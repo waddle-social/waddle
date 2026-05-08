@@ -2,14 +2,14 @@ use super::groupchat_archive::{extract_room_stanza_id, room_scoped_reply_to_attr
 use super::*;
 
 pub(super) struct BotGroupchatDispatch<'a> {
-    room_jid: &'a BareJid,
-    occupants: &'a [OccupantSnapshot],
-    sender_full: &'a FullJid,
-    room_actor: Option<&'a ActorRef<RoomActor>>,
-    room_moderated: bool,
-    dispatch_timestamp: i64,
-    recursion_depth: u8,
-    occupant_id_secret: &'a waddle_xmpp::xep::xep0421::OccupantIdSecret,
+    pub(super) room_jid: &'a BareJid,
+    pub(super) occupants: &'a [OccupantSnapshot],
+    pub(super) sender_full: &'a FullJid,
+    pub(super) room_actor: Option<&'a ActorRef<RoomActor>>,
+    pub(super) room_moderated: bool,
+    pub(super) dispatch_timestamp: i64,
+    pub(super) recursion_depth: u8,
+    pub(super) occupant_id_secret: &'a waddle_xmpp::xep::xep0421::OccupantIdSecret,
 }
 
 pub(super) async fn dispatch_bot_groupchat_response(

@@ -1,17 +1,19 @@
 use super::*;
 
 pub(super) async fn handle_muc_owner_and_moderation_iq(
-    iq: &xmpp_parsers::iq::Iq,
-    id: &str,
-    payload_ns: &str,
-    target_to: Option<&str>,
-    has_destroy: bool,
+    ctx: IqHandlerContext<'_>,
     state: &WebSocketState,
     phase: &ConnectionPhase,
     authenticated_session: &Option<Session>,
-    response_from: Option<&str>,
-    response_to: Option<&str>,
 ) -> Vec<String> {
+    let iq = ctx.iq;
+    let id = ctx.id;
+    let payload_ns = ctx.payload_ns;
+    let target_to = ctx.target_to;
+    let has_destroy = ctx.has_destroy;
+    let response_from = ctx.response_from;
+    let response_to = ctx.response_to;
+
     // MUC owner IQ (XEP-0045): instant room config submit and room destroy.
     // This is needed for clients that create a room by:
     // 1) joining via presence
@@ -19,7 +21,7 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
     if payload_ns == "http://jabber.org/protocol/muc#owner" {
         let Some(target) = target_to else {
             return vec![build_iq_error_xml_typed(
-                &id,
+                id,
                 response_from,
                 response_to,
                 bad_request_iq_error("Malformed IQ payload."),
@@ -29,7 +31,7 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
         let room_target = target.split('/').next().unwrap_or(target);
         let Ok(room_jid) = room_target.parse::<BareJid>() else {
             return vec![build_iq_error_xml_typed(
-                &id,
+                id,
                 response_from,
                 response_to,
                 jid_malformed_iq_error("Malformed JID in IQ addressing."),
@@ -38,7 +40,7 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
 
         if !is_muc_room_jid(state, &room_jid).await {
             return vec![build_iq_error_xml_typed(
-                &id,
+                id,
                 response_from,
                 response_to,
                 item_not_found_iq_error("Requested item not found."),
@@ -47,7 +49,7 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
 
         let Some(sender_jid) = phase.bound_jid() else {
             return vec![build_iq_error_xml_typed(
-                &id,
+                id,
                 response_from,
                 response_to,
                 not_authorized_iq_error("Authentication required."),
@@ -59,7 +61,7 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
             Ok(true) => {}
             Ok(false) => {
                 return vec![build_iq_error_xml_typed(
-                    &id,
+                    id,
                     response_from,
                     response_to,
                     forbidden_iq_error("Operation not permitted."),
@@ -72,7 +74,7 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
                     "Failed to authorize MUC owner IQ"
                 );
                 return vec![build_iq_error_xml_typed(
-                    &id,
+                    id,
                     response_from,
                     response_to,
                     internal_server_error_iq_error("Internal server error."),
@@ -85,7 +87,7 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
                 debug!(room = %room_jid, "Destroyed MUC room via owner IQ");
                 let room_jid_string = room_jid.to_string();
                 return vec![build_iq_result_xml(
-                    &id,
+                    id,
                     Some(room_jid_string.as_str()),
                     response_to,
                     None,
@@ -93,7 +95,7 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
             }
 
             return vec![build_iq_error_xml_typed(
-                &id,
+                id,
                 response_from,
                 response_to,
                 item_not_found_iq_error("Requested item not found."),
@@ -101,7 +103,7 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
         }
 
         if matches!(&iq.payload, xmpp_parsers::iq::IqType::Get(_)) {
-            match build_muc_owner_config_response(state, &room_jid, &id, response_to).await {
+            match build_muc_owner_config_response(state, &room_jid, id, response_to).await {
                 Ok(response) => return vec![response],
                 Err(error) => {
                     warn!(
@@ -110,7 +112,7 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
                         "Failed to build MUC owner config response"
                     );
                     return vec![build_iq_error_xml_typed(
-                        &id,
+                        id,
                         response_from,
                         response_to,
                         internal_server_error_iq_error("Internal server error."),
@@ -120,7 +122,7 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
         }
 
         if let Err(error) =
-            apply_muc_owner_config(state, &room_jid, &iq, authenticated_session.as_ref()).await
+            apply_muc_owner_config(state, &room_jid, iq, authenticated_session.as_ref()).await
         {
             warn!(
                 room = %room_jid,
@@ -128,7 +130,7 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
                 "Failed to apply MUC owner config"
             );
             return vec![build_iq_error_xml_typed(
-                &id,
+                id,
                 response_from,
                 response_to,
                 internal_server_error_iq_error("Internal server error."),
@@ -138,17 +140,17 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
         // Treat all other owner IQ sets as successful config submit for instant rooms.
         let room_jid_string = room_jid.to_string();
         return vec![build_iq_result_xml(
-            &id,
+            id,
             Some(room_jid_string.as_str()),
             response_to,
             None,
         )];
     }
 
-    if let Some(request) = parse_moderation_iq(&iq) {
+    if let Some(request) = parse_moderation_iq(iq) {
         let Some(sender_jid) = phase.bound_jid() else {
             return vec![build_iq_error_xml_typed(
-                &id,
+                id,
                 response_from,
                 response_to,
                 not_authorized_iq_error("Authentication required."),
@@ -156,7 +158,7 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
         };
         let Some(room_jid) = iq.to.as_ref().map(|jid| jid.to_bare()) else {
             return vec![build_iq_error_xml_typed(
-                &id,
+                id,
                 response_from,
                 response_to,
                 bad_request_iq_error("Malformed IQ payload."),
@@ -164,7 +166,7 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
         };
         let Some(room_actor) = get_room_actor(state, &room_jid).await else {
             return vec![build_iq_error_xml_typed(
-                &id,
+                id,
                 response_from,
                 response_to,
                 item_not_found_iq_error("Requested item not found."),
@@ -179,7 +181,7 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
             Ok(context) => context,
             Err(_) => {
                 return vec![build_iq_error_xml_typed(
-                    &id,
+                    id,
                     response_from,
                     response_to,
                     internal_server_error_iq_error("Internal server error."),
@@ -194,7 +196,7 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
         // (e.g. visitor), that signal is intentional and must be honoured.
         if !matches!(context.role, waddle_xmpp::Role::Moderator) {
             return vec![build_iq_error_xml_typed(
-                &id,
+                id,
                 response_from,
                 response_to,
                 forbidden_iq_error("Operation not permitted."),
@@ -210,7 +212,7 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
             Ok(Some(message)) if message.to.to_string() == room_jid.to_string() => {}
             Ok(Some(_)) => {
                 return vec![build_iq_error_xml_typed(
-                    &id,
+                    id,
                     response_from,
                     response_to,
                     item_not_found_iq_error("Requested item not found."),
@@ -218,7 +220,7 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
             }
             Ok(None) => {
                 return vec![build_iq_error_xml_typed(
-                    &id,
+                    id,
                     response_from,
                     response_to,
                     item_not_found_iq_error("Requested item not found."),
@@ -227,7 +229,7 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
             Err(error) => {
                 warn!(room = %room_jid, target = %request.target_id, error = %error, "Failed to look up moderation target");
                 return vec![build_iq_error_xml_typed(
-                    &id,
+                    id,
                     response_from,
                     response_to,
                     internal_server_error_iq_error("Internal server error."),
@@ -417,7 +419,7 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
             }
         }
 
-        frames.push(build_iq_result_xml(&id, response_from, response_to, None));
+        frames.push(build_iq_result_xml(id, response_from, response_to, None));
         return frames;
     }
     Vec::new()

@@ -708,7 +708,10 @@ async fn reaction_round_trips_through_in_memory_storage() {
 
     assert_eq!(result.messages.len(), 1);
     let archived = &result.messages[0];
-    assert!(archived.body.is_none(), "reaction-only row must have no body");
+    assert!(
+        archived.body.is_none(),
+        "reaction-only row must have no body"
+    );
     let rich = archived.rich.as_ref().expect("rich payload survives");
     match rich.payload.as_ref() {
         Some(waddle_xmpp_core::mam::ArchivedRichPayload::Reactions(set)) => {

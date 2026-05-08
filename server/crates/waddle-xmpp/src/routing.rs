@@ -38,9 +38,9 @@ use tracing::{debug, info, instrument};
 use xmpp_parsers::iq::Iq;
 use xmpp_parsers::presence::Presence;
 
+use crate::registry::{ConnectionRegistry, SendResult};
 use crate::Stanza;
 use crate::XmppError;
-use crate::registry::{ConnectionRegistry, SendResult};
 
 /// Result of a routing operation.
 #[derive(Debug)]

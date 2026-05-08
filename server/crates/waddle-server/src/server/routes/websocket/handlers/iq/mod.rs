@@ -4,46 +4,45 @@ use std::{collections::HashSet, sync::Arc};
 use tracing::{debug, warn};
 use url::{Host, Url};
 use waddle_xmpp::{
-    Affiliation, SpaceDetails, Stanza, StanzaErrorCondition, StanzaErrorType, XmppError,
     carbons::CARBONS_NS,
     commands::{CommandContext, CommandResult},
     disco::{
-        DiscoItem, Feature, Identity, build_disco_info_response,
-        build_disco_info_response_with_extensions, build_disco_items_response, muc_room_features,
-        parse_disco_info_query, parse_disco_items_query, spaces_service_features,
-        upload_service_features,
+        build_disco_info_response, build_disco_info_response_with_extensions,
+        build_disco_items_response, muc_room_features, parse_disco_info_query,
+        parse_disco_items_query, spaces_service_features, upload_service_features, DiscoItem,
+        Feature, Identity,
     },
     inbox::runtime::filter_query,
-    isr::{ISR_NS, IsrToken, build_isr_token_error, build_isr_token_result, is_isr_token_request},
+    isr::{build_isr_token_error, build_isr_token_result, is_isr_token_request, IsrToken, ISR_NS},
     mam::{
-        ArchivedMessage, ArchivedModeration, ArchivedRichMessage, ArchivedRichPayload,
-        RichMessageId, RichText, build_fin_iq, build_query_form_iq, build_result_messages,
-        is_mam_query, is_mam_query_form_request, parse_mam_query,
+        build_fin_iq, build_query_form_iq, build_result_messages, is_mam_query,
+        is_mam_query_form_request, parse_mam_query, ArchivedMessage, ArchivedModeration,
+        ArchivedRichMessage, ArchivedRichPayload, RichMessageId, RichText,
     },
     muc::{
-        DATA_FORMS_NS,
         admin::{
             build_admin_result, build_admin_set_result, build_role_result, is_muc_admin_iq,
             is_role_change_query, parse_admin_query,
         },
         owner::build_config_form,
         room_actor::{ApplyAdminItems, GetAdminContext, GetSnapshot, PingSelfCheck, UpdateConfig},
+        DATA_FORMS_NS,
     },
     presence::subscription::{
-        SubscriptionStateMachine, SubscriptionType, build_subscription_presence,
+        build_subscription_presence, SubscriptionStateMachine, SubscriptionType,
     },
     protocol::{ConnectionPhase, StanzaContext as ProtocolStanzaContext},
     pubsub::{
-        PubSubError, PubSubItem, PubSubRequest, SubId, build_pubsub_affiliations_result,
-        build_pubsub_configure_form_result, build_pubsub_error, build_pubsub_items_result,
-        build_pubsub_publish_result, build_pubsub_subscribe_result, build_pubsub_success,
-        is_pep_request, is_pep_request_to, is_pubsub_iq, parse_pubsub_iq,
+        build_pubsub_affiliations_result, build_pubsub_configure_form_result, build_pubsub_error,
+        build_pubsub_items_result, build_pubsub_publish_result, build_pubsub_subscribe_result,
+        build_pubsub_success, is_pep_request, is_pep_request_to, is_pubsub_iq, parse_pubsub_iq,
+        PubSubError, PubSubItem, PubSubRequest, SubId,
     },
     registry::BroadcastOutcome,
     roster::{
-        AskType, ROSTER_NS, RosterItem, RosterSetResult, RosterVersion, Subscription,
         build_roster_push, build_roster_result, build_roster_result_empty, parse_roster_get,
-        parse_roster_set,
+        parse_roster_set, AskType, RosterItem, RosterSetResult, RosterVersion, Subscription,
+        ROSTER_NS,
     },
     xep::xep0054::{VCard, VCardPhoto},
     xep::xep0357::{
@@ -51,22 +50,23 @@ use waddle_xmpp::{
         parse_push_disable, parse_push_enable,
     },
     xep::xep0363::{
-        UploadError, UploadSlot, build_upload_error, build_upload_slot_response,
-        effective_content_type, is_upload_request, parse_upload_request, sanitize_filename,
+        build_upload_error, build_upload_slot_response, effective_content_type, is_upload_request,
+        parse_upload_request, sanitize_filename, UploadError, UploadSlot,
     },
     xep::xep0430::{
         build_inbox_query_result, build_mark_read_result, is_inbox_iq, parse_inbox_query,
         parse_mark_read,
     },
     xep::{
-        ChannelResult, Command, CommandStatus, NODE_COMMANDS, NS_CHANNEL_SEARCH, Searchable,
-        SpaceAffiliation, Xep0359StanzaId, add_stanza_id_xep0359, build_command_items,
-        build_command_result, build_last_activity_response, build_moderation_result_message,
-        build_room_metadata_form, build_room_space_metadata_forms_with_description,
-        build_search_response, build_server_role_form, build_spaces_metadata_form_for_requester,
-        is_last_activity_query, is_search_request, is_time_query, is_version_query,
-        parse_command_from_iq, parse_moderation_iq, parse_search_request,
+        add_stanza_id_xep0359, build_command_items, build_command_result,
+        build_last_activity_response, build_moderation_result_message, build_room_metadata_form,
+        build_room_space_metadata_forms_with_description, build_search_response,
+        build_server_role_form, build_spaces_metadata_form_for_requester, is_last_activity_query,
+        is_search_request, is_time_query, is_version_query, parse_command_from_iq,
+        parse_moderation_iq, parse_search_request, ChannelResult, Command, CommandStatus,
+        Searchable, SpaceAffiliation, Xep0359StanzaId, NODE_COMMANDS, NS_CHANNEL_SEARCH,
     },
+    Affiliation, SpaceDetails, Stanza, StanzaErrorCondition, StanzaErrorType, XmppError,
 };
 use xmpp_parsers::minidom::Element;
 
@@ -103,9 +103,9 @@ pub use conn_state::IqConnState;
 use disco_info::handle_disco_info_iq;
 use disco_items::handle_disco_items_iq;
 use extension_forms::{
-    EXTENSION_COMMAND_FORM_TYPE, EXTENSION_ROUTE_FORM_TYPE, command_name_by_boundary,
-    command_refs_by_boundary, extension_command_metadata_form, extension_features_for_disco,
-    extension_route_disco_node, extension_route_metadata_form,
+    command_name_by_boundary, command_refs_by_boundary, extension_command_metadata_form,
+    extension_features_for_disco, extension_route_disco_node, extension_route_metadata_form,
+    EXTENSION_COMMAND_FORM_TYPE, EXTENSION_ROUTE_FORM_TYPE,
 };
 use last_activity::handle_last_activity_iq;
 use muc_owner_config::apply_muc_owner_config;
@@ -118,9 +118,10 @@ use permissions::{
 };
 use pubsub_dispatch::handle_pubsub_iq;
 use pubsub_helpers::{
-    PubSubItemsRead, canonical_channel_disco_items, handle_extension_route_items,
-    handle_spaces_items, handle_spaces_publish, handle_spaces_retract, is_pep_self_or_to,
+    canonical_channel_disco_items, handle_extension_route_items, handle_spaces_items,
+    handle_spaces_publish, handle_spaces_retract, is_pep_self_or_to,
     room_space_metadata_extensions, space_details_from_node, spaces_service_bare_jid,
+    PubSubItemsRead,
 };
 #[cfg(test)]
 pub use test_helpers::handle_iq;
@@ -149,8 +150,8 @@ use vcard_private::{handle_private_storage_iq, handle_vcard_iq};
 pub(super) use super::super::build_iq_error_xml_typed;
 
 use super::super::{
-    WebSocketState, build_iq_result_xml, destroy_room_actor, get_room_actor, iq_to_xml,
-    is_muc_room_jid, stanza_to_xml,
+    build_iq_result_xml, destroy_room_actor, get_room_actor, iq_to_xml, is_muc_room_jid,
+    stanza_to_xml, WebSocketState,
 };
 use super::presence::{
     get_managed_channel_for_room, send_current_presence_from_user_to_user,
@@ -163,18 +164,34 @@ use crate::db::roster::{
     DatabaseRosterStorage, RosterItemRow, RosterRowChange, RosterRowMutationKind,
     RosterStorageError,
 };
-use crate::db::{Database, Value, ValueExt, row_value};
+use crate::db::{row_value, Database, Value, ValueExt};
 use crate::permissions::{
     CheckPermission, Object, ObjectType, Permission, PermissionError, Relation, Subject,
     SubjectType, Tuple, WriteTuple,
 };
 use crate::server::bootstrap_membership::DEPLOYMENT_SERVER_ID;
 use crate::server::managed_channel_policy::{
-    DEPLOYMENT_MEMBERSHIP_PERMISSIONS, ManagedChannelServerPolicy,
-    server_policy_for_managed_channel,
+    server_policy_for_managed_channel, ManagedChannelServerPolicy,
+    DEPLOYMENT_MEMBERSHIP_PERMISSIONS,
 };
-use crate::server::xmpp_state::{XmppChannelRecord, get_xmpp_channel, list_xmpp_channels};
+use crate::server::xmpp_state::{get_xmpp_channel, list_xmpp_channels, XmppChannelRecord};
 use crate::vcard::VCardStore;
+
+#[derive(Clone, Copy)]
+pub(super) struct IqHandlerContext<'a> {
+    pub(super) iq: &'a xmpp_parsers::iq::Iq,
+    pub(super) id: &'a str,
+    pub(super) payload_ns: &'a str,
+    pub(super) target_to: Option<&'a str>,
+    pub(super) has_destroy: bool,
+    pub(super) domain: &'a str,
+    pub(super) muc_domain: &'a str,
+    pub(super) upload_domain: &'a str,
+    pub(super) spaces_domain: &'a str,
+    pub(super) extensions_domain: &'a str,
+    pub(super) response_from: Option<&'a str>,
+    pub(super) response_to: Option<&'a str>,
+}
 
 pub async fn handle_iq_with_conn_state(
     iq: xmpp_parsers::iq::Iq,
@@ -250,75 +267,39 @@ pub async fn handle_iq_with_conn_state(
         }
     }
 
-    let sans_io_response = handle_sans_io_iq(
-        &iq,
-        &id,
-        payload_ns.as_str(),
+    let handler_ctx = IqHandlerContext {
+        iq: &iq,
+        id: id.as_str(),
+        payload_ns: payload_ns.as_str(),
+        target_to: to.as_deref(),
+        has_destroy,
         domain,
-        state,
-        authenticated_session,
-        phase,
-        conn_state,
+        muc_domain,
+        upload_domain: upload_domain.as_str(),
+        spaces_domain: spaces_domain.as_str(),
+        extensions_domain: extensions_domain.as_str(),
         response_from,
         response_to,
-    )
-    .await;
+    };
+
+    let sans_io_response =
+        handle_sans_io_iq(handler_ctx, state, authenticated_session, phase, conn_state).await;
     if !sans_io_response.is_empty() {
         return sans_io_response;
     }
 
-    let misc_response = handle_misc_iq(
-        &iq,
-        payload_ns.as_str(),
-        domain,
-        muc_domain,
-        state,
-        phase,
-        conn_state,
-        response_from,
-        response_to,
-    )
-    .await;
+    let misc_response = handle_misc_iq(handler_ctx, state, phase, conn_state).await;
     if !misc_response.is_empty() {
         return misc_response;
     }
 
-    let disco_info_response = handle_disco_info_iq(
-        &iq,
-        &id,
-        payload_ns.as_str(),
-        to.as_deref(),
-        domain,
-        muc_domain,
-        &upload_domain,
-        &spaces_domain,
-        &extensions_domain,
-        state,
-        phase,
-        authenticated_session,
-        response_from,
-        response_to,
-    )
-    .await;
+    let disco_info_response =
+        handle_disco_info_iq(handler_ctx, state, phase, authenticated_session).await;
     if !disco_info_response.is_empty() {
         return disco_info_response;
     }
 
-    let disco_items_response = handle_disco_items_iq(
-        &iq,
-        &id,
-        payload_ns.as_str(),
-        to.as_deref(),
-        domain,
-        muc_domain,
-        &upload_domain,
-        &spaces_domain,
-        &extensions_domain,
-        state,
-        response_from,
-        response_to,
-    )
-    .await;
+    let disco_items_response = handle_disco_items_iq(handler_ctx, state).await;
     if !disco_items_response.is_empty() {
         return disco_items_response;
     }
@@ -347,19 +328,8 @@ pub async fn handle_iq_with_conn_state(
         .await;
     }
 
-    let muc_owner_or_moderation = handle_muc_owner_and_moderation_iq(
-        &iq,
-        &id,
-        payload_ns.as_str(),
-        to.as_deref(),
-        has_destroy,
-        state,
-        phase,
-        authenticated_session,
-        response_from,
-        response_to,
-    )
-    .await;
+    let muc_owner_or_moderation =
+        handle_muc_owner_and_moderation_iq(handler_ctx, state, phase, authenticated_session).await;
     if !muc_owner_or_moderation.is_empty() {
         return muc_owner_or_moderation;
     }
@@ -370,19 +340,7 @@ pub async fn handle_iq_with_conn_state(
         return archive_inbox_upload;
     }
 
-    let pubsub_response = handle_pubsub_iq(
-        &iq,
-        &id,
-        muc_domain,
-        &spaces_domain,
-        &extensions_domain,
-        state,
-        phase,
-        authenticated_session,
-        response_from,
-        response_to,
-    )
-    .await;
+    let pubsub_response = handle_pubsub_iq(handler_ctx, state, phase, authenticated_session).await;
     if !pubsub_response.is_empty() {
         return pubsub_response;
     }

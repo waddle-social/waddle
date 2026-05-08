@@ -7,9 +7,10 @@ pub use access::{get_managed_channel_for_room, parse_room_jid_context};
 
 use access::{resolve_managed_channel_affiliation, server_permission_allowed};
 use xml::{
-    MucJoinPresence, build_muc_conflict_presence_xml, build_muc_join_presence_xml,
-    build_muc_presence_error_xml, build_muc_self_unavailable_xml, create_presence_stanza,
+    build_muc_conflict_presence_xml, build_muc_presence_error_xml, build_muc_self_unavailable_xml,
+    create_presence_stanza,
 };
+pub(super) use xml::{build_muc_join_presence_xml, MucJoinPresence};
 
 pub async fn handle_muc_join(
     state: &WebSocketState,

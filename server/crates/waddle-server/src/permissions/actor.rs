@@ -1,9 +1,9 @@
-use kameo::Actor;
 use kameo::message::Context;
+use kameo::Actor;
 
 use crate::config::ServerConfig;
-use crate::db::Database;
 use crate::db::actor::DbActor;
+use crate::db::Database;
 use std::sync::Arc;
 
 use super::schema::SPICEDB_SCHEMA;

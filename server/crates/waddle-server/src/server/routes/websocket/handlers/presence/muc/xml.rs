@@ -1,17 +1,17 @@
 use super::*;
 
-pub(super) struct MucJoinPresence<'a> {
-    pub(super) occupant_id_secret: &'a waddle_xmpp::xep::xep0421::OccupantIdSecret,
-    pub(super) room_jid: &'a BareJid,
-    pub(super) nick: &'a str,
-    pub(super) to_jid: &'a FullJid,
-    pub(super) affiliation: Affiliation,
-    pub(super) role: Role,
-    pub(super) real_jid: &'a FullJid,
-    pub(super) include_self_status: bool,
+pub(crate) struct MucJoinPresence<'a> {
+    pub(crate) occupant_id_secret: &'a waddle_xmpp::xep::xep0421::OccupantIdSecret,
+    pub(crate) room_jid: &'a BareJid,
+    pub(crate) nick: &'a str,
+    pub(crate) to_jid: &'a FullJid,
+    pub(crate) affiliation: Affiliation,
+    pub(crate) role: Role,
+    pub(crate) real_jid: &'a FullJid,
+    pub(crate) include_self_status: bool,
 }
 
-pub(super) fn build_muc_join_presence_xml(params: MucJoinPresence<'_>) -> String {
+pub(crate) fn build_muc_join_presence_xml(params: MucJoinPresence<'_>) -> String {
     let presence = build_muc_join_presence_stanza(params);
     stanza_to_xml(&Stanza::Presence(presence))
 }

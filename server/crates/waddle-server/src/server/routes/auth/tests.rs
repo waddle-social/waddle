@@ -4,7 +4,7 @@ use crate::db::actor::{DbActor, DbExecute};
 use crate::db::{DatabaseConfig, DatabasePool, MigrationRunner, PoolConfig};
 use crate::server::AppState;
 use axum::body::Body;
-use axum::http::{Request, StatusCode, header};
+use axum::http::{header, Request, StatusCode};
 use http_body_util::BodyExt;
 use tower::ServiceExt;
 
@@ -134,17 +134,13 @@ async fn secure_cookie_header_tracks_base_url_scheme() {
     let mut secure_config = ServerConfig::test_homeserver();
     secure_config.base_url = "https://server.waddle.social".to_string();
     let (secure_state, _) = create_test_auth_state(&secure_config).await;
-    assert!(
-        secure_state
-            .session_cookie_header(Some("token"), 60)
-            .contains("Secure")
-    );
+    assert!(secure_state
+        .session_cookie_header(Some("token"), 60)
+        .contains("Secure"));
 
     let insecure_config = ServerConfig::test_homeserver();
     let (insecure_state, _) = create_test_auth_state(&insecure_config).await;
-    assert!(
-        !insecure_state
-            .session_cookie_header(Some("token"), 60)
-            .contains("Secure")
-    );
+    assert!(!insecure_state
+        .session_cookie_header(Some("token"), 60)
+        .contains("Secure"));
 }

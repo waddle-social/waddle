@@ -2,11 +2,11 @@
 
 use async_trait::async_trait;
 use jid::{BareJid, Jid};
-use waddle_xmpp::XmppError;
 use waddle_xmpp::pubsub::{
     Affiliation, NodeConfig, PubSubItem, PubSubNode, PubSubStorage, StoredItem, SubId,
     Subscription, SubscriptionState,
 };
+use waddle_xmpp::XmppError;
 
 use crate::db::Database;
 

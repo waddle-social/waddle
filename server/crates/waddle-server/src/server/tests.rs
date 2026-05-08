@@ -4,8 +4,8 @@ use crate::config::ServerConfig;
 use crate::db::{DatabaseConfig, DatabasePool, MigrationRunner, PoolConfig};
 use crate::permissions::{Object, ObjectType, Permission, Relation, Subject, Tuple, WriteTuple};
 use axum::body::Body;
-use axum::http::{Request, StatusCode, header};
-use axum::{Router, routing::get};
+use axum::http::{header, Request, StatusCode};
+use axum::{routing::get, Router};
 use base64::prelude::*;
 use http_body_util::BodyExt;
 use std::sync::Arc;
@@ -453,18 +453,14 @@ async fn test_seed_fixed_test_account_creates_user() {
         .unwrap();
 
     let native_user_store = NativeUserStore::new(state.db_pool.global_actor().clone());
-    assert!(
-        native_user_store
-            .user_exists(&config.username, &config.domain)
-            .await
-            .unwrap()
-    );
-    assert!(
-        native_user_store
-            .verify_password(&config.username, &config.domain, &config.password)
-            .await
-            .unwrap()
-    );
+    assert!(native_user_store
+        .user_exists(&config.username, &config.domain)
+        .await
+        .unwrap());
+    assert!(native_user_store
+        .verify_password(&config.username, &config.domain, &config.password)
+        .await
+        .unwrap());
 }
 
 #[tokio::test]
@@ -494,18 +490,14 @@ async fn test_seed_fixed_test_account_replaces_existing_credentials() {
         .await
         .unwrap();
 
-    assert!(
-        native_user_store
-            .verify_password(&config.username, &config.domain, &config.password)
-            .await
-            .unwrap()
-    );
-    assert!(
-        !native_user_store
-            .verify_password(&config.username, &config.domain, &old_password)
-            .await
-            .unwrap()
-    );
+    assert!(native_user_store
+        .verify_password(&config.username, &config.domain, &config.password)
+        .await
+        .unwrap());
+    assert!(!native_user_store
+        .verify_password(&config.username, &config.domain, &old_password)
+        .await
+        .unwrap());
 
     let credentials = native_user_store
         .get_scram_credentials(&config.username, &config.domain)

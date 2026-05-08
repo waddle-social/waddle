@@ -2,7 +2,7 @@ use crate::db::PoolHealth;
 use crate::server::AppState;
 use axum::{
     extract::State,
-    http::{HeaderName, Method, StatusCode, header},
+    http::{header, HeaderName, Method, StatusCode},
     response::{IntoResponse, Json},
 };
 use serde::Serialize;

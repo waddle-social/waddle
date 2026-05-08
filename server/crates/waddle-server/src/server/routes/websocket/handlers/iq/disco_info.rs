@@ -1,21 +1,23 @@
 use super::*;
 
 pub(super) async fn handle_disco_info_iq(
-    iq: &xmpp_parsers::iq::Iq,
-    id: &str,
-    payload_ns: &str,
-    target_to: Option<&str>,
-    domain: &str,
-    muc_domain: &str,
-    upload_domain: &str,
-    spaces_domain: &str,
-    extensions_domain: &str,
+    ctx: IqHandlerContext<'_>,
     state: &WebSocketState,
     phase: &ConnectionPhase,
     authenticated_session: &Option<Session>,
-    response_from: Option<&str>,
-    response_to: Option<&str>,
 ) -> Vec<String> {
+    let iq = ctx.iq;
+    let id = ctx.id;
+    let payload_ns = ctx.payload_ns;
+    let target_to = ctx.target_to;
+    let domain = ctx.domain;
+    let muc_domain = ctx.muc_domain;
+    let upload_domain = ctx.upload_domain;
+    let spaces_domain = ctx.spaces_domain;
+    let extensions_domain = ctx.extensions_domain;
+    let response_from = ctx.response_from;
+    let response_to = ctx.response_to;
+
     // Disco info on MUC service
     if payload_ns == "http://jabber.org/protocol/disco#info" {
         let request_iq = &iq;
@@ -23,7 +25,7 @@ pub(super) async fn handle_disco_info_iq(
             Ok(query) => query,
             Err(_) => {
                 return vec![build_iq_error_xml_typed(
-                    &id,
+                    id,
                     None,
                     None,
                     bad_request_iq_error("Malformed IQ payload."),
@@ -57,7 +59,7 @@ pub(super) async fn handle_disco_info_iq(
                                 "Failed to load room snapshot for disco#info"
                             );
                             return vec![build_iq_error_xml_typed(
-                                &id,
+                                id,
                                 response_from,
                                 response_to,
                                 internal_server_error_iq_error("Internal server error."),
@@ -209,7 +211,7 @@ pub(super) async fn handle_disco_info_iq(
                         .find(|(_, descriptor)| descriptor.node.as_str() == node)
                     else {
                         return vec![build_iq_error_xml_typed(
-                            &id,
+                            id,
                             response_from,
                             response_to,
                             item_not_found_iq_error("Requested item not found."),
@@ -242,7 +244,7 @@ pub(super) async fn handle_disco_info_iq(
                     .find(|route| extension_route_disco_node(route) == node)
                 else {
                     return vec![build_iq_error_xml_typed(
-                        &id,
+                        id,
                         response_from,
                         response_to,
                         item_not_found_iq_error("Requested item not found."),
@@ -287,9 +289,9 @@ pub(super) async fn handle_disco_info_iq(
         // Disco info on spaces service
         if target_to == Some(spaces_domain) {
             if let Some(node) = query.node.as_deref() {
-                let Ok(spaces_jid) = spaces_service_bare_jid(&spaces_domain) else {
+                let Ok(spaces_jid) = spaces_service_bare_jid(spaces_domain) else {
                     return vec![build_iq_error_xml_typed(
-                        &id,
+                        id,
                         None,
                         None,
                         internal_server_error_iq_error("Internal server error."),
@@ -305,7 +307,7 @@ pub(super) async fn handle_disco_info_iq(
                     Ok(Some(node)) => node,
                     Ok(None) => {
                         return vec![build_iq_error_xml_typed(
-                            &id,
+                            id,
                             None,
                             None,
                             item_not_found_iq_error("Requested item not found."),
@@ -314,7 +316,7 @@ pub(super) async fn handle_disco_info_iq(
                     Err(error) => {
                         warn!(node, error = %error, "Failed to resolve Spaces node info");
                         return vec![build_iq_error_xml_typed(
-                            &id,
+                            id,
                             None,
                             None,
                             item_not_found_iq_error("Requested item not found."),

@@ -9,10 +9,10 @@ use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use jid::{BareJid, FullJid};
-use kameo::Actor;
 use kameo::actor::ActorRef;
 use kameo::error::SendError;
 use kameo::message::Context;
+use kameo::Actor;
 use thiserror::Error;
 use tracing::{debug, info};
 

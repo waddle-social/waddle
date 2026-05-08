@@ -1,13 +1,13 @@
 use crate::permissions::{CheckPermission, Object, ObjectType, Permission, Subject};
-use crate::server::AppState;
 use crate::server::bootstrap_membership::DEPLOYMENT_SERVER_ID;
 use crate::server::extension_commands::forms::{
     extension_data_form_to_xmpp, extension_enrichment_result_form, extension_enrichment_texts,
 };
 use crate::server::managed_channel_policy::{
-    DEPLOYMENT_MEMBERSHIP_PERMISSIONS, ManagedChannelServerPolicy,
-    server_policy_for_managed_channel,
+    server_policy_for_managed_channel, ManagedChannelServerPolicy,
+    DEPLOYMENT_MEMBERSHIP_PERMISSIONS,
 };
+use crate::server::AppState;
 use std::sync::Arc;
 use waddle_extensions::{ExtensionEffect, ExtensionManager, PubSubPublish};
 use waddle_xmpp::pubsub::{NodeConfig, PubSubItem, PubSubStorage};

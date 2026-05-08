@@ -1,11 +1,11 @@
 use tracing::{debug, warn};
-use waddle_xmpp::{XmppError, roster};
+use waddle_xmpp::{roster, XmppError};
 
-use crate::db::Database;
 use crate::db::roster::{
     DatabaseRosterStorage, RosterItemRow, RosterRowChange, RosterRowMutationKind,
     RosterStorageError,
 };
+use crate::db::Database;
 
 pub(crate) async fn get_roster(
     db: Database,

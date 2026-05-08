@@ -9,11 +9,11 @@ pub(super) async fn handle_archive_inbox_upload_iq(
     phase: &ConnectionPhase,
 ) -> Vec<String> {
     // MAM (Message Archive Management) query
-    if is_mam_query(&iq) {
+    if is_mam_query(iq) {
         let request_iq = &iq;
         let Some(target) = request_iq.to.as_ref().map(|jid| jid.to_string()) else {
             return vec![build_iq_error_xml_typed(
-                &id,
+                id,
                 None,
                 None,
                 bad_request_iq_error("Malformed IQ payload."),
@@ -23,7 +23,7 @@ pub(super) async fn handle_archive_inbox_upload_iq(
         let room_target = target.split('/').next().unwrap_or(target.as_str());
         let Ok(target_bare) = room_target.parse::<BareJid>() else {
             return vec![build_iq_error_xml_typed(
-                &id,
+                id,
                 None,
                 None,
                 jid_malformed_iq_error("Malformed JID in IQ addressing."),
@@ -41,7 +41,7 @@ pub(super) async fn handle_archive_inbox_upload_iq(
 
         if !is_personal && !is_muc_room_jid(state, &target_bare).await {
             return vec![build_iq_error_xml_typed(
-                &id,
+                id,
                 None,
                 None,
                 item_not_found_iq_error("Requested item not found."),
@@ -58,14 +58,14 @@ pub(super) async fn handle_archive_inbox_upload_iq(
                 warn!(error = %err, target = %target_bare, "Invalid MAM query");
                 if matches!(err, waddle_xmpp::CoreError::NotImplemented) {
                     return vec![build_iq_error_xml_typed(
-                        &id,
+                        id,
                         None,
                         None,
                         feature_not_implemented_iq_error("Requested feature not implemented."),
                     )];
                 }
                 return vec![build_iq_error_xml_typed(
-                    &id,
+                    id,
                     None,
                     None,
                     bad_request_iq_error("Malformed IQ payload."),
@@ -83,7 +83,7 @@ pub(super) async fn handle_archive_inbox_upload_iq(
             Ok(result) => result,
             Err(waddle_xmpp::mam::MamStorageError::NotFound(_)) => {
                 return vec![build_iq_error_xml_typed(
-                    &id,
+                    id,
                     None,
                     None,
                     item_not_found_iq_error("Requested item not found."),
@@ -92,7 +92,7 @@ pub(super) async fn handle_archive_inbox_upload_iq(
             Err(err) => {
                 warn!(error = %err, target = %target_bare, "MAM query failed");
                 return vec![build_iq_error_xml_typed(
-                    &id,
+                    id,
                     None,
                     None,
                     internal_server_error_iq_error("Internal server error."),
@@ -124,7 +124,7 @@ pub(super) async fn handle_archive_inbox_upload_iq(
             .or_else(|| phase.bound_jid().cloned().map(jid::Jid::from))
         else {
             return vec![build_iq_error_xml_typed(
-                &id,
+                id,
                 None,
                 None,
                 bad_request_iq_error("Malformed IQ payload."),
@@ -140,11 +140,11 @@ pub(super) async fn handle_archive_inbox_upload_iq(
         return responses;
     }
 
-    if is_inbox_iq(&iq) {
+    if is_inbox_iq(iq) {
         let request_iq = &iq;
         let Some(user_jid) = phase.bound_jid().map(|jid| jid.to_bare()) else {
             return vec![build_iq_error_xml_typed(
-                &id,
+                id,
                 None,
                 None,
                 not_authorized_iq_error("Authentication required."),
@@ -158,7 +158,7 @@ pub(super) async fn handle_archive_inbox_upload_iq(
                     Err(error) => {
                         warn!(error = %error, "Invalid inbox query");
                         return vec![build_iq_error_xml_typed(
-                            &id,
+                            id,
                             None,
                             None,
                             bad_request_iq_error("Malformed IQ payload."),
@@ -178,7 +178,7 @@ pub(super) async fn handle_archive_inbox_upload_iq(
                             Err(error) => {
                                 warn!(error = %error, jid = %user_jid, "Failed to list thread inbox");
                                 return vec![build_iq_error_xml_typed(
-                                    &id,
+                                    id,
                                     None,
                                     None,
                                     internal_server_error_iq_error("Internal server error."),
@@ -187,7 +187,7 @@ pub(super) async fn handle_archive_inbox_upload_iq(
                         }
                     } else {
                         return vec![build_iq_error_xml_typed(
-                            &id,
+                            id,
                             None,
                             None,
                             bad_request_iq_error("Malformed IQ payload."),
@@ -199,7 +199,7 @@ pub(super) async fn handle_archive_inbox_upload_iq(
                         Err(error) => {
                             warn!(error = %error, jid = %user_jid, "Failed to list inbox");
                             return vec![build_iq_error_xml_typed(
-                                &id,
+                                id,
                                 None,
                                 None,
                                 internal_server_error_iq_error("Internal server error."),
@@ -218,7 +218,7 @@ pub(super) async fn handle_archive_inbox_upload_iq(
                     Err(error) => {
                         warn!(error = %error, jid = %user_jid, "Failed to count inbox unread");
                         return vec![build_iq_error_xml_typed(
-                            &id,
+                            id,
                             None,
                             None,
                             internal_server_error_iq_error("Internal server error."),
@@ -238,7 +238,7 @@ pub(super) async fn handle_archive_inbox_upload_iq(
                     Err(error) => {
                         warn!(error = %error, "Invalid inbox mark-read");
                         return vec![build_iq_error_xml_typed(
-                            &id,
+                            id,
                             None,
                             None,
                             bad_request_iq_error("Malformed IQ payload."),
@@ -258,7 +258,7 @@ pub(super) async fn handle_archive_inbox_upload_iq(
                 {
                     warn!(error = %error, jid = %user_jid, partner = %mark_read.partner, "Failed to mark inbox read");
                     return vec![build_iq_error_xml_typed(
-                        &id,
+                        id,
                         None,
                         None,
                         internal_server_error_iq_error("Internal server error."),
@@ -268,7 +268,7 @@ pub(super) async fn handle_archive_inbox_upload_iq(
             }
             _ => {
                 return vec![build_iq_error_xml_typed(
-                    &id,
+                    id,
                     None,
                     None,
                     bad_request_iq_error("Malformed IQ payload."),
@@ -286,7 +286,7 @@ pub(super) async fn handle_archive_inbox_upload_iq(
         if is_upload_request(request_iq) {
             let Some(sender_jid) = phase.bound_jid() else {
                 return vec![build_iq_error_xml_typed(
-                    &id,
+                    id,
                     None,
                     None,
                     not_authorized_iq_error("Authentication required."),
@@ -295,7 +295,7 @@ pub(super) async fn handle_archive_inbox_upload_iq(
             let request = match parse_upload_request(request_iq) {
                 Ok(req) => req,
                 Err(e) => {
-                    return vec![build_upload_error(&id, &e)];
+                    return vec![build_upload_error(id, &e)];
                 }
             };
 
@@ -307,7 +307,7 @@ pub(super) async fn handle_archive_inbox_upload_iq(
 
             if request.size > max_size {
                 return vec![build_upload_error(
-                    &id,
+                    id,
                     &UploadError::FileTooLarge { max_size },
                 )];
             }
@@ -344,7 +344,7 @@ pub(super) async fn handle_archive_inbox_upload_iq(
             {
                 warn!(error = %e, "Failed to create upload slot in database");
                 return vec![build_upload_error(
-                    &id,
+                    id,
                     &UploadError::InternalError(format!("Database error: {}", e)),
                 )];
             }

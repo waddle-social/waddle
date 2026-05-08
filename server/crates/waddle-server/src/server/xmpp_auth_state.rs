@@ -2,7 +2,7 @@ use tracing::{debug, warn};
 use waddle_xmpp::{Session as XmppSession, XmppError};
 
 use crate::auth::jid::jid_to_localpart;
-use crate::auth::{AuthError, SessionManager, localpart_to_jid};
+use crate::auth::{localpart_to_jid, AuthError, SessionManager};
 
 pub(crate) async fn validate_session(
     session_manager: &SessionManager,

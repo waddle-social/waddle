@@ -6,7 +6,7 @@ use tracing::{debug, instrument};
 use super::super::PermissionError;
 use super::types::{Object, ObjectType, Relation, Subject, SubjectType, Tuple};
 use crate::db::actor::{DbActor, DbExecute, DbQuery, DbQueryOne, RowValues};
-use crate::db::{ValueExt, row_value};
+use crate::db::{row_value, ValueExt};
 
 /// Storage layer for permission tuples.
 pub struct TupleStore {

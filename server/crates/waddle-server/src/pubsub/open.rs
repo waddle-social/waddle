@@ -2,8 +2,8 @@ use std::path::Path;
 use std::sync::Arc;
 
 use tracing::info;
-use waddle_xmpp::XmppError;
 use waddle_xmpp::pubsub::PubSubStorage;
+use waddle_xmpp::XmppError;
 
 use super::DatabasePubSubStorage;
 use crate::db::{Database, DatabaseConfig, DatabaseDriver};

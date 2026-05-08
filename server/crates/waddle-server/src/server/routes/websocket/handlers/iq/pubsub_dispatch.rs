@@ -3,22 +3,24 @@ use super::*;
 use crate::server::routes::websocket::handlers::pubsub_fanout;
 
 pub(super) async fn handle_pubsub_iq(
-    iq: &xmpp_parsers::iq::Iq,
-    id: &str,
-    muc_domain: &str,
-    spaces_domain: &str,
-    extensions_domain: &str,
+    ctx: IqHandlerContext<'_>,
     state: &WebSocketState,
     phase: &ConnectionPhase,
     authenticated_session: &Option<Session>,
-    response_from: Option<&str>,
-    response_to: Option<&str>,
 ) -> Vec<String> {
+    let iq = ctx.iq;
+    let id = ctx.id;
+    let muc_domain = ctx.muc_domain;
+    let spaces_domain = ctx.spaces_domain;
+    let extensions_domain = ctx.extensions_domain;
+    let response_from = ctx.response_from;
+    let response_to = ctx.response_to;
+
     // PubSub / PEP (XEP-0060, XEP-0163)
-    if is_pubsub_iq(&iq) {
+    if is_pubsub_iq(iq) {
         if !phase.is_ready() {
             return vec![build_iq_error_xml_typed(
-                &id,
+                id,
                 response_from,
                 response_to,
                 not_authorized_iq_error("Authentication required."),
@@ -27,7 +29,7 @@ pub(super) async fn handle_pubsub_iq(
 
         let Some(user_jid) = phase.bound_jid().map(|jid| jid.to_bare()) else {
             return vec![build_iq_error_xml_typed(
-                &id,
+                id,
                 response_from,
                 response_to,
                 not_authorized_iq_error("Authentication required."),
@@ -39,11 +41,11 @@ pub(super) async fn handle_pubsub_iq(
             None => user_jid.clone(),
         };
 
-        let request = match parse_pubsub_iq(&iq) {
+        let request = match parse_pubsub_iq(iq) {
             Ok(req) => req,
             Err(e) => {
                 warn!("Failed to parse PubSub request: {}", e);
-                let error = build_pubsub_error(&iq, PubSubError::InvalidJid);
+                let error = build_pubsub_error(iq, PubSubError::InvalidJid);
                 return vec![iq_to_xml(error)];
             }
         };
@@ -54,10 +56,10 @@ pub(super) async fn handle_pubsub_iq(
             PubSubRequest::Publish { node, item } => {
                 if target_jid.to_string() == spaces_domain {
                     return handle_spaces_publish(
-                        &iq,
+                        iq,
                         state,
                         muc_domain,
-                        &spaces_domain,
+                        spaces_domain,
                         &node,
                         item,
                         authenticated_session.as_ref(),
@@ -65,7 +67,7 @@ pub(super) async fn handle_pubsub_iq(
                     .await;
                 }
 
-                let is_pep = is_pep_self_or_to(&iq, &target_jid, &user_jid);
+                let is_pep = is_pep_self_or_to(iq, &target_jid, &user_jid);
                 match crate::pubsub_authz::can_publish(
                     &state.deps.protocol.pubsub_storage,
                     &target_jid,
@@ -95,16 +97,16 @@ pub(super) async fn handle_pubsub_iq(
                                 .flatten()
                                 .is_some();
                             let error = if node_exists {
-                                build_pubsub_error(&iq, PubSubError::Forbidden)
+                                build_pubsub_error(iq, PubSubError::Forbidden)
                             } else {
-                                build_pubsub_error(&iq, PubSubError::NodeNotFound)
+                                build_pubsub_error(iq, PubSubError::NodeNotFound)
                             };
                             return vec![iq_to_xml(error)];
                         }
                     }
                     Err(e) => {
                         warn!("PubSub publish authz check failed: {e}");
-                        return vec![iq_to_xml(build_pubsub_error(&iq, PubSubError::Forbidden))];
+                        return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::Forbidden))];
                     }
                 }
 
@@ -133,12 +135,12 @@ pub(super) async fn handle_pubsub_iq(
                         )
                         .await;
                         let response =
-                            build_pubsub_publish_result(&iq, &node, &publish_result.item_id);
+                            build_pubsub_publish_result(iq, &node, &publish_result.item_id);
                         return vec![iq_to_xml(response)];
                     }
                     Err(e) => {
                         warn!("PubSub publish failed: {}", e);
-                        let error = build_pubsub_error(&iq, PubSubError::Forbidden);
+                        let error = build_pubsub_error(iq, PubSubError::Forbidden);
                         return vec![iq_to_xml(error)];
                     }
                 }
@@ -151,9 +153,9 @@ pub(super) async fn handle_pubsub_iq(
             } => {
                 if target_jid.to_string() == spaces_domain {
                     return handle_spaces_items(
-                        &iq,
+                        iq,
                         state,
-                        &spaces_domain,
+                        spaces_domain,
                         &node,
                         max_items,
                         &item_ids,
@@ -170,7 +172,7 @@ pub(super) async fn handle_pubsub_iq(
                         item_ids: &item_ids,
                     };
                     return handle_extension_route_items(
-                        &iq,
+                        iq,
                         state,
                         muc_domain,
                         authenticated_session.as_ref(),
@@ -195,12 +197,12 @@ pub(super) async fn handle_pubsub_iq(
                             count = items.len(),
                             "PubSub items retrieved via WebSocket"
                         );
-                        let response = build_pubsub_items_result(&iq, &node, &items);
+                        let response = build_pubsub_items_result(iq, &node, &items);
                         return vec![iq_to_xml(response)];
                     }
                     Err(e) => {
                         warn!("PubSub items retrieval failed: {}", e);
-                        let error = build_pubsub_error(&iq, PubSubError::NodeNotFound);
+                        let error = build_pubsub_error(iq, PubSubError::NodeNotFound);
                         return vec![iq_to_xml(error)];
                     }
                 }
@@ -213,10 +215,10 @@ pub(super) async fn handle_pubsub_iq(
             } => {
                 if target_jid.to_string() == spaces_domain {
                     return handle_spaces_retract(
-                        &iq,
+                        iq,
                         state,
                         muc_domain,
-                        &spaces_domain,
+                        spaces_domain,
                         &node,
                         &item_id,
                         authenticated_session.as_ref(),
@@ -225,7 +227,7 @@ pub(super) async fn handle_pubsub_iq(
                 }
 
                 if target_jid != user_jid {
-                    let error = build_pubsub_error(&iq, PubSubError::Forbidden);
+                    let error = build_pubsub_error(iq, PubSubError::Forbidden);
                     return vec![iq_to_xml(error)];
                 }
 
@@ -240,16 +242,16 @@ pub(super) async fn handle_pubsub_iq(
                     Ok(retracted) => {
                         if retracted {
                             debug!(node = %node, item_id = %item_id, "PubSub item retracted via WebSocket");
-                            let response = build_pubsub_success(&iq);
+                            let response = build_pubsub_success(iq);
                             return vec![iq_to_xml(response)];
                         } else {
-                            let error = build_pubsub_error(&iq, PubSubError::ItemNotFound);
+                            let error = build_pubsub_error(iq, PubSubError::ItemNotFound);
                             return vec![iq_to_xml(error)];
                         }
                     }
                     Err(e) => {
                         warn!("PubSub retract failed: {}", e);
-                        let error = build_pubsub_error(&iq, PubSubError::NodeNotFound);
+                        let error = build_pubsub_error(iq, PubSubError::NodeNotFound);
                         return vec![iq_to_xml(error)];
                     }
                 }
@@ -257,7 +259,7 @@ pub(super) async fn handle_pubsub_iq(
 
             request => {
                 return handle_pubsub_admin_request(
-                    &iq,
+                    iq,
                     state,
                     &target_jid,
                     &user_jid,

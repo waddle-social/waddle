@@ -1,5 +1,5 @@
 use super::*;
-use waddle_xmpp::protocol::frame::{InboundFrame, parse_frame};
+use waddle_xmpp::protocol::frame::{parse_frame, InboundFrame};
 
 /// Only called from test helpers.
 #[cfg(test)]

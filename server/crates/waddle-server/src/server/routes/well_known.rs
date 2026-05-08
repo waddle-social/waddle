@@ -5,11 +5,11 @@
 //! - /.well-known/host-meta.json - JSON variant
 
 use axum::{
-    Router,
     extract::State,
-    http::{StatusCode, header},
+    http::{header, StatusCode},
     response::{IntoResponse, Response},
     routing::get,
+    Router,
 };
 use std::sync::Arc;
 

@@ -15,10 +15,10 @@ use tracing::{debug, instrument};
 use xmpp_parsers::iq::{Iq, IqType};
 use xmpp_parsers::presence::Presence;
 
-use super::{MucRoom, NS_MUC_OWNER, RoomConfig};
-use crate::XmppError;
-use crate::xep::FIELD_FORUM_MODE;
+use super::{MucRoom, RoomConfig, NS_MUC_OWNER};
 use crate::xep::xep0004::{self, DataForm, Field, FormType, FromElement, IntoElement};
+use crate::xep::FIELD_FORUM_MODE;
+use crate::XmppError;
 
 /// Namespace for XEP-0004 Data Forms (re-exported for backward compatibility).
 pub const DATA_FORMS_NS: &str = xep0004::NS_DATA_FORMS;

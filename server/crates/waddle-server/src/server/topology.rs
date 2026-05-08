@@ -1,6 +1,6 @@
 use crate::db::actor::{DbExecute, DbQueryOne};
-use crate::server::AppState;
 use crate::server::routes::websocket::XmppServiceDomains;
+use crate::server::AppState;
 use anyhow::Result;
 use jid::BareJid;
 use std::sync::Arc;

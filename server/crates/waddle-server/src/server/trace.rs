@@ -1,6 +1,6 @@
 use opentelemetry::trace::TraceContextExt;
 use opentelemetry_http::HeaderExtractor;
-use tracing::{Span, info_span};
+use tracing::{info_span, Span};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 /// Build the per-request `tracing` span and attach the inbound W3C

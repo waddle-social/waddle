@@ -2,11 +2,11 @@ use kameo::actor::ActorRef;
 use tracing::{debug, warn};
 use waddle_xmpp::{UserDirectoryEntry, XmppError};
 
-use crate::auth::{AuthError, NativeUserStore, RegisterRequest, localpart_to_jid};
+use crate::auth::{localpart_to_jid, AuthError, NativeUserStore, RegisterRequest};
 use crate::db::actor::{DbActor, DbQuery};
-use crate::db::{ValueExt, row_value};
+use crate::db::{row_value, ValueExt};
 use crate::permissions::PermissionActor;
-use crate::server::bootstrap_membership::{BootstrapMembershipConfig, provision_user_membership};
+use crate::server::bootstrap_membership::{provision_user_membership, BootstrapMembershipConfig};
 
 pub(crate) async fn search_users(
     global_db_actor: &ActorRef<DbActor>,

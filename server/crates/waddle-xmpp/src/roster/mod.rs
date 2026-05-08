@@ -46,7 +46,7 @@
 //! ```
 
 pub use waddle_xmpp_core::roster::{
-    AskType, ROSTER_NS, RosterItem, RosterVersion, RosterVersionRequest, Subscription,
+    AskType, RosterItem, RosterVersion, RosterVersionRequest, Subscription, ROSTER_NS,
 };
 
 use jid::{BareJid, FullJid, Jid};

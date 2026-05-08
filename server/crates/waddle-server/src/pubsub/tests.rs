@@ -192,13 +192,11 @@ async fn database_purge_clears_items_keeps_node() {
     let purged = storage.purge_node(&owner, "n").await.expect("purge");
     assert_eq!(purged, 3);
     assert!(storage.get_node(&owner, "n").await.expect("get").is_some());
-    assert!(
-        storage
-            .get_items(&owner, "n", None, &[])
-            .await
-            .expect("items")
-            .is_empty()
-    );
+    assert!(storage
+        .get_items(&owner, "n", None, &[])
+        .await
+        .expect("items")
+        .is_empty());
 }
 
 #[tokio::test]

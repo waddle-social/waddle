@@ -134,7 +134,7 @@ fn build_subject_message_set_state_produces_section_7_2_15_shape() {
     assert_eq!(msg.to.as_ref().map(|j| j.to_string()), Some(to.to_string()));
     assert_eq!(msg.subjects.len(), 1, "exactly one <subject/> element");
     assert_eq!(
-        msg.subjects.iter().next().map(|s| s.1.0.as_str()),
+        msg.subjects.iter().next().map(|s| s.1 .0.as_str()),
         Some("Fire Burn and Cauldron Bubble!")
     );
     assert!(msg.bodies.is_empty(), "subject message has no <body/>");
@@ -155,7 +155,7 @@ fn build_subject_message_cleared_state_emits_empty_subject_with_delay() {
     let msg = build_subject_message(&room, &to, Some(&state), &secret);
 
     assert_eq!(
-        msg.subjects.iter().next().map(|s| s.1.0.as_str()),
+        msg.subjects.iter().next().map(|s| s.1 .0.as_str()),
         Some(""),
         "explicitly cleared subject is empty <subject/>"
     );
@@ -184,7 +184,7 @@ fn build_subject_message_never_set_emits_empty_subject_without_delay() {
         "never-set rooms emit bare-from (§7.2.15 allows this; no setter exists)"
     );
     assert_eq!(
-        msg.subjects.iter().next().map(|s| s.1.0.as_str()),
+        msg.subjects.iter().next().map(|s| s.1 .0.as_str()),
         Some(""),
         "MUST return an empty <subject/> (§7.2.15)"
     );

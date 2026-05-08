@@ -1,6 +1,9 @@
 use super::*;
 use crate::db::MigrationRunner;
+use crate::db::{actor::DbActor, Database};
 use crate::permissions::{ObjectType, PermissionActor};
+use kameo::actor::ActorRef;
+use std::sync::Arc;
 use waddle_xmpp::AppState;
 
 async fn create_test_db() -> (Arc<Database>, ActorRef<DbActor>) {

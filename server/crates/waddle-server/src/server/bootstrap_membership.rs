@@ -3,7 +3,7 @@ use kameo::error::SendError;
 use tracing::{debug, info, warn};
 
 use crate::db::actor::{DbActor, DbQuery};
-use crate::db::{ValueExt, row_value};
+use crate::db::{row_value, ValueExt};
 use crate::permissions::{
     CheckPermission, Object, ObjectType, Permission, PermissionActor, PermissionError, Relation,
     Subject, Tuple, WriteTuple,

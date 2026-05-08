@@ -1,6 +1,6 @@
 use jid::BareJid;
-use waddle_xmpp::XmppError;
 use waddle_xmpp::pubsub::{NodeConfig, PubSubNode};
+use waddle_xmpp::XmppError;
 
 use super::DatabasePubSubStorage;
 

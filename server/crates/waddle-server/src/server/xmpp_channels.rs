@@ -2,7 +2,7 @@ use kameo::actor::ActorRef;
 use serde::Serialize;
 
 use crate::db::actor::{DbActor, DbQuery, DbQueryOne};
-use crate::db::{ValueExt, row_value};
+use crate::db::{row_value, ValueExt};
 
 #[derive(Debug, Serialize)]
 pub(crate) struct XmppChannelRecord {

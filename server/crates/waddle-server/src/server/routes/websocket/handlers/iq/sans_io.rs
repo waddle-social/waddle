@@ -1,17 +1,19 @@
 use super::*;
 
 pub(super) async fn handle_sans_io_iq(
-    iq: &xmpp_parsers::iq::Iq,
-    id: &str,
-    payload_ns: &str,
-    domain: &str,
+    ctx: IqHandlerContext<'_>,
     state: &WebSocketState,
     authenticated_session: &Option<Session>,
     phase: &ConnectionPhase,
     conn_state: &mut IqConnState<'_>,
-    response_from: Option<&str>,
-    response_to: Option<&str>,
 ) -> Vec<String> {
+    let iq = ctx.iq;
+    let id = ctx.id;
+    let payload_ns = ctx.payload_ns;
+    let domain = ctx.domain;
+    let response_from = ctx.response_from;
+    let response_to = ctx.response_to;
+
     // Sans-I/O dispatch: if the IQ namespace has a registered handler in
     // the protocol dispatcher, route through it and translate the emitted
     // OutboundEvents into outbound XML frames via `interpret()`.
@@ -29,9 +31,9 @@ pub(super) async fn handle_sans_io_iq(
         _ => None,
     };
     if state.deps.protocol.dispatcher.has_iq_handler(payload_ns) {
-        if payload_ns == waddle_xmpp::xep::NS_VERSION && !is_version_query(&iq) {
+        if payload_ns == waddle_xmpp::xep::NS_VERSION && !is_version_query(iq) {
             return vec![build_iq_error_xml_typed(
-                &id,
+                id,
                 response_from,
                 response_to,
                 bad_request_iq_error("Malformed IQ payload."),
@@ -44,16 +46,16 @@ pub(super) async fn handle_sans_io_iq(
                 .is_some_and(|target| target.to_bare().as_str() != domain)
         {
             return vec![build_iq_error_xml_typed(
-                &id,
+                id,
                 response_from,
                 response_to,
                 service_unavailable_iq_error("Service unavailable at this address."),
             )];
         }
         if payload_ns == waddle_xmpp::xep::NS_TIME {
-            if !is_time_query(&iq) {
+            if !is_time_query(iq) {
                 return vec![build_iq_error_xml_typed(
-                    &id,
+                    id,
                     response_from,
                     response_to,
                     bad_request_iq_error("Malformed IQ payload."),
@@ -65,7 +67,7 @@ pub(super) async fn handle_sans_io_iq(
                 .is_some_and(|target| target.to_bare().as_str() != domain)
             {
                 return vec![build_iq_error_xml_typed(
-                    &id,
+                    id,
                     response_from,
                     response_to,
                     service_unavailable_iq_error("Service unavailable at this address."),
@@ -74,7 +76,7 @@ pub(super) async fn handle_sans_io_iq(
         }
         let Some(full_jid) = phase.bound_jid() else {
             return vec![build_iq_error_xml_typed(
-                &id,
+                id,
                 response_from,
                 response_to,
                 not_authorized_iq_error("Authentication required."),
@@ -89,7 +91,7 @@ pub(super) async fn handle_sans_io_iq(
                 .set_carbons_enabled(full_jid, enabled);
         }
         let ctx = ProtocolStanzaContext { domain, full_jid };
-        let events = state.deps.protocol.dispatcher.dispatch_iq(&iq, &ctx);
+        let events = state.deps.protocol.dispatcher.dispatch_iq(iq, &ctx);
         let deps = crate::server::routes::interpret::Deps {
             connection_registry: &state.deps.protocol.connection_registry,
             sm_session_registry: Some(&state.deps.protocol.sm_session_registry),

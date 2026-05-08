@@ -4,11 +4,11 @@
 
 use super::auth::AuthState;
 use axum::{
-    Router,
     extract::State,
     http::StatusCode,
     response::{Html, IntoResponse},
     routing::get,
+    Router,
 };
 use std::sync::Arc;
 

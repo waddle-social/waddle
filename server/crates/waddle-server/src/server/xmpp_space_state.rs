@@ -3,7 +3,7 @@ use tracing::{debug, warn};
 use waddle_xmpp::{ChannelInfo, ChannelRoomInfo, SpaceDetails, XmppError};
 
 use crate::db::actor::{DbActor, DbQuery, DbQueryOne};
-use crate::db::{Value, ValueExt, row_value};
+use crate::db::{row_value, Value, ValueExt};
 
 pub(crate) async fn list_space_channels(
     space_db_actor: Option<&ActorRef<DbActor>>,

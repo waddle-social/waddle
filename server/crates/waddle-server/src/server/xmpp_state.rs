@@ -4,14 +4,14 @@
 //! the existing auth, session, and permission services in waddle-server.
 
 #[cfg(test)]
-use waddle_xmpp::inbox::{InboxEntry, storage::InboxStorage};
+use waddle_xmpp::inbox::InboxEntry;
 #[cfg(test)]
 use waddle_xmpp::{Session as XmppSession, XmppError};
 
 #[cfg(test)]
 pub use super::xmpp_app_state::XmppAppState;
 
-pub(crate) use super::xmpp_channels::{XmppChannelRecord, get_xmpp_channel, list_xmpp_channels};
+pub(crate) use super::xmpp_channels::{get_xmpp_channel, list_xmpp_channels, XmppChannelRecord};
 
 #[cfg(test)]
 impl waddle_xmpp::AppState for XmppAppState {

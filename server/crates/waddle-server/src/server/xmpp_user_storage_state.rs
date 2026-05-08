@@ -1,11 +1,11 @@
 use kameo::actor::ActorRef;
 use tracing::{debug, warn};
+use waddle_xmpp::inbox::{storage::InboxStorage, InboxEntry};
 use waddle_xmpp::XmppError;
-use waddle_xmpp::inbox::{InboxEntry, storage::InboxStorage};
 
 use crate::db::actor::{DbActor, DbExecute, DbQueryOne};
 use crate::db::blocking::DatabaseBlockingStorage;
-use crate::db::{Database, Value, ValueExt, row_value};
+use crate::db::{row_value, Database, Value, ValueExt};
 
 pub(crate) async fn get_blocklist(
     db: Database,

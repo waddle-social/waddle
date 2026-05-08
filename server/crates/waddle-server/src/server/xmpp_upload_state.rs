@@ -3,8 +3,8 @@ use tracing::{debug, warn};
 use waddle_xmpp::xep::xep0363::{effective_content_type, sanitize_filename};
 use waddle_xmpp::{UploadSlotInfo, XmppError};
 
-use crate::db::Value;
 use crate::db::actor::{DbActor, DbExecute};
+use crate::db::Value;
 
 pub(crate) async fn create_upload_slot(
     global_db_actor: &ActorRef<DbActor>,

@@ -1,3 +1,4 @@
+use super::extension_forms::extension_namespaces_for_disco;
 use super::*;
 
 #[cfg(test)]
@@ -25,7 +26,7 @@ mod extension_disco_tests {
 mod vcard_fallback_tests {
     use super::*;
     use crate::db::MigrationRunner;
-    use waddle_xmpp::xep::xep0054::{NS_VCARD, VCardPhoto};
+    use waddle_xmpp::xep::xep0054::{VCardPhoto, NS_VCARD};
 
     async fn test_db(name: &str) -> Arc<Database> {
         let db = Arc::new(Database::in_memory(name).await.expect("database"));

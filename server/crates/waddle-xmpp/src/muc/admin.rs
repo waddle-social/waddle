@@ -14,8 +14,8 @@ use minidom::Element;
 use tracing::{debug, instrument};
 use xmpp_parsers::iq::{Iq, IqType};
 
-use crate::XmppError;
 use crate::types::{Affiliation, Role};
+use crate::XmppError;
 
 /// Namespace for MUC admin protocol.
 pub const NS_MUC_ADMIN: &str = "http://jabber.org/protocol/muc#admin";

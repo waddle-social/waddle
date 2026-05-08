@@ -3,7 +3,7 @@ use tracing::{debug, warn};
 use waddle_xmpp::XmppError;
 
 use crate::db::actor::{DbActor, DbQueryOne};
-use crate::db::{Value, ValueExt, row_value};
+use crate::db::{row_value, Value, ValueExt};
 use crate::vcard::VCardStore;
 
 pub(crate) async fn get_vcard(

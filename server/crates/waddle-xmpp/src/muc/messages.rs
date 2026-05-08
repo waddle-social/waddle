@@ -7,10 +7,10 @@ use tracing::debug;
 use xmpp_parsers::message::{Message, MessageType, Subject};
 
 use super::SubjectState;
-use crate::XmppError;
 use crate::xep::xep0085::{self, ChatStateCarrier};
 use crate::xep::xep0203;
-use crate::xep::xep0421::{OccupantIdSecret, generate_occupant_id, set_occupant_id_on_message};
+use crate::xep::xep0421::{generate_occupant_id, set_occupant_id_on_message, OccupantIdSecret};
+use crate::XmppError;
 
 /// Represents a parsed MUC message ready for routing.
 #[derive(Debug, Clone)]
@@ -70,7 +70,7 @@ impl MucMessage {
 
     /// Get the message body text (first body if multiple languages).
     pub fn body_text(&self) -> Option<&str> {
-        self.message.bodies.iter().next().map(|b| b.1.0.as_str())
+        self.message.bodies.iter().next().map(|b| b.1 .0.as_str())
     }
 
     /// Get the message ID.
@@ -90,7 +90,7 @@ impl MucMessage {
     ///
     /// Returns the subject text, or None if no subject is present.
     pub fn subject_text(&self) -> Option<&str> {
-        self.message.subjects.iter().next().map(|s| s.1.0.as_str())
+        self.message.subjects.iter().next().map(|s| s.1 .0.as_str())
     }
 
     /// Check if this message is a subject-only message (no body, has subject).

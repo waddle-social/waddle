@@ -1,19 +1,21 @@
 use super::*;
 
 pub(super) async fn handle_disco_items_iq(
-    iq: &xmpp_parsers::iq::Iq,
-    id: &str,
-    payload_ns: &str,
-    target_to: Option<&str>,
-    domain: &str,
-    muc_domain: &str,
-    upload_domain: &str,
-    spaces_domain: &str,
-    extensions_domain: &str,
+    ctx: IqHandlerContext<'_>,
     state: &WebSocketState,
-    response_from: Option<&str>,
-    response_to: Option<&str>,
 ) -> Vec<String> {
+    let iq = ctx.iq;
+    let id = ctx.id;
+    let payload_ns = ctx.payload_ns;
+    let target_to = ctx.target_to;
+    let domain = ctx.domain;
+    let muc_domain = ctx.muc_domain;
+    let upload_domain = ctx.upload_domain;
+    let spaces_domain = ctx.spaces_domain;
+    let extensions_domain = ctx.extensions_domain;
+    let response_from = ctx.response_from;
+    let response_to = ctx.response_to;
+
     // Disco items - list services/rooms
     if payload_ns == "http://jabber.org/protocol/disco#items" {
         let request_iq = &iq;
@@ -21,7 +23,7 @@ pub(super) async fn handle_disco_items_iq(
             Ok(query) => query,
             Err(_) => {
                 return vec![build_iq_error_xml_typed(
-                    &id,
+                    id,
                     None,
                     None,
                     bad_request_iq_error("Malformed IQ payload."),
@@ -47,7 +49,7 @@ pub(super) async fn handle_disco_items_iq(
         if target_to == Some(extensions_domain) && query.node.as_deref() == Some(NODE_COMMANDS) {
             let commands = state.deps.protocol.command_registry.list_commands().await;
             let command_refs = command_refs_by_boundary(&commands, true);
-            let response = build_command_items(request_iq, &command_refs, &extensions_domain);
+            let response = build_command_items(request_iq, &command_refs, extensions_domain);
             return vec![iq_to_xml(response)];
         }
 
@@ -62,7 +64,7 @@ pub(super) async fn handle_disco_items_iq(
                     .any(|route| extension_route_disco_node(route) == node);
                 if !known_route_node {
                     return vec![build_iq_error_xml_typed(
-                        &id,
+                        id,
                         response_from,
                         response_to,
                         item_not_found_iq_error("Requested item not found."),
@@ -80,7 +82,7 @@ pub(super) async fn handle_disco_items_iq(
                 .map(|route| {
                     let node = extension_route_disco_node(route);
                     DiscoItem::new(
-                        &extensions_domain,
+                        extensions_domain,
                         Some(route.label.as_str()),
                         Some(node.as_str()),
                     )
@@ -93,7 +95,7 @@ pub(super) async fn handle_disco_items_iq(
         if target_to == Some(spaces_domain) {
             let items: Vec<DiscoItem> = match query.node.as_deref() {
                 Some(_) => vec![],
-                None => match spaces_service_bare_jid(&spaces_domain) {
+                None => match spaces_service_bare_jid(spaces_domain) {
                     Ok(spaces_jid) => match state
                         .deps
                         .protocol
@@ -105,7 +107,7 @@ pub(super) async fn handle_disco_items_iq(
                             .into_iter()
                             .map(|node| {
                                 let name = if node == "general" { "General" } else { &node };
-                                DiscoItem::spaces_node(&spaces_domain, &node, Some(name))
+                                DiscoItem::spaces_node(spaces_domain, &node, Some(name))
                             })
                             .collect(),
                         Err(error) => {
@@ -127,9 +129,9 @@ pub(super) async fn handle_disco_items_iq(
         debug!("Disco items query on server");
         let items = vec![
             DiscoItem::muc_service(muc_domain, Some("Chatrooms")),
-            DiscoItem::upload_service(&upload_domain, Some("HTTP File Upload")),
-            DiscoItem::spaces_service(&spaces_domain, Some("Spaces")),
-            DiscoItem::pubsub_service(&extensions_domain, Some("Extensions")),
+            DiscoItem::upload_service(upload_domain, Some("HTTP File Upload")),
+            DiscoItem::spaces_service(spaces_domain, Some("Spaces")),
+            DiscoItem::pubsub_service(extensions_domain, Some("Extensions")),
         ];
         let response = build_disco_items_response(request_iq, &items, None);
         return vec![iq_to_xml(response)];

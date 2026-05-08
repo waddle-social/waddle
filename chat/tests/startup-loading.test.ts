@@ -18,7 +18,10 @@ describe("startup loading fallback", () => {
   });
 
   test("keeps fallback dimensions stable without Vue", () => {
-    const styles = readFileSync(new URL("../src/styles/global.css", import.meta.url), "utf8");
+    const styles = readFileSync(
+      new URL("../src/styles/global/shell.css", import.meta.url),
+      "utf8",
+    );
 
     expect(styles).toContain(".chat-app-shell");
     expect(styles).toContain("height: 100dvh;");

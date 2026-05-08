@@ -14,9 +14,9 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::{debug, instrument};
 
-use super::PermissionError;
 use super::schema::{ComputedPermission, PermissionSchema};
 use super::tuple::{Object, ObjectType, Subject, SubjectType, TupleStore};
+use super::PermissionError;
 use crate::db::actor::DbActor;
 
 /// Maximum depth for permission check traversal (prevents infinite loops)

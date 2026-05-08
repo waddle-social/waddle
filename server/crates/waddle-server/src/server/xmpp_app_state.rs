@@ -1,12 +1,12 @@
 use std::sync::Arc;
 
 use kameo::actor::ActorRef;
-use waddle_xmpp::XmppError;
 use waddle_xmpp::inbox::storage::InboxStorage;
+use waddle_xmpp::XmppError;
 
 use crate::auth::{NativeUserStore, SessionManager};
-use crate::db::Database;
 use crate::db::actor::{DbActor, GetDatabase};
+use crate::db::Database;
 use crate::permissions::{Object, PermissionActor, Subject};
 use crate::vcard::VCardStore;
 

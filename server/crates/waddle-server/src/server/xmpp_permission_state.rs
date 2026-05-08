@@ -4,7 +4,7 @@ use waddle_xmpp::{Affiliation, XmppError};
 
 use crate::auth::localpart_to_jid;
 use crate::db::actor::{DbActor, DbQueryOne, RowValues};
-use crate::db::{ValueExt, row_value};
+use crate::db::{row_value, ValueExt};
 use crate::permissions::{
     CheckPermission, DeleteTuple, ListRelations, ListSubjects, Object, ObjectType, Permission,
     PermissionActor, Relation, Subject, SubjectType, Tuple, WriteTuple,

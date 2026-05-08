@@ -11,23 +11,23 @@ use crate::auth::identity::IdentityService;
 use crate::auth::oauth2;
 use crate::auth::oidc;
 use crate::auth::{
-    AuthError, AuthProviderConfig, AuthProviderKind, AuthProviderTokenEndpointAuthMethod,
-    ProviderRegistry, Session, SessionManager, localpart_to_jid,
+    localpart_to_jid, AuthError, AuthProviderConfig, AuthProviderKind,
+    AuthProviderTokenEndpointAuthMethod, ProviderRegistry, Session, SessionManager,
 };
 use crate::config::ServerConfig;
 use crate::db::actor::{DbExecute, DbQueryOne};
-use crate::db::{ValueExt, row_value};
+use crate::db::{row_value, ValueExt};
 use crate::permissions::PermissionActor;
+use crate::server::bootstrap_membership::{reconcile_user_membership, BootstrapMembershipConfig};
 use crate::server::AppState;
-use crate::server::bootstrap_membership::{BootstrapMembershipConfig, reconcile_user_membership};
 use axum::{
-    Router,
     extract::{Query, State},
-    http::{StatusCode, header},
+    http::{header, StatusCode},
     response::{IntoResponse, Json, Redirect},
     routing::{get, post},
+    Router,
 };
-use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use chrono::{DateTime, Duration, Utc};
 use dashmap::DashMap;
 use kameo::actor::ActorRef;

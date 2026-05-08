@@ -77,17 +77,15 @@ pub async fn promote_session_unacked(
     for entry in &session.unacked_stanzas {
         let outcome = match parse_stanza(&entry.stanza_xml) {
             Some(Stanza::Message(message)) => {
-                promote_one(
-                    message,
-                    entry.sequence,
-                    &online,
+                let ctx = PromotionContext {
+                    online: &online,
                     blocklist,
                     registry,
                     pending_storage,
-                    entry.original_receipt_at,
+                    original_receipt_fallback: entry.original_receipt_at,
                     server_domain,
-                )
-                .await
+                };
+                promote_one(message, entry.sequence, ctx).await
             }
             Some(Stanza::Iq(iq)) => promote_iq(iq, registry).await,
             Some(Stanza::Presence(presence)) => promote_presence(presence, registry).await,
@@ -110,19 +108,23 @@ pub async fn promote_session_unacked(
     summary
 }
 
+struct PromotionContext<'a> {
+    online: &'a OnlineResources,
+    blocklist: &'a Blocklist,
+    registry: &'a ConnectionRegistry,
+    pending_storage: &'a Arc<dyn PendingDeliveryStorage>,
+    original_receipt_fallback: DateTime<Utc>,
+    server_domain: &'a str,
+}
+
 /// Promote a single typed [`xmpp_parsers::message::Message`] per the
 /// locked Q6 chain.
 async fn promote_one(
     message: xmpp_parsers::message::Message,
     sequence: u32,
-    online: &OnlineResources,
-    blocklist: &Blocklist,
-    registry: &ConnectionRegistry,
-    pending_storage: &Arc<dyn PendingDeliveryStorage>,
-    original_receipt_fallback: DateTime<Utc>,
-    server_domain: &str,
+    ctx: PromotionContext<'_>,
 ) -> PromotedOutcome {
-    let routing: DmRouting = classify_dm_intake(&message, online, blocklist);
+    let routing: DmRouting = classify_dm_intake(&message, ctx.online, ctx.blocklist);
 
     // Step 1: alt-resource — if the classifier says live-deliver,
     // route to the recipient's connected resource(s) via the
@@ -133,12 +135,12 @@ async fn promote_one(
     // `next()` which silently lost deliveries on multi-resource
     // users).
     if !matches!(routing.live, LiveDecision::None) {
-        let targets = collect_live_targets(&routing, &message, registry);
+        let targets = collect_live_targets(&routing, &message, ctx.registry);
         if !targets.is_empty() {
             let delayed = build_replay_stanza(
                 MaterializedPayload::Transient(Box::new(message.clone())),
-                server_domain,
-                original_receipt_fallback,
+                ctx.server_domain,
+                ctx.original_receipt_fallback,
                 ReplayReason::SmRedelivery,
             );
             // Send to all eligible resources; mark redelivered if at
@@ -147,7 +149,7 @@ async fn promote_one(
             let mut delivered_to = None;
             for target in targets {
                 if matches!(
-                    registry
+                    ctx.registry
                         .send_to(&target, Stanza::Message(delayed.clone()))
                         .await,
                     SendResult::Sent
@@ -206,9 +208,9 @@ async fn promote_one(
                         return promote_as_transient(
                             message,
                             recipient_bare,
-                            pending_storage,
-                            original_receipt_fallback,
-                            registry,
+                            ctx.pending_storage,
+                            ctx.original_receipt_fallback,
+                            ctx.registry,
                         )
                         .await;
                     }
@@ -230,10 +232,10 @@ async fn promote_one(
     insert_pending(
         recipient_bare,
         payload,
-        pending_storage,
-        original_receipt_fallback,
+        ctx.pending_storage,
+        ctx.original_receipt_fallback,
         &message,
-        registry,
+        ctx.registry,
     )
     .await
 }

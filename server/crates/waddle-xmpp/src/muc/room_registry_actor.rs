@@ -7,9 +7,9 @@
 use std::collections::{HashMap, HashSet};
 
 use jid::BareJid;
-use kameo::Actor;
 use kameo::actor::ActorRef;
 use kameo::message::Context;
+use kameo::Actor;
 use thiserror::Error;
 use tracing::{debug, info, warn};
 

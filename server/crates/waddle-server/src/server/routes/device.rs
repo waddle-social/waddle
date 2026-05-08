@@ -3,11 +3,11 @@
 use super::auth::{AuthState, DeviceAuthStatus, DeviceAuthorization, ErrorResponse, PendingFlow};
 use crate::auth::localpart_to_jid;
 use axum::{
-    Router,
     extract::{Form, Query, State},
     http::StatusCode,
     response::{Html, IntoResponse, Json},
     routing::{get, post},
+    Router,
 };
 use chrono::{Duration, Utc};
 use rand::Rng;

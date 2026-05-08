@@ -1,7 +1,11 @@
 use super::*;
 use super::{
+    cleanup::cleanup_connection_shutdown,
+    frame::handle_xmpp_frame,
     interpret_loop::build_interpret_deps,
     replay::{drain_outbound_into_replay, drive_interpret_loop},
+    send::{send_ws_message, send_ws_text_frames},
+    session_init::load_blocklist_for_bind,
     state::WsConnState,
     stream_management::is_countable_stanza,
     transport_xml::{build_stream_features_xml, sasl_failure_xml, sasl_success_xml},
@@ -9,8 +13,8 @@ use super::{
 use crate::config::ServerConfig;
 use crate::db::{DatabaseConfig, DatabasePool, MigrationRunner, PoolConfig};
 use crate::permissions::{Object, ObjectType, Permission, Relation, Subject, Tuple, WriteTuple};
-use crate::server::AppState;
 use crate::server::bootstrap_membership::DEPLOYMENT_SERVER_ID;
+use crate::server::AppState;
 use futures::Sink;
 use hmac::{Hmac, Mac};
 use pbkdf2::pbkdf2_hmac;
@@ -21,17 +25,17 @@ use std::task::{Context, Poll};
 use tokio::sync::mpsc;
 // Handler functions moved to sub-modules but called directly in tests
 use handlers::iq::{
-    IqConnState, handle_iq, handle_iq_with_conn_state, managed_channel_permission_allowed,
+    handle_iq, handle_iq_with_conn_state, managed_channel_permission_allowed, IqConnState,
 };
 use handlers::presence::{handle_muc_join, handle_muc_leave, parse_room_jid_context};
 // Types moved out of mod.rs scope but used in tests
 use waddle_extensions::ExtensionConfig;
-use waddle_xmpp::Affiliation;
 use waddle_xmpp::commands::{CommandContext, CommandResult};
 use waddle_xmpp::muc::room_actor::{
     ChangeAffiliation, GetSnapshot, JoinWithAffiliation, SetSubject,
 };
 use waddle_xmpp::registry::BroadcastOutcome;
+use waddle_xmpp::Affiliation;
 use xmpp_parsers::iq::{Iq, IqType};
 use xmpp_parsers::message::MessageType as XmppMessageType;
 
@@ -1353,11 +1357,9 @@ async fn sm_resume_is_rejected_during_scram_and_scram_can_still_complete() {
     assert_eq!(resume_responses.len(), 1);
     let failed = Element::from_str(&resume_responses[0]).expect("failed xml");
     assert_eq!(failed.name(), "failed");
-    assert!(
-        failed
-            .get_child("unexpected-request", "urn:ietf:params:xml:ns:xmpp-stanzas")
-            .is_some()
-    );
+    assert!(failed
+        .get_child("unexpected-request", "urn:ietf:params:xml:ns:xmpp-stanzas")
+        .is_some());
     assert_eq!(conn.phase.scram_pending_username(), Some("alice"));
 
     let response_frame = element_to_xml(
@@ -1639,16 +1641,12 @@ async fn muc_join_responses_use_client_namespace() {
     assert_eq!(item.attr("jid"), Some("alice@example.com/web"));
     assert_eq!(item.attr("affiliation"), Some("owner"));
     assert_eq!(item.attr("role"), Some("moderator"));
-    assert!(
-        user_x
-            .children()
-            .any(|child| child.name() == "status" && child.attr("code") == Some("100"))
-    );
-    assert!(
-        user_x
-            .children()
-            .any(|child| child.name() == "status" && child.attr("code") == Some("110"))
-    );
+    assert!(user_x
+        .children()
+        .any(|child| child.name() == "status" && child.attr("code") == Some("100")));
+    assert!(user_x
+        .children()
+        .any(|child| child.name() == "status" && child.attr("code") == Some("110")));
     assert!(
         self_presence
             .get_child("occupant-id", waddle_xmpp::xep::xep0421::NS_OCCUPANT_ID)
@@ -2519,13 +2517,11 @@ async fn handle_iq_carbons_toggle_updates_registry_flag() {
         .protocol
         .connection_registry
         .register(jid.clone(), tx);
-    assert!(
-        !state
-            .deps
-            .protocol
-            .connection_registry
-            .is_carbons_enabled(&jid)
-    );
+    assert!(!state
+        .deps
+        .protocol
+        .connection_registry
+        .is_carbons_enabled(&jid));
 
     let enable = r#"<iq xmlns="jabber:client" id="carbons-enable" type="set"><enable xmlns="urn:xmpp:carbons:2"/></iq>"#;
     let enable_responses = handle_iq(
@@ -2538,13 +2534,11 @@ async fn handle_iq_carbons_toggle_updates_registry_flag() {
     )
     .await;
     assert_eq!(enable_responses.len(), 1);
-    assert!(
-        state
-            .deps
-            .protocol
-            .connection_registry
-            .is_carbons_enabled(&jid)
-    );
+    assert!(state
+        .deps
+        .protocol
+        .connection_registry
+        .is_carbons_enabled(&jid));
 
     let disable = r#"<iq xmlns="jabber:client" id="carbons-disable" type="set"><disable xmlns="urn:xmpp:carbons:2"/></iq>"#;
     let disable_responses = handle_iq(
@@ -2557,13 +2551,11 @@ async fn handle_iq_carbons_toggle_updates_registry_flag() {
     )
     .await;
     assert_eq!(disable_responses.len(), 1);
-    assert!(
-        !state
-            .deps
-            .protocol
-            .connection_registry
-            .is_carbons_enabled(&jid)
-    );
+    assert!(!state
+        .deps
+        .protocol
+        .connection_registry
+        .is_carbons_enabled(&jid));
 }
 
 #[tokio::test]
@@ -4392,12 +4384,10 @@ fn parse_message_stanza_preserves_thread_and_reply() {
         parsed.thread.as_ref().map(|t| t.0.as_str()),
         Some("thread-root")
     );
-    assert!(
-        parsed
-            .payloads
-            .iter()
-            .any(|p| p.name() == "reply" && p.ns() == "urn:xmpp:reply:0")
-    );
+    assert!(parsed
+        .payloads
+        .iter()
+        .any(|p| p.name() == "reply" && p.ns() == "urn:xmpp:reply:0"));
 }
 
 #[test]
@@ -4804,10 +4794,9 @@ async fn muc_nick_collision_returns_conflict_presence() {
         .get_child("error", waddle_xmpp::ns::JABBER_CLIENT)
         .expect("error element");
     assert_eq!(err.attr("type"), Some("cancel"));
-    assert!(
-        err.get_child("conflict", "urn:ietf:params:xml:ns:xmpp-stanzas")
-            .is_some()
-    );
+    assert!(err
+        .get_child("conflict", "urn:ietf:params:xml:ns:xmpp-stanzas")
+        .is_some());
 
     // Alice still owns the nick.
     let room = snapshot_room(state.as_ref(), &room_jid).await.room;
@@ -4882,10 +4871,9 @@ async fn sm_resume_requires_authentication() {
     assert_eq!(responses.len(), 1);
     let el = Element::from_str(&responses[0]).expect("xml");
     assert_eq!(el.name(), "failed");
-    assert!(
-        el.get_child("unexpected-request", "urn:ietf:params:xml:ns:xmpp-stanzas")
-            .is_some()
-    );
+    assert!(el
+        .get_child("unexpected-request", "urn:ietf:params:xml:ns:xmpp-stanzas")
+        .is_some());
     assert!(matches!(conn.phase, ConnectionPhase::Unauthenticated));
 }
 
@@ -4917,10 +4905,9 @@ async fn sm_resume_is_allowed_after_auth_before_bind() {
     assert_eq!(responses.len(), 1);
     let el = Element::from_str(&responses[0]).expect("xml");
     assert_eq!(el.name(), "failed");
-    assert!(
-        el.get_child("item-not-found", "urn:ietf:params:xml:ns:xmpp-stanzas")
-            .is_some()
-    );
+    assert!(el
+        .get_child("item-not-found", "urn:ietf:params:xml:ns:xmpp-stanzas")
+        .is_some());
     assert!(matches!(conn.phase, ConnectionPhase::Authenticated { .. }));
     assert!(!conn.phase.is_resumed());
 }
@@ -4980,10 +4967,9 @@ async fn sm_resume_rejects_authenticated_identity_mismatch_and_preserves_session
     assert_eq!(responses.len(), 1);
     let el = Element::from_str(&responses[0]).expect("xml");
     assert_eq!(el.name(), "failed");
-    assert!(
-        el.get_child("not-authorized", "urn:ietf:params:xml:ns:xmpp-stanzas")
-            .is_some()
-    );
+    assert!(el
+        .get_child("not-authorized", "urn:ietf:params:xml:ns:xmpp-stanzas")
+        .is_some());
     assert!(matches!(conn.phase, ConnectionPhase::Authenticated { .. }));
     assert_eq!(
         conn.phase.authenticated_bare_jid().map(ToString::to_string),
@@ -5177,10 +5163,9 @@ async fn sm_resume_rejects_ready_phase() {
     assert_eq!(responses.len(), 1);
     let el = Element::from_str(&responses[0]).expect("xml");
     assert_eq!(el.name(), "failed");
-    assert!(
-        el.get_child("unexpected-request", "urn:ietf:params:xml:ns:xmpp-stanzas")
-            .is_some()
-    );
+    assert!(el
+        .get_child("unexpected-request", "urn:ietf:params:xml:ns:xmpp-stanzas")
+        .is_some());
     assert!(matches!(conn.phase, ConnectionPhase::Ready { .. }));
 }
 
@@ -6720,13 +6705,11 @@ async fn cleanup_shutdown_detaches_resumable_session_on_transport_drop() {
             .any(|entry| entry.stanza_xml.contains("<presence")),
         "cleanup must record queued-but-unwritten outbound stanzas before detaching"
     );
-    assert!(
-        snapshot_room(state.as_ref(), &room_jid)
-            .await
-            .room
-            .find_nick_by_real_jid(&jid)
-            .is_some()
-    );
+    assert!(snapshot_room(state.as_ref(), &room_jid)
+        .await
+        .room
+        .find_nick_by_real_jid(&jid)
+        .is_some());
 }
 
 #[tokio::test]
@@ -6772,13 +6755,11 @@ async fn cleanup_shutdown_does_not_detach_explicit_close() {
         detached.is_none(),
         "explicit <close/> must not leave a resumable detached session behind"
     );
-    assert!(
-        snapshot_room(state.as_ref(), &room_jid)
-            .await
-            .room
-            .find_nick_by_real_jid(&jid)
-            .is_none()
-    );
+    assert!(snapshot_room(state.as_ref(), &room_jid)
+        .await
+        .room
+        .find_nick_by_real_jid(&jid)
+        .is_none());
 }
 
 #[tokio::test]
@@ -6841,13 +6822,11 @@ async fn sm_janitor_helper_drains_expired_and_cleans_muc() {
         &Some(owner_session),
     )
     .await;
-    assert!(
-        snapshot_room(state.as_ref(), &room_jid)
-            .await
-            .room
-            .find_nick_by_real_jid(&jid)
-            .is_some()
-    );
+    assert!(snapshot_room(state.as_ref(), &room_jid)
+        .await
+        .room
+        .find_nick_by_real_jid(&jid)
+        .is_some());
 
     // Seed an immediately-expired detached session for that JID.
     let stream_id = "already-expired".to_string();
@@ -6902,13 +6881,11 @@ async fn sm_janitor_helper_drains_expired_and_cleans_muc() {
         .unregister(&drained[0].jid);
     cleanup_muc_presence_for_jid(state.as_ref(), &drained[0].jid).await;
 
-    assert!(
-        !state
-            .deps
-            .protocol
-            .resumable_sessions
-            .contains_key(&stream_id)
-    );
+    assert!(!state
+        .deps
+        .protocol
+        .resumable_sessions
+        .contains_key(&stream_id));
     assert!(
         snapshot_room(state.as_ref(), &room_jid)
             .await

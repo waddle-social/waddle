@@ -1,3 +1,6 @@
+use super::bot::{dispatch_bot_groupchat_response, BotGroupchatDispatch};
+use super::groupchat_archive::room_scoped_reply_to_attr;
+use super::groupchat_validation::lookup_groupchat_retraction_target;
 use super::*;
 use waddle_xmpp::xep::{set_thread_create, ThreadCreate};
 use waddle_xmpp::Stanza;

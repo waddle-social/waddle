@@ -1,25 +1,25 @@
 use jid::{BareJid, FullJid, Jid};
 use tracing::{debug, info, warn};
 use waddle_xmpp::{
-    Affiliation, Role, Stanza,
     muc::{
-        RoomConfig,
         messages::build_subject_message,
         room_actor::{JoinWithAffiliation, LeaveByRealJid},
+        RoomConfig,
     },
     presence::subscription::{
-        PresenceAction, SubscriptionStateMachine, SubscriptionType, build_available_presence,
-        build_subscription_presence, build_unavailable_presence, parse_subscription_presence,
+        build_available_presence, build_subscription_presence, build_unavailable_presence,
+        parse_subscription_presence, PresenceAction, SubscriptionStateMachine, SubscriptionType,
     },
     registry::BroadcastOutcome,
-    roster::{AskType, RosterItem, RosterVersion, Subscription, build_roster_push},
+    roster::{build_roster_push, AskType, RosterItem, RosterVersion, Subscription},
     xep::NS_DELAY,
+    Affiliation, Role, Stanza,
 };
 use xmpp_parsers::minidom::Element;
 use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
 
 use super::super::{
-    WebSocketState, element_to_xml, get_or_create_room_actor, get_room_actor, stanza_to_xml,
+    element_to_xml, get_or_create_room_actor, get_room_actor, stanza_to_xml, WebSocketState,
 };
 use crate::auth::Session;
 use crate::db::actor::GetDatabase;
@@ -29,7 +29,7 @@ use crate::db::roster::{
 };
 use crate::permissions::{CheckPermission, Object, ObjectType, Permission, Subject};
 use crate::server::bootstrap_membership::DEPLOYMENT_SERVER_ID;
-use crate::server::xmpp_state::{XmppChannelRecord, get_xmpp_channel};
+use crate::server::xmpp_state::{get_xmpp_channel, XmppChannelRecord};
 use waddle_xmpp::protocol::ConnectionPhase;
 
 mod muc;
@@ -164,12 +164,10 @@ mod delay_strip_tests {
 
         strip_client_authored_delay(&mut presence);
 
-        assert!(
-            presence
-                .payloads
-                .iter()
-                .all(|payload| !(payload.name() == "delay" && payload.ns() == NS_DELAY))
-        );
+        assert!(presence
+            .payloads
+            .iter()
+            .all(|payload| !(payload.name() == "delay" && payload.ns() == NS_DELAY)));
     }
 }
 

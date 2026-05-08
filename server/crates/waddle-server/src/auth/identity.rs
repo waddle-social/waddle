@@ -1,8 +1,8 @@
-use crate::auth::{AuthError, AuthProviderConfig, username_to_localpart};
+use crate::auth::{username_to_localpart, AuthError, AuthProviderConfig};
 use kameo::actor::ActorRef;
 
 use crate::db::actor::{DbActor, DbExecute, DbQueryOne};
-use crate::db::{ValueExt, row_value};
+use crate::db::{row_value, ValueExt};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

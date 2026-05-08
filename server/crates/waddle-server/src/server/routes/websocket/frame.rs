@@ -4,7 +4,7 @@ use super::{
     resource_binding::handle_resource_binding,
     sasl::{handle_sasl_oauthbearer, handle_sasl_scram_client_first, handle_sasl_scram_response},
     state::WsConnState,
-    stream_management::{SmCtx, handle_sm_stanza},
+    stream_management::{handle_sm_stanza, SmCtx},
     transport_xml::{build_stream_features_for_phase, sasl_failure_xml},
 };
 

@@ -18,14 +18,14 @@ use crate::server::topology::bootstrap_fresh_xmpp_topology;
 use crate::server::trace::make_request_span;
 use crate::server::{AppState, XmppConfig};
 use anyhow::Result;
-use axum::{Router, routing::get};
+use axum::{routing::get, Router};
 use rustls_acme::tower::TowerHttp01ChallengeService;
 use std::sync::Arc;
 use tower_http::{
     compression::CompressionLayer,
     trace::{DefaultOnResponse, TraceLayer},
 };
-use tracing::{Level, info, warn};
+use tracing::{info, warn, Level};
 use waddle_xmpp::mam::{MamStorage, SqlxMamStorage};
 use waddle_xmpp::{muc::room_registry_actor::RoomRegistryActor, registry::ConnectionRegistry};
 

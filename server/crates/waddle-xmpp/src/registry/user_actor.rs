@@ -7,12 +7,12 @@
 use std::collections::{HashMap, HashSet};
 
 use jid::{BareJid, FullJid};
-use kameo::Actor;
 use kameo::message::Context;
+use kameo::Actor;
 use tracing::debug;
 
-use crate::Stanza;
 use crate::registry::connection_registry::PresenceState;
+use crate::Stanza;
 
 /// Actor that manages per-user connection state.
 ///

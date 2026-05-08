@@ -45,7 +45,7 @@ pub(super) fn extension_features_for_disco(state: &WebSocketState) -> Vec<Featur
     extension_namespaces_for_disco(state.deps.protocol.extension_manager.extension_features())
 }
 
-fn extension_namespaces_for_disco(namespaces: Vec<String>) -> Vec<Feature> {
+pub(super) fn extension_namespaces_for_disco(namespaces: Vec<String>) -> Vec<Feature> {
     namespaces.into_iter().map(|ns| Feature::new(&ns)).collect()
 }
 

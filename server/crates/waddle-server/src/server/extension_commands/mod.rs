@@ -5,11 +5,11 @@ use crate::server::AppState;
 use forms::{
     extension_command_action, extension_command_fields, extension_data_form, extension_session_id,
 };
-use pubsub::{ExtensionPubSubContext, extension_command_result};
+use pubsub::{extension_command_result, ExtensionPubSubContext};
 use std::sync::Arc;
 use waddle_extensions::{
-    ExtensionConfig, ExtensionManager, FullJidValue, INVOKE_COMMAND_NODE, LaunchContext, LaunchId,
-    RoomJid as ExtensionRoomJid, StanzaId, WaddleId, host_tools as ext_host,
+    host_tools as ext_host, ExtensionConfig, ExtensionManager, FullJidValue, LaunchContext,
+    LaunchId, RoomJid as ExtensionRoomJid, StanzaId, WaddleId, INVOKE_COMMAND_NODE,
 };
 use waddle_xmpp::pubsub::PubSubStorage;
 

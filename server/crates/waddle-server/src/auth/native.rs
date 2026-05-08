@@ -12,8 +12,8 @@
 //! - Each user has a unique random salt
 
 use argon2::{
+    password_hash::{rand_core::OsRng, PasswordHasher, SaltString},
     Argon2,
-    password_hash::{PasswordHasher, SaltString, rand_core::OsRng},
 };
 use base64::prelude::*;
 use kameo::actor::ActorRef;
@@ -21,7 +21,7 @@ use tracing::debug;
 use waddle_xmpp::ScramCredentials;
 
 use crate::db::actor::{DbActor, DbExecute, DbQuery, DbQueryOne};
-use crate::db::{ValueExt, row_value};
+use crate::db::{row_value, ValueExt};
 
 use super::AuthError;
 
