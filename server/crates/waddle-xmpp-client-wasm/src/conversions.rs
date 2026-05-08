@@ -103,6 +103,38 @@ pub(crate) fn inbound_to_js(message: InboundMessage) -> WaddleMessage {
             .into_iter()
             .map(shared_file_to_js)
             .collect(),
+        pin_event: message.pin_event.map(pin_event_to_js),
+    }
+}
+
+pub(crate) fn pin_event_to_js(event: PinEvent) -> WaddlePinEvent {
+    WaddlePinEvent {
+        action: match event.action {
+            PinEventAction::Pinned => "pinned".to_string(),
+            PinEventAction::Unpinned => "unpinned".to_string(),
+        },
+        target_stanza_id: event.target_stanza_id,
+        by: event.by,
+        reason: event.reason,
+        preview: event.preview.map(pin_preview_to_js),
+    }
+}
+
+pub(crate) fn pin_preview_to_js(preview: PinPreview) -> WaddlePinPreview {
+    WaddlePinPreview {
+        author_jid: preview.author_jid,
+        author_nick: preview.author_nick,
+        text: preview.text,
+        message_timestamp: preview.message_timestamp.to_rfc3339(),
+    }
+}
+
+pub(crate) fn pin_entry_to_js(entry: PinEntry) -> WaddlePinEntry {
+    WaddlePinEntry {
+        target_stanza_id: entry.target_stanza_id,
+        pinner_jid: entry.pinner_jid,
+        pinned_at: entry.pinned_at.to_rfc3339(),
+        preview: pin_preview_to_js(entry.preview),
     }
 }
 

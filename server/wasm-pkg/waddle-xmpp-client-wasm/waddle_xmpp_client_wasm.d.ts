@@ -17,6 +17,14 @@ export class WaddleClient {
     fetch_room_history(room_jid: string, max: number, before_id?: string | null): Promise<any>;
     fetch_room_history_by_thread(room_jid: string, thread_id: string, max: number, before_id?: string | null): Promise<any>;
     fetch_room_history_page(room_jid: string, max: number, page_param: any): Promise<any>;
+    /**
+     * Fetch the current pinned-messages list for a MUC room (#414).
+     * Resolves to a JS array of `WaddlePinEntry`. Empty array if the
+     * room has no pins. Server gates on room occupancy: a non-occupant
+     * caller will get a `<forbidden type='auth'/>` error which surfaces
+     * here as a rejected Promise.
+     */
+    fetch_room_pins(room_jid: string): Promise<any>;
     fetch_user_pep_profile(jid: string): Promise<any>;
     get_server_version(): Promise<any>;
     join_room(room_jid: string, nick: string): Promise<any>;
@@ -26,6 +34,14 @@ export class WaddleClient {
     list_roster_contacts(): Promise<any>;
     mark_inbox_read(partner_jid: string, thread_id?: string | null): Promise<any>;
     constructor(config: WaddleConfig);
+    /**
+     * Publish a pin request (#414). `room_jid` is the bare MUC JID;
+     * `target_stanza_id` is the XEP-0359 `by=room` stanza-id of the
+     * message to pin. Server gates on Owner/Admin affiliation; a
+     * non-admin sender will receive a `<forbidden type='auth'/>`
+     * reply via the inbound message stream.
+     */
+    pin_message(room_jid: string, target_stanza_id: string): Promise<any>;
     publish_activity(activity_json: any): Promise<any>;
     publish_mood(mood_json: any): Promise<any>;
     publish_tune(tune_json: any): Promise<any>;
@@ -57,6 +73,11 @@ export class WaddleClient {
     set_on_session_lifecycle(cb: Function): void;
     set_room_affiliation(room_jid: string, jid: string, affiliation: string): Promise<any>;
     subscribe_to_presence(peer_jid: string): Promise<any>;
+    /**
+     * Publish an unpin request (#414). Same authorization rules as
+     * [`Self::pin_message`].
+     */
+    unpin_message(room_jid: string, target_stanza_id: string): Promise<any>;
 }
 
 export class WaddleConfig {

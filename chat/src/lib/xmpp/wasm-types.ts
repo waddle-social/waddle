@@ -76,6 +76,36 @@ export interface WasmMessage {
   forum_thread_title?: string;
   is_sticker: boolean;
   shared_files: WasmSharedFile[];
+  /** urn:waddle:pin:0 pin/unpin event surfaced by the room (#414). */
+  pin_event?: WasmPinEvent;
+}
+
+/** Pin/unpin event from a room system message (#414). */
+export interface WasmPinEvent {
+  action: "pinned" | "unpinned";
+  target_stanza_id: string;
+  by: string;
+  /** "retracted" when the unpin was triggered by an XEP-0424 cascade. */
+  reason?: string;
+  preview?: WasmPinPreview;
+}
+
+/** Frozen preview snapshot of a pinned message (#414). */
+export interface WasmPinPreview {
+  author_jid: string;
+  author_nick?: string;
+  text: string;
+  /** rfc3339. */
+  message_timestamp: string;
+}
+
+/** One pinned-message entry returned by `fetchRoomPins` (#414). */
+export interface WasmPinEntry {
+  target_stanza_id: string;
+  pinner_jid: string;
+  /** rfc3339. */
+  pinned_at: string;
+  preview: WasmPinPreview;
 }
 
 export interface WasmPresenceHat {

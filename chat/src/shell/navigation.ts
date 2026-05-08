@@ -8,6 +8,8 @@ interface RouteState {
   extensionRouteId: string | null;
   /** XEP-0201 thread stack from `?thread=rootId,childId,...`. Empty = panel closed. */
   threadStack: string[];
+  /** #414: pinned-messages right-rail panel (`?pinned=1`). */
+  pinnedPanelOpen: boolean;
 }
 
 const SETTINGS_PATH = "/settings";
@@ -34,10 +36,20 @@ function parseThreadStack(search: string | null | undefined): string[] {
     .filter((s) => s.length > 0);
 }
 
-function buildSearch(threadStack: string[] | undefined): string {
-  if (!threadStack || threadStack.length === 0) return "";
-  const encoded = threadStack.map((id) => encodeURIComponent(id)).join(",");
-  return `?thread=${encoded}`;
+function parsePinnedFlag(search: string | null | undefined): boolean {
+  if (!search) return false;
+  const query = search.startsWith("?") ? search.slice(1) : search;
+  return /(?:^|&)pinned=1(?:&|$)/.test(query);
+}
+
+function buildSearch(threadStack: string[] | undefined, pinnedPanelOpen?: boolean): string {
+  const parts: string[] = [];
+  if (threadStack && threadStack.length > 0) {
+    const encoded = threadStack.map((id) => encodeURIComponent(id)).join(",");
+    parts.push(`thread=${encoded}`);
+  }
+  if (pinnedPanelOpen) parts.push("pinned=1");
+  return parts.length > 0 ? `?${parts.join("&")}` : "";
 }
 
 // Parses canonical Waddle app routes.
@@ -45,6 +57,7 @@ export function parseChatLocation(pathname: string, search?: string): RouteState
   const segments = pathname.split("/").filter(Boolean);
   const resolvedSearch = search ?? (typeof window !== "undefined" ? window.location.search : "");
   const threadStack = parseThreadStack(resolvedSearch);
+  const pinnedPanelOpen = parsePinnedFlag(resolvedSearch);
   if (pathname === "/" || segments.length === 0) {
     return {
       page: "dashboard",
@@ -53,6 +66,7 @@ export function parseChatLocation(pathname: string, search?: string): RouteState
       extensionPluginId: null,
       extensionRouteId: null,
       threadStack: [],
+      pinnedPanelOpen: false,
     };
   }
   if (pathname === SETTINGS_PATH) {
@@ -63,6 +77,7 @@ export function parseChatLocation(pathname: string, search?: string): RouteState
       extensionPluginId: null,
       extensionRouteId: null,
       threadStack: [],
+      pinnedPanelOpen: false,
     };
   }
   if (segments[0] === "r") {
@@ -74,6 +89,7 @@ export function parseChatLocation(pathname: string, search?: string): RouteState
         extensionPluginId: decodeURIComponent(segments[3]),
         extensionRouteId: decodeURIComponent(segments[4]),
         threadStack: [],
+        pinnedPanelOpen: false,
       };
     }
     return {
@@ -83,6 +99,7 @@ export function parseChatLocation(pathname: string, search?: string): RouteState
       extensionPluginId: null,
       extensionRouteId: null,
       threadStack,
+      pinnedPanelOpen,
     };
   }
   if (segments[0] === "dm") {
@@ -93,6 +110,7 @@ export function parseChatLocation(pathname: string, search?: string): RouteState
       extensionPluginId: null,
       extensionRouteId: null,
       threadStack,
+      pinnedPanelOpen: false,
     };
   }
   return {
@@ -102,6 +120,7 @@ export function parseChatLocation(pathname: string, search?: string): RouteState
     extensionPluginId: null,
     extensionRouteId: null,
     threadStack: [],
+    pinnedPanelOpen: false,
   };
 }
 
@@ -119,8 +138,9 @@ export function shouldLoadWaddleStructureForRoute(
 export function buildChannelPath(
   channel: ChannelSummary | null,
   threadStack?: string[],
+  pinnedPanelOpen?: boolean,
 ): string {
-  const search = buildSearch(threadStack);
+  const search = buildSearch(threadStack, pinnedPanelOpen);
   return channel ? `/r/${encodeURIComponent(channel.id)}${search}` : "/";
 }
 
@@ -145,8 +165,9 @@ export function buildChatSettingsPath(): string {
 export function pushChannelRoute(
   channel: ChannelSummary | null,
   threadStack?: string[],
+  pinnedPanelOpen?: boolean,
 ) {
-  const path = buildChannelPath(channel, threadStack);
+  const path = buildChannelPath(channel, threadStack, pinnedPanelOpen);
   const current = window.location.pathname + window.location.search;
   if (current !== path) {
     window.history.pushState({ waddlePage: "chat" }, "", path);

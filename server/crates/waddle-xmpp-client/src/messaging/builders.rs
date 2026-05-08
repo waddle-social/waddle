@@ -61,6 +61,36 @@ pub fn build_reaction_message(
         .build()
 }
 
+/// Build a `<message><pinned target='…'/></message>` request for #414.
+/// `to` is the room bare JID; `target_stanza_id` is the XEP-0359
+/// stanza-id (`by=room`) of the message being pinned.
+pub fn build_pinned_message(to: &str, target_stanza_id: &str) -> Element {
+    Element::builder("message", NS_CLIENT)
+        .attr("to", to)
+        .attr("type", "groupchat")
+        .attr("id", Uuid::new_v4().to_string())
+        .append(
+            Element::builder("pinned", NS_WADDLE_PIN_V0)
+                .attr("target", target_stanza_id)
+                .build(),
+        )
+        .build()
+}
+
+/// Build a `<message><unpinned target='…'/></message>` request for #414.
+pub fn build_unpinned_message(to: &str, target_stanza_id: &str) -> Element {
+    Element::builder("message", NS_CLIENT)
+        .attr("to", to)
+        .attr("type", "groupchat")
+        .attr("id", Uuid::new_v4().to_string())
+        .append(
+            Element::builder("unpinned", NS_WADDLE_PIN_V0)
+                .attr("target", target_stanza_id)
+                .build(),
+        )
+        .build()
+}
+
 pub fn build_retraction_message(to: &str, message_type: &str, retracts_id: &str) -> Element {
     Element::builder("message", NS_CLIENT)
         .attr("to", to)

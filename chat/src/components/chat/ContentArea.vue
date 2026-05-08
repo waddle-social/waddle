@@ -1,9 +1,12 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, ref, watch, type ComponentPublicInstance } from "vue";
+import { useStore } from "@nanostores/vue";
 import { AlertCircle, CheckCircle2, Hash, MessageCircle, MessagesSquare, RefreshCw, Search, Upload, WifiOff, X } from "lucide-vue-next";
+import { $pinnedStanzaIds } from "@/stores/pinned-messages";
 import { isForumChannel as detectForumChannel } from "@/lib/channel-types";
 import { getConnectionNoticeCopy } from "@/lib/connection-notice";
 import { findMessageElementById } from "@/lib/message-targeting";
+import { findMessageById } from "@/lib/message-ids";
 import { getReplyJumpNotice } from "@/lib/reply-ux";
 import { findThreadToAutoOpen } from "@/lib/thread-auto-open";
 import {
@@ -32,6 +35,7 @@ import VirtualTimeline from "@/components/chat/VirtualTimeline.vue";
 
 const draft = defineModel<string>("draft", { required: true });
 const forumTitle = defineModel<string>("forumTitle", { default: "" });
+const pinnedPanelOpen = defineModel<boolean>("pinnedPanelOpen", { default: false });
 
 const props = defineProps<{
   waddle: SpaceSummary | null;
@@ -97,6 +101,8 @@ const emit = defineEmits<{
   refreshUpdate: [];
   loadOlder: [];
   retryLoad: [];
+  pinMessage: [messageId: string];
+  unpinMessage: [messageId: string];
 }>();
 
 // Hide thread members from the main feed — they live inside the thread panel.
@@ -196,10 +202,16 @@ async function scrollToMessage(messageId: string) {
     showReplyJumpNotice(getReplyJumpNotice(false));
     return;
   }
-  if (await virtualTimelineRef.value?.scrollToMessageId(messageId, "center")) {
+  // VirtualTimeline + the data-message-id index match items by their
+  // primary `id` only. Pinned-panel "jump to message" passes a
+  // XEP-0359 stanza-id, which on the timeline lives in `wireIds[]`,
+  // not `id`. Resolve the candidate to the primary id first so both
+  // paths work (#414).
+  const resolvedId = findMessageById(props.messages, messageId)?.id ?? messageId;
+  if (await virtualTimelineRef.value?.scrollToMessageId(resolvedId, "center")) {
     await nextTick();
   }
-  const el = findMessageElementById(messagesContainer.value, messageId);
+  const el = findMessageElementById(messagesContainer.value, resolvedId);
   const notice = getReplyJumpNotice(el instanceof HTMLElement);
   if (!notice && el instanceof HTMLElement) {
     clearReplyJumpNotice();
@@ -305,6 +317,31 @@ const searchInput = ref("");
 const searchSubmitted = ref(false);
 const avatarUrlByAuthor = computed(() => props.avatarUrlByAuthor ?? {});
 const isForumChannel = computed(() => detectForumChannel(props.channel));
+
+// #414: pin state for the current room. Hydrated by the controller.
+// Reads from the derived `$pinnedStanzaIds` map (roomJid → Set<stanzaId>)
+// matching the #414 PRD contract for a presence-check store.
+const pinnedStanzaIdsByRoom = useStore($pinnedStanzaIds);
+const pinnedStanzaIdsForRoom = computed(() => {
+  if (!props.roomJid) return null;
+  return pinnedStanzaIdsByRoom.value.get(props.roomJid) ?? null;
+});
+function isPinnedMessage(msg: TimelineMessage): boolean {
+  const set = pinnedStanzaIdsForRoom.value;
+  if (!set) return false;
+  if (msg.id && set.has(msg.id)) return true;
+  // Also match wireIds (XEP-0359 stanza-id mirrors).
+  const wireIds = (msg as TimelineMessage & { wireIds?: string[] }).wireIds;
+  return Boolean(wireIds?.some((wid) => set.has(wid)));
+}
+// Owner/Admin gate: any of the current user's hats indicates admin/owner
+// affiliation. The room sets these via the existing hats system.
+const currentUserCanPin = computed(() => {
+  const me = props.currentUser;
+  if (!me) return false;
+  const myHats = props.roomHats[me] ?? [];
+  return myHats.some((hat) => hat.uri === "urn:xmpp:hats:owner" || hat.uri === "urn:xmpp:hats:admin");
+});
 const canShowComposer = computed(() => !!(props.channel || props.dmPeer));
 const queuedMessageCount = computed(() =>
   props.messages.filter((message) =>
@@ -460,7 +497,7 @@ async function scrollToPinnedEdge(mode: ScrollDirectionMode) {
   return true;
 }
 
-defineExpose({ messagesContainer, scrollToPinnedEdge });
+defineExpose({ messagesContainer, scrollToPinnedEdge, scrollToMessage });
 
 function doSearch() {
   searchSubmitted.value = !!searchInput.value.trim();
@@ -662,6 +699,7 @@ function dayDividerLabel(createdAt: string): string {
 
     <ChatHeader
       v-model:show-search="showSearch"
+      v-model:show-pinned-panel="pinnedPanelOpen"
       :waddle="waddle"
       :channel="channel"
       :dm-peer="dmPeer"
@@ -1006,6 +1044,8 @@ function dayDividerLabel(createdAt: string): string {
             :grouped="isGroupedFollowUp(msg.id)"
             :reaction-mode-selected="reactionMode?.selectedMessageId === msg.id"
             :invoke-extension-action="props.invokeExtensionAction"
+            :is-pinned="isPinnedMessage(msg)"
+            :can-pin-messages="currentUserCanPin"
             @edit="(id, body, m, r) => emit('editMessage', id, body, m, r)"
             @retract="(id) => emit('retractMessage', id)"
             @react="(id, emoji) => emit('reactMessage', id, emoji)"
@@ -1013,6 +1053,8 @@ function dayDividerLabel(createdAt: string): string {
             @scroll-to-message="scrollToMessage"
             @avatar-click="onAvatarClick"
             @open-thread="(tid: string) => emit('openThread', tid)"
+            @pin="(id: string) => emit('pinMessage', id)"
+            @unpin="(id: string) => emit('unpinMessage', id)"
           />
           <div
             v-if="showDividerAfter(msg.id)"

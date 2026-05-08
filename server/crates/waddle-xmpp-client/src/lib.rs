@@ -13,6 +13,7 @@ pub mod event;
 pub mod mam;
 pub mod messaging;
 pub mod pep;
+pub mod pin;
 pub mod request;
 pub mod runtime;
 pub mod state;

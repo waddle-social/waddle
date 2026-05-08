@@ -15,6 +15,8 @@ import {
   CheckCircle2,
   LayoutDashboard,
   LoaderCircle,
+  Pin,
+  PinOff,
 } from "lucide-vue-next";
 import type { JSONContent } from "@tiptap/core";
 import AppAvatar from "@/components/ui/AppAvatar.vue";
@@ -85,6 +87,11 @@ const props = defineProps<{
   grouped?: boolean;
   reactionModeSelected?: boolean;
   invokeExtensionAction?: (action: ExtensionAnnotationAction) => Promise<ExtensionCommandResult>;
+  /** #414: this message is pinned in its host room. */
+  isPinned?: boolean;
+  /** #414: current user is room Owner or Admin (controls pin/unpin
+   * action-sheet entry visibility). */
+  canPinMessages?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -95,6 +102,8 @@ const emit = defineEmits<{
   scrollToMessage: [messageId: string];
   avatarClick: [author: string];
   openThread: [threadId: string];
+  pin: [messageId: string];
+  unpin: [messageId: string];
 }>();
 
 const quickEmojis = QUICK_REACTION_EMOJIS;
@@ -209,6 +218,16 @@ const showThreadChip = computed(
 
 function openThreadFromChip() {
   emit("openThread", props.message.id);
+}
+
+function togglePinFromMenu() {
+  if (!props.message.id) return;
+  if (props.isPinned) {
+    emit("unpin", props.message.id);
+  } else {
+    emit("pin", props.message.id);
+  }
+  closeSheet();
 }
 
 function startReplyInThreadFromMenu() {
@@ -447,9 +466,30 @@ watch(
 </script>
 
 <template>
+  <!-- #414: pin-event system message rendered distinctly from user
+       posts (no avatar, italic, muted) so the channel timeline
+       reads as "alice pinned a message" without looking like a chat
+       reply. -->
+  <div
+    v-if="message.isPinEvent"
+    :data-message-id="message.id"
+    :data-message-created-at="message.createdAt"
+    class="chat-message-grid animate-message-in"
+  >
+    <div class="chat-message-avatar-cell flex items-center justify-center text-muted-foreground/60">
+      <component :is="message.pinEventAction === 'unpinned' ? PinOff : Pin" class="w-4 h-4" aria-hidden="true" />
+    </div>
+    <div class="chat-message-body-stack">
+      <p class="type-field-sm italic text-muted-foreground">
+        {{ message.body }}
+        <span class="type-meta type-numeric ml-2">{{ formatTimelineTimeOfDay(message.createdAt) }}</span>
+      </p>
+    </div>
+  </div>
+
   <!-- Retracted tombstone -->
   <div
-    v-if="message.isRetracted"
+    v-else-if="message.isRetracted"
     :data-message-id="message.id"
     :data-message-created-at="message.createdAt"
     class="chat-message-grid opacity-35 animate-message-in"
@@ -529,6 +569,14 @@ watch(
         >{{ HAT_LABELS[seniorHat.uri] ?? seniorHat.title }}</span>
         <span class="type-meta type-numeric text-muted-foreground/60">
           {{ formatTimelineTimeOfDay(message.createdAt) }}
+        </span>
+        <span
+          v-if="isPinned"
+          class="inline-flex items-center text-muted-foreground/70"
+          title="Pinned in this channel"
+          aria-label="Pinned in this channel"
+        >
+          <Pin class="w-3 h-3" aria-hidden="true" />
         </span>
         <span v-if="message.isEdited" class="type-meta text-muted-foreground/50">(edited)</span>
         <span
@@ -1061,6 +1109,16 @@ watch(
       >
         <MessageSquare class="w-4 h-4" aria-hidden="true" />
       </button>
+      <button
+        v-if="canPinMessages && message.id"
+        type="button"
+        class="h-8 w-8 flex items-center justify-center rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-all duration-150"
+        :title="isPinned ? 'Unpin from channel' : 'Pin to channel'"
+        :aria-label="isPinned ? 'Unpin from channel' : 'Pin to channel'"
+        @click="togglePinFromMenu"
+      >
+        <component :is="isPinned ? PinOff : Pin" class="w-4 h-4" aria-hidden="true" />
+      </button>
       <template v-if="message.isSelf">
         <div class="w-px h-5 bg-border mx-0.5" />
         <button
@@ -1158,6 +1216,15 @@ watch(
           >
             <MessageSquare class="w-5 h-5 text-muted-foreground" aria-hidden="true" />
             <span>{{ (threadReplyCount ?? 0) > 0 ? "Open thread" : "Reply in thread" }}</span>
+          </button>
+          <button
+            v-if="canPinMessages && message.id"
+            type="button"
+            class="type-field w-full flex items-center gap-3 px-3 h-12 rounded-lg hover:bg-muted active:bg-muted transition-colors text-left"
+            @click="togglePinFromMenu"
+          >
+            <component :is="isPinned ? PinOff : Pin" class="w-5 h-5 text-muted-foreground" aria-hidden="true" />
+            <span>{{ isPinned ? "Unpin from channel" : "Pin to channel" }}</span>
           </button>
           <template v-if="message.isSelf">
             <button

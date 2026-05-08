@@ -44,6 +44,51 @@ pub struct WaddleMessage {
     pub forum_thread_title: Option<String>,
     pub is_sticker: bool,
     pub shared_files: Vec<WaddleSharedFile>,
+    /// urn:waddle:pin:0 pin/unpin event surfaced from a system message
+    /// (#414). `None` when the message carries no `<pin-event/>`.
+    pub pin_event: Option<WaddlePinEvent>,
+}
+
+/// Pin/unpin event surfaced from an inbound system message (#414).
+#[derive(Debug, Serialize)]
+pub struct WaddlePinEvent {
+    /// `pinned` or `unpinned`.
+    pub action: String,
+    /// XEP-0359 stanza-id of the targeted message.
+    pub target_stanza_id: String,
+    /// Bare JID of the user who applied the change.
+    pub by: String,
+    /// `Some("retracted")` when the unpin was triggered by an XEP-0424
+    /// retraction cascade.
+    pub reason: Option<String>,
+    /// Frozen preview, present only on `pinned` events.
+    pub preview: Option<WaddlePinPreview>,
+}
+
+/// One pinned-message entry returned by `fetch_room_pins` (#414).
+#[derive(Debug, Serialize)]
+pub struct WaddlePinEntry {
+    /// XEP-0359 stanza-id of the pinned message.
+    pub target_stanza_id: String,
+    /// Bare JID of the user who pinned the message.
+    pub pinner_jid: String,
+    /// When the pin was applied (rfc3339).
+    pub pinned_at: String,
+    /// Frozen preview snapshot.
+    pub preview: WaddlePinPreview,
+}
+
+/// Frozen preview of a pinned message (#414).
+#[derive(Debug, Serialize)]
+pub struct WaddlePinPreview {
+    /// Bare JID of the message author at pin time.
+    pub author_jid: String,
+    /// Author's MUC nick at pin time, if known.
+    pub author_nick: Option<String>,
+    /// Truncated body text (≤280 chars).
+    pub text: String,
+    /// Original message timestamp (rfc3339).
+    pub message_timestamp: String,
 }
 
 #[derive(Debug, Serialize)]

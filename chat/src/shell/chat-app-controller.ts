@@ -18,6 +18,7 @@ import { barePeerJid, jidDomain, parseManagedRoomBareJid } from "@/lib/xmpp-clie
 import { roomJidForChannelId as resolveRoomJidForChannelId } from "@/lib/channel-room";
 import { mergeRoomHats, roomHatsFromMembers } from "@/lib/xmpp/occupant-badges";
 import { connectionStore } from "@/lib/connection-store";
+import { resetPinnedRooms } from "@/stores/pinned-messages";
 import { orderTimelineForScrollDirection, type ScrollDirectionMode } from "@/lib/scroll-direction";
 import { useScrollDirectionPreference } from "@/preferences/scroll-direction";
 import type { MemberSummary } from "@/lib/chat-types";
@@ -85,6 +86,7 @@ export function useChatAppController(giphyApiKey: string) {
   type ContentAreaHandle = ComponentPublicInstance & {
     messagesContainer: HTMLDivElement | null;
     scrollToPinnedEdge: (mode: ScrollDirectionMode) => Promise<boolean>;
+    scrollToMessage: (messageId: string) => Promise<void>;
   };
   const contentAreaRef = ref<ContentAreaHandle | null>(null);
   const setContentAreaRef = (
@@ -630,7 +632,11 @@ export function useChatAppController(giphyApiKey: string) {
         )
       : ui.sidebarMode.value === "dms" && activeDmPeer.value
       ? buildDirectMessagePath(activeDmPeer.value.peerUsername)
-      : buildChannelPath(waddles.currentChannel.value, activeThreadStack.value),
+      : buildChannelPath(
+          waddles.currentChannel.value,
+          activeThreadStack.value,
+          ui.showPinnedPanel.value,
+        ),
   );
 
   async function setupPushSubscription() {
@@ -828,6 +834,62 @@ export function useChatAppController(giphyApiKey: string) {
     void activeTarget.value.toggleReaction(messageId, emoji);
   }
 
+  /** #414: pin or unpin the targeted message in the active channel. The
+   * server gates on Owner/Admin affiliation; the action sheet entry is
+   * also visibility-gated client-side, so non-admins shouldn't reach
+   * this — but the server is authoritative. */
+  function pinActiveMessage(messageId: string) {
+    const client = xmppClient.value;
+    const channel = waddles.currentChannel.value;
+    const space = waddles.currentSpace.value;
+    if (!client || !channel || !space) return;
+    const stanzaId = resolvePinTargetStanzaId(messageId);
+    if (!stanzaId) return;
+    void client.pinMessage(space.id, channel.id, stanzaId).catch((error: unknown) => {
+      console.warn("pinMessage failed", error);
+    });
+  }
+
+  function unpinActiveMessage(messageId: string) {
+    const client = xmppClient.value;
+    const channel = waddles.currentChannel.value;
+    const space = waddles.currentSpace.value;
+    if (!client || !channel || !space) return;
+    const stanzaId = resolvePinTargetStanzaId(messageId);
+    if (!stanzaId) return;
+    void client.unpinMessage(space.id, channel.id, stanzaId).catch((error: unknown) => {
+      console.warn("unpinMessage failed", error);
+    });
+  }
+
+  /** #414: jump to a pinned message from the panel — load it into the
+   * timeline if needed, then scroll/center. Stanza-id is the room
+   * archive id; message-id used in the timeline matches via wireIds /
+   * reactionTargetId. The chat client's existing
+   * `scrollToMessage(messageId)` accepts the wire id; we route the
+   * stanza-id directly since `ensureMessageLoaded` resolves both. */
+  async function jumpToPinnedMessage(stanzaId: string) {
+    await ensureActiveMessageLoaded(stanzaId);
+    await contentAreaRef.value?.scrollToMessage(stanzaId);
+  }
+
+  /** Map a chat-side message id to the room's XEP-0359 stanza-id. The
+   * pin server expects the stable archive id stamped by-room, not the
+   * wire `id` attribute or the client-assigned origin-id. Timeline
+   * rows expose this as `reactionTargetId` (room messages) /
+   * `replyableId` (DMs use this for reply-to); both pull from
+   * `message.stanza_id` upstream. Returns null when no archive id is
+   * known yet (e.g., a queued send hasn't been reflected). */
+  function resolvePinTargetStanzaId(messageId: string): string | null {
+    const message = messaging.messages.value.find((m) => m.id === messageId);
+    if (!message) return null;
+    const m = message as TimelineMessage & {
+      reactionTargetId?: string;
+      replyableId?: string;
+    };
+    return m.reactionTargetId ?? m.replyableId ?? null;
+  }
+
   function markActiveDisplayed(messageId: string) {
     activeTarget.value.markDisplayed(messageId);
   }
@@ -929,7 +991,11 @@ export function useChatAppController(giphyApiKey: string) {
     if (ui.sidebarMode.value === "dms" && activeDmPeer.value) {
       pushDirectMessageRoute(activeDmPeer.value.peerUsername);
     } else {
-      pushChannelRoute(waddles.currentChannel.value, activeThreadStack.value);
+      pushChannelRoute(
+        waddles.currentChannel.value,
+        activeThreadStack.value,
+        ui.showPinnedPanel.value,
+      );
     }
   }
 
@@ -940,6 +1006,8 @@ export function useChatAppController(giphyApiKey: string) {
       // the stack belong to the channel we just left.
       activeThreadTargetMessageId.value = null;
       activeThreadStack.value = [];
+      // #414: pin panel state is per-room — clear on channel switch.
+      ui.showPinnedPanel.value = false;
       exitReactionMode();
       updateUrl();
     },
@@ -949,6 +1017,10 @@ export function useChatAppController(giphyApiKey: string) {
     exitReactionMode();
     updateUrl();
   }, { deep: true });
+  // #414: any toggle of the pin panel pushes the URL state.
+  watch(() => ui.showPinnedPanel.value, () => {
+    updateUrl();
+  });
   watch(() => ui.activePage.value, () => {
     exitReactionMode();
     updateUrl();
@@ -1039,6 +1111,9 @@ export function useChatAppController(giphyApiKey: string) {
 
   async function applyRouteTarget(route: ReturnType<typeof parseChatLocation>, requestId: number) {
     ui.activePage.value = route.page;
+    // #414: sync the pin panel toggle with `?pinned=1`. Channel-only;
+    // dashboard/settings/extension/DM routes leave it false.
+    ui.showPinnedPanel.value = route.pinnedPanelOpen && route.page === "chat" && !route.dmUsername;
     if (route.page === "settings") {
       activeThreadTargetMessageId.value = null;
       activeThreadStack.value = [];
@@ -1171,6 +1246,11 @@ export function useChatAppController(giphyApiKey: string) {
     setupPromptShown = false;
     messaging.clearMessages();
     dmMessaging.clearMessages();
+    // #414: drop all pin state on logout so a subsequent login doesn't
+    // see the prior user's pinned-message previews and pre-hydration
+    // events buffered from the prior session don't leak forward.
+    resetPinnedRooms();
+    ui.showPinnedPanel.value = false;
     pushChannelRoute(null);
     await connectionStore.logout();
   }
@@ -1440,6 +1520,9 @@ export function useChatAppController(giphyApiKey: string) {
       editActiveMessage,
       retractActiveMessage,
       reactActiveMessage,
+      pinActiveMessage,
+      unpinActiveMessage,
+      jumpToPinnedMessage,
       markActiveDisplayed,
       invokeActiveExtensionAction,
       invokeExtensionRouteAction,

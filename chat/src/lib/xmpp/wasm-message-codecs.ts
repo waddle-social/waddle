@@ -203,6 +203,20 @@ export function roomMessageFromArchived(message: WasmArchivedMessage): LiveRoomM
       ...(message.author_real_jid ? { _reactionSenderId: message.author_real_jid } : {}),
     };
   }
+  // #414: pin-event system messages from the room bare JID render
+  // distinctly so users see "alice pinned a message" inline without
+  // it looking like a normal user post.
+  if (message.pin_event) {
+    return {
+      id: message.id ?? message.stanza_id ?? message.mam_id,
+      roomJid,
+      nick: "",
+      body: message.body ?? "",
+      createdAt,
+      type: "pin-event",
+      pinEventAction: message.pin_event.action,
+    };
+  }
   const sharedFiles = message.shared_files ?? [];
   const mentionUris = message.mention_uris ?? [];
   const markupSpans = message.markup_spans ?? [];

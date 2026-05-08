@@ -180,6 +180,11 @@ export interface TimelineMessage {
   forumPostKind?: "topic" | "reply";
   forumTitle?: string;
   forumThreadTitle?: string;
+  /** #414: room-authored `<pin-event/>` system message; the timeline
+   * renders these distinctly (no avatar, italic). `pinEventAction`
+   * carries the action when set. */
+  isPinEvent?: boolean;
+  pinEventAction?: "pinned" | "unpinned";
 }
 
 export interface CommunityFormData {

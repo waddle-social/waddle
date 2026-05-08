@@ -36,6 +36,25 @@ impl WaddleClient {
         })
     }
 
+    /// Fetch the current pinned-messages list for a MUC room (#414).
+    /// Resolves to a JS array of `WaddlePinEntry`. Empty array if the
+    /// room has no pins. Server gates on room occupancy: a non-occupant
+    /// caller will get a `<forbidden type='auth'/>` error which surfaces
+    /// here as a rejected Promise.
+    pub fn fetch_room_pins(&self, room_jid: String) -> Promise {
+        let inner = self.inner.clone();
+        future_to_promise(async move {
+            let iq = build_pin_list_iq(&room_jid);
+            let result = send_iq_command(inner, iq).await?;
+            let entries = parse_pin_list_response(&result);
+            let js_entries: Vec<WaddlePinEntry> = entries
+                .into_iter()
+                .map(crate::conversions::pin_entry_to_js)
+                .collect();
+            serde_wasm_bindgen::to_value(&js_entries).map_err(|err| js_error(err.to_string()))
+        })
+    }
+
     pub fn leave_room(&self, room_jid: String, nick: String) -> Promise {
         let inner = self.inner.clone();
         future_to_promise(async move {

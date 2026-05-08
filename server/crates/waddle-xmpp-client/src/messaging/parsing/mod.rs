@@ -79,6 +79,8 @@ fn parse_message(el: &Element) -> InboundMessage {
     let reaction_target_id = reaction.as_ref().map(|payload| payload.target_id.clone());
     let reaction_emojis = reaction.map(|payload| payload.emojis).unwrap_or_default();
 
+    let pin_event = crate::pin::extract_pin_event_from_message(el);
+
     let reply_marker = xep_reply::parse_reply(el);
     let reply_to_id = reply_marker.as_ref().map(|m| m.id.clone());
     let reply_to_sender = reply_marker.as_ref().map(|m| m.to.to_string());
@@ -293,5 +295,6 @@ fn parse_message(el: &Element) -> InboundMessage {
         thread_id,
         parent_thread_id,
         is_sticker,
+        pin_event,
     }
 }

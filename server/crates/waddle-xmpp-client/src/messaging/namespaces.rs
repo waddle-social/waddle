@@ -23,3 +23,4 @@ pub(crate) const NS_MUC: &str = "http://jabber.org/protocol/muc";
 pub(crate) const NS_MUC_USER: &str = "http://jabber.org/protocol/muc#user";
 pub(crate) const NS_STICKERS: &str = "urn:xmpp:stickers:0";
 pub(crate) const NS_VCARD_UPDATE: &str = "vcard-temp:x:update";
+pub const NS_WADDLE_PIN_V0: &str = "urn:waddle:pin:0";

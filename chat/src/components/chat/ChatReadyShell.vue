@@ -7,6 +7,7 @@ import DmPanel from "@/components/chat/DmPanel.vue";
 import ExtensionRouteView from "@/components/chat/ExtensionRouteView.vue";
 import ThreadPanel from "@/components/chat/ThreadPanel.vue";
 import TopicsPanel from "@/components/chat/TopicsPanel.vue";
+import PinnedPanel from "@/components/chat/PinnedPanel.vue";
 import UserSettingsPage from "@/components/chat/UserSettingsPage.vue";
 import WaddlesSidebar from "@/components/chat/WaddlesSidebar.vue";
 import type { ChatAppController } from "@/shell/chat-app-controller";
@@ -97,6 +98,9 @@ const {
   retryActiveLoad,
   ensureActiveMessageLoaded,
   loadOlderThreadMessages,
+  pinActiveMessage,
+  unpinActiveMessage,
+  jumpToPinnedMessage,
 } = props.controller;
 </script>
 
@@ -228,6 +232,7 @@ const {
               :ref="setContentAreaRef"
               v-model:draft="activeDraft"
               v-model:forum-title="activeForumTitle"
+              v-model:pinned-panel-open="ui.showPinnedPanel.value"
               :waddle="waddles.currentSpace.value"
               :channel="ui.sidebarMode.value === 'dms' ? null : waddles.currentChannel.value"
               :room-jid="ui.sidebarMode.value === 'dms' ? null : activeChannelRoomJid"
@@ -270,6 +275,8 @@ const {
               @edit-message="editActiveMessage"
               @retract-message="retractActiveMessage"
               @react-message="reactActiveMessage"
+              @pin-message="pinActiveMessage"
+              @unpin-message="unpinActiveMessage"
               @search="searchActiveMessages"
               @clear-search="clearActiveSearch"
               @load-older="loadOlderActiveMessages"
@@ -391,6 +398,26 @@ const {
               @select-gif="sendGif"
               @typing="notifyActiveComposing"
               @load-older="loadOlderThreadMessages"
+            />
+          </div>
+
+          <!-- #414 PinnedPanel: right-rail panel listing pinned messages.
+               Visible in channel context only when ui.showPinnedPanel
+               is true. Mutually exclusive with the thread panel — the
+               header pin button toggles this and the URL state. -->
+          <div
+            v-if="ui.sidebarMode.value === 'channels'
+              && ui.showPinnedPanel.value
+              && activeThreadStack.length === 0
+              && waddles.currentChannel.value
+              && activeChannelRoomJid"
+            class="chat-active-thread-pane"
+          >
+            <PinnedPanel
+              :room-jid="activeChannelRoomJid"
+              :channel-name="waddles.currentChannel.value?.name ?? ''"
+              @close="ui.showPinnedPanel.value = false"
+              @jump-to-message="(stanzaId: string) => jumpToPinnedMessage(stanzaId)"
             />
           </div>
         </div>
