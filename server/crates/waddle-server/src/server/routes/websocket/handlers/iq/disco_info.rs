@@ -380,8 +380,6 @@ pub(super) async fn handle_disco_info_iq(
                     return vec![iq_to_xml(response)];
                 }
                 if target_bare.domain().as_str() == domain && target_bare.node().is_some() {
-                    let native_user_store =
-                        NativeUserStore::new(state.deps.app_state.db_pool.global_actor().clone());
                     let Some(localpart) = target_bare.node() else {
                         return vec![build_iq_error_xml_typed(
                             id,
@@ -390,10 +388,7 @@ pub(super) async fn handle_disco_info_iq(
                             item_not_found_iq_error("Requested item not found."),
                         )];
                     };
-                    match native_user_store
-                        .user_exists(localpart.as_str(), domain)
-                        .await
-                    {
+                    match local_xmpp_account_exists(state, localpart.as_str(), domain).await {
                         Ok(true) => {
                             let identities = vec![build_pep_identity()];
                             let mut features = vec![Feature::disco_info()];
@@ -454,4 +449,33 @@ pub(super) async fn handle_disco_info_iq(
         return vec![iq_to_xml(response)];
     }
     Vec::new()
+}
+
+async fn local_xmpp_account_exists(
+    state: &WebSocketState,
+    localpart: &str,
+    domain: &str,
+) -> Result<bool, String> {
+    let row = state
+        .deps
+        .app_state
+        .db_pool
+        .global_actor()
+        .ask(DbQueryOne {
+            sql: r#"
+                SELECT 1
+                WHERE EXISTS (
+                    SELECT 1 FROM native_users WHERE username = ? AND domain = ?
+                )
+                OR EXISTS (
+                    SELECT 1 FROM users WHERE xmpp_localpart = ?
+                )
+            "#
+            .to_string(),
+            params: vec![localpart.into(), domain.into(), localpart.into()],
+        })
+        .await
+        .map_err(|error| error.to_string())?;
+
+    Ok(row.is_some())
 }

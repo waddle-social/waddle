@@ -2827,6 +2827,63 @@ async fn handle_iq_disco_info_advertises_replies() {
 }
 
 #[tokio::test]
+async fn handle_iq_cross_user_pep_disco_resolves_session_backed_accounts() {
+    let state = create_test_websocket_state().await;
+    let alice = create_test_session(state.as_ref(), "alice-session").await;
+    let bob = create_test_session(state.as_ref(), "bob-session").await;
+    let bob_jid: FullJid = format!("{}@example.com/phone", bob.xmpp_localpart)
+        .parse()
+        .expect("bob jid");
+
+    let query = disco_info_iq_frame("session-pep", "alice-session@example.com", None);
+    let responses = handle_iq(
+        &query,
+        "example.com",
+        "muc.example.com",
+        state.as_ref(),
+        &Some(bob),
+        &ready_phase(&bob_jid),
+    )
+    .await;
+    let response = responses.first().expect("session-backed PEP disco");
+
+    assert!(
+        response.contains("type=\"result\"") || response.contains("type='result'"),
+        "session-backed user should expose PEP disco: {response}"
+    );
+    assert!(
+        response.contains("http://jabber.org/protocol/pubsub#auto-create"),
+        "expected PEP features for session-backed user: {response}"
+    );
+    assert!(
+        !response.contains("urn:xmpp:mam:2"),
+        "cross-user PEP disco must not expose personal MAM: {response}"
+    );
+
+    let missing_query = disco_info_iq_frame("session-pep-missing", "missing@example.com", None);
+    let missing_responses = handle_iq(
+        &missing_query,
+        "example.com",
+        "muc.example.com",
+        state.as_ref(),
+        &Some(alice),
+        &ready_phase(
+            &"alice-session@example.com/phone"
+                .parse()
+                .expect("alice jid"),
+        ),
+    )
+    .await;
+    let missing_response = missing_responses
+        .first()
+        .expect("missing session-backed PEP disco");
+    assert!(
+        missing_response.contains("item-not-found"),
+        "unknown local user should not expose PEP disco: {missing_response}"
+    );
+}
+
+#[tokio::test]
 async fn handle_iq_disco_items_server_advertises_spaces_service() {
     let state = create_test_websocket_state().await;
     let query = disco_items_iq_frame("srv-items", "example.com", None);
