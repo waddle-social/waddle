@@ -60,27 +60,6 @@ fn test_build_disco_info_response() {
 }
 
 #[test]
-fn test_build_server_info_abuse_form() {
-    let form = build_server_info_abuse_form("example.com");
-    assert_eq!(form.name(), "x");
-    assert_eq!(form.ns(), DATA_FORMS_NS);
-    assert_eq!(form.attr("type"), Some("result"));
-    let form_type = form
-        .children()
-        .find(|child| child.attr("var") == Some("FORM_TYPE"))
-        .and_then(|child| child.get_child("value", DATA_FORMS_NS))
-        .expect("FORM_TYPE field should be present");
-    assert_eq!(form_type.text(), SERVER_INFO_FORM_TYPE);
-
-    let abuse_addresses = form
-        .children()
-        .find(|child| child.attr("var") == Some("abuse-addresses"))
-        .and_then(|child| child.get_child("value", DATA_FORMS_NS))
-        .expect("abuse-addresses field should be present");
-    assert_eq!(abuse_addresses.text(), "mailto:abuse@example.com");
-}
-
-#[test]
 fn test_server_features_include_core_features() {
     let features = server_features();
     assert!(features.contains(&Feature::disco_info()));

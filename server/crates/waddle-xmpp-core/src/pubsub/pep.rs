@@ -7,6 +7,10 @@ use super::node::AccessModel;
 use super::stanzas::is_pubsub_iq;
 use crate::disco::{Feature, Identity};
 
+pub const PEP_NODE_BOOKMARKS: &str = "urn:xmpp:bookmarks:1";
+pub const PEP_NODE_AVATAR_DATA: &str = "urn:xmpp:avatar:data";
+pub const PEP_NODE_AVATAR_METADATA: &str = "urn:xmpp:avatar:metadata";
+
 /// Check if an IQ is a PEP request for the current user.
 pub fn is_pep_request(iq: &Iq, user_jid: &BareJid) -> bool {
     if !is_pubsub_iq(iq) {
@@ -37,9 +41,9 @@ pub struct PepHandler;
 impl PepHandler {
     /// Check if a node name is one of the built-in well-known PEP nodes.
     pub fn is_well_known_node(node: &str) -> bool {
-        node == "urn:xmpp:bookmarks:1"
-            || node == "urn:xmpp:avatar:data"
-            || node == "urn:xmpp:avatar:metadata"
+        node == PEP_NODE_BOOKMARKS
+            || node == PEP_NODE_AVATAR_DATA
+            || node == PEP_NODE_AVATAR_METADATA
             || node == "http://jabber.org/protocol/nick"
             || node == "http://jabber.org/protocol/mood"
             || node == "http://jabber.org/protocol/activity"
@@ -51,7 +55,7 @@ impl PepHandler {
 
     /// Get the default access model for a well-known PEP node.
     pub fn default_access_model_for_node(node: &str) -> AccessModel {
-        if node == "urn:xmpp:bookmarks:1" {
+        if node == PEP_NODE_BOOKMARKS {
             return AccessModel::Whitelist;
         }
 

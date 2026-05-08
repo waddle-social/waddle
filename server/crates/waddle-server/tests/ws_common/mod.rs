@@ -89,6 +89,7 @@ impl TestServer {
             .map(|(username, password)| format!("{username}:{password}"))
             .collect::<Vec<_>>()
             .join(",");
+        let database_url = database_url.unwrap_or_else(|| "sqlite::memory:".to_string());
 
         // Temp file where the server writes its bound HTTP port
         let port_file =
@@ -109,11 +110,18 @@ impl TestServer {
             .env("WADDLE_SERVER_OWNER_LOCALPARTS", "admin")
             .env("WADDLE_HTTP_ADDR", "127.0.0.1:0")
             .env("WADDLE_XMPP_DOMAIN", "localhost")
+            .env("WADDLE_DB_DRIVER", "sqlite")
+            .env("WADDLE_DATABASE_URL", &database_url)
             .env(
                 "WADDLE_XMPP_MAM_DATABASE_URL",
                 mam_database_url.as_deref().unwrap_or("sqlite::memory:"),
             )
             .env("WADDLE_XMPP_INBOX_DATABASE_URL", "sqlite::memory:")
+            .env("WADDLE_XMPP_SM_DATABASE_URL", "sqlite::memory:")
+            .env(
+                "WADDLE_XMPP_PENDING_DELIVERY_DATABASE_URL",
+                "sqlite::memory:",
+            )
             .env("WADDLE_XMPP_PUBSUB_DATABASE_URL", "sqlite::memory:")
             .env("WADDLE_GIT_SHA", TEST_GIT_SHA)
             .env(
@@ -123,9 +131,6 @@ impl TestServer {
             .env("WADDLE_HTTP_PORT_FILE", &port_file)
             .stdout(Stdio::null())
             .stderr(Stdio::null());
-        if let Some(url) = database_url {
-            command.env("WADDLE_DATABASE_URL", url);
-        }
         let child = command
             .spawn()
             .unwrap_or_else(|e| panic!("Failed to start waddle-server at {bin}: {e}"));

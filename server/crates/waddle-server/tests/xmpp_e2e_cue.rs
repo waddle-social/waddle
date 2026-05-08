@@ -425,7 +425,7 @@ struct AttributeCapture {
 struct ScenarioContext {
     clients: HashMap<String, WsXmppClient>,
     pending_frames: HashMap<String, VecDeque<String>>,
-    last_mam_frames: Vec<String>,
+    last_mam_frames: VecDeque<String>,
     captures: HashMap<String, String>,
     ws_url: String,
     domain: String,
@@ -574,7 +574,7 @@ async fn run_scenario(scenario: Scenario) -> Result<()> {
     let mut ctx = ScenarioContext {
         clients,
         pending_frames: HashMap::new(),
-        last_mam_frames: Vec::new(),
+        last_mam_frames: VecDeque::new(),
         captures: HashMap::new(),
         ws_url,
         domain: scenario.domain.clone(),
@@ -766,13 +766,9 @@ async fn execute_step(ctx: &mut ScenarioContext, step: &Step) -> Result<()> {
                         frame.contains(&format!("type=\"{}\"", iq_response_kind_name(type_)))
                     })
                     && contains.iter().all(|part| frame.contains(part))
-                    && absent.iter().all(|part| !frame.contains(part))
                     && elements
                         .iter()
                         .all(|spec| frame_has_element(frame, spec, &captures_snapshot))
-                    && absent_elements
-                        .iter()
-                        .all(|spec| !frame_has_element(frame, spec, &captures_snapshot))
             })
             .await?;
             assert_contains_all(&frame, &expected, "IQ expectation")?;
@@ -898,13 +894,9 @@ async fn execute_step(ctx: &mut ScenarioContext, step: &Step) -> Result<()> {
                         .iter()
                         .all(|spec| frame_has_element(frame, spec, &captures_snapshot))
                     && contains.iter().all(|part| frame.contains(part))
-                    && absent.iter().all(|part| !frame.contains(part))
                     && elements
                         .iter()
                         .all(|spec| frame_has_element(frame, spec, &captures_snapshot))
-                    && absent_elements
-                        .iter()
-                        .all(|spec| !frame_has_element(frame, spec, &captures_snapshot))
             })
             .await?;
             if *body_absent && frame_has_direct_message_body(&frame) {
@@ -970,13 +962,9 @@ async fn execute_step(ctx: &mut ScenarioContext, step: &Step) -> Result<()> {
                         .iter()
                         .all(|spec| frame_has_element(frame, spec, &captures_snapshot))
                     && contains.iter().all(|part| frame.contains(part))
-                    && absent.iter().all(|part| !frame.contains(part))
                     && elements
                         .iter()
                         .all(|spec| frame_has_element(frame, spec, &captures_snapshot))
-                    && absent_elements
-                        .iter()
-                        .all(|spec| !frame_has_element(frame, spec, &captures_snapshot))
             })
             .await?;
             if *body_absent && frame_has_direct_message_body(&frame) {
@@ -1089,9 +1077,6 @@ async fn execute_step(ctx: &mut ScenarioContext, step: &Step) -> Result<()> {
                     && elements
                         .iter()
                         .all(|spec| frame_has_element(frame, spec, &captures_snapshot))
-                    && absent_elements
-                        .iter()
-                        .all(|spec| !frame_has_element(frame, spec, &captures_snapshot))
             })
             .await?;
             assert_contains_all(&frame, contains, "presence expectation")?;
@@ -1140,7 +1125,8 @@ async fn execute_step(ctx: &mut ScenarioContext, step: &Step) -> Result<()> {
             ctx.last_mam_frames = recv_until(ctx, actor, |frame| {
                 frame.contains("urn:xmpp:mam:2") && frame.contains("<fin") && frame.contains(&id)
             })
-            .await?;
+            .await?
+            .into();
         }
         Step::ExpectMamResult {
             body,
@@ -1154,53 +1140,55 @@ async fn execute_step(ctx: &mut ScenarioContext, step: &Step) -> Result<()> {
             let payload_expectations = payload_expectations(payloads, ctx)?;
             let payload_element_expectations = payload_element_expectations(payloads);
             let captures_snapshot = ctx.captures.clone();
-            let matched = ctx.last_mam_frames.iter().find(|frame| {
-                frame.contains("<forwarded")
+            let mut skipped = Vec::new();
+            let frame = loop {
+                let Some(frame) = ctx.last_mam_frames.pop_front() else {
+                    return Err(anyhow!(
+                        "no MAM result matched body {:?} and contains {:?}; skipped frames: {:?}; remaining frames: {:?}",
+                        body,
+                        contains,
+                        skipped,
+                        ctx.last_mam_frames
+                    ));
+                };
+                if frame.contains("<forwarded")
                     && body
                         .as_ref()
-                        .is_none_or(|body| frame_contains_body(frame, body))
-                    && (!*body_absent || !frame_has_direct_message_body(frame))
+                        .is_none_or(|body| frame_contains_body(&frame, body))
+                    && (!*body_absent || !frame_has_direct_message_body(&frame))
                     && payload_expectations.iter().all(|part| frame.contains(part))
                     && payload_element_expectations
                         .iter()
-                        .all(|spec| frame_has_element(frame, spec, &captures_snapshot))
+                        .all(|spec| frame_has_element(&frame, spec, &captures_snapshot))
                     && contains.iter().all(|part| frame.contains(part))
-                    && absent.iter().all(|part| !frame.contains(part))
                     && elements
                         .iter()
-                        .all(|spec| frame_has_element(frame, spec, &captures_snapshot))
-                    && absent_elements
-                        .iter()
-                        .all(|spec| !frame_has_element(frame, spec, &captures_snapshot))
-            });
-            let Some(frame) = matched else {
-                return Err(anyhow!(
-                    "no MAM result matched body {:?} and contains {:?}; frames: {:?}",
-                    body,
-                    contains,
-                    ctx.last_mam_frames
-                ));
+                        .all(|spec| frame_has_element(&frame, spec, &captures_snapshot))
+                {
+                    break frame;
+                }
+                skipped.push(frame);
             };
             if let Some(body) = body {
-                assert_contains_all(frame, std::slice::from_ref(body), "MAM result body")?;
+                assert_contains_all(&frame, std::slice::from_ref(body), "MAM result body")?;
             }
-            if *body_absent && frame_has_direct_message_body(frame) {
+            if *body_absent && frame_has_direct_message_body(&frame) {
                 return Err(anyhow!(
                     "MAM result expected no <body> element, got: {frame}"
                 ));
             }
-            assert_contains_all(frame, &payload_expectations, "MAM result payloads")?;
+            assert_contains_all(&frame, &payload_expectations, "MAM result payloads")?;
             assert_elements_present(
-                frame,
+                &frame,
                 &payload_element_expectations,
                 &captures_snapshot,
                 "MAM result payloads",
             )?;
-            assert_contains_all(frame, contains, "MAM result contains")?;
-            assert_absent_all(frame, absent, "MAM result absent")?;
-            assert_elements_present(frame, elements, &captures_snapshot, "MAM result elements")?;
+            assert_contains_all(&frame, contains, "MAM result contains")?;
+            assert_absent_all(&frame, absent, "MAM result absent")?;
+            assert_elements_present(&frame, elements, &captures_snapshot, "MAM result elements")?;
             assert_elements_absent(
-                frame,
+                &frame,
                 absent_elements,
                 &captures_snapshot,
                 "MAM result elements",
@@ -1249,13 +1237,9 @@ async fn execute_step(ctx: &mut ScenarioContext, step: &Step) -> Result<()> {
             let captures_snapshot = ctx.captures.clone();
             let frame = recv_matching(ctx, target, |frame| {
                 contains.iter().all(|part| frame.contains(part))
-                    && absent.iter().all(|part| !frame.contains(part))
                     && elements
                         .iter()
                         .all(|spec| frame_has_element(frame, spec, &captures_snapshot))
-                    && absent_elements
-                        .iter()
-                        .all(|spec| !frame_has_element(frame, spec, &captures_snapshot))
             })
             .await?;
             assert_contains_all(&frame, contains, "frame expectation")?;

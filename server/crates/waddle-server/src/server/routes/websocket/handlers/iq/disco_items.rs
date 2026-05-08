@@ -126,6 +126,36 @@ pub(super) async fn handle_disco_items_iq(
             return vec![iq_to_xml(response)];
         }
 
+        if let Some(target) = target_to {
+            if query.node.is_none() {
+                if let Ok(target_bare) = target.parse::<BareJid>() {
+                    if target_bare.node().is_some() {
+                        let items = match state
+                            .deps
+                            .protocol
+                            .pubsub_storage
+                            .list_nodes(&target_bare)
+                            .await
+                        {
+                            Ok(nodes) => nodes
+                                .into_iter()
+                                .filter(|node| {
+                                    node == PEP_NODE_AVATAR_DATA || node == PEP_NODE_AVATAR_METADATA
+                                })
+                                .map(|node| DiscoItem::pubsub_node(&target_bare.to_string(), &node))
+                                .collect::<Vec<_>>(),
+                            Err(error) => {
+                                warn!(target = %target_bare, error = %error, "Failed to list PEP nodes");
+                                vec![]
+                            }
+                        };
+                        let response = build_disco_items_response(request_iq, &items, None);
+                        return vec![iq_to_xml(response)];
+                    }
+                }
+            }
+        }
+
         debug!("Disco items query on server");
         let items = vec![
             DiscoItem::muc_service(muc_domain, Some("Chatrooms")),

@@ -474,6 +474,39 @@ scenario: #Scenario & {
 		#SendIq & {
 			actor: adminPhone
 			type:  "get"
+			id:    "cue-pep-avatar-disco-items"
+			to:    adminPhone.bareJid
+			payload: #XmlElement & {
+				name: "query"
+				ns:   "http://jabber.org/protocol/disco#items"
+			}
+		},
+		#ExpectIq & {
+			target: adminPhone
+			id:     "cue-pep-avatar-disco-items"
+			type:   "result"
+			elements: [
+				#XmlElement & {
+					name: "item"
+					ns:   "http://jabber.org/protocol/disco#items"
+					attrs: {
+						jid:  adminPhone.bareJid
+						node: "urn:xmpp:avatar:data"
+					}
+				},
+				#XmlElement & {
+					name: "item"
+					ns:   "http://jabber.org/protocol/disco#items"
+					attrs: {
+						jid:  adminPhone.bareJid
+						node: "urn:xmpp:avatar:metadata"
+					}
+				},
+			]
+		},
+		#SendIq & {
+			actor: adminPhone
+			type:  "get"
 			id:    "cue-pep-avatar-items"
 			to:    adminPhone.bareJid
 			payload: #XmlElement & {
