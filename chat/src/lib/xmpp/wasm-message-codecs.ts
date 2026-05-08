@@ -175,24 +175,47 @@ function referenceFromWasm(reference: WasmReference): MessageReference {
   };
 }
 
+function roomAssignedStanzaId(message: WasmArchivedMessage, roomJid: string): string | undefined {
+  const byScoped = message.stanza_ids?.find((stanzaId) => stanzaId.by === roomJid);
+  if (byScoped?.id) return byScoped.id;
+  return message.stanza_id && message.stanza_id_by === roomJid
+    ? message.stanza_id
+    : undefined;
+}
+
 export function roomMessageFromArchived(message: WasmArchivedMessage): LiveRoomMessage | null {
-  const roomJid = barePeerJid(message.from ?? message.to ?? "");
-  const nick = (message.from ?? "").split("/")[1] ?? "unknown";
+  const fromJid = message.from ?? "";
+  const roomJid = barePeerJid(fromJid || message.to || "");
+  const nick = fromJid.split("/")[1] ?? "unknown";
   const createdAt = message.timestamp ?? new Date().toISOString();
-  if (message.retracts_id) {
+  const stampedByRoom = roomAssignedStanzaId(message, roomJid);
+  const moderationTargetId = message.moderation_target_id && fromJid === roomJid
+    ? message.moderation_target_id
+    : undefined;
+  const activeRetractionTarget = moderationTargetId ?? (!message.moderation_target_id ? message.retracts_id : undefined);
+  const roomPrimaryId = message.id ?? stampedByRoom ?? message.mam_id;
+  const roomWireIds = [message.id, message.origin_id, stampedByRoom]
+    .filter((value): value is string => !!value && value !== roomPrimaryId);
+  if (activeRetractionTarget) {
     return {
-      id: message.id ?? message.stanza_id ?? message.mam_id,
+      id: roomPrimaryId,
+      fromJid,
       roomJid,
       nick,
       body: "",
       createdAt,
       type: "message",
-      retractsId: message.retracts_id,
+      retractsId: activeRetractionTarget,
+      ...(message.retraction_id ? { retractionId: message.retraction_id } : {}),
+      ...(moderationTargetId ? { moderationTargetId } : {}),
+      ...(message.moderated_by ? { moderatedBy: message.moderated_by } : {}),
+      ...(message.moderation_reason ? { moderationReason: message.moderation_reason } : {}),
+      ...(message.author_real_jid ? { authorRealJid: message.author_real_jid } : {}),
     };
   }
   if (message.reaction_target_id) {
     return {
-      id: message.id ?? message.stanza_id ?? message.mam_id,
+      id: roomPrimaryId,
       roomJid,
       nick,
       body: "",
@@ -221,20 +244,20 @@ export function roomMessageFromArchived(message: WasmArchivedMessage): LiveRoomM
   const mentionUris = message.mention_uris ?? [];
   const markupSpans = message.markup_spans ?? [];
   const references = message.references ?? [];
-  if (!message.body && !message.subject && !sharedFiles.length && !message.thread && !message.forum_post_kind) {
+  if (!message.body && !message.subject && !sharedFiles.length && !message.thread && !message.forum_post_kind && !message.is_retracted) {
     return null;
   }
   const base: LiveRoomMessage = {
-    id: message.id ?? message.stanza_id ?? message.mam_id,
+    id: roomPrimaryId,
+    fromJid,
     roomJid,
     nick,
-    body: message.body ?? message.subject ?? "",
+    body: message.is_retracted ? "" : (message.body ?? message.subject ?? ""),
     createdAt,
     type: message.subject && !message.body ? "subject" : "message",
-    ...(message.moderation_target_id ? { retractsId: message.moderation_target_id } : {}),
     ...(message.replaces_id ? { replacesId: message.replaces_id } : {}),
-    ...(message.stanza_id || message.origin_id
-      ? { wireIds: [message.id, message.origin_id, message.stanza_id].filter((value): value is string => !!value) }
+    ...(roomWireIds.length > 0
+      ? { wireIds: roomWireIds }
       : {}),
     ...(message.reply_to_id
       ? { replyTo: { id: message.reply_to_id, ...(message.reply_to_sender ? { author: message.reply_to_sender } : {}) } }
@@ -245,7 +268,7 @@ export function roomMessageFromArchived(message: WasmArchivedMessage): LiveRoomM
     ...(message.forum_title ? { forumTitle: message.forum_title } : {}),
     ...(message.forum_thread_title ? { forumThreadTitle: message.forum_thread_title } : {}),
     ...(message.author_real_jid ? { authorRealJid: message.author_real_jid } : {}),
-    ...(message.stanza_id ? { reactionTargetId: message.stanza_id } : {}),
+    ...(stampedByRoom ? { reactionTargetId: stampedByRoom } : {}),
     ...(mentionUris.length ? { mentions: mentionUris.map((uri) => uri.replace(/^xmpp:/, "")) } : {}),
     ...(message.broadcast_mention === "here" || message.broadcast_mention === "everyone" ? { broadcastMention: message.broadcast_mention } : {}),
     ...(markupSpans.length
@@ -254,8 +277,12 @@ export function roomMessageFromArchived(message: WasmArchivedMessage): LiveRoomM
     ...(references.length ? { references: references.map(referenceFromWasm) } : {}),
     ...(sharedFiles.length ? { sharedFiles: sharedFiles.map(sharedFileFromWasm) } : {}),
     ...(message.is_sticker ? { isSticker: true } : {}),
+    ...(message.is_retracted ? { isRetracted: true } : {}),
+    ...(message.retraction_id ? { retractionId: message.retraction_id } : {}),
+    ...(message.moderated_by ? { moderatedBy: message.moderated_by } : {}),
+    ...(message.moderation_reason ? { moderationReason: message.moderation_reason } : {}),
     ...(message.stanza_id ?? message.origin_id ? { correctionTargetId: message.origin_id ?? message.id ?? "" } : {}),
-    ...(message.stanza_id ? { replyableId: message.stanza_id } : {}),
+    ...(stampedByRoom ? { replyableId: stampedByRoom } : {}),
   };
   return stripReplyFallback(base, message.reply_fallback_start, message.reply_fallback_end);
 }
@@ -269,9 +296,10 @@ export function dmMessageFromArchived(message: WasmArchivedMessage, selfBareJid:
   const fromJid = message.from ?? fromBare;
   const nick = barePeerJid(fromJid).split("@")[0] ?? "unknown";
   const createdAt = message.timestamp ?? new Date().toISOString();
+  const dmPrimaryId = message.id ?? message.origin_id ?? message.mam_id;
   if (message.retracts_id) {
     return {
-      id: message.id ?? message.stanza_id ?? message.mam_id,
+      id: dmPrimaryId,
       peerJid,
       fromJid,
       nick,
@@ -279,11 +307,12 @@ export function dmMessageFromArchived(message: WasmArchivedMessage, selfBareJid:
       createdAt,
       type: "message",
       retractsId: message.retracts_id,
+      ...(message.retraction_id ? { retractionId: message.retraction_id } : {}),
     };
   }
   if (message.reaction_target_id) {
     return {
-      id: message.id ?? message.stanza_id ?? message.mam_id,
+      id: dmPrimaryId,
       peerJid,
       fromJid,
       nick,
@@ -298,13 +327,15 @@ export function dmMessageFromArchived(message: WasmArchivedMessage, selfBareJid:
   const mentionUris = message.mention_uris ?? [];
   const markupSpans = message.markup_spans ?? [];
   const references = message.references ?? [];
-  if (!message.body && !message.subject && !sharedFiles.length && !message.thread) return null;
+  const dmWireIds = [message.id, message.origin_id]
+    .filter((value): value is string => !!value && value !== dmPrimaryId);
+  if (!message.body && !message.subject && !sharedFiles.length && !message.thread && !message.is_retracted) return null;
   const base: LiveDmMessage = {
-    id: message.id ?? message.stanza_id ?? message.mam_id,
+    id: dmPrimaryId,
     peerJid,
     fromJid,
     nick,
-    body: message.body ?? message.subject ?? "",
+    body: message.is_retracted ? "" : (message.body ?? message.subject ?? ""),
     createdAt,
     type: "message",
     ...(message.replaces_id ? { replacesId: message.replaces_id } : {}),
@@ -323,10 +354,12 @@ export function dmMessageFromArchived(message: WasmArchivedMessage, selfBareJid:
     ...(references.length ? { references: references.map(referenceFromWasm) } : {}),
     ...(sharedFiles.length ? { sharedFiles: sharedFiles.map(sharedFileFromWasm) } : {}),
     ...(message.is_sticker ? { isSticker: true } : {}),
+    ...(message.is_retracted ? { isRetracted: true } : {}),
+    ...(message.retraction_id ? { retractionId: message.retraction_id } : {}),
     ...(message.origin_id || message.id ? { correctionTargetId: message.origin_id ?? message.id ?? "" } : {}),
     ...(message.origin_id || message.id ? { replyableId: message.origin_id ?? message.id ?? undefined } : {}),
-    ...(message.stanza_id || message.origin_id
-      ? { wireIds: [message.id, message.origin_id, message.stanza_id].filter((value): value is string => !!value) }
+    ...(dmWireIds.length > 0
+      ? { wireIds: dmWireIds }
       : {}),
   };
   return stripReplyFallback(base, message.reply_fallback_start, message.reply_fallback_end);

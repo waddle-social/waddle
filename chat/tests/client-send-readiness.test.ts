@@ -4,7 +4,7 @@ import { ref } from "vue";
 import type { WaddleSession } from "../src/lib/server-auth";
 import { useDirectMessages } from "../src/dms/messages";
 import { useChannelMessages } from "../src/channels/messages";
-import { BrowserXmppClient, roomBareJidFor, type InboxEntry } from "../src/lib/xmpp-client";
+import { BrowserXmppClient, roomBareJidFor, type InboxEntry, type LiveDmMessage, type RoomActivityEvent } from "../src/lib/xmpp-client";
 import { enqueueQueuedMessage, listQueuedDmMessages, listQueuedRoomMessages } from "../src/lib/outbound-queue-store";
 import { handlerStubs } from "./helpers/xmpp-client-mock";
 
@@ -37,6 +37,39 @@ function createStorageMock() {
     clear() {
       values.clear();
     },
+  };
+}
+
+function roomWasmMessage(partial: Record<string, unknown> = {}) {
+  return {
+    mam_id: "mam-room-1",
+    id: "room-1",
+    from: "room@conference.example.com/bob",
+    to: "alice@example.com/desktop",
+    message_type: "groupchat",
+    body: "hello from another room",
+    timestamp: "2024-01-01T00:00:01.000Z",
+    reaction_emojis: [],
+    is_muc: true,
+    markup_spans: [],
+    mention_uris: [],
+    references: [],
+    is_sticker: false,
+    shared_files: [],
+    ...partial,
+  };
+}
+
+function dmMessage(partial: Partial<LiveDmMessage> = {}): LiveDmMessage {
+  return {
+    id: "dm-1",
+    peerJid: "bob@example.com",
+    fromJid: "bob@example.com/mobile",
+    nick: "bob",
+    body: "",
+    createdAt: "2026-05-08T13:00:00Z",
+    type: "message",
+    ...partial,
   };
 }
 
@@ -151,6 +184,45 @@ describe("client send readiness", () => {
     } finally {
       console.warn = originalConsoleWarn;
     }
+  });
+
+  test("DM live retractions require the same bare sender as the target", () => {
+    const actionError = ref("");
+    const dm = useDirectMessages(
+      ref<WaddleSession | null>(session()),
+      ref<BrowserXmppClient | null>({} as BrowserXmppClient),
+      ref("bob@example.com"),
+      normalizeError,
+      actionError,
+      () => {
+        actionError.value = "";
+      },
+    );
+    dm.messages.value = [{
+      id: "target-client-id",
+      wireIds: ["target-origin-id"],
+      author: "bob",
+      authorJid: "bob@example.com/mobile",
+      body: "keep me",
+      createdAt: "2026-05-08T13:00:00Z",
+      isSelf: false,
+      markup: [{ type: "span", start: 0, end: 4, styles: ["strong"] }],
+      references: [{ type: "data", uri: "https://example.com", begin: 0, end: 4 }],
+      sharedFiles: [{ url: "https://example.com/file.png", disposition: "inline" }],
+      extensionAnnotations: [],
+      mentions: ["alice@example.com"],
+    }];
+
+    dm.onIncomingMessage(dmMessage({ id: "spoofed-retract", fromJid: "mallory@example.com/home", retractsId: "target-origin-id" }));
+    expect(dm.messages.value[0]?.isRetracted).toBeUndefined();
+
+    dm.onIncomingMessage(dmMessage({ id: "valid-retract", fromJid: "bob@example.com/laptop", retractsId: "target-origin-id" }));
+    expect(dm.messages.value[0]?.isRetracted).toBe(true);
+    expect(dm.messages.value[0]?.markup).toBeUndefined();
+    expect(dm.messages.value[0]?.references).toBeUndefined();
+    expect(dm.messages.value[0]?.sharedFiles).toBeUndefined();
+    expect(dm.messages.value[0]?.extensionAnnotations).toBeUndefined();
+    expect(dm.messages.value[0]?.mentions).toBeUndefined();
   });
 
   test("room sends immediately when the room is ready", async () => {
@@ -347,6 +419,107 @@ describe("client keepalive lifecycle", () => {
       body: "missed while suspended",
       peerJid: "bob@example.com",
     }));
+  });
+});
+
+describe("room activity adapter", () => {
+  test("does not emit XEP-0308 corrections or retractions as off-room activity", () => {
+    const client = new BrowserXmppClient(session());
+    const activity: RoomActivityEvent[] = [];
+    const roomMessages: unknown[] = [];
+    client.setActivityHandler((event) => activity.push(event));
+    client.setMessageHandler((message) => roomMessages.push(message));
+    const xmpp = Object.assign(new EventEmitter(), {}) as unknown as Agent;
+    (client as unknown as { xmpp: Agent }).xmpp = xmpp;
+    (client as unknown as { wireEvents: (xmpp: Agent) => void }).wireEvents(xmpp);
+
+    xmpp.emit("message", roomWasmMessage({
+      id: "normal-message",
+      body: "hello alice",
+      mention_uris: ["xmpp:alice@example.com"],
+    }));
+    xmpp.emit("message", roomWasmMessage({
+      id: "edited-message",
+      body: "edited hello alice",
+      replaces_id: "normal-message",
+      mention_uris: ["xmpp:alice@example.com"],
+    }));
+    xmpp.emit("message", roomWasmMessage({
+      id: "retracted-message",
+      from: "room@conference.example.com",
+      body: "removed hello alice",
+      retracts_id: "normal-message",
+      moderation_target_id: "normal-message",
+      mention_uris: ["xmpp:alice@example.com"],
+    }));
+
+    expect(activity).toEqual([
+      {
+        roomJid: "room@conference.example.com",
+        nick: "bob",
+        body: "hello alice",
+        mentions: ["alice@example.com"],
+      },
+    ]);
+    expect(roomMessages).toEqual([
+      expect.objectContaining({ id: "edited-message", replacesId: "normal-message" }),
+      expect.objectContaining({ id: "retracted-message", retractsId: "normal-message" }),
+    ]);
+  });
+
+  test("does not project reconnect catch-up corrections or retractions as room activity", async () => {
+    const client = new BrowserXmppClient(session());
+    const catchup = (client as unknown as { catchup: { recordRoomSeen: (room: string, ts: string) => void; onSessionStarted: () => unknown[] } }).catchup;
+    catchup.recordRoomSeen("room@conference.example.com", "2024-01-01T00:00:00.000Z");
+    catchup.onSessionStarted();
+    const activity: RoomActivityEvent[] = [];
+    client.setActivityHandler((event) => activity.push(event));
+    const fetchRoomHistoryPage = mock(async () => ({
+      messages: [
+        roomWasmMessage({
+          mam_id: "mam-normal-message",
+          id: "normal-message",
+          body: "missed hello alice",
+          mention_uris: ["xmpp:alice@example.com"],
+        }),
+        roomWasmMessage({
+          mam_id: "mam-edited-message",
+          id: "edited-message",
+          body: "edited missed hello alice",
+          replaces_id: "normal-message",
+          mention_uris: ["xmpp:alice@example.com"],
+        }),
+        roomWasmMessage({
+          mam_id: "mam-retracted-message",
+          id: "retracted-message",
+          from: "room@conference.example.com",
+          body: "removed missed hello alice",
+          retracts_id: "normal-message",
+          moderation_target_id: "normal-message",
+          mention_uris: ["xmpp:alice@example.com"],
+        }),
+      ],
+      is_complete: true,
+    }));
+    const xmpp = Object.assign(new EventEmitter(), {
+      fetch_room_history_page: fetchRoomHistoryPage,
+    }) as unknown as Agent;
+    (client as unknown as { xmpp: Agent }).xmpp = xmpp;
+    (client as unknown as { wireEvents: (xmpp: Agent) => void }).wireEvents(xmpp);
+
+    xmpp.emit("stream:management:resumed");
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(fetchRoomHistoryPage).toHaveBeenCalledWith("room@conference.example.com", 100, { type: "latest" });
+    expect(activity).toEqual([
+      {
+        roomJid: "room@conference.example.com",
+        nick: "bob",
+        body: "missed hello alice",
+        mentions: ["alice@example.com"],
+      },
+    ]);
   });
 });
 

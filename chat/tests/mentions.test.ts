@@ -1,8 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import {
   avatarLookupCandidates,
+  messageMentionsBareJid,
   mentionAutocompleteCandidates,
   mentionAutocompleteNames,
+  mentionMatchesBareJid,
   mentionMatchesUsername,
   mergeMentionMembers,
   resolveMentionUri,
@@ -13,6 +15,32 @@ describe("mention helpers", () => {
     expect(mentionMatchesUsername("xmpp:Rawkode@waddle.social", "rawkode")).toBe(true);
     expect(mentionMatchesUsername("ICEPUMA", "icepuma")).toBe(true);
     expect(mentionMatchesUsername("randax@waddle.social", "rawkode")).toBe(false);
+  });
+
+  test("matches personal mention references by exact bare JID", () => {
+    expect(mentionMatchesBareJid("xmpp:rawkode@waddle.social", "rawkode@waddle.social/desktop")).toBe(true);
+    expect(mentionMatchesBareJid("rawkode@waddle.social?message", "rawkode@waddle.social")).toBe(true);
+    expect(mentionMatchesBareJid("xmpp:rawkode@other.example", "rawkode@waddle.social")).toBe(false);
+    expect(mentionMatchesBareJid("rawkode", "rawkode@waddle.social")).toBe(false);
+  });
+
+  test("detects rendered message mentions by exact bare JID", () => {
+    expect(messageMentionsBareJid(
+      { mentions: ["xmpp:alice@example.com"] },
+      "alice@example.com/desktop",
+    )).toBe(true);
+    expect(messageMentionsBareJid(
+      { mentions: ["xmpp:alice@other.example"] },
+      "alice@example.com/desktop",
+    )).toBe(false);
+    expect(messageMentionsBareJid(
+      { mentions: ["alice"] },
+      "alice@example.com/desktop",
+    )).toBe(false);
+    expect(messageMentionsBareJid(
+      { broadcastMention: "everyone" },
+      null,
+    )).toBe(true);
   });
 
   test("resolves room nick mentions through known member bare JIDs", () => {

@@ -27,6 +27,7 @@ const props = defineProps<{
    */
   resolveEntry: (threadId: string) => MessageThreadEntry | undefined;
   currentUser?: string;
+  currentUserJid?: string;
   avatarUrlByAuthor: Record<string, string | null>;
   authorJidByNick?: Record<string, string>;
   roomHats: RoomHats;
@@ -506,6 +507,7 @@ function replyChildHasNestedThread(message: TimelineMessage): boolean {
           v-if="message.id === activeEntry.root?.id"
           :message="message"
           :current-user="currentUser"
+          :current-user-jid="currentUserJid"
           :avatar-url="avatarUrlByAuthor[message.author] ?? null"
           :hats="hatsFor(message.author)"
           :presence="presenceFor(message.author)"
@@ -537,6 +539,7 @@ function replyChildHasNestedThread(message: TimelineMessage): boolean {
             <MessageCard
               :message="message"
               :current-user="currentUser"
+              :current-user-jid="currentUserJid"
               :avatar-url="avatarUrlByAuthor[message.author] ?? null"
               :hats="hatsFor(message.author)"
               :presence="presenceFor(message.author)"

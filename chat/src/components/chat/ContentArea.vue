@@ -59,6 +59,7 @@ const props = defineProps<{
   memberState: MemberLoadState;
   typingUsers: string[];
   currentUser?: string;
+  currentUserJid?: string;
   selfDomain?: string;
   avatarUrlByAuthor: Record<string, string | null>;
   authorJidByNick?: Record<string, string>;
@@ -1035,6 +1036,7 @@ function dayDividerLabel(createdAt: string): string {
           <MessageCard
             :message="msg"
             :current-user="props.currentUser"
+            :current-user-jid="props.currentUserJid"
             :avatar-url="avatarUrlByAuthor[msg.author] ?? null"
             :hats="roomHats[msg.author] ?? []"
             :presence="roomPresence[msg.author] ?? 'offline'"

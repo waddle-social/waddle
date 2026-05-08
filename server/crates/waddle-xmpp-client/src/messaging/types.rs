@@ -1,4 +1,5 @@
 use chrono::{DateTime, Utc};
+use waddle_xmpp_core::xep0359::StanzaId as StableStanzaId;
 
 use crate::request::StanzaId;
 use crate::xep::encrypted_file::EncryptedFile;
@@ -97,9 +98,16 @@ pub struct RetractionPayload {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RetractionTombstonePayload {
+    pub retraction_id: Option<String>,
+    pub moderated_by: Option<jid::Jid>,
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModerationPayload {
     pub target_id: String,
-    pub moderated_by: String,
+    pub moderated_by: Option<jid::Jid>,
     pub reason: Option<String>,
 }
 
@@ -114,7 +122,8 @@ pub struct InboundMessage {
     pub to: Option<String>,
     pub message_type: String,
     pub id: Option<String>,
-    pub stanza_id: Option<String>,
+    pub stanza_id: Option<StableStanzaId>,
+    pub stanza_ids: Vec<StableStanzaId>,
     pub origin_id: Option<String>,
     pub body: Option<String>,
     pub subject: Option<String>,
@@ -122,8 +131,10 @@ pub struct InboundMessage {
     pub timestamp: Option<DateTime<Utc>>,
     pub replaces_id: Option<String>,
     pub retracts_id: Option<String>,
+    pub retraction_id: Option<String>,
+    pub is_retracted: bool,
     pub moderation_target_id: Option<String>,
-    pub moderated_by: Option<String>,
+    pub moderated_by: Option<jid::Jid>,
     pub moderation_reason: Option<String>,
     pub reaction_target_id: Option<String>,
     pub reaction_emojis: Vec<String>,

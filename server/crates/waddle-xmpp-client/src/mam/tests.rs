@@ -91,6 +91,62 @@ fn parse_mam_result_happy_path() {
 }
 
 #[test]
+fn parse_mam_result_preserves_multiple_typed_stanza_ids() {
+    let inner_message = Element::builder("message", CLIENT_NS)
+        .attr("from", "room@conf.example/alice")
+        .attr("type", "groupchat")
+        .append(Element::builder("body", CLIENT_NS).append("Hello").build())
+        .append(
+            Element::builder("stanza-id", XEP0359_NS)
+                .attr("id", "foreign-sid")
+                .attr("by", "archive.example")
+                .build(),
+        )
+        .append(
+            Element::builder("stanza-id", XEP0359_NS)
+                .attr("id", "room-sid")
+                .attr("by", "room@conf.example")
+                .build(),
+        )
+        .append(
+            Element::builder("stanza-id", XEP0359_NS)
+                .attr("id", "bad-sid")
+                .attr("by", "")
+                .build(),
+        )
+        .build();
+    let forwarded = Element::builder("forwarded", FORWARD_NS)
+        .append(inner_message)
+        .build();
+    let result = Element::builder("result", MAM_NS)
+        .attr("id", "mam-id-1")
+        .append(forwarded)
+        .build();
+    let el = Element::builder("message", CLIENT_NS)
+        .append(result)
+        .build();
+
+    let archived = parse_mam_result(&el).expect("should parse");
+
+    let stanza_ids: Vec<(String, String)> = archived
+        .stanza_ids
+        .iter()
+        .map(|stanza_id| (stanza_id.id.clone(), stanza_id.by.to_string()))
+        .collect();
+    assert_eq!(
+        stanza_ids,
+        vec![
+            ("foreign-sid".to_string(), "archive.example".to_string()),
+            ("room-sid".to_string(), "room@conf.example".to_string()),
+        ]
+    );
+    assert_eq!(
+        archived.stanza_id.as_ref().map(|id| id.as_str()),
+        Some("foreign-sid")
+    );
+}
+
+#[test]
 fn parse_mam_result_preserves_inner_message_and_origin_ids() {
     let inner = Element::builder("message", CLIENT_NS)
         .attr("from", "alice@example.com/desktop")
@@ -431,18 +487,20 @@ mod query {
     }
 
     fn build_archived(mam_id: &str, query_id: &str, body: &str) -> ArchivedMessage {
+        let stanza_id = waddle_xmpp_core::xep0359::StanzaId::new(
+            mam_id,
+            "room@muc.example.com".parse().expect("valid archive jid"),
+        );
         ArchivedMessage {
             mam_id: mam_id.to_string(),
             query_id: Some(query_id.to_string()),
             id: None,
-            stanza_id: Some(waddle_xmpp_core::xep0359::StanzaId::new(
-                mam_id,
-                "room@muc.example.com".parse().expect("valid archive jid"),
-            )),
+            stanza_id: Some(stanza_id.clone()),
             origin_id: None,
             timestamp: None,
             from: Some("room@muc.example.com/alice".to_string()),
             to: Some("alice@example.com/res".to_string()),
+            stanza_ids: vec![stanza_id],
             parent_thread_id: None,
             message_type: "groupchat".to_string(),
             body: Some(body.to_string()),

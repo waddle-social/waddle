@@ -41,6 +41,11 @@ export interface WasmReference {
   anchor?: string;
 }
 
+export interface WasmStanzaId {
+  id: string;
+  by: string;
+}
+
 export interface WasmMessage {
   id?: string;
   from?: string;
@@ -50,9 +55,13 @@ export interface WasmMessage {
   message_type: string;
   timestamp?: string;
   stanza_id?: string;
+  stanza_id_by?: string;
+  stanza_ids?: WasmStanzaId[];
   origin_id?: string;
   replaces_id?: string;
   retracts_id?: string;
+  retraction_id?: string;
+  is_retracted?: boolean;
   moderation_target_id?: string;
   moderated_by?: string;
   moderation_reason?: string;

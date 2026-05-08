@@ -25,6 +25,8 @@ export function fromLiveDmMessage(
   };
   if (msg.correctionTargetId) tm.correctionTargetId = msg.correctionTargetId;
   if (msg.replyableId) tm.replyableId = msg.replyableId;
+  if (msg.isRetracted) tm.isRetracted = true;
+  if (msg.retractionId) tm.retractionId = msg.retractionId;
   if (msg.wireIds?.length) tm.wireIds = msg.wireIds;
   if (msg.mentions?.length) tm.mentions = msg.mentions;
   if (msg.markup?.length) tm.markup = msg.markup;
@@ -42,7 +44,7 @@ export function fromLiveDmMessage(
   }
   if (msg.threadId) tm.threadId = msg.threadId;
   if (msg.parentThreadId) tm.parentThreadId = msg.parentThreadId;
-  return tm;
+  return tm.isRetracted ? retractDmTimelineMessage(tm, tm.retractionId) : tm;
 }
 
 export function queuedDmMessageToTimeline(
@@ -89,6 +91,36 @@ export function isSameDmCorrectionSender(target: TimelineMessage, correctionFrom
   return barePeerJid(target.authorJid ?? "") === barePeerJid(correctionFromJid);
 }
 
+export function retractDmTimelineMessage(
+  existing: TimelineMessage,
+  retractionId?: string,
+): TimelineMessage {
+  const next: TimelineMessage = {
+    ...existing,
+    body: "",
+    isRetracted: true,
+    ...(retractionId ? { retractionId } : {}),
+  };
+  delete next.markup;
+  delete next.references;
+  delete next.sharedFiles;
+  delete next.extensionAnnotations;
+  delete next.isSticker;
+  delete next.mentions;
+  delete next.broadcastMention;
+  delete next.forumPostKind;
+  delete next.forumTitle;
+  delete next.forumThreadTitle;
+  return next;
+}
+
+function mergeDmRetractionTombstone(
+  existing: TimelineMessage,
+  incoming: TimelineMessage,
+): TimelineMessage {
+  return incoming.isRetracted ? retractDmTimelineMessage(existing, incoming.retractionId) : existing;
+}
+
 export function buildDmTimelineFromMamResults(params: {
   session: WaddleSession;
   mamResults: LiveDmMessage[];
@@ -97,7 +129,7 @@ export function buildDmTimelineFromMamResults(params: {
   const { session, mamResults, existing = [] } = params;
   const regular: LiveDmMessage[] = [];
   const reactionUpdates: { targetId: string; nick: string; emojis: string[] }[] = [];
-  const retractionUpdates: string[] = [];
+  const retractionUpdates: { targetId: string; fromJid: string }[] = [];
   const correctionUpdates: {
     targetId: string;
     correctionFromJid: string;
@@ -110,7 +142,7 @@ export function buildDmTimelineFromMamResults(params: {
     if (msg._reactionTarget && msg._reactionEmojis) {
       reactionUpdates.push({ targetId: msg._reactionTarget, nick: msg.nick, emojis: msg._reactionEmojis });
     } else if (msg.retractsId) {
-      retractionUpdates.push(msg.retractsId);
+      retractionUpdates.push({ targetId: msg.retractsId, fromJid: msg.fromJid });
     } else if (msg.replacesId) {
       correctionUpdates.push({
         targetId: msg.replacesId,
@@ -122,6 +154,7 @@ export function buildDmTimelineFromMamResults(params: {
       });
     } else if (
       msg.body
+      || msg.isRetracted
       || (msg.sharedFiles && msg.sharedFiles.length > 0)
       || msg.isSticker
       || (msg.extensionAnnotations && msg.extensionAnnotations.length > 0)
@@ -133,8 +166,17 @@ export function buildDmTimelineFromMamResults(params: {
   for (const message of existing) indexMessageByIds(byId, message);
   const timeline = [...existing];
   for (const raw of regular) {
-    if (findMessageById(timeline, raw.id)) continue;
     const tm = fromLiveDmMessage(session, raw, (id) => byId.get(id));
+    const existingMessage = findMessageById(timeline, tm.id);
+    if (existingMessage) {
+      const merged = mergeDmRetractionTombstone(existingMessage, tm);
+      if (merged !== existingMessage) {
+        const index = timeline.indexOf(existingMessage);
+        if (index !== -1) timeline[index] = merged;
+        indexMessageByIds(byId, merged);
+      }
+      continue;
+    }
     indexMessageByIds(byId, tm);
     timeline.push(tm);
   }
@@ -153,11 +195,14 @@ export function buildDmTimelineFromMamResults(params: {
       delete target.extensionAnnotations;
     }
   }
-  for (const retractsId of retractionUpdates) {
-    const target = findMessageById(timeline, retractsId);
-    if (!target) continue;
-    target.body = "";
-    target.isRetracted = true;
+  for (const update of retractionUpdates) {
+    const target = findMessageById(timeline, update.targetId);
+    if (!target || !isSameDmCorrectionSender(target, update.fromJid)) continue;
+    const index = timeline.indexOf(target);
+    if (index === -1) continue;
+    const retracted = retractDmTimelineMessage(target);
+    timeline[index] = retracted;
+    indexMessageByIds(byId, retracted);
   }
   for (const update of reactionUpdates) {
     const target = findMessageById(timeline, update.targetId);

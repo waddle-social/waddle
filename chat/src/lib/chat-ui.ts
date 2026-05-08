@@ -149,6 +149,8 @@ export interface TimelineMessage {
   isEdited?: boolean;
   /** Whether this message has been retracted (XEP-0424). */
   isRetracted?: boolean;
+  /** XEP-0424 retraction message id preserved from tombstone archives. */
+  retractionId?: string;
   /** Aggregated emoji reactions: emoji -> list of nicks (XEP-0444). */
   reactions?: Record<string, string[]>;
   /** Archived reaction sender identities: emoji -> sender id -> display nick. */

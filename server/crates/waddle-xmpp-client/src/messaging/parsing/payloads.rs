@@ -51,31 +51,62 @@ pub fn parse_reaction_payload(element: &Element) -> Option<ReactionPayload> {
 }
 
 pub fn parse_retraction_payload(element: &Element) -> Option<RetractionPayload> {
-    element
-        .get_child("retract", NS_MESSAGE_RETRACT)
-        .and_then(|child| child.attr("id"))
-        .or_else(|| {
-            element
-                .get_child("retracted", NS_MESSAGE_RETRACT)
-                .and_then(|child| child.attr("id"))
-        })
+    let retract = element.get_child("retract", NS_MESSAGE_RETRACT)?;
+    if retract
+        .get_child("moderated", NS_MESSAGE_MODERATE)
+        .is_some()
+    {
+        return None;
+    }
+    retract
+        .attr("id")
         .filter(|id| !id.is_empty())
         .map(|id| RetractionPayload {
             target_id: id.to_string(),
         })
 }
 
+pub fn parse_retraction_tombstone_payload(element: &Element) -> Option<RetractionTombstonePayload> {
+    let retracted = element.get_child("retracted", NS_MESSAGE_RETRACT)?;
+    let retraction_id = retracted
+        .attr("id")
+        .filter(|id| !id.is_empty())
+        .map(str::to_string);
+    let moderated = retracted.get_child("moderated", NS_MESSAGE_MODERATE);
+    let moderated_by = moderated
+        .and_then(|child| child.attr("by"))
+        .and_then(|by| by.parse::<jid::Jid>().ok());
+    let reason = retracted
+        .get_child("reason", NS_MESSAGE_RETRACT)
+        .map(|child| child.text())
+        .filter(|text| !text.trim().is_empty());
+    Some(RetractionTombstonePayload {
+        retraction_id,
+        moderated_by,
+        reason,
+    })
+}
+
+fn is_bare_jid(value: &str) -> bool {
+    !value.contains('/')
+}
+
 pub fn parse_moderation_payload(element: &Element) -> Option<ModerationPayload> {
-    let apply_to = element.get_child("apply-to", NS_FASTEN)?;
-    let target_id = apply_to.attr("id")?.trim();
+    let from = element.attr("from")?;
+    if element.attr("type") != Some("groupchat") || !is_bare_jid(from) {
+        return None;
+    }
+    let retract = element.get_child("retract", NS_MESSAGE_RETRACT)?;
+    let target_id = retract.attr("id")?.trim();
     if target_id.is_empty() {
         return None;
     }
-    let moderated = apply_to.get_child("moderated", NS_MESSAGE_MODERATE)?;
-    moderated.get_child("retract", NS_MESSAGE_RETRACT)?;
-    let moderated_by = moderated.attr("by").unwrap_or_default().to_string();
-    let reason = moderated
-        .get_child("reason", NS_MESSAGE_MODERATE)
+    let moderated = retract.get_child("moderated", NS_MESSAGE_MODERATE)?;
+    let moderated_by = moderated
+        .attr("by")
+        .and_then(|by| by.parse::<jid::Jid>().ok());
+    let reason = retract
+        .get_child("reason", NS_MESSAGE_RETRACT)
         .map(|child| child.text())
         .filter(|text| !text.trim().is_empty());
     Some(ModerationPayload {

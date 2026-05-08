@@ -22,6 +22,14 @@ export interface ChannelThreadInboxEntry {
   preview?: string;
 }
 
+interface ChannelUnreadSummary {
+  unread: number;
+  mentions: number;
+  threadUnread: number;
+  preview?: string;
+  lastUpdated?: number;
+}
+
 export function useChannelInbox(
   xmppClient: Ref<BrowserXmppClient | null>,
 ) {
@@ -115,12 +123,23 @@ export function useChannelInbox(
    */
   function channelUnreadMap(
     channels: readonly Pick<ChannelSummary, "id" | "jid">[],
-  ): Record<string, { unread: number; mentions: number }> {
-    const map: Record<string, { unread: number; mentions: number }> = {};
+  ): Record<string, ChannelUnreadSummary> {
+    const map: Record<string, ChannelUnreadSummary> = {};
     for (const channel of channels) {
       if (!channel.jid) continue;
-      const entry = inboxState.value.channels.get(barePeerJid(channel.jid));
-      map[channel.id] = { unread: entry?.unread ?? 0, mentions: 0 };
+      const roomJid = barePeerJid(channel.jid);
+      const entry = inboxState.value.channels.get(roomJid);
+      const threadEntriesForRoom = threadsForRoom(inboxState.value, roomJid);
+      const newest = [entry, ...threadEntriesForRoom]
+        .filter((item): item is InboxEntry => !!item)
+        .sort((a, b) => b.lastUpdated - a.lastUpdated)[0];
+      map[channel.id] = {
+        unread: entry?.unread ?? 0,
+        mentions: 0,
+        threadUnread: threadEntriesForRoom.reduce((total, thread) => total + thread.unread, 0),
+        ...(newest?.preview || newest?.threadTitle ? { preview: newest.preview ?? newest.threadTitle } : {}),
+        ...(newest?.lastUpdated ? { lastUpdated: newest.lastUpdated } : {}),
+      };
     }
     return map;
   }

@@ -1,17 +1,28 @@
 <script setup lang="ts">
 import { computed } from "vue";
 import { Hash, MessageCircle, MessagesSquare, Users } from "lucide-vue-next";
-import type { ChannelSummary, SpaceSummary } from "@/lib/chat-types";
+import type { ChannelSummary } from "@/lib/chat-types";
 import type { RosterContact } from "@/lib/xmpp/types";
+import AppAvatar from "@/components/ui/AppAvatar.vue";
 import { isForumChannel } from "@/lib/channel-types";
 import { groupChannelsBySpace } from "@/lib/channel-grouping";
+import { formatTimelineStamp } from "@/channels/timeline";
+import type { HomeDashboardProps } from "@/home/dashboard-props";
+import {
+  channelActivityPreview,
+  channelActivityState,
+  channelHomeLabel,
+  channelUnreadBadgeCount,
+  compareChannelActivityPriority,
+  dmHomeLabel,
+  dmPresenceLabel,
+  dmPreviewText,
+  spaceHomeLabel,
+  summarizeHomeActivity,
+  type HomeActivitySummary,
+} from "@/home/activity";
 
-const props = defineProps<{
-  spaces: SpaceSummary[];
-  channels: ChannelSummary[];
-  contacts: RosterContact[];
-  isLoading: boolean;
-}>();
+const props = defineProps<HomeDashboardProps>();
 
 const emit = defineEmits<{
   selectChannel: [id: string];
@@ -20,17 +31,115 @@ const emit = defineEmits<{
 }>();
 
 const groups = computed(() => groupChannelsBySpace(props.spaces, props.channels));
+const visibleChannelGroups = computed(() => groups.value.filter((group) => group.channels.length > 0));
+const activeChannelJids = computed(() => props.activeChannelJids ?? new Set<string>());
+const directMessages = computed(() => props.dmConversations ?? []);
 const channelsBySpace = computed(() =>
-  new Map(groups.value.filter((group) => group.space).map((group) => [group.id, group.channels.length])),
+  new Map(groups.value.flatMap((group) => group.space ? [[group.space.id, group.channels.length] as const] : [])),
+);
+const activityByChannelId = computed(() =>
+  new Map(props.channels.map((channel) => [
+    channel.id,
+    channelActivityState(channel, props.channelUnreadMap, activeChannelJids.value),
+  ])),
+);
+const activityByGroupId = computed(() =>
+  new Map(groups.value.map((group) => [
+    group.id,
+    summarizeHomeActivity(group.channels, props.channelUnreadMap, activeChannelJids.value),
+  ])),
 );
 
 function contactLabel(contact: RosterContact): string {
   return contact.name || contact.username || contact.jid;
 }
 
-function selectFirstSpaceChannel(spaceId: string) {
-  const channel = groups.value.find((group) => group.id === spaceId)?.channels[0];
-  if (channel) emit("selectChannel", channel.id);
+function selectSpaceChannel(spaceId: string) {
+  const channelId = spaceTargetChannel(spaceId)?.id;
+  if (channelId) emit("selectChannel", channelId);
+}
+
+function channelsForSpace(spaceId: string): ChannelSummary[] {
+  return groups.value.find((group) => group.space?.id === spaceId)?.channels ?? [];
+}
+
+function spaceTargetChannel(spaceId: string): ChannelSummary | undefined {
+  return [...channelsForSpace(spaceId)]
+    .sort((a, b) => compareChannelActivityPriority(channelActivity(a), channelActivity(b)))
+    [0];
+}
+
+function spaceHasChannels(spaceId: string): boolean {
+  return (channelsBySpace.value.get(spaceId) ?? 0) > 0;
+}
+
+function channelActivity(channel: ChannelSummary) {
+  return activityByChannelId.value.get(channel.id)
+    ?? { unread: 0, mentions: 0, threadUnread: 0, hasActivity: false };
+}
+
+function groupActivity(groupId: string): HomeActivitySummary {
+  return activityByGroupId.value.get(groupId)
+    ?? { channelCount: 0, unread: 0, mentions: 0, threadUnread: 0, hasActivity: false };
+}
+
+function unreadBadgeCount(activity: { unread: number; threadUnread?: number }): number {
+  return channelUnreadBadgeCount(activity);
+}
+
+function threadUnreadCount(activity: { threadUnread?: number }): number {
+  return activity.threadUnread ?? 0;
+}
+
+function threadUnreadBadgeLabel(activity: { threadUnread?: number }): string {
+  const count = threadUnreadCount(activity);
+  return `${count} ${count === 1 ? "reply" : "replies"}`;
+}
+
+function hasChannelActivitySignal(activity: { unread: number; mentions: number; threadUnread?: number; hasActivity: boolean }): boolean {
+  return activity.unread > 0 || activity.mentions > 0 || threadUnreadCount(activity) > 0 || activity.hasActivity;
+}
+
+function showLiveActivityDot(activity: { unread: number; mentions: number; threadUnread?: number; hasActivity: boolean }): boolean {
+  return activity.hasActivity && activity.mentions === 0 && unreadBadgeCount(activity) === 0 && threadUnreadCount(activity) === 0;
+}
+
+function activityStamp(value?: number): string {
+  if (!value) return "";
+  const timestamp = value > 1_000_000_000_000 ? value : value * 1000;
+  return formatTimelineStamp(new Date(timestamp).toISOString());
+}
+
+function spaceDetail(spaceId: string): string {
+  const channelCount = channelsBySpace.value.get(spaceId) ?? 0;
+  const count = `${channelCount} ${channelCount === 1 ? "channel" : "channels"}`;
+  const target = spaceTargetChannel(spaceId);
+  const preview = channelActivityPreview(groupActivity(`space:${spaceId}`));
+  return [
+    count,
+    ...(target ? [`Opens ${target.name}`] : []),
+    ...(preview ? [preview] : []),
+  ].join(" · ");
+}
+
+function dotClass(show?: "available" | "away" | "xa" | "dnd" | "offline"): string {
+  if (show === "away") return "bg-warning/75";
+  if (show === "dnd") return "bg-destructive/75";
+  if (show === "xa") return "bg-warning/55";
+  if (show === "available") return "bg-success/75";
+  return "bg-muted-foreground/25";
+}
+
+function dmDisplayName(conversation: { peerUsername?: string; peerJid: string }): string {
+  return conversation.peerUsername || conversation.peerJid;
+}
+
+function dmSecondaryText(conversation: { peerUsername?: string; peerJid: string; lastMessageBody?: string }): string {
+  const preview = dmPreviewText(conversation.lastMessageBody);
+  if (preview && conversation.peerUsername && conversation.peerUsername !== conversation.peerJid) {
+    return `${conversation.peerJid} · ${preview}`;
+  }
+  return preview || conversation.peerJid;
 }
 </script>
 
@@ -40,7 +149,7 @@ function selectFirstSpaceChannel(spaceId: string) {
       <header class="flex items-center justify-between gap-4">
         <div>
           <h1 class="type-display-title">Home</h1>
-          <p class="type-caption text-muted-foreground">Spaces, channels, and roster contacts.</p>
+          <p class="type-caption text-muted-foreground">Activity across spaces, channels, direct messages, and contacts.</p>
         </div>
         <button
           class="chat-icon-button chat-icon-button--md text-muted-foreground hover:bg-muted hover:text-foreground lg:hidden"
@@ -62,15 +171,44 @@ function selectFirstSpaceChannel(spaceId: string) {
             v-for="space in spaces"
             :key="space.id"
             class="chat-list-row flex min-h-16 items-center gap-3 rounded-lg border border-border bg-card px-4 py-3 text-left hover:bg-muted/60"
+            :class="spaceHasChannels(space.id) ? '' : 'cursor-default hover:bg-card'"
             type="button"
-            @click="selectFirstSpaceChannel(space.id)"
+            :disabled="!spaceHasChannels(space.id)"
+            :aria-label="spaceHomeLabel(space.name, groupActivity(`space:${space.id}`), spaceTargetChannel(space.id)?.name)"
+            @click="selectSpaceChannel(space.id)"
           >
             <span class="flex h-9 w-9 items-center justify-center rounded-lg bg-primary/10 text-primary">
               {{ (space.name[0] ?? "S").toUpperCase() }}
             </span>
             <span class="min-w-0 flex-1">
               <span class="type-control block truncate text-foreground">{{ space.name }}</span>
-              <span class="type-caption text-muted-foreground">{{ channelsBySpace.get(space.id) ?? 0 }} channels</span>
+              <span class="type-caption block truncate text-muted-foreground" :title="spaceDetail(space.id)">
+                {{ spaceDetail(space.id) }}
+              </span>
+            </span>
+            <span class="flex shrink-0 items-center gap-1">
+              <span
+                v-if="groupActivity(`space:${space.id}`).mentions > 0"
+                class="type-count-badge inline-flex min-w-[18px] h-[18px] px-1 items-center justify-center rounded-full bg-destructive text-destructive-foreground"
+                aria-hidden="true"
+              >@{{ groupActivity(`space:${space.id}`).mentions }}</span>
+              <span
+                v-if="unreadBadgeCount(groupActivity(`space:${space.id}`)) > 0"
+                class="type-count-badge inline-flex min-w-[18px] h-[18px] px-1 items-center justify-center rounded-full bg-primary text-primary-foreground"
+                aria-hidden="true"
+              >{{ unreadBadgeCount(groupActivity(`space:${space.id}`)) }}</span>
+              <span
+                v-if="threadUnreadCount(groupActivity(`space:${space.id}`)) > 0"
+                class="type-count-badge inline-flex min-h-[18px] items-center justify-center whitespace-nowrap rounded-full border border-border bg-muted px-1.5 py-0.5 text-foreground"
+                title="Unread thread replies"
+                aria-hidden="true"
+              >{{ threadUnreadBadgeLabel(groupActivity(`space:${space.id}`)) }}</span>
+              <span
+                v-if="showLiveActivityDot(groupActivity(`space:${space.id}`))"
+                class="w-2 h-2 rounded-full bg-primary shadow-[0_0_6px_var(--glow-strong)]"
+                title="Live activity"
+                aria-hidden="true"
+              />
             </span>
           </button>
           <div v-if="!isLoading && spaces.length === 0" class="type-caption rounded-lg border border-border px-4 py-6 text-muted-foreground">
@@ -86,7 +224,7 @@ function selectFirstSpaceChannel(spaceId: string) {
         </div>
         <div class="grid gap-4 lg:grid-cols-2">
           <div
-            v-for="group in groups"
+            v-for="group in visibleChannelGroups"
             :key="group.id"
             class="rounded-lg border border-border bg-card p-3"
           >
@@ -95,17 +233,101 @@ function selectFirstSpaceChannel(spaceId: string) {
               <button
                 v-for="channel in group.channels"
                 :key="channel.id"
-                class="chat-list-row flex min-h-10 items-center gap-2 rounded-md px-3 py-2 text-left text-muted-foreground hover:bg-muted hover:text-foreground"
+                class="chat-list-row flex min-h-14 items-center gap-2 rounded-md px-3 py-2 text-left text-muted-foreground hover:bg-muted hover:text-foreground"
                 type="button"
+                :aria-label="channelHomeLabel(channel, channelActivity(channel), activityStamp(channelActivity(channel).lastUpdated))"
                 @click="emit('selectChannel', channel.id)"
               >
                 <component :is="isForumChannel(channel) ? MessagesSquare : Hash" class="h-3.5 w-3.5 text-primary/70" />
-                <span class="type-control flex-1 truncate">{{ channel.name }}</span>
+                <span class="min-w-0 flex-1">
+                  <span
+                    class="type-control block truncate"
+                    :class="hasChannelActivitySignal(channelActivity(channel)) ? 'type-strong text-foreground' : ''"
+                  >{{ channel.name }}</span>
+                  <span
+                    v-if="channelActivityPreview(channelActivity(channel))"
+                    class="type-caption block truncate text-muted-foreground"
+                    :title="channelActivityPreview(channelActivity(channel))"
+                  >{{ channelActivityPreview(channelActivity(channel)) }}</span>
+                </span>
+                <span v-if="activityStamp(channelActivity(channel).lastUpdated)" class="type-meta type-numeric text-muted-foreground">
+                  {{ activityStamp(channelActivity(channel).lastUpdated) }}
+                </span>
+                <span class="flex shrink-0 items-center gap-1">
+                  <span
+                    v-if="channelActivity(channel).mentions > 0"
+                    class="type-count-badge inline-flex min-w-[18px] h-[18px] px-1 items-center justify-center rounded-full bg-destructive text-destructive-foreground"
+                    aria-hidden="true"
+                  >@{{ channelActivity(channel).mentions }}</span>
+                  <span
+                    v-if="unreadBadgeCount(channelActivity(channel)) > 0"
+                    class="type-count-badge inline-flex min-w-[18px] h-[18px] px-1 items-center justify-center rounded-full bg-primary text-primary-foreground"
+                    aria-hidden="true"
+                  >{{ unreadBadgeCount(channelActivity(channel)) }}</span>
+                  <span
+                    v-if="threadUnreadCount(channelActivity(channel)) > 0"
+                    class="type-count-badge inline-flex min-h-[18px] items-center justify-center whitespace-nowrap rounded-full border border-border bg-muted px-1.5 py-0.5 text-foreground"
+                    title="Unread thread replies"
+                    aria-hidden="true"
+                  >{{ threadUnreadBadgeLabel(channelActivity(channel)) }}</span>
+                  <span
+                    v-if="showLiveActivityDot(channelActivity(channel))"
+                    class="w-2 h-2 rounded-full bg-primary shadow-[0_0_6px_var(--glow-strong)]"
+                    title="Live activity"
+                    aria-hidden="true"
+                  />
+                </span>
               </button>
             </div>
           </div>
-          <div v-if="!isLoading && groups.length === 0" class="type-caption rounded-lg border border-border px-4 py-6 text-muted-foreground">
+          <div v-if="!isLoading && visibleChannelGroups.length === 0" class="type-caption rounded-lg border border-border px-4 py-6 text-muted-foreground">
             No channels discovered.
+          </div>
+        </div>
+      </section>
+
+      <section class="grid gap-3">
+        <div class="flex items-center gap-2">
+          <MessageCircle class="h-4 w-4 text-primary" />
+          <h2 class="type-pane-title">Direct messages</h2>
+        </div>
+        <div class="grid gap-2 md:grid-cols-2 xl:grid-cols-3">
+          <button
+            v-for="conversation in directMessages"
+            :key="conversation.peerJid"
+            class="chat-list-row flex min-h-14 items-center gap-3 rounded-lg border border-border bg-card px-4 py-3 text-left hover:bg-muted/60"
+            type="button"
+            :aria-label="dmHomeLabel(conversation, conversation.lastMessageAt ? formatTimelineStamp(conversation.lastMessageAt) : '')"
+            @click="emit('selectContact', conversation.peerJid)"
+          >
+            <span class="relative">
+              <AppAvatar :name="conversation.peerUsername" :src="conversation.peerAvatarUrl ?? null" size="sm" />
+              <span class="absolute -right-0.5 -bottom-0.5 w-2 h-2 rounded-full border border-background" :class="dotClass(conversation.presenceShow)" />
+              <span class="sr-only">{{ dmPresenceLabel(conversation.presenceShow) }}</span>
+            </span>
+            <span class="min-w-0 flex-1">
+              <span
+                class="type-control block truncate text-foreground"
+                :class="conversation.unreadCount > 0 ? 'type-strong' : ''"
+              >{{ dmDisplayName(conversation) }}</span>
+              <span class="type-caption block truncate text-muted-foreground" :title="dmSecondaryText(conversation)">
+                {{ dmSecondaryText(conversation) }}
+              </span>
+              <span class="type-meta block text-muted-foreground">
+                {{ dmPresenceLabel(conversation.presenceShow) }}
+              </span>
+            </span>
+            <span v-if="conversation.lastMessageAt" class="type-meta type-numeric text-muted-foreground">
+              {{ formatTimelineStamp(conversation.lastMessageAt) }}
+            </span>
+            <span
+              v-if="conversation.unreadCount > 0"
+              class="type-count-badge inline-flex min-w-[18px] h-[18px] px-1 items-center justify-center rounded-full bg-primary text-primary-foreground"
+              aria-hidden="true"
+            >{{ conversation.unreadCount }}</span>
+          </button>
+          <div v-if="!isLoading && directMessages.length === 0" class="type-caption rounded-lg border border-border px-4 py-6 text-muted-foreground">
+            No direct messages yet.
           </div>
         </div>
       </section>

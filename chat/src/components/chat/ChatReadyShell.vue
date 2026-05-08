@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { computed } from "vue";
 import HomeDashboard from "@/components/chat/HomeDashboard.vue";
 import ChatAppModals from "@/components/chat/ChatAppModals.vue";
 import ChatMobileDrawers from "@/components/chat/ChatMobileDrawers.vue";
@@ -10,6 +11,7 @@ import TopicsPanel from "@/components/chat/TopicsPanel.vue";
 import PinnedPanel from "@/components/chat/PinnedPanel.vue";
 import UserSettingsPage from "@/components/chat/UserSettingsPage.vue";
 import WaddlesSidebar from "@/components/chat/WaddlesSidebar.vue";
+import { buildHomeDashboardProps } from "@/home/dashboard-props";
 import type { ChatAppController } from "@/shell/chat-app-controller";
 
 const props = defineProps<{
@@ -102,6 +104,17 @@ const {
   unpinActiveMessage,
   jumpToPinnedMessage,
 } = props.controller;
+
+const homeDashboardProps = computed(() => buildHomeDashboardProps({
+  spaces: waddles.sortedSpaces.value,
+  channels: waddles.sortedChannels.value,
+  contacts: rosterContacts.contacts.value,
+  isLoading: waddles.isLoadingStructure.value || rosterContacts.isLoadingContacts.value,
+  channelUnreadMap: computedChannelUnreadMap.value,
+  mentionedRoomJids: messaging.mentionedChannelCounts.value,
+  activeChannelJids: messaging.activeChannels.value,
+  dmConversations: dmConversations.conversations.value,
+}));
 </script>
 
 <template>
@@ -173,10 +186,7 @@ const {
       <!-- Main content -->
       <HomeDashboard
         v-if="ui.activePage.value === 'dashboard'"
-        :spaces="waddles.sortedSpaces.value"
-        :channels="waddles.sortedChannels.value"
-        :contacts="rosterContacts.contacts.value"
-        :is-loading="waddles.isLoadingStructure.value || rosterContacts.isLoadingContacts.value"
+        v-bind="homeDashboardProps"
         @select-channel="selectChannel"
         @select-contact="handleOpenDm"
         @open-nav="ui.showMobileNav.value = true"
@@ -254,11 +264,12 @@ const {
               :member-state="displayedMemberState"
               :typing-users="activeTypingUsers"
               :current-user="connectionStore.session?.username"
+              :current-user-jid="connectionStore.session?.jid"
               :self-domain="selfDomain"
               :avatar-url-by-author="avatarUrlByAuthor"
-               :author-jid-by-nick="authorJidByNick"
+              :author-jid-by-nick="authorJidByNick"
               :giphy-api-key="giphyApiKey"
-               :mention-candidates="mentionCandidates"
+              :mention-candidates="mentionCandidates"
               :room-hats="authorHatsByNick"
               :room-presence="messaging.roomPresence.value"
               :room-last-seen="messaging.roomLastSeen.value"
@@ -333,13 +344,14 @@ const {
               :thread-index="threads.index.value"
               :resolve-entry="threads.resolveEntry"
               :current-user="connectionStore.session?.username"
+              :current-user-jid="connectionStore.session?.jid"
               :avatar-url-by-author="avatarUrlByAuthor"
-               :author-jid-by-nick="authorJidByNick"
+              :author-jid-by-nick="authorJidByNick"
               :room-hats="authorHatsByNick"
               :room-presence="messaging.roomPresence.value"
               :room-last-seen="messaging.roomLastSeen.value"
               :giphy-api-key="giphyApiKey"
-               :mention-candidates="mentionCandidates"
+              :mention-candidates="mentionCandidates"
               :slow-mode-cooldown="messaging.slowModeCooldown.value"
               :is-sending="false"
               :is-loading-older-replies="messaging.loadingOlderThreadIds.value.has(activeThreadStack[activeThreadStack.length - 2] ?? '')"
@@ -371,13 +383,14 @@ const {
               :thread-index="threads.index.value"
               :resolve-entry="threads.resolveEntry"
               :current-user="connectionStore.session?.username"
+              :current-user-jid="connectionStore.session?.jid"
               :avatar-url-by-author="avatarUrlByAuthor"
-               :author-jid-by-nick="authorJidByNick"
+              :author-jid-by-nick="authorJidByNick"
               :room-hats="authorHatsByNick"
               :room-presence="messaging.roomPresence.value"
               :room-last-seen="messaging.roomLastSeen.value"
               :giphy-api-key="giphyApiKey"
-               :mention-candidates="mentionCandidates"
+              :mention-candidates="mentionCandidates"
               :slow-mode-cooldown="messaging.slowModeCooldown.value"
               :is-sending="messaging.isSending.value"
               :is-loading-older-replies="messaging.loadingOlderThreadIds.value.has(activeThreadStack[activeThreadStack.length - 1] ?? '')"

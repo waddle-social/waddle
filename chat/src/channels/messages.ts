@@ -38,7 +38,7 @@ import { roomKey, setLastSeen } from "@/lib/last-seen-store";
 import {
   listQueuedRoomMessages,
 } from "@/lib/outbound-queue-store";
-import { mentionMatchesUsername } from "@/lib/mentions";
+import { mentionMatchesBareJid } from "@/lib/mentions";
 import { useScrollDirectionPreference } from "@/preferences/scroll-direction";
 import { roomJidForChannelSummary } from "@/lib/channel-room";
 import {
@@ -48,11 +48,16 @@ import {
 } from "@/channels/timeline";
 import {
   buildChannelTimelineFromMamResults,
+  isMucServiceModeration,
+  isSameMucRetractionSender,
+  isValidMucModerationTarget,
+  isValidMucRetractionTarget,
   isSameMucCorrectionSender,
   mucCorrectionSender,
   queuedRoomMessageToTimeline,
   reactionSendersForUpdate,
   reactionsFromSenders,
+  retractChannelTimelineMessage,
   removeSenderReactions,
   type TimelineBuildOptions,
 } from "@/channels/message-timeline-state";
@@ -68,6 +73,7 @@ export function useChannelMessages(
   actionError: Ref<string>,
   clearActionError: () => void,
   mentionJidsByNick?: Ref<Record<string, string>>,
+  isChannelTimelineActive: Ref<boolean> = computed(() => true),
 ) {
   const { mode: scrollDirection } = useScrollDirectionPreference();
   // xmppStatus is owned by $xmppStatus (written from XmppProvider, which is
@@ -107,6 +113,7 @@ export function useChannelMessages(
     return null;
   });
   const activeChannels = ref<Set<string>>(new Set());
+  const mentionedChannelCounts = ref<Record<string, number>>({});
   const lastMentionActivity = ref<RoomActivityEvent | null>(null);
   const roomAvatarHashes = ref<Record<string, string>>({});
   const searchQuery = ref("");
@@ -133,6 +140,9 @@ export function useChannelMessages(
     if (!session.value || !activeChannelId.value) return null;
     return roomJidForChannel(activeChannelId.value);
   });
+  const activeTimelineRoomJid = computed(() =>
+    isChannelTimelineActive.value ? currentRoomJid.value : null
+  );
   const channelIsForum = computed(() => isForumChannel(currentChannel.value));
 
   function roomJidForChannel(channelId: string): string | null {
@@ -161,8 +171,24 @@ export function useChannelMessages(
     if (client) {
       client.setMessageHandler((msg) => {
         if (
-          !currentRoomJid.value ||
-          msg.roomJid !== currentRoomJid.value ||
+          (!activeTimelineRoomJid.value || msg.roomJid !== activeTimelineRoomJid.value) &&
+          msg.type === "message" &&
+          msg.body &&
+          !msg.replacesId &&
+          !msg.retractsId
+        ) {
+          recordRoomActivity({
+            roomJid: msg.roomJid,
+            nick: msg.nick,
+            body: msg.body,
+            ...(msg.mentions ? { mentions: msg.mentions } : {}),
+            ...(msg.broadcastMention ? { broadcastMention: msg.broadcastMention } : {}),
+          });
+          return;
+        }
+        if (
+          !activeTimelineRoomJid.value ||
+          msg.roomJid !== activeTimelineRoomJid.value ||
           msg.type !== "message"
         )
           return;
@@ -171,7 +197,7 @@ export function useChannelMessages(
 
         // XEP-0424: Handle message retractions
         if (msg.retractsId) {
-          applyRetraction(msg.retractsId);
+          applyRetraction(msg);
           return;
         }
 
@@ -198,7 +224,7 @@ export function useChannelMessages(
         if (msg.nick !== session.value?.username && isTabHidden) {
           const isMentioned =
             !!msg.broadcastMention ||
-            msg.mentions?.some((mention) => mentionMatchesUsername(mention, session.value?.username));
+            msg.mentions?.some(isSessionMention);
           if (isMentioned) {
             const activity: RoomActivityEvent = {
               roomJid: msg.roomJid,
@@ -207,12 +233,13 @@ export function useChannelMessages(
             };
             if (msg.mentions) activity.mentions = msg.mentions;
             if (msg.broadcastMention) activity.broadcastMention = msg.broadcastMention;
+            recordMentionActivity(activity);
             lastMentionActivity.value = activity;
           }
         }
       });
       client.setChatStateHandler((event) => {
-        if (!currentRoomJid.value || event.roomJid !== currentRoomJid.value) return;
+        if (!activeTimelineRoomJid.value || event.roomJid !== activeTimelineRoomJid.value) return;
         if (event.state === "composing") {
           addTypingUser(event.nick);
         } else {
@@ -220,7 +247,7 @@ export function useChannelMessages(
         }
       });
       client.setReactionHandler((event) => {
-        if (!currentRoomJid.value || event.roomJid !== currentRoomJid.value) return;
+        if (!activeTimelineRoomJid.value || event.roomJid !== activeTimelineRoomJid.value) return;
         applyReaction(
           event.messageId,
           event.nick,
@@ -251,7 +278,7 @@ export function useChannelMessages(
         }
       });
       client.setDisplayedHandler((event) => {
-        if (!currentRoomJid.value || event.roomJid !== currentRoomJid.value) return;
+        if (!activeTimelineRoomJid.value || event.roomJid !== activeTimelineRoomJid.value) return;
         applyDisplayed(event.messageId, event.nick);
       });
       client.setHatsHandler((hats) => {
@@ -264,10 +291,7 @@ export function useChannelMessages(
         roomLastSeen.value = { ...roomLastSeen.value, [nick]: timestamp };
       });
       client.setActivityHandler((event) => {
-        activeChannels.value = new Set([...activeChannels.value, event.roomJid]);
-        if (event.mentions?.length || event.broadcastMention) {
-          lastMentionActivity.value = event;
-        }
+        recordRoomActivity(event);
       });
       // XEP-0486: Track room avatar hashes from presence
       client.setRoomAvatarHandler((roomJid, hash) => {
@@ -290,6 +314,7 @@ export function useChannelMessages(
     } else {
       // $xmppStatus is reset by XmppProvider on logout/unmount.
       clearTypingState();
+      clearLiveActivityState();
     }
   }, { immediate: true });
 
@@ -436,10 +461,20 @@ export function useChannelMessages(
     });
   }
 
-  function applyRetraction(retractsId: string) {
-    messages.value = messages.value.map((m) =>
-      matchMessageId(m, retractsId) ? { ...m, body: "", isRetracted: true } : m,
-    );
+  function applyRetraction(msg: LiveRoomMessage) {
+    messages.value = messages.value.map((m) => {
+      if (!msg.retractsId || !matchMessageId(m, msg.retractsId)) return m;
+      if (msg.moderationTargetId) {
+        if (!isMucServiceModeration(msg)) return m;
+        if (!isValidMucModerationTarget(m, msg.moderationTargetId)) return m;
+      } else if (
+        !isValidMucRetractionTarget(m, msg.retractsId)
+        || !isSameMucRetractionSender(m, mucCorrectionSender(msg))
+      ) {
+        return m;
+      }
+      return retractChannelTimelineMessage(m, msg.retractionId);
+    });
   }
 
   function applyCorrection(
@@ -476,7 +511,10 @@ export function useChannelMessages(
     });
   }
 
-  function mergeLiveMessage(msg: TimelineMessage) {
+  function mergeLiveMessage(rawMessage: TimelineMessage) {
+    const msg = rawMessage.isRetracted
+      ? retractChannelTimelineMessage(rawMessage, rawMessage.retractionId)
+      : rawMessage;
     // Check if this is a self-echo reconciling an optimistically-inserted
     // message. Match by ID first; otherwise, for our own sends, fall back
     // to body matching — but only against messages still awaiting echo
@@ -1238,6 +1276,7 @@ export function useChannelMessages(
     isLoadingOlderMessages.value = false;
     // $xmppStatus is authoritative and owned by XmppProvider; do not write it here.
     clearTypingState();
+    clearLiveActivityState();
     isLoadingMessages.value = false;
     isSearching.value = false;
     searchQuery.value = "";
@@ -1308,9 +1347,48 @@ export function useChannelMessages(
   }
 
   function clearChannelActivity(roomJid: string) {
+    const bareRoomJid = barePeerJid(roomJid);
     const next = new Set(activeChannels.value);
-    next.delete(roomJid);
+    next.delete(bareRoomJid);
     activeChannels.value = next;
+    if (mentionedChannelCounts.value[bareRoomJid]) {
+      const remaining = { ...mentionedChannelCounts.value };
+      delete remaining[bareRoomJid];
+      mentionedChannelCounts.value = remaining;
+    }
+  }
+
+  function clearLiveActivityState() {
+    activeChannels.value = new Set();
+    mentionedChannelCounts.value = {};
+    lastMentionActivity.value = null;
+  }
+
+  function isOwnMentionActivity(event: RoomActivityEvent): boolean {
+    if (event.nick === session.value?.username) return false;
+    return !!event.broadcastMention
+      || !!event.mentions?.some(isSessionMention);
+  }
+
+  function isSessionMention(mention: string): boolean {
+    return mentionMatchesBareJid(mention, session.value?.jid);
+  }
+
+  function recordMentionActivity(event: RoomActivityEvent) {
+    const roomJid = barePeerJid(event.roomJid);
+    mentionedChannelCounts.value = {
+      ...mentionedChannelCounts.value,
+      [roomJid]: (mentionedChannelCounts.value[roomJid] ?? 0) + 1,
+    };
+  }
+
+  function recordRoomActivity(event: RoomActivityEvent) {
+    const roomJid = barePeerJid(event.roomJid);
+    activeChannels.value = new Set([...activeChannels.value, roomJid]);
+    if (isOwnMentionActivity(event)) {
+      recordMentionActivity(event);
+      lastMentionActivity.value = event;
+    }
   }
 
   watch(scrollDirection, () => {
@@ -1379,6 +1457,7 @@ export function useChannelMessages(
     disconnect,
     clearMessages,
     activeChannels,
+    mentionedChannelCounts,
     roomAvatarHashes,
     searchQuery,
     searchResults,

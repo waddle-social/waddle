@@ -64,6 +64,36 @@ function mergeMissingThreadMetadata(
   return next;
 }
 
+export function retractChannelTimelineMessage(
+  existing: TimelineMessage,
+  retractionId?: string,
+): TimelineMessage {
+  const next: TimelineMessage = {
+    ...existing,
+    body: "",
+    isRetracted: true,
+    ...(retractionId ? { retractionId } : {}),
+  };
+  delete next.markup;
+  delete next.references;
+  delete next.sharedFiles;
+  delete next.extensionAnnotations;
+  delete next.isSticker;
+  delete next.mentions;
+  delete next.broadcastMention;
+  delete next.forumPostKind;
+  delete next.forumTitle;
+  delete next.forumThreadTitle;
+  return next;
+}
+
+function mergeRetractionTombstone(
+  existing: TimelineMessage,
+  incoming: TimelineMessage,
+): TimelineMessage {
+  return incoming.isRetracted ? retractChannelTimelineMessage(existing, incoming.retractionId) : existing;
+}
+
 export interface TimelineBuildOptions {
   seedExistingOnly?: boolean;
 }
@@ -185,6 +215,27 @@ export function isSameMucCorrectionSender(
   return true;
 }
 
+export function isSameMucRetractionSender(
+  target: TimelineMessage,
+  retraction: { authorJid: string; authorRealJid?: string },
+): boolean {
+  return isSameMucCorrectionSender(target, retraction);
+}
+
+export function isValidMucModerationTarget(target: TimelineMessage, targetId: string): boolean {
+  return target.replyableId === targetId;
+}
+
+export function isValidMucRetractionTarget(target: TimelineMessage, targetId: string): boolean {
+  return !target.replyableId || target.replyableId === targetId;
+}
+
+export function isMucServiceModeration(
+  msg: Pick<LiveRoomMessage, "fromJid" | "roomJid" | "moderationTargetId">,
+): boolean {
+  return !!msg.moderationTargetId && msg.fromJid === msg.roomJid;
+}
+
 export function buildChannelTimelineFromMamResults(params: {
   session: WaddleSession;
   channelIsForum: boolean;
@@ -195,7 +246,11 @@ export function buildChannelTimelineFromMamResults(params: {
   const { session, channelIsForum, mamResults, existing = [], options = {} } = params;
   const regularMessages: LiveRoomMessage[] = [];
   const reactionUpdates: { targetId: string; nick: string; senderId: string; emojis: string[] }[] = [];
-  const retractionUpdates: string[] = [];
+  const retractionUpdates: {
+    targetId: string;
+    retractionSender: { authorJid: string; authorRealJid?: string };
+    isModeration: boolean;
+  }[] = [];
   const correctionUpdates: {
     targetId: string;
     correctionSender: { authorJid: string; authorRealJid?: string };
@@ -214,7 +269,12 @@ export function buildChannelTimelineFromMamResults(params: {
         emojis: msg._reactionEmojis,
       });
     } else if (msg.retractsId) {
-      retractionUpdates.push(msg.retractsId);
+      if (msg.moderationTargetId && !isMucServiceModeration(msg)) continue;
+      retractionUpdates.push({
+        targetId: msg.retractsId,
+        retractionSender: mucCorrectionSender(msg),
+        isModeration: !!msg.moderationTargetId,
+      });
     } else if (msg.replacesId) {
       correctionUpdates.push({
         targetId: msg.replacesId,
@@ -226,6 +286,7 @@ export function buildChannelTimelineFromMamResults(params: {
       });
     } else if (
       msg.body
+      || msg.isRetracted
       || (msg.sharedFiles && msg.sharedFiles.length > 0)
       || msg.isSticker
       || msg.threadId
@@ -243,14 +304,18 @@ export function buildChannelTimelineFromMamResults(params: {
   }
   const timeline = options.seedExistingOnly ? [] : [...existing];
   for (const raw of regularMessages) {
-    const tm = mapLiveRoomMessageToTimeline(session, raw, (id) => byId.get(id));
+    const mapped = mapLiveRoomMessageToTimeline(session, raw, (id) => byId.get(id));
+    const tm = mapped.isRetracted
+      ? retractChannelTimelineMessage(mapped, mapped.retractionId)
+      : mapped;
     const existingMessage = [tm.id, ...(tm.wireIds ?? [])]
       .map((id) => byId.get(id))
       .find((message): message is TimelineMessage => !!message);
     if (existingMessage) {
-      const merged = options.seedExistingOnly
+      const mergedBase = options.seedExistingOnly
         ? mergeMissingThreadMetadata(tm, existingMessage)
         : mergeMissingThreadMetadata(existingMessage, tm);
+      const merged = mergeRetractionTombstone(mergedBase, tm);
       if (options.seedExistingOnly) {
         indexMessageByIds(byId, merged);
         timeline.push(merged);
@@ -281,11 +346,22 @@ export function buildChannelTimelineFromMamResults(params: {
     }
   }
 
-  for (const retractsId of retractionUpdates) {
-    const target = findMessageById(timeline, retractsId);
+  for (const update of retractionUpdates) {
+    const target = findMessageById(timeline, update.targetId);
     if (!target) continue;
-    target.body = "";
-    target.isRetracted = true;
+    if (update.isModeration) {
+      if (!isValidMucModerationTarget(target, update.targetId)) continue;
+    } else if (
+      !isValidMucRetractionTarget(target, update.targetId)
+      || !isSameMucRetractionSender(target, update.retractionSender)
+    ) {
+      continue;
+    }
+    const index = timeline.indexOf(target);
+    if (index === -1) continue;
+    const retracted = retractChannelTimelineMessage(target);
+    timeline[index] = retracted;
+    indexMessageByIds(byId, retracted);
   }
 
   for (const update of reactionUpdates) {

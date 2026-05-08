@@ -9,6 +9,12 @@ pub struct WaddleMarkupSpan {
 }
 
 #[derive(Debug, Serialize)]
+pub struct WaddleStanzaId {
+    pub id: String,
+    pub by: String,
+}
+
+#[derive(Debug, Serialize)]
 pub struct WaddleMessage {
     pub id: Option<String>,
     pub from: Option<String>,
@@ -18,9 +24,13 @@ pub struct WaddleMessage {
     pub message_type: String,
     pub timestamp: Option<String>,
     pub stanza_id: Option<String>,
+    pub stanza_id_by: Option<String>,
+    pub stanza_ids: Vec<WaddleStanzaId>,
     pub origin_id: Option<String>,
     pub replaces_id: Option<String>,
     pub retracts_id: Option<String>,
+    pub retraction_id: Option<String>,
+    pub is_retracted: bool,
     pub moderation_target_id: Option<String>,
     pub moderated_by: Option<String>,
     pub moderation_reason: Option<String>,
@@ -97,6 +107,8 @@ pub struct WaddleArchivedMessage {
     pub query_id: Option<String>,
     pub id: Option<String>,
     pub stanza_id: Option<String>,
+    pub stanza_id_by: Option<String>,
+    pub stanza_ids: Vec<WaddleStanzaId>,
     pub origin_id: Option<String>,
     pub timestamp: Option<String>,
     pub from: Option<String>,
@@ -106,6 +118,8 @@ pub struct WaddleArchivedMessage {
     pub subject: Option<String>,
     pub replaces_id: Option<String>,
     pub retracts_id: Option<String>,
+    pub retraction_id: Option<String>,
+    pub is_retracted: bool,
     pub moderation_target_id: Option<String>,
     pub moderated_by: Option<String>,
     pub moderation_reason: Option<String>,

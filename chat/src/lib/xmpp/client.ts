@@ -87,6 +87,17 @@ import type {
 
 export { dmMessageFromArchived, roomMessageFromArchived } from "./wasm-message-codecs";
 
+function isRoomActivityMessage(message: LiveRoomMessage): boolean {
+  return !!message.body && !message.replacesId && !message.retractsId;
+}
+
+function roomActivityEventFromMessage(message: LiveRoomMessage): RoomActivityEvent {
+  const activity: RoomActivityEvent = { roomJid: message.roomJid, nick: message.nick, body: message.body };
+  if (message.mentions) activity.mentions = message.mentions;
+  if (message.broadcastMention) activity.broadcastMention = message.broadcastMention;
+  return activity;
+}
+
 type WasmModule = typeof import("@waddle/xmpp-client-wasm");
 type WasmClient = import("@waddle/xmpp-client-wasm").WaddleClient & {
   discover_extension_routes?: () => Promise<unknown>;
@@ -884,7 +895,7 @@ export class BrowserXmppClient {
       const converted = roomMessageFromArchived({ ...message, mam_id: message.id ?? crypto.randomUUID() } as WasmArchivedMessage);
       if (!converted) return;
       this.catchup.recordRoomSeen(converted.roomJid, converted.createdAt);
-      if (converted.roomJid !== this.currentRoom && converted.body) { const activity: RoomActivityEvent = { roomJid: converted.roomJid, nick: converted.nick, body: converted.body }; if (converted.mentions) (activity as any).mentions = converted.mentions; if ((converted as any).broadcastMention) (activity as any).broadcastMention = (converted as any).broadcastMention; this.activityHandler?.(activity); return; }
+      if (converted.roomJid !== this.currentRoom && isRoomActivityMessage(converted)) { this.activityHandler?.(roomActivityEventFromMessage(converted)); return; }
       this.messageHandler?.(converted); return;
     }
     const converted = dmMessageFromArchived({ ...message, mam_id: message.id ?? crypto.randomUUID() } as WasmArchivedMessage, barePeerJid(this.session.jid));
@@ -918,11 +929,8 @@ export class BrowserXmppClient {
             const converted = roomMessageFromArchived(message);
             if (!converted || converted.createdAt <= since) continue;
             this.catchup.recordRoomSeen(converted.roomJid, converted.createdAt);
-            if (converted.roomJid !== this.currentRoom && converted.body) {
-              const activity: RoomActivityEvent = { roomJid: converted.roomJid, nick: converted.nick, body: converted.body };
-              if (converted.mentions) (activity as any).mentions = converted.mentions;
-              if ((converted as any).broadcastMention) (activity as any).broadcastMention = (converted as any).broadcastMention;
-              this.activityHandler?.(activity);
+            if (converted.roomJid !== this.currentRoom && isRoomActivityMessage(converted)) {
+              this.activityHandler?.(roomActivityEventFromMessage(converted));
             } else {
               this.messageHandler?.(converted);
             }

@@ -83,6 +83,7 @@ describe("roomMessageFromArchived", () => {
       mam_id: "live-echo",
       id: "client-1",
       stanza_id: "room-stanza-1",
+      stanza_id_by: "room@conf.example.com",
       from: "room@conf.example.com/alice",
       body: outbound.body,
       references: wasmReferences,
@@ -92,6 +93,7 @@ describe("roomMessageFromArchived", () => {
       mam_id: "mam-reload-1",
       id: "server-1",
       stanza_id: "room-stanza-1",
+      stanza_id_by: "room@conf.example.com",
       from: "room@conf.example.com/alice",
       body: outbound.body,
       references: wasmReferences,
@@ -159,23 +161,74 @@ describe("roomMessageFromArchived", () => {
     const archived: WasmArchivedMessage = {
       ...baseArchivedRoom,
       id: "client-origin-id",
-      stanza_id: "room-stanza-xyz",
+      stanza_id: "foreign-stanza-xyz",
+      stanza_id_by: "archive.example.com",
+      stanza_ids: [
+        { id: "foreign-stanza-xyz", by: "archive.example.com" },
+        { id: "room-stanza-xyz", by: "room@conf.example.com" },
+      ],
     };
 
     const result = roomMessageFromArchived(archived);
 
     expect(result?.reactionTargetId).toBe("room-stanza-xyz");
+    expect(result?.replyableId).toBe("room-stanza-xyz");
+    expect(result?.wireIds).toContain("room-stanza-xyz");
+    expect(result?.wireIds).not.toContain("foreign-stanza-xyz");
   });
 
-  test("leaves reactionTargetId undefined when the room did not assign a stanza-id", () => {
+  test("leaves room-targeted ids undefined when the room did not assign the stanza-id", () => {
     const archived: WasmArchivedMessage = {
       ...baseArchivedRoom,
       id: "client-origin-id",
+      stanza_id: "foreign-stanza-xyz",
+      stanza_id_by: "example.com",
     };
 
     const result = roomMessageFromArchived(archived);
 
     expect(result?.reactionTargetId).toBeUndefined();
+    expect(result?.replyableId).toBeUndefined();
+    expect(result?.wireIds).toBeUndefined();
+  });
+
+  test("requires an exact room JID on XEP-0359 stanza-id by", () => {
+    const archived: WasmArchivedMessage = {
+      ...baseArchivedRoom,
+      id: "client-origin-id",
+      stanza_id: "resource-scoped-stanza",
+      stanza_id_by: "room@conf.example.com/alice",
+      stanza_ids: [
+        { id: "resource-scoped-stanza", by: "room@conf.example.com/alice" },
+      ],
+    };
+
+    const result = roomMessageFromArchived(archived);
+
+    expect(result?.reactionTargetId).toBeUndefined();
+    expect(result?.replyableId).toBeUndefined();
+    expect(result?.wireIds).toBeUndefined();
+  });
+
+  test("maps XEP-0424 tombstones without projecting a new retraction target", () => {
+    const archivedBase = { ...baseArchivedRoom };
+    delete archivedBase.body;
+    const archived: WasmArchivedMessage = {
+      ...archivedBase,
+      id: "original-message-id",
+      is_retracted: true,
+      retraction_id: "retract-message-id",
+    };
+
+    const result = roomMessageFromArchived(archived);
+
+    expect(result).toMatchObject({
+      id: "original-message-id",
+      body: "",
+      isRetracted: true,
+      retractionId: "retract-message-id",
+    });
+    expect(result?.retractsId).toBeUndefined();
   });
 
   test("converts an archived reaction stanza into a marker with _reactionTarget set", () => {

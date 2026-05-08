@@ -21,7 +21,7 @@ interface AvatarLookupCandidate {
 }
 
 function canonicalMentionIdentifier(value: string): string {
-  return value.trim().replace(/^xmpp:/i, "").replace(/^@+/, "").toLowerCase();
+  return value.trim().replace(/^xmpp:/i, "").replace(/^@+/, "").split(/[?#]/)[0]?.toLowerCase() ?? "";
 }
 
 function bareJid(value?: string | null): string | null {
@@ -40,13 +40,24 @@ function inferLocalUserJid(nick: string, selfDomain: string): string | null {
   return `${canonical}@${selfDomain}`;
 }
 
-function isBroadcastMention(value: string): boolean {
-  return BROADCAST_MENTION_SET.has(canonicalMentionIdentifier(value));
-}
-
 export function mentionMatchesUsername(mention: string, username?: string | null): boolean {
   if (!username) return false;
   return canonicalMentionIdentifier(mention).split("@")[0] === canonicalMentionIdentifier(username);
+}
+
+export function mentionMatchesBareJid(mention: string, jid?: string | null): boolean {
+  const mentionedBareJid = bareJid(canonicalMentionIdentifier(mention));
+  const targetBareJid = bareJid(canonicalMentionIdentifier(jid ?? ""));
+  return !!mentionedBareJid && !!targetBareJid && mentionedBareJid === targetBareJid;
+}
+
+export function messageMentionsBareJid(
+  message: Pick<TimelineMessage, "broadcastMention" | "mentions">,
+  jid?: string | null,
+): boolean {
+  if (message.broadcastMention) return true;
+  if (!jid || !message.mentions) return false;
+  return message.mentions.some((mention) => mentionMatchesBareJid(mention, jid));
 }
 
 /**

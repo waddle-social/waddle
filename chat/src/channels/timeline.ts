@@ -20,6 +20,8 @@ export function mapLiveRoomMessageToTimeline(
   if (msg.correctionTargetId) tm.correctionTargetId = msg.correctionTargetId;
   if (msg.reactionTargetId) tm.reactionTargetId = msg.reactionTargetId;
   if (msg.replyableId) tm.replyableId = msg.replyableId;
+  if (msg.isRetracted) tm.isRetracted = true;
+  if (msg.retractionId) tm.retractionId = msg.retractionId;
   if (msg.authorRealJid) tm.authorRealJid = msg.authorRealJid;
   if (msg.wireIds && msg.wireIds.length > 0) tm.wireIds = msg.wireIds;
   if (msg.mentions && msg.mentions.length > 0) tm.mentions = msg.mentions;
@@ -55,12 +57,13 @@ export function applyForumContext(list: TimelineMessage[], inferForumReplies = t
   const threadTitles = new Map<string, string>();
 
   for (const message of list) {
-    if (message.forumPostKind === "topic" && message.forumTitle) {
+    if (!message.isRetracted && message.forumPostKind === "topic" && message.forumTitle) {
       threadTitles.set(message.threadId ?? message.id, message.forumTitle);
     }
   }
 
   return list.map((message) => {
+    if (message.isRetracted) return message;
     const threadId = message.threadId ?? (message.forumPostKind === "topic" ? message.id : undefined);
     const threadTitle = threadId ? threadTitles.get(threadId) : undefined;
     const next: TimelineMessage = { ...message };
