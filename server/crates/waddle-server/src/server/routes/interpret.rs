@@ -345,6 +345,19 @@ async fn interpret_with_depth(
                     &retraction_message,
                 )
                 .await;
+                // #414: cascade XEP-0424 retraction to the room's pin
+                // list. If the retracted stanza-id is currently pinned,
+                // remove it from the projection and broadcast a
+                // synthetic unpin system message so live clients see the
+                // tab update without a separate poll.
+                room_pin::cascade_retraction_to_pin_list(
+                    registry,
+                    deps,
+                    room,
+                    target_message_id,
+                    recursion_depth,
+                )
+                .await;
             }
             OutboundEvent::PersistRoomSubject {
                 room,
