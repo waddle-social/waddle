@@ -313,6 +313,27 @@ async fn interpret_with_depth(
                 archive_groupchat_event(deps, room, sender, message, sender_nickname_generation)
                     .await;
             }
+            OutboundEvent::ApplyPinChange { room, change } => {
+                // #414 follow-up: forward to room actor (Pin/Unpin
+                // messages on RoomActor) once the actor surface lands.
+                // For now the protocol layer is fully typed; wire the
+                // mutation in the next commit.
+                warn!(
+                    variant = "ApplyPinChange",
+                    room = %room,
+                    change = ?change,
+                    "OutboundEvent variant not yet wired in interpreter"
+                );
+            }
+            OutboundEvent::BroadcastRoomSystemMessage { room, .. } => {
+                // #414 follow-up: stamp XEP-0359 by-room stanza-id,
+                // archive in MAM, fan out RouteToConnection per occupant.
+                warn!(
+                    variant = "BroadcastRoomSystemMessage",
+                    room = %room,
+                    "OutboundEvent variant not yet wired in interpreter"
+                );
+            }
             OutboundEvent::ApplyGroupchatRetractionTombstone {
                 room,
                 target_message_id,
