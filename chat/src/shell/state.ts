@@ -13,6 +13,8 @@ export function useChatShellState() {
   const showEditChannel = ref(false);
   const showWaddleSettings = ref(false);
   const showMembers = ref(false);
+  /** #414: pinned-messages right-rail panel toggle. Synced with `?pinned=1`. */
+  const showPinnedPanel = ref(false);
   const confirmDeleteWaddle = ref(false);
   const confirmDeleteChannel = ref(false);
   const showNewDm = ref(false);
@@ -39,6 +41,7 @@ export function useChatShellState() {
     showEditChannel,
     showWaddleSettings,
     showMembers,
+    showPinnedPanel,
     confirmDeleteWaddle,
     showNewDm,
     confirmDeleteChannel,

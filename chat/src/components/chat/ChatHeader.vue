@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, type Component } from "vue";
-import { ChevronRight, Hash, Menu, MessageCircle, MessagesSquare, Search, Settings, Users } from "lucide-vue-next";
+import { ChevronRight, Hash, Menu, MessageCircle, MessagesSquare, Pin, Search, Settings, Users } from "lucide-vue-next";
 import type { ChannelSummary, SpaceSummary } from "@/lib/chat-types";
 import type { ConnectionNoticeCopy } from "@/lib/connection-notice";
 import type { MemberLoadState } from "@/waddles/directory";
@@ -26,6 +26,7 @@ const props = defineProps<{
 }>();
 
 const showSearch = defineModel<boolean>("showSearch", { required: true });
+const showPinnedPanel = defineModel<boolean>("showPinnedPanel", { default: false });
 
 const emit = defineEmits<{
   openNav: [];
@@ -135,6 +136,18 @@ const memberButtonCopy = computed(() => {
           @click="showSearch = !showSearch"
         >
           <Search class="w-3.5 h-3.5" />
+        </button>
+        <button
+          v-if="channel"
+          class="chat-icon-button chat-icon-button--md transition-all duration-200"
+          :class="showPinnedPanel ? 'bg-muted text-primary' : 'text-muted-foreground hover:bg-muted hover:text-foreground'"
+          title="Pinned messages"
+          aria-label="Pinned messages"
+          :aria-pressed="showPinnedPanel"
+          type="button"
+          @click="showPinnedPanel = !showPinnedPanel"
+        >
+          <Pin class="w-3.5 h-3.5" />
         </button>
         <button
           v-if="canManageChannels && channel"

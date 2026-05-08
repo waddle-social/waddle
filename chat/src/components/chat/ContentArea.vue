@@ -32,6 +32,7 @@ import VirtualTimeline from "@/components/chat/VirtualTimeline.vue";
 
 const draft = defineModel<string>("draft", { required: true });
 const forumTitle = defineModel<string>("forumTitle", { default: "" });
+const pinnedPanelOpen = defineModel<boolean>("pinnedPanelOpen", { default: false });
 
 const props = defineProps<{
   waddle: SpaceSummary | null;
@@ -662,6 +663,7 @@ function dayDividerLabel(createdAt: string): string {
 
     <ChatHeader
       v-model:show-search="showSearch"
+      v-model:show-pinned-panel="pinnedPanelOpen"
       :waddle="waddle"
       :channel="channel"
       :dm-peer="dmPeer"
