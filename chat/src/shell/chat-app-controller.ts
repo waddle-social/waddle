@@ -1332,8 +1332,8 @@ export function useChatAppController(giphyApiKey: string) {
   }
 
   async function handleUpdateChannel() {
-    await waddles.updateChannel();
-    ui.showEditChannel.value = false;
+    const ok = await waddles.updateChannel();
+    if (ok) ui.showEditChannel.value = false;
   }
 
   async function handleDeleteChannel() {

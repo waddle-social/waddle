@@ -335,11 +335,24 @@ function isPinnedMessage(msg: TimelineMessage): boolean {
   const wireIds = (msg as TimelineMessage & { wireIds?: string[] }).wireIds;
   return Boolean(wireIds?.some((wid) => set.has(wid)));
 }
-// Owner/Admin gate: any of the current user's hats indicates admin/owner
-// affiliation. The room sets these via the existing hats system.
+// #415: pin gate combines the room's pin_permission with the current
+// user's affiliation. AdminsOnly retains the owner/admin check via
+// the hats system; Anyone admits any joined member (a present
+// `currentUser` + the channel being known are sufficient signals
+// that we're a current occupant). The action-sheet visibility
+// updates reactively when the channel object's `pinPermission`
+// changes — no reload required.
 const currentUserCanPin = computed(() => {
   const me = props.currentUser;
   if (!me) return false;
+  // Membership signal: roomPresence tracks every joined occupant
+  // regardless of hats. roomHats (authorHatsByNick) only keeps
+  // entries for occupants with at least one hat, so a typical
+  // member with no hats would be incorrectly treated as a
+  // non-occupant if we used it as the membership proxy.
+  if (props.roomPresence[me] === undefined) return false;
+  const channelPolicy = props.channel?.pinPermission ?? "admins-only";
+  if (channelPolicy === "anyone") return true;
   const myHats = props.roomHats[me] ?? [];
   return myHats.some((hat) => hat.uri === "urn:xmpp:hats:owner" || hat.uri === "urn:xmpp:hats:admin");
 });

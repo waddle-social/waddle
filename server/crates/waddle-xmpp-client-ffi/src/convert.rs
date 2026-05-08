@@ -229,7 +229,7 @@ fn inbound_to_ffi(msg: InboundMessage) -> WaddleMessage {
         body: msg.body,
         message_type: msg.message_type,
         timestamp: msg.timestamp.map(|t| t.to_rfc3339()),
-        stanza_id: msg.stanza_id,
+        stanza_id: msg.stanza_id.map(|id| id.to_string()),
         origin_id: msg.origin_id,
         replaces_id: msg.replaces_id,
         retracts_id: msg.retracts_id,

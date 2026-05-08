@@ -1,4 +1,5 @@
 import type { WaddleClient } from "@waddle/xmpp-client-wasm";
+import type { PinPermission } from "@/lib/chat-types";
 
 const NS_DATAFORM = "jabber:x:data";
 const NS_MUC_OWNER = "http://jabber.org/protocol/muc#owner";
@@ -9,9 +10,13 @@ const NS_MUC_ROOMCONFIG = "http://jabber.org/protocol/muc#roomconfig";
 const NS_PUBSUB_NODE_CONFIG = "http://jabber.org/protocol/pubsub#node_config";
 
 type HybridClient = Partial<WaddleClient> & {
-  send_raw_iq?: (xml: string) => Promise<unknown>;
+  send_raw_iq?: (xml: string) => Promise<string>;
   join_room_without_history?: (roomJid: string, nick: string) => Promise<unknown>;
 };
+
+const FIELD_PIN_PERMISSION = "urn:waddle:roomconfig:pinpermission";
+const FIELD_ROOM_NAME = "muc#roomconfig_roomname";
+const FIELD_ROOM_DESC = "muc#roomconfig_roomdesc";
 
 interface CreateMucRoomParams {
   roomLocalpart: string;
@@ -19,6 +24,13 @@ interface CreateMucRoomParams {
   name: string;
   description?: string;
   mucType?: "text" | "forum";
+}
+
+interface ConfigureMucRoomParams {
+  name: string;
+  description?: string;
+  /** #415: per-room pin permission. */
+  pinPermission?: PinPermission;
 }
 interface CreateSpaceNodeParams { nodeId?: string; name: string; description?: string; }
 interface PublishMucToSpaceParams { name: string; autojoin?: boolean; }
@@ -46,7 +58,7 @@ function slugifyNodeId(value: string): string {
   return value.trim().toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "") || "space";
 }
 
-async function sendIq(client: HybridClient, type: "get" | "set", xmlPayload: string, to: string): Promise<unknown> {
+async function sendIq(client: HybridClient, type: "get" | "set", xmlPayload: string, to: string): Promise<string> {
   if (!client.send_raw_iq) throw new Error("XMPP session is not ready");
   return client.send_raw_iq(`<iq type="${type}" id="${crypto.randomUUID()}" to="${to}">${xmlPayload}</iq>`);
 }
@@ -63,6 +75,63 @@ async function joinRoom(client: HybridClient, roomJid: string, nick: string): Pr
 async function leaveRoom(client: HybridClient, roomJid: string, nick: string): Promise<void> {
   if (!client.leave_room) throw new Error("XMPP session is not ready");
   return client.leave_room(roomJid, nick);
+}
+
+async function fetchMucOwnerConfig(
+  client: HybridClient,
+  roomJid: string,
+): Promise<Map<string, string>> {
+  const responseXml = await sendIq(
+    client,
+    "get",
+    `<query xmlns="${NS_MUC_OWNER}"/>`,
+    roomJid,
+  );
+  const doc = new DOMParser().parseFromString(responseXml, "text/xml");
+  const form = doc.getElementsByTagNameNS(NS_DATAFORM, "x")[0];
+  const fields = new Map<string, string>();
+  if (!form) return fields;
+  for (const field of Array.from(form.children)) {
+    if (field.localName !== "field" || field.namespaceURI !== NS_DATAFORM) continue;
+    const name = field.getAttribute("var");
+    if (!name) continue;
+    // Read the field's own <value> direct child, not <option><value>.
+    // list-single fields contain both a current <value> and several
+    // <option> elements that each carry their own <value>.
+    const valueChild = Array.from(field.children).find(
+      (child) => child.localName === "value" && child.namespaceURI === NS_DATAFORM,
+    );
+    fields.set(name, valueChild?.textContent ?? "");
+  }
+  return fields;
+}
+
+/** #415: XEP-0045 §10.2 owner-config GET-then-SET. Owner-only.
+ *
+ * Fetches the current room config form, applies the caller's
+ * overrides on top, and submits the merged form. This is the
+ * conformant pattern: fields the caller does NOT supply round-trip
+ * through unchanged so the server doesn't revert un-echoed fields
+ * to defaults. */
+export async function configureMucRoom(
+  client: HybridClient,
+  roomJid: string,
+  params: ConfigureMucRoomParams,
+): Promise<void> {
+  const current = await fetchMucOwnerConfig(client, roomJid);
+  current.set(FIELD_ROOM_NAME, params.name);
+  if (params.description !== undefined) current.set(FIELD_ROOM_DESC, params.description);
+  if (params.pinPermission) current.set(FIELD_PIN_PERMISSION, params.pinPermission);
+  current.set("FORM_TYPE", NS_MUC_ROOMCONFIG);
+  const fieldsXml = Array.from(current.entries())
+    .map(([name, value]) => `<field var="${escapeXml(name)}"><value>${escapeXml(value)}</value></field>`)
+    .join("");
+  await sendIq(
+    client,
+    "set",
+    `<query xmlns="${NS_MUC_OWNER}"><x xmlns="${NS_DATAFORM}" type="submit">${fieldsXml}</x></query>`,
+    roomJid,
+  );
 }
 
 export async function createMucRoom(client: HybridClient, mucServiceJid: string, params: CreateMucRoomParams): Promise<{ roomJid: string }> {

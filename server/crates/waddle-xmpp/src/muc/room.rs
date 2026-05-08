@@ -4,7 +4,7 @@ use jid::{BareJid, FullJid};
 use serde::{Deserialize, Serialize};
 
 use super::affiliation::{AffiliationList, FederatedAffiliationConfig, FederatedPermissionPolicy};
-use super::pin::PinnedEntry;
+use super::pin::{PinPermission, PinnedEntry};
 use super::subject::SubjectState;
 use crate::types::{Affiliation, Role};
 
@@ -41,6 +41,12 @@ pub struct RoomConfig {
     /// Whether the room uses Waddle thread-oriented metadata.
     #[serde(default)]
     pub forum: bool,
+    /// #415: who may pin/unpin messages in this room. Default is
+    /// `admins-only`; when set to `anyone`, any current occupant may
+    /// pin. Set via the `urn:waddle:roomconfig:pinpermission` field on
+    /// the standard XEP-0045 owner-config form.
+    #[serde(default)]
+    pub pin_permission: PinPermission,
     /// Federation permission policy retained for serialized room configs.
     ///
     /// Remote XMPP federation is not served by Waddle, so active joins must still be local
@@ -61,6 +67,7 @@ impl Default for RoomConfig {
             max_occupants: 0,
             enable_logging: true,
             forum: false,
+            pin_permission: PinPermission::default(),
             federation_policy: FederatedPermissionPolicy::default(),
             federated_affiliation_config: FederatedAffiliationConfig::open_member(),
         }

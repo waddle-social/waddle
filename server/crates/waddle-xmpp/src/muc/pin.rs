@@ -16,6 +16,41 @@ use waddle_xmpp_core::xep0359::StanzaId;
 /// faithful render. Click-through fetches the full body via MAM.
 pub const MAX_PREVIEW_LEN: usize = 280;
 
+/// Per-room pin permission policy (#415). Drives the `MucPinHandler`
+/// authorization gate via `RoomConfig.pin_permission`. The value is
+/// configurable through the standard XEP-0045 owner-config form using
+/// the `urn:waddle:roomconfig:pinpermission` field.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PinPermission {
+    /// Only Owners and Admins may pin/unpin (default).
+    #[default]
+    AdminsOnly,
+    /// Any current room occupant may pin/unpin.
+    Anyone,
+}
+
+impl PinPermission {
+    /// Wire value used in the `urn:waddle:roomconfig:pinpermission`
+    /// data-form field. Stable across Waddle versions.
+    pub fn as_form_value(self) -> &'static str {
+        match self {
+            PinPermission::AdminsOnly => "admins-only",
+            PinPermission::Anyone => "anyone",
+        }
+    }
+
+    /// Parse from the data-form `<value>` text. Returns `None` for
+    /// unknown / malformed values; callers fall back to the default.
+    pub fn from_form_value(value: &str) -> Option<Self> {
+        match value {
+            "admins-only" => Some(PinPermission::AdminsOnly),
+            "anyone" => Some(PinPermission::Anyone),
+            _ => None,
+        }
+    }
+}
+
 /// Maximum pinned entries kept on a single room. When this cap is
 /// exceeded by a new pin (not a replacement), the oldest entry is
 /// evicted. Bounds room actor memory so admin pin-spam can't exhaust

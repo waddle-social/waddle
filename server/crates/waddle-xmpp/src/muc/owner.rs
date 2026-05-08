@@ -15,8 +15,15 @@ use tracing::{debug, instrument};
 use xmpp_parsers::iq::{Iq, IqType};
 use xmpp_parsers::presence::Presence;
 
+use super::pin::PinPermission;
 use super::{MucRoom, RoomConfig, NS_MUC_OWNER};
-use crate::xep::xep0004::{self, DataForm, Field, FormType, FromElement, IntoElement};
+
+/// XEP-0045 owner-config form field var for the per-room pin
+/// permission policy (#415).
+pub const FIELD_PIN_PERMISSION: &str = "urn:waddle:roomconfig:pinpermission";
+use crate::xep::xep0004::{
+    self, DataForm, Field, FieldOption, FieldType, FormType, FromElement, IntoElement,
+};
 use crate::xep::FIELD_FORUM_MODE;
 use crate::XmppError;
 
@@ -279,6 +286,19 @@ pub fn build_config_form(room: &MucRoom) -> Element {
                 .with_label("Enable Room Logging"),
         )
         .add_field(Field::boolean(FIELD_FORUM_MODE, room.config.forum).with_label("Forum Mode"))
+        .add_field(
+            Field::new(FIELD_PIN_PERMISSION, FieldType::ListSingle)
+                .with_label("Who can pin messages")
+                .with_value(room.config.pin_permission.as_form_value())
+                .add_option(FieldOption::with_label(
+                    "Admins only",
+                    PinPermission::AdminsOnly.as_form_value(),
+                ))
+                .add_option(FieldOption::with_label(
+                    "Anyone",
+                    PinPermission::Anyone.as_form_value(),
+                )),
+        )
         .into_element()
 }
 

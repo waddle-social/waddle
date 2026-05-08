@@ -226,6 +226,44 @@ fn test_build_config_form() {
         .get_child("value", DATA_FORMS_NS)
         .expect("forum field should contain a value");
     assert_eq!(forum_value.text(), "1");
+
+    // #415: pin permission field is a list-single with both options
+    // enumerated, defaulting to admins-only for fresh rooms.
+    let pin_field = form
+        .children()
+        .find(|c| c.attr("var") == Some(FIELD_PIN_PERMISSION))
+        .expect("pin permission field should exist");
+    assert_eq!(pin_field.attr("type"), Some("list-single"));
+    let pin_value = pin_field
+        .get_child("value", DATA_FORMS_NS)
+        .expect("pin permission field should contain a value");
+    assert_eq!(pin_value.text(), "admins-only");
+    let option_values: Vec<String> = pin_field
+        .children()
+        .filter(|c| c.is("option", DATA_FORMS_NS))
+        .filter_map(|opt| opt.get_child("value", DATA_FORMS_NS).map(|v| v.text()))
+        .collect();
+    assert_eq!(option_values, vec!["admins-only", "anyone"]);
+}
+
+/// #415: rooms persisted before the pin_permission field was added
+/// must deserialize to the `AdminsOnly` default — locks the
+/// `#[serde(default)]` contract on `RoomConfig::pin_permission`.
+#[test]
+fn legacy_room_config_deserializes_to_admins_only() {
+    let mut value =
+        serde_json::to_value(RoomConfig::default()).expect("default RoomConfig serializes");
+    let obj = value.as_object_mut().expect("object");
+    assert!(
+        obj.remove("pin_permission").is_some(),
+        "fixture must drop pin_permission to simulate pre-#415 on-disk shape"
+    );
+    let config: RoomConfig =
+        serde_json::from_value(value).expect("RoomConfig sans pin_permission must deserialize");
+    assert_eq!(
+        config.pin_permission,
+        super::super::pin::PinPermission::AdminsOnly
+    );
 }
 
 #[test]

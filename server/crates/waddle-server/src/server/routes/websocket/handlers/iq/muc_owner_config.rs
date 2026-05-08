@@ -40,9 +40,13 @@ pub(super) async fn apply_muc_owner_config(
             {
                 config.name = name;
             }
-            config.description = data_form_value(form, "muc#roomconfig_roomdesc")
-                .filter(|value| !value.is_empty())
-                .or(config.description);
+            // Treat presence of the roomdesc field as authoritative
+            // even when empty, so an owner can clear the description.
+            // Field absent => keep existing; field present + empty
+            // => clear; field present + non-empty => set.
+            if let Some(value) = data_form_value(form, "muc#roomconfig_roomdesc") {
+                config.description = if value.is_empty() { None } else { Some(value) };
+            }
             if let Some(members_only) = data_form_bool(form, "muc#roomconfig_membersonly") {
                 config.members_only = members_only;
             }
@@ -54,6 +58,16 @@ pub(super) async fn apply_muc_owner_config(
             }
             if let Some(forum) = data_form_bool(form, "muc#roomconfig_forum") {
                 config.forum = forum;
+            }
+            // #415: per-room pin permission policy.
+            if let Some(value) =
+                data_form_value(form, waddle_xmpp::muc::owner::FIELD_PIN_PERMISSION)
+            {
+                if let Some(pin_permission) =
+                    waddle_xmpp::muc::PinPermission::from_form_value(&value)
+                {
+                    config.pin_permission = pin_permission;
+                }
             }
         }
     }
