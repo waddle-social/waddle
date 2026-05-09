@@ -1,4 +1,5 @@
 mod acme;
+pub(crate) mod caps_resolution;
 mod config;
 mod extension_commands;
 pub mod extension_host_adapter;

@@ -175,6 +175,12 @@ pub(super) async fn cleanup_connection_shutdown(
                         .protocol
                         .connection_registry
                         .unregister_if_owner(&jid, owner);
+                    // PR #438 review (Copilot): when SM detachment
+                    // fails we fall back to a full unregister, so the
+                    // caps resource→ver mapping AND any pending
+                    // disco#info resolution must be cleared too —
+                    // otherwise stale state lingers indefinitely.
+                    state.deps.protocol.caps_resolver.drop_resource(&jid);
                     cleanup_muc_presence(state, &jid).await;
                 }
             }
@@ -191,6 +197,11 @@ pub(super) async fn cleanup_connection_shutdown(
             .is_some()
     });
     if removed {
+        // XEP-0115 §6: drop the per-resource caps mapping for this
+        // resource. The hash-keyed `CapsCache` itself stays warm so
+        // a future session reusing the same `(hash, ver)` short-
+        // circuits the disco#info round-trip.
+        state.deps.protocol.caps_resolver.drop_resource(&jid);
         info!(jid = %jid, "WebSocket connection unregistered");
         cleanup_muc_presence(state, &jid).await;
     } else {
@@ -254,6 +265,14 @@ pub(super) async fn cleanup_invalidated_detached_session(
             .protocol
             .connection_registry
             .unregister(&detached.jid);
+        // XEP-0115 §6: clear the resource→ver mapping AND any stuck
+        // pending disco#info resolution for this resource so an
+        // unresumed detached session doesn't leak indefinitely.
+        state
+            .deps
+            .protocol
+            .caps_resolver
+            .drop_resource(&detached.jid);
     }
     if detached.presence_available && !replacement_is_current_owner {
         handlers::presence::broadcast_unavailable_for_expired_detached_session(

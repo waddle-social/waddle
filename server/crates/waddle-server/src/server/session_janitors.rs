@@ -244,6 +244,18 @@ pub(crate) fn spawn_sm_expiry_janitor(websocket_state: &Arc<WebSocketState>) {
                     .protocol
                     .connection_registry
                     .unregister(&session.jid);
+                // PR #438 review (Qodo issue #2): the periodic SM expiry
+                // janitor takes its own cleanup path; without this drop
+                // it leaks `resource_to_ver` and `pending` entries for
+                // every detached session that times out. The other
+                // disconnect/expiry paths already call this; mirror it
+                // here so the caps state is bounded across all five
+                // tear-down code paths.
+                state
+                    .deps
+                    .protocol
+                    .caps_resolver
+                    .drop_resource(&session.jid);
                 routes::websocket::cleanup_muc_presence_for_jid(&state, &session.jid).await;
             }
         }

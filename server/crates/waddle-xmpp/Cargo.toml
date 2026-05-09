@@ -26,6 +26,7 @@ rxml = { workspace = true }
 
 # Concurrent Data Structures
 dashmap = { workspace = true }
+lru = { workspace = true }
 
 # TLS
 rustls = { workspace = true, features = ["ring"] }

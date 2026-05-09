@@ -259,6 +259,8 @@ async fn create_websocket_state(
     );
     let pending_delivery_storage = create_pending_delivery_storage(xmpp_config).await;
 
+    let caps_resolver = Arc::new(crate::server::caps_resolution::CapsResolver::default());
+
     let websocket_state = Arc::new(WebSocketState {
         deps: WebSocketDeps {
             app_state: state.clone(),
@@ -279,6 +281,7 @@ async fn create_websocket_state(
                 isr_token_store: waddle_xmpp::isr::create_shared_store(),
                 sm_session_registry,
                 resumable_sessions,
+                caps_resolver,
             },
             occupant_id_secret: server_config.occupant_id_secret.clone(),
         },

@@ -5896,6 +5896,7 @@ dependencies = [
  "html-escape",
  "jid",
  "kameo",
+ "lru 0.12.5",
  "minidom",
  "opentelemetry",
  "pbkdf2",

@@ -3,6 +3,8 @@ use super::subscription::{
     roster_storage,
 };
 use super::*;
+use crate::server::caps_resolution::{build_caps_disco_info_query, extract_caps_payload};
+use waddle_xmpp::Stanza;
 
 pub(super) async fn handle_regular_presence_update(
     state: &WebSocketState,
@@ -22,6 +24,7 @@ pub(super) async fn handle_regular_presence_update(
             .protocol
             .connection_registry
             .update_presence(sender_jid, true, priority);
+        resolve_caps_for_presence(state, sender_jid, &presence).await;
         // XEP-0160 §3 step 5 (locked Q7a/Q7d): on the first non-negative-
         // priority presence of a fresh session, drain pending_delivery
         // for the recipient. `claim_offline_flush` ensures this fires at
@@ -210,6 +213,86 @@ async fn broadcast_presence_to_subscribers(
             &delivered_resources,
         )
         .await;
+    }
+}
+
+/// XEP-0115: drive caps resolution for an inbound `<presence>`
+/// carrying `<c hash node ver/>`.
+///
+/// - Cache hit on `(hash, ver)`: record the per-resource mapping so
+///   the next PEP fan-out (PR 2) can filter by feature list.
+/// - Cache miss with supported `hash`: send the resource a typed
+///   disco#info IQ get with `node="<NODE>#<VER>"` per §6.2 and remember
+///   the in-flight ver. If the outbound write fails (resource just
+///   went offline / channel closed) the pending entry is immediately
+///   evicted so the in-memory pending map cannot leak.
+/// - Cache miss with unsupported `hash` (e.g. `sha-256`): per §5.4
+///   step 2 the server MUST NOT cache. We additionally skip the
+///   round-trip entirely — fan-out will treat this resource as
+///   "caps unknown" until it next advertises with a supported algo.
+async fn resolve_caps_for_presence(
+    state: &WebSocketState,
+    sender_jid: &FullJid,
+    presence: &xmpp_parsers::presence::Presence,
+) {
+    let Some(caps) = extract_caps_payload(presence) else {
+        return;
+    };
+    let resolver = &state.deps.protocol.caps_resolver;
+    let cache_key = waddle_xmpp::xep::xep0115::CapsCacheKey::from_caps(&caps);
+    if resolver.cache().contains(&cache_key) {
+        resolver.record_resource(sender_jid, cache_key);
+        return;
+    }
+    if !crate::server::caps_resolution::is_supported_hash(&caps.hash) {
+        debug!(
+            jid = %sender_jid,
+            hash = %caps.hash,
+            "Skipping caps resolution: advertised hash algorithm not implemented (XEP-0115 §5.4 step 2)"
+        );
+        return;
+    }
+    // Dedup in-flight resolutions per (full_jid, hash, ver). Without
+    // this guard, a client spamming presence updates with random
+    // `ver` values (or re-advertising the same uncached ver before
+    // its disco#info reply lands) could grow the pending map
+    // unboundedly and amplify outbound disco#info traffic. PR #438
+    // review issue (Qodo / Copilot).
+    if resolver.has_pending_for(sender_jid, &caps) {
+        debug!(
+            jid = %sender_jid,
+            hash = %caps.hash,
+            ver = %caps.ver,
+            "Skipping caps disco#info: a resolution is already in flight for this (jid, hash, ver)"
+        );
+        return;
+    }
+    let iq_id = format!("waddle-caps-disco-{}", uuid::Uuid::new_v4());
+    let iq = build_caps_disco_info_query(
+        &state.deps.auth_state.caps_server_domain,
+        sender_jid,
+        &caps,
+        &iq_id,
+    );
+    resolver.begin_pending(iq_id.clone(), sender_jid.clone(), caps);
+    let send_outcome = state
+        .deps
+        .protocol
+        .connection_registry
+        .send_to(sender_jid, Stanza::Iq(iq))
+        .await;
+    if !send_outcome.is_sent() {
+        // PR #438 review issue #5: if the recipient already
+        // disconnected between the presence-receipt and the
+        // disco#info IQ write, evict the orphan pending entry
+        // immediately rather than waiting for the next disconnect
+        // event.
+        debug!(
+            jid = %sender_jid,
+            iq_id = %iq_id,
+            "Caps disco#info send failed; evicting orphaned pending entry"
+        );
+        let _ = resolver.take_pending(&iq_id);
     }
 }
 
