@@ -2,7 +2,7 @@ import { ref } from "vue";
 import type { AdminTab } from "@/lib/chat-ui";
 
 export function useChatShellState() {
-  const activePage = ref<"dashboard" | "chat" | "settings" | "extension">("dashboard");
+  const activePage = ref<"dashboard" | "chat" | "settings">("dashboard");
   const adminTab = ref<AdminTab>("rooms");
   const sidebarMode = ref<"channels" | "dms">("channels");
   const collapsedSpaceGroupIds = ref<Set<string>>(new Set());

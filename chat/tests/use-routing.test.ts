@@ -74,6 +74,17 @@ describe("parseChatLocation / buildChannelPath threadStack", () => {
     });
   });
 
+  test("buildChannelExtensionPath preserves collapsed right-panel state", () => {
+    const path = buildChannelExtensionPath(channel, "link-board", "saved-links", ["root,1", "child%2"], true);
+    expect(path).toBe("/r/room-id-1/x/link-board/saved-links?thread=root%2C1,child%252&pinned=1");
+    const route = parseChatLocation("/r/room-id-1/x/link-board/saved-links", "?thread=root%2C1,child%252&pinned=1");
+    expect(route).toMatchObject({
+      page: "extension",
+      threadStack: ["root,1", "child%2"],
+      pinnedPanelOpen: true,
+    });
+  });
+
   test("resolveChannelBySlug uses channel ids only", () => {
     const channels = [
       { ...channel, id: "space-a-general", name: "general" },

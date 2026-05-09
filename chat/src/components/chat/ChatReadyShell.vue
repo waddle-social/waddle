@@ -5,6 +5,7 @@ import ChatAppModals from "@/components/chat/ChatAppModals.vue";
 import ChatMobileDrawers from "@/components/chat/ChatMobileDrawers.vue";
 import ContentArea from "@/components/chat/ContentArea.vue";
 import DmPanel from "@/components/chat/DmPanel.vue";
+import ExtensionRouteRail from "@/components/chat/ExtensionRouteRail.vue";
 import ExtensionRouteView from "@/components/chat/ExtensionRouteView.vue";
 import ThreadPanel from "@/components/chat/ThreadPanel.vue";
 import TopicsPanel from "@/components/chat/TopicsPanel.vue";
@@ -13,6 +14,7 @@ import UserSettingsPage from "@/components/chat/UserSettingsPage.vue";
 import WaddlesSidebar from "@/components/chat/WaddlesSidebar.vue";
 import { buildHomeDashboardProps } from "@/home/dashboard-props";
 import type { ChatAppController } from "@/shell/chat-app-controller";
+import type { DiscoveredExtensionRoute } from "@/lib/xmpp/extension-commands";
 
 const props = defineProps<{
   controller: ChatAppController;
@@ -32,12 +34,13 @@ const {
   xmppClient,
   activeMessages,
   activeFirstUnseenId,
-  extensionRoutes,
+  channelExtensionRoutes,
   activeExtensionRouteKey,
   activeExtensionRoute,
   activeChannelRoomJid,
   activeThreadStack,
   activeThreadTargetMessageId,
+  activeRightPanel,
   threads,
   reactionModeTarget,
   reactionModeState,
@@ -87,6 +90,9 @@ const {
   pushThread,
   popThreadTo,
   closeThreadPanel,
+  activateRightPanel,
+  closeExtensionRoutePanel,
+  closePinnedPanel,
   notifyActiveComposing,
   editActiveMessage,
   retractActiveMessage,
@@ -115,6 +121,32 @@ const homeDashboardProps = computed(() => buildHomeDashboardProps({
   activeChannelJids: messaging.activeChannels.value,
   dmConversations: dmConversations.conversations.value,
 }));
+
+const contentPaneClass = computed(() => {
+  if (ui.sidebarMode.value !== "channels") return "";
+  if (activeRightPanel.value === "thread") {
+    if (activeThreadStack.value.length === 0) return "";
+    return activeThreadStack.value.length === 1
+      ? "chat-content-pane--desktop-split"
+      : "chat-content-pane--hidden";
+  }
+  return activeRightPanel.value ? "chat-content-pane--desktop-split" : "";
+});
+
+function selectCurrentChannelExtensionRoute(route: DiscoveredExtensionRoute) {
+  const channel = waddles.currentChannel.value;
+  if (!channel) return;
+  void selectExtensionRoute(channel.id, route);
+}
+
+function setPinnedPanelOpen(isOpen: boolean) {
+  if (!isOpen) {
+    closePinnedPanel();
+    return;
+  }
+  ui.showPinnedPanel.value = true;
+  activateRightPanel("pinned");
+}
 </script>
 
 <template>
@@ -163,11 +195,8 @@ const homeDashboardProps = computed(() => buildHomeDashboardProps({
           :collapsed-group-ids="ui.collapsedSpaceGroupIds.value"
           :channel-unread-map="computedChannelUnreadMap"
           :thread-entries-fn="(roomJid: string) => channelUnread.threadEntries(roomJid)"
-          :extension-routes="extensionRoutes"
-          :active-extension-route="ui.activePage.value === 'extension' ? activeExtensionRouteKey : null"
           @select-channel="selectChannel"
           @select-thread="onSelectThread"
-          @select-extension-route="selectExtensionRoute"
           @create-channel="openCreateChannelDialog()"
           @create-channel-in-space="openCreateChannelDialog"
           @open-settings="ui.showWaddleSettings.value = true"
@@ -199,18 +228,6 @@ const homeDashboardProps = computed(() => buildHomeDashboardProps({
         :server-version="version.serverVersion.value"
         @close="closeUserSettings"
       />
-      <ExtensionRouteView
-        v-else-if="ui.activePage.value === 'extension'"
-        :waddle="waddles.currentSpace.value"
-        :channel="waddles.currentChannel.value"
-        :route="activeExtensionRoute"
-        :requested-route="activeExtensionRouteKey"
-        :room-jid="activeChannelRoomJid"
-        :xmpp-client="xmppClient"
-        :action-error="activeActionError"
-        @open-nav="ui.showMobileNav.value = true"
-        @invoke-action="invokeExtensionRouteAction"
-      />
       <template v-else>
         <!--
           Accordion thread layout
@@ -227,22 +244,21 @@ const homeDashboardProps = computed(() => buildHomeDashboardProps({
              - depth 0: visible and flex-1 (full remaining width)
              - depth 1: hidden on mobile, flex-1 on desktop (left pane)
              - depth 2+: hidden entirely (parent thread pane takes its place) -->
-        <div class="chat-workspace">
+        <div
+          class="chat-workspace"
+          :class="activeRightPanel ? 'chat-workspace--right-panel-active' : ''"
+        >
           <div
             :class="[
               'chat-content-pane',
-              activeThreadStack.length === 0
-                ? ''
-                : activeThreadStack.length === 1
-                  ? 'chat-content-pane--desktop-split'
-                  : 'chat-content-pane--hidden',
+              contentPaneClass,
             ]"
           >
             <ContentArea
               :ref="setContentAreaRef"
               v-model:draft="activeDraft"
               v-model:forum-title="activeForumTitle"
-              v-model:pinned-panel-open="ui.showPinnedPanel.value"
+              :pinned-panel-open="activeRightPanel === 'pinned' && ui.showPinnedPanel.value"
               :waddle="waddles.currentSpace.value"
               :channel="ui.sidebarMode.value === 'dms' ? null : waddles.currentChannel.value"
               :room-jid="ui.sidebarMode.value === 'dms' ? null : activeChannelRoomJid"
@@ -288,6 +304,7 @@ const homeDashboardProps = computed(() => buildHomeDashboardProps({
               @react-message="reactActiveMessage"
               @pin-message="pinActiveMessage"
               @unpin-message="unpinActiveMessage"
+              @update:pinned-panel-open="setPinnedPanelOpen"
               @search="searchActiveMessages"
               @clear-search="clearActiveSearch"
               @load-older="loadOlderActiveMessages"
@@ -302,11 +319,22 @@ const homeDashboardProps = computed(() => buildHomeDashboardProps({
             />
           </div>
 
-          <!-- Collapsed accordion bars: one per hidden ancestor level (desktop only, depth >= 2).
-               Each bar is a thin vertical strip with a rotated label; clicking
-               navigates to that level. The channel bar returns to the main feed,
-               thread bars collapse levels older than the parent context pane. -->
-          <template v-if="ui.sidebarMode.value === 'channels' && activeThreadStack.length >= 2">
+          <!-- Collapsed accordion bars: one per inactive right-side panel. -->
+          <button
+            v-if="ui.sidebarMode.value === 'channels'
+              && activeRightPanel !== 'thread'
+              && activeThreadStack.length >= 1"
+            type="button"
+            class="chat-accordion-bar bg-muted/20 hover:bg-muted/50"
+            :title="getThreadLabel(activeThreadStack[activeThreadStack.length - 1] ?? '')"
+            @click="activateRightPanel('thread')"
+          >
+            <span class="accordion-bar-label text-muted-foreground/70">
+              {{ getThreadLabel(activeThreadStack[activeThreadStack.length - 1] ?? '') }}
+            </span>
+          </button>
+
+          <template v-if="ui.sidebarMode.value === 'channels' && activeRightPanel === 'thread' && activeThreadStack.length >= 2">
             <!-- Channel / main-feed bar -->
             <button
               type="button"
@@ -333,10 +361,40 @@ const homeDashboardProps = computed(() => buildHomeDashboardProps({
             </button>
           </template>
 
+          <button
+            v-if="ui.sidebarMode.value === 'channels'
+              && activeRightPanel !== 'pinned'
+              && ui.showPinnedPanel.value
+              && waddles.currentChannel.value
+              && activeChannelRoomJid"
+            type="button"
+            class="chat-accordion-bar bg-muted/20 hover:bg-muted/50"
+            title="Pinned messages"
+            @click="activateRightPanel('pinned')"
+          >
+            <span class="accordion-bar-label text-muted-foreground/70">
+              Pinned
+            </span>
+          </button>
+
+          <button
+            v-if="ui.sidebarMode.value === 'channels'
+              && activeRightPanel !== 'extension'
+              && activeExtensionRouteKey"
+            type="button"
+            class="chat-accordion-bar bg-muted/20 hover:bg-muted/50"
+            :title="activeExtensionRoute?.label ?? 'Extensions'"
+            @click="activateRightPanel('extension')"
+          >
+            <span class="accordion-bar-label text-muted-foreground/70">
+              {{ activeExtensionRoute?.label ?? 'Extensions' }}
+            </span>
+          </button>
+
           <!-- Parent thread pane: desktop-only context when depth >= 2.
                Shows the second-to-last thread in read-only mode (no composer). -->
           <div
-            v-if="ui.sidebarMode.value === 'channels' && activeThreadStack.length >= 2"
+            v-if="ui.sidebarMode.value === 'channels' && activeRightPanel === 'thread' && activeThreadStack.length >= 2"
             class="chat-parent-thread-pane"
           >
             <ThreadPanel
@@ -375,7 +433,7 @@ const homeDashboardProps = computed(() => buildHomeDashboardProps({
           <!-- Active thread pane: shown when any thread is open.
                Full-width on mobile; shares space with parent context on desktop. -->
           <div
-            v-if="ui.sidebarMode.value === 'channels' && activeThreadStack.length >= 1"
+            v-if="ui.sidebarMode.value === 'channels' && activeRightPanel === 'thread' && activeThreadStack.length >= 1"
             class="chat-active-thread-pane"
           >
             <ThreadPanel
@@ -414,14 +472,10 @@ const homeDashboardProps = computed(() => buildHomeDashboardProps({
             />
           </div>
 
-          <!-- #414 PinnedPanel: right-rail panel listing pinned messages.
-               Visible in channel context only when ui.showPinnedPanel
-               is true. Mutually exclusive with the thread panel — the
-               header pin button toggles this and the URL state. -->
           <div
             v-if="ui.sidebarMode.value === 'channels'
+              && activeRightPanel === 'pinned'
               && ui.showPinnedPanel.value
-              && activeThreadStack.length === 0
               && waddles.currentChannel.value
               && activeChannelRoomJid"
             class="chat-active-thread-pane"
@@ -429,10 +483,38 @@ const homeDashboardProps = computed(() => buildHomeDashboardProps({
             <PinnedPanel
               :room-jid="activeChannelRoomJid"
               :channel-name="waddles.currentChannel.value?.name ?? ''"
-              @close="ui.showPinnedPanel.value = false"
+              @close="closePinnedPanel"
               @jump-to-message="(stanzaId: string) => jumpToPinnedMessage(stanzaId)"
             />
           </div>
+
+          <div
+            v-if="ui.sidebarMode.value === 'channels'
+              && activeRightPanel === 'extension'
+              && activeExtensionRouteKey"
+            class="chat-active-thread-pane"
+          >
+            <ExtensionRouteView
+              :waddle="waddles.currentSpace.value"
+              :channel="waddles.currentChannel.value"
+              :route="activeExtensionRoute"
+              :requested-route="activeExtensionRouteKey"
+              :room-jid="activeChannelRoomJid"
+              :xmpp-client="xmppClient"
+              :action-error="activeActionError"
+              @open-nav="ui.showMobileNav.value = true"
+              @close="closeExtensionRoutePanel"
+              @invoke-action="invokeExtensionRouteAction"
+            />
+          </div>
+
+          <ExtensionRouteRail
+            v-if="ui.sidebarMode.value === 'channels' && waddles.currentChannel.value"
+            :routes="channelExtensionRoutes"
+            :active-route="activeExtensionRouteKey"
+            :active="activeRightPanel === 'extension'"
+            @select-route="selectCurrentChannelExtensionRoute"
+          />
         </div>
       </template>
     </div>

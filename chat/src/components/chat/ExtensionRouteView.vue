@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
-import { ExternalLink, Grid3X3, List, RefreshCw, WifiOff } from "lucide-vue-next";
+import { computed, nextTick, onMounted, ref, watch } from "vue";
+import { ExternalLink, Grid3X3, List, RefreshCw, WifiOff, X } from "lucide-vue-next";
 import type { ChannelSummary, SpaceSummary } from "@/lib/chat-types";
 import type { BrowserXmppClient } from "@/lib/xmpp-client";
 import type { ExtensionAnnotationAction } from "@/lib/chat-ui";
@@ -18,12 +18,14 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   openNav: [];
+  close: [];
   invokeAction: [action: ExtensionAnnotationAction];
 }>();
 
 const items = ref<ExtensionRouteItem[]>([]);
 const state = ref<"idle" | "loading" | "error">("idle");
 const detail = ref("");
+const panelRef = ref<HTMLElement | null>(null);
 
 const routeKey = computed(() =>
   props.route && props.roomJid
@@ -84,13 +86,25 @@ function safeUrl(href: string | undefined): string | null {
   }
 }
 
+function focusPanel() {
+  void nextTick(() => panelRef.value?.focus({ preventScroll: true }));
+}
+
 watch(routeKey, () => {
+  focusPanel();
   void refreshItems();
 }, { immediate: true });
+
+onMounted(focusPanel);
 </script>
 
 <template>
-  <div class="flex min-w-0 flex-1 flex-col bg-background">
+  <aside
+    ref="panelRef"
+    class="extension-route-panel flex min-w-0 flex-1 flex-col bg-background border-l border-border"
+    tabindex="-1"
+    :aria-label="route?.label ? `${route.label} extension route` : 'Extension route'"
+  >
     <header class="chat-pane-header border-b border-border px-[var(--chat-content-inline)] py-0 flex flex-shrink-0 items-center justify-between gap-3 glass-panel">
       <div class="chat-message-lane flex min-w-0 items-center gap-2">
         <button
@@ -109,18 +123,28 @@ watch(routeKey, () => {
           </div>
         </div>
       </div>
-      <button
-        class="chat-icon-button"
-        type="button"
-        aria-label="Refresh"
-        :disabled="state === 'loading'"
-        @click="refreshItems"
-      >
-        <RefreshCw class="h-4 w-4" :class="state === 'loading' ? 'animate-spin' : ''" />
-      </button>
+      <div class="flex items-center gap-1.5">
+        <button
+          class="chat-icon-button"
+          type="button"
+          aria-label="Refresh"
+          :disabled="state === 'loading'"
+          @click="refreshItems"
+        >
+          <RefreshCw class="h-4 w-4" :class="state === 'loading' ? 'animate-spin' : ''" />
+        </button>
+        <button
+          class="chat-icon-button"
+          type="button"
+          aria-label="Close extension route"
+          @click="emit('close')"
+        >
+          <X class="h-4 w-4" />
+        </button>
+      </div>
     </header>
 
-    <main class="chat-pane-scroll flex-1 px-[var(--chat-content-inline)] py-4">
+    <div class="chat-pane-scroll flex-1 px-[var(--chat-content-inline)] py-4">
       <div v-if="state === 'loading'" class="type-caption flex h-full items-center justify-center text-muted-foreground">
         Loading…
       </div>
@@ -190,7 +214,7 @@ watch(routeKey, () => {
               v-for="action in item.actions"
               :key="action.launchId"
               type="button"
-              class="chat-icon-button chat-icon-button--sm"
+              class="type-caption inline-flex min-h-8 items-center gap-1.5 rounded-md border border-border bg-background px-2.5 py-1.5 text-foreground transition-colors hover:bg-muted"
               @click="emit('invokeAction', { label: action.label, route: action.launchId, launch: action.launch })"
             >
               {{ action.label }}
@@ -198,6 +222,6 @@ watch(routeKey, () => {
           </div>
         </article>
       </div>
-    </main>
-  </div>
+    </div>
+  </aside>
 </template>

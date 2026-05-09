@@ -20,8 +20,6 @@ const {
   channelUnread,
   notifications,
   version,
-  extensionRoutes,
-  activeExtensionRouteKey,
   displayedMemberCount,
   displayedMemberState,
   memberCountLabel,
@@ -32,7 +30,6 @@ const {
   handleToggleNotifications,
   selectChannel,
   onSelectThread,
-  selectExtensionRoute,
   selectDm,
   openCreateChannelDialog,
   openChannelEdit,
@@ -79,12 +76,9 @@ const {
           :collapsed-group-ids="ui.collapsedSpaceGroupIds.value"
           :channel-unread-map="computedChannelUnreadMap"
           :thread-entries-fn="(roomJid: string) => channelUnread.threadEntries(roomJid)"
-          :extension-routes="extensionRoutes"
-          :active-extension-route="ui.activePage.value === 'extension' ? activeExtensionRouteKey : null"
           class="!w-full !border-r-0 !flex-1"
           @select-channel="selectChannel"
           @select-thread="onSelectThread"
-          @select-extension-route="selectExtensionRoute"
           @create-channel="openCreateChannelDialog()"
           @create-channel-in-space="openCreateChannelDialog"
           @open-settings="ui.showWaddleSettings.value = true"
