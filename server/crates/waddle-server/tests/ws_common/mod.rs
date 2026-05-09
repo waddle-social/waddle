@@ -134,6 +134,10 @@ impl TestServer {
             .env("WADDLE_UPLOAD_DIR", &upload_dir)
             .env("WADDLE_GIT_SHA", TEST_GIT_SHA)
             .env(
+                "WADDLE_SESSION_KEY",
+                "integration-test-session-key-32-bytes-long",
+            )
+            .env(
                 "WADDLE_OCCUPANT_ID_SECRET",
                 "integration-test-occupant-id-secret-32-bytes-long",
             )

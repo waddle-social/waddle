@@ -114,12 +114,10 @@ pub(crate) async fn create_router(
     drain_complete: Arc<tokio::sync::Notify>,
 ) -> Result<Router> {
     // Create auth broker state
-    let encryption_key = server_config.session_key.clone();
-
     let auth_state = Arc::new(AuthState::new(
         state.clone(),
         &server_config,
-        encryption_key.as_ref().map(|s| s.as_bytes()),
+        Some(server_config.session_key.as_bytes()),
     ));
 
     let websocket_state = create_websocket_state(

@@ -127,7 +127,7 @@ impl SpiceDbConfig {
 pub struct ServerConfig {
     pub mode: ServerMode,
     pub base_url: String,
-    pub session_key: Option<String>,
+    pub session_key: String,
     pub auth: AuthConfig,
     /// Runtime extension configuration.
     pub extensions: ExtensionConfig,
@@ -162,6 +162,14 @@ fn parse_occupant_id_secret(raw: Option<&str>) -> Result<OccupantIdSecret, Strin
     })
 }
 
+fn parse_session_key(raw: Option<&str>) -> Result<String, String> {
+    raw.filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| {
+            "WADDLE_SESSION_KEY is required (generate with: openssl rand -base64 48)".to_string()
+        })
+}
+
 #[cfg(test)]
 const TEST_OCCUPANT_ID_SECRET: &str = "test-occupant-id-secret-32-bytes-long";
 
@@ -173,16 +181,17 @@ fn test_occupant_id_secret() -> OccupantIdSecret {
 
 // `Default` is gated to `#[cfg(test)]`. Production startup MUST go
 // through `ServerConfig::from_env`, which enforces the deployment-keyed
-// `WADDLE_OCCUPANT_ID_SECRET`; a non-test `Default` impl could be
-// silently used (e.g. via `..Default::default()` in scaffolding) and
-// reintroduce the cross-deployment linkability that #283 closes.
+// `WADDLE_SESSION_KEY` and `WADDLE_OCCUPANT_ID_SECRET`; a non-test
+// `Default` impl could be silently used (e.g. via `..Default::default()`
+// in scaffolding) and reintroduce the cross-deployment linkability that
+// #283 closes.
 #[cfg(test)]
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
             mode: ServerMode::default(),
             base_url: "http://localhost:3000".to_string(),
-            session_key: None,
+            session_key: "test-session-key".to_string(),
             auth: AuthConfig::default(),
             extensions: ExtensionConfig::default(),
             spicedb: None,
@@ -199,7 +208,7 @@ impl ServerConfig {
         let base_url = std::env::var("WADDLE_BASE_URL")
             .unwrap_or_else(|_| "http://localhost:3000".to_string());
 
-        let session_key = std::env::var("WADDLE_SESSION_KEY").ok();
+        let session_key = parse_session_key(std::env::var("WADDLE_SESSION_KEY").ok().as_deref())?;
         let auth = AuthConfig::from_env()?;
 
         let extensions =
@@ -243,7 +252,7 @@ impl ServerConfig {
         Self {
             mode: ServerMode::HomeServer,
             base_url: "http://localhost:3000".to_string(),
-            session_key: Some("test-key-32-bytes-long-for-aes!".to_string()),
+            session_key: "test-key-32-bytes-long-for-aes!".to_string(),
             auth: AuthConfig::default(),
             extensions: ExtensionConfig::default(),
             spicedb: None,
@@ -256,7 +265,7 @@ impl ServerConfig {
         Self {
             mode: ServerMode::Standalone,
             base_url: "http://localhost:3000".to_string(),
-            session_key: Some("test-key-32-bytes-long-for-aes!".to_string()),
+            session_key: "test-key-32-bytes-long-for-aes!".to_string(),
             auth: AuthConfig::default(),
             extensions: ExtensionConfig::default(),
             spicedb: None,
@@ -268,6 +277,34 @@ impl ServerConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_session_key_rejects_unset() {
+        let err = parse_session_key(None).unwrap_err();
+        assert!(
+            err.contains("WADDLE_SESSION_KEY is required"),
+            "error must name the env var; got: {err}"
+        );
+        assert!(
+            err.contains("openssl rand"),
+            "error must include the generation recipe; got: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_session_key_rejects_empty() {
+        let err = parse_session_key(Some("")).unwrap_err();
+        assert!(
+            err.contains("WADDLE_SESSION_KEY is required"),
+            "empty key must be treated as unset; got: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_session_key_accepts_value() {
+        let value = "test-session-key";
+        assert_eq!(parse_session_key(Some(value)).unwrap(), value);
+    }
 
     #[test]
     fn parse_occupant_id_secret_rejects_unset() {
