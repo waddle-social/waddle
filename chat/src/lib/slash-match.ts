@@ -24,9 +24,12 @@ export function resolveSlashCommand(
 ): DiscoveredExtensionCommand | null {
   if (!prefix) return null;
   const needle = prefix.toLowerCase();
-  return commands.find((command) => {
+  const matches = commands.filter((command) => {
     if (!command.composerPrefix) return false;
     if (command.scope === "channel" && !context.inMuc) return false;
     return command.composerPrefix.toLowerCase() === needle;
-  }) ?? null;
+  });
+  // Multiple extensions advertised the same prefix: refuse to auto-resolve
+  // so the user picks explicitly from the autocomplete popover.
+  return matches.length === 1 ? matches[0] : null;
 }

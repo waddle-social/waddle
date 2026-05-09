@@ -53,6 +53,7 @@ const props = defineProps<{
   extensionsOpen?: boolean;
   slashCommands?: DiscoveredExtensionCommand[];
   inMuc?: boolean;
+  dispatchSlashCommand?: (invocation: SlashInvocation) => Promise<boolean>;
 }>();
 
 const emit = defineEmits<{
@@ -61,7 +62,6 @@ const emit = defineEmits<{
   selectGif: [url: string];
   cancelReply: [];
   openExtensions: [];
-  dispatchSlash: [invocation: SlashInvocation];
 }>();
 
 const replyAuthorName = computed(() => {
@@ -302,12 +302,16 @@ function checkAutocompleteFromEditor() {
     !!firstChild && firstChild.type?.name === "paragraph" && pos > 0 && pos <= firstChild.nodeSize - 1;
 
   const firstParagraph = firstParagraphTextFromDoc(doc);
-  const slash = cursorInFirstParagraph ? parseSlashTrigger(firstParagraph) : null;
+  const slash = parseSlashTrigger(firstParagraph);
   if (slash) {
-    if (dismissedSlashPrefix.value !== null && dismissedSlashPrefix.value === slash.prefix) {
+    // Hold the popover when the cursor is outside paragraph 0 — but keep the
+    // dismissedSlashPrefix intact so the user can navigate away and back
+    // without re-arming the same `/word` they already dismissed.
+    const suppressedByDismissal =
+      dismissedSlashPrefix.value !== null && dismissedSlashPrefix.value === slash.prefix;
+    if (!cursorInFirstParagraph || suppressedByDismissal) {
       showSlash.value = false;
     } else {
-      dismissedSlashPrefix.value = null;
       slashPrefix.value = slash.prefix;
       slashTrailing.value = slash.trailing;
       selectedIndex.value = 0;
@@ -319,6 +323,7 @@ function checkAutocompleteFromEditor() {
     return;
   }
 
+  // The leading `/word` is gone; safe to reset the dismissal too.
   dismissedSlashPrefix.value = null;
   showSlash.value = false;
   triggerRange.value = null;
@@ -376,13 +381,20 @@ function dispatchSlashResolution(): boolean {
   // Forum channels demand a title; don't smuggle a slash dispatch past that gate.
   if (showForumTitleInput.value && !forumTitle.value.trim()) return true;
   const invocation = buildSlashInvocation(command, slashTrailing.value);
-  // Suppress the popover for this exact prefix until the parent resets the
-  // draft so a stray re-render between emit and draft-clear cannot re-arm
-  // the slash submit path on the same keystroke.
-  dismissedSlashPrefix.value = slashPrefix.value;
+  const dispatcher = props.dispatchSlashCommand;
+  // Hide the popover for the round-trip; only commit the dismissal once the
+  // parent reports success, so a failed dispatch leaves slash mode armed for
+  // the user to retry, edit, or Esc.
   showSlash.value = false;
   triggerRange.value = null;
-  emit("dispatchSlash", invocation);
+  if (!dispatcher) return true;
+  const dispatchedPrefix = slashPrefix.value;
+  void (async () => {
+    const ok = await dispatcher(invocation);
+    if (ok) {
+      dismissedSlashPrefix.value = dispatchedPrefix;
+    }
+  })();
   return true;
 }
 

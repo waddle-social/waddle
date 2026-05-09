@@ -91,4 +91,15 @@ describe("resolveSlashCommand", () => {
   test("ignores commands without a composerPrefix", () => {
     expect(resolveSlashCommand("ops-panic", [noPrefix], { inMuc: true })).toBeNull();
   });
+
+  test("returns null when two commands advertise the same composerPrefix", () => {
+    const dupe: DiscoveredExtensionCommand = {
+      serviceJid: "extensions.example.com",
+      node: "urn:waddle:extension:1:other-ai",
+      name: "Other AI",
+      scope: "global",
+      composerPrefix: "ai",
+    };
+    expect(resolveSlashCommand("ai", [ai, dupe], { inMuc: true })).toBeNull();
+  });
 });

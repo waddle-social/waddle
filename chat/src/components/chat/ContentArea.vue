@@ -314,12 +314,15 @@ const updateExtensionCommandField = extensionLauncher.updateField;
 const resetExtensionLauncherState = extensionLauncher.reset;
 const submitExtensionCommandForm = extensionLauncher.submitForm;
 const invokeCommandResultAction = extensionLauncher.invokeResultAction;
-async function dispatchSlashCommand(invocation: Parameters<typeof extensionLauncher.dispatchSlashInvocation>[0]) {
+async function dispatchSlashCommand(
+  invocation: Parameters<typeof extensionLauncher.dispatchSlashInvocation>[0],
+): Promise<boolean> {
   const ok = await extensionLauncher.dispatchSlashInvocation(invocation);
   if (ok) {
     draft.value = "";
     if (isForumChannel.value) forumTitle.value = "";
   }
+  return ok;
 }
 const inMucContext = computed(() => !!props.roomJid);
 
@@ -920,12 +923,12 @@ function dayDividerLabel(createdAt: string): string {
       :extensions-open="extensionLauncherOpen"
       :slash-commands="allDiscoveredCommands"
       :in-muc="inMucContext"
+      :dispatch-slash-command="dispatchSlashCommand"
       @send="onSend"
       @cancel-reply="cancelReply"
       @typing="emit('typing')"
       @select-gif="onSelectGif"
       @open-extensions="openExtensionLauncher"
-      @dispatch-slash="dispatchSlashCommand"
     />
 
     <ExtensionPalette
@@ -1142,12 +1145,12 @@ function dayDividerLabel(createdAt: string): string {
       :extensions-open="extensionLauncherOpen"
       :slash-commands="allDiscoveredCommands"
       :in-muc="inMucContext"
+      :dispatch-slash-command="dispatchSlashCommand"
       @send="onSend"
       @cancel-reply="cancelReply"
       @typing="emit('typing')"
       @select-gif="onSelectGif"
       @open-extensions="openExtensionLauncher"
-      @dispatch-slash="dispatchSlashCommand"
     />
     <ExtensionPalette
       v-if="extensionLauncherOpen && !isTopPinned"
