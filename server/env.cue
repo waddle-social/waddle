@@ -301,15 +301,43 @@ schema.#Project & {
 					gitops_kustomize="$(mktemp)"
 					published_values="$(mktemp)"
 					published_render="$(mktemp)"
+					chart_secret_args=(
+					  --set-string secret.sessionKey=ci-session-key
+					  --set-string secret.occupantIdSecret=ci-occupant-id-secret-32-bytes-long
+					)
 
-					helm lint charts/waddle-server --set spicedb.enabled=false
+					if helm template waddle-server charts/waddle-server \
+					  --namespace waddle \
+					  --set spicedb.enabled=false > /dev/null 2>&1; then
+					  echo "chart must require an operator-owned WADDLE_SESSION_KEY and WADDLE_OCCUPANT_ID_SECRET source" >&2
+					  exit 1
+					fi
+					if helm template waddle-server charts/waddle-server \
+					  --namespace waddle \
+					  --set spicedb.enabled=false \
+					  --set secret.create=false \
+					  "${chart_secret_args[@]}" > /dev/null 2>&1; then
+					  echo "chart must reject inline runtime secrets when secret.create=false because no Secret is rendered" >&2
+					  exit 1
+					fi
+					if helm template waddle-server charts/waddle-server \
+					  --namespace waddle \
+					  --set spicedb.enabled=false \
+					  --set-string 'extraSecretRefs[0]=not-runtime-secrets' > /dev/null 2>&1; then
+					  echo "chart must reject arbitrary extraSecretRefs as proof of required runtime keys" >&2
+					  exit 1
+					fi
+
+					helm lint charts/waddle-server --set spicedb.enabled=false "${chart_secret_args[@]}"
 					helm template waddle-server charts/waddle-server \
 					  --namespace waddle \
-					  --set spicedb.enabled=false > "${chart_render}"
+					  --set spicedb.enabled=false \
+					  "${chart_secret_args[@]}" > "${chart_render}"
 
 					if helm template waddle-server charts/waddle-server \
 					  --namespace waddle \
 					  --set spicedb.enabled=false \
+					  "${chart_secret_args[@]}" \
 					  --set-string image.digest="${placeholder_digest}" > /dev/null 2>&1; then
 					  echo "chart must reject the all-zero image digest placeholder" >&2
 					  exit 1
@@ -318,6 +346,7 @@ schema.#Project & {
 					if helm template waddle-server charts/waddle-server \
 					  --namespace waddle \
 					  --set spicedb.enabled=false \
+					  "${chart_secret_args[@]}" \
 					  --set extensions.enabled=true \
 					  --set-string 'extensions.modules[0].name=placeholder-extension' \
 					  --set-string 'extensions.modules[0].registry=ghcr.io/waddle-social/waddle/extensions/placeholder-extension' \
@@ -336,12 +365,47 @@ schema.#Project & {
 					  echo "checked-in GitOps must not ship github-enricher" >&2
 					  exit 1
 					fi
+					for manifest in ../infrastructure/waddle.cloud/gitops/waddle-server/*external-secret.yaml; do
+					  yq -e '[(.spec.data // [])[] | select(.remoteRef.property == "password")] | length == 0' "${manifest}" > /dev/null || {
+					    echo "checked-in Waddle server ExternalSecrets must not read 1Password default password fields: ${manifest}" >&2
+					    exit 1
+					  }
+					done
+					for forbidden in "helm.sh/hook" "secret-bootstrap" "bootstrap-secrets" "bitnami/kubectl"; do
+					  if grep -R "${forbidden}" charts/waddle-server ../infrastructure/waddle.cloud/gitops/waddle-server; then
+					    echo "chart/GitOps must not contain removed bootstrap hook token: ${forbidden}" >&2
+					    exit 1
+					  fi
+					  if grep -q "${forbidden}" "${chart_render}"; then
+					    echo "rendered chart must not contain removed bootstrap hook token: ${forbidden}" >&2
+					    exit 1
+					  fi
+					done
+					for key_property in \
+					  "WADDLE_SESSION_KEY session-key" \
+					  "WADDLE_OCCUPANT_ID_SECRET occupant-id-secret" \
+					  "WADDLE_S3_ACCESS_KEY_ID r2-access-key-id" \
+					  "WADDLE_S3_SECRET_ACCESS_KEY r2-secret-access-key" \
+					  "WADDLE_SPICEDB_PRESHARED_KEY spicedb-preshared-key"; do
+					  secret_key="${key_property%% *}"
+					  property="${key_property#* }"
+					  yq -e ".spec.data[] | select(.secretKey == \"${secret_key}\" and .remoteRef.key == \"server-runtime-production\" and .remoteRef.property == \"${property}\")" ../infrastructure/waddle.cloud/gitops/waddle-server/runtime-external-secret.yaml > /dev/null
+					done
+					yq -e '(.spec.data | length) == 5' ../infrastructure/waddle.cloud/gitops/waddle-server/runtime-external-secret.yaml > /dev/null
+					yq -e '.spec.data[] | select(.secretKey == "apiKey" and .remoteRef.key == "server-runtime-production" and .remoteRef.property == "openrouter-api-key")' ../infrastructure/waddle.cloud/gitops/waddle-server/openrouter-external-secret.yaml > /dev/null
+					yq -e '(.spec.data | length) == 1' ../infrastructure/waddle.cloud/gitops/waddle-server/openrouter-external-secret.yaml > /dev/null
+					yq -e '.spec.data[] | select(.secretKey == "preshared_key" and .remoteRef.key == "server-runtime-production" and .remoteRef.property == "spicedb-preshared-key")' ../infrastructure/waddle.cloud/gitops/waddle-server/spicedb-config-external-secret.yaml > /dev/null
 					yq -e '.extensions.enabled == false' "${gitops_values}" > /dev/null
 					yq -e '(.extensions.modules // []) | length == 0' "${gitops_values}" > /dev/null
+					yq -e '(.extraSecretRefs | length) == 1 and (.extraSecretRefs[0] == "waddle-runtime-secrets")' "${gitops_values}" > /dev/null
+					yq -e '.secret.runtimeSecretName == "waddle-runtime-secrets"' "${gitops_values}" > /dev/null
 					helm lint charts/waddle-server -f "${gitops_values}"
 					helm template waddle-server charts/waddle-server \
 					  --namespace waddle \
 					  -f "${gitops_values}" > "${gitops_render}"
+					for env_name in WADDLE_SESSION_KEY WADDLE_OCCUPANT_ID_SECRET; do
+					  yq -e "select(.kind == \"Deployment\") | .spec.template.spec.containers[] | select(.name == \"waddle-server\") | (.env // [])[] | select(.name == \"${env_name}\" and .valueFrom.secretKeyRef.name == \"waddle-runtime-secrets\" and .valueFrom.secretKeyRef.optional == false)" "${gitops_render}" > /dev/null
+					done
 					kubectl kustomize ../infrastructure/waddle.cloud/gitops/waddle-server > "${gitops_kustomize}"
 					if grep -q "${placeholder_digest}" "${gitops_kustomize}"; then
 					  echo "rendered GitOps must not contain all-zero digest placeholders" >&2
@@ -351,6 +415,12 @@ schema.#Project & {
 					  echo "rendered GitOps must not contain github-enricher" >&2
 					  exit 1
 					fi
+					for forbidden in "helm.sh/hook" "secret-bootstrap" "bootstrap-secrets" "bitnami/kubectl"; do
+					  if grep -q "${forbidden}" "${gitops_render}" || grep -q "${forbidden}" "${gitops_kustomize}"; then
+					    echo "rendered GitOps must not contain removed bootstrap hook token: ${forbidden}" >&2
+					    exit 1
+					  fi
+					done
 
 					cp "${gitops_values}" "${published_values}"
 					SAMPLE_DIGEST="${sample_digest}" yq -i '
@@ -704,6 +774,7 @@ schema.#Project & {
 			WADDLE_TEST_FIXED_ACCOUNT_ENABLED:  "true"
 			WADDLE_TEST_FIXED_ACCOUNT_PASSWORD: "cuenv-test-password"
 			WADDLE_UPLOAD_DIR:                  "./uploads"
+			WADDLE_SESSION_KEY:                 "cuenv-test-session-key"
 			// XEP-0421 occupant-id HMAC key. Test/CI value only — production
 			// must set its own via the Helm chart or secret manager.
 			WADDLE_OCCUPANT_ID_SECRET: "cuenv-test-occupant-id-secret-32-bytes-long"

@@ -195,23 +195,18 @@ pub(crate) async fn register_extension_commands(
 
 pub(crate) async fn build_extension_manager(
     server_config: &crate::config::ServerConfig,
-    xmpp_domain: &str,
+    _xmpp_domain: &str,
     deferred_extension_host_tools: Arc<
         crate::server::extension_host_tools::DeferredExtensionHostTools,
     >,
 ) -> anyhow::Result<Arc<ExtensionManager>> {
-    let extension_launch_key = server_config
-        .session_key
-        .clone()
-        .unwrap_or_else(|| format!("development-extension-launch-key:{xmpp_domain}"));
-
     let manager = match ExtensionManager::from_config_with_host_tools(
         server_config.extensions.clone(),
         Arc::clone(&deferred_extension_host_tools) as Arc<dyn ext_host::ExtensionHostTools>,
     )
     .await
     {
-        Ok(mgr) => mgr.with_launch_signing_key(extension_launch_key.as_bytes()),
+        Ok(mgr) => mgr.with_launch_signing_key(server_config.session_key.as_bytes()),
         Err(error) => {
             if server_config.extensions.enabled && !server_config.extensions.modules.is_empty() {
                 return Err(anyhow::anyhow!(
@@ -228,7 +223,7 @@ pub(crate) async fn build_extension_manager(
                 Arc::clone(&deferred_extension_host_tools) as Arc<dyn ext_host::ExtensionHostTools>,
             )
             .await
-            .map(|mgr| mgr.with_launch_signing_key(extension_launch_key.as_bytes()))
+            .map(|mgr| mgr.with_launch_signing_key(server_config.session_key.as_bytes()))
             .expect("BUG: failed to create disabled ExtensionManager")
         }
     };

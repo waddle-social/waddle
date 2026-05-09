@@ -10,7 +10,7 @@ spec:
   chart:
     spec:
       chart: waddle-server
-      version: 0.2.x
+      version: 0.3.x
       sourceRef:
         kind: HelmRepository
         name: waddle-server
@@ -43,8 +43,6 @@ spec:
       endpoint: http://spicedb:50051
       insecure: true
     extraSecretRefs:
-      - waddle-r2-credentials
-      - waddle-spicedb
       - waddle-runtime-secrets
     extraVolumes:
       - name: openrouter-api-key
@@ -107,9 +105,10 @@ spec:
 
     secret:
       create: true
-      # WADDLE_OCCUPANT_ID_SECRET is owned by the 1Password-backed
-      # waddle-runtime-secrets ExternalSecret referenced above.
-      manageOccupantIdSecret: false
+      # WADDLE_SESSION_KEY and WADDLE_OCCUPANT_ID_SECRET are owned by the
+      # 1Password-backed waddle-runtime-secrets ExternalSecret referenced
+      # above.
+      runtimeSecretName: waddle-runtime-secrets
       databaseUrl: "postgresql://postgresql-rw:5432/waddle"
       xmppMamDatabaseUrl: "postgresql://postgresql-rw:5432/waddle"
       xmppInboxDatabaseUrl: "postgresql://postgresql-rw:5432/waddle"

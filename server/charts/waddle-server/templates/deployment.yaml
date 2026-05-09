@@ -54,29 +54,36 @@ spec:
                 name: {{ include "waddle-server.configMapName" . }}
             {{- /*
               Order matters: later envFrom sources override earlier ones for
-              the same key. Auto-generated bootstrap keys come first; then
-              operator-supplied values (which may override session/occupant);
-              then external Secrets injected via extraSecretRefs.
+              the same key. Operator-supplied values come before external
+              Secrets injected via extraSecretRefs.
             */}}
-            {{- $autoGenerate := true -}}
-            {{- if hasKey .Values.secret "autoGenerate" -}}
-            {{- $autoGenerate = .Values.secret.autoGenerate -}}
-            {{- end }}
-            {{- if and .Values.secret.create (not .Values.secret.existingSecret) $autoGenerate }}
-            - secretRef:
-                name: {{ include "waddle-server.bootstrapSecretName" . }}
-                optional: true
-            {{- end }}
-            {{- if or .Values.secret.create .Values.secret.existingSecret }}
+            {{- if and .Values.secret.create (not .Values.secret.existingSecret) }}
             - secretRef:
                 name: {{ include "waddle-server.secretName" . }}
                 optional: true
+            {{- else if .Values.secret.existingSecret }}
+            - secretRef:
+                name: {{ include "waddle-server.secretName" . }}
+                optional: false
             {{- end }}
             {{- range .Values.extraSecretRefs }}
             - secretRef:
                 name: {{ . }}
             {{- end }}
           env:
+            {{- $runtimeSecretName := include "waddle-server.runtimeSecretName" . }}
+            - name: WADDLE_SESSION_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $runtimeSecretName | quote }}
+                  key: WADDLE_SESSION_KEY
+                  optional: false
+            - name: WADDLE_OCCUPANT_ID_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $runtimeSecretName | quote }}
+                  key: WADDLE_OCCUPANT_ID_SECRET
+                  optional: false
             - name: WADDLE_UPLOAD_DIR
               value: {{ printf "%s/%s" .Values.persistence.mountPath .Values.persistence.uploadSubPath | quote }}
             {{- if and .Values.xmpp.enabled .Values.xmpp.tls.secretName }}

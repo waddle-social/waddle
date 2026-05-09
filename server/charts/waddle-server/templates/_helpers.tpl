@@ -91,14 +91,16 @@ Secret name (operator-supplied values).
 {{- end -}}
 
 {{/*
-Bootstrap Secret name (chart-managed auto-generated keys).
-
-The bootstrap Secret is created out-of-band by a pre-install hook (see
-templates/secret-bootstrap-hook.yaml) so that `helm template` does not
-produce drift against the live cluster. See waddle-social/waddle#303.
+Runtime Secret name for required server keys.
 */}}
-{{- define "waddle-server.bootstrapSecretName" -}}
-{{- printf "%s-bootstrap-secrets" (include "waddle-server.fullname" .) -}}
+{{- define "waddle-server.runtimeSecretName" -}}
+{{- if .Values.secret.runtimeSecretName -}}
+{{- .Values.secret.runtimeSecretName -}}
+{{- else if .Values.secret.existingSecret -}}
+{{- .Values.secret.existingSecret -}}
+{{- else if and .Values.secret.create (or .Values.secret.sessionKey .Values.secret.occupantIdSecret) -}}
+{{- include "waddle-server.secretName" . -}}
+{{- end -}}
 {{- end -}}
 
 {{/*
