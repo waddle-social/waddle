@@ -77,4 +77,82 @@ describe("reply UX helpers", () => {
     expect(getReplyJumpNotice(true)).toBe("");
     expect(getReplyJumpNotice(false)).toBe(REPLY_JUMP_TARGET_MISSING_MESSAGE);
   });
+
+  test("Escape dismisses the slash popover before cancelling a reply", () => {
+    expect(
+      getComposerEscapeAction({
+        showMentions: false,
+        showEmoji: false,
+        showSlash: true,
+        isReplyingTo: true,
+      }),
+    ).toBe("dismiss-slash");
+  });
+
+  test("Escape ignores slash popover when mention/emoji autocomplete is also showing", () => {
+    expect(
+      getComposerEscapeAction({
+        showMentions: true,
+        showEmoji: false,
+        showSlash: true,
+        isReplyingTo: false,
+      }),
+    ).toBe("dismiss-autocomplete");
+  });
+
+  test("Submit on `/word` that resolves to a command invokes the slash submit path", () => {
+    expect(
+      getComposerAutocompleteAction({
+        showMentions: false,
+        mentionCount: 0,
+        showEmoji: false,
+        emojiCount: 0,
+        showSlash: true,
+        slashCandidateCount: 1,
+        slashHasResolution: true,
+      }),
+    ).toBe("submit-slash");
+  });
+
+  test("Submit on slash popover with candidates but no exact resolution expands the highlighted candidate", () => {
+    expect(
+      getComposerAutocompleteAction({
+        showMentions: false,
+        mentionCount: 0,
+        showEmoji: false,
+        emojiCount: 0,
+        showSlash: true,
+        slashCandidateCount: 2,
+        slashHasResolution: false,
+      }),
+    ).toBe("select-command");
+  });
+
+  test("Submit on `/word` with no candidates and no resolution blocks", () => {
+    expect(
+      getComposerAutocompleteAction({
+        showMentions: false,
+        mentionCount: 0,
+        showEmoji: false,
+        emojiCount: 0,
+        showSlash: true,
+        slashCandidateCount: 0,
+        slashHasResolution: false,
+      }),
+    ).toBe("block-slash");
+  });
+
+  test("Mention autocomplete still wins over slash popover", () => {
+    expect(
+      getComposerAutocompleteAction({
+        showMentions: true,
+        mentionCount: 1,
+        showEmoji: false,
+        emojiCount: 0,
+        showSlash: true,
+        slashCandidateCount: 1,
+        slashHasResolution: true,
+      }),
+    ).toBe("select-mention");
+  });
 });
