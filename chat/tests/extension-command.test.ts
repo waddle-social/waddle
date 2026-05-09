@@ -123,6 +123,46 @@ describe("extension command invocation", () => {
     ]);
   });
 
+  test("falls back to raw disco XML when typed command info omits metadata forms", async () => {
+    const xmpp = {
+      async getDiscoItems(jid: string, node?: string) {
+        if (jid === "example.com" && !node) return { items: [{ jid: "extensions.example.com" }] };
+        if (jid === "extensions.example.com" && node === "http://jabber.org/protocol/commands") {
+          return {
+            items: [{
+              jid: "extensions.example.com",
+              node: "urn:waddle:extension:1:ai-chatbot",
+              name: "Ask AI Chatbot",
+            }],
+          };
+        }
+        return { items: [] };
+      },
+      async getDiscoInfo(_jid: string, node?: string) {
+        if (!node) {
+          return {
+            features: ["urn:waddle:extension:1", "http://jabber.org/protocol/commands"],
+            extensions: [],
+          };
+        }
+        return { features: ["http://jabber.org/protocol/commands"], extensions: [] };
+      },
+      async send_raw_iq(xml: string) {
+        expect(xml).toContain('node="urn:waddle:extension:1:ai-chatbot"');
+        return `<iq type="result"><query xmlns="http://jabber.org/protocol/disco#info"><x xmlns="jabber:x:data" type="result"><field var="FORM_TYPE"><value>urn:waddle:extension:1:command</value></field><field var="waddle#command_scope"><value>global</value></field><field var="waddle#composer_prefix"><value>ai</value></field><field var="waddle#inline_field"><value>prompt</value></field></x></query></iq>`;
+      },
+    };
+
+    expect(await discoverExtensionCommands(xmpp as any, "alice@example.com/web")).toEqual([{
+      serviceJid: "extensions.example.com",
+      node: "urn:waddle:extension:1:ai-chatbot",
+      name: "Ask AI Chatbot",
+      scope: "global",
+      composerPrefix: "ai",
+      inlineField: "prompt",
+    }]);
+  });
+
   test("treats an empty composer_prefix value as absent rather than a zero-length match", async () => {
     const xmpp = {
       async send_raw_iq(xml: string) {
@@ -691,6 +731,7 @@ describe("extension command invocation", () => {
     expect(sent).toContain('<field var="payload#choices"><value>yes</value><value>maybe</value></field>');
     expect(sent).toContain('<field var="payload#notify" type="boolean"><value>false</value></field>');
     expect(sent).toContain('<field var="hidden#multi"><value>alpha</value><value>beta</value></field>');
+    expect(sent).toContain('<field var="waddle#room_jid"><value>pub@muc.example.com</value></field>');
     expect(sent).not.toContain('fixed:Do not send me');
   });
 });

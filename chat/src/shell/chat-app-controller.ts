@@ -780,6 +780,17 @@ export function useChatAppController(giphyApiKey: string) {
     await messaging.sendMessage(body, markup, references, files, replyTo, forumTitle);
   }
 
+  async function sendPublicChannelMessage(body: string) {
+    if (ui.sidebarMode.value !== "channels" || !xmppClient.value || !waddles.activeChannelId.value) {
+      throw new Error("Public AI prompts require an active channel.");
+    }
+    ui.clearActionError();
+    await messaging.sendMessage(body);
+    if (ui.actionError.value) {
+      throw new Error(ui.actionError.value);
+    }
+  }
+
   async function sendThreadMessage(
     body: string,
     markup: MarkupSpan[],
@@ -1608,6 +1619,7 @@ export function useChatAppController(giphyApiKey: string) {
       confirmRemoveMember,
       openChannelEdit,
       sendActiveMessage,
+      sendPublicChannelMessage,
       sendThreadMessage,
       sendGif,
       openThread,

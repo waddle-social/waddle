@@ -161,9 +161,10 @@ async function rawDiscoInfoFull(xmpp: XmppSendIq, jid: string, node?: string): P
   if (typeof xmpp.getDiscoInfo === "function") {
     try {
       const info = await xmpp.getDiscoInfo(jid, node);
-      return { features: info.features ?? [], extensions: info.extensions ?? [] };
+      const parsed = { features: info.features ?? [], extensions: info.extensions ?? [] };
+      if (parsed.extensions.length > 0 || typeof xmpp.send_raw_iq !== "function") return parsed;
     } catch {
-      return { features: [], extensions: [] };
+      if (typeof xmpp.send_raw_iq !== "function") return { features: [], extensions: [] };
     }
   }
   if (typeof xmpp.send_raw_iq !== "function") return { features: [], extensions: [] };

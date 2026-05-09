@@ -77,6 +77,7 @@ const props = defineProps<{
   reactionMode?: { selectedMessageId: string | null } | null;
   ensureMessageLoaded?: (messageId: string) => Promise<boolean>;
   invokeExtensionAction?: (action: ExtensionAnnotationAction) => Promise<ExtensionCommandResult>;
+  sendPublicChannelMessage?: (body: string) => Promise<void>;
 }>();
 
 const emit = defineEmits<{
@@ -297,6 +298,7 @@ const extensionLauncher = useExtensionLauncher({
   xmppClient: computed(() => props.xmppClient),
   roomJid: computed(() => props.roomJid),
   invokeExtensionAction: computed(() => props.invokeExtensionAction),
+  sendPublicChannelMessage: computed(() => props.sendPublicChannelMessage),
   focusPalette: () => extensionPaletteRef.value?.focus(),
   focusComposerExtensions: () => composerRef.value?.focusExtensions(),
 });

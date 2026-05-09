@@ -3,11 +3,11 @@ use super::{
     execute_provider_request_with_runtime, extension_error, format_archived_messages, manifest,
     parse_provider_answer, provider_execution_error, provider_request_headers,
     provider_request_json, provider_request_json_from_parts, provider_tool_mam_query,
-    select_host_tools, types, CleanPrompt, ExecutionContext, HostTool, NonEmptyString,
-    ProviderAnswer, ProviderConfig, ProviderExecutionError, ProviderExecutor, ProviderRequest,
-    ProviderRole, ResponseTarget, BASELINE_SYSTEM_PROMPT, COMMAND_NODE, MAX_CONTEXT_BYTES,
-    MAX_CONTEXT_LINE_BYTES, MAX_PROVIDER_TOOL_CALLS_PER_ROUND, OPENROUTER_REFERER,
-    OPENROUTER_TITLE,
+    select_host_tools, take_sent_room_messages, types, CleanPrompt, ExecutionContext, HostTool,
+    NonEmptyString, ProviderAnswer, ProviderConfig, ProviderExecutionError, ProviderExecutor,
+    ProviderRequest, ProviderRole, ResponseTarget, BASELINE_SYSTEM_PROMPT, COMMAND_NODE,
+    MAX_CONTEXT_BYTES, MAX_CONTEXT_LINE_BYTES, MAX_PROVIDER_TOOL_CALLS_PER_ROUND,
+    OPENROUTER_REFERER, OPENROUTER_TITLE,
 };
 
 struct FakeExecutor {
@@ -673,6 +673,67 @@ fn command_success_returns_visible_result_enrichment() {
         panic!("expected text block");
     };
     assert_eq!(text.text.value, "answer");
+}
+
+#[test]
+fn channel_public_command_posts_answer_to_active_room() {
+    let _ = take_sent_room_messages();
+    let mut command = command_invocation("summarize release blockers");
+    command.room = Some(types::RoomJid {
+        value: "chat@muc.example.com".to_string(),
+    });
+    command.fields.push(types::FormFieldValue {
+        name: types::UiActionId {
+            value: "output".to_string(),
+        },
+        values: vec![types::DataFormValue {
+            value: "channel".to_string(),
+        }],
+    });
+    let executor = success_executor("there are no blockers");
+
+    let effect = command_response_with_config(command, &executor, test_config())
+        .expect("command succeeds")
+        .expect("visible command result");
+
+    let types::ExtensionEffect::EnrichMessage(envelope) = effect else {
+        panic!("expected visible posted confirmation");
+    };
+    let block = &envelope.enrichments[0].ui[0].blocks[0];
+    let types::UiBlock::Text(text) = block else {
+        panic!("expected text block");
+    };
+    assert_eq!(text.text.value, "AI answer posted to channel.");
+    let sent = take_sent_room_messages();
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0].body.value, "there are no blockers");
+    assert!(sent.iter().all(|request| matches!(
+        &request.target,
+        types::MessageTarget::Muc(room) if room.value == "chat@muc.example.com"
+    )));
+}
+
+#[test]
+fn channel_public_command_requires_active_room() {
+    let mut command = command_invocation("summarize release blockers");
+    command.fields.push(types::FormFieldValue {
+        name: types::UiActionId {
+            value: "output".to_string(),
+        },
+        values: vec![types::DataFormValue {
+            value: "channel".to_string(),
+        }],
+    });
+    let executor = success_executor("unused");
+
+    let error = command_response_with_config(command, &executor, test_config())
+        .expect_err("channel output without room fails");
+
+    assert_eq!(error.code, types::ExtensionErrorCode::InvalidRequest);
+    assert_eq!(
+        error.message.value,
+        "posting an AI answer to a channel requires an active channel"
+    );
 }
 
 fn success_executor(answer: &str) -> FakeExecutor {

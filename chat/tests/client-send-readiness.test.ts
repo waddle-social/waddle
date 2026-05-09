@@ -682,6 +682,37 @@ describe("optimistic UI waits for successful sends", () => {
     expect(actionError.value).toBe("");
   });
 
+  test("room programmatic sends do not clear the composer draft", async () => {
+    const sendGroupMessage = mock(async () => ({ id: "public-prompt-1", state: "queued" as const }));
+    const sendChatState = mock(async () => undefined);
+    const actionError = ref("");
+    const messaging = useChannelMessages(
+      ref(session()),
+      ref(null),
+      ref({ ...handlerStubs(), sendGroupMessage, sendChatState } as never),
+      ref("w1"),
+      ref("c1"),
+      ref({ id: "c1", name: "general", channel_type: "text" }),
+      normalizeError,
+      actionError,
+      () => {
+        actionError.value = "";
+      },
+    );
+    messaging.draft.value = "/ai tell the room";
+
+    await messaging.sendMessage("tell the room");
+
+    expect(sendGroupMessage).toHaveBeenCalledWith(
+      "w1",
+      "c1",
+      "tell the room",
+      expect.any(Object),
+    );
+    expect(messaging.draft.value).toBe("/ai tell the room");
+    expect(actionError.value).toBe("");
+  });
+
   test("room composer allows bodyless standard MUC thread metadata", async () => {
     const sendGroupMessage = mock(async () => ({ id: "thread-marker-1", state: "sending" as const }));
     const sendChatState = mock(async () => undefined);

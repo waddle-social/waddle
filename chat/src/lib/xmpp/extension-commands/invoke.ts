@@ -43,12 +43,17 @@ export async function submitExtensionCommandForm(
   sessionId: string,
   fields: ExtensionCommandFormField[],
   action: ExtensionCommandAction = "complete",
-  _roomJid?: string,
+  roomJid?: string,
 ): Promise<ExtensionCommandResult> {
   const sendRawIq = requireRawIq(xmpp);
-  const dataFields: DataFormField[] = (action === "cancel" || action === "prev") ? [] : fields
-    .filter((field) => field.type !== "fixed")
-    .map((field) => ({ name: field.name, value: dataFormFieldValue(field) }));
+  const dataFields: DataFormField[] = (action === "cancel" || action === "prev") ? [] : [
+    ...fields
+      .filter((field) => field.type !== "fixed")
+      .map((field) => ({ name: field.name, value: dataFormFieldValue(field) })),
+    ...(roomJid && !fields.some((field) => field.name === "waddle#room_jid")
+      ? [{ name: "waddle#room_jid", value: roomJid }]
+      : []),
+  ];
   const responseXml = await sendRawIq(buildCommandIqXml(command.serviceJid, command.node, action, dataFields, sessionId));
   return parseCommandIqResponse(responseXml);
 }
