@@ -88,8 +88,8 @@ export function parseChatLocation(pathname: string, search?: string): RouteState
         dmUsername: null,
         extensionPluginId: decodeURIComponent(segments[3]),
         extensionRouteId: decodeURIComponent(segments[4]),
-        threadStack: [],
-        pinnedPanelOpen: false,
+        threadStack,
+        pinnedPanelOpen,
       };
     }
     return {
@@ -148,9 +148,12 @@ export function buildChannelExtensionPath(
   channel: ChannelSummary | null,
   pluginId: string | null | undefined,
   routeId: string | null | undefined,
+  threadStack?: string[],
+  pinnedPanelOpen?: boolean,
 ): string {
   if (!channel || !pluginId || !routeId) return "/";
-  return `/r/${encodeURIComponent(channel.id)}/x/${encodeURIComponent(pluginId)}/${encodeURIComponent(routeId)}`;
+  const search = buildSearch(threadStack, pinnedPanelOpen);
+  return `/r/${encodeURIComponent(channel.id)}/x/${encodeURIComponent(pluginId)}/${encodeURIComponent(routeId)}${search}`;
 }
 
 export function buildDirectMessagePath(username: string | null, threadStack?: string[]): string {
@@ -193,8 +196,10 @@ export function pushChannelExtensionRoute(
   channel: ChannelSummary | null,
   pluginId: string | null | undefined,
   routeId: string | null | undefined,
+  threadStack?: string[],
+  pinnedPanelOpen?: boolean,
 ) {
-  const path = buildChannelExtensionPath(channel, pluginId, routeId);
+  const path = buildChannelExtensionPath(channel, pluginId, routeId, threadStack, pinnedPanelOpen);
   const current = window.location.pathname + window.location.search;
   if (current !== path) {
     window.history.pushState({ waddlePage: "extension" }, "", path);

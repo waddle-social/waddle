@@ -127,6 +127,11 @@ export function useChatAppController(giphyApiKey: string) {
       route.pluginId === key.pluginId && route.routeId === key.routeId,
     ) ?? null;
   });
+  const channelExtensionRoutes = computed(() =>
+    ui.sidebarMode.value === "channels" && waddles.currentChannel.value
+      ? extensionRoutes.value.filter((route) => route.scope === "channel")
+      : [],
+  );
   const activeChannelRoomJid = computed(() => {
     const channel = waddles.currentChannel.value;
     if (!channel || !session.value) return null;
@@ -139,6 +144,8 @@ export function useChatAppController(giphyApiKey: string) {
   const activeThreadStack = ref<string[]>([]);
   const activeThreadTargetMessageId = ref<string | null>(null);
   const threads = useMessageThreads(activeMessages);
+  type ActiveRightPanel = "thread" | "pinned" | "extension";
+  const activeRightPanel = ref<ActiveRightPanel | null>(null);
   type ReactionModeTarget = "main" | "thread";
   const reactionModeTarget = ref<ReactionModeTarget | null>(null);
   const reactionModeSelectedMessageId = ref<string | null>(null);
@@ -150,6 +157,37 @@ export function useChatAppController(giphyApiKey: string) {
     const entry = threads.resolveEntry(threadId);
     const body = entry?.root?.body?.trim() ?? "";
     return body.length > 0 ? body.slice(0, 40) : threadId.slice(0, 8);
+  }
+
+  function isRightPanelAvailable(panel: ActiveRightPanel): boolean {
+    if (ui.sidebarMode.value !== "channels" || ui.activePage.value !== "chat") return false;
+    if (panel === "thread") return activeThreadStack.value.length > 0;
+    if (panel === "pinned") return ui.showPinnedPanel.value && !!waddles.currentChannel.value && !!activeChannelRoomJid.value;
+    return !!activeExtensionRouteKey.value && !!waddles.currentChannel.value;
+  }
+
+  function bestAvailableRightPanel(exclude?: ActiveRightPanel): ActiveRightPanel | null {
+    const candidates: ActiveRightPanel[] = ["thread", "pinned", "extension"];
+    return candidates.find((candidate) => candidate !== exclude && isRightPanelAvailable(candidate)) ?? null;
+  }
+
+  function activateRightPanel(panel: ActiveRightPanel) {
+    if (isRightPanelAvailable(panel)) activeRightPanel.value = panel;
+  }
+
+  function normalizeActiveRightPanel(exclude?: ActiveRightPanel) {
+    if (activeRightPanel.value && activeRightPanel.value !== exclude && isRightPanelAvailable(activeRightPanel.value)) return;
+    activeRightPanel.value = bestAvailableRightPanel(exclude);
+  }
+
+  function closeExtensionRoutePanel() {
+    activeExtensionRouteKey.value = null;
+    normalizeActiveRightPanel("extension");
+  }
+
+  function closePinnedPanel() {
+    ui.showPinnedPanel.value = false;
+    normalizeActiveRightPanel("pinned");
   }
 
   const orderedMainReactionMessages = computed(() =>
@@ -189,7 +227,7 @@ export function useChatAppController(giphyApiKey: string) {
 
   function activeReactionTarget(): ReactionModeTarget | null {
     if (ui.activePage.value !== "chat") return null;
-    if (ui.sidebarMode.value === "channels" && activeThreadStack.value.length > 0) return "thread";
+    if (ui.sidebarMode.value === "channels" && activeRightPanel.value === "thread" && activeThreadStack.value.length > 0) return "thread";
     if (ui.sidebarMode.value === "dms" && activeDmPeer.value) return "main";
     if (ui.sidebarMode.value === "channels" && waddles.currentChannel.value) return "main";
     return null;
@@ -625,11 +663,13 @@ export function useChatAppController(giphyApiKey: string) {
   const settingsPath = buildChatSettingsPath();
 
   const currentChatPath = computed(() =>
-    ui.activePage.value === "extension" && activeExtensionRouteKey.value
+    ui.activePage.value === "chat" && activeRightPanel.value === "extension" && activeExtensionRouteKey.value
       ? buildChannelExtensionPath(
           waddles.currentChannel.value,
           activeExtensionRouteKey.value.pluginId,
           activeExtensionRouteKey.value.routeId,
+          activeThreadStack.value,
+          ui.showPinnedPanel.value,
         )
       : ui.sidebarMode.value === "dms" && activeDmPeer.value
       ? buildDirectMessagePath(activeDmPeer.value.peerUsername)
@@ -757,6 +797,7 @@ export function useChatAppController(giphyApiKey: string) {
 
   function openThread(threadId: string, targetMessageId?: string) {
     if (!threadId) return;
+    activeRightPanel.value = "thread";
     activeThreadTargetMessageId.value = targetMessageId ?? null;
     if (
       activeThreadStack.value.length > 0 &&
@@ -790,6 +831,7 @@ export function useChatAppController(giphyApiKey: string) {
 
   function pushThread(threadId: string) {
     if (!threadId) return;
+    activeRightPanel.value = "thread";
     activeThreadTargetMessageId.value = null;
     if (
       activeThreadStack.value.length > 0 &&
@@ -805,14 +847,17 @@ export function useChatAppController(giphyApiKey: string) {
     activeThreadTargetMessageId.value = null;
     if (index < 0) {
       activeThreadStack.value = [];
+      normalizeActiveRightPanel("thread");
       return;
     }
     activeThreadStack.value = activeThreadStack.value.slice(0, index + 1);
+    activeRightPanel.value = "thread";
   }
 
   function closeThreadPanel() {
     activeThreadTargetMessageId.value = null;
     activeThreadStack.value = [];
+    normalizeActiveRightPanel("thread");
   }
 
   function notifyActiveComposing() {
@@ -945,10 +990,21 @@ export function useChatAppController(giphyApiKey: string) {
   }
 
   function handleChatEscape(event: KeyboardEvent) {
-    if (activeThreadStack.value.length === 0) return;
     // Don't intercept Escape when any dialog/drawer is open so they can close first.
     if (anyModalOpen()) return;
+    if (activeRightPanel.value === "extension" && activeExtensionRouteKey.value) {
+      closeExtensionRoutePanel();
+      consumeKeystrokEvent(event);
+      return;
+    }
+    if (activeRightPanel.value === "pinned" && ui.showPinnedPanel.value) {
+      closePinnedPanel();
+      consumeKeystrokEvent(event);
+      return;
+    }
+    if (activeThreadStack.value.length === 0) return;
     activeThreadStack.value = activeThreadStack.value.slice(0, -1);
+    normalizeActiveRightPanel();
     consumeKeystrokEvent(event);
   }
 
@@ -981,11 +1037,13 @@ export function useChatAppController(giphyApiKey: string) {
       pushChannelRoute(null);
       return;
     }
-    if (ui.activePage.value === "extension") {
+    if (ui.activePage.value === "chat" && activeRightPanel.value === "extension") {
       pushChannelExtensionRoute(
         waddles.currentChannel.value,
         activeExtensionRouteKey.value?.pluginId,
         activeExtensionRouteKey.value?.routeId,
+        activeThreadStack.value,
+        ui.showPinnedPanel.value,
       );
       return;
     }
@@ -1009,20 +1067,33 @@ export function useChatAppController(giphyApiKey: string) {
       activeThreadStack.value = [];
       // #414: pin panel state is per-room — clear on channel switch.
       ui.showPinnedPanel.value = false;
+      activeExtensionRouteKey.value = null;
+      activeRightPanel.value = null;
       exitReactionMode();
       updateUrl();
     },
   );
 
   watch(activeThreadStack, () => {
+    normalizeActiveRightPanel();
     exitReactionMode();
     updateUrl();
   }, { deep: true });
   // #414: any toggle of the pin panel pushes the URL state.
   watch(() => ui.showPinnedPanel.value, () => {
+    if (!ui.showPinnedPanel.value && activeRightPanel.value === "pinned") {
+      normalizeActiveRightPanel("pinned");
+    }
+    updateUrl();
+  });
+  watch(activeExtensionRouteKey, () => {
+    normalizeActiveRightPanel();
+  }, { deep: true });
+  watch(activeRightPanel, () => {
     updateUrl();
   });
   watch(() => ui.activePage.value, () => {
+    normalizeActiveRightPanel();
     exitReactionMode();
     updateUrl();
   });
@@ -1061,17 +1132,17 @@ export function useChatAppController(giphyApiKey: string) {
       window.history.back();
       return;
     }
-    ui.activePage.value = activeExtensionRouteKey.value && waddles.currentChannel.value
-      ? "extension"
-      : waddles.currentChannel.value || activeDmPeer.value
+    ui.activePage.value = waddles.currentChannel.value || activeDmPeer.value
         ? "chat"
         : "dashboard";
     if (window.location.pathname + window.location.search !== currentChatPath.value) {
-      if (ui.activePage.value === "extension") {
+      if (activeRightPanel.value === "extension") {
         pushChannelExtensionRoute(
           waddles.currentChannel.value,
           activeExtensionRouteKey.value?.pluginId,
           activeExtensionRouteKey.value?.routeId,
+          activeThreadStack.value,
+          ui.showPinnedPanel.value,
         );
       } else if (ui.sidebarMode.value === "dms" && activeDmPeer.value) {
         pushDirectMessageRoute(activeDmPeer.value.peerUsername);
@@ -1083,7 +1154,7 @@ export function useChatAppController(giphyApiKey: string) {
 
   function onPopState() {
     const route = parseChatLocation(window.location.pathname, window.location.search);
-    ui.activePage.value = route.page;
+    ui.activePage.value = route.page === "extension" ? "chat" : route.page;
     if (route.page === "settings") {
       activeThreadTargetMessageId.value = null;
       activeThreadStack.value = [];
@@ -1111,10 +1182,10 @@ export function useChatAppController(giphyApiKey: string) {
   }
 
   async function applyRouteTarget(route: ReturnType<typeof parseChatLocation>, requestId: number) {
-    ui.activePage.value = route.page;
-    // #414: sync the pin panel toggle with `?pinned=1`. Channel-only;
-    // dashboard/settings/extension/DM routes leave it false.
-    ui.showPinnedPanel.value = route.pinnedPanelOpen && route.page === "chat" && !route.dmUsername;
+    ui.activePage.value = route.page === "extension" ? "chat" : route.page;
+    // #414: sync the pin panel toggle with `?pinned=1`. Channel routes,
+    // including extension panels, can keep pinned collapsed beside another panel.
+    ui.showPinnedPanel.value = route.pinnedPanelOpen && (route.page === "chat" || route.page === "extension") && !route.dmUsername;
     if (route.page === "settings") {
       activeThreadTargetMessageId.value = null;
       activeThreadStack.value = [];
@@ -1153,7 +1224,7 @@ export function useChatAppController(giphyApiKey: string) {
       ui.sidebarMode.value = "channels";
       dmConversations.closeDm();
       activeThreadTargetMessageId.value = null;
-      activeThreadStack.value = [];
+      activeThreadStack.value = route.threadStack;
       if (route.channelSlug) {
         const ch = resolveChannelBySlug(route.channelSlug, waddles.channels.value);
         if (!ch) {
@@ -1163,9 +1234,20 @@ export function useChatAppController(giphyApiKey: string) {
         }
         waddles.activeChannelId.value = ch.id;
         void waddles.reloadChannelMembers(ch.id);
-        activeExtensionRouteKey.value = route.extensionPluginId && route.extensionRouteId
+        const nextExtensionRouteKey = route.extensionPluginId && route.extensionRouteId
           ? { channelId: ch.id, pluginId: route.extensionPluginId, routeId: route.extensionRouteId }
           : null;
+        messaging.clearMessages();
+        await messaging.loadMessages(ch.spaceId ?? "", ch.id);
+        if (requestId !== routeRequestId) return;
+        activeThreadTargetMessageId.value = null;
+        activeThreadStack.value = route.threadStack;
+        ui.showPinnedPanel.value = route.pinnedPanelOpen;
+        for (const threadId of route.threadStack) {
+          void messaging.backfillThread(threadId);
+        }
+        activeExtensionRouteKey.value = nextExtensionRouteKey;
+        activeRightPanel.value = activeExtensionRouteKey.value ? "extension" : null;
       }
       return;
     }
@@ -1190,8 +1272,16 @@ export function useChatAppController(giphyApiKey: string) {
     // Restore the thread panel from the URL and initialize paging for every
     // visible thread pane. Dedupe in the messaging composable keeps already
     // loaded roots/replies stable.
+    ui.showPinnedPanel.value = route.pinnedPanelOpen;
     activeThreadTargetMessageId.value = null;
     activeThreadStack.value = route.threadStack;
+    if (route.pinnedPanelOpen) {
+      activeRightPanel.value = "pinned";
+    } else if (route.threadStack.length > 0) {
+      activeRightPanel.value = "thread";
+    } else {
+      activeRightPanel.value = null;
+    }
     for (const threadId of route.threadStack) {
       void messaging.backfillThread(threadId);
     }
@@ -1244,6 +1334,7 @@ export function useChatAppController(giphyApiKey: string) {
     rosterContacts.clearRosterContacts();
     extensionRoutes.value = [];
     activeExtensionRouteKey.value = null;
+    activeRightPanel.value = null;
     setupPromptShown = false;
     messaging.clearMessages();
     dmMessaging.clearMessages();
@@ -1280,14 +1371,18 @@ export function useChatAppController(giphyApiKey: string) {
   }
 
   async function selectExtensionRoute(channelId: string, route: DiscoveredExtensionRoute) {
-    ui.activePage.value = "extension";
+    ui.activePage.value = "chat";
     ui.sidebarMode.value = "channels";
     dmConversations.closeDm();
-    activeThreadTargetMessageId.value = null;
-    activeThreadStack.value = [];
-    activeExtensionRouteKey.value = { channelId, pluginId: route.pluginId, routeId: route.routeId };
     memberJidByNick.value = {};
-    waddles.activeChannelId.value = channelId;
+    if (waddles.activeChannelId.value !== channelId) {
+      waddles.activeChannelId.value = channelId;
+      messaging.clearMessages();
+      await messaging.loadMessages(waddles.currentChannel.value?.spaceId ?? "", channelId);
+    }
+    activeExtensionRouteKey.value = { channelId, pluginId: route.pluginId, routeId: route.routeId };
+    activeRightPanel.value = "extension";
+    updateUrl();
     void waddles.reloadChannelMembers(channelId);
     ui.showMobileNav.value = false;
   }
@@ -1448,11 +1543,13 @@ export function useChatAppController(giphyApiKey: string) {
       activeMessages,
       activeFirstUnseenId,
       extensionRoutes,
+      channelExtensionRoutes,
       activeExtensionRouteKey,
       activeExtensionRoute,
       activeChannelRoomJid,
       activeThreadStack,
       activeThreadTargetMessageId,
+      activeRightPanel,
       threads,
       reactionModeTarget,
       reactionModeState,
@@ -1517,6 +1614,9 @@ export function useChatAppController(giphyApiKey: string) {
       pushThread,
       popThreadTo,
       closeThreadPanel,
+      activateRightPanel,
+      closeExtensionRoutePanel,
+      closePinnedPanel,
       notifyActiveComposing,
       editActiveMessage,
       retractActiveMessage,
