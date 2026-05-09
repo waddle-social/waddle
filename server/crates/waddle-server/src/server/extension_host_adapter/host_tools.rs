@@ -222,6 +222,19 @@ impl ExtensionHostAdapter {
         &self,
         context: &ext_host::InvocationContext,
     ) -> Result<ExtensionInvocation, ext_host::HostToolError> {
+        if context.kind == ext_host::InvocationKind::ProviderWebhook {
+            let actor_jid = self
+                .plugin_actor_jid(&context.plugin_id)
+                .map_err(host_tool_error)?;
+            return Ok(ExtensionInvocation {
+                session: None,
+                actor_jid,
+                plugin_id: context.plugin_id.clone(),
+                source_room: context.source_room.clone(),
+                kind: context.kind,
+                provider_room_grants: context.provider_room_grants.clone(),
+            });
+        }
         let Some(requester) = context.requester.as_ref() else {
             return Err(host_tool_error(ExtensionHostAdapterError::NotAuthorized));
         };
@@ -229,6 +242,7 @@ impl ExtensionHostAdapter {
             requester,
             context.plugin_id.clone(),
             context.source_room.clone(),
+            context.kind,
         )
         .await
     }
@@ -238,6 +252,7 @@ impl ExtensionHostAdapter {
         requester: &BareJid,
         plugin_id: waddle_extensions::PluginId,
         source_room: Option<BareJid>,
+        kind: ext_host::InvocationKind,
     ) -> Result<ExtensionInvocation, ext_host::HostToolError> {
         let Some(localpart) = requester.node() else {
             return Err(host_tool_error(ExtensionHostAdapterError::NotAuthorized));
@@ -281,10 +296,12 @@ impl ExtensionHostAdapter {
                 host_tool_error(ExtensionHostAdapterError::Protocol(error.to_string()))
             })?;
         Ok(ExtensionInvocation {
-            session: Session::new(&user_id, &username, &xmpp_localpart),
+            session: Some(Session::new(&user_id, &username, &xmpp_localpart)),
             actor_jid,
             plugin_id,
             source_room,
+            kind,
+            provider_room_grants: Vec::new(),
         })
     }
 }

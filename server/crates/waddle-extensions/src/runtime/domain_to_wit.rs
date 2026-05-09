@@ -4,9 +4,11 @@ use crate::types::{
     DataFormField, DataFormType, DataFormValue, DisplayText, EnrichmentId, ExtensionEvent,
     ExtensionPayload, FormFieldOption, FormFieldType, FormFieldValue, FullJidValue, LaunchContext,
     LaunchId, LaunchInvocation, LinkTarget, ListId, ListItemId, MediaType, MessageContext,
-    MessageHook, PayloadNamespace, PayloadRoot, PluginId, PubSubItemId, PubSubNode, ReplyTarget,
-    RoomJid, Sha256Digest, StanzaId, ThreadId, Timestamp, UiActionId, UiViewId, Url, WaddleId,
-    XmlAttribute, XmlElement, XmlNode,
+    MessageHook, PayloadNamespace, PayloadRoot, PluginId, ProviderDeliveryId, ProviderEventType,
+    ProviderField, ProviderFieldName, ProviderFieldNumber, ProviderFieldText, ProviderFieldValue,
+    ProviderId, ProviderPayload, ProviderWebhook, PubSubItemId, PubSubNode, ReplyTarget, RoomJid,
+    Sha256Digest, StanzaId, ThreadId, Timestamp, UiActionId, UiViewId, Url, WaddleId, XmlAttribute,
+    XmlElement, XmlNode,
 };
 
 impl From<ExtensionEvent> for wit_types::ExtensionEvent {
@@ -15,6 +17,7 @@ impl From<ExtensionEvent> for wit_types::ExtensionEvent {
             ExtensionEvent::MessageHook(event) => Self::MessageHook(event.into()),
             ExtensionEvent::Command(event) => Self::Command(event.into()),
             ExtensionEvent::Launch(event) => Self::Launch(event.into()),
+            ExtensionEvent::ProviderWebhook(event) => Self::ProviderWebhook(event.into()),
         }
     }
 }
@@ -88,6 +91,46 @@ impl From<LaunchInvocation> for wit_types::LaunchInvocation {
             action: value.action.map(Into::into),
             form: value.form.map(Into::into),
             fields: value.fields.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+impl From<ProviderWebhook> for wit_types::ProviderWebhook {
+    fn from(value: ProviderWebhook) -> Self {
+        Self {
+            waddle_id: value.waddle_id.into(),
+            provider: value.provider.into(),
+            event_type: value.event_type.into(),
+            delivery_id: value.delivery_id.into(),
+            payload: value.payload.into(),
+        }
+    }
+}
+
+impl From<ProviderPayload> for wit_types::ProviderPayload {
+    fn from(value: ProviderPayload) -> Self {
+        Self {
+            fields: value.fields.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+impl From<ProviderField> for wit_types::ProviderField {
+    fn from(value: ProviderField) -> Self {
+        Self {
+            path: value.path.into_iter().map(Into::into).collect(),
+            value: value.value.into(),
+        }
+    }
+}
+
+impl From<ProviderFieldValue> for wit_types::ProviderFieldValue {
+    fn from(value: ProviderFieldValue) -> Self {
+        match value {
+            ProviderFieldValue::Null => Self::Null,
+            ProviderFieldValue::Boolean(value) => Self::Boolean(value),
+            ProviderFieldValue::Number(value) => Self::Number(value.into()),
+            ProviderFieldValue::Text(value) => Self::Text(value.into()),
         }
     }
 }
@@ -279,6 +322,12 @@ impl_domain_newtype_to_wit!(ListItemId, ListItemId);
 impl_domain_newtype_to_wit!(MediaType, MediaType);
 impl_domain_newtype_to_wit!(PayloadNamespace, PayloadNamespace);
 impl_domain_newtype_to_wit!(PluginId, PluginId);
+impl_domain_newtype_to_wit!(ProviderDeliveryId, ProviderDeliveryId);
+impl_domain_newtype_to_wit!(ProviderEventType, ProviderEventType);
+impl_domain_newtype_to_wit!(ProviderFieldName, ProviderFieldName);
+impl_domain_newtype_to_wit!(ProviderFieldNumber, ProviderFieldNumber);
+impl_domain_newtype_to_wit!(ProviderFieldText, ProviderFieldText);
+impl_domain_newtype_to_wit!(ProviderId, ProviderId);
 impl_domain_newtype_to_wit!(PubSubItemId, PubsubItemId);
 impl_domain_newtype_to_wit!(PubSubNode, PubsubNode);
 impl_domain_newtype_to_wit!(RoomJid, RoomJid);

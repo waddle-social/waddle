@@ -63,11 +63,11 @@ External provider
         |
         v
 Provider ingress
-  verify signature, parse provider payload, dedupe delivery
+  verify signature, normalize provider payload, dedupe delivery
         |
         v
 GitHub extension runtime
-  typed provider event, config lookup, permission checks
+  interpret GitHub fields, config lookup, permission checks
         |
         v
 XMPP-native effects
@@ -136,21 +136,25 @@ V1 required provider inputs:
 - App ID or slug as non-secret server config.
 - App private key through a server-owned secret file.
 - Webhook secret through a server-owned secret file.
-- GitHub App webhook URL pointing at Waddle provider ingress.
+- GitHub App webhook URL pointing at generic Waddle provider ingress, for
+  example `/webhooks/providers/github/github`.
 - Repository permissions sufficient for subscribed events and optional API
   enrichment.
 
 The provider ingress handler must:
 
-- Accept only GitHub App webhook deliveries.
-- Verify `X-Hub-Signature-256` against the configured webhook secret.
-- Require `X-GitHub-Event` and `X-GitHub-Delivery`.
-- Parse the GitHub `installation.id`, repository ID, repository full name, and
-  event-specific payload.
-- Drop the raw JSON after parsing it into typed Rust values.
-- Deduplicate by `X-GitHub-Delivery` before dispatching extension effects.
-- Return quickly after validation and dispatch, without exposing extension
+- Stay provider-generic in `waddle-server`: no GitHub event routing, alert
+  text, repository matching, or Actions semantics in the server crate.
+- Verify a configured HMAC-SHA256 signature before any extension dispatch.
+- Read configured provider event and delivery headers.
+- Normalize JSON into a typed provider field list and drop the raw body.
+- Deduplicate by provider and delivery ID before dispatching extension effects.
+- Return quickly after validation and queueing, without exposing extension
   internals to the provider.
+
+The GitHub extension interprets the typed provider field list. It owns GitHub
+event semantics such as `installation.id`, repository IDs, `workflow_run`,
+`check_run`, conclusions, route matching, and alert formatting.
 
 When the extension needs GitHub API data, the server generates a short-lived
 installation access token for the relevant installation. Tokens are scoped by
@@ -254,7 +258,7 @@ integration primitives.
 
 ## Security Considerations
 
-- Provider webhook ingress must verify `X-Hub-Signature-256`; SHA-1 signatures
+- Provider webhook ingress must verify HMAC-SHA256 signatures; SHA-1 signatures
   are not sufficient for new code.
 - Provider ingress is not a Waddle control plane. It cannot configure routes,
   install extensions, trigger user actions, or mutate Waddle state except
@@ -277,8 +281,8 @@ Provider ingress tests:
 
 - Accept a valid `X-Hub-Signature-256` signature.
 - Reject missing, malformed, or invalid signatures.
-- Reject payloads without `X-GitHub-Event`, `X-GitHub-Delivery`,
-  installation ID, or repository identity.
+- Reject payloads without configured provider event and delivery headers.
+- Normalize provider JSON without provider-specific server parsing.
 - Deduplicate repeated delivery IDs.
 - Parse `workflow_run` and `check_run` completed failure payloads into typed
   GitHub extension events.

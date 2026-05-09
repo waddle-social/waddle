@@ -2,6 +2,7 @@
 pub mod auth; // Provider auth broker, session management
 pub mod auth_page; // Web-based auth page for XMPP credentials
 pub mod device; // OAuth Device Flow for CLI
+pub mod extension_webhooks; // Extension webhook ingress
 pub mod interpret; // OutboundEvent effect interpreter for sans-I/O protocol
 pub mod uploads; // File upload endpoints (XEP-0363)
 pub mod websocket; // XMPP over WebSocket (RFC 7395)

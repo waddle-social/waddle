@@ -15,6 +15,7 @@ DROP TABLE IF EXISTS roster_items;
 DROP TABLE IF EXISTS roster_versions;
 DROP TABLE IF EXISTS blocking_list;
 DROP TABLE IF EXISTS private_xml_storage;
+DROP TABLE IF EXISTS provider_webhook_deliveries;
 
 CREATE TABLE users (
     id TEXT PRIMARY KEY,
@@ -183,6 +184,7 @@ DROP TABLE IF EXISTS roster_items CASCADE;
 DROP TABLE IF EXISTS roster_versions CASCADE;
 DROP TABLE IF EXISTS blocking_list CASCADE;
 DROP TABLE IF EXISTS private_xml_storage CASCADE;
+DROP TABLE IF EXISTS provider_webhook_deliveries CASCADE;
 
 CREATE TABLE users (
     id TEXT PRIMARY KEY,
@@ -413,6 +415,50 @@ pub const V0004_AVATAR_FETCH_STATE_POLICY_DIGEST_POSTGRES: &str = r#"
 ALTER TABLE user_avatar_fetch_state ADD COLUMN IF NOT EXISTS last_fetch_policy_digest TEXT;
 "#;
 
+/// Delivery ledger for provider webhook ingress
+/// (`/webhooks/providers/:provider_id/:plugin_id`). The unique
+/// `(provider_id, delivery_id)` primary key deduplicates retried
+/// deliveries from the provider (GitHub redelivers up to 8 times),
+/// and the `status` index supports operator queries for stuck
+/// `queued` rows whose dispatch task never ran to completion.
+pub const V0005_PROVIDER_WEBHOOK_DELIVERY_LEDGER: &str = r#"
+CREATE TABLE provider_webhook_deliveries (
+    provider_id TEXT NOT NULL,
+    delivery_id TEXT NOT NULL,
+    plugin_id TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    payload_sha256 TEXT NOT NULL,
+    status TEXT NOT NULL,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (provider_id, delivery_id)
+);
+
+CREATE INDEX idx_provider_webhook_deliveries_status
+    ON provider_webhook_deliveries(status, attempts, created_at);
+"#;
+
+pub const V0005_PROVIDER_WEBHOOK_DELIVERY_LEDGER_POSTGRES: &str = r#"
+CREATE TABLE provider_webhook_deliveries (
+    provider_id TEXT NOT NULL,
+    delivery_id TEXT NOT NULL,
+    plugin_id TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    payload_sha256 TEXT NOT NULL,
+    status TEXT NOT NULL,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP::TEXT,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP::TEXT,
+    PRIMARY KEY (provider_id, delivery_id)
+);
+
+CREATE INDEX idx_provider_webhook_deliveries_status
+    ON provider_webhook_deliveries(status, attempts, created_at);
+"#;
+
 /// Get all global migrations in order
 pub fn all() -> Vec<Migration> {
     vec![
@@ -442,6 +488,12 @@ pub fn all() -> Vec<Migration> {
                 .to_string(),
             sql_sqlite: V0004_AVATAR_FETCH_STATE_POLICY_DIGEST,
             sql_postgres: V0004_AVATAR_FETCH_STATE_POLICY_DIGEST_POSTGRES,
+        },
+        Migration {
+            version: 5,
+            description: "Provider webhook delivery ledger".to_string(),
+            sql_sqlite: V0005_PROVIDER_WEBHOOK_DELIVERY_LEDGER,
+            sql_postgres: V0005_PROVIDER_WEBHOOK_DELIVERY_LEDGER_POSTGRES,
         },
     ]
 }

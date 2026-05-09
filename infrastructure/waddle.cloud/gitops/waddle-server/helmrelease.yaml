@@ -74,6 +74,14 @@ spec:
     containerExtraEnv:
       - name: OTEL_EXPORTER_OTLP_PROTOCOL
         value: "grpc"
+      - name: WADDLE_PROVIDER_GITHUB_WEBHOOK_EVENT_HEADER
+        value: x-github-event
+      - name: WADDLE_PROVIDER_GITHUB_WEBHOOK_DELIVERY_HEADER
+        value: x-github-delivery
+      - name: WADDLE_PROVIDER_GITHUB_WEBHOOK_SIGNATURE_HEADER
+        value: x-hub-signature-256
+      - name: WADDLE_PROVIDER_GITHUB_WEBHOOK_SIGNATURE_PREFIX
+        value: sha256=
       - name: WADDLE_DATABASE_URL
         valueFrom:
           secretKeyRef:
@@ -105,6 +113,8 @@ spec:
     # Extension modules are enabled by release automation only after their OCI
     # WASM artifacts have been pushed and digest-pinned. The AI chatbot is
     # wired to OpenRouter through the waddle-openrouter ExternalSecret above.
+    # GitHub App webhook verification reads WADDLE_PROVIDER_GITHUB_WEBHOOK_SECRET
+    # from the 1Password-backed waddle-runtime-secrets ExternalSecret.
     extensions:
       enabled: false
       cacheDir: /var/lib/waddle/extensions

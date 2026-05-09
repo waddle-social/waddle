@@ -6,10 +6,12 @@ use crate::auth::Session;
 
 #[derive(Clone)]
 pub struct ExtensionInvocation {
-    pub session: Session,
+    pub session: Option<Session>,
     pub actor_jid: FullJid,
     pub plugin_id: waddle_extensions::PluginId,
     pub source_room: Option<BareJid>,
+    pub kind: waddle_extensions::host_tools::InvocationKind,
+    pub provider_room_grants: Vec<BareJid>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

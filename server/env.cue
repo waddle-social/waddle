@@ -272,18 +272,20 @@ schema.#Project & {
 			args: ["-c", #"""
 					set -euo pipefail
 					rustup target add wasm32-wasip2 >/dev/null 2>&1 || true
-					for module in link-board ai-chatbot decision-polls; do
+					for module in link-board ai-chatbot decision-polls github; do
 					  cargo build --release --locked --target wasm32-wasip2 --target-dir target --manifest-path "extensions/${module}/Cargo.toml"
 					done
 					test -s target/wasm32-wasip2/release/link_board.wasm
 					test -s target/wasm32-wasip2/release/ai_chatbot.wasm
 					test -s target/wasm32-wasip2/release/decision_polls.wasm
+					test -s target/wasm32-wasip2/release/github.wasm
 				"""#]
 			inputs: _rustInputs
 			outputs: [
 				"server/target/wasm32-wasip2/release/link_board.wasm",
 				"server/target/wasm32-wasip2/release/ai_chatbot.wasm",
 				"server/target/wasm32-wasip2/release/decision_polls.wasm",
+				"server/target/wasm32-wasip2/release/github.wasm",
 			]
 			dependsOn: [tasks.fmt, tasks.clippy, tasks.test]
 		}
@@ -430,7 +432,8 @@ schema.#Project & {
 					  .extensions.modules = [
 					    {"name": "link-board", "registry": "ghcr.io/waddle-social/waddle/extensions/link-board", "digest": strenv(SAMPLE_DIGEST), "namespace": "urn:waddle:link-board:1", "config": {}, "capabilityGrants": ["message.enrich", "launch", "pubsub.publish", "ui.declarative"]},
 					    {"name": "ai-chatbot", "registry": "ghcr.io/waddle-social/waddle/extensions/ai-chatbot", "digest": strenv(SAMPLE_DIGEST), "namespace": "urn:waddle:ai-chatbot:1", "config": {"endpoint": "https://openrouter.ai/api/v1/chat/completions", "model": "openrouter/auto"}, "configSecretFiles": {"api_key": "/var/run/secrets/waddle-ai/api_key"}, "capabilityGrants": ["message.enrich", "host.mam.read", "host.members.read", "host.presence.read", "host.roster.read", "host.channels.read", "host.spaces.read", "host.message.send", "outbound.http.request", "commands"], "allowedHttpOrigins": ["https://openrouter.ai"]},
-					    {"name": "decision-polls", "registry": "ghcr.io/waddle-social/waddle/extensions/decision-polls", "digest": strenv(SAMPLE_DIGEST), "namespace": "urn:waddle:decision-polls:1", "config": {}, "capabilityGrants": ["message.enrich", "commands", "launch", "pubsub.publish", "host.message.send", "ui.declarative"]}
+					    {"name": "decision-polls", "registry": "ghcr.io/waddle-social/waddle/extensions/decision-polls", "digest": strenv(SAMPLE_DIGEST), "namespace": "urn:waddle:decision-polls:1", "config": {}, "capabilityGrants": ["message.enrich", "commands", "launch", "pubsub.publish", "host.message.send", "ui.declarative"]},
+					    {"name": "github", "registry": "ghcr.io/waddle-social/waddle/extensions/github", "digest": strenv(SAMPLE_DIGEST), "namespace": "urn:waddle:web-integration:1", "config": {"routes": [{"repository_id": "1009269194", "channel": "chat@muc.waddle.social", "events": ["workflow_run", "check_run"]}]}, "providerRoomGrants": ["chat@muc.waddle.social"], "capabilityGrants": ["host.message.send"]}
 					  ]
 					' "${published_values}"
 					helm lint charts/waddle-server -f "${published_values}"
@@ -450,19 +453,23 @@ schema.#Project & {
 					esac
 
 					yq -e '.extensions.enabled == true' "${published_values}" > /dev/null
-					yq -e '.extensions.modules | length == 3' "${published_values}" > /dev/null
+					yq -e '.extensions.modules | length == 4' "${published_values}" > /dev/null
 
-					expected_modules="ai-chatbot decision-polls link-board"
+					expected_modules="ai-chatbot decision-polls github link-board"
 					actual_modules="$(yq -r '.extensions.modules[].name' "${published_values}" | sort | tr '\n' ' ' | sed 's/ $//')"
 					if [ "${actual_modules}" != "${expected_modules}" ]; then
 					  echo "GitOps extensions.modules must contain exactly: ${expected_modules}; got: ${actual_modules}" >&2
 					  exit 1
 					fi
 
-					for module in link-board ai-chatbot decision-polls; do
+					for module in link-board ai-chatbot decision-polls github; do
 					  yq -e ".extensions.modules[] | select(.name == \"${module}\") | .registry == \"ghcr.io/waddle-social/waddle/extensions/${module}\"" "${published_values}" > /dev/null
 					  yq -e ".extensions.modules[] | select(.name == \"${module}\") | .digest == \"${sample_digest}\"" "${published_values}" > /dev/null
 					done
+					yq -e '.extensions.modules[] | select(.name == "github") | .config.routes[0].channel == "chat@muc.waddle.social"' "${published_values}" > /dev/null
+					yq -e '.extensions.modules[] | select(.name == "github") | .config.routes[0].repository_id == "1009269194"' "${published_values}" > /dev/null
+					yq -e '.extensions.modules[] | select(.name == "github") | .providerRoomGrants[0] == "chat@muc.waddle.social"' "${published_values}" > /dev/null
+					yq -e '.data[] | select(.secretKey == "WADDLE_PROVIDER_GITHUB_WEBHOOK_SECRET") | .remoteRef.property == "github-app-webhook-secret"' ../infrastructure/waddle.cloud/gitops/waddle-server/runtime-external-secret.yaml > /dev/null
 				"""#]
 			inputs: list.Concat([_chartInputs, _gitopsWaddleServerInputs])
 		}
@@ -583,6 +590,7 @@ schema.#Project & {
 					  "link-board:link_board:urn:waddle:link-board:1"
 					  "ai-chatbot:ai_chatbot:urn:waddle:ai-chatbot:1"
 					  "decision-polls:decision_polls:urn:waddle:decision-polls:1"
+					  "github:github:urn:waddle:web-integration:1"
 					)
 
 					modules_yaml="../target/digests/extensions-modules.yaml"
@@ -638,6 +646,18 @@ schema.#Project & {
 					      printf '    - commands\n'
 					      printf '  allowedHttpOrigins:\n'
 					      printf '    - https://openrouter.ai\n'
+					    elif [ "${extension_name}" = "github" ]; then
+					      printf '  config:\n'
+					      printf '    routes:\n'
+					      printf '      - repository_id: "1009269194"\n'
+					      printf '        channel: chat@muc.waddle.social\n'
+					      printf '        events:\n'
+					      printf '          - workflow_run\n'
+					      printf '          - check_run\n'
+					      printf '  providerRoomGrants:\n'
+					      printf '    - chat@muc.waddle.social\n'
+					      printf '  capabilityGrants:\n'
+					      printf '    - host.message.send\n'
 					    else
 					      printf '  config: {}\n'
 					      printf '  capabilityGrants:\n'
@@ -661,7 +681,10 @@ schema.#Project & {
 					yq -e ".spec.values.containerExtraEnv[] | select(.name == \"WADDLE_GIT_SHA\") | .value == \"${FULL_SHA}\"" ../infrastructure/waddle.cloud/gitops/waddle-server/helmrelease.yaml > /dev/null
 					yq -i ".spec.values.extensions.modules = load(\"${modules_yaml}\")" ../infrastructure/waddle.cloud/gitops/waddle-server/helmrelease.yaml
 					yq -e ".spec.values.extensions.enabled == true" ../infrastructure/waddle.cloud/gitops/waddle-server/helmrelease.yaml > /dev/null
-					yq -e ".spec.values.extensions.modules | length == 3" ../infrastructure/waddle.cloud/gitops/waddle-server/helmrelease.yaml > /dev/null
+					yq -e ".spec.values.extensions.modules | length == 4" ../infrastructure/waddle.cloud/gitops/waddle-server/helmrelease.yaml > /dev/null
+					yq -e '.spec.values.extensions.modules[] | select(.name == "github") | .config.routes[0].channel == "chat@muc.waddle.social"' ../infrastructure/waddle.cloud/gitops/waddle-server/helmrelease.yaml > /dev/null
+					yq -e '.spec.values.extensions.modules[] | select(.name == "github") | .config.routes[0].repository_id == "1009269194"' ../infrastructure/waddle.cloud/gitops/waddle-server/helmrelease.yaml > /dev/null
+					yq -e '.spec.values.extensions.modules[] | select(.name == "github") | .providerRoomGrants[0] == "chat@muc.waddle.social"' ../infrastructure/waddle.cloud/gitops/waddle-server/helmrelease.yaml > /dev/null
 					if grep -R "${placeholder_digest}" ../infrastructure/waddle.cloud/gitops/waddle-server; then
 					  echo "refusing to publish GitOps with all-zero digest placeholders" >&2
 					  exit 1

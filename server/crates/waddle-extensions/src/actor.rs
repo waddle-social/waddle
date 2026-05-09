@@ -21,6 +21,7 @@ pub struct WasmExtensionActor {
     host_tools: Arc<dyn ExtensionHostTools>,
     grants: HashSet<ExtensionCapability>,
     allowed_http_origins: Vec<String>,
+    provider_room_grants: Vec<xmpp_parsers::jid::BareJid>,
 }
 
 impl std::fmt::Debug for WasmExtensionActor {
@@ -45,6 +46,7 @@ impl WasmExtensionActor {
             host_tools: Arc::new(DenyingExtensionHostTools),
             grants: HashSet::new(),
             allowed_http_origins: Vec::new(),
+            provider_room_grants: Vec::new(),
         })
     }
 
@@ -60,6 +62,11 @@ impl WasmExtensionActor {
 
     pub fn with_allowed_http_origins(mut self, origins: Vec<String>) -> Self {
         self.allowed_http_origins = origins;
+        self
+    }
+
+    pub fn with_provider_room_grants(mut self, rooms: Vec<xmpp_parsers::jid::BareJid>) -> Self {
+        self.provider_room_grants = rooms;
         self
     }
 
@@ -101,6 +108,11 @@ impl WasmExtensionActor {
             requester: requester.or_else(|| requester_for_event(&event)),
             source_room: source_room_for_event(&event),
             kind: invocation_kind_for_event(&event),
+            provider_room_grants: if matches!(event, ExtensionEvent::ProviderWebhook(_)) {
+                self.provider_room_grants.clone()
+            } else {
+                Vec::new()
+            },
         };
         match self
             .extension
@@ -141,6 +153,7 @@ fn invocation_kind_for_event(event: &ExtensionEvent) -> InvocationKind {
         ExtensionEvent::MessageHook(_) => InvocationKind::MessageHook,
         ExtensionEvent::Command(_) => InvocationKind::Command,
         ExtensionEvent::Launch(_) => InvocationKind::Launch,
+        ExtensionEvent::ProviderWebhook(_) => InvocationKind::ProviderWebhook,
     }
 }
 
@@ -164,6 +177,7 @@ fn requester_for_event(event: &ExtensionEvent) -> Option<xmpp_parsers::jid::Bare
             .parse::<FullJid>()
             .ok()
             .map(|jid| jid.to_bare()),
+        ExtensionEvent::ProviderWebhook(_) => None,
     }
 }
 
@@ -183,5 +197,6 @@ fn source_room_for_event(event: &ExtensionEvent) -> Option<xmpp_parsers::jid::Ba
             .room
             .as_ref()
             .and_then(|room| room.as_str().parse().ok()),
+        ExtensionEvent::ProviderWebhook(_) => None,
     }
 }

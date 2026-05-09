@@ -25,6 +25,9 @@ pub use types::{
     ExtensionRouteDescriptor, ExtensionRouteScope, ExtensionRouteSurface, FormFieldOption,
     FormFieldType, FormFieldValue, FrameworkTypeError, FullJidValue, LaunchContext,
     LaunchDescriptor, LaunchId, LaunchToken, MessageEnrichment, PayloadRoot, PayloadRule,
-    PayloadSurface, PluginId, PubSubPublish, ReplyTarget, RoomJid, RouteId, StanzaId, ThreadId,
-    Timestamp, UiActionId, WaddleId, XmlAttribute, XmlElement, XmlNode, INVOKE_COMMAND_NODE,
+    PayloadSurface, PluginId, ProviderDeliveryId, ProviderEventType, ProviderField,
+    ProviderFieldName, ProviderFieldNumber, ProviderFieldText, ProviderFieldValue, ProviderId,
+    ProviderPayload, ProviderWebhook, PubSubPublish, ReplyTarget, RoomJid, RouteId, StanzaId,
+    ThreadId, Timestamp, UiActionId, Url, WaddleId, XmlAttribute, XmlElement, XmlNode,
+    INVOKE_COMMAND_NODE,
 };

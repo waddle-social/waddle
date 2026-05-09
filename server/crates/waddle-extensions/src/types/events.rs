@@ -5,6 +5,7 @@ pub enum ExtensionEvent {
     MessageHook(MessageHook),
     Command(CommandInvocation),
     Launch(LaunchInvocation),
+    ProviderWebhook(ProviderWebhook),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -96,4 +97,32 @@ pub struct LaunchInvocation {
     pub action: Option<CommandAction>,
     pub form: Option<DataForm>,
     pub fields: Vec<FormFieldValue>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProviderWebhook {
+    pub waddle_id: WaddleId,
+    pub provider: ProviderId,
+    pub event_type: ProviderEventType,
+    pub delivery_id: ProviderDeliveryId,
+    pub payload: ProviderPayload,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProviderPayload {
+    pub fields: Vec<ProviderField>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProviderField {
+    pub path: Vec<ProviderFieldName>,
+    pub value: ProviderFieldValue,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ProviderFieldValue {
+    Null,
+    Boolean(bool),
+    Number(ProviderFieldNumber),
+    Text(ProviderFieldText),
 }

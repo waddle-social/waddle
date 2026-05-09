@@ -14,6 +14,7 @@ pub struct InvocationContext {
     pub requester: Option<BareJid>,
     pub source_room: Option<BareJid>,
     pub kind: InvocationKind,
+    pub provider_room_grants: Vec<BareJid>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -21,6 +22,7 @@ pub enum InvocationKind {
     MessageHook,
     Command,
     Launch,
+    ProviderWebhook,
 }
 
 #[derive(Debug, Clone)]

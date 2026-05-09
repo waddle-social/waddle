@@ -25,13 +25,14 @@ use crate::types::{
     CommandNode, CommandSessionId, DetectedLink, DisplayText, ExtensionCapability, ExtensionEffect,
     ExtensionEnvelope, ExtensionEvent, ExtensionManifest, FullJidValue, LaunchContext, LaunchId,
     LaunchInvocation, LinkTarget, MessageContext, MessageHook, PayloadNamespace, PluginId,
-    ReplyTarget, RoomJid, StanzaId, ThreadId, WaddleId, FRAMEWORK_NAMESPACE,
+    ProviderWebhook, ReplyTarget, RoomJid, StanzaId, ThreadId, WaddleId, FRAMEWORK_NAMESPACE,
 };
 
 const MAX_DETECTED_LINKS: usize = 3;
 const EXTENSION_ENRICH_TIMEOUT: Duration = Duration::from_millis(750);
 const EXTENSION_OBSERVE_TIMEOUT: Duration = Duration::from_secs(45);
 const EXTENSION_COMMAND_TIMEOUT: Duration = Duration::from_secs(45);
+const EXTENSION_PROVIDER_WEBHOOK_TIMEOUT: Duration = Duration::from_secs(45);
 const XEP_0359_STANZA_ID_NS: &str = "urn:xmpp:sid:0";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

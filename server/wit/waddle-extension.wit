@@ -67,6 +67,46 @@ interface types {
         value: string,
     }
 
+    record provider-id {
+        value: string,
+    }
+
+    record provider-event-type {
+        value: string,
+    }
+
+    record provider-delivery-id {
+        value: string,
+    }
+
+    record provider-field-name {
+        value: string,
+    }
+
+    record provider-field-text {
+        value: string,
+    }
+
+    record provider-field-number {
+        value: string,
+    }
+
+    variant provider-field-value {
+        null,
+        boolean(bool),
+        number(provider-field-number),
+        text(provider-field-text),
+    }
+
+    record provider-field {
+        path: list<provider-field-name>,
+        value: provider-field-value,
+    }
+
+    record provider-payload {
+        fields: list<provider-field>,
+    }
+
     record pubsub-item-id {
         value: string,
     }
@@ -425,10 +465,19 @@ interface types {
         fields: list<form-field-value>,
     }
 
+    record provider-webhook {
+        waddle-id: waddle-id,
+        provider: provider-id,
+        event-type: provider-event-type,
+        delivery-id: provider-delivery-id,
+        payload: provider-payload,
+    }
+
     variant extension-event {
         message-hook(message-hook),
         command(command-invocation),
         launch(launch-invocation),
+        provider-webhook(provider-webhook),
     }
 
     record pubsub-publish {

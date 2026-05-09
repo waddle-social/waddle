@@ -317,6 +317,7 @@ fn host_state_with_kind(
             requester: Some("alice@example.com".parse().expect("requester jid")),
             source_room: Some("room@muc.example.com".parse().expect("room jid")),
             kind,
+            provider_room_grants: Vec::new(),
         },
         "{}".to_string(),
         grants,

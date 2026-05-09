@@ -57,6 +57,7 @@ impl HostState {
                 requester: None,
                 source_room: None,
                 kind: InvocationKind::Launch,
+                provider_room_grants: Vec::new(),
             },
             String::new(),
             HashSet::new(),
