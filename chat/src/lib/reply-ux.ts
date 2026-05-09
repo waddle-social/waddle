@@ -31,6 +31,7 @@ export function getComposerAutocompleteAction(state: {
   showEmoji: boolean;
   emojiCount: number;
   showSlash?: boolean;
+  slashHasPrefix?: boolean;
   slashCandidateCount?: number;
   slashHasResolution?: boolean;
 }): "select-mention" | "select-emoji" | "select-command" | "submit-slash" | "block-slash" | "dismiss-autocomplete" | "none" {
@@ -45,7 +46,10 @@ export function getComposerAutocompleteAction(state: {
   if (state.showSlash) {
     if (state.slashHasResolution) return "submit-slash";
     if ((state.slashCandidateCount ?? 0) > 0) return "select-command";
-    return "block-slash";
+    // Block only when the user typed an actual command attempt. A bare `/`
+    // with nothing matching falls through so the Enter sends as plain text.
+    if (state.slashHasPrefix) return "block-slash";
+    return "none";
   }
 
   return "none";

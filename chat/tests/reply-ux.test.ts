@@ -136,10 +136,26 @@ describe("reply UX helpers", () => {
         showEmoji: false,
         emojiCount: 0,
         showSlash: true,
+        slashHasPrefix: true,
         slashCandidateCount: 0,
         slashHasResolution: false,
       }),
     ).toBe("block-slash");
+  });
+
+  test("Bare `/` with zero candidates falls through to plain-text send", () => {
+    expect(
+      getComposerAutocompleteAction({
+        showMentions: false,
+        mentionCount: 0,
+        showEmoji: false,
+        emojiCount: 0,
+        showSlash: true,
+        slashHasPrefix: false,
+        slashCandidateCount: 0,
+        slashHasResolution: false,
+      }),
+    ).toBe("none");
   });
 
   test("Mention autocomplete still wins over slash popover", () => {

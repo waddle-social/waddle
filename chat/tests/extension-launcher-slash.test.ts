@@ -122,8 +122,9 @@ describe("dispatchSlashInvocation: inline-submit", () => {
       fieldName: "prompt",
       value: "tell me a joke",
     };
-    await launcher.dispatchSlashInvocation(invocation);
+    const ok = await launcher.dispatchSlashInvocation(invocation);
 
+    expect(ok).toBe(true);
     expect(invokeCalls).toEqual([aiCommand]);
     expect(submitCalls).toHaveLength(1);
     expect(submitCalls[0].action).toBe("complete");
@@ -131,6 +132,27 @@ describe("dispatchSlashInvocation: inline-submit", () => {
       "tell me a joke",
     ]);
     expect(launcher.open.value).toBe(false);
+  });
+
+  test("returns false and surfaces an error state when the XMPP client is null", async () => {
+    const launcher = useExtensionLauncher({
+      xmppClient: ref(null) as never,
+      roomJid: ref(null),
+      invokeExtensionAction: ref(undefined),
+      focusPalette: () => {},
+      focusComposerExtensions: () => {},
+    });
+
+    const ok = await launcher.dispatchSlashInvocation({
+      kind: "inline-submit",
+      command: aiCommand,
+      fieldName: "prompt",
+      value: "tell me a joke",
+    });
+
+    expect(ok).toBe(false);
+    expect(launcher.state.value).toBe("error");
+    expect(launcher.detail.value).toContain("disconnected");
   });
 
   test("falls back to the palette when the executing form does not allow `complete`", async () => {

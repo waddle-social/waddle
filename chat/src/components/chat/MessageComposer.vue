@@ -200,6 +200,7 @@ const autocompleteAction = computed(() =>
     showEmoji: showEmoji.value,
     emojiCount: emojiResults.value.length,
     showSlash: showSlash.value,
+    slashHasPrefix: slashPrefix.value.length > 0,
     slashCandidateCount: slashCandidates.value.length,
     slashHasResolution: !!slashResolution.value,
   }),
@@ -354,10 +355,14 @@ function insertEmoji(emoji: string) {
 function expandSlashCandidate(command: DiscoveredExtensionCommand) {
   const tiptapEditor = getTiptapEditor();
   if (!tiptapEditor || !command.composerPrefix) return;
+  // If the user already typed a space after the partial prefix, swallow it
+  // so we don't end up with double spaces (e.g. `/p ` + `/poll ` → `/poll  `).
+  const firstParagraph = firstParagraphTextFromDoc(tiptapEditor.state.doc);
+  const consumedExtra = firstParagraph.charAt(1 + slashPrefix.value.length) === " " ? 1 : 0;
   const replacement = `/${command.composerPrefix} `;
   tiptapEditor.chain()
     .focus()
-    .setTextSelection({ from: 1, to: 1 + 1 + slashPrefix.value.length })
+    .setTextSelection({ from: 1, to: 1 + 1 + slashPrefix.value.length + consumedExtra })
     .insertContent(replacement)
     .run();
   slashPrefix.value = command.composerPrefix;
@@ -371,11 +376,13 @@ function dispatchSlashResolution(): boolean {
   // Forum channels demand a title; don't smuggle a slash dispatch past that gate.
   if (showForumTitleInput.value && !forumTitle.value.trim()) return true;
   const invocation = buildSlashInvocation(command, slashTrailing.value);
-  emit("dispatchSlash", invocation);
+  // Suppress the popover for this exact prefix until the parent resets the
+  // draft so a stray re-render between emit and draft-clear cannot re-arm
+  // the slash submit path on the same keystroke.
+  dismissedSlashPrefix.value = slashPrefix.value;
   showSlash.value = false;
-  dismissedSlashPrefix.value = null;
   triggerRange.value = null;
-  // Caller resets the editor draft after the launcher accepts the invocation.
+  emit("dispatchSlash", invocation);
   return true;
 }
 

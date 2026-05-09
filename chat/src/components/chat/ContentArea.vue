@@ -314,7 +314,13 @@ const updateExtensionCommandField = extensionLauncher.updateField;
 const resetExtensionLauncherState = extensionLauncher.reset;
 const submitExtensionCommandForm = extensionLauncher.submitForm;
 const invokeCommandResultAction = extensionLauncher.invokeResultAction;
-const dispatchSlashCommand = extensionLauncher.dispatchSlashInvocation;
+async function dispatchSlashCommand(invocation: Parameters<typeof extensionLauncher.dispatchSlashInvocation>[0]) {
+  const ok = await extensionLauncher.dispatchSlashInvocation(invocation);
+  if (ok) {
+    draft.value = "";
+    if (isForumChannel.value) forumTitle.value = "";
+  }
+}
 const inMucContext = computed(() => !!props.roomJid);
 
 watch(

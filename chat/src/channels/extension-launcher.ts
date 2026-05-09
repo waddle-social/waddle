@@ -85,8 +85,9 @@ export function useExtensionLauncher(input: {
   }
 
   let discoveryPromise: Promise<void> | null = null;
+  let discoveryAttempted = false;
   async function ensureDiscovered() {
-    if (commands.value.length > 0) return;
+    if (commands.value.length > 0 || discoveryAttempted) return;
     if (discoveryPromise) {
       await discoveryPromise;
       return;
@@ -98,6 +99,7 @@ export function useExtensionLauncher(input: {
     discoveryPromise = (async () => {
       try {
         commands.value = await client.discoverExtensionCommands();
+        discoveryAttempted = true;
         state.value = "idle";
         if (commands.value.length === 0) detail.value = "No extension commands discovered.";
       } catch (error) {
@@ -165,6 +167,7 @@ export function useExtensionLauncher(input: {
     commandStates.value = {};
     commandForms.value = {};
     commandActions.value = {};
+    discoveryAttempted = false;
   }
 
   async function submitForm(command: DiscoveredExtensionCommand, action: ExtensionCommandAction = "complete") {
@@ -186,9 +189,15 @@ export function useExtensionLauncher(input: {
     }
   }
 
-  async function dispatchSlashInvocation(invocation: SlashInvocation) {
+  async function dispatchSlashInvocation(invocation: SlashInvocation): Promise<boolean> {
     const client = input.xmppClient.value;
-    if (!client) return;
+    if (!client) {
+      state.value = "error";
+      detail.value = "Extensions are unavailable while XMPP is disconnected.";
+      open.value = true;
+      void nextTick(input.focusPalette);
+      return false;
+    }
     const command = invocation.command;
     const key = command.node;
     const wantsPalette = invocation.kind === "open-palette";
@@ -213,7 +222,7 @@ export function useExtensionLauncher(input: {
             updateField(key, target.name, [invocation.prefillFirstRequired]);
           }
         }
-        return;
+        return true;
       }
 
       // inline-submit only stays inline if the server returned a single-stage
@@ -223,7 +232,7 @@ export function useExtensionLauncher(input: {
       if (form && allowed.includes("complete")) {
         updateField(key, invocation.fieldName, [invocation.value]);
         await submitForm(command, "complete");
-        return;
+        return true;
       }
 
       commandStates.value = { ...commandStates.value, [key]: extensionCommandOutcome(result) };
@@ -232,11 +241,13 @@ export function useExtensionLauncher(input: {
         open.value = true;
         void nextTick(input.focusPalette);
       }
+      return true;
     } catch (error) {
       commandStates.value = {
         ...commandStates.value,
         [key]: { state: "error", detail: error instanceof Error ? error.message : "Extension command failed." },
       };
+      return false;
     }
   }
 

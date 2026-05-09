@@ -22,7 +22,7 @@ const emit = defineEmits<{
   >
     <div v-if="blocked" class="type-caption flex items-center gap-2 px-3 py-2 text-destructive">
       <AlertCircle class="h-3.5 w-3.5" aria-hidden="true" />
-      <span>No command <span class="type-emphasis">/{{ prefix }}</span>. Press Esc to send as text.</span>
+      <span>No command <span class="type-emphasis">/{{ prefix }}</span>. Press Esc, then Enter to send as text.</span>
     </div>
     <div v-else class="flex flex-col gap-1">
       <button
