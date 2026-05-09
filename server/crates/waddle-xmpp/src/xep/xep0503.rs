@@ -211,7 +211,7 @@ pub fn build_room_metadata_form(channel_type: &str, pin_permission: &str) -> Ele
         .add_field(Field::form_type(NS_WADDLE_ROOM_METADATA))
         .add_field(Field::text_single("waddle#channel_type", channel_type))
         .add_field(Field::text_single(
-            "urn:waddle:roomconfig:pinpermission",
+            crate::muc::owner::FIELD_PIN_PERMISSION,
             pin_permission,
         ))
         .into_element()
@@ -369,8 +369,16 @@ mod tests {
         );
     }
 
+    fn pin_permission_value(form: &Element) -> String {
+        let field = form
+            .children()
+            .find(|field| field.attr("var") == Some(crate::muc::owner::FIELD_PIN_PERMISSION))
+            .expect("pin permission field");
+        field.children().next().unwrap().texts().collect()
+    }
+
     #[test]
-    fn test_build_room_metadata_form() {
+    fn test_build_room_metadata_form_anyone() {
         let form = build_room_metadata_form("forum", "anyone");
         let form_type = form
             .children()
@@ -388,13 +396,16 @@ mod tests {
 
         // #422: pin permission is surfaced on disco-info so non-owners
         // can render the Pin action correctly under the `anyone` policy.
-        let pin_permission = form
-            .children()
-            .find(|field| field.attr("var") == Some("urn:waddle:roomconfig:pinpermission"))
-            .expect("pin permission field");
-        let pin_permission_value: String =
-            pin_permission.children().next().unwrap().texts().collect();
-        assert_eq!(pin_permission_value, "anyone");
+        assert_eq!(pin_permission_value(&form), "anyone");
+    }
+
+    /// #422: companion to `test_build_room_metadata_form_anyone` —
+    /// confirms the `admins-only` policy round-trips on disco. Both
+    /// values are tested so a regression in either branch is caught.
+    #[test]
+    fn test_build_room_metadata_form_admins_only() {
+        let form = build_room_metadata_form("text", "admins-only");
+        assert_eq!(pin_permission_value(&form), "admins-only");
     }
 
     #[test]

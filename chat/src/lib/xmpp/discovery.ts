@@ -2,6 +2,7 @@ import type { WaddleClient } from "@waddle/xmpp-client-wasm";
 import { normalizeChannelType } from "@/lib/channel-types";
 import type { DiscoveredChannel, DiscoveredSpace, DiscoveredTopology } from "./types";
 import { barePeerJid, jidDomain } from "./jid";
+import { FIELD_PIN_PERMISSION } from "./protocol-helpers";
 
 const NS_FORUMS_0 = "urn:xmpp:forums:0";
 const NS_MUC = "http://jabber.org/protocol/muc";
@@ -19,7 +20,7 @@ type HybridClient = Partial<WaddleClient> & {
   send_raw_iq?: (xml: string) => Promise<string>;
 };
 
-type DiscoInfoData = {
+export type DiscoInfoData = {
   features: string[];
   identities: Array<{ category?: string; type?: string; name?: string }>;
   fields: Map<string, string>;
@@ -174,8 +175,25 @@ function channelFromRoom(room: { jid: string; name?: string; channel_type?: stri
  * present and recognized, `undefined` otherwise (consumer defaults to
  * `admins-only`). Exported for unit testing. */
 export function pinPermissionFromDiscoFields(fields: Map<string, string>): "admins-only" | "anyone" | undefined {
-  const raw = fields.get("urn:waddle:roomconfig:pinpermission");
+  const raw = fields.get(FIELD_PIN_PERMISSION);
   return raw === "anyone" || raw === "admins-only" ? raw : undefined;
+}
+
+/** #422: end-to-end hydration helper — given a parsed disco-info
+ * payload, apply every field to the channel record so callers (and
+ * tests) can verify the full mapping without going through DOMParser.
+ * `hydrateRoomInfo` is the IO-boundary wrapper; this function is the
+ * pure transform. */
+export function applyDiscoInfoToChannel(room: DiscoveredChannel, info: DiscoInfoData): DiscoveredChannel {
+  const parentSpaceId = roomParentSpaceId(info);
+  const pinPermission = pinPermissionFromDiscoFields(info.fields);
+  return {
+    ...room,
+    channelType: channelTypeFromInfo(info),
+    ...(parentSpaceId ? { spaceId: parentSpaceId, standalone: false } : {}),
+    ...(info.features.length ? { features: info.features } : {}),
+    ...(pinPermission ? { pinPermission } : {}),
+  };
 }
 
 async function hydrateRoomInfo(xmpp: HybridClient, room: DiscoveredChannel): Promise<DiscoveredChannel> {
@@ -183,15 +201,7 @@ async function hydrateRoomInfo(xmpp: HybridClient, room: DiscoveredChannel): Pro
   try {
     const info = await sendDiscoInfo(xmpp, room.jid);
     if (!info) return room;
-    const parentSpaceId = roomParentSpaceId(info);
-    const pinPermission = pinPermissionFromDiscoFields(info.fields);
-    return {
-      ...room,
-      channelType: channelTypeFromInfo(info),
-      ...(parentSpaceId ? { spaceId: parentSpaceId, standalone: false } : {}),
-      ...(info.features.length ? { features: info.features } : {}),
-      ...(pinPermission ? { pinPermission } : {}),
-    };
+    return applyDiscoInfoToChannel(room, info);
   } catch {
     return room;
   }

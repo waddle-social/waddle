@@ -133,6 +133,10 @@ pub async fn handle_muc_join(
                     members_only: true,
                     moderated: channel.channel_type == "announcement",
                     forum: channel.channel_type == "forum",
+                    // #422: load persisted pin policy so the actor's
+                    // snapshot matches the channel's last-saved value
+                    // even after eviction.
+                    pin_permission: channel.pin_permission,
                     ..Default::default()
                 })
                 .unwrap_or_else(|| RoomConfig {

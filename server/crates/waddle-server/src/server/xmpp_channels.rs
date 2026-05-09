@@ -1,5 +1,6 @@
 use kameo::actor::ActorRef;
 use serde::Serialize;
+use waddle_xmpp::muc::PinPermission;
 
 use crate::db::actor::{DbActor, DbQuery, DbQueryOne};
 use crate::db::{row_value, ValueExt};
@@ -12,6 +13,9 @@ pub(crate) struct XmppChannelRecord {
     pub channel_type: String,
     pub position: i32,
     pub is_default: bool,
+    /// #422: persisted pin permission so disco-info on a dormant
+    /// room reflects the configured policy.
+    pub pin_permission: PinPermission,
     pub created_at: String,
     pub updated_at: Option<String>,
 }
@@ -51,6 +55,10 @@ fn db_bool(row: &crate::db::actor::RowValues, index: usize, name: &str) -> Resul
 }
 
 fn parse_channel_record(row: &crate::db::actor::RowValues) -> Result<XmppChannelRecord, String> {
+    let pin_permission_raw = db_string(row, 6, "pin_permission")?;
+    let pin_permission = PinPermission::from_form_value(&pin_permission_raw).ok_or_else(|| {
+        format!("Failed to get pin_permission: unexpected value {pin_permission_raw:?}")
+    })?;
     Ok(XmppChannelRecord {
         id: db_string(row, 0, "id")?,
         name: db_string(row, 1, "name")?,
@@ -58,8 +66,9 @@ fn parse_channel_record(row: &crate::db::actor::RowValues) -> Result<XmppChannel
         channel_type: db_string(row, 3, "channel_type")?,
         position: db_i32(row, 4, "position")?,
         is_default: db_bool(row, 5, "is_default")?,
-        created_at: db_string(row, 6, "created_at")?,
-        updated_at: db_optional_string(row, 7, "updated_at")?,
+        pin_permission,
+        created_at: db_string(row, 7, "created_at")?,
+        updated_at: db_optional_string(row, 8, "updated_at")?,
     })
 }
 
@@ -70,7 +79,7 @@ pub(crate) async fn get_xmpp_channel(
     let row = actor
         .ask(DbQueryOne {
             sql: r#"
-                SELECT id, name, description, channel_type, position, is_default, created_at, updated_at
+                SELECT id, name, description, channel_type, position, is_default, pin_permission, created_at, updated_at
                 FROM channels
                 WHERE id = ?
             "#
@@ -91,7 +100,7 @@ pub(crate) async fn list_xmpp_channels(
     let rows = actor
         .ask(DbQuery {
             sql: r#"
-                SELECT id, name, description, channel_type, position, is_default, created_at, updated_at
+                SELECT id, name, description, channel_type, position, is_default, pin_permission, created_at, updated_at
                 FROM channels
                 ORDER BY position ASC, created_at ASC
                 LIMIT ? OFFSET ?
