@@ -76,7 +76,7 @@ const showEmoji = ref(false);
 const showSlash = ref(false);
 const slashPrefix = ref("");
 const slashTrailing = ref("");
-const slashDismissed = ref(false);
+const dismissedSlashPrefix = ref<string | null>(null);
 const mentionQuery = ref("");
 const emojiQuery = ref("");
 const selectedIndex = ref(0);
@@ -294,12 +294,19 @@ function checkAutocompleteFromEditor() {
   }
   showEmoji.value = false;
 
+  // Slash autocomplete is anchored to paragraph 0; if the cursor is in a
+  // later paragraph, an earlier `/word` must not arm the slash submit path.
+  const firstChild = doc.firstChild;
+  const cursorInFirstParagraph =
+    !!firstChild && firstChild.type?.name === "paragraph" && pos > 0 && pos <= firstChild.nodeSize - 1;
+
   const firstParagraph = firstParagraphTextFromDoc(doc);
-  const slash = parseSlashTrigger(firstParagraph);
+  const slash = cursorInFirstParagraph ? parseSlashTrigger(firstParagraph) : null;
   if (slash) {
-    if (slashDismissed.value) {
+    if (dismissedSlashPrefix.value !== null && dismissedSlashPrefix.value === slash.prefix) {
       showSlash.value = false;
     } else {
+      dismissedSlashPrefix.value = null;
       slashPrefix.value = slash.prefix;
       slashTrailing.value = slash.trailing;
       selectedIndex.value = 0;
@@ -311,7 +318,7 @@ function checkAutocompleteFromEditor() {
     return;
   }
 
-  slashDismissed.value = false;
+  dismissedSlashPrefix.value = null;
   showSlash.value = false;
   triggerRange.value = null;
 }
@@ -361,10 +368,12 @@ function expandSlashCandidate(command: DiscoveredExtensionCommand) {
 function dispatchSlashResolution(): boolean {
   const command = slashResolution.value;
   if (!command) return false;
+  // Forum channels demand a title; don't smuggle a slash dispatch past that gate.
+  if (showForumTitleInput.value && !forumTitle.value.trim()) return true;
   const invocation = buildSlashInvocation(command, slashTrailing.value);
   emit("dispatchSlash", invocation);
   showSlash.value = false;
-  slashDismissed.value = false;
+  dismissedSlashPrefix.value = null;
   triggerRange.value = null;
   // Caller resets the editor draft after the launcher accepts the invocation.
   return true;
@@ -466,7 +475,7 @@ function onEditorCancel() {
 
   if (action === "dismiss-slash") {
     showSlash.value = false;
-    slashDismissed.value = true;
+    dismissedSlashPrefix.value = slashPrefix.value;
     return;
   }
 

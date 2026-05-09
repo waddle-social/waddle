@@ -123,6 +123,34 @@ describe("extension command invocation", () => {
     ]);
   });
 
+  test("treats an empty composer_prefix value as absent rather than a zero-length match", async () => {
+    const xmpp = {
+      async send_raw_iq(xml: string) {
+        if (xml.includes('to="example.com"') && xml.includes("disco#items")) {
+          return `<iq type="result"><query xmlns="http://jabber.org/protocol/disco#items"><item jid="extensions.example.com" name="Extensions" /></query></iq>`;
+        }
+        if (xml.includes('to="extensions.example.com"') && xml.includes("disco#info") && !xml.includes(" node=")) {
+          return `<iq type="result"><query xmlns="http://jabber.org/protocol/disco#info"><feature var="urn:waddle:extension:1" /><feature var="http://jabber.org/protocol/commands" /></query></iq>`;
+        }
+        if (xml.includes('node="http://jabber.org/protocol/commands"')) {
+          return `<iq type="result"><query xmlns="http://jabber.org/protocol/disco#items"><item jid="extensions.example.com" node="urn:waddle:extension:1:noprefix" name="No Prefix" /></query></iq>`;
+        }
+        expect(xml).toContain('node="urn:waddle:extension:1:noprefix"');
+        return `<iq type="result"><query xmlns="http://jabber.org/protocol/disco#info"><x xmlns="jabber:x:data" type="result"><field var="FORM_TYPE"><value>urn:waddle:extension:1:command</value></field><field var="waddle#command_scope"><value>global</value></field><field var="waddle#composer_prefix"><value></value></field><field var="waddle#inline_field" /></x></query></iq>`;
+      },
+    };
+
+    const commands = await discoverExtensionCommands(xmpp as any, "alice@example.com/web");
+    expect(commands).toEqual([
+      {
+        serviceJid: "extensions.example.com",
+        node: "urn:waddle:extension:1:noprefix",
+        name: "No Prefix",
+        scope: "global",
+      },
+    ]);
+  });
+
   test("prefers the advertised Waddle extension service over generic command services", async () => {
     const commandItemTargets: string[] = [];
     const xmpp = {

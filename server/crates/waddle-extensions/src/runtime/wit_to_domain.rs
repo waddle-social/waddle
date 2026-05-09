@@ -250,3 +250,49 @@ impl From<wit_types::ExtensionCapability> for ExtensionCapability {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn wit_descriptor(
+        node: &str,
+        composer_prefix: Option<&str>,
+        inline_field: Option<&str>,
+    ) -> wit_types::CommandDescriptor {
+        wit_types::CommandDescriptor {
+            node: wit_types::CommandNode {
+                value: node.to_string(),
+            },
+            name: wit_types::DisplayText {
+                value: "Test Command".to_string(),
+            },
+            scope: wit_types::CommandScope::Global,
+            composer_prefix: composer_prefix.map(str::to_string),
+            inline_field: inline_field.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn command_descriptor_round_trip_carries_composer_prefix_and_inline_field() {
+        let descriptor: CommandDescriptor = wit_descriptor(
+            "urn:waddle:extension:1:ai-chatbot",
+            Some("ai"),
+            Some("prompt"),
+        )
+        .try_into()
+        .expect("convert");
+        assert_eq!(descriptor.composer_prefix.as_deref(), Some("ai"));
+        assert_eq!(descriptor.inline_field.as_deref(), Some("prompt"));
+    }
+
+    #[test]
+    fn command_descriptor_round_trip_preserves_none_when_absent() {
+        let descriptor: CommandDescriptor =
+            wit_descriptor("urn:waddle:extension:1:invoke", None, None)
+                .try_into()
+                .expect("convert");
+        assert!(descriptor.composer_prefix.is_none());
+        assert!(descriptor.inline_field.is_none());
+    }
+}

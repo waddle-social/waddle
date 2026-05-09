@@ -189,47 +189,49 @@ export function useExtensionLauncher(input: {
   async function dispatchSlashInvocation(invocation: SlashInvocation) {
     const client = input.xmppClient.value;
     if (!client) return;
-    if (invocation.kind === "open-palette") {
-      open.value = true;
-      void nextTick(input.focusPalette);
-      const key = invocation.command.node;
-      clearCommandSurfaces(key);
-      commandStates.value = { ...commandStates.value, [key]: { state: "loading" } };
-      try {
-        const result = await client.invokeExtensionCommand(invocation.command);
-        storeResultSurfaces(key, result);
-        commandStates.value = { ...commandStates.value, [key]: extensionCommandOutcome(result) };
-        if (invocation.prefillFirstRequired) {
-          const form = commandForms.value[key];
-          const target = form?.fields.find((field) => field.required && !field.hidden);
-          if (target) {
-            updateField(key, target.name, [invocation.prefillFirstRequired]);
-          }
-        }
-      } catch (error) {
-        commandStates.value = {
-          ...commandStates.value,
-          [key]: { state: "error", detail: error instanceof Error ? error.message : "Extension command failed." },
-        };
-      }
-      return;
-    }
-
-    // inline-submit: invoke the command, set the inline field, submit.
     const command = invocation.command;
     const key = command.node;
+    const wantsPalette = invocation.kind === "open-palette";
+
     clearCommandSurfaces(key);
     commandStates.value = { ...commandStates.value, [key]: { state: "loading" } };
+    if (wantsPalette) {
+      open.value = true;
+      void nextTick(input.focusPalette);
+    }
+
     try {
       const result = await client.invokeExtensionCommand(command);
       storeResultSurfaces(key, result);
       const form = commandForms.value[key];
-      if (!form) {
+
+      if (invocation.kind === "open-palette") {
         commandStates.value = { ...commandStates.value, [key]: extensionCommandOutcome(result) };
+        if (invocation.prefillFirstRequired && form) {
+          const target = form.fields.find((field) => field.required && !field.hidden);
+          if (target) {
+            updateField(key, target.name, [invocation.prefillFirstRequired]);
+          }
+        }
         return;
       }
-      updateField(key, invocation.fieldName, [invocation.value]);
-      await submitForm(command, "complete");
+
+      // inline-submit only stays inline if the server returned a single-stage
+      // form whose advertised XEP-0050 actions include `complete`. Otherwise
+      // fall back to the palette so the user can drive the multi-stage flow.
+      const allowed = form?.actions ?? [];
+      if (form && allowed.includes("complete")) {
+        updateField(key, invocation.fieldName, [invocation.value]);
+        await submitForm(command, "complete");
+        return;
+      }
+
+      commandStates.value = { ...commandStates.value, [key]: extensionCommandOutcome(result) };
+      if (form) {
+        updateField(key, invocation.fieldName, [invocation.value]);
+        open.value = true;
+        void nextTick(input.focusPalette);
+      }
     } catch (error) {
       commandStates.value = {
         ...commandStates.value,
