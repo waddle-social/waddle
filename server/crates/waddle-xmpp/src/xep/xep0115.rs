@@ -106,6 +106,49 @@ impl CachedDiscoInfo {
     }
 }
 
+/// Typed wrapper for an XEP-0115 verification string. The `ver` is
+/// opaque base64-encoded ciphertext at the protocol layer; the
+/// newtype prevents accidental confusion with other strings (JIDs,
+/// node names, hash-algo identifiers) and satisfies the
+/// typed-payloads hard rule for protocol data carried past the I/O
+/// boundary.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct CapsVer(String);
+
+impl CapsVer {
+    pub fn new(s: impl Into<String>) -> Self {
+        Self(s.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for CapsVer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl From<&str> for CapsVer {
+    fn from(s: &str) -> Self {
+        Self(s.to_string())
+    }
+}
+
+impl From<String> for CapsVer {
+    fn from(s: String) -> Self {
+        Self(s)
+    }
+}
+
+impl From<&String> for CapsVer {
+    fn from(s: &String) -> Self {
+        Self(s.clone())
+    }
+}
+
 /// Composite cache key that XEP-0115 §6 mandates: caching is per
 /// `(hash algorithm, verification string)`. Two clients advertising
 /// the same opaque `ver` under different hash families MUST not
@@ -113,11 +156,11 @@ impl CachedDiscoInfo {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct CapsCacheKey {
     pub hash: String,
-    pub ver: String,
+    pub ver: CapsVer,
 }
 
 impl CapsCacheKey {
-    pub fn new(hash: impl Into<String>, ver: impl Into<String>) -> Self {
+    pub fn new(hash: impl Into<String>, ver: impl Into<CapsVer>) -> Self {
         Self {
             hash: hash.into(),
             ver: ver.into(),
