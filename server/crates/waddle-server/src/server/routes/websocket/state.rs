@@ -76,6 +76,10 @@ pub struct ProtocolServices {
     /// XEP-0198 detached-session registry — holds state for clients whose
     /// WebSocket has closed but may still resume within the session timeout.
     pub sm_session_registry: Arc<InMemorySmSessionRegistry>,
+    /// XEP-0115 entity-capabilities resolver. Maintains the
+    /// process-wide hash-keyed `CapsCache` plus per-resource caps
+    /// mappings used by XEP-0163 §3 fan-out filtering.
+    pub caps_resolver: Arc<crate::server::caps_resolution::CapsResolver>,
     /// Sidecar map keyed by SM stream id, holding the authenticated `Session`
     /// so that a resumed stream doesn't lose its authorization context and
     /// can serve IQs that check channel membership, etc. Entries are

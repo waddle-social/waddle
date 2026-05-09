@@ -72,6 +72,7 @@ use xmpp_parsers::minidom::Element;
 
 mod archive_inbox_upload;
 mod blocking;
+mod caps_result;
 mod commands;
 mod conn_state;
 mod disco_info;
@@ -99,6 +100,7 @@ mod vcard_private;
 
 use archive_inbox_upload::handle_archive_inbox_upload_iq;
 use blocking::handle_blocking_iq;
+use caps_result::handle_caps_disco_info_result;
 use commands::handle_command_iq;
 pub use conn_state::IqConnState;
 use disco_info::handle_disco_info_iq;
@@ -216,6 +218,9 @@ pub async fn handle_iq_with_conn_state(
         &iq.payload,
         xmpp_parsers::iq::IqType::Result(_) | xmpp_parsers::iq::IqType::Error(_)
     ) {
+        if let Some(full) = phase.bound_jid() {
+            handle_caps_disco_info_result(&iq, full, state);
+        }
         debug!(id = %id, "Ignoring IQ result/error stanza");
         return vec![];
     }

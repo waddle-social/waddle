@@ -2,8 +2,9 @@
 
 pub use waddle_xmpp_core::disco::info::{
     build_disco_info_response, build_disco_info_response_with_extensions, is_disco_info_query,
-    muc_room_features, muc_service_features, pubsub_service_features, spaces_service_features,
-    upload_service_features, DiscoInfoQuery, Feature, Identity, DISCO_INFO_NS,
+    muc_room_features, muc_service_features, parse_disco_info_response, pubsub_service_features,
+    spaces_service_features, upload_service_features, DiscoInfoQuery, DiscoInfoResponse, Feature,
+    Identity, DISCO_INFO_NS,
 };
 use xmpp_parsers::iq::Iq;
 

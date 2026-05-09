@@ -3,6 +3,8 @@ use super::subscription::{
     roster_storage,
 };
 use super::*;
+use crate::server::caps_resolution::{build_caps_disco_info_query, extract_caps_payload};
+use waddle_xmpp::Stanza;
 
 pub(super) async fn handle_regular_presence_update(
     state: &WebSocketState,
@@ -22,6 +24,7 @@ pub(super) async fn handle_regular_presence_update(
             .protocol
             .connection_registry
             .update_presence(sender_jid, true, priority);
+        resolve_caps_for_presence(state, sender_jid, &presence).await;
         // XEP-0160 §3 step 5 (locked Q7a/Q7d): on the first non-negative-
         // priority presence of a fresh session, drain pending_delivery
         // for the recipient. `claim_offline_flush` ensures this fires at
@@ -211,6 +214,48 @@ async fn broadcast_presence_to_subscribers(
         )
         .await;
     }
+}
+
+/// XEP-0115: drive caps resolution for an inbound `<presence>`
+/// carrying `<c hash node ver/>`.
+///
+/// - Cache hit: record the per-resource ver mapping so the next
+///   PEP fan-out (PR 2) can filter by feature list.
+/// - Cache miss: send the resource a typed disco#info IQ get with
+///   `node="<NODE>#<VER>"` per §6.2 and remember the in-flight ver.
+async fn resolve_caps_for_presence(
+    state: &WebSocketState,
+    sender_jid: &FullJid,
+    presence: &xmpp_parsers::presence::Presence,
+) {
+    let Some(caps) = extract_caps_payload(presence) else {
+        return;
+    };
+    let resolver = &state.deps.protocol.caps_resolver;
+    if resolver.cache().contains(&caps.ver) {
+        resolver.record_resource(sender_jid, &caps.ver);
+        return;
+    }
+    let iq_id = format!("waddle-caps-disco-{}", uuid::Uuid::new_v4());
+    let iq = match build_caps_disco_info_query(
+        &state.deps.auth_state.xmpp_domain,
+        sender_jid,
+        &caps,
+        &iq_id,
+    ) {
+        Ok(iq) => iq,
+        Err(error) => {
+            warn!(error = %error, "Failed to build caps disco#info query");
+            return;
+        }
+    };
+    resolver.begin_pending(iq_id, sender_jid.clone(), caps);
+    let _ = state
+        .deps
+        .protocol
+        .connection_registry
+        .send_to(sender_jid, Stanza::Iq(iq))
+        .await;
 }
 
 pub(super) fn show_name(show: &xmpp_parsers::presence::Show) -> &'static str {

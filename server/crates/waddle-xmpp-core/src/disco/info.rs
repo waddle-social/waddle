@@ -123,6 +123,82 @@ pub fn parse_disco_info_query(iq: &Iq) -> Result<DiscoInfoQuery, CoreError> {
     Ok(DiscoInfoQuery { target, node })
 }
 
+/// Parsed disco#info response payload.
+///
+/// The `<query xmlns="http://jabber.org/protocol/disco#info">` element
+/// returned in an IQ result. XEP-0030 lists `<identity/>` and
+/// `<feature/>` children; XEP-0128 adds `<x xmlns="jabber:x:data"/>`
+/// extension forms whose typed handling lives elsewhere — this parser
+/// surfaces only identities and features, sufficient for XEP-0115
+/// hash recomputation against the no-form fallback path.
+#[derive(Debug, Clone)]
+pub struct DiscoInfoResponse {
+    pub node: Option<String>,
+    pub identities: Vec<Identity>,
+    pub features: Vec<Feature>,
+}
+
+/// Parse the `<query/>` element of a disco#info IQ result into typed
+/// identities + features.
+pub fn parse_disco_info_response(query: &Element) -> Result<DiscoInfoResponse, CoreError> {
+    if query.name() != "query" || query.ns() != DISCO_INFO_NS {
+        return Err(CoreError::bad_request(Some(
+            "disco#info response payload is not a <query/> element".to_string(),
+        )));
+    }
+
+    let node = query.attr("node").map(str::to_string);
+    let mut identities = Vec::new();
+    let mut features = Vec::new();
+
+    for child in query.children() {
+        if child.ns() != DISCO_INFO_NS {
+            continue;
+        }
+        match child.name() {
+            "identity" => {
+                let category = child
+                    .attr("category")
+                    .ok_or_else(|| {
+                        CoreError::bad_request(Some(
+                            "disco#info <identity/> missing category".to_string(),
+                        ))
+                    })?
+                    .to_string();
+                let type_ = child
+                    .attr("type")
+                    .ok_or_else(|| {
+                        CoreError::bad_request(Some(
+                            "disco#info <identity/> missing type".to_string(),
+                        ))
+                    })?
+                    .to_string();
+                let lang = child.attr("xml:lang").map(str::to_string);
+                let name = child.attr("name").map(str::to_string);
+                identities.push(Identity {
+                    category,
+                    type_,
+                    lang,
+                    name,
+                });
+            }
+            "feature" => {
+                let var = child.attr("var").ok_or_else(|| {
+                    CoreError::bad_request(Some("disco#info <feature/> missing var".to_string()))
+                })?;
+                features.push(Feature::new(var));
+            }
+            _ => {}
+        }
+    }
+
+    Ok(DiscoInfoResponse {
+        node,
+        identities,
+        features,
+    })
+}
+
 /// Build a disco#info response IQ.
 pub fn build_disco_info_response(
     original_iq: &Iq,

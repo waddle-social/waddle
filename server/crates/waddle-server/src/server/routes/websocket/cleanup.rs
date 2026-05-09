@@ -191,6 +191,11 @@ pub(super) async fn cleanup_connection_shutdown(
             .is_some()
     });
     if removed {
+        // XEP-0115 §6: drop the per-resource caps mapping for this
+        // resource. The hash-keyed `CapsCache` itself stays warm so
+        // a future session reusing the same `(hash, ver)` short-
+        // circuits the disco#info round-trip.
+        state.deps.protocol.caps_resolver.drop_resource(&jid);
         info!(jid = %jid, "WebSocket connection unregistered");
         cleanup_muc_presence(state, &jid).await;
     } else {
