@@ -244,27 +244,43 @@ impl DatabaseRosterStorage {
 
     /// Get all roster items where the user should send presence updates.
     ///
-    /// Returns contacts with subscription=from or subscription=both.
+    /// Returns contacts with subscription=from or subscription=both as
+    /// typed `BareJid` values — per the typed-payloads hard rule, the
+    /// untyped `String` form from storage is parsed exactly once at the
+    /// boundary so handler code never touches raw JID strings. Rows
+    /// that fail to parse are dropped with a debug log rather than
+    /// surfaced as a per-row error, since corrupted JIDs in the roster
+    /// are unactionable for the caller.
     #[instrument(skip(self), fields(user = %user_jid))]
     pub async fn get_presence_subscribers(
         &self,
         user_jid: &BareJid,
-    ) -> Result<Vec<String>, RosterStorageError> {
+    ) -> Result<Vec<BareJid>, RosterStorageError> {
         let mut rows = self.query_with_persistent(
             "SELECT contact_jid FROM roster_items WHERE user_jid = ? AND subscription IN ('from', 'both')",
             crate::db_params![user_jid.to_string()],
         ).await?;
 
-        let mut jids = Vec::new();
+        let mut jids: Vec<BareJid> = Vec::new();
         while let Some(row) = rows
             .next()
             .await
             .map_err(|e| RosterStorageError::QueryFailed(format!("Failed to read row: {}", e)))?
         {
-            let jid: String = row.get(0).map_err(|e| {
+            let raw: String = row.get(0).map_err(|e| {
                 RosterStorageError::QueryFailed(format!("Failed to get jid: {}", e))
             })?;
-            jids.push(jid);
+            match raw.parse::<BareJid>() {
+                Ok(jid) => jids.push(jid),
+                Err(error) => {
+                    debug!(
+                        error = %error,
+                        raw = %raw,
+                        user = %user_jid,
+                        "Skipping un-parseable contact_jid row in get_presence_subscribers"
+                    );
+                }
+            }
         }
 
         debug!(count = jids.len(), "Retrieved presence subscribers");

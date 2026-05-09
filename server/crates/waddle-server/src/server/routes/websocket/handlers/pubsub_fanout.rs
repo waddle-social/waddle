@@ -41,16 +41,41 @@ use crate::db::actor::GetDatabase;
 use crate::db::blocking::DatabaseBlockingStorage;
 use crate::db::roster::DatabaseRosterStorage;
 
+/// Typed bundle of `fan_out_publish` inputs — keeps the public
+/// signature compact (one `state` + one struct) while still letting
+/// the helper consume each field by reference.
+pub struct FanOutRequest<'a> {
+    pub owner: &'a BareJid,
+    pub node: &'a str,
+    pub published_item: &'a PubSubItem,
+    pub item_id: &'a str,
+    pub publisher: Option<&'a BareJid>,
+    /// The publishing resource's full JID, when known. Used to
+    /// suppress the §3.4 owner-self echo back to the originator.
+    pub publisher_full: Option<&'a FullJid>,
+    /// `true` when this is a XEP-0163 PEP publish (owner is a user
+    /// JID); `false` for generic PubSub / Spaces publishes where the
+    /// §3 roster + owner-self passes would be a leak.
+    pub is_pep: bool,
+}
+
 /// Dispatch a §7.1 event notification to every deliverable subscriber.
-pub async fn fan_out_publish(
-    state: &WebSocketState,
-    owner: &BareJid,
-    node: &str,
-    published_item: &PubSubItem,
-    item_id: &str,
-    publisher: Option<&BareJid>,
-    publisher_full: Option<&FullJid>,
-) {
+///
+/// `req.is_pep` distinguishes XEP-0163 PEP self-publishes (where
+/// `owner` is a user JID and the §3 roster + owner-self passes apply)
+/// from generic PubSub or Spaces publishes (where `owner` is a service
+/// component domain and the §3 passes are skipped). Without this
+/// guard, a non-PEP publish would leak to the publisher's roster
+/// contacts that happen to advertise `<node>+notify` for the
+/// (unrelated) generic node — a real authorization bypass.
+pub async fn fan_out_publish(state: &WebSocketState, req: FanOutRequest<'_>) {
+    let owner = req.owner;
+    let node = req.node;
+    let published_item = req.published_item;
+    let item_id = req.item_id;
+    let publisher = req.publisher;
+    let publisher_full = req.publisher_full;
+    let is_pep = req.is_pep;
     let storage = &state.deps.protocol.pubsub_storage;
 
     let node_cfg = match storage.get_node(owner, node).await {
@@ -258,8 +283,20 @@ pub async fn fan_out_publish(
         event: &event,
         notify_filter: &notify_filter,
     };
-    let roster_metrics = roster_caps_fan_out(state, owner, &ctx, &mut already_delivered).await;
-    let self_metrics = owner_self_caps_fan_out(state, owner, &ctx, &mut already_delivered).await;
+    // Codex P1 review (PR #439): the §3 roster + owner-self passes
+    // are XEP-0163 PEP-specific. For non-PEP publishes (generic
+    // PubSub on a service component, Spaces) `owner` is a service
+    // domain and the publisher's roster bears no authorization
+    // relationship to the published node — running the passes there
+    // would leak the event to roster contacts that advertise
+    // `<node>+notify` for an unrelated node URI.
+    let (roster_metrics, self_metrics) = if is_pep {
+        let roster = roster_caps_fan_out(state, owner, &ctx, &mut already_delivered).await;
+        let self_ = owner_self_caps_fan_out(state, owner, &ctx, &mut already_delivered).await;
+        (roster, self_)
+    } else {
+        (FanOutMetrics::default(), FanOutMetrics::default())
+    };
     intended += roster_metrics.intended + self_metrics.intended;
     delivered += roster_metrics.delivered + self_metrics.delivered;
     dropped_full += roster_metrics.dropped_full + self_metrics.dropped_full;
@@ -308,10 +345,18 @@ struct CapsFanOutCtx<'a> {
 /// deliver `<message><event>` to each available resource whose cached
 /// CAPS include `<node>+notify`. Skips resources already reached via
 /// the explicit-subscribers loop (deduped through `already_delivered`).
+///
 /// Honors XEP-0191 blocking in both directions, fail-closed: if the
-/// blocking-storage handle is unavailable the entire roster pass is
-/// aborted (failing OPEN would risk leaking PEP items to blocked
-/// contacts during a transient DB outage, which §3.3 forbids).
+/// shared DB handle is unavailable the entire roster pass is aborted
+/// (failing OPEN would risk leaking PEP items to blocked contacts
+/// during a transient DB outage, which §3.3 forbids).
+///
+/// The DB handle is acquired ONCE for both the roster query and the
+/// blocking lookups (PR #439 review: avoid two `GetDatabase` actor
+/// round-trips and the fail-open window between them). The
+/// publisher's own blocklist is loaded ONCE and consulted via a
+/// `HashSet` membership test (PR #439 review: cuts the per-roster-
+/// contact query count in half on the publisher→contact direction).
 async fn roster_caps_fan_out(
     state: &WebSocketState,
     owner: &BareJid,
@@ -320,7 +365,7 @@ async fn roster_caps_fan_out(
 ) -> FanOutMetrics {
     let mut metrics = FanOutMetrics::default();
 
-    let roster = match state
+    let db = match state
         .deps
         .app_state
         .db_pool
@@ -329,16 +374,20 @@ async fn roster_caps_fan_out(
         .ask(GetDatabase)
         .await
     {
-        Ok(db) => DatabaseRosterStorage::new(db),
+        Ok(db) => db,
         Err(error) => {
             warn!(
                 error = %error,
                 owner = %owner,
-                "Failed to access roster database for §3 fan-out"
+                notify_filter = %ctx.notify_filter,
+                "Aborting §3 roster fan-out: cannot acquire DB handle; \
+                 cannot honor XEP-0191 — failing closed"
             );
             return metrics;
         }
     };
+    let roster = DatabaseRosterStorage::new(db.clone());
+    let blocking = DatabaseBlockingStorage::new(db);
 
     let presence_subscribers = match roster.get_presence_subscribers(owner).await {
         Ok(subs) => subs,
@@ -357,39 +406,28 @@ async fn roster_caps_fan_out(
         return metrics;
     }
 
-    // XEP-0191 §2 + RFC 363 PR #439 review issue #2: fail CLOSED if
-    // the blocking storage handle is unavailable. Failing open would
-    // skip the both-direction block check on a transient DB outage,
-    // which is a §3.3 violation (MUST NOT deliver to blocked peers).
-    let blocking = match blocking_storage(state).await {
-        Some(b) => b,
-        None => {
+    // Pre-load the publisher's blocklist as a typed set so the
+    // owner→contact direction is checked in O(1) per roster entry,
+    // not via a round-trip per check (PR #439 review). The
+    // contact→owner direction still needs a per-contact query
+    // because we don't have the contacts' blocklists pre-loaded.
+    let owner_blocklist: HashSet<BareJid> = match blocking.list_blocked_jids(owner).await {
+        Ok(list) => list.into_iter().collect(),
+        Err(error) => {
             warn!(
+                error = %error,
                 owner = %owner,
                 notify_filter = %ctx.notify_filter,
-                "Aborting §3 roster fan-out: blocking storage handle unavailable; \
+                "Aborting §3 roster fan-out: failed to load publisher's blocklist; \
                  cannot honor XEP-0191 — failing closed"
             );
             return metrics;
         }
     };
 
-    for subscriber in presence_subscribers {
-        let contact_bare = match subscriber.parse::<BareJid>() {
-            Ok(jid) => jid,
-            Err(error) => {
-                warn!(
-                    error = %error,
-                    raw = %subscriber,
-                    owner = %owner,
-                    "Skipping invalid roster JID in §3 fan-out"
-                );
-                continue;
-            }
-        };
-
+    for contact_bare in presence_subscribers {
         // XEP-0191 §2: do not deliver if either party blocked the other.
-        if is_blocked(&blocking, owner, &contact_bare).await
+        if owner_blocklist.contains(&contact_bare)
             || is_blocked(&blocking, &contact_bare, owner).await
         {
             continue;
@@ -420,8 +458,16 @@ async fn owner_self_caps_fan_out(
     metrics
 }
 
-/// Deliver the event to every live resource of `target` whose cached
-/// CAPS include `notify_filter`, skipping anything in `already_delivered`.
+/// Deliver the event to every presence-AVAILABLE resource of `target`
+/// whose cached CAPS include `notify_filter`, skipping anything in
+/// `already_delivered`.
+///
+/// XEP-0163 §3 is presence-driven: a resource that has explicitly gone
+/// `<presence type="unavailable"/>` MUST NOT receive PEP notifications
+/// even if its CAPS still advertise `+notify` (PR #439 review issue
+/// Qodo #2). We use the `get_available_resources_for_user` helper
+/// rather than `get_resources_for_user`, which would return all
+/// connected sockets including unavailable/invisible ones.
 ///
 /// Detached XEP-0198 resumable resources are NOT enumerated here:
 /// `caps_resolver.drop_resource` is called on every disconnect/expiry
@@ -439,11 +485,14 @@ async fn deliver_to_user_resources(
     already_delivered: &mut HashSet<FullJid>,
     metrics: &mut FanOutMetrics,
 ) {
-    let resources = state
+    let resources: Vec<FullJid> = state
         .deps
         .protocol
         .connection_registry
-        .get_resources_for_user(target);
+        .get_available_resources_for_user(target)
+        .into_iter()
+        .map(|(jid, _priority)| jid)
+        .collect();
 
     for resource in resources {
         if already_delivered.contains(&resource) {
@@ -516,24 +565,6 @@ async fn deliver_to_user_resources(
                     metrics.not_connected += 1;
                 }
             },
-        }
-    }
-}
-
-async fn blocking_storage(state: &WebSocketState) -> Option<DatabaseBlockingStorage> {
-    match state
-        .deps
-        .app_state
-        .db_pool
-        .global_actor()
-        .clone()
-        .ask(GetDatabase)
-        .await
-    {
-        Ok(db) => Some(DatabaseBlockingStorage::new(db)),
-        Err(error) => {
-            warn!(error = %error, "Failed to access blocking storage for §3 fan-out");
-            None
         }
     }
 }

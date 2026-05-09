@@ -386,16 +386,21 @@ pub(super) async fn handle_spaces_publish(
             // compensating-retract path above must NOT emit events for
             // a publish that gets rolled back.
             // Spaces publishes are owned by the spaces service domain,
-            // not a user JID, so there is no per-resource publisher to
-            // exclude from the §3 owner-self pass.
+            // not a user JID. `is_pep = false` skips the §3 roster +
+            // owner-self passes (PR #439 review): the publisher's
+            // roster has no authorization relationship to a Spaces
+            // node, so running those passes would leak the event.
             pubsub_fanout::fan_out_publish(
                 state,
-                &spaces_jid,
-                node,
-                &item,
-                &result.item_id,
-                None,
-                None,
+                pubsub_fanout::FanOutRequest {
+                    owner: &spaces_jid,
+                    node,
+                    published_item: &item,
+                    item_id: &result.item_id,
+                    publisher: None,
+                    publisher_full: None,
+                    is_pep: false,
+                },
             )
             .await;
             vec![iq_to_xml(build_pubsub_publish_result(
