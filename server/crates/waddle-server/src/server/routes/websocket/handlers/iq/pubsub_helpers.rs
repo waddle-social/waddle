@@ -385,8 +385,19 @@ pub(super) async fn handle_spaces_publish(
             // Fan-out only after the parent-tuple write succeeds: the
             // compensating-retract path above must NOT emit events for
             // a publish that gets rolled back.
-            pubsub_fanout::fan_out_publish(state, &spaces_jid, node, &item, &result.item_id, None)
-                .await;
+            // Spaces publishes are owned by the spaces service domain,
+            // not a user JID, so there is no per-resource publisher to
+            // exclude from the §3 owner-self pass.
+            pubsub_fanout::fan_out_publish(
+                state,
+                &spaces_jid,
+                node,
+                &item,
+                &result.item_id,
+                None,
+                None,
+            )
+            .await;
             vec![iq_to_xml(build_pubsub_publish_result(
                 iq,
                 node,

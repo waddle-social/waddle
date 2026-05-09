@@ -49,6 +49,7 @@ pub async fn fan_out_publish(
     published_item: &PubSubItem,
     item_id: &str,
     publisher: Option<&BareJid>,
+    publisher_full: Option<&FullJid>,
 ) {
     let storage = &state.deps.protocol.pubsub_storage;
 
@@ -118,7 +119,14 @@ pub async fn fan_out_publish(
 
     // Track resources reached via the explicit-subscribers loop so the
     // roster + CAPS phase doesn't double-deliver to the same client.
+    // We also pre-seed the publishing resource itself (when known) so
+    // the §3.4 owner-self pass doesn't echo a headline event back to
+    // the same FullJid that just received the publish IQ result —
+    // matches Prosody/ejabberd behavior.
     let mut already_delivered: HashSet<FullJid> = HashSet::new();
+    if let Some(publisher_full) = publisher_full {
+        already_delivered.insert(publisher_full.clone());
+    }
 
     for sub in subscribers {
         let target_resources: Vec<FullJid> = match sub.subscriber.try_as_full() {
@@ -235,9 +243,9 @@ pub async fn fan_out_publish(
     //
     // - Self pass: the publisher's own *other* resources (PEP §3.4 —
     //   account owner is among the appropriate subscribers). Same +notify
-    //   filter; the publishing resource is not specifically excluded
-    //   (it'll naturally drop the duplicate by item id, and we don't
-    //   thread the publishing FullJid through this function yet).
+    //   filter. The publishing resource itself is pre-seeded into
+    //   `already_delivered` above so it does NOT receive a headline
+    //   echo of the item it just authored.
     //
     // Resources mid-resolution (presence with `<c/>` arrived but the
     // disco#info round-trip hasn't completed) carry no ver mapping and
@@ -250,8 +258,7 @@ pub async fn fan_out_publish(
         event: &event,
         notify_filter: &notify_filter,
     };
-    let roster_metrics =
-        roster_caps_fan_out(state, owner, node, &ctx, &mut already_delivered).await;
+    let roster_metrics = roster_caps_fan_out(state, owner, &ctx, &mut already_delivered).await;
     let self_metrics = owner_self_caps_fan_out(state, owner, &ctx, &mut already_delivered).await;
     intended += roster_metrics.intended + self_metrics.intended;
     delivered += roster_metrics.delivered + self_metrics.delivered;
@@ -301,11 +308,13 @@ struct CapsFanOutCtx<'a> {
 /// deliver `<message><event>` to each available resource whose cached
 /// CAPS include `<node>+notify`. Skips resources already reached via
 /// the explicit-subscribers loop (deduped through `already_delivered`).
-/// Honors XEP-0191 blocking in both directions.
+/// Honors XEP-0191 blocking in both directions, fail-closed: if the
+/// blocking-storage handle is unavailable the entire roster pass is
+/// aborted (failing OPEN would risk leaking PEP items to blocked
+/// contacts during a transient DB outage, which §3.3 forbids).
 async fn roster_caps_fan_out(
     state: &WebSocketState,
     owner: &BareJid,
-    node: &str,
     ctx: &CapsFanOutCtx<'_>,
     already_delivered: &mut HashSet<FullJid>,
 ) -> FanOutMetrics {
@@ -337,7 +346,7 @@ async fn roster_caps_fan_out(
             warn!(
                 error = %error,
                 owner = %owner,
-                node,
+                notify_filter = %ctx.notify_filter,
                 "Failed to load roster from/both contacts for §3 fan-out"
             );
             return metrics;
@@ -348,7 +357,22 @@ async fn roster_caps_fan_out(
         return metrics;
     }
 
-    let blocking = blocking_storage(state).await;
+    // XEP-0191 §2 + RFC 363 PR #439 review issue #2: fail CLOSED if
+    // the blocking storage handle is unavailable. Failing open would
+    // skip the both-direction block check on a transient DB outage,
+    // which is a §3.3 violation (MUST NOT deliver to blocked peers).
+    let blocking = match blocking_storage(state).await {
+        Some(b) => b,
+        None => {
+            warn!(
+                owner = %owner,
+                notify_filter = %ctx.notify_filter,
+                "Aborting §3 roster fan-out: blocking storage handle unavailable; \
+                 cannot honor XEP-0191 — failing closed"
+            );
+            return metrics;
+        }
+    };
 
     for subscriber in presence_subscribers {
         let contact_bare = match subscriber.parse::<BareJid>() {
@@ -365,12 +389,10 @@ async fn roster_caps_fan_out(
         };
 
         // XEP-0191 §2: do not deliver if either party blocked the other.
-        if let Some(blocking) = blocking.as_ref() {
-            if is_blocked(blocking, owner, &contact_bare).await
-                || is_blocked(blocking, &contact_bare, owner).await
-            {
-                continue;
-            }
+        if is_blocked(&blocking, owner, &contact_bare).await
+            || is_blocked(&blocking, &contact_bare, owner).await
+        {
+            continue;
         }
 
         deliver_to_user_resources(state, &contact_bare, ctx, already_delivered, &mut metrics).await;
@@ -383,9 +405,10 @@ async fn roster_caps_fan_out(
 /// "appropriate subscribers" of their own publishes. Mirror to every
 /// online resource of `owner` whose cached CAPS include `<node>+notify`,
 /// skipping resources already reached. The publishing resource itself
-/// will receive a duplicate event (the publisher's `<iq result>` is
-/// independent of the headline event), but XMPP clients dedupe by item
-/// id so this is harmless and matches behavior of other PEP servers.
+/// is pre-seeded into `already_delivered` by the caller, so the owner's
+/// other resources receive the headline event but the originator does
+/// not see an echo of the item it just authored — matching Prosody's
+/// `mod_pep` and ejabberd's `mod_pubsub`.
 async fn owner_self_caps_fan_out(
     state: &WebSocketState,
     owner: &BareJid,
@@ -397,9 +420,18 @@ async fn owner_self_caps_fan_out(
     metrics
 }
 
-/// Deliver the event to every live + detached resource of `target`
-/// whose cached CAPS include `notify_filter`, skipping anything in
-/// `already_delivered`.
+/// Deliver the event to every live resource of `target` whose cached
+/// CAPS include `notify_filter`, skipping anything in `already_delivered`.
+///
+/// Detached XEP-0198 resumable resources are NOT enumerated here:
+/// `caps_resolver.drop_resource` is called on every disconnect/expiry
+/// path (including SM detach) so a detached resource never has a caps
+/// mapping when the event is published, and the §3 filter would skip
+/// it regardless. Once the caps lifetime is extended to span SM detach
+/// windows (a separate PR), the iteration here should re-include
+/// `sm_session_registry.detached_resources_for_user(target)` and route
+/// through `record_stanza_for_detached_bound_resource` on
+/// `DroppedClosed`/`NotConnected` outcomes.
 async fn deliver_to_user_resources(
     state: &WebSocketState,
     target: &BareJid,
@@ -407,41 +439,25 @@ async fn deliver_to_user_resources(
     already_delivered: &mut HashSet<FullJid>,
     metrics: &mut FanOutMetrics,
 ) {
-    let mut resources = state
+    let resources = state
         .deps
         .protocol
         .connection_registry
         .get_resources_for_user(target);
-    match state
-        .deps
-        .protocol
-        .sm_session_registry
-        .detached_resources_for_user(target)
-        .await
-    {
-        Ok(detached) => resources.extend(detached),
-        Err(error) => {
-            warn!(
-                error = %error,
-                target = %target,
-                "Failed to enumerate detached resources for §3 fan-out"
-            );
-        }
-    }
 
     for resource in resources {
         if already_delivered.contains(&resource) {
             continue;
         }
-        let Some(ver) = state
+        let Some(caps_key) = state
             .deps
             .protocol
             .caps_resolver
-            .ver_for_resource(&resource)
+            .key_for_resource(&resource)
         else {
             continue;
         };
-        let Some(cached) = state.deps.protocol.caps_resolver.cached(&ver) else {
+        let Some(cached) = state.deps.protocol.caps_resolver.cached(&caps_key) else {
             continue;
         };
         if !cached

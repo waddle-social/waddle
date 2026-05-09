@@ -132,6 +132,7 @@ pub(super) async fn handle_pubsub_iq(
                             &item,
                             &publish_result.item_id,
                             Some(&user_jid),
+                            phase.bound_jid(),
                         )
                         .await;
                         let response =
