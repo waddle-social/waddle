@@ -190,6 +190,14 @@ impl TestServer {
         format!("ws://127.0.0.1:{}/ws", self.http_port)
     }
 
+    /// Base HTTP URL (no path). Useful for hitting test-only routes
+    /// like `/api/test/profile-publish` that the harness gates on
+    /// `WADDLE_TEST_FIXED_ACCOUNT_ENABLED=true`.
+    #[allow(dead_code)]
+    pub fn http_base_url(&self) -> String {
+        format!("http://127.0.0.1:{}", self.http_port)
+    }
+
     /// The password for the fixed test account (username: "admin").
     #[allow(dead_code)]
     pub fn fixed_account_password(&self) -> &str {

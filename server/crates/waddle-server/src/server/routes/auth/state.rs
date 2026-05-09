@@ -1,4 +1,22 @@
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::OnceLock;
+
 use super::*;
+
+/// RFC 363 PR 3 — typed callback the OIDC callback handler fires
+/// after a successful login to materialize a conformant PEP avatar +
+/// vCard set. Returns immediately; the caller spawns the future so
+/// login latency is unaffected.
+pub type ProfilePublishHook = Arc<
+    dyn Fn(
+            jid::BareJid,
+            crate::profile::ProfileSource,
+        ) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>>
+        + Send
+        + Sync
+        + 'static,
+>;
 
 /// Shared auth state.
 pub struct AuthState {
@@ -20,6 +38,10 @@ pub struct AuthState {
     pub dynamic_oidc_client_locks: Arc<DashMap<String, Arc<Mutex<()>>>>,
     pub permission_actor: ActorRef<PermissionActor>,
     pub bootstrap_membership: BootstrapMembershipConfig,
+    /// Set once at startup after `WebSocketState` exists. The callback
+    /// handler reads it via `profile_publish_hook()` and spawns it on
+    /// every successful OIDC login.
+    profile_publish_hook: OnceLock<ProfilePublishHook>,
 }
 
 impl AuthState {
@@ -57,7 +79,19 @@ impl AuthState {
             dynamic_oidc_client_locks: Arc::new(DashMap::new()),
             permission_actor: app_state.permission_actor.clone(),
             bootstrap_membership: BootstrapMembershipConfig::from_env(),
+            profile_publish_hook: OnceLock::new(),
         }
+    }
+
+    /// Install the profile-publish hook. Idempotent (subsequent calls
+    /// are no-ops). Called at HTTP bootstrap once `WebSocketState` and
+    /// its `pubsub_storage`/`vcard_store` deps exist.
+    pub fn install_profile_publish_hook(&self, hook: ProfilePublishHook) {
+        let _ = self.profile_publish_hook.set(hook);
+    }
+
+    pub fn profile_publish_hook(&self) -> Option<&ProfilePublishHook> {
+        self.profile_publish_hook.get()
     }
 
     async fn resolve_dynamic_oidc_registration(

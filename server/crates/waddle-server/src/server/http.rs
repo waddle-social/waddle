@@ -129,6 +129,12 @@ pub(crate) async fn create_router(
     )
     .await?;
 
+    // RFC 363 PR 3 — install the OIDC → PEP profile bridge hook now
+    // that `WebSocketState` (and its `pubsub_storage`) exists. The
+    // hook captures cheap clones of the deps and runs the publish
+    // chain in a `tokio::spawn` from `auth/callback.rs`.
+    install_profile_publish_hook(&auth_state, websocket_state.clone(), state.clone());
+
     spawn_sm_expiry_janitor(&websocket_state);
     spawn_pending_delivery_claim_janitor(&websocket_state);
     spawn_graceful_shutdown_drain(
@@ -137,7 +143,7 @@ pub(crate) async fn create_router(
         Arc::clone(&drain_complete),
     );
 
-    let websocket_router = routes::websocket::router(websocket_state);
+    let websocket_router = routes::websocket::router(websocket_state.clone());
 
     // Upload router for XEP-0363 HTTP File Upload
     let upload_state = Arc::new(UploadState::new(state.clone()));
@@ -175,6 +181,20 @@ pub(crate) async fn create_router(
         .merge(device_router)
         .merge(xmpp_oauth_router)
         .merge(auth_page_router);
+
+    // RFC 363 PR 3 — test-only profile-publish route. Only mounted
+    // when the test fixed-account flag is set (the same flag the
+    // integration-test harness enables). Production deployments never
+    // see this route.
+    if std::env::var("WADDLE_TEST_FIXED_ACCOUNT_ENABLED")
+        .ok()
+        .as_deref()
+        == Some("true")
+    {
+        router = router.merge(crate::server::profile_publish_route::router(
+            websocket_state.clone(),
+        ));
+    }
 
     // Always merge common routes required by XMPP, auth, upload, and operations.
     let router = router
@@ -290,6 +310,57 @@ async fn create_websocket_state(
         Arc::clone(&websocket_state),
     )));
     Ok(websocket_state)
+}
+
+/// Build the OIDC → PEP profile-publish hook with cheap-clone deps
+/// captured, and install it onto `auth_state`. The hook is invoked
+/// from `auth/callback.rs` after every successful OIDC login (within
+/// `tokio::spawn`, so login latency is unaffected).
+fn install_profile_publish_hook(
+    auth_state: &Arc<AuthState>,
+    websocket_state: Arc<routes::websocket::WebSocketState>,
+    app_state: Arc<AppState>,
+) {
+    use crate::profile::{
+        ensure_pep_profile_published, FetchPolicy, ProfilePublishDeps, ProfileSource,
+    };
+
+    let pubsub_storage = Arc::clone(&websocket_state.deps.protocol.pubsub_storage);
+    let db_actor = app_state.db_pool.global_actor().clone();
+
+    let hook: super::routes::auth::ProfilePublishHook =
+        std::sync::Arc::new(move |jid: jid::BareJid, source: ProfileSource| {
+            let pubsub_storage = Arc::clone(&pubsub_storage);
+            let db_actor = db_actor.clone();
+            Box::pin(async move {
+                let db = match db_actor.ask(crate::db::actor::GetDatabase).await {
+                    Ok(db) => db,
+                    Err(error) => {
+                        warn!(
+                            error = %error,
+                            jid = %jid,
+                            "OIDC profile publish: failed to acquire database; skipping"
+                        );
+                        return;
+                    }
+                };
+                let deps = ProfilePublishDeps {
+                    pubsub_storage,
+                    vcard_store: crate::vcard::VCardStore::new(db.into()),
+                    fetch_policy: FetchPolicy::default(),
+                };
+                if let Err(error) = ensure_pep_profile_published(&deps, &jid, source).await {
+                    warn!(
+                        error = %error,
+                        jid = %jid,
+                        "OIDC profile publish chain failed (background)"
+                    );
+                }
+            })
+                as std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>
+        });
+    auth_state.install_profile_publish_hook(hook);
+    tracing::debug!("OIDC → PEP profile-publish hook installed");
 }
 
 async fn create_sm_session_registry(

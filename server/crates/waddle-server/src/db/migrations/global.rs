@@ -329,12 +329,42 @@ CREATE TABLE private_xml_storage (
 );
 "#;
 
+/// RFC 363 PR 3 — provenance + failure-cache columns for the OIDC →
+/// PEP avatar/FN bridge.
+///
+/// - `avatar_source` distinguishes OIDC-managed avatars (which the
+///   bridge owns and may overwrite/remove on re-login) from
+///   user-self-published avatars (which it must NOT touch).
+/// - `last_avatar_fetch_attempt_at` + `last_avatar_fetch_error` cap
+///   re-attempts after permanent failures (e.g. 4xx, MIME mismatch,
+///   SSRF block) and back off on transient ones.
+pub const V0002_AVATAR_SOURCE_AND_FETCH_CACHE: &str = r#"
+ALTER TABLE users ADD COLUMN avatar_source TEXT NOT NULL DEFAULT 'oidc';
+ALTER TABLE users ADD COLUMN last_avatar_fetch_attempt_at TEXT;
+ALTER TABLE users ADD COLUMN last_avatar_fetch_error TEXT;
+"#;
+
+pub const V0002_AVATAR_SOURCE_AND_FETCH_CACHE_POSTGRES: &str = r#"
+ALTER TABLE users ADD COLUMN avatar_source TEXT NOT NULL DEFAULT 'oidc';
+ALTER TABLE users ADD COLUMN last_avatar_fetch_attempt_at TEXT;
+ALTER TABLE users ADD COLUMN last_avatar_fetch_error TEXT;
+"#;
+
 /// Get all global migrations in order
 pub fn all() -> Vec<Migration> {
-    vec![Migration {
-        version: 1,
-        description: "Hard-cut auth broker schema with roster pre-approval".to_string(),
-        sql_sqlite: V0001_AUTH_BROKER_SCHEMA,
-        sql_postgres: V0001_AUTH_BROKER_SCHEMA_POSTGRES,
-    }]
+    vec![
+        Migration {
+            version: 1,
+            description: "Hard-cut auth broker schema with roster pre-approval".to_string(),
+            sql_sqlite: V0001_AUTH_BROKER_SCHEMA,
+            sql_postgres: V0001_AUTH_BROKER_SCHEMA_POSTGRES,
+        },
+        Migration {
+            version: 2,
+            description: "RFC 363 PR 3: avatar_source + fetch failure-cache columns on users"
+                .to_string(),
+            sql_sqlite: V0002_AVATAR_SOURCE_AND_FETCH_CACHE,
+            sql_postgres: V0002_AVATAR_SOURCE_AND_FETCH_CACHE_POSTGRES,
+        },
+    ]
 }

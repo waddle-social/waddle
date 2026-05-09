@@ -7,6 +7,7 @@ mod extension_host_tools;
 mod fixed_account;
 mod health;
 mod http;
+pub(crate) mod profile_publish_route;
 mod session_janitors;
 mod state;
 mod topology;

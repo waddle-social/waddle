@@ -43,7 +43,7 @@ mod callback;
 mod state;
 
 use callback::callback_handler;
-pub use state::AuthState;
+pub use state::{AuthState, ProfilePublishHook};
 
 #[derive(Debug, Clone)]
 pub struct PendingAuthorization {
