@@ -303,6 +303,7 @@ const extensionLauncher = useExtensionLauncher({
 const extensionLauncherOpen = extensionLauncher.open;
 const extensionLauncherState = extensionLauncher.state;
 const extensionLauncherDetail = extensionLauncher.detail;
+const allDiscoveredCommands = extensionLauncher.commands;
 const availableExtensionCommands = extensionLauncher.availableCommands;
 const extensionCommandStates = extensionLauncher.commandStates;
 const extensionCommandForms = extensionLauncher.commandForms;
@@ -313,6 +314,25 @@ const updateExtensionCommandField = extensionLauncher.updateField;
 const resetExtensionLauncherState = extensionLauncher.reset;
 const submitExtensionCommandForm = extensionLauncher.submitForm;
 const invokeCommandResultAction = extensionLauncher.invokeResultAction;
+async function dispatchSlashCommand(
+  invocation: Parameters<typeof extensionLauncher.dispatchSlashInvocation>[0],
+): Promise<boolean> {
+  const ok = await extensionLauncher.dispatchSlashInvocation(invocation);
+  if (ok) {
+    draft.value = "";
+    if (isForumChannel.value) forumTitle.value = "";
+  }
+  return ok;
+}
+const inMucContext = computed(() => !!props.roomJid);
+
+watch(
+  () => props.xmppClient,
+  (client) => {
+    if (client) void extensionLauncher.ensureDiscovered();
+  },
+  { immediate: true },
+);
 const showSearch = ref(false);
 const searchInput = ref("");
 const searchSubmitted = ref(false);
@@ -901,6 +921,9 @@ function dayDividerLabel(createdAt: string): string {
       :replying-to="replyingTo"
       :is-top-pinned="true"
       :extensions-open="extensionLauncherOpen"
+      :slash-commands="allDiscoveredCommands"
+      :in-muc="inMucContext"
+      :dispatch-slash-command="dispatchSlashCommand"
       @send="onSend"
       @cancel-reply="cancelReply"
       @typing="emit('typing')"
@@ -1120,6 +1143,9 @@ function dayDividerLabel(createdAt: string): string {
       :upload-progress="uploadProgress"
       :replying-to="replyingTo"
       :extensions-open="extensionLauncherOpen"
+      :slash-commands="allDiscoveredCommands"
+      :in-muc="inMucContext"
+      :dispatch-slash-command="dispatchSlashCommand"
       @send="onSend"
       @cancel-reply="cancelReply"
       @typing="emit('typing')"

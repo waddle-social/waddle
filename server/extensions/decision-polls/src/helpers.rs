@@ -151,6 +151,8 @@ pub(super) fn command_descriptor(
     node: &str,
     name: &str,
     scope: types::CommandScope,
+    composer_prefix: Option<&str>,
+    inline_field: Option<&str>,
 ) -> types::CommandDescriptor {
     types::CommandDescriptor {
         node: types::CommandNode {
@@ -158,6 +160,8 @@ pub(super) fn command_descriptor(
         },
         name: display(name),
         scope,
+        composer_prefix: composer_prefix.map(str::to_string),
+        inline_field: inline_field.map(str::to_string),
     }
 }
 

@@ -28,11 +28,15 @@ pub(super) fn manifest() -> types::ExtensionManifest {
                 COMMAND_NODE,
                 "Create Decision Poll",
                 types::CommandScope::Channel,
+                Some("poll"),
+                None,
             ),
             command_descriptor(
                 INVOKE_NODE,
                 "Run Decision Poll action",
                 types::CommandScope::Channel,
+                None,
+                None,
             ),
         ],
         routes: vec![types::ExtensionRouteDescriptor {

@@ -90,7 +90,7 @@ pub(super) fn extension_command_metadata_form(
 ) -> Element {
     use waddle_xmpp::xep::xep0004::{DataForm, Field, FormType, IntoElement};
 
-    DataForm::new(FormType::Result)
+    let mut form = DataForm::new(FormType::Result)
         .add_field(Field::form_type(EXTENSION_COMMAND_FORM_TYPE))
         .add_field(Field::text_single("waddle#plugin_id", plugin.as_str()))
         .add_field(Field::text_single(
@@ -104,6 +104,113 @@ pub(super) fn extension_command_metadata_form(
         .add_field(Field::text_single(
             "waddle#command_scope",
             descriptor.scope.as_str(),
-        ))
-        .into_element()
+        ));
+    if let Some(prefix) = descriptor.composer_prefix.as_deref() {
+        form = form.add_field(Field::text_single("waddle#composer_prefix", prefix));
+    }
+    if let Some(field_name) = descriptor.inline_field.as_deref() {
+        form = form.add_field(Field::text_single("waddle#inline_field", field_name));
+    }
+    form.into_element()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn descriptor(
+        node: &str,
+        scope: waddle_extensions::CommandScope,
+        composer_prefix: Option<&str>,
+        inline_field: Option<&str>,
+    ) -> waddle_extensions::CommandDescriptor {
+        waddle_extensions::CommandDescriptor {
+            node: waddle_extensions::CommandNode::new(node).expect("command node"),
+            name: waddle_extensions::DisplayText::new("Test Command").expect("display text"),
+            scope,
+            composer_prefix: composer_prefix.map(str::to_string),
+            inline_field: inline_field.map(str::to_string),
+        }
+    }
+
+    fn plugin(id: &str) -> waddle_extensions::PluginId {
+        waddle_extensions::PluginId::new(id).expect("plugin id")
+    }
+
+    fn field_value(form: &Element, var: &str) -> Option<String> {
+        form.children()
+            .filter(|c| c.name() == "field")
+            .find_map(|field| {
+                (field.attr("var") == Some(var)).then(|| {
+                    field
+                        .get_child("value", "jabber:x:data")
+                        .map(|v| v.text())
+                        .unwrap_or_default()
+                })
+            })
+    }
+
+    fn has_field(form: &Element, var: &str) -> bool {
+        form.children()
+            .filter(|c| c.name() == "field")
+            .any(|field| field.attr("var") == Some(var))
+    }
+
+    #[test]
+    fn command_metadata_form_omits_composer_prefix_when_descriptor_has_none() {
+        let form = extension_command_metadata_form(
+            &plugin("decision-polls"),
+            &descriptor(
+                "urn:waddle:extension:1:invoke",
+                waddle_extensions::CommandScope::Channel,
+                None,
+                None,
+            ),
+        );
+        assert!(!has_field(&form, "waddle#composer_prefix"));
+        assert!(!has_field(&form, "waddle#inline_field"));
+        assert_eq!(
+            field_value(&form, "waddle#command_scope").as_deref(),
+            Some("channel"),
+        );
+    }
+
+    #[test]
+    fn command_metadata_form_serializes_composer_prefix_and_inline_field() {
+        let form = extension_command_metadata_form(
+            &plugin("ai-chatbot"),
+            &descriptor(
+                "urn:waddle:extension:1:ai-chatbot",
+                waddle_extensions::CommandScope::Global,
+                Some("ai"),
+                Some("prompt"),
+            ),
+        );
+        assert_eq!(
+            field_value(&form, "waddle#composer_prefix").as_deref(),
+            Some("ai"),
+        );
+        assert_eq!(
+            field_value(&form, "waddle#inline_field").as_deref(),
+            Some("prompt"),
+        );
+    }
+
+    #[test]
+    fn command_metadata_form_includes_composer_prefix_without_inline_field() {
+        let form = extension_command_metadata_form(
+            &plugin("decision-polls"),
+            &descriptor(
+                "urn:waddle:extension:1:decision-polls",
+                waddle_extensions::CommandScope::Channel,
+                Some("poll"),
+                None,
+            ),
+        );
+        assert_eq!(
+            field_value(&form, "waddle#composer_prefix").as_deref(),
+            Some("poll"),
+        );
+        assert!(!has_field(&form, "waddle#inline_field"));
+    }
 }

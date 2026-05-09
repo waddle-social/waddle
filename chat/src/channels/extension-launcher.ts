@@ -10,6 +10,7 @@ import {
   type ExtensionCommandFormField,
   type ExtensionCommandResult,
 } from "@/lib/xmpp/extension-commands";
+import type { SlashInvocation } from "@/lib/slash-dispatch";
 
 type ExtensionLauncherState = "idle" | "loading" | "error";
 type ExtensionCommandUiState = "loading" | "success" | "warning" | "error";
@@ -83,26 +84,45 @@ export function useExtensionLauncher(input: {
     commandForms.value = nextForms;
   }
 
+  let discoveryPromise: Promise<void> | null = null;
+  let discoveryAttempted = false;
+  async function ensureDiscovered() {
+    if (commands.value.length > 0 || discoveryAttempted) return;
+    if (discoveryPromise) {
+      await discoveryPromise;
+      return;
+    }
+    const client = input.xmppClient.value;
+    if (!client) return;
+    state.value = "loading";
+    detail.value = "";
+    discoveryPromise = (async () => {
+      try {
+        commands.value = await client.discoverExtensionCommands();
+        discoveryAttempted = true;
+        state.value = "idle";
+        if (commands.value.length === 0) detail.value = "No extension commands discovered.";
+      } catch (error) {
+        state.value = "error";
+        detail.value = error instanceof Error ? error.message : "Could not discover extension commands.";
+      } finally {
+        discoveryPromise = null;
+      }
+    })();
+    await discoveryPromise;
+  }
+
   async function toggle() {
     open.value = !open.value;
     if (open.value) void nextTick(input.focusPalette);
-    if (!open.value || commands.value.length > 0) return;
+    if (!open.value) return;
     const client = input.xmppClient.value;
     if (!client) {
       state.value = "error";
       detail.value = "Extensions are unavailable while XMPP is disconnected.";
       return;
     }
-    state.value = "loading";
-    detail.value = "";
-    try {
-      commands.value = await client.discoverExtensionCommands();
-      state.value = "idle";
-      if (commands.value.length === 0) detail.value = "No extension commands discovered.";
-    } catch (error) {
-      state.value = "error";
-      detail.value = error instanceof Error ? error.message : "Could not discover extension commands.";
-    }
+    await ensureDiscovered();
   }
 
   async function invokeCommand(command: DiscoveredExtensionCommand) {
@@ -147,6 +167,7 @@ export function useExtensionLauncher(input: {
     commandStates.value = {};
     commandForms.value = {};
     commandActions.value = {};
+    discoveryAttempted = false;
   }
 
   async function submitForm(command: DiscoveredExtensionCommand, action: ExtensionCommandAction = "complete") {
@@ -165,6 +186,68 @@ export function useExtensionLauncher(input: {
         ...commandStates.value,
         [key]: { state: "error", detail: error instanceof Error ? error.message : "Extension form submission failed." },
       };
+    }
+  }
+
+  async function dispatchSlashInvocation(invocation: SlashInvocation): Promise<boolean> {
+    const client = input.xmppClient.value;
+    if (!client) {
+      state.value = "error";
+      detail.value = "Extensions are unavailable while XMPP is disconnected.";
+      open.value = true;
+      void nextTick(input.focusPalette);
+      return false;
+    }
+    const command = invocation.command;
+    const key = command.node;
+    const wantsPalette = invocation.kind === "open-palette";
+
+    clearCommandSurfaces(key);
+    commandStates.value = { ...commandStates.value, [key]: { state: "loading" } };
+    if (wantsPalette) {
+      open.value = true;
+      void nextTick(input.focusPalette);
+    }
+
+    try {
+      const result = await client.invokeExtensionCommand(command);
+      storeResultSurfaces(key, result);
+      const form = commandForms.value[key];
+
+      if (invocation.kind === "open-palette") {
+        commandStates.value = { ...commandStates.value, [key]: extensionCommandOutcome(result) };
+        if (invocation.prefillFirstRequired && form) {
+          const target = form.fields.find((field) => field.required && !field.hidden);
+          if (target) {
+            updateField(key, target.name, [invocation.prefillFirstRequired]);
+          }
+        }
+        return true;
+      }
+
+      // inline-submit only stays inline if the server returned a single-stage
+      // form whose advertised XEP-0050 actions include `complete`. Otherwise
+      // fall back to the palette so the user can drive the multi-stage flow.
+      const allowed = form?.actions ?? [];
+      if (form && allowed.includes("complete")) {
+        updateField(key, invocation.fieldName, [invocation.value]);
+        await submitForm(command, "complete");
+        return true;
+      }
+
+      commandStates.value = { ...commandStates.value, [key]: extensionCommandOutcome(result) };
+      if (form) {
+        updateField(key, invocation.fieldName, [invocation.value]);
+        open.value = true;
+        void nextTick(input.focusPalette);
+      }
+      return true;
+    } catch (error) {
+      commandStates.value = {
+        ...commandStates.value,
+        [key]: { state: "error", detail: error instanceof Error ? error.message : "Extension command failed." },
+      };
+      return false;
     }
   }
 
@@ -196,10 +279,12 @@ export function useExtensionLauncher(input: {
     commandActions,
     close,
     toggle,
+    ensureDiscovered,
     invokeCommand,
     updateField,
     reset,
     submitForm,
     invokeResultAction,
+    dispatchSlashInvocation,
   };
 }

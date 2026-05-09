@@ -79,6 +79,8 @@ fn sample_manifest() -> ExtensionManifest {
             node: CommandNode::new("urn:waddle:extension:1:task-widget").expect("command node"),
             name: text("Task Widget"),
             scope: CommandScope::Global,
+            composer_prefix: None,
+            inline_field: None,
         }],
         routes: Vec::new(),
         pubsub_nodes: vec![id!(
