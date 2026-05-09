@@ -227,6 +227,10 @@ fn test_caps_from_element_missing_attrs() {
     assert!(Caps::from_element(&elem).is_none());
 }
 
+fn key(hash: &str, ver: &str) -> super::CapsCacheKey {
+    super::CapsCacheKey::new(hash, ver)
+}
+
 #[test]
 fn test_caps_cache_insert_and_get() {
     let cache = CapsCache::new();
@@ -235,11 +239,36 @@ fn test_caps_cache_insert_and_get() {
         vec![Feature::disco_info()],
     );
 
-    cache.insert("test-hash", info.clone());
+    cache.insert(key("sha-1", "test-hash"), info.clone());
 
-    let retrieved = cache.get("test-hash").unwrap();
+    let retrieved = cache.get(&key("sha-1", "test-hash")).unwrap();
     assert_eq!(retrieved.identities.len(), 1);
     assert_eq!(retrieved.features.len(), 1);
+}
+
+#[test]
+fn test_caps_cache_keys_are_per_hash_algo() {
+    // XEP-0115 §6: caching MUST be per `(hash algorithm, ver)`. Two
+    // entries with identical `ver` but different `hash` MUST coexist.
+    let cache = CapsCache::new();
+    let sha1_info = CachedDiscoInfo::new(vec![Identity::server(Some("sha-1"))], vec![]);
+    let sha256_info = CachedDiscoInfo::new(vec![Identity::server(Some("sha-256"))], vec![]);
+
+    cache.insert(key("sha-1", "samever"), sha1_info);
+    cache.insert(key("sha-256", "samever"), sha256_info);
+
+    assert_eq!(
+        cache.get(&key("sha-1", "samever")).unwrap().identities[0]
+            .name
+            .as_deref(),
+        Some("sha-1")
+    );
+    assert_eq!(
+        cache.get(&key("sha-256", "samever")).unwrap().identities[0]
+            .name
+            .as_deref(),
+        Some("sha-256")
+    );
 }
 
 #[test]
@@ -247,9 +276,9 @@ fn test_caps_cache_contains() {
     let cache = CapsCache::new();
     let info = CachedDiscoInfo::new(vec![], vec![]);
 
-    assert!(!cache.contains("hash1"));
-    cache.insert("hash1", info);
-    assert!(cache.contains("hash1"));
+    assert!(!cache.contains(&key("sha-1", "hash1")));
+    cache.insert(key("sha-1", "hash1"), info);
+    assert!(cache.contains(&key("sha-1", "hash1")));
 }
 
 #[test]
@@ -257,12 +286,12 @@ fn test_caps_cache_remove() {
     let cache = CapsCache::new();
     let info = CachedDiscoInfo::new(vec![], vec![]);
 
-    cache.insert("hash1", info);
-    assert!(cache.contains("hash1"));
+    cache.insert(key("sha-1", "hash1"), info);
+    assert!(cache.contains(&key("sha-1", "hash1")));
 
-    let removed = cache.remove("hash1");
+    let removed = cache.remove(&key("sha-1", "hash1"));
     assert!(removed.is_some());
-    assert!(!cache.contains("hash1"));
+    assert!(!cache.contains(&key("sha-1", "hash1")));
 }
 
 #[test]
@@ -272,14 +301,31 @@ fn test_caps_cache_len_and_clear() {
     assert_eq!(cache.len(), 0);
     assert!(cache.is_empty());
 
-    cache.insert("h1", CachedDiscoInfo::new(vec![], vec![]));
-    cache.insert("h2", CachedDiscoInfo::new(vec![], vec![]));
+    cache.insert(key("sha-1", "h1"), CachedDiscoInfo::new(vec![], vec![]));
+    cache.insert(key("sha-1", "h2"), CachedDiscoInfo::new(vec![], vec![]));
 
     assert_eq!(cache.len(), 2);
     assert!(!cache.is_empty());
 
     cache.clear();
     assert!(cache.is_empty());
+}
+
+#[test]
+fn test_caps_cache_lru_eviction_at_capacity() {
+    // Bounded LRU prevents unbounded memory growth (PR 438 review #15).
+    let cache = CapsCache::with_capacity(2);
+    cache.insert(key("sha-1", "a"), CachedDiscoInfo::new(vec![], vec![]));
+    cache.insert(key("sha-1", "b"), CachedDiscoInfo::new(vec![], vec![]));
+    // Touch "a" so "b" becomes LRU.
+    let _ = cache.get(&key("sha-1", "a"));
+    cache.insert(key("sha-1", "c"), CachedDiscoInfo::new(vec![], vec![]));
+    assert!(cache.contains(&key("sha-1", "a")));
+    assert!(
+        !cache.contains(&key("sha-1", "b")),
+        "LRU eviction MUST drop b"
+    );
+    assert!(cache.contains(&key("sha-1", "c")));
 }
 
 #[test]

@@ -7,6 +7,11 @@ pub struct AuthState {
     pub providers: ProviderRegistry,
     pub base_url: String,
     pub xmpp_domain: String,
+    /// Pre-parsed XMPP domain JID for server-issued IQ stanzas
+    /// (e.g. XEP-0115 caps disco#info queries). Validated at startup
+    /// so downstream construction sites cannot panic on a malformed
+    /// `WADDLE_XMPP_DOMAIN` value at runtime.
+    pub caps_server_domain: crate::server::caps_resolution::ServerDomainJid,
     pub http_client: reqwest::Client,
     pub pending_auth: Arc<DashMap<String, PendingAuthorization>>,
     pub device_auth: Arc<DashMap<String, DeviceAuthorization>>,
@@ -29,13 +34,21 @@ impl AuthState {
         let providers = ProviderRegistry::new(server_config.auth.providers.clone())
             .unwrap_or_else(|e| panic!("invalid provider config at startup: {}", e));
 
+        let xmpp_domain =
+            std::env::var("WADDLE_XMPP_DOMAIN").unwrap_or_else(|_| "localhost".to_string());
+        let caps_server_domain = crate::server::caps_resolution::ServerDomainJid::parse(
+            &xmpp_domain,
+        )
+        .unwrap_or_else(|error| {
+            panic!("WADDLE_XMPP_DOMAIN={xmpp_domain:?} is not a valid JID at startup: {error}")
+        });
         Self {
             session_manager,
             identity_service,
             providers,
             base_url: server_config.base_url.trim_end_matches('/').to_string(),
-            xmpp_domain: std::env::var("WADDLE_XMPP_DOMAIN")
-                .unwrap_or_else(|_| "localhost".to_string()),
+            xmpp_domain,
+            caps_server_domain,
             http_client: reqwest::Client::new(),
             pending_auth: Arc::new(DashMap::new()),
             device_auth: Arc::new(DashMap::new()),

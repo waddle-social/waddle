@@ -219,10 +219,17 @@ async fn broadcast_presence_to_subscribers(
 /// XEP-0115: drive caps resolution for an inbound `<presence>`
 /// carrying `<c hash node ver/>`.
 ///
-/// - Cache hit: record the per-resource ver mapping so the next
-///   PEP fan-out (PR 2) can filter by feature list.
-/// - Cache miss: send the resource a typed disco#info IQ get with
-///   `node="<NODE>#<VER>"` per §6.2 and remember the in-flight ver.
+/// - Cache hit on `(hash, ver)`: record the per-resource mapping so
+///   the next PEP fan-out (PR 2) can filter by feature list.
+/// - Cache miss with supported `hash`: send the resource a typed
+///   disco#info IQ get with `node="<NODE>#<VER>"` per §6.2 and remember
+///   the in-flight ver. If the outbound write fails (resource just
+///   went offline / channel closed) the pending entry is immediately
+///   evicted so the in-memory pending map cannot leak.
+/// - Cache miss with unsupported `hash` (e.g. `sha-256`): per §5.4
+///   step 2 the server MUST NOT cache. We additionally skip the
+///   round-trip entirely — fan-out will treat this resource as
+///   "caps unknown" until it next advertises with a supported algo.
 async fn resolve_caps_for_presence(
     state: &WebSocketState,
     sender_jid: &FullJid,
@@ -232,24 +239,46 @@ async fn resolve_caps_for_presence(
         return;
     };
     let resolver = &state.deps.protocol.caps_resolver;
-    if resolver.cache().contains(&caps.ver) {
-        resolver.record_resource(sender_jid, &caps.ver);
+    let cache_key = waddle_xmpp::xep::xep0115::CapsCacheKey::from_caps(&caps);
+    if resolver.cache().contains(&cache_key) {
+        resolver.record_resource(sender_jid, cache_key);
+        return;
+    }
+    if !crate::server::caps_resolution::is_supported_hash(&caps.hash) {
+        debug!(
+            jid = %sender_jid,
+            hash = %caps.hash,
+            "Skipping caps resolution: advertised hash algorithm not implemented (XEP-0115 §5.4 step 2)"
+        );
         return;
     }
     let iq_id = format!("waddle-caps-disco-{}", uuid::Uuid::new_v4());
     let iq = build_caps_disco_info_query(
-        &state.deps.auth_state.xmpp_domain,
+        &state.deps.auth_state.caps_server_domain,
         sender_jid,
         &caps,
         &iq_id,
     );
-    resolver.begin_pending(iq_id, sender_jid.clone(), caps);
-    let _ = state
+    resolver.begin_pending(iq_id.clone(), sender_jid.clone(), caps);
+    let send_outcome = state
         .deps
         .protocol
         .connection_registry
         .send_to(sender_jid, Stanza::Iq(iq))
         .await;
+    if !send_outcome.is_sent() {
+        // PR #438 review issue #5: if the recipient already
+        // disconnected between the presence-receipt and the
+        // disco#info IQ write, evict the orphan pending entry
+        // immediately rather than waiting for the next disconnect
+        // event.
+        debug!(
+            jid = %sender_jid,
+            iq_id = %iq_id,
+            "Caps disco#info send failed; evicting orphaned pending entry"
+        );
+        let _ = resolver.take_pending(&iq_id);
+    }
 }
 
 pub(super) fn show_name(show: &xmpp_parsers::presence::Show) -> &'static str {

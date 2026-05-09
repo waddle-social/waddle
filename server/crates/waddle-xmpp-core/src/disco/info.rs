@@ -136,6 +136,13 @@ const NS_DATA_FORMS: &str = "jabber:x:data";
 /// Surfaces identities, features, and any XEP-0128 `<x/>` extension
 /// elements verbatim so XEP-0115 §5.4 hash recomputation can run
 /// against the full input that produced the advertised `ver`.
+///
+/// `ill_formed` is true when the response violates one of XEP-0115
+/// §5.4 step 2.4's well-formedness rules — duplicate identities,
+/// duplicate features, or multi-FORM_TYPE extension forms. The
+/// parser still surfaces what it could read so callers can log
+/// diagnostics, but XEP-0115 verification MUST treat such a reply
+/// as invalid (do not cache).
 #[derive(Debug, Clone)]
 pub struct DiscoInfoResponse {
     pub node: Option<String>,
@@ -144,6 +151,7 @@ pub struct DiscoInfoResponse {
     /// XEP-0128 service-discovery extension forms preserved verbatim
     /// (typically `<x xmlns="jabber:x:data" type="result">…</x>`).
     pub extensions: Vec<Element>,
+    pub ill_formed: bool,
 }
 
 /// Parse the `<query/>` element of a disco#info IQ result into typed
@@ -159,6 +167,13 @@ pub fn parse_disco_info_response(query: &Element) -> Result<DiscoInfoResponse, C
     let mut identities = Vec::new();
     let mut features = Vec::new();
     let mut extensions = Vec::new();
+    // §5.4 step 2.4 well-formedness tracking: duplicate identity
+    // tuples (category, type, xml:lang, name), duplicate feature
+    // vars, or multi-FORM_TYPE forms invalidate the entire response.
+    let mut seen_identities: std::collections::HashSet<(String, String, String, String)> =
+        std::collections::HashSet::new();
+    let mut seen_features: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut ill_formed = false;
 
     for child in query.children() {
         let child_ns = child.ns();
@@ -182,6 +197,15 @@ pub fn parse_disco_info_response(query: &Element) -> Result<DiscoInfoResponse, C
                     .to_string();
                 let lang = child.attr("xml:lang").map(str::to_string);
                 let name = child.attr("name").map(str::to_string);
+                let key = (
+                    category.clone(),
+                    type_.clone(),
+                    lang.clone().unwrap_or_default(),
+                    name.clone().unwrap_or_default(),
+                );
+                if !seen_identities.insert(key) {
+                    ill_formed = true;
+                }
                 identities.push(Identity {
                     category,
                     type_,
@@ -193,9 +217,15 @@ pub fn parse_disco_info_response(query: &Element) -> Result<DiscoInfoResponse, C
                 let var = child.attr("var").ok_or_else(|| {
                     CoreError::bad_request(Some("disco#info <feature/> missing var".to_string()))
                 })?;
+                if !seen_features.insert(var.to_string()) {
+                    ill_formed = true;
+                }
                 features.push(Feature::new(var));
             }
             ("x", NS_DATA_FORMS) => {
+                if has_multiple_form_types(child) {
+                    ill_formed = true;
+                }
                 extensions.push(child.clone());
             }
             _ => {}
@@ -207,7 +237,30 @@ pub fn parse_disco_info_response(query: &Element) -> Result<DiscoInfoResponse, C
         identities,
         features,
         extensions,
+        ill_formed,
     })
+}
+
+/// XEP-0115 §5.4 step 2.4: a `<x type="result"/>` form with more than
+/// one FORM_TYPE field — or one FORM_TYPE field carrying more than
+/// one `<value/>` — is malformed. Either case invalidates the whole
+/// disco#info response.
+fn has_multiple_form_types(form: &Element) -> bool {
+    let mut form_type_fields = 0;
+    let mut form_type_values = 0;
+    for field in form.children().filter(|c| {
+        c.name() == "field" && c.ns() == NS_DATA_FORMS && c.attr("var") == Some("FORM_TYPE")
+    }) {
+        form_type_fields += 1;
+        for value in field
+            .children()
+            .filter(|c| c.name() == "value" && c.ns() == NS_DATA_FORMS)
+        {
+            form_type_values += 1;
+            let _ = value;
+        }
+    }
+    form_type_fields > 1 || form_type_values > 1
 }
 
 /// Build a disco#info response IQ.

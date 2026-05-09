@@ -15,7 +15,6 @@
 //! - <https://xmpp.org/extensions/xep-0115.html>
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
-use dashmap::DashMap;
 use minidom::Element;
 use sha1::{Digest, Sha1};
 use std::sync::Arc;
@@ -107,13 +106,51 @@ impl CachedDiscoInfo {
     }
 }
 
+/// Composite cache key that XEP-0115 §6 mandates: caching is per
+/// `(hash algorithm, verification string)`. Two clients advertising
+/// the same opaque `ver` under different hash families MUST not
+/// collide in the cache.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct CapsCacheKey {
+    pub hash: String,
+    pub ver: String,
+}
+
+impl CapsCacheKey {
+    pub fn new(hash: impl Into<String>, ver: impl Into<String>) -> Self {
+        Self {
+            hash: hash.into(),
+            ver: ver.into(),
+        }
+    }
+
+    pub fn from_caps(caps: &Caps) -> Self {
+        Self::new(caps.hash.clone(), caps.ver.clone())
+    }
+}
+
+/// Default soft cap on cached `(hash, ver)` entries before the
+/// least-recently-used entry is evicted. XEP-0115 §6 RECOMMENDS
+/// long-lived caching, but unbounded growth from rotating client
+/// versions is operationally untenable. 10k entries is generous
+/// for typical deployments and bounded.
+pub const DEFAULT_CAPS_CACHE_CAPACITY: usize = 10_000;
+
 /// Cache for entity capabilities.
 ///
-/// Maps verification hashes to disco#info responses for efficient lookups.
-#[derive(Debug, Clone)]
+/// Keyed on `(hash, ver)` per XEP-0115 §6. Bounded by an LRU policy
+/// so a long-lived server with rotating client populations doesn't
+/// grow without bound.
+#[derive(Clone)]
 pub struct CapsCache {
-    /// Map from verification hash to disco#info data
-    cache: Arc<DashMap<String, CachedDiscoInfo>>,
+    inner: Arc<std::sync::Mutex<lru::LruCache<CapsCacheKey, CachedDiscoInfo>>>,
+}
+
+impl std::fmt::Debug for CapsCache {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let len = self.inner.lock().map(|g| g.len()).unwrap_or_default();
+        f.debug_struct("CapsCache").field("len", &len).finish()
+    }
 }
 
 impl Default for CapsCache {
@@ -123,47 +160,73 @@ impl Default for CapsCache {
 }
 
 impl CapsCache {
-    /// Create a new empty capabilities cache.
+    /// Create a new empty capabilities cache with the default LRU
+    /// capacity (`DEFAULT_CAPS_CACHE_CAPACITY`).
     pub fn new() -> Self {
+        Self::with_capacity(DEFAULT_CAPS_CACHE_CAPACITY)
+    }
+
+    /// Create a new empty capabilities cache with a custom LRU
+    /// capacity. Use this in tests to exercise the eviction policy.
+    pub fn with_capacity(capacity: usize) -> Self {
+        let cap =
+            std::num::NonZeroUsize::new(capacity.max(1)).expect("max(1) above guarantees nonzero");
         Self {
-            cache: Arc::new(DashMap::new()),
+            inner: Arc::new(std::sync::Mutex::new(lru::LruCache::new(cap))),
         }
     }
 
-    /// Store disco#info for a capabilities hash.
-    pub fn insert(&self, hash: &str, info: CachedDiscoInfo) {
-        debug!(hash = %hash, identities = info.identities.len(), features = info.features.len(), "Caching caps");
-        self.cache.insert(hash.to_string(), info);
+    /// Store disco#info for a (hash, ver) tuple. Evicts the LRU entry
+    /// if at capacity.
+    pub fn insert(&self, key: CapsCacheKey, info: CachedDiscoInfo) {
+        debug!(
+            hash = %key.hash,
+            ver = %key.ver,
+            identities = info.identities.len(),
+            features = info.features.len(),
+            "Caching caps"
+        );
+        if let Ok(mut guard) = self.inner.lock() {
+            guard.put(key, info);
+        }
     }
 
-    /// Retrieve cached disco#info for a capabilities hash.
-    pub fn get(&self, hash: &str) -> Option<CachedDiscoInfo> {
-        self.cache.get(hash).map(|entry| entry.value().clone())
+    /// Retrieve cached disco#info, refreshing LRU recency.
+    pub fn get(&self, key: &CapsCacheKey) -> Option<CachedDiscoInfo> {
+        self.inner
+            .lock()
+            .ok()
+            .and_then(|mut guard| guard.get(key).cloned())
     }
 
-    /// Check if a capabilities hash is cached.
-    pub fn contains(&self, hash: &str) -> bool {
-        self.cache.contains_key(hash)
+    /// Non-recency-affecting presence check.
+    pub fn contains(&self, key: &CapsCacheKey) -> bool {
+        self.inner
+            .lock()
+            .ok()
+            .map(|guard| guard.contains(key))
+            .unwrap_or(false)
     }
 
     /// Remove a cached entry.
-    pub fn remove(&self, hash: &str) -> Option<CachedDiscoInfo> {
-        self.cache.remove(hash).map(|(_, v)| v)
+    pub fn remove(&self, key: &CapsCacheKey) -> Option<CachedDiscoInfo> {
+        self.inner.lock().ok().and_then(|mut guard| guard.pop(key))
     }
 
-    /// Get the number of cached entries.
+    /// Number of cached entries.
     pub fn len(&self) -> usize {
-        self.cache.len()
+        self.inner.lock().map(|guard| guard.len()).unwrap_or(0)
     }
 
-    /// Check if the cache is empty.
     pub fn is_empty(&self) -> bool {
-        self.cache.is_empty()
+        self.len() == 0
     }
 
     /// Clear all cached entries.
     pub fn clear(&self) {
-        self.cache.clear();
+        if let Ok(mut guard) = self.inner.lock() {
+            guard.clear();
+        }
     }
 }
 

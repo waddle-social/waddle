@@ -70,6 +70,71 @@ fn caps_verification_string(
     compute_caps_hash(&identities, &features)
 }
 
+/// XEP-0115 §5.1 with one XEP-0128 form. The wire-test for the
+/// software-info form path needs the server's hash to incorporate
+/// the form so the verification matches.
+fn caps_verification_string_with_softwareinfo_form(
+    identity_category: &str,
+    identity_type: &str,
+    identity_name: &str,
+    features: &[&str],
+    form_type: &str,
+    software: &str,
+) -> String {
+    use waddle_xmpp::disco::info::{Feature, Identity};
+    use waddle_xmpp::xep::xep0115::compute_caps_hash_with_extensions;
+    use xmpp_parsers::minidom::Element;
+
+    let identities = vec![Identity::new(
+        identity_category,
+        identity_type,
+        Some(identity_name),
+    )];
+    let features: Vec<Feature> = features.iter().map(|f| Feature::new(f)).collect();
+    let form = Element::builder("x", "jabber:x:data")
+        .attr("type", "result")
+        .append(
+            Element::builder("field", "jabber:x:data")
+                .attr("var", "FORM_TYPE")
+                .attr("type", "hidden")
+                .append(
+                    Element::builder("value", "jabber:x:data")
+                        .append(form_type)
+                        .build(),
+                )
+                .build(),
+        )
+        .append(
+            Element::builder("field", "jabber:x:data")
+                .attr("var", "software")
+                .append(
+                    Element::builder("value", "jabber:x:data")
+                        .append(software)
+                        .build(),
+                )
+                .build(),
+        )
+        .build();
+    compute_caps_hash_with_extensions(&identities, &features, std::slice::from_ref(&form))
+}
+
+/// Send a ping IQ and wait for its result. Used as a deterministic
+/// FIFO anchor for "MUST NOT receive frame X" assertions: anything
+/// that would have arrived before the ping reply has been emitted
+/// by the server when the ping result lands.
+async fn ping_anchor(client: &mut WsXmppClient, id: &str) {
+    client
+        .send(&format!(
+            r#"<iq xmlns="jabber:client" type="get" id="{id}"><ping xmlns="urn:xmpp:ping"/></iq>"#
+        ))
+        .await
+        .expect("send ping");
+    let _ = client
+        .recv_matching(|frame| frame.contains(&format!(r#"id="{id}""#)) && frame.contains("<iq"))
+        .await
+        .expect("ping result");
+}
+
 // ============================================================================
 // Test 1 — caps_unknown_ver_triggers_disco_info_to_full_jid
 // ============================================================================
@@ -444,4 +509,240 @@ async fn caps_cache_survives_publisher_disconnect_for_cross_session_reuse() {
     );
 
     let _ = admin2.close().await;
+}
+
+// ============================================================================
+// Test 5 — caps_reply_with_xep0128_form_verifies_and_caches
+// ============================================================================
+//
+// XEP-0128 / XEP-0115 §5.1: disco#info responses MAY include
+// `<x xmlns="jabber:x:data" type="result">` extension forms whose
+// FORM_TYPE values participate in the verification string. Real-world
+// clients (Gajim, Dino, Conversations) emit a `urn:xmpp:dataforms:softwareinfo`
+// form by default. PR #438's adversarial review (issue #1) flagged
+// that the previous fix was unit-tested only — this test exercises
+// the same path end-to-end over the wire.
+#[tokio::test]
+async fn caps_reply_with_xep0128_form_verifies_and_caches() {
+    let _serial = TEST_SERIAL.lock().await;
+    let server = TestServer::start();
+    let mut admin = admin_client(&server, "caps-form-1").await;
+    let admin_full_jid = admin.full_jid.clone().expect("full jid");
+
+    let node = "https://example.test/caps#form";
+    let features = ["http://jabber.org/protocol/disco#info", "urn:xmpp:ping"];
+    let form_type = "urn:xmpp:dataforms:softwareinfo";
+    let software = "Waddle Test Client";
+    let ver = caps_verification_string_with_softwareinfo_form(
+        "client",
+        "pc",
+        "Form Client",
+        &features,
+        form_type,
+        software,
+    );
+
+    admin
+        .send(&format!(
+            r#"<presence xmlns="jabber:client"><c xmlns="{NS_CAPS}" hash="sha-1" node="{node}" ver="{ver}"/></presence>"#
+        ))
+        .await
+        .expect("send presence with caps");
+    let disco_query = admin
+        .recv_matching(|frame| {
+            frame.contains("<iq")
+                && frame.contains(r#"type="get""#)
+                && frame.contains(NS_DISCO_INFO)
+        })
+        .await
+        .expect("server queries admin");
+    let iq_id = extract_iq_id(&disco_query);
+
+    let feature_xml: String = features
+        .iter()
+        .map(|f| format!(r#"<feature var="{f}"/>"#))
+        .collect();
+    let form_xml = format!(
+        r#"<x xmlns="jabber:x:data" type="result"><field var="FORM_TYPE" type="hidden"><value>{form_type}</value></field><field var="software"><value>{software}</value></field></x>"#
+    );
+    admin
+        .send(&format!(
+            r#"<iq xmlns="jabber:client" type="result" id="{iq_id}" from="{admin_full_jid}"><query xmlns="{NS_DISCO_INFO}" node="{node}#{ver}"><identity category="client" type="pc" name="Form Client"/>{feature_xml}{form_xml}</query></iq>"#
+        ))
+        .await
+        .expect("admin replies with form-bearing disco#info");
+
+    // Anchor: ping result confirms the disco#info reply was processed
+    // by the server's frame loop in FIFO order.
+    ping_anchor(&mut admin, "caps-form-anchor-1").await;
+
+    // A second resource advertising the same ver MUST be a cache hit.
+    let mut admin2 = admin_client(&server, "caps-form-2").await;
+    admin2
+        .send(&format!(
+            r#"<presence xmlns="jabber:client"><c xmlns="{NS_CAPS}" hash="sha-1" node="{node}" ver="{ver}"/></presence>"#
+        ))
+        .await
+        .expect("admin2 sends caps");
+    ping_anchor(&mut admin2, "caps-form-anchor-2").await;
+
+    let timed = tokio::time::timeout(
+        Duration::from_millis(50),
+        admin2.recv_matching(|frame| {
+            frame.contains("<iq")
+                && frame.contains(r#"type="get""#)
+                && frame.contains(NS_DISCO_INFO)
+        }),
+    )
+    .await;
+    assert!(
+        timed.is_err(),
+        "form-bearing reply MUST recompute correctly per XEP-0128 + §5.1 \
+         and populate the cache; second advert should be a hit. Got: {timed:?}"
+    );
+
+    let _ = admin.close().await;
+    let _ = admin2.close().await;
+}
+
+// ============================================================================
+// Test 6 — caps_unsupported_hash_algorithm_skips_resolution
+// ============================================================================
+//
+// XEP-0115 §5.4 step 2 + §8.1: the recipient MUST NOT cache a
+// result it cannot verify. SHA-1 is the only mandatory-to-implement
+// algorithm; for any other `hash` attribute the server skips the
+// disco#info round-trip rather than produce an unverifiable cache
+// entry.
+#[tokio::test]
+async fn caps_unsupported_hash_algorithm_skips_resolution() {
+    let _serial = TEST_SERIAL.lock().await;
+    let server = TestServer::start();
+    let mut admin = admin_client(&server, "caps-unsupp-1").await;
+
+    admin
+        .send(&format!(
+            r#"<presence xmlns="jabber:client"><c xmlns="{NS_CAPS}" hash="sha-256" node="https://example.test/caps#sha256" ver="some-base64-string"/></presence>"#
+        ))
+        .await
+        .expect("send presence with sha-256 caps");
+    ping_anchor(&mut admin, "caps-unsupp-anchor-1").await;
+
+    let timed = tokio::time::timeout(
+        Duration::from_millis(50),
+        admin.recv_matching(|frame| {
+            frame.contains("<iq")
+                && frame.contains(r#"type="get""#)
+                && frame.contains(NS_DISCO_INFO)
+        }),
+    )
+    .await;
+    assert!(
+        timed.is_err(),
+        "advertised sha-256 hash MUST NOT trigger a disco#info round-trip; \
+         the server has no way to verify the reply per §5.4 step 2. Got: {timed:?}"
+    );
+
+    let _ = admin.close().await;
+}
+
+// ============================================================================
+// Test 7 — caps_cache_is_not_poisoned_after_mismatched_reply
+// ============================================================================
+//
+// PR #438 review issue #10 hardening: confirm Test 3's "the cache
+// wasn't populated" claim by driving a *third* resource through a
+// successful resolution and verifying the cache then carries the
+// CORRECT identity/feature set, not the earlier poisoned payload.
+#[tokio::test]
+async fn caps_cache_is_not_poisoned_after_mismatched_reply() {
+    let _serial = TEST_SERIAL.lock().await;
+    let server = TestServer::start();
+    let mut admin = admin_client(&server, "caps-poison2-1").await;
+    let admin_full_jid = admin.full_jid.clone().expect("full");
+
+    let node = "https://example.test/caps#poison2";
+    let features = ["http://jabber.org/protocol/disco#info", "urn:xmpp:ping"];
+    let ver = caps_verification_string("client", "pc", "Honest Client", &features);
+
+    // Round 1: poisoned reply — features won't recompute to ver.
+    admin
+        .send(&format!(
+            r#"<presence xmlns="jabber:client"><c xmlns="{NS_CAPS}" hash="sha-1" node="{node}" ver="{ver}"/></presence>"#
+        ))
+        .await
+        .expect("send presence");
+    let q = admin
+        .recv_matching(|f| {
+            f.contains("<iq") && f.contains(r#"type="get""#) && f.contains(NS_DISCO_INFO)
+        })
+        .await
+        .expect("disco");
+    let id = extract_iq_id(&q);
+    let bogus_xml = r#"<feature var="urn:xmpp:malicious"/>"#;
+    admin
+        .send(&format!(
+            r#"<iq xmlns="jabber:client" type="result" id="{id}" from="{admin_full_jid}"><query xmlns="{NS_DISCO_INFO}" node="{node}#{ver}"><identity category="client" type="pc" name="Honest Client"/>{bogus_xml}</query></iq>"#
+        ))
+        .await
+        .expect("send poisoned reply");
+    ping_anchor(&mut admin, "caps-poison2-anchor-1").await;
+
+    // Round 2: a fresh resource advertises the same ver. Server MUST
+    // re-resolve (cache should be empty for this ver).
+    let mut admin2 = admin_client(&server, "caps-poison2-2").await;
+    admin2
+        .send(&format!(
+            r#"<presence xmlns="jabber:client"><c xmlns="{NS_CAPS}" hash="sha-1" node="{node}" ver="{ver}"/></presence>"#
+        ))
+        .await
+        .expect("send presence");
+    let q2 = admin2
+        .recv_matching(|f| {
+            f.contains("<iq") && f.contains(r#"type="get""#) && f.contains(NS_DISCO_INFO)
+        })
+        .await
+        .expect("re-resolve fired");
+    let id2 = extract_iq_id(&q2);
+
+    // This time send the CORRECT reply.
+    let admin2_full_jid = admin2.full_jid.clone().expect("admin2 full");
+    let feature_xml: String = features
+        .iter()
+        .map(|f| format!(r#"<feature var="{f}"/>"#))
+        .collect();
+    admin2
+        .send(&format!(
+            r#"<iq xmlns="jabber:client" type="result" id="{id2}" from="{admin2_full_jid}"><query xmlns="{NS_DISCO_INFO}" node="{node}#{ver}"><identity category="client" type="pc" name="Honest Client"/>{feature_xml}</query></iq>"#
+        ))
+        .await
+        .expect("send correct reply");
+    ping_anchor(&mut admin2, "caps-poison2-anchor-2").await;
+
+    // Round 3: verify the cache now carries the correct features by
+    // having yet another resource hit the cache (no disco#info).
+    let mut admin3 = admin_client(&server, "caps-poison2-3").await;
+    admin3
+        .send(&format!(
+            r#"<presence xmlns="jabber:client"><c xmlns="{NS_CAPS}" hash="sha-1" node="{node}" ver="{ver}"/></presence>"#
+        ))
+        .await
+        .expect("send presence");
+    ping_anchor(&mut admin3, "caps-poison2-anchor-3").await;
+    let timed = tokio::time::timeout(
+        Duration::from_millis(50),
+        admin3.recv_matching(|f| {
+            f.contains("<iq") && f.contains(r#"type="get""#) && f.contains(NS_DISCO_INFO)
+        }),
+    )
+    .await;
+    assert!(
+        timed.is_err(),
+        "after a poisoned reply followed by a CORRECT reply, the cache MUST \
+         carry the correct (non-poisoned) entry; subsequent advert is a hit. Got: {timed:?}"
+    );
+
+    let _ = admin.close().await;
+    let _ = admin2.close().await;
+    let _ = admin3.close().await;
 }

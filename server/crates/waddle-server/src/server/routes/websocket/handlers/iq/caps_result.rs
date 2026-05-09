@@ -70,6 +70,7 @@ pub(super) fn handle_caps_disco_info_result(
         parsed.identities,
         parsed.features,
         parsed.extensions,
+        parsed.ill_formed,
     ) {
         CapsVerification::Match => {
             debug!(id = %iq.id, jid = %sender, "Cached XEP-0115 caps after hash verification");
@@ -78,7 +79,14 @@ pub(super) fn handle_caps_disco_info_result(
             warn!(
                 id = %iq.id,
                 jid = %sender,
-                "XEP-0115 §5.4: recomputed hash did not match advertised ver — discarding"
+                "XEP-0115 §5.4: recomputed hash did not match advertised ver (or unsupported algo) — discarding"
+            );
+        }
+        CapsVerification::IllFormed => {
+            warn!(
+                id = %iq.id,
+                jid = %sender,
+                "XEP-0115 §5.4 step 2.4: ill-formed disco#info response — discarding entire reply"
             );
         }
     }
