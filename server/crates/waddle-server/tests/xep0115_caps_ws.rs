@@ -184,8 +184,6 @@ async fn caps_unknown_ver_triggers_disco_info_to_full_jid() {
     );
 
     let _ = admin.close().await;
-    let _ = server;
-    let _ = Duration::from_secs(1);
 }
 
 // ============================================================================
@@ -745,4 +743,142 @@ async fn caps_cache_is_not_poisoned_after_mismatched_reply() {
     let _ = admin.close().await;
     let _ = admin2.close().await;
     let _ = admin3.close().await;
+}
+
+// ============================================================================
+// Test 8 — caps_multi_resource_independent_tracking
+// ============================================================================
+//
+// PR description (PR 1) and CLAUDE.md hard rule require: per-resource
+// caps tracking is independent. Two resources of the same user
+// advertising DIFFERENT `ver` values MUST resolve independently and
+// neither resolution should pollute the other's cache entry. This is
+// the test the original PR description named but did not include.
+#[tokio::test]
+async fn caps_multi_resource_independent_tracking() {
+    let _serial = TEST_SERIAL.lock().await;
+    let bob_password = format!("bob-pass-{}", uuid::Uuid::new_v4());
+    let server = TestServer::start_with_extra_accounts(&[("bob", &bob_password)]);
+
+    // Two resources of the SAME user, each advertising a distinct
+    // `(node, ver)` so their caps must be tracked separately.
+    let mut admin = admin_client(&server, "caps-multi-admin").await;
+    let admin_full = admin.full_jid.clone().expect("admin full");
+    let mut bob = extra_client(&server, "bob", &bob_password, "caps-multi-bob").await;
+    let bob_full = bob.full_jid.clone().expect("bob full");
+
+    let admin_features = ["http://jabber.org/protocol/disco#info", "urn:xmpp:ping"];
+    let bob_features = [
+        "http://jabber.org/protocol/disco#info",
+        "urn:xmpp:carbons:2",
+    ];
+    let admin_node = "https://example.test/caps#admin";
+    let bob_node = "https://example.test/caps#bob";
+    let admin_ver = caps_verification_string("client", "pc", "Admin Client", &admin_features);
+    let bob_ver = caps_verification_string("client", "phone", "Bob Client", &bob_features);
+
+    // Each resource advertises its own caps. The server MUST issue a
+    // separate disco#info to each resource (no cross-pollution).
+    admin
+        .send(&format!(
+            r#"<presence xmlns="jabber:client"><c xmlns="{NS_CAPS}" hash="sha-1" node="{admin_node}" ver="{admin_ver}"/></presence>"#
+        ))
+        .await
+        .expect("admin presence");
+    bob.send(&format!(
+        r#"<presence xmlns="jabber:client"><c xmlns="{NS_CAPS}" hash="sha-1" node="{bob_node}" ver="{bob_ver}"/></presence>"#
+    ))
+    .await
+    .expect("bob presence");
+
+    let admin_query = admin
+        .recv_matching(|f| {
+            f.contains("<iq")
+                && f.contains(r#"type="get""#)
+                && f.contains(NS_DISCO_INFO)
+                && f.contains(&format!(r#"node="{admin_node}#{admin_ver}""#))
+        })
+        .await
+        .expect("admin disco");
+    let admin_id = extract_iq_id(&admin_query);
+    let bob_query = bob
+        .recv_matching(|f| {
+            f.contains("<iq")
+                && f.contains(r#"type="get""#)
+                && f.contains(NS_DISCO_INFO)
+                && f.contains(&format!(r#"node="{bob_node}#{bob_ver}""#))
+        })
+        .await
+        .expect("bob disco");
+    let bob_id = extract_iq_id(&bob_query);
+
+    let admin_feature_xml: String = admin_features
+        .iter()
+        .map(|f| format!(r#"<feature var="{f}"/>"#))
+        .collect();
+    let bob_feature_xml: String = bob_features
+        .iter()
+        .map(|f| format!(r#"<feature var="{f}"/>"#))
+        .collect();
+    admin
+        .send(&format!(
+            r#"<iq xmlns="jabber:client" type="result" id="{admin_id}" from="{admin_full}"><query xmlns="{NS_DISCO_INFO}" node="{admin_node}#{admin_ver}"><identity category="client" type="pc" name="Admin Client"/>{admin_feature_xml}</query></iq>"#
+        ))
+        .await
+        .expect("admin reply");
+    bob.send(&format!(
+        r#"<iq xmlns="jabber:client" type="result" id="{bob_id}" from="{bob_full}"><query xmlns="{NS_DISCO_INFO}" node="{bob_node}#{bob_ver}"><identity category="client" type="phone" name="Bob Client"/>{bob_feature_xml}</query></iq>"#
+    ))
+    .await
+    .expect("bob reply");
+
+    ping_anchor(&mut admin, "caps-multi-anchor-1").await;
+    ping_anchor(&mut bob, "caps-multi-anchor-2").await;
+
+    // Confirm independent caching: a third resource advertising the
+    // admin ver hits the cache (no disco#info), and a fourth resource
+    // advertising bob's ver also hits independently.
+    let mut admin2 = admin_client(&server, "caps-multi-admin2").await;
+    admin2
+        .send(&format!(
+            r#"<presence xmlns="jabber:client"><c xmlns="{NS_CAPS}" hash="sha-1" node="{admin_node}" ver="{admin_ver}"/></presence>"#
+        ))
+        .await
+        .expect("admin2 presence");
+    ping_anchor(&mut admin2, "caps-multi-anchor-3").await;
+    let admin2_timed = tokio::time::timeout(
+        Duration::from_millis(50),
+        admin2.recv_matching(|f| {
+            f.contains("<iq") && f.contains(r#"type="get""#) && f.contains(NS_DISCO_INFO)
+        }),
+    )
+    .await;
+    assert!(
+        admin2_timed.is_err(),
+        "admin's ver MUST be independently cached (no second disco#info): {admin2_timed:?}"
+    );
+
+    let mut bob2 = extra_client(&server, "bob", &bob_password, "caps-multi-bob2").await;
+    bob2.send(&format!(
+        r#"<presence xmlns="jabber:client"><c xmlns="{NS_CAPS}" hash="sha-1" node="{bob_node}" ver="{bob_ver}"/></presence>"#
+    ))
+    .await
+    .expect("bob2 presence");
+    ping_anchor(&mut bob2, "caps-multi-anchor-4").await;
+    let bob2_timed = tokio::time::timeout(
+        Duration::from_millis(50),
+        bob2.recv_matching(|f| {
+            f.contains("<iq") && f.contains(r#"type="get""#) && f.contains(NS_DISCO_INFO)
+        }),
+    )
+    .await;
+    assert!(
+        bob2_timed.is_err(),
+        "bob's ver MUST be independently cached: {bob2_timed:?}"
+    );
+
+    let _ = admin.close().await;
+    let _ = admin2.close().await;
+    let _ = bob.close().await;
+    let _ = bob2.close().await;
 }

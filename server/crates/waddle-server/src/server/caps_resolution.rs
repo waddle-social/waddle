@@ -140,6 +140,24 @@ impl CapsResolver {
             .insert(iq_id, PendingCapsResolution { full_jid, caps });
     }
 
+    /// True iff there is already a pending disco#info resolution for
+    /// this `(full_jid, hash, ver)` tuple. Callers use this to avoid
+    /// queuing a second outbound query while the first is still in
+    /// flight, which a malicious client could exploit by spamming
+    /// presence updates with random `ver` values.
+    pub fn has_pending_for(&self, full_jid: &FullJid, caps: &Caps) -> bool {
+        self.pending.iter().any(|entry| {
+            let v = entry.value();
+            v.full_jid == *full_jid && v.caps.hash == caps.hash && v.caps.ver == caps.ver
+        })
+    }
+
+    /// Number of currently-pending resolutions. Test/telemetry hook.
+    #[doc(hidden)]
+    pub fn pending_len(&self) -> usize {
+        self.pending.len()
+    }
+
     /// Take a pending entry by IQ id. Returns `None` if no resolution
     /// is in flight under that id (a stray result; ignore per §5.4).
     pub fn take_pending(&self, iq_id: &str) -> Option<PendingCapsResolution> {

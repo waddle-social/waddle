@@ -175,6 +175,12 @@ pub(super) async fn cleanup_connection_shutdown(
                         .protocol
                         .connection_registry
                         .unregister_if_owner(&jid, owner);
+                    // PR #438 review (Copilot): when SM detachment
+                    // fails we fall back to a full unregister, so the
+                    // caps resource→ver mapping AND any pending
+                    // disco#info resolution must be cleared too —
+                    // otherwise stale state lingers indefinitely.
+                    state.deps.protocol.caps_resolver.drop_resource(&jid);
                     cleanup_muc_presence(state, &jid).await;
                 }
             }

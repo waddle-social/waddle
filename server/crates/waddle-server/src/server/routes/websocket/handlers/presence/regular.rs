@@ -252,6 +252,21 @@ async fn resolve_caps_for_presence(
         );
         return;
     }
+    // Dedup in-flight resolutions per (full_jid, hash, ver). Without
+    // this guard, a client spamming presence updates with random
+    // `ver` values (or re-advertising the same uncached ver before
+    // its disco#info reply lands) could grow the pending map
+    // unboundedly and amplify outbound disco#info traffic. PR #438
+    // review issue (Qodo / Copilot).
+    if resolver.has_pending_for(sender_jid, &caps) {
+        debug!(
+            jid = %sender_jid,
+            hash = %caps.hash,
+            ver = %caps.ver,
+            "Skipping caps disco#info: a resolution is already in flight for this (jid, hash, ver)"
+        );
+        return;
+    }
     let iq_id = format!("waddle-caps-disco-{}", uuid::Uuid::new_v4());
     let iq = build_caps_disco_info_query(
         &state.deps.auth_state.caps_server_domain,
