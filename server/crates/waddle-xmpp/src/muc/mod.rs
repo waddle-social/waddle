@@ -33,11 +33,7 @@ pub use messages::{
     create_broadcast_message, is_muc_groupchat, looks_like_muc_jid, MessageRouteResult, MucMessage,
     OutboundMucMessage,
 };
-pub use owner::{
-    apply_config_form, build_config_form, build_config_result, build_destroy_notification,
-    build_owner_set_result, parse_owner_query, ConfigFormData, DestroyRequest, OwnerAction,
-    OwnerQuery, DATA_FORMS_NS, MUC_ROOMCONFIG_NS,
-};
+pub use owner::{build_config_form, DATA_FORMS_NS, MUC_ROOMCONFIG_NS};
 pub use pin::{
     PinChangeRequest, PinPermission, PinPreview, PinStateChange, PinnedEntry, MAX_PINNED_ENTRIES,
     MAX_PREVIEW_LEN as PIN_PREVIEW_MAX_LEN,

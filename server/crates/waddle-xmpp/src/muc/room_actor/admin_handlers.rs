@@ -6,9 +6,6 @@ use xmpp_parsers::presence::Presence;
 
 use super::{AdminApplyError, AdminContext, RoomActor};
 use crate::muc::admin::{is_role_change_query, AdminItem};
-use crate::muc::owner::{
-    apply_config_form, build_destroy_notification, ConfigFormData, DestroyRequest,
-};
 use crate::muc::{
     build_affiliation_change_presence, build_ban_presence, build_kick_presence,
     build_role_change_presence,
@@ -241,51 +238,5 @@ impl kameo::message::Message<IsOwner> for RoomActor {
 
     async fn handle(&mut self, msg: IsOwner, _ctx: &mut Context<Self, Self::Reply>) -> Self::Reply {
         self.room.get_affiliation(&msg.jid) == Affiliation::Owner
-    }
-}
-
-pub struct ApplyOwnerConfig {
-    pub form_data: ConfigFormData,
-}
-
-impl kameo::message::Message<ApplyOwnerConfig> for RoomActor {
-    type Reply = ();
-
-    async fn handle(
-        &mut self,
-        msg: ApplyOwnerConfig,
-        _ctx: &mut Context<Self, Self::Reply>,
-    ) -> Self::Reply {
-        apply_config_form(&mut self.room.config, &msg.form_data);
-    }
-}
-
-pub struct DestroyWithNotifications {
-    pub sender_jid: FullJid,
-    pub request: DestroyRequest,
-}
-
-impl kameo::message::Message<DestroyWithNotifications> for RoomActor {
-    type Reply = Result<Vec<(FullJid, Presence)>, Infallible>;
-
-    async fn handle(
-        &mut self,
-        msg: DestroyWithNotifications,
-        _ctx: &mut Context<Self, Self::Reply>,
-    ) -> Self::Reply {
-        let mut updates = Vec::new();
-        for (nick, occupant) in self.room.occupants.iter() {
-            let is_self = occupant.real_jid == msg.sender_jid;
-            let presence = build_destroy_notification(
-                &self.room.room_jid,
-                nick,
-                &occupant.real_jid,
-                &msg.request,
-                is_self,
-            );
-            updates.push((occupant.real_jid.clone(), presence));
-        }
-        self.room.occupants.clear();
-        Ok(updates)
     }
 }
