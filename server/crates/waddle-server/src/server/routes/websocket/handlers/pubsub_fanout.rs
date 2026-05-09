@@ -30,12 +30,15 @@
 //! §7.1 and not worth holding a lock across fan-out to prevent.
 
 use jid::{BareJid, FullJid, Jid};
-use tracing::{debug, info, warn};
+use std::collections::HashSet;
+use tracing::{info, warn};
 use waddle_xmpp::pubsub::{build_pubsub_event, PubSubEvent, PubSubItem};
 use waddle_xmpp::registry::BroadcastOutcome;
 use waddle_xmpp::Stanza;
 
 use super::super::WebSocketState;
+use crate::db::actor::GetDatabase;
+use crate::db::roster::DatabaseRosterStorage;
 
 /// Dispatch a §7.1 event notification to every deliverable subscriber.
 pub async fn fan_out_publish(
@@ -82,10 +85,10 @@ pub async fn fan_out_publish(
         }
     };
 
-    if subscribers.is_empty() {
-        debug!(owner = %owner, node, "No deliverable subscribers; nothing to fan out");
-        return;
-    }
+    // XEP-0163 §3 fan-out is presence-driven, not subscription-driven —
+    // an empty deliverable-subscriber list does NOT terminate fan-out.
+    // We still need to iterate the publisher's roster for from/both
+    // contacts whose CAPS advertise `<node>+notify`.
 
     // §7.1.5: include `publisher` only when it differs from the owner.
     let event_publisher = publisher.filter(|p| *p != owner).cloned();
@@ -111,6 +114,10 @@ pub async fn fan_out_publish(
     let mut dropped_full: u32 = 0;
     let mut dropped_closed: u32 = 0;
     let mut not_connected: u32 = 0;
+
+    // Track resources reached via the explicit-subscribers loop so the
+    // roster + CAPS phase doesn't double-deliver to the same client.
+    let mut already_delivered: HashSet<FullJid> = HashSet::new();
 
     for sub in subscribers {
         let target_resources: Vec<FullJid> = match sub.subscriber.try_as_full() {
@@ -157,6 +164,7 @@ pub async fn fan_out_publish(
 
         for resource in target_resources {
             intended += 1;
+            already_delivered.insert(resource.clone());
             let message = build_pubsub_event(&from, &Jid::from(resource.clone()), &event);
             let stanza = Stanza::Message(message);
 
@@ -216,6 +224,21 @@ pub async fn fan_out_publish(
         }
     }
 
+    // XEP-0163 §3: presence-driven fan-out to roster from/both contacts
+    // whose cached CAPS include `<node>+notify`. Per-resource semantics —
+    // we deliver only to resources whose ver is mapped (set by PR 1's
+    // caps resolver) AND whose cached features include the notify filter.
+    // Resources mid-resolution (no ver mapping yet) are skipped here and
+    // pick up via `send_last_published_item` on their next presence
+    // broadcast per XEP-0060.
+    let roster_metrics =
+        roster_caps_fan_out(state, owner, node, &from, &event, &mut already_delivered).await;
+    intended += roster_metrics.intended;
+    delivered += roster_metrics.delivered;
+    dropped_full += roster_metrics.dropped_full;
+    dropped_closed += roster_metrics.dropped_closed;
+    not_connected += roster_metrics.not_connected;
+
     debug_assert_eq!(
         intended,
         delivered + dropped_full + dropped_closed + not_connected,
@@ -230,6 +253,127 @@ pub async fn fan_out_publish(
         dropped_full,
         dropped_closed,
         not_connected,
+        roster_caps_intended = roster_metrics.intended,
+        roster_caps_delivered = roster_metrics.delivered,
         "PubSub publish fan-out complete"
     );
+}
+
+#[derive(Default)]
+struct FanOutMetrics {
+    intended: u32,
+    delivered: u32,
+    dropped_full: u32,
+    dropped_closed: u32,
+    not_connected: u32,
+}
+
+/// XEP-0163 §3 — iterate the publisher's roster from/both contacts and
+/// deliver `<message><event>` to each available resource whose cached
+/// CAPS include `<node>+notify`. Skips resources already reached via
+/// the explicit-subscribers loop (deduped through `already_delivered`).
+async fn roster_caps_fan_out(
+    state: &WebSocketState,
+    owner: &BareJid,
+    node: &str,
+    from: &Jid,
+    event: &PubSubEvent,
+    already_delivered: &mut HashSet<FullJid>,
+) -> FanOutMetrics {
+    let mut metrics = FanOutMetrics::default();
+
+    let roster = match state
+        .deps
+        .app_state
+        .db_pool
+        .global_actor()
+        .clone()
+        .ask(GetDatabase)
+        .await
+    {
+        Ok(db) => DatabaseRosterStorage::new(db),
+        Err(error) => {
+            warn!(
+                error = %error,
+                owner = %owner,
+                "Failed to access roster database for §3 fan-out"
+            );
+            return metrics;
+        }
+    };
+
+    let presence_subscribers = match roster.get_presence_subscribers(owner).await {
+        Ok(subs) => subs,
+        Err(error) => {
+            warn!(
+                error = %error,
+                owner = %owner,
+                node,
+                "Failed to load roster from/both contacts for §3 fan-out"
+            );
+            return metrics;
+        }
+    };
+
+    if presence_subscribers.is_empty() {
+        return metrics;
+    }
+
+    let notify_filter = format!("{node}+notify");
+
+    for subscriber in presence_subscribers {
+        let Ok(contact_bare) = subscriber.parse::<BareJid>() else {
+            continue;
+        };
+
+        let resources = state
+            .deps
+            .protocol
+            .connection_registry
+            .get_resources_for_user(&contact_bare);
+
+        for resource in resources {
+            if already_delivered.contains(&resource) {
+                continue;
+            }
+            // Skip resources mid-resolution — no ver mapping yet — per
+            // RFC 363 PR 2 contract. They pick up via send_last_published_item.
+            let Some(ver) = state
+                .deps
+                .protocol
+                .caps_resolver
+                .ver_for_resource(&resource)
+            else {
+                continue;
+            };
+            let Some(cached) = state.deps.protocol.caps_resolver.cached(&ver) else {
+                continue;
+            };
+            let advertises_notify = cached
+                .features
+                .iter()
+                .any(|feature| feature.0 == notify_filter);
+            if !advertises_notify {
+                continue;
+            }
+
+            metrics.intended += 1;
+            already_delivered.insert(resource.clone());
+            let message = build_pubsub_event(from, &Jid::from(resource.clone()), event);
+            let stanza = Stanza::Message(message);
+            match state
+                .deps
+                .protocol
+                .connection_registry
+                .try_send_to(&resource, stanza.clone())
+            {
+                BroadcastOutcome::Delivered => metrics.delivered += 1,
+                BroadcastOutcome::DroppedFull => metrics.dropped_full += 1,
+                BroadcastOutcome::DroppedClosed => metrics.dropped_closed += 1,
+                BroadcastOutcome::NotConnected => metrics.not_connected += 1,
+            }
+        }
+    }
+
+    metrics
 }
