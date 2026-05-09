@@ -38,6 +38,7 @@ use waddle_xmpp::Stanza;
 
 use super::super::WebSocketState;
 use crate::db::actor::GetDatabase;
+use crate::db::blocking::DatabaseBlockingStorage;
 use crate::db::roster::DatabaseRosterStorage;
 
 /// Dispatch a §7.1 event notification to every deliverable subscriber.
@@ -224,20 +225,39 @@ pub async fn fan_out_publish(
         }
     }
 
-    // XEP-0163 §3: presence-driven fan-out to roster from/both contacts
-    // whose cached CAPS include `<node>+notify`. Per-resource semantics —
-    // we deliver only to resources whose ver is mapped (set by PR 1's
-    // caps resolver) AND whose cached features include the notify filter.
-    // Resources mid-resolution (no ver mapping yet) are skipped here and
-    // pick up via `send_last_published_item` on their next presence
-    // broadcast per XEP-0060.
+    // XEP-0163 §3: presence-driven fan-out. Two passes follow the
+    // explicit-subscribers loop:
+    //
+    // - Roster pass: every roster from/both contact of the publisher,
+    //   filtered by per-resource cached CAPS for `<node>+notify`. This
+    //   is the §3 mainline. XEP-0191 blocking is honored both directions
+    //   (publisher blocking contact, contact blocking publisher).
+    //
+    // - Self pass: the publisher's own *other* resources (PEP §3.4 —
+    //   account owner is among the appropriate subscribers). Same +notify
+    //   filter; the publishing resource is not specifically excluded
+    //   (it'll naturally drop the duplicate by item id, and we don't
+    //   thread the publishing FullJid through this function yet).
+    //
+    // Resources mid-resolution (presence with `<c/>` arrived but the
+    // disco#info round-trip hasn't completed) carry no ver mapping and
+    // are skipped here. Replaying the last item to such a resource on
+    // resolution-complete is `send_last_published_item` territory — not
+    // yet wired through the runtime; tracked for a follow-up PR.
+    let notify_filter = format!("{node}+notify");
+    let ctx = CapsFanOutCtx {
+        from: &from,
+        event: &event,
+        notify_filter: &notify_filter,
+    };
     let roster_metrics =
-        roster_caps_fan_out(state, owner, node, &from, &event, &mut already_delivered).await;
-    intended += roster_metrics.intended;
-    delivered += roster_metrics.delivered;
-    dropped_full += roster_metrics.dropped_full;
-    dropped_closed += roster_metrics.dropped_closed;
-    not_connected += roster_metrics.not_connected;
+        roster_caps_fan_out(state, owner, node, &ctx, &mut already_delivered).await;
+    let self_metrics = owner_self_caps_fan_out(state, owner, &ctx, &mut already_delivered).await;
+    intended += roster_metrics.intended + self_metrics.intended;
+    delivered += roster_metrics.delivered + self_metrics.delivered;
+    dropped_full += roster_metrics.dropped_full + self_metrics.dropped_full;
+    dropped_closed += roster_metrics.dropped_closed + self_metrics.dropped_closed;
+    not_connected += roster_metrics.not_connected + self_metrics.not_connected;
 
     debug_assert_eq!(
         intended,
@@ -255,6 +275,8 @@ pub async fn fan_out_publish(
         not_connected,
         roster_caps_intended = roster_metrics.intended,
         roster_caps_delivered = roster_metrics.delivered,
+        self_caps_intended = self_metrics.intended,
+        self_caps_delivered = self_metrics.delivered,
         "PubSub publish fan-out complete"
     );
 }
@@ -268,16 +290,23 @@ struct FanOutMetrics {
     not_connected: u32,
 }
 
+/// Constants threaded through both §3 fan-out passes.
+struct CapsFanOutCtx<'a> {
+    from: &'a Jid,
+    event: &'a PubSubEvent,
+    notify_filter: &'a str,
+}
+
 /// XEP-0163 §3 — iterate the publisher's roster from/both contacts and
 /// deliver `<message><event>` to each available resource whose cached
 /// CAPS include `<node>+notify`. Skips resources already reached via
 /// the explicit-subscribers loop (deduped through `already_delivered`).
+/// Honors XEP-0191 blocking in both directions.
 async fn roster_caps_fan_out(
     state: &WebSocketState,
     owner: &BareJid,
     node: &str,
-    from: &Jid,
-    event: &PubSubEvent,
+    ctx: &CapsFanOutCtx<'_>,
     already_delivered: &mut HashSet<FullJid>,
 ) -> FanOutMetrics {
     let mut metrics = FanOutMetrics::default();
@@ -319,61 +348,195 @@ async fn roster_caps_fan_out(
         return metrics;
     }
 
-    let notify_filter = format!("{node}+notify");
+    let blocking = blocking_storage(state).await;
 
     for subscriber in presence_subscribers {
-        let Ok(contact_bare) = subscriber.parse::<BareJid>() else {
-            continue;
+        let contact_bare = match subscriber.parse::<BareJid>() {
+            Ok(jid) => jid,
+            Err(error) => {
+                warn!(
+                    error = %error,
+                    raw = %subscriber,
+                    owner = %owner,
+                    "Skipping invalid roster JID in §3 fan-out"
+                );
+                continue;
+            }
         };
 
-        let resources = state
-            .deps
-            .protocol
-            .connection_registry
-            .get_resources_for_user(&contact_bare);
-
-        for resource in resources {
-            if already_delivered.contains(&resource) {
-                continue;
-            }
-            // Skip resources mid-resolution — no ver mapping yet — per
-            // RFC 363 PR 2 contract. They pick up via send_last_published_item.
-            let Some(ver) = state
-                .deps
-                .protocol
-                .caps_resolver
-                .ver_for_resource(&resource)
-            else {
-                continue;
-            };
-            let Some(cached) = state.deps.protocol.caps_resolver.cached(&ver) else {
-                continue;
-            };
-            let advertises_notify = cached
-                .features
-                .iter()
-                .any(|feature| feature.0 == notify_filter);
-            if !advertises_notify {
-                continue;
-            }
-
-            metrics.intended += 1;
-            already_delivered.insert(resource.clone());
-            let message = build_pubsub_event(from, &Jid::from(resource.clone()), event);
-            let stanza = Stanza::Message(message);
-            match state
-                .deps
-                .protocol
-                .connection_registry
-                .try_send_to(&resource, stanza.clone())
+        // XEP-0191 §2: do not deliver if either party blocked the other.
+        if let Some(blocking) = blocking.as_ref() {
+            if is_blocked(blocking, owner, &contact_bare).await
+                || is_blocked(blocking, &contact_bare, owner).await
             {
-                BroadcastOutcome::Delivered => metrics.delivered += 1,
-                BroadcastOutcome::DroppedFull => metrics.dropped_full += 1,
-                BroadcastOutcome::DroppedClosed => metrics.dropped_closed += 1,
-                BroadcastOutcome::NotConnected => metrics.not_connected += 1,
+                continue;
             }
         }
+
+        deliver_to_user_resources(state, &contact_bare, ctx, already_delivered, &mut metrics).await;
     }
 
     metrics
+}
+
+/// XEP-0163 §3.4 / PEP §4.2 — the account owner is among the
+/// "appropriate subscribers" of their own publishes. Mirror to every
+/// online resource of `owner` whose cached CAPS include `<node>+notify`,
+/// skipping resources already reached. The publishing resource itself
+/// will receive a duplicate event (the publisher's `<iq result>` is
+/// independent of the headline event), but XMPP clients dedupe by item
+/// id so this is harmless and matches behavior of other PEP servers.
+async fn owner_self_caps_fan_out(
+    state: &WebSocketState,
+    owner: &BareJid,
+    ctx: &CapsFanOutCtx<'_>,
+    already_delivered: &mut HashSet<FullJid>,
+) -> FanOutMetrics {
+    let mut metrics = FanOutMetrics::default();
+    deliver_to_user_resources(state, owner, ctx, already_delivered, &mut metrics).await;
+    metrics
+}
+
+/// Deliver the event to every live + detached resource of `target`
+/// whose cached CAPS include `notify_filter`, skipping anything in
+/// `already_delivered`.
+async fn deliver_to_user_resources(
+    state: &WebSocketState,
+    target: &BareJid,
+    ctx: &CapsFanOutCtx<'_>,
+    already_delivered: &mut HashSet<FullJid>,
+    metrics: &mut FanOutMetrics,
+) {
+    let mut resources = state
+        .deps
+        .protocol
+        .connection_registry
+        .get_resources_for_user(target);
+    match state
+        .deps
+        .protocol
+        .sm_session_registry
+        .detached_resources_for_user(target)
+        .await
+    {
+        Ok(detached) => resources.extend(detached),
+        Err(error) => {
+            warn!(
+                error = %error,
+                target = %target,
+                "Failed to enumerate detached resources for §3 fan-out"
+            );
+        }
+    }
+
+    for resource in resources {
+        if already_delivered.contains(&resource) {
+            continue;
+        }
+        let Some(ver) = state
+            .deps
+            .protocol
+            .caps_resolver
+            .ver_for_resource(&resource)
+        else {
+            continue;
+        };
+        let Some(cached) = state.deps.protocol.caps_resolver.cached(&ver) else {
+            continue;
+        };
+        if !cached
+            .features
+            .iter()
+            .any(|feature| feature.0 == ctx.notify_filter)
+        {
+            continue;
+        }
+
+        metrics.intended += 1;
+        already_delivered.insert(resource.clone());
+        let message = build_pubsub_event(ctx.from, &Jid::from(resource.clone()), ctx.event);
+        let stanza = Stanza::Message(message);
+        match state
+            .deps
+            .protocol
+            .connection_registry
+            .try_send_to(&resource, stanza.clone())
+        {
+            BroadcastOutcome::Delivered => metrics.delivered += 1,
+            BroadcastOutcome::DroppedFull => metrics.dropped_full += 1,
+            BroadcastOutcome::DroppedClosed => match state
+                .deps
+                .protocol
+                .sm_session_registry
+                .record_stanza_for_detached_bound_resource(&resource, &stanza, chrono::Utc::now())
+                .await
+            {
+                Ok(true) => metrics.delivered += 1,
+                Ok(false) => metrics.dropped_closed += 1,
+                Err(error) => {
+                    warn!(
+                        resource = %resource,
+                        error = %error,
+                        "Failed to stash §3 fan-out for detached resource after closed live send"
+                    );
+                    metrics.dropped_closed += 1;
+                }
+            },
+            BroadcastOutcome::NotConnected => match state
+                .deps
+                .protocol
+                .sm_session_registry
+                .record_stanza_for_detached_bound_resource(&resource, &stanza, chrono::Utc::now())
+                .await
+            {
+                Ok(true) => metrics.delivered += 1,
+                Ok(false) => metrics.not_connected += 1,
+                Err(error) => {
+                    warn!(
+                        resource = %resource,
+                        error = %error,
+                        "Failed to stash §3 fan-out for not-connected detached resource"
+                    );
+                    metrics.not_connected += 1;
+                }
+            },
+        }
+    }
+}
+
+async fn blocking_storage(state: &WebSocketState) -> Option<DatabaseBlockingStorage> {
+    match state
+        .deps
+        .app_state
+        .db_pool
+        .global_actor()
+        .clone()
+        .ask(GetDatabase)
+        .await
+    {
+        Ok(db) => Some(DatabaseBlockingStorage::new(db)),
+        Err(error) => {
+            warn!(error = %error, "Failed to access blocking storage for §3 fan-out");
+            None
+        }
+    }
+}
+
+async fn is_blocked(
+    storage: &DatabaseBlockingStorage,
+    recipient: &BareJid,
+    sender: &BareJid,
+) -> bool {
+    match storage.is_blocked(recipient, sender).await {
+        Ok(blocked) => blocked,
+        Err(error) => {
+            warn!(
+                error = %error,
+                recipient = %recipient,
+                sender = %sender,
+                "Blocking check failed during §3 fan-out; treating as blocked to fail closed"
+            );
+            true
+        }
+    }
 }

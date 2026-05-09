@@ -929,3 +929,237 @@ async fn pep_publish_targets_only_resources_advertising_notify_filter() {
     let _ = bob_b.close().await;
     let _ = alice.close().await;
 }
+
+// ============================================================================
+// XEP-0163 §3 — overlap dedup: explicit subscriber + roster + +notify
+// ============================================================================
+//
+// A roster contact who is also an explicit pubsub subscriber AND
+// advertises +notify must receive exactly ONE event, not two. The
+// already_delivered HashSet inside fan_out_publish is the dedup seam.
+
+#[tokio::test]
+async fn pep_publish_delivers_exactly_once_when_subscriber_also_in_roster() {
+    let _serial = TEST_SERIAL.lock().await;
+    let alice_password = format!("alice-{}", uuid::Uuid::new_v4());
+    let bob_password = format!("bob-{}", uuid::Uuid::new_v4());
+    let server = TestServer::start_with_extra_accounts(&[
+        ("alice", &alice_password),
+        ("bob", &bob_password),
+    ]);
+    let mut alice = WsXmppClient::connect_and_auth(
+        &server.ws_url(),
+        DOMAIN,
+        "alice",
+        &alice_password,
+        "alice-dedup-1",
+    )
+    .await
+    .expect("alice");
+    let mut bob = WsXmppClient::connect_and_auth(
+        &server.ws_url(),
+        DOMAIN,
+        "bob",
+        &bob_password,
+        "bob-dedup-1",
+    )
+    .await
+    .expect("bob");
+    let alice_bare = format!("alice@{DOMAIN}");
+    let bob_bare = format!("bob@{DOMAIN}");
+    let bob_full = bob.full_jid.clone().expect("bob full jid");
+
+    // Alice opens an open-access PEP node so bob can both subscribe AND
+    // satisfy presence-driven §3 fan-out.
+    let publish_node = "urn:xmpp:bookmarks:1";
+    let r1 = iq_set_to(
+        &mut alice,
+        "pep-dedup-create",
+        &alice_bare,
+        &format!(
+            r#"<pubsub xmlns="{NS_PUBSUB}"><publish node="{publish_node}"><item id="seed"/></publish></pubsub>"#
+        ),
+    )
+    .await;
+    assert!(r1.contains(r#"type="result""#), "create: {r1}");
+    let cfg = iq_set_to(
+        &mut alice,
+        "pep-dedup-cfg",
+        &alice_bare,
+        &format!(
+            r#"<pubsub xmlns="{NS_PUBSUB_OWNER}"><configure node="{publish_node}"><x xmlns="jabber:x:data" type="submit"><field var="pubsub#access_model"><value>open</value></field></x></configure></pubsub>"#
+        ),
+    )
+    .await;
+    assert!(cfg.contains(r#"type="result""#), "configure: {cfg}");
+
+    establish_bob_subscribes_to_alice(&mut alice, &mut bob, &alice_bare, &bob_bare).await;
+
+    // Bob explicitly subscribes via XEP-0060.
+    let sub = iq_set_to(
+        &mut bob,
+        "pep-dedup-sub",
+        &alice_bare,
+        &format!(
+            r#"<pubsub xmlns="{NS_PUBSUB}"><subscribe node="{publish_node}" jid="{bob_bare}"/></pubsub>"#
+        ),
+    )
+    .await;
+    assert!(sub.contains(r#"type="result""#), "subscribe: {sub}");
+
+    // Bob also advertises +notify in CAPS.
+    let notify_var = format!("{publish_node}+notify");
+    let features = ["http://jabber.org/protocol/disco#info", notify_var.as_str()];
+    let caps_node = "https://bob.example/dedup";
+    let ver = caps_verification_string("client", "pc", "Bob's Client", &features);
+    bob.send(&format!(
+        r#"<presence xmlns="jabber:client"><c xmlns="{NS_CAPS}" hash="sha-1" node="{caps_node}" ver="{ver}"/></presence>"#
+    ))
+    .await
+    .expect("bob caps presence");
+    let disco_query = bob
+        .recv_matching(|f| {
+            f.contains("<iq") && f.contains(r#"type="get""#) && f.contains(NS_DISCO_INFO)
+        })
+        .await
+        .expect("disco#info to bob");
+    let iq_id = extract_iq_id(&disco_query);
+    let feature_xml: String = features
+        .iter()
+        .map(|f| format!(r#"<feature var="{f}"/>"#))
+        .collect();
+    bob.send(&format!(
+        r#"<iq xmlns="jabber:client" type="result" id="{iq_id}" from="{bob_full}"><query xmlns="{NS_DISCO_INFO}" node="{caps_node}#{ver}"><identity category="client" type="pc" name="Bob's Client"/>{feature_xml}</query></iq>"#
+    ))
+    .await
+    .expect("bob disco#info reply");
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let pub_resp = iq_set_to(
+        &mut alice,
+        "pep-dedup-pub",
+        &alice_bare,
+        &format!(
+            r#"<pubsub xmlns="{NS_PUBSUB}"><publish node="{publish_node}"><item id="dedup-1"><conference xmlns="{publish_node}" name="Dedup"/></item></publish></pubsub>"#
+        ),
+    )
+    .await;
+    assert!(pub_resp.contains(r#"type="result""#), "publish: {pub_resp}");
+
+    let first = wait_for_event_message(&mut bob, publish_node, Duration::from_secs(2))
+        .await
+        .expect("bob (subscriber+roster+notify) MUST receive at least one event");
+    assert!(
+        first.contains(r#"id="dedup-1""#),
+        "expected dedup-1: {first}"
+    );
+
+    let second = wait_for_event_message(&mut bob, publish_node, Duration::from_millis(700)).await;
+    assert!(
+        second.is_none(),
+        "MUST receive exactly one event when both subscriber AND roster paths apply; got duplicate: {second:?}"
+    );
+
+    let _ = bob.close().await;
+    let _ = alice.close().await;
+}
+
+// ============================================================================
+// XEP-0163 §3.4 / PEP §4.2 — owner's other resources receive too
+// ============================================================================
+//
+// "Sending the Last Published Item" reaches "all appropriate
+// subscribers", which includes the account owner itself: when alice
+// publishes from /r1, alice/r2 must also receive the event so it can
+// keep its UI in sync with the publishing resource.
+
+#[tokio::test]
+async fn pep_publish_fans_to_owner_other_resources_with_caps_notify() {
+    let _serial = TEST_SERIAL.lock().await;
+    let alice_password = format!("alice-{}", uuid::Uuid::new_v4());
+    let server = TestServer::start_with_extra_accounts(&[("alice", &alice_password)]);
+    let mut alice_a = WsXmppClient::connect_and_auth(
+        &server.ws_url(),
+        DOMAIN,
+        "alice",
+        &alice_password,
+        "alice-self-A",
+    )
+    .await
+    .expect("alice-A");
+    let mut alice_b = WsXmppClient::connect_and_auth(
+        &server.ws_url(),
+        DOMAIN,
+        "alice",
+        &alice_password,
+        "alice-self-B",
+    )
+    .await
+    .expect("alice-B");
+    let alice_bare = format!("alice@{DOMAIN}");
+    let alice_b_full = alice_b.full_jid.clone().expect("alice-B full jid");
+
+    // Both resources go presence-available.
+    alice_a
+        .send(r#"<presence xmlns="jabber:client"/>"#)
+        .await
+        .expect("alice-A presence");
+    alice_b
+        .send(r#"<presence xmlns="jabber:client"/>"#)
+        .await
+        .expect("alice-B presence");
+
+    let publish_node = "urn:xmpp:bookmarks:1";
+    let notify_var = format!("{publish_node}+notify");
+    let features = ["http://jabber.org/protocol/disco#info", notify_var.as_str()];
+    let caps_node = "https://alice.example/caps";
+    let ver = caps_verification_string("client", "pc", "Alice B", &features);
+
+    alice_b
+        .send(&format!(
+            r#"<presence xmlns="jabber:client"><c xmlns="{NS_CAPS}" hash="sha-1" node="{caps_node}" ver="{ver}"/></presence>"#
+        ))
+        .await
+        .expect("alice-B presence with caps");
+    let disco_query = alice_b
+        .recv_matching(|f| {
+            f.contains("<iq") && f.contains(r#"type="get""#) && f.contains(NS_DISCO_INFO)
+        })
+        .await
+        .expect("disco#info to alice-B");
+    let iq_id = extract_iq_id(&disco_query);
+    let feature_xml: String = features
+        .iter()
+        .map(|f| format!(r#"<feature var="{f}"/>"#))
+        .collect();
+    alice_b
+        .send(&format!(
+            r#"<iq xmlns="jabber:client" type="result" id="{iq_id}" from="{alice_b_full}"><query xmlns="{NS_DISCO_INFO}" node="{caps_node}#{ver}"><identity category="client" type="pc" name="Alice B"/>{feature_xml}</query></iq>"#
+        ))
+        .await
+        .expect("alice-B disco#info reply");
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let pub_resp = iq_set_to(
+        &mut alice_a,
+        "pep-self-pub",
+        &alice_bare,
+        &format!(
+            r#"<pubsub xmlns="{NS_PUBSUB}"><publish node="{publish_node}"><item id="self-1"><conference xmlns="{publish_node}" name="Self Sync"/></item></publish></pubsub>"#
+        ),
+    )
+    .await;
+    assert!(pub_resp.contains(r#"type="result""#), "publish: {pub_resp}");
+
+    let event = wait_for_event_message(&mut alice_b, publish_node, Duration::from_secs(2))
+        .await
+        .expect(
+            "alice-B advertising +notify MUST receive PEP event from alice-A's publish per §3.4",
+        );
+    assert!(event.contains(r#"id="self-1""#), "item id: {event}");
+
+    let _ = alice_a.close().await;
+    let _ = alice_b.close().await;
+}
