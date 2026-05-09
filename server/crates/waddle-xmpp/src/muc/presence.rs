@@ -482,3 +482,94 @@ pub fn build_role_change_presence(
 
     presence
 }
+
+/// XEP-0045 §10.9 destroy request payload — the `<destroy/>` element
+/// that an owner sends inside `<query xmlns='muc#owner'>`.
+///
+/// All fields are optional per the XEP. The reason is shown to
+/// remaining occupants; alternate_venue lets clients automatically
+/// follow the room elsewhere.
+#[derive(Debug, Default, Clone)]
+pub struct DestroyRequest {
+    /// Optional reason for destruction.
+    pub reason: Option<String>,
+    /// Optional alternate venue JID an occupant should redirect to.
+    pub alternate_venue: Option<BareJid>,
+    /// Optional password for the alternate venue.
+    pub password: Option<String>,
+}
+
+/// Build a XEP-0045 §10.9 destroy notification — an unavailable
+/// presence with `<x xmlns='muc#user'>` carrying `<item
+/// affiliation='none' role='none'/>` plus a `<destroy/>` child.
+///
+/// `xmpp-parsers`' `MucUser` doesn't model the `<destroy/>` child,
+/// so we serialize the typed `MucUser` first (items + statuses) and
+/// then append the destroy element via `minidom::Element` — XML is
+/// still produced via typed builders, never via `format!` or string
+/// concat.
+///
+/// `is_self` adds XEP-0045 status code 110 so the recipient
+/// recognizes the presence as their own.
+pub fn build_destroy_notification(
+    room_jid: &BareJid,
+    occupant_nick: &str,
+    occupant_jid: &FullJid,
+    destroy_request: &DestroyRequest,
+    is_self: bool,
+) -> Presence {
+    let from_room_jid = room_jid
+        .with_resource_str(occupant_nick)
+        .unwrap_or_else(|_| {
+            room_jid
+                .with_resource_str("unknown")
+                .expect("literal 'unknown' is always a valid resource")
+        });
+
+    let mut presence = Presence::new(PresenceType::Unavailable);
+    presence.from = Some(Jid::from(from_room_jid));
+    presence.to = Some(Jid::from(occupant_jid.clone()));
+
+    // The typed MucUser serializer omits affiliation='none' / role='none'
+    // attributes when they're the default; XEP-0045 §10.9 shows them
+    // explicitly. Build the `<x>` payload via minidom so the wire shape
+    // matches the XEP example precisely.
+    let mut x_elem = Element::builder("x", NS_MUC_USER).append(
+        Element::builder("item", NS_MUC_USER)
+            .attr("affiliation", "none")
+            .attr("role", "none")
+            .build(),
+    );
+
+    // <destroy jid='alternate'><reason>…</reason><password>…</password></destroy>
+    let mut destroy = Element::builder("destroy", NS_MUC_USER);
+    if let Some(ref venue) = destroy_request.alternate_venue {
+        destroy = destroy.attr("jid", venue.to_string());
+    }
+    if let Some(ref reason) = destroy_request.reason {
+        destroy = destroy.append(
+            Element::builder("reason", NS_MUC_USER)
+                .append(reason.as_str())
+                .build(),
+        );
+    }
+    if let Some(ref password) = destroy_request.password {
+        destroy = destroy.append(
+            Element::builder("password", NS_MUC_USER)
+                .append(password.as_str())
+                .build(),
+        );
+    }
+    x_elem = x_elem.append(destroy.build());
+
+    if is_self {
+        x_elem = x_elem.append(
+            Element::builder("status", NS_MUC_USER)
+                .attr("code", "110")
+                .build(),
+        );
+    }
+
+    presence.payloads.push(x_elem.build());
+    presence
+}

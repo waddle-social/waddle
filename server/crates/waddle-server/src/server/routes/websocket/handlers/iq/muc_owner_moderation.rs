@@ -1,4 +1,39 @@
 use super::*;
+use waddle_xmpp::muc::{build_destroy_notification, DestroyRequest, NS_MUC_OWNER};
+
+/// Extract the optional alternate venue, reason, and password from a
+/// `<destroy xmlns='muc#owner'/>` child of the owner-config IQ. All
+/// fields are optional per XEP-0045 §10.9, so a malformed or empty
+/// element yields `DestroyRequest::default()` and the destroy still
+/// proceeds.
+fn parse_destroy_request(iq: &xmpp_parsers::iq::Iq) -> Option<DestroyRequest> {
+    let xmpp_parsers::iq::IqType::Set(query) = &iq.payload else {
+        return None;
+    };
+    let destroy = query.get_child("destroy", NS_MUC_OWNER)?;
+    let mut request = DestroyRequest::default();
+    if let Some(jid_str) = destroy.attr("jid") {
+        request.alternate_venue = jid_str.parse().ok();
+    }
+    for child in destroy.children() {
+        match child.name() {
+            "reason" => {
+                let text = child.text();
+                if !text.is_empty() {
+                    request.reason = Some(text);
+                }
+            }
+            "password" => {
+                let text = child.text();
+                if !text.is_empty() {
+                    request.password = Some(text);
+                }
+            }
+            _ => {}
+        }
+    }
+    Some(request)
+}
 
 pub(super) async fn handle_muc_owner_and_moderation_iq(
     ctx: IqHandlerContext<'_>,
@@ -83,15 +118,49 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
         }
 
         if has_destroy {
+            // XEP-0045 §10.9: parse the optional alternate venue and
+            // reason out of the `<destroy/>` payload, snapshot the
+            // current occupants from the room actor, then broadcast a
+            // typed destroy presence to each session before tearing
+            // the actor down. The sender's frame is returned inline
+            // alongside the IQ result so it lands on the same socket;
+            // others are routed via the connection registry.
+            let destroy_request = parse_destroy_request(iq).unwrap_or_default();
+            let mut frames = Vec::new();
+            if let Some(room_actor) = get_room_actor(state, &room_jid).await {
+                if let Ok(snapshot) = room_actor.ask(GetSnapshot).await {
+                    for occupant in snapshot.room.occupants.values() {
+                        let is_self_occupant = occupant.real_jid == *sender_jid;
+                        let presence = build_destroy_notification(
+                            &room_jid,
+                            &occupant.nick,
+                            &occupant.real_jid,
+                            &destroy_request,
+                            is_self_occupant,
+                        );
+                        if is_self_occupant {
+                            frames.push(stanza_to_xml(&Stanza::Presence(presence)));
+                        } else {
+                            let _ = state
+                                .deps
+                                .protocol
+                                .connection_registry
+                                .try_send_to(&occupant.real_jid, Stanza::Presence(presence));
+                        }
+                    }
+                }
+            }
+
             if destroy_room_actor(state, &room_jid).await {
                 debug!(room = %room_jid, "Destroyed MUC room via owner IQ");
                 let room_jid_string = room_jid.to_string();
-                return vec![build_iq_result_xml(
+                frames.push(build_iq_result_xml(
                     id,
                     Some(room_jid_string.as_str()),
                     response_to,
                     None,
-                )];
+                ));
+                return frames;
             }
 
             return vec![build_iq_error_xml_typed(

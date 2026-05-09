@@ -39,10 +39,11 @@ pub use pin::{
     MAX_PREVIEW_LEN as PIN_PREVIEW_MAX_LEN,
 };
 pub use presence::{
-    build_affiliation_change_presence, build_ban_presence, build_kick_presence,
-    build_leave_presence, build_occupant_presence, build_occupant_presence_update,
-    build_role_change_presence, parse_muc_presence, HistoryRequest, MucJoinRequest,
-    MucLeaveRequest, MucPresenceAction, MucPresenceUpdateRequest, OutboundMucPresence,
+    build_affiliation_change_presence, build_ban_presence, build_destroy_notification,
+    build_kick_presence, build_leave_presence, build_occupant_presence,
+    build_occupant_presence_update, build_role_change_presence, parse_muc_presence, DestroyRequest,
+    HistoryRequest, MucJoinRequest, MucLeaveRequest, MucPresenceAction, MucPresenceUpdateRequest,
+    OutboundMucPresence,
 };
 pub use room::{is_remote_jid, MucRoom, Occupant, RoomConfig};
 pub use room_actor::RoomActorError;
