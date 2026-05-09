@@ -5,11 +5,16 @@ import type { JSONContent } from "@tiptap/core";
 import GifPicker from "@/components/chat/GifPicker.vue";
 import ChatEditor from "@/components/chat/ChatEditor.vue";
 import EditorBubbleToolbar from "@/components/chat/EditorBubbleToolbar.vue";
+import SlashCommandPopover from "@/components/chat/SlashCommandPopover.vue";
 import { searchEmoji } from "@/lib/emoji";
 import { getComposerAutocompleteAction, getComposerEscapeAction } from "@/lib/reply-ux";
 import { tiptapToRichMessage } from "@/lib/rich-message";
 import { extractImagesFromClipboardEvent } from "@/lib/xmpp/file-upload";
 import type { MentionCandidate } from "@/lib/mentions";
+import { parseSlashTrigger } from "@/lib/slash-trigger";
+import { filterSlashCandidates, resolveSlashCommand } from "@/lib/slash-match";
+import { buildSlashInvocation, type SlashInvocation } from "@/lib/slash-dispatch";
+import type { DiscoveredExtensionCommand } from "@/lib/xmpp/extension-commands";
 import {
   isAudioFile,
   isImageFile,
@@ -46,6 +51,8 @@ const props = defineProps<{
   replyingTo?: { id: string; author: string; preview?: string } | null;
   isTopPinned?: boolean;
   extensionsOpen?: boolean;
+  slashCommands?: DiscoveredExtensionCommand[];
+  inMuc?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -54,6 +61,7 @@ const emit = defineEmits<{
   selectGif: [url: string];
   cancelReply: [];
   openExtensions: [];
+  dispatchSlash: [invocation: SlashInvocation];
 }>();
 
 const replyAuthorName = computed(() => {
@@ -65,6 +73,10 @@ const replyAuthorName = computed(() => {
 const showGifPicker = ref(false);
 const showMentions = ref(false);
 const showEmoji = ref(false);
+const showSlash = ref(false);
+const slashPrefix = ref("");
+const slashTrailing = ref("");
+const slashDismissed = ref(false);
 const mentionQuery = ref("");
 const emojiQuery = ref("");
 const selectedIndex = ref(0);
@@ -163,9 +175,21 @@ const mentionResults = computed(() => {
 const emojiResults = computed(() => searchEmoji(emojiQuery.value));
 const showForumTitleInput = computed(() => props.isForumChannel && !props.replyingTo);
 
+const slashContext = computed(() => ({ inMuc: !!props.inMuc }));
+const slashCandidates = computed(() =>
+  filterSlashCandidates(slashPrefix.value, props.slashCommands ?? [], slashContext.value),
+);
+const slashResolution = computed(() =>
+  resolveSlashCommand(slashPrefix.value, props.slashCommands ?? [], slashContext.value),
+);
+const slashBlocked = computed(() =>
+  showSlash.value && slashPrefix.value.length > 0 && !slashResolution.value && slashCandidates.value.length === 0,
+);
+
 const activeResults = computed(() => {
   if (showMentions.value) return mentionResults.value;
   if (showEmoji.value) return emojiResults.value;
+  if (showSlash.value) return slashCandidates.value;
   return [];
 });
 
@@ -175,6 +199,9 @@ const autocompleteAction = computed(() =>
     mentionCount: mentionResults.value.length,
     showEmoji: showEmoji.value,
     emojiCount: emojiResults.value.length,
+    showSlash: showSlash.value,
+    slashCandidateCount: slashCandidates.value.length,
+    slashHasResolution: !!slashResolution.value,
   }),
 );
 
@@ -209,7 +236,14 @@ function onEditorUpdate(doc: JSONContent) {
 function clearAutocomplete() {
   showMentions.value = false;
   showEmoji.value = false;
+  showSlash.value = false;
   triggerRange.value = null;
+}
+
+function firstParagraphTextFromDoc(doc: any): string {
+  const firstChild = doc?.firstChild;
+  if (!firstChild || firstChild.type?.name !== "paragraph") return "";
+  return firstChild.textContent ?? "";
 }
 
 function checkAutocompleteFromEditor() {
@@ -237,6 +271,7 @@ function checkAutocompleteFromEditor() {
     selectedIndex.value = 0;
     showMentions.value = true;
     showEmoji.value = false;
+    showSlash.value = false;
     triggerRange.value = {
       from: pos - mentionMatch[0].trimStart().length,
       to: pos,
@@ -250,13 +285,35 @@ function checkAutocompleteFromEditor() {
     emojiQuery.value = emojiMatch[1];
     selectedIndex.value = 0;
     showEmoji.value = true;
+    showSlash.value = false;
     triggerRange.value = {
       from: pos - emojiMatch[0].trimStart().length,
       to: pos,
     };
     return;
   }
-  clearAutocomplete();
+  showEmoji.value = false;
+
+  const firstParagraph = firstParagraphTextFromDoc(doc);
+  const slash = parseSlashTrigger(firstParagraph);
+  if (slash) {
+    if (slashDismissed.value) {
+      showSlash.value = false;
+    } else {
+      slashPrefix.value = slash.prefix;
+      slashTrailing.value = slash.trailing;
+      selectedIndex.value = 0;
+      showSlash.value = true;
+      // The slash trigger spans the first paragraph from position 1 (after the
+      // leading <p> open tag) through the prefix length.
+      triggerRange.value = { from: 1, to: 1 + 1 + slash.prefix.length };
+    }
+    return;
+  }
+
+  slashDismissed.value = false;
+  showSlash.value = false;
+  triggerRange.value = null;
 }
 
 function insertMention(candidate: MentionCandidate) {
@@ -287,6 +344,32 @@ function insertEmoji(emoji: string) {
   triggerRange.value = null;
 }
 
+function expandSlashCandidate(command: DiscoveredExtensionCommand) {
+  const tiptapEditor = getTiptapEditor();
+  if (!tiptapEditor || !command.composerPrefix) return;
+  const replacement = `/${command.composerPrefix} `;
+  tiptapEditor.chain()
+    .focus()
+    .setTextSelection({ from: 1, to: 1 + 1 + slashPrefix.value.length })
+    .insertContent(replacement)
+    .run();
+  slashPrefix.value = command.composerPrefix;
+  slashTrailing.value = "";
+  showSlash.value = true;
+}
+
+function dispatchSlashResolution(): boolean {
+  const command = slashResolution.value;
+  if (!command) return false;
+  const invocation = buildSlashInvocation(command, slashTrailing.value);
+  emit("dispatchSlash", invocation);
+  showSlash.value = false;
+  slashDismissed.value = false;
+  triggerRange.value = null;
+  // Caller resets the editor draft after the launcher accepts the invocation.
+  return true;
+}
+
 function selectAutocompleteResult(action = autocompleteAction.value): boolean {
   if (action === "select-mention") {
     insertMention(mentionResults.value[selectedIndex.value]);
@@ -295,6 +378,21 @@ function selectAutocompleteResult(action = autocompleteAction.value): boolean {
 
   if (action === "select-emoji") {
     insertEmoji(emojiResults.value[selectedIndex.value].emoji);
+    return true;
+  }
+
+  if (action === "select-command") {
+    const candidate = slashCandidates.value[selectedIndex.value];
+    if (candidate) expandSlashCandidate(candidate);
+    return true;
+  }
+
+  if (action === "submit-slash") {
+    return dispatchSlashResolution();
+  }
+
+  if (action === "block-slash") {
+    // Hold the message; popover already shows an inline "no command" hint.
     return true;
   }
 
@@ -357,11 +455,18 @@ function onEditorCancel() {
   const action = getComposerEscapeAction({
     showMentions: showMentions.value,
     showEmoji: showEmoji.value,
+    showSlash: showSlash.value,
     isReplyingTo: !!props.replyingTo,
   });
 
   if (action === "dismiss-autocomplete") {
     clearAutocomplete();
+    return;
+  }
+
+  if (action === "dismiss-slash") {
+    showSlash.value = false;
+    slashDismissed.value = true;
     return;
   }
 
@@ -371,7 +476,7 @@ function onEditorCancel() {
 }
 
 function onKeydown(e: KeyboardEvent) {
-  if (activeResults.value.length > 0 && (showMentions.value || showEmoji.value)) {
+  if (activeResults.value.length > 0 && (showMentions.value || showEmoji.value || showSlash.value)) {
     if (e.key === "ArrowDown") {
       e.preventDefault();
       e.stopPropagation();
@@ -632,6 +737,17 @@ watch(
         </button>
       </div>
     </div>
+
+    <!-- /slash command autocomplete -->
+    <SlashCommandPopover
+      v-if="showSlash && (slashCandidates.length > 0 || slashBlocked)"
+      :candidates="slashCandidates"
+      :selected-index="selectedIndex"
+      :prefix="slashPrefix"
+      :blocked="slashBlocked"
+      :is-top-pinned="isTopPinned"
+      @pick="expandSlashCandidate"
+    />
 
     <div
       class="chat-composer-input-shell flex min-w-0 flex-nowrap items-center gap-2 bg-muted p-1 transition-all duration-300 has-[:focus]:ring-2 has-[:focus]:ring-primary/20 has-[:focus]:shadow-[0_0_16px_var(--glow)]"
