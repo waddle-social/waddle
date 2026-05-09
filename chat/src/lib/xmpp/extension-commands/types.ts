@@ -63,6 +63,8 @@ export interface DiscoveredExtensionCommand {
   node: string;
   name: string;
   scope: ExtensionCommandScope;
+  composerPrefix?: string;
+  inlineField?: string;
 }
 
 export type ExtensionRouteScope = "channel";

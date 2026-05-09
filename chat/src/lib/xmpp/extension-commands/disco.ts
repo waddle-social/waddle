@@ -53,10 +53,14 @@ export async function discoverExtensionCommands(
     const itemServiceJid = item.jid ?? serviceJid;
     const node = item.node;
     let scope: ExtensionCommandScope = "global";
+    let composerPrefix: string | undefined;
+    let inlineField: string | undefined;
     try {
       const info = await rawDiscoInfoFull(xmpp, itemServiceJid, node);
-      const parsedScope = parseExtensionCommandScope(info.extensions);
-      if (parsedScope) scope = parsedScope;
+      const metadata = parseExtensionCommandMetadata(info.extensions);
+      if (metadata.scope) scope = metadata.scope;
+      composerPrefix = metadata.composerPrefix;
+      inlineField = metadata.inlineField;
     } catch {
       // If disco#info is unavailable, fall back to global scope.
     }
@@ -65,22 +69,35 @@ export async function discoverExtensionCommands(
       node,
       name: item.name || node,
       scope,
+      ...(composerPrefix !== undefined ? { composerPrefix } : {}),
+      ...(inlineField !== undefined ? { inlineField } : {}),
     });
   }
   return commands;
 }
 
-function parseExtensionCommandScope(extensions: unknown[] | undefined): ExtensionCommandScope | null {
-  if (!Array.isArray(extensions)) return null;
+interface ExtensionCommandMetadata {
+  scope: ExtensionCommandScope | null;
+  composerPrefix?: string;
+  inlineField?: string;
+}
+
+function parseExtensionCommandMetadata(extensions: unknown[] | undefined): ExtensionCommandMetadata {
+  const result: ExtensionCommandMetadata = { scope: null };
+  if (!Array.isArray(extensions)) return result;
   for (const form of extensions) {
     const fields = (form as { fields?: unknown[] } | undefined)?.fields;
     if (!Array.isArray(fields)) continue;
     const formType = formFieldValue(fields, "FORM_TYPE");
     if (formType !== NS_WADDLE_EXTENSION_1 && formType !== EXTENSION_COMMAND_FORM_TYPE) continue;
-    const value = formFieldValue(fields, "waddle#command_scope");
-    if (value === "global" || value === "channel") return value;
+    const scopeValue = formFieldValue(fields, "waddle#command_scope");
+    if (scopeValue === "global" || scopeValue === "channel") result.scope = scopeValue;
+    const composerPrefix = formFieldValue(fields, "waddle#composer_prefix");
+    if (composerPrefix) result.composerPrefix = composerPrefix;
+    const inlineField = formFieldValue(fields, "waddle#inline_field");
+    if (inlineField) result.inlineField = inlineField;
   }
-  return null;
+  return result;
 }
 
 export async function discoverExtensionCommandService(xmpp: XmppSendIq, userJid: string): Promise<string> {

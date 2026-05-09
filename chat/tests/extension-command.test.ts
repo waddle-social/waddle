@@ -83,6 +83,46 @@ describe("extension command invocation", () => {
     ]);
   });
 
+  test("reads composer-prefix and inline-field from XEP-0128 disco metadata", async () => {
+    const xmpp = {
+      async send_raw_iq(xml: string) {
+        if (xml.includes('to="example.com"') && xml.includes("disco#items")) {
+          return `<iq type="result"><query xmlns="http://jabber.org/protocol/disco#items"><item jid="extensions.example.com" name="Extensions" /></query></iq>`;
+        }
+        if (xml.includes('to="extensions.example.com"') && xml.includes("disco#info") && !xml.includes(" node=")) {
+          return `<iq type="result"><query xmlns="http://jabber.org/protocol/disco#info"><feature var="urn:waddle:extension:1" /><feature var="http://jabber.org/protocol/commands" /></query></iq>`;
+        }
+        if (xml.includes('node="http://jabber.org/protocol/commands"')) {
+          return `<iq type="result"><query xmlns="http://jabber.org/protocol/disco#items"><item jid="extensions.example.com" node="urn:waddle:extension:1:ai-chatbot" name="Ask AI Chatbot" /><item jid="extensions.example.com" node="urn:waddle:extension:1:decision-polls" name="Create Decision Poll" /></query></iq>`;
+        }
+        if (xml.includes('node="urn:waddle:extension:1:ai-chatbot"')) {
+          return `<iq type="result"><query xmlns="http://jabber.org/protocol/disco#info"><x xmlns="jabber:x:data" type="result"><field var="FORM_TYPE"><value>urn:waddle:extension:1:command</value></field><field var="waddle#command_scope"><value>global</value></field><field var="waddle#composer_prefix"><value>ai</value></field><field var="waddle#inline_field"><value>prompt</value></field></x></query></iq>`;
+        }
+        expect(xml).toContain('node="urn:waddle:extension:1:decision-polls"');
+        return `<iq type="result"><query xmlns="http://jabber.org/protocol/disco#info"><x xmlns="jabber:x:data" type="result"><field var="FORM_TYPE"><value>urn:waddle:extension:1:command</value></field><field var="waddle#command_scope"><value>channel</value></field><field var="waddle#composer_prefix"><value>poll</value></field></x></query></iq>`;
+      },
+    };
+
+    const commands = await discoverExtensionCommands(xmpp as any, "alice@example.com/web");
+    expect(commands).toEqual([
+      {
+        serviceJid: "extensions.example.com",
+        node: "urn:waddle:extension:1:ai-chatbot",
+        name: "Ask AI Chatbot",
+        scope: "global",
+        composerPrefix: "ai",
+        inlineField: "prompt",
+      },
+      {
+        serviceJid: "extensions.example.com",
+        node: "urn:waddle:extension:1:decision-polls",
+        name: "Create Decision Poll",
+        scope: "channel",
+        composerPrefix: "poll",
+      },
+    ]);
+  });
+
   test("prefers the advertised Waddle extension service over generic command services", async () => {
     const commandItemTargets: string[] = [];
     const xmpp = {
