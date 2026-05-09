@@ -16,7 +16,7 @@ async fn test_migration_runner_global() {
 
     // Check version (global + shared waddle schema)
     let version = runner.current_version(&db).await.unwrap();
-    assert_eq!(version, Some(1001));
+    assert_eq!(version, Some(1002));
 }
 
 #[tokio::test]
@@ -48,6 +48,91 @@ async fn test_migration_runner_waddle() {
     assert!(tables.contains(&"messages".to_string()));
     assert!(tables.contains(&"reactions".to_string()));
     assert!(tables.contains(&"attachments".to_string()));
+
+    let mut rows = conn
+        .query(
+            r#"
+                SELECT COUNT(*)
+                FROM pragma_table_info('channels')
+                WHERE name = 'pin_permission'
+                "#,
+            (),
+        )
+        .await
+        .unwrap();
+    let row = rows.next().await.unwrap().unwrap();
+    let has_pin_permission: i64 = row.get(0).unwrap();
+    assert_eq!(has_pin_permission, 1);
+}
+
+#[tokio::test]
+async fn test_waddle_v1002_adds_pin_permission_to_existing_v1001_schema() {
+    let db = Database::in_memory("test-waddle-v1002-pin-permission")
+        .await
+        .unwrap();
+    let conn = db.guard().await.unwrap();
+
+    conn.execute(
+        r#"
+            CREATE TABLE IF NOT EXISTS _migrations (
+                version INTEGER PRIMARY KEY,
+                description TEXT NOT NULL,
+                applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )
+            "#,
+        (),
+    )
+    .await
+    .unwrap();
+    conn.execute(
+        "INSERT INTO _migrations (version, description) VALUES (1001, 'Hard-cut per-waddle schema with user_id principals')",
+        (),
+    )
+    .await
+    .unwrap();
+    conn.execute(
+        r#"
+            CREATE TABLE channels (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                description TEXT,
+                channel_type TEXT NOT NULL DEFAULT 'text',
+                position INTEGER NOT NULL DEFAULT 0,
+                is_default INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )
+            "#,
+        (),
+    )
+    .await
+    .unwrap();
+    conn.execute(
+        r#"
+            INSERT INTO channels (id, name, description, channel_type, position, is_default)
+            VALUES ('chat', 'Chat', 'General member chat', 'text', 0, 1)
+            "#,
+        (),
+    )
+    .await
+    .unwrap();
+    drop(conn);
+
+    let runner = MigrationRunner::waddle();
+    let applied = runner.run(&db).await.unwrap();
+    assert_eq!(applied, vec![1002]);
+
+    let conn = db.guard().await.unwrap();
+    let mut rows = conn
+        .query("SELECT pin_permission FROM channels WHERE id = 'chat'", ())
+        .await
+        .unwrap();
+    let row = rows.next().await.unwrap().unwrap();
+    let pin_permission: String = row.get(0).unwrap();
+    assert_eq!(pin_permission, "admins-only");
+
+    let version = runner.current_version(&db).await.unwrap();
+    assert_eq!(version, Some(1002));
 }
 
 #[tokio::test]
@@ -94,13 +179,13 @@ async fn test_incompatible_history_forces_hard_cut_reapply() {
 
     let runner = MigrationRunner::global();
     let applied = runner.run(&db).await.unwrap();
-    assert_eq!(applied, vec![1, 1001]);
+    assert_eq!(applied, vec![1, 1001, 1002]);
 
     let applied_again = runner.run(&db).await.unwrap();
     assert!(applied_again.is_empty());
 
     let version = runner.current_version(&db).await.unwrap();
-    assert_eq!(version, Some(1001));
+    assert_eq!(version, Some(1002));
 }
 
 #[tokio::test]
@@ -145,7 +230,7 @@ async fn test_incompatible_history_recreates_existing_owned_tables() {
 
     let runner = MigrationRunner::global();
     let applied = runner.run(&db).await.unwrap();
-    assert_eq!(applied, vec![1, 1001]);
+    assert_eq!(applied, vec![1, 1001, 1002]);
 
     let conn = db.guard().await.unwrap();
     let mut rows = conn
@@ -267,4 +352,12 @@ fn all_migrations_have_non_empty_postgres_sql() {
             m.version
         );
     }
+}
+
+#[test]
+fn postgres_channel_pin_permission_migration_is_hot_patch_safe() {
+    assert!(
+        waddle::V1002_ADD_CHANNEL_PIN_PERMISSION_POSTGRES.contains("ADD COLUMN IF NOT EXISTS"),
+        "Postgres v1002 must tolerate prod databases where pin_permission was hot-patched before the migration was recorded"
+    );
 }

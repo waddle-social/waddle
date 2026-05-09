@@ -9,6 +9,16 @@ use super::{
     RosterStorageError, UserMutationLock,
 };
 
+pub(super) const COMMIT_SUBSCRIPTION_UPDATE_SQL: &str = r#"
+            INSERT INTO roster_items (user_jid, contact_jid, subscription, ask, approved, groups, updated_at)
+            VALUES (?, ?, ?, ?, FALSE, '[]', ?)
+            ON CONFLICT(user_jid, contact_jid) DO UPDATE SET
+                subscription = excluded.subscription,
+                ask = excluded.ask,
+                approved = excluded.approved,
+                updated_at = excluded.updated_at
+            "#;
+
 impl DatabaseRosterStorage {
     /// Atomic roster mutation: write the row, bump the user's roster version,
     /// return the new version along with a [`UserMutationLock`] guard.
@@ -228,15 +238,7 @@ impl DatabaseRosterStorage {
         let mut tx = self.db.begin().await?;
         let now = now_utc_text();
         tx.execute(
-            r#"
-            INSERT INTO roster_items (user_jid, contact_jid, subscription, ask, approved, groups, updated_at)
-            VALUES (?, ?, ?, ?, 0, '[]', ?)
-            ON CONFLICT(user_jid, contact_jid) DO UPDATE SET
-                subscription = excluded.subscription,
-                ask = excluded.ask,
-                approved = excluded.approved,
-                updated_at = excluded.updated_at
-            "#,
+            COMMIT_SUBSCRIPTION_UPDATE_SQL,
             crate::db_params![
                 user_jid.to_string(),
                 contact_jid.to_string(),

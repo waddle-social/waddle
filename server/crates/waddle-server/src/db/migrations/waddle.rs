@@ -16,10 +16,6 @@ CREATE TABLE channels (
     channel_type TEXT NOT NULL DEFAULT 'text',
     position INTEGER NOT NULL DEFAULT 0,
     is_default INTEGER NOT NULL DEFAULT 0,
-    -- #422: room's pin permission policy persisted so disco-info on a
-    -- dormant room (no live actor) can advertise the truth instead of
-    -- the default. Wire values: 'admins-only' (default) | 'anyone'.
-    pin_permission TEXT NOT NULL DEFAULT 'admins-only',
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -90,7 +86,6 @@ CREATE TABLE channels (
     channel_type TEXT NOT NULL DEFAULT 'text',
     position INTEGER NOT NULL DEFAULT 0,
     is_default INTEGER NOT NULL DEFAULT 0,
-    pin_permission TEXT NOT NULL DEFAULT 'admins-only',
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP::TEXT,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP::TEXT
 );
@@ -145,15 +140,37 @@ CREATE TABLE attachments (
 CREATE INDEX idx_attachments_message_id ON attachments(message_id);
 "#;
 
+/// Persist a room's pin permission policy so disco-info on a dormant room
+/// (no live actor) can advertise the truth instead of the default.
+pub const V1002_ADD_CHANNEL_PIN_PERMISSION: &str = r#"
+ALTER TABLE channels
+ADD COLUMN pin_permission TEXT NOT NULL DEFAULT 'admins-only';
+"#;
+
+/// Postgres variant is idempotent because prod was manually hot-patched before
+/// this migration existed.
+pub const V1002_ADD_CHANNEL_PIN_PERMISSION_POSTGRES: &str = r#"
+ALTER TABLE channels
+ADD COLUMN IF NOT EXISTS pin_permission TEXT NOT NULL DEFAULT 'admins-only';
+"#;
+
 /// Get all waddle schema migrations in order.
 ///
 /// Versions are intentionally offset from global migrations so a single
 /// database can safely apply both sets without migration history collisions.
 pub fn all() -> Vec<Migration> {
-    vec![Migration {
-        version: 1001,
-        description: "Hard-cut per-waddle schema with user_id principals".to_string(),
-        sql_sqlite: V0001_SCHEMA,
-        sql_postgres: V0001_SCHEMA_POSTGRES,
-    }]
+    vec![
+        Migration {
+            version: 1001,
+            description: "Hard-cut per-waddle schema with user_id principals".to_string(),
+            sql_sqlite: V0001_SCHEMA,
+            sql_postgres: V0001_SCHEMA_POSTGRES,
+        },
+        Migration {
+            version: 1002,
+            description: "Add channel pin permission policy".to_string(),
+            sql_sqlite: V1002_ADD_CHANNEL_PIN_PERMISSION,
+            sql_postgres: V1002_ADD_CHANNEL_PIN_PERMISSION_POSTGRES,
+        },
+    ]
 }

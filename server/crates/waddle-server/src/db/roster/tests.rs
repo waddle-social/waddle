@@ -125,6 +125,19 @@ async fn test_apply_subscription_update_bumps_version() {
     assert_ne!(first.version, second.version);
 }
 
+#[test]
+fn subscription_update_uses_sql_boolean_literal_for_postgres() {
+    let sql = super::mutation::COMMIT_SUBSCRIPTION_UPDATE_SQL;
+    assert!(
+        sql.contains("FALSE"),
+        "Postgres roster_items.approved is BOOLEAN and must not be written as an integer literal"
+    );
+    assert!(
+        !sql.contains(", 0,"),
+        "integer approved literals fail against Postgres BOOLEAN columns"
+    );
+}
+
 #[tokio::test]
 async fn test_presence_queries() {
     let db = setup_test_db().await;
