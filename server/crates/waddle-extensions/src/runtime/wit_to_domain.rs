@@ -52,6 +52,8 @@ impl TryFrom<wit_types::CommandDescriptor> for CommandDescriptor {
             node: wit_newtype_to_domain!(value.node, CommandNode)?,
             name: wit_newtype_to_domain!(value.name, DisplayText)?,
             scope: value.scope.into(),
+            composer_prefix: value.composer_prefix,
+            inline_field: value.inline_field,
         })
     }
 }

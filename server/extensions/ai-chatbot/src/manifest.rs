@@ -29,6 +29,8 @@ pub(crate) fn manifest() -> types::ExtensionManifest {
             COMMAND_NODE,
             AI_COMMAND,
             types::CommandScope::Global,
+            Some("ai"),
+            Some("prompt"),
         )],
         routes: vec![],
         pubsub_nodes: vec![],
@@ -50,6 +52,8 @@ fn command_descriptor(
     node: &str,
     name: &str,
     scope: types::CommandScope,
+    composer_prefix: Option<&str>,
+    inline_field: Option<&str>,
 ) -> types::CommandDescriptor {
     types::CommandDescriptor {
         node: types::CommandNode {
@@ -57,5 +61,7 @@ fn command_descriptor(
         },
         name: display(name),
         scope,
+        composer_prefix: composer_prefix.map(str::to_string),
+        inline_field: inline_field.map(str::to_string),
     }
 }

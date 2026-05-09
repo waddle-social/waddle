@@ -119,6 +119,10 @@ pub struct CommandDescriptor {
     pub node: CommandNode,
     pub name: DisplayText,
     pub scope: CommandScope,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub composer_prefix: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inline_field: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]

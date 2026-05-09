@@ -186,6 +186,15 @@ interface types {
         node: command-node,
         name: display-text,
         scope: command-scope,
+        /// Optional `/`-prefix string declared by the extension. When present,
+        /// the chat client surfaces this command in its keyboard-first slash
+        /// autocomplete (XEP-0128 form var `waddle#composer_prefix`).
+        composer-prefix: option<string>,
+        /// Form-field name that captures the trailing text from the slash
+        /// composer (`/<prefix> <text>`). Only meaningful when the command's
+        /// XEP-0004 form has a single user-fillable field. (XEP-0128 form var
+        /// `waddle#inline_field`.)
+        inline-field: option<string>,
     }
 
     record extension-route-descriptor {

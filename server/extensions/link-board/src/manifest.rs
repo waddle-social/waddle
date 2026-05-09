@@ -22,6 +22,8 @@ pub(super) fn manifest() -> types::ExtensionManifest {
             INVOKE_NODE,
             "Run Link Board action",
             types::CommandScope::Channel,
+            None,
+            None,
         )],
         routes: vec![types::ExtensionRouteDescriptor {
             plugin: plugin_id(),
