@@ -1,4 +1,4 @@
-export interface SlashTriggerMatch {
+interface SlashTriggerMatch {
   prefix: string;
   trailing: string;
 }

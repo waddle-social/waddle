@@ -1,6 +1,6 @@
 import type { DiscoveredExtensionCommand } from "./xmpp/extension-commands";
 
-export interface SlashMatchContext {
+interface SlashMatchContext {
   inMuc: boolean;
 }
 
