@@ -90,12 +90,13 @@ pub(super) async fn apply_muc_owner_config(
     actor
         .ask(DbExecute {
             sql: r#"
-                INSERT INTO channels (id, name, description, channel_type, position, is_default, created_at, updated_at)
-                VALUES (?, ?, ?, ?, 0, 0, ?, ?)
+                INSERT INTO channels (id, name, description, channel_type, position, is_default, pin_permission, created_at, updated_at)
+                VALUES (?, ?, ?, ?, 0, 0, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     name = excluded.name,
                     description = excluded.description,
                     channel_type = excluded.channel_type,
+                    pin_permission = excluded.pin_permission,
                     updated_at = excluded.updated_at
             "#
             .to_string(),
@@ -104,6 +105,7 @@ pub(super) async fn apply_muc_owner_config(
                 config.name.into(),
                 config.description.into(),
                 (if config.forum { "forum" } else { "text" }).into(),
+                config.pin_permission.as_form_value().into(),
                 now.clone().into(),
                 now.into(),
             ],

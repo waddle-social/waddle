@@ -16,6 +16,10 @@ CREATE TABLE channels (
     channel_type TEXT NOT NULL DEFAULT 'text',
     position INTEGER NOT NULL DEFAULT 0,
     is_default INTEGER NOT NULL DEFAULT 0,
+    -- #422: room's pin permission policy persisted so disco-info on a
+    -- dormant room (no live actor) can advertise the truth instead of
+    -- the default. Wire values: 'admins-only' (default) | 'anyone'.
+    pin_permission TEXT NOT NULL DEFAULT 'admins-only',
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -86,6 +90,7 @@ CREATE TABLE channels (
     channel_type TEXT NOT NULL DEFAULT 'text',
     position INTEGER NOT NULL DEFAULT 0,
     is_default INTEGER NOT NULL DEFAULT 0,
+    pin_permission TEXT NOT NULL DEFAULT 'admins-only',
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP::TEXT,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP::TEXT
 );

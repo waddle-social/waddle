@@ -96,7 +96,10 @@ pub(super) async fn handle_disco_info_iq(
                     if has_space_metadata {
                         features.push(Feature::spaces());
                     }
-                    extensions.push(build_room_metadata_form(channel_type));
+                    extensions.push(build_room_metadata_form(
+                        channel_type,
+                        snapshot.config.pin_permission.as_form_value(),
+                    ));
                     let response = build_disco_info_response_with_extensions(
                         request_iq,
                         &identities,
@@ -128,7 +131,13 @@ pub(super) async fn handle_disco_info_iq(
                         if has_space_metadata {
                             features.push(Feature::spaces());
                         }
-                        extensions.push(build_room_metadata_form(&channel.channel_type));
+                        // #422: read the persisted pin policy from
+                        // the channel record so dormant rooms
+                        // advertise the truth — not the default.
+                        extensions.push(build_room_metadata_form(
+                            &channel.channel_type,
+                            channel.pin_permission.as_form_value(),
+                        ));
                         let response = build_disco_info_response_with_extensions(
                             request_iq,
                             &identities,

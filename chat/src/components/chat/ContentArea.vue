@@ -339,9 +339,11 @@ function isPinnedMessage(msg: TimelineMessage): boolean {
 // user's affiliation. AdminsOnly retains the owner/admin check via
 // the hats system; Anyone admits any joined member (a present
 // `currentUser` + the channel being known are sufficient signals
-// that we're a current occupant). The action-sheet visibility
-// updates reactively when the channel object's `pinPermission`
-// changes — no reload required.
+// that we're a current occupant). The action-sheet updates the
+// instant the local user toggles the policy via the edit dialog;
+// owner-config changes from another client only flow in on the
+// next topology refresh until the server emits status-code-104 on
+// owner-config set (separate follow-up).
 const currentUserCanPin = computed(() => {
   const me = props.currentUser;
   if (!me) return false;

@@ -14,7 +14,7 @@ type HybridClient = Partial<WaddleClient> & {
   join_room_without_history?: (roomJid: string, nick: string) => Promise<unknown>;
 };
 
-const FIELD_PIN_PERMISSION = "urn:waddle:roomconfig:pinpermission";
+export const FIELD_PIN_PERMISSION = "urn:waddle:roomconfig:pinpermission";
 const FIELD_ROOM_NAME = "muc#roomconfig_roomname";
 const FIELD_ROOM_DESC = "muc#roomconfig_roomdesc";
 
