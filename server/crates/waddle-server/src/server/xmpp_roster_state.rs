@@ -157,10 +157,13 @@ pub(crate) async fn get_presence_subscribers(
     debug!(jid = %user_jid, "Getting presence subscribers");
 
     let storage = DatabaseRosterStorage::new(db);
-    storage.get_presence_subscribers(user_jid).await.map_err(|e| {
-        warn!(jid = %user_jid, error = %e, "Failed to get presence subscribers");
-        XmppError::internal(format!("Database error: {}", e))
-    })
+    storage
+        .get_presence_subscribers(user_jid)
+        .await
+        .map_err(|e| {
+            warn!(jid = %user_jid, error = %e, "Failed to get presence subscribers");
+            XmppError::internal(format!("Database error: {}", e))
+        })
 }
 
 pub(crate) async fn get_presence_subscriptions(
