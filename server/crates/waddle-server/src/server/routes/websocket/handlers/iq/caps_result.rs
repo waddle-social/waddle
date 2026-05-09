@@ -14,12 +14,10 @@
 
 use jid::FullJid;
 use tracing::{debug, warn};
-use waddle_xmpp::disco::info::parse_disco_info_response;
+use waddle_xmpp::disco::info::{parse_disco_info_response, DISCO_INFO_NS};
 
 use crate::server::caps_resolution::CapsVerification;
 use crate::server::routes::websocket::WebSocketState;
-
-const NS_DISCO_INFO: &str = "http://jabber.org/protocol/disco#info";
 
 pub(super) fn handle_caps_disco_info_result(
     iq: &xmpp_parsers::iq::Iq,
@@ -54,7 +52,7 @@ pub(super) fn handle_caps_disco_info_result(
         _ => return,
     };
 
-    if query.name() != "query" || query.ns() != NS_DISCO_INFO {
+    if query.name() != "query" || query.ns() != DISCO_INFO_NS {
         debug!(id = %iq.id, "caps disco#info reply payload is not a disco#info query element");
         return;
     }
@@ -67,7 +65,12 @@ pub(super) fn handle_caps_disco_info_result(
         }
     };
 
-    match resolver.complete_pending(pending, parsed.identities, parsed.features) {
+    match resolver.complete_pending(
+        pending,
+        parsed.identities,
+        parsed.features,
+        parsed.extensions,
+    ) {
         CapsVerification::Match => {
             debug!(id = %iq.id, jid = %sender, "Cached XEP-0115 caps after hash verification");
         }

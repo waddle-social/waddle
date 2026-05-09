@@ -293,6 +293,73 @@ async fn caps_mismatched_hash_reply_is_rejected_and_not_cached() {
 }
 
 // ============================================================================
+// Test 3b — caps_iq_error_reply_is_not_cached_and_re_resolves
+// ============================================================================
+//
+// XEP-0115 §5.4: a disco#info IQ-error reply is not a verifiable
+// caps assertion. The recipient MUST NOT cache anything and the next
+// advertisement of the same `(hash, ver)` MUST re-resolve.
+
+#[tokio::test]
+async fn caps_iq_error_reply_is_not_cached_and_re_resolves() {
+    let _serial = TEST_SERIAL.lock().await;
+    let server = TestServer::start();
+    let mut admin = admin_client(&server, "caps-iqerr-1").await;
+    let admin_full_jid = admin.full_jid.clone().expect("full jid");
+
+    let node = "https://example.test/caps#iq-error";
+    let features = ["urn:xmpp:ping"];
+    let ver = caps_verification_string("client", "pc", "Erroring Client", &features);
+
+    admin
+        .send(&format!(
+            r#"<presence xmlns="jabber:client"><c xmlns="{NS_CAPS}" hash="sha-1" node="{node}" ver="{ver}"/></presence>"#
+        ))
+        .await
+        .expect("send caps presence");
+
+    let disco_query = admin
+        .recv_matching(|frame| {
+            frame.contains("<iq")
+                && frame.contains(r#"type="get""#)
+                && frame.contains(NS_DISCO_INFO)
+        })
+        .await
+        .expect("server queries admin");
+    let iq_id = extract_iq_id(&disco_query);
+
+    // Reply with an IQ error instead of a result.
+    admin
+        .send(&format!(
+            r#"<iq xmlns="jabber:client" type="error" id="{iq_id}" from="{admin_full_jid}"><error type="cancel"><service-unavailable xmlns="urn:ietf:params:xml:ns:xmpp-stanzas"/></error></iq>"#
+        ))
+        .await
+        .expect("admin replies with IQ error");
+
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    let mut admin2 = admin_client(&server, "caps-iqerr-2").await;
+    admin2
+        .send(&format!(
+            r#"<presence xmlns="jabber:client"><c xmlns="{NS_CAPS}" hash="sha-1" node="{node}" ver="{ver}"/></presence>"#
+        ))
+        .await
+        .expect("admin2 sends caps");
+
+    let _re_query = admin2
+        .recv_matching(|frame| {
+            frame.contains("<iq")
+                && frame.contains(r#"type="get""#)
+                && frame.contains(NS_DISCO_INFO)
+        })
+        .await
+        .expect("IQ error MUST NOT populate cache; next advert MUST re-resolve");
+
+    let _ = admin.close().await;
+    let _ = admin2.close().await;
+}
+
+// ============================================================================
 // Test 4 — caps_cache_survives_publisher_disconnect_for_cross_session_reuse
 // ============================================================================
 //

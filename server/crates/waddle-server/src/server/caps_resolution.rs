@@ -8,24 +8,25 @@
 //! - **Cache miss:** sends a typed `disco#info` IQ get to the resource
 //!   with `node="<NODE>#<VER>"` (XEP-0115 §6.2). The reply is verified
 //!   per §5.4 — the recipient MUST recompute the verification string
-//!   from the disco#info response and only cache when the recomputed
-//!   hash matches the advertised `ver`.
+//!   from the disco#info response (identities + features + XEP-0128
+//!   forms) and only cache when the recomputed hash matches the
+//!   advertised `ver`.
 //!
-//! On disconnect, the per-resource mapping is dropped while the
-//! hash-keyed `CapsCache` itself stays warm so the next session can
-//! reuse cross-session knowledge (XEP-0115 §6).
+//! On disconnect, the per-resource mapping AND any in-flight pending
+//! resolution for that resource are dropped while the hash-keyed
+//! `CapsCache` itself stays warm so the next session can reuse
+//! cross-session knowledge (XEP-0115 §6).
 
-use std::str::FromStr;
 use std::sync::Arc;
 
 use dashmap::DashMap;
 use jid::{FullJid, Jid};
-use waddle_xmpp::disco::info::{Feature, Identity};
-use waddle_xmpp::xep::xep0115::{compute_caps_hash, CachedDiscoInfo, Caps, CapsCache};
+use waddle_xmpp::disco::info::{Feature, Identity, DISCO_INFO_NS};
+use waddle_xmpp::xep::xep0115::{
+    compute_caps_hash_with_extensions, CachedDiscoInfo, Caps, CapsCache,
+};
 use xmpp_parsers::iq::{Iq, IqType};
 use xmpp_parsers::minidom::Element;
-
-const NS_DISCO_INFO: &str = "http://jabber.org/protocol/disco#info";
 
 /// Outcome of recomputing and verifying a disco#info reply against an
 /// advertised `ver` per XEP-0115 §5.4.
@@ -57,7 +58,7 @@ pub struct PendingCapsResolution {
 #[derive(Clone)]
 pub struct CapsResolver {
     cache: Arc<CapsCache>,
-    resource_to_ver: Arc<DashMap<String, String>>,
+    resource_to_ver: Arc<DashMap<FullJid, String>>,
     pending: Arc<DashMap<String, PendingCapsResolution>>,
 }
 
@@ -84,19 +85,22 @@ impl CapsResolver {
     /// cache hit and after a successful verification.
     pub fn record_resource(&self, full_jid: &FullJid, ver: &str) {
         self.resource_to_ver
-            .insert(full_jid.to_string(), ver.to_string());
+            .insert(full_jid.clone(), ver.to_string());
     }
 
-    /// Drop the per-resource mapping. Called on resource disconnect.
-    /// Leaves the hash-keyed cache warm.
+    /// Drop the per-resource mapping AND any in-flight pending
+    /// disco#info resolution for that resource. Called on resource
+    /// disconnect (live or detached-session expiry). Leaves the
+    /// hash-keyed cache warm.
     pub fn drop_resource(&self, full_jid: &FullJid) {
-        self.resource_to_ver.remove(&full_jid.to_string());
+        self.resource_to_ver.remove(full_jid);
+        self.pending.retain(|_, v| v.full_jid != *full_jid);
     }
 
     /// Return the ver advertised by `full_jid`, if any.
     pub fn ver_for_resource(&self, full_jid: &FullJid) -> Option<String> {
         self.resource_to_ver
-            .get(&full_jid.to_string())
+            .get(full_jid)
             .map(|v| v.value().clone())
     }
 
@@ -123,13 +127,19 @@ impl CapsResolver {
     /// per XEP-0115 §5.4. On match, the (hash, ver) is cached and the
     /// resource→ver mapping recorded. On mismatch, neither side
     /// effect occurs.
+    ///
+    /// `extensions` MUST include any XEP-0128 `<x xmlns="jabber:x:data"
+    /// type="result"/>` forms returned alongside identities/features —
+    /// dropping them silently breaks verification for any client that
+    /// emits a software-info form.
     pub fn complete_pending(
         &self,
         pending: PendingCapsResolution,
         identities: Vec<Identity>,
         features: Vec<Feature>,
+        extensions: Vec<Element>,
     ) -> CapsVerification {
-        let recomputed = compute_caps_hash(&identities, &features);
+        let recomputed = compute_caps_hash_with_extensions(&identities, &features, &extensions);
         if recomputed != pending.caps.ver {
             return CapsVerification::Mismatch;
         }
@@ -144,23 +154,28 @@ impl CapsResolver {
 
 /// Build a typed disco#info IQ get for caps resolution.
 /// Per XEP-0115 §6.2 the query MUST carry `node="<NODE>#<VER>"`.
+///
+/// `server_domain` is the validated XMPP domain configured at server
+/// boot — `Jid::Domain` construction is infallible for a non-empty
+/// validated domain string, so the helper never fails at runtime.
 pub fn build_caps_disco_info_query(
     server_domain: &str,
     target: &FullJid,
     caps: &Caps,
     iq_id: &str,
-) -> Result<Iq, String> {
-    let from = Jid::from_str(server_domain)
-        .map_err(|e| format!("server domain is not a valid JID: {e}"))?;
-    let query = Element::builder("query", NS_DISCO_INFO)
+) -> Iq {
+    let from = server_domain
+        .parse::<Jid>()
+        .expect("waddle xmpp_domain is validated as a JID at startup");
+    let query = Element::builder("query", DISCO_INFO_NS)
         .attr("node", caps.node_ver())
         .build();
-    Ok(Iq {
+    Iq {
         from: Some(from),
         to: Some(Jid::from(target.clone())),
         id: iq_id.to_string(),
         payload: IqType::Get(query),
-    })
+    }
 }
 
 /// Extract a `<c hash node ver/>` payload from a typed `Presence`.
@@ -176,6 +191,7 @@ pub fn extract_caps_payload(presence: &xmpp_parsers::presence::Presence) -> Opti
 #[cfg(test)]
 mod tests {
     use super::*;
+    use waddle_xmpp::xep::xep0115::compute_caps_hash;
 
     fn sample_identities() -> Vec<Identity> {
         vec![Identity::server(Some("Waddle Test"))]
@@ -183,6 +199,36 @@ mod tests {
 
     fn sample_features() -> Vec<Feature> {
         vec![Feature::disco_info(), Feature::disco_items()]
+    }
+
+    /// Build a XEP-0128 `<x xmlns="jabber:x:data" type="result">` form
+    /// with a single FORM_TYPE field and one extra var. Used to
+    /// exercise the extension path through `compute_caps_hash_with_extensions`.
+    fn sample_extension_form(form_type: &str, software: &str) -> Element {
+        Element::builder("x", "jabber:x:data")
+            .attr("type", "result")
+            .append(
+                Element::builder("field", "jabber:x:data")
+                    .attr("var", "FORM_TYPE")
+                    .attr("type", "hidden")
+                    .append(
+                        Element::builder("value", "jabber:x:data")
+                            .append(form_type)
+                            .build(),
+                    )
+                    .build(),
+            )
+            .append(
+                Element::builder("field", "jabber:x:data")
+                    .attr("var", "software")
+                    .append(
+                        Element::builder("value", "jabber:x:data")
+                            .append(software)
+                            .build(),
+                    )
+                    .build(),
+            )
+            .build()
     }
 
     #[test]
@@ -196,7 +242,8 @@ mod tests {
         resolver.begin_pending("iq-1".into(), full_jid.clone(), caps.clone());
         let pending = resolver.take_pending("iq-1").expect("pending entry");
 
-        let outcome = resolver.complete_pending(pending, identities.clone(), features.clone());
+        let outcome =
+            resolver.complete_pending(pending, identities.clone(), features.clone(), vec![]);
 
         assert_eq!(outcome, CapsVerification::Match);
         assert!(resolver.cached(&ver).is_some());
@@ -214,7 +261,7 @@ mod tests {
         resolver.begin_pending("iq-2".into(), full_jid.clone(), caps);
         let pending = resolver.take_pending("iq-2").expect("pending entry");
 
-        let outcome = resolver.complete_pending(pending, identities, features);
+        let outcome = resolver.complete_pending(pending, identities, features, vec![]);
 
         assert_eq!(outcome, CapsVerification::Mismatch);
         assert!(resolver.cached(advertised).is_none());
@@ -222,20 +269,71 @@ mod tests {
     }
 
     #[test]
-    fn drop_resource_clears_mapping_but_not_hash_cache() {
+    fn complete_pending_includes_xep0128_form_in_recomputed_hash() {
+        let resolver = CapsResolver::default();
+        let identities = sample_identities();
+        let features = sample_features();
+        let extension = sample_extension_form("urn:xmpp:dataforms:softwareinfo", "Waddle");
+        // ver was computed *with* the form. Without feeding the form
+        // back into recomputation the verification would mismatch —
+        // see Issue 1 in the PR 1 adversarial review.
+        let ver = compute_caps_hash_with_extensions(
+            &identities,
+            &features,
+            std::slice::from_ref(&extension),
+        );
+        let full_jid: FullJid = "alice@localhost/r1".parse().expect("jid");
+        let caps = Caps::new("https://example.test/caps", &ver);
+        resolver.begin_pending("iq-3".into(), full_jid.clone(), caps);
+        let pending = resolver.take_pending("iq-3").expect("pending entry");
+
+        let outcome = resolver.complete_pending(
+            pending,
+            identities.clone(),
+            features.clone(),
+            vec![extension],
+        );
+
+        assert_eq!(outcome, CapsVerification::Match);
+        assert_eq!(resolver.ver_for_resource(&full_jid), Some(ver));
+    }
+
+    #[test]
+    fn drop_resource_clears_mapping_and_pending_but_not_hash_cache() {
         let resolver = CapsResolver::default();
         let identities = sample_identities();
         let features = sample_features();
         let ver = compute_caps_hash(&identities, &features);
         let full_jid: FullJid = "alice@localhost/r1".parse().expect("jid");
+        let other_jid: FullJid = "bob@localhost/r1".parse().expect("jid");
         resolver
             .cache()
             .insert(&ver, CachedDiscoInfo::new(identities, features));
         resolver.record_resource(&full_jid, &ver);
+        // Pending entry for the resource that's about to disconnect AND
+        // an unrelated entry that MUST survive.
+        resolver.begin_pending(
+            "iq-leak".into(),
+            full_jid.clone(),
+            Caps::new("https://example.test/caps", &ver),
+        );
+        resolver.begin_pending(
+            "iq-keep".into(),
+            other_jid.clone(),
+            Caps::new("https://example.test/caps", "other-ver"),
+        );
 
         resolver.drop_resource(&full_jid);
 
         assert_eq!(resolver.ver_for_resource(&full_jid), None);
+        assert!(
+            resolver.take_pending("iq-leak").is_none(),
+            "drop_resource MUST also evict the pending entry to bound memory growth"
+        );
+        assert!(
+            resolver.take_pending("iq-keep").is_some(),
+            "drop_resource MUST not touch unrelated pending entries"
+        );
         assert!(resolver.cached(&ver).is_some());
     }
 }

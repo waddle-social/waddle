@@ -237,18 +237,12 @@ async fn resolve_caps_for_presence(
         return;
     }
     let iq_id = format!("waddle-caps-disco-{}", uuid::Uuid::new_v4());
-    let iq = match build_caps_disco_info_query(
+    let iq = build_caps_disco_info_query(
         &state.deps.auth_state.xmpp_domain,
         sender_jid,
         &caps,
         &iq_id,
-    ) {
-        Ok(iq) => iq,
-        Err(error) => {
-            warn!(error = %error, "Failed to build caps disco#info query");
-            return;
-        }
-    };
+    );
     resolver.begin_pending(iq_id, sender_jid.clone(), caps);
     let _ = state
         .deps

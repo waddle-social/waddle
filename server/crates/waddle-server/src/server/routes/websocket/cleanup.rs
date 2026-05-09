@@ -259,6 +259,14 @@ pub(super) async fn cleanup_invalidated_detached_session(
             .protocol
             .connection_registry
             .unregister(&detached.jid);
+        // XEP-0115 §6: clear the resource→ver mapping AND any stuck
+        // pending disco#info resolution for this resource so an
+        // unresumed detached session doesn't leak indefinitely.
+        state
+            .deps
+            .protocol
+            .caps_resolver
+            .drop_resource(&detached.jid);
     }
     if detached.presence_available && !replacement_is_current_owner {
         handlers::presence::broadcast_unavailable_for_expired_detached_session(
