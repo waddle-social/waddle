@@ -172,16 +172,7 @@ async fn send_blocking_presence_side_effects(
         }
     };
 
-    let subscriber_bares: HashSet<BareJid> = subscribers
-        .into_iter()
-        .filter_map(|jid| match jid.parse::<Jid>() {
-            Ok(jid) => Some(jid.to_bare()),
-            Err(error) => {
-                warn!(jid, %error, "Skipping invalid stored roster subscriber JID");
-                None
-            }
-        })
-        .collect();
+    let subscriber_bares: HashSet<BareJid> = subscribers.into_iter().collect();
 
     let mut targets = Vec::new();
     let mut seen = HashSet::new();

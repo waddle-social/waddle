@@ -157,15 +157,13 @@ pub(crate) async fn get_presence_subscribers(
     debug!(jid = %user_jid, "Getting presence subscribers");
 
     let storage = DatabaseRosterStorage::new(db);
-    let jid_strings = storage
+    storage
         .get_presence_subscribers(user_jid)
         .await
         .map_err(|e| {
             warn!(jid = %user_jid, error = %e, "Failed to get presence subscribers");
             XmppError::internal(format!("Database error: {}", e))
-        })?;
-
-    parse_bare_jids(&jid_strings, user_jid, "presence subscriber")
+        })
 }
 
 pub(crate) async fn get_presence_subscriptions(

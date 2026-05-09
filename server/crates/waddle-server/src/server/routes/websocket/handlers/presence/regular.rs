@@ -160,10 +160,7 @@ async fn broadcast_presence_to_subscribers(
             return;
         }
     };
-    for subscriber in subscribers {
-        let Ok(subscriber_bare) = subscriber.parse::<BareJid>() else {
-            continue;
-        };
+    for subscriber_bare in subscribers {
         if recipient_blocks_sender(state, &sender_jid.to_bare(), &subscriber_bare).await {
             continue;
         }

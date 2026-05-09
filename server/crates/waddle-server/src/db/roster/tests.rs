@@ -162,8 +162,10 @@ async fn test_presence_queries() {
 
     let subscribers = storage.get_presence_subscribers(&user_jid).await.unwrap();
     assert_eq!(subscribers.len(), 2);
-    assert!(subscribers.contains(&"carol@example.com".to_string()));
-    assert!(subscribers.contains(&"dan@example.com".to_string()));
+    let carol: BareJid = "carol@example.com".parse().unwrap();
+    let dan: BareJid = "dan@example.com".parse().unwrap();
+    assert!(subscribers.contains(&carol));
+    assert!(subscribers.contains(&dan));
 
     let subscriptions = storage.get_presence_subscriptions(&user_jid).await.unwrap();
     assert_eq!(subscriptions.len(), 2);

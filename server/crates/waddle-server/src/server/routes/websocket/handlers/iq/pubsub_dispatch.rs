@@ -127,11 +127,15 @@ pub(super) async fn handle_pubsub_iq(
                         );
                         pubsub_fanout::fan_out_publish(
                             state,
-                            &target_jid,
-                            &node,
-                            &item,
-                            &publish_result.item_id,
-                            Some(&user_jid),
+                            pubsub_fanout::FanOutRequest {
+                                owner: &target_jid,
+                                node: &node,
+                                published_item: &item,
+                                item_id: &publish_result.item_id,
+                                publisher: Some(&user_jid),
+                                publisher_full: phase.bound_jid(),
+                                is_pep,
+                            },
                         )
                         .await;
                         let response =

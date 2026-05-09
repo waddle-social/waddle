@@ -153,13 +153,6 @@ pub async fn broadcast_unavailable_for_expired_detached_session(
     };
 
     for subscriber in subscribers {
-        let Ok(subscriber) = subscriber.parse::<BareJid>() else {
-            warn!(
-                subscriber,
-                "Skipping invalid stored presence subscriber JID"
-            );
-            continue;
-        };
         let mut presence =
             xmpp_parsers::presence::Presence::new(xmpp_parsers::presence::Type::Unavailable);
         presence.from = Some(Jid::from(from.clone()));
