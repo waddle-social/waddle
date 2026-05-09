@@ -296,3 +296,86 @@ fn test_history_request_default() {
     assert_eq!(default.maxstanzas, Some(25));
     assert!(!default.is_disabled());
 }
+
+/// XEP-0045 §10.9: when a room is destroyed, each occupant receives
+/// `<presence type='unavailable'>` carrying `<x xmlns='muc#user'>`
+/// with `<item affiliation='none' role='none'/>` and a `<destroy/>`
+/// child that conveys the optional alternate venue and reason.
+/// Self-presence additionally carries status code 110.
+#[test]
+fn test_build_destroy_notification() {
+    use jid::BareJid;
+    let room_jid: BareJid = "room@muc.example.com".parse().unwrap();
+    let occupant_jid: FullJid = "user@example.com/res".parse().unwrap();
+
+    let request = DestroyRequest {
+        reason: Some("Room closed".to_string()),
+        alternate_venue: Some("newroom@muc.example.com".parse().unwrap()),
+        password: None,
+    };
+
+    let presence = build_destroy_notification(&room_jid, "user", &occupant_jid, &request, true);
+
+    assert!(matches!(presence.type_, PresenceType::Unavailable));
+    assert!(presence.from.is_some());
+    assert!(presence.to.is_some());
+
+    let x_elem = presence
+        .payloads
+        .iter()
+        .find(|p| p.name() == "x" && p.ns() == NS_MUC_USER)
+        .expect("muc#user x element");
+
+    let item = x_elem.get_child("item", NS_MUC_USER).expect("item element");
+    assert_eq!(item.attr("affiliation"), Some("none"));
+    assert_eq!(item.attr("role"), Some("none"));
+
+    let destroy = x_elem
+        .get_child("destroy", NS_MUC_USER)
+        .expect("destroy element");
+    assert_eq!(destroy.attr("jid"), Some("newroom@muc.example.com"));
+
+    let reason = destroy
+        .get_child("reason", NS_MUC_USER)
+        .expect("reason element");
+    assert_eq!(reason.text(), "Room closed");
+
+    let status_110 = x_elem
+        .children()
+        .filter(|c| c.is("status", NS_MUC_USER))
+        .find(|s| s.attr("code") == Some("110"));
+    assert!(
+        status_110.is_some(),
+        "self-presence must carry status code 110"
+    );
+}
+
+/// XEP-0045 §10.9: a destroy notification addressed to a different
+/// occupant (not self) must NOT carry status code 110, and the
+/// `<destroy/>` child stays present even with no reason / alternate.
+#[test]
+fn test_build_destroy_notification_not_self_minimal() {
+    use jid::BareJid;
+    let room_jid: BareJid = "room@muc.example.com".parse().unwrap();
+    let occupant_jid: FullJid = "bob@example.com/desk".parse().unwrap();
+    let presence = build_destroy_notification(
+        &room_jid,
+        "alice",
+        &occupant_jid,
+        &DestroyRequest::default(),
+        false,
+    );
+    let x_elem = presence
+        .payloads
+        .iter()
+        .find(|p| p.name() == "x" && p.ns() == NS_MUC_USER)
+        .expect("muc#user x element");
+    assert!(x_elem.get_child("destroy", NS_MUC_USER).is_some());
+    assert!(
+        x_elem
+            .children()
+            .filter(|c| c.is("status", NS_MUC_USER))
+            .all(|s| s.attr("code") != Some("110")),
+        "non-self destroy must not carry status code 110"
+    );
+}

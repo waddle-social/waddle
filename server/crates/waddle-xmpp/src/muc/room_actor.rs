@@ -22,9 +22,7 @@ mod snapshot_handlers;
 #[cfg(test)]
 mod tests;
 
-pub use admin_handlers::{
-    ApplyAdminItems, ApplyOwnerConfig, DestroyWithNotifications, GetAdminContext, IsOwner,
-};
+pub use admin_handlers::{ApplyAdminItems, GetAdminContext, IsOwner};
 pub use occupancy_handlers::{
     JoinWithAffiliation, LeaveByRealJid, PingSelfCheck, PresenceUpdateData,
     ReconcileChannelBackedRoom,
