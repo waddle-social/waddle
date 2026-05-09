@@ -183,7 +183,7 @@ fn response_effect(
         return Ok(command_answer_effect(answer));
     };
     send_room_message(&target, display(answer.text.as_str()))?;
-    Ok(types::ExtensionEffect::Noop)
+    Ok(channel_posted_effect())
 }
 
 fn room_message_request(
@@ -228,12 +228,33 @@ fn sent_room_messages() -> &'static std::sync::Mutex<Vec<types::SendMessageReque
     SENT_ROOM_MESSAGES.get_or_init(|| std::sync::Mutex::new(Vec::new()))
 }
 
+#[cfg(test)]
+pub(crate) fn take_sent_room_messages() -> Vec<types::SendMessageRequest> {
+    std::mem::take(
+        &mut *sent_room_messages()
+            .lock()
+            .expect("sent room messages lock"),
+    )
+}
+
 fn command_answer_effect(answer: ProviderAnswer) -> types::ExtensionEffect {
+    command_text_effect("ai-command-answer", "AI answer", answer.text.as_str())
+}
+
+fn channel_posted_effect() -> types::ExtensionEffect {
+    command_text_effect(
+        "ai-command-posted",
+        "AI answer posted",
+        "AI answer posted to channel.",
+    )
+}
+
+fn command_text_effect(id: &str, title: &str, text: &str) -> types::ExtensionEffect {
     types::ExtensionEffect::EnrichMessage(types::ExtensionEnvelope {
         version: 1,
         enrichments: vec![types::MessageEnrichment {
             id: types::EnrichmentId {
-                value: "ai-command-answer".to_string(),
+                value: id.to_string(),
             },
             plugin: plugin_id(),
             capability: types::ExtensionCapability::MessageEnrich,
@@ -242,11 +263,11 @@ fn command_answer_effect(answer: ProviderAnswer) -> types::ExtensionEffect {
             source: None,
             ui: vec![types::UiView {
                 id: types::UiViewId {
-                    value: "ai-command-answer".to_string(),
+                    value: id.to_string(),
                 },
-                title: Some(display("AI answer")),
+                title: Some(display(title)),
                 blocks: vec![types::UiBlock::Text(types::TextBlock {
-                    text: display(answer.text.as_str()),
+                    text: display(text),
                     style: types::TextStyle::Body,
                 })],
             }],

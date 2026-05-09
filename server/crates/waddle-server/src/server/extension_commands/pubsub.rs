@@ -246,3 +246,53 @@ fn extension_pubsub_node_config() -> NodeConfig {
     config.max_items = MAX_EXTENSION_PUBSUB_ITEMS;
     config
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use waddle_extensions::types::{
+        DisplayText, EnrichmentId, ExtensionCapability, ExtensionEnvelope, MessageEnrichment,
+        PayloadNamespace, PluginId, TextBlock, TextStyle, Timestamp, UiBlock, UiView, UiViewId,
+    };
+    use waddle_xmpp::commands::CommandResult;
+    use waddle_xmpp::xep::xep0050::NoteType;
+
+    #[tokio::test]
+    async fn enrichment_command_result_completes_without_noop_warning() {
+        let result =
+            extension_command_result(vec![ExtensionEffect::EnrichMessage(envelope())], None).await;
+
+        let CommandResult::Completed {
+            form: Some(_),
+            notes,
+        } = result
+        else {
+            panic!("expected completed command result with visible form");
+        };
+        assert!(notes.iter().all(|note| note.note_type != NoteType::Warn));
+        assert!(notes.iter().any(|note| {
+            note.note_type == NoteType::Info && note.text == "AI answer posted to channel."
+        }));
+    }
+
+    fn envelope() -> ExtensionEnvelope {
+        ExtensionEnvelope::new(vec![MessageEnrichment {
+            id: EnrichmentId::new("ai-command-posted").expect("enrichment id"),
+            plugin: PluginId::new("ai-chatbot").expect("plugin id"),
+            capability: ExtensionCapability::MessageEnrich,
+            payload_namespace: PayloadNamespace::framework(),
+            created_at: Timestamp::new("2026-05-09T00:00:00Z").expect("timestamp"),
+            source: None,
+            ui: vec![UiView {
+                id: UiViewId::new("ai-command-posted").expect("view id"),
+                title: Some(DisplayText::new("AI answer posted").expect("title")),
+                blocks: vec![UiBlock::Text(TextBlock {
+                    text: DisplayText::new("AI answer posted to channel.").expect("body"),
+                    style: TextStyle::Body,
+                })],
+            }],
+            payloads: vec![],
+            launches: vec![],
+        }])
+    }
+}

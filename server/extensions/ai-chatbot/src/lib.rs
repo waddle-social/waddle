@@ -102,7 +102,7 @@ fn provider_config() -> Result<RuntimeProviderConfig, types::ExtensionError> {
 }
 
 #[cfg(test)]
-pub(crate) use command::command_response_with_config;
+pub(crate) use command::{command_response_with_config, take_sent_room_messages};
 #[cfg(test)]
 pub(crate) use constants::{
     BASELINE_SYSTEM_PROMPT, COMMAND_NODE, MAX_CONTEXT_BYTES, MAX_CONTEXT_LINE_BYTES,

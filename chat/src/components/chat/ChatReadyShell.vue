@@ -84,6 +84,7 @@ const {
   openCreateChannelDialog,
   openChannelEdit,
   sendActiveMessage,
+  sendPublicChannelMessage,
   sendThreadMessage,
   sendGif,
   openThread,
@@ -297,6 +298,7 @@ function setPinnedPanelOpen(isOpen: boolean) {
               :xmpp-client="xmppClient"
               :reaction-mode="reactionModeTarget === 'main' ? reactionModeState : null"
               :ensure-message-loaded="ensureActiveMessageLoaded"
+              :send-public-channel-message="sendPublicChannelMessage"
               @send="sendActiveMessage"
               @typing="notifyActiveComposing"
               @edit-message="editActiveMessage"

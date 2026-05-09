@@ -15,11 +15,13 @@ import type { SlashInvocation } from "@/lib/slash-dispatch";
 type ExtensionLauncherState = "idle" | "loading" | "error";
 type ExtensionCommandUiState = "loading" | "success" | "warning" | "error";
 type ReadonlyRef<T> = Readonly<Ref<T>>;
+const AI_CHATBOT_COMMAND_NODE = "urn:waddle:extension:1:ai-chatbot";
 
 export function useExtensionLauncher(input: {
   xmppClient: ReadonlyRef<BrowserXmppClient | null | undefined>;
   roomJid: ReadonlyRef<string | null | undefined>;
   invokeExtensionAction: ReadonlyRef<((action: ExtensionAnnotationAction) => Promise<ExtensionCommandResult>) | undefined>;
+  sendPublicChannelMessage?: ReadonlyRef<((body: string) => Promise<void>) | undefined>;
   focusPalette: () => void;
   focusComposerExtensions: () => void;
 }) {
@@ -170,22 +172,31 @@ export function useExtensionLauncher(input: {
     discoveryAttempted = false;
   }
 
-  async function submitForm(command: DiscoveredExtensionCommand, action: ExtensionCommandAction = "complete") {
+  async function submitForm(
+    command: DiscoveredExtensionCommand,
+    action: ExtensionCommandAction = "complete",
+    options: { skipPublicPrompt?: boolean } = {},
+  ): Promise<boolean> {
     const client = input.xmppClient.value;
-    if (!client) return;
+    if (!client) return false;
     const key = command.node;
     const form = commandForms.value[key];
-    if (!form) return;
+    if (!form) return false;
     commandStates.value = { ...commandStates.value, [key]: { state: "loading" } };
     try {
+      if (!options.skipPublicPrompt) {
+        await sendPublicPromptIfRequested(command, form.fields, action);
+      }
       const result = await client.submitExtensionCommandForm(command, form.sessionId, form.fields, action, input.roomJid.value ?? undefined);
       storeResultSurfaces(key, result);
       commandStates.value = { ...commandStates.value, [key]: extensionCommandOutcome(result) };
+      return true;
     } catch (error) {
       commandStates.value = {
         ...commandStates.value,
         [key]: { state: "error", detail: error instanceof Error ? error.message : "Extension form submission failed." },
       };
+      return false;
     }
   }
 
@@ -231,8 +242,8 @@ export function useExtensionLauncher(input: {
       const allowed = form?.actions ?? [];
       if (form && allowed.includes("complete")) {
         updateField(key, invocation.fieldName, [invocation.value]);
-        await submitForm(command, "complete");
-        return true;
+        forceChannelOutputForSlashAi(command);
+        return await submitForm(command, "complete");
       }
 
       commandStates.value = { ...commandStates.value, [key]: extensionCommandOutcome(result) };
@@ -249,6 +260,42 @@ export function useExtensionLauncher(input: {
       };
       return false;
     }
+  }
+
+  async function sendPublicPromptIfRequested(
+    command: DiscoveredExtensionCommand,
+    fields: ExtensionCommandFormField[],
+    action: ExtensionCommandAction,
+  ) {
+    if (command.node !== AI_CHATBOT_COMMAND_NODE) return;
+    if (action === "cancel" || action === "prev") return;
+    if (formFieldValue(fields, "output") !== "channel") return;
+    if (!input.roomJid.value) return;
+    const prompt = formFieldValue(fields, "prompt")?.trim();
+    if (!prompt) return;
+    const sendPublicChannelMessage = input.sendPublicChannelMessage?.value;
+    if (!sendPublicChannelMessage) {
+      throw new Error("Cannot post the AI prompt to this channel.");
+    }
+    await sendPublicChannelMessage(prompt);
+  }
+
+  function forceChannelOutputForSlashAi(command: DiscoveredExtensionCommand) {
+    if (!input.roomJid.value || command.node !== AI_CHATBOT_COMMAND_NODE) return;
+    const form = commandForms.value[command.node];
+    const output = form?.fields.find((field) => field.name === "output");
+    if (!output) return;
+    const supportsChannelOutput = output.options.length === 0
+      || output.options.some((option) => option.value === "channel");
+    if (supportsChannelOutput) updateField(command.node, "output", ["channel"]);
+  }
+
+  function formFieldValue(
+    fields: ExtensionCommandFormField[],
+    name: string,
+  ): string | undefined {
+    const field = fields.find((candidate) => candidate.name === name);
+    return field?.values.find((value) => value.trim().length > 0) ?? field?.value;
   }
 
   async function invokeResultAction(command: DiscoveredExtensionCommand, action: ExtensionAnnotationAction) {
