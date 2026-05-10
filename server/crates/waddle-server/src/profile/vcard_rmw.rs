@@ -74,7 +74,7 @@ pub fn apply_vcard_temp_update(
 /// Why a URI rather than an inline `data:` payload: vCard4 items
 /// fan out via XEP-0163 §3 to every roster contact's `+notify`
 /// resource. Embedding base64 PNG bytes makes each fan-out stanza
-/// the size of the avatar (~133 KB at the 100 KB cap), risking
+/// the size of the avatar (up to ~1.4 MB at the 1 MB cap), risking
 /// per-stanza limits and bandwidth amplification. The published
 /// `urn:xmpp:avatar:data` PEP node already holds the bytes; vCard4
 /// just references them.

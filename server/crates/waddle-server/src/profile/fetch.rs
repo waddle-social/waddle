@@ -21,9 +21,18 @@
 //!   `reqwest::redirect::Policy`. OIDC providers typically serve
 //!   avatar URLs directly; if you see this in practice, file an
 //!   issue.
-//! - **Streaming size cap:** 100 KB hard cap, enforced chunk-by-chunk
+//! - **Streaming size cap:** 1 MB hard cap, enforced chunk-by-chunk
 //!   on the response body so an oversize/slowloris/lying-Content-Length
-//!   server cannot OOM us.
+//!   server cannot OOM us. The same cap is re-applied post-transcode
+//!   because lossy → lossless re-encoding (e.g. JPEG → PNG) can
+//!   inflate 5–10× for photo-like content. 1 MB is the value
+//!   issue #363 reserved for the post-#437 (object-storage) world;
+//!   the project runs Postgres in prod (TEXT ≤ 1 GB), so the
+//!   100 KB transitional D1 cap doesn't apply here. A real GitHub
+//!   `?v=4` avatar at 460×460 transcodes to a PNG in the
+//!   150–800 KB range — the previous 100 KB cap rejected every
+//!   non-trivial-detail JPEG source even after #450's transcoding
+//!   landed.
 //! - **MIME:** allowlist of `image/png`, `image/jpeg`, `image/gif`,
 //!   `image/webp` at the fetch boundary. Non-PNG bodies are decoded
 //!   and re-encoded as PNG before the helper returns — XEP-0084 §3.2
@@ -57,7 +66,12 @@ use thiserror::Error;
 use tracing::{debug, warn};
 use url::{Host, Url};
 
-const MAX_BYTES: usize = 100 * 1024;
+/// Hard cap on both the source response body (OOM defense) and the
+/// post-transcode PNG (D1 storage budget when applicable). Sized to
+/// fit a real GitHub avatar after JPEG → PNG re-encoding; see the
+/// module-level "Streaming size cap" note for the rationale and
+/// issue #363 for the original transitional cap of 100 KB.
+const MAX_BYTES: usize = 1024 * 1024;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const TOTAL_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -255,7 +269,7 @@ fn compute_fetch_policy_digest(
     // cross-arch redeploy (or even a debug-vs-release build with
     // different target tuples) would shift the digest and trigger
     // a spurious throttle invalidation for every policy-dependent
-    // user. `MAX_BYTES` is 100 KB; never overflows `u64`.
+    // user. `MAX_BYTES` is 1 MB; never overflows `u64`.
     hasher.update((max_bytes as u64).to_le_bytes());
     hasher.update(max_image_dimension.to_le_bytes());
     for mime in allowed {
@@ -945,7 +959,7 @@ mod tests {
     #[test]
     fn transcode_to_png_rejects_oversize_dimensions() {
         // A PNG IHDR can declare any 32-bit width/height. The
-        // attacker's body is < 100 KB on the wire (passes the
+        // attacker's body is < 1 MB on the wire (passes the
         // streaming cap) but advertises billions of pixels; without
         // `image::Limits` the decoder would attempt to allocate
         // `width * height * channels` bytes and OOM the process.
