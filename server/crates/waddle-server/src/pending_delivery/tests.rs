@@ -1311,8 +1311,9 @@ async fn xep0160_pending_delivery_survives_server_restart() {
 /// Regression: `original_receipt_at` stores `timestamp_millis()` (i64
 /// ms-since-epoch). On Postgres, the column MUST be `BIGINT` — using
 /// `INTEGER` (i32, max ~2.1B) overflowed on every write past
-/// 2001-09-09, taking reactions and other pending-delivery writes down
-/// with it (production logs spammed `numeric_value_out_of_range`).
+/// 2001-09-09, breaking XEP-0160 offline DM delivery on SM session
+/// resume / detach promotion (production logs spammed
+/// `numeric_value_out_of_range`).
 ///
 /// CI runs only against SQLite (where `INTEGER` is dynamic-width), so
 /// the bug slipped past the existing SQLite-backed coverage. This test
@@ -1349,8 +1350,9 @@ async fn db_storage_postgres_handles_i32_overflow_receipt_ms() {
     let recipient_local = format!("alice-{}", uuid::Uuid::new_v4());
     let recipient = bare(&format!("{recipient_local}@example.com"));
 
+    let row_id = PendingRowId::fresh();
     let row = PendingRow {
-        id: PendingRowId::fresh(),
+        id: row_id.clone(),
         recipient: recipient.clone(),
         original_receipt_at: receipt,
         payload: PendingPayload::Archived(StanzaId::new(
@@ -1370,9 +1372,12 @@ async fn db_storage_postgres_handles_i32_overflow_receipt_ms() {
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].original_receipt_at, receipt);
 
-    // Clean up so repeated runs are idempotent.
-    storage
-        .delete_older_than(receipt + chrono::Duration::seconds(1))
-        .await
-        .expect("cleanup");
+    // Clean up by the exact row id we just inserted so repeated runs
+    // are idempotent without touching unrelated rows. `delete_older_than`
+    // is a global cutoff across all recipients — using it for test
+    // cleanup against a `WADDLE_TEST_POSTGRES_URL` pointed at a shared
+    // dev/CI database could wipe production-shaped test fixtures from
+    // other suites.
+    let deleted = storage.delete_row(&row_id).await.expect("cleanup");
+    assert_eq!(deleted, 1, "test row must be deleted by id");
 }
