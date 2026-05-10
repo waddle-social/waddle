@@ -23,10 +23,19 @@
 //! X-Waddle-Test-Token: <token>
 //! {
 //!   "jid": "alice@localhost",
-//!   "photo": { "setFromUrl": "https://..." }   // OR { "removeIfOidcOwned": null } OR omit
-//!   "name":  { "set": "Alice" }                // OR { "remove": null } OR omit
+//!   "photo": { "setFromUrl": "https://..." }      // tuple variant
+//!         | { "removeIfOidcOwned": null },        // unit variant
+//!   "name":  { "set": "Alice" } | { "remove": null }
 //! }
 //! ```
+//!
+//! `photo` and `name` use Serde's default externally-tagged enum
+//! representation. Each field is independently optional; omit it
+//! for `Skip`. Unit variants (`removeIfOidcOwned`, `remove`) accept
+//! the JSON shape `{ "<variant>": null }` (matching the existing
+//! wire test fixtures); the equivalent bare-string form is also
+//! recognized by Serde but the object form is what the harness
+//! emits.
 //!
 //! `photo` and `name` are independently optional. Empty object is a
 //! no-op. Returns 200 with the typed `ProfilePublishOutcome` JSON on

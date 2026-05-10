@@ -65,13 +65,9 @@ struct PublishResp {
     published_avatar_removal: bool,
     mirrored_vcard_temp: bool,
     mirrored_vcard4: bool,
-    #[allow(dead_code)]
     removed_vcard_temp_photo: bool,
-    #[allow(dead_code)]
     removed_vcard_temp_fn: bool,
-    #[allow(dead_code)]
     removed_vcard4_photo: bool,
-    #[allow(dead_code)]
     removed_vcard4_fn: bool,
     photo_removal_guarded_by_user_managed: bool,
 }
@@ -645,6 +641,14 @@ async fn avatar_removal_publishes_empty_metadata_and_strips_vcards() {
         !rm1.photo_removal_guarded_by_user_managed,
         "no user self-publish so guard MUST NOT fire: {rm1:?}"
     );
+    assert!(
+        rm1.removed_vcard_temp_photo && rm1.removed_vcard4_photo,
+        "PHOTO must be stripped from both vcard surfaces: {rm1:?}"
+    );
+    assert!(
+        !rm1.removed_vcard_temp_fn && !rm1.removed_vcard4_fn,
+        "FN must be untouched on photo-only removal: {rm1:?}"
+    );
 
     let metadata = iq_get_to(
         &mut admin,
@@ -713,7 +717,15 @@ async fn fn_removal_strips_fn_from_both_vcard_surfaces() {
     )
     .await;
 
-    invoke_profile_publish(&server, &PublishReq::for_jid(&admin_bare).remove_name()).await;
+    let rm = invoke_profile_publish(&server, &PublishReq::for_jid(&admin_bare).remove_name()).await;
+    assert!(
+        rm.removed_vcard_temp_fn && rm.removed_vcard4_fn,
+        "FN must be stripped from both vcard surfaces: {rm:?}"
+    );
+    assert!(
+        !rm.removed_vcard_temp_photo && !rm.removed_vcard4_photo,
+        "PHOTO must be untouched on FN-only removal: {rm:?}"
+    );
 
     let vcard_temp = iq_get_to(
         &mut admin,
@@ -741,6 +753,98 @@ async fn fn_removal_strips_fn_from_both_vcard_surfaces() {
     assert!(
         !vcard4.contains("<fn"),
         "vCard4 <fn> must be stripped: {vcard4}"
+    );
+
+    let _ = admin.close().await;
+}
+
+// ============================================================================
+// cross_axis_remove_photo_plus_set_fn_applies_both
+// ============================================================================
+//
+// Cross-axis regression test: when one publish call asks to
+// `RemoveIfOidcOwned` PHOTO AND `Set` FN simultaneously, both axes
+// must take effect. A prior version of the chain dropped the new
+// FN value when paired with photo-removal because the
+// `match (photo_op, name_op)` had no `(RemovePublished, NameOp::Set)`
+// arm. The current `mirror_*` helpers handle this by computing
+// `after_set` from `(photo_set, name_set)` independently and then
+// applying the strip pass on top.
+
+#[tokio::test]
+async fn cross_axis_remove_photo_plus_set_fn_applies_both() {
+    let _serial = TEST_SERIAL.lock().await;
+    let server = TestServer::start();
+    let mut admin = admin_client(&server, "cross-axis-1").await;
+    let admin_bare = format!("{ADMIN}@{DOMAIN}");
+
+    let png = tiny_png();
+    let mock = wiremock::MockServer::start().await;
+    wiremock::Mock::given(wiremock::matchers::method("GET"))
+        .respond_with(
+            wiremock::ResponseTemplate::new(200)
+                .insert_header("content-type", "image/png")
+                .set_body_bytes(png.clone()),
+        )
+        .mount(&mock)
+        .await;
+
+    // Seed: PHOTO + initial FN.
+    invoke_profile_publish(
+        &server,
+        &PublishReq::for_jid(&admin_bare)
+            .set_name("Original FN")
+            .set_photo_url(format!("{}/seed.png", mock.uri())),
+    )
+    .await;
+
+    // Single publish: remove PHOTO + set new FN.
+    let mixed = invoke_profile_publish(
+        &server,
+        &PublishReq::for_jid(&admin_bare)
+            .remove_photo()
+            .set_name("Renamed"),
+    )
+    .await;
+    assert!(
+        mixed.published_avatar_removal,
+        "PHOTO removal must fire: {mixed:?}"
+    );
+    assert!(
+        mixed.removed_vcard_temp_photo && mixed.removed_vcard4_photo,
+        "PHOTO must be stripped from both vcard surfaces: {mixed:?}"
+    );
+
+    let vcard_temp = iq_get_to(
+        &mut admin,
+        "vcard-temp-cross-1",
+        &admin_bare,
+        r#"<vCard xmlns="vcard-temp"/>"#,
+    )
+    .await;
+    assert!(
+        !vcard_temp.contains("<PHOTO"),
+        "PHOTO stripped: {vcard_temp}"
+    );
+    assert!(
+        vcard_temp.contains("<FN") && vcard_temp.contains("Renamed"),
+        "new FN MUST be applied alongside PHOTO removal: {vcard_temp}"
+    );
+    assert!(
+        !vcard_temp.contains("Original FN"),
+        "old FN MUST be replaced: {vcard_temp}"
+    );
+
+    let vcard4 = iq_get_to(
+        &mut admin,
+        "vcard4-cross-1",
+        &admin_bare,
+        &format!(r#"<pubsub xmlns="{NS_PUBSUB}"><items node="urn:xmpp:vcard4"/></pubsub>"#),
+    )
+    .await;
+    assert!(
+        !vcard4.contains("<photo") && vcard4.contains("Renamed"),
+        "vCard4: photo stripped, new FN applied: {vcard4}"
     );
 
     let _ = admin.close().await;

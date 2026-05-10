@@ -145,6 +145,9 @@ pub async fn ensure_pep_profile_published(
         set_photo = outcome.photo_sha1_hex.is_some(),
         removed_photo = outcome.published_avatar_removal,
         guard_user_managed = outcome.photo_removal_guarded_by_user_managed,
+        set_fn = matches!(name_intent, NameIntent::Set(_)),
+        removed_fn = matches!(name_intent, NameIntent::Remove)
+            && (outcome.removed_vcard_temp_fn || outcome.removed_vcard4_fn),
         "ensure_pep_profile_published completed"
     );
 
@@ -261,6 +264,16 @@ async fn mirror_vcard_temp(
     };
 
     if let Some(vcard) = final_vcard {
+        // Idempotence guard — same rationale as `mirror_vcard4`'s
+        // guard below: skip the write when the vcard is unchanged
+        // so we don't bump storage timestamps and (more importantly,
+        // for any subscriber to vcard-temp via legacy IQ result
+        // delivery) re-emit the result for a no-op login.
+        if let Some(existing) = existing.as_ref() {
+            if String::from(existing) == String::from(&vcard) {
+                return Ok(());
+            }
+        }
         deps.vcard_store.set(jid, &vcard).await?;
         outcome.mirrored_vcard_temp = true;
         outcome.removed_vcard_temp_photo = removal.remove_photo;
@@ -317,6 +330,17 @@ async fn mirror_vcard4(
     };
 
     if let Some(vcard) = final_vcard4 {
+        // Idempotence guard: skip the publish (and the resulting
+        // XEP-0163 §3 fan-out event) when the serialized vCard4 hasn't
+        // changed. Without this every login that doesn't actually
+        // mutate a field still bumps `published_at` on `current` and
+        // emits a redundant `<message><event>` to every subscriber —
+        // measurable noise for IDPs that don't supply `name`.
+        if let Some(existing) = existing_vcard4.as_ref() {
+            if String::from(existing) == String::from(&vcard) {
+                return Ok(());
+            }
+        }
         publish_vcard4(&deps.state, jid, &vcard).await?;
         outcome.mirrored_vcard4 = true;
         outcome.removed_vcard4_photo = removal.remove_photo;

@@ -61,15 +61,17 @@ pub enum AvatarSourceStorageError {
 }
 
 /// Read the provenance flag for the user owning `jid`. Returns
-/// `Unknown` when the row is missing.
+/// `Unknown` when the row is missing or `jid` has no localpart
+/// (server-domain-only JIDs can't own avatars).
 pub async fn read_avatar_source(
     db_actor: &ActorRef<DbActor>,
     jid: &BareJid,
 ) -> Result<AvatarSource, AvatarSourceStorageError> {
-    let localpart = jid
-        .node()
-        .map(|n| n.as_str().to_string())
-        .unwrap_or_default();
+    let Some(localpart) = jid.node().map(|n| n.as_str().to_string()) else {
+        // No localpart → no possible avatar owner; skip the DB
+        // round-trip. Mirrors `record_self_published`'s early return.
+        return Ok(AvatarSource::Unknown);
+    };
     let row = db_actor
         .ask(DbQueryOne {
             sql: "SELECT source FROM user_avatar_source WHERE xmpp_localpart = ? LIMIT 1"
