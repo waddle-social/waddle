@@ -135,6 +135,48 @@ pub(crate) async fn create_router(
     // in a `tokio::spawn` from `auth/callback.rs`.
     install_profile_publish_hook(&auth_state, websocket_state.clone());
 
+    // One-shot OIDC-profile backfill at boot — best-effort,
+    // bounded-concurrency, idempotent. Registered with
+    // `profile_publish_tracker` so the graceful-shutdown drain
+    // awaits it before tearing down. The auth callback path
+    // continues to fire per-login, so a partial backfill is just
+    // "we'll catch up next boot."
+    {
+        let db_actor = websocket_state
+            .deps
+            .app_state
+            .db_pool
+            .global_actor()
+            .clone();
+        let backfill_state = websocket_state.clone();
+        let xmpp_domain = auth_state.xmpp_domain.clone();
+        let span = tracing::info_span!("oidc_profile_backfill");
+        let backfill_tracker = backfill_state.deps.protocol.profile_publish_tracker.clone();
+        let _backfill_handle = backfill_tracker.spawn(async move {
+            use tracing::Instrument;
+            let db = match db_actor.ask(crate::db::actor::GetDatabase).await {
+                Ok(db) => db,
+                Err(error) => {
+                    warn!(
+                        error = %error,
+                        "OIDC profile backfill: failed to acquire database; skipping run"
+                    );
+                    return;
+                }
+            };
+            let deps = crate::profile::ProfilePublishDeps {
+                state: backfill_state,
+                vcard_store: crate::vcard::VCardStore::new(db.into()),
+                fetch_policy: crate::profile::FetchPolicy::default(),
+            };
+            let _report = async move {
+                crate::profile::run_startup_backfill(&deps, &xmpp_domain).await;
+            }
+            .instrument(span)
+            .await;
+        });
+    }
+
     spawn_sm_expiry_janitor(&websocket_state);
     spawn_pending_delivery_claim_janitor(&websocket_state);
     spawn_graceful_shutdown_drain(
