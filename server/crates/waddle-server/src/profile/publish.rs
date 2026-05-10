@@ -8,32 +8,46 @@
 //!   publishes data → metadata.
 //! - FN chain (XEP-0398 §3): runs whenever `display_name` is present.
 //! - vcard-temp + vCard4 mirror: applies to whichever subset ran.
-//! - XEP-0153 self-presence: runs only if PHOTO ran (the hash that
-//!   travels in `<x xmlns="vcard-temp:x:update">` is undefined when
-//!   no PHOTO change happened).
 
 use std::sync::Arc;
 
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use jid::BareJid;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 use waddle_xmpp::pubsub::{NodeConfig, PubSubItem, PubSubStorage};
+use waddle_xmpp::xep::xep0084::{
+    build_avatar_data, build_avatar_metadata, AvatarInfo, NODE_AVATAR_DATA, NODE_AVATAR_METADATA,
+};
+use waddle_xmpp::xep::xep0292::PEP_NODE_VCARD4;
 use waddle_xmpp::xep::xep0300::{compute_hash, HashAlgo};
 use xmpp_parsers::minidom::Element;
 
 use super::fetch::{fetch_avatar_bytes, AvatarBytes, FetchPolicy};
 use super::source::{ProfileSource, ProfileSyncError};
-use super::vcard_rmw::{apply_vcard4_update, apply_vcard_temp_update};
+use super::vcard_rmw::{apply_vcard4_update, apply_vcard_temp_update, PhotoUpdate};
 use crate::vcard::VCardStore;
 
-pub const PEP_NODE_AVATAR_DATA: &str = "urn:xmpp:avatar:data";
-pub const PEP_NODE_AVATAR_METADATA: &str = "urn:xmpp:avatar:metadata";
-pub const PEP_NODE_VCARD4: &str = "urn:xmpp:vcard4";
-pub const NS_AVATAR_METADATA: &str = "urn:xmpp:avatar:metadata";
-pub const NS_AVATAR_DATA: &str = "urn:xmpp:avatar:data";
+/// XEP-0292 §4.1.1: a vCard4 PEP node holds a single item with id
+/// `current`.
+const VCARD4_ITEM_ID: &str = "current";
 
-/// Dependencies passed to the publish helper. Bundled so the OIDC
-/// bridge and the future startup backfill share a single shape.
+/// `NodeConfig` for the OIDC-managed avatar/vCard4 PEP nodes:
+///
+/// - `AccessModel::Open` so any peer (not just roster contacts) can
+///   resolve a user's avatar — typical web-app expectation.
+/// - `max_items = 1` so a new avatar/vCard publish evicts the
+///   previous item rather than accumulating one row per unique
+///   payload. XEP-0084 metadata + XEP-0292 vCard4 are last-writer-
+///   wins; avatar data is keyed on its SHA-1 so the old data row
+///   would never be re-fetched anyway, but evicting it removes a
+///   storage-bloat / past-avatar-leak surface.
+fn oidc_pep_node_config() -> NodeConfig {
+    NodeConfig {
+        max_items: 1,
+        ..NodeConfig::public()
+    }
+}
+
+/// Dependencies passed to the publish helper.
 pub struct ProfilePublishDeps {
     pub pubsub_storage: Arc<dyn PubSubStorage>,
     pub vcard_store: VCardStore,
@@ -92,24 +106,18 @@ pub async fn ensure_pep_profile_published(
         None
     };
 
+    let photo_update = avatar_bytes_opt.as_ref().map(|b| PhotoUpdate {
+        bytes: b.bytes.as_slice(),
+        mime: b.mime.as_str(),
+    });
+
     // ---- vcard-temp mirror (XEP-0054 / XEP-0398 §3) ----
-    let need_vcard_update = avatar_bytes_opt.is_some() || display_name.is_some();
+    let need_vcard_update = photo_update.is_some() || display_name.is_some();
     if need_vcard_update {
-        let existing = deps
-            .vcard_store
-            .get(jid)
-            .await
-            .map_err(|e| ProfileSyncError::VCardTemp(e.to_string()))?;
-        let updated = apply_vcard_temp_update(
-            existing.as_ref(),
-            avatar_bytes_opt.as_ref().map(|b| b.bytes.as_slice()),
-            avatar_bytes_opt.as_ref().map(|b| b.mime.as_str()),
-            display_name.as_deref(),
-        );
-        deps.vcard_store
-            .set(jid, &updated)
-            .await
-            .map_err(|e| ProfileSyncError::VCardTemp(e.to_string()))?;
+        let existing = deps.vcard_store.get(jid).await?;
+        let updated =
+            apply_vcard_temp_update(existing.as_ref(), photo_update, display_name.as_deref());
+        deps.vcard_store.set(jid, &updated).await?;
         outcome.mirrored_vcard_temp = true;
     }
 
@@ -118,8 +126,7 @@ pub async fn ensure_pep_profile_published(
         let existing_vcard4 = read_existing_vcard4(deps, jid).await?;
         let updated_vcard4 = apply_vcard4_update(
             existing_vcard4.as_ref(),
-            avatar_bytes_opt.as_ref().map(|b| b.bytes.as_slice()),
-            avatar_bytes_opt.as_ref().map(|b| b.mime.as_str()),
+            photo_update,
             display_name.as_deref(),
         );
         publish_vcard4(&deps.pubsub_storage, jid, &updated_vcard4).await?;
@@ -142,21 +149,19 @@ async fn publish_avatar_data(
     item_id: &str,
     bytes: &AvatarBytes,
 ) -> Result<(), ProfileSyncError> {
-    let data_element = Element::builder("data", NS_AVATAR_DATA)
-        .append(BASE64.encode(&bytes.bytes).as_str())
-        .build();
+    use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 
+    ensure_node_with_oidc_config(storage, jid, NODE_AVATAR_DATA).await?;
+
+    let payload = build_avatar_data(&BASE64.encode(&bytes.bytes));
     let item = PubSubItem {
         id: Some(item_id.to_string()),
         publisher: Some(jid.clone()),
-        payload: Some(data_element),
+        payload: Some(payload),
     };
-
     storage
-        .publish_item(jid, PEP_NODE_AVATAR_DATA, &item, Some(jid), true)
-        .await
-        .map_err(|e| ProfileSyncError::PubSubPublish(e.to_string()))?;
-    set_public_access(storage, jid, PEP_NODE_AVATAR_DATA).await?;
+        .publish_item(jid, NODE_AVATAR_DATA, &item, Some(jid), false)
+        .await?;
     Ok(())
 }
 
@@ -166,26 +171,25 @@ async fn publish_avatar_metadata(
     item_id: &str,
     bytes: &AvatarBytes,
 ) -> Result<(), ProfileSyncError> {
-    let info = Element::builder("info", NS_AVATAR_METADATA)
-        .attr("id", item_id)
-        .attr("type", &bytes.mime)
-        .attr("bytes", bytes.bytes.len().to_string())
-        .build();
-    let metadata = Element::builder("metadata", NS_AVATAR_METADATA)
-        .append(info)
-        .build();
+    ensure_node_with_oidc_config(storage, jid, NODE_AVATAR_METADATA).await?;
 
+    let info = AvatarInfo {
+        id: item_id.to_string(),
+        mime_type: bytes.mime.clone(),
+        width: None,
+        height: None,
+        bytes: Some(bytes.bytes.len() as u64),
+        url: None,
+    };
+    let payload = build_avatar_metadata(&info);
     let item = PubSubItem {
         id: Some(item_id.to_string()),
         publisher: Some(jid.clone()),
-        payload: Some(metadata),
+        payload: Some(payload),
     };
-
     storage
-        .publish_item(jid, PEP_NODE_AVATAR_METADATA, &item, Some(jid), true)
-        .await
-        .map_err(|e| ProfileSyncError::PubSubPublish(e.to_string()))?;
-    set_public_access(storage, jid, PEP_NODE_AVATAR_METADATA).await?;
+        .publish_item(jid, NODE_AVATAR_METADATA, &item, Some(jid), false)
+        .await?;
     Ok(())
 }
 
@@ -194,29 +198,34 @@ async fn publish_vcard4(
     jid: &BareJid,
     vcard: &Element,
 ) -> Result<(), ProfileSyncError> {
+    ensure_node_with_oidc_config(storage, jid, PEP_NODE_VCARD4).await?;
+
     let item = PubSubItem {
-        id: Some("current".to_string()),
+        id: Some(VCARD4_ITEM_ID.to_string()),
         publisher: Some(jid.clone()),
         payload: Some(vcard.clone()),
     };
-
     storage
-        .publish_item(jid, PEP_NODE_VCARD4, &item, Some(jid), true)
-        .await
-        .map_err(|e| ProfileSyncError::VCard4(e.to_string()))?;
-    set_public_access(storage, jid, PEP_NODE_VCARD4).await?;
+        .publish_item(jid, PEP_NODE_VCARD4, &item, Some(jid), false)
+        .await?;
     Ok(())
 }
 
+/// Read the existing `current` vCard4 item if any. Reading by id
+/// (rather than "latest item") is what makes the
+/// publish-as-`current` flow robust against legacy items written
+/// under different ids — those would not match here, so we treat
+/// them as "no existing vCard4" and the publish overwrites the
+/// `current` slot directly. With `max_items = 1` on the node the
+/// stale-id row is then evicted on the next publish.
 async fn read_existing_vcard4(
     deps: &ProfilePublishDeps,
     jid: &BareJid,
 ) -> Result<Option<Element>, ProfileSyncError> {
     let items = deps
         .pubsub_storage
-        .get_items(jid, PEP_NODE_VCARD4, Some(1), &[])
-        .await
-        .map_err(|e| ProfileSyncError::VCard4(e.to_string()))?;
+        .get_items(jid, PEP_NODE_VCARD4, Some(1), &[VCARD4_ITEM_ID.to_string()])
+        .await?;
     let Some(item) = items.into_iter().next() else {
         return Ok(None);
     };
@@ -225,29 +234,50 @@ async fn read_existing_vcard4(
     };
     xml.parse::<Element>()
         .map(Some)
-        .map_err(|e| ProfileSyncError::VCard4(format!("malformed stored vCard4: {e}")))
+        .map_err(|e| ProfileSyncError::VCard4Malformed(e.to_string()))
 }
 
-/// Set `NodeConfig::public()` on the avatar/vCard4 nodes. Called
-/// after each publish — idempotent — so that any authenticated peer
-/// can read the bytes/metadata/vCard4 (XEP-0084 + XEP-0292 design
-/// intent: avatars and profile data are semi-public).
-async fn set_public_access(
+/// Pre-create the PEP node with the OIDC-managed config (Open
+/// access, `max_items=1`) BEFORE the first publish. If the node
+/// already exists with a different config, flip it. Either way the
+/// node is at the desired shape by the time `publish_item` lands —
+/// closing the auto-create-then-flip race where a peer fetching
+/// between the two would have been denied by `pep_default()`'s
+/// Presence access.
+async fn ensure_node_with_oidc_config(
     storage: &Arc<dyn PubSubStorage>,
     jid: &BareJid,
     node: &str,
 ) -> Result<(), ProfileSyncError> {
-    if let Err(error) = storage
-        .update_node_config(jid, node, &NodeConfig::public())
-        .await
-    {
-        warn!(
-            jid = %jid,
-            node,
-            error = %error,
-            "Failed to set NodeConfig::public on PEP node; subsequent reads from non-roster peers may be denied"
-        );
-        return Err(ProfileSyncError::PubSubPublish(error.to_string()));
-    }
+    let _ = storage.get_or_create_node(jid, node).await?;
+    storage
+        .update_node_config(jid, node, &oidc_pep_node_config())
+        .await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn oidc_pep_node_config_is_public_with_one_item_cap() {
+        let cfg = oidc_pep_node_config();
+        assert_eq!(cfg.max_items, 1);
+        assert_eq!(
+            cfg.access_model,
+            waddle_xmpp::pubsub::AccessModel::Open,
+            "OIDC-managed PEP nodes are semi-public so non-roster peers can resolve avatars"
+        );
+    }
+
+    #[test]
+    fn xep0084_namespace_constants_are_reused_not_redeclared() {
+        // Sanity check that our publish chain talks to the same node
+        // names the XEP-0084 / XEP-0292 modules export — guarding
+        // against drift if either side is moved later.
+        assert_eq!(NODE_AVATAR_DATA, "urn:xmpp:avatar:data");
+        assert_eq!(NODE_AVATAR_METADATA, "urn:xmpp:avatar:metadata");
+        assert_eq!(PEP_NODE_VCARD4, "urn:xmpp:vcard4");
+    }
 }

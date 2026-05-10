@@ -148,10 +148,10 @@ pub(super) async fn callback_handler(
         Err(err) => return auth_error_to_response(err).into_response(),
     };
 
-    // RFC 363 PR 3 — fire-and-forget the OIDC → PEP profile bridge so
-    // login latency is unaffected. The hook is installed at HTTP
-    // bootstrap once `WebSocketState` exists; if it isn't installed
-    // (e.g. tests that bypass HTTP), this is a silent no-op.
+    // Fire-and-forget the OIDC → PEP profile bridge so login latency
+    // is unaffected. The hook is installed at HTTP bootstrap once
+    // `WebSocketState` exists; if it isn't installed (e.g. tests that
+    // bypass HTTP), this is a silent no-op.
     if let Some(hook) = state.profile_publish_hook() {
         if let Ok(jid) =
             format!("{}@{}", linked.user.xmpp_localpart, state.xmpp_domain).parse::<jid::BareJid>()

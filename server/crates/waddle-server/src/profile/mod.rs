@@ -1,9 +1,9 @@
-//! RFC 363 PR 3 — typed profile/avatar publish chain.
+//! Typed profile/avatar publish chain.
 //!
 //! `ensure_pep_profile_published` is the single entry point the OIDC
-//! bridge (and the future startup backfill) calls to materialize a
-//! conformant PEP avatar + vCard set for a user. The chain follows
-//! XEP-0084 §4.1, XEP-0292, XEP-0153 §4, and XEP-0398 §3.
+//! bridge calls to materialize a conformant PEP avatar + vCard set
+//! for a user. The chain follows
+//! XEP-0084 §4.1, XEP-0292, and XEP-0398 §3.
 //!
 //! Steps (a subset runs depending on which fields are set in
 //! `ProfileSource`; PHOTO and FN are independent):
@@ -19,8 +19,12 @@
 //! 5. **(PHOTO and/or FN)** RMW vcard-temp: replace/insert `<PHOTO>`
 //!    if PHOTO ran; replace/insert `<FN>` if FN sync ran.
 //! 6. **(PHOTO and/or FN)** RMW XEP-0292 `urn:xmpp:vcard4` PEP item.
-//! 7. **(PHOTO only)** Self-presence broadcast carrying
-//!    `<x xmlns="vcard-temp:x:update"><photo>SHA1</photo></x>`.
+//!
+//! XEP-0153 §4 (`vcard-temp:x:update` advertisement on presence) is
+//! intentionally out of scope here. Modern XEP-0084-aware peers learn
+//! about the avatar through the PEP fan-out triggered by step 4 / 6.
+//! Legacy-only clients require server-side auto-stamping on every
+//! outbound presence — tracked as a follow-up.
 
 mod fetch;
 mod publish;

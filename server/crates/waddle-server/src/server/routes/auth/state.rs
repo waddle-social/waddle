@@ -4,10 +4,10 @@ use std::sync::OnceLock;
 
 use super::*;
 
-/// RFC 363 PR 3 — typed callback the OIDC callback handler fires
-/// after a successful login to materialize a conformant PEP avatar +
-/// vCard set. Returns immediately; the caller spawns the future so
-/// login latency is unaffected.
+/// Typed callback the OIDC callback handler fires after a successful
+/// login to materialize a conformant PEP avatar + vCard set. Returns
+/// immediately; the caller spawns the future so login latency is
+/// unaffected.
 pub type ProfilePublishHook = Arc<
     dyn Fn(
             jid::BareJid,

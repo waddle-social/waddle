@@ -1,5 +1,5 @@
 //! XEP-0084 / XEP-0292 / XEP-0398 wire-conformance tests for the
-//! OIDC profile/avatar publish chain (RFC 363 PR 3).
+//! OIDC profile/avatar publish chain.
 //!
 //! Tests drive the chain through the test-only HTTP endpoint
 //! `POST /api/test/profile-publish` (gated on
@@ -7,7 +7,6 @@
 
 mod ws_common;
 
-use std::time::Duration;
 use tokio::sync::Mutex;
 use ws_common::{TestServer, WsXmppClient};
 
@@ -16,7 +15,6 @@ const ADMIN: &str = "admin";
 static TEST_SERIAL: Mutex<()> = Mutex::const_new(());
 
 const NS_PUBSUB: &str = "http://jabber.org/protocol/pubsub";
-const NS_PUBSUB_EVENT: &str = "http://jabber.org/protocol/pubsub#event";
 const NS_VCARD_TEMP: &str = "vcard-temp";
 const NS_AVATAR_DATA: &str = "urn:xmpp:avatar:data";
 const NS_AVATAR_METADATA: &str = "urn:xmpp:avatar:metadata";
@@ -69,6 +67,7 @@ async fn invoke_profile_publish(server: &TestServer, req: &PublishReq) -> Publis
     let client = reqwest::Client::new();
     let resp = client
         .post(&url)
+        .header("X-Waddle-Test-Token", server.test_profile_publish_token())
         .json(req)
         .send()
         .await
@@ -80,6 +79,39 @@ async fn invoke_profile_publish(server: &TestServer, req: &PublishReq) -> Publis
         "test endpoint returned {status}: {body}"
     );
     serde_json::from_str(&body).unwrap_or_else(|e| panic!("decode response failed: {e}: {body}"))
+}
+
+/// Variant of [`invoke_profile_publish`] that returns `(status, body)`
+/// without panicking on non-2xx, so failure-path tests can assert
+/// what the test seam does on bad input.
+async fn invoke_profile_publish_raw(
+    server: &TestServer,
+    req: &PublishReq,
+    token: Option<&str>,
+) -> (reqwest::StatusCode, String) {
+    let url = format!("{}/api/test/profile-publish", server.http_base_url());
+    let client = reqwest::Client::new();
+    let mut builder = client.post(&url).json(req);
+    if let Some(t) = token {
+        builder = builder.header("X-Waddle-Test-Token", t);
+    }
+    let resp = builder
+        .send()
+        .await
+        .expect("POST /api/test/profile-publish");
+    let status = resp.status();
+    let body = resp.text().await.unwrap_or_default();
+    (status, body)
+}
+
+/// Build a 1×1 PNG with the proper signature so the magic-byte
+/// check in `fetch.rs` accepts it.
+fn tiny_png() -> Vec<u8> {
+    vec![
+        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44,
+        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1f,
+        0x15, 0xc4, 0x89,
+    ]
 }
 
 // ============================================================================
@@ -168,12 +200,7 @@ async fn avatar_url_publishes_data_and_metadata_with_real_sha1() {
     let mut admin = admin_client(&server, "avatar-bytes-1").await;
     let admin_bare = format!("{ADMIN}@{DOMAIN}");
 
-    // Tiny 1x1 PNG (real PNG signature + minimal IHDR).
-    let png_bytes: Vec<u8> = vec![
-        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44,
-        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1f,
-        0x15, 0xc4, 0x89,
-    ];
+    let png_bytes = tiny_png();
     let mock = wiremock::MockServer::start().await;
     wiremock::Mock::given(wiremock::matchers::method("GET"))
         .and(wiremock::matchers::path("/avatar.png"))
@@ -260,7 +287,6 @@ async fn avatar_url_publishes_data_and_metadata_with_real_sha1() {
     );
 
     let _ = admin.close().await;
-    let _ = Duration::from_secs(1);
 }
 
 // ============================================================================
@@ -300,9 +326,7 @@ async fn combined_fn_plus_avatar_publishes_full_chain() {
     let mut admin = admin_client(&server, "avatar-combo-1").await;
     let admin_bare = format!("{ADMIN}@{DOMAIN}");
 
-    let png: Vec<u8> = vec![
-        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x42, 0x42, 0x42, 0x42,
-    ];
+    let png = tiny_png();
     let mock = wiremock::MockServer::start().await;
     wiremock::Mock::given(wiremock::matchers::method("GET"))
         .respond_with(
@@ -342,5 +366,289 @@ async fn combined_fn_plus_avatar_publishes_full_chain() {
     );
 
     let _ = admin.close().await;
-    let _ = NS_PUBSUB_EVENT;
+}
+
+// ============================================================================
+// Test 5 — non_png_content_type_is_rejected
+// ============================================================================
+//
+// XEP-0084 §3.1 limits `<data/>` to `image/png`. The fetcher MUST
+// reject any other Content-Type before publishing.
+
+#[tokio::test]
+async fn non_png_content_type_is_rejected() {
+    let _serial = TEST_SERIAL.lock().await;
+    let server = TestServer::start();
+    let admin_bare = format!("{ADMIN}@{DOMAIN}");
+
+    let mock = wiremock::MockServer::start().await;
+    wiremock::Mock::given(wiremock::matchers::method("GET"))
+        .respond_with(
+            wiremock::ResponseTemplate::new(200)
+                .insert_header("content-type", "image/jpeg")
+                .set_body_bytes(b"\xff\xd8\xff\xe0".to_vec()),
+        )
+        .mount(&mock)
+        .await;
+
+    let (status, body) = invoke_profile_publish_raw(
+        &server,
+        &PublishReq {
+            jid: admin_bare,
+            display_name: None,
+            avatar_url: Some(format!("{}/jpeg.bin", mock.uri())),
+        },
+        Some(server.test_profile_publish_token()),
+    )
+    .await;
+    assert!(
+        !status.is_success(),
+        "non-PNG MIME must be rejected; got {status} {body}"
+    );
+}
+
+// ============================================================================
+// Test 6 — png_content_type_with_non_png_bytes_is_rejected
+// ============================================================================
+//
+// A hostile origin can return `Content-Type: image/png` while
+// serving HTML/SVG/JS bytes. The fetcher's magic-byte sniff MUST
+// catch the lie before the bytes land in `urn:xmpp:avatar:data`.
+
+#[tokio::test]
+async fn png_content_type_with_non_png_bytes_is_rejected() {
+    let _serial = TEST_SERIAL.lock().await;
+    let server = TestServer::start();
+    let admin_bare = format!("{ADMIN}@{DOMAIN}");
+
+    let mock = wiremock::MockServer::start().await;
+    wiremock::Mock::given(wiremock::matchers::method("GET"))
+        .respond_with(
+            wiremock::ResponseTemplate::new(200)
+                .insert_header("content-type", "image/png")
+                // JPEG SOI + JFIF — definitely not a PNG signature.
+                .set_body_bytes(
+                    b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00"
+                        .to_vec(),
+                ),
+        )
+        .mount(&mock)
+        .await;
+
+    let (status, body) = invoke_profile_publish_raw(
+        &server,
+        &PublishReq {
+            jid: admin_bare,
+            display_name: None,
+            avatar_url: Some(format!("{}/lying.png", mock.uri())),
+        },
+        Some(server.test_profile_publish_token()),
+    )
+    .await;
+    assert!(
+        !status.is_success(),
+        "magic-byte mismatch must be rejected; got {status} {body}"
+    );
+}
+
+// ============================================================================
+// Test 7 — same_avatar_published_twice_is_idempotent
+// ============================================================================
+//
+// XEP-0060 / XEP-0084 §4.1.1: avatar items are keyed on SHA-1 of
+// bytes. Re-publishing the same bytes results in the same item id
+// and `max_items=1` evicts no rows that weren't already replaced —
+// the wire-observable end state is identical.
+
+#[tokio::test]
+async fn same_avatar_published_twice_is_idempotent() {
+    let _serial = TEST_SERIAL.lock().await;
+    let server = TestServer::start();
+    let mut admin = admin_client(&server, "avatar-idem-1").await;
+    let admin_bare = format!("{ADMIN}@{DOMAIN}");
+
+    let png = tiny_png();
+    let mock = wiremock::MockServer::start().await;
+    wiremock::Mock::given(wiremock::matchers::method("GET"))
+        .respond_with(
+            wiremock::ResponseTemplate::new(200)
+                .insert_header("content-type", "image/png")
+                .set_body_bytes(png.clone()),
+        )
+        .mount(&mock)
+        .await;
+    let url = format!("{}/idem.png", mock.uri());
+
+    let first = invoke_profile_publish(
+        &server,
+        &PublishReq {
+            jid: admin_bare.clone(),
+            display_name: None,
+            avatar_url: Some(url.clone()),
+        },
+    )
+    .await;
+    let second = invoke_profile_publish(
+        &server,
+        &PublishReq {
+            jid: admin_bare.clone(),
+            display_name: None,
+            avatar_url: Some(url),
+        },
+    )
+    .await;
+    assert_eq!(
+        first.photo_sha1_hex, second.photo_sha1_hex,
+        "identical bytes MUST produce identical SHA-1 ids: {first:?} vs {second:?}"
+    );
+
+    // Metadata still has exactly one item, and it carries that id.
+    let sha1 = first.photo_sha1_hex.expect("first publish has hash");
+    let metadata = iq_get_to(
+        &mut admin,
+        "avatar-meta-idem",
+        &admin_bare,
+        &format!(r#"<pubsub xmlns="{NS_PUBSUB}"><items node="{NS_AVATAR_METADATA}"/></pubsub>"#),
+    )
+    .await;
+    assert!(
+        metadata.contains(&format!(r#"id="{sha1}""#)),
+        "after idempotent re-publish the metadata id MUST be unchanged: {metadata}"
+    );
+    let _ = admin.close().await;
+}
+
+// ============================================================================
+// Test 8 — fn_only_after_combined_preserves_photo
+// ============================================================================
+//
+// XEP-0398 RMW invariant: a subsequent FN-only publish MUST NOT
+// drop the existing PHOTO from vcard-temp or vCard4.
+
+#[tokio::test]
+async fn fn_only_after_combined_preserves_photo() {
+    let _serial = TEST_SERIAL.lock().await;
+    let server = TestServer::start();
+    let mut admin = admin_client(&server, "avatar-preserve-1").await;
+    let admin_bare = format!("{ADMIN}@{DOMAIN}");
+
+    let png = tiny_png();
+    let mock = wiremock::MockServer::start().await;
+    wiremock::Mock::given(wiremock::matchers::method("GET"))
+        .respond_with(
+            wiremock::ResponseTemplate::new(200)
+                .insert_header("content-type", "image/png")
+                .set_body_bytes(png.clone()),
+        )
+        .mount(&mock)
+        .await;
+
+    invoke_profile_publish(
+        &server,
+        &PublishReq {
+            jid: admin_bare.clone(),
+            display_name: Some("First Name".into()),
+            avatar_url: Some(format!("{}/seed.png", mock.uri())),
+        },
+    )
+    .await;
+    invoke_profile_publish(
+        &server,
+        &PublishReq {
+            jid: admin_bare.clone(),
+            display_name: Some("Renamed".into()),
+            avatar_url: None,
+        },
+    )
+    .await;
+
+    let vcard_temp = iq_get_to(
+        &mut admin,
+        "vcard-temp-preserve-1",
+        &admin_bare,
+        r#"<vCard xmlns="vcard-temp"/>"#,
+    )
+    .await;
+    assert!(
+        vcard_temp.contains("Renamed") && !vcard_temp.contains("First Name"),
+        "FN must be replaced: {vcard_temp}"
+    );
+    assert!(
+        vcard_temp.contains("<PHOTO") && vcard_temp.contains("<BINVAL"),
+        "PHOTO must be preserved on FN-only follow-up: {vcard_temp}"
+    );
+
+    let vcard4 = iq_get_to(
+        &mut admin,
+        "vcard4-preserve-1",
+        &admin_bare,
+        &format!(r#"<pubsub xmlns="{NS_PUBSUB}"><items node="urn:xmpp:vcard4"/></pubsub>"#),
+    )
+    .await;
+    assert!(
+        vcard4.contains("Renamed")
+            && vcard4.contains("<photo")
+            && vcard4.contains("data:image/png;base64,"),
+        "vCard4 must preserve the photo URI on FN-only follow-up: {vcard4}"
+    );
+    let _ = admin.close().await;
+}
+
+// ============================================================================
+// Test 9 — test_seam_rejects_missing_token
+// ============================================================================
+//
+// Defense-in-depth: the test seam MUST refuse to publish without
+// the `X-Waddle-Test-Token` header, even when the env-flag is on.
+
+#[tokio::test]
+async fn test_seam_rejects_missing_token() {
+    let _serial = TEST_SERIAL.lock().await;
+    let server = TestServer::start();
+    let admin_bare = format!("{ADMIN}@{DOMAIN}");
+
+    let (status, _) = invoke_profile_publish_raw(
+        &server,
+        &PublishReq {
+            jid: admin_bare,
+            display_name: Some("X".into()),
+            avatar_url: None,
+        },
+        None,
+    )
+    .await;
+    assert_eq!(
+        status,
+        reqwest::StatusCode::UNAUTHORIZED,
+        "missing token MUST yield 401, got {status}"
+    );
+}
+
+// ============================================================================
+// Test 10 — test_seam_rejects_jid_outside_allowlist
+// ============================================================================
+//
+// Defense-in-depth: even with a valid token, the seam MUST refuse
+// any JID that isn't a configured fixed-account JID.
+
+#[tokio::test]
+async fn test_seam_rejects_jid_outside_allowlist() {
+    let _serial = TEST_SERIAL.lock().await;
+    let server = TestServer::start();
+
+    let (status, _) = invoke_profile_publish_raw(
+        &server,
+        &PublishReq {
+            jid: format!("ghost@{DOMAIN}"),
+            display_name: Some("X".into()),
+            avatar_url: None,
+        },
+        Some(server.test_profile_publish_token()),
+    )
+    .await;
+    assert_eq!(
+        status,
+        reqwest::StatusCode::FORBIDDEN,
+        "non-allowlisted JID MUST yield 403, got {status}"
+    );
 }
