@@ -70,6 +70,16 @@ fn test_server_features_include_core_features() {
     assert!(!features.contains(&Feature::fulltext_mam()));
     assert!(!features.contains(&Feature::pep()));
     assert!(!features.contains(&Feature::avatar_metadata_notify()));
+    assert!(!features.contains(&Feature::vcard4_notify()));
+}
+
+#[test]
+fn test_vcard4_notify_feature_var_pins_xep0292_namespace() {
+    // Pin the `+notify` filter contract so a future rename trips a test
+    // instead of silently breaking XEP-0292 / XEP-0163 §3 fan-out.
+    assert_eq!(Feature::vcard4_notify().0, "urn:xmpp:vcard4+notify");
+    assert_eq!(Feature::vcard4_notify(), Feature::vcard4_notify());
+    assert_ne!(Feature::vcard4_notify(), Feature::avatar_metadata_notify());
 }
 
 #[test]

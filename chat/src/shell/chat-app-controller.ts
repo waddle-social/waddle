@@ -493,14 +493,33 @@ export function useChatAppController(giphyApiKey: string) {
   const notifications = usePushNotifications();
   const appUpdate = useServiceWorkerUpdate();
   const version = useDeploymentVersionInfo(xmppClient);
-  const avatarCandidates = computed(() =>
-    avatarLookupCandidates({
+  // RFC 363 PR 6: include DM peers in the iterate-and-pull avatar
+  // candidate set. Without this, avatars in DM views never resolve
+  // (the peer never appears in `messaging.messages` because that's
+  // the channel-message timeline). After #435 (workspace roster
+  // bridge) lands, push delivery covers both axes and this fallback
+  // can be slimmed back down.
+  //
+  // DM messages are resolved through a SEPARATE call with empty
+  // `members` / `authorJidByNick` so that a DM sender whose nick
+  // collides with a channel member is NOT misresolved through the
+  // channel-only nick→JID map. DM `authorJid` (`fromJid`) is the
+  // authoritative peer JID and falls through to rank 2 with empty
+  // channel context.
+  const avatarCandidates = computed(() => [
+    ...avatarLookupCandidates({
       members: mergedMentionMembers.value.members,
       messages: messaging.messages.value,
       authorJidByNick: authorJidByNick.value,
       selfDomain: selfDomain.value,
     }),
-  );
+    ...avatarLookupCandidates({
+      members: [],
+      messages: dmMessaging.messages.value,
+      authorJidByNick: {},
+      selfDomain: selfDomain.value,
+    }),
+  ]);
   const avatarUrlByAuthor = computed<Record<string, string | null>>(() => {
     const avatars: Record<string, string | null> = {};
 
