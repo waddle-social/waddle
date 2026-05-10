@@ -132,7 +132,7 @@ pub struct ProfilePublishResponse {
     pub removed_vcard_temp_fn: bool,
     pub removed_vcard4_photo: bool,
     pub removed_vcard4_fn: bool,
-    pub photo_removal_guarded_by_user_managed: bool,
+    pub photo_axis_guarded_by_user_managed: bool,
 }
 
 pub fn router(websocket_state: Arc<WebSocketState>, auth: TestSeamAuth) -> Router {
@@ -246,7 +246,7 @@ async fn handler(
         removed_vcard_temp_fn: outcome.removed_vcard_temp_fn,
         removed_vcard4_photo: outcome.removed_vcard4_photo,
         removed_vcard4_fn: outcome.removed_vcard4_fn,
-        photo_removal_guarded_by_user_managed: outcome.photo_removal_guarded_by_user_managed,
+        photo_axis_guarded_by_user_managed: outcome.photo_axis_guarded_by_user_managed,
     }))
 }
 

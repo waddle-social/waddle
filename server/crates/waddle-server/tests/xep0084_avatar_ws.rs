@@ -69,7 +69,7 @@ struct PublishResp {
     removed_vcard_temp_fn: bool,
     removed_vcard4_photo: bool,
     removed_vcard4_fn: bool,
-    photo_removal_guarded_by_user_managed: bool,
+    photo_axis_guarded_by_user_managed: bool,
 }
 
 /// Builder for the test-seam JSON request. The on-the-wire shape
@@ -638,7 +638,7 @@ async fn avatar_removal_publishes_empty_metadata_and_strips_vcards() {
         "first removal must publish empty <metadata/>: {rm1:?}"
     );
     assert!(
-        !rm1.photo_removal_guarded_by_user_managed,
+        !rm1.photo_axis_guarded_by_user_managed,
         "no user self-publish so guard MUST NOT fire: {rm1:?}"
     );
     assert!(
@@ -872,7 +872,7 @@ async fn avatar_removal_no_op_when_no_prior_avatar() {
         "no prior avatar => no removal publish: {resp:?}"
     );
     assert!(
-        !resp.photo_removal_guarded_by_user_managed,
+        !resp.photo_axis_guarded_by_user_managed,
         "user-managed guard didn't fire — `Unknown` source falls through to the prior-item check: {resp:?}"
     );
 }
@@ -1047,7 +1047,7 @@ async fn user_self_published_avatar_is_protected_from_oidc_removal() {
 
     // Step 2: OIDC reconcile asks to remove the avatar. Guard should
     // fire — `published_avatar_removal=false`,
-    // `photo_removal_guarded_by_user_managed=true`.
+    // `photo_axis_guarded_by_user_managed=true`.
     let resp =
         invoke_profile_publish(&server, &PublishReq::for_jid(&admin_bare).remove_photo()).await;
     assert!(
@@ -1055,7 +1055,7 @@ async fn user_self_published_avatar_is_protected_from_oidc_removal() {
         "user-managed guard MUST suppress the empty-metadata publish: {resp:?}"
     );
     assert!(
-        resp.photo_removal_guarded_by_user_managed,
+        resp.photo_axis_guarded_by_user_managed,
         "guard flag MUST be set so telemetry can observe the suppression: {resp:?}"
     );
 

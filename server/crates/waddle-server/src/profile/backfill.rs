@@ -252,16 +252,17 @@ async fn process_row(
         None => PhotoIntent::RemoveIfOidcOwned,
     };
 
-    let name = match row.display_name.clone() {
-        Some(s) => {
-            let trimmed = s.trim();
-            if trimmed.is_empty() {
-                NameIntent::Skip
-            } else {
-                NameIntent::Set(trimmed.to_string())
-            }
-        }
-        None => NameIntent::Skip,
+    // Match the OIDC callback's three-way semantics:
+    //   - Some non-empty → `NameIntent::Set` (replace/insert).
+    //   - Some empty/whitespace → `NameIntent::Remove` (a blank
+    //     `display_name` claim means "no name" — clear stale FN).
+    //   - None → `NameIntent::Remove` (claim absent — clear).
+    // Without this alignment, a user whose IDP cleared their `name`
+    // claim AFTER an earlier sync would leave the stale FN on the
+    // PEP/vcard surface across boots until they next log in.
+    let name = match row.display_name.as_deref().map(str::trim) {
+        Some(s) if !s.is_empty() => NameIntent::Set(s.to_string()),
+        _ => NameIntent::Remove,
     };
 
     if matches!(photo, PhotoIntent::Skip) && matches!(name, NameIntent::Skip) {
@@ -284,6 +285,11 @@ async fn process_row(
         return ProcessOutcome::Ran;
     }
 
+    // Capture whether the NAME axis carries work; used below to
+    // disambiguate "guard suppressed PHOTO and there was nothing
+    // else to do" from "guard suppressed PHOTO but FN still ran".
+    let name_axis_active = !matches!(name, NameIntent::Skip);
+
     let source = ProfileSource::Oidc { photo, name };
     match ensure_pep_profile_published(deps, &bare, source).await {
         Ok(outcome) => {
@@ -304,11 +310,18 @@ async fn process_row(
                 );
             }
             if photo_url_was_invalid {
-                // Half-fail: FN succeeded but PHOTO URL was bad.
+                // Half-fail: FN may have run but the PHOTO URL was
+                // bad. Surface as Failed so the operator counter
+                // reflects that something needs human attention.
                 ProcessOutcome::Failed
-            } else if outcome.photo_removal_guarded_by_user_managed {
+            } else if outcome.photo_axis_guarded_by_user_managed && !name_axis_active {
+                // Guard fired AND there was no FN axis work — the
+                // run truly skipped this user.
                 ProcessOutcome::UserManagedSkip
             } else {
+                // Guard may or may not have fired, but at least one
+                // axis (FN, or PHOTO without guard suppression) made
+                // progress.
                 ProcessOutcome::Ran
             }
         }
