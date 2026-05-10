@@ -68,16 +68,30 @@ const PERMANENT_KINDS: &[&str] = &[
 /// — closing the "deploy widened the policy but throttle still
 /// suppresses the affected users" gap (#451).
 ///
-/// Excluded kinds are upstream-bound (the IDP serves a 404, the URL
-/// is malformed, the host is missing, the scheme is wrong); a code
-/// deploy doesn't alter their verdict, so they keep honouring the
-/// 24h cool-down.
+/// Each entry must correspond to an input that's actually folded
+/// into [`fetch_policy_digest`]; otherwise the kind would only get
+/// retried piggybacking on unrelated digest changes, which is
+/// incoherent. Today the digest covers the size cap, the dimension
+/// cap, and the MIME allowlist, so:
+/// - `mime_rejected`, `magic_byte_mismatch`, `transcode_failed` →
+///   verdict is gated by `AllowedMime::ALL` and the decoder logic
+///   it dispatches.
+/// - `size_exceeded` → verdict is gated by `MAX_BYTES`.
+///
+/// Excluded kinds are either upstream-bound (the IDP serves a 404,
+/// the URL is malformed, the host is missing, the scheme is wrong)
+/// or gated by inputs the digest doesn't track. `ssrf_blocked` is
+/// in the latter bucket — the SSRF predicate (`is_global_ipv4/6`
+/// and the per-call `FetchPolicy` SSRF knobs) isn't hashed into
+/// the digest, so listing the kind here would only invalidate
+/// piggybacking on unrelated MIME/cap changes. If a future PR
+/// folds an SSRF-policy marker into the digest, add the kind here
+/// in the same change.
 const POLICY_DEPENDENT_KINDS: &[&str] = &[
     "mime_rejected",
     "magic_byte_mismatch",
     "transcode_failed",
     "size_exceeded",
-    "ssrf_blocked",
 ];
 
 /// Aggregate counts of a backfill run.
@@ -663,6 +677,27 @@ mod tests {
             now,
             TEST_DIGEST
         ));
+    }
+
+    #[test]
+    fn should_throttle_holds_throttle_for_policy_dependent_kinds_when_digest_matches() {
+        // Negative twin of the digest-mismatch test below: when the
+        // persisted digest matches the current build, the 24h
+        // cool-down still suppresses re-attempts within the window.
+        // Without this contract, a regression that always returned
+        // `false` from the digest comparison would silently turn the
+        // throttle into a no-op for every policy-dependent kind.
+        let now = Utc::now();
+        let one_hour_ago = (now - Duration::hours(1)).to_rfc3339();
+        for kind in POLICY_DEPENDENT_KINDS {
+            // `row_with` already sets `last_fetch_policy_digest =
+            // Some(TEST_DIGEST)` so the digest matches by default.
+            let row = row_with(Some(&one_hour_ago), Some(kind));
+            assert!(
+                should_throttle(&row, now, TEST_DIGEST),
+                "kind {kind} with matching digest MUST still throttle within the 24h window"
+            );
+        }
     }
 
     #[test]
