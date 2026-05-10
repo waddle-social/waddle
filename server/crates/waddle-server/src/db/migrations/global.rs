@@ -396,8 +396,15 @@ pub const V0004_AVATAR_FETCH_STATE_POLICY_DIGEST: &str = r#"
 ALTER TABLE user_avatar_fetch_state ADD COLUMN last_fetch_policy_digest TEXT;
 "#;
 
+/// Postgres variant uses `IF NOT EXISTS` so a re-run after a
+/// crashed migration-bookkeeping insert (the `_migrations` row is
+/// written outside the DDL transaction in the runner) is a clean
+/// no-op rather than a hard failure on the second `ALTER TABLE`.
+/// SQLite has no `IF NOT EXISTS` support on `ADD COLUMN`; for that
+/// dialect the migration-history check inside the runner is the
+/// only line of defence.
 pub const V0004_AVATAR_FETCH_STATE_POLICY_DIGEST_POSTGRES: &str = r#"
-ALTER TABLE user_avatar_fetch_state ADD COLUMN last_fetch_policy_digest TEXT;
+ALTER TABLE user_avatar_fetch_state ADD COLUMN IF NOT EXISTS last_fetch_policy_digest TEXT;
 "#;
 
 /// Get all global migrations in order
