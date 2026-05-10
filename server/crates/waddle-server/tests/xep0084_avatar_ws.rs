@@ -169,6 +169,22 @@ fn tiny_png() -> Vec<u8> {
     ]
 }
 
+/// JPEG fixture — a real 2×2 red square the transcoder can decode.
+/// `fetch.rs` re-encodes non-PNG sources to PNG before publish per
+/// XEP-0084 §3.2, so the magic-byte prefix alone is no longer
+/// sufficient (the decoder rejects truncated JPEGs).
+fn tiny_jpeg() -> Vec<u8> {
+    let img = image::ImageBuffer::from_pixel(2u32, 2u32, image::Rgb([255u8, 0, 0]));
+    let mut out = Vec::new();
+    image::DynamicImage::ImageRgb8(img)
+        .write_to(
+            &mut std::io::Cursor::new(&mut out),
+            image::ImageFormat::Jpeg,
+        )
+        .expect("encoding 2×2 RGB to JPEG must succeed");
+    out
+}
+
 // ============================================================================
 // fn_only_publishes_to_vcard_temp_and_vcard4_with_no_avatar
 // ============================================================================
@@ -298,6 +314,127 @@ async fn avatar_url_publishes_data_and_metadata_with_real_sha1() {
 }
 
 // ============================================================================
+// avatar_url_jpeg_is_transcoded_to_png_per_xep_0084_3_2
+// ============================================================================
+//
+// Regression for the prod incident traced to issue #363: GitHub
+// avatars at `avatars.githubusercontent.com/u/<id>?v=4` are served
+// with `Content-Type: image/jpeg` for users whose original avatar
+// was a JPEG, and the original PNG-only fetch path rejected them as
+// `mime_rejected`.
+//
+// The fix accepts JPEG (and GIF/WebP) at the fetch boundary AND
+// transcodes them to PNG before publish, so the wire payload always
+// satisfies XEP-0084 §3.2 ("data node carries image/png only") and
+// §4.2 ("one of the formats MUST be image/png to ensure
+// interoperability"). This test pins both halves: the publish
+// succeeds for a JPEG source, and the metadata advertises
+// `image/png` regardless of source MIME.
+
+#[tokio::test]
+async fn avatar_url_jpeg_is_transcoded_to_png_per_xep_0084_3_2() {
+    let _serial = TEST_SERIAL.lock().await;
+    let server = TestServer::start();
+    let mut admin = admin_client(&server, "avatar-jpeg-1").await;
+    let admin_bare = format!("{ADMIN}@{DOMAIN}");
+
+    let jpeg_bytes = tiny_jpeg();
+    let mock = wiremock::MockServer::start().await;
+    wiremock::Mock::given(wiremock::matchers::method("GET"))
+        .and(wiremock::matchers::path("/avatar.jpg"))
+        .respond_with(
+            wiremock::ResponseTemplate::new(200)
+                .insert_header("content-type", "image/jpeg")
+                .set_body_bytes(jpeg_bytes.clone()),
+        )
+        .mount(&mock)
+        .await;
+
+    let avatar_url = format!("{}/avatar.jpg", mock.uri());
+    let resp = invoke_profile_publish(
+        &server,
+        &PublishReq::for_jid(&admin_bare).set_photo_url(&avatar_url),
+    )
+    .await;
+
+    let sha1 = resp
+        .photo_sha1_hex
+        .clone()
+        .expect("metadata MUST carry the SHA-1 id");
+    assert_eq!(resp.photo_mime.as_deref(), Some("image/png"));
+    assert!(resp.published_avatar_data && resp.published_avatar_metadata);
+
+    let metadata = iq_get_to(
+        &mut admin,
+        "avatar-meta-jpeg-1",
+        &admin_bare,
+        &format!(r#"<pubsub xmlns="{NS_PUBSUB}"><items node="{NS_AVATAR_METADATA}"/></pubsub>"#),
+    )
+    .await;
+    assert!(
+        metadata.contains(NS_AVATAR_METADATA) && metadata.contains(&format!(r#"id="{sha1}""#)),
+        "metadata item MUST be keyed on the SHA-1 of the PNG bytes per XEP-0084 §4.1.1: {metadata}"
+    );
+    assert!(
+        metadata.contains(r#"type="image/png""#),
+        "metadata <info type> MUST be image/png after transcoding (XEP-0084 §3.2 / §4.2): {metadata}"
+    );
+    assert!(!metadata.contains(r#"type="image/jpeg""#));
+    assert!(!metadata.contains(r#"url="#));
+
+    // Strongest proof the bytes were transcoded: fetch the published
+    // data item, base64-decode the `<data>` payload, and assert it
+    // starts with the PNG magic-byte signature. A length-comparison
+    // would be brittle for tiny fixtures (a 2×2 PNG and JPEG can
+    // coincidentally match in size); the magic-byte check is robust
+    // because PNG and JPEG signatures are mutually exclusive.
+    let data = iq_get_to(
+        &mut admin,
+        "avatar-data-jpeg-1",
+        &admin_bare,
+        &format!(
+            r#"<pubsub xmlns="{NS_PUBSUB}"><items node="{NS_AVATAR_DATA}"><item id="{sha1}"/></items></pubsub>"#
+        ),
+    )
+    .await;
+    let payload = extract_base64_data_payload(&data)
+        .unwrap_or_else(|| panic!("data response must carry a <data> element: {data}"));
+    let decoded = base64_decode(&payload)
+        .unwrap_or_else(|| panic!("data <data> base64 must decode: {payload}"));
+    assert!(
+        decoded.starts_with(&[0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+        "data node bytes MUST start with the PNG magic-byte signature after transcoding (XEP-0084 §3.2)"
+    );
+    assert_ne!(
+        decoded, jpeg_bytes,
+        "data node bytes MUST NOT be the source JPEG"
+    );
+
+    let _ = admin.close().await;
+}
+
+/// Extract the base64 payload between `<data ...>` and `</data>`
+/// from a pubsub items response. Returns `None` if the element is
+/// absent. Whitespace is stripped because XEP-0084 §3.2 SHOULDs not
+/// inserting line feeds but explicitly accepts them.
+fn extract_base64_data_payload(xml: &str) -> Option<String> {
+    let open_idx = xml.find("<data ").or_else(|| xml.find("<data>"))?;
+    let after_open = open_idx + xml[open_idx..].find('>')? + 1;
+    let close_idx = xml[after_open..].find("</data>")? + after_open;
+    Some(
+        xml[after_open..close_idx]
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect(),
+    )
+}
+
+fn base64_decode(s: &str) -> Option<Vec<u8>> {
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD.decode(s).ok()
+}
+
+// ============================================================================
 // empty_source_is_no_op
 // ============================================================================
 
@@ -367,11 +504,16 @@ async fn combined_fn_plus_avatar_publishes_full_chain() {
 }
 
 // ============================================================================
-// non_png_content_type_is_rejected
+// out_of_allowlist_content_type_is_rejected
 // ============================================================================
+//
+// Per RFC 363 the avatar fetch allowlist is `image/png`, `image/jpeg`,
+// `image/gif`, `image/webp`. Anything outside that list — including
+// older container formats (BMP, TIFF) and the `image/jpg` colloquial
+// alias — is rejected at the fetch gate.
 
 #[tokio::test]
-async fn non_png_content_type_is_rejected() {
+async fn out_of_allowlist_content_type_is_rejected() {
     let _serial = TEST_SERIAL.lock().await;
     let server = TestServer::start();
     let admin_bare = format!("{ADMIN}@{DOMAIN}");
@@ -380,22 +522,22 @@ async fn non_png_content_type_is_rejected() {
     wiremock::Mock::given(wiremock::matchers::method("GET"))
         .respond_with(
             wiremock::ResponseTemplate::new(200)
-                .insert_header("content-type", "image/jpeg")
-                .set_body_bytes(b"\xff\xd8\xff\xe0".to_vec()),
+                .insert_header("content-type", "image/bmp")
+                .set_body_bytes(b"BM\x00\x00\x00\x00".to_vec()),
         )
         .mount(&mock)
         .await;
 
     let (status, body) = invoke_profile_publish_raw(
         &server,
-        &PublishReq::for_jid(admin_bare).set_photo_url(format!("{}/jpeg.bin", mock.uri())),
+        &PublishReq::for_jid(admin_bare).set_photo_url(format!("{}/avatar.bmp", mock.uri())),
         Some(server.test_profile_publish_token()),
     )
     .await;
     assert_eq!(
         status,
         reqwest::StatusCode::UNPROCESSABLE_ENTITY,
-        "non-PNG MIME is a fetch-policy reject (422), got {status} {body}"
+        "out-of-allowlist MIME is a fetch-policy reject (422), got {status} {body}"
     );
 }
 

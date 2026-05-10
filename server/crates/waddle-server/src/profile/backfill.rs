@@ -52,6 +52,7 @@ const PERMANENT_KINDS: &[&str] = &[
     "size_exceeded",
     "ssrf_blocked",
     "magic_byte_mismatch",
+    "transcode_failed",
     "invalid_url",
     "invalid_scheme",
     "missing_host",
@@ -620,6 +621,10 @@ mod tests {
             (FetchError::MimeRejected(None), "mime_rejected"),
             (FetchError::MagicByteMismatch, "magic_byte_mismatch"),
             (FetchError::SizeExceeded(100), "size_exceeded"),
+            (
+                FetchError::TranscodeFailed("decode failed".into()),
+                "transcode_failed",
+            ),
         ];
         for (err, expected_kind) in representatives {
             assert_eq!(err.kind(), *expected_kind);
