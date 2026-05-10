@@ -137,9 +137,7 @@ pub async fn fetch_avatar_bytes(
     url: &Url,
     policy: &FetchPolicy,
 ) -> Result<AvatarBytes, FetchError> {
-    let scheme_ok =
-        url.scheme() == "https" || (policy.allow_http_for_tests && url.scheme() == "http");
-    if !scheme_ok {
+    if url.scheme() != "https" && !policy.allow_http_for_tests {
         return Err(FetchError::InvalidScheme(url.scheme().to_string()));
     }
     let host = url.host().ok_or(FetchError::MissingHost)?;
@@ -187,6 +185,20 @@ pub async fn fetch_avatar_bytes(
                 .collect()
         }
     };
+
+    // Defense in depth — when the test policy opts in to plaintext
+    // HTTP (`allow_http_for_tests=true`), the URL must additionally
+    // resolve only to loopback. Production policy
+    // (`FetchPolicy::default`) leaves `allow_http_for_tests` false
+    // and this branch is unreachable, but proving that statically
+    // here narrows the test-only surface and gives static analysis
+    // a clear "https or loopback" barrier.
+    if url.scheme() != "https" {
+        let all_loopback = pinned_addrs.iter().all(|a| a.ip().is_loopback());
+        if !all_loopback {
+            return Err(FetchError::InvalidScheme(url.scheme().to_string()));
+        }
+    }
 
     let mut builder = Client::builder()
         .connect_timeout(policy.connect_timeout)

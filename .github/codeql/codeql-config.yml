@@ -1,0 +1,14 @@
+name: "waddle CodeQL config"
+
+# Integration tests under `**/tests/**/*.rs` legitimately use plaintext
+# HTTP against a `127.0.0.1` loopback test server (no TLS provisioning
+# in the harness), and CodeQL's `rust/cleartext-transmission`
+# heuristic flags every test-helper `client.post(http_url)` call. The
+# tests are not deployed and the bodies they send are per-process
+# random fixtures (no real secrets), so excluding them removes a
+# steady stream of false positives without weakening the production
+# query set.
+paths-ignore:
+  - "**/tests/**/*.rs"
+  - "**/benches/**/*.rs"
+  - "**/examples/**/*.rs"
