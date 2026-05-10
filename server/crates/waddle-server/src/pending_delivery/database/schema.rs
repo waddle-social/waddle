@@ -3,13 +3,27 @@ use super::*;
 pub(super) async fn initialize(
     storage: &DatabasePendingDeliveryStorage,
 ) -> Result<(), PendingStorageError> {
+    // `original_receipt_at` stores `timestamp_millis()` (i64 ms since
+    // unix epoch). Postgres `INTEGER` is i32 (max ~2.1B), which
+    // overflows on every insert from 2001-09-09 onward — every prod
+    // write since the column was introduced in #339 has failed with
+    // `numeric_value_out_of_range`, taking reactions and other
+    // pending-delivery writes down with it. Sibling
+    // `sm_persistence/schema.rs` already uses this driver-aware
+    // selector for the same reason. SQLite `INTEGER` is dynamic-width,
+    // so the same DDL stays correct there.
+    let bigint = match storage.db.driver() {
+        DatabaseDriver::Postgres => "BIGINT",
+        DatabaseDriver::Sqlite => "INTEGER",
+    };
     storage
         .execute(
-            r#"
+            &format!(
+                r#"
         CREATE TABLE IF NOT EXISTS pending_delivery (
             row_id TEXT PRIMARY KEY,
             recipient_jid TEXT NOT NULL,
-            original_receipt_at INTEGER NOT NULL,
+            original_receipt_at {bigint} NOT NULL,
             payload_kind TEXT NOT NULL,
             archive_stanza_by TEXT,
             archive_stanza_id TEXT,
@@ -17,10 +31,26 @@ pub(super) async fn initialize(
             flushed_in_session TEXT,
             outbound_sequence INTEGER
         )
-        "#,
+        "#
+            ),
             (),
         )
         .await?;
+    // Online migration for existing Postgres tables that were created
+    // with the pre-fix `INTEGER` (i32) shape. Widening to BIGINT is
+    // lossless and idempotent — Postgres rewrites the column type, but
+    // every value that actually made it in fits in i32 anyway (writes
+    // past i32::MAX rejected at the wire). SQLite columns are
+    // dynamic-width, so the type doesn't need rewriting there.
+    if matches!(storage.db.driver(), DatabaseDriver::Postgres) {
+        storage
+            .execute(
+                "ALTER TABLE pending_delivery \
+                 ALTER COLUMN original_receipt_at TYPE BIGINT",
+                (),
+            )
+            .await?;
+    }
     // Idempotent column-add migration for the locked Q7b
     // outbound_sequence column. Tables created by an older
     // version of waddle-server (before PR #358) were missing this

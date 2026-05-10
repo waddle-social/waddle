@@ -49,7 +49,8 @@ pub fn sweep_recipient_locks(
 /// CREATE TABLE pending_delivery (
 ///     row_id TEXT PRIMARY KEY,            -- UUID v7 — sortable for FIFO
 ///     recipient_jid TEXT NOT NULL,
-///     original_receipt_at INTEGER NOT NULL, -- ms since unix epoch
+///     original_receipt_at BIGINT NOT NULL, -- ms since unix epoch (i64;
+///                                          -- SQLite collapses to INTEGER)
 ///     payload_kind TEXT NOT NULL,         -- 'archived' | 'transient'
 ///     archive_stanza_by TEXT,             -- bare jid stamping `<stanza-id/>`
 ///     archive_stanza_id TEXT,             -- XEP-0359 id (Archived rows)
