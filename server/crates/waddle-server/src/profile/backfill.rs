@@ -19,21 +19,18 @@
 //! wire publishes for the same user during a backfill pass do not
 //! race the user-managed guard.
 
-use std::sync::Arc;
-
 use chrono::{DateTime, Duration, Utc};
 use futures::stream::{self, StreamExt};
 use jid::BareJid;
+use kameo::actor::ActorRef;
 use thiserror::Error;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 use url::Url;
 
-use super::avatar_source::{read_avatar_source, AvatarSource};
 use super::publish::{ensure_pep_profile_published, ProfilePublishDeps};
 use super::source::{NameIntent, PhotoIntent, ProfileSource, ProfileSyncError};
 use crate::db::actor::{DbActor, DbExecute, DbQuery};
-use crate::server::routes::websocket::WebSocketState;
-use kameo::actor::ActorRef;
 
 /// Concurrency cap on outbound avatar fetches during backfill.
 /// Avoids hammering the IDP / a slow CDN at boot.
@@ -95,12 +92,19 @@ struct BackfillRow {
 
 /// Run a one-shot backfill. `xmpp_domain` is the server's
 /// authoritative XMPP domain (used to construct each user's
-/// `BareJid`).
+/// `BareJid`). `cancel` is checked between rows so SIGTERM
+/// short-circuits the run instead of letting an N-row pass block
+/// the graceful-shutdown drain past the deployment grace period.
 ///
 /// Returns aggregate counters useful for boot-time telemetry.
 /// Per-user failures are logged and persisted but never abort the
-/// run.
-pub async fn run_startup_backfill(deps: &ProfilePublishDeps, xmpp_domain: &str) -> BackfillReport {
+/// run; cancellation does abort (with the partial counts up to that
+/// point reflected in the report's `processed`/`failed` fields).
+pub async fn run_startup_backfill(
+    deps: &ProfilePublishDeps,
+    xmpp_domain: &str,
+    cancel: CancellationToken,
+) -> BackfillReport {
     let db_actor = deps.state.deps.app_state.db_pool.global_actor();
 
     let rows = match load_users(db_actor).await {
@@ -121,54 +125,50 @@ pub async fn run_startup_backfill(deps: &ProfilePublishDeps, xmpp_domain: &str) 
     info!(total = rows.len(), "Profile backfill: starting");
 
     let now = Utc::now();
+    let cancel_for_workers = cancel.clone();
     let outcomes = stream::iter(rows)
-        .map(|row| process_row(deps, xmpp_domain, row, now))
+        .map(|row| {
+            let cancel = cancel_for_workers.clone();
+            async move {
+                if cancel.is_cancelled() {
+                    return ProcessOutcome::Cancelled;
+                }
+                process_row(deps, xmpp_domain, row, now).await
+            }
+        })
         .buffer_unordered(MAX_INFLIGHT)
         .collect::<Vec<_>>()
         .await;
 
+    let mut cancelled_count = 0usize;
     for outcome in outcomes {
         match outcome {
             ProcessOutcome::Ran => report.processed += 1,
             ProcessOutcome::ThrottledSkip => report.skipped_throttled += 1,
             ProcessOutcome::UserManagedSkip => report.skipped_user_managed += 1,
             ProcessOutcome::Failed => report.failed += 1,
+            ProcessOutcome::Cancelled => cancelled_count += 1,
         }
     }
 
-    info!(
-        total = report.total,
-        processed = report.processed,
-        skipped_throttled = report.skipped_throttled,
-        skipped_user_managed = report.skipped_user_managed,
-        failed = report.failed,
-        "Profile backfill: complete"
-    );
+    if cancelled_count > 0 {
+        info!(
+            cancelled = cancelled_count,
+            total = report.total,
+            processed = report.processed,
+            "Profile backfill: cancelled mid-pass (graceful shutdown)"
+        );
+    } else {
+        info!(
+            total = report.total,
+            processed = report.processed,
+            skipped_throttled = report.skipped_throttled,
+            skipped_user_managed = report.skipped_user_managed,
+            failed = report.failed,
+            "Profile backfill: complete"
+        );
+    }
     report
-}
-
-/// Convenience for callers that want to spawn the backfill
-/// registered with the WebSocket state's `profile_publish_tracker`,
-/// so the graceful-shutdown drain awaits it.
-///
-/// Returns the `JoinHandle` so the caller can `let _handle = ...`
-/// and detach without tripping `let_underscore_future`. The
-/// tracker holds the strong reference for `wait()`.
-pub fn spawn_startup_backfill(
-    state: Arc<WebSocketState>,
-    vcard_store: crate::vcard::VCardStore,
-    xmpp_domain: String,
-) -> tokio::task::JoinHandle<BackfillReport> {
-    let tracker = state.deps.protocol.profile_publish_tracker.clone();
-    let fetch_policy = super::FetchPolicy::default();
-    tracker.spawn(async move {
-        let deps = ProfilePublishDeps {
-            state,
-            vcard_store,
-            fetch_policy,
-        };
-        run_startup_backfill(&deps, &xmpp_domain).await
-    })
 }
 
 /// What `process_row` decided to do for a single user.
@@ -184,6 +184,8 @@ enum ProcessOutcome {
     UserManagedSkip,
     /// The publish chain returned an error.
     Failed,
+    /// The cancellation token fired before this row started.
+    Cancelled,
 }
 
 async fn process_row(
@@ -213,23 +215,15 @@ async fn process_row(
         }
     };
 
-    // Provenance check up front. A user who has self-published their
-    // avatar should not have the bridge re-fetch and re-publish on
-    // every boot — the user-managed guard would suppress
-    // `RemoveIfOidcOwned`, and we shouldn't waste an HTTP fetch + PEP
-    // publish for `SetFromUrl` when the user has explicitly opted out.
     let db_actor = deps.state.deps.app_state.db_pool.global_actor();
-    let provenance = match read_avatar_source(db_actor, &bare).await {
-        Ok(source) => source,
-        Err(error) => {
-            warn!(
-                error = %error,
-                jid = %bare,
-                "Profile backfill: avatar_source lookup failed; treating as unknown and continuing"
-            );
-            AvatarSource::Unknown
-        }
-    };
+
+    // Provenance is checked authoritatively inside
+    // `ensure_pep_profile_published` — it now consults
+    // `user_avatar_source` under the per-(BareJid) lock for both
+    // `SetFromUrl` and `RemoveIfOidcOwned`. We don't pre-read here
+    // because the publish layer's read is the authoritative one
+    // (any pre-check would race a concurrent wire publish that
+    // flips the row between the two reads).
 
     // Track whether the malformed-URL persist needs to fire later —
     // we don't want to abort the whole row just because the PHOTO
@@ -237,14 +231,8 @@ async fn process_row(
     // valid `display_name` should still get their FN backfilled.
     let mut photo_url_was_invalid = false;
 
-    let photo = match (row.avatar_url.as_deref(), provenance) {
-        // User self-published; bridge stays out of the PHOTO axis
-        // entirely. (Setting via OIDC after the user opted into
-        // self-management is a deliberate choice the user makes by
-        // wire-publishing empty `<metadata/>` to opt back in — see
-        // PR4's `record_oidc_managed` hook.)
-        (_, AvatarSource::User) => PhotoIntent::Skip,
-        (Some(s), _) => match Url::parse(s) {
+    let photo = match row.avatar_url.as_deref() {
+        Some(s) => match Url::parse(s) {
             Ok(url) => PhotoIntent::SetFromUrl(url),
             Err(error) => {
                 warn!(
@@ -257,10 +245,11 @@ async fn process_row(
                 PhotoIntent::Skip
             }
         },
-        // No avatar claim. If OIDC owned the previous avatar this
-        // becomes a removal; otherwise leave well enough alone.
-        (None, AvatarSource::Oidc) => PhotoIntent::RemoveIfOidcOwned,
-        (None, AvatarSource::Unknown) => PhotoIntent::Skip,
+        // No avatar claim. The publish layer's `RemoveIfOidcOwned`
+        // path handles all three provenance states (`'oidc'` →
+        // remove, `'user'` → suppress, `Unknown` → idempotent
+        // no-op via the metadata-present probe).
+        None => PhotoIntent::RemoveIfOidcOwned,
     };
 
     let name = match row.display_name.clone() {
@@ -281,19 +270,23 @@ async fn process_row(
         // skipped, so the throttle prevents re-attempting the bad
         // URL every boot.
         if photo_url_was_invalid {
-            let _ = persist_attempt(db_actor, &row.xmpp_localpart, now, Some("invalid_url")).await;
+            if let Err(error) =
+                persist_attempt(db_actor, &row.xmpp_localpart, now, Some("invalid_url")).await
+            {
+                warn!(
+                    error = %error,
+                    jid = %bare,
+                    "Profile backfill: failed to persist invalid_url state"
+                );
+            }
             return ProcessOutcome::Failed;
         }
-        return if matches!(provenance, AvatarSource::User) {
-            ProcessOutcome::UserManagedSkip
-        } else {
-            ProcessOutcome::Ran
-        };
+        return ProcessOutcome::Ran;
     }
 
     let source = ProfileSource::Oidc { photo, name };
     match ensure_pep_profile_published(deps, &bare, source).await {
-        Ok(_) => {
+        Ok(outcome) => {
             // Honor the "invalid_url" persistent throttle even when
             // the FN axis succeeds — re-fetching the same bad URL
             // every boot is the failure mode the throttle exists to
@@ -310,11 +303,11 @@ async fn process_row(
                     "Profile backfill: failed to persist success state (continuing)"
                 );
             }
-            // If only the FN axis ran (PHOTO skipped on invalid
-            // URL), surface that as Failed so the boot-time
-            // counters reflect the half-fail.
             if photo_url_was_invalid {
+                // Half-fail: FN succeeded but PHOTO URL was bad.
                 ProcessOutcome::Failed
+            } else if outcome.photo_removal_guarded_by_user_managed {
+                ProcessOutcome::UserManagedSkip
             } else {
                 ProcessOutcome::Ran
             }
@@ -346,19 +339,45 @@ async fn process_row(
 
 /// Pure throttle decision — exposed at module scope so a unit test
 /// can exercise it without touching the database.
+///
+/// Semantics:
+/// - No `last_attempt_at` row → not throttled.
+/// - `last_attempt_at` parses, last error is a permanent kind, and
+///   `now - last_attempt <= PERMANENT_FAILURE_COOLDOWN` → throttled.
+/// - `last_attempt_at` parses, last error is transient OR `None` →
+///   not throttled (transient errors retry every boot; success
+///   never throttles).
+/// - `last_attempt_at` FAILS to parse AND last error is a permanent
+///   kind → **throttled** (fail-closed). A corrupted timestamp is
+///   indistinguishable from a recent permanent failure to the
+///   throttle, so we err on the side of not re-hammering the IDP
+///   until a human resets the row. Transient kinds with a corrupt
+///   timestamp still proceed (re-attempt is the safe default).
+/// - Negative `now - last_attempt` (clock skew backward) is treated
+///   as "within the cool-down" — falls through to the kind check.
 fn should_throttle(row: &BackfillRow, now: DateTime<Utc>) -> bool {
-    let Some(last_attempt) = row
+    let last_error_is_permanent = matches!(
+        row.last_error.as_deref(),
+        Some(kind) if PERMANENT_KINDS.contains(&kind)
+    );
+    let Some(parsed) = row
         .last_attempt_at
         .as_deref()
         .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
         .map(|d| d.with_timezone(&Utc))
     else {
+        // No row OR unparseable timestamp.
+        if row.last_attempt_at.is_some() && last_error_is_permanent {
+            // Corrupted permanent-failure row → fail-closed.
+            return true;
+        }
         return false;
     };
-    if now.signed_duration_since(last_attempt) > PERMANENT_FAILURE_COOLDOWN {
+    let elapsed = now.signed_duration_since(parsed);
+    if elapsed > PERMANENT_FAILURE_COOLDOWN {
         return false;
     }
-    matches!(row.last_error.as_deref(), Some(kind) if PERMANENT_KINDS.contains(&kind))
+    last_error_is_permanent
 }
 
 async fn load_users(db_actor: &ActorRef<DbActor>) -> Result<Vec<BackfillRow>, BackfillError> {
@@ -516,5 +535,89 @@ mod tests {
         let now = Utc::now();
         let one_hour_ago = (now - Duration::hours(1)).to_rfc3339();
         assert!(!should_throttle(&row_with(Some(&one_hour_ago), None), now));
+    }
+
+    #[test]
+    fn should_throttle_at_exact_cooldown_boundary() {
+        // Exactly 24h ago — cool-down comparison is `>` not `>=`,
+        // so this still throttles. Verify the boundary so future
+        // refactors don't silently flip the semantics.
+        let now = Utc::now();
+        let exactly_24h_ago = (now - Duration::hours(24)).to_rfc3339();
+        assert!(should_throttle(
+            &row_with(Some(&exactly_24h_ago), Some("permanent_4xx")),
+            now
+        ));
+    }
+
+    #[test]
+    fn should_throttle_for_clock_skew_backward() {
+        // last_attempt > now (negative elapsed). Treat as "within the
+        // cool-down" → throttle if kind is permanent.
+        let now = Utc::now();
+        let an_hour_in_the_future = (now + Duration::hours(1)).to_rfc3339();
+        assert!(should_throttle(
+            &row_with(Some(&an_hour_in_the_future), Some("permanent_4xx")),
+            now
+        ));
+        assert!(!should_throttle(
+            &row_with(Some(&an_hour_in_the_future), Some("network")),
+            now
+        ));
+    }
+
+    #[test]
+    fn should_throttle_fail_closed_on_unparseable_permanent() {
+        // Corrupted timestamp + permanent kind → fail-closed.
+        let now = Utc::now();
+        assert!(should_throttle(
+            &row_with(Some("not-an-rfc3339-timestamp"), Some("permanent_4xx")),
+            now
+        ));
+    }
+
+    #[test]
+    fn should_throttle_fail_open_on_unparseable_transient() {
+        // Corrupted timestamp + transient kind → fail-open (retry).
+        let now = Utc::now();
+        assert!(!should_throttle(
+            &row_with(Some("garbage"), Some("network")),
+            now
+        ));
+    }
+
+    #[test]
+    fn permanent_kinds_subset_of_fetch_error_kinds() {
+        // Pin the contract: every `PERMANENT_KINDS` entry must
+        // either be a real `FetchError::kind()` value OR the
+        // synthesized `"invalid_url"` (which the backfill
+        // emits itself for `Url::parse` failures). A future rename
+        // in `fetch.rs` would silently break the throttle without
+        // this guard.
+        use super::super::fetch::FetchError;
+        use std::net::{IpAddr, Ipv4Addr};
+        let representatives: &[(FetchError, &str)] = &[
+            (FetchError::InvalidScheme("http".into()), "invalid_scheme"),
+            (FetchError::MissingHost, "missing_host"),
+            (
+                FetchError::SsrfBlocked(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1))),
+                "ssrf_blocked",
+            ),
+            (FetchError::Http(404), "permanent_4xx"),
+            (FetchError::MimeRejected(None), "mime_rejected"),
+            (FetchError::MagicByteMismatch, "magic_byte_mismatch"),
+            (FetchError::SizeExceeded(100), "size_exceeded"),
+        ];
+        for (err, expected_kind) in representatives {
+            assert_eq!(err.kind(), *expected_kind);
+            assert!(
+                PERMANENT_KINDS.contains(expected_kind),
+                "FetchError::kind() value {expected_kind:?} should be in PERMANENT_KINDS"
+            );
+        }
+        assert!(
+            PERMANENT_KINDS.contains(&"invalid_url"),
+            "synthesized 'invalid_url' kind must be in PERMANENT_KINDS"
+        );
     }
 }

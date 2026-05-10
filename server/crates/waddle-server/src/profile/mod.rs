@@ -37,7 +37,7 @@ pub use avatar_source::{
     acquire_per_jid_lock, read_avatar_source, record_oidc_managed, record_self_published,
     AvatarSource, AvatarSourceStorageError,
 };
-pub use backfill::{run_startup_backfill, spawn_startup_backfill, BackfillError, BackfillReport};
+pub use backfill::{run_startup_backfill, BackfillError, BackfillReport};
 pub use fetch::{fetch_avatar_bytes, AvatarBytes, FetchError, FetchPolicy};
 pub use publish::{ensure_pep_profile_published, ProfilePublishDeps};
 pub use source::{NameIntent, PhotoIntent, ProfileSource, ProfileSyncError};

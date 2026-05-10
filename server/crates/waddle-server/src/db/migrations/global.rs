@@ -371,7 +371,7 @@ CREATE TABLE user_avatar_fetch_state (
     xmpp_localpart TEXT PRIMARY KEY,
     last_attempt_at TEXT NOT NULL,
     last_error TEXT,
-    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    updated_at TEXT NOT NULL
 );
 "#;
 
@@ -380,7 +380,7 @@ CREATE TABLE user_avatar_fetch_state (
     xmpp_localpart TEXT PRIMARY KEY,
     last_attempt_at TEXT NOT NULL,
     last_error TEXT,
-    updated_at TEXT NOT NULL DEFAULT to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')
+    updated_at TEXT NOT NULL
 );
 "#;
 

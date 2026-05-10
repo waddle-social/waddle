@@ -141,6 +141,11 @@ pub(crate) async fn create_router(
     // awaits it before tearing down. The auth callback path
     // continues to fire per-login, so a partial backfill is just
     // "we'll catch up next boot."
+    //
+    // The `shutdown_stop_token` is forwarded into the run so SIGTERM
+    // short-circuits the row stream — without that, an N-row pass
+    // could block the publish-tracker `wait()` in the graceful-
+    // shutdown drain past the deployment grace period.
     {
         let db_actor = websocket_state
             .deps
@@ -150,6 +155,7 @@ pub(crate) async fn create_router(
             .clone();
         let backfill_state = websocket_state.clone();
         let xmpp_domain = auth_state.xmpp_domain.clone();
+        let backfill_cancel = shutdown_stop_token.clone();
         let span = tracing::info_span!("oidc_profile_backfill");
         let backfill_tracker = backfill_state.deps.protocol.profile_publish_tracker.clone();
         let _backfill_handle = backfill_tracker.spawn(async move {
@@ -170,7 +176,7 @@ pub(crate) async fn create_router(
                 fetch_policy: crate::profile::FetchPolicy::default(),
             };
             let _report = async move {
-                crate::profile::run_startup_backfill(&deps, &xmpp_domain).await;
+                crate::profile::run_startup_backfill(&deps, &xmpp_domain, backfill_cancel).await;
             }
             .instrument(span)
             .await;
