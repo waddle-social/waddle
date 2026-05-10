@@ -136,6 +136,154 @@ async fn test_waddle_v1002_adds_pin_permission_to_existing_v1001_schema() {
 }
 
 #[tokio::test]
+async fn test_global_v0004_adds_policy_digest_to_existing_v0003_schema() {
+    // Mirror of `test_waddle_v1002_adds_pin_permission_to_existing_v1001_schema`
+    // for V0004: seed a database that already has the V0003-shaped
+    // `user_avatar_fetch_state` (the migration history is at v3),
+    // run the global migration runner, and assert that V0004 added
+    // `last_fetch_policy_digest` and that the column accepts both
+    // NULL and a non-NULL string value (both code paths used by
+    // `backfill::persist_attempt`).
+    let db = Database::in_memory("test-global-v0004-policy-digest")
+        .await
+        .unwrap();
+    let conn = db.guard().await.unwrap();
+
+    conn.execute(
+        r#"
+            CREATE TABLE IF NOT EXISTS _migrations (
+                version INTEGER PRIMARY KEY,
+                description TEXT NOT NULL,
+                applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )
+            "#,
+        (),
+    )
+    .await
+    .unwrap();
+    for (version, description) in [
+        (1, "Hard-cut auth broker schema with roster pre-approval"),
+        (
+            2,
+            "Add user_avatar_source provenance table for OIDC user-managed avatar guard",
+        ),
+        (
+            3,
+            "Add user_avatar_fetch_state for startup-backfill throttle",
+        ),
+    ] {
+        conn.execute(
+            "INSERT INTO _migrations (version, description) VALUES (?, ?)",
+            (version, description),
+        )
+        .await
+        .unwrap();
+    }
+    // Materialise the V0003 shape so V0004's ALTER has a target.
+    conn.execute(
+        r#"
+            CREATE TABLE user_avatar_fetch_state (
+                xmpp_localpart TEXT PRIMARY KEY,
+                last_attempt_at TEXT NOT NULL,
+                last_error TEXT,
+                updated_at TEXT NOT NULL
+            )
+            "#,
+        (),
+    )
+    .await
+    .unwrap();
+    // Seed a row mimicking the prod scenario: a `mime_rejected`
+    // throttle persisted before V0004 existed (so the digest column
+    // is NULL after the migration).
+    conn.execute(
+        r#"
+            INSERT INTO user_avatar_fetch_state
+              (xmpp_localpart, last_attempt_at, last_error, updated_at)
+            VALUES ('alice', '2026-05-10T12:08:46.886293143+00:00', 'mime_rejected', '2026-05-10T12:08:46.886293143+00:00')
+            "#,
+        (),
+    )
+    .await
+    .unwrap();
+    drop(conn);
+
+    // `MigrationRunner::global()` composes global + waddle migrations,
+    // so the runner also reports applying 1001 and 1002 (the waddle
+    // schema tables) on top of V0004. The test's invariant is V0004
+    // specifically, asserted via the `pragma_table_info` probe below;
+    // the version list is included in the assertion so a future PR
+    // that reorders or renumbers can't silently shift it.
+    let runner = MigrationRunner::global();
+    let applied = runner.run(&db).await.unwrap();
+    assert_eq!(applied, vec![4, 1001, 1002]);
+
+    // Column exists.
+    let conn = db.guard().await.unwrap();
+    let mut rows = conn
+        .query(
+            r#"
+                SELECT COUNT(*)
+                FROM pragma_table_info('user_avatar_fetch_state')
+                WHERE name = 'last_fetch_policy_digest'
+                "#,
+            (),
+        )
+        .await
+        .unwrap();
+    let row = rows.next().await.unwrap().unwrap();
+    let has_digest_column: i64 = row.get(0).unwrap();
+    assert_eq!(
+        has_digest_column, 1,
+        "V0004 must add last_fetch_policy_digest column"
+    );
+
+    // Pre-V0004 row's digest column is NULL — this is the path
+    // `should_throttle` uses to mark policy-dependent kinds as
+    // not-yet-attempted on the first post-migration backfill.
+    let mut rows = conn
+        .query(
+            "SELECT last_fetch_policy_digest FROM user_avatar_fetch_state WHERE xmpp_localpart = 'alice'",
+            (),
+        )
+        .await
+        .unwrap();
+    let row = rows.next().await.unwrap().unwrap();
+    let digest: Option<String> = row.get(0).unwrap();
+    assert_eq!(
+        digest, None,
+        "rows that predate V0004 must have NULL digest after the migration"
+    );
+
+    // Round-trip: write a non-NULL digest into the new column and
+    // read it back. Confirms the column is plain TEXT-compatible
+    // and `persist_attempt`'s 5-column UPSERT will land cleanly.
+    conn.execute(
+        "UPDATE user_avatar_fetch_state SET last_fetch_policy_digest = ? WHERE xmpp_localpart = 'alice'",
+        ["test_digest_v1"],
+    )
+    .await
+    .unwrap();
+    let mut rows = conn
+        .query(
+            "SELECT last_fetch_policy_digest FROM user_avatar_fetch_state WHERE xmpp_localpart = 'alice'",
+            (),
+        )
+        .await
+        .unwrap();
+    let row = rows.next().await.unwrap().unwrap();
+    let digest: Option<String> = row.get(0).unwrap();
+    assert_eq!(digest.as_deref(), Some("test_digest_v1"));
+
+    let version = runner.current_version(&db).await.unwrap();
+    assert_eq!(
+        version,
+        Some(1002),
+        "current version reflects the highest applied across global+waddle"
+    );
+}
+
+#[tokio::test]
 async fn test_has_pending_migrations() {
     let db = Database::in_memory("test-pending").await.unwrap();
     let runner = MigrationRunner::global();

@@ -400,9 +400,15 @@ ALTER TABLE user_avatar_fetch_state ADD COLUMN last_fetch_policy_digest TEXT;
 /// crashed migration-bookkeeping insert (the `_migrations` row is
 /// written outside the DDL transaction in the runner) is a clean
 /// no-op rather than a hard failure on the second `ALTER TABLE`.
-/// SQLite has no `IF NOT EXISTS` support on `ADD COLUMN`; for that
-/// dialect the migration-history check inside the runner is the
-/// only line of defence.
+/// SQLite has no `IF NOT EXISTS` support on `ADD COLUMN`, so the
+/// SQLite variant is not idempotent: a crash between the DDL
+/// commit and the `_migrations` insert leaves the next boot
+/// failing on "duplicate column" until a human clears the half-
+/// applied state. This is a pre-existing migration-runner
+/// fragility (the runner's incompatible-history reset only fires
+/// on differing descriptions, not on missing-row + existing-column),
+/// not something V0004 introduces or worsens — but the asymmetry
+/// is worth flagging at the migration site.
 pub const V0004_AVATAR_FETCH_STATE_POLICY_DIGEST_POSTGRES: &str = r#"
 ALTER TABLE user_avatar_fetch_state ADD COLUMN IF NOT EXISTS last_fetch_policy_digest TEXT;
 "#;
