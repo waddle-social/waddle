@@ -169,6 +169,16 @@ fn tiny_png() -> Vec<u8> {
     ]
 }
 
+/// JPEG fixture — SOI plus a JFIF APP0 marker prefix. Just enough
+/// to clear the `AllowedMime::Jpeg` magic-byte check in `fetch.rs`;
+/// the publish chain base64-encodes whatever clears the gate
+/// (nothing downstream parses the image structure).
+fn tiny_jpeg() -> Vec<u8> {
+    vec![
+        0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46, 0x00, 0x01,
+    ]
+}
+
 // ============================================================================
 // fn_only_publishes_to_vcard_temp_and_vcard4_with_no_avatar
 // ============================================================================
@@ -298,6 +308,71 @@ async fn avatar_url_publishes_data_and_metadata_with_real_sha1() {
 }
 
 // ============================================================================
+// avatar_url_publishes_jpeg_with_per_format_mime
+// ============================================================================
+//
+// Regression for the prod incident traced to issue #363: GitHub
+// avatars at `avatars.githubusercontent.com/u/<id>?v=4` are served
+// with `Content-Type: image/jpeg` for users whose original avatar
+// was a JPEG, and the fetcher rejected them as `mime_rejected`.
+// This test pins the JPEG path end-to-end: the metadata `<info type>`
+// must carry `image/jpeg`, not `image/png`.
+
+#[tokio::test]
+async fn avatar_url_publishes_jpeg_with_per_format_mime() {
+    let _serial = TEST_SERIAL.lock().await;
+    let server = TestServer::start();
+    let mut admin = admin_client(&server, "avatar-jpeg-1").await;
+    let admin_bare = format!("{ADMIN}@{DOMAIN}");
+
+    let jpeg_bytes = tiny_jpeg();
+    let mock = wiremock::MockServer::start().await;
+    wiremock::Mock::given(wiremock::matchers::method("GET"))
+        .and(wiremock::matchers::path("/avatar.jpg"))
+        .respond_with(
+            wiremock::ResponseTemplate::new(200)
+                .insert_header("content-type", "image/jpeg")
+                .set_body_bytes(jpeg_bytes.clone()),
+        )
+        .mount(&mock)
+        .await;
+
+    let avatar_url = format!("{}/avatar.jpg", mock.uri());
+    let resp = invoke_profile_publish(
+        &server,
+        &PublishReq::for_jid(&admin_bare).set_photo_url(&avatar_url),
+    )
+    .await;
+
+    let sha1 = resp
+        .photo_sha1_hex
+        .clone()
+        .expect("metadata MUST carry the SHA-1 id");
+    assert_eq!(resp.photo_mime.as_deref(), Some("image/jpeg"));
+    assert_eq!(resp.photo_bytes_len, Some(jpeg_bytes.len()));
+    assert!(resp.published_avatar_data && resp.published_avatar_metadata);
+
+    let metadata = iq_get_to(
+        &mut admin,
+        "avatar-meta-jpeg-1",
+        &admin_bare,
+        &format!(r#"<pubsub xmlns="{NS_PUBSUB}"><items node="{NS_AVATAR_METADATA}"/></pubsub>"#),
+    )
+    .await;
+    assert!(
+        metadata.contains(NS_AVATAR_METADATA) && metadata.contains(&format!(r#"id="{sha1}""#)),
+        "metadata item MUST be keyed on the SHA-1 of the bytes per XEP-0084 §4.1.1: {metadata}"
+    );
+    assert!(
+        metadata.contains(r#"type="image/jpeg""#),
+        "metadata <info type> MUST reflect the source MIME, not a hard-coded image/png: {metadata}"
+    );
+    assert!(!metadata.contains(r#"url="#));
+
+    let _ = admin.close().await;
+}
+
+// ============================================================================
 // empty_source_is_no_op
 // ============================================================================
 
@@ -367,11 +442,16 @@ async fn combined_fn_plus_avatar_publishes_full_chain() {
 }
 
 // ============================================================================
-// non_png_content_type_is_rejected
+// out_of_allowlist_content_type_is_rejected
 // ============================================================================
+//
+// Per RFC 363 the avatar fetch allowlist is `image/png`, `image/jpeg`,
+// `image/gif`, `image/webp`. Anything outside that list — including
+// older container formats (BMP, TIFF) and the `image/jpg` colloquial
+// alias — is rejected at the fetch gate.
 
 #[tokio::test]
-async fn non_png_content_type_is_rejected() {
+async fn out_of_allowlist_content_type_is_rejected() {
     let _serial = TEST_SERIAL.lock().await;
     let server = TestServer::start();
     let admin_bare = format!("{ADMIN}@{DOMAIN}");
@@ -380,22 +460,22 @@ async fn non_png_content_type_is_rejected() {
     wiremock::Mock::given(wiremock::matchers::method("GET"))
         .respond_with(
             wiremock::ResponseTemplate::new(200)
-                .insert_header("content-type", "image/jpeg")
-                .set_body_bytes(b"\xff\xd8\xff\xe0".to_vec()),
+                .insert_header("content-type", "image/bmp")
+                .set_body_bytes(b"BM\x00\x00\x00\x00".to_vec()),
         )
         .mount(&mock)
         .await;
 
     let (status, body) = invoke_profile_publish_raw(
         &server,
-        &PublishReq::for_jid(admin_bare).set_photo_url(format!("{}/jpeg.bin", mock.uri())),
+        &PublishReq::for_jid(admin_bare).set_photo_url(format!("{}/avatar.bmp", mock.uri())),
         Some(server.test_profile_publish_token()),
     )
     .await;
     assert_eq!(
         status,
         reqwest::StatusCode::UNPROCESSABLE_ENTITY,
-        "non-PNG MIME is a fetch-policy reject (422), got {status} {body}"
+        "out-of-allowlist MIME is a fetch-policy reject (422), got {status} {body}"
     );
 }
 

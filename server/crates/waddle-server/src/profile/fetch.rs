@@ -24,11 +24,16 @@
 //! - **Streaming size cap:** 100 KB hard cap, enforced chunk-by-chunk
 //!   on the response body so an oversize/slowloris/lying-Content-Length
 //!   server cannot OOM us.
-//! - **MIME:** `image/png` only — XEP-0084 §3.1 restricts
-//!   `urn:xmpp:avatar:data` to PNG. The header is checked, then the
-//!   bytes are magic-byte sniffed against the PNG signature so a
-//!   server lying in `Content-Type` can't smuggle non-PNG payloads
-//!   downstream.
+//! - **MIME:** allowlist of `image/png`, `image/jpeg`, `image/gif`,
+//!   `image/webp` per RFC 363's design (issue #363). XEP-0084 §3.1
+//!   says PNG SHOULD be the data-node format, but the issue explicitly
+//!   chose to publish the source MIME under "exactly one `<info>`
+//!   element" rather than transcoding — the publish chain plumbs the
+//!   actual MIME through `<info type>`, vCard `<TYPE>`, and the vCard4
+//!   `<photo>` data-URI. The header is gated against the allowlist,
+//!   then the body is magic-byte sniffed against the specific format
+//!   the header declared so a server lying in `Content-Type` can't
+//!   smuggle a different payload downstream.
 //! - **Timeouts:** 5s connect, 10s total.
 //! - **Retries:** one retry on transient failures (5xx, connect
 //!   timeout, network error). No backoff.
@@ -51,10 +56,62 @@ const MAX_BYTES: usize = 100 * 1024;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const TOTAL_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// XEP-0084 §3.1: `<data/>` is for `image/png` only.
-const PNG_MIME: &str = "image/png";
-/// PNG file signature (RFC 2083 §3.1).
-const PNG_MAGIC: [u8; 8] = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+/// Image formats we accept on the avatar fetch path. The publish
+/// chain carries the canonical MIME string forward into XEP-0084
+/// metadata (`<info type>`), vCard-temp PHOTO `<TYPE>`, and the
+/// XEP-0292 vCard4 `<photo>` data-URI without re-encoding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AllowedMime {
+    Png,
+    Jpeg,
+    Gif,
+    Webp,
+}
+
+impl AllowedMime {
+    /// Match a normalized (`split(';').next().trim().to_lowercase()`)
+    /// `Content-Type` against the allowlist. `image/jpg` is rejected
+    /// — RFC 6838 only registers `image/jpeg`. If a real-world IdP
+    /// trips on this in practice, accept it explicitly with a test
+    /// rather than loosening the match.
+    fn from_header(s: &str) -> Option<Self> {
+        match s {
+            "image/png" => Some(Self::Png),
+            "image/jpeg" => Some(Self::Jpeg),
+            "image/gif" => Some(Self::Gif),
+            "image/webp" => Some(Self::Webp),
+            _ => None,
+        }
+    }
+
+    fn as_mime(self) -> &'static str {
+        match self {
+            Self::Png => "image/png",
+            Self::Jpeg => "image/jpeg",
+            Self::Gif => "image/gif",
+            Self::Webp => "image/webp",
+        }
+    }
+
+    /// Verify the body's leading bytes match the format declared in
+    /// the response header. Each signature is the format's documented
+    /// fixed prefix:
+    /// - PNG: 8-byte signature, RFC 2083 §3.1.
+    /// - JPEG: SOI + first marker, `FF D8 FF`. Subsequent bytes vary
+    ///   by encoder (E0/E1 for JFIF/EXIF, DB for raw quantization
+    ///   tables) so only the 3-byte prefix is fixed.
+    /// - GIF: ASCII `GIF87a` or `GIF89a` (CompuServe spec §17).
+    /// - WebP: RIFF container — `RIFF` magic, 4-byte LE chunk size,
+    ///   `WEBP` form (RFC 9649 §2.1).
+    fn matches_magic(self, bytes: &[u8]) -> bool {
+        match self {
+            Self::Png => bytes.starts_with(&[0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+            Self::Jpeg => bytes.starts_with(&[0xff, 0xd8, 0xff]),
+            Self::Gif => bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a"),
+            Self::Webp => bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP",
+        }
+    }
+}
 
 /// Successful avatar fetch result.
 #[derive(Debug, Clone)]
@@ -77,9 +134,11 @@ pub enum FetchError {
     Network(String),
     #[error("HTTP {0}")]
     Http(u16),
-    #[error("response Content-Type {0:?} is not image/png")]
+    #[error(
+        "response Content-Type {0:?} is not in the avatar allowlist (image/png, image/jpeg, image/gif, image/webp)"
+    )]
     MimeRejected(Option<String>),
-    #[error("response body did not start with the PNG signature")]
+    #[error("response body did not start with the magic-byte signature for the declared MIME")]
     MagicByteMismatch,
     #[error("response exceeds {0}-byte cap")]
     SizeExceeded(usize),
@@ -253,9 +312,10 @@ async fn try_fetch(
         .get(CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
         .map(|v| v.split(';').next().unwrap_or(v).trim().to_lowercase());
-    if header_mime.as_deref() != Some(PNG_MIME) {
-        return Err(FetchError::MimeRejected(header_mime));
-    }
+    let declared = match header_mime.as_deref().and_then(AllowedMime::from_header) {
+        Some(m) => m,
+        None => return Err(FetchError::MimeRejected(header_mime)),
+    };
 
     if let Some(len) = response.content_length() {
         if (len as usize) > policy.max_bytes {
@@ -277,14 +337,15 @@ async fn try_fetch(
         buf.extend_from_slice(&chunk);
     }
 
-    if buf.len() < PNG_MAGIC.len() || buf[..PNG_MAGIC.len()] != PNG_MAGIC {
+    if !declared.matches_magic(&buf) {
         return Err(FetchError::MagicByteMismatch);
     }
 
-    debug!(url = %url, bytes = buf.len(), mime = %PNG_MIME, "avatar fetched");
+    let mime = declared.as_mime();
+    debug!(url = %url, bytes = buf.len(), mime = %mime, "avatar fetched");
     Ok(AvatarBytes {
         bytes: buf,
-        mime: PNG_MIME.to_string(),
+        mime: mime.to_string(),
     })
 }
 
@@ -506,5 +567,84 @@ mod tests {
             FetchError::MimeRejected(Some("application/pdf".into())).kind(),
             "mime_rejected"
         );
+    }
+
+    #[test]
+    fn allowed_mime_round_trips_each_allowlist_entry() {
+        for (header, expected) in [
+            ("image/png", AllowedMime::Png),
+            ("image/jpeg", AllowedMime::Jpeg),
+            ("image/gif", AllowedMime::Gif),
+            ("image/webp", AllowedMime::Webp),
+        ] {
+            let parsed = AllowedMime::from_header(header).unwrap_or_else(|| {
+                panic!("{header} must be in the allowlist");
+            });
+            assert_eq!(parsed, expected);
+            assert_eq!(parsed.as_mime(), header);
+        }
+    }
+
+    #[test]
+    fn allowed_mime_rejects_unsupported_types() {
+        // RFC 6838 only registers `image/jpeg`; some IdPs serve
+        // `image/jpg` colloquially. We do NOT accept the alias —
+        // adding it would mean we publish `image/jpg` downstream
+        // (non-conformant per RFC 6838) and accept a body whose
+        // declared type isn't actually a registered MIME. If a real
+        // IdP trips on this, add a dedicated test alongside the
+        // explicit branch.
+        for header in [
+            "image/jpg",
+            "image/bmp",
+            "image/tiff",
+            "image/svg+xml",
+            "image/avif",
+            "application/pdf",
+            "text/plain",
+            "",
+        ] {
+            assert!(
+                AllowedMime::from_header(header).is_none(),
+                "{header:?} must NOT be in the allowlist"
+            );
+        }
+    }
+
+    #[test]
+    fn allowed_mime_matches_per_format_magic_bytes() {
+        let png = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00];
+        let jpeg = [0xff, 0xd8, 0xff, 0xe0, 0x00];
+        let gif87 = b"GIF87a\x00\x00";
+        let gif89 = b"GIF89a\x00\x00";
+        // RIFF<4 LE size bytes>WEBPVP8 ...
+        let webp = b"RIFF\x24\x00\x00\x00WEBPVP8 \x00";
+
+        assert!(AllowedMime::Png.matches_magic(&png));
+        assert!(AllowedMime::Jpeg.matches_magic(&jpeg));
+        assert!(AllowedMime::Gif.matches_magic(gif87));
+        assert!(AllowedMime::Gif.matches_magic(gif89));
+        assert!(AllowedMime::Webp.matches_magic(webp));
+
+        // Mismatched header vs body is the smuggling case the magic
+        // check exists to defeat.
+        assert!(!AllowedMime::Png.matches_magic(&jpeg));
+        assert!(!AllowedMime::Jpeg.matches_magic(&png));
+        assert!(!AllowedMime::Gif.matches_magic(&jpeg));
+        assert!(!AllowedMime::Webp.matches_magic(&jpeg));
+    }
+
+    #[test]
+    fn allowed_mime_magic_check_handles_short_body() {
+        // Empty / very short bodies must never panic — `try_fetch`
+        // streams the response and could in principle deliver a
+        // truncated buffer. `starts_with` is bounds-safe; the WebP
+        // arm explicitly checks `len >= 12`. Pin the contract.
+        for short in [&[][..], &[0xff][..], &[0xff, 0xd8][..]] {
+            assert!(!AllowedMime::Png.matches_magic(short));
+            assert!(!AllowedMime::Jpeg.matches_magic(short));
+            assert!(!AllowedMime::Gif.matches_magic(short));
+            assert!(!AllowedMime::Webp.matches_magic(short));
+        }
     }
 }
