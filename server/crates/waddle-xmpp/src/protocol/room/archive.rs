@@ -99,6 +99,7 @@ mod tests {
     use crate::xep::xep0421::OccupantIdSecret;
     use jid::{BareJid, FullJid, Jid};
     use minidom::Element;
+    use std::str::FromStr;
     use xmpp_parsers::message::{Body, Message, MessageType};
 
     fn full(s: &str) -> FullJid {
@@ -269,6 +270,28 @@ mod tests {
                 .iter()
                 .any(|e| matches!(e, OutboundEvent::ArchiveGroupchat { .. })),
             "forum reply metadata is durable thread UI state and must be archived"
+        );
+    }
+
+    /// Production wire shape emitted by `waddle-xmpp-client::messaging::
+    /// builders::build_reaction_message` (the WASM client's `send_reaction`
+    /// path). Reactions stopped landing in production MAM on 2026-05-04;
+    /// this test pins down the wire shape → `is_archivable` round-trip
+    /// so any regression in the parse-side detection (xmpp_parsers
+    /// upgrades, payload field renames, namespace drift) trips here
+    /// before it ships.
+    #[test]
+    fn xep_0444_groupchat_reaction_wire_shape_is_archivable() {
+        let xml = r#"<message xmlns='jabber:client' to='room@muc.example.com' type='groupchat' id='reaction-uuid-1'><reactions xmlns='urn:xmpp:reactions:0' id='target-sid'><reaction>❤️</reaction></reactions><store xmlns='urn:xmpp:hints'/></message>"#;
+        let element = Element::from_str(xml).expect("parse element");
+        let msg = Message::try_from(element).expect("parse message");
+        assert!(
+            crate::xep::is_reaction_message(&msg),
+            "is_reaction_message must detect the <reactions/> payload"
+        );
+        assert!(
+            is_archivable(&msg),
+            "is_archivable must accept the bodyless reaction stanza"
         );
     }
 

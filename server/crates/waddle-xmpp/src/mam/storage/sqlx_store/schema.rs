@@ -208,5 +208,19 @@ pub(super) async fn ensure_postgres_schema(pool: &PgPool) -> Result<(), MamStora
     sqlx::query("ALTER TABLE mam_messages ADD COLUMN IF NOT EXISTS parent_thread_id TEXT")
         .execute(pool)
         .await?;
+    // RFC 6121 §5.2.3 / XEP-0313 §3: `body` is nullable. Older
+    // production deployments were created with `body TEXT NOT NULL`
+    // (the schema before the typed `Option<String>` retype in #228);
+    // `CREATE TABLE IF NOT EXISTS` is a no-op on those, so the
+    // constraint never gets dropped. Body-less archive writes
+    // (XEP-0444 reactions, XEP-0424 retractions, sticker- /
+    // shared-file-only stanzas) bind `NULL` and are rejected with
+    // `23502 not_null_violation`, dropping the row entirely.
+    //
+    // `DROP NOT NULL` is idempotent on Postgres — a no-op when the
+    // column is already nullable.
+    sqlx::query("ALTER TABLE mam_messages ALTER COLUMN body DROP NOT NULL")
+        .execute(pool)
+        .await?;
     Ok(())
 }
