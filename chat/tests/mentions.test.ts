@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   avatarLookupCandidates,
+  avatarLookupCandidatesAcrossContexts,
   messageMentionsBareJid,
   mentionAutocompleteCandidates,
   mentionAutocompleteNames,
@@ -240,6 +241,57 @@ describe("mention helpers", () => {
 
     expect(candidates).toEqual([
       { nick: "randax", jid: "randax@waddle.social", avatar_url: null },
+    ]);
+  });
+
+  // RFC 363 PR 6: avatar candidate set MUST queue DM peers (not just
+  // channel members) and MUST resolve a DM author via the DM stanza's
+  // own `authorJid`, NOT via any channel-only nick map.
+  test("across-contexts merge resolves DM peer via DM authorJid even when nick collides with a channel member", () => {
+    const candidates = avatarLookupCandidatesAcrossContexts({
+      channelMembers: [
+        { jid: "alice@waddle.social", username: "alice", avatar_url: null, role: "member", joined_at: "" },
+      ],
+      channelMessages: [
+        { author: "alice", authorJid: "chat@muc.waddle.social/alice", authorRealJid: "alice@waddle.social/laptop" },
+      ],
+      channelAuthorJidByNick: { alice: "alice@waddle.social" },
+      dmMessages: [
+        { author: "alice", authorJid: "alice@other.example/desktop" },
+      ],
+      selfDomain: "waddle.social",
+    });
+
+    const jids = candidates.map((c) => c.jid);
+    expect(jids).toContain("alice@waddle.social");
+    expect(jids).toContain("alice@other.example");
+  });
+
+  test("across-contexts merge produces empty result for empty inputs", () => {
+    const candidates = avatarLookupCandidatesAcrossContexts({
+      channelMembers: [],
+      channelMessages: [],
+      channelAuthorJidByNick: {},
+      dmMessages: [],
+      selfDomain: "waddle.social",
+    });
+
+    expect(candidates).toEqual([]);
+  });
+
+  test("across-contexts merge queues DM-only peers when no channel context exists", () => {
+    const candidates = avatarLookupCandidatesAcrossContexts({
+      channelMembers: [],
+      channelMessages: [],
+      channelAuthorJidByNick: {},
+      dmMessages: [
+        { author: "bob", authorJid: "bob@other.example/desktop" },
+      ],
+      selfDomain: "waddle.social",
+    });
+
+    expect(candidates).toEqual([
+      { nick: "bob", jid: "bob@other.example", avatar_url: null },
     ]);
   });
 });

@@ -24,7 +24,7 @@ import { useScrollDirectionPreference } from "@/preferences/scroll-direction";
 import type { MemberSummary } from "@/lib/chat-types";
 import type { ExtensionAnnotationAction, MarkupSpan, MessageReference, TimelineMessage } from "@/lib/chat-ui";
 import type { DiscoveredExtensionRoute } from "@/lib/xmpp/extension-commands";
-import { avatarLookupCandidates, mentionAutocompleteCandidates, mentionMatchesBareJid, mergeMentionMembers } from "@/lib/mentions";
+import { avatarLookupCandidatesAcrossContexts, mentionAutocompleteCandidates, mentionMatchesBareJid, mergeMentionMembers } from "@/lib/mentions";
 import {
   moveReactionSelection,
   preserveReactionSelection,
@@ -493,11 +493,18 @@ export function useChatAppController(giphyApiKey: string) {
   const notifications = usePushNotifications();
   const appUpdate = useServiceWorkerUpdate();
   const version = useDeploymentVersionInfo(xmppClient);
+  // RFC 363 PR 6: include DM peers in the iterate-and-pull avatar
+  // candidate set. Without this, avatars in DM views never resolve
+  // (the peer never appears in `messaging.messages` because that's
+  // the channel-message timeline). After #435 (workspace roster
+  // bridge) lands, push delivery covers both axes and this fallback
+  // can be slimmed back down.
   const avatarCandidates = computed(() =>
-    avatarLookupCandidates({
-      members: mergedMentionMembers.value.members,
-      messages: messaging.messages.value,
-      authorJidByNick: authorJidByNick.value,
+    avatarLookupCandidatesAcrossContexts({
+      channelMembers: mergedMentionMembers.value.members,
+      channelMessages: messaging.messages.value,
+      channelAuthorJidByNick: authorJidByNick.value,
+      dmMessages: dmMessaging.messages.value,
       selfDomain: selfDomain.value,
     }),
   );

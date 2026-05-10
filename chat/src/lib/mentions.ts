@@ -173,6 +173,45 @@ export function avatarLookupCandidates({
   return candidates;
 }
 
+/**
+ * RFC 363 PR 6: avatar candidate set spanning channel + DM contexts.
+ *
+ * DM messages MUST NOT be resolved through the channel-only nick→JID
+ * map (`authorJidByNick` / member presence): a DM from
+ * `alice@other.example` whose nick collides with a channel member
+ * `alice@waddle.social` would otherwise rank-1 to the channel JID
+ * and the real DM peer would never be queued for `fetchUserAvatar`.
+ *
+ * The resolution: invoke `avatarLookupCandidates` once per context
+ * (channel context with members + nick map; DM context with empty
+ * members + empty nick map) and concatenate the results. The DM
+ * pass falls through to rank 2 (`message.authorJid`), the
+ * authoritative DM peer JID. Downstream consumers dedupe by JID via
+ * `avatarFetchStateByJid`.
+ */
+export function avatarLookupCandidatesAcrossContexts(params: {
+  channelMembers: readonly MemberSummary[];
+  channelMessages: readonly Pick<TimelineMessage, "author" | "authorJid" | "authorRealJid">[];
+  channelAuthorJidByNick: Readonly<Record<string, string>>;
+  dmMessages: readonly Pick<TimelineMessage, "author" | "authorJid" | "authorRealJid">[];
+  selfDomain: string;
+}): AvatarLookupCandidate[] {
+  return [
+    ...avatarLookupCandidates({
+      members: params.channelMembers,
+      messages: params.channelMessages,
+      authorJidByNick: params.channelAuthorJidByNick,
+      selfDomain: params.selfDomain,
+    }),
+    ...avatarLookupCandidates({
+      members: [],
+      messages: params.dmMessages,
+      authorJidByNick: {},
+      selfDomain: params.selfDomain,
+    }),
+  ];
+}
+
 export function resolveMentionUri(
   mention: string,
   mentionJidsByNick?: Readonly<Record<string, string>>,

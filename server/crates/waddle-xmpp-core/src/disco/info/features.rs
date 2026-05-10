@@ -267,6 +267,12 @@ impl Feature {
         Self::new("urn:xmpp:avatar:metadata+notify")
     }
 
+    /// XEP-0292 vCard4 over XMPP — `+notify` filter advertised by
+    /// clients that want to receive vCard4 PEP fan-out per XEP-0163 §3.
+    pub fn vcard4_notify() -> Self {
+        Self::new("urn:xmpp:vcard4+notify")
+    }
+
     pub fn private_storage() -> Self {
         Self::new("jabber:iq:private")
     }
