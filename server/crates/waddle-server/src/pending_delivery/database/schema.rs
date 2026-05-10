@@ -38,18 +38,51 @@ pub(super) async fn initialize(
         .await?;
     // Online migration for existing Postgres tables that were created
     // with the pre-fix `INTEGER` (i32) shape. Widening to BIGINT is
-    // lossless and idempotent — Postgres rewrites the column type, but
-    // every value that actually made it in fits in i32 anyway (writes
-    // past i32::MAX rejected at the wire). SQLite columns are
-    // dynamic-width, so the type doesn't need rewriting there.
+    // lossless — every value that actually made it in fits in i32
+    // anyway (writes past i32::MAX rejected at the wire). SQLite
+    // columns are dynamic-width, so the type doesn't need rewriting
+    // there.
+    //
+    // Gate the ALTER on the current column type so subsequent restarts
+    // (and racing replicas in a rolling deploy) do not re-issue an
+    // `ALTER COLUMN ... TYPE BIGINT` that still takes ACCESS EXCLUSIVE
+    // even when the column is already BIGINT.
     if matches!(storage.db.driver(), DatabaseDriver::Postgres) {
-        storage
-            .execute(
-                "ALTER TABLE pending_delivery \
-                 ALTER COLUMN original_receipt_at TYPE BIGINT",
+        let mut rows = storage
+            .query(
+                "SELECT data_type \
+                 FROM information_schema.columns \
+                 WHERE table_name = 'pending_delivery' \
+                   AND column_name = 'original_receipt_at'",
                 (),
             )
             .await?;
+        let current_type: Option<String> = match rows
+            .next()
+            .await
+            .map_err(|error| PendingStorageError::Other(error.to_string()))?
+        {
+            Some(row) => row
+                .get(0)
+                .map_err(|error| PendingStorageError::Other(error.to_string()))?,
+            None => None,
+        };
+        // `information_schema.columns.data_type` reports `integer` for
+        // int4 and `bigint` for int8 — case is lowercase per the SQL
+        // standard. Compare lowercase to be defensive against any
+        // future Postgres surface changes.
+        let needs_widen = current_type
+            .as_deref()
+            .is_some_and(|t| !t.eq_ignore_ascii_case("bigint"));
+        if needs_widen {
+            storage
+                .execute(
+                    "ALTER TABLE pending_delivery \
+                     ALTER COLUMN original_receipt_at TYPE BIGINT",
+                    (),
+                )
+                .await?;
+        }
     }
     // Idempotent column-add migration for the locked Q7b
     // outbound_sequence column. Tables created by an older
