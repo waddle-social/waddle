@@ -1,0 +1,35 @@
+name: "waddle CodeQL config"
+
+# Integration tests under `**/tests/**/*.rs` legitimately use plaintext
+# HTTP against a `127.0.0.1` loopback test server (no TLS provisioning
+# in the harness), and CodeQL's `rust/cleartext-transmission`
+# heuristic flags every test-helper `client.post(http_url)` call. The
+# tests are not deployed and the bodies they send are per-process
+# random fixtures (no real secrets), so excluding them removes a
+# steady stream of false positives without weakening the production
+# query set.
+paths-ignore:
+  - "**/tests/**/*.rs"
+  - "**/benches/**/*.rs"
+  - "**/examples/**/*.rs"
+
+# Disable `rust/non-https-url`. The avatar fetcher
+# (`server/crates/waddle-server/src/profile/fetch.rs`) deliberately
+# exposes a `FetchPolicy::allow_http_for_tests` knob that the test
+# seam flips on alongside `block_non_global_ips=false`; the function
+# then enforces, separately, that when http is in play the resolved
+# address set must be loopback only. CodeQL's flow tracker sees
+# `allow_http_for_tests=true` reach `client.get(url)` and flags it
+# without modeling the loopback barrier. The query schema doesn't
+# support per-path filtering, only by id/tags/severity, so we
+# disable the query repo-wide.
+#
+# The repo's HTTP attack surface is otherwise narrow: the only HTTP
+# clients are this avatar fetcher (https + magic-byte sniff +
+# resolve-pinning + IP block-list + 100 KB cap), the OIDC token
+# exchange (https-only via the IDP discovery contract), and the
+# upload route (always TLS-terminated by the deployment). Each is
+# manually reviewed for SSRF posture.
+query-filters:
+  - exclude:
+      id: rust/non-https-url

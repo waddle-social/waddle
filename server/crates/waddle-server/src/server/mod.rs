@@ -7,6 +7,7 @@ mod extension_host_tools;
 mod fixed_account;
 mod health;
 mod http;
+pub(crate) mod profile_publish_route;
 mod session_janitors;
 mod state;
 mod topology;
@@ -33,7 +34,7 @@ mod xmpp_user_storage_state;
 
 pub(crate) mod bootstrap_membership;
 pub(crate) mod managed_channel_policy;
-mod routes;
+pub(crate) mod routes;
 pub mod xmpp_state;
 
 pub use config::{XmppAcmeConfig, XmppConfig};

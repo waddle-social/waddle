@@ -148,6 +148,38 @@ pub(super) async fn callback_handler(
         Err(err) => return auth_error_to_response(err).into_response(),
     };
 
+    // Fire-and-forget the OIDC → PEP profile bridge so login latency
+    // is unaffected. The hook is installed at HTTP bootstrap once
+    // `WebSocketState` exists; if it isn't installed (e.g. tests that
+    // bypass HTTP), this is a silent no-op.
+    if let Some(hook) = state.profile_publish_hook() {
+        if let Ok(jid) =
+            format!("{}@{}", linked.user.xmpp_localpart, state.xmpp_domain).parse::<jid::BareJid>()
+        {
+            let avatar_url = identity_claims
+                .avatar_url
+                .as_deref()
+                .and_then(|s| url::Url::parse(s).ok());
+            // Treat empty / whitespace-only `name` claims as absent so
+            // the bridge does NOT publish a blank `<FN>` to vcard-temp
+            // / vCard4. The OIDC spec doesn't forbid an empty `name`,
+            // some IDPs return one when the user hasn't set a profile
+            // name; an empty FN would just blank a previously-set one.
+            let display_name = identity_claims
+                .name
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string);
+            let source = crate::profile::ProfileSource::Oidc {
+                avatar_url,
+                display_name,
+            };
+            let fut = (hook)(jid, source);
+            tokio::spawn(fut);
+        }
+    }
+
     if let Err(err) = reconcile_user_membership(
         &state.permission_actor,
         &state.bootstrap_membership,

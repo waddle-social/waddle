@@ -42,6 +42,8 @@ pub struct TestServer {
     upload_dir: std::path::PathBuf,
     #[allow(dead_code)]
     fixed_account_password: String,
+    #[allow(dead_code)]
+    test_profile_publish_token: String,
 }
 
 impl TestServer {
@@ -85,6 +87,7 @@ impl TestServer {
     ) -> Self {
         let bin = env!("CARGO_BIN_EXE_waddle-server");
         let fixed_account_password = format!("ws-test-password-{}", uuid::Uuid::new_v4());
+        let test_profile_publish_token = uuid::Uuid::new_v4().to_string();
         let extra_accounts_env = extra_accounts
             .iter()
             .map(|(username, password)| format!("{username}:{password}"))
@@ -112,6 +115,10 @@ impl TestServer {
                 &fixed_account_password,
             )
             .env("WADDLE_TEST_EXTRA_FIXED_ACCOUNTS", extra_accounts_env)
+            .env(
+                "WADDLE_TEST_PROFILE_PUBLISH_TOKEN",
+                &test_profile_publish_token,
+            )
             // The fixed test account ("admin") is always provisioned as a
             // server owner so integration tests can exercise owner-gated
             // operations (MUC creation, Space node creation, etc.)
@@ -182,12 +189,29 @@ impl TestServer {
             port_file,
             upload_dir,
             fixed_account_password,
+            test_profile_publish_token,
         }
+    }
+
+    /// Token the harness generated to authenticate against the
+    /// test-only `/api/test/profile-publish` route. Pass it as the
+    /// `X-Waddle-Test-Token` header value.
+    #[allow(dead_code)]
+    pub fn test_profile_publish_token(&self) -> &str {
+        &self.test_profile_publish_token
     }
 
     /// WebSocket URL for the XMPP endpoint.
     pub fn ws_url(&self) -> String {
         format!("ws://127.0.0.1:{}/ws", self.http_port)
+    }
+
+    /// Base HTTP URL (no path). Useful for hitting test-only routes
+    /// like `/api/test/profile-publish` that the harness gates on
+    /// `WADDLE_TEST_FIXED_ACCOUNT_ENABLED=true`.
+    #[allow(dead_code)]
+    pub fn http_base_url(&self) -> String {
+        format!("http://127.0.0.1:{}", self.http_port)
     }
 
     /// The password for the fixed test account (username: "admin").

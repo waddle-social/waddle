@@ -129,6 +129,12 @@ pub(crate) async fn create_router(
     )
     .await?;
 
+    // Install the OIDC → PEP profile bridge hook now that
+    // `WebSocketState` (and its `pubsub_storage`) exists. The hook
+    // captures cheap clones of the deps and runs the publish chain
+    // in a `tokio::spawn` from `auth/callback.rs`.
+    install_profile_publish_hook(&auth_state, websocket_state.clone());
+
     spawn_sm_expiry_janitor(&websocket_state);
     spawn_pending_delivery_claim_janitor(&websocket_state);
     spawn_graceful_shutdown_drain(
@@ -137,7 +143,7 @@ pub(crate) async fn create_router(
         Arc::clone(&drain_complete),
     );
 
-    let websocket_router = routes::websocket::router(websocket_state);
+    let websocket_router = routes::websocket::router(websocket_state.clone());
 
     // Upload router for XEP-0363 HTTP File Upload
     let upload_state = Arc::new(UploadState::new(state.clone()));
@@ -175,6 +181,19 @@ pub(crate) async fn create_router(
         .merge(device_router)
         .merge(xmpp_oauth_router)
         .merge(auth_page_router);
+
+    // Test-only profile-publish route. Only mounted when:
+    // 1. The fixed-account flag is on (the test harness opt-in).
+    // 2. A non-empty `WADDLE_TEST_PROFILE_PUBLISH_TOKEN` is set.
+    // Both must be true. Production deployments set neither, and even
+    // a misconfigured staging that flips the flag without the token
+    // does not mount the route.
+    if let Some(auth) = build_test_profile_publish_auth(&auth_state.xmpp_domain) {
+        router = router.merge(crate::server::profile_publish_route::router(
+            websocket_state.clone(),
+            auth,
+        ));
+    }
 
     // Always merge common routes required by XMPP, auth, upload, and operations.
     let router = router
@@ -290,6 +309,129 @@ async fn create_websocket_state(
         Arc::clone(&websocket_state),
     )));
     Ok(websocket_state)
+}
+
+/// Build the [`TestSeamAuth`] for the test profile-publish route, or
+/// `None` if either the fixed-account flag or the per-process token is
+/// not configured. The token is consumed from
+/// `WADDLE_TEST_PROFILE_PUBLISH_TOKEN`; the JID allowlist is derived
+/// from `WADDLE_TEST_FIXED_ACCOUNT_USERNAME` (default `admin`) plus
+/// any `WADDLE_TEST_EXTRA_FIXED_ACCOUNTS` entries, all in the
+/// configured XMPP domain.
+fn build_test_profile_publish_auth(
+    xmpp_domain: &str,
+) -> Option<crate::server::profile_publish_route::TestSeamAuth> {
+    use crate::server::profile_publish_route::TestSeamAuth;
+
+    if !crate::server::fixed_account::fixed_test_account_enabled() {
+        return None;
+    }
+
+    let token = std::env::var("WADDLE_TEST_PROFILE_PUBLISH_TOKEN")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let Some(token) = token else {
+        warn!(
+            "WADDLE_TEST_FIXED_ACCOUNT_ENABLED is set but WADDLE_TEST_PROFILE_PUBLISH_TOKEN is empty — \
+             not mounting /api/test/profile-publish (set the token to enable wire-conformance tests)"
+        );
+        return None;
+    };
+
+    let mut localparts: Vec<String> = vec![std::env::var("WADDLE_TEST_FIXED_ACCOUNT_USERNAME")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "admin".to_string())];
+    if let Ok(extras) = std::env::var("WADDLE_TEST_EXTRA_FIXED_ACCOUNTS") {
+        for entry in extras.split(',') {
+            let entry = entry.trim();
+            if entry.is_empty() {
+                continue;
+            }
+            let username = entry
+                .split_once(':')
+                .map(|(u, _)| u)
+                .unwrap_or(entry)
+                .trim();
+            if !username.is_empty() {
+                localparts.push(username.to_string());
+            }
+        }
+    }
+    let allowed_jids: Vec<jid::BareJid> = localparts
+        .into_iter()
+        .filter_map(|lp| format!("{}@{}", lp, xmpp_domain).parse().ok())
+        .collect();
+
+    if allowed_jids.is_empty() {
+        warn!(
+            "WADDLE_TEST_PROFILE_PUBLISH_TOKEN is set but no valid fixed-account JID could be \
+             parsed — not mounting /api/test/profile-publish"
+        );
+        return None;
+    }
+
+    Some(TestSeamAuth {
+        token,
+        allowed_jids,
+    })
+}
+
+/// Build the OIDC → PEP profile-publish hook with cheap-clone deps
+/// captured, and install it onto `auth_state`. The hook is invoked
+/// from `auth/callback.rs` after every successful OIDC login (within
+/// `tokio::spawn`, so login latency is unaffected).
+fn install_profile_publish_hook(
+    auth_state: &Arc<AuthState>,
+    websocket_state: Arc<routes::websocket::WebSocketState>,
+) {
+    use crate::profile::{
+        ensure_pep_profile_published, FetchPolicy, ProfilePublishDeps, ProfileSource,
+    };
+
+    let db_actor = websocket_state
+        .deps
+        .app_state
+        .db_pool
+        .global_actor()
+        .clone();
+
+    let hook: super::routes::auth::ProfilePublishHook =
+        std::sync::Arc::new(move |jid: jid::BareJid, source: ProfileSource| {
+            let websocket_state = Arc::clone(&websocket_state);
+            let db_actor = db_actor.clone();
+            // Carry the JID into the spawned task's tracing span so a
+            // failure logged inside the future is correlated to the
+            // user even after the closure capture is gone.
+            let span = tracing::info_span!("oidc_profile_publish", jid = %jid);
+            let fut = async move {
+                let db = match db_actor.ask(crate::db::actor::GetDatabase).await {
+                    Ok(db) => db,
+                    Err(error) => {
+                        warn!(
+                            error = %error,
+                            "OIDC profile publish: failed to acquire database; skipping"
+                        );
+                        return;
+                    }
+                };
+                let deps = ProfilePublishDeps {
+                    state: websocket_state,
+                    vcard_store: crate::vcard::VCardStore::new(db.into()),
+                    fetch_policy: FetchPolicy::default(),
+                };
+                if let Err(error) = ensure_pep_profile_published(&deps, &jid, source).await {
+                    warn!(error = %error, "OIDC profile publish chain failed (background)");
+                }
+            };
+            use tracing::Instrument;
+            Box::pin(fut.instrument(span))
+                as std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>
+        });
+    auth_state.install_profile_publish_hook(hook);
+    tracing::debug!("OIDC → PEP profile-publish hook installed");
 }
 
 async fn create_sm_session_registry(
