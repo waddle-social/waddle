@@ -185,6 +185,8 @@ async fn create_test_websocket_state_with_extension_manager(
                     caps_resolver: Arc::new(
                         crate::server::caps_resolution::CapsResolver::default(),
                     ),
+                    avatar_source_locks: Arc::new(dashmap::DashMap::new()),
+                    profile_publish_tracker: tokio_util::task::TaskTracker::new(),
                 },
                 occupant_id_secret: OccupantIdSecret::new(
                     b"test-occupant-id-secret-32-bytes-long".to_vec(),

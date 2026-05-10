@@ -80,6 +80,22 @@ pub struct ProtocolServices {
     /// process-wide hash-keyed `CapsCache` plus per-resource caps
     /// mappings used by XEP-0163 §3 fan-out filtering.
     pub caps_resolver: Arc<crate::server::caps_resolution::CapsResolver>,
+    /// Per-(BareJid) mutex set guarding the `user_avatar_source`
+    /// read-then-publish critical section. Both the OIDC publish
+    /// chain (`profile::publish::ensure_pep_profile_published`) and
+    /// the wire avatar-publish hook (`pubsub_dispatch` calling
+    /// `record_self_published`) acquire the same mutex by
+    /// `BareJid`, closing the TOCTOU race where OIDC could read
+    /// `'oidc'` between the user's wire publish and the user's
+    /// provenance flip and then wipe the just-set avatar.
+    pub avatar_source_locks: Arc<dashmap::DashMap<jid::BareJid, Arc<tokio::sync::Mutex<()>>>>,
+    /// Tracker for the OIDC → PEP profile-publish background tasks.
+    /// The auth callback registers each `tokio::spawn` here so the
+    /// graceful-shutdown drain can `wait()` on in-flight publishes
+    /// before tearing down the runtime — preventing the split-state
+    /// where the empty `<metadata/>` is published but vcard-temp
+    /// PHOTO is still set.
+    pub profile_publish_tracker: tokio_util::task::TaskTracker,
     /// Sidecar map keyed by SM stream id, holding the authenticated `Session`
     /// so that a resumed stream doesn't lose its authorization context and
     /// can serve IQs that check channel membership, etc. Entries are

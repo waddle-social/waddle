@@ -110,6 +110,26 @@ pub(super) async fn handle_pubsub_iq(
                     }
                 }
 
+                // RFC 363 user-managed avatar guard: when a user
+                // wire-publishes to their OWN avatar / vCard4 node we
+                // need the publish AND the provenance flip to be
+                // atomic vs the concurrent OIDC publish chain. Both
+                // sides take the same per-(BareJid) lock from
+                // `profile::avatar_source::acquire_per_jid_lock`.
+                // Acquired conditionally (the lock is meaningless for
+                // non-PEP-self publishes) so unrelated publishes
+                // aren't serialized.
+                let touches_avatar_provenance = is_pep
+                    && target_jid == user_jid
+                    && (node == waddle_xmpp::xep::xep0084::NODE_AVATAR_DATA
+                        || node == waddle_xmpp::xep::xep0084::NODE_AVATAR_METADATA
+                        || node == waddle_xmpp::xep::xep0292::PEP_NODE_VCARD4);
+                let _guard = if touches_avatar_provenance {
+                    Some(crate::profile::acquire_per_jid_lock(state, &user_jid).await)
+                } else {
+                    None
+                };
+
                 let result = state
                     .deps
                     .protocol
@@ -138,6 +158,22 @@ pub(super) async fn handle_pubsub_iq(
                             },
                         )
                         .await;
+                        // Provenance flip — runs while holding the
+                        // per-JID lock above so an OIDC reconcile
+                        // either sees the new `'user'` flag or hasn't
+                        // started yet (won't race in to wipe).
+                        if touches_avatar_provenance {
+                            let db_actor = state.deps.app_state.db_pool.global_actor();
+                            if is_user_avatar_retract(&node, &item) {
+                                // User explicitly retracted their
+                                // own avatar (XEP-0084 §4.3 empty
+                                // `<metadata/>`) — opt back into OIDC
+                                // management.
+                                crate::profile::record_oidc_managed(db_actor, &user_jid).await;
+                            } else {
+                                crate::profile::record_self_published(db_actor, &user_jid).await;
+                            }
+                        }
                         let response =
                             build_pubsub_publish_result(iq, &node, &publish_result.item_id);
                         return vec![iq_to_xml(response)];
@@ -276,4 +312,21 @@ pub(super) async fn handle_pubsub_iq(
         }
     }
     Vec::new()
+}
+
+/// Detect XEP-0084 §4.3's empty-`<metadata/>` "I have no avatar"
+/// publish: the metadata node, payload is a `<metadata>` element with
+/// no children. Used to flip `avatar_source='oidc'` so a user who
+/// retracts their own picture re-opts into OIDC management.
+fn is_user_avatar_retract(node: &str, item: &waddle_xmpp::pubsub::PubSubItem) -> bool {
+    if node != waddle_xmpp::xep::xep0084::NODE_AVATAR_METADATA {
+        return false;
+    }
+    let Some(payload) = item.payload.as_ref() else {
+        return false;
+    };
+    if payload.name() != "metadata" {
+        return false;
+    }
+    payload.children().next().is_none()
 }

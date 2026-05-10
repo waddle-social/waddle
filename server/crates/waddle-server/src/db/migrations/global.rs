@@ -329,12 +329,50 @@ CREATE TABLE private_xml_storage (
 );
 "#;
 
+/// `user_avatar_source` provenance table for the OIDC → PEP
+/// avatar/FN bridge. The user-managed avatar guard reads this value
+/// on `RemoveIfOidcOwned`: a row marked `'user'` keeps its picture
+/// even when the IDP claim disappears.
+///
+/// Why a dedicated table rather than a column on `users`: native-auth
+/// users (XEP-0077 / SCRAM, the test fixed-account fixture) only land
+/// in `native_users`, not `users`. A column on `users` would force the
+/// guard's write path to UPSERT a `users` row, which then collides
+/// with the `users.username UNIQUE` constraint when an OIDC user
+/// already owns the same `username`. A separate table keyed solely on
+/// `xmpp_localpart` avoids that cross-row conflict surface entirely.
+pub const V0002_USER_AVATAR_SOURCE: &str = r#"
+CREATE TABLE user_avatar_source (
+    xmpp_localpart TEXT PRIMARY KEY,
+    source TEXT NOT NULL CHECK (source IN ('oidc', 'user')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+"#;
+
+pub const V0002_USER_AVATAR_SOURCE_POSTGRES: &str = r#"
+CREATE TABLE user_avatar_source (
+    xmpp_localpart TEXT PRIMARY KEY,
+    source TEXT NOT NULL CHECK (source IN ('oidc', 'user')),
+    updated_at TEXT NOT NULL DEFAULT to_char(NOW(), 'YYYY-MM-DD"T"HH24:MI:SS"Z"')
+);
+"#;
+
 /// Get all global migrations in order
 pub fn all() -> Vec<Migration> {
-    vec![Migration {
-        version: 1,
-        description: "Hard-cut auth broker schema with roster pre-approval".to_string(),
-        sql_sqlite: V0001_AUTH_BROKER_SCHEMA,
-        sql_postgres: V0001_AUTH_BROKER_SCHEMA_POSTGRES,
-    }]
+    vec![
+        Migration {
+            version: 1,
+            description: "Hard-cut auth broker schema with roster pre-approval".to_string(),
+            sql_sqlite: V0001_AUTH_BROKER_SCHEMA,
+            sql_postgres: V0001_AUTH_BROKER_SCHEMA_POSTGRES,
+        },
+        Migration {
+            version: 2,
+            description:
+                "Add user_avatar_source provenance table for OIDC user-managed avatar guard"
+                    .to_string(),
+            sql_sqlite: V0002_USER_AVATAR_SOURCE,
+            sql_postgres: V0002_USER_AVATAR_SOURCE_POSTGRES,
+        },
+    ]
 }

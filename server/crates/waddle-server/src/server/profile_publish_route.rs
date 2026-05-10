@@ -1,6 +1,6 @@
 //! Test-only HTTP route exposing `ensure_pep_profile_published` so
 //! the wire-conformance test suites can exercise the full chain
-//! without driving an OIDC mock.
+//! (set + remove + name) without driving an OIDC mock.
 //!
 //! Hardening (defense in depth — the route is *intended* to be
 //! unreachable in production but every layer here is a backstop in
@@ -21,15 +21,28 @@
 //! ```json
 //! POST /api/test/profile-publish
 //! X-Waddle-Test-Token: <token>
-//! { "jid": "alice@localhost", "displayName": "Alice", "avatarUrl": "https://..." }
+//! {
+//!   "jid": "alice@localhost",
+//!   "photo": { "setFromUrl": "https://..." }      // tuple variant
+//!         | { "removeIfOidcOwned": null },        // unit variant
+//!   "name":  { "set": "Alice" } | { "remove": null }
+//! }
 //! ```
 //!
-//! `displayName` and `avatarUrl` are independently optional. Empty
-//! object is a no-op. Returns 200 with the typed
-//! `ProfilePublishOutcome` JSON on success. Failure status is
-//! mapped from the typed [`ProfileSyncError`] kind:
+//! `photo` and `name` use Serde's default externally-tagged enum
+//! representation. Each field is independently optional; omit it
+//! for `Skip`. Unit variants (`removeIfOidcOwned`, `remove`) accept
+//! the JSON shape `{ "<variant>": null }` (matching the existing
+//! wire test fixtures); the equivalent bare-string form is also
+//! recognized by Serde but the object form is what the harness
+//! emits.
 //!
-//! - 400 — invalid request (bad JID, malformed `avatar_url`)
+//! `photo` and `name` are independently optional. Empty object is a
+//! no-op. Returns 200 with the typed `ProfilePublishOutcome` JSON on
+//! success. Failure status is mapped from the typed
+//! [`ProfileSyncError`] kind:
+//!
+//! - 400 — invalid request (bad JID, malformed `photo.setFromUrl`)
 //! - 401 — missing or wrong `X-Waddle-Test-Token`
 //! - 403 — JID outside the test seam allowlist
 //! - 422 — fetch policy rejected the bytes (scheme/MIME/size/SSRF/magic)
@@ -48,8 +61,8 @@ use tracing::warn;
 use url::Url;
 
 use crate::profile::{
-    ensure_pep_profile_published, FetchError, FetchPolicy, ProfilePublishDeps, ProfileSource,
-    ProfileSyncError,
+    ensure_pep_profile_published, FetchError, FetchPolicy, NameIntent, PhotoIntent,
+    ProfilePublishDeps, ProfileSource, ProfileSyncError,
 };
 use crate::server::routes::websocket::WebSocketState;
 
@@ -80,9 +93,28 @@ struct RouteState {
 pub struct ProfilePublishRequest {
     pub jid: String,
     #[serde(default)]
-    pub display_name: Option<String>,
+    pub photo: Option<PhotoIntentDto>,
     #[serde(default)]
-    pub avatar_url: Option<String>,
+    pub name: Option<NameIntentDto>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum PhotoIntentDto {
+    /// `{ "setFromUrl": "https://..." }` — fetch + publish.
+    SetFromUrl(String),
+    /// `{ "removeIfOidcOwned": null }` — XEP-0084 §4.3 empty
+    /// `<metadata/>` if the user-managed avatar guard allows it.
+    RemoveIfOidcOwned,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum NameIntentDto {
+    /// `{ "set": "Alice" }` — replace/insert FN.
+    Set(String),
+    /// `{ "remove": null }` — strip `<FN>` / `<fn>`.
+    Remove,
 }
 
 #[derive(Debug, Serialize)]
@@ -93,8 +125,14 @@ pub struct ProfilePublishResponse {
     pub photo_bytes_len: Option<usize>,
     pub published_avatar_data: bool,
     pub published_avatar_metadata: bool,
+    pub published_avatar_removal: bool,
     pub mirrored_vcard_temp: bool,
     pub mirrored_vcard4: bool,
+    pub removed_vcard_temp_photo: bool,
+    pub removed_vcard_temp_fn: bool,
+    pub removed_vcard4_photo: bool,
+    pub removed_vcard4_fn: bool,
+    pub photo_removal_guarded_by_user_managed: bool,
 }
 
 pub fn router(websocket_state: Arc<WebSocketState>, auth: TestSeamAuth) -> Router {
@@ -139,14 +177,28 @@ async fn handler(
         ));
     }
 
-    let avatar_url = req
-        .avatar_url
-        .as_deref()
-        .filter(|s| !s.is_empty())
-        .map(Url::parse)
-        .transpose()
-        .map_err(|e| (StatusCode::BAD_REQUEST, format!("invalid avatar_url: {e}")))?;
-    let display_name = req.display_name.filter(|s| !s.is_empty());
+    let photo = match req.photo {
+        Some(PhotoIntentDto::SetFromUrl(raw)) => PhotoIntent::SetFromUrl(
+            Url::parse(&raw)
+                .map_err(|e| (StatusCode::BAD_REQUEST, format!("photo.setFromUrl: {e}")))?,
+        ),
+        Some(PhotoIntentDto::RemoveIfOidcOwned) => PhotoIntent::RemoveIfOidcOwned,
+        None => PhotoIntent::Skip,
+    };
+    let name = match req.name {
+        Some(NameIntentDto::Set(s)) => {
+            if s.trim().is_empty() {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    "name.set must not be empty/whitespace; use {\"remove\": null} to clear FN"
+                        .to_string(),
+                ));
+            }
+            NameIntent::Set(s)
+        }
+        Some(NameIntentDto::Remove) => NameIntent::Remove,
+        None => NameIntent::Skip,
+    };
 
     let db = state
         .websocket
@@ -162,13 +214,10 @@ async fn handler(
         state: Arc::clone(&state.websocket),
         vcard_store: crate::vcard::VCardStore::new(db.into()),
         // Tests serve avatars from wiremock on 127.0.0.1 over plain
-        // HTTP. We relax the loopback block AND the HTTPS requirement
-        // so the test fixture is reachable; production callers (the
-        // OIDC bridge) build a `FetchPolicy::default()` instead. The
-        // route is gated on a per-process auth token + JID allowlist
-        // (see [`TestSeamAuth`]), so even with the SSRF guard relaxed
-        // the route can only be invoked against the configured
-        // fixed-account JIDs by code that already holds the token.
+        // HTTP. The fetcher's defense in depth requires loopback for
+        // any non-https URL; the route is also gated on a
+        // per-process auth token + JID allowlist (see
+        // [`TestSeamAuth`]).
         fetch_policy: FetchPolicy {
             block_non_global_ips: false,
             allow_http_for_tests: true,
@@ -176,20 +225,13 @@ async fn handler(
         },
     };
 
-    let outcome = ensure_pep_profile_published(
-        &deps,
-        &jid,
-        ProfileSource::Oidc {
-            avatar_url,
-            display_name,
-        },
-    )
-    .await
-    .map_err(|e| {
-        let status = profile_sync_error_status(&e);
-        warn!(error = %e, status = %status, "test profile-publish helper failed");
-        (status, "profile publish chain failed".to_string())
-    })?;
+    let outcome = ensure_pep_profile_published(&deps, &jid, ProfileSource::Oidc { photo, name })
+        .await
+        .map_err(|e| {
+            let status = profile_sync_error_status(&e);
+            warn!(error = %e, status = %status, "test profile-publish helper failed");
+            (status, "profile publish chain failed".to_string())
+        })?;
 
     Ok(Json(ProfilePublishResponse {
         photo_sha1_hex: outcome.photo_sha1_hex,
@@ -197,8 +239,14 @@ async fn handler(
         photo_bytes_len: outcome.photo_bytes_len,
         published_avatar_data: outcome.published_avatar_data,
         published_avatar_metadata: outcome.published_avatar_metadata,
+        published_avatar_removal: outcome.published_avatar_removal,
         mirrored_vcard_temp: outcome.mirrored_vcard_temp,
         mirrored_vcard4: outcome.mirrored_vcard4,
+        removed_vcard_temp_photo: outcome.removed_vcard_temp_photo,
+        removed_vcard_temp_fn: outcome.removed_vcard_temp_fn,
+        removed_vcard4_photo: outcome.removed_vcard4_photo,
+        removed_vcard4_fn: outcome.removed_vcard4_fn,
+        photo_removal_guarded_by_user_managed: outcome.photo_removal_guarded_by_user_managed,
     }))
 }
 
@@ -220,6 +268,7 @@ fn profile_sync_error_status(error: &ProfileSyncError) -> StatusCode {
         ProfileSyncError::Fetch(_) => StatusCode::BAD_GATEWAY,
         ProfileSyncError::PubSub(_)
         | ProfileSyncError::VCardTemp(_)
-        | ProfileSyncError::VCard4Malformed(_) => StatusCode::BAD_GATEWAY,
+        | ProfileSyncError::VCard4Malformed(_)
+        | ProfileSyncError::AvatarSource(_) => StatusCode::BAD_GATEWAY,
     }
 }

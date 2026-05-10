@@ -537,5 +537,30 @@ pub(crate) fn spawn_graceful_shutdown_drain(
             total_drained,
             "Graceful shutdown: SM Q6 drain complete (iterative)"
         );
+
+        // Drain the OIDC profile-publish tracker before notifying
+        // shutdown complete. Each in-flight `ensure_pep_profile_published`
+        // call is bounded by the fetcher's 25s timeout budget +
+        // storage latency, so the wait is naturally bounded; calling
+        // `close()` first prevents new publishes from racing in
+        // during the drain. Without this wait the runtime can tear
+        // down mid-step and leave the avatar in a split state
+        // (empty `<metadata/>` published but vcard-temp PHOTO not
+        // yet stripped — exactly the inconsistency XEP-0398 §3
+        // forbids).
+        let publish_tracker = websocket_state
+            .deps
+            .protocol
+            .profile_publish_tracker
+            .clone();
+        publish_tracker.close();
+        if !publish_tracker.is_empty() {
+            info!(
+                in_flight = publish_tracker.len(),
+                "Graceful shutdown: awaiting in-flight OIDC profile publishes"
+            );
+        }
+        publish_tracker.wait().await;
+        info!("Graceful shutdown: OIDC profile-publish drain complete");
     });
 }
