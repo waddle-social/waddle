@@ -10,7 +10,7 @@
 //!
 //! 1. **(PHOTO)** Fetch the bytes from `avatar_url` per the typed
 //!    fetch policy (HTTPS-only, RFC1918/loopback blocked, MIME
-//!    allowlist, 1 MB cap, short timeouts).
+//!    allowlist, 512 KB cap, short timeouts).
 //! 2. **(PHOTO)** `compute_hash(HashAlgo::Sha1, &bytes) -> HashValue`.
 //!    Use `HashValue::to_hex()` as the item id.
 //! 3. **(PHOTO)** Publish base64-encoded bytes to `urn:xmpp:avatar:data`.
