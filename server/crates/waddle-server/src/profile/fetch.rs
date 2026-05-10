@@ -21,9 +21,30 @@
 //!   `reqwest::redirect::Policy`. OIDC providers typically serve
 //!   avatar URLs directly; if you see this in practice, file an
 //!   issue.
-//! - **Streaming size cap:** 100 KB hard cap, enforced chunk-by-chunk
-//!   on the response body so an oversize/slowloris/lying-Content-Length
-//!   server cannot OOM us.
+//! - **Size cap:** 512 KB hard cap on (a) the source response body
+//!   streamed off the wire (OOM defense against an oversize /
+//!   slowloris / lying-`Content-Length` upstream) and (b) the
+//!   post-transcode PNG, enforced *during* encoding via a
+//!   [`LimitedCursor`] write wrapper so a malformed source can't
+//!   burn unbounded CPU/memory in `image::DynamicImage::write_to`
+//!   before being rejected. The cap is shared between fetch and
+//!   transcode because lossy → lossless re-encoding (e.g.
+//!   JPEG → PNG) can inflate 5–10× for photo-like content; the
+//!   transcode budget is what the publish chain actually stores.
+//!   512 KB is set with three constraints in mind:
+//!
+//!   1. **Wire-frame budget.** Avatar bytes are base64-encoded into
+//!      the `urn:xmpp:avatar:data` PEP item and shipped over the
+//!      WebSocket; the chat client's frame decoder rejects inbound
+//!      frames > 1 MiB. 512 KB raw → ~683 KB base64 + a few hundred
+//!      bytes of XML overhead, comfortably under the limit.
+//!   2. **Real-world coverage.** GitHub `?v=4` avatars max at
+//!      460×460 and transcode to PNGs typically in the 150–400 KB
+//!      range; 512 KB has 1.5–3× headroom on observed worst cases.
+//!   3. **Generic storage budget.** Per-stanza fan-out under
+//!      XEP-0163 §3 multiplies the avatar size by `|roster|`;
+//!      keeping the raw cap below ~600 KB keeps the per-publish
+//!      bandwidth predictable across deployments.
 //! - **MIME:** allowlist of `image/png`, `image/jpeg`, `image/gif`,
 //!   `image/webp` at the fetch boundary. Non-PNG bodies are decoded
 //!   and re-encoded as PNG before the helper returns — XEP-0084 §3.2
@@ -45,7 +66,7 @@
 //! into the persisted `users.last_avatar_fetch_error` enum without
 //! parsing log strings.
 
-use std::io::Cursor;
+use std::io::{self, Cursor, Seek, SeekFrom, Write};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::time::Duration;
 
@@ -57,7 +78,13 @@ use thiserror::Error;
 use tracing::{debug, warn};
 use url::{Host, Url};
 
-const MAX_BYTES: usize = 100 * 1024;
+/// Hard cap on both the source response body (OOM defense) and
+/// the post-transcode PNG (wire-frame + per-stanza fan-out budget).
+/// Sized to fit a real GitHub avatar after JPEG → PNG re-encoding
+/// while staying under the chat client's 1 MiB WebSocket frame
+/// limit once base64-encoded. See the module-level "Size cap" note
+/// for the full rationale.
+const MAX_BYTES: usize = 512 * 1024;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const TOTAL_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -255,7 +282,7 @@ fn compute_fetch_policy_digest(
     // cross-arch redeploy (or even a debug-vs-release build with
     // different target tuples) would shift the digest and trigger
     // a spurious throttle invalidation for every policy-dependent
-    // user. `MAX_BYTES` is 100 KB; never overflows `u64`.
+    // user. `MAX_BYTES` is 512 KB; never overflows `u64`.
     hasher.update((max_bytes as u64).to_le_bytes());
     hasher.update(max_image_dimension.to_le_bytes());
     for mime in allowed {
@@ -459,20 +486,21 @@ async fn try_fetch(
             // Decode + encode is CPU-bound; offload from the Tokio
             // executor so a slow image doesn't starve other async
             // tasks (OIDC publishes also run from a `tokio::spawn`
-            // alongside the chat WebSocket loop).
-            tokio::task::spawn_blocking(move || transcode_to_png(&buf, declared))
+            // alongside the chat WebSocket loop). The encoder is
+            // capped at `policy.max_bytes` via [`LimitedCursor`] so
+            // a small JPEG that would inflate to a multi-MB PNG
+            // aborts mid-encode rather than burning unbounded
+            // memory before the post-encode size check.
+            let max_bytes = policy.max_bytes;
+            tokio::task::spawn_blocking(move || transcode_to_png(&buf, declared, max_bytes))
                 .await
                 .map_err(|e| FetchError::TranscodeFailed(format!("spawn_blocking join: {e}")))??
         }
     };
 
-    // The post-transcode size cap protects D1 storage (issue #363:
-    // `pubsub_items.payload_xml TEXT` budget). PNG re-encoding can
-    // expand a small lossy JPEG into a larger lossless PNG; reject
-    // those rather than overflowing the row. The pre-transcode
-    // streaming cap (above, around `policy.max_bytes`) is a separate
-    // OOM defense: it keeps the fetch buffer bounded regardless of
-    // what the upstream serves.
+    // Source bytes that are already PNG bypass the transcode
+    // wrapper; defense-in-depth size check covers them. Non-PNG
+    // sources have already been bounded inside `transcode_to_png`.
     if png_bytes.len() > policy.max_bytes {
         return Err(FetchError::SizeExceeded(policy.max_bytes));
     }
@@ -492,14 +520,30 @@ async fn try_fetch(
 /// XEP-0084 §3.1 SHOULD is 96×96 — and caps decoded RGBA at 64 MB.
 const MAX_IMAGE_DIMENSION: u32 = 4096;
 
-/// Decode `bytes` (declared as `source`) and re-encode as PNG. The
-/// `image` crate's `ImageReader::set_format` is used to pin the
-/// decoder to the format already verified by the magic-byte check
-/// in `try_fetch`; this avoids the slower "try every codec" path
+/// Decode `bytes` (declared as `source`) and re-encode as PNG,
+/// aborting if the encoded output exceeds `max_bytes`. The
+/// `image` crate's `ImageReader::set_format` pins the decoder to
+/// the format already verified by the magic-byte check in
+/// `try_fetch`; this avoids the slower "try every codec" path
 /// `with_guessed_format` would take. `image::Limits` bounds the
 /// decoder's allocations so a malformed source can't OOM the
 /// process before the decode completes.
-fn transcode_to_png(bytes: &[u8], source: AllowedMime) -> Result<Vec<u8>, FetchError> {
+///
+/// The encoder writes through [`LimitedCursor`], which fails the
+/// underlying `Write` once the byte budget is exhausted. This
+/// matters because PNG output size is data-dependent; without the
+/// inline cap a small adversarial JPEG (high-frequency content,
+/// low compressibility) could inflate to many MB inside
+/// `image::DynamicImage::write_to` before any post-hoc size check
+/// could reject it. The wrapper aborts mid-encode and the helper
+/// returns `FetchError::SizeExceeded(max_bytes)` — the same kind
+/// the post-encode check would have produced — so callers don't
+/// see two different errors for the same root cause.
+fn transcode_to_png(
+    bytes: &[u8],
+    source: AllowedMime,
+    max_bytes: usize,
+) -> Result<Vec<u8>, FetchError> {
     let image_format = match source {
         AllowedMime::Png => ImageFormat::Png,
         AllowedMime::Jpeg => ImageFormat::Jpeg,
@@ -515,10 +559,86 @@ fn transcode_to_png(bytes: &[u8], source: AllowedMime) -> Result<Vec<u8>, FetchE
     let img = reader
         .decode()
         .map_err(|e| FetchError::TranscodeFailed(format!("decode {}: {e}", source.as_mime())))?;
-    let mut out = Vec::with_capacity(bytes.len());
-    img.write_to(&mut Cursor::new(&mut out), ImageFormat::Png)
-        .map_err(|e| FetchError::TranscodeFailed(format!("encode png: {e}")))?;
-    Ok(out)
+
+    // Initial capacity hint covers the common case (PNG ≈ source
+    // size for already-compressed inputs); the cap is enforced at
+    // `max_bytes`. Reusing `LimitedCursor` ensures the encoder
+    // gives up early on outputs that would blow past it.
+    let mut writer = LimitedCursor::new(max_bytes, bytes.len().min(max_bytes));
+    match img.write_to(&mut writer, ImageFormat::Png) {
+        Ok(()) => Ok(writer.into_inner()),
+        Err(_) if writer.limit_exceeded() => Err(FetchError::SizeExceeded(max_bytes)),
+        Err(e) => Err(FetchError::TranscodeFailed(format!("encode png: {e}"))),
+    }
+}
+
+/// `Write + Seek` wrapper that caps the underlying buffer at
+/// `limit` bytes. Used to bound `image::DynamicImage::write_to`'s
+/// PNG encoder so a small source that would inflate massively as
+/// PNG aborts mid-encode rather than allocating unbounded memory.
+///
+/// `image::write_to` requires `Seek` because the PNG encoder
+/// back-patches chunk lengths after writing each chunk's payload;
+/// we delegate `seek` to the underlying `Cursor<Vec<u8>>` and only
+/// gate `write` against the cumulative high-water mark of the
+/// underlying buffer. Once the limit is breached, `write` returns
+/// `io::Error::other(_)` and `limit_exceeded()` flips to `true`
+/// so callers can map the failure back to a typed error
+/// (`FetchError::SizeExceeded`) instead of guessing from the
+/// stringly-typed `io::Error` cause.
+struct LimitedCursor {
+    cursor: Cursor<Vec<u8>>,
+    limit: usize,
+    limit_exceeded: bool,
+}
+
+impl LimitedCursor {
+    fn new(limit: usize, capacity: usize) -> Self {
+        Self {
+            cursor: Cursor::new(Vec::with_capacity(capacity)),
+            limit,
+            limit_exceeded: false,
+        }
+    }
+
+    fn into_inner(self) -> Vec<u8> {
+        self.cursor.into_inner()
+    }
+
+    fn limit_exceeded(&self) -> bool {
+        self.limit_exceeded
+    }
+}
+
+impl Write for LimitedCursor {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        // Compute the buffer length the write would produce. The
+        // underlying `Cursor` extends its `Vec` when writing past
+        // the current `len`, so this matches what `cursor.write`
+        // would persist.
+        let pos = self.cursor.position() as usize;
+        let new_high_water = pos
+            .saturating_add(buf.len())
+            .max(self.cursor.get_ref().len());
+        if new_high_water > self.limit {
+            self.limit_exceeded = true;
+            return Err(io::Error::other("avatar transcode exceeded size limit"));
+        }
+        self.cursor.write(buf)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.cursor.flush()
+    }
+}
+
+impl Seek for LimitedCursor {
+    fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
+        // Seeking changes the cursor position but never extends the
+        // underlying `Vec`; the `write` path is the only place a
+        // limit breach can occur. Delegate without policy.
+        self.cursor.seek(pos)
+    }
 }
 
 async fn resolve_host(host: &str, port: u16) -> std::io::Result<Vec<IpAddr>> {
@@ -867,7 +987,7 @@ mod tests {
                 source.matches_magic(&source_bytes),
                 "{source:?} fixture must clear its own magic-byte gate"
             );
-            let png = transcode_to_png(&source_bytes, source)
+            let png = transcode_to_png(&source_bytes, source, MAX_BYTES)
                 .unwrap_or_else(|e| panic!("{source:?} → PNG must succeed for a real image: {e}"));
             assert!(
                 AllowedMime::Png.matches_magic(&png),
@@ -882,11 +1002,68 @@ mod tests {
         // surfaces this as `TranscodeFailed` so the fetch path can
         // map it into the persisted error enum without panicking.
         let corrupted = b"\xff\xd8\xff\xe0not-a-real-jpeg";
-        let result = transcode_to_png(corrupted, AllowedMime::Jpeg);
+        let result = transcode_to_png(corrupted, AllowedMime::Jpeg, MAX_BYTES);
         assert!(
             matches!(result, Err(FetchError::TranscodeFailed(_))),
             "{result:?}"
         );
+    }
+
+    #[test]
+    fn transcode_to_png_aborts_inline_when_encoded_size_exceeds_cap() {
+        // Pin the inline-cap behaviour: a perfectly valid JPEG that
+        // re-encodes to a PNG larger than `max_bytes` must surface
+        // as `SizeExceeded`, NOT as `TranscodeFailed`, AND the
+        // encoder must stop writing once the limit is hit (otherwise
+        // a small adversarial JPEG could burn unbounded memory
+        // before the post-encode size check). We verify the kind by
+        // calling `transcode_to_png` with a budget far below the
+        // smallest plausible PNG header (8 bytes — guaranteed to
+        // fail on the first chunk write).
+        let source_bytes = encode_test_image(image::ImageFormat::Jpeg);
+        assert!(AllowedMime::Jpeg.matches_magic(&source_bytes));
+        let result = transcode_to_png(&source_bytes, AllowedMime::Jpeg, 8);
+        assert!(
+            matches!(result, Err(FetchError::SizeExceeded(8))),
+            "expected SizeExceeded(8), got {result:?}"
+        );
+    }
+
+    #[test]
+    fn limited_cursor_blocks_writes_past_the_limit() {
+        // Direct unit test for the `Write + Seek` wrapper: writes
+        // up to the limit succeed; a write that would push the
+        // high-water mark past the limit fails AND flips the
+        // `limit_exceeded` flag so the caller can map back to
+        // `SizeExceeded` rather than guessing from the io::Error
+        // cause. The test also covers the seek-then-write case
+        // (PNG encoder back-patches chunk lengths via Seek), where
+        // a seek into the existing buffer must NOT trip the limit
+        // even though the underlying `Vec` length is preserved.
+        use std::io::{Seek, SeekFrom, Write};
+
+        let mut w = LimitedCursor::new(8, 0);
+        assert!(w.write_all(&[0u8; 4]).is_ok());
+        assert!(w.write_all(&[1u8; 4]).is_ok());
+        assert!(!w.limit_exceeded());
+
+        let err = w.write_all(&[2u8; 1]).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::Other);
+        assert!(w.limit_exceeded(), "limit_exceeded flag must flip");
+
+        // Buffer was bounded at 8 bytes — the failed write neither
+        // grew the buffer nor truncated it.
+        let inner = w.into_inner();
+        assert_eq!(inner.len(), 8);
+
+        // Seek inside the existing buffer is fine — does not extend
+        // the high-water mark.
+        let mut w = LimitedCursor::new(8, 0);
+        w.write_all(&[0u8; 8]).unwrap();
+        w.seek(SeekFrom::Start(2)).unwrap();
+        // Overwriting bytes 2..6 keeps len at 8 — must succeed.
+        w.write_all(&[9u8; 4]).unwrap();
+        assert!(!w.limit_exceeded());
     }
 
     #[test]
@@ -945,7 +1122,7 @@ mod tests {
     #[test]
     fn transcode_to_png_rejects_oversize_dimensions() {
         // A PNG IHDR can declare any 32-bit width/height. The
-        // attacker's body is < 100 KB on the wire (passes the
+        // attacker's body is < 512 KB on the wire (passes the
         // streaming cap) but advertises billions of pixels; without
         // `image::Limits` the decoder would attempt to allocate
         // `width * height * channels` bytes and OOM the process.
@@ -968,7 +1145,7 @@ mod tests {
         // check before CRC validation.
         png.extend_from_slice(&[0, 0, 0, 0]);
 
-        let result = transcode_to_png(&png, AllowedMime::Png);
+        let result = transcode_to_png(&png, AllowedMime::Png, MAX_BYTES);
         assert!(
             matches!(result, Err(FetchError::TranscodeFailed(_))),
             "expected TranscodeFailed (limit exceeded), got {result:?}"
