@@ -24,7 +24,7 @@ import { useScrollDirectionPreference } from "@/preferences/scroll-direction";
 import type { MemberSummary } from "@/lib/chat-types";
 import type { ExtensionAnnotationAction, MarkupSpan, MessageReference, TimelineMessage } from "@/lib/chat-ui";
 import type { DiscoveredExtensionRoute } from "@/lib/xmpp/extension-commands";
-import { avatarLookupCandidates, mentionAutocompleteCandidates, mentionMatchesBareJid, mergeMentionMembers } from "@/lib/mentions";
+import { avatarLookupCandidatesAcrossContexts, mentionAutocompleteCandidates, mentionMatchesBareJid, mergeMentionMembers } from "@/lib/mentions";
 import {
   moveReactionSelection,
   preserveReactionSelection,
@@ -499,27 +499,15 @@ export function useChatAppController(giphyApiKey: string) {
   // the channel-message timeline). After #435 (workspace roster
   // bridge) lands, push delivery covers both axes and this fallback
   // can be slimmed back down.
-  //
-  // DM messages are resolved through a SEPARATE call with empty
-  // `members` / `authorJidByNick` so that a DM sender whose nick
-  // collides with a channel member is NOT misresolved through the
-  // channel-only nick→JID map. DM `authorJid` (`fromJid`) is the
-  // authoritative peer JID and falls through to rank 2 with empty
-  // channel context.
-  const avatarCandidates = computed(() => [
-    ...avatarLookupCandidates({
-      members: mergedMentionMembers.value.members,
-      messages: messaging.messages.value,
-      authorJidByNick: authorJidByNick.value,
+  const avatarCandidates = computed(() =>
+    avatarLookupCandidatesAcrossContexts({
+      channelMembers: mergedMentionMembers.value.members,
+      channelMessages: messaging.messages.value,
+      channelAuthorJidByNick: authorJidByNick.value,
+      dmMessages: dmMessaging.messages.value,
       selfDomain: selfDomain.value,
     }),
-    ...avatarLookupCandidates({
-      members: [],
-      messages: dmMessaging.messages.value,
-      authorJidByNick: {},
-      selfDomain: selfDomain.value,
-    }),
-  ]);
+  );
   const avatarUrlByAuthor = computed<Record<string, string | null>>(() => {
     const avatars: Record<string, string | null> = {};
 

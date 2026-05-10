@@ -76,9 +76,11 @@ fn test_server_features_include_core_features() {
 #[test]
 fn test_vcard4_notify_feature_var_pins_xep0292_namespace() {
     // Pin the `+notify` filter contract so a future rename trips a test
-    // instead of silently breaking XEP-0292 / XEP-0163 §3 fan-out.
+    // instead of silently breaking XEP-0292 / XEP-0163 §3 fan-out. The
+    // var must equal the XEP-0292 PEP node `urn:xmpp:vcard4` plus the
+    // standard `+notify` suffix; that is the string the runtime
+    // fan-out filter constructs per XEP-0163 §3.
     assert_eq!(Feature::vcard4_notify().0, "urn:xmpp:vcard4+notify");
-    assert_eq!(Feature::vcard4_notify(), Feature::vcard4_notify());
     assert_ne!(Feature::vcard4_notify(), Feature::avatar_metadata_notify());
 }
 

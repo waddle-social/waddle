@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   avatarLookupCandidates,
+  avatarLookupCandidatesAcrossContexts,
   messageMentionsBareJid,
   mentionAutocompleteCandidates,
   mentionAutocompleteNames,
@@ -243,44 +244,54 @@ describe("mention helpers", () => {
     ]);
   });
 
-  // RFC 363 PR 6: regression — passing DM messages through the
-  // channel-only `authorJidByNick` map can resolve a foreign-domain
-  // DM peer to a same-nick channel member's JID. Callers must split
-  // DM resolution into a separate call with empty channel context.
-  test("avatar lookup candidates from empty channel context resolve DM peers via message authorJid", () => {
-    const candidates = avatarLookupCandidates({
-      members: [],
-      messages: [
+  // RFC 363 PR 6: avatar candidate set MUST queue DM peers (not just
+  // channel members) and MUST resolve a DM author via the DM stanza's
+  // own `authorJid`, NOT via any channel-only nick map.
+  test("across-contexts merge resolves DM peer via DM authorJid even when nick collides with a channel member", () => {
+    const candidates = avatarLookupCandidatesAcrossContexts({
+      channelMembers: [
+        { jid: "alice@waddle.social", username: "alice", avatar_url: null, role: "member", joined_at: "" },
+      ],
+      channelMessages: [
+        { author: "alice", authorJid: "chat@muc.waddle.social/alice", authorRealJid: "alice@waddle.social/laptop" },
+      ],
+      channelAuthorJidByNick: { alice: "alice@waddle.social" },
+      dmMessages: [
         { author: "alice", authorJid: "alice@other.example/desktop" },
       ],
-      authorJidByNick: {},
+      selfDomain: "waddle.social",
+    });
+
+    const jids = candidates.map((c) => c.jid);
+    expect(jids).toContain("alice@waddle.social");
+    expect(jids).toContain("alice@other.example");
+  });
+
+  test("across-contexts merge produces empty result for empty inputs", () => {
+    const candidates = avatarLookupCandidatesAcrossContexts({
+      channelMembers: [],
+      channelMessages: [],
+      channelAuthorJidByNick: {},
+      dmMessages: [],
+      selfDomain: "waddle.social",
+    });
+
+    expect(candidates).toEqual([]);
+  });
+
+  test("across-contexts merge queues DM-only peers when no channel context exists", () => {
+    const candidates = avatarLookupCandidatesAcrossContexts({
+      channelMembers: [],
+      channelMessages: [],
+      channelAuthorJidByNick: {},
+      dmMessages: [
+        { author: "bob", authorJid: "bob@other.example/desktop" },
+      ],
       selfDomain: "waddle.social",
     });
 
     expect(candidates).toEqual([
-      { nick: "alice", jid: "alice@other.example", avatar_url: null },
+      { nick: "bob", jid: "bob@other.example", avatar_url: null },
     ]);
-  });
-
-  test("avatar lookup candidates with channel context misresolve DM-shaped messages — split required", () => {
-    // Demonstrates the bug being fixed: passing DM messages into a
-    // channel-context call resolves the DM author through
-    // `mappedJidByNick`, ignoring the DM's own `authorJid`. The
-    // production fix at chat/src/shell/chat-app-controller.ts splits
-    // DM messages into their own call with empty members /
-    // authorJidByNick to avoid this collision.
-    const candidates = avatarLookupCandidates({
-      members: [{ jid: "alice@waddle.social", username: "alice", avatar_url: null, role: "member", joined_at: "" }],
-      messages: [
-        { author: "alice", authorJid: "alice@other.example/desktop" },
-      ],
-      authorJidByNick: { alice: "alice@waddle.social" },
-      selfDomain: "waddle.social",
-    });
-
-    // alice resolves to channel member, NOT to the DM `authorJid`.
-    // This is why splitting calls per-context is necessary.
-    expect(candidates.map((c) => c.jid)).toEqual(["alice@waddle.social"]);
-    expect(candidates.map((c) => c.jid)).not.toContain("alice@other.example");
   });
 });
