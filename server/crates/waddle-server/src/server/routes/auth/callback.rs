@@ -156,27 +156,58 @@ pub(super) async fn callback_handler(
         if let Ok(jid) =
             format!("{}@{}", linked.user.xmpp_localpart, state.xmpp_domain).parse::<jid::BareJid>()
         {
-            let avatar_url = identity_claims
-                .avatar_url
-                .as_deref()
-                .and_then(|s| url::Url::parse(s).ok());
             // Treat empty / whitespace-only `name` claims as absent so
             // the bridge does NOT publish a blank `<FN>` to vcard-temp
-            // / vCard4. The OIDC spec doesn't forbid an empty `name`,
-            // some IDPs return one when the user hasn't set a profile
-            // name; an empty FN would just blank a previously-set one.
-            // After this filter, `from_oidc_claims` maps `None` to
-            // `NameIntent::Remove` so a name that disappears from the
-            // IDP claim is actively cleared (instead of stale-set).
+            // / vCard4. After this filter, `from_oidc_claims` maps
+            // `None` to `NameIntent::Remove` so a name that disappears
+            // from the IDP claim is actively cleared (instead of
+            // stale-set).
             let display_name = identity_claims
                 .name
                 .as_deref()
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
                 .map(str::to_string);
-            let source = crate::profile::ProfileSource::from_oidc_claims(avatar_url, display_name);
-            let fut = (hook)(jid, source);
-            tokio::spawn(fut);
+
+            // Three-way classification of the OIDC `picture` claim:
+            //   - absent / null            → RemoveIfOidcOwned
+            //   - present but unparseable  → Skip (preserve prior
+            //     state — actively wiping on a typo'd URL would be
+            //     destructive)
+            //   - present and parseable    → SetFromUrl
+            // We do NOT route through `from_oidc_claims` here because
+            // its two-way mapping treats `None` as "remove", which
+            // would conflate "IDP forgot the picture claim" with
+            // "IDP returned a malformed URL".
+            let raw_avatar = identity_claims
+                .avatar_url
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty());
+            let photo_intent = match raw_avatar {
+                None => crate::profile::PhotoIntent::RemoveIfOidcOwned,
+                Some(s) => match url::Url::parse(s) {
+                    Ok(url) => crate::profile::PhotoIntent::SetFromUrl(url),
+                    Err(parse_err) => {
+                        tracing::warn!(
+                            jid = %linked.user.xmpp_localpart,
+                            url = %s,
+                            error = %parse_err,
+                            "OIDC `picture` claim is not a parseable URL; skipping PHOTO sync (prior avatar preserved)"
+                        );
+                        crate::profile::PhotoIntent::Skip
+                    }
+                },
+            };
+            let name_intent = match display_name {
+                Some(s) => crate::profile::NameIntent::Set(s),
+                None => crate::profile::NameIntent::Remove,
+            };
+            let source = crate::profile::ProfileSource::Oidc {
+                photo: photo_intent,
+                name: name_intent,
+            };
+            (hook)(jid, source);
         }
     }
 

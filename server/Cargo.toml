@@ -24,7 +24,7 @@ repository = "https://github.com/waddle-social/waddle"
 [workspace.dependencies]
 # Core Runtime & Async
 tokio = { version = "1.43", features = ["full"] }
-tokio-util = "0.7"
+tokio-util = { version = "0.7", features = ["rt"] }
 tower = "0.5"
 futures = "0.3"
 

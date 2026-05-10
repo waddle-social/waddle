@@ -774,6 +774,123 @@ async fn avatar_removal_no_op_when_no_prior_avatar() {
 }
 
 // ============================================================================
+// avatar_removal_fans_out_empty_metadata_event_to_subscriber
+// ============================================================================
+//
+// XEP-0163 §3 / XEP-0060 §7.1: subscribers MUST receive a
+// `<message><event>` notification when a PEP item is published —
+// including the XEP-0084 §4.3 empty-`<metadata/>` removal shape.
+// Without explicit fan-out (the load-bearing PR3 fix) the removal
+// is silent. This is the regression test for that wiring.
+
+const NS_PUBSUB_EVENT: &str = "http://jabber.org/protocol/pubsub#event";
+
+#[tokio::test]
+async fn avatar_removal_fans_out_empty_metadata_event_to_subscriber() {
+    use std::time::Duration;
+    let _serial = TEST_SERIAL.lock().await;
+    let bob_password = format!("ws-test-bob-{}", uuid::Uuid::new_v4());
+    let server = TestServer::start_with_extra_accounts(&[("bob", bob_password.as_str())]);
+    let admin = admin_client(&server, "avatar-fanout-admin").await;
+    let admin_bare = format!("{ADMIN}@{DOMAIN}");
+    let bob_bare = format!("bob@{DOMAIN}");
+
+    // Seed an avatar so the metadata node exists with `oidc_pep_node_config`
+    // (Open access, max_items=1) — without this, bob's <subscribe/> would
+    // be denied.
+    let png = tiny_png();
+    let mock = wiremock::MockServer::start().await;
+    wiremock::Mock::given(wiremock::matchers::method("GET"))
+        .respond_with(
+            wiremock::ResponseTemplate::new(200)
+                .insert_header("content-type", "image/png")
+                .set_body_bytes(png.clone()),
+        )
+        .mount(&mock)
+        .await;
+    invoke_profile_publish(
+        &server,
+        &PublishReq::for_jid(&admin_bare).set_photo_url(format!("{}/seed.png", mock.uri())),
+    )
+    .await;
+
+    // Bob subscribes to admin's avatar-metadata node via plain
+    // XEP-0060 `<subscribe/>`. Open access lets any peer subscribe.
+    let mut bob = WsXmppClient::connect_and_auth(
+        &server.ws_url(),
+        DOMAIN,
+        "bob",
+        &bob_password,
+        "avatar-fanout-bob",
+    )
+    .await
+    .expect("bob connect");
+    let sub_resp = iq_set_to(
+        &mut bob,
+        "avatar-fanout-sub",
+        &admin_bare,
+        &format!(
+            r#"<pubsub xmlns="{NS_PUBSUB}"><subscribe node="{NS_AVATAR_METADATA}" jid="{bob_bare}"/></pubsub>"#
+        ),
+    )
+    .await;
+    assert!(
+        sub_resp.contains(r#"type="result""#),
+        "subscribe must succeed (Open access): {sub_resp}"
+    );
+
+    // OIDC removal — empty `<metadata/>` published; fan-out MUST
+    // deliver the event to bob.
+    let rm =
+        invoke_profile_publish(&server, &PublishReq::for_jid(&admin_bare).remove_photo()).await;
+    assert!(rm.published_avatar_removal, "removal must publish: {rm:?}");
+
+    // Bob receives the `<message><event>` carrying the empty
+    // `<metadata/>` payload at item id `current`.
+    let event = wait_for_event_message(&mut bob, NS_AVATAR_METADATA, Duration::from_secs(2))
+        .await
+        .expect("bob MUST receive the empty-metadata fan-out event");
+    assert!(
+        event.contains(r#"id="current""#) || event.contains(r#"id='current'"#),
+        "fan-out item id must be `current` per §4.3: {event}"
+    );
+    assert!(
+        event.contains(r#"<metadata xmlns="urn:xmpp:avatar:metadata"/>"#)
+            || event.contains(r#"<metadata xmlns='urn:xmpp:avatar:metadata'/>"#),
+        "fan-out payload MUST be the empty `<metadata/>` removal shape: {event}"
+    );
+
+    let _ = bob.close().await;
+    let _ = admin.close().await;
+}
+
+async fn wait_for_event_message(
+    client: &mut WsXmppClient,
+    node: &str,
+    dur: std::time::Duration,
+) -> Option<String> {
+    let deadline = std::time::Instant::now() + dur;
+    loop {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            return None;
+        }
+        match client.recv_timeout(remaining).await {
+            Ok(frame) => {
+                if frame.contains("<message")
+                    && frame.contains(NS_PUBSUB_EVENT)
+                    && (frame.contains(&format!(r#"node="{node}""#))
+                        || frame.contains(&format!(r#"node='{node}'"#)))
+                {
+                    return Some(frame);
+                }
+            }
+            Err(_) => return None,
+        }
+    }
+}
+
+// ============================================================================
 // user_self_published_avatar_is_protected_from_oidc_removal
 // ============================================================================
 //

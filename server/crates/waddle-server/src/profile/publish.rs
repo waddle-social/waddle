@@ -32,7 +32,9 @@ use waddle_xmpp::xep::xep0292::PEP_NODE_VCARD4;
 use waddle_xmpp::xep::xep0300::{compute_hash, HashAlgo};
 use xmpp_parsers::minidom::Element;
 
-use super::avatar_source::{read_avatar_source, AvatarSource};
+use super::avatar_source::{
+    acquire_per_jid_lock, read_avatar_source, record_oidc_managed, AvatarSource,
+};
 use super::fetch::{fetch_avatar_bytes, AvatarBytes, FetchPolicy};
 use super::source::{NameIntent, PhotoIntent, ProfileSource, ProfileSyncError};
 use super::vcard_rmw::{
@@ -112,6 +114,16 @@ pub async fn ensure_pep_profile_published(
         return Ok(ProfilePublishOutcome::default());
     }
 
+    // Hold the per-(BareJid) avatar-source mutex across the entire
+    // publish chain. The wire avatar-publish hook in `pubsub_dispatch`
+    // acquires the same mutex around its `record_self_published`
+    // call — together this serializes "user wire publishes their
+    // avatar then flips provenance to 'user'" against "OIDC reconcile
+    // reads provenance then publishes empty `<metadata/>`", closing
+    // the TOCTOU race that would otherwise let OIDC wipe a freshly-
+    // published user avatar.
+    let _guard = acquire_per_jid_lock(&deps.state, jid).await;
+
     let mut outcome = ProfilePublishOutcome::default();
     let (photo_intent, name_intent) = match source {
         ProfileSource::Oidc { photo, name } => (photo, name),
@@ -169,6 +181,14 @@ async fn resolve_photo_op(
             outcome.published_avatar_data = true;
             publish_avatar_metadata(&deps.state, jid, &id, &bytes).await?;
             outcome.published_avatar_metadata = true;
+            // Record OIDC ownership of the freshly-published avatar
+            // so the provenance row exists from the very first OIDC
+            // publish (otherwise `read_avatar_source` returns
+            // `Unknown` for users who never wire-published, which
+            // would defeat any future "did the user override?" probe
+            // that relies on a non-Unknown signal).
+            let db_actor = deps.state.deps.app_state.db_pool.global_actor();
+            record_oidc_managed(db_actor, jid).await;
             Ok(PhotoOp::Set(bytes, id))
         }
         PhotoIntent::RemoveIfOidcOwned => {
@@ -176,9 +196,7 @@ async fn resolve_photo_op(
             // who self-published via wire XEP-0084 keeps their
             // picture (the user-managed avatar guard).
             let db_actor = deps.state.deps.app_state.db_pool.global_actor();
-            let source = read_avatar_source(db_actor, jid)
-                .await
-                .map_err(ProfileSyncError::AvatarSourceLookup)?;
+            let source = read_avatar_source(db_actor, jid).await?;
             if source == AvatarSource::User {
                 outcome.photo_removal_guarded_by_user_managed = true;
                 return Ok(PhotoOp::None);
@@ -377,9 +395,14 @@ async fn publish_empty_avatar_metadata(
 }
 
 /// Idempotence probe — returns `false` when the avatar-metadata
-/// node is empty OR the most-recent item is already the
-/// empty-`<metadata/>` removal shape. Saves an extra wire publish
-/// (and fan-out) on repeated re-logins after a removal.
+/// node is empty OR the latest item is already the empty-`<metadata/>`
+/// removal shape. Saves an extra wire publish (and fan-out) on
+/// repeated re-logins after a removal.
+///
+/// Probes only the single latest item (`max_items=1` on the OIDC-managed
+/// node means there's only ever one anyway). Storage backends with
+/// different eviction order can't fool the probe by leaving an old
+/// SHA-1 item alongside the new `current` empty one.
 async fn avatar_metadata_present(
     deps: &ProfilePublishDeps,
     jid: &BareJid,
@@ -389,24 +412,21 @@ async fn avatar_metadata_present(
         .deps
         .protocol
         .pubsub_storage
-        .get_items(jid, NODE_AVATAR_METADATA, None, &[])
+        .get_items(jid, NODE_AVATAR_METADATA, Some(1), &[])
         .await?;
-    if items.is_empty() {
+    let Some(item) = items.into_iter().next() else {
         return Ok(false);
-    }
-    // If any non-empty `<metadata>` item exists, treat the avatar as
-    // present. We parse the XML rather than string-comparing so
-    // whitespace / quoting variants don't fool us.
-    for item in items {
-        if let Some(xml) = item.payload_xml.as_deref() {
-            if let Ok(el) = xml.parse::<Element>() {
-                if el.children().next().is_some() {
-                    return Ok(true);
-                }
-            }
-        }
-    }
-    Ok(false)
+    };
+    let Some(xml) = item.payload_xml.as_deref() else {
+        return Ok(false);
+    };
+    let Ok(el) = xml.parse::<Element>() else {
+        // Malformed stored payload — treat as "no avatar present" so
+        // a removal request is safely a no-op rather than re-firing
+        // an event over a corrupt item we can't reason about.
+        return Ok(false);
+    };
+    Ok(el.children().next().is_some())
 }
 
 async fn publish_vcard4(

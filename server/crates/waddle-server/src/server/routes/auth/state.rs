@@ -1,22 +1,16 @@
-use std::future::Future;
-use std::pin::Pin;
 use std::sync::OnceLock;
 
 use super::*;
 
 /// Typed callback the OIDC callback handler fires after a successful
-/// login to materialize a conformant PEP avatar + vCard set. Returns
-/// immediately; the caller spawns the future so login latency is
-/// unaffected.
-pub type ProfilePublishHook = Arc<
-    dyn Fn(
-            jid::BareJid,
-            crate::profile::ProfileSource,
-        ) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>>
-        + Send
-        + Sync
-        + 'static,
->;
+/// login to materialize a conformant PEP avatar + vCard set. The hook
+/// implementation registers the publish chain with the
+/// `profile_publish_tracker` (`tokio_util::task::TaskTracker`)
+/// internally so login latency is unaffected AND the
+/// graceful-shutdown drain can `wait()` on in-flight publishes
+/// before tearing down the runtime.
+pub type ProfilePublishHook =
+    Arc<dyn Fn(jid::BareJid, crate::profile::ProfileSource) + Send + Sync + 'static>;
 
 /// Shared auth state.
 pub struct AuthState {

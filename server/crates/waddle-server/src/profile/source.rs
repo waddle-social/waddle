@@ -4,6 +4,7 @@ use thiserror::Error;
 use url::Url;
 use waddle_xmpp::XmppError;
 
+use super::avatar_source::AvatarSourceStorageError;
 use super::fetch::FetchError;
 use crate::vcard::VCardError;
 
@@ -97,9 +98,11 @@ pub enum ProfileSyncError {
     /// it.
     #[error("vcard4 stored item is malformed: {0}")]
     VCard4Malformed(String),
-    /// Failure looking up the `users.avatar_source` provenance flag
-    /// — the user-managed avatar guard cannot be evaluated and the
-    /// publish chain refuses to honor `RemoveIfOidcOwned`.
-    #[error("avatar_source lookup failed: {0}")]
-    AvatarSourceLookup(String),
+    /// Failure looking up the `user_avatar_source` provenance row —
+    /// the user-managed avatar guard cannot be evaluated and the
+    /// publish chain refuses to honor `RemoveIfOidcOwned`. Carries
+    /// the typed underlying storage error so callers can drill into
+    /// the actor / DB failure mode.
+    #[error("avatar_source storage error: {0}")]
+    AvatarSource(#[from] AvatarSourceStorageError),
 }

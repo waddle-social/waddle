@@ -177,7 +177,16 @@ async fn handler(
         None => PhotoIntent::Skip,
     };
     let name = match req.name {
-        Some(NameIntentDto::Set(s)) => NameIntent::Set(s),
+        Some(NameIntentDto::Set(s)) => {
+            if s.trim().is_empty() {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    "name.set must not be empty/whitespace; use {\"remove\": null} to clear FN"
+                        .to_string(),
+                ));
+            }
+            NameIntent::Set(s)
+        }
         Some(NameIntentDto::Remove) => NameIntent::Remove,
         None => NameIntent::Skip,
     };
@@ -251,6 +260,6 @@ fn profile_sync_error_status(error: &ProfileSyncError) -> StatusCode {
         ProfileSyncError::PubSub(_)
         | ProfileSyncError::VCardTemp(_)
         | ProfileSyncError::VCard4Malformed(_)
-        | ProfileSyncError::AvatarSourceLookup(_) => StatusCode::BAD_GATEWAY,
+        | ProfileSyncError::AvatarSource(_) => StatusCode::BAD_GATEWAY,
     }
 }

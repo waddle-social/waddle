@@ -301,6 +301,8 @@ async fn create_websocket_state(
                 sm_session_registry,
                 resumable_sessions,
                 caps_resolver,
+                avatar_source_locks: Arc::new(dashmap::DashMap::new()),
+                profile_publish_tracker: tokio_util::task::TaskTracker::new(),
             },
             occupant_id_secret: server_config.occupant_id_secret.clone(),
         },
@@ -398,6 +400,11 @@ fn install_profile_publish_hook(
         .global_actor()
         .clone();
 
+    let tracker = websocket_state
+        .deps
+        .protocol
+        .profile_publish_tracker
+        .clone();
     let hook: super::routes::auth::ProfilePublishHook =
         std::sync::Arc::new(move |jid: jid::BareJid, source: ProfileSource| {
             let websocket_state = Arc::clone(&websocket_state);
@@ -427,8 +434,15 @@ fn install_profile_publish_hook(
                 }
             };
             use tracing::Instrument;
-            Box::pin(fut.instrument(span))
-                as std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>
+            // Register with the shutdown tracker so the
+            // graceful-shutdown drain can `close().wait()` on
+            // in-flight publishes before tearing down the runtime.
+            // Closed trackers refuse new spawns; the auth callback
+            // accepts that as "shutting down — skip this publish".
+            // The `_handle` binding (rather than `_`) is intentional:
+            // detaching the JoinHandle is exactly what we want here
+            // (the tracker holds its own reference for `wait()`).
+            let _handle = tracker.spawn(fut.instrument(span));
         });
     auth_state.install_profile_publish_hook(hook);
     tracing::debug!("OIDC → PEP profile-publish hook installed");
