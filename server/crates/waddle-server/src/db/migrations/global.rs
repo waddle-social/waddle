@@ -353,7 +353,34 @@ pub const V0002_USER_AVATAR_SOURCE_POSTGRES: &str = r#"
 CREATE TABLE user_avatar_source (
     xmpp_localpart TEXT PRIMARY KEY,
     source TEXT NOT NULL CHECK (source IN ('oidc', 'user')),
-    updated_at TEXT NOT NULL DEFAULT to_char(NOW(), 'YYYY-MM-DD"T"HH24:MI:SS"Z"')
+    updated_at TEXT NOT NULL DEFAULT to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')
+);
+"#;
+
+/// `user_avatar_fetch_state` — per-user attempt + outcome state for
+/// the OIDC avatar fetcher's startup backfill. Keyed solely on
+/// `xmpp_localpart` to avoid the same `users.username UNIQUE`
+/// collision surface that drove `user_avatar_source` into a
+/// dedicated table. `last_error` is `NULL` on success and otherwise
+/// carries a `FetchError::kind()` value (`permanent_4xx`,
+/// `mime_rejected`, `size_exceeded`, `ssrf_blocked`, etc.) — the
+/// backfill consults it to throttle 4xx-style permanent failures
+/// for a 24h cool-down without re-hammering the IDP every boot.
+pub const V0003_USER_AVATAR_FETCH_STATE: &str = r#"
+CREATE TABLE user_avatar_fetch_state (
+    xmpp_localpart TEXT PRIMARY KEY,
+    last_attempt_at TEXT NOT NULL,
+    last_error TEXT,
+    updated_at TEXT NOT NULL
+);
+"#;
+
+pub const V0003_USER_AVATAR_FETCH_STATE_POSTGRES: &str = r#"
+CREATE TABLE user_avatar_fetch_state (
+    xmpp_localpart TEXT PRIMARY KEY,
+    last_attempt_at TEXT NOT NULL,
+    last_error TEXT,
+    updated_at TEXT NOT NULL
 );
 "#;
 
@@ -373,6 +400,12 @@ pub fn all() -> Vec<Migration> {
                     .to_string(),
             sql_sqlite: V0002_USER_AVATAR_SOURCE,
             sql_postgres: V0002_USER_AVATAR_SOURCE_POSTGRES,
+        },
+        Migration {
+            version: 3,
+            description: "Add user_avatar_fetch_state for startup-backfill throttle".to_string(),
+            sql_sqlite: V0003_USER_AVATAR_FETCH_STATE,
+            sql_postgres: V0003_USER_AVATAR_FETCH_STATE_POSTGRES,
         },
     ]
 }

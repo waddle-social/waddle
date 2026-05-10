@@ -99,7 +99,7 @@ pub struct ProfilePublishOutcome {
     pub removed_vcard4_fn: bool,
     /// `users.avatar_source = 'user'`, so `RemoveIfOidcOwned` was
     /// suppressed. Visible to tests + telemetry.
-    pub photo_removal_guarded_by_user_managed: bool,
+    pub photo_axis_guarded_by_user_managed: bool,
 }
 
 /// Materialize a conformant PEP avatar + vCard set for `jid` from
@@ -144,7 +144,7 @@ pub async fn ensure_pep_profile_published(
         jid = %jid,
         set_photo = outcome.photo_sha1_hex.is_some(),
         removed_photo = outcome.published_avatar_removal,
-        guard_user_managed = outcome.photo_removal_guarded_by_user_managed,
+        guard_user_managed = outcome.photo_axis_guarded_by_user_managed,
         set_fn = matches!(name_intent, NameIntent::Set(_)),
         removed_fn = matches!(name_intent, NameIntent::Remove)
             && (outcome.removed_vcard_temp_fn || outcome.removed_vcard4_fn),
@@ -174,6 +174,19 @@ async fn resolve_photo_op(
     match intent {
         PhotoIntent::Skip => Ok(PhotoOp::None),
         PhotoIntent::SetFromUrl(url) => {
+            // User-managed guard also applies to the SET path. The
+            // outer per-(BareJid) lock (acquired in
+            // `ensure_pep_profile_published`) makes this read +
+            // subsequent publish atomic against a concurrent wire
+            // publish that would flip provenance to `'user'`.
+            // Without this branch, OIDC reconcile after a user wire
+            // publish would silently overwrite their avatar.
+            let db_actor = deps.state.deps.app_state.db_pool.global_actor();
+            let source = read_avatar_source(db_actor, jid).await?;
+            if source == AvatarSource::User {
+                outcome.photo_axis_guarded_by_user_managed = true;
+                return Ok(PhotoOp::None);
+            }
             let bytes = fetch_avatar_bytes(&url, &deps.fetch_policy).await?;
             let hash = compute_hash(HashAlgo::Sha1, &bytes.bytes);
             let id = hash.to_hex();
@@ -190,7 +203,6 @@ async fn resolve_photo_op(
             // `Unknown` for users who never wire-published, which
             // would defeat any future "did the user override?" probe
             // that relies on a non-Unknown signal).
-            let db_actor = deps.state.deps.app_state.db_pool.global_actor();
             record_oidc_managed(db_actor, jid).await;
             Ok(PhotoOp::Set(bytes, id))
         }
@@ -201,7 +213,7 @@ async fn resolve_photo_op(
             let db_actor = deps.state.deps.app_state.db_pool.global_actor();
             let source = read_avatar_source(db_actor, jid).await?;
             if source == AvatarSource::User {
-                outcome.photo_removal_guarded_by_user_managed = true;
+                outcome.photo_axis_guarded_by_user_managed = true;
                 return Ok(PhotoOp::None);
             }
             // Guard 2: idempotence — if no prior metadata item or
