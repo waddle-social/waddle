@@ -92,9 +92,19 @@ html-escape = "0.2"
 jsonwebtoken = { workspace = true }
 prescience = { version = "0.1.0", features = ["tls-rustls"] }
 
+# Avatar transcoding — XEP-0084 §3.2 mandates `image/png` for the
+# data node, so non-PNG OIDC avatar bytes are decoded by `image`
+# and re-encoded as PNG before publish. Default features pull in
+# decoders for every supported format; we narrow to the four MIME
+# types in the avatar fetch allowlist to keep the build slim.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
+
 [dev-dependencies]
 tokio-test = "0.4"
 wiremock = "0.6"
+# Integration tests build real JPEG fixtures so the transcoder
+# accepts them. Mirrors the lib's runtime feature set.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 http-body-util = "0.1"
 tokio-tungstenite = "0.24"
 pbkdf2 = { version = "0.12", features = ["hmac"] }

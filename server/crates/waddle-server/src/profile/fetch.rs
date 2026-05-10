@@ -25,15 +25,18 @@
 //!   on the response body so an oversize/slowloris/lying-Content-Length
 //!   server cannot OOM us.
 //! - **MIME:** allowlist of `image/png`, `image/jpeg`, `image/gif`,
-//!   `image/webp` per RFC 363's design (issue #363). XEP-0084 §3.1
-//!   says PNG SHOULD be the data-node format, but the issue explicitly
-//!   chose to publish the source MIME under "exactly one `<info>`
-//!   element" rather than transcoding — the publish chain plumbs the
-//!   actual MIME through `<info type>`, vCard `<TYPE>`, and the vCard4
-//!   `<photo>` data-URI. The header is gated against the allowlist,
-//!   then the body is magic-byte sniffed against the specific format
-//!   the header declared so a server lying in `Content-Type` can't
-//!   smuggle a different payload downstream.
+//!   `image/webp` at the fetch boundary. Non-PNG bodies are decoded
+//!   and re-encoded as PNG before the helper returns — XEP-0084 §3.2
+//!   normatively reserves the `urn:xmpp:avatar:data` node for
+//!   `image/png`, §4.1.1 mandates the metadata ItemID be the SHA-1 of
+//!   the PNG bytes, and §4.2 requires "one of the formats MUST be
+//!   image/png to ensure interoperability." The header parses into
+//!   `AllowedMime` (gate); the body is magic-byte sniffed against
+//!   that declared format (defense against malformed/buggy servers
+//!   that mis-label a body — not an adversarial defense, since the
+//!   header itself is attacker-controlled); then the bytes are
+//!   transcoded to PNG so callers always see a single canonical
+//!   format on the wire.
 //! - **Timeouts:** 5s connect, 10s total.
 //! - **Retries:** one retry on transient failures (5xx, connect
 //!   timeout, network error). No backoff.
@@ -42,9 +45,11 @@
 //! into the persisted `users.last_avatar_fetch_error` enum without
 //! parsing log strings.
 
+use std::io::Cursor;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::time::Duration;
 
+use image::{ImageFormat, ImageReader};
 use reqwest::header::CONTENT_TYPE;
 use reqwest::redirect;
 use reqwest::Client;
@@ -56,10 +61,10 @@ const MAX_BYTES: usize = 100 * 1024;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const TOTAL_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Image formats we accept on the avatar fetch path. The publish
-/// chain carries the canonical MIME string forward into XEP-0084
-/// metadata (`<info type>`), vCard-temp PHOTO `<TYPE>`, and the
-/// XEP-0292 vCard4 `<photo>` data-URI without re-encoding.
+/// Image formats we accept on the avatar fetch path. Internal to
+/// the fetcher: callers always see a transcoded PNG (XEP-0084 §3.2),
+/// so this enum exists purely to gate inputs and dispatch the
+/// magic-byte / decode logic.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AllowedMime {
     Png,
@@ -69,6 +74,13 @@ enum AllowedMime {
 }
 
 impl AllowedMime {
+    /// Single source of truth for the allowlist. `from_header`,
+    /// `as_mime`, and `matches_magic` all match exhaustively, so the
+    /// compiler catches missing arms when a new variant is added.
+    /// `ALL` is what the user-facing error message and tests iterate
+    /// over — keep it in lockstep with the variants.
+    const ALL: &'static [Self] = &[Self::Png, Self::Jpeg, Self::Gif, Self::Webp];
+
     /// Match a normalized (`split(';').next().trim().to_lowercase()`)
     /// `Content-Type` against the allowlist. `image/jpg` is rejected
     /// — RFC 6838 only registers `image/jpeg`. If a real-world IdP
@@ -93,9 +105,26 @@ impl AllowedMime {
         }
     }
 
+    /// Comma-separated MIME list for human-facing diagnostics. The
+    /// `MimeRejected` `Display` calls this so the allowlist string
+    /// has a single source of truth.
+    fn allowlist_help() -> String {
+        Self::ALL
+            .iter()
+            .map(|m| m.as_mime())
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
     /// Verify the body's leading bytes match the format declared in
-    /// the response header. Each signature is the format's documented
-    /// fixed prefix:
+    /// the response header. This is a malformed-server defense (a
+    /// server returning JPEG bytes with `Content-Type: image/png`),
+    /// not an adversarial one — the header itself is attacker-
+    /// controlled, and a malicious server can simply declare whatever
+    /// type matches the body it wants to smuggle. The transcode step
+    /// downstream is what makes the wire payload predictable.
+    ///
+    /// Each signature is the format's documented fixed prefix:
     /// - PNG: 8-byte signature, RFC 2083 §3.1.
     /// - JPEG: SOI + first marker, `FF D8 FF`. Subsequent bytes vary
     ///   by encoder (E0/E1 for JFIF/EXIF, DB for raw quantization
@@ -135,13 +164,17 @@ pub enum FetchError {
     #[error("HTTP {0}")]
     Http(u16),
     #[error(
-        "response Content-Type {0:?} is not in the avatar allowlist (image/png, image/jpeg, image/gif, image/webp)"
+        "response Content-Type {mime:?} is not in the avatar allowlist ({list})",
+        mime = .0,
+        list = AllowedMime::allowlist_help()
     )]
     MimeRejected(Option<String>),
     #[error("response body did not start with the magic-byte signature for the declared MIME")]
     MagicByteMismatch,
     #[error("response exceeds {0}-byte cap")]
     SizeExceeded(usize),
+    #[error("could not transcode source bytes to image/png: {0}")]
+    TranscodeFailed(String),
 }
 
 impl FetchError {
@@ -158,6 +191,7 @@ impl FetchError {
             FetchError::MimeRejected(_) => "mime_rejected",
             FetchError::MagicByteMismatch => "magic_byte_mismatch",
             FetchError::SizeExceeded(_) => "size_exceeded",
+            FetchError::TranscodeFailed(_) => "transcode_failed",
         }
     }
 }
@@ -341,12 +375,56 @@ async fn try_fetch(
         return Err(FetchError::MagicByteMismatch);
     }
 
-    let mime = declared.as_mime();
-    debug!(url = %url, bytes = buf.len(), mime = %mime, "avatar fetched");
+    // XEP-0084 §3.2: the `urn:xmpp:avatar:data` node carries
+    // `image/png` only; §4.1.1 ties the metadata `<info id>` to the
+    // SHA-1 of the PNG bytes; §4.2 requires "one of the formats MUST
+    // be image/png to ensure interoperability." Non-PNG sources are
+    // decoded and re-encoded as PNG here so the publish chain never
+    // sees a non-conformant payload.
+    let png_bytes = match declared {
+        AllowedMime::Png => buf,
+        AllowedMime::Jpeg | AllowedMime::Gif | AllowedMime::Webp => {
+            transcode_to_png(&buf, declared)?
+        }
+    };
+
+    // The post-transcode size cap protects D1 storage (issue #363:
+    // `pubsub_items.payload_xml TEXT` budget). PNG re-encoding can
+    // expand a small lossy JPEG into a larger lossless PNG; reject
+    // those rather than overflowing the row.
+    if png_bytes.len() > policy.max_bytes {
+        return Err(FetchError::SizeExceeded(policy.max_bytes));
+    }
+
+    debug!(url = %url, bytes = png_bytes.len(), source_mime = %declared.as_mime(), "avatar fetched and normalised to image/png");
     Ok(AvatarBytes {
-        bytes: buf,
-        mime: mime.to_string(),
+        bytes: png_bytes,
+        mime: AllowedMime::Png.as_mime().to_string(),
     })
+}
+
+/// Decode `bytes` (declared as `source`) and re-encode as PNG. The
+/// `image` crate's `ImageReader::with_guessed_format` re-sniffs the
+/// header so a magic-byte mismatch caught upstream wouldn't slip
+/// through here either; we still hint the format from the declared
+/// MIME so a corrupted file fails fast with a typed error rather
+/// than triggering a slower "try every format" path.
+fn transcode_to_png(bytes: &[u8], source: AllowedMime) -> Result<Vec<u8>, FetchError> {
+    let image_format = match source {
+        AllowedMime::Png => ImageFormat::Png,
+        AllowedMime::Jpeg => ImageFormat::Jpeg,
+        AllowedMime::Gif => ImageFormat::Gif,
+        AllowedMime::Webp => ImageFormat::WebP,
+    };
+    let mut reader = ImageReader::new(Cursor::new(bytes));
+    reader.set_format(image_format);
+    let img = reader
+        .decode()
+        .map_err(|e| FetchError::TranscodeFailed(format!("decode {}: {e}", source.as_mime())))?;
+    let mut out = Vec::with_capacity(bytes.len());
+    img.write_to(&mut Cursor::new(&mut out), ImageFormat::Png)
+        .map_err(|e| FetchError::TranscodeFailed(format!("encode png: {e}")))?;
+    Ok(out)
 }
 
 async fn resolve_host(host: &str, port: u16) -> std::io::Result<Vec<IpAddr>> {
@@ -567,6 +645,27 @@ mod tests {
             FetchError::MimeRejected(Some("application/pdf".into())).kind(),
             "mime_rejected"
         );
+        assert_eq!(
+            FetchError::TranscodeFailed("bad bytes".into()).kind(),
+            "transcode_failed"
+        );
+    }
+
+    #[test]
+    fn mime_rejected_display_lists_every_allowlist_entry() {
+        // The user-facing error message must enumerate the
+        // allowlist; that text and `AllowedMime::ALL` have to stay in
+        // sync. `allowlist_help` is the single source of truth — pin
+        // the contract so a future variant addition doesn't slip
+        // through with stale Display text.
+        let display = FetchError::MimeRejected(Some("image/bmp".into())).to_string();
+        for variant in AllowedMime::ALL {
+            assert!(
+                display.contains(variant.as_mime()),
+                "Display must list {}: {display}",
+                variant.as_mime()
+            );
+        }
     }
 
     #[test]
@@ -646,5 +745,53 @@ mod tests {
             assert!(!AllowedMime::Gif.matches_magic(short));
             assert!(!AllowedMime::Webp.matches_magic(short));
         }
+    }
+
+    /// Encode a 2×2 red square as the requested format. Two-by-two
+    /// because the JPEG encoder needs at least an 8×8 MCU's worth of
+    /// data internally; one-by-one decodes correctly but produces a
+    /// JFIF-style fixture that's larger than necessary. 2×2 is the
+    /// smallest useful test image where every codec is happy.
+    fn encode_test_image(format: image::ImageFormat) -> Vec<u8> {
+        let img = image::ImageBuffer::from_pixel(2u32, 2u32, image::Rgb([255u8, 0, 0]));
+        let mut out = Vec::new();
+        image::DynamicImage::ImageRgb8(img)
+            .write_to(&mut Cursor::new(&mut out), format)
+            .expect("encoder must succeed for 2×2 RGB fixture");
+        out
+    }
+
+    #[test]
+    fn transcode_to_png_round_trips_each_non_png_format() {
+        for (source, format) in [
+            (AllowedMime::Jpeg, image::ImageFormat::Jpeg),
+            (AllowedMime::Gif, image::ImageFormat::Gif),
+            (AllowedMime::Webp, image::ImageFormat::WebP),
+        ] {
+            let source_bytes = encode_test_image(format);
+            assert!(
+                source.matches_magic(&source_bytes),
+                "{source:?} fixture must clear its own magic-byte gate"
+            );
+            let png = transcode_to_png(&source_bytes, source)
+                .unwrap_or_else(|e| panic!("{source:?} → PNG must succeed for a real image: {e}"));
+            assert!(
+                AllowedMime::Png.matches_magic(&png),
+                "{source:?} → PNG output must clear the PNG magic-byte gate"
+            );
+        }
+    }
+
+    #[test]
+    fn transcode_to_png_rejects_corrupted_body() {
+        // Magic bytes match JPEG but the rest is junk — the decoder
+        // surfaces this as `TranscodeFailed` so the fetch path can
+        // map it into the persisted error enum without panicking.
+        let corrupted = b"\xff\xd8\xff\xe0not-a-real-jpeg";
+        let result = transcode_to_png(corrupted, AllowedMime::Jpeg);
+        assert!(
+            matches!(result, Err(FetchError::TranscodeFailed(_))),
+            "{result:?}"
+        );
     }
 }

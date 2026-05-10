@@ -169,14 +169,20 @@ fn tiny_png() -> Vec<u8> {
     ]
 }
 
-/// JPEG fixture — SOI plus a JFIF APP0 marker prefix. Just enough
-/// to clear the `AllowedMime::Jpeg` magic-byte check in `fetch.rs`;
-/// the publish chain base64-encodes whatever clears the gate
-/// (nothing downstream parses the image structure).
+/// JPEG fixture — a real 2×2 red square the transcoder can decode.
+/// `fetch.rs` re-encodes non-PNG sources to PNG before publish per
+/// XEP-0084 §3.2, so the magic-byte prefix alone is no longer
+/// sufficient (the decoder rejects truncated JPEGs).
 fn tiny_jpeg() -> Vec<u8> {
-    vec![
-        0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46, 0x00, 0x01,
-    ]
+    let img = image::ImageBuffer::from_pixel(2u32, 2u32, image::Rgb([255u8, 0, 0]));
+    let mut out = Vec::new();
+    image::DynamicImage::ImageRgb8(img)
+        .write_to(
+            &mut std::io::Cursor::new(&mut out),
+            image::ImageFormat::Jpeg,
+        )
+        .expect("encoding 2×2 RGB to JPEG must succeed");
+    out
 }
 
 // ============================================================================
@@ -308,18 +314,25 @@ async fn avatar_url_publishes_data_and_metadata_with_real_sha1() {
 }
 
 // ============================================================================
-// avatar_url_publishes_jpeg_with_per_format_mime
+// avatar_url_jpeg_is_transcoded_to_png_per_xep_0084_3_2
 // ============================================================================
 //
 // Regression for the prod incident traced to issue #363: GitHub
 // avatars at `avatars.githubusercontent.com/u/<id>?v=4` are served
 // with `Content-Type: image/jpeg` for users whose original avatar
-// was a JPEG, and the fetcher rejected them as `mime_rejected`.
-// This test pins the JPEG path end-to-end: the metadata `<info type>`
-// must carry `image/jpeg`, not `image/png`.
+// was a JPEG, and the original PNG-only fetch path rejected them as
+// `mime_rejected`.
+//
+// The fix accepts JPEG (and GIF/WebP) at the fetch boundary AND
+// transcodes them to PNG before publish, so the wire payload always
+// satisfies XEP-0084 §3.2 ("data node carries image/png only") and
+// §4.2 ("one of the formats MUST be image/png to ensure
+// interoperability"). This test pins both halves: the publish
+// succeeds for a JPEG source, and the metadata advertises
+// `image/png` regardless of source MIME.
 
 #[tokio::test]
-async fn avatar_url_publishes_jpeg_with_per_format_mime() {
+async fn avatar_url_jpeg_is_transcoded_to_png_per_xep_0084_3_2() {
     let _serial = TEST_SERIAL.lock().await;
     let server = TestServer::start();
     let mut admin = admin_client(&server, "avatar-jpeg-1").await;
@@ -348,8 +361,14 @@ async fn avatar_url_publishes_jpeg_with_per_format_mime() {
         .photo_sha1_hex
         .clone()
         .expect("metadata MUST carry the SHA-1 id");
-    assert_eq!(resp.photo_mime.as_deref(), Some("image/jpeg"));
-    assert_eq!(resp.photo_bytes_len, Some(jpeg_bytes.len()));
+    // Post-transcode: outcome.photo_mime is image/png, and the
+    // bytes count is the PNG re-encoding's, not the source JPEG.
+    assert_eq!(resp.photo_mime.as_deref(), Some("image/png"));
+    assert_ne!(
+        resp.photo_bytes_len,
+        Some(jpeg_bytes.len()),
+        "post-transcode byte count must reflect the PNG re-encoding, not the source JPEG"
+    );
     assert!(resp.published_avatar_data && resp.published_avatar_metadata);
 
     let metadata = iq_get_to(
@@ -361,12 +380,13 @@ async fn avatar_url_publishes_jpeg_with_per_format_mime() {
     .await;
     assert!(
         metadata.contains(NS_AVATAR_METADATA) && metadata.contains(&format!(r#"id="{sha1}""#)),
-        "metadata item MUST be keyed on the SHA-1 of the bytes per XEP-0084 §4.1.1: {metadata}"
+        "metadata item MUST be keyed on the SHA-1 of the PNG bytes per XEP-0084 §4.1.1: {metadata}"
     );
     assert!(
-        metadata.contains(r#"type="image/jpeg""#),
-        "metadata <info type> MUST reflect the source MIME, not a hard-coded image/png: {metadata}"
+        metadata.contains(r#"type="image/png""#),
+        "metadata <info type> MUST be image/png after transcoding (XEP-0084 §3.2 / §4.2): {metadata}"
     );
+    assert!(!metadata.contains(r#"type="image/jpeg""#));
     assert!(!metadata.contains(r#"url="#));
 
     let _ = admin.close().await;
