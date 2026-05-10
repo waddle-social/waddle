@@ -7,34 +7,74 @@ use waddle_xmpp::XmppError;
 use super::fetch::FetchError;
 use crate::vcard::VCardError;
 
+/// Per-axis intent for a single PEP profile sync call. PHOTO and FN
+/// are independent — either subset can be set, removed, or skipped
+/// on any single call.
+#[derive(Debug, Clone)]
+pub enum PhotoIntent {
+    /// No PHOTO sync for this call.
+    Skip,
+    /// Set PHOTO from the bytes fetched at this URL.
+    SetFromUrl(Url),
+    /// Remove the OIDC-managed PHOTO if one exists. Honored only
+    /// when `users.avatar_source = 'oidc'`; a user who self-published
+    /// via wire XEP-0084 keeps their picture (the user-managed
+    /// avatar guard).
+    RemoveIfOidcOwned,
+}
+
+#[derive(Debug, Clone)]
+pub enum NameIntent {
+    /// No FN sync for this call.
+    Skip,
+    /// Set FN to this string.
+    Set(String),
+    /// Remove `<FN>` / `<fn>` from vcard-temp + vCard4. Name has no
+    /// user-managed guard analogous to PHOTO — name is always
+    /// OIDC-owned today.
+    Remove,
+}
+
 /// Provenance + payload for a single profile-publish call.
 ///
 /// The variant is open for future provenances (e.g. SCIM, admin
 /// override) without changing the call sites that consume the helper.
-/// `Oidc { None, None }` is the explicit no-op shape.
 #[derive(Debug, Clone)]
 pub enum ProfileSource {
     Oidc {
-        /// Typed avatar URL parsed once at the OIDC boundary. Per the
-        /// typed-payloads hard rule the helper does NOT accept &str
-        /// here.
-        avatar_url: Option<Url>,
-        /// Free-form unicode display name. `None` means "no FN sync
-        /// for this call". The bridge does NOT clear an existing FN
-        /// just because it isn't supplied — explicit removal lives
-        /// in the removal flow.
-        display_name: Option<String>,
+        photo: PhotoIntent,
+        name: NameIntent,
     },
 }
 
 impl ProfileSource {
     pub fn is_no_op(&self) -> bool {
         match self {
-            ProfileSource::Oidc {
-                avatar_url,
-                display_name,
-            } => avatar_url.is_none() && display_name.is_none(),
+            ProfileSource::Oidc { photo, name } => {
+                matches!(photo, PhotoIntent::Skip) && matches!(name, NameIntent::Skip)
+            }
         }
+    }
+
+    /// Build a `ProfileSource::Oidc` from raw OIDC claim values.
+    /// `avatar_url = Some` → set; `None` → remove-if-oidc-owned.
+    /// `display_name = Some` → set; `None` → remove.
+    ///
+    /// Callers are responsible for filtering empty/whitespace claim
+    /// strings to `None` before calling — the helper interprets a
+    /// `Some("")` as a literal "set FN to empty string", which is
+    /// almost certainly not what an IDP returning an empty `name`
+    /// claim meant.
+    pub fn from_oidc_claims(avatar_url: Option<Url>, display_name: Option<String>) -> Self {
+        let photo = match avatar_url {
+            Some(url) => PhotoIntent::SetFromUrl(url),
+            None => PhotoIntent::RemoveIfOidcOwned,
+        };
+        let name = match display_name {
+            Some(s) => NameIntent::Set(s),
+            None => NameIntent::Remove,
+        };
+        ProfileSource::Oidc { photo, name }
     }
 }
 
@@ -57,4 +97,9 @@ pub enum ProfileSyncError {
     /// it.
     #[error("vcard4 stored item is malformed: {0}")]
     VCard4Malformed(String),
+    /// Failure looking up the `users.avatar_source` provenance flag
+    /// — the user-managed avatar guard cannot be evaluated and the
+    /// publish chain refuses to honor `RemoveIfOidcOwned`.
+    #[error("avatar_source lookup failed: {0}")]
+    AvatarSourceLookup(String),
 }

@@ -129,6 +129,56 @@ pub fn apply_vcard4_update(
     builder.build()
 }
 
+/// Which fields to strip from an XEP-0054 vcard-temp element on
+/// the removal path. Set the bools the caller wants gone; every
+/// other child is preserved verbatim.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct VcardTempFieldRemoval {
+    pub remove_photo: bool,
+    pub remove_fn: bool,
+}
+
+/// Strip `<PHOTO>` and/or `<FN>` from `existing`. Preserves every
+/// other child. The output's namespace + element name are pinned
+/// so the result is still a valid `<vCard xmlns="vcard-temp"/>`.
+pub fn remove_vcard_temp_fields(existing: &Element, removal: &VcardTempFieldRemoval) -> Element {
+    let mut builder = Element::builder("vCard", NS_VCARD_TEMP);
+    for child in existing.children() {
+        match child.name() {
+            "PHOTO" if removal.remove_photo => {}
+            "FN" if removal.remove_fn => {}
+            _ => {
+                builder = builder.append(child.clone());
+            }
+        }
+    }
+    builder.build()
+}
+
+/// Which fields to strip from an XEP-0292 vCard4 element on the
+/// removal path.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Vcard4FieldRemoval {
+    pub remove_photo: bool,
+    pub remove_fn: bool,
+}
+
+/// Strip `<photo>` and/or `<fn>` from `existing`, preserving every
+/// other child.
+pub fn remove_vcard4_fields(existing: &Element, removal: &Vcard4FieldRemoval) -> Element {
+    let mut builder = Element::builder("vcard", NS_VCARD4);
+    for child in existing.children() {
+        match child.name() {
+            "photo" if removal.remove_photo => {}
+            "fn" if removal.remove_fn => {}
+            _ => {
+                builder = builder.append(child.clone());
+            }
+        }
+    }
+    builder.build()
+}
+
 fn build_vcard_temp_photo(bytes: &[u8], mime: &str) -> Element {
     Element::builder("PHOTO", NS_VCARD_TEMP)
         .append(Element::builder("TYPE", NS_VCARD_TEMP).append(mime).build())
@@ -229,6 +279,79 @@ mod tests {
             xml.contains("KEEP"),
             "PHOTO untouched when only FN is supplied: {xml}"
         );
+    }
+
+    #[test]
+    fn vcard_temp_remove_photo_keeps_other_fields() {
+        let existing: Element = "<vCard xmlns='vcard-temp'><FN>Alice</FN><PHOTO><TYPE>image/png</TYPE><BINVAL>BYTES</BINVAL></PHOTO><EMAIL>a@example.com</EMAIL></vCard>"
+            .parse()
+            .unwrap();
+        let result = remove_vcard_temp_fields(
+            &existing,
+            &VcardTempFieldRemoval {
+                remove_photo: true,
+                remove_fn: false,
+            },
+        );
+        let xml = String::from(&result);
+        assert!(!xml.contains("<PHOTO"), "PHOTO must be stripped: {xml}");
+        assert!(!xml.contains("BYTES"), "{xml}");
+        assert!(xml.contains("<FN"), "FN must be preserved: {xml}");
+        assert!(xml.contains("a@example.com"), "EMAIL preserved: {xml}");
+    }
+
+    #[test]
+    fn vcard_temp_remove_fn_keeps_photo_and_other_fields() {
+        let existing: Element = "<vCard xmlns='vcard-temp'><FN>Old</FN><PHOTO><TYPE>image/png</TYPE><BINVAL>BYTES</BINVAL></PHOTO><NICKNAME>Ali</NICKNAME></vCard>"
+            .parse()
+            .unwrap();
+        let result = remove_vcard_temp_fields(
+            &existing,
+            &VcardTempFieldRemoval {
+                remove_photo: false,
+                remove_fn: true,
+            },
+        );
+        let xml = String::from(&result);
+        assert!(!xml.contains("<FN"), "FN must be stripped: {xml}");
+        assert!(!xml.contains("Old"), "{xml}");
+        assert!(xml.contains("<PHOTO"), "PHOTO preserved: {xml}");
+        assert!(xml.contains("Ali"), "NICKNAME preserved: {xml}");
+    }
+
+    #[test]
+    fn vcard4_remove_photo_keeps_other_fields() {
+        let existing: Element = "<vcard xmlns='urn:ietf:params:xml:ns:vcard-4.0'><fn><text>Alice</text></fn><photo><uri>xmpp:alice@example.com?pubsub;node=urn:xmpp:avatar:data;item=abc</uri></photo><nickname><text>Ali</text></nickname></vcard>"
+            .parse()
+            .unwrap();
+        let result = remove_vcard4_fields(
+            &existing,
+            &Vcard4FieldRemoval {
+                remove_photo: true,
+                remove_fn: false,
+            },
+        );
+        let xml = String::from(&result);
+        assert!(!xml.contains("<photo"), "<photo> must be stripped: {xml}");
+        assert!(xml.contains("<fn"), "<fn> preserved: {xml}");
+        assert!(xml.contains("Ali"), "<nickname> preserved: {xml}");
+    }
+
+    #[test]
+    fn vcard4_remove_fn_keeps_photo_and_other_fields() {
+        let existing: Element = "<vcard xmlns='urn:ietf:params:xml:ns:vcard-4.0'><fn><text>Alice</text></fn><photo><uri>xmpp:alice@example.com?pubsub;node=urn:xmpp:avatar:data;item=abc</uri></photo></vcard>"
+            .parse()
+            .unwrap();
+        let result = remove_vcard4_fields(
+            &existing,
+            &Vcard4FieldRemoval {
+                remove_photo: false,
+                remove_fn: true,
+            },
+        );
+        let xml = String::from(&result);
+        assert!(!xml.contains("<fn"), "<fn> must be stripped: {xml}");
+        assert!(xml.contains("<photo"), "<photo> preserved: {xml}");
     }
 
     #[test]

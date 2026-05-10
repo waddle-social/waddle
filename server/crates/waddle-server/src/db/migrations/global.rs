@@ -329,12 +329,40 @@ CREATE TABLE private_xml_storage (
 );
 "#;
 
+/// `users.avatar_source` provenance column for the OIDC → PEP
+/// avatar/FN bridge. The user-managed avatar guard reads this value
+/// on `RemoveIfOidcOwned`: a row marked `'user'` keeps its picture
+/// even when the IDP claim disappears. The default `'oidc'` is the
+/// safe value for fresh provisions where OIDC is authoritative;
+/// existing rows pre-date this column and OIDC owns avatars by
+/// default in this codebase, so backfilling them as `'oidc'` matches
+/// observed semantics. Once a user issues a wire XEP-0084 publish to
+/// their own avatar node, the publish-time handler flips this to
+/// `'user'` (see `pubsub_authz::record_avatar_self_publish`).
+pub const V0002_AVATAR_SOURCE_COLUMN: &str = r#"
+ALTER TABLE users ADD COLUMN avatar_source TEXT NOT NULL DEFAULT 'oidc';
+"#;
+
+pub const V0002_AVATAR_SOURCE_COLUMN_POSTGRES: &str = r#"
+ALTER TABLE users ADD COLUMN avatar_source TEXT NOT NULL DEFAULT 'oidc';
+"#;
+
 /// Get all global migrations in order
 pub fn all() -> Vec<Migration> {
-    vec![Migration {
-        version: 1,
-        description: "Hard-cut auth broker schema with roster pre-approval".to_string(),
-        sql_sqlite: V0001_AUTH_BROKER_SCHEMA,
-        sql_postgres: V0001_AUTH_BROKER_SCHEMA_POSTGRES,
-    }]
+    vec![
+        Migration {
+            version: 1,
+            description: "Hard-cut auth broker schema with roster pre-approval".to_string(),
+            sql_sqlite: V0001_AUTH_BROKER_SCHEMA,
+            sql_postgres: V0001_AUTH_BROKER_SCHEMA_POSTGRES,
+        },
+        Migration {
+            version: 2,
+            description:
+                "Add users.avatar_source provenance column for OIDC user-managed avatar guard"
+                    .to_string(),
+            sql_sqlite: V0002_AVATAR_SOURCE_COLUMN,
+            sql_postgres: V0002_AVATAR_SOURCE_COLUMN_POSTGRES,
+        },
+    ]
 }

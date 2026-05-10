@@ -26,11 +26,13 @@
 //! Legacy-only clients require server-side auto-stamping on every
 //! outbound presence — tracked as a follow-up.
 
+pub mod avatar_source;
 mod fetch;
 mod publish;
 mod source;
 mod vcard_rmw;
 
+pub use avatar_source::{read_avatar_source, record_self_published, AvatarSource};
 pub use fetch::{fetch_avatar_bytes, AvatarBytes, FetchError, FetchPolicy};
 pub use publish::{ensure_pep_profile_published, ProfilePublishDeps};
-pub use source::{ProfileSource, ProfileSyncError};
+pub use source::{NameIntent, PhotoIntent, ProfileSource, ProfileSyncError};

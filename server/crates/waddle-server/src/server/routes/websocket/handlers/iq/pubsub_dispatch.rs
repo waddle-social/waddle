@@ -138,6 +138,22 @@ pub(super) async fn handle_pubsub_iq(
                             },
                         )
                         .await;
+                        // RFC 363 user-managed avatar guard: a user
+                        // publishing to their own `urn:xmpp:avatar:*`
+                        // node owns the avatar henceforth. Mark
+                        // `avatar_source='user'` so the next OIDC
+                        // reconcile suppresses `RemoveIfOidcOwned`.
+                        if is_pep
+                            && target_jid == user_jid
+                            && (node == waddle_xmpp::xep::xep0084::NODE_AVATAR_DATA
+                                || node == waddle_xmpp::xep::xep0084::NODE_AVATAR_METADATA)
+                        {
+                            crate::profile::record_self_published(
+                                state.deps.app_state.db_pool.global_actor(),
+                                &user_jid,
+                            )
+                            .await;
+                        }
                         let response =
                             build_pubsub_publish_result(iq, &node, &publish_result.item_id);
                         return vec![iq_to_xml(response)];

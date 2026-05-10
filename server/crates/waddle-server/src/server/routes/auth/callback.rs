@@ -165,16 +165,16 @@ pub(super) async fn callback_handler(
             // / vCard4. The OIDC spec doesn't forbid an empty `name`,
             // some IDPs return one when the user hasn't set a profile
             // name; an empty FN would just blank a previously-set one.
+            // After this filter, `from_oidc_claims` maps `None` to
+            // `NameIntent::Remove` so a name that disappears from the
+            // IDP claim is actively cleared (instead of stale-set).
             let display_name = identity_claims
                 .name
                 .as_deref()
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
                 .map(str::to_string);
-            let source = crate::profile::ProfileSource::Oidc {
-                avatar_url,
-                display_name,
-            };
+            let source = crate::profile::ProfileSource::from_oidc_claims(avatar_url, display_name);
             let fut = (hook)(jid, source);
             tokio::spawn(fut);
         }
