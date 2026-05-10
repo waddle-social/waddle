@@ -361,14 +361,7 @@ async fn avatar_url_jpeg_is_transcoded_to_png_per_xep_0084_3_2() {
         .photo_sha1_hex
         .clone()
         .expect("metadata MUST carry the SHA-1 id");
-    // Post-transcode: outcome.photo_mime is image/png, and the
-    // bytes count is the PNG re-encoding's, not the source JPEG.
     assert_eq!(resp.photo_mime.as_deref(), Some("image/png"));
-    assert_ne!(
-        resp.photo_bytes_len,
-        Some(jpeg_bytes.len()),
-        "post-transcode byte count must reflect the PNG re-encoding, not the source JPEG"
-    );
     assert!(resp.published_avatar_data && resp.published_avatar_metadata);
 
     let metadata = iq_get_to(
@@ -389,7 +382,56 @@ async fn avatar_url_jpeg_is_transcoded_to_png_per_xep_0084_3_2() {
     assert!(!metadata.contains(r#"type="image/jpeg""#));
     assert!(!metadata.contains(r#"url="#));
 
+    // Strongest proof the bytes were transcoded: fetch the published
+    // data item, base64-decode the `<data>` payload, and assert it
+    // starts with the PNG magic-byte signature. A length-comparison
+    // would be brittle for tiny fixtures (a 2×2 PNG and JPEG can
+    // coincidentally match in size); the magic-byte check is robust
+    // because PNG and JPEG signatures are mutually exclusive.
+    let data = iq_get_to(
+        &mut admin,
+        "avatar-data-jpeg-1",
+        &admin_bare,
+        &format!(
+            r#"<pubsub xmlns="{NS_PUBSUB}"><items node="{NS_AVATAR_DATA}"><item id="{sha1}"/></items></pubsub>"#
+        ),
+    )
+    .await;
+    let payload = extract_base64_data_payload(&data)
+        .unwrap_or_else(|| panic!("data response must carry a <data> element: {data}"));
+    let decoded = base64_decode(&payload)
+        .unwrap_or_else(|| panic!("data <data> base64 must decode: {payload}"));
+    assert!(
+        decoded.starts_with(&[0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+        "data node bytes MUST start with the PNG magic-byte signature after transcoding (XEP-0084 §3.2)"
+    );
+    assert_ne!(
+        decoded, jpeg_bytes,
+        "data node bytes MUST NOT be the source JPEG"
+    );
+
     let _ = admin.close().await;
+}
+
+/// Extract the base64 payload between `<data ...>` and `</data>`
+/// from a pubsub items response. Returns `None` if the element is
+/// absent. Whitespace is stripped because XEP-0084 §3.2 SHOULDs not
+/// inserting line feeds but explicitly accepts them.
+fn extract_base64_data_payload(xml: &str) -> Option<String> {
+    let open_idx = xml.find("<data ").or_else(|| xml.find("<data>"))?;
+    let after_open = open_idx + xml[open_idx..].find('>')? + 1;
+    let close_idx = xml[after_open..].find("</data>")? + after_open;
+    Some(
+        xml[after_open..close_idx]
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect(),
+    )
+}
+
+fn base64_decode(s: &str) -> Option<Vec<u8>> {
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD.decode(s).ok()
 }
 
 // ============================================================================

@@ -384,14 +384,23 @@ async fn try_fetch(
     let png_bytes = match declared {
         AllowedMime::Png => buf,
         AllowedMime::Jpeg | AllowedMime::Gif | AllowedMime::Webp => {
-            transcode_to_png(&buf, declared)?
+            // Decode + encode is CPU-bound; offload from the Tokio
+            // executor so a slow image doesn't starve other async
+            // tasks (OIDC publishes also run from a `tokio::spawn`
+            // alongside the chat WebSocket loop).
+            tokio::task::spawn_blocking(move || transcode_to_png(&buf, declared))
+                .await
+                .map_err(|e| FetchError::TranscodeFailed(format!("spawn_blocking join: {e}")))??
         }
     };
 
     // The post-transcode size cap protects D1 storage (issue #363:
     // `pubsub_items.payload_xml TEXT` budget). PNG re-encoding can
     // expand a small lossy JPEG into a larger lossless PNG; reject
-    // those rather than overflowing the row.
+    // those rather than overflowing the row. The pre-transcode
+    // streaming cap (above, around `policy.max_bytes`) is a separate
+    // OOM defense: it keeps the fetch buffer bounded regardless of
+    // what the upstream serves.
     if png_bytes.len() > policy.max_bytes {
         return Err(FetchError::SizeExceeded(policy.max_bytes));
     }
@@ -403,12 +412,21 @@ async fn try_fetch(
     })
 }
 
+/// Cap on decoded image dimensions. A small adversarial JPEG can
+/// declare e.g. 65535×65535 in its SOF0 marker; without an explicit
+/// limit `image::ImageDecoder` would allocate
+/// `width * height * channels` bytes (≈16 GB at 65k²×4) before we
+/// could reject it. 4096×4096 covers any sane avatar — the
+/// XEP-0084 §3.1 SHOULD is 96×96 — and caps decoded RGBA at 64 MB.
+const MAX_IMAGE_DIMENSION: u32 = 4096;
+
 /// Decode `bytes` (declared as `source`) and re-encode as PNG. The
-/// `image` crate's `ImageReader::with_guessed_format` re-sniffs the
-/// header so a magic-byte mismatch caught upstream wouldn't slip
-/// through here either; we still hint the format from the declared
-/// MIME so a corrupted file fails fast with a typed error rather
-/// than triggering a slower "try every format" path.
+/// `image` crate's `ImageReader::set_format` is used to pin the
+/// decoder to the format already verified by the magic-byte check
+/// in `try_fetch`; this avoids the slower "try every codec" path
+/// `with_guessed_format` would take. `image::Limits` bounds the
+/// decoder's allocations so a malformed source can't OOM the
+/// process before the decode completes.
 fn transcode_to_png(bytes: &[u8], source: AllowedMime) -> Result<Vec<u8>, FetchError> {
     let image_format = match source {
         AllowedMime::Png => ImageFormat::Png,
@@ -418,6 +436,10 @@ fn transcode_to_png(bytes: &[u8], source: AllowedMime) -> Result<Vec<u8>, FetchE
     };
     let mut reader = ImageReader::new(Cursor::new(bytes));
     reader.set_format(image_format);
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(MAX_IMAGE_DIMENSION);
+    limits.max_image_height = Some(MAX_IMAGE_DIMENSION);
+    reader.limits(limits);
     let img = reader
         .decode()
         .map_err(|e| FetchError::TranscodeFailed(format!("decode {}: {e}", source.as_mime())))?;
@@ -792,6 +814,39 @@ mod tests {
         assert!(
             matches!(result, Err(FetchError::TranscodeFailed(_))),
             "{result:?}"
+        );
+    }
+
+    #[test]
+    fn transcode_to_png_rejects_oversize_dimensions() {
+        // A PNG IHDR can declare any 32-bit width/height. The
+        // attacker's body is < 100 KB on the wire (passes the
+        // streaming cap) but advertises billions of pixels; without
+        // `image::Limits` the decoder would attempt to allocate
+        // `width * height * channels` bytes and OOM the process.
+        // Construct a PNG with a 65535×65535 IHDR — far above the
+        // 4096×4096 cap — and assert it surfaces as
+        // `TranscodeFailed`, not an allocation panic.
+        let mut png = Vec::new();
+        // PNG signature.
+        png.extend_from_slice(&[0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+        // IHDR chunk: length=13, type="IHDR", data=W(4)+H(4)+depth(1)+color(1)+compr(1)+filter(1)+interl(1).
+        let ihdr_data: [u8; 13] = [
+            0x00, 0x00, 0xff, 0xff, // width = 65535
+            0x00, 0x00, 0xff, 0xff, // height = 65535
+            0x08, 0x06, 0x00, 0x00, 0x00, // 8-bit RGBA, default compression/filter/interlace
+        ];
+        png.extend_from_slice(&13u32.to_be_bytes());
+        png.extend_from_slice(b"IHDR");
+        png.extend_from_slice(&ihdr_data);
+        // Bogus CRC is fine — the decoder rejects via the limit
+        // check before CRC validation.
+        png.extend_from_slice(&[0, 0, 0, 0]);
+
+        let result = transcode_to_png(&png, AllowedMime::Png);
+        assert!(
+            matches!(result, Err(FetchError::TranscodeFailed(_))),
+            "expected TranscodeFailed (limit exceeded), got {result:?}"
         );
     }
 }
