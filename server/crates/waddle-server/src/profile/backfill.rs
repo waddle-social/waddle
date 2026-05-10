@@ -46,7 +46,9 @@ const PERMANENT_FAILURE_COOLDOWN: Duration = Duration::hours(24);
 
 /// Error kinds (from `FetchError::kind()` plus a synthesized
 /// `invalid_url` for parse-failure rows) that count as permanent
-/// for the throttle.
+/// for the throttle. Anything not on this list is treated as
+/// transient — re-attempted every boot until it succeeds or
+/// flips to a permanent kind.
 const PERMANENT_KINDS: &[&str] = &[
     "permanent_4xx",
     "mime_rejected",
@@ -54,6 +56,8 @@ const PERMANENT_KINDS: &[&str] = &[
     "ssrf_blocked",
     "magic_byte_mismatch",
     "invalid_url",
+    "invalid_scheme",
+    "missing_host",
 ];
 
 /// Aggregate counts of a backfill run.
@@ -227,6 +231,12 @@ async fn process_row(
         }
     };
 
+    // Track whether the malformed-URL persist needs to fire later —
+    // we don't want to abort the whole row just because the PHOTO
+    // axis is unhealthy. A user with a bad `avatar_url` claim but a
+    // valid `display_name` should still get their FN backfilled.
+    let mut photo_url_was_invalid = false;
+
     let photo = match (row.avatar_url.as_deref(), provenance) {
         // User self-published; bridge stays out of the PHOTO axis
         // entirely. (Setting via OIDC after the user opted into
@@ -241,18 +251,10 @@ async fn process_row(
                     error = %error,
                     jid = %bare,
                     raw_url = %s,
-                    "Profile backfill: malformed avatar_url; skipping PHOTO and recording invalid_url"
+                    "Profile backfill: malformed avatar_url; skipping PHOTO axis and continuing with NAME"
                 );
-                if let Err(persist_err) =
-                    persist_attempt(db_actor, &row.xmpp_localpart, now, Some("invalid_url")).await
-                {
-                    warn!(
-                        error = %persist_err,
-                        jid = %bare,
-                        "Profile backfill: failed to persist invalid_url state"
-                    );
-                }
-                return ProcessOutcome::Failed;
+                photo_url_was_invalid = true;
+                PhotoIntent::Skip
             }
         },
         // No avatar claim. If OIDC owned the previous avatar this
@@ -274,10 +276,14 @@ async fn process_row(
     };
 
     if matches!(photo, PhotoIntent::Skip) && matches!(name, NameIntent::Skip) {
-        // Nothing to do for this user. Don't count as throttled
-        // (which implies a prior failure); count as user-managed
-        // when the suppression came from the guard, otherwise just
-        // ran-to-completion-with-no-work.
+        // Nothing to do for this user via the publish chain.
+        // Persist the invalid_url state if that's why PHOTO was
+        // skipped, so the throttle prevents re-attempting the bad
+        // URL every boot.
+        if photo_url_was_invalid {
+            let _ = persist_attempt(db_actor, &row.xmpp_localpart, now, Some("invalid_url")).await;
+            return ProcessOutcome::Failed;
+        }
         return if matches!(provenance, AvatarSource::User) {
             ProcessOutcome::UserManagedSkip
         } else {
@@ -288,14 +294,30 @@ async fn process_row(
     let source = ProfileSource::Oidc { photo, name };
     match ensure_pep_profile_published(deps, &bare, source).await {
         Ok(_) => {
-            if let Err(error) = persist_attempt(db_actor, &row.xmpp_localpart, now, None).await {
+            // Honor the "invalid_url" persistent throttle even when
+            // the FN axis succeeds — re-fetching the same bad URL
+            // every boot is the failure mode the throttle exists to
+            // prevent.
+            let kind = if photo_url_was_invalid {
+                Some("invalid_url")
+            } else {
+                None
+            };
+            if let Err(error) = persist_attempt(db_actor, &row.xmpp_localpart, now, kind).await {
                 warn!(
                     error = %error,
                     jid = %bare,
                     "Profile backfill: failed to persist success state (continuing)"
                 );
             }
-            ProcessOutcome::Ran
+            // If only the FN axis ran (PHOTO skipped on invalid
+            // URL), surface that as Failed so the boot-time
+            // counters reflect the half-fail.
+            if photo_url_was_invalid {
+                ProcessOutcome::Failed
+            } else {
+                ProcessOutcome::Ran
+            }
         }
         Err(error) => {
             let kind = match &error {

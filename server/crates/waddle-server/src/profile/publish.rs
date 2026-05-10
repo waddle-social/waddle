@@ -174,6 +174,19 @@ async fn resolve_photo_op(
     match intent {
         PhotoIntent::Skip => Ok(PhotoOp::None),
         PhotoIntent::SetFromUrl(url) => {
+            // User-managed guard also applies to the SET path. The
+            // outer per-(BareJid) lock (acquired in
+            // `ensure_pep_profile_published`) makes this read +
+            // subsequent publish atomic against a concurrent wire
+            // publish that would flip provenance to `'user'`.
+            // Without this branch, OIDC reconcile after a user wire
+            // publish would silently overwrite their avatar.
+            let db_actor = deps.state.deps.app_state.db_pool.global_actor();
+            let source = read_avatar_source(db_actor, jid).await?;
+            if source == AvatarSource::User {
+                outcome.photo_removal_guarded_by_user_managed = true;
+                return Ok(PhotoOp::None);
+            }
             let bytes = fetch_avatar_bytes(&url, &deps.fetch_policy).await?;
             let hash = compute_hash(HashAlgo::Sha1, &bytes.bytes);
             let id = hash.to_hex();
@@ -190,7 +203,6 @@ async fn resolve_photo_op(
             // `Unknown` for users who never wire-published, which
             // would defeat any future "did the user override?" probe
             // that relies on a non-Unknown signal).
-            let db_actor = deps.state.deps.app_state.db_pool.global_actor();
             record_oidc_managed(db_actor, jid).await;
             Ok(PhotoOp::Set(bytes, id))
         }
