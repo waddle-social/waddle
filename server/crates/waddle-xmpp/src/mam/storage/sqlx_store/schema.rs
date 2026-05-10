@@ -191,7 +191,87 @@ pub(super) async fn ensure_sqlite_schema(pool: &SqlitePool) -> Result<(), MamSto
     ensure_sqlite_column(pool, "rich_payload", "TEXT").await?;
     ensure_sqlite_column(pool, "stanza_xml", "TEXT").await?;
     ensure_sqlite_column(pool, "nickname_generation", "INTEGER").await?;
-    ensure_sqlite_column(pool, "parent_thread_id", "TEXT").await
+    ensure_sqlite_column(pool, "parent_thread_id", "TEXT").await?;
+    // Same body-NULL constraint risk as Postgres (see
+    // `ensure_postgres_schema`): SQLite tables created before #228
+    // retained `body TEXT NOT NULL` and `CREATE TABLE IF NOT EXISTS`
+    // is a no-op against them. SQLite does not support
+    // `ALTER COLUMN ... DROP NOT NULL` — relaxing the constraint
+    // requires the 12-step table rebuild. Detect the legacy shape
+    // and rebuild only when needed.
+    ensure_sqlite_body_nullable(pool).await
+}
+
+async fn ensure_sqlite_body_nullable(pool: &SqlitePool) -> Result<(), MamStorageError> {
+    let columns = sqlx::query("PRAGMA table_info(mam_messages)")
+        .fetch_all(pool)
+        .await?;
+    let body_is_not_null = columns.iter().any(|row| {
+        let name: String = match row.try_get("name") {
+            Ok(value) => value,
+            Err(_) => return false,
+        };
+        if name != "body" {
+            return false;
+        }
+        // `PRAGMA table_info` reports `notnull` as an integer (1 = NOT NULL).
+        let notnull: i64 = row.try_get("notnull").unwrap_or(0);
+        notnull != 0
+    });
+    if !body_is_not_null {
+        return Ok(());
+    }
+    // SQLite table rebuild: copy → drop → rename, all inside a
+    // single transaction on a single pool-acquired connection. The
+    // pool-per-statement path (`execute_sqlite_batch`) lets WAL
+    // visibility race so a later `RENAME` connection can still see
+    // the soon-to-be-dropped `mam_messages` table, producing
+    // `SQLITE_ERROR: there is already another table or index with
+    // this name`. The transaction also makes the rebuild atomic —
+    // a crash mid-rebuild leaves the legacy table intact.
+    //
+    // No `PRAGMA foreign_keys=OFF` needed — `mam_messages` has no
+    // foreign keys defined in this codebase.
+    let mut tx = pool.begin().await?;
+    for statement in [
+        r#"CREATE TABLE mam_messages__new (
+            id TEXT PRIMARY KEY,
+            room_jid TEXT NOT NULL,
+            timestamp TEXT NOT NULL,
+            from_jid TEXT NOT NULL,
+            to_jid TEXT NOT NULL,
+            body TEXT,
+            stanza_id TEXT,
+            thread_id TEXT,
+            reply_to_id TEXT,
+            reply_to_jid TEXT,
+            origin_id TEXT,
+            message_type TEXT NOT NULL DEFAULT 'normal',
+            stanza_xml TEXT,
+            rich_payload TEXT,
+            nickname_generation INTEGER,
+            parent_thread_id TEXT,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )"#,
+        r#"INSERT INTO mam_messages__new
+            SELECT id, room_jid, timestamp, from_jid, to_jid, body,
+                   stanza_id, thread_id, reply_to_id, reply_to_jid,
+                   origin_id, message_type, stanza_xml, rich_payload,
+                   nickname_generation, parent_thread_id, created_at
+            FROM mam_messages"#,
+        "DROP TABLE mam_messages",
+        "ALTER TABLE mam_messages__new RENAME TO mam_messages",
+        // Indexes were dropped with the old table; recreate them.
+        "CREATE INDEX IF NOT EXISTS idx_mam_room_timestamp ON mam_messages(room_jid, timestamp DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_mam_room_sender ON mam_messages(room_jid, from_jid, timestamp DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_mam_room_id ON mam_messages(room_jid, id)",
+        "CREATE INDEX IF NOT EXISTS idx_mam_room_thread ON mam_messages(room_jid, thread_id, timestamp DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_mam_room_reply_to ON mam_messages(room_jid, reply_to_id, timestamp DESC)",
+    ] {
+        sqlx::query(statement).execute(&mut *tx).await?;
+    }
+    tx.commit().await?;
+    Ok(())
 }
 
 pub(super) async fn ensure_postgres_schema(pool: &PgPool) -> Result<(), MamStorageError> {
@@ -215,12 +295,34 @@ pub(super) async fn ensure_postgres_schema(pool: &PgPool) -> Result<(), MamStora
     // constraint never gets dropped. Body-less archive writes
     // (XEP-0444 reactions, XEP-0424 retractions, sticker- /
     // shared-file-only stanzas) bind `NULL` and are rejected with
-    // `23502 not_null_violation`, dropping the row entirely.
+    // `23502 not_null_violation`, dropping the row entirely. This
+    // also unblocks the tombstone UPDATE site in `write.rs` that
+    // sets `body = NULL` for XEP-0424 retractions.
     //
-    // `DROP NOT NULL` is idempotent on Postgres — a no-op when the
-    // column is already nullable.
-    sqlx::query("ALTER TABLE mam_messages ALTER COLUMN body DROP NOT NULL")
-        .execute(pool)
-        .await?;
+    // Gate on `information_schema.columns.is_nullable` so once the
+    // constraint is dropped, subsequent restarts skip the ALTER.
+    // `ALTER COLUMN ... DROP NOT NULL` is not a documented no-op on
+    // Postgres — issuing it unconditionally would acquire
+    // `ACCESS EXCLUSIVE` on this hot write table on every replica
+    // boot, serializing rolling-deploy startups against the live
+    // archive INSERT path. Mirrors the gating pattern used in
+    // `pending_delivery/database/schema.rs` (#455).
+    let is_nullable: Option<String> = sqlx::query_scalar(
+        "SELECT is_nullable \
+         FROM information_schema.columns \
+         WHERE table_schema = current_schema() \
+           AND table_name = 'mam_messages' \
+           AND column_name = 'body'",
+    )
+    .fetch_optional(pool)
+    .await?;
+    let needs_drop = is_nullable
+        .as_deref()
+        .is_some_and(|v| v.eq_ignore_ascii_case("NO"));
+    if needs_drop {
+        sqlx::query("ALTER TABLE mam_messages ALTER COLUMN body DROP NOT NULL")
+            .execute(pool)
+            .await?;
+    }
     Ok(())
 }

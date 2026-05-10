@@ -273,13 +273,18 @@ mod tests {
         );
     }
 
-    /// Production wire shape emitted by `waddle-xmpp-client::messaging::
-    /// builders::build_reaction_message` (the WASM client's `send_reaction`
-    /// path). Reactions stopped landing in production MAM on 2026-05-04;
-    /// this test pins down the wire shape → `is_archivable` round-trip
-    /// so any regression in the parse-side detection (xmpp_parsers
-    /// upgrades, payload field renames, namespace drift) trips here
-    /// before it ships.
+    /// Parse-side wire-shape pin for the reaction stanza emitted by
+    /// `waddle-xmpp-client::messaging::builders::build_reaction_message`
+    /// (the WASM client's `send_reaction` path). Catches detection-side
+    /// regressions: xmpp_parsers upgrades, payload field renames,
+    /// namespace drift.
+    ///
+    /// NOTE: this test does NOT cover the actual storage-write path
+    /// where the production "reactions vanish after refresh" incident
+    /// (#457) lived — that bug was a `NOT NULL` constraint mismatch
+    /// at the SQL boundary, not a parse-side detection failure. See
+    /// `mam::storage::tests::reaction_lands_after_legacy_body_not_null_schema_migrated`
+    /// for the SQL-write regression coverage that incident needed.
     #[test]
     fn xep_0444_groupchat_reaction_wire_shape_is_archivable() {
         let xml = r#"<message xmlns='jabber:client' to='room@muc.example.com' type='groupchat' id='reaction-uuid-1'><reactions xmlns='urn:xmpp:reactions:0' id='target-sid'><reaction>❤️</reaction></reactions><store xmlns='urn:xmpp:hints'/></message>"#;
