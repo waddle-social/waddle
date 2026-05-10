@@ -792,6 +792,143 @@ async fn reaction_round_trips_through_persistent_sqlite() {
     }
 }
 
+/// Regression: pre-#228 deployments created `mam_messages` with
+/// `body TEXT NOT NULL`. `CREATE TABLE IF NOT EXISTS` is a no-op
+/// against the existing table, so the constraint never gets dropped
+/// even after the schema source was relaxed in #228. Every body-less
+/// archive write (XEP-0444 reactions, XEP-0424 retractions, sticker-
+/// / shared-file-only stanzas) was then rejected by the engine with
+/// `23502 not_null_violation` (Postgres) or
+/// `NOT NULL constraint failed: mam_messages.body` (SQLite), dropping
+/// the row entirely.
+///
+/// Production manifested this as "MUC reactions vanish after refresh"
+/// — live reactions reflected to occupants normally, then never
+/// appeared in MAM replay because the archive write was dropped.
+/// This test pins the migration round-trip end-to-end:
+///
+/// 1. Pre-populate a SQLite file with the *legacy* `body TEXT NOT
+///    NULL` schema, mirroring production drift.
+/// 2. Open via `SqlxMamStorage` — `ensure_sqlite_schema` detects the
+///    legacy shape via `PRAGMA table_info` and runs the 12-step table
+///    rebuild that relaxes `body`.
+/// 3. Write a body-less reaction `ArchivedMessage`. Pre-fix this
+///    would fail with `NOT NULL constraint failed`.
+/// 4. Query and assert the row lands with the reactions rich payload
+///    intact.
+#[tokio::test(flavor = "multi_thread")]
+async fn reaction_lands_after_legacy_body_not_null_schema_migrated() {
+    use sqlx::sqlite::SqlitePoolOptions;
+
+    let artifacts = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/test-artifacts");
+    std::fs::create_dir_all(&artifacts).expect("artifacts dir");
+    let path = artifacts.join(format!("mam-legacy-body-{}.db", uuid::Uuid::new_v4()));
+    let database_url = format!("sqlite://{}?mode=rwc", path.display());
+
+    // 1. Pre-populate the file with the legacy `body TEXT NOT NULL`
+    //    schema. Mirror exactly what a pre-#228 deploy looked like —
+    //    no rich_payload column, no stanza_xml column, etc.
+    {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect(&database_url)
+            .await
+            .expect("open raw pool");
+        sqlx::query(
+            r#"
+            CREATE TABLE mam_messages (
+                id TEXT PRIMARY KEY,
+                room_jid TEXT NOT NULL,
+                timestamp TEXT NOT NULL,
+                from_jid TEXT NOT NULL,
+                to_jid TEXT NOT NULL,
+                body TEXT NOT NULL,
+                stanza_id TEXT,
+                thread_id TEXT,
+                reply_to_id TEXT,
+                reply_to_jid TEXT,
+                origin_id TEXT,
+                message_type TEXT NOT NULL DEFAULT 'chat',
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .expect("seed legacy schema");
+        pool.close().await;
+    }
+
+    // 2. Open via SqlxMamStorage — schema migration runs.
+    let archive = bare("room@conference.example.com");
+    let archive_jid = jid("room@conference.example.com");
+    let storage = SqlxMamStorage::open(&database_url)
+        .await
+        .expect("storage open after legacy seed");
+
+    // 3. Write a body-less reaction. Pre-fix this would fail with
+    //    `NOT NULL constraint failed: mam_messages.body`.
+    let target_id = waddle_xmpp_core::mam::RichMessageId::new("room-stanza-original")
+        .expect("non-empty target id");
+    let thumbs_up = waddle_xmpp_core::mam::RichText::new("👍").expect("non-empty emoji literal");
+    let msg = ArchivedMessage {
+        body: None,
+        stanza_id: Some(waddle_xmpp_core::xep0359::StanzaId::new(
+            "room-stanza-reaction",
+            archive_jid.clone(),
+        )),
+        message_type: xmpp_parsers::message::MessageType::Groupchat,
+        rich: Some(waddle_xmpp_core::mam::ArchivedRichMessage {
+            payload: Some(waddle_xmpp_core::mam::ArchivedRichPayload::Reactions(
+                waddle_xmpp_core::mam::ArchivedReactionSet {
+                    target_id: target_id.clone(),
+                    emojis: vec![thumbs_up.clone()],
+                },
+            )),
+            ..Default::default()
+        }),
+        ..ArchivedMessage::for_test(archive_alice(&archive), archive_jid.clone())
+    };
+    storage
+        .store_message(&archive, &msg)
+        .await
+        .expect("body-less reaction lands after legacy migration");
+
+    // 4. Confirm the row is there with the reaction payload intact.
+    let result = storage
+        .query_messages(&archive, &MamQuery::default())
+        .await
+        .expect("query");
+    assert_eq!(result.messages.len(), 1);
+    let archived = &result.messages[0];
+    assert!(
+        archived.body.is_none(),
+        "reaction row must round-trip with NULL body"
+    );
+    let rich = archived
+        .rich
+        .as_ref()
+        .expect("rich payload survives the legacy migration");
+    match rich.payload.as_ref() {
+        Some(waddle_xmpp_core::mam::ArchivedRichPayload::Reactions(set)) => {
+            assert_eq!(set.target_id.as_str(), "room-stanza-original");
+            assert_eq!(
+                set.emojis.iter().map(|e| e.as_str()).collect::<Vec<_>>(),
+                vec!["👍"]
+            );
+        }
+        other => panic!("expected Reactions rich payload, got {other:?}"),
+    }
+
+    for cleanup in [
+        path.clone(),
+        PathBuf::from(format!("{}-shm", path.display())),
+        PathBuf::from(format!("{}-wal", path.display())),
+    ] {
+        let _ = std::fs::remove_file(cleanup);
+    }
+}
+
 // XEP-0059 §2.5: an empty <before/> element requests the last page of
 // results. Regression test for a bug where `before_id = Some("")` was
 // collapsed to "no pagination" and the query returned the *first* page

@@ -272,6 +272,48 @@ mod tests {
         );
     }
 
+    /// Parse-side wire-shape pin for the reaction stanza emitted by
+    /// `waddle-xmpp-client::messaging::builders::build_reaction_message`
+    /// (the WASM client's `send_reaction` path). Catches detection-side
+    /// regressions: xmpp_parsers upgrades, payload field renames,
+    /// namespace drift.
+    ///
+    /// NOTE: this test does NOT cover the actual storage-write path
+    /// where the production "reactions vanish after refresh" incident
+    /// (#457) lived — that bug was a `NOT NULL` constraint mismatch
+    /// at the SQL boundary, not a parse-side detection failure. See
+    /// `mam::storage::tests::reaction_lands_after_legacy_body_not_null_schema_migrated`
+    /// for the SQL-write regression coverage that incident needed.
+    #[test]
+    fn xep_0444_groupchat_reaction_wire_shape_is_archivable() {
+        // Build the wire shape via typed XEP-0444 + XEP-0334 builders
+        // (no raw XML — AGENTS.md XML-generation hard rule), then
+        // round-trip through the `Message::try_from(Element)` parse
+        // boundary that the test claims to cover. This is structurally
+        // identical to the bytes `waddle-xmpp-client::messaging::
+        // builders::build_reaction_message` puts on the wire for the
+        // WASM client's `send_reaction` path.
+        let stanza = Element::builder("message", CLIENT_STANZA_NS)
+            .attr("to", "room@muc.example.com")
+            .attr("type", "groupchat")
+            .attr("id", "reaction-uuid-1")
+            .append(crate::xep::xep0444::build_reactions_element(
+                "target-sid",
+                &["❤️"],
+            ))
+            .append(Element::builder("store", crate::xep::xep0334::NS_HINTS).build())
+            .build();
+        let msg = Message::try_from(stanza).expect("parse message");
+        assert!(
+            crate::xep::is_reaction_message(&msg),
+            "is_reaction_message must detect the <reactions/> payload"
+        );
+        assert!(
+            is_archivable(&msg),
+            "is_archivable must accept the bodyless reaction stanza"
+        );
+    }
+
     #[test]
     fn xep_0313_skips_malformed_bodyless_forum_metadata() {
         let room = bare("team@conf.example.com");
