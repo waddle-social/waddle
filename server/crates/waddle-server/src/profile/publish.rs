@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use jid::BareJid;
 use tracing::{debug, info};
-use waddle_xmpp::pubsub::{NodeConfig, PubSubItem, PubSubStorage};
+use waddle_xmpp::pubsub::{AccessModel, NodeConfig, PubSubItem};
 use waddle_xmpp::xep::xep0084::{
     build_avatar_data, build_avatar_metadata, AvatarInfo, NODE_AVATAR_DATA, NODE_AVATAR_METADATA,
 };
@@ -24,32 +24,46 @@ use xmpp_parsers::minidom::Element;
 use super::fetch::{fetch_avatar_bytes, AvatarBytes, FetchPolicy};
 use super::source::{ProfileSource, ProfileSyncError};
 use super::vcard_rmw::{apply_vcard4_update, apply_vcard_temp_update, PhotoUpdate, Vcard4PhotoRef};
+use crate::server::routes::websocket::handlers::pubsub_fanout::{self, FanOutRequest};
+use crate::server::routes::websocket::WebSocketState;
 use crate::vcard::VCardStore;
 
 /// XEP-0292 §4.1.1: a vCard4 PEP node holds a single item with id
 /// `current`.
 const VCARD4_ITEM_ID: &str = "current";
 
-/// `NodeConfig` for the OIDC-managed avatar/vCard4 PEP nodes:
+/// `NodeConfig` for the OIDC-managed avatar/vCard4 PEP nodes.
 ///
-/// - `AccessModel::Open` so any peer (not just roster contacts) can
-///   resolve a user's avatar — typical web-app expectation.
-/// - `max_items = 1` so a new avatar/vCard publish evicts the
+/// Built off `pep_default()` so we inherit the canonical PEP shape
+/// (e.g. `SendLastPublishedItem::OnSubAndPresence`, payload
+/// delivery, retract notifications) and override only the fields
+/// where the OIDC-managed surface intentionally differs:
+///
+/// - `access_model = Open` — any peer (not just roster contacts)
+///   can resolve a user's avatar; matches the typical web-app
+///   expectation that profile photos are public.
+/// - `max_items = 1` — a new avatar/vCard publish evicts the
 ///   previous item rather than accumulating one row per unique
-///   payload. XEP-0084 metadata + XEP-0292 vCard4 are last-writer-
-///   wins; avatar data is keyed on its SHA-1 so the old data row
-///   would never be re-fetched anyway, but evicting it removes a
-///   storage-bloat / past-avatar-leak surface.
+///   payload. XEP-0084 metadata + XEP-0292 vCard4 are
+///   last-writer-wins; avatar data is keyed on its SHA-1 so the
+///   old data row would never be re-fetched anyway, but evicting
+///   it removes a storage-bloat / past-avatar-leak surface.
 fn oidc_pep_node_config() -> NodeConfig {
     NodeConfig {
+        access_model: AccessModel::Open,
         max_items: 1,
-        ..NodeConfig::public()
+        ..NodeConfig::pep_default()
     }
 }
 
 /// Dependencies passed to the publish helper.
 pub struct ProfilePublishDeps {
-    pub pubsub_storage: Arc<dyn PubSubStorage>,
+    /// Shared WebSocket state — needed for both `pubsub_storage`
+    /// (writes) and `pubsub_fanout::fan_out_publish` (XEP-0163 §3
+    /// notifications to roster + multi-resource owner). Without
+    /// fan-out, OIDC publishes silently update storage and
+    /// subscribers never see `pubsub#event` notifications.
+    pub state: Arc<WebSocketState>,
     pub vcard_store: VCardStore,
     pub fetch_policy: FetchPolicy,
 }
@@ -97,9 +111,9 @@ pub async fn ensure_pep_profile_published(
         outcome.photo_mime = Some(bytes.mime.clone());
         outcome.photo_bytes_len = Some(bytes.bytes.len());
 
-        publish_avatar_data(&deps.pubsub_storage, jid, &id, &bytes).await?;
+        publish_avatar_data(&deps.state, jid, &id, &bytes).await?;
         outcome.published_avatar_data = true;
-        publish_avatar_metadata(&deps.pubsub_storage, jid, &id, &bytes).await?;
+        publish_avatar_metadata(&deps.state, jid, &id, &bytes).await?;
         outcome.published_avatar_metadata = true;
         Some(bytes)
     } else {
@@ -137,7 +151,7 @@ pub async fn ensure_pep_profile_published(
             vcard4_photo_ref,
             display_name.as_deref(),
         );
-        publish_vcard4(&deps.pubsub_storage, jid, &updated_vcard4).await?;
+        publish_vcard4(&deps.state, jid, &updated_vcard4).await?;
         outcome.mirrored_vcard4 = true;
     }
 
@@ -152,14 +166,14 @@ pub async fn ensure_pep_profile_published(
 }
 
 async fn publish_avatar_data(
-    storage: &Arc<dyn PubSubStorage>,
+    state: &Arc<WebSocketState>,
     jid: &BareJid,
     item_id: &str,
     bytes: &AvatarBytes,
 ) -> Result<(), ProfileSyncError> {
     use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 
-    ensure_node_with_oidc_config(storage, jid, NODE_AVATAR_DATA).await?;
+    ensure_node_with_oidc_config(state, jid, NODE_AVATAR_DATA).await?;
 
     let payload = build_avatar_data(&BASE64.encode(&bytes.bytes));
     let item = PubSubItem {
@@ -167,19 +181,16 @@ async fn publish_avatar_data(
         publisher: Some(jid.clone()),
         payload: Some(payload),
     };
-    storage
-        .publish_item(jid, NODE_AVATAR_DATA, &item, Some(jid), false)
-        .await?;
-    Ok(())
+    publish_and_fan_out(state, jid, NODE_AVATAR_DATA, &item, item_id).await
 }
 
 async fn publish_avatar_metadata(
-    storage: &Arc<dyn PubSubStorage>,
+    state: &Arc<WebSocketState>,
     jid: &BareJid,
     item_id: &str,
     bytes: &AvatarBytes,
 ) -> Result<(), ProfileSyncError> {
-    ensure_node_with_oidc_config(storage, jid, NODE_AVATAR_METADATA).await?;
+    ensure_node_with_oidc_config(state, jid, NODE_AVATAR_METADATA).await?;
 
     let info = AvatarInfo {
         id: item_id.to_string(),
@@ -195,27 +206,62 @@ async fn publish_avatar_metadata(
         publisher: Some(jid.clone()),
         payload: Some(payload),
     };
-    storage
-        .publish_item(jid, NODE_AVATAR_METADATA, &item, Some(jid), false)
-        .await?;
-    Ok(())
+    publish_and_fan_out(state, jid, NODE_AVATAR_METADATA, &item, item_id).await
 }
 
 async fn publish_vcard4(
-    storage: &Arc<dyn PubSubStorage>,
+    state: &Arc<WebSocketState>,
     jid: &BareJid,
     vcard: &Element,
 ) -> Result<(), ProfileSyncError> {
-    ensure_node_with_oidc_config(storage, jid, PEP_NODE_VCARD4).await?;
+    ensure_node_with_oidc_config(state, jid, PEP_NODE_VCARD4).await?;
 
     let item = PubSubItem {
         id: Some(VCARD4_ITEM_ID.to_string()),
         publisher: Some(jid.clone()),
         payload: Some(vcard.clone()),
     };
-    storage
-        .publish_item(jid, PEP_NODE_VCARD4, &item, Some(jid), false)
+    publish_and_fan_out(state, jid, PEP_NODE_VCARD4, &item, VCARD4_ITEM_ID).await
+}
+
+/// Persist the item via `PubSubStorage::publish_item` AND drive the
+/// XEP-0163 §3 fan-out so subscribers (roster contacts with
+/// `+notify`, multi-resource owner) actually receive the
+/// `pubsub#event` notification. Without this second call, OIDC
+/// avatar/vCard publishes silently update storage and peers never
+/// know the avatar changed.
+async fn publish_and_fan_out(
+    state: &Arc<WebSocketState>,
+    jid: &BareJid,
+    node: &str,
+    item: &PubSubItem,
+    item_id: &str,
+) -> Result<(), ProfileSyncError> {
+    state
+        .deps
+        .protocol
+        .pubsub_storage
+        .publish_item(jid, node, item, Some(jid), false)
         .await?;
+
+    // Owner-self echo is suppressed by `publisher_full = None` plus
+    // the §3.4 owner-self pass logic in `fan_out_publish`: there's no
+    // originating XMPP resource to filter against, so all owner
+    // resources currently online with `+notify` get the event.
+    pubsub_fanout::fan_out_publish(
+        state,
+        FanOutRequest {
+            owner: jid,
+            node,
+            published_item: item,
+            item_id,
+            publisher: Some(jid),
+            publisher_full: None,
+            is_pep: true,
+        },
+    )
+    .await;
+
     Ok(())
 }
 
@@ -231,6 +277,9 @@ async fn read_existing_vcard4(
     jid: &BareJid,
 ) -> Result<Option<Element>, ProfileSyncError> {
     let items = deps
+        .state
+        .deps
+        .protocol
         .pubsub_storage
         .get_items(jid, PEP_NODE_VCARD4, Some(1), &[VCARD4_ITEM_ID.to_string()])
         .await?;
@@ -262,10 +311,11 @@ fn vcard4_photo_pep_uri(jid: &BareJid, sha1_hex: &str) -> String {
 /// between the two would have been denied by `pep_default()`'s
 /// Presence access.
 async fn ensure_node_with_oidc_config(
-    storage: &Arc<dyn PubSubStorage>,
+    state: &Arc<WebSocketState>,
     jid: &BareJid,
     node: &str,
 ) -> Result<(), ProfileSyncError> {
+    let storage = &state.deps.protocol.pubsub_storage;
     let _ = storage.get_or_create_node(jid, node).await?;
     storage
         .update_node_config(jid, node, &oidc_pep_node_config())

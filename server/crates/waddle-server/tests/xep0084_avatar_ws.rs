@@ -212,13 +212,11 @@ async fn avatar_url_publishes_data_and_metadata_with_real_sha1() {
         .mount(&mock)
         .await;
 
-    // wiremock binds to 127.0.0.1; the test endpoint's FetchPolicy
-    // sets block_non_global_ips=false specifically so the loopback
-    // is reachable. We need https in fetch policy though — wiremock
-    // is http. Update fetch_policy in the test endpoint to also accept
-    // http when the SSRF block is off, or have wiremock serve TLS.
-    //
-    // For now: the test endpoint must accept http when block_non_global_ips=false.
+    // wiremock serves over plain HTTP on 127.0.0.1. The test seam's
+    // FetchPolicy sets `block_non_global_ips=false` and
+    // `allow_http_for_tests=true` so the loopback fixture is
+    // reachable; production callers (the OIDC bridge) build a
+    // `FetchPolicy::default()` instead.
     let avatar_url = format!("{}/avatar.png", mock.uri());
 
     let resp = invoke_profile_publish(
@@ -407,9 +405,10 @@ async fn non_png_content_type_is_rejected() {
         Some(server.test_profile_publish_token()),
     )
     .await;
-    assert!(
-        !status.is_success(),
-        "non-PNG MIME must be rejected; got {status} {body}"
+    assert_eq!(
+        status,
+        reqwest::StatusCode::UNPROCESSABLE_ENTITY,
+        "non-PNG MIME is a fetch-policy reject (422), got {status} {body}"
     );
 }
 
@@ -451,9 +450,10 @@ async fn png_content_type_with_non_png_bytes_is_rejected() {
         Some(server.test_profile_publish_token()),
     )
     .await;
-    assert!(
-        !status.is_success(),
-        "magic-byte mismatch must be rejected; got {status} {body}"
+    assert_eq!(
+        status,
+        reqwest::StatusCode::UNPROCESSABLE_ENTITY,
+        "magic-byte mismatch is a fetch-policy reject (422), got {status} {body}"
     );
 }
 

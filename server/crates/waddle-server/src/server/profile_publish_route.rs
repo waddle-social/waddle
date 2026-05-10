@@ -26,8 +26,15 @@
 //!
 //! `displayName` and `avatarUrl` are independently optional. Empty
 //! object is a no-op. Returns 200 with the typed
-//! `ProfilePublishOutcome` JSON on success, 4xx with a typed error
-//! string on failure.
+//! `ProfilePublishOutcome` JSON on success. Failure status is
+//! mapped from the typed [`ProfileSyncError`] kind:
+//!
+//! - 400 — invalid request (bad JID, malformed `avatar_url`)
+//! - 401 — missing or wrong `X-Waddle-Test-Token`
+//! - 403 — JID outside the test seam allowlist
+//! - 422 — fetch policy rejected the bytes (scheme/MIME/size/SSRF/magic)
+//! - 502 — upstream HTTP error / network / DNS / vCard storage
+//! - 500 — database actor unavailable
 
 use std::sync::Arc;
 
@@ -41,7 +48,8 @@ use tracing::warn;
 use url::Url;
 
 use crate::profile::{
-    ensure_pep_profile_published, FetchPolicy, ProfilePublishDeps, ProfileSource,
+    ensure_pep_profile_published, FetchError, FetchPolicy, ProfilePublishDeps, ProfileSource,
+    ProfileSyncError,
 };
 use crate::server::routes::websocket::WebSocketState;
 
@@ -151,12 +159,16 @@ async fn handler(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("db: {e}")))?;
     let deps = ProfilePublishDeps {
-        pubsub_storage: Arc::clone(&state.websocket.deps.protocol.pubsub_storage),
+        state: Arc::clone(&state.websocket),
         vcard_store: crate::vcard::VCardStore::new(db.into()),
         // Tests serve avatars from wiremock on 127.0.0.1 over plain
-        // HTTP; relax the loopback block AND the HTTPS requirement.
-        // Production callers (OIDC bridge) build a
-        // FetchPolicy::default() instead.
+        // HTTP. We relax the loopback block AND the HTTPS requirement
+        // so the test fixture is reachable; production callers (the
+        // OIDC bridge) build a `FetchPolicy::default()` instead. The
+        // route is gated on a per-process auth token + JID allowlist
+        // (see [`TestSeamAuth`]), so even with the SSRF guard relaxed
+        // the route can only be invoked against the configured
+        // fixed-account JIDs by code that already holds the token.
         fetch_policy: FetchPolicy {
             block_non_global_ips: false,
             allow_http_for_tests: true,
@@ -174,11 +186,9 @@ async fn handler(
     )
     .await
     .map_err(|e| {
-        warn!(error = %e, "test profile-publish helper failed");
-        (
-            StatusCode::BAD_GATEWAY,
-            "profile publish chain failed".to_string(),
-        )
+        let status = profile_sync_error_status(&e);
+        warn!(error = %e, status = %status, "test profile-publish helper failed");
+        (status, "profile publish chain failed".to_string())
     })?;
 
     Ok(Json(ProfilePublishResponse {
@@ -190,4 +200,26 @@ async fn handler(
         mirrored_vcard_temp: outcome.mirrored_vcard_temp,
         mirrored_vcard4: outcome.mirrored_vcard4,
     }))
+}
+
+/// Map a typed [`ProfileSyncError`] to an HTTP status. Distinguishes
+/// "the OIDC payload is bad / the upstream rejected the bytes"
+/// (4xx) from "we couldn't reach upstream / our storage is down"
+/// (5xx) so wire tests can assert the failure mode.
+fn profile_sync_error_status(error: &ProfileSyncError) -> StatusCode {
+    match error {
+        ProfileSyncError::Fetch(FetchError::InvalidScheme(_) | FetchError::MissingHost) => {
+            StatusCode::BAD_REQUEST
+        }
+        ProfileSyncError::Fetch(
+            FetchError::SsrfBlocked(_)
+            | FetchError::MimeRejected(_)
+            | FetchError::MagicByteMismatch
+            | FetchError::SizeExceeded(_),
+        ) => StatusCode::UNPROCESSABLE_ENTITY,
+        ProfileSyncError::Fetch(_) => StatusCode::BAD_GATEWAY,
+        ProfileSyncError::PubSub(_)
+        | ProfileSyncError::VCardTemp(_)
+        | ProfileSyncError::VCard4Malformed(_) => StatusCode::BAD_GATEWAY,
+    }
 }

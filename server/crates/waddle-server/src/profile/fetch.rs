@@ -328,6 +328,11 @@ fn is_global_ipv6(ip: Ipv6Addr) -> bool {
         return is_global_ipv4(v4);
     }
     let segs = ip.segments();
+    // Site-local fec0::/10 (RFC 3879 — deprecated, but still routed
+    // on some legacy stacks; defense in depth).
+    if (segs[0] & 0xffc0) == 0xfec0 {
+        return false;
+    }
     // Documentation 2001:db8::/32 (RFC 3849).
     if segs[0] == 0x2001 && segs[1] == 0x0db8 {
         return false;
@@ -463,6 +468,20 @@ mod tests {
         let url: Url = "https://[fc00::1]/avatar.png".parse().unwrap();
         let result = futures::executor::block_on(fetch_avatar_bytes(&url, &policy));
         assert!(matches!(result, Err(FetchError::SsrfBlocked(_))));
+    }
+
+    #[test]
+    fn rejects_ipv6_site_local() {
+        let policy = FetchPolicy::default();
+        // fec0::/10 — RFC 3879 deprecated site-local, still routed on
+        // some legacy IPv6 stacks. None of the std `is_*` predicates
+        // catch it.
+        let url: Url = "https://[fec0::1]/avatar.png".parse().unwrap();
+        let result = futures::executor::block_on(fetch_avatar_bytes(&url, &policy));
+        assert!(
+            matches!(result, Err(FetchError::SsrfBlocked(_))),
+            "{result:?}"
+        );
     }
 
     #[test]

@@ -133,7 +133,7 @@ pub(crate) async fn create_router(
     // `WebSocketState` (and its `pubsub_storage`) exists. The hook
     // captures cheap clones of the deps and runs the publish chain
     // in a `tokio::spawn` from `auth/callback.rs`.
-    install_profile_publish_hook(&auth_state, websocket_state.clone(), state.clone());
+    install_profile_publish_hook(&auth_state, websocket_state.clone());
 
     spawn_sm_expiry_janitor(&websocket_state);
     spawn_pending_delivery_claim_janitor(&websocket_state);
@@ -386,18 +386,21 @@ fn build_test_profile_publish_auth(
 fn install_profile_publish_hook(
     auth_state: &Arc<AuthState>,
     websocket_state: Arc<routes::websocket::WebSocketState>,
-    app_state: Arc<AppState>,
 ) {
     use crate::profile::{
         ensure_pep_profile_published, FetchPolicy, ProfilePublishDeps, ProfileSource,
     };
 
-    let pubsub_storage = Arc::clone(&websocket_state.deps.protocol.pubsub_storage);
-    let db_actor = app_state.db_pool.global_actor().clone();
+    let db_actor = websocket_state
+        .deps
+        .app_state
+        .db_pool
+        .global_actor()
+        .clone();
 
     let hook: super::routes::auth::ProfilePublishHook =
         std::sync::Arc::new(move |jid: jid::BareJid, source: ProfileSource| {
-            let pubsub_storage = Arc::clone(&pubsub_storage);
+            let websocket_state = Arc::clone(&websocket_state);
             let db_actor = db_actor.clone();
             // Carry the JID into the spawned task's tracing span so a
             // failure logged inside the future is correlated to the
@@ -415,7 +418,7 @@ fn install_profile_publish_hook(
                     }
                 };
                 let deps = ProfilePublishDeps {
-                    pubsub_storage,
+                    state: websocket_state,
                     vcard_store: crate::vcard::VCardStore::new(db.into()),
                     fetch_policy: FetchPolicy::default(),
                 };
