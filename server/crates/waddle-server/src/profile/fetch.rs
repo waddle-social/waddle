@@ -196,17 +196,20 @@ impl FetchError {
     }
 }
 
-/// Stable, build-time digest of the fetch policy that influences
-/// which inputs surface as which `FetchError::kind()`. The startup
+/// Stable, build-time digest of the fetch policy that gates
+/// which avatar bytes are accepted vs. rejected. The startup
 /// backfill persists this digest alongside each per-user attempt
 /// state; on a future boot, if the persisted digest no longer
-/// matches the current build's digest, throttle rows whose error
+/// matches the current build's digest, rows whose throttle kind
 /// is in [`backfill::POLICY_DEPENDENT_KINDS`] are treated as
 /// not-yet-attempted so the backfill retries them immediately.
-/// Upstream-bound errors (`permanent_4xx`, `invalid_url`,
+/// Upstream-bound throttle kinds (`permanent_4xx`, `invalid_url`,
 /// `invalid_scheme`, `missing_host`) honour the 24h cool-down
 /// regardless of digest because nothing about a deploy changes
-/// those conditions.
+/// those conditions. Note that `invalid_url` is synthesized by
+/// the backfill itself on `Url::parse` failures, while the other
+/// three originate from `FetchError::kind()`; the throttle treats
+/// them uniformly.
 ///
 /// The digest is derived from the values that gate the fetch path:
 /// the size cap, the decode-dimension cap, and the MIME allowlist.
@@ -247,7 +250,13 @@ fn compute_fetch_policy_digest(
     // even if the new build happens to omit a previously-included
     // input.
     hasher.update(b"v1\n");
-    hasher.update(max_bytes.to_le_bytes());
+    // Width-fix `usize` to `u64` before hashing so the digest is
+    // identical across 32-bit and 64-bit targets — otherwise a
+    // cross-arch redeploy (or even a debug-vs-release build with
+    // different target tuples) would shift the digest and trigger
+    // a spurious throttle invalidation for every policy-dependent
+    // user. `MAX_BYTES` is 100 KB; never overflows `u64`.
+    hasher.update((max_bytes as u64).to_le_bytes());
     hasher.update(max_image_dimension.to_le_bytes());
     for mime in allowed {
         hasher.update(mime.as_mime().as_bytes());
