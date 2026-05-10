@@ -1307,3 +1307,77 @@ async fn xep0160_pending_delivery_survives_server_restart() {
     };
     assert_eq!(body, Some("across-restart"));
 }
+
+/// Regression: `original_receipt_at` stores `timestamp_millis()` (i64
+/// ms-since-epoch). On Postgres, the column MUST be `BIGINT` — using
+/// `INTEGER` (i32, max ~2.1B) overflowed on every write past
+/// 2001-09-09, breaking XEP-0160 offline DM delivery on SM session
+/// resume / detach promotion (production logs spammed
+/// `numeric_value_out_of_range`).
+///
+/// CI runs only against SQLite (where `INTEGER` is dynamic-width), so
+/// the bug slipped past the existing SQLite-backed coverage. This test
+/// opts in to a real Postgres via `WADDLE_TEST_POSTGRES_URL` and proves
+/// the round-trip with a 2026-era millisecond value that does not fit
+/// in i32.
+#[tokio::test]
+async fn db_storage_postgres_handles_i32_overflow_receipt_ms() {
+    let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+        eprintln!(
+            "skipping: WADDLE_TEST_POSTGRES_URL not set \
+             (postgres-backed regression for pending_delivery BIGINT)"
+        );
+        return;
+    };
+
+    let storage = DatabasePendingDeliveryStorage::open(Some(&database_url), QuotaPolicy::Unlimited)
+        .await
+        .expect("open postgres storage");
+
+    // 2026-era ms timestamp — comfortably past i32::MAX (~2.147B). A
+    // pre-fix `INTEGER` column would reject this with
+    // `22003 numeric_value_out_of_range`.
+    let receipt_ms: i64 = 1_778_000_000_000;
+    assert!(
+        receipt_ms > i64::from(i32::MAX),
+        "test value must exceed i32::MAX to exercise the regression"
+    );
+    let receipt = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(receipt_ms)
+        .expect("valid timestamp");
+
+    // Unique recipient per run so concurrent test runs against the
+    // same Postgres do not collide on the archived-id unique index.
+    let recipient_local = format!("alice-{}", uuid::Uuid::new_v4());
+    let recipient = bare(&format!("{recipient_local}@example.com"));
+
+    let row_id = PendingRowId::fresh();
+    let row = PendingRow {
+        id: row_id.clone(),
+        recipient: recipient.clone(),
+        original_receipt_at: receipt,
+        payload: PendingPayload::Archived(StanzaId::new(
+            uuid::Uuid::new_v4().to_string(),
+            jid::Jid::from(recipient.clone()),
+        )),
+        flushed_in_session: None,
+        outbound_sequence: None,
+    };
+    assert_eq!(
+        storage.insert(row).await.expect("insert"),
+        InsertOutcome::Inserted,
+        "BIGINT column must accept i64 ms past i32::MAX"
+    );
+
+    let rows = storage.list(&recipient).await.expect("list");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].original_receipt_at, receipt);
+
+    // Clean up by the exact row id we just inserted so repeated runs
+    // are idempotent without touching unrelated rows. `delete_older_than`
+    // is a global cutoff across all recipients — using it for test
+    // cleanup against a `WADDLE_TEST_POSTGRES_URL` pointed at a shared
+    // dev/CI database could wipe production-shaped test fixtures from
+    // other suites.
+    let deleted = storage.delete_row(&row_id).await.expect("cleanup");
+    assert_eq!(deleted, 1, "test row must be deleted by id");
+}
