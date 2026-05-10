@@ -196,6 +196,78 @@ impl FetchError {
     }
 }
 
+/// Stable, build-time digest of the fetch policy that gates
+/// which avatar bytes are accepted vs. rejected. The startup
+/// backfill persists this digest alongside each per-user attempt
+/// state; on a future boot, if the persisted digest no longer
+/// matches the current build's digest, rows whose throttle kind
+/// is in [`backfill::POLICY_DEPENDENT_KINDS`] are treated as
+/// not-yet-attempted so the backfill retries them immediately.
+/// Upstream-bound throttle kinds (`permanent_4xx`, `invalid_url`,
+/// `invalid_scheme`, `missing_host`) honour the 24h cool-down
+/// regardless of digest because nothing about a deploy changes
+/// those conditions. Note that `invalid_url` is synthesized by
+/// the backfill itself on `Url::parse` failures, while the other
+/// three originate from `FetchError::kind()`; the throttle treats
+/// them uniformly.
+///
+/// The digest is derived from the values that gate the fetch path:
+/// the size cap, the decode-dimension cap, and the MIME allowlist.
+/// A widening (new MIME, larger cap) shifts the digest; the next
+/// backfill round therefore retries every previously-failed user
+/// whose failure could plausibly be the policy's fault. There is
+/// no behaviour change for fresh installs — they observe the
+/// current digest from the start.
+///
+/// The list of error kinds invalidated by a digest mismatch must
+/// stay in lockstep with the list of inputs hashed below — see
+/// `backfill::POLICY_DEPENDENT_KINDS` for the canonical list and
+/// the rationale per kind.
+pub fn fetch_policy_digest() -> &'static str {
+    use std::sync::OnceLock;
+    static DIGEST: OnceLock<String> = OnceLock::new();
+    DIGEST.get_or_init(|| {
+        compute_fetch_policy_digest(MAX_BYTES, MAX_IMAGE_DIMENSION, AllowedMime::ALL)
+    })
+}
+
+/// Pure helper exposed so unit tests can pin per-input sensitivity:
+/// flipping any one of `max_bytes`, `max_image_dimension`, or the
+/// MIME allowlist must produce a different digest, otherwise an
+/// accidental drop of one of the `hasher.update` lines below would
+/// silently turn the corresponding `POLICY_DEPENDENT_KINDS` entry
+/// into a no-op for the throttle reset.
+fn compute_fetch_policy_digest(
+    max_bytes: usize,
+    max_image_dimension: u32,
+    allowed: &[AllowedMime],
+) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    // Bump the prefix when the set of hashed inputs changes (e.g.
+    // adding an SSRF-policy marker), so two builds that hash
+    // disjoint inputs are guaranteed to produce different digests
+    // even if the new build happens to omit a previously-included
+    // input.
+    hasher.update(b"v1\n");
+    // Width-fix `usize` to `u64` before hashing so the digest is
+    // identical across 32-bit and 64-bit targets — otherwise a
+    // cross-arch redeploy (or even a debug-vs-release build with
+    // different target tuples) would shift the digest and trigger
+    // a spurious throttle invalidation for every policy-dependent
+    // user. `MAX_BYTES` is 100 KB; never overflows `u64`.
+    hasher.update((max_bytes as u64).to_le_bytes());
+    hasher.update(max_image_dimension.to_le_bytes());
+    for mime in allowed {
+        hasher.update(mime.as_mime().as_bytes());
+        hasher.update(b"\n");
+    }
+    // 16 hex chars (64 bits) is plenty for collision avoidance
+    // across the small number of policy revisions the project
+    // will ever ship.
+    hex::encode(&hasher.finalize()[..8])
+}
+
 /// Knobs for the fetcher. Defaults match the production policy; tests
 /// override the SSRF block to allow loopback when wiremock is the URL
 /// host.
@@ -814,6 +886,59 @@ mod tests {
         assert!(
             matches!(result, Err(FetchError::TranscodeFailed(_))),
             "{result:?}"
+        );
+    }
+
+    #[test]
+    fn fetch_policy_digest_changes_for_each_hashed_input() {
+        // Pin the contract documented on `compute_fetch_policy_digest`:
+        // every input the digest hashes must measurably affect the
+        // output. A regression that drops one of the
+        // `hasher.update(...)` lines (e.g. accidentally removes
+        // `MAX_BYTES.to_le_bytes()`) would silently turn the
+        // matching `POLICY_DEPENDENT_KINDS` entry — `size_exceeded`
+        // — into a permanent-throttle no-op when the cap shifts.
+        // The drift is invisible without a per-input test.
+        let baseline =
+            compute_fetch_policy_digest(MAX_BYTES, MAX_IMAGE_DIMENSION, AllowedMime::ALL);
+
+        // 1. max_bytes shift → `size_exceeded` invalidation hinge.
+        assert_ne!(
+            baseline,
+            compute_fetch_policy_digest(MAX_BYTES + 1, MAX_IMAGE_DIMENSION, AllowedMime::ALL),
+            "MAX_BYTES change must shift the digest"
+        );
+
+        // 2. max_image_dimension shift → `transcode_failed` (decoder
+        // limit) invalidation hinge.
+        assert_ne!(
+            baseline,
+            compute_fetch_policy_digest(MAX_BYTES, MAX_IMAGE_DIMENSION + 1, AllowedMime::ALL),
+            "MAX_IMAGE_DIMENSION change must shift the digest"
+        );
+
+        // 3. allowlist shrink → `mime_rejected` invalidation hinge.
+        let shrunk: &[AllowedMime] = &[AllowedMime::Png];
+        assert_ne!(
+            baseline,
+            compute_fetch_policy_digest(MAX_BYTES, MAX_IMAGE_DIMENSION, shrunk),
+            "MIME allowlist change must shift the digest"
+        );
+
+        // 4. allowlist reorder must NOT shift the digest if the set
+        // is identical — `AllowedMime::ALL` is already the canonical
+        // order, so we mirror it explicitly to confirm the hash is
+        // stable when the set is the same.
+        let same_order: &[AllowedMime] = &[
+            AllowedMime::Png,
+            AllowedMime::Jpeg,
+            AllowedMime::Gif,
+            AllowedMime::Webp,
+        ];
+        assert_eq!(
+            baseline,
+            compute_fetch_policy_digest(MAX_BYTES, MAX_IMAGE_DIMENSION, same_order),
+            "identical inputs must produce the same digest"
         );
     }
 
