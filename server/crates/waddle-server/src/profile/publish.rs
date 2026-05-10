@@ -23,7 +23,7 @@ use xmpp_parsers::minidom::Element;
 
 use super::fetch::{fetch_avatar_bytes, AvatarBytes, FetchPolicy};
 use super::source::{ProfileSource, ProfileSyncError};
-use super::vcard_rmw::{apply_vcard4_update, apply_vcard_temp_update, PhotoUpdate};
+use super::vcard_rmw::{apply_vcard4_update, apply_vcard_temp_update, PhotoUpdate, Vcard4PhotoRef};
 use crate::vcard::VCardStore;
 
 /// XEP-0292 §4.1.1: a vCard4 PEP node holds a single item with id
@@ -123,10 +123,18 @@ pub async fn ensure_pep_profile_published(
 
     // ---- vCard4 PEP mirror (XEP-0292) ----
     if need_vcard_update {
+        let vcard4_photo_uri = avatar_bytes_opt
+            .as_ref()
+            .and_then(|b| outcome.photo_sha1_hex.as_deref().map(|sha1| (b, sha1)))
+            .map(|(b, sha1)| (vcard4_photo_pep_uri(jid, sha1), b.mime.clone()));
+        let vcard4_photo_ref = vcard4_photo_uri.as_ref().map(|(uri, mime)| Vcard4PhotoRef {
+            uri: uri.as_str(),
+            mime: mime.as_str(),
+        });
         let existing_vcard4 = read_existing_vcard4(deps, jid).await?;
         let updated_vcard4 = apply_vcard4_update(
             existing_vcard4.as_ref(),
-            photo_update,
+            vcard4_photo_ref,
             display_name.as_deref(),
         );
         publish_vcard4(&deps.pubsub_storage, jid, &updated_vcard4).await?;
@@ -237,6 +245,15 @@ async fn read_existing_vcard4(
         .map_err(|e| ProfileSyncError::VCard4Malformed(e.to_string()))
 }
 
+/// Build the canonical vCard4 photo URI for `jid` referencing the
+/// `urn:xmpp:avatar:data` PEP item with the given SHA-1 hex. Uses
+/// the XEP-0147 `xmpp:` URI scheme with a `?pubsub` query so a
+/// dereferencing client can pull the bytes via PEP rather than a
+/// `data:` URI inflating every fan-out stanza.
+fn vcard4_photo_pep_uri(jid: &BareJid, sha1_hex: &str) -> String {
+    format!("xmpp:{jid}?pubsub;node={NODE_AVATAR_DATA};item={sha1_hex}")
+}
+
 /// Pre-create the PEP node with the OIDC-managed config (Open
 /// access, `max_items=1`) BEFORE the first publish. If the node
 /// already exists with a different config, flip it. Either way the
@@ -279,5 +296,15 @@ mod tests {
         assert_eq!(NODE_AVATAR_DATA, "urn:xmpp:avatar:data");
         assert_eq!(NODE_AVATAR_METADATA, "urn:xmpp:avatar:metadata");
         assert_eq!(PEP_NODE_VCARD4, "urn:xmpp:vcard4");
+    }
+
+    #[test]
+    fn vcard4_photo_uri_points_at_pep_avatar_item() {
+        let jid: BareJid = "alice@example.com".parse().unwrap();
+        let uri = vcard4_photo_pep_uri(&jid, "abc123");
+        assert_eq!(
+            uri,
+            "xmpp:alice@example.com?pubsub;node=urn:xmpp:avatar:data;item=abc123"
+        );
     }
 }

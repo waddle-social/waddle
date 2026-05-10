@@ -361,8 +361,14 @@ async fn combined_fn_plus_avatar_publishes_full_chain() {
     .await;
     assert!(vcard4.contains("Combined"), "FN: {vcard4}");
     assert!(
-        vcard4.contains("data:image/png;base64,"),
-        "vCard4 MUST embed photo as data: URI per XEP-0292: {vcard4}"
+        vcard4.contains("xmpp:")
+            && vcard4.contains("?pubsub")
+            && vcard4.contains(&format!("node={NS_AVATAR_DATA}")),
+        "vCard4 photo MUST reference the PEP avatar-data item, not embed bytes inline: {vcard4}"
+    );
+    assert!(
+        !vcard4.contains("data:image/png;base64,"),
+        "vCard4 MUST NOT inline base64 bytes (XEP-0163 fan-out bloat): {vcard4}"
     );
 
     let _ = admin.close().await;
@@ -588,8 +594,9 @@ async fn fn_only_after_combined_preserves_photo() {
     assert!(
         vcard4.contains("Renamed")
             && vcard4.contains("<photo")
-            && vcard4.contains("data:image/png;base64,"),
-        "vCard4 must preserve the photo URI on FN-only follow-up: {vcard4}"
+            && vcard4.contains("?pubsub")
+            && vcard4.contains(&format!("node={NS_AVATAR_DATA}")),
+        "vCard4 must preserve the photo PEP-item URI on FN-only follow-up: {vcard4}"
     );
     let _ = admin.close().await;
 }

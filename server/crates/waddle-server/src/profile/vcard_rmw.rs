@@ -67,11 +67,28 @@ pub fn apply_vcard_temp_update(
     builder.build()
 }
 
+/// vCard4 photo reference — a URI pointing at the canonical avatar
+/// bytes (the `urn:xmpp:avatar:data` PEP item) plus the MIME of the
+/// referenced bytes.
+///
+/// Why a URI rather than an inline `data:` payload: vCard4 items
+/// fan out via XEP-0163 §3 to every roster contact's `+notify`
+/// resource. Embedding base64 PNG bytes makes each fan-out stanza
+/// the size of the avatar (~133 KB at the 100 KB cap), risking
+/// per-stanza limits and bandwidth amplification. The published
+/// `urn:xmpp:avatar:data` PEP node already holds the bytes; vCard4
+/// just references them.
+#[derive(Debug, Clone, Copy)]
+pub struct Vcard4PhotoRef<'a> {
+    pub uri: &'a str,
+    pub mime: &'a str,
+}
+
 /// Apply the requested PHOTO/FN updates to a XEP-0292 vCard4 element.
 /// `existing` is `None` for users without a published vCard4 item.
 pub fn apply_vcard4_update(
     existing: Option<&Element>,
-    photo: Option<PhotoUpdate<'_>>,
+    photo: Option<Vcard4PhotoRef<'_>>,
     fn_text: Option<&str>,
 ) -> Element {
     let mut builder = Element::builder("vcard", NS_VCARD4);
@@ -85,7 +102,7 @@ pub fn apply_vcard4_update(
                 "photo" if photo.is_some() => {
                     handled_photo = true;
                     let p = photo.expect("matched is_some");
-                    builder = builder.append(build_vcard4_photo(p.bytes, p.mime));
+                    builder = builder.append(build_vcard4_photo(p.uri, p.mime));
                 }
                 "fn" if fn_text.is_some() => {
                     handled_fn = true;
@@ -100,7 +117,7 @@ pub fn apply_vcard4_update(
 
     if !handled_photo {
         if let Some(p) = photo {
-            builder = builder.append(build_vcard4_photo(p.bytes, p.mime));
+            builder = builder.append(build_vcard4_photo(p.uri, p.mime));
         }
     }
     if !handled_fn {
@@ -127,14 +144,25 @@ fn build_vcard_temp_fn(name: &str) -> Element {
     Element::builder("FN", NS_VCARD_TEMP).append(name).build()
 }
 
-fn build_vcard4_photo(bytes: &[u8], mime: &str) -> Element {
-    let data_uri = format!("data:{mime};base64,{}", BASE64.encode(bytes));
-    Element::builder("photo", NS_VCARD4)
-        .append(
-            Element::builder("uri", NS_VCARD4)
-                .append(data_uri.as_str())
+fn build_vcard4_photo(uri: &str, mime: &str) -> Element {
+    // RFC 6350 §6.7.4: a vCard4 PHOTO is a single URI. Per RFC 6350
+    // PARAMETERs land as XML attributes in the XEP-0292 mapping; we
+    // surface the MIME via `mediatype` (RFC 6350 §5.10) so a client
+    // that doesn't dereference the URI still knows the format.
+    let mut photo = Element::builder("photo", NS_VCARD4);
+    if !mime.is_empty() {
+        photo = photo.append(
+            Element::builder("parameters", NS_VCARD4)
+                .append(
+                    Element::builder("mediatype", NS_VCARD4)
+                        .append(Element::builder("text", NS_VCARD4).append(mime).build())
+                        .build(),
+                )
                 .build(),
-        )
+        );
+    }
+    photo
+        .append(Element::builder("uri", NS_VCARD4).append(uri).build())
         .build()
 }
 
@@ -151,6 +179,13 @@ mod tests {
     fn png(bytes: &'static [u8]) -> PhotoUpdate<'static> {
         PhotoUpdate {
             bytes,
+            mime: "image/png",
+        }
+    }
+
+    fn png_ref(uri: &'static str) -> Vcard4PhotoRef<'static> {
+        Vcard4PhotoRef {
+            uri,
             mime: "image/png",
         }
     }
@@ -197,27 +232,46 @@ mod tests {
     }
 
     #[test]
-    fn vcard4_inserts_photo_with_data_uri() {
-        let result = apply_vcard4_update(None, Some(png(b"PNGDATA")), Some("Alice"));
+    fn vcard4_inserts_photo_uri_reference() {
+        let result = apply_vcard4_update(
+            None,
+            Some(png_ref(
+                "xmpp:alice@example.com?pubsub;node=urn:xmpp:avatar:data;item=abc",
+            )),
+            Some("Alice"),
+        );
         let xml = String::from(&result);
         assert!(xml.contains("<photo"), "{xml}");
         assert!(xml.contains("<uri"), "{xml}");
-        assert!(xml.contains("data:image/png;base64,"), "{xml}");
+        assert!(
+            xml.contains("xmpp:alice@example.com?pubsub") && xml.contains("item=abc"),
+            "vCard4 photo URI must reference the avatar-data PEP item: {xml}"
+        );
+        assert!(
+            !xml.contains("data:image/png;base64,"),
+            "vCard4 MUST NOT embed bytes inline (XEP-0163 fan-out bloat): {xml}"
+        );
         assert!(xml.contains("<fn"), "{xml}");
         assert!(xml.contains("Alice"), "{xml}");
     }
 
     #[test]
     fn vcard4_replaces_photo_preserving_other_fields() {
-        let existing: Element = "<vcard xmlns='urn:ietf:params:xml:ns:vcard-4.0'><fn><text>Old</text></fn><photo><uri>data:image/jpeg;base64,OLD</uri></photo><nickname><text>Pal</text></nickname></vcard>"
+        let existing: Element = "<vcard xmlns='urn:ietf:params:xml:ns:vcard-4.0'><fn><text>Old</text></fn><photo><uri>xmpp:alice@example.com?pubsub;node=urn:xmpp:avatar:data;item=OLD</uri></photo><nickname><text>Pal</text></nickname></vcard>"
             .parse()
             .unwrap();
-        let result = apply_vcard4_update(Some(&existing), Some(png(b"NEW")), Some("New"));
+        let result = apply_vcard4_update(
+            Some(&existing),
+            Some(png_ref(
+                "xmpp:alice@example.com?pubsub;node=urn:xmpp:avatar:data;item=NEW",
+            )),
+            Some("New"),
+        );
         let xml = String::from(&result);
         assert!(xml.contains("New"), "{xml}");
-        assert!(!xml.contains("Old"), "{xml}");
+        assert!(!xml.contains("<text>Old</text>"), "{xml}");
         assert!(xml.contains("Pal"), "nickname preserved: {xml}");
-        assert!(xml.contains("data:image/png;base64,"), "{xml}");
-        assert!(!xml.contains("OLD"), "{xml}");
+        assert!(xml.contains("item=NEW"), "{xml}");
+        assert!(!xml.contains("item=OLD"), "{xml}");
     }
 }
