@@ -196,6 +196,46 @@ impl FetchError {
     }
 }
 
+/// Stable, build-time digest of the fetch policy that influences
+/// which inputs surface as which `FetchError::kind()`. The startup
+/// backfill persists this digest alongside each per-user attempt
+/// state; on a future boot, if the persisted digest no longer
+/// matches the current build's digest, throttle rows whose error
+/// was policy-dependent (`mime_rejected`, `magic_byte_mismatch`,
+/// `transcode_failed`, `size_exceeded`, `ssrf_blocked`) are
+/// treated as not-yet-attempted so the backfill retries them
+/// immediately. Upstream-bound errors (`permanent_4xx`,
+/// `invalid_url`, `invalid_scheme`, `missing_host`) honour the 24h
+/// cool-down regardless of digest because nothing about a deploy
+/// changes those conditions.
+///
+/// The digest is derived from the values that gate the fetch path:
+/// the size cap, the decode-dimension cap, and the MIME allowlist.
+/// A widening (new MIME, larger cap) shifts the digest; the next
+/// backfill round therefore retries every previously-failed user
+/// whose failure could plausibly be the policy's fault. There is
+/// no behaviour change for fresh installs — they observe the
+/// current digest from the start.
+pub fn fetch_policy_digest() -> &'static str {
+    use std::sync::OnceLock;
+    static DIGEST: OnceLock<String> = OnceLock::new();
+    DIGEST.get_or_init(|| {
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(b"v1\n");
+        hasher.update(MAX_BYTES.to_le_bytes());
+        hasher.update(MAX_IMAGE_DIMENSION.to_le_bytes());
+        for mime in AllowedMime::ALL {
+            hasher.update(mime.as_mime().as_bytes());
+            hasher.update(b"\n");
+        }
+        // 16 hex chars (64 bits) is plenty for collision avoidance
+        // across the small number of policy revisions the project
+        // will ever ship.
+        hex::encode(&hasher.finalize()[..8])
+    })
+}
+
 /// Knobs for the fetcher. Defaults match the production policy; tests
 /// override the SSRF block to allow loopback when wiremock is the URL
 /// host.

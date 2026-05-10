@@ -28,6 +28,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 use url::Url;
 
+use super::fetch::fetch_policy_digest;
 use super::publish::{ensure_pep_profile_published, ProfilePublishDeps};
 use super::source::{NameIntent, PhotoIntent, ProfileSource, ProfileSyncError};
 use crate::db::actor::{DbActor, DbExecute, DbQuery};
@@ -56,6 +57,27 @@ const PERMANENT_KINDS: &[&str] = &[
     "invalid_url",
     "invalid_scheme",
     "missing_host",
+];
+
+/// Subset of `PERMANENT_KINDS` whose verdict can flip when the
+/// build's fetch policy widens (allowlist additions, cap relaxations,
+/// new decoder logic). When the persisted
+/// `last_fetch_policy_digest` does not match the current build's
+/// digest, rows whose `last_error` is in this set are treated as
+/// not-yet-attempted so the backfill retries them on the next boot
+/// — closing the "deploy widened the policy but throttle still
+/// suppresses the affected users" gap (#451).
+///
+/// Excluded kinds are upstream-bound (the IDP serves a 404, the URL
+/// is malformed, the host is missing, the scheme is wrong); a code
+/// deploy doesn't alter their verdict, so they keep honouring the
+/// 24h cool-down.
+const POLICY_DEPENDENT_KINDS: &[&str] = &[
+    "mime_rejected",
+    "magic_byte_mismatch",
+    "transcode_failed",
+    "size_exceeded",
+    "ssrf_blocked",
 ];
 
 /// Aggregate counts of a backfill run.
@@ -89,6 +111,12 @@ struct BackfillRow {
     display_name: Option<String>,
     last_attempt_at: Option<String>,
     last_error: Option<String>,
+    /// Policy digest in effect when the previous attempt was
+    /// recorded. `None` indicates the row predates the digest column
+    /// (V0004 migration just landed) — treated as "stale build" so
+    /// policy-dependent throttles get retried, identical to the
+    /// digest-mismatch case.
+    last_fetch_policy_digest: Option<String>,
 }
 
 /// Run a one-shot backfill. `xmpp_domain` is the server's
@@ -195,7 +223,7 @@ async fn process_row(
     row: BackfillRow,
     now: DateTime<Utc>,
 ) -> ProcessOutcome {
-    if should_throttle(&row, now) {
+    if should_throttle(&row, now, fetch_policy_digest()) {
         debug!(
             jid = %row.xmpp_localpart,
             last_error = ?row.last_error,
@@ -356,6 +384,13 @@ async fn process_row(
 ///
 /// Semantics:
 /// - No `last_attempt_at` row → not throttled.
+/// - Last error is in `POLICY_DEPENDENT_KINDS` AND the persisted
+///   policy digest does not match the current build's digest →
+///   not throttled (the deploy widened the policy; retry now
+///   instead of waiting out the 24h cool-down). This is the #451
+///   behaviour: a fresh deploy auto-clears stale policy-dependent
+///   throttles. `None`-digest rows pre-date V0004 and are
+///   conservatively treated as mismatch.
 /// - `last_attempt_at` parses, last error is a permanent kind, and
 ///   `now - last_attempt <= PERMANENT_FAILURE_COOLDOWN` → throttled.
 /// - `last_attempt_at` parses, last error is transient OR `None` →
@@ -369,11 +404,26 @@ async fn process_row(
 ///   timestamp still proceed (re-attempt is the safe default).
 /// - Negative `now - last_attempt` (clock skew backward) is treated
 ///   as "within the cool-down" — falls through to the kind check.
-fn should_throttle(row: &BackfillRow, now: DateTime<Utc>) -> bool {
+fn should_throttle(row: &BackfillRow, now: DateTime<Utc>, current_digest: &str) -> bool {
+    let last_error_kind = row.last_error.as_deref();
     let last_error_is_permanent = matches!(
-        row.last_error.as_deref(),
+        last_error_kind,
         Some(kind) if PERMANENT_KINDS.contains(&kind)
     );
+    // Policy-dependent kinds with a stale digest auto-invalidate so
+    // a deploy that widens the fetch policy retries the affected
+    // users on the next backfill round (#451). Checked before the
+    // timestamp parse so a corrupted timestamp can't keep a
+    // policy-stale row throttled forever.
+    let policy_dependent_and_stale = matches!(
+        last_error_kind,
+        Some(kind)
+            if POLICY_DEPENDENT_KINDS.contains(&kind)
+                && row.last_fetch_policy_digest.as_deref() != Some(current_digest)
+    );
+    if policy_dependent_and_stale {
+        return false;
+    }
     let Some(parsed) = row
         .last_attempt_at
         .as_deref()
@@ -399,7 +449,7 @@ async fn load_users(db_actor: &ActorRef<DbActor>) -> Result<Vec<BackfillRow>, Ba
         .ask(DbQuery {
             sql: r#"
                 SELECT u.xmpp_localpart, u.avatar_url, u.display_name,
-                       s.last_attempt_at, s.last_error
+                       s.last_attempt_at, s.last_error, s.last_fetch_policy_digest
                 FROM users u
                 LEFT JOIN user_avatar_fetch_state s
                   ON s.xmpp_localpart = u.xmpp_localpart
@@ -417,28 +467,19 @@ async fn load_users(db_actor: &ActorRef<DbActor>) -> Result<Vec<BackfillRow>, Ba
             Some(crate::db::Value::Text(s)) => s.clone(),
             _ => continue,
         };
-        let avatar_url = row.get(1).and_then(|v| match v {
-            crate::db::Value::Text(s) => Some(s.clone()),
-            _ => None,
-        });
-        let display_name = row.get(2).and_then(|v| match v {
-            crate::db::Value::Text(s) => Some(s.clone()),
-            _ => None,
-        });
-        let last_attempt_at = row.get(3).and_then(|v| match v {
-            crate::db::Value::Text(s) => Some(s.clone()),
-            _ => None,
-        });
-        let last_error = row.get(4).and_then(|v| match v {
-            crate::db::Value::Text(s) => Some(s.clone()),
-            _ => None,
-        });
+        let text_at = |idx: usize| {
+            row.get(idx).and_then(|v| match v {
+                crate::db::Value::Text(s) => Some(s.clone()),
+                _ => None,
+            })
+        };
         out.push(BackfillRow {
             xmpp_localpart,
-            avatar_url,
-            display_name,
-            last_attempt_at,
-            last_error,
+            avatar_url: text_at(1),
+            display_name: text_at(2),
+            last_attempt_at: text_at(3),
+            last_error: text_at(4),
+            last_fetch_policy_digest: text_at(5),
         });
     }
     Ok(out)
@@ -455,15 +496,18 @@ async fn persist_attempt(
         Some(k) => k.into(),
         None => crate::db::Value::Null,
     };
+    let digest = fetch_policy_digest().to_string();
     db_actor
         .ask(DbExecute {
             sql: r#"
                 INSERT INTO user_avatar_fetch_state
-                  (xmpp_localpart, last_attempt_at, last_error, updated_at)
-                VALUES (?, ?, ?, ?)
+                  (xmpp_localpart, last_attempt_at, last_error,
+                   last_fetch_policy_digest, updated_at)
+                VALUES (?, ?, ?, ?, ?)
                 ON CONFLICT(xmpp_localpart) DO UPDATE
                   SET last_attempt_at = excluded.last_attempt_at,
                       last_error = excluded.last_error,
+                      last_fetch_policy_digest = excluded.last_fetch_policy_digest,
                       updated_at = excluded.updated_at
             "#
             .to_string(),
@@ -471,6 +515,7 @@ async fn persist_attempt(
                 xmpp_localpart.into(),
                 now_str.clone().into(),
                 error_value,
+                digest.into(),
                 now_str.into(),
             ],
         })
@@ -483,6 +528,14 @@ async fn persist_attempt(
 mod tests {
     use super::*;
 
+    /// Stable digest used by the `should_throttle` tests below. The
+    /// test fixture sets `row.last_fetch_policy_digest` to this same
+    /// value so the digest-mismatch branch is bypassed and the rest
+    /// of the throttle semantics get tested in isolation. Tests that
+    /// specifically exercise the policy-stale path override the
+    /// digest explicitly.
+    const TEST_DIGEST: &str = "test_digest_v1";
+
     fn row_with(last_attempt: Option<&str>, last_error: Option<&str>) -> BackfillRow {
         BackfillRow {
             xmpp_localpart: "alice".into(),
@@ -490,16 +543,18 @@ mod tests {
             display_name: None,
             last_attempt_at: last_attempt.map(str::to_string),
             last_error: last_error.map(str::to_string),
+            last_fetch_policy_digest: Some(TEST_DIGEST.to_string()),
         }
     }
 
     #[test]
     fn should_throttle_returns_false_when_no_prior_attempt() {
         let now = Utc::now();
-        assert!(!should_throttle(&row_with(None, None), now));
+        assert!(!should_throttle(&row_with(None, None), now, TEST_DIGEST));
         assert!(!should_throttle(
             &row_with(None, Some("permanent_4xx")),
-            now
+            now,
+            TEST_DIGEST
         ));
     }
 
@@ -509,7 +564,8 @@ mod tests {
         let twenty_five_hours_ago = (now - Duration::hours(25)).to_rfc3339();
         assert!(!should_throttle(
             &row_with(Some(&twenty_five_hours_ago), Some("permanent_4xx")),
-            now
+            now,
+            TEST_DIGEST
         ));
     }
 
@@ -526,7 +582,7 @@ mod tests {
             "invalid_url",
         ] {
             assert!(
-                should_throttle(&row_with(Some(&one_hour_ago), Some(kind)), now),
+                should_throttle(&row_with(Some(&one_hour_ago), Some(kind)), now, TEST_DIGEST),
                 "kind {kind} must throttle"
             );
         }
@@ -538,7 +594,7 @@ mod tests {
         let one_hour_ago = (now - Duration::hours(1)).to_rfc3339();
         for kind in ["network", "transient_5xx", "dns", "publish_failed"] {
             assert!(
-                !should_throttle(&row_with(Some(&one_hour_ago), Some(kind)), now),
+                !should_throttle(&row_with(Some(&one_hour_ago), Some(kind)), now, TEST_DIGEST),
                 "kind {kind} must NOT throttle (transient)"
             );
         }
@@ -548,7 +604,11 @@ mod tests {
     fn should_throttle_returns_false_when_recent_success() {
         let now = Utc::now();
         let one_hour_ago = (now - Duration::hours(1)).to_rfc3339();
-        assert!(!should_throttle(&row_with(Some(&one_hour_ago), None), now));
+        assert!(!should_throttle(
+            &row_with(Some(&one_hour_ago), None),
+            now,
+            TEST_DIGEST
+        ));
     }
 
     #[test]
@@ -560,7 +620,8 @@ mod tests {
         let exactly_24h_ago = (now - Duration::hours(24)).to_rfc3339();
         assert!(should_throttle(
             &row_with(Some(&exactly_24h_ago), Some("permanent_4xx")),
-            now
+            now,
+            TEST_DIGEST
         ));
     }
 
@@ -572,11 +633,13 @@ mod tests {
         let an_hour_in_the_future = (now + Duration::hours(1)).to_rfc3339();
         assert!(should_throttle(
             &row_with(Some(&an_hour_in_the_future), Some("permanent_4xx")),
-            now
+            now,
+            TEST_DIGEST
         ));
         assert!(!should_throttle(
             &row_with(Some(&an_hour_in_the_future), Some("network")),
-            now
+            now,
+            TEST_DIGEST
         ));
     }
 
@@ -586,7 +649,8 @@ mod tests {
         let now = Utc::now();
         assert!(should_throttle(
             &row_with(Some("not-an-rfc3339-timestamp"), Some("permanent_4xx")),
-            now
+            now,
+            TEST_DIGEST
         ));
     }
 
@@ -596,8 +660,103 @@ mod tests {
         let now = Utc::now();
         assert!(!should_throttle(
             &row_with(Some("garbage"), Some("network")),
-            now
+            now,
+            TEST_DIGEST
         ));
+    }
+
+    #[test]
+    fn should_throttle_invalidates_policy_dependent_kinds_on_digest_mismatch() {
+        // Core #451 behaviour: a row that previously failed for a
+        // policy-dependent reason gets retried after a fetch-policy
+        // change (digest mismatch), even within the 24h cool-down.
+        let now = Utc::now();
+        let one_hour_ago = (now - Duration::hours(1)).to_rfc3339();
+        for kind in POLICY_DEPENDENT_KINDS {
+            let row = BackfillRow {
+                last_fetch_policy_digest: Some("old_digest_v0".to_string()),
+                ..row_with(Some(&one_hour_ago), Some(kind))
+            };
+            assert!(
+                !should_throttle(&row, now, TEST_DIGEST),
+                "kind {kind} with stale digest MUST NOT throttle (#451)"
+            );
+        }
+    }
+
+    #[test]
+    fn should_throttle_invalidates_policy_dependent_kinds_when_digest_is_null() {
+        // Rows persisted before V0004 have `last_fetch_policy_digest
+        // = NULL`. Treat that the same as a stale digest so the
+        // first backfill after the migration retries the affected
+        // users without manual SQL.
+        let now = Utc::now();
+        let one_hour_ago = (now - Duration::hours(1)).to_rfc3339();
+        for kind in POLICY_DEPENDENT_KINDS {
+            let row = BackfillRow {
+                last_fetch_policy_digest: None,
+                ..row_with(Some(&one_hour_ago), Some(kind))
+            };
+            assert!(
+                !should_throttle(&row, now, TEST_DIGEST),
+                "kind {kind} with NULL digest MUST NOT throttle (V0004 migration path)"
+            );
+        }
+    }
+
+    #[test]
+    fn should_throttle_keeps_upstream_kinds_throttled_across_digest_changes() {
+        // Upstream-bound failures (4xx, malformed URL, missing host,
+        // wrong scheme) are not in `POLICY_DEPENDENT_KINDS` and
+        // therefore continue to honour the 24h cool-down regardless
+        // of digest state. A code deploy doesn't change whether the
+        // user's avatar URL still 404s.
+        let now = Utc::now();
+        let one_hour_ago = (now - Duration::hours(1)).to_rfc3339();
+        for kind in [
+            "permanent_4xx",
+            "invalid_url",
+            "invalid_scheme",
+            "missing_host",
+        ] {
+            let row = BackfillRow {
+                last_fetch_policy_digest: Some("old_digest_v0".to_string()),
+                ..row_with(Some(&one_hour_ago), Some(kind))
+            };
+            assert!(
+                should_throttle(&row, now, TEST_DIGEST),
+                "kind {kind} is upstream-bound; digest mismatch MUST NOT lift the cool-down"
+            );
+        }
+    }
+
+    #[test]
+    fn should_throttle_invalidates_policy_dependent_with_corrupted_timestamp() {
+        // Belt-and-suspenders: the digest-mismatch short-circuit
+        // runs before the timestamp parse, so even a corrupted
+        // timestamp on a policy-dependent row gets retried after a
+        // policy widening. Without this, a row that fail-closed
+        // under the old build would stay throttled forever.
+        let now = Utc::now();
+        let row = BackfillRow {
+            last_fetch_policy_digest: Some("old_digest_v0".to_string()),
+            ..row_with(Some("not-an-rfc3339-timestamp"), Some("mime_rejected"))
+        };
+        assert!(!should_throttle(&row, now, TEST_DIGEST));
+    }
+
+    #[test]
+    fn policy_dependent_kinds_subset_of_permanent_kinds() {
+        // Every policy-dependent kind must also be a permanent
+        // kind; otherwise the 24h cool-down would never throttle it
+        // in the first place and the V0004 invalidation path would
+        // be a no-op.
+        for kind in POLICY_DEPENDENT_KINDS {
+            assert!(
+                PERMANENT_KINDS.contains(kind),
+                "policy-dependent kind {kind:?} must also be in PERMANENT_KINDS"
+            );
+        }
     }
 
     #[test]

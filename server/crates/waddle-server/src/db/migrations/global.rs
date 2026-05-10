@@ -384,6 +384,22 @@ CREATE TABLE user_avatar_fetch_state (
 );
 "#;
 
+/// Add `last_fetch_policy_digest` to the avatar throttle so a
+/// fetch-policy widening (allowlist expansion, cap relaxation, etc.)
+/// invalidates stale throttle rows for policy-dependent error
+/// kinds without manual SQL. The column is `NULL` on existing rows
+/// — `should_throttle` treats `NULL` as digest-mismatch and
+/// retries policy-dependent failures on the next backfill round.
+/// See `fetch::fetch_policy_digest` for the value being persisted
+/// and `backfill::POLICY_DEPENDENT_KINDS` for the kinds invalidated.
+pub const V0004_AVATAR_FETCH_STATE_POLICY_DIGEST: &str = r#"
+ALTER TABLE user_avatar_fetch_state ADD COLUMN last_fetch_policy_digest TEXT;
+"#;
+
+pub const V0004_AVATAR_FETCH_STATE_POLICY_DIGEST_POSTGRES: &str = r#"
+ALTER TABLE user_avatar_fetch_state ADD COLUMN last_fetch_policy_digest TEXT;
+"#;
+
 /// Get all global migrations in order
 pub fn all() -> Vec<Migration> {
     vec![
@@ -406,6 +422,13 @@ pub fn all() -> Vec<Migration> {
             description: "Add user_avatar_fetch_state for startup-backfill throttle".to_string(),
             sql_sqlite: V0003_USER_AVATAR_FETCH_STATE,
             sql_postgres: V0003_USER_AVATAR_FETCH_STATE_POSTGRES,
+        },
+        Migration {
+            version: 4,
+            description: "Add last_fetch_policy_digest column for deploy-time throttle reset"
+                .to_string(),
+            sql_sqlite: V0004_AVATAR_FETCH_STATE_POLICY_DIGEST,
+            sql_postgres: V0004_AVATAR_FETCH_STATE_POLICY_DIGEST_POSTGRES,
         },
     ]
 }
