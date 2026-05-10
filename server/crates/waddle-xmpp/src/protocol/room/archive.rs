@@ -99,7 +99,6 @@ mod tests {
     use crate::xep::xep0421::OccupantIdSecret;
     use jid::{BareJid, FullJid, Jid};
     use minidom::Element;
-    use std::str::FromStr;
     use xmpp_parsers::message::{Body, Message, MessageType};
 
     fn full(s: &str) -> FullJid {
@@ -287,9 +286,24 @@ mod tests {
     /// for the SQL-write regression coverage that incident needed.
     #[test]
     fn xep_0444_groupchat_reaction_wire_shape_is_archivable() {
-        let xml = r#"<message xmlns='jabber:client' to='room@muc.example.com' type='groupchat' id='reaction-uuid-1'><reactions xmlns='urn:xmpp:reactions:0' id='target-sid'><reaction>❤️</reaction></reactions><store xmlns='urn:xmpp:hints'/></message>"#;
-        let element = Element::from_str(xml).expect("parse element");
-        let msg = Message::try_from(element).expect("parse message");
+        // Build the wire shape via typed XEP-0444 + XEP-0334 builders
+        // (no raw XML — AGENTS.md XML-generation hard rule), then
+        // round-trip through the `Message::try_from(Element)` parse
+        // boundary that the test claims to cover. This is structurally
+        // identical to the bytes `waddle-xmpp-client::messaging::
+        // builders::build_reaction_message` puts on the wire for the
+        // WASM client's `send_reaction` path.
+        let stanza = Element::builder("message", CLIENT_STANZA_NS)
+            .attr("to", "room@muc.example.com")
+            .attr("type", "groupchat")
+            .attr("id", "reaction-uuid-1")
+            .append(crate::xep::xep0444::build_reactions_element(
+                "target-sid",
+                &["❤️"],
+            ))
+            .append(Element::builder("store", crate::xep::xep0334::NS_HINTS).build())
+            .build();
+        let msg = Message::try_from(stanza).expect("parse message");
         assert!(
             crate::xep::is_reaction_message(&msg),
             "is_reaction_message must detect the <reactions/> payload"
