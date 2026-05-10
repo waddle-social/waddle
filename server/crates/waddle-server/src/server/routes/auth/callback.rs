@@ -160,7 +160,17 @@ pub(super) async fn callback_handler(
                 .avatar_url
                 .as_deref()
                 .and_then(|s| url::Url::parse(s).ok());
-            let display_name = identity_claims.name.clone();
+            // Treat empty / whitespace-only `name` claims as absent so
+            // the bridge does NOT publish a blank `<FN>` to vcard-temp
+            // / vCard4. The OIDC spec doesn't forbid an empty `name`,
+            // some IDPs return one when the user hasn't set a profile
+            // name; an empty FN would just blank a previously-set one.
+            let display_name = identity_claims
+                .name
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string);
             let source = crate::profile::ProfileSource::Oidc {
                 avatar_url,
                 display_name,
