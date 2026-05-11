@@ -358,20 +358,15 @@ fn rsm_page_info_defaults() {
 
 #[test]
 fn build_mam_iq_extended_supports_thread_fulltext_and_after() {
-    let iq = build_mam_iq_extended(
-        "iq-1",
-        "query-1",
-        25,
-        None,
-        Some("after-1"),
-        Some("alice@example.com"),
-        Some("room@muc.example.com"),
-        Some("thread-42"),
-        Some("needle"),
-        Some("2024-01-01T00:00:00Z"),
-        Some("2024-01-31T23:59:59Z"),
-        None,
-    );
+    let iq = MamIqBuilder::new("iq-1", "query-1", 25)
+        .after("after-1")
+        .with_jid("alice@example.com")
+        .to_jid("room@muc.example.com")
+        .thread_id("thread-42")
+        .fulltext("needle")
+        .start("2024-01-01T00:00:00Z")
+        .end("2024-01-31T23:59:59Z")
+        .build();
     let query = iq.get_child("query", MAM_NS).expect("query child");
     let form = query.get_child("x", DATA_FORMS_NS).expect("form child");
     let fields: Vec<(String, String)> = form
@@ -405,20 +400,7 @@ fn build_mam_iq_extended_supports_thread_fulltext_and_after() {
 
 #[test]
 fn build_mam_iq_extended_supports_latest_before_marker() {
-    let iq = build_mam_iq_extended(
-        "iq-2",
-        "query-2",
-        10,
-        Some(""),
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-    );
+    let iq = MamIqBuilder::new("iq-2", "query-2", 10).before("").build();
     let before = iq
         .get_child("query", MAM_NS)
         .and_then(|query| query.get_child("set", RSM_NS))
@@ -465,24 +447,14 @@ mod stanza_id_filter_tests {
     use minidom::Element;
     use waddle_xmpp_core::mam::{MAM_NS, STANZA_ID_FILTER_FIELD};
 
-    use super::super::{build_mam_iq_extended, DATA_FORMS_NS};
+    use super::super::{MamIqBuilder, DATA_FORMS_NS};
 
     #[test]
     fn builder_appends_stanza_id_filter_when_provided() {
-        let iq = build_mam_iq_extended(
-            "iq1",
-            "q1",
-            10,
-            None,
-            None,
-            None,
-            Some("room@conf.example"),
-            None,
-            None,
-            None,
-            None,
-            Some(&["sid-A", "sid-B"]),
-        );
+        let iq = MamIqBuilder::new("iq1", "q1", 10)
+            .to_jid("room@conf.example")
+            .stanza_ids(&["sid-A", "sid-B"])
+            .build();
         let query = iq.get_child("query", MAM_NS).expect("query child");
         let form = query.get_child("x", DATA_FORMS_NS).expect("form");
         let field = form
@@ -499,20 +471,9 @@ mod stanza_id_filter_tests {
 
     #[test]
     fn builder_omits_stanza_id_filter_when_none() {
-        let iq = build_mam_iq_extended(
-            "iq1",
-            "q1",
-            10,
-            None,
-            None,
-            None,
-            Some("room@conf.example"),
-            None,
-            None,
-            None,
-            None,
-            None,
-        );
+        let iq = MamIqBuilder::new("iq1", "q1", 10)
+            .to_jid("room@conf.example")
+            .build();
         let query = iq.get_child("query", MAM_NS).expect("query child");
         let form = query.get_child("x", DATA_FORMS_NS).expect("form");
         assert!(form
@@ -522,20 +483,10 @@ mod stanza_id_filter_tests {
 
     #[test]
     fn builder_omits_stanza_id_filter_when_empty_slice() {
-        let iq = build_mam_iq_extended(
-            "iq1",
-            "q1",
-            10,
-            None,
-            None,
-            None,
-            Some("room@conf.example"),
-            None,
-            None,
-            None,
-            None,
-            Some(&[]),
-        );
+        let iq = MamIqBuilder::new("iq1", "q1", 10)
+            .to_jid("room@conf.example")
+            .stanza_ids(&[])
+            .build();
         let query = iq.get_child("query", MAM_NS).expect("query child");
         let form = query.get_child("x", DATA_FORMS_NS).expect("form");
         assert!(form
@@ -547,20 +498,12 @@ mod stanza_id_filter_tests {
     fn builder_emits_stanza_id_filter_alongside_thread_and_fulltext() {
         use waddle_xmpp_core::mam::{FULLTEXT_MAM_FIELD, WADDLE_MAM_THREAD_FIELD};
 
-        let iq = build_mam_iq_extended(
-            "iq1",
-            "q1",
-            10,
-            None,
-            None,
-            None,
-            Some("room@conf.example"),
-            Some("thread-X"),
-            Some("hello"),
-            None,
-            None,
-            Some(&["sid-A", "sid-B"]),
-        );
+        let iq = MamIqBuilder::new("iq1", "q1", 10)
+            .to_jid("room@conf.example")
+            .thread_id("thread-X")
+            .fulltext("hello")
+            .stanza_ids(&["sid-A", "sid-B"])
+            .build();
         let query = iq.get_child("query", MAM_NS).expect("query child");
         let form = query.get_child("x", DATA_FORMS_NS).expect("form");
 

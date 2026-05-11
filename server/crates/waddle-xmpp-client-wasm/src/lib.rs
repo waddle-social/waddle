@@ -18,7 +18,7 @@ use waddle_xmpp_client::discovery::{
     WaddleInboxMarkRead, WaddleInboxQuery,
 };
 use waddle_xmpp_client::error::parse_stanza_error;
-use waddle_xmpp_client::mam::{self, build_mam_iq, build_mam_iq_extended};
+use waddle_xmpp_client::mam::{self, build_mam_iq, MamIqBuilder};
 use waddle_xmpp_client::messaging::{
     self, build_chat_state_message, build_correction_message, build_displayed_message,
     build_moderation_message, build_outbound_message, build_pinned_message, build_reaction_message,

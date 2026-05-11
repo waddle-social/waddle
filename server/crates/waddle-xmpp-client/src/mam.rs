@@ -160,6 +160,159 @@ impl MamExt for ClientHandle {
 
 // ── Internal helpers ─────────────────────────────────────────────────────────
 
+/// Builder for a MAM query IQ. Each `with_*` setter is chainable;
+/// `build()` emits the final `<iq>` element.
+pub struct MamIqBuilder<'a> {
+    iq_id: &'a str,
+    query_id: &'a str,
+    max: u32,
+    before: Option<&'a str>,
+    after: Option<&'a str>,
+    with_jid: Option<&'a str>,
+    to_jid: Option<&'a str>,
+    thread_id: Option<&'a str>,
+    fulltext: Option<&'a str>,
+    start: Option<&'a str>,
+    end: Option<&'a str>,
+    stanza_ids: Option<&'a [&'a str]>,
+}
+
+impl<'a> MamIqBuilder<'a> {
+    /// New builder with required fields. All other fields default to `None`.
+    pub fn new(iq_id: &'a str, query_id: &'a str, max: u32) -> Self {
+        Self {
+            iq_id,
+            query_id,
+            max,
+            before: None,
+            after: None,
+            with_jid: None,
+            to_jid: None,
+            thread_id: None,
+            fulltext: None,
+            start: None,
+            end: None,
+            stanza_ids: None,
+        }
+    }
+
+    pub fn before(mut self, value: &'a str) -> Self {
+        self.before = Some(value);
+        self
+    }
+
+    pub fn after(mut self, value: &'a str) -> Self {
+        self.after = Some(value);
+        self
+    }
+
+    pub fn with_jid(mut self, value: &'a str) -> Self {
+        self.with_jid = Some(value);
+        self
+    }
+
+    pub fn to_jid(mut self, value: &'a str) -> Self {
+        self.to_jid = Some(value);
+        self
+    }
+
+    pub fn thread_id(mut self, value: &'a str) -> Self {
+        self.thread_id = Some(value);
+        self
+    }
+
+    pub fn fulltext(mut self, value: &'a str) -> Self {
+        self.fulltext = Some(value);
+        self
+    }
+
+    pub fn start(mut self, value: &'a str) -> Self {
+        self.start = Some(value);
+        self
+    }
+
+    pub fn end(mut self, value: &'a str) -> Self {
+        self.end = Some(value);
+        self
+    }
+
+    pub fn stanza_ids(mut self, value: &'a [&'a str]) -> Self {
+        self.stanza_ids = Some(value);
+        self
+    }
+
+    /// Build the `<iq>` element.
+    pub fn build(self) -> Element {
+        let mut rsm = Element::builder("set", RSM_NS).append(
+            Element::builder("max", RSM_NS)
+                .append(self.max.to_string())
+                .build(),
+        );
+        if let Some(before) = self.before {
+            rsm = rsm.append(Element::builder("before", RSM_NS).append(before).build());
+        }
+        if let Some(after) = self.after {
+            rsm = rsm.append(Element::builder("after", RSM_NS).append(after).build());
+        }
+
+        let mut form = Element::builder("x", DATA_FORMS_NS)
+            .attr("type", "submit")
+            .append(
+                Element::builder("field", DATA_FORMS_NS)
+                    .attr("var", "FORM_TYPE")
+                    .attr("type", "hidden")
+                    .append(
+                        Element::builder("value", DATA_FORMS_NS)
+                            .append(MAM_NS)
+                            .build(),
+                    )
+                    .build(),
+            );
+        if let Some(with_jid) = self.with_jid {
+            form = form.append(build_form_field("with", with_jid));
+        }
+        if let Some(thread_id) = self.thread_id {
+            form = form.append(build_form_field(WADDLE_MAM_THREAD_FIELD, thread_id));
+        }
+        if let Some(fulltext) = self.fulltext {
+            form = form.append(build_form_field(FULLTEXT_MAM_FIELD, fulltext));
+        }
+        if let Some(start) = self.start {
+            form = form.append(build_form_field(MAM_START_FIELD, start));
+        }
+        if let Some(end) = self.end {
+            form = form.append(build_form_field(MAM_END_FIELD, end));
+        }
+        if let Some(stanza_ids) = self.stanza_ids {
+            if !stanza_ids.is_empty() {
+                let mut field = Element::builder("field", DATA_FORMS_NS)
+                    .attr("var", STANZA_ID_FILTER_FIELD)
+                    .attr("type", "text-multi");
+                for id in stanza_ids {
+                    field =
+                        field.append(Element::builder("value", DATA_FORMS_NS).append(*id).build());
+                }
+                form = form.append(field.build());
+            }
+        }
+
+        let query = Element::builder("query", MAM_NS)
+            .attr("queryid", self.query_id)
+            .append(form.build())
+            .append(rsm.build())
+            .build();
+
+        let mut iq = Element::builder("iq", CLIENT_NS)
+            .attr("type", "set")
+            .attr("id", self.iq_id)
+            .append(query);
+        if let Some(to_jid) = self.to_jid {
+            iq = iq.attr("to", to_jid);
+        }
+        iq.build()
+    }
+}
+
 /// Build a MAM query IQ element.
 ///
 /// * `with_jid` — set as the `<with>` data form field (DM queries).
@@ -172,20 +325,14 @@ pub fn build_mam_iq(
     with_jid: Option<&str>,
     to_jid: Option<&str>,
 ) -> Element {
-    build_mam_iq_extended(
-        iq_id,
-        query_id,
-        max,
-        before.or(Some("")),
-        None,
-        with_jid,
-        to_jid,
-        None,
-        None,
-        None,
-        None,
-        None,
-    )
+    let mut builder = MamIqBuilder::new(iq_id, query_id, max).before(before.unwrap_or(""));
+    if let Some(value) = with_jid {
+        builder = builder.with_jid(value);
+    }
+    if let Some(value) = to_jid {
+        builder = builder.to_jid(value);
+    }
+    builder.build()
 }
 
 fn build_form_field(var: &str, value: &str) -> Element {
@@ -209,92 +356,6 @@ fn parse_archived_author_real_jid(inner: &Element) -> Option<String> {
         .and_then(|payload| payload.get_child("item", NS_MUC_USER))
         .and_then(|item| item.attr("jid"))
         .map(|jid| bare_jid(jid).to_string())
-}
-
-#[expect(
-    clippy::too_many_arguments,
-    reason = "Phase 3 API shape is required by the wasm bindings and TS parity; stanza-id filter adds 12th param"
-)]
-pub fn build_mam_iq_extended(
-    iq_id: &str,
-    query_id: &str,
-    max: u32,
-    before: Option<&str>,
-    after: Option<&str>,
-    with_jid: Option<&str>,
-    to_jid: Option<&str>,
-    thread_id: Option<&str>,
-    fulltext: Option<&str>,
-    start: Option<&str>,
-    end: Option<&str>,
-    stanza_ids: Option<&[&str]>,
-) -> Element {
-    let mut rsm = Element::builder("set", RSM_NS).append(
-        Element::builder("max", RSM_NS)
-            .append(max.to_string())
-            .build(),
-    );
-    if let Some(before) = before {
-        rsm = rsm.append(Element::builder("before", RSM_NS).append(before).build());
-    }
-    if let Some(after) = after {
-        rsm = rsm.append(Element::builder("after", RSM_NS).append(after).build());
-    }
-
-    let mut form = Element::builder("x", DATA_FORMS_NS)
-        .attr("type", "submit")
-        .append(
-            Element::builder("field", DATA_FORMS_NS)
-                .attr("var", "FORM_TYPE")
-                .attr("type", "hidden")
-                .append(
-                    Element::builder("value", DATA_FORMS_NS)
-                        .append(MAM_NS)
-                        .build(),
-                )
-                .build(),
-        );
-    if let Some(with_jid) = with_jid {
-        form = form.append(build_form_field("with", with_jid));
-    }
-    if let Some(thread_id) = thread_id {
-        form = form.append(build_form_field(WADDLE_MAM_THREAD_FIELD, thread_id));
-    }
-    if let Some(fulltext) = fulltext {
-        form = form.append(build_form_field(FULLTEXT_MAM_FIELD, fulltext));
-    }
-    if let Some(start) = start {
-        form = form.append(build_form_field(MAM_START_FIELD, start));
-    }
-    if let Some(end) = end {
-        form = form.append(build_form_field(MAM_END_FIELD, end));
-    }
-    if let Some(stanza_ids) = stanza_ids {
-        if !stanza_ids.is_empty() {
-            let mut field = Element::builder("field", DATA_FORMS_NS)
-                .attr("var", STANZA_ID_FILTER_FIELD)
-                .attr("type", "text-multi");
-            for id in stanza_ids {
-                field = field.append(Element::builder("value", DATA_FORMS_NS).append(*id).build());
-            }
-            form = form.append(field.build());
-        }
-    }
-
-    let query = Element::builder("query", MAM_NS)
-        .attr("queryid", query_id)
-        .append(form.build())
-        .append(rsm.build())
-        .build();
-
-    let mut iq = Element::builder("iq", CLIENT_NS)
-        .attr("type", "set")
-        .attr("id", iq_id)
-        .append(query);
-    if let Some(to_jid) = to_jid {
-        iq = iq.attr("to", to_jid);
-    }
-    iq.build()
 }
 
 /// Subscribe to the event bus, send the IQ, collect MAM result messages until
