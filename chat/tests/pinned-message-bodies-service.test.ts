@@ -26,12 +26,12 @@ function pinEntry(id: string, text = ""): WasmPinEntry {
   };
 }
 
-function archived(id: string, body = "live body"): WasmArchivedMessage {
+function archived(id: string, body = "live body", roomJid = "room@conf.example"): WasmArchivedMessage {
   return {
     id,
     mam_id: id,
     message_type: "groupchat",
-    from: "room@conf.example/alice",
+    from: `${roomJid}/alice`,
     body,
     timestamp: "2026-05-11T11:50:00Z",
     reaction_emojis: [],
@@ -41,6 +41,8 @@ function archived(id: string, body = "live body"): WasmArchivedMessage {
     markup_spans: [],
     is_sticker: false,
     shared_files: [],
+    // XEP-0359 room-scoped stanza-id: branch 1 of matchRequestedStanzaId.
+    stanza_ids: [{ by: roomJid, id }],
   } as unknown as WasmArchivedMessage;
 }
 
@@ -187,7 +189,7 @@ describe("hydrateSinglePinnedBody", () => {
   it("fetches the single id when not in the timeline", async () => {
     const client = {
       fetchRoomMessagesByStanzaIds: mock(async (_s: string, _c: string, _ids: string[]) =>
-        [archived("sid-new")],
+        [archived("sid-new", "live body", "room@x")],
       ),
     };
     await hydrateSinglePinnedBody({
@@ -241,6 +243,103 @@ describe("hydrateSinglePinnedBody", () => {
       convert: fakeConvert,
     });
     expect(client.fetchRoomMessagesByStanzaIds).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// matchRequestedStanzaId branch coverage
+// ---------------------------------------------------------------------------
+
+describe("matchRequestedStanzaId — branch 2: singular stanza_id field", () => {
+  beforeEach(() => {
+    resetPinnedRooms();
+    resetPinnedMessageBodies();
+  });
+
+  it("caches body under singular stanza_id when stanza_ids array is absent", async () => {
+    // Branch 2: no stanza_ids array, but stanza_id + stanza_id_by are set.
+    const archivedFixture = {
+      id: "wire-id",
+      mam_id: "mam-id",
+      nick: "alice",
+      body: "branch-2 body",
+      createdAt: "x",
+      roomJid: "room@x",
+      message_type: "groupchat",
+      reaction_emojis: [],
+      is_muc: true,
+      mention_uris: [],
+      references: [],
+      markup_spans: [],
+      is_sticker: false,
+      shared_files: [],
+      stanza_id: "uuid-X",
+      stanza_id_by: "room@x",
+      // deliberately no stanza_ids array — branch 1 must not match
+    } as unknown as WasmArchivedMessage;
+
+    const client = {
+      fetchRoomMessagesByStanzaIds: mock(async () => [archivedFixture]),
+    };
+    hydratePinnedRoom("room@x", [pinEntry("uuid-X")]);
+
+    await hydratePinnedBodiesOnPanelOpen({
+      client,
+      spaceId: "s",
+      channelId: "c",
+      roomJid: "room@x",
+      timelineMessages: [],
+      convert: fakeConvert,
+    });
+
+    expect($pinnedMessageBodies.get().get("room@x")?.get("uuid-X")?.body).toBe("branch-2 body");
+  });
+});
+
+describe("matchRequestedStanzaId — wrong-JID fall-through (no match)", () => {
+  beforeEach(() => {
+    resetPinnedRooms();
+    resetPinnedMessageBodies();
+  });
+
+  it("does not match when stanza_ids only has entries with by !== roomJid", async () => {
+    // The stanza_ids array contains only a foreign-by entry; branch 1 must
+    // not match. Branch 2 has no stanza_id_by. Result: no cache entry.
+    const archivedFixture = {
+      id: "uuid-canonical",
+      mam_id: "mam-id",
+      nick: "alice",
+      body: "foreign body",
+      createdAt: "x",
+      roomJid: "room@x",
+      message_type: "groupchat",
+      reaction_emojis: [],
+      is_muc: true,
+      mention_uris: [],
+      references: [],
+      markup_spans: [],
+      is_sticker: false,
+      shared_files: [],
+      stanza_ids: [{ by: "foreign.example", id: "uuid-canonical" }],
+    } as unknown as WasmArchivedMessage;
+
+    const client = {
+      fetchRoomMessagesByStanzaIds: mock(async () => [archivedFixture]),
+    };
+    hydratePinnedRoom("room@x", [pinEntry("uuid-canonical")]);
+
+    await hydratePinnedBodiesOnPanelOpen({
+      client,
+      spaceId: "s",
+      channelId: "c",
+      roomJid: "room@x",
+      timelineMessages: [],
+      convert: fakeConvert,
+    });
+
+    // Neither branch matched → nothing cached.
+    const room = $pinnedMessageBodies.get().get("room@x");
+    expect(room?.size ?? 0).toBe(0);
   });
 });
 

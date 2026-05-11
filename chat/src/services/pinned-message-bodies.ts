@@ -32,26 +32,30 @@ import type { WasmArchivedMessage } from "@/lib/xmpp/wasm-types";
  * Match an archived message against a set of REQUESTED stanza-ids, preferring
  * the room-scoped XEP-0359 id (the canonical UUID pins reference). Returns the
  * matched requested id so that the cache key equals what the caller asked for.
+ *
+ * Contract: the server's stanza-id filter guarantees only messages whose
+ * XEP-0359 room-scoped stanza-id is in the requested set are returned. Both
+ * archive paths expose that id either through the `stanza_ids` array (branch 1)
+ * or the singular `stanza_id`/`stanza_id_by` fields (branch 2).
  */
 function matchRequestedStanzaId(
   archived: WasmArchivedMessage,
   roomJid: string,
   requested: Set<string>,
 ): string | null {
-  // Room-stamped XEP-0359 id (the canonical UUID pin uses).
+  // Branch 1: the canonical room-scoped XEP-0359 stanza-id, where the
+  // wasm `stanza_ids` array contains a `by === roomJid` entry. This is
+  // the production path for well-formed XEP-0313 §5.1.2 archives.
   const roomStamped = archived.stanza_ids?.find((s) => s.by === roomJid)?.id;
   if (roomStamped && requested.has(roomStamped)) return roomStamped;
-  // Fallback: singular stanza_id field scoped to the room.
-  if (
-    archived.stanza_id &&
-    archived.stanza_id_by === roomJid &&
-    requested.has(archived.stanza_id)
-  ) {
+
+  // Branch 2: the singular `stanza_id` field (some archive paths
+  // surface the canonical id this way instead of the array).
+  if (archived.stanza_id && archived.stanza_id_by === roomJid && requested.has(archived.stanza_id)) {
     return archived.stanza_id;
   }
-  // Last resort: the wire message id (covers legacy clients that use the
-  // canonical UUID as the wire id attribute).
-  if (archived.id && requested.has(archived.id)) return archived.id;
+
+  // No match — caller drops this entry.
   return null;
 }
 

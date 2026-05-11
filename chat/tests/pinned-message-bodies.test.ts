@@ -87,4 +87,27 @@ describe("$pinnedMessageBodies", () => {
     cachePinnedMessageBodies("room@x", [], epoch);
     expect($pinnedMessageBodies.get().size).toBe(0);
   });
+
+  it("evicting after reset is a no-op", () => {
+    const epoch = pinnedMessageBodiesEpoch();
+    cachePinnedMessageBody("room@x", "sid-A", makeMessage("m1"), epoch);
+    resetPinnedMessageBodies();
+    expect(() => evictPinnedMessageBody("room@x", "sid-A")).not.toThrow();
+    expect($pinnedMessageBodies.get().size).toBe(0);
+  });
+
+  it("cachePinnedMessageBodies with duplicate stanza-ids keeps the last write", () => {
+    const epoch = pinnedMessageBodiesEpoch();
+    cachePinnedMessageBodies(
+      "room@x",
+      [
+        { stanzaId: "A", message: makeMessage("m1") },
+        { stanzaId: "A", message: makeMessage("m2") },
+      ],
+      epoch,
+    );
+    const room = $pinnedMessageBodies.get().get("room@x");
+    expect(room?.size).toBe(1);
+    expect(room?.get("A")?.id).toBe("m2");
+  });
 });

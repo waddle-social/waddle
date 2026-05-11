@@ -12,7 +12,7 @@
 // `<MessageBody compact />` renders images, video, audio, PDFs,
 // downloadables, and extension cards. Empty preview.text + no live
 // body → "Original message no longer available." italic fallback.
-import { computed, ref } from "vue";
+import { computed, ref, watch } from "vue";
 import { useStore } from "@nanostores/vue";
 import { Pin, X } from "lucide-vue-next";
 
@@ -95,12 +95,31 @@ const lightboxOpen = ref(false);
 const lightboxImages = ref<ResolvedLightboxImage[]>([]);
 const lightboxIndex = ref(0);
 
-function handleImageClick(images: ResolvedLightboxImage[], index: number) {
+// Track which pinned entry's images currently populate the lightbox so we
+// can close it if that entry is unpinned while the lightbox is open.
+// When an entry is unpinned its <MessageBody> unmounts and revokes the
+// blob URLs, leaving the lightbox with a dead blob: reference that renders
+// as a broken image. Closing proactively prevents that UX glitch.
+const lightboxSourceStanzaId = ref<string | null>(null);
+
+function handleImageClick(images: ResolvedLightboxImage[], index: number, entryStanzaId: string) {
   if (images.length === 0) return;
   lightboxImages.value = images;
   lightboxIndex.value = index;
   lightboxOpen.value = true;
+  lightboxSourceStanzaId.value = entryStanzaId;
 }
+
+watch(resolvedEntries, (entries) => {
+  if (!lightboxOpen.value) return;
+  const source = lightboxSourceStanzaId.value;
+  if (!source) return;
+  const stillPresent = entries.some(({ entry }) => entry.target_stanza_id === source);
+  if (!stillPresent) {
+    lightboxOpen.value = false;
+    lightboxSourceStanzaId.value = null;
+  }
+});
 </script>
 
 <template>
@@ -160,7 +179,7 @@ function handleImageClick(images: ResolvedLightboxImage[], index: number) {
             v-else
             :message="live"
             compact
-            :on-image-click="handleImageClick"
+            :on-image-click="(images, index) => handleImageClick(images, index, entry.target_stanza_id)"
           />
         </template>
         <template v-else>
