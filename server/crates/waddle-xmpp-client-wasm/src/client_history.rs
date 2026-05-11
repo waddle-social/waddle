@@ -25,6 +25,7 @@ impl WaddleClient {
                 None,
                 None,
                 None,
+                None,
             );
             let page = send_mam_query_command(inner, iq, query_id).await?;
             to_js_value(&mam_page_to_js(page))
@@ -48,6 +49,7 @@ impl WaddleClient {
                 Some(&query),
                 None,
                 None,
+                None,
             );
             let page = send_mam_query_command(inner, iq, query_id).await?;
             to_js_value(&mam_page_to_js(page))
@@ -69,6 +71,7 @@ impl WaddleClient {
                 None,
                 None,
                 Some(&query),
+                None,
                 None,
                 None,
             );
@@ -106,6 +109,7 @@ impl WaddleClient {
                 None,
                 None,
                 None,
+                None,
             );
             let result = send_mam_query_command(inner, iq, query_id).await?;
             to_js_value(&mam_page_to_js(result))
@@ -136,6 +140,7 @@ impl WaddleClient {
                 before.as_deref(),
                 None,
                 Some(&peer_jid),
+                None,
                 None,
                 None,
                 None,

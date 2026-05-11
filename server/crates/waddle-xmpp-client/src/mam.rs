@@ -8,7 +8,8 @@
 use chrono::{DateTime, Utc};
 use minidom::Element;
 use waddle_xmpp_core::mam::{
-    DELAY_NS, FORWARD_NS, FULLTEXT_MAM_FIELD, MAM_NS, RSM_NS, WADDLE_MAM_THREAD_FIELD,
+    DELAY_NS, FORWARD_NS, FULLTEXT_MAM_FIELD, MAM_NS, RSM_NS, STANZA_ID_FILTER_FIELD,
+    WADDLE_MAM_THREAD_FIELD,
 };
 use waddle_xmpp_core::xep0359::{OriginId, StanzaId as StableStanzaId, NS_SID as XEP0359_NS};
 
@@ -183,6 +184,7 @@ pub fn build_mam_iq(
         None,
         None,
         None,
+        None,
     )
 }
 
@@ -211,7 +213,7 @@ fn parse_archived_author_real_jid(inner: &Element) -> Option<String> {
 
 #[expect(
     clippy::too_many_arguments,
-    reason = "Phase 3 API shape is required by the wasm bindings and TS parity"
+    reason = "Phase 3 API shape is required by the wasm bindings and TS parity; stanza-id filter adds 12th param"
 )]
 pub fn build_mam_iq_extended(
     iq_id: &str,
@@ -225,6 +227,7 @@ pub fn build_mam_iq_extended(
     fulltext: Option<&str>,
     start: Option<&str>,
     end: Option<&str>,
+    stanza_ids: Option<&[&str]>,
 ) -> Element {
     let mut rsm = Element::builder("set", RSM_NS).append(
         Element::builder("max", RSM_NS)
@@ -265,6 +268,17 @@ pub fn build_mam_iq_extended(
     }
     if let Some(end) = end {
         form = form.append(build_form_field(MAM_END_FIELD, end));
+    }
+    if let Some(stanza_ids) = stanza_ids {
+        if !stanza_ids.is_empty() {
+            let mut field = Element::builder("field", DATA_FORMS_NS)
+                .attr("var", STANZA_ID_FILTER_FIELD)
+                .attr("type", "text-multi");
+            for id in stanza_ids {
+                field = field.append(Element::builder("value", DATA_FORMS_NS).append(*id).build());
+            }
+            form = form.append(field.build());
+        }
     }
 
     let query = Element::builder("query", MAM_NS)

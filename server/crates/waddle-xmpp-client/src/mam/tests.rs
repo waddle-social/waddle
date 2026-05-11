@@ -370,6 +370,7 @@ fn build_mam_iq_extended_supports_thread_fulltext_and_after() {
         Some("needle"),
         Some("2024-01-01T00:00:00Z"),
         Some("2024-01-31T23:59:59Z"),
+        None,
     );
     let query = iq.get_child("query", MAM_NS).expect("query child");
     let form = query.get_child("x", DATA_FORMS_NS).expect("form child");
@@ -416,6 +417,7 @@ fn build_mam_iq_extended_supports_latest_before_marker() {
         None,
         None,
         None,
+        None,
     );
     let before = iq
         .get_child("query", MAM_NS)
@@ -454,6 +456,92 @@ fn build_mam_iq_preserves_existing_before_behavior() {
         })
         .collect();
     assert!(fields.contains(&("with".to_string(), "bob@example.com".to_string())));
+}
+
+// ── XEP-0359 stanza-id filter tests ─────────────────────────────────────
+
+#[cfg(test)]
+mod stanza_id_filter_tests {
+    use minidom::Element;
+    use waddle_xmpp_core::mam::{MAM_NS, STANZA_ID_FILTER_FIELD};
+
+    use super::super::{build_mam_iq_extended, DATA_FORMS_NS};
+
+    #[test]
+    fn builder_appends_stanza_id_filter_when_provided() {
+        let iq = build_mam_iq_extended(
+            "iq1",
+            "q1",
+            10,
+            None,
+            None,
+            None,
+            Some("room@conf.example"),
+            None,
+            None,
+            None,
+            None,
+            Some(&["sid-A", "sid-B"]),
+        );
+        let query = iq.get_child("query", MAM_NS).expect("query child");
+        let form = query.get_child("x", DATA_FORMS_NS).expect("form");
+        let field = form
+            .children()
+            .find(|c| c.name() == "field" && c.attr("var") == Some(STANZA_ID_FILTER_FIELD))
+            .expect("stanza-id filter field present");
+        let values: Vec<String> = field
+            .children()
+            .filter(|c| c.name() == "value")
+            .map(Element::text)
+            .collect();
+        assert_eq!(values, vec!["sid-A".to_string(), "sid-B".to_string()]);
+    }
+
+    #[test]
+    fn builder_omits_stanza_id_filter_when_none() {
+        let iq = build_mam_iq_extended(
+            "iq1",
+            "q1",
+            10,
+            None,
+            None,
+            None,
+            Some("room@conf.example"),
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        let query = iq.get_child("query", MAM_NS).expect("query child");
+        let form = query.get_child("x", DATA_FORMS_NS).expect("form");
+        assert!(form
+            .children()
+            .all(|c| c.attr("var") != Some(STANZA_ID_FILTER_FIELD)));
+    }
+
+    #[test]
+    fn builder_omits_stanza_id_filter_when_empty_slice() {
+        let iq = build_mam_iq_extended(
+            "iq1",
+            "q1",
+            10,
+            None,
+            None,
+            None,
+            Some("room@conf.example"),
+            None,
+            None,
+            None,
+            None,
+            Some(&[]),
+        );
+        let query = iq.get_child("query", MAM_NS).expect("query child");
+        let form = query.get_child("x", DATA_FORMS_NS).expect("form");
+        assert!(form
+            .children()
+            .all(|c| c.attr("var") != Some(STANZA_ID_FILTER_FIELD)));
+    }
 }
 
 // ── Query orchestration integration tests ────────────────────────────────
