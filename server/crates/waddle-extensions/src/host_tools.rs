@@ -4,7 +4,8 @@ use thiserror::Error;
 use xmpp_parsers::jid::{BareJid, FullJid, Jid};
 
 use crate::types::{
-    DisplayText, ExtensionEnvelope, PubSubNode, ReplyTarget, RoomJid, StanzaId, ThreadId,
+    DisplayText, ExtensionEnvelope, ExtensionPayload, PubSubItemId, PubSubNode, ReplyTarget,
+    RoomJid, StanzaId, ThreadId,
 };
 
 #[derive(Debug, Clone)]
@@ -14,6 +15,7 @@ pub struct InvocationContext {
     pub requester: Option<BareJid>,
     pub source_room: Option<BareJid>,
     pub kind: InvocationKind,
+    pub provider_room_grants: Vec<BareJid>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -21,6 +23,7 @@ pub enum InvocationKind {
     MessageHook,
     Command,
     Launch,
+    ProviderWebhook,
 }
 
 #[derive(Debug, Clone)]
@@ -211,6 +214,25 @@ pub struct SendMessageResponse {
     pub stanza_id: StanzaId,
 }
 
+#[derive(Debug, Clone)]
+pub struct PubSubGetItemsRequest {
+    pub node: PubSubNode,
+    pub max_items: Option<u32>,
+    pub item_ids: Vec<PubSubItemId>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PubSubStoredItem {
+    pub id: PubSubItemId,
+    pub payload: ExtensionPayload,
+    pub publisher: Option<BareJid>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PubSubGetItemsResponse {
+    pub items: Vec<PubSubStoredItem>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HostToolErrorCode {
     Denied,
@@ -286,6 +308,12 @@ pub trait ExtensionHostTools: Send + Sync + 'static {
         context: &InvocationContext,
         request: SendMessageRequest,
     ) -> Result<SendMessageResponse, HostToolError>;
+
+    async fn pubsub_get_items(
+        &self,
+        context: &InvocationContext,
+        request: PubSubGetItemsRequest,
+    ) -> Result<PubSubGetItemsResponse, HostToolError>;
 }
 
 #[derive(Debug, Default)]
@@ -346,6 +374,14 @@ impl ExtensionHostTools for DenyingExtensionHostTools {
         _context: &InvocationContext,
         _request: SendMessageRequest,
     ) -> Result<SendMessageResponse, HostToolError> {
+        Err(unavailable())
+    }
+
+    async fn pubsub_get_items(
+        &self,
+        _context: &InvocationContext,
+        _request: PubSubGetItemsRequest,
+    ) -> Result<PubSubGetItemsResponse, HostToolError> {
         Err(unavailable())
     }
 }

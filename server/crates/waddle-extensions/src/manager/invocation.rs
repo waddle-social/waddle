@@ -103,6 +103,37 @@ impl ExtensionManager {
         Vec::new()
     }
 
+    pub async fn invoke_provider_webhook(
+        &self,
+        plugin_name: &str,
+        event: ProviderWebhook,
+    ) -> Vec<ExtensionEffect> {
+        let Ok(plugin_id) = PluginId::new(plugin_name.to_string()) else {
+            return Vec::new();
+        };
+        let waddle_id = event.waddle_id.clone();
+        let event = ExtensionEvent::ProviderWebhook(event);
+        for actor in &self.actors {
+            if actor.manifest().id == plugin_id {
+                return match timeout(
+                    EXTENSION_PROVIDER_WEBHOOK_TIMEOUT,
+                    actor.handle_event_for_waddle(event, waddle_id),
+                )
+                .await
+                {
+                    Ok(effects) => self.sign_effects(effects),
+                    Err(_) => vec![ExtensionEffect::HostWarning(
+                        DisplayText::new(format!(
+                            "Extension provider webhook {plugin_name} timed out"
+                        ))
+                        .expect("timeout warning is non-empty"),
+                    )],
+                };
+            }
+        }
+        Vec::new()
+    }
+
     pub fn validates_launch_invocation(&self, request: LaunchValidationRequest<'_>) -> bool {
         let Ok(plugin_id) = PluginId::new(request.plugin_name.to_string()) else {
             return false;

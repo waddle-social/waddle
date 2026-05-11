@@ -37,6 +37,31 @@ fn payload_namespace_accepts_framework_namespace() {
 }
 
 #[test]
+fn pubsub_node_declaration_does_not_grant_prefix_or_sibling_nodes() {
+    let mut manifest = manifest_with(Vec::new());
+    manifest.pubsub_nodes = vec![
+        PubSubNode::new("urn:waddle:web-integration:1:github:routes")
+            .expect("declared pubsub node"),
+    ];
+
+    assert!(manifest.declares_pubsub_node(
+        &PubSubNode::new("urn:waddle:web-integration:1:github:routes")
+            .expect("declared pubsub node")
+    ));
+    assert!(!manifest.declares_pubsub_node(
+        &PubSubNode::new("urn:waddle:web-integration:1:github").expect("prefix pubsub node")
+    ));
+    assert!(!manifest.declares_pubsub_node(
+        &PubSubNode::new("urn:waddle:web-integration:1:github:routes-extra")
+            .expect("sibling pubsub node")
+    ));
+    assert!(!manifest.declares_pubsub_node(
+        &PubSubNode::new("urn:waddle:web-integration:10:github:routes")
+            .expect("version sibling pubsub node")
+    ));
+}
+
+#[test]
 fn pubsub_publish_accepts_framework_extension_item_without_manifest_payload_rule() {
     let manifest = ExtensionManifest {
         id: PluginId::new("test-extension").expect("plugin id"),

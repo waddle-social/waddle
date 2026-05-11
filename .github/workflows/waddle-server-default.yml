@@ -95,6 +95,7 @@ jobs:
           server/target/wasm32-wasip2/release/link_board.wasm
           server/target/wasm32-wasip2/release/ai_chatbot.wasm
           server/target/wasm32-wasip2/release/decision_polls.wasm
+          server/target/wasm32-wasip2/release/github.wasm
         if-no-files-found: ignore
         include-hidden-files: true
   checkCiDrift:

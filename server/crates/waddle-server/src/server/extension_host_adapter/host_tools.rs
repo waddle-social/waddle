@@ -216,6 +216,83 @@ impl ext_host::ExtensionHostTools for ExtensionHostAdapter {
             .map_err(host_tool_error)?;
         Ok(ext_host::SendMessageResponse { stanza_id })
     }
+
+    async fn pubsub_get_items(
+        &self,
+        context: &ext_host::InvocationContext,
+        request: ext_host::PubSubGetItemsRequest,
+    ) -> Result<ext_host::PubSubGetItemsResponse, ext_host::HostToolError> {
+        // Authorization: reads are limited to the PubSub nodes explicitly
+        // declared by the calling extension's manifest.
+        let manifest = self
+            .state
+            .deps
+            .protocol
+            .extension_manager
+            .manifest_for_plugin(context.plugin_id.as_str())
+            .ok_or_else(|| {
+                host_tool_error(ExtensionHostAdapterError::Protocol(format!(
+                    "extension {} is not loaded",
+                    context.plugin_id.as_str()
+                )))
+            })?;
+        let node_name = request.node.as_str();
+        if !manifest.declares_pubsub_node(&request.node) {
+            return Err(ext_host::HostToolError::denied(
+                DisplayText::new(format!(
+                    "pubsub node {node_name} is outside extension {} declared nodes",
+                    context.plugin_id.as_str()
+                ))
+                .expect("denied message non-empty"),
+            ));
+        }
+
+        let owner: BareJid =
+            self.state
+                .deps
+                .service_domains
+                .extensions
+                .parse()
+                .map_err(|error: jid::Error| {
+                    host_tool_error(ExtensionHostAdapterError::Protocol(error.to_string()))
+                })?;
+        let id_filter = request
+            .item_ids
+            .iter()
+            .map(|id| id.as_str().to_string())
+            .collect::<Vec<_>>();
+        let stored = self
+            .state
+            .deps
+            .protocol
+            .pubsub_storage
+            .get_items(&owner, node_name, request.max_items, &id_filter)
+            .await
+            .map_err(|error| {
+                host_tool_error(ExtensionHostAdapterError::Storage(error.to_string()))
+            })?;
+        let mut items = Vec::with_capacity(stored.len());
+        for entry in stored {
+            let Ok(id) = waddle_extensions::PubSubItemId::new(entry.id) else {
+                continue;
+            };
+            let Some(xml) = entry.payload_xml.as_deref() else {
+                continue;
+            };
+            let Ok(element) = xml.parse::<minidom::Element>() else {
+                continue;
+            };
+            let Ok(payload) = waddle_extensions::ExtensionPayload::from_minidom(&element) else {
+                continue;
+            };
+            items.push(ext_host::PubSubStoredItem {
+                id,
+                payload,
+                publisher: entry.publisher,
+            });
+        }
+        Ok(ext_host::PubSubGetItemsResponse { items })
+    }
 }
 
 impl ExtensionHostAdapter {
@@ -223,6 +300,19 @@ impl ExtensionHostAdapter {
         &self,
         context: &ext_host::InvocationContext,
     ) -> Result<ExtensionInvocation, ext_host::HostToolError> {
+        if context.kind == ext_host::InvocationKind::ProviderWebhook {
+            let actor_jid = self
+                .plugin_actor_jid(&context.plugin_id)
+                .map_err(host_tool_error)?;
+            return Ok(ExtensionInvocation {
+                session: None,
+                actor_jid,
+                plugin_id: context.plugin_id.clone(),
+                source_room: context.source_room.clone(),
+                kind: context.kind,
+                provider_room_grants: context.provider_room_grants.clone(),
+            });
+        }
         let Some(requester) = context.requester.as_ref() else {
             return Err(host_tool_error(ExtensionHostAdapterError::NotAuthorized));
         };
@@ -230,6 +320,7 @@ impl ExtensionHostAdapter {
             requester,
             context.plugin_id.clone(),
             context.source_room.clone(),
+            context.kind,
         )
         .await
     }
@@ -239,6 +330,7 @@ impl ExtensionHostAdapter {
         requester: &BareJid,
         plugin_id: waddle_extensions::PluginId,
         source_room: Option<BareJid>,
+        kind: ext_host::InvocationKind,
     ) -> Result<ExtensionInvocation, ext_host::HostToolError> {
         let Some(localpart) = requester.node() else {
             return Err(host_tool_error(ExtensionHostAdapterError::NotAuthorized));
@@ -282,10 +374,12 @@ impl ExtensionHostAdapter {
                 host_tool_error(ExtensionHostAdapterError::Protocol(error.to_string()))
             })?;
         Ok(ExtensionInvocation {
-            session: Session::new(&user_id, &username, &xmpp_localpart),
+            session: Some(Session::new(&user_id, &username, &xmpp_localpart)),
             actor_jid,
             plugin_id,
             source_room,
+            kind,
+            provider_room_grants: Vec::new(),
         })
     }
 }

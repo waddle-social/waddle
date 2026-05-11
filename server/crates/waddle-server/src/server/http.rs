@@ -191,6 +191,8 @@ pub(crate) async fn create_router(
         Arc::clone(&drain_complete),
     );
 
+    let extension_webhooks_router =
+        routes::extension_webhooks::router(Arc::clone(&websocket_state));
     let websocket_router = routes::websocket::router(websocket_state.clone());
 
     // Upload router for XEP-0363 HTTP File Upload
@@ -228,7 +230,8 @@ pub(crate) async fn create_router(
         .merge(auth_router)
         .merge(device_router)
         .merge(xmpp_oauth_router)
-        .merge(auth_page_router);
+        .merge(auth_page_router)
+        .merge(extension_webhooks_router);
 
     // Test-only profile-publish route. Only mounted when:
     // 1. The fixed-account flag is on (the test harness opt-in).
@@ -328,6 +331,12 @@ async fn create_websocket_state(
 
     let caps_resolver = Arc::new(crate::server::caps_resolution::CapsResolver::default());
 
+    let provider_ingress = Arc::new(
+        crate::server::routes::extension_webhooks::ProviderIngressRegistry::from_env()
+            .map_err(|error| anyhow::anyhow!("failed to load provider webhook config: {error}"))?,
+    );
+    let provider_dispatch_tasks =
+        crate::server::routes::extension_webhooks::ProviderDispatchTracker::new();
     let websocket_state = Arc::new(WebSocketState {
         deps: WebSocketDeps {
             app_state: state.clone(),
@@ -353,6 +362,8 @@ async fn create_websocket_state(
                 profile_publish_tracker: tokio_util::task::TaskTracker::new(),
             },
             occupant_id_secret: server_config.occupant_id_secret.clone(),
+            provider_ingress,
+            provider_dispatch_tasks,
         },
     });
     deferred_extension_host_tools.set(Arc::new(extension_host_adapter::ExtensionHostAdapter::new(

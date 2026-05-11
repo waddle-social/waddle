@@ -153,6 +153,7 @@ pub(crate) enum ExtensionBotDispatchError {
 pub(crate) async fn dispatch_extension_bot_groupchat_response(
     deps: &Deps<'_>,
     room_jid: BareJid,
+    bot_full: FullJid,
     response: ExtensionRoomMessage,
 ) -> Result<ExtensionRoomDispatchResult, ExtensionBotDispatchError> {
     let mut outcome = InterpretOutcome::default();
@@ -190,7 +191,6 @@ pub(crate) async fn dispatch_extension_bot_groupchat_response(
             return Err(ExtensionBotDispatchError::RoomLookupFailed);
         }
     };
-    let bot_full = bot_full_jid(&state.deps.auth_state.xmpp_domain);
     match room_actor
         .ask(GetAffiliation {
             jid: bot_full.to_bare(),

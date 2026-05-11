@@ -18,6 +18,7 @@ fn validates_reference_format() {
         config: serde_json::Value::Object(Default::default()),
         capability_grants: Vec::new(),
         allowed_http_origins: Vec::new(),
+        provider_room_grants: Vec::new(),
         config_secret_files: Default::default(),
         local_path: None,
     };
@@ -49,6 +50,7 @@ fn rejects_reference_with_mutable_registry_tag() {
         config: serde_json::Value::Object(Default::default()),
         capability_grants: Vec::new(),
         allowed_http_origins: Vec::new(),
+        provider_room_grants: Vec::new(),
         config_secret_files: Default::default(),
         local_path: None,
     };
@@ -74,6 +76,7 @@ fn rejects_oci_module_tag_field_even_when_digest_is_set() {
         config: serde_json::Value::Object(Default::default()),
         capability_grants: Vec::new(),
         allowed_http_origins: Vec::new(),
+        provider_room_grants: Vec::new(),
         config_secret_files: Default::default(),
         local_path: None,
     };
@@ -174,6 +177,7 @@ fn rejects_invalid_cache_component() {
         config: serde_json::Value::Object(Default::default()),
         capability_grants: Vec::new(),
         allowed_http_origins: Vec::new(),
+        provider_room_grants: Vec::new(),
         config_secret_files: Default::default(),
         local_path: None,
     };
@@ -200,6 +204,7 @@ fn cache_path_uses_sanitized_digest() {
         config: serde_json::Value::Object(Default::default()),
         capability_grants: Vec::new(),
         allowed_http_origins: Vec::new(),
+        provider_room_grants: Vec::new(),
         config_secret_files: Default::default(),
         local_path: None,
     };

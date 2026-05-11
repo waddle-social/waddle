@@ -7,9 +7,11 @@
 
 use std::sync::Arc;
 
-use jid::{BareJid, Jid};
+use jid::{BareJid, FullJid, Jid};
 use kameo::actor::ActorRef;
-use waddle_extensions::{DisplayText, ReplyTarget, RoomJid, StanzaId, ThreadId};
+use waddle_extensions::{
+    host_tools::InvocationKind, DisplayText, PluginId, ReplyTarget, RoomJid, StanzaId, ThreadId,
+};
 use waddle_xmpp::{
     muc::{
         room_actor::{GetSnapshot, RoomActor},
@@ -65,8 +67,12 @@ impl ExtensionHostAdapter {
                 {
                     return Err(ExtensionHostAdapterError::NotAuthorized);
                 }
-                self.authorize_room(invocation, &room, Permission::SendMessage)
-                    .await?;
+                if invocation.kind == InvocationKind::ProviderWebhook {
+                    self.authorize_provider_room(invocation, &room).await?;
+                } else {
+                    self.authorize_room(invocation, &room, Permission::SendMessage)
+                        .await?;
+                }
                 let mut extensions = request.extensions;
                 if let Some(envelope) = extensions.as_mut() {
                     if envelope_has_cross_room_launch(envelope, &room)
@@ -99,11 +105,17 @@ impl ExtensionHostAdapter {
                     reply_to: request.reply_to,
                     extensions,
                 };
-                let deps = self.interpret_deps(Some(&invocation.session));
-                let result =
-                    interpret::dispatch_extension_bot_groupchat_response(&deps, room, response)
-                        .await
-                        .map_err(|error| ExtensionHostAdapterError::Protocol(error.to_string()))?;
+                let session = invocation.session.as_ref();
+                let deps = self.interpret_deps(session);
+                let room_sender = self.plugin_actor_jid(&invocation.plugin_id)?;
+                let result = interpret::dispatch_extension_bot_groupchat_response(
+                    &deps,
+                    room,
+                    room_sender,
+                    response,
+                )
+                .await
+                .map_err(|error| ExtensionHostAdapterError::Protocol(error.to_string()))?;
                 if result.outcome.close {
                     return Err(ExtensionHostAdapterError::Protocol(
                         "bot groupchat dispatch requested transport close".to_string(),
@@ -112,6 +124,9 @@ impl ExtensionHostAdapter {
                 Ok(result.stanza_id)
             }
             HostMessageTarget::Direct(target) => {
+                if invocation.kind == InvocationKind::ProviderWebhook {
+                    return Err(ExtensionHostAdapterError::NotAuthorized);
+                }
                 self.authorize_direct_send(invocation, &target).await?;
                 self.dispatch_direct(
                     invocation,
@@ -172,7 +187,7 @@ impl ExtensionHostAdapter {
         let events = sm.handle(InboundEvent::FrameReceived(InboundFrame::Stanza(Box::new(
             Stanza::Message(message),
         ))));
-        let deps = self.interpret_deps(Some(&invocation.session));
+        let deps = self.interpret_deps(invocation.session.as_ref());
         let outcome = interpret::interpret(events, &deps).await;
         if outcome.close {
             return Err(ExtensionHostAdapterError::Protocol(
@@ -322,7 +337,10 @@ impl ExtensionHostAdapter {
         let Some(channel_id) = waddle_xmpp::parse_managed_room_jid(room) else {
             return Err(ExtensionHostAdapterError::NotAuthorized);
         };
-        let subject = Subject::user(&invocation.session.user_id);
+        let Some(session) = invocation.session.as_ref() else {
+            return Err(ExtensionHostAdapterError::NotAuthorized);
+        };
+        let subject = Subject::user(&session.user_id);
         if self
             .permission_allowed(
                 subject,
@@ -384,7 +402,10 @@ impl ExtensionHostAdapter {
         object: Object,
         permission: Permission,
     ) -> Result<bool, ExtensionHostAdapterError> {
-        let subject = Subject::user(&invocation.session.user_id);
+        let Some(session) = invocation.session.as_ref() else {
+            return Err(ExtensionHostAdapterError::NotAuthorized);
+        };
+        let subject = Subject::user(&session.user_id);
         if self
             .permission_allowed(subject.clone(), object, permission)
             .await?
@@ -398,6 +419,39 @@ impl ExtensionHostAdapter {
             Permission::Owner,
         )
         .await
+    }
+
+    async fn authorize_provider_room(
+        &self,
+        invocation: &ExtensionInvocation,
+        room: &BareJid,
+    ) -> Result<(), ExtensionHostAdapterError> {
+        if !invocation
+            .provider_room_grants
+            .iter()
+            .any(|granted| granted == room)
+        {
+            return Err(ExtensionHostAdapterError::NotAuthorized);
+        }
+        let Some(_channel_id) = waddle_xmpp::parse_managed_room_jid(room) else {
+            return Err(ExtensionHostAdapterError::NotAuthorized);
+        };
+        self.room_actor(room).await.map(|_| ())
+    }
+
+    pub(super) fn plugin_actor_jid(
+        &self,
+        plugin_id: &PluginId,
+    ) -> Result<FullJid, ExtensionHostAdapterError> {
+        let bare: BareJid = format!(
+            "{}@{}",
+            plugin_id.as_str(),
+            self.state.deps.service_domains.extensions
+        )
+        .parse()
+        .map_err(|error: jid::Error| ExtensionHostAdapterError::Protocol(error.to_string()))?;
+        bare.with_resource_str("bot")
+            .map_err(|error| ExtensionHostAdapterError::Protocol(error.to_string()))
     }
 }
 

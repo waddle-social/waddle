@@ -107,6 +107,14 @@ impl ExtensionHostTools for MockHostTools {
             stanza_id: StanzaId::new("extension-stanza").expect("stanza id"),
         })
     }
+
+    async fn pubsub_get_items(
+        &self,
+        _context: &InvocationContext,
+        _request: host_domain::PubSubGetItemsRequest,
+    ) -> std::result::Result<host_domain::PubSubGetItemsResponse, HostToolError> {
+        Err(unsupported())
+    }
 }
 
 #[tokio::test]
@@ -317,6 +325,7 @@ fn host_state_with_kind(
             requester: Some("alice@example.com".parse().expect("requester jid")),
             source_room: Some("room@muc.example.com".parse().expect("room jid")),
             kind,
+            provider_room_grants: Vec::new(),
         },
         "{}".to_string(),
         grants,

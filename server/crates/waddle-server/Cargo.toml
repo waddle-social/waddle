@@ -34,6 +34,7 @@ waddle-extensions = { path = "../waddle-extensions" }
 waddle-ecdysis = { path = "../waddle-ecdysis" }
 jid = { workspace = true }
 dashmap = { workspace = true }
+minidom = { workspace = true }
 
 xmpp-parsers = { workspace = true }
 quick-xml = { workspace = true }

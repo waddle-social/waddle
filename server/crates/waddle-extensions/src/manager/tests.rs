@@ -216,6 +216,7 @@ fn merges_secret_file_values_into_effective_config() {
         }),
         capability_grants: Vec::new(),
         allowed_http_origins: Vec::new(),
+        provider_room_grants: Vec::new(),
         config_secret_files,
         local_path: None,
     };
@@ -256,6 +257,7 @@ fn rejects_non_object_config_when_secret_files_are_enabled() {
         config: json!(["not", "an", "object"]),
         capability_grants: Vec::new(),
         allowed_http_origins: Vec::new(),
+        provider_room_grants: Vec::new(),
         config_secret_files,
         local_path: None,
     };
@@ -291,6 +293,7 @@ fn reads_secret_files_from_disk_when_building_effective_config() {
         config: json!({}),
         capability_grants: Vec::new(),
         allowed_http_origins: Vec::new(),
+        provider_room_grants: Vec::new(),
         config_secret_files,
         local_path: None,
     };
@@ -314,6 +317,7 @@ async fn from_config_fails_fast_when_configured_actor_cannot_load() {
             config: json!({}),
             capability_grants: Vec::new(),
             allowed_http_origins: Vec::new(),
+            provider_room_grants: Vec::new(),
             config_secret_files: Default::default(),
             local_path: Some("missing-example-extension-test.wasm".to_string()),
         }],
@@ -353,6 +357,7 @@ fn advertised_feature_namespaces_reject_official_namespaces() {
         config: json!({}),
         capability_grants: Vec::new(),
         allowed_http_origins: Vec::new(),
+        provider_room_grants: Vec::new(),
         config_secret_files: Default::default(),
         local_path: None,
     };
@@ -392,6 +397,7 @@ fn runtime_grants_are_host_configured_and_manifest_bounded() {
             ExtensionCapability::HostMessageSend,
         ],
         allowed_http_origins: Vec::new(),
+        provider_room_grants: Vec::new(),
         config_secret_files: Default::default(),
         local_path: None,
     };

@@ -33,6 +33,10 @@ pub struct ExtensionModuleConfig {
     /// `https://api.example.com`. Empty means no outbound HTTP targets.
     #[serde(default, alias = "allowedHttpOrigins")]
     pub allowed_http_origins: Vec<String>,
+    /// Bare room JIDs this module may target from provider webhook
+    /// invocations that do not have a user requester.
+    #[serde(default, alias = "providerRoomGrants")]
+    pub provider_room_grants: Vec<String>,
     /// Optional map of config key -> file path. Each file is read at startup and
     /// injected into `config` as a string value under the given key.
     ///
@@ -307,7 +311,8 @@ mod tests {
                     "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
                     "namespace": "urn:example:extension:1",
                     "capabilityGrants": ["commands", "outbound.http.request"],
-                    "allowedHttpOrigins": ["https://api.example.test"]
+                    "allowedHttpOrigins": ["https://api.example.test"],
+                    "providerRoomGrants": ["general@muc.example.test"]
                 }]
             }"#,
         );
@@ -326,6 +331,10 @@ mod tests {
         assert_eq!(
             config.modules[0].allowed_http_origins,
             vec!["https://api.example.test"]
+        );
+        assert_eq!(
+            config.modules[0].provider_room_grants,
+            vec!["general@muc.example.test"]
         );
 
         if let Some(previous) = previous {
@@ -346,6 +355,7 @@ mod tests {
             config: Value::Object(Default::default()),
             capability_grants: Vec::new(),
             allowed_http_origins: Vec::new(),
+            provider_room_grants: Vec::new(),
             config_secret_files: Default::default(),
             local_path: None,
         };
@@ -368,6 +378,7 @@ mod tests {
             config: Value::Object(Default::default()),
             capability_grants: Vec::new(),
             allowed_http_origins: Vec::new(),
+            provider_room_grants: Vec::new(),
             config_secret_files: Default::default(),
             local_path: None,
         };
@@ -389,6 +400,7 @@ mod tests {
             config: Value::Object(Default::default()),
             capability_grants: Vec::new(),
             allowed_http_origins: Vec::new(),
+            provider_room_grants: Vec::new(),
             config_secret_files: Default::default(),
             local_path: Some("/srv/waddle/extensions/example-extension.wasm".to_string()),
         };

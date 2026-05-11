@@ -80,7 +80,8 @@ impl ExtensionManager {
             validate_manifest_against_module(module, &manifest)?;
             let actor = actor
                 .with_grants(runtime_grants_for_module(module, &manifest))
-                .with_allowed_http_origins(module.allowed_http_origins.clone());
+                .with_allowed_http_origins(module.allowed_http_origins.clone())
+                .with_provider_room_grants(parse_provider_room_grants(module)?);
             if !plugin_ids.insert(manifest.id.clone()) {
                 bail!(
                     "extension plugin id {} is declared by multiple modules",
@@ -193,4 +194,43 @@ impl ExtensionManager {
     pub fn route_descriptors(&self) -> &[crate::types::ExtensionRouteDescriptor] {
         &self.route_descriptors
     }
+
+    pub fn has_plugin(&self, plugin_name: &str) -> bool {
+        let Ok(plugin_id) = PluginId::new(plugin_name.to_string()) else {
+            return false;
+        };
+        self.actors
+            .iter()
+            .any(|actor| actor.manifest().id == plugin_id)
+    }
+
+    /// Returns a clone of the manifest for the named plugin if it is
+    /// loaded. Used by host tools that need to know an extension's
+    /// declared payload namespace at runtime (e.g. to gate PubSub reads
+    /// to the extension's own namespace).
+    pub fn manifest_for_plugin(
+        &self,
+        plugin_name: &str,
+    ) -> Option<crate::types::ExtensionManifest> {
+        let plugin_id = PluginId::new(plugin_name.to_string()).ok()?;
+        self.actors
+            .iter()
+            .find(|actor| actor.manifest().id == plugin_id)
+            .map(|actor| actor.manifest())
+    }
+}
+
+fn parse_provider_room_grants(module: &ExtensionModuleConfig) -> Result<Vec<BareJid>> {
+    module
+        .provider_room_grants
+        .iter()
+        .map(|room| {
+            room.parse::<BareJid>().map_err(|error| {
+                anyhow::anyhow!(
+                    "extension {} providerRoomGrants entry {room:?} is not a valid bare room JID: {error}",
+                    module.name
+                )
+            })
+        })
+        .collect()
 }

@@ -192,6 +192,11 @@ async fn create_test_websocket_state_with_extension_manager(
                     b"test-occupant-id-secret-32-bytes-long".to_vec(),
                 )
                 .expect("test secret meets length floor"),
+                provider_ingress: Arc::new(
+                    crate::server::routes::extension_webhooks::ProviderIngressRegistry::default(),
+                ),
+                provider_dispatch_tasks:
+                    crate::server::routes::extension_webhooks::ProviderDispatchTracker::new(),
             },
         })
 }

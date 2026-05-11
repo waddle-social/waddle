@@ -67,6 +67,46 @@ interface types {
         value: string,
     }
 
+    record provider-id {
+        value: string,
+    }
+
+    record provider-event-type {
+        value: string,
+    }
+
+    record provider-delivery-id {
+        value: string,
+    }
+
+    record provider-field-name {
+        value: string,
+    }
+
+    record provider-field-text {
+        value: string,
+    }
+
+    record provider-field-number {
+        value: string,
+    }
+
+    variant provider-field-value {
+        null,
+        boolean(bool),
+        number(provider-field-number),
+        text(provider-field-text),
+    }
+
+    record provider-field {
+        path: list<provider-field-name>,
+        value: provider-field-value,
+    }
+
+    record provider-payload {
+        fields: list<provider-field>,
+    }
+
     record pubsub-item-id {
         value: string,
     }
@@ -425,10 +465,19 @@ interface types {
         fields: list<form-field-value>,
     }
 
+    record provider-webhook {
+        waddle-id: waddle-id,
+        provider: provider-id,
+        event-type: provider-event-type,
+        delivery-id: provider-delivery-id,
+        payload: provider-payload,
+    }
+
     variant extension-event {
         message-hook(message-hook),
         command(command-invocation),
         launch(launch-invocation),
+        provider-webhook(provider-webhook),
     }
 
     record pubsub-publish {
@@ -529,6 +578,29 @@ interface types {
 
     record list-room-members-response {
         members: list<room-member>,
+    }
+
+    record pubsub-get-items-request {
+        node: pubsub-node,
+        /// When `none`, all items are returned. When `some(n)`, at most `n`
+        /// most-recent items are returned.
+        max-items: option<u32>,
+        /// When non-empty, only items with these IDs are returned. Order
+        /// of returned items matches the order requested.
+        item-ids: list<pubsub-item-id>,
+    }
+
+    record pubsub-stored-item {
+        id: pubsub-item-id,
+        /// Item payload, encoded as the same xml-token stream the
+        /// extension wrote via `publish-pubsub`.
+        payload: extension-payload,
+        /// Publisher JID when known (None for system-issued items).
+        publisher: option<bare-jid>,
+    }
+
+    record pubsub-get-items-response {
+        items: list<pubsub-stored-item>,
     }
 
     enum presence-availability {
@@ -686,7 +758,9 @@ interface host-tools {
         get-roster-response, host-tool-error, list-channels-request,
         list-channels-response, list-room-members-request,
         list-room-members-response, list-spaces-request, list-spaces-response,
-        mam-query, mam-query-response, send-message-request, send-message-response
+        mam-query, mam-query-response,
+        pubsub-get-items-request, pubsub-get-items-response,
+        send-message-request, send-message-response
     };
 
     list-channels: func(request: list-channels-request) -> result<list-channels-response, host-tool-error>;
@@ -696,6 +770,12 @@ interface host-tools {
     get-roster: func(request: get-roster-request) -> result<get-roster-response, host-tool-error>;
     query-mam: func(query: mam-query) -> result<mam-query-response, host-tool-error>;
     send-message: func(request: send-message-request) -> result<send-message-response, host-tool-error>;
+    /// Read items from a PubSub node the extension owns.
+    ///
+    /// Authorization rule: the host enforces that the requested node
+    /// name lies under the extension's declared payload namespace; a
+    /// caller cannot read another extension's nodes.
+    pubsub-get-items: func(request: pubsub-get-items-request) -> result<pubsub-get-items-response, host-tool-error>;
 }
 
 interface runtime {

@@ -38,6 +38,9 @@ pub(crate) async fn register_extension_commands(
                 else {
                     return extension_warning_result("Extension launch is missing plugin");
                 };
+                let Ok(pubsub_plugin_id) = waddle_extensions::PluginId::new(plugin.clone()) else {
+                    return extension_warning_result("Extension launch plugin is invalid");
+                };
                 let Some(launch) = extension_field_value(&fields, "launch-id")
                     .or_else(|| extension_field_value(&fields, "waddle#launch_id"))
                 else {
@@ -76,6 +79,7 @@ pub(crate) async fn register_extension_commands(
                     room,
                     source_stanza_id,
                 };
+                let command_session_id = ctx.command.session_id.clone();
                 if !manager.validates_launch_invocation(
                     waddle_extensions::manager::LaunchValidationRequest {
                         plugin_name: &plugin,
@@ -99,7 +103,7 @@ pub(crate) async fn register_extension_commands(
                         context,
                         requester: FullJidValue::new(ctx.from.to_string())
                             .expect("requester JID string is non-empty"),
-                        session_id: extension_session_id(ctx.command.session_id),
+                        session_id: extension_session_id(command_session_id.clone()),
                         action: ctx.command.action.map(extension_command_action),
                         fields,
                         form: submitted_form.and_then(extension_data_form),
@@ -114,34 +118,39 @@ pub(crate) async fn register_extension_commands(
                         owner,
                         app_state,
                         extension_manager: manager,
+                        plugin_id: pubsub_plugin_id,
                         authenticated_user_id: ctx.authenticated_user_id,
                     }),
+                    command_session_id,
                 )
                 .await
             }
         })
         .await;
 
-    for (node, name) in extension_manager.command_nodes() {
+    for (plugin_id, descriptor) in extension_manager.command_descriptors() {
         let manager = Arc::clone(&extension_manager);
         let storage = Arc::clone(&pubsub_storage);
         let owner = extension_pubsub_owner.clone();
         let app_state = Arc::clone(&app_state);
-        let registered_node = node.clone();
+        let registered_node = descriptor.node.into_string();
+        let registered_name = descriptor.name.into_string();
+        let command_plugin_id = plugin_id.clone();
         command_registry
-            .register(node, name, move |ctx| {
+            .register(registered_node.clone(), registered_name, move |ctx| {
                 let manager = Arc::clone(&manager);
                 let storage = Arc::clone(&storage);
                 let owner = owner.clone();
                 let app_state = Arc::clone(&app_state);
                 let registered_node = registered_node.clone();
+                let command_plugin_id = command_plugin_id.clone();
                 async move {
                     let waddle_id = match WaddleId::new(ctx.from.to_string()) {
                         Ok(value) => value,
                         Err(error) => {
                             return waddle_xmpp::commands::CommandResult::Completed {
                                 form: None,
-                                notes: vec![waddle_xmpp::commands::Note::warn(format!(
+                                notes: vec![waddle_xmpp::commands::Note::error(format!(
                                     "Invalid requester JID: {error}"
                                 ))],
                             };
@@ -152,6 +161,7 @@ pub(crate) async fn register_extension_commands(
                     let room = extension_field_value(&fields, "room")
                         .or_else(|| extension_field_value(&fields, "waddle#room_jid"))
                         .and_then(|value| ExtensionRoomJid::new(value).ok());
+                    let command_session_id = ctx.command.session_id.clone();
                     let effects = manager
                         .invoke_command(waddle_extensions::manager::CommandInvocationRequest {
                             node: &registered_node,
@@ -164,13 +174,13 @@ pub(crate) async fn register_extension_commands(
                                 Err(error) => {
                                     return waddle_xmpp::commands::CommandResult::Completed {
                                         form: None,
-                                        notes: vec![waddle_xmpp::commands::Note::warn(format!(
+                                        notes: vec![waddle_xmpp::commands::Note::error(format!(
                                             "Invalid requester JID: {error}"
                                         ))],
                                     };
                                 }
                             },
-                            session_id: extension_session_id(ctx.command.session_id),
+                            session_id: extension_session_id(command_session_id.clone()),
                             action: ctx.command.action.map(extension_command_action),
                             fields,
                             form: submitted_form.and_then(extension_data_form),
@@ -183,8 +193,10 @@ pub(crate) async fn register_extension_commands(
                             owner,
                             app_state,
                             extension_manager: manager,
+                            plugin_id: command_plugin_id,
                             authenticated_user_id: ctx.authenticated_user_id,
                         }),
+                        command_session_id,
                     )
                     .await
                 }
@@ -245,6 +257,6 @@ fn extension_field_value(
 fn extension_warning_result(message: &str) -> waddle_xmpp::commands::CommandResult {
     waddle_xmpp::commands::CommandResult::Completed {
         form: None,
-        notes: vec![waddle_xmpp::commands::Note::warn(message.to_string())],
+        notes: vec![waddle_xmpp::commands::Note::error(message.to_string())],
     }
 }

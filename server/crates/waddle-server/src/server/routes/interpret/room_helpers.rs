@@ -1,11 +1,5 @@
 use super::*;
 
-pub(super) fn bot_full_jid(account_domain: &str) -> FullJid {
-    format!("waddle-ai@extensions.{account_domain}/bot")
-        .parse::<FullJid>()
-        .expect("configured XMPP domain produces a valid extension bot JID")
-}
-
 pub(super) fn available_bot_nick(occupants: &[OccupantSnapshot]) -> String {
     const BASE: &str = "waddle";
     if !occupants.iter().any(|occupant| occupant.nick == BASE) {

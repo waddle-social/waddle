@@ -57,6 +57,7 @@ impl HostState {
                 requester: None,
                 source_room: None,
                 kind: InvocationKind::Launch,
+                provider_room_grants: Vec::new(),
             },
             String::new(),
             HashSet::new(),
@@ -256,6 +257,22 @@ impl HostToolsHost for HostState {
         let result = match self.ensure_capability(ExtensionCapability::HostMessageSend) {
             Ok(()) => match request.try_into() {
                 Ok(request) => self.tools.send_message(&self.context, request).await,
+                Err(error) => Err(error),
+            },
+            Err(error) => Err(error),
+        };
+        Ok(result.map(Into::into).map_err(Into::into))
+    }
+
+    async fn pubsub_get_items(
+        &mut self,
+        request: wit_types::PubsubGetItemsRequest,
+    ) -> wasmtime::Result<
+        std::result::Result<wit_types::PubsubGetItemsResponse, wit_types::HostToolError>,
+    > {
+        let result = match self.ensure_capability(ExtensionCapability::PubSubPublish) {
+            Ok(()) => match request.try_into() {
+                Ok(request) => self.tools.pubsub_get_items(&self.context, request).await,
                 Err(error) => Err(error),
             },
             Err(error) => Err(error),
