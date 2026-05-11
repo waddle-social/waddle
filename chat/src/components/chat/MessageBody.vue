@@ -143,6 +143,35 @@ function emitImageClick(file: TimelineSharedFile, _index: number) {
       v-html="styledHtml"
     />
 
+    <!-- Sticker: single image rendered at thumb size, with decryption support.
+         v-else-if chains with displayBody and isGif so only one body/media branch
+         renders per message (XEP-0449 stickers carry a <body> alt-text that must
+         not also render as a text bubble). -->
+    <div v-else-if="isSticker">
+      <img
+        v-if="resolvedAttachmentUrl(imageAttachments[0])"
+        :src="resolvedAttachmentUrl(imageAttachments[0])!"
+        :alt="imageAttachments[0].desc ?? message.body ?? 'Sticker'"
+        :class="[
+          'rounded-lg object-contain',
+          compact ? 'max-w-20 max-h-20' : 'max-w-28 max-h-28',
+        ]"
+        loading="lazy"
+        @click.stop
+      />
+      <div
+        v-else
+        :class="[
+          'type-caption flex flex-col items-center justify-center gap-2 rounded-lg border border-dashed border-border px-4 text-center text-muted-foreground',
+          compact ? 'h-20 w-20' : 'h-28 w-28',
+        ]"
+        @click.stop
+      >
+        <Lock class="h-4 w-4 text-primary/70" />
+        <span>{{ attachmentError(imageAttachments[0]) ?? (isDecryptingAttachment(imageAttachments[0]) ? "Decrypting sticker…" : "Preparing sticker…") }}</span>
+      </div>
+    </div>
+
     <!-- Inline GIF -->
     <div v-else-if="isGif">
       <img
@@ -255,26 +284,8 @@ function emitImageClick(file: TimelineSharedFile, _index: number) {
       </div>
     </div>
 
-    <!-- Sticker: single image rendered at thumb size, with decryption support -->
-    <div v-if="isSticker">
-      <img
-        v-if="resolvedAttachmentUrl(imageAttachments[0])"
-        :src="resolvedAttachmentUrl(imageAttachments[0])!"
-        :alt="imageAttachments[0].desc ?? message.body ?? 'Sticker'"
-        class="max-w-28 max-h-28 rounded-lg object-contain"
-        loading="lazy"
-      />
-      <div
-        v-else
-        class="type-caption flex h-28 w-28 flex-col items-center justify-center gap-2 rounded-lg border border-dashed border-border px-4 text-center text-muted-foreground"
-      >
-        <Lock class="h-4 w-4 text-primary/70" />
-        <span>{{ attachmentError(imageAttachments[0]) ?? (isDecryptingAttachment(imageAttachments[0]) ? "Decrypting sticker…" : "Preparing sticker…") }}</span>
-      </div>
-    </div>
-
     <!-- Image attachments gallery -->
-    <div v-else-if="imageAttachments.length > 0" class="chat-attachment-strip">
+    <div v-if="imageAttachments.length > 0 && !isSticker" class="chat-attachment-strip">
       <div
         v-for="(img, idx) in imageAttachments"
         :key="attachmentKey(img)"
@@ -491,19 +502,31 @@ function emitImageClick(file: TimelineSharedFile, _index: number) {
         v-if="(pdfAttachments.length + downloadableAttachments.length) > 0"
         class="flex flex-col gap-1.5"
       >
-        <a
+        <template
           v-for="file in [...pdfAttachments, ...downloadableAttachments]"
           :key="attachmentKey(file)"
-          :href="resolvedAttachmentUrl(file) || file.url || '#'"
-          target="_blank"
-          rel="noopener noreferrer"
-          class="type-caption inline-flex items-center gap-1.5 rounded-md border border-border bg-background px-2 py-1 text-foreground hover:bg-muted"
-          @click.stop
         >
-          <FileDown class="h-3 w-3" aria-hidden="true" />
-          <span class="truncate">{{ file.name ?? "Attachment" }}</span>
-          <span v-if="file.size" class="text-muted-foreground">{{ formatFileSize(file.size) }}</span>
-        </a>
+          <a
+            v-if="!file.encrypted || resolvedAttachmentUrl(file)"
+            :href="resolvedAttachmentUrl(file) || file.url || '#'"
+            target="_blank"
+            rel="noopener noreferrer"
+            class="type-caption inline-flex items-center gap-1.5 rounded-md border border-border bg-background px-2 py-1 text-foreground hover:bg-muted"
+            @click.stop
+          >
+            <FileDown class="h-3 w-3" aria-hidden="true" />
+            <span class="truncate">{{ file.name ?? "Attachment" }}</span>
+            <span v-if="file.size" class="text-muted-foreground">{{ formatFileSize(file.size) }}</span>
+          </a>
+          <span
+            v-else
+            class="type-caption inline-flex items-center gap-1.5 rounded-md border border-border bg-muted/50 px-2 py-1 text-muted-foreground"
+            title="Decrypting…"
+          >
+            <Lock class="h-3 w-3" aria-hidden="true" />
+            <span class="truncate">{{ file.name ?? "Encrypted attachment" }}</span>
+          </span>
+        </template>
       </div>
     </template>
   </div>
