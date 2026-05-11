@@ -30,15 +30,7 @@ import { formatFileSize, useMessageAttachments } from "@/channels/message-attach
 import { applyShikiToCodeBlocks } from "@/lib/shiki";
 import { useExtensionAnnotationActions } from "@/channels/extension-annotation-actions";
 import type { ExtensionCommandResult } from "@/lib/xmpp/extension-commands";
-
-// Canonical shape for the resolved image list emitted by onImageClick.
-// Matches `LightboxImage` in ImageLightbox.vue (url, name?, width?, height?).
-export type ResolvedLightboxImage = {
-  url: string;
-  name?: string;
-  width?: number;
-  height?: number;
-};
+import type { ResolvedLightboxImage } from "@/components/chat/message-body-types";
 
 const props = withDefaults(
   defineProps<{

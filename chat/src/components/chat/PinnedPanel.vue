@@ -19,7 +19,7 @@ import { Pin, X } from "lucide-vue-next";
 import { $pinnedRooms } from "@/stores/pinned-messages";
 import { $pinnedMessageBodies } from "@/stores/pinned-message-bodies";
 import MessageBody from "@/components/chat/MessageBody.vue";
-import type { ResolvedLightboxImage } from "@/components/chat/MessageBody.vue";
+import type { ResolvedLightboxImage } from "@/components/chat/message-body-types";
 import ImageLightbox from "@/components/ui/ImageLightbox.vue";
 import type { TimelineMessage } from "@/lib/chat-ui";
 import type { WasmPinEntry } from "@/lib/xmpp/wasm-types";

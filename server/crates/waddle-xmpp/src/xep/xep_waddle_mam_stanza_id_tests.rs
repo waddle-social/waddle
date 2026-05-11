@@ -8,11 +8,18 @@
 //! custom data-form fields for archive filtering.
 //!
 //! The wire-level form-field parser tests live in
-//! `waddle_xmpp_core::mam::tests`. This module exercises the end-to-end
+//! `waddle_xmpp_core::mam::tests`. This module exercises the storage
 //! contract: the form field constant matches the Waddle namespace, the
 //! validation caps match the pin protocol they serve, the storage filter
-//! returns only the requested ids, non-occupant access is refused, and
-//! rich payloads survive the round-trip.
+//! returns only the requested ids, no-match queries return an empty
+//! result set (not an error), and rich payloads survive the round-trip
+//! through `build_result_messages`.
+//!
+//! Out of scope: occupancy authz for non-occupant MAM access. XEP-0313
+//! §5.1.3 requires this for members-only rooms, but today the MAM IQ
+//! handler does not enforce it — that pre-existing gap is tracked
+//! separately. See test 4 (`stanza_id_filter_with_no_match_returns_empty_not_error`)
+//! for the storage-level access-agnostic contract.
 
 #![cfg(test)]
 

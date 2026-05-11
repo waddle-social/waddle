@@ -75,7 +75,7 @@ function entry(stanzaId: string, text = "") {
 // Helper: mirrors PinnedPanel's `timelineIndex` computed (all alias keys).
 // ---------------------------------------------------------------------------
 
-export function buildTimelineIndex(
+function buildTimelineIndex(
   timelineMessages: ReadonlyArray<TimelineMessage>,
 ): Map<string, TimelineMessage> {
   const map = new Map<string, TimelineMessage>();
