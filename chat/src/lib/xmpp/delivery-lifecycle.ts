@@ -9,6 +9,12 @@ import type { DeliveryStatus } from "@/lib/chat-ui";
 //                 or self-echo from MUC reflection)
 // - "failed"    — transport gave up (resume failed / no resumable session)
 //
+// "delivered" means *delivered to the server / reflected by the room*, not
+// "read". Read state lives separately on `TimelineMessage.readBy` and is
+// driven by XEP-0333 chat markers. These are distinct lifecycles by design:
+// a message can be "delivered" but never read, and the displayed marker can
+// only move forward independently of any later XEP-0184/0198 signal.
+//
 // Invariants:
 // - "delivered" is terminal — duplicate or stale events MUST NOT downgrade
 //   a confirmed delivery. This guards against XEP-0198's documented

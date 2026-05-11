@@ -153,7 +153,14 @@ export function useChatSend(deps: UseChatSendDeps) {
         }
         if (fromComposer) draft.value = "";
       }
-      onSendComplete(result ?? null, peerJid, isStillActive);
+      // Isolate the post-send side-effect callback so a misbehaving
+      // orchestrator (chat-state cleanup, XEP-0085 "active" send) can't be
+      // mistaken for a send failure and surface as actionError.
+      try {
+        onSendComplete(result ?? null, peerJid, isStillActive);
+      } catch (callbackError) {
+        console.warn("useChatSend onSendComplete callback threw", callbackError);
+      }
     } catch (e) {
       actionError.value = normalizeError(e);
     } finally {

@@ -230,7 +230,14 @@ export function useMucSend(deps: UseMucSendDeps) {
         draft.value = "";
         if (threadCreate) forumPostTitle.value = "";
       }
-      onSendComplete(result ?? null, spaceId, channelId, isStillCurrentChannel);
+      // Isolate the post-send side-effect callback so a misbehaving
+      // orchestrator (chat-state cleanup, XEP-0085 "active" send) can't be
+      // mistaken for a send failure and surface as actionError.
+      try {
+        onSendComplete(result ?? null, spaceId, channelId, isStillCurrentChannel);
+      } catch (callbackError) {
+        console.warn("useMucSend onSendComplete callback threw", callbackError);
+      }
     } catch (e) {
       actionError.value = normalizeError(e);
     } finally {
