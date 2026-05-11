@@ -820,3 +820,68 @@ fn stanza_xml_strips_to_for_groupchat_on_raw_element_fallback() {
         inner_msg.attr("to")
     );
 }
+
+fn build_mam_iq_with_form_fields(fields: &[(&str, Vec<&str>)]) -> Iq {
+    let mut form = Element::builder("x", DATA_FORMS_NS).attr("type", "submit");
+    form = form.append(
+        Element::builder("field", DATA_FORMS_NS)
+            .attr("var", "FORM_TYPE")
+            .attr("type", "hidden")
+            .append(
+                Element::builder("value", DATA_FORMS_NS)
+                    .append(MAM_NS)
+                    .build(),
+            )
+            .build(),
+    );
+    for (var, values) in fields {
+        let mut field = Element::builder("field", DATA_FORMS_NS).attr("var", *var);
+        for value in values {
+            field = field.append(
+                Element::builder("value", DATA_FORMS_NS)
+                    .append(*value)
+                    .build(),
+            );
+        }
+        form = form.append(field.build());
+    }
+    let query = Element::builder("query", MAM_NS)
+        .append(form.build())
+        .build();
+    Iq {
+        from: None,
+        to: None,
+        id: "q1".to_string(),
+        payload: IqType::Set(query),
+    }
+}
+
+#[test]
+fn parses_stanza_id_filter_field() {
+    let iq =
+        build_mam_iq_with_form_fields(&[(STANZA_ID_FILTER_FIELD, vec!["stanza-A", "stanza-B"])]);
+    let (_, query) = parse_mam_query(&iq).expect("parses");
+    assert_eq!(
+        query.stanza_ids,
+        vec!["stanza-A".to_string(), "stanza-B".to_string()]
+    );
+}
+
+#[test]
+fn rejects_oversize_stanza_id_value() {
+    let oversized = "x".repeat(MAX_FILTER_STANZA_ID_LEN + 1);
+    let iq = build_mam_iq_with_form_fields(&[(STANZA_ID_FILTER_FIELD, vec![oversized.as_str()])]);
+    let err = parse_mam_query(&iq).expect_err("must reject");
+    assert!(matches!(err, CoreError::BadRequest(_)));
+}
+
+#[test]
+fn rejects_too_many_stanza_ids() {
+    let values: Vec<String> = (0..=MAX_FILTER_STANZA_IDS)
+        .map(|i| format!("s{i}"))
+        .collect();
+    let refs: Vec<&str> = values.iter().map(String::as_str).collect();
+    let iq = build_mam_iq_with_form_fields(&[(STANZA_ID_FILTER_FIELD, refs)]);
+    let err = parse_mam_query(&iq).expect_err("must reject");
+    assert!(matches!(err, CoreError::BadRequest(_)));
+}

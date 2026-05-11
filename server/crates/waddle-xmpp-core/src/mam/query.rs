@@ -7,7 +7,8 @@ use xmpp_parsers::iq::{Iq, IqType};
 
 use super::types::{MamQuery, RichText, ThreadId};
 use super::{
-    DATA_FORMS_NS, FULLTEXT_MAM_FIELD, MAM_NS, RSM_NS, WADDLE_MAM_THREAD_FIELD, XDATA_VALIDATE_NS,
+    DATA_FORMS_NS, FULLTEXT_MAM_FIELD, MAM_NS, MAX_FILTER_STANZA_IDS, MAX_FILTER_STANZA_ID_LEN,
+    RSM_NS, STANZA_ID_FILTER_FIELD, WADDLE_MAM_THREAD_FIELD, XDATA_VALIDATE_NS,
 };
 use crate::{CoreError, CoreResult};
 
@@ -190,6 +191,24 @@ fn parse_data_form(form: &Element, query: &mut MamQuery) -> CoreResult<()> {
                     .into_iter()
                     .filter(|value| !value.is_empty())
                     .collect();
+            }
+            STANZA_ID_FILTER_FIELD => {
+                let nonempty: Vec<String> = values
+                    .into_iter()
+                    .filter(|value| !value.is_empty())
+                    .collect();
+                if nonempty.len() > MAX_FILTER_STANZA_IDS {
+                    return Err(CoreError::bad_request(Some(format!(
+                        "MAM stanza-id filter exceeds cap: {} > {MAX_FILTER_STANZA_IDS}",
+                        nonempty.len()
+                    ))));
+                }
+                if nonempty.iter().any(|v| v.len() > MAX_FILTER_STANZA_ID_LEN) {
+                    return Err(CoreError::bad_request(Some(format!(
+                        "MAM stanza-id filter value exceeds max length {MAX_FILTER_STANZA_ID_LEN}"
+                    ))));
+                }
+                query.stanza_ids = nonempty;
             }
             WADDLE_MAM_THREAD_FIELD => {
                 query.thread_id = value.and_then(ThreadId::new);
