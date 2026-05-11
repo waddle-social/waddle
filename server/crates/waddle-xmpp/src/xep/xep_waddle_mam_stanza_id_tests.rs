@@ -155,18 +155,18 @@ async fn stanza_id_filter_returns_only_matching_message() {
 
 /// Waddle-specific MAM stanza-id filter (XEP-0313 §4.2 + XEP-0068):
 /// a `{urn:waddle:mam:stanza-id:0}stanza-id` filter that matches no
-/// archived message MUST return an empty result set (not an error). This
-/// corresponds to the access-denied semantic at the storage layer: no data
-/// is disclosed when no match exists.
+/// archived message MUST return an empty result set (not an error). The
+/// storage layer is correctly access-agnostic — it returns messages
+/// scoped to the archive JID regardless of caller.
 ///
-/// Note on the original "non-occupant gets forbidden" requirement: the
-/// forbidden-error is enforced in the MUC IQ dispatcher (room actor), not in
-/// the storage layer. That layer is correctly access-agnostic — it returns
-/// messages scoped to the archive JID regardless of caller. Testing the
-/// dispatcher's auth guard requires a room-actor fixture that would be
-/// disproportionate for this module. The storage-level "no match → empty
-/// result" contract is exercised here as the closest conformant substitute
-/// at this integration level.
+/// **Note on MAM occupancy authz (out of scope for this test):** XEP-0313
+/// §5.1.3 requires that, for members-only MUC archives, only owners /
+/// admins / members can query. Today the MAM IQ handler does not enforce
+/// this — `archive_inbox_upload.rs` only checks that the target domain
+/// matches the MUC domain. The pin-list IQ handler does check occupancy;
+/// the MAM handler does not. That pre-existing gap is tracked as a
+/// separate follow-up; this test does NOT compensate for it, and the
+/// stanza-id filter inherits whatever authz the MAM path provides.
 ///
 /// Integration level: storage API.
 #[tokio::test]
