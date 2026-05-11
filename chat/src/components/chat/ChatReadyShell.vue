@@ -485,6 +485,7 @@ function setPinnedPanelOpen(isOpen: boolean) {
             <PinnedPanel
               :room-jid="activeChannelRoomJid"
               :channel-name="waddles.currentChannel.value?.name ?? ''"
+              :timeline-messages="activeMessages"
               @close="closePinnedPanel"
               @jump-to-message="(stanzaId: string) => jumpToPinnedMessage(stanzaId)"
             />
