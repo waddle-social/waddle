@@ -689,12 +689,28 @@ export function useChannelMessages(
     hasOlderMessages,
     loadingOlderThreadIds,
     threadHasOlder,
-    loadMessages,
     loadOlderMessages,
     ensureMessageLoaded,
     backfillThread,
     loadOlderThreadMessages,
   } = paging;
+
+  // Channel-load entry point. The MAM-paging composable owns paging state,
+  // but search state lives here, so we reset it before delegating — keeping
+  // the pre-#188 invariant that switching channels invalidates in-flight
+  // searches and clears stale results.
+  async function loadMessages(
+    spaceId: string,
+    channelId: string,
+    unreadAtLoad = 0,
+    metadataSeed: TimelineMessage[] = [],
+  ) {
+    searchRequestId++;
+    searchQuery.value = "";
+    searchResults.value = [];
+    isSearching.value = false;
+    await paging.loadMessages(spaceId, channelId, unreadAtLoad, metadataSeed);
+  }
 
   async function selectChannel(channelId: string) {
     messages.value = [];

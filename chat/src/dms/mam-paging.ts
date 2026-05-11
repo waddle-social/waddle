@@ -225,7 +225,20 @@ export function useDmMamPaging(deps: UseDmMamPagingDeps) {
       } catch (e) {
         const classified = classifyMamError(e);
         if (isMamCursorNotFound(classified)) {
+          // §4.3.4 — drop the cursor AND collapse hasOlderMessages so the
+          // UI's "load older" sentinel doesn't keep prompting paging that
+          // would early-return on !before. A fresh loadMessages() resets
+          // both to their initial state.
           oldestArchiveId = null;
+          hasOlderMessages.value = false;
+        } else if (
+          requestId === messageRequestId &&
+          xmppClient.value === client &&
+          activePeerJid.value === peerJid
+        ) {
+          // Non-§4.3.4 failure: surface to the caller instead of silently
+          // returning false.
+          actionError.value = dmLoadErrorMessage(peerJid);
         }
         return false;
       }

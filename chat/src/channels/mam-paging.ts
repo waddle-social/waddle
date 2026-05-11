@@ -305,9 +305,16 @@ export function useChannelMamPaging(deps: UseChannelMamPagingDeps) {
         const classified = classifyMamError(e);
         if (isMamCursorNotFound(classified)) {
           // §4.3.4 — stale cursor; the message we were chasing is no longer
-          // reachable via the prior cursor. Surface as "not found" so the
-          // caller can decide whether to retry from a fresh tail page.
+          // reachable via the prior cursor. Drop the cursor AND collapse
+          // hasOlderMessages so the UI's "load older" sentinel stops
+          // offering a paging entry that would early-return on !before.
+          // A fresh loadMessages() resets both to their initial state.
           oldestArchiveId = null;
+          hasOlderMessages.value = false;
+        } else if (isCurrentRequest()) {
+          // Non-§4.3.4 failure: surface so the caller (reply jump / pinned
+          // jump / search-result open) doesn't see a silent "not found".
+          actionError.value = normalizeError(e);
         }
         return false;
       }
@@ -420,16 +427,25 @@ export function useChannelMamPaging(deps: UseChannelMamPagingDeps) {
       const classified = classifyMamError(e);
       if (isMamCursorNotFound(classified)) {
         // §4.3.4 — drop stale thread cursor and let the next backfill restart
-        // from the latest page.
-        oldestThreadArchiveIds.delete(threadId);
-        threadHasOlder.value = { ...threadHasOlder.value, [threadId]: false };
+        // from the latest page. Guarded by isCurrentRequest() so a late
+        // completion after channel switch can't corrupt the new channel's
+        // thread state (which a fresh reset() has already cleared).
+        if (isCurrentRequest()) {
+          oldestThreadArchiveIds.delete(threadId);
+          threadHasOlder.value = { ...threadHasOlder.value, [threadId]: false };
+        }
       } else if (isCurrentRequest()) {
         actionError.value = normalizeError(e);
       }
     } finally {
-      const next = new Set(loadingOlderThreadIds.value);
-      next.delete(threadId);
-      loadingOlderThreadIds.value = next;
+      // Guard the cleanup too — a stale completion must not delete a
+      // threadId entry from the new channel's loading set, which would
+      // unstick a spinner that belongs to a different in-flight request.
+      if (isCurrentRequest()) {
+        const next = new Set(loadingOlderThreadIds.value);
+        next.delete(threadId);
+        loadingOlderThreadIds.value = next;
+      }
     }
   }
 

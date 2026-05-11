@@ -270,10 +270,20 @@ export function useDirectMessages(
     isLoadingMessages,
     isLoadingOlderMessages,
     hasOlderMessages,
-    loadMessages,
     loadOlderMessages,
     ensureMessageLoaded,
   } = paging;
+
+  // DM-load entry point. Search state lives in this orchestrator, so we
+  // reset it before delegating to the MAM-paging composable — keeping the
+  // pre-#188 invariant that switching peers invalidates in-flight searches
+  // and clears stale results.
+  async function loadMessages(peerJid: string, unreadAtLoad = 0) {
+    searchRequestId++;
+    searchResults.value = [];
+    isSearching.value = false;
+    await paging.loadMessages(peerJid, unreadAtLoad);
+  }
 
   function mergeLiveMessage(rawMessage: TimelineMessage) {
     const msg = rawMessage.isRetracted

@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   INITIAL_CURSOR,
+  MAM_UNKNOWN_CURSOR,
   advanceCursorWithBeforePage,
   advanceThreadCursor,
   classifyMamError,
@@ -206,12 +207,20 @@ describe("MamCursorNotFoundError + classifyMamError (XEP-0313 §4.3.4)", () => {
     // fires even before the wasm layer learns to emit structured errors.
     const classified = classifyMamError("MAM query failed: item-not-found");
     expect(isMamCursorNotFound(classified)).toBe(true);
+    // No cursor extractable from the raw string — sentinel keeps logs
+    // distinguishable from a real empty-cursor case.
+    if (isMamCursorNotFound(classified)) {
+      expect(classified.cursor).toBe(MAM_UNKNOWN_CURSOR);
+    }
   });
 
   test("recognises Error instances whose message contains 'item-not-found'", () => {
     const raw = new Error("stanza error: item-not-found");
     const classified = classifyMamError(raw);
     expect(isMamCursorNotFound(classified)).toBe(true);
+    if (isMamCursorNotFound(classified)) {
+      expect(classified.cursor).toBe(MAM_UNKNOWN_CURSOR);
+    }
   });
 
   test("passes through unrelated errors unchanged", () => {

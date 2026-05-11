@@ -118,6 +118,12 @@ export function stripQueuedSelfMessages<
 // stale cursor and re-fetch the tail page. Callers detect this via the
 // dedicated error type below, which `classifyMamError` lifts out of the
 // various raw error shapes the XMPP client may surface.
+// Sentinel used when the cursor value can't be extracted from the raw error
+// shape (current waddle wasm client surfaces errors as plain strings without
+// the offending UID). Telemetry/log readers should treat this as "unknown
+// cursor, classified by substring match" rather than an empty cursor.
+export const MAM_UNKNOWN_CURSOR = "<unknown>";
+
 export class MamCursorNotFoundError extends Error {
   readonly cursor: string;
   constructor(cursor: string) {
@@ -140,11 +146,11 @@ export function classifyMamError(error: unknown): MamCursorNotFoundError | unkno
   // stanza-error condition name appears literally somewhere in the string.
   if (typeof error === "string") {
     return error.includes("item-not-found")
-      ? new MamCursorNotFoundError("")
+      ? new MamCursorNotFoundError(MAM_UNKNOWN_CURSOR)
       : error;
   }
   if (error instanceof Error && error.message.includes("item-not-found")) {
-    return new MamCursorNotFoundError("");
+    return new MamCursorNotFoundError(MAM_UNKNOWN_CURSOR);
   }
   if (!error || typeof error !== "object") return error;
   const candidate = error as { condition?: unknown; code?: unknown; cursor?: unknown };
