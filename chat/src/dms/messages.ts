@@ -35,12 +35,12 @@ import {
 } from "@/lib/outbound-queue-store";
 import { useScrollDirectionPreference } from "@/preferences/scroll-direction";
 import {
-  buildDmTimelineFromMamResults,
   fromLiveDmMessage,
   isSameDmCorrectionSender,
   queuedDmMessageToTimeline,
   retractDmTimelineMessage,
 } from "@/dms/message-timeline-state";
+import { useDmMamPaging } from "@/dms/mam-paging";
 
 export function useDirectMessages(
   session: Ref<WaddleSession | null>,
@@ -61,9 +61,6 @@ export function useDirectMessages(
   };
   const messages = ref<TimelineMessage[]>([]);
   const draft = ref("");
-  const isLoadingMessages = ref(false);
-  const isLoadingOlderMessages = ref(false);
-  const hasOlderMessages = ref(true);
   const isSending = ref(false);
   const timelineEl: Ref<HTMLDivElement | null> = ref(null);
   const timelineEdgeScroller: Ref<((mode: ScrollDirectionMode) => boolean | Promise<boolean>) | null> = ref(null);
@@ -88,9 +85,6 @@ export function useDirectMessages(
     return null;
   });
 
-  let messageRequestId = 0;
-  let oldestArchiveId: string | null = null;
-  let initialLatestPagePinned = false;
   let searchRequestId = 0;
   let lastChatState: ChatStateType = "active";
   let composingTimeout: ReturnType<typeof setTimeout> | null = null;
@@ -252,17 +246,34 @@ export function useDirectMessages(
     });
   }
 
-  function buildTimelineFromMamResults(
-    mamResults: LiveDmMessage[],
-    existing: TimelineMessage[] = [],
-  ): TimelineMessage[] {
-    if (!session.value) return existing;
-    return buildDmTimelineFromMamResults({
-      session: session.value,
-      mamResults,
-      existing,
-    });
-  }
+  const paging = useDmMamPaging({
+    session,
+    xmppClient,
+    activePeerJid,
+    messages,
+    firstUnseenId,
+    loadErrorPeerJid,
+    loadErrorMessage,
+    timelineEl,
+    scrollDirection,
+    pinnedEdgeScroller,
+    actionError,
+    clearActionError,
+    pendingEchoClientIds,
+    appendQueuedMessages,
+    scrollToPinnedEdgeAndPin,
+    isFeedVisible,
+    persistLastSeen: (peerJid, messageId) => setLastSeen(dmKey(barePeerJid(peerJid)), messageId),
+    dmLoadErrorMessage,
+  });
+  const {
+    isLoadingMessages,
+    isLoadingOlderMessages,
+    hasOlderMessages,
+    loadMessages,
+    loadOlderMessages,
+    ensureMessageLoaded,
+  } = paging;
 
   function mergeLiveMessage(rawMessage: TimelineMessage) {
     const msg = rawMessage.isRetracted
@@ -361,134 +372,6 @@ export function useDirectMessages(
       const toAppend = preserved.filter((m) => !findMessageById(messages.value, m.id));
       if (toAppend.length > 0) messages.value = [...messages.value, ...toAppend];
     })();
-  }
-
-  async function loadMessages(peerJid: string, unreadAtLoad = 0) {
-    if (!session.value) return;
-    const requestId = ++messageRequestId;
-    initialLatestPagePinned = false;
-    isLoadingMessages.value = true;
-    isLoadingOlderMessages.value = false;
-    hasOlderMessages.value = true;
-    searchRequestId++;
-    searchResults.value = [];
-    isSearching.value = false;
-    oldestArchiveId = null;
-    pinnedEdgeScroller.disconnect();
-    firstUnseenId.value = null;
-    clearActionError();
-    loadErrorPeerJid.value = null;
-    loadErrorMessage.value = "";
-    pendingEchoClientIds.clear();
-    messages.value = appendQueuedMessages([], peerJid);
-    try {
-      const page = xmppClient.value && "queryPersonalMamPage" in xmppClient.value
-        ? await xmppClient.value.queryPersonalMamPage(peerJid, 100, { type: "latest" })
-        : null;
-      const mamResults = page
-        ? page.messages
-        : xmppClient.value
-          ? await xmppClient.value.queryPersonalMam(peerJid, 100)
-          : [];
-      if (requestId !== messageRequestId || activePeerJid.value !== peerJid) return;
-      loadErrorPeerJid.value = null;
-      loadErrorMessage.value = "";
-      oldestArchiveId = page?.firstArchiveId ?? mamResults[0]?.id ?? null;
-      hasOlderMessages.value = page ? !page.complete && !!page.firstArchiveId : mamResults.length >= 100;
-      const timeline = buildTimelineFromMamResults(mamResults);
-      const timelineWithQueue = appendQueuedMessages(timeline, peerJid);
-      messages.value = timelineWithQueue;
-      if (requestId === messageRequestId) isLoadingMessages.value = false;
-
-      const key = dmKey(barePeerJid(peerJid));
-      const feedTimeline = timelineWithQueue.filter(isFeedVisible);
-      firstUnseenId.value = unreadAtLoad > 0 && feedTimeline.length >= unreadAtLoad
-        ? feedTimeline[feedTimeline.length - unreadAtLoad]?.id ?? null
-        : null;
-      const pinned = await scrollToPinnedEdgeAndPin();
-      if (!pinned || requestId !== messageRequestId || activePeerJid.value !== peerJid) return;
-      initialLatestPagePinned = true;
-      const newest = [...timelineWithQueue].reverse().find(isFeedVisible);
-      if (newest) setLastSeen(key, newest.id);
-    } catch {
-      if (requestId === messageRequestId) {
-        console.warn("Could not load DM conversation");
-        const queuedOnly = appendQueuedMessages([], peerJid);
-        messages.value = queuedOnly;
-        loadErrorPeerJid.value = peerJid;
-        loadErrorMessage.value = dmLoadErrorMessage(peerJid, { queuedOnly: queuedOnly.length > 0 });
-        actionError.value = loadErrorMessage.value;
-        isLoadingMessages.value = false;
-      }
-    }
-  }
-
-  async function loadOlderMessages() {
-    const client = xmppClient.value;
-    const peerJid = activePeerJid.value;
-    const before = oldestArchiveId;
-    if (!client || !peerJid || !before || !initialLatestPagePinned || !hasOlderMessages.value || isLoadingOlderMessages.value) {
-      return;
-    }
-    if (!("queryPersonalMamPage" in client)) return;
-    const requestId = messageRequestId;
-    const isCurrentRequest = () =>
-      requestId === messageRequestId &&
-      xmppClient.value === client &&
-      activePeerJid.value === peerJid;
-    const el = timelineEl.value;
-    const previousHeight = el?.scrollHeight ?? 0;
-    const previousTop = el?.scrollTop ?? 0;
-    isLoadingOlderMessages.value = true;
-    try {
-      const page = await client.queryPersonalMamPage(peerJid, 100, { type: "before", before });
-      if (!isCurrentRequest()) return;
-      oldestArchiveId = page.firstArchiveId ?? oldestArchiveId;
-      hasOlderMessages.value = !page.complete && !!page.firstArchiveId && page.firstArchiveId !== before;
-      const withoutQueued = messages.value.filter((m) => !(m.isSelf && m.deliveryStatus === "queued"));
-      messages.value = appendQueuedMessages(buildTimelineFromMamResults(page.messages, withoutQueued), peerJid);
-      await nextTick();
-      if (el && !isTopPinnedScrollDirection(scrollDirection.value)) {
-        el.scrollTop = previousTop + (el.scrollHeight - previousHeight);
-      }
-    } catch {
-      if (isCurrentRequest()) {
-        console.warn("Could not load older DM messages");
-        actionError.value = dmLoadErrorMessage(peerJid);
-      }
-    } finally {
-      if (isCurrentRequest()) isLoadingOlderMessages.value = false;
-    }
-  }
-
-  async function ensureMessageLoaded(messageId: string): Promise<boolean> {
-    if (findMessageById(messages.value, messageId)) return true;
-    const client = xmppClient.value;
-    const peerJid = activePeerJid.value;
-    if (!client || !peerJid || !("queryPersonalMamPage" in client)) return false;
-
-    let before = oldestArchiveId;
-    while (before && hasOlderMessages.value && !findMessageById(messages.value, messageId)) {
-      const requestId = messageRequestId;
-      const previousBefore = before;
-      const page = await client.queryPersonalMamPage(peerJid, 100, { type: "before", before });
-      if (
-        requestId !== messageRequestId ||
-        xmppClient.value !== client ||
-        activePeerJid.value !== peerJid
-      ) {
-        return false;
-      }
-      const nextBefore = page.firstArchiveId ?? previousBefore;
-      oldestArchiveId = nextBefore;
-      hasOlderMessages.value = !page.complete && !!page.firstArchiveId && page.firstArchiveId !== previousBefore;
-      const withoutQueued = messages.value.filter((m) => !(m.isSelf && m.deliveryStatus === "queued"));
-      messages.value = appendQueuedMessages(buildTimelineFromMamResults(page.messages, withoutQueued), peerJid);
-      if (findMessageById(messages.value, messageId)) return true;
-      if (!page.firstArchiveId || page.firstArchiveId === previousBefore || page.complete) break;
-      before = nextBefore;
-    }
-    return !!findMessageById(messages.value, messageId);
   }
 
   async function sendMessage(
@@ -736,16 +619,11 @@ export function useDirectMessages(
   }
 
   function clearMessages() {
-    messageRequestId++;
+    paging.reset();
     searchRequestId++;
     pinnedEdgeScroller.disconnect();
     pendingEchoClientIds.clear();
-    initialLatestPagePinned = false;
-    oldestArchiveId = null;
-    hasOlderMessages.value = true;
-    isLoadingOlderMessages.value = false;
     messages.value = [];
-    isLoadingMessages.value = false;
     searchResults.value = [];
     isSearching.value = false;
     firstUnseenId.value = null;
@@ -753,15 +631,10 @@ export function useDirectMessages(
   }
 
   function disconnect() {
-    messageRequestId++;
+    paging.reset();
     searchRequestId++;
     pinnedEdgeScroller.disconnect();
     pendingEchoClientIds.clear();
-    initialLatestPagePinned = false;
-    oldestArchiveId = null;
-    hasOlderMessages.value = true;
-    isLoadingOlderMessages.value = false;
-    isLoadingMessages.value = false;
     isSearching.value = false;
     searchResults.value = [];
     firstUnseenId.value = null;
@@ -821,16 +694,16 @@ export function useDirectMessages(
     async ([el, edgeScroller]) => {
       if (!el || !edgeScroller || isLoadingMessages.value) return;
       if (!messages.value.some(isFeedVisible)) return;
-      const requestId = messageRequestId;
+      const requestId = paging.currentRequestId();
       const peerJid = activePeerJid.value;
       const pinned = await scrollToPinnedEdgeAndPin();
       if (
         pinned &&
-        requestId === messageRequestId &&
+        requestId === paging.currentRequestId() &&
         activePeerJid.value === peerJid &&
         messages.value.some(isFeedVisible)
       ) {
-        initialLatestPagePinned = true;
+        paging.markInitialLatestPagePinned();
         const newest = [...messages.value].reverse().find(isFeedVisible);
         if (peerJid && newest) setLastSeen(dmKey(barePeerJid(peerJid)), newest.id);
       }
