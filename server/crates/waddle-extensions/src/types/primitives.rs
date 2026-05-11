@@ -14,7 +14,6 @@ typed_non_empty_string!(ProviderDeliveryId, "provider delivery id");
 typed_non_empty_string!(ProviderEventType, "provider event type");
 typed_non_empty_string!(ProviderFieldName, "provider field name");
 typed_non_empty_string!(ProviderFieldNumber, "provider field number");
-typed_non_empty_string!(ProviderFieldText, "provider field text");
 typed_non_empty_string!(ProviderId, "provider id");
 typed_non_empty_string!(PubSubItemId, "pubsub item id");
 typed_non_empty_string!(PubSubNode, "pubsub node");
@@ -26,6 +25,35 @@ typed_non_empty_string!(UiActionId, "ui action id");
 typed_non_empty_string!(UiViewId, "ui view id");
 typed_non_empty_string!(Url, "url");
 typed_non_empty_string!(WaddleId, "waddle id");
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ProviderFieldText(String);
+
+impl ProviderFieldText {
+    pub fn new(value: impl Into<String>) -> Result<Self, FrameworkTypeError> {
+        Ok(Self(value.into()))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn into_string(self) -> String {
+        self.0
+    }
+}
+
+impl AsRef<str> for ProviderFieldText {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl fmt::Display for ProviderFieldText {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct RoomJid(String);

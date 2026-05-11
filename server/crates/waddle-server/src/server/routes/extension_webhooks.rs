@@ -631,7 +631,7 @@ mod tests {
         let payload = br#"{
             "action": "completed",
             "subject": {"id": 100, "name": "example"},
-            "event": {"status": "failure", "attempt": 2}
+            "event": {"status": "failure", "attempt": 2, "description": ""}
         }"#;
 
         let parsed = parse_provider_payload(payload).expect("payload");
@@ -660,6 +660,10 @@ mod tests {
         assert!(fields.iter().any(|(path, value)| {
             path == "event.status"
                 && matches!(value, ProviderFieldValue::Text(text) if text.as_str() == "failure")
+        }));
+        assert!(fields.iter().any(|(path, value)| {
+            path == "event.description"
+                && matches!(value, ProviderFieldValue::Text(text) if text.as_str().is_empty())
         }));
     }
 

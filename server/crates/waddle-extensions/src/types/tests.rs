@@ -62,6 +62,14 @@ fn pubsub_node_declaration_does_not_grant_prefix_or_sibling_nodes() {
 }
 
 #[test]
+fn provider_field_text_preserves_empty_strings() {
+    let text = ProviderFieldText::new("").expect("empty provider text is valid");
+
+    assert_eq!(text.as_str(), "");
+    assert_eq!(text.into_string(), "");
+}
+
+#[test]
 fn pubsub_publish_accepts_framework_extension_item_without_manifest_payload_rule() {
     let manifest = ExtensionManifest {
         id: PluginId::new("test-extension").expect("plugin id"),
