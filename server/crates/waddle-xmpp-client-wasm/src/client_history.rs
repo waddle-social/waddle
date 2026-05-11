@@ -193,7 +193,7 @@ impl WaddleClient {
 
     /// Waddle-specific MAM stanza-id filter — fetch a batch of messages from
     /// a room MAM archive by XEP-0359 stanza-id. Uses the custom data-form
-    /// var `{urn:waddle:mam:stanza-id:0}stanza-id` per XEP-0313 §4.2 +
+    /// var `{urn:waddle:mam-stanza-id:0}stanza-id` per XEP-0313 §4.2 +
     /// XEP-0068 (not the `urn:xmpp:sid:0` namespace, which is XEP-0359
     /// wire protocol only). Used by the pinned-panel rich-preview render
     /// path to materialize `TimelineMessage`s for pinned entries that

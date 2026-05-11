@@ -4,7 +4,7 @@
 //   pinned stanza-id not already represented in the room's loaded
 //   channel timeline. Single batched MAM IQ per panel-open via the
 //   Waddle-specific MAM stanza-id filter (custom data-form var per
-//   XEP-0313 §4.2 + XEP-0068; field var: {urn:waddle:mam:stanza-id:0}stanza-id).
+//   XEP-0313 §4.2 + XEP-0068; field var: {urn:waddle:mam-stanza-id:0}stanza-id).
 // - On `applyPinEvent("pinned")`: hydrateSinglePinnedBody fetches the
 //   new entry's body (skipping the round-trip if the message is
 //   already on screen).

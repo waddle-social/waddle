@@ -1,6 +1,6 @@
 //! Waddle-specific MAM filter: filter an archive by XEP-0359 stanza-id.
 //!
-//! Form-field var is namespaced under `urn:waddle:mam:stanza-id:0`
+//! Form-field var is namespaced under `urn:waddle:mam-stanza-id:0`
 //! per CLAUDE.md's "official XEP namespaces must conform exactly;
 //! Waddle-specific semantics use `urn:waddle:*`" rule. No XEP defines
 //! "filter MAM by XEP-0359 stanza-id" — XEP-0313 supports custom
@@ -14,7 +14,7 @@
 
 /// Form-field var for the Waddle-specific stanza-id MAM filter.
 ///
-/// Uses the `urn:waddle:mam:stanza-id:0` namespace (not `urn:xmpp:sid:0`)
+/// Uses the `urn:waddle:mam-stanza-id:0` namespace (not `urn:xmpp:sid:0`)
 /// because this is a Waddle extension, not a shape defined by XEP-0359.
 /// XEP-0068 Clark-notation field vars allow custom namespaces in
 /// XEP-0313 data forms (§4.2).
@@ -22,12 +22,12 @@
 /// Wire shape (text-multi):
 ///
 /// ```xml
-/// <field var="{urn:waddle:mam:stanza-id:0}stanza-id" type="text-multi">
+/// <field var="{urn:waddle:mam-stanza-id:0}stanza-id" type="text-multi">
 ///   <value>STANZA-ID-1</value>
 ///   <value>STANZA-ID-2</value>
 /// </field>
 /// ```
-pub const STANZA_ID_FILTER_FIELD: &str = "{urn:waddle:mam:stanza-id:0}stanza-id";
+pub const STANZA_ID_FILTER_FIELD: &str = "{urn:waddle:mam-stanza-id:0}stanza-id";
 
 /// Maximum length of a single stanza-id value, in bytes.
 ///
@@ -36,13 +36,18 @@ pub const STANZA_ID_FILTER_FIELD: &str = "{urn:waddle:mam:stanza-id:0}stanza-id"
 /// ever ask for, and reusing the same cap keeps validation symmetric.
 pub const MAX_FILTER_STANZA_ID_LEN: usize = 256;
 
-/// Maximum number of stanza-ids accepted in a single MAM query. A
-/// well-formed pinned panel asks for at most `MAX_PINNED_ENTRIES`
-/// (1_000) ids in one batch; cap matches.
-pub const MAX_FILTER_STANZA_IDS: usize = 1_000;
+/// Maximum number of stanza-ids accepted in a single MAM query.
+///
+/// Matches the MAM storage hard cap (`min(query.max, 500)` in both the
+/// in-memory and SQLx backends). Sending more stanza-ids than this cap
+/// would result in a truncated result set with `is_complete=false` and
+/// no client-side pagination, causing the excess pins to silently fall
+/// back to "Original message no longer available." Cap the filter batch
+/// here to make the constraint explicit and symmetric.
+pub const MAX_FILTER_STANZA_IDS: usize = 500;
 
 /// A validated stanza-id used as a value in the
-/// `{urn:waddle:mam:stanza-id:0}stanza-id` MAM filter.
+/// `{urn:waddle:mam-stanza-id:0}stanza-id` MAM filter.
 ///
 /// Distinct from `xep0359::StanzaId` because the filter carries only
 /// the opaque id token (no `by` JID context), and from
