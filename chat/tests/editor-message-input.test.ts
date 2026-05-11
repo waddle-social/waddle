@@ -440,6 +440,140 @@ describe("message input editor", () => {
     }
   });
 
+  test("formats selected pasted multi-line code as one code block", () => {
+    const editor = createEditor({
+      type: "doc",
+      content: [
+        { type: "paragraph", content: [{ type: "text", text: "one" }] },
+        { type: "paragraph", content: [{ type: "text", text: "two" }] },
+      ],
+    });
+
+    try {
+      editor.commands.setTextSelection({ from: 1, to: editor.state.doc.content.size });
+
+      editor.chain().focus().toggleCodeBlock().run();
+      expect(editor.getJSON()).toEqual({
+        type: "doc",
+        content: [
+          {
+            type: "codeBlock",
+            attrs: { language: null },
+            content: [{ type: "text", text: "one\ntwo" }],
+          },
+        ],
+      });
+      expect(tiptapToRichMessage(editor.getJSON())).toEqual({
+        body: "one\ntwo",
+        markup: [{ type: "bcode", start: 0, end: 7 }],
+        references: [],
+      });
+    } finally {
+      editor.destroy();
+    }
+  });
+
+  test("preserves selected hard breaks when formatting as a code block", () => {
+    const editor = createEditor({
+      type: "doc",
+      content: [
+        {
+          type: "paragraph",
+          content: [
+            { type: "text", text: "one" },
+            { type: "hardBreak" },
+            { type: "text", text: "two" },
+          ],
+        },
+      ],
+    });
+
+    try {
+      editor.commands.setTextSelection({ from: 1, to: editor.state.doc.content.size });
+
+      editor.chain().focus().toggleCodeBlock().run();
+      expect(editor.getJSON()).toEqual({
+        type: "doc",
+        content: [
+          {
+            type: "codeBlock",
+            attrs: { language: null },
+            content: [{ type: "text", text: "one\ntwo" }],
+          },
+        ],
+      });
+    } finally {
+      editor.destroy();
+    }
+  });
+
+  test("delegates nested selections to Tiptap's normal code block command", () => {
+    const editor = createEditor({
+      type: "doc",
+      content: [
+        {
+          type: "bulletList",
+          content: [
+            { type: "listItem", content: [{ type: "paragraph", content: [{ type: "text", text: "one" }] }] },
+            { type: "listItem", content: [{ type: "paragraph", content: [{ type: "text", text: "two" }] }] },
+          ],
+        },
+      ],
+    });
+
+    try {
+      let firstItemParagraphStart: number | null = null;
+      editor.state.doc.descendants((node, pos, parent) => {
+        if (node.type.name === "paragraph" && parent?.type.name === "listItem" && firstItemParagraphStart === null) {
+          firstItemParagraphStart = pos;
+          return false;
+        }
+        return true;
+      });
+      expect(firstItemParagraphStart).not.toBeNull();
+      editor.commands.setTextSelection({
+        from: firstItemParagraphStart! + 1,
+        to: firstItemParagraphStart! + 4,
+      });
+
+      editor.commands.toggleCodeBlock();
+      expect(editor.getText()).toContain("two");
+    } finally {
+      editor.destroy();
+    }
+  });
+
+  test("keeps normal code block toggling for a cursor inside one block", () => {
+    const editor = createEditor({
+      type: "doc",
+      content: [{ type: "paragraph", content: [{ type: "text", text: "code" }] }],
+    });
+
+    try {
+      expect(editor.commands.toggleCodeBlock()).toBe(true);
+      expect(editor.getJSON()).toEqual({
+        type: "doc",
+        content: [
+          {
+            type: "codeBlock",
+            attrs: { language: null },
+            content: [{ type: "text", text: "code" }],
+          },
+        ],
+      });
+
+      expect(editor.commands.toggleCodeBlock()).toBe(true);
+      expect(editor.getJSON()).toEqual({
+        type: "doc",
+        content: [
+          { type: "paragraph", content: [{ type: "text", text: "code" }] },
+        ],
+      });
+    } finally {
+      editor.destroy();
+    }
+  });
+
   test("serializes TipTap marks and links as XEP body, markup, and references", () => {
     const serialized = tiptapToRichMessage({
       type: "doc",

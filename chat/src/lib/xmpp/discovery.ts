@@ -75,6 +75,10 @@ function channelTypeFromInfo(info: DiscoInfoData): DiscoveredChannel["channelTyp
   return normalizeChannelType(info.features.includes(NS_FORUMS_0) || forumField ? "forum" : "text");
 }
 
+function hasDiscoFeature(info: DiscoInfoData | null | undefined, feature: string): boolean {
+  return info?.features.some((candidate) => candidate === feature) ?? false;
+}
+
 function roomParentSpaceId(info: DiscoInfoData): string | null {
   return parseSpaceNodeIri(info.fields.get("parent") ?? null)
     ?? parseSpaceNodeIri(info.fields.get("muc#roominfo_pubsub") ?? null);
@@ -149,16 +153,21 @@ async function discoverComponentServices(xmpp: HybridClient, domain: string, jid
   try {
     const items = await sendDiscoItems(xmpp, domain);
     const candidates = items.map((item) => item.jid).filter((value): value is string => !!value);
-    let muc = fallback.muc;
-    let spaces = fallback.spaces;
-    await Promise.all(candidates.map(async (serviceJid) => {
+    const serviceInfo = await Promise.all(candidates.map(async (serviceJid) => {
       try {
-        const info = await sendDiscoInfo(xmpp, serviceJid);
-        if (!info) return;
-        if (info.features.includes(NS_MUC) || info.identities.some((identity) => identity.category === "conference")) muc = serviceJid;
-        if (info.features.includes(NS_SPACES_0) || info.identities.some((identity) => identity.category === "pubsub")) spaces = serviceJid;
-      } catch {}
+        return { serviceJid, info: await sendDiscoInfo(xmpp, serviceJid) };
+      } catch {
+        return { serviceJid, info: null };
+      }
     }));
+    const muc = serviceInfo.find(({ info }) =>
+      hasDiscoFeature(info, NS_MUC)
+      || info?.identities.some((identity) => identity.category === "conference")
+    )?.serviceJid ?? fallback.muc;
+    // A generic pubsub identity is not enough: the extensions component is
+    // also pubsub. Keep the conventional Spaces fallback unless a component
+    // explicitly advertises the XEP-0503 namespace.
+    const spaces = serviceInfo.find(({ info }) => hasDiscoFeature(info, NS_SPACES_0))?.serviceJid ?? fallback.spaces;
     return { muc, spaces };
   } catch {
     return fallback;
@@ -224,28 +233,27 @@ export async function discoverTopology(xmpp: HybridClient, jid: string): Promise
   const spaces: DiscoveredSpace[] = [];
   let serverRole: DiscoveryRole = null;
 
-  try {
-    const serverInfo = await sendDiscoInfo(xmpp, domain);
-    if (serverInfo) serverRole = parseDiscoveryRole(serverInfo.fields.get("waddle#server_affiliation") ?? null);
-  } catch {}
+  const serverInfoResult = await sendDiscoInfo(xmpp, domain).catch(() => null);
+  if (serverInfoResult) {
+    serverRole = parseDiscoveryRole(serverInfoResult.fields.get("waddle#server_affiliation") ?? null);
+  }
 
   try {
     const spaceItems = await sendDiscoItems(xmpp, services.spaces);
-    for (const [index, item] of spaceItems.entries()) {
-      const spaceId = item.node ?? barePeerJid(item.jid ?? "").split("@")[0] ?? `space-${index}`;
+    for (const item of spaceItems) {
+      if (!item.node) continue;
+      const spaceId = item.node;
       let role = serverRole;
-      if (item.node) {
-        try {
-          const info = await sendDiscoInfo(xmpp, services.spaces, item.node);
-          if (info) role = parseDiscoveryRole(info.fields.get("pubsub#affiliation") ?? null) ?? serverRole;
-        } catch {}
-        try {
-          const bookmarks = await sendPubsubItems(xmpp, services.spaces, item.node);
-          for (const bookmark of bookmarks) {
-            if (bookmark.jid) bookmarkedSpaceIds.set(barePeerJid(bookmark.jid), spaceId);
-          }
-        } catch {}
-      }
+      try {
+        const info = await sendDiscoInfo(xmpp, services.spaces, item.node);
+        if (info) role = parseDiscoveryRole(info.fields.get("pubsub#affiliation") ?? null) ?? serverRole;
+      } catch {}
+      try {
+        const bookmarks = await sendPubsubItems(xmpp, services.spaces, item.node);
+        for (const bookmark of bookmarks) {
+          if (bookmark.jid) bookmarkedSpaceIds.set(barePeerJid(bookmark.jid), spaceId);
+        }
+      } catch {}
       spaces.push({ id: spaceId, name: item.name ?? spaceId, role });
     }
   } catch {}
