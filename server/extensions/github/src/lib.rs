@@ -27,9 +27,11 @@ const PLUGIN_NAME: &str = "GitHub";
 const PLUGIN_NS: &str = "urn:waddle:web-integration:1";
 const VERSION: &str = "0.1.0";
 const ROUTES_NODE: &str = "urn:waddle:web-integration:1:github:routes";
-const ROUTE_ELEMENT: &str = "route";
-const CONFIGURE_ROUTE_COMMAND: &str = "github:configure-route";
+const ROUTE_ELEMENT: &str = "github-route";
+const COMMAND_NODE: &str = "urn:waddle:extension:1:github";
+const CONFIGURE_ROUTE_FORM_TYPE: &str = "urn:waddle:web-integration:1:github:configure-route";
 
+const FIELD_FORM_TYPE: &str = "FORM_TYPE";
 const FIELD_REPOSITORY_ID: &str = "repository_id";
 const FIELD_CHANNEL: &str = "channel";
 const FIELD_EVENTS: &str = "events";
@@ -77,7 +79,10 @@ fn manifest() -> types::ExtensionManifest {
             types::ExtensionCapability::Commands,
             types::ExtensionCapability::PubsubPublish,
         ],
-        commands: vec![configure_route_command_descriptor()],
+        commands: vec![command_descriptor(
+            COMMAND_NODE,
+            "Configure GitHub repository alert route",
+        )],
         routes: vec![],
         pubsub_nodes: vec![types::PubsubNode {
             value: ROUTES_NODE.to_string(),
@@ -86,12 +91,12 @@ fn manifest() -> types::ExtensionManifest {
     }
 }
 
-fn configure_route_command_descriptor() -> types::CommandDescriptor {
+fn command_descriptor(node: &str, name: &str) -> types::CommandDescriptor {
     types::CommandDescriptor {
         node: types::CommandNode {
-            value: CONFIGURE_ROUTE_COMMAND.to_string(),
+            value: node.to_string(),
         },
-        name: display("Configure GitHub repository alert route"),
+        name: display(name),
         scope: types::CommandScope::Global,
         composer_prefix: None,
         inline_field: None,
@@ -108,12 +113,11 @@ fn handle_provider_webhook(
     if webhook.provider.value != "github" {
         return Ok(vec![]);
     }
-    let Some(alert) = alert_for_webhook(&webhook) else {
+    let Some(payload) = GitHubPayload::from_webhook(&webhook) else {
         return Ok(vec![]);
     };
-    let payload = match GitHubPayload::from_webhook(&webhook) {
-        Some(payload) => payload,
-        None => return Ok(vec![]),
+    let Some(alert) = alert_for_payload(&payload) else {
+        return Ok(vec![]);
     };
     let routes = load_routes()?;
     let matching: Vec<_> = routes
@@ -134,8 +138,7 @@ fn handle_provider_webhook(
     Ok(vec![types::ExtensionEffect::Noop])
 }
 
-fn alert_for_webhook(webhook: &types::ProviderWebhook) -> Option<GitHubAlert> {
-    let payload = GitHubPayload::from_webhook(webhook)?;
+fn alert_for_payload(payload: &GitHubPayload) -> Option<GitHubAlert> {
     if payload.action != "completed" {
         return None;
     }
@@ -374,14 +377,14 @@ fn load_routes() -> Result<Vec<Route>, types::ExtensionError> {
 }
 
 // ---------------------------------------------------------------------------
-// XEP-0050 admin command: github:configure-route
+// XEP-0050 admin command: configure GitHub alert route
 // ---------------------------------------------------------------------------
 
 fn handle_command(
     command: types::CommandInvocation,
     config: GitHubConfig,
 ) -> Result<Vec<types::ExtensionEffect>, types::ExtensionError> {
-    if command.command_node.value != CONFIGURE_ROUTE_COMMAND {
+    if command.command_node.value != COMMAND_NODE {
         return Ok(vec![]);
     }
     let requester_bare = bare_jid_value(&command.requester.value);
@@ -401,6 +404,7 @@ fn handle_command(
             configure_route_form(),
         )]);
     }
+    require_form_type(&command.fields, CONFIGURE_ROUTE_FORM_TYPE)?;
     let route = build_route_from_fields(&command.fields)?;
     Ok(vec![types::ExtensionEffect::PublishPubsub(
         types::PubsubPublish {
@@ -423,6 +427,16 @@ fn configure_route_form() -> types::DataForm {
             "Map a GitHub repository's workflow/check failures to a MUC room.",
         )],
         fields: vec![
+            types::DataFormField {
+                name: types::UiActionId {
+                    value: FIELD_FORM_TYPE.to_string(),
+                },
+                field_type: types::FormFieldType::Hidden,
+                label: None,
+                required: false,
+                values: vec![form_value(CONFIGURE_ROUTE_FORM_TYPE)],
+                options: vec![],
+            },
             types::DataFormField {
                 name: types::UiActionId {
                     value: FIELD_REPOSITORY_ID.to_string(),
@@ -479,13 +493,7 @@ fn configure_route_form() -> types::DataForm {
 fn build_route_from_fields(
     fields: &[types::FormFieldValue],
 ) -> Result<Route, types::ExtensionError> {
-    let repository_id = require_field(fields, FIELD_REPOSITORY_ID)?;
-    if repository_id.parse::<u64>().is_err() {
-        return Err(extension_error(
-            types::ExtensionErrorCode::InvalidRequest,
-            "repository_id must be a positive integer",
-        ));
-    }
+    let repository_id = require_numeric_field(fields, FIELD_REPOSITORY_ID)?;
     let channel = require_field(fields, FIELD_CHANNEL)?;
     let events: Vec<String> = field_values(fields, FIELD_EVENTS)
         .into_iter()
@@ -505,6 +513,37 @@ fn build_route_from_fields(
         events,
         installation_id,
     })
+}
+
+fn require_numeric_field(
+    fields: &[types::FormFieldValue],
+    name: &str,
+) -> Result<String, types::ExtensionError> {
+    let value = require_field(fields, name)?;
+    if value.parse::<u64>().is_err() {
+        return Err(extension_error(
+            types::ExtensionErrorCode::InvalidRequest,
+            &format!("{name} must be a positive integer"),
+        ));
+    }
+    Ok(value)
+}
+
+fn require_form_type(
+    fields: &[types::FormFieldValue],
+    expected: &str,
+) -> Result<(), types::ExtensionError> {
+    match field_value(fields, FIELD_FORM_TYPE).as_deref() {
+        Some(actual) if actual == expected => Ok(()),
+        Some(_) => Err(extension_error(
+            types::ExtensionErrorCode::InvalidRequest,
+            "submitted form type does not match the GitHub route configuration form",
+        )),
+        None => Err(extension_error(
+            types::ExtensionErrorCode::InvalidRequest,
+            "missing required field FORM_TYPE",
+        )),
+    }
 }
 
 fn require_field(

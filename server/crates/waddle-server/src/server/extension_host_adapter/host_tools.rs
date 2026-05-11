@@ -221,10 +221,8 @@ impl ext_host::ExtensionHostTools for ExtensionHostAdapter {
         context: &ext_host::InvocationContext,
         request: ext_host::PubSubGetItemsRequest,
     ) -> Result<ext_host::PubSubGetItemsResponse, ext_host::HostToolError> {
-        // Authorization: the requested node must lie under one of the
-        // extension's declared payload namespaces. The host disallows
-        // reading another extension's nodes via a prefix check on the
-        // node name.
+        // Authorization: reads are limited to the PubSub nodes explicitly
+        // declared by the calling extension's manifest.
         let manifest = self
             .state
             .deps
@@ -238,15 +236,10 @@ impl ext_host::ExtensionHostTools for ExtensionHostAdapter {
                 )))
             })?;
         let node_name = request.node.as_str();
-        let namespace_match = manifest
-            .payloads
-            .iter()
-            .map(|rule| rule.root.namespace.as_str())
-            .any(|namespace| node_name == namespace || node_name.starts_with(namespace));
-        if !namespace_match {
+        if !manifest.declares_pubsub_node(&request.node) {
             return Err(ext_host::HostToolError::denied(
                 DisplayText::new(format!(
-                    "pubsub node {node_name} is outside extension {} namespaces",
+                    "pubsub node {node_name} is outside extension {} declared nodes",
                     context.plugin_id.as_str()
                 ))
                 .expect("denied message non-empty"),

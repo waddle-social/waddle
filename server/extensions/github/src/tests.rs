@@ -38,6 +38,33 @@ fn sample_webhook(conclusion: &str) -> types::ProviderWebhook {
     }
 }
 
+fn installation_webhook() -> types::ProviderWebhook {
+    types::ProviderWebhook {
+        waddle_id: types::WaddleId {
+            value: "github-delivery-installation".to_string(),
+        },
+        provider: types::ProviderId {
+            value: "github".to_string(),
+        },
+        event_type: types::ProviderEventType {
+            value: "installation".to_string(),
+        },
+        delivery_id: types::ProviderDeliveryId {
+            value: "delivery-installation".to_string(),
+        },
+        payload: types::ProviderPayload {
+            fields: vec![
+                text_field(&["action"], "deleted"),
+                number_field(&["installation", "id"], "42"),
+            ],
+        },
+    }
+}
+
+fn sample_payload(conclusion: &str) -> GitHubPayload {
+    GitHubPayload::from_webhook(&sample_webhook(conclusion)).expect("payload")
+}
+
 fn text_field(path: &[&str], value: &str) -> types::ProviderField {
     provider_field(path, types::ProviderFieldValue::Text(text(value)))
 }
@@ -132,7 +159,7 @@ fn manifest_declares_admin_command_and_routes_node() {
         .capabilities
         .contains(&types::ExtensionCapability::PubsubPublish));
     assert_eq!(manifest.commands.len(), 1);
-    assert_eq!(manifest.commands[0].node.value, CONFIGURE_ROUTE_COMMAND);
+    assert_eq!(manifest.commands[0].node.value, COMMAND_NODE);
     assert!(manifest
         .pubsub_nodes
         .iter()
@@ -160,7 +187,8 @@ fn empty_config_parses_to_empty_admin_list() {
 
 #[test]
 fn failure_webhook_builds_alert_text() {
-    let alert = alert_for_webhook(&sample_webhook("failure")).expect("alert");
+    let payload = sample_payload("failure");
+    let alert = alert_for_payload(&payload).expect("alert");
 
     assert!(alert
         .body
@@ -174,7 +202,8 @@ fn failure_webhook_builds_alert_text() {
 
 #[test]
 fn successful_webhook_does_not_alert() {
-    assert!(alert_for_webhook(&sample_webhook("success")).is_none());
+    let payload = sample_payload("success");
+    assert!(alert_for_payload(&payload).is_none());
 }
 
 #[test]
@@ -214,6 +243,21 @@ fn provider_webhook_ignores_non_matching_repository() {
 }
 
 #[test]
+fn provider_webhook_ignores_installation_scoped_event_without_repository() {
+    let _guard = test_lock().lock().expect("test lock");
+    test_state::reset();
+    test_state::set_route_fixtures(vec![sample_route("100", "dev@muc.waddle.local")]);
+
+    let effects = handle_provider_webhook(installation_webhook()).expect("handled");
+
+    assert!(effects.is_empty());
+    assert!(test_state::sent_room_messages()
+        .lock()
+        .expect("messages lock")
+        .is_empty());
+}
+
+#[test]
 fn configure_route_command_returns_form_when_fields_missing() {
     let _guard = test_lock().lock().expect("test lock");
     test_state::reset();
@@ -221,12 +265,19 @@ fn configure_route_command_returns_form_when_fields_missing() {
         admins: vec!["rawkode@waddle.social".to_string()],
     });
 
-    let command = admin_command(CONFIGURE_ROUTE_COMMAND, "rawkode@waddle.social/abc", vec![]);
+    let command = admin_command(COMMAND_NODE, "rawkode@waddle.social/abc", vec![]);
     let effects = handle_command(command, current_config().expect("config")).expect("handled");
 
     assert_eq!(effects.len(), 1);
     match &effects[0] {
         types::ExtensionEffect::CommandForm(form) => {
+            assert!(form.fields.iter().any(|f| {
+                f.name.value == FIELD_FORM_TYPE
+                    && f.field_type == types::FormFieldType::Hidden
+                    && f.values
+                        .first()
+                        .is_some_and(|value| value.value == CONFIGURE_ROUTE_FORM_TYPE)
+            }));
             assert!(form
                 .fields
                 .iter()
@@ -247,9 +298,10 @@ fn configure_route_command_writes_publish_effect_on_submit() {
     });
 
     let command = admin_command(
-        CONFIGURE_ROUTE_COMMAND,
+        COMMAND_NODE,
         "rawkode@waddle.social/abc",
         vec![
+            form_field(FIELD_FORM_TYPE, &[CONFIGURE_ROUTE_FORM_TYPE]),
             form_field(FIELD_REPOSITORY_ID, &["1009269194"]),
             form_field(FIELD_CHANNEL, &["chat@muc.waddle.social"]),
             form_field(FIELD_EVENTS, &["workflow_run", "check_run"]),
@@ -294,9 +346,10 @@ fn configure_route_command_rejects_non_admin() {
     });
 
     let command = admin_command(
-        CONFIGURE_ROUTE_COMMAND,
+        COMMAND_NODE,
         "stranger@elsewhere.org/x",
         vec![
+            form_field(FIELD_FORM_TYPE, &[CONFIGURE_ROUTE_FORM_TYPE]),
             form_field(FIELD_REPOSITORY_ID, &["1009269194"]),
             form_field(FIELD_CHANNEL, &["chat@muc.waddle.social"]),
             form_field(FIELD_EVENTS, &["workflow_run"]),
@@ -304,6 +357,54 @@ fn configure_route_command_rejects_non_admin() {
     );
     let err = handle_command(command, current_config().expect("config")).expect_err("should deny");
     assert_eq!(err.code, types::ExtensionErrorCode::Denied);
+}
+
+#[test]
+fn configure_route_command_rejects_missing_form_type_on_submit() {
+    let _guard = test_lock().lock().expect("test lock");
+    test_state::reset();
+    test_state::set_config_fixture(GitHubConfig {
+        admins: vec!["rawkode@waddle.social".to_string()],
+    });
+
+    let command = admin_command(
+        COMMAND_NODE,
+        "rawkode@waddle.social/abc",
+        vec![
+            form_field(FIELD_REPOSITORY_ID, &["1009269194"]),
+            form_field(FIELD_CHANNEL, &["chat@muc.waddle.social"]),
+            form_field(FIELD_EVENTS, &["workflow_run"]),
+        ],
+    );
+    let err =
+        handle_command(command, current_config().expect("config")).expect_err("should reject");
+    assert_eq!(err.code, types::ExtensionErrorCode::InvalidRequest);
+}
+
+#[test]
+fn configure_route_command_rejects_wrong_form_type_on_submit() {
+    let _guard = test_lock().lock().expect("test lock");
+    test_state::reset();
+    test_state::set_config_fixture(GitHubConfig {
+        admins: vec!["rawkode@waddle.social".to_string()],
+    });
+
+    let command = admin_command(
+        COMMAND_NODE,
+        "rawkode@waddle.social/abc",
+        vec![
+            form_field(
+                FIELD_FORM_TYPE,
+                &["urn:waddle:web-integration:1:github:other"],
+            ),
+            form_field(FIELD_REPOSITORY_ID, &["1009269194"]),
+            form_field(FIELD_CHANNEL, &["chat@muc.waddle.social"]),
+            form_field(FIELD_EVENTS, &["workflow_run"]),
+        ],
+    );
+    let err =
+        handle_command(command, current_config().expect("config")).expect_err("should reject");
+    assert_eq!(err.code, types::ExtensionErrorCode::InvalidRequest);
 }
 
 #[test]
@@ -315,9 +416,10 @@ fn configure_route_command_rejects_non_numeric_repository_id() {
     });
 
     let command = admin_command(
-        CONFIGURE_ROUTE_COMMAND,
+        COMMAND_NODE,
         "rawkode@waddle.social/abc",
         vec![
+            form_field(FIELD_FORM_TYPE, &[CONFIGURE_ROUTE_FORM_TYPE]),
             form_field(FIELD_REPOSITORY_ID, &["not-a-number"]),
             form_field(FIELD_CHANNEL, &["chat@muc.waddle.social"]),
             form_field(FIELD_EVENTS, &["workflow_run"]),

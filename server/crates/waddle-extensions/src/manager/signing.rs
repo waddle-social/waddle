@@ -51,6 +51,22 @@ impl ExtensionManager {
         None
     }
 
+    pub fn room_for_plugin_pubsub_node(
+        &self,
+        plugin: &PluginId,
+        node: &crate::types::PubSubNode,
+    ) -> Option<RoomJid> {
+        self.actors
+            .iter()
+            .find(|actor| actor.manifest().id == *plugin)
+            .and_then(|actor| {
+                actor.manifest().pubsub_nodes.iter().find_map(|pattern| {
+                    pubsub_node_placeholder_value(pattern.as_str(), node.as_str(), "room")
+                        .and_then(|room| RoomJid::new(room).ok())
+                })
+            })
+    }
+
     fn sign_launch(&self, launch: &mut crate::types::LaunchDescriptor) {
         let Some(key) = self.launch_signing_key.as_deref() else {
             return;

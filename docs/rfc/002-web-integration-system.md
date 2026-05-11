@@ -43,7 +43,7 @@ wire behavior. These XEPs define the protocol shapes used by this RFC:
   commands, and PubSub nodes.
 - XEP-0128 Service Discovery Extensions for metadata forms on disco info.
 - XEP-0004 Data Forms for admin configuration forms.
-- XEP-0050 Ad-Hoc Commands for install, configuration, test, and sync actions.
+- XEP-0050 Ad-Hoc Commands for install, configuration, and sync actions.
 - XEP-0060 Publish-Subscribe for extension config, routing state, delivery
   state, dedupe ledgers, and recent errors.
 - XEP-0313 MAM and XEP-0297 Stanza Forwarding for archived extension-authored
@@ -110,15 +110,31 @@ Do not revive the legacy `urn:waddle:github:0` namespace. Do not introduce new
 payloads must wrap client-visible output in the framework envelope before it
 reaches clients.
 
-The GitHub extension manifest declares only the capabilities it uses:
+For this RFC, the GitHub extension owns `urn:waddle:web-integration:1`. It is a
+web-integration payload namespace rather than a provider-branded namespace, so
+GitHub payloads are discriminated by typed root elements in that namespace.
+GitHub roots are `github-route` and `github-event`. Do not load a second
+extension module that declares this same namespace unless the extension-manager
+ownership model is changed; future providers either ship inside the same owning
+module with distinct roots or mint a new versioned web-integration namespace
+with unique ownership.
+
+The GitHub extension manifest declares only the capabilities each shipped slice
+uses:
 
 - `commands` for XEP-0050 admin and operator actions.
 - `pubsub.publish` for durable extension-owned state.
 - `host.message.send` for bot-authored room messages.
-- `outbound.http.request` for GitHub API calls through an allowlist containing
-  `https://api.github.com`.
+- `outbound.http.request` when a slice makes GitHub API calls, scoped by
+  `allowedHttpOrigins` containing `https://api.github.com`.
 - `ui.declarative` and `message.enrich` when a slice exposes rich message
   cards or route views.
+
+These names are the current serialized `ExtensionCapability` vocabulary. Older
+design notes that mention names such as `message.send` or `net.fetch.*` are not
+the active contract. `outbound.http.request` is only usable for HTTPS origins
+listed in the module's `allowedHttpOrigins`; the capability grant alone does
+not authorize arbitrary HTTP.
 
 Secrets are server-owned. The GitHub App private key, webhook secret, optional
 client secret, and installation token cache must never appear in XEP-0050
@@ -146,6 +162,8 @@ The provider ingress handler must:
 - Stay provider-generic in `waddle-server`: no GitHub event routing, alert
   text, repository matching, or Actions semantics in the server crate.
 - Verify a configured HMAC-SHA256 signature before any extension dispatch.
+- Dispatch only to the plugin configured for that provider. A signed GitHub
+  delivery must not be accepted on another extension's webhook path.
 - Read configured provider event and delivery headers.
 - Normalize JSON into a typed provider field list and drop the raw body.
 - Deduplicate by provider and delivery ID before dispatching extension effects.
@@ -155,6 +173,13 @@ The provider ingress handler must:
 The GitHub extension interprets the typed provider field list. It owns GitHub
 event semantics such as `installation.id`, repository IDs, `workflow_run`,
 `check_run`, conclusions, route matching, and alert formatting.
+
+Repository-scoped events (`workflow_run`, `check_run`) must include both a
+GitHub App installation identity and a single repository identity before they
+can match routes or emit alerts. Installation-scoped events (`installation`,
+`installation_repositories`) may carry repository lists or no single repository
+for actions such as uninstall; they update installation/repository state and do
+not enter the failure-alert path.
 
 When the extension needs GitHub API data, the server generates a short-lived
 installation access token for the relevant installation. Tokens are scoped by
@@ -173,8 +198,8 @@ Required state categories:
   repositories, and enabled Waddle contexts.
 - Routes: repository ID or `owner/repo`, event class, destination room JID, and
   enabled flag.
-- Delivery ledger: GitHub delivery ID, event type, repository ID, outcome, and
-  timestamp for dedupe and diagnostics.
+- Delivery ledger: GitHub delivery ID, event type, repository ID when present,
+  outcome, and timestamp for dedupe and diagnostics.
 - Sync cursors: per-installation or per-repository cursor state for future
   fallback reconciliation.
 - Recent errors: provider parsing, permission, API, routing, and message-send
@@ -187,18 +212,19 @@ typed archived-payload value with explicit retention rules.
 ## Admin Commands
 
 The GitHub extension exposes XEP-0050 commands discovered through
-`extensions.<domain>`.
+`extensions.<domain>`. Command nodes use the extension framework namespace; V1
+uses `urn:waddle:extension:1:github`, and individual operations are expressed
+by XEP-0004 `FORM_TYPE` values and fields rather than provider-prefixed command
+nodes. These operations are not XEP-0050 `action` attribute values.
 
-Required V1 commands:
+Required V1 operations:
 
-- `github:list-installations`: show installed GitHub App accounts visible to
+- `list-installations`: show installed GitHub App accounts visible to
   the requester.
-- `github:configure-repository`: choose a GitHub installation/repository,
+- `configure-repository`: choose a GitHub installation/repository,
   destination room, and enabled event classes.
-- `github:set-enabled`: enable or disable a configured repository route.
-- `github:test-alert`: send a synthetic alert through the normal extension
-  message path to prove routing and authorization.
-- `github:sync-installation`: refresh installation and repository metadata from
+- `set-enabled`: enable or disable a configured repository route.
+- `sync-installation`: refresh installation and repository metadata from
   GitHub using a server-side installation token.
 
 All forms use XEP-0004. Hidden `FORM_TYPE` values and field names must follow
@@ -217,6 +243,7 @@ Subscribed GitHub App webhook events:
 - `installation`
 - `installation_repositories`
 
+Only repository-scoped `workflow_run` and `check_run` events can emit alerts.
 The extension emits an alert only when:
 
 - the route is enabled for the installation and repository,
@@ -284,16 +311,29 @@ Provider ingress tests:
 - Reject payloads without configured provider event and delivery headers.
 - Normalize provider JSON without provider-specific server parsing.
 - Deduplicate repeated delivery IDs.
+- Preserve typed provider fields for repository-scoped and installation-scoped
+  deliveries without requiring a universal repository field.
+
+GitHub extension event tests:
+
 - Parse `workflow_run` and `check_run` completed failure payloads into typed
   GitHub extension events.
+- Require installation and repository identity for repository-scoped
+  `workflow_run` and `check_run` deliveries.
+- Accept installation-scoped `installation` and `installation_repositories`
+  deliveries with repository lists or no single repository identity, and verify
+  they do not emit failure alerts.
 - Ignore success, skipped, neutral, in-progress, and unsupported events.
 
 Extension protocol tests:
 
-- GitHub commands are discoverable through XEP-0030 and XEP-0050.
+- GitHub commands are discoverable through XEP-0030 and XEP-0050 under
+  `urn:waddle:extension:1:github`.
 - Admin forms use XEP-0004 with the expected `FORM_TYPE`.
 - Config, routing state, delivery ledger, sync cursors, and errors use XEP-0060
   nodes on `extensions.<domain>`.
+- PubSub reads and writes are limited to manifest-declared nodes; prefix or
+  sibling namespaces do not grant access to another node.
 - No new GitHub payload uses `urn:waddle:github:0` or `urn:waddle:github:*`.
 
 Message behavior tests:

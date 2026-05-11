@@ -71,6 +71,8 @@ enum WebhookError {
     InvalidPayload(String),
     #[error("extension plugin is not loaded")]
     PluginUnavailable,
+    #[error("provider webhook is not configured for this extension plugin")]
+    PluginNotAllowed,
     #[error("webhook delivery ledger failed: {0}")]
     Ledger(String),
 }
@@ -89,6 +91,7 @@ pub enum IngressRegistryError {
 
 #[derive(Debug, Clone)]
 pub struct ProviderIngressConfig {
+    plugin: PluginId,
     secret: String,
     event_header: String,
     delivery_header: String,
@@ -179,13 +182,29 @@ fn build_ingress_config(
             .filter(|value| !value.is_empty())
             .unwrap_or_else(|| default.to_string())
     };
+    let plugin_var = format!("WADDLE_PROVIDER_{provider_key}_WEBHOOK_PLUGIN");
+    let plugin_name = env
+        .get(&plugin_var)
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| default_plugin_for_provider_key(provider_key));
+    let plugin =
+        PluginId::new(plugin_name).map_err(|error| IngressRegistryError::InvalidEnvVar {
+            var: plugin_var,
+            detail: error.to_string(),
+        })?;
     Ok(ProviderIngressConfig {
+        plugin,
         secret,
         event_header: pick("EVENT_HEADER", "x-provider-event"),
         delivery_header: pick("DELIVERY_HEADER", "x-provider-delivery"),
         signature_header: pick("SIGNATURE_HEADER", "x-provider-signature-256"),
         signature_prefix: pick("SIGNATURE_PREFIX", "sha256="),
     })
+}
+
+fn default_plugin_for_provider_key(provider_key: &str) -> String {
+    provider_key.to_ascii_lowercase().replace('_', "-")
 }
 
 /// Tracker for in-flight provider webhook dispatch tasks. Each dispatch
@@ -231,6 +250,9 @@ async fn accept_provider_webhook(
         .provider_ingress
         .get(provider.as_str())
         .ok_or(WebhookError::MissingSecret)?;
+    if config.plugin != plugin {
+        return Err(WebhookError::PluginNotAllowed);
+    }
     if !verify_hmac_sha256_signature(
         headers,
         body,
@@ -451,6 +473,7 @@ fn webhook_error_response(error: WebhookError) -> axum::response::Response {
     let status = match error {
         WebhookError::MissingSecret => StatusCode::SERVICE_UNAVAILABLE,
         WebhookError::PluginUnavailable => StatusCode::SERVICE_UNAVAILABLE,
+        WebhookError::PluginNotAllowed => StatusCode::FORBIDDEN,
         WebhookError::InvalidSignature => StatusCode::UNAUTHORIZED,
         WebhookError::Ledger(_) => StatusCode::SERVICE_UNAVAILABLE,
         WebhookError::EmptyBody
@@ -678,12 +701,42 @@ mod tests {
         .expect("registry build");
 
         let config = registry.get("github").expect("github config");
+        assert_eq!(config.plugin.as_str(), "github");
         assert_eq!(config.secret, "not-a-real-secret");
         assert_eq!(config.event_header, "x-github-event");
         assert_eq!(config.delivery_header, "x-github-delivery");
         assert_eq!(config.signature_header, "x-hub-signature-256");
         assert_eq!(config.signature_prefix, "sha256=");
         assert!(registry.get("missing-provider").is_none());
+    }
+
+    #[test]
+    fn ingress_registry_accepts_explicit_plugin_binding() {
+        let registry = ProviderIngressRegistry::from_vars([
+            (
+                "WADDLE_PROVIDER_GITHUB_WEBHOOK_SECRET".to_string(),
+                "not-a-real-secret".to_string(),
+            ),
+            (
+                "WADDLE_PROVIDER_GITHUB_WEBHOOK_PLUGIN".to_string(),
+                "github".to_string(),
+            ),
+        ])
+        .expect("registry build");
+
+        assert_eq!(
+            registry
+                .get("github")
+                .expect("github config")
+                .plugin
+                .as_str(),
+            "github"
+        );
+    }
+
+    #[test]
+    fn default_provider_plugin_replaces_env_underscores_with_plugin_dashes() {
+        assert_eq!(default_plugin_for_provider_key("GITHUB_APP"), "github-app");
     }
 
     #[test]

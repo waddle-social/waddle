@@ -393,7 +393,7 @@ schema.#Project & {
 					  property="${key_property#* }"
 					  yq -e ".spec.data[] | select(.secretKey == \"${secret_key}\" and .remoteRef.key == \"server-runtime-production\" and .remoteRef.property == \"${property}\")" ../infrastructure/waddle.cloud/gitops/waddle-server/runtime-external-secret.yaml > /dev/null
 					done
-					yq -e '(.spec.data | length) == 5' ../infrastructure/waddle.cloud/gitops/waddle-server/runtime-external-secret.yaml > /dev/null
+					yq -e '(.spec.data | length) == 6' ../infrastructure/waddle.cloud/gitops/waddle-server/runtime-external-secret.yaml > /dev/null
 					yq -e '.spec.data[] | select(.secretKey == "apiKey" and .remoteRef.key == "server-runtime-production" and .remoteRef.property == "openrouter-api-key")' ../infrastructure/waddle.cloud/gitops/waddle-server/openrouter-external-secret.yaml > /dev/null
 					yq -e '(.spec.data | length) == 1' ../infrastructure/waddle.cloud/gitops/waddle-server/openrouter-external-secret.yaml > /dev/null
 					yq -e '.spec.data[] | select(.secretKey == "preshared_key" and .remoteRef.key == "server-runtime-production" and .remoteRef.property == "spicedb-preshared-key")' ../infrastructure/waddle.cloud/gitops/waddle-server/spicedb-config-external-secret.yaml > /dev/null
@@ -469,7 +469,7 @@ schema.#Project & {
 					yq -e '.extensions.modules[] | select(.name == "github") | (.config.admins // []) | length >= 1' "${published_values}" > /dev/null
 					yq -e '.extensions.modules[] | select(.name == "github") | .providerRoomGrants[0] == "chat@muc.waddle.social"' "${published_values}" > /dev/null
 					yq -e '.extensions.modules[] | select(.name == "github") | .capabilityGrants | contains(["host.message.send", "commands", "pubsub.publish"])' "${published_values}" > /dev/null
-					yq -e '.data[] | select(.secretKey == "WADDLE_PROVIDER_GITHUB_WEBHOOK_SECRET") | .remoteRef.property == "github-app-webhook-secret"' ../infrastructure/waddle.cloud/gitops/waddle-server/runtime-external-secret.yaml > /dev/null
+					yq -e '.spec.data[] | select(.secretKey == "WADDLE_PROVIDER_GITHUB_WEBHOOK_SECRET" and .remoteRef.key == "server-runtime-production" and .remoteRef.property == "github-app-webhook-secret")' ../infrastructure/waddle.cloud/gitops/waddle-server/runtime-external-secret.yaml > /dev/null
 				"""#]
 			inputs: list.Concat([_chartInputs, _gitopsWaddleServerInputs])
 		}
@@ -648,7 +648,7 @@ schema.#Project & {
 					      printf '    - https://openrouter.ai\n'
 					    elif [ "${extension_name}" = "github" ]; then
 					      # Routes are admin-managed at runtime via the
-					      # `github:configure-route` XEP-0050 ad-hoc command, which
+					      # GitHub XEP-0050 route configuration command, which
 					      # writes typed route entries into the extension's PubSub
 					      # routes node and reads them back on every webhook
 					      # delivery via the `pubsub-get-items` host tool. The

@@ -17,6 +17,7 @@ pub(crate) struct ExtensionPubSubContext {
     pub(crate) owner: jid::BareJid,
     pub(crate) app_state: Arc<AppState>,
     pub(crate) extension_manager: Arc<ExtensionManager>,
+    pub(crate) plugin_id: waddle_extensions::PluginId,
     pub(crate) authenticated_user_id: Option<String>,
 }
 
@@ -27,8 +28,24 @@ async fn authorize_extension_pubsub_publish(
     let Some(user_id) = context.authenticated_user_id.as_deref() else {
         return Err("authenticated user required".to_string());
     };
-    let Some(room) = context.extension_manager.room_for_pubsub_node(node) else {
-        return Err("PubSub node is not bound to a channel".to_string());
+    let manifest = context
+        .extension_manager
+        .manifest_for_plugin(context.plugin_id.as_str())
+        .ok_or_else(|| format!("extension {} is not loaded", context.plugin_id))?;
+    if !manifest.declares_pubsub_node(node) {
+        return Err(format!(
+            "PubSub node is not declared by extension {}",
+            context.plugin_id
+        ));
+    }
+    let Some(room) = context
+        .extension_manager
+        .room_for_plugin_pubsub_node(&context.plugin_id, node)
+    else {
+        if deployment_owner_allowed(&context.app_state, user_id).await? {
+            return Ok(());
+        }
+        return Err("requester cannot write extension-owned PubSub state".to_string());
     };
     let room_jid: jid::BareJid = room
         .as_str()
@@ -64,6 +81,19 @@ async fn authorize_extension_pubsub_publish(
     } else {
         Err("requester cannot write extension state for this channel".to_string())
     }
+}
+
+async fn deployment_owner_allowed(app_state: &AppState, user_id: &str) -> Result<bool, String> {
+    app_state
+        .permission_actor
+        .ask(CheckPermission {
+            subject: Subject::user(user_id),
+            permission: Permission::Owner,
+            object: Object::new(ObjectType::Server, DEPLOYMENT_SERVER_ID),
+        })
+        .await
+        .map(|result| result.allowed)
+        .map_err(|error| format!("permission check failed: {error}"))
 }
 
 pub(crate) async fn managed_channel_permission_allowed(
@@ -126,6 +156,7 @@ pub(crate) async fn managed_channel_permission_allowed(
 pub(crate) async fn extension_command_result(
     effects: Vec<ExtensionEffect>,
     pubsub: Option<ExtensionPubSubContext>,
+    command_session_id: Option<String>,
 ) -> waddle_xmpp::commands::CommandResult {
     let mut notes = Vec::new();
     let mut result_form = None;
@@ -136,7 +167,7 @@ pub(crate) async fn extension_command_result(
                     match authorize_extension_pubsub_publish(context, &publish.node).await {
                         Ok(()) => {}
                         Err(error) => {
-                            notes.push(waddle_xmpp::commands::Note::warn(format!(
+                            notes.push(waddle_xmpp::commands::Note::error(format!(
                                 "PubSub publish denied: {error}"
                             )));
                             continue;
@@ -152,12 +183,12 @@ pub(crate) async fn extension_command_result(
                         Ok(item_id) => notes.push(waddle_xmpp::commands::Note::info(format!(
                             "Published PubSub item {item_id}"
                         ))),
-                        Err(error) => notes.push(waddle_xmpp::commands::Note::warn(format!(
+                        Err(error) => notes.push(waddle_xmpp::commands::Note::error(format!(
                             "PubSub publish failed: {error}"
                         ))),
                     }
                 }
-                None => notes.push(waddle_xmpp::commands::Note::warn(
+                None => notes.push(waddle_xmpp::commands::Note::error(
                     "PubSub publish unavailable".to_string(),
                 )),
             },
@@ -168,12 +199,12 @@ pub(crate) async fn extension_command_result(
             ExtensionEffect::CommandForm(form) => {
                 return waddle_xmpp::commands::CommandResult::Executing {
                     form: extension_data_form_to_xmpp(form),
-                    session_id: String::new(),
+                    session_id: command_session_id.unwrap_or_default(),
                     notes,
                 };
             }
             ExtensionEffect::HostWarning(message) => {
-                notes.push(waddle_xmpp::commands::Note::warn(
+                notes.push(waddle_xmpp::commands::Note::error(
                     message.as_str().to_string(),
                 ));
             }
@@ -251,8 +282,9 @@ fn extension_pubsub_node_config() -> NodeConfig {
 mod tests {
     use super::*;
     use waddle_extensions::types::{
-        DisplayText, EnrichmentId, ExtensionCapability, ExtensionEnvelope, MessageEnrichment,
-        PayloadNamespace, PluginId, TextBlock, TextStyle, Timestamp, UiBlock, UiView, UiViewId,
+        DataForm, DataFormType, DisplayText, EnrichmentId, ExtensionCapability, ExtensionEnvelope,
+        MessageEnrichment, PayloadNamespace, PluginId, TextBlock, TextStyle, Timestamp, UiBlock,
+        UiView, UiViewId,
     };
     use waddle_xmpp::commands::CommandResult;
     use waddle_xmpp::xep::xep0050::NoteType;
@@ -260,7 +292,8 @@ mod tests {
     #[tokio::test]
     async fn enrichment_command_result_completes_without_noop_warning() {
         let result =
-            extension_command_result(vec![ExtensionEffect::EnrichMessage(envelope())], None).await;
+            extension_command_result(vec![ExtensionEffect::EnrichMessage(envelope())], None, None)
+                .await;
 
         let CommandResult::Completed {
             form: Some(_),
@@ -273,6 +306,45 @@ mod tests {
         assert!(notes.iter().any(|note| {
             note.note_type == NoteType::Info && note.text == "AI answer posted to channel."
         }));
+    }
+
+    #[tokio::test]
+    async fn command_form_result_preserves_session_id() {
+        let result = extension_command_result(
+            vec![ExtensionEffect::CommandForm(DataForm {
+                form_type: DataFormType::Form,
+                title: None,
+                instructions: Vec::new(),
+                fields: Vec::new(),
+            })],
+            None,
+            Some("session-123".to_string()),
+        )
+        .await;
+
+        let CommandResult::Executing { session_id, .. } = result else {
+            panic!("expected executing command result");
+        };
+        assert_eq!(session_id, "session-123");
+    }
+
+    #[tokio::test]
+    async fn host_warning_command_result_uses_error_note() {
+        let result = extension_command_result(
+            vec![ExtensionEffect::HostWarning(
+                DisplayText::new("invalid submitted form").expect("warning text"),
+            )],
+            None,
+            Some("session-123".to_string()),
+        )
+        .await;
+
+        let CommandResult::Completed { notes, .. } = result else {
+            panic!("expected completed command result");
+        };
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].note_type, NoteType::Error);
+        assert_eq!(notes[0].text, "invalid submitted form");
     }
 
     fn envelope() -> ExtensionEnvelope {
