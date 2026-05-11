@@ -6,6 +6,8 @@ import {
 import {
   $pinnedMessageBodies,
   resetPinnedMessageBodies,
+  cachePinnedMessageBody,
+  pinnedMessageBodiesEpoch,
 } from "@/stores/pinned-message-bodies";
 import { resetPinnedRooms, hydratePinnedRoom } from "@/stores/pinned-messages";
 import type { WasmPinEntry, WasmArchivedMessage } from "@/lib/xmpp/wasm-types";
@@ -125,6 +127,37 @@ describe("hydratePinnedBodiesOnPanelOpen", () => {
     });
     expect(client.fetchRoomMessagesByStanzaIds).not.toHaveBeenCalled();
   });
+
+  it("skips fetching ids that are already in the body cache", async () => {
+    const client = {
+      fetchRoomMessagesByStanzaIds: mock(async (_s: string, _c: string, ids: string[]) =>
+        ids.map((id) => archived(id)),
+      ),
+    };
+    hydratePinnedRoom("room@conf.example", [pinEntry("sid-A"), pinEntry("sid-B")]);
+    // Pre-populate the cache with sid-A so only sid-B should be fetched.
+    cachePinnedMessageBody(
+      "room@conf.example",
+      "sid-A",
+      fakeConvert(archived("sid-A")),
+      pinnedMessageBodiesEpoch(),
+    );
+
+    await hydratePinnedBodiesOnPanelOpen({
+      client,
+      spaceId: "space1",
+      channelId: "channel1",
+      roomJid: "room@conf.example",
+      timelineMessages: [],
+      convert: fakeConvert,
+    });
+
+    expect(client.fetchRoomMessagesByStanzaIds).toHaveBeenCalledWith(
+      "space1",
+      "channel1",
+      ["sid-B"],
+    );
+  });
 });
 
 describe("hydrateSinglePinnedBody", () => {
@@ -167,6 +200,26 @@ describe("hydrateSinglePinnedBody", () => {
       timelineMessages: [
         { id: "sid-new", author: "alice", body: "x", createdAt: "x", isSelf: false } as TimelineMessage,
       ],
+      convert: fakeConvert,
+    });
+    expect(client.fetchRoomMessagesByStanzaIds).not.toHaveBeenCalled();
+  });
+
+  it("short-circuits when id is already cached", async () => {
+    const client = { fetchRoomMessagesByStanzaIds: mock(async () => []) };
+    cachePinnedMessageBody(
+      "room@x",
+      "sid-cached",
+      fakeConvert(archived("sid-cached")),
+      pinnedMessageBodiesEpoch(),
+    );
+    await hydrateSinglePinnedBody({
+      client,
+      spaceId: "s",
+      channelId: "c",
+      roomJid: "room@x",
+      stanzaId: "sid-cached",
+      timelineMessages: [],
       convert: fakeConvert,
     });
     expect(client.fetchRoomMessagesByStanzaIds).not.toHaveBeenCalled();
