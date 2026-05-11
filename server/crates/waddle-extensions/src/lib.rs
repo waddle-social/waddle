@@ -13,7 +13,8 @@ pub use host_tools::{
     HostToolErrorCode, InvocationContext, ListChannelsRequest, ListChannelsResponse,
     ListRoomMembersRequest, ListRoomMembersResponse, ListSpacesRequest, ListSpacesResponse,
     MamQuery, MamQueryResponse, MamTarget, MessageTarget, MucAffiliation, MucRole,
-    PresenceAvailability, PresenceShow, PresenceState, RoomMember, RosterAsk, RosterEntry,
+    PresenceAvailability, PresenceShow, PresenceState, PubSubGetItemsRequest,
+    PubSubGetItemsResponse, PubSubStoredItem, RoomMember, RosterAsk, RosterEntry,
     RosterSubscription, SendMessageRequest, SendMessageResponse, SpaceSummary,
 };
 pub use manager::{ExtensionManager, MessageExtensionOutcome};
@@ -24,10 +25,10 @@ pub use types::{
     ExtensionEnvelope, ExtensionEvent, ExtensionManifest, ExtensionPayload, ExtensionResponse,
     ExtensionRouteDescriptor, ExtensionRouteScope, ExtensionRouteSurface, FormFieldOption,
     FormFieldType, FormFieldValue, FrameworkTypeError, FullJidValue, LaunchContext,
-    LaunchDescriptor, LaunchId, LaunchToken, MessageEnrichment, PayloadRoot, PayloadRule,
-    PayloadSurface, PluginId, ProviderDeliveryId, ProviderEventType, ProviderField,
+    LaunchDescriptor, LaunchId, LaunchToken, MessageEnrichment, PayloadNamespace, PayloadRoot,
+    PayloadRule, PayloadSurface, PluginId, ProviderDeliveryId, ProviderEventType, ProviderField,
     ProviderFieldName, ProviderFieldNumber, ProviderFieldText, ProviderFieldValue, ProviderId,
-    ProviderPayload, ProviderWebhook, PubSubPublish, ReplyTarget, RoomJid, RouteId, StanzaId,
-    ThreadId, Timestamp, UiActionId, Url, WaddleId, XmlAttribute, XmlElement, XmlNode,
-    INVOKE_COMMAND_NODE,
+    ProviderPayload, ProviderWebhook, PubSubItemId, PubSubNode, PubSubPublish, ReplyTarget,
+    RoomJid, RouteId, StanzaId, ThreadId, Timestamp, UiActionId, Url, WaddleId, XmlAttribute,
+    XmlElement, XmlNode, INVOKE_COMMAND_NODE,
 };

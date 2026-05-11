@@ -4,7 +4,7 @@ use xmpp_parsers::jid::BareJid;
 use super::waddle::extension::types as wit_types;
 use crate::host_tools as host_domain;
 use crate::host_tools::{HostToolError, HostToolErrorCode};
-use crate::types::{DisplayText, RoomJid, ThreadId, Timestamp};
+use crate::types::{DisplayText, PubSubItemId, PubSubNode, RoomJid, ThreadId, Timestamp};
 
 impl TryFrom<wit_types::ListChannelsRequest> for host_domain::ListChannelsRequest {
     type Error = HostToolError;
@@ -362,6 +362,44 @@ impl From<host_domain::SendMessageResponse> for wit_types::SendMessageResponse {
     fn from(value: host_domain::SendMessageResponse) -> Self {
         Self {
             stanza_id: value.stanza_id.into(),
+        }
+    }
+}
+
+impl TryFrom<wit_types::PubsubGetItemsRequest> for host_domain::PubSubGetItemsRequest {
+    type Error = HostToolError;
+
+    fn try_from(value: wit_types::PubsubGetItemsRequest) -> Result<Self, Self::Error> {
+        let node = PubSubNode::new(value.node.value).map_err(host_type_error)?;
+        let item_ids = value
+            .item_ids
+            .into_iter()
+            .map(|id| PubSubItemId::new(id.value).map_err(host_type_error))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Self {
+            node,
+            max_items: value.max_items,
+            item_ids,
+        })
+    }
+}
+
+impl From<host_domain::PubSubGetItemsResponse> for wit_types::PubsubGetItemsResponse {
+    fn from(value: host_domain::PubSubGetItemsResponse) -> Self {
+        Self {
+            items: value.items.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+impl From<host_domain::PubSubStoredItem> for wit_types::PubsubStoredItem {
+    fn from(value: host_domain::PubSubStoredItem) -> Self {
+        Self {
+            id: value.id.into(),
+            payload: value.payload.into(),
+            publisher: value.publisher.map(|jid| wit_types::BareJid {
+                value: jid.to_string(),
+            }),
         }
     }
 }

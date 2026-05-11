@@ -83,4 +83,12 @@ impl ext_host::ExtensionHostTools for DeferredExtensionHostTools {
     ) -> std::result::Result<ext_host::SendMessageResponse, ext_host::HostToolError> {
         self.tools()?.send_message(context, request).await
     }
+
+    async fn pubsub_get_items(
+        &self,
+        context: &ext_host::InvocationContext,
+        request: ext_host::PubSubGetItemsRequest,
+    ) -> std::result::Result<ext_host::PubSubGetItemsResponse, ext_host::HostToolError> {
+        self.tools()?.pubsub_get_items(context, request).await
+    }
 }

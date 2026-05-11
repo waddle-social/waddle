@@ -70,36 +70,92 @@ fn number(value: &str) -> types::ProviderFieldNumber {
     }
 }
 
-#[test]
-fn manifest_declares_web_integration_namespace_and_message_send() {
-    let manifest = manifest();
+fn sample_route(repository_id: &str, channel: &str) -> Route {
+    Route {
+        repository_id: repository_id.to_string(),
+        channel: channel.to_string(),
+        events: vec!["workflow_run".to_string(), "check_run".to_string()],
+        installation_id: None,
+    }
+}
 
-    assert_eq!(manifest.id.value, "github");
-    assert!(manifest
-        .capabilities
-        .contains(&types::ExtensionCapability::HostMessageSend));
-    assert_eq!(manifest.payloads[0].root.namespace.value, PLUGIN_NS);
+fn admin_command(
+    node: &str,
+    requester: &str,
+    fields: Vec<types::FormFieldValue>,
+) -> types::CommandInvocation {
+    types::CommandInvocation {
+        waddle_id: types::WaddleId {
+            value: "command-1".to_string(),
+        },
+        room: None,
+        requester: types::FullJid {
+            value: requester.to_string(),
+        },
+        command_node: types::CommandNode {
+            value: node.to_string(),
+        },
+        session_id: None,
+        action: Some(types::CommandAction::Execute),
+        form: None,
+        fields,
+    }
+}
+
+fn form_field(name: &str, values: &[&str]) -> types::FormFieldValue {
+    types::FormFieldValue {
+        name: types::UiActionId {
+            value: name.to_string(),
+        },
+        values: values
+            .iter()
+            .map(|value| types::DataFormValue {
+                value: (*value).to_string(),
+            })
+            .collect(),
+    }
 }
 
 #[test]
-fn parses_route_config() {
+fn manifest_declares_admin_command_and_routes_node() {
+    let manifest = manifest();
+
+    assert_eq!(manifest.id.value, "github");
+    assert_eq!(manifest.payloads[0].root.namespace.value, PLUGIN_NS);
+    assert!(manifest
+        .capabilities
+        .contains(&types::ExtensionCapability::HostMessageSend));
+    assert!(manifest
+        .capabilities
+        .contains(&types::ExtensionCapability::Commands));
+    assert!(manifest
+        .capabilities
+        .contains(&types::ExtensionCapability::PubsubPublish));
+    assert_eq!(manifest.commands.len(), 1);
+    assert_eq!(manifest.commands[0].node.value, CONFIGURE_ROUTE_COMMAND);
+    assert!(manifest
+        .pubsub_nodes
+        .iter()
+        .any(|node| node.value == ROUTES_NODE));
+}
+
+#[test]
+fn parses_admin_only_config() {
     let config = parse_config(
         r#"{
-            "routes": [{
-                "installation_id": "42",
-                "repository_id": "100",
-                "channel": "dev@muc.waddle.local",
-                "events": ["workflow_run"]
-            }]
+            "admins": ["rawkode@waddle.social", "icepuma@waddle.social"]
         }"#,
     )
     .expect("config parses");
 
-    assert_eq!(config.routes.len(), 1);
-    assert_eq!(config.routes[0].installation_id.as_deref(), Some("42"));
-    assert_eq!(config.routes[0].repository_id, "100");
-    assert_eq!(config.routes[0].channel.value, "dev@muc.waddle.local");
-    assert_eq!(config.routes[0].events, vec!["workflow_run"]);
+    assert_eq!(config.admins.len(), 2);
+    assert!(config.admins.contains(&"rawkode@waddle.social".to_string()));
+}
+
+#[test]
+fn empty_config_parses_to_empty_admin_list() {
+    let config = parse_config("").expect("empty config parses");
+    assert!(config.admins.is_empty());
 }
 
 #[test]
@@ -122,55 +178,165 @@ fn successful_webhook_does_not_alert() {
 }
 
 #[test]
-fn provider_webhook_sends_to_matching_route() {
+fn provider_webhook_sends_to_route_loaded_from_pubsub() {
     let _guard = test_lock().lock().expect("test lock");
-    sent_room_messages().lock().expect("messages lock").clear();
-    let config = parse_config(
-        r#"{
-            "routes": [{
-                "installation_id": "42",
-                "repository_id": "100",
-                "channel": "dev@muc.waddle.local",
-                "events": ["workflow_run"]
-            }]
-        }"#,
-    )
-    .expect("config parses");
+    test_state::reset();
+    test_state::set_route_fixtures(vec![sample_route("100", "dev@muc.waddle.local")]);
 
-    let effects = handle_provider_webhook(sample_webhook("timed_out"), config).expect("handled");
+    let effects = handle_provider_webhook(sample_webhook("failure")).expect("handled");
 
     assert_eq!(effects.len(), 1);
     assert!(matches!(effects[0], types::ExtensionEffect::Noop));
-    let messages = sent_room_messages().lock().expect("messages lock");
+    let messages = test_state::sent_room_messages()
+        .lock()
+        .expect("messages lock");
     assert_eq!(messages.len(), 1);
     match &messages[0].target {
         types::MessageTarget::Muc(room) => assert_eq!(room.value, "dev@muc.waddle.local"),
         types::MessageTarget::Direct(_) => panic!("expected room message"),
     }
-    assert!(messages[0].body.value.contains("timed_out"));
+    assert!(messages[0].body.value.contains("failure"));
 }
 
 #[test]
-fn provider_webhook_ignores_non_matching_route() {
+fn provider_webhook_ignores_non_matching_repository() {
     let _guard = test_lock().lock().expect("test lock");
-    sent_room_messages().lock().expect("messages lock").clear();
-    let config = parse_config(
-        r#"{
-            "routes": [{
-                "installation_id": "42",
-                "repository_id": "999",
-                "channel": "dev@muc.waddle.local",
-                "events": ["workflow_run"]
-            }]
-        }"#,
-    )
-    .expect("config parses");
+    test_state::reset();
+    test_state::set_route_fixtures(vec![sample_route("999", "dev@muc.waddle.local")]);
 
-    let effects = handle_provider_webhook(sample_webhook("failure"), config).expect("handled");
+    let effects = handle_provider_webhook(sample_webhook("failure")).expect("handled");
 
     assert!(effects.is_empty());
-    assert!(sent_room_messages()
+    assert!(test_state::sent_room_messages()
         .lock()
         .expect("messages lock")
         .is_empty());
+}
+
+#[test]
+fn configure_route_command_returns_form_when_fields_missing() {
+    let _guard = test_lock().lock().expect("test lock");
+    test_state::reset();
+    test_state::set_config_fixture(GitHubConfig {
+        admins: vec!["rawkode@waddle.social".to_string()],
+    });
+
+    let command = admin_command(CONFIGURE_ROUTE_COMMAND, "rawkode@waddle.social/abc", vec![]);
+    let effects = handle_command(command, current_config().expect("config")).expect("handled");
+
+    assert_eq!(effects.len(), 1);
+    match &effects[0] {
+        types::ExtensionEffect::CommandForm(form) => {
+            assert!(form
+                .fields
+                .iter()
+                .any(|f| f.name.value == FIELD_REPOSITORY_ID));
+            assert!(form.fields.iter().any(|f| f.name.value == FIELD_CHANNEL));
+            assert!(form.fields.iter().any(|f| f.name.value == FIELD_EVENTS));
+        }
+        other => panic!("expected CommandForm, got {other:?}"),
+    }
+}
+
+#[test]
+fn configure_route_command_writes_publish_effect_on_submit() {
+    let _guard = test_lock().lock().expect("test lock");
+    test_state::reset();
+    test_state::set_config_fixture(GitHubConfig {
+        admins: vec!["rawkode@waddle.social".to_string()],
+    });
+
+    let command = admin_command(
+        CONFIGURE_ROUTE_COMMAND,
+        "rawkode@waddle.social/abc",
+        vec![
+            form_field(FIELD_REPOSITORY_ID, &["1009269194"]),
+            form_field(FIELD_CHANNEL, &["chat@muc.waddle.social"]),
+            form_field(FIELD_EVENTS, &["workflow_run", "check_run"]),
+        ],
+    );
+    let effects = handle_command(command, current_config().expect("config")).expect("handled");
+
+    assert_eq!(effects.len(), 1);
+    match &effects[0] {
+        types::ExtensionEffect::PublishPubsub(publish) => {
+            assert_eq!(publish.node.value, ROUTES_NODE);
+            assert_eq!(
+                publish.item_id.as_ref().expect("item id").value,
+                "1009269194"
+            );
+            assert_eq!(publish.payload.root.local_name, ROUTE_ELEMENT);
+            assert_eq!(publish.payload.root.namespace.value, PLUGIN_NS);
+            let attrs = match &publish.payload.tokens[0] {
+                types::XmlToken::StartElement(element) => &element.attributes,
+                _ => panic!("expected start element"),
+            };
+            assert_eq!(find_attr(attrs, ATTR_REPOSITORY_ID), Some("1009269194"));
+            assert_eq!(
+                find_attr(attrs, ATTR_CHANNEL),
+                Some("chat@muc.waddle.social")
+            );
+            assert_eq!(
+                find_attr(attrs, ATTR_EVENTS),
+                Some("workflow_run,check_run")
+            );
+        }
+        other => panic!("expected PublishPubsub, got {other:?}"),
+    }
+}
+
+#[test]
+fn configure_route_command_rejects_non_admin() {
+    let _guard = test_lock().lock().expect("test lock");
+    test_state::reset();
+    test_state::set_config_fixture(GitHubConfig {
+        admins: vec!["rawkode@waddle.social".to_string()],
+    });
+
+    let command = admin_command(
+        CONFIGURE_ROUTE_COMMAND,
+        "stranger@elsewhere.org/x",
+        vec![
+            form_field(FIELD_REPOSITORY_ID, &["1009269194"]),
+            form_field(FIELD_CHANNEL, &["chat@muc.waddle.social"]),
+            form_field(FIELD_EVENTS, &["workflow_run"]),
+        ],
+    );
+    let err = handle_command(command, current_config().expect("config")).expect_err("should deny");
+    assert_eq!(err.code, types::ExtensionErrorCode::Denied);
+}
+
+#[test]
+fn configure_route_command_rejects_non_numeric_repository_id() {
+    let _guard = test_lock().lock().expect("test lock");
+    test_state::reset();
+    test_state::set_config_fixture(GitHubConfig {
+        admins: vec!["rawkode@waddle.social".to_string()],
+    });
+
+    let command = admin_command(
+        CONFIGURE_ROUTE_COMMAND,
+        "rawkode@waddle.social/abc",
+        vec![
+            form_field(FIELD_REPOSITORY_ID, &["not-a-number"]),
+            form_field(FIELD_CHANNEL, &["chat@muc.waddle.social"]),
+            form_field(FIELD_EVENTS, &["workflow_run"]),
+        ],
+    );
+    let err =
+        handle_command(command, current_config().expect("config")).expect_err("should reject");
+    assert_eq!(err.code, types::ExtensionErrorCode::InvalidRequest);
+}
+
+#[test]
+fn route_payload_round_trip() {
+    let original = Route {
+        repository_id: "1009269194".to_string(),
+        channel: "chat@muc.waddle.social".to_string(),
+        events: vec!["workflow_run".to_string(), "check_run".to_string()],
+        installation_id: Some("42".to_string()),
+    };
+    let payload = original.to_payload();
+    let parsed = Route::from_payload(&payload).expect("round trip");
+    assert_eq!(parsed, original);
 }

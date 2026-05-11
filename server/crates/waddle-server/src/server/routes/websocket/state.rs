@@ -37,6 +37,14 @@ pub struct WebSocketDeps {
     /// inner `Arc<[u8]>`; shared with `RoomRegistryActor` so every
     /// stamping site uses the same key.
     pub occupant_id_secret: OccupantIdSecret,
+    /// Snapshot of `WADDLE_PROVIDER_*_WEBHOOK_*` env vars, built once at
+    /// startup; the extension webhook handler reads from this instead of
+    /// re-parsing env on every request.
+    pub provider_ingress: Arc<crate::server::routes::extension_webhooks::ProviderIngressRegistry>,
+    /// Tracker for spawned provider webhook dispatch tasks, drained on
+    /// graceful shutdown so in-flight deliveries can finish updating the
+    /// ledger before runtime teardown.
+    pub provider_dispatch_tasks: crate::server::routes::extension_webhooks::ProviderDispatchTracker,
 }
 
 pub struct ProtocolServices {

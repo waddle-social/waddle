@@ -48,6 +48,18 @@ impl ExtensionPayload {
         self.root.to_minidom()
     }
 
+    /// Parse a `minidom::Element` back into an `ExtensionPayload`.
+    ///
+    /// Used by the host's `pubsub-get-items` bridge when materialising
+    /// stored PubSub items into the typed payload extensions exchange
+    /// across the WIT boundary. The element's namespace becomes the
+    /// payload namespace; nested elements with a different namespace
+    /// are rejected (extensions only own their declared namespace).
+    pub fn from_minidom(element: &Element) -> Result<Self, FrameworkTypeError> {
+        let root = XmlElement::from_minidom(element)?;
+        Self::new(root.namespace.clone(), root)
+    }
+
     /// Returns true when this payload is the framework-defined
     /// `<extension-item>` PubSub envelope. The host accepts these from any
     /// extension that has been granted `PubSubPublish`, without requiring the
@@ -165,5 +177,34 @@ impl XmlElement {
                     XmlNode::Text(text) => text.len(),
                 })
                 .sum::<usize>()
+    }
+
+    /// Parse a `minidom::Element` into a typed `XmlElement`. Rejects
+    /// namespaced attributes (extensions don't use them) and validates
+    /// limits + name shape via `XmlElement::new`.
+    pub fn from_minidom(element: &Element) -> Result<Self, FrameworkTypeError> {
+        let namespace = PayloadNamespace::new(element.ns())?;
+        let attributes = element
+            .attrs()
+            .map(|(name, value)| XmlAttribute {
+                namespace: None,
+                local_name: name.to_string(),
+                value: value.to_string(),
+            })
+            .collect::<Vec<_>>();
+        let mut children = Vec::with_capacity(element.nodes().count());
+        for node in element.nodes() {
+            match node {
+                minidom::Node::Element(child) => {
+                    children.push(XmlNode::Element(XmlElement::from_minidom(child)?));
+                }
+                minidom::Node::Text(text) => {
+                    if !text.is_empty() {
+                        children.push(XmlNode::Text(text.clone()));
+                    }
+                }
+            }
+        }
+        Self::new(namespace, element.name().to_string(), attributes, children)
     }
 }

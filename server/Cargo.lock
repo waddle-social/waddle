@@ -5951,6 +5951,7 @@ dependencies = [
  "jsonwebtoken",
  "kameo",
  "lru 0.12.5",
+ "minidom",
  "object_store",
  "opentelemetry",
  "opentelemetry-appender-tracing",

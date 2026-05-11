@@ -216,7 +216,7 @@ async fn test_global_v0004_adds_policy_digest_to_existing_v0003_schema() {
     // that reorders or renumbers can't silently shift it.
     let runner = MigrationRunner::global();
     let applied = runner.run(&db).await.unwrap();
-    assert_eq!(applied, vec![4, 1001, 1002]);
+    assert_eq!(applied, vec![4, 5, 1001, 1002]);
 
     // Column exists.
     let conn = db.guard().await.unwrap();
@@ -327,7 +327,7 @@ async fn test_incompatible_history_forces_hard_cut_reapply() {
 
     let runner = MigrationRunner::global();
     let applied = runner.run(&db).await.unwrap();
-    assert_eq!(applied, vec![1, 2, 3, 4, 1001, 1002]);
+    assert_eq!(applied, vec![1, 2, 3, 4, 5, 1001, 1002]);
 
     let applied_again = runner.run(&db).await.unwrap();
     assert!(applied_again.is_empty());
@@ -378,7 +378,7 @@ async fn test_incompatible_history_recreates_existing_owned_tables() {
 
     let runner = MigrationRunner::global();
     let applied = runner.run(&db).await.unwrap();
-    assert_eq!(applied, vec![1, 2, 3, 4, 1001, 1002]);
+    assert_eq!(applied, vec![1, 2, 3, 4, 5, 1001, 1002]);
 
     let conn = db.guard().await.unwrap();
     let mut rows = conn

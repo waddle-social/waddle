@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use axum::{
@@ -54,8 +55,6 @@ struct WebhookAccepted {
 enum WebhookError {
     #[error("provider webhook secret is not configured")]
     MissingSecret,
-    #[error("failed to read provider webhook secret file")]
-    SecretFile(#[from] std::io::Error),
     #[error("webhook payload required")]
     EmptyBody,
     #[error("missing provider event header")]
@@ -76,14 +75,126 @@ enum WebhookError {
     Ledger(String),
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum IngressRegistryError {
+    #[error("invalid provider ingress env var {var}: {detail}")]
+    InvalidEnvVar { var: String, detail: String },
+    #[error("failed to read provider webhook secret file {path}: {source}")]
+    SecretFile {
+        path: String,
+        #[source]
+        source: std::io::Error,
+    },
+}
+
 #[derive(Debug, Clone)]
-struct ProviderIngressConfig {
+pub struct ProviderIngressConfig {
     secret: String,
     event_header: String,
     delivery_header: String,
     signature_header: String,
     signature_prefix: String,
 }
+
+/// Snapshot of `WADDLE_PROVIDER_*_WEBHOOK_*` env vars, built once at server
+/// startup. The handler does an `O(1)` lookup keyed by the URL `provider_id`'s
+/// env-key form (uppercased alphanumeric); no per-request env reads or file
+/// I/O.
+#[derive(Debug, Default)]
+pub struct ProviderIngressRegistry {
+    configs: HashMap<String, ProviderIngressConfig>,
+}
+
+impl ProviderIngressRegistry {
+    pub fn from_env() -> Result<Self, IngressRegistryError> {
+        Self::from_vars(std::env::vars())
+    }
+
+    fn from_vars<I>(vars: I) -> Result<Self, IngressRegistryError>
+    where
+        I: IntoIterator<Item = (String, String)>,
+    {
+        let env: HashMap<String, String> = vars.into_iter().collect();
+        let mut configs = HashMap::new();
+        for (key, value) in &env {
+            let Some(provider_key) = key
+                .strip_prefix("WADDLE_PROVIDER_")
+                .and_then(|rest| rest.strip_suffix("_WEBHOOK_SECRET"))
+            else {
+                continue;
+            };
+            let provider_key = provider_key.to_string();
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let config = build_ingress_config(&provider_key, trimmed.to_string(), &env)?;
+            configs.insert(provider_key, config);
+        }
+        // Also pick up providers configured only via *_SECRET_FILE.
+        for (key, value) in &env {
+            let Some(provider_key) = key
+                .strip_prefix("WADDLE_PROVIDER_")
+                .and_then(|rest| rest.strip_suffix("_WEBHOOK_SECRET_FILE"))
+            else {
+                continue;
+            };
+            let provider_key = provider_key.to_string();
+            if configs.contains_key(&provider_key) {
+                continue;
+            }
+            let path = value.trim();
+            if path.is_empty() {
+                continue;
+            }
+            let secret = std::fs::read_to_string(path)
+                .map_err(|source| IngressRegistryError::SecretFile {
+                    path: path.to_string(),
+                    source,
+                })?
+                .trim()
+                .to_string();
+            if secret.is_empty() {
+                continue;
+            }
+            let config = build_ingress_config(&provider_key, secret, &env)?;
+            configs.insert(provider_key, config);
+        }
+        Ok(Self { configs })
+    }
+
+    fn get(&self, provider_id: &str) -> Option<&ProviderIngressConfig> {
+        self.configs.get(&provider_env_key(provider_id))
+    }
+}
+
+fn build_ingress_config(
+    provider_key: &str,
+    secret: String,
+    env: &HashMap<String, String>,
+) -> Result<ProviderIngressConfig, IngressRegistryError> {
+    let pick = |suffix: &str, default: &str| -> String {
+        env.get(&format!("WADDLE_PROVIDER_{provider_key}_WEBHOOK_{suffix}"))
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| default.to_string())
+    };
+    Ok(ProviderIngressConfig {
+        secret,
+        event_header: pick("EVENT_HEADER", "x-provider-event"),
+        delivery_header: pick("DELIVERY_HEADER", "x-provider-delivery"),
+        signature_header: pick("SIGNATURE_HEADER", "x-provider-signature-256"),
+        signature_prefix: pick("SIGNATURE_PREFIX", "sha256="),
+    })
+}
+
+/// Tracker for in-flight provider webhook dispatch tasks. Each dispatch
+/// is spawned through this so graceful shutdown can `close()` + `wait()`
+/// before tearing down the runtime. Note: a row inserted into
+/// `provider_webhook_deliveries` with `status = 'queued'` that the dispatch
+/// task never reaches (process kill, runtime drop) stays `queued` forever —
+/// V1 has no sweep/retry loop. Operators should look at stuck rows.
+pub type ProviderDispatchTracker = tokio_util::task::TaskTracker;
 
 async fn provider_webhook_handler(
     Extension(websocket_state): Extension<Arc<WebSocketState>>,
@@ -115,7 +226,11 @@ async fn accept_provider_webhook(
         PluginId::new(path.plugin_id.clone()),
         WebhookError::InvalidPluginId,
     )?;
-    let config = provider_ingress_config(provider.as_str())?;
+    let config = websocket_state
+        .deps
+        .provider_ingress
+        .get(provider.as_str())
+        .ok_or(WebhookError::MissingSecret)?;
     if !verify_hmac_sha256_signature(
         headers,
         body,
@@ -187,16 +302,19 @@ async fn accept_provider_webhook(
     let dispatch_plugin = plugin.clone();
     let dispatch_provider = provider.clone();
     let dispatch_delivery = delivery_id.clone();
-    tokio::spawn(async move {
-        dispatch_provider_delivery(
-            dispatch_state,
-            dispatch_plugin,
-            dispatch_provider,
-            dispatch_delivery,
-            event,
-        )
-        .await;
-    });
+    websocket_state
+        .deps
+        .provider_dispatch_tasks
+        .spawn(async move {
+            dispatch_provider_delivery(
+                dispatch_state,
+                dispatch_plugin,
+                dispatch_provider,
+                dispatch_delivery,
+                event,
+            )
+            .await;
+        });
 
     Ok(WebhookAccepted {
         accepted: true,
@@ -316,46 +434,6 @@ async fn mark_provider_delivery(
     Ok(())
 }
 
-fn provider_ingress_config(provider_id: &str) -> Result<ProviderIngressConfig, WebhookError> {
-    let key = provider_env_key(provider_id);
-    let secret_env = format!("WADDLE_PROVIDER_{key}_WEBHOOK_SECRET");
-    let secret_file_env = format!("WADDLE_PROVIDER_{key}_WEBHOOK_SECRET_FILE");
-    let event_header_env = format!("WADDLE_PROVIDER_{key}_WEBHOOK_EVENT_HEADER");
-    let delivery_header_env = format!("WADDLE_PROVIDER_{key}_WEBHOOK_DELIVERY_HEADER");
-    let signature_header_env = format!("WADDLE_PROVIDER_{key}_WEBHOOK_SIGNATURE_HEADER");
-    let signature_prefix_env = format!("WADDLE_PROVIDER_{key}_WEBHOOK_SIGNATURE_PREFIX");
-
-    let secret = std::env::var(&secret_env)
-        .ok()
-        .map(|secret| secret.trim().to_string())
-        .filter(|secret| !secret.is_empty())
-        .map(Ok)
-        .unwrap_or_else(|| {
-            let path = std::env::var(&secret_file_env)
-                .ok()
-                .map(|path| path.trim().to_string())
-                .filter(|path| !path.is_empty())
-                .ok_or(WebhookError::MissingSecret)?;
-            std::fs::read_to_string(path)
-                .map(|secret| secret.trim().to_string())
-                .map_err(WebhookError::SecretFile)
-        })?;
-    if secret.is_empty() {
-        return Err(WebhookError::MissingSecret);
-    }
-
-    Ok(ProviderIngressConfig {
-        secret,
-        event_header: std::env::var(event_header_env)
-            .unwrap_or_else(|_| "x-provider-event".to_string()),
-        delivery_header: std::env::var(delivery_header_env)
-            .unwrap_or_else(|_| "x-provider-delivery".to_string()),
-        signature_header: std::env::var(signature_header_env)
-            .unwrap_or_else(|_| "x-provider-signature-256".to_string()),
-        signature_prefix: std::env::var(signature_prefix_env).unwrap_or_else(|_| "sha256=".into()),
-    })
-}
-
 fn provider_env_key(provider_id: &str) -> String {
     provider_id
         .chars()
@@ -371,9 +449,7 @@ fn provider_env_key(provider_id: &str) -> String {
 
 fn webhook_error_response(error: WebhookError) -> axum::response::Response {
     let status = match error {
-        WebhookError::MissingSecret | WebhookError::SecretFile(_) => {
-            StatusCode::SERVICE_UNAVAILABLE
-        }
+        WebhookError::MissingSecret => StatusCode::SERVICE_UNAVAILABLE,
         WebhookError::PluginUnavailable => StatusCode::SERVICE_UNAVAILABLE,
         WebhookError::InvalidSignature => StatusCode::UNAUTHORIZED,
         WebhookError::Ledger(_) => StatusCode::SERVICE_UNAVAILABLE,
@@ -572,5 +648,108 @@ mod tests {
 
         assert!(webhook_effects_failed(&[warning]));
         assert!(!webhook_effects_failed(&[ExtensionEffect::Noop]));
+    }
+
+    #[test]
+    fn ingress_registry_builds_from_env_inline_secret() {
+        let registry = ProviderIngressRegistry::from_vars([
+            (
+                "WADDLE_PROVIDER_GITHUB_WEBHOOK_SECRET".to_string(),
+                "  not-a-real-secret  ".to_string(),
+            ),
+            (
+                "WADDLE_PROVIDER_GITHUB_WEBHOOK_EVENT_HEADER".to_string(),
+                "x-github-event".to_string(),
+            ),
+            (
+                "WADDLE_PROVIDER_GITHUB_WEBHOOK_DELIVERY_HEADER".to_string(),
+                "x-github-delivery".to_string(),
+            ),
+            (
+                "WADDLE_PROVIDER_GITHUB_WEBHOOK_SIGNATURE_HEADER".to_string(),
+                "x-hub-signature-256".to_string(),
+            ),
+            (
+                "WADDLE_PROVIDER_GITHUB_WEBHOOK_SIGNATURE_PREFIX".to_string(),
+                "sha256=".to_string(),
+            ),
+            ("UNRELATED".to_string(), "value".to_string()),
+        ])
+        .expect("registry build");
+
+        let config = registry.get("github").expect("github config");
+        assert_eq!(config.secret, "not-a-real-secret");
+        assert_eq!(config.event_header, "x-github-event");
+        assert_eq!(config.delivery_header, "x-github-delivery");
+        assert_eq!(config.signature_header, "x-hub-signature-256");
+        assert_eq!(config.signature_prefix, "sha256=");
+        assert!(registry.get("missing-provider").is_none());
+    }
+
+    #[test]
+    fn ingress_registry_skips_blank_secret() {
+        let registry = ProviderIngressRegistry::from_vars([(
+            "WADDLE_PROVIDER_GITHUB_WEBHOOK_SECRET".to_string(),
+            "   ".to_string(),
+        )])
+        .expect("registry build");
+        assert!(registry.get("github").is_none());
+    }
+
+    #[test]
+    fn ingress_registry_defaults_headers_when_unset() {
+        let registry = ProviderIngressRegistry::from_vars([(
+            "WADDLE_PROVIDER_EXAMPLE_WEBHOOK_SECRET".to_string(),
+            "shh".to_string(),
+        )])
+        .expect("registry build");
+
+        let config = registry.get("example").expect("example config");
+        assert_eq!(config.event_header, "x-provider-event");
+        assert_eq!(config.delivery_header, "x-provider-delivery");
+        assert_eq!(config.signature_header, "x-provider-signature-256");
+        assert_eq!(config.signature_prefix, "sha256=");
+    }
+
+    #[test]
+    fn ingress_registry_prefers_inline_secret_over_file() {
+        // If both _SECRET and _SECRET_FILE are set, the inline secret wins
+        // and we never read the file (so a bad path doesn't matter).
+        let registry = ProviderIngressRegistry::from_vars([
+            (
+                "WADDLE_PROVIDER_GITHUB_WEBHOOK_SECRET".to_string(),
+                "inline-wins".to_string(),
+            ),
+            (
+                "WADDLE_PROVIDER_GITHUB_WEBHOOK_SECRET_FILE".to_string(),
+                "/nonexistent/path/that/would/fail".to_string(),
+            ),
+        ])
+        .expect("registry build");
+        assert_eq!(
+            registry.get("github").expect("github config").secret,
+            "inline-wins"
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_tracker_drains_spawned_tasks() {
+        let tracker = ProviderDispatchTracker::new();
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        tracker.spawn(async move {
+            let _ = rx.await;
+        });
+        tracker.close();
+        let drain = tokio::spawn({
+            let tracker = tracker.clone();
+            async move {
+                tracker.wait().await;
+            }
+        });
+        // The drain future should still be pending until the task completes.
+        tokio::task::yield_now().await;
+        assert!(!drain.is_finished());
+        tx.send(()).expect("notify completion");
+        drain.await.expect("drain completes");
     }
 }

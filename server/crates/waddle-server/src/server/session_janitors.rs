@@ -562,5 +562,20 @@ pub(crate) fn spawn_graceful_shutdown_drain(
         }
         publish_tracker.wait().await;
         info!("Graceful shutdown: OIDC profile-publish drain complete");
+
+        // Drain in-flight provider webhook dispatch tasks so the ledger
+        // status update (`mark_provider_delivery`) lands before teardown.
+        // Rows that never reach dispatch (process kill between insert and
+        // task start) still stay 'queued' — V1 has no sweep job.
+        let dispatch_tracker = websocket_state.deps.provider_dispatch_tasks.clone();
+        dispatch_tracker.close();
+        if !dispatch_tracker.is_empty() {
+            info!(
+                in_flight = dispatch_tracker.len(),
+                "Graceful shutdown: awaiting in-flight provider webhook dispatches"
+            );
+        }
+        dispatch_tracker.wait().await;
+        info!("Graceful shutdown: provider webhook dispatch drain complete");
     });
 }

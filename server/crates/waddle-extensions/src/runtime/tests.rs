@@ -107,6 +107,14 @@ impl ExtensionHostTools for MockHostTools {
             stanza_id: StanzaId::new("extension-stanza").expect("stanza id"),
         })
     }
+
+    async fn pubsub_get_items(
+        &self,
+        _context: &InvocationContext,
+        _request: host_domain::PubSubGetItemsRequest,
+    ) -> std::result::Result<host_domain::PubSubGetItemsResponse, HostToolError> {
+        Err(unsupported())
+    }
 }
 
 #[tokio::test]

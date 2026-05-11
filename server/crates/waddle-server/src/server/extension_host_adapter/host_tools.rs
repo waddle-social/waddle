@@ -215,6 +215,90 @@ impl ext_host::ExtensionHostTools for ExtensionHostAdapter {
             .map_err(host_tool_error)?;
         Ok(ext_host::SendMessageResponse { stanza_id })
     }
+
+    async fn pubsub_get_items(
+        &self,
+        context: &ext_host::InvocationContext,
+        request: ext_host::PubSubGetItemsRequest,
+    ) -> Result<ext_host::PubSubGetItemsResponse, ext_host::HostToolError> {
+        // Authorization: the requested node must lie under one of the
+        // extension's declared payload namespaces. The host disallows
+        // reading another extension's nodes via a prefix check on the
+        // node name.
+        let manifest = self
+            .state
+            .deps
+            .protocol
+            .extension_manager
+            .manifest_for_plugin(context.plugin_id.as_str())
+            .ok_or_else(|| {
+                host_tool_error(ExtensionHostAdapterError::Protocol(format!(
+                    "extension {} is not loaded",
+                    context.plugin_id.as_str()
+                )))
+            })?;
+        let node_name = request.node.as_str();
+        let namespace_match = manifest
+            .payloads
+            .iter()
+            .map(|rule| rule.root.namespace.as_str())
+            .any(|namespace| node_name == namespace || node_name.starts_with(namespace));
+        if !namespace_match {
+            return Err(ext_host::HostToolError::denied(
+                DisplayText::new(format!(
+                    "pubsub node {node_name} is outside extension {} namespaces",
+                    context.plugin_id.as_str()
+                ))
+                .expect("denied message non-empty"),
+            ));
+        }
+
+        let owner: BareJid =
+            self.state
+                .deps
+                .service_domains
+                .extensions
+                .parse()
+                .map_err(|error: jid::Error| {
+                    host_tool_error(ExtensionHostAdapterError::Protocol(error.to_string()))
+                })?;
+        let id_filter = request
+            .item_ids
+            .iter()
+            .map(|id| id.as_str().to_string())
+            .collect::<Vec<_>>();
+        let stored = self
+            .state
+            .deps
+            .protocol
+            .pubsub_storage
+            .get_items(&owner, node_name, request.max_items, &id_filter)
+            .await
+            .map_err(|error| {
+                host_tool_error(ExtensionHostAdapterError::Storage(error.to_string()))
+            })?;
+        let mut items = Vec::with_capacity(stored.len());
+        for entry in stored {
+            let Ok(id) = waddle_extensions::PubSubItemId::new(entry.id) else {
+                continue;
+            };
+            let Some(xml) = entry.payload_xml.as_deref() else {
+                continue;
+            };
+            let Ok(element) = xml.parse::<minidom::Element>() else {
+                continue;
+            };
+            let Ok(payload) = waddle_extensions::ExtensionPayload::from_minidom(&element) else {
+                continue;
+            };
+            items.push(ext_host::PubSubStoredItem {
+                id,
+                payload,
+                publisher: entry.publisher,
+            });
+        }
+        Ok(ext_host::PubSubGetItemsResponse { items })
+    }
 }
 
 impl ExtensionHostAdapter {
