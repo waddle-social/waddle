@@ -41,6 +41,7 @@ import {
   retractDmTimelineMessage,
 } from "@/dms/message-timeline-state";
 import { useDmMamPaging } from "@/dms/mam-paging";
+import { useChatSend } from "@/dms/chat-send";
 
 export function useDirectMessages(
   session: Ref<WaddleSession | null>,
@@ -61,7 +62,6 @@ export function useDirectMessages(
   };
   const messages = ref<TimelineMessage[]>([]);
   const draft = ref("");
-  const isSending = ref(false);
   const timelineEl: Ref<HTMLDivElement | null> = ref(null);
   const timelineEdgeScroller: Ref<((mode: ScrollDirectionMode) => boolean | Promise<boolean>) | null> = ref(null);
   const pinnedEdgeScroller = createPinnedEdgeScroller({
@@ -72,7 +72,6 @@ export function useDirectMessages(
   const typingUsers = ref<string[]>([]);
   const searchResults = ref<MessageSearchResult[]>([]);
   const isSearching = ref(false);
-  const uploadProgress = ref({ uploading: false, progress: 0, filename: "" });
   const firstUnseenId = ref<string | null>(null);
   const loadErrorPeerJid = ref<string | null>(null);
   const loadErrorMessage = ref("");
@@ -89,10 +88,6 @@ export function useDirectMessages(
   let lastChatState: ChatStateType = "active";
   let composingTimeout: ReturnType<typeof setTimeout> | null = null;
   const typingTimers = new Map<string, ReturnType<typeof setTimeout>>();
-  // Client-assigned stanza ids still awaiting server-echo reconciliation.
-  // Only these participate in the body-based fallback match so repeated
-  // identical text doesn't mis-target already-reconciled messages.
-  const pendingEchoClientIds = new Set<string>();
 
   function queuedMessagesForPeer(peerJid: string): TimelineMessage[] {
     const currentSession = session.value;
@@ -246,6 +241,40 @@ export function useDirectMessages(
     });
   }
 
+  const send = useChatSend({
+    session,
+    xmppClient,
+    activePeerJid,
+    messages,
+    draft,
+    actionError,
+    clearActionError,
+    normalizeError,
+    scrollToPinnedEdgeAndPin,
+    onSendComplete: (result, peerJid, isStillActive) => {
+      if (isStillActive) {
+        if (composingTimeout) {
+          clearTimeout(composingTimeout);
+          composingTimeout = null;
+        }
+        lastChatState = "active";
+      }
+      if (result?.state === "sending" && xmppClient.value) {
+        void xmppClient.value.sendDmChatState(peerJid, "active").catch(() => undefined);
+      }
+    },
+  });
+  const {
+    isSending,
+    uploadProgress,
+    pendingEchoClientIds,
+    sendMessage,
+    editMessage,
+    onMessageAck,
+    onMessageQueueStatus,
+    onMessageDeliveryFailure,
+  } = send;
+
   const paging = useDmMamPaging({
     session,
     xmppClient,
@@ -333,33 +362,6 @@ export function useDirectMessages(
     }
   }
 
-  /** XEP-0198: SM ack promotes the matching self-sent message to delivered. */
-  function onMessageAck(messageId: string) {
-    messages.value = messages.value.map((m) =>
-      m.id === messageId && m.isSelf && m.deliveryStatus !== "delivered"
-        ? { ...m, deliveryStatus: "delivered" as DeliveryStatus }
-        : m,
-    );
-  }
-
-  function onMessageQueueStatus(messageId: string, status: "queued" | "sending") {
-    messages.value = messages.value.map((m) =>
-      m.id === messageId && m.isSelf && m.deliveryStatus !== "delivered"
-        ? { ...m, deliveryStatus: status as DeliveryStatus }
-        : m,
-    );
-  }
-
-  /** XEP-0198: the XMPP client gave up on the stanza — surface as failed so the
-   *  user can retry. */
-  function onMessageDeliveryFailure(messageId: string) {
-    messages.value = messages.value.map((m) =>
-      m.id === messageId && m.isSelf && m.deliveryStatus !== "delivered"
-        ? { ...m, deliveryStatus: "failed" as DeliveryStatus }
-        : m,
-    );
-  }
-
   /** On a fresh session (SM resume failed), re-fetch MAM to close any gap
    *  for the currently-open conversation. Local optimistic sends are
    *  preserved across the reload so the user keeps retry affordances. */
@@ -382,120 +384,6 @@ export function useDirectMessages(
       const toAppend = preserved.filter((m) => !findMessageById(messages.value, m.id));
       if (toAppend.length > 0) messages.value = [...messages.value, ...toAppend];
     })();
-  }
-
-  async function sendMessage(
-    explicitBody?: string,
-    markup?: MarkupSpan[],
-    references?: MessageReference[],
-    files?: Array<File | Blob>,
-    replyTo?: { id: string; author: string; body?: string },
-  ) {
-    const bodyText = explicitBody ?? draft.value;
-    const fromComposer = markup !== undefined;
-    const client = xmppClient.value;
-    const peerJid = activePeerJid.value;
-    const hasFiles = !!files && files.length > 0;
-    if (!client || !peerJid || !session.value) return;
-    if (!bodyText.trim() && !hasFiles) return;
-
-    if (hasFiles) {
-      for (const f of files!) {
-        if (f.size > MAX_FILE_UPLOAD_BYTES) {
-          actionError.value = `File too large (${(f.size / 1024 / 1024).toFixed(1)} MB). Maximum upload size is 10 MB.`;
-          return;
-        }
-      }
-    }
-
-    isSending.value = true;
-    clearActionError();
-    try {
-      let attachments: OutboundFileAttachment[] | undefined;
-      if (hasFiles) {
-        const filenames = files!.map((f) => (f instanceof File ? f.name : `attachment-${Date.now()}.bin`));
-        uploadProgress.value = { uploading: true, progress: 0, filename: filenames[0] };
-        attachments = await client.uploadAttachments(files!, (overall, idx) => {
-          uploadProgress.value = {
-            uploading: true,
-            progress: overall.total > 0 ? overall.loaded / overall.total : 0,
-            filename: filenames[idx] ?? "",
-          };
-        });
-      }
-
-      const parent = replyTo ? findMessageById(messages.value, replyTo.id) : undefined;
-      const wireReplyTo = replyTo && parent
-        ? {
-            id: parent.id,
-            author: parent.authorJid ?? replyTo.author,
-            ...(replyTo.body ? { body: replyTo.body } : {}),
-          }
-        : undefined;
-      const threadId = parent ? (parent.threadId ?? parent.id) : undefined;
-      const result = await client.sendDirectMessage(peerJid, bodyText, {
-        markup,
-        references,
-        files: attachments,
-        ...(wireReplyTo ? { replyTo: wireReplyTo } : {}),
-        ...(threadId ? { threadId } : {}),
-      });
-      const msgId = result?.id ?? null;
-      const isStillActive = xmppClient.value === client && activePeerJid.value === peerJid;
-      if (isStillActive) {
-        if (msgId) {
-          pendingEchoClientIds.add(msgId);
-          const optimistic: TimelineMessage = {
-            id: msgId,
-            correctionTargetId: msgId,
-            author: session.value.username,
-            authorJid: session.value.jid,
-            body: bodyText || (attachments?.[0]?.url ?? ""),
-            createdAt: new Date().toISOString(),
-            isSelf: true,
-            deliveryStatus: (result?.state ?? "sending") as DeliveryStatus,
-            ...(markup && markup.length > 0 ? { markup } : {}),
-            ...(references && references.length > 0 ? { references } : {}),
-          };
-          if (replyTo && parent) {
-            optimistic.replyTo = {
-              id: parent.id,
-              author: replyTo.author,
-              ...(replyTo.body ? { preview: replyTo.body } : {}),
-            };
-          }
-          if (threadId) optimistic.threadId = threadId;
-          if (attachments && attachments.length > 0) {
-            optimistic.sharedFiles = attachments.map((a) => ({
-              url: a.url,
-              name: a.name,
-              mediaType: a.mediaType,
-              size: a.size,
-              ...(a.width ? { width: a.width } : {}),
-              ...(a.height ? { height: a.height } : {}),
-              disposition: inferredFileDisposition(a.mediaType, a.name ?? a.url),
-              ...(a.encrypted ? { encrypted: a.encrypted } : {}),
-            }));
-          }
-          messages.value = [...messages.value, optimistic];
-          void scrollToPinnedEdgeAndPin();
-        }
-        if (fromComposer) draft.value = "";
-        if (composingTimeout) {
-          clearTimeout(composingTimeout);
-          composingTimeout = null;
-        }
-        lastChatState = "active";
-      }
-      if (result?.state === "sending") {
-        void client.sendDmChatState(peerJid, "active").catch(() => undefined);
-      }
-    } catch (e) {
-      actionError.value = normalizeError(e);
-    } finally {
-      isSending.value = false;
-      uploadProgress.value = { uploading: false, progress: 0, filename: "" };
-    }
   }
 
   async function toggleReaction(messageId: string, emoji: string) {
@@ -557,18 +445,6 @@ export function useDirectMessages(
     } catch (e) {
       actionError.value = normalizeError(e);
       throw e;
-    }
-  }
-
-  async function editMessage(messageId: string, newBody: string, markup?: MarkupSpan[], references?: MessageReference[]) {
-    if (!xmppClient.value || !activePeerJid.value || !newBody.trim()) return;
-    const message = findMessageById(messages.value, messageId);
-    const targetId = message?.correctionTargetId ?? messageId;
-    clearActionError();
-    try {
-      await xmppClient.value.sendDmCorrection(activePeerJid.value, newBody, targetId, markup, references);
-    } catch (e) {
-      actionError.value = normalizeError(e);
     }
   }
 
