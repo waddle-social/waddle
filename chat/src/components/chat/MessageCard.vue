@@ -117,10 +117,15 @@ const {
   imageAttachments,
   lightboxOpen,
   lightboxIndex,
-  lightboxImages,
-  openLightbox,
   cleanup: cleanupAttachments,
 } = useMessageAttachments(messageRef);
+
+// Pre-resolved lightbox images delivered by MessageBody's onImageClick.
+// MessageBody builds this list from its own useMessageAttachments state,
+// which holds the decrypted blob URLs and uses the canonical imageAttachments
+// predicate — so neither encrypted attachment URLs nor wrong-predicate index
+// mismatches can occur here.
+const lightboxImages = ref<Array<{ url: string; name?: string; width?: number; height?: number }>>([]);
 
 const replyAuthorName = computed(() => {
   const author = props.message.replyTo?.author;
@@ -631,7 +636,7 @@ onBeforeUnmount(() => {
       v-else
       :message="message"
       :invoke-extension-action="invokeExtensionAction"
-      :on-image-click="(file, _idx) => openLightbox(file)"
+      :on-image-click="(images, index) => { lightboxImages.value = images; lightboxIndex.value = index; lightboxOpen.value = true; }"
     />
 
     <ImageLightbox

@@ -19,8 +19,9 @@ import { Pin, X } from "lucide-vue-next";
 import { $pinnedRooms } from "@/stores/pinned-messages";
 import { $pinnedMessageBodies } from "@/stores/pinned-message-bodies";
 import MessageBody from "@/components/chat/MessageBody.vue";
+import type { ResolvedLightboxImage } from "@/components/chat/MessageBody.vue";
 import ImageLightbox from "@/components/ui/ImageLightbox.vue";
-import type { TimelineMessage, TimelineSharedFile } from "@/lib/chat-ui";
+import type { TimelineMessage } from "@/lib/chat-ui";
 
 const props = defineProps<{
   roomJid: string;
@@ -69,19 +70,15 @@ function relativeTime(iso: string): string {
 }
 
 // Lightbox state owned by the panel — clicks on images inside any
-// `<MessageBody>` bubble up through `onImageClick`.
+// `<MessageBody>` bubble up through `onImageClick`. The image list is
+// pre-resolved by MessageBody (decrypted blob URLs, canonical
+// imageAttachments predicate) so the panel never touches raw file.url.
 const lightboxOpen = ref(false);
-const lightboxImages = ref<TimelineSharedFile[]>([]);
+const lightboxImages = ref<ResolvedLightboxImage[]>([]);
 const lightboxIndex = ref(0);
 
-function handleImageClick(message: TimelineMessage | null, file: TimelineSharedFile, _idx: number) {
-  if (!message) return;
-  const images = (message.sharedFiles ?? []).filter(
-    (f) =>
-      f.disposition === "inline" &&
-      (f.mediaType?.startsWith("image/") ?? false),
-  );
-  const index = Math.max(0, images.findIndex((f) => f === file));
+function handleImageClick(images: ResolvedLightboxImage[], index: number) {
+  if (images.length === 0) return;
   lightboxImages.value = images;
   lightboxIndex.value = index;
   lightboxOpen.value = true;
@@ -147,7 +144,7 @@ function handleImageClick(message: TimelineMessage | null, file: TimelineSharedF
               v-else
               :message="liveMessageFor(entry.target_stanza_id)!"
               compact
-              :on-image-click="(file: TimelineSharedFile, idx: number) => handleImageClick(liveMessageFor(entry.target_stanza_id), file, idx)"
+              :on-image-click="handleImageClick"
             />
           </template>
           <template v-else>

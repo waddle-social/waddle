@@ -31,11 +31,25 @@ import { applyShikiToCodeBlocks } from "@/lib/shiki";
 import { useExtensionAnnotationActions } from "@/channels/extension-annotation-actions";
 import type { ExtensionCommandResult } from "@/lib/xmpp/extension-commands";
 
+// Canonical shape for the resolved image list emitted by onImageClick.
+// Matches `LightboxImage` in ImageLightbox.vue (url, name?, width?, height?).
+export type ResolvedLightboxImage = {
+  url: string;
+  name?: string;
+  width?: number;
+  height?: number;
+};
+
 const props = withDefaults(
   defineProps<{
     message: TimelineMessage;
     compact?: boolean;
-    onImageClick?: (file: TimelineSharedFile, index: number) => void;
+    /** Called when the user clicks an image in the gallery. Receives a
+     * fully-resolved image list (decrypted blob URLs, correct mediaType
+     * filter) and the index of the clicked image. Both MessageCard and
+     * PinnedPanel receive a ready-to-render list; neither rebuilds the
+     * list independently. */
+    onImageClick?: (images: ResolvedLightboxImage[], index: number) => void;
     invokeExtensionAction?: (action: ExtensionAnnotationAction) => Promise<ExtensionCommandResult>;
   }>(),
   {
@@ -91,8 +105,24 @@ watch(
   { immediate: true },
 );
 
-function emitImageClick(file: TimelineSharedFile, index: number) {
-  props.onImageClick?.(file, index);
+function emitImageClick(file: TimelineSharedFile, _index: number) {
+  if (!props.onImageClick) return;
+  // Build a fully-resolved list from imageAttachments (same predicate as the
+  // gallery render) so callers never need to re-derive it. For OMEMO-encrypted
+  // files, resolvedAttachmentUrl returns the decrypted blob URL; files still
+  // decrypting are excluded (they have no resolved URL yet).
+  const images: ResolvedLightboxImage[] = imageAttachments.value.flatMap((f) => {
+    const url = resolvedAttachmentUrl(f);
+    if (!url) return [];
+    const entry: ResolvedLightboxImage = { url };
+    if (f.name) entry.name = f.name;
+    if (f.width) entry.width = f.width;
+    if (f.height) entry.height = f.height;
+    return [entry];
+  });
+  const clickedUrl = resolvedAttachmentUrl(file);
+  const resolvedIndex = clickedUrl ? images.findIndex((i) => i.url === clickedUrl) : -1;
+  props.onImageClick(images, Math.max(0, resolvedIndex));
 }
 </script>
 
