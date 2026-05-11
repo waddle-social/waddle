@@ -16,10 +16,7 @@ import {
 } from "@/lib/xmpp-client";
 import { $xmppStatus } from "@/stores/xmpp-status";
 import { applyPinEvent, hydratePinnedRoom, pinnedRoomsEpoch } from "@/stores/pinned-messages";
-import {
-  hydratePinnedBodiesOnPanelOpen,
-  hydrateSinglePinnedBody,
-} from "@/services/pinned-message-bodies";
+import { hydrateSinglePinnedBody } from "@/services/pinned-message-bodies";
 import { roomMessageFromArchived } from "@/lib/xmpp/wasm-message-codecs";
 import {
   inferredFileDisposition,

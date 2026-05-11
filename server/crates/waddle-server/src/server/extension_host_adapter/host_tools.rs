@@ -161,6 +161,7 @@ impl ext_host::ExtensionHostTools for ExtensionHostAdapter {
             filter_before_id: None,
             filter_after_id: None,
             ids: Vec::new(),
+            stanza_ids: Vec::new(),
             before_id: Some(String::new()),
             after_id: None,
         };
