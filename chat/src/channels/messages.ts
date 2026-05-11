@@ -17,6 +17,11 @@ import {
 import { $xmppStatus } from "@/stores/xmpp-status";
 import { applyPinEvent, hydratePinnedRoom, pinnedRoomsEpoch } from "@/stores/pinned-messages";
 import {
+  hydratePinnedBodiesOnPanelOpen,
+  hydrateSinglePinnedBody,
+} from "@/services/pinned-message-bodies";
+import { roomMessageFromArchived } from "@/lib/xmpp/wasm-message-codecs";
+import {
   inferredFileDisposition,
   type DeliveryStatus,
   type ExtensionAnnotationAction,
@@ -270,6 +275,29 @@ export function useChannelMessages(
               preview: event.preview,
             },
           });
+          // XEP-0359 §3: fetch the full message body so PinnedPanel can
+          // render the message without a panel re-open. Skip if the
+          // client does not support the stanza-id MAM filter.
+          if (xmppClient.value && "fetchRoomMessagesByStanzaIds" in xmppClient.value) {
+            const currentClient = xmppClient.value;
+            const spaceId = activeSpaceId.value ?? "";
+            const channelId = activeChannelId.value ?? "";
+            const convertForTimeline = (a: Parameters<typeof roomMessageFromArchived>[0]) => {
+              const live = roomMessageFromArchived(a);
+              return live && session.value
+                ? mapLiveRoomMessageToTimeline(session.value, live)
+                : null;
+            };
+            void hydrateSinglePinnedBody({
+              client: currentClient,
+              spaceId,
+              channelId,
+              roomJid,
+              stanzaId: event.target_stanza_id,
+              timelineMessages: messages.value,
+              convert: convertForTimeline,
+            }).catch((error) => console.warn("hydrateSinglePinnedBody failed", error));
+          }
         } else {
           applyPinEvent(roomJid, {
             action: event.action,

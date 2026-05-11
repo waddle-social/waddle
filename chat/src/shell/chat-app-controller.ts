@@ -19,6 +19,9 @@ import { roomJidForChannelId as resolveRoomJidForChannelId } from "@/lib/channel
 import { mergeRoomHats, roomHatsFromMembers } from "@/lib/xmpp/occupant-badges";
 import { connectionStore } from "@/lib/connection-store";
 import { resetPinnedRooms } from "@/stores/pinned-messages";
+import { hydratePinnedBodiesOnPanelOpen } from "@/services/pinned-message-bodies";
+import { roomMessageFromArchived } from "@/lib/xmpp/wasm-message-codecs";
+import { mapLiveRoomMessageToTimeline } from "@/channels/timeline";
 import { orderTimelineForScrollDirection, type ScrollDirectionMode } from "@/lib/scroll-direction";
 import { useScrollDirectionPreference } from "@/preferences/scroll-direction";
 import type { MemberSummary } from "@/lib/chat-types";
@@ -1103,6 +1106,35 @@ export function useChatAppController(giphyApiKey: string) {
       normalizeActiveRightPanel("pinned");
     }
     updateUrl();
+  });
+  // XEP-0359 §3: on false → true transition, batch-fetch any pinned
+  // stanza-ids not already in the loaded timeline or cache.
+  watch(() => ui.showPinnedPanel.value, async (open) => {
+    if (!open) return;
+    const client = xmppClient.value;
+    const spaceId = waddles.activeSpaceId.value;
+    const channelId = waddles.activeChannelId.value;
+    const roomJid = messaging.currentRoomJid.value;
+    if (!client || !spaceId || !channelId || !roomJid) return;
+    if (!("fetchRoomMessagesByStanzaIds" in client)) return;
+    const convertForTimeline = (a: Parameters<typeof roomMessageFromArchived>[0]) => {
+      const live = roomMessageFromArchived(a);
+      return live && session.value
+        ? mapLiveRoomMessageToTimeline(session.value, live)
+        : null;
+    };
+    try {
+      await hydratePinnedBodiesOnPanelOpen({
+        client,
+        spaceId,
+        channelId,
+        roomJid,
+        timelineMessages: messaging.messages.value,
+        convert: convertForTimeline,
+      });
+    } catch (error) {
+      console.warn("hydratePinnedBodiesOnPanelOpen failed", error);
+    }
   });
   watch(activeExtensionRouteKey, () => {
     normalizeActiveRightPanel();
