@@ -15,34 +15,36 @@ const controllerSource = readFileSync(
   "utf8",
 );
 
-function block(name: string): string {
-  const start = controllerSource.indexOf(`function ${name}(`);
-  if (start === -1) throw new Error(`function ${name} not found in chat-app-controller.ts`);
-  let depth = 0;
-  let inBody = false;
-  for (let i = start; i < controllerSource.length; i++) {
-    const ch = controllerSource[i];
-    if (ch === "{") {
-      depth++;
-      inBody = true;
-    } else if (ch === "}") {
-      depth--;
-      if (inBody && depth === 0) return controllerSource.slice(start, i + 1);
-    }
-  }
-  throw new Error(`could not extract body of ${name}`);
-}
-
 describe("pin/unpin handlers for standalone channels", () => {
-  for (const name of ["pinActiveMessage", "unpinActiveMessage"] as const) {
-    test(`${name} does not require currentSpace`, () => {
-      const body = block(name);
-      expect(body).not.toContain("currentSpace");
-    });
+  test("pinMessage call site reads spaceId off the active channel", () => {
+    expect(controllerSource).toContain(
+      'client.pinMessage(channel.spaceId ?? "", channel.id',
+    );
+  });
 
-    test(`${name} reads the space id off the active channel`, () => {
-      const body = block(name);
-      expect(body).toContain("channel.spaceId");
-    });
-  }
+  test("unpinMessage call site reads spaceId off the active channel", () => {
+    expect(controllerSource).toContain(
+      'client.unpinMessage(channel.spaceId ?? "", channel.id',
+    );
+  });
+
+  test("pin call site no longer threads space.id from currentSpace", () => {
+    expect(controllerSource).not.toContain("client.pinMessage(space.id");
+    expect(controllerSource).not.toContain("client.unpinMessage(space.id");
+  });
+
+  test("no pin handler reaches for waddles.currentSpace.value", () => {
+    // The full call site is the only place a removed guard would
+    // re-appear; pin a narrow regex around the two function names so
+    // unrelated currentSpace usages elsewhere in the controller (modals,
+    // headers) do not trip the assertion.
+    const pinRegion = controllerSource.match(
+      /function pinActiveMessage[\s\S]{0,800}/,
+    )?.[0] ?? "";
+    const unpinRegion = controllerSource.match(
+      /function unpinActiveMessage[\s\S]{0,800}/,
+    )?.[0] ?? "";
+    expect(pinRegion).not.toContain("currentSpace");
+    expect(unpinRegion).not.toContain("currentSpace");
+  });
 });
