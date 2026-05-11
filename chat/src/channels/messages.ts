@@ -15,7 +15,7 @@ import {
   type RoomPresence,
 } from "@/lib/xmpp-client";
 import { $xmppStatus } from "@/stores/xmpp-status";
-import { applyPinEvent, hydratePinnedRoom, pinnedRoomsEpoch } from "@/stores/pinned-messages";
+import { applyPinEvent } from "@/stores/pinned-messages";
 import { hydrateSinglePinnedBody } from "@/services/pinned-message-bodies";
 import { roomMessageFromArchived } from "@/lib/xmpp/wasm-message-codecs";
 import {
@@ -49,7 +49,6 @@ import {
   mapLiveRoomMessageToTimeline,
 } from "@/channels/timeline";
 import {
-  buildChannelTimelineFromMamResults,
   isMucServiceModeration,
   isSameMucRetractionSender,
   isValidMucModerationTarget,
@@ -61,8 +60,8 @@ import {
   reactionsFromSenders,
   retractChannelTimelineMessage,
   removeSenderReactions,
-  type TimelineBuildOptions,
 } from "@/channels/message-timeline-state";
+import { useChannelMamPaging } from "@/channels/mam-paging";
 
 export function useChannelMessages(
   session: Ref<WaddleSession | null>,
@@ -86,11 +85,6 @@ export function useChannelMessages(
   const messages = ref<TimelineMessage[]>([]);
   const draft = ref("");
   const forumPostTitle = ref("");
-  const isLoadingMessages = ref(false);
-  const isLoadingOlderMessages = ref(false);
-  const hasOlderMessages = ref(true);
-  const loadingOlderThreadIds = ref<Set<string>>(new Set());
-  const threadHasOlder = ref<Record<string, boolean>>({});
   const isSending = ref(false);
   const timelineEl: Ref<HTMLDivElement | null> = ref(null);
   const timelineEdgeScroller: Ref<((mode: ScrollDirectionMode) => boolean | Promise<boolean>) | null> = ref(null);
@@ -123,10 +117,6 @@ export function useChannelMessages(
   const isSearching = ref(false);
   let slowModeTimer: ReturnType<typeof setInterval> | null = null;
 
-  let messageRequestId = 0;
-  let oldestArchiveId: string | null = null;
-  let initialLatestPagePinned = false;
-  const oldestThreadArchiveIds = new Map<string, string>();
   let searchRequestId = 0;
   let lastChatState: ChatStateType = "active";
   let composingTimeout: ReturnType<typeof setTimeout> | null = null;
@@ -673,306 +663,53 @@ export function useChannelMessages(
   // and the "New messages" divider must be computed against this predicate.
   const isFeedVisible = isFeedTimelineMessage;
 
-  function buildTimelineFromMamResults(
-    mamResults: LiveRoomMessage[],
-    existing: TimelineMessage[] = [],
-    options: TimelineBuildOptions = {},
-  ): TimelineMessage[] {
-    if (!session.value) return existing;
-    return buildChannelTimelineFromMamResults({
-      session: session.value,
-      channelIsForum: channelIsForum.value,
-      mamResults,
-      existing,
-      options,
-    });
-  }
+  const paging = useChannelMamPaging({
+    session,
+    xmppClient,
+    activeSpaceId,
+    activeChannelId,
+    currentChannel,
+    messages,
+    firstUnseenId,
+    timelineEl,
+    scrollDirection,
+    pinnedEdgeScroller,
+    actionError,
+    clearActionError,
+    normalizeError,
+    pendingEchoClientIds,
+    appendQueuedMessages,
+    roomJidForChannel,
+    scrollToPinnedEdgeAndPin,
+    persistLastSeen,
+  });
+  const {
+    isLoadingMessages,
+    isLoadingOlderMessages,
+    hasOlderMessages,
+    loadingOlderThreadIds,
+    threadHasOlder,
+    loadOlderMessages,
+    ensureMessageLoaded,
+    backfillThread,
+    loadOlderThreadMessages,
+  } = paging;
 
+  // Channel-load entry point. The MAM-paging composable owns paging state,
+  // but search state lives here, so we reset it before delegating — keeping
+  // the pre-#188 invariant that switching channels invalidates in-flight
+  // searches and clears stale results.
   async function loadMessages(
     spaceId: string,
     channelId: string,
     unreadAtLoad = 0,
     metadataSeed: TimelineMessage[] = [],
   ) {
-    if (!session.value) return;
-
-    const requestId = ++messageRequestId;
-    const roomJid = roomJidForChannel(channelId);
-    if (!roomJid) return;
-    initialLatestPagePinned = false;
-    isLoadingMessages.value = true;
-    isLoadingOlderMessages.value = false;
-    hasOlderMessages.value = true;
     searchRequestId++;
     searchQuery.value = "";
     searchResults.value = [];
     isSearching.value = false;
-    oldestArchiveId = null;
-    loadingOlderThreadIds.value = new Set();
-    threadHasOlder.value = {};
-    oldestThreadArchiveIds.clear();
-    pinnedEdgeScroller.disconnect();
-    // Reset the divider anchor up-front: a previous conversation's id could
-    // coincidentally match a message in the new timeline, and an aborted
-    // request (requestId mismatch) would otherwise leave stale state.
-    firstUnseenId.value = null;
-    clearActionError();
-    pendingEchoClientIds.clear();
-    messages.value = appendQueuedMessages([], roomJid);
-
-    try {
-      // #414: hydrate the pin store for this room. Fire-and-forget —
-      // the panel + badge tolerate an empty store, and the live
-      // pin-event handler will mutate it from now on.
-      // - On error (<forbidden/>, network), hydrate with an empty
-      //   list so the panel exits "Loading…".
-      // - When the wasm client lacks `fetchRoomPins` (stub clients in
-      //   tests, older builds), also hydrate with an empty list to
-      //   prevent the panel from spinning forever.
-      // - Capture the epoch at request-issue time and pass it back
-      //   to hydratePinnedRoom; if logout bumps the epoch in between,
-      //   the late callback is dropped instead of leaking prior-session
-      //   data into the new login.
-      if (xmppClient.value && "fetchRoomPins" in xmppClient.value) {
-        const epoch = pinnedRoomsEpoch();
-        void xmppClient.value
-          .fetchRoomPins(spaceId, channelId)
-          .then((entries) => {
-            hydratePinnedRoom(roomJid, entries, epoch);
-          })
-          .catch((error: unknown) => {
-            console.warn("fetchRoomPins failed", error);
-            hydratePinnedRoom(roomJid, [], epoch);
-          });
-      } else {
-        hydratePinnedRoom(roomJid, []);
-      }
-      // XEP-0313: Load message history via MAM (XMPP-native)
-      const page = xmppClient.value && "queryMamPage" in xmppClient.value
-        ? await xmppClient.value.queryMamPage(spaceId, channelId, 100, { type: "latest" })
-        : null;
-      const mamResults = page
-        ? page.messages
-        : xmppClient.value
-          ? await xmppClient.value.queryMam(spaceId, channelId, 100)
-          : [];
-
-      if (
-        requestId !== messageRequestId ||
-        (activeSpaceId.value ?? "") !== spaceId ||
-        activeChannelId.value !== channelId
-      ) {
-        return;
-      }
-
-      oldestArchiveId = page?.firstArchiveId ?? mamResults[0]?.id ?? null;
-      hasOlderMessages.value = page ? !page.complete && !!page.firstArchiveId : mamResults.length >= 100;
-      const timelineWithQueue = appendQueuedMessages(
-        buildTimelineFromMamResults(mamResults, metadataSeed, {
-          seedExistingOnly: metadataSeed.length > 0,
-        }),
-        roomJid,
-      );
-      messages.value = timelineWithQueue;
-      if (requestId === messageRequestId) {
-        isLoadingMessages.value = false;
-      }
-
-      const feedTimeline = timelineWithQueue.filter(isFeedVisible);
-      firstUnseenId.value = unreadAtLoad > 0 && feedTimeline.length >= unreadAtLoad
-        ? feedTimeline[feedTimeline.length - unreadAtLoad]?.id ?? null
-        : null;
-      const pinned = await scrollToPinnedEdgeAndPin();
-      if (
-        !pinned ||
-        requestId !== messageRequestId ||
-        (activeSpaceId.value ?? "") !== spaceId ||
-        activeChannelId.value !== channelId
-      ) {
-        return;
-      }
-      initialLatestPagePinned = true;
-      const newest = [...timelineWithQueue].reverse().find(isFeedVisible);
-      if (newest) persistLastSeen(channelId, newest.id);
-    } catch (e) {
-      if (requestId === messageRequestId) {
-        const queuedOnly = appendQueuedMessages([], roomJid);
-        messages.value = queuedOnly;
-        actionError.value = queuedOnly.length > 0 ? "" : normalizeError(e);
-        isLoadingMessages.value = false;
-      }
-    }
-  }
-
-  async function loadOlderMessages() {
-    const client = xmppClient.value;
-    const spaceId = activeSpaceId.value ?? "";
-    const channelId = activeChannelId.value;
-    const before = oldestArchiveId;
-    if (
-      !client ||
-      !channelId ||
-      !before ||
-      !initialLatestPagePinned ||
-      !hasOlderMessages.value ||
-      isLoadingOlderMessages.value
-    ) {
-      return;
-    }
-    if (!("queryMamPage" in client)) return;
-    const requestId = messageRequestId;
-    const isCurrentRequest = () =>
-      requestId === messageRequestId &&
-      xmppClient.value === client &&
-      (activeSpaceId.value ?? "") === spaceId &&
-      activeChannelId.value === channelId;
-
-    const el = timelineEl.value;
-    const previousHeight = el?.scrollHeight ?? 0;
-    const previousTop = el?.scrollTop ?? 0;
-    isLoadingOlderMessages.value = true;
-    try {
-      const page = await client.queryMamPage(spaceId, channelId, 100, { type: "before", before });
-      if (!isCurrentRequest()) return;
-      oldestArchiveId = page.firstArchiveId ?? oldestArchiveId;
-      hasOlderMessages.value = !page.complete && !!page.firstArchiveId && page.firstArchiveId !== before;
-      const withoutQueued = messages.value.filter((m) => !(m.isSelf && m.deliveryStatus === "queued"));
-      const roomJid = roomJidForChannel(channelId);
-      if (!roomJid) return;
-      messages.value = appendQueuedMessages(buildTimelineFromMamResults(page.messages, withoutQueued), roomJid);
-      await nextTick();
-      if (el && !isTopPinnedScrollDirection(scrollDirection.value)) {
-        el.scrollTop = previousTop + (el.scrollHeight - previousHeight);
-      }
-    } catch (e) {
-      if (isCurrentRequest()) actionError.value = normalizeError(e);
-    } finally {
-      if (isCurrentRequest()) isLoadingOlderMessages.value = false;
-    }
-  }
-
-  async function ensureMessageLoaded(messageId: string): Promise<boolean> {
-    if (findMessageById(messages.value, messageId)) return true;
-    const client = xmppClient.value;
-    const channelId = activeChannelId.value;
-    if (!client || !channelId || !session.value || !("queryMamPage" in client)) return false;
-    const roomJid = roomJidForChannel(channelId);
-    if (!roomJid) return false;
-
-    let before = oldestArchiveId;
-    while (before && hasOlderMessages.value && !findMessageById(messages.value, messageId)) {
-      const requestId = messageRequestId;
-      const spaceId = activeSpaceId.value ?? "";
-      const previousBefore = before;
-      const page = await client.queryMamPage(spaceId, channelId, 100, { type: "before", before });
-      if (
-        requestId !== messageRequestId ||
-        xmppClient.value !== client ||
-        (activeSpaceId.value ?? "") !== spaceId ||
-        activeChannelId.value !== channelId
-      ) {
-        return false;
-      }
-      const nextBefore = page.firstArchiveId ?? previousBefore;
-      oldestArchiveId = nextBefore;
-      hasOlderMessages.value = !page.complete && !!page.firstArchiveId && page.firstArchiveId !== previousBefore;
-      const withoutQueued = messages.value.filter((m) => !(m.isSelf && m.deliveryStatus === "queued"));
-      messages.value = appendQueuedMessages(
-        buildTimelineFromMamResults(page.messages, withoutQueued),
-        roomJid,
-      );
-      if (findMessageById(messages.value, messageId)) return true;
-      if (!page.firstArchiveId || page.firstArchiveId === previousBefore || page.complete) break;
-      before = nextBefore;
-    }
-    return !!findMessageById(messages.value, messageId);
-  }
-
-  /**
-   * Backfill a thread via XEP-0313 MAM filtered by thread id. Returns every
-   * archived reply whose `<thread>` element matches `threadId`. The thread
-   * root does not carry `<thread>` (threads start when someone replies into
-   * one), so MAM-by-thread never includes it — the panel resolves the root
-   * separately from the loaded channel window.
-   */
-  async function backfillThread(threadId: string): Promise<void> {
-    const client = xmppClient.value;
-    const spaceId = activeSpaceId.value;
-    const channelId = activeChannelId.value;
-    if (!client || !channelId || !threadId || !session.value) return;
-    const requestId = messageRequestId;
-    let page: { messages: LiveRoomMessage[]; firstArchiveId?: string; complete?: boolean } | null = null;
-    let results: LiveRoomMessage[] = [];
-    try {
-      page = "queryMamThreadPage" in client
-        ? await client.queryMamThreadPage(spaceId ?? "", channelId, threadId, 100, { type: "latest" })
-        : null;
-      results = page ? page.messages : await client.queryMamByThread(spaceId ?? "", channelId, threadId, 100);
-    } catch (e) {
-      if (
-        xmppClient.value === client &&
-        (activeSpaceId.value ?? "") === (spaceId ?? "") &&
-        activeChannelId.value === channelId &&
-        requestId === messageRequestId
-      ) {
-        threadHasOlder.value = { ...threadHasOlder.value, [threadId]: false };
-        actionError.value = normalizeError(e);
-      }
-      return;
-    }
-    if (
-      xmppClient.value !== client ||
-      (activeSpaceId.value ?? "") !== (spaceId ?? "") ||
-      activeChannelId.value !== channelId ||
-      requestId !== messageRequestId
-    ) {
-      return;
-    }
-    if (page?.firstArchiveId) oldestThreadArchiveIds.set(threadId, page.firstArchiveId);
-    threadHasOlder.value = {
-      ...threadHasOlder.value,
-      [threadId]: page ? !page.complete && !!page.firstArchiveId : results.length >= 100,
-    };
-    const next = buildTimelineFromMamResults(results, messages.value);
-    if (
-      next.length === messages.value.length &&
-      next.every((message, index) => message === messages.value[index])
-    ) {
-      return;
-    }
-    messages.value = next;
-  }
-
-  async function loadOlderThreadMessages(threadId: string): Promise<void> {
-    const client = xmppClient.value;
-    const spaceId = activeSpaceId.value;
-    const channelId = activeChannelId.value;
-    const before = oldestThreadArchiveIds.get(threadId);
-    if (!client || !channelId || !threadId || !before || loadingOlderThreadIds.value.has(threadId)) return;
-    if (!("queryMamThreadPage" in client)) return;
-    const requestId = messageRequestId;
-    const isCurrentRequest = () =>
-      requestId === messageRequestId &&
-      xmppClient.value === client &&
-      (activeSpaceId.value ?? "") === (spaceId ?? "") &&
-      activeChannelId.value === channelId;
-    loadingOlderThreadIds.value = new Set([...loadingOlderThreadIds.value, threadId]);
-    try {
-      const page = await client.queryMamThreadPage(spaceId ?? "", channelId, threadId, 100, { type: "before", before });
-      if (!isCurrentRequest()) return;
-      if (page.firstArchiveId) oldestThreadArchiveIds.set(threadId, page.firstArchiveId);
-      threadHasOlder.value = {
-        ...threadHasOlder.value,
-        [threadId]: !page.complete && !!page.firstArchiveId && page.firstArchiveId !== before,
-      };
-      messages.value = buildTimelineFromMamResults(page.messages, messages.value);
-    } catch (e) {
-      if (isCurrentRequest()) actionError.value = normalizeError(e);
-    } finally {
-      const next = new Set(loadingOlderThreadIds.value);
-      next.delete(threadId);
-      loadingOlderThreadIds.value = next;
-    }
+    await paging.loadMessages(spaceId, channelId, unreadAtLoad, metadataSeed);
   }
 
   async function selectChannel(channelId: string) {
@@ -1291,18 +1028,13 @@ export function useChannelMessages(
   }
 
   function disconnect() {
-    messageRequestId++;
+    paging.reset();
     searchRequestId++;
     pinnedEdgeScroller.disconnect();
     pendingEchoClientIds.clear();
-    initialLatestPagePinned = false;
-    oldestArchiveId = null;
-    hasOlderMessages.value = true;
-    isLoadingOlderMessages.value = false;
     // $xmppStatus is authoritative and owned by XmppProvider; do not write it here.
     clearTypingState();
     clearLiveActivityState();
-    isLoadingMessages.value = false;
     isSearching.value = false;
     searchQuery.value = "";
     searchResults.value = [];
@@ -1310,16 +1042,11 @@ export function useChannelMessages(
   }
 
   function clearMessages() {
-    messageRequestId++;
+    paging.reset();
     searchRequestId++;
     pinnedEdgeScroller.disconnect();
     pendingEchoClientIds.clear();
-    initialLatestPagePinned = false;
-    oldestArchiveId = null;
-    hasOlderMessages.value = true;
-    isLoadingOlderMessages.value = false;
     messages.value = [];
-    isLoadingMessages.value = false;
     searchQuery.value = "";
     searchResults.value = [];
     isSearching.value = false;
@@ -1425,18 +1152,18 @@ export function useChannelMessages(
     async ([el, edgeScroller]) => {
       if (!el || !edgeScroller || isLoadingMessages.value) return;
       if (!messages.value.some(isFeedVisible)) return;
-      const requestId = messageRequestId;
+      const requestId = paging.currentRequestId();
       const spaceId = activeSpaceId.value ?? "";
       const channelId = activeChannelId.value;
       const pinned = await scrollToPinnedEdgeAndPin();
       if (
         pinned &&
-        requestId === messageRequestId &&
+        requestId === paging.currentRequestId() &&
         (activeSpaceId.value ?? "") === spaceId &&
         activeChannelId.value === channelId &&
         messages.value.some(isFeedVisible)
       ) {
-        initialLatestPagePinned = true;
+        paging.markInitialLatestPagePinned();
         const newest = [...messages.value].reverse().find(isFeedVisible);
         if (channelId && newest) persistLastSeen(channelId, newest.id);
       }
