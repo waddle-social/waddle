@@ -124,6 +124,12 @@ pub fn build_query_form_iq(original_iq: &Iq) -> Iq {
         )
         .append(
             Element::builder("field", DATA_FORMS_NS)
+                .attr("var", STANZA_ID_FILTER_FIELD)
+                .attr("type", "text-multi")
+                .build(),
+        )
+        .append(
+            Element::builder("field", DATA_FORMS_NS)
                 .attr("var", WADDLE_MAM_THREAD_FIELD)
                 .attr("type", "text-single")
                 .build(),

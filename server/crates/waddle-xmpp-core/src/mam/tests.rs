@@ -299,6 +299,31 @@ fn builds_mam_query_form_with_waddle_thread_field() {
 }
 
 #[test]
+fn disco_form_advertises_stanza_id_filter_field() {
+    let iq = Iq {
+        from: None,
+        to: None,
+        id: "disco".to_string(),
+        payload: IqType::Get(Element::builder("query", MAM_NS).build()),
+    };
+
+    let response = build_query_form_iq(&iq);
+    let IqType::Result(Some(query)) = response.payload else {
+        panic!("expected query form result");
+    };
+    let form = query.get_child("x", DATA_FORMS_NS).expect("form");
+    let fields = form
+        .children()
+        .filter_map(|field| field.attr("var"))
+        .collect::<Vec<_>>();
+
+    assert!(
+        fields.contains(&STANZA_ID_FILTER_FIELD),
+        "expected disco form to advertise {STANZA_ID_FILTER_FIELD} (got {fields:?})"
+    );
+}
+
+#[test]
 fn parses_last_page_rsm_before() {
     let iq = Iq {
         from: None,
