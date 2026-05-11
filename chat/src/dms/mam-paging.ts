@@ -186,10 +186,17 @@ export function useDmMamPaging(deps: UseDmMamPagingDeps) {
       const classified = classifyMamError(e);
       if (isMamCursorNotFound(classified)) {
         // XEP-0313 §4.3.4 — stale cursor. Drop and re-fetch the tail page.
+        // Explicit reset before the await is necessary because `loadMessages`
+        // bumps `messageRequestId`; the `finally` block guards on
+        // `isCurrentRequest()` and would otherwise leave the flag stuck true.
         if (isCurrentRequest()) {
           oldestArchiveId = null;
           isLoadingOlderMessages.value = false;
-          await loadMessages(peerJid);
+          try {
+            await loadMessages(peerJid);
+          } catch (recoveryError) {
+            console.warn("MAM §4.3.4 recovery failed", recoveryError);
+          }
           return;
         }
       }

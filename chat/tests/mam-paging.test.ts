@@ -170,9 +170,9 @@ describe("advanceThreadCursor", () => {
 describe("stripQueuedSelfMessages", () => {
   test("filters self+queued; keeps everything else", () => {
     const timeline = [
-      { id: "a", isSelf: true, deliveryStatus: "queued" },
-      { id: "b", isSelf: true, deliveryStatus: "sent" },
-      { id: "c", isSelf: false, deliveryStatus: "queued" },
+      { id: "a", isSelf: true, deliveryStatus: "queued" as const },
+      { id: "b", isSelf: true, deliveryStatus: "delivered" as const },
+      { id: "c", isSelf: false, deliveryStatus: "queued" as const },
       { id: "d", isSelf: false },
     ];
     const result = stripQueuedSelfMessages(timeline);
@@ -200,6 +200,20 @@ describe("MamCursorNotFoundError + classifyMamError (XEP-0313 §4.3.4)", () => {
     expect(isMamCursorNotFound(classified)).toBe(true);
   });
 
+  test("recognises plain-string errors carrying 'item-not-found' (current wasm shape)", () => {
+    // The waddle wasm client surfaces stanza errors via JsValue::from_str,
+    // not as structured objects. Match by substring so §4.3.4 recovery
+    // fires even before the wasm layer learns to emit structured errors.
+    const classified = classifyMamError("MAM query failed: item-not-found");
+    expect(isMamCursorNotFound(classified)).toBe(true);
+  });
+
+  test("recognises Error instances whose message contains 'item-not-found'", () => {
+    const raw = new Error("stanza error: item-not-found");
+    const classified = classifyMamError(raw);
+    expect(isMamCursorNotFound(classified)).toBe(true);
+  });
+
   test("passes through unrelated errors unchanged", () => {
     const raw = new Error("network down");
     const classified = classifyMamError(raw);
@@ -207,7 +221,12 @@ describe("MamCursorNotFoundError + classifyMamError (XEP-0313 §4.3.4)", () => {
     expect(isMamCursorNotFound(classified)).toBe(false);
   });
 
-  test("isMamCursorNotFound is false for null/undefined/strings", () => {
+  test("passes through plain strings without the marker unchanged", () => {
+    const raw = "permission denied";
+    expect(classifyMamError(raw)).toBe(raw);
+  });
+
+  test("isMamCursorNotFound is false for null/undefined/non-marker strings", () => {
     expect(isMamCursorNotFound(null)).toBe(false);
     expect(isMamCursorNotFound(undefined)).toBe(false);
     expect(isMamCursorNotFound("item-not-found")).toBe(false);

@@ -132,6 +132,20 @@ export function isMamCursorNotFound(value: unknown): value is MamCursorNotFoundE
 }
 
 export function classifyMamError(error: unknown): MamCursorNotFoundError | unknown {
+  // String-form fallback: the current wasm client surfaces errors as plain
+  // strings via `JsValue::from_str(err.to_string())` (see
+  // server/crates/waddle-xmpp-client-wasm/src/helpers.rs). Until that layer
+  // emits structured errors, the only way to detect a §4.3.4 condition is
+  // a substring match on the message. Acceptable as long as the underlying
+  // stanza-error condition name appears literally somewhere in the string.
+  if (typeof error === "string") {
+    return error.includes("item-not-found")
+      ? new MamCursorNotFoundError("")
+      : error;
+  }
+  if (error instanceof Error && error.message.includes("item-not-found")) {
+    return new MamCursorNotFoundError("");
+  }
   if (!error || typeof error !== "object") return error;
   const candidate = error as { condition?: unknown; code?: unknown; cursor?: unknown };
   const condition = typeof candidate.condition === "string" ? candidate.condition : undefined;

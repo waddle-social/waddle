@@ -261,11 +261,21 @@ export function useChannelMamPaging(deps: UseChannelMamPagingDeps) {
         // XEP-0313 §4.3.4: the server reports the `<before/>` UID is gone
         // from the archive. The cursor moved past us (e.g. server-side
         // compaction). Drop the stale cursor and re-fetch the tail page —
-        // safer than reporting "no more history" to the user.
+        // safer than reporting "no more history" to the user. The explicit
+        // `isLoadingOlderMessages = false` here is necessary because
+        // `loadMessages` bumps `messageRequestId`, so the `finally` block's
+        // `isCurrentRequest()` guard will be false by the time it runs.
+        // Setting `oldestArchiveId = null` first also blocks any concurrent
+        // `loadOlderMessages` from racing past its `!before` guard while we
+        // await the tail-page refetch.
         if (isCurrentRequest()) {
           oldestArchiveId = null;
           isLoadingOlderMessages.value = false;
-          await loadMessages(spaceId, channelId);
+          try {
+            await loadMessages(spaceId, channelId);
+          } catch (recoveryError) {
+            console.warn("MAM §4.3.4 recovery failed", recoveryError);
+          }
           return;
         }
       }
