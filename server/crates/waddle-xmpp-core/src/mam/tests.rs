@@ -5,6 +5,10 @@ use minidom::Element;
 use xmpp_parsers::iq::{Iq, IqType};
 use xmpp_parsers::message::{Message, MessageType};
 
+fn filter_id(s: &str) -> MamFilterStanzaId {
+    MamFilterStanzaId::new(s).expect("valid test fixture id")
+}
+
 use crate::xep0201::ThreadInfo;
 use crate::xep0359::{OriginId, StanzaId};
 use crate::CoreError;
@@ -296,6 +300,31 @@ fn builds_mam_query_form_with_waddle_thread_field() {
         .expect("ids field validate element");
     assert_eq!(validate.attr("datatype"), Some("xs:string"));
     assert!(validate.get_child("open", XDATA_VALIDATE_NS).is_some());
+}
+
+#[test]
+fn disco_form_advertises_stanza_id_filter_field() {
+    let iq = Iq {
+        from: None,
+        to: None,
+        id: "disco".to_string(),
+        payload: IqType::Get(Element::builder("query", MAM_NS).build()),
+    };
+
+    let response = build_query_form_iq(&iq);
+    let IqType::Result(Some(query)) = response.payload else {
+        panic!("expected query form result");
+    };
+    let form = query.get_child("x", DATA_FORMS_NS).expect("form");
+    let fields = form
+        .children()
+        .filter_map(|field| field.attr("var"))
+        .collect::<Vec<_>>();
+
+    assert!(
+        fields.contains(&STANZA_ID_FILTER_FIELD),
+        "expected disco form to advertise {STANZA_ID_FILTER_FIELD} (got {fields:?})"
+    );
 }
 
 #[test]
@@ -819,4 +848,69 @@ fn stanza_xml_strips_to_for_groupchat_on_raw_element_fallback() {
         "groupchat MAM replay via raw element fallback should not have a 'to' attribute, got: {:?}",
         inner_msg.attr("to")
     );
+}
+
+fn build_mam_iq_with_form_fields(fields: &[(&str, Vec<&str>)]) -> Iq {
+    let mut form = Element::builder("x", DATA_FORMS_NS).attr("type", "submit");
+    form = form.append(
+        Element::builder("field", DATA_FORMS_NS)
+            .attr("var", "FORM_TYPE")
+            .attr("type", "hidden")
+            .append(
+                Element::builder("value", DATA_FORMS_NS)
+                    .append(MAM_NS)
+                    .build(),
+            )
+            .build(),
+    );
+    for (var, values) in fields {
+        let mut field = Element::builder("field", DATA_FORMS_NS).attr("var", *var);
+        for value in values {
+            field = field.append(
+                Element::builder("value", DATA_FORMS_NS)
+                    .append(*value)
+                    .build(),
+            );
+        }
+        form = form.append(field.build());
+    }
+    let query = Element::builder("query", MAM_NS)
+        .append(form.build())
+        .build();
+    Iq {
+        from: None,
+        to: None,
+        id: "q1".to_string(),
+        payload: IqType::Set(query),
+    }
+}
+
+#[test]
+fn parses_stanza_id_filter_field() {
+    let iq =
+        build_mam_iq_with_form_fields(&[(STANZA_ID_FILTER_FIELD, vec!["stanza-A", "stanza-B"])]);
+    let (_, query) = parse_mam_query(&iq).expect("parses");
+    assert_eq!(
+        query.stanza_ids,
+        vec![filter_id("stanza-A"), filter_id("stanza-B")]
+    );
+}
+
+#[test]
+fn rejects_oversize_stanza_id_value() {
+    let oversized = "x".repeat(MAX_FILTER_STANZA_ID_LEN + 1);
+    let iq = build_mam_iq_with_form_fields(&[(STANZA_ID_FILTER_FIELD, vec![oversized.as_str()])]);
+    let err = parse_mam_query(&iq).expect_err("must reject");
+    assert!(matches!(err, CoreError::BadRequest(_)));
+}
+
+#[test]
+fn rejects_too_many_stanza_ids() {
+    let values: Vec<String> = (0..=MAX_FILTER_STANZA_IDS)
+        .map(|i| format!("s{i}"))
+        .collect();
+    let refs: Vec<&str> = values.iter().map(String::as_str).collect();
+    let iq = build_mam_iq_with_form_fields(&[(STANZA_ID_FILTER_FIELD, refs)]);
+    let err = parse_mam_query(&iq).expect_err("must reject");
+    assert!(matches!(err, CoreError::BadRequest(_)));
 }

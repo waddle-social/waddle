@@ -358,19 +358,15 @@ fn rsm_page_info_defaults() {
 
 #[test]
 fn build_mam_iq_extended_supports_thread_fulltext_and_after() {
-    let iq = build_mam_iq_extended(
-        "iq-1",
-        "query-1",
-        25,
-        None,
-        Some("after-1"),
-        Some("alice@example.com"),
-        Some("room@muc.example.com"),
-        Some("thread-42"),
-        Some("needle"),
-        Some("2024-01-01T00:00:00Z"),
-        Some("2024-01-31T23:59:59Z"),
-    );
+    let iq = MamIqBuilder::new("iq-1", "query-1", 25)
+        .after("after-1")
+        .with_jid("alice@example.com")
+        .to_jid("room@muc.example.com")
+        .thread_id("thread-42")
+        .fulltext("needle")
+        .start("2024-01-01T00:00:00Z")
+        .end("2024-01-31T23:59:59Z")
+        .build();
     let query = iq.get_child("query", MAM_NS).expect("query child");
     let form = query.get_child("x", DATA_FORMS_NS).expect("form child");
     let fields: Vec<(String, String)> = form
@@ -404,19 +400,7 @@ fn build_mam_iq_extended_supports_thread_fulltext_and_after() {
 
 #[test]
 fn build_mam_iq_extended_supports_latest_before_marker() {
-    let iq = build_mam_iq_extended(
-        "iq-2",
-        "query-2",
-        10,
-        Some(""),
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-    );
+    let iq = MamIqBuilder::new("iq-2", "query-2", 10).before("").build();
     let before = iq
         .get_child("query", MAM_NS)
         .and_then(|query| query.get_child("set", RSM_NS))
@@ -454,6 +438,151 @@ fn build_mam_iq_preserves_existing_before_behavior() {
         })
         .collect();
     assert!(fields.contains(&("with".to_string(), "bob@example.com".to_string())));
+}
+
+// ── XEP-0359 stanza-id filter tests ─────────────────────────────────────
+
+#[cfg(test)]
+mod stanza_id_filter_tests {
+    use minidom::Element;
+    use waddle_xmpp_core::mam::{MAM_NS, RSM_NS, STANZA_ID_FILTER_FIELD};
+
+    use super::super::{MamIqBuilder, DATA_FORMS_NS};
+
+    #[test]
+    fn builder_emits_minimal_iq_with_no_setters() {
+        // No to_jid, no before/after, no filter fields — only FORM_TYPE.
+        let iq = MamIqBuilder::new("iq1", "q1", 10).build();
+        assert!(
+            iq.attr("to").is_none(),
+            "no to attribute when to_jid setter not called"
+        );
+        let query = iq.get_child("query", MAM_NS).expect("query child");
+        let form = query.get_child("x", DATA_FORMS_NS).expect("form");
+        let vars: Vec<&str> = form
+            .children()
+            .filter(|c| c.name() == "field")
+            .filter_map(|c| c.attr("var"))
+            .collect();
+        assert_eq!(vars, vec!["FORM_TYPE"], "only FORM_TYPE field present");
+        let rsm = query.get_child("set", RSM_NS).expect("rsm set");
+        assert!(
+            rsm.get_child("before", RSM_NS).is_none(),
+            "no before element when before setter not called"
+        );
+        assert!(
+            rsm.get_child("after", RSM_NS).is_none(),
+            "no after element when after setter not called"
+        );
+    }
+
+    #[test]
+    fn build_mam_iq_round_trips_through_parse_mam_query() {
+        use std::str::FromStr;
+        use waddle_xmpp_core::mam::{parse_mam_query, MamFilterStanzaId};
+
+        let iq_elem = MamIqBuilder::new("iq1", "q1", 10)
+            .to_jid("room@conf.example")
+            .stanza_ids(&["sid-A", "sid-B"])
+            .build();
+
+        // Serialize to bytes, parse back as minidom Element, then as Iq.
+        let mut bytes = Vec::<u8>::new();
+        iq_elem
+            .write_to(&mut bytes)
+            .expect("element serializes to bytes");
+        let xml = String::from_utf8(bytes).expect("minidom emits valid UTF-8");
+        let reparsed = Element::from_str(&xml).expect("element round-trips through XML");
+        let iq = xmpp_parsers::iq::Iq::try_from(reparsed).expect("Iq parse from element");
+
+        let (_query_id, query) = parse_mam_query(&iq).expect("query parses");
+        assert_eq!(
+            query.stanza_ids,
+            vec![
+                MamFilterStanzaId::new("sid-A").unwrap(),
+                MamFilterStanzaId::new("sid-B").unwrap(),
+            ],
+            "stanza-id filter values must survive builder → serialize → parse round-trip"
+        );
+    }
+
+    #[test]
+    fn builder_appends_stanza_id_filter_when_provided() {
+        let iq = MamIqBuilder::new("iq1", "q1", 10)
+            .to_jid("room@conf.example")
+            .stanza_ids(&["sid-A", "sid-B"])
+            .build();
+        let query = iq.get_child("query", MAM_NS).expect("query child");
+        let form = query.get_child("x", DATA_FORMS_NS).expect("form");
+        let field = form
+            .children()
+            .find(|c| c.name() == "field" && c.attr("var") == Some(STANZA_ID_FILTER_FIELD))
+            .expect("stanza-id filter field present");
+        let values: Vec<String> = field
+            .children()
+            .filter(|c| c.name() == "value")
+            .map(Element::text)
+            .collect();
+        assert_eq!(values, vec!["sid-A".to_string(), "sid-B".to_string()]);
+    }
+
+    #[test]
+    fn builder_omits_stanza_id_filter_when_none() {
+        let iq = MamIqBuilder::new("iq1", "q1", 10)
+            .to_jid("room@conf.example")
+            .build();
+        let query = iq.get_child("query", MAM_NS).expect("query child");
+        let form = query.get_child("x", DATA_FORMS_NS).expect("form");
+        assert!(form
+            .children()
+            .all(|c| c.attr("var") != Some(STANZA_ID_FILTER_FIELD)));
+    }
+
+    #[test]
+    fn builder_omits_stanza_id_filter_when_empty_slice() {
+        let iq = MamIqBuilder::new("iq1", "q1", 10)
+            .to_jid("room@conf.example")
+            .stanza_ids(&[])
+            .build();
+        let query = iq.get_child("query", MAM_NS).expect("query child");
+        let form = query.get_child("x", DATA_FORMS_NS).expect("form");
+        assert!(form
+            .children()
+            .all(|c| c.attr("var") != Some(STANZA_ID_FILTER_FIELD)));
+    }
+
+    #[test]
+    fn builder_emits_stanza_id_filter_alongside_thread_and_fulltext() {
+        use waddle_xmpp_core::mam::{FULLTEXT_MAM_FIELD, WADDLE_MAM_THREAD_FIELD};
+
+        let iq = MamIqBuilder::new("iq1", "q1", 10)
+            .to_jid("room@conf.example")
+            .thread_id("thread-X")
+            .fulltext("hello")
+            .stanza_ids(&["sid-A", "sid-B"])
+            .build();
+        let query = iq.get_child("query", MAM_NS).expect("query child");
+        let form = query.get_child("x", DATA_FORMS_NS).expect("form");
+
+        let vars: Vec<&str> = form
+            .children()
+            .filter(|c| c.name() == "field")
+            .filter_map(|c| c.attr("var"))
+            .collect();
+
+        assert!(
+            vars.contains(&STANZA_ID_FILTER_FIELD),
+            "missing stanza-id field; got {vars:?}"
+        );
+        assert!(
+            vars.contains(&WADDLE_MAM_THREAD_FIELD),
+            "missing thread field; got {vars:?}"
+        );
+        assert!(
+            vars.contains(&FULLTEXT_MAM_FIELD),
+            "missing fulltext field; got {vars:?}"
+        );
+    }
 }
 
 // ── Query orchestration integration tests ────────────────────────────────

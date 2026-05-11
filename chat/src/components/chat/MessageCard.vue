@@ -7,28 +7,19 @@ import {
   Reply,
   SmilePlus,
   Trash2,
-  FileDown,
   CornerDownRight,
   MessageSquare,
-  Lock,
-  AlertCircle,
-  CheckCircle2,
-  LayoutDashboard,
-  LoaderCircle,
   Pin,
   PinOff,
 } from "lucide-vue-next";
 import type { JSONContent } from "@tiptap/core";
 import AppAvatar from "@/components/ui/AppAvatar.vue";
 import ChatEditor from "@/components/chat/ChatEditor.vue";
+import MessageBody from "@/components/chat/MessageBody.vue";
 import EditorBubbleToolbar from "@/components/chat/EditorBubbleToolbar.vue";
 import EmojiPicker from "@/components/chat/EmojiPicker.vue";
 import ImageLightbox from "@/components/ui/ImageLightbox.vue";
 import {
-  extensionCardDetails,
-  extensionPresentation,
-  renderStyledBody,
-  extensionSurfaceLabel,
   type TimelineMessage,
   type ExtensionAnnotationAction,
   type MarkupSpan,
@@ -36,11 +27,8 @@ import {
 } from "@/lib/chat-ui";
 import { messageMentionsBareJid } from "@/lib/mentions";
 import { richMessageToTiptap, tiptapToRichMessage } from "@/lib/rich-message";
-import { applyShikiToCodeBlocks } from "@/lib/shiki";
 import type { OccupantHat, OccupantPresence } from "@/lib/xmpp-client";
 import { formatTimelineTimeOfDay } from "@/channels/timeline";
-import { formatFileSize, useMessageAttachments } from "@/channels/message-attachments";
-import { useExtensionAnnotationActions } from "@/channels/extension-annotation-actions";
 import { useLongPress } from "@/ui/gestures/long-press";
 import type { ExtensionCommandResult } from "@/lib/xmpp/extension-commands";
 import { $desktopToolbarOwnerId } from "@/stores/message-toolbar";
@@ -108,9 +96,6 @@ const emit = defineEmits<{
 }>();
 
 const quickEmojis = QUICK_REACTION_EMOJIS;
-const messageRef = computed(() => props.message);
-const invokeExtensionActionRef = computed(() => props.invokeExtensionAction);
-
 const seniorHat = computed<OccupantHat | null>(() => {
   if (!props.hats || props.hats.length === 0) return null;
   let best: OccupantHat | null = null;
@@ -125,46 +110,14 @@ const seniorHat = computed<OccupantHat | null>(() => {
   return best;
 });
 
-const styledHtml = computed(() => renderStyledBody(displayBody.value, props.message.markup, props.message.references));
-const styledBodyRef = ref<HTMLDivElement | null>(null);
-const setStyledBodyRef = (el: HTMLDivElement | null) => {
-  styledBodyRef.value = el;
-};
-const extensionAnnotations = computed(() => props.message.extensionAnnotations ?? []);
-const {
-  sharedFiles,
-  imageAttachments,
-  videoAttachments,
-  audioAttachments,
-  pdfAttachments,
-  downloadableAttachments,
-  displayBody,
-  isGif,
-  lightboxOpen,
-  lightboxIndex,
-  lightboxImages,
-  attachmentKey,
-  resolvedAttachmentUrl,
-  attachmentError,
-  isDecryptingAttachment,
-  openLightbox,
-  downloadAttachment,
-  cleanup: cleanupAttachments,
-} = useMessageAttachments(messageRef);
-const {
-  actionState: extensionActionState,
-  actionStatusLabel,
-  invokeExtension,
-} = useExtensionAnnotationActions({
-  annotations: extensionAnnotations,
-  invokeExtensionAction: invokeExtensionActionRef,
-});
-
-async function highlightMessageCodeBlocks() {
-  const el = styledBodyRef.value;
-  if (!el) return;
-  await applyShikiToCodeBlocks(el);
-}
+// Pre-resolved lightbox images delivered by MessageBody's onImageClick.
+// MessageBody builds this list from its own useMessageAttachments state,
+// which holds the decrypted blob URLs and uses the canonical imageAttachments
+// predicate — so neither encrypted attachment URLs nor wrong-predicate index
+// mismatches can occur here.
+const lightboxImages = ref<Array<{ url: string; name?: string; width?: number; height?: number }>>([]);
+const lightboxOpen = ref(false);
+const lightboxIndex = ref(0);
 
 const replyAuthorName = computed(() => {
   const author = props.message.replyTo?.author;
@@ -450,18 +403,10 @@ onBeforeUnmount(() => {
 });
 
 onBeforeUnmount(() => {
-  cleanupAttachments();
   if (typeof window === "undefined") return;
   window.removeEventListener("keydown", onWindowKeydown);
 });
 
-watch(
-  styledHtml,
-  () => {
-    void nextTick().then(highlightMessageCodeBlocks);
-  },
-  { immediate: true },
-);
 </script>
 
 <template>
@@ -668,331 +613,12 @@ watch(
       <EditorBubbleToolbar v-if="editTiptapEditor" :editor="editTiptapEditor" />
     </div>
 
-    <!-- Sticker -->
-    <div v-else-if="message.isSticker && imageAttachments.length > 0">
-      <img
-        :src="imageAttachments[0].url"
-        :alt="imageAttachments[0].desc ?? message.body ?? 'Sticker'"
-        class="max-w-28 max-h-28 rounded-lg object-contain"
-        loading="lazy"
-      />
-    </div>
-
-    <div v-else class="chat-message-media-stack">
-      <!-- User text body (shown alongside attachments) -->
-      <div
-        v-if="displayBody"
-        :ref="setStyledBodyRef"
-        class="type-message-body break-words styled-body"
-        v-html="styledHtml"
-      />
-
-      <!-- Inline GIF -->
-      <div v-else-if="isGif">
-        <img
-          :src="message.body.trim()"
-          alt="GIF"
-          class="chat-attachment-image rounded-lg border border-border object-contain"
-          loading="lazy"
-        />
-      </div>
-
-      <!-- Waddle extension annotations -->
-      <div v-if="extensionAnnotations.length > 0" class="flex flex-col gap-2">
-        <div
-          v-for="annotation in extensionAnnotations"
-          :key="`${annotation.extensionId}:${annotation.annotationId}`"
-          class="chat-extension-card flex min-w-0 items-start gap-3 rounded-lg border border-border bg-muted/25 p-3 text-left"
-        >
-          <span class="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-md bg-background text-foreground ring-1 ring-border">
-            <MessageSquare v-if="annotation.surfaceKind === 'chat-bot'" class="h-4 w-4 text-primary/80" aria-hidden="true" />
-            <LayoutDashboard v-else class="h-4 w-4" aria-hidden="true" />
-          </span>
-          <span class="min-w-0 flex-1">
-            <span class="type-section-label block text-muted-foreground">
-              {{ extensionPresentation(annotation).label || extensionSurfaceLabel(annotation.surfaceKind) }}
-            </span>
-            <span class="type-control block break-words text-foreground">
-              {{ extensionPresentation(annotation).title }}
-            </span>
-            <span v-if="extensionPresentation(annotation).summary" class="type-caption mt-1 block break-words text-muted-foreground">
-              {{ extensionPresentation(annotation).summary }}
-            </span>
-            <span
-              v-if="extensionPresentation(annotation).options.length > 0"
-              class="mt-2 grid gap-1"
-            >
-              <span
-                v-for="option in extensionPresentation(annotation).options"
-                :key="`${annotation.annotationId}:option:${option.id}`"
-                class="type-caption flex min-w-0 items-center justify-between gap-3 rounded-md bg-background/70 px-2 py-1.5 text-foreground ring-1 ring-border/70"
-              >
-                <span class="min-w-0 break-words">{{ option.label }}</span>
-                <span v-if="option.value !== undefined" class="type-numeric text-muted-foreground">{{ option.value }}</span>
-              </span>
-            </span>
-            <dl
-              v-if="extensionCardDetails(annotation).length > 0"
-              class="mt-2 grid min-w-0 grid-cols-[max-content_minmax(0,1fr)] gap-x-2 gap-y-1"
-            >
-              <template
-                v-for="detail in extensionCardDetails(annotation)"
-                :key="`${annotation.annotationId}:${detail.label}:${detail.value}`"
-              >
-                <dt class="type-meta text-muted-foreground/70">{{ detail.label }}</dt>
-                <dd class="type-caption min-w-0 break-words text-foreground/85" :title="detail.value">{{ detail.value }}</dd>
-              </template>
-            </dl>
-            <span v-if="annotation.actions.length > 0" class="mt-2 flex flex-wrap gap-2">
-              <button
-                v-for="action in annotation.actions"
-                :key="`${annotation.annotationId}:${action.route}:${action.label}`"
-                type="button"
-                class="type-caption inline-flex min-h-8 items-center gap-1.5 rounded-md border border-border bg-background px-2.5 py-1.5 text-foreground transition-colors hover:bg-muted disabled:cursor-not-allowed disabled:opacity-60"
-                :disabled="extensionActionState(annotation.annotationId, action)?.state === 'loading' || !action.launch"
-                :title="extensionActionState(annotation.annotationId, action)?.detail ?? action.launch?.commandNode ?? action.label"
-                @click.stop="invokeExtension(annotation.annotationId, action)"
-              >
-                <LoaderCircle
-                  v-if="extensionActionState(annotation.annotationId, action)?.state === 'loading'"
-                  class="h-3.5 w-3.5 animate-spin text-primary/80"
-                  aria-hidden="true"
-                />
-                <CheckCircle2
-                  v-else-if="extensionActionState(annotation.annotationId, action)?.state === 'success'"
-                  class="h-3.5 w-3.5 text-success"
-                  aria-hidden="true"
-                />
-                <AlertCircle
-                  v-else-if="extensionActionState(annotation.annotationId, action)?.state === 'warning'"
-                  class="h-3.5 w-3.5 text-warning"
-                  aria-hidden="true"
-                />
-                <AlertCircle
-                  v-else-if="extensionActionState(annotation.annotationId, action)?.state === 'error'"
-                  class="h-3.5 w-3.5 text-destructive"
-                  aria-hidden="true"
-                />
-                {{ action.label }}
-                <span v-if="actionStatusLabel(annotation.annotationId, action)" class="text-muted-foreground">
-                  {{ actionStatusLabel(annotation.annotationId, action) }}
-                </span>
-              </button>
-            </span>
-            <span
-              v-for="action in annotation.actions"
-              :key="`${annotation.annotationId}:${action.route}:state`"
-              v-show="extensionActionState(annotation.annotationId, action)?.detail && extensionActionState(annotation.annotationId, action)?.state !== 'success'"
-              class="type-caption mt-1 block"
-              :class="extensionActionState(annotation.annotationId, action)?.state === 'error' ? 'text-destructive' : 'text-warning'"
-            >
-              {{ extensionActionState(annotation.annotationId, action)?.detail }}
-            </span>
-          </span>
-        </div>
-      </div>
-
-      <!-- Image attachments gallery -->
-      <div v-if="imageAttachments.length > 0" class="chat-attachment-strip">
-        <div
-          v-for="img in imageAttachments"
-          :key="attachmentKey(img)"
-          class="rounded-lg border border-border overflow-hidden bg-muted/40"
-        >
-          <button
-            v-if="resolvedAttachmentUrl(img)"
-            type="button"
-            class="block hover:opacity-90 transition-opacity focus-visible:outline-2 focus-visible:outline-primary"
-            :title="img.name ?? 'Image'"
-            @click="openLightbox(img)"
-          >
-            <img
-              :src="resolvedAttachmentUrl(img) || ''"
-              :alt="img.name ?? 'Shared image'"
-              class="chat-attachment-image object-cover"
-              loading="lazy"
-            />
-          </button>
-          <div
-            v-else
-            class="type-caption flex h-36 w-48 flex-col items-center justify-center gap-2 px-4 text-center text-muted-foreground"
-          >
-            <Lock class="h-4 w-4 text-primary/70" />
-            <span>{{ attachmentError(img) ?? (isDecryptingAttachment(img) ? "Decrypting image…" : "Preparing image…") }}</span>
-            <button
-              v-if="attachmentError(img)"
-              type="button"
-              class="type-caption rounded-lg border border-border bg-background px-2.5 py-1 text-foreground hover:bg-muted transition-colors"
-              @click="downloadAttachment(img)"
-            >
-              Download
-            </button>
-          </div>
-          <div
-            v-if="img.encrypted"
-            class="type-meta type-emphasis flex items-center gap-1 border-t border-border/70 px-2 py-1 text-muted-foreground"
-          >
-            <Lock class="h-3 w-3 text-primary/70" />
-            <span>Encrypted</span>
-          </div>
-        </div>
-      </div>
-
-      <!-- Inline video attachments -->
-      <div v-if="videoAttachments.length > 0" class="flex flex-col gap-2">
-        <div
-          v-for="file in videoAttachments"
-          :key="attachmentKey(file)"
-          class="chat-attachment-card flex flex-col gap-2 rounded-lg border border-border bg-muted/30 p-2"
-        >
-          <video
-            v-if="resolvedAttachmentUrl(file)"
-            :src="resolvedAttachmentUrl(file) || ''"
-            class="max-h-72 w-full rounded-lg border border-border bg-black"
-            controls
-            playsinline
-            preload="metadata"
-          />
-          <div
-            v-else
-            class="type-caption flex h-40 w-full flex-col items-center justify-center gap-2 rounded-lg border border-dashed border-border px-4 text-center text-muted-foreground"
-          >
-            <Lock class="h-4 w-4 text-primary/70" />
-            <span>{{ attachmentError(file) ?? (isDecryptingAttachment(file) ? "Decrypting video…" : "Preparing video…") }}</span>
-            <button
-              v-if="attachmentError(file)"
-              type="button"
-              class="type-caption rounded-lg border border-border bg-background px-2.5 py-1 text-foreground hover:bg-muted transition-colors"
-              @click="downloadAttachment(file)"
-            >
-              Download
-            </button>
-          </div>
-          <div class="type-caption text-muted-foreground">
-            {{ file.name ?? "Video" }} · {{ file.mediaType ?? "video" }}
-            <span v-if="file.size"> · {{ formatFileSize(file.size) }}</span>
-            <span v-if="file.encrypted"> · Encrypted</span>
-          </div>
-        </div>
-      </div>
-
-      <!-- Inline audio attachments -->
-      <div v-if="audioAttachments.length > 0" class="flex flex-col gap-2">
-        <div
-          v-for="file in audioAttachments"
-          :key="attachmentKey(file)"
-          class="chat-attachment-card flex flex-col gap-2 rounded-lg border border-border bg-muted/30 p-3"
-        >
-          <audio
-            v-if="resolvedAttachmentUrl(file)"
-            :src="resolvedAttachmentUrl(file) || ''"
-            class="w-full"
-            controls
-            preload="metadata"
-          />
-          <div
-            v-else
-            class="type-caption flex min-h-20 w-full flex-col items-center justify-center gap-2 rounded-lg border border-dashed border-border px-4 text-center text-muted-foreground"
-          >
-            <Lock class="h-4 w-4 text-primary/70" />
-            <span>{{ attachmentError(file) ?? (isDecryptingAttachment(file) ? "Decrypting audio…" : "Preparing audio…") }}</span>
-            <button
-              v-if="attachmentError(file)"
-              type="button"
-              class="type-caption rounded-lg border border-border bg-background px-2.5 py-1 text-foreground hover:bg-muted transition-colors"
-              @click="downloadAttachment(file)"
-            >
-              Download
-            </button>
-          </div>
-          <div class="type-caption text-muted-foreground">
-            {{ file.name ?? "Audio" }} · {{ file.mediaType ?? "audio" }}
-            <span v-if="file.size"> · {{ formatFileSize(file.size) }}</span>
-            <span v-if="file.encrypted"> · Encrypted</span>
-          </div>
-        </div>
-      </div>
-
-      <!-- Inline PDF attachments -->
-      <div v-if="pdfAttachments.length > 0" class="flex flex-col gap-2">
-        <div
-          v-for="file in pdfAttachments"
-          :key="attachmentKey(file)"
-          class="chat-attachment-card flex flex-col gap-2 rounded-lg border border-border bg-muted/30 p-2"
-        >
-          <iframe
-            v-if="resolvedAttachmentUrl(file)"
-            :src="resolvedAttachmentUrl(file) || ''"
-            :title="file.name ?? 'PDF document'"
-            class="h-72 w-full rounded-lg border border-border bg-background"
-          />
-          <div
-            v-else
-            class="type-caption flex h-40 w-full flex-col items-center justify-center gap-2 rounded-lg border border-dashed border-border px-4 text-center text-muted-foreground"
-          >
-            <Lock class="h-4 w-4 text-primary/70" />
-            <span>{{ attachmentError(file) ?? (isDecryptingAttachment(file) ? "Decrypting PDF…" : "Preparing PDF…") }}</span>
-            <button
-              v-if="attachmentError(file)"
-              type="button"
-              class="type-caption rounded-lg border border-border bg-background px-2.5 py-1 text-foreground hover:bg-muted transition-colors"
-              @click="downloadAttachment(file)"
-            >
-              Download
-            </button>
-          </div>
-          <div class="type-caption text-muted-foreground">
-            {{ file.name ?? "PDF" }} · {{ file.mediaType ?? "application/pdf" }}
-            <span v-if="file.size"> · {{ formatFileSize(file.size) }}</span>
-            <span v-if="file.encrypted"> · Encrypted</span>
-          </div>
-        </div>
-      </div>
-
-      <!-- Downloadable attachments -->
-      <div v-if="downloadableAttachments.length > 0" class="flex flex-col gap-1.5">
-        <template v-for="file in downloadableAttachments" :key="attachmentKey(file)">
-          <button
-            v-if="file.encrypted"
-            type="button"
-            class="chat-file-card inline-flex items-center gap-3 bg-muted rounded-lg p-3 hover:bg-muted/80 transition-all duration-200 text-left"
-            @click="downloadAttachment(file)"
-          >
-            <FileDown class="w-4 h-4 text-muted-foreground flex-shrink-0" />
-            <div class="flex-1 min-w-0">
-              <div class="type-control truncate">{{ file.name ?? "File" }}</div>
-              <div class="type-caption flex flex-wrap items-center gap-1.5 text-muted-foreground">
-                <span>{{ file.mediaType ?? "file" }}</span>
-                <span v-if="file.size">· {{ formatFileSize(file.size) }}</span>
-                <span class="inline-flex items-center gap-1 rounded-full bg-primary/8 px-1.5 py-0.5 text-primary/80">
-                  <Lock class="h-3 w-3" />
-                  Encrypted
-                </span>
-              </div>
-              <div v-if="attachmentError(file)" class="type-caption text-destructive">
-                {{ attachmentError(file) }}
-              </div>
-            </div>
-          </button>
-          <a
-            v-else
-            :href="file.url"
-            target="_blank"
-            rel="noopener noreferrer"
-            class="chat-file-card inline-flex items-center gap-3 bg-muted rounded-lg p-3 hover:bg-muted/80 transition-all duration-200"
-          >
-            <FileDown class="w-4 h-4 text-muted-foreground flex-shrink-0" />
-            <div class="flex-1 min-w-0">
-              <div class="type-control truncate">{{ file.name ?? "File" }}</div>
-              <div class="type-caption text-muted-foreground">
-                {{ file.mediaType ?? "file" }}
-                <span v-if="file.size"> · {{ formatFileSize(file.size) }}</span>
-              </div>
-            </div>
-          </a>
-        </template>
-      </div>
-    </div>
+    <MessageBody
+      v-else
+      :message="message"
+      :invoke-extension-action="invokeExtensionAction"
+      :on-image-click="(images, index) => { lightboxImages.value = images; lightboxIndex.value = index; lightboxOpen.value = true; }"
+    />
 
     <ImageLightbox
       v-model:open="lightboxOpen"

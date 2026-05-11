@@ -13,19 +13,13 @@ impl WaddleClient {
         future_to_promise(async move {
             let query_id = uuid::Uuid::new_v4().to_string();
             let iq_id = uuid::Uuid::new_v4().to_string();
-            let iq = build_mam_iq_extended(
-                &iq_id,
-                &query_id,
-                max,
-                before_id.as_deref(),
-                None,
-                None,
-                Some(&room_jid),
-                Some(&thread_id),
-                None,
-                None,
-                None,
-            );
+            let mut builder = MamIqBuilder::new(&iq_id, &query_id, max)
+                .to_jid(&room_jid)
+                .thread_id(&thread_id);
+            if let Some(before) = before_id.as_deref() {
+                builder = builder.before(before);
+            }
+            let iq = builder.build();
             let page = send_mam_query_command(inner, iq, query_id).await?;
             to_js_value(&mam_page_to_js(page))
         })
@@ -36,19 +30,11 @@ impl WaddleClient {
         future_to_promise(async move {
             let query_id = uuid::Uuid::new_v4().to_string();
             let iq_id = uuid::Uuid::new_v4().to_string();
-            let iq = build_mam_iq_extended(
-                &iq_id,
-                &query_id,
-                max,
-                Some(""),
-                None,
-                None,
-                Some(&room_jid),
-                None,
-                Some(&query),
-                None,
-                None,
-            );
+            let iq = MamIqBuilder::new(&iq_id, &query_id, max)
+                .before("")
+                .to_jid(&room_jid)
+                .fulltext(&query)
+                .build();
             let page = send_mam_query_command(inner, iq, query_id).await?;
             to_js_value(&mam_page_to_js(page))
         })
@@ -59,19 +45,11 @@ impl WaddleClient {
         future_to_promise(async move {
             let query_id = uuid::Uuid::new_v4().to_string();
             let iq_id = uuid::Uuid::new_v4().to_string();
-            let iq = build_mam_iq_extended(
-                &iq_id,
-                &query_id,
-                max,
-                Some(""),
-                None,
-                Some(&peer_jid),
-                None,
-                None,
-                Some(&query),
-                None,
-                None,
-            );
+            let iq = MamIqBuilder::new(&iq_id, &query_id, max)
+                .before("")
+                .with_jid(&peer_jid)
+                .fulltext(&query)
+                .build();
             let page = send_mam_query_command(inner, iq, query_id).await?;
             to_js_value(&mam_page_to_js(page))
         })
@@ -94,19 +72,11 @@ impl WaddleClient {
             };
             let query_id = uuid::Uuid::new_v4().to_string();
             let iq_id = uuid::Uuid::new_v4().to_string();
-            let iq = build_mam_iq_extended(
-                &iq_id,
-                &query_id,
-                max,
-                before.as_deref(),
-                None,
-                None,
-                Some(&room_jid),
-                None,
-                None,
-                None,
-                None,
-            );
+            let mut builder = MamIqBuilder::new(&iq_id, &query_id, max).to_jid(&room_jid);
+            if let Some(b) = before.as_deref() {
+                builder = builder.before(b);
+            }
+            let iq = builder.build();
             let result = send_mam_query_command(inner, iq, query_id).await?;
             to_js_value(&mam_page_to_js(result))
         })
@@ -129,19 +99,11 @@ impl WaddleClient {
             };
             let query_id = uuid::Uuid::new_v4().to_string();
             let iq_id = uuid::Uuid::new_v4().to_string();
-            let iq = build_mam_iq_extended(
-                &iq_id,
-                &query_id,
-                max,
-                before.as_deref(),
-                None,
-                Some(&peer_jid),
-                None,
-                None,
-                None,
-                None,
-                None,
-            );
+            let mut builder = MamIqBuilder::new(&iq_id, &query_id, max).with_jid(&peer_jid);
+            if let Some(b) = before.as_deref() {
+                builder = builder.before(b);
+            }
+            let iq = builder.build();
             let result = send_mam_query_command(inner, iq, query_id).await?;
             to_js_value(&mam_page_to_js(result))
         })
@@ -224,6 +186,41 @@ impl WaddleClient {
                 Some(&peer_jid),
                 None,
             );
+            let page = send_mam_query_command(inner, iq, query_id).await?;
+            to_js_value(&mam_page_to_js(page))
+        })
+    }
+
+    /// Waddle-specific MAM stanza-id filter — fetch a batch of messages from
+    /// a room MAM archive by XEP-0359 stanza-id. Uses the custom data-form
+    /// var `{urn:waddle:mam-stanza-id:0}stanza-id` per XEP-0313 §4.2 +
+    /// XEP-0068 (not the `urn:xmpp:sid:0` namespace, which is XEP-0359
+    /// wire protocol only). Used by the pinned-panel rich-preview render
+    /// path to materialize `TimelineMessage`s for pinned entries that
+    /// are not in the loaded timeline window.
+    pub fn fetch_room_messages_by_stanza_ids(
+        &self,
+        room_jid: String,
+        stanza_ids: Vec<String>,
+    ) -> Promise {
+        let inner = self.inner.clone();
+        future_to_promise(async move {
+            if stanza_ids.is_empty() {
+                return to_js_value(&mam_page_to_js(waddle_xmpp_client::MamPage {
+                    messages: vec![],
+                    rsm: waddle_xmpp_client::RsmPageInfo::default(),
+                    query_id: String::new(),
+                    is_complete: true,
+                }));
+            }
+            let refs: Vec<&str> = stanza_ids.iter().map(String::as_str).collect();
+            let query_id = uuid::Uuid::new_v4().to_string();
+            let iq_id = uuid::Uuid::new_v4().to_string();
+            let iq = MamIqBuilder::new(&iq_id, &query_id, stanza_ids.len() as u32)
+                .before("")
+                .to_jid(&room_jid)
+                .stanza_ids(&refs)
+                .build();
             let page = send_mam_query_command(inner, iq, query_id).await?;
             to_js_value(&mam_page_to_js(page))
         })

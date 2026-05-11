@@ -5,9 +5,11 @@ use tracing::debug;
 use uuid::Uuid;
 use xmpp_parsers::iq::{Iq, IqType};
 
+use super::stanza_id_filter::MamFilterStanzaId;
 use super::types::{MamQuery, RichText, ThreadId};
 use super::{
-    DATA_FORMS_NS, FULLTEXT_MAM_FIELD, MAM_NS, RSM_NS, WADDLE_MAM_THREAD_FIELD, XDATA_VALIDATE_NS,
+    DATA_FORMS_NS, FULLTEXT_MAM_FIELD, MAM_NS, MAX_FILTER_STANZA_IDS, MAX_FILTER_STANZA_ID_LEN,
+    RSM_NS, STANZA_ID_FILTER_FIELD, WADDLE_MAM_THREAD_FIELD, XDATA_VALIDATE_NS,
 };
 use crate::{CoreError, CoreResult};
 
@@ -42,7 +44,18 @@ pub fn parse_mam_query(iq: &Iq) -> CoreResult<(String, MamQuery)> {
         }
     }
 
-    debug!(query_id = %query_id, query = ?mam_query, "Parsed MAM query");
+    debug!(
+        query_id = %query_id,
+        with = ?mam_query.with,
+        thread = ?mam_query.thread_id,
+        fulltext_len = mam_query.fulltext.as_ref().map(|t| t.as_str().len()),
+        ids_count = mam_query.ids.len(),
+        stanza_ids_count = mam_query.stanza_ids.len(),
+        start = ?mam_query.start,
+        end = ?mam_query.end,
+        max = ?mam_query.max,
+        "Parsed MAM query"
+    );
 
     Ok((query_id, mam_query))
 }
@@ -123,6 +136,12 @@ pub fn build_query_form_iq(original_iq: &Iq) -> Iq {
         )
         .append(
             Element::builder("field", DATA_FORMS_NS)
+                .attr("var", STANZA_ID_FILTER_FIELD)
+                .attr("type", "text-multi")
+                .build(),
+        )
+        .append(
+            Element::builder("field", DATA_FORMS_NS)
                 .attr("var", WADDLE_MAM_THREAD_FIELD)
                 .attr("type", "text-single")
                 .build(),
@@ -190,6 +209,27 @@ fn parse_data_form(form: &Element, query: &mut MamQuery) -> CoreResult<()> {
                     .into_iter()
                     .filter(|value| !value.is_empty())
                     .collect();
+            }
+            STANZA_ID_FILTER_FIELD => {
+                let mut tokens: Vec<MamFilterStanzaId> = Vec::with_capacity(values.len());
+                for value in values {
+                    if value.is_empty() {
+                        continue;
+                    }
+                    let Some(token) = MamFilterStanzaId::new(value) else {
+                        return Err(CoreError::bad_request(Some(format!(
+                            "MAM stanza-id filter value exceeds max length {MAX_FILTER_STANZA_ID_LEN}"
+                        ))));
+                    };
+                    tokens.push(token);
+                }
+                if tokens.len() > MAX_FILTER_STANZA_IDS {
+                    return Err(CoreError::bad_request(Some(format!(
+                        "MAM stanza-id filter exceeds cap: {} > {MAX_FILTER_STANZA_IDS}",
+                        tokens.len()
+                    ))));
+                }
+                query.stanza_ids = tokens;
             }
             WADDLE_MAM_THREAD_FIELD => {
                 query.thread_id = value.and_then(ThreadId::new);

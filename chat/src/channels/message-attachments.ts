@@ -63,6 +63,10 @@ export function useMessageAttachments(message: ReadonlyRef<TimelineMessage>) {
   const displayBody = computed(() => {
     const body = message.value.body;
     if (!body) return "";
+    // XEP-0449 stickers carry a <body> alt-text element; suppress the text
+    // bubble so only the sticker image renders (the template chains
+    // v-else-if="isSticker" after v-if="displayBody").
+    if (message.value.isSticker && imageAttachments.value.length > 0) return "";
     if (sharedFiles.value.length === 0) return isGif.value ? "" : body;
     const matchesAttachment = sharedFiles.value.some((f) => f.url === body.trim());
     return matchesAttachment ? "" : body;

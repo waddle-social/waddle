@@ -59,7 +59,7 @@ pub use event::{
 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 pub use mam::MamExt;
 pub use mam::{
-    build_mam_iq, build_mam_iq_extended, ArchivedMessage, MamPage, RsmPageInfo, MAM_END_FIELD,
+    build_mam_iq, ArchivedMessage, MamIqBuilder, MamPage, RsmPageInfo, MAM_END_FIELD,
     MAM_START_FIELD,
 };
 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]

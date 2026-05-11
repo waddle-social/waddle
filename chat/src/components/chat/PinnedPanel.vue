@@ -5,15 +5,31 @@
 // XmppClient. Mutually exclusive with ThreadPanel in the right rail
 // — the parent (ChatReadyShell) gates rendering on
 // ui.showPinnedPanel.
-import { computed } from "vue";
+//
+// Rich preview: each entry resolves to a TimelineMessage from either
+// (a) the in-memory channel timeline or (b) the pinned-message body
+// cache populated by the panel-open hydration service. The shared
+// `<MessageBody compact />` renders images, video, audio, PDFs,
+// downloadables, and extension cards. Empty preview.text + no live
+// body → "Original message no longer available." italic fallback.
+import { computed, ref, watch } from "vue";
 import { useStore } from "@nanostores/vue";
 import { Pin, X } from "lucide-vue-next";
 
 import { $pinnedRooms } from "@/stores/pinned-messages";
+import { $pinnedMessageBodies } from "@/stores/pinned-message-bodies";
+import MessageBody from "@/components/chat/MessageBody.vue";
+import type { ResolvedLightboxImage } from "@/components/chat/message-body-types";
+import ImageLightbox from "@/components/ui/ImageLightbox.vue";
+import type { TimelineMessage } from "@/lib/chat-ui";
+import type { WasmPinEntry } from "@/lib/xmpp/wasm-types";
 
 const props = defineProps<{
   roomJid: string;
   channelName: string;
+  /** Optional — when present, used to short-circuit MAM cache lookups
+   * for pinned entries that already live in the loaded timeline. */
+  timelineMessages?: ReadonlyArray<TimelineMessage>;
 }>();
 
 const emit = defineEmits<{
@@ -22,9 +38,41 @@ const emit = defineEmits<{
 }>();
 
 const pinnedRooms = useStore($pinnedRooms);
+const pinnedBodies = useStore($pinnedMessageBodies);
 const state = computed(() => pinnedRooms.value.get(props.roomJid) ?? null);
 const entries = computed(() => state.value?.entries ?? []);
 const hydrated = computed(() => state.value?.hydrated ?? false);
+
+const timelineIndex = computed(() => {
+  const map = new Map<string, TimelineMessage>();
+  for (const m of props.timelineMessages ?? []) {
+    map.set(m.id, m);
+    if (m.reactionTargetId) map.set(m.reactionTargetId, m);
+    if (m.replyableId) map.set(m.replyableId, m);
+    for (const wid of m.wireIds ?? []) map.set(wid, m);
+  }
+  return map;
+});
+
+function liveMessageFor(stanzaId: string): TimelineMessage | null {
+  return (
+    timelineIndex.value.get(stanzaId) ??
+    pinnedBodies.value.get(props.roomJid)?.get(stanzaId) ??
+    null
+  );
+}
+
+interface ResolvedEntry {
+  entry: WasmPinEntry;
+  live: TimelineMessage | null;
+}
+
+const resolvedEntries = computed<ResolvedEntry[]>(() =>
+  entries.value.map((entry) => ({
+    entry,
+    live: liveMessageFor(entry.target_stanza_id),
+  })),
+);
 
 function relativeTime(iso: string): string {
   const t = Date.parse(iso);
@@ -38,6 +86,40 @@ function relativeTime(iso: string): string {
   const days = Math.round(hours / 24);
   return `${days}d ago`;
 }
+
+// Lightbox state owned by the panel — clicks on images inside any
+// `<MessageBody>` bubble up through `onImageClick`. The image list is
+// pre-resolved by MessageBody (decrypted blob URLs, canonical
+// imageAttachments predicate) so the panel never touches raw file.url.
+const lightboxOpen = ref(false);
+const lightboxImages = ref<ResolvedLightboxImage[]>([]);
+const lightboxIndex = ref(0);
+
+// Track which pinned entry's images currently populate the lightbox so we
+// can close it if that entry is unpinned while the lightbox is open.
+// When an entry is unpinned its <MessageBody> unmounts and revokes the
+// blob URLs, leaving the lightbox with a dead blob: reference that renders
+// as a broken image. Closing proactively prevents that UX glitch.
+const lightboxSourceStanzaId = ref<string | null>(null);
+
+function handleImageClick(images: ResolvedLightboxImage[], index: number, entryStanzaId: string) {
+  if (images.length === 0) return;
+  lightboxImages.value = images;
+  lightboxIndex.value = index;
+  lightboxOpen.value = true;
+  lightboxSourceStanzaId.value = entryStanzaId;
+}
+
+watch(resolvedEntries, (entries) => {
+  if (!lightboxOpen.value) return;
+  const source = lightboxSourceStanzaId.value;
+  if (!source) return;
+  const stillPresent = entries.some(({ entry }) => entry.target_stanza_id === source);
+  if (!stillPresent) {
+    lightboxOpen.value = false;
+    lightboxSourceStanzaId.value = null;
+  }
+});
 </script>
 
 <template>
@@ -70,7 +152,7 @@ function relativeTime(iso: string): string {
     </div>
     <ol v-else class="flex-1 overflow-y-auto divide-y divide-border" role="list">
       <li
-        v-for="entry in entries"
+        v-for="{ entry, live } in resolvedEntries"
         :key="entry.target_stanza_id"
         class="px-4 py-3 cursor-pointer hover:bg-muted/40 focus-within:bg-muted/40"
         tabindex="0"
@@ -86,13 +168,42 @@ function relativeTime(iso: string): string {
             {{ relativeTime(entry.preview.message_timestamp) }}
           </span>
         </div>
-        <p class="type-field-sm text-muted-foreground line-clamp-3 break-words">
-          {{ entry.preview.text || "(no preview text)" }}
-        </p>
+
+        <!-- Rich render or fallback -->
+        <template v-if="live !== null">
+          <p
+            v-if="live.isRetracted"
+            class="type-field-sm italic text-muted-foreground"
+          >Message retracted</p>
+          <MessageBody
+            v-else
+            :message="live"
+            compact
+            :on-image-click="(images, index) => handleImageClick(images, index, entry.target_stanza_id)"
+          />
+        </template>
+        <template v-else>
+          <p
+            v-if="entry.preview.text"
+            class="type-field-sm text-muted-foreground line-clamp-3 break-words"
+          >{{ entry.preview.text }}</p>
+          <p
+            v-else
+            class="type-field-sm italic text-muted-foreground"
+          >Original message no longer available.</p>
+        </template>
+
         <p class="type-field-xs text-muted-foreground mt-1">
           Pinned by {{ entry.pinner_jid }} · {{ relativeTime(entry.pinned_at) }}
         </p>
       </li>
     </ol>
+
+    <ImageLightbox
+      v-if="lightboxOpen"
+      v-model:open="lightboxOpen"
+      v-model:index="lightboxIndex"
+      :images="lightboxImages"
+    />
   </aside>
 </template>
