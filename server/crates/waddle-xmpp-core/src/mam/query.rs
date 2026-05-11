@@ -44,7 +44,18 @@ pub fn parse_mam_query(iq: &Iq) -> CoreResult<(String, MamQuery)> {
         }
     }
 
-    debug!(query_id = %query_id, query = ?mam_query, "Parsed MAM query");
+    debug!(
+        query_id = %query_id,
+        with = ?mam_query.with,
+        thread = ?mam_query.thread_id,
+        fulltext_len = mam_query.fulltext.as_ref().map(|t| t.as_str().len()),
+        ids_count = mam_query.ids.len(),
+        stanza_ids_count = mam_query.stanza_ids.len(),
+        start = ?mam_query.start,
+        end = ?mam_query.end,
+        max = ?mam_query.max,
+        "Parsed MAM query"
+    );
 
     Ok((query_id, mam_query))
 }

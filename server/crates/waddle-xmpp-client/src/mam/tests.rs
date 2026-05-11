@@ -445,9 +445,66 @@ fn build_mam_iq_preserves_existing_before_behavior() {
 #[cfg(test)]
 mod stanza_id_filter_tests {
     use minidom::Element;
-    use waddle_xmpp_core::mam::{MAM_NS, STANZA_ID_FILTER_FIELD};
+    use waddle_xmpp_core::mam::{MAM_NS, RSM_NS, STANZA_ID_FILTER_FIELD};
 
     use super::super::{MamIqBuilder, DATA_FORMS_NS};
+
+    #[test]
+    fn builder_emits_minimal_iq_with_no_setters() {
+        // No to_jid, no before/after, no filter fields — only FORM_TYPE.
+        let iq = MamIqBuilder::new("iq1", "q1", 10).build();
+        assert!(
+            iq.attr("to").is_none(),
+            "no to attribute when to_jid setter not called"
+        );
+        let query = iq.get_child("query", MAM_NS).expect("query child");
+        let form = query.get_child("x", DATA_FORMS_NS).expect("form");
+        let vars: Vec<&str> = form
+            .children()
+            .filter(|c| c.name() == "field")
+            .filter_map(|c| c.attr("var"))
+            .collect();
+        assert_eq!(vars, vec!["FORM_TYPE"], "only FORM_TYPE field present");
+        let rsm = query.get_child("set", RSM_NS).expect("rsm set");
+        assert!(
+            rsm.get_child("before", RSM_NS).is_none(),
+            "no before element when before setter not called"
+        );
+        assert!(
+            rsm.get_child("after", RSM_NS).is_none(),
+            "no after element when after setter not called"
+        );
+    }
+
+    #[test]
+    fn build_mam_iq_round_trips_through_parse_mam_query() {
+        use std::str::FromStr;
+        use waddle_xmpp_core::mam::{parse_mam_query, MamFilterStanzaId};
+
+        let iq_elem = MamIqBuilder::new("iq1", "q1", 10)
+            .to_jid("room@conf.example")
+            .stanza_ids(&["sid-A", "sid-B"])
+            .build();
+
+        // Serialize to bytes, parse back as minidom Element, then as Iq.
+        let mut bytes = Vec::<u8>::new();
+        iq_elem
+            .write_to(&mut bytes)
+            .expect("element serializes to bytes");
+        let xml = String::from_utf8(bytes).expect("minidom emits valid UTF-8");
+        let reparsed = Element::from_str(&xml).expect("element round-trips through XML");
+        let iq = xmpp_parsers::iq::Iq::try_from(reparsed).expect("Iq parse from element");
+
+        let (_query_id, query) = parse_mam_query(&iq).expect("query parses");
+        assert_eq!(
+            query.stanza_ids,
+            vec![
+                MamFilterStanzaId::new("sid-A").unwrap(),
+                MamFilterStanzaId::new("sid-B").unwrap(),
+            ],
+            "stanza-id filter values must survive builder → serialize → parse round-trip"
+        );
+    }
 
     #[test]
     fn builder_appends_stanza_id_filter_when_provided() {

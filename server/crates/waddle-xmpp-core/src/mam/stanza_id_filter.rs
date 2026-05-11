@@ -87,3 +87,42 @@ impl AsRef<str> for MamFilterStanzaId {
         &self.0
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rejects_empty_string() {
+        assert!(MamFilterStanzaId::new("").is_none());
+    }
+
+    #[test]
+    fn accepts_max_length_exactly() {
+        let s = "x".repeat(MAX_FILTER_STANZA_ID_LEN);
+        assert!(MamFilterStanzaId::new(s).is_some());
+    }
+
+    #[test]
+    fn rejects_over_max_length_by_one() {
+        let s = "x".repeat(MAX_FILTER_STANZA_ID_LEN + 1);
+        assert!(MamFilterStanzaId::new(s).is_none());
+    }
+
+    #[test]
+    fn validates_by_byte_length_not_char_count() {
+        // 3-byte UTF-8 chars ("あ"): MAX_FILTER_STANZA_ID_LEN/3 chars
+        // is allowed; MAX_FILTER_STANZA_ID_LEN/3 + 1 chars is rejected
+        // because that's MAX_FILTER_STANZA_ID_LEN + 3 bytes.
+        let allowed_chars = MAX_FILTER_STANZA_ID_LEN / 3;
+        let too_many_chars = allowed_chars + 1;
+        assert!(MamFilterStanzaId::new("あ".repeat(allowed_chars)).is_some());
+        assert!(MamFilterStanzaId::new("あ".repeat(too_many_chars)).is_none());
+    }
+
+    #[test]
+    fn as_str_returns_inner() {
+        let id = MamFilterStanzaId::new("sid-A").expect("non-empty");
+        assert_eq!(id.as_str(), "sid-A");
+    }
+}
