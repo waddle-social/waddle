@@ -1253,12 +1253,22 @@ async fn xep_0313_sqlx_archive_uses_id_as_deterministic_tiebreak_when_timestamps
     );
 }
 
-fn archived_with_stanza_id(archive_id: &str, stanza_id: &str) -> ArchivedMessage {
+/// Build an `ArchivedMessage` that mirrors the production data layout:
+///
+/// - `archive_id`: canonical XEP-0359 room-stamped UUID — stored in the SQL
+///   `id` column (primary key). This is what `MamQuery.stanza_ids` filters
+///   against, and what the chat client supplies via `roomAssignedStanzaId`.
+/// - `wire_id`: the client's `<message id>` attribute — stored in the SQL
+///   `stanza_id` column. Different from `archive_id`.
+///
+/// See `groupchat_archive.rs:10,94-97` for the authoritative server-side
+/// assignment.
+fn archived_with_archive_and_wire_id(archive_id: &str, wire_id: &str) -> ArchivedMessage {
     let archive = bare("room@conf.example");
     ArchivedMessage {
         id: archive_id.to_string(),
         stanza_id: Some(waddle_xmpp_core::xep0359::StanzaId::new(
-            stanza_id.to_string(),
+            wire_id.to_string(),
             jid(&archive.to_string()),
         )),
         ..archived_groupchat(&archive)
@@ -1267,19 +1277,34 @@ fn archived_with_stanza_id(archive_id: &str, stanza_id: &str) -> ArchivedMessage
 
 #[tokio::test]
 async fn in_memory_query_filters_by_stanza_id() {
+    // `MamQuery.stanza_ids` filters by the canonical XEP-0359 room-stamped id,
+    // stored in the `id` column (not the `stanza_id` column which holds the
+    // wire <message id>). Confirmed against `groupchat_archive.rs:10,94-97`.
+    //
+    // archive_id "uuid-A/B/C" = canonical room UUID (what pin's target_stanza_id is)
+    // wire_id    "wire-A/B/C" = client's <message id> (different column)
     let store = InMemoryMamStorage::new();
     let archive = bare("room@conf.example");
 
     store
-        .store_message(&archive, &archived_with_stanza_id("m1", "sid-A"))
+        .store_message(
+            &archive,
+            &archived_with_archive_and_wire_id("uuid-A", "wire-A"),
+        )
         .await
         .expect("store m1");
     store
-        .store_message(&archive, &archived_with_stanza_id("m2", "sid-B"))
+        .store_message(
+            &archive,
+            &archived_with_archive_and_wire_id("uuid-B", "wire-B"),
+        )
         .await
         .expect("store m2");
     store
-        .store_message(&archive, &archived_with_stanza_id("m3", "sid-C"))
+        .store_message(
+            &archive,
+            &archived_with_archive_and_wire_id("uuid-C", "wire-C"),
+        )
         .await
         .expect("store m3");
 
@@ -1287,20 +1312,15 @@ async fn in_memory_query_filters_by_stanza_id() {
         .query_messages(
             &archive,
             &MamQuery {
-                stanza_ids: vec!["sid-A".to_string(), "sid-C".to_string()],
+                stanza_ids: vec!["uuid-A".to_string(), "uuid-C".to_string()],
                 ..Default::default()
             },
         )
         .await
         .expect("query ok");
-    let ids: Vec<&str> = result
-        .messages
-        .iter()
-        .filter_map(|m| m.stanza_id.as_ref().map(|s| s.id.as_str()))
-        .collect();
-    // Use HashSet comparison since result ordering may not be stable.
-    let got: std::collections::HashSet<&str> = ids.into_iter().collect();
-    let want: std::collections::HashSet<&str> = ["sid-A", "sid-C"].into_iter().collect();
+    let got: std::collections::HashSet<&str> =
+        result.messages.iter().map(|m| m.id.as_str()).collect();
+    let want: std::collections::HashSet<&str> = ["uuid-A", "uuid-C"].into_iter().collect();
     assert_eq!(got, want);
 }
 
@@ -1309,7 +1329,10 @@ async fn in_memory_query_stanza_id_no_match_returns_empty() {
     let store = InMemoryMamStorage::new();
     let archive = bare("room@conf.example");
     store
-        .store_message(&archive, &archived_with_stanza_id("m1", "sid-A"))
+        .store_message(
+            &archive,
+            &archived_with_archive_and_wire_id("uuid-A", "wire-A"),
+        )
         .await
         .expect("store m1");
 
@@ -1317,7 +1340,7 @@ async fn in_memory_query_stanza_id_no_match_returns_empty() {
         .query_messages(
             &archive,
             &MamQuery {
-                stanza_ids: vec!["sid-missing".to_string()],
+                stanza_ids: vec!["uuid-missing".to_string()],
                 ..Default::default()
             },
         )
@@ -1329,18 +1352,33 @@ async fn in_memory_query_stanza_id_no_match_returns_empty() {
 
 #[tokio::test]
 async fn sqlx_query_filters_by_stanza_id() {
+    // `MamQuery.stanza_ids` filters by the canonical XEP-0359 room-stamped id,
+    // stored in the `id` column (not the `stanza_id` column which holds the
+    // wire <message id>). Confirmed against `groupchat_archive.rs:10,94-97`.
+    //
+    // archive_id "uuid-A/B/C" = canonical room UUID (what pin's target_stanza_id is)
+    // wire_id    "wire-A/B/C" = client's <message id> (different column)
     let store = create_test_storage().await;
     let archive = bare("room@conf.example");
     store
-        .store_message(&archive, &archived_with_stanza_id("m1", "sid-A"))
+        .store_message(
+            &archive,
+            &archived_with_archive_and_wire_id("uuid-A", "wire-A"),
+        )
         .await
         .expect("store m1");
     store
-        .store_message(&archive, &archived_with_stanza_id("m2", "sid-B"))
+        .store_message(
+            &archive,
+            &archived_with_archive_and_wire_id("uuid-B", "wire-B"),
+        )
         .await
         .expect("store m2");
     store
-        .store_message(&archive, &archived_with_stanza_id("m3", "sid-C"))
+        .store_message(
+            &archive,
+            &archived_with_archive_and_wire_id("uuid-C", "wire-C"),
+        )
         .await
         .expect("store m3");
 
@@ -1348,17 +1386,14 @@ async fn sqlx_query_filters_by_stanza_id() {
         .query_messages(
             &archive,
             &MamQuery {
-                stanza_ids: vec!["sid-B".to_string(), "sid-C".to_string()],
+                stanza_ids: vec!["uuid-B".to_string(), "uuid-C".to_string()],
                 ..Default::default()
             },
         )
         .await
         .expect("query ok");
-    let got: std::collections::HashSet<&str> = result
-        .messages
-        .iter()
-        .filter_map(|m| m.stanza_id.as_ref().map(|s| s.id.as_str()))
-        .collect();
-    let want: std::collections::HashSet<&str> = ["sid-B", "sid-C"].into_iter().collect();
+    let got: std::collections::HashSet<&str> =
+        result.messages.iter().map(|m| m.id.as_str()).collect();
+    let want: std::collections::HashSet<&str> = ["uuid-B", "uuid-C"].into_iter().collect();
     assert_eq!(got, want);
 }

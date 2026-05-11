@@ -152,13 +152,14 @@ impl MamStorage for InMemoryMamStorage {
             });
         }
         if !query.stanza_ids.is_empty() {
+            // `MamQuery.stanza_ids` carries canonical XEP-0359 room-stamped
+            // UUIDs, stored in the `id` field (the archive primary key). The
+            // `stanza_id` field holds the wire `<message id>` attribute —
+            // a different value. Filtering by `id` matches what the chat
+            // client supplies (via `roomAssignedStanzaId`). See
+            // `groupchat_archive.rs:10,94-97`.
             let allowed: HashSet<&str> = query.stanza_ids.iter().map(String::as_str).collect();
-            messages.retain(|m| {
-                m.stanza_id
-                    .as_ref()
-                    .map(|s| allowed.contains(s.id.as_str()))
-                    .unwrap_or(false)
-            });
+            messages.retain(|m| allowed.contains(m.id.as_str()));
         }
         if let Some(cursor) = filter_before_cursor.as_ref() {
             messages.retain(|message| archive_order_before(message, cursor));

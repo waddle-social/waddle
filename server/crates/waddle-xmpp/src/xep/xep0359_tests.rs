@@ -29,22 +29,25 @@ fn bare(value: &str) -> BareJid {
     value.parse::<BareJid>().expect("valid bare jid literal")
 }
 
-/// Build an `ArchivedMessage` with a specific stanza-id assigned by the
-/// archive. `archive_msg_id` is the archive row id; `stanza_id_val` is the
-/// XEP-0359 stanza-id the server stamped on the wire.
-fn archived_with_stanza_id(
-    archive: &BareJid,
-    archive_msg_id: &str,
-    stanza_id_val: &str,
-) -> ArchivedMessage {
+/// Build an `ArchivedMessage` that mirrors the production data layout.
+///
+/// - `archive_id`: the canonical XEP-0359 room-stamped UUID stored in the SQL
+///   `id` column (primary key). `MamQuery.stanza_ids` filters on this column.
+///   This is what the chat client supplies via `roomAssignedStanzaId`.
+/// - `wire_id`: the client's `<message id>` attribute stored in the SQL
+///   `stanza_id` column. Different from `archive_id`.
+///
+/// See `groupchat_archive.rs:10,94-97` for the authoritative server-side
+/// column assignment.
+fn archived_with_stanza_id(archive: &BareJid, archive_id: &str, wire_id: &str) -> ArchivedMessage {
     ArchivedMessage {
-        id: archive_msg_id.to_string(),
+        id: archive_id.to_string(),
         stanza_id: Some(StanzaId::new(
-            stanza_id_val.to_string(),
+            wire_id.to_string(),
             jid(&archive.to_string()),
         )),
         message_type: MessageType::Groupchat,
-        body: Some(format!("message with stanza-id {stanza_id_val}")),
+        body: Some(format!("message with archive-id {archive_id}")),
         ..ArchivedMessage::for_test(jid(&format!("{archive}/alice")), jid(&archive.to_string()))
     }
 }
@@ -76,21 +79,36 @@ fn stanza_id_filter_caps_match_pin_protocol() {
 /// MUST return only messages whose server-assigned stanza-id matches that
 /// value.
 ///
+/// `MamQuery.stanza_ids` filters by the canonical XEP-0359 room-stamped id,
+/// stored in the `id` column (the SQL primary key), not the `stanza_id`
+/// column which holds the wire `<message id>` attribute. The chat client
+/// supplies the canonical id via `roomAssignedStanzaId`. See
+/// `groupchat_archive.rs:10,94-97`.
+///
 /// Integration level: storage API (`InMemoryMamStorage::query_messages`).
 /// The filter is exercised through the same `MamQuery.stanza_ids` path that
 /// the IQ parser populates on the wire, giving full conformance coverage of
 /// the storage contract without requiring a room-actor fixture.
 #[tokio::test]
 async fn stanza_id_filter_returns_only_matching_message() {
+    // archive_id "uuid-m1/m2" = canonical room UUID (what pin's target_stanza_id is,
+    //                           stored in SQL `id` column)
+    // wire_id    "wire-m1/m2" = client's <message id> (SQL `stanza_id` column)
     let store = InMemoryMamStorage::new();
     let archive = bare("room@conference.example.com");
 
     store
-        .store_message(&archive, &archived_with_stanza_id(&archive, "m1", "sid-A"))
+        .store_message(
+            &archive,
+            &archived_with_stanza_id(&archive, "uuid-m1", "wire-m1"),
+        )
         .await
         .expect("store m1");
     store
-        .store_message(&archive, &archived_with_stanza_id(&archive, "m2", "sid-B"))
+        .store_message(
+            &archive,
+            &archived_with_stanza_id(&archive, "uuid-m2", "wire-m2"),
+        )
         .await
         .expect("store m2");
 
@@ -98,7 +116,7 @@ async fn stanza_id_filter_returns_only_matching_message() {
         .query_messages(
             &archive,
             &MamQuery {
-                stanza_ids: vec!["sid-A".to_string()],
+                stanza_ids: vec!["uuid-m1".to_string()],
                 ..Default::default()
             },
         )
@@ -106,13 +124,11 @@ async fn stanza_id_filter_returns_only_matching_message() {
         .expect("query must succeed");
 
     assert_eq!(result.messages.len(), 1, "exactly one message returned");
-    let returned_sid = result.messages[0]
-        .stanza_id
-        .as_ref()
-        .expect("stanza_id present on returned message")
-        .id
-        .as_str();
-    assert_eq!(returned_sid, "sid-A");
+    assert_eq!(
+        result.messages[0].id.as_str(),
+        "uuid-m1",
+        "returned message has the canonical archive id"
+    );
     assert!(result.complete, "single-result page is complete");
 }
 
@@ -215,12 +231,14 @@ async fn stanza_id_filter_preserves_rich_payload_roundtrip() {
         .await
         .expect("store rich message");
 
-    // Query by stanza-id — the XEP-0359 §3 filter path.
+    // Query by canonical archive id — the XEP-0359 §3 filter path.
+    // `MamQuery.stanza_ids` filters by the `id` column (canonical UUID),
+    // not by `stanza_id` (wire <message id>). See `groupchat_archive.rs:10,94-97`.
     let result = store
         .query_messages(
             &archive,
             &MamQuery {
-                stanza_ids: vec!["sid-rich".to_string()],
+                stanza_ids: vec!["archive-rich-1".to_string()],
                 ..Default::default()
             },
         )

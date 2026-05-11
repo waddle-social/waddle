@@ -105,7 +105,13 @@ macro_rules! push_common_mam_filters {
             ids.push_unseparated(")");
         }
         if !$query.stanza_ids.is_empty() {
-            $builder.push(" AND stanza_id IN (");
+            // `MamQuery.stanza_ids` carries canonical XEP-0359 room-stamped
+            // UUIDs, stored in the `id` column (the SQL primary key). The
+            // `stanza_id` column holds the wire `<message id>` attribute —
+            // a different value. Filtering by `id` matches what the chat
+            // client supplies (via `roomAssignedStanzaId`). See
+            // `groupchat_archive.rs:10,94-97`.
+            $builder.push(" AND id IN (");
             let mut ids = $builder.separated(", ");
             for id in &$query.stanza_ids {
                 ids.push_bind(id.as_str());
