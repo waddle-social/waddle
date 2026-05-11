@@ -9,12 +9,12 @@ pub struct XmppServiceDomains {
 }
 
 impl XmppServiceDomains {
-    pub fn new(xmpp_domain: &str, component_parent_domain: &str) -> Self {
+    pub fn new(xmpp_domain: &str) -> Self {
         Self {
-            muc: format!("muc.{component_parent_domain}"),
-            spaces: format!("spaces.{component_parent_domain}"),
+            muc: format!("muc.{xmpp_domain}"),
+            spaces: format!("spaces.{xmpp_domain}"),
             upload: format!("upload.{xmpp_domain}"),
-            extensions: format!("extensions.{component_parent_domain}"),
+            extensions: format!("extensions.{xmpp_domain}"),
         }
     }
 }

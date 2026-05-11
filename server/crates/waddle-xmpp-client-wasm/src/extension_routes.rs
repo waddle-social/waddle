@@ -326,9 +326,9 @@ mod extension_route_tests {
     #[test]
     fn extension_service_candidates_probe_advertised_items_before_domain_fallbacks() {
         let items = vec![
-            disco_item("muc.waddle.local"),
+            disco_item("muc.alt.example.com"),
             disco_item("upload.waddle.social"),
-            disco_item("extensions.waddle.local"),
+            disco_item("extensions.alt.example.com"),
         ];
 
         let candidates = extension_command_service_candidates("waddle.social", &items);
@@ -336,9 +336,9 @@ mod extension_route_tests {
         assert_eq!(
             candidates,
             vec![
-                "muc.waddle.local",
+                "muc.alt.example.com",
                 "upload.waddle.social",
-                "extensions.waddle.local",
+                "extensions.alt.example.com",
                 "extensions.waddle.social",
                 "waddle.social",
             ]

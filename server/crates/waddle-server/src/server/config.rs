@@ -7,8 +7,6 @@ pub struct XmppConfig {
     pub enabled: bool,
     /// XMPP server domain (default: "localhost")
     pub domain: String,
-    /// Parent domain for XMPP component services such as MUC and Spaces.
-    pub component_domain: String,
     /// MAM database URL (prefers dedicated XMPP DSN, otherwise the main runtime DSN)
     pub mam_database_url: Option<String>,
     /// Inbox database URL (prefers dedicated XMPP DSN, otherwise the main runtime DSN)
@@ -57,7 +55,6 @@ impl Default for XmppConfig {
         Self {
             enabled: true,
             domain: "localhost".to_string(),
-            component_domain: "localhost".to_string(),
             mam_database_url: None,
             inbox_database_url: None,
             pending_delivery_database_url: None,
@@ -83,8 +80,6 @@ impl XmppConfig {
 
         let domain =
             std::env::var("WADDLE_XMPP_DOMAIN").unwrap_or_else(|_| "localhost".to_string());
-        let component_domain =
-            std::env::var("WADDLE_XMPP_COMPONENT_DOMAIN").unwrap_or_else(|_| domain.clone());
 
         let mam_database_url = resolve_xmpp_database_url("WADDLE_XMPP_MAM_DATABASE_URL");
         let inbox_database_url = resolve_xmpp_database_url("WADDLE_XMPP_INBOX_DATABASE_URL");
@@ -114,7 +109,6 @@ impl XmppConfig {
         Self {
             enabled,
             domain,
-            component_domain,
             mam_database_url,
             inbox_database_url,
             pending_delivery_database_url,

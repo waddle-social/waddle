@@ -276,7 +276,7 @@ async fn create_websocket_state(
 
     // Create MUC room registry with the XMPP domain (not the HTTP base_url host)
     let xmpp_domain = auth_state.xmpp_domain.clone();
-    let service_domains = XmppServiceDomains::new(&xmpp_domain, &xmpp_config.component_domain);
+    let service_domains = XmppServiceDomains::new(&xmpp_domain);
     let room_registry = kameo::spawn(RoomRegistryActor::new(
         service_domains.muc.clone(),
         server_config.occupant_id_secret.clone(),

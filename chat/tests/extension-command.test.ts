@@ -198,18 +198,18 @@ describe("extension command invocation", () => {
         const target = xml.match(/\bto="([^"]+)"/)?.[1] ?? "";
         if (xml.includes("disco#items") && !xml.includes('node="http://jabber.org/protocol/commands"')) {
           expect(target).toBe("example.com");
-          return `<iq type="result"><query xmlns="http://jabber.org/protocol/disco#items"><item jid="automation.waddle.local" name="Automation" /><item jid="extensions.waddle.local" name="Extensions" /></query></iq>`;
+          return `<iq type="result"><query xmlns="http://jabber.org/protocol/disco#items"><item jid="automation.example.com" name="Automation" /><item jid="extensions.example.com" name="Extensions" /></query></iq>`;
         }
         if (xml.includes("disco#info") && !xml.includes(" node=")) {
-          if (target === "automation.waddle.local") {
+          if (target === "automation.example.com") {
             return `<iq type="result"><query xmlns="http://jabber.org/protocol/disco#info"><feature var="http://jabber.org/protocol/commands" /></query></iq>`;
           }
-          expect(target).toBe("extensions.waddle.local");
+          expect(target).toBe("extensions.example.com");
           return `<iq type="result"><query xmlns="http://jabber.org/protocol/disco#info"><feature var="urn:waddle:extension:1" /><feature var="http://jabber.org/protocol/commands" /></query></iq>`;
         }
         if (xml.includes("disco#items") && xml.includes('node="http://jabber.org/protocol/commands"')) {
           commandItemTargets.push(target);
-          return `<iq type="result"><query xmlns="http://jabber.org/protocol/disco#items"><item jid="extensions.waddle.local" node="urn:waddle:extension:1:decision-polls" name="Create Decision Poll" /></query></iq>`;
+          return `<iq type="result"><query xmlns="http://jabber.org/protocol/disco#items"><item jid="extensions.example.com" node="urn:waddle:extension:1:decision-polls" name="Create Decision Poll" /></query></iq>`;
         }
         expect(xml).toContain('node="urn:waddle:extension:1:decision-polls"');
         return `<iq type="result"><query xmlns="http://jabber.org/protocol/disco#info"><x xmlns="jabber:x:data" type="result"><field var="FORM_TYPE"><value>urn:waddle:extension:1:command</value></field><field var="waddle#plugin_id"><value>decision-polls</value></field><field var="waddle#command_node"><value>urn:waddle:extension:1:decision-polls</value></field><field var="waddle#command_label"><value>Create Decision Poll</value></field><field var="waddle#command_scope"><value>channel</value></field></x></query></iq>`;
@@ -217,12 +217,12 @@ describe("extension command invocation", () => {
     };
 
     expect(await discoverExtensionCommands(xmpp as any, "alice@example.com/web")).toEqual([{
-      serviceJid: "extensions.waddle.local",
+      serviceJid: "extensions.example.com",
       node: "urn:waddle:extension:1:decision-polls",
       name: "Create Decision Poll",
       scope: "channel",
     }]);
-    expect(commandItemTargets).toEqual(["extensions.waddle.local"]);
+    expect(commandItemTargets).toEqual(["extensions.example.com"]);
   });
 
   test("builds a XEP-0050 invoke request from launch metadata", () => {

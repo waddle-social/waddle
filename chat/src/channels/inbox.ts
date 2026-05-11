@@ -117,7 +117,7 @@ export function useChannelInbox(
    * Build a `channelId → unread` map by matching topology channel JIDs
    * against inbox entries. Keying by JID (not partner-localpart) is
    * required: stale inbox rows from a different deployment can share a
-   * localpart with a live room (e.g. `chat@muc.waddle.local` vs
+   * localpart with a live room (e.g. `chat@muc.legacy.example` vs
    * `chat@muc.waddle.social`) and a localpart-keyed map silently
    * overwrites the live row, leaving its unread count stuck.
    */

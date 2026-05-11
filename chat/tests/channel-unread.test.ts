@@ -171,22 +171,22 @@ describe("useChannelInbox", () => {
 
   test("does not let a stale same-localpart inbox row mask the live room's unread", async () => {
     // Real-world scenario captured from user logs: the inbox holds rows
-    // from a previously-used deployment (`muc.waddle.social`) alongside
-    // the live deployment (`muc.waddle.local`). Both rooms share the
+    // from a previously-used deployment (`muc.legacy.example`) alongside
+    // the live deployment (`muc.waddle.social`). Both rooms share the
     // localpart `chat`. A localpart-keyed map silently overwrote the
     // live row, so opening the channel reported unread=0 and the
     // mark-read path never fired.
     const client = makeClient();
     const composable = useChannelInbox(ref<BrowserXmppClient | null>(client));
     composable.onInboxPush({
-      partner: "chat@muc.waddle.local",
+      partner: "chat@muc.waddle.social",
       kind: "muc",
       lastStanzaId: "live-1",
       lastUpdated: 200,
       unread: 38,
     });
     composable.onInboxPush({
-      partner: "chat@muc.waddle.social",
+      partner: "chat@muc.legacy.example",
       kind: "muc",
       lastStanzaId: "stale-1",
       lastUpdated: 100,
@@ -195,22 +195,22 @@ describe("useChannelInbox", () => {
 
     const liveChannel: Pick<ChannelSummary, "id" | "jid"> = {
       id: "chat",
-      jid: "chat@muc.waddle.local",
+      jid: "chat@muc.waddle.social",
     };
 
-    expect(composable.unreadForRoomJid("chat@muc.waddle.local")).toBe(38);
+    expect(composable.unreadForRoomJid("chat@muc.waddle.social")).toBe(38);
     expect(composable.channelUnreadMap([liveChannel])).toMatchObject({
       chat: { unread: 38, mentions: 0 },
     });
 
-    composable.markRead("chat@muc.waddle.local");
+    composable.markRead("chat@muc.waddle.social");
 
-    expect(composable.unreadForRoomJid("chat@muc.waddle.local")).toBe(0);
+    expect(composable.unreadForRoomJid("chat@muc.waddle.social")).toBe(0);
     expect(composable.channelUnreadMap([liveChannel])).toMatchObject({
       chat: { unread: 0, mentions: 0 },
     });
     expect(composable.totalChannelUnreadCount.value).toBe(0);
-    expect(client.markInboxRead).toHaveBeenCalledWith("chat@muc.waddle.local");
+    expect(client.markInboxRead).toHaveBeenCalledWith("chat@muc.waddle.social");
   });
 
   test("clears stale unread state without a client", async () => {

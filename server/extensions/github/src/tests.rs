@@ -210,7 +210,7 @@ fn successful_webhook_does_not_alert() {
 fn provider_webhook_sends_to_route_loaded_from_pubsub() {
     let _guard = test_lock().lock().expect("test lock");
     test_state::reset();
-    test_state::set_route_fixtures(vec![sample_route("100", "dev@muc.waddle.local")]);
+    test_state::set_route_fixtures(vec![sample_route("100", "dev@muc.waddle.social")]);
 
     let effects = handle_provider_webhook(sample_webhook("failure")).expect("handled");
 
@@ -221,7 +221,7 @@ fn provider_webhook_sends_to_route_loaded_from_pubsub() {
         .expect("messages lock");
     assert_eq!(messages.len(), 1);
     match &messages[0].target {
-        types::MessageTarget::Muc(room) => assert_eq!(room.value, "dev@muc.waddle.local"),
+        types::MessageTarget::Muc(room) => assert_eq!(room.value, "dev@muc.waddle.social"),
         types::MessageTarget::Direct(_) => panic!("expected room message"),
     }
     assert!(messages[0].body.value.contains("failure"));
@@ -231,7 +231,7 @@ fn provider_webhook_sends_to_route_loaded_from_pubsub() {
 fn provider_webhook_ignores_non_matching_repository() {
     let _guard = test_lock().lock().expect("test lock");
     test_state::reset();
-    test_state::set_route_fixtures(vec![sample_route("999", "dev@muc.waddle.local")]);
+    test_state::set_route_fixtures(vec![sample_route("999", "dev@muc.waddle.social")]);
 
     let effects = handle_provider_webhook(sample_webhook("failure")).expect("handled");
 
@@ -246,7 +246,7 @@ fn provider_webhook_ignores_non_matching_repository() {
 fn provider_webhook_ignores_installation_scoped_event_without_repository() {
     let _guard = test_lock().lock().expect("test lock");
     test_state::reset();
-    test_state::set_route_fixtures(vec![sample_route("100", "dev@muc.waddle.local")]);
+    test_state::set_route_fixtures(vec![sample_route("100", "dev@muc.waddle.social")]);
 
     let effects = handle_provider_webhook(installation_webhook()).expect("handled");
 
