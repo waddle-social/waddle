@@ -74,7 +74,8 @@ const lightboxOpen = ref(false);
 const lightboxImages = ref<TimelineSharedFile[]>([]);
 const lightboxIndex = ref(0);
 
-function handleImageClick(message: TimelineMessage, file: TimelineSharedFile, _idx: number) {
+function handleImageClick(message: TimelineMessage | null, file: TimelineSharedFile, _idx: number) {
+  if (!message) return;
   const images = (message.sharedFiles ?? []).filter(
     (f) =>
       f.disposition === "inline" &&
@@ -146,7 +147,7 @@ function handleImageClick(message: TimelineMessage, file: TimelineSharedFile, _i
               v-else
               :message="liveMessageFor(entry.target_stanza_id)!"
               compact
-              :on-image-click="(file: TimelineSharedFile, idx: number) => handleImageClick(liveMessageFor(entry.target_stanza_id)!, file, idx)"
+              :on-image-click="(file: TimelineSharedFile, idx: number) => handleImageClick(liveMessageFor(entry.target_stanza_id), file, idx)"
             />
           </template>
           <template v-else>
