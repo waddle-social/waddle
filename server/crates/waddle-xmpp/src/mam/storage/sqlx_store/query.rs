@@ -104,6 +104,14 @@ macro_rules! push_common_mam_filters {
             }
             ids.push_unseparated(")");
         }
+        if !$query.stanza_ids.is_empty() {
+            $builder.push(" AND stanza_id IN (");
+            let mut ids = $builder.separated(", ");
+            for id in &$query.stanza_ids {
+                ids.push_bind(id.as_str());
+            }
+            ids.push_unseparated(")");
+        }
         if let Some(thread_id) = $query.thread_id.as_ref() {
             $builder
                 .push(" AND (id = ")

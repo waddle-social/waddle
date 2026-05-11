@@ -1326,3 +1326,39 @@ async fn in_memory_query_stanza_id_no_match_returns_empty() {
     assert!(result.messages.is_empty());
     assert!(result.complete);
 }
+
+#[tokio::test]
+async fn sqlx_query_filters_by_stanza_id() {
+    let store = create_test_storage().await;
+    let archive = bare("room@conf.example");
+    store
+        .store_message(&archive, &archived_with_stanza_id("m1", "sid-A"))
+        .await
+        .expect("store m1");
+    store
+        .store_message(&archive, &archived_with_stanza_id("m2", "sid-B"))
+        .await
+        .expect("store m2");
+    store
+        .store_message(&archive, &archived_with_stanza_id("m3", "sid-C"))
+        .await
+        .expect("store m3");
+
+    let result = store
+        .query_messages(
+            &archive,
+            &MamQuery {
+                stanza_ids: vec!["sid-B".to_string(), "sid-C".to_string()],
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("query ok");
+    let got: std::collections::HashSet<&str> = result
+        .messages
+        .iter()
+        .filter_map(|m| m.stanza_id.as_ref().map(|s| s.id.as_str()))
+        .collect();
+    let want: std::collections::HashSet<&str> = ["sid-B", "sid-C"].into_iter().collect();
+    assert_eq!(got, want);
+}
