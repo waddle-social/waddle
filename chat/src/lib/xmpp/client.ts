@@ -690,6 +690,18 @@ export class BrowserXmppClient {
     const result = await xmpp.fetch_room_pins(roomJid);
     return Array.isArray(result) ? (result as import("./wasm-types").WasmPinEntry[]) : [];
   }
+  /** XEP-0359: fetch a batch of MAM messages by their stanza-ids. */
+  async fetchRoomMessagesByStanzaIds(
+    spaceId: string,
+    channelId: string,
+    stanzaIds: string[],
+  ): Promise<import("./wasm-types").WasmArchivedMessage[]> {
+    if (stanzaIds.length === 0) return [];
+    const { xmpp, roomJid } = await this.requireJoinedRoom(spaceId, channelId);
+    if (typeof xmpp.fetch_room_messages_by_stanza_ids !== "function") throw new Error("fetch_room_messages_by_stanza_ids not available in wasm client");
+    const page = (await xmpp.fetch_room_messages_by_stanza_ids(roomJid, stanzaIds)) as import("./wasm-types").WasmMamPage | null;
+    return Array.isArray(page?.messages) ? page.messages : [];
+  }
   async sendRetraction(spaceId: string, channelId: string, retractsId: string) { const { xmpp, roomJid } = await this.requireJoinedRoom(spaceId, channelId); await this.compatSendRetraction(xmpp, roomJid, "groupchat", retractsId); }
   async sendModeration(spaceId: string, channelId: string, targetId: string, reason?: string) { const { xmpp, roomJid } = await this.requireJoinedRoom(spaceId, channelId); await this.compatSendModeration(xmpp, roomJid, targetId, reason); }
   async sendCorrection(spaceId: string, channelId: string, body: string, replacesId: string, markup?: SendGroupMessageOptions["markup"], references?: SendGroupMessageOptions["references"]): Promise<string | null> { const { xmpp, roomJid } = await this.requireJoinedRoom(spaceId, channelId); return await this.compatSendCorrection(xmpp, roomJid, "groupchat", body, replacesId, { markup, references }); }
