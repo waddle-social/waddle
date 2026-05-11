@@ -151,6 +151,15 @@ impl MamStorage for InMemoryMamStorage {
                 matches_fulltext(message.body.as_deref().unwrap_or(""), fulltext.as_str())
             });
         }
+        if !query.stanza_ids.is_empty() {
+            let allowed: HashSet<&str> = query.stanza_ids.iter().map(String::as_str).collect();
+            messages.retain(|m| {
+                m.stanza_id
+                    .as_ref()
+                    .map(|s| allowed.contains(s.id.as_str()))
+                    .unwrap_or(false)
+            });
+        }
         if let Some(cursor) = filter_before_cursor.as_ref() {
             messages.retain(|message| archive_order_before(message, cursor));
         }

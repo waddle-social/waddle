@@ -1252,3 +1252,77 @@ async fn xep_0313_sqlx_archive_uses_id_as_deterministic_tiebreak_when_timestamps
         "tied timestamps must be ordered by archive id ascending"
     );
 }
+
+fn archived_with_stanza_id(archive_id: &str, stanza_id: &str) -> ArchivedMessage {
+    let archive = bare("room@conf.example");
+    ArchivedMessage {
+        id: archive_id.to_string(),
+        stanza_id: Some(waddle_xmpp_core::xep0359::StanzaId::new(
+            stanza_id.to_string(),
+            jid(&archive.to_string()),
+        )),
+        ..archived_groupchat(&archive)
+    }
+}
+
+#[tokio::test]
+async fn in_memory_query_filters_by_stanza_id() {
+    let store = InMemoryMamStorage::new();
+    let archive = bare("room@conf.example");
+
+    store
+        .store_message(&archive, &archived_with_stanza_id("m1", "sid-A"))
+        .await
+        .expect("store m1");
+    store
+        .store_message(&archive, &archived_with_stanza_id("m2", "sid-B"))
+        .await
+        .expect("store m2");
+    store
+        .store_message(&archive, &archived_with_stanza_id("m3", "sid-C"))
+        .await
+        .expect("store m3");
+
+    let result = store
+        .query_messages(
+            &archive,
+            &MamQuery {
+                stanza_ids: vec!["sid-A".to_string(), "sid-C".to_string()],
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("query ok");
+    let ids: Vec<&str> = result
+        .messages
+        .iter()
+        .filter_map(|m| m.stanza_id.as_ref().map(|s| s.id.as_str()))
+        .collect();
+    // Use HashSet comparison since result ordering may not be stable.
+    let got: std::collections::HashSet<&str> = ids.into_iter().collect();
+    let want: std::collections::HashSet<&str> = ["sid-A", "sid-C"].into_iter().collect();
+    assert_eq!(got, want);
+}
+
+#[tokio::test]
+async fn in_memory_query_stanza_id_no_match_returns_empty() {
+    let store = InMemoryMamStorage::new();
+    let archive = bare("room@conf.example");
+    store
+        .store_message(&archive, &archived_with_stanza_id("m1", "sid-A"))
+        .await
+        .expect("store m1");
+
+    let result = store
+        .query_messages(
+            &archive,
+            &MamQuery {
+                stanza_ids: vec!["sid-missing".to_string()],
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("query ok");
+    assert!(result.messages.is_empty());
+    assert!(result.complete);
+}
