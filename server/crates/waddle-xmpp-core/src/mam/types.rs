@@ -345,6 +345,12 @@ pub struct MamQuery {
     pub filter_after_id: Option<String>,
     /// Extended MAM filter: only these archive IDs.
     pub ids: Vec<String>,
+    /// XEP-0359 §3 filter: only these XEP-0359 stanza-ids.
+    ///
+    /// Distinct from `ids` (extended-MAM archive ids). The chat client
+    /// uses this to materialize pinned messages by their pin
+    /// `target_stanza_id` without first round-tripping for archive ids.
+    pub stanza_ids: Vec<String>,
     /// RSM pagination cursor: before this ID.
     pub before_id: Option<String>,
     /// RSM pagination cursor: after this ID.
