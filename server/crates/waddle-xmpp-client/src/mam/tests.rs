@@ -542,6 +542,47 @@ mod stanza_id_filter_tests {
             .children()
             .all(|c| c.attr("var") != Some(STANZA_ID_FILTER_FIELD)));
     }
+
+    #[test]
+    fn builder_emits_stanza_id_filter_alongside_thread_and_fulltext() {
+        use waddle_xmpp_core::mam::{FULLTEXT_MAM_FIELD, WADDLE_MAM_THREAD_FIELD};
+
+        let iq = build_mam_iq_extended(
+            "iq1",
+            "q1",
+            10,
+            None,
+            None,
+            None,
+            Some("room@conf.example"),
+            Some("thread-X"),
+            Some("hello"),
+            None,
+            None,
+            Some(&["sid-A", "sid-B"]),
+        );
+        let query = iq.get_child("query", MAM_NS).expect("query child");
+        let form = query.get_child("x", DATA_FORMS_NS).expect("form");
+
+        let vars: Vec<&str> = form
+            .children()
+            .filter(|c| c.name() == "field")
+            .filter_map(|c| c.attr("var"))
+            .collect();
+
+        assert!(
+            vars.contains(&STANZA_ID_FILTER_FIELD),
+            "missing stanza-id field; got {vars:?}"
+        );
+        assert!(
+            vars.contains(&WADDLE_MAM_THREAD_FIELD),
+            "missing thread field; got {vars:?}"
+        );
+        assert!(
+            vars.contains(&FULLTEXT_MAM_FIELD),
+            "missing fulltext field; got {vars:?}"
+        );
+    }
 }
 
 // ── Query orchestration integration tests ────────────────────────────────

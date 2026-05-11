@@ -128,6 +128,24 @@ describe("hydratePinnedBodiesOnPanelOpen", () => {
     expect(client.fetchRoomMessagesByStanzaIds).not.toHaveBeenCalled();
   });
 
+  it("is a no-op when the room has no pinned entries", async () => {
+    const client = {
+      fetchRoomMessagesByStanzaIds: mock(async () => []),
+    };
+    hydratePinnedRoom("room@x", []);
+
+    await hydratePinnedBodiesOnPanelOpen({
+      client,
+      spaceId: "space1",
+      channelId: "channel1",
+      roomJid: "room@x",
+      timelineMessages: [],
+      convert: fakeConvert,
+    });
+
+    expect(client.fetchRoomMessagesByStanzaIds).not.toHaveBeenCalled();
+  });
+
   it("skips fetching ids that are already in the body cache", async () => {
     const client = {
       fetchRoomMessagesByStanzaIds: mock(async (_s: string, _c: string, ids: string[]) =>

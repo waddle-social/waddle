@@ -53,6 +53,18 @@ describe("$pinnedMessageBodies", () => {
     cachePinnedMessageBody("room@x", "sid-A", makeMessage("m1"), epoch);
     evictPinnedMessageBody("room@x", "sid-A");
     expect($pinnedMessageBodies.get().get("room@x")?.has("sid-A")).toBeFalsy();
+    // Cleanup: the outer room key is removed once its inner map is empty.
+    expect($pinnedMessageBodies.get().has("room@x")).toBe(false);
+  });
+
+  it("evicting one entry leaves the room with remaining entries intact", () => {
+    const epoch = pinnedMessageBodiesEpoch();
+    cachePinnedMessageBody("room@x", "sid-A", makeMessage("mA"), epoch);
+    cachePinnedMessageBody("room@x", "sid-B", makeMessage("mB"), epoch);
+    evictPinnedMessageBody("room@x", "sid-A");
+    expect($pinnedMessageBodies.get().has("room@x")).toBe(true);
+    expect($pinnedMessageBodies.get().get("room@x")?.has("sid-A")).toBe(false);
+    expect($pinnedMessageBodies.get().get("room@x")?.get("sid-B")?.id).toBe("mB");
   });
 
   it("drops late writes after epoch bump", () => {
@@ -67,6 +79,12 @@ describe("$pinnedMessageBodies", () => {
     cachePinnedMessageBody("room@x", "sid-A", makeMessage("m1"), epoch);
     cachePinnedMessageBody("room@y", "sid-B", makeMessage("m2"), epoch);
     resetPinnedMessageBodies();
+    expect($pinnedMessageBodies.get().size).toBe(0);
+  });
+
+  it("cachePinnedMessageBodies with empty entries is a no-op", () => {
+    const epoch = pinnedMessageBodiesEpoch();
+    cachePinnedMessageBodies("room@x", [], epoch);
     expect($pinnedMessageBodies.get().size).toBe(0);
   });
 });

@@ -316,7 +316,7 @@ function emitImageClick(file: TimelineSharedFile, _index: number) {
           class="max-h-72 w-full rounded-lg border border-border bg-black"
           controls
           playsinline
-          preload="metadata"
+          :preload="compact ? 'none' : 'metadata'"
           @click.stop
         />
         <div
@@ -354,7 +354,7 @@ function emitImageClick(file: TimelineSharedFile, _index: number) {
           :src="resolvedAttachmentUrl(file) || ''"
           class="w-full"
           controls
-          preload="metadata"
+          :preload="compact ? 'none' : 'metadata'"
           @click.stop
         />
         <div
