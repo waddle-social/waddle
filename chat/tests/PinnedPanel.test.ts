@@ -72,6 +72,23 @@ function entry(stanzaId: string, text = "") {
 }
 
 // ---------------------------------------------------------------------------
+// Helper: mirrors PinnedPanel's `timelineIndex` computed (all alias keys).
+// ---------------------------------------------------------------------------
+
+export function buildTimelineIndex(
+  timelineMessages: ReadonlyArray<TimelineMessage>,
+): Map<string, TimelineMessage> {
+  const map = new Map<string, TimelineMessage>();
+  for (const m of timelineMessages) {
+    map.set(m.id, m);
+    if (m.reactionTargetId) map.set(m.reactionTargetId, m);
+    if (m.replyableId) map.set(m.replyableId, m);
+    for (const wid of m.wireIds ?? []) map.set(wid, m);
+  }
+  return map;
+}
+
+// ---------------------------------------------------------------------------
 // Helper: mirrors PinnedPanel's `liveMessageFor` resolver logic.
 // Timeline index (passed as prop) is preferred over the per-room body cache.
 // ---------------------------------------------------------------------------
@@ -81,10 +98,7 @@ function liveMessageFor(
   stanzaId: string,
   timelineMessages: ReadonlyArray<TimelineMessage> = [],
 ): TimelineMessage | null {
-  // Build timeline index (same as computed in component)
-  const map = new Map<string, TimelineMessage>();
-  for (const m of timelineMessages) map.set(m.id, m);
-
+  const map = buildTimelineIndex(timelineMessages);
   return (
     map.get(stanzaId) ??
     $pinnedMessageBodies.get().get(roomJid)?.get(stanzaId) ??
@@ -287,5 +301,52 @@ describe("PinnedPanel handleImageClick contract", () => {
     handleImageClick(images, 0);
     expect(state().lightboxIndex).toBe(0);
     expect(state().lightboxOpen).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Bug B: alias-keyed timeline lookup
+// ---------------------------------------------------------------------------
+
+describe("PinnedPanel.liveMessageFor alias resolution", () => {
+  it("matches a timeline message by reactionTargetId when pin uses canonical UUID", () => {
+    const message: TimelineMessage = {
+      id: "wire-id-X",
+      author: "alice",
+      body: "body",
+      createdAt: "2026-05-11T11:50:00Z",
+      isSelf: false,
+      reactionTargetId: "uuid-canonical",
+    } as TimelineMessage;
+    const index = buildTimelineIndex([message]);
+    expect(index.get("uuid-canonical")?.id).toBe("wire-id-X");
+    expect(index.get("wire-id-X")?.id).toBe("wire-id-X");
+  });
+
+  it("matches a timeline message via wireIds aliases", () => {
+    const message: TimelineMessage = {
+      id: "primary",
+      author: "alice",
+      body: "body",
+      createdAt: "2026-05-11T11:50:00Z",
+      isSelf: false,
+      wireIds: ["alias-A", "alias-B"],
+    } as TimelineMessage;
+    const index = buildTimelineIndex([message]);
+    expect(index.get("alias-A")?.id).toBe("primary");
+    expect(index.get("alias-B")?.id).toBe("primary");
+  });
+
+  it("matches a timeline message by replyableId", () => {
+    const message: TimelineMessage = {
+      id: "wire-id-Y",
+      author: "alice",
+      body: "body",
+      createdAt: "2026-05-11T11:50:00Z",
+      isSelf: false,
+      replyableId: "reply-canonical",
+    } as TimelineMessage;
+    const index = buildTimelineIndex([message]);
+    expect(index.get("reply-canonical")?.id).toBe("wire-id-Y");
   });
 });

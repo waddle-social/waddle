@@ -243,3 +243,93 @@ describe("hydrateSinglePinnedBody", () => {
     expect(client.fetchRoomMessagesByStanzaIds).not.toHaveBeenCalled();
   });
 });
+
+// ---------------------------------------------------------------------------
+// Bug A & B regression tests
+// ---------------------------------------------------------------------------
+
+describe("hydratePinnedBodiesOnPanelOpen — alias + requested-id fixes", () => {
+  beforeEach(() => {
+    resetPinnedRooms();
+    resetPinnedMessageBodies();
+  });
+
+  it("skips fetching when the requested id is in timeline under reactionTargetId alias", async () => {
+    const client = {
+      fetchRoomMessagesByStanzaIds: mock(async () => []),
+    };
+    hydratePinnedRoom("room@x", [pinEntry("uuid-canonical")]);
+
+    await hydratePinnedBodiesOnPanelOpen({
+      client,
+      spaceId: "s",
+      channelId: "c",
+      roomJid: "room@x",
+      timelineMessages: [
+        {
+          id: "wire-id",
+          author: "alice",
+          body: "body",
+          createdAt: "x",
+          isSelf: false,
+          reactionTargetId: "uuid-canonical",
+        } as TimelineMessage,
+      ],
+      convert: fakeConvert,
+    });
+
+    expect(client.fetchRoomMessagesByStanzaIds).not.toHaveBeenCalled();
+  });
+
+  it("caches body under requested stanza-id even when result's id is the wire message-id", async () => {
+    // Simulate the production case: server returns archived row whose
+    // stanza_ids array contains the canonical room-scoped UUID. The
+    // convert function returns a TimelineMessage whose `id` is the wire
+    // message-id (a different string). The cache MUST be keyed by the
+    // requested canonical id, not the wire id.
+    const archivedFixture = {
+      id: "wire-id",
+      mam_id: "uuid-canonical",
+      nick: "alice",
+      body: "live",
+      createdAt: "x",
+      roomJid: "room@x",
+      message_type: "groupchat",
+      reaction_emojis: [],
+      is_muc: true,
+      mention_uris: [],
+      references: [],
+      markup_spans: [],
+      is_sticker: false,
+      shared_files: [],
+      stanza_ids: [{ by: "room@x", id: "uuid-canonical" }],
+    } as unknown as WasmArchivedMessage;
+
+    const client = {
+      fetchRoomMessagesByStanzaIds: mock(async () => [archivedFixture]),
+    };
+    hydratePinnedRoom("room@x", [pinEntry("uuid-canonical")]);
+
+    // Convert maps the archived to a TimelineMessage whose `id` is the
+    // wire id, not the canonical uuid.
+    const convertWithWireId = (a: WasmArchivedMessage): TimelineMessage => ({
+      id: "wire-id",
+      author: a.nick ?? "alice",
+      body: a.body ?? "",
+      createdAt: a.timestamp ?? "x",
+      isSelf: false,
+      reactionTargetId: "uuid-canonical",
+    } as TimelineMessage);
+
+    await hydratePinnedBodiesOnPanelOpen({
+      client,
+      spaceId: "s",
+      channelId: "c",
+      roomJid: "room@x",
+      timelineMessages: [],
+      convert: convertWithWireId,
+    });
+
+    expect($pinnedMessageBodies.get().get("room@x")?.get("uuid-canonical")?.body).toBe("live");
+  });
+});

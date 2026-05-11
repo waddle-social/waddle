@@ -44,7 +44,12 @@ const hydrated = computed(() => state.value?.hydrated ?? false);
 
 const timelineIndex = computed(() => {
   const map = new Map<string, TimelineMessage>();
-  for (const m of props.timelineMessages ?? []) map.set(m.id, m);
+  for (const m of props.timelineMessages ?? []) {
+    map.set(m.id, m);
+    if (m.reactionTargetId) map.set(m.reactionTargetId, m);
+    if (m.replyableId) map.set(m.replyableId, m);
+    for (const wid of m.wireIds ?? []) map.set(wid, m);
+  }
   return map;
 });
 

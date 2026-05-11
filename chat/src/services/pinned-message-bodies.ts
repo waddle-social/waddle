@@ -28,6 +28,49 @@ import { $pinnedRooms } from "@/stores/pinned-messages";
 import type { TimelineMessage } from "@/lib/chat-ui";
 import type { WasmArchivedMessage } from "@/lib/xmpp/wasm-types";
 
+/**
+ * Match an archived message against a set of REQUESTED stanza-ids, preferring
+ * the room-scoped XEP-0359 id (the canonical UUID pins reference). Returns the
+ * matched requested id so that the cache key equals what the caller asked for.
+ */
+function matchRequestedStanzaId(
+  archived: WasmArchivedMessage,
+  roomJid: string,
+  requested: Set<string>,
+): string | null {
+  // Room-stamped XEP-0359 id (the canonical UUID pin uses).
+  const roomStamped = archived.stanza_ids?.find((s) => s.by === roomJid)?.id;
+  if (roomStamped && requested.has(roomStamped)) return roomStamped;
+  // Fallback: singular stanza_id field scoped to the room.
+  if (
+    archived.stanza_id &&
+    archived.stanza_id_by === roomJid &&
+    requested.has(archived.stanza_id)
+  ) {
+    return archived.stanza_id;
+  }
+  // Last resort: the wire message id (covers legacy clients that use the
+  // canonical UUID as the wire id attribute).
+  if (archived.id && requested.has(archived.id)) return archived.id;
+  return null;
+}
+
+/**
+ * Build a set of all ids by which a timeline message can be identified:
+ * m.id, m.reactionTargetId, m.replyableId, and all entries in m.wireIds.
+ * Used to short-circuit MAM fetches for messages already on screen.
+ */
+function timelinePresenceSet(messages: ReadonlyArray<TimelineMessage>): Set<string> {
+  const set = new Set<string>();
+  for (const m of messages) {
+    set.add(m.id);
+    if (m.reactionTargetId) set.add(m.reactionTargetId);
+    if (m.replyableId) set.add(m.replyableId);
+    for (const wid of m.wireIds ?? []) set.add(wid);
+  }
+  return set;
+}
+
 interface MamFetcher {
   fetchRoomMessagesByStanzaIds: (
     spaceId: string,
@@ -52,7 +95,7 @@ export async function hydratePinnedBodiesOnPanelOpen(args: HydrateOpenArgs): Pro
   const room = $pinnedRooms.get().get(args.roomJid);
   if (!room) return;
   const cache = $pinnedMessageBodies.get().get(args.roomJid) ?? new Map();
-  const timelineIds = new Set(args.timelineMessages.map((m) => m.id));
+  const timelineIds = timelinePresenceSet(args.timelineMessages);
   const missing = room.entries
     .map((e) => e.target_stanza_id)
     .filter((id) => !timelineIds.has(id) && !cache.has(id));
@@ -64,12 +107,13 @@ export async function hydratePinnedBodiesOnPanelOpen(args: HydrateOpenArgs): Pro
     args.channelId,
     missing,
   );
-  const cached = archived
-    .map((m) => {
-      const message = args.convert(m);
-      return message ? { stanzaId: m.id ?? m.mam_id, message } : null;
-    })
-    .filter((m): m is { stanzaId: string; message: TimelineMessage } => m !== null);
+  const requestedSet = new Set(missing);
+  const cached = archived.flatMap((m) => {
+    const stanzaId = matchRequestedStanzaId(m, args.roomJid, requestedSet);
+    if (!stanzaId) return [];
+    const message = args.convert(m);
+    return message ? [{ stanzaId, message }] : [];
+  });
   cachePinnedMessageBodies(args.roomJid, cached, epoch);
 }
 
@@ -86,7 +130,8 @@ interface HydrateSingleArgs {
 }
 
 export async function hydrateSinglePinnedBody(args: HydrateSingleArgs): Promise<void> {
-  if (args.timelineMessages.some((m) => m.id === args.stanzaId)) return;
+  const timelineIds = timelinePresenceSet(args.timelineMessages);
+  if (timelineIds.has(args.stanzaId)) return;
   const room = $pinnedMessageBodies.get().get(args.roomJid);
   if (room?.has(args.stanzaId)) return;
 
@@ -96,11 +141,12 @@ export async function hydrateSinglePinnedBody(args: HydrateSingleArgs): Promise<
     args.channelId,
     [args.stanzaId],
   );
-  const cached = archived
-    .map((m) => {
-      const message = args.convert(m);
-      return message ? { stanzaId: m.id ?? m.mam_id, message } : null;
-    })
-    .filter((m): m is { stanzaId: string; message: TimelineMessage } => m !== null);
+  const requestedSet = new Set([args.stanzaId]);
+  const cached = archived.flatMap((m) => {
+    const stanzaId = matchRequestedStanzaId(m, args.roomJid, requestedSet);
+    if (!stanzaId) return [];
+    const message = args.convert(m);
+    return message ? [{ stanzaId, message }] : [];
+  });
   cachePinnedMessageBodies(args.roomJid, cached, epoch);
 }
