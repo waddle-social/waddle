@@ -233,4 +233,45 @@ impl WaddleClient {
             to_js_value(&mam_page_to_js(page))
         })
     }
+
+    /// XEP-0359 §3 — fetch a batch of messages from a room MAM archive by
+    /// XEP-0359 stanza-id. Used by the pinned-panel rich-preview render
+    /// path to materialize `TimelineMessage`s for pinned entries that
+    /// are not in the loaded timeline window.
+    pub fn fetch_room_messages_by_stanza_ids(
+        &self,
+        room_jid: String,
+        stanza_ids: Vec<String>,
+    ) -> Promise {
+        let inner = self.inner.clone();
+        future_to_promise(async move {
+            if stanza_ids.is_empty() {
+                return to_js_value(&mam_page_to_js(waddle_xmpp_client::MamPage {
+                    messages: vec![],
+                    rsm: waddle_xmpp_client::RsmPageInfo::default(),
+                    query_id: String::new(),
+                    is_complete: true,
+                }));
+            }
+            let refs: Vec<&str> = stanza_ids.iter().map(String::as_str).collect();
+            let query_id = uuid::Uuid::new_v4().to_string();
+            let iq_id = uuid::Uuid::new_v4().to_string();
+            let iq = build_mam_iq_extended(
+                &iq_id,
+                &query_id,
+                stanza_ids.len() as u32,
+                Some(""),
+                None,
+                None,
+                Some(&room_jid),
+                None,
+                None,
+                None,
+                None,
+                Some(&refs),
+            );
+            let page = send_mam_query_command(inner, iq, query_id).await?;
+            to_js_value(&mam_page_to_js(page))
+        })
+    }
 }
