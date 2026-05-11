@@ -905,11 +905,10 @@ export function useChatAppController(giphyApiKey: string) {
   function pinActiveMessage(messageId: string) {
     const client = xmppClient.value;
     const channel = waddles.currentChannel.value;
-    const space = waddles.currentSpace.value;
-    if (!client || !channel || !space) return;
+    if (!client || !channel) return;
     const stanzaId = resolvePinTargetStanzaId(messageId);
     if (!stanzaId) return;
-    void client.pinMessage(space.id, channel.id, stanzaId).catch((error: unknown) => {
+    void client.pinMessage(channel.spaceId ?? "", channel.id, stanzaId).catch((error: unknown) => {
       console.warn("pinMessage failed", error);
     });
   }
@@ -917,11 +916,10 @@ export function useChatAppController(giphyApiKey: string) {
   function unpinActiveMessage(messageId: string) {
     const client = xmppClient.value;
     const channel = waddles.currentChannel.value;
-    const space = waddles.currentSpace.value;
-    if (!client || !channel || !space) return;
+    if (!client || !channel) return;
     const stanzaId = resolvePinTargetStanzaId(messageId);
     if (!stanzaId) return;
-    void client.unpinMessage(space.id, channel.id, stanzaId).catch((error: unknown) => {
+    void client.unpinMessage(channel.spaceId ?? "", channel.id, stanzaId).catch((error: unknown) => {
       console.warn("unpinMessage failed", error);
     });
   }
