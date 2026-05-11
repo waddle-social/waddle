@@ -1,6 +1,7 @@
 import StarterKit from "@tiptap/starter-kit";
 import Placeholder from "@tiptap/extension-placeholder";
 import type { Extensions, JSONContent } from "@tiptap/core";
+import { ChatCodeBlock } from "@/lib/editor/chat-code-block";
 import { ChatLink } from "@/lib/editor/chat-link";
 import { ChatKeymap } from "@/lib/editor/chat-keymap";
 
@@ -19,14 +20,15 @@ export function createChatEditorExtensions(options: ChatEditorExtensionsOptions 
 
   extensions.push(
     StarterKit.configure({
-      codeBlock: {
-        exitOnTripleEnter: false,
-      },
+      codeBlock: false,
       heading: false,
       horizontalRule: false,
       link: false,
       trailingNode: false,
       underline: false,
+    }),
+    ChatCodeBlock.configure({
+      exitOnTripleEnter: false,
     }),
     ChatLink.configure({
       openOnClick: false,

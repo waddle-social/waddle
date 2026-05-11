@@ -31,6 +31,7 @@
     "@tanstack/vue-query": "^5.100.6",
     "@tanstack/vue-virtual": "^3.13.24",
     "@tiptap/core": "^3.22.4",
+    "@tiptap/extension-code-block": "^3.22.4",
     "@tiptap/extension-link": "^3.22.4",
     "@tiptap/extension-placeholder": "^3.22.4",
     "@tiptap/pm": "^3.22.4",
