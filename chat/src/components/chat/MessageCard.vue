@@ -29,7 +29,6 @@ import { messageMentionsBareJid } from "@/lib/mentions";
 import { richMessageToTiptap, tiptapToRichMessage } from "@/lib/rich-message";
 import type { OccupantHat, OccupantPresence } from "@/lib/xmpp-client";
 import { formatTimelineTimeOfDay } from "@/channels/timeline";
-import { useMessageAttachments } from "@/channels/message-attachments";
 import { useLongPress } from "@/ui/gestures/long-press";
 import type { ExtensionCommandResult } from "@/lib/xmpp/extension-commands";
 import { $desktopToolbarOwnerId } from "@/stores/message-toolbar";
@@ -97,8 +96,6 @@ const emit = defineEmits<{
 }>();
 
 const quickEmojis = QUICK_REACTION_EMOJIS;
-const messageRef = computed(() => props.message);
-
 const seniorHat = computed<OccupantHat | null>(() => {
   if (!props.hats || props.hats.length === 0) return null;
   let best: OccupantHat | null = null;
@@ -113,19 +110,14 @@ const seniorHat = computed<OccupantHat | null>(() => {
   return best;
 });
 
-const {
-  imageAttachments,
-  lightboxOpen,
-  lightboxIndex,
-  cleanup: cleanupAttachments,
-} = useMessageAttachments(messageRef);
-
 // Pre-resolved lightbox images delivered by MessageBody's onImageClick.
 // MessageBody builds this list from its own useMessageAttachments state,
 // which holds the decrypted blob URLs and uses the canonical imageAttachments
 // predicate — so neither encrypted attachment URLs nor wrong-predicate index
 // mismatches can occur here.
 const lightboxImages = ref<Array<{ url: string; name?: string; width?: number; height?: number }>>([]);
+const lightboxOpen = ref(false);
+const lightboxIndex = ref(0);
 
 const replyAuthorName = computed(() => {
   const author = props.message.replyTo?.author;
@@ -411,7 +403,6 @@ onBeforeUnmount(() => {
 });
 
 onBeforeUnmount(() => {
-  cleanupAttachments();
   if (typeof window === "undefined") return;
   window.removeEventListener("keydown", onWindowKeydown);
 });
@@ -620,16 +611,6 @@ onBeforeUnmount(() => {
         </p>
       </div>
       <EditorBubbleToolbar v-if="editTiptapEditor" :editor="editTiptapEditor" />
-    </div>
-
-    <!-- Sticker -->
-    <div v-else-if="message.isSticker && imageAttachments.length > 0">
-      <img
-        :src="imageAttachments[0].url"
-        :alt="imageAttachments[0].desc ?? message.body ?? 'Sticker'"
-        class="max-w-28 max-h-28 rounded-lg object-contain"
-        loading="lazy"
-      />
     </div>
 
     <MessageBody

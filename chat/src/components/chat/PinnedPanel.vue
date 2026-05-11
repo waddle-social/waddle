@@ -22,6 +22,7 @@ import MessageBody from "@/components/chat/MessageBody.vue";
 import type { ResolvedLightboxImage } from "@/components/chat/MessageBody.vue";
 import ImageLightbox from "@/components/ui/ImageLightbox.vue";
 import type { TimelineMessage } from "@/lib/chat-ui";
+import type { WasmPinEntry } from "@/lib/xmpp/wasm-types";
 
 const props = defineProps<{
   roomJid: string;
@@ -60,6 +61,18 @@ function liveMessageFor(stanzaId: string): TimelineMessage | null {
     null
   );
 }
+
+interface ResolvedEntry {
+  entry: WasmPinEntry;
+  live: TimelineMessage | null;
+}
+
+const resolvedEntries = computed<ResolvedEntry[]>(() =>
+  entries.value.map((entry) => ({
+    entry,
+    live: liveMessageFor(entry.target_stanza_id),
+  })),
+);
 
 function relativeTime(iso: string): string {
   const t = Date.parse(iso);
@@ -119,55 +132,52 @@ function handleImageClick(images: ResolvedLightboxImage[], index: number) {
       <p class="text-xs">Admins can pin a message from the message menu.</p>
     </div>
     <ol v-else class="flex-1 overflow-y-auto divide-y divide-border" role="list">
-      <template
-        v-for="entry in entries"
+      <li
+        v-for="{ entry, live } in resolvedEntries"
         :key="entry.target_stanza_id"
+        class="px-4 py-3 cursor-pointer hover:bg-muted/40 focus-within:bg-muted/40"
+        tabindex="0"
+        @click="emit('jumpToMessage', entry.target_stanza_id)"
+        @keydown.enter.prevent="emit('jumpToMessage', entry.target_stanza_id)"
+        @keydown.space.prevent="emit('jumpToMessage', entry.target_stanza_id)"
       >
-        <li
-          class="px-4 py-3 cursor-pointer hover:bg-muted/40 focus-within:bg-muted/40"
-          tabindex="0"
-          @click="emit('jumpToMessage', entry.target_stanza_id)"
-          @keydown.enter.prevent="emit('jumpToMessage', entry.target_stanza_id)"
-          @keydown.space.prevent="emit('jumpToMessage', entry.target_stanza_id)"
-        >
-          <div class="flex items-baseline justify-between gap-2 mb-0.5">
-            <span class="type-field font-medium truncate">
-              {{ entry.preview.author_nick ?? entry.preview.author_jid }}
-            </span>
-            <span class="type-field-xs text-muted-foreground shrink-0">
-              {{ relativeTime(entry.preview.message_timestamp) }}
-            </span>
-          </div>
+        <div class="flex items-baseline justify-between gap-2 mb-0.5">
+          <span class="type-field font-medium truncate">
+            {{ entry.preview.author_nick ?? entry.preview.author_jid }}
+          </span>
+          <span class="type-field-xs text-muted-foreground shrink-0">
+            {{ relativeTime(entry.preview.message_timestamp) }}
+          </span>
+        </div>
 
-          <!-- Rich render or fallback -->
-          <template v-if="liveMessageFor(entry.target_stanza_id) !== null">
-            <p
-              v-if="liveMessageFor(entry.target_stanza_id)!.isRetracted"
-              class="type-field-sm italic text-muted-foreground"
-            >Message retracted</p>
-            <MessageBody
-              v-else
-              :message="liveMessageFor(entry.target_stanza_id)!"
-              compact
-              :on-image-click="handleImageClick"
-            />
-          </template>
-          <template v-else>
-            <p
-              v-if="entry.preview.text"
-              class="type-field-sm text-muted-foreground line-clamp-3 break-words"
-            >{{ entry.preview.text }}</p>
-            <p
-              v-else
-              class="type-field-sm italic text-muted-foreground"
-            >Original message no longer available.</p>
-          </template>
+        <!-- Rich render or fallback -->
+        <template v-if="live !== null">
+          <p
+            v-if="live.isRetracted"
+            class="type-field-sm italic text-muted-foreground"
+          >Message retracted</p>
+          <MessageBody
+            v-else
+            :message="live"
+            compact
+            :on-image-click="handleImageClick"
+          />
+        </template>
+        <template v-else>
+          <p
+            v-if="entry.preview.text"
+            class="type-field-sm text-muted-foreground line-clamp-3 break-words"
+          >{{ entry.preview.text }}</p>
+          <p
+            v-else
+            class="type-field-sm italic text-muted-foreground"
+          >Original message no longer available.</p>
+        </template>
 
-          <p class="type-field-xs text-muted-foreground mt-1">
-            Pinned by {{ entry.pinner_jid }} · {{ relativeTime(entry.pinned_at) }}
-          </p>
-        </li>
-      </template>
+        <p class="type-field-xs text-muted-foreground mt-1">
+          Pinned by {{ entry.pinner_jid }} · {{ relativeTime(entry.pinned_at) }}
+        </p>
+      </li>
     </ol>
 
     <ImageLightbox

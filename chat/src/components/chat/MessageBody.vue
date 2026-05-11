@@ -86,6 +86,8 @@ const {
   invokeExtensionAction: invokeExtensionActionRef,
 });
 
+const isSticker = computed(() => !!props.message.isSticker && imageAttachments.value.length > 0);
+
 const styledHtml = computed(() =>
   renderStyledBody(displayBody.value, props.message.markup, props.message.references),
 );
@@ -121,8 +123,10 @@ function emitImageClick(file: TimelineSharedFile, _index: number) {
     return [entry];
   });
   const clickedUrl = resolvedAttachmentUrl(file);
-  const resolvedIndex = clickedUrl ? images.findIndex((i) => i.url === clickedUrl) : -1;
-  props.onImageClick(images, Math.max(0, resolvedIndex));
+  if (!clickedUrl) return;
+  const resolvedIndex = images.findIndex((i) => i.url === clickedUrl);
+  if (resolvedIndex < 0) return;
+  props.onImageClick(images, resolvedIndex);
 }
 </script>
 
@@ -251,8 +255,26 @@ function emitImageClick(file: TimelineSharedFile, _index: number) {
       </div>
     </div>
 
+    <!-- Sticker: single image rendered at thumb size, with decryption support -->
+    <div v-if="isSticker">
+      <img
+        v-if="resolvedAttachmentUrl(imageAttachments[0])"
+        :src="resolvedAttachmentUrl(imageAttachments[0])!"
+        :alt="imageAttachments[0].desc ?? message.body ?? 'Sticker'"
+        class="max-w-28 max-h-28 rounded-lg object-contain"
+        loading="lazy"
+      />
+      <div
+        v-else
+        class="type-caption flex h-28 w-28 flex-col items-center justify-center gap-2 rounded-lg border border-dashed border-border px-4 text-center text-muted-foreground"
+      >
+        <Lock class="h-4 w-4 text-primary/70" />
+        <span>{{ attachmentError(imageAttachments[0]) ?? (isDecryptingAttachment(imageAttachments[0]) ? "Decrypting sticker…" : "Preparing sticker…") }}</span>
+      </div>
+    </div>
+
     <!-- Image attachments gallery -->
-    <div v-if="imageAttachments.length > 0" class="chat-attachment-strip">
+    <div v-else-if="imageAttachments.length > 0" class="chat-attachment-strip">
       <div
         v-for="(img, idx) in imageAttachments"
         :key="attachmentKey(img)"
