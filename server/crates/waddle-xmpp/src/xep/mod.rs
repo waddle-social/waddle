@@ -195,6 +195,9 @@ pub mod xep_waddle_pin;
 
 mod exports;
 
+#[cfg(test)]
+mod xep0359_tests;
+
 pub use exports::*;
 
 pub mod prelude {
