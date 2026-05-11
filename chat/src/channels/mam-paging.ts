@@ -311,7 +311,12 @@ export function useChannelMamPaging(deps: UseChannelMamPagingDeps) {
           // A fresh loadMessages() resets both to their initial state.
           oldestArchiveId = null;
           hasOlderMessages.value = false;
-        } else if (isCurrentRequest()) {
+        } else if (
+          requestId === messageRequestId &&
+          xmppClient.value === client &&
+          (activeSpaceId.value ?? "") === spaceId &&
+          activeChannelId.value === channelId
+        ) {
           // Non-§4.3.4 failure: surface so the caller (reply jump / pinned
           // jump / search-result open) doesn't see a silent "not found".
           actionError.value = normalizeError(e);
