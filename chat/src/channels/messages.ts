@@ -272,9 +272,9 @@ export function useChannelMessages(
               preview: event.preview,
             },
           });
-          // XEP-0359 §3: fetch the full message body so PinnedPanel can
-          // render the message without a panel re-open. Skip if the
-          // client does not support the stanza-id MAM filter.
+          // Waddle MAM stanza-id filter: fetch the full message body so
+          // PinnedPanel can render the message without a panel re-open.
+          // Skip if the client does not support the stanza-id MAM filter.
           if (xmppClient.value && "fetchRoomMessagesByStanzaIds" in xmppClient.value) {
             const currentClient = xmppClient.value;
             const spaceId = activeSpaceId.value ?? "";

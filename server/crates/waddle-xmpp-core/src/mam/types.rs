@@ -345,7 +345,9 @@ pub struct MamQuery {
     pub filter_after_id: Option<String>,
     /// Extended MAM filter: only these archive IDs.
     pub ids: Vec<String>,
-    /// XEP-0359 §3 filter: only these XEP-0359 stanza-ids.
+    /// Waddle-specific MAM stanza-id filter (XEP-0313 §4.2 + XEP-0068):
+    /// only these XEP-0359 stanza-ids. Form-field var is
+    /// `{urn:waddle:mam:stanza-id:0}stanza-id` (see `STANZA_ID_FILTER_FIELD`).
     ///
     /// Distinct from `ids` (extended-MAM archive ids). The chat client
     /// uses this to materialize pinned messages by their pin

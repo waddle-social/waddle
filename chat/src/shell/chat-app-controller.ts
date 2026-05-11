@@ -1107,8 +1107,8 @@ export function useChatAppController(giphyApiKey: string) {
     }
     updateUrl();
   });
-  // XEP-0359 §3: on false → true transition, batch-fetch any pinned
-  // stanza-ids not already in the loaded timeline or cache.
+  // Waddle MAM stanza-id filter: on false → true transition, batch-fetch
+  // any pinned stanza-ids not already in the loaded timeline or cache.
   watch(() => ui.showPinnedPanel.value, async (open) => {
     if (!open) return;
     const client = xmppClient.value;

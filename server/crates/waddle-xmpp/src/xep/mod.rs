@@ -196,7 +196,7 @@ pub mod xep_waddle_pin;
 mod exports;
 
 #[cfg(test)]
-mod xep0359_tests;
+mod xep_waddle_mam_stanza_id_tests;
 
 pub use exports::*;
 

@@ -1,11 +1,18 @@
-//! XEP-0359 §3 — stanza-id MAM filter custom test suite.
+//! Waddle-specific MAM stanza-id filter — custom test suite.
+//!
+//! This is a Waddle extension, not a XEP-0359 conformance suite. The filter
+//! form-field var lives under `urn:waddle:mam:stanza-id:0` (not
+//! `urn:xmpp:sid:0`) per CLAUDE.md: "official XEP namespaces must conform
+//! exactly; Waddle-specific semantics use `urn:waddle:*`". XEP-0359 only
+//! defines the stanza-id wire protocol; XEP-0313 §4.2 + XEP-0068 allow
+//! custom data-form fields for archive filtering.
 //!
 //! The wire-level form-field parser tests live in
 //! `waddle_xmpp_core::mam::tests`. This module exercises the end-to-end
-//! conformance contract: the form field is the spec-defined identifier,
-//! the validation caps match the pin protocol they serve, the storage
-//! filter returns only the requested ids, non-occupant access is
-//! refused, and rich payloads survive the round-trip.
+//! contract: the form field constant matches the Waddle namespace, the
+//! validation caps match the pin protocol they serve, the storage filter
+//! returns only the requested ids, non-occupant access is refused, and
+//! rich payloads survive the round-trip.
 
 #![cfg(test)]
 
@@ -54,12 +61,18 @@ fn archived_with_stanza_id(archive: &BareJid, archive_id: &str, wire_id: &str) -
 
 // ── test 1 ───────────────────────────────────────────────────────────────────
 
-/// XEP-0359 §3 specifies the filter form field var as
-/// `{urn:xmpp:sid:0}stanza-id`. This test pins the constant to that exact
-/// value so a mis-edit of the namespace is caught immediately.
+/// The Waddle-specific stanza-id MAM filter field var MUST live under the
+/// `urn:waddle:mam:stanza-id:0` namespace, NOT `urn:xmpp:sid:0`. XEP-0359
+/// does not define "filter MAM archive by stanza-id"; the Waddle extension
+/// uses XEP-0313 §4.2 + XEP-0068 Clark-notation to define its own field.
+/// This test pins the constant to the Waddle namespace so a mis-edit is
+/// caught immediately.
 #[test]
-fn stanza_id_filter_field_constant_matches_xep0359() {
-    assert_eq!(STANZA_ID_FILTER_FIELD, "{urn:xmpp:sid:0}stanza-id");
+fn stanza_id_filter_field_constant_matches_waddle_namespace() {
+    assert_eq!(
+        STANZA_ID_FILTER_FIELD,
+        "{urn:waddle:mam:stanza-id:0}stanza-id"
+    );
 }
 
 // ── test 2 ───────────────────────────────────────────────────────────────────
@@ -75,9 +88,10 @@ fn stanza_id_filter_caps_match_pin_protocol() {
 
 // ── test 3 ───────────────────────────────────────────────────────────────────
 
-/// XEP-0359 §3: a `{urn:xmpp:sid:0}stanza-id` MAM filter with a single value
-/// MUST return only messages whose server-assigned stanza-id matches that
-/// value.
+/// Waddle-specific MAM stanza-id filter (XEP-0313 §4.2 + XEP-0068 custom
+/// data-form var): a `{urn:waddle:mam:stanza-id:0}stanza-id` filter with a
+/// single value MUST return only messages whose server-assigned stanza-id
+/// matches that value.
 ///
 /// `MamQuery.stanza_ids` filters by the canonical XEP-0359 room-stamped id,
 /// stored in the `id` column (the SQL primary key), not the `stanza_id`
@@ -87,8 +101,8 @@ fn stanza_id_filter_caps_match_pin_protocol() {
 ///
 /// Integration level: storage API (`InMemoryMamStorage::query_messages`).
 /// The filter is exercised through the same `MamQuery.stanza_ids` path that
-/// the IQ parser populates on the wire, giving full conformance coverage of
-/// the storage contract without requiring a room-actor fixture.
+/// the IQ parser populates on the wire, giving full coverage of the storage
+/// contract without requiring a room-actor fixture.
 #[tokio::test]
 async fn stanza_id_filter_returns_only_matching_message() {
     // archive_id "uuid-m1/m2" = canonical room UUID (what pin's target_stanza_id is,
@@ -134,7 +148,8 @@ async fn stanza_id_filter_returns_only_matching_message() {
 
 // ── test 4 ───────────────────────────────────────────────────────────────────
 
-/// XEP-0359 §3: a `{urn:xmpp:sid:0}stanza-id` filter that matches no
+/// Waddle-specific MAM stanza-id filter (XEP-0313 §4.2 + XEP-0068):
+/// a `{urn:waddle:mam:stanza-id:0}stanza-id` filter that matches no
 /// archived message MUST return an empty result set (not an error). This
 /// corresponds to the access-denied semantic at the storage layer: no data
 /// is disclosed when no match exists.
@@ -179,11 +194,11 @@ async fn stanza_id_filter_with_no_match_returns_empty_not_error() {
 
 // ── test 5 ───────────────────────────────────────────────────────────────────
 
-/// XEP-0359 §3 / rich-payload round-trip: a message whose `stanza_xml`
-/// contains both an OMEMO `<encrypted/>` element and an SFS `<file-sharing/>`
-/// element MUST survive the full store → `stanza_ids` query →
-/// `build_result_messages` pipeline with both child elements present in the
-/// inner forwarded stanza, byte-for-byte.
+/// Waddle stanza-id filter / rich-payload round-trip: a message whose
+/// `stanza_xml` contains both an OMEMO `<encrypted/>` element and an SFS
+/// `<file-sharing/>` element MUST survive the full store → `stanza_ids`
+/// query → `build_result_messages` pipeline with both child elements present
+/// in the inner forwarded stanza, byte-for-byte.
 ///
 /// This exercises the critical path that the chat client uses when restoring
 /// the pinned-message panel: the raw `stanza_xml` column is used as the
@@ -231,7 +246,8 @@ async fn stanza_id_filter_preserves_rich_payload_roundtrip() {
         .await
         .expect("store rich message");
 
-    // Query by canonical archive id — the XEP-0359 §3 filter path.
+    // Query by canonical archive id — the Waddle MAM stanza-id filter path
+    // (XEP-0313 §4.2 + XEP-0068 custom var under urn:waddle:mam:stanza-id:0).
     // `MamQuery.stanza_ids` filters by the `id` column (canonical UUID),
     // not by `stanza_id` (wire <message id>). See `groupchat_archive.rs:10,94-97`.
     let result = store

@@ -1,19 +1,33 @@
-//! XEP-0359 §3 — filter a MAM archive by stanza-id.
+//! Waddle-specific MAM filter: filter an archive by XEP-0359 stanza-id.
 //!
-//! Exposes the form-field name and per-id length cap. The field is
-//! advertised by `build_query_form_iq` and parsed in `parse_mam_query`.
+//! Form-field var is namespaced under `urn:waddle:mam:stanza-id:0`
+//! per CLAUDE.md's "official XEP namespaces must conform exactly;
+//! Waddle-specific semantics use `urn:waddle:*`" rule. No XEP defines
+//! "filter MAM by XEP-0359 stanza-id" — XEP-0313 supports custom
+//! data-form fields (§4.2), XEP-0068 defines Clark-notation field
+//! var naming, and XEP-0359 only defines the stanza-id wire protocol
+//! itself.
+//!
+//! The chat client uses this to materialize pinned-message bodies in
+//! the pinned-panel right rail by sending a single batched MAM IQ
+//! filtered to the room-canonical stanza-ids it cares about.
 
-/// Form-field var for XEP-0359 §3 stanza-id filter.
+/// Form-field var for the Waddle-specific stanza-id MAM filter.
+///
+/// Uses the `urn:waddle:mam:stanza-id:0` namespace (not `urn:xmpp:sid:0`)
+/// because this is a Waddle extension, not a shape defined by XEP-0359.
+/// XEP-0068 Clark-notation field vars allow custom namespaces in
+/// XEP-0313 data forms (§4.2).
 ///
 /// Wire shape (text-multi):
 ///
 /// ```xml
-/// <field var="{urn:xmpp:sid:0}stanza-id" type="text-multi">
+/// <field var="{urn:waddle:mam:stanza-id:0}stanza-id" type="text-multi">
 ///   <value>STANZA-ID-1</value>
 ///   <value>STANZA-ID-2</value>
 /// </field>
 /// ```
-pub const STANZA_ID_FILTER_FIELD: &str = "{urn:xmpp:sid:0}stanza-id";
+pub const STANZA_ID_FILTER_FIELD: &str = "{urn:waddle:mam:stanza-id:0}stanza-id";
 
 /// Maximum length of a single stanza-id value, in bytes.
 ///
