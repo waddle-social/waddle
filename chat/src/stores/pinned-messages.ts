@@ -10,6 +10,7 @@
 import { atom, computed } from "nanostores";
 
 import type { WasmPinEntry } from "@/lib/xmpp/wasm-types";
+import { resetPinnedMessageBodies } from "@/stores/pinned-message-bodies";
 
 interface PinnedRoomState {
   /** Pin entries in pin-time-desc order, mirroring server output. */
@@ -107,6 +108,7 @@ export function hydratePinnedRoom(
 export function resetPinnedRooms(): void {
   $pinnedRooms.set(new Map());
   pendingUpdates.clear();
+  resetPinnedMessageBodies();
   currentEpoch += 1;
 }
 
