@@ -5,6 +5,10 @@ use minidom::Element;
 use xmpp_parsers::iq::{Iq, IqType};
 use xmpp_parsers::message::{Message, MessageType};
 
+fn filter_id(s: &str) -> MamFilterStanzaId {
+    MamFilterStanzaId::new(s).expect("valid test fixture id")
+}
+
 use crate::xep0201::ThreadInfo;
 use crate::xep0359::{OriginId, StanzaId};
 use crate::CoreError;
@@ -888,7 +892,7 @@ fn parses_stanza_id_filter_field() {
     let (_, query) = parse_mam_query(&iq).expect("parses");
     assert_eq!(
         query.stanza_ids,
-        vec!["stanza-A".to_string(), "stanza-B".to_string()]
+        vec![filter_id("stanza-A"), filter_id("stanza-B")]
     );
 }
 

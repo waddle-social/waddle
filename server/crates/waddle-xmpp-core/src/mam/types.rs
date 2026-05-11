@@ -3,6 +3,7 @@ use jid::{BareJid, Jid};
 use serde::{Deserialize, Serialize};
 use xmpp_parsers::message::MessageType;
 
+use crate::mam::stanza_id_filter::MamFilterStanzaId;
 use crate::xep0201::ThreadInfo;
 use crate::xep0359::{OriginId, StanzaId};
 
@@ -352,7 +353,7 @@ pub struct MamQuery {
     /// Distinct from `ids` (extended-MAM archive ids). The chat client
     /// uses this to materialize pinned messages by their pin
     /// `target_stanza_id` without first round-tripping for archive ids.
-    pub stanza_ids: Vec<String>,
+    pub stanza_ids: Vec<MamFilterStanzaId>,
     /// RSM pagination cursor: before this ID.
     pub before_id: Option<String>,
     /// RSM pagination cursor: after this ID.

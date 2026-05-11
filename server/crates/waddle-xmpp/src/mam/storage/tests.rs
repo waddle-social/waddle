@@ -2,7 +2,11 @@ use super::*;
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use jid::{BareJid, Jid};
 use std::path::PathBuf;
-use waddle_xmpp_core::mam::{ArchivedMessage, MamQuery, MamResult};
+use waddle_xmpp_core::mam::{ArchivedMessage, MamFilterStanzaId, MamQuery, MamResult};
+
+fn filter_id(s: &str) -> MamFilterStanzaId {
+    MamFilterStanzaId::new(s).expect("valid test fixture id")
+}
 
 async fn create_test_storage() -> SqlxMamStorage {
     SqlxMamStorage::open_in_memory().await.unwrap()
@@ -1312,7 +1316,7 @@ async fn in_memory_query_filters_by_stanza_id() {
         .query_messages(
             &archive,
             &MamQuery {
-                stanza_ids: vec!["uuid-A".to_string(), "uuid-C".to_string()],
+                stanza_ids: vec![filter_id("uuid-A"), filter_id("uuid-C")],
                 ..Default::default()
             },
         )
@@ -1340,7 +1344,7 @@ async fn in_memory_query_stanza_id_no_match_returns_empty() {
         .query_messages(
             &archive,
             &MamQuery {
-                stanza_ids: vec!["uuid-missing".to_string()],
+                stanza_ids: vec![filter_id("uuid-missing")],
                 ..Default::default()
             },
         )
@@ -1386,7 +1390,7 @@ async fn sqlx_query_filters_by_stanza_id() {
         .query_messages(
             &archive,
             &MamQuery {
-                stanza_ids: vec!["uuid-B".to_string(), "uuid-C".to_string()],
+                stanza_ids: vec![filter_id("uuid-B"), filter_id("uuid-C")],
                 ..Default::default()
             },
         )

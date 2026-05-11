@@ -158,7 +158,7 @@ impl MamStorage for InMemoryMamStorage {
             // a different value. Filtering by `id` matches what the chat
             // client supplies (via `roomAssignedStanzaId`). See
             // `groupchat_archive.rs:10,94-97`.
-            let allowed: HashSet<&str> = query.stanza_ids.iter().map(String::as_str).collect();
+            let allowed: HashSet<&str> = query.stanza_ids.iter().map(|id| id.as_str()).collect();
             messages.retain(|m| allowed.contains(m.id.as_str()));
         }
         if let Some(cursor) = filter_before_cursor.as_ref() {

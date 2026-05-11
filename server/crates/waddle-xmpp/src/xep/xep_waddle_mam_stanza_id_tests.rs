@@ -17,8 +17,9 @@
 #![cfg(test)]
 
 use jid::{BareJid, Jid};
+use minidom::Element;
 use waddle_xmpp_core::mam::{
-    ArchivedMessage, ArchivedRichMessage, MamQuery, MAX_FILTER_STANZA_ID_LEN,
+    ArchivedMessage, ArchivedRichMessage, MamFilterStanzaId, MamQuery, MAX_FILTER_STANZA_ID_LEN,
     STANZA_ID_FILTER_FIELD,
 };
 use waddle_xmpp_core::xep0359::StanzaId;
@@ -34,6 +35,10 @@ fn jid(value: &str) -> Jid {
 
 fn bare(value: &str) -> BareJid {
     value.parse::<BareJid>().expect("valid bare jid literal")
+}
+
+fn filter_id(s: &str) -> MamFilterStanzaId {
+    MamFilterStanzaId::new(s).expect("valid test fixture id")
 }
 
 /// Build an `ArchivedMessage` that mirrors the production data layout.
@@ -130,7 +135,7 @@ async fn stanza_id_filter_returns_only_matching_message() {
         .query_messages(
             &archive,
             &MamQuery {
-                stanza_ids: vec!["uuid-m1".to_string()],
+                stanza_ids: vec![filter_id("uuid-m1")],
                 ..Default::default()
             },
         )
@@ -178,7 +183,7 @@ async fn stanza_id_filter_with_no_match_returns_empty_not_error() {
         .query_messages(
             &archive,
             &MamQuery {
-                stanza_ids: vec!["sid-missing".to_string()],
+                stanza_ids: vec![filter_id("sid-missing")],
                 ..Default::default()
             },
         )
@@ -213,20 +218,34 @@ async fn stanza_id_filter_preserves_rich_payload_roundtrip() {
     let archive_jid = jid("room@conference.example.com");
 
     // Craft a stanza_xml that carries both an OMEMO encrypted element and an
-    // XEP-0447 file-sharing element in the same message.
-    let rich_stanza_xml = concat!(
-        "<message xmlns='jabber:client'",
-        " from='room@conference.example.com/alice'",
-        " type='groupchat'",
-        " id='sid-rich'>",
-        "<encrypted xmlns='eu.siacs.conversations.axolotl'>",
-        "<header sid='12345'/>",
-        "</encrypted>",
-        "<file-sharing xmlns='urn:xmpp:sfs:0'>",
-        "<file><name>photo.jpg</name></file>",
-        "</file-sharing>",
-        "</message>",
-    );
+    // XEP-0447 file-sharing element in the same message. Built via
+    // minidom::Element::builder per the XML-generation hard rule.
+    const CLIENT_NS: &str = "jabber:client";
+    const OMEMO_AXOLOTL_NS: &str = "eu.siacs.conversations.axolotl";
+    const SFS_NS: &str = "urn:xmpp:sfs:0";
+
+    let encrypted_header = Element::builder("header", OMEMO_AXOLOTL_NS)
+        .attr("sid", "12345")
+        .build();
+    let encrypted = Element::builder("encrypted", OMEMO_AXOLOTL_NS)
+        .append(encrypted_header)
+        .build();
+
+    let file_name = Element::builder("name", SFS_NS).append("photo.jpg").build();
+    let file = Element::builder("file", SFS_NS).append(file_name).build();
+    let file_sharing = Element::builder("file-sharing", SFS_NS)
+        .append(file)
+        .build();
+
+    let message = Element::builder("message", CLIENT_NS)
+        .attr("from", "room@conference.example.com/alice")
+        .attr("type", "groupchat")
+        .attr("id", "sid-rich")
+        .append(encrypted)
+        .append(file_sharing)
+        .build();
+
+    let rich_stanza_xml = String::from(&message);
 
     let msg = ArchivedMessage {
         id: "archive-rich-1".to_string(),
@@ -254,7 +273,7 @@ async fn stanza_id_filter_preserves_rich_payload_roundtrip() {
         .query_messages(
             &archive,
             &MamQuery {
-                stanza_ids: vec!["archive-rich-1".to_string()],
+                stanza_ids: vec![filter_id("archive-rich-1")],
                 ..Default::default()
             },
         )

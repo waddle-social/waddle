@@ -40,3 +40,45 @@ pub const MAX_FILTER_STANZA_ID_LEN: usize = 256;
 /// well-formed pinned panel asks for at most `MAX_PINNED_ENTRIES`
 /// (1_000) ids in one batch; cap matches.
 pub const MAX_FILTER_STANZA_IDS: usize = 1_000;
+
+/// A validated stanza-id used as a value in the
+/// `{urn:waddle:mam:stanza-id:0}stanza-id` MAM filter.
+///
+/// Distinct from `xep0359::StanzaId` because the filter carries only
+/// the opaque id token (no `by` JID context), and from
+/// `MamArchivedMessage.id` because those are archive primary keys.
+///
+/// The invariants — non-empty and at most [`MAX_FILTER_STANZA_ID_LEN`]
+/// bytes — are checked once at the wire/data-form parse boundary in
+/// [`crate::mam::parse_mam_query`]. Raw token access via [`as_str`]
+/// is reserved for the SQL/storage boundary only; the typed value
+/// flows through the rest of the routing and handler chain.
+///
+/// [`as_str`]: MamFilterStanzaId::as_str
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct MamFilterStanzaId(String);
+
+impl MamFilterStanzaId {
+    /// Construct a validated stanza-id token. Returns `None` for an
+    /// empty token or one exceeding [`MAX_FILTER_STANZA_ID_LEN`].
+    pub fn new(value: impl Into<String>) -> Option<Self> {
+        let value = value.into();
+        if value.is_empty() || value.len() > MAX_FILTER_STANZA_ID_LEN {
+            return None;
+        }
+        Some(Self(value))
+    }
+
+    /// The raw token string. Use this only at the SQL/storage boundary
+    /// and at the wire/data-form boundary — keep `MamFilterStanzaId`
+    /// throughout the routing/handler chain.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl AsRef<str> for MamFilterStanzaId {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
