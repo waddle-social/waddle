@@ -10,7 +10,7 @@
 import { atom, computed } from "nanostores";
 
 import type { WasmPinEntry } from "@/lib/xmpp/wasm-types";
-import { resetPinnedMessageBodies } from "@/stores/pinned-message-bodies";
+import { evictPinnedMessageBody, resetPinnedMessageBodies } from "@/stores/pinned-message-bodies";
 
 interface PinnedRoomState {
   /** Pin entries in pin-time-desc order, mirroring server output. */
@@ -130,6 +130,7 @@ export function applyPinEvent(roomJid: string, event: PinUpdate): void {
     entries = event.entry ? [event.entry, ...filtered] : filtered;
   } else {
     entries = entries.filter((e) => e.target_stanza_id !== event.target_stanza_id);
+    evictPinnedMessageBody(roomJid, event.target_stanza_id);
   }
   setPinnedRoom(roomJid, {
     entries,
