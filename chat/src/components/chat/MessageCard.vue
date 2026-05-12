@@ -18,7 +18,6 @@ import ChatEditor from "@/components/chat/ChatEditor.vue";
 import MessageBody from "@/components/chat/MessageBody.vue";
 import EditorBubbleToolbar from "@/components/chat/EditorBubbleToolbar.vue";
 import EmojiPicker from "@/components/chat/EmojiPicker.vue";
-import ImageLightbox from "@/components/ui/ImageLightbox.vue";
 import {
   type TimelineMessage,
   type ExtensionAnnotationAction,
@@ -109,15 +108,6 @@ const seniorHat = computed<OccupantHat | null>(() => {
   }
   return best;
 });
-
-// Pre-resolved lightbox images delivered by MessageBody's onImageClick.
-// MessageBody builds this list from its own useMessageAttachments state,
-// which holds the decrypted blob URLs and uses the canonical imageAttachments
-// predicate — so neither encrypted attachment URLs nor wrong-predicate index
-// mismatches can occur here.
-const lightboxImages = ref<Array<{ url: string; name?: string; width?: number; height?: number }>>([]);
-const lightboxOpen = ref(false);
-const lightboxIndex = ref(0);
 
 const replyAuthorName = computed(() => {
   const author = props.message.replyTo?.author;
@@ -617,13 +607,6 @@ onBeforeUnmount(() => {
       v-else
       :message="message"
       :invoke-extension-action="invokeExtensionAction"
-      :on-image-click="(images, index) => { lightboxImages.value = images; lightboxIndex.value = index; lightboxOpen.value = true; }"
-    />
-
-    <ImageLightbox
-      v-model:open="lightboxOpen"
-      v-model:index="lightboxIndex"
-      :images="lightboxImages"
     />
 
     <!-- Thread replies affordance. Visible in the main channel feed on roots

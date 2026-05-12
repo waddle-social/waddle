@@ -6,8 +6,6 @@
 // — `liveMessageFor` resolver (timeline-index preferred over cache)
 // — all four render-state branches are reachable from store state
 // — legacy "(no preview text)" literal is never produced
-// — handleImageClick receives a pre-resolved image list from MessageBody
-//   (bug-locks: encrypted attachment URL & wrong-predicate index bugs)
 //
 // Each assertion maps 1-to-1 to one of the planned integration tests.
 import { describe, expect, it, beforeEach } from "bun:test";
@@ -223,88 +221,6 @@ describe("PinnedPanel store hydration state", () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// handleImageClick contract — locks the new callback shape
-// ---------------------------------------------------------------------------
-//
-// MessageBody.onImageClick now emits a pre-resolved image list + index so
-// PinnedPanel never reads raw `file.url` (which is the ciphertext download
-// URL for OMEMO-encrypted attachments) or applies a divergent predicate.
-//
-// The actual decryption flow is exercised by the existing
-// encrypted-attachments.test.ts suite via useMessageAttachments. Here we lock
-// the PinnedPanel-side contract: handleImageClick stores exactly the
-// resolved list it receives and sets the correct index.
-//
-// NOTE: this mirrors the component's handleImageClick at the function level
-// (no Vue mounting required).
-// ---------------------------------------------------------------------------
-
-describe("PinnedPanel handleImageClick contract", () => {
-  // Inline mirror of the component's handleImageClick function.
-  type ResolvedLightboxImage = { url: string; name?: string; width?: number; height?: number };
-
-  function makeHandleImageClick() {
-    let lightboxImages: ResolvedLightboxImage[] = [];
-    let lightboxIndex = 0;
-    let lightboxOpen = false;
-
-    function handleImageClick(images: ResolvedLightboxImage[], index: number) {
-      if (images.length === 0) return;
-      lightboxImages = images;
-      lightboxIndex = index;
-      lightboxOpen = true;
-    }
-
-    return { handleImageClick, state: () => ({ lightboxImages, lightboxIndex, lightboxOpen }) };
-  }
-
-  it("stores the pre-resolved image list and index on click", () => {
-    const { handleImageClick, state } = makeHandleImageClick();
-    const images: ResolvedLightboxImage[] = [
-      { url: "blob:http://localhost/abc-123", name: "photo.png" },
-      { url: "blob:http://localhost/def-456", name: "shot.png" },
-    ];
-    handleImageClick(images, 1);
-    const s = state();
-    expect(s.lightboxOpen).toBe(true);
-    expect(s.lightboxIndex).toBe(1);
-    expect(s.lightboxImages).toHaveLength(2);
-    expect(s.lightboxImages[0]!.url).toBe("blob:http://localhost/abc-123");
-    expect(s.lightboxImages[1]!.url).toBe("blob:http://localhost/def-456");
-  });
-
-  it("does not open the lightbox when the resolved list is empty", () => {
-    // An empty list means all images are still decrypting — lightbox stays closed.
-    const { handleImageClick, state } = makeHandleImageClick();
-    handleImageClick([], 0);
-    expect(state().lightboxOpen).toBe(false);
-  });
-
-  it("accepts blob URLs (decrypted OMEMO attachments) without error", () => {
-    // Confirms the panel consumes resolved blob: URLs — it never reads
-    // raw TimelineSharedFile.url, which would be the ciphertext download URL.
-    const { handleImageClick, state } = makeHandleImageClick();
-    const images: ResolvedLightboxImage[] = [
-      { url: "blob:http://localhost/decrypted-omemo-attachment" },
-    ];
-    handleImageClick(images, 0);
-    expect(state().lightboxImages[0]!.url).toMatch(/^blob:/);
-    expect(state().lightboxOpen).toBe(true);
-  });
-
-  it("opens at index 0 when a single image is clicked", () => {
-    const { handleImageClick, state } = makeHandleImageClick();
-    const images: ResolvedLightboxImage[] = [
-      { url: "blob:http://localhost/only-image", name: "cover.jpg" },
-    ];
-    handleImageClick(images, 0);
-    expect(state().lightboxIndex).toBe(0);
-    expect(state().lightboxOpen).toBe(true);
-  });
-});
-
-// ---------------------------------------------------------------------------
 // Bug B: alias-keyed timeline lookup
 // ---------------------------------------------------------------------------
 

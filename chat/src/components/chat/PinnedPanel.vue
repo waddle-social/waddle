@@ -12,15 +12,13 @@
 // `<MessageBody compact />` renders images, video, audio, PDFs,
 // downloadables, and extension cards. Empty preview.text + no live
 // body → "Original message no longer available." italic fallback.
-import { computed, ref, watch } from "vue";
+import { computed } from "vue";
 import { useStore } from "@nanostores/vue";
 import { Pin, X } from "lucide-vue-next";
 
 import { $pinnedRooms } from "@/stores/pinned-messages";
 import { $pinnedMessageBodies } from "@/stores/pinned-message-bodies";
 import MessageBody from "@/components/chat/MessageBody.vue";
-import type { ResolvedLightboxImage } from "@/components/chat/message-body-types";
-import ImageLightbox from "@/components/ui/ImageLightbox.vue";
 import type { TimelineMessage } from "@/lib/chat-ui";
 import type { WasmPinEntry } from "@/lib/xmpp/wasm-types";
 
@@ -87,39 +85,6 @@ function relativeTime(iso: string): string {
   return `${days}d ago`;
 }
 
-// Lightbox state owned by the panel — clicks on images inside any
-// `<MessageBody>` bubble up through `onImageClick`. The image list is
-// pre-resolved by MessageBody (decrypted blob URLs, canonical
-// imageAttachments predicate) so the panel never touches raw file.url.
-const lightboxOpen = ref(false);
-const lightboxImages = ref<ResolvedLightboxImage[]>([]);
-const lightboxIndex = ref(0);
-
-// Track which pinned entry's images currently populate the lightbox so we
-// can close it if that entry is unpinned while the lightbox is open.
-// When an entry is unpinned its <MessageBody> unmounts and revokes the
-// blob URLs, leaving the lightbox with a dead blob: reference that renders
-// as a broken image. Closing proactively prevents that UX glitch.
-const lightboxSourceStanzaId = ref<string | null>(null);
-
-function handleImageClick(images: ResolvedLightboxImage[], index: number, entryStanzaId: string) {
-  if (images.length === 0) return;
-  lightboxImages.value = images;
-  lightboxIndex.value = index;
-  lightboxOpen.value = true;
-  lightboxSourceStanzaId.value = entryStanzaId;
-}
-
-watch(resolvedEntries, (entries) => {
-  if (!lightboxOpen.value) return;
-  const source = lightboxSourceStanzaId.value;
-  if (!source) return;
-  const stillPresent = entries.some(({ entry }) => entry.target_stanza_id === source);
-  if (!stillPresent) {
-    lightboxOpen.value = false;
-    lightboxSourceStanzaId.value = null;
-  }
-});
 </script>
 
 <template>
@@ -179,7 +144,6 @@ watch(resolvedEntries, (entries) => {
             v-else
             :message="live"
             compact
-            :on-image-click="(images, index) => handleImageClick(images, index, entry.target_stanza_id)"
           />
         </template>
         <template v-else>
@@ -198,12 +162,5 @@ watch(resolvedEntries, (entries) => {
         </p>
       </li>
     </ol>
-
-    <ImageLightbox
-      v-if="lightboxOpen"
-      v-model:open="lightboxOpen"
-      v-model:index="lightboxIndex"
-      :images="lightboxImages"
-    />
   </aside>
 </template>

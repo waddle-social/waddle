@@ -5,8 +5,6 @@
 // suppresses interactive affordances that belong on the timeline only
 // (extension action buttons).
 //
-// Lightbox state is not owned here — callers host their own
-// `<ImageLightbox>` instance and pass `onImageClick`.
 import { computed, ref, nextTick, watch } from "vue";
 import {
   Lock,
@@ -23,25 +21,18 @@ import {
   extensionSurfaceLabel,
   renderStyledBody,
   type TimelineMessage,
-  type TimelineSharedFile,
   type ExtensionAnnotationAction,
 } from "@/lib/chat-ui";
 import { formatFileSize, useMessageAttachments } from "@/channels/message-attachments";
 import { applyShikiToCodeBlocks } from "@/lib/shiki";
 import { useExtensionAnnotationActions } from "@/channels/extension-annotation-actions";
 import type { ExtensionCommandResult } from "@/lib/xmpp/extension-commands";
-import type { ResolvedLightboxImage } from "@/components/chat/message-body-types";
+import ImageLightbox from "@/components/ui/ImageLightbox.vue";
 
 const props = withDefaults(
   defineProps<{
     message: TimelineMessage;
     compact?: boolean;
-    /** Called when the user clicks an image in the gallery. Receives a
-     * fully-resolved image list (decrypted blob URLs, correct mediaType
-     * filter) and the index of the clicked image. Both MessageCard and
-     * PinnedPanel receive a ready-to-render list; neither rebuilds the
-     * list independently. */
-    onImageClick?: (images: ResolvedLightboxImage[], index: number) => void;
     invokeExtensionAction?: (action: ExtensionAnnotationAction) => Promise<ExtensionCommandResult>;
   }>(),
   {
@@ -60,10 +51,15 @@ const {
   downloadableAttachments,
   displayBody,
   isGif,
+  lightboxOpen,
+  lightboxIndex,
+  lightboxImages,
   attachmentKey,
+  attachmentRenderKey,
   resolvedAttachmentUrl,
   attachmentError,
   isDecryptingAttachment,
+  openLightbox,
   downloadAttachment,
 } = useMessageAttachments(messageRef);
 
@@ -99,27 +95,6 @@ watch(
   { immediate: true },
 );
 
-function emitImageClick(file: TimelineSharedFile, _index: number) {
-  if (!props.onImageClick) return;
-  // Build a fully-resolved list from imageAttachments (same predicate as the
-  // gallery render) so callers never need to re-derive it. For OMEMO-encrypted
-  // files, resolvedAttachmentUrl returns the decrypted blob URL; files still
-  // decrypting are excluded (they have no resolved URL yet).
-  const images: ResolvedLightboxImage[] = imageAttachments.value.flatMap((f) => {
-    const url = resolvedAttachmentUrl(f);
-    if (!url) return [];
-    const entry: ResolvedLightboxImage = { url };
-    if (f.name) entry.name = f.name;
-    if (f.width) entry.width = f.width;
-    if (f.height) entry.height = f.height;
-    return [entry];
-  });
-  const clickedUrl = resolvedAttachmentUrl(file);
-  if (!clickedUrl) return;
-  const resolvedIndex = images.findIndex((i) => i.url === clickedUrl);
-  if (resolvedIndex < 0) return;
-  props.onImageClick(images, resolvedIndex);
-}
 </script>
 
 <template>
@@ -279,8 +254,8 @@ function emitImageClick(file: TimelineSharedFile, _index: number) {
     <!-- Image attachments gallery -->
     <div v-if="imageAttachments.length > 0 && !isSticker" class="chat-attachment-strip">
       <div
-        v-for="(img, idx) in imageAttachments"
-        :key="attachmentKey(img)"
+        v-for="img in imageAttachments"
+        :key="attachmentRenderKey(img)"
         class="rounded-lg border border-border overflow-hidden bg-muted/40"
       >
         <button
@@ -288,7 +263,7 @@ function emitImageClick(file: TimelineSharedFile, _index: number) {
           type="button"
           class="block hover:opacity-90 transition-opacity focus-visible:outline-2 focus-visible:outline-primary"
           :title="img.name ?? 'Image'"
-          @click.stop="emitImageClick(img, idx)"
+          @click.stop="openLightbox(img)"
         >
           <img
             :src="resolvedAttachmentUrl(img) || ''"
@@ -306,6 +281,7 @@ function emitImageClick(file: TimelineSharedFile, _index: number) {
             'type-caption flex flex-col items-center justify-center gap-2 px-4 text-center text-muted-foreground',
             compact ? 'h-20 w-20' : 'h-36 w-48',
           ]"
+          @click.stop
         >
           <Lock class="h-4 w-4 text-primary/70" />
           <span>{{ attachmentError(img) ?? (isDecryptingAttachment(img) ? "Decrypting image…" : "Preparing image…") }}</span>
@@ -321,12 +297,20 @@ function emitImageClick(file: TimelineSharedFile, _index: number) {
         <div
           v-if="img.encrypted"
           class="type-meta type-emphasis flex items-center gap-1 border-t border-border/70 px-2 py-1 text-muted-foreground"
+          @click.stop
         >
           <Lock class="h-3 w-3 text-primary/70" />
           <span>Encrypted</span>
         </div>
       </div>
     </div>
+
+    <ImageLightbox
+      v-if="lightboxOpen"
+      v-model:open="lightboxOpen"
+      v-model:index="lightboxIndex"
+      :images="lightboxImages"
+    />
 
     <!-- Inline video attachments -->
     <div v-if="videoAttachments.length > 0" class="flex flex-col gap-2">
