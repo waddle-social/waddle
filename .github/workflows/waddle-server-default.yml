@@ -30,6 +30,8 @@ jobs:
       uses: namespacelabs/nscloud-cache-action@v1
       with:
         cache: nix
+    - name: Hand /nix to the runner user
+      run: sudo chown -R runner /nix
     - name: Install Nix
       uses: cachix/install-nix-action@v31
       with:
@@ -62,6 +64,8 @@ jobs:
       uses: namespacelabs/nscloud-cache-action@v1
       with:
         cache: nix
+    - name: Hand /nix to the runner user
+      run: sudo chown -R runner /nix
     - name: Install Nix
       uses: cachix/install-nix-action@v31
       with:
@@ -110,6 +114,8 @@ jobs:
       uses: namespacelabs/nscloud-cache-action@v1
       with:
         cache: nix
+    - name: Hand /nix to the runner user
+      run: sudo chown -R runner /nix
     - name: Install Nix
       uses: cachix/install-nix-action@v31
       with:
@@ -147,6 +153,8 @@ jobs:
       uses: namespacelabs/nscloud-cache-action@v1
       with:
         cache: nix
+    - name: Hand /nix to the runner user
+      run: sudo chown -R runner /nix
     - name: Install Nix
       uses: cachix/install-nix-action@v31
       with:
@@ -184,6 +192,8 @@ jobs:
       uses: namespacelabs/nscloud-cache-action@v1
       with:
         cache: nix
+    - name: Hand /nix to the runner user
+      run: sudo chown -R runner /nix
     - name: Install Nix
       uses: cachix/install-nix-action@v31
       with:
@@ -221,6 +231,8 @@ jobs:
       uses: namespacelabs/nscloud-cache-action@v1
       with:
         cache: nix
+    - name: Hand /nix to the runner user
+      run: sudo chown -R runner /nix
     - name: Install Nix
       uses: cachix/install-nix-action@v31
       with:
@@ -263,6 +275,8 @@ jobs:
       uses: namespacelabs/nscloud-cache-action@v1
       with:
         cache: nix
+    - name: Hand /nix to the runner user
+      run: sudo chown -R runner /nix
     - name: Install Nix
       uses: cachix/install-nix-action@v31
       with:
@@ -312,6 +326,8 @@ jobs:
       uses: namespacelabs/nscloud-cache-action@v1
       with:
         cache: nix
+    - name: Hand /nix to the runner user
+      run: sudo chown -R runner /nix
     - name: Install Nix
       uses: cachix/install-nix-action@v31
       with:
@@ -349,6 +365,8 @@ jobs:
       uses: namespacelabs/nscloud-cache-action@v1
       with:
         cache: nix
+    - name: Hand /nix to the runner user
+      run: sudo chown -R runner /nix
     - name: Install Nix
       uses: cachix/install-nix-action@v31
       with:

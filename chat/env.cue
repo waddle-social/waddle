@@ -19,10 +19,17 @@ let _NamespaceNix = schema.#Contributor & {
 			}
 		},
 		{
-			id:        "nix.install"
-			label:     "Install Nix"
+			id:        "nix.chown"
+			label:     "Hand /nix to the runner user"
 			priority:  1
 			dependsOn: ["nix.cache"]
+			script:    "sudo chown -R runner /nix"
+		},
+		{
+			id:        "nix.install"
+			label:     "Install Nix"
+			priority:  2
+			dependsOn: ["nix.chown"]
 			provider: github: {
 				uses: "cachix/install-nix-action@v31"
 				with: extra_nix_config: "accept-flake-config = true"

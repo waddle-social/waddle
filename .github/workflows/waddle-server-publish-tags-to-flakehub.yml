@@ -31,15 +31,17 @@ jobs:
       uses: namespacelabs/nscloud-cache-action@v1
       with:
         cache: nix
-    - name: Install Nix
-      uses: cachix/install-nix-action@v31
-      with:
-        extra_nix_config: accept-flake-config = true
+    - name: Hand /nix to the runner user
+      run: sudo chown -R runner /nix
     - name: Checkout tag
       uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
       with:
         persist-credentials: false
         ref: ${{ (inputs.tag != null) && format('refs/tags/{0}', inputs.tag) || '' }}
+    - name: Install Nix
+      uses: cachix/install-nix-action@v31
+      with:
+        extra_nix_config: accept-flake-config = true
     - name: Push to FlakeHub
       uses: DeterminateSystems/flakehub-push@a225170f3ab20a9d93dbb4424090ef0523ca7425
       with:
