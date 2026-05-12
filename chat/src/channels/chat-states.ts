@@ -1,4 +1,4 @@
-import { ref, type Ref } from "vue";
+import { getCurrentScope, onScopeDispose, ref, type Ref } from "vue";
 import type { BrowserXmppClient } from "@/lib/xmpp-client";
 
 // XEP-0085 chat-state notifications for the channel side. Owns:
@@ -67,6 +67,15 @@ export function useChannelChatStates(deps: UseChannelChatStatesDeps) {
     }
   }
 
+  // Defense-in-depth: the orchestrator already calls clearTypingState() on
+  // disconnect / clearMessages / xmppClient → null, but if the composable's
+  // effect scope ever ends without that contract being honoured (component
+  // teardown, hot-reload), drop the timers here so they don't fire on a
+  // dead reactive graph.
+  if (getCurrentScope()) {
+    onScopeDispose(() => clearTypingState());
+  }
+
   /**
    * XEP-0085 §5.2 / §5.3 composing/paused debounce. Sends "composing"
    * the first time the user types in a window of activity, then arms a
@@ -98,11 +107,15 @@ export function useChannelChatStates(deps: UseChannelChatStatesDeps) {
   }
 
   /**
-   * Called by useMucSend's onSendComplete after a successful send to
-   * cancel any in-flight pause timer and snap the local state back to
-   * "active" (XEP-0085 §4.2 — content messages SHOULD include
-   * <active/>). The orchestrator routes this from useMucSend until that
-   * composable starts holding a direct ref to useChannelChatStates.
+   * Internal-state reset called by useMucSend's onSendComplete after a
+   * successful send: cancels any in-flight pause timer and snaps
+   * `lastChatState` back to "active". This does NOT emit a wire
+   * `<active/>` notification — that's the orchestrator's job after this
+   * returns. The split exists so the composable can keep its private
+   * state machine consistent without taking a dependency on the XMPP
+   * client; the orchestrator owns the outbound `client.sendChatState(
+   * ..., "active")` call per XEP-0085 §4.2 (content messages SHOULD
+   * include `<active/>`).
    */
   function resetOnSend() {
     if (composingTimeout) {

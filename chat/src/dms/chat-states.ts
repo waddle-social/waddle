@@ -1,4 +1,4 @@
-import { ref, type Ref } from "vue";
+import { getCurrentScope, onScopeDispose, ref, type Ref } from "vue";
 import type { BrowserXmppClient } from "@/lib/xmpp-client";
 
 // XEP-0085 chat-state notifications for the DM side. Mirrors
@@ -55,6 +55,14 @@ export function useDmChatStates(deps: UseDmChatStatesDeps) {
     }
   }
 
+  // Defense-in-depth: parallels the channel-side composable. Orchestrator
+  // explicitly calls clearTypingState() on disconnect / clearMessages, but
+  // scope teardown without that contract being honoured shouldn't leak
+  // timers either.
+  if (getCurrentScope()) {
+    onScopeDispose(() => clearTypingState());
+  }
+
   function notifyComposing() {
     const client = xmppClient.value;
     const peerJid = activePeerJid.value;
@@ -71,6 +79,14 @@ export function useDmChatStates(deps: UseDmChatStatesDeps) {
     }, COMPOSING_PAUSE_MS);
   }
 
+  /**
+   * Internal-state reset called by useChatSend's onSendComplete after a
+   * successful send. Does NOT emit a wire `<active/>` notification — the
+   * orchestrator owns the outbound `client.sendDmChatState(peerJid,
+   * "active")` call per XEP-0085 §4.2. Keeping the wire emission in the
+   * orchestrator lets this composable stay independent of the XMPP
+   * client.
+   */
   function resetOnSend() {
     if (composingTimeout) {
       clearTimeout(composingTimeout);
