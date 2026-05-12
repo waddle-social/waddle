@@ -45,14 +45,20 @@ export function useDmLiveMerge(deps: UseDmLiveMergeDeps) {
     isFeedVisible,
   } = deps;
 
-  /** XEP-0333 displayed marker: append the reader's nick to `readBy`. */
+  /**
+   * XEP-0333 displayed marker: append the reader's nick to `readBy`.
+   * Short-circuits on target miss / already-marked.
+   */
   function applyDisplayed(messageId: string, nick: string) {
-    messages.value = messages.value.map((m): TimelineMessage => {
-      if (!matchMessageId(m, messageId)) return m;
-      const existing = m.readBy ? [...m.readBy] : [];
-      if (!existing.includes(nick)) existing.push(nick);
-      return { ...m, readBy: existing };
-    });
+    const index = messages.value.findIndex((m) => matchMessageId(m, messageId));
+    if (index < 0) return;
+    const current = messages.value[index]!;
+    const existing = current.readBy ? [...current.readBy] : [];
+    if (existing.includes(nick)) return;
+    existing.push(nick);
+    const next = messages.value.slice();
+    next[index] = { ...current, readBy: existing };
+    messages.value = next;
   }
 
   /**
@@ -60,37 +66,48 @@ export function useDmLiveMerge(deps: UseDmLiveMergeDeps) {
    * the DM stanza already arrives keyed on the conversation partner, so
    * the reaction-set per nick is sufficient. (Carbon-forwarded self
    * reactions are attributed via the orchestrator-side `peerNameFromJid`
-   * mapping in onReaction.)
+   * mapping in onReaction.) Short-circuits on target miss.
    */
   function applyReaction(messageId: string, nick: string, emojis: string[]) {
-    messages.value = messages.value.map((m): TimelineMessage => {
-      if (!matchMessageId(m, messageId)) return m;
-      const existing: Record<string, string[]> = m.reactions ? { ...m.reactions } : {};
-      for (const key of Object.keys(existing)) {
-        existing[key] = (existing[key] ?? []).filter((n) => n !== nick);
-        if (existing[key].length === 0) delete existing[key];
-      }
-      for (const emoji of emojis) {
-        if (!existing[emoji]) existing[emoji] = [];
-        existing[emoji].push(nick);
-      }
-      const updated = { ...m };
-      if (Object.keys(existing).length > 0) updated.reactions = existing;
-      else delete updated.reactions;
-      return updated;
-    });
+    const index = messages.value.findIndex((m) => matchMessageId(m, messageId));
+    if (index < 0) return;
+    const current = messages.value[index]!;
+    const existing: Record<string, string[]> = current.reactions ? { ...current.reactions } : {};
+    for (const key of Object.keys(existing)) {
+      existing[key] = (existing[key] ?? []).filter((n) => n !== nick);
+      if (existing[key].length === 0) delete existing[key];
+    }
+    for (const emoji of emojis) {
+      if (!existing[emoji]) existing[emoji] = [];
+      existing[emoji].push(nick);
+    }
+    const updated: TimelineMessage = { ...current };
+    if (Object.keys(existing).length > 0) updated.reactions = existing;
+    else delete updated.reactions;
+    const next = messages.value.slice();
+    next[index] = updated;
+    messages.value = next;
   }
 
-  /** XEP-0424 retraction. Sender match via `isSameDmCorrectionSender`. */
+  /**
+   * XEP-0424 retraction. Sender match via `isSameDmCorrectionSender`
+   * — short-circuits on target miss / sender mismatch.
+   */
   function applyRetraction(msg: LiveDmMessage) {
-    messages.value = messages.value.map((m) =>
-      msg.retractsId && matchMessageId(m, msg.retractsId) && isSameDmCorrectionSender(m, msg.fromJid)
-        ? retractDmTimelineMessage(m, msg.retractionId)
-        : m
+    if (!msg.retractsId) return;
+    const index = messages.value.findIndex(
+      (m) => matchMessageId(m, msg.retractsId!) && isSameDmCorrectionSender(m, msg.fromJid),
     );
+    if (index < 0) return;
+    const next = messages.value.slice();
+    next[index] = retractDmTimelineMessage(messages.value[index]!, msg.retractionId);
+    messages.value = next;
   }
 
-  /** XEP-0308 last-message correction. Same sender match as retraction. */
+  /**
+   * XEP-0308 last-message correction. Same sender match as retraction.
+   * Short-circuits on target miss / sender mismatch.
+   */
   function applyCorrection(
     replacesId: string,
     newBody: string,
@@ -100,23 +117,27 @@ export function useDmLiveMerge(deps: UseDmLiveMergeDeps) {
     extensionAnnotations?: LiveDmMessage["extensionAnnotations"],
     extensionBodyFallback?: boolean,
   ) {
-    messages.value = messages.value.map((m) => {
-      if (!matchMessageId(m, replacesId) || !isSameDmCorrectionSender(m, correctionFromJid)) return m;
-      const updated: TimelineMessage = { ...m, body: newBody.trim(), isEdited: true };
-      if (markup && markup.length > 0) updated.markup = markup;
-      else delete updated.markup;
-      if (references && references.length > 0) updated.references = references;
-      else delete updated.references;
-      if (extensionAnnotations && extensionAnnotations.length > 0) {
-        updated.extensionAnnotations = extensionAnnotations;
-        if (extensionBodyFallback) updated.extensionBodyFallback = true;
-        else delete updated.extensionBodyFallback;
-      } else {
-        delete updated.extensionAnnotations;
-        delete updated.extensionBodyFallback;
-      }
-      return updated;
-    });
+    const index = messages.value.findIndex(
+      (m) => matchMessageId(m, replacesId) && isSameDmCorrectionSender(m, correctionFromJid),
+    );
+    if (index < 0) return;
+    const current = messages.value[index]!;
+    const updated: TimelineMessage = { ...current, body: newBody.trim(), isEdited: true };
+    if (markup && markup.length > 0) updated.markup = markup;
+    else delete updated.markup;
+    if (references && references.length > 0) updated.references = references;
+    else delete updated.references;
+    if (extensionAnnotations && extensionAnnotations.length > 0) {
+      updated.extensionAnnotations = extensionAnnotations;
+      if (extensionBodyFallback) updated.extensionBodyFallback = true;
+      else delete updated.extensionBodyFallback;
+    } else {
+      delete updated.extensionAnnotations;
+      delete updated.extensionBodyFallback;
+    }
+    const next = messages.value.slice();
+    next[index] = updated;
+    messages.value = next;
   }
 
   /** Plain inbound message — reconciles self-echo if pending, else appends. */

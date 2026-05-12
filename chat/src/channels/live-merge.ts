@@ -13,6 +13,7 @@ import {
   isSameMucRetractionSender,
   isValidMucModerationTarget,
   isValidMucRetractionTarget,
+  mucCorrectionSender,
   reactionSendersForUpdate,
   reactionsFromSenders,
   removeSenderReactions,
@@ -59,64 +60,74 @@ export function useChannelLiveMerge(deps: UseChannelLiveMergeDeps) {
    * a remote read of one of our messages. Cumulative — all earlier messages
    * are implicitly displayed for that reader too, but the helper only
    * mutates the exact target since the timeline carries `readBy` per
-   * message.
+   * message. Short-circuits on id-miss to avoid allocating on every
+   * inbound XEP-0333 marker.
    */
   function applyDisplayed(messageId: string, nick: string) {
-    messages.value = messages.value.map((m): TimelineMessage => {
-      if (!matchMessageId(m, messageId)) return m;
-      const existing = m.readBy ? [...m.readBy] : [];
-      if (!existing.includes(nick)) existing.push(nick);
-      return { ...m, readBy: existing };
-    });
+    const index = messages.value.findIndex((m) => matchMessageId(m, messageId));
+    if (index < 0) return;
+    const current = messages.value[index]!;
+    const existing = current.readBy ? [...current.readBy] : [];
+    if (existing.includes(nick)) return;
+    existing.push(nick);
+    const next = messages.value.slice();
+    next[index] = { ...current, readBy: existing };
+    messages.value = next;
   }
 
   /**
    * XEP-0444 replace semantics: this author's full reaction set on the
    * target message becomes `emojis`. The previous per-author set is wiped
    * via `removeSenderReactions` so unticking an emoji actually removes it.
+   * Short-circuits on target miss.
    */
   function applyReaction(messageId: string, nick: string, emojis: string[], senderId: string = nick) {
-    messages.value = messages.value.map((m): TimelineMessage => {
-      if (m.reactionTargetId !== messageId) return m;
-      const reactionSenders = reactionSendersForUpdate(m, nick, senderId);
-      removeSenderReactions(reactionSenders, nick, senderId);
-      for (const emoji of emojis) {
-        if (!reactionSenders[emoji]) reactionSenders[emoji] = {};
-        reactionSenders[emoji][senderId] = nick;
-      }
-      const reactions = reactionsFromSenders(reactionSenders);
-      const updated = { ...m };
-      if (Object.keys(reactionSenders).length > 0) {
-        updated.reactionSenders = reactionSenders;
-        updated.reactions = reactions;
-      } else {
-        delete updated.reactionSenders;
-        delete updated.reactions;
-      }
-      return updated;
-    });
+    const index = messages.value.findIndex((m) => m.reactionTargetId === messageId);
+    if (index < 0) return;
+    const current = messages.value[index]!;
+    const reactionSenders = reactionSendersForUpdate(current, nick, senderId);
+    removeSenderReactions(reactionSenders, nick, senderId);
+    for (const emoji of emojis) {
+      if (!reactionSenders[emoji]) reactionSenders[emoji] = {};
+      reactionSenders[emoji][senderId] = nick;
+    }
+    const reactions = reactionsFromSenders(reactionSenders);
+    const updated: TimelineMessage = { ...current };
+    if (Object.keys(reactionSenders).length > 0) {
+      updated.reactionSenders = reactionSenders;
+      updated.reactions = reactions;
+    } else {
+      delete updated.reactionSenders;
+      delete updated.reactions;
+    }
+    const next = messages.value.slice();
+    next[index] = updated;
+    messages.value = next;
   }
 
   /**
    * XEP-0424 retraction with XEP-0425 moderation support. Sender gating
    * happens here via `isSameMucRetractionSender` / `isMucServiceModeration`
    * so a spoofed retraction from a different occupant can't tombstone
-   * someone else's message.
+   * someone else's message. Short-circuits on target miss / sender mismatch.
    */
   function applyRetraction(msg: LiveRoomMessage) {
-    messages.value = messages.value.map((m) => {
-      if (!msg.retractsId || !matchMessageId(m, msg.retractsId)) return m;
-      if (msg.moderationTargetId) {
-        if (!isMucServiceModeration(msg)) return m;
-        if (!isValidMucModerationTarget(m, msg.moderationTargetId)) return m;
-      } else if (
-        !isValidMucRetractionTarget(m, msg.retractsId)
-        || !isSameMucRetractionSender(m, mucCorrectionSenderFor(msg))
-      ) {
-        return m;
-      }
-      return retractChannelTimelineMessage(m, msg.retractionId);
-    });
+    if (!msg.retractsId) return;
+    const index = messages.value.findIndex((m) => matchMessageId(m, msg.retractsId!));
+    if (index < 0) return;
+    const target = messages.value[index]!;
+    if (msg.moderationTargetId) {
+      if (!isMucServiceModeration(msg)) return;
+      if (!isValidMucModerationTarget(target, msg.moderationTargetId)) return;
+    } else if (
+      !isValidMucRetractionTarget(target, msg.retractsId)
+      || !isSameMucRetractionSender(target, mucCorrectionSender(msg))
+    ) {
+      return;
+    }
+    const next = messages.value.slice();
+    next[index] = retractChannelTimelineMessage(target, msg.retractionId);
+    messages.value = next;
   }
 
   /**
@@ -124,6 +135,7 @@ export function useChannelLiveMerge(deps: UseChannelLiveMergeDeps) {
    * `isSameMucCorrectionSender` (real-JID for non-anon MUC, occupant-id
    * elsewhere). Markup / references / extension annotations are replaced
    * wholesale to mirror the wire shape — null/empty drops the field.
+   * Short-circuits on target miss / sender mismatch.
    */
   function applyCorrection(
     replacesId: string,
@@ -134,27 +146,27 @@ export function useChannelLiveMerge(deps: UseChannelLiveMergeDeps) {
     extensionAnnotations?: LiveRoomMessage["extensionAnnotations"],
     extensionBodyFallback?: boolean,
   ) {
-    const idx = messages.value.findIndex((m) =>
+    const index = messages.value.findIndex((m) =>
       matchMessageId(m, replacesId) && isSameMucCorrectionSender(m, correctionSender)
     );
-    if (idx === -1) return;
-    messages.value = messages.value.map((m) => {
-      if (!matchMessageId(m, replacesId) || !isSameMucCorrectionSender(m, correctionSender)) return m;
-      const updated: TimelineMessage = { ...m, body: newBody.trim(), isEdited: true };
-      if (markup && markup.length > 0) updated.markup = markup;
-      else delete updated.markup;
-      if (references && references.length > 0) updated.references = references;
-      else delete updated.references;
-      if (extensionAnnotations && extensionAnnotations.length > 0) {
-        updated.extensionAnnotations = extensionAnnotations;
-        if (extensionBodyFallback) updated.extensionBodyFallback = true;
-        else delete updated.extensionBodyFallback;
-      } else {
-        delete updated.extensionAnnotations;
-        delete updated.extensionBodyFallback;
-      }
-      return updated;
-    });
+    if (index < 0) return;
+    const current = messages.value[index]!;
+    const updated: TimelineMessage = { ...current, body: newBody.trim(), isEdited: true };
+    if (markup && markup.length > 0) updated.markup = markup;
+    else delete updated.markup;
+    if (references && references.length > 0) updated.references = references;
+    else delete updated.references;
+    if (extensionAnnotations && extensionAnnotations.length > 0) {
+      updated.extensionAnnotations = extensionAnnotations;
+      if (extensionBodyFallback) updated.extensionBodyFallback = true;
+      else delete updated.extensionBodyFallback;
+    } else {
+      delete updated.extensionAnnotations;
+      delete updated.extensionBodyFallback;
+    }
+    const next = messages.value.slice();
+    next[index] = updated;
+    messages.value = next;
   }
 
   /**
@@ -256,14 +268,3 @@ export function useChannelLiveMerge(deps: UseChannelLiveMergeDeps) {
   };
 }
 
-// Local helper to avoid a cross-file circular: mucCorrectionSender lives in
-// message-timeline-state and is also used by the classifier. We keep a
-// thin local function here so applyRetraction doesn't reach into the
-// classifier's typed output for the sender — it's still building it from
-// the raw stanza.
-function mucCorrectionSenderFor(msg: LiveRoomMessage): { authorJid: string; authorRealJid?: string } {
-  return {
-    authorJid: `${msg.roomJid}/${msg.nick}`,
-    ...(msg.authorRealJid ? { authorRealJid: msg.authorRealJid } : {}),
-  };
-}

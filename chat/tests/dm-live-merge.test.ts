@@ -128,6 +128,46 @@ describe("handleIncomingMessage typed dispatch", () => {
   });
 });
 
+describe("applyRetraction sender-match gate (XEP-0424)", () => {
+  test("refuses to retract when sender doesn't match target's authorJid", () => {
+    const h = harness();
+    h.messages.value = [
+      {
+        id: "m1",
+        body: "from bob",
+        nick: "bob",
+        authorJid: "bob@example.com",
+        timestamp: 0,
+      } as TimelineMessage,
+    ];
+    h.liveMerge.applyRetraction(makeLive({
+      retractsId: "m1",
+      retractionId: "r1",
+      fromJid: "mallory@example.com",
+      nick: "mallory",
+    }));
+    expect(h.messages.value[0]?.isRetracted).toBeFalsy();
+  });
+});
+
+describe("applyCorrection sender-match gate (XEP-0308)", () => {
+  test("refuses to correct when fromJid doesn't match target", () => {
+    const h = harness();
+    h.messages.value = [
+      {
+        id: "m1",
+        body: "from bob",
+        nick: "bob",
+        authorJid: "bob@example.com",
+        timestamp: 0,
+      } as TimelineMessage,
+    ];
+    h.liveMerge.applyCorrection("m1", "hijacked!", "mallory@example.com");
+    expect(h.messages.value[0]?.body).toBe("from bob");
+    expect(h.messages.value[0]?.isEdited).toBeFalsy();
+  });
+});
+
 describe("mergeLiveMessage self-echo reconciliation", () => {
   test("body-match fallback only targets messages tracked in pendingEchoClientIds", () => {
     const h = harness();

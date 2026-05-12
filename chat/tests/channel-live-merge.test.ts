@@ -162,6 +162,92 @@ describe("handleRoomMessage typed dispatch", () => {
   });
 });
 
+describe("applyRetraction sender-match gate (XEP-0424)", () => {
+  test("retracts when sender matches the target's authorJid", () => {
+    const h = harness();
+    h.messages.value = [
+      {
+        id: "m1",
+        body: "alice's message",
+        nick: "alice",
+        authorJid: "room@muc.example.com/alice",
+        replyableId: "m1",
+        timestamp: 0,
+      } as TimelineMessage,
+    ];
+    h.liveMerge.applyRetraction(makeLive({
+      retractsId: "m1",
+      retractionId: "r1",
+      fromJid: "room@muc.example.com/alice",
+      nick: "alice",
+    }));
+    expect(h.messages.value[0]?.isRetracted).toBe(true);
+  });
+
+  test("refuses to retract when sender doesn't match target's authorJid (spoof attempt)", () => {
+    const h = harness();
+    h.messages.value = [
+      {
+        id: "m1",
+        body: "alice's message",
+        nick: "alice",
+        authorJid: "room@muc.example.com/alice",
+        replyableId: "m1",
+        timestamp: 0,
+      } as TimelineMessage,
+    ];
+    h.liveMerge.applyRetraction(makeLive({
+      retractsId: "m1",
+      retractionId: "r1",
+      fromJid: "room@muc.example.com/mallory",
+      nick: "mallory",
+    }));
+    expect(h.messages.value[0]?.isRetracted).toBeFalsy();
+  });
+});
+
+describe("applyCorrection sender-match gate (XEP-0308)", () => {
+  test("corrects when sender matches the target's authorJid", () => {
+    const h = harness();
+    h.messages.value = [
+      {
+        id: "m1",
+        body: "old text",
+        nick: "alice",
+        authorJid: "room@muc.example.com/alice",
+        timestamp: 0,
+      } as TimelineMessage,
+    ];
+    h.liveMerge.applyCorrection(
+      "m1",
+      "new text",
+      { authorJid: "room@muc.example.com/alice" },
+    );
+    expect(h.messages.value[0]?.body).toBe("new text");
+    expect(h.messages.value[0]?.isEdited).toBe(true);
+  });
+
+  test("refuses to correct when sender doesn't match (spoof attempt)", () => {
+    const h = harness();
+    h.messages.value = [
+      {
+        id: "m1",
+        body: "old text",
+        nick: "alice",
+        authorJid: "room@muc.example.com/alice",
+        timestamp: 0,
+      } as TimelineMessage,
+    ];
+    h.liveMerge.applyCorrection(
+      "m1",
+      "hijacked!",
+      { authorJid: "room@muc.example.com/mallory" },
+    );
+    expect(h.messages.value[0]?.body).toBe("old text");
+    expect(h.messages.value[0]?.isEdited).toBeFalsy();
+  });
+});
+
 describe("mergeLiveMessage self-echo reconciliation", () => {
   test("reconciles by id when the server-assigned id matches a wireId of an optimistic insert", () => {
     const h = harness();
