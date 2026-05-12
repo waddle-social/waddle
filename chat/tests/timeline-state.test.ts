@@ -49,6 +49,21 @@ describe("applyDeliveryEventById", () => {
     expect(applyDeliveryEventById([], "any", "delivered")).toEqual([]);
   });
 
+  test("matches via wireIds when the primary id was reconciled by XEP-0359", () => {
+    // After a self-echo, the message's primary id swaps to the
+    // server-assigned stanza-id while the original client id moves into
+    // wireIds. A subsequent XEP-0198 SM ack referencing the original client
+    // id must still find the message.
+    const timeline = [
+      makeMessage("server-stanza-id", {
+        deliveryStatus: "sending",
+        wireIds: ["original-client-id"],
+      } as Partial<TimelineMessage>),
+    ];
+    const next = applyDeliveryEventById(timeline, "original-client-id", "delivered");
+    expect(next.find((m) => m.id === "server-stanza-id")?.deliveryStatus).toBe("delivered");
+  });
+
   test("preserves all other fields on the updated message", () => {
     const original = makeMessage("a", { deliveryStatus: "sending", body: "hello", nick: "bob" });
     const next = applyDeliveryEventById([original], "a", "delivered");

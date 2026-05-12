@@ -1,4 +1,5 @@
 import type { TimelineMessage } from "@/lib/chat-ui";
+import { matchMessageId } from "@/lib/message-ids";
 import {
   applyDeliveryEvent,
   type DeliveryEvent,
@@ -21,6 +22,13 @@ import {
  * no-downgrade short-circuit), so Vue's reactivity skips a re-render and
  * downstream watchers don't fire.
  *
+ * Matches the id via `matchMessageId` (primary id OR a XEP-0359-reconciled
+ * id in `wireIds`). XEP-0198 SM acks and the wasm queue/failure callbacks
+ * fire with the client-assigned id, but by the time they arrive the
+ * message's primary id may already have been swapped to the room/server
+ * stanza-id while the original client id moved into `wireIds`. Strict
+ * equality on `m.id` would miss those messages.
+ *
  * Optimised for the XEP-0184 / XEP-0198 fan-out hot path: ack, queue, and
  * failure events arrive on every outbound stanza id and fan out to both
  * the room and DM timelines. The previous implementation always allocated
@@ -36,7 +44,7 @@ export function applyDeliveryEventById<M extends TimelineMessage>(
   messageId: string,
   event: DeliveryEvent,
 ): M[] {
-  const index = timeline.findIndex((m) => m.id === messageId && m.isSelf);
+  const index = timeline.findIndex((m) => m.isSelf && matchMessageId(m, messageId));
   if (index < 0) return timeline;
   const current = timeline[index]!;
   const nextStatus = applyDeliveryEvent(current.deliveryStatus, event);
