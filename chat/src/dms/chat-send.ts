@@ -13,6 +13,9 @@ import {
 import { findMessageById } from "@/lib/message-ids";
 import { applyDeliveryEventById } from "@/lib/timeline-state";
 
+// Derived from the wasm client's return shape; see useMucSend for rationale.
+type ChatSendResult = Awaited<ReturnType<BrowserXmppClient["sendDirectMessage"]>>;
+
 type UseChatSendDeps = {
   session: Ref<WaddleSession | null>;
   xmppClient: Ref<BrowserXmppClient | null>;
@@ -26,7 +29,7 @@ type UseChatSendDeps = {
   // Mirror of useMucSend's contract: the orchestrator handles XEP-0085 chat
   // state cleanup until that axis lands its own composable in PR 5.
   onSendComplete: (
-    result: { state?: string } | null,
+    result: ChatSendResult,
     peerJid: string,
     isStillActive: boolean,
   ) => void;

@@ -16,6 +16,11 @@ import { findMessageById } from "@/lib/message-ids";
 import { applyForumContext } from "@/channels/timeline";
 import { applyDeliveryEventById } from "@/lib/timeline-state";
 
+// Derived from the wasm client's return shape — `OutboundSendResult | null`
+// today, but tracked through the actual method so the union stays in sync
+// without re-declaring the literal `state` values.
+type MucSendResult = Awaited<ReturnType<BrowserXmppClient["sendGroupMessage"]>>;
+
 type UseMucSendDeps = {
   session: Ref<WaddleSession | null>;
   xmppClient: Ref<BrowserXmppClient | null>;
@@ -35,7 +40,7 @@ type UseMucSendDeps = {
   // to clear chat-state debounce timers and mark XEP-0085 state as "active"
   // again. Keeps PR 2 free of chat-states ownership (extracted in PR 5).
   onSendComplete: (
-    result: { state?: string } | null,
+    result: MucSendResult,
     spaceId: string,
     channelId: string,
     isStillCurrentChannel: boolean,
