@@ -233,10 +233,14 @@ describe("PinnedPanel attachment click containment", () => {
       Math.max(0, source.lastIndexOf("<div", source.indexOf("isDecryptingAttachment(img)"))),
       source.indexOf("isDecryptingAttachment(img)"),
     );
+    const encryptedLabel = source.slice(
+      source.indexOf("v-if=\"img.encrypted\""),
+      source.indexOf("<Lock class=\"h-3 w-3", source.indexOf("v-if=\"img.encrypted\"")),
+    );
 
     expect(imagePlaceholder).toContain("Decrypting image…");
     expect(imagePlaceholderContainer).toContain("@click.stop");
-    expect(source).toContain("v-if=\"img.encrypted\"\n          class=\"type-meta type-emphasis flex items-center gap-1 border-t border-border/70 px-2 py-1 text-muted-foreground\"\n          @click.stop");
+    expect(encryptedLabel).toContain("@click.stop");
   });
 });
 
