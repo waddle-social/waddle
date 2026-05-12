@@ -30,8 +30,12 @@ pub use parsing::{
     parse_moderation_payload, parse_reaction_payload, parse_retraction_payload,
 };
 pub use types::{
-    ChatStatePayload, CorrectionPayload, DisplayedMarkerPayload, InboundMessage, InboundPresence,
-    MarkupSpan, MarkupSpanData, MarkupSpanType, MessagingEvent, ModerationPayload, MucAffiliation,
-    MucRole, PresenceHat, ReactionPayload, ReferenceData, RetractionPayload, SendMessageOptions,
-    SharedFile, SharedFileDisposition,
+    ChatStatePayload, CorrectionPayload, DisplayedMarkerPayload, ExtensionCapabilityData,
+    ExtensionCommandNode, ExtensionDisplayText, ExtensionEnrichmentData, ExtensionEnvelopeData,
+    ExtensionLaunchContextData, ExtensionLaunchData, ExtensionNamespace,
+    ExtensionPayloadAttributeData, ExtensionPayloadElementData, ExtensionPluginId,
+    ExtensionRoomJid, ExtensionSourceData, ExtensionTextId, ExtensionTimestamp, ExtensionXmlName,
+    InboundMessage, InboundPresence, MarkupSpan, MarkupSpanData, MarkupSpanType, MessagingEvent,
+    ModerationPayload, MucAffiliation, MucRole, PresenceHat, ReactionPayload, ReferenceData,
+    RetractionPayload, SendMessageOptions, SharedFile, SharedFileDisposition,
 };

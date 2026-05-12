@@ -1,6 +1,6 @@
 import type { ExtensionLaunchDescriptor } from "@/lib/chat-ui";
 import { jidDomain } from "../jid";
-import { INVOKE_COMMAND_NODE, NS_WADDLE_EXTENSION_1 } from "./constants";
+import { NS_WADDLE_EXTENSION_1 } from "./constants";
 import type { DataFormField, ExtensionInvokeIq } from "./types";
 
 export function extensionServiceJidForUserJid(userJid: string): string {
@@ -46,7 +46,7 @@ export function buildExtensionLaunchInvokeIq(
     type: "set",
     to: serviceJid,
     command: {
-      node: INVOKE_COMMAND_NODE,
+      node: requiredLaunchValue(launch.commandNode, "command node"),
       action: "execute",
       form: {
         type: "submit",

@@ -350,4 +350,58 @@ describe("renderStyledBody", () => {
     });
     expect(extensionPresentation(annotation).summary).toBeUndefined();
   });
+
+  test("renders GitHub webhook payloads as status cards", () => {
+    const annotation: ExtensionAnnotation = {
+      extensionId: "github",
+      annotationId: "github-delivery-1",
+      surfaceKind: "message-card",
+      title: "GitHub",
+      summary: "GitHub waddle-social/waddle: ci completed with failure",
+      payloadNamespace: "urn:waddle:web-integration:1",
+      fields: {
+        payloadNamespace: "urn:waddle:web-integration:1",
+      },
+      payloads: [{
+        namespace: "urn:waddle:web-integration:1",
+        name: "github-event",
+        attributes: {
+          "event-type": "workflow_run",
+          action: "completed",
+          repository: "waddle-social/waddle",
+          conclusion: "failure",
+          name: "ci",
+          branch: "main",
+          revision: "1234567890abcdef",
+          url: "https://github.com/waddle-social/waddle/actions/runs/1",
+        },
+        children: [],
+      }],
+      actions: [],
+    };
+
+    expect(extensionPresentation(annotation)).toMatchObject({
+      kind: "github-event",
+      tone: "danger",
+      label: "GitHub",
+      title: "ci",
+      primaryValue: "Failure",
+      primaryUrl: "https://github.com/waddle-social/waddle/actions/runs/1",
+      details: [
+        { label: "Repository", value: "waddle-social/waddle" },
+        { label: "Branch", value: "main" },
+        { label: "Commit", value: "1234567" },
+        { label: "Event", value: "Workflow Run" },
+      ],
+    });
+
+    annotation.payloads![0]!.attributes.conclusion = "error";
+    expect(extensionPresentation(annotation).tone).toBe("danger");
+
+    annotation.payloads![0]!.attributes.url = "javascript:alert(1)";
+    expect(extensionPresentation(annotation).primaryUrl).toBeUndefined();
+
+    annotation.payloads![0]!.attributes.url = "HTTPS://github.com/waddle-social/waddle/actions/runs/2";
+    expect(extensionPresentation(annotation).primaryUrl).toBe("HTTPS://github.com/waddle-social/waddle/actions/runs/2");
+  });
 });

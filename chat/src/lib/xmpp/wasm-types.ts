@@ -46,6 +46,56 @@ export interface WasmStanzaId {
   by: string;
 }
 
+export interface WasmExtensionEnvelope {
+  version: number;
+  enrichments: WasmExtensionEnrichment[];
+}
+
+export interface WasmExtensionEnrichment {
+  id: string;
+  plugin: string;
+  capability: string;
+  payload_namespace: string;
+  created: string;
+  source?: WasmExtensionSource;
+  title?: string;
+  summary?: string;
+  payloads: WasmExtensionPayloadElement[];
+  launches: WasmExtensionLaunch[];
+}
+
+export interface WasmExtensionSource {
+  stanza_id: string;
+  body_start?: number;
+  body_end?: number;
+}
+
+export interface WasmExtensionLaunch {
+  id: string;
+  plugin: string;
+  action: string;
+  command_node: string;
+  label: string;
+  context: WasmExtensionLaunchContext;
+  payloads: WasmExtensionPayloadElement[];
+  expires_at?: string;
+  token?: string;
+}
+
+export interface WasmExtensionLaunchContext {
+  waddle_id: string;
+  room?: string;
+  source_stanza_id?: string;
+}
+
+export interface WasmExtensionPayloadElement {
+  namespace: string;
+  name: string;
+  attributes: Array<{ name: string; value: string }>;
+  text?: string;
+  children: WasmExtensionPayloadElement[];
+}
+
 export interface WasmMessage {
   id?: string;
   from?: string;
@@ -85,6 +135,8 @@ export interface WasmMessage {
   forum_thread_title?: string;
   is_sticker: boolean;
   shared_files: WasmSharedFile[];
+  extension_envelope?: WasmExtensionEnvelope;
+  extension_body_fallback?: boolean;
   /** urn:waddle:pin:0 pin/unpin event surfaced by the room (#414). */
   pin_event?: WasmPinEvent;
 }

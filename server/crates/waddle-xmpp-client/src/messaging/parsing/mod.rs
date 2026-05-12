@@ -13,8 +13,8 @@ use self::files::{parse_file_sharing_element, parse_shared_file};
 use self::markup::parse_markup_spans;
 pub use self::payloads::{
     parse_chat_state_payload, parse_correction_payload, parse_displayed_marker_payload,
-    parse_moderation_payload, parse_reaction_payload, parse_retraction_payload,
-    parse_retraction_tombstone_payload,
+    parse_extension_envelope, parse_moderation_payload, parse_reaction_payload,
+    parse_retraction_payload, parse_retraction_tombstone_payload,
 };
 use super::namespaces::*;
 use super::presence::parse_presence;
@@ -108,6 +108,9 @@ fn parse_message(el: &Element) -> Option<InboundMessage> {
     let reaction_emojis = reaction.map(|payload| payload.emojis).unwrap_or_default();
 
     let pin_event = crate::pin::extract_pin_event_from_message(el);
+    let extension_envelope = parse_extension_envelope(el);
+    let extension_body_fallback = extension_envelope.is_some()
+        && crate::xep::fallback::has_whole_body_fallback_for(el, NS_WADDLE_EXTENSION);
 
     let reply_marker = xep_reply::parse_reply(el);
     let reply_to_id = reply_marker.as_ref().map(|m| m.id.clone());
@@ -327,6 +330,8 @@ fn parse_message(el: &Element) -> Option<InboundMessage> {
         parent_thread_id,
         is_sticker,
         pin_event,
+        extension_envelope,
+        extension_body_fallback,
     })
 }
 

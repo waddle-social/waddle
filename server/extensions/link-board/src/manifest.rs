@@ -37,6 +37,13 @@ pub(super) fn manifest() -> types::ExtensionManifest {
             payload_namespace: payload_namespace(),
         }],
         pubsub_nodes: vec![links_node_template()],
+        profile: Some(types::ExtensionProfile {
+            display_name: display(PLUGIN_NAME),
+            description: Some(display("Saved link collector")),
+            accent: Some("cyan".to_string()),
+            avatar: None,
+            bot_hat_label: Some(display("Bot")),
+        }),
         artifact: None,
     }
 }

@@ -165,9 +165,11 @@ use groupchat_validation::{
 use offline_delivery::queue_offline_delivery;
 use room_dispatch::dispatch_to_room;
 #[cfg(test)]
+use room_helpers::available_bot_nick;
+#[cfg(test)]
 use room_helpers::message_thread_id;
 use room_helpers::{
-    available_bot_nick, enrich_message_event, normalize_thread_create_source,
+    available_bot_nick_with_base, enrich_message_event, normalize_thread_create_source,
     session_is_server_owner,
 };
 use room_pin::apply_pin_change_event;

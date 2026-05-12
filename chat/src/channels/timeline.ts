@@ -29,6 +29,7 @@ export function mapLiveRoomMessageToTimeline(
   if (msg.extensionAnnotations && msg.extensionAnnotations.length > 0) {
     tm.extensionAnnotations = msg.extensionAnnotations;
   }
+  if (msg.extensionBodyFallback) tm.extensionBodyFallback = true;
   if (msg.isSticker) tm.isSticker = true;
   if (msg.broadcastMention) tm.broadcastMention = msg.broadcastMention;
   if (msg.markup && msg.markup.length > 0) tm.markup = msg.markup;

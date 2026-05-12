@@ -31,6 +31,7 @@ pub mod carbons;
 pub mod carbons_message;
 pub mod enrichment_dispatch;
 pub mod errors;
+pub mod framework_envelope;
 pub mod inbox;
 pub mod offline_delivery;
 pub mod ping;
@@ -65,31 +66,35 @@ pub fn register_default_handlers(dispatcher: &mut StanzaDispatcher) {
 /// 1. [`blocking_filter::BlockingFilterHandler`] (XEP-0191) — drop
 ///    blocked stanzas before they reach later stages (privacy
 ///    invariant).
-/// 2. [`rich_target_validation::RichTargetValidationHandler`]
+/// 2. [`framework_envelope::FrameworkEnvelopeGuardHandler`] — reject
+///    client-authored Waddle framework envelopes on direct messages before
+///    archive/inbox/delivery can persist or render forged extension UI.
+/// 3. [`rich_target_validation::RichTargetValidationHandler`]
 ///    (XEP-0308 / 0424 / 0461) — validate rich-message targets
 ///    against the archive before stamping or routing.
-/// 3. [`canonicalize::CanonicalizeHandler`] (XEP-0359) — strip
+/// 4. [`canonicalize::CanonicalizeHandler`] (XEP-0359) — strip
 ///    foreign `<stanza-id>` siblings and stamp under the local
 ///    archive.
-/// 4. [`enrichment_dispatch::EnrichmentDispatchHandler`] — request
+/// 5. [`enrichment_dispatch::EnrichmentDispatchHandler`] — request
 ///    embed enrichment via two-phase callback so later stages see the
 ///    rewritten message.
-/// 5. [`archive::ArchiveHandler`] (XEP-0313) — persist to MAM under
+/// 6. [`archive::ArchiveHandler`] (XEP-0313) — persist to MAM under
 ///    the local user's archive (sender-side and recipient-side
 ///    distinct entries).
-/// 6. [`carbons_message::CarbonsMessageHandler`] (XEP-0280) — fan
+/// 7. [`carbons_message::CarbonsMessageHandler`] (XEP-0280) — fan
 ///    out sent / received carbons to other resources of the local
 ///    user.
-/// 7. [`inbox::InboxHandler`] — project the conversation into the
+/// 8. [`inbox::InboxHandler`] — project the conversation into the
 ///    Waddle inbox.
-/// 8. [`route::RouteHandler`] — final stage for the content stanza:
+/// 9. [`route::RouteHandler`] — final stage for the content stanza:
 ///    route 1:1 to the destination connection, dispatch groupchat to
 ///    the room chain, or write to the local wire on the recipient pass.
-/// 9. [`receipts::ReceiptsHandler`] (XEP-0184) — after the content
-///    stanza is queued for delivery, emit a separate receipt route for
-///    eligible direct messages that requested one.
+/// 10. [`receipts::ReceiptsHandler`] (XEP-0184) — after the content
+///     stanza is queued for delivery, emit a separate receipt route for
+///     eligible direct messages that requested one.
 pub fn register_default_message_handlers(dispatcher: &mut StanzaDispatcher) {
     dispatcher.register_message(Arc::new(blocking_filter::BlockingFilterHandler));
+    dispatcher.register_message(Arc::new(framework_envelope::FrameworkEnvelopeGuardHandler));
     dispatcher.register_message(Arc::new(
         rich_target_validation::RichTargetValidationHandler,
     ));

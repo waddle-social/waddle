@@ -4,7 +4,7 @@ use super::exports::waddle::extension as wit_exports;
 use super::waddle::extension::types as wit_types;
 use crate::types::{
     CommandDescriptor, CommandNode, CommandScope, DisplayText, EnrichmentId, ExtensionCapability,
-    ExtensionEffect, ExtensionEnvelope, ExtensionManifest, ExtensionResponse,
+    ExtensionEffect, ExtensionEnvelope, ExtensionManifest, ExtensionProfile, ExtensionResponse,
     ExtensionRouteDescriptor, ExtensionRouteScope, ExtensionRouteSurface, FullJidValue,
     MessageEnrichment, PayloadNamespace, PayloadRoot, PayloadRule, PayloadSurface, PluginId,
     PluginVersion, PubSubNode, ReplyTarget, RouteId, StanzaId, Timestamp,
@@ -39,7 +39,28 @@ impl TryFrom<wit_exports::lifecycle::ExtensionManifest> for ExtensionManifest {
                 .into_iter()
                 .map(|node| wit_newtype_to_domain!(node, PubSubNode))
                 .collect::<Result<Vec<_>>>()?,
+            profile: value.profile.map(TryInto::try_into).transpose()?,
             artifact: value.artifact.map(TryInto::try_into).transpose()?,
+        })
+    }
+}
+
+impl TryFrom<wit_types::ExtensionProfile> for ExtensionProfile {
+    type Error = anyhow::Error;
+
+    fn try_from(value: wit_types::ExtensionProfile) -> Result<Self> {
+        Ok(Self {
+            display_name: wit_newtype_to_domain!(value.display_name, DisplayText)?,
+            description: value
+                .description
+                .map(|description| wit_newtype_to_domain!(description, DisplayText))
+                .transpose()?,
+            accent: value.accent,
+            avatar: value.avatar.map(TryInto::try_into).transpose()?,
+            bot_hat_label: value
+                .bot_hat_label
+                .map(|label| wit_newtype_to_domain!(label, DisplayText))
+                .transpose()?,
         })
     }
 }
@@ -294,5 +315,35 @@ mod tests {
                 .expect("convert");
         assert!(descriptor.composer_prefix.is_none());
         assert!(descriptor.inline_field.is_none());
+    }
+
+    #[test]
+    fn extension_profile_round_trip_carries_bot_identity_metadata() {
+        let profile: ExtensionProfile = wit_types::ExtensionProfile {
+            display_name: wit_types::DisplayText {
+                value: "GitHub".to_string(),
+            },
+            description: Some(wit_types::DisplayText {
+                value: "GitHub webhook alerts".to_string(),
+            }),
+            accent: Some("green".to_string()),
+            avatar: None,
+            bot_hat_label: Some(wit_types::DisplayText {
+                value: "Bot".to_string(),
+            }),
+        }
+        .try_into()
+        .expect("convert");
+
+        assert_eq!(profile.display_name.as_str(), "GitHub");
+        assert_eq!(
+            profile.description.as_ref().map(DisplayText::as_str),
+            Some("GitHub webhook alerts")
+        );
+        assert_eq!(profile.accent.as_deref(), Some("green"));
+        assert_eq!(
+            profile.bot_hat_label.as_ref().map(DisplayText::as_str),
+            Some("Bot")
+        );
     }
 }

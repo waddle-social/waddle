@@ -57,6 +57,70 @@ pub struct WaddleMessage {
     /// urn:waddle:pin:0 pin/unpin event surfaced from a system message
     /// (#414). `None` when the message carries no `<pin-event/>`.
     pub pin_event: Option<WaddlePinEvent>,
+    pub extension_envelope: Option<WaddleExtensionEnvelope>,
+    pub extension_body_fallback: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct WaddleExtensionEnvelope {
+    pub version: u32,
+    pub enrichments: Vec<WaddleExtensionEnrichment>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct WaddleExtensionEnrichment {
+    pub id: String,
+    pub plugin: String,
+    pub capability: String,
+    pub payload_namespace: String,
+    pub created: String,
+    pub source: Option<WaddleExtensionSource>,
+    pub title: Option<String>,
+    pub summary: Option<String>,
+    pub payloads: Vec<WaddleExtensionPayloadElement>,
+    pub launches: Vec<WaddleExtensionLaunch>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct WaddleExtensionSource {
+    pub stanza_id: String,
+    pub body_start: Option<u32>,
+    pub body_end: Option<u32>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct WaddleExtensionLaunch {
+    pub id: String,
+    pub plugin: String,
+    pub action: String,
+    pub command_node: String,
+    pub label: String,
+    pub context: WaddleExtensionLaunchContext,
+    pub payloads: Vec<WaddleExtensionPayloadElement>,
+    pub expires_at: Option<String>,
+    pub token: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct WaddleExtensionLaunchContext {
+    pub waddle_id: String,
+    pub room: Option<String>,
+    pub source_stanza_id: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct WaddleExtensionPayloadElement {
+    pub namespace: String,
+    pub name: String,
+    pub attributes: Vec<WaddleExtensionPayloadAttribute>,
+    pub text: Option<String>,
+    pub children: Vec<WaddleExtensionPayloadElement>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct WaddleExtensionPayloadAttribute {
+    pub name: String,
+    pub value: String,
 }
 
 /// Pin/unpin event surfaced from an inbound system message (#414).
@@ -141,6 +205,8 @@ pub struct WaddleArchivedMessage {
     pub is_sticker: bool,
     pub author_real_jid: Option<String>,
     pub shared_files: Vec<WaddleSharedFile>,
+    pub extension_envelope: Option<WaddleExtensionEnvelope>,
+    pub extension_body_fallback: bool,
 }
 
 #[derive(Debug, Serialize)]

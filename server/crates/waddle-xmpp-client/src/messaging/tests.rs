@@ -27,6 +27,124 @@ fn parse_message_with_body() {
 }
 
 #[test]
+fn parse_message_with_waddle_extension_envelope() {
+    let e = el("<message xmlns='jabber:client' \
+         from='room@conf.example/github' \
+         to='bob@example.com' \
+         type='groupchat' \
+         id='msg-extension'>\
+         <body>GitHub waddle-social/waddle: ci completed with failure</body>\
+         <fallback xmlns='urn:xmpp:fallback:0' for='urn:waddle:extension:1'>\
+           <body/>\
+         </fallback>\
+         <extensions xmlns='urn:waddle:extension:1' version='1'>\
+           <enrichment id='github-delivery-1' plugin='github' capability='message.enrich' payload-ns='urn:waddle:web-integration:1' created='2026-05-12T00:00:00Z'>\
+             <source stanza-id='room-stanza-1'/>\
+             <payload>\
+               <view id='github-event' title='GitHub'>\
+                 <text style='body'>GitHub waddle-social/waddle: ci completed with failure</text>\
+               </view>\
+               <github-event xmlns='urn:waddle:web-integration:1' event-type='workflow_run' repository='waddle-social/waddle' conclusion='failure' name='ci'>\
+                 <detail xmlns='urn:example:webhook:detail' id='nested'/>\
+               </github-event>\
+             </payload>\
+             <launch id='retry-1' plugin='github' action='retry' command-node='urn:waddle:extension:1:invoke' label='Retry' expires-at='2026-05-12T00:05:00Z' token='signed-token'>\
+               <context waddle-id='github-delivery-1' room='room@conf.example' stanza-id='room-stanza-1'/>\
+             </launch>\
+           </enrichment>\
+         </extensions>\
+         </message>");
+    let MessagingEvent::Message(msg) = parse(&e).unwrap() else {
+        panic!("expected Message");
+    };
+
+    let envelope = msg.extension_envelope.expect("extension envelope");
+    assert_eq!(envelope.version, 1);
+    let enrichment = envelope.enrichments.first().expect("enrichment");
+    assert_eq!(enrichment.plugin.as_str(), "github");
+    assert_eq!(enrichment.capability.as_str(), "message.enrich");
+    assert_eq!(enrichment.created.as_str(), "2026-05-12T00:00:00Z");
+    assert_eq!(
+        enrichment.title.as_ref().map(|title| title.as_str()),
+        Some("GitHub")
+    );
+    assert_eq!(
+        enrichment.payload_namespace.as_str(),
+        "urn:waddle:web-integration:1"
+    );
+    assert_eq!(
+        enrichment
+            .source
+            .as_ref()
+            .expect("source")
+            .stanza_id
+            .as_str(),
+        "room-stanza-1"
+    );
+    assert_eq!(enrichment.payloads.len(), 1);
+    let payload = &enrichment.payloads[0];
+    assert_eq!(payload.name.as_str(), "github-event");
+    assert!(payload
+        .attributes
+        .iter()
+        .any(|attribute| attribute.name.as_str() == "repository"
+            && attribute.value == "waddle-social/waddle"));
+    let nested = payload.children.first().expect("nested payload child");
+    assert_eq!(nested.name.as_str(), "detail");
+    assert_eq!(nested.namespace.as_str(), "urn:example:webhook:detail");
+    assert!(nested
+        .attributes
+        .iter()
+        .any(|attribute| attribute.name.as_str() == "id" && attribute.value == "nested"));
+    assert_eq!(enrichment.launches.len(), 1);
+    assert_eq!(enrichment.launches[0].id.as_str(), "retry-1");
+    assert_eq!(
+        enrichment.launches[0].command_node.as_str(),
+        "urn:waddle:extension:1:invoke"
+    );
+    assert_eq!(enrichment.launches[0].label.as_str(), "Retry");
+    assert_eq!(
+        enrichment.launches[0]
+            .expires_at
+            .as_ref()
+            .map(|timestamp| timestamp.as_str()),
+        Some("2026-05-12T00:05:00Z")
+    );
+    assert_eq!(
+        enrichment.launches[0]
+            .context
+            .room
+            .as_ref()
+            .map(|room| room.as_str()),
+        Some("room@conf.example")
+    );
+    assert!(msg.extension_body_fallback);
+}
+
+#[test]
+fn parse_message_keeps_body_when_extension_fallback_has_no_renderable_envelope() {
+    let e = el("<message xmlns='jabber:client' \
+         from='room@conf.example/github' \
+         to='bob@example.com' \
+         type='groupchat' \
+         id='msg-extension'>\
+         <body>GitHub waddle-social/waddle: ci completed with failure</body>\
+         <fallback xmlns='urn:xmpp:fallback:0' for='urn:waddle:extension:1'>\
+           <body/>\
+         </fallback>\
+         <extensions xmlns='urn:waddle:extension:1' version='1'>\
+           <enrichment id='github-delivery-1' plugin='github' capability='message.observe' payload-ns='urn:waddle:web-integration:1' created='2026-05-12T00:00:00Z'/>\
+         </extensions>\
+         </message>");
+    let MessagingEvent::Message(msg) = parse(&e).unwrap() else {
+        panic!("expected Message");
+    };
+
+    assert!(msg.extension_envelope.is_none());
+    assert!(!msg.extension_body_fallback);
+}
+
+#[test]
 fn parse_message_with_delay() {
     use chrono::Datelike;
     let e = el("<message xmlns='jabber:client' type='groupchat' id='m2'>\

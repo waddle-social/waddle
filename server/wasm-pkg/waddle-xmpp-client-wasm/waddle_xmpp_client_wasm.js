@@ -1,7 +1,7 @@
 /* @ts-self-types="./waddle_xmpp_client_wasm.d.ts" */
-import wasmUrl from "./waddle_xmpp_client_wasm_bg.wasm?url&b=mox6mrk4";
-import * as bgModule from "./waddle_xmpp_client_wasm_bg.js?b=mox6mrk4";
-import { __wbg_set_wasm } from "./waddle_xmpp_client_wasm_bg.js?b=mox6mrk4";
+import wasmUrl from "./waddle_xmpp_client_wasm_bg.wasm?url&b=mp2l4pjr";
+import * as bgModule from "./waddle_xmpp_client_wasm_bg.js?b=mp2l4pjr";
+import { __wbg_set_wasm } from "./waddle_xmpp_client_wasm_bg.js?b=mp2l4pjr";
 
 let initPromise;
 
@@ -26,4 +26,4 @@ export default async function init() {
   return initPromise;
 }
 
-export { WaddleClient, WaddleConfig } from "./waddle_xmpp_client_wasm_bg.js?b=mox6mrk4";
+export { WaddleClient, WaddleConfig } from "./waddle_xmpp_client_wasm_bg.js?b=mp2l4pjr";
