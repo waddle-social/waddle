@@ -44,7 +44,9 @@ fn parse_message_with_waddle_extension_envelope() {
                <view id='github-event' title='GitHub'>\
                  <text style='body'>GitHub waddle-social/waddle: ci completed with failure</text>\
                </view>\
-               <github-event xmlns='urn:waddle:web-integration:1' event-type='workflow_run' repository='waddle-social/waddle' conclusion='failure' name='ci'/>\
+               <github-event xmlns='urn:waddle:web-integration:1' event-type='workflow_run' repository='waddle-social/waddle' conclusion='failure' name='ci'>\
+                 <detail xmlns='urn:example:webhook:detail' id='nested'/>\
+               </github-event>\
              </payload>\
              <launch id='retry-1' plugin='github' action='retry' command-node='urn:waddle:extension:1:invoke' label='Retry' expires-at='2026-05-12T00:05:00Z' token='signed-token'>\
                <context waddle-id='github-delivery-1' room='room@conf.example' stanza-id='room-stanza-1'/>\
@@ -87,6 +89,13 @@ fn parse_message_with_waddle_extension_envelope() {
         .iter()
         .any(|attribute| attribute.name.as_str() == "repository"
             && attribute.value == "waddle-social/waddle"));
+    let nested = payload.children.first().expect("nested payload child");
+    assert_eq!(nested.name.as_str(), "detail");
+    assert_eq!(nested.namespace.as_str(), "urn:example:webhook:detail");
+    assert!(nested
+        .attributes
+        .iter()
+        .any(|attribute| attribute.name.as_str() == "id" && attribute.value == "nested"));
     assert_eq!(enrichment.launches.len(), 1);
     assert_eq!(enrichment.launches[0].id.as_str(), "retry-1");
     assert_eq!(

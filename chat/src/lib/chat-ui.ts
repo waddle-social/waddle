@@ -479,6 +479,7 @@ function githubEventPresentation(
     ...(attrs.revision ? [{ label: "Commit", value: attrs.revision.slice(0, 7) }] : []),
     ...(attrs["event-type"] ? [{ label: "Event", value: humanizeExtensionKey(attrs["event-type"]) }] : []),
   ];
+  const primaryUrl = safeExternalUrl(attrs.url);
   return {
     kind: "github-event",
     tone: githubTone(conclusion),
@@ -487,10 +488,21 @@ function githubEventPresentation(
     summary,
     primaryValue: conclusion && conclusion !== "unknown" ? humanizeExtensionKey(conclusion) : humanizeExtensionKey(action),
     secondaryValue: repository,
-    ...(attrs.url ? { primaryUrl: attrs.url } : {}),
+    ...(primaryUrl ? { primaryUrl } : {}),
     options: [],
     details,
   };
+}
+
+function safeExternalUrl(value: string | undefined): string | undefined {
+  const trimmed = value?.trim();
+  if (!trimmed) return undefined;
+  try {
+    const url = new URL(trimmed);
+    return url.protocol === "http:" || url.protocol === "https:" ? trimmed : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function githubSummary(repository: string, name: string, action: string, conclusion: string): string {

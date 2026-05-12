@@ -69,6 +69,12 @@ const {
 } = useMessageAttachments(messageRef);
 
 const extensionAnnotations = computed(() => props.message.extensionAnnotations ?? []);
+const extensionCards = computed(() =>
+  extensionAnnotations.value.map((annotation) => ({
+    annotation,
+    presentation: extensionPresentation(annotation),
+  })),
+);
 
 const {
   actionState: extensionActionState,
@@ -183,65 +189,65 @@ function emitImageClick(file: TimelineSharedFile, _index: number) {
     </div>
 
     <!-- Waddle extension annotations -->
-    <div v-if="extensionAnnotations.length > 0" class="flex flex-col gap-2">
+    <div v-if="extensionCards.length > 0" class="flex flex-col gap-2">
       <div
-        v-for="annotation in extensionAnnotations"
-        :key="`${annotation.extensionId}:${annotation.annotationId}`"
+        v-for="card in extensionCards"
+        :key="`${card.annotation.extensionId}:${card.annotation.annotationId}`"
         class="chat-extension-card flex min-w-0 items-start gap-3 rounded-lg border p-3 text-left"
-        :class="extensionPresentation(annotation).kind === 'github-event'
+        :class="card.presentation.kind === 'github-event'
           ? 'chat-github-card border-emerald-500/25 bg-emerald-500/5'
           : 'border-border bg-muted/25'"
       >
         <span
           class="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-md bg-background text-foreground ring-1 ring-border"
-          :class="extensionPresentation(annotation).kind === 'github-event' ? 'text-emerald-700 dark:text-emerald-300' : ''"
+          :class="card.presentation.kind === 'github-event' ? 'text-emerald-700 dark:text-emerald-300' : ''"
         >
-          <MessageSquare v-if="annotation.surfaceKind === 'chat-bot'" class="h-4 w-4 text-primary/80" aria-hidden="true" />
-          <Github v-else-if="extensionPresentation(annotation).kind === 'github-event'" class="h-4 w-4" aria-hidden="true" />
+          <MessageSquare v-if="card.annotation.surfaceKind === 'chat-bot'" class="h-4 w-4 text-primary/80" aria-hidden="true" />
+          <Github v-else-if="card.presentation.kind === 'github-event'" class="h-4 w-4" aria-hidden="true" />
           <LayoutDashboard v-else class="h-4 w-4" aria-hidden="true" />
         </span>
         <span class="min-w-0 flex-1">
           <span class="flex min-w-0 items-center justify-between gap-2">
             <span class="type-section-label min-w-0 text-muted-foreground">
-              {{ extensionPresentation(annotation).label || extensionSurfaceLabel(annotation.surfaceKind) }}
+              {{ card.presentation.label || extensionSurfaceLabel(card.annotation.surfaceKind) }}
             </span>
             <span
-              v-if="extensionPresentation(annotation).primaryValue"
+              v-if="card.presentation.primaryValue"
               class="type-meta flex-shrink-0 rounded-md border px-1.5 py-0.5"
               :class="[
-                extensionPresentation(annotation).tone === 'danger' ? 'border-destructive/30 bg-destructive/10 text-destructive' : '',
-                extensionPresentation(annotation).tone === 'success' ? 'border-success/30 bg-success/10 text-success' : '',
-                extensionPresentation(annotation).tone === 'warning' ? 'border-warning/30 bg-warning/10 text-warning' : '',
-                extensionPresentation(annotation).tone === 'neutral' ? 'border-border bg-background text-muted-foreground' : '',
+                card.presentation.tone === 'danger' ? 'border-destructive/30 bg-destructive/10 text-destructive' : '',
+                card.presentation.tone === 'success' ? 'border-success/30 bg-success/10 text-success' : '',
+                card.presentation.tone === 'warning' ? 'border-warning/30 bg-warning/10 text-warning' : '',
+                card.presentation.tone === 'neutral' ? 'border-border bg-background text-muted-foreground' : '',
               ]"
             >
-              {{ extensionPresentation(annotation).primaryValue }}
+              {{ card.presentation.primaryValue }}
             </span>
           </span>
           <span class="type-control block break-words text-foreground">
-            {{ extensionPresentation(annotation).title }}
+            {{ card.presentation.title }}
           </span>
           <a
-            v-if="extensionPresentation(annotation).primaryUrl && !compact"
-            :href="extensionPresentation(annotation).primaryUrl"
+            v-if="card.presentation.primaryUrl && !compact"
+            :href="card.presentation.primaryUrl"
             target="_blank"
             rel="noreferrer"
             class="type-caption mt-1 inline-flex min-w-0 items-center gap-1 text-primary hover:underline"
             @click.stop
           >
-            <span class="min-w-0 truncate">{{ extensionPresentation(annotation).primaryUrl }}</span>
+            <span class="min-w-0 truncate">{{ card.presentation.primaryUrl }}</span>
             <ExternalLink class="h-3.5 w-3.5 flex-shrink-0" aria-hidden="true" />
           </a>
-          <span v-if="extensionPresentation(annotation).summary" class="type-caption mt-1 block break-words text-muted-foreground">
-            {{ extensionPresentation(annotation).summary }}
+          <span v-if="card.presentation.summary" class="type-caption mt-1 block break-words text-muted-foreground">
+            {{ card.presentation.summary }}
           </span>
           <span
-            v-if="extensionPresentation(annotation).options.length > 0"
+            v-if="card.presentation.options.length > 0"
             class="mt-2 grid gap-1"
           >
             <span
-              v-for="option in extensionPresentation(annotation).options"
-              :key="`${annotation.annotationId}:option:${option.id}`"
+              v-for="option in card.presentation.options"
+              :key="`${card.annotation.annotationId}:option:${option.id}`"
               class="type-caption flex min-w-0 items-center justify-between gap-3 rounded-md bg-background/70 px-2 py-1.5 text-foreground ring-1 ring-border/70"
             >
               <span class="min-w-0 break-words">{{ option.label }}</span>
@@ -249,12 +255,12 @@ function emitImageClick(file: TimelineSharedFile, _index: number) {
             </span>
           </span>
           <dl
-            v-if="extensionPresentation(annotation).details.length > 0"
+            v-if="card.presentation.details.length > 0"
             class="mt-2 grid min-w-0 grid-cols-[max-content_minmax(0,1fr)] gap-x-2 gap-y-1"
           >
             <template
-              v-for="detail in extensionPresentation(annotation).details"
-              :key="`${annotation.annotationId}:${detail.label}:${detail.value}`"
+              v-for="detail in card.presentation.details"
+              :key="`${card.annotation.annotationId}:${detail.label}:${detail.value}`"
             >
               <dt class="type-meta text-muted-foreground/70">{{ detail.label }}</dt>
               <dd class="type-caption min-w-0 break-words text-foreground/85" :title="detail.value">{{ detail.value }}</dd>
@@ -262,50 +268,50 @@ function emitImageClick(file: TimelineSharedFile, _index: number) {
           </dl>
           <!-- Action buttons: only shown in non-compact (timeline) mode -->
           <template v-if="!compact">
-            <span v-if="annotation.actions.length > 0" class="mt-2 flex flex-wrap gap-2">
+            <span v-if="card.annotation.actions.length > 0" class="mt-2 flex flex-wrap gap-2">
               <button
-                v-for="action in annotation.actions"
-                :key="`${annotation.annotationId}:${action.route}:${action.label}`"
+                v-for="action in card.annotation.actions"
+                :key="`${card.annotation.annotationId}:${action.route}:${action.label}`"
                 type="button"
                 class="type-caption inline-flex min-h-8 items-center gap-1.5 rounded-md border border-border bg-background px-2.5 py-1.5 text-foreground transition-colors hover:bg-muted disabled:cursor-not-allowed disabled:opacity-60"
-                :disabled="extensionActionState(annotation.annotationId, action)?.state === 'loading' || !action.launch"
-                :title="extensionActionState(annotation.annotationId, action)?.detail ?? action.launch?.commandNode ?? action.label"
-                @click.stop="invokeExtension(annotation.annotationId, action)"
+                :disabled="extensionActionState(card.annotation.annotationId, action)?.state === 'loading' || !action.launch"
+                :title="extensionActionState(card.annotation.annotationId, action)?.detail ?? action.launch?.commandNode ?? action.label"
+                @click.stop="invokeExtension(card.annotation.annotationId, action)"
               >
                 <LoaderCircle
-                  v-if="extensionActionState(annotation.annotationId, action)?.state === 'loading'"
+                  v-if="extensionActionState(card.annotation.annotationId, action)?.state === 'loading'"
                   class="h-3.5 w-3.5 animate-spin text-primary/80"
                   aria-hidden="true"
                 />
                 <CheckCircle2
-                  v-else-if="extensionActionState(annotation.annotationId, action)?.state === 'success'"
+                  v-else-if="extensionActionState(card.annotation.annotationId, action)?.state === 'success'"
                   class="h-3.5 w-3.5 text-success"
                   aria-hidden="true"
                 />
                 <AlertCircle
-                  v-else-if="extensionActionState(annotation.annotationId, action)?.state === 'warning'"
+                  v-else-if="extensionActionState(card.annotation.annotationId, action)?.state === 'warning'"
                   class="h-3.5 w-3.5 text-warning"
                   aria-hidden="true"
                 />
                 <AlertCircle
-                  v-else-if="extensionActionState(annotation.annotationId, action)?.state === 'error'"
+                  v-else-if="extensionActionState(card.annotation.annotationId, action)?.state === 'error'"
                   class="h-3.5 w-3.5 text-destructive"
                   aria-hidden="true"
                 />
                 {{ action.label }}
-                <span v-if="actionStatusLabel(annotation.annotationId, action)" class="text-muted-foreground">
-                  {{ actionStatusLabel(annotation.annotationId, action) }}
+                <span v-if="actionStatusLabel(card.annotation.annotationId, action)" class="text-muted-foreground">
+                  {{ actionStatusLabel(card.annotation.annotationId, action) }}
                 </span>
               </button>
             </span>
             <span
-              v-for="action in annotation.actions"
-              :key="`${annotation.annotationId}:${action.route}:state`"
-              v-show="extensionActionState(annotation.annotationId, action)?.detail && extensionActionState(annotation.annotationId, action)?.state !== 'success'"
+              v-for="action in card.annotation.actions"
+              :key="`${card.annotation.annotationId}:${action.route}:state`"
+              v-show="extensionActionState(card.annotation.annotationId, action)?.detail && extensionActionState(card.annotation.annotationId, action)?.state !== 'success'"
               class="type-caption mt-1 block"
-              :class="extensionActionState(annotation.annotationId, action)?.state === 'error' ? 'text-destructive' : 'text-warning'"
+              :class="extensionActionState(card.annotation.annotationId, action)?.state === 'error' ? 'text-destructive' : 'text-warning'"
             >
-              {{ extensionActionState(annotation.annotationId, action)?.detail }}
+              {{ extensionActionState(card.annotation.annotationId, action)?.detail }}
             </span>
           </template>
         </span>

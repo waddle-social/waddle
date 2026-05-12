@@ -174,7 +174,6 @@ fn parse_extension_payload_element(element: &Element) -> Option<ExtensionPayload
         .collect::<Vec<_>>();
     let children = element
         .children()
-        .filter(|child| child.ns() == element.ns())
         .filter_map(parse_extension_payload_element)
         .collect();
     let text = element.text().trim().to_string();

@@ -397,5 +397,11 @@ describe("renderStyledBody", () => {
 
     annotation.payloads![0]!.attributes.conclusion = "error";
     expect(extensionPresentation(annotation).tone).toBe("danger");
+
+    annotation.payloads![0]!.attributes.url = "javascript:alert(1)";
+    expect(extensionPresentation(annotation).primaryUrl).toBeUndefined();
+
+    annotation.payloads![0]!.attributes.url = "HTTPS://github.com/waddle-social/waddle/actions/runs/2";
+    expect(extensionPresentation(annotation).primaryUrl).toBe("HTTPS://github.com/waddle-social/waddle/actions/runs/2");
   });
 });

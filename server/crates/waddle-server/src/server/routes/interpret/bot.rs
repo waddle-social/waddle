@@ -1,8 +1,6 @@
 use super::groupchat_archive::{extract_room_stanza_id, room_scoped_reply_to_attr};
 use super::*;
 
-const WADDLE_EXTENSION_BOT_HAT_URI: &str = "urn:waddle:hats:bot";
-
 pub(super) struct BotGroupchatDispatch<'a> {
     pub(super) room_jid: &'a BareJid,
     pub(super) occupants: &'a [OccupantSnapshot],
@@ -298,12 +296,10 @@ pub(crate) async fn dispatch_extension_bot_groupchat_response(
                         .map(|label| {
                             waddle_xmpp::xep::xep0317::Hat::new(
                                 label.as_str(),
-                                WADDLE_EXTENSION_BOT_HAT_URI,
+                                waddle_xmpp::xep::xep0317::well_known::BOT,
                             )
                         })
-                        .unwrap_or_else(|| {
-                            waddle_xmpp::xep::xep0317::Hat::new("Bot", WADDLE_EXTENSION_BOT_HAT_URI)
-                        });
+                        .unwrap_or_else(waddle_xmpp::xep::xep0317::Hat::bot);
                     waddle_xmpp::xep::xep0317::set_hats(
                         &mut presence,
                         &waddle_xmpp::xep::xep0317::HatSet::new().with_hat(bot_hat),
