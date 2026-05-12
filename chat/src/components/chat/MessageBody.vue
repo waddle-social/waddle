@@ -50,7 +50,7 @@ const {
   pdfAttachments,
   downloadableAttachments,
   displayBody,
-  isGif,
+  isInlineImageBodyUrl,
   lightboxOpen,
   lightboxIndex,
   lightboxImages,
@@ -60,7 +60,7 @@ const {
   attachmentError,
   isDecryptingAttachment,
   openLightbox,
-  openGifLightbox,
+  openInlineImageLightbox,
   downloadAttachment,
 } = useMessageAttachments(messageRef);
 
@@ -112,7 +112,7 @@ watch(
     />
 
     <!-- Sticker: single image rendered at thumb size, with decryption support.
-         v-else-if chains with displayBody and isGif so only one body/media branch
+         v-else-if chains with displayBody and isInlineImageBodyUrl so only one body/media branch
          renders per message (XEP-0449 stickers carry a <body> alt-text that must
          not also render as a text bubble). -->
     <div v-else-if="isSticker">
@@ -140,17 +140,17 @@ watch(
       </div>
     </div>
 
-    <!-- Inline GIF -->
-    <div v-else-if="isGif">
+    <!-- Inline image body URL -->
+    <div v-else-if="isInlineImageBodyUrl">
       <img
         :src="message.body.trim()"
-        alt="GIF"
+        alt="Image"
         :class="[
-          'rounded-lg border border-border object-contain',
+          'rounded-lg border border-border object-contain cursor-pointer transition-opacity hover:opacity-90',
           compact ? 'max-h-24' : 'chat-attachment-image',
         ]"
         loading="lazy"
-        @click.stop="openGifLightbox"
+        @click.stop="openInlineImageLightbox"
       />
     </div>
 

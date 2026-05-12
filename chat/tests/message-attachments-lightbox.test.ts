@@ -61,11 +61,11 @@ function pendingEncryptedImage(url: string, name: string): TimelineSharedFile {
 }
 
 describe("useMessageAttachments lightbox state", () => {
-  it("opens an inline GIF body URL in a one-image lightbox", () => {
+  it("opens an inline image body URL in a one-image lightbox", () => {
     const gifUrl = "https://media.giphy.com/media/example/giphy.gif";
     const attachments = messageAttachments(ref(messageWithBody(` ${gifUrl} `)));
 
-    attachments.openGifLightbox();
+    attachments.openInlineImageLightbox();
 
     expect(attachments.lightboxOpen.value).toBe(true);
     expect(attachments.lightboxIndex.value).toBe(0);
@@ -73,10 +73,10 @@ describe("useMessageAttachments lightbox state", () => {
     expect(attachments.lightboxImages.value[0]!.url).toBe(gifUrl);
   });
 
-  it("ignores inline GIF lightbox opens when the body is not an image URL", () => {
+  it("ignores inline image lightbox opens when the body is not an image URL", () => {
     const attachments = messageAttachments(ref(messageWithBody("hello")));
 
-    attachments.openGifLightbox();
+    attachments.openInlineImageLightbox();
 
     expect(attachments.lightboxOpen.value).toBe(false);
     expect(attachments.lightboxImages.value).toEqual([]);
