@@ -115,12 +115,12 @@ export function useMessageAttachments(message: ReadonlyRef<TimelineMessage>) {
   }
 
   function attachmentFingerprint(file: TimelineSharedFile): string {
-    return [
+    return JSON.stringify([
       attachmentKey(file),
       file.name ?? "",
-      file.width ?? "",
-      file.height ?? "",
-    ].join("\u0000");
+      file.width ?? null,
+      file.height ?? null,
+    ]);
   }
 
   function attachmentInstanceId(file: TimelineSharedFile): string {
@@ -133,16 +133,20 @@ export function useMessageAttachments(message: ReadonlyRef<TimelineMessage>) {
     return id;
   }
 
-  function attachmentRenderKey(file: TimelineSharedFile): string {
-    const target = toRaw(file);
+  const attachmentRenderKeys = computed(() => {
     const occurrenceCounts = new Map<string, number>();
+    const renderKeys = new WeakMap<TimelineSharedFile, string>();
     for (const attachment of imageAttachments.value) {
       const fingerprint = attachmentFingerprint(attachment);
       const occurrence = occurrenceCounts.get(fingerprint) ?? 0;
       occurrenceCounts.set(fingerprint, occurrence + 1);
-      if (toRaw(attachment) === target) return `${fingerprint}:${occurrence}`;
+      renderKeys.set(toRaw(attachment), `${fingerprint}:${occurrence}`);
     }
-    return attachmentInstanceId(file);
+    return renderKeys;
+  });
+
+  function attachmentRenderKey(file: TimelineSharedFile): string {
+    return attachmentRenderKeys.value.get(toRaw(file)) ?? attachmentInstanceId(file);
   }
 
   function setAttachmentFlag(key: string, value: boolean) {
@@ -253,15 +257,22 @@ export function useMessageAttachments(message: ReadonlyRef<TimelineMessage>) {
     });
   });
 
+  function uniqueFingerprintIndex(images: LightboxImage[], fingerprint: string): number {
+    let matchedIndex = -1;
+    for (const [index, image] of images.entries()) {
+      if (image.fingerprint !== fingerprint) continue;
+      if (matchedIndex >= 0) return -1;
+      matchedIndex = index;
+    }
+    return matchedIndex;
+  }
+
   function syncLightboxIndex(images = lightboxImages.value) {
     const selected = lightboxSelectedImage.value;
     if (!lightboxOpen.value || !selected) return;
     let index = images.findIndex((image) => image.sourceId === selected.sourceId);
     if (index < 0 && selected.fingerprintUnique) {
-      const matchingIndexes = images.flatMap((image, imageIndex) =>
-        image.fingerprint === selected.fingerprint ? [imageIndex] : [],
-      );
-      if (matchingIndexes.length === 1) index = matchingIndexes[0]!;
+      index = uniqueFingerprintIndex(images, selected.fingerprint);
     }
     if (index < 0) {
       lightboxOpen.value = false;
@@ -277,7 +288,7 @@ export function useMessageAttachments(message: ReadonlyRef<TimelineMessage>) {
     return {
       sourceId: image.sourceId,
       fingerprint: image.fingerprint,
-      fingerprintUnique: images.filter((candidate) => candidate.fingerprint === image.fingerprint).length === 1,
+      fingerprintUnique: uniqueFingerprintIndex(images, image.fingerprint) >= 0,
     };
   }
 
