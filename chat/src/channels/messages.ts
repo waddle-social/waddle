@@ -19,7 +19,6 @@ import { hydrateSinglePinnedBody } from "@/services/pinned-message-bodies";
 import { roomMessageFromArchived } from "@/lib/xmpp/wasm-message-codecs";
 import {
   type DeliveryStatus,
-  type ExtensionAnnotationAction,
   type MarkupSpan,
   type MessageReference,
   type TimelineMessage,
@@ -59,6 +58,7 @@ import {
 } from "@/channels/message-timeline-state";
 import { useChannelMamPaging } from "@/channels/mam-paging";
 import { useMucSend } from "@/channels/muc-send";
+import { useChannelMessageActions } from "@/channels/message-actions";
 
 export function useChannelMessages(
   session: Ref<WaddleSession | null>,
@@ -668,6 +668,27 @@ export function useChannelMessages(
     onMessageDeliveryFailure,
   } = send;
 
+  const actions = useChannelMessageActions({
+    session,
+    xmppClient,
+    activeSpaceId,
+    activeChannelId,
+    currentRoomJid,
+    messages,
+    actionError,
+    clearActionError,
+    normalizeError,
+    // applyReaction is still orchestrator-owned in PR 3; PR 4 (live-merge)
+    // moves it into useChannelLiveMerge and the dep wiring updates there.
+    applyReaction,
+  });
+  const {
+    toggleReaction,
+    retractMessage,
+    moderateMessage,
+    invokeExtensionAction,
+  } = actions;
+
   const paging = useChannelMamPaging({
     session,
     xmppClient,
@@ -721,115 +742,6 @@ export function useChannelMessages(
     messages.value = [];
     clearTypingState();
     await loadMessages(activeSpaceId.value ?? "", channelId);
-  }
-
-  async function toggleReaction(messageId: string, emoji: string) {
-    if (!xmppClient.value || !activeChannelId.value || !session.value)
-      return;
-
-    const msg = findMessageById(messages.value, messageId);
-    const targetId = msg?.reactionTargetId;
-    if (!targetId) return;
-    const myNick = session.value.username;
-    const currentReactions = msg?.reactions ?? {};
-
-    const previousEmojis: string[] = [];
-    for (const [e, nicks] of Object.entries(currentReactions)) {
-      if (nicks.includes(myNick)) previousEmojis.push(e);
-    }
-    const myEmojis = new Set(previousEmojis);
-
-    if (myEmojis.has(emoji)) myEmojis.delete(emoji);
-    else myEmojis.add(emoji);
-
-    const nextEmojis = [...myEmojis];
-    const senderId = currentRoomJid.value
-      ? `${currentRoomJid.value}/${myNick}`
-      : myNick;
-    applyReaction(targetId, myNick, nextEmojis, senderId);
-
-    try {
-      await xmppClient.value.sendReaction(
-        activeSpaceId.value ?? "",
-        activeChannelId.value,
-        targetId,
-        nextEmojis,
-      );
-    } catch (e) {
-      // Roll back the optimistic update so the chip stops claiming a
-      // reaction the server never accepted (no echo will arrive to
-      // reconcile it).
-      applyReaction(targetId, myNick, previousEmojis, senderId);
-      actionError.value = normalizeError(e);
-    }
-  }
-
-  async function retractMessage(messageId: string) {
-    if (!xmppClient.value || !activeChannelId.value) return;
-    const target = findMessageById(messages.value, messageId);
-    const targetId = target?.replyableId;
-
-    clearActionError();
-    if (!targetId) {
-      actionError.value =
-        "This message can't be retracted (no room stanza-id). Try reloading the channel.";
-      return;
-    }
-
-    try {
-      await xmppClient.value.sendRetraction(
-        activeSpaceId.value ?? "",
-        activeChannelId.value,
-        targetId,
-      );
-    } catch (e) {
-      actionError.value = normalizeError(e);
-    }
-  }
-
-  async function moderateMessage(messageId: string, reason?: string) {
-    if (!xmppClient.value || !activeChannelId.value) return;
-    const target = findMessageById(messages.value, messageId);
-    const targetId = target?.replyableId;
-
-    clearActionError();
-    if (!targetId) {
-      actionError.value =
-        "This message can't be moderated (no room stanza-id). Try reloading the channel.";
-      return;
-    }
-
-    try {
-      await xmppClient.value.sendModeration(
-        activeSpaceId.value ?? "",
-        activeChannelId.value,
-        targetId,
-        reason,
-      );
-    } catch (e) {
-      actionError.value = normalizeError(e);
-    }
-  }
-
-  async function invokeExtensionAction(action: ExtensionAnnotationAction) {
-    const client = xmppClient.value;
-    if (!client) {
-      const error = new Error("XMPP session is not ready.");
-      actionError.value = normalizeError(error);
-      throw error;
-    }
-    if (!action.launch) {
-      const error = new Error("This extension action is missing launch metadata.");
-      actionError.value = normalizeError(error);
-      throw error;
-    }
-    clearActionError();
-    try {
-      return await client.invokeExtensionLaunch(action.launch);
-    } catch (e) {
-      actionError.value = normalizeError(e);
-      throw e;
-    }
   }
 
   function disconnect() {
