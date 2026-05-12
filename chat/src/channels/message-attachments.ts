@@ -348,8 +348,8 @@ export function useMessageAttachments(message: ReadonlyRef<TimelineMessage>) {
   }
 
   function openGifLightbox() {
-    const image = lightboxImages.value[0];
-    if (!inlineGifUrl.value || !image) return;
+    if (!inlineGifUrl.value) return;
+    const image = lightboxImages.value[0]!;
     lightboxSelectedImage.value = selectedLightboxImageFor(image);
     lightboxIndex.value = 0;
     startLightboxSelectionTracking();
