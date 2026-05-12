@@ -60,6 +60,7 @@ const {
   attachmentError,
   isDecryptingAttachment,
   openLightbox,
+  openGifLightbox,
   downloadAttachment,
 } = useMessageAttachments(messageRef);
 
@@ -149,7 +150,7 @@ watch(
           compact ? 'max-h-24' : 'chat-attachment-image',
         ]"
         loading="lazy"
-        @click.stop
+        @click.stop="openGifLightbox"
       />
     </div>
 

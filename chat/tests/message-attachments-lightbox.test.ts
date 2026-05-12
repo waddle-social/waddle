@@ -29,6 +29,16 @@ function messageWithFiles(sharedFiles: TimelineSharedFile[]): TimelineMessage {
   };
 }
 
+function messageWithBody(body: string): TimelineMessage {
+  return {
+    id: "msg-1",
+    author: "alice",
+    body,
+    createdAt: "2026-05-12T09:53:00Z",
+    isSelf: false,
+  };
+}
+
 function imageFile(url: string, name: string): TimelineSharedFile {
   return {
     url,
@@ -51,6 +61,27 @@ function pendingEncryptedImage(url: string, name: string): TimelineSharedFile {
 }
 
 describe("useMessageAttachments lightbox state", () => {
+  it("opens an inline GIF body URL in a one-image lightbox", () => {
+    const gifUrl = "https://media.giphy.com/media/example/giphy.gif";
+    const attachments = messageAttachments(ref(messageWithBody(` ${gifUrl} `)));
+
+    attachments.openGifLightbox();
+
+    expect(attachments.lightboxOpen.value).toBe(true);
+    expect(attachments.lightboxIndex.value).toBe(0);
+    expect(attachments.lightboxImages.value).toHaveLength(1);
+    expect(attachments.lightboxImages.value[0]!.url).toBe(gifUrl);
+  });
+
+  it("ignores inline GIF lightbox opens when the body is not an image URL", () => {
+    const attachments = messageAttachments(ref(messageWithBody("hello")));
+
+    attachments.openGifLightbox();
+
+    expect(attachments.lightboxOpen.value).toBe(false);
+    expect(attachments.lightboxImages.value).toEqual([]);
+  });
+
   it("opens a plain image gallery at the clicked image", () => {
     const first = imageFile("https://example.com/a.png", "a.png");
     const second = imageFile("https://example.com/b.png", "b.png");

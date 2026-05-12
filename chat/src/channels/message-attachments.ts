@@ -85,6 +85,7 @@ export function useMessageAttachments(message: ReadonlyRef<TimelineMessage>) {
     const matchesAttachment = sharedFiles.value.some((f) => f.url === body.trim());
     return matchesAttachment ? "" : body;
   });
+  const inlineGifUrl = computed(() => (isGif.value ? message.value.body.trim() : null));
 
   // Canonical per-message image lightbox state. Components rendering a
   // message body should use these refs and openLightbox(file) together so the
@@ -249,6 +250,15 @@ export function useMessageAttachments(message: ReadonlyRef<TimelineMessage>) {
   );
 
   const lightboxImages = computed(() => {
+    const gifUrl = inlineGifUrl.value;
+    if (gifUrl) {
+      return [{
+        sourceId: `inline-gif:${gifUrl}`,
+        fingerprint: JSON.stringify(["inline-gif", gifUrl]),
+        url: gifUrl,
+      }];
+    }
+
     return imageAttachments.value.flatMap((f) => {
       const resolvedUrl = resolvedAttachmentUrl(f);
       if (!resolvedUrl) return [];
@@ -337,6 +347,15 @@ export function useMessageAttachments(message: ReadonlyRef<TimelineMessage>) {
     lightboxOpen.value = true;
   }
 
+  function openGifLightbox() {
+    const image = lightboxImages.value[0];
+    if (!inlineGifUrl.value || !image) return;
+    lightboxSelectedImage.value = selectedLightboxImageFor(image);
+    lightboxIndex.value = 0;
+    startLightboxSelectionTracking();
+    lightboxOpen.value = true;
+  }
+
   async function downloadAttachment(file: TimelineSharedFile) {
     const downloadUrl = await ensureAttachmentReady(file);
     if (!downloadUrl || typeof document === "undefined") return;
@@ -382,6 +401,7 @@ export function useMessageAttachments(message: ReadonlyRef<TimelineMessage>) {
     attachmentError,
     isDecryptingAttachment,
     openLightbox,
+    openGifLightbox,
     downloadAttachment,
     cleanup,
   };
