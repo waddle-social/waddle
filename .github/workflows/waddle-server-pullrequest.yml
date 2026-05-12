@@ -23,15 +23,14 @@ jobs:
       uses: actions/checkout@v4
       with:
         fetch-depth: 2
-    - name: Install Determinate Nix
-      uses: DeterminateSystems/determinate-nix-action@v3
+    - name: Cache /nix on Namespace volume
+      uses: namespacelabs/nscloud-cache-action@v1
       with:
-        extra-conf: accept-flake-config = true
-    - name: Setup FlakeHub Cache
-      uses: DeterminateSystems/flakehub-cache-action@v3
+        cache: nix
+    - name: Install Nix
+      uses: cachix/install-nix-action@v31
       with:
-        flakehub-flake-name: waddle-social/waddle
-        use-gha-cache: disabled
+        extra_nix_config: accept-flake-config = true
     - name: Setup cuenv (release)
       run: |-
         arch="$(uname -m)"
@@ -53,15 +52,14 @@ jobs:
       uses: actions/checkout@v4
       with:
         fetch-depth: 2
-    - name: Install Determinate Nix
-      uses: DeterminateSystems/determinate-nix-action@v3
+    - name: Cache /nix on Namespace volume
+      uses: namespacelabs/nscloud-cache-action@v1
       with:
-        extra-conf: accept-flake-config = true
-    - name: Setup FlakeHub Cache
-      uses: DeterminateSystems/flakehub-cache-action@v3
+        cache: nix
+    - name: Install Nix
+      uses: cachix/install-nix-action@v31
       with:
-        flakehub-flake-name: waddle-social/waddle
-        use-gha-cache: disabled
+        extra_nix_config: accept-flake-config = true
     - name: Setup cuenv (release)
       run: |-
         arch="$(uname -m)"
@@ -91,15 +89,14 @@ jobs:
       uses: actions/checkout@v4
       with:
         fetch-depth: 2
-    - name: Install Determinate Nix
-      uses: DeterminateSystems/determinate-nix-action@v3
+    - name: Cache /nix on Namespace volume
+      uses: namespacelabs/nscloud-cache-action@v1
       with:
-        extra-conf: accept-flake-config = true
-    - name: Setup FlakeHub Cache
-      uses: DeterminateSystems/flakehub-cache-action@v3
+        cache: nix
+    - name: Install Nix
+      uses: cachix/install-nix-action@v31
       with:
-        flakehub-flake-name: waddle-social/waddle
-        use-gha-cache: disabled
+        extra_nix_config: accept-flake-config = true
     - name: Setup cuenv (release)
       run: |-
         arch="$(uname -m)"
@@ -129,15 +126,14 @@ jobs:
       uses: actions/checkout@v4
       with:
         fetch-depth: 2
-    - name: Install Determinate Nix
-      uses: DeterminateSystems/determinate-nix-action@v3
+    - name: Cache /nix on Namespace volume
+      uses: namespacelabs/nscloud-cache-action@v1
       with:
-        extra-conf: accept-flake-config = true
-    - name: Setup FlakeHub Cache
-      uses: DeterminateSystems/flakehub-cache-action@v3
+        cache: nix
+    - name: Install Nix
+      uses: cachix/install-nix-action@v31
       with:
-        flakehub-flake-name: waddle-social/waddle
-        use-gha-cache: disabled
+        extra_nix_config: accept-flake-config = true
     - name: nixBuildCi
       run: nix build --print-build-logs ../#checks.x86_64-linux.waddle-server-ci-build
       working-directory: server
@@ -156,15 +152,14 @@ jobs:
       uses: actions/checkout@v4
       with:
         fetch-depth: 2
-    - name: Install Determinate Nix
-      uses: DeterminateSystems/determinate-nix-action@v3
+    - name: Cache /nix on Namespace volume
+      uses: namespacelabs/nscloud-cache-action@v1
       with:
-        extra-conf: accept-flake-config = true
-    - name: Setup FlakeHub Cache
-      uses: DeterminateSystems/flakehub-cache-action@v3
+        cache: nix
+    - name: Install Nix
+      uses: cachix/install-nix-action@v31
       with:
-        flakehub-flake-name: waddle-social/waddle
-        use-gha-cache: disabled
+        extra_nix_config: accept-flake-config = true
     - name: nixBuildExtensionModules
       run: nix build --print-build-logs ../#checks.x86_64-linux.waddle-server-extension-modules
       working-directory: server
@@ -183,15 +178,14 @@ jobs:
       uses: actions/checkout@v4
       with:
         fetch-depth: 2
-    - name: Install Determinate Nix
-      uses: DeterminateSystems/determinate-nix-action@v3
+    - name: Cache /nix on Namespace volume
+      uses: namespacelabs/nscloud-cache-action@v1
       with:
-        extra-conf: accept-flake-config = true
-    - name: Setup FlakeHub Cache
-      uses: DeterminateSystems/flakehub-cache-action@v3
+        cache: nix
+    - name: Install Nix
+      uses: cachix/install-nix-action@v31
       with:
-        flakehub-flake-name: waddle-social/waddle
-        use-gha-cache: disabled
+        extra_nix_config: accept-flake-config = true
     - name: nixClippy
       run: nix build --print-build-logs ../#checks.x86_64-linux.waddle-server-clippy
       working-directory: server
@@ -210,15 +204,14 @@ jobs:
       uses: actions/checkout@v4
       with:
         fetch-depth: 2
-    - name: Install Determinate Nix
-      uses: DeterminateSystems/determinate-nix-action@v3
+    - name: Cache /nix on Namespace volume
+      uses: namespacelabs/nscloud-cache-action@v1
       with:
-        extra-conf: accept-flake-config = true
-    - name: Setup FlakeHub Cache
-      uses: DeterminateSystems/flakehub-cache-action@v3
+        cache: nix
+    - name: Install Nix
+      uses: cachix/install-nix-action@v31
       with:
-        flakehub-flake-name: waddle-social/waddle
-        use-gha-cache: disabled
+        extra_nix_config: accept-flake-config = true
     - name: nixFmt
       run: nix build --print-build-logs ../#checks.x86_64-linux.waddle-server-fmt
       working-directory: server
@@ -237,15 +230,14 @@ jobs:
       uses: actions/checkout@v4
       with:
         fetch-depth: 2
-    - name: Install Determinate Nix
-      uses: DeterminateSystems/determinate-nix-action@v3
+    - name: Cache /nix on Namespace volume
+      uses: namespacelabs/nscloud-cache-action@v1
       with:
-        extra-conf: accept-flake-config = true
-    - name: Setup FlakeHub Cache
-      uses: DeterminateSystems/flakehub-cache-action@v3
+        cache: nix
+    - name: Install Nix
+      uses: cachix/install-nix-action@v31
       with:
-        flakehub-flake-name: waddle-social/waddle
-        use-gha-cache: disabled
+        extra_nix_config: accept-flake-config = true
     - name: nixTest
       run: nix build --print-build-logs ../#checks.x86_64-linux.waddle-server-test
       working-directory: server
@@ -264,15 +256,14 @@ jobs:
       uses: actions/checkout@v4
       with:
         fetch-depth: 2
-    - name: Install Determinate Nix
-      uses: DeterminateSystems/determinate-nix-action@v3
+    - name: Cache /nix on Namespace volume
+      uses: namespacelabs/nscloud-cache-action@v1
       with:
-        extra-conf: accept-flake-config = true
-    - name: Setup FlakeHub Cache
-      uses: DeterminateSystems/flakehub-cache-action@v3
+        cache: nix
+    - name: Install Nix
+      uses: cachix/install-nix-action@v31
       with:
-        flakehub-flake-name: waddle-social/waddle
-        use-gha-cache: disabled
+        extra_nix_config: accept-flake-config = true
     - name: Setup cuenv (release)
       run: |-
         arch="$(uname -m)"
