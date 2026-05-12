@@ -3,6 +3,7 @@ use super::DatabaseError;
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
     Null,
+    Boolean(bool),
     Integer(i64),
     Real(f64),
     Text(String),
@@ -101,7 +102,7 @@ impl From<f32> for Value {
 
 impl From<bool> for Value {
     fn from(value: bool) -> Self {
-        Self::Integer(i64::from(value))
+        Self::Boolean(value)
     }
 }
 
@@ -192,6 +193,7 @@ impl DbDecode for String {
     fn decode(value: Value) -> Result<Self, DatabaseError> {
         match value {
             Value::Text(value) => Ok(value),
+            Value::Boolean(value) => Ok(value.to_string()),
             Value::Integer(value) => Ok(value.to_string()),
             Value::Real(value) => Ok(value.to_string()),
             Value::Blob(value) => String::from_utf8(value).map_err(|e| {
@@ -217,6 +219,7 @@ impl DbDecode for i64 {
     fn decode(value: Value) -> Result<Self, DatabaseError> {
         match value {
             Value::Integer(value) => Ok(value),
+            Value::Boolean(value) => Ok(i64::from(value)),
             Value::Real(value) => Ok(value as i64),
             Value::Text(value) => value.parse::<i64>().map_err(|e| {
                 DatabaseError::QueryFailed(format!("failed to parse integer '{}': {}", value, e))
@@ -260,7 +263,10 @@ impl DbDecode for Option<i32> {
 
 impl DbDecode for bool {
     fn decode(value: Value) -> Result<Self, DatabaseError> {
-        Ok(i64::decode(value)? != 0)
+        match value {
+            Value::Boolean(value) => Ok(value),
+            other => Ok(i64::decode(other)? != 0),
+        }
     }
 }
 
@@ -278,6 +284,7 @@ impl DbDecode for f64 {
         match value {
             Value::Real(value) => Ok(value),
             Value::Integer(value) => Ok(value as f64),
+            Value::Boolean(value) => Ok(if value { 1.0 } else { 0.0 }),
             Value::Text(value) => value.parse::<f64>().map_err(|e| {
                 DatabaseError::QueryFailed(format!("failed to parse float '{}': {}", value, e))
             }),
@@ -306,9 +313,9 @@ impl DbDecode for Vec<u8> {
             Value::Blob(value) => Ok(value),
             Value::Text(value) => Ok(value.into_bytes()),
             Value::Null => Ok(Vec::new()),
-            Value::Integer(_) | Value::Real(_) => Err(DatabaseError::QueryFailed(
-                "cannot decode numeric value into blob".to_string(),
-            )),
+            Value::Boolean(_) | Value::Integer(_) | Value::Real(_) => Err(
+                DatabaseError::QueryFailed("cannot decode numeric value into blob".to_string()),
+            ),
         }
     }
 }

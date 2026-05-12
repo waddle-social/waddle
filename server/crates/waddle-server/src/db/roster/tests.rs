@@ -138,6 +138,18 @@ fn subscription_update_uses_sql_boolean_literal_for_postgres() {
     );
 }
 
+#[test]
+fn bool_db_params_bind_as_typed_booleans_for_postgres() {
+    let params = crate::db_params![true, false];
+    assert!(matches!(
+        params.as_slice(),
+        [
+            crate::db::Value::Boolean(true),
+            crate::db::Value::Boolean(false)
+        ]
+    ));
+}
+
 #[tokio::test]
 async fn test_presence_queries() {
     let db = setup_test_db().await;
