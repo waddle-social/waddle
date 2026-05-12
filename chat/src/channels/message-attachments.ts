@@ -1,4 +1,4 @@
-import { computed, onScopeDispose, ref, watch, type Ref } from "vue";
+import { computed, getCurrentScope, onScopeDispose, ref, watch, type Ref } from "vue";
 import {
   isAudioFile,
   isImageFile,
@@ -215,7 +215,7 @@ export function useMessageAttachments(message: ReadonlyRef<TimelineMessage>) {
     for (const key of Object.keys(decryptedAttachmentUrls.value)) revokeAttachmentUrl(key);
   }
 
-  onScopeDispose(cleanup, true);
+  if (getCurrentScope()) onScopeDispose(cleanup);
 
   return {
     sharedFiles,
