@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { TimelineMessage } from "../src/lib/chat-ui";
-import { applyDeliveryEventById } from "../src/lib/timeline-state";
+import { applyDeliveryEventById, latestRemoteMessageIdFor } from "../src/lib/timeline-state";
 
 function makeMessage(id: string, overrides: Partial<TimelineMessage> = {}): TimelineMessage {
   return {
@@ -13,6 +13,46 @@ function makeMessage(id: string, overrides: Partial<TimelineMessage> = {}): Time
     ...overrides,
   } as TimelineMessage;
 }
+
+describe("latestRemoteMessageIdFor", () => {
+  test("returns null for an empty timeline", () => {
+    expect(latestRemoteMessageIdFor([])).toBeNull();
+  });
+
+  test("returns the most recent non-self, non-retracted message id", () => {
+    const timeline = [
+      makeMessage("a", { isSelf: false }),
+      makeMessage("b", { isSelf: false }),
+      makeMessage("c", { isSelf: true }),
+    ];
+    expect(latestRemoteMessageIdFor(timeline)).toBe("b");
+  });
+
+  test("skips trailing self-sends", () => {
+    const timeline = [
+      makeMessage("a", { isSelf: false }),
+      makeMessage("b", { isSelf: true }),
+      makeMessage("c", { isSelf: true }),
+    ];
+    expect(latestRemoteMessageIdFor(timeline)).toBe("a");
+  });
+
+  test("skips retracted messages", () => {
+    const timeline = [
+      makeMessage("a", { isSelf: false }),
+      makeMessage("b", { isSelf: false, isRetracted: true } as Partial<TimelineMessage>),
+    ];
+    expect(latestRemoteMessageIdFor(timeline)).toBe("a");
+  });
+
+  test("returns null when timeline contains only self/retracted messages", () => {
+    const timeline = [
+      makeMessage("a", { isSelf: true }),
+      makeMessage("b", { isSelf: false, isRetracted: true } as Partial<TimelineMessage>),
+    ];
+    expect(latestRemoteMessageIdFor(timeline)).toBeNull();
+  });
+});
 
 describe("applyDeliveryEventById", () => {
   test("updates the matching self-message's deliveryStatus", () => {

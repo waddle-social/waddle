@@ -17,6 +17,23 @@ import {
 // grilling for #351.
 
 /**
+ * Find the id of the most recent remote (non-self, non-retracted) message
+ * in the timeline. Used by XEP-0333 displayed-marker logic to derive the
+ * "latest message we should mark as read" anchor — a self-sent or
+ * tombstoned message doesn't carry that semantic so we walk back past
+ * them. Returns null when the timeline is empty or contains only
+ * self/retracted entries.
+ */
+export function latestRemoteMessageIdFor(timeline: ReadonlyArray<TimelineMessage>): string | null {
+  for (let i = timeline.length - 1; i >= 0; i--) {
+    const m = timeline[i];
+    if (!m || m.isSelf || m.isRetracted) continue;
+    return m.id;
+  }
+  return null;
+}
+
+/**
  * Apply a delivery event to the self-message matching `messageId`. Returns
  * the original array reference when nothing changes (id miss or
  * no-downgrade short-circuit), so Vue's reactivity skips a re-render and
