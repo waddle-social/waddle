@@ -280,6 +280,7 @@ watch(
             'type-caption flex flex-col items-center justify-center gap-2 px-4 text-center text-muted-foreground',
             compact ? 'h-20 w-20' : 'h-36 w-48',
           ]"
+          @click.stop
         >
           <Lock class="h-4 w-4 text-primary/70" />
           <span>{{ attachmentError(img) ?? (isDecryptingAttachment(img) ? "Decrypting image…" : "Preparing image…") }}</span>
@@ -295,6 +296,7 @@ watch(
         <div
           v-if="img.encrypted"
           class="type-meta type-emphasis flex items-center gap-1 border-t border-border/70 px-2 py-1 text-muted-foreground"
+          @click.stop
         >
           <Lock class="h-3 w-3 text-primary/70" />
           <span>Encrypted</span>

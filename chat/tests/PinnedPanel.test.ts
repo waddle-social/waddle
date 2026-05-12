@@ -9,6 +9,7 @@
 //
 // Each assertion maps 1-to-1 to one of the planned integration tests.
 import { describe, expect, it, beforeEach } from "bun:test";
+import { readFileSync } from "node:fs";
 import { hydratePinnedRoom, resetPinnedRooms } from "@/stores/pinned-messages";
 import {
   $pinnedMessageBodies,
@@ -218,6 +219,24 @@ describe("PinnedPanel store hydration state", () => {
     expect(entries).toHaveLength(1);
     expect(entries[0]!.target_stanza_id).toBe("sid-A");
     expect(entries[0]!.preview.text).toBe("pinned text");
+  });
+});
+
+describe("PinnedPanel attachment click containment", () => {
+  it("keeps image placeholder and encrypted label clicks inside MessageBody", () => {
+    const source = readFileSync(new URL("../src/components/chat/MessageBody.vue", import.meta.url), "utf8");
+    const imagePlaceholder = source.slice(
+      source.indexOf("isDecryptingAttachment(img)"),
+      source.indexOf("v-if=\"attachmentError(img) && !compact\""),
+    );
+    const imagePlaceholderContainer = source.slice(
+      Math.max(0, source.lastIndexOf("<div", source.indexOf("isDecryptingAttachment(img)"))),
+      source.indexOf("isDecryptingAttachment(img)"),
+    );
+
+    expect(imagePlaceholder).toContain("Decrypting image…");
+    expect(imagePlaceholderContainer).toContain("@click.stop");
+    expect(source).toContain("v-if=\"img.encrypted\"\n          class=\"type-meta type-emphasis flex items-center gap-1 border-t border-border/70 px-2 py-1 text-muted-foreground\"\n          @click.stop");
   });
 });
 
