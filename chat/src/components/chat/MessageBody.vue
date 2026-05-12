@@ -55,6 +55,7 @@ const {
   lightboxIndex,
   lightboxImages,
   attachmentKey,
+  attachmentRenderKey,
   resolvedAttachmentUrl,
   attachmentError,
   isDecryptingAttachment,
@@ -254,7 +255,7 @@ watch(
     <div v-if="imageAttachments.length > 0 && !isSticker" class="chat-attachment-strip">
       <div
         v-for="img in imageAttachments"
-        :key="attachmentKey(img)"
+        :key="attachmentRenderKey(img)"
         class="rounded-lg border border-border overflow-hidden bg-muted/40"
       >
         <button
@@ -305,6 +306,7 @@ watch(
     </div>
 
     <ImageLightbox
+      v-if="lightboxOpen"
       v-model:open="lightboxOpen"
       v-model:index="lightboxIndex"
       :images="lightboxImages"

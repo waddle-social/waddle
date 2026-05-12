@@ -1,4 +1,4 @@
-import { computed, getCurrentScope, onScopeDispose, ref, watch, type Ref } from "vue";
+import { computed, getCurrentScope, onScopeDispose, ref, toRaw, watch, type Ref, type WatchStopHandle } from "vue";
 import {
   isAudioFile,
   isImageFile,
@@ -15,6 +15,17 @@ import {
 } from "@/lib/xmpp/encrypted-attachments";
 
 type ReadonlyRef<T> = Readonly<Ref<T>>;
+type LightboxImage = {
+  sourceId: string;
+  fingerprint: string;
+  url: string;
+  name?: string;
+  width?: number;
+  height?: number;
+};
+type SelectedLightboxImage = Pick<LightboxImage, "sourceId" | "fingerprint"> & {
+  fingerprintUnique: boolean;
+};
 
 export function useMessageAttachments(message: ReadonlyRef<TimelineMessage>) {
   const sharedFiles = computed(() => message.value.sharedFiles ?? []);
@@ -77,16 +88,61 @@ export function useMessageAttachments(message: ReadonlyRef<TimelineMessage>) {
   // gallery is derived from the same resolved attachment URLs. Calling
   // openLightbox for an encrypted image whose decrypted blob URL is not ready
   // is a silent no-op; unresolved entries are excluded from the gallery.
-  const lightboxOpen = ref(false);
+  const lightboxOpenValue = ref(false);
+  const lightboxOpen = computed({
+    get: () => lightboxOpenValue.value,
+    set: (open) => {
+      lightboxOpenValue.value = open;
+      if (open) startLightboxSelectionTracking();
+      else stopLightboxSelectionTracking();
+    },
+  });
   // Meaningful only while lightboxOpen is true; the lightbox ignores it when
   // closed and openLightbox always seeds it before opening.
   const lightboxIndex = ref(0);
+  const lightboxSelectedImage = ref<SelectedLightboxImage | null>(null);
   const decryptedAttachmentUrls = ref<Record<string, string>>({});
   const decryptedAttachmentErrors = ref<Record<string, string>>({});
   const decryptingAttachmentKeys = ref<Record<string, boolean>>({});
+  const attachmentInstanceIds = new WeakMap<TimelineSharedFile, string>();
+  let nextAttachmentInstanceId = 0;
+  let stopLightboxImagesWatch: WatchStopHandle | null = null;
+  let stopLightboxIndexWatch: WatchStopHandle | null = null;
+  let disposed = false;
 
   function attachmentKey(file: TimelineSharedFile): string {
     return hasEncryptedAttachmentMetadata(file) ? encryptedAttachmentKey(file) : file.url;
+  }
+
+  function attachmentFingerprint(file: TimelineSharedFile): string {
+    return [
+      attachmentKey(file),
+      file.name ?? "",
+      file.width ?? "",
+      file.height ?? "",
+    ].join("\u0000");
+  }
+
+  function attachmentInstanceId(file: TimelineSharedFile): string {
+    const identity = toRaw(file);
+    const existing = attachmentInstanceIds.get(identity);
+    if (existing) return existing;
+    const id = `${attachmentKey(file)}:${nextAttachmentInstanceId}`;
+    nextAttachmentInstanceId += 1;
+    attachmentInstanceIds.set(identity, id);
+    return id;
+  }
+
+  function attachmentRenderKey(file: TimelineSharedFile): string {
+    const target = toRaw(file);
+    const occurrenceCounts = new Map<string, number>();
+    for (const attachment of imageAttachments.value) {
+      const fingerprint = attachmentFingerprint(attachment);
+      const occurrence = occurrenceCounts.get(fingerprint) ?? 0;
+      occurrenceCounts.set(fingerprint, occurrence + 1);
+      if (toRaw(attachment) === target) return `${fingerprint}:${occurrence}`;
+    }
+    return attachmentInstanceId(file);
   }
 
   function setAttachmentFlag(key: string, value: boolean) {
@@ -126,6 +182,7 @@ export function useMessageAttachments(message: ReadonlyRef<TimelineMessage>) {
   }
 
   async function ensureAttachmentReady(file: TimelineSharedFile, persist = false): Promise<string | null> {
+    if (disposed) return null;
     if (!hasEncryptedAttachmentMetadata(file)) return file.url;
     if (typeof window === "undefined" || typeof URL === "undefined") return null;
     const key = attachmentKey(file);
@@ -138,6 +195,10 @@ export function useMessageAttachments(message: ReadonlyRef<TimelineMessage>) {
     try {
       const blob = await decryptEncryptedAttachment(file);
       const objectUrl = URL.createObjectURL(blob);
+      if (disposed) {
+        URL.revokeObjectURL(objectUrl);
+        return null;
+      }
       if (!persist) return objectUrl;
       const stillVisible = imageAttachments.value.some((attachment) => attachmentKey(attachment) === key);
       if (!stillVisible) {
@@ -161,7 +222,7 @@ export function useMessageAttachments(message: ReadonlyRef<TimelineMessage>) {
     ...pdfAttachments.value,
   ]);
 
-  watch(
+  const stopPreviewableAttachmentsWatch = watch(
     previewableAttachments,
     (attachments) => {
       if (typeof window === "undefined") return;
@@ -176,24 +237,82 @@ export function useMessageAttachments(message: ReadonlyRef<TimelineMessage>) {
     { immediate: true },
   );
 
-  const lightboxImages = computed(() =>
-    imageAttachments.value.flatMap((f) => {
+  const lightboxImages = computed(() => {
+    return imageAttachments.value.flatMap((f) => {
       const resolvedUrl = resolvedAttachmentUrl(f);
       if (!resolvedUrl) return [];
-      const img: { url: string; name?: string; width?: number; height?: number } = { url: resolvedUrl };
+      const img: LightboxImage = {
+        sourceId: attachmentInstanceId(f),
+        fingerprint: attachmentFingerprint(f),
+        url: resolvedUrl,
+      };
       if (f.name) img.name = f.name;
       if (f.width) img.width = f.width;
       if (f.height) img.height = f.height;
       return [img];
-    }),
-  );
+    });
+  });
+
+  function syncLightboxIndex(images = lightboxImages.value) {
+    const selected = lightboxSelectedImage.value;
+    if (!lightboxOpen.value || !selected) return;
+    let index = images.findIndex((image) => image.sourceId === selected.sourceId);
+    if (index < 0 && selected.fingerprintUnique) {
+      const matchingIndexes = images.flatMap((image, imageIndex) =>
+        image.fingerprint === selected.fingerprint ? [imageIndex] : [],
+      );
+      if (matchingIndexes.length === 1) index = matchingIndexes[0]!;
+    }
+    if (index < 0) {
+      lightboxOpen.value = false;
+      lightboxSelectedImage.value = null;
+      lightboxIndex.value = 0;
+      return;
+    }
+    lightboxIndex.value = index;
+    lightboxSelectedImage.value = selectedLightboxImageFor(images[index]!, images);
+  }
+
+  function selectedLightboxImageFor(image: LightboxImage, images = lightboxImages.value): SelectedLightboxImage {
+    return {
+      sourceId: image.sourceId,
+      fingerprint: image.fingerprint,
+      fingerprintUnique: images.filter((candidate) => candidate.fingerprint === image.fingerprint).length === 1,
+    };
+  }
+
+  function syncSelectedLightboxImage(index: number) {
+    if (!lightboxOpen.value) return;
+    const selected = lightboxImages.value[index];
+    lightboxSelectedImage.value = selected
+      ? selectedLightboxImageFor(selected)
+      : null;
+  }
+
+  function startLightboxSelectionTracking() {
+    if (stopLightboxImagesWatch) return;
+    stopLightboxImagesWatch = watch(lightboxImages, syncLightboxIndex, { flush: "sync" });
+    stopLightboxIndexWatch = watch(lightboxIndex, syncSelectedLightboxImage, { flush: "sync" });
+  }
+
+  function stopLightboxSelectionTracking() {
+    stopLightboxImagesWatch?.();
+    stopLightboxIndexWatch?.();
+    stopLightboxImagesWatch = null;
+    stopLightboxIndexWatch = null;
+    lightboxSelectedImage.value = null;
+  }
 
   function openLightbox(file: TimelineSharedFile) {
     const resolvedUrl = resolvedAttachmentUrl(file);
     if (!resolvedUrl) return;
-    const index = lightboxImages.value.findIndex((image) => image.url === resolvedUrl);
+    const sourceId = attachmentInstanceId(file);
+    const index = lightboxImages.value.findIndex((image) => image.sourceId === sourceId);
     if (index < 0) return;
+    const selected = lightboxImages.value[index]!;
+    lightboxSelectedImage.value = selectedLightboxImageFor(selected);
     lightboxIndex.value = index;
+    startLightboxSelectionTracking();
     lightboxOpen.value = true;
   }
 
@@ -213,6 +332,9 @@ export function useMessageAttachments(message: ReadonlyRef<TimelineMessage>) {
   }
 
   function cleanup() {
+    disposed = true;
+    stopPreviewableAttachmentsWatch();
+    stopLightboxSelectionTracking();
     if (typeof URL === "undefined") return;
     for (const key of Object.keys(decryptedAttachmentUrls.value)) revokeAttachmentUrl(key);
   }
@@ -234,6 +356,7 @@ export function useMessageAttachments(message: ReadonlyRef<TimelineMessage>) {
     lightboxIndex,
     lightboxImages,
     attachmentKey,
+    attachmentRenderKey,
     resolvedAttachmentUrl,
     attachmentError,
     isDecryptingAttachment,
