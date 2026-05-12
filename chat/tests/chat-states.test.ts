@@ -1,11 +1,30 @@
 // Direct unit tests for useChannelChatStates and useDmChatStates covering
 // the XEP-0085 typing-indicator + debounce machine.
+//
+// Composables are created inside an effectScope so that `onScopeDispose`
+// inside the composable runs at the end of each test — that cancels the
+// 5s typing-expiry + 3s composing→paused timers and keeps the test
+// process from hanging or leaking timers across tests.
 
-import { describe, expect, mock, test } from "bun:test";
-import { ref } from "vue";
+import { afterEach, describe, expect, mock, test } from "bun:test";
+import { effectScope, ref, type EffectScope } from "vue";
 import { useChannelChatStates } from "../src/channels/chat-states";
 import { useDmChatStates } from "../src/dms/chat-states";
 import type { BrowserXmppClient } from "../src/lib/xmpp-client";
+
+const activeScopes: EffectScope[] = [];
+
+afterEach(() => {
+  while (activeScopes.length > 0) {
+    activeScopes.pop()?.stop();
+  }
+});
+
+function withScope<T>(factory: () => T): T {
+  const scope = effectScope();
+  activeScopes.push(scope);
+  return scope.run(factory)!;
+}
 
 function makeChannelClient(sendChatState = mock(async () => undefined)): BrowserXmppClient {
   return { sendChatState } as unknown as BrowserXmppClient;
@@ -17,11 +36,11 @@ function makeDmClient(sendDmChatState = mock(async () => undefined)): BrowserXmp
 
 describe("useChannelChatStates — typing indicator", () => {
   test("addTypingUser inserts a nick and dedups on repeated calls", () => {
-    const states = useChannelChatStates({
+    const states = withScope(() => useChannelChatStates({
       xmppClient: ref<BrowserXmppClient | null>(makeChannelClient()),
       activeSpaceId: ref("space"),
       activeChannelId: ref("general"),
-    });
+    }));
     states.addTypingUser("alice");
     states.addTypingUser("alice");
     states.addTypingUser("bob");
@@ -29,22 +48,22 @@ describe("useChannelChatStates — typing indicator", () => {
   });
 
   test("removeTypingUser drops the nick", () => {
-    const states = useChannelChatStates({
+    const states = withScope(() => useChannelChatStates({
       xmppClient: ref<BrowserXmppClient | null>(makeChannelClient()),
       activeSpaceId: ref("space"),
       activeChannelId: ref("general"),
-    });
+    }));
     states.addTypingUser("alice");
     states.removeTypingUser("alice");
     expect(states.typingUsers.value).toEqual([]);
   });
 
   test("clearTypingState wipes all typing nicks", () => {
-    const states = useChannelChatStates({
+    const states = withScope(() => useChannelChatStates({
       xmppClient: ref<BrowserXmppClient | null>(makeChannelClient()),
       activeSpaceId: ref("space"),
       activeChannelId: ref("general"),
-    });
+    }));
     states.addTypingUser("alice");
     states.addTypingUser("bob");
     states.clearTypingState();
@@ -55,11 +74,11 @@ describe("useChannelChatStates — typing indicator", () => {
 describe("useChannelChatStates — outbound composing/paused (XEP-0085)", () => {
   test("notifyComposing sends composing on the first call only", () => {
     const sendChatState = mock(async () => undefined);
-    const states = useChannelChatStates({
+    const states = withScope(() => useChannelChatStates({
       xmppClient: ref<BrowserXmppClient | null>(makeChannelClient(sendChatState)),
       activeSpaceId: ref("space"),
       activeChannelId: ref("general"),
-    });
+    }));
     states.notifyComposing();
     states.notifyComposing();
     // First call sends "composing"; the second is suppressed because
@@ -72,22 +91,22 @@ describe("useChannelChatStates — outbound composing/paused (XEP-0085)", () => 
 
   test("notifyComposing is a no-op when no client / no channel", () => {
     const sendChatState = mock(async () => undefined);
-    const states = useChannelChatStates({
+    const states = withScope(() => useChannelChatStates({
       xmppClient: ref<BrowserXmppClient | null>(null),
       activeSpaceId: ref("space"),
       activeChannelId: ref("general"),
-    });
+    }));
     states.notifyComposing();
     expect(sendChatState).not.toHaveBeenCalled();
   });
 
   test("resetOnSend after notifyComposing lets a subsequent notifyComposing fire composing again", () => {
     const sendChatState = mock(async () => undefined);
-    const states = useChannelChatStates({
+    const states = withScope(() => useChannelChatStates({
       xmppClient: ref<BrowserXmppClient | null>(makeChannelClient(sendChatState)),
       activeSpaceId: ref("space"),
       activeChannelId: ref("general"),
-    });
+    }));
     states.notifyComposing();
     states.resetOnSend();
     states.notifyComposing();
@@ -103,10 +122,10 @@ describe("useChannelChatStates — outbound composing/paused (XEP-0085)", () => 
 describe("useDmChatStates", () => {
   test("notifyComposing sends DM chat-state to the active peer", () => {
     const sendDmChatState = mock(async () => undefined);
-    const states = useDmChatStates({
+    const states = withScope(() => useDmChatStates({
       xmppClient: ref<BrowserXmppClient | null>(makeDmClient(sendDmChatState)),
       activePeerJid: ref("bob@example.com"),
-    });
+    }));
     states.notifyComposing();
     expect(sendDmChatState).toHaveBeenCalledTimes(1);
     expect(sendDmChatState.mock.calls[0]![0]).toBe("bob@example.com");
@@ -114,10 +133,10 @@ describe("useDmChatStates", () => {
   });
 
   test("addTypingUser + clearTypingState surfaces and clears typingUsers", () => {
-    const states = useDmChatStates({
+    const states = withScope(() => useDmChatStates({
       xmppClient: ref<BrowserXmppClient | null>(makeDmClient()),
       activePeerJid: ref("bob@example.com"),
-    });
+    }));
     states.addTypingUser("bob");
     expect(states.typingUsers.value).toContain("bob");
     states.clearTypingState();
@@ -126,10 +145,10 @@ describe("useDmChatStates", () => {
 
   test("no-op without peerJid", () => {
     const sendDmChatState = mock(async () => undefined);
-    const states = useDmChatStates({
+    const states = withScope(() => useDmChatStates({
       xmppClient: ref<BrowserXmppClient | null>(makeDmClient(sendDmChatState)),
       activePeerJid: ref<string | null>(null),
-    });
+    }));
     states.notifyComposing();
     expect(sendDmChatState).not.toHaveBeenCalled();
   });

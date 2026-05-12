@@ -1,11 +1,7 @@
-import { computed, nextTick, ref, watch, type Ref } from "vue";
-import {
-  type DeliveryStatus,
-  type TimelineMessage,
-} from "@/lib/chat-ui";
+import { nextTick, ref, watch, type Ref } from "vue";
+import type { TimelineMessage } from "@/lib/chat-ui";
 import type {
   BrowserXmppClient,
-  ChatStateType,
   DmChatStateEvent,
   DmDisplayedEvent,
   DmReactionEvent,
@@ -15,25 +11,15 @@ import type {
 } from "@/lib/xmpp-client";
 import { barePeerJid } from "@/lib/xmpp-client";
 import type { WaddleSession } from "@/lib/server-auth";
-import {
-  findMessageById,
-  matchMessageId,
-  mergeMessageIds,
-} from "@/lib/message-ids";
+import { findMessageById } from "@/lib/message-ids";
 import { findMessageElementById } from "@/lib/message-targeting";
 import { isTopPinnedScrollDirection, type ScrollDirectionMode } from "@/lib/scroll-direction";
 import { createPinnedEdgeScroller } from "@/lib/pinned-edge-scroll";
-import { dmKey, setLastSeen } from "@/lib/last-seen-store";
 import {
   listQueuedDmMessages,
 } from "@/lib/outbound-queue-store";
 import { useScrollDirectionPreference } from "@/preferences/scroll-direction";
-import {
-  fromLiveDmMessage,
-  isSameDmCorrectionSender,
-  queuedDmMessageToTimeline,
-  retractDmTimelineMessage,
-} from "@/dms/message-timeline-state";
+import { queuedDmMessageToTimeline } from "@/dms/message-timeline-state";
 import { useDmMamPaging } from "@/dms/mam-paging";
 import { useChatSend } from "@/dms/chat-send";
 import { useDmMessageActions } from "@/dms/message-actions";
@@ -186,7 +172,7 @@ export function useDirectMessages(
     activePeerJid,
     pendingEchoClientIds,
     scrollToPinnedEdgeAndPin,
-    persistLastSeen: (peerJid, messageId) => setLastSeen(dmKey(barePeerJid(peerJid)), messageId),
+    persistLastSeen,
     isFeedVisible,
   });
   const { applyDisplayed, applyReaction } = liveMerge;
@@ -224,7 +210,7 @@ export function useDirectMessages(
     appendQueuedMessages,
     scrollToPinnedEdgeAndPin,
     isFeedVisible,
-    persistLastSeen: (peerJid, messageId) => setLastSeen(dmKey(barePeerJid(peerJid)), messageId),
+    persistLastSeen,
     dmLoadErrorMessage,
   });
   const {
@@ -375,7 +361,7 @@ export function useDirectMessages(
       ) {
         paging.markInitialLatestPagePinned();
         const newest = [...messages.value].reverse().find(isFeedVisible);
-        if (peerJid && newest) setLastSeen(dmKey(barePeerJid(peerJid)), newest.id);
+        if (peerJid && newest) persistLastSeen(peerJid, newest.id);
       }
     },
     { flush: "post" },

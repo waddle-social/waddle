@@ -12,7 +12,6 @@ export type { OutboundFileAttachment } from "./send-types";
 export type { InboxEntry } from "./inbox-types";
 export type { UserPepProfile } from "./pep-types";
 export type {
-  ChatStateType,
   DmChatStateEvent,
   DmConversation,
   DmDisplayedEvent,

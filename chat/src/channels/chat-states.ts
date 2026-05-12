@@ -110,12 +110,13 @@ export function useChannelChatStates(deps: UseChannelChatStatesDeps) {
    * Internal-state reset called by useMucSend's onSendComplete after a
    * successful send: cancels any in-flight pause timer and snaps
    * `lastChatState` back to "active". This does NOT emit a wire
-   * `<active/>` notification — that's the orchestrator's job after this
-   * returns. The split exists so the composable can keep its private
-   * state machine consistent without taking a dependency on the XMPP
-   * client; the orchestrator owns the outbound `client.sendChatState(
-   * ..., "active")` call per XEP-0085 §4.2 (content messages SHOULD
-   * include `<active/>`).
+   * `<active/>` notification — that's the orchestrator's job, which
+   * sends `client.sendChatState(..., "active")` after `resetOnSend()`
+   * returns, per XEP-0085 §4.2 (content messages SHOULD include
+   * `<active/>`). The split exists so the composable's in-memory debounce
+   * state stays consistent on every send while the orchestrator decides
+   * (based on the wasm-client send result) whether the wire-level
+   * `<active/>` actually fires.
    */
   function resetOnSend() {
     if (composingTimeout) {

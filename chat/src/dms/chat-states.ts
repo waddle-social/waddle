@@ -81,11 +81,14 @@ export function useDmChatStates(deps: UseDmChatStatesDeps) {
 
   /**
    * Internal-state reset called by useChatSend's onSendComplete after a
-   * successful send. Does NOT emit a wire `<active/>` notification — the
-   * orchestrator owns the outbound `client.sendDmChatState(peerJid,
-   * "active")` call per XEP-0085 §4.2. Keeping the wire emission in the
-   * orchestrator lets this composable stay independent of the XMPP
-   * client.
+   * successful send: cancels any in-flight pause timer and snaps
+   * `lastChatState` back to "active". Does NOT emit a wire `<active/>`
+   * notification — the orchestrator sends
+   * `client.sendDmChatState(peerJid, "active")` after this returns, per
+   * XEP-0085 §4.2. The split exists so the composable's in-memory
+   * debounce state stays consistent on every send while the orchestrator
+   * decides (based on the wasm-client send result) whether the
+   * wire-level `<active/>` actually fires.
    */
   function resetOnSend() {
     if (composingTimeout) {
