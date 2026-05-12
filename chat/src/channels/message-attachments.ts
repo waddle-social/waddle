@@ -15,6 +15,9 @@ import {
 } from "@/lib/xmpp/encrypted-attachments";
 
 type ReadonlyRef<T> = Readonly<Ref<T>>;
+// Internal gallery entry metadata. `sourceId` tracks the same attachment object
+// across reactive recomputes, while `fingerprint` lets a uniquely identifiable
+// replacement object keep the current lightbox selection stable.
 type LightboxImage = {
   sourceId: string;
   fingerprint: string;
@@ -114,6 +117,8 @@ export function useMessageAttachments(message: ReadonlyRef<TimelineMessage>) {
     return hasEncryptedAttachmentMetadata(file) ? encryptedAttachmentKey(file) : file.url;
   }
 
+  // JSON tuple encoding keeps optional fields unambiguous without relying on a
+  // separator character that could also appear in user-provided names.
   function attachmentFingerprint(file: TimelineSharedFile): string {
     return JSON.stringify([
       attachmentKey(file),
@@ -127,6 +132,8 @@ export function useMessageAttachments(message: ReadonlyRef<TimelineMessage>) {
     const identity = toRaw(file);
     const existing = attachmentInstanceIds.get(identity);
     if (existing) return existing;
+    // The monotonic suffix only needs to be unique for this composable
+    // instance; combining it with the attachment key keeps IDs readable.
     const id = `${attachmentKey(file)}:${nextAttachmentInstanceId}`;
     nextAttachmentInstanceId += 1;
     attachmentInstanceIds.set(identity, id);
@@ -257,6 +264,9 @@ export function useMessageAttachments(message: ReadonlyRef<TimelineMessage>) {
     });
   });
 
+  // Returns an index only when the fingerprint appears exactly once; ambiguous
+  // duplicates and missing entries both return -1 so the lightbox can close
+  // rather than jump to a different attachment.
   function uniqueFingerprintIndex(images: LightboxImage[], fingerprint: string): number {
     let matchedIndex = -1;
     for (const [index, image] of images.entries()) {

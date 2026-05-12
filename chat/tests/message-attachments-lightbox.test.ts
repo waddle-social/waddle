@@ -5,15 +5,15 @@ import type { TimelineMessage, TimelineSharedFile } from "@/lib/chat-ui";
 
 type MessageRef = Parameters<typeof useMessageAttachments>[0];
 
-const cleanups: Array<() => void> = [];
+const pendingCleanups: Array<() => void> = [];
 
 afterEach(() => {
-  for (const cleanup of cleanups.splice(0)) cleanup();
+  for (const cleanup of pendingCleanups.splice(0)) cleanup();
 });
 
 function messageAttachments(message: MessageRef) {
   const attachments = useMessageAttachments(message);
-  cleanups.push(attachments.cleanup);
+  pendingCleanups.push(attachments.cleanup);
   return attachments;
 }
 
