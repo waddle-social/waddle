@@ -1,7 +1,6 @@
 import { ref, computed, nextTick, watch, type Ref } from "vue";
 import { useStore } from "@nanostores/vue";
 import type { ChannelSummary } from "@/lib/chat-types";
-import { isForumChannel } from "@/lib/channel-types";
 import type { WaddleSession } from "@/lib/server-auth";
 import {
   BrowserXmppClient,
@@ -19,15 +18,12 @@ import { applyPinEvent } from "@/stores/pinned-messages";
 import { hydrateSinglePinnedBody } from "@/services/pinned-message-bodies";
 import { roomMessageFromArchived } from "@/lib/xmpp/wasm-message-codecs";
 import {
-  inferredFileDisposition,
   type DeliveryStatus,
   type ExtensionAnnotationAction,
   type MarkupSpan,
   type MessageReference,
   type TimelineMessage,
 } from "@/lib/chat-ui";
-import { MAX_FILE_UPLOAD_BYTES } from "@/lib/xmpp/file-upload";
-import type { OutboundFileAttachment } from "@/lib/xmpp";
 import {
   findMessageById,
   matchMessageId,
@@ -62,6 +58,7 @@ import {
   removeSenderReactions,
 } from "@/channels/message-timeline-state";
 import { useChannelMamPaging } from "@/channels/mam-paging";
+import { useMucSend } from "@/channels/muc-send";
 
 export function useChannelMessages(
   session: Ref<WaddleSession | null>,
@@ -85,7 +82,6 @@ export function useChannelMessages(
   const messages = ref<TimelineMessage[]>([]);
   const draft = ref("");
   const forumPostTitle = ref("");
-  const isSending = ref(false);
   const timelineEl: Ref<HTMLDivElement | null> = ref(null);
   const timelineEdgeScroller: Ref<((mode: ScrollDirectionMode) => boolean | Promise<boolean>) | null> = ref(null);
   const pinnedEdgeScroller = createPinnedEdgeScroller({
@@ -98,7 +94,6 @@ export function useChannelMessages(
   const roomPresence = ref<RoomPresence>({});
   const roomLastSeen = ref<Record<string, number>>({});
   const slowModeCooldown = ref(0);
-  const uploadProgress = ref({ uploading: false, progress: 0, filename: "" });
   const firstUnseenId = ref<string | null>(null);
   const latestRemoteMessageId = computed<string | null>(() => {
     for (let i = messages.value.length - 1; i >= 0; i--) {
@@ -121,12 +116,6 @@ export function useChannelMessages(
   let lastChatState: ChatStateType = "active";
   let composingTimeout: ReturnType<typeof setTimeout> | null = null;
   const typingTimers = new Map<string, ReturnType<typeof setTimeout>>();
-  // Client-assigned stanza ids still awaiting MUC-echo reconciliation. A self
-  // echo with a server-rewritten id falls back to body matching, but only
-  // against messages in this set — otherwise sending the same text twice
-  // would cause the second echo to rewrite the first (already reconciled)
-  // message's id.
-  const pendingEchoClientIds = new Set<string>();
 
   const currentRoomJid = computed(() => {
     if (!session.value || !activeChannelId.value) return null;
@@ -135,7 +124,6 @@ export function useChannelMessages(
   const activeTimelineRoomJid = computed(() =>
     isChannelTimelineActive.value ? currentRoomJid.value : null
   );
-  const channelIsForum = computed(() => isForumChannel(currentChannel.value));
 
   function roomJidForChannel(channelId: string): string | null {
     const currentSession = session.value;
@@ -586,42 +574,6 @@ export function useChannelMessages(
   }
 
   /**
-   * XEP-0198: server acked our outbound stanza. The id here is the
-   * client-assigned stanza ID. Promote the matching optimistic entry to
-   * "delivered" even if the MUC self-echo hasn't arrived yet (the echo
-   * will later reconcile the ID through mergeLiveMessage).
-   */
-  function onMessageAck(messageId: string) {
-    messages.value = messages.value.map((m) =>
-      m.id === messageId && m.isSelf && m.deliveryStatus !== "delivered"
-        ? { ...m, deliveryStatus: "delivered" as DeliveryStatus }
-        : m,
-    );
-  }
-
-  function onMessageQueueStatus(messageId: string, status: "queued" | "sending") {
-    messages.value = messages.value.map((m) =>
-      m.id === messageId && m.isSelf && m.deliveryStatus !== "delivered"
-        ? { ...m, deliveryStatus: status as DeliveryStatus }
-        : m,
-    );
-  }
-
-  /**
-   * XEP-0198: the XMPP client gave up on the stanza (resume failed or no
-   * resumable transport). Mark the message as failed so the UI can
-   * surface a retry affordance. Kept in place so the user can see what
-   * did not go through.
-   */
-  function onMessageDeliveryFailure(messageId: string) {
-    messages.value = messages.value.map((m) =>
-      m.id === messageId && m.isSelf && m.deliveryStatus !== "delivered"
-        ? { ...m, deliveryStatus: "failed" as DeliveryStatus }
-        : m,
-    );
-  }
-
-  /**
    * On a fresh XMPP session (resume failed or first connect after a drop),
    * refetch MAM to close any message gap for the current channel. Local
    * optimistic sends (sending/failed) are preserved across the reload so
@@ -662,6 +614,54 @@ export function useChannelMessages(
   // threadId that isn't their own id) are hidden, so the last-seen anchor
   // and the "New messages" divider must be computed against this predicate.
   const isFeedVisible = isFeedTimelineMessage;
+
+  const send = useMucSend({
+    session,
+    xmppClient,
+    activeSpaceId,
+    activeChannelId,
+    currentChannel,
+    currentRoomJid,
+    messages,
+    draft,
+    forumPostTitle,
+    actionError,
+    clearActionError,
+    normalizeError,
+    ...(mentionJidsByNick ? { mentionJidsByNick } : {}),
+    scrollToPinnedEdgeAndPin,
+    // Chat-state cleanup on successful send — composingTimeout/lastChatState
+    // are still orchestrator-owned in PR 2; they move into useChannelChatStates
+    // in PR 5. Until then the callback keeps useMucSend free of chat-state
+    // concerns.
+    onSendComplete: (result, spaceId, channelId, isStillCurrentChannel) => {
+      if (!isStillCurrentChannel) {
+        // Client swap or channel change happened during the send. Don't
+        // emit XEP-0085 "active" through the new session targeting the
+        // old room — and skip the composing-timer cleanup since it
+        // belonged to the prior session.
+        return;
+      }
+      if (composingTimeout) {
+        clearTimeout(composingTimeout);
+        composingTimeout = null;
+      }
+      lastChatState = "active";
+      if (result?.state === "sending" && xmppClient.value) {
+        void xmppClient.value.sendChatState(spaceId, channelId, "active").catch(() => undefined);
+      }
+    },
+  });
+  const {
+    isSending,
+    uploadProgress,
+    pendingEchoClientIds,
+    sendMessage,
+    editMessage,
+    onMessageAck,
+    onMessageQueueStatus,
+    onMessageDeliveryFailure,
+  } = send;
 
   const paging = useChannelMamPaging({
     session,
@@ -716,184 +716,6 @@ export function useChannelMessages(
     messages.value = [];
     clearTypingState();
     await loadMessages(activeSpaceId.value ?? "", channelId);
-  }
-
-  async function sendMessage(
-    body?: string,
-    markup?: MarkupSpan[],
-    references?: MessageReference[],
-    files?: Array<File | Blob>,
-    replyTo?: { id: string; author: string; body?: string },
-    forumTitleOrThreadOverride?: string | { threadId: string; parentThreadId?: string },
-  ) {
-    const bodyText = body ?? draft.value;
-    // markup !== undefined means this came from the rich editor (composer send)
-    // undefined means it came from a programmatic send (GIF, etc.)
-    const fromComposer = markup !== undefined;
-    const threadOverride = typeof forumTitleOrThreadOverride === "string"
-      ? undefined
-      : forumTitleOrThreadOverride;
-    const forumTitle = typeof forumTitleOrThreadOverride === "string"
-      ? forumTitleOrThreadOverride
-      : undefined;
-    const client = xmppClient.value;
-    const spaceId = activeSpaceId.value ?? "";
-    const channelId = activeChannelId.value;
-    const hasFiles = !!files && files.length > 0;
-    const isForumPost = channelIsForum.value && !replyTo;
-    const resolvedForumTitle = (forumTitle ?? forumPostTitle.value).trim();
-    const hasThreadMetadataIntent = !!threadOverride?.threadId.trim();
-    const hasForumMetadataIntent = (isForumPost && !!resolvedForumTitle) || (channelIsForum.value && !!replyTo);
-    if (!client || !channelId) return;
-    if (!bodyText.trim() && !hasFiles && !hasThreadMetadataIntent && !hasForumMetadataIntent) return;
-    if (isForumPost && !resolvedForumTitle) {
-      actionError.value = "Add a title before posting to this forum.";
-      return;
-    }
-
-    if (hasFiles) {
-      for (const f of files!) {
-        if (f.size > MAX_FILE_UPLOAD_BYTES) {
-          actionError.value = `File too large (${(f.size / 1024 / 1024).toFixed(1)} MB). Maximum upload size is 10 MB.`;
-          return;
-        }
-      }
-    }
-
-    isSending.value = true;
-    clearActionError();
-
-    try {
-      let attachments: OutboundFileAttachment[] | undefined;
-      if (hasFiles) {
-        const filenames = files!.map((f) => (f instanceof File ? f.name : `attachment-${Date.now()}.bin`));
-        uploadProgress.value = { uploading: true, progress: 0, filename: filenames[0] };
-        attachments = await client.uploadAttachments(files!, (overall, idx) => {
-          uploadProgress.value = {
-            uploading: true,
-            progress: overall.total > 0 ? overall.loaded / overall.total : 0,
-            filename: filenames[idx] ?? "",
-          };
-        });
-      }
-
-      const parent = replyTo ? findMessageById(messages.value, replyTo.id) : undefined;
-      // XEP-0461 §3.2: groupchat replies MUST quote the room-assigned
-      // XEP-0359 stanza-id. Without one, "messages without one cannot be
-      // replied to"; refuse the send rather than leak a non-conformant id.
-      if (replyTo && parent && !parent.replyableId) {
-        actionError.value =
-          "This message can't be replied to (no room stanza-id). Try reloading the channel.";
-        isSending.value = false;
-        return;
-      }
-      const wireReplyTo = replyTo && parent && parent.replyableId
-        ? {
-            id: parent.replyableId,
-            author: parent.authorOccupantJid ?? parent.authorJid ?? replyTo.author,
-            ...(replyTo.body ? { body: replyTo.body } : {}),
-          }
-        : undefined;
-      // Thread membership is explicit via threadOverride, except forum replies,
-      // which derive their thread from the replied-to topic/message.
-      const threadId = threadOverride?.threadId
-        ?? (channelIsForum.value && parent ? (parent.threadId ?? parent.id) : undefined);
-      const parentThreadId = threadOverride?.parentThreadId;
-      const threadCreate = isForumPost ? { title: resolvedForumTitle } : undefined;
-      const threadReply = channelIsForum.value && replyTo && threadId
-        ? { threadId }
-        : undefined;
-      const result = await client.sendGroupMessage(spaceId, channelId, bodyText, {
-        markup,
-        references,
-        files: attachments,
-        ...(wireReplyTo ? { replyTo: wireReplyTo } : {}),
-        ...(threadId ? { threadId } : {}),
-        ...(parentThreadId ? { parentThreadId } : {}),
-        ...(threadCreate ? { threadCreate } : {}),
-        ...(threadReply ? { threadReply } : {}),
-        ...(mentionJidsByNick ? { mentionJidsByNick: mentionJidsByNick.value } : {}),
-      });
-      const msgId = result?.id ?? null;
-      const isStillCurrentChannel =
-        xmppClient.value === client &&
-        (activeSpaceId.value ?? "") === spaceId &&
-        activeChannelId.value === channelId;
-
-      if (msgId && session.value && isStillCurrentChannel) {
-        // Optimistic insert: show message immediately with "sending" status
-        const optimistic: TimelineMessage = {
-          id: msgId,
-          correctionTargetId: msgId,
-          author: session.value.username,
-          authorJid: `${currentRoomJid.value}/${session.value.username}`,
-          body: bodyText || (attachments?.[0]?.url ?? ""),
-          createdAt: new Date().toISOString(),
-          isSelf: true,
-          deliveryStatus: (result?.state ?? "sending") as DeliveryStatus,
-          ...(markup && markup.length > 0 ? { markup } : {}),
-          ...(references && references.length > 0 ? { references } : {}),
-        };
-        if (replyTo && parent && parent.replyableId) {
-          // Mirror the wire reply id on the optimistic insert so the local
-          // chip and the eventual MAM round-trip resolve to the same id.
-          optimistic.replyTo = {
-            id: parent.replyableId,
-            author: replyTo.author,
-            ...(replyTo.body ? { preview: replyTo.body } : {}),
-          };
-        }
-        if (threadId) optimistic.threadId = threadId;
-        if (parentThreadId) optimistic.parentThreadId = parentThreadId;
-        if (threadCreate) {
-          optimistic.threadId = msgId;
-          optimistic.forumPostKind = "topic";
-          optimistic.forumTitle = threadCreate.title;
-          optimistic.forumThreadTitle = threadCreate.title;
-        } else if (threadReply) {
-          optimistic.forumPostKind = "reply";
-          const threadTitle = parent?.forumTitle ?? parent?.forumThreadTitle;
-          if (threadTitle) optimistic.forumThreadTitle = threadTitle;
-        }
-        if (attachments && attachments.length > 0) {
-          optimistic.sharedFiles = attachments.map((a) => ({
-            url: a.url,
-            name: a.name,
-            mediaType: a.mediaType,
-            size: a.size,
-            ...(a.width ? { width: a.width } : {}),
-            ...(a.height ? { height: a.height } : {}),
-            disposition: inferredFileDisposition(a.mediaType, a.name ?? a.url),
-            ...(a.encrypted ? { encrypted: a.encrypted } : {}),
-          }));
-        }
-        pendingEchoClientIds.add(msgId);
-        messages.value = applyForumContext([...messages.value, optimistic]);
-        void scrollToPinnedEdgeAndPin();
-      }
-
-      // Clear draft on successful send (triggers ChatEditor clear via watcher)
-      if (fromComposer && isStillCurrentChannel) {
-        draft.value = "";
-        if (threadCreate) forumPostTitle.value = "";
-      }
-      // Send "active" state after sending a message (stops composing indicator)
-      if (isStillCurrentChannel) {
-        if (composingTimeout) {
-          clearTimeout(composingTimeout);
-          composingTimeout = null;
-        }
-        lastChatState = "active";
-      }
-      if (result?.state === "sending") {
-        void client.sendChatState(spaceId, channelId, "active").catch(() => undefined);
-      }
-    } catch (e) {
-      actionError.value = normalizeError(e);
-    } finally {
-      isSending.value = false;
-      uploadProgress.value = { uploading: false, progress: 0, filename: "" };
-    }
   }
 
   async function toggleReaction(messageId: string, emoji: string) {
@@ -1002,28 +824,6 @@ export function useChannelMessages(
     } catch (e) {
       actionError.value = normalizeError(e);
       throw e;
-    }
-  }
-
-  async function editMessage(messageId: string, newBody: string, markup?: MarkupSpan[], references?: MessageReference[]) {
-    if (!xmppClient.value || !activeChannelId.value || !newBody.trim())
-      return;
-    const message = findMessageById(messages.value, messageId);
-    const targetId = message?.correctionTargetId ?? messageId;
-
-    clearActionError();
-
-    try {
-      await xmppClient.value.sendCorrection(
-        activeSpaceId.value ?? "",
-        activeChannelId.value,
-        newBody,
-        targetId,
-        markup,
-        references,
-      );
-    } catch (e) {
-      actionError.value = normalizeError(e);
     }
   }
 
