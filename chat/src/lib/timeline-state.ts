@@ -16,27 +16,32 @@ import {
 // grilling for #351.
 
 /**
- * Apply a delivery event to the message matching `messageId`, but only when
- * the message is a self-send. Non-self messages are untouched because the
- * delivery lifecycle tracks the local outbound stanza, not received ones.
+ * Apply a delivery event to the self-message matching `messageId`. Returns
+ * the original array reference when nothing changes (id miss or
+ * no-downgrade short-circuit), so Vue's reactivity skips a re-render and
+ * downstream watchers don't fire.
  *
- * The helper preserves reference identity when the result would be
- * structurally identical to the input — both at the array level (id miss
- * or terminal-no-op) and at the element level (no-downgrade short-circuits
- * to the existing object). Vue's reactivity skips re-renders in that case.
+ * Optimised for the XEP-0184 / XEP-0198 fan-out hot path: ack, queue, and
+ * failure events arrive on every outbound stanza id and fan out to both
+ * the room and DM timelines. The previous implementation always allocated
+ * via `Array.map`; this version locates the target via `findIndex` and
+ * only allocates when the transition is real.
+ *
+ * Generic `M extends TimelineMessage` accepts mutable `M[]` and returns
+ * `M[]` — callers operate on a Vue `Ref<TimelineMessage[]>` whose `.value`
+ * is mutable, so the input is `M[]` rather than `ReadonlyArray<M>`.
  */
 export function applyDeliveryEventById<M extends TimelineMessage>(
-  timeline: ReadonlyArray<M>,
+  timeline: M[],
   messageId: string,
   event: DeliveryEvent,
 ): M[] {
-  let changed = false;
-  const next = timeline.map((m): M => {
-    if (m.id !== messageId || !m.isSelf) return m;
-    const nextStatus = applyDeliveryEvent(m.deliveryStatus, event);
-    if (nextStatus === m.deliveryStatus) return m;
-    changed = true;
-    return { ...m, deliveryStatus: nextStatus };
-  });
-  return changed ? next : (timeline as M[]);
+  const index = timeline.findIndex((m) => m.id === messageId && m.isSelf);
+  if (index < 0) return timeline;
+  const current = timeline[index]!;
+  const nextStatus = applyDeliveryEvent(current.deliveryStatus, event);
+  if (nextStatus === current.deliveryStatus) return timeline;
+  const next = timeline.slice();
+  next[index] = { ...current, deliveryStatus: nextStatus };
+  return next;
 }
