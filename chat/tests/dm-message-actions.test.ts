@@ -79,10 +79,12 @@ describe("toggleReaction (XEP-0444)", () => {
 
 describe("toggleReaction target-id precedence", () => {
   test("prefers replyableId over id when both are present", async () => {
-    // If a DM carries a server-stable XEP-0359 stanza-id (currently rare,
-    // but possible if the server starts attaching one), the reaction MUST
-    // target the stable id, not the client-assigned message id. Lock the
-    // precedence in to catch any regression in `msg.replyableId ?? msg.id`.
+    // DM `replyableId` is the XEP-0461 §3.2 reply-target id —
+    // `dmMessageFromArchived` sets it to `origin_id ?? message.id`, which
+    // is wire-stable across MAM round-trips. `TimelineMessage.id` can fall
+    // back to a MAM archive id when origin-id and message.id are absent;
+    // that's not a valid reaction target. Lock the
+    // `msg.replyableId ?? msg.id` precedence in.
     const h = harness();
     h.messages.value = [
       {
@@ -100,6 +102,24 @@ describe("toggleReaction target-id precedence", () => {
 });
 
 describe("retractMessage (XEP-0424)", () => {
+  test("prefers replyableId over id (wire-stable origin-id beats potential MAM-id fallback)", async () => {
+    // `dmMessageFromArchived` sets `replyableId = origin_id ?? message.id`
+    // — that's the wire-stable retract target. `TimelineMessage.id` can
+    // fall back to a MAM archive id, which is NOT a valid XEP-0424 target.
+    const h = harness();
+    h.messages.value = [
+      {
+        id: "mam-archive-id",
+        replyableId: "wire-origin-id",
+        body: "", nick: "", timestamp: 0,
+      } as TimelineMessage,
+    ];
+    await h.actions.retractMessage("mam-archive-id");
+    const sendDmRetraction = h.xmppClient.value!.sendDmRetraction as unknown as ReturnType<typeof mock>;
+    expect(sendDmRetraction).toHaveBeenCalledTimes(1);
+    expect(sendDmRetraction.mock.calls[0]![1]).toBe("wire-origin-id");
+  });
+
   test("falls back to message id when replyableId is absent (DMs don't require room stanza-id)", async () => {
     const h = harness();
     h.messages.value = [

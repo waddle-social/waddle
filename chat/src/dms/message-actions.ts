@@ -67,12 +67,17 @@ export function useDmMessageActions(deps: UseDmMessageActionsDeps) {
   }
 
   /**
-   * XEP-0424 retraction for 1:1. No room stanza-id requirement — the
-   * client-assigned message id is sufficient for DMs.
+   * XEP-0424 retraction for 1:1. Prefer `replyableId` (origin-id per
+   * XEP-0461 §3.2 in `dmMessageFromArchived`) over `TimelineMessage.id`
+   * — the latter can fall back to the MAM archive id when origin-id and
+   * the message's own `@id` are absent, and a MAM id is not a valid
+   * XEP-0424 retraction target. The trailing `?? messageId` keeps the
+   * caller's id usable when the message isn't in our timeline yet.
    */
   async function retractMessage(messageId: string) {
     if (!xmppClient.value || !activePeerJid.value) return;
-    const targetId = findMessageById(messages.value, messageId)?.id ?? messageId;
+    const target = findMessageById(messages.value, messageId);
+    const targetId = target?.replyableId ?? target?.id ?? messageId;
     clearActionError();
     try {
       await xmppClient.value.sendDmRetraction(activePeerJid.value, targetId);
