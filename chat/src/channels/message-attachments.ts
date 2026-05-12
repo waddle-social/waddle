@@ -249,16 +249,7 @@ export function useMessageAttachments(message: ReadonlyRef<TimelineMessage>) {
     { immediate: true },
   );
 
-  const lightboxImages = computed(() => {
-    const gifUrl = inlineGifUrl.value;
-    if (gifUrl) {
-      return [{
-        sourceId: `inline-gif:${gifUrl}`,
-        fingerprint: JSON.stringify(["inline-gif", gifUrl]),
-        url: gifUrl,
-      }];
-    }
-
+  const attachmentLightboxImages = computed(() => {
     return imageAttachments.value.flatMap((f) => {
       const resolvedUrl = resolvedAttachmentUrl(f);
       if (!resolvedUrl) return [];
@@ -272,6 +263,17 @@ export function useMessageAttachments(message: ReadonlyRef<TimelineMessage>) {
       if (f.height) img.height = f.height;
       return [img];
     });
+  });
+
+  const lightboxImages = computed(() => {
+    const gifUrl = inlineGifUrl.value;
+    const images = attachmentLightboxImages.value;
+    if (!gifUrl) return images;
+    return [{
+      sourceId: `inline-gif:${gifUrl}`,
+      fingerprint: JSON.stringify(["inline-gif", gifUrl]),
+      url: gifUrl,
+    }, ...images];
   });
 
   // Returns an index only when the fingerprint appears exactly once; ambiguous
@@ -348,8 +350,8 @@ export function useMessageAttachments(message: ReadonlyRef<TimelineMessage>) {
   }
 
   function openGifLightbox() {
-    if (!inlineGifUrl.value) return;
-    const image = lightboxImages.value[0]!;
+    const image = lightboxImages.value[0];
+    if (!inlineGifUrl.value || !image) return;
     lightboxSelectedImage.value = selectedLightboxImageFor(image);
     lightboxIndex.value = 0;
     startLightboxSelectionTracking();
