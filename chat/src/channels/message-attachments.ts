@@ -85,7 +85,7 @@ export function useMessageAttachments(message: ReadonlyRef<TimelineMessage>) {
     const matchesAttachment = sharedFiles.value.some((f) => f.url === body.trim());
     return matchesAttachment ? "" : body;
   });
-  const inlineBodyImageUrl = computed(() => (isInlineImageBodyUrl.value ? message.value.body.trim() : null));
+  const inlineImageUrl = computed(() => (isInlineImageBodyUrl.value ? message.value.body.trim() : null));
 
   // Canonical per-message image lightbox state. Components rendering a
   // message body should use these refs and openLightbox(file) together so the
@@ -266,7 +266,7 @@ export function useMessageAttachments(message: ReadonlyRef<TimelineMessage>) {
   });
 
   const lightboxImages = computed(() => {
-    const imageUrl = inlineBodyImageUrl.value;
+    const imageUrl = inlineImageUrl.value;
     const images = attachmentLightboxImages.value;
     if (!imageUrl) return images;
     return [
@@ -354,7 +354,7 @@ export function useMessageAttachments(message: ReadonlyRef<TimelineMessage>) {
 
   function openInlineImageLightbox() {
     const image = lightboxImages.value[0];
-    if (!inlineBodyImageUrl.value || !image) return;
+    if (!inlineImageUrl.value || !image) return;
     lightboxSelectedImage.value = selectedLightboxImageFor(image);
     lightboxIndex.value = 0;
     startLightboxSelectionTracking();
