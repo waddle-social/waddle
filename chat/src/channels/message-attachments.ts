@@ -233,7 +233,7 @@ export function useMessageAttachments(message: ReadonlyRef<TimelineMessage>) {
     ...pdfAttachments.value,
   ]);
 
-  const stopPreviewableAttachmentsWatch = watch(
+  const stopPreviewableAttachmentsWatchHandle = watch(
     previewableAttachments,
     (attachments) => {
       if (typeof window === "undefined") return;
@@ -354,7 +354,7 @@ export function useMessageAttachments(message: ReadonlyRef<TimelineMessage>) {
 
   function cleanup() {
     disposed = true;
-    stopPreviewableAttachmentsWatch();
+    stopPreviewableAttachmentsWatchHandle();
     stopLightboxSelectionTracking();
     if (typeof URL === "undefined") return;
     for (const key of Object.keys(decryptedAttachmentUrls.value)) revokeAttachmentUrl(key);

@@ -8,7 +8,8 @@ type MessageRef = Parameters<typeof useMessageAttachments>[0];
 const pendingCleanups: Array<() => void> = [];
 
 afterEach(() => {
-  for (const cleanup of pendingCleanups.splice(0)) cleanup();
+  for (const cleanup of pendingCleanups) cleanup();
+  pendingCleanups.length = 0;
 });
 
 function messageAttachments(message: MessageRef) {
