@@ -1,10 +1,7 @@
 import { computed, nextTick, ref, watch, type Ref } from "vue";
 import {
-  inferredFileDisposition,
   type DeliveryStatus,
   type ExtensionAnnotationAction,
-  type MarkupSpan,
-  type MessageReference,
   type TimelineMessage,
 } from "@/lib/chat-ui";
 import type {
@@ -19,8 +16,6 @@ import type {
 } from "@/lib/xmpp-client";
 import { barePeerJid } from "@/lib/xmpp-client";
 import type { WaddleSession } from "@/lib/server-auth";
-import { MAX_FILE_UPLOAD_BYTES } from "@/lib/xmpp/file-upload";
-import type { OutboundFileAttachment } from "@/lib/xmpp";
 import {
   findMessageById,
   matchMessageId,

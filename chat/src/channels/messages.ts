@@ -1,7 +1,6 @@
 import { ref, computed, nextTick, watch, type Ref } from "vue";
 import { useStore } from "@nanostores/vue";
 import type { ChannelSummary } from "@/lib/chat-types";
-import { isForumChannel } from "@/lib/channel-types";
 import type { WaddleSession } from "@/lib/server-auth";
 import {
   BrowserXmppClient,
@@ -19,15 +18,12 @@ import { applyPinEvent } from "@/stores/pinned-messages";
 import { hydrateSinglePinnedBody } from "@/services/pinned-message-bodies";
 import { roomMessageFromArchived } from "@/lib/xmpp/wasm-message-codecs";
 import {
-  inferredFileDisposition,
   type DeliveryStatus,
   type ExtensionAnnotationAction,
   type MarkupSpan,
   type MessageReference,
   type TimelineMessage,
 } from "@/lib/chat-ui";
-import { MAX_FILE_UPLOAD_BYTES } from "@/lib/xmpp/file-upload";
-import type { OutboundFileAttachment } from "@/lib/xmpp";
 import {
   findMessageById,
   matchMessageId,
@@ -128,7 +124,6 @@ export function useChannelMessages(
   const activeTimelineRoomJid = computed(() =>
     isChannelTimelineActive.value ? currentRoomJid.value : null
   );
-  const channelIsForum = computed(() => isForumChannel(currentChannel.value));
 
   function roomJidForChannel(channelId: string): string | null {
     const currentSession = session.value;
