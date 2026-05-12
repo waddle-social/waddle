@@ -139,15 +139,12 @@ fn subscription_update_uses_sql_boolean_literal_for_postgres() {
 }
 
 #[test]
-fn bool_db_params_bind_as_typed_booleans_for_postgres() {
-    let params = crate::db_params![true, false];
-    assert!(matches!(
-        params.as_slice(),
-        [
-            crate::db::Value::Boolean(true),
-            crate::db::Value::Boolean(false)
-        ]
-    ));
+fn roster_upsert_casts_approved_param_for_postgres() {
+    let sql = super::mutation::COMMIT_ROSTER_UPSERT_SQL;
+    assert!(
+        sql.contains("(? <> 0)"),
+        "Postgres roster_items.approved is BOOLEAN, but shared bool params bind as integer flags"
+    );
 }
 
 #[tokio::test]

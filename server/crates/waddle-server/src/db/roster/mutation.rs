@@ -19,6 +19,18 @@ pub(super) const COMMIT_SUBSCRIPTION_UPDATE_SQL: &str = r#"
                 updated_at = excluded.updated_at
             "#;
 
+pub(super) const COMMIT_ROSTER_UPSERT_SQL: &str = r#"
+                    INSERT INTO roster_items (user_jid, contact_jid, name, subscription, ask, approved, groups, updated_at)
+                    VALUES (?, ?, ?, ?, ?, (? <> 0), ?, ?)
+                    ON CONFLICT(user_jid, contact_jid) DO UPDATE SET
+                        name = excluded.name,
+                        subscription = excluded.subscription,
+                        ask = excluded.ask,
+                        approved = excluded.approved,
+                        groups = excluded.groups,
+                        updated_at = excluded.updated_at
+                    "#;
+
 impl DatabaseRosterStorage {
     /// Atomic roster mutation: write the row, bump the user's roster version,
     /// return the new version along with a [`UserMutationLock`] guard.
@@ -115,17 +127,7 @@ impl DatabaseRosterStorage {
                 let groups_json = serde_json::to_string(&row.groups)
                     .map_err(RosterStorageError::SerializationError)?;
                 tx.execute(
-                    r#"
-                    INSERT INTO roster_items (user_jid, contact_jid, name, subscription, ask, approved, groups, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(user_jid, contact_jid) DO UPDATE SET
-                        name = excluded.name,
-                        subscription = excluded.subscription,
-                        ask = excluded.ask,
-                        approved = excluded.approved,
-                        groups = excluded.groups,
-                        updated_at = excluded.updated_at
-                    "#,
+                    COMMIT_ROSTER_UPSERT_SQL,
                     crate::db_params![
                         user_jid.to_string(),
                         row.contact_jid.clone(),
