@@ -1,4 +1,4 @@
-import { computed, onBeforeUnmount, ref, watch, type Ref } from "vue";
+import { computed, getCurrentInstance, onBeforeUnmount, ref, watch, type Ref } from "vue";
 import {
   isAudioFile,
   isImageFile,
@@ -72,6 +72,9 @@ export function useMessageAttachments(message: ReadonlyRef<TimelineMessage>) {
     return matchesAttachment ? "" : body;
   });
 
+  // Canonical per-message image lightbox state. Components rendering a
+  // message body should use these refs and openLightbox(file) together so the
+  // gallery is derived from the same resolved attachment URLs.
   const lightboxOpen = ref(false);
   const lightboxIndex = ref(0);
   const decryptedAttachmentUrls = ref<Record<string, string>>({});
@@ -210,7 +213,7 @@ export function useMessageAttachments(message: ReadonlyRef<TimelineMessage>) {
     for (const key of Object.keys(decryptedAttachmentUrls.value)) revokeAttachmentUrl(key);
   }
 
-  onBeforeUnmount(cleanup);
+  if (getCurrentInstance()) onBeforeUnmount(cleanup);
 
   return {
     sharedFiles,
