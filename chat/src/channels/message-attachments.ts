@@ -1,4 +1,4 @@
-import { computed, getCurrentInstance, onBeforeUnmount, ref, watch, type Ref } from "vue";
+import { computed, onScopeDispose, ref, watch, type Ref } from "vue";
 import {
   isAudioFile,
   isImageFile,
@@ -74,7 +74,9 @@ export function useMessageAttachments(message: ReadonlyRef<TimelineMessage>) {
 
   // Canonical per-message image lightbox state. Components rendering a
   // message body should use these refs and openLightbox(file) together so the
-  // gallery is derived from the same resolved attachment URLs.
+  // gallery is derived from the same resolved attachment URLs. Calling
+  // openLightbox for an encrypted image whose decrypted blob URL is not ready
+  // is a silent no-op; unresolved entries are excluded from the gallery.
   const lightboxOpen = ref(false);
   const lightboxIndex = ref(0);
   const decryptedAttachmentUrls = ref<Record<string, string>>({});
@@ -213,7 +215,7 @@ export function useMessageAttachments(message: ReadonlyRef<TimelineMessage>) {
     for (const key of Object.keys(decryptedAttachmentUrls.value)) revokeAttachmentUrl(key);
   }
 
-  if (getCurrentInstance()) onBeforeUnmount(cleanup);
+  onScopeDispose(cleanup, true);
 
   return {
     sharedFiles,
