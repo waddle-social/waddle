@@ -8,7 +8,6 @@ import {
   type MessageSearchResult,
   type RoomActivityEvent,
   type SessionLifecycleEvent,
-  type ChatStateType,
   type RoomHats,
   type RoomPresence,
 } from "@/lib/xmpp-client";
@@ -23,7 +22,6 @@ import { findMessageById } from "@/lib/message-ids";
 import { findMessageElementById } from "@/lib/message-targeting";
 import { isTopPinnedScrollDirection, type ScrollDirectionMode } from "@/lib/scroll-direction";
 import { createPinnedEdgeScroller } from "@/lib/pinned-edge-scroll";
-import { roomKey, setLastSeen } from "@/lib/last-seen-store";
 import {
   listQueuedRoomMessages,
 } from "@/lib/outbound-queue-store";
@@ -42,6 +40,8 @@ import { useChannelMamPaging } from "@/channels/mam-paging";
 import { useMucSend } from "@/channels/muc-send";
 import { useChannelMessageActions } from "@/channels/message-actions";
 import { useChannelLiveMerge } from "@/channels/live-merge";
+import { useChannelChatStates } from "@/channels/chat-states";
+import { useChannelReadMarkers } from "@/channels/read-markers";
 
 export function useChannelMessages(
   session: Ref<WaddleSession | null>,
@@ -72,20 +72,10 @@ export function useChannelMessages(
     mode: scrollDirection,
     virtualScroll: timelineEdgeScroller,
   });
-  const typingUsers = ref<string[]>([]);
   const roomHats = ref<RoomHats>({});
   const roomPresence = ref<RoomPresence>({});
   const roomLastSeen = ref<Record<string, number>>({});
   const slowModeCooldown = ref(0);
-  const firstUnseenId = ref<string | null>(null);
-  const latestRemoteMessageId = computed<string | null>(() => {
-    for (let i = messages.value.length - 1; i >= 0; i--) {
-      const m = messages.value[i];
-      if (!m || m.isSelf || m.isRetracted) continue;
-      return m.id;
-    }
-    return null;
-  });
   const activeChannels = ref<Set<string>>(new Set());
   const mentionedChannelCounts = ref<Record<string, number>>({});
   const lastMentionActivity = ref<RoomActivityEvent | null>(null);
@@ -96,9 +86,32 @@ export function useChannelMessages(
   let slowModeTimer: ReturnType<typeof setInterval> | null = null;
 
   let searchRequestId = 0;
-  let lastChatState: ChatStateType = "active";
-  let composingTimeout: ReturnType<typeof setTimeout> | null = null;
-  const typingTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+  const chatStates = useChannelChatStates({
+    xmppClient,
+    activeSpaceId,
+    activeChannelId,
+  });
+  const {
+    typingUsers,
+    addTypingUser,
+    removeTypingUser,
+    clearTypingState,
+    notifyComposing,
+  } = chatStates;
+
+  const readMarkers = useChannelReadMarkers({
+    xmppClient,
+    activeSpaceId,
+    activeChannelId,
+    messages,
+  });
+  const {
+    firstUnseenId,
+    latestRemoteMessageId,
+    markDisplayed,
+    persistLastSeen,
+  } = readMarkers;
 
   const currentRoomJid = computed(() => {
     if (!session.value || !activeChannelId.value) return null;
@@ -293,76 +306,12 @@ export function useChannelMessages(
     }
   }, { immediate: true });
 
-  function addTypingUser(nick: string) {
-    if (!typingUsers.value.includes(nick)) {
-      typingUsers.value = [...typingUsers.value, nick];
-    }
-    // Auto-expire after 5 seconds (in case we miss a "paused" notification)
-    const existing = typingTimers.get(nick);
-    if (existing) clearTimeout(existing);
-    typingTimers.set(
-      nick,
-      setTimeout(() => removeTypingUser(nick), 5000),
-    );
-  }
-
-  function removeTypingUser(nick: string) {
-    const timer = typingTimers.get(nick);
-    if (timer) {
-      clearTimeout(timer);
-      typingTimers.delete(nick);
-    }
-    if (typingUsers.value.includes(nick)) {
-      typingUsers.value = typingUsers.value.filter((n) => n !== nick);
-    }
-  }
-
-  function clearTypingState() {
-    for (const timer of typingTimers.values()) clearTimeout(timer);
-    typingTimers.clear();
-    typingUsers.value = [];
-    lastChatState = "active";
-    if (composingTimeout) {
-      clearTimeout(composingTimeout);
-      composingTimeout = null;
-    }
-  }
-
-  function notifyComposing() {
-    const client = xmppClient.value;
-    const spaceId = activeSpaceId.value ?? "";
-    const channelId = activeChannelId.value;
-    if (!client || !channelId) return;
-
-    if (lastChatState !== "composing") {
-      lastChatState = "composing";
-      void client.sendChatState(spaceId, channelId, "composing").catch(() => undefined);
-    }
-
-    // Reset the pause timer: if user stops typing for 3s, send "paused"
-    if (composingTimeout) clearTimeout(composingTimeout);
-    composingTimeout = setTimeout(() => {
-      if (
-        xmppClient.value !== client ||
-        (activeSpaceId.value ?? "") !== spaceId ||
-        activeChannelId.value !== channelId
-      )
-        return;
-      lastChatState = "paused";
-      void client.sendChatState(spaceId, channelId, "paused").catch(() => undefined);
-    }, 3000);
-  }
-
   async function scrollToPinnedEdge() {
     await pinnedEdgeScroller.scrollToPinnedEdge();
   }
 
   async function scrollToPinnedEdgeAndPin() {
     return pinnedEdgeScroller.scrollToPinnedEdge({ settle: true });
-  }
-
-  function persistLastSeen(channelId: string, messageId: string) {
-    setLastSeen(roomKey(channelId), messageId);
   }
 
   async function scrollFirstUnseenIntoView(messageId: string) {
@@ -394,13 +343,6 @@ export function useChannelMessages(
       return;
     }
     await scrollToPinnedEdgeAndPin();
-  }
-
-  function markDisplayed(messageId: string) {
-    if (!xmppClient.value || !activeChannelId.value) return;
-    const targetId = findMessageById(messages.value, messageId)?.id ?? messageId;
-    void xmppClient.value.sendDisplayed(activeSpaceId.value ?? "", activeChannelId.value, targetId)
-      .catch(() => undefined);
   }
 
   /**
@@ -460,10 +402,10 @@ export function useChannelMessages(
     normalizeError,
     ...(mentionJidsByNick ? { mentionJidsByNick } : {}),
     scrollToPinnedEdgeAndPin,
-    // Chat-state cleanup on successful send — composingTimeout/lastChatState
-    // are still orchestrator-owned in PR 2; they move into useChannelChatStates
-    // in PR 5. Until then the callback keeps useMucSend free of chat-state
-    // concerns.
+    // Post-send XEP-0085 cleanup. The composing-timer + lastChatState
+    // bookkeeping moved into useChannelChatStates in PR 5; the
+    // orchestrator routes the post-send signal via `resetOnSend()` and
+    // emits the active state through the client.
     onSendComplete: (result, spaceId, channelId, isStillCurrentChannel) => {
       if (!isStillCurrentChannel) {
         // Client swap or channel change happened during the send. Don't
@@ -472,11 +414,7 @@ export function useChannelMessages(
         // belonged to the prior session.
         return;
       }
-      if (composingTimeout) {
-        clearTimeout(composingTimeout);
-        composingTimeout = null;
-      }
-      lastChatState = "active";
+      chatStates.resetOnSend();
       if (result?.state === "sending" && xmppClient.value) {
         void xmppClient.value.sendChatState(spaceId, channelId, "active").catch(() => undefined);
       }

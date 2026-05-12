@@ -38,6 +38,8 @@ import { useDmMamPaging } from "@/dms/mam-paging";
 import { useChatSend } from "@/dms/chat-send";
 import { useDmMessageActions } from "@/dms/message-actions";
 import { useDmLiveMerge } from "@/dms/live-merge";
+import { useDmChatStates } from "@/dms/chat-states";
+import { useDmReadMarkers } from "@/dms/read-markers";
 
 export function useDirectMessages(
   session: Ref<WaddleSession | null>,
@@ -65,25 +67,29 @@ export function useDirectMessages(
     mode: scrollDirection,
     virtualScroll: timelineEdgeScroller,
   });
-  const typingUsers = ref<string[]>([]);
   const searchResults = ref<MessageSearchResult[]>([]);
   const isSearching = ref(false);
-  const firstUnseenId = ref<string | null>(null);
   const loadErrorPeerJid = ref<string | null>(null);
   const loadErrorMessage = ref("");
-  const latestRemoteMessageId = computed<string | null>(() => {
-    for (let i = messages.value.length - 1; i >= 0; i--) {
-      const m = messages.value[i];
-      if (!m || m.isSelf || m.isRetracted) continue;
-      return m.id;
-    }
-    return null;
-  });
 
   let searchRequestId = 0;
-  let lastChatState: ChatStateType = "active";
-  let composingTimeout: ReturnType<typeof setTimeout> | null = null;
-  const typingTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+  const chatStates = useDmChatStates({ xmppClient, activePeerJid });
+  const {
+    typingUsers,
+    addTypingUser,
+    removeTypingUser,
+    clearTypingState,
+    notifyComposing,
+  } = chatStates;
+
+  const readMarkers = useDmReadMarkers({ xmppClient, activePeerJid, messages });
+  const {
+    firstUnseenId,
+    latestRemoteMessageId,
+    markDisplayed,
+    persistLastSeen,
+  } = readMarkers;
 
   function queuedMessagesForPeer(peerJid: string): TimelineMessage[] {
     const currentSession = session.value;
@@ -140,37 +146,6 @@ export function useDirectMessages(
     return !m.threadId || m.id === m.threadId;
   }
 
-  function addTypingUser(nick: string) {
-    if (!typingUsers.value.includes(nick)) {
-      typingUsers.value = [...typingUsers.value, nick];
-    }
-    const existing = typingTimers.get(nick);
-    if (existing) clearTimeout(existing);
-    typingTimers.set(nick, setTimeout(() => removeTypingUser(nick), 5000));
-  }
-
-  function removeTypingUser(nick: string) {
-    const timer = typingTimers.get(nick);
-    if (timer) {
-      clearTimeout(timer);
-      typingTimers.delete(nick);
-    }
-    if (typingUsers.value.includes(nick)) {
-      typingUsers.value = typingUsers.value.filter((n) => n !== nick);
-    }
-  }
-
-  function clearTypingState() {
-    for (const timer of typingTimers.values()) clearTimeout(timer);
-    typingTimers.clear();
-    typingUsers.value = [];
-    lastChatState = "active";
-    if (composingTimeout) {
-      clearTimeout(composingTimeout);
-      composingTimeout = null;
-    }
-  }
-
   const send = useChatSend({
     session,
     xmppClient,
@@ -188,11 +163,7 @@ export function useDirectMessages(
         // old peer.
         return;
       }
-      if (composingTimeout) {
-        clearTimeout(composingTimeout);
-        composingTimeout = null;
-      }
-      lastChatState = "active";
+      chatStates.resetOnSend();
       if (result?.state === "sending" && xmppClient.value) {
         void xmppClient.value.sendDmChatState(peerJid, "active").catch(() => undefined);
       }
@@ -299,28 +270,6 @@ export function useDirectMessages(
     })();
   }
 
-
-  function markDisplayed(messageId: string) {
-    if (!xmppClient.value || !activePeerJid.value) return;
-    const targetId = findMessageById(messages.value, messageId)?.id ?? messageId;
-    void xmppClient.value.sendDmDisplayed(activePeerJid.value, targetId).catch(() => undefined);
-  }
-
-  function notifyComposing() {
-    const client = xmppClient.value;
-    const peerJid = activePeerJid.value;
-    if (!client || !peerJid) return;
-    if (lastChatState !== "composing") {
-      lastChatState = "composing";
-      void client.sendDmChatState(peerJid, "composing").catch(() => undefined);
-    }
-    if (composingTimeout) clearTimeout(composingTimeout);
-    composingTimeout = setTimeout(() => {
-      if (xmppClient.value !== client || activePeerJid.value !== peerJid) return;
-      lastChatState = "paused";
-      void client.sendDmChatState(peerJid, "paused").catch(() => undefined);
-    }, 3000);
-  }
 
   async function searchMessages(query: string) {
     const client = xmppClient.value;
