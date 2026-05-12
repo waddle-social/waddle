@@ -640,13 +640,18 @@ export function useChannelMessages(
     // in PR 5. Until then the callback keeps useMucSend free of chat-state
     // concerns.
     onSendComplete: (result, spaceId, channelId, isStillCurrentChannel) => {
-      if (isStillCurrentChannel) {
-        if (composingTimeout) {
-          clearTimeout(composingTimeout);
-          composingTimeout = null;
-        }
-        lastChatState = "active";
+      if (!isStillCurrentChannel) {
+        // Client swap or channel change happened during the send. Don't
+        // emit XEP-0085 "active" through the new session targeting the
+        // old room — and skip the composing-timer cleanup since it
+        // belonged to the prior session.
+        return;
       }
+      if (composingTimeout) {
+        clearTimeout(composingTimeout);
+        composingTimeout = null;
+      }
+      lastChatState = "active";
       if (result?.state === "sending" && xmppClient.value) {
         void xmppClient.value.sendChatState(spaceId, channelId, "active").catch(() => undefined);
       }

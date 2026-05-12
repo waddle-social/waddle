@@ -252,13 +252,17 @@ export function useDirectMessages(
     normalizeError,
     scrollToPinnedEdgeAndPin,
     onSendComplete: (result, peerJid, isStillActive) => {
-      if (isStillActive) {
-        if (composingTimeout) {
-          clearTimeout(composingTimeout);
-          composingTimeout = null;
-        }
-        lastChatState = "active";
+      if (!isStillActive) {
+        // Client swap or peer change happened during the send. Don't
+        // emit XEP-0085 "active" through the new session targeting the
+        // old peer.
+        return;
       }
+      if (composingTimeout) {
+        clearTimeout(composingTimeout);
+        composingTimeout = null;
+      }
+      lastChatState = "active";
       if (result?.state === "sending" && xmppClient.value) {
         void xmppClient.value.sendDmChatState(peerJid, "active").catch(() => undefined);
       }
