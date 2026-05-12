@@ -32,7 +32,7 @@ type SelectedLightboxImage = Pick<LightboxImage, "sourceId" | "fingerprint"> & {
 
 export function useMessageAttachments(message: ReadonlyRef<TimelineMessage>) {
   const sharedFiles = computed(() => message.value.sharedFiles ?? []);
-  const isGif = computed(() => sharedFiles.value.length === 0 && isImageUrl(message.value.body));
+  const isInlineImageBodyUrl = computed(() => sharedFiles.value.length === 0 && isImageUrl(message.value.body));
 
   const imageAttachments = computed(() =>
     sharedFiles.value.filter((f) =>
@@ -81,10 +81,11 @@ export function useMessageAttachments(message: ReadonlyRef<TimelineMessage>) {
     // bubble so only the sticker image renders (the template chains
     // v-else-if="isSticker" after v-if="displayBody").
     if (message.value.isSticker && imageAttachments.value.length > 0) return "";
-    if (sharedFiles.value.length === 0) return isGif.value ? "" : body;
+    if (sharedFiles.value.length === 0) return isInlineImageBodyUrl.value ? "" : body;
     const matchesAttachment = sharedFiles.value.some((f) => f.url === body.trim());
     return matchesAttachment ? "" : body;
   });
+  const inlineImageUrl = computed(() => (isInlineImageBodyUrl.value ? message.value.body.trim() : null));
 
   // Canonical per-message image lightbox state. Components rendering a
   // message body should use these refs and openLightbox(file) together so the
@@ -138,6 +139,14 @@ export function useMessageAttachments(message: ReadonlyRef<TimelineMessage>) {
     nextAttachmentInstanceId += 1;
     attachmentInstanceIds.set(identity, id);
     return id;
+  }
+
+  function lightboxImage(sourceId: string, fingerprint: string, url: string, file?: TimelineSharedFile): LightboxImage {
+    const img: LightboxImage = { sourceId, fingerprint, url };
+    if (file?.name) img.name = file.name;
+    if (file?.width) img.width = file.width;
+    if (file?.height) img.height = file.height;
+    return img;
   }
 
   const attachmentRenderKeys = computed(() => {
@@ -248,20 +257,26 @@ export function useMessageAttachments(message: ReadonlyRef<TimelineMessage>) {
     { immediate: true },
   );
 
-  const lightboxImages = computed(() => {
+  const attachmentLightboxImages = computed(() => {
     return imageAttachments.value.flatMap((f) => {
       const resolvedUrl = resolvedAttachmentUrl(f);
       if (!resolvedUrl) return [];
-      const img: LightboxImage = {
-        sourceId: attachmentInstanceId(f),
-        fingerprint: attachmentFingerprint(f),
-        url: resolvedUrl,
-      };
-      if (f.name) img.name = f.name;
-      if (f.width) img.width = f.width;
-      if (f.height) img.height = f.height;
-      return [img];
+      return [lightboxImage(attachmentInstanceId(f), attachmentFingerprint(f), resolvedUrl, f)];
     });
+  });
+
+  const lightboxImages = computed(() => {
+    const imageUrl = inlineImageUrl.value;
+    const images = attachmentLightboxImages.value;
+    if (!imageUrl) return images;
+    return [
+      lightboxImage(
+        `inline-body-image:${imageUrl}`,
+        JSON.stringify(["inline-body-image", imageUrl]),
+        imageUrl,
+      ),
+      ...images,
+    ];
   });
 
   // Returns an index only when the fingerprint appears exactly once; ambiguous
@@ -337,6 +352,15 @@ export function useMessageAttachments(message: ReadonlyRef<TimelineMessage>) {
     lightboxOpen.value = true;
   }
 
+  function openInlineImageLightbox() {
+    const image = lightboxImages.value[0];
+    if (!inlineImageUrl.value || !image) return;
+    lightboxSelectedImage.value = selectedLightboxImageFor(image);
+    lightboxIndex.value = 0;
+    startLightboxSelectionTracking();
+    lightboxOpen.value = true;
+  }
+
   async function downloadAttachment(file: TimelineSharedFile) {
     const downloadUrl = await ensureAttachmentReady(file);
     if (!downloadUrl || typeof document === "undefined") return;
@@ -372,7 +396,7 @@ export function useMessageAttachments(message: ReadonlyRef<TimelineMessage>) {
     pdfAttachments,
     downloadableAttachments,
     displayBody,
-    isGif,
+    isInlineImageBodyUrl,
     lightboxOpen,
     lightboxIndex,
     lightboxImages,
@@ -382,6 +406,7 @@ export function useMessageAttachments(message: ReadonlyRef<TimelineMessage>) {
     attachmentError,
     isDecryptingAttachment,
     openLightbox,
+    openInlineImageLightbox,
     downloadAttachment,
     cleanup,
   };
