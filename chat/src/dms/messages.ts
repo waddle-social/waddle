@@ -6,7 +6,6 @@ import type {
   DmDisplayedEvent,
   DmReactionEvent,
   LiveDmMessage,
-  MessageSearchResult,
   SessionLifecycleEvent,
 } from "@/lib/xmpp-client";
 import { barePeerJid } from "@/lib/xmpp-client";
@@ -26,6 +25,7 @@ import { useDmMessageActions } from "@/dms/message-actions";
 import { useDmLiveMerge } from "@/dms/live-merge";
 import { useDmChatStates } from "@/dms/chat-states";
 import { useDmReadMarkers } from "@/dms/read-markers";
+import { useDmMessageSearch } from "@/dms/message-search";
 
 export function useDirectMessages(
   session: Ref<WaddleSession | null>,
@@ -53,12 +53,8 @@ export function useDirectMessages(
     mode: scrollDirection,
     virtualScroll: timelineEdgeScroller,
   });
-  const searchResults = ref<MessageSearchResult[]>([]);
-  const isSearching = ref(false);
   const loadErrorPeerJid = ref<string | null>(null);
   const loadErrorMessage = ref("");
-
-  let searchRequestId = 0;
 
   const chatStates = useDmChatStates({ xmppClient, activePeerJid });
   const {
@@ -76,6 +72,20 @@ export function useDirectMessages(
     markDisplayed,
     persistLastSeen,
   } = readMarkers;
+
+  const messageSearch = useDmMessageSearch({
+    xmppClient,
+    activePeerJid,
+    actionError,
+    clearActionError,
+    normalizeError,
+  });
+  const {
+    searchResults,
+    isSearching,
+    searchMessages,
+    clearSearch,
+  } = messageSearch;
 
   function queuedMessagesForPeer(peerJid: string): TimelineMessage[] {
     const currentSession = session.value;
@@ -221,14 +231,12 @@ export function useDirectMessages(
     ensureMessageLoaded,
   } = paging;
 
-  // DM-load entry point. Search state lives in this orchestrator, so we
-  // reset it before delegating to the MAM-paging composable — keeping the
-  // pre-#188 invariant that switching peers invalidates in-flight searches
-  // and clears stale results.
+  // DM-load entry point. The MAM-paging composable owns paging state; the
+  // message-search composable owns search state. Reset both before
+  // delegating so switching peers invalidates in-flight searches and
+  // clears stale results.
   async function loadMessages(peerJid: string, unreadAtLoad = 0) {
-    searchRequestId++;
-    searchResults.value = [];
-    isSearching.value = false;
+    messageSearch.reset();
     await paging.loadMessages(peerJid, unreadAtLoad);
   }
 
@@ -257,59 +265,22 @@ export function useDirectMessages(
   }
 
 
-  async function searchMessages(query: string) {
-    const client = xmppClient.value;
-    const peerJid = activePeerJid.value;
-    if (!client || !peerJid) return;
-    const requestId = ++searchRequestId;
-    const trimmed = query.trim();
-    if (!trimmed) {
-      searchResults.value = [];
-      isSearching.value = false;
-      return;
-    }
-    isSearching.value = true;
-    clearActionError();
-    try {
-      const results = await client.searchDmMessages(peerJid, trimmed);
-      if (requestId === searchRequestId && xmppClient.value === client && activePeerJid.value === peerJid) {
-        searchResults.value = results;
-      }
-    } catch (e) {
-      if (requestId === searchRequestId) {
-        searchResults.value = [];
-        actionError.value = normalizeError(e);
-      }
-    } finally {
-      if (requestId === searchRequestId) isSearching.value = false;
-    }
-  }
-
-  function clearSearch() {
-    searchRequestId++;
-    searchResults.value = [];
-    isSearching.value = false;
-  }
 
   function clearMessages() {
     paging.reset();
-    searchRequestId++;
+    messageSearch.reset();
     pinnedEdgeScroller.disconnect();
     pendingEchoClientIds.clear();
     messages.value = [];
-    searchResults.value = [];
-    isSearching.value = false;
     firstUnseenId.value = null;
     clearTypingState();
   }
 
   function disconnect() {
     paging.reset();
-    searchRequestId++;
+    messageSearch.reset();
     pinnedEdgeScroller.disconnect();
     pendingEchoClientIds.clear();
-    isSearching.value = false;
-    searchResults.value = [];
     firstUnseenId.value = null;
     clearTypingState();
   }

@@ -25,7 +25,7 @@ import {
   isMamCursorNotFound,
   stripQueuedSelfMessages,
   threadCursorFromLatestPage,
-} from "@/lib/xmpp/mam-paging";
+} from "@/lib/xmpp/mam";
 import { hydratePinnedRoom, pinnedRoomsEpoch } from "@/stores/pinned-messages";
 
 const PAGE_SIZE = 100;

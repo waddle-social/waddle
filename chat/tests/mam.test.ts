@@ -10,7 +10,7 @@ import {
   MamCursorNotFoundError,
   stripQueuedSelfMessages,
   threadCursorFromLatestPage,
-} from "../src/lib/xmpp/mam-paging";
+} from "../src/lib/xmpp/mam";
 
 describe("INITIAL_CURSOR", () => {
   test("is null/true so a first load is permitted", () => {

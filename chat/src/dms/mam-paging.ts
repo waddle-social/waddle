@@ -14,7 +14,7 @@ import {
   cursorFromLatestPage,
   isMamCursorNotFound,
   stripQueuedSelfMessages,
-} from "@/lib/xmpp/mam-paging";
+} from "@/lib/xmpp/mam";
 
 const PAGE_SIZE = 100;
 

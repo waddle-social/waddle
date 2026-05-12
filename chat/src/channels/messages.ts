@@ -5,7 +5,6 @@ import type { WaddleSession } from "@/lib/server-auth";
 import {
   BrowserXmppClient,
   barePeerJid,
-  type MessageSearchResult,
   type RoomActivityEvent,
   type SessionLifecycleEvent,
   type RoomHats,
@@ -42,6 +41,7 @@ import { useChannelMessageActions } from "@/channels/message-actions";
 import { useChannelLiveMerge } from "@/channels/live-merge";
 import { useChannelChatStates } from "@/channels/chat-states";
 import { useChannelReadMarkers } from "@/channels/read-markers";
+import { useChannelMessageSearch } from "@/channels/message-search";
 
 export function useChannelMessages(
   session: Ref<WaddleSession | null>,
@@ -80,12 +80,7 @@ export function useChannelMessages(
   const mentionedChannelCounts = ref<Record<string, number>>({});
   const lastMentionActivity = ref<RoomActivityEvent | null>(null);
   const roomAvatarHashes = ref<Record<string, string>>({});
-  const searchQuery = ref("");
-  const searchResults = ref<MessageSearchResult[]>([]);
-  const isSearching = ref(false);
   let slowModeTimer: ReturnType<typeof setInterval> | null = null;
-
-  let searchRequestId = 0;
 
   const chatStates = useChannelChatStates({
     xmppClient,
@@ -112,6 +107,22 @@ export function useChannelMessages(
     markDisplayed,
     persistLastSeen,
   } = readMarkers;
+
+  const messageSearch = useChannelMessageSearch({
+    xmppClient,
+    activeSpaceId,
+    activeChannelId,
+    actionError,
+    clearActionError,
+    normalizeError,
+  });
+  const {
+    searchQuery,
+    searchResults,
+    isSearching,
+    searchMessages,
+    clearSearch,
+  } = messageSearch;
 
   const currentRoomJid = computed(() => {
     if (!session.value || !activeChannelId.value) return null;
@@ -502,10 +513,7 @@ export function useChannelMessages(
     unreadAtLoad = 0,
     metadataSeed: TimelineMessage[] = [],
   ) {
-    searchRequestId++;
-    searchQuery.value = "";
-    searchResults.value = [];
-    isSearching.value = false;
+    messageSearch.reset();
     await paging.loadMessages(spaceId, channelId, unreadAtLoad, metadataSeed);
   }
 
@@ -517,73 +525,23 @@ export function useChannelMessages(
 
   function disconnect() {
     paging.reset();
-    searchRequestId++;
+    messageSearch.reset();
     pinnedEdgeScroller.disconnect();
     pendingEchoClientIds.clear();
     // $xmppStatus is authoritative and owned by XmppProvider; do not write it here.
     clearTypingState();
     clearLiveActivityState();
-    isSearching.value = false;
-    searchQuery.value = "";
-    searchResults.value = [];
     firstUnseenId.value = null;
   }
 
   function clearMessages() {
     paging.reset();
-    searchRequestId++;
+    messageSearch.reset();
     pinnedEdgeScroller.disconnect();
     pendingEchoClientIds.clear();
     messages.value = [];
-    searchQuery.value = "";
-    searchResults.value = [];
-    isSearching.value = false;
     clearTypingState();
     firstUnseenId.value = null;
-  }
-
-  async function searchMessages(query: string) {
-    const client = xmppClient.value;
-    const spaceId = activeSpaceId.value ?? "";
-    const channelId = activeChannelId.value;
-    if (!client || !channelId) return;
-    const requestId = ++searchRequestId;
-    const trimmed = query.trim();
-    searchQuery.value = trimmed;
-    if (!trimmed) {
-      searchResults.value = [];
-      isSearching.value = false;
-      return;
-    }
-    isSearching.value = true;
-    clearActionError();
-    try {
-      const results = await client.searchMessages(spaceId, channelId, trimmed);
-      if (
-        requestId === searchRequestId &&
-        xmppClient.value === client &&
-        (activeSpaceId.value ?? "") === spaceId &&
-        activeChannelId.value === channelId
-      ) {
-        searchResults.value = results;
-      }
-    } catch (e) {
-      if (requestId === searchRequestId) {
-        searchResults.value = [];
-        actionError.value = normalizeError(e);
-      }
-    } finally {
-      if (requestId === searchRequestId) {
-        isSearching.value = false;
-      }
-    }
-  }
-
-  function clearSearch() {
-    searchRequestId++;
-    searchQuery.value = "";
-    searchResults.value = [];
-    isSearching.value = false;
   }
 
   function clearChannelActivity(roomJid: string) {
