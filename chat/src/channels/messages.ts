@@ -5,7 +5,6 @@ import type { WaddleSession } from "@/lib/server-auth";
 import {
   BrowserXmppClient,
   barePeerJid,
-  type LiveRoomMessage,
   type MessageSearchResult,
   type RoomActivityEvent,
   type SessionLifecycleEvent,
@@ -18,16 +17,9 @@ import { applyPinEvent } from "@/stores/pinned-messages";
 import { hydrateSinglePinnedBody } from "@/services/pinned-message-bodies";
 import { roomMessageFromArchived } from "@/lib/xmpp/wasm-message-codecs";
 import {
-  type DeliveryStatus,
-  type MarkupSpan,
-  type MessageReference,
   type TimelineMessage,
 } from "@/lib/chat-ui";
-import {
-  findMessageById,
-  matchMessageId,
-  mergeMessageIds,
-} from "@/lib/message-ids";
+import { findMessageById } from "@/lib/message-ids";
 import { findMessageElementById } from "@/lib/message-targeting";
 import { isTopPinnedScrollDirection, type ScrollDirectionMode } from "@/lib/scroll-direction";
 import { createPinnedEdgeScroller } from "@/lib/pinned-edge-scroll";
@@ -44,21 +36,12 @@ import {
   mapLiveRoomMessageToTimeline,
 } from "@/channels/timeline";
 import {
-  isMucServiceModeration,
-  isSameMucRetractionSender,
-  isValidMucModerationTarget,
-  isValidMucRetractionTarget,
-  isSameMucCorrectionSender,
-  mucCorrectionSender,
   queuedRoomMessageToTimeline,
-  reactionSendersForUpdate,
-  reactionsFromSenders,
-  retractChannelTimelineMessage,
-  removeSenderReactions,
 } from "@/channels/message-timeline-state";
 import { useChannelMamPaging } from "@/channels/mam-paging";
 import { useMucSend } from "@/channels/muc-send";
 import { useChannelMessageActions } from "@/channels/message-actions";
+import { useChannelLiveMerge } from "@/channels/live-merge";
 
 export function useChannelMessages(
   session: Ref<WaddleSession | null>,
@@ -150,6 +133,10 @@ export function useChannelMessages(
   watch(xmppClient, (client) => {
     if (client) {
       client.setMessageHandler((msg) => {
+        // Out-of-room body-bearing message: record cross-room activity
+        // (channel-list unread badge, etc.) and do not route to the
+        // in-room live-merge path. Retractions / corrections targeting
+        // other rooms are silently ignored.
         if (
           (!activeTimelineRoomJid.value || msg.roomJid !== activeTimelineRoomJid.value) &&
           msg.type === "message" &&
@@ -175,31 +162,15 @@ export function useChannelMessages(
         // When a user sends a real message, clear their typing state
         removeTypingUser(msg.nick);
 
-        // XEP-0424: Handle message retractions
-        if (msg.retractsId) {
-          applyRetraction(msg);
-          return;
-        }
+        // Typed dispatch via the live-merge composable. The classifier
+        // inside handleRoomMessage routes to applyRetraction /
+        // applyCorrection / mergeLiveMessage based on the stanza shape.
+        const classified = liveMerge.handleRoomMessage(msg);
 
-        // XEP-0308: Handle message corrections
-        if (msg.replacesId) {
-          applyCorrection(
-            msg.replacesId,
-            msg.body,
-            mucCorrectionSender(msg),
-            msg.markup,
-            msg.references,
-            msg.extensionAnnotations,
-            msg.extensionBodyFallback,
-          );
-          return;
-        }
-
-        mergeLiveMessage(
-          mapLiveRoomMessageToTimeline(session.value!, msg, (id) => findMessageById(messages.value, id)),
-        );
-
-        // Trigger notification for mentions when tab is unfocused
+        // Mention-driven notification routing stays in the orchestrator —
+        // it depends on cross-room session state and the tab-visibility
+        // signal, both of which are out of scope for live-merge.
+        if (classified.kind !== "live") return;
         const isTabHidden = typeof document !== "undefined"
           && (!document.hasFocus() || document.visibilityState === "hidden");
         if (msg.nick !== session.value?.username && isTabHidden) {
@@ -425,157 +396,11 @@ export function useChannelMessages(
     await scrollToPinnedEdgeAndPin();
   }
 
-  function applyDisplayed(messageId: string, nick: string) {
-    messages.value = messages.value.map((m): TimelineMessage => {
-      if (!matchMessageId(m, messageId)) return m;
-      const existing = m.readBy ? [...m.readBy] : [];
-      if (!existing.includes(nick)) {
-        existing.push(nick);
-      }
-      return { ...m, readBy: existing };
-    });
-  }
-
   function markDisplayed(messageId: string) {
     if (!xmppClient.value || !activeChannelId.value) return;
     const targetId = findMessageById(messages.value, messageId)?.id ?? messageId;
     void xmppClient.value.sendDisplayed(activeSpaceId.value ?? "", activeChannelId.value, targetId)
       .catch(() => undefined);
-  }
-
-  function applyReaction(messageId: string, nick: string, emojis: string[], senderId = nick) {
-    messages.value = messages.value.map((m): TimelineMessage => {
-      if (m.reactionTargetId !== messageId) return m;
-      const reactionSenders = reactionSendersForUpdate(m, nick, senderId);
-      removeSenderReactions(reactionSenders, nick, senderId);
-      for (const emoji of emojis) {
-        if (!reactionSenders[emoji]) reactionSenders[emoji] = {};
-        reactionSenders[emoji][senderId] = nick;
-      }
-      const reactions = reactionsFromSenders(reactionSenders);
-      const updated = { ...m };
-      if (Object.keys(reactionSenders).length > 0) {
-        updated.reactionSenders = reactionSenders;
-        updated.reactions = reactions;
-      } else {
-        delete updated.reactionSenders;
-        delete updated.reactions;
-      }
-      return updated;
-    });
-  }
-
-  function applyRetraction(msg: LiveRoomMessage) {
-    messages.value = messages.value.map((m) => {
-      if (!msg.retractsId || !matchMessageId(m, msg.retractsId)) return m;
-      if (msg.moderationTargetId) {
-        if (!isMucServiceModeration(msg)) return m;
-        if (!isValidMucModerationTarget(m, msg.moderationTargetId)) return m;
-      } else if (
-        !isValidMucRetractionTarget(m, msg.retractsId)
-        || !isSameMucRetractionSender(m, mucCorrectionSender(msg))
-      ) {
-        return m;
-      }
-      return retractChannelTimelineMessage(m, msg.retractionId);
-    });
-  }
-
-  function applyCorrection(
-    replacesId: string,
-    newBody: string,
-    correctionSender: { authorJid: string; authorRealJid?: string },
-    markup?: MarkupSpan[],
-    references?: MessageReference[],
-    extensionAnnotations?: LiveRoomMessage["extensionAnnotations"],
-    extensionBodyFallback?: boolean,
-  ) {
-    const idx = messages.value.findIndex((m) =>
-      matchMessageId(m, replacesId) && isSameMucCorrectionSender(m, correctionSender)
-    );
-    if (idx === -1) return;
-    messages.value = messages.value.map((m) => {
-      if (!matchMessageId(m, replacesId) || !isSameMucCorrectionSender(m, correctionSender)) return m;
-      const updated: TimelineMessage = { ...m, body: newBody.trim(), isEdited: true };
-      if (markup && markup.length > 0) {
-        updated.markup = markup;
-      } else {
-        delete updated.markup;
-      }
-      if (references && references.length > 0) {
-        updated.references = references;
-      } else {
-        delete updated.references;
-      }
-      if (extensionAnnotations && extensionAnnotations.length > 0) {
-        updated.extensionAnnotations = extensionAnnotations;
-        if (extensionBodyFallback) updated.extensionBodyFallback = true;
-        else delete updated.extensionBodyFallback;
-      } else {
-        delete updated.extensionAnnotations;
-        delete updated.extensionBodyFallback;
-      }
-      return updated;
-    });
-  }
-
-  function mergeLiveMessage(rawMessage: TimelineMessage) {
-    const msg = rawMessage.isRetracted
-      ? retractChannelTimelineMessage(rawMessage, rawMessage.retractionId)
-      : rawMessage;
-    // Check if this is a self-echo reconciling an optimistically-inserted
-    // message. Match by ID first; otherwise, for our own sends, fall back
-    // to body matching — but only against messages still awaiting echo
-    // reconciliation (tracked via pendingEchoClientIds). Without that
-    // constraint, sending the same text twice would let the second echo
-    // re-target the already-reconciled first message.
-    const existingById = [msg.id, ...(msg.wireIds ?? [])]
-      .map((id) => findMessageById(messages.value, id))
-      .find((message): message is TimelineMessage => !!message);
-    const pendingSelfEcho = messages.value.find(
-      (m) => pendingEchoClientIds.has(m.id) && m.isSelf && msg.isSelf && m.body === msg.body,
-    );
-    const preservedSelfEcho = [...messages.value].reverse().find(
-      (m) =>
-        m.isSelf
-        && msg.isSelf
-        && m.body === msg.body
-        && !!m.deliveryStatus
-        && m.deliveryStatus !== "delivered",
-    );
-    const existing = existingById ?? pendingSelfEcho ?? preservedSelfEcho;
-    if (existing) {
-      const wasPending = existing.id !== msg.id;
-      // Reconcile the ID to the server-assigned one and merge authoritative
-      // server-side enrichment while preserving local-only UI state.
-      messages.value = messages.value.map((m) => {
-        if (m.id !== existing.id) return m;
-        const updated: TimelineMessage = {
-          ...m,
-          ...msg,
-          ...mergeMessageIds(m, msg.id, msg.wireIds),
-        };
-        if (m.isSelf && msg.isSelf) {
-          // A self-echo is authoritative evidence that the server accepted
-          // the stanza, so it supersedes any prior "sending" or "failed"
-          // optimistic state.
-          updated.deliveryStatus = "delivered" as DeliveryStatus;
-        }
-        return updated;
-      });
-      messages.value = applyForumContext(messages.value);
-      if (wasPending) pendingEchoClientIds.delete(existing.id);
-      return;
-    }
-    const channelId = activeChannelId.value;
-    messages.value = applyForumContext([...messages.value, msg]);
-    // mergeLiveMessage always snaps to the active edge, so last-seen should advance
-    // in lockstep regardless of the user's prior scroll position — if we're
-    // scrolling them to the message, by definition they can see it.
-    void scrollToPinnedEdgeAndPin();
-    if (channelId && isFeedVisible(msg)) {
-      persistLastSeen(channelId, msg.id);
-    }
   }
 
   /**
@@ -668,6 +493,16 @@ export function useChannelMessages(
     onMessageDeliveryFailure,
   } = send;
 
+  const liveMerge = useChannelLiveMerge({
+    session,
+    messages,
+    activeChannelId,
+    pendingEchoClientIds,
+    scrollToPinnedEdgeAndPin,
+    persistLastSeen,
+  });
+  const { applyDisplayed, applyReaction } = liveMerge;
+
   const actions = useChannelMessageActions({
     session,
     xmppClient,
@@ -678,8 +513,6 @@ export function useChannelMessages(
     actionError,
     clearActionError,
     normalizeError,
-    // applyReaction is still orchestrator-owned in PR 3; PR 4 (live-merge)
-    // moves it into useChannelLiveMerge and the dep wiring updates there.
     applyReaction,
   });
   const {

@@ -37,6 +37,7 @@ import {
 import { useDmMamPaging } from "@/dms/mam-paging";
 import { useChatSend } from "@/dms/chat-send";
 import { useDmMessageActions } from "@/dms/message-actions";
+import { useDmLiveMerge } from "@/dms/live-merge";
 
 export function useDirectMessages(
   session: Ref<WaddleSession | null>,
@@ -170,76 +171,6 @@ export function useDirectMessages(
     }
   }
 
-  function applyDisplayed(messageId: string, nick: string) {
-    messages.value = messages.value.map((m): TimelineMessage => {
-      if (!matchMessageId(m, messageId)) return m;
-      const existing = m.readBy ? [...m.readBy] : [];
-      if (!existing.includes(nick)) existing.push(nick);
-      return { ...m, readBy: existing };
-    });
-  }
-
-  function applyReaction(messageId: string, nick: string, emojis: string[]) {
-    messages.value = messages.value.map((m): TimelineMessage => {
-      if (!matchMessageId(m, messageId)) return m;
-      const existing: Record<string, string[]> = m.reactions ? { ...m.reactions } : {};
-      for (const key of Object.keys(existing)) {
-        existing[key] = (existing[key] ?? []).filter((n) => n !== nick);
-        if (existing[key].length === 0) delete existing[key];
-      }
-      for (const emoji of emojis) {
-        if (!existing[emoji]) existing[emoji] = [];
-        existing[emoji].push(nick);
-      }
-      const updated = { ...m };
-      if (Object.keys(existing).length > 0) updated.reactions = existing;
-      else delete updated.reactions;
-      return updated;
-    });
-  }
-
-  function applyRetraction(msg: LiveDmMessage) {
-    messages.value = messages.value.map((m) =>
-      msg.retractsId && matchMessageId(m, msg.retractsId) && isSameDmCorrectionSender(m, msg.fromJid)
-        ? retractDmTimelineMessage(m, msg.retractionId)
-        : m
-    );
-  }
-
-  function applyCorrection(
-    replacesId: string,
-    newBody: string,
-    correctionFromJid: string,
-    markup?: LiveDmMessage["markup"],
-    references?: LiveDmMessage["references"],
-    extensionAnnotations?: LiveDmMessage["extensionAnnotations"],
-    extensionBodyFallback?: boolean,
-  ) {
-    messages.value = messages.value.map((m) => {
-      if (!matchMessageId(m, replacesId) || !isSameDmCorrectionSender(m, correctionFromJid)) return m;
-      const updated: TimelineMessage = { ...m, body: newBody.trim(), isEdited: true };
-      if (markup && markup.length > 0) {
-        updated.markup = markup;
-      } else {
-        delete updated.markup;
-      }
-      if (references && references.length > 0) {
-        updated.references = references;
-      } else {
-        delete updated.references;
-      }
-      if (extensionAnnotations && extensionAnnotations.length > 0) {
-        updated.extensionAnnotations = extensionAnnotations;
-        if (extensionBodyFallback) updated.extensionBodyFallback = true;
-        else delete updated.extensionBodyFallback;
-      } else {
-        delete updated.extensionAnnotations;
-        delete updated.extensionBodyFallback;
-      }
-      return updated;
-    });
-  }
-
   const send = useChatSend({
     session,
     xmppClient,
@@ -278,6 +209,17 @@ export function useDirectMessages(
     onMessageDeliveryFailure,
   } = send;
 
+  const liveMerge = useDmLiveMerge({
+    session,
+    messages,
+    activePeerJid,
+    pendingEchoClientIds,
+    scrollToPinnedEdgeAndPin,
+    persistLastSeen: (peerJid, messageId) => setLastSeen(dmKey(barePeerJid(peerJid)), messageId),
+    isFeedVisible,
+  });
+  const { applyDisplayed, applyReaction } = liveMerge;
+
   const actions = useDmMessageActions({
     session,
     xmppClient,
@@ -286,8 +228,6 @@ export function useDirectMessages(
     actionError,
     clearActionError,
     normalizeError,
-    // applyReaction is still orchestrator-owned in PR 3; PR 4 (live-merge)
-    // moves it into useDmLiveMerge and the dep wiring updates there.
     applyReaction,
   });
   const {
@@ -333,54 +273,6 @@ export function useDirectMessages(
     searchResults.value = [];
     isSearching.value = false;
     await paging.loadMessages(peerJid, unreadAtLoad);
-  }
-
-  function mergeLiveMessage(rawMessage: TimelineMessage) {
-    const msg = rawMessage.isRetracted
-      ? retractDmTimelineMessage(rawMessage, rawMessage.retractionId)
-      : rawMessage;
-    // Self-echo reconciliation: match by id first; otherwise body-match only
-    // against messages still awaiting reconciliation so duplicates don't
-    // retarget already-reconciled entries. Echo = authoritative → delivered.
-    const existingById = [msg.id, ...(msg.wireIds ?? [])]
-      .map((id) => findMessageById(messages.value, id))
-      .find((message): message is TimelineMessage => !!message);
-    const pendingSelfEcho = messages.value.find(
-      (m) => pendingEchoClientIds.has(m.id) && m.isSelf && msg.isSelf && m.body === msg.body,
-    );
-    const preservedSelfEcho = [...messages.value].reverse().find(
-      (m) =>
-        m.isSelf
-        && msg.isSelf
-        && m.body === msg.body
-        && !!m.deliveryStatus
-        && m.deliveryStatus !== "delivered",
-    );
-    const existing = existingById ?? pendingSelfEcho ?? preservedSelfEcho;
-    if (existing) {
-      const wasPending = existing.id !== msg.id;
-      messages.value = messages.value.map((m) => {
-        if (m.id !== existing.id) return m;
-        const updated: TimelineMessage = {
-          ...m,
-          ...msg,
-          ...mergeMessageIds(m, msg.id, msg.wireIds),
-        };
-        if (m.isSelf && msg.isSelf) {
-          updated.deliveryStatus = "delivered" as DeliveryStatus;
-        }
-        return updated;
-      });
-      if (wasPending) pendingEchoClientIds.delete(existing.id);
-      return;
-    }
-    const peerJid = activePeerJid.value;
-    messages.value = [...messages.value, msg];
-    // Always snaps to the active edge, so last-seen advances in lockstep.
-    void scrollToPinnedEdgeAndPin();
-    if (peerJid && isFeedVisible(msg)) {
-      setLastSeen(dmKey(barePeerJid(peerJid)), msg.id);
-    }
   }
 
   /** On a fresh session (SM resume failed), re-fetch MAM to close any gap
@@ -490,25 +382,7 @@ export function useDirectMessages(
   function onIncomingMessage(msg: LiveDmMessage) {
     if (!session.value || !activePeerJid.value || msg.peerJid !== activePeerJid.value) return;
     removeTypingUser(msg.nick);
-    if (msg.retractsId) {
-      applyRetraction(msg);
-      return;
-    }
-    if (msg.replacesId) {
-      applyCorrection(
-        msg.replacesId,
-        msg.body,
-        msg.fromJid,
-        msg.markup,
-        msg.references,
-        msg.extensionAnnotations,
-        msg.extensionBodyFallback,
-      );
-      return;
-    }
-    mergeLiveMessage(
-      fromLiveDmMessage(session.value, msg, (id) => findMessageById(messages.value, id)),
-    );
+    liveMerge.handleIncomingMessage(msg);
   }
 
   function onChatState(event: DmChatStateEvent) {
