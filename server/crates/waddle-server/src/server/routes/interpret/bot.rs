@@ -59,6 +59,13 @@ pub(super) async fn dispatch_bot_groupchat_response(
     }
     if let Some(extensions) = response.extensions.as_ref() {
         working.payloads.push(extensions.to_minidom());
+        working
+            .payloads
+            .push(waddle_xmpp::xep::build_fallback_element(
+                &waddle_xmpp::xep::FallbackIndication::whole_body(
+                    waddle_extensions::FRAMEWORK_NAMESPACE,
+                ),
+            ));
     }
 
     if let Some(room_actor) = bot_ctx.room_actor {
@@ -115,6 +122,8 @@ pub(super) async fn dispatch_bot_groupchat_response(
 pub(crate) struct ExtensionRoomMessage {
     pub body: DisplayText,
     pub room: RoomJid,
+    pub preferred_nick: Option<String>,
+    pub bot_hat_label: Option<DisplayText>,
     pub stanza_id: Option<StanzaId>,
     pub thread_id: Option<ThreadId>,
     pub reply_to: Option<ReplyTarget>,
@@ -241,7 +250,10 @@ pub(crate) async fn dispatch_extension_bot_groupchat_response(
             role: o.role,
         })
         .collect();
-    let bot_nick = available_bot_nick(&initial_occupants);
+    let bot_nick = available_bot_nick_with_base(
+        &initial_occupants,
+        response.preferred_nick.as_deref().unwrap_or("waddle"),
+    );
     match room_actor
         .ask(JoinWithAffiliation {
             sender_jid: bot_full.clone(),
@@ -266,7 +278,7 @@ pub(crate) async fn dispatch_extension_bot_groupchat_response(
                         }
                     };
                     let bot_bare = bot_full.to_bare();
-                    let presence = waddle_xmpp::muc::build_occupant_presence(
+                    let mut presence = waddle_xmpp::muc::build_occupant_presence(
                         &from,
                         &existing.jid,
                         join.new_occupant_affiliation,
@@ -277,6 +289,20 @@ pub(crate) async fn dispatch_extension_bot_groupchat_response(
                             real_jid: Some(&bot_full),
                             secret: &state.deps.occupant_id_secret,
                         },
+                    );
+                    let bot_hat = response
+                        .bot_hat_label
+                        .as_ref()
+                        .map(|label| {
+                            waddle_xmpp::xep::xep0317::Hat::new(
+                                label.as_str(),
+                                waddle_xmpp::xep::xep0317::well_known::BOT,
+                            )
+                        })
+                        .unwrap_or_else(waddle_xmpp::xep::xep0317::Hat::bot);
+                    waddle_xmpp::xep::xep0317::set_hats(
+                        &mut presence,
+                        &waddle_xmpp::xep::xep0317::HatSet::new().with_hat(bot_hat),
                     );
                     let _ = state
                         .deps

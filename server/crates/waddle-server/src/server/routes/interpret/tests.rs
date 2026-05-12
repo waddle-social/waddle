@@ -1378,6 +1378,8 @@ async fn extension_room_message_dispatches_threaded_muc_message() {
     let response = ExtensionRoomMessage {
         body: DisplayText::new("bot answer").expect("body"),
         room: RoomJid::new(room_jid.to_string()).expect("room"),
+        preferred_nick: None,
+        bot_hat_label: None,
         stanza_id: None,
         thread_id: Some(ThreadId::new("root-msg").expect("thread")),
         reply_to: Some(ReplyTarget {
@@ -1516,6 +1518,29 @@ fn bot_nick_avoids_existing_occupant_collision() {
     ];
 
     assert_eq!(available_bot_nick(&occupants), "waddle-3");
+}
+
+#[test]
+fn bot_nick_uses_extension_preferred_base_before_suffixing() {
+    let occupants = vec![OccupantSnapshot {
+        full_jid: "alice@example.com/web".parse().expect("alice jid"),
+        nick: "GitHub".to_string(),
+        affiliation: waddle_xmpp::Affiliation::Member,
+        role: waddle_xmpp::Role::Participant,
+    }];
+
+    assert_eq!(
+        available_bot_nick_with_base(&occupants, "GitHub"),
+        "GitHub-2"
+    );
+}
+
+#[test]
+fn bot_nick_sanitizes_invalid_resource_base_before_joining() {
+    assert_eq!(
+        available_bot_nick_with_base(&[], "GitHub\u{0}Deploys"),
+        "GitHubDeploys"
+    );
 }
 
 // -----------------------------------------------------------------

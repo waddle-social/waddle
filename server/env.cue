@@ -433,7 +433,7 @@ schema.#Project & {
 					    {"name": "link-board", "registry": "ghcr.io/waddle-social/waddle/extensions/link-board", "digest": strenv(SAMPLE_DIGEST), "namespace": "urn:waddle:link-board:1", "config": {}, "capabilityGrants": ["message.enrich", "launch", "pubsub.publish", "ui.declarative"]},
 					    {"name": "ai-chatbot", "registry": "ghcr.io/waddle-social/waddle/extensions/ai-chatbot", "digest": strenv(SAMPLE_DIGEST), "namespace": "urn:waddle:ai-chatbot:1", "config": {"endpoint": "https://openrouter.ai/api/v1/chat/completions", "model": "openrouter/auto"}, "configSecretFiles": {"api_key": "/var/run/secrets/waddle-ai/api_key"}, "capabilityGrants": ["message.enrich", "host.mam.read", "host.members.read", "host.presence.read", "host.roster.read", "host.channels.read", "host.spaces.read", "host.message.send", "outbound.http.request", "commands"], "allowedHttpOrigins": ["https://openrouter.ai"]},
 					    {"name": "decision-polls", "registry": "ghcr.io/waddle-social/waddle/extensions/decision-polls", "digest": strenv(SAMPLE_DIGEST), "namespace": "urn:waddle:decision-polls:1", "config": {}, "capabilityGrants": ["message.enrich", "commands", "launch", "pubsub.publish", "host.message.send", "ui.declarative"]},
-					    {"name": "github", "registry": "ghcr.io/waddle-social/waddle/extensions/github", "digest": strenv(SAMPLE_DIGEST), "namespace": "urn:waddle:web-integration:1", "config": {"admins": ["rawkode@waddle.social"]}, "providerRoomGrants": ["chat@muc.waddle.social"], "capabilityGrants": ["host.message.send", "commands", "pubsub.publish"]}
+					    {"name": "github", "registry": "ghcr.io/waddle-social/waddle/extensions/github", "digest": strenv(SAMPLE_DIGEST), "namespace": "urn:waddle:web-integration:1", "config": {"admins": ["rawkode@waddle.social"]}, "providerRoomGrants": ["chat@muc.waddle.social"], "capabilityGrants": ["message.enrich", "host.message.send", "commands", "pubsub.publish"]}
 					  ]
 					' "${published_values}"
 					helm lint charts/waddle-server -f "${published_values}"
@@ -468,7 +468,7 @@ schema.#Project & {
 					done
 					yq -e '.extensions.modules[] | select(.name == "github") | (.config.admins // []) | length >= 1' "${published_values}" > /dev/null
 					yq -e '.extensions.modules[] | select(.name == "github") | .providerRoomGrants[0] == "chat@muc.waddle.social"' "${published_values}" > /dev/null
-					yq -e '.extensions.modules[] | select(.name == "github") | .capabilityGrants | contains(["host.message.send", "commands", "pubsub.publish"])' "${published_values}" > /dev/null
+					yq -e '.extensions.modules[] | select(.name == "github") | .capabilityGrants | contains(["host.message.send", "message.enrich", "commands", "pubsub.publish"])' "${published_values}" > /dev/null
 					yq -e '.spec.data[] | select(.secretKey == "WADDLE_PROVIDER_GITHUB_WEBHOOK_SECRET" and .remoteRef.key == "server-runtime-production" and .remoteRef.property == "github-app-webhook-secret")' ../infrastructure/waddle.cloud/gitops/waddle-server/runtime-external-secret.yaml > /dev/null
 				"""#]
 			inputs: list.Concat([_chartInputs, _gitopsWaddleServerInputs])
@@ -663,6 +663,7 @@ schema.#Project & {
 					      printf '  providerRoomGrants:\n'
 					      printf '    - chat@muc.waddle.social\n'
 					      printf '  capabilityGrants:\n'
+					      printf '    - message.enrich\n'
 					      printf '    - host.message.send\n'
 					      printf '    - commands\n'
 					      printf '    - pubsub.publish\n'
@@ -692,7 +693,7 @@ schema.#Project & {
 					yq -e ".spec.values.extensions.modules | length == 4" ../infrastructure/waddle.cloud/gitops/waddle-server/helmrelease.yaml > /dev/null
 					yq -e '.spec.values.extensions.modules[] | select(.name == "github") | (.config.admins // []) | length >= 1' ../infrastructure/waddle.cloud/gitops/waddle-server/helmrelease.yaml > /dev/null
 					yq -e '.spec.values.extensions.modules[] | select(.name == "github") | .providerRoomGrants[0] == "chat@muc.waddle.social"' ../infrastructure/waddle.cloud/gitops/waddle-server/helmrelease.yaml > /dev/null
-					yq -e '.spec.values.extensions.modules[] | select(.name == "github") | .capabilityGrants | contains(["host.message.send", "commands", "pubsub.publish"])' ../infrastructure/waddle.cloud/gitops/waddle-server/helmrelease.yaml > /dev/null
+					yq -e '.spec.values.extensions.modules[] | select(.name == "github") | .capabilityGrants | contains(["host.message.send", "message.enrich", "commands", "pubsub.publish"])' ../infrastructure/waddle.cloud/gitops/waddle-server/helmrelease.yaml > /dev/null
 					if grep -R "${placeholder_digest}" ../infrastructure/waddle.cloud/gitops/waddle-server; then
 					  echo "refusing to publish GitOps with all-zero digest placeholders" >&2
 					  exit 1

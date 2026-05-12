@@ -157,6 +157,87 @@ describe("roomMessageFromArchived", () => {
     expect(result?.references).toBeUndefined();
   });
 
+  test("maps Waddle extension envelopes onto room message annotations", () => {
+    const result = roomMessageFromArchived({
+      ...baseArchivedRoom,
+      body: "GitHub waddle-social/waddle: ci completed with failure",
+      extension_envelope: {
+        version: 1,
+        enrichments: [{
+          id: "github-delivery-1",
+          plugin: "github",
+          capability: "message.enrich",
+          payload_namespace: "urn:waddle:web-integration:1",
+          created: "2026-05-12T00:00:00Z",
+          source: { stanza_id: "room-stanza-1" },
+          title: "GitHub",
+          summary: "GitHub waddle-social/waddle: ci completed with failure",
+          payloads: [{
+            namespace: "urn:waddle:web-integration:1",
+            name: "github-event",
+            attributes: [
+              { name: "event-type", value: "workflow_run" },
+              { name: "repository", value: "waddle-social/waddle" },
+              { name: "conclusion", value: "failure" },
+              { name: "name", value: "ci" },
+            ],
+            children: [],
+          }],
+          launches: [{
+            id: "retry-1",
+            plugin: "github",
+            action: "retry",
+            command_node: "urn:waddle:extension:1:invoke",
+            label: "Retry",
+            context: {
+              waddle_id: "github-delivery-1",
+              room: "room@conf.example.com",
+              source_stanza_id: "room-stanza-1",
+            },
+            payloads: [],
+            expires_at: "2026-05-12T00:05:00Z",
+            token: "signed-token",
+          }],
+        }],
+      },
+      extension_body_fallback: true,
+    });
+
+    expect(result?.extensionBodyFallback).toBe(true);
+    expect(result?.extensionAnnotations).toEqual([
+      expect.objectContaining({
+        extensionId: "github",
+        annotationId: "github-delivery-1",
+        surfaceKind: "message-card",
+        title: "GitHub",
+        payloadNamespace: "urn:waddle:web-integration:1",
+        fields: expect.objectContaining({
+          repository: "waddle-social/waddle",
+          conclusion: "failure",
+        }),
+        actions: [expect.objectContaining({
+          label: "Retry",
+          launch: expect.objectContaining({
+            id: "retry-1",
+            launchToken: "signed-token",
+          }),
+        })],
+      }),
+    ]);
+  });
+
+  test("keeps extension fallback body when WASM exposes no renderable annotation", () => {
+    const result = roomMessageFromArchived({
+      ...baseArchivedRoom,
+      body: "GitHub waddle-social/waddle: ci completed with failure",
+      extension_body_fallback: true,
+    });
+
+    expect(result?.extensionAnnotations).toBeUndefined();
+    expect(result?.extensionBodyFallback).toBeUndefined();
+    expect(result?.body).toBe("GitHub waddle-social/waddle: ci completed with failure");
+  });
+
   test("derives reactionTargetId from the room-assigned XEP-0359 stanza-id", () => {
     const archived: WasmArchivedMessage = {
       ...baseArchivedRoom,

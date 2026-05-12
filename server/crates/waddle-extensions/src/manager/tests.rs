@@ -413,6 +413,7 @@ fn runtime_grants_are_host_configured_and_manifest_bounded() {
         commands: Vec::new(),
         routes: Vec::new(),
         pubsub_nodes: Vec::new(),
+        profile: None,
         artifact: None,
     };
 

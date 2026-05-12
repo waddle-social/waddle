@@ -190,6 +190,7 @@ export function useChannelMessages(
             msg.markup,
             msg.references,
             msg.extensionAnnotations,
+            msg.extensionBodyFallback,
           );
           return;
         }
@@ -487,6 +488,7 @@ export function useChannelMessages(
     markup?: MarkupSpan[],
     references?: MessageReference[],
     extensionAnnotations?: LiveRoomMessage["extensionAnnotations"],
+    extensionBodyFallback?: boolean,
   ) {
     const idx = messages.value.findIndex((m) =>
       matchMessageId(m, replacesId) && isSameMucCorrectionSender(m, correctionSender)
@@ -507,8 +509,11 @@ export function useChannelMessages(
       }
       if (extensionAnnotations && extensionAnnotations.length > 0) {
         updated.extensionAnnotations = extensionAnnotations;
+        if (extensionBodyFallback) updated.extensionBodyFallback = true;
+        else delete updated.extensionBodyFallback;
       } else {
         delete updated.extensionAnnotations;
+        delete updated.extensionBodyFallback;
       }
       return updated;
     });

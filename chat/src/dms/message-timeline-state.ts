@@ -33,6 +33,7 @@ export function fromLiveDmMessage(
   if (msg.references?.length) tm.references = msg.references;
   if (msg.sharedFiles && msg.sharedFiles.length > 0) tm.sharedFiles = msg.sharedFiles;
   if (msg.extensionAnnotations && msg.extensionAnnotations.length > 0) tm.extensionAnnotations = msg.extensionAnnotations;
+  if (msg.extensionBodyFallback) tm.extensionBodyFallback = true;
   if (msg.isSticker) tm.isSticker = true;
   if (msg.replyTo) {
     const parent = parentLookup?.(msg.replyTo.id);
@@ -105,6 +106,7 @@ export function retractDmTimelineMessage(
   delete next.references;
   delete next.sharedFiles;
   delete next.extensionAnnotations;
+  delete next.extensionBodyFallback;
   delete next.isSticker;
   delete next.mentions;
   delete next.broadcastMention;
@@ -137,6 +139,7 @@ export function buildDmTimelineFromMamResults(params: {
     markup?: LiveDmMessage["markup"];
     references?: LiveDmMessage["references"];
     extensionAnnotations?: LiveDmMessage["extensionAnnotations"];
+    extensionBodyFallback?: boolean;
   }[] = [];
   for (const msg of mamResults) {
     if (msg._reactionTarget && msg._reactionEmojis) {
@@ -151,6 +154,7 @@ export function buildDmTimelineFromMamResults(params: {
         markup: msg.markup,
         references: msg.references,
         extensionAnnotations: msg.extensionAnnotations,
+        extensionBodyFallback: msg.extensionBodyFallback,
       });
     } else if (
       msg.body
@@ -191,8 +195,11 @@ export function buildDmTimelineFromMamResults(params: {
     else delete target.references;
     if (update.extensionAnnotations && update.extensionAnnotations.length > 0) {
       target.extensionAnnotations = update.extensionAnnotations;
+      if (update.extensionBodyFallback) target.extensionBodyFallback = true;
+      else delete target.extensionBodyFallback;
     } else {
       delete target.extensionAnnotations;
+      delete target.extensionBodyFallback;
     }
   }
   for (const update of retractionUpdates) {

@@ -161,6 +161,257 @@ pub struct InboundMessage {
     /// urn:waddle:pin:0 pin/unpin system event surfaced by the room.
     /// `None` when the message carries no `<pin-event/>` payload.
     pub pin_event: Option<crate::pin::PinEvent>,
+    /// Waddle typed extension envelope attached to the message.
+    pub extension_envelope: Option<ExtensionEnvelopeData>,
+    /// XEP-0428 marks the readable body as fallback for the Waddle extension payload.
+    pub extension_body_fallback: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExtensionEnvelopeData {
+    pub version: u32,
+    pub enrichments: Vec<ExtensionEnrichmentData>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExtensionEnrichmentData {
+    pub id: ExtensionTextId,
+    pub plugin: ExtensionPluginId,
+    pub capability: ExtensionCapabilityData,
+    pub payload_namespace: ExtensionNamespace,
+    pub created: ExtensionTimestamp,
+    pub source: Option<ExtensionSourceData>,
+    pub title: Option<ExtensionDisplayText>,
+    pub summary: Option<ExtensionDisplayText>,
+    pub payloads: Vec<ExtensionPayloadElementData>,
+    pub launches: Vec<ExtensionLaunchData>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExtensionPayloadElementData {
+    pub namespace: ExtensionNamespace,
+    pub name: ExtensionXmlName,
+    pub attributes: Vec<ExtensionPayloadAttributeData>,
+    pub text: Option<String>,
+    pub children: Vec<ExtensionPayloadElementData>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExtensionPayloadAttributeData {
+    pub name: ExtensionXmlName,
+    pub value: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExtensionSourceData {
+    pub stanza_id: ExtensionTextId,
+    pub body_start: Option<u32>,
+    pub body_end: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExtensionLaunchData {
+    pub id: ExtensionTextId,
+    pub plugin: ExtensionPluginId,
+    pub action: ExtensionTextId,
+    pub command_node: ExtensionCommandNode,
+    pub label: ExtensionDisplayText,
+    pub context: ExtensionLaunchContextData,
+    pub payloads: Vec<ExtensionPayloadElementData>,
+    pub expires_at: Option<ExtensionTimestamp>,
+    pub token: Option<ExtensionTextId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExtensionLaunchContextData {
+    pub waddle_id: ExtensionTextId,
+    pub room: Option<ExtensionRoomJid>,
+    pub source_stanza_id: Option<ExtensionTextId>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ExtensionCapabilityData {
+    MessageEnrich,
+    MessageObserve,
+    HostChannelsRead,
+    HostSpacesRead,
+    HostMembersRead,
+    HostPresenceRead,
+    HostMamRead,
+    HostRosterRead,
+    HostMessageSend,
+    OutboundHttpRequest,
+    Commands,
+    Launch,
+    PubSubPublish,
+    ArtifactReference,
+    UiDeclarative,
+}
+
+impl ExtensionCapabilityData {
+    pub fn from_attr(value: &str) -> Option<Self> {
+        match value {
+            "message.enrich" => Some(Self::MessageEnrich),
+            "message.observe" => Some(Self::MessageObserve),
+            "host.channels.read" => Some(Self::HostChannelsRead),
+            "host.spaces.read" => Some(Self::HostSpacesRead),
+            "host.members.read" => Some(Self::HostMembersRead),
+            "host.presence.read" => Some(Self::HostPresenceRead),
+            "host.mam.read" => Some(Self::HostMamRead),
+            "host.roster.read" => Some(Self::HostRosterRead),
+            "host.message.send" => Some(Self::HostMessageSend),
+            "outbound.http.request" => Some(Self::OutboundHttpRequest),
+            "commands" => Some(Self::Commands),
+            "launch" => Some(Self::Launch),
+            "pubsub.publish" => Some(Self::PubSubPublish),
+            "artifact.reference" => Some(Self::ArtifactReference),
+            "ui.declarative" => Some(Self::UiDeclarative),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::MessageEnrich => "message.enrich",
+            Self::MessageObserve => "message.observe",
+            Self::HostChannelsRead => "host.channels.read",
+            Self::HostSpacesRead => "host.spaces.read",
+            Self::HostMembersRead => "host.members.read",
+            Self::HostPresenceRead => "host.presence.read",
+            Self::HostMamRead => "host.mam.read",
+            Self::HostRosterRead => "host.roster.read",
+            Self::HostMessageSend => "host.message.send",
+            Self::OutboundHttpRequest => "outbound.http.request",
+            Self::Commands => "commands",
+            Self::Launch => "launch",
+            Self::PubSubPublish => "pubsub.publish",
+            Self::ArtifactReference => "artifact.reference",
+            Self::UiDeclarative => "ui.declarative",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ExtensionTextId(String);
+
+impl ExtensionTextId {
+    pub fn new(value: impl Into<String>) -> Option<Self> {
+        let value = value.into();
+        (!value.trim().is_empty()).then_some(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ExtensionDisplayText(String);
+
+impl ExtensionDisplayText {
+    pub fn new(value: impl Into<String>) -> Option<Self> {
+        let value = value.into();
+        (!value.trim().is_empty()).then_some(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ExtensionTimestamp(String);
+
+impl ExtensionTimestamp {
+    pub fn new(value: impl Into<String>) -> Option<Self> {
+        let value = value.into();
+        chrono::DateTime::parse_from_rfc3339(value.as_str())
+            .ok()
+            .map(|_| Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ExtensionCommandNode(String);
+
+impl ExtensionCommandNode {
+    pub fn new(value: impl Into<String>) -> Option<Self> {
+        let value = value.into();
+        let valid = value == crate::messaging::namespaces::NS_WADDLE_EXTENSION
+            || value
+                .strip_prefix(crate::messaging::namespaces::NS_WADDLE_EXTENSION)
+                .is_some_and(|suffix| suffix.starts_with(':'));
+        valid.then_some(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ExtensionRoomJid(String);
+
+impl ExtensionRoomJid {
+    pub fn new(value: impl Into<String>) -> Option<Self> {
+        let value = value.into();
+        value.parse::<jid::BareJid>().ok()?;
+        Some(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ExtensionPluginId(String);
+
+impl ExtensionPluginId {
+    pub fn new(value: impl Into<String>) -> Option<Self> {
+        let value = value.into();
+        let valid = !value.is_empty()
+            && value
+                .chars()
+                .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-');
+        valid.then_some(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ExtensionNamespace(String);
+
+impl ExtensionNamespace {
+    pub fn new(value: impl Into<String>) -> Option<Self> {
+        let value = value.into();
+        (!value.trim().is_empty()).then_some(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ExtensionXmlName(String);
+
+impl ExtensionXmlName {
+    pub fn new(value: impl Into<String>) -> Option<Self> {
+        let value = value.into();
+        (!value.trim().is_empty()).then_some(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]

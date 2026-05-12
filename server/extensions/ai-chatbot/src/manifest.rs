@@ -34,6 +34,13 @@ pub(crate) fn manifest() -> types::ExtensionManifest {
         )],
         routes: vec![],
         pubsub_nodes: vec![],
+        profile: Some(types::ExtensionProfile {
+            display_name: display(PLUGIN_NAME),
+            description: Some(display("AI chat assistant")),
+            accent: Some("violet".to_string()),
+            avatar: None,
+            bot_hat_label: Some(display("Bot")),
+        }),
         artifact: None,
     }
 }

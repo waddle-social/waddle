@@ -71,10 +71,12 @@ fn manifest() -> types::ExtensionManifest {
             value: VERSION.to_string(),
         },
         payloads: vec![
+            payload_rule(types::PayloadSurface::MessageEnrichment, "github-event"),
             payload_rule(types::PayloadSurface::PubsubItem, "github-event"),
             payload_rule(types::PayloadSurface::PubsubItem, ROUTE_ELEMENT),
         ],
         capabilities: vec![
+            types::ExtensionCapability::MessageEnrich,
             types::ExtensionCapability::HostMessageSend,
             types::ExtensionCapability::Commands,
             types::ExtensionCapability::PubsubPublish,
@@ -87,6 +89,13 @@ fn manifest() -> types::ExtensionManifest {
         pubsub_nodes: vec![types::PubsubNode {
             value: ROUTES_NODE.to_string(),
         }],
+        profile: Some(types::ExtensionProfile {
+            display_name: display(PLUGIN_NAME),
+            description: Some(display("GitHub webhook alerts")),
+            accent: Some("green".to_string()),
+            avatar: None,
+            bot_hat_label: Some(display("Bot")),
+        }),
         artifact: None,
     }
 }
@@ -133,26 +142,29 @@ fn handle_provider_webhook(
                 value: route.channel.clone(),
             },
             display(alert.body.as_str()),
+            Some(github_envelope(&webhook, &payload, &alert)),
         )?;
     }
     Ok(vec![types::ExtensionEffect::Noop])
 }
 
 fn alert_for_payload(payload: &GitHubPayload) -> Option<GitHubAlert> {
-    if payload.action != "completed" {
+    if !should_alert_for_payload(payload) {
         return None;
     }
-    let conclusion = payload.conclusion.as_str();
-    if !matches!(conclusion, "failure" | "timed_out" | "cancelled") {
-        return None;
-    }
-    if !matches!(payload.event_type.as_str(), "workflow_run" | "check_run") {
-        return None;
-    }
-
     let name = payload.name.as_str();
     let repository = payload.repository_full_name.as_str();
-    let mut body = format!("GitHub {repository}: {name} completed with {conclusion}");
+    let mut body = if payload.is_status_event() {
+        format!(
+            "GitHub {repository}: {name} {} with {}",
+            payload.action, payload.conclusion
+        )
+    } else {
+        format!(
+            "GitHub {repository}: {} {}",
+            payload.event_type, payload.action
+        )
+    };
     if let Some(branch) = payload.branch.as_ref() {
         body.push_str(" on ");
         body.push_str(branch.as_str());
@@ -167,6 +179,57 @@ fn alert_for_payload(payload: &GitHubPayload) -> Option<GitHubAlert> {
         body.push_str(url.as_str());
     }
     Some(GitHubAlert { body })
+}
+
+fn should_alert_for_payload(payload: &GitHubPayload) -> bool {
+    match payload.event_type.as_str() {
+        "workflow_run" | "check_run" => {
+            payload.action == "completed"
+                && is_workflow_check_alert_conclusion(payload.conclusion.as_str())
+        }
+        "deployment_status" => is_deployment_alert_state(payload.conclusion.as_str()),
+        _ => false,
+    }
+}
+
+fn is_workflow_check_alert_conclusion(conclusion: &str) -> bool {
+    conclusion == "failure"
+}
+
+fn is_deployment_alert_state(state: &str) -> bool {
+    state == "failure"
+}
+
+fn github_envelope(
+    webhook: &types::ProviderWebhook,
+    payload: &GitHubPayload,
+    alert: &GitHubAlert,
+) -> types::ExtensionEnvelope {
+    types::ExtensionEnvelope {
+        version: 1,
+        enrichments: vec![types::MessageEnrichment {
+            id: types::EnrichmentId {
+                value: format!("github-{}", webhook.delivery_id.value),
+            },
+            plugin: plugin_id(),
+            capability: types::ExtensionCapability::MessageEnrich,
+            payload_namespace: payload_namespace(),
+            created_at: timestamp(),
+            source: None,
+            ui: vec![types::UiView {
+                id: types::UiViewId {
+                    value: "github-event".to_string(),
+                },
+                title: Some(display("GitHub")),
+                blocks: vec![types::UiBlock::Text(types::TextBlock {
+                    text: display(alert.body.as_str()),
+                    style: types::TextStyle::Body,
+                })],
+            }],
+            payloads: vec![payload.to_enrichment_payload()],
+            launches: vec![],
+        }],
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -194,11 +257,7 @@ impl GitHubPayload {
             return None;
         }
         let event_type = webhook.event_type.value.as_str();
-        let prefix = match event_type {
-            "workflow_run" => "workflow_run",
-            "check_run" => "check_run",
-            _ => return None,
-        };
+        let prefix = status_payload_prefix(event_type);
         let fields = ProviderFields::new(&webhook.payload);
         Some(Self {
             event_type: event_type.to_string(),
@@ -206,15 +265,132 @@ impl GitHubPayload {
             installation_id: fields.text(&["installation", "id"])?.to_string(),
             repository_id: fields.text(&["repository", "id"])?.to_string(),
             repository_full_name: fields.text(&["repository", "full_name"])?.to_string(),
-            conclusion: fields.text(&[prefix, "conclusion"])?.to_string(),
-            name: fields.text(&[prefix, "name"])?.to_string(),
-            branch: fields
-                .text(&[prefix, "head_branch"])
-                .or_else(|| fields.text(&[prefix, "check_suite", "head_branch"]))
-                .map(str::to_string),
-            revision: fields.text(&[prefix, "head_sha"]).map(str::to_string),
-            url: fields.text(&[prefix, "html_url"]).map(str::to_string),
+            conclusion: status_conclusion(&fields, event_type, prefix)
+                .unwrap_or("unknown")
+                .to_string(),
+            name: status_name(&fields, event_type, prefix)
+                .unwrap_or(event_type)
+                .to_string(),
+            branch: status_branch(&fields, event_type, prefix).map(str::to_string),
+            revision: status_revision(&fields, event_type, prefix).map(str::to_string),
+            url: status_url(&fields, event_type, prefix).map(str::to_string),
         })
+    }
+
+    fn is_status_event(&self) -> bool {
+        status_payload_prefix(self.event_type.as_str()).is_some()
+    }
+
+    fn to_enrichment_payload(&self) -> types::ExtensionPayload {
+        let mut attributes = vec![
+            xml_attr("event-type", &self.event_type),
+            xml_attr("action", &self.action),
+            xml_attr("installation-id", &self.installation_id),
+            xml_attr("repository-id", &self.repository_id),
+            xml_attr("repository", &self.repository_full_name),
+            xml_attr("conclusion", &self.conclusion),
+            xml_attr("name", &self.name),
+        ];
+        if let Some(branch) = self.branch.as_ref() {
+            attributes.push(xml_attr("branch", branch));
+        }
+        if let Some(revision) = self.revision.as_ref() {
+            attributes.push(xml_attr("revision", revision));
+        }
+        if let Some(url) = self.url.as_ref() {
+            attributes.push(xml_attr("url", url));
+        }
+        types::ExtensionPayload {
+            namespace: payload_namespace(),
+            root: types::PayloadRoot {
+                namespace: payload_namespace(),
+                local_name: "github-event".to_string(),
+            },
+            tokens: vec![
+                types::XmlToken::StartElement(types::XmlElement {
+                    namespace: payload_namespace(),
+                    local_name: "github-event".to_string(),
+                    attributes,
+                }),
+                types::XmlToken::EndElement,
+            ],
+        }
+    }
+}
+
+fn status_payload_prefix(event_type: &str) -> Option<&'static str> {
+    match event_type {
+        "workflow_run" => Some("workflow_run"),
+        "check_run" => Some("check_run"),
+        "deployment_status" => Some("deployment_status"),
+        _ => None,
+    }
+}
+
+fn status_conclusion<'a>(
+    fields: &ProviderFields<'a>,
+    event_type: &str,
+    prefix: Option<&str>,
+) -> Option<&'a str> {
+    match event_type {
+        "deployment_status" => fields.non_empty_text(&["deployment_status", "state"]),
+        _ => prefix.and_then(|prefix| fields.non_empty_text(&[prefix, "conclusion"])),
+    }
+}
+
+fn status_name<'a>(
+    fields: &ProviderFields<'a>,
+    event_type: &str,
+    prefix: Option<&str>,
+) -> Option<&'a str> {
+    match event_type {
+        "deployment_status" => fields
+            .non_empty_text(&["deployment_status", "environment"])
+            .or_else(|| fields.non_empty_text(&["deployment", "environment"])),
+        _ => prefix.and_then(|prefix| fields.non_empty_text(&[prefix, "name"])),
+    }
+}
+
+fn status_branch<'a>(
+    fields: &ProviderFields<'a>,
+    event_type: &str,
+    prefix: Option<&str>,
+) -> Option<&'a str> {
+    match event_type {
+        "deployment_status" => fields.non_empty_text(&["deployment", "ref"]),
+        _ => prefix.and_then(|prefix| {
+            fields
+                .non_empty_text(&[prefix, "head_branch"])
+                .or_else(|| fields.non_empty_text(&[prefix, "check_suite", "head_branch"]))
+        }),
+    }
+}
+
+fn status_revision<'a>(
+    fields: &ProviderFields<'a>,
+    event_type: &str,
+    prefix: Option<&str>,
+) -> Option<&'a str> {
+    match event_type {
+        "deployment_status" => fields
+            .non_empty_text(&["deployment", "sha"])
+            .or_else(|| fields.non_empty_text(&["deployment_status", "deployment", "sha"])),
+        _ => prefix.and_then(|prefix| fields.non_empty_text(&[prefix, "head_sha"])),
+    }
+}
+
+fn status_url<'a>(
+    fields: &ProviderFields<'a>,
+    event_type: &str,
+    prefix: Option<&str>,
+) -> Option<&'a str> {
+    match event_type {
+        "deployment_status" => fields
+            .non_empty_text(&["deployment_status", "target_url"])
+            .or_else(|| fields.non_empty_text(&["deployment_status", "log_url"]))
+            .or_else(|| fields.non_empty_text(&["deployment_status", "environment_url"]))
+            .or_else(|| fields.non_empty_text(&["repository", "html_url"])),
+        _ => prefix.and_then(|prefix| fields.non_empty_text(&[prefix, "html_url"])),
     }
 }
 
@@ -244,6 +420,10 @@ impl<'a> ProviderFields<'a> {
                 types::ProviderFieldValue::Number(value) => Some(value.value.as_str()),
                 _ => None,
             })
+    }
+
+    fn non_empty_text(&self, path: &[&str]) -> Option<&'a str> {
+        self.text(path).filter(|value| !value.trim().is_empty())
     }
 }
 
@@ -468,10 +648,15 @@ fn configure_route_form() -> types::DataForm {
                 field_type: types::FormFieldType::ListMulti,
                 label: Some(display("Event types")),
                 required: true,
-                values: vec![form_value("workflow_run"), form_value("check_run")],
+                values: vec![
+                    form_value("workflow_run"),
+                    form_value("check_run"),
+                    form_value("deployment_status"),
+                ],
                 options: vec![
                     form_option("Workflow runs", "workflow_run"),
                     form_option("Check runs", "check_run"),
+                    form_option("Deployment statuses", "deployment_status"),
                 ],
             },
             types::DataFormField {
@@ -651,13 +836,14 @@ fn current_config() -> Result<GitHubConfig, types::ExtensionError> {
 fn send_room_message(
     room: &types::RoomJid,
     body: types::DisplayText,
+    extensions: Option<types::ExtensionEnvelope>,
 ) -> Result<(), types::ExtensionError> {
     let request = types::SendMessageRequest {
         target: types::MessageTarget::Muc(room.clone()),
         body,
         thread_id: None,
         reply_to: None,
-        extensions: None,
+        extensions,
     };
     send_message_request(&request)
 }
@@ -707,6 +893,14 @@ fn payload_rule(surface: types::PayloadSurface, root: &str) -> types::PayloadRul
     }
 }
 
+fn xml_attr(local_name: &str, value: &str) -> types::XmlAttribute {
+    types::XmlAttribute {
+        namespace: None,
+        local_name: local_name.to_string(),
+        value: value.to_string(),
+    }
+}
+
 fn plugin_id() -> types::PluginId {
     types::PluginId {
         value: PLUGIN_ID.to_string(),
@@ -723,6 +917,22 @@ fn display(value: &str) -> types::DisplayText {
     types::DisplayText {
         value: value.to_string(),
     }
+}
+
+fn timestamp() -> types::Timestamp {
+    types::Timestamp {
+        value: current_timestamp_value(),
+    }
+}
+
+#[cfg(not(test))]
+fn current_timestamp_value() -> String {
+    runtime::current_timestamp()
+}
+
+#[cfg(test)]
+fn current_timestamp_value() -> String {
+    "2026-05-12T00:00:00Z".to_string()
 }
 
 #[cfg(test)]

@@ -162,6 +162,14 @@ interface types {
         media-type: option<media-type>,
     }
 
+    record extension-profile {
+        display-name: display-text,
+        description: option<display-text>,
+        accent: option<string>,
+        avatar: option<artifact-reference>,
+        bot-hat-label: option<display-text>,
+    }
+
     enum extension-capability {
         message-enrich,
         message-observe,
@@ -214,6 +222,7 @@ interface types {
         commands: list<command-descriptor>,
         routes: list<extension-route-descriptor>,
         pubsub-nodes: list<pubsub-node>,
+        profile: option<extension-profile>,
         artifact: option<artifact-reference>,
     }
 

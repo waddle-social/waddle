@@ -253,6 +253,15 @@ describe("extension command invocation", () => {
     ]);
   });
 
+  test("uses the launch-advertised command node for action invocation", () => {
+    const iq = buildExtensionLaunchInvokeIq("alice@example.com/web", {
+      ...launch,
+      commandNode: "urn:waddle:extension:1:decision-polls",
+    });
+
+    expect(iq.command.node).toBe("urn:waddle:extension:1:decision-polls");
+  });
+
   test("builds plain XEP-0050 execute requests for discovered commands", async () => {
     let sent = "";
     const xmpp = {
