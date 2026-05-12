@@ -55,6 +55,13 @@ pub(super) fn manifest() -> types::ExtensionManifest {
             results_node_template(),
             votes_node_template(),
         ],
+        profile: Some(types::ExtensionProfile {
+            display_name: display(PLUGIN_NAME),
+            description: Some(display("Decision poll assistant")),
+            accent: Some("amber".to_string()),
+            avatar: None,
+            bot_hat_label: Some(display("Bot")),
+        }),
         artifact: None,
     }
 }

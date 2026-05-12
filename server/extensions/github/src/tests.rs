@@ -38,6 +38,39 @@ fn sample_webhook(conclusion: &str) -> types::ProviderWebhook {
     }
 }
 
+fn deployment_status_webhook(state: &str) -> types::ProviderWebhook {
+    types::ProviderWebhook {
+        waddle_id: types::WaddleId {
+            value: "github-deployment-1".to_string(),
+        },
+        provider: types::ProviderId {
+            value: "github".to_string(),
+        },
+        event_type: types::ProviderEventType {
+            value: "deployment_status".to_string(),
+        },
+        delivery_id: types::ProviderDeliveryId {
+            value: "delivery-deployment-1".to_string(),
+        },
+        payload: types::ProviderPayload {
+            fields: vec![
+                text_field(&["action"], "created"),
+                number_field(&["installation", "id"], "42"),
+                number_field(&["repository", "id"], "100"),
+                text_field(&["repository", "full_name"], "waddle-social/waddle"),
+                text_field(&["deployment", "environment"], "production"),
+                text_field(&["deployment", "ref"], "main"),
+                text_field(&["deployment", "sha"], "1234567890abcdef"),
+                text_field(&["deployment_status", "state"], state),
+                text_field(
+                    &["deployment_status", "target_url"],
+                    "https://dashboard.render.com/deploys/1",
+                ),
+            ],
+        },
+    }
+}
+
 fn installation_webhook() -> types::ProviderWebhook {
     types::ProviderWebhook {
         waddle_id: types::WaddleId {
@@ -148,7 +181,23 @@ fn manifest_declares_admin_command_and_routes_node() {
     let manifest = manifest();
 
     assert_eq!(manifest.id.value, "github");
+    assert_eq!(
+        manifest
+            .profile
+            .as_ref()
+            .expect("profile")
+            .display_name
+            .value,
+        "GitHub"
+    );
     assert_eq!(manifest.payloads[0].root.namespace.value, PLUGIN_NS);
+    assert!(manifest.payloads.iter().any(|rule| {
+        rule.surface == types::PayloadSurface::MessageEnrichment
+            && rule.root.local_name == "github-event"
+    }));
+    assert!(manifest
+        .capabilities
+        .contains(&types::ExtensionCapability::MessageEnrich));
     assert!(manifest
         .capabilities
         .contains(&types::ExtensionCapability::HostMessageSend));
@@ -203,6 +252,73 @@ fn failure_webhook_builds_alert_text() {
 #[test]
 fn successful_webhook_does_not_alert() {
     let payload = sample_payload("success");
+
+    assert!(alert_for_payload(&payload).is_none());
+}
+
+#[test]
+fn cancelled_webhook_does_not_alert() {
+    let payload = sample_payload("cancelled");
+
+    assert!(alert_for_payload(&payload).is_none());
+}
+
+#[test]
+fn deployment_status_payload_uses_state_and_deployment_fields() {
+    let payload =
+        GitHubPayload::from_webhook(&deployment_status_webhook("failure")).expect("payload");
+
+    assert_eq!(payload.conclusion, "failure");
+    assert_eq!(payload.name, "production");
+    assert_eq!(payload.branch.as_deref(), Some("main"));
+    assert_eq!(payload.revision.as_deref(), Some("1234567890abcdef"));
+    assert_eq!(
+        payload.url.as_deref(),
+        Some("https://dashboard.render.com/deploys/1"),
+    );
+}
+
+#[test]
+fn deployment_status_payload_skips_empty_url_fields() {
+    let mut webhook = deployment_status_webhook("failure");
+    webhook.payload.fields.push(text_field(
+        &["deployment_status", "log_url"],
+        "https://github.com/waddle-social/waddle/deployments/1/logs",
+    ));
+    webhook.payload.fields.retain(|field| {
+        !field
+            .path
+            .iter()
+            .map(|segment| segment.value.as_str())
+            .eq(["deployment_status", "target_url"])
+    });
+    webhook
+        .payload
+        .fields
+        .push(text_field(&["deployment_status", "target_url"], ""));
+
+    let payload = GitHubPayload::from_webhook(&webhook).expect("payload");
+
+    assert_eq!(
+        payload.url.as_deref(),
+        Some("https://github.com/waddle-social/waddle/deployments/1/logs")
+    );
+    assert!(alert_for_payload(&payload).is_some());
+}
+
+#[test]
+fn deployment_status_pending_does_not_alert() {
+    let payload =
+        GitHubPayload::from_webhook(&deployment_status_webhook("pending")).expect("payload");
+
+    assert!(alert_for_payload(&payload).is_none());
+}
+
+#[test]
+fn deployment_status_error_does_not_alert_for_now() {
+    let payload =
+        GitHubPayload::from_webhook(&deployment_status_webhook("error")).expect("payload");
+
     assert!(alert_for_payload(&payload).is_none());
 }
 
@@ -225,6 +341,25 @@ fn provider_webhook_sends_to_route_loaded_from_pubsub() {
         types::MessageTarget::Direct(_) => panic!("expected room message"),
     }
     assert!(messages[0].body.value.contains("failure"));
+    let envelope = messages[0].extensions.as_ref().expect("extension envelope");
+    assert_eq!(envelope.version, 1);
+    let enrichment = envelope.enrichments.first().expect("enrichment");
+    assert_eq!(enrichment.plugin.value, "github");
+    assert_eq!(
+        enrichment.capability,
+        types::ExtensionCapability::MessageEnrich
+    );
+    assert_eq!(enrichment.payload_namespace.value, PLUGIN_NS);
+    assert_eq!(enrichment.payloads.len(), 1);
+    let payload = &enrichment.payloads[0];
+    assert_eq!(payload.root.local_name, "github-event");
+    let attrs = match &payload.tokens[0] {
+        types::XmlToken::StartElement(element) => &element.attributes,
+        _ => panic!("expected start element"),
+    };
+    assert_eq!(find_attr(attrs, "event-type"), Some("workflow_run"));
+    assert_eq!(find_attr(attrs, "repository"), Some("waddle-social/waddle"));
+    assert_eq!(find_attr(attrs, "conclusion"), Some("failure"));
 }
 
 #[test]

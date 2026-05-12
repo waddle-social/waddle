@@ -39,6 +39,7 @@ const HAT_LABELS: Record<string, string> = {
   "urn:xmpp:hats:admin": "ADMIN",
   "urn:xmpp:hats:moderator": "MOD",
   "urn:xmpp:hats:bot": "BOT",
+  "urn:waddle:hats:bot": "BOT",
   "urn:xmpp:hats:verified": "VERIFIED",
 };
 
@@ -47,6 +48,7 @@ const HAT_COLORS: Record<string, string> = {
   "urn:xmpp:hats:admin": "bg-primary/10 text-primary",
   "urn:xmpp:hats:moderator": "bg-primary/10 text-primary",
   "urn:xmpp:hats:bot": "bg-success/10 text-success",
+  "urn:waddle:hats:bot": "bg-success/10 text-success",
   "urn:xmpp:hats:verified": "bg-primary/10 text-primary",
 };
 
@@ -60,6 +62,7 @@ const HAT_RANK: Record<string, number> = {
   "urn:xmpp:hats:moderator": 2,
   "urn:xmpp:hats:verified": 1,
   "urn:xmpp:hats:bot": 0,
+  "urn:waddle:hats:bot": 0,
 };
 
 const props = defineProps<{

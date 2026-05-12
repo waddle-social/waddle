@@ -18,6 +18,16 @@ export class WaddleClient {
     fetch_room_history_by_thread(room_jid: string, thread_id: string, max: number, before_id?: string | null): Promise<any>;
     fetch_room_history_page(room_jid: string, max: number, page_param: any): Promise<any>;
     /**
+     * Waddle-specific MAM stanza-id filter — fetch a batch of messages from
+     * a room MAM archive by XEP-0359 stanza-id. Uses the custom data-form
+     * var `{urn:waddle:mam-stanza-id:0}stanza-id` per XEP-0313 §4.2 +
+     * XEP-0068 (not the `urn:xmpp:sid:0` namespace, which is XEP-0359
+     * wire protocol only). Used by the pinned-panel rich-preview render
+     * path to materialize `TimelineMessage`s for pinned entries that
+     * are not in the loaded timeline window.
+     */
+    fetch_room_messages_by_stanza_ids(room_jid: string, stanza_ids: string[]): Promise<any>;
+    /**
      * Fetch the current pinned-messages list for a MUC room (#414).
      * Resolves to a JS array of `WaddlePinEntry`. Empty array if the
      * room has no pins. Server gates on room occupancy: a non-occupant

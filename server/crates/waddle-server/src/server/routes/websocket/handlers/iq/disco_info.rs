@@ -233,7 +233,15 @@ pub(super) async fn handle_disco_info_iq(
                         Feature::new(DATA_FORMS_NS),
                         Feature::new(EXTENSION_COMMAND_FORM_TYPE),
                     ];
-                    let form = extension_command_metadata_form(&plugin, &descriptor);
+                    let manifest = state
+                        .deps
+                        .protocol
+                        .extension_manager
+                        .manifest_for_plugin(plugin.as_str());
+                    let profile = manifest
+                        .as_ref()
+                        .and_then(|manifest| manifest.profile.as_ref());
+                    let form = extension_command_metadata_form(&plugin, &descriptor, profile);
                     let response = build_disco_info_response_with_extensions(
                         request_iq,
                         &identities,
@@ -266,11 +274,20 @@ pub(super) async fn handle_disco_info_iq(
                 )];
                 let features = vec![
                     Feature::disco_info(),
+                    Feature::new(DATA_FORMS_NS),
                     Feature::new("urn:waddle:extension:1"),
                     Feature::new(EXTENSION_ROUTE_FORM_TYPE),
                     Feature::new(route.payload_namespace.as_str()),
                 ];
-                let form = extension_route_metadata_form(route);
+                let manifest = state
+                    .deps
+                    .protocol
+                    .extension_manager
+                    .manifest_for_plugin(route.plugin.as_str());
+                let profile = manifest
+                    .as_ref()
+                    .and_then(|manifest| manifest.profile.as_ref());
+                let form = extension_route_metadata_form(route, profile);
                 let response = build_disco_info_response_with_extensions(
                     request_iq,
                     &identities,

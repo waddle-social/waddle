@@ -78,6 +78,7 @@ export function retractChannelTimelineMessage(
   delete next.references;
   delete next.sharedFiles;
   delete next.extensionAnnotations;
+  delete next.extensionBodyFallback;
   delete next.isSticker;
   delete next.mentions;
   delete next.broadcastMention;
@@ -258,6 +259,7 @@ export function buildChannelTimelineFromMamResults(params: {
     markup?: MarkupSpan[];
     references?: MessageReference[];
     extensionAnnotations?: LiveRoomMessage["extensionAnnotations"];
+    extensionBodyFallback?: boolean;
   }[] = [];
 
   for (const msg of mamResults) {
@@ -283,6 +285,7 @@ export function buildChannelTimelineFromMamResults(params: {
         markup: msg.markup,
         references: msg.references,
         extensionAnnotations: msg.extensionAnnotations,
+        extensionBodyFallback: msg.extensionBodyFallback,
       });
     } else if (
       msg.body
@@ -341,8 +344,11 @@ export function buildChannelTimelineFromMamResults(params: {
     else delete target.references;
     if (update.extensionAnnotations && update.extensionAnnotations.length > 0) {
       target.extensionAnnotations = update.extensionAnnotations;
+      if (update.extensionBodyFallback) target.extensionBodyFallback = true;
+      else delete target.extensionBodyFallback;
     } else {
       delete target.extensionAnnotations;
+      delete target.extensionBodyFallback;
     }
   }
 

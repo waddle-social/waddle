@@ -223,6 +223,7 @@ export function useDirectMessages(
     markup?: LiveDmMessage["markup"],
     references?: LiveDmMessage["references"],
     extensionAnnotations?: LiveDmMessage["extensionAnnotations"],
+    extensionBodyFallback?: boolean,
   ) {
     messages.value = messages.value.map((m) => {
       if (!matchMessageId(m, replacesId) || !isSameDmCorrectionSender(m, correctionFromJid)) return m;
@@ -239,8 +240,11 @@ export function useDirectMessages(
       }
       if (extensionAnnotations && extensionAnnotations.length > 0) {
         updated.extensionAnnotations = extensionAnnotations;
+        if (extensionBodyFallback) updated.extensionBodyFallback = true;
+        else delete updated.extensionBodyFallback;
       } else {
         delete updated.extensionAnnotations;
+        delete updated.extensionBodyFallback;
       }
       return updated;
     });
@@ -666,6 +670,7 @@ export function useDirectMessages(
         msg.markup,
         msg.references,
         msg.extensionAnnotations,
+        msg.extensionBodyFallback,
       );
       return;
     }

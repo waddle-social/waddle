@@ -100,6 +100,8 @@ impl ExtensionHostAdapter {
                         .map_err(|error| ExtensionHostAdapterError::Protocol(error.to_string()))?,
                     body: DisplayText::new(request.body)
                         .map_err(|error| ExtensionHostAdapterError::Protocol(error.to_string()))?,
+                    preferred_nick: Some(self.extension_bot_nick(&invocation.plugin_id)),
+                    bot_hat_label: self.extension_bot_hat_label(&invocation.plugin_id),
                     stanza_id: Some(request.stanza_id),
                     thread_id: request.thread_id,
                     reply_to: request.reply_to,
@@ -204,6 +206,38 @@ impl ExtensionHostAdapter {
             .spaces
             .parse()
             .map_err(|error: jid::Error| ExtensionHostAdapterError::Protocol(error.to_string()))
+    }
+
+    fn extension_manifest(
+        &self,
+        plugin_id: &PluginId,
+    ) -> Option<waddle_extensions::ExtensionManifest> {
+        self.state
+            .deps
+            .protocol
+            .extension_manager
+            .manifest_for_plugin(plugin_id.as_str())
+    }
+
+    fn extension_bot_nick(&self, plugin_id: &PluginId) -> String {
+        self.extension_manifest(plugin_id)
+            .map(|manifest| {
+                manifest
+                    .profile
+                    .as_ref()
+                    .map(|profile| profile.display_name.as_str())
+                    .unwrap_or_else(|| manifest.name.as_str())
+                    .trim()
+                    .to_string()
+            })
+            .filter(|nick| !nick.is_empty())
+            .unwrap_or_else(|| plugin_id.as_str().to_string())
+    }
+
+    fn extension_bot_hat_label(&self, plugin_id: &PluginId) -> Option<DisplayText> {
+        self.extension_manifest(plugin_id)
+            .and_then(|manifest| manifest.profile)
+            .and_then(|profile| profile.bot_hat_label)
     }
 
     fn interpret_deps<'a>(&'a self, session: Option<&'a Session>) -> Deps<'a> {

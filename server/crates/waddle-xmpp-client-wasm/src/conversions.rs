@@ -50,6 +50,98 @@ pub(crate) fn references_to_js(references: Vec<messaging::ReferenceData>) -> Vec
         .collect()
 }
 
+pub(crate) fn extension_envelope_to_js(
+    envelope: messaging::ExtensionEnvelopeData,
+) -> WaddleExtensionEnvelope {
+    WaddleExtensionEnvelope {
+        version: envelope.version,
+        enrichments: envelope
+            .enrichments
+            .into_iter()
+            .map(|enrichment| WaddleExtensionEnrichment {
+                id: enrichment.id.as_str().to_string(),
+                plugin: enrichment.plugin.as_str().to_string(),
+                capability: enrichment.capability.as_str().to_string(),
+                payload_namespace: enrichment.payload_namespace.as_str().to_string(),
+                created: enrichment.created.as_str().to_string(),
+                source: enrichment.source.map(extension_source_to_js),
+                title: enrichment.title.map(|title| title.as_str().to_string()),
+                summary: enrichment
+                    .summary
+                    .map(|summary| summary.as_str().to_string()),
+                payloads: enrichment
+                    .payloads
+                    .into_iter()
+                    .map(extension_payload_element_to_js)
+                    .collect(),
+                launches: enrichment
+                    .launches
+                    .into_iter()
+                    .map(extension_launch_to_js)
+                    .collect(),
+            })
+            .collect(),
+    }
+}
+
+fn extension_source_to_js(source: messaging::ExtensionSourceData) -> WaddleExtensionSource {
+    WaddleExtensionSource {
+        stanza_id: source.stanza_id.as_str().to_string(),
+        body_start: source.body_start,
+        body_end: source.body_end,
+    }
+}
+
+fn extension_launch_to_js(launch: messaging::ExtensionLaunchData) -> WaddleExtensionLaunch {
+    WaddleExtensionLaunch {
+        id: launch.id.as_str().to_string(),
+        plugin: launch.plugin.as_str().to_string(),
+        action: launch.action.as_str().to_string(),
+        command_node: launch.command_node.as_str().to_string(),
+        label: launch.label.as_str().to_string(),
+        context: WaddleExtensionLaunchContext {
+            waddle_id: launch.context.waddle_id.as_str().to_string(),
+            room: launch.context.room.map(|room| room.as_str().to_string()),
+            source_stanza_id: launch
+                .context
+                .source_stanza_id
+                .map(|stanza_id| stanza_id.as_str().to_string()),
+        },
+        payloads: launch
+            .payloads
+            .into_iter()
+            .map(extension_payload_element_to_js)
+            .collect(),
+        expires_at: launch
+            .expires_at
+            .map(|expires_at| expires_at.as_str().to_string()),
+        token: launch.token.map(|token| token.as_str().to_string()),
+    }
+}
+
+fn extension_payload_element_to_js(
+    element: messaging::ExtensionPayloadElementData,
+) -> WaddleExtensionPayloadElement {
+    WaddleExtensionPayloadElement {
+        namespace: element.namespace.as_str().to_string(),
+        name: element.name.as_str().to_string(),
+        attributes: element
+            .attributes
+            .into_iter()
+            .map(|attribute| WaddleExtensionPayloadAttribute {
+                name: attribute.name.as_str().to_string(),
+                value: attribute.value,
+            })
+            .collect(),
+        text: element.text,
+        children: element
+            .children
+            .into_iter()
+            .map(extension_payload_element_to_js)
+            .collect(),
+    }
+}
+
 pub(crate) fn inbound_to_js(message: InboundMessage) -> WaddleMessage {
     let (reply_fallback_start, reply_fallback_end) = match message.reply_fallback {
         Some((start, end)) => (Some(start), Some(end)),
@@ -115,6 +207,8 @@ pub(crate) fn inbound_to_js(message: InboundMessage) -> WaddleMessage {
             .map(shared_file_to_js)
             .collect(),
         pin_event: message.pin_event.map(pin_event_to_js),
+        extension_envelope: message.extension_envelope.map(extension_envelope_to_js),
+        extension_body_fallback: message.extension_body_fallback,
     }
 }
 
@@ -264,6 +358,13 @@ pub(crate) fn archived_to_js(archived: ArchivedMessage) -> Option<WaddleArchived
                     .collect()
             })
             .unwrap_or_default(),
+        extension_envelope: parsed
+            .as_ref()
+            .and_then(|message| message.extension_envelope.clone())
+            .map(extension_envelope_to_js),
+        extension_body_fallback: parsed
+            .as_ref()
+            .is_some_and(|message| message.extension_body_fallback),
     })
 }
 

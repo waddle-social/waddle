@@ -17,6 +17,7 @@ pub(crate) const NS_SFS: &str = "urn:xmpp:sfs:0";
 pub(crate) const NS_FILE_METADATA: &str = "urn:xmpp:file:metadata:0";
 pub(crate) const NS_URL_DATA: &str = "http://jabber.org/protocol/url-data";
 pub(crate) const NS_CLIENT: &str = "jabber:client";
+pub(crate) const NS_WADDLE_EXTENSION: &str = "urn:waddle:extension:1";
 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 pub(crate) const NS_MUC: &str = "http://jabber.org/protocol/muc";
 pub(crate) const NS_MUC_USER: &str = "http://jabber.org/protocol/muc#user";

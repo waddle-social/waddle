@@ -16,9 +16,10 @@ import {
   MessageSquare,
   LayoutDashboard,
   FileDown,
+  Github,
+  ExternalLink,
 } from "lucide-vue-next";
 import {
-  extensionCardDetails,
   extensionPresentation,
   extensionSurfaceLabel,
   renderStyledBody,
@@ -83,6 +84,9 @@ const isSticker = computed(() => !!props.message.isSticker && imageAttachments.v
 const styledHtml = computed(() =>
   renderStyledBody(displayBody.value, props.message.markup, props.message.references),
 );
+const shouldRenderTextBody = computed(() =>
+  !!displayBody.value && !props.message.extensionBodyFallback,
+);
 const styledBodyRef = ref<HTMLDivElement | null>(null);
 
 async function highlightMessageCodeBlocks() {
@@ -126,7 +130,7 @@ function emitImageClick(file: TimelineSharedFile, _index: number) {
   <div class="chat-message-media-stack">
     <!-- User text body (shown alongside attachments) -->
     <div
-      v-if="displayBody"
+      v-if="shouldRenderTextBody"
       ref="styledBodyRef"
       :class="[
         'type-message-body break-words styled-body',
@@ -183,19 +187,51 @@ function emitImageClick(file: TimelineSharedFile, _index: number) {
       <div
         v-for="annotation in extensionAnnotations"
         :key="`${annotation.extensionId}:${annotation.annotationId}`"
-        class="chat-extension-card flex min-w-0 items-start gap-3 rounded-lg border border-border bg-muted/25 p-3 text-left"
+        class="chat-extension-card flex min-w-0 items-start gap-3 rounded-lg border p-3 text-left"
+        :class="extensionPresentation(annotation).kind === 'github-event'
+          ? 'chat-github-card border-emerald-500/25 bg-emerald-500/5'
+          : 'border-border bg-muted/25'"
       >
-        <span class="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-md bg-background text-foreground ring-1 ring-border">
+        <span
+          class="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-md bg-background text-foreground ring-1 ring-border"
+          :class="extensionPresentation(annotation).kind === 'github-event' ? 'text-emerald-700 dark:text-emerald-300' : ''"
+        >
           <MessageSquare v-if="annotation.surfaceKind === 'chat-bot'" class="h-4 w-4 text-primary/80" aria-hidden="true" />
+          <Github v-else-if="extensionPresentation(annotation).kind === 'github-event'" class="h-4 w-4" aria-hidden="true" />
           <LayoutDashboard v-else class="h-4 w-4" aria-hidden="true" />
         </span>
         <span class="min-w-0 flex-1">
-          <span class="type-section-label block text-muted-foreground">
-            {{ extensionPresentation(annotation).label || extensionSurfaceLabel(annotation.surfaceKind) }}
+          <span class="flex min-w-0 items-center justify-between gap-2">
+            <span class="type-section-label min-w-0 text-muted-foreground">
+              {{ extensionPresentation(annotation).label || extensionSurfaceLabel(annotation.surfaceKind) }}
+            </span>
+            <span
+              v-if="extensionPresentation(annotation).primaryValue"
+              class="type-meta flex-shrink-0 rounded-md border px-1.5 py-0.5"
+              :class="[
+                extensionPresentation(annotation).tone === 'danger' ? 'border-destructive/30 bg-destructive/10 text-destructive' : '',
+                extensionPresentation(annotation).tone === 'success' ? 'border-success/30 bg-success/10 text-success' : '',
+                extensionPresentation(annotation).tone === 'warning' ? 'border-warning/30 bg-warning/10 text-warning' : '',
+                extensionPresentation(annotation).tone === 'neutral' ? 'border-border bg-background text-muted-foreground' : '',
+              ]"
+            >
+              {{ extensionPresentation(annotation).primaryValue }}
+            </span>
           </span>
           <span class="type-control block break-words text-foreground">
             {{ extensionPresentation(annotation).title }}
           </span>
+          <a
+            v-if="extensionPresentation(annotation).primaryUrl && !compact"
+            :href="extensionPresentation(annotation).primaryUrl"
+            target="_blank"
+            rel="noreferrer"
+            class="type-caption mt-1 inline-flex min-w-0 items-center gap-1 text-primary hover:underline"
+            @click.stop
+          >
+            <span class="min-w-0 truncate">{{ extensionPresentation(annotation).primaryUrl }}</span>
+            <ExternalLink class="h-3.5 w-3.5 flex-shrink-0" aria-hidden="true" />
+          </a>
           <span v-if="extensionPresentation(annotation).summary" class="type-caption mt-1 block break-words text-muted-foreground">
             {{ extensionPresentation(annotation).summary }}
           </span>
@@ -213,11 +249,11 @@ function emitImageClick(file: TimelineSharedFile, _index: number) {
             </span>
           </span>
           <dl
-            v-if="extensionCardDetails(annotation).length > 0"
+            v-if="extensionPresentation(annotation).details.length > 0"
             class="mt-2 grid min-w-0 grid-cols-[max-content_minmax(0,1fr)] gap-x-2 gap-y-1"
           >
             <template
-              v-for="detail in extensionCardDetails(annotation)"
+              v-for="detail in extensionPresentation(annotation).details"
               :key="`${annotation.annotationId}:${detail.label}:${detail.value}`"
             >
               <dt class="type-meta text-muted-foreground/70">{{ detail.label }}</dt>

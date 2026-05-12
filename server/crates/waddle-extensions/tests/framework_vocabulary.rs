@@ -87,6 +87,7 @@ fn sample_manifest() -> ExtensionManifest {
             PubSubNode::new,
             "urn:example:task-widget:1:waddle:{waddle-id}:links"
         )],
+        profile: None,
         artifact: None,
     }
 }

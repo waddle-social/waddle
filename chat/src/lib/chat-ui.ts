@@ -168,6 +168,8 @@ export interface TimelineMessage {
   sharedFiles?: TimelineSharedFile[];
   /** Waddle unified extension framework annotations. */
   extensionAnnotations?: ExtensionAnnotation[];
+  /** XEP-0428: message body is fallback text for the Waddle extension payload. */
+  extensionBodyFallback?: boolean;
   /** XEP-0513: Broadcast mention (everyone/here). */
   broadcastMention?: "everyone" | "here";
   /** XEP-0394: Message Markup offset-based annotations. */
@@ -417,10 +419,13 @@ function isInternalExtensionDetailKey(key: string): boolean {
     || key === "source-stanza-id"
     || key === "body-start"
     || key === "body-end"
+    || key === "installation-id"
+    || key === "repository-id"
     || /^option-\d+-(?:id|label)$/.test(key);
 }
 
-type ExtensionPresentationKind = "generic";
+type ExtensionPresentationKind = "generic" | "github-event";
+type ExtensionPresentationTone = "neutral" | "success" | "warning" | "danger";
 
 interface ExtensionPresentationOption {
   id: string;
@@ -430,26 +435,87 @@ interface ExtensionPresentationOption {
 
 interface ExtensionPresentation {
   kind: ExtensionPresentationKind;
+  tone: ExtensionPresentationTone;
   label: string;
   title: string;
   summary?: string;
   primaryValue?: string;
   secondaryValue?: string;
+  primaryUrl?: string;
   options: ExtensionPresentationOption[];
   details: ExtensionCardDetail[];
 }
 
 export function extensionPresentation(annotation: ExtensionAnnotation): ExtensionPresentation {
   const payload = annotation.payloads?.[0];
+  if (payload?.namespace === "urn:waddle:web-integration:1" && payload.name === "github-event") {
+    return githubEventPresentation(annotation, payload);
+  }
   const summary = genericExtensionSummary(annotation, payload);
   return {
     kind: "generic",
+    tone: "neutral",
     label: extensionSurfaceLabel(annotation.surfaceKind),
     title: annotation.title,
     ...(summary ? { summary } : {}),
     options: payloadOptions(payload),
     details: extensionCardDetails(annotation),
   };
+}
+
+function githubEventPresentation(
+  annotation: ExtensionAnnotation,
+  payload: ExtensionPayloadElement,
+): ExtensionPresentation {
+  const attrs = payload.attributes;
+  const repository = attrs.repository || "GitHub";
+  const name = attrs.name || attrs["event-type"] || "event";
+  const action = attrs.action || "received";
+  const conclusion = attrs.conclusion || "";
+  const summary = annotation.summary || githubSummary(repository, name, action, conclusion);
+  const details: ExtensionCardDetail[] = [
+    { label: "Repository", value: repository },
+    ...(attrs.branch ? [{ label: "Branch", value: attrs.branch }] : []),
+    ...(attrs.revision ? [{ label: "Commit", value: attrs.revision.slice(0, 7) }] : []),
+    ...(attrs["event-type"] ? [{ label: "Event", value: humanizeExtensionKey(attrs["event-type"]) }] : []),
+  ];
+  return {
+    kind: "github-event",
+    tone: githubTone(conclusion),
+    label: "GitHub",
+    title: name,
+    summary,
+    primaryValue: conclusion && conclusion !== "unknown" ? humanizeExtensionKey(conclusion) : humanizeExtensionKey(action),
+    secondaryValue: repository,
+    ...(attrs.url ? { primaryUrl: attrs.url } : {}),
+    options: [],
+    details,
+  };
+}
+
+function githubSummary(repository: string, name: string, action: string, conclusion: string): string {
+  if (conclusion && conclusion !== "unknown") {
+    return `${repository}: ${name} ${action} with ${conclusion.replace(/_/g, " ")}`;
+  }
+  return `${repository}: ${name} ${action}`;
+}
+
+function githubTone(conclusion: string | undefined): ExtensionPresentationTone {
+  switch (conclusion) {
+    case "success":
+      return "success";
+    case "cancelled":
+    case "timed_out":
+    case "failure":
+    case "error":
+      return "danger";
+    case "unknown":
+    case undefined:
+    case "":
+      return "neutral";
+    default:
+      return "warning";
+  }
 }
 
 export function extensionActionStatusLabel(state?: "loading" | "success" | "warning" | "error"): string {

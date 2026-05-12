@@ -1,3 +1,4 @@
+import type { ExtensionAnnotation, ExtensionLaunchDescriptor, ExtensionPayloadElement } from "@/lib/chat-ui";
 import type { MarkupSpan, MessageReference } from "@/lib/rich-message";
 import type { RichInlineStyle } from "@/lib/rich-message/types";
 
@@ -16,6 +17,8 @@ import type { LiveDmMessage, LiveRoomMessage, OccupantPresence, PresenceUpdateEv
 import type {
   WasmArchivedMessage,
   WasmInboxConversation,
+  WasmExtensionEnvelope,
+  WasmExtensionPayloadElement,
   WasmMessage,
   WasmPresence,
   WasmReference,
@@ -175,6 +178,80 @@ function referenceFromWasm(reference: WasmReference): MessageReference {
   };
 }
 
+function payloadElementFromWasm(payload: WasmExtensionPayloadElement): ExtensionPayloadElement {
+  return {
+    namespace: payload.namespace,
+    name: payload.name,
+    attributes: Object.fromEntries(payload.attributes.map((attribute) => [attribute.name, attribute.value])),
+    ...(payload.text ? { text: payload.text } : {}),
+    children: payload.children.map(payloadElementFromWasm),
+  };
+}
+
+function launchFromWasm(
+  launch: WasmExtensionEnvelope["enrichments"][number]["launches"][number],
+  source?: WasmExtensionEnvelope["enrichments"][number]["source"],
+): ExtensionLaunchDescriptor | null {
+  if (!launch.token || !launch.expires_at) return null;
+  return {
+    id: launch.id,
+    pluginId: launch.plugin,
+    actionId: launch.action,
+    commandNode: launch.command_node,
+    launchToken: launch.token,
+    label: launch.label,
+    context: {
+      waddleId: launch.context.waddle_id,
+      ...(launch.context.room ? { roomJid: launch.context.room } : {}),
+      ...(launch.context.source_stanza_id ? { stanzaId: launch.context.source_stanza_id } : {}),
+    },
+    expiresAt: launch.expires_at,
+    ...(source ? {
+      source: {
+        stanzaId: source.stanza_id,
+        ...(source.body_start !== undefined ? { bodyStart: source.body_start } : {}),
+        ...(source.body_end !== undefined ? { bodyEnd: source.body_end } : {}),
+      },
+    } : {}),
+    payloads: launch.payloads.map(payloadElementFromWasm),
+  };
+}
+
+function extensionAnnotationsFromWasm(envelope?: WasmExtensionEnvelope): ExtensionAnnotation[] {
+  if (!envelope?.enrichments.length) return [];
+  return envelope.enrichments.map((enrichment) => {
+    const payloads = enrichment.payloads.map(payloadElementFromWasm);
+    const fields = payloads[0]?.attributes ?? {};
+    const source = enrichment.source ? {
+      stanzaId: enrichment.source.stanza_id,
+      ...(enrichment.source.body_start !== undefined ? { bodyStart: enrichment.source.body_start } : {}),
+      ...(enrichment.source.body_end !== undefined ? { bodyEnd: enrichment.source.body_end } : {}),
+    } : undefined;
+    const actions = enrichment.launches.flatMap((launch) => {
+      const launchDescriptor = launchFromWasm(launch, enrichment.source);
+      return launchDescriptor
+        ? [{ label: launch.label, route: launch.id, launch: launchDescriptor }]
+        : [];
+    });
+    return {
+      extensionId: enrichment.plugin,
+      annotationId: enrichment.id,
+      surfaceKind: "message-card",
+      title: enrichment.title?.trim() || enrichment.plugin,
+      ...(enrichment.summary?.trim() ? { summary: enrichment.summary.trim() } : {}),
+      ...(source ? { source } : {}),
+      payloadNamespace: enrichment.payload_namespace,
+      payloads,
+      fields: {
+        surface: "message-card",
+        payloadNamespace: enrichment.payload_namespace,
+        ...fields,
+      },
+      actions,
+    };
+  });
+}
+
 function roomAssignedStanzaId(message: WasmArchivedMessage, roomJid: string): string | undefined {
   const byScoped = message.stanza_ids?.find((stanzaId) => stanzaId.by === roomJid);
   if (byScoped?.id) return byScoped.id;
@@ -244,7 +321,8 @@ export function roomMessageFromArchived(message: WasmArchivedMessage): LiveRoomM
   const mentionUris = message.mention_uris ?? [];
   const markupSpans = message.markup_spans ?? [];
   const references = message.references ?? [];
-  if (!message.body && !message.subject && !sharedFiles.length && !message.thread && !message.forum_post_kind && !message.is_retracted) {
+  const extensionAnnotations = extensionAnnotationsFromWasm(message.extension_envelope);
+  if (!message.body && !message.subject && !sharedFiles.length && !extensionAnnotations.length && !message.thread && !message.forum_post_kind && !message.is_retracted) {
     return null;
   }
   const base: LiveRoomMessage = {
@@ -276,6 +354,8 @@ export function roomMessageFromArchived(message: WasmArchivedMessage): LiveRoomM
       : {}),
     ...(references.length ? { references: references.map(referenceFromWasm) } : {}),
     ...(sharedFiles.length ? { sharedFiles: sharedFiles.map(sharedFileFromWasm) } : {}),
+    ...(extensionAnnotations.length ? { extensionAnnotations } : {}),
+    ...(message.extension_body_fallback && extensionAnnotations.length ? { extensionBodyFallback: true } : {}),
     ...(message.is_sticker ? { isSticker: true } : {}),
     ...(message.is_retracted ? { isRetracted: true } : {}),
     ...(message.retraction_id ? { retractionId: message.retraction_id } : {}),
@@ -327,9 +407,10 @@ export function dmMessageFromArchived(message: WasmArchivedMessage, selfBareJid:
   const mentionUris = message.mention_uris ?? [];
   const markupSpans = message.markup_spans ?? [];
   const references = message.references ?? [];
+  const extensionAnnotations = extensionAnnotationsFromWasm(message.extension_envelope);
   const dmWireIds = [message.id, message.origin_id]
     .filter((value): value is string => !!value && value !== dmPrimaryId);
-  if (!message.body && !message.subject && !sharedFiles.length && !message.thread && !message.is_retracted) return null;
+  if (!message.body && !message.subject && !sharedFiles.length && !extensionAnnotations.length && !message.thread && !message.is_retracted) return null;
   const base: LiveDmMessage = {
     id: dmPrimaryId,
     peerJid,
@@ -353,6 +434,8 @@ export function dmMessageFromArchived(message: WasmArchivedMessage, selfBareJid:
       : {}),
     ...(references.length ? { references: references.map(referenceFromWasm) } : {}),
     ...(sharedFiles.length ? { sharedFiles: sharedFiles.map(sharedFileFromWasm) } : {}),
+    ...(extensionAnnotations.length ? { extensionAnnotations } : {}),
+    ...(message.extension_body_fallback && extensionAnnotations.length ? { extensionBodyFallback: true } : {}),
     ...(message.is_sticker ? { isSticker: true } : {}),
     ...(message.is_retracted ? { isRetracted: true } : {}),
     ...(message.retraction_id ? { retractionId: message.retraction_id } : {}),

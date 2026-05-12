@@ -32,6 +32,161 @@ pub fn parse_displayed_marker_payload(element: &Element) -> Option<DisplayedMark
         .map(|id| DisplayedMarkerPayload { id: id.to_string() })
 }
 
+pub fn parse_extension_envelope(element: &Element) -> Option<ExtensionEnvelopeData> {
+    let envelope = element.get_child("extensions", NS_WADDLE_EXTENSION)?;
+    let version = envelope
+        .attr("version")
+        .and_then(|value| value.parse::<u32>().ok())
+        .unwrap_or(1);
+    let enrichments = envelope
+        .children()
+        .filter(|child| child.name() == "enrichment" && child.ns() == NS_WADDLE_EXTENSION)
+        .filter_map(parse_extension_enrichment)
+        .collect::<Vec<_>>();
+    if enrichments.is_empty() {
+        return None;
+    }
+    Some(ExtensionEnvelopeData {
+        version,
+        enrichments,
+    })
+}
+
+fn parse_extension_enrichment(element: &Element) -> Option<ExtensionEnrichmentData> {
+    let id = ExtensionTextId::new(element.attr("id")?)?;
+    let plugin = ExtensionPluginId::new(element.attr("plugin")?)?;
+    let capability = ExtensionCapabilityData::from_attr(element.attr("capability")?)?;
+    if capability != ExtensionCapabilityData::MessageEnrich {
+        return None;
+    }
+    let payload_namespace = ExtensionNamespace::new(element.attr("payload-ns")?)?;
+    let created = ExtensionTimestamp::new(element.attr("created")?)?;
+    let source = element
+        .get_child("source", NS_WADDLE_EXTENSION)
+        .and_then(parse_extension_source);
+    let payload_container = element.get_child("payload", NS_WADDLE_EXTENSION);
+    let title = payload_container.and_then(|payload| {
+        payload
+            .children()
+            .find(|child| child.name() == "view" && child.ns() == NS_WADDLE_EXTENSION)
+            .and_then(|view| view.attr("title"))
+            .filter(|title| !title.trim().is_empty())
+            .and_then(ExtensionDisplayText::new)
+    });
+    let summary = payload_container.and_then(|payload| {
+        payload
+            .children()
+            .find(|child| child.name() == "view" && child.ns() == NS_WADDLE_EXTENSION)
+            .and_then(|view| {
+                view.children()
+                    .find(|child| child.name() == "text" && child.ns() == NS_WADDLE_EXTENSION)
+            })
+            .map(|text| text.text().trim().to_string())
+            .filter(|text| !text.is_empty())
+            .and_then(ExtensionDisplayText::new)
+    });
+    let payloads = payload_container
+        .map(|payload| {
+            payload
+                .children()
+                .filter(|child| child.ns() != NS_WADDLE_EXTENSION)
+                .filter_map(parse_extension_payload_element)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let launches = element
+        .children()
+        .filter(|child| child.name() == "launch" && child.ns() == NS_WADDLE_EXTENSION)
+        .filter_map(parse_extension_launch)
+        .collect();
+
+    Some(ExtensionEnrichmentData {
+        id,
+        plugin,
+        capability,
+        payload_namespace,
+        created,
+        source,
+        title,
+        summary,
+        payloads,
+        launches,
+    })
+}
+
+fn parse_extension_source(element: &Element) -> Option<ExtensionSourceData> {
+    Some(ExtensionSourceData {
+        stanza_id: ExtensionTextId::new(element.attr("stanza-id")?)?,
+        body_start: element
+            .attr("body-start")
+            .and_then(|value| value.parse::<u32>().ok()),
+        body_end: element
+            .attr("body-end")
+            .and_then(|value| value.parse::<u32>().ok()),
+    })
+}
+
+fn parse_extension_launch(element: &Element) -> Option<ExtensionLaunchData> {
+    let context = element
+        .get_child("context", NS_WADDLE_EXTENSION)
+        .and_then(parse_extension_launch_context)?;
+    let payloads = element
+        .get_child("payload", NS_WADDLE_EXTENSION)
+        .map(|payload| {
+            payload
+                .children()
+                .filter(|child| child.ns() != NS_WADDLE_EXTENSION)
+                .filter_map(parse_extension_payload_element)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    Some(ExtensionLaunchData {
+        id: ExtensionTextId::new(element.attr("id")?)?,
+        plugin: ExtensionPluginId::new(element.attr("plugin")?)?,
+        action: ExtensionTextId::new(element.attr("action")?)?,
+        command_node: ExtensionCommandNode::new(element.attr("command-node")?)?,
+        label: ExtensionDisplayText::new(element.attr("label")?.trim())?,
+        context,
+        payloads,
+        expires_at: element.attr("expires-at").and_then(ExtensionTimestamp::new),
+        token: element.attr("token").and_then(ExtensionTextId::new),
+    })
+}
+
+fn parse_extension_launch_context(element: &Element) -> Option<ExtensionLaunchContextData> {
+    Some(ExtensionLaunchContextData {
+        waddle_id: ExtensionTextId::new(element.attr("waddle-id")?)?,
+        room: element.attr("room").and_then(ExtensionRoomJid::new),
+        source_stanza_id: element.attr("stanza-id").and_then(ExtensionTextId::new),
+    })
+}
+
+fn parse_extension_payload_element(element: &Element) -> Option<ExtensionPayloadElementData> {
+    let attributes = element
+        .attrs()
+        .filter_map(|(name, value)| {
+            Some(ExtensionPayloadAttributeData {
+                name: ExtensionXmlName::new(name)?,
+                value: value.to_string(),
+            })
+        })
+        .collect::<Vec<_>>();
+    let children = element
+        .children()
+        .filter(|child| child.ns() == element.ns())
+        .filter_map(parse_extension_payload_element)
+        .collect();
+    let text = element.text().trim().to_string();
+    Some(ExtensionPayloadElementData {
+        namespace: ExtensionNamespace::new(element.ns())?,
+        name: ExtensionXmlName::new(element.name())?,
+        attributes,
+        text: if text.is_empty() { None } else { Some(text) },
+        children,
+    })
+}
+
 pub fn parse_reaction_payload(element: &Element) -> Option<ReactionPayload> {
     let reactions = element.get_child("reactions", NS_REACTIONS)?;
     let target_id = reactions.attr("id")?.trim();

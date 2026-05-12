@@ -66,6 +66,7 @@ pub struct ExtensionManifest {
     pub commands: Vec<CommandDescriptor>,
     pub routes: Vec<ExtensionRouteDescriptor>,
     pub pubsub_nodes: Vec<PubSubNode>,
+    pub profile: Option<ExtensionProfile>,
     pub artifact: Option<ArtifactReference>,
 }
 
@@ -96,6 +97,15 @@ impl ExtensionManifest {
     pub fn route_descriptors(&self) -> &[ExtensionRouteDescriptor] {
         &self.routes
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ExtensionProfile {
+    pub display_name: DisplayText,
+    pub description: Option<DisplayText>,
+    pub accent: Option<String>,
+    pub avatar: Option<ArtifactReference>,
+    pub bot_hat_label: Option<DisplayText>,
 }
 
 fn pubsub_node_pattern_matches(pattern: &str, candidate: &str) -> bool {

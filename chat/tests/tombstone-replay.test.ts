@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { buildChannelTimelineFromMamResults } from "../src/channels/message-timeline-state";
 import { buildDmTimelineFromMamResults } from "../src/dms/message-timeline-state";
-import type { TimelineMessage } from "../src/lib/chat-ui";
+import type { ExtensionAnnotation, TimelineMessage } from "../src/lib/chat-ui";
 import type { WaddleSession } from "../src/lib/server-auth";
 import type { LiveDmMessage, LiveRoomMessage } from "../src/lib/xmpp-client";
 
@@ -15,6 +15,15 @@ const session: WaddleSession = {
   xmpp_websocket_url: "wss://example.com/xmpp",
   is_expired: false,
   expires_at: null,
+};
+
+const extensionAnnotation: ExtensionAnnotation = {
+  extensionId: "github",
+  annotationId: "github-delivery-1",
+  surfaceKind: "message-card",
+  title: "GitHub",
+  fields: { repository: "waddle-social/waddle", conclusion: "failure" },
+  actions: [],
 };
 
 describe("XEP-0424 tombstone replay", () => {
@@ -32,7 +41,8 @@ describe("XEP-0424 tombstone replay", () => {
       markup: [{ type: "span", start: 0, end: 6, styles: ["strong"] }],
       references: [{ type: "data", uri: "https://example.com", begin: 7, end: 26 }],
       sharedFiles: [{ url: "https://example.com/file.png", disposition: "inline" }],
-      extensionAnnotations: [],
+      extensionAnnotations: [extensionAnnotation],
+      extensionBodyFallback: true,
       isSticker: true,
       mentions: ["bob@example.com"],
       broadcastMention: "here",
@@ -67,6 +77,7 @@ describe("XEP-0424 tombstone replay", () => {
     expect(timeline[0]?.references).toBeUndefined();
     expect(timeline[0]?.sharedFiles).toBeUndefined();
     expect(timeline[0]?.extensionAnnotations).toBeUndefined();
+    expect(timeline[0]?.extensionBodyFallback).toBeUndefined();
     expect(timeline[0]?.isSticker).toBeUndefined();
     expect(timeline[0]?.mentions).toBeUndefined();
     expect(timeline[0]?.broadcastMention).toBeUndefined();
@@ -86,7 +97,8 @@ describe("XEP-0424 tombstone replay", () => {
       markup: [{ type: "span", start: 0, end: 6, styles: ["strong"] }],
       references: [{ type: "data", uri: "https://example.com", begin: 7, end: 26 }],
       sharedFiles: [{ url: "https://example.com/file.png", disposition: "inline" }],
-      extensionAnnotations: [],
+      extensionAnnotations: [extensionAnnotation],
+      extensionBodyFallback: true,
       isSticker: true,
       mentions: ["alice@example.com"],
       broadcastMention: "here",
@@ -112,6 +124,7 @@ describe("XEP-0424 tombstone replay", () => {
     expect(timeline[0]?.references).toBeUndefined();
     expect(timeline[0]?.sharedFiles).toBeUndefined();
     expect(timeline[0]?.extensionAnnotations).toBeUndefined();
+    expect(timeline[0]?.extensionBodyFallback).toBeUndefined();
     expect(timeline[0]?.isSticker).toBeUndefined();
     expect(timeline[0]?.mentions).toBeUndefined();
     expect(timeline[0]?.broadcastMention).toBeUndefined();
@@ -230,6 +243,43 @@ describe("XEP-0424 tombstone replay", () => {
     expect(timeline[1]?.forumThreadTitle).toBeUndefined();
   });
 
+  test("MAM channel corrections clear extension fallback state when the edit has no rich card", () => {
+    const existing: TimelineMessage = {
+      id: "original-message",
+      wireIds: ["room-stanza-1"],
+      replyableId: "room-stanza-1",
+      author: "bob",
+      authorJid: "room@muc.example.com/bob",
+      authorOccupantJid: "room@muc.example.com/bob",
+      body: "GitHub waddle-social/waddle: ci completed with failure",
+      createdAt: "2026-05-08T13:00:00Z",
+      isSelf: false,
+      extensionAnnotations: [extensionAnnotation],
+      extensionBodyFallback: true,
+    };
+    const correction: LiveRoomMessage = {
+      id: "edit-message",
+      roomJid: "room@muc.example.com",
+      nick: "bob",
+      body: "plain edit",
+      createdAt: "2026-05-08T13:01:00Z",
+      type: "message",
+      replacesId: "room-stanza-1",
+    };
+
+    const timeline = buildChannelTimelineFromMamResults({
+      session,
+      channelIsForum: false,
+      mamResults: [correction],
+      existing: [existing],
+    });
+
+    expect(timeline[0]?.body).toBe("plain edit");
+    expect(timeline[0]?.isEdited).toBe(true);
+    expect(timeline[0]?.extensionAnnotations).toBeUndefined();
+    expect(timeline[0]?.extensionBodyFallback).toBeUndefined();
+  });
+
   test("updates an already-loaded direct message from a MAM tombstone", () => {
     const existing: TimelineMessage = {
       id: "dm-origin",
@@ -239,6 +289,8 @@ describe("XEP-0424 tombstone replay", () => {
       createdAt: "2026-05-08T13:00:00Z",
       isSelf: false,
       sharedFiles: [{ url: "https://example.com/file.png", disposition: "inline" }],
+      extensionAnnotations: [extensionAnnotation],
+      extensionBodyFallback: true,
       mentions: ["alice@example.com"],
     };
     const tombstone: LiveDmMessage = {
@@ -267,7 +319,43 @@ describe("XEP-0424 tombstone replay", () => {
       retractionId: "dm-retract",
     });
     expect(timeline[0]?.sharedFiles).toBeUndefined();
+    expect(timeline[0]?.extensionAnnotations).toBeUndefined();
+    expect(timeline[0]?.extensionBodyFallback).toBeUndefined();
     expect(timeline[0]?.mentions).toBeUndefined();
+  });
+
+  test("MAM direct-message corrections apply extension fallback state when the edit has a rich card", () => {
+    const existing: TimelineMessage = {
+      id: "dm-origin",
+      author: "bob",
+      authorJid: "bob@example.com/mobile",
+      body: "plain text",
+      createdAt: "2026-05-08T13:00:00Z",
+      isSelf: false,
+    };
+    const correction: LiveDmMessage = {
+      id: "dm-edit",
+      peerJid: "bob@example.com",
+      fromJid: "bob@example.com/mobile",
+      nick: "bob",
+      body: "GitHub waddle-social/waddle: ci completed with failure",
+      createdAt: "2026-05-08T13:01:00Z",
+      type: "message",
+      replacesId: "dm-origin",
+      extensionAnnotations: [extensionAnnotation],
+      extensionBodyFallback: true,
+    };
+
+    const timeline = buildDmTimelineFromMamResults({
+      session,
+      mamResults: [correction],
+      existing: [existing],
+    });
+
+    expect(timeline[0]?.body).toBe("GitHub waddle-social/waddle: ci completed with failure");
+    expect(timeline[0]?.isEdited).toBe(true);
+    expect(timeline[0]?.extensionAnnotations).toEqual([extensionAnnotation]);
+    expect(timeline[0]?.extensionBodyFallback).toBe(true);
   });
 
   test("scrubs a fresh direct-message tombstone before insertion", () => {
@@ -284,7 +372,8 @@ describe("XEP-0424 tombstone replay", () => {
       markup: [{ type: "span", start: 0, end: 6, styles: ["strong"] }],
       references: [{ type: "data", uri: "https://example.com", begin: 7, end: 26 }],
       sharedFiles: [{ url: "https://example.com/file.png", disposition: "inline" }],
-      extensionAnnotations: [],
+      extensionAnnotations: [extensionAnnotation],
+      extensionBodyFallback: true,
       mentions: ["alice@example.com"],
     };
 
@@ -304,6 +393,7 @@ describe("XEP-0424 tombstone replay", () => {
     expect(timeline[0]?.references).toBeUndefined();
     expect(timeline[0]?.sharedFiles).toBeUndefined();
     expect(timeline[0]?.extensionAnnotations).toBeUndefined();
+    expect(timeline[0]?.extensionBodyFallback).toBeUndefined();
     expect(timeline[0]?.mentions).toBeUndefined();
   });
 
@@ -318,7 +408,8 @@ describe("XEP-0424 tombstone replay", () => {
       markup: [{ type: "span", start: 0, end: 6, styles: ["strong"] }],
       references: [{ type: "data", uri: "https://example.com", begin: 7, end: 26 }],
       sharedFiles: [{ url: "https://example.com/file.png", disposition: "inline" }],
-      extensionAnnotations: [],
+      extensionAnnotations: [extensionAnnotation],
+      extensionBodyFallback: true,
       mentions: ["alice@example.com"],
     };
     const retraction: LiveDmMessage = {
@@ -348,6 +439,7 @@ describe("XEP-0424 tombstone replay", () => {
     expect(timeline[0]?.references).toBeUndefined();
     expect(timeline[0]?.sharedFiles).toBeUndefined();
     expect(timeline[0]?.extensionAnnotations).toBeUndefined();
+    expect(timeline[0]?.extensionBodyFallback).toBeUndefined();
     expect(timeline[0]?.mentions).toBeUndefined();
   });
 });
