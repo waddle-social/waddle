@@ -33,6 +33,39 @@ let _gitopsWaddleServerInputs = [
 ]
 let _deploymentInputs = ["deployment.cue"]
 
+let _NamespaceNix = schema.#Contributor & {
+	id: "namespaceNix"
+	when: runtimeType: ["nix"]
+	tasks: [
+		{
+			id:       "nix.cache"
+			label:    "Cache /nix on Namespace volume"
+			priority: 0
+			provider: github: {
+				uses: "namespacelabs/nscloud-cache-action@v1"
+				with: cache: "nix"
+			}
+		},
+		{
+			id:        "nix.chown"
+			label:     "Hand /nix to the runner user"
+			priority:  1
+			dependsOn: ["nix.cache"]
+			script:    "sudo chown -R runner /nix"
+		},
+		{
+			id:        "nix.install"
+			label:     "Install Nix"
+			priority:  2
+			dependsOn: ["nix.chown"]
+			provider: github: {
+				uses: "cachix/install-nix-action@v31"
+				with: extra_nix_config: "accept-flake-config = true"
+			}
+		},
+	]
+}
+
 schema.#Project & {
 	name: "waddle-server"
 
@@ -45,7 +78,7 @@ schema.#Project & {
 
 	ci: providers: ["github"]
 	ci: contributors: [
-		c.#FlakeHubCache,
+		_NamespaceNix,
 		c.#CuenvRelease,
 		c.#OnePassword,
 		schema.#Contributor & {
@@ -65,17 +98,10 @@ schema.#Project & {
 					}
 				},
 				{
-					id:       "determinate-nix"
-					label:    "Setup Determinate Nix"
-					priority: 2
-					dependsOn: ["checkout.tag"]
-					provider: github: uses: "DeterminateSystems/determinate-nix-action@f4c468f2287f0f14a113841b41f2dc8957119519"
-				},
-				{
 					id:       "push"
 					label:    "Push to FlakeHub"
 					priority: 3
-					dependsOn: ["determinate-nix"]
+					dependsOn: ["checkout.tag", "nix.install"]
 					provider: github: {
 						uses: "DeterminateSystems/flakehub-push@a225170f3ab20a9d93dbb4424090ef0523ca7425"
 						with: {
@@ -91,7 +117,6 @@ schema.#Project & {
 	]
 
 	ci: provider: github: {
-		flakehubCache: flakeName: "waddle-social/waddle"
 		runner: "namespace-profile-linux-x86"
 		runners: arch: {
 			"linux-x64":    "namespace-profile-linux-x86"

@@ -17,11 +17,13 @@ schema.#Base & {
 		]
 	}
 
-	vcs: xeps: {
-		url:       "https://github.com/xsf/xeps.git"
-		reference: "master"
-		vendor:    false
-		path:      "xeps"
+	vcs: {
+		xeps: {
+			url:       "https://github.com/xsf/xeps.git"
+			reference: "master"
+			vendor:    false
+			path:      "xeps"
+		}
 	}
 
 	env: {
