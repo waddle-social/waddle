@@ -78,6 +78,8 @@ export function useMessageAttachments(message: ReadonlyRef<TimelineMessage>) {
   // openLightbox for an encrypted image whose decrypted blob URL is not ready
   // is a silent no-op; unresolved entries are excluded from the gallery.
   const lightboxOpen = ref(false);
+  // Meaningful only while lightboxOpen is true; the lightbox ignores it when
+  // closed and openLightbox always seeds it before opening.
   const lightboxIndex = ref(0);
   const decryptedAttachmentUrls = ref<Record<string, string>>({});
   const decryptedAttachmentErrors = ref<Record<string, string>>({});
@@ -215,6 +217,8 @@ export function useMessageAttachments(message: ReadonlyRef<TimelineMessage>) {
     for (const key of Object.keys(decryptedAttachmentUrls.value)) revokeAttachmentUrl(key);
   }
 
+  // Component callers get automatic cleanup through Vue's active effect scope.
+  // Component-free tests call the returned cleanup() explicitly when needed.
   if (getCurrentScope()) onScopeDispose(cleanup);
 
   return {
