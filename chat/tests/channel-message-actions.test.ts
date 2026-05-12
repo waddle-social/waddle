@@ -7,7 +7,7 @@ import { ref } from "vue";
 import { useChannelMessageActions } from "../src/channels/message-actions";
 import type { BrowserXmppClient } from "../src/lib/xmpp-client";
 import type { WaddleSession } from "../src/lib/server-auth";
-import type { TimelineMessage } from "../src/lib/chat-ui";
+import type { ExtensionAnnotationAction, TimelineMessage } from "../src/lib/chat-ui";
 
 const session: WaddleSession = {
   username: "alice",
@@ -187,12 +187,13 @@ describe("invokeExtensionAction", () => {
     const client = makeClient({ invokeExtensionLaunch } as Partial<BrowserXmppClient>);
     const h = harness({ client });
 
-    const result = await h.actions.invokeExtensionAction({
+    const action: ExtensionAnnotationAction = {
       annotationId: "a1",
       extensionId: "ext",
       label: "Do it",
       launch: { kind: "launch", url: "https://example.com/x" },
-    } as any);
+    };
+    const result = await h.actions.invokeExtensionAction(action);
 
     expect(invokeExtensionLaunch).toHaveBeenCalledTimes(1);
     expect(result).toEqual({ ok: true, value: "abc" });
@@ -202,13 +203,20 @@ describe("invokeExtensionAction", () => {
   test("throws and sets actionError when no client is available", async () => {
     const h = harness();
     h.xmppClient.value = null;
-    await expect(h.actions.invokeExtensionAction({} as any)).rejects.toThrow("XMPP session is not ready");
+    const action: ExtensionAnnotationAction = {
+      annotationId: "a1",
+      extensionId: "ext",
+      label: "Do it",
+      launch: { kind: "launch", url: "https://example.com/x" },
+    };
+    await expect(h.actions.invokeExtensionAction(action)).rejects.toThrow("XMPP session is not ready");
     expect(h.actionError.value).toContain("XMPP session is not ready");
   });
 
   test("throws and sets actionError when launch metadata is missing", async () => {
     const h = harness();
-    await expect(h.actions.invokeExtensionAction({ annotationId: "a1", extensionId: "ext", label: "Do it" } as any))
+    const action = { annotationId: "a1", extensionId: "ext", label: "Do it" } as ExtensionAnnotationAction;
+    await expect(h.actions.invokeExtensionAction(action))
       .rejects.toThrow("missing launch metadata");
     expect(h.actionError.value).toContain("missing launch metadata");
   });

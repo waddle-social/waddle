@@ -6,7 +6,7 @@ import { ref } from "vue";
 import { useDmMessageActions } from "../src/dms/message-actions";
 import type { BrowserXmppClient } from "../src/lib/xmpp-client";
 import type { WaddleSession } from "../src/lib/server-auth";
-import type { TimelineMessage } from "../src/lib/chat-ui";
+import type { ExtensionAnnotationAction, TimelineMessage } from "../src/lib/chat-ui";
 
 const session: WaddleSession = {
   username: "alice",
@@ -77,6 +77,28 @@ describe("toggleReaction (XEP-0444)", () => {
   });
 });
 
+describe("toggleReaction target-id precedence", () => {
+  test("prefers replyableId over id when both are present", async () => {
+    // If a DM carries a server-stable XEP-0359 stanza-id (currently rare,
+    // but possible if the server starts attaching one), the reaction MUST
+    // target the stable id, not the client-assigned message id. Lock the
+    // precedence in to catch any regression in `msg.replyableId ?? msg.id`.
+    const h = harness();
+    h.messages.value = [
+      {
+        id: "client-id",
+        replyableId: "server-stable-id",
+        reactions: {},
+        body: "", nick: "", timestamp: 0,
+      } as TimelineMessage,
+    ];
+    await h.actions.toggleReaction("client-id", "👀");
+    const sendDmReaction = h.xmppClient.value!.sendDmReaction as unknown as ReturnType<typeof mock>;
+    expect(sendDmReaction).toHaveBeenCalledTimes(1);
+    expect(sendDmReaction.mock.calls[0]![1]).toBe("server-stable-id");
+  });
+});
+
 describe("retractMessage (XEP-0424)", () => {
   test("falls back to message id when replyableId is absent (DMs don't require room stanza-id)", async () => {
     const h = harness();
@@ -108,12 +130,13 @@ describe("invokeExtensionAction", () => {
     const client = makeClient({ invokeExtensionLaunch } as Partial<BrowserXmppClient>);
     const h = harness({ client });
 
-    const result = await h.actions.invokeExtensionAction({
+    const action: ExtensionAnnotationAction = {
       annotationId: "a1",
       extensionId: "ext",
       label: "Do it",
       launch: { kind: "launch", url: "https://example.com/x" },
-    } as any);
+    };
+    const result = await h.actions.invokeExtensionAction(action);
 
     expect(invokeExtensionLaunch).toHaveBeenCalledTimes(1);
     expect(result).toEqual({ ok: true });
@@ -122,12 +145,19 @@ describe("invokeExtensionAction", () => {
   test("throws when no client", async () => {
     const h = harness();
     h.xmppClient.value = null;
-    await expect(h.actions.invokeExtensionAction({} as any)).rejects.toThrow("XMPP session is not ready");
+    const action: ExtensionAnnotationAction = {
+      annotationId: "a1",
+      extensionId: "ext",
+      label: "Do it",
+      launch: { kind: "launch", url: "https://example.com/x" },
+    };
+    await expect(h.actions.invokeExtensionAction(action)).rejects.toThrow("XMPP session is not ready");
   });
 
   test("throws when launch metadata is missing", async () => {
     const h = harness();
-    await expect(h.actions.invokeExtensionAction({ annotationId: "a1", extensionId: "ext", label: "Do it" } as any))
+    const action = { annotationId: "a1", extensionId: "ext", label: "Do it" } as ExtensionAnnotationAction;
+    await expect(h.actions.invokeExtensionAction(action))
       .rejects.toThrow("missing launch metadata");
   });
 });

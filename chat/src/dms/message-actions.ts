@@ -2,6 +2,7 @@ import type { Ref } from "vue";
 import type { WaddleSession } from "@/lib/server-auth";
 import type { BrowserXmppClient } from "@/lib/xmpp-client";
 import type { ExtensionAnnotationAction, TimelineMessage } from "@/lib/chat-ui";
+import type { ExtensionCommandResult } from "@/lib/xmpp/extension-commands";
 import { findMessageById } from "@/lib/message-ids";
 
 // Outbound message-action handlers for the DM side: reactions (XEP-0444),
@@ -80,7 +81,9 @@ export function useDmMessageActions(deps: UseDmMessageActionsDeps) {
     }
   }
 
-  async function invokeExtensionAction(action: ExtensionAnnotationAction) {
+  async function invokeExtensionAction(
+    action: ExtensionAnnotationAction,
+  ): Promise<ExtensionCommandResult> {
     const client = xmppClient.value;
     if (!client) {
       const error = new Error("XMPP session is not ready.");
