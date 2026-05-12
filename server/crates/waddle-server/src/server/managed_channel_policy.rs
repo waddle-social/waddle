@@ -15,7 +15,10 @@ pub(crate) fn server_policy_for_managed_channel(
         ("announcements", Permission::SendMessage) => {
             ManagedChannelServerPolicy::DeploymentOwnerOnly
         }
-        ("chat", Permission::View | Permission::Read | Permission::SendMessage)
+        (
+            "chat" | "github-actions",
+            Permission::View | Permission::Read | Permission::SendMessage,
+        )
         | ("announcements", Permission::View | Permission::Read) => {
             ManagedChannelServerPolicy::DeploymentMembership
         }

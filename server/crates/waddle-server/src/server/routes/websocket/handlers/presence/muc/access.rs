@@ -28,12 +28,17 @@ pub(super) async fn resolve_managed_channel_affiliation(
         }
     }
 
-    if matches!(channel_id, "chat" | "announcements") {
+    if matches!(channel_id, "chat" | "announcements" | "github-actions") {
         let server = Object::new(ObjectType::Server, DEPLOYMENT_SERVER_ID);
         if check_channel_permission(state, server.clone(), subject.clone(), Permission::Owner)
             .await?
         {
             return Ok(Some(Affiliation::Owner));
+        }
+        if check_channel_permission(state, server.clone(), subject.clone(), Permission::Admin)
+            .await?
+        {
+            return Ok(Some(Affiliation::Admin));
         }
         if check_channel_permission(state, server, subject.clone(), Permission::Member).await? {
             return Ok(Some(Affiliation::Member));

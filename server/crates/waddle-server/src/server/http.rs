@@ -313,8 +313,13 @@ async fn create_websocket_state(
         Arc::clone(&state),
     )
     .await;
-    if let Err(error) =
-        bootstrap_fresh_xmpp_topology(&state, Arc::clone(&pubsub_storage), &service_domains).await
+    if let Err(error) = bootstrap_fresh_xmpp_topology(
+        &state,
+        Arc::clone(&pubsub_storage),
+        &service_domains,
+        &room_registry,
+    )
+    .await
     {
         warn!(error = %error, "Failed to bootstrap fresh XMPP topology");
     }

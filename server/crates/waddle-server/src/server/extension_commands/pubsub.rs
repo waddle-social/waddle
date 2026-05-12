@@ -240,7 +240,7 @@ pub(crate) async fn extension_command_result(
 
 const MAX_EXTENSION_PUBSUB_ITEMS: u32 = 500;
 
-async fn publish_extension_pubsub(
+pub(crate) async fn publish_extension_pubsub(
     storage: &dyn PubSubStorage,
     owner: &jid::BareJid,
     publish: PubSubPublish,

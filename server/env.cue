@@ -31,6 +31,7 @@ let _gitopsWaddleServerInputs = [
 	"../infrastructure/waddle.cloud/gitops/waddle-server-source.yaml",
 	"../infrastructure/waddle.cloud/gitops/kustomization-infra-waddle-server.yaml",
 ]
+let _deploymentInputs = ["deployment.cue"]
 
 schema.#Project & {
 	name: "waddle-server"
@@ -190,7 +191,7 @@ schema.#Project & {
 		checkCiDrift: schema.#Task & {
 			command: "cuenv"
 			args: ["sync", "ci", "--check", "-A"]
-			inputs: ["**/env.cue"]
+			inputs: ["**/env.cue", "deployment.cue"]
 		}
 
 		checkRootSyncDrift: schema.#Task & {
@@ -297,16 +298,26 @@ schema.#Project & {
 
 					placeholder_digest="sha256:0000000000000000000000000000000000000000000000000000000000000000"
 					sample_digest="sha256:1111111111111111111111111111111111111111111111111111111111111111"
+					sample_git_sha="1111111111111111111111111111111111111111"
 					chart_render="$(mktemp)"
-					gitops_values="$(mktemp)"
+					gitops_values="$(mktemp).yaml"
 					gitops_render="$(mktemp)"
 					gitops_kustomize="$(mktemp)"
-					published_values="$(mktemp)"
+					modules_yaml="$(mktemp)"
+					published_values="$(mktemp).yaml"
 					published_render="$(mktemp)"
 					chart_secret_args=(
 					  --set-string secret.sessionKey=ci-session-key
 					  --set-string secret.occupantIdSecret=ci-occupant-id-secret-32-bytes-long
 					)
+
+					cue vet .
+					cue vet . ../infrastructure/waddle.cloud/gitops/waddle-server/runtime-external-secret.yaml -d '#RuntimeExternalSecret'
+					cue vet . ../infrastructure/waddle.cloud/gitops/waddle-server/openrouter-external-secret.yaml -d '#OpenRouterExternalSecret'
+					cue vet . ../infrastructure/waddle.cloud/gitops/waddle-server/spicedb-config-external-secret.yaml -d '#SpiceDbExternalSecret'
+					for manifest in ../infrastructure/waddle.cloud/gitops/waddle-server/*external-secret.yaml; do
+					  cue vet . "${manifest}" -d '#ExternalSecretNoDefaultPassword'
+					done
 
 					if helm template waddle-server charts/waddle-server \
 					  --namespace waddle \
@@ -367,12 +378,6 @@ schema.#Project & {
 					  echo "checked-in GitOps must not ship github-enricher" >&2
 					  exit 1
 					fi
-					for manifest in ../infrastructure/waddle.cloud/gitops/waddle-server/*external-secret.yaml; do
-					  yq -e '[(.spec.data // [])[] | select(.remoteRef.property == "password")] | length == 0' "${manifest}" > /dev/null || {
-					    echo "checked-in Waddle server ExternalSecrets must not read 1Password default password fields: ${manifest}" >&2
-					    exit 1
-					  }
-					done
 					for forbidden in "helm.sh/hook" "secret-bootstrap" "bootstrap-secrets" "bitnami/kubectl"; do
 					  if grep -R "${forbidden}" charts/waddle-server ../infrastructure/waddle.cloud/gitops/waddle-server; then
 					    echo "chart/GitOps must not contain removed bootstrap hook token: ${forbidden}" >&2
@@ -383,24 +388,7 @@ schema.#Project & {
 					    exit 1
 					  fi
 					done
-					for key_property in \
-					  "WADDLE_SESSION_KEY session-key" \
-					  "WADDLE_OCCUPANT_ID_SECRET occupant-id-secret" \
-					  "WADDLE_S3_ACCESS_KEY_ID r2-access-key-id" \
-					  "WADDLE_S3_SECRET_ACCESS_KEY r2-secret-access-key" \
-					  "WADDLE_SPICEDB_PRESHARED_KEY spicedb-preshared-key"; do
-					  secret_key="${key_property%% *}"
-					  property="${key_property#* }"
-					  yq -e ".spec.data[] | select(.secretKey == \"${secret_key}\" and .remoteRef.key == \"server-runtime-production\" and .remoteRef.property == \"${property}\")" ../infrastructure/waddle.cloud/gitops/waddle-server/runtime-external-secret.yaml > /dev/null
-					done
-					yq -e '(.spec.data | length) == 6' ../infrastructure/waddle.cloud/gitops/waddle-server/runtime-external-secret.yaml > /dev/null
-					yq -e '.spec.data[] | select(.secretKey == "apiKey" and .remoteRef.key == "server-runtime-production" and .remoteRef.property == "openrouter-api-key")' ../infrastructure/waddle.cloud/gitops/waddle-server/openrouter-external-secret.yaml > /dev/null
-					yq -e '(.spec.data | length) == 1' ../infrastructure/waddle.cloud/gitops/waddle-server/openrouter-external-secret.yaml > /dev/null
-					yq -e '.spec.data[] | select(.secretKey == "preshared_key" and .remoteRef.key == "server-runtime-production" and .remoteRef.property == "spicedb-preshared-key")' ../infrastructure/waddle.cloud/gitops/waddle-server/spicedb-config-external-secret.yaml > /dev/null
-					yq -e '.extensions.enabled == false' "${gitops_values}" > /dev/null
-					yq -e '(.extensions.modules // []) | length == 0' "${gitops_values}" > /dev/null
-					yq -e '(.extraSecretRefs | length) == 1 and (.extraSecretRefs[0] == "waddle-runtime-secrets")' "${gitops_values}" > /dev/null
-					yq -e '.secret.runtimeSecretName == "waddle-runtime-secrets"' "${gitops_values}" > /dev/null
+					cue vet . "${gitops_values}" -d '#CheckedInGitOpsValues'
 					helm lint charts/waddle-server -f "${gitops_values}"
 					helm template waddle-server charts/waddle-server \
 					  --namespace waddle \
@@ -424,18 +412,24 @@ schema.#Project & {
 					  fi
 					done
 
+					cue export . -e '#PublishedExtensionModules' --out yaml \
+					  -t linkBoardDigest="${sample_digest}" \
+					  -t aiChatbotDigest="${sample_digest}" \
+					  -t decisionPollsDigest="${sample_digest}" \
+					  -t githubDigest="${sample_digest}" > "${modules_yaml}"
 					cp "${gitops_values}" "${published_values}"
-					SAMPLE_DIGEST="${sample_digest}" yq -i '
+					MODULES_YAML="${modules_yaml}" SAMPLE_DIGEST="${sample_digest}" SAMPLE_GIT_SHA="${sample_git_sha}" yq -i '
 					  .image.digest = strenv(SAMPLE_DIGEST) |
-					  .containerExtraEnv = ((.containerExtraEnv // []) | map(select(.name != "WADDLE_GIT_SHA"))) + [{"name": "WADDLE_GIT_SHA", "value": "1111111111111111111111111111111111111111"}] |
+					  .containerExtraEnv = ((.containerExtraEnv // []) | map(select(.name != "WADDLE_GIT_SHA"))) + [{"name": "WADDLE_GIT_SHA", "value": strenv(SAMPLE_GIT_SHA)}] |
 					  .extensions.enabled = true |
-					  .extensions.modules = [
-					    {"name": "link-board", "registry": "ghcr.io/waddle-social/waddle/extensions/link-board", "digest": strenv(SAMPLE_DIGEST), "namespace": "urn:waddle:link-board:1", "config": {}, "capabilityGrants": ["message.enrich", "launch", "pubsub.publish", "ui.declarative"]},
-					    {"name": "ai-chatbot", "registry": "ghcr.io/waddle-social/waddle/extensions/ai-chatbot", "digest": strenv(SAMPLE_DIGEST), "namespace": "urn:waddle:ai-chatbot:1", "config": {"endpoint": "https://openrouter.ai/api/v1/chat/completions", "model": "openrouter/auto"}, "configSecretFiles": {"api_key": "/var/run/secrets/waddle-ai/api_key"}, "capabilityGrants": ["message.enrich", "host.mam.read", "host.members.read", "host.presence.read", "host.roster.read", "host.channels.read", "host.spaces.read", "host.message.send", "outbound.http.request", "commands"], "allowedHttpOrigins": ["https://openrouter.ai"]},
-					    {"name": "decision-polls", "registry": "ghcr.io/waddle-social/waddle/extensions/decision-polls", "digest": strenv(SAMPLE_DIGEST), "namespace": "urn:waddle:decision-polls:1", "config": {}, "capabilityGrants": ["message.enrich", "commands", "launch", "pubsub.publish", "host.message.send", "ui.declarative"]},
-					    {"name": "github", "registry": "ghcr.io/waddle-social/waddle/extensions/github", "digest": strenv(SAMPLE_DIGEST), "namespace": "urn:waddle:web-integration:1", "config": {"admins": ["rawkode@waddle.social"]}, "providerRoomGrants": ["chat@muc.waddle.social"], "capabilityGrants": ["message.enrich", "host.message.send", "commands", "pubsub.publish"]}
-					  ]
+					  .extensions.modules = load(strenv(MODULES_YAML))
 					' "${published_values}"
+					cue vet . "${published_values}" -d '#PublishedValues' \
+					  -t serverImageDigest="${sample_digest}" \
+					  -t linkBoardDigest="${sample_digest}" \
+					  -t aiChatbotDigest="${sample_digest}" \
+					  -t decisionPollsDigest="${sample_digest}" \
+					  -t githubDigest="${sample_digest}"
 					helm lint charts/waddle-server -f "${published_values}"
 					helm template waddle-server charts/waddle-server \
 					  --namespace waddle \
@@ -448,30 +442,11 @@ schema.#Project & {
 					esac
 					rendered_git_sha="$(yq -r 'select(.kind == "Deployment") | .spec.template.spec.containers[] | select(.name == "waddle-server") | (.env // [])[] | select(.name == "WADDLE_GIT_SHA") | .value' "${published_render}")"
 					case "${rendered_git_sha}" in
-					  1111111111111111111111111111111111111111) ;;
+					  "${sample_git_sha}") ;;
 					  *) echo "published GitOps render must set WADDLE_GIT_SHA, got: ${rendered_git_sha:-<missing>}" >&2; exit 1 ;;
 					esac
-
-					yq -e '.extensions.enabled == true' "${published_values}" > /dev/null
-					yq -e '.extensions.modules | length == 4' "${published_values}" > /dev/null
-
-					expected_modules="ai-chatbot decision-polls github link-board"
-					actual_modules="$(yq -r '.extensions.modules[].name' "${published_values}" | sort | tr '\n' ' ' | sed 's/ $//')"
-					if [ "${actual_modules}" != "${expected_modules}" ]; then
-					  echo "GitOps extensions.modules must contain exactly: ${expected_modules}; got: ${actual_modules}" >&2
-					  exit 1
-					fi
-
-					for module in link-board ai-chatbot decision-polls github; do
-					  yq -e ".extensions.modules[] | select(.name == \"${module}\") | .registry == \"ghcr.io/waddle-social/waddle/extensions/${module}\"" "${published_values}" > /dev/null
-					  yq -e ".extensions.modules[] | select(.name == \"${module}\") | .digest == \"${sample_digest}\"" "${published_values}" > /dev/null
-					done
-					yq -e '.extensions.modules[] | select(.name == "github") | (.config.admins // []) | length >= 1' "${published_values}" > /dev/null
-					yq -e '.extensions.modules[] | select(.name == "github") | .providerRoomGrants[0] == "chat@muc.waddle.social"' "${published_values}" > /dev/null
-					yq -e '.extensions.modules[] | select(.name == "github") | .capabilityGrants | contains(["host.message.send", "message.enrich", "commands", "pubsub.publish"])' "${published_values}" > /dev/null
-					yq -e '.spec.data[] | select(.secretKey == "WADDLE_PROVIDER_GITHUB_WEBHOOK_SECRET" and .remoteRef.key == "server-runtime-production" and .remoteRef.property == "github-app-webhook-secret")' ../infrastructure/waddle.cloud/gitops/waddle-server/runtime-external-secret.yaml > /dev/null
 				"""#]
-			inputs: list.Concat([_chartInputs, _gitopsWaddleServerInputs])
+			inputs: list.Concat([_chartInputs, _gitopsWaddleServerInputs, _deploymentInputs])
 		}
 
 		buildContainerImage: schema.#Task & {
@@ -593,11 +568,13 @@ schema.#Project & {
 					  "github:github:urn:waddle:web-integration:1"
 					)
 
+					link_board_digest=""
+					ai_chatbot_digest=""
+					decision_polls_digest=""
+					github_digest=""
 					modules_yaml="../target/digests/extensions-modules.yaml"
-					: > "${modules_yaml}"
 					for extension_spec in "${EXTENSIONS[@]}"; do
-					  IFS=: read -r extension_name crate_name namespace_scheme namespace_rest <<< "${extension_spec}"
-					  namespace="${namespace_scheme}:${namespace_rest}"
+					  IFS=: read -r extension_name crate_name _namespace_scheme _namespace_rest <<< "${extension_spec}"
 					  wasm_path="target/wasm32-wasip2/release/${crate_name}.wasm"
 					  extension_ref="ghcr.io/waddle-social/waddle/extensions/${extension_name}:sha-${SHORT_SHA}"
 
@@ -622,67 +599,19 @@ schema.#Project & {
 					    echo "Refusing to pin all-zero digest placeholder for ${extension_name}" >&2
 					    exit 1
 					  fi
-					  {
-					    printf -- '- name: %s\n' "${extension_name}"
-					    printf '  registry: ghcr.io/waddle-social/waddle/extensions/%s\n' "${extension_name}"
-					    printf '  digest: %s\n' "${extension_digest}"
-					    printf '  namespace: %s\n' "${namespace}"
-					    if [ "${extension_name}" = "ai-chatbot" ]; then
-					      printf '  config:\n'
-					      printf '    endpoint: https://openrouter.ai/api/v1/chat/completions\n'
-					      printf '    model: openrouter/free\n'
-					      printf '  configSecretFiles:\n'
-					      printf '    api_key: /var/run/secrets/waddle-ai/api_key\n'
-					      printf '  capabilityGrants:\n'
-					      printf '    - message.enrich\n'
-					      printf '    - host.mam.read\n'
-					      printf '    - host.members.read\n'
-					      printf '    - host.presence.read\n'
-					      printf '    - host.roster.read\n'
-					      printf '    - host.channels.read\n'
-					      printf '    - host.spaces.read\n'
-					      printf '    - host.message.send\n'
-					      printf '    - outbound.http.request\n'
-					      printf '    - commands\n'
-					      printf '  allowedHttpOrigins:\n'
-					      printf '    - https://openrouter.ai\n'
-					    elif [ "${extension_name}" = "github" ]; then
-					      # Routes are admin-managed at runtime via the
-					      # GitHub XEP-0050 route configuration command, which
-					      # writes typed route entries into the extension's PubSub
-					      # routes node and reads them back on every webhook
-					      # delivery via the `pubsub-get-items` host tool. The
-					      # `admins` list below is the operator-set allow-list of
-					      # bare JIDs permitted to run that command;
-					      # `providerRoomGrants` is the operator-set whitelist of
-					      # MUC rooms the extension can post to. Both are
-					      # intentionally NOT user-editable.
-					      printf '  config:\n'
-					      printf '    admins:\n'
-					      printf '      - rawkode@waddle.social\n'
-					      printf '  providerRoomGrants:\n'
-					      printf '    - chat@muc.waddle.social\n'
-					      printf '  capabilityGrants:\n'
-					      printf '    - message.enrich\n'
-					      printf '    - host.message.send\n'
-					      printf '    - commands\n'
-					      printf '    - pubsub.publish\n'
-					    else
-					      printf '  config: {}\n'
-					      printf '  capabilityGrants:\n'
-					      printf '    - message.enrich\n'
-					      if [ "${extension_name}" = "decision-polls" ]; then
-					        printf '    - commands\n'
-					      fi
-					      printf '    - launch\n'
-					      printf '    - pubsub.publish\n'
-					      if [ "${extension_name}" = "decision-polls" ]; then
-					        printf '    - host.message.send\n'
-					      fi
-					      printf '    - ui.declarative\n'
-					    fi
-					  } >> "${modules_yaml}"
+					  case "${extension_name}" in
+					    link-board) link_board_digest="${extension_digest}" ;;
+					    ai-chatbot) ai_chatbot_digest="${extension_digest}" ;;
+					    decision-polls) decision_polls_digest="${extension_digest}" ;;
+					    github) github_digest="${extension_digest}" ;;
+					    *) echo "unknown extension ${extension_name}" >&2; exit 1 ;;
+					  esac
 					done
+					cue export . -e '#PublishedExtensionModules' --out yaml \
+					  -t linkBoardDigest="${link_board_digest:?missing link-board digest}" \
+					  -t aiChatbotDigest="${ai_chatbot_digest:?missing ai-chatbot digest}" \
+					  -t decisionPollsDigest="${decision_polls_digest:?missing decision-polls digest}" \
+					  -t githubDigest="${github_digest:?missing github digest}" > "${modules_yaml}"
 
 					FULL_SHA="${FULL_SHA}" yq -i ".spec.values.image.tag = \"sha-${SHORT_SHA}\" | .spec.values.image.digest = \"${digest}\" | .spec.values.containerExtraEnv = ((.spec.values.containerExtraEnv // []) | map(select(.name != \"WADDLE_GIT_SHA\"))) + [{\"name\": \"WADDLE_GIT_SHA\", \"value\": strenv(FULL_SHA)}] | .spec.values.extensions.enabled = true" ../infrastructure/waddle.cloud/gitops/waddle-server/helmrelease.yaml
 					yq -e ".spec.values.image.tag == \"sha-${SHORT_SHA}\"" ../infrastructure/waddle.cloud/gitops/waddle-server/helmrelease.yaml > /dev/null
@@ -690,10 +619,6 @@ schema.#Project & {
 					yq -e ".spec.values.containerExtraEnv[] | select(.name == \"WADDLE_GIT_SHA\") | .value == \"${FULL_SHA}\"" ../infrastructure/waddle.cloud/gitops/waddle-server/helmrelease.yaml > /dev/null
 					yq -i ".spec.values.extensions.modules = load(\"${modules_yaml}\")" ../infrastructure/waddle.cloud/gitops/waddle-server/helmrelease.yaml
 					yq -e ".spec.values.extensions.enabled == true" ../infrastructure/waddle.cloud/gitops/waddle-server/helmrelease.yaml > /dev/null
-					yq -e ".spec.values.extensions.modules | length == 4" ../infrastructure/waddle.cloud/gitops/waddle-server/helmrelease.yaml > /dev/null
-					yq -e '.spec.values.extensions.modules[] | select(.name == "github") | (.config.admins // []) | length >= 1' ../infrastructure/waddle.cloud/gitops/waddle-server/helmrelease.yaml > /dev/null
-					yq -e '.spec.values.extensions.modules[] | select(.name == "github") | .providerRoomGrants[0] == "chat@muc.waddle.social"' ../infrastructure/waddle.cloud/gitops/waddle-server/helmrelease.yaml > /dev/null
-					yq -e '.spec.values.extensions.modules[] | select(.name == "github") | .capabilityGrants | contains(["host.message.send", "message.enrich", "commands", "pubsub.publish"])' ../infrastructure/waddle.cloud/gitops/waddle-server/helmrelease.yaml > /dev/null
 					if grep -R "${placeholder_digest}" ../infrastructure/waddle.cloud/gitops/waddle-server; then
 					  echo "refusing to publish GitOps with all-zero digest placeholders" >&2
 					  exit 1
@@ -702,9 +627,15 @@ schema.#Project & {
 					  echo "refusing to publish GitOps with github-enricher" >&2
 					  exit 1
 					fi
-					gitops_values="$(mktemp)"
+					gitops_values="$(mktemp).yaml"
 					gitops_render="$(mktemp)"
 					yq -o=yaml '.spec.values' ../infrastructure/waddle.cloud/gitops/waddle-server/helmrelease.yaml > "${gitops_values}"
+					cue vet . "${gitops_values}" -d '#PublishedValues' \
+					  -t serverImageDigest="${digest}" \
+					  -t linkBoardDigest="${link_board_digest}" \
+					  -t aiChatbotDigest="${ai_chatbot_digest}" \
+					  -t decisionPollsDigest="${decision_polls_digest}" \
+					  -t githubDigest="${github_digest}"
 					helm template waddle-server charts/waddle-server \
 					  --namespace waddle \
 					  -f "${gitops_values}" > "${gitops_render}"
@@ -723,7 +654,7 @@ schema.#Project & {
 					  --source="$(git config --get remote.origin.url)" \
 					  --revision="${SHORT_SHA}"
 				"""#]
-			inputs: list.Concat([_nixInputs, _chartInputs, _gitopsWaddleServerInputs])
+			inputs: list.Concat([_nixInputs, _chartInputs, _gitopsWaddleServerInputs, _deploymentInputs])
 			outputs: ["target/digests/**"]
 			dependsOn: [tasks.fmt, tasks.clippy, tasks.test, tasks.renderDeployment, tasks.buildExtensionModules]
 		}

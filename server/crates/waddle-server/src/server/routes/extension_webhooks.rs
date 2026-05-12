@@ -21,6 +21,7 @@ use waddle_extensions::{
 
 use crate::{db::actor::DbExecute, db_params};
 
+use super::super::extension_commands::pubsub::publish_extension_pubsub;
 use super::websocket::WebSocketState;
 
 type HmacSha256 = Hmac<Sha256>;
@@ -362,20 +363,62 @@ async fn dispatch_provider_delivery(
         .extension_manager
         .invoke_provider_webhook(plugin.as_str(), event)
         .await;
-    let (status, error_text) = if webhook_effects_failed(&effects) {
-        (
-            "failed",
-            Some("extension provider webhook returned a host warning"),
-        )
+    let mut error_text = if webhook_effects_failed(&effects) {
+        Some("extension provider webhook returned a host warning".to_string())
     } else {
-        ("processed", None)
+        None
+    };
+    let owner = match websocket_state.deps.service_domains.extensions.parse() {
+        Ok(owner) => owner,
+        Err(error) => {
+            error_text = Some(format!("invalid extension PubSub owner JID: {error}"));
+            if let Err(error) = mark_provider_delivery(
+                &websocket_state,
+                provider.as_str(),
+                delivery_id.as_str(),
+                "failed",
+                error_text.as_deref(),
+            )
+            .await
+            {
+                error!(
+                    provider = %provider,
+                    delivery_id = %delivery_id,
+                    error = %error,
+                    "failed to update provider webhook delivery ledger"
+                );
+            }
+            return;
+        }
+    };
+    if let Err(error) = publish_provider_pubsub_effects(
+        websocket_state.deps.protocol.pubsub_storage.as_ref(),
+        &owner,
+        &effects,
+    )
+    .await
+    {
+        error!(
+            provider = %provider,
+            delivery_id = %delivery_id,
+            error = %error,
+            "failed to apply provider webhook PubSub effects"
+        );
+        error_text = Some(format!(
+            "extension provider webhook PubSub effect failed: {error}"
+        ));
+    }
+    let status = if error_text.is_some() {
+        "failed"
+    } else {
+        "processed"
     };
     if let Err(error) = mark_provider_delivery(
         &websocket_state,
         provider.as_str(),
         delivery_id.as_str(),
         status,
-        error_text,
+        error_text.as_deref(),
     )
     .await
     {
@@ -386,6 +429,28 @@ async fn dispatch_provider_delivery(
             "failed to update provider webhook delivery ledger"
         );
     }
+}
+
+async fn publish_provider_pubsub_effects(
+    storage: &dyn waddle_xmpp::pubsub::PubSubStorage,
+    owner: &jid::BareJid,
+    effects: &[ExtensionEffect],
+) -> Result<usize, String> {
+    let mut published = 0;
+    for effect in effects {
+        if let ExtensionEffect::PublishPubSub(publish) = effect {
+            publish_extension_pubsub(storage, owner, publish.clone())
+                .await
+                .map_err(|error| {
+                    format!(
+                        "failed to publish extension PubSub item to {}: {error}",
+                        publish.node
+                    )
+                })?;
+            published += 1;
+        }
+    }
+    Ok(published)
 }
 
 async fn record_provider_delivery(
@@ -675,6 +740,46 @@ mod tests {
 
         assert!(webhook_effects_failed(&[warning]));
         assert!(!webhook_effects_failed(&[ExtensionEffect::Noop]));
+    }
+
+    #[tokio::test]
+    async fn provider_pubsub_effects_are_persisted() {
+        use waddle_extensions::{
+            ExtensionPayload, PayloadNamespace, PubSubItemId, PubSubNode, PubSubPublish, XmlElement,
+        };
+        use waddle_xmpp::pubsub::{InMemoryPubSubStorage, PubSubStorage};
+
+        let storage = InMemoryPubSubStorage::new();
+        let owner: jid::BareJid = "extensions.waddle.social".parse().expect("owner JID");
+        let namespace =
+            PayloadNamespace::new("urn:waddle:test-extension:1").expect("payload namespace");
+        let payload = ExtensionPayload::new(
+            namespace.clone(),
+            XmlElement::new(namespace, "route", vec![], vec![]).expect("payload root"),
+        )
+        .expect("payload");
+        let node = PubSubNode::new("urn:waddle:test-extension:1:routes").expect("node");
+        let item_id = PubSubItemId::new("100").expect("item id");
+        let effects = vec![ExtensionEffect::PublishPubSub(PubSubPublish {
+            node: node.clone(),
+            item_id: Some(item_id.clone()),
+            payload,
+        })];
+
+        let published = publish_provider_pubsub_effects(&storage, &owner, &effects)
+            .await
+            .expect("pubsub effects persisted");
+
+        assert_eq!(published, 1);
+        let items = storage
+            .get_items(&owner, node.as_str(), None, &[item_id.into_string()])
+            .await
+            .expect("stored items");
+        assert_eq!(items.len(), 1);
+        let item = items[0].to_pubsub_item();
+        let payload = item.payload.as_ref().expect("stored payload");
+        assert_eq!(payload.name(), "route");
+        assert_eq!(payload.ns(), "urn:waddle:test-extension:1");
     }
 
     #[test]

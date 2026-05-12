@@ -41,6 +41,8 @@ const ATTR_REPOSITORY_ID: &str = "repository-id";
 const ATTR_CHANNEL: &str = "channel";
 const ATTR_EVENTS: &str = "events";
 const ATTR_INSTALLATION_ID: &str = "installation-id";
+const LEGACY_ALERT_ROOM: &str = "chat@muc.waddle.social";
+const GITHUB_ACTIONS_ALERT_ROOM: &str = "github-actions@muc.waddle.social";
 
 impl exports::waddle::extension::lifecycle::Guest for GitHub {
     fn init(config: String) -> Result<types::ExtensionManifest, String> {
@@ -136,16 +138,24 @@ fn handle_provider_webhook(
     if matching.is_empty() {
         return Ok(vec![]);
     }
+    let mut effects = vec![];
     for route in matching {
+        let route = migrate_route(route);
+        if route.migrated {
+            effects.push(types::ExtensionEffect::PublishPubsub(
+                route.current.to_publish_effect(),
+            ));
+        }
         send_room_message(
             &types::RoomJid {
-                value: route.channel.clone(),
+                value: route.current.channel.clone(),
             },
             display(alert.body.as_str()),
             Some(github_envelope(&webhook, &payload, &alert)),
         )?;
     }
-    Ok(vec![types::ExtensionEffect::Noop])
+    effects.push(types::ExtensionEffect::Noop);
+    Ok(effects)
 }
 
 fn alert_for_payload(payload: &GitHubPayload) -> Option<GitHubAlert> {
@@ -494,6 +504,18 @@ impl Route {
         }
     }
 
+    fn to_publish_effect(&self) -> types::PubsubPublish {
+        types::PubsubPublish {
+            node: types::PubsubNode {
+                value: ROUTES_NODE.to_string(),
+            },
+            item_id: Some(types::PubsubItemId {
+                value: self.repository_id.clone(),
+            }),
+            payload: self.to_payload(),
+        }
+    }
+
     fn from_payload(payload: &types::ExtensionPayload) -> Option<Self> {
         if payload.root.namespace.value != PLUGIN_NS || payload.root.local_name != ROUTE_ELEMENT {
             return None;
@@ -523,6 +545,27 @@ impl Route {
             events,
             installation_id,
         })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MigratedRoute {
+    current: Route,
+    migrated: bool,
+}
+
+fn migrate_route(route: &Route) -> MigratedRoute {
+    if route.channel == LEGACY_ALERT_ROOM {
+        let mut current = route.clone();
+        current.channel = GITHUB_ACTIONS_ALERT_ROOM.to_string();
+        return MigratedRoute {
+            current,
+            migrated: true,
+        };
+    }
+    MigratedRoute {
+        current: route.clone(),
+        migrated: false,
     }
 }
 
@@ -585,17 +628,9 @@ fn handle_command(
         )]);
     }
     require_form_type(&command.fields, CONFIGURE_ROUTE_FORM_TYPE)?;
-    let route = build_route_from_fields(&command.fields)?;
+    let route = migrate_route(&build_route_from_fields(&command.fields)?).current;
     Ok(vec![types::ExtensionEffect::PublishPubsub(
-        types::PubsubPublish {
-            node: types::PubsubNode {
-                value: ROUTES_NODE.to_string(),
-            },
-            item_id: Some(types::PubsubItemId {
-                value: route.repository_id.clone(),
-            }),
-            payload: route.to_payload(),
-        },
+        route.to_publish_effect(),
     )])
 }
 

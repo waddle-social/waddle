@@ -363,6 +363,45 @@ fn provider_webhook_sends_to_route_loaded_from_pubsub() {
 }
 
 #[test]
+fn provider_webhook_migrates_legacy_chat_route_to_github_actions() {
+    let _guard = test_lock().lock().expect("test lock");
+    test_state::reset();
+    test_state::set_route_fixtures(vec![sample_route("100", "chat@muc.waddle.social")]);
+
+    let effects = handle_provider_webhook(sample_webhook("failure")).expect("handled");
+
+    assert_eq!(effects.len(), 2);
+    match &effects[0] {
+        types::ExtensionEffect::PublishPubsub(publish) => {
+            assert_eq!(publish.node.value, ROUTES_NODE);
+            assert_eq!(publish.item_id.as_ref().expect("item id").value, "100");
+            let attrs = match &publish.payload.tokens[0] {
+                types::XmlToken::StartElement(element) => &element.attributes,
+                _ => panic!("expected start element"),
+            };
+            assert_eq!(find_attr(attrs, ATTR_REPOSITORY_ID), Some("100"));
+            assert_eq!(
+                find_attr(attrs, ATTR_CHANNEL),
+                Some("github-actions@muc.waddle.social")
+            );
+        }
+        other => panic!("expected PublishPubsub migration, got {other:?}"),
+    }
+    assert!(matches!(effects[1], types::ExtensionEffect::Noop));
+
+    let messages = test_state::sent_room_messages()
+        .lock()
+        .expect("messages lock");
+    assert_eq!(messages.len(), 1);
+    match &messages[0].target {
+        types::MessageTarget::Muc(room) => {
+            assert_eq!(room.value, "github-actions@muc.waddle.social")
+        }
+        types::MessageTarget::Direct(_) => panic!("expected room message"),
+    }
+}
+
+#[test]
 fn provider_webhook_ignores_non_matching_repository() {
     let _guard = test_lock().lock().expect("test lock");
     test_state::reset();
@@ -438,7 +477,7 @@ fn configure_route_command_writes_publish_effect_on_submit() {
         vec![
             form_field(FIELD_FORM_TYPE, &[CONFIGURE_ROUTE_FORM_TYPE]),
             form_field(FIELD_REPOSITORY_ID, &["1009269194"]),
-            form_field(FIELD_CHANNEL, &["chat@muc.waddle.social"]),
+            form_field(FIELD_CHANNEL, &["github-actions@muc.waddle.social"]),
             form_field(FIELD_EVENTS, &["workflow_run", "check_run"]),
         ],
     );
@@ -461,7 +500,7 @@ fn configure_route_command_writes_publish_effect_on_submit() {
             assert_eq!(find_attr(attrs, ATTR_REPOSITORY_ID), Some("1009269194"));
             assert_eq!(
                 find_attr(attrs, ATTR_CHANNEL),
-                Some("chat@muc.waddle.social")
+                Some("github-actions@muc.waddle.social")
             );
             assert_eq!(
                 find_attr(attrs, ATTR_EVENTS),
@@ -486,7 +525,7 @@ fn configure_route_command_rejects_non_admin() {
         vec![
             form_field(FIELD_FORM_TYPE, &[CONFIGURE_ROUTE_FORM_TYPE]),
             form_field(FIELD_REPOSITORY_ID, &["1009269194"]),
-            form_field(FIELD_CHANNEL, &["chat@muc.waddle.social"]),
+            form_field(FIELD_CHANNEL, &["github-actions@muc.waddle.social"]),
             form_field(FIELD_EVENTS, &["workflow_run"]),
         ],
     );
@@ -507,7 +546,7 @@ fn configure_route_command_rejects_missing_form_type_on_submit() {
         "rawkode@waddle.social/abc",
         vec![
             form_field(FIELD_REPOSITORY_ID, &["1009269194"]),
-            form_field(FIELD_CHANNEL, &["chat@muc.waddle.social"]),
+            form_field(FIELD_CHANNEL, &["github-actions@muc.waddle.social"]),
             form_field(FIELD_EVENTS, &["workflow_run"]),
         ],
     );
@@ -533,7 +572,7 @@ fn configure_route_command_rejects_wrong_form_type_on_submit() {
                 &["urn:waddle:web-integration:1:github:other"],
             ),
             form_field(FIELD_REPOSITORY_ID, &["1009269194"]),
-            form_field(FIELD_CHANNEL, &["chat@muc.waddle.social"]),
+            form_field(FIELD_CHANNEL, &["github-actions@muc.waddle.social"]),
             form_field(FIELD_EVENTS, &["workflow_run"]),
         ],
     );
@@ -556,7 +595,7 @@ fn configure_route_command_rejects_non_numeric_repository_id() {
         vec![
             form_field(FIELD_FORM_TYPE, &[CONFIGURE_ROUTE_FORM_TYPE]),
             form_field(FIELD_REPOSITORY_ID, &["not-a-number"]),
-            form_field(FIELD_CHANNEL, &["chat@muc.waddle.social"]),
+            form_field(FIELD_CHANNEL, &["github-actions@muc.waddle.social"]),
             form_field(FIELD_EVENTS, &["workflow_run"]),
         ],
     );
@@ -569,7 +608,7 @@ fn configure_route_command_rejects_non_numeric_repository_id() {
 fn route_payload_round_trip() {
     let original = Route {
         repository_id: "1009269194".to_string(),
-        channel: "chat@muc.waddle.social".to_string(),
+        channel: "github-actions@muc.waddle.social".to_string(),
         events: vec!["workflow_run".to_string(), "check_run".to_string()],
         installation_id: Some("42".to_string()),
     };

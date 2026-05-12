@@ -87,6 +87,21 @@ async fn extension_pubsub_permission_allows_bootstrap_chat_member() {
         })
         .await
         .expect("server owner tuple");
+    let admin_subject = Subject::user("user-admin");
+    state
+        .permission_actor
+        .ask(WriteTuple {
+            tuple: Tuple::new(
+                Object::new(
+                    ObjectType::Server,
+                    bootstrap_membership::DEPLOYMENT_SERVER_ID,
+                ),
+                Relation::new("admin"),
+                admin_subject.clone(),
+            ),
+        })
+        .await
+        .expect("server admin tuple");
 
     assert!(
         extension_commands::pubsub::managed_channel_permission_allowed(
@@ -98,6 +113,39 @@ async fn extension_pubsub_permission_allows_bootstrap_chat_member() {
         .await
         .expect("chat permission check"),
         "default chat extension publishes should inherit deployment membership"
+    );
+    assert!(
+        extension_commands::pubsub::managed_channel_permission_allowed(
+            &state,
+            &subject,
+            "github-actions",
+            Permission::SendMessage,
+        )
+        .await
+        .expect("github-actions permission check"),
+        "github actions alerts should inherit deployment membership"
+    );
+    assert!(
+        extension_commands::pubsub::managed_channel_permission_allowed(
+            &state,
+            &owner_subject,
+            "github-actions",
+            Permission::View,
+        )
+        .await
+        .expect("owner github-actions permission check"),
+        "github actions alerts policy must include deployment owners"
+    );
+    assert!(
+        extension_commands::pubsub::managed_channel_permission_allowed(
+            &state,
+            &admin_subject,
+            "github-actions",
+            Permission::Read,
+        )
+        .await
+        .expect("admin github-actions permission check"),
+        "github actions alerts policy must include deployment admins"
     );
     assert!(
         extension_commands::pubsub::managed_channel_permission_allowed(
