@@ -1,6 +1,5 @@
 import type { LiveRoomMessage } from "@/lib/xmpp-client";
 import type { MarkupSpan, MessageReference } from "@/lib/chat-ui";
-import { mucCorrectionSender } from "@/channels/message-timeline-state";
 
 // Typed-dispatch classifier for the channel-side omnibus inbound message
 // handler. The wasm client currently exposes a single `setMessageHandler`
@@ -8,6 +7,11 @@ import { mucCorrectionSender } from "@/channels/message-timeline-state";
 // XEP-0308 correction, XEP-0424 retraction, XEP-0425 moderator retract);
 // the pre-refactor code branched on `msg.replacesId` / `msg.retractsId`
 // inside the handler body.
+//
+// Reaction (XEP-0444) and displayed (XEP-0333) events arrive on their own
+// typed handlers (`setReactionHandler` / `setDisplayedHandler`) — they
+// never flow through `setMessageHandler` and so are deliberately excluded
+// from this classifier's union.
 //
 // This classifier lifts the branch into a pure helper so `useLiveMerge`
 // can switch on a tagged union instead of sniffing stanza properties. The
@@ -19,6 +23,21 @@ import { mucCorrectionSender } from "@/channels/message-timeline-state";
 // migrating `BrowserXmppClient` itself to emit typed events
 // (`onRoomRetraction`, `onRoomReaction`, etc.) so the classifier becomes
 // redundant and the channel side ends up as typed as the DM side already is.
+
+// Inline trivial helper — pre-refactor this lived in
+// channels/message-timeline-state, but importing UI-layer modules from
+// lib/xmpp violates the dependency direction. The computation is four
+// lines of pure stanza shaping; lifting it here keeps the protocol layer
+// independent of channels/*.
+function mucCorrectionSender(msg: Pick<LiveRoomMessage, "roomJid" | "nick" | "authorRealJid">): {
+  authorJid: string;
+  authorRealJid?: string;
+} {
+  return {
+    authorJid: `${msg.roomJid}/${msg.nick}`,
+    ...(msg.authorRealJid ? { authorRealJid: msg.authorRealJid } : {}),
+  };
+}
 
 type ClassifiedRoomMessage =
   | {
