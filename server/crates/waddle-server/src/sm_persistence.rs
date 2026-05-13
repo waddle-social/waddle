@@ -46,12 +46,12 @@ type StreamLockMap = dashmap::DashMap<SmSessionId, Arc<tokio::sync::Mutex<()>>>;
 ///     stream_id TEXT PRIMARY KEY,
 ///     user_id TEXT NOT NULL,
 ///     full_jid TEXT NOT NULL,
-///     inbound_count INTEGER NOT NULL,
-///     outbound_count INTEGER NOT NULL,
-///     last_acked INTEGER NOT NULL,
-///     max_resume_secs INTEGER,
-///     detached_at_ms INTEGER NOT NULL,
-///     max_resume_duration_ms INTEGER NOT NULL,
+///     inbound_count BIGINT NOT NULL,
+///     outbound_count BIGINT NOT NULL,
+///     last_acked BIGINT NOT NULL,
+///     max_resume_secs BIGINT,
+///     detached_at_ms BIGINT NOT NULL,
+///     max_resume_duration_ms BIGINT NOT NULL,
 ///     carbons_enabled INTEGER NOT NULL,
 ///     roster_interested INTEGER NOT NULL,
 ///     presence_available INTEGER NOT NULL,
@@ -62,9 +62,9 @@ type StreamLockMap = dashmap::DashMap<SmSessionId, Arc<tokio::sync::Mutex<()>>>;
 ///
 /// CREATE TABLE sm_unacked (
 ///     stream_id TEXT NOT NULL,
-///     sequence INTEGER NOT NULL,
+///     sequence BIGINT NOT NULL,
 ///     stanza_xml TEXT NOT NULL,
-///     original_receipt_at_ms INTEGER NOT NULL,
+///     original_receipt_at_ms BIGINT NOT NULL,
 ///     PRIMARY KEY (stream_id, sequence)
 /// );
 /// ```

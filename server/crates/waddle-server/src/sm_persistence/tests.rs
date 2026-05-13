@@ -489,3 +489,62 @@ async fn list_all_sessions_with_unacked_skips_poison_pill_unacked_rows() {
         .map(|(_, u)| u);
     assert_eq!(beta_unacked.map(Vec::len), Some(0));
 }
+
+/// Regression for #456: existing Postgres SM tables created before
+/// the driver-aware BIGINT selector must be widened online. The test
+/// exercises both session timestamp fields and unacked receipt
+/// timestamps with values that do not fit in Postgres int4.
+#[tokio::test]
+async fn postgres_handles_i32_overflow_session_and_unacked_timestamps_ms() {
+    let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+        eprintln!(
+            "skipping: WADDLE_TEST_POSTGRES_URL not set \
+             (postgres-backed regression for sm persistence BIGINT)"
+        );
+        return;
+    };
+
+    let storage = DatabaseSmPersistence::open(Some(&database_url))
+        .await
+        .expect("open postgres sm persistence");
+    let stream_id = format!("postgres-bigint-{}", uuid::Uuid::new_v4());
+    let receipt_ms: i64 = 1_778_000_000_000;
+    assert!(
+        receipt_ms > i64::from(i32::MAX),
+        "test value must exceed Postgres int4 range"
+    );
+    let receipt_at =
+        DateTime::<Utc>::from_timestamp_millis(receipt_ms).expect("valid receipt timestamp");
+
+    let mut session = fixture_session(&stream_id);
+    session.detached_at = receipt_at;
+    storage
+        .upsert_session(session.clone())
+        .await
+        .expect("BIGINT sm_sessions timestamps accept values past i32::MAX");
+    let loaded = storage
+        .get_session(&session.stream_id)
+        .await
+        .expect("load postgres sm session")
+        .expect("postgres sm session row");
+    assert_eq!(loaded.detached_at, receipt_at);
+
+    let mut unacked = fixture_unacked(&stream_id, 1);
+    unacked.original_receipt_at = receipt_at;
+    storage
+        .append_unacked(unacked)
+        .await
+        .expect("BIGINT sm_unacked original_receipt_at_ms accepts values past i32::MAX");
+
+    let listed = storage
+        .list_unacked(&SmSessionId::new(&stream_id))
+        .await
+        .expect("list postgres unacked stanzas");
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].original_receipt_at, receipt_at);
+
+    storage
+        .delete_session(&SmSessionId::new(&stream_id))
+        .await
+        .expect("cleanup postgres sm rows");
+}

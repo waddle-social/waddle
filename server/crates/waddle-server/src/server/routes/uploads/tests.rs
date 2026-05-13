@@ -77,6 +77,25 @@ async fn create_expired_slot(state: &UploadState, slot_id: &str) {
         .unwrap();
 }
 
+#[test]
+fn upload_size_to_i64_rejects_values_outside_database_range() {
+    assert_eq!(upload_size_to_i64(i64::MAX as u64), Some(i64::MAX));
+    assert_eq!(upload_size_to_i64(i64::MAX as u64 + 1), None);
+}
+
+#[test]
+fn max_upload_size_is_capped_to_database_range() {
+    let configured = (i64::MAX as u64).saturating_add(1).to_string();
+    assert_eq!(
+        max_upload_size_from_env_value(Some(&configured)),
+        MAX_DATABASE_UPLOAD_SIZE
+    );
+    assert_eq!(
+        max_upload_size_from_env_value(Some("not-a-number")),
+        DEFAULT_MAX_UPLOAD_SIZE
+    );
+}
+
 #[tokio::test]
 async fn test_upload_to_valid_slot() {
     let (state, upload_dir) = create_test_upload_state().await;

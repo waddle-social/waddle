@@ -299,18 +299,25 @@ pub(super) async fn handle_archive_inbox_upload_iq(
                 }
             };
 
-            // Check file size limits (default 10 MB)
-            let max_size: u64 = std::env::var("WADDLE_MAX_UPLOAD_SIZE")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(10 * 1024 * 1024);
-
+            // Check file size limits (default 10 MB). The helper also
+            // caps operator configuration to the database BIGINT range
+            // so accepted XEP-0363 sizes are stored losslessly.
+            let max_size = crate::server::routes::uploads::max_upload_size();
             if request.size > max_size {
                 return vec![build_upload_error(
                     id,
                     &UploadError::FileTooLarge { max_size },
                 )];
             }
+            let Some(size_bytes) = crate::server::routes::uploads::upload_size_to_i64(request.size)
+            else {
+                return vec![build_upload_error(
+                    id,
+                    &UploadError::FileTooLarge {
+                        max_size: crate::server::routes::uploads::MAX_DATABASE_UPLOAD_SIZE,
+                    },
+                )];
+            };
 
             let safe_filename = sanitize_filename(&request.filename);
             let content_type = effective_content_type(request.content_type.as_deref()).to_string();
@@ -335,7 +342,7 @@ pub(super) async fn handle_archive_inbox_upload_iq(
                         slot_id.clone().into(),
                         sender_jid.to_bare().to_string().into(),
                         safe_filename.clone().into(),
-                        (request.size as i64).into(),
+                        size_bytes.into(),
                         content_type.clone().into(),
                         expires_at.into(),
                     ],

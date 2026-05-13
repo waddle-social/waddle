@@ -22,7 +22,7 @@ pub(crate) async fn create_upload_slot(
         "Creating upload slot"
     );
 
-    let max_size = max_upload_size();
+    let max_size = crate::server::routes::uploads::max_upload_size();
     if size > max_size {
         warn!(
             jid = %requester_jid,
@@ -35,6 +35,12 @@ pub(crate) async fn create_upload_slot(
             max_size
         ))));
     }
+    let size_bytes = crate::server::routes::uploads::upload_size_to_i64(size).ok_or_else(|| {
+        XmppError::not_acceptable(Some(format!(
+            "File too large. Maximum size is {} bytes.",
+            crate::server::routes::uploads::MAX_DATABASE_UPLOAD_SIZE
+        )))
+    })?;
 
     let safe_filename = sanitize_filename(filename);
     let effective_type = effective_content_type(content_type).to_string();
@@ -51,7 +57,7 @@ pub(crate) async fn create_upload_slot(
                 Value::from(slot_id.clone()),
                 Value::from(requester_jid.to_string()),
                 Value::from(safe_filename),
-                Value::from(size as i64),
+                Value::from(size_bytes),
                 Value::from(effective_type.clone()),
                 Value::from(expires_at.to_rfc3339()),
             ],
@@ -74,13 +80,6 @@ pub(crate) async fn create_upload_slot(
         get_url,
         put_headers: vec![("Content-Type".to_string(), effective_type)],
     })
-}
-
-pub(crate) fn max_upload_size() -> u64 {
-    std::env::var("WADDLE_MAX_UPLOAD_SIZE")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(10 * 1024 * 1024)
 }
 
 fn upload_base_url(domain: &str) -> String {

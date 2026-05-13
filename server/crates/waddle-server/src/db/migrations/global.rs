@@ -273,7 +273,7 @@ CREATE TABLE upload_slots (
     id TEXT PRIMARY KEY,
     requester_jid TEXT NOT NULL,
     filename TEXT NOT NULL,
-    size_bytes INTEGER NOT NULL,
+    size_bytes BIGINT NOT NULL,
     content_type TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'pending',
     storage_key TEXT,
@@ -459,6 +459,19 @@ CREATE INDEX idx_provider_webhook_deliveries_status
     ON provider_webhook_deliveries(status, attempts, created_at);
 "#;
 
+/// Widen XEP-0363 upload slot sizes for Postgres. The request size is
+/// accepted as `u64`, bounded by `WADDLE_MAX_UPLOAD_SIZE`, and then
+/// stored as an `i64`; Postgres `INTEGER` would reject configured
+/// maxima above int4 even though the Rust boundary accepts them.
+pub const V0006_UPLOAD_SIZES_BIGINT: &str = r#"
+SELECT 1;
+"#;
+
+pub const V0006_UPLOAD_SIZES_BIGINT_POSTGRES: &str = r#"
+ALTER TABLE upload_slots
+ALTER COLUMN size_bytes TYPE BIGINT;
+"#;
+
 /// Get all global migrations in order
 pub fn all() -> Vec<Migration> {
     vec![
@@ -494,6 +507,12 @@ pub fn all() -> Vec<Migration> {
             description: "Provider webhook delivery ledger".to_string(),
             sql_sqlite: V0005_PROVIDER_WEBHOOK_DELIVERY_LEDGER,
             sql_postgres: V0005_PROVIDER_WEBHOOK_DELIVERY_LEDGER_POSTGRES,
+        },
+        Migration {
+            version: 6,
+            description: "Widen upload slot sizes to bigint on Postgres".to_string(),
+            sql_sqlite: V0006_UPLOAD_SIZES_BIGINT,
+            sql_postgres: V0006_UPLOAD_SIZES_BIGINT_POSTGRES,
         },
     ]
 }

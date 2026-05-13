@@ -232,6 +232,29 @@
               cp -R ${./server/charts} "$sourceRoot/charts"
             '';
           };
+          serverPostgresTestArgs = serverTestArgs // {
+            nativeBuildInputs = serverTestArgs.nativeBuildInputs ++ [
+              pkgs.postgresql
+            ];
+            preCheck = ''
+              export PGDATA="$TMPDIR/postgres-data"
+              export PGHOST="$TMPDIR/postgres-socket"
+              export PGPORT=55432
+              mkdir -p "$PGHOST"
+
+              cleanup_waddle_test_postgres() {
+                if [ -n "''${PGDATA:-}" ] && [ -d "$PGDATA" ]; then
+                  pg_ctl -D "$PGDATA" -m fast -w stop || true
+                fi
+              }
+              trap cleanup_waddle_test_postgres EXIT
+
+              initdb -D "$PGDATA" -U waddle_test -A trust --no-locale --encoding=UTF8
+              pg_ctl -D "$PGDATA" -o "-k $PGHOST -p $PGPORT -c listen_addresses=" -w start
+              createdb -h "$PGHOST" -p "$PGPORT" -U waddle_test waddle_test
+              export WADDLE_TEST_POSTGRES_URL="postgresql:///waddle_test?user=waddle_test&host=$PGHOST&port=$PGPORT"
+            '';
+          };
           workspaceArtifacts = craneLib.buildDepsOnly (
             baseArgs
             // {
@@ -306,7 +329,7 @@
             }
           );
           waddle-server-test = craneLib.cargoTest (
-            serverTestArgs
+            serverPostgresTestArgs
             // {
               cargoArtifacts = workspaceAllFeaturesArtifacts;
               cargoExtraArgs = "--locked --workspace --all-features";
@@ -341,7 +364,7 @@
             }
           );
           waddle-server-xmpp-server-tests = craneLib.cargoTest (
-            serverTestArgs
+            serverPostgresTestArgs
             // {
               pname = "waddle-server-xmpp-server-tests";
               cargoArtifacts = serverTestArtifacts;

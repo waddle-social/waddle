@@ -1,6 +1,8 @@
 use super::*;
 
 pub(super) async fn initialize(storage: &DatabaseInboxStorage) -> Result<(), InboxStorageError> {
+    let i64_type = crate::db::i64_sql_type(storage.db.driver());
+
     // Check if the table already exists with the old schema (missing thread_id column).
     let needs_migration = needs_thread_migration(storage).await?;
 
@@ -34,14 +36,15 @@ pub(super) async fn initialize(storage: &DatabaseInboxStorage) -> Result<(), Inb
     } else {
         storage
             .execute(
-                r#"
+                &format!(
+                    r#"
             CREATE TABLE IF NOT EXISTS inbox_entries (
                 user_jid TEXT NOT NULL,
                 partner_jid TEXT NOT NULL,
                 thread_id TEXT NOT NULL DEFAULT '',
                 kind TEXT NOT NULL,
                 last_stanza_id TEXT NOT NULL,
-                last_updated INTEGER NOT NULL,
+                last_updated {i64_type} NOT NULL,
                 unread INTEGER NOT NULL DEFAULT 0,
                 preview TEXT,
                 thread_title TEXT,
@@ -50,10 +53,15 @@ pub(super) async fn initialize(storage: &DatabaseInboxStorage) -> Result<(), Inb
                 PRIMARY KEY (user_jid, partner_jid, thread_id)
             );
             "#,
+                ),
                 (),
             )
             .await?;
     }
+
+    crate::db::widen_postgres_i64_column_to_bigint(&storage.db, "inbox_entries", "last_updated")
+        .await
+        .map_err(|error| InboxStorageError::Other(error.to_string()))?;
 
     storage.execute(
         "CREATE INDEX IF NOT EXISTS idx_inbox_entries_user_updated ON inbox_entries (user_jid, last_updated DESC)",
