@@ -99,9 +99,11 @@ impl SmState {
     }
 
     pub fn from_resume_state(resume_state: &SmResumeState) -> Self {
+        let queue_len = u32::try_from(resume_state.outbound_queue.len()).unwrap_or(u32::MAX);
         Self {
             outbound_count: resume_state.outbound_h(),
             inbound_count: resume_state.inbound_h(),
+            server_h: resume_state.outbound_h().wrapping_sub(queue_len),
             previd: Some(resume_state.previd().to_string()),
             outbound_queue: resume_state.outbound_queue.clone(),
             ..Self::default()
@@ -196,6 +198,13 @@ impl SmState {
         self.outbound_queue
             .iter()
             .map(QueuedOutboundStanza::element_for_fallback_retry)
+            .collect()
+    }
+
+    pub fn unhandled_message_stanza_ids(&self) -> Vec<StanzaId> {
+        self.outbound_queue
+            .iter()
+            .filter_map(|queued| queued.message_stanza_id.clone())
             .collect()
     }
 
@@ -497,6 +506,46 @@ mod tests {
             vec!["last-before-wrap", "first-after-wrap"]
         );
         assert!(state.outbound_queue.is_empty());
+    }
+
+    #[test]
+    fn from_resume_state_restores_prior_server_ack_position() {
+        let mut state = SmState::new();
+        state.start_outbound();
+        state.previd = Some("previous-stream".to_string());
+        for id in 1..=10 {
+            state.record_sent_stanza(
+                &Element::builder("message", "jabber:client")
+                    .attr("id", format!("msg-{id}"))
+                    .build(),
+            );
+        }
+
+        let acked = state.process_ack(8);
+        assert_eq!(acked.len(), 8);
+
+        let resume_state = state.resume_state().expect("resume state");
+        let mut restored = SmState::from_resume_state(&resume_state);
+
+        assert_eq!(restored.server_h, 8);
+        assert!(!restored.handled_count_too_high(9));
+        let acked_after_resume = restored.process_ack(9);
+        assert_eq!(
+            acked_after_resume
+                .iter()
+                .map(|stanza_id| stanza_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["msg-9"]
+        );
+        assert_eq!(
+            restored
+                .outbound_queue
+                .iter()
+                .filter_map(|queued| queued.message_stanza_id.as_ref())
+                .map(|stanza_id| stanza_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["msg-10"]
+        );
     }
 
     #[test]

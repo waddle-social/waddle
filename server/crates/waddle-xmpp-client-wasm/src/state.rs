@@ -170,4 +170,5 @@ pub(crate) struct WasmDriverTask {
     pub(crate) pending_iqs: HashMap<String, oneshot::Sender<DriverResult<Element>>>,
     pub(crate) pending_mam_queries: HashMap<String, PendingMamQuery>,
     pub(crate) deferred_commands: VecDeque<DeferredWasmCommand>,
+    pub(crate) explicit_disconnect: bool,
 }

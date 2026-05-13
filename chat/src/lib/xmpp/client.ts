@@ -130,6 +130,10 @@ type XmppResumeState = {
   outboundH: number;
 };
 
+type XmppResumeStateHandle = {
+  free?: () => void;
+} & Record<PropertyKey, unknown>;
+
 interface OutboundSendResult {
   id: string | null;
   state: "queued" | "sending";
@@ -313,6 +317,31 @@ export class BrowserXmppClient {
     }
   }
 
+  private clearResumeState() {
+    this.resumeState = null;
+    this.setResumeStateHandle(null);
+  }
+
+  private setResumeStateHandle(handle: unknown | null) {
+    if (this.resumeStateHandle && this.resumeStateHandle !== handle) {
+      this.disposeResumeStateHandle(this.resumeStateHandle);
+    }
+    this.resumeStateHandle = handle;
+  }
+
+  private disposeResumeStateHandle(handle: unknown) {
+    const owned = handle as XmppResumeStateHandle;
+    const symbolDispose = typeof Symbol === "function" ? (Symbol as any).dispose : undefined;
+    const dispose = symbolDispose ? (owned as any)[symbolDispose] : undefined;
+    try {
+      if (typeof dispose === "function") {
+        dispose.call(owned);
+      } else if (typeof owned.free === "function") {
+        owned.free.call(owned);
+      }
+    } catch {}
+  }
+
   private scheduleReconnect() {
     if (this.destroying || this.reconnectTimer) return;
     const delay = Math.min(2000 * (2 ** this.reconnectAttempt), 60000);
@@ -341,13 +370,16 @@ export class BrowserXmppClient {
       this.resource,
     );
     if (this.resumeStateHandle && typeof (config as any).with_resume_state_handle === "function") {
-      (config as any).with_resume_state_handle(this.resumeStateHandle);
+      const handle = this.resumeStateHandle;
+      (config as any).with_resume_state_handle(handle);
+      this.clearResumeState();
     } else if (this.resumeState) {
       (config as any).with_resume_state?.(
         this.resumeState.previd,
         this.resumeState.inboundH,
         this.resumeState.outboundH,
       );
+      this.resumeState = null;
     }
     const xmpp = new mod.WaddleClient(config) as unknown as XmppClientInstance;
     this.xmpp = xmpp;
@@ -393,8 +425,7 @@ export class BrowserXmppClient {
   async disconnect() {
     this.destroying = true;
     this.clearReconnectTimer();
-    this.resumeState = null;
-    this.resumeStateHandle = null;
+    this.clearResumeState();
     const xmpp = this.xmpp;
     const roomBefore = this.currentRoom;
     this.stopSelfPing();
@@ -888,8 +919,8 @@ export class BrowserXmppClient {
   private handleDisconnected(xmpp: XmppClientInstance, error?: Error) {
     if (this.xmpp !== xmpp) return;
     this.connected = false; this.stopSelfPing(); this.xmpp = null;
-    if (this.destroying) { this.resumeState = null; this.resumeStateHandle = null; this.emitStatus({ state: "offline", detail: error?.message ?? "Disconnected" }); return; }
-    this.resumeStateHandle = xmpp.get_resume_state_handle?.() ?? null;
+    if (this.destroying) { this.clearResumeState(); this.emitStatus({ state: "offline", detail: error?.message ?? "Disconnected" }); return; }
+    this.setResumeStateHandle(xmpp.get_resume_state_handle?.() ?? null);
     this.resumeState = xmpp.get_resume_state?.() ?? null;
     this.emitStatus({ state: "reconnecting", detail: countQueuedMessages(this.queueScope) > 0 ? "Connection lost — queued messages will send when reconnected" : (error?.message ?? "Connection lost, reconnecting...") });
     if (this.onceConnectFailed) { const fail = this.onceConnectFailed; this.onceConnected = null; this.onceConnectFailed = null; fail(error ?? new Error("XMPP connection failed")); }

@@ -33,6 +33,7 @@ impl WasmDriverTask {
             pending_iqs: HashMap::new(),
             pending_mam_queries: HashMap::new(),
             deferred_commands: VecDeque::new(),
+            explicit_disconnect: false,
         })
     }
 
@@ -156,6 +157,7 @@ impl WasmDriverTask {
                     .await
             }
             Some(WasmCommand::Disconnect { responder }) => {
+                self.explicit_disconnect = true;
                 let result = self
                     .send_transport_message(TransportMessage::Close(StreamClose))
                     .await;
@@ -300,7 +302,6 @@ impl WasmDriverTask {
             return false;
         }
 
-        self.publish_resume_state().await;
         true
     }
 
@@ -321,15 +322,14 @@ impl WasmDriverTask {
                 return Err(ClientError::Disconnected);
             }
         }
-        self.publish_resume_state().await;
         Ok(())
     }
 
-    async fn publish_resume_state(&mut self) {
+    async fn publish_resume_state(&mut self, state: Option<waddle_xmpp_client::SmResumeState>) {
         let _ = self
             .event_tx
             .clone()
-            .send(DriverEvent::ResumeState(self.runtime.resume_state()))
+            .send(DriverEvent::ResumeState(state))
             .await;
     }
 
@@ -472,6 +472,13 @@ impl WasmDriverTask {
     }
 
     async fn finish(&mut self) {
+        let resume_state = if self.explicit_disconnect {
+            None
+        } else {
+            self.runtime.resume_state()
+        };
+        self.publish_resume_state(resume_state).await;
+
         for command in self.deferred_commands.drain(..) {
             match command {
                 DeferredWasmCommand::Stanza { responder, .. } => {

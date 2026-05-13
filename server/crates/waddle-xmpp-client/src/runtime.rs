@@ -9,7 +9,7 @@ use crate::error::{ClientError, ClientResult};
 use crate::event::{ClientEvent, ConnectionEvent, LifecycleEvent};
 use crate::request::{ClientRequest, PendingRequest, RequestTracker, StanzaId};
 use crate::state::{SessionBinding, SessionPhase, SessionSnapshot};
-use crate::stream_management::SmState;
+use crate::stream_management::{SmResumeState, SmState};
 use crate::transport::{StreamClose, StreamOpen, TransportEvent, TransportMessage, TransportState};
 use crate::AuthenticationConfig;
 use minidom::Element;
@@ -37,6 +37,8 @@ pub struct XmppRuntime {
     sm_state: SmState,
     sm_advertised: bool,
     pending_fallback_retries: VecDeque<Element>,
+    fallback_resume_state: Option<SmResumeState>,
+    fallback_retry_writes_in_flight: VecDeque<Element>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -71,6 +73,8 @@ impl XmppRuntime {
             sm_state,
             sm_advertised: false,
             pending_fallback_retries: VecDeque::new(),
+            fallback_resume_state: None,
+            fallback_retry_writes_in_flight: VecDeque::new(),
         })
     }
 
@@ -82,7 +86,14 @@ impl XmppRuntime {
         &self.snapshot
     }
 
-    pub fn resume_state(&self) -> Option<crate::stream_management::SmResumeState> {
+    pub fn resume_state(&self) -> Option<SmResumeState> {
+        if self.fallback_resume_state.is_some()
+            && (!self.pending_fallback_retries.is_empty()
+                || !self.fallback_retry_writes_in_flight.is_empty())
+        {
+            return self.fallback_resume_state.clone();
+        }
+
         self.sm_state.resume_state()
     }
 
@@ -232,6 +243,7 @@ impl XmppRuntime {
         {
             self.sm_state.record_sent_stanza(element);
         }
+        self.mark_fallback_retry_sent(element);
     }
 
     fn handle_stream_open(
@@ -485,9 +497,26 @@ impl XmppRuntime {
 
     pub(super) fn flush_pending_fallback_retries(&mut self, events: &mut Vec<ClientEvent>) {
         while let Some(element) = self.pending_fallback_retries.pop_front() {
+            self.fallback_retry_writes_in_flight
+                .push_back(element.clone());
             events.push(ClientEvent::Connection(ConnectionEvent::OutboundMessage(
                 TransportMessage::Element(element),
             )));
+        }
+    }
+
+    fn mark_fallback_retry_sent(&mut self, element: &Element) {
+        if self
+            .fallback_retry_writes_in_flight
+            .front()
+            .is_some_and(|retry| retry == element)
+        {
+            self.fallback_retry_writes_in_flight.pop_front();
+            if self.pending_fallback_retries.is_empty()
+                && self.fallback_retry_writes_in_flight.is_empty()
+            {
+                self.fallback_resume_state = None;
+            }
         }
     }
 

@@ -95,9 +95,14 @@ impl XmppRuntime {
                 }));
             }
             if resume_failed {
+                let failed = self.sm_state.unhandled_message_stanza_ids();
+                self.fallback_resume_state = self.sm_state.resume_state();
                 self.pending_fallback_retries
                     .extend(self.sm_state.unhandled_stanzas_for_fallback_retry());
                 self.sm_state.previd = None;
+                events.extend(failed.into_iter().map(|stanza_id| {
+                    ClientEvent::MessageDelivery(MessageDeliveryEvent::Failed { stanza_id })
+                }));
             }
             self.sm_state.stop();
             events.push(ClientEvent::Connection(ConnectionEvent::StreamManagement(
