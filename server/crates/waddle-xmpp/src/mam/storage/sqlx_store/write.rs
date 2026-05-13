@@ -1,12 +1,19 @@
 use jid::BareJid;
+use sqlx::postgres::PgRow;
+use sqlx::sqlite::SqliteRow;
 use sqlx::{Postgres, QueryBuilder, Sqlite};
 use tracing::debug;
 use uuid::Uuid;
 use waddle_xmpp_core::mam::{ArchivedMessage, ArchivedRichMessage, ArchivedRichPayload};
 
+use crate::mam::storage::origin_dedup::origin_id_dedup_match;
 use crate::mam::storage::MamStorageError;
 
-use super::decode::{encode_nickname_generation, encode_rich_payload};
+use super::decode::{
+    decode_postgres_message_row, decode_sqlite_message_row, encode_nickname_generation,
+    encode_rich_payload,
+};
+use super::schema::SELECT_COLUMNS;
 use super::MamDatabaseBackend;
 
 pub(super) async fn store_message(
@@ -14,6 +21,12 @@ pub(super) async fn store_message(
     archive_jid: &BareJid,
     message: &ArchivedMessage,
 ) -> Result<String, MamStorageError> {
+    if let Some(existing_archive_id) =
+        find_existing_origin_id_match(backend, archive_jid, message).await?
+    {
+        return Ok(existing_archive_id);
+    }
+
     let archive_id = if message.id.is_empty() {
         Uuid::now_v7().to_string()
     } else {
@@ -103,6 +116,56 @@ pub(super) async fn store_message(
 
     debug!(archive_id = %archive_id, "Message stored in MAM archive");
     Ok(archive_id)
+}
+
+async fn find_existing_origin_id_match(
+    backend: &MamDatabaseBackend,
+    archive_jid: &BareJid,
+    message: &ArchivedMessage,
+) -> Result<Option<String>, MamStorageError> {
+    let Some(origin_id) = message.origin_id.as_ref() else {
+        return Ok(None);
+    };
+    let archive_jid_str = archive_jid.to_string();
+
+    match backend {
+        MamDatabaseBackend::Sqlite(pool) => {
+            let mut builder = QueryBuilder::<Sqlite>::new(format!(
+                "SELECT {SELECT_COLUMNS} FROM mam_messages WHERE room_jid = "
+            ));
+            builder
+                .push_bind(archive_jid_str.as_str())
+                .push(" AND origin_id = ")
+                .push_bind(origin_id.as_str())
+                .push(" ORDER BY timestamp ASC, id ASC");
+            let rows: Vec<SqliteRow> = builder.build().fetch_all(pool).await?;
+            for row in rows {
+                let existing = decode_sqlite_message_row(&row)?;
+                if origin_id_dedup_match(&existing, message) {
+                    return Ok(Some(existing.id));
+                }
+            }
+        }
+        MamDatabaseBackend::Postgres(pool) => {
+            let mut builder = QueryBuilder::<Postgres>::new(format!(
+                "SELECT {SELECT_COLUMNS} FROM mam_messages WHERE room_jid = "
+            ));
+            builder
+                .push_bind(archive_jid_str.as_str())
+                .push(" AND origin_id = ")
+                .push_bind(origin_id.as_str())
+                .push(" ORDER BY timestamp ASC, id ASC");
+            let rows: Vec<PgRow> = builder.build().fetch_all(pool).await?;
+            for row in rows {
+                let existing = decode_postgres_message_row(&row)?;
+                if origin_id_dedup_match(&existing, message) {
+                    return Ok(Some(existing.id));
+                }
+            }
+        }
+    }
+
+    Ok(None)
 }
 
 pub(super) async fn replace_with_tombstone(

@@ -62,6 +62,154 @@ async fn test_store_and_retrieve_message() {
 }
 
 #[tokio::test]
+async fn test_sqlite_deduplicates_origin_id_within_archive_sender_scope() {
+    let storage = create_test_storage().await;
+    assert_deduplicates_origin_id_within_archive_sender_scope(&storage).await;
+}
+
+#[tokio::test]
+async fn test_inmemory_deduplicates_origin_id_within_archive_sender_scope() {
+    let storage = InMemoryMamStorage::new();
+    assert_deduplicates_origin_id_within_archive_sender_scope(&storage).await;
+}
+
+async fn assert_deduplicates_origin_id_within_archive_sender_scope(storage: &dyn MamStorage) {
+    let archive = bare("room@conference.example.com");
+    let archive_jid = jid("room@conference.example.com");
+    let origin_id = waddle_xmpp_core::xep0359::OriginId::new("client-origin-1");
+
+    let first = ArchivedMessage {
+        id: "archive-first".to_string(),
+        body: Some("first copy".to_string()),
+        origin_id: Some(origin_id.clone()),
+        message_type: xmpp_parsers::message::MessageType::Groupchat,
+        nickname_generation: Some(7),
+        ..ArchivedMessage::for_test(archive_alice(&archive), archive_jid.clone())
+    };
+    let retry = ArchivedMessage {
+        id: "archive-retry".to_string(),
+        body: Some("retry copy".to_string()),
+        origin_id: Some(origin_id.clone()),
+        message_type: xmpp_parsers::message::MessageType::Groupchat,
+        nickname_generation: Some(7),
+        ..ArchivedMessage::for_test(archive_alice(&archive), archive_jid.clone())
+    };
+    let other_sender = ArchivedMessage {
+        id: "archive-other-sender".to_string(),
+        body: Some("other sender".to_string()),
+        origin_id: Some(origin_id.clone()),
+        message_type: xmpp_parsers::message::MessageType::Groupchat,
+        nickname_generation: Some(7),
+        ..ArchivedMessage::for_test(jid("room@conference.example.com/bob"), archive_jid.clone())
+    };
+    let same_nick_next_generation = ArchivedMessage {
+        id: "archive-next-generation".to_string(),
+        body: Some("same nick next generation".to_string()),
+        origin_id: Some(origin_id),
+        message_type: xmpp_parsers::message::MessageType::Groupchat,
+        nickname_generation: Some(8),
+        ..ArchivedMessage::for_test(archive_alice(&archive), archive_jid)
+    };
+
+    let first_id = storage.store_message(&archive, &first).await.unwrap();
+    let retry_id = storage.store_message(&archive, &retry).await.unwrap();
+    let other_sender_id = storage
+        .store_message(&archive, &other_sender)
+        .await
+        .unwrap();
+    let next_generation_id = storage
+        .store_message(&archive, &same_nick_next_generation)
+        .await
+        .unwrap();
+
+    assert_eq!(first_id, "archive-first");
+    assert_eq!(
+        retry_id, first_id,
+        "same archive + same sender + same XEP-0359 origin-id must return the existing archive row"
+    );
+    assert_eq!(other_sender_id, "archive-other-sender");
+    assert_eq!(next_generation_id, "archive-next-generation");
+
+    let result = storage
+        .query_messages(&archive, &MamQuery::default())
+        .await
+        .unwrap();
+    let ids: Vec<&str> = result
+        .messages
+        .iter()
+        .map(|message| message.id.as_str())
+        .collect();
+    assert_eq!(
+        ids,
+        vec![
+            "archive-first",
+            "archive-other-sender",
+            "archive-next-generation"
+        ]
+    );
+    assert_eq!(result.count, Some(3));
+
+    let stored = storage
+        .get_message("archive-first")
+        .await
+        .unwrap()
+        .expect("first row remains");
+    assert_eq!(stored.body.as_deref(), Some("first copy"));
+}
+
+#[tokio::test]
+async fn test_sqlite_origin_id_dedup_uses_bare_sender_for_direct_messages() {
+    let storage = create_test_storage().await;
+    assert_origin_id_dedup_uses_bare_sender_for_direct_messages(&storage).await;
+}
+
+#[tokio::test]
+async fn test_inmemory_origin_id_dedup_uses_bare_sender_for_direct_messages() {
+    let storage = InMemoryMamStorage::new();
+    assert_origin_id_dedup_uses_bare_sender_for_direct_messages(&storage).await;
+}
+
+async fn assert_origin_id_dedup_uses_bare_sender_for_direct_messages(storage: &dyn MamStorage) {
+    let archive = bare("alice@example.com");
+    let origin_id = waddle_xmpp_core::xep0359::OriginId::new("client-origin-dm-1");
+    let first = ArchivedMessage {
+        id: "dm-archive-first".to_string(),
+        body: Some("sent before reconnect".to_string()),
+        origin_id: Some(origin_id.clone()),
+        message_type: xmpp_parsers::message::MessageType::Chat,
+        ..ArchivedMessage::for_test(jid("alice@example.com/web-old"), jid("bob@example.com"))
+    };
+    let retry_from_new_resource = ArchivedMessage {
+        id: "dm-archive-retry".to_string(),
+        body: Some("sent after reconnect".to_string()),
+        origin_id: Some(origin_id.clone()),
+        message_type: xmpp_parsers::message::MessageType::Chat,
+        ..ArchivedMessage::for_test(jid("alice@example.com/web-new"), jid("bob@example.com"))
+    };
+    let different_sender = ArchivedMessage {
+        id: "dm-other-sender".to_string(),
+        body: Some("colliding contact origin-id".to_string()),
+        origin_id: Some(origin_id),
+        message_type: xmpp_parsers::message::MessageType::Chat,
+        ..ArchivedMessage::for_test(jid("bob@example.com/phone"), jid("alice@example.com"))
+    };
+
+    let first_id = storage.store_message(&archive, &first).await.unwrap();
+    let retry_id = storage
+        .store_message(&archive, &retry_from_new_resource)
+        .await
+        .unwrap();
+    let different_sender_id = storage
+        .store_message(&archive, &different_sender)
+        .await
+        .unwrap();
+
+    assert_eq!(retry_id, first_id);
+    assert_eq!(different_sender_id, "dm-other-sender");
+    assert_eq!(storage.count_messages(&archive).await.unwrap(), 2);
+}
+
+#[tokio::test]
 async fn test_store_and_retrieve_reply_thread_metadata() {
     let storage = create_test_storage().await;
 

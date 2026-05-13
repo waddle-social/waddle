@@ -59,6 +59,8 @@ CREATE INDEX IF NOT EXISTS idx_mam_room_thread
     ON mam_messages(room_jid, thread_id, timestamp DESC);
 CREATE INDEX IF NOT EXISTS idx_mam_room_reply_to
     ON mam_messages(room_jid, reply_to_id, timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_mam_room_origin
+    ON mam_messages(room_jid, origin_id);
 "#;
 
 // See `SQLITE_MAM_SCHEMA` for the body-nullability rationale.
@@ -92,6 +94,8 @@ CREATE INDEX IF NOT EXISTS idx_mam_room_thread
     ON mam_messages(room_jid, thread_id, timestamp DESC);
 CREATE INDEX IF NOT EXISTS idx_mam_room_reply_to
     ON mam_messages(room_jid, reply_to_id, timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_mam_room_origin
+    ON mam_messages(room_jid, origin_id);
 "#;
 
 pub(super) fn infer_driver(database_url: &str) -> Result<MamDatabaseDriver, MamStorageError> {
@@ -267,6 +271,7 @@ async fn ensure_sqlite_body_nullable(pool: &SqlitePool) -> Result<(), MamStorage
         "CREATE INDEX IF NOT EXISTS idx_mam_room_id ON mam_messages(room_jid, id)",
         "CREATE INDEX IF NOT EXISTS idx_mam_room_thread ON mam_messages(room_jid, thread_id, timestamp DESC)",
         "CREATE INDEX IF NOT EXISTS idx_mam_room_reply_to ON mam_messages(room_jid, reply_to_id, timestamp DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_mam_room_origin ON mam_messages(room_jid, origin_id)",
     ] {
         sqlx::query(statement).execute(&mut *tx).await?;
     }
