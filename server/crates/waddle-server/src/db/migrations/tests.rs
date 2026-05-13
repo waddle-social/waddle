@@ -1,5 +1,5 @@
 use super::*;
-use crate::db::{Database, DatabaseDriver};
+use crate::db::{Database, DatabaseConfig, DatabaseDriver};
 
 #[tokio::test]
 async fn test_migration_runner_global() {
@@ -16,7 +16,7 @@ async fn test_migration_runner_global() {
 
     // Check version (global + shared waddle schema)
     let version = runner.current_version(&db).await.unwrap();
-    assert_eq!(version, Some(1002));
+    assert_eq!(version, Some(1003));
 }
 
 #[tokio::test]
@@ -120,7 +120,7 @@ async fn test_waddle_v1002_adds_pin_permission_to_existing_v1001_schema() {
 
     let runner = MigrationRunner::waddle();
     let applied = runner.run(&db).await.unwrap();
-    assert_eq!(applied, vec![1002]);
+    assert_eq!(applied, vec![1002, 1003]);
 
     let conn = db.guard().await.unwrap();
     let mut rows = conn
@@ -132,7 +132,7 @@ async fn test_waddle_v1002_adds_pin_permission_to_existing_v1001_schema() {
     assert_eq!(pin_permission, "admins-only");
 
     let version = runner.current_version(&db).await.unwrap();
-    assert_eq!(version, Some(1002));
+    assert_eq!(version, Some(1003));
 }
 
 #[tokio::test]
@@ -209,14 +209,14 @@ async fn test_global_v0004_adds_policy_digest_to_existing_v0003_schema() {
     drop(conn);
 
     // `MigrationRunner::global()` composes global + waddle migrations,
-    // so the runner also reports applying 1001 and 1002 (the waddle
+    // so the runner also reports applying 1001 through 1003 (the waddle
     // schema tables) on top of V0004. The test's invariant is V0004
     // specifically, asserted via the `pragma_table_info` probe below;
     // the version list is included in the assertion so a future PR
     // that reorders or renumbers can't silently shift it.
     let runner = MigrationRunner::global();
     let applied = runner.run(&db).await.unwrap();
-    assert_eq!(applied, vec![4, 5, 1001, 1002]);
+    assert_eq!(applied, vec![4, 5, 6, 1001, 1002, 1003]);
 
     // Column exists.
     let conn = db.guard().await.unwrap();
@@ -278,7 +278,7 @@ async fn test_global_v0004_adds_policy_digest_to_existing_v0003_schema() {
     let version = runner.current_version(&db).await.unwrap();
     assert_eq!(
         version,
-        Some(1002),
+        Some(1003),
         "current version reflects the highest applied across global+waddle"
     );
 }
@@ -327,13 +327,13 @@ async fn test_incompatible_history_forces_hard_cut_reapply() {
 
     let runner = MigrationRunner::global();
     let applied = runner.run(&db).await.unwrap();
-    assert_eq!(applied, vec![1, 2, 3, 4, 5, 1001, 1002]);
+    assert_eq!(applied, vec![1, 2, 3, 4, 5, 6, 1001, 1002, 1003]);
 
     let applied_again = runner.run(&db).await.unwrap();
     assert!(applied_again.is_empty());
 
     let version = runner.current_version(&db).await.unwrap();
-    assert_eq!(version, Some(1002));
+    assert_eq!(version, Some(1003));
 }
 
 #[tokio::test]
@@ -378,7 +378,7 @@ async fn test_incompatible_history_recreates_existing_owned_tables() {
 
     let runner = MigrationRunner::global();
     let applied = runner.run(&db).await.unwrap();
-    assert_eq!(applied, vec![1, 2, 3, 4, 5, 1001, 1002]);
+    assert_eq!(applied, vec![1, 2, 3, 4, 5, 6, 1001, 1002, 1003]);
 
     let conn = db.guard().await.unwrap();
     let mut rows = conn
@@ -508,4 +508,304 @@ fn postgres_channel_pin_permission_migration_is_hot_patch_safe() {
         waddle::V1002_ADD_CHANNEL_PIN_PERMISSION_POSTGRES.contains("ADD COLUMN IF NOT EXISTS"),
         "Postgres v1002 must tolerate prod databases where pin_permission was hot-patched before the migration was recorded"
     );
+}
+
+#[test]
+fn postgres_upload_and_attachment_sizes_are_bigint() {
+    assert!(
+        global::V0001_AUTH_BROKER_SCHEMA_POSTGRES.contains("size_bytes BIGINT NOT NULL"),
+        "fresh Postgres upload_slots.size_bytes must be BIGINT"
+    );
+    assert!(
+        global::V0006_UPLOAD_SIZES_BIGINT_POSTGRES.contains("ALTER COLUMN size_bytes TYPE BIGINT"),
+        "existing Postgres upload_slots.size_bytes must be widened online"
+    );
+    assert!(
+        waddle::V0001_SCHEMA_POSTGRES.contains("size_bytes BIGINT NOT NULL"),
+        "fresh Postgres attachments.size_bytes must be BIGINT"
+    );
+    assert!(
+        waddle::V1003_ATTACHMENT_SIZES_BIGINT_POSTGRES
+            .contains("ALTER COLUMN size_bytes TYPE BIGINT"),
+        "existing Postgres attachments.size_bytes must be widened online"
+    );
+}
+
+#[tokio::test]
+async fn postgres_v0006_widens_existing_upload_slot_size_bytes() {
+    let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+        eprintln!(
+            "skipping: WADDLE_TEST_POSTGRES_URL not set \
+             (postgres-backed migration regression for upload_slots.size_bytes BIGINT)"
+        );
+        return;
+    };
+
+    let schema = unique_postgres_schema_name("upload_size");
+    let (db, admin) = open_isolated_postgres_database(&database_url, &schema).await;
+    let conn = db.guard().await.expect("postgres guard");
+    conn.execute(sql::migrations_table_sql(DatabaseDriver::Postgres), ())
+        .await
+        .expect("create migration table");
+    seed_applied_migrations(&conn, global::all().into_iter().filter(|m| m.version < 6)).await;
+    conn.execute(
+        r#"
+        CREATE TABLE upload_slots (
+            id TEXT PRIMARY KEY,
+            requester_jid TEXT NOT NULL,
+            filename TEXT NOT NULL,
+            size_bytes INTEGER NOT NULL,
+            content_type TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending',
+            storage_key TEXT,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP::TEXT,
+            expires_at TEXT NOT NULL,
+            uploaded_at TEXT
+        )
+        "#,
+        (),
+    )
+    .await
+    .expect("create legacy upload_slots");
+    conn.execute(
+        "INSERT INTO upload_slots \
+         (id, requester_jid, filename, size_bytes, content_type, expires_at) \
+         VALUES (?, ?, ?, ?, ?, ?)",
+        crate::db_params![
+            "slot-legacy",
+            "alice@example.com",
+            "legacy.bin",
+            i64::from(i32::MAX),
+            "application/octet-stream",
+            "2026-05-13T00:00:00Z"
+        ],
+    )
+    .await
+    .expect("seed legacy upload slot");
+    drop(conn);
+
+    let applied = MigrationRunner::global()
+        .run(&db)
+        .await
+        .expect("run global migration");
+    assert_eq!(applied, vec![6, 1001, 1002, 1003]);
+    assert_postgres_column_type(&db, "upload_slots", "size_bytes", "bigint").await;
+
+    let oversized_int4 = i64::from(i32::MAX) + 1;
+    let conn = db.guard().await.expect("postgres guard");
+    conn.execute(
+        "INSERT INTO upload_slots \
+         (id, requester_jid, filename, size_bytes, content_type, expires_at) \
+         VALUES (?, ?, ?, ?, ?, ?)",
+        crate::db_params![
+            "slot-bigint",
+            "alice@example.com",
+            "bigint.bin",
+            oversized_int4,
+            "application/octet-stream",
+            "2026-05-13T00:00:00Z"
+        ],
+    )
+    .await
+    .expect("insert upload slot above int4 range");
+    let stored = query_i64(
+        &db,
+        "SELECT size_bytes FROM upload_slots WHERE id = ?",
+        "slot-bigint",
+    )
+    .await;
+    assert_eq!(stored, oversized_int4);
+    drop(conn);
+
+    drop_postgres_schema(&admin, &schema).await;
+}
+
+#[tokio::test]
+async fn postgres_v1003_widens_existing_attachment_size_bytes() {
+    let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+        eprintln!(
+            "skipping: WADDLE_TEST_POSTGRES_URL not set \
+             (postgres-backed migration regression for attachments.size_bytes BIGINT)"
+        );
+        return;
+    };
+
+    let schema = unique_postgres_schema_name("attachment_size");
+    let (db, admin) = open_isolated_postgres_database(&database_url, &schema).await;
+    let conn = db.guard().await.expect("postgres guard");
+    conn.execute(sql::migrations_table_sql(DatabaseDriver::Postgres), ())
+        .await
+        .expect("create migration table");
+    seed_applied_migrations(
+        &conn,
+        waddle::all().into_iter().filter(|m| m.version < 1003),
+    )
+    .await;
+    conn.execute(
+        r#"
+        CREATE TABLE attachments (
+            id TEXT PRIMARY KEY,
+            message_id TEXT NOT NULL,
+            filename TEXT NOT NULL,
+            content_type TEXT NOT NULL,
+            size_bytes INTEGER NOT NULL,
+            storage_key TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP::TEXT
+        )
+        "#,
+        (),
+    )
+    .await
+    .expect("create legacy attachments");
+    conn.execute(
+        "INSERT INTO attachments \
+         (id, message_id, filename, content_type, size_bytes, storage_key) \
+         VALUES (?, ?, ?, ?, ?, ?)",
+        crate::db_params![
+            "attachment-legacy",
+            "message-1",
+            "legacy.bin",
+            "application/octet-stream",
+            i64::from(i32::MAX),
+            "legacy-key"
+        ],
+    )
+    .await
+    .expect("seed legacy attachment");
+    drop(conn);
+
+    let applied = MigrationRunner::waddle()
+        .run(&db)
+        .await
+        .expect("run waddle migration");
+    assert_eq!(applied, vec![1003]);
+    assert_postgres_column_type(&db, "attachments", "size_bytes", "bigint").await;
+
+    let oversized_int4 = i64::from(i32::MAX) + 1;
+    let conn = db.guard().await.expect("postgres guard");
+    conn.execute(
+        "INSERT INTO attachments \
+         (id, message_id, filename, content_type, size_bytes, storage_key) \
+         VALUES (?, ?, ?, ?, ?, ?)",
+        crate::db_params![
+            "attachment-bigint",
+            "message-2",
+            "bigint.bin",
+            "application/octet-stream",
+            oversized_int4,
+            "bigint-key"
+        ],
+    )
+    .await
+    .expect("insert attachment above int4 range");
+    let stored = query_i64(
+        &db,
+        "SELECT size_bytes FROM attachments WHERE id = ?",
+        "attachment-bigint",
+    )
+    .await;
+    assert_eq!(stored, oversized_int4);
+    drop(conn);
+
+    drop_postgres_schema(&admin, &schema).await;
+}
+
+async fn seed_applied_migrations(
+    conn: &crate::db::ConnectionGuard,
+    migrations: impl IntoIterator<Item = Migration>,
+) {
+    for migration in migrations {
+        conn.execute(
+            "INSERT INTO _migrations (version, description) VALUES (?, ?)",
+            crate::db_params![migration.version, migration.description],
+        )
+        .await
+        .expect("seed applied migration row");
+    }
+}
+
+async fn assert_postgres_column_type(
+    db: &Database,
+    table: &str,
+    column: &str,
+    expected_type: &str,
+) {
+    let conn = db.guard().await.expect("postgres guard");
+    let mut rows = conn
+        .query(
+            "SELECT data_type \
+             FROM information_schema.columns \
+             WHERE table_schema = current_schema() \
+               AND table_name = ? \
+               AND column_name = ?",
+            crate::db_params![table, column],
+        )
+        .await
+        .expect("query information_schema column type");
+    let row = rows
+        .next()
+        .await
+        .expect("read column type")
+        .expect("column row");
+    let data_type: String = row.get(0).expect("decode column type");
+    assert_eq!(data_type, expected_type);
+}
+
+async fn query_i64(db: &Database, sql: &str, id: &str) -> i64 {
+    let conn = db.guard().await.expect("postgres guard");
+    let mut rows = conn
+        .query(sql, crate::db_params![id])
+        .await
+        .expect("query i64 value");
+    let row = rows.next().await.expect("read i64 row").expect("i64 row");
+    row.get(0).expect("decode i64 value")
+}
+
+async fn open_isolated_postgres_database(
+    database_url: &str,
+    schema: &str,
+) -> (Database, sqlx::PgPool) {
+    let admin = sqlx::PgPool::connect(database_url)
+        .await
+        .expect("connect postgres admin pool");
+    let create_schema = format!("CREATE SCHEMA {schema}");
+    sqlx::query(&create_schema)
+        .execute(&admin)
+        .await
+        .expect("create isolated postgres schema");
+
+    let scoped_url = postgres_url_with_search_path(database_url, schema);
+    let db = Database::from_config(
+        "isolated-postgres-migration-test",
+        &DatabaseConfig::new(DatabaseDriver::Postgres, scoped_url),
+    )
+    .await
+    .expect("open isolated postgres database");
+    (db, admin)
+}
+
+async fn drop_postgres_schema(admin: &sqlx::PgPool, schema: &str) {
+    let drop_schema = format!("DROP SCHEMA IF EXISTS {schema} CASCADE");
+    sqlx::query(&drop_schema)
+        .execute(admin)
+        .await
+        .expect("drop isolated postgres schema");
+}
+
+fn unique_postgres_schema_name(prefix: &str) -> String {
+    format!("waddle_test_{prefix}_{}", uuid::Uuid::new_v4().simple())
+}
+
+fn postgres_url_with_search_path(database_url: &str, schema: &str) -> String {
+    let mut url = url::Url::parse(database_url).expect("parse postgres url");
+    let retained: Vec<(String, String)> = url
+        .query_pairs()
+        .filter(|(key, _)| key != "options")
+        .map(|(key, value)| (key.into_owned(), value.into_owned()))
+        .collect();
+    url.query_pairs_mut()
+        .clear()
+        .extend_pairs(retained.iter().map(|(key, value)| (key, value)))
+        .append_pair("options", &format!("-c search_path={schema}"));
+    url.to_string()
 }

@@ -131,7 +131,7 @@ CREATE TABLE attachments (
     message_id TEXT NOT NULL,
     filename TEXT NOT NULL,
     content_type TEXT NOT NULL,
-    size_bytes INTEGER NOT NULL,
+    size_bytes BIGINT NOT NULL,
     storage_key TEXT NOT NULL,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP::TEXT,
     FOREIGN KEY (message_id) REFERENCES messages(id) ON DELETE CASCADE
@@ -154,6 +154,18 @@ ALTER TABLE channels
 ADD COLUMN IF NOT EXISTS pin_permission TEXT NOT NULL DEFAULT 'admins-only';
 "#;
 
+/// Widen attachment sizes for Postgres. SQLite `INTEGER` already
+/// stores dynamic-width integer values, while Postgres `INTEGER` is
+/// int4 and can reject valid Rust `i64` sizes.
+pub const V1003_ATTACHMENT_SIZES_BIGINT: &str = r#"
+SELECT 1;
+"#;
+
+pub const V1003_ATTACHMENT_SIZES_BIGINT_POSTGRES: &str = r#"
+ALTER TABLE attachments
+ALTER COLUMN size_bytes TYPE BIGINT;
+"#;
+
 /// Get all waddle schema migrations in order.
 ///
 /// Versions are intentionally offset from global migrations so a single
@@ -171,6 +183,12 @@ pub fn all() -> Vec<Migration> {
             description: "Add channel pin permission policy".to_string(),
             sql_sqlite: V1002_ADD_CHANNEL_PIN_PERMISSION,
             sql_postgres: V1002_ADD_CHANNEL_PIN_PERMISSION_POSTGRES,
+        },
+        Migration {
+            version: 1003,
+            description: "Widen attachment sizes to bigint on Postgres".to_string(),
+            sql_sqlite: V1003_ATTACHMENT_SIZES_BIGINT,
+            sql_postgres: V1003_ATTACHMENT_SIZES_BIGINT_POSTGRES,
         },
     ]
 }

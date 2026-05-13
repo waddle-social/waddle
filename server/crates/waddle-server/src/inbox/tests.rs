@@ -166,3 +166,54 @@ async fn sqlx_inbox_storage_persists_file_backing() {
         let _ = std::fs::remove_file(cleanup);
     }
 }
+
+/// Regression for #456: `inbox_entries.last_updated` is an i64
+/// timestamp. Postgres `INTEGER` is int4, so fresh and existing
+/// Postgres tables must expose this column as BIGINT.
+#[tokio::test]
+async fn sqlx_inbox_postgres_handles_i32_overflow_last_updated() {
+    let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+        eprintln!(
+            "skipping: WADDLE_TEST_POSTGRES_URL not set \
+             (postgres-backed regression for inbox_entries.last_updated BIGINT)"
+        );
+        return;
+    };
+
+    let storage = DatabaseInboxStorage::open(Some(&database_url))
+        .await
+        .expect("open postgres inbox storage");
+    let run_id = uuid::Uuid::new_v4();
+    let user = jid(&format!("inbox-{run_id}@example.com"));
+    let partner = jid(&format!("partner-{run_id}@example.com"));
+    let last_updated = i64::from(i32::MAX) + 86_400;
+
+    let stored = storage
+        .upsert(
+            &user,
+            InboxEntry::new(
+                partner.clone(),
+                ConversationKind::Direct,
+                format!("stanza-{run_id}"),
+                last_updated,
+            ),
+            false,
+        )
+        .await
+        .expect("BIGINT last_updated accepts values past i32::MAX");
+    assert_eq!(stored.last_updated, last_updated);
+
+    let listed = storage.list(&user).await.expect("list postgres inbox");
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].partner, partner);
+    assert_eq!(listed[0].last_updated, last_updated);
+
+    let deleted = storage
+        .execute(
+            "DELETE FROM inbox_entries WHERE user_jid = ? AND partner_jid = ?",
+            crate::db_params![user.to_string(), partner.to_string()],
+        )
+        .await
+        .expect("cleanup inbox postgres row");
+    assert_eq!(deleted, 1);
+}

@@ -219,7 +219,7 @@ impl waddle_xmpp::AppState for XmppAppState {
 
     /// Get the maximum allowed file upload size in bytes.
     fn max_upload_size(&self) -> u64 {
-        super::xmpp_upload_state::max_upload_size()
+        super::routes::uploads::max_upload_size()
     }
 
     // =========================================================================

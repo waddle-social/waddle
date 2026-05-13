@@ -28,6 +28,9 @@ mod download;
 
 use download::download_handler;
 
+const DEFAULT_MAX_UPLOAD_SIZE: u64 = 10 * 1024 * 1024;
+pub(crate) const MAX_DATABASE_UPLOAD_SIZE: u64 = i64::MAX as u64;
+
 /// Extended application state for upload routes.
 ///
 /// File storage is delegated to the `BlobStorage` trait on `AppState`,
@@ -54,18 +57,25 @@ impl UploadState {
     }
 }
 
-fn configured_max_upload_size() -> u64 {
-    std::env::var("WADDLE_MAX_UPLOAD_SIZE")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(10 * 1024 * 1024)
+pub(crate) fn max_upload_size() -> u64 {
+    max_upload_size_from_env_value(std::env::var("WADDLE_MAX_UPLOAD_SIZE").ok().as_deref())
+}
+
+pub(crate) fn upload_size_to_i64(size: u64) -> Option<i64> {
+    i64::try_from(size).ok()
+}
+
+fn max_upload_size_from_env_value(raw: Option<&str>) -> u64 {
+    raw.and_then(|s| s.parse::<u64>().ok())
+        .map(|size| size.min(MAX_DATABASE_UPLOAD_SIZE))
+        .unwrap_or(DEFAULT_MAX_UPLOAD_SIZE)
 }
 
 fn upload_body_limit() -> DefaultBodyLimit {
     // The upload handler extracts the request body as `Bytes`, so Axum's
     // default 2 MiB limit would reject larger uploads before our slot/size
     // validation runs. Keep the HTTP body cap aligned with the XMPP slot cap.
-    let limit = usize::try_from(configured_max_upload_size()).unwrap_or(usize::MAX);
+    let limit = usize::try_from(max_upload_size()).unwrap_or(usize::MAX);
     DefaultBodyLimit::max(limit)
 }
 
