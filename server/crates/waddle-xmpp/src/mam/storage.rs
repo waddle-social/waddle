@@ -8,6 +8,7 @@
 
 mod error;
 mod in_memory;
+mod origin_dedup;
 mod query_semantics;
 mod sqlx_store;
 mod tombstone;

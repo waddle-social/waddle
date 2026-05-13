@@ -119,6 +119,9 @@ use waddle_xmpp::xep::{
 };
 use waddle_xmpp::xep0201::set_thread_id;
 use waddle_xmpp::Stanza;
+use waddle_xmpp_core::xep0359::{
+    add_stanza_id as replace_stanza_id, extract_stanza_id_by, StanzaId as Xep0359StanzaId,
+};
 use xmpp_parsers::message::{Message, MessageType as XmppMessageType};
 use xmpp_parsers::minidom::Element;
 use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
@@ -196,6 +199,106 @@ pub async fn interpret(events: Vec<OutboundEvent>, deps: &Deps<'_>) -> Interpret
 /// to prevent runaway recursion. See PR15 design notes.
 const MAX_RECIPIENT_PASS_DEPTH: u8 = 1;
 
+#[derive(Clone, Debug)]
+pub(super) struct ArchiveIdRewrite {
+    by: Jid,
+    from_id: String,
+    to_id: String,
+}
+
+impl ArchiveIdRewrite {
+    pub(super) fn from_store_result(
+        by: Jid,
+        requested_id: String,
+        stored_id: String,
+    ) -> Option<Self> {
+        if requested_id.is_empty() || requested_id == stored_id {
+            return None;
+        }
+        Some(Self {
+            by,
+            from_id: requested_id,
+            to_id: stored_id,
+        })
+    }
+
+    fn rewritten_id_for(&self, by: &Jid, id: &str) -> Option<&str> {
+        (&self.by == by && self.from_id == id).then_some(self.to_id.as_str())
+    }
+}
+
+fn apply_archive_id_rewrites(event: &mut OutboundEvent, rewrites: &[ArchiveIdRewrite]) {
+    if rewrites.is_empty() {
+        return;
+    }
+    match event {
+        OutboundEvent::SendStanza(stanza) | OutboundEvent::RouteToConnection { stanza, .. } => {
+            rewrite_stanza_archive_ids(stanza, rewrites);
+        }
+        OutboundEvent::DispatchToRoom { message, .. }
+        | OutboundEvent::ArchiveGroupchat { message, .. }
+        | OutboundEvent::ArchiveDirect { message, .. }
+        | OutboundEvent::ProjectGroupchatInbox { message, .. }
+        | OutboundEvent::SendCarbons { message, .. }
+        | OutboundEvent::RequestEnrichment { message, .. }
+        | OutboundEvent::ApplyGroupchatRetractionTombstone {
+            retraction_message: message,
+            ..
+        } => {
+            rewrite_message_archive_ids(message, rewrites);
+        }
+        OutboundEvent::ProjectInbox {
+            message,
+            archive_ref,
+            ..
+        } => {
+            rewrite_message_archive_ids(message, rewrites);
+            rewrite_stanza_id(archive_ref, rewrites);
+        }
+        OutboundEvent::QueueOfflineDelivery {
+            payload,
+            original_message,
+            ..
+        } => {
+            match payload {
+                waddle_xmpp::pending_delivery::PendingPayload::Archived(stanza_id) => {
+                    rewrite_stanza_id(stanza_id, rewrites);
+                }
+                waddle_xmpp::pending_delivery::PendingPayload::Transient(message) => {
+                    rewrite_message_archive_ids(message, rewrites);
+                }
+            }
+            rewrite_message_archive_ids(original_message, rewrites);
+        }
+        _ => {}
+    }
+}
+
+fn rewrite_stanza_archive_ids(stanza: &mut Stanza, rewrites: &[ArchiveIdRewrite]) {
+    if let Stanza::Message(message) = stanza {
+        rewrite_message_archive_ids(message, rewrites);
+    }
+}
+
+fn rewrite_message_archive_ids(message: &mut Message, rewrites: &[ArchiveIdRewrite]) {
+    for rewrite in rewrites {
+        if extract_stanza_id_by(message, &rewrite.by).as_deref() == Some(rewrite.from_id.as_str()) {
+            replace_stanza_id(
+                message,
+                &Xep0359StanzaId::new(rewrite.to_id.clone(), rewrite.by.clone()),
+            );
+        }
+    }
+}
+
+fn rewrite_stanza_id(stanza_id: &mut Xep0359StanzaId, rewrites: &[ArchiveIdRewrite]) {
+    for rewrite in rewrites {
+        if let Some(rewritten) = rewrite.rewritten_id_for(&stanza_id.by, stanza_id.id.as_str()) {
+            stanza_id.id = rewritten.to_owned();
+        }
+    }
+}
+
 /// Internal entry point that threads the recursion depth. The public
 /// [`interpret`] starts at depth 0; the offline-recipient pass
 /// re-enters at depth 1 via [`run_headless_recipient_pass`].
@@ -206,8 +309,10 @@ async fn interpret_with_depth(
 ) -> InterpretOutcome {
     let registry = deps.connection_registry;
     let mut outcome = InterpretOutcome::default();
+    let mut archive_id_rewrites: Vec<ArchiveIdRewrite> = Vec::new();
 
-    for event in events {
+    for mut event in events {
+        apply_archive_id_rewrites(&mut event, &archive_id_rewrites);
         match event {
             OutboundEvent::SendStanza(stanza) => match stanza.to_element_string() {
                 Ok(xml) => outcome.frames.push(xml),
@@ -315,8 +420,12 @@ async fn interpret_with_depth(
                 message,
                 sender_nickname_generation,
             } => {
-                archive_groupchat_event(deps, room, sender, message, sender_nickname_generation)
-                    .await;
+                if let Some(rewrite) =
+                    archive_groupchat_event(deps, room, sender, message, sender_nickname_generation)
+                        .await
+                {
+                    archive_id_rewrites.push(rewrite);
+                }
             }
             OutboundEvent::ApplyPinChange { room, request } => {
                 apply_pin_change_event(registry, deps, room, request, recursion_depth).await;
@@ -390,7 +499,9 @@ async fn interpret_with_depth(
                 to,
                 message,
             } => {
-                archive_direct(deps, archive_jid, from, to, message).await;
+                if let Some(rewrite) = archive_direct(deps, archive_jid, from, to, message).await {
+                    archive_id_rewrites.push(rewrite);
+                }
             }
             OutboundEvent::RequestEnrichment { id, message } => {
                 let enriched = enrich_message_event(deps, *message).await;

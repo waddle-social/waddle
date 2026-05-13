@@ -100,9 +100,9 @@ pub(super) async fn broadcast_room_system_message_event(
     // user-authored messages; system messages are never corrected.
     if let Some(mam_storage) = deps.mam_storage {
         match archive_groupchat_message(mam_storage, &room, &message, 0).await {
-            Some(_) => debug!(
+            Some(result) => debug!(
                 room = %room,
-                stanza_id,
+                stanza_id = %result.stored_id,
                 "BroadcastRoomSystemMessage: archived"
             ),
             None => debug!(

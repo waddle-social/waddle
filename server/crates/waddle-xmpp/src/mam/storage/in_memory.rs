@@ -10,6 +10,7 @@ use waddle_xmpp_core::mam::{ArchivedMessage, MamQuery, MamResult};
 
 use crate::xep::matches_fulltext;
 
+use super::origin_dedup::origin_id_dedup_match;
 use super::query_semantics::{
     archive_order_after, archive_order_before, jid_matches_with_filter, matches_thread_filter,
     missing_requested_id, uses_backward_pagination,
@@ -39,6 +40,16 @@ impl MamStorage for InMemoryMamStorage {
         archive_jid: &BareJid,
         message: &ArchivedMessage,
     ) -> Result<String, MamStorageError> {
+        let archive_jid_str = archive_jid.to_string();
+        let mut entries = self.entries.write().await;
+        if message.origin_id.is_some() {
+            if let Some((_, existing)) = entries.iter().find(|(jid, existing)| {
+                jid == &archive_jid_str && origin_id_dedup_match(existing, message)
+            }) {
+                return Ok(existing.id.clone());
+            }
+        }
+
         let archive_id = if message.id.is_empty() {
             Self::generate_archive_id()
         } else {
@@ -48,8 +59,7 @@ impl MamStorage for InMemoryMamStorage {
         let mut stored = message.clone();
         stored.id = archive_id.clone();
 
-        let mut entries = self.entries.write().await;
-        entries.push((archive_jid.to_string(), stored));
+        entries.push((archive_jid_str, stored));
         Ok(archive_id)
     }
 
