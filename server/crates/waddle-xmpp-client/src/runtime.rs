@@ -60,7 +60,7 @@ impl XmppRuntime {
             .resume_state
             .as_ref()
             .map(SmState::from_resume_state)
-            .unwrap_or_else(SmState::new);
+            .unwrap_or_default();
 
         Ok(Self {
             config,

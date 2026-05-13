@@ -122,7 +122,7 @@ impl WasmDriverTask {
             Some(WasmCommand::SendStanza { stanza, responder }) => {
                 if !self.runtime.can_send_app_stanza() {
                     self.deferred_commands
-                        .push_back(DeferredWasmCommand::SendStanza { stanza, responder });
+                        .push_back(DeferredWasmCommand::Stanza { stanza, responder });
                     return true;
                 }
 
@@ -131,7 +131,7 @@ impl WasmDriverTask {
             Some(WasmCommand::SendIq { stanza, responder }) => {
                 if !self.runtime.can_send_app_stanza() {
                     self.deferred_commands
-                        .push_back(DeferredWasmCommand::SendIq { stanza, responder });
+                        .push_back(DeferredWasmCommand::Iq { stanza, responder });
                     return true;
                 }
 
@@ -144,7 +144,7 @@ impl WasmDriverTask {
             }) => {
                 if !self.runtime.can_send_app_stanza() {
                     self.deferred_commands
-                        .push_back(DeferredWasmCommand::SendMamQuery {
+                        .push_back(DeferredWasmCommand::MamQuery {
                             stanza,
                             query_id,
                             responder,
@@ -257,13 +257,13 @@ impl WasmDriverTask {
             };
 
             let keep_running = match command {
-                DeferredWasmCommand::SendStanza { stanza, responder } => {
+                DeferredWasmCommand::Stanza { stanza, responder } => {
                     self.send_stanza_command(stanza, responder).await
                 }
-                DeferredWasmCommand::SendIq { stanza, responder } => {
+                DeferredWasmCommand::Iq { stanza, responder } => {
                     self.send_iq_command(stanza, responder).await
                 }
-                DeferredWasmCommand::SendMamQuery {
+                DeferredWasmCommand::MamQuery {
                     stanza,
                     query_id,
                     responder,
@@ -474,13 +474,13 @@ impl WasmDriverTask {
     async fn finish(&mut self) {
         for command in self.deferred_commands.drain(..) {
             match command {
-                DeferredWasmCommand::SendStanza { responder, .. } => {
+                DeferredWasmCommand::Stanza { responder, .. } => {
                     let _ = responder.send(Err(ClientError::Disconnected));
                 }
-                DeferredWasmCommand::SendIq { responder, .. } => {
+                DeferredWasmCommand::Iq { responder, .. } => {
                     let _ = responder.send(Err(ClientError::Disconnected));
                 }
-                DeferredWasmCommand::SendMamQuery { responder, .. } => {
+                DeferredWasmCommand::MamQuery { responder, .. } => {
                     let _ = responder.send(Err(ClientError::Disconnected));
                 }
             }

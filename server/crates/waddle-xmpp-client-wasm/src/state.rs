@@ -130,15 +130,15 @@ pub(crate) enum WasmCommand {
 }
 
 pub(crate) enum DeferredWasmCommand {
-    SendStanza {
+    Stanza {
         stanza: Element,
         responder: oneshot::Sender<DriverResult<()>>,
     },
-    SendIq {
+    Iq {
         stanza: Element,
         responder: oneshot::Sender<DriverResult<Element>>,
     },
-    SendMamQuery {
+    MamQuery {
         stanza: Element,
         query_id: String,
         responder: oneshot::Sender<DriverResult<waddle_xmpp_client::MamPage>>,

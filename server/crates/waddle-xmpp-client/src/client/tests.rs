@@ -300,6 +300,49 @@ async fn driver_keeps_deferred_stanzas_behind_fresh_fallback_sm_enable() {
     );
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn driver_flushes_deferred_stanzas_when_fresh_sm_enable_fails() {
+    let shared = MockTransportShared::default();
+    let (mut task, _cmd_tx, _rx) = make_driver_task_with_config(
+        config_with_resume_state(),
+        MockTransport::new(vec![], vec![], shared.clone()),
+    );
+
+    drive_task_to_resume_attempt(&mut task).await;
+
+    task.handle_command(XmppCommand::SendStanza(message_stanza("queued-1")))
+        .await;
+
+    task.apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+        failed_sm(0),
+    )))
+    .await;
+    task.apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+        bind_result("bind-1"),
+    )))
+    .await;
+
+    assert!(
+        !shared
+            .sent_messages()
+            .iter()
+            .any(|message| transport_message_id(message) == Some("queued-1")),
+        "app stanza should stay deferred until SM either enables or fails"
+    );
+
+    task.apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+        Element::builder("failed", NS_SM).build(),
+    )))
+    .await;
+
+    let sent = shared.sent_messages();
+    assert!(
+        sent.iter()
+            .any(|message| transport_message_id(message) == Some("queued-1")),
+        "queued app stanza should flush after fresh SM enable fails"
+    );
+}
+
 // ── full bootstrap integration tests ─────────────────────────────────────
 
 #[tokio::test(flavor = "current_thread")]

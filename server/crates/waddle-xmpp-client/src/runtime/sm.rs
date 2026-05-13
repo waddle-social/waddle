@@ -26,7 +26,7 @@ impl XmppRuntime {
                 StreamManagementEvent::AckRequested,
             )));
         } else if let Some(h) = crate::stream_management::SmState::parse_ack_h(element) {
-            if h > self.sm_state.outbound_count {
+            if self.sm_state.handled_count_too_high(h) {
                 self.handle_sm_handled_count_too_high(h, events);
                 return Ok(());
             }
@@ -46,20 +46,31 @@ impl XmppRuntime {
             )));
             self.flush_pending_fallback_retries(events);
         } else if element.name() == "resumed" {
-            let h = element.attr("h").and_then(|v| v.parse().ok()).unwrap_or(0);
-            if h > self.sm_state.outbound_count {
+            let Some(h) = element.attr("h").and_then(|v| v.parse().ok()) else {
+                self.handle_sm_protocol_violation(events);
+                return Ok(());
+            };
+            let Some(previd) = element.attr("previd") else {
+                self.handle_sm_protocol_violation(events);
+                return Ok(());
+            };
+            if !matches!(self.bootstrap, BootstrapState::AwaitingResume)
+                || self.sm_state.previd.as_deref() != Some(previd)
+            {
+                self.handle_sm_protocol_violation(events);
+                return Ok(());
+            }
+            if self.sm_state.handled_count_too_high(h) {
                 self.handle_sm_handled_count_too_high(h, events);
                 return Ok(());
             }
             let acked = self.sm_state.process_ack(h);
-            self.sm_state.previd = element.attr("previd").map(|s| s.to_string());
+            self.sm_state.previd = Some(previd.to_string());
             self.sm_state.enabled = true;
             self.sm_state.outbound_enabled = true;
-            if matches!(self.bootstrap, BootstrapState::AwaitingResume) {
-                self.snapshot.binding = Some(self.resumed_session_binding()?);
-                self.bootstrap = BootstrapState::Ready;
-                self.set_phase(crate::state::SessionPhase::Established)?;
-            }
+            self.snapshot.binding = Some(self.resumed_session_binding()?);
+            self.bootstrap = BootstrapState::Ready;
+            self.set_phase(crate::state::SessionPhase::Established)?;
             events.push(ClientEvent::Connection(ConnectionEvent::StreamManagement(
                 StreamManagementEvent::Resumed { h },
             )));
@@ -74,7 +85,7 @@ impl XmppRuntime {
         } else if element.name() == "failed" {
             let resume_failed = matches!(self.bootstrap, BootstrapState::AwaitingResume);
             if let Some(h) = element.attr("h").and_then(|value| value.parse().ok()) {
-                if h > self.sm_state.outbound_count {
+                if self.sm_state.handled_count_too_high(h) {
                     self.handle_sm_handled_count_too_high(h, events);
                     return Ok(());
                 }
@@ -85,7 +96,7 @@ impl XmppRuntime {
             }
             if resume_failed {
                 self.pending_fallback_retries
-                    .extend(self.sm_state.unhandled_stanzas());
+                    .extend(self.sm_state.unhandled_stanzas_for_fallback_retry());
                 self.sm_state.previd = None;
             }
             self.sm_state.stop();
@@ -94,6 +105,9 @@ impl XmppRuntime {
             )));
             if resume_failed {
                 self.request_resource_binding(events)?;
+            } else {
+                self.sm_advertised = false;
+                self.flush_pending_fallback_retries(events);
             }
         }
 
@@ -109,6 +123,22 @@ impl XmppRuntime {
                     .attr("send-count", self.sm_state.outbound_count.to_string())
                     .build(),
             )
+            .build();
+        self.sm_state.stop();
+        events.push(ClientEvent::Connection(ConnectionEvent::OutboundMessage(
+            TransportMessage::Element(error),
+        )));
+        events.push(ClientEvent::Connection(ConnectionEvent::StreamManagement(
+            StreamManagementEvent::Failed,
+        )));
+        events.push(ClientEvent::Connection(ConnectionEvent::OutboundMessage(
+            TransportMessage::Close(StreamClose),
+        )));
+    }
+
+    fn handle_sm_protocol_violation(&mut self, events: &mut Vec<ClientEvent>) {
+        let error = Element::builder("error", NS_STREAMS)
+            .append(Element::builder("bad-request", NS_STREAM_ERRORS).build())
             .build();
         self.sm_state.stop();
         events.push(ClientEvent::Connection(ConnectionEvent::OutboundMessage(

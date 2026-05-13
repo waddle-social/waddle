@@ -229,6 +229,85 @@ fn runtime_establishes_session_from_successful_sm_resume_without_binding() {
 }
 
 #[test]
+fn runtime_rejects_resumed_without_required_h() {
+    let mut config = config();
+    config.session.stream_management.resume_state =
+        Some(SmResumeState::new("old-sm-id", 7, 12).unwrap());
+    let mut runtime = XmppRuntime::new(config).unwrap();
+    drive_to_authenticated_stream(&mut runtime);
+    runtime
+        .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+            post_auth_features_with_sm(),
+        )))
+        .unwrap();
+
+    let events = runtime
+        .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+            Element::builder("resumed", crate::stream_management::NS_SM)
+                .attr("previd", "old-sm-id")
+                .build(),
+        )))
+        .unwrap();
+
+    assert_eq!(runtime.snapshot().phase, SessionPhase::Resuming);
+    assert!(events.iter().any(|event| matches!(
+        event,
+        ClientEvent::Connection(ConnectionEvent::StreamManagement(
+            StreamManagementEvent::Failed
+        ))
+    )));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        ClientEvent::Connection(ConnectionEvent::OutboundMessage(TransportMessage::Close(_)))
+    )));
+    assert!(!events.iter().any(|event| matches!(
+        event,
+        ClientEvent::Connection(ConnectionEvent::SessionReady(_))
+            | ClientEvent::Lifecycle(LifecycleEvent::SessionReady(_))
+    )));
+}
+
+#[test]
+fn runtime_rejects_resumed_with_mismatched_previd() {
+    let mut config = config();
+    config.session.stream_management.resume_state =
+        Some(SmResumeState::new("old-sm-id", 7, 12).unwrap());
+    let mut runtime = XmppRuntime::new(config).unwrap();
+    drive_to_authenticated_stream(&mut runtime);
+    runtime
+        .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+            post_auth_features_with_sm(),
+        )))
+        .unwrap();
+
+    let events = runtime
+        .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+            Element::builder("resumed", crate::stream_management::NS_SM)
+                .attr("previd", "different-sm-id")
+                .attr("h", "12")
+                .build(),
+        )))
+        .unwrap();
+
+    assert_eq!(runtime.snapshot().phase, SessionPhase::Resuming);
+    assert!(events.iter().any(|event| matches!(
+        event,
+        ClientEvent::Connection(ConnectionEvent::StreamManagement(
+            StreamManagementEvent::Failed
+        ))
+    )));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        ClientEvent::Connection(ConnectionEvent::OutboundMessage(
+            TransportMessage::Element(element)
+        )) if element.name() == "error"
+            && element
+                .get_child("bad-request", "urn:ietf:params:xml:ns:xmpp-streams")
+                .is_some()
+    )));
+}
+
+#[test]
 fn runtime_falls_back_to_resource_binding_when_sm_resume_fails() {
     let mut config = config();
     config.session.stream_management.resume_state =
@@ -310,30 +389,57 @@ fn runtime_requests_default_resume_window_when_enabling_stream_management() {
 }
 
 #[test]
-fn runtime_replays_unhandled_stanzas_after_resume_without_recounting_them() {
+fn runtime_releases_send_barrier_when_fresh_sm_enable_fails() {
     let mut runtime = XmppRuntime::new(config()).unwrap();
+    drive_to_authenticated_stream(&mut runtime);
+    let bind_events = runtime
+        .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+            post_auth_features_with_sm(),
+        )))
+        .unwrap();
+    let bind_id = bind_events
+        .iter()
+        .find_map(|event| match event {
+            ClientEvent::Connection(ConnectionEvent::ResourceBindingRequested(request)) => {
+                Some(request.stanza_id.clone())
+            }
+            _ => None,
+        })
+        .unwrap();
     runtime
-        .apply_transport_event(TransportEvent::MessageSent(TransportMessage::Element(
-            SmState::build_enable(true),
+        .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+            bind_result(&bind_id),
         )))
         .unwrap();
 
-    let handled = Element::builder("message", crate::NS_CLIENT)
-        .attr("id", "handled")
-        .attr("type", "chat")
-        .build();
-    let unhandled = Element::builder("message", crate::NS_CLIENT)
-        .attr("id", "unhandled")
-        .attr("type", "chat")
-        .build();
-    runtime
-        .apply_transport_event(TransportEvent::MessageSent(TransportMessage::Element(
-            handled,
+    assert!(!runtime.can_send_app_stanza());
+
+    let failed_events = runtime
+        .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+            Element::builder("failed", crate::stream_management::NS_SM).build(),
         )))
         .unwrap();
+
+    assert_eq!(runtime.snapshot().phase, SessionPhase::Established);
+    assert!(runtime.can_send_app_stanza());
+    assert!(failed_events.iter().any(|event| matches!(
+        event,
+        ClientEvent::Connection(ConnectionEvent::StreamManagement(
+            StreamManagementEvent::Failed
+        ))
+    )));
+}
+
+#[test]
+fn runtime_replays_unhandled_stanzas_after_resume_without_recounting_them() {
+    let resume_state = resume_state_with_sent_messages(["handled", "unhandled"]);
+    let mut config = config();
+    config.session.stream_management.resume_state = Some(resume_state);
+    let mut runtime = XmppRuntime::new(config).unwrap();
+    drive_to_authenticated_stream(&mut runtime);
     runtime
-        .apply_transport_event(TransportEvent::MessageSent(TransportMessage::Element(
-            unhandled.clone(),
+        .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+            post_auth_features_with_sm(),
         )))
         .unwrap();
 
@@ -351,11 +457,15 @@ fn runtime_replays_unhandled_stanzas_after_resume_without_recounting_them() {
         ClientEvent::Connection(ConnectionEvent::OutboundMessage(
             TransportMessage::Element(element)
         )) if element.attr("id") == Some("unhandled")
+            && element.get_child("delay", "urn:xmpp:delay").is_none()
     )));
 
     runtime
         .apply_transport_event(TransportEvent::MessageSent(TransportMessage::Element(
-            unhandled,
+            Element::builder("message", crate::NS_CLIENT)
+                .attr("id", "unhandled")
+                .attr("type", "chat")
+                .build(),
         )))
         .unwrap();
 
@@ -507,12 +617,98 @@ fn runtime_retries_only_unhandled_stanzas_after_failed_resume_fresh_enable() {
             TransportMessage::Element(element)
         )) if element.attr("id") == Some("handled-before-fail")
     )));
-    assert!(enabled_events.iter().any(|event| matches!(
+    let retry = enabled_events
+        .iter()
+        .find_map(|event| match event {
+            ClientEvent::Connection(ConnectionEvent::OutboundMessage(
+                TransportMessage::Element(element),
+            )) if element.attr("id") == Some("retry-after-fail") => Some(element),
+            _ => None,
+        })
+        .expect("retry-after-fail replay");
+    let delay = retry
+        .get_child("delay", "urn:xmpp:delay")
+        .expect("fallback replay should include XEP-0203 delay");
+    assert!(delay.attr("stamp").is_some());
+}
+
+#[test]
+fn runtime_retries_unhandled_stanzas_when_fresh_sm_enable_fails() {
+    let resume_state = resume_state_with_sent_messages(["handled-before-fail", "retry-after-fail"]);
+    let mut config = config();
+    config.session.stream_management.resume_state = Some(resume_state);
+    let mut runtime = XmppRuntime::new(config).unwrap();
+
+    drive_to_authenticated_stream(&mut runtime);
+    runtime
+        .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+            post_auth_features_with_sm(),
+        )))
+        .unwrap();
+
+    let failed_events = runtime
+        .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+            Element::builder("failed", crate::stream_management::NS_SM)
+                .attr("h", "1")
+                .build(),
+        )))
+        .unwrap();
+    let bind_id = failed_events
+        .iter()
+        .find_map(|event| match event {
+            ClientEvent::Connection(ConnectionEvent::ResourceBindingRequested(request)) => {
+                Some(request.stanza_id.clone())
+            }
+            _ => None,
+        })
+        .expect("fresh bind request");
+    let bind_events = runtime
+        .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+            bind_result(&bind_id),
+        )))
+        .unwrap();
+
+    let enable = bind_events
+        .iter()
+        .find_map(|event| match event {
+            ClientEvent::Connection(ConnectionEvent::OutboundMessage(
+                TransportMessage::Element(element),
+            )) if element.name() == "enable" => Some(element.clone()),
+            _ => None,
+        })
+        .expect("fresh SM enable");
+    runtime
+        .apply_transport_event(TransportEvent::MessageSent(TransportMessage::Element(
+            enable,
+        )))
+        .unwrap();
+
+    let failed_enable_events = runtime
+        .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+            Element::builder("failed", crate::stream_management::NS_SM).build(),
+        )))
+        .unwrap();
+
+    assert!(runtime.can_send_app_stanza());
+    assert!(!failed_enable_events.iter().any(|event| matches!(
         event,
         ClientEvent::Connection(ConnectionEvent::OutboundMessage(
             TransportMessage::Element(element)
-        )) if element.attr("id") == Some("retry-after-fail")
+        )) if element.attr("id") == Some("handled-before-fail")
     )));
+    let retry = failed_enable_events
+        .iter()
+        .find_map(|event| match event {
+            ClientEvent::Connection(ConnectionEvent::OutboundMessage(
+                TransportMessage::Element(element),
+            )) if element.attr("id") == Some("retry-after-fail") => Some(element),
+            _ => None,
+        })
+        .expect("retry-after-fail replay after fresh enable failure");
+    let delay = retry
+        .get_child("delay", "urn:xmpp:delay")
+        .expect("fresh enable failure replay should include XEP-0203 delay");
+    assert!(delay.attr("stamp").is_some());
 }
 
 #[test]

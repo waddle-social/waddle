@@ -1,17 +1,19 @@
 use std::collections::VecDeque;
 
+use chrono::{DateTime, SecondsFormat, Utc};
 use minidom::Element;
 
 use crate::error::{ClientError, ClientResult};
 use crate::request::StanzaId;
 
 pub const NS_SM: &str = "urn:xmpp:sm:3";
+const NS_DELAY: &str = "urn:xmpp:delay";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct QueuedOutboundStanza {
-    h: u32,
     element: Element,
     message_stanza_id: Option<StanzaId>,
+    sent_at: DateTime<Utc>,
 }
 
 /// In-memory XEP-0198 resume snapshot carried across a reconnect attempt.
@@ -131,9 +133,9 @@ impl SmState {
 
         self.record_sent(1);
         self.outbound_queue.push_back(QueuedOutboundStanza {
-            h: self.outbound_count,
             message_stanza_id: message_delivery_stanza_id(element),
             element: element.clone(),
+            sent_at: existing_delay_stamp(element).unwrap_or_else(Utc::now),
         });
     }
 
@@ -159,13 +161,13 @@ impl SmState {
 
     /// Update `server_h` from an `<a h='...'/>` ack.
     pub fn process_ack(&mut self, h: u32) -> Vec<StanzaId> {
+        let handled_since_last_ack = h.wrapping_sub(self.server_h);
         self.server_h = h;
         let mut acked = Vec::new();
-        while self
-            .outbound_queue
-            .front()
-            .is_some_and(|queued| queued.h <= h)
-        {
+        let to_drop = usize::try_from(handled_since_last_ack)
+            .unwrap_or(usize::MAX)
+            .min(self.outbound_queue.len());
+        for _ in 0..to_drop {
             if let Some(queued) = self.outbound_queue.pop_front() {
                 if let Some(stanza_id) = queued.message_stanza_id {
                     acked.push(stanza_id);
@@ -173,6 +175,10 @@ impl SmState {
             }
         }
         acked
+    }
+
+    pub fn handled_count_too_high(&self, h: u32) -> bool {
+        h.wrapping_sub(self.server_h) > self.outbound_count.wrapping_sub(self.server_h)
     }
 
     /// Mark currently unhandled outbound stanzas for replay and return them.
@@ -186,10 +192,10 @@ impl SmState {
         replay
     }
 
-    pub fn unhandled_stanzas(&self) -> Vec<Element> {
+    pub fn unhandled_stanzas_for_fallback_retry(&self) -> Vec<Element> {
         self.outbound_queue
             .iter()
-            .map(|queued| queued.element.clone())
+            .map(QueuedOutboundStanza::element_for_fallback_retry)
             .collect()
     }
 
@@ -267,6 +273,34 @@ impl SmState {
     pub fn is_request_ack(element: &Element) -> bool {
         element.name() == "r" && element.ns() == NS_SM
     }
+}
+
+impl QueuedOutboundStanza {
+    fn element_for_fallback_retry(&self) -> Element {
+        if self.element.name() != "message" {
+            return self.element.clone();
+        }
+        if self.element.get_child("delay", NS_DELAY).is_some() {
+            return self.element.clone();
+        }
+
+        let stamp = self.sent_at.to_rfc3339_opts(SecondsFormat::Millis, true);
+        let mut element = self.element.clone();
+        element.append_child(
+            Element::builder("delay", NS_DELAY)
+                .attr("stamp", stamp)
+                .build(),
+        );
+        element
+    }
+}
+
+fn existing_delay_stamp(element: &Element) -> Option<DateTime<Utc>> {
+    element
+        .get_child("delay", NS_DELAY)?
+        .attr("stamp")
+        .and_then(|stamp| DateTime::parse_from_rfc3339(stamp).ok())
+        .map(|stamp| stamp.with_timezone(&Utc))
 }
 
 fn message_delivery_stanza_id(element: &Element) -> Option<StanzaId> {
@@ -432,5 +466,64 @@ mod tests {
         assert_eq!(state.server_h, 10);
         state.process_ack(15);
         assert_eq!(state.server_h, 15);
+    }
+
+    #[test]
+    fn process_ack_trims_queue_across_u32_wrap() {
+        let mut state = SmState::new();
+        state.outbound_enabled = true;
+        state.server_h = u32::MAX - 1;
+        state.outbound_count = u32::MAX - 1;
+
+        state.record_sent_stanza(
+            &Element::builder("message", "jabber:client")
+                .attr("id", "last-before-wrap")
+                .build(),
+        );
+        state.record_sent_stanza(
+            &Element::builder("message", "jabber:client")
+                .attr("id", "first-after-wrap")
+                .build(),
+        );
+
+        assert!(!state.handled_count_too_high(0));
+        let acked = state.process_ack(0);
+
+        assert_eq!(
+            acked
+                .iter()
+                .map(|stanza_id| stanza_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["last-before-wrap", "first-after-wrap"]
+        );
+        assert!(state.outbound_queue.is_empty());
+    }
+
+    #[test]
+    fn fallback_retry_preserves_existing_delay_stamp() {
+        let mut state = SmState::new();
+        state.outbound_enabled = true;
+        let message = Element::builder("message", "jabber:client")
+            .attr("id", "already-delayed")
+            .append(
+                Element::builder("delay", NS_DELAY)
+                    .attr("stamp", "2024-01-15T10:00:00Z")
+                    .build(),
+            )
+            .build();
+
+        state.record_sent_stanza(&message);
+        let retry = state
+            .unhandled_stanzas_for_fallback_retry()
+            .into_iter()
+            .next()
+            .expect("fallback retry");
+        let delays = retry
+            .children()
+            .filter(|child| child.name() == "delay" && child.ns() == NS_DELAY)
+            .collect::<Vec<_>>();
+
+        assert_eq!(delays.len(), 1);
+        assert_eq!(delays[0].attr("stamp"), Some("2024-01-15T10:00:00Z"));
     }
 }
