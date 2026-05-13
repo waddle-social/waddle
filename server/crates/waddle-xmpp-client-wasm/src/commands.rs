@@ -82,6 +82,7 @@ pub(crate) async fn disconnect_client(
         .await
         .map_err(|_| js_error("client is disconnected"))?;
     inner.borrow_mut().cmd_tx = None;
+    inner.borrow_mut().resume_state = None;
     rx.await
         .map_err(|_| js_error("client is disconnected"))?
         .map_err(|err| js_error(err.to_string()))

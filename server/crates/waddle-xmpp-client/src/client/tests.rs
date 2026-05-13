@@ -14,7 +14,7 @@ use crate::bootstrap::{NS_BIND, NS_SASL, NS_STREAMS};
 use crate::command::XmppCommand;
 use crate::config::{AccessToken, ClientResource, OAuthBearerConfig, WebSocketConfig};
 use crate::error::ClientError;
-use crate::event::{ClientEvent, LifecycleEvent, MessageDeliveryEvent, StreamManagementEvent};
+use crate::event::{ClientEvent, LifecycleEvent, MessageDeliveryEvent};
 use crate::state::{SessionBinding, SessionPhase, SessionSnapshot};
 use crate::transport::{StreamClose, StreamOpen, TransportEvent, TransportMessage, TransportState};
 use crate::ConnectionConfig;
@@ -52,9 +52,6 @@ fn make_driver_task(
         events: evt_tx,
         state,
         pending_iqs: HashMap::new(),
-        sm_delivery_tracking_enabled: false,
-        outbound_h: 0,
-        pending_message_deliveries: VecDeque::new(),
     };
     (task, cmd_tx, evt_rx)
 }
@@ -182,140 +179,29 @@ async fn send_iq_resolves_via_mock_driver() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn stream_management_ack_emits_message_delivery_ack() {
+async fn driver_forwards_core_message_delivery_ack() {
     let (mut task, _cmd_tx, mut rx) = make_driver_task(MockTransport::new(
         vec![],
         vec![],
         MockTransportShared::default(),
     ));
 
-    let message = Element::builder("message", crate::NS_CLIENT)
-        .attr("id", "out-1")
-        .attr("type", "chat")
-        .build();
-    task.sm_delivery_tracking_enabled = true;
-    task.record_outbound_element(&message);
-
-    task.dispatch_client_event(ClientEvent::Connection(ConnectionEvent::StreamManagement(
-        StreamManagementEvent::AckReceived { h: 1 },
-    )));
+    task.dispatch_client_event(ClientEvent::MessageDelivery(MessageDeliveryEvent::Acked {
+        stanza_id: StanzaId::new("core-tracked").unwrap(),
+    }));
 
     let mut got_ack = false;
-    for _ in 0..2 {
-        match rx.try_recv() {
-            Ok(ClientEvent::MessageDelivery(MessageDeliveryEvent::Acked { stanza_id }))
-                if stanza_id.as_str() == "out-1" =>
+    while let Ok(event) = rx.try_recv() {
+        match event {
+            ClientEvent::MessageDelivery(MessageDeliveryEvent::Acked { stanza_id })
+                if stanza_id.as_str() == "core-tracked" =>
             {
                 got_ack = true
             }
-            Ok(_) => {}
-            Err(_) => break,
+            _ => {}
         }
     }
-    assert!(got_ack, "expected delivery ack event for out-1");
-    assert!(task.pending_message_deliveries.is_empty());
-}
-
-#[tokio::test(flavor = "current_thread")]
-async fn stream_management_tracking_starts_when_enable_is_sent() {
-    let (mut task, _cmd_tx, mut rx) = make_driver_task(MockTransport::new(
-        vec![],
-        vec![],
-        MockTransportShared::default(),
-    ));
-
-    let enable = crate::stream_management::SmState::build_enable(true);
-    task.record_outbound_element(&enable);
-    assert!(task.sm_delivery_tracking_enabled);
-    assert_eq!(task.outbound_h, 0);
-
-    let message = Element::builder("message", crate::NS_CLIENT)
-        .attr("id", "out-before-enabled")
-        .attr("type", "chat")
-        .build();
-    task.record_outbound_element(&message);
-
-    task.dispatch_client_event(ClientEvent::Connection(ConnectionEvent::StreamManagement(
-        StreamManagementEvent::AckReceived { h: 1 },
-    )));
-
-    let mut got_ack = false;
-    for _ in 0..2 {
-        match rx.try_recv() {
-            Ok(ClientEvent::MessageDelivery(MessageDeliveryEvent::Acked { stanza_id }))
-                if stanza_id.as_str() == "out-before-enabled" =>
-            {
-                got_ack = true
-            }
-            Ok(_) => {}
-            Err(_) => break,
-        }
-    }
-    assert!(got_ack, "message sent after <enable/> must be tracked");
-}
-
-#[tokio::test(flavor = "current_thread")]
-async fn stream_management_resume_does_not_reset_outbound_counter() {
-    let (mut task, _cmd_tx, _rx) = make_driver_task(MockTransport::new(
-        vec![],
-        vec![],
-        MockTransportShared::default(),
-    ));
-
-    task.sm_delivery_tracking_enabled = true;
-    task.outbound_h = 2;
-
-    task.dispatch_client_event(ClientEvent::Connection(ConnectionEvent::StreamManagement(
-        StreamManagementEvent::Resumed { h: 1 },
-    )));
-
-    let message = Element::builder("message", crate::NS_CLIENT)
-        .attr("id", "after-resume")
-        .attr("type", "chat")
-        .build();
-    task.record_outbound_element(&message);
-
-    assert_eq!(task.outbound_h, 3);
-    assert!(matches!(
-        task.pending_message_deliveries.back(),
-        Some(TrackedMessageDelivery { stanza_id, h: 3 })
-            if stanza_id.as_str() == "after-resume"
-    ));
-}
-
-#[tokio::test(flavor = "current_thread")]
-async fn stream_management_failure_emits_message_delivery_failed() {
-    let (mut task, _cmd_tx, mut rx) = make_driver_task(MockTransport::new(
-        vec![],
-        vec![],
-        MockTransportShared::default(),
-    ));
-
-    let message = Element::builder("message", crate::NS_CLIENT)
-        .attr("id", "out-2")
-        .attr("type", "groupchat")
-        .build();
-    task.sm_delivery_tracking_enabled = true;
-    task.record_outbound_element(&message);
-
-    task.dispatch_client_event(ClientEvent::Connection(ConnectionEvent::StreamManagement(
-        StreamManagementEvent::Failed,
-    )));
-
-    let mut got_failed = false;
-    for _ in 0..2 {
-        match rx.try_recv() {
-            Ok(ClientEvent::MessageDelivery(MessageDeliveryEvent::Failed { stanza_id }))
-                if stanza_id.as_str() == "out-2" =>
-            {
-                got_failed = true
-            }
-            Ok(_) => {}
-            Err(_) => break,
-        }
-    }
-    assert!(got_failed, "expected delivery failure event for out-2");
-    assert!(task.pending_message_deliveries.is_empty());
+    assert!(got_ack, "expected forwarded delivery ack event");
 }
 
 // ── full bootstrap integration tests ─────────────────────────────────────

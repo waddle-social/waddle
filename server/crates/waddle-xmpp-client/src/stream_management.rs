@@ -1,17 +1,61 @@
+use std::collections::VecDeque;
+
 use minidom::Element;
+
+use crate::error::{ClientError, ClientResult};
+use crate::request::StanzaId;
 
 pub const NS_SM: &str = "urn:xmpp:sm:3";
 
+/// In-memory XEP-0198 resume snapshot carried across a reconnect attempt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SmResumeState {
+    previd: String,
+    inbound_h: u32,
+    outbound_h: u32,
+}
+
+impl SmResumeState {
+    pub fn new(previd: impl Into<String>, inbound_h: u32, outbound_h: u32) -> ClientResult<Self> {
+        let previd = previd.into();
+        if previd.trim().is_empty() {
+            return Err(ClientError::EmptyStanzaId);
+        }
+
+        Ok(Self {
+            previd,
+            inbound_h,
+            outbound_h,
+        })
+    }
+
+    pub fn previd(&self) -> &str {
+        &self.previd
+    }
+
+    pub fn inbound_h(&self) -> u32 {
+        self.inbound_h
+    }
+
+    pub fn outbound_h(&self) -> u32 {
+        self.outbound_h
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct QueuedOutboundStanza {
+    h: u32,
+    element: Element,
+    message_stanza_id: Option<StanzaId>,
+}
+
 /// XEP-0198 client-side stream management state.
 ///
-/// **SM semantics:** Acking tracks transport-level delivery only — the server
-/// acknowledging `h` means it has *received* those stanzas at the transport
-/// boundary.  Application-level stanzas (`<message/>`, `<iq/>`, `<presence/>`)
-/// are **not** queued for resend on session resume.  Resumption restores the
-/// stream so the server can retransmit anything it buffered; the client does not
-/// replay its own unacked stanzas.  This keeps the implementation simple and
-/// avoids double-delivery problems that would otherwise require app-level
-/// deduplication.
+/// **SM semantics:** Acking tracks transport-level responsibility. When the
+/// peer reports `h`, every outbound stanza at or below that sequence number has
+/// been handled by the peer. A resumable session must retain enough typed
+/// outbound state to replay stanzas above the reported `h` without inventing new
+/// message identity.
 #[derive(Debug, Clone, Default)]
 pub struct SmState {
     /// Stanzas sent since the session started (wrapping u32).
@@ -30,6 +74,8 @@ pub struct SmState {
     pub outbound_enabled: bool,
     /// Whether SM is currently enabled for this session.
     pub enabled: bool,
+    outbound_queue: VecDeque<QueuedOutboundStanza>,
+    replay_in_flight: VecDeque<Element>,
 }
 
 impl SmState {
@@ -37,9 +83,32 @@ impl SmState {
         Self::default()
     }
 
+    pub fn from_resume_state(resume_state: &SmResumeState) -> Self {
+        Self {
+            outbound_count: resume_state.outbound_h(),
+            inbound_count: resume_state.inbound_h(),
+            previd: Some(resume_state.previd().to_string()),
+            ..Self::default()
+        }
+    }
+
     /// Increment the outbound stanza counter by `count`.
     pub fn record_sent(&mut self, count: u32) {
         self.outbound_count = self.outbound_count.wrapping_add(count);
+    }
+
+    /// Record a newly sent outbound stanza unless it is a queued replay.
+    pub fn record_sent_stanza(&mut self, element: &Element) {
+        if self.suppress_replay_sent_record(element) {
+            return;
+        }
+
+        self.record_sent(1);
+        self.outbound_queue.push_back(QueuedOutboundStanza {
+            h: self.outbound_count,
+            message_stanza_id: message_delivery_stanza_id(element),
+            element: element.clone(),
+        });
     }
 
     /// Start a fresh outbound SM sequence after sending `<enable/>`.
@@ -47,6 +116,8 @@ impl SmState {
         self.outbound_count = 0;
         self.server_h = 0;
         self.outbound_enabled = true;
+        self.outbound_queue.clear();
+        self.replay_in_flight.clear();
     }
 
     /// Stop all SM counters after `<failed/>` or stream termination.
@@ -61,17 +132,69 @@ impl SmState {
     }
 
     /// Update `server_h` from an `<a h='...'/>` ack.
-    pub fn process_ack(&mut self, h: u32) {
+    pub fn process_ack(&mut self, h: u32) -> Vec<StanzaId> {
         self.server_h = h;
+        let mut acked = Vec::new();
+        while self
+            .outbound_queue
+            .front()
+            .is_some_and(|queued| queued.h <= h)
+        {
+            if let Some(queued) = self.outbound_queue.pop_front() {
+                if let Some(stanza_id) = queued.message_stanza_id {
+                    acked.push(stanza_id);
+                }
+            }
+        }
+        acked
+    }
+
+    /// Mark currently unhandled outbound stanzas for replay and return them.
+    pub fn mark_unhandled_for_replay(&mut self) -> Vec<Element> {
+        let replay: Vec<Element> = self
+            .outbound_queue
+            .iter()
+            .map(|queued| queued.element.clone())
+            .collect();
+        self.replay_in_flight.extend(replay.iter().cloned());
+        replay
+    }
+
+    fn suppress_replay_sent_record(&mut self, element: &Element) -> bool {
+        if self
+            .replay_in_flight
+            .front()
+            .is_some_and(|queued| queued == element)
+        {
+            self.replay_in_flight.pop_front();
+            return true;
+        }
+        false
     }
 
     /// Build `<enable xmlns='urn:xmpp:sm:3' resume='true'/>`.
     pub fn build_enable(resume: bool) -> Element {
+        Self::build_enable_with_max(resume, None)
+    }
+
+    /// Build `<enable/>` with an optional XEP-0198 resumption window request.
+    pub fn build_enable_with_max(resume: bool, max: Option<u32>) -> Element {
         let mut b = Element::builder("enable", NS_SM);
         if resume {
             b = b.attr("resume", "true");
         }
+        if let Some(max) = max {
+            b = b.attr("max", max.to_string());
+        }
         b.build()
+    }
+
+    /// Build `<resume xmlns='urn:xmpp:sm:3' previd='ID' h='N'/>`.
+    pub fn build_resume(previd: &str, h: u32) -> Element {
+        Element::builder("resume", NS_SM)
+            .attr("previd", previd)
+            .attr("h", h.to_string())
+            .build()
     }
 
     /// Build `<r xmlns='urn:xmpp:sm:3'/>` to request an ack.
@@ -89,6 +212,9 @@ impl SmState {
     /// Extract the resumption `id` from an `<enabled/>` element, if present.
     pub fn parse_enabled(element: &Element) -> Option<String> {
         if element.name() == "enabled" && element.ns() == NS_SM {
+            if !matches!(element.attr("resume"), Some("true") | Some("1")) {
+                return None;
+            }
             element.attr("id").map(|s| s.to_string())
         } else {
             None
@@ -108,6 +234,14 @@ impl SmState {
     pub fn is_request_ack(element: &Element) -> bool {
         element.name() == "r" && element.ns() == NS_SM
     }
+}
+
+fn message_delivery_stanza_id(element: &Element) -> Option<StanzaId> {
+    if element.name() != "message" {
+        return None;
+    }
+
+    element.attr("id").and_then(|id| StanzaId::new(id).ok())
 }
 
 #[cfg(test)]
@@ -162,6 +296,20 @@ mod tests {
             .attr("resume", "true")
             .build();
         assert_eq!(SmState::parse_enabled(&el), Some("abc123".to_string()));
+    }
+
+    #[test]
+    fn parse_enabled_requires_resumable_response() {
+        let el = Element::builder("enabled", NS_SM)
+            .attr("id", "abc123")
+            .build();
+        assert_eq!(SmState::parse_enabled(&el), None);
+
+        let el = Element::builder("enabled", NS_SM)
+            .attr("id", "abc123")
+            .attr("resume", "false")
+            .build();
+        assert_eq!(SmState::parse_enabled(&el), None);
     }
 
     #[test]

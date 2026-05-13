@@ -16,7 +16,15 @@ impl WaddleClient {
                 on_error: None,
                 on_message_delivery_acked: None,
                 on_message_delivery_failed: None,
+                resume_state: None,
             })),
+        }
+    }
+
+    pub fn get_resume_state(&self) -> JsValue {
+        match self.inner.borrow().resume_state.as_ref() {
+            Some(state) => to_js_value(state).unwrap_or(JsValue::NULL),
+            None => JsValue::NULL,
         }
     }
 

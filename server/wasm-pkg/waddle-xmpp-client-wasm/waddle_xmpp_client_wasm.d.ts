@@ -36,6 +36,7 @@ export class WaddleClient {
      */
     fetch_room_pins(room_jid: string): Promise<any>;
     fetch_user_pep_profile(jid: string): Promise<any>;
+    get_resume_state(): any;
     get_server_version(): Promise<any>;
     join_room(room_jid: string, nick: string): Promise<any>;
     join_room_without_history(room_jid: string, nick: string): Promise<any>;
@@ -94,6 +95,7 @@ export class WaddleConfig {
     free(): void;
     [Symbol.dispose](): void;
     constructor(server_url: string, jid: string, access_token: string, resource: string);
+    with_resume_state(previd: string, inbound_h: number, outbound_h: number): void;
 }
 
 export default function init(): Promise<void>;

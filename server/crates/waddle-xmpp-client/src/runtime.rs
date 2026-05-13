@@ -44,19 +44,28 @@ enum BootstrapState {
     AwaitingFeatures { authenticated: bool },
     AwaitingAuthenticationOutcome,
     AwaitingBindResult { stanza_id: StanzaId },
+    AwaitingResume,
     Ready,
 }
 
 impl XmppRuntime {
     pub fn new(config: ClientConfig) -> ClientResult<Self> {
         config.validate()?;
+        let sm_state = config
+            .session
+            .stream_management
+            .resume_state
+            .as_ref()
+            .map(SmState::from_resume_state)
+            .unwrap_or_else(SmState::new);
+
         Ok(Self {
             config,
             snapshot: SessionSnapshot::new(),
             requests: RequestTracker::default(),
             bootstrap: BootstrapState::Idle,
             next_bootstrap_stanza: 0,
-            sm_state: SmState::new(),
+            sm_state,
             sm_advertised: false,
         })
     }
@@ -67,6 +76,17 @@ impl XmppRuntime {
 
     pub fn snapshot(&self) -> &SessionSnapshot {
         &self.snapshot
+    }
+
+    pub fn resume_state(&self) -> Option<crate::stream_management::SmResumeState> {
+        self.sm_state.previd.as_ref().and_then(|previd| {
+            crate::stream_management::SmResumeState::new(
+                previd.clone(),
+                self.sm_state.inbound_count,
+                self.sm_state.outbound_count,
+            )
+            .ok()
+        })
     }
 
     pub fn pending_requests(&self) -> Vec<PendingRequest> {
@@ -200,7 +220,7 @@ impl XmppRuntime {
 
         if self.sm_state.outbound_enabled && matches!(element.name(), "iq" | "message" | "presence")
         {
-            self.sm_state.record_sent(1);
+            self.sm_state.record_sent_stanza(element);
         }
     }
 
@@ -294,34 +314,57 @@ impl XmppRuntime {
             BootstrapState::AwaitingFeatures {
                 authenticated: true,
             } => {
+                if features.stream_management {
+                    self.sm_advertised = true;
+                }
+
+                let sm_cfg = &self.config.session.stream_management;
+                if sm_cfg.enable_stream_management
+                    && sm_cfg.allow_resume
+                    && features.stream_management
+                    && self.sm_state.previd.is_some()
+                {
+                    let resume = SmState::build_resume(
+                        self.sm_state.previd.as_deref().unwrap_or_default(),
+                        self.sm_state.inbound_count,
+                    );
+                    self.bootstrap = BootstrapState::AwaitingResume;
+                    self.set_phase(SessionPhase::Resuming)?;
+                    events.push(ClientEvent::Connection(ConnectionEvent::OutboundMessage(
+                        TransportMessage::Element(resume),
+                    )));
+                    return Ok(());
+                }
+
                 if !features.bind {
                     return Err(ClientError::MissingStreamFeature {
                         feature: RequiredStreamFeature::ResourceBinding,
                     });
                 }
 
-                if features.stream_management {
-                    self.sm_advertised = true;
-                }
-
-                let request = ResourceBindingRequest::new(
-                    self.next_bootstrap_stanza_id()?,
-                    self.oauth_config().resource.clone(),
-                );
-                self.bootstrap = BootstrapState::AwaitingBindResult {
-                    stanza_id: request.stanza_id.clone(),
-                };
-                self.set_phase(SessionPhase::Binding)?;
-                events.push(ClientEvent::Connection(
-                    ConnectionEvent::ResourceBindingRequested(request.clone()),
-                ));
-                events.push(ClientEvent::Connection(ConnectionEvent::OutboundMessage(
-                    request.to_transport_message(),
-                )));
+                self.request_resource_binding(events)?;
             }
             _ => {}
         }
 
+        Ok(())
+    }
+
+    fn request_resource_binding(&mut self, events: &mut Vec<ClientEvent>) -> ClientResult<()> {
+        let request = ResourceBindingRequest::new(
+            self.next_bootstrap_stanza_id()?,
+            self.oauth_config().resource.clone(),
+        );
+        self.bootstrap = BootstrapState::AwaitingBindResult {
+            stanza_id: request.stanza_id.clone(),
+        };
+        self.set_phase(SessionPhase::Binding)?;
+        events.push(ClientEvent::Connection(
+            ConnectionEvent::ResourceBindingRequested(request.clone()),
+        ));
+        events.push(ClientEvent::Connection(ConnectionEvent::OutboundMessage(
+            request.to_transport_message(),
+        )));
         Ok(())
     }
 
@@ -421,7 +464,7 @@ impl XmppRuntime {
 
         let sm_cfg = &self.config.session.stream_management;
         if sm_cfg.enable_stream_management && self.sm_advertised {
-            let enable = SmState::build_enable(sm_cfg.allow_resume);
+            let enable = SmState::build_enable_with_max(sm_cfg.allow_resume, sm_cfg.resume_max);
             events.push(ClientEvent::Connection(ConnectionEvent::OutboundMessage(
                 TransportMessage::Element(enable),
             )));
@@ -465,7 +508,9 @@ impl XmppRuntime {
                 | (SessionPhase::OpeningStream, SessionPhase::Authenticating)
                 | (SessionPhase::Authenticating, SessionPhase::OpeningStream)
                 | (SessionPhase::OpeningStream, SessionPhase::Binding)
+                | (SessionPhase::OpeningStream, SessionPhase::Resuming)
                 | (SessionPhase::Authenticating, SessionPhase::Binding)
+                | (SessionPhase::Resuming, SessionPhase::Binding)
                 | (SessionPhase::Binding, SessionPhase::Established)
                 | (SessionPhase::Established, SessionPhase::Resuming)
                 | (SessionPhase::Resuming, SessionPhase::Established)
