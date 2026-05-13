@@ -178,7 +178,8 @@ async fn delete_legacy_mam_query_frames(
                 "SELECT row_id, transient_xml \
                  FROM pending_delivery \
                  WHERE payload_kind = 'transient' \
-                   AND transient_xml IS NOT NULL",
+                   AND transient_xml IS NOT NULL \
+                   AND transient_xml LIKE '%urn:xmpp:mam:2%'",
                 (),
             )
             .await?;

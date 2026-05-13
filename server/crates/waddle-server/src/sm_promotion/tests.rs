@@ -74,9 +74,54 @@ fn mam_replay_xml(child_name: &str) -> String {
     ));
     m.from = Some("alice@example.com".parse::<jid::Jid>().unwrap());
     m.type_ = xmpp_parsers::message::MessageType::Normal;
+    let payload = match child_name {
+        "result" => {
+            xmpp_parsers::minidom::Element::builder("result", waddle_xmpp_core::mam::MAM_NS)
+                .attr("queryid", "q1")
+                .attr("id", "archive-id-1")
+                .append(
+                    xmpp_parsers::minidom::Element::builder(
+                        "forwarded",
+                        waddle_xmpp_core::mam::FORWARD_NS,
+                    )
+                    .build(),
+                )
+                .build()
+        }
+        "fin" => xmpp_parsers::minidom::Element::builder("fin", waddle_xmpp_core::mam::MAM_NS)
+            .append(
+                xmpp_parsers::minidom::Element::builder("set", waddle_xmpp_core::mam::RSM_NS)
+                    .build(),
+            )
+            .build(),
+        other => {
+            xmpp_parsers::minidom::Element::builder(other, waddle_xmpp_core::mam::MAM_NS).build()
+        }
+    };
+    m.payloads.push(payload);
+    let element: xmpp_parsers::minidom::Element = m.into();
+    let mut buf = Vec::new();
+    element.write_to(&mut buf).unwrap();
+    String::from_utf8(buf).unwrap()
+}
+
+fn dm_with_mam_payload_xml(from: &str, to: &str, body: &str) -> String {
+    let mut m = xmpp_parsers::message::Message::new(Some(to.parse::<jid::Jid>().unwrap()));
+    m.from = Some(from.parse::<jid::Jid>().unwrap());
+    m.type_ = xmpp_parsers::message::MessageType::Chat;
+    m.bodies
+        .insert(String::new(), xmpp_parsers::message::Body(body.to_string()));
     m.payloads.push(
-        xmpp_parsers::minidom::Element::builder(child_name, waddle_xmpp_core::mam::MAM_NS)
+        xmpp_parsers::minidom::Element::builder("result", waddle_xmpp_core::mam::MAM_NS)
             .attr("queryid", "q1")
+            .attr("id", "archive-id-1")
+            .append(
+                xmpp_parsers::minidom::Element::builder(
+                    "forwarded",
+                    waddle_xmpp_core::mam::FORWARD_NS,
+                )
+                .build(),
+            )
             .build(),
     );
     let element: xmpp_parsers::minidom::Element = m.into();
@@ -109,6 +154,36 @@ async fn promotes_to_pending_delivery_when_no_alt_resource() {
 
     assert_eq!(summary.queued, 1);
     assert_eq!(summary.redelivered, 0);
+    assert_eq!(summary.bounced, 0);
+    assert_eq!(storage.count(&bare("alice@example.com")).await.unwrap(), 1);
+}
+
+#[tokio::test]
+async fn dm_with_mam_payload_is_still_promoted_to_pending_delivery() {
+    let storage: Arc<dyn PendingDeliveryStorage> =
+        Arc::new(InMemoryPendingDeliveryStorage::unlimited());
+    let registry = ConnectionRegistry::new();
+    let session = detached_session_with_unacked(
+        "stream-1",
+        full("alice@example.com/laptop"),
+        vec![dm_with_mam_payload_xml(
+            "bob@elsewhere/x",
+            "alice@example.com",
+            "keep despite extension",
+        )],
+    );
+
+    let summary = promote_session_unacked(
+        &session,
+        &registry,
+        &storage,
+        &Blocklist::empty(),
+        "example.com",
+    )
+    .await;
+
+    assert_eq!(summary.not_promotable, 0);
+    assert_eq!(summary.queued, 1);
     assert_eq!(summary.bounced, 0);
     assert_eq!(storage.count(&bare("alice@example.com")).await.unwrap(), 1);
 }

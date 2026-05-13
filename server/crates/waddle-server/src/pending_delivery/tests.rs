@@ -46,9 +46,50 @@ fn mam_query_frame_xml(recipient: &str, child_name: &str) -> String {
     let mut m = Message::new(Some(recipient.parse::<jid::Jid>().expect("jid")));
     m.from = Some("alice@example.com".parse::<jid::Jid>().expect("jid"));
     m.type_ = MessageType::Normal;
+    let payload = match child_name {
+        "result" => {
+            xmpp_parsers::minidom::Element::builder("result", waddle_xmpp_core::mam::MAM_NS)
+                .attr("queryid", "q1")
+                .attr("id", "archive-id-1")
+                .append(
+                    xmpp_parsers::minidom::Element::builder(
+                        "forwarded",
+                        waddle_xmpp_core::mam::FORWARD_NS,
+                    )
+                    .build(),
+                )
+                .build()
+        }
+        "fin" => xmpp_parsers::minidom::Element::builder("fin", waddle_xmpp_core::mam::MAM_NS)
+            .append(
+                xmpp_parsers::minidom::Element::builder("set", waddle_xmpp_core::mam::RSM_NS)
+                    .build(),
+            )
+            .build(),
+        other => {
+            xmpp_parsers::minidom::Element::builder(other, waddle_xmpp_core::mam::MAM_NS).build()
+        }
+    };
+    m.payloads.push(payload);
+    message_xml(m)
+}
+
+fn transient_message_with_mam_payload_xml(recipient: &str, body: &str) -> String {
+    let mut m = Message::new(Some(recipient.parse::<jid::Jid>().expect("jid")));
+    m.from = Some("bob@elsewhere/x".parse::<jid::Jid>().expect("jid"));
+    m.type_ = MessageType::Chat;
+    m.bodies.insert(String::new(), Body(body.to_string()));
     m.payloads.push(
-        xmpp_parsers::minidom::Element::builder(child_name, waddle_xmpp_core::mam::MAM_NS)
+        xmpp_parsers::minidom::Element::builder("result", waddle_xmpp_core::mam::MAM_NS)
             .attr("queryid", "q1")
+            .attr("id", "archive-id-1")
+            .append(
+                xmpp_parsers::minidom::Element::builder(
+                    "forwarded",
+                    waddle_xmpp_core::mam::FORWARD_NS,
+                )
+                .build(),
+            )
             .build(),
     );
     message_xml(m)
@@ -123,6 +164,10 @@ async fn db_storage_startup_deletes_legacy_mam_query_frames() {
                 "normal-message",
                 transient_message_xml("alice@example.com", "keep"),
             ),
+            (
+                "body-with-mam-payload",
+                transient_message_with_mam_payload_xml("alice@example.com", "keep-with-payload"),
+            ),
         ] {
             conn.execute(
                 "INSERT INTO pending_delivery (
@@ -144,12 +189,17 @@ async fn db_storage_startup_deletes_legacy_mam_query_frames() {
         .await
         .expect("list cleaned rows");
 
-    assert_eq!(rows.len(), 1);
-    let body = match &rows[0].payload {
-        PendingPayload::Transient(message) => message.bodies.get("").map(|body| body.0.as_str()),
-        PendingPayload::Archived(_) => None,
-    };
-    assert_eq!(body, Some("keep"));
+    let mut bodies = rows
+        .iter()
+        .filter_map(|row| match &row.payload {
+            PendingPayload::Transient(message) => {
+                message.bodies.get("").map(|body| body.0.as_str())
+            }
+            PendingPayload::Archived(_) => None,
+        })
+        .collect::<Vec<_>>();
+    bodies.sort_unstable();
+    assert_eq!(bodies, ["keep", "keep-with-payload"]);
 }
 
 #[tokio::test]
