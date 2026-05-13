@@ -16,23 +16,35 @@ pub fn build_chat_state_message(
     message_type: &str,
 ) -> ClientResult<Element> {
     let state = validate_chat_state(state)?;
-    Ok(Element::builder("message", NS_CLIENT)
+    let stanza_id = Uuid::new_v4().to_string();
+    let mut builder = Element::builder("message", NS_CLIENT)
         .attr("to", to)
         .attr("type", message_type)
-        .append(Element::builder(state, NS_CHAT_STATES).build())
-        .build())
+        .append(Element::builder(state, NS_CHAT_STATES).build());
+    if should_stamp_origin_id(message_type) {
+        builder = builder
+            .attr("id", stanza_id.as_str())
+            .append(build_origin_id(&stanza_id));
+    }
+    Ok(builder.build())
 }
 
 pub fn build_displayed_message(to: &str, message_id: &str, message_type: &str) -> Element {
-    Element::builder("message", NS_CLIENT)
+    let stanza_id = Uuid::new_v4().to_string();
+    let mut builder = Element::builder("message", NS_CLIENT)
         .attr("to", to)
         .attr("type", message_type)
         .append(
             Element::builder("displayed", NS_CHAT_MARKERS)
                 .attr("id", message_id)
                 .build(),
-        )
-        .build()
+        );
+    if should_stamp_origin_id(message_type) {
+        builder = builder
+            .attr("id", stanza_id.as_str())
+            .append(build_origin_id(&stanza_id));
+    }
+    builder.build()
 }
 
 pub fn build_reaction_message(
@@ -41,6 +53,7 @@ pub fn build_reaction_message(
     target_id: &str,
     emojis: &[String],
 ) -> Element {
+    let stanza_id = Uuid::new_v4().to_string();
     let mut reactions = Element::builder("reactions", NS_REACTIONS)
         .attr("id", target_id)
         .build();
@@ -55,7 +68,8 @@ pub fn build_reaction_message(
     Element::builder("message", NS_CLIENT)
         .attr("to", to)
         .attr("type", message_type)
-        .attr("id", Uuid::new_v4().to_string())
+        .attr("id", stanza_id.as_str())
+        .append(build_origin_id(&stanza_id))
         .append(reactions)
         .append(Element::builder("store", NS_HINTS).build())
         .build()
@@ -65,10 +79,12 @@ pub fn build_reaction_message(
 /// `to` is the room bare JID; `target_stanza_id` is the XEP-0359
 /// stanza-id (`by=room`) of the message being pinned.
 pub fn build_pinned_message(to: &str, target_stanza_id: &str) -> Element {
+    let stanza_id = Uuid::new_v4().to_string();
     Element::builder("message", NS_CLIENT)
         .attr("to", to)
         .attr("type", "groupchat")
-        .attr("id", Uuid::new_v4().to_string())
+        .attr("id", stanza_id.as_str())
+        .append(build_origin_id(&stanza_id))
         .append(
             Element::builder("pinned", NS_WADDLE_PIN_V0)
                 .attr("target", target_stanza_id)
@@ -79,10 +95,12 @@ pub fn build_pinned_message(to: &str, target_stanza_id: &str) -> Element {
 
 /// Build a `<message><unpinned target='…'/></message>` request for #414.
 pub fn build_unpinned_message(to: &str, target_stanza_id: &str) -> Element {
+    let stanza_id = Uuid::new_v4().to_string();
     Element::builder("message", NS_CLIENT)
         .attr("to", to)
         .attr("type", "groupchat")
-        .attr("id", Uuid::new_v4().to_string())
+        .attr("id", stanza_id.as_str())
+        .append(build_origin_id(&stanza_id))
         .append(
             Element::builder("unpinned", NS_WADDLE_PIN_V0)
                 .attr("target", target_stanza_id)
@@ -92,10 +110,12 @@ pub fn build_unpinned_message(to: &str, target_stanza_id: &str) -> Element {
 }
 
 pub fn build_retraction_message(to: &str, message_type: &str, retracts_id: &str) -> Element {
+    let stanza_id = Uuid::new_v4().to_string();
     Element::builder("message", NS_CLIENT)
         .attr("to", to)
         .attr("type", message_type)
-        .attr("id", Uuid::new_v4().to_string())
+        .attr("id", stanza_id.as_str())
+        .append(build_origin_id(&stanza_id))
         .append(
             Element::builder("retract", NS_MESSAGE_RETRACT)
                 .attr("id", retracts_id)
@@ -169,6 +189,10 @@ pub fn build_outbound_message(
         .attr("type", message_type)
         .attr("id", stanza_id.as_str())
         .append(Element::builder("body", NS_CLIENT).append(body).build());
+
+    if matches!(message_type, "chat" | "groupchat") {
+        builder = builder.append(build_origin_id(stanza_id.as_str()));
+    }
 
     if let Some(subject) = options.subject.as_deref() {
         builder = builder.append(
@@ -289,6 +313,16 @@ pub fn build_outbound_message(
         }
     }
     Ok((stanza_id, builder.build()))
+}
+
+fn should_stamp_origin_id(message_type: &str) -> bool {
+    matches!(message_type, "chat" | "groupchat")
+}
+
+fn build_origin_id(stanza_id: &str) -> Element {
+    Element::builder("origin-id", NS_ORIGIN_ID)
+        .attr("id", stanza_id)
+        .build()
 }
 
 pub fn build_file_sharing_element(file: &SharedFile) -> Element {

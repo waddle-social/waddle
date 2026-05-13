@@ -14,8 +14,9 @@ use crate::bootstrap::{NS_BIND, NS_SASL, NS_STREAMS};
 use crate::command::XmppCommand;
 use crate::config::{AccessToken, ClientResource, OAuthBearerConfig, WebSocketConfig};
 use crate::error::ClientError;
-use crate::event::{ClientEvent, LifecycleEvent, MessageDeliveryEvent, StreamManagementEvent};
+use crate::event::{ClientEvent, LifecycleEvent, MessageDeliveryEvent};
 use crate::state::{SessionBinding, SessionPhase, SessionSnapshot};
+use crate::stream_management::{SmResumeState, NS_SM};
 use crate::transport::{StreamClose, StreamOpen, TransportEvent, TransportMessage, TransportState};
 use crate::ConnectionConfig;
 
@@ -33,9 +34,27 @@ fn config() -> ClientConfig {
     .unwrap()
 }
 
+fn config_with_resume_state() -> ClientConfig {
+    let mut config = config();
+    config.session.stream_management.resume_state =
+        Some(SmResumeState::new("prev-stream", 0, 0).unwrap());
+    config
+}
+
 // ── helper constructors ───────────────────────────────────────────────────
 
 fn make_driver_task(
+    transport: MockTransport,
+) -> (
+    DriverTask,
+    mpsc::Sender<XmppCommand>,
+    broadcast::Receiver<ClientEvent>,
+) {
+    make_driver_task_with_config(config(), transport)
+}
+
+fn make_driver_task_with_config(
+    config: ClientConfig,
     transport: MockTransport,
 ) -> (
     DriverTask,
@@ -46,15 +65,13 @@ fn make_driver_task(
     let (evt_tx, evt_rx) = broadcast::channel::<ClientEvent>(256);
     let state = Arc::new(RwLock::new(SessionSnapshot::new()));
     let task = DriverTask {
-        runtime: XmppRuntime::new(config()).unwrap(),
+        runtime: XmppRuntime::new(config).unwrap(),
         transport: Box::new(transport),
         commands: cmd_rx,
         events: evt_tx,
         state,
         pending_iqs: HashMap::new(),
-        sm_delivery_tracking_enabled: false,
-        outbound_h: 0,
-        pending_message_deliveries: VecDeque::new(),
+        deferred_commands: VecDeque::new(),
     };
     (task, cmd_tx, evt_rx)
 }
@@ -182,140 +199,148 @@ async fn send_iq_resolves_via_mock_driver() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn stream_management_ack_emits_message_delivery_ack() {
+async fn driver_forwards_core_message_delivery_ack() {
     let (mut task, _cmd_tx, mut rx) = make_driver_task(MockTransport::new(
         vec![],
         vec![],
         MockTransportShared::default(),
     ));
 
-    let message = Element::builder("message", crate::NS_CLIENT)
-        .attr("id", "out-1")
-        .attr("type", "chat")
-        .build();
-    task.sm_delivery_tracking_enabled = true;
-    task.record_outbound_element(&message);
-
-    task.dispatch_client_event(ClientEvent::Connection(ConnectionEvent::StreamManagement(
-        StreamManagementEvent::AckReceived { h: 1 },
-    )));
+    task.dispatch_client_event(ClientEvent::MessageDelivery(MessageDeliveryEvent::Acked {
+        stanza_id: StanzaId::new("core-tracked").unwrap(),
+    }));
 
     let mut got_ack = false;
-    for _ in 0..2 {
-        match rx.try_recv() {
-            Ok(ClientEvent::MessageDelivery(MessageDeliveryEvent::Acked { stanza_id }))
-                if stanza_id.as_str() == "out-1" =>
+    while let Ok(event) = rx.try_recv() {
+        match event {
+            ClientEvent::MessageDelivery(MessageDeliveryEvent::Acked { stanza_id })
+                if stanza_id.as_str() == "core-tracked" =>
             {
                 got_ack = true
             }
-            Ok(_) => {}
-            Err(_) => break,
+            _ => {}
         }
     }
-    assert!(got_ack, "expected delivery ack event for out-1");
-    assert!(task.pending_message_deliveries.is_empty());
+    assert!(got_ack, "expected forwarded delivery ack event");
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn stream_management_tracking_starts_when_enable_is_sent() {
-    let (mut task, _cmd_tx, mut rx) = make_driver_task(MockTransport::new(
-        vec![],
-        vec![],
-        MockTransportShared::default(),
-    ));
+async fn driver_defers_app_stanzas_until_sm_resume_completes() {
+    let shared = MockTransportShared::default();
+    let (mut task, _cmd_tx, _rx) = make_driver_task_with_config(
+        config_with_resume_state(),
+        MockTransport::new(vec![], vec![], shared.clone()),
+    );
 
-    let enable = crate::stream_management::SmState::build_enable(true);
-    task.record_outbound_element(&enable);
-    assert!(task.sm_delivery_tracking_enabled);
-    assert_eq!(task.outbound_h, 0);
+    drive_task_to_resume_attempt(&mut task).await;
+    let sent_before_command = shared.sent_messages().len();
 
-    let message = Element::builder("message", crate::NS_CLIENT)
-        .attr("id", "out-before-enabled")
-        .attr("type", "chat")
-        .build();
-    task.record_outbound_element(&message);
+    task.handle_command(XmppCommand::SendStanza(message_stanza("queued-1")))
+        .await;
 
-    task.dispatch_client_event(ClientEvent::Connection(ConnectionEvent::StreamManagement(
-        StreamManagementEvent::AckReceived { h: 1 },
-    )));
+    assert_eq!(
+        shared.sent_messages().len(),
+        sent_before_command,
+        "app stanza must stay behind the resume barrier"
+    );
 
-    let mut got_ack = false;
-    for _ in 0..2 {
-        match rx.try_recv() {
-            Ok(ClientEvent::MessageDelivery(MessageDeliveryEvent::Acked { stanza_id }))
-                if stanza_id.as_str() == "out-before-enabled" =>
-            {
-                got_ack = true
-            }
-            Ok(_) => {}
-            Err(_) => break,
-        }
-    }
-    assert!(got_ack, "message sent after <enable/> must be tracked");
+    task.apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+        resumed("prev-stream", 0),
+    )))
+    .await;
+
+    let sent = shared.sent_messages();
+    assert!(
+        sent.iter()
+            .any(|message| transport_message_id(message) == Some("queued-1")),
+        "queued app stanza should flush after resumed"
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn stream_management_resume_does_not_reset_outbound_counter() {
-    let (mut task, _cmd_tx, _rx) = make_driver_task(MockTransport::new(
-        vec![],
-        vec![],
-        MockTransportShared::default(),
-    ));
+async fn driver_keeps_deferred_stanzas_behind_fresh_fallback_sm_enable() {
+    let shared = MockTransportShared::default();
+    let (mut task, _cmd_tx, _rx) = make_driver_task_with_config(
+        config_with_resume_state(),
+        MockTransport::new(vec![], vec![], shared.clone()),
+    );
 
-    task.sm_delivery_tracking_enabled = true;
-    task.outbound_h = 2;
+    drive_task_to_resume_attempt(&mut task).await;
 
-    task.dispatch_client_event(ClientEvent::Connection(ConnectionEvent::StreamManagement(
-        StreamManagementEvent::Resumed { h: 1 },
-    )));
+    task.handle_command(XmppCommand::SendStanza(message_stanza("queued-1")))
+        .await;
 
-    let message = Element::builder("message", crate::NS_CLIENT)
-        .attr("id", "after-resume")
-        .attr("type", "chat")
-        .build();
-    task.record_outbound_element(&message);
+    task.apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+        failed_sm(0),
+    )))
+    .await;
+    task.apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+        bind_result("bind-1"),
+    )))
+    .await;
 
-    assert_eq!(task.outbound_h, 3);
-    assert!(matches!(
-        task.pending_message_deliveries.back(),
-        Some(TrackedMessageDelivery { stanza_id, h: 3 })
-            if stanza_id.as_str() == "after-resume"
-    ));
+    assert!(
+        !shared
+            .sent_messages()
+            .iter()
+            .any(|message| transport_message_id(message) == Some("queued-1")),
+        "fresh fallback must not flush app stanzas before SM is enabled"
+    );
+
+    task.apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+        enabled_sm("new-stream"),
+    )))
+    .await;
+
+    let sent = shared.sent_messages();
+    assert!(
+        sent.iter()
+            .any(|message| transport_message_id(message) == Some("queued-1")),
+        "queued app stanza should flush after fresh SM enable"
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn stream_management_failure_emits_message_delivery_failed() {
-    let (mut task, _cmd_tx, mut rx) = make_driver_task(MockTransport::new(
-        vec![],
-        vec![],
-        MockTransportShared::default(),
-    ));
+async fn driver_flushes_deferred_stanzas_when_fresh_sm_enable_fails() {
+    let shared = MockTransportShared::default();
+    let (mut task, _cmd_tx, _rx) = make_driver_task_with_config(
+        config_with_resume_state(),
+        MockTransport::new(vec![], vec![], shared.clone()),
+    );
 
-    let message = Element::builder("message", crate::NS_CLIENT)
-        .attr("id", "out-2")
-        .attr("type", "groupchat")
-        .build();
-    task.sm_delivery_tracking_enabled = true;
-    task.record_outbound_element(&message);
+    drive_task_to_resume_attempt(&mut task).await;
 
-    task.dispatch_client_event(ClientEvent::Connection(ConnectionEvent::StreamManagement(
-        StreamManagementEvent::Failed,
-    )));
+    task.handle_command(XmppCommand::SendStanza(message_stanza("queued-1")))
+        .await;
 
-    let mut got_failed = false;
-    for _ in 0..2 {
-        match rx.try_recv() {
-            Ok(ClientEvent::MessageDelivery(MessageDeliveryEvent::Failed { stanza_id }))
-                if stanza_id.as_str() == "out-2" =>
-            {
-                got_failed = true
-            }
-            Ok(_) => {}
-            Err(_) => break,
-        }
-    }
-    assert!(got_failed, "expected delivery failure event for out-2");
-    assert!(task.pending_message_deliveries.is_empty());
+    task.apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+        failed_sm(0),
+    )))
+    .await;
+    task.apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+        bind_result("bind-1"),
+    )))
+    .await;
+
+    assert!(
+        !shared
+            .sent_messages()
+            .iter()
+            .any(|message| transport_message_id(message) == Some("queued-1")),
+        "app stanza should stay deferred until SM either enables or fails"
+    );
+
+    task.apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+        Element::builder("failed", NS_SM).build(),
+    )))
+    .await;
+
+    let sent = shared.sent_messages();
+    assert!(
+        sent.iter()
+            .any(|message| transport_message_id(message) == Some("queued-1")),
+        "queued app stanza should flush after fresh SM enable fails"
+    );
 }
 
 // ── full bootstrap integration tests ─────────────────────────────────────
@@ -634,6 +659,13 @@ fn post_auth_features() -> Element {
         .build()
 }
 
+fn post_auth_features_with_sm() -> Element {
+    Element::builder("features", NS_STREAMS)
+        .append(Element::builder("bind", NS_BIND).build())
+        .append(Element::builder("sm", NS_SM).attr("resume", "true").build())
+        .build()
+}
+
 fn bind_result(stanza_id: &str) -> Element {
     Element::builder("iq", crate::NS_CLIENT)
         .attr("id", stanza_id)
@@ -648,4 +680,72 @@ fn bind_result(stanza_id: &str) -> Element {
                 .build(),
         )
         .build()
+}
+
+fn message_stanza(stanza_id: &str) -> Element {
+    Element::builder("message", crate::NS_CLIENT)
+        .attr("id", stanza_id)
+        .attr("type", "chat")
+        .append(
+            Element::builder("body", crate::NS_CLIENT)
+                .append("queued")
+                .build(),
+        )
+        .build()
+}
+
+fn resumed(previd: &str, h: u32) -> Element {
+    Element::builder("resumed", NS_SM)
+        .attr("previd", previd)
+        .attr("h", h.to_string())
+        .build()
+}
+
+fn failed_sm(h: u32) -> Element {
+    Element::builder("failed", NS_SM)
+        .attr("h", h.to_string())
+        .build()
+}
+
+fn enabled_sm(previd: &str) -> Element {
+    Element::builder("enabled", NS_SM)
+        .attr("resume", "true")
+        .attr("id", previd)
+        .build()
+}
+
+fn transport_message_id(message: &TransportMessage) -> Option<&str> {
+    match message {
+        TransportMessage::Element(element) => element.attr("id"),
+        _ => None,
+    }
+}
+
+async fn drive_task_to_resume_attempt(task: &mut DriverTask) {
+    task.runtime
+        .queue_request(ClientRequest::Connect)
+        .expect("connect request should queue");
+    task.apply_transport_event(TransportEvent::StateChanged(TransportState::Open))
+        .await;
+    task.apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Open(
+        StreamOpen::from_server(BareJid::from_str("waddle.example").unwrap()),
+    )))
+    .await;
+    task.apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+        pre_auth_features(),
+    )))
+    .await;
+    task.apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+        Element::builder("success", NS_SASL).build(),
+    )))
+    .await;
+    task.apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Open(
+        StreamOpen::from_server(BareJid::from_str("waddle.example").unwrap()),
+    )))
+    .await;
+    task.apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+        post_auth_features_with_sm(),
+    )))
+    .await;
+    assert_eq!(task.runtime.snapshot().phase, SessionPhase::Resuming);
 }

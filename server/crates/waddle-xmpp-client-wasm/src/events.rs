@@ -7,6 +7,9 @@ pub(crate) async fn event_dispatch_loop(
     while let Some(event) = event_rx.next().await {
         match event {
             DriverEvent::Client(client_event) => dispatch_client_event(&inner, *client_event),
+            DriverEvent::ResumeState(state) => {
+                inner.borrow_mut().resume_state = state;
+            }
             DriverEvent::Error(description) => emit_error_callback(&inner, &description),
             DriverEvent::Disconnected => {
                 inner.borrow_mut().cmd_tx = None;

@@ -1,3 +1,5 @@
+use std::collections::VecDeque;
+
 use crate::bootstrap::{
     AuthMechanism, AuthenticationRequest, BootstrapElement, RequiredStreamFeature,
     ResourceBindingRequest,
@@ -7,7 +9,7 @@ use crate::error::{ClientError, ClientResult};
 use crate::event::{ClientEvent, ConnectionEvent, LifecycleEvent};
 use crate::request::{ClientRequest, PendingRequest, RequestTracker, StanzaId};
 use crate::state::{SessionBinding, SessionPhase, SessionSnapshot};
-use crate::stream_management::SmState;
+use crate::stream_management::{SmResumeState, SmState};
 use crate::transport::{StreamClose, StreamOpen, TransportEvent, TransportMessage, TransportState};
 use crate::AuthenticationConfig;
 use minidom::Element;
@@ -34,6 +36,9 @@ pub struct XmppRuntime {
     next_bootstrap_stanza: u64,
     sm_state: SmState,
     sm_advertised: bool,
+    pending_fallback_retries: VecDeque<Element>,
+    fallback_resume_state: Option<SmResumeState>,
+    fallback_retry_writes_in_flight: VecDeque<Element>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -44,20 +49,32 @@ enum BootstrapState {
     AwaitingFeatures { authenticated: bool },
     AwaitingAuthenticationOutcome,
     AwaitingBindResult { stanza_id: StanzaId },
+    AwaitingResume,
     Ready,
 }
 
 impl XmppRuntime {
     pub fn new(config: ClientConfig) -> ClientResult<Self> {
         config.validate()?;
+        let sm_state = config
+            .session
+            .stream_management
+            .resume_state
+            .as_ref()
+            .map(SmState::from_resume_state)
+            .unwrap_or_default();
+
         Ok(Self {
             config,
             snapshot: SessionSnapshot::new(),
             requests: RequestTracker::default(),
             bootstrap: BootstrapState::Idle,
             next_bootstrap_stanza: 0,
-            sm_state: SmState::new(),
+            sm_state,
             sm_advertised: false,
+            pending_fallback_retries: VecDeque::new(),
+            fallback_resume_state: None,
+            fallback_retry_writes_in_flight: VecDeque::new(),
         })
     }
 
@@ -69,6 +86,17 @@ impl XmppRuntime {
         &self.snapshot
     }
 
+    pub fn resume_state(&self) -> Option<SmResumeState> {
+        if self.fallback_resume_state.is_some()
+            && (!self.pending_fallback_retries.is_empty()
+                || !self.fallback_retry_writes_in_flight.is_empty())
+        {
+            return self.fallback_resume_state.clone();
+        }
+
+        self.sm_state.resume_state()
+    }
+
     pub fn pending_requests(&self) -> Vec<PendingRequest> {
         self.requests.snapshot()
     }
@@ -78,6 +106,19 @@ impl XmppRuntime {
             SessionPhase::Disconnected => RuntimeStatus::Prepared,
             _ => RuntimeStatus::Active,
         }
+    }
+
+    pub fn can_send_app_stanza(&self) -> bool {
+        if !matches!(self.snapshot.phase, SessionPhase::Established) {
+            return false;
+        }
+
+        let sm_cfg = &self.config.session.stream_management;
+        if sm_cfg.enable_stream_management && self.sm_advertised {
+            return self.sm_state.enabled;
+        }
+
+        true
     }
 
     pub fn queue_request(&mut self, request: ClientRequest) -> ClientResult<Vec<ClientEvent>> {
@@ -200,8 +241,9 @@ impl XmppRuntime {
 
         if self.sm_state.outbound_enabled && matches!(element.name(), "iq" | "message" | "presence")
         {
-            self.sm_state.record_sent(1);
+            self.sm_state.record_sent_stanza(element);
         }
+        self.mark_fallback_retry_sent(element);
     }
 
     fn handle_stream_open(
@@ -294,34 +336,57 @@ impl XmppRuntime {
             BootstrapState::AwaitingFeatures {
                 authenticated: true,
             } => {
+                if features.stream_management {
+                    self.sm_advertised = true;
+                }
+
+                let sm_cfg = &self.config.session.stream_management;
+                if sm_cfg.enable_stream_management
+                    && sm_cfg.allow_resume
+                    && features.stream_management
+                    && self.sm_state.previd.is_some()
+                {
+                    let resume = SmState::build_resume(
+                        self.sm_state.previd.as_deref().unwrap_or_default(),
+                        self.sm_state.inbound_count,
+                    );
+                    self.bootstrap = BootstrapState::AwaitingResume;
+                    self.set_phase(SessionPhase::Resuming)?;
+                    events.push(ClientEvent::Connection(ConnectionEvent::OutboundMessage(
+                        TransportMessage::Element(resume),
+                    )));
+                    return Ok(());
+                }
+
                 if !features.bind {
                     return Err(ClientError::MissingStreamFeature {
                         feature: RequiredStreamFeature::ResourceBinding,
                     });
                 }
 
-                if features.stream_management {
-                    self.sm_advertised = true;
-                }
-
-                let request = ResourceBindingRequest::new(
-                    self.next_bootstrap_stanza_id()?,
-                    self.oauth_config().resource.clone(),
-                );
-                self.bootstrap = BootstrapState::AwaitingBindResult {
-                    stanza_id: request.stanza_id.clone(),
-                };
-                self.set_phase(SessionPhase::Binding)?;
-                events.push(ClientEvent::Connection(
-                    ConnectionEvent::ResourceBindingRequested(request.clone()),
-                ));
-                events.push(ClientEvent::Connection(ConnectionEvent::OutboundMessage(
-                    request.to_transport_message(),
-                )));
+                self.request_resource_binding(events)?;
             }
             _ => {}
         }
 
+        Ok(())
+    }
+
+    fn request_resource_binding(&mut self, events: &mut Vec<ClientEvent>) -> ClientResult<()> {
+        let request = ResourceBindingRequest::new(
+            self.next_bootstrap_stanza_id()?,
+            self.oauth_config().resource.clone(),
+        );
+        self.bootstrap = BootstrapState::AwaitingBindResult {
+            stanza_id: request.stanza_id.clone(),
+        };
+        self.set_phase(SessionPhase::Binding)?;
+        events.push(ClientEvent::Connection(
+            ConnectionEvent::ResourceBindingRequested(request.clone()),
+        ));
+        events.push(ClientEvent::Connection(ConnectionEvent::OutboundMessage(
+            request.to_transport_message(),
+        )));
         Ok(())
     }
 
@@ -421,13 +486,38 @@ impl XmppRuntime {
 
         let sm_cfg = &self.config.session.stream_management;
         if sm_cfg.enable_stream_management && self.sm_advertised {
-            let enable = SmState::build_enable(sm_cfg.allow_resume);
+            let enable = SmState::build_enable_with_max(sm_cfg.allow_resume, sm_cfg.resume_max);
             events.push(ClientEvent::Connection(ConnectionEvent::OutboundMessage(
                 TransportMessage::Element(enable),
             )));
         }
 
         Ok(())
+    }
+
+    pub(super) fn flush_pending_fallback_retries(&mut self, events: &mut Vec<ClientEvent>) {
+        while let Some(element) = self.pending_fallback_retries.pop_front() {
+            self.fallback_retry_writes_in_flight
+                .push_back(element.clone());
+            events.push(ClientEvent::Connection(ConnectionEvent::OutboundMessage(
+                TransportMessage::Element(element),
+            )));
+        }
+    }
+
+    fn mark_fallback_retry_sent(&mut self, element: &Element) {
+        if self
+            .fallback_retry_writes_in_flight
+            .front()
+            .is_some_and(|retry| retry == element)
+        {
+            self.fallback_retry_writes_in_flight.pop_front();
+            if self.pending_fallback_retries.is_empty()
+                && self.fallback_retry_writes_in_flight.is_empty()
+            {
+                self.fallback_resume_state = None;
+            }
+        }
     }
 
     fn oauth_config(&self) -> &crate::OAuthBearerConfig {
@@ -465,7 +555,9 @@ impl XmppRuntime {
                 | (SessionPhase::OpeningStream, SessionPhase::Authenticating)
                 | (SessionPhase::Authenticating, SessionPhase::OpeningStream)
                 | (SessionPhase::OpeningStream, SessionPhase::Binding)
+                | (SessionPhase::OpeningStream, SessionPhase::Resuming)
                 | (SessionPhase::Authenticating, SessionPhase::Binding)
+                | (SessionPhase::Resuming, SessionPhase::Binding)
                 | (SessionPhase::Binding, SessionPhase::Established)
                 | (SessionPhase::Established, SessionPhase::Resuming)
                 | (SessionPhase::Resuming, SessionPhase::Established)

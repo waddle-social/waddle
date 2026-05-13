@@ -6,6 +6,7 @@ use url::Url;
 use waddle_xmpp_core::ConnectionConfig;
 
 use crate::error::{ClientError, ClientResult};
+use crate::stream_management::SmResumeState;
 
 /// Immutable client bootstrap configuration.
 #[derive(Debug, Clone, PartialEq)]
@@ -187,10 +188,12 @@ pub struct SessionConfig {
 }
 
 /// Stream management feature flags reserved for future parity slices.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StreamManagementConfig {
     pub enable_stream_management: bool,
     pub allow_resume: bool,
+    pub resume_max: Option<u32>,
+    pub resume_state: Option<SmResumeState>,
 }
 
 impl Default for StreamManagementConfig {
@@ -198,6 +201,8 @@ impl Default for StreamManagementConfig {
         Self {
             enable_stream_management: true,
             allow_resume: true,
+            resume_max: Some(300),
+            resume_state: None,
         }
     }
 }

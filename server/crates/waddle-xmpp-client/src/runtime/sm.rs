@@ -1,10 +1,12 @@
 use crate::bootstrap::NS_STREAMS;
-use crate::error::ClientResult;
-use crate::event::{ClientEvent, ConnectionEvent, StreamManagementEvent};
+
+use crate::error::{ClientError, ClientResult};
+use crate::event::{ClientEvent, ConnectionEvent, MessageDeliveryEvent, StreamManagementEvent};
+use crate::state::{SessionBinding, StreamId};
 use crate::transport::{StreamClose, TransportMessage};
 use minidom::Element;
 
-use super::XmppRuntime;
+use super::{BootstrapState, XmppRuntime};
 
 const NS_STREAM_ERRORS: &str = "urn:ietf:params:xml:ns:xmpp-streams";
 
@@ -24,14 +26,17 @@ impl XmppRuntime {
                 StreamManagementEvent::AckRequested,
             )));
         } else if let Some(h) = crate::stream_management::SmState::parse_ack_h(element) {
-            if h > self.sm_state.outbound_count {
+            if self.sm_state.handled_count_too_high(h) {
                 self.handle_sm_handled_count_too_high(h, events);
                 return Ok(());
             }
-            self.sm_state.process_ack(h);
+            let acked = self.sm_state.process_ack(h);
             events.push(ClientEvent::Connection(ConnectionEvent::StreamManagement(
                 StreamManagementEvent::AckReceived { h },
             )));
+            events.extend(acked.into_iter().map(|stanza_id| {
+                ClientEvent::MessageDelivery(MessageDeliveryEvent::Acked { stanza_id })
+            }));
         } else if element.name() == "enabled" {
             let previd = crate::stream_management::SmState::parse_enabled(element);
             self.sm_state.previd = previd.clone();
@@ -39,23 +44,77 @@ impl XmppRuntime {
             events.push(ClientEvent::Connection(ConnectionEvent::StreamManagement(
                 StreamManagementEvent::Enabled { previd },
             )));
+            self.flush_pending_fallback_retries(events);
         } else if element.name() == "resumed" {
-            let h = element.attr("h").and_then(|v| v.parse().ok()).unwrap_or(0);
-            if h > self.sm_state.outbound_count {
+            let Some(h) = element.attr("h").and_then(|v| v.parse().ok()) else {
+                self.handle_sm_protocol_violation(events);
+                return Ok(());
+            };
+            let Some(previd) = element.attr("previd") else {
+                self.handle_sm_protocol_violation(events);
+                return Ok(());
+            };
+            if !matches!(self.bootstrap, BootstrapState::AwaitingResume)
+                || self.sm_state.previd.as_deref() != Some(previd)
+            {
+                self.handle_sm_protocol_violation(events);
+                return Ok(());
+            }
+            if self.sm_state.handled_count_too_high(h) {
                 self.handle_sm_handled_count_too_high(h, events);
                 return Ok(());
             }
-            self.sm_state.process_ack(h);
-            self.sm_state.previd = element.attr("previd").map(|s| s.to_string());
+            let acked = self.sm_state.process_ack(h);
+            self.sm_state.previd = Some(previd.to_string());
             self.sm_state.enabled = true;
+            self.sm_state.outbound_enabled = true;
+            self.snapshot.binding = Some(self.resumed_session_binding()?);
+            self.bootstrap = BootstrapState::Ready;
+            self.set_phase(crate::state::SessionPhase::Established)?;
             events.push(ClientEvent::Connection(ConnectionEvent::StreamManagement(
                 StreamManagementEvent::Resumed { h },
             )));
+            events.extend(acked.into_iter().map(|stanza_id| {
+                ClientEvent::MessageDelivery(MessageDeliveryEvent::Acked { stanza_id })
+            }));
+            for replay in self.sm_state.mark_unhandled_for_replay() {
+                events.push(ClientEvent::Connection(ConnectionEvent::OutboundMessage(
+                    TransportMessage::Element(replay),
+                )));
+            }
         } else if element.name() == "failed" {
+            let resume_failed = matches!(self.bootstrap, BootstrapState::AwaitingResume);
+            if let Some(h) = element.attr("h").and_then(|value| value.parse().ok()) {
+                if self.sm_state.handled_count_too_high(h) {
+                    self.handle_sm_handled_count_too_high(h, events);
+                    return Ok(());
+                }
+                let acked = self.sm_state.process_ack(h);
+                events.extend(acked.into_iter().map(|stanza_id| {
+                    ClientEvent::MessageDelivery(MessageDeliveryEvent::Acked { stanza_id })
+                }));
+            }
+            if resume_failed {
+                let failed = self.sm_state.unhandled_message_stanza_ids();
+                // Keep the queue resumable until fallback retries are written to the new stream.
+                self.fallback_resume_state = self.sm_state.resume_state();
+                self.pending_fallback_retries
+                    .extend(self.sm_state.unhandled_stanzas_for_fallback_retry());
+                self.sm_state.previd = None;
+                events.extend(failed.into_iter().map(|stanza_id| {
+                    ClientEvent::MessageDelivery(MessageDeliveryEvent::Failed { stanza_id })
+                }));
+            }
             self.sm_state.stop();
             events.push(ClientEvent::Connection(ConnectionEvent::StreamManagement(
                 StreamManagementEvent::Failed,
             )));
+            if resume_failed {
+                self.request_resource_binding(events)?;
+            } else {
+                self.sm_advertised = false;
+                self.flush_pending_fallback_retries(events);
+            }
         }
 
         Ok(())
@@ -81,5 +140,34 @@ impl XmppRuntime {
         events.push(ClientEvent::Connection(ConnectionEvent::OutboundMessage(
             TransportMessage::Close(StreamClose),
         )));
+    }
+
+    fn handle_sm_protocol_violation(&mut self, events: &mut Vec<ClientEvent>) {
+        let error = Element::builder("error", NS_STREAMS)
+            .append(Element::builder("bad-request", NS_STREAM_ERRORS).build())
+            .build();
+        self.sm_state.stop();
+        events.push(ClientEvent::Connection(ConnectionEvent::OutboundMessage(
+            TransportMessage::Element(error),
+        )));
+        events.push(ClientEvent::Connection(ConnectionEvent::StreamManagement(
+            StreamManagementEvent::Failed,
+        )));
+        events.push(ClientEvent::Connection(ConnectionEvent::OutboundMessage(
+            TransportMessage::Close(StreamClose),
+        )));
+    }
+
+    fn resumed_session_binding(&self) -> ClientResult<SessionBinding> {
+        let auth = self.oauth_config();
+        let jid = auth
+            .account
+            .with_resource_str(auth.resource.as_str())
+            .map_err(|_| ClientError::InvalidBindResponse)?;
+        Ok(SessionBinding {
+            jid,
+            stream_id: self.sm_state.previd.as_ref().map(StreamId::new),
+            resumable: self.sm_state.previd.is_some(),
+        })
     }
 }

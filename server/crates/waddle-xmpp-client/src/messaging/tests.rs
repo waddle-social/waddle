@@ -7,6 +7,14 @@ fn el(xml: &str) -> Element {
     xml.parse().expect("invalid XML")
 }
 
+fn assert_origin_id_matches_message_id(stanza: &Element) {
+    let stanza_id = stanza.attr("id").expect("message id");
+    let origin_id = stanza
+        .get_child("origin-id", NS_ORIGIN_ID)
+        .expect("origin-id");
+    assert_eq!(origin_id.attr("id"), Some(stanza_id));
+}
+
 #[test]
 fn parse_message_with_body() {
     let e = el("<message xmlns='jabber:client' \
@@ -1021,6 +1029,27 @@ fn build_outbound_message_uses_caller_stanza_id() {
 }
 
 #[test]
+fn build_outbound_chat_messages_stamp_origin_id_matching_stanza_id() {
+    for message_type in ["chat", "groupchat"] {
+        let stanza_id = StanzaId::new(format!("{message_type}-client-id")).unwrap();
+        let options = SendMessageOptions {
+            stanza_id: Some(stanza_id.clone()),
+            ..Default::default()
+        };
+
+        let (_, stanza) =
+            build_outbound_message("room@muc.example", message_type, "hello", &options).unwrap();
+        let origin_id = stanza
+            .get_child("origin-id", NS_ORIGIN_ID)
+            .expect("origin-id");
+
+        assert_eq!(origin_id.attr("id"), Some(stanza_id.as_str()));
+        assert_eq!(origin_id.children().count(), 0);
+        assert!(origin_id.text().is_empty());
+    }
+}
+
+#[test]
 fn build_outbound_message_with_markup_spans_and_references() {
     let options = SendMessageOptions {
         markup_spans: vec![
@@ -1211,6 +1240,7 @@ fn build_chat_state_message_validates_state() {
         .expect("valid chat state");
     assert_eq!(stanza.attr("to"), Some("alice@example.com"));
     assert_eq!(stanza.attr("type"), Some("chat"));
+    assert_origin_id_matches_message_id(&stanza);
     assert!(stanza.get_child("composing", NS_CHAT_STATES).is_some());
     assert!(build_chat_state_message("alice@example.com", "typing", "chat").is_err());
 }
@@ -1219,6 +1249,7 @@ fn build_chat_state_message_validates_state() {
 fn build_displayed_message_has_expected_shape() {
     let stanza = build_displayed_message("room@muc.example", "msg-1", "groupchat");
     assert_eq!(stanza.attr("to"), Some("room@muc.example"));
+    assert_origin_id_matches_message_id(&stanza);
     assert!(stanza.get_child("displayed", NS_CHAT_MARKERS).is_some());
     assert_eq!(
         stanza
@@ -1265,6 +1296,7 @@ fn build_correction_message_with_markup_spans() {
 fn build_reaction_message_has_expected_shape() {
     let emojis = vec!["👍".to_string(), "❤️".to_string()];
     let stanza = build_reaction_message("room@muc.example", "groupchat", "msg-1", &emojis);
+    assert_origin_id_matches_message_id(&stanza);
     let reactions = stanza
         .get_child("reactions", NS_REACTIONS)
         .expect("reactions child");
@@ -1281,6 +1313,7 @@ fn build_reaction_message_has_expected_shape() {
 #[test]
 fn build_retraction_message_has_expected_shape() {
     let stanza = build_retraction_message("room@muc.example", "groupchat", "msg-1");
+    assert_origin_id_matches_message_id(&stanza);
     assert_eq!(
         stanza
             .get_child("retract", NS_MESSAGE_RETRACT)
@@ -1294,6 +1327,17 @@ fn build_retraction_message_has_expected_shape() {
         Some("This person attempted to retract a previous message.".to_string())
     );
     assert!(stanza.get_child("store", NS_HINTS).is_some());
+}
+
+#[test]
+fn build_pin_messages_stamp_origin_id_matching_message_id() {
+    let pinned = build_pinned_message("room@muc.example", "room-stanza-1");
+    assert_origin_id_matches_message_id(&pinned);
+    assert!(pinned.get_child("pinned", NS_WADDLE_PIN_V0).is_some());
+
+    let unpinned = build_unpinned_message("room@muc.example", "room-stanza-1");
+    assert_origin_id_matches_message_id(&unpinned);
+    assert!(unpinned.get_child("unpinned", NS_WADDLE_PIN_V0).is_some());
 }
 
 #[test]

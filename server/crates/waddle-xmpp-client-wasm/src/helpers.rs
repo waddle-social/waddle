@@ -21,8 +21,10 @@ pub(crate) fn build_client_config(config: &StoredConfig) -> Result<ClientConfig,
         ClientResource::new(config.resource.clone()).map_err(|err| js_error(err.to_string()))?;
     let auth = OAuthBearerConfig::new(jid, resource, AccessToken::new(config.access_token.clone()))
         .map_err(|err| js_error(err.to_string()))?;
-    ClientConfig::new(ConnectionConfig::new(domain), transport, auth)
-        .map_err(|err| js_error(err.to_string()))
+    let mut client_config = ClientConfig::new(ConnectionConfig::new(domain), transport, auth)
+        .map_err(|err| js_error(err.to_string()))?;
+    client_config.session.stream_management.resume_state = config.resume_state.clone();
+    Ok(client_config)
 }
 
 pub(crate) fn parse_raw_iq(xml: &str) -> Result<Element, JsValue> {
@@ -88,10 +90,6 @@ pub(crate) fn message_delivery_stanza_id(element: &Element) -> Option<StanzaId> 
     }
 
     element.attr("id").and_then(|id| StanzaId::new(id).ok())
-}
-
-pub(crate) fn is_stream_management_enable(element: &Element) -> bool {
-    element.name() == "enable" && element.ns() == waddle_xmpp_client::stream_management::NS_SM
 }
 
 pub(crate) fn to_js_value<T: Serialize + ?Sized>(value: &T) -> Result<JsValue, JsValue> {
