@@ -252,7 +252,7 @@
               initdb -D "$PGDATA" -U waddle_test -A trust --no-locale --encoding=UTF8
               pg_ctl -D "$PGDATA" -o "-k $PGHOST -p $PGPORT -c listen_addresses=" -w start
               createdb -h "$PGHOST" -p "$PGPORT" -U waddle_test waddle_test
-              export WADDLE_TEST_POSTGRES_URL="postgresql://waddle_test@localhost:$PGPORT/waddle_test?host=$PGHOST"
+              export WADDLE_TEST_POSTGRES_URL="postgresql:///waddle_test?user=waddle_test&host=$PGHOST&port=$PGPORT"
             '';
           };
           workspaceArtifacts = craneLib.buildDepsOnly (

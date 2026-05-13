@@ -26,7 +26,7 @@ pub(super) async fn initialize(storage: &DatabaseSmPersistence) -> Result<(), Sm
     // Driver-aware bigint type: Postgres INTEGER is i32 (overflows
     // for `timestamp_millis()` after Jan 2038); BIGINT is i64.
     // SQLite INTEGER is dynamically sized so the same DDL works.
-    let bigint = i64_sql_type(storage.db.driver());
+    let bigint = crate::db::i64_sql_type(storage.db.driver());
     storage
         .execute(
             &format!(
@@ -91,20 +91,9 @@ pub(super) async fn initialize(storage: &DatabaseSmPersistence) -> Result<(), Sm
     Ok(())
 }
 
-fn i64_sql_type(driver: DatabaseDriver) -> &'static str {
-    match driver {
-        DatabaseDriver::Postgres => "BIGINT",
-        DatabaseDriver::Sqlite => "INTEGER",
-    }
-}
-
 async fn widen_existing_postgres_i64_columns(
     storage: &DatabaseSmPersistence,
 ) -> Result<(), SmPersistenceError> {
-    if !matches!(storage.db.driver(), DatabaseDriver::Postgres) {
-        return Ok(());
-    }
-
     for (table, column) in [
         ("sm_sessions", "inbound_count"),
         ("sm_sessions", "outbound_count"),
@@ -115,47 +104,10 @@ async fn widen_existing_postgres_i64_columns(
         ("sm_unacked", "sequence"),
         ("sm_unacked", "original_receipt_at_ms"),
     ] {
-        widen_postgres_i64_column_to_bigint(storage, table, column).await?;
+        crate::db::widen_postgres_i64_column_to_bigint(&storage.db, table, column)
+            .await
+            .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
     }
 
-    Ok(())
-}
-
-async fn widen_postgres_i64_column_to_bigint(
-    storage: &DatabaseSmPersistence,
-    table: &'static str,
-    column: &'static str,
-) -> Result<(), SmPersistenceError> {
-    let mut rows = storage
-        .query(
-            "SELECT data_type \
-             FROM information_schema.columns \
-             WHERE table_schema = current_schema() \
-               AND table_name = ? \
-               AND column_name = ?",
-            crate::db_params![table, column],
-        )
-        .await?;
-    let current_type: Option<String> = match rows
-        .next()
-        .await
-        .map_err(|error| SmPersistenceError::Other(error.to_string()))?
-    {
-        Some(row) => row
-            .get(0)
-            .map_err(|error| SmPersistenceError::Other(error.to_string()))?,
-        None => None,
-    };
-    let needs_widen = current_type
-        .as_deref()
-        .is_some_and(|data_type| !data_type.eq_ignore_ascii_case("bigint"));
-    if needs_widen {
-        storage
-            .execute(
-                &format!("ALTER TABLE {table} ALTER COLUMN {column} TYPE BIGINT"),
-                (),
-            )
-            .await?;
-    }
     Ok(())
 }

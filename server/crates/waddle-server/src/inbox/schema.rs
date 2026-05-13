@@ -1,7 +1,7 @@
 use super::*;
 
 pub(super) async fn initialize(storage: &DatabaseInboxStorage) -> Result<(), InboxStorageError> {
-    let i64_type = i64_sql_type(storage.db.driver());
+    let i64_type = crate::db::i64_sql_type(storage.db.driver());
 
     // Check if the table already exists with the old schema (missing thread_id column).
     let needs_migration = needs_thread_migration(storage).await?;
@@ -59,9 +59,9 @@ pub(super) async fn initialize(storage: &DatabaseInboxStorage) -> Result<(), Inb
             .await?;
     }
 
-    if matches!(storage.db.driver(), DatabaseDriver::Postgres) {
-        widen_postgres_i64_column_to_bigint(storage, "inbox_entries", "last_updated").await?;
-    }
+    crate::db::widen_postgres_i64_column_to_bigint(&storage.db, "inbox_entries", "last_updated")
+        .await
+        .map_err(|error| InboxStorageError::Other(error.to_string()))?;
 
     storage.execute(
         "CREATE INDEX IF NOT EXISTS idx_inbox_entries_user_updated ON inbox_entries (user_jid, last_updated DESC)",
@@ -73,53 +73,6 @@ pub(super) async fn initialize(storage: &DatabaseInboxStorage) -> Result<(), Inb
         (),
     )
     .await?;
-    Ok(())
-}
-
-fn i64_sql_type(driver: DatabaseDriver) -> &'static str {
-    match driver {
-        DatabaseDriver::Postgres => "BIGINT",
-        DatabaseDriver::Sqlite => "INTEGER",
-    }
-}
-
-async fn widen_postgres_i64_column_to_bigint(
-    storage: &DatabaseInboxStorage,
-    table: &'static str,
-    column: &'static str,
-) -> Result<(), InboxStorageError> {
-    let mut rows = storage
-        .query(
-            "SELECT data_type \
-             FROM information_schema.columns \
-             WHERE table_schema = current_schema() \
-               AND table_name = ? \
-               AND column_name = ?",
-            crate::db_params![table, column],
-        )
-        .await
-        .map_err(|error| InboxStorageError::Other(error.to_string()))?;
-    let current_type: Option<String> = match rows
-        .next()
-        .await
-        .map_err(|error| InboxStorageError::Other(error.to_string()))?
-    {
-        Some(row) => row
-            .get(0)
-            .map_err(|error| InboxStorageError::Other(error.to_string()))?,
-        None => None,
-    };
-    let needs_widen = current_type
-        .as_deref()
-        .is_some_and(|data_type| !data_type.eq_ignore_ascii_case("bigint"));
-    if needs_widen {
-        storage
-            .execute(
-                &format!("ALTER TABLE {table} ALTER COLUMN {column} TYPE BIGINT"),
-                (),
-            )
-            .await?;
-    }
     Ok(())
 }
 
