@@ -96,6 +96,7 @@ impl XmppRuntime {
             }
             if resume_failed {
                 let failed = self.sm_state.unhandled_message_stanza_ids();
+                // Keep the queue resumable until fallback retries are written to the new stream.
                 self.fallback_resume_state = self.sm_state.resume_state();
                 self.pending_fallback_retries
                     .extend(self.sm_state.unhandled_stanzas_for_fallback_retry());

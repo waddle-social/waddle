@@ -121,7 +121,7 @@ type XmppClientInstance = Partial<WasmClient> & CompatEmitter & {
   set_on_message_delivery_failed?: (cb: (id: string) => void) => void;
   set_on_session_lifecycle?: (cb: (event: string) => void) => void;
   get_resume_state?: () => XmppResumeState | null;
-  get_resume_state_handle?: () => unknown | null;
+  get_resume_state_handle?: () => XmppResumeStateHandle | undefined;
 };
 
 type XmppResumeState = {
@@ -130,9 +130,7 @@ type XmppResumeState = {
   outboundH: number;
 };
 
-type XmppResumeStateHandle = {
-  free?: () => void;
-} & Record<PropertyKey, unknown>;
+type XmppResumeStateHandle = import("@waddle/xmpp-client-wasm").WaddleResumeState;
 
 interface OutboundSendResult {
   id: string | null;
@@ -211,7 +209,7 @@ export class BrowserXmppClient {
   private reconnectAttempt = 0;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private resumeState: XmppResumeState | null = null;
-  private resumeStateHandle: unknown | null = null;
+  private resumeStateHandle: XmppResumeStateHandle | null = null;
   private directQueueFlushPromise: Promise<void> | null = null;
   private readonly roomQueueFlushes = new Map<string, Promise<void>>();
   private readonly inflightQueuedIds = new Set<string>();
@@ -322,23 +320,16 @@ export class BrowserXmppClient {
     this.setResumeStateHandle(null);
   }
 
-  private setResumeStateHandle(handle: unknown | null) {
+  private setResumeStateHandle(handle: XmppResumeStateHandle | null | undefined) {
     if (this.resumeStateHandle && this.resumeStateHandle !== handle) {
       this.disposeResumeStateHandle(this.resumeStateHandle);
     }
-    this.resumeStateHandle = handle;
+    this.resumeStateHandle = handle ?? null;
   }
 
-  private disposeResumeStateHandle(handle: unknown) {
-    const owned = handle as XmppResumeStateHandle;
-    const symbolDispose = typeof Symbol === "function" ? (Symbol as any).dispose : undefined;
-    const dispose = symbolDispose ? (owned as any)[symbolDispose] : undefined;
+  private disposeResumeStateHandle(handle: XmppResumeStateHandle) {
     try {
-      if (typeof dispose === "function") {
-        dispose.call(owned);
-      } else if (typeof owned.free === "function") {
-        owned.free.call(owned);
-      }
+      handle.free();
     } catch {}
   }
 

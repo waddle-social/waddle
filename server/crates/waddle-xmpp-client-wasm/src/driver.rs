@@ -325,14 +325,6 @@ impl WasmDriverTask {
         Ok(())
     }
 
-    async fn publish_resume_state(&mut self, state: Option<waddle_xmpp_client::SmResumeState>) {
-        let _ = self
-            .event_tx
-            .clone()
-            .send(DriverEvent::ResumeState(state))
-            .await;
-    }
-
     async fn dispatch_client_event(&mut self, event: ClientEvent) -> Option<TransportMessage> {
         match event {
             ClientEvent::Connection(ConnectionEvent::OutboundMessage(message)) => {
@@ -477,7 +469,11 @@ impl WasmDriverTask {
         } else {
             self.runtime.resume_state()
         };
-        self.publish_resume_state(resume_state).await;
+        let _ = self
+            .event_tx
+            .clone()
+            .send(DriverEvent::ResumeState(resume_state))
+            .await;
 
         for command in self.deferred_commands.drain(..) {
             match command {

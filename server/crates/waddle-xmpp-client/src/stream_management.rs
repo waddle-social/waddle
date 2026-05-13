@@ -100,6 +100,7 @@ impl SmState {
 
     pub fn from_resume_state(resume_state: &SmResumeState) -> Self {
         let queue_len = u32::try_from(resume_state.outbound_queue.len()).unwrap_or(u32::MAX);
+        // The queue contains only stanzas not yet handled by the server.
         Self {
             outbound_count: resume_state.outbound_h(),
             inbound_count: resume_state.inbound_h(),
