@@ -27,6 +27,33 @@ fn transient_row(recipient: &str, body: &str) -> PendingRow {
     }
 }
 
+fn message_xml(message: Message) -> String {
+    let element: xmpp_parsers::minidom::Element = message.into();
+    let mut buf = Vec::new();
+    element.write_to(&mut buf).expect("serialize message");
+    String::from_utf8(buf).expect("utf-8 xml")
+}
+
+fn transient_message_xml(recipient: &str, body: &str) -> String {
+    let mut m = Message::new(Some(recipient.parse::<jid::Jid>().expect("jid")));
+    m.from = Some("bob@elsewhere/x".parse::<jid::Jid>().expect("jid"));
+    m.type_ = MessageType::Chat;
+    m.bodies.insert(String::new(), Body(body.to_string()));
+    message_xml(m)
+}
+
+fn mam_query_frame_xml(recipient: &str, child_name: &str) -> String {
+    let mut m = Message::new(Some(recipient.parse::<jid::Jid>().expect("jid")));
+    m.from = Some("alice@example.com".parse::<jid::Jid>().expect("jid"));
+    m.type_ = MessageType::Normal;
+    m.payloads.push(
+        xmpp_parsers::minidom::Element::builder(child_name, waddle_xmpp_core::mam::MAM_NS)
+            .attr("queryid", "q1")
+            .build(),
+    );
+    message_xml(m)
+}
+
 #[tokio::test]
 async fn flush_with_no_rows_is_noop() {
     let storage: Arc<dyn PendingDeliveryStorage> =
@@ -46,6 +73,83 @@ async fn flush_with_no_rows_is_noop() {
     )
     .await;
     assert_eq!(outcome, FlushOutcome::default());
+}
+
+#[tokio::test]
+async fn db_storage_startup_deletes_legacy_mam_query_frames() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir
+        .path()
+        .join("pending_delivery-cleanup.sqlite")
+        .to_str()
+        .expect("utf-8 path")
+        .to_string();
+    let url = format!("sqlite://{path}");
+    let receipt_ms = Utc::now().timestamp_millis();
+
+    {
+        let db = crate::db::Database::from_config(
+            "legacy_pending_delivery",
+            &crate::db::DatabaseConfig::new(crate::db::DatabaseDriver::Sqlite, url.clone()),
+        )
+        .await
+        .expect("open legacy db");
+        let conn = db.guard().await.expect("db guard");
+        conn.execute(
+            "CREATE TABLE pending_delivery (
+                row_id TEXT PRIMARY KEY,
+                recipient_jid TEXT NOT NULL,
+                original_receipt_at INTEGER NOT NULL,
+                payload_kind TEXT NOT NULL,
+                archive_stanza_by TEXT,
+                archive_stanza_id TEXT,
+                transient_xml TEXT,
+                flushed_in_session TEXT
+            )",
+            (),
+        )
+        .await
+        .expect("create legacy table");
+        for (row_id, xml) in [
+            (
+                "mam-result",
+                mam_query_frame_xml("alice@example.com/web", "result"),
+            ),
+            (
+                "mam-fin",
+                mam_query_frame_xml("alice@example.com/web", "fin"),
+            ),
+            (
+                "normal-message",
+                transient_message_xml("alice@example.com", "keep"),
+            ),
+        ] {
+            conn.execute(
+                "INSERT INTO pending_delivery (
+                    row_id, recipient_jid, original_receipt_at, payload_kind,
+                    archive_stanza_by, archive_stanza_id, transient_xml, flushed_in_session
+                 ) VALUES (?, ?, ?, 'transient', NULL, NULL, ?, NULL)",
+                crate::db_params![row_id, "alice@example.com", receipt_ms, xml],
+            )
+            .await
+            .expect("insert legacy row");
+        }
+    }
+
+    let storage = DatabasePendingDeliveryStorage::open(Some(&url), QuotaPolicy::Unlimited)
+        .await
+        .expect("open storage with startup cleanup");
+    let rows = storage
+        .list(&bare("alice@example.com"))
+        .await
+        .expect("list cleaned rows");
+
+    assert_eq!(rows.len(), 1);
+    let body = match &rows[0].payload {
+        PendingPayload::Transient(message) => message.bodies.get("").map(|body| body.0.as_str()),
+        PendingPayload::Archived(_) => None,
+    };
+    assert_eq!(body, Some("keep"));
 }
 
 #[tokio::test]

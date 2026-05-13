@@ -159,5 +159,62 @@ pub(super) async fn initialize(
             (),
         )
         .await?;
+    let deleted_mam_frames = delete_legacy_mam_query_frames(storage).await?;
+    if deleted_mam_frames > 0 {
+        info!(
+            deleted = deleted_mam_frames,
+            "pending_delivery startup cleanup removed XEP-0313 MAM query frames"
+        );
+    }
     Ok(())
+}
+
+async fn delete_legacy_mam_query_frames(
+    storage: &DatabasePendingDeliveryStorage,
+) -> Result<u64, PendingStorageError> {
+    let row_ids = {
+        let mut rows = storage
+            .query(
+                "SELECT row_id, transient_xml \
+                 FROM pending_delivery \
+                 WHERE payload_kind = 'transient' \
+                   AND transient_xml IS NOT NULL",
+                (),
+            )
+            .await?;
+        let mut row_ids = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|error| PendingStorageError::Other(error.to_string()))?
+        {
+            let row_id: String = row
+                .get(0)
+                .map_err(|error| PendingStorageError::Other(error.to_string()))?;
+            let xml: String = row
+                .get(1)
+                .map_err(|error| PendingStorageError::Other(error.to_string()))?;
+            let Ok(element) = xml.parse::<xmpp_parsers::minidom::Element>() else {
+                continue;
+            };
+            let Ok(message) = xmpp_parsers::message::Message::try_from(element) else {
+                continue;
+            };
+            if waddle_xmpp_core::mam::is_mam_query_response_message(&message) {
+                row_ids.push(row_id);
+            }
+        }
+        row_ids
+    };
+
+    let mut deleted = 0;
+    for row_id in row_ids {
+        deleted += storage
+            .execute(
+                "DELETE FROM pending_delivery WHERE row_id = ?",
+                crate::db_params![row_id],
+            )
+            .await?;
+    }
+    Ok(deleted)
 }

@@ -43,6 +43,33 @@ fn message_type_default_matches_rfc6121_5_2_2() {
 }
 
 #[test]
+fn identifies_mam_query_response_messages() {
+    for child in ["result", "fin"] {
+        let mut message = Message::new(Some(jid("alice@example.com/web")));
+        message.payloads.push(
+            Element::builder(child, MAM_NS)
+                .attr("queryid", "query-1")
+                .build(),
+        );
+
+        assert!(is_mam_query_response_message(&message));
+    }
+}
+
+#[test]
+fn ordinary_messages_are_not_mam_query_responses() {
+    let mut message = Message::new(Some(jid("alice@example.com")));
+    message.type_ = MessageType::Chat;
+    message.payloads.push(
+        Element::builder("result", "urn:example:not-mam")
+            .attr("queryid", "query-1")
+            .build(),
+    );
+
+    assert!(!is_mam_query_response_message(&message));
+}
+
+#[test]
 fn parses_mam_query_with_form_and_rsm() {
     let iq = Iq {
         from: None,

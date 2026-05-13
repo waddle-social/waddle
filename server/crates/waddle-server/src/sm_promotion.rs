@@ -102,7 +102,13 @@ pub async fn promote_session_unacked(
 
     debug!(
         stream_id = %session.stream_id,
-        ?summary,
+        redelivered = summary.redelivered,
+        queued = summary.queued,
+        bounced = summary.bounced,
+        dropped = summary.dropped,
+        not_promotable = summary.not_promotable,
+        unparseable = summary.unparseable,
+        storage_failed = summary.storage_failed,
         "Q6 promotion: session summary"
     );
     summary
@@ -124,6 +130,11 @@ async fn promote_one(
     sequence: u32,
     ctx: PromotionContext<'_>,
 ) -> PromotedOutcome {
+    if waddle_xmpp_core::mam::is_mam_query_response_message(&message) {
+        waddle_xmpp::prometheus::increment_sm_promotion_not_promotable();
+        return PromotedOutcome::NotPromotable;
+    }
+
     let routing: DmRouting = classify_dm_intake(&message, ctx.online, ctx.blocklist);
 
     // Step 1: alt-resource — if the classifier says live-deliver,

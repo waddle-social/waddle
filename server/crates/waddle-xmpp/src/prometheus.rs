@@ -53,6 +53,11 @@ static PENDING_DELIVERY_UNRESOLVED_POISON_PILL: AtomicU64 = AtomicU64::new(0);
 // pending_delivery insert error and preserved the durable SM row for
 // retry (issue #209 PR #346 + finding #14 dead-letter cap).
 static SM_PROMOTION_STORAGE_FAILED: AtomicU64 = AtomicU64::new(0);
+// `sm_promotion_not_promotable`: Q6 promotion saw an unacked stanza
+// that is valid XMPP but not an XEP-0160 offline-message candidate.
+// This is expected for XEP-0313 MAM result/fin frames addressed to
+// stale full-JID resources.
+static SM_PROMOTION_NOT_PROMOTABLE: AtomicU64 = AtomicU64::new(0);
 // `sm_promotion_blocklist_failed`: blocklist storage load failed
 // during Q6 promotion; the session was skipped fail-closed.
 static SM_PROMOTION_BLOCKLIST_FAILED: AtomicU64 = AtomicU64::new(0);
@@ -160,6 +165,10 @@ pub fn add_sm_promotion_storage_failed(n: u64) {
     SM_PROMOTION_STORAGE_FAILED.fetch_add(n, Ordering::Relaxed);
 }
 
+pub fn increment_sm_promotion_not_promotable() {
+    SM_PROMOTION_NOT_PROMOTABLE.fetch_add(1, Ordering::Relaxed);
+}
+
 pub fn increment_sm_promotion_blocklist_failed() {
     SM_PROMOTION_BLOCKLIST_FAILED.fetch_add(1, Ordering::Relaxed);
 }
@@ -194,6 +203,7 @@ pub fn render_metrics() -> String {
     let pending_aged_out = PENDING_DELIVERY_AGED_OUT.load(Ordering::Relaxed);
     let pending_poison_pill = PENDING_DELIVERY_UNRESOLVED_POISON_PILL.load(Ordering::Relaxed);
     let sm_promotion_storage_failed = SM_PROMOTION_STORAGE_FAILED.load(Ordering::Relaxed);
+    let sm_promotion_not_promotable = SM_PROMOTION_NOT_PROMOTABLE.load(Ordering::Relaxed);
     let sm_promotion_blocklist_failed = SM_PROMOTION_BLOCKLIST_FAILED.load(Ordering::Relaxed);
     let sm_promotion_dead_lettered = SM_PROMOTION_DEAD_LETTERED.load(Ordering::Relaxed);
     let sm_drain_timeout = SM_DRAIN_TIMEOUT.load(Ordering::Relaxed);
@@ -243,6 +253,9 @@ pub fn render_metrics() -> String {
             "# HELP waddle_sm_promotion_storage_failed_total Q6 promotion encountered a transient pending_delivery insert error; durable SM row preserved for retry.\n",
             "# TYPE waddle_sm_promotion_storage_failed_total counter\n",
             "waddle_sm_promotion_storage_failed_total {sm_promotion_storage_failed}\n",
+            "# HELP waddle_sm_promotion_not_promotable_total Q6 promotion skipped a valid stanza that must not enter XEP-0160 offline storage, such as XEP-0313 MAM result/fin frames.\n",
+            "# TYPE waddle_sm_promotion_not_promotable_total counter\n",
+            "waddle_sm_promotion_not_promotable_total {sm_promotion_not_promotable}\n",
             "# HELP waddle_sm_promotion_blocklist_failed_total Q6 promotion skipped a session because its blocklist load failed (fail-closed XEP-0191 policy).\n",
             "# TYPE waddle_sm_promotion_blocklist_failed_total counter\n",
             "waddle_sm_promotion_blocklist_failed_total {sm_promotion_blocklist_failed}\n",
@@ -270,6 +283,7 @@ pub fn render_metrics() -> String {
         pending_aged_out = pending_aged_out,
         pending_poison_pill = pending_poison_pill,
         sm_promotion_storage_failed = sm_promotion_storage_failed,
+        sm_promotion_not_promotable = sm_promotion_not_promotable,
         sm_promotion_blocklist_failed = sm_promotion_blocklist_failed,
         sm_promotion_dead_lettered = sm_promotion_dead_lettered,
         sm_drain_timeout = sm_drain_timeout,
@@ -413,6 +427,7 @@ mod tests {
         add_pending_delivery_aged_out(3);
         increment_pending_delivery_unresolved_poison_pill();
         add_sm_promotion_storage_failed(2);
+        increment_sm_promotion_not_promotable();
         increment_sm_promotion_blocklist_failed();
         increment_sm_promotion_dead_lettered();
         increment_sm_drain_timeout();
@@ -426,6 +441,7 @@ mod tests {
             "waddle_pending_delivery_aged_out_total",
             "waddle_pending_delivery_unresolved_poison_pill_total",
             "waddle_sm_promotion_storage_failed_total",
+            "waddle_sm_promotion_not_promotable_total",
             "waddle_sm_promotion_blocklist_failed_total",
             "waddle_sm_promotion_dead_lettered_total",
             "waddle_sm_drain_timeout_total",
@@ -444,6 +460,7 @@ mod tests {
         assert!(rendered.contains("waddle_pending_delivery_orphan_claims_released_total 7"));
         assert!(rendered.contains("waddle_pending_delivery_aged_out_total 3"));
         assert!(rendered.contains("waddle_sm_promotion_storage_failed_total 2"));
+        assert!(rendered.contains("waddle_sm_promotion_not_promotable_total 1"));
         assert!(rendered.contains("waddle_sm_resume_window_clamped_total 1"));
     }
 
