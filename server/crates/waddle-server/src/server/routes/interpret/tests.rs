@@ -429,7 +429,11 @@ async fn origin_id_dedup_rewrites_downstream_archive_refs_to_existing_mam_id() {
         .await
         .expect("seed original archive row");
 
-    let mut retry = chat_msg("alice@example.com/web-new", "bob@example.com", "retry copy");
+    let mut retry = chat_msg(
+        "alice@example.com/web-new",
+        "bob@example.com",
+        "original copy",
+    );
     retry
         .payloads
         .push(build_origin_id_element(origin_id.as_str()));
@@ -476,6 +480,86 @@ async fn origin_id_dedup_rewrites_downstream_archive_refs_to_existing_mam_id() {
         !outcome.frames[0].contains("fresh-retry-archive-id"),
         "wire stanza-id must not point at the skipped duplicate row"
     );
+}
+
+#[tokio::test]
+async fn origin_id_collision_with_distinct_content_keeps_fresh_archive_refs() {
+    use waddle_xmpp::inbox::storage::InMemoryInboxStorage;
+    use waddle_xmpp::mam::{ArchivedMessage, InMemoryMamStorage};
+    use waddle_xmpp_core::xep0359::{
+        build_origin_id_element, build_stanza_id_element, OriginId, StanzaId,
+    };
+
+    let registry = ConnectionRegistry::new();
+    let mam_concrete = Arc::new(InMemoryMamStorage::new());
+    let mam: Arc<dyn MamStorage> = mam_concrete.clone();
+    let inbox_concrete = Arc::new(InMemoryInboxStorage::new());
+    let inbox: Arc<dyn InboxStorage> = inbox_concrete.clone();
+    let deps = Deps::test_with_storage(&registry, &mam, &inbox);
+
+    let alice: jid::BareJid = "alice@example.com".parse().expect("bare");
+    let bob: jid::BareJid = "bob@example.com".parse().expect("bare");
+    let origin_id = OriginId::new("retry-origin-collision");
+
+    mam_concrete
+        .store_message(
+            &alice,
+            &ArchivedMessage {
+                id: "existing-archive-id".to_string(),
+                body: Some("original copy".to_string()),
+                origin_id: Some(origin_id.clone()),
+                message_type: xmpp_parsers::message::MessageType::Chat,
+                ..ArchivedMessage::for_test(
+                    "alice@example.com/web-old".parse().expect("jid"),
+                    "bob@example.com".parse().expect("jid"),
+                )
+            },
+        )
+        .await
+        .expect("seed original archive row");
+
+    let mut distinct = chat_msg(
+        "alice@example.com/web-new",
+        "bob@example.com",
+        "new content",
+    );
+    distinct
+        .payloads
+        .push(build_origin_id_element(origin_id.as_str()));
+    distinct.payloads.push(build_stanza_id_element(
+        "fresh-distinct-archive-id",
+        &jid::Jid::from(alice.clone()),
+    ));
+
+    let events = vec![
+        OutboundEvent::ArchiveDirect {
+            archive_jid: alice.clone(),
+            from: alice.clone(),
+            to: bob.clone(),
+            message: Box::new(distinct.clone()),
+        },
+        OutboundEvent::ProjectInbox {
+            owner: alice.clone(),
+            peer: bob,
+            message: Box::new(distinct.clone()),
+            archive_ref: StanzaId::new("fresh-distinct-archive-id", jid::Jid::from(alice.clone())),
+            increment_unread: false,
+        },
+        OutboundEvent::SendStanza(Box::new(Stanza::Message(distinct))),
+    ];
+    let outcome = interpret(events, &deps).await;
+
+    assert_eq!(
+        mam_concrete.count_messages(&alice).await.expect("count"),
+        2,
+        "origin-id reuse with distinct content must archive a new MAM row"
+    );
+    let entries = inbox_concrete.list(&alice).await.expect("inbox list");
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].last_stanza_id, "fresh-distinct-archive-id");
+    assert_eq!(outcome.frames.len(), 1);
+    assert!(outcome.frames[0].contains("fresh-distinct-archive-id"));
+    assert!(!outcome.frames[0].contains("existing-archive-id"));
 }
 
 #[tokio::test]

@@ -88,7 +88,15 @@ async fn assert_deduplicates_origin_id_within_archive_sender_scope(storage: &dyn
     };
     let retry = ArchivedMessage {
         id: "archive-retry".to_string(),
-        body: Some("retry copy".to_string()),
+        body: Some("first copy".to_string()),
+        origin_id: Some(origin_id.clone()),
+        message_type: xmpp_parsers::message::MessageType::Groupchat,
+        nickname_generation: Some(7),
+        ..ArchivedMessage::for_test(archive_alice(&archive), archive_jid.clone())
+    };
+    let same_sender_different_body = ArchivedMessage {
+        id: "archive-distinct-body".to_string(),
+        body: Some("distinct send with reused origin-id".to_string()),
         origin_id: Some(origin_id.clone()),
         message_type: xmpp_parsers::message::MessageType::Groupchat,
         nickname_generation: Some(7),
@@ -113,6 +121,10 @@ async fn assert_deduplicates_origin_id_within_archive_sender_scope(storage: &dyn
 
     let first_id = storage.store_message(&archive, &first).await.unwrap();
     let retry_id = storage.store_message(&archive, &retry).await.unwrap();
+    let distinct_body_id = storage
+        .store_message(&archive, &same_sender_different_body)
+        .await
+        .unwrap();
     let other_sender_id = storage
         .store_message(&archive, &other_sender)
         .await
@@ -127,6 +139,7 @@ async fn assert_deduplicates_origin_id_within_archive_sender_scope(storage: &dyn
         retry_id, first_id,
         "same archive + same sender + same XEP-0359 origin-id must return the existing archive row"
     );
+    assert_eq!(distinct_body_id, "archive-distinct-body");
     assert_eq!(other_sender_id, "archive-other-sender");
     assert_eq!(next_generation_id, "archive-next-generation");
 
@@ -143,11 +156,12 @@ async fn assert_deduplicates_origin_id_within_archive_sender_scope(storage: &dyn
         ids,
         vec![
             "archive-first",
+            "archive-distinct-body",
             "archive-other-sender",
             "archive-next-generation"
         ]
     );
-    assert_eq!(result.count, Some(3));
+    assert_eq!(result.count, Some(4));
 
     let stored = storage
         .get_message("archive-first")
@@ -181,7 +195,14 @@ async fn assert_origin_id_dedup_uses_bare_sender_for_direct_messages(storage: &d
     };
     let retry_from_new_resource = ArchivedMessage {
         id: "dm-archive-retry".to_string(),
-        body: Some("sent after reconnect".to_string()),
+        body: Some("sent before reconnect".to_string()),
+        origin_id: Some(origin_id.clone()),
+        message_type: xmpp_parsers::message::MessageType::Chat,
+        ..ArchivedMessage::for_test(jid("alice@example.com/web-new"), jid("bob@example.com"))
+    };
+    let same_sender_distinct_body = ArchivedMessage {
+        id: "dm-distinct-body".to_string(),
+        body: Some("distinct send with reused origin-id".to_string()),
         origin_id: Some(origin_id.clone()),
         message_type: xmpp_parsers::message::MessageType::Chat,
         ..ArchivedMessage::for_test(jid("alice@example.com/web-new"), jid("bob@example.com"))
@@ -210,6 +231,10 @@ async fn assert_origin_id_dedup_uses_bare_sender_for_direct_messages(storage: &d
         .store_message(&archive, &same_sender_different_recipient)
         .await
         .unwrap();
+    let distinct_body_id = storage
+        .store_message(&archive, &same_sender_distinct_body)
+        .await
+        .unwrap();
     let different_sender_id = storage
         .store_message(&archive, &different_sender)
         .await
@@ -217,8 +242,9 @@ async fn assert_origin_id_dedup_uses_bare_sender_for_direct_messages(storage: &d
 
     assert_eq!(retry_id, first_id);
     assert_eq!(different_recipient_id, "dm-different-recipient");
+    assert_eq!(distinct_body_id, "dm-distinct-body");
     assert_eq!(different_sender_id, "dm-other-sender");
-    assert_eq!(storage.count_messages(&archive).await.unwrap(), 3);
+    assert_eq!(storage.count_messages(&archive).await.unwrap(), 4);
 }
 
 #[tokio::test]
