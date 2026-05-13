@@ -7,12 +7,20 @@ use crate::request::StanzaId;
 
 pub const NS_SM: &str = "urn:xmpp:sm:3";
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct QueuedOutboundStanza {
+    h: u32,
+    element: Element,
+    message_stanza_id: Option<StanzaId>,
+}
+
 /// In-memory XEP-0198 resume snapshot carried across a reconnect attempt.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SmResumeState {
     previd: String,
     inbound_h: u32,
     outbound_h: u32,
+    outbound_queue: VecDeque<QueuedOutboundStanza>,
 }
 
 impl SmResumeState {
@@ -26,7 +34,19 @@ impl SmResumeState {
             previd,
             inbound_h,
             outbound_h,
+            outbound_queue: VecDeque::new(),
         })
+    }
+
+    fn from_outbound_queue(
+        previd: impl Into<String>,
+        inbound_h: u32,
+        outbound_h: u32,
+        outbound_queue: VecDeque<QueuedOutboundStanza>,
+    ) -> ClientResult<Self> {
+        let mut state = Self::new(previd, inbound_h, outbound_h)?;
+        state.outbound_queue = outbound_queue;
+        Ok(state)
     }
 
     pub fn previd(&self) -> &str {
@@ -40,13 +60,6 @@ impl SmResumeState {
     pub fn outbound_h(&self) -> u32 {
         self.outbound_h
     }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct QueuedOutboundStanza {
-    h: u32,
-    element: Element,
-    message_stanza_id: Option<StanzaId>,
 }
 
 /// XEP-0198 client-side stream management state.
@@ -88,8 +101,21 @@ impl SmState {
             outbound_count: resume_state.outbound_h(),
             inbound_count: resume_state.inbound_h(),
             previd: Some(resume_state.previd().to_string()),
+            outbound_queue: resume_state.outbound_queue.clone(),
             ..Self::default()
         }
+    }
+
+    pub fn resume_state(&self) -> Option<SmResumeState> {
+        self.previd.as_ref().and_then(|previd| {
+            SmResumeState::from_outbound_queue(
+                previd.clone(),
+                self.inbound_count,
+                self.outbound_count,
+                self.outbound_queue.clone(),
+            )
+            .ok()
+        })
     }
 
     /// Increment the outbound stanza counter by `count`.

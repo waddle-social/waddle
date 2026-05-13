@@ -23,9 +23,19 @@ impl WaddleClient {
 
     pub fn get_resume_state(&self) -> JsValue {
         match self.inner.borrow().resume_state.as_ref() {
-            Some(state) => to_js_value(state).unwrap_or(JsValue::NULL),
+            Some(state) => {
+                to_js_value(&JsResumeState::from(state.clone())).unwrap_or(JsValue::NULL)
+            }
             None => JsValue::NULL,
         }
+    }
+
+    pub fn get_resume_state_handle(&self) -> Option<WaddleResumeState> {
+        self.inner
+            .borrow()
+            .resume_state
+            .clone()
+            .map(|inner| WaddleResumeState { inner })
     }
 
     pub fn set_on_message(&mut self, cb: Function) {

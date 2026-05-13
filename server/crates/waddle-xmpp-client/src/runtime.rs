@@ -79,14 +79,7 @@ impl XmppRuntime {
     }
 
     pub fn resume_state(&self) -> Option<crate::stream_management::SmResumeState> {
-        self.sm_state.previd.as_ref().and_then(|previd| {
-            crate::stream_management::SmResumeState::new(
-                previd.clone(),
-                self.sm_state.inbound_count,
-                self.sm_state.outbound_count,
-            )
-            .ok()
-        })
+        self.sm_state.resume_state()
     }
 
     pub fn pending_requests(&self) -> Vec<PendingRequest> {

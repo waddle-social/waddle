@@ -121,6 +121,7 @@ type XmppClientInstance = Partial<WasmClient> & CompatEmitter & {
   set_on_message_delivery_failed?: (cb: (id: string) => void) => void;
   set_on_session_lifecycle?: (cb: (event: string) => void) => void;
   get_resume_state?: () => XmppResumeState | null;
+  get_resume_state_handle?: () => unknown | null;
 };
 
 type XmppResumeState = {
@@ -206,6 +207,7 @@ export class BrowserXmppClient {
   private reconnectAttempt = 0;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private resumeState: XmppResumeState | null = null;
+  private resumeStateHandle: unknown | null = null;
   private directQueueFlushPromise: Promise<void> | null = null;
   private readonly roomQueueFlushes = new Map<string, Promise<void>>();
   private readonly inflightQueuedIds = new Set<string>();
@@ -338,7 +340,9 @@ export class BrowserXmppClient {
       this.session.session_id,
       this.resource,
     );
-    if (this.resumeState) {
+    if (this.resumeStateHandle && typeof (config as any).with_resume_state_handle === "function") {
+      (config as any).with_resume_state_handle(this.resumeStateHandle);
+    } else if (this.resumeState) {
       (config as any).with_resume_state?.(
         this.resumeState.previd,
         this.resumeState.inboundH,
@@ -390,6 +394,7 @@ export class BrowserXmppClient {
     this.destroying = true;
     this.clearReconnectTimer();
     this.resumeState = null;
+    this.resumeStateHandle = null;
     const xmpp = this.xmpp;
     const roomBefore = this.currentRoom;
     this.stopSelfPing();
@@ -883,7 +888,8 @@ export class BrowserXmppClient {
   private handleDisconnected(xmpp: XmppClientInstance, error?: Error) {
     if (this.xmpp !== xmpp) return;
     this.connected = false; this.stopSelfPing(); this.xmpp = null;
-    if (this.destroying) { this.resumeState = null; this.emitStatus({ state: "offline", detail: error?.message ?? "Disconnected" }); return; }
+    if (this.destroying) { this.resumeState = null; this.resumeStateHandle = null; this.emitStatus({ state: "offline", detail: error?.message ?? "Disconnected" }); return; }
+    this.resumeStateHandle = xmpp.get_resume_state_handle?.() ?? null;
     this.resumeState = xmpp.get_resume_state?.() ?? null;
     this.emitStatus({ state: "reconnecting", detail: countQueuedMessages(this.queueScope) > 0 ? "Connection lost — queued messages will send when reconnected" : (error?.message ?? "Connection lost, reconnecting...") });
     if (this.onceConnectFailed) { const fail = this.onceConnectFailed; this.onceConnected = null; this.onceConnectFailed = null; fail(error ?? new Error("XMPP connection failed")); }

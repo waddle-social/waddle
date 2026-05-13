@@ -3,6 +3,11 @@ use super::*;
 pub(crate) type DriverResult<T> = Result<T, ClientError>;
 
 #[wasm_bindgen]
+pub struct WaddleResumeState {
+    pub(crate) inner: waddle_xmpp_client::SmResumeState,
+}
+
+#[wasm_bindgen]
 pub struct WaddleConfig {
     pub(crate) server_url: String,
     pub(crate) jid: String,
@@ -40,6 +45,10 @@ impl WaddleConfig {
                 .map_err(|err| js_error(err.to_string()))?,
         );
         Ok(())
+    }
+
+    pub fn with_resume_state_handle(&mut self, state: &WaddleResumeState) {
+        self.resume_state = Some(state.inner.clone());
     }
 }
 
@@ -98,7 +107,7 @@ pub(crate) struct WaddleClientInner {
     pub(crate) on_error: Option<Function>,
     pub(crate) on_message_delivery_acked: Option<Function>,
     pub(crate) on_message_delivery_failed: Option<Function>,
-    pub(crate) resume_state: Option<JsResumeState>,
+    pub(crate) resume_state: Option<waddle_xmpp_client::SmResumeState>,
 }
 
 pub(crate) enum WasmCommand {

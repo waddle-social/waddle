@@ -379,6 +379,62 @@ fn runtime_replays_unhandled_stanzas_after_resume_without_recounting_them() {
 }
 
 #[test]
+fn runtime_resume_state_carries_unhandled_stanzas_into_next_runtime() {
+    let mut first_runtime = XmppRuntime::new(config()).unwrap();
+    first_runtime
+        .apply_transport_event(TransportEvent::MessageSent(TransportMessage::Element(
+            SmState::build_enable(true),
+        )))
+        .unwrap();
+    first_runtime
+        .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+            Element::builder("enabled", crate::stream_management::NS_SM)
+                .attr("resume", "true")
+                .attr("id", "old-sm-id")
+                .build(),
+        )))
+        .unwrap();
+    first_runtime
+        .apply_transport_event(TransportEvent::MessageSent(TransportMessage::Element(
+            Element::builder("message", crate::NS_CLIENT)
+                .attr("id", "carried-unhandled")
+                .attr("type", "chat")
+                .build(),
+        )))
+        .unwrap();
+
+    let resume_state = first_runtime
+        .resume_state()
+        .expect("resume state with unhandled queue");
+    let mut config = config();
+    config.session.stream_management.resume_state = Some(resume_state);
+    let mut next_runtime = XmppRuntime::new(config).unwrap();
+
+    drive_to_authenticated_stream(&mut next_runtime);
+    next_runtime
+        .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+            post_auth_features_with_sm(),
+        )))
+        .unwrap();
+
+    let resumed_events = next_runtime
+        .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+            Element::builder("resumed", crate::stream_management::NS_SM)
+                .attr("previd", "old-sm-id")
+                .attr("h", "0")
+                .build(),
+        )))
+        .unwrap();
+
+    assert!(resumed_events.iter().any(|event| matches!(
+        event,
+        ClientEvent::Connection(ConnectionEvent::OutboundMessage(
+            TransportMessage::Element(element)
+        )) if element.attr("id") == Some("carried-unhandled")
+    )));
+}
+
+#[test]
 fn runtime_emits_message_delivery_ack_from_core_sm_queue() {
     let mut runtime = XmppRuntime::new(config()).unwrap();
     runtime
