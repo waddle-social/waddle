@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, RwLock};
 
 use minidom::Element;
@@ -181,6 +181,7 @@ where
             events: evt_tx,
             state,
             pending_iqs: HashMap::new(),
+            deferred_commands: VecDeque::new(),
         };
 
         tokio::spawn(task.run());
@@ -197,6 +198,15 @@ struct DriverTask {
     events: broadcast::Sender<ClientEvent>,
     state: Arc<RwLock<SessionSnapshot>>,
     pending_iqs: HashMap<String, oneshot::Sender<ClientResult<Element>>>,
+    deferred_commands: VecDeque<DeferredXmppCommand>,
+}
+
+enum DeferredXmppCommand {
+    SendStanza(Element),
+    SendIq {
+        stanza: Element,
+        responder: oneshot::Sender<ClientResult<Element>>,
+    },
 }
 
 impl DriverTask {
@@ -233,43 +243,100 @@ impl DriverTask {
                 }
                 cmd = self.commands.recv() => {
                     match cmd {
-                        Some(XmppCommand::SendStanza(el)) => {
-                            let maybe_message_id = message_delivery_stanza_id(&el);
-                            match self.send_transport_message(TransportMessage::Element(el)).await {
-                                Ok(()) => {}
-                                Err(_) => {
-                                    if let Some(stanza_id) = maybe_message_id {
-                                        self.emit_message_delivery_failed(stanza_id);
-                                    }
-                                }
+                        Some(command) => {
+                            if !self.handle_command(command).await {
+                                return;
                             }
-                        }
-                        Some(XmppCommand::SendIq { stanza, responder }) => {
-                            let id = stanza.attr("id").map(|s| s.to_string());
-                            match self.send_transport_message(TransportMessage::Element(stanza)).await {
-                                Err(_) => {
-                                    let _ = responder.send(Err(ClientError::Disconnected));
-                                }
-                                Ok(()) => match id {
-                                    Some(id) => {
-                                        self.pending_iqs.insert(id, responder);
-                                    }
-                                    None => {
-                                        let _ = responder.send(Err(ClientError::Disconnected));
-                                    }
-                                },
-                            }
-                        }
-                        Some(XmppCommand::Disconnect) => {
-                            let _ = self.transport.close().await;
-                            // Drain close events so state reaches Disconnected before we exit.
-                            for event in self.transport.drain_events() {
-                                self.apply_transport_event(event).await;
-                            }
-                            return;
                         }
                         None => return,
                     }
+                }
+            }
+        }
+    }
+
+    async fn handle_command(&mut self, command: XmppCommand) -> bool {
+        match command {
+            XmppCommand::SendStanza(stanza) => {
+                if !self.runtime.can_send_app_stanza() {
+                    self.deferred_commands
+                        .push_back(DeferredXmppCommand::SendStanza(stanza));
+                    return true;
+                }
+
+                self.send_stanza_command(stanza).await;
+                true
+            }
+            XmppCommand::SendIq { stanza, responder } => {
+                if !self.runtime.can_send_app_stanza() {
+                    self.deferred_commands
+                        .push_back(DeferredXmppCommand::SendIq { stanza, responder });
+                    return true;
+                }
+
+                self.send_iq_command(stanza, responder).await;
+                true
+            }
+            XmppCommand::Disconnect => {
+                let _ = self.transport.close().await;
+                // Drain close events so state reaches Disconnected before we exit.
+                for event in self.transport.drain_events() {
+                    self.apply_transport_event(event).await;
+                }
+                false
+            }
+        }
+    }
+
+    async fn send_stanza_command(&mut self, stanza: Element) {
+        let maybe_message_id = message_delivery_stanza_id(&stanza);
+        if self
+            .send_transport_message(TransportMessage::Element(stanza))
+            .await
+            .is_err()
+        {
+            if let Some(stanza_id) = maybe_message_id {
+                self.emit_message_delivery_failed(stanza_id);
+            }
+        }
+    }
+
+    async fn send_iq_command(
+        &mut self,
+        stanza: Element,
+        responder: oneshot::Sender<ClientResult<Element>>,
+    ) {
+        let id = stanza.attr("id").map(|s| s.to_string());
+        match self
+            .send_transport_message(TransportMessage::Element(stanza))
+            .await
+        {
+            Err(_) => {
+                let _ = responder.send(Err(ClientError::Disconnected));
+            }
+            Ok(()) => match id {
+                Some(id) => {
+                    self.pending_iqs.insert(id, responder);
+                }
+                None => {
+                    let _ = responder.send(Err(ClientError::Disconnected));
+                }
+            },
+        }
+    }
+
+    async fn flush_deferred_commands(&mut self) {
+        while self.runtime.can_send_app_stanza() {
+            let Some(command) = self.deferred_commands.pop_front() else {
+                return;
+            };
+
+            match command {
+                DeferredXmppCommand::SendStanza(stanza) => {
+                    self.send_stanza_command(stanza).await;
+                }
+                DeferredXmppCommand::SendIq { stanza, responder } => {
+                    self.send_iq_command(stanza, responder).await;
                 }
             }
         }
@@ -295,6 +362,8 @@ impl DriverTask {
                 }
             }
         }
+
+        self.flush_deferred_commands().await;
 
         *self.state.write().unwrap() = self.runtime.snapshot().clone();
         !is_terminal

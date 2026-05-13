@@ -120,6 +120,22 @@ pub(crate) enum WasmCommand {
     },
 }
 
+pub(crate) enum DeferredWasmCommand {
+    SendStanza {
+        stanza: Element,
+        responder: oneshot::Sender<DriverResult<()>>,
+    },
+    SendIq {
+        stanza: Element,
+        responder: oneshot::Sender<DriverResult<Element>>,
+    },
+    SendMamQuery {
+        stanza: Element,
+        query_id: String,
+        responder: oneshot::Sender<DriverResult<waddle_xmpp_client::MamPage>>,
+    },
+}
+
 pub(crate) enum DriverEvent {
     Client(Box<ClientEvent>),
     ResumeState(Option<waddle_xmpp_client::SmResumeState>),
@@ -144,4 +160,5 @@ pub(crate) struct WasmDriverTask {
     pub(crate) event_tx: mpsc::Sender<DriverEvent>,
     pub(crate) pending_iqs: HashMap<String, oneshot::Sender<DriverResult<Element>>>,
     pub(crate) pending_mam_queries: HashMap<String, PendingMamQuery>,
+    pub(crate) deferred_commands: VecDeque<DeferredWasmCommand>,
 }

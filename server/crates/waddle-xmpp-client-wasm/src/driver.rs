@@ -32,6 +32,7 @@ impl WasmDriverTask {
             event_tx,
             pending_iqs: HashMap::new(),
             pending_mam_queries: HashMap::new(),
+            deferred_commands: VecDeque::new(),
         })
     }
 
@@ -119,75 +120,40 @@ impl WasmDriverTask {
     async fn handle_command(&mut self, cmd: Option<WasmCommand>) -> bool {
         match cmd {
             Some(WasmCommand::SendStanza { stanza, responder }) => {
-                let result = self
-                    .send_transport_message(TransportMessage::Element(stanza.clone()))
-                    .await;
-                let keep_running = result.is_ok();
-                if let Err(err) = &result {
-                    if let Some(stanza_id) = message_delivery_stanza_id(&stanza) {
-                        self.emit_message_delivery_failed(stanza_id).await;
-                    }
-                    self.emit_error(err.to_string()).await;
+                if !self.runtime.can_send_app_stanza() {
+                    self.deferred_commands
+                        .push_back(DeferredWasmCommand::SendStanza { stanza, responder });
+                    return true;
                 }
-                let _ = responder.send(result);
-                keep_running
+
+                self.send_stanza_command(stanza, responder).await
             }
             Some(WasmCommand::SendIq { stanza, responder }) => {
-                let id = stanza.attr("id").map(|value| value.to_string());
-                match self
-                    .send_transport_message(TransportMessage::Element(stanza))
-                    .await
-                {
-                    Ok(()) => match id {
-                        Some(id) => {
-                            self.pending_iqs.insert(id, responder);
-                            true
-                        }
-                        None => {
-                            let _ = responder.send(Err(ClientError::Disconnected));
-                            false
-                        }
-                    },
-                    Err(err) => {
-                        self.emit_error(err.to_string()).await;
-                        let _ = responder.send(Err(err));
-                        false
-                    }
+                if !self.runtime.can_send_app_stanza() {
+                    self.deferred_commands
+                        .push_back(DeferredWasmCommand::SendIq { stanza, responder });
+                    return true;
                 }
+
+                self.send_iq_command(stanza, responder).await
             }
             Some(WasmCommand::SendMamQuery {
                 stanza,
                 query_id,
                 responder,
             }) => {
-                let id = stanza.attr("id").map(|value| value.to_string());
-                match self
-                    .send_transport_message(TransportMessage::Element(stanza))
-                    .await
-                {
-                    Ok(()) => match id {
-                        Some(id) => {
-                            self.pending_mam_queries.insert(
-                                id,
-                                PendingMamQuery {
-                                    query_id,
-                                    messages: Vec::new(),
-                                    responder,
-                                },
-                            );
-                            true
-                        }
-                        None => {
-                            let _ = responder.send(Err(ClientError::Disconnected));
-                            false
-                        }
-                    },
-                    Err(err) => {
-                        self.emit_error(err.to_string()).await;
-                        let _ = responder.send(Err(err));
-                        false
-                    }
+                if !self.runtime.can_send_app_stanza() {
+                    self.deferred_commands
+                        .push_back(DeferredWasmCommand::SendMamQuery {
+                            stanza,
+                            query_id,
+                            responder,
+                        });
+                    return true;
                 }
+
+                self.send_mam_query_command(stanza, query_id, responder)
+                    .await
             }
             Some(WasmCommand::Disconnect { responder }) => {
                 let result = self
@@ -199,6 +165,120 @@ impl WasmDriverTask {
             }
             None => false,
         }
+    }
+
+    async fn send_stanza_command(
+        &mut self,
+        stanza: Element,
+        responder: oneshot::Sender<DriverResult<()>>,
+    ) -> bool {
+        let result = self
+            .send_transport_message(TransportMessage::Element(stanza.clone()))
+            .await;
+        let keep_running = result.is_ok();
+        if let Err(err) = &result {
+            if let Some(stanza_id) = message_delivery_stanza_id(&stanza) {
+                self.emit_message_delivery_failed(stanza_id).await;
+            }
+            self.emit_error(err.to_string()).await;
+        }
+        let _ = responder.send(result);
+        keep_running
+    }
+
+    async fn send_iq_command(
+        &mut self,
+        stanza: Element,
+        responder: oneshot::Sender<DriverResult<Element>>,
+    ) -> bool {
+        let id = stanza.attr("id").map(|value| value.to_string());
+        match self
+            .send_transport_message(TransportMessage::Element(stanza))
+            .await
+        {
+            Ok(()) => match id {
+                Some(id) => {
+                    self.pending_iqs.insert(id, responder);
+                    true
+                }
+                None => {
+                    let _ = responder.send(Err(ClientError::Disconnected));
+                    false
+                }
+            },
+            Err(err) => {
+                self.emit_error(err.to_string()).await;
+                let _ = responder.send(Err(err));
+                false
+            }
+        }
+    }
+
+    async fn send_mam_query_command(
+        &mut self,
+        stanza: Element,
+        query_id: String,
+        responder: oneshot::Sender<DriverResult<waddle_xmpp_client::MamPage>>,
+    ) -> bool {
+        let id = stanza.attr("id").map(|value| value.to_string());
+        match self
+            .send_transport_message(TransportMessage::Element(stanza))
+            .await
+        {
+            Ok(()) => match id {
+                Some(id) => {
+                    self.pending_mam_queries.insert(
+                        id,
+                        PendingMamQuery {
+                            query_id,
+                            messages: Vec::new(),
+                            responder,
+                        },
+                    );
+                    true
+                }
+                None => {
+                    let _ = responder.send(Err(ClientError::Disconnected));
+                    false
+                }
+            },
+            Err(err) => {
+                self.emit_error(err.to_string()).await;
+                let _ = responder.send(Err(err));
+                false
+            }
+        }
+    }
+
+    async fn flush_deferred_commands(&mut self) -> bool {
+        while self.runtime.can_send_app_stanza() {
+            let Some(command) = self.deferred_commands.pop_front() else {
+                return true;
+            };
+
+            let keep_running = match command {
+                DeferredWasmCommand::SendStanza { stanza, responder } => {
+                    self.send_stanza_command(stanza, responder).await
+                }
+                DeferredWasmCommand::SendIq { stanza, responder } => {
+                    self.send_iq_command(stanza, responder).await
+                }
+                DeferredWasmCommand::SendMamQuery {
+                    stanza,
+                    query_id,
+                    responder,
+                } => {
+                    self.send_mam_query_command(stanza, query_id, responder)
+                        .await
+                }
+            };
+
+            if !keep_running {
+                return false;
+            }
+        }
+
+        true
     }
 
     async fn apply_transport_event(&mut self, event: TransportEvent) -> bool {
@@ -214,6 +294,10 @@ impl WasmDriverTask {
             if !self.handle_client_event(event).await {
                 return false;
             }
+        }
+
+        if !self.flush_deferred_commands().await {
+            return false;
         }
 
         self.publish_resume_state().await;
@@ -388,6 +472,19 @@ impl WasmDriverTask {
     }
 
     async fn finish(&mut self) {
+        for command in self.deferred_commands.drain(..) {
+            match command {
+                DeferredWasmCommand::SendStanza { responder, .. } => {
+                    let _ = responder.send(Err(ClientError::Disconnected));
+                }
+                DeferredWasmCommand::SendIq { responder, .. } => {
+                    let _ = responder.send(Err(ClientError::Disconnected));
+                }
+                DeferredWasmCommand::SendMamQuery { responder, .. } => {
+                    let _ = responder.send(Err(ClientError::Disconnected));
+                }
+            }
+        }
         for (_, responder) in self.pending_iqs.drain() {
             let _ = responder.send(Err(ClientError::Disconnected));
         }

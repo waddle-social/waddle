@@ -100,6 +100,19 @@ impl XmppRuntime {
         }
     }
 
+    pub fn can_send_app_stanza(&self) -> bool {
+        if !matches!(self.snapshot.phase, SessionPhase::Established) {
+            return false;
+        }
+
+        let sm_cfg = &self.config.session.stream_management;
+        if sm_cfg.enable_stream_management && self.sm_advertised {
+            return self.sm_state.enabled;
+        }
+
+        true
+    }
+
     pub fn queue_request(&mut self, request: ClientRequest) -> ClientResult<Vec<ClientEvent>> {
         let previous = self.snapshot.clone();
         let pending = self.requests.register(request)?;
