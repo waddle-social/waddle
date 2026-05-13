@@ -15,6 +15,9 @@ pub enum PromotedOutcome {
     /// `<no-store/>`, chat-states-only, error-type to fully-offline
     /// recipient per RFC 6121 §8.5.2.1.4).
     Dropped,
+    /// Valid stanza that intentionally bypassed Q6 sinks because it
+    /// has no XEP-0160 offline-delivery semantics.
+    NotPromotable,
     /// Skipped — stanza could not be parsed back to a typed value
     /// (corrupt unacked queue entry). Logged for operator visibility.
     Unparseable,
@@ -35,6 +38,7 @@ pub struct PromotionSummary {
     pub queued: u32,
     pub bounced: u32,
     pub dropped: u32,
+    pub not_promotable: u32,
     pub unparseable: u32,
     /// Number of stanzas that failed to insert into pending storage.
     /// Non-zero means the session's promotion was lossy: the caller
@@ -50,6 +54,7 @@ impl PromotionSummary {
             PromotedOutcome::Queued => self.queued += 1,
             PromotedOutcome::Bounced => self.bounced += 1,
             PromotedOutcome::Dropped => self.dropped += 1,
+            PromotedOutcome::NotPromotable => self.not_promotable += 1,
             PromotedOutcome::Unparseable => self.unparseable += 1,
             PromotedOutcome::StorageFailure => self.storage_failed += 1,
         }

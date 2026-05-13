@@ -44,6 +44,43 @@ pub const DATA_FORMS_NS: &str = "jabber:x:data";
 /// Stanza ID namespace (XEP-0359).
 pub const STANZA_ID_NS: &str = "urn:xmpp:sid:0";
 
+/// `true` when a message is a query-scoped MAM response envelope, not
+/// an offline-deliverable user message.
+pub fn is_mam_query_response_message(message: &xmpp_parsers::message::Message) -> bool {
+    if message.type_ != xmpp_parsers::message::MessageType::Normal
+        || !message.bodies.is_empty()
+        || !message.subjects.is_empty()
+        || message.thread.is_some()
+        || message.payloads.len() != 1
+    {
+        return false;
+    }
+
+    let payload = &message.payloads[0];
+    if payload.ns() != MAM_NS {
+        return false;
+    }
+
+    match payload.name() {
+        "result" => is_mam_result_payload(payload),
+        "fin" => is_mam_fin_payload(payload),
+        _ => false,
+    }
+}
+
+fn is_mam_result_payload(payload: &minidom::Element) -> bool {
+    payload.attr("id").is_some()
+        && payload
+            .children()
+            .any(|child| child.name() == "forwarded" && child.ns() == FORWARD_NS)
+}
+
+fn is_mam_fin_payload(payload: &minidom::Element) -> bool {
+    payload
+        .children()
+        .any(|child| child.name() == "set" && child.ns() == RSM_NS)
+}
+
 /// Forward namespace (XEP-0297).
 pub const FORWARD_NS: &str = "urn:xmpp:forward:0";
 

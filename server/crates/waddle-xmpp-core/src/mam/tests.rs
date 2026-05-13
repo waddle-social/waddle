@@ -43,6 +43,60 @@ fn message_type_default_matches_rfc6121_5_2_2() {
 }
 
 #[test]
+fn identifies_mam_query_response_messages() {
+    let mut result_message = Message::new(Some(jid("alice@example.com/web")));
+    result_message.type_ = MessageType::Normal;
+    result_message.payloads.push(
+        Element::builder("result", MAM_NS)
+            .attr("queryid", "query-1")
+            .attr("id", "archive-id-1")
+            .append(Element::builder("forwarded", FORWARD_NS).build())
+            .build(),
+    );
+    assert!(is_mam_query_response_message(&result_message));
+
+    let mut fin_message = Message::new(Some(jid("alice@example.com/web")));
+    fin_message.type_ = MessageType::Normal;
+    fin_message.payloads.push(
+        Element::builder("fin", MAM_NS)
+            .append(Element::builder("set", RSM_NS).build())
+            .build(),
+    );
+    assert!(is_mam_query_response_message(&fin_message));
+}
+
+#[test]
+fn ordinary_messages_are_not_mam_query_responses() {
+    let mut message = Message::new(Some(jid("alice@example.com")));
+    message.type_ = MessageType::Chat;
+    message.payloads.push(
+        Element::builder("result", "urn:example:not-mam")
+            .attr("queryid", "query-1")
+            .build(),
+    );
+
+    assert!(!is_mam_query_response_message(&message));
+}
+
+#[test]
+fn body_messages_with_mam_payload_are_not_mam_query_responses() {
+    let mut message = Message::new(Some(jid("alice@example.com")));
+    message.type_ = MessageType::Chat;
+    message
+        .bodies
+        .insert(String::new(), xmpp_parsers::message::Body("keep me".into()));
+    message.payloads.push(
+        Element::builder("result", MAM_NS)
+            .attr("queryid", "query-1")
+            .attr("id", "archive-id-1")
+            .append(Element::builder("forwarded", FORWARD_NS).build())
+            .build(),
+    );
+
+    assert!(!is_mam_query_response_message(&message));
+}
+
+#[test]
 fn parses_mam_query_with_form_and_rsm() {
     let iq = Iq {
         from: None,

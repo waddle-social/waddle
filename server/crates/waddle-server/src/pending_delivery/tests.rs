@@ -27,6 +27,74 @@ fn transient_row(recipient: &str, body: &str) -> PendingRow {
     }
 }
 
+fn message_xml(message: Message) -> String {
+    let element: xmpp_parsers::minidom::Element = message.into();
+    let mut buf = Vec::new();
+    element.write_to(&mut buf).expect("serialize message");
+    String::from_utf8(buf).expect("utf-8 xml")
+}
+
+fn transient_message_xml(recipient: &str, body: &str) -> String {
+    let mut m = Message::new(Some(recipient.parse::<jid::Jid>().expect("jid")));
+    m.from = Some("bob@elsewhere/x".parse::<jid::Jid>().expect("jid"));
+    m.type_ = MessageType::Chat;
+    m.bodies.insert(String::new(), Body(body.to_string()));
+    message_xml(m)
+}
+
+fn mam_query_frame_xml(recipient: &str, child_name: &str) -> String {
+    let mut m = Message::new(Some(recipient.parse::<jid::Jid>().expect("jid")));
+    m.from = Some("alice@example.com".parse::<jid::Jid>().expect("jid"));
+    m.type_ = MessageType::Normal;
+    let payload = match child_name {
+        "result" => {
+            xmpp_parsers::minidom::Element::builder("result", waddle_xmpp_core::mam::MAM_NS)
+                .attr("queryid", "q1")
+                .attr("id", "archive-id-1")
+                .append(
+                    xmpp_parsers::minidom::Element::builder(
+                        "forwarded",
+                        waddle_xmpp_core::mam::FORWARD_NS,
+                    )
+                    .build(),
+                )
+                .build()
+        }
+        "fin" => xmpp_parsers::minidom::Element::builder("fin", waddle_xmpp_core::mam::MAM_NS)
+            .append(
+                xmpp_parsers::minidom::Element::builder("set", waddle_xmpp_core::mam::RSM_NS)
+                    .build(),
+            )
+            .build(),
+        other => {
+            xmpp_parsers::minidom::Element::builder(other, waddle_xmpp_core::mam::MAM_NS).build()
+        }
+    };
+    m.payloads.push(payload);
+    message_xml(m)
+}
+
+fn transient_message_with_mam_payload_xml(recipient: &str, body: &str) -> String {
+    let mut m = Message::new(Some(recipient.parse::<jid::Jid>().expect("jid")));
+    m.from = Some("bob@elsewhere/x".parse::<jid::Jid>().expect("jid"));
+    m.type_ = MessageType::Chat;
+    m.bodies.insert(String::new(), Body(body.to_string()));
+    m.payloads.push(
+        xmpp_parsers::minidom::Element::builder("result", waddle_xmpp_core::mam::MAM_NS)
+            .attr("queryid", "q1")
+            .attr("id", "archive-id-1")
+            .append(
+                xmpp_parsers::minidom::Element::builder(
+                    "forwarded",
+                    waddle_xmpp_core::mam::FORWARD_NS,
+                )
+                .build(),
+            )
+            .build(),
+    );
+    message_xml(m)
+}
+
 #[tokio::test]
 async fn flush_with_no_rows_is_noop() {
     let storage: Arc<dyn PendingDeliveryStorage> =
@@ -46,6 +114,123 @@ async fn flush_with_no_rows_is_noop() {
     )
     .await;
     assert_eq!(outcome, FlushOutcome::default());
+}
+
+#[tokio::test]
+async fn db_storage_startup_deletes_legacy_mam_query_frames() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir
+        .path()
+        .join("pending_delivery-cleanup.sqlite")
+        .to_str()
+        .expect("utf-8 path")
+        .to_string();
+    let url = format!("sqlite://{path}");
+    let receipt_ms = Utc::now().timestamp_millis();
+
+    {
+        let db = crate::db::Database::from_config(
+            "legacy_pending_delivery",
+            &crate::db::DatabaseConfig::new(crate::db::DatabaseDriver::Sqlite, url.clone()),
+        )
+        .await
+        .expect("open legacy db");
+        let conn = db.guard().await.expect("db guard");
+        conn.execute(
+            "CREATE TABLE pending_delivery (
+                row_id TEXT PRIMARY KEY,
+                recipient_jid TEXT NOT NULL,
+                original_receipt_at INTEGER NOT NULL,
+                payload_kind TEXT NOT NULL,
+                archive_stanza_by TEXT,
+                archive_stanza_id TEXT,
+                transient_xml TEXT,
+                flushed_in_session TEXT
+            )",
+            (),
+        )
+        .await
+        .expect("create legacy table");
+        let mut legacy_rows = vec![
+            (
+                "mam-result".to_string(),
+                mam_query_frame_xml("alice@example.com/web", "result"),
+            ),
+            (
+                "mam-fin".to_string(),
+                mam_query_frame_xml("alice@example.com/web", "fin"),
+            ),
+            (
+                "normal-message".to_string(),
+                transient_message_xml("alice@example.com", "keep"),
+            ),
+            (
+                "body-with-mam-payload".to_string(),
+                transient_message_with_mam_payload_xml("alice@example.com", "keep-with-payload"),
+            ),
+        ];
+        for i in 0..140 {
+            legacy_rows.push((
+                format!("mam-result-{i:03}"),
+                mam_query_frame_xml("alice@example.com/web", "result"),
+            ));
+        }
+
+        for (row_id, xml) in legacy_rows {
+            conn.execute(
+                "INSERT INTO pending_delivery (
+                    row_id, recipient_jid, original_receipt_at, payload_kind,
+                    archive_stanza_by, archive_stanza_id, transient_xml, flushed_in_session
+                 ) VALUES (?, ?, ?, 'transient', NULL, NULL, ?, NULL)",
+                crate::db_params![row_id, "alice@example.com", receipt_ms, xml],
+            )
+            .await
+            .expect("insert legacy row");
+        }
+    }
+
+    let storage = DatabasePendingDeliveryStorage::open(Some(&url), QuotaPolicy::Unlimited)
+        .await
+        .expect("open storage with startup cleanup");
+    let rows = storage
+        .list(&bare("alice@example.com"))
+        .await
+        .expect("list cleaned rows");
+
+    let mut bodies = rows
+        .iter()
+        .filter_map(|row| match &row.payload {
+            PendingPayload::Transient(message) => {
+                message.bodies.get("").map(|body| body.0.as_str())
+            }
+            PendingPayload::Archived(_) => None,
+        })
+        .collect::<Vec<_>>();
+    bodies.sort_unstable();
+    assert_eq!(bodies, ["keep", "keep-with-payload"]);
+
+    let db = crate::db::Database::from_config(
+        "legacy_pending_delivery_marker",
+        &crate::db::DatabaseConfig::new(crate::db::DatabaseDriver::Sqlite, url.clone()),
+    )
+    .await
+    .expect("open cleaned db");
+    let conn = db.guard().await.expect("db guard");
+    let mut marker_rows = conn
+        .query(
+            "SELECT completed_at FROM pending_delivery_startup_migrations \
+             WHERE name = 'legacy_mam_query_frames_v1'",
+            (),
+        )
+        .await
+        .expect("query cleanup marker");
+    let marker_row = marker_rows
+        .next()
+        .await
+        .expect("read cleanup marker")
+        .expect("cleanup marker row");
+    let completed_at: i64 = marker_row.get(0).expect("cleanup marker timestamp");
+    assert!(completed_at > i64::from(i32::MAX));
 }
 
 #[tokio::test]

@@ -140,7 +140,8 @@ pub(crate) fn spawn_sm_expiry_janitor(websocket_state: &Arc<WebSocketState>) {
                     state.deps.auth_state.xmpp_domain.as_str(),
                 )
                 .await;
-                if summary.queued + summary.redelivered + summary.bounced > 0
+                if summary.queued + summary.redelivered + summary.bounced + summary.not_promotable
+                    > 0
                     || summary.storage_failed > 0
                 {
                     info!(
@@ -149,6 +150,7 @@ pub(crate) fn spawn_sm_expiry_janitor(websocket_state: &Arc<WebSocketState>) {
                         queued = summary.queued,
                         bounced = summary.bounced,
                         dropped = summary.dropped,
+                        not_promotable = summary.not_promotable,
                         unparseable = summary.unparseable,
                         storage_failed = summary.storage_failed,
                         "SM janitor: Q6 promotion completed"
