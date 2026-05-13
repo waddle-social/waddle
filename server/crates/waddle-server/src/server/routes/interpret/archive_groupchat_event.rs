@@ -6,14 +6,14 @@ pub(super) async fn archive_groupchat_event(
     sender: FullJid,
     message: Box<Message>,
     sender_nickname_generation: u64,
-) {
+) -> Option<ArchiveIdRewrite> {
     let Some(mam_storage) = deps.mam_storage else {
         debug!(
             room = %room,
             sender = %sender,
             "ArchiveGroupchat: no mam_storage in Deps; skipping (test fixture?)"
         );
-        return;
+        return None;
     };
     // Per XEP-0313 §5.1.3 the eligibility check ran inside
     // `MucArchiveHandler` before this event was emitted —
@@ -30,11 +30,12 @@ pub(super) async fn archive_groupchat_event(
             .await
         {
             Some(id) => id,
-            None => return,
+            None => return None,
         };
     debug!(
         room = %room,
-        archive_id,
+        archive_id = %archive_id.stored_id,
         "ArchiveGroupchat: persisted"
     );
+    archive_id.rewrite
 }

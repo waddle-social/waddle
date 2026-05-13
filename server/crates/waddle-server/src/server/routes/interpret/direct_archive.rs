@@ -6,7 +6,7 @@ pub(super) async fn archive_direct(
     from: BareJid,
     to: BareJid,
     message: Box<Message>,
-) {
+) -> Option<ArchiveIdRewrite> {
     let Some(mam_storage) = deps.mam_storage else {
         debug!(
             archive_jid = %archive_jid,
@@ -14,7 +14,7 @@ pub(super) async fn archive_direct(
             to = %to,
             "ArchiveDirect: no mam_storage in Deps; skipping (test fixture?)"
         );
-        return;
+        return None;
     };
     // Per XEP-0313 §5.1.3, the eligibility check is
     // upstream (ArchiveHandler) — the interpreter just
@@ -28,6 +28,7 @@ pub(super) async fn archive_direct(
         jid::Jid::from(to.clone()),
         &message,
     );
+    let requested_archive_id = archived.id.clone();
     match mam_storage.store_message(&archive_jid, &archived).await {
         Ok(archive_id) => {
             debug!(
@@ -35,6 +36,13 @@ pub(super) async fn archive_direct(
                 archive_id,
                 "ArchiveDirect: persisted"
             );
+            let rewrite = ArchiveIdRewrite::from_store_result(
+                jid::Jid::from(archive_jid.clone()),
+                requested_archive_id,
+                archive_id,
+            );
+            apply_direct_retraction_tombstone(deps, &archive_jid, &message).await;
+            rewrite
         }
         Err(error) => {
             // Archive errors must not block dispatch — the
@@ -47,9 +55,17 @@ pub(super) async fn archive_direct(
                 %error,
                 "ArchiveDirect: store_message failed; dropping archive write"
             );
+            apply_direct_retraction_tombstone(deps, &archive_jid, &message).await;
+            None
         }
     }
+}
 
+async fn apply_direct_retraction_tombstone(
+    deps: &Deps<'_>,
+    archive_jid: &BareJid,
+    message: &Message,
+) {
     // XEP-0424 §"prevent further distribution": when the
     // archived message is itself a retraction *request*,
     // replace the target message in this archive with a
@@ -63,15 +79,17 @@ pub(super) async fn archive_direct(
     // archive write so both sender's and recipient's
     // archives observe the tombstone independently.
     if let Some(waddle_xmpp::xep::xep0424::RetractionKind::Request(retraction)) =
-        waddle_xmpp::xep::xep0424::extract_retraction_from_message(&message)
+        waddle_xmpp::xep::xep0424::extract_retraction_from_message(message)
     {
-        apply_retraction_tombstone(
-            mam_storage,
-            deps.sm_session_registry,
-            &archive_jid,
-            &retraction.retracts_id,
-            &message,
-        )
-        .await;
+        if let Some(mam_storage) = deps.mam_storage {
+            apply_retraction_tombstone(
+                mam_storage,
+                deps.sm_session_registry,
+                archive_jid,
+                &retraction.retracts_id,
+                message,
+            )
+            .await;
+        }
     }
 }

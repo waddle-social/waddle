@@ -186,6 +186,13 @@ async fn assert_origin_id_dedup_uses_bare_sender_for_direct_messages(storage: &d
         message_type: xmpp_parsers::message::MessageType::Chat,
         ..ArchivedMessage::for_test(jid("alice@example.com/web-new"), jid("bob@example.com"))
     };
+    let same_sender_different_recipient = ArchivedMessage {
+        id: "dm-different-recipient".to_string(),
+        body: Some("same origin-id different peer".to_string()),
+        origin_id: Some(origin_id.clone()),
+        message_type: xmpp_parsers::message::MessageType::Chat,
+        ..ArchivedMessage::for_test(jid("alice@example.com/web-new"), jid("carol@example.com"))
+    };
     let different_sender = ArchivedMessage {
         id: "dm-other-sender".to_string(),
         body: Some("colliding contact origin-id".to_string()),
@@ -199,14 +206,19 @@ async fn assert_origin_id_dedup_uses_bare_sender_for_direct_messages(storage: &d
         .store_message(&archive, &retry_from_new_resource)
         .await
         .unwrap();
+    let different_recipient_id = storage
+        .store_message(&archive, &same_sender_different_recipient)
+        .await
+        .unwrap();
     let different_sender_id = storage
         .store_message(&archive, &different_sender)
         .await
         .unwrap();
 
     assert_eq!(retry_id, first_id);
+    assert_eq!(different_recipient_id, "dm-different-recipient");
     assert_eq!(different_sender_id, "dm-other-sender");
-    assert_eq!(storage.count_messages(&archive).await.unwrap(), 2);
+    assert_eq!(storage.count_messages(&archive).await.unwrap(), 3);
 }
 
 #[tokio::test]

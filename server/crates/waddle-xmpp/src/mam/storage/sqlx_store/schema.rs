@@ -63,6 +63,26 @@ CREATE INDEX IF NOT EXISTS idx_mam_room_origin
     ON mam_messages(room_jid, origin_id);
 "#;
 
+const SQLITE_MAM_ORIGIN_DEDUP_INDEXES: &str = r#"
+CREATE UNIQUE INDEX IF NOT EXISTS idx_mam_origin_groupchat_unique
+    ON mam_messages(room_jid, origin_id, from_jid, COALESCE(nickname_generation, -1))
+    WHERE origin_id IS NOT NULL AND message_type = 'groupchat';
+CREATE UNIQUE INDEX IF NOT EXISTS idx_mam_origin_direct_unique
+    ON mam_messages(
+        room_jid,
+        origin_id,
+        CASE
+            WHEN instr(from_jid, '/') = 0 THEN from_jid
+            ELSE substr(from_jid, 1, instr(from_jid, '/') - 1)
+        END,
+        CASE
+            WHEN instr(to_jid, '/') = 0 THEN to_jid
+            ELSE substr(to_jid, 1, instr(to_jid, '/') - 1)
+        END
+    )
+    WHERE origin_id IS NOT NULL AND message_type <> 'groupchat';
+"#;
+
 // See `SQLITE_MAM_SCHEMA` for the body-nullability rationale.
 const POSTGRES_MAM_SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS mam_messages (
@@ -96,6 +116,20 @@ CREATE INDEX IF NOT EXISTS idx_mam_room_reply_to
     ON mam_messages(room_jid, reply_to_id, timestamp DESC);
 CREATE INDEX IF NOT EXISTS idx_mam_room_origin
     ON mam_messages(room_jid, origin_id);
+"#;
+
+const POSTGRES_MAM_ORIGIN_DEDUP_INDEXES: &str = r#"
+CREATE UNIQUE INDEX IF NOT EXISTS idx_mam_origin_groupchat_unique
+    ON mam_messages(room_jid, origin_id, from_jid, (COALESCE(nickname_generation, -1)))
+    WHERE origin_id IS NOT NULL AND message_type = 'groupchat';
+CREATE UNIQUE INDEX IF NOT EXISTS idx_mam_origin_direct_unique
+    ON mam_messages(
+        room_jid,
+        origin_id,
+        (split_part(from_jid, '/', 1)),
+        (split_part(to_jid, '/', 1))
+    )
+    WHERE origin_id IS NOT NULL AND message_type <> 'groupchat';
 "#;
 
 pub(super) fn infer_driver(database_url: &str) -> Result<MamDatabaseDriver, MamStorageError> {
@@ -203,7 +237,8 @@ pub(super) async fn ensure_sqlite_schema(pool: &SqlitePool) -> Result<(), MamSto
     // `ALTER COLUMN ... DROP NOT NULL` — relaxing the constraint
     // requires the 12-step table rebuild. Detect the legacy shape
     // and rebuild only when needed.
-    ensure_sqlite_body_nullable(pool).await
+    ensure_sqlite_body_nullable(pool).await?;
+    execute_sqlite_batch(pool, SQLITE_MAM_ORIGIN_DEDUP_INDEXES).await
 }
 
 async fn ensure_sqlite_body_nullable(pool: &SqlitePool) -> Result<(), MamStorageError> {
@@ -272,6 +307,8 @@ async fn ensure_sqlite_body_nullable(pool: &SqlitePool) -> Result<(), MamStorage
         "CREATE INDEX IF NOT EXISTS idx_mam_room_thread ON mam_messages(room_jid, thread_id, timestamp DESC)",
         "CREATE INDEX IF NOT EXISTS idx_mam_room_reply_to ON mam_messages(room_jid, reply_to_id, timestamp DESC)",
         "CREATE INDEX IF NOT EXISTS idx_mam_room_origin ON mam_messages(room_jid, origin_id)",
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_mam_origin_groupchat_unique ON mam_messages(room_jid, origin_id, from_jid, COALESCE(nickname_generation, -1)) WHERE origin_id IS NOT NULL AND message_type = 'groupchat'",
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_mam_origin_direct_unique ON mam_messages(room_jid, origin_id, CASE WHEN instr(from_jid, '/') = 0 THEN from_jid ELSE substr(from_jid, 1, instr(from_jid, '/') - 1) END, CASE WHEN instr(to_jid, '/') = 0 THEN to_jid ELSE substr(to_jid, 1, instr(to_jid, '/') - 1) END) WHERE origin_id IS NOT NULL AND message_type <> 'groupchat'",
     ] {
         sqlx::query(statement).execute(&mut *tx).await?;
     }
@@ -329,5 +366,5 @@ pub(super) async fn ensure_postgres_schema(pool: &PgPool) -> Result<(), MamStora
             .execute(pool)
             .await?;
     }
-    Ok(())
+    execute_postgres_batch(pool, POSTGRES_MAM_ORIGIN_DEDUP_INDEXES).await
 }

@@ -5,7 +5,7 @@ pub(super) async fn archive_groupchat_message(
     room: &BareJid,
     message: &Message,
     sender_nickname_generation: u64,
-) -> Option<String> {
+) -> Option<ArchiveStoreResult> {
     let archive_clone = message.clone();
     let archive_id = match extract_room_stanza_id(&archive_clone, room) {
         Some(id) => id,
@@ -56,7 +56,7 @@ pub(super) async fn finish_archive_groupchat_message(
     archive_clone: Message,
     archive_id: String,
     sender_nickname_generation: u64,
-) -> Option<String> {
+) -> Option<ArchiveStoreResult> {
     // RFC 6121 §5.2.3: `<body>` is optional. Preserve the
     // None-vs-empty distinction so subject-only / reaction-only
     // groupchat messages don't materialize a fake empty body in the
@@ -96,7 +96,7 @@ pub(super) async fn finish_archive_groupchat_message(
         .clone()
         .map(|id| waddle_xmpp_core::xep0359::StanzaId::new(id, room_jid_full.clone()));
     let archived = MamArchivedMessage {
-        id: archive_id,
+        id: archive_id.clone(),
         timestamp: chrono::Utc::now(),
         from: from_jid,
         to: room_jid_full,
@@ -115,7 +115,14 @@ pub(super) async fn finish_archive_groupchat_message(
     };
 
     match mam_storage.store_message(room, &archived).await {
-        Ok(archive_id) => Some(archive_id),
+        Ok(stored_id) => Some(ArchiveStoreResult {
+            rewrite: ArchiveIdRewrite::from_store_result(
+                jid::Jid::from(room.clone()),
+                archive_id,
+                stored_id.clone(),
+            ),
+            stored_id,
+        }),
         Err(error) => {
             warn!(
                 room = %room,
@@ -125,6 +132,11 @@ pub(super) async fn finish_archive_groupchat_message(
             None
         }
     }
+}
+
+pub(super) struct ArchiveStoreResult {
+    pub stored_id: String,
+    pub rewrite: Option<ArchiveIdRewrite>,
 }
 
 pub(super) async fn apply_groupchat_retraction_tombstone(

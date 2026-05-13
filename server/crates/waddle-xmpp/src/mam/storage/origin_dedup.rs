@@ -22,6 +22,9 @@ fn sender_scope_matches(existing: &ArchivedMessage, incoming: &ArchivedMessage) 
                 && existing.nickname_generation == incoming.nickname_generation
         }
         (MessageType::Groupchat, _) | (_, MessageType::Groupchat) => false,
-        _ => existing.from.to_bare() == incoming.from.to_bare(),
+        _ => {
+            existing.from.to_bare() == incoming.from.to_bare()
+                && existing.to.to_bare() == incoming.to.to_bare()
+        }
     }
 }

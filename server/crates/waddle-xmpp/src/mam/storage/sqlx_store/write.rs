@@ -79,7 +79,14 @@ pub(super) async fn store_message(
                             .map(|p| p.as_str()),
                     );
             });
-            query.build().execute(pool).await?;
+            if let Err(error) = query.build().execute(pool).await {
+                if let Some(existing_archive_id) =
+                    find_existing_origin_id_match(backend, archive_jid, message).await?
+                {
+                    return Ok(existing_archive_id);
+                }
+                return Err(error.into());
+            }
         }
         MamDatabaseBackend::Postgres(pool) => {
             let mut query = QueryBuilder::<Postgres>::new(
@@ -110,7 +117,14 @@ pub(super) async fn store_message(
                             .map(|p| p.as_str()),
                     );
             });
-            query.build().execute(pool).await?;
+            if let Err(error) = query.build().execute(pool).await {
+                if let Some(existing_archive_id) =
+                    find_existing_origin_id_match(backend, archive_jid, message).await?
+                {
+                    return Ok(existing_archive_id);
+                }
+                return Err(error.into());
+            }
         }
     }
 
