@@ -130,6 +130,57 @@ fn dm_with_mam_payload_xml(from: &str, to: &str, body: &str) -> String {
     String::from_utf8(buf).unwrap()
 }
 
+fn sm_promotion_metric_test_lock() -> &'static tokio::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
+fn prometheus_counter_value(rendered: &str, name: &str) -> u64 {
+    rendered
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix(name)
+                .and_then(|rest| rest.trim().parse::<u64>().ok())
+        })
+        .unwrap_or_else(|| panic!("missing prometheus counter {name}"))
+}
+
+async fn assert_mam_frame_not_promoted_to_pending_delivery(child_name: &str) {
+    let _guard = sm_promotion_metric_test_lock().lock().await;
+    waddle_xmpp::prometheus::reset_metrics_for_test();
+
+    let storage: Arc<dyn PendingDeliveryStorage> =
+        Arc::new(InMemoryPendingDeliveryStorage::unlimited());
+    let registry = ConnectionRegistry::new();
+    let session = detached_session_with_unacked(
+        "stream-1",
+        full("alice@example.com/web"),
+        vec![mam_replay_xml(child_name)],
+    );
+
+    let summary = promote_session_unacked(
+        &session,
+        &registry,
+        &storage,
+        &Blocklist::empty(),
+        "example.com",
+    )
+    .await;
+
+    assert_eq!(summary.not_promotable, 1);
+    assert_eq!(summary.queued, 0);
+    assert_eq!(summary.bounced, 0);
+    assert_eq!(storage.count(&bare("alice@example.com")).await.unwrap(), 0);
+
+    let rendered = waddle_xmpp::prometheus::render_metrics();
+    assert_eq!(
+        prometheus_counter_value(&rendered, "waddle_sm_promotion_not_promotable_total"),
+        1
+    );
+
+    waddle_xmpp::prometheus::reset_metrics_for_test();
+}
+
 #[tokio::test]
 async fn promotes_to_pending_delivery_when_no_alt_resource() {
     // Locked Q6 = B step 2: alt-resource fails (no online
@@ -190,54 +241,12 @@ async fn dm_with_mam_payload_is_still_promoted_to_pending_delivery() {
 
 #[tokio::test]
 async fn mam_result_frame_is_not_promoted_to_pending_delivery() {
-    let storage: Arc<dyn PendingDeliveryStorage> =
-        Arc::new(InMemoryPendingDeliveryStorage::unlimited());
-    let registry = ConnectionRegistry::new();
-    let session = detached_session_with_unacked(
-        "stream-1",
-        full("alice@example.com/web"),
-        vec![mam_replay_xml("result")],
-    );
-
-    let summary = promote_session_unacked(
-        &session,
-        &registry,
-        &storage,
-        &Blocklist::empty(),
-        "example.com",
-    )
-    .await;
-
-    assert_eq!(summary.not_promotable, 1);
-    assert_eq!(summary.queued, 0);
-    assert_eq!(summary.bounced, 0);
-    assert_eq!(storage.count(&bare("alice@example.com")).await.unwrap(), 0);
+    assert_mam_frame_not_promoted_to_pending_delivery("result").await;
 }
 
 #[tokio::test]
 async fn mam_fin_frame_is_not_promoted_to_pending_delivery() {
-    let storage: Arc<dyn PendingDeliveryStorage> =
-        Arc::new(InMemoryPendingDeliveryStorage::unlimited());
-    let registry = ConnectionRegistry::new();
-    let session = detached_session_with_unacked(
-        "stream-1",
-        full("alice@example.com/web"),
-        vec![mam_replay_xml("fin")],
-    );
-
-    let summary = promote_session_unacked(
-        &session,
-        &registry,
-        &storage,
-        &Blocklist::empty(),
-        "example.com",
-    )
-    .await;
-
-    assert_eq!(summary.not_promotable, 1);
-    assert_eq!(summary.queued, 0);
-    assert_eq!(summary.bounced, 0);
-    assert_eq!(storage.count(&bare("alice@example.com")).await.unwrap(), 0);
+    assert_mam_frame_not_promoted_to_pending_delivery("fin").await;
 }
 
 #[tokio::test]

@@ -200,6 +200,29 @@ async fn db_storage_startup_deletes_legacy_mam_query_frames() {
         .collect::<Vec<_>>();
     bodies.sort_unstable();
     assert_eq!(bodies, ["keep", "keep-with-payload"]);
+
+    let db = crate::db::Database::from_config(
+        "legacy_pending_delivery_marker",
+        &crate::db::DatabaseConfig::new(crate::db::DatabaseDriver::Sqlite, url.clone()),
+    )
+    .await
+    .expect("open cleaned db");
+    let conn = db.guard().await.expect("db guard");
+    let mut marker_rows = conn
+        .query(
+            "SELECT COUNT(*) FROM pending_delivery_startup_migrations \
+             WHERE name = 'legacy_mam_query_frames_v1'",
+            (),
+        )
+        .await
+        .expect("query cleanup marker");
+    let marker_row = marker_rows
+        .next()
+        .await
+        .expect("read cleanup marker")
+        .expect("cleanup marker count row");
+    let marker_count: i64 = marker_row.get(0).expect("cleanup marker count");
+    assert_eq!(marker_count, 1);
 }
 
 #[tokio::test]

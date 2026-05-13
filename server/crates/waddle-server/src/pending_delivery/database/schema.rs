@@ -1,5 +1,8 @@
 use super::*;
 
+const LEGACY_MAM_CLEANUP_MARKER: &str = "legacy_mam_query_frames_v1";
+const LEGACY_MAM_CLEANUP_DELETE_BATCH: usize = 128;
+
 pub(super) async fn initialize(
     storage: &DatabasePendingDeliveryStorage,
 ) -> Result<(), PendingStorageError> {
@@ -159,19 +162,106 @@ pub(super) async fn initialize(
             (),
         )
         .await?;
-    let deleted_mam_frames = delete_legacy_mam_query_frames(storage).await?;
-    if deleted_mam_frames > 0 {
-        info!(
-            deleted = deleted_mam_frames,
-            "pending_delivery startup cleanup removed XEP-0313 MAM query frames"
-        );
+    ensure_startup_migration_marker_table(storage).await?;
+    if !startup_migration_marker_completed(storage, LEGACY_MAM_CLEANUP_MARKER).await? {
+        let deleted_mam_frames = delete_legacy_mam_query_frames(storage).await?;
+        mark_startup_migration_completed(storage, LEGACY_MAM_CLEANUP_MARKER).await?;
+        if deleted_mam_frames > 0 {
+            info!(
+                deleted = deleted_mam_frames,
+                "pending_delivery startup cleanup removed XEP-0313 MAM query frames"
+            );
+        }
     }
     Ok(())
+}
+
+async fn ensure_startup_migration_marker_table(
+    storage: &DatabasePendingDeliveryStorage,
+) -> Result<(), PendingStorageError> {
+    storage
+        .execute(
+            "CREATE TABLE IF NOT EXISTS pending_delivery_startup_migrations (\
+                name TEXT PRIMARY KEY, \
+                completed_at INTEGER NOT NULL\
+             )",
+            (),
+        )
+        .await?;
+    Ok(())
+}
+
+async fn startup_migration_marker_completed(
+    storage: &DatabasePendingDeliveryStorage,
+    marker: &str,
+) -> Result<bool, PendingStorageError> {
+    let mut rows = storage
+        .query(
+            "SELECT 1 FROM pending_delivery_startup_migrations \
+             WHERE name = ? \
+             LIMIT 1",
+            crate::db_params![marker],
+        )
+        .await?;
+    Ok(rows
+        .next()
+        .await
+        .map_err(|error| PendingStorageError::Other(error.to_string()))?
+        .is_some())
+}
+
+async fn mark_startup_migration_completed(
+    storage: &DatabasePendingDeliveryStorage,
+    marker: &str,
+) -> Result<(), PendingStorageError> {
+    let sql = match storage.db.driver() {
+        DatabaseDriver::Postgres => {
+            "INSERT INTO pending_delivery_startup_migrations (name, completed_at) \
+             VALUES (?, ?) \
+             ON CONFLICT (name) DO NOTHING"
+        }
+        DatabaseDriver::Sqlite => {
+            "INSERT OR IGNORE INTO pending_delivery_startup_migrations (name, completed_at) \
+             VALUES (?, ?)"
+        }
+    };
+    storage
+        .execute(
+            sql,
+            crate::db_params![marker, chrono::Utc::now().timestamp_millis()],
+        )
+        .await?;
+    Ok(())
+}
+
+async fn legacy_mam_query_frame_candidates_exist(
+    storage: &DatabasePendingDeliveryStorage,
+) -> Result<bool, PendingStorageError> {
+    let mut rows = storage
+        .query(
+            "SELECT 1 \
+             FROM pending_delivery \
+             WHERE payload_kind = 'transient' \
+               AND transient_xml IS NOT NULL \
+               AND transient_xml LIKE '%urn:xmpp:mam:2%' \
+             LIMIT 1",
+            (),
+        )
+        .await?;
+    Ok(rows
+        .next()
+        .await
+        .map_err(|error| PendingStorageError::Other(error.to_string()))?
+        .is_some())
 }
 
 async fn delete_legacy_mam_query_frames(
     storage: &DatabasePendingDeliveryStorage,
 ) -> Result<u64, PendingStorageError> {
+    if !legacy_mam_query_frame_candidates_exist(storage).await? {
+        return Ok(0);
+    }
+
     let row_ids = {
         let mut rows = storage
             .query(
@@ -208,14 +298,38 @@ async fn delete_legacy_mam_query_frames(
         row_ids
     };
 
-    let mut deleted = 0;
-    for row_id in row_ids {
-        deleted += storage
-            .execute(
-                "DELETE FROM pending_delivery WHERE row_id = ?",
-                crate::db_params![row_id],
-            )
-            .await?;
+    delete_legacy_mam_query_frame_rows(storage, &row_ids).await
+}
+
+async fn delete_legacy_mam_query_frame_rows(
+    storage: &DatabasePendingDeliveryStorage,
+    row_ids: &[String],
+) -> Result<u64, PendingStorageError> {
+    if row_ids.is_empty() {
+        return Ok(0);
     }
+
+    let mut tx = storage
+        .db
+        .begin()
+        .await
+        .map_err(|error| PendingStorageError::Other(error.to_string()))?;
+    let mut deleted = 0;
+    for chunk in row_ids.chunks(LEGACY_MAM_CLEANUP_DELETE_BATCH) {
+        let placeholders = vec!["?"; chunk.len()].join(", ");
+        let sql = format!("DELETE FROM pending_delivery WHERE row_id IN ({placeholders})");
+        let params = chunk
+            .iter()
+            .cloned()
+            .map(crate::db::Value::from)
+            .collect::<Vec<_>>();
+        deleted += tx
+            .execute(&sql, params)
+            .await
+            .map_err(|error| PendingStorageError::Other(error.to_string()))?;
+    }
+    tx.commit()
+        .await
+        .map_err(|error| PendingStorageError::Other(error.to_string()))?;
     Ok(deleted)
 }

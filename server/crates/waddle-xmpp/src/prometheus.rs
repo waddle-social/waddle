@@ -185,6 +185,31 @@ pub fn increment_sm_resume_window_clamped() {
     SM_RESUME_WINDOW_CLAMPED.fetch_add(1, Ordering::Relaxed);
 }
 
+#[cfg(any(test, feature = "test-utils"))]
+pub fn reset_metrics_for_test() {
+    CONNECTED_USERS.store(0, Ordering::Release);
+    ROOM_COUNT.store(0, Ordering::Release);
+    MESSAGES_TOTAL.store(0, Ordering::Release);
+    CURRENT_SECOND.store(0, Ordering::Release);
+    CURRENT_SECOND_MESSAGES.store(0, Ordering::Release);
+    LAST_SECOND_MESSAGES.store(0, Ordering::Release);
+    BROADCAST_DELIVERED.store(0, Ordering::Release);
+    BROADCAST_NOT_CONNECTED.store(0, Ordering::Release);
+    BROADCAST_DROPPED_FULL.store(0, Ordering::Release);
+    BROADCAST_DROPPED_CLOSED.store(0, Ordering::Release);
+    SM_UNACKED_EVICTED.store(0, Ordering::Release);
+    PENDING_DELIVERY_QUOTA_EXCEEDED.store(0, Ordering::Release);
+    PENDING_DELIVERY_ORPHAN_CLAIMS_RELEASED.store(0, Ordering::Release);
+    PENDING_DELIVERY_AGED_OUT.store(0, Ordering::Release);
+    PENDING_DELIVERY_UNRESOLVED_POISON_PILL.store(0, Ordering::Release);
+    SM_PROMOTION_STORAGE_FAILED.store(0, Ordering::Release);
+    SM_PROMOTION_NOT_PROMOTABLE.store(0, Ordering::Release);
+    SM_PROMOTION_BLOCKLIST_FAILED.store(0, Ordering::Release);
+    SM_PROMOTION_DEAD_LETTERED.store(0, Ordering::Release);
+    SM_DRAIN_TIMEOUT.store(0, Ordering::Release);
+    SM_RESUME_WINDOW_CLAMPED.store(0, Ordering::Release);
+}
+
 pub fn render_metrics() -> String {
     let now = unix_timestamp_secs();
     rotate_second_bucket(now);
@@ -299,29 +324,6 @@ mod tests {
     fn test_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| Mutex::new(()))
-    }
-
-    fn reset_metrics_for_test() {
-        CONNECTED_USERS.store(0, Ordering::Release);
-        ROOM_COUNT.store(0, Ordering::Release);
-        MESSAGES_TOTAL.store(0, Ordering::Release);
-        CURRENT_SECOND.store(0, Ordering::Release);
-        CURRENT_SECOND_MESSAGES.store(0, Ordering::Release);
-        LAST_SECOND_MESSAGES.store(0, Ordering::Release);
-        BROADCAST_DELIVERED.store(0, Ordering::Release);
-        BROADCAST_NOT_CONNECTED.store(0, Ordering::Release);
-        BROADCAST_DROPPED_FULL.store(0, Ordering::Release);
-        BROADCAST_DROPPED_CLOSED.store(0, Ordering::Release);
-        SM_UNACKED_EVICTED.store(0, Ordering::Release);
-        PENDING_DELIVERY_QUOTA_EXCEEDED.store(0, Ordering::Release);
-        PENDING_DELIVERY_ORPHAN_CLAIMS_RELEASED.store(0, Ordering::Release);
-        PENDING_DELIVERY_AGED_OUT.store(0, Ordering::Release);
-        PENDING_DELIVERY_UNRESOLVED_POISON_PILL.store(0, Ordering::Release);
-        SM_PROMOTION_STORAGE_FAILED.store(0, Ordering::Release);
-        SM_PROMOTION_BLOCKLIST_FAILED.store(0, Ordering::Release);
-        SM_PROMOTION_DEAD_LETTERED.store(0, Ordering::Release);
-        SM_DRAIN_TIMEOUT.store(0, Ordering::Release);
-        SM_RESUME_WINDOW_CLAMPED.store(0, Ordering::Release);
     }
 
     #[test]
@@ -462,6 +464,18 @@ mod tests {
         assert!(rendered.contains("waddle_sm_promotion_storage_failed_total 2"));
         assert!(rendered.contains("waddle_sm_promotion_not_promotable_total 1"));
         assert!(rendered.contains("waddle_sm_resume_window_clamped_total 1"));
+    }
+
+    #[test]
+    fn test_reset_metrics_for_test_clears_sm_promotion_not_promotable() {
+        let _guard = test_lock().lock().unwrap();
+        reset_metrics_for_test();
+
+        increment_sm_promotion_not_promotable();
+        reset_metrics_for_test();
+
+        let rendered = render_metrics();
+        assert!(rendered.contains("waddle_sm_promotion_not_promotable_total 0"));
     }
 
     #[test]
