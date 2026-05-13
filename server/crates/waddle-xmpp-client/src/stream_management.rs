@@ -186,6 +186,13 @@ impl SmState {
         replay
     }
 
+    pub fn unhandled_stanzas(&self) -> Vec<Element> {
+        self.outbound_queue
+            .iter()
+            .map(|queued| queued.element.clone())
+            .collect()
+    }
+
     fn suppress_replay_sent_record(&mut self, element: &Element) -> bool {
         if self
             .replay_in_flight

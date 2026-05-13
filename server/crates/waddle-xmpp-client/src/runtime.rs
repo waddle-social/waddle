@@ -1,3 +1,5 @@
+use std::collections::VecDeque;
+
 use crate::bootstrap::{
     AuthMechanism, AuthenticationRequest, BootstrapElement, RequiredStreamFeature,
     ResourceBindingRequest,
@@ -34,6 +36,7 @@ pub struct XmppRuntime {
     next_bootstrap_stanza: u64,
     sm_state: SmState,
     sm_advertised: bool,
+    pending_fallback_retries: VecDeque<Element>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -67,6 +70,7 @@ impl XmppRuntime {
             next_bootstrap_stanza: 0,
             sm_state,
             sm_advertised: false,
+            pending_fallback_retries: VecDeque::new(),
         })
     }
 
@@ -477,6 +481,14 @@ impl XmppRuntime {
         }
 
         Ok(())
+    }
+
+    pub(super) fn flush_pending_fallback_retries(&mut self, events: &mut Vec<ClientEvent>) {
+        while let Some(element) = self.pending_fallback_retries.pop_front() {
+            events.push(ClientEvent::Connection(ConnectionEvent::OutboundMessage(
+                TransportMessage::Element(element),
+            )));
+        }
     }
 
     fn oauth_config(&self) -> &crate::OAuthBearerConfig {

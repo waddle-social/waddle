@@ -44,6 +44,7 @@ impl XmppRuntime {
             events.push(ClientEvent::Connection(ConnectionEvent::StreamManagement(
                 StreamManagementEvent::Enabled { previd },
             )));
+            self.flush_pending_fallback_retries(events);
         } else if element.name() == "resumed" {
             let h = element.attr("h").and_then(|v| v.parse().ok()).unwrap_or(0);
             if h > self.sm_state.outbound_count {
@@ -72,7 +73,19 @@ impl XmppRuntime {
             }
         } else if element.name() == "failed" {
             let resume_failed = matches!(self.bootstrap, BootstrapState::AwaitingResume);
+            if let Some(h) = element.attr("h").and_then(|value| value.parse().ok()) {
+                if h > self.sm_state.outbound_count {
+                    self.handle_sm_handled_count_too_high(h, events);
+                    return Ok(());
+                }
+                let acked = self.sm_state.process_ack(h);
+                events.extend(acked.into_iter().map(|stanza_id| {
+                    ClientEvent::MessageDelivery(MessageDeliveryEvent::Acked { stanza_id })
+                }));
+            }
             if resume_failed {
+                self.pending_fallback_retries
+                    .extend(self.sm_state.unhandled_stanzas());
                 self.sm_state.previd = None;
             }
             self.sm_state.stop();

@@ -435,6 +435,87 @@ fn runtime_resume_state_carries_unhandled_stanzas_into_next_runtime() {
 }
 
 #[test]
+fn runtime_retries_only_unhandled_stanzas_after_failed_resume_fresh_enable() {
+    let resume_state = resume_state_with_sent_messages(["handled-before-fail", "retry-after-fail"]);
+    let mut config = config();
+    config.session.stream_management.resume_state = Some(resume_state);
+    let mut runtime = XmppRuntime::new(config).unwrap();
+
+    drive_to_authenticated_stream(&mut runtime);
+    runtime
+        .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+            post_auth_features_with_sm(),
+        )))
+        .unwrap();
+
+    let failed_events = runtime
+        .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+            Element::builder("failed", crate::stream_management::NS_SM)
+                .attr("h", "1")
+                .build(),
+        )))
+        .unwrap();
+
+    assert!(failed_events.iter().any(|event| matches!(
+        event,
+        ClientEvent::MessageDelivery(crate::MessageDeliveryEvent::Acked { stanza_id })
+            if stanza_id.as_str() == "handled-before-fail"
+    )));
+
+    let bind_id = failed_events
+        .iter()
+        .find_map(|event| match event {
+            ClientEvent::Connection(ConnectionEvent::ResourceBindingRequested(request)) => {
+                Some(request.stanza_id.clone())
+            }
+            _ => None,
+        })
+        .expect("fresh bind request");
+    let bind_events = runtime
+        .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+            bind_result(&bind_id),
+        )))
+        .unwrap();
+
+    let enable = bind_events
+        .iter()
+        .find_map(|event| match event {
+            ClientEvent::Connection(ConnectionEvent::OutboundMessage(
+                TransportMessage::Element(element),
+            )) if element.name() == "enable" => Some(element.clone()),
+            _ => None,
+        })
+        .expect("fresh SM enable");
+    runtime
+        .apply_transport_event(TransportEvent::MessageSent(TransportMessage::Element(
+            enable,
+        )))
+        .unwrap();
+
+    let enabled_events = runtime
+        .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+            Element::builder("enabled", crate::stream_management::NS_SM)
+                .attr("resume", "true")
+                .attr("id", "fresh-sm-id")
+                .build(),
+        )))
+        .unwrap();
+
+    assert!(!enabled_events.iter().any(|event| matches!(
+        event,
+        ClientEvent::Connection(ConnectionEvent::OutboundMessage(
+            TransportMessage::Element(element)
+        )) if element.attr("id") == Some("handled-before-fail")
+    )));
+    assert!(enabled_events.iter().any(|event| matches!(
+        event,
+        ClientEvent::Connection(ConnectionEvent::OutboundMessage(
+            TransportMessage::Element(element)
+        )) if element.attr("id") == Some("retry-after-fail")
+    )));
+}
+
+#[test]
 fn runtime_emits_message_delivery_ack_from_core_sm_queue() {
     let mut runtime = XmppRuntime::new(config()).unwrap();
     runtime
@@ -658,4 +739,32 @@ fn bind_result(stanza_id: &StanzaId) -> Element {
                 .build(),
         )
         .build()
+}
+
+fn resume_state_with_sent_messages<const N: usize>(ids: [&str; N]) -> SmResumeState {
+    let mut runtime = XmppRuntime::new(config()).unwrap();
+    runtime
+        .apply_transport_event(TransportEvent::MessageSent(TransportMessage::Element(
+            SmState::build_enable(true),
+        )))
+        .unwrap();
+    runtime
+        .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+            Element::builder("enabled", crate::stream_management::NS_SM)
+                .attr("resume", "true")
+                .attr("id", "old-sm-id")
+                .build(),
+        )))
+        .unwrap();
+    for id in ids {
+        runtime
+            .apply_transport_event(TransportEvent::MessageSent(TransportMessage::Element(
+                Element::builder("message", crate::NS_CLIENT)
+                    .attr("id", id)
+                    .attr("type", "chat")
+                    .build(),
+            )))
+            .unwrap();
+    }
+    runtime.resume_state().expect("resume state")
 }
