@@ -151,24 +151,32 @@ async fn db_storage_startup_deletes_legacy_mam_query_frames() {
         )
         .await
         .expect("create legacy table");
-        for (row_id, xml) in [
+        let mut legacy_rows = vec![
             (
-                "mam-result",
+                "mam-result".to_string(),
                 mam_query_frame_xml("alice@example.com/web", "result"),
             ),
             (
-                "mam-fin",
+                "mam-fin".to_string(),
                 mam_query_frame_xml("alice@example.com/web", "fin"),
             ),
             (
-                "normal-message",
+                "normal-message".to_string(),
                 transient_message_xml("alice@example.com", "keep"),
             ),
             (
-                "body-with-mam-payload",
+                "body-with-mam-payload".to_string(),
                 transient_message_with_mam_payload_xml("alice@example.com", "keep-with-payload"),
             ),
-        ] {
+        ];
+        for i in 0..140 {
+            legacy_rows.push((
+                format!("mam-result-{i:03}"),
+                mam_query_frame_xml("alice@example.com/web", "result"),
+            ));
+        }
+
+        for (row_id, xml) in legacy_rows {
             conn.execute(
                 "INSERT INTO pending_delivery (
                     row_id, recipient_jid, original_receipt_at, payload_kind,
@@ -210,7 +218,7 @@ async fn db_storage_startup_deletes_legacy_mam_query_frames() {
     let conn = db.guard().await.expect("db guard");
     let mut marker_rows = conn
         .query(
-            "SELECT COUNT(*) FROM pending_delivery_startup_migrations \
+            "SELECT completed_at FROM pending_delivery_startup_migrations \
              WHERE name = 'legacy_mam_query_frames_v1'",
             (),
         )
@@ -220,9 +228,9 @@ async fn db_storage_startup_deletes_legacy_mam_query_frames() {
         .next()
         .await
         .expect("read cleanup marker")
-        .expect("cleanup marker count row");
-    let marker_count: i64 = marker_row.get(0).expect("cleanup marker count");
-    assert_eq!(marker_count, 1);
+        .expect("cleanup marker row");
+    let completed_at: i64 = marker_row.get(0).expect("cleanup marker timestamp");
+    assert!(completed_at > i64::from(i32::MAX));
 }
 
 #[tokio::test]

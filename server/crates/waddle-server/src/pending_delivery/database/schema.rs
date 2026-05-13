@@ -1,6 +1,7 @@
 use super::*;
 
 const LEGACY_MAM_CLEANUP_MARKER: &str = "legacy_mam_query_frames_v1";
+const LEGACY_MAM_CLEANUP_SELECT_BATCH: i64 = 128;
 const LEGACY_MAM_CLEANUP_DELETE_BATCH: usize = 128;
 
 pub(super) async fn initialize(
@@ -15,10 +16,7 @@ pub(super) async fn initialize(
     // `sm_persistence/schema.rs` already uses this driver-aware
     // selector for the same reason. SQLite `INTEGER` is dynamic-width,
     // so the same DDL stays correct there.
-    let bigint = match storage.db.driver() {
-        DatabaseDriver::Postgres => "BIGINT",
-        DatabaseDriver::Sqlite => "INTEGER",
-    };
+    let bigint = timestamp_millis_sql_type(storage.db.driver());
     storage
         .execute(
             &format!(
@@ -51,50 +49,12 @@ pub(super) async fn initialize(
     // `ALTER COLUMN ... TYPE BIGINT` that still takes ACCESS EXCLUSIVE
     // even when the column is already BIGINT.
     if matches!(storage.db.driver(), DatabaseDriver::Postgres) {
-        // Constrain by `table_schema = current_schema()` so the probe
-        // looks at the same table the unqualified `ALTER TABLE
-        // pending_delivery` below would hit (which resolves via
-        // `search_path`). Without this, in databases that contain
-        // `pending_delivery` in multiple schemas, the probe could read
-        // a sibling table's type and incorrectly skip the widening
-        // (leaving the overflow bug in place) or trigger an ALTER
-        // against a table whose type was already correct.
-        let mut rows = storage
-            .query(
-                "SELECT data_type \
-                 FROM information_schema.columns \
-                 WHERE table_schema = current_schema() \
-                   AND table_name = 'pending_delivery' \
-                   AND column_name = 'original_receipt_at'",
-                (),
-            )
-            .await?;
-        let current_type: Option<String> = match rows
-            .next()
-            .await
-            .map_err(|error| PendingStorageError::Other(error.to_string()))?
-        {
-            Some(row) => row
-                .get(0)
-                .map_err(|error| PendingStorageError::Other(error.to_string()))?,
-            None => None,
-        };
-        // `information_schema.columns.data_type` reports `integer` for
-        // int4 and `bigint` for int8 — case is lowercase per the SQL
-        // standard. Compare lowercase to be defensive against any
-        // future Postgres surface changes.
-        let needs_widen = current_type
-            .as_deref()
-            .is_some_and(|t| !t.eq_ignore_ascii_case("bigint"));
-        if needs_widen {
-            storage
-                .execute(
-                    "ALTER TABLE pending_delivery \
-                     ALTER COLUMN original_receipt_at TYPE BIGINT",
-                    (),
-                )
-                .await?;
-        }
+        widen_postgres_timestamp_millis_column_to_bigint(
+            storage,
+            "pending_delivery",
+            "original_receipt_at",
+        )
+        .await?;
     }
     // Idempotent column-add migration for the locked Q7b
     // outbound_sequence column. Tables created by an older
@@ -179,15 +139,75 @@ pub(super) async fn initialize(
 async fn ensure_startup_migration_marker_table(
     storage: &DatabasePendingDeliveryStorage,
 ) -> Result<(), PendingStorageError> {
+    let completed_at_type = timestamp_millis_sql_type(storage.db.driver());
     storage
         .execute(
-            "CREATE TABLE IF NOT EXISTS pending_delivery_startup_migrations (\
+            &format!(
+                "CREATE TABLE IF NOT EXISTS pending_delivery_startup_migrations (\
                 name TEXT PRIMARY KEY, \
-                completed_at INTEGER NOT NULL\
-             )",
+                completed_at {completed_at_type} NOT NULL\
+             )"
+            ),
             (),
         )
         .await?;
+    if matches!(storage.db.driver(), DatabaseDriver::Postgres) {
+        widen_postgres_timestamp_millis_column_to_bigint(
+            storage,
+            "pending_delivery_startup_migrations",
+            "completed_at",
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+fn timestamp_millis_sql_type(driver: DatabaseDriver) -> &'static str {
+    match driver {
+        DatabaseDriver::Postgres => "BIGINT",
+        DatabaseDriver::Sqlite => "INTEGER",
+    }
+}
+
+async fn widen_postgres_timestamp_millis_column_to_bigint(
+    storage: &DatabasePendingDeliveryStorage,
+    table: &'static str,
+    column: &'static str,
+) -> Result<(), PendingStorageError> {
+    // Constrain by `table_schema = current_schema()` so the probe
+    // looks at the same table the unqualified `ALTER TABLE` below
+    // would hit via `search_path`.
+    let mut rows = storage
+        .query(
+            "SELECT data_type \
+             FROM information_schema.columns \
+             WHERE table_schema = current_schema() \
+               AND table_name = ? \
+               AND column_name = ?",
+            crate::db_params![table, column],
+        )
+        .await?;
+    let current_type: Option<String> = match rows
+        .next()
+        .await
+        .map_err(|error| PendingStorageError::Other(error.to_string()))?
+    {
+        Some(row) => row
+            .get(0)
+            .map_err(|error| PendingStorageError::Other(error.to_string()))?,
+        None => None,
+    };
+    let needs_widen = current_type
+        .as_deref()
+        .is_some_and(|t| !t.eq_ignore_ascii_case("bigint"));
+    if needs_widen {
+        storage
+            .execute(
+                &format!("ALTER TABLE {table} ALTER COLUMN {column} TYPE BIGINT"),
+                (),
+            )
+            .await?;
+    }
     Ok(())
 }
 
@@ -234,57 +254,20 @@ async fn mark_startup_migration_completed(
     Ok(())
 }
 
-async fn legacy_mam_query_frame_candidates_exist(
-    storage: &DatabasePendingDeliveryStorage,
-) -> Result<bool, PendingStorageError> {
-    let mut rows = storage
-        .query(
-            "SELECT 1 \
-             FROM pending_delivery \
-             WHERE payload_kind = 'transient' \
-               AND transient_xml IS NOT NULL \
-               AND transient_xml LIKE '%urn:xmpp:mam:2%' \
-             LIMIT 1",
-            (),
-        )
-        .await?;
-    Ok(rows
-        .next()
-        .await
-        .map_err(|error| PendingStorageError::Other(error.to_string()))?
-        .is_some())
-}
-
 async fn delete_legacy_mam_query_frames(
     storage: &DatabasePendingDeliveryStorage,
 ) -> Result<u64, PendingStorageError> {
-    if !legacy_mam_query_frame_candidates_exist(storage).await? {
-        return Ok(0);
-    }
+    let mut after_row_id = None;
+    let mut deleted = 0;
+    loop {
+        let candidates = legacy_mam_query_frame_candidate_batch(storage, after_row_id).await?;
+        let Some((last_row_id, _)) = candidates.last() else {
+            break;
+        };
+        after_row_id = Some(last_row_id.clone());
 
-    let row_ids = {
-        let mut rows = storage
-            .query(
-                "SELECT row_id, transient_xml \
-                 FROM pending_delivery \
-                 WHERE payload_kind = 'transient' \
-                   AND transient_xml IS NOT NULL \
-                   AND transient_xml LIKE '%urn:xmpp:mam:2%'",
-                (),
-            )
-            .await?;
         let mut row_ids = Vec::new();
-        while let Some(row) = rows
-            .next()
-            .await
-            .map_err(|error| PendingStorageError::Other(error.to_string()))?
-        {
-            let row_id: String = row
-                .get(0)
-                .map_err(|error| PendingStorageError::Other(error.to_string()))?;
-            let xml: String = row
-                .get(1)
-                .map_err(|error| PendingStorageError::Other(error.to_string()))?;
+        for (row_id, xml) in candidates {
             let Ok(element) = xml.parse::<xmpp_parsers::minidom::Element>() else {
                 continue;
             };
@@ -295,10 +278,55 @@ async fn delete_legacy_mam_query_frames(
                 row_ids.push(row_id);
             }
         }
-        row_ids
-    };
+        deleted += delete_legacy_mam_query_frame_rows(storage, &row_ids).await?;
+    }
 
-    delete_legacy_mam_query_frame_rows(storage, &row_ids).await
+    Ok(deleted)
+}
+
+async fn legacy_mam_query_frame_candidate_batch(
+    storage: &DatabasePendingDeliveryStorage,
+    after_row_id: Option<String>,
+) -> Result<Vec<(String, String)>, PendingStorageError> {
+    let (sql, params) = match after_row_id {
+        Some(row_id) => (
+            "SELECT row_id, transient_xml \
+             FROM pending_delivery \
+             WHERE payload_kind = 'transient' \
+               AND transient_xml IS NOT NULL \
+               AND transient_xml LIKE '%urn:xmpp:mam:2%' \
+               AND row_id > ? \
+             ORDER BY row_id \
+             LIMIT ?",
+            crate::db_params![row_id, LEGACY_MAM_CLEANUP_SELECT_BATCH],
+        ),
+        None => (
+            "SELECT row_id, transient_xml \
+             FROM pending_delivery \
+             WHERE payload_kind = 'transient' \
+               AND transient_xml IS NOT NULL \
+               AND transient_xml LIKE '%urn:xmpp:mam:2%' \
+             ORDER BY row_id \
+             LIMIT ?",
+            crate::db_params![LEGACY_MAM_CLEANUP_SELECT_BATCH],
+        ),
+    };
+    let mut rows = storage.query(sql, params).await?;
+    let mut candidates = Vec::new();
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| PendingStorageError::Other(error.to_string()))?
+    {
+        let row_id: String = row
+            .get(0)
+            .map_err(|error| PendingStorageError::Other(error.to_string()))?;
+        let xml: String = row
+            .get(1)
+            .map_err(|error| PendingStorageError::Other(error.to_string()))?;
+        candidates.push((row_id, xml));
+    }
+    Ok(candidates)
 }
 
 async fn delete_legacy_mam_query_frame_rows(
