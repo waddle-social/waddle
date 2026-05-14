@@ -1,9 +1,9 @@
 use super::*;
 
-pub(super) async fn handle_extensions_disco_info(
-    req: &DiscoInfoRequest<'_>,
+pub(super) async fn handle_extensions_disco_info<'a>(
+    req: &'a DiscoInfoRequest<'a>,
     state: &WebSocketState,
-) -> Option<Vec<String>> {
+) -> Option<DiscoInfoResponse<'a>> {
     if req.target_to != Some(req.extensions_domain) {
         return None;
     }
@@ -17,7 +17,7 @@ pub(super) async fn handle_extensions_disco_info(
         ];
         let response =
             build_disco_info_response(req.request_iq, &identities, &features, Some(NODE_COMMANDS));
-        return Some(vec![iq_to_xml(response)]);
+        return Some(DiscoInfoResponse::iq(response));
     }
 
     if let Some(node) = req.node {
@@ -31,12 +31,12 @@ pub(super) async fn handle_extensions_disco_info(
                 .into_iter()
                 .find(|(_, descriptor)| descriptor.node.as_str() == node)
             else {
-                return Some(vec![build_iq_error_xml_typed(
+                return Some(DiscoInfoResponse::error(
                     req.id,
                     req.response_from,
                     req.response_to,
                     item_not_found_iq_error("Requested item not found."),
-                )]);
+                ));
             };
             let identities = vec![Identity::automation(Some(descriptor.name.as_str()))];
             let features = vec![
@@ -61,7 +61,7 @@ pub(super) async fn handle_extensions_disco_info(
                 Some(node),
                 &[form],
             );
-            return Some(vec![iq_to_xml(response)]);
+            return Some(DiscoInfoResponse::iq(response));
         }
 
         let Some(route) = state
@@ -72,12 +72,12 @@ pub(super) async fn handle_extensions_disco_info(
             .iter()
             .find(|route| extension_route_disco_node(route) == node)
         else {
-            return Some(vec![build_iq_error_xml_typed(
+            return Some(DiscoInfoResponse::error(
                 req.id,
                 req.response_from,
                 req.response_to,
                 item_not_found_iq_error("Requested item not found."),
-            )]);
+            ));
         };
         let identities = vec![Identity::new(
             "waddle",
@@ -107,7 +107,7 @@ pub(super) async fn handle_extensions_disco_info(
             Some(node),
             &[form],
         );
-        return Some(vec![iq_to_xml(response)]);
+        return Some(DiscoInfoResponse::iq(response));
     }
 
     let identities = vec![Identity::pubsub_service(Some("Waddle Extensions"))];
@@ -121,5 +121,5 @@ pub(super) async fn handle_extensions_disco_info(
     ];
     features.extend(extension_features_for_disco(state));
     let response = build_disco_info_response(req.request_iq, &identities, &features, None);
-    Some(vec![iq_to_xml(response)])
+    Some(DiscoInfoResponse::iq(response))
 }

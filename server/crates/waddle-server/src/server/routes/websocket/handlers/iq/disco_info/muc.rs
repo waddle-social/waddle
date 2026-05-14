@@ -1,9 +1,9 @@
 use super::*;
 
-pub(super) async fn handle_muc_disco_info(
-    req: &DiscoInfoRequest<'_>,
+pub(super) async fn handle_muc_disco_info<'a>(
+    req: &'a DiscoInfoRequest<'a>,
     state: &WebSocketState,
-) -> Option<Vec<String>> {
+) -> Option<DiscoInfoResponse<'a>> {
     if req.target_to == Some(req.muc_domain) {
         let identities = vec![Identity::muc_service(Some("Waddle Chatrooms"))];
         let mut features = vec![
@@ -13,7 +13,7 @@ pub(super) async fn handle_muc_disco_info(
         ];
         features.extend(extension_features_for_disco(state));
         let response = build_disco_info_response(req.request_iq, &identities, &features, None);
-        return Some(vec![iq_to_xml(response)]);
+        return Some(DiscoInfoResponse::iq(response));
     }
 
     let target = req.target_to?;
@@ -29,12 +29,12 @@ pub(super) async fn handle_muc_disco_info(
                     error = ?error,
                     "Failed to load room snapshot for disco#info"
                 );
-                return Some(vec![build_iq_error_xml_typed(
+                return Some(DiscoInfoResponse::error(
                     req.id,
                     req.response_from,
                     req.response_to,
                     internal_server_error_iq_error("Internal server error."),
-                )]);
+                ));
             }
         };
         let managed_channel = get_managed_channel_for_room(state, &room_jid)
@@ -77,7 +77,7 @@ pub(super) async fn handle_muc_disco_info(
             None,
             &extensions,
         );
-        return Some(vec![iq_to_xml(response)]);
+        return Some(DiscoInfoResponse::iq(response));
     }
 
     if !is_muc_room_jid(state, &room_jid).await {
@@ -112,7 +112,7 @@ pub(super) async fn handle_muc_disco_info(
             None,
             &extensions,
         );
-        return Some(vec![iq_to_xml(response)]);
+        return Some(DiscoInfoResponse::iq(response));
     }
 
     let room_name = room_jid
@@ -123,5 +123,5 @@ pub(super) async fn handle_muc_disco_info(
     let mut features = muc_room_features(false, false, false, false);
     features.extend(extension_features_for_disco(state));
     let response = build_disco_info_response(req.request_iq, &identities, &features, None);
-    Some(vec![iq_to_xml(response)])
+    Some(DiscoInfoResponse::iq(response))
 }

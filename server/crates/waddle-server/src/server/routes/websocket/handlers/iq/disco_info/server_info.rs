@@ -1,9 +1,9 @@
 use super::*;
 
-pub(super) async fn handle_command_disco_info(
-    req: &DiscoInfoRequest<'_>,
+pub(super) async fn handle_command_disco_info<'a>(
+    req: &'a DiscoInfoRequest<'a>,
     state: &WebSocketState,
-) -> Option<Vec<String>> {
+) -> Option<DiscoInfoResponse<'a>> {
     if req.target_to == Some(req.domain) && req.node == Some(NODE_COMMANDS) {
         let identities = vec![Identity::command_list(Some("Ad-Hoc Commands"))];
         let features = vec![
@@ -13,7 +13,7 @@ pub(super) async fn handle_command_disco_info(
         ];
         let response =
             build_disco_info_response(req.request_iq, &identities, &features, Some(NODE_COMMANDS));
-        return Some(vec![iq_to_xml(response)]);
+        return Some(DiscoInfoResponse::iq(response));
     }
 
     if req.target_to == Some(req.domain) {
@@ -28,7 +28,7 @@ pub(super) async fn handle_command_disco_info(
                 ];
                 let response =
                     build_disco_info_response(req.request_iq, &identities, &features, Some(node));
-                return Some(vec![iq_to_xml(response)]);
+                return Some(DiscoInfoResponse::iq(response));
             }
         }
     }
@@ -36,11 +36,11 @@ pub(super) async fn handle_command_disco_info(
     None
 }
 
-pub(super) async fn handle_server_disco_info(
-    req: &DiscoInfoRequest<'_>,
+pub(super) async fn handle_server_disco_info<'a>(
+    req: &'a DiscoInfoRequest<'a>,
     state: &WebSocketState,
     authenticated_session: Option<&Session>,
-) -> Vec<String> {
+) -> DiscoInfoResponse<'a> {
     // Disco info on server. Source the canonical feature catalogue
     // from `waddle-xmpp-core::disco::info::server_features()` so the
     // rich-message XEPs (corrections, retractions, reactions,
@@ -62,5 +62,5 @@ pub(super) async fn handle_server_disco_info(
         ),
         None => build_disco_info_response(req.request_iq, &identities, &features, None),
     };
-    vec![iq_to_xml(response)]
+    DiscoInfoResponse::iq(response)
 }

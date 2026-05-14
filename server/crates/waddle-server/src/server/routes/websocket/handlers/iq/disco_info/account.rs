@@ -1,10 +1,10 @@
 use super::*;
 
-pub(super) async fn handle_account_disco_info(
-    req: &DiscoInfoRequest<'_>,
+pub(super) async fn handle_account_disco_info<'a>(
+    req: &'a DiscoInfoRequest<'a>,
     state: &WebSocketState,
     phase: &ConnectionPhase,
-) -> Option<Vec<String>> {
+) -> Option<DiscoInfoResponse<'a>> {
     let (Some(target), Some(bound_jid)) = (req.target_to, phase.bound_jid()) else {
         return None;
     };
@@ -23,7 +23,7 @@ pub(super) async fn handle_account_disco_info(
         ];
         features.extend(pep_features());
         let response = build_disco_info_response(req.request_iq, &identities, &features, None);
-        return Some(vec![iq_to_xml(response)]);
+        return Some(DiscoInfoResponse::iq(response));
     }
 
     if target_bare.domain().as_str() != req.domain || target_bare.node().is_none() {
@@ -31,12 +31,12 @@ pub(super) async fn handle_account_disco_info(
     }
 
     let Some(localpart) = target_bare.node() else {
-        return Some(vec![build_iq_error_xml_typed(
+        return Some(DiscoInfoResponse::error(
             req.id,
             req.response_from,
             req.response_to,
             item_not_found_iq_error("Requested item not found."),
-        )]);
+        ));
     };
 
     match local_xmpp_account_exists(state, localpart.as_str(), req.domain).await {
@@ -50,22 +50,22 @@ pub(super) async fn handle_account_disco_info(
                 )
             }));
             let response = build_disco_info_response(req.request_iq, &identities, &features, None);
-            Some(vec![iq_to_xml(response)])
+            Some(DiscoInfoResponse::iq(response))
         }
-        Ok(false) => Some(vec![build_iq_error_xml_typed(
+        Ok(false) => Some(DiscoInfoResponse::error(
             req.id,
             req.response_from,
             req.response_to,
             item_not_found_iq_error("Requested item not found."),
-        )]),
+        )),
         Err(error) => {
             warn!(target = %target_bare, error = %error, "Failed to resolve PEP disco target");
-            Some(vec![build_iq_error_xml_typed(
+            Some(DiscoInfoResponse::error(
                 req.id,
                 req.response_from,
                 req.response_to,
                 internal_server_error_iq_error("Internal server error."),
-            )])
+            ))
         }
     }
 }

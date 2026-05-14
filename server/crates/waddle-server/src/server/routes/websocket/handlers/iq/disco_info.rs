@@ -22,6 +22,52 @@ struct DiscoInfoRequest<'a> {
     response_to: Option<&'a str>,
 }
 
+enum DiscoInfoResponse<'a> {
+    Iq(xmpp_parsers::iq::Iq),
+    IqError {
+        id: &'a str,
+        from: Option<&'a str>,
+        to: Option<&'a str>,
+        error: xmpp_parsers::stanza_error::StanzaError,
+    },
+}
+
+impl<'a> DiscoInfoResponse<'a> {
+    fn iq(iq: xmpp_parsers::iq::Iq) -> Self {
+        Self::Iq(iq)
+    }
+
+    fn error(
+        id: &'a str,
+        from: Option<&'a str>,
+        to: Option<&'a str>,
+        error: xmpp_parsers::stanza_error::StanzaError,
+    ) -> Self {
+        Self::IqError {
+            id,
+            from,
+            to,
+            error,
+        }
+    }
+
+    fn into_xml(self) -> String {
+        match self {
+            Self::Iq(iq) => iq_to_xml(iq),
+            Self::IqError {
+                id,
+                from,
+                to,
+                error,
+            } => build_iq_error_xml_typed(id, from, to, error),
+        }
+    }
+}
+
+fn disco_info_xml(response: DiscoInfoResponse<'_>) -> Vec<String> {
+    vec![response.into_xml()]
+}
+
 pub(super) async fn handle_disco_info_iq(
     ctx: IqHandlerContext<'_>,
     state: &WebSocketState,
@@ -35,12 +81,12 @@ pub(super) async fn handle_disco_info_iq(
     let query = match parse_disco_info_query(ctx.iq) {
         Ok(query) => query,
         Err(_) => {
-            return vec![build_iq_error_xml_typed(
+            return disco_info_xml(DiscoInfoResponse::error(
                 ctx.id,
                 None,
                 None,
                 bad_request_iq_error("Malformed IQ payload."),
-            )];
+            ));
         }
     };
 
@@ -59,30 +105,33 @@ pub(super) async fn handle_disco_info_iq(
     };
 
     if let Some(response) = muc::handle_muc_disco_info(&request, state).await {
-        return response;
+        return disco_info_xml(response);
     }
 
     if let Some(response) = server_info::handle_command_disco_info(&request, state).await {
-        return response;
+        return disco_info_xml(response);
     }
 
     if let Some(response) = extensions::handle_extensions_disco_info(&request, state).await {
-        return response;
+        return disco_info_xml(response);
     }
 
     if let Some(response) =
         spaces::handle_spaces_disco_info(&request, state, authenticated_session.as_ref()).await
     {
-        return response;
+        return disco_info_xml(response);
     }
 
     if let Some(response) = services::handle_upload_disco_info(&request) {
-        return response;
+        return disco_info_xml(response);
     }
 
     if let Some(response) = account::handle_account_disco_info(&request, state, phase).await {
-        return response;
+        return disco_info_xml(response);
     }
 
-    server_info::handle_server_disco_info(&request, state, authenticated_session.as_ref()).await
+    disco_info_xml(
+        server_info::handle_server_disco_info(&request, state, authenticated_session.as_ref())
+            .await,
+    )
 }
