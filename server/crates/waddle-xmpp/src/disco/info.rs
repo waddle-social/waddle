@@ -72,3 +72,44 @@ pub fn call_features() -> Vec<Feature> {
         Feature::waddle_muc_call(),
     ]
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn server_features_omit_call_namespaces_by_default() {
+        // The base list is used by tests that don't register call
+        // handlers; advertising A/V features there would be a lie.
+        let features = server_features();
+        for feature in call_features() {
+            assert!(
+                !features.contains(&feature),
+                "{} leaked into server_features() — gating must be done by callers, not here",
+                feature.0
+            );
+        }
+    }
+
+    #[test]
+    fn call_features_returns_eight_canonical_namespaces() {
+        let features = call_features();
+        let expected = [
+            "urn:xmpp:jingle:1",
+            "urn:xmpp:jingle:apps:rtp:1",
+            "urn:xmpp:jingle:apps:rtp:audio",
+            "urn:xmpp:jingle:apps:rtp:video",
+            "urn:xmpp:jingle-message:0",
+            "urn:xmpp:extdisco:2",
+            "urn:waddle:transports:livekit:0",
+            "urn:waddle:muc-call:0",
+        ];
+        assert_eq!(features.len(), expected.len());
+        for ns in expected {
+            assert!(
+                features.contains(&Feature::new(ns)),
+                "call_features() missing {ns}"
+            );
+        }
+    }
+}
