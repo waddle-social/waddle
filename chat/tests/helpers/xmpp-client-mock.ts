@@ -17,6 +17,5 @@ export function handlerStubs() {
     setLastSeenHandler: () => {},
     setActivityHandler: () => {},
     setRoomAvatarHandler: () => {},
-    setSlowModeHandler: () => {},
   };
 }
