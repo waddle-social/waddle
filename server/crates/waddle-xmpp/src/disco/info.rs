@@ -51,3 +51,24 @@ pub fn server_features() -> Vec<Feature> {
     features.push(Feature::new(crate::admin::NS_ADMIN_CHANNELS_KICK));
     features
 }
+
+/// XMPP-native A/V calling feature namespaces. Returned as a separate
+/// list so disco-info builders only emit them when the
+/// LiveKit-backed handlers are actually registered at startup. Each
+/// namespace is covered by a custom test suite (per the CLAUDE.md
+/// "advertised feature must have testable behavior" rule) and a real
+/// handler — see [`crate::protocol::handlers::jingle`],
+/// [`crate::protocol::handlers::extdisco`], and the typed XEP
+/// modules under `crate::xep`.
+pub fn call_features() -> Vec<Feature> {
+    vec![
+        Feature::jingle(),
+        Feature::jingle_rtp(),
+        Feature::jingle_rtp_audio(),
+        Feature::jingle_rtp_video(),
+        Feature::jingle_message(),
+        Feature::ext_disco(),
+        Feature::waddle_livekit_transport(),
+        Feature::waddle_muc_call(),
+    ]
+}

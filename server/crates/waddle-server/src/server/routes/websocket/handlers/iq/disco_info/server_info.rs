@@ -52,6 +52,20 @@ pub(super) async fn handle_server_disco_info<'a>(
     let mut features = waddle_xmpp::disco::info::server_features();
     features.extend([Feature::new("jabber:iq:search"), Feature::new(ISR_NS)]);
     features.extend(extension_features_for_disco(state));
+    // Advertise XMPP-native A/V calling only when the Jingle handler
+    // is registered. `register_call_handlers` is invoked at startup
+    // iff `SfuConfig::from_env` produced a config — so the
+    // dispatcher's handler set is the canonical "is calling
+    // available" flag. Lying about features that have no behavior
+    // is the lesson we took from PR #243.
+    if state
+        .deps
+        .protocol
+        .dispatcher
+        .has_iq_handler("urn:xmpp:jingle:1")
+    {
+        features.extend(waddle_xmpp::disco::info::call_features());
+    }
     let response = match server_affiliation_for_requester(state, authenticated_session).await {
         Some(role) => build_disco_info_response_with_extensions(
             req.request_iq,
