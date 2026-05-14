@@ -9,6 +9,7 @@ resources:
   - xmpp-certificate.yaml
   - runtime-external-secret.yaml
   - openrouter-external-secret.yaml
+  - livekit-external-secret.yaml
   - helmrepository.yaml
   - helmrelease.yaml
   - httproute.yaml

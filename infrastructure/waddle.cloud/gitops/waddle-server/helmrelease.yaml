@@ -51,6 +51,12 @@ spec:
       insecure: true
     extraSecretRefs:
       - waddle-runtime-secrets
+      # LiveKit signing key + TURN shared secret + LiveKit/TURN URLs.
+      # Mounted as env vars; consumed by `waddle-sfu::SfuConfig::from_env`
+      # at server boot. If this Secret is absent or unpopulated the
+      # server boots without A/V calling (Jingle / extdisco handlers
+      # are not registered and `call_features()` stays out of disco).
+      - waddle-livekit-config
     extraVolumes:
       - name: openrouter-api-key
         secret:
