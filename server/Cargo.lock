@@ -6135,6 +6135,7 @@ dependencies = [
  "url",
  "uuid",
  "waddle-extensions",
+ "waddle-sfu",
  "waddle-xmpp-core",
  "xmpp-parsers",
 ]
