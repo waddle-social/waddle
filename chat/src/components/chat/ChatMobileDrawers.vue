@@ -164,9 +164,7 @@ function openExtensionRoute(route: DiscoveredExtensionRoute) {
         </div>
 
         <div
-          v-if="ui.sidebarMode.value === 'channels'
-            && waddles.currentChannel.value
-            && drawerExtensionRoutes.length > 0"
+          v-if="drawerExtensionRoutes.length > 0"
           class="flex flex-col gap-1.5 border-t border-border pt-4"
         >
           <h3 class="type-section-label text-muted-foreground">Extensions</h3>
