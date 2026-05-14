@@ -1,6 +1,14 @@
+import { Grid3X3, Link2, ListChecks } from "lucide-vue-next";
+import type { Component } from "vue";
 import type { DiscoveredExtensionRoute } from "@/lib/xmpp/extension-commands";
 
-export type ExtensionRouteRailIcon = "gallery" | "links" | "list";
+type ExtensionRouteRailIcon = "gallery" | "links" | "list";
+
+export function extensionRouteIconComponent(icon: ExtensionRouteRailIcon): Component {
+  if (icon === "links") return Link2;
+  if (icon === "gallery") return Grid3X3;
+  return ListChecks;
+}
 
 interface ExtensionRouteRailItem {
   key: string;
