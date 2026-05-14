@@ -22,12 +22,16 @@ pub struct CallId(String);
 impl CallId {
     pub fn new(value: impl Into<String>) -> Result<Self, SfuError> {
         let value = value.into();
-        if value.is_empty() || value.len() > 128 {
+        if value.is_empty() || value.len() > 256 {
             return Err(SfuError::InvalidCallId(value));
         }
+        // The Jingle handler namespaces call ids by the initiator's
+        // bare JID (`<localpart>@<domain>::<sid>`) to prevent room
+        // collisions. The whitelist permits JID-safe characters plus
+        // the `::` separator chars.
         let valid = value
             .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | ':' | '.'));
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | ':' | '.' | '@'));
         if !valid {
             return Err(SfuError::InvalidCallId(value));
         }

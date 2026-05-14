@@ -50,7 +50,7 @@ impl IqHandler for ExtDiscoHandler {
         NS_EXT_DISCO
     }
 
-    fn handle(&self, iq: &Iq, _ctx: &StanzaContext<'_>) -> Vec<OutboundEvent> {
+    fn handle(&self, iq: &Iq, ctx: &StanzaContext<'_>) -> Vec<OutboundEvent> {
         let IqType::Get(query) = &iq.payload else {
             return error_reply(
                 iq,
@@ -66,29 +66,15 @@ impl IqHandler for ExtDiscoHandler {
             );
         }
 
-        let Some(from) = iq.from.clone() else {
-            return error_reply(
-                iq,
-                DefinedCondition::BadRequest,
-                "extdisco request missing 'from' attribute",
-            );
-        };
-        let Ok(full) = from.try_into_full() else {
-            return error_reply(
-                iq,
-                DefinedCondition::BadRequest,
-                "extdisco 'from' must be a full JID",
-            );
-        };
-        let identity = Identity::from_jid(full);
+        // Mint credentials scoped to the authenticated session JID,
+        // never the client-supplied `iq.from` (which could spoof any
+        // identity into the TURN username).
+        let identity = Identity::from_jid(ctx.full_jid.clone());
         let cred = match self.sfu.issue_turn_credentials(&identity) {
             Ok(c) => c,
             Err(e) => {
-                return error_reply(
-                    iq,
-                    DefinedCondition::InternalServerError,
-                    &format!("TURN credential mint failed: {e}"),
-                );
+                tracing::error!(error = %e, "TURN credential mint failed");
+                return error_reply(iq, DefinedCondition::InternalServerError, "internal error");
             }
         };
 

@@ -12,19 +12,19 @@
 
 use std::sync::Arc;
 
-use jid::Jid;
+use jid::{BareJid, Jid};
 use minidom::Element;
 use xmpp_parsers::iq::{Iq, IqType};
 use xmpp_parsers::jingle::{Action, Content, Jingle, Transport};
 use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
 
-use waddle_sfu::{Identity, MediaCapabilities, SfuService};
+use waddle_sfu::{CallId, Identity, MediaCapabilities, SfuError, SfuService};
 
 use crate::protocol::event::{OutboundEvent, StanzaContext};
 use crate::protocol::traits::IqHandler;
 use crate::xep::xep0166::NS_JINGLE;
 use crate::xep::xep_waddle_livekit_transport::{
-    IssuedTransport, WaddleLiveKitTransport, NS_WADDLE_LIVEKIT_TRANSPORT,
+    IssuedTransport, TransportParseError, WaddleLiveKitTransport, NS_WADDLE_LIVEKIT_TRANSPORT,
 };
 use crate::Stanza;
 
@@ -54,7 +54,6 @@ impl IqHandler for JingleHandler {
         let Some(jingle_elem) = iq_set_jingle(iq) else {
             return error_reply(
                 iq,
-                ctx,
                 DefinedCondition::BadRequest,
                 "expected IQ set with a <jingle/> payload",
             );
@@ -65,7 +64,6 @@ impl IqHandler for JingleHandler {
             Err(_) => {
                 return error_reply(
                     iq,
-                    ctx,
                     DefinedCondition::BadRequest,
                     "malformed <jingle/> stanza",
                 );
@@ -75,7 +73,6 @@ impl IqHandler for JingleHandler {
         let Some(peer) = iq.to.clone() else {
             return error_reply(
                 iq,
-                ctx,
                 DefinedCondition::BadRequest,
                 "Jingle stanza missing 'to' attribute",
             );
@@ -104,10 +101,10 @@ impl IqHandler for JingleHandler {
 
 impl JingleHandler {
     /// Rewrite every Waddle LiveKit transport in the jingle stanza
-    /// with a freshly-issued LiveKit join token for `peer` (the
-    /// recipient of the forwarded stanza), then forward to that peer
-    /// and ACK the requester. Used for session-initiate and
-    /// session-accept.
+    /// with a freshly-issued LiveKit join token for the responder,
+    /// then forward to the responder. The server does NOT pre-ACK
+    /// the requester — the responder's real client emits the
+    /// `<iq type='result'/>` itself, per XEP-0166 §6.4.
     fn handle_session_negotiation(
         &self,
         iq: &Iq,
@@ -115,55 +112,73 @@ impl JingleHandler {
         peer: Jid,
         ctx: &StanzaContext<'_>,
     ) -> Vec<OutboundEvent> {
-        let peer_identity = match peer.clone().try_into_full() {
-            Ok(full) => Identity::from_jid(full),
+        let peer_full = match peer.clone().try_into_full() {
+            Ok(full) => full,
             Err(_) => {
                 return error_reply(
                     iq,
-                    ctx,
                     DefinedCondition::BadRequest,
                     "Jingle 'to' must be a full JID (resource required)",
                 );
             }
         };
+        let peer_identity = Identity::from_jid(peer_full);
 
-        // Each <content/> must carry a Waddle LiveKit transport. We
-        // rewrite empty (request) transports with issued tokens scoped
-        // to (sid, peer); leave already-issued transports alone (the
-        // responder may have populated their own copy).
+        // Resolve the call's initiator JID. On session-initiate the
+        // initiator MUST be the authenticated session (else a peer
+        // could spoof a call as someone else, leaking tokens scoped
+        // to a victim's identity). On session-accept the initiator
+        // attribute names the original caller and the authenticated
+        // session is the responder.
+        let initiator_bare = match resolve_initiator(&jingle, &jingle.action, ctx) {
+            Ok(bare) => bare,
+            Err(e) => return e.into_reply(iq),
+        };
+
+        // Namespace the LiveKit room by the initiator's bare JID so
+        // an attacker can't pick a sid that collides with a victim's
+        // active call and have the server mint a join token scoped
+        // to the victim's room.
+        let call_id = match scoped_call_id(&initiator_bare, &jingle.sid.0) {
+            Ok(c) => c,
+            Err(_) => {
+                return error_reply(
+                    iq,
+                    DefinedCondition::BadRequest,
+                    "Jingle sid must be printable ASCII",
+                );
+            }
+        };
+
         for content in &mut jingle.contents {
-            match rewrite_content_transport(content, &jingle.sid.0, &peer_identity, &*self.sfu) {
+            match rewrite_content_transport(content, &call_id, &peer_identity, &*self.sfu) {
                 Ok(()) => {}
-                Err(reason) => return reason.into_error_reply(iq, ctx),
+                Err(reason) => return reason.into_error_reply(iq),
             }
         }
 
-        // Register the peer with the in-memory call registry so the
-        // MUC focus path knows about active calls. Call-id is the
-        // Jingle sid.
-        if let Ok(call_id) = waddle_sfu::CallId::new(jingle.sid.0.clone()) {
-            self.sfu.register_call_participant(&call_id, &peer_identity);
-        }
+        // Register the authenticated participant (not the peer —
+        // the peer hasn't joined yet, they're being invited).
+        let self_identity = Identity::from_jid(ctx.full_jid.clone());
+        self.sfu.register_call_participant(&call_id, &self_identity);
 
+        // Stamp the forwarded stanza's `from` with the authenticated
+        // JID — never trust the client-supplied `iq.from`.
         let forwarded_elem: Element = jingle.into();
         let forwarded_iq = Iq {
-            from: iq.from.clone(),
+            from: Some(ctx.full_jid.clone().into()),
             to: Some(peer),
             id: iq.id.clone(),
             payload: IqType::Set(forwarded_elem),
         };
 
-        let ack = empty_iq_result_for(iq, ctx.domain);
-        vec![
-            OutboundEvent::SendStanza(Box::new(Stanza::Iq(ack))),
-            OutboundEvent::RouteToConnection {
-                jid: forwarded_iq
-                    .to
-                    .clone()
-                    .unwrap_or_else(|| ctx.full_jid.clone().into()),
-                stanza: Box::new(Stanza::Iq(forwarded_iq)),
-            },
-        ]
+        vec![OutboundEvent::RouteToConnection {
+            jid: forwarded_iq
+                .to
+                .clone()
+                .unwrap_or_else(|| ctx.full_jid.clone().into()),
+            stanza: Box::new(Stanza::Iq(forwarded_iq)),
+        }]
     }
 
     fn handle_session_terminate(
@@ -173,7 +188,11 @@ impl JingleHandler {
         peer: Jid,
         ctx: &StanzaContext<'_>,
     ) -> Vec<OutboundEvent> {
-        if let Ok(call_id) = waddle_sfu::CallId::new(jingle.sid.0.clone()) {
+        let initiator_bare = match resolve_initiator(&jingle, &jingle.action, ctx) {
+            Ok(bare) => bare,
+            Err(e) => return e.into_reply(iq),
+        };
+        if let Ok(call_id) = scoped_call_id(&initiator_bare, &jingle.sid.0) {
             let _ = self
                 .sfu
                 .unregister_call_participant(&call_id, &Identity::from_jid(ctx.full_jid.clone()));
@@ -181,46 +200,112 @@ impl JingleHandler {
         self.route_unchanged(iq, peer, ctx)
     }
 
-    /// Forward the stanza verbatim and ACK. Used for transport-info,
-    /// session-info, content-* and the like that don't need server
-    /// mediation.
+    /// Forward the stanza verbatim with a sanitised `from` so the
+    /// authenticated session is the only thing the peer sees as the
+    /// sender. Used for transport-info, session-info, content-* and
+    /// the like that don't need server mediation.
     fn route_unchanged(&self, iq: &Iq, peer: Jid, ctx: &StanzaContext<'_>) -> Vec<OutboundEvent> {
-        let ack = empty_iq_result_for(iq, ctx.domain);
-        vec![
-            OutboundEvent::SendStanza(Box::new(Stanza::Iq(ack))),
-            OutboundEvent::RouteToConnection {
-                jid: peer,
-                stanza: Box::new(Stanza::Iq(iq.clone())),
-            },
-        ]
+        let mut forwarded = iq.clone();
+        forwarded.from = Some(ctx.full_jid.clone().into());
+        forwarded.to = Some(peer.clone());
+        vec![OutboundEvent::RouteToConnection {
+            jid: peer,
+            stanza: Box::new(Stanza::Iq(forwarded)),
+        }]
     }
+}
+
+enum InitiatorError {
+    InitiatorMismatch,
+    InitiatorMissing,
+}
+
+impl InitiatorError {
+    fn into_reply(self, iq: &Iq) -> Vec<OutboundEvent> {
+        match self {
+            Self::InitiatorMismatch => error_reply(
+                iq,
+                DefinedCondition::Forbidden,
+                "Jingle initiator must match the authenticated session",
+            ),
+            Self::InitiatorMissing => error_reply(
+                iq,
+                DefinedCondition::BadRequest,
+                "Jingle action requires the 'initiator' attribute",
+            ),
+        }
+    }
+}
+
+/// Verify the Jingle stanza's `initiator` attribute is consistent
+/// with the authenticated session and return the initiator's bare
+/// JID used to derive the SFU call-id.
+fn resolve_initiator(
+    jingle: &Jingle,
+    action: &Action,
+    ctx: &StanzaContext<'_>,
+) -> Result<BareJid, InitiatorError> {
+    let ctx_bare = ctx.full_jid.to_bare();
+    match action {
+        Action::SessionInitiate => {
+            // The initiator attribute MAY be present (XEP-0166 §7.1);
+            // if so it must name the authenticated session.
+            match jingle.initiator.as_ref().map(|j| j.to_bare()) {
+                Some(declared) if declared != ctx_bare => Err(InitiatorError::InitiatorMismatch),
+                _ => Ok(ctx_bare),
+            }
+        }
+        _ => {
+            // Non-initiate actions MUST identify the initiator so
+            // the server can derive the same scoped call-id used on
+            // the original session-initiate.
+            jingle
+                .initiator
+                .as_ref()
+                .map(|j| j.to_bare())
+                .ok_or(InitiatorError::InitiatorMissing)
+        }
+    }
+}
+
+fn scoped_call_id(initiator_bare: &BareJid, sid: &str) -> Result<CallId, SfuError> {
+    CallId::new(format!("{}::{}", initiator_bare, sid))
 }
 
 enum RewriteError {
     UnsupportedTransport,
-    InvalidWaddleTransport(String),
-    SfuFailed(String),
+    InvalidWaddleTransport(TransportParseError),
+    SfuFailed(SfuError),
 }
 
 impl RewriteError {
-    fn into_error_reply(self, iq: &Iq, ctx: &StanzaContext<'_>) -> Vec<OutboundEvent> {
+    fn into_error_reply(self, iq: &Iq) -> Vec<OutboundEvent> {
         match self {
-            // XEP-0166 §10.2: <unsupported-transports/> is signalled
-            // as a Jingle-specific application condition. We surface
-            // it through the generic feature-not-implemented stanza
-            // error because xmpp_parsers' StanzaError model doesn't
-            // carry the Jingle-side application condition directly.
+            // The server acts as a transport-policy gate: only
+            // urn:waddle:transports:livekit:0 is acceptable. A
+            // conformant peer-style termination flow (ACK +
+            // session-terminate with `unsupported-transports`) is
+            // deferred; an XMPP-error response here is well-formed
+            // and the WaddleClient already understands it.
             Self::UnsupportedTransport => error_reply(
                 iq,
-                ctx,
                 DefinedCondition::FeatureNotImplemented,
                 "only urn:waddle:transports:livekit:0 is supported",
             ),
-            Self::InvalidWaddleTransport(msg) => {
-                error_reply(iq, ctx, DefinedCondition::BadRequest, &msg)
+            // Don't reflect the inner error string to the client —
+            // it can leak parser internals or signing details. Log
+            // it server-side and return a generic message.
+            Self::InvalidWaddleTransport(inner) => {
+                tracing::warn!(error = %inner, "rejecting Jingle stanza with invalid Waddle transport");
+                error_reply(
+                    iq,
+                    DefinedCondition::BadRequest,
+                    "invalid Waddle LiveKit transport",
+                )
             }
-            Self::SfuFailed(msg) => {
-                error_reply(iq, ctx, DefinedCondition::InternalServerError, &msg)
+            Self::SfuFailed(inner) => {
+                tracing::error!(error = %inner, "SFU operation failed during Jingle handling");
+                error_reply(iq, DefinedCondition::InternalServerError, "internal error")
             }
         }
     }
@@ -228,7 +313,7 @@ impl RewriteError {
 
 fn rewrite_content_transport(
     content: &mut Content,
-    call_sid: &str,
+    call_id: &CallId,
     peer_identity: &Identity,
     sfu: &dyn SfuService,
 ) -> Result<(), RewriteError> {
@@ -239,19 +324,17 @@ fn rewrite_content_transport(
         return Err(RewriteError::UnsupportedTransport);
     }
     let parsed = WaddleLiveKitTransport::try_from(transport_elem)
-        .map_err(|e| RewriteError::InvalidWaddleTransport(e.to_string()))?;
+        .map_err(RewriteError::InvalidWaddleTransport)?;
     match parsed {
         WaddleLiveKitTransport::Issued(_) => Ok(()),
         WaddleLiveKitTransport::Request => {
-            let call_id = waddle_sfu::CallId::new(call_sid.to_string())
-                .map_err(|e| RewriteError::InvalidWaddleTransport(e.to_string()))?;
             let token = sfu
                 .issue_join_token(
-                    &call_id,
+                    call_id,
                     peer_identity,
                     MediaCapabilities::full_participant(),
                 )
-                .map_err(|e| RewriteError::SfuFailed(e.to_string()))?;
+                .map_err(RewriteError::SfuFailed)?;
             let issued = WaddleLiveKitTransport::Issued(IssuedTransport {
                 url: token.url,
                 room: token.room,
@@ -271,21 +354,7 @@ fn iq_set_jingle(iq: &Iq) -> Option<&Element> {
     }
 }
 
-fn empty_iq_result_for(original: &Iq, _domain: &str) -> Iq {
-    Iq {
-        from: original.to.clone(),
-        to: original.from.clone(),
-        id: original.id.clone(),
-        payload: IqType::Result(None),
-    }
-}
-
-fn error_reply(
-    original: &Iq,
-    _ctx: &StanzaContext<'_>,
-    cond: DefinedCondition,
-    text: &str,
-) -> Vec<OutboundEvent> {
+fn error_reply(original: &Iq, cond: DefinedCondition, text: &str) -> Vec<OutboundEvent> {
     let err = Iq {
         from: original.to.clone(),
         to: original.from.clone(),
@@ -366,50 +435,80 @@ mod tests {
 
         let events = handler.handle(&iq, &ctx);
 
-        // Expect: ACK to initiator + forwarded stanza to responder.
-        assert_eq!(events.len(), 2, "expected ack + forward, got {events:?}");
-
-        let mut ack_seen = false;
-        let mut forward_seen = false;
-        for ev in events {
-            match ev {
-                OutboundEvent::SendStanza(stanza) => {
-                    if let Stanza::Iq(reply) = *stanza {
-                        assert!(matches!(reply.payload, IqType::Result(_)));
-                        ack_seen = true;
-                    }
-                }
-                OutboundEvent::RouteToConnection { jid: peer, stanza } => {
-                    assert_eq!(peer.to_string(), "bob@waddle.test/desktop");
-                    let Stanza::Iq(fwd) = *stanza else {
-                        panic!("expected Iq")
-                    };
-                    let IqType::Set(elem) = fwd.payload else {
-                        panic!("expected Iq set, got error or result")
-                    };
-                    let forwarded = Jingle::try_from(elem).expect("forwarded jingle reparses");
-                    let content = &forwarded.contents[0];
-                    let Some(Transport::Unknown(t)) = &content.transport else {
-                        panic!("expected Waddle transport, got other variant")
-                    };
-                    let parsed = WaddleLiveKitTransport::try_from(t).expect("transport parses");
-                    match parsed {
-                        WaddleLiveKitTransport::Issued(t) => {
-                            assert_eq!(t.room.as_str(), "c1");
-                            assert_eq!(t.identity.as_livekit_identity(), "bob@waddle.test/desktop");
-                            assert!(!t.token.as_str().is_empty());
-                        }
-                        WaddleLiveKitTransport::Request => {
-                            panic!("server must populate the transport")
-                        }
-                    }
-                    forward_seen = true;
-                }
-                _ => panic!("unexpected event: {ev:?}"),
+        // Server does NOT pre-ACK; the responder's real client emits
+        // the IQ-result. We just forward the rewritten stanza.
+        assert_eq!(events.len(), 1, "expected forward only, got {events:?}");
+        let OutboundEvent::RouteToConnection { jid: peer, stanza } =
+            events.into_iter().next().unwrap()
+        else {
+            panic!("expected RouteToConnection");
+        };
+        assert_eq!(peer.to_string(), "bob@waddle.test/desktop");
+        let Stanza::Iq(fwd) = *stanza else {
+            panic!("expected Iq")
+        };
+        // Forwarded stanza's `from` must be the authenticated session.
+        assert_eq!(
+            fwd.from.as_ref().map(|j| j.to_string()),
+            Some("alice@waddle.test/desktop".to_string())
+        );
+        let IqType::Set(elem) = fwd.payload else {
+            panic!("expected Iq set, got error or result")
+        };
+        let forwarded = Jingle::try_from(elem).expect("forwarded jingle reparses");
+        let content = &forwarded.contents[0];
+        let Some(Transport::Unknown(t)) = &content.transport else {
+            panic!("expected Waddle transport, got other variant")
+        };
+        let parsed = WaddleLiveKitTransport::try_from(t).expect("transport parses");
+        match parsed {
+            WaddleLiveKitTransport::Issued(t) => {
+                // Room is namespaced by initiator bare JID so an
+                // attacker can't pick a sid that collides with a
+                // victim's live call.
+                assert_eq!(t.room.as_str(), "alice@waddle.test::c1");
+                assert_eq!(t.identity.as_livekit_identity(), "bob@waddle.test/desktop");
+                assert!(!t.token.as_str().is_empty());
             }
+            WaddleLiveKitTransport::Request => panic!("server must populate the transport"),
         }
-        assert!(ack_seen);
-        assert!(forward_seen);
+    }
+
+    #[test]
+    fn session_initiate_with_spoofed_initiator_is_rejected() {
+        let mut content = Content::new(Creator::Initiator, ContentId("audio".into()));
+        content.description = Some(xmpp_parsers::jingle::Description::Rtp(
+            opus_audio_description(),
+        ));
+        content.transport = Some(Transport::Unknown(
+            WaddleLiveKitTransport::Request.to_element(),
+        ));
+        let mut jingle = Jingle::new(Action::SessionInitiate, SessionId("c1".into()));
+        jingle.initiator = Some("charlie@waddle.test/desktop".parse().unwrap());
+        jingle.contents.push(content);
+        let iq = Iq {
+            from: Some("alice@waddle.test/desktop".parse().unwrap()),
+            to: Some("bob@waddle.test/desktop".parse().unwrap()),
+            id: "spoof".into(),
+            payload: IqType::Set(jingle.into()),
+        };
+
+        let jid = test_ctx_jid();
+        let handler = JingleHandler::new(fixture_sfu());
+        let events = handler.handle(&iq, &ctx(&jid));
+
+        match &events[0] {
+            OutboundEvent::SendStanza(stanza) => match stanza.as_ref() {
+                Stanza::Iq(reply) => {
+                    let IqType::Error(err) = &reply.payload else {
+                        panic!("expected error");
+                    };
+                    assert_eq!(err.defined_condition, DefinedCondition::Forbidden);
+                }
+                _ => panic!("expected Iq"),
+            },
+            _ => panic!("expected SendStanza"),
+        }
     }
 
     #[test]
@@ -455,9 +554,12 @@ mod tests {
 
     #[test]
     fn session_terminate_routes_to_peer_and_unregisters() {
-        let jingle = Jingle::new(Action::SessionTerminate, SessionId("c1".into())).set_reason(
+        let mut jingle = Jingle::new(Action::SessionTerminate, SessionId("c1".into())).set_reason(
             xep0166::reason_element(xmpp_parsers::jingle::Reason::Success),
         );
+        // Non-initiate actions require `initiator` so the server can
+        // re-derive the scoped call-id.
+        jingle.initiator = Some("alice@waddle.test/desktop".parse().unwrap());
         let iq = Iq {
             from: Some("alice@waddle.test/desktop".parse().unwrap()),
             to: Some("bob@waddle.test/desktop".parse().unwrap()),
@@ -466,8 +568,9 @@ mod tests {
         };
 
         let sfu = fixture_sfu();
-        // pre-register so the unregister path has something to remove
-        let call = waddle_sfu::CallId::new("c1").unwrap();
+        // Pre-register under the scoped id so the unregister path
+        // has something to remove.
+        let call = waddle_sfu::CallId::new("alice@waddle.test::c1").unwrap();
         let alice = Identity::from_jid("alice@waddle.test/desktop".parse().unwrap());
         sfu.register_call_participant(&call, &alice);
 
@@ -475,8 +578,8 @@ mod tests {
         let handler = JingleHandler::new(sfu);
         let events = handler.handle(&iq, &ctx(&jid));
 
-        // ack + forward
-        assert_eq!(events.len(), 2);
+        // No server-forged ACK — just the forwarded terminate.
+        assert_eq!(events.len(), 1);
         let mut routed = false;
         for ev in events {
             if let OutboundEvent::RouteToConnection { jid: peer, .. } = ev {

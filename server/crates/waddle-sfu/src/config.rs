@@ -27,7 +27,10 @@ impl ApiKey {
 
 impl fmt::Debug for ApiKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_tuple("ApiKey").field(&self.0).finish()
+        f.debug_struct("ApiKey")
+            .field("len", &self.0.len())
+            .field("value", &"<redacted>")
+            .finish()
     }
 }
 
@@ -160,11 +163,8 @@ impl SfuConfig {
         let turn_shared_secret =
             turn_shared_secret.ok_or(FromEnvError::Missing("LIVEKIT_TURN_SHARED_SECRET"))?;
 
-        let parsed_url: url::Url = ws_url
-            .parse()
-            .map_err(|_| FromEnvError::InvalidUrl(ws_url.clone()))?;
-        let ws_url =
-            WebsocketUrl::new(parsed_url).map_err(|e| FromEnvError::InvalidUrl(e.to_string()))?;
+        let parsed_url: url::Url = ws_url.parse().map_err(FromEnvError::InvalidUrl)?;
+        let ws_url = WebsocketUrl::new(parsed_url).map_err(FromEnvError::InvalidScheme)?;
 
         let turn_tls_port = parse_port_env("LIVEKIT_TURN_TLS_PORT", 443)?;
         let turn_udp_port = parse_port_env("LIVEKIT_TURN_UDP_PORT", 3478)?;
@@ -187,18 +187,14 @@ impl SfuConfig {
 
 fn parse_port_env(name: &'static str, default: u16) -> Result<u16, FromEnvError> {
     match std::env::var(name) {
-        Ok(value) => value
-            .parse()
-            .map_err(|_| FromEnvError::InvalidNumber(name, value)),
+        Ok(value) => value.parse().map_err(|_| FromEnvError::InvalidNumber(name)),
         Err(_) => Ok(default),
     }
 }
 
 fn parse_seconds_env(name: &'static str, default: i64) -> Result<i64, FromEnvError> {
     match std::env::var(name) {
-        Ok(value) => value
-            .parse()
-            .map_err(|_| FromEnvError::InvalidNumber(name, value)),
+        Ok(value) => value.parse().map_err(|_| FromEnvError::InvalidNumber(name)),
         Err(_) => Ok(default),
     }
 }
@@ -207,8 +203,10 @@ fn parse_seconds_env(name: &'static str, default: i64) -> Result<i64, FromEnvErr
 pub enum FromEnvError {
     #[error("missing required env var: {0}")]
     Missing(&'static str),
-    #[error("invalid LiveKit websocket URL: {0}")]
-    InvalidUrl(String),
-    #[error("invalid numeric env var {0}={1}")]
-    InvalidNumber(&'static str, String),
+    #[error("LIVEKIT_WS_URL is not a valid URL")]
+    InvalidUrl(#[source] url::ParseError),
+    #[error("LIVEKIT_WS_URL has wrong scheme")]
+    InvalidScheme(#[source] InvalidWebsocketUrl),
+    #[error("env var {0} is not a valid number")]
+    InvalidNumber(&'static str),
 }
