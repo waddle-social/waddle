@@ -5,6 +5,7 @@
 //! trait for sending those stanzas through the native client handle.
 
 mod builders;
+mod call;
 pub(crate) mod namespaces;
 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 mod native;
@@ -18,6 +19,10 @@ pub use builders::{
     build_chat_state_message, build_correction_message, build_displayed_message,
     build_file_sharing_element, build_moderation_message, build_outbound_message,
     build_pinned_message, build_reaction_message, build_retraction_message, build_unpinned_message,
+};
+pub use call::{
+    parse_call_event, parse_jingle_iq, parse_jmi_message, CallEventKind, CallMedia,
+    InboundCallEvent, LiveKitJoin,
 };
 pub use namespaces::{
     NS_CHAT_MARKERS, NS_CHAT_STATES, NS_MESSAGE_CORRECT, NS_MESSAGE_MODERATE, NS_MESSAGE_RETRACT,
