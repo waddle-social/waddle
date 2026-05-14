@@ -470,6 +470,12 @@ fn parse_message_for_test(xml: &str) -> xmpp_parsers::message::Message {
     }
 }
 
+fn message_frame_xml_with_id(id: String) -> String {
+    let mut message = xmpp_parsers::message::Message::new(None::<jid::Jid>);
+    message.id = Some(id);
+    stanza_to_xml(&Stanza::Message(message))
+}
+
 fn assert_sample_payload(xml: &str, element_name: &str, url: &str, owner: &str, name: &str) {
     let parsed = parse_message_for_test(xml);
     let payload = parsed
@@ -5019,7 +5025,7 @@ async fn sm_resume_rejects_when_replay_window_has_gap() {
     {
         detached.record_detached_outbound_at(
             sequence,
-            format!("<message xmlns='jabber:client' id='m{sequence}'/>"),
+            message_frame_xml_with_id(format!("m{sequence}")),
             chrono::Utc::now(),
         );
     }

@@ -243,3 +243,50 @@ pub(super) fn encode_nickname_generation(
         ))
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn assert_serialization_error(
+        result: Result<Option<waddle_xmpp_core::xep0201::ThreadInfo>, MamStorageError>,
+        expected_parts: &[&str],
+    ) {
+        let message = match result {
+            Err(MamStorageError::Serialization(message)) => message,
+            other => panic!("expected serialization error, got: {other:?}"),
+        };
+        for part in expected_parts {
+            assert!(
+                message.contains(part),
+                "decode error should mention {part:?}; got: {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn xep_0201_decode_rejects_present_but_empty_thread_id_row() {
+        // Q7 hard-error policy (PR #331 review): a non-NULL but empty
+        // `thread_id` is malformed and must not be folded into `None`.
+        assert_serialization_error(
+            decode_thread_columns(Some(String::new()), Some("orphan-parent".to_string())),
+            &["thread_id"],
+        );
+    }
+
+    #[test]
+    fn xep_0201_decode_rejects_present_but_empty_parent_thread_id_row() {
+        assert_serialization_error(
+            decode_thread_columns(Some("real-thread".to_string()), Some(String::new())),
+            &["parent_thread_id"],
+        );
+    }
+
+    #[test]
+    fn xep_0201_decode_rejects_orphan_parent_thread_id_row() {
+        assert_serialization_error(
+            decode_thread_columns(None, Some("orphan-parent".to_string())),
+            &["orphan", "parent_thread_id"],
+        );
+    }
+}

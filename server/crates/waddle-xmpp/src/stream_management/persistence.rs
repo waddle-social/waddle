@@ -201,19 +201,24 @@ pub trait SmPersistenceStorage: Send + Sync {
         Ok(out)
     }
 
-    /// Atomically write a session record + its unacked queue. Either
-    /// every row commits or none does, so a panic / process crash
-    /// mid-batch leaves the durable view consistent (no half-stored
-    /// session whose row claims N unacked stanzas but the table only
-    /// holds K < N). Default impl falls back to upsert + N appends
-    /// without a transaction so backends that don't support nested
-    /// ops keep working; the libSQL/Postgres backend overrides with
-    /// a `BEGIN; … ; COMMIT;` block via `Database::begin`.
+    /// Atomically write a session record + its complete unacked
+    /// queue. Either every row commits or none does, so a panic /
+    /// process crash mid-batch leaves the durable view consistent
+    /// (no half-stored session whose row claims N unacked stanzas but
+    /// the table only holds K < N). Implementations must treat the
+    /// supplied queue as a full replacement for the stream's prior
+    /// unacked rows; appending full snapshots would duplicate replay
+    /// stanzas. Default impl falls back to delete + upsert + N
+    /// appends without a transaction so backends that don't support
+    /// nested ops keep working; the libSQL/Postgres backend overrides
+    /// with a `BEGIN; … ; COMMIT;` block via `Database::begin`.
     async fn store_session_atomic(
         &self,
         session: PersistedSession,
         unacked: Vec<PersistedUnackedStanza>,
     ) -> Result<(), SmPersistenceError> {
+        let stream_id = session.stream_id.clone();
+        self.delete_session(&stream_id).await?;
         self.upsert_session(session).await?;
         for entry in unacked {
             self.append_unacked(entry).await?;

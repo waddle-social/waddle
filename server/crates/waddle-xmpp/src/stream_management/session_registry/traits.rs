@@ -90,4 +90,5 @@ pub trait SmSessionRegistry: Send + Sync {
 pub enum SmClaimCompletion {
     Resumed(DetachedSession),
     Expired(DetachedSession),
+    ReplayWindowTruncated(DetachedSession),
 }

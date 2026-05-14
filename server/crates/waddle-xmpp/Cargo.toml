@@ -77,11 +77,6 @@ tracing-subscriber = { workspace = true }
 serde_json = { workspace = true }
 waddle-xmpp-core = { path = "../waddle-xmpp-core", features = ["test-utils"] }
 
-[[test]]
-name = "xep0201_thread_parent"
-path = "tests/xep0201_thread_parent.rs"
-required-features = ["test-utils"]
-
 [features]
 # Exposes `insert_raw_*_for_test` storage helpers (and other test-only
 # escape hatches) to cross-crate integration tests. Production builds

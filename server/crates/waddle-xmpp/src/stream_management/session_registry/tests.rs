@@ -11,6 +11,15 @@ fn make_test_jid() -> FullJid {
     "user@example.com/resource".parse().unwrap()
 }
 
+fn message_stanza_xml_with_id(id: String) -> String {
+    let mut message = xmpp_parsers::message::Message::new(None::<jid::Jid>);
+    message.id = Some(id);
+    let element = Stanza::Message(message).to_element();
+    let mut buffer = Vec::new();
+    element.write_to(&mut buffer).expect("serialize message");
+    String::from_utf8(buffer).expect("message stanza xml is utf-8")
+}
+
 fn make_test_session(stream_id: &str) -> DetachedSession {
     make_test_session_for_jid(stream_id, make_test_jid())
 }
@@ -98,7 +107,7 @@ fn detached_session_overflow_blocks_resume_for_older_client_h() {
     for sequence in 1..=(crate::stream_management::DEFAULT_MAX_UNACKED_QUEUE_SIZE as u32 + 1) {
         session.record_detached_outbound_at(
             sequence,
-            format!("<message id='m{sequence}'/>"),
+            message_stanza_xml_with_id(format!("m{sequence}")),
             Utc::now(),
         );
     }
@@ -486,7 +495,61 @@ async fn test_claimed_session_remains_writable_for_handoff_fanout() {
             );
         }
         SmClaimCompletion::Expired(_) => panic!("claim should still be resumable"),
+        SmClaimCompletion::ReplayWindowTruncated(_) => {
+            panic!("claim should still have a complete replay window")
+        }
     }
+}
+
+#[tokio::test]
+async fn complete_claim_releases_when_handoff_creates_replay_gap() {
+    let registry = InMemorySmSessionRegistry::new();
+    let mut session = make_test_session_with_unacked("stream-handoff-gap", Vec::new());
+    session.outbound_count = 0;
+    session.last_acked = 0;
+
+    registry
+        .store_session(session)
+        .await
+        .expect("store session");
+    registry
+        .claim_session("stream-handoff-gap")
+        .await
+        .expect("claim")
+        .expect("session exists");
+
+    for sequence in 1..=(crate::stream_management::DEFAULT_MAX_UNACKED_QUEUE_SIZE as u32 + 1) {
+        registry
+            .record_outbound_for_detached_stream_at(
+                "stream-handoff-gap",
+                sequence,
+                message_stanza_xml_with_id(format!("m{sequence}")),
+                Utc::now(),
+            )
+            .await
+            .expect("record detached outbound");
+    }
+
+    let completed = registry
+        .complete_claim_if_resumable("stream-handoff-gap", 0)
+        .await
+        .expect("complete checked claim")
+        .expect("claim still exists");
+    let SmClaimCompletion::ReplayWindowTruncated(truncated) = completed else {
+        panic!("late replay gap must fail resume completion")
+    };
+    assert_eq!(truncated.replay_gap_through, Some(1));
+
+    let restored = registry
+        .peek_session("stream-handoff-gap")
+        .await
+        .expect("peek restored session")
+        .expect("truncated claim is restored to detached pool");
+    assert_eq!(restored.replay_gap_through, Some(1));
+    assert!(
+        !restored.can_resume_from(0),
+        "restored session must continue rejecting the stale h value"
+    );
 }
 
 #[tokio::test]

@@ -227,6 +227,27 @@ impl InMemorySmSessionRegistry {
         &self,
         stream_id: &str,
     ) -> Result<Option<SmClaimCompletion>, SmRegistryError> {
+        self.complete_claim_checked(stream_id, None).await
+    }
+
+    /// Complete a claim only if the final claimed session still has
+    /// every stanza needed by `client_h`. If late detached fanout
+    /// during the claim handoff evicted an older stanza, the claim is
+    /// restored to the detached pool and the caller must return
+    /// XEP-0198 `<failed/>` instead of `<resumed/>`.
+    pub async fn complete_claim_if_resumable(
+        &self,
+        stream_id: &str,
+        client_h: u32,
+    ) -> Result<Option<SmClaimCompletion>, SmRegistryError> {
+        self.complete_claim_checked(stream_id, Some(client_h)).await
+    }
+
+    async fn complete_claim_checked(
+        &self,
+        stream_id: &str,
+        client_h: Option<u32>,
+    ) -> Result<Option<SmClaimCompletion>, SmRegistryError> {
         let stream_lock = self.stream_lock(stream_id)?;
         let _stream_guard = stream_lock.lock().await;
         // Persist-first ordering: durably erase the session BEFORE
@@ -245,10 +266,30 @@ impl InMemorySmSessionRegistry {
                 .claimed_sessions
                 .read()
                 .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
-            claimed.contains_key(stream_id)
+            claimed.get(stream_id).cloned()
         };
-        if !exists {
+        let Some(session) = exists else {
             return Ok(None);
+        };
+        if let Some(client_h) = client_h {
+            if !session.is_expired() && !session.can_resume_from(client_h) {
+                let restored = {
+                    let mut claimed = self
+                        .claimed_sessions
+                        .write()
+                        .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+                    claimed.remove(stream_id)
+                };
+                if let Some(restored) = restored {
+                    let mut sessions = self
+                        .sessions
+                        .write()
+                        .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+                    sessions.insert(stream_id.to_string(), restored.clone());
+                    return Ok(Some(SmClaimCompletion::ReplayWindowTruncated(restored)));
+                }
+                return Ok(None);
+            }
         }
         self.persist_delete_session(stream_id).await?;
         // Now remove from in-memory; the durable side has already
