@@ -49,6 +49,9 @@ pub(super) fn decode_session(row: &crate::db::Row) -> Result<PersistedSession, S
     let presence_priority: i64 = row
         .get(14)
         .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
+    let replay_gap_through: Option<i64> = row
+        .get(15)
+        .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
 
     let detached_at = DateTime::<Utc>::from_timestamp_millis(detached_at_ms)
         .ok_or_else(|| SmPersistenceError::Other("invalid detached_at_ms".into()))?;
@@ -63,6 +66,7 @@ pub(super) fn decode_session(row: &crate::db::Row) -> Result<PersistedSession, S
         inbound_count: inbound_count.max(0) as u32,
         outbound_count: outbound_count.max(0) as u32,
         last_acked: last_acked.max(0) as u32,
+        replay_gap_through: replay_gap_through.map(|v| v.max(0) as u32),
         max_resume_time: max_resume_secs.map(|v| v.max(0) as u32),
         detached_at,
         max_resume_duration,
@@ -108,8 +112,8 @@ pub(super) fn decode_unacked(
 
 /// Decode an unacked-stanza row from a JOIN result. Reads
 /// `stream_id` from column 0 (the session's stream_id),
-/// `stanza_xml` from column 16, and `original_receipt_at_ms`
-/// from column 17. Caller already has `sequence` (column 15).
+/// `stanza_xml` from column 17, and `original_receipt_at_ms`
+/// from column 18. Caller already has `sequence` (column 16).
 /// Used by `list_all_sessions_with_unacked` (issue #209 PR #405).
 pub(super) fn decode_unacked_join_row(
     row: &crate::db::Row,
@@ -119,10 +123,10 @@ pub(super) fn decode_unacked_join_row(
         .get(0)
         .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
     let stanza_xml: String = row
-        .get(16)
+        .get(17)
         .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
     let receipt_ms: i64 = row
-        .get(17)
+        .get(18)
         .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
     let original_receipt_at = DateTime::<Utc>::from_timestamp_millis(receipt_ms)
         .ok_or_else(|| SmPersistenceError::Other("invalid unacked receipt timestamp".into()))?;

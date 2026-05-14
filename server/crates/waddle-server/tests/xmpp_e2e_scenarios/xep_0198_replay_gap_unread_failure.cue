@@ -1,7 +1,7 @@
 package xmpp_e2e_scenarios
 
 scenario: #Scenario & {
-	name: "xep-0198-stream-management"
+	name: "xep-0198-replay-gap-unread-failure"
 	xeps: ["XEP-0198"]
 	users: {
 		alice: devices: phone: #Actor & {
@@ -31,12 +31,12 @@ scenario: #Scenario & {
 			max:    60
 		},
 		#ExpectFrame & {
-			target:   alicePhone
+			target: alicePhone
 			contains: ["urn:xmpp:sm:3"]
 			elements: [#XmlElement & {
-				name:         "enabled"
-				ns:           "urn:xmpp:sm:3"
-				attrs:        resume: "true"
+				name: "enabled"
+				ns:   "urn:xmpp:sm:3"
+				attrs: resume: "true"
 				attrsPresent: ["id"]
 			}]
 			captures: [#AttributeCapture & {
@@ -46,40 +46,15 @@ scenario: #Scenario & {
 				ns:      "urn:xmpp:sm:3"
 			}]
 		},
-		#SendMessage & {
-			from: alicePhone
-			to:   bobPhone
-			id:   "cue-sm-counted"
-			body: "stream-management-counted"
+		#SendMessageBurst & {
+			from:       bobPhone
+			to:         alicePhone
+			idPrefix:   "cue-sm-unread-overflow"
+			bodyPrefix: "stream-management-unread-overflow"
+			count:      1100
 		},
-		#ExpectMessage & {
-			target: bobPhone
-			from:   alicePhone
-			body:   "stream-management-counted"
-		},
-		#StreamManagement & {
-			actor:  alicePhone
-			action: "requestAck"
-		},
-		#ExpectFrame & {
-			target:   alicePhone
-			contains: ["urn:xmpp:sm:3"]
-			elements: [#XmlElement & {
-				name: "a"
-				ns:   "urn:xmpp:sm:3"
-				attrs: h: "1"
-			}]
-		},
-		#SendMessage & {
-			from: bobPhone
-			to:   alicePhone
-			id:   "cue-sm-replay"
-			body: "stream-management-resume-replay"
-		},
-		#ExpectMessage & {
-			target: alicePhone
-			from:   bobPhone
-			body:   "stream-management-resume-replay"
+		#WaitMillis & {
+			millis: 1500
 		},
 		#DisconnectActor & {
 			actor:    alicePhone
@@ -96,18 +71,19 @@ scenario: #Scenario & {
 			h:          0
 		},
 		#ExpectFrame & {
-			target:   alicePhone
-			contains: ["urn:xmpp:sm:3"]
-			elements: [#XmlElement & {
-				name:         "resumed"
-				ns:           "urn:xmpp:sm:3"
-				attrsPresent: ["h", "previd"]
-			}]
-		},
-		#ExpectMessage & {
 			target: alicePhone
-			from:   bobPhone
-			body:   "stream-management-resume-replay"
+			contains: ["urn:xmpp:sm:3", "resource-constraint"]
+			elements: [
+				#XmlElement & {
+					name: "failed"
+					ns:   "urn:xmpp:sm:3"
+					attrsPresent: ["h"]
+				},
+				#XmlElement & {
+					name: "resource-constraint"
+					ns:   "urn:ietf:params:xml:ns:xmpp-stanzas"
+				},
+			]
 		},
 	]
 }

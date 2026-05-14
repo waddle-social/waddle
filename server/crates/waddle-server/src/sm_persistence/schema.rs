@@ -47,6 +47,7 @@ pub(super) async fn initialize(storage: &DatabaseSmPersistence) -> Result<(), Sm
                 presence_show TEXT,
                 presence_status TEXT,
                 presence_priority INTEGER NOT NULL,
+                replay_gap_through {bigint},
                 promotion_attempts INTEGER NOT NULL DEFAULT 0
             )
             "#
@@ -70,6 +71,12 @@ pub(super) async fn initialize(storage: &DatabaseSmPersistence) -> Result<(), Sm
             (),
         )
         .await?;
+    add_column_if_missing(
+        storage,
+        "sm_sessions",
+        &format!("replay_gap_through {bigint}"),
+    )
+    .await?;
     widen_existing_postgres_i64_columns(storage).await?;
     // Index on detached_at_ms + max_resume_duration_ms for the
     // janitor's expired-session sweep. We can't compute the
@@ -98,6 +105,7 @@ async fn widen_existing_postgres_i64_columns(
         ("sm_sessions", "inbound_count"),
         ("sm_sessions", "outbound_count"),
         ("sm_sessions", "last_acked"),
+        ("sm_sessions", "replay_gap_through"),
         ("sm_sessions", "max_resume_secs"),
         ("sm_sessions", "detached_at_ms"),
         ("sm_sessions", "max_resume_duration_ms"),

@@ -17,6 +17,7 @@ fn fixture_session(stream_id: &str) -> PersistedSession {
         inbound_count: 0,
         outbound_count: 0,
         last_acked: 0,
+        replay_gap_through: Some(9),
         max_resume_time: Some(60),
         detached_at: Utc::now(),
         max_resume_duration: Duration::from_secs(60),
@@ -56,6 +57,7 @@ async fn upsert_get_round_trip() {
     let loaded = store.get_session(&sid("stream-1")).await.unwrap().unwrap();
     assert_eq!(loaded.user_id, s.user_id);
     assert!(loaded.carbons_enabled);
+    assert_eq!(loaded.replay_gap_through, Some(9));
 }
 
 #[tokio::test]
@@ -188,9 +190,8 @@ async fn list_all_sessions_with_unacked_groups_by_session() {
 }
 
 /// Issue #209 PR #405: the trait default for
-/// `store_session_atomic` falls back to upsert + N appends.
-/// Verify the success path produces the same result as
-/// individually-issued ops.
+/// `store_session_atomic` falls back to delete + upsert + N appends.
+/// Verify the success path produces the expected complete snapshot.
 #[tokio::test]
 async fn store_session_atomic_writes_session_and_unacked_together() {
     let store = InMemorySmPersistence::new();
@@ -204,4 +205,38 @@ async fn store_session_atomic_writes_session_and_unacked_together() {
     assert!(store.get_session(&sid("atomic-1")).await.unwrap().is_some());
     let listed = store.list_unacked(&sid("atomic-1")).await.unwrap();
     assert_eq!(listed.len(), 3);
+}
+
+#[tokio::test]
+async fn store_session_atomic_replaces_existing_unacked_snapshot() {
+    let store = InMemorySmPersistence::new();
+    store
+        .store_session_atomic(
+            fixture_session("atomic-replace"),
+            vec![
+                fixture_unacked("atomic-replace", 1),
+                fixture_unacked("atomic-replace", 2),
+            ],
+        )
+        .await
+        .unwrap();
+
+    store
+        .store_session_atomic(
+            fixture_session("atomic-replace"),
+            vec![
+                fixture_unacked("atomic-replace", 2),
+                fixture_unacked("atomic-replace", 3),
+            ],
+        )
+        .await
+        .unwrap();
+
+    let listed = store.list_unacked(&sid("atomic-replace")).await.unwrap();
+    let sequences: Vec<u32> = listed.iter().map(|entry| entry.sequence).collect();
+    assert_eq!(
+        sequences,
+        vec![2, 3],
+        "full detached snapshots must replace prior unacked rows, not append duplicates"
+    );
 }

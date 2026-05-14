@@ -57,7 +57,8 @@ type StreamLockMap = dashmap::DashMap<SmSessionId, Arc<tokio::sync::Mutex<()>>>;
 ///     presence_available INTEGER NOT NULL,
 ///     presence_show TEXT,
 ///     presence_status TEXT,
-///     presence_priority INTEGER NOT NULL
+///     presence_priority INTEGER NOT NULL,
+///     replay_gap_through BIGINT
 /// );
 ///
 /// CREATE TABLE sm_unacked (
@@ -186,8 +187,8 @@ impl SmPersistenceStorage for DatabaseSmPersistence {
                 stream_id, user_id, full_jid, inbound_count, outbound_count,
                 last_acked, max_resume_secs, detached_at_ms, max_resume_duration_ms,
                 carbons_enabled, roster_interested, presence_available,
-                presence_show, presence_status, presence_priority
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                presence_show, presence_status, presence_priority, replay_gap_through
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT (stream_id) DO UPDATE SET
                 user_id = excluded.user_id,
                 full_jid = excluded.full_jid,
@@ -202,7 +203,8 @@ impl SmPersistenceStorage for DatabaseSmPersistence {
                 presence_available = excluded.presence_available,
                 presence_show = excluded.presence_show,
                 presence_status = excluded.presence_status,
-                presence_priority = excluded.presence_priority
+                presence_priority = excluded.presence_priority,
+                replay_gap_through = excluded.replay_gap_through
             "#,
             crate::db_params![
                 session.stream_id.as_str().to_string(),
@@ -220,6 +222,7 @@ impl SmPersistenceStorage for DatabaseSmPersistence {
                 presence_show_str.map(str::to_string),
                 session.presence_status,
                 i64::from(session.presence_priority),
+                session.replay_gap_through.map(i64::from),
             ],
         )
         .await?;
@@ -235,7 +238,7 @@ impl SmPersistenceStorage for DatabaseSmPersistence {
                 "SELECT stream_id, user_id, full_jid, inbound_count, outbound_count, \
                         last_acked, max_resume_secs, detached_at_ms, max_resume_duration_ms, \
                         carbons_enabled, roster_interested, presence_available, \
-                        presence_show, presence_status, presence_priority \
+                        presence_show, presence_status, presence_priority, replay_gap_through \
                  FROM sm_sessions WHERE stream_id = ?",
                 crate::db_params![stream_id.as_str().to_string()],
             )
@@ -382,7 +385,7 @@ impl SmPersistenceStorage for DatabaseSmPersistence {
                 "SELECT stream_id, user_id, full_jid, inbound_count, outbound_count, \
                         last_acked, max_resume_secs, detached_at_ms, max_resume_duration_ms, \
                         carbons_enabled, roster_interested, presence_available, \
-                        presence_show, presence_status, presence_priority \
+                        presence_show, presence_status, presence_priority, replay_gap_through \
                  FROM sm_sessions WHERE detached_at_ms + max_resume_duration_ms <= ?",
                 crate::db_params![now_ms],
             )
@@ -404,7 +407,7 @@ impl SmPersistenceStorage for DatabaseSmPersistence {
                 "SELECT stream_id, user_id, full_jid, inbound_count, outbound_count, \
                         last_acked, max_resume_secs, detached_at_ms, max_resume_duration_ms, \
                         carbons_enabled, roster_interested, presence_available, \
-                        presence_show, presence_status, presence_priority \
+                        presence_show, presence_status, presence_priority, replay_gap_through \
                  FROM sm_sessions",
                 (),
             )

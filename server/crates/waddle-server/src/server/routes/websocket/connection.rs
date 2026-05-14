@@ -207,15 +207,25 @@ async fn handle_xmpp_websocket(socket: WebSocket, state: Arc<WebSocketState>) {
                                         );
                                 }
                                 if let Some(stream_id) = conn.pending_resume_stream_id.take() {
-                                    match state
-                                        .deps
-                                        .protocol
-                                        .sm_session_registry
-                                        .complete_claim(&stream_id)
-                                        .await
-                                    {
+                                    let resume_h = conn.pending_resume_h.take();
+                                    let completion = match resume_h {
+                                        Some(h) => state
+                                            .deps
+                                            .protocol
+                                            .sm_session_registry
+                                            .complete_claim_if_resumable(&stream_id, h)
+                                            .await,
+                                        None => state
+                                            .deps
+                                            .protocol
+                                            .sm_session_registry
+                                            .complete_claim(&stream_id)
+                                            .await,
+                                    };
+                                    let mut remove_resumable_sidecar = true;
+                                    match completion {
                                         Ok(Some(SmClaimCompletion::Resumed(detached))) => {
-                                            if let Some(h) = conn.pending_resume_h.take() {
+                                            if let Some(h) = resume_h {
                                                 conn.sm_state.restore_from_session(&detached);
                                                 conn.sm_state.acknowledge(h);
                                                 responses = vec![
@@ -228,6 +238,35 @@ async fn handle_xmpp_websocket(socket: WebSocket, state: Arc<WebSocketState>) {
                                                 responses
                                                     .extend(conn.sm_state.get_stanzas_to_resend(h));
                                             }
+                                        }
+                                        Ok(Some(SmClaimCompletion::ReplayWindowTruncated(
+                                            detached,
+                                        ))) => {
+                                            warn!(
+                                                stream_id = %stream_id,
+                                                jid = %jid,
+                                                client_h = ?resume_h,
+                                                replay_gap_through = ?detached.replay_gap_through,
+                                                "SM resume claim gained a replay gap before completion"
+                                            );
+                                            let _ = state
+                                                .deps
+                                                .protocol
+                                                .connection_registry
+                                                .unregister_if_owner(&jid, &owner);
+                                            conn.registry_owner = None;
+                                            conn.phase = ConnectionPhase::authenticated(&jid);
+                                            conn.state_machine = None;
+                                            conn.sm_state = StreamManagementState::new();
+                                            conn.suppress_sm_record_next_batch = false;
+                                            responses = vec![
+                                                waddle_xmpp::stream_management::SmFailed::resume_failed(
+                                                    "resource-constraint",
+                                                    detached.inbound_count,
+                                                )
+                                                .to_xml(),
+                                            ];
+                                            remove_resumable_sidecar = false;
                                         }
                                         Ok(Some(SmClaimCompletion::Expired(detached))) => {
                                             warn!(stream_id = %stream_id, jid = %jid, "SM resume claim expired before completion");
@@ -269,7 +308,9 @@ async fn handle_xmpp_websocket(socket: WebSocket, state: Arc<WebSocketState>) {
                                             responses = vec![waddle_xmpp::stream_management::SmFailed::with_condition("internal-server-error").to_xml()];
                                         }
                                     }
-                                    state.deps.protocol.resumable_sessions.remove(&stream_id);
+                                    if remove_resumable_sidecar {
+                                        state.deps.protocol.resumable_sessions.remove(&stream_id);
+                                    }
                                 } else if !conn.phase.is_resumed() {
                                     match state
                                         .deps

@@ -225,6 +225,7 @@ async fn xep_0280_send_carbons_queues_for_detached_xep_0198_resources() {
         inbound_count: 0,
         outbound_count: 0,
         last_acked: 0,
+        replay_gap_through: None,
         unacked_stanzas: Vec::new(),
         max_resume_time: Some(300),
         detached_at: std::time::Instant::now(),

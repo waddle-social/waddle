@@ -3,7 +3,6 @@ use jid::{BareJid, FullJid};
 use xmpp_parsers::presence::Show;
 
 use super::core::InMemorySmSessionRegistry;
-use super::persistence_codec::parse_xml_to_persisted_unacked;
 use super::SmRegistryError;
 use crate::Stanza;
 
@@ -60,28 +59,37 @@ impl InMemorySmSessionRegistry {
         stanza_xml: String,
         original_receipt_at: DateTime<Utc>,
     ) -> Result<bool, SmRegistryError> {
-        let mut sessions = self
-            .sessions
-            .write()
-            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
-        for session in sessions.values_mut() {
-            if !session.is_expired() && session.roster_interested && session.jid == *jid {
-                session.record_detached_outbound(stanza_xml, original_receipt_at);
-                return Ok(true);
-            }
-        }
-        drop(sessions);
-        let mut claimed = self
-            .claimed_sessions
-            .write()
-            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
-        for session in claimed.values_mut() {
-            if !session.is_expired() && session.roster_interested && session.jid == *jid {
-                session.record_detached_outbound(stanza_xml, original_receipt_at);
-                return Ok(true);
-            }
-        }
-        Ok(false)
+        let Some(stream_id) = self.find_session_id_matching(|session| {
+            !session.is_expired() && session.roster_interested && session.jid == *jid
+        })?
+        else {
+            return Ok(false);
+        };
+        self.update_detached_session_snapshot(
+            &stream_id,
+            |session| !session.is_expired() && session.roster_interested && session.jid == *jid,
+            |session| session.record_detached_outbound(stanza_xml, original_receipt_at),
+        )
+        .await
+    }
+
+    async fn record_outbound_for_detached_bound_resource(
+        &self,
+        jid: &FullJid,
+        stanza_xml: String,
+        original_receipt_at: DateTime<Utc>,
+    ) -> Result<bool, SmRegistryError> {
+        let Some(stream_id) =
+            self.find_session_id_matching(|session| !session.is_expired() && session.jid == *jid)?
+        else {
+            return Ok(false);
+        };
+        self.update_detached_session_snapshot(
+            &stream_id,
+            |session| !session.is_expired() && session.jid == *jid,
+            |session| session.record_detached_outbound(stanza_xml, original_receipt_at),
+        )
+        .await
     }
 
     /// Record a typed stanza for one detached interested resource.
@@ -107,29 +115,12 @@ impl InMemorySmSessionRegistry {
         stanza: &Stanza,
         original_receipt_at: DateTime<Utc>,
     ) -> Result<bool, SmRegistryError> {
-        let stanza_xml = Self::stanza_to_replay_xml(stanza);
-        let mut sessions = self
-            .sessions
-            .write()
-            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
-        for session in sessions.values_mut() {
-            if !session.is_expired() && session.jid == *jid {
-                session.record_detached_outbound(stanza_xml, original_receipt_at);
-                return Ok(true);
-            }
-        }
-        drop(sessions);
-        let mut claimed = self
-            .claimed_sessions
-            .write()
-            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
-        for session in claimed.values_mut() {
-            if !session.is_expired() && session.jid == *jid {
-                session.record_detached_outbound(stanza_xml, original_receipt_at);
-                return Ok(true);
-            }
-        }
-        Ok(false)
+        self.record_outbound_for_detached_bound_resource(
+            jid,
+            Self::stanza_to_replay_xml(stanza),
+            original_receipt_at,
+        )
+        .await
     }
 
     /// Record a stanza directly against a detached stream id, regardless of
@@ -140,30 +131,12 @@ impl InMemorySmSessionRegistry {
         stanza_xml: String,
         original_receipt_at: DateTime<Utc>,
     ) -> Result<bool, SmRegistryError> {
-        let mut sessions = self
-            .sessions
-            .write()
-            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
-        if let Some(session) = sessions.get_mut(stream_id) {
-            if !session.is_expired() {
-                session.record_detached_outbound(stanza_xml, original_receipt_at);
-                return Ok(true);
-            }
-            return Ok(false);
-        }
-        drop(sessions);
-        let mut claimed = self
-            .claimed_sessions
-            .write()
-            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
-        if let Some(session) = claimed.get_mut(stream_id) {
-            if !session.is_expired() {
-                session.record_detached_outbound(stanza_xml, original_receipt_at);
-                return Ok(true);
-            }
-            return Ok(false);
-        }
-        Ok(false)
+        self.update_detached_session_snapshot(
+            stream_id,
+            |session| !session.is_expired(),
+            |session| session.record_detached_outbound(stanza_xml, original_receipt_at),
+        )
+        .await
     }
 
     pub async fn record_outbound_for_detached_stream_at(
@@ -173,67 +146,14 @@ impl InMemorySmSessionRegistry {
         stanza_xml: String,
         original_receipt_at: DateTime<Utc>,
     ) -> Result<bool, SmRegistryError> {
-        let eligible = self.detached_session_is_live(stream_id)?;
-        if !eligible {
-            return Ok(false);
-        }
-
-        if let Some(storage) = &self.persistence {
-            let persisted = parse_xml_to_persisted_unacked(
-                stream_id,
-                sequence,
-                &stanza_xml,
-                original_receipt_at,
-            )?;
-            storage
-                .append_unacked(persisted)
-                .await
-                .map_err(|e| SmRegistryError::Internal(e.to_string()))?;
-        }
-
-        let mut sessions = self
-            .sessions
-            .write()
-            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
-
-        if let Some(session) = sessions.get_mut(stream_id) {
-            if !session.is_expired() {
+        self.update_detached_session_snapshot(
+            stream_id,
+            |session| !session.is_expired(),
+            |session| {
                 session.record_detached_outbound_at(sequence, stanza_xml, original_receipt_at);
-                return Ok(true);
-            }
-            return Ok(false);
-        }
-        drop(sessions);
-        let mut claimed = self
-            .claimed_sessions
-            .write()
-            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
-        if let Some(session) = claimed.get_mut(stream_id) {
-            if !session.is_expired() {
-                session.record_detached_outbound_at(sequence, stanza_xml, original_receipt_at);
-                return Ok(true);
-            }
-            return Ok(false);
-        }
-        Ok(false)
-    }
-
-    fn detached_session_is_live(&self, stream_id: &str) -> Result<bool, SmRegistryError> {
-        let sessions = self
-            .sessions
-            .read()
-            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
-        if let Some(session) = sessions.get(stream_id) {
-            return Ok(!session.is_expired());
-        }
-        drop(sessions);
-        let claimed = self
-            .claimed_sessions
-            .read()
-            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
-        Ok(claimed
-            .get(stream_id)
-            .is_some_and(|session| !session.is_expired()))
+            },
+        )
+        .await
     }
 
     /// List all detached resources for a bare JID, including resources that
@@ -352,28 +272,18 @@ impl InMemorySmSessionRegistry {
         stanza_xml: String,
         original_receipt_at: DateTime<Utc>,
     ) -> Result<bool, SmRegistryError> {
-        let mut sessions = self
-            .sessions
-            .write()
-            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
-        for session in sessions.values_mut() {
-            if !session.is_expired() && session.presence_available && session.jid == *jid {
-                session.record_detached_outbound(stanza_xml, original_receipt_at);
-                return Ok(true);
-            }
-        }
-        drop(sessions);
-        let mut claimed = self
-            .claimed_sessions
-            .write()
-            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
-        for session in claimed.values_mut() {
-            if !session.is_expired() && session.presence_available && session.jid == *jid {
-                session.record_detached_outbound(stanza_xml, original_receipt_at);
-                return Ok(true);
-            }
-        }
-        Ok(false)
+        let Some(stream_id) = self.find_session_id_matching(|session| {
+            !session.is_expired() && session.presence_available && session.jid == *jid
+        })?
+        else {
+            return Ok(false);
+        };
+        self.update_detached_session_snapshot(
+            &stream_id,
+            |session| !session.is_expired() && session.presence_available && session.jid == *jid,
+            |session| session.record_detached_outbound(stanza_xml, original_receipt_at),
+        )
+        .await
     }
 
     /// Record a typed stanza for one detached resource that was available at detach.

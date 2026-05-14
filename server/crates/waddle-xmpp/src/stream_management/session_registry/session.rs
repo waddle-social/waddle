@@ -47,6 +47,12 @@ pub struct DetachedSession {
     pub outbound_count: u32,
     /// Last acknowledged outbound stanza count
     pub last_acked: u32,
+    /// Highest evicted outbound sequence not yet covered by a client ack.
+    ///
+    /// When set, XEP-0198 resumption can only succeed for a client `h`
+    /// that is at or beyond this sequence; older `h` values still need a
+    /// stanza this bounded replay queue no longer retains.
+    pub replay_gap_through: Option<u32>,
     /// Unacknowledged stanzas (sequence + xml + receipt time).
     /// See [`DetachedUnackedStanza`] for field semantics.
     pub unacked_stanzas: Vec<DetachedUnackedStanza>,
@@ -115,6 +121,12 @@ impl DetachedSession {
             .collect()
     }
 
+    /// Whether this detached session can satisfy XEP-0198 replay for `client_h`.
+    pub fn can_resume_from(&self, client_h: u32) -> bool {
+        self.replay_gap_through
+            .is_none_or(|gap| !sequence_gt(gap, client_h))
+    }
+
     /// Record an outbound stanza while this stream is detached.
     /// `original_receipt_at` is the server-side receipt time of the
     /// stanza (NOT the detach time) — consumed by the Q6 SM-expiry
@@ -126,7 +138,8 @@ impl DetachedSession {
     ) {
         self.outbound_count = self.outbound_count.wrapping_add(1);
         if self.unacked_stanzas.len() >= crate::stream_management::DEFAULT_MAX_UNACKED_QUEUE_SIZE {
-            self.unacked_stanzas.remove(0);
+            let evicted = self.unacked_stanzas.remove(0);
+            self.mark_replay_gap_through(evicted.sequence);
         }
         self.unacked_stanzas.push(DetachedUnackedStanza {
             sequence: self.outbound_count,
@@ -150,7 +163,8 @@ impl DetachedSession {
             return;
         }
         if self.unacked_stanzas.len() >= crate::stream_management::DEFAULT_MAX_UNACKED_QUEUE_SIZE {
-            self.unacked_stanzas.remove(0);
+            let evicted = self.unacked_stanzas.remove(0);
+            self.mark_replay_gap_through(evicted.sequence);
         }
         self.unacked_stanzas.push(DetachedUnackedStanza {
             sequence,
@@ -158,5 +172,14 @@ impl DetachedSession {
             original_receipt_at,
         });
         self.unacked_stanzas.sort_by_key(|entry| entry.sequence);
+    }
+
+    fn mark_replay_gap_through(&mut self, sequence: u32) {
+        if self
+            .replay_gap_through
+            .is_none_or(|current| sequence_gt(sequence, current))
+        {
+            self.replay_gap_through = Some(sequence);
+        }
     }
 }

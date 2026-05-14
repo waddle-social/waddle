@@ -1,9 +1,7 @@
 use async_trait::async_trait;
 use tracing::debug;
 
-use super::claims::drain_expired_internal;
 use super::core::InMemorySmSessionRegistry;
-use super::persistence_codec::{detached_to_persisted, parse_xml_to_persisted_unacked};
 use super::tombstone::scrub_session_unacked;
 use super::{DetachedSession, SmRegistryError, SmSessionRegistry};
 
@@ -12,6 +10,8 @@ impl SmSessionRegistry for InMemorySmSessionRegistry {
     async fn store_session(&self, session: DetachedSession) -> Result<(), SmRegistryError> {
         let stream_id = session.stream_id.clone();
         let jid = session.jid.clone();
+        let stream_lock = self.stream_lock(&stream_id)?;
+        let _stream_guard = stream_lock.lock().await;
         // Scope the RwLock guards in a block so they're definitively
         // dropped before any await point. RwLockWriteGuard is not
         // Send, and explicit `drop()` doesn't satisfy the async
@@ -87,34 +87,13 @@ impl SmSessionRegistry for InMemorySmSessionRegistry {
             }
         }
 
-        // Persist the detached session + its unacked queue so it
-        // survives a server restart per locked Q8 = B. Use the
-        // atomic store API (issue #209 PR #405): backends that
-        // support transactions wrap the session upsert + N unacked
-        // appends in a single BEGIN/COMMIT so a panic / process
-        // crash mid-batch leaves the durable view consistent —
-        // either every row commits or none does. Backends that
-        // don't (in-memory) fall back to the trait default which
-        // performs the same upsert + N appends without atomicity.
-        if let Some(storage) = &self.persistence {
-            let persisted = detached_to_persisted(&session)?;
-            // Pre-decode every stanza outside the storage call so
-            // any parse failure rolls the whole batch back without
-            // a round-trip to the backend.
-            let mut unacked_rows = Vec::with_capacity(session.unacked_stanzas.len());
-            for entry in &session.unacked_stanzas {
-                unacked_rows.push(parse_xml_to_persisted_unacked(
-                    &stream_id,
-                    entry.sequence,
-                    &entry.stanza_xml,
-                    entry.original_receipt_at,
-                )?);
-            }
-            storage
-                .store_session_atomic(persisted, unacked_rows)
-                .await
-                .map_err(|e| SmRegistryError::Internal(e.to_string()))?;
-        }
+        // `store_session` publishes the session in memory before its first
+        // durable snapshot is written so the cleanup path can keep draining
+        // the old live channel. Hold the same stream lock used by detached
+        // append snapshots until the initial snapshot has landed; otherwise a
+        // concurrent append can persist a newer queue and then get overwritten
+        // by this stale first snapshot.
+        self.persist_detached_session_snapshot(&session).await?;
 
         debug!(stream_id = %stream_id, count = count, "Stored detached SM session");
         Ok(())
@@ -124,6 +103,8 @@ impl SmSessionRegistry for InMemorySmSessionRegistry {
         &self,
         stream_id: &str,
     ) -> Result<Option<DetachedSession>, SmRegistryError> {
+        let stream_lock = self.stream_lock(stream_id)?;
+        let _stream_guard = stream_lock.lock().await;
         // Persist-first ordering (same rationale as complete_claim):
         // peek to see if the session exists, durably erase, then
         // remove from in-memory. Failure to durably erase aborts
@@ -192,30 +173,50 @@ impl SmSessionRegistry for InMemorySmSessionRegistry {
     }
 
     async fn cleanup_expired(&self) -> Result<usize, SmRegistryError> {
-        // Lock-scoped block so guards drop before the durable
-        // delete awaits.
-        let drained: Vec<DetachedSession> = {
-            let mut sessions = self
+        let expired_ids: Vec<String> = {
+            let sessions = self
                 .sessions
-                .write()
+                .read()
                 .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
-            drain_expired_internal(&mut sessions)
+            sessions
+                .iter()
+                .filter(|(_, session)| session.is_expired())
+                .map(|(stream_id, _)| stream_id.clone())
+                .collect()
         };
-        for session in &drained {
+
+        let mut removed = 0usize;
+        for stream_id in &expired_ids {
+            let stream_lock = self.stream_lock(stream_id)?;
+            let _stream_guard = stream_lock.lock().await;
+            let removed_session = {
+                let mut sessions = self
+                    .sessions
+                    .write()
+                    .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+                match sessions.get(stream_id) {
+                    Some(session) if session.is_expired() => sessions.remove(stream_id),
+                    _ => None,
+                }
+            };
+            if removed_session.is_none() {
+                continue;
+            }
+            removed += 1;
             // Best-effort: cleanup paths log and continue rather
             // than aborting the whole sweep on a single bad row.
             // Restart-time expired-filter still drops anything that
             // slipped through.
-            if let Err(error) = self.persist_delete_session(&session.stream_id).await {
+            if let Err(error) = self.persist_delete_session(stream_id).await {
                 debug!(
-                    stream_id = %session.stream_id,
+                    stream_id = %stream_id,
                     error = %error,
                     "expired SM session: durable delete failed in cleanup; \
                      restart-time expiry filter will drop the orphan"
                 );
             }
         }
-        Ok(drained.len())
+        Ok(removed)
     }
 
     async fn session_count(&self) -> usize {

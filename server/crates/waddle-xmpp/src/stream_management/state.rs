@@ -4,6 +4,7 @@ use tracing::warn;
 
 use crate::prometheus;
 
+use super::unacked_queue::sequence_gt;
 use super::{
     DetachedSession, UnackedPushResult, UnackedQueue, DEFAULT_ACK_REQUEST_THRESHOLD,
     DEFAULT_MAX_UNACKED_QUEUE_SIZE,
@@ -40,6 +41,8 @@ pub struct StreamManagementState {
     pub outbound_count: u32,
     /// Last acknowledged outbound stanza count (from client's <a/>)
     pub last_acked: u32,
+    /// Highest evicted outbound sequence not yet covered by a client ack.
+    replay_gap_through: Option<u32>,
     /// Maximum resumption timeout in seconds
     pub max_resume_time: Option<u32>,
     /// Queue of unacknowledged outbound stanzas
@@ -66,6 +69,7 @@ impl StreamManagementState {
             inbound_count: 0,
             outbound_count: 0,
             last_acked: 0,
+            replay_gap_through: None,
             max_resume_time: None,
             unacked_queue: UnackedQueue::new(DEFAULT_MAX_UNACKED_QUEUE_SIZE),
             ack_threshold: DEFAULT_ACK_REQUEST_THRESHOLD,
@@ -82,6 +86,7 @@ impl StreamManagementState {
             inbound_count: 0,
             outbound_count: 0,
             last_acked: 0,
+            replay_gap_through: None,
             max_resume_time: None,
             unacked_queue: UnackedQueue::new(max_queue_size),
             ack_threshold,
@@ -115,9 +120,9 @@ impl StreamManagementState {
     /// When the unacked queue is at capacity the oldest stanza is evicted
     /// to make room; that is surfaced via a `warn!` + the
     /// `waddle_sm_unacked_evicted_total` metric. A non-zero eviction rate
-    /// means a subsequent `<resumed/>` on this stream will silently lose
-    /// the evicted stanzas — the sender half of "reconnects drop
-    /// messages".
+    /// means a subsequent `<resume/>` from a client whose `h` is older
+    /// than the retained window must fail instead of returning a
+    /// misleading `<resumed/>` with missing stanzas.
     pub fn record_outbound(&mut self, stanza_xml: String) {
         self.record_outbound_with_receipt_at(stanza_xml, chrono::Utc::now());
     }
@@ -145,12 +150,13 @@ impl StreamManagementState {
         ) {
             UnackedPushResult::Accepted => {}
             UnackedPushResult::Evicted(evicted) => {
+                self.mark_replay_gap_through(evicted.sequence);
                 prometheus::increment_sm_unacked_evicted();
                 warn!(
                     stream_id = self.stream_id.as_deref().unwrap_or("<unset>"),
                     evicted_sequence = evicted.sequence,
                     queue_len = self.unacked_queue.len(),
-                    "SM unacked queue full; evicted oldest stanza — a later resume will replay without it"
+                    "SM unacked queue full; evicted oldest stanza — older resume h values will be rejected"
                 );
             }
         }
@@ -162,6 +168,12 @@ impl StreamManagementState {
     pub fn acknowledge(&mut self, h: u32) {
         self.last_acked = h;
         self.unacked_queue.acknowledge(h);
+        if self
+            .replay_gap_through
+            .is_some_and(|gap| !sequence_gt(gap, h))
+        {
+            self.replay_gap_through = None;
+        }
     }
 
     /// Get the current inbound count for sending in an <a/> response.
@@ -194,6 +206,17 @@ impl StreamManagementState {
         self.unacked_queue.get_unacked_after(client_h)
     }
 
+    /// Highest evicted outbound sequence that the client has not acked yet.
+    pub fn replay_gap_through(&self) -> Option<u32> {
+        self.replay_gap_through
+    }
+
+    /// Whether the retained queue can satisfy XEP-0198 replay for `client_h`.
+    pub fn can_resume_from(&self, client_h: u32) -> bool {
+        self.replay_gap_through
+            .is_none_or(|gap| !sequence_gt(gap, client_h))
+    }
+
     /// Get the queue length (for diagnostics).
     pub fn queue_len(&self) -> usize {
         self.unacked_queue.len()
@@ -207,6 +230,15 @@ impl StreamManagementState {
     /// Get the age of this SM state.
     pub fn age(&self) -> std::time::Duration {
         self.created_at.elapsed()
+    }
+
+    fn mark_replay_gap_through(&mut self, sequence: u32) {
+        if self
+            .replay_gap_through
+            .is_none_or(|current| sequence_gt(sequence, current))
+        {
+            self.replay_gap_through = Some(sequence);
+        }
     }
 
     /// Create a detached session for storage in the registry.
@@ -229,6 +261,7 @@ impl StreamManagementState {
             inbound_count: self.inbound_count,
             outbound_count: self.outbound_count,
             last_acked: self.last_acked,
+            replay_gap_through: self.replay_gap_through,
             unacked_stanzas: self.unacked_queue.get_all_unacked(),
             max_resume_time: self.max_resume_time,
             detached_at: Instant::now(),
@@ -251,6 +284,7 @@ impl StreamManagementState {
         self.inbound_count = session.inbound_count;
         self.outbound_count = session.outbound_count;
         self.last_acked = session.last_acked;
+        self.replay_gap_through = session.replay_gap_through;
         self.max_resume_time = session.max_resume_time;
 
         // Restore unacked queue
@@ -345,10 +379,41 @@ mod tests {
             "one eviction must have bumped the counter by one"
         );
 
-        // The replay after resume must be missing the evicted stanza.
+        // The retained queue no longer contains the evicted stanza; the
+        // replay-gap marker added below is what prevents a successful resume
+        // for clients that still need it.
         let resend = state.get_stanzas_to_resend(0);
         assert_eq!(resend.len(), 3, "evicted seq=1 must be absent from replay");
         assert!(!resend.iter().any(|xml| xml.contains("id='1'")));
+    }
+
+    #[test]
+    fn test_evicted_unacked_stanza_blocks_resume_until_client_h_covers_gap() {
+        let mut state = StreamManagementState::with_config(3, 5);
+        state.enable("tiny-cap".to_string(), true, Some(300));
+
+        state.record_outbound("<message id='1'/>".to_string());
+        state.record_outbound("<message id='2'/>".to_string());
+        state.record_outbound("<message id='3'/>".to_string());
+        state.record_outbound("<message id='4'/>".to_string());
+
+        assert_eq!(state.replay_gap_through(), Some(1));
+        assert!(
+            !state.can_resume_from(0),
+            "client h=0 still needs the evicted sequence 1, so resume would be incomplete"
+        );
+        assert!(
+            state.can_resume_from(1),
+            "client h=1 has handled the evicted sequence, so the retained replay window is complete"
+        );
+
+        state.acknowledge(1);
+        assert_eq!(
+            state.replay_gap_through(),
+            None,
+            "acknowledging through the evicted sequence closes the replay gap"
+        );
+        assert!(state.can_resume_from(1));
     }
 
     #[test]

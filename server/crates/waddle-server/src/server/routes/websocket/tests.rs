@@ -470,6 +470,12 @@ fn parse_message_for_test(xml: &str) -> xmpp_parsers::message::Message {
     }
 }
 
+fn message_frame_xml_with_id(id: String) -> String {
+    let mut message = xmpp_parsers::message::Message::new(None::<jid::Jid>);
+    message.id = Some(id);
+    stanza_to_xml(&Stanza::Message(message))
+}
+
 fn assert_sample_payload(xml: &str, element_name: &str, url: &str, owner: &str, name: &str) {
     let parsed = parse_message_for_test(xml);
     let payload = parsed
@@ -4980,6 +4986,88 @@ async fn sm_resume_is_allowed_after_auth_before_bind() {
 }
 
 #[tokio::test]
+async fn sm_resume_rejects_when_replay_window_has_gap() {
+    use waddle_xmpp::stream_management::{DetachedSession, SmSessionRegistry};
+
+    let state = create_test_websocket_state().await;
+    let domain = state.deps.auth_state.xmpp_domain.clone();
+    let session = create_test_session(state.as_ref(), "alice").await;
+    let payload = BASE64_STANDARD.encode(format!("n,,\x01auth=Bearer {}\x01\x01", session.id));
+    let auth_frame = element_to_xml(
+        Element::builder("auth", waddle_xmpp::ns::SASL)
+            .attr("mechanism", "OAUTHBEARER")
+            .append(payload)
+            .build(),
+    );
+    let mut conn = WsConnState::new();
+    let auth_responses = handle_xmpp_frame(&auth_frame, &domain, state.as_ref(), &mut conn).await;
+    assert_eq!(auth_responses, vec![sasl_success_xml()]);
+
+    let mut detached = DetachedSession {
+        stream_id: "stream-gap".to_string(),
+        user_id: format!("alice@{domain}"),
+        jid: format!("alice@{domain}/web").parse().expect("jid"),
+        inbound_count: 5,
+        outbound_count: 0,
+        last_acked: 0,
+        replay_gap_through: None,
+        unacked_stanzas: Vec::new(),
+        max_resume_time: Some(300),
+        detached_at: std::time::Instant::now(),
+        carbons_enabled: false,
+        roster_interested: false,
+        presence_available: false,
+        presence_show: None,
+        presence_status: None,
+        presence_priority: 0,
+    };
+    for sequence in 1..=(waddle_xmpp::stream_management::DEFAULT_MAX_UNACKED_QUEUE_SIZE as u32 + 1)
+    {
+        detached.record_detached_outbound_at(
+            sequence,
+            message_frame_xml_with_id(format!("m{sequence}")),
+            chrono::Utc::now(),
+        );
+    }
+    assert_eq!(detached.replay_gap_through, Some(1));
+    state
+        .deps
+        .protocol
+        .sm_session_registry
+        .store_session(detached.clone())
+        .await
+        .expect("store");
+
+    let responses = handle_xmpp_frame(
+        "<resume xmlns='urn:xmpp:sm:3' previd='stream-gap' h='0'/>",
+        &domain,
+        state.as_ref(),
+        &mut conn,
+    )
+    .await;
+
+    assert_eq!(responses.len(), 1);
+    let el = Element::from_str(&responses[0]).expect("xml");
+    assert_eq!(el.name(), "failed");
+    assert_eq!(el.attr("h"), Some("5"));
+    assert!(el
+        .get_child("resource-constraint", "urn:ietf:params:xml:ns:xmpp-stanzas")
+        .is_some());
+    assert!(matches!(conn.phase, ConnectionPhase::Authenticated { .. }));
+    assert!(!conn.phase.is_resumed());
+
+    let stored = state
+        .deps
+        .protocol
+        .sm_session_registry
+        .take_session("stream-gap")
+        .await
+        .expect("take")
+        .expect("detached session should remain for expiry/fallback handling");
+    assert_eq!(stored.jid, detached.jid);
+}
+
+#[tokio::test]
 async fn sm_resume_rejects_authenticated_identity_mismatch_and_preserves_session() {
     use waddle_xmpp::stream_management::{DetachedSession, SmSessionRegistry};
 
@@ -5005,6 +5093,7 @@ async fn sm_resume_rejects_authenticated_identity_mismatch_and_preserves_session
         inbound_count: 0,
         outbound_count: 0,
         last_acked: 0,
+        replay_gap_through: None,
         unacked_stanzas: Vec::new(),
         max_resume_time: Some(300),
         detached_at: std::time::Instant::now(),
@@ -5085,6 +5174,7 @@ async fn sm_resume_matching_authenticated_identity_preserves_current_session_wit
             inbound_count: 2,
             outbound_count: 3,
             last_acked: 3,
+            replay_gap_through: None,
             unacked_stanzas: Vec::new(),
             max_resume_time: Some(300),
             detached_at: std::time::Instant::now(),
@@ -5161,6 +5251,7 @@ async fn sm_resume_matching_authenticated_identity_prefers_detached_sidecar_sess
             inbound_count: 0,
             outbound_count: 0,
             last_acked: 0,
+            replay_gap_through: None,
             unacked_stanzas: Vec::new(),
             max_resume_time: Some(300),
             detached_at: std::time::Instant::now(),
@@ -5309,6 +5400,7 @@ async fn sm_resume_restores_session_and_replays_unacked() {
         inbound_count: 7,
         outbound_count: 10,
         last_acked: 8,
+        replay_gap_through: None,
         unacked_stanzas: vec![
             waddle_xmpp::stream_management::DetachedUnackedStanza {
                 sequence: 9,
@@ -5393,6 +5485,7 @@ async fn sm_resume_rejects_impossible_client_handled_count() {
             inbound_count: 4,
             outbound_count: 2,
             last_acked: 0,
+            replay_gap_through: None,
             unacked_stanzas: vec![waddle_xmpp::stream_management::DetachedUnackedStanza {
                 sequence: 1,
                 stanza_xml: "<message id='m1'/>".to_string(),
@@ -5469,6 +5562,7 @@ async fn sm_resume_replays_roster_push_recorded_while_detached() {
             inbound_count: 0,
             outbound_count: 0,
             last_acked: 0,
+            replay_gap_through: None,
             unacked_stanzas: Vec::new(),
             max_resume_time: Some(300),
             detached_at: std::time::Instant::now(),
@@ -5539,6 +5633,7 @@ async fn direct_full_jid_message_records_for_detached_resource_replay() {
             inbound_count: 0,
             outbound_count: 0,
             last_acked: 0,
+            replay_gap_through: None,
             unacked_stanzas: Vec::new(),
             max_resume_time: Some(300),
             detached_at: std::time::Instant::now(),
@@ -5606,6 +5701,7 @@ async fn bare_jid_message_records_for_detached_resource_replay() {
             inbound_count: 0,
             outbound_count: 0,
             last_acked: 0,
+            replay_gap_through: None,
             unacked_stanzas: Vec::new(),
             max_resume_time: Some(300),
             detached_at: std::time::Instant::now(),
@@ -5681,6 +5777,7 @@ async fn message_carbons_record_for_detached_enabled_resources() {
             inbound_count: 0,
             outbound_count: 0,
             last_acked: 0,
+            replay_gap_through: None,
             unacked_stanzas: Vec::new(),
             max_resume_time: Some(300),
             detached_at: std::time::Instant::now(),
@@ -5742,6 +5839,7 @@ async fn message_carbons_record_for_detached_enabled_resources() {
             inbound_count: 0,
             outbound_count: 0,
             last_acked: 0,
+            replay_gap_through: None,
             unacked_stanzas: Vec::new(),
             max_resume_time: Some(300),
             detached_at: std::time::Instant::now(),
@@ -5926,6 +6024,7 @@ async fn roster_set_records_push_for_detached_interested_resource() {
             inbound_count: 0,
             outbound_count: 0,
             last_acked: 0,
+            replay_gap_through: None,
             unacked_stanzas: Vec::new(),
             max_resume_time: Some(300),
             detached_at: std::time::Instant::now(),
@@ -6018,6 +6117,7 @@ async fn subscription_approval_replays_current_presence_from_detached_available_
             inbound_count: 0,
             outbound_count: 0,
             last_acked: 0,
+            replay_gap_through: None,
             unacked_stanzas: Vec::new(),
             max_resume_time: Some(300),
             detached_at: std::time::Instant::now(),
@@ -6105,6 +6205,7 @@ async fn presence_probe_returns_detached_available_resource_presence() {
             inbound_count: 0,
             outbound_count: 0,
             last_acked: 0,
+            replay_gap_through: None,
             unacked_stanzas: Vec::new(),
             max_resume_time: Some(300),
             detached_at: std::time::Instant::now(),
@@ -6203,6 +6304,7 @@ async fn full_jid_presence_probe_returns_only_that_resources_availability() {
                 inbound_count: 0,
                 outbound_count: 0,
                 last_acked: 0,
+                replay_gap_through: None,
                 unacked_stanzas: Vec::new(),
                 max_resume_time: Some(300),
                 detached_at: std::time::Instant::now(),
@@ -6272,6 +6374,7 @@ async fn presence_probe_without_subscription_does_not_reveal_detached_presence()
             inbound_count: 0,
             outbound_count: 0,
             last_acked: 0,
+            replay_gap_through: None,
             unacked_stanzas: Vec::new(),
             max_resume_time: Some(300),
             detached_at: std::time::Instant::now(),
@@ -6430,6 +6533,7 @@ async fn subscription_approval_records_roster_push_for_detached_interested_resou
             inbound_count: 0,
             outbound_count: 0,
             last_acked: 0,
+            replay_gap_through: None,
             unacked_stanzas: Vec::new(),
             max_resume_time: Some(300),
             detached_at: std::time::Instant::now(),
@@ -6487,6 +6591,7 @@ async fn subscribe_to_detached_available_resource_replays_on_resume() {
             inbound_count: 0,
             outbound_count: 0,
             last_acked: 0,
+            replay_gap_through: None,
             unacked_stanzas: Vec::new(),
             max_resume_time: Some(300),
             detached_at: std::time::Instant::now(),
@@ -6562,6 +6667,7 @@ async fn presence_broadcast_to_detached_available_subscriber_replays_on_resume()
             inbound_count: 0,
             outbound_count: 0,
             last_acked: 0,
+            replay_gap_through: None,
             unacked_stanzas: Vec::new(),
             max_resume_time: Some(300),
             detached_at: std::time::Instant::now(),
@@ -6635,6 +6741,7 @@ async fn sm_resume_signals_suppress_record_so_main_loop_skips_replay() {
         inbound_count: 0,
         outbound_count: 2,
         last_acked: 0,
+        replay_gap_through: None,
         unacked_stanzas: vec![
             waddle_xmpp::stream_management::DetachedUnackedStanza {
                 sequence: 1,
@@ -6908,6 +7015,7 @@ async fn sm_janitor_helper_drains_expired_and_cleans_muc() {
             inbound_count: 0,
             outbound_count: 0,
             last_acked: 0,
+            replay_gap_through: None,
             unacked_stanzas: Vec::new(),
             max_resume_time: Some(0), // already expired
             detached_at: std::time::Instant::now(),

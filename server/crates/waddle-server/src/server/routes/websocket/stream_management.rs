@@ -280,6 +280,28 @@ async fn handle_sm_resume(resume: SmResume, state: &WebSocketState, ctx: SmCtx<'
         )];
     }
 
+    if !detached.can_resume_from(resume.h) {
+        warn!(
+            stream_id = %resume.previd,
+            jid = %detached.jid,
+            client_h = resume.h,
+            replay_gap_through = ?detached.replay_gap_through,
+            "SM resume rejected: replay window no longer contains every stanza required by client h"
+        );
+        if let Err(error) = state
+            .deps
+            .protocol
+            .sm_session_registry
+            .release_claim(&resume.previd)
+            .await
+        {
+            warn!(stream_id = %resume.previd, error = %error, "Failed to release truncated SM resume claim");
+        }
+        return vec![
+            SmFailed::resume_failed("resource-constraint", detached.inbound_count).to_xml(),
+        ];
+    }
+
     // Restore SM counters + the unacked queue.
     sm_state.restore_from_session(&detached);
     // The client tells us how many of OUR outbound stanzas they've actually

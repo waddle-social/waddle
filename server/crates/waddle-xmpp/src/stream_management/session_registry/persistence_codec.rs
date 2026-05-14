@@ -18,6 +18,7 @@ pub(super) fn detached_to_persisted(
         inbound_count: session.inbound_count,
         outbound_count: session.outbound_count,
         last_acked: session.last_acked,
+        replay_gap_through: session.replay_gap_through,
         max_resume_time: session.max_resume_time,
         // `detached_at: Instant` is process-relative; persistence
         // captures the wall-clock moment of the persist write. The
@@ -124,6 +125,7 @@ pub(super) fn persisted_to_detached(
         inbound_count: persisted.inbound_count,
         outbound_count: persisted.outbound_count,
         last_acked: persisted.last_acked,
+        replay_gap_through: persisted.replay_gap_through,
         unacked_stanzas,
         max_resume_time: persisted.max_resume_time,
         detached_at,
