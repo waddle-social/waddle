@@ -982,7 +982,7 @@ function dayDividerLabel(createdAt: string): string {
     <div
       v-if="isLoadingMessages || !channel && !dmPeer || feedMessages.length === 0"
       :ref="setMessagesContainer"
-      class="chat-pane-scroll chat-message-scroll flex-1 min-h-0 overflow-auto px-[var(--chat-content-inline)]"
+      class="chat-pane-scroll chat-message-scroll flex-1 min-h-0 overflow-x-hidden overflow-y-auto px-[var(--chat-content-inline)]"
       @scroll="updateCurrentDayMarker"
     >
       <div v-if="isLoadingMessages" class="type-caption flex flex-col items-center justify-center gap-3 py-16 text-center text-muted-foreground">

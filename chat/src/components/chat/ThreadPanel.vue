@@ -585,7 +585,7 @@ function replyChildHasNestedThread(message: TimelineMessage): boolean {
     <div
       v-else
       :ref="setScrollContainerRef"
-      class="chat-pane-scroll flex-1 min-h-0 overflow-auto px-3 py-4 lg:px-4"
+      class="chat-pane-scroll flex-1 min-h-0 overflow-x-hidden overflow-y-auto px-3 py-4 lg:px-4"
       @scroll="updateCurrentDayMarker"
     >
       <div class="type-caption text-center py-10 text-muted-foreground">
