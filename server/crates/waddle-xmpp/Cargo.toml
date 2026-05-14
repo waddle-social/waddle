@@ -65,6 +65,7 @@ reqwest = { workspace = true }
 # Wasm extension runtime
 waddle-extensions = { path = "../waddle-extensions" }
 waddle-xmpp-core = { path = "../waddle-xmpp-core" }
+waddle-sfu = { path = "../waddle-sfu" }
 
 # Database
 sqlx = { workspace = true }
