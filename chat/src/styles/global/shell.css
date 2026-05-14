@@ -186,7 +186,7 @@
 }
 
 @media (max-width: 63.999rem) {
-  .chat-workspace--right-panel-active .extension-route-rail {
+  .extension-route-rail {
     display: none;
   }
 }
