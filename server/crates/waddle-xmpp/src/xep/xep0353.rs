@@ -80,8 +80,15 @@ pub fn build_retract(sid: SessionId) -> JingleMI {
     JingleMI::Retract(sid)
 }
 
-pub fn build_accept(sid: SessionId) -> JingleMI {
-    JingleMI::Accept(sid)
+/// Build a `<finish/>` JMI envelope (XEP-0353 §3.5). The envelope
+/// signals call termination; both parties SHOULD send it when the
+/// call ends. xmpp-parsers does not yet have a typed `Finish`
+/// variant, so we build the element directly via [`minidom`]; the
+/// receiver matches by element name + namespace.
+pub fn build_finish(sid: SessionId) -> minidom::Element {
+    minidom::Element::builder("finish", NS_JINGLE_MESSAGE)
+        .attr("id", sid.0)
+        .build()
 }
 
 #[cfg(test)]
@@ -158,13 +165,11 @@ mod tests {
     }
 
     #[test]
-    fn accept_round_trips() {
-        let accept = build_accept(SessionId("c1".into()));
-        let elem: Element = accept.into();
-        assert_eq!(elem.name(), "accept");
-        assert!(matches!(
-            JingleMI::try_from(elem).unwrap(),
-            JingleMI::Accept(_)
-        ));
+    fn finish_emits_canonical_element() {
+        let elem = build_finish(SessionId("c1".into()));
+        assert_eq!(elem.name(), "finish");
+        assert_eq!(elem.ns(), NS_JINGLE_MESSAGE);
+        assert_eq!(elem.attr("id"), Some("c1"));
+        assert!(elem.children().next().is_none());
     }
 }

@@ -47,6 +47,10 @@ pub fn opus_audio_description() -> RtpDescription {
     let mut payload = PayloadType::new(111, "opus".to_string(), 48_000, 2);
     payload.maxptime = Some(60);
     desc.payload_types.push(payload);
+    // XEP-0167 §3.3 / RFC 5761: signal RTCP-mux support so the peer
+    // can multiplex RTP and RTCP on the same port. Required by
+    // browser-class WebRTC stacks (and what LiveKit expects).
+    desc.rtcp_mux = Some(RtcpMux);
     desc
 }
 
@@ -56,6 +60,7 @@ pub fn vp8_video_description() -> RtpDescription {
     let mut desc = RtpDescription::new(MediaKind::Video.as_str().to_string());
     let payload = PayloadType::new(96, "VP8".to_string(), 90_000, 1);
     desc.payload_types.push(payload);
+    desc.rtcp_mux = Some(RtcpMux);
     desc
 }
 
@@ -78,6 +83,10 @@ mod tests {
         assert_eq!(payload.attr("name"), Some("opus"));
         assert_eq!(payload.attr("clockrate"), Some("48000"));
         assert_eq!(payload.attr("channels"), Some("2"));
+        assert!(
+            elem.children().any(|c| c.name() == "rtcp-mux"),
+            "opus description should declare rtcp-mux per XEP-0167 §3.3"
+        );
     }
 
     #[test]

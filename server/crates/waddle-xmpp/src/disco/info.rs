@@ -61,6 +61,11 @@ pub fn server_features() -> Vec<Feature> {
 /// [`crate::protocol::handlers::extdisco`], and the typed XEP
 /// modules under `crate::xep`.
 pub fn call_features() -> Vec<Feature> {
+    // NOTE: `Feature::waddle_muc_call()` is intentionally absent
+    // here — `urn:waddle:muc-call:0` has no presence handler yet,
+    // and CLAUDE.md forbids advertising features without backing
+    // behavior. It will be added back when the MUC presence
+    // pipeline learns to validate/relay the extension.
     vec![
         Feature::jingle(),
         Feature::jingle_rtp(),
@@ -69,7 +74,6 @@ pub fn call_features() -> Vec<Feature> {
         Feature::jingle_message(),
         Feature::ext_disco(),
         Feature::waddle_livekit_transport(),
-        Feature::waddle_muc_call(),
     ]
 }
 
@@ -92,7 +96,7 @@ mod tests {
     }
 
     #[test]
-    fn call_features_returns_eight_canonical_namespaces() {
+    fn call_features_returns_seven_canonical_namespaces() {
         let features = call_features();
         let expected = [
             "urn:xmpp:jingle:1",
@@ -102,7 +106,6 @@ mod tests {
             "urn:xmpp:jingle-message:0",
             "urn:xmpp:extdisco:2",
             "urn:waddle:transports:livekit:0",
-            "urn:waddle:muc-call:0",
         ];
         assert_eq!(features.len(), expected.len());
         for ns in expected {
@@ -111,5 +114,15 @@ mod tests {
                 "call_features() missing {ns}"
             );
         }
+    }
+
+    #[test]
+    fn call_features_does_not_advertise_muc_call_until_handler_lands() {
+        // urn:waddle:muc-call:0 must not be advertised in disco
+        // until the MUC presence handler validates+relays the
+        // extension. CLAUDE.md: an advertised feature MUST have
+        // testable backing behavior.
+        let features = call_features();
+        assert!(!features.contains(&Feature::waddle_muc_call()));
     }
 }
