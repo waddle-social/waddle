@@ -221,6 +221,9 @@ package xmpp_e2e_scenarios
 	id?:     string
 	max:     *50 | int & >=1 & <=4294967295
 	after?:  string
+	afterFrom?: string
+	before?: string
+	beforeFrom?: string
 	with?:   string
 	fulltext?: string
 	ids?: [...string]
@@ -236,6 +239,7 @@ package xmpp_e2e_scenarios
 	absent?: [...string]
 	elements?: [...#XmlElement]
 	absentElements?: [...#XmlElement]
+	captures?: [...#AttributeCapture]
 	...
 }
 

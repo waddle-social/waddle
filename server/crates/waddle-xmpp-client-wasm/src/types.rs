@@ -481,6 +481,7 @@ pub struct WaddleMamPageParam {
     #[serde(rename = "type")]
     pub kind: String,
     pub before: Option<String>,
+    pub after: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

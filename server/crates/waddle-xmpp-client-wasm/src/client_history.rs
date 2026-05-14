@@ -65,17 +65,10 @@ impl WaddleClient {
         future_to_promise(async move {
             let page: WaddleMamPageParam = serde_wasm_bindgen::from_value(page_param)
                 .map_err(|err| js_error(err.to_string()))?;
-            let before = match page.kind.as_str() {
-                "latest" => Some(String::new()),
-                "before" => page.before,
-                _ => return Err(js_error("invalid page param type")),
-            };
             let query_id = uuid::Uuid::new_v4().to_string();
             let iq_id = uuid::Uuid::new_v4().to_string();
             let mut builder = MamIqBuilder::new(&iq_id, &query_id, max).to_jid(&room_jid);
-            if let Some(b) = before.as_deref() {
-                builder = builder.before(b);
-            }
+            builder = apply_page_param(builder, &page)?;
             let iq = builder.build();
             let result = send_mam_query_command(inner, iq, query_id).await?;
             to_js_value(&mam_page_to_js(result))
@@ -92,17 +85,10 @@ impl WaddleClient {
         future_to_promise(async move {
             let page: WaddleMamPageParam = serde_wasm_bindgen::from_value(page_param)
                 .map_err(|err| js_error(err.to_string()))?;
-            let before = match page.kind.as_str() {
-                "latest" => Some(String::new()),
-                "before" => page.before,
-                _ => return Err(js_error("invalid page param type")),
-            };
             let query_id = uuid::Uuid::new_v4().to_string();
             let iq_id = uuid::Uuid::new_v4().to_string();
             let mut builder = MamIqBuilder::new(&iq_id, &query_id, max).with_jid(&peer_jid);
-            if let Some(b) = before.as_deref() {
-                builder = builder.before(b);
-            }
+            builder = apply_page_param(builder, &page)?;
             let iq = builder.build();
             let result = send_mam_query_command(inner, iq, query_id).await?;
             to_js_value(&mam_page_to_js(result))
@@ -224,5 +210,51 @@ impl WaddleClient {
             let page = send_mam_query_command(inner, iq, query_id).await?;
             to_js_value(&mam_page_to_js(page))
         })
+    }
+}
+
+fn apply_page_param<'a>(
+    builder: MamIqBuilder<'a>,
+    page: &'a WaddleMamPageParam,
+) -> Result<MamIqBuilder<'a>, JsValue> {
+    Ok(match page.kind.as_str() {
+        "latest" => builder.before(""),
+        "before" => match page.before.as_deref() {
+            Some(before) => builder.before(before),
+            None => return Err(js_error("missing before page cursor")),
+        },
+        "after" => match page.after.as_deref() {
+            Some(after) => builder.after(after),
+            None => return Err(js_error("missing after page cursor")),
+        },
+        _ => return Err(js_error("invalid page param type")),
+    })
+}
+
+#[cfg(test)]
+mod client_history_tests {
+    use super::*;
+
+    const TEST_MAM_NS: &str = "urn:xmpp:mam:2";
+    const TEST_RSM_NS: &str = "http://jabber.org/protocol/rsm";
+
+    #[test]
+    fn page_param_after_builds_rsm_after_query() {
+        let page = WaddleMamPageParam {
+            kind: "after".to_string(),
+            before: None,
+            after: Some("cursor-1".to_string()),
+        };
+
+        let iq = apply_page_param(MamIqBuilder::new("iq-1", "query-1", 10), &page)
+            .expect("after page param should apply")
+            .build();
+
+        let after = iq
+            .get_child("query", TEST_MAM_NS)
+            .and_then(|query| query.get_child("set", TEST_RSM_NS))
+            .and_then(|set| set.get_child("after", TEST_RSM_NS))
+            .map(|element| element.text());
+        assert_eq!(after.as_deref(), Some("cursor-1"));
     }
 }

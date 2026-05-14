@@ -10,7 +10,8 @@
  *      conversation (DM peer bare JID or MUC room bare JID).
  *   2. Distinguish the very first `session:started` (initial login — nothing
  *      to catch up on) from subsequent ones (resume — catch up on all
- *      tracked conversations via `MAM start=lastSeen`).
+ *      tracked conversations via XEP-0059 `after` when an archive UID is
+ *      known, or a timestamp fallback for conversations seen only live).
  *
  * DM peers and rooms are tracked in separate namespaces so the two can never
  * collide even if a bare JID were somehow valid in both worlds.
@@ -19,12 +20,18 @@
  * zero state of its own and the logic is trivially testable.
  */
 type CatchupEntry =
-  | { kind: "dm"; key: string }
-  | { kind: "room"; key: string };
+  | { kind: "dm"; key: string; after?: string; since?: string; seenIds?: string[] }
+  | { kind: "room"; key: string; after?: string; since?: string; seenIds?: string[] };
+
+type SeenCursor = {
+  timestamp: string;
+  archiveId?: string;
+  seenIds?: string[];
+};
 
 export class ReconnectCatchup {
-  private readonly dmLastSeen = new Map<string, string>();
-  private readonly roomLastSeen = new Map<string, string>();
+  private readonly dmLastSeen = new Map<string, SeenCursor>();
+  private readonly roomLastSeen = new Map<string, SeenCursor>();
   private sessionStartedOnce = false;
 
   /**
@@ -32,21 +39,21 @@ export class ReconnectCatchup {
    * advances the cursor — out-of-order or older arrivals are ignored so the
    * next catch-up can't re-pull already-applied messages.
    */
-  recordDmSeen(peerBareJid: string, timestamp: string): void {
-    advance(this.dmLastSeen, peerBareJid, timestamp);
+  recordDmSeen(peerBareJid: string, timestamp: string, archiveId?: string, seenIds?: ReadonlyArray<string>): void {
+    advance(this.dmLastSeen, peerBareJid, timestamp, archiveId, seenIds);
   }
 
   /** As `recordDmSeen`, but for a MUC room JID. */
-  recordRoomSeen(roomBareJid: string, timestamp: string): void {
-    advance(this.roomLastSeen, roomBareJid, timestamp);
+  recordRoomSeen(roomBareJid: string, timestamp: string, archiveId?: string, seenIds?: ReadonlyArray<string>): void {
+    advance(this.roomLastSeen, roomBareJid, timestamp, archiveId, seenIds);
   }
 
   getDmLastSeen(peerBareJid: string): string | undefined {
-    return this.dmLastSeen.get(peerBareJid);
+    return this.dmLastSeen.get(peerBareJid)?.timestamp;
   }
 
   getRoomLastSeen(roomBareJid: string): string | undefined {
-    return this.roomLastSeen.get(roomBareJid);
+    return this.roomLastSeen.get(roomBareJid)?.timestamp;
   }
 
   /**
@@ -61,8 +68,12 @@ export class ReconnectCatchup {
       return [];
     }
     const entries: CatchupEntry[] = [];
-    for (const key of this.dmLastSeen.keys()) entries.push({ kind: "dm", key });
-    for (const key of this.roomLastSeen.keys()) entries.push({ kind: "room", key });
+    for (const [key, cursor] of this.dmLastSeen) {
+      entries.push(catchupEntry("dm", key, cursor));
+    }
+    for (const [key, cursor] of this.roomLastSeen) {
+      entries.push(catchupEntry("room", key, cursor));
+    }
     return entries;
   }
 
@@ -74,9 +85,76 @@ export class ReconnectCatchup {
   }
 }
 
-function advance(map: Map<string, string>, key: string, timestamp: string): void {
-  const current = map.get(key);
-  if (current === undefined || timestamp > current) {
-    map.set(key, timestamp);
+function catchupEntry(kind: "dm", key: string, cursor: SeenCursor): CatchupEntry;
+function catchupEntry(kind: "room", key: string, cursor: SeenCursor): CatchupEntry;
+function catchupEntry(kind: "dm" | "room", key: string, cursor: SeenCursor): CatchupEntry {
+  if (!cursor.archiveId) {
+    return {
+      kind,
+      key,
+      since: cursor.timestamp,
+      ...(cursor.seenIds?.length ? { seenIds: cursor.seenIds } : {}),
+    };
   }
+  return {
+    kind,
+    key,
+    after: cursor.archiveId,
+    ...(cursor.seenIds?.length ? { seenIds: cursor.seenIds } : {}),
+  };
+}
+
+function advance(
+  map: Map<string, SeenCursor>,
+  key: string,
+  timestamp: string,
+  archiveId?: string,
+  seenIds?: ReadonlyArray<string>,
+): void {
+  const normalizedTimestamp = normalizeTimestamp(timestamp);
+  const current = map.get(key);
+  const ordering = current ? compareTimestamps(normalizedTimestamp, current.timestamp) : 1;
+  if (current === undefined || ordering > 0) {
+    const nextArchiveId = archiveId ?? current?.archiveId;
+    map.set(key, {
+      timestamp: normalizedTimestamp,
+      ...(nextArchiveId ? { archiveId: nextArchiveId } : {}),
+      ...nonEmptySeenIds(seenIds),
+    });
+    return;
+  }
+  if (ordering === 0) {
+    const nextSeenIds = mergeSeenIds(current.seenIds, seenIds);
+    map.set(key, {
+      ...current,
+      ...(archiveId ? { archiveId } : {}),
+      ...nonEmptySeenIds(nextSeenIds),
+    });
+  }
+}
+
+function nonEmptySeenIds(seenIds: ReadonlyArray<string> | undefined): Partial<Pick<SeenCursor, "seenIds">> {
+  const normalized = mergeSeenIds(undefined, seenIds);
+  return normalized.length > 0 ? { seenIds: normalized } : {};
+}
+
+function mergeSeenIds(
+  current: ReadonlyArray<string> | undefined,
+  next: ReadonlyArray<string> | undefined,
+): string[] {
+  return Array.from(new Set([...(current ?? []), ...(next ?? [])].filter(Boolean)));
+}
+
+function normalizeTimestamp(timestamp: string): string {
+  const timestampMs = Date.parse(timestamp);
+  return Number.isFinite(timestampMs) ? new Date(timestampMs).toISOString() : timestamp;
+}
+
+function compareTimestamps(left: string, right: string): number {
+  const leftMs = Date.parse(left);
+  const rightMs = Date.parse(right);
+  if (Number.isFinite(leftMs) && Number.isFinite(rightMs)) {
+    return leftMs === rightMs ? 0 : leftMs < rightMs ? -1 : 1;
+  }
+  return left.localeCompare(right);
 }
