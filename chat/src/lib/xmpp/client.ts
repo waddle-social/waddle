@@ -906,11 +906,19 @@ export class BrowserXmppClient {
     return result;
   }
   async queryMamByThread(spaceId: string, channelId: string, threadId: string, max = 100): Promise<LiveRoomMessage[]> {
-    await this.connect(); await this.switchRoom(spaceId, channelId); const xmpp = await this.requireConnectedXmpp(); const page = await xmpp.fetch_room_history_by_thread?.(this.roomJidForChannel(channelId), threadId, max, null) as WasmMamPage; return page ? this.roomMamPageToMessages(page).messages : [];
+    await this.connect(); await this.switchRoom(spaceId, channelId); const xmpp = await this.requireConnectedXmpp(); const page = await xmpp.fetch_room_history_by_thread?.(this.roomJidForChannel(channelId), threadId, max, null) as WasmMamPage;
+    if (!page) return [];
+    const result = this.roomMamPageToMessages(page);
+    this.recordRoomMamWatermarks(result.messages);
+    return result.messages;
   }
   async queryMamThreadPage(spaceId: string, channelId: string, threadId: string, max = 100, pageParam: MamThreadPageParam = { type: "latest" }): Promise<MamHistoryPage<LiveRoomMessage>> {
     if (!threadId) return { messages: [], complete: true };
-    await this.connect(); await this.switchRoom(spaceId, channelId); const xmpp = await this.requireConnectedXmpp(); const page = await xmpp.fetch_room_history_by_thread?.(this.roomJidForChannel(channelId), threadId, max, pageParam.type === "before" ? pageParam.before : null) as WasmMamPage; return page ? this.roomMamPageToMessages(page) : { messages: [], complete: true };
+    await this.connect(); await this.switchRoom(spaceId, channelId); const xmpp = await this.requireConnectedXmpp(); const page = await xmpp.fetch_room_history_by_thread?.(this.roomJidForChannel(channelId), threadId, max, pageParam.type === "before" ? pageParam.before : null) as WasmMamPage;
+    if (!page) return { messages: [], complete: true };
+    const result = this.roomMamPageToMessages(page);
+    this.recordRoomMamWatermarks(result.messages);
+    return result;
   }
   async searchMessages(_spaceId: string, channelId: string, query: string, max = 20): Promise<MessageSearchResult[]> {
     if (!query.trim()) return [];
@@ -1066,10 +1074,14 @@ export class BrowserXmppClient {
     if (!xmpp.fetch_dm_history_page) return;
     if (entry.after) {
       let after: string | undefined = entry.after;
-      for (let guard = 0; after && guard < 50; guard += 1) {
+      const seenAfter = new Set<string>();
+      while (after) {
+        if (seenAfter.has(after)) throw new Error(`Reconnect catch-up repeated archive cursor for ${entry.key}`);
+        seenAfter.add(after);
         const page = await xmpp.fetch_dm_history_page(entry.key, 100, { type: "after", after }) as WasmMamPage;
         const nextAfter = this.applyDmCatchupPage(page, undefined, entry.seenIds);
-        if (isMamPageComplete(page) || !nextAfter || nextAfter === after) return;
+        if (isMamPageComplete(page)) return;
+        if (!nextAfter) throw new Error(`Reconnect catch-up could not advance archive cursor for ${entry.key}`);
         after = nextAfter;
       }
       return;
@@ -1085,10 +1097,14 @@ export class BrowserXmppClient {
     if (!xmpp.fetch_room_history_page) return;
     if (entry.after) {
       let after: string | undefined = entry.after;
-      for (let guard = 0; after && guard < 50; guard += 1) {
+      const seenAfter = new Set<string>();
+      while (after) {
+        if (seenAfter.has(after)) throw new Error(`Reconnect catch-up repeated archive cursor for ${entry.key}`);
+        seenAfter.add(after);
         const page = await xmpp.fetch_room_history_page(entry.key, 100, { type: "after", after }) as WasmMamPage;
         const nextAfter = this.applyRoomCatchupPage(page, undefined, entry.seenIds);
-        if (isMamPageComplete(page) || !nextAfter || nextAfter === after) return;
+        if (isMamPageComplete(page)) return;
+        if (!nextAfter) throw new Error(`Reconnect catch-up could not advance archive cursor for ${entry.key}`);
         after = nextAfter;
       }
       return;
@@ -1104,12 +1120,15 @@ export class BrowserXmppClient {
     seenIds?: ReadonlyArray<string>,
   ) {
     let pageParam: MamPageParam = { type: "latest" };
-    for (let guard = 0; guard < 50; guard += 1) {
+    const seenBefore = new Set<string>();
+    while (true) {
       const page = await xmpp.fetch_dm_history_page?.(peerJid, 100, pageParam) as WasmMamPage;
       this.applyDmCatchupPage(page, since, seenIds);
       if (isMamPageComplete(page) || pageCrossesSince(page, since)) return;
       const firstArchiveId = pageFirstArchiveId(page);
-      if (!firstArchiveId || pageParam.type === "before" && pageParam.before === firstArchiveId) return;
+      if (!firstArchiveId) throw new Error(`Reconnect catch-up could not page backward for ${peerJid}`);
+      if (seenBefore.has(firstArchiveId)) throw new Error(`Reconnect catch-up repeated backward archive cursor for ${peerJid}`);
+      seenBefore.add(firstArchiveId);
       pageParam = { type: "before", before: firstArchiveId };
     }
   }
@@ -1120,12 +1139,15 @@ export class BrowserXmppClient {
     seenIds?: ReadonlyArray<string>,
   ) {
     let pageParam: MamPageParam = { type: "latest" };
-    for (let guard = 0; guard < 50; guard += 1) {
+    const seenBefore = new Set<string>();
+    while (true) {
       const page = await xmpp.fetch_room_history_page?.(roomJid, 100, pageParam) as WasmMamPage;
       this.applyRoomCatchupPage(page, since, seenIds);
       if (isMamPageComplete(page) || pageCrossesSince(page, since)) return;
       const firstArchiveId = pageFirstArchiveId(page);
-      if (!firstArchiveId || pageParam.type === "before" && pageParam.before === firstArchiveId) return;
+      if (!firstArchiveId) throw new Error(`Reconnect catch-up could not page backward for ${roomJid}`);
+      if (seenBefore.has(firstArchiveId)) throw new Error(`Reconnect catch-up repeated backward archive cursor for ${roomJid}`);
+      seenBefore.add(firstArchiveId);
       pageParam = { type: "before", before: firstArchiveId };
     }
   }

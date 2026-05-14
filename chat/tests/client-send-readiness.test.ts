@@ -60,6 +60,21 @@ function roomWasmMessage(partial: Record<string, unknown> = {}) {
   };
 }
 
+function dmWasmMessage(partial: Record<string, unknown> = {}) {
+  return {
+    mam_id: "mam-dm-1",
+    id: "dm-1",
+    from: "bob@example.com/phone",
+    to: "alice@example.com/desktop",
+    message_type: "chat",
+    body: "hello from dm",
+    timestamp: "2024-01-01T00:00:01.000Z",
+    reaction_emojis: [],
+    shared_files: [],
+    ...partial,
+  };
+}
+
 function dmMessage(partial: Partial<LiveDmMessage> = {}): LiveDmMessage {
   return {
     id: "dm-1",
@@ -73,8 +88,8 @@ function dmMessage(partial: Partial<LiveDmMessage> = {}): LiveDmMessage {
   };
 }
 
-async function settleReconnectCatchup(): Promise<void> {
-  for (let i = 0; i < 6; i += 1) await Promise.resolve();
+async function settleReconnectCatchup(turns = 6): Promise<void> {
+  for (let i = 0; i < turns; i += 1) await Promise.resolve();
 }
 
 const originalWindow = globalThis.window;
@@ -644,6 +659,53 @@ describe("client keepalive lifecycle", () => {
     expect(dmHandler).toHaveBeenCalledWith(expect.objectContaining({ id: "dm-same-time-missed" }));
   });
 
+  test("timestamp fallback continues beyond fifty pages until it crosses the last seen timestamp", async () => {
+    const client = new BrowserXmppClient(session());
+    const catchup = (client as unknown as {
+      catchup: {
+        recordDmSeen: (peer: string, ts: string, archiveId?: string, seenIds?: string[]) => void;
+        onSessionStarted: () => unknown[];
+      };
+    }).catchup;
+    catchup.recordDmSeen("bob@example.com", "2024-01-01T00:00:00.000Z", undefined, ["dm-seen"]);
+    catchup.onSessionStarted();
+    const dmHandler = mock(() => undefined);
+    client.setDirectMessageHandler(dmHandler);
+    const newestIndex = 51;
+    const fetchDmHistoryPage = mock(async (_peer: string, _max: number, pageParam: { type: string; before?: string }) => {
+      const index = pageParam.type === "latest"
+        ? newestIndex
+        : Number(pageParam.before?.replace("mam-", "") ?? "1") - 1;
+      return {
+        messages: [dmWasmMessage({
+          mam_id: `mam-${index}`,
+          id: `dm-${index}`,
+          body: index === 0 ? "older than boundary" : `missed page ${index}`,
+          timestamp: index === 0
+            ? "2023-12-31T23:59:59.000Z"
+            : new Date(Date.UTC(2024, 0, 1, 0, 0, index)).toISOString(),
+        })],
+        first_id: `mam-${index}`,
+        last_id: `mam-${index}`,
+        is_complete: false,
+      };
+    });
+
+    const xmpp = Object.assign(new EventEmitter(), {
+      fetch_dm_history_page: fetchDmHistoryPage,
+    }) as unknown as Agent;
+    (client as unknown as { xmpp: Agent }).xmpp = xmpp;
+    (client as unknown as { wireEvents: (xmpp: Agent) => void }).wireEvents(xmpp);
+
+    xmpp.emit("stream:management:resumed");
+    await settleReconnectCatchup(newestIndex + 20);
+
+    expect(fetchDmHistoryPage).toHaveBeenCalledTimes(newestIndex + 1);
+    expect(dmHandler).toHaveBeenCalledTimes(newestIndex);
+    expect(dmHandler).toHaveBeenCalledWith(expect.objectContaining({ id: "dm-1" }));
+    expect(dmHandler).toHaveBeenCalledWith(expect.objectContaining({ id: "dm-51" }));
+  });
+
   test("stale archive cursor catch-up filters live messages already seen after that cursor", async () => {
     const client = new BrowserXmppClient(session());
     const catchup = (client as unknown as {
@@ -805,6 +867,51 @@ describe("client keepalive lifecycle", () => {
     expect(dmHandler).toHaveBeenCalledTimes(2);
   });
 
+  test("pages tracked DM catch-up forward beyond fifty pages until MAM is complete", async () => {
+    const client = new BrowserXmppClient(session());
+    const catchup = (client as unknown as {
+      catchup: {
+        recordDmSeen: (peer: string, ts: string, archiveId?: string) => void;
+        onSessionStarted: () => unknown[];
+      };
+    }).catchup;
+    catchup.recordDmSeen("bob@example.com", "2024-01-01T00:00:00.000Z", "mam-0");
+    catchup.onSessionStarted();
+    const dmHandler = mock(() => undefined);
+    client.setDirectMessageHandler(dmHandler);
+    const finalPage = 51;
+    const fetchDmHistoryPage = mock(async (_peer: string, _max: number, pageParam: { type: string; after?: string }) => {
+      const index = Number(pageParam.after?.replace("mam-", "") ?? "0") + 1;
+      return {
+        messages: [dmWasmMessage({
+          mam_id: `mam-${index}`,
+          id: `dm-${index}`,
+          body: `missed page ${index}`,
+          timestamp: new Date(Date.UTC(2024, 0, 1, 0, 0, index)).toISOString(),
+        })],
+        last_id: `mam-${index}`,
+        is_complete: index === finalPage,
+      };
+    });
+
+    const xmpp = Object.assign(new EventEmitter(), {
+      fetch_dm_history_page: fetchDmHistoryPage,
+    }) as unknown as Agent;
+    (client as unknown as { xmpp: Agent }).xmpp = xmpp;
+    (client as unknown as { wireEvents: (xmpp: Agent) => void }).wireEvents(xmpp);
+
+    xmpp.emit("stream:management:resumed");
+    await settleReconnectCatchup(finalPage + 20);
+
+    expect(fetchDmHistoryPage).toHaveBeenCalledTimes(finalPage);
+    expect(fetchDmHistoryPage).toHaveBeenLastCalledWith("bob@example.com", 100, {
+      type: "after",
+      after: "mam-50",
+    });
+    expect(dmHandler).toHaveBeenCalledTimes(finalPage);
+    expect(dmHandler).toHaveBeenCalledWith(expect.objectContaining({ id: "dm-51" }));
+  });
+
   test("queryPersonalMamPage seeds reconnect catch-up from XEP-0313 archive ids", async () => {
     const client = new BrowserXmppClient(session());
     (client as unknown as { connect: () => Promise<void> }).connect = async () => undefined;
@@ -833,6 +940,68 @@ describe("client keepalive lifecycle", () => {
 
     expect((client as unknown as { catchup: { onSessionStarted: () => unknown[] } }).catchup.onSessionStarted()).toEqual([
       { kind: "dm", key: "bob@example.com", after: "mam-loaded-1", seenIds: ["dm-loaded-1"] },
+    ]);
+  });
+
+  test("queryMamThreadPage seeds room reconnect catch-up from XEP-0313 archive ids", async () => {
+    const client = new BrowserXmppClient(session());
+    const roomJid = roomBareJidFor(session(), "c1");
+    (client as unknown as { connect: () => Promise<void> }).connect = async () => undefined;
+    (client as unknown as { switchRoom: () => Promise<void> }).switchRoom = async () => undefined;
+    (client as unknown as { connected: boolean }).connected = true;
+    (client as unknown as { catchup: { onSessionStarted: () => unknown[] } }).catchup.onSessionStarted();
+    const fetchRoomHistoryByThread = mock(async () => ({
+      messages: [roomWasmMessage({
+        mam_id: "mam-thread-1",
+        id: "room-thread-1",
+        from: `${roomJid}/bob`,
+        body: "thread history",
+        timestamp: "2024-01-01T00:00:01.000Z",
+        thread: "thread-1",
+      })],
+      last_id: "mam-thread-1",
+      is_complete: true,
+    }));
+    (client as unknown as { xmpp: Agent }).xmpp = Object.assign(new EventEmitter(), {
+      fetch_room_history_by_thread: fetchRoomHistoryByThread,
+    }) as unknown as Agent;
+
+    await client.queryMamThreadPage("w1", "c1", "thread-1", 100, { type: "latest" });
+
+    expect(fetchRoomHistoryByThread).toHaveBeenCalledWith(roomJid, "thread-1", 100, null);
+    expect((client as unknown as { catchup: { onSessionStarted: () => unknown[] } }).catchup.onSessionStarted()).toEqual([
+      { kind: "room", key: roomJid, after: "mam-thread-1", seenIds: ["room-thread-1"] },
+    ]);
+  });
+
+  test("queryMamByThread seeds room reconnect catch-up from XEP-0313 archive ids", async () => {
+    const client = new BrowserXmppClient(session());
+    const roomJid = roomBareJidFor(session(), "c1");
+    (client as unknown as { connect: () => Promise<void> }).connect = async () => undefined;
+    (client as unknown as { switchRoom: () => Promise<void> }).switchRoom = async () => undefined;
+    (client as unknown as { connected: boolean }).connected = true;
+    (client as unknown as { catchup: { onSessionStarted: () => unknown[] } }).catchup.onSessionStarted();
+    const fetchRoomHistoryByThread = mock(async () => ({
+      messages: [roomWasmMessage({
+        mam_id: "mam-thread-list-1",
+        id: "room-thread-list-1",
+        from: `${roomJid}/bob`,
+        body: "thread list history",
+        timestamp: "2024-01-01T00:00:01.000Z",
+        thread: "thread-1",
+      })],
+      last_id: "mam-thread-list-1",
+      is_complete: true,
+    }));
+    (client as unknown as { xmpp: Agent }).xmpp = Object.assign(new EventEmitter(), {
+      fetch_room_history_by_thread: fetchRoomHistoryByThread,
+    }) as unknown as Agent;
+
+    await client.queryMamByThread("w1", "c1", "thread-1", 100);
+
+    expect(fetchRoomHistoryByThread).toHaveBeenCalledWith(roomJid, "thread-1", 100, null);
+    expect((client as unknown as { catchup: { onSessionStarted: () => unknown[] } }).catchup.onSessionStarted()).toEqual([
+      { kind: "room", key: roomJid, after: "mam-thread-list-1", seenIds: ["room-thread-list-1"] },
     ]);
   });
 
