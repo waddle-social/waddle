@@ -23,6 +23,14 @@ impl Jwt {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    /// Reconstruct from a wire-format token string read off an
+    /// incoming Jingle transport element. The JWT is not validated
+    /// here; signature verification happens inside LiveKit when the
+    /// client connects to the SFU.
+    pub fn from_wire(value: String) -> Self {
+        Self(value)
+    }
 }
 
 impl std::fmt::Debug for Jwt {
