@@ -10,6 +10,8 @@ import {
   removeQueuedMessage,
   type PersistedQueuedDmMessage,
 } from "../outbound-queue-store";
+import { applyCallEvent } from "@/lib/calls/call-store";
+import type { CallEvent } from "@/lib/calls/types";
 import { barePeerJid, jidDomain, roomBareJidFor } from "./jid";
 import type {
   ChatStateEvent,
@@ -243,6 +245,7 @@ type XmppClientInstance = Partial<WasmClient> & CompatEmitter & {
   set_on_presence?: (cb: (presence: WasmPresence) => void) => void;
   set_on_message_delivery_acked?: (cb: (id: string) => void) => void;
   set_on_message_delivery_failed?: (cb: (id: string) => void) => void;
+  set_on_call?: (cb: (event: CallEvent) => void) => void;
   set_on_session_lifecycle?: (cb: (event: string) => void) => void;
   set_on_mds_displayed?: (cb: (entry: WasmMdsDisplayedEntry) => void) => void;
   get_resume_state?: () => XmppResumeState | null;
@@ -1758,6 +1761,7 @@ export class BrowserXmppClient {
     xmpp.set_on_mds_displayed?.((entry: WasmMdsDisplayedEntry) => {
       this.mdsDisplayedHandler?.({ chatId: entry.chat_id, stanzaId: entry.stanza_id, stanzaIdBy: entry.stanza_id_by });
     });
+    xmpp.set_on_call?.((event: CallEvent) => applyCallEvent(event));
     xmpp.on?.("session:started", () => { xmpp.disableKeepAlive?.(); xmpp.enableKeepAlive?.({ interval: 30, timeout: 15 }); this.handleSessionReady(xmpp, { type: "fresh" }); });
     xmpp.on?.("stream:management:resumed", () => this.handleSessionReady(xmpp, { type: "resumed" }));
     xmpp.on?.("disconnected", (error?: Error) => { xmpp.disableKeepAlive?.(); this.handleDisconnected(xmpp, error); });
