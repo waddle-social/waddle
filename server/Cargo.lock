@@ -6081,6 +6081,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "waddle-sfu"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "chrono",
+ "dashmap",
+ "hmac",
+ "jid",
+ "jsonwebtoken",
+ "serde",
+ "serde_json",
+ "sha1",
+ "thiserror 2.0.18",
+ "tracing",
+ "url",
+]
+
+[[package]]
 name = "waddle-xmpp"
 version = "0.1.0"
 dependencies = [

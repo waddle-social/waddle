@@ -1,0 +1,254 @@
+//! LiveKit JWT minting.
+//!
+//! Per LiveKit's access-token spec, a join token is an HS256-signed
+//! JWT carrying an `iss` (API key), `sub` (participant identity),
+//! `iat`/`nbf`/`exp` lifetime triple, and a `video` grant struct
+//! controlling room access and publish/subscribe rights.
+
+use chrono::{DateTime, Duration, Utc};
+use jsonwebtoken::{encode, EncodingKey, Header};
+use serde::{Deserialize, Serialize};
+
+use crate::call::{CallId, Identity, MediaCapabilities};
+use crate::config::{ApiKey, ApiSecret, WebsocketUrl};
+use crate::error::SfuError;
+
+/// Opaque encoded JWT. Wire boundary value; never inspected by the
+/// XMPP layer apart from being placed in a `<token/>` child of the
+/// `urn:waddle:transports:livekit:0` transport element.
+#[derive(Clone, PartialEq, Eq)]
+pub struct Jwt(String);
+
+impl Jwt {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for Jwt {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Jwt")
+            .field("len", &self.0.len())
+            .field("value", &"<redacted>")
+            .finish()
+    }
+}
+
+/// Fully-issued join credential. Returned by
+/// [`crate::SfuService::issue_join_token`] and used to populate the
+/// outbound `urn:waddle:transports:livekit:0` transport.
+#[derive(Debug, Clone)]
+pub struct JoinToken {
+    pub url: WebsocketUrl,
+    pub room: CallId,
+    pub identity: Identity,
+    pub jwt: Jwt,
+    pub expires_at: DateTime<Utc>,
+}
+
+/// LiveKit `video` grant claim. Public so tests can assert the
+/// shape; production code receives this via the
+/// [`crate::SfuService`] surface and never constructs it directly.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct VideoGrant {
+    #[serde(rename = "roomJoin")]
+    pub room_join: bool,
+    pub room: String,
+    #[serde(rename = "canPublish")]
+    pub can_publish: bool,
+    #[serde(rename = "canSubscribe")]
+    pub can_subscribe: bool,
+    #[serde(rename = "canPublishData")]
+    pub can_publish_data: bool,
+}
+
+impl VideoGrant {
+    fn from_capabilities(call_id: &CallId, caps: MediaCapabilities) -> Self {
+        Self {
+            room_join: true,
+            room: call_id.as_str().to_string(),
+            can_publish: caps.can_publish,
+            can_subscribe: caps.can_subscribe,
+            can_publish_data: caps.can_publish_data,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct Claims {
+    iss: String,
+    sub: String,
+    iat: i64,
+    nbf: i64,
+    exp: i64,
+    video: VideoGrant,
+}
+
+/// Inputs to [`mint_join_token`] kept as one struct to keep the
+/// signing function arity small.
+pub(crate) struct MintInputs<'a> {
+    pub api_key: &'a ApiKey,
+    pub api_secret: &'a ApiSecret,
+    pub ws_url: &'a WebsocketUrl,
+    pub call_id: &'a CallId,
+    pub identity: &'a Identity,
+    pub capabilities: MediaCapabilities,
+    pub ttl: Duration,
+}
+
+pub(crate) fn mint_join_token(inputs: MintInputs<'_>) -> Result<JoinToken, SfuError> {
+    let now = Utc::now();
+    let expires_at = now + inputs.ttl;
+
+    let claims = Claims {
+        iss: inputs.api_key.as_str().to_string(),
+        sub: inputs.identity.as_livekit_identity(),
+        iat: now.timestamp(),
+        nbf: now.timestamp(),
+        exp: expires_at.timestamp(),
+        video: VideoGrant::from_capabilities(inputs.call_id, inputs.capabilities),
+    };
+
+    let key = EncodingKey::from_secret(inputs.api_secret.as_bytes());
+    let encoded = encode(&Header::new(jsonwebtoken::Algorithm::HS256), &claims, &key)
+        .map_err(SfuError::JwtSigning)?;
+
+    Ok(JoinToken {
+        url: inputs.ws_url.clone(),
+        room: inputs.call_id.clone(),
+        identity: inputs.identity.clone(),
+        jwt: Jwt(encoded),
+        expires_at,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use jsonwebtoken::{decode, DecodingKey, Validation};
+    use serde::Deserialize;
+
+    fn fixture_identity() -> Identity {
+        let jid: jid::FullJid = "alice@waddle.social/desktop".parse().expect("valid JID");
+        Identity::from_jid(jid)
+    }
+
+    fn fixture_inputs<'a>(
+        api_key: &'a ApiKey,
+        secret: &'a ApiSecret,
+        ws_url: &'a WebsocketUrl,
+        call_id: &'a CallId,
+        identity: &'a Identity,
+    ) -> MintInputs<'a> {
+        MintInputs {
+            api_key,
+            api_secret: secret,
+            ws_url,
+            call_id,
+            identity,
+            capabilities: MediaCapabilities::full_participant(),
+            ttl: Duration::seconds(3600),
+        }
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct DecodedClaims {
+        iss: String,
+        sub: String,
+        iat: i64,
+        nbf: i64,
+        exp: i64,
+        video: VideoGrant,
+    }
+
+    #[test]
+    fn mints_token_with_expected_claims() {
+        let api_key = ApiKey::new("APIxxxxxxxx");
+        let secret = ApiSecret::from_text("super-secret-secret-32-bytes-min");
+        let ws_url = WebsocketUrl::new("wss://livekit.waddle.social".parse().expect("valid URL"))
+            .expect("valid ws url");
+        let call_id = CallId::new("call-abc-123").expect("valid call id");
+        let identity = fixture_identity();
+
+        let token = mint_join_token(fixture_inputs(
+            &api_key, &secret, &ws_url, &call_id, &identity,
+        ))
+        .expect("mint should succeed");
+
+        assert_eq!(token.room, call_id);
+        assert_eq!(token.identity, identity);
+        assert_eq!(token.url.as_str(), ws_url.as_str());
+
+        let mut validation = Validation::new(jsonwebtoken::Algorithm::HS256);
+        validation.validate_nbf = true;
+        let key = DecodingKey::from_secret(secret.as_bytes());
+        let decoded = decode::<DecodedClaims>(token.jwt.as_str(), &key, &validation)
+            .expect("token decodes with secret");
+        let claims = decoded.claims;
+
+        assert_eq!(claims.iss, api_key.as_str());
+        assert_eq!(claims.sub, identity.as_livekit_identity());
+        assert!(claims.exp > claims.iat);
+        assert_eq!(claims.iat, claims.nbf);
+        assert!(claims.video.room_join);
+        assert_eq!(claims.video.room, call_id.as_str());
+        assert!(claims.video.can_publish);
+        assert!(claims.video.can_subscribe);
+        assert!(claims.video.can_publish_data);
+    }
+
+    #[test]
+    fn capabilities_round_trip_into_video_grant() {
+        let api_key = ApiKey::new("APIxxxxxxxx");
+        let secret = ApiSecret::from_text("super-secret-secret-32-bytes-min");
+        let ws_url = WebsocketUrl::new("wss://livekit.waddle.social".parse().expect("valid URL"))
+            .expect("valid ws url");
+        let call_id = CallId::new("call-abc-123").expect("valid call id");
+        let identity = fixture_identity();
+
+        let token = mint_join_token(MintInputs {
+            api_key: &api_key,
+            api_secret: &secret,
+            ws_url: &ws_url,
+            call_id: &call_id,
+            identity: &identity,
+            capabilities: MediaCapabilities {
+                can_publish: false,
+                can_subscribe: true,
+                can_publish_data: false,
+            },
+            ttl: Duration::seconds(60),
+        })
+        .expect("mint should succeed");
+
+        let mut validation = Validation::new(jsonwebtoken::Algorithm::HS256);
+        validation.validate_nbf = true;
+        let key = DecodingKey::from_secret(secret.as_bytes());
+        let decoded =
+            decode::<DecodedClaims>(token.jwt.as_str(), &key, &validation).expect("decode");
+
+        assert!(!decoded.claims.video.can_publish);
+        assert!(decoded.claims.video.can_subscribe);
+        assert!(!decoded.claims.video.can_publish_data);
+    }
+
+    #[test]
+    fn token_rejects_wrong_secret() {
+        let api_key = ApiKey::new("APIxxxxxxxx");
+        let secret = ApiSecret::from_text("super-secret-secret-32-bytes-min");
+        let ws_url = WebsocketUrl::new("wss://livekit.waddle.social".parse().expect("valid URL"))
+            .expect("valid ws url");
+        let call_id = CallId::new("call-abc-123").expect("valid call id");
+        let identity = fixture_identity();
+
+        let token = mint_join_token(fixture_inputs(
+            &api_key, &secret, &ws_url, &call_id, &identity,
+        ))
+        .expect("mint should succeed");
+
+        let wrong = DecodingKey::from_secret(b"definitely-not-the-right-secret-xxxx");
+        let validation = Validation::new(jsonwebtoken::Algorithm::HS256);
+        let outcome = decode::<DecodedClaims>(token.jwt.as_str(), &wrong, &validation);
+        assert!(outcome.is_err(), "wrong secret must fail decode");
+    }
+}
