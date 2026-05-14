@@ -4,6 +4,7 @@ use super::super::{
     session_init::load_blocklist_for_bind,
     state::WsConnState,
     stream_management::SmRegistrationFinalization,
+    transport_xml::element_to_xml,
 };
 use super::{create_test_session, create_test_websocket_state};
 use jid::{BareJid, FullJid};
@@ -12,21 +13,11 @@ use tokio::sync::mpsc;
 use waddle_xmpp::{
     protocol::{Blocklist, ConnectionPhase, InboundEvent, InboundFrame, StanzaDispatcher},
     registry::OutboundStanza,
+    stream_management::SM_NS,
     Stanza,
 };
 use xmpp_parsers::message::MessageType as XmppMessageType;
-
-// ---------------------------------------------------------------
-// #229 PR11 — DeliveryKind dispatch in the per-connection main loop
-// ---------------------------------------------------------------
-//
-// The actual main-loop entry point is `xmpp_websocket_handler`, an
-// async function tied to a real WebSocket sink. To test the
-// dispatch logic in isolation we exercise its two helpers
-// (`build_interpret_deps`, `drive_interpret_loop`) and the
-// `WsConnState::ensure_state_machine` lifecycle directly. End-to-
-// end coverage of the routing flow lands once PR12 emits
-// `OutboundStanza::peer_stanza` from `RouteToConnection`.
+use xmpp_parsers::minidom::Element;
 
 #[tokio::test]
 async fn ensure_state_machine_initializes_sm_in_ready_phase() {
@@ -188,7 +179,12 @@ async fn register_bound_connection_after_frame_completes_pending_resume_claim() 
 
     conn.phase = ConnectionPhase::authenticated(&jid);
     conn.authenticated_session = Some(session.clone());
-    let resume_frame = format!("<resume xmlns='urn:xmpp:sm:3' previd='{stream_id}' h='9'/>");
+    let resume_frame = element_to_xml(
+        Element::builder("resume", SM_NS)
+            .attr("previd", stream_id.as_str())
+            .attr("h", "9")
+            .build(),
+    );
     let resume_responses =
         handle_xmpp_frame(&resume_frame, "example.com", state.as_ref(), &mut conn).await;
 

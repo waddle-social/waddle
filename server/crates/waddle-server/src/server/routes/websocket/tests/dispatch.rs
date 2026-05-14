@@ -12,6 +12,18 @@ use waddle_xmpp::{
     Stanza,
 };
 
+// ---------------------------------------------------------------
+// #229 PR11 - DeliveryKind dispatch in the per-connection main loop
+// ---------------------------------------------------------------
+//
+// The actual main-loop entry point is `xmpp_websocket_handler`, an
+// async function tied to a real WebSocket sink. To test the
+// dispatch logic in isolation we exercise its two helpers
+// (`build_interpret_deps`, `drive_interpret_loop`) and the
+// `WsConnState::ensure_state_machine` lifecycle directly. End-to-
+// end coverage of the routing flow lands once PR12 emits
+// `OutboundStanza::peer_stanza` from `RouteToConnection`.
+
 #[tokio::test]
 async fn drive_interpret_loop_resolves_send_stanza_into_wire_frames() {
     // Recipient pass produces `OutboundEvent::SendStanza` for the
