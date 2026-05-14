@@ -104,7 +104,7 @@ rand = "0.9"
 hex = "0.4"
 lru = "0.16"
 regex = "1.10"
-jsonwebtoken = "10.3"
+jsonwebtoken = "10.4"
 
 # Markdown/Syntax (CLI)
 pulldown-cmark = "0.12"
