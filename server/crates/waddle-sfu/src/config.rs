@@ -38,18 +38,36 @@ impl fmt::Debug for ApiKey {
 #[derive(Clone)]
 pub struct ApiSecret(Vec<u8>);
 
+/// Minimum acceptable length of an HMAC-SHA256 signing key. RFC 2104
+/// recommends the key length match the digest length (32 bytes for
+/// SHA-256); shorter keys silently degrade signing strength and are
+/// rejected at construction.
+pub const MIN_API_SECRET_BYTES: usize = 32;
+
 impl ApiSecret {
-    pub fn from_bytes(bytes: Vec<u8>) -> Self {
-        Self(bytes)
+    pub fn from_bytes(bytes: Vec<u8>) -> Result<Self, WeakSecret> {
+        if bytes.len() < MIN_API_SECRET_BYTES {
+            return Err(WeakSecret { len: bytes.len() });
+        }
+        Ok(Self(bytes))
     }
 
-    pub fn from_text(value: &str) -> Self {
-        Self(value.as_bytes().to_vec())
+    pub fn from_text(value: &str) -> Result<Self, WeakSecret> {
+        Self::from_bytes(value.as_bytes().to_vec())
     }
 
     pub fn as_bytes(&self) -> &[u8] {
         &self.0
     }
+}
+
+/// Returned when an [`ApiSecret`] is built from input shorter than
+/// [`MIN_API_SECRET_BYTES`]. Carries only the rejected length so the
+/// raw secret material never reaches a log line.
+#[derive(Debug, thiserror::Error)]
+#[error("API secret is too short: {len} bytes (minimum: {MIN_API_SECRET_BYTES})")]
+pub struct WeakSecret {
+    pub len: usize,
 }
 
 impl fmt::Debug for ApiSecret {
@@ -173,7 +191,7 @@ impl SfuConfig {
 
         Ok(Some(Self {
             api_key: ApiKey::new(api_key),
-            api_secret: ApiSecret::from_text(&api_secret),
+            api_secret: ApiSecret::from_text(&api_secret).map_err(FromEnvError::WeakApiSecret)?,
             ws_url,
             turn_host: crate::turn::TurnHost::new(turn_host),
             turn_tls_port,
@@ -209,4 +227,35 @@ pub enum FromEnvError {
     InvalidScheme(#[source] InvalidWebsocketUrl),
     #[error("env var {0} is not a valid number")]
     InvalidNumber(&'static str),
+    #[error("LIVEKIT_API_SECRET is too weak")]
+    WeakApiSecret(#[source] WeakSecret),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn api_secret_below_min_length_is_rejected() {
+        let short = "short";
+        let err = ApiSecret::from_text(short).expect_err("short secret should be rejected");
+        assert_eq!(err.len, short.len());
+    }
+
+    #[test]
+    fn api_secret_at_min_length_is_accepted() {
+        let exact: String = "x".repeat(MIN_API_SECRET_BYTES);
+        ApiSecret::from_text(&exact).expect("32-byte secret should be accepted");
+    }
+
+    #[test]
+    fn api_key_debug_redacts_value() {
+        let key = ApiKey::new("APIxxxxxxxxxxxxxxxxxxxxxx");
+        let rendered = format!("{key:?}");
+        assert!(
+            !rendered.contains("APIxxxxxxxxxxxxxxxxxxxxxx"),
+            "ApiKey Debug must not leak the key material: rendered={rendered}"
+        );
+        assert!(rendered.contains("redacted"));
+    }
 }

@@ -122,7 +122,8 @@ mod tests {
     fn fixture_sfu() -> Arc<dyn SfuService> {
         let cfg = SfuConfig {
             api_key: ApiKey::new("APIxxxxxxxx"),
-            api_secret: ApiSecret::from_text("api-secret"),
+            api_secret: ApiSecret::from_text("api-secret-meets-min-length-32!!")
+                .expect("test secret meets min length"),
             ws_url: WebsocketUrl::new("wss://livekit.test/".parse().unwrap()).unwrap(),
             turn_host: TurnHost::new("turn.test"),
             turn_tls_port: 443,

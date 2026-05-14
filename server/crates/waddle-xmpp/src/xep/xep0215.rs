@@ -77,7 +77,8 @@ mod tests {
         };
         let cfg = SfuConfig {
             api_key: ApiKey::new("k"),
-            api_secret: ApiSecret::from_text("api-secret"),
+            api_secret: ApiSecret::from_text("api-secret-meets-min-length-32!!")
+                .expect("test secret meets min length"),
             ws_url: WebsocketUrl::new("wss://h/".parse().unwrap()).unwrap(),
             turn_host: TurnHost::new("turn.waddle.social"),
             turn_tls_port: 443,

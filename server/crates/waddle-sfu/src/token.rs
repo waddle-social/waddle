@@ -172,7 +172,8 @@ mod tests {
     #[test]
     fn mints_token_with_expected_claims() {
         let api_key = ApiKey::new("APIxxxxxxxx");
-        let secret = ApiSecret::from_text("super-secret-secret-32-bytes-min");
+        let secret = ApiSecret::from_text("super-secret-secret-32-bytes-min")
+            .expect("test secret meets min length");
         let ws_url = WebsocketUrl::new("wss://livekit.waddle.social".parse().expect("valid URL"))
             .expect("valid ws url");
         let call_id = CallId::new("call-abc-123").expect("valid call id");
@@ -208,7 +209,8 @@ mod tests {
     #[test]
     fn capabilities_round_trip_into_video_grant() {
         let api_key = ApiKey::new("APIxxxxxxxx");
-        let secret = ApiSecret::from_text("super-secret-secret-32-bytes-min");
+        let secret = ApiSecret::from_text("super-secret-secret-32-bytes-min")
+            .expect("test secret meets min length");
         let ws_url = WebsocketUrl::new("wss://livekit.waddle.social".parse().expect("valid URL"))
             .expect("valid ws url");
         let call_id = CallId::new("call-abc-123").expect("valid call id");
@@ -243,7 +245,8 @@ mod tests {
     #[test]
     fn token_rejects_wrong_secret() {
         let api_key = ApiKey::new("APIxxxxxxxx");
-        let secret = ApiSecret::from_text("super-secret-secret-32-bytes-min");
+        let secret = ApiSecret::from_text("super-secret-secret-32-bytes-min")
+            .expect("test secret meets min length");
         let ws_url = WebsocketUrl::new("wss://livekit.waddle.social".parse().expect("valid URL"))
             .expect("valid ws url");
         let call_id = CallId::new("call-abc-123").expect("valid call id");

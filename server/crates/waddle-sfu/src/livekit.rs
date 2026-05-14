@@ -112,7 +112,8 @@ mod tests {
     fn fixture_config() -> SfuConfig {
         SfuConfig {
             api_key: ApiKey::new("APIxxxxxxxx"),
-            api_secret: ApiSecret::from_text("super-secret-secret-32-bytes-min"),
+            api_secret: ApiSecret::from_text("super-secret-secret-32-bytes-min")
+                .expect("test secret meets min length"),
             ws_url: WebsocketUrl::new(Url::parse("wss://livekit.waddle.social").unwrap()).unwrap(),
             turn_host: TurnHost::new("turn.waddle.social"),
             turn_tls_port: 443,
