@@ -94,7 +94,7 @@ pub(super) async fn register_bound_connection_after_frame(
             .deps
             .protocol
             .connection_registry
-            .update_presence(&jid, true, 0);
+            .update_presence(&jid, true, conn.presence_priority);
         state
             .deps
             .protocol

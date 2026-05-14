@@ -3,11 +3,12 @@ use super::{
     cleanup::cleanup_connection_shutdown,
     frame::handle_xmpp_frame,
     interpret_loop::build_interpret_deps,
+    registration::{register_bound_connection_after_frame, RegistrationAfterFrame},
     replay::{drain_outbound_into_replay, drive_interpret_loop},
     send::{send_ws_message, send_ws_text_frames},
     session_init::load_blocklist_for_bind,
     state::WsConnState,
-    stream_management::is_countable_stanza,
+    stream_management::{is_countable_stanza, SmRegistrationFinalization},
     transport_xml::{build_stream_features_xml, sasl_failure_xml, sasl_success_xml},
 };
 use crate::config::ServerConfig;
@@ -681,6 +682,225 @@ async fn ensure_state_machine_initializes_sm_in_ready_phase() {
     let sm = conn.state_machine.as_ref().expect("SM initialized");
     assert!(matches!(sm.phase(), ConnectionPhase::Ready { .. }));
     assert_eq!(sm.phase().bound_jid(), Some(&jid));
+}
+
+#[tokio::test]
+async fn register_bound_connection_after_frame_registers_ready_connection_once() {
+    let state = create_test_websocket_state().await;
+    let mut conn = WsConnState::new();
+    let jid: FullJid = "alice@example.com/web".parse().expect("jid");
+    let (tx, _rx) = mpsc::channel::<OutboundStanza>(1);
+    let mut pending_tx = Some(tx);
+
+    conn.phase = ConnectionPhase::ready(jid.clone(), false);
+    conn.carbons_enabled = true;
+    conn.roster_interested = true;
+    conn.presence_available = true;
+    conn.presence_show = Some(xmpp_parsers::presence::Show::Chat);
+    conn.presence_status = Some("ready".to_string());
+    conn.presence_priority = 7;
+
+    let result = register_bound_connection_after_frame(
+        state.as_ref(),
+        "example.com",
+        &mut conn,
+        &mut pending_tx,
+    )
+    .await;
+
+    assert!(matches!(
+        result,
+        RegistrationAfterFrame::Registered(SmRegistrationFinalization::KeepExistingResponses)
+    ));
+    assert!(
+        pending_tx.is_none(),
+        "registration consumes the one-shot sender"
+    );
+    assert!(
+        conn.registry_owner.is_some(),
+        "registry ownership is tracked"
+    );
+
+    let sm = conn
+        .state_machine
+        .as_ref()
+        .expect("state machine initialized");
+    assert!(matches!(sm.phase(), ConnectionPhase::Ready { .. }));
+    assert_eq!(sm.phase().bound_jid(), Some(&jid));
+
+    let entry = state
+        .deps
+        .protocol
+        .connection_registry
+        .get_entry(&jid)
+        .expect("registered connection");
+    assert!(entry.is_carbons_enabled());
+    assert!(entry
+        .roster_interested
+        .load(std::sync::atomic::Ordering::Relaxed));
+    assert!(entry.is_presence_available());
+    assert_eq!(entry.presence_priority(), 7);
+
+    let presence = state
+        .deps
+        .protocol
+        .connection_registry
+        .get_presence_state(&jid)
+        .expect("presence state restored");
+    assert_eq!(presence.show.as_deref(), Some("chat"));
+    assert_eq!(presence.status.as_deref(), Some("ready"));
+    assert_eq!(presence.priority, 7);
+
+    let second = register_bound_connection_after_frame(
+        state.as_ref(),
+        "example.com",
+        &mut conn,
+        &mut pending_tx,
+    )
+    .await;
+    assert!(matches!(second, RegistrationAfterFrame::Unchanged));
+    assert_eq!(
+        state.deps.protocol.connection_registry.connection_count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn register_bound_connection_after_frame_completes_pending_resume_claim() {
+    use waddle_xmpp::stream_management::{
+        DetachedSession, DetachedUnackedStanza, SmSessionRegistry,
+    };
+
+    let state = create_test_websocket_state().await;
+    let mut conn = WsConnState::new();
+    let jid: FullJid = "alice@example.com/web".parse().expect("jid");
+    let stream_id = "registration-resume-stream".to_string();
+    let session = create_test_session(state.as_ref(), "alice").await;
+
+    state
+        .deps
+        .protocol
+        .resumable_sessions
+        .insert(stream_id.clone(), session.clone());
+    state
+        .deps
+        .protocol
+        .sm_session_registry
+        .store_session(DetachedSession {
+            stream_id: stream_id.clone(),
+            user_id: session.user_id.clone(),
+            jid: jid.clone(),
+            inbound_count: 4,
+            outbound_count: 10,
+            last_acked: 8,
+            replay_gap_through: None,
+            unacked_stanzas: vec![
+                DetachedUnackedStanza {
+                    sequence: 9,
+                    stanza_xml: "<message id='m9'/>".to_string(),
+                    original_receipt_at: chrono::Utc::now(),
+                },
+                DetachedUnackedStanza {
+                    sequence: 10,
+                    stanza_xml: "<message id='m10'/>".to_string(),
+                    original_receipt_at: chrono::Utc::now(),
+                },
+            ],
+            max_resume_time: Some(300),
+            detached_at: std::time::Instant::now(),
+            carbons_enabled: true,
+            roster_interested: true,
+            presence_available: true,
+            presence_show: Some(xmpp_parsers::presence::Show::Chat),
+            presence_status: Some("back".to_string()),
+            presence_priority: 5,
+        })
+        .await
+        .expect("store detached session");
+
+    conn.phase = ConnectionPhase::authenticated(&jid);
+    conn.authenticated_session = Some(session.clone());
+    let resume_frame = format!("<resume xmlns='urn:xmpp:sm:3' previd='{stream_id}' h='9'/>");
+    let resume_responses =
+        handle_xmpp_frame(&resume_frame, "example.com", state.as_ref(), &mut conn).await;
+
+    assert!(!resume_responses.is_empty());
+    assert_eq!(
+        conn.pending_resume_stream_id.as_deref(),
+        Some(stream_id.as_str())
+    );
+    assert_eq!(conn.pending_resume_h, Some(9));
+    assert!(conn.suppress_sm_record_next_batch);
+
+    let (tx, _rx) = mpsc::channel::<OutboundStanza>(1);
+    let mut pending_tx = Some(tx);
+    let result = register_bound_connection_after_frame(
+        state.as_ref(),
+        "example.com",
+        &mut conn,
+        &mut pending_tx,
+    )
+    .await;
+
+    match result {
+        RegistrationAfterFrame::Registered(SmRegistrationFinalization::ReplaceWithResumed {
+            resumed,
+            replay_after_h,
+        }) => {
+            assert_eq!(resumed.previd.as_str(), stream_id.as_str());
+            assert_eq!(resumed.h, 4);
+            assert_eq!(replay_after_h, 9);
+        }
+        _ => panic!("expected resumed finalization"),
+    }
+
+    assert!(
+        pending_tx.is_none(),
+        "registration consumes the one-shot sender"
+    );
+    assert!(conn.pending_resume_stream_id.is_none());
+    assert!(conn.pending_resume_h.is_none());
+    assert_eq!(
+        conn.sm_state.get_stanzas_to_resend(9),
+        vec!["<message id='m10'/>".to_string()]
+    );
+    assert!(state
+        .deps
+        .protocol
+        .resumable_sessions
+        .get(&stream_id)
+        .is_none());
+    assert!(state
+        .deps
+        .protocol
+        .sm_session_registry
+        .peek_session(&stream_id)
+        .await
+        .expect("peek detached session")
+        .is_none());
+
+    let entry = state
+        .deps
+        .protocol
+        .connection_registry
+        .get_entry(&jid)
+        .expect("registered resumed connection");
+    assert!(entry.is_carbons_enabled());
+    assert!(entry
+        .roster_interested
+        .load(std::sync::atomic::Ordering::Relaxed));
+    assert!(entry.is_presence_available());
+    assert_eq!(entry.presence_priority(), 5);
+
+    let presence = state
+        .deps
+        .protocol
+        .connection_registry
+        .get_presence_state(&jid)
+        .expect("resumed presence state restored");
+    assert_eq!(presence.show.as_deref(), Some("chat"));
+    assert_eq!(presence.status.as_deref(), Some("back"));
+    assert_eq!(presence.priority, 5);
 }
 
 #[tokio::test]
