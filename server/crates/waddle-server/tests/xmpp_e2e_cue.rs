@@ -324,6 +324,11 @@ enum Step {
         id: Option<String>,
         max: u32,
         after: Option<String>,
+        #[serde(default, rename = "afterFrom")]
+        after_from: Option<String>,
+        before: Option<String>,
+        #[serde(default, rename = "beforeFrom")]
+        before_from: Option<String>,
         #[serde(rename = "with")]
         with_jid: Option<String>,
         fulltext: Option<String>,
@@ -347,6 +352,8 @@ enum Step {
         elements: Vec<XmlElementSpec>,
         #[serde(default, rename = "absentElements")]
         absent_elements: Vec<XmlElementSpec>,
+        #[serde(default)]
+        captures: Vec<AttributeCapture>,
     },
     #[serde(rename = "expectNoMamResult")]
     ExpectNoMamResult {
@@ -1309,6 +1316,9 @@ async fn execute_step(ctx: &mut ScenarioContext, step: &Step) -> Result<()> {
             id,
             max,
             after,
+            after_from,
+            before,
+            before_from,
             with_jid,
             fulltext,
             ids,
@@ -1326,10 +1336,40 @@ async fn execute_step(ctx: &mut ScenarioContext, step: &Step) -> Result<()> {
                     .ok_or_else(|| anyhow!("unknown captured MAM id {capture}"))?;
                 query_ids.push(value.clone());
             }
+            let after_cursor = match (after.as_deref(), after_from.as_deref()) {
+                (Some(_), Some(_)) => {
+                    return Err(anyhow!("queryMam cannot set both after and afterFrom"));
+                }
+                (Some(after), None) => Some(after.to_string()),
+                (None, Some(capture)) => Some(
+                    ctx.captures
+                        .get(capture)
+                        .ok_or_else(|| anyhow!("unknown captured MAM after cursor {capture}"))?
+                        .clone(),
+                ),
+                (None, None) => None,
+            };
+            let before_cursor = match (before.as_deref(), before_from.as_deref()) {
+                (Some(_), Some(_)) => {
+                    return Err(anyhow!("queryMam cannot set both before and beforeFrom"));
+                }
+                (Some(before), None) => Some(before.to_string()),
+                (None, Some(capture)) => Some(
+                    ctx.captures
+                        .get(capture)
+                        .ok_or_else(|| anyhow!("unknown captured MAM before cursor {capture}"))?
+                        .clone(),
+                ),
+                (None, None) => None,
+            };
+            if after_cursor.is_some() && before_cursor.is_some() {
+                return Err(anyhow!("queryMam cannot set both after and before cursors"));
+            }
             let query = mam_query_element(
                 &id,
                 *max,
-                after.as_deref(),
+                after_cursor.as_deref(),
+                before_cursor.as_deref(),
                 with_jid.as_deref(),
                 fulltext.as_deref(),
                 &query_ids,
@@ -1383,6 +1423,7 @@ async fn execute_step(ctx: &mut ScenarioContext, step: &Step) -> Result<()> {
             absent,
             elements,
             absent_elements,
+            captures,
         } => {
             let payload_expectations = payload_expectations(payloads, ctx)?;
             let payload_element_expectations = payload_element_expectations(payloads);
@@ -1441,6 +1482,10 @@ async fn execute_step(ctx: &mut ScenarioContext, step: &Step) -> Result<()> {
                 &captures_snapshot,
                 "MAM result elements",
             )?;
+            for capture in captures {
+                let value = extract_attr_capture(&frame, capture)?;
+                ctx.captures.insert(capture.capture_as.clone(), value);
+            }
         }
         Step::ExpectNoMamResult {
             body,
@@ -1690,6 +1735,7 @@ fn mam_query_element(
     query_id: &str,
     max: u32,
     after: Option<&str>,
+    before: Option<&str>,
     with_jid: Option<&str>,
     fulltext: Option<&str>,
     ids: &[String],
@@ -1706,6 +1752,9 @@ fn mam_query_element(
     );
     if let Some(after) = after {
         rsm = rsm.append(Element::builder("after", RSM_NS).append(after).build());
+    }
+    if let Some(before) = before {
+        rsm = rsm.append(Element::builder("before", RSM_NS).append(before).build());
     }
 
     let has_form = with_jid.is_some() || fulltext.is_some() || !ids.is_empty();

@@ -23,6 +23,7 @@ import type {
   LiveRoomMessage,
   MamHistoryPage,
   MamPageParam,
+  MamThreadPageParam,
   MessageSearchResult,
   PresenceUpdateEvent,
   ReactionEvent,
@@ -96,6 +97,61 @@ function roomActivityEventFromMessage(message: LiveRoomMessage): RoomActivityEve
   if (message.mentions) activity.mentions = message.mentions;
   if (message.broadcastMention) activity.broadcastMention = message.broadcastMention;
   return activity;
+}
+
+function isMamPageComplete(page: WasmMamPage | null | undefined): boolean {
+  const compat = page as (WasmMamPage & { complete?: boolean }) | null | undefined;
+  return !!(compat?.is_complete ?? compat?.complete);
+}
+
+function pageLastArchiveId(page: WasmMamPage | null | undefined): string | undefined {
+  const compat = page as (WasmMamPage & { lastArchiveId?: string }) | null | undefined;
+  return compat?.last_id ?? compat?.lastArchiveId;
+}
+
+function pageFirstArchiveId(page: WasmMamPage | null | undefined): string | undefined {
+  const compat = page as (WasmMamPage & { firstArchiveId?: string }) | null | undefined;
+  return compat?.first_id ?? compat?.firstArchiveId;
+}
+
+function compareTimestamps(left: string, right: string): number {
+  const leftMs = Date.parse(left);
+  const rightMs = Date.parse(right);
+  if (Number.isFinite(leftMs) && Number.isFinite(rightMs)) {
+    return leftMs === rightMs ? 0 : leftMs < rightMs ? -1 : 1;
+  }
+  return left.localeCompare(right);
+}
+
+function pageCrossesSince(page: WasmMamPage | null | undefined, since: string): boolean {
+  return (page?.messages ?? []).some((message) => typeof message.timestamp === "string" && compareTimestamps(message.timestamp, since) < 0);
+}
+
+function messageSeenIds(message: Pick<LiveDmMessage | LiveRoomMessage, "id" | "wireIds">): string[] {
+  return Array.from(new Set([message.id, ...(message.wireIds ?? [])].filter(Boolean)));
+}
+
+function rawMessageSeenIds(message: WasmMessage): string[] {
+  return Array.from(new Set([
+    message.id,
+    message.origin_id,
+    message.stanza_id,
+    ...(message.stanza_ids?.map((stanzaId) => stanzaId.id) ?? []),
+  ].filter((value): value is string => !!value)));
+}
+
+function shouldSkipCatchupMessage(
+  message: Pick<LiveDmMessage | LiveRoomMessage, "createdAt" | "id" | "wireIds">,
+  since?: string,
+  seenIds?: ReadonlyArray<string>,
+): boolean {
+  const seen = new Set(seenIds ?? []);
+  if (seen.size > 0 && messageSeenIds(message).some((id) => seen.has(id))) return true;
+  if (!since) return false;
+  const order = compareTimestamps(message.createdAt, since);
+  if (order < 0) return true;
+  if (order > 0) return false;
+  return false;
 }
 
 type WasmModule = typeof import("@waddle/xmpp-client-wasm");
@@ -830,15 +886,29 @@ export class BrowserXmppClient {
     const selfBare = barePeerJid(this.session.jid);
     return { messages: page.messages.map((message) => dmMessageFromArchived(message, selfBare)).filter((message): message is LiveDmMessage => !!message), ...(page.first_id ? { firstArchiveId: page.first_id } : {}), ...(page.last_id ? { lastArchiveId: page.last_id } : {}), complete: page.is_complete };
   }
+  private recordRoomMamWatermarks(messages: ReadonlyArray<LiveRoomMessage>) {
+    for (const message of messages) {
+      this.catchup.recordRoomSeen(message.roomJid, message.createdAt, message.archiveId, messageSeenIds(message));
+    }
+  }
+  private recordDmMamWatermarks(messages: ReadonlyArray<LiveDmMessage>) {
+    for (const message of messages) {
+      this.catchup.recordDmSeen(message.peerJid, message.createdAt, message.archiveId, messageSeenIds(message));
+    }
+  }
 
   async queryMam(spaceId: string, channelId: string, max = 50): Promise<LiveRoomMessage[]> { const page = await this.queryMamPage(spaceId, channelId, max, { type: "latest" }); return page.messages; }
   async queryMamPage(spaceId: string, channelId: string, max = 100, pageParam: MamPageParam = { type: "latest" }): Promise<MamHistoryPage<LiveRoomMessage>> {
-    await this.connect(); await this.switchRoom(spaceId, channelId); const xmpp = await this.requireConnectedXmpp(); const page = await xmpp.fetch_room_history_page?.(this.roomJidForChannel(channelId), max, pageParam) as WasmMamPage; return page ? this.roomMamPageToMessages(page) : { messages: [], complete: true };
+    await this.connect(); await this.switchRoom(spaceId, channelId); const xmpp = await this.requireConnectedXmpp(); const page = await xmpp.fetch_room_history_page?.(this.roomJidForChannel(channelId), max, pageParam) as WasmMamPage;
+    if (!page) return { messages: [], complete: true };
+    const result = this.roomMamPageToMessages(page);
+    this.recordRoomMamWatermarks(result.messages);
+    return result;
   }
   async queryMamByThread(spaceId: string, channelId: string, threadId: string, max = 100): Promise<LiveRoomMessage[]> {
     await this.connect(); await this.switchRoom(spaceId, channelId); const xmpp = await this.requireConnectedXmpp(); const page = await xmpp.fetch_room_history_by_thread?.(this.roomJidForChannel(channelId), threadId, max, null) as WasmMamPage; return page ? this.roomMamPageToMessages(page).messages : [];
   }
-  async queryMamThreadPage(spaceId: string, channelId: string, threadId: string, max = 100, pageParam: MamPageParam = { type: "latest" }): Promise<MamHistoryPage<LiveRoomMessage>> {
+  async queryMamThreadPage(spaceId: string, channelId: string, threadId: string, max = 100, pageParam: MamThreadPageParam = { type: "latest" }): Promise<MamHistoryPage<LiveRoomMessage>> {
     if (!threadId) return { messages: [], complete: true };
     await this.connect(); await this.switchRoom(spaceId, channelId); const xmpp = await this.requireConnectedXmpp(); const page = await xmpp.fetch_room_history_by_thread?.(this.roomJidForChannel(channelId), threadId, max, pageParam.type === "before" ? pageParam.before : null) as WasmMamPage; return page ? this.roomMamPageToMessages(page) : { messages: [], complete: true };
   }
@@ -850,7 +920,13 @@ export class BrowserXmppClient {
     return parsed.filter((message) => !!message.body).map((message, index) => ({ id: message.id, ...(page?.messages[index]?.mam_id ? { archiveId: page.messages[index].mam_id } : {}), nick: message.nick, body: message.body, createdAt: message.createdAt, ...(message.threadId ? { threadId: message.threadId } : {}), ...(message.parentThreadId ? { parentThreadId: message.parentThreadId } : {}), roomJid: message.roomJid }));
   }
   async queryPersonalMam(peerJid: string, max = 100): Promise<LiveDmMessage[]> { const page = await this.queryPersonalMamPage(peerJid, max, { type: "latest" }); return page.messages; }
-  async queryPersonalMamPage(peerJid: string, max = 100, pageParam: MamPageParam = { type: "latest" }): Promise<MamHistoryPage<LiveDmMessage>> { const xmpp = await this.requireConnectedXmpp(); const page = await xmpp.fetch_dm_history_page?.(barePeerJid(peerJid), max, pageParam) as WasmMamPage; return page ? this.dmMamPageToMessages(page) : { messages: [], complete: true }; }
+  async queryPersonalMamPage(peerJid: string, max = 100, pageParam: MamPageParam = { type: "latest" }): Promise<MamHistoryPage<LiveDmMessage>> {
+    const xmpp = await this.requireConnectedXmpp(); const page = await xmpp.fetch_dm_history_page?.(barePeerJid(peerJid), max, pageParam) as WasmMamPage;
+    if (!page) return { messages: [], complete: true };
+    const result = this.dmMamPageToMessages(page);
+    this.recordDmMamWatermarks(result.messages);
+    return result;
+  }
   async searchDmMessages(peerJid: string, query: string, max = 20): Promise<MessageSearchResult[]> {
     if (!query.trim()) return [];
     const xmpp = await this.requireConnectedXmpp();
@@ -903,7 +979,7 @@ export class BrowserXmppClient {
     this.emitStatus({ state: "online", detail: countQueuedMessages(this.queueScope) > 0 ? lifecycle.type === "fresh" ? "Reconnected — replaying queued messages" : "Connection resumed — replaying queued messages" : lifecycle.type === "fresh" ? "Connection ready" : "Connection resumed" });
     const catchupEntries = this.catchup.onSessionStarted();
     if (lifecycle.type === "fresh") { this.inflightQueuedIds.clear(); void this.enableCarbons(xmpp); }
-    else if (catchupEntries.length > 0) { void this.runReconnectCatchup(xmpp, catchupEntries); }
+    if (catchupEntries.length > 0) { void this.runReconnectCatchup(xmpp, catchupEntries); }
     this.emitSessionLifecycle(lifecycle); void this.flushQueuedDirectMessages(); if (this.currentRoom) void this.flushQueuedRoomMessages(this.currentRoom);
     if (this.onceConnected) { const done = this.onceConnected; this.onceConnected = null; this.onceConnectFailed = null; done(); }
   }
@@ -951,47 +1027,27 @@ export class BrowserXmppClient {
     if (message.is_muc) {
       const converted = roomMessageFromArchived({ ...message, mam_id: message.id ?? crypto.randomUUID() } as WasmArchivedMessage);
       if (!converted) return;
-      this.catchup.recordRoomSeen(converted.roomJid, converted.createdAt);
+      this.catchup.recordRoomSeen(converted.roomJid, converted.createdAt, undefined, rawMessageSeenIds(message));
       if (converted.roomJid !== this.currentRoom && isRoomActivityMessage(converted)) { this.activityHandler?.(roomActivityEventFromMessage(converted)); return; }
       this.messageHandler?.(converted); return;
     }
     const converted = dmMessageFromArchived({ ...message, mam_id: message.id ?? crypto.randomUUID() } as WasmArchivedMessage, barePeerJid(this.session.jid));
     if (converted) {
-      this.catchup.recordDmSeen(converted.peerJid, converted.createdAt);
+      this.catchup.recordDmSeen(converted.peerJid, converted.createdAt, undefined, rawMessageSeenIds(message));
       this.directMessageHandler?.(converted);
     }
   }
   private async runReconnectCatchup(
     xmpp: XmppClientInstance,
-    entries: Array<{ kind: "dm" | "room"; key: string }>,
+    entries: Array<{ kind: "dm" | "room"; key: string; after?: string; since?: string; seenIds?: string[] }>,
   ) {
     for (const entry of entries) {
       if (this.xmpp !== xmpp) return;
       try {
         if (entry.kind === "dm") {
-          const since = this.catchup.getDmLastSeen(entry.key);
-          if (!since || !xmpp.fetch_dm_history_page) continue;
-          const page = await xmpp.fetch_dm_history_page(entry.key, 100, { type: "latest" }) as WasmMamPage;
-          for (const message of page?.messages ?? []) {
-            const converted = dmMessageFromArchived(message, barePeerJid(this.session.jid));
-            if (!converted || converted.createdAt <= since) continue;
-            this.catchup.recordDmSeen(converted.peerJid, converted.createdAt);
-            this.directMessageHandler?.(converted);
-          }
+          await this.runDmReconnectCatchup(xmpp, entry);
         } else {
-          const since = this.catchup.getRoomLastSeen(entry.key);
-          if (!since || !xmpp.fetch_room_history_page) continue;
-          const page = await xmpp.fetch_room_history_page(entry.key, 100, { type: "latest" }) as WasmMamPage;
-          for (const message of page?.messages ?? []) {
-            const converted = roomMessageFromArchived(message);
-            if (!converted || converted.createdAt <= since) continue;
-            this.catchup.recordRoomSeen(converted.roomJid, converted.createdAt);
-            if (converted.roomJid !== this.currentRoom && isRoomActivityMessage(converted)) {
-              this.activityHandler?.(roomActivityEventFromMessage(converted));
-            } else {
-              this.messageHandler?.(converted);
-            }
-          }
+          await this.runRoomReconnectCatchup(xmpp, entry);
         }
       } catch (error) {
         this.emitError({
@@ -1002,6 +1058,102 @@ export class BrowserXmppClient {
         });
       }
     }
+  }
+  private async runDmReconnectCatchup(
+    xmpp: XmppClientInstance,
+    entry: { key: string; after?: string; since?: string; seenIds?: string[] },
+  ) {
+    if (!xmpp.fetch_dm_history_page) return;
+    if (entry.after) {
+      let after: string | undefined = entry.after;
+      for (let guard = 0; after && guard < 50; guard += 1) {
+        const page = await xmpp.fetch_dm_history_page(entry.key, 100, { type: "after", after }) as WasmMamPage;
+        const nextAfter = this.applyDmCatchupPage(page, undefined, entry.seenIds);
+        if (isMamPageComplete(page) || !nextAfter || nextAfter === after) return;
+        after = nextAfter;
+      }
+      return;
+    }
+    const since = entry.since ?? this.catchup.getDmLastSeen(entry.key);
+    if (!since) return;
+    await this.runDmTimestampCatchup(xmpp, entry.key, since, entry.seenIds);
+  }
+  private async runRoomReconnectCatchup(
+    xmpp: XmppClientInstance,
+    entry: { key: string; after?: string; since?: string; seenIds?: string[] },
+  ) {
+    if (!xmpp.fetch_room_history_page) return;
+    if (entry.after) {
+      let after: string | undefined = entry.after;
+      for (let guard = 0; after && guard < 50; guard += 1) {
+        const page = await xmpp.fetch_room_history_page(entry.key, 100, { type: "after", after }) as WasmMamPage;
+        const nextAfter = this.applyRoomCatchupPage(page, undefined, entry.seenIds);
+        if (isMamPageComplete(page) || !nextAfter || nextAfter === after) return;
+        after = nextAfter;
+      }
+      return;
+    }
+    const since = entry.since ?? this.catchup.getRoomLastSeen(entry.key);
+    if (!since) return;
+    await this.runRoomTimestampCatchup(xmpp, entry.key, since, entry.seenIds);
+  }
+  private async runDmTimestampCatchup(
+    xmpp: XmppClientInstance,
+    peerJid: string,
+    since: string,
+    seenIds?: ReadonlyArray<string>,
+  ) {
+    let pageParam: MamPageParam = { type: "latest" };
+    for (let guard = 0; guard < 50; guard += 1) {
+      const page = await xmpp.fetch_dm_history_page?.(peerJid, 100, pageParam) as WasmMamPage;
+      this.applyDmCatchupPage(page, since, seenIds);
+      if (isMamPageComplete(page) || pageCrossesSince(page, since)) return;
+      const firstArchiveId = pageFirstArchiveId(page);
+      if (!firstArchiveId || pageParam.type === "before" && pageParam.before === firstArchiveId) return;
+      pageParam = { type: "before", before: firstArchiveId };
+    }
+  }
+  private async runRoomTimestampCatchup(
+    xmpp: XmppClientInstance,
+    roomJid: string,
+    since: string,
+    seenIds?: ReadonlyArray<string>,
+  ) {
+    let pageParam: MamPageParam = { type: "latest" };
+    for (let guard = 0; guard < 50; guard += 1) {
+      const page = await xmpp.fetch_room_history_page?.(roomJid, 100, pageParam) as WasmMamPage;
+      this.applyRoomCatchupPage(page, since, seenIds);
+      if (isMamPageComplete(page) || pageCrossesSince(page, since)) return;
+      const firstArchiveId = pageFirstArchiveId(page);
+      if (!firstArchiveId || pageParam.type === "before" && pageParam.before === firstArchiveId) return;
+      pageParam = { type: "before", before: firstArchiveId };
+    }
+  }
+  private applyDmCatchupPage(page: WasmMamPage | null | undefined, since?: string, seenIds?: ReadonlyArray<string>): string | undefined {
+    let lastArchiveId = pageLastArchiveId(page);
+    for (const message of page?.messages ?? []) {
+      const converted = dmMessageFromArchived(message, barePeerJid(this.session.jid));
+      if (!converted || shouldSkipCatchupMessage(converted, since, seenIds)) continue;
+      this.catchup.recordDmSeen(converted.peerJid, converted.createdAt, converted.archiveId, messageSeenIds(converted));
+      this.directMessageHandler?.(converted);
+      lastArchiveId = converted.archiveId ?? lastArchiveId;
+    }
+    return lastArchiveId;
+  }
+  private applyRoomCatchupPage(page: WasmMamPage | null | undefined, since?: string, seenIds?: ReadonlyArray<string>): string | undefined {
+    let lastArchiveId = pageLastArchiveId(page);
+    for (const message of page?.messages ?? []) {
+      const converted = roomMessageFromArchived(message);
+      if (!converted || shouldSkipCatchupMessage(converted, since, seenIds)) continue;
+      this.catchup.recordRoomSeen(converted.roomJid, converted.createdAt, converted.archiveId, messageSeenIds(converted));
+      if (converted.roomJid !== this.currentRoom && isRoomActivityMessage(converted)) {
+        this.activityHandler?.(roomActivityEventFromMessage(converted));
+      } else {
+        this.messageHandler?.(converted);
+      }
+      lastArchiveId = converted.archiveId ?? lastArchiveId;
+    }
+    return lastArchiveId;
   }
   private wireEvents(xmpp: XmppClientInstance & { enableKeepAlive?: (opts: { interval: number; timeout: number }) => void; disableKeepAlive?: () => void }) {
     xmpp.set_on_connected?.(() => { if (this.xmpp !== xmpp) return; void this.enableCarbons(xmpp); });

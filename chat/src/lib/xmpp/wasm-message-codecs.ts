@@ -276,6 +276,7 @@ export function roomMessageFromArchived(message: WasmArchivedMessage): LiveRoomM
   if (activeRetractionTarget) {
     return {
       id: roomPrimaryId,
+      archiveId: message.mam_id,
       fromJid,
       roomJid,
       nick,
@@ -293,6 +294,7 @@ export function roomMessageFromArchived(message: WasmArchivedMessage): LiveRoomM
   if (message.reaction_target_id) {
     return {
       id: roomPrimaryId,
+      archiveId: message.mam_id,
       roomJid,
       nick,
       body: "",
@@ -309,6 +311,7 @@ export function roomMessageFromArchived(message: WasmArchivedMessage): LiveRoomM
   if (message.pin_event) {
     return {
       id: message.id ?? message.stanza_id ?? message.mam_id,
+      archiveId: message.mam_id,
       roomJid,
       nick: "",
       body: message.body ?? "",
@@ -327,6 +330,7 @@ export function roomMessageFromArchived(message: WasmArchivedMessage): LiveRoomM
   }
   const base: LiveRoomMessage = {
     id: roomPrimaryId,
+    archiveId: message.mam_id,
     fromJid,
     roomJid,
     nick,
@@ -380,6 +384,7 @@ export function dmMessageFromArchived(message: WasmArchivedMessage, selfBareJid:
   if (message.retracts_id) {
     return {
       id: dmPrimaryId,
+      archiveId: message.mam_id,
       peerJid,
       fromJid,
       nick,
@@ -393,6 +398,7 @@ export function dmMessageFromArchived(message: WasmArchivedMessage, selfBareJid:
   if (message.reaction_target_id) {
     return {
       id: dmPrimaryId,
+      archiveId: message.mam_id,
       peerJid,
       fromJid,
       nick,
@@ -413,6 +419,7 @@ export function dmMessageFromArchived(message: WasmArchivedMessage, selfBareJid:
   if (!message.body && !message.subject && !sharedFiles.length && !extensionAnnotations.length && !message.thread && !message.is_retracted) return null;
   const base: LiveDmMessage = {
     id: dmPrimaryId,
+    archiveId: message.mam_id,
     peerJid,
     fromJid,
     nick,

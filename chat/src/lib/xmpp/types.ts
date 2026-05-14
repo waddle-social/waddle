@@ -20,6 +20,11 @@ export type SessionLifecycleEvent = { type: "resumed" } | { type: "fresh" };
 
 export type MamPageParam =
   | { type: "latest" }
+  | { type: "before"; before: string }
+  | { type: "after"; after: string };
+
+export type MamThreadPageParam =
+  | { type: "latest" }
   | { type: "before"; before: string };
 
 export interface MamHistoryPage<T> {
@@ -87,6 +92,8 @@ export interface ReplyPreview {
 
 export interface LiveRoomMessage {
   id: string;
+  /** XEP-0313 archive UID from the MAM result envelope, when known. */
+  archiveId?: string;
   wireIds?: string[];
   /** XEP-0308 correction target: original sender message id/origin-id. */
   correctionTargetId?: string;
@@ -153,6 +160,8 @@ export interface LiveRoomMessage {
 /** A direct message received/sent via type:"chat" stanzas */
 export interface LiveDmMessage {
   id: string;
+  /** XEP-0313 archive UID from the MAM result envelope, when known. */
+  archiveId?: string;
   wireIds?: string[];
   /** XEP-0308 correction target: original sender message id/origin-id. */
   correctionTargetId?: string;
