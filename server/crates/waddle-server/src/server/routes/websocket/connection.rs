@@ -3,13 +3,11 @@ use super::{
     cleanup::cleanup_connection_shutdown,
     frame::handle_xmpp_frame,
     outbound::handle_outbound_stanza,
+    registration::{register_bound_connection_after_frame, RegistrationAfterFrame},
     send::{send_ws_message, send_ws_text_frames},
-    session_init::{build_internal_server_error_stream_error, load_blocklist_for_bind},
+    session_init::build_internal_server_error_stream_error,
     state::WsConnState,
-    stream_management::{
-        finalize_sm_after_registry_registration, is_countable_stanza, sm_show_name,
-        SmRegistrationFinalization,
-    },
+    stream_management::{is_countable_stanza, SmRegistrationFinalization},
 };
 
 /// Create the WebSocket router
@@ -86,137 +84,34 @@ async fn handle_xmpp_websocket(socket: WebSocket, state: Arc<WebSocketState>) {
                         // has marked the connection Closing.
                         conn.sync_state_machine_phase();
 
-                        // Register connection after successful authentication AND resource binding
-                        // This ensures the JID in ConnectionRegistry matches the JID stored in MUC room occupants
-                        if let Some(jid) = conn.phase.bound_jid().cloned() {
-                            if let Some(tx) = pending_tx.take() {
-                                // Mirror the bind transition into the
-                                // per-connection state machine (#229
-                                // PR11). The SM stays `None` until
-                                // here so unauthenticated traffic
-                                // can't reach `on_peer_stanza`. We
-                                // detect SM-resume vs fresh bind from
-                                // whether `pending_resume_stream_id`
-                                // was just consumed below.
-                                let resumed = conn.pending_resume_stream_id.is_some();
-                                // Seed the SM's XEP-0191 session-state
-                                // snapshot (#229 PR13).
-                                //
-                                // Fresh bind: load from
-                                // `DatabaseBlockingStorage`. On Err we
-                                // FAIL the bind via a stream-error
-                                // close rather than silently
-                                // initializing an empty list — a
-                                // session-long fail-open would bypass
-                                // XEP-0191 for the entire connection
-                                // (Codex P1 / Qodo P1 review).
-                                //
-                                // XEP-0198 resume: the previous
-                                // session was detached/dropped, but we
-                                // deliberately do NOT re-read from DB.
-                                // Re-reading would let blocklist
-                                // mutations from other resources
-                                // during the detach window leak into
-                                // the resumed stream, contradicting
-                                // the snapshot semantic. The resumed
-                                // session starts with an empty
-                                // snapshot; subsequent XEP-0191
-                                // IQ-set traffic on the resumed stream
-                                // re-populates it via the SM's
-                                // internal blocklist mutators.
-                                let blocklist = if resumed {
-                                    Blocklist::empty()
-                                } else {
-                                    match load_blocklist_for_bind(
-                                        &state.deps.app_state.db_pool,
-                                        &jid,
-                                    )
-                                    .await
-                                    {
-                                        Ok(bl) => bl,
-                                        Err(error) => {
-                                            error!(
-                                                jid = %jid,
-                                                %error,
-                                                "Failed to load XEP-0191 blocklist at \
-                                                 bind; failing the bind to avoid a \
-                                                 session-long fail-open. Client should \
-                                                 reconnect."
-                                            );
-                                            let stream_error =
-                                                build_internal_server_error_stream_error(
-                                                    "Session initialization failed; \
-                                                     please reconnect.",
-                                                );
-                                            let _ = send_ws_message(
-                                                &mut ws_sender,
-                                                Message::Text(stream_error),
-                                                "Failed to send blocklist-load \
-                                                 stream error",
-                                            )
-                                            .await;
-                                            break;
-                                        }
-                                    }
-                                };
-                                conn.ensure_state_machine(
-                                    &domain,
-                                    &state.deps.protocol.dispatcher,
-                                    jid.clone(),
-                                    resumed,
-                                    blocklist,
+                        // Register the connection after successful authentication
+                        // and resource binding. This keeps the transport loop
+                        // focused on WebSocket I/O while the registration module
+                        // owns registry publication and post-registration SM
+                        // finalization.
+                        match register_bound_connection_after_frame(
+                            state.as_ref(),
+                            &domain,
+                            &mut conn,
+                            &mut pending_tx,
+                        )
+                        .await
+                        {
+                            RegistrationAfterFrame::Unchanged => {}
+                            RegistrationAfterFrame::SessionInitializationFailed => {
+                                let stream_error = build_internal_server_error_stream_error(
+                                    "Session initialization failed; please reconnect.",
                                 );
-                                let owner = state.deps.protocol.connection_registry.register_with_stream_state(
-                                    jid.clone(),
-                                    tx,
-                                    conn.carbons_enabled,
-                                    conn.roster_interested,
-                                );
-                                conn.registry_owner = Some(owner.clone());
-                                // Publish the SM stream id onto the freshly-registered entry
-                                // so the offline-flush path keys claims by the XEP-0198
-                                // session id, not the resource JID. Locked Q7b SM-ack
-                                // lifecycle (issue #209). For a fresh bind without SM
-                                // enabled, sm_state.stream_id is None — the flush path
-                                // falls back to delete-on-push for non-SM sessions.
-                                if let Some(entry) = state
-                                    .deps
-                                    .protocol
-                                    .connection_registry
-                                    .get_entry(&jid)
-                                {
-                                    entry.set_sm_stream_id(
-                                        conn.sm_state
-                                            .stream_id
-                                            .clone()
-                                            .map(waddle_xmpp::pending_delivery::SmSessionId::new),
-                                    );
-                                }
-                                if conn.presence_available {
-                                    state
-                                        .deps
-                                        .protocol
-                                        .connection_registry
-                                        .update_presence(&jid, true, 0);
-                                    state
-                                        .deps
-                                        .protocol
-                                        .connection_registry
-                                        .update_presence_state(
-                                            &jid,
-                                            conn.presence_show.as_ref().map(sm_show_name).map(str::to_string),
-                                            conn.presence_status.clone(),
-                                            conn.presence_priority,
-                                        );
-                                }
-                                match finalize_sm_after_registry_registration(
-                                    state.as_ref(),
-                                    &mut conn,
-                                    &jid,
-                                    &owner,
+                                let _ = send_ws_message(
+                                    &mut ws_sender,
+                                    Message::Text(stream_error),
+                                    "Failed to send blocklist-load stream error",
                                 )
-                                .await
-                                {
+                                .await;
+                                break;
+                            }
+                            RegistrationAfterFrame::Registered(sm_finalization) => {
+                                match sm_finalization {
                                     SmRegistrationFinalization::KeepExistingResponses => {}
                                     SmRegistrationFinalization::ReplaceWithResumed {
                                         resumed,
@@ -231,12 +126,6 @@ async fn handle_xmpp_websocket(socket: WebSocket, state: Arc<WebSocketState>) {
                                         responses = vec![failed.to_xml()];
                                     }
                                 }
-                                info!(
-                                    jid = %jid,
-                                    resumed = conn.phase.is_resumed(),
-                                    carbons_enabled = conn.carbons_enabled,
-                                    "WebSocket connection registered"
-                                );
                             }
                         }
 

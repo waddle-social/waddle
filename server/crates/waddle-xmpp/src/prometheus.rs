@@ -4,6 +4,8 @@
 //! operational health dashboards and exposes them in Prometheus text format.
 
 use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(test)]
+use std::sync::{Mutex, OnceLock};
 
 static CONNECTED_USERS: AtomicU64 = AtomicU64::new(0);
 static ROOM_COUNT: AtomicU64 = AtomicU64::new(0);
@@ -76,6 +78,13 @@ static SM_DRAIN_TIMEOUT: AtomicU64 = AtomicU64::new(0);
 // was silently lowered. Sustained non-zero indicates the cap is too
 // tight for the client population.
 static SM_RESUME_WINDOW_CLAMPED: AtomicU64 = AtomicU64::new(0);
+
+/// Serializes unit tests that mutate process-global metrics.
+#[cfg(test)]
+pub(crate) fn metrics_test_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
 
 fn unix_timestamp_secs() -> u64 {
     std::time::SystemTime::now()
@@ -320,16 +329,10 @@ pub fn render_metrics() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Mutex, OnceLock};
-
-    fn test_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-    }
 
     #[test]
     fn test_decrement_saturates_at_zero() {
-        let _guard = test_lock().lock().unwrap();
+        let _guard = metrics_test_lock().lock().unwrap();
         reset_metrics_for_test();
 
         decrement_connected_users();
@@ -341,7 +344,7 @@ mod tests {
 
     #[test]
     fn test_increment_and_decrement_round_trip() {
-        let _guard = test_lock().lock().unwrap();
+        let _guard = metrics_test_lock().lock().unwrap();
         reset_metrics_for_test();
 
         increment_connected_users();
@@ -357,7 +360,7 @@ mod tests {
 
     #[test]
     fn test_rotate_second_bucket_moves_current_to_last() {
-        let _guard = test_lock().lock().unwrap();
+        let _guard = metrics_test_lock().lock().unwrap();
         reset_metrics_for_test();
 
         CURRENT_SECOND.store(100, Ordering::Release);
@@ -372,7 +375,7 @@ mod tests {
 
     #[test]
     fn test_render_metrics_contains_expected_families() {
-        let _guard = test_lock().lock().unwrap();
+        let _guard = metrics_test_lock().lock().unwrap();
         reset_metrics_for_test();
 
         increment_connected_users();
@@ -396,7 +399,7 @@ mod tests {
 
     #[test]
     fn test_broadcast_counters_increment_and_render() {
-        let _guard = test_lock().lock().unwrap();
+        let _guard = metrics_test_lock().lock().unwrap();
         reset_metrics_for_test();
 
         increment_broadcast_delivered();
@@ -422,7 +425,7 @@ mod tests {
     /// scraper accepts the line but dashboards lose the metric type.
     #[test]
     fn test_issue_209_finding_11_metric_families_render() {
-        let _guard = test_lock().lock().unwrap();
+        let _guard = metrics_test_lock().lock().unwrap();
         reset_metrics_for_test();
 
         increment_pending_delivery_quota_exceeded();
@@ -469,7 +472,7 @@ mod tests {
 
     #[test]
     fn test_reset_metrics_for_test_clears_sm_promotion_not_promotable() {
-        let _guard = test_lock().lock().unwrap();
+        let _guard = metrics_test_lock().lock().unwrap();
         reset_metrics_for_test();
 
         increment_sm_promotion_not_promotable();
@@ -481,7 +484,7 @@ mod tests {
 
     #[test]
     fn test_sm_unacked_evicted_counter_increments_and_renders() {
-        let _guard = test_lock().lock().unwrap();
+        let _guard = metrics_test_lock().lock().unwrap();
         reset_metrics_for_test();
 
         increment_sm_unacked_evicted();
