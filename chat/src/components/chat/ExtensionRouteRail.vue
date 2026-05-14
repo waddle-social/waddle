@@ -1,8 +1,7 @@
 <script setup lang="ts">
-import { Grid3X3, Link2, ListChecks } from "lucide-vue-next";
 import { computed } from "vue";
 import type { DiscoveredExtensionRoute } from "@/lib/xmpp/extension-commands";
-import { extensionRouteRailItems, type ExtensionRouteRailIcon } from "./extension-route-rail-model";
+import { extensionRouteIconComponent, extensionRouteRailItems } from "./extension-route-rail-model";
 
 const props = defineProps<{
   routes: DiscoveredExtensionRoute[];
@@ -15,12 +14,6 @@ const emit = defineEmits<{
 }>();
 
 const items = computed(() => extensionRouteRailItems(props.routes, props.activeRoute, !!props.active));
-
-function routeIcon(icon: ExtensionRouteRailIcon) {
-  if (icon === "links") return Link2;
-  if (icon === "gallery") return Grid3X3;
-  return ListChecks;
-}
 </script>
 
 <template>
@@ -40,7 +33,7 @@ function routeIcon(icon: ExtensionRouteRailIcon) {
       :aria-current="item.isActive ? 'page' : undefined"
       @click="emit('selectRoute', item.route)"
     >
-      <component :is="routeIcon(item.icon)" class="h-4 w-4" aria-hidden="true" />
+      <component :is="extensionRouteIconComponent(item.icon)" class="h-4 w-4" aria-hidden="true" />
     </button>
   </aside>
 </template>

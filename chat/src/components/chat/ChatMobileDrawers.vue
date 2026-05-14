@@ -1,13 +1,12 @@
 <script setup lang="ts">
 import { computed } from "vue";
-import { Grid3X3, Link2, ListChecks } from "lucide-vue-next";
 import WaddlesSidebar from "@/components/chat/WaddlesSidebar.vue";
 import TopicsPanel from "@/components/chat/TopicsPanel.vue";
 import DmPanel from "@/components/chat/DmPanel.vue";
 import SettingsMobileHeader from "@/components/chat/SettingsMobileHeader.vue";
 import ProfilePanel from "@/components/chat/ProfilePanel.vue";
 import AppDrawer from "@/components/ui/AppDrawer.vue";
-import { extensionRouteRailItems, type ExtensionRouteRailIcon } from "./extension-route-rail-model";
+import { extensionRouteIconComponent, extensionRouteRailItems } from "./extension-route-rail-model";
 import type { DiscoveredExtensionRoute } from "@/lib/xmpp/extension-commands";
 import type { ChatAppController } from "@/shell/chat-app-controller";
 
@@ -50,12 +49,6 @@ const drawerExtensionRoutes = computed(() =>
     activeRightPanel.value === "extension",
   ),
 );
-
-function routeIcon(icon: ExtensionRouteRailIcon) {
-  if (icon === "links") return Link2;
-  if (icon === "gallery") return Grid3X3;
-  return ListChecks;
-}
 
 function openExtensionRoute(route: DiscoveredExtensionRoute) {
   const channel = waddles.currentChannel.value;
@@ -186,7 +179,7 @@ function openExtensionRoute(route: DiscoveredExtensionRoute) {
             :aria-current="item.isActive ? 'page' : undefined"
             @click="openExtensionRoute(item.route)"
           >
-            <component :is="routeIcon(item.icon)" class="h-4 w-4" aria-hidden="true" />
+            <component :is="extensionRouteIconComponent(item.icon)" class="h-4 w-4" aria-hidden="true" />
             <span class="truncate text-left">{{ item.label }}</span>
           </button>
         </div>
