@@ -75,6 +75,7 @@ mod frame;
 mod interpret_loop;
 mod outbound;
 mod parse_errors;
+mod registration;
 mod replay;
 mod resource_binding;
 mod sasl;
