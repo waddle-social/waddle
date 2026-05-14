@@ -46,8 +46,8 @@ use waddle_xmpp::{
     },
     registry::{ConnectionRegistry, DeliveryKind, OutboundStanza},
     stream_management::{
-        InMemorySmSessionRegistry, SmClaimCompletion, SmEnable, SmResume, SmSessionRegistry,
-        SmStanza, StreamManagementState, SM_NS,
+        InMemorySmSessionRegistry, SmEnable, SmResume, SmSessionRegistry, SmStanza,
+        StreamManagementState, SM_NS,
     },
     xep::xep0421::OccupantIdSecret,
     Stanza,
