@@ -1,8 +1,18 @@
 //! XEP-0198: Stream Management detached session registry suite.
 
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 use std::time::{Duration, Instant};
 
+use async_trait::async_trait;
 use jid::{BareJid, FullJid, Jid};
+use waddle_xmpp::pending_delivery::SmSessionId;
+use waddle_xmpp::stream_management::persistence::{
+    InMemorySmPersistence, PersistedSession, PersistedUnackedStanza, SmPersistenceError,
+    SmPersistenceStorage,
+};
 use waddle_xmpp::stream_management::{
     DetachedSession, InMemorySmSessionRegistry, SmClaimCompletion, SmSessionRegistry,
 };
@@ -41,6 +51,101 @@ fn chat_stanza(to: &FullJid, body: &str) -> Stanza {
     message.id = Some(format!("msg-{}", body.len()));
     message.bodies.insert(String::new(), Body(body.to_string()));
     Stanza::Message(message)
+}
+
+struct BlockingFirstAtomicStore {
+    inner: InMemorySmPersistence,
+    first_store_seen: AtomicBool,
+    first_store_started: tokio::sync::Notify,
+    allow_first_store: tokio::sync::Notify,
+}
+
+impl BlockingFirstAtomicStore {
+    fn new() -> Self {
+        Self {
+            inner: InMemorySmPersistence::new(),
+            first_store_seen: AtomicBool::new(false),
+            first_store_started: tokio::sync::Notify::new(),
+            allow_first_store: tokio::sync::Notify::new(),
+        }
+    }
+
+    async fn wait_for_first_store(&self) {
+        self.first_store_started.notified().await;
+    }
+
+    fn release_first_store(&self) {
+        self.allow_first_store.notify_one();
+    }
+}
+
+#[async_trait]
+impl SmPersistenceStorage for BlockingFirstAtomicStore {
+    async fn upsert_session(&self, session: PersistedSession) -> Result<(), SmPersistenceError> {
+        self.inner.upsert_session(session).await
+    }
+
+    async fn get_session(
+        &self,
+        stream_id: &SmSessionId,
+    ) -> Result<Option<PersistedSession>, SmPersistenceError> {
+        self.inner.get_session(stream_id).await
+    }
+
+    async fn delete_session(&self, stream_id: &SmSessionId) -> Result<(), SmPersistenceError> {
+        self.inner.delete_session(stream_id).await
+    }
+
+    async fn append_unacked(
+        &self,
+        stanza: PersistedUnackedStanza,
+    ) -> Result<(), SmPersistenceError> {
+        self.inner.append_unacked(stanza).await
+    }
+
+    async fn ack_through(
+        &self,
+        stream_id: &SmSessionId,
+        up_to_sequence: u32,
+    ) -> Result<u64, SmPersistenceError> {
+        self.inner.ack_through(stream_id, up_to_sequence).await
+    }
+
+    async fn list_unacked(
+        &self,
+        stream_id: &SmSessionId,
+    ) -> Result<Vec<PersistedUnackedStanza>, SmPersistenceError> {
+        self.inner.list_unacked(stream_id).await
+    }
+
+    async fn list_expired_sessions(
+        &self,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Vec<PersistedSession>, SmPersistenceError> {
+        self.inner.list_expired_sessions(now).await
+    }
+
+    async fn list_all_sessions(&self) -> Result<Vec<PersistedSession>, SmPersistenceError> {
+        self.inner.list_all_sessions().await
+    }
+
+    async fn store_session_atomic(
+        &self,
+        session: PersistedSession,
+        unacked: Vec<PersistedUnackedStanza>,
+    ) -> Result<(), SmPersistenceError> {
+        if !self.first_store_seen.swap(true, Ordering::SeqCst) {
+            self.first_store_started.notify_waiters();
+            self.allow_first_store.notified().await;
+        }
+
+        self.inner.delete_session(&session.stream_id).await?;
+        self.inner.upsert_session(session).await?;
+        for entry in unacked {
+            self.inner.append_unacked(entry).await?;
+        }
+        Ok(())
+    }
 }
 
 #[tokio::test]
@@ -115,6 +220,62 @@ async fn xep0198_releasing_claim_restores_session_with_handoff_records() {
         .expect("session restored");
     assert_eq!(restored.unacked_stanzas.len(), 1);
     assert!(restored.unacked_stanzas[0].stanza_xml.contains("retry"));
+}
+
+#[tokio::test]
+async fn xep0198_initial_store_does_not_overwrite_concurrent_detached_append() {
+    let persistence = Arc::new(BlockingFirstAtomicStore::new());
+    let storage: Arc<dyn SmPersistenceStorage> = persistence.clone();
+    let registry = Arc::new(InMemorySmSessionRegistry::new().with_persistence(storage));
+    let jid: FullJid = "alice@example.test/race".parse().expect("valid jid");
+    let mut session = detached_session("stream-race-store", jid.as_str());
+    session.outbound_count = 0;
+    session.last_acked = 0;
+
+    let store_registry = Arc::clone(&registry);
+    let store_task = tokio::spawn(async move { store_registry.store_session(session).await });
+
+    tokio::time::timeout(Duration::from_secs(2), persistence.wait_for_first_store())
+        .await
+        .expect("first durable store started");
+
+    let append_registry = Arc::clone(&registry);
+    let append_jid = jid.clone();
+    let append_task = tokio::spawn(async move {
+        append_registry
+            .record_stanza_for_detached_bound_resource(
+                &append_jid,
+                &chat_stanza(&append_jid, "during-store"),
+                chrono::Utc::now(),
+            )
+            .await
+    });
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    persistence.release_first_store();
+
+    tokio::time::timeout(Duration::from_secs(2), store_task)
+        .await
+        .expect("store task completed")
+        .expect("store task joined")
+        .expect("store session");
+    let recorded = tokio::time::timeout(Duration::from_secs(2), append_task)
+        .await
+        .expect("append task completed")
+        .expect("append task joined")
+        .expect("append result");
+    assert!(recorded, "append should find the newly detached session");
+
+    let persisted = persistence
+        .list_unacked(&SmSessionId::new("stream-race-store"))
+        .await
+        .expect("list unacked");
+    assert_eq!(
+        persisted.len(),
+        1,
+        "initial store must not erase a detached append persisted during detach handoff"
+    );
+    assert!(matches!(&*persisted[0].stanza, Stanza::Message(_)));
 }
 
 #[tokio::test]

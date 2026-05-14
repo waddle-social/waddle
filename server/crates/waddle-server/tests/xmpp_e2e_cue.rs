@@ -196,6 +196,8 @@ enum Step {
         #[serde(default)]
         graceful: Option<bool>,
     },
+    #[serde(rename = "waitMillis")]
+    WaitMillis { millis: u64 },
     #[serde(rename = "sendIq")]
     SendIq {
         actor: Actor,
@@ -981,6 +983,9 @@ async fn execute_step(ctx: &mut ScenarioContext, step: &Step) -> Result<()> {
         }
         Step::DisconnectActor { actor, graceful } => {
             disconnect_actor(ctx, actor, graceful.unwrap_or(true)).await?;
+        }
+        Step::WaitMillis { millis } => {
+            tokio::time::sleep(Duration::from_millis(*millis)).await;
         }
         Step::ConnectActor { actor, bind } => {
             reconnect_actor(ctx, actor, bind.unwrap_or(true)).await?;

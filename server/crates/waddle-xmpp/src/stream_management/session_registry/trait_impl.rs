@@ -10,6 +10,8 @@ impl SmSessionRegistry for InMemorySmSessionRegistry {
     async fn store_session(&self, session: DetachedSession) -> Result<(), SmRegistryError> {
         let stream_id = session.stream_id.clone();
         let jid = session.jid.clone();
+        let stream_lock = self.stream_lock(&stream_id)?;
+        let _stream_guard = stream_lock.lock().await;
         // Scope the RwLock guards in a block so they're definitively
         // dropped before any await point. RwLockWriteGuard is not
         // Send, and explicit `drop()` doesn't satisfy the async
@@ -85,6 +87,12 @@ impl SmSessionRegistry for InMemorySmSessionRegistry {
             }
         }
 
+        // `store_session` publishes the session in memory before its first
+        // durable snapshot is written so the cleanup path can keep draining
+        // the old live channel. Hold the same stream lock used by detached
+        // append snapshots until the initial snapshot has landed; otherwise a
+        // concurrent append can persist a newer queue and then get overwritten
+        // by this stale first snapshot.
         self.persist_detached_session_snapshot(&session).await?;
 
         debug!(stream_id = %stream_id, count = count, "Stored detached SM session");

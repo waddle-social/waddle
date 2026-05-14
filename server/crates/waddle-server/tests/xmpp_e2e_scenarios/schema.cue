@@ -33,6 +33,7 @@ package xmpp_e2e_scenarios
 	#StreamManagement |
 	#ConnectActor |
 	#DisconnectActor |
+	#WaitMillis |
 	#SendIq |
 	#ExpectIq |
 	#SendPresence |
@@ -80,6 +81,12 @@ package xmpp_e2e_scenarios
 	kind:     "disconnectActor"
 	actor:    #Actor
 	graceful?: bool
+	...
+}
+
+#WaitMillis: {
+	kind:   "waitMillis"
+	millis: int & >=1
 	...
 }
 

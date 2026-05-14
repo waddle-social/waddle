@@ -1,5 +1,6 @@
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, RwLock};
+use std::hash::{Hash, Hasher};
+use std::sync::{Arc, RwLock};
 
 use tracing::debug;
 
@@ -7,6 +8,8 @@ use super::persistence_codec::{
     detached_to_persisted, parse_xml_to_persisted_unacked, persisted_to_detached,
 };
 use super::{DetachedSession, SmRegistryError, DEFAULT_MAX_SESSIONS};
+
+const STREAM_LOCK_SHARDS: usize = 256;
 
 /// In-memory implementation of the SM session registry, optionally
 /// backed by a [`SmPersistenceStorage`] so detached sessions survive
@@ -23,7 +26,7 @@ use super::{DetachedSession, SmRegistryError, DEFAULT_MAX_SESSIONS};
 pub struct InMemorySmSessionRegistry {
     pub(super) sessions: RwLock<HashMap<String, DetachedSession>>,
     pub(super) claimed_sessions: RwLock<HashMap<String, DetachedSession>>,
-    pub(super) stream_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    pub(super) stream_locks: Vec<Arc<tokio::sync::Mutex<()>>>,
     pub(super) max_sessions: usize,
     /// Optional durable backing store. When `None` the registry is
     /// strictly in-memory (legacy behaviour); production wiring sets
@@ -50,10 +53,7 @@ impl std::fmt::Debug for InMemorySmSessionRegistry {
                 "claimed_count",
                 &self.claimed_sessions.read().map(|s| s.len()).unwrap_or(0),
             )
-            .field(
-                "stream_lock_count",
-                &self.stream_locks.lock().map(|s| s.len()).unwrap_or(0),
-            )
+            .field("stream_lock_shards", &self.stream_locks.len())
             .field("persistence_attached", &self.persistence.is_some())
             .finish()
     }
@@ -65,7 +65,7 @@ impl InMemorySmSessionRegistry {
         Self {
             sessions: RwLock::new(HashMap::new()),
             claimed_sessions: RwLock::new(HashMap::new()),
-            stream_locks: Mutex::new(HashMap::new()),
+            stream_locks: new_stream_locks(),
             max_sessions: DEFAULT_MAX_SESSIONS,
             persistence: None,
         }
@@ -76,7 +76,7 @@ impl InMemorySmSessionRegistry {
         Self {
             sessions: RwLock::new(HashMap::with_capacity(max_sessions.min(10000))),
             claimed_sessions: RwLock::new(HashMap::new()),
-            stream_locks: Mutex::new(HashMap::new()),
+            stream_locks: new_stream_locks(),
             max_sessions,
             persistence: None,
         }
@@ -228,14 +228,10 @@ impl InMemorySmSessionRegistry {
         &self,
         stream_id: &str,
     ) -> Result<Arc<tokio::sync::Mutex<()>>, SmRegistryError> {
-        let mut locks = self
-            .stream_locks
-            .lock()
-            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
-        Ok(locks
-            .entry(stream_id.to_string())
-            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
-            .clone())
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        stream_id.hash(&mut hasher);
+        let shard = (hasher.finish() as usize) % self.stream_locks.len();
+        Ok(Arc::clone(&self.stream_locks[shard]))
     }
 
     pub(super) fn find_session_id_matching(
@@ -338,4 +334,10 @@ impl InMemorySmSessionRegistry {
         self.persist_delete_session(stream_id).await?;
         Ok(false)
     }
+}
+
+fn new_stream_locks() -> Vec<Arc<tokio::sync::Mutex<()>>> {
+    (0..STREAM_LOCK_SHARDS)
+        .map(|_| Arc::new(tokio::sync::Mutex::new(())))
+        .collect()
 }

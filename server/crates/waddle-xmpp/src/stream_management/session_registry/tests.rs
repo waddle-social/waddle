@@ -67,6 +67,29 @@ fn make_test_session_with_unacked(stream_id: &str, unacked: Vec<(u32, String)>) 
 }
 
 #[test]
+fn stream_locks_are_fixed_shards_not_per_stream_entries() {
+    let registry = InMemorySmSessionRegistry::new();
+    let shard_count = registry.stream_locks.len();
+
+    assert!(
+        shard_count > 0,
+        "registry must have at least one lock shard"
+    );
+
+    for index in 0..(shard_count * 4) {
+        let _lock = registry
+            .stream_lock(&format!("historical-stream-{index}"))
+            .expect("stream lock");
+    }
+
+    assert_eq!(
+        registry.stream_locks.len(),
+        shard_count,
+        "unique SM stream ids must not grow an unbounded lock map"
+    );
+}
+
+#[test]
 fn detached_session_overflow_blocks_resume_for_older_client_h() {
     let mut session = make_test_session_with_unacked("stream-overflow", Vec::new());
     session.outbound_count = 0;
