@@ -55,7 +55,7 @@ impl TestServer {
 
     /// Start a waddle-server and seed additional native users.
     pub fn start_with_extra_accounts(extra_accounts: &[(&str, &str)]) -> Self {
-        Self::spawn(extra_accounts, None, None)
+        Self::spawn(extra_accounts, None, None, &[])
     }
 
     /// Start a waddle-server pointed at a persistent SQLite file. Used by tests
@@ -67,7 +67,7 @@ impl TestServer {
         database_url: &str,
         extra_accounts: &[(&str, &str)],
     ) -> Self {
-        Self::spawn(extra_accounts, Some(database_url.to_string()), None)
+        Self::spawn(extra_accounts, Some(database_url.to_string()), None, &[])
     }
 
     /// Start a waddle-server pointed at a persistent SQLite MAM database,
@@ -77,13 +77,27 @@ impl TestServer {
     /// `sqlite::memory:` shortcut the rest of the harness uses).
     #[allow(dead_code)]
     pub fn start_with_persistent_mam(mam_database_url: &str) -> Self {
-        Self::spawn(&[], None, Some(mam_database_url.to_string()))
+        Self::spawn(&[], None, Some(mam_database_url.to_string()), &[])
+    }
+
+    /// Start a waddle-server with additional environment variables
+    /// merged into the spawn. The harness strips parent `WADDLE_*`
+    /// envs to make tests deterministic; this hook is the only path
+    /// for tests that need a specific `WADDLE_*` or feature-toggling
+    /// env present (e.g. `LIVEKIT_*` for A/V call tests).
+    #[allow(dead_code)]
+    pub fn start_with_extra_envs(
+        extra_accounts: &[(&str, &str)],
+        extra_envs: &[(&str, &str)],
+    ) -> Self {
+        Self::spawn(extra_accounts, None, None, extra_envs)
     }
 
     fn spawn(
         extra_accounts: &[(&str, &str)],
         database_url: Option<String>,
         mam_database_url: Option<String>,
+        extra_envs: &[(&str, &str)],
     ) -> Self {
         let bin = env!("CARGO_BIN_EXE_waddle-server");
         let fixed_account_password = format!("ws-test-password-{}", uuid::Uuid::new_v4());
@@ -149,9 +163,11 @@ impl TestServer {
                 "WADDLE_OCCUPANT_ID_SECRET",
                 "integration-test-occupant-id-secret-32-bytes-long",
             )
-            .env("WADDLE_HTTP_PORT_FILE", &port_file)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
+            .env("WADDLE_HTTP_PORT_FILE", &port_file);
+        for (key, value) in extra_envs {
+            command.env(*key, *value);
+        }
+        command.stdout(Stdio::null()).stderr(Stdio::null());
         let child = command
             .spawn()
             .unwrap_or_else(|e| panic!("Failed to start waddle-server at {bin}: {e}"));
@@ -451,6 +467,7 @@ impl WsXmppClient {
         }
     }
 
+    #[allow(dead_code)]
     pub async fn close(mut self) -> Result<(), String> {
         let close =
             xmpp_parsers::minidom::Element::builder("close", "urn:ietf:params:xml:ns:xmpp-framing")

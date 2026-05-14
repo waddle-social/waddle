@@ -343,10 +343,20 @@ impl XmppStateMachine {
                 };
                 self.handle_message_outcome(outcome, message, &full_jid, None)
             }
+            Stanza::Iq(iq) => {
+                // IQs routed peer-to-peer (e.g. Jingle session-initiate
+                // after the server's namespace handler has rewritten the
+                // Waddle transport) bypass the recipient-pass message
+                // pipeline — they're application-specific and have no
+                // archive/inbox/incoming-block semantics. Write straight
+                // to the responder's wire so they can emit the
+                // XEP-0166 §6.4 IQ-result themselves.
+                vec![OutboundEvent::SendStanza(Box::new(Stanza::Iq(iq)))]
+            }
             other => vec![OutboundEvent::Log {
                 level: Level::DEBUG,
                 message: format!(
-                    "Peer-routed {} stanza (only message-pipeline forwarding wired so far)",
+                    "Peer-routed {} stanza (only message + iq pipelines wired so far)",
                     other.name()
                 ),
             }],

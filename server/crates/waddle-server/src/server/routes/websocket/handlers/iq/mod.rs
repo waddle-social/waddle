@@ -286,13 +286,30 @@ pub async fn handle_iq_with_conn_state(
         .await;
     }
 
-    if let Some(target) = iq
-        .to
-        .as_ref()
-        .and_then(|jid| jid.clone().try_into_full().ok())
-    {
-        if target.domain().as_str() == domain {
-            return route_full_jid_iq(iq, state, phase.bound_jid(), target, response_from).await;
+    // Namespace-based dispatch takes priority over the generic
+    // full-jid forwarder ONLY for the handful of namespaces whose
+    // server-side handler must mediate the stanza before it reaches
+    // the peer — e.g. XEP-0166 Jingle stamping a LiveKit join token
+    // onto the Waddle transport in the rewrite path. For other
+    // handler-registered namespaces (XEP-0199 ping, XEP-0030
+    // disco#info, etc.) the historical contract is that IQs
+    // addressed to another user's full JID are forwarded verbatim
+    // and answered by that user's real client, not by our local
+    // handler — preserve that.
+    let payload_mediates_peer_routing = matches!(
+        payload_ns.as_str(),
+        "urn:xmpp:jingle:1" | "urn:xmpp:extdisco:2"
+    );
+    if !payload_mediates_peer_routing {
+        if let Some(target) = iq
+            .to
+            .as_ref()
+            .and_then(|jid| jid.clone().try_into_full().ok())
+        {
+            if target.domain().as_str() == domain {
+                return route_full_jid_iq(iq, state, phase.bound_jid(), target, response_from)
+                    .await;
+            }
         }
     }
 
