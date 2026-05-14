@@ -1,9 +1,20 @@
 use super::super::{
+    frame::handle_xmpp_frame,
     registration::{register_bound_connection_after_frame, RegistrationAfterFrame},
     session_init::load_blocklist_for_bind,
+    state::WsConnState,
     stream_management::SmRegistrationFinalization,
 };
-use super::*;
+use super::{create_test_session, create_test_websocket_state};
+use jid::{BareJid, FullJid};
+use std::sync::Arc;
+use tokio::sync::mpsc;
+use waddle_xmpp::{
+    protocol::{Blocklist, ConnectionPhase, InboundEvent, InboundFrame, StanzaDispatcher},
+    registry::OutboundStanza,
+    Stanza,
+};
+use xmpp_parsers::message::MessageType as XmppMessageType;
 
 // ---------------------------------------------------------------
 // #229 PR11 — DeliveryKind dispatch in the per-connection main loop

@@ -3,7 +3,7 @@ use super::{
     cleanup::cleanup_connection_shutdown,
     frame::handle_xmpp_frame,
     interpret_loop::build_interpret_deps,
-    replay::{drain_outbound_into_replay, drive_interpret_loop},
+    replay::drive_interpret_loop,
     state::WsConnState,
     stream_management::is_countable_stanza,
     transport_xml::{build_stream_features_xml, sasl_failure_xml, sasl_success_xml},
