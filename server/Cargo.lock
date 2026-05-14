@@ -6074,6 +6074,7 @@ dependencies = [
  "uuid",
  "waddle-ecdysis",
  "waddle-extensions",
+ "waddle-sfu",
  "waddle-xmpp",
  "waddle-xmpp-core",
  "wiremock",

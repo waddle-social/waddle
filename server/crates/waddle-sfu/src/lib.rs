@@ -28,7 +28,7 @@ mod token;
 mod turn;
 
 pub use call::{CallId, CallState, Identity, MediaCapabilities};
-pub use config::{ApiKey, ApiSecret, SfuConfig, TurnSharedSecret, WebsocketUrl};
+pub use config::{ApiKey, ApiSecret, FromEnvError, SfuConfig, TurnSharedSecret, WebsocketUrl};
 pub use error::SfuError;
 pub use livekit::LiveKitSfu;
 pub use token::{JoinToken, Jwt, VideoGrant};
