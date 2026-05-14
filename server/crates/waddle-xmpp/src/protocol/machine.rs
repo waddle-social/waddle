@@ -347,10 +347,22 @@ impl XmppStateMachine {
                 // IQs routed peer-to-peer (e.g. Jingle session-initiate
                 // after the server's namespace handler has rewritten the
                 // Waddle transport) bypass the recipient-pass message
-                // pipeline — they're application-specific and have no
-                // archive/inbox/incoming-block semantics. Write straight
-                // to the responder's wire so they can emit the
-                // XEP-0166 §6.4 IQ-result themselves.
+                // pipeline — they're application-specific. We still
+                // enforce XEP-0191 incoming-block here so a blocked
+                // peer can't ring us: an authenticated user who has
+                // added bob@domain to their blocklist must not receive
+                // bob's session-initiate, otherwise the call surfaces
+                // and the block is effectively meaningless.
+                if let Some(sender_bare) = iq.from.as_ref().map(|j| j.to_bare()) {
+                    if self.blocklist.contains(&sender_bare) {
+                        return vec![OutboundEvent::Log {
+                            level: Level::DEBUG,
+                            message: format!(
+                                "Dropping peer-routed IQ from blocked sender {sender_bare}"
+                            ),
+                        }];
+                    }
+                }
                 vec![OutboundEvent::SendStanza(Box::new(Stanza::Iq(iq)))]
             }
             other => vec![OutboundEvent::Log {

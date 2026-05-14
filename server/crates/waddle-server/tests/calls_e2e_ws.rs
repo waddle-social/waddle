@@ -157,6 +157,64 @@ async fn jmi_proceed_round_trips_back_to_caller() {
     assert!(proceed.contains("urn:xmpp:jingle-message:0"));
 }
 
+/// XEP-0191 incoming-block must apply to peer-routed Jingle IQs:
+/// an authenticated user who has bob@domain on their blocklist
+/// must not receive bob's session-initiate. The JingleHandler
+/// rewrites the transport regardless (it cannot see the
+/// recipient's blocklist), but the recipient's state machine
+/// drops the IQ before writing to the wire.
+#[tokio::test]
+async fn session_initiate_from_blocked_peer_is_dropped() {
+    let (_server, mut alice, mut bob) = start_pair().await;
+
+    let alice_full = alice.full_jid.clone().expect("alice bound");
+    let bob_full = bob.full_jid.clone().expect("bob bound");
+
+    // Bob blocks alice via XEP-0191. Wait for the IQ result so we
+    // know the block is committed before alice rings.
+    bob.send(
+        r#"<iq xmlns="jabber:client" type="set" id="block-1">
+             <block xmlns="urn:xmpp:blocking">
+               <item jid="alice@localhost"/>
+             </block>
+           </iq>"#,
+    )
+    .await
+    .expect("bob blocks alice");
+    bob.recv_matching(|f| f.contains(r#"id="block-1""#))
+        .await
+        .expect("block ack");
+
+    let sid = "blocked-call";
+    alice
+        .send(&format!(
+            r#"<iq xmlns="jabber:client" type="set" id="ji-{sid}" to="{bob_full}">
+                 <jingle xmlns="urn:xmpp:jingle:1" action="session-initiate"
+                         initiator="{alice_full}" sid="{sid}">
+                   <content creator="initiator" name="audio">
+                     <description xmlns="urn:xmpp:jingle:apps:rtp:1" media="audio">
+                       <payload-type id="111" name="opus" clockrate="48000" channels="2"/>
+                     </description>
+                     <transport xmlns="urn:waddle:transports:livekit:0"/>
+                   </content>
+                 </jingle>
+               </iq>"#
+        ))
+        .await
+        .expect("alice session-initiate");
+
+    let dropped = bob
+        .recv_matching(|frame| {
+            frame.contains("session-initiate") && frame.contains(&format!(r#"sid="{sid}""#))
+                || frame.contains(&format!(r#"sid='{sid}'"#))
+        })
+        .await;
+    assert!(
+        dropped.is_err(),
+        "blocked peer's session-initiate must not reach bob; got: {dropped:?}"
+    );
+}
+
 #[tokio::test]
 async fn session_initiate_rewrites_empty_waddle_transport() {
     let (_server, mut alice, mut bob) = start_pair().await;
