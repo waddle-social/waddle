@@ -13,6 +13,15 @@
 }
 
 /* Rich text rendered from XEP metadata and TipTap composer nodes. */
+/* `overflow-wrap: anywhere` (not `break-word`) is required so an unbreakable
+   token shrinks the box's min-content intrinsic size to a single character —
+   otherwise long URLs/slugs hold the message body wider than the pane and
+   produce a horizontal scrollbar on flex/grid layouts. The composer applies
+   the same rule on `.ProseMirror` (see ChatEditor.vue). */
+.styled-body {
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
 :where(.styled-body, .chat-editor .ProseMirror) p {
   margin: 0;
 }

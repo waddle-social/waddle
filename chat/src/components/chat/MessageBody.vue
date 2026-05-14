@@ -115,7 +115,7 @@ watch(
       v-if="shouldRenderTextBody"
       ref="styledBodyRef"
       :class="[
-        'type-message-body break-words styled-body',
+        'type-message-body styled-body',
         compact ? 'type-field-sm line-clamp-3' : '',
       ]"
       v-html="styledHtml"
