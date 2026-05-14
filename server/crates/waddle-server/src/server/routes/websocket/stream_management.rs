@@ -1,6 +1,7 @@
 use super::transport_xml::build_handled_count_too_high_stream_error;
 use super::*;
 use super::{cleanup::cleanup_invalidated_detached_session, state::WsConnState};
+use waddle_xmpp::stream_management::{SmFailed, SmResumed};
 
 /// Returns true if the frame is an XMPP stanza that counts toward XEP-0198
 /// handled/sent counters. Only `<iq>`, `<message>`, `<presence>` qualify;
@@ -45,25 +46,33 @@ pub(super) fn sm_show_name(show: &xmpp_parsers::presence::Show) -> &'static str 
 /// `handle_sm_resume` claims the detached session before bind so the old
 /// stream cannot be resumed twice, but detached fanout can still append
 /// stanzas during the claim-to-registration handoff. This boundary completes
-/// that claim under the stream registry lock, emits the final `<resumed/>` or
-/// XEP-0198 `<failed/>`, and invalidates superseded detached sessions for
-/// fresh binds.
+/// that claim under the stream registry lock, returns the typed final
+/// XEP-0198 outcome, and invalidates superseded detached sessions for fresh
+/// binds.
 pub(super) async fn finalize_sm_after_registry_registration(
     state: &WebSocketState,
     conn: &mut WsConnState,
     jid: &FullJid,
     owner: &Arc<std::sync::atomic::AtomicBool>,
-    responses: Vec<String>,
-) -> Vec<String> {
+) -> SmRegistrationFinalization {
     if let Some(stream_id) = conn.pending_resume_stream_id.take() {
-        return complete_pending_resume_claim(state, conn, jid, owner, stream_id, responses).await;
+        return complete_pending_resume_claim(state, conn, jid, owner, stream_id).await;
     }
 
     if !conn.phase.is_resumed() {
         invalidate_older_detached_sessions(state, jid, owner).await;
     }
 
-    responses
+    SmRegistrationFinalization::KeepExistingResponses
+}
+
+pub(super) enum SmRegistrationFinalization {
+    KeepExistingResponses,
+    ReplaceWithResumed {
+        resumed: SmResumed,
+        replay_after_h: u32,
+    },
+    ReplaceWithFailed(SmFailed),
 }
 
 async fn complete_pending_resume_claim(
@@ -72,8 +81,7 @@ async fn complete_pending_resume_claim(
     jid: &FullJid,
     owner: &Arc<std::sync::atomic::AtomicBool>,
     stream_id: String,
-    responses: Vec<String>,
-) -> Vec<String> {
+) -> SmRegistrationFinalization {
     let resume_h = conn.pending_resume_h.take();
     let completion = match resume_h {
         Some(h) => {
@@ -94,20 +102,17 @@ async fn complete_pending_resume_claim(
         }
     };
     let mut remove_resumable_sidecar = true;
-    let responses = match completion {
+    let finalization = match completion {
         Ok(Some(SmClaimCompletion::Resumed(detached))) => match resume_h {
             Some(h) => {
                 conn.sm_state.restore_from_session(&detached);
                 conn.sm_state.acknowledge(h);
-                let mut resumed = vec![waddle_xmpp::stream_management::SmResumed::new(
-                    stream_id.clone(),
-                    conn.sm_state.get_inbound_count(),
-                )
-                .to_xml()];
-                resumed.extend(conn.sm_state.get_stanzas_to_resend(h));
-                resumed
+                SmRegistrationFinalization::ReplaceWithResumed {
+                    resumed: SmResumed::new(stream_id.clone(), conn.sm_state.get_inbound_count()),
+                    replay_after_h: h,
+                }
             }
-            None => responses,
+            None => SmRegistrationFinalization::KeepExistingResponses,
         },
         Ok(Some(SmClaimCompletion::ReplayWindowTruncated(detached))) => {
             warn!(
@@ -119,40 +124,38 @@ async fn complete_pending_resume_claim(
             );
             reset_registered_resume_attempt(state, conn, jid, owner);
             remove_resumable_sidecar = false;
-            vec![waddle_xmpp::stream_management::SmFailed::resume_failed(
+            SmRegistrationFinalization::ReplaceWithFailed(SmFailed::resume_failed(
                 "resource-constraint",
                 detached.inbound_count,
-            )
-            .to_xml()]
+            ))
         }
         Ok(Some(SmClaimCompletion::Expired(detached))) => {
             warn!(stream_id = %stream_id, jid = %jid, "SM resume claim expired before completion");
             cleanup_invalidated_detached_session(state, detached, Some(owner)).await;
             close_registered_resume_attempt(state, conn, jid, owner);
-            vec![
-                waddle_xmpp::stream_management::SmFailed::with_condition("item-not-found").to_xml(),
-            ]
+            SmRegistrationFinalization::ReplaceWithFailed(SmFailed::with_condition(
+                "item-not-found",
+            ))
         }
         Ok(None) => {
             warn!(stream_id = %stream_id, jid = %jid, "SM resume claim disappeared before completion");
             close_registered_resume_attempt(state, conn, jid, owner);
-            vec![
-                waddle_xmpp::stream_management::SmFailed::with_condition("item-not-found").to_xml(),
-            ]
+            SmRegistrationFinalization::ReplaceWithFailed(SmFailed::with_condition(
+                "item-not-found",
+            ))
         }
         Err(error) => {
             warn!(stream_id = %stream_id, jid = %jid, error = %error, "Failed to complete SM resume claim");
             close_registered_resume_attempt(state, conn, jid, owner);
-            vec![
-                waddle_xmpp::stream_management::SmFailed::with_condition("internal-server-error")
-                    .to_xml(),
-            ]
+            SmRegistrationFinalization::ReplaceWithFailed(SmFailed::with_condition(
+                "internal-server-error",
+            ))
         }
     };
     if remove_resumable_sidecar {
         state.deps.protocol.resumable_sessions.remove(&stream_id);
     }
-    responses
+    finalization
 }
 
 async fn invalidate_older_detached_sessions(

@@ -8,6 +8,7 @@ use super::{
     state::WsConnState,
     stream_management::{
         finalize_sm_after_registry_registration, is_countable_stanza, sm_show_name,
+        SmRegistrationFinalization,
     },
 };
 
@@ -208,14 +209,28 @@ async fn handle_xmpp_websocket(socket: WebSocket, state: Arc<WebSocketState>) {
                                             conn.presence_priority,
                                         );
                                 }
-                                responses = finalize_sm_after_registry_registration(
+                                match finalize_sm_after_registry_registration(
                                     state.as_ref(),
                                     &mut conn,
                                     &jid,
                                     &owner,
-                                    responses,
                                 )
-                                .await;
+                                .await
+                                {
+                                    SmRegistrationFinalization::KeepExistingResponses => {}
+                                    SmRegistrationFinalization::ReplaceWithResumed {
+                                        resumed,
+                                        replay_after_h,
+                                    } => {
+                                        responses = vec![resumed.to_xml()];
+                                        responses.extend(
+                                            conn.sm_state.get_stanzas_to_resend(replay_after_h),
+                                        );
+                                    }
+                                    SmRegistrationFinalization::ReplaceWithFailed(failed) => {
+                                        responses = vec![failed.to_xml()];
+                                    }
+                                }
                                 info!(
                                     jid = %jid,
                                     resumed = conn.phase.is_resumed(),
