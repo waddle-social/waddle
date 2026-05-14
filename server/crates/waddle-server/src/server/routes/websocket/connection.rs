@@ -1,12 +1,14 @@
 use super::*;
 use super::{
-    cleanup::{cleanup_connection_shutdown, cleanup_invalidated_detached_session},
+    cleanup::cleanup_connection_shutdown,
     frame::handle_xmpp_frame,
     outbound::handle_outbound_stanza,
     send::{send_ws_message, send_ws_text_frames},
     session_init::{build_internal_server_error_stream_error, load_blocklist_for_bind},
     state::WsConnState,
-    stream_management::{is_countable_stanza, sm_show_name},
+    stream_management::{
+        finalize_sm_after_registry_registration, is_countable_stanza, sm_show_name,
+    },
 };
 
 /// Create the WebSocket router
@@ -206,134 +208,14 @@ async fn handle_xmpp_websocket(socket: WebSocket, state: Arc<WebSocketState>) {
                                             conn.presence_priority,
                                         );
                                 }
-                                if let Some(stream_id) = conn.pending_resume_stream_id.take() {
-                                    let resume_h = conn.pending_resume_h.take();
-                                    let completion = match resume_h {
-                                        Some(h) => state
-                                            .deps
-                                            .protocol
-                                            .sm_session_registry
-                                            .complete_claim_if_resumable(&stream_id, h)
-                                            .await,
-                                        None => state
-                                            .deps
-                                            .protocol
-                                            .sm_session_registry
-                                            .complete_claim(&stream_id)
-                                            .await,
-                                    };
-                                    let mut remove_resumable_sidecar = true;
-                                    match completion {
-                                        Ok(Some(SmClaimCompletion::Resumed(detached))) => {
-                                            if let Some(h) = resume_h {
-                                                conn.sm_state.restore_from_session(&detached);
-                                                conn.sm_state.acknowledge(h);
-                                                responses = vec![
-                                                    waddle_xmpp::stream_management::SmResumed::new(
-                                                        stream_id.clone(),
-                                                        conn.sm_state.get_inbound_count(),
-                                                    )
-                                                    .to_xml(),
-                                                ];
-                                                responses
-                                                    .extend(conn.sm_state.get_stanzas_to_resend(h));
-                                            }
-                                        }
-                                        Ok(Some(SmClaimCompletion::ReplayWindowTruncated(
-                                            detached,
-                                        ))) => {
-                                            warn!(
-                                                stream_id = %stream_id,
-                                                jid = %jid,
-                                                client_h = ?resume_h,
-                                                replay_gap_through = ?detached.replay_gap_through,
-                                                "SM resume claim gained a replay gap before completion"
-                                            );
-                                            let _ = state
-                                                .deps
-                                                .protocol
-                                                .connection_registry
-                                                .unregister_if_owner(&jid, &owner);
-                                            conn.registry_owner = None;
-                                            conn.phase = ConnectionPhase::authenticated(&jid);
-                                            conn.state_machine = None;
-                                            conn.sm_state = StreamManagementState::new();
-                                            conn.suppress_sm_record_next_batch = false;
-                                            responses = vec![
-                                                waddle_xmpp::stream_management::SmFailed::resume_failed(
-                                                    "resource-constraint",
-                                                    detached.inbound_count,
-                                                )
-                                                .to_xml(),
-                                            ];
-                                            remove_resumable_sidecar = false;
-                                        }
-                                        Ok(Some(SmClaimCompletion::Expired(detached))) => {
-                                            warn!(stream_id = %stream_id, jid = %jid, "SM resume claim expired before completion");
-                                            cleanup_invalidated_detached_session(
-                                                state.as_ref(),
-                                                detached,
-                                                Some(&owner),
-                                            )
-                                            .await;
-                                            let _ = state
-                                                .deps
-                                                .protocol
-                                                .connection_registry
-                                                .unregister_if_owner(&jid, &owner);
-                                            conn.registry_owner = None;
-                                            conn.phase = ConnectionPhase::closing(Some(jid.clone()));
-                                            responses = vec![waddle_xmpp::stream_management::SmFailed::with_condition("item-not-found").to_xml()];
-                                        }
-                                        Ok(None) => {
-                                            warn!(stream_id = %stream_id, jid = %jid, "SM resume claim disappeared before completion");
-                                            let _ = state
-                                                .deps
-                                                .protocol
-                                                .connection_registry
-                                                .unregister_if_owner(&jid, &owner);
-                                            conn.registry_owner = None;
-                                            conn.phase = ConnectionPhase::closing(Some(jid.clone()));
-                                            responses = vec![waddle_xmpp::stream_management::SmFailed::with_condition("item-not-found").to_xml()];
-                                        }
-                                        Err(error) => {
-                                            warn!(stream_id = %stream_id, jid = %jid, error = %error, "Failed to complete SM resume claim");
-                                            let _ = state
-                                                .deps
-                                                .protocol
-                                                .connection_registry
-                                                .unregister_if_owner(&jid, &owner);
-                                            conn.registry_owner = None;
-                                            conn.phase = ConnectionPhase::closing(Some(jid.clone()));
-                                            responses = vec![waddle_xmpp::stream_management::SmFailed::with_condition("internal-server-error").to_xml()];
-                                        }
-                                    }
-                                    if remove_resumable_sidecar {
-                                        state.deps.protocol.resumable_sessions.remove(&stream_id);
-                                    }
-                                } else if !conn.phase.is_resumed() {
-                                    match state
-                                        .deps
-                                        .protocol
-                                        .sm_session_registry
-                                        .invalidate_sessions_for_jid(&jid)
-                                        .await
-                                    {
-                                        Ok(removed) => {
-                                            for detached in removed {
-                                                cleanup_invalidated_detached_session(
-                                                    state.as_ref(),
-                                                    detached,
-                                                    Some(&owner),
-                                                )
-                                                .await;
-                                            }
-                                        }
-                                        Err(error) => {
-                                            warn!(jid = %jid, error = %error, "Failed to invalidate older detached SM sessions for fresh bind");
-                                        }
-                                    }
-                                }
+                                responses = finalize_sm_after_registry_registration(
+                                    state.as_ref(),
+                                    &mut conn,
+                                    &jid,
+                                    &owner,
+                                    responses,
+                                )
+                                .await;
                                 info!(
                                     jid = %jid,
                                     resumed = conn.phase.is_resumed(),
