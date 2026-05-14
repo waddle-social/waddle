@@ -272,17 +272,21 @@
  * inside MessageCard via v-if. The avatar slot becomes a hover-revealed
  * timestamp gutter so the user can still read the per-message time. */
 .chat-message-grouped {
+  min-height: var(--chat-message-first-line-box);
   margin-block-start: calc(-1 * var(--chat-message-row-gap, var(--space-xs)));
 }
 
 .chat-message-time-gutter {
   display: flex;
+  height: var(--chat-message-first-line-box);
   align-items: center;
   justify-content: center;
   opacity: 0;
   transition: opacity 0.12s ease-out;
   font-variant-numeric: tabular-nums;
   pointer-events: none;
+  white-space: nowrap;
+  overflow: hidden;
 }
 
 .chat-message-grouped:hover .chat-message-time-gutter,

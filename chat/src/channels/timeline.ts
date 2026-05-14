@@ -100,20 +100,26 @@ export function isFeedTimelineMessage(message: TimelineMessage): boolean {
   return !message.threadId || message.id === message.threadId;
 }
 
+const TIMELINE_STAMP_FORMATTER = new Intl.DateTimeFormat("en", {
+  hour: "2-digit",
+  minute: "2-digit",
+  month: "short",
+  day: "numeric",
+  hour12: false,
+});
+
+const TIMELINE_TIME_OF_DAY_FORMATTER = new Intl.DateTimeFormat("en", {
+  hour: "2-digit",
+  minute: "2-digit",
+  hour12: false,
+});
+
 export function formatTimelineStamp(value: string) {
-  return new Intl.DateTimeFormat("en", {
-    hour: "2-digit",
-    minute: "2-digit",
-    month: "short",
-    day: "numeric",
-  }).format(new Date(value));
+  return TIMELINE_STAMP_FORMATTER.format(new Date(value));
 }
 
 export function formatTimelineTimeOfDay(value: string) {
-  return new Intl.DateTimeFormat("en", {
-    hour: "2-digit",
-    minute: "2-digit",
-  }).format(new Date(value));
+  return TIMELINE_TIME_OF_DAY_FORMATTER.format(new Date(value));
 }
 
 const DAY_DIVIDER_FORMATTER = new Intl.DateTimeFormat("en", {

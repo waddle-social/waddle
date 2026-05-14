@@ -80,7 +80,6 @@ export function useChannelMessages(
   const mentionedChannelCounts = ref<Record<string, number>>({});
   const lastMentionActivity = ref<RoomActivityEvent | null>(null);
   const roomAvatarHashes = ref<Record<string, string>>({});
-  let slowModeTimer: ReturnType<typeof setInterval> | null = null;
 
   const chatStates = useChannelChatStates({
     xmppClient,
@@ -295,20 +294,6 @@ export function useChannelMessages(
       // XEP-0486: Track room avatar hashes from presence
       client.setRoomAvatarHandler((roomJid, hash) => {
         roomAvatarHashes.value = { ...roomAvatarHashes.value, [roomJid]: hash };
-      });
-      client.setSlowModeHandler((seconds) => {
-        slowModeCooldown.value = seconds;
-        if (slowModeTimer) clearInterval(slowModeTimer);
-        slowModeTimer = setInterval(() => {
-          slowModeCooldown.value--;
-          if (slowModeCooldown.value <= 0) {
-            slowModeCooldown.value = 0;
-            if (slowModeTimer) {
-              clearInterval(slowModeTimer);
-              slowModeTimer = null;
-            }
-          }
-        }, 1000);
       });
     } else {
       // $xmppStatus is reset by XmppProvider on logout/unmount.

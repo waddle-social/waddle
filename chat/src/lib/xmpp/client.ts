@@ -237,7 +237,6 @@ export class BrowserXmppClient {
   private roomMemberJids: Record<string, string> = {};
   private memberJidHandler: ((nick: string, bareJid: string) => void) | null = null;
   private hatsHandler: ((hats: RoomHats) => void) | null = null;
-  private slowModeHandler: ((seconds: number) => void) | null = null;
   private activityHandler: ((event: RoomActivityEvent) => void) | null = null;
   private inboxPushHandler: ((entry: InboxEntry) => void) | null = null;
   private roomAvatarHandler: ((roomJid: string, hash: string) => void) | null = null;
@@ -252,7 +251,6 @@ export class BrowserXmppClient {
   private connectPromise: Promise<void> | null = null;
   private connected = false;
   private destroying = false;
-  private refreshSession: (() => Promise<WaddleSession | null>) | null = null;
   private currentRoom: string | null = null;
   private roomSwitchPromise: Promise<void> | null = null;
   private roomSwitchTarget: string | null = null;
@@ -297,7 +295,6 @@ export class BrowserXmppClient {
   setPresenceUpdateHandler(h: (event: PresenceUpdateEvent) => void) { this.presenceUpdateHandler = h; }
   setMemberJidHandler(h: (nick: string, bareJid: string) => void) { this.memberJidHandler = h; }
   setHatsHandler(h: (hats: RoomHats) => void) { this.hatsHandler = h; }
-  setSlowModeHandler(h: (seconds: number) => void) { this.slowModeHandler = h; }
   setActivityHandler(h: (event: RoomActivityEvent) => void) { this.activityHandler = h; }
   setInboxPushHandler(h: (entry: InboxEntry) => void) { this.inboxPushHandler = h; }
   setRoomAvatarHandler(h: (roomJid: string, hash: string) => void) { this.roomAvatarHandler = h; }
@@ -308,7 +305,6 @@ export class BrowserXmppClient {
   setMessageDeliveryFailureHandler(h: (messageId: string) => void) { this.messageDeliveryFailureHandler = h; }
   setQueuedMessageStatusHandler(h: (messageId: string, status: "queued" | "sending") => void) { this.queuedMessageStatusHandler = h; }
   setSessionLifecycleHandler(h: (event: SessionLifecycleEvent) => void) { this.sessionLifecycleHandler = h; }
-  setRefreshSession(fn: () => Promise<WaddleSession | null>) { this.refreshSession = fn; }
 
   onMessageAcked(hook: (id: string, meta: { kind: "room" | "dm"; latencyMs: number }) => void) { this.messageAckHooks.push(hook); }
   onMessageDeliveryFailed(hook: (id: string, meta: { kind: "room" | "dm" }) => void) { this.messageFailHooks.push(hook); }
