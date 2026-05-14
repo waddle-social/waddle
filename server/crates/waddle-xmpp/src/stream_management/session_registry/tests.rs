@@ -23,6 +23,7 @@ fn make_test_session_for_jid(stream_id: &str, jid: FullJid) -> DetachedSession {
         inbound_count: 10,
         outbound_count: 15,
         last_acked: 12,
+        replay_gap_through: None,
         unacked_stanzas: vec![
             DetachedUnackedStanza {
                 sequence: 13,
@@ -63,6 +64,31 @@ fn make_test_session_with_unacked(stream_id: &str, unacked: Vec<(u32, String)>) 
         })
         .collect();
     s
+}
+
+#[test]
+fn detached_session_overflow_blocks_resume_for_older_client_h() {
+    let mut session = make_test_session_with_unacked("stream-overflow", Vec::new());
+    session.outbound_count = 0;
+    session.last_acked = 0;
+
+    for sequence in 1..=(crate::stream_management::DEFAULT_MAX_UNACKED_QUEUE_SIZE as u32 + 1) {
+        session.record_detached_outbound_at(
+            sequence,
+            format!("<message id='m{sequence}'/>"),
+            Utc::now(),
+        );
+    }
+
+    assert_eq!(session.replay_gap_through, Some(1));
+    assert!(
+        !session.can_resume_from(0),
+        "resume must fail when the client still needs an evicted detached stanza"
+    );
+    assert!(
+        session.can_resume_from(1),
+        "resume can proceed once the client's h covers the evicted sequence"
+    );
 }
 
 #[tokio::test]
@@ -579,6 +605,7 @@ fn realistic_test_session_for_jid(stream_id: &str, jid: FullJid) -> DetachedSess
         inbound_count: 4,
         outbound_count: 7,
         last_acked: 5,
+        replay_gap_through: None,
         unacked_stanzas: vec![
             DetachedUnackedStanza {
                 sequence: 6,
@@ -768,6 +795,7 @@ async fn restore_skips_and_deletes_expired_sessions() {
         inbound_count: 0,
         outbound_count: 0,
         last_acked: 0,
+        replay_gap_through: None,
         max_resume_time: Some(60),
         detached_at: now - chrono::Duration::seconds(120),
         max_resume_duration: Duration::from_secs(60),

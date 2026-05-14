@@ -40,7 +40,7 @@ pub enum UnackedPushResult {
     Accepted,
     /// Queue was at capacity; the oldest stanza was evicted to make
     /// room. The evicted entry is returned so the caller can log its
-    /// sequence number.
+    /// sequence number and mark the replay window as truncated.
     Evicted(UnackedStanza),
 }
 
@@ -99,9 +99,9 @@ impl UnackedQueue {
     /// Returns `UnackedPushResult::Accepted` when the queue had
     /// capacity, or `UnackedPushResult::Evicted(stanza)` when the
     /// queue was full and the oldest entry had to be removed to make
-    /// room. Callers MUST observe the evicted variant (log + metric)
-    /// — a non-zero eviction rate means subsequent `<resumed/>`
-    /// replays will be missing those stanzas entirely.
+    /// room. Callers MUST observe the evicted variant (log + metric +
+    /// replay-gap marker) so later `<resume/>` requests with older `h`
+    /// values can fail instead of replaying an incomplete window.
     #[must_use = "eviction must be observed so missing-after-resume drops are not silent"]
     pub fn push(&mut self, sequence: u32, stanza_xml: String) -> UnackedPushResult {
         self.push_with_receipt_at(sequence, stanza_xml, Utc::now())
@@ -219,7 +219,7 @@ impl UnackedQueue {
 ///
 /// XEP-0198 specifies that sequence numbers wrap at 2^32.
 /// Per RFC 1982-like comparison, we use a window of 2^31.
-fn sequence_lte(a: u32, b: u32) -> bool {
+pub(super) fn sequence_lte(a: u32, b: u32) -> bool {
     // If a == b, it's equal
     if a == b {
         return true;
@@ -231,7 +231,7 @@ fn sequence_lte(a: u32, b: u32) -> bool {
 }
 
 /// Check if sequence a > b, handling wrap-around.
-fn sequence_gt(a: u32, b: u32) -> bool {
+pub(super) fn sequence_gt(a: u32, b: u32) -> bool {
     !sequence_lte(a, b)
 }
 

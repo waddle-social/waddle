@@ -37,6 +37,7 @@ package xmpp_e2e_scenarios
 	#ExpectIq |
 	#SendPresence |
 	#SendMessage |
+	#SendMessageBurst |
 	#ExpectMessage |
 	#ExpectCarbon |
 	#JoinMuc |
@@ -60,21 +61,25 @@ package xmpp_e2e_scenarios
 #StreamManagement: {
 	kind:   "streamManagement"
 	actor:  #Actor
-	action: "enable" | "requestAck"
+	action: "enable" | "requestAck" | "resume"
 	resume?: bool
 	max?:    int & >=1 & <=4294967295
+	previdFrom?: string
+	h?:          int & >=0 & <=4294967295
 	...
 }
 
 #ConnectActor: {
 	kind:  "connectActor"
 	actor: #Actor
+	bind?: bool
 	...
 }
 
 #DisconnectActor: {
-	kind:  "disconnectActor"
-	actor: #Actor
+	kind:     "disconnectActor"
+	actor:    #Actor
+	graceful?: bool
 	...
 }
 
@@ -121,6 +126,17 @@ package xmpp_e2e_scenarios
 	id?:  string
 	body?: string
 	payloads?: [...#Payload]
+	...
+}
+
+#SendMessageBurst: {
+	kind:       "sendMessageBurst"
+	from:       #Actor
+	#Destination
+	type:       *"chat" | "normal" | "groupchat"
+	idPrefix:   string
+	bodyPrefix: string
+	count:      int & >=1 & <=4096
 	...
 }
 
@@ -259,6 +275,7 @@ package xmpp_e2e_scenarios
 	absent?: [...string]
 	elements?: [...#XmlElement]
 	absentElements?: [...#XmlElement]
+	captures?: [...#AttributeCapture]
 	...
 }
 

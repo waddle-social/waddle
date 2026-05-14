@@ -17,6 +17,7 @@ fn fixture_session(stream_id: &str) -> PersistedSession {
         inbound_count: 0,
         outbound_count: 0,
         last_acked: 0,
+        replay_gap_through: Some(9),
         max_resume_time: Some(60),
         detached_at: Utc::now(),
         max_resume_duration: Duration::from_secs(60),
@@ -56,6 +57,7 @@ async fn upsert_get_round_trip() {
     let loaded = store.get_session(&sid("stream-1")).await.unwrap().unwrap();
     assert_eq!(loaded.user_id, s.user_id);
     assert!(loaded.carbons_enabled);
+    assert_eq!(loaded.replay_gap_through, Some(9));
 }
 
 #[tokio::test]

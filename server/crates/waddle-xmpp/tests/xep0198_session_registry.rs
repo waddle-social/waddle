@@ -17,6 +17,7 @@ fn detached_session(stream_id: &str, jid: &str) -> DetachedSession {
         inbound_count: 7,
         outbound_count: 11,
         last_acked: 10,
+        replay_gap_through: None,
         unacked_stanzas: Vec::new(),
         max_resume_time: Some(300),
         detached_at: Instant::now(),
@@ -666,6 +667,51 @@ async fn xep0198_record_outbound_for_detached_stream_at_persists_durably() {
     );
     assert_eq!(unacked[0].sequence, 42);
     assert_eq!(unacked[0].original_receipt_at, t1);
+}
+
+/// Presence replay for available detached resources is also part of the
+/// XEP-0198 unacked outbound queue. It must be mirrored durably at append
+/// time, not only in the in-memory detached snapshot.
+#[tokio::test]
+async fn xep0198_record_available_resource_presence_persists_durably() {
+    use std::sync::Arc;
+    use waddle_xmpp::stream_management::persistence::InMemorySmPersistence;
+
+    let persistence: Arc<dyn waddle_xmpp::stream_management::persistence::SmPersistenceStorage> =
+        Arc::new(InMemorySmPersistence::new());
+    let registry = InMemorySmSessionRegistry::new().with_persistence(Arc::clone(&persistence));
+    let jid: FullJid = "alice@example.com/phone".parse().expect("valid jid");
+    registry
+        .store_session(detached_session("stream-available", jid.as_str()))
+        .await
+        .expect("store");
+
+    let mut presence = xmpp_parsers::presence::Presence::new(xmpp_parsers::presence::Type::None);
+    presence
+        .statuses
+        .insert(String::new(), "still-online".to_string());
+    let t1 = chrono::Utc::now();
+
+    let recorded = registry
+        .record_stanza_for_detached_available_resource(&jid, &Stanza::Presence(presence), t1)
+        .await
+        .expect("record available-resource presence");
+    assert!(recorded, "available detached resource was found");
+
+    let unacked = persistence
+        .list_unacked(&waddle_xmpp::pending_delivery::SmSessionId::new(
+            "stream-available",
+        ))
+        .await
+        .expect("list_unacked");
+    assert_eq!(
+        unacked.len(),
+        1,
+        "available-resource presence replay must be persisted at append time"
+    );
+    assert_eq!(unacked[0].sequence, 12);
+    assert_eq!(unacked[0].original_receipt_at, t1);
+    assert!(matches!(&*unacked[0].stanza, Stanza::Presence(_)));
 }
 
 /// Qodo finding on PR #409: `record_outbound_for_detached_stream_at`

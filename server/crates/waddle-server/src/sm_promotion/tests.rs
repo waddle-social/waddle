@@ -34,6 +34,7 @@ fn detached_session_with_unacked(
         inbound_count: 0,
         outbound_count: unacked_xml.len() as u32,
         last_acked: 0,
+        replay_gap_through: None,
         unacked_stanzas: unacked_xml
             .into_iter()
             .enumerate()
@@ -582,6 +583,7 @@ async fn promoted_pending_row_carries_per_stanza_original_receipt_at() {
         inbound_count: 0,
         outbound_count: 1,
         last_acked: 0,
+        replay_gap_through: None,
         unacked_stanzas: vec![waddle_xmpp::stream_management::DetachedUnackedStanza {
             sequence: 1,
             stanza_xml: dm_xml("bob@elsewhere/x", "alice@example.com", "missed me"),

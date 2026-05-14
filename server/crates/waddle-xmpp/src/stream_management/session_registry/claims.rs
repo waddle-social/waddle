@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 use jid::FullJid;
 use tracing::debug;
 
@@ -31,13 +29,26 @@ impl InMemorySmSessionRegistry {
     /// implementation deleted durable rows up-front, losing
     /// stanzas on any partial-promotion failure.)
     pub async fn drain_all_for_shutdown(&self) -> Result<Vec<DetachedSession>, SmRegistryError> {
-        let drained: Vec<DetachedSession> = {
-            let mut sessions = self
+        let stream_ids: Vec<String> = {
+            let sessions = self
+                .sessions
+                .read()
+                .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+            sessions.keys().cloned().collect()
+        };
+        let mut drained = Vec::with_capacity(stream_ids.len());
+        for stream_id in &stream_ids {
+            let stream_lock = self.stream_lock(stream_id)?;
+            let _stream_guard = stream_lock.lock().await;
+            if let Some(session) = self
                 .sessions
                 .write()
-                .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
-            sessions.drain().map(|(_, s)| s).collect()
-        };
+                .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?
+                .remove(stream_id)
+            {
+                drained.push(session);
+            }
+        }
         Ok(drained)
     }
 
@@ -73,6 +84,18 @@ impl InMemorySmSessionRegistry {
     /// the sessions, caller promotes each, caller calls
     /// `confirm_drained` per session after successful promotion.
     pub async fn confirm_drained(&self, stream_id: &str) {
+        let stream_lock = match self.stream_lock(stream_id) {
+            Ok(lock) => lock,
+            Err(error) => {
+                debug!(
+                    stream_id = %stream_id,
+                    error = %error,
+                    "graceful-shutdown drain: stream lock lookup failed before durable delete"
+                );
+                return;
+            }
+        };
+        let _stream_guard = stream_lock.lock().await;
         if let Err(error) = self.persist_delete_session(stream_id).await {
             debug!(
                 stream_id = %stream_id,
@@ -108,13 +131,38 @@ impl InMemorySmSessionRegistry {
     /// restart can retry. (Copilot review on PR #346: previous
     /// up-front delete lost stanzas on partial-promotion failure.)
     pub async fn drain_expired(&self) -> Result<Vec<DetachedSession>, SmRegistryError> {
-        let drained: Vec<DetachedSession> = {
-            let mut sessions = self
+        let expired_ids: Vec<String> = {
+            let sessions = self
                 .sessions
-                .write()
+                .read()
                 .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
-            drain_expired_internal(&mut sessions)
+            sessions
+                .iter()
+                .filter(|(_, session)| session.is_expired())
+                .map(|(stream_id, _)| stream_id.clone())
+                .collect()
         };
+        let mut drained = Vec::with_capacity(expired_ids.len());
+        for stream_id in &expired_ids {
+            let stream_lock = self.stream_lock(stream_id)?;
+            let _stream_guard = stream_lock.lock().await;
+            let removed = {
+                let mut sessions = self
+                    .sessions
+                    .write()
+                    .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+                match sessions.get(stream_id) {
+                    Some(session) if session.is_expired() => sessions.remove(stream_id),
+                    _ => None,
+                }
+            };
+            if let Some(session) = removed {
+                drained.push(session);
+            }
+        }
+        if !drained.is_empty() {
+            debug!(removed = drained.len(), "Cleaned up expired SM sessions");
+        }
         Ok(drained)
     }
 
@@ -127,6 +175,8 @@ impl InMemorySmSessionRegistry {
         &self,
         stream_id: &str,
     ) -> Result<Option<DetachedSession>, SmRegistryError> {
+        let stream_lock = self.stream_lock(stream_id)?;
+        let _stream_guard = stream_lock.lock().await;
         let mut sessions = self
             .sessions
             .write()
@@ -151,6 +201,8 @@ impl InMemorySmSessionRegistry {
 
     /// Release a previously claimed session without consuming it.
     pub async fn release_claim(&self, stream_id: &str) -> Result<(), SmRegistryError> {
+        let stream_lock = self.stream_lock(stream_id)?;
+        let _stream_guard = stream_lock.lock().await;
         let mut sessions = self
             .sessions
             .write()
@@ -175,6 +227,8 @@ impl InMemorySmSessionRegistry {
         &self,
         stream_id: &str,
     ) -> Result<Option<SmClaimCompletion>, SmRegistryError> {
+        let stream_lock = self.stream_lock(stream_id)?;
+        let _stream_guard = stream_lock.lock().await;
         // Persist-first ordering: durably erase the session BEFORE
         // we hand it back to the resuming connection. If the durable
         // delete fails, abort the resume — the in-memory entry stays
@@ -220,6 +274,8 @@ impl InMemorySmSessionRegistry {
         &self,
         stream_id: &str,
     ) -> Result<Option<DetachedSession>, SmRegistryError> {
+        let stream_lock = self.stream_lock(stream_id)?;
+        let _stream_guard = stream_lock.lock().await;
         // Persist-first ordering: peek + abort if claimed, durably
         // erase, then remove from in-memory. Same rationale as
         // complete_claim — failure to durably erase aborts the
@@ -279,12 +335,11 @@ impl InMemorySmSessionRegistry {
             }
             ids
         };
-        for stream_id in &matching_ids {
-            self.persist_delete_session(stream_id).await?;
-        }
-        // Now remove from in-memory (durable side already committed).
         let mut removed = Vec::new();
-        {
+        for stream_id in &matching_ids {
+            let stream_lock = self.stream_lock(stream_id)?;
+            let _stream_guard = stream_lock.lock().await;
+            self.persist_delete_session(stream_id).await?;
             let mut sessions = self
                 .sessions
                 .write()
@@ -293,48 +348,13 @@ impl InMemorySmSessionRegistry {
                 .claimed_sessions
                 .write()
                 .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
-            for stream_id in &matching_ids {
-                if let Some(session) = sessions.remove(stream_id) {
-                    removed.push(session);
-                }
-                if let Some(session) = claimed.remove(stream_id) {
-                    removed.push(session);
-                }
+            if let Some(session) = sessions.remove(stream_id) {
+                removed.push(session);
+            }
+            if let Some(session) = claimed.remove(stream_id) {
+                removed.push(session);
             }
         }
         Ok(removed)
     }
-}
-
-/// Internal helper: remove expired sessions and return them.
-pub(super) fn drain_expired_internal(
-    sessions: &mut HashMap<String, DetachedSession>,
-) -> Vec<DetachedSession> {
-    let expired_keys: Vec<String> = sessions
-        .iter()
-        .filter_map(|(k, s)| {
-            if s.is_expired() {
-                Some(k.clone())
-            } else {
-                None
-            }
-        })
-        .collect();
-
-    let mut drained = Vec::with_capacity(expired_keys.len());
-    for key in &expired_keys {
-        if let Some(session) = sessions.remove(key) {
-            drained.push(session);
-        }
-    }
-
-    if !drained.is_empty() {
-        debug!(
-            removed = drained.len(),
-            remaining = sessions.len(),
-            "Cleaned up expired SM sessions"
-        );
-    }
-
-    drained
 }

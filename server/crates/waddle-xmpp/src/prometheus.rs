@@ -24,7 +24,8 @@ static BROADCAST_DROPPED_CLOSED: AtomicU64 = AtomicU64::new(0);
 // XEP-0198 unacked-queue evictions (see `stream_management::UnackedQueue`).
 // A non-zero counter means at least one stanza was evicted from an SM
 // session's replay buffer while that session was still resumable — a
-// later `<resumed/>` will silently drop that stanza.
+// later `<resume/>` with an older h must fail rather than claiming a
+// complete replay window.
 static SM_UNACKED_EVICTED: AtomicU64 = AtomicU64::new(0);
 
 // Issue #209 finding #11 — observability for the offline-DM /
@@ -260,7 +261,7 @@ pub fn render_metrics() -> String {
             "# HELP waddle_broadcast_dropped_closed_total Non-blocking broadcast attempts dropped because the recipient's outbound channel was closed.\n",
             "# TYPE waddle_broadcast_dropped_closed_total counter\n",
             "waddle_broadcast_dropped_closed_total {broadcast_dropped_closed}\n",
-            "# HELP waddle_sm_unacked_evicted_total XEP-0198 unacked-queue entries evicted because the queue hit capacity; each eviction will be missing from a later <resumed/> replay.\n",
+            "# HELP waddle_sm_unacked_evicted_total XEP-0198 unacked-queue entries evicted because the queue hit capacity; older resume h values must fail instead of receiving an incomplete replay.\n",
             "# TYPE waddle_sm_unacked_evicted_total counter\n",
             "waddle_sm_unacked_evicted_total {sm_unacked_evicted}\n",
             "# HELP waddle_pending_delivery_quota_exceeded_total Inserts rejected because the per-recipient pending_delivery quota was full (XEP-0160 §3 step 3 bounce path).\n",

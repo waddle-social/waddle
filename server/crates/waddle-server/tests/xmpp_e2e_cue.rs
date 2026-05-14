@@ -179,11 +179,23 @@ enum Step {
         resume: Option<bool>,
         #[serde(default)]
         max: Option<u32>,
+        #[serde(default, rename = "previdFrom")]
+        previd_from: Option<String>,
+        #[serde(default)]
+        h: Option<u32>,
     },
     #[serde(rename = "connectActor")]
-    ConnectActor { actor: Actor },
+    ConnectActor {
+        actor: Actor,
+        #[serde(default)]
+        bind: Option<bool>,
+    },
     #[serde(rename = "disconnectActor")]
-    DisconnectActor { actor: Actor },
+    DisconnectActor {
+        actor: Actor,
+        #[serde(default)]
+        graceful: Option<bool>,
+    },
     #[serde(rename = "sendIq")]
     SendIq {
         actor: Actor,
@@ -234,6 +246,20 @@ enum Step {
         body: Option<String>,
         #[serde(default)]
         payloads: Vec<Payload>,
+    },
+    #[serde(rename = "sendMessageBurst")]
+    SendMessageBurst {
+        from: Actor,
+        to: Option<Actor>,
+        #[serde(rename = "toJid")]
+        to_jid: Option<String>,
+        #[serde(rename = "type")]
+        type_: MessageKind,
+        #[serde(rename = "idPrefix")]
+        id_prefix: String,
+        #[serde(rename = "bodyPrefix")]
+        body_prefix: String,
+        count: u32,
     },
     #[serde(rename = "expectMessage")]
     ExpectMessage {
@@ -378,6 +404,8 @@ enum Step {
         elements: Vec<XmlElementSpec>,
         #[serde(default, rename = "absentElements")]
         absent_elements: Vec<XmlElementSpec>,
+        #[serde(default)]
+        captures: Vec<AttributeCapture>,
     },
     #[serde(rename = "drainFrames")]
     DrainFrames {
@@ -416,6 +444,7 @@ enum MessageKind {
 enum StreamManagementAction {
     Enable,
     RequestAck,
+    Resume,
 }
 
 #[derive(Debug, Deserialize)]
@@ -842,30 +871,46 @@ async fn close_clients(clients: HashMap<String, WsXmppClient>) -> Result<()> {
     }
 }
 
-async fn disconnect_actor(ctx: &mut ScenarioContext, actor: &Actor) -> Result<()> {
+async fn disconnect_actor(ctx: &mut ScenarioContext, actor: &Actor, graceful: bool) -> Result<()> {
     let key = actor_key(actor);
     assert_actor_has_no_pending_frames(ctx, actor)?;
     ctx.pending_frames.remove(&key);
     if let Some(client) = ctx.clients.remove(&key) {
-        client
-            .close()
-            .await
-            .map_err(|error| anyhow!("disconnect {}.{}: {error}", actor.user, actor.device))?;
+        if graceful {
+            client
+                .close()
+                .await
+                .map_err(|error| anyhow!("disconnect {}.{}: {error}", actor.user, actor.device))?;
+        } else {
+            drop(client);
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
     }
     Ok(())
 }
 
-async fn reconnect_actor(ctx: &mut ScenarioContext, actor: &Actor) -> Result<()> {
-    disconnect_actor(ctx, actor).await?;
+async fn reconnect_actor(ctx: &mut ScenarioContext, actor: &Actor, bind: bool) -> Result<()> {
+    disconnect_actor(ctx, actor, true).await?;
     let password = account_password(&ctx.account_passwords, &ctx.admin_password, &actor.username)?;
-    let client = WsXmppClient::connect_and_auth(
-        &ctx.ws_url,
-        &ctx.domain,
-        &actor.username,
-        password,
-        &actor.resource,
-    )
-    .await
+    let client = if bind {
+        WsXmppClient::connect_and_auth(
+            &ctx.ws_url,
+            &ctx.domain,
+            &actor.username,
+            password,
+            &actor.resource,
+        )
+        .await
+    } else {
+        let mut client = WsXmppClient::connect(&ctx.ws_url)
+            .await
+            .map_err(|error| anyhow!(error))?;
+        client
+            .authenticate(&ctx.domain, &actor.username, password)
+            .await
+            .map_err(|error| anyhow!(error))?;
+        Ok(client)
+    }
     .map_err(|error| anyhow!("reconnect {}.{}: {error}", actor.user, actor.device))?;
     ctx.clients.insert(actor_key(actor), client);
     Ok(())
@@ -895,6 +940,8 @@ async fn execute_step(ctx: &mut ScenarioContext, step: &Step) -> Result<()> {
             action,
             resume,
             max,
+            previd_from,
+            h,
         } => {
             let element = match action {
                 StreamManagementAction::Enable => {
@@ -911,6 +958,20 @@ async fn execute_step(ctx: &mut ScenarioContext, step: &Step) -> Result<()> {
                 StreamManagementAction::RequestAck => {
                     Element::builder("r", "urn:xmpp:sm:3").build()
                 }
+                StreamManagementAction::Resume => {
+                    let capture = previd_from
+                        .as_deref()
+                        .ok_or_else(|| anyhow!("streamManagement resume requires previdFrom"))?;
+                    let previd = ctx
+                        .captures
+                        .get(capture)
+                        .ok_or_else(|| anyhow!("unknown captured stream id {capture:?}"))?;
+                    let h = h.ok_or_else(|| anyhow!("streamManagement resume requires h"))?;
+                    Element::builder("resume", "urn:xmpp:sm:3")
+                        .attr("previd", previd.as_str())
+                        .attr("h", h.to_string())
+                        .build()
+                }
             };
             let xml = element_xml(&element)?;
             client_mut(ctx, actor)?
@@ -918,11 +979,11 @@ async fn execute_step(ctx: &mut ScenarioContext, step: &Step) -> Result<()> {
                 .await
                 .map_err(|error| anyhow!(error))?;
         }
-        Step::DisconnectActor { actor } => {
-            disconnect_actor(ctx, actor).await?;
+        Step::DisconnectActor { actor, graceful } => {
+            disconnect_actor(ctx, actor, graceful.unwrap_or(true)).await?;
         }
-        Step::ConnectActor { actor } => {
-            reconnect_actor(ctx, actor).await?;
+        Step::ConnectActor { actor, bind } => {
+            reconnect_actor(ctx, actor, bind.unwrap_or(true)).await?;
         }
         Step::SendIq {
             actor,
@@ -1073,6 +1134,33 @@ async fn execute_step(ctx: &mut ScenarioContext, step: &Step) -> Result<()> {
                 .send(&xml)
                 .await
                 .map_err(|error| anyhow!(error))?;
+        }
+        Step::SendMessageBurst {
+            from,
+            to,
+            to_jid,
+            type_,
+            id_prefix,
+            body_prefix,
+            count,
+        } => {
+            let to = to_jid
+                .clone()
+                .or_else(|| to.as_ref().map(|actor| actor.jid.clone()))
+                .ok_or_else(|| anyhow!("sendMessageBurst requires to or toJid"))?;
+            for index in 0..*count {
+                let mut message =
+                    Message::new_with_type(message_type(type_), Some(to.parse::<Jid>()?));
+                message.id = Some(format!("{id_prefix}-{index}"));
+                message
+                    .bodies
+                    .insert(String::new(), Body(format!("{body_prefix}-{index}")));
+                let xml = stanza_xml(Stanza::Message(message))?;
+                client_mut(ctx, from)?
+                    .send(&xml)
+                    .await
+                    .map_err(|error| anyhow!(error))?;
+            }
         }
         Step::ExpectMessage {
             target,
@@ -1526,6 +1614,7 @@ async fn execute_step(ctx: &mut ScenarioContext, step: &Step) -> Result<()> {
             absent,
             elements,
             absent_elements,
+            captures,
         } => {
             let captures_snapshot = ctx.captures.clone();
             let frame = recv_matching(ctx, target, |frame| {
@@ -1544,6 +1633,10 @@ async fn execute_step(ctx: &mut ScenarioContext, step: &Step) -> Result<()> {
                 &captures_snapshot,
                 "frame expectation",
             )?;
+            for capture in captures {
+                let value = extract_attr_capture(&frame, capture)?;
+                ctx.captures.insert(capture.capture_as.clone(), value);
+            }
         }
         Step::DrainFrames {
             target,

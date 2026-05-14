@@ -1,7 +1,7 @@
 package xmpp_e2e_scenarios
 
 scenario: #Scenario & {
-	name: "xep-0198-stream-management"
+	name: "xep-0198-replay-gap-failure"
 	xeps: ["XEP-0198"]
 	users: {
 		alice: devices: phone: #Actor & {
@@ -46,40 +46,19 @@ scenario: #Scenario & {
 				ns:      "urn:xmpp:sm:3"
 			}]
 		},
-		#SendMessage & {
-			from: alicePhone
-			to:   bobPhone
-			id:   "cue-sm-counted"
-			body: "stream-management-counted"
+		#SendMessageBurst & {
+			from:       bobPhone
+			to:         alicePhone
+			idPrefix:   "cue-sm-overflow"
+			bodyPrefix: "stream-management-overflow"
+			count:      1001
 		},
-		#ExpectMessage & {
-			target: bobPhone
-			from:   alicePhone
-			body:   "stream-management-counted"
-		},
-		#StreamManagement & {
-			actor:  alicePhone
-			action: "requestAck"
-		},
-		#ExpectFrame & {
+		#DrainFrames & {
 			target:   alicePhone
-			contains: ["urn:xmpp:sm:3"]
-			elements: [#XmlElement & {
-				name: "a"
-				ns:   "urn:xmpp:sm:3"
-				attrs: h: "1"
-			}]
-		},
-		#SendMessage & {
-			from: bobPhone
-			to:   alicePhone
-			id:   "cue-sm-replay"
-			body: "stream-management-resume-replay"
-		},
-		#ExpectMessage & {
-			target: alicePhone
-			from:   bobPhone
-			body:   "stream-management-resume-replay"
+			contains: ["stream-management-overflow"]
+			millis:   20000
+			min:      1001
+			max:      1001
 		},
 		#DisconnectActor & {
 			actor:    alicePhone
@@ -97,17 +76,18 @@ scenario: #Scenario & {
 		},
 		#ExpectFrame & {
 			target:   alicePhone
-			contains: ["urn:xmpp:sm:3"]
-			elements: [#XmlElement & {
-				name:         "resumed"
-				ns:           "urn:xmpp:sm:3"
-				attrsPresent: ["h", "previd"]
-			}]
-		},
-		#ExpectMessage & {
-			target: alicePhone
-			from:   bobPhone
-			body:   "stream-management-resume-replay"
+			contains: ["urn:xmpp:sm:3", "resource-constraint"]
+			elements: [
+				#XmlElement & {
+					name:         "failed"
+					ns:           "urn:xmpp:sm:3"
+					attrsPresent: ["h"]
+				},
+				#XmlElement & {
+					name: "resource-constraint"
+					ns:   "urn:ietf:params:xml:ns:xmpp-stanzas"
+				},
+			]
 		},
 	]
 }

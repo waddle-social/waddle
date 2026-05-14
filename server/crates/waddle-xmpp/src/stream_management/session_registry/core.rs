@@ -1,9 +1,11 @@
 use std::collections::HashMap;
-use std::sync::RwLock;
+use std::sync::{Arc, Mutex, RwLock};
 
 use tracing::debug;
 
-use super::persistence_codec::persisted_to_detached;
+use super::persistence_codec::{
+    detached_to_persisted, parse_xml_to_persisted_unacked, persisted_to_detached,
+};
 use super::{DetachedSession, SmRegistryError, DEFAULT_MAX_SESSIONS};
 
 /// In-memory implementation of the SM session registry, optionally
@@ -21,6 +23,7 @@ use super::{DetachedSession, SmRegistryError, DEFAULT_MAX_SESSIONS};
 pub struct InMemorySmSessionRegistry {
     pub(super) sessions: RwLock<HashMap<String, DetachedSession>>,
     pub(super) claimed_sessions: RwLock<HashMap<String, DetachedSession>>,
+    pub(super) stream_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     pub(super) max_sessions: usize,
     /// Optional durable backing store. When `None` the registry is
     /// strictly in-memory (legacy behaviour); production wiring sets
@@ -47,6 +50,10 @@ impl std::fmt::Debug for InMemorySmSessionRegistry {
                 "claimed_count",
                 &self.claimed_sessions.read().map(|s| s.len()).unwrap_or(0),
             )
+            .field(
+                "stream_lock_count",
+                &self.stream_locks.lock().map(|s| s.len()).unwrap_or(0),
+            )
             .field("persistence_attached", &self.persistence.is_some())
             .finish()
     }
@@ -58,6 +65,7 @@ impl InMemorySmSessionRegistry {
         Self {
             sessions: RwLock::new(HashMap::new()),
             claimed_sessions: RwLock::new(HashMap::new()),
+            stream_locks: Mutex::new(HashMap::new()),
             max_sessions: DEFAULT_MAX_SESSIONS,
             persistence: None,
         }
@@ -68,6 +76,7 @@ impl InMemorySmSessionRegistry {
         Self {
             sessions: RwLock::new(HashMap::with_capacity(max_sessions.min(10000))),
             claimed_sessions: RwLock::new(HashMap::new()),
+            stream_locks: Mutex::new(HashMap::new()),
             max_sessions,
             persistence: None,
         }
@@ -190,5 +199,143 @@ impl InMemorySmSessionRegistry {
             ))
             .await
             .map_err(|e| SmRegistryError::Internal(e.to_string()))
+    }
+
+    pub(super) async fn persist_detached_session_snapshot(
+        &self,
+        session: &DetachedSession,
+    ) -> Result<(), SmRegistryError> {
+        let Some(storage) = &self.persistence else {
+            return Ok(());
+        };
+        let persisted = detached_to_persisted(session)?;
+        let mut unacked_rows = Vec::with_capacity(session.unacked_stanzas.len());
+        for entry in &session.unacked_stanzas {
+            unacked_rows.push(parse_xml_to_persisted_unacked(
+                &session.stream_id,
+                entry.sequence,
+                &entry.stanza_xml,
+                entry.original_receipt_at,
+            )?);
+        }
+        storage
+            .store_session_atomic(persisted, unacked_rows)
+            .await
+            .map_err(|e| SmRegistryError::Internal(e.to_string()))
+    }
+
+    pub(super) fn stream_lock(
+        &self,
+        stream_id: &str,
+    ) -> Result<Arc<tokio::sync::Mutex<()>>, SmRegistryError> {
+        let mut locks = self
+            .stream_locks
+            .lock()
+            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+        Ok(locks
+            .entry(stream_id.to_string())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone())
+    }
+
+    pub(super) fn find_session_id_matching(
+        &self,
+        predicate: impl Fn(&DetachedSession) -> bool,
+    ) -> Result<Option<String>, SmRegistryError> {
+        let sessions = self
+            .sessions
+            .read()
+            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+        if let Some((stream_id, _)) = sessions.iter().find(|(_, session)| predicate(session)) {
+            return Ok(Some(stream_id.clone()));
+        }
+        drop(sessions);
+
+        let claimed = self
+            .claimed_sessions
+            .read()
+            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+        Ok(claimed
+            .iter()
+            .find(|(_, session)| predicate(session))
+            .map(|(stream_id, _)| stream_id.clone()))
+    }
+
+    pub(super) async fn update_detached_session_snapshot(
+        &self,
+        stream_id: &str,
+        predicate: impl Fn(&DetachedSession) -> bool,
+        mutate: impl FnOnce(&mut DetachedSession),
+    ) -> Result<bool, SmRegistryError> {
+        let stream_lock = self.stream_lock(stream_id)?;
+        let _stream_guard = stream_lock.lock().await;
+
+        let current = {
+            let sessions = self
+                .sessions
+                .read()
+                .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+            sessions
+                .get(stream_id)
+                .filter(|session| predicate(session))
+                .cloned()
+        };
+        let current = if current.is_some() {
+            current
+        } else {
+            let claimed = self
+                .claimed_sessions
+                .read()
+                .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+            claimed
+                .get(stream_id)
+                .filter(|session| predicate(session))
+                .cloned()
+        };
+
+        let Some(mut updated) = current else {
+            return Ok(false);
+        };
+        mutate(&mut updated);
+
+        // Durable snapshot first, then publish the same typed state in memory.
+        // The stream lock serializes this full-snapshot write with other appends
+        // and with claim completion/deletion so an older clone cannot overwrite
+        // a newer replay window.
+        self.persist_detached_session_snapshot(&updated).await?;
+
+        let updated = {
+            let mut sessions = self
+                .sessions
+                .write()
+                .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+            if sessions.contains_key(stream_id) {
+                sessions.insert(stream_id.to_string(), updated);
+                return Ok(true);
+            }
+            updated
+        };
+
+        let found_claimed = {
+            let mut claimed = self
+                .claimed_sessions
+                .write()
+                .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+            if claimed.contains_key(stream_id) {
+                claimed.insert(stream_id.to_string(), updated);
+                true
+            } else {
+                false
+            }
+        };
+        if found_claimed {
+            return Ok(true);
+        }
+
+        // Fail closed if a future path removes the session without taking the
+        // stream lock. The snapshot was already written durably, so erase it
+        // rather than allowing restart to resurrect an already-consumed stream.
+        self.persist_delete_session(stream_id).await?;
+        Ok(false)
     }
 }

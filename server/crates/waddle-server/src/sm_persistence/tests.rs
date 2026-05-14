@@ -18,6 +18,7 @@ fn fixture_session(stream_id: &str) -> PersistedSession {
         inbound_count: 7,
         outbound_count: 12,
         last_acked: 10,
+        replay_gap_through: Some(9),
         max_resume_time: Some(60),
         detached_at: fixed_time(),
         max_resume_duration: Duration::from_secs(60),
@@ -60,6 +61,7 @@ async fn round_trip_session_preserves_every_field() {
     assert_eq!(loaded.inbound_count, s.inbound_count);
     assert_eq!(loaded.outbound_count, s.outbound_count);
     assert_eq!(loaded.last_acked, s.last_acked);
+    assert_eq!(loaded.replay_gap_through, s.replay_gap_through);
     assert_eq!(loaded.max_resume_time, s.max_resume_time);
     assert_eq!(loaded.detached_at, s.detached_at);
     assert_eq!(loaded.max_resume_duration, s.max_resume_duration);

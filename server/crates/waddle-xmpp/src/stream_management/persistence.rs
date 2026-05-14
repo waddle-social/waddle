@@ -66,6 +66,7 @@ pub struct PersistedSession {
     pub inbound_count: u32,
     pub outbound_count: u32,
     pub last_acked: u32,
+    pub replay_gap_through: Option<u32>,
     pub max_resume_time: Option<u32>,
     pub detached_at: chrono::DateTime<chrono::Utc>,
     pub max_resume_duration: Duration,

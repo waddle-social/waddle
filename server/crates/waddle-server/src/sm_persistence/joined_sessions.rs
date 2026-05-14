@@ -10,6 +10,7 @@ pub(super) async fn list_all_sessions_with_unacked(
                     s.detached_at_ms, s.max_resume_duration_ms, \
                     s.carbons_enabled, s.roster_interested, s.presence_available, \
                     s.presence_show, s.presence_status, s.presence_priority, \
+                    s.replay_gap_through, \
                     u.sequence, u.stanza_xml, u.original_receipt_at_ms \
              FROM sm_sessions s \
              LEFT JOIN sm_unacked u ON s.stream_id = u.stream_id \
@@ -75,11 +76,11 @@ pub(super) async fn list_all_sessions_with_unacked(
             // session; drop this unacked row too.
             continue;
         }
-        // Unacked columns: sequence (15), stanza_xml (16),
-        // original_receipt_at_ms (17). NULL when LEFT JOIN had
+        // Unacked columns: sequence (16), stanza_xml (17),
+        // original_receipt_at_ms (18). NULL when LEFT JOIN had
         // no match. Per-row decode failure skips that row but
         // keeps the rest of the session's queue.
-        let sequence_opt: Option<i64> = match row.get(15) {
+        let sequence_opt: Option<i64> = match row.get(16) {
             Ok(v) => v,
             Err(error) => {
                 tracing::debug!(
