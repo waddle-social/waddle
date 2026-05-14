@@ -8,7 +8,6 @@ const NS_FORUMS_0 = "urn:xmpp:forums:0";
 const NS_MUC = "http://jabber.org/protocol/muc";
 const NS_SPACES_0 = "urn:xmpp:spaces:0";
 const NS_PUBSUB = "http://jabber.org/protocol/pubsub";
-const NS_PUBSUB_METADATA = `${NS_PUBSUB}#meta-data`;
 const DISCO_INFO_NS = "http://jabber.org/protocol/disco#info";
 const DISCO_ITEMS_NS = "http://jabber.org/protocol/disco#items";
 const DATAFORM_NS = "jabber:x:data";

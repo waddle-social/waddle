@@ -3,8 +3,6 @@
  *
  * Shared type definitions used by the chat UI and attachment helpers.
  */
-const NS_ESFS_0 = "urn:xmpp:esfs:0";
-const NS_HASHES_2 = "urn:xmpp:hashes:2";
 
 /** Closed set of ciphers Waddle understands end-to-end. */
 export type EncryptedFileCipher =

@@ -3,7 +3,6 @@ import { onMounted, onUnmounted } from "vue";
 import { useSessionAuth } from "@/auth/session";
 import { BrowserXmppClient } from "@/lib/xmpp-client";
 import { connectionStore } from "@/lib/connection-store";
-import { createServerAuth } from "@/lib/server-auth";
 import { $xmppStatus, OFFLINE_SNAPSHOT } from "@/stores/xmpp-status";
 import { installInstrumentation } from "@/lib/xmpp/xmpp-instrumentation";
 
@@ -33,16 +32,6 @@ async function bootstrap() {
     // `onStatus` hook fires alongside it. Safe to install even when
     // Faro isn't initialized; `@/lib/telemetry` no-ops until bootstrap.
     installInstrumentation(client);
-    const serverUrl = auth.activeServerUrl.value;
-    client.setRefreshSession(async () => {
-      const serverAuth = createServerAuth(serverUrl);
-      const refreshed = await serverAuth.getSession(auth.session.value?.session_id);
-      if (refreshed && !refreshed.is_expired) {
-        auth.session.value = refreshed;
-        syncStoreFromAuth();
-      }
-      return refreshed;
-    });
     // The status handler is owned here — XmppProvider is persisted across
     // route changes (transition:persist), so there is exactly one writer to
     // $xmppStatus for the lifetime of the client. Transient consumers

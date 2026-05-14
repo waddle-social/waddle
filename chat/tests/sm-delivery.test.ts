@@ -896,7 +896,6 @@ describe("XEP-0198 self-echo reconciliation (group chat)", () => {
       setLastSeenHandler() {},
       setActivityHandler() {},
       setRoomAvatarHandler() {},
-      setSlowModeHandler() {},
     } as never;
     await nextTick();
 
