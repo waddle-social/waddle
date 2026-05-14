@@ -258,4 +258,171 @@ mod tests {
         );
         assert!(rendered.contains("redacted"));
     }
+
+    // `from_env` reads process-wide env state; serialise the tests
+    // with a single-threaded gate to avoid cross-test contamination.
+    fn with_env<R>(vars: &[(&str, Option<&str>)], f: impl FnOnce() -> R) -> R {
+        use std::sync::Mutex;
+        static GATE: Mutex<()> = Mutex::new(());
+        let _guard = GATE.lock().unwrap();
+        // Save & set
+        let preserved: Vec<(String, Option<String>)> = vars
+            .iter()
+            .map(|(k, _)| (k.to_string(), std::env::var(k).ok()))
+            .collect();
+        for (k, v) in vars {
+            match v {
+                Some(value) => std::env::set_var(k, value),
+                None => std::env::remove_var(k),
+            }
+        }
+        let out = f();
+        // Restore
+        for (k, v) in preserved {
+            match v {
+                Some(value) => std::env::set_var(&k, value),
+                None => std::env::remove_var(&k),
+            }
+        }
+        out
+    }
+
+    const REQUIRED_VARS: &[&str] = &[
+        "LIVEKIT_API_KEY",
+        "LIVEKIT_API_SECRET",
+        "LIVEKIT_WS_URL",
+        "LIVEKIT_TURN_HOST",
+        "LIVEKIT_TURN_SHARED_SECRET",
+    ];
+
+    const OPTIONAL_VARS: &[&str] = &[
+        "LIVEKIT_TURN_TLS_PORT",
+        "LIVEKIT_TURN_UDP_PORT",
+        "LIVEKIT_TOKEN_TTL_SECONDS",
+        "LIVEKIT_TURN_TTL_SECONDS",
+    ];
+
+    fn all_unset_overrides() -> Vec<(&'static str, Option<&'static str>)> {
+        REQUIRED_VARS
+            .iter()
+            .chain(OPTIONAL_VARS.iter())
+            .map(|k| (*k, None))
+            .collect()
+    }
+
+    #[test]
+    fn from_env_all_unset_returns_none() {
+        let result = with_env(&all_unset_overrides(), SfuConfig::from_env);
+        assert!(matches!(result, Ok(None)));
+    }
+
+    #[test]
+    fn from_env_full_required_set_produces_config() {
+        let mut overrides = all_unset_overrides();
+        overrides.extend([
+            ("LIVEKIT_API_KEY", Some("APIxxxxxxxx")),
+            (
+                "LIVEKIT_API_SECRET",
+                Some("super-secret-secret-32-bytes-min"),
+            ),
+            ("LIVEKIT_WS_URL", Some("wss://livekit.test/")),
+            ("LIVEKIT_TURN_HOST", Some("turn.test")),
+            ("LIVEKIT_TURN_SHARED_SECRET", Some("turn-shared-secret")),
+        ]);
+        let cfg = with_env(&overrides, SfuConfig::from_env)
+            .expect("ok")
+            .expect("some");
+        assert_eq!(cfg.turn_tls_port, 443);
+        assert_eq!(cfg.turn_udp_port, 3478);
+        assert_eq!(cfg.token_ttl, Duration::seconds(3600));
+        assert_eq!(cfg.turn_ttl, Duration::seconds(3600));
+        assert_eq!(cfg.turn_host.as_str(), "turn.test");
+    }
+
+    #[test]
+    fn from_env_partial_required_set_returns_missing() {
+        let mut overrides = all_unset_overrides();
+        overrides.extend([
+            ("LIVEKIT_API_KEY", Some("APIxxxxxxxx")),
+            (
+                "LIVEKIT_API_SECRET",
+                Some("super-secret-secret-32-bytes-min"),
+            ),
+            // Other required vars left unset.
+        ]);
+        let err = with_env(&overrides, SfuConfig::from_env).expect_err("partial input is err");
+        match err {
+            FromEnvError::Missing(var) => assert_eq!(var, "LIVEKIT_WS_URL"),
+            other => panic!("expected Missing, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn from_env_invalid_url_returns_typed_error() {
+        let mut overrides = all_unset_overrides();
+        overrides.extend([
+            ("LIVEKIT_API_KEY", Some("APIxxxxxxxx")),
+            (
+                "LIVEKIT_API_SECRET",
+                Some("super-secret-secret-32-bytes-min"),
+            ),
+            ("LIVEKIT_WS_URL", Some("not a url at all")),
+            ("LIVEKIT_TURN_HOST", Some("turn.test")),
+            ("LIVEKIT_TURN_SHARED_SECRET", Some("turn-shared-secret")),
+        ]);
+        let err = with_env(&overrides, SfuConfig::from_env).expect_err("invalid url is err");
+        assert!(matches!(err, FromEnvError::InvalidUrl(_)));
+    }
+
+    #[test]
+    fn from_env_wrong_scheme_returns_typed_error() {
+        let mut overrides = all_unset_overrides();
+        overrides.extend([
+            ("LIVEKIT_API_KEY", Some("APIxxxxxxxx")),
+            (
+                "LIVEKIT_API_SECRET",
+                Some("super-secret-secret-32-bytes-min"),
+            ),
+            ("LIVEKIT_WS_URL", Some("https://livekit.test/")),
+            ("LIVEKIT_TURN_HOST", Some("turn.test")),
+            ("LIVEKIT_TURN_SHARED_SECRET", Some("turn-shared-secret")),
+        ]);
+        let err = with_env(&overrides, SfuConfig::from_env).expect_err("wrong scheme is err");
+        assert!(matches!(err, FromEnvError::InvalidScheme(_)));
+    }
+
+    #[test]
+    fn from_env_invalid_port_returns_typed_error() {
+        let mut overrides = all_unset_overrides();
+        overrides.extend([
+            ("LIVEKIT_API_KEY", Some("APIxxxxxxxx")),
+            (
+                "LIVEKIT_API_SECRET",
+                Some("super-secret-secret-32-bytes-min"),
+            ),
+            ("LIVEKIT_WS_URL", Some("wss://livekit.test/")),
+            ("LIVEKIT_TURN_HOST", Some("turn.test")),
+            ("LIVEKIT_TURN_SHARED_SECRET", Some("turn-shared-secret")),
+            ("LIVEKIT_TURN_TLS_PORT", Some("not-a-port")),
+        ]);
+        let err = with_env(&overrides, SfuConfig::from_env).expect_err("invalid port is err");
+        assert!(matches!(
+            err,
+            FromEnvError::InvalidNumber("LIVEKIT_TURN_TLS_PORT")
+        ));
+    }
+
+    #[test]
+    fn from_env_weak_api_secret_returns_typed_error() {
+        let mut overrides = all_unset_overrides();
+        overrides.extend([
+            ("LIVEKIT_API_KEY", Some("APIxxxxxxxx")),
+            ("LIVEKIT_API_SECRET", Some("short")),
+            ("LIVEKIT_WS_URL", Some("wss://livekit.test/")),
+            ("LIVEKIT_TURN_HOST", Some("turn.test")),
+            ("LIVEKIT_TURN_SHARED_SECRET", Some("turn-shared-secret")),
+        ]);
+        let err = with_env(&overrides, SfuConfig::from_env).expect_err("weak secret is err");
+        assert!(matches!(err, FromEnvError::WeakApiSecret(_)));
+    }
 }

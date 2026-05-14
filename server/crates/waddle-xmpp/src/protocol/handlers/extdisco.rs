@@ -194,6 +194,49 @@ mod tests {
     }
 
     #[test]
+    fn wrong_child_element_returns_bad_request() {
+        let iq = Iq {
+            from: Some("alice@waddle.test/desktop".parse().unwrap()),
+            to: Some("waddle.test".parse().unwrap()),
+            id: "e3".into(),
+            // Right namespace, wrong element name.
+            payload: IqType::Get(Element::builder("credentials", NS_EXT_DISCO).build()),
+        };
+        let jid = test_jid();
+        let handler = ExtDiscoHandler::new(fixture_sfu(), 443, 3478);
+        let events = handler.handle(&iq, &ctx(&jid));
+        let OutboundEvent::SendStanza(stanza) = events.into_iter().next().unwrap() else {
+            panic!()
+        };
+        let Stanza::Iq(reply) = *stanza else { panic!() };
+        let IqType::Error(err) = reply.payload else {
+            panic!("expected error")
+        };
+        assert_eq!(err.defined_condition, DefinedCondition::BadRequest);
+    }
+
+    #[test]
+    fn wrong_namespace_returns_bad_request() {
+        let iq = Iq {
+            from: Some("alice@waddle.test/desktop".parse().unwrap()),
+            to: Some("waddle.test".parse().unwrap()),
+            id: "e4".into(),
+            payload: IqType::Get(Element::builder("services", "urn:xmpp:other:1").build()),
+        };
+        let jid = test_jid();
+        let handler = ExtDiscoHandler::new(fixture_sfu(), 443, 3478);
+        let events = handler.handle(&iq, &ctx(&jid));
+        let OutboundEvent::SendStanza(stanza) = events.into_iter().next().unwrap() else {
+            panic!()
+        };
+        let Stanza::Iq(reply) = *stanza else { panic!() };
+        let IqType::Error(err) = reply.payload else {
+            panic!("expected error")
+        };
+        assert_eq!(err.defined_condition, DefinedCondition::BadRequest);
+    }
+
+    #[test]
     fn iq_set_rejected_as_bad_request() {
         let iq = Iq {
             from: Some("alice@waddle.test/desktop".parse().unwrap()),

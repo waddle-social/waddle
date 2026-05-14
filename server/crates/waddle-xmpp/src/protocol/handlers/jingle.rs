@@ -592,6 +592,90 @@ mod tests {
     }
 
     #[test]
+    fn malformed_jingle_payload_returns_bad_request() {
+        // Right namespace, wrong element name — Jingle::try_from rejects.
+        let bogus = Element::builder("garbage", NS_JINGLE).build();
+        let iq = Iq {
+            from: Some("alice@waddle.test/desktop".parse().unwrap()),
+            to: Some("bob@waddle.test/desktop".parse().unwrap()),
+            id: "m1".into(),
+            payload: IqType::Set(bogus),
+        };
+        let jid = test_ctx_jid();
+        let handler = JingleHandler::new(fixture_sfu());
+        let events = handler.handle(&iq, &ctx(&jid));
+        let OutboundEvent::SendStanza(stanza) = events.into_iter().next().unwrap() else {
+            panic!()
+        };
+        let Stanza::Iq(reply) = *stanza else { panic!() };
+        let IqType::Error(err) = reply.payload else {
+            panic!("expected error")
+        };
+        assert_eq!(err.defined_condition, DefinedCondition::BadRequest);
+    }
+
+    #[test]
+    fn bare_to_jid_returns_bad_request() {
+        let mut content = Content::new(Creator::Initiator, ContentId("audio".into()));
+        content.description = Some(xmpp_parsers::jingle::Description::Rtp(
+            opus_audio_description(),
+        ));
+        content.transport = Some(Transport::Unknown(
+            WaddleLiveKitTransport::Request.to_element(),
+        ));
+        let mut jingle = Jingle::new(Action::SessionInitiate, SessionId("c1".into()));
+        jingle.initiator = Some("alice@waddle.test/desktop".parse().unwrap());
+        jingle.contents.push(content);
+        let iq = Iq {
+            from: Some("alice@waddle.test/desktop".parse().unwrap()),
+            // Bare JID — no resource.
+            to: Some("bob@waddle.test".parse().unwrap()),
+            id: "b1".into(),
+            payload: IqType::Set(jingle.into()),
+        };
+        let jid = test_ctx_jid();
+        let handler = JingleHandler::new(fixture_sfu());
+        let events = handler.handle(&iq, &ctx(&jid));
+        let OutboundEvent::SendStanza(stanza) = events.into_iter().next().unwrap() else {
+            panic!()
+        };
+        let Stanza::Iq(reply) = *stanza else { panic!() };
+        let IqType::Error(err) = reply.payload else {
+            panic!("expected error")
+        };
+        assert_eq!(err.defined_condition, DefinedCondition::BadRequest);
+    }
+
+    #[test]
+    fn transport_info_forwards_unchanged_with_sanitised_from() {
+        let mut jingle = Jingle::new(Action::TransportInfo, SessionId("c1".into()));
+        jingle.initiator = Some("alice@waddle.test/desktop".parse().unwrap());
+        let iq = Iq {
+            // Spoofed: client claims `iq.from` is charlie's.
+            from: Some("charlie@waddle.test/desktop".parse().unwrap()),
+            to: Some("bob@waddle.test/desktop".parse().unwrap()),
+            id: "ti1".into(),
+            payload: IqType::Set(jingle.into()),
+        };
+        let jid = test_ctx_jid();
+        let handler = JingleHandler::new(fixture_sfu());
+        let events = handler.handle(&iq, &ctx(&jid));
+        assert_eq!(events.len(), 1, "no server-forged ACK on transport-info");
+        let OutboundEvent::RouteToConnection { jid: peer, stanza } =
+            events.into_iter().next().unwrap()
+        else {
+            panic!("expected RouteToConnection");
+        };
+        assert_eq!(peer.to_string(), "bob@waddle.test/desktop");
+        let Stanza::Iq(fwd) = *stanza else { panic!() };
+        // route_unchanged must overwrite the spoofed `from`.
+        assert_eq!(
+            fwd.from.as_ref().map(|j| j.to_string()),
+            Some("alice@waddle.test/desktop".to_string())
+        );
+    }
+
+    #[test]
     fn missing_to_returns_bad_request() {
         let mut jingle = Jingle::new(Action::SessionInitiate, SessionId("c1".into()));
         jingle
