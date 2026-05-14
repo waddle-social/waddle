@@ -17,6 +17,7 @@ impl WaddleClient {
                 on_message_delivery_acked: None,
                 on_message_delivery_failed: None,
                 on_mds_displayed: None,
+                on_call: None,
                 resume_state: None,
             })),
         }
@@ -76,6 +77,17 @@ impl WaddleClient {
     /// event, with a `WaddleMdsDisplayedEntry`-shaped JS value.
     pub fn set_on_mds_displayed(&mut self, cb: Function) {
         self.inner.borrow_mut().on_mds_displayed = Some(cb);
+    }
+
+    /// Register a callback for inbound XMPP-native call events
+    /// (XEP-0353 JMI envelopes + XEP-0166 Jingle session control
+    /// carrying a `urn:waddle:transports:livekit:0` transport).
+    /// The callback receives a [`WaddleCallEvent`]-shaped object
+    /// with a `kind` discriminator and optional `media` / `join` /
+    /// `reason` fields. See `messaging::call::parse_call_event` on
+    /// the Rust side for the typed input.
+    pub fn set_on_call(&mut self, cb: Function) {
+        self.inner.borrow_mut().on_call = Some(cb);
     }
 
     pub fn connect(&self) -> Promise {

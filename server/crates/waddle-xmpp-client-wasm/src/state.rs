@@ -112,6 +112,7 @@ pub(crate) struct WaddleClientInner {
     /// inbound PEP event, so the chat layer can apply each one
     /// independently without re-parsing the message.
     pub(crate) on_mds_displayed: Option<Function>,
+    pub(crate) on_call: Option<Function>,
     pub(crate) resume_state: Option<waddle_xmpp_client::SmResumeState>,
 }
 

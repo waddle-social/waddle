@@ -83,6 +83,20 @@ pub(crate) fn dispatch_client_event(inner: &Rc<RefCell<WaddleClientInner>>, even
                 let _ = callback.call1(&JsValue::NULL, &JsValue::from_str(stanza_id.as_str()));
             }
         }
+        ClientEvent::UnhandledStanza(element) => {
+            // Try to recognise an A/V call event (XEP-0353 JMI
+            // envelope or XEP-0166 Jingle session control with a
+            // urn:waddle:transports:livekit:0 transport). If matched,
+            // surface as a typed `on_call` callback so the chat side
+            // doesn't have to parse XML.
+            if let Some(call_event) = parse_call_event(&element) {
+                if let Some(callback) = inner.borrow().on_call.as_ref() {
+                    if let Ok(value) = to_js_value(&call_event_to_js(call_event)) {
+                        let _ = callback.call1(&JsValue::NULL, &value);
+                    }
+                }
+            }
+        }
         _ => {}
     }
 }
