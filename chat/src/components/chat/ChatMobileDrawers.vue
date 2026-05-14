@@ -174,15 +174,15 @@ function openExtensionRoute(route: DiscoveredExtensionRoute) {
           v-if="ui.sidebarMode.value === 'channels'
             && waddles.currentChannel.value
             && drawerExtensionRoutes.length > 0"
-          class="flex flex-col gap-1.5"
+          class="flex flex-col gap-1.5 border-t border-border pt-4"
         >
-          <h4 class="type-pane-title">Extensions</h4>
+          <h3 class="type-section-label text-muted-foreground">Extensions</h3>
           <button
             v-for="item in drawerExtensionRoutes"
             :key="item.key"
             type="button"
             class="type-control flex h-9 w-full items-center gap-2 rounded-lg border border-border px-3 hover:bg-muted transition-colors"
-            :class="item.isActive ? 'bg-muted' : ''"
+            :class="item.isActive ? 'border-primary/30 bg-primary/10 text-primary' : ''"
             :aria-current="item.isActive ? 'page' : undefined"
             @click="openExtensionRoute(item.route)"
           >
