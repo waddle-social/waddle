@@ -143,7 +143,13 @@ function dayDividerLabel(createdAt: string): string {
 const isTopPinned = computed(() =>
   isTopPinnedScrollDirection(scrollDirectionMode.value),
 );
-const olderSentinelPosition = computed(() => scrollDirectionMode.value === "social" ? "end" : "start");
+// Older replies paginate at the chronologically-older end of the list. In
+// social mode the root is appended after the loaded replies, so the sentinel
+// has to sit one slot inboard of the trailing root rather than below it.
+const olderSentinelPosition = computed<"start" | "end" | "before-end">(() => {
+  if (scrollDirectionMode.value !== "social") return "start";
+  return activeEntry.value?.root ? "before-end" : "end";
+});
 
 const scrollContainerRef = ref<HTMLElement | null>(null);
 const virtualTimelineEdgeScroller: Ref<((mode: ScrollDirectionMode) => boolean | Promise<boolean>) | null> = ref(null);
@@ -509,32 +515,41 @@ function replyChildHasNestedThread(message: TimelineMessage): boolean {
       @load-older="activeThreadId && emit('loadOlder', activeThreadId)"
     >
       <template #item="{ item: message }">
-        <div
-          v-if="message.id === activeEntry.root?.id"
-          class="chat-thread-root"
-          aria-label="Thread root message"
-        >
-          <span class="chat-thread-root__label type-section-label">Thread start</span>
-          <MessageCard
-            :message="message"
-            :current-user="currentUser"
-            :current-user-jid="currentUserJid"
-            :avatar-url="avatarUrlByAuthor[message.author] ?? null"
-            :hats="hatsFor(message.author)"
-            :presence="presenceFor(message.author)"
-            :last-seen="roomLastSeen[message.author]"
-            :author-jid="authorJidByNick?.[message.author]"
-            :thread-reply-count="activeEntry.count"
-            hide-thread-chip
-            :reaction-mode-selected="reactionMode?.selectedMessageId === message.id"
-            :invoke-extension-action="props.invokeExtensionAction"
-            @edit="(id, body, m, r) => emit('editMessage', id, body, m, r)"
-            @retract="(id) => emit('retractMessage', id)"
-            @react="(id, emoji) => emit('reactMessage', id, emoji)"
-            @reply="beginReplyInThread"
-            @open-thread="onOpenThreadFromCard"
-          />
-        </div>
+        <template v-if="message.id === activeEntry.root?.id">
+          <div
+            v-if="showDayDividerBefore(message.id)"
+            class="chat-day-divider type-section-label"
+            :data-day-marker-created-at="message.createdAt"
+            role="separator"
+            :aria-label="dayDividerLabel(message.createdAt)"
+          >
+            <div class="chat-day-divider__rule" />
+            <span class="chat-day-divider__label">{{ dayDividerLabel(message.createdAt) }}</span>
+            <div class="chat-day-divider__rule" />
+          </div>
+          <div class="chat-thread-root" aria-label="Thread root message">
+            <span class="chat-thread-root__label type-section-label">Thread start</span>
+            <MessageCard
+              :message="message"
+              :current-user="currentUser"
+              :current-user-jid="currentUserJid"
+              :avatar-url="avatarUrlByAuthor[message.author] ?? null"
+              :hats="hatsFor(message.author)"
+              :presence="presenceFor(message.author)"
+              :last-seen="roomLastSeen[message.author]"
+              :author-jid="authorJidByNick?.[message.author]"
+              :thread-reply-count="activeEntry.count"
+              hide-thread-chip
+              :reaction-mode-selected="reactionMode?.selectedMessageId === message.id"
+              :invoke-extension-action="props.invokeExtensionAction"
+              @edit="(id, body, m, r) => emit('editMessage', id, body, m, r)"
+              @retract="(id) => emit('retractMessage', id)"
+              @react="(id, emoji) => emit('reactMessage', id, emoji)"
+              @reply="beginReplyInThread"
+              @open-thread="onOpenThreadFromCard"
+            />
+          </div>
+        </template>
         <template v-else>
           <div
             v-if="showDayDividerBefore(message.id)"

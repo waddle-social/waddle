@@ -11,7 +11,12 @@ const props = withDefaults(defineProps<{
   items: TimelineMessage[];
   hasOlder: boolean;
   loadingOlder: boolean;
-  sentinelPosition: "start" | "end";
+  // "start" / "end" anchor the older-history sentinel to the edge of the
+  // virtualized list. "before-end" parks it one slot in from the end so the
+  // sentinel can sit between the loaded items and a non-paginated trailing
+  // anchor (e.g. the thread root rendered at the chronologically-oldest end
+  // in social mode).
+  sentinelPosition: "start" | "end" | "before-end";
   ariaLabel: string;
   contentClass?: string;
 }>(), {
@@ -26,14 +31,30 @@ const emit = defineEmits<{
 const scrollElement = ref<HTMLDivElement | null>(null);
 const hasOlderSentinel = computed(() => props.hasOlder || props.loadingOlder);
 const rowCount = computed(() => props.items.length + (hasOlderSentinel.value ? 1 : 0));
-const sentinelIndex = computed(() =>
-  !hasOlderSentinel.value ? -1 : props.sentinelPosition === "start" ? 0 : rowCount.value - 1,
-);
+const sentinelIndex = computed(() => {
+  if (!hasOlderSentinel.value) return -1;
+  if (props.sentinelPosition === "start") return 0;
+  if (props.sentinelPosition === "before-end") return Math.max(0, rowCount.value - 2);
+  return rowCount.value - 1;
+});
+
+function itemIndexForVirtualIndex(index: number): number {
+  if (!hasOlderSentinel.value) return index;
+  if (props.sentinelPosition === "start") return index - 1;
+  if (props.sentinelPosition === "before-end") return index < sentinelIndex.value ? index : index - 1;
+  return index;
+}
+
+function virtualIndexForItemIndex(itemIndex: number): number {
+  if (!hasOlderSentinel.value) return itemIndex;
+  if (props.sentinelPosition === "start") return itemIndex + 1;
+  if (props.sentinelPosition === "before-end") return itemIndex < sentinelIndex.value ? itemIndex : itemIndex + 1;
+  return itemIndex;
+}
 
 function itemForVirtualIndex(index: number): TimelineMessage | null {
   if (index === sentinelIndex.value) return null;
-  const offset = hasOlderSentinel.value && props.sentinelPosition === "start" ? 1 : 0;
-  return props.items[index - offset] ?? null;
+  return props.items[itemIndexForVirtualIndex(index)] ?? null;
 }
 
 const virtualizer = useVirtualizer(computed(() => ({
@@ -65,8 +86,7 @@ watch(
 async function scrollToMessageId(messageId: string, align: "start" | "center" | "end" = "center") {
   const index = props.items.findIndex((item) => item.id === messageId);
   if (index === -1) return false;
-  const offset = hasOlderSentinel.value && props.sentinelPosition === "start" ? 1 : 0;
-  virtualizer.value.scrollToIndex(index + offset, { align });
+  virtualizer.value.scrollToIndex(virtualIndexForItemIndex(index), { align });
   await nextTick();
   return true;
 }
@@ -74,8 +94,7 @@ async function scrollToMessageId(messageId: string, align: "start" | "center" | 
 async function scrollToPinnedEdge(mode: ScrollDirectionMode) {
   if (props.items.length === 0) return false;
   const itemIndex = isTopPinnedScrollDirection(mode) ? 0 : props.items.length - 1;
-  const offset = hasOlderSentinel.value && props.sentinelPosition === "start" ? 1 : 0;
-  virtualizer.value.scrollToIndex(itemIndex + offset, {
+  virtualizer.value.scrollToIndex(virtualIndexForItemIndex(itemIndex), {
     align: isTopPinnedScrollDirection(mode) ? "start" : "end",
   });
   await nextTick();
