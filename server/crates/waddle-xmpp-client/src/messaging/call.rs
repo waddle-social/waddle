@@ -224,6 +224,134 @@ fn extract_terminate_reason(jingle: &Element) -> Option<String> {
     reason.children().next().map(|c| c.name().to_string())
 }
 
+// ---------------------------------------------------------------------
+// Outbound builders
+//
+// These mirror the inbound parsers above so the chat UI can originate
+// the same wire shapes it can already decode. Returned values are
+// `minidom::Element`s ready to be wrapped in a `<message>` or `<iq>`
+// envelope by the wasm send pipeline.
+//
+// The server is the one that mints LiveKit join tokens, so outbound
+// transports are always built in the **request** shape (empty
+// `<transport xmlns='urn:waddle:transports:livekit:0'/>`); the server's
+// Jingle handler rewrites them with a populated transport before
+// forwarding to the peer.
+
+/// Build a `<propose/>` JMI body for a 1:1 call. The propose carries
+/// one `<description/>` per offered media kind so the responder's UI
+/// can show "audio call" vs. "video call" without waiting for the
+/// session-initiate.
+pub fn build_propose(sid: &str, media: CallMedia) -> Element {
+    let mut builder = Element::builder("propose", NS_JINGLE_MESSAGE).attr("id", sid);
+    if media.audio {
+        builder = builder.append(rtp_description_element("audio"));
+    }
+    if media.video {
+        builder = builder.append(rtp_description_element("video"));
+    }
+    builder.build()
+}
+
+pub fn build_proceed(sid: &str) -> Element {
+    Element::builder("proceed", NS_JINGLE_MESSAGE)
+        .attr("id", sid)
+        .build()
+}
+
+pub fn build_reject(sid: &str) -> Element {
+    Element::builder("reject", NS_JINGLE_MESSAGE)
+        .attr("id", sid)
+        .build()
+}
+
+pub fn build_retract(sid: &str) -> Element {
+    Element::builder("retract", NS_JINGLE_MESSAGE)
+        .attr("id", sid)
+        .build()
+}
+
+pub fn build_finish(sid: &str) -> Element {
+    Element::builder("finish", NS_JINGLE_MESSAGE)
+        .attr("id", sid)
+        .build()
+}
+
+/// Build the `<jingle/>` body of a session-initiate IQ. The
+/// `initiator` attribute is required so the receiving server's Jingle
+/// handler can verify the call originator and namespace the LiveKit
+/// room scope. One `<content/>` per offered media kind, each
+/// carrying an empty Waddle LiveKit transport for the server to
+/// populate.
+pub fn build_session_initiate(sid: &str, initiator_full_jid: &str, media: CallMedia) -> Element {
+    let mut builder = Element::builder("jingle", NS_JINGLE)
+        .attr("action", "session-initiate")
+        .attr("initiator", initiator_full_jid)
+        .attr("sid", sid);
+    if media.audio {
+        builder = builder.append(content_element("audio"));
+    }
+    if media.video {
+        builder = builder.append(content_element("video"));
+    }
+    builder.build()
+}
+
+/// Build the `<jingle/>` body of a session-accept IQ. Per
+/// XEP-0166 §7.1 the `responder` attribute names the accepting
+/// party; the initiator attribute mirrors the originator so the
+/// server can re-derive the call scope.
+pub fn build_session_accept(
+    sid: &str,
+    initiator_full_jid: &str,
+    responder_full_jid: &str,
+    media: CallMedia,
+) -> Element {
+    let mut builder = Element::builder("jingle", NS_JINGLE)
+        .attr("action", "session-accept")
+        .attr("initiator", initiator_full_jid)
+        .attr("responder", responder_full_jid)
+        .attr("sid", sid);
+    if media.audio {
+        builder = builder.append(content_element("audio"));
+    }
+    if media.video {
+        builder = builder.append(content_element("video"));
+    }
+    builder.build()
+}
+
+/// Build the `<jingle/>` body of a session-terminate IQ. Reason is
+/// one of the XEP-0166 §7.4 condition names (`success`, `decline`,
+/// `cancel`, `busy`, `gone`, …). `None` omits the `<reason/>` child.
+pub fn build_session_terminate(sid: &str, reason: Option<&str>) -> Element {
+    let mut builder = Element::builder("jingle", NS_JINGLE)
+        .attr("action", "session-terminate")
+        .attr("sid", sid);
+    if let Some(condition) = reason {
+        let reason_elem = Element::builder("reason", NS_JINGLE)
+            .append(Element::builder(condition, NS_JINGLE).build())
+            .build();
+        builder = builder.append(reason_elem);
+    }
+    builder.build()
+}
+
+fn rtp_description_element(media: &str) -> Element {
+    Element::builder("description", NS_JINGLE_RTP)
+        .attr("media", media)
+        .build()
+}
+
+fn content_element(media: &str) -> Element {
+    Element::builder("content", NS_JINGLE)
+        .attr("creator", "initiator")
+        .attr("name", media)
+        .append(rtp_description_element(media))
+        .append(Element::builder("transport", NS_WADDLE_LIVEKIT_TRANSPORT).build())
+        .build()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -330,6 +458,131 @@ mod tests {
         // transport-info isn't surfaced as a call event yet — it's
         // mid-session signalling, handled internally.
         assert!(parse_call_event(&elem).is_none());
+    }
+
+    // --- outbound builders --------------------------------------------
+
+    #[test]
+    fn build_propose_emits_one_description_per_offered_media() {
+        let elem = build_propose("c1", CallMedia::audio_video());
+        assert_eq!(elem.name(), "propose");
+        assert_eq!(elem.ns(), NS_JINGLE_MESSAGE);
+        assert_eq!(elem.attr("id"), Some("c1"));
+        let media: Vec<_> = elem
+            .children()
+            .filter(|c| c.name() == "description" && c.ns() == NS_JINGLE_RTP)
+            .filter_map(|c| c.attr("media"))
+            .collect();
+        assert_eq!(media, vec!["audio", "video"]);
+    }
+
+    #[test]
+    fn build_propose_audio_only_omits_video_description() {
+        let elem = build_propose("c1", CallMedia::audio_only());
+        let media: Vec<_> = elem
+            .children()
+            .filter(|c| c.name() == "description")
+            .filter_map(|c| c.attr("media"))
+            .collect();
+        assert_eq!(media, vec!["audio"]);
+    }
+
+    #[test]
+    fn build_jmi_helpers_roundtrip_through_parser() {
+        // proceed: wrapping in a <message/> with a `from` makes the
+        // inbound parser pick it up.
+        let stanza = Element::builder("message", "jabber:client")
+            .attr("from", "bob@waddle.test/desktop")
+            .append(build_proceed("c1"))
+            .build();
+        let ev = parse_call_event(&stanza).expect("proceed parses");
+        assert!(matches!(ev.kind, CallEventKind::Proceed));
+
+        let stanza = Element::builder("message", "jabber:client")
+            .attr("from", "bob@waddle.test/desktop")
+            .append(build_reject("c1"))
+            .build();
+        let ev = parse_call_event(&stanza).expect("reject parses");
+        assert!(matches!(ev.kind, CallEventKind::Reject));
+
+        let stanza = Element::builder("message", "jabber:client")
+            .attr("from", "alice@waddle.test/desktop")
+            .append(build_retract("c1"))
+            .build();
+        let ev = parse_call_event(&stanza).expect("retract parses");
+        assert!(matches!(ev.kind, CallEventKind::Retract));
+
+        let stanza = Element::builder("message", "jabber:client")
+            .attr("from", "alice@waddle.test/desktop")
+            .append(build_finish("c1"))
+            .build();
+        let ev = parse_call_event(&stanza).expect("finish parses");
+        assert!(matches!(ev.kind, CallEventKind::Finish));
+    }
+
+    #[test]
+    fn build_session_initiate_carries_empty_waddle_transport_per_content() {
+        let jingle =
+            build_session_initiate("c1", "alice@waddle.test/desktop", CallMedia::audio_video());
+        assert_eq!(jingle.name(), "jingle");
+        assert_eq!(jingle.ns(), NS_JINGLE);
+        assert_eq!(jingle.attr("action"), Some("session-initiate"));
+        assert_eq!(jingle.attr("sid"), Some("c1"));
+        assert_eq!(jingle.attr("initiator"), Some("alice@waddle.test/desktop"));
+
+        let contents: Vec<_> = jingle
+            .children()
+            .filter(|c| c.name() == "content")
+            .collect();
+        assert_eq!(contents.len(), 2);
+        for content in contents {
+            // Every content has an empty Waddle transport request —
+            // the server fills in url/room/identity/token before
+            // forwarding to the peer.
+            let transport = content
+                .children()
+                .find(|c| c.name() == "transport")
+                .expect("content has transport");
+            assert_eq!(transport.ns(), NS_WADDLE_LIVEKIT_TRANSPORT);
+            assert!(
+                transport.attr("url").is_none(),
+                "outbound transport must be a request"
+            );
+            assert!(transport.attr("room").is_none());
+            assert!(transport.attr("identity").is_none());
+            assert!(transport.children().next().is_none());
+        }
+    }
+
+    #[test]
+    fn build_session_accept_carries_responder_attr_and_empty_transport() {
+        let jingle = build_session_accept(
+            "c1",
+            "alice@waddle.test/desktop",
+            "bob@waddle.test/desktop",
+            CallMedia::audio_only(),
+        );
+        assert_eq!(jingle.attr("action"), Some("session-accept"));
+        assert_eq!(jingle.attr("initiator"), Some("alice@waddle.test/desktop"));
+        assert_eq!(jingle.attr("responder"), Some("bob@waddle.test/desktop"));
+        let contents: Vec<_> = jingle
+            .children()
+            .filter(|c| c.name() == "content")
+            .collect();
+        assert_eq!(contents.len(), 1);
+    }
+
+    #[test]
+    fn build_session_terminate_includes_reason_when_supplied() {
+        let with_reason = build_session_terminate("c1", Some("success"));
+        let reason_elem = with_reason
+            .children()
+            .find(|c| c.name() == "reason")
+            .expect("reason child");
+        assert!(reason_elem.children().any(|c| c.name() == "success"));
+
+        let without = build_session_terminate("c1", None);
+        assert!(without.children().all(|c| c.name() != "reason"));
     }
 
     #[test]

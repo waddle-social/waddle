@@ -21,8 +21,9 @@ pub use builders::{
     build_pinned_message, build_reaction_message, build_retraction_message, build_unpinned_message,
 };
 pub use call::{
-    parse_call_event, parse_jingle_iq, parse_jmi_message, CallEventKind, CallMedia,
-    InboundCallEvent, LiveKitJoin,
+    build_finish, build_proceed, build_propose, build_reject, build_retract, build_session_accept,
+    build_session_initiate, build_session_terminate, parse_call_event, parse_jingle_iq,
+    parse_jmi_message, CallEventKind, CallMedia, InboundCallEvent, LiveKitJoin,
 };
 pub use namespaces::{
     NS_CHAT_MARKERS, NS_CHAT_STATES, NS_MESSAGE_CORRECT, NS_MESSAGE_MODERATE, NS_MESSAGE_RETRACT,

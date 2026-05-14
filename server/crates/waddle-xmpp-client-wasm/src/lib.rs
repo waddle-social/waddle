@@ -58,6 +58,7 @@ use wasm_bindgen_futures::{future_to_promise, spawn_local};
 mod client_account;
 mod client_admin;
 mod client_admin_v2;
+mod client_calls;
 mod client_core;
 mod client_extensions;
 mod client_history;
