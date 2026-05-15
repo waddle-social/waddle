@@ -350,6 +350,19 @@ function userIsReactor(nicks: readonly string[]): boolean {
   return false;
 }
 
+/* Warmth tier — count-proportional ambient halo on the reaction chip.
+ * Replaces the "metric chip" feel with an "ambient acknowledgement"
+ * read: at a glance the room shows you which posts resonated, not
+ * just which ones got a tap. Thresholds are intentionally low so a
+ * 3-person room still gets the warmest tier on a single shared
+ * reaction. */
+function reactionWarmthClass(count: number): string {
+  if (count >= 5) return "chat-reaction-chip--warmth-hot";
+  if (count >= 3) return "chat-reaction-chip--warmth-warm";
+  if (count >= 2) return "chat-reaction-chip--warmth-tepid";
+  return "";
+}
+
 // Reaction tooltip is teleported to <body> so that pane-level
 // `overflow-x: hidden` (`.chat-pane-scroll`) cannot clip it. The chip stays
 // in place; on hover/focus we capture the chip's bounding rect and render a
@@ -762,7 +775,10 @@ onBeforeUnmount(() => {
         :key="emoji"
         type="button"
         class="chat-reaction-chip type-caption inline-flex h-7 items-center gap-1 px-2 rounded-lg"
-        :class="userIsReactor(nicks) ? 'chat-reaction-chip--self' : ''"
+        :class="[
+          userIsReactor(nicks) ? 'chat-reaction-chip--self' : '',
+          reactionWarmthClass(nicks.length),
+        ]"
         :aria-label="reactionAriaLabel(emoji, nicks)"
         :aria-pressed="userIsReactor(nicks)"
         @click="emit('react', message.id, emoji)"
