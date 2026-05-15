@@ -4,9 +4,36 @@
   box-shadow: var(--shadow-pane);
 }
 
+/* The composer input-shell is where the user writes — the most
+ * emotionally-loaded interaction surface in the app. Previously it
+ * relied on bg-muted + a focus ring for definition, which left the
+ * at-rest state edgeless: the shell blended into the composer pane
+ * backdrop with nothing saying "this is where you type." Two small
+ * additions:
+ *
+ *   - A subtle border at rest so the shell reads as a card, not a
+ *     muted band. ~30% --border in alpha so it sits behind the type
+ *     without competing.
+ *   - Primary-tinted border on focus-within so the surface "wakes"
+ *     when the user lands the caret. The tailwind ring-2 + glow on
+ *     :focus inside the shell still applies; the border colour swap
+ *     gives the lift a clear edge in addition to the ambient halo.
+ *
+ * Transitions are short (180 ms) so the focus state feels responsive,
+ * not floaty. */
 .chat-composer-input-shell {
   min-height: var(--chat-composer-inner-height);
   border-radius: var(--chat-composer-input-radius);
+  border: 1px solid color-mix(in oklab, var(--border) 70%, transparent);
+  transition: border-color 0.18s ease, background-color 0.18s ease;
+}
+
+.chat-composer-input-shell:hover {
+  border-color: color-mix(in oklab, var(--border) 92%, transparent);
+}
+
+.chat-composer-input-shell:has(:focus) {
+  border-color: color-mix(in oklab, var(--primary) 52%, transparent);
 }
 
 .chat-composer-input-action {
