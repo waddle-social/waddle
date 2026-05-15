@@ -6035,6 +6035,7 @@ dependencies = [
  "jid",
  "jsonwebtoken",
  "kameo",
+ "libc",
  "lru 0.12.5",
  "minidom",
  "object_store",

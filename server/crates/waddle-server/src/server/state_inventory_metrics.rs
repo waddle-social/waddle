@@ -17,7 +17,7 @@ use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use opentelemetry::metrics::Gauge;
-use tracing::debug;
+use tracing::{debug, warn};
 
 use crate::server::routes::websocket::WebSocketState;
 use crate::server::state_inventory::collect_snapshot;
@@ -43,6 +43,51 @@ macro_rules! gauge {
                 .build()
         })
     }};
+}
+
+/// Process resident-set-size gauge, units bytes.
+fn rss_gauge() -> &'static Gauge<i64> {
+    static G: OnceLock<Gauge<i64>> = OnceLock::new();
+    G.get_or_init(|| {
+        meter()
+            .i64_gauge("waddle.process.resident_memory_bytes")
+            .with_description(
+                "Server process resident set size, sampled from /proc/self/statm \
+                 on each state-inventory publisher tick. Plot against \
+                 waddle.state.* to attribute an RSS climb to the map driving it.",
+            )
+            .with_unit("By")
+            .build()
+    })
+}
+
+/// Read RSS in bytes from `/proc/self/statm`. The second whitespace-
+/// separated field is the resident set size in pages; multiply by the
+/// page size on the running kernel. Returns `None` on Linux platforms
+/// where the file is missing/malformed or on non-Linux hosts (the
+/// helper is a no-op there). The publisher logs and skips the sample
+/// in that case rather than failing the whole tick.
+fn read_process_rss_bytes() -> Option<i64> {
+    #[cfg(target_os = "linux")]
+    {
+        let statm = std::fs::read_to_string("/proc/self/statm").ok()?;
+        let pages: u64 = statm.split_whitespace().nth(1)?.parse().ok()?;
+        // SAFETY: `sysconf(_SC_PAGESIZE)` is signal-safe and always
+        // returns a positive value on a running Linux kernel. We
+        // clamp to a known fallback (4 KiB) if the call returns ≤ 0
+        // for any reason rather than panicking.
+        let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+        let page_size: u64 = if page_size > 0 {
+            page_size as u64
+        } else {
+            4096
+        };
+        i64::try_from(pages.saturating_mul(page_size)).ok()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        None
+    }
 }
 
 /// Cast a `usize` length to `i64` for OTel without panicking on
@@ -199,11 +244,33 @@ pub(crate) async fn publish_once(websocket_state: &WebSocketState) {
     )
     .record(as_i64(snapshot.rooms.dormant), labels);
 
+    // Process RSS — co-emitted here so the state-inventory dashboard
+    // can correlate map sizes against memory pressure without
+    // depending on a cluster-side cAdvisor / kubelet scrape that
+    // doesn't exist on this deployment today.
+    let mut rss_sampled: Option<i64> = None;
+    match read_process_rss_bytes() {
+        Some(bytes) => {
+            rss_gauge().record(bytes, labels);
+            rss_sampled = Some(bytes);
+        }
+        None => {
+            // Logged at warn so an unexpected platform / malformed
+            // /proc/self/statm shows up in the canary logs rather than
+            // silently leaving the RSS panel empty.
+            warn!(
+                target_os = std::env::consts::OS,
+                "state-inventory publisher: RSS sample unavailable; skipping waddle.process.resident_memory_bytes"
+            );
+        }
+    }
+
     debug!(
         rooms_total = snapshot.rooms.total,
         rooms_dormant = snapshot.rooms.dormant,
         sm_live = ?snapshot.sessions.sm_live_sessions,
         full_jid_conns = snapshot.connections.full_jid_connections,
+        rss_bytes = ?rss_sampled,
         "state-inventory publisher: recorded gauge sample"
     );
 }
@@ -220,6 +287,24 @@ mod tests {
         // map at zero; we just want to confirm the publisher walks
         // them all without panicking.
         publish_once(&state).await;
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn read_process_rss_bytes_returns_positive_value_on_linux() {
+        // The test process is itself a Linux user-space process, so
+        // /proc/self/statm MUST exist and report a non-zero RSS.
+        let rss = super::read_process_rss_bytes().expect("Linux /proc/self/statm");
+        assert!(rss > 0, "RSS must be positive in a live process");
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn read_process_rss_bytes_is_none_off_linux() {
+        // macOS / Windows builders run the test suite too — make
+        // explicit that the helper returns None there rather than
+        // panicking.
+        assert!(super::read_process_rss_bytes().is_none());
     }
 
     #[test]
