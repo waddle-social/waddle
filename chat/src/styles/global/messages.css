@@ -758,17 +758,22 @@
   padding-block: var(--space-2xs) var(--space-sm);
 }
 
-.chat-thread-root {
-  position: relative;
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-2xs);
-  padding-block: var(--space-sm);
-  padding-inline: var(--space-sm);
-  margin-block: var(--space-xs);
-  border-radius: var(--radius-md);
-  background: color-mix(in oklab, var(--primary) 5%, transparent);
-  box-shadow: inset 2px 0 0 0 color-mix(in oklab, var(--primary) 55%, transparent);
+/* Hairline divider between the thread root and the first reply.
+ * The thread-lobby header at the top of the panel already identifies
+ * the root ("Started by …"), so the root itself renders as a normal
+ * MessageCard — no heavy primary-tinted callout box, no loud
+ * THREAD START label. This rule sits in place of the old card and
+ * provides a quiet "replies below" separator instead. */
+.chat-thread-root-divider {
+  height: 1px;
+  margin: var(--space-sm) var(--space-md);
+  background: linear-gradient(
+    to right,
+    transparent,
+    color-mix(in oklab, var(--border) 78%, transparent) 18%,
+    color-mix(in oklab, var(--border) 78%, transparent) 82%,
+    transparent
+  );
 }
 
 /* Thread lobby header — replaces the generic "Thread > author"
@@ -980,15 +985,6 @@
   font-variant-numeric: tabular-nums;
 }
 
-.chat-thread-root__label {
-  align-self: flex-start;
-  padding-inline-start: var(--chat-thread-action-indent);
-  color: var(--primary);
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  font-size: 0.6875rem;
-  line-height: 1;
-}
 
 .chat-accordion-bar {
   display: none;

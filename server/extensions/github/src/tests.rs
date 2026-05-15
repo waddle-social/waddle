@@ -360,6 +360,11 @@ fn provider_webhook_sends_to_route_loaded_from_pubsub() {
     assert_eq!(find_attr(attrs, "event-type"), Some("workflow_run"));
     assert_eq!(find_attr(attrs, "repository"), Some("waddle-social/waddle"));
     assert_eq!(find_attr(attrs, "conclusion"), Some("failure"));
+    // GitHub events are server-pushed notifications, not human replies,
+    // so the payload declares its surface so the client can render
+    // them as full-width system bands without per-message detection
+    // hacks.
+    assert_eq!(find_attr(attrs, "surface"), Some("chat-bot"));
 }
 
 #[test]

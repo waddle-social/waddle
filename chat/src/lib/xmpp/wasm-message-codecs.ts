@@ -217,11 +217,33 @@ function launchFromWasm(
   };
 }
 
+// Allowed values for the `surface` declaration on the payload root.
+// Extensions opt in by adding a `surface="..."` attribute; anything
+// missing or unrecognised falls back to "message-card" so existing
+// extensions keep their current treatment.
+const KNOWN_SURFACE_KINDS = ["message-card", "board", "game", "chat-bot", "dynamic-canvas", "utility-panel"] as const;
+type KnownSurfaceKind = typeof KNOWN_SURFACE_KINDS[number];
+
+function surfaceKindFromPayloadAttributes(attrs: Record<string, string>): KnownSurfaceKind {
+  const declared = attrs.surface;
+  if (declared && (KNOWN_SURFACE_KINDS as readonly string[]).includes(declared)) {
+    return declared as KnownSurfaceKind;
+  }
+  return "message-card";
+}
+
 function extensionAnnotationsFromWasm(envelope?: WasmExtensionEnvelope): ExtensionAnnotation[] {
   if (!envelope?.enrichments.length) return [];
   return envelope.enrichments.map((enrichment) => {
     const payloads = enrichment.payloads.map(payloadElementFromWasm);
     const fields = payloads[0]?.attributes ?? {};
+    // Surface declaration travels with the payload root element. The
+    // GitHub extension (and any future bot-style publisher) sets
+    // `surface="chat-bot"` so the client renders it as a full-width
+    // system band rather than a human-shaped message bubble. Default
+    // is "message-card" — the existing treatment for everything that
+    // doesn't opt in.
+    const surfaceKind = surfaceKindFromPayloadAttributes(fields);
     const source = enrichment.source ? {
       stanzaId: enrichment.source.stanza_id,
       ...(enrichment.source.body_start !== undefined ? { bodyStart: enrichment.source.body_start } : {}),
@@ -236,14 +258,14 @@ function extensionAnnotationsFromWasm(envelope?: WasmExtensionEnvelope): Extensi
     return {
       extensionId: enrichment.plugin,
       annotationId: enrichment.id,
-      surfaceKind: "message-card",
+      surfaceKind,
       title: enrichment.title?.trim() || enrichment.plugin,
       ...(enrichment.summary?.trim() ? { summary: enrichment.summary.trim() } : {}),
       ...(source ? { source } : {}),
       payloadNamespace: enrichment.payload_namespace,
       payloads,
       fields: {
-        surface: "message-card",
+        surface: surfaceKind,
         payloadNamespace: enrichment.payload_namespace,
         ...fields,
       },
