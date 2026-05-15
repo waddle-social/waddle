@@ -203,6 +203,7 @@ watch(
         card.presentation.tone === 'success' ? 'chat-system-band--tone-success' : '',
         card.presentation.tone === 'danger'  ? 'chat-system-band--tone-danger'  : '',
         card.presentation.tone === 'warning' ? 'chat-system-band--tone-warning' : '',
+        card.presentation.kind ? `chat-system-band--kind-${card.presentation.kind}` : '',
       ]"
     >
       <div class="chat-system-band__header">
@@ -243,7 +244,7 @@ watch(
           <span class="chat-system-band__meta-label">{{ detail.label }}</span>
           <span
             class="chat-system-band__meta-value"
-            :class="detail.label === 'Commit' ? 'chat-system-band__meta-value--mono' : ''"
+            :class="(detail.label === 'Commit' || detail.label === 'Branch') ? 'chat-system-band__meta-value--mono' : ''"
             :title="detail.value"
           >{{ detail.value }}</span>
         </span>

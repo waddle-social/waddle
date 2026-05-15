@@ -519,7 +519,12 @@ function githubEventPresentation(
     title: name,
     summary,
     primaryValue: conclusion && conclusion !== "unknown" ? humanizeExtensionKey(conclusion) : humanizeExtensionKey(action),
-    secondaryValue: repository,
+    // `secondaryValue` previously echoed the repository as a prominent
+    // un-labeled meta-item — a duplicate of the Repository detail below.
+    // GitHub-event cards now use a positional chip strip (labels hidden
+    // via CSS for kind=github-event) so the repo appears exactly once,
+    // alongside branch / commit / event. Dropping the dupe gets the
+    // card from ~6 lines to ~3 on the same payload.
     ...(primaryUrl ? { primaryUrl } : {}),
     options: [],
     details,

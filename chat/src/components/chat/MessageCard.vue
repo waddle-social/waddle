@@ -165,6 +165,22 @@ function systemBandToneClass(tone: string): string {
   return "";
 }
 
+// Per-kind modifier so the stylesheet can tune layout for specific
+// payload shapes — github-event cards hide their meta-item labels and
+// render as a positional chip strip (branch · commit · event) instead
+// of a labeled K/V grid.
+function systemBandKindClass(kind: string): string {
+  return kind ? `chat-system-band--kind-${kind}` : "";
+}
+
+// Branch values look like code (slashes, identifier-style suffixes)
+// and deserve the same tabular-mono treatment commit SHAs get.
+function systemBandMetaValueClass(label: string): string {
+  return label === "Commit" || label === "Branch"
+    ? "chat-system-band__meta-value--mono"
+    : "";
+}
+
 // Reuse the same action-state machine MessageBody uses so loading /
 // success / error feedback is consistent across all extension surfaces.
 const allExtensionAnnotations = computed(() => props.message.extensionAnnotations ?? []);
@@ -656,7 +672,10 @@ onBeforeUnmount(() => {
       :data-message-id="message.id"
       :data-message-created-at="message.createdAt"
       class="chat-system-band animate-message-in"
-      :class="systemBandToneClass(card.presentation.tone)"
+      :class="[
+        systemBandToneClass(card.presentation.tone),
+        systemBandKindClass(card.presentation.kind),
+      ]"
     >
       <div class="chat-system-band__header">
         <span class="chat-system-band__source">
@@ -697,7 +716,7 @@ onBeforeUnmount(() => {
           <span class="chat-system-band__meta-label">{{ detail.label }}</span>
           <span
             class="chat-system-band__meta-value"
-            :class="detail.label === 'Commit' ? 'chat-system-band__meta-value--mono' : ''"
+            :class="systemBandMetaValueClass(detail.label)"
             :title="detail.value"
           >{{ detail.value }}</span>
         </span>

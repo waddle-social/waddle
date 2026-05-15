@@ -31,20 +31,19 @@
   flex-direction: column;
   gap: 0.3rem;
   width: 100%;
-  padding: 0.65rem var(--space-md) 0.65rem calc(var(--space-md) + 0.5rem);
-  background: linear-gradient(
-    90deg,
-    color-mix(in oklab, var(--rail-color) 6%, transparent),
-    transparent 55%
-  );
-  border-top: 1px solid color-mix(in oklab, var(--border) 55%, transparent);
-  border-bottom: 1px solid color-mix(in oklab, var(--border) 55%, transparent);
+  padding: 0.7rem var(--space-md) 0.7rem calc(var(--space-md) + 0.5rem);
+  /* Rail-only treatment — full-card tonal wash dropped. A stack of
+   * five failing CI cards previously painted the whole feed red; the
+   * 3 px left rail (::before) carries tone alone, leaving the body
+   * neutral so the feed reads like a list of distinct events. */
+  background: transparent;
+  /* Explicit breathing room between consecutive bands. The message
+   * list's --space-2xs row gap is too tight for the visual weight of
+   * a full-width card; --space-sm gives each event its own block. */
+  margin-block-end: var(--space-sm);
+  border-top: 1px solid color-mix(in oklab, var(--border) 50%, transparent);
+  border-bottom: 1px solid color-mix(in oklab, var(--border) 50%, transparent);
   transition: background-color 0.16s ease;
-}
-
-.chat-system-band + .chat-system-band {
-  border-top: 0;
-  margin-top: -1px;
 }
 
 .chat-system-band::before {
@@ -59,9 +58,12 @@
 }
 
 .chat-system-band:hover {
+  /* Hover gives a quiet hue-tinted lift on the BODY only — well below
+   * the at-rest wash that used to live here, and only while the user
+   * is actually pointing at the card. Standing CI feed stays neutral. */
   background: linear-gradient(
     90deg,
-    color-mix(in oklab, var(--rail-color) 10%, transparent),
+    color-mix(in oklab, var(--rail-color) 5%, transparent),
     transparent 55%
   );
 }
@@ -77,9 +79,10 @@
 .chat-system-band--inline {
   border: 1px solid color-mix(in oklab, var(--border) 88%, transparent);
   border-radius: var(--radius-md);
-  background:
-    linear-gradient(90deg, color-mix(in oklab, var(--rail-color) 5%, transparent), transparent 55%),
-    color-mix(in oklab, var(--card) 55%, transparent);
+  /* Inline variant keeps its quiet --card surface; the rail-color
+   * wash that used to layer on top is dropped (same quietening pass
+   * as the full-width band). The rail still carries tone. */
+  background: color-mix(in oklab, var(--card) 55%, transparent);
 }
 
 .chat-system-band--inline::before {
@@ -198,6 +201,20 @@
   display: flex;
   flex-wrap: wrap;
   gap: 0.4rem;
+}
+
+/* GitHub-event kind — positional chip strip. The labels (REPOSITORY,
+ * BRANCH, COMMIT, EVENT) carry zero new information per card (every
+ * github event publishes the same four keys), so they're hidden and
+ * the values render as a single flowing strip:
+ *
+ *   waddle-social/waddle · main · dbcbc16 · Workflow Run
+ *
+ * Position is the label — repo first, branch second, commit third,
+ * event last. The "·" between items comes from the `+ ::before`
+ * separator that's already in the base style. */
+.chat-system-band--kind-github-event .chat-system-band__meta-label {
+  display: none;
 }
 
 /* ============================================================
