@@ -161,7 +161,6 @@ onMounted(focusPanel);
       </div>
       <div
         v-else
-        class="chat-message-lane"
         :class="route?.surface === 'gallery' ? 'grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3' : 'grid gap-2'"
       >
         <article
