@@ -462,6 +462,25 @@ impl kameo::message::Message<OccupantCount> for RoomActor {
     }
 }
 
+/// Ask whether this room is fully dormant — no occupants, no
+/// subject, no pins, and no in-memory affiliations. The dormancy
+/// janitor uses this to decide whether the persistent-room
+/// `RoomActor` is safe to reap. See [`super::MucRoom::is_dormant`]
+/// for the exact predicate.
+pub struct IsDormant;
+
+impl kameo::message::Message<IsDormant> for RoomActor {
+    type Reply = bool;
+
+    async fn handle(
+        &mut self,
+        _msg: IsDormant,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.room.is_dormant()
+    }
+}
+
 /// Destroy the room (clears all occupants).
 pub struct Destroy;
 

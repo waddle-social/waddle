@@ -62,6 +62,20 @@ struct InventoryResponse {
     sessions: SessionInventory,
     caps: CapsInventory,
     connections: ConnectionInventory,
+    rooms: RoomInventory,
+}
+
+#[derive(Debug, Serialize)]
+struct RoomInventory {
+    /// Total `RoomActor` instances tracked by `RoomRegistryActor`.
+    /// Errors fall through as 0 to keep the endpoint best-effort.
+    total: usize,
+    /// Rooms that report `is_dormant() == true` — zero occupants AND
+    /// no subject AND no pinned entries AND no in-memory affiliations.
+    /// Reclaimable by the room dormancy janitor on its next pass; a
+    /// growing value here is the canary signal that the janitor
+    /// interval should be tightened.
+    dormant: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -133,6 +147,8 @@ async fn handler(
         .live_session_ids()
         .map(|ids| ids.len());
 
+    let rooms = collect_room_inventory(ws).await;
+
     let response = InventoryResponse {
         auth: AuthInventory {
             pending_auth: auth_state.pending_auth.len(),
@@ -160,8 +176,48 @@ async fn handler(
             presence_states: protocol.connection_registry.presence_state_count(),
             last_activity: protocol.connection_registry.last_activity_count(),
         },
+        rooms,
     };
     Ok(Json(response))
+}
+
+/// Best-effort population of `RoomInventory`. Errors fall through as
+/// zeros so the inventory endpoint stays operational even when the
+/// room registry or a per-room actor is overloaded.
+async fn collect_room_inventory(ws: &WebSocketState) -> RoomInventory {
+    use waddle_xmpp::muc::room_actor::IsDormant;
+    use waddle_xmpp::muc::room_registry_actor::{GetRoom, ListRooms, RoomCount};
+    let total: usize = ws
+        .deps
+        .protocol
+        .room_registry
+        .ask(RoomCount)
+        .await
+        .unwrap_or(0);
+    let room_list = match ws.deps.protocol.room_registry.ask(ListRooms).await {
+        Ok(list) => list,
+        Err(_) => {
+            return RoomInventory { total, dormant: 0 };
+        }
+    };
+    let mut dormant = 0usize;
+    for room_jid in room_list {
+        let Ok(Some(actor)) = ws
+            .deps
+            .protocol
+            .room_registry
+            .ask(GetRoom {
+                room_jid: room_jid.clone(),
+            })
+            .await
+        else {
+            continue;
+        };
+        if matches!(actor.ask(IsDormant).await, Ok(true)) {
+            dormant += 1;
+        }
+    }
+    RoomInventory { total, dormant }
 }
 
 /// Constant-time byte slice comparison so the auth check cannot leak

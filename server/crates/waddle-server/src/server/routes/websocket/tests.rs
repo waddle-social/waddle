@@ -44,7 +44,7 @@ mod send;
 mod stream_features;
 mod stream_management;
 
-pub(super) async fn create_test_websocket_state() -> Arc<WebSocketState> {
+pub(crate) async fn create_test_websocket_state() -> Arc<WebSocketState> {
     create_test_websocket_state_with_extension_manager(empty_extension_manager().await).await
 }
 

@@ -567,3 +567,67 @@ async fn leave_by_real_jid_surfaces_is_persistent_false_for_instant_rooms() {
     assert_eq!(outcome.occupant_count, 0);
     assert!(outcome.removed_last_session);
 }
+
+#[tokio::test]
+async fn is_dormant_true_for_fresh_empty_room() {
+    let actor = spawn_room_actor().await;
+    assert!(actor.ask(crate::muc::room_actor::IsDormant).await.unwrap());
+}
+
+#[tokio::test]
+async fn is_dormant_false_while_occupants_present() {
+    let actor = spawn_room_actor().await;
+    actor
+        .ask(Join {
+            nick: "alice".to_string(),
+            real_jid: test_full_jid("alice"),
+            role: Role::Participant,
+            affiliation: Affiliation::Member,
+        })
+        .await
+        .expect("join");
+    assert!(!actor.ask(crate::muc::room_actor::IsDormant).await.unwrap());
+}
+
+#[tokio::test]
+async fn is_dormant_false_when_affiliation_is_set() {
+    let actor = spawn_room_actor().await;
+    let jid: BareJid = "alice@example.com".parse().expect("bare jid");
+    actor
+        .ask(ChangeAffiliation {
+            jid,
+            affiliation: Affiliation::Admin,
+        })
+        .await
+        .expect("change affiliation");
+    assert!(
+        !actor.ask(crate::muc::room_actor::IsDormant).await.unwrap(),
+        "in-memory affiliation grants must keep the room non-dormant \
+         so eviction does not drop them"
+    );
+}
+
+#[tokio::test]
+async fn is_dormant_true_after_last_occupant_leaves_with_no_stored_state() {
+    let actor = spawn_room_actor().await;
+    let alice = test_full_jid("alice");
+    actor
+        .ask(Join {
+            nick: "alice".to_string(),
+            real_jid: alice.clone(),
+            role: Role::Participant,
+            affiliation: Affiliation::Member,
+        })
+        .await
+        .expect("join");
+    actor
+        .ask(crate::muc::room_actor::LeaveByRealJid { sender_jid: alice })
+        .await
+        .expect("leave")
+        .expect("outcome");
+    assert!(
+        actor.ask(crate::muc::room_actor::IsDormant).await.unwrap(),
+        "an empty room with no subject/pins/affiliations is dormant \
+         and safe for the room dormancy janitor to reap"
+    );
+}

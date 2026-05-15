@@ -7,6 +7,9 @@ use tracing::{debug, error, info, warn};
 /// Default interval for the auth-state TTL janitor.
 const AUTH_JANITOR_INTERVAL: Duration = Duration::from_secs(60);
 
+/// Default interval for the persistent-room dormancy janitor.
+const ROOM_DORMANCY_JANITOR_INTERVAL: Duration = Duration::from_secs(300);
+
 fn pending_delivery_max_age_days_from_env() -> u32 {
     const DEFAULT_DAYS: u32 = 30;
     const MIN_DAYS: u32 = 1;
@@ -688,6 +691,149 @@ pub(crate) fn spawn_auth_state_janitor(websocket_state: &Arc<WebSocketState>) {
     });
 }
 
+/// Per-sweep counts returned by [`sweep_dormant_rooms_once`].
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct DormancySweepCounts {
+    pub evicted: usize,
+    pub examined: usize,
+    pub remaining: usize,
+}
+
+/// Walk every registered MUC room and destroy the ones that report
+/// dormant. Pure helper so the live janitor and unit tests share the
+/// same logic. Each room ask is bounded — a hung room actor only
+/// stalls its own check, never the sweep.
+pub(crate) async fn sweep_dormant_rooms_once(
+    websocket_state: &WebSocketState,
+) -> DormancySweepCounts {
+    use waddle_xmpp::muc::room_actor::IsDormant;
+    use waddle_xmpp::muc::room_registry_actor::{DestroyRoom, ListRooms, RoomCount};
+    let mut counts = DormancySweepCounts::default();
+    let rooms = match websocket_state
+        .deps
+        .protocol
+        .room_registry
+        .ask(ListRooms)
+        .await
+    {
+        Ok(list) => list,
+        Err(error) => {
+            warn!(error = ?error, "room dormancy janitor: ListRooms ask failed");
+            return counts;
+        }
+    };
+    counts.examined = rooms.len();
+    for room_jid in rooms {
+        let actor = match websocket_state
+            .deps
+            .protocol
+            .room_registry
+            .ask(waddle_xmpp::muc::room_registry_actor::GetRoom {
+                room_jid: room_jid.clone(),
+            })
+            .await
+        {
+            Ok(Some(actor)) => actor,
+            Ok(None) => continue,
+            Err(error) => {
+                warn!(
+                    room = %room_jid,
+                    error = ?error,
+                    "room dormancy janitor: GetRoom ask failed; skipping"
+                );
+                continue;
+            }
+        };
+        let is_dormant = match actor.ask(IsDormant).await {
+            Ok(value) => value,
+            Err(error) => {
+                warn!(
+                    room = %room_jid,
+                    error = ?error,
+                    "room dormancy janitor: IsDormant ask failed; skipping"
+                );
+                continue;
+            }
+        };
+        if !is_dormant {
+            continue;
+        }
+        match websocket_state
+            .deps
+            .protocol
+            .room_registry
+            .ask(DestroyRoom {
+                room_jid: room_jid.clone(),
+            })
+            .await
+        {
+            Ok(true) => {
+                counts.evicted += 1;
+                debug!(room = %room_jid, "room dormancy janitor: evicted dormant room");
+            }
+            Ok(false) => {}
+            Err(error) => {
+                warn!(
+                    room = %room_jid,
+                    error = ?error,
+                    "room dormancy janitor: DestroyRoom ask failed; will retry next pass"
+                );
+            }
+        }
+    }
+    counts.remaining = websocket_state
+        .deps
+        .protocol
+        .room_registry
+        .ask(RoomCount)
+        .await
+        .unwrap_or(0);
+    counts
+}
+
+/// Periodically evict fully-dormant MUC rooms (no occupants AND no
+/// subject AND no pins AND no in-memory affiliations) so the
+/// `RoomRegistryActor.rooms` map shrinks back to current
+/// working-set rather than growing to the lifetime room set.
+///
+/// Eviction is safe for dormant rooms because re-entry through
+/// `GetOrCreateRoom` spawns a fresh `RoomActor` with identical
+/// initial state — see [`waddle_xmpp::muc::MucRoom::is_dormant`].
+/// Rooms with subject text, pinned entries, or explicit affiliation
+/// grants are intentionally NOT evicted here: those caches are
+/// in-memory only and dropping them would lose user-visible state.
+///
+/// Runs on a 5-minute ticker. Skips the first immediate tick so the
+/// process doesn't sweep before any room has been touched.
+pub(crate) fn spawn_room_dormancy_janitor(websocket_state: &Arc<WebSocketState>) {
+    let weak_state = Arc::downgrade(websocket_state);
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(ROOM_DORMANCY_JANITOR_INTERVAL);
+        ticker.tick().await;
+        loop {
+            ticker.tick().await;
+            let Some(state) = weak_state.upgrade() else {
+                break;
+            };
+            let counts = sweep_dormant_rooms_once(&state).await;
+            if counts.evicted > 0 {
+                info!(
+                    examined = counts.examined,
+                    evicted = counts.evicted,
+                    remaining = counts.remaining,
+                    "room dormancy janitor: evicted dormant rooms"
+                );
+            } else {
+                debug!(
+                    examined = counts.examined,
+                    remaining = counts.remaining,
+                    "room dormancy janitor: no dormant rooms"
+                );
+            }
+        }
+    });
+}
+
 #[cfg(test)]
 mod auth_janitor_tests {
     use super::sweep_auth_state_once;
@@ -788,5 +934,156 @@ mod auth_janitor_tests {
         assert_eq!(counts.pending_remaining, 1);
         assert_eq!(counts.device_remaining, 1);
         assert_eq!(counts.xmpp_remaining, 1);
+    }
+}
+
+#[cfg(test)]
+mod room_dormancy_tests {
+    use super::sweep_dormant_rooms_once;
+    use crate::server::routes::websocket::tests::create_test_websocket_state;
+    use waddle_xmpp::muc::{
+        room_actor::{ChangeAffiliation, Join, LeaveByRealJid},
+        room_registry_actor::{CreateRoom, RoomCount},
+        RoomConfig,
+    };
+    use waddle_xmpp_core::{Affiliation, Role};
+
+    fn full_jid(s: &str) -> jid::FullJid {
+        s.parse().expect("valid full jid")
+    }
+    fn room_bare_jid(local: &str) -> jid::BareJid {
+        format!("{local}@muc.example.com")
+            .parse()
+            .expect("bare jid")
+    }
+
+    #[tokio::test]
+    async fn sweep_evicts_dormant_persistent_rooms() {
+        let state = create_test_websocket_state().await;
+        let room_jid = room_bare_jid("dormant");
+        state
+            .deps
+            .protocol
+            .room_registry
+            .ask(CreateRoom {
+                room_jid: room_jid.clone(),
+                waddle_id: "w".to_string(),
+                channel_id: "c".to_string(),
+                config: RoomConfig::default(),
+            })
+            .await
+            .expect("create");
+
+        let before: usize = state
+            .deps
+            .protocol
+            .room_registry
+            .ask(RoomCount)
+            .await
+            .expect("count");
+        assert_eq!(before, 1);
+
+        let counts = sweep_dormant_rooms_once(&state).await;
+        assert_eq!(counts.examined, 1);
+        assert_eq!(counts.evicted, 1);
+        assert_eq!(counts.remaining, 0);
+    }
+
+    #[tokio::test]
+    async fn sweep_skips_room_with_occupant() {
+        let state = create_test_websocket_state().await;
+        let room_jid = room_bare_jid("busy");
+        let actor = state
+            .deps
+            .protocol
+            .room_registry
+            .ask(CreateRoom {
+                room_jid: room_jid.clone(),
+                waddle_id: "w".to_string(),
+                channel_id: "c".to_string(),
+                config: RoomConfig::default(),
+            })
+            .await
+            .expect("create");
+        actor
+            .ask(Join {
+                nick: "alice".to_string(),
+                real_jid: full_jid("alice@example.com/r1"),
+                role: Role::Participant,
+                affiliation: Affiliation::Member,
+            })
+            .await
+            .expect("join");
+
+        let counts = sweep_dormant_rooms_once(&state).await;
+        assert_eq!(counts.examined, 1);
+        assert_eq!(counts.evicted, 0);
+        assert_eq!(counts.remaining, 1);
+    }
+
+    #[tokio::test]
+    async fn sweep_skips_room_with_affiliation_grant() {
+        let state = create_test_websocket_state().await;
+        let room_jid = room_bare_jid("graced");
+        let actor = state
+            .deps
+            .protocol
+            .room_registry
+            .ask(CreateRoom {
+                room_jid: room_jid.clone(),
+                waddle_id: "w".to_string(),
+                channel_id: "c".to_string(),
+                config: RoomConfig::default(),
+            })
+            .await
+            .expect("create");
+        actor
+            .ask(ChangeAffiliation {
+                jid: "alice@example.com".parse().expect("bare jid"),
+                affiliation: Affiliation::Admin,
+            })
+            .await
+            .expect("change affiliation");
+
+        let counts = sweep_dormant_rooms_once(&state).await;
+        assert_eq!(counts.evicted, 0);
+        assert_eq!(counts.remaining, 1);
+    }
+
+    #[tokio::test]
+    async fn sweep_evicts_room_after_last_occupant_leaves() {
+        let state = create_test_websocket_state().await;
+        let room_jid = room_bare_jid("emptied");
+        let actor = state
+            .deps
+            .protocol
+            .room_registry
+            .ask(CreateRoom {
+                room_jid: room_jid.clone(),
+                waddle_id: "w".to_string(),
+                channel_id: "c".to_string(),
+                config: RoomConfig::default(),
+            })
+            .await
+            .expect("create");
+        let alice = full_jid("alice@example.com/r1");
+        actor
+            .ask(Join {
+                nick: "alice".to_string(),
+                real_jid: alice.clone(),
+                role: Role::Participant,
+                affiliation: Affiliation::Member,
+            })
+            .await
+            .expect("join");
+        actor
+            .ask(LeaveByRealJid { sender_jid: alice })
+            .await
+            .expect("leave")
+            .expect("outcome");
+
+        let counts = sweep_dormant_rooms_once(&state).await;
+        assert_eq!(counts.evicted, 1);
+        assert_eq!(counts.remaining, 0);
     }
 }

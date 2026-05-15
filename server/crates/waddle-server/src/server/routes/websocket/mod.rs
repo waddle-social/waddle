@@ -98,4 +98,4 @@ pub(crate) use transport_xml::{
     build_iq_error_xml_typed, build_iq_result_xml, element_to_xml, iq_to_xml, stanza_to_xml,
 };
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
