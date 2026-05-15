@@ -363,7 +363,7 @@ async fn create_websocket_state(
                 sm_session_registry,
                 resumable_sessions,
                 caps_resolver,
-                avatar_source_locks: Arc::new(dashmap::DashMap::new()),
+                avatar_source_locks: Arc::new(crate::profile::AvatarLockMap::new()),
                 profile_publish_tracker: tokio_util::task::TaskTracker::new(),
             },
             occupant_id_secret: server_config.occupant_id_secret.clone(),

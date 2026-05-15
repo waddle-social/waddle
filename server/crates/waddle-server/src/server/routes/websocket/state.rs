@@ -96,7 +96,11 @@ pub struct ProtocolServices {
     /// `BareJid`, closing the TOCTOU race where OIDC could read
     /// `'oidc'` between the user's wire publish and the user's
     /// provenance flip and then wipe the just-set avatar.
-    pub avatar_source_locks: Arc<dashmap::DashMap<jid::BareJid, Arc<tokio::sync::Mutex<()>>>>,
+    ///
+    /// Entries are evicted by `AvatarLockGuard::drop` when no
+    /// acquirer is in flight, so the map stays bounded by current
+    /// contention rather than growing to the lifetime user set.
+    pub avatar_source_locks: Arc<crate::profile::AvatarLockMap>,
     /// Tracker for the OIDC → PEP profile-publish background tasks.
     /// The auth callback registers each `tokio::spawn` here so the
     /// graceful-shutdown drain can `wait()` on in-flight publishes
