@@ -74,12 +74,12 @@ const props = defineProps<{
   threadReplyCount?: number;
   hideThreadChip?: boolean;
   /**
-   * Suppress the inline reply-to chip when it points at this message id.
-   * Used inside thread/sub-thread views where every reply implicitly
-   * targets the root — showing "↪ @author …root preview" on every row
-   * is pure noise.
+   * Unconditional kill switch for the inline reply-to chip. The thread
+   * panel sets this true on every message it renders — once you're inside
+   * a thread, replies-to-the-root are implicit and replies-to-replies are
+   * still inside the thread context, so the chip adds no information.
    */
-  hideReplyChipIfPointsTo?: string;
+  hideReplyChip?: boolean;
   grouped?: boolean;
   reactionModeSelected?: boolean;
   invokeExtensionAction?: (action: ExtensionAnnotationAction) => Promise<ExtensionCommandResult>;
@@ -676,7 +676,7 @@ onBeforeUnmount(() => {
          preview is available we also expand it inline so users still see the
          full quoted text even when the parent has scrolled off-screen or
          hasn't loaded from history yet. -->
-    <div v-if="message.replyTo && message.replyTo.id !== hideReplyChipIfPointsTo" class="chat-message-fill">
+    <div v-if="message.replyTo && !hideReplyChip" class="chat-message-fill">
       <button
         type="button"
         class="type-caption flex min-h-7 max-w-full items-center gap-1.5 rounded-lg bg-muted/35 px-2 text-left text-muted-foreground transition-colors hover:bg-muted/60 hover:text-foreground"

@@ -536,6 +536,7 @@ function replyChildHasNestedThread(message: TimelineMessage): boolean {
               :author-jid="authorJidByNick?.[message.author]"
               :thread-reply-count="activeEntry.count"
               hide-thread-chip
+              hide-reply-chip
               :reaction-mode-selected="reactionMode?.selectedMessageId === message.id"
               :invoke-extension-action="props.invokeExtensionAction"
               @edit="(id, body, m, r) => emit('editMessage', id, body, m, r)"
@@ -571,7 +572,7 @@ function replyChildHasNestedThread(message: TimelineMessage): boolean {
               :thread-reply-count="threadIndex.get(message.id)?.count ?? 0"
               :grouped="isGroupedFollowUp(message.id)"
               hide-thread-chip
-              :hide-reply-chip-if-points-to="activeThreadId ?? undefined"
+              hide-reply-chip
               :reaction-mode-selected="reactionMode?.selectedMessageId === message.id"
               :invoke-extension-action="props.invokeExtensionAction"
               @edit="(id, body, m, r) => emit('editMessage', id, body, m, r)"
