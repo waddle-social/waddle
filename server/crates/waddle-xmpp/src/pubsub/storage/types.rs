@@ -19,10 +19,11 @@ pub struct PubSubNode {
 impl PubSubNode {
     /// Create a new PubSub node with default PEP configuration.
     pub fn new_pep(owner: BareJid, node_name: String) -> Self {
+        let config = NodeConfig::pep_for_node(&node_name);
         Self {
             node_name,
             owner,
-            config: NodeConfig::pep_default(),
+            config,
             created_at: chrono::Utc::now(),
         }
     }
@@ -71,4 +72,6 @@ pub struct PublishResult {
     pub item_id: String,
     /// Whether a new node was created (auto-create).
     pub node_created: bool,
+    /// Item IDs evicted by the node's `max_items` retention policy.
+    pub evicted_item_ids: Vec<String>,
 }

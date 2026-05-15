@@ -754,6 +754,685 @@ async fn handle_iq_pubsub_publish_returns_result() {
 }
 
 #[tokio::test]
+async fn xep0402_bookmark_publish_updates_xep0492_projection() {
+    let state = create_test_websocket_state().await;
+    let jid: FullJid = "alice@example.com/web".parse().expect("valid jid");
+    let frame = r#"<iq xmlns="jabber:client" id="bookmark-notify-1" type="set">
+        <pubsub xmlns="http://jabber.org/protocol/pubsub">
+            <publish node="urn:xmpp:bookmarks:1">
+                <item id="room@muc.example.com">
+                    <conference xmlns="urn:xmpp:bookmarks:1">
+                        <extensions>
+                            <notify xmlns="urn:xmpp:notification-settings:1"><never /></notify>
+                        </extensions>
+                    </conference>
+                </item>
+            </publish>
+        </pubsub>
+    </iq>"#;
+
+    let responses = handle_iq(
+        frame,
+        "example.com",
+        "muc.example.com",
+        state.as_ref(),
+        &None,
+        &ready_phase(&jid),
+    )
+    .await;
+
+    assert_eq!(responses.len(), 1, "expected one response: {responses:?}");
+    let owner: BareJid = "alice@example.com".parse().expect("owner");
+    let conversation: BareJid = "room@muc.example.com".parse().expect("conversation");
+    let projection = state
+        .deps
+        .protocol
+        .notification_settings_projection
+        .get(&owner, &conversation)
+        .await
+        .expect("projection lookup")
+        .expect("projection row");
+    assert_eq!(projection.mode, waddle_xmpp::xep::NotificationLevel::Never);
+    assert_eq!(
+        projection.conversation_kind,
+        crate::notification_settings_projection::ConversationKind::PrivateGroup
+    );
+}
+
+#[tokio::test]
+async fn xep0402_bookmark_publish_overwrites_existing_xep0492_projection() {
+    let state = create_test_websocket_state().await;
+    let jid: FullJid = "alice@example.com/web".parse().expect("valid jid");
+    let first_frame = r#"<iq xmlns="jabber:client" id="bookmark-notify-overwrite-1" type="set">
+        <pubsub xmlns="http://jabber.org/protocol/pubsub">
+            <publish node="urn:xmpp:bookmarks:1">
+                <item id="room@muc.example.com">
+                    <conference xmlns="urn:xmpp:bookmarks:1">
+                        <extensions>
+                            <notify xmlns="urn:xmpp:notification-settings:1"><never /></notify>
+                        </extensions>
+                    </conference>
+                </item>
+            </publish>
+        </pubsub>
+    </iq>"#;
+    let second_frame = r#"<iq xmlns="jabber:client" id="bookmark-notify-overwrite-2" type="set">
+        <pubsub xmlns="http://jabber.org/protocol/pubsub">
+            <publish node="urn:xmpp:bookmarks:1">
+                <item id="room@muc.example.com">
+                    <conference xmlns="urn:xmpp:bookmarks:1">
+                        <extensions>
+                            <notify xmlns="urn:xmpp:notification-settings:1"><on-mention /></notify>
+                        </extensions>
+                    </conference>
+                </item>
+            </publish>
+        </pubsub>
+    </iq>"#;
+
+    let first_responses = handle_iq(
+        first_frame,
+        "example.com",
+        "muc.example.com",
+        state.as_ref(),
+        &None,
+        &ready_phase(&jid),
+    )
+    .await;
+    assert_eq!(
+        first_responses.len(),
+        1,
+        "expected one response: {first_responses:?}"
+    );
+
+    let second_responses = handle_iq(
+        second_frame,
+        "example.com",
+        "muc.example.com",
+        state.as_ref(),
+        &None,
+        &ready_phase(&jid),
+    )
+    .await;
+    assert_eq!(
+        second_responses.len(),
+        1,
+        "expected one response: {second_responses:?}"
+    );
+
+    let owner: BareJid = "alice@example.com".parse().expect("owner");
+    let conversation: BareJid = "room@muc.example.com".parse().expect("conversation");
+    let projection = state
+        .deps
+        .protocol
+        .notification_settings_projection
+        .get(&owner, &conversation)
+        .await
+        .expect("projection lookup")
+        .expect("projection row");
+    assert_eq!(
+        projection.mode,
+        waddle_xmpp::xep::NotificationLevel::OnMention
+    );
+}
+
+#[tokio::test]
+async fn xep0402_bookmark_publish_deletes_evicted_xep0492_projection() {
+    let state = create_test_websocket_state().await;
+    let jid: FullJid = "alice@example.com/web".parse().expect("valid jid");
+    let owner: BareJid = "alice@example.com".parse().expect("owner");
+    let first_conversation: BareJid = "first@muc.example.com".parse().expect("first room");
+    let second_conversation: BareJid = "second@muc.example.com".parse().expect("second room");
+    let first_frame = r#"<iq xmlns="jabber:client" id="bookmark-notify-evict-1" type="set">
+        <pubsub xmlns="http://jabber.org/protocol/pubsub">
+            <publish node="urn:xmpp:bookmarks:1">
+                <item id="first@muc.example.com">
+                    <conference xmlns="urn:xmpp:bookmarks:1">
+                        <extensions>
+                            <notify xmlns="urn:xmpp:notification-settings:1"><never /></notify>
+                        </extensions>
+                    </conference>
+                </item>
+            </publish>
+        </pubsub>
+    </iq>"#;
+    let second_frame = r#"<iq xmlns="jabber:client" id="bookmark-notify-evict-2" type="set">
+        <pubsub xmlns="http://jabber.org/protocol/pubsub">
+            <publish node="urn:xmpp:bookmarks:1">
+                <item id="second@muc.example.com">
+                    <conference xmlns="urn:xmpp:bookmarks:1">
+                        <extensions>
+                            <notify xmlns="urn:xmpp:notification-settings:1"><on-mention /></notify>
+                        </extensions>
+                    </conference>
+                </item>
+            </publish>
+        </pubsub>
+    </iq>"#;
+
+    let first_responses = handle_iq(
+        first_frame,
+        "example.com",
+        "muc.example.com",
+        state.as_ref(),
+        &None,
+        &ready_phase(&jid),
+    )
+    .await;
+    assert_eq!(
+        first_responses.len(),
+        1,
+        "expected one response: {first_responses:?}"
+    );
+
+    let mut node = state
+        .deps
+        .protocol
+        .pubsub_storage
+        .get_node(&owner, waddle_xmpp::xep::xep0402::PEP_NODE)
+        .await
+        .expect("node lookup")
+        .expect("bookmark node");
+    node.config.max_items = 1;
+    state
+        .deps
+        .protocol
+        .pubsub_storage
+        .update_node_config(&owner, waddle_xmpp::xep::xep0402::PEP_NODE, &node.config)
+        .await
+        .expect("update config");
+
+    let second_responses = handle_iq(
+        second_frame,
+        "example.com",
+        "muc.example.com",
+        state.as_ref(),
+        &None,
+        &ready_phase(&jid),
+    )
+    .await;
+    assert_eq!(
+        second_responses.len(),
+        1,
+        "expected one response: {second_responses:?}"
+    );
+
+    assert!(
+        state
+            .deps
+            .protocol
+            .notification_settings_projection
+            .get(&owner, &first_conversation)
+            .await
+            .expect("first projection lookup")
+            .is_none(),
+        "retention-evicted bookmark must not leave a stale projection"
+    );
+    let second_projection = state
+        .deps
+        .protocol
+        .notification_settings_projection
+        .get(&owner, &second_conversation)
+        .await
+        .expect("second projection lookup")
+        .expect("second projection row");
+    assert_eq!(
+        second_projection.mode,
+        waddle_xmpp::xep::NotificationLevel::OnMention
+    );
+}
+
+#[tokio::test]
+async fn xep0402_bookmark_publish_without_notify_deletes_xep0492_projection() {
+    let state = create_test_websocket_state().await;
+    let jid: FullJid = "alice@example.com/web".parse().expect("valid jid");
+    let owner: BareJid = "alice@example.com".parse().expect("owner");
+    let conversation: BareJid = "room@muc.example.com".parse().expect("conversation");
+    state
+        .deps
+        .protocol
+        .notification_settings_projection
+        .upsert(
+            &crate::notification_settings_projection::NotificationSettingsProjection {
+                owner_bare_jid: owner.clone(),
+                conversation_jid: conversation.clone(),
+                conversation_kind:
+                    crate::notification_settings_projection::ConversationKind::PrivateGroup,
+                mode: waddle_xmpp::xep::NotificationLevel::Never,
+                updated_at_ms: 1,
+                source: crate::notification_settings_projection::NotificationSettingsSource::Xep0402Bookmarks,
+                source_item_jid: conversation.clone(),
+            },
+        )
+        .await
+        .expect("seed projection");
+    let frame = r#"<iq xmlns="jabber:client" id="bookmark-notify-2" type="set">
+        <pubsub xmlns="http://jabber.org/protocol/pubsub">
+            <publish node="urn:xmpp:bookmarks:1">
+                <item id="room@muc.example.com">
+                    <conference xmlns="urn:xmpp:bookmarks:1" />
+                </item>
+            </publish>
+        </pubsub>
+    </iq>"#;
+
+    let responses = handle_iq(
+        frame,
+        "example.com",
+        "muc.example.com",
+        state.as_ref(),
+        &None,
+        &ready_phase(&jid),
+    )
+    .await;
+
+    assert_eq!(responses.len(), 1, "expected one response: {responses:?}");
+    assert!(
+        responses[0].contains(r#"type="result""#),
+        "bookmark publish without notify should succeed before projection cleanup assertion: {}",
+        responses[0]
+    );
+    assert!(state
+        .deps
+        .protocol
+        .notification_settings_projection
+        .get(&owner, &conversation)
+        .await
+        .expect("projection lookup")
+        .is_none());
+}
+
+#[tokio::test]
+async fn xep0402_bookmark_publish_with_malformed_notify_is_rejected() {
+    let state = create_test_websocket_state().await;
+    let jid: FullJid = "alice@example.com/web".parse().expect("valid jid");
+    let owner: BareJid = "alice@example.com".parse().expect("owner");
+    let conversation: BareJid = "room@muc.example.com".parse().expect("conversation");
+    let valid = r#"<iq xmlns="jabber:client" id="bookmark-malformed-seed" type="set">
+        <pubsub xmlns="http://jabber.org/protocol/pubsub">
+            <publish node="urn:xmpp:bookmarks:1">
+                <item id="room@muc.example.com">
+                    <conference xmlns="urn:xmpp:bookmarks:1">
+                        <extensions>
+                            <notify xmlns="urn:xmpp:notification-settings:1"><never /></notify>
+                        </extensions>
+                    </conference>
+                </item>
+            </publish>
+        </pubsub>
+    </iq>"#;
+    let _ = handle_iq(
+        valid,
+        "example.com",
+        "muc.example.com",
+        state.as_ref(),
+        &None,
+        &ready_phase(&jid),
+    )
+    .await;
+    assert!(state
+        .deps
+        .protocol
+        .notification_settings_projection
+        .get(&owner, &conversation)
+        .await
+        .expect("projection lookup")
+        .is_some());
+
+    let malformed = r#"<iq xmlns="jabber:client" id="bookmark-malformed-update" type="set">
+        <pubsub xmlns="http://jabber.org/protocol/pubsub">
+            <publish node="urn:xmpp:bookmarks:1">
+                <item id="room@muc.example.com">
+                    <conference xmlns="urn:xmpp:bookmarks:1">
+                        <extensions>
+                            <notify xmlns="urn:xmpp:notification-settings:1">
+                                <always />
+                                <never />
+                            </notify>
+                        </extensions>
+                    </conference>
+                </item>
+            </publish>
+        </pubsub>
+    </iq>"#;
+
+    let responses = handle_iq(
+        malformed,
+        "example.com",
+        "muc.example.com",
+        state.as_ref(),
+        &None,
+        &ready_phase(&jid),
+    )
+    .await;
+
+    assert_eq!(responses.len(), 1, "expected one response: {responses:?}");
+    assert!(
+        responses[0].contains(r#"type="error""#) && responses[0].contains("bad-request"),
+        "malformed XEP-0492 notify payload must be rejected: {}",
+        responses[0]
+    );
+    assert!(state
+        .deps
+        .protocol
+        .notification_settings_projection
+        .get(&owner, &conversation)
+        .await
+        .expect("projection lookup")
+        .is_some());
+}
+
+#[tokio::test]
+async fn xep0402_bookmark_publish_with_malformed_conference_is_rejected() {
+    let state = create_test_websocket_state().await;
+    let jid: FullJid = "alice@example.com/web".parse().expect("valid jid");
+    let malformed = r#"<iq xmlns="jabber:client" id="bookmark-malformed-conference" type="set">
+        <pubsub xmlns="http://jabber.org/protocol/pubsub">
+            <publish node="urn:xmpp:bookmarks:1">
+                <item id="room@muc.example.com">
+                    <conference xmlns="urn:xmpp:bookmarks:1">
+                        <unexpected xmlns="urn:xmpp:bookmarks:1" />
+                    </conference>
+                </item>
+            </publish>
+        </pubsub>
+    </iq>"#;
+
+    let responses = handle_iq(
+        malformed,
+        "example.com",
+        "muc.example.com",
+        state.as_ref(),
+        &None,
+        &ready_phase(&jid),
+    )
+    .await;
+
+    assert_eq!(responses.len(), 1, "expected one response: {responses:?}");
+    assert!(
+        responses[0].contains(r#"type="error""#) && responses[0].contains("bad-request"),
+        "malformed XEP-0402 bookmark payload must be rejected: {}",
+        responses[0]
+    );
+}
+
+#[tokio::test]
+async fn xep0402_bookmark_retract_deletes_xep0492_projection() {
+    let state = create_test_websocket_state().await;
+    let jid: FullJid = "alice@example.com/web".parse().expect("valid jid");
+    let owner: BareJid = "alice@example.com".parse().expect("owner");
+    let conversation: BareJid = "room@muc.example.com".parse().expect("conversation");
+    let publish = r#"<iq xmlns="jabber:client" id="bookmark-retract-pub" type="set">
+        <pubsub xmlns="http://jabber.org/protocol/pubsub">
+            <publish node="urn:xmpp:bookmarks:1">
+                <item id="room@muc.example.com">
+                    <conference xmlns="urn:xmpp:bookmarks:1">
+                        <extensions>
+                            <notify xmlns="urn:xmpp:notification-settings:1"><never /></notify>
+                        </extensions>
+                    </conference>
+                </item>
+            </publish>
+        </pubsub>
+    </iq>"#;
+    let _ = handle_iq(
+        publish,
+        "example.com",
+        "muc.example.com",
+        state.as_ref(),
+        &None,
+        &ready_phase(&jid),
+    )
+    .await;
+    assert!(state
+        .deps
+        .protocol
+        .notification_settings_projection
+        .get(&owner, &conversation)
+        .await
+        .expect("projection lookup")
+        .is_some());
+
+    let retract = r#"<iq xmlns="jabber:client" id="bookmark-retract-1" type="set">
+        <pubsub xmlns="http://jabber.org/protocol/pubsub">
+            <retract node="urn:xmpp:bookmarks:1">
+                <item id="room@muc.example.com" />
+            </retract>
+        </pubsub>
+    </iq>"#;
+
+    let responses = handle_iq(
+        retract,
+        "example.com",
+        "muc.example.com",
+        state.as_ref(),
+        &None,
+        &ready_phase(&jid),
+    )
+    .await;
+
+    assert_eq!(responses.len(), 1, "expected one response: {responses:?}");
+    assert!(
+        responses[0].contains(r#"type="result""#),
+        "bookmark retract should succeed before projection cleanup assertion: {}",
+        responses[0]
+    );
+    assert!(state
+        .deps
+        .protocol
+        .notification_settings_projection
+        .get(&owner, &conversation)
+        .await
+        .expect("projection lookup")
+        .is_none());
+}
+
+#[tokio::test]
+async fn xep0402_bookmark_node_purge_deletes_xep0492_projection() {
+    let state = create_test_websocket_state().await;
+    let jid: FullJid = "alice@example.com/web".parse().expect("valid jid");
+    let owner: BareJid = "alice@example.com".parse().expect("owner");
+    let conversation: BareJid = "room@muc.example.com".parse().expect("conversation");
+    let publish = r#"<iq xmlns="jabber:client" id="bookmark-purge-pub" type="set">
+        <pubsub xmlns="http://jabber.org/protocol/pubsub">
+            <publish node="urn:xmpp:bookmarks:1">
+                <item id="room@muc.example.com">
+                    <conference xmlns="urn:xmpp:bookmarks:1">
+                        <extensions>
+                            <notify xmlns="urn:xmpp:notification-settings:1"><never /></notify>
+                        </extensions>
+                    </conference>
+                </item>
+            </publish>
+        </pubsub>
+    </iq>"#;
+    let _ = handle_iq(
+        publish,
+        "example.com",
+        "muc.example.com",
+        state.as_ref(),
+        &None,
+        &ready_phase(&jid),
+    )
+    .await;
+    assert!(state
+        .deps
+        .protocol
+        .notification_settings_projection
+        .get(&owner, &conversation)
+        .await
+        .expect("projection lookup")
+        .is_some());
+
+    let purge = r#"<iq xmlns="jabber:client" id="bookmark-purge-1" type="set">
+        <pubsub xmlns="http://jabber.org/protocol/pubsub#owner">
+            <purge node="urn:xmpp:bookmarks:1" />
+        </pubsub>
+    </iq>"#;
+
+    let responses = handle_iq(
+        purge,
+        "example.com",
+        "muc.example.com",
+        state.as_ref(),
+        &None,
+        &ready_phase(&jid),
+    )
+    .await;
+
+    assert_eq!(responses.len(), 1, "expected one response: {responses:?}");
+    assert!(
+        responses[0].contains(r#"type="result""#),
+        "bookmark purge should succeed before projection cleanup assertion: {}",
+        responses[0]
+    );
+    assert!(state
+        .deps
+        .protocol
+        .notification_settings_projection
+        .get(&owner, &conversation)
+        .await
+        .expect("projection lookup")
+        .is_none());
+}
+
+#[tokio::test]
+async fn xep0402_bookmark_node_delete_deletes_xep0492_projection() {
+    let state = create_test_websocket_state().await;
+    let jid: FullJid = "alice@example.com/web".parse().expect("valid jid");
+    let owner: BareJid = "alice@example.com".parse().expect("owner");
+    let conversation: BareJid = "room@muc.example.com".parse().expect("conversation");
+    let publish = r#"<iq xmlns="jabber:client" id="bookmark-delete-pub" type="set">
+        <pubsub xmlns="http://jabber.org/protocol/pubsub">
+            <publish node="urn:xmpp:bookmarks:1">
+                <item id="room@muc.example.com">
+                    <conference xmlns="urn:xmpp:bookmarks:1">
+                        <extensions>
+                            <notify xmlns="urn:xmpp:notification-settings:1"><never /></notify>
+                        </extensions>
+                    </conference>
+                </item>
+            </publish>
+        </pubsub>
+    </iq>"#;
+    let _ = handle_iq(
+        publish,
+        "example.com",
+        "muc.example.com",
+        state.as_ref(),
+        &None,
+        &ready_phase(&jid),
+    )
+    .await;
+    assert!(state
+        .deps
+        .protocol
+        .notification_settings_projection
+        .get(&owner, &conversation)
+        .await
+        .expect("projection lookup")
+        .is_some());
+
+    let delete = r#"<iq xmlns="jabber:client" id="bookmark-delete-1" type="set">
+        <pubsub xmlns="http://jabber.org/protocol/pubsub#owner">
+            <delete node="urn:xmpp:bookmarks:1" />
+        </pubsub>
+    </iq>"#;
+
+    let responses = handle_iq(
+        delete,
+        "example.com",
+        "muc.example.com",
+        state.as_ref(),
+        &None,
+        &ready_phase(&jid),
+    )
+    .await;
+
+    assert_eq!(responses.len(), 1, "expected one response: {responses:?}");
+    assert!(
+        responses[0].contains(r#"type="result""#),
+        "bookmark delete should succeed before projection cleanup assertion: {}",
+        responses[0]
+    );
+    assert!(state
+        .deps
+        .protocol
+        .notification_settings_projection
+        .get(&owner, &conversation)
+        .await
+        .expect("projection lookup")
+        .is_none());
+}
+
+#[tokio::test]
+async fn xep0402_bookmark_publish_and_retract_require_jid_item_ids() {
+    let state = create_test_websocket_state().await;
+    let jid: FullJid = "alice@example.com/web".parse().expect("valid jid");
+    let publish = r#"<iq xmlns="jabber:client" id="bookmark-invalid-id-publish" type="set">
+        <pubsub xmlns="http://jabber.org/protocol/pubsub">
+            <publish node="urn:xmpp:bookmarks:1">
+                <item id="not-a-jid">
+                    <conference xmlns="urn:xmpp:bookmarks:1" />
+                </item>
+            </publish>
+        </pubsub>
+    </iq>"#;
+
+    let publish_responses = handle_iq(
+        publish,
+        "example.com",
+        "muc.example.com",
+        state.as_ref(),
+        &None,
+        &ready_phase(&jid),
+    )
+    .await;
+
+    assert_eq!(
+        publish_responses.len(),
+        1,
+        "expected one response: {publish_responses:?}"
+    );
+    assert!(
+        publish_responses[0].contains(r#"type="error""#)
+            && publish_responses[0].contains("bad-request"),
+        "invalid bookmark item id must be rejected: {}",
+        publish_responses[0]
+    );
+
+    let retract = r#"<iq xmlns="jabber:client" id="bookmark-invalid-id-retract" type="set">
+        <pubsub xmlns="http://jabber.org/protocol/pubsub">
+            <retract node="urn:xmpp:bookmarks:1">
+                <item id="not-a-jid" />
+            </retract>
+        </pubsub>
+    </iq>"#;
+
+    let retract_responses = handle_iq(
+        retract,
+        "example.com",
+        "muc.example.com",
+        state.as_ref(),
+        &None,
+        &ready_phase(&jid),
+    )
+    .await;
+
+    assert_eq!(
+        retract_responses.len(),
+        1,
+        "expected one response: {retract_responses:?}"
+    );
+    assert!(
+        retract_responses[0].contains(r#"type="error""#)
+            && retract_responses[0].contains("bad-request"),
+        "invalid bookmark retract item id must be rejected: {}",
+        retract_responses[0]
+    );
+}
+
+#[tokio::test]
 async fn handle_iq_pubsub_items_empty_node_returns_result() {
     let state = create_test_websocket_state().await;
     let jid: FullJid = "alice@example.com/web".parse().expect("valid jid");

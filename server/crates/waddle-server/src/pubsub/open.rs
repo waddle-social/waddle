@@ -21,11 +21,21 @@ impl DatabasePubSubStorage {
         info!(driver = ?storage.db.driver(), "PubSub storage initialized");
         Ok(storage)
     }
+
+    pub fn database(&self) -> Database {
+        self.db.clone()
+    }
 }
 
 pub async fn build_pubsub_storage(
     database_url: Option<String>,
 ) -> Result<Arc<dyn PubSubStorage>, XmppError> {
+    Ok(build_database_pubsub_storage(database_url).await?)
+}
+
+pub async fn build_database_pubsub_storage(
+    database_url: Option<String>,
+) -> Result<Arc<DatabasePubSubStorage>, XmppError> {
     if let Some(url) = database_url {
         return Ok(Arc::new(DatabasePubSubStorage::open(Some(&url)).await?));
     }

@@ -463,6 +463,34 @@ impl<'a> Transaction<'a> {
         }
     }
 
+    /// Query rows inside the transaction.
+    pub async fn query(
+        &mut self,
+        sql: &str,
+        params: impl IntoParams,
+    ) -> Result<Rows, DatabaseError> {
+        let params = params.into_params();
+        match &mut self.inner {
+            TransactionInner::Sqlite(tx) => {
+                let mut q = sqlx::query(sql);
+                for value in params {
+                    q = bind_sqlite(q, value);
+                }
+                let fetched: Vec<SqliteRow> = q.fetch_all(&mut **tx).await?;
+                sqlite_rows_to_rows(fetched)
+            }
+            TransactionInner::Postgres(tx) => {
+                let sql = rewrite_positional_for_postgres(sql);
+                let mut q = sqlx::query(&sql);
+                for value in params {
+                    q = bind_postgres(q, value);
+                }
+                let fetched: Vec<PgRow> = q.fetch_all(&mut **tx).await?;
+                postgres_rows_to_rows(fetched)
+            }
+        }
+    }
+
     /// Commit the transaction. Drops without commit roll back automatically.
     pub async fn commit(self) -> Result<(), DatabaseError> {
         match self.inner {

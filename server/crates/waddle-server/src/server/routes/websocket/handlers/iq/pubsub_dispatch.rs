@@ -130,6 +130,13 @@ pub(super) async fn handle_pubsub_iq(
                     None
                 };
 
+                if is_pep
+                    && node == waddle_xmpp::xep::xep0402::PEP_NODE
+                    && !is_valid_xep0402_bookmark_item(&item)
+                {
+                    return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::InvalidJid))];
+                }
+
                 let result = state
                     .deps
                     .protocol
@@ -221,6 +228,45 @@ pub(super) async fn handle_pubsub_iq(
                     .await;
                 }
 
+                let is_pep = is_pep_self_or_to(iq, &target_jid, &user_jid);
+                match crate::pubsub_authz::can_subscribe(
+                    &state.deps.protocol.pubsub_storage,
+                    &target_jid,
+                    &node,
+                    &user_jid,
+                    is_pep,
+                )
+                .await
+                {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        let node_exists = state
+                            .deps
+                            .protocol
+                            .pubsub_storage
+                            .get_node(&target_jid, &node)
+                            .await
+                            .ok()
+                            .flatten()
+                            .is_some();
+                        let error = if node_exists {
+                            build_pubsub_error(iq, PubSubError::Forbidden)
+                        } else {
+                            build_pubsub_error(iq, PubSubError::NodeNotFound)
+                        };
+                        return vec![iq_to_xml(error)];
+                    }
+                    Err(error) => {
+                        warn!(
+                            node = %node,
+                            error = %error,
+                            "Failed to authorize PubSub items access"
+                        );
+                        let error = build_pubsub_error(iq, PubSubError::Forbidden);
+                        return vec![iq_to_xml(error)];
+                    }
+                }
+
                 let result = state
                     .deps
                     .protocol
@@ -268,6 +314,13 @@ pub(super) async fn handle_pubsub_iq(
 
                 if target_jid != user_jid {
                     let error = build_pubsub_error(iq, PubSubError::Forbidden);
+                    return vec![iq_to_xml(error)];
+                }
+
+                if node == waddle_xmpp::xep::xep0402::PEP_NODE
+                    && !is_valid_xep0402_bookmark_item_id(&item_id)
+                {
+                    let error = build_pubsub_error(iq, PubSubError::InvalidJid);
                     return vec![iq_to_xml(error)];
                 }
 
@@ -329,4 +382,21 @@ fn is_user_avatar_retract(node: &str, item: &waddle_xmpp::pubsub::PubSubItem) ->
         return false;
     }
     payload.children().next().is_none()
+}
+
+fn is_valid_xep0402_bookmark_item(item: &waddle_xmpp::pubsub::PubSubItem) -> bool {
+    let Some(item_id) = item.id.as_deref() else {
+        return false;
+    };
+    let Some(payload) = item.payload.as_ref() else {
+        return false;
+    };
+    crate::notification_settings_projection::validate_xep0402_bookmark_publish(item_id, payload)
+        .is_ok()
+}
+
+fn is_valid_xep0402_bookmark_item_id(item_id: &str) -> bool {
+    item_id
+        .parse::<BareJid>()
+        .is_ok_and(|jid| jid.node().is_some())
 }

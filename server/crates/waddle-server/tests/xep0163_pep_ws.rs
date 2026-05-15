@@ -94,7 +94,7 @@ async fn pep_owner_can_publish_to_self_node_without_explicit_create() {
         "pep-pub-auto-1",
         &admin_bare,
         &format!(
-            r#"<pubsub xmlns="{NS_PUBSUB}"><publish node="urn:xmpp:bookmarks:1"><item id="home"><conference xmlns="urn:xmpp:bookmarks:1" name="Home"/></item></publish></pubsub>"#
+            r#"<pubsub xmlns="{NS_PUBSUB}"><publish node="urn:xmpp:bookmarks:1"><item id="home@muc.example.com"><conference xmlns="urn:xmpp:bookmarks:1" name="Home"/></item></publish></pubsub>"#
         ),
     )
     .await;
@@ -130,7 +130,7 @@ async fn pep_other_user_cannot_publish_to_alice_pep_node() {
         "pep-authz-pub-1",
         &admin_bare,
         &format!(
-            r#"<pubsub xmlns="{NS_PUBSUB}"><publish node="urn:xmpp:bookmarks:1"><item id="home"><conference xmlns="urn:xmpp:bookmarks:1" name="Home"/></item></publish></pubsub>"#
+            r#"<pubsub xmlns="{NS_PUBSUB}"><publish node="urn:xmpp:bookmarks:1"><item id="home@muc.example.com"><conference xmlns="urn:xmpp:bookmarks:1" name="Home"/></item></publish></pubsub>"#
         ),
     )
     .await;
@@ -151,7 +151,7 @@ async fn pep_other_user_cannot_publish_to_alice_pep_node() {
     .expect("bob connect");
 
     bob.send(&format!(
-        r#"<iq type="set" id="bob-pub-1" to="{admin_bare}"><pubsub xmlns="{NS_PUBSUB}"><publish node="urn:xmpp:bookmarks:1"><item id="evil"><conference xmlns="urn:xmpp:bookmarks:1" name="Evil"/></item></publish></pubsub></iq>"#
+        r#"<iq type="set" id="bob-pub-1" to="{admin_bare}"><pubsub xmlns="{NS_PUBSUB}"><publish node="urn:xmpp:bookmarks:1"><item id="evil@muc.example.com"><conference xmlns="urn:xmpp:bookmarks:1" name="Evil"/></item></publish></pubsub></iq>"#
     ))
     .await
     .expect("send bob publish");
@@ -194,13 +194,13 @@ async fn pep_max_items_is_one_by_default() {
     let mut admin = admin_client(&server, "pep163-maxitems-1").await;
     let admin_bare = format!("{ADMIN}@{DOMAIN}");
 
-    // Publish first item (auto-creates the PEP node with max_items=1).
+    // Publish first item to a generic PEP node (auto-creates with max_items=1).
     let r1 = iq_set_to(
         &mut admin,
         "pep-mi-pub-1",
         &admin_bare,
         &format!(
-            r#"<pubsub xmlns="{NS_PUBSUB}"><publish node="urn:xmpp:bookmarks:1"><item id="i1"><conference xmlns="urn:xmpp:bookmarks:1" name="First"/></item></publish></pubsub>"#
+            r#"<pubsub xmlns="{NS_PUBSUB}"><publish node="http://jabber.org/protocol/mood"><item id="i1"><mood xmlns="http://jabber.org/protocol/mood"><happy/></mood></item></publish></pubsub>"#
         ),
     )
     .await;
@@ -212,7 +212,7 @@ async fn pep_max_items_is_one_by_default() {
         "pep-mi-pub-2",
         &admin_bare,
         &format!(
-            r#"<pubsub xmlns="{NS_PUBSUB}"><publish node="urn:xmpp:bookmarks:1"><item id="i2"><conference xmlns="urn:xmpp:bookmarks:1" name="Second"/></item></publish></pubsub>"#
+            r#"<pubsub xmlns="{NS_PUBSUB}"><publish node="http://jabber.org/protocol/mood"><item id="i2"><mood xmlns="http://jabber.org/protocol/mood"><sad/></mood></item></publish></pubsub>"#
         ),
     )
     .await;
@@ -223,7 +223,9 @@ async fn pep_max_items_is_one_by_default() {
         &mut admin,
         "pep-mi-items-1",
         &admin_bare,
-        &format!(r#"<pubsub xmlns="{NS_PUBSUB}"><items node="urn:xmpp:bookmarks:1"/></pubsub>"#),
+        &format!(
+            r#"<pubsub xmlns="{NS_PUBSUB}"><items node="http://jabber.org/protocol/mood"/></pubsub>"#
+        ),
     )
     .await;
     assert!(
@@ -249,9 +251,9 @@ async fn pep_max_items_is_one_by_default() {
 // Test 4 — pep_owner_can_purge_self_node
 // ============================================================================
 //
-// XEP-0060 §8.5 (owner namespace) is used to purge a PEP node.  Because PEP
-// defaults to max_items=1 we first reconfigure max_items=10 so we can stage
-// multiple items, then purge, then verify the node is empty but still exists.
+// XEP-0060 §8.5 (owner namespace) is used to purge a PEP node. We first
+// configure max_items=10 so this test controls the staged-item count even if
+// node-specific PEP defaults change.
 
 #[tokio::test]
 async fn pep_owner_can_purge_self_node() {
@@ -266,7 +268,7 @@ async fn pep_owner_can_purge_self_node() {
         "pep-purge-pub-1",
         &admin_bare,
         &format!(
-            r#"<pubsub xmlns="{NS_PUBSUB}"><publish node="urn:xmpp:bookmarks:1"><item id="p1"><conference xmlns="urn:xmpp:bookmarks:1" name="One"/></item></publish></pubsub>"#
+            r#"<pubsub xmlns="{NS_PUBSUB}"><publish node="urn:xmpp:bookmarks:1"><item id="p1@muc.example.com"><conference xmlns="urn:xmpp:bookmarks:1" name="One"/></item></publish></pubsub>"#
         ),
     )
     .await;
@@ -296,7 +298,7 @@ async fn pep_owner_can_purge_self_node() {
         "pep-purge-pub-2",
         &admin_bare,
         &format!(
-            r#"<pubsub xmlns="{NS_PUBSUB}"><publish node="urn:xmpp:bookmarks:1"><item id="p2"><conference xmlns="urn:xmpp:bookmarks:1" name="Two"/></item></publish></pubsub>"#
+            r#"<pubsub xmlns="{NS_PUBSUB}"><publish node="urn:xmpp:bookmarks:1"><item id="p2@muc.example.com"><conference xmlns="urn:xmpp:bookmarks:1" name="Two"/></item></publish></pubsub>"#
         ),
     )
     .await;
@@ -307,7 +309,7 @@ async fn pep_owner_can_purge_self_node() {
         "pep-purge-pub-3",
         &admin_bare,
         &format!(
-            r#"<pubsub xmlns="{NS_PUBSUB}"><publish node="urn:xmpp:bookmarks:1"><item id="p3"><conference xmlns="urn:xmpp:bookmarks:1" name="Three"/></item></publish></pubsub>"#
+            r#"<pubsub xmlns="{NS_PUBSUB}"><publish node="urn:xmpp:bookmarks:1"><item id="p3@muc.example.com"><conference xmlns="urn:xmpp:bookmarks:1" name="Three"/></item></publish></pubsub>"#
         ),
     )
     .await;
@@ -366,7 +368,7 @@ async fn pep_owner_can_purge_self_node() {
         "pep-purge-pub-4",
         &admin_bare,
         &format!(
-            r#"<pubsub xmlns="{NS_PUBSUB}"><publish node="urn:xmpp:bookmarks:1"><item id="p4"><conference xmlns="urn:xmpp:bookmarks:1" name="Four"/></item></publish></pubsub>"#
+            r#"<pubsub xmlns="{NS_PUBSUB}"><publish node="urn:xmpp:bookmarks:1"><item id="p4@muc.example.com"><conference xmlns="urn:xmpp:bookmarks:1" name="Four"/></item></publish></pubsub>"#
         ),
     )
     .await;
@@ -414,6 +416,7 @@ async fn pep_publish_fans_event_with_owner_jid_as_from() {
     let mut admin = admin_client(&server, "pep-fanout-admin").await;
     let admin_bare = format!("{ADMIN}@{DOMAIN}");
     let bob_bare = format!("bob@{DOMAIN}");
+    let node = "http://jabber.org/protocol/mood";
 
     // Auto-create the PEP node and configure access_model=open so bob can
     // subscribe without presence subscription (presence-driven filtering
@@ -423,7 +426,7 @@ async fn pep_publish_fans_event_with_owner_jid_as_from() {
         "pep-fanout-create",
         &admin_bare,
         &format!(
-            r#"<pubsub xmlns="{NS_PUBSUB}"><publish node="urn:xmpp:bookmarks:1"><item id="seed"/></publish></pubsub>"#
+            r#"<pubsub xmlns="{NS_PUBSUB}"><publish node="{node}"><item id="seed"><mood xmlns="{node}"><happy/></mood></item></publish></pubsub>"#
         ),
     )
     .await;
@@ -434,7 +437,7 @@ async fn pep_publish_fans_event_with_owner_jid_as_from() {
         "pep-fanout-cfg",
         &admin_bare,
         &format!(
-            r#"<pubsub xmlns="{NS_PUBSUB_OWNER}"><configure node="urn:xmpp:bookmarks:1"><x xmlns="jabber:x:data" type="submit"><field var="pubsub#access_model"><value>open</value></field></x></configure></pubsub>"#
+            r#"<pubsub xmlns="{NS_PUBSUB_OWNER}"><configure node="{node}"><x xmlns="jabber:x:data" type="submit"><field var="pubsub#access_model"><value>open</value></field></x></configure></pubsub>"#
         ),
     )
     .await;
@@ -455,7 +458,7 @@ async fn pep_publish_fans_event_with_owner_jid_as_from() {
         "pep-fanout-sub",
         &admin_bare,
         &format!(
-            r#"<pubsub xmlns="{NS_PUBSUB}"><subscribe node="urn:xmpp:bookmarks:1" jid="{bob_bare}"/></pubsub>"#
+            r#"<pubsub xmlns="{NS_PUBSUB}"><subscribe node="{node}" jid="{bob_bare}"/></pubsub>"#
         ),
     )
     .await;
@@ -466,13 +469,13 @@ async fn pep_publish_fans_event_with_owner_jid_as_from() {
         "pep-fanout-pub",
         &admin_bare,
         &format!(
-            r#"<pubsub xmlns="{NS_PUBSUB}"><publish node="urn:xmpp:bookmarks:1"><item id="bm-1"><conference xmlns="urn:xmpp:bookmarks:1" name="One"/></item></publish></pubsub>"#
+            r#"<pubsub xmlns="{NS_PUBSUB}"><publish node="{node}"><item id="mood-1"><mood xmlns="{node}"><happy/></mood></item></publish></pubsub>"#
         ),
     )
     .await;
     assert!(pub_resp.contains(r#"type="result""#), "publish: {pub_resp}");
 
-    let event = wait_for_event_message(&mut bob, "urn:xmpp:bookmarks:1", Duration::from_secs(2))
+    let event = wait_for_event_message(&mut bob, node, Duration::from_secs(2))
         .await
         .expect("bob must receive PEP event");
 
@@ -488,7 +491,7 @@ async fn pep_publish_fans_event_with_owner_jid_as_from() {
         "PEP event must be type=headline: {event}"
     );
     assert!(
-        event.contains(r#"id="bm-1""#),
+        event.contains(r#"id="mood-1""#),
         "item id must round-trip: {event}"
     );
     // §7.1.5: publisher == owner here (admin published to own PEP), so
@@ -634,7 +637,7 @@ async fn pep_publish_fans_to_roster_contacts_with_matching_caps_notify() {
 
     establish_bob_subscribes_to_alice(&mut alice, &mut bob, &alice_bare, &bob_bare).await;
 
-    let node = "urn:xmpp:bookmarks:1";
+    let node = "http://jabber.org/protocol/mood";
     let notify_var = format!("{node}+notify");
     let features = ["http://jabber.org/protocol/disco#info", notify_var.as_str()];
     let caps_node = "https://bob.example/caps";
@@ -675,7 +678,7 @@ async fn pep_publish_fans_to_roster_contacts_with_matching_caps_notify() {
         "pep-roster-pub",
         &alice_bare,
         &format!(
-            r#"<pubsub xmlns="{NS_PUBSUB}"><publish node="{node}"><item id="bm-roster-1"><conference xmlns="{node}" name="Roster Fanout"/></item></publish></pubsub>"#
+            r#"<pubsub xmlns="{NS_PUBSUB}"><publish node="{node}"><item id="mood-roster-1"><mood xmlns="{node}"><happy/></mood></item></publish></pubsub>"#
         ),
     )
     .await;
@@ -692,8 +695,257 @@ async fn pep_publish_fans_to_roster_contacts_with_matching_caps_notify() {
         "fan-out from MUST be alice's bare JID per XEP-0163 §4.3: {event}"
     );
     assert!(
-        event.contains(r#"id="bm-roster-1""#),
+        event.contains(r#"id="mood-roster-1""#),
         "item id must round-trip: {event}"
+    );
+
+    let _ = bob.close().await;
+    let _ = alice.close().await;
+}
+
+#[tokio::test]
+async fn pep_bookmark_publish_skips_roster_contacts_even_with_matching_caps_notify() {
+    let _serial = TEST_SERIAL.lock().await;
+    let alice_password = format!("alice-{}", uuid::Uuid::new_v4());
+    let bob_password = format!("bob-{}", uuid::Uuid::new_v4());
+    let server = TestServer::start_with_extra_accounts(&[
+        ("alice", &alice_password),
+        ("bob", &bob_password),
+    ]);
+    let mut alice = WsXmppClient::connect_and_auth(
+        &server.ws_url(),
+        DOMAIN,
+        "alice",
+        &alice_password,
+        "alice-bookmark-private-1",
+    )
+    .await
+    .expect("alice connect");
+    let mut bob = WsXmppClient::connect_and_auth(
+        &server.ws_url(),
+        DOMAIN,
+        "bob",
+        &bob_password,
+        "bob-bookmark-private-1",
+    )
+    .await
+    .expect("bob connect");
+    let alice_bare = format!("alice@{DOMAIN}");
+    let bob_bare = format!("bob@{DOMAIN}");
+    let bob_full = bob.full_jid.clone().expect("bob full jid");
+
+    establish_bob_subscribes_to_alice(&mut alice, &mut bob, &alice_bare, &bob_bare).await;
+
+    let node = "urn:xmpp:bookmarks:1";
+    let notify_var = format!("{node}+notify");
+    let features = ["http://jabber.org/protocol/disco#info", notify_var.as_str()];
+    let caps_node = "https://bob.example/bookmark-private-caps";
+    let ver = caps_verification_string("client", "pc", "Bob's Client", &features);
+
+    bob.send(&format!(
+        r#"<presence xmlns="jabber:client"><c xmlns="{NS_CAPS}" hash="sha-1" node="{caps_node}" ver="{ver}"/></presence>"#
+    ))
+    .await
+    .expect("bob presence with caps");
+    let disco_query = bob
+        .recv_matching(|frame| {
+            frame.contains("<iq")
+                && frame.contains(r#"type="get""#)
+                && frame.contains(NS_DISCO_INFO)
+        })
+        .await
+        .expect("server queries bob caps");
+    let iq_id = extract_iq_id(&disco_query);
+    let feature_xml: String = features
+        .iter()
+        .map(|f| format!(r#"<feature var="{f}"/>"#))
+        .collect();
+    bob.send(&format!(
+        r#"<iq xmlns="jabber:client" type="result" id="{iq_id}" from="{bob_full}"><query xmlns="{NS_DISCO_INFO}" node="{caps_node}#{ver}"><identity category="client" type="pc" name="Bob's Client"/>{feature_xml}</query></iq>"#
+    ))
+    .await
+    .expect("bob disco#info reply");
+
+    ping_anchor(
+        &mut bob,
+        &format!("pep-bookmark-private-anchor-{}", uuid::Uuid::new_v4()),
+    )
+    .await;
+
+    let pub_resp = iq_set_to(
+        &mut alice,
+        "pep-bookmark-private-pub",
+        &alice_bare,
+        &format!(
+            r#"<pubsub xmlns="{NS_PUBSUB}"><publish node="{node}"><item id="private-room@muc.example.com"><conference xmlns="{node}" name="Private"><extensions><notify xmlns="urn:xmpp:notification-settings:1"><never/></notify></extensions></conference></item></publish></pubsub>"#
+        ),
+    )
+    .await;
+    assert!(pub_resp.contains(r#"type="result""#), "publish: {pub_resp}");
+
+    let event = wait_for_event_message(&mut bob, node, Duration::from_millis(700)).await;
+    assert!(
+        event.is_none(),
+        "bookmarks are private PEP state and MUST NOT fan out to roster contacts: {event:?}"
+    );
+
+    let _ = bob.close().await;
+    let _ = alice.close().await;
+}
+
+#[tokio::test]
+async fn pep_bookmark_publish_skips_explicit_non_owner_subscribers() {
+    let _serial = TEST_SERIAL.lock().await;
+    let alice_password = format!("alice-{}", uuid::Uuid::new_v4());
+    let bob_password = format!("bob-{}", uuid::Uuid::new_v4());
+    let server = TestServer::start_with_extra_accounts(&[
+        ("alice", &alice_password),
+        ("bob", &bob_password),
+    ]);
+    let mut alice = WsXmppClient::connect_and_auth(
+        &server.ws_url(),
+        DOMAIN,
+        "alice",
+        &alice_password,
+        "alice-bookmark-explicit-1",
+    )
+    .await
+    .expect("alice connect");
+    let mut bob = WsXmppClient::connect_and_auth(
+        &server.ws_url(),
+        DOMAIN,
+        "bob",
+        &bob_password,
+        "bob-bookmark-explicit-1",
+    )
+    .await
+    .expect("bob connect");
+    let alice_bare = format!("alice@{DOMAIN}");
+    let bob_bare = format!("bob@{DOMAIN}");
+    let node = "urn:xmpp:bookmarks:1";
+
+    let create = iq_set_to(
+        &mut alice,
+        "pep-bookmark-explicit-create",
+        &alice_bare,
+        &format!(
+            r#"<pubsub xmlns="{NS_PUBSUB}"><publish node="{node}"><item id="seed-explicit@muc.example.com"><conference xmlns="{node}" name="Seed"/></item></publish></pubsub>"#
+        ),
+    )
+    .await;
+    assert!(
+        create.contains(r#"type="result""#),
+        "create bookmark node: {create}"
+    );
+    let cfg = iq_set_to(
+        &mut alice,
+        "pep-bookmark-explicit-cfg",
+        &alice_bare,
+        &format!(
+            r#"<pubsub xmlns="{NS_PUBSUB_OWNER}"><configure node="{node}"><x xmlns="jabber:x:data" type="submit"><field var="pubsub#access_model"><value>open</value></field></x></configure></pubsub>"#
+        ),
+    )
+    .await;
+    assert!(cfg.contains(r#"type="result""#), "configure: {cfg}");
+
+    let sub = iq_set_to(
+        &mut bob,
+        "pep-bookmark-explicit-sub",
+        &alice_bare,
+        &format!(
+            r#"<pubsub xmlns="{NS_PUBSUB}"><subscribe node="{node}" jid="{bob_bare}"/></pubsub>"#
+        ),
+    )
+    .await;
+    assert!(sub.contains(r#"type="result""#), "subscribe: {sub}");
+
+    ping_anchor(
+        &mut bob,
+        &format!("pep-bookmark-explicit-anchor-{}", uuid::Uuid::new_v4()),
+    )
+    .await;
+
+    let publish = iq_set_to(
+        &mut alice,
+        "pep-bookmark-explicit-pub",
+        &alice_bare,
+        &format!(
+            r#"<pubsub xmlns="{NS_PUBSUB}"><publish node="{node}"><item id="private-explicit@muc.example.com"><conference xmlns="{node}" name="Private"><extensions><notify xmlns="urn:xmpp:notification-settings:1"><never/></notify></extensions></conference></item></publish></pubsub>"#
+        ),
+    )
+    .await;
+    assert!(publish.contains(r#"type="result""#), "publish: {publish}");
+
+    let event = wait_for_event_message(&mut bob, node, Duration::from_millis(700)).await;
+    assert!(
+        event.is_none(),
+        "bookmarks are private PEP state and MUST NOT fan out to explicit non-owner subscribers: {event:?}"
+    );
+
+    let _ = bob.close().await;
+    let _ = alice.close().await;
+}
+
+#[tokio::test]
+async fn pep_bookmark_items_reject_non_owner_reads() {
+    let _serial = TEST_SERIAL.lock().await;
+    let alice_password = format!("alice-{}", uuid::Uuid::new_v4());
+    let bob_password = format!("bob-{}", uuid::Uuid::new_v4());
+    let server = TestServer::start_with_extra_accounts(&[
+        ("alice", &alice_password),
+        ("bob", &bob_password),
+    ]);
+    let mut alice = WsXmppClient::connect_and_auth(
+        &server.ws_url(),
+        DOMAIN,
+        "alice",
+        &alice_password,
+        "alice-bookmark-read-1",
+    )
+    .await
+    .expect("alice connect");
+    let mut bob = WsXmppClient::connect_and_auth(
+        &server.ws_url(),
+        DOMAIN,
+        "bob",
+        &bob_password,
+        "bob-bookmark-read-1",
+    )
+    .await
+    .expect("bob connect");
+    let alice_bare = format!("alice@{DOMAIN}");
+    let node = "urn:xmpp:bookmarks:1";
+
+    let publish = iq_set_to(
+        &mut alice,
+        "pep-bookmark-read-create",
+        &alice_bare,
+        &format!(
+            r#"<pubsub xmlns="{NS_PUBSUB}"><publish node="{node}"><item id="private-read@muc.example.com"><conference xmlns="{node}" name="Private"><extensions><notify xmlns="urn:xmpp:notification-settings:1"><never/></notify></extensions></conference></item></publish></pubsub>"#
+        ),
+    )
+    .await;
+    assert!(publish.contains(r#"type="result""#), "publish: {publish}");
+
+    let read = iq_get_to(
+        &mut bob,
+        "pep-bookmark-read-bob",
+        &alice_bare,
+        &format!(r#"<pubsub xmlns="{NS_PUBSUB}"><items node="{node}"/></pubsub>"#),
+    )
+    .await;
+    assert!(
+        read.contains(r#"type="error""#),
+        "non-owner bookmark read must be rejected: {read}"
+    );
+    assert!(
+        read.contains("forbidden"),
+        "non-owner bookmark read should fail as forbidden: {read}"
+    );
+    assert!(
+        !read.contains("private-read@muc.example.com")
+            && !read.contains("urn:xmpp:notification-settings:1"),
+        "private bookmark and notification settings must not leak: {read}"
     );
 
     let _ = bob.close().await;
@@ -745,10 +997,10 @@ async fn pep_publish_skips_roster_contact_without_caps_notify_filter() {
 
     // Bob advertises caps, but with NO `+notify` filter for the
     // node alice will publish to.
-    let publish_node = "urn:xmpp:bookmarks:1";
+    let publish_node = "http://jabber.org/protocol/mood";
     let features = [
         "http://jabber.org/protocol/disco#info",
-        // Notice: no urn:xmpp:bookmarks:1+notify
+        // Notice: no http://jabber.org/protocol/mood+notify
         "urn:xmpp:ping",
     ];
     let caps_node = "https://bob.example/caps-no-notify";
@@ -789,7 +1041,7 @@ async fn pep_publish_skips_roster_contact_without_caps_notify_filter() {
         "pep-no-notify-pub",
         &alice_bare,
         &format!(
-            r#"<pubsub xmlns="{NS_PUBSUB}"><publish node="{publish_node}"><item id="silent-1"><conference xmlns="{publish_node}" name="Should Not See"/></item></publish></pubsub>"#
+            r#"<pubsub xmlns="{NS_PUBSUB}"><publish node="{publish_node}"><item id="silent-1"><mood xmlns="{publish_node}"><sad/></mood></item></publish></pubsub>"#
         ),
     )
     .await;
@@ -866,7 +1118,7 @@ async fn pep_publish_targets_only_resources_advertising_notify_filter() {
         .await
         .expect("bob-B presence");
 
-    let publish_node = "urn:xmpp:bookmarks:1";
+    let publish_node = "http://jabber.org/protocol/mood";
     let notify_var = format!("{publish_node}+notify");
 
     // Resource A: advertises +notify
@@ -941,7 +1193,7 @@ async fn pep_publish_targets_only_resources_advertising_notify_filter() {
         "pep-multi-pub",
         &alice_bare,
         &format!(
-            r#"<pubsub xmlns="{NS_PUBSUB}"><publish node="{publish_node}"><item id="multi-1"><conference xmlns="{publish_node}" name="Multi Resource"/></item></publish></pubsub>"#
+            r#"<pubsub xmlns="{NS_PUBSUB}"><publish node="{publish_node}"><item id="multi-1"><mood xmlns="{publish_node}"><happy/></mood></item></publish></pubsub>"#
         ),
     )
     .await;
@@ -1008,13 +1260,13 @@ async fn pep_publish_delivers_exactly_once_when_subscriber_also_in_roster() {
 
     // Alice opens an open-access PEP node so bob can both subscribe AND
     // satisfy presence-driven §3 fan-out.
-    let publish_node = "urn:xmpp:bookmarks:1";
+    let publish_node = "http://jabber.org/protocol/mood";
     let r1 = iq_set_to(
         &mut alice,
         "pep-dedup-create",
         &alice_bare,
         &format!(
-            r#"<pubsub xmlns="{NS_PUBSUB}"><publish node="{publish_node}"><item id="seed"/></publish></pubsub>"#
+            r#"<pubsub xmlns="{NS_PUBSUB}"><publish node="{publish_node}"><item id="seed"><mood xmlns="{publish_node}"><happy/></mood></item></publish></pubsub>"#
         ),
     )
     .await;
@@ -1082,7 +1334,7 @@ async fn pep_publish_delivers_exactly_once_when_subscriber_also_in_roster() {
         "pep-dedup-pub",
         &alice_bare,
         &format!(
-            r#"<pubsub xmlns="{NS_PUBSUB}"><publish node="{publish_node}"><item id="dedup-1"><conference xmlns="{publish_node}" name="Dedup"/></item></publish></pubsub>"#
+            r#"<pubsub xmlns="{NS_PUBSUB}"><publish node="{publish_node}"><item id="dedup-1"><mood xmlns="{publish_node}"><happy/></mood></item></publish></pubsub>"#
         ),
     )
     .await;
@@ -1151,7 +1403,7 @@ async fn pep_publish_fans_to_owner_other_resources_with_caps_notify() {
         .await
         .expect("alice-B presence");
 
-    let publish_node = "urn:xmpp:bookmarks:1";
+    let publish_node = "http://jabber.org/protocol/mood";
     let notify_var = format!("{publish_node}+notify");
     let features = ["http://jabber.org/protocol/disco#info", notify_var.as_str()];
     let caps_node = "https://alice.example/caps";
@@ -1192,7 +1444,7 @@ async fn pep_publish_fans_to_owner_other_resources_with_caps_notify() {
         "pep-self-pub",
         &alice_bare,
         &format!(
-            r#"<pubsub xmlns="{NS_PUBSUB}"><publish node="{publish_node}"><item id="self-1"><conference xmlns="{publish_node}" name="Self Sync"/></item></publish></pubsub>"#
+            r#"<pubsub xmlns="{NS_PUBSUB}"><publish node="{publish_node}"><item id="self-1@muc.example.com"><conference xmlns="{publish_node}" name="Self Sync"/></item></publish></pubsub>"#
         ),
     )
     .await;
@@ -1203,7 +1455,10 @@ async fn pep_publish_fans_to_owner_other_resources_with_caps_notify() {
         .expect(
             "alice-B advertising +notify MUST receive PEP event from alice-A's publish per §3.4",
         );
-    assert!(event.contains(r#"id="self-1""#), "item id: {event}");
+    assert!(
+        event.contains(r#"id="self-1@muc.example.com""#),
+        "item id: {event}"
+    );
 
     let _ = alice_a.close().await;
     let _ = alice_b.close().await;
@@ -1274,7 +1529,7 @@ async fn pep_publish_skips_blocked_roster_contact() {
 
     // Bob advertises +notify so the only path that COULD deliver to
     // him is the §3 roster pass — which the block must veto.
-    let publish_node = "urn:xmpp:bookmarks:1";
+    let publish_node = "http://jabber.org/protocol/mood";
     let notify_var = format!("{publish_node}+notify");
     let features = ["http://jabber.org/protocol/disco#info", notify_var.as_str()];
     let caps_node = "https://bob.example/blocked";
@@ -1310,7 +1565,7 @@ async fn pep_publish_skips_blocked_roster_contact() {
         "pep-block-pub",
         &alice_bare,
         &format!(
-            r#"<pubsub xmlns="{NS_PUBSUB}"><publish node="{publish_node}"><item id="blocked-1"><conference xmlns="{publish_node}" name="Blocked"/></item></publish></pubsub>"#
+            r#"<pubsub xmlns="{NS_PUBSUB}"><publish node="{publish_node}"><item id="blocked-1"><mood xmlns="{publish_node}"><happy/></mood></item></publish></pubsub>"#
         ),
     )
     .await;
@@ -1367,7 +1622,7 @@ async fn pep_publish_skips_when_contact_blocked_publisher() {
 
     establish_bob_subscribes_to_alice(&mut alice, &mut bob, &alice_bare, &bob_bare).await;
 
-    let publish_node = "urn:xmpp:bookmarks:1";
+    let publish_node = "http://jabber.org/protocol/mood";
     let notify_var = format!("{publish_node}+notify");
     let features = ["http://jabber.org/protocol/disco#info", notify_var.as_str()];
     let caps_node = "https://bob.example/contact-blocks";
@@ -1403,7 +1658,7 @@ async fn pep_publish_skips_when_contact_blocked_publisher() {
         "pep-block2-pub",
         &alice_bare,
         &format!(
-            r#"<pubsub xmlns="{NS_PUBSUB}"><publish node="{publish_node}"><item id="contact-blocks-1"><conference xmlns="{publish_node}" name="ContactBlocks"/></item></publish></pubsub>"#
+            r#"<pubsub xmlns="{NS_PUBSUB}"><publish node="{publish_node}"><item id="contact-blocks-1"><mood xmlns="{publish_node}"><happy/></mood></item></publish></pubsub>"#
         ),
     )
     .await;
@@ -1481,7 +1736,7 @@ async fn pep_publish_does_not_echo_to_publishing_resource() {
         "pep-noecho-pub",
         &alice_bare,
         &format!(
-            r#"<pubsub xmlns="{NS_PUBSUB}"><publish node="{publish_node}"><item id="echo-1"><conference xmlns="{publish_node}" name="Echo"/></item></publish></pubsub>"#
+            r#"<pubsub xmlns="{NS_PUBSUB}"><publish node="{publish_node}"><item id="echo-1@muc.example.com"><conference xmlns="{publish_node}" name="Echo"/></item></publish></pubsub>"#
         ),
     )
     .await;

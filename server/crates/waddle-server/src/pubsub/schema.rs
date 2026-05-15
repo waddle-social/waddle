@@ -2,7 +2,7 @@ use waddle_xmpp::XmppError;
 
 use super::DatabasePubSubStorage;
 
-const PUBSUB_SCHEMA_VERSION: i64 = 2;
+const PUBSUB_SCHEMA_VERSION: i64 = 3;
 
 impl DatabasePubSubStorage {
     pub(super) async fn initialize(&self) -> Result<(), XmppError> {
@@ -34,6 +34,7 @@ impl DatabasePubSubStorage {
         if current != Some(PUBSUB_SCHEMA_VERSION) {
             // Drop-and-recreate: CLAUDE.md greenlights breaking changes.
             for table in [
+                "notification_settings_projection",
                 "pubsub_items",
                 "pubsub_subscriptions",
                 "pubsub_affiliations",
@@ -100,6 +101,46 @@ impl DatabasePubSubStorage {
             }
         };
         self.execute(nodes_ddl, ()).await?;
+        let notification_settings_projection_ddl = match self.db.driver() {
+            crate::db::DatabaseDriver::Sqlite => {
+                r#"
+                CREATE TABLE IF NOT EXISTS notification_settings_projection (
+                    owner_bare_jid TEXT NOT NULL,
+                    conversation_jid TEXT NOT NULL,
+                    conversation_kind TEXT NOT NULL CHECK (conversation_kind IN ('direct', 'private_group', 'public_group')),
+                    mode TEXT NOT NULL CHECK (mode IN ('always', 'on-mention', 'never')),
+                    updated_at_ms INTEGER NOT NULL,
+                    source_node TEXT NOT NULL,
+                    source_item_id TEXT NOT NULL,
+                    PRIMARY KEY (owner_bare_jid, conversation_jid)
+                )
+                "#
+            }
+            crate::db::DatabaseDriver::Postgres => {
+                r#"
+                CREATE TABLE IF NOT EXISTS notification_settings_projection (
+                    owner_bare_jid TEXT NOT NULL,
+                    conversation_jid TEXT NOT NULL,
+                    conversation_kind TEXT NOT NULL CHECK (conversation_kind IN ('direct', 'private_group', 'public_group')),
+                    mode TEXT NOT NULL CHECK (mode IN ('always', 'on-mention', 'never')),
+                    updated_at_ms BIGINT NOT NULL,
+                    source_node TEXT NOT NULL,
+                    source_item_id TEXT NOT NULL,
+                    PRIMARY KEY (owner_bare_jid, conversation_jid)
+                )
+                "#
+            }
+        };
+        self.execute(notification_settings_projection_ddl, ())
+            .await?;
+        self.execute(
+            r#"
+            CREATE INDEX IF NOT EXISTS idx_notification_settings_projection_owner_mode
+                ON notification_settings_projection(owner_bare_jid, mode)
+            "#,
+            (),
+        )
+        .await?;
 
         let items_ddl = match self.db.driver() {
             crate::db::DatabaseDriver::Sqlite => {

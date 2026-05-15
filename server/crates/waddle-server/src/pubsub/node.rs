@@ -1,8 +1,8 @@
 use jid::BareJid;
-use waddle_xmpp::pubsub::{NodeConfig, PubSubNode};
+use waddle_xmpp::pubsub::{NodeConfig, PubSubNode, PEP_BOOKMARK_MAX_ITEMS};
 use waddle_xmpp::XmppError;
 
-use super::DatabasePubSubStorage;
+use super::{item::clear_bookmark_projection_tx, DatabasePubSubStorage};
 
 impl DatabasePubSubStorage {
     pub(super) async fn insert_node(&self, node: &PubSubNode) -> Result<(), XmppError> {
@@ -81,6 +81,28 @@ impl DatabasePubSubStorage {
         owner: &BareJid,
         node_name: &str,
     ) -> Result<bool, XmppError> {
+        if is_bookmarks_node(node_name) {
+            let mut tx = self
+                .db
+                .begin()
+                .await
+                .map_err(|error| XmppError::internal(error.to_string()))?;
+            let affected = tx
+                .execute(
+                    "DELETE FROM pubsub_nodes WHERE owner_jid = ? AND node_name = ?",
+                    crate::db_params![owner.to_string(), node_name],
+                )
+                .await
+                .map_err(|error| XmppError::internal(error.to_string()))?;
+            if affected > 0 {
+                clear_bookmark_projection_tx(&mut tx, owner).await?;
+            }
+            tx.commit()
+                .await
+                .map_err(|error| XmppError::internal(error.to_string()))?;
+            return Ok(affected > 0);
+        }
+
         let affected = self
             .execute(
                 "DELETE FROM pubsub_nodes WHERE owner_jid = ? AND node_name = ?",
@@ -147,6 +169,7 @@ impl DatabasePubSubStorage {
         node_name: &str,
         config: &NodeConfig,
     ) -> Result<(), XmppError> {
+        let config = bounded_node_config(node_name, config);
         let affected = self
             .execute(
                 r#"
@@ -240,4 +263,18 @@ impl DatabasePubSubStorage {
             created_at,
         })
     }
+}
+
+fn bounded_node_config(node_name: &str, config: &NodeConfig) -> NodeConfig {
+    let mut config = config.clone();
+    if is_bookmarks_node(node_name)
+        && (config.max_items == 0 || config.max_items > PEP_BOOKMARK_MAX_ITEMS)
+    {
+        config.max_items = PEP_BOOKMARK_MAX_ITEMS;
+    }
+    config
+}
+
+fn is_bookmarks_node(node_name: &str) -> bool {
+    node_name == waddle_xmpp::xep::xep0402::PEP_NODE
 }

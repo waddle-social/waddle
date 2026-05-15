@@ -97,10 +97,20 @@ async fn create_test_websocket_state_with_extension_manager(
     let mut dispatcher = StanzaDispatcher::new();
     waddle_xmpp::protocol::handlers::register_default_handlers(&mut dispatcher);
     waddle_xmpp::protocol::handlers::register_default_message_handlers(&mut dispatcher);
+    let pubsub_storage = Arc::new(
+        crate::pubsub::DatabasePubSubStorage::open(Some("sqlite::memory:"))
+            .await
+            .expect("pubsub storage"),
+    );
+    let notification_settings_projection = Arc::new(
+        crate::notification_settings_projection::NotificationSettingsProjectionStore::new(
+            pubsub_storage.database(),
+        ),
+    );
 
     Arc::new(WebSocketState {
             deps: WebSocketDeps {
-                app_state,
+                app_state: Arc::clone(&app_state),
                 auth_state,
                 service_domains: XmppServiceDomains {
                     muc: "muc.example.com".to_string(),
@@ -128,8 +138,9 @@ async fn create_test_websocket_state_with_extension_manager(
                     command_registry: Arc::new(CommandRegistry::new()),
                     extension_manager,
                     dispatcher: Arc::new(dispatcher),
-                    pubsub_storage: Arc::new(waddle_xmpp::pubsub::InMemoryPubSubStorage::new()),
+                    pubsub_storage,
                     push_store: Arc::new(waddle_xmpp::push::InMemoryPushStore::new()),
+                    notification_settings_projection,
                     isr_token_store: waddle_xmpp::isr::create_shared_store(),
                     sm_session_registry: Arc::new(InMemorySmSessionRegistry::new()),
                     resumable_sessions: Arc::new(dashmap::DashMap::new()),

@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use jid::{BareJid, Jid};
 use waddle_xmpp_core::pubsub::{Affiliation, SubId, Subscription, SubscriptionState};
 
-use crate::pubsub::node::NodeConfig;
+use crate::pubsub::node::{NodeConfig, PEP_BOOKMARK_MAX_ITEMS};
 use crate::pubsub::stanzas::PubSubItem;
 use crate::XmppError;
 
@@ -129,14 +129,16 @@ impl PubSubStorage for InMemoryPubSubStorage {
         }
 
         let max_items = node.config.max_items as usize;
+        let mut evicted_item_ids = Vec::new();
         if max_items > 0 && items.len() > max_items {
             let excess = items.len() - max_items;
-            items.drain(0..excess);
+            evicted_item_ids.extend(items.drain(0..excess).map(|item| item.id));
         }
 
         Ok(PublishResult {
             item_id,
             node_created,
+            evicted_item_ids,
         })
     }
 
@@ -242,7 +244,13 @@ impl PubSubStorage for InMemoryPubSubStorage {
             XmppError::item_not_found(Some(format!("Node '{}' does not exist", node_name)))
         })?;
 
-        node.config = config.clone();
+        let mut config = config.clone();
+        if node_name == crate::xep::xep0402::PEP_NODE
+            && (config.max_items == 0 || config.max_items > PEP_BOOKMARK_MAX_ITEMS)
+        {
+            config.max_items = PEP_BOOKMARK_MAX_ITEMS;
+        }
+        node.config = config;
 
         Ok(())
     }

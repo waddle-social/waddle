@@ -16,7 +16,7 @@ mod node;
 mod open;
 mod schema;
 
-pub use open::build_pubsub_storage;
+pub use open::{build_database_pubsub_storage, build_pubsub_storage};
 
 #[derive(Clone)]
 pub struct DatabasePubSubStorage {
