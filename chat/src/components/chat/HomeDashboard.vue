@@ -335,7 +335,7 @@ function onHeroCta() {
           <button
             v-for="space in spaces"
             :key="space.id"
-            class="chat-list-row flex min-h-16 items-center gap-3 rounded-lg border border-border bg-card px-4 py-3 text-left hover:bg-muted/60"
+            class="chat-list-row flex min-w-0 min-h-16 items-center gap-3 overflow-hidden rounded-lg border border-border bg-card px-4 py-3 text-left hover:bg-muted/60"
             :class="[
               spaceHasChannels(space.id) ? '' : 'cursor-default hover:bg-card',
               groupActivity(`space:${space.id}`).mentions > 0
@@ -412,14 +412,14 @@ function onHeroCta() {
           <div
             v-for="group in visibleChannelGroups"
             :key="group.id"
-            class="rounded-lg border border-border bg-card p-3"
+            class="min-w-0 overflow-hidden rounded-lg border border-border bg-card p-3"
           >
             <h3 class="type-section-label px-1 pb-2 text-muted-foreground">{{ group.name }}</h3>
             <div class="grid gap-1">
               <button
                 v-for="channel in group.channels"
                 :key="channel.id"
-                class="chat-list-row flex min-h-14 items-center gap-2 rounded-md px-3 py-2 text-left text-muted-foreground hover:bg-muted hover:text-foreground"
+                class="chat-list-row flex min-w-0 min-h-14 items-center gap-2 overflow-hidden rounded-md px-3 py-2 text-left text-muted-foreground hover:bg-muted hover:text-foreground"
                 :class="channelActivity(channel).mentions > 0
                   ? 'chat-list-row--unread chat-list-row--mention'
                   : unreadBadgeCount(channelActivity(channel)) > 0
@@ -475,7 +475,7 @@ function onHeroCta() {
             <div
               v-for="i in 2"
               :key="`channel-group-skel-${i}`"
-              class="rounded-lg border border-border bg-card p-3"
+              class="min-w-0 overflow-hidden rounded-lg border border-border bg-card p-3"
               aria-hidden="true"
             >
               <Skeleton width="35%" height="0.65rem" />
@@ -509,7 +509,7 @@ function onHeroCta() {
           <button
             v-for="conversation in directMessages"
             :key="conversation.peerJid"
-            class="chat-list-row flex min-h-14 items-center gap-3 rounded-lg border border-border bg-card px-4 py-3 text-left hover:bg-muted/60"
+            class="chat-list-row flex min-w-0 min-h-14 items-center gap-3 overflow-hidden rounded-lg border border-border bg-card px-4 py-3 text-left hover:bg-muted/60"
             :class="conversation.unreadCount > 0 ? 'chat-list-row--unread' : ''"
             type="button"
             :aria-label="dmHomeLabel(conversation, conversation.lastMessageAt ? formatTimelineStamp(conversation.lastMessageAt) : '')"
@@ -570,7 +570,7 @@ function onHeroCta() {
           <button
             v-for="contact in contacts"
             :key="contact.jid"
-            class="chat-list-row flex min-h-12 items-center gap-3 rounded-lg border border-border bg-card px-4 py-3 text-left hover:bg-muted/60"
+            class="chat-list-row flex min-w-0 min-h-12 items-center gap-3 overflow-hidden rounded-lg border border-border bg-card px-4 py-3 text-left hover:bg-muted/60"
             type="button"
             @click="emit('selectContact', contact.jid)"
           >

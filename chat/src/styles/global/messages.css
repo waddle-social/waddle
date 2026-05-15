@@ -5,6 +5,80 @@
   gap: var(--space-2xs);
 }
 
+/* Wrapping container for the VirtualTimeline that also hosts the
+ * floating "jump to latest" affordance. Position-relative so the
+ * button can anchor to the live-edge side of the pane. Inherits the
+ * flex-fill behaviour the bare timeline previously had so the surface
+ * layout doesn't shift. */
+.chat-message-pane {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 0%;
+  min-height: 0;
+}
+
+/* "Jump to latest" floating pill — appears when the user has scrolled
+ * away from the live edge of the message list. Anchors at the
+ * appropriate edge based on scroll-direction preference (top in
+ * social mode, bottom in chat mode). Soft glass surface with the
+ * established --glow-strong shadow so it reads as native to the
+ * design system, not a bolted-on tooltip. */
+.chat-jump-to-live {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2xs);
+  padding: 0.4rem 0.85rem;
+  border-radius: var(--radius-pill);
+  border: 1px solid color-mix(in oklab, var(--border) 80%, transparent);
+  background: color-mix(in oklab, var(--card) 90%, transparent);
+  color: var(--foreground);
+  font-size: var(--text-meta);
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  cursor: pointer;
+  z-index: var(--z-floating);
+  backdrop-filter: blur(10px);
+  box-shadow:
+    0 8px 24px -8px var(--glow-strong),
+    0 2px 6px color-mix(in oklab, oklch(0.12 0.012 248) 18%, transparent);
+  transition: transform 0.15s ease, box-shadow 0.15s ease, background-color 0.15s ease;
+}
+
+.chat-jump-to-live--top    { top: var(--space-md); }
+.chat-jump-to-live--bottom { bottom: var(--space-md); }
+
+.chat-jump-to-live:hover {
+  background: var(--card);
+  transform: translateX(-50%) translateY(-1px);
+  box-shadow:
+    0 12px 30px -8px var(--glow-strong),
+    0 4px 10px color-mix(in oklab, oklch(0.12 0.012 248) 22%, transparent);
+}
+
+.chat-jump-to-live:active {
+  transform: translateX(-50%) translateY(0);
+}
+
+.chat-jump-to-live:focus-visible {
+  outline: 2px solid color-mix(in oklab, var(--primary) 55%, transparent);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .chat-jump-to-live {
+    animation: chat-jump-to-live-in 0.22s cubic-bezier(0.16, 1, 0.3, 1);
+  }
+}
+
+@keyframes chat-jump-to-live-in {
+  from { opacity: 0; transform: translateX(-50%) translateY(0.5rem); }
+  to   { opacity: 1; transform: translateX(-50%) translateY(0); }
+}
+
 .chat-message-grid {
   display: grid;
   width: 100%;

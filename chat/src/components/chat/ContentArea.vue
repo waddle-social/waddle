@@ -26,6 +26,8 @@ import { useScrollDirectionPreference } from "@/preferences/scroll-direction";
 import type { MessageThreadIndex } from "@/channels/threads";
 import { formatTimelineStamp, formatTimelineDayDivider, isSameTimelineDay } from "@/channels/timeline";
 import { useExtensionLauncher } from "@/channels/extension-launcher";
+import { useJumpToLiveEdge } from "@/ui/use-jump-to-live-edge";
+import { ArrowDown, ArrowUp } from "lucide-vue-next";
 import ChatHeader, { type ChannelHeaderMember } from "@/components/chat/ChatHeader.vue";
 import ExtensionPalette from "@/components/chat/ExtensionPalette.vue";
 import MessageCard from "@/components/chat/MessageCard.vue";
@@ -320,7 +322,10 @@ type VirtualTimelineHandle = ComponentPublicInstance & {
 const virtualTimelineRef = ref<VirtualTimelineHandle | null>(null);
 const setMessagesContainer = (el: HTMLDivElement | null) => {
   messagesContainer.value = el;
-  void nextTick(updateCurrentDayMarker);
+  void nextTick(() => {
+    updateCurrentDayMarker();
+    jumpToLive.updateDistance();
+  });
 };
 const setVirtualTimelineRef = (
   instance: VirtualTimelineHandle | null,
@@ -328,6 +333,21 @@ const setVirtualTimelineRef = (
   virtualTimelineRef.value = instance;
   setMessagesContainer(instance?.scrollElement ?? null);
 };
+
+// "Jump to latest" floating button — shown when the user has scrolled
+// away from the live edge. The live-edge anchor flips with the user's
+// scroll-direction preference (social = top, chat = bottom), so the
+// same button reads "↑ Latest" or "↓ Latest" accordingly.
+const jumpToLive = useJumpToLiveEdge({
+  scrollElement: computed(() => virtualTimelineRef.value?.scrollElement ?? null),
+  mode: scrollDirection,
+  scrollToEdge: (mode) => virtualTimelineRef.value?.scrollToPinnedEdge(mode) ?? false,
+});
+
+function onMessagesScroll() {
+  updateCurrentDayMarker();
+  jumpToLive.updateDistance();
+}
 const currentDayMarkerLabel = ref("");
 const composerRef = ref<MessageComposerHandle | null>(null);
 const setComposerRef = (instance: MessageComposerHandle | null) => {
@@ -1170,15 +1190,15 @@ function dayDividerLabel(createdAt: string): string {
 
     </div>
 
+    <div v-else class="chat-message-pane">
     <VirtualTimeline
-      v-else
       :ref="setVirtualTimelineRef"
       :items="orderedFeedMessages"
       :has-older="hasOlderMessages"
       :loading-older="isLoadingOlderMessages"
       :sentinel-position="olderSentinelPosition"
       aria-label="Messages"
-      @scroll="updateCurrentDayMarker"
+      @scroll="onMessagesScroll"
       @load-older="emit('loadOlder')"
     >
       <template #item="{ item: msg }">
@@ -1244,6 +1264,20 @@ function dayDividerLabel(createdAt: string): string {
           </div>
       </template>
     </VirtualTimeline>
+    <button
+      v-if="jumpToLive.shouldShow.value"
+      type="button"
+      class="chat-jump-to-live"
+      :class="isTopPinned ? 'chat-jump-to-live--top' : 'chat-jump-to-live--bottom'"
+      :aria-label="isTopPinned ? 'Jump to latest message' : 'Jump to latest message'"
+      title="Jump to latest"
+      @click="jumpToLive.jump"
+    >
+      <ArrowUp v-if="isTopPinned" class="w-3.5 h-3.5" aria-hidden="true" />
+      <ArrowDown v-else class="w-3.5 h-3.5" aria-hidden="true" />
+      <span>Latest</span>
+    </button>
+    </div>
 
     <!-- Typing indicator -->
     <div
