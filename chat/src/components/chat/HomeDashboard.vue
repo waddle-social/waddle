@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { computed } from "vue";
-import { Hash, MessageCircle, MessagesSquare, Users } from "lucide-vue-next";
+import { computed, onBeforeUnmount, onMounted, ref } from "vue";
+import { ArrowRight, Hash, MessageCircle, MessagesSquare, Users } from "lucide-vue-next";
 import type { ChannelSummary } from "@/lib/chat-types";
 import type { RosterContact } from "@/lib/xmpp/types";
 import AppAvatar from "@/components/ui/AppAvatar.vue";
@@ -8,7 +8,7 @@ import Skeleton from "@/components/ui/Skeleton.vue";
 import { isForumChannel } from "@/lib/channel-types";
 import { groupChannelsBySpace } from "@/lib/channel-grouping";
 import { formatTimelineStamp } from "@/channels/timeline";
-import type { HomeDashboardProps } from "@/home/dashboard-props";
+import type { ChannelActivityState, HomeDashboardProps } from "@/home/dashboard-props";
 import {
   channelActivityPreview,
   channelActivityState,
@@ -30,6 +30,58 @@ const emit = defineEmits<{
   selectContact: [jid: string];
   openNav: [];
 }>();
+
+const now = ref<Date>(new Date());
+let heroClockHandle: ReturnType<typeof setInterval> | null = null;
+
+onMounted(() => {
+  heroClockHandle = setInterval(() => { now.value = new Date(); }, 60_000);
+});
+
+onBeforeUnmount(() => {
+  if (heroClockHandle) clearInterval(heroClockHandle);
+});
+
+type HeroTimeOfDay = "morning" | "day" | "evening" | "night";
+
+const heroTimeOfDay = computed<HeroTimeOfDay>(() => {
+  const h = now.value.getHours();
+  if (h >= 5 && h < 11) return "morning";
+  if (h >= 11 && h < 17) return "day";
+  if (h >= 17 && h < 22) return "evening";
+  return "night";
+});
+
+const heroGreeting = computed(() => {
+  switch (heroTimeOfDay.value) {
+    case "morning": return "Good morning.";
+    case "day":     return "Good afternoon.";
+    case "evening": return "Good evening.";
+    case "night":   return "Late one tonight.";
+  }
+});
+
+const heroEyebrow = computed(() =>
+  new Intl.DateTimeFormat(undefined, {
+    weekday: "long",
+    month: "short",
+    day: "numeric",
+  }).format(now.value),
+);
+
+interface HeroSummary {
+  totalUnread: number;
+  totalMentions: number;
+  totalThreadUnread: number;
+  dmUnread: number;
+  onlineFriends: number;
+  hasUnread: boolean;
+}
+
+interface HeroSummaryPart {
+  count: number;
+  label: string;
+}
 
 const groups = computed(() => groupChannelsBySpace(props.spaces, props.channels));
 const visibleChannelGroups = computed(() => groups.value.filter((group) => group.channels.length > 0));
@@ -142,25 +194,137 @@ function dmSecondaryText(conversation: { peerUsername?: string; peerJid: string;
   }
   return preview || conversation.peerJid;
 }
+
+const heroSummary = computed<HeroSummary>(() => {
+  let totalUnread = 0;
+  let totalMentions = 0;
+  let totalThreadUnread = 0;
+  for (const channel of props.channels) {
+    const a = channelActivity(channel);
+    totalUnread += unreadBadgeCount(a);
+    totalMentions += a.mentions;
+    totalThreadUnread += threadUnreadCount(a);
+  }
+  let dmUnread = 0;
+  let onlineFriends = 0;
+  for (const dm of directMessages.value) {
+    if (dm.unreadCount > 0) dmUnread += dm.unreadCount;
+    if (dm.presenceShow === "available") onlineFriends += 1;
+  }
+  for (const contact of props.contacts) {
+    if (contact.presenceShow && contact.presenceShow !== "offline") {
+      onlineFriends += 1;
+    }
+  }
+  return {
+    totalUnread,
+    totalMentions,
+    totalThreadUnread,
+    dmUnread,
+    onlineFriends,
+    hasUnread: totalUnread + totalMentions + totalThreadUnread + dmUnread > 0,
+  };
+});
+
+const heroSummaryParts = computed<HeroSummaryPart[]>(() => {
+  const s = heroSummary.value;
+  const parts: HeroSummaryPart[] = [];
+  if (s.totalMentions > 0) {
+    parts.push({ count: s.totalMentions, label: s.totalMentions === 1 ? "mention" : "mentions" });
+  }
+  const unreadTotal = s.totalUnread + s.dmUnread;
+  if (unreadTotal > 0) {
+    parts.push({ count: unreadTotal, label: unreadTotal === 1 ? "unread message" : "unread messages" });
+  }
+  if (s.totalThreadUnread > 0) {
+    parts.push({ count: s.totalThreadUnread, label: s.totalThreadUnread === 1 ? "thread reply" : "thread replies" });
+  }
+  if (s.onlineFriends > 0) {
+    parts.push({ count: s.onlineFriends, label: s.onlineFriends === 1 ? "friend online" : "friends online" });
+  }
+  return parts;
+});
+
+const heroQuietMessage = computed(() => {
+  switch (heroTimeOfDay.value) {
+    case "morning": return "Everything's quiet. A good moment to start something.";
+    case "day":     return "All caught up. The room is yours.";
+    case "evening": return "All caught up. Maybe say hi to someone.";
+    case "night":   return "Quiet night. Sleep well — or send a long-form note.";
+  }
+});
+
+const heroPrimaryChannel = computed<ChannelSummary | undefined>(() => {
+  let best: ChannelSummary | undefined;
+  let bestActivity: ChannelActivityState | undefined;
+  for (const channel of props.channels) {
+    const a = channelActivity(channel);
+    if (!hasChannelActivitySignal(a)) continue;
+    if (!best || !bestActivity || compareChannelActivityPriority(a, bestActivity) < 0) {
+      best = channel;
+      bestActivity = a;
+    }
+  }
+  return best;
+});
+
+const heroCtaLabel = computed(() => {
+  const channel = heroPrimaryChannel.value;
+  return channel ? `Jump into ${channel.name}` : "Browse channels";
+});
+
+function onHeroCta() {
+  const channel = heroPrimaryChannel.value;
+  if (channel) emit("selectChannel", channel.id);
+}
 </script>
 
 <template>
   <div class="chat-pane-scroll flex-1 min-h-0 bg-background px-[var(--chat-content-inline)] py-6">
     <div class="mx-auto grid w-full max-w-6xl gap-6">
-      <header class="flex items-center justify-between gap-4">
-        <div>
-          <h1 class="type-display-title">Home</h1>
-          <p class="type-caption text-muted-foreground">Activity across spaces, channels, direct messages, and contacts.</p>
+      <section
+        class="home-hero"
+        :class="`home-hero--${heroTimeOfDay}`"
+        :aria-label="`${heroGreeting} ${heroEyebrow}.`"
+      >
+        <div class="home-hero__body">
+          <span class="home-hero__eyebrow">
+            <span class="home-hero__pulse" aria-hidden="true"></span>
+            {{ heroEyebrow }}
+          </span>
+          <h1 class="home-hero__greeting">{{ heroGreeting }}</h1>
+          <p class="home-hero__summary">
+            <template v-if="heroSummaryParts.length > 0">
+              <template v-for="(part, idx) in heroSummaryParts" :key="`${part.label}-${idx}`">
+                <span v-if="idx > 0" class="home-hero__separator"> · </span>
+                <strong>{{ part.count }}</strong> {{ part.label }}
+              </template>
+            </template>
+            <template v-else>{{ heroQuietMessage }}</template>
+          </p>
+          <button
+            v-if="heroPrimaryChannel"
+            type="button"
+            class="home-hero__cta"
+            @click="onHeroCta"
+          >
+            {{ heroCtaLabel }}
+            <ArrowRight class="home-hero__cta-arrow h-4 w-4" aria-hidden="true" />
+          </button>
+        </div>
+        <div class="home-hero__mascot-wrap" aria-hidden="true">
+          <span class="home-hero__mascot-halo"></span>
+          <img class="home-hero__mascot" src="/waddle-logo.svg" alt="" />
         </div>
         <button
-          class="chat-icon-button chat-icon-button--md text-muted-foreground hover:bg-muted hover:text-foreground lg:hidden"
+          class="home-hero__nav-button"
           type="button"
           aria-label="Open navigation"
           @click="emit('openNav')"
         >
           <Hash class="h-4 w-4" />
         </button>
-      </header>
+      </section>
 
       <section class="grid gap-3">
         <div class="flex items-center gap-2">
