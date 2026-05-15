@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, watch, onBeforeUnmount } from "vue";
-import { Send, Image, Paperclip, FileText, Music4, Puzzle, X, Loader2 } from "lucide-vue-next";
+import { Send, Paperclip, FileText, Music4, Puzzle, X, Loader2 } from "lucide-vue-next";
 import type { JSONContent } from "@tiptap/core";
 import GifPicker from "@/components/chat/GifPicker.vue";
 import ChatEditor from "@/components/chat/ChatEditor.vue";
@@ -787,6 +787,10 @@ watch(
         class="hidden"
         @change="onFileInputChange"
       />
+      <!-- LEFT cluster: content-add actions (attach, GIF). The picker
+           launched by the second button is GIPHY-only — not a generic
+           photo browser — so the affordance is a typographic GIF mark
+           rather than a photo icon. -->
       <button
         type="button"
         class="chat-composer-input-action h-9 w-9 shrink-0 flex items-center justify-center transition-all duration-200 text-muted-foreground hover:bg-background/70 hover:text-primary active:scale-[0.94] disabled:opacity-40 disabled:active:scale-100 [@media(pointer:coarse)]:h-11 [@media(pointer:coarse)]:w-11"
@@ -798,16 +802,16 @@ watch(
         <Paperclip class="w-4 h-4" aria-hidden="true" />
       </button>
       <button
-        :ref="setExtensionButtonRef"
         type="button"
-        class="chat-composer-input-action h-9 w-9 shrink-0 flex items-center justify-center transition-all duration-200 text-muted-foreground hover:bg-background/70 hover:text-primary active:scale-[0.94] disabled:opacity-40 disabled:active:scale-100 [@media(pointer:coarse)]:h-11 [@media(pointer:coarse)]:w-11"
-        title="Extensions"
-        aria-label="Extensions"
-        :aria-expanded="extensionsOpen"
+        class="chat-composer-input-action h-9 w-9 shrink-0 flex items-center justify-center transition-all duration-200 active:scale-[0.94] disabled:active:scale-100 [@media(pointer:coarse)]:h-11 [@media(pointer:coarse)]:w-11"
+        :class="showGifPicker ? 'bg-background/80 text-primary' : 'text-muted-foreground hover:bg-background/70 hover:text-primary'"
+        title="Search GIFs"
+        aria-label="Search GIFs"
+        :aria-expanded="showGifPicker"
         :disabled="disabled"
-        @click="emit('openExtensions')"
+        @click="showGifPicker = !showGifPicker"
       >
-        <Puzzle class="w-4 h-4" aria-hidden="true" />
+        <span class="chat-composer-gif-badge" aria-hidden="true">GIF</span>
       </button>
       <ChatEditor
         :ref="setEditorRef"
@@ -821,17 +825,21 @@ watch(
         @cancel="onEditorCancel"
         @paste="onEditorPaste"
       />
+      <!-- RIGHT cluster: dispatch actions (extensions menu, send).
+           Extensions live next to send so the right edge is consistently
+           "fire an action"; the left edge is consistently "add to the
+           message draft". -->
       <button
+        :ref="setExtensionButtonRef"
         type="button"
-        class="chat-composer-input-action h-9 w-9 shrink-0 flex items-center justify-center transition-all duration-200 active:scale-[0.94] disabled:active:scale-100 [@media(pointer:coarse)]:h-11 [@media(pointer:coarse)]:w-11"
-        :class="showGifPicker ? 'bg-background/80 text-primary' : 'text-muted-foreground hover:bg-background/70 hover:text-primary'"
-        title="Open GIF picker"
-        aria-label="Open GIF picker"
-        :aria-expanded="showGifPicker"
+        class="chat-composer-input-action h-9 w-9 shrink-0 flex items-center justify-center transition-all duration-200 text-muted-foreground hover:bg-background/70 hover:text-primary active:scale-[0.94] disabled:opacity-40 disabled:active:scale-100 [@media(pointer:coarse)]:h-11 [@media(pointer:coarse)]:w-11"
+        title="Extensions"
+        aria-label="Extensions"
+        :aria-expanded="extensionsOpen"
         :disabled="disabled"
-        @click="showGifPicker = !showGifPicker"
+        @click="emit('openExtensions')"
       >
-        <Image class="w-4 h-4" aria-hidden="true" />
+        <Puzzle class="w-4 h-4" aria-hidden="true" />
       </button>
       <button
         type="button"

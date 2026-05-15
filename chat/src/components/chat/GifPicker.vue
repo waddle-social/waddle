@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, watch } from "vue";
+import { onMounted, ref, watch } from "vue";
 import { Search, X } from "lucide-vue-next";
 
 const props = defineProps<{
@@ -11,6 +11,11 @@ const emit = defineEmits<{
   select: [url: string];
   close: [];
 }>();
+
+const searchInput = ref<HTMLInputElement | null>(null);
+onMounted(() => {
+  searchInput.value?.focus();
+});
 
 interface GiphyGif {
   id: string;
@@ -68,6 +73,7 @@ function selectGif(gif: GiphyGif) {
           aria-hidden="true"
         />
         <input
+          ref="searchInput"
           v-model="query"
           type="text"
           placeholder="Search GIFs…"
