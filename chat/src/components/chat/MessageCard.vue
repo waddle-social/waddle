@@ -595,7 +595,10 @@ onBeforeUnmount(() => {
       swipe.isArmed.value && swipe.direction.value === -1 ? 'chat-message-swipe-armed-thread' : '',
       swipe.isArmed.value && swipe.direction.value === 1 ? 'chat-message-swipe-armed-reply' : '',
     ]"
-    :style="{ '--chat-swipe-x': swipe.translateX.value + 'px' }"
+    :style="{
+      '--chat-swipe-x': swipe.translateX.value + 'px',
+      transform: `translateX(${swipe.translateX.value}px)`,
+    }"
     @pointerdown="onSwipePointerdown"
     @pointermove="onSwipePointermove"
     @pointerup="onSwipePointerup"
