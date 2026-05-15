@@ -134,10 +134,6 @@ const seniorHat = computed<OccupantHat | null>(() => {
   return best;
 });
 
-const isBotAuthor = computed(() =>
-  props.hats?.some((h) => h.uri === "urn:xmpp:hats:bot") ?? false,
-);
-
 const eventBands = computed(() =>
   (props.message.extensionAnnotations ?? [])
     .map((annotation) => ({ annotation, presentation: extensionPresentation(annotation) }))
@@ -145,23 +141,15 @@ const eventBands = computed(() =>
 );
 
 // Render as a system band when an event-intent annotation declares the
-// `chat-bot` surface, OR when the message author wears the bot hat
-// and any event annotation is present. The annotation-level surface
-// declaration is the load-bearing signal — the annotation provider
-// itself is saying "I came from a system actor, not a human" — and
-// trusting it makes detection robust even when the underlying XMPP
-// account hasn't been assigned `urn:xmpp:hats:bot` in this particular
-// room (the real-world case for the live GitHub integration today).
-//
-// First pass relied on the hat alone, which is what users were seeing
-// in production: GitHub kept rendering as a human-shaped message
-// because the bot account simply didn't have the hat. surfaceKind on
-// the annotation always does.
-const renderAsSystemBand = computed(() => {
-  if (eventBands.value.length === 0) return false;
-  if (isBotAuthor.value) return true;
-  return eventBands.value.some((band) => band.annotation.surfaceKind === "chat-bot");
-});
+// `chat-bot` surface. The annotation provider (the extension that
+// publishes the event) is the one that knows it's a system-level
+// notification, not a human reply — and it now says so explicitly via
+// `surfaceKind`, which the WASM codec hydrates from the wire-format
+// `surface` attribute on the payload's root element. No author-hat
+// fallbacks, no "any event intent" hacks: trust the declaration.
+const renderAsSystemBand = computed(() =>
+  eventBands.value.some((band) => band.annotation.surfaceKind === "chat-bot"),
+);
 
 function systemBandIcon(card: { annotation: ExtensionAnnotation; presentation: ReturnType<typeof extensionPresentation> }) {
   if (card.presentation.kind === "github-event") return Github;

@@ -292,7 +292,15 @@ impl GitHubPayload {
     }
 
     fn to_enrichment_payload(&self) -> types::ExtensionPayload {
+        // `surface` declares what kind of UI the payload expects the
+        // client to render. GitHub events are server-pushed
+        // notifications, not human replies, so we render them as a
+        // chat-bot surface (full-width system band with no author
+        // gutter). The framework keeps the attribute optional so
+        // existing payloads default to the standard message-card
+        // treatment; extensions that ARE bot-style declare themselves.
         let mut attributes = vec![
+            xml_attr("surface", "chat-bot"),
             xml_attr("event-type", &self.event_type),
             xml_attr("action", &self.action),
             xml_attr("installation-id", &self.installation_id),
