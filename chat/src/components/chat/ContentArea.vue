@@ -1033,16 +1033,28 @@ function dayDividerLabel(createdAt: string): string {
       </div>
 
       <div v-else-if="!channel && !dmPeer" class="chat-empty-state">
-        <div class="w-12 h-12 rounded-lg bg-muted flex items-center justify-center">
-          <component :is="sidebarMode === 'dms' ? MessageCircle : isForumChannel ? MessagesSquare : Hash" class="w-5 h-5 text-primary/50" />
+        <div class="chat-empty-state__halo">
+          <span class="chat-empty-state__halo-glow" aria-hidden="true" />
+          <span class="chat-empty-state__halo-ring chat-empty-state__halo-ring--muted">
+            <component :is="sidebarMode === 'dms' ? MessageCircle : isForumChannel ? MessagesSquare : Hash" class="w-6 h-6 text-primary/70" />
+          </span>
         </div>
-        <p class="type-empty-title text-muted-foreground">
-          {{ sidebarMode === "dms"
-            ? "Select a conversation"
-            : isForumChannel
-              ? "Select a forum to browse topics"
-              : "Select a channel to start chatting" }}
-        </p>
+        <div class="chat-field-stack">
+          <p class="type-empty-title">
+            {{ sidebarMode === "dms"
+              ? "Pick a conversation"
+              : isForumChannel
+                ? "Pick a forum"
+                : "Pick a channel" }}
+          </p>
+          <p class="type-field text-muted-foreground chat-copy-measure">
+            {{ sidebarMode === "dms"
+              ? "Open one from the sidebar to keep chatting."
+              : isForumChannel
+                ? "Open one to browse its topics."
+                : "Open one from the sidebar to drop into the conversation." }}
+          </p>
+        </div>
       </div>
 
       <div v-else-if="errorActionLabel" class="chat-empty-state">
@@ -1060,17 +1072,24 @@ function dayDividerLabel(createdAt: string): string {
       </div>
 
       <div v-else-if="feedMessages.length === 0" class="chat-empty-state">
-        <div class="w-12 h-12 rounded-lg bg-primary/10 flex items-center justify-center">
-          <component :is="dmPeer ? MessageCircle : isForumChannel ? MessagesSquare : Hash" class="w-5 h-5 text-primary" />
+        <div class="chat-empty-state__halo">
+          <span class="chat-empty-state__halo-glow chat-empty-state__halo-glow--primary" aria-hidden="true" />
+          <span class="chat-empty-state__halo-ring chat-empty-state__halo-ring--primary">
+            <component :is="dmPeer ? MessageCircle : isForumChannel ? MessagesSquare : Hash" class="w-6 h-6 text-primary" />
+          </span>
         </div>
         <div class="chat-field-stack">
           <p class="type-empty-title">
-            {{ dmPeer ? `Conversation with @${dmPeer.peerUsername}` : `Welcome to #${channel?.name}` }}
+            {{ dmPeer
+              ? `Just you and @${dmPeer.peerUsername}`
+              : `Welcome to #${channel?.name}` }}
           </p>
-          <p class="type-field text-muted-foreground">
+          <p class="type-field text-muted-foreground chat-copy-measure">
             {{ isForumChannel
               ? "Start the first topic with a clear title so people can follow the thread."
-              : "This is the start of the conversation." }}
+              : dmPeer
+                ? "Send the first message to get the conversation going."
+                : "Say hi — this is where the conversation starts." }}
           </p>
         </div>
       </div>
