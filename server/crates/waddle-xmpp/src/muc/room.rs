@@ -242,6 +242,26 @@ impl MucRoom {
         }
     }
 
+    /// True when this room carries no in-memory state that would be
+    /// lost on eviction from the room registry: zero occupants, no
+    /// stored subject, no pinned entries, and no explicit
+    /// affiliations.
+    ///
+    /// The dormancy janitor uses this predicate to safely reap
+    /// persistent rooms whose `RoomActor` is holding nothing but a
+    /// mailbox and an empty `MucRoom`. Eviction in this state is
+    /// equivalent to never having spawned the actor: any future
+    /// access will `GetOrCreateRoom` the actor afresh with identical
+    /// initial state. Rooms with subject, pins, or affiliations are
+    /// NOT dormant — those caches are in-memory only today and
+    /// dropping them would lose user-visible state.
+    pub fn is_dormant(&self) -> bool {
+        self.occupants.is_empty()
+            && self.subject.is_none()
+            && self.pinned_entries.is_empty()
+            && self.affiliation_list.is_empty()
+    }
+
     /// Whether `bare_jid` is currently joined to this room as an
     /// occupant. Used by the pin-list IQ query handler to gate
     /// access on membership.

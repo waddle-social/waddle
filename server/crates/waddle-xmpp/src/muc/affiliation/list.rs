@@ -114,6 +114,15 @@ impl AffiliationList {
             .collect()
     }
 
+    /// True when no non-default affiliations are recorded. Used by
+    /// `MucRoom::is_dormant` to decide whether an empty room is safe
+    /// to evict from the in-memory registry: a populated affiliation
+    /// list is currently in-memory only, so eviction would silently
+    /// drop those grants until durable storage is added.
+    pub fn is_empty(&self) -> bool {
+        self.affiliations.is_empty()
+    }
+
     /// Get all affiliation entries.
     pub fn all(&self) -> Vec<AffiliationEntry> {
         self.affiliations
