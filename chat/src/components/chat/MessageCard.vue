@@ -12,6 +12,7 @@ import {
   Github,
   LayoutDashboard,
   MessageSquare,
+  MessagesSquare,
   Pin,
   PinOff,
 } from "lucide-vue-next";
@@ -231,7 +232,7 @@ function openThreadFromChip() {
   emit("openThread", props.message.id);
 }
 
-const MAX_CHIP_PARTICIPANTS = 2;
+const MAX_CHIP_PARTICIPANTS = 3;
 const visibleThreadParticipants = computed(() =>
   (props.threadParticipants ?? []).slice(0, MAX_CHIP_PARTICIPANTS),
 );
@@ -247,14 +248,14 @@ function formatThreadRecency(iso: string | undefined): string {
   const seconds = Math.floor(ms / 1000);
   if (seconds < 45) return "just now";
   const minutes = Math.floor(seconds / 60);
-  if (minutes < 2) return "1 min";
-  if (minutes < 60) return `${minutes} min`;
+  if (minutes < 2) return "1 min ago";
+  if (minutes < 60) return `${minutes} min ago`;
   const hours = Math.floor(minutes / 60);
-  if (hours < 2) return "1 hour";
-  if (hours < 24) return `${hours} hours`;
+  if (hours < 2) return "1 hour ago";
+  if (hours < 24) return `${hours} hours ago`;
   const days = Math.floor(hours / 24);
-  if (days < 2) return "1 day";
-  if (days < 7) return `${days} days`;
+  if (days < 2) return "1 day ago";
+  if (days < 7) return `${days} days ago`;
   return new Date(iso).toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
@@ -799,33 +800,18 @@ onBeforeUnmount(() => {
     >
       <AppAvatar :name="message.author" :src="avatarUrl" :presence="presence" :last-seen="lastSeen" size="message" />
     </button>
-    <!-- Thread participant stack — pulled out of the inline thread chip
-         into the avatar gutter so it sits visually under the main
-         author avatar, sharing the column with the burst rail and the
-         time gutter. Position-absolute relative to the row's grid;
-         centred horizontally in the avatar column, bottom-anchored so
-         it aligns with the chip which is the last body child. -->
+    <!-- Thread rail glyph — a small "messages-stack" icon centred in the
+         avatar column, under the author avatar. Structural marker that
+         this row anchors a thread; the rich summary (who replied, how
+         many, how recently) lives in the in-body chip. Position-absolute
+         relative to the row's grid; bottom-anchored to align with the
+         chip which is the last body child. -->
     <div
-      v-if="showThreadChip && visibleThreadParticipants.length > 0"
-      class="chat-thread-chip-gutter"
+      v-if="showThreadChip"
+      class="chat-thread-rail-glyph"
       aria-hidden="true"
     >
-      <span
-        v-for="participant in visibleThreadParticipants"
-        :key="`thread-gutter-avatar:${message.id}:${participant.nick}`"
-        class="chat-thread-chip-gutter__avatar-wrap"
-      >
-        <AppAvatar
-          :name="participant.nick"
-          :src="participant.avatarUrl ?? null"
-          :presence="participant.presence"
-          size="xs"
-        />
-      </span>
-      <span
-        v-if="threadParticipantOverflow > 0"
-        class="chat-thread-chip-gutter__overflow"
-      >+{{ threadParticipantOverflow }}</span>
+      <MessagesSquare class="chat-thread-rail-glyph__icon" />
     </div>
     <div class="chat-message-body-stack">
       <div v-if="!grouped" class="chat-message-meta-row">
@@ -946,10 +932,12 @@ onBeforeUnmount(() => {
 
     <!-- Thread replies affordance. Visible in the main channel feed on roots
          that have replies; the thread panel hides it via hideThreadChip since
-         the panel already shows children. Carries a tiny avatar stack of
-         participants (current user excluded by the caller) and a relative-
-         time suffix so the eye can triage threads at a glance — who's been
-         talking, how recently — without opening the panel. -->
+         the panel already shows children. The chip carries a row of
+         participant avatars (current user excluded by the caller) + reply
+         count, with the recency timestamp right-aligned so the eye can
+         triage threads at a glance — who's been talking, how many turns,
+         how recently — without opening the panel. The structural "this is
+         a thread" marker lives in the avatar gutter as the rail glyph. -->
     <button
       v-if="showThreadChip"
       type="button"
@@ -957,7 +945,28 @@ onBeforeUnmount(() => {
       :title="`Open thread (${threadReplyCount} ${threadReplyCount === 1 ? 'reply' : 'replies'})`"
       @click="openThreadFromChip"
     >
-      <MessageSquare class="chat-thread-chip__icon w-3 h-3 flex-shrink-0" />
+      <span
+        v-if="visibleThreadParticipants.length > 0"
+        class="chat-thread-chip__avatars"
+        aria-hidden="true"
+      >
+        <span
+          v-for="participant in visibleThreadParticipants"
+          :key="`thread-chip-avatar:${message.id}:${participant.nick}`"
+          class="chat-thread-chip__avatar-wrap"
+        >
+          <AppAvatar
+            :name="participant.nick"
+            :src="participant.avatarUrl ?? null"
+            :presence="participant.presence"
+            size="xs"
+          />
+        </span>
+        <span
+          v-if="threadParticipantOverflow > 0"
+          class="chat-thread-chip__overflow"
+        >+{{ threadParticipantOverflow }}</span>
+      </span>
       <span class="chat-thread-chip__count min-w-0 truncate">{{ threadReplyCount }} {{ threadReplyCount === 1 ? "reply" : "replies" }}</span>
       <span v-if="threadChipRecency" class="chat-thread-chip__recency">{{ threadChipRecency }}</span>
     </button>

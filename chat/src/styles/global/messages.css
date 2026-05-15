@@ -376,48 +376,64 @@
   flex-shrink: 0;
 }
 
-/* Participant stack lives in the message's avatar gutter, anchored to
- * the bottom of the avatar column so it sits visually under the main
- * author avatar (or the time gutter on grouped rows). Uses absolute
- * positioning relative to the row's grid; the message-card grid is
- * already `position: relative`. */
-.chat-thread-chip-gutter {
+/* Thread rail glyph — a single "stacked messages" icon centred in the
+ * avatar column under the main author avatar. Structural rail marker
+ * that this row anchors a thread; the rich summary (who replied + how
+ * many + how recently) lives in the in-body chip. Absolute-positioned
+ * relative to the row's grid (the message-card grid is already
+ * `position: relative`), bottom-anchored to align with the chip which
+ * is the last body child. */
+.chat-thread-rail-glyph {
   position: absolute;
-  bottom: 0.35rem;
+  bottom: 0.4rem;
   left: 0;
   width: var(--chat-message-avatar-size);
   display: inline-flex;
   justify-content: center;
   align-items: center;
-  isolation: isolate;
   pointer-events: none;
+  color: color-mix(in oklab, var(--primary) 55%, var(--muted-foreground));
+  opacity: 0.7;
 }
 
-.chat-thread-chip-gutter__avatar-wrap {
+.chat-thread-rail-glyph__icon {
+  width: 0.95rem;
+  height: 0.95rem;
+}
+
+/* Participant stack lives inside the thread chip body, ahead of the
+ * reply count, so the eye reads "[who's here] [how many turns] …
+ * [how recently]" left-to-right. Avatars shrink to 1.125 rem so they
+ * sit comfortably on the 0.6875 rem chip text baseline and remain
+ * legible without overpowering the count. The gutter holds only the
+ * structural rail glyph; this stack carries the richness. */
+.chat-thread-chip__avatars {
+  display: inline-flex;
+  align-items: center;
+  isolation: isolate;
+  flex-shrink: 0;
+}
+
+.chat-thread-chip__avatar-wrap {
   display: inline-flex;
   margin-left: -0.35rem;
   border-radius: 9999px;
   outline: 1.5px solid var(--background);
 }
 
-.chat-thread-chip-gutter__avatar-wrap:first-child {
+.chat-thread-chip__avatar-wrap:first-child {
   margin-left: 0;
 }
 
-/* The xs AppAvatar preset is 1.5 rem; the avatar column is
- * `--chat-message-avatar-size` (≈ 2.78 rem) wide, so two visible
- * avatars plus a "+N" chip need to fit. Shrink to 1.125 rem so they
- * fit centred in the column without crowding the time-gutter
- * timestamp when both reveal on hover. */
-.chat-thread-chip-gutter__avatar-wrap > .app-avatar,
-.chat-thread-chip-gutter__avatar-wrap > .app-avatar > .type-avatar-mark,
-.chat-thread-chip-gutter__avatar-wrap > .app-avatar > img {
+.chat-thread-chip__avatar-wrap > .app-avatar,
+.chat-thread-chip__avatar-wrap > .app-avatar > .type-avatar-mark,
+.chat-thread-chip__avatar-wrap > .app-avatar > img {
   width: 1.125rem;
   height: 1.125rem;
   font-size: 0.55rem;
 }
 
-.chat-thread-chip-gutter__overflow {
+.chat-thread-chip__overflow {
   display: inline-flex;
   align-items: center;
   justify-content: center;
