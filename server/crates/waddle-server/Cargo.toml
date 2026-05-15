@@ -90,6 +90,12 @@ lru = { workspace = true }
 percent-encoding = "2.3"
 urlencoding = "2.1"
 html-escape = "0.2"
+# Used by `state_inventory_metrics::read_process_rss_bytes` to query
+# the running kernel's page size before converting `/proc/self/statm`
+# pages to bytes. Already a transitive dep of tokio/sqlx/etc; declared
+# explicitly here so the call site doesn't depend on a transitive
+# closure being re-exported.
+libc = "0.2"
 jsonwebtoken = { workspace = true }
 prescience = { version = "0.1.0", features = ["tls-rustls"] }
 
