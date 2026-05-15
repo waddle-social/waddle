@@ -507,3 +507,63 @@ async fn apply_unpin_for_unknown_target_is_idempotent() {
     let entries = actor.ask(GetPinList).await.expect("get pin list");
     assert!(entries.is_empty());
 }
+
+#[tokio::test]
+async fn leave_by_real_jid_surfaces_is_persistent_true_for_default_rooms() {
+    let actor = spawn_room_actor().await;
+    let alice = test_full_jid("alice");
+    actor
+        .ask(Join {
+            nick: "alice".to_string(),
+            real_jid: alice.clone(),
+            role: Role::Participant,
+            affiliation: Affiliation::Member,
+        })
+        .await
+        .expect("join");
+
+    let outcome = actor
+        .ask(crate::muc::room_actor::LeaveByRealJid { sender_jid: alice })
+        .await
+        .expect("leave")
+        .expect("outcome");
+    assert!(
+        outcome.is_persistent,
+        "default RoomConfig is persistent (Waddle channel shape) — \
+         must report is_persistent=true so callers do NOT evict"
+    );
+    assert_eq!(outcome.occupant_count, 0);
+    assert!(outcome.removed_last_session);
+}
+
+#[tokio::test]
+async fn leave_by_real_jid_surfaces_is_persistent_false_for_instant_rooms() {
+    let actor = spawn_room_actor_with_config(RoomConfig {
+        persistent: false,
+        ..RoomConfig::default()
+    })
+    .await;
+    let alice = test_full_jid("alice");
+    actor
+        .ask(Join {
+            nick: "alice".to_string(),
+            real_jid: alice.clone(),
+            role: Role::Participant,
+            affiliation: Affiliation::Member,
+        })
+        .await
+        .expect("join");
+
+    let outcome = actor
+        .ask(crate::muc::room_actor::LeaveByRealJid { sender_jid: alice })
+        .await
+        .expect("leave")
+        .expect("outcome");
+    assert!(
+        !outcome.is_persistent,
+        "instant rooms (XEP-0045 §10.1.3) report is_persistent=false \
+         so the leave caller knows to evict the empty room from the registry"
+    );
+    assert_eq!(outcome.occupant_count, 0);
+    assert!(outcome.removed_last_session);
+}

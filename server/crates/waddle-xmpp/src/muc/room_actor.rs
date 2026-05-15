@@ -82,6 +82,14 @@ pub struct LeaveOutcome {
     pub remaining_occupants: Vec<FullJid>,
     pub removed_last_session: bool,
     pub occupant_count: usize,
+    /// Mirrors `MucRoom.config.persistent`. Surfaced so the leave
+    /// caller can decide whether to evict the room's `RoomActor` +
+    /// registry entry without an extra `GetConfig` round-trip when
+    /// `removed_last_session && occupant_count == 0`. Non-persistent
+    /// instant rooms (XEP-0045 §10.1.3) are eligible for immediate
+    /// destruction; persistent rooms must NOT be evicted from memory
+    /// without a re-hydration path.
+    pub is_persistent: bool,
 }
 
 #[derive(Debug, Clone)]
