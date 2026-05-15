@@ -36,6 +36,47 @@
   height: var(--chat-rail-logo-size);
 }
 
+/* Logo / Home button in the icon rail — clicking returns to the
+ * dashboard. Idle is a quiet container; hover lifts the logo with the
+ * established Aether glow. Active (you're on dashboard) gets a soft
+ * primary-tinted plate so the user sees "you are here". */
+.chat-rail-home-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--chat-rail-logo-size);
+  height: var(--chat-rail-logo-size);
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-lg);
+  background: transparent;
+  cursor: pointer;
+  transition: background-color 0.15s ease, transform 0.15s ease, box-shadow 0.15s ease;
+}
+
+.chat-rail-home-button:hover {
+  background: color-mix(in oklab, var(--primary) 10%, transparent);
+  transform: scale(1.04);
+}
+
+.chat-rail-home-button:focus-visible {
+  outline: 2px solid color-mix(in oklab, var(--primary) 55%, transparent);
+  outline-offset: 2px;
+}
+
+.chat-rail-home-button:active {
+  transform: scale(0.97);
+}
+
+.chat-rail-home-button--active {
+  background: color-mix(in oklab, var(--primary) 14%, transparent);
+  box-shadow: 0 0 12px -4px var(--glow-strong);
+}
+
+.chat-rail-home-button--active:hover {
+  background: color-mix(in oklab, var(--primary) 18%, transparent);
+}
+
 .chat-startup-logo img,
 .chat-startup-mobile-logo img {
   display: block;

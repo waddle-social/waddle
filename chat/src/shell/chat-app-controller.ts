@@ -1170,6 +1170,24 @@ export function useChatAppController(giphyApiKey: string) {
     ui.activePage.value = "settings";
   }
 
+  /**
+   * Navigate back to the Home dashboard from anywhere. Clears any
+   * channel/DM selection, drops thread state, closes the mobile nav
+   * drawer, and resyncs the URL so a refresh returns the user to home
+   * rather than re-entering the last channel.
+   */
+  function openHome() {
+    ui.showMobileNav.value = false;
+    ui.showMobileDetails.value = false;
+    ui.activePage.value = "dashboard";
+    waddles.activeChannelId.value = null;
+    dmConversations.closeDm();
+    activeRightPanel.value = null;
+    activeThreadStack.value = [];
+    activeExtensionRouteKey.value = null;
+    pushChannelRoute(null);
+  }
+
   function closeUserSettings() {
     const state = window.history.state as { waddlePage?: string; origin?: string } | null;
     if (
@@ -1636,6 +1654,7 @@ export function useChatAppController(giphyApiKey: string) {
       handleRequestNotifications,
       handleToggleNotifications,
       openUserSettings,
+      openHome,
       closeUserSettings,
       handleLogout,
       selectChannel,
