@@ -213,13 +213,16 @@ const memberButtonCopy = computed(() => {
         >
           <Settings class="w-3.5 h-3.5" />
         </button>
-        <!-- Live presence stack: at-a-glance "who's here right now" instead
-             of a static "N members" count. Replaces the eye's first read
-             of "this is a room labeled #x" with "this is a room with
-             these specific people present right now." -->
+        <!-- Live presence stack — desktop only. The mobile header is
+             already crowded with hamburger + channel chip + search/pin/
+             settings + the user's own profile avatar at the very right;
+             dropping more avatars into that lane reads as "the app
+             changed my profile picture" rather than "these other
+             people are here." Mobile gets the compact count button
+             instead. -->
         <button
           v-if="channel"
-          class="chat-presence-stack"
+          class="chat-presence-stack hidden lg:inline-flex"
           type="button"
           :title="memberButtonCopy.title"
           :aria-label="`${memberButtonCopy.aria}. ${onlineCount} online.`"
@@ -257,6 +260,19 @@ const memberButtonCopy = computed(() => {
             <Users class="w-3.5 h-3.5" />
             <span class="type-control">{{ memberButtonCopy.primary }}</span>
           </span>
+        </button>
+        <!-- Mobile members button — same data, no avatars. Keeps the
+             tap-target obvious and prevents the corner avatar from
+             reading as the user's own profile picture. -->
+        <button
+          v-if="channel"
+          class="chat-icon-button chat-icon-button--md lg:hidden text-muted-foreground hover:bg-muted hover:text-foreground"
+          type="button"
+          :title="memberButtonCopy.title"
+          :aria-label="memberButtonCopy.aria"
+          @click="emit('openDetails')"
+        >
+          <Users class="w-4 h-4" />
         </button>
       </div>
     </div>
