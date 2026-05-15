@@ -329,6 +329,71 @@ function reactionAriaLabel(emoji: string, nicks: readonly string[]): string {
   return `${formatReactors(nicks)} reacted with ${emoji}`;
 }
 
+// Reaction tooltip is teleported to <body> so that pane-level
+// `overflow-x: hidden` (`.chat-pane-scroll`) cannot clip it. The chip stays
+// in place; on hover/focus we capture the chip's bounding rect and render a
+// fixed-position panel above it. Touch devices use the action sheet instead;
+// keyboard reveal is gated on `:focus-visible` so a mouse click does not
+// briefly flash the tooltip alongside the just-applied reaction.
+const hoveredReaction = ref<{
+  emoji: string;
+  nicks: readonly string[];
+  rect: DOMRect;
+} | null>(null);
+
+const REACTION_TOOLTIP_HALF_WIDTH = 144; // matches max-w-[18rem]
+const REACTION_TOOLTIP_GAP = 8;
+
+function showReactionFromPointer(emoji: string, nicks: readonly string[], event: PointerEvent) {
+  // Touch: skip — touch devices use the action sheet for reactions and the
+  // synthesized pointerenter has no matching pointerleave on tap.
+  // Mouse + pen (stylus): show — both fire pointerleave reliably and
+  // benefit from the hover affordance.
+  if (event.pointerType !== "mouse" && event.pointerType !== "pen") return;
+  const target = event.currentTarget;
+  if (!(target instanceof HTMLElement)) return;
+  hoveredReaction.value = { emoji, nicks, rect: target.getBoundingClientRect() };
+}
+
+function showReactionFromFocus(emoji: string, nicks: readonly string[], event: FocusEvent) {
+  const target = event.currentTarget;
+  if (!(target instanceof HTMLElement)) return;
+  if (!target.matches(":focus-visible")) return;
+  hoveredReaction.value = { emoji, nicks, rect: target.getBoundingClientRect() };
+}
+
+function hideReactionTooltip(emoji: string) {
+  if (hoveredReaction.value?.emoji === emoji) hoveredReaction.value = null;
+}
+
+const reactionTooltipStyle = computed(() => {
+  const hover = hoveredReaction.value;
+  if (!hover) return null;
+  const viewportWidth = typeof window === "undefined" ? hover.rect.right + REACTION_TOOLTIP_HALF_WIDTH : window.innerWidth;
+  const wantedCenter = hover.rect.left + hover.rect.width / 2;
+  const minCenter = REACTION_TOOLTIP_HALF_WIDTH + REACTION_TOOLTIP_GAP;
+  const maxCenter = viewportWidth - REACTION_TOOLTIP_HALF_WIDTH - REACTION_TOOLTIP_GAP;
+  const clampedCenter = Math.max(minCenter, Math.min(maxCenter, wantedCenter));
+  return {
+    top: `${hover.rect.top - REACTION_TOOLTIP_GAP}px`,
+    left: `${clampedCenter}px`,
+  };
+});
+
+function onReactionTooltipScroll() {
+  hoveredReaction.value = null;
+}
+
+watch(hoveredReaction, (next) => {
+  if (typeof window === "undefined") return;
+  if (next) {
+    window.addEventListener("scroll", onReactionTooltipScroll, true);
+  }
+  else {
+    window.removeEventListener("scroll", onReactionTooltipScroll, true);
+  }
+});
+
 function startReplyFromMenu() {
   emit("reply", props.message);
   closePicker(true);
@@ -395,6 +460,7 @@ onBeforeUnmount(() => {
 onBeforeUnmount(() => {
   if (typeof window === "undefined") return;
   window.removeEventListener("keydown", onWindowKeydown);
+  window.removeEventListener("scroll", onReactionTooltipScroll, true);
 });
 
 </script>
@@ -629,21 +695,16 @@ onBeforeUnmount(() => {
         v-for="(nicks, emoji) in message.reactions"
         :key="emoji"
         type="button"
-        class="chat-reaction-chip group/reaction relative type-caption inline-flex h-7 items-center gap-1 px-2 rounded-lg bg-muted/60 hover:bg-muted transition-all duration-200"
+        class="chat-reaction-chip type-caption inline-flex h-7 items-center gap-1 px-2 rounded-lg bg-muted/60 hover:bg-muted transition-all duration-200"
         :aria-label="reactionAriaLabel(emoji, nicks)"
         @click="emit('react', message.id, emoji)"
+        @pointerenter="(event) => showReactionFromPointer(emoji, nicks, event)"
+        @pointerleave="() => hideReactionTooltip(emoji)"
+        @focusin="(event) => showReactionFromFocus(emoji, nicks, event)"
+        @focusout="() => hideReactionTooltip(emoji)"
       >
         <span>{{ emoji }}</span>
         <span class="type-meta type-numeric text-muted-foreground">{{ nicks.length }}</span>
-        <span
-          aria-hidden="true"
-          class="chat-reaction-tooltip pointer-events-none absolute bottom-full left-1/2 z-popover mb-1 hidden -translate-x-1/2 max-w-xs rounded-md border border-border bg-popover px-2 py-1.5 text-popover-foreground shadow-md group-hover/reaction:flex group-focus-visible/reaction:flex flex-col items-center gap-0.5"
-        >
-          <span class="text-lg leading-none" aria-hidden="true">{{ emoji }}</span>
-          <span class="type-meta text-center text-muted-foreground">
-            {{ formatReactors(nicks) }}
-          </span>
-        </span>
       </button>
     </div>
 
@@ -868,6 +929,23 @@ onBeforeUnmount(() => {
           />
         </template>
       </div>
+    </div>
+  </Teleport>
+
+  <!-- Reaction tooltip: teleported so it escapes `.chat-pane-scroll`'s
+       `overflow-x: hidden`. Anchored above the hovered chip via the captured
+       rect. -->
+  <Teleport to="body">
+    <div
+      v-if="hoveredReaction && reactionTooltipStyle"
+      aria-hidden="true"
+      class="chat-reaction-tooltip pointer-events-none fixed z-popover flex max-w-[18rem] -translate-x-1/2 -translate-y-full flex-col items-center gap-0.5 rounded-md border border-border bg-popover px-2 py-1.5 text-popover-foreground shadow-md"
+      :style="reactionTooltipStyle"
+    >
+      <span class="text-lg leading-none" aria-hidden="true">{{ hoveredReaction.emoji }}</span>
+      <span class="type-meta text-center text-muted-foreground">
+        {{ formatReactors(hoveredReaction.nicks) }}
+      </span>
     </div>
   </Teleport>
 </template>

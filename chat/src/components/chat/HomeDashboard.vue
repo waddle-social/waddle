@@ -144,7 +144,7 @@ function dmSecondaryText(conversation: { peerUsername?: string; peerJid: string;
 </script>
 
 <template>
-  <div class="chat-pane-scroll flex-1 overflow-auto bg-background px-[var(--chat-content-inline)] py-6">
+  <div class="chat-pane-scroll flex-1 min-h-0 bg-background px-[var(--chat-content-inline)] py-6">
     <div class="mx-auto grid w-full max-w-6xl gap-6">
       <header class="flex items-center justify-between gap-4">
         <div>
