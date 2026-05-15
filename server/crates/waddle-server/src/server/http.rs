@@ -12,7 +12,8 @@ use crate::server::routes::websocket::{
     ProtocolServices, WebSocketDeps, WebSocketState, XmppServiceDomains,
 };
 use crate::server::session_janitors::{
-    spawn_graceful_shutdown_drain, spawn_pending_delivery_claim_janitor, spawn_sm_expiry_janitor,
+    spawn_auth_state_janitor, spawn_graceful_shutdown_drain, spawn_pending_delivery_claim_janitor,
+    spawn_sm_expiry_janitor,
 };
 use crate::server::topology::bootstrap_fresh_xmpp_topology;
 use crate::server::trace::make_request_span;
@@ -185,6 +186,7 @@ pub(crate) async fn create_router(
 
     spawn_sm_expiry_janitor(&websocket_state);
     spawn_pending_delivery_claim_janitor(&websocket_state);
+    spawn_auth_state_janitor(&websocket_state);
     spawn_graceful_shutdown_drain(
         Arc::clone(&websocket_state),
         shutdown_stop_token,
@@ -241,6 +243,19 @@ pub(crate) async fn create_router(
     // does not mount the route.
     if let Some(auth) = build_test_profile_publish_auth(&auth_state.xmpp_domain) {
         router = router.merge(crate::server::profile_publish_route::router(
+            websocket_state.clone(),
+            auth,
+        ));
+    }
+
+    // Debug state-inventory route. Mounted only when
+    // `WADDLE_DEBUG_STATE_TOKEN` is set; production canary opts in by
+    // setting the env var. Returns per-map `.len()` counts so a
+    // Prometheus scrape can correlate the offending structure with
+    // process RSS.
+    if let Some(auth) = crate::server::state_inventory_route::debug_state_auth_from_env() {
+        info!("Mounting /debug/state-inventory (WADDLE_DEBUG_STATE_TOKEN set)");
+        router = router.merge(crate::server::state_inventory_route::router(
             websocket_state.clone(),
             auth,
         ));
@@ -363,7 +378,7 @@ async fn create_websocket_state(
                 sm_session_registry,
                 resumable_sessions,
                 caps_resolver,
-                avatar_source_locks: Arc::new(dashmap::DashMap::new()),
+                avatar_source_locks: Arc::new(crate::profile::AvatarLockMap::new()),
                 profile_publish_tracker: tokio_util::task::TaskTracker::new(),
             },
             occupant_id_secret: server_config.occupant_id_secret.clone(),

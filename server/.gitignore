@@ -24,6 +24,11 @@ local.toml
 # Logs
 *.log
 
+# dhat-rs heap profile artifacts (produced by the
+# waddle-extensions `profile_all_extensions` example)
+dhat-heap*.json
+profile_extensions.log
+
 # Database
 *.db
 *.db-shm

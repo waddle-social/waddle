@@ -136,7 +136,7 @@ async fn create_test_websocket_state_with_extension_manager(
                     caps_resolver: Arc::new(
                         crate::server::caps_resolution::CapsResolver::default(),
                     ),
-                    avatar_source_locks: Arc::new(dashmap::DashMap::new()),
+                    avatar_source_locks: Arc::new(crate::profile::AvatarLockMap::new()),
                     profile_publish_tracker: tokio_util::task::TaskTracker::new(),
                 },
                 occupant_id_secret: OccupantIdSecret::new(

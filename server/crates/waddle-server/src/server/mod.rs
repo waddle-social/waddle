@@ -10,6 +10,7 @@ mod http;
 pub(crate) mod profile_publish_route;
 mod session_janitors;
 mod state;
+pub(crate) mod state_inventory_route;
 mod topology;
 mod trace;
 #[cfg(test)]

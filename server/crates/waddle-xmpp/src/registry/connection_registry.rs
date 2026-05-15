@@ -55,6 +55,25 @@ impl ConnectionRegistry {
             started_at: Instant::now(),
         }
     }
+
+    /// Number of bare JIDs holding queued subscription stanzas for
+    /// offline peers. Used by the server's `/debug/state-inventory`
+    /// endpoint.
+    pub fn pending_subscription_count(&self) -> usize {
+        self.pending_subscription_stanzas.len()
+    }
+
+    /// Number of bare JIDs with tracked presence state. Used by the
+    /// server's `/debug/state-inventory` endpoint.
+    pub fn presence_state_count(&self) -> usize {
+        self.presence_states.len()
+    }
+
+    /// Number of bare JIDs with recorded last-activity timestamps.
+    /// Used by the server's `/debug/state-inventory` endpoint.
+    pub fn last_activity_count(&self) -> usize {
+        self.last_activity.len()
+    }
 }
 
 impl Default for ConnectionRegistry {

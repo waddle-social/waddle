@@ -1,7 +1,11 @@
 use crate::server::routes;
 use crate::server::routes::websocket::WebSocketState;
 use std::sync::Arc;
+use std::time::Duration;
 use tracing::{debug, error, info, warn};
+
+/// Default interval for the auth-state TTL janitor.
+const AUTH_JANITOR_INTERVAL: Duration = Duration::from_secs(60);
 
 fn pending_delivery_max_age_days_from_env() -> u32 {
     const DEFAULT_DAYS: u32 = 30;
@@ -580,4 +584,209 @@ pub(crate) fn spawn_graceful_shutdown_drain(
         dispatch_tracker.wait().await;
         info!("Graceful shutdown: provider webhook dispatch drain complete");
     });
+}
+
+/// Per-sweep counts returned by [`sweep_auth_state_once`]. Exposed for
+/// the unit tests that exercise the sweep without the live tokio
+/// ticker.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct AuthSweepCounts {
+    pub pending_pruned: usize,
+    pub device_pruned: usize,
+    pub xmpp_pruned: usize,
+    pub pending_remaining: usize,
+    pub device_remaining: usize,
+    pub xmpp_remaining: usize,
+}
+
+/// Walk the three auth-state DashMaps and remove every entry whose
+/// `is_expired()` reports `true`. Pure helper so the long-running
+/// janitor in [`spawn_auth_state_janitor`] and the unit tests share
+/// the same eviction logic.
+pub(crate) fn sweep_auth_state_once(
+    pending_auth: &dashmap::DashMap<String, crate::server::routes::auth::PendingAuthorization>,
+    device_auth: &dashmap::DashMap<String, crate::server::routes::auth::DeviceAuthorization>,
+    xmpp_auth_codes: &dashmap::DashMap<String, crate::server::routes::auth::XmppAuthCode>,
+) -> AuthSweepCounts {
+    let mut counts = AuthSweepCounts::default();
+    pending_auth.retain(|_, entry| {
+        if entry.is_expired() {
+            counts.pending_pruned += 1;
+            false
+        } else {
+            true
+        }
+    });
+    device_auth.retain(|_, entry| {
+        if entry.is_expired() {
+            counts.device_pruned += 1;
+            false
+        } else {
+            true
+        }
+    });
+    xmpp_auth_codes.retain(|_, entry| {
+        if entry.is_expired() {
+            counts.xmpp_pruned += 1;
+            false
+        } else {
+            true
+        }
+    });
+    counts.pending_remaining = pending_auth.len();
+    counts.device_remaining = device_auth.len();
+    counts.xmpp_remaining = xmpp_auth_codes.len();
+    counts
+}
+
+/// Sweep expired entries from the auth-state DashMaps (`pending_auth`,
+/// `device_auth`, `xmpp_auth_codes`).
+///
+/// These maps grow on every started OAuth / device / XMPP-OAuth flow
+/// and are removed only on the success path. Abandoned flows (network
+/// flake, tab close, user typo) leave entries behind. Each carries an
+/// `is_expired()` and the OAuth specs already bound the validity
+/// window (10 minutes for `PendingAuthorization` / `XmppAuthCode`,
+/// `device_auth.expires_at` for `DeviceAuthorization`), so the
+/// janitor just consults that and removes anything past its window.
+///
+/// Runs on a 60 s ticker. Skips the first immediate tick so a fresh
+/// process doesn't sweep before any auth flow has started.
+pub(crate) fn spawn_auth_state_janitor(websocket_state: &Arc<WebSocketState>) {
+    let weak_state = Arc::downgrade(websocket_state);
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(AUTH_JANITOR_INTERVAL);
+        ticker.tick().await;
+        loop {
+            ticker.tick().await;
+            let Some(state) = weak_state.upgrade() else {
+                break;
+            };
+            let auth = &state.deps.auth_state;
+            let counts =
+                sweep_auth_state_once(&auth.pending_auth, &auth.device_auth, &auth.xmpp_auth_codes);
+            let total = counts.pending_pruned + counts.device_pruned + counts.xmpp_pruned;
+            if total > 0 {
+                info!(
+                    pending_auth_pruned = counts.pending_pruned,
+                    device_auth_pruned = counts.device_pruned,
+                    xmpp_auth_codes_pruned = counts.xmpp_pruned,
+                    pending_auth_remaining = counts.pending_remaining,
+                    device_auth_remaining = counts.device_remaining,
+                    xmpp_auth_codes_remaining = counts.xmpp_remaining,
+                    "auth janitor: pruned expired entries"
+                );
+            } else {
+                debug!(
+                    pending_auth_remaining = counts.pending_remaining,
+                    device_auth_remaining = counts.device_remaining,
+                    xmpp_auth_codes_remaining = counts.xmpp_remaining,
+                    "auth janitor: no expired entries"
+                );
+            }
+        }
+    });
+}
+
+#[cfg(test)]
+mod auth_janitor_tests {
+    use super::sweep_auth_state_once;
+    use crate::auth::providers::AuthProviderTokenEndpointAuthMethod;
+    use crate::server::routes::auth::{
+        BrowserSessionTransport, DeviceAuthStatus, DeviceAuthorization, PendingAuthorization,
+        PendingFlow, XmppAuthCode,
+    };
+    use chrono::{Duration, Utc};
+    use dashmap::DashMap;
+
+    fn make_pending(state: &str, created_minutes_ago: i64) -> PendingAuthorization {
+        PendingAuthorization {
+            state: state.to_string(),
+            provider_id: "p".to_string(),
+            nonce: "n".to_string(),
+            code_verifier: "cv".to_string(),
+            redirect_uri: "https://example.test/cb".to_string(),
+            client_id: "cid".to_string(),
+            client_secret: String::new(),
+            token_endpoint_auth_method: AuthProviderTokenEndpointAuthMethod::NoAuthentication,
+            require_dpop: false,
+            flow: PendingFlow::Browser {
+                next: None,
+                session_transport: BrowserSessionTransport::Cookie,
+            },
+            created_at: Utc::now() - Duration::minutes(created_minutes_ago),
+        }
+    }
+
+    fn make_device(code: &str, expires_minutes_from_now: i64) -> DeviceAuthorization {
+        DeviceAuthorization {
+            device_code: code.to_string(),
+            user_code: "user".to_string(),
+            provider_id: "p".to_string(),
+            expires_at: Utc::now() + Duration::minutes(expires_minutes_from_now),
+            status: DeviceAuthStatus::Pending,
+            session_id: None,
+        }
+    }
+
+    fn make_xmpp_code(session_id: &str, created_minutes_ago: i64) -> XmppAuthCode {
+        XmppAuthCode {
+            session_id: session_id.to_string(),
+            redirect_uri: "xmpp://example.test/cb".to_string(),
+            code_challenge: None,
+            created_at: Utc::now() - Duration::minutes(created_minutes_ago),
+        }
+    }
+
+    #[test]
+    fn sweep_removes_only_expired_entries() {
+        let pending: DashMap<String, PendingAuthorization> = DashMap::new();
+        // PendingAuthorization expires 10 minutes after creation.
+        pending.insert("fresh".to_string(), make_pending("fresh", 1));
+        pending.insert("stale".to_string(), make_pending("stale", 30));
+
+        let device: DashMap<String, DeviceAuthorization> = DashMap::new();
+        device.insert("live".to_string(), make_device("live", 5));
+        device.insert("dead".to_string(), make_device("dead", -1));
+
+        let xmpp: DashMap<String, XmppAuthCode> = DashMap::new();
+        // XmppAuthCode expires 10 minutes after creation.
+        xmpp.insert("fresh".to_string(), make_xmpp_code("fresh", 2));
+        xmpp.insert("stale".to_string(), make_xmpp_code("stale", 20));
+
+        let counts = sweep_auth_state_once(&pending, &device, &xmpp);
+
+        assert_eq!(counts.pending_pruned, 1);
+        assert_eq!(counts.device_pruned, 1);
+        assert_eq!(counts.xmpp_pruned, 1);
+        assert_eq!(counts.pending_remaining, 1);
+        assert_eq!(counts.device_remaining, 1);
+        assert_eq!(counts.xmpp_remaining, 1);
+
+        assert!(pending.contains_key("fresh"));
+        assert!(!pending.contains_key("stale"));
+        assert!(device.contains_key("live"));
+        assert!(!device.contains_key("dead"));
+        assert!(xmpp.contains_key("fresh"));
+        assert!(!xmpp.contains_key("stale"));
+    }
+
+    #[test]
+    fn sweep_is_noop_when_all_entries_are_fresh() {
+        let pending: DashMap<String, PendingAuthorization> = DashMap::new();
+        pending.insert("a".to_string(), make_pending("a", 0));
+        let device: DashMap<String, DeviceAuthorization> = DashMap::new();
+        device.insert("b".to_string(), make_device("b", 30));
+        let xmpp: DashMap<String, XmppAuthCode> = DashMap::new();
+        xmpp.insert("c".to_string(), make_xmpp_code("c", 0));
+
+        let counts = sweep_auth_state_once(&pending, &device, &xmpp);
+
+        assert_eq!(counts.pending_pruned, 0);
+        assert_eq!(counts.device_pruned, 0);
+        assert_eq!(counts.xmpp_pruned, 0);
+        assert_eq!(counts.pending_remaining, 1);
+        assert_eq!(counts.device_remaining, 1);
+        assert_eq!(counts.xmpp_remaining, 1);
+    }
 }
