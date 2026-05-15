@@ -937,7 +937,7 @@ onBeforeUnmount(() => {
     <button
       v-if="showThreadChip"
       type="button"
-      class="chat-thread-chip type-caption inline-flex items-center gap-1.5 rounded-md py-0.5 text-primary/85 transition-colors hover:text-primary"
+      class="chat-thread-chip type-caption inline-flex rounded-md py-0.5 text-primary/85 transition-colors hover:text-primary"
       :title="`Open thread (${threadReplyCount} ${threadReplyCount === 1 ? 'reply' : 'replies'})`"
       @click="openThreadFromChip"
     >

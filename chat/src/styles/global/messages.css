@@ -236,10 +236,21 @@
 /* Thread "N replies" chip — quieter inline link, not a button.
  * Carries a tiny avatar stack of participants + a relative-time
  * suffix so the eye can triage threads from the channel feed
- * without opening the panel. */
+ * without opening the panel.
+ *
+ * Spacing system: the chip mixes four element kinds (svg icon, text
+ * count, avatar stack, text recency) at three different visual
+ * heights. A uniform Tailwind `gap-1.5` (0.375 rem) is too tight for
+ * that variety — text and avatars end up visually touching even
+ * though their boxes are notionally apart. Override with explicit
+ * design-system spacing (`--space-xs` = 0.5 rem) between every
+ * group, and shrink the inline avatar from xs (1.5 rem) to
+ * 1.125 rem so its scale matches the 0.6875 rem chip text. */
 .chat-thread-chip {
   font-size: 0.6875rem;
   line-height: 1.4;
+  gap: var(--space-xs);
+  align-items: center;
 }
 
 .chat-thread-chip > svg {
@@ -254,7 +265,7 @@
 
 .chat-thread-chip__avatar-wrap {
   display: inline-flex;
-  margin-left: -0.4rem;
+  margin-left: -0.3rem;
   border-radius: 9999px;
   outline: 1.5px solid var(--background);
 }
@@ -263,14 +274,26 @@
   margin-left: 0;
 }
 
+/* Shrink the AppAvatar instance inside the chip — its xs preset is
+ * 1.5 rem which dwarfs the 0.6875 rem chip text. Drop to 1.125 rem
+ * for visual harmony with the surrounding type and to give the
+ * outline ring room to breathe between adjacent avatars. */
+.chat-thread-chip__avatar-wrap > .app-avatar,
+.chat-thread-chip__avatar-wrap > .app-avatar > .type-avatar-mark,
+.chat-thread-chip__avatar-wrap > .app-avatar > img {
+  width: 1.125rem;
+  height: 1.125rem;
+  font-size: 0.55rem;
+}
+
 .chat-thread-chip__overflow {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-width: 1.1rem;
-  height: 1.1rem;
+  min-width: 1.125rem;
+  height: 1.125rem;
   padding: 0 0.3rem;
-  margin-left: -0.25rem;
+  margin-left: -0.2rem;
   border-radius: 9999px;
   background: color-mix(in oklab, var(--muted) 65%, transparent);
   font-size: 0.55rem;
