@@ -4,6 +4,7 @@ import { Hash, MessageCircle, MessagesSquare, Users } from "lucide-vue-next";
 import type { ChannelSummary } from "@/lib/chat-types";
 import type { RosterContact } from "@/lib/xmpp/types";
 import AppAvatar from "@/components/ui/AppAvatar.vue";
+import Skeleton from "@/components/ui/Skeleton.vue";
 import { isForumChannel } from "@/lib/channel-types";
 import { groupChannelsBySpace } from "@/lib/channel-grouping";
 import { formatTimelineStamp } from "@/channels/timeline";
@@ -211,7 +212,21 @@ function dmSecondaryText(conversation: { peerUsername?: string; peerJid: string;
               />
             </span>
           </button>
-          <div v-if="!isLoading && spaces.length === 0" class="type-caption rounded-lg border border-border px-4 py-6 text-muted-foreground">
+          <template v-if="isLoading && spaces.length === 0">
+            <div
+              v-for="i in 3"
+              :key="`space-skel-${i}`"
+              class="flex min-h-16 items-center gap-3 rounded-lg border border-border bg-card px-4 py-3"
+              aria-hidden="true"
+            >
+              <Skeleton width="2.25rem" height="2.25rem" radius="0.5rem" />
+              <div class="flex min-w-0 flex-1 flex-col gap-1.5">
+                <Skeleton width="55%" height="0.75rem" />
+                <Skeleton width="80%" height="0.65rem" />
+              </div>
+            </div>
+          </template>
+          <div v-else-if="spaces.length === 0" class="type-caption rounded-lg border border-border px-4 py-6 text-muted-foreground">
             No spaces discovered.
           </div>
         </div>
@@ -280,7 +295,30 @@ function dmSecondaryText(conversation: { peerUsername?: string; peerJid: string;
               </button>
             </div>
           </div>
-          <div v-if="!isLoading && visibleChannelGroups.length === 0" class="type-caption rounded-lg border border-border px-4 py-6 text-muted-foreground">
+          <template v-if="isLoading && visibleChannelGroups.length === 0">
+            <div
+              v-for="i in 2"
+              :key="`channel-group-skel-${i}`"
+              class="rounded-lg border border-border bg-card p-3"
+              aria-hidden="true"
+            >
+              <Skeleton width="35%" height="0.65rem" />
+              <div class="mt-3 grid gap-2">
+                <div
+                  v-for="j in 3"
+                  :key="`channel-skel-${i}-${j}`"
+                  class="flex min-h-10 items-center gap-2 rounded-md px-3 py-2"
+                >
+                  <Skeleton width="0.875rem" height="0.875rem" radius="0.25rem" />
+                  <div class="flex min-w-0 flex-1 flex-col gap-1">
+                    <Skeleton width="45%" height="0.65rem" />
+                    <Skeleton width="70%" height="0.55rem" />
+                  </div>
+                </div>
+              </div>
+            </div>
+          </template>
+          <div v-else-if="visibleChannelGroups.length === 0" class="type-caption rounded-lg border border-border px-4 py-6 text-muted-foreground">
             No channels discovered.
           </div>
         </div>
@@ -326,7 +364,21 @@ function dmSecondaryText(conversation: { peerUsername?: string; peerJid: string;
               aria-hidden="true"
             >{{ conversation.unreadCount }}</span>
           </button>
-          <div v-if="!isLoading && directMessages.length === 0" class="type-caption rounded-lg border border-border px-4 py-6 text-muted-foreground">
+          <template v-if="isLoading && directMessages.length === 0">
+            <div
+              v-for="i in 3"
+              :key="`dm-skel-${i}`"
+              class="flex min-h-14 items-center gap-3 rounded-lg border border-border bg-card px-4 py-3"
+              aria-hidden="true"
+            >
+              <Skeleton width="2rem" height="2rem" radius="9999px" />
+              <div class="flex min-w-0 flex-1 flex-col gap-1.5">
+                <Skeleton width="50%" height="0.7rem" />
+                <Skeleton width="75%" height="0.6rem" />
+              </div>
+            </div>
+          </template>
+          <div v-else-if="directMessages.length === 0" class="type-caption rounded-lg border border-border px-4 py-6 text-muted-foreground">
             No direct messages yet.
           </div>
         </div>
@@ -353,7 +405,21 @@ function dmSecondaryText(conversation: { peerUsername?: string; peerJid: string;
               <span class="type-caption block truncate text-muted-foreground" :title="contact.jid">{{ contact.jid }}</span>
             </span>
           </button>
-          <div v-if="!isLoading && contacts.length === 0" class="type-caption rounded-lg border border-border px-4 py-6 text-muted-foreground">
+          <template v-if="isLoading && contacts.length === 0">
+            <div
+              v-for="i in 4"
+              :key="`contact-skel-${i}`"
+              class="flex min-h-12 items-center gap-3 rounded-lg border border-border bg-card px-4 py-3"
+              aria-hidden="true"
+            >
+              <Skeleton width="2rem" height="2rem" radius="0.5rem" />
+              <div class="flex min-w-0 flex-1 flex-col gap-1.5">
+                <Skeleton width="45%" height="0.7rem" />
+                <Skeleton width="65%" height="0.55rem" />
+              </div>
+            </div>
+          </template>
+          <div v-else-if="contacts.length === 0" class="type-caption rounded-lg border border-border px-4 py-6 text-muted-foreground">
             No roster contacts yet.
           </div>
         </div>
