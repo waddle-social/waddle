@@ -117,6 +117,47 @@
   }
 }
 
+/* Empty channel mascot — when a regular room has zero messages, we
+ * promote the penguin from "branding glyph" to the welcoming presence.
+ * Slack drops a flat illustration here; Waddle leans into its mascot
+ * with a soft glow halo and a gentle idle bob (reduced-motion gated). */
+.chat-empty-state__mascot-wrap {
+  position: relative;
+  isolation: isolate;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 7rem;
+  height: 7rem;
+}
+
+.chat-empty-state__mascot-halo {
+  position: absolute;
+  inset: -1rem;
+  z-index: -1;
+  border-radius: 9999px;
+  background: radial-gradient(closest-side, var(--glow-strong), transparent 70%);
+  filter: blur(2px);
+}
+
+.chat-empty-state__mascot {
+  width: 100%;
+  height: 100%;
+  filter: drop-shadow(0 10px 26px color-mix(in oklab, var(--primary) 32%, transparent));
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .chat-empty-state__mascot {
+    animation: chat-empty-mascot-bob 4.8s ease-in-out infinite;
+    transform-origin: center 60%;
+  }
+}
+
+@keyframes chat-empty-mascot-bob {
+  0%, 100% { transform: translateY(0) rotate(-2deg); }
+  50%      { transform: translateY(-6px) rotate(2deg); }
+}
+
 .chat-dialog-stack,
 .chat-field-stack,
 .chat-panel-stack,
