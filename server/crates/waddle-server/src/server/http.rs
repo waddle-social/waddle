@@ -12,7 +12,8 @@ use crate::server::routes::websocket::{
     ProtocolServices, WebSocketDeps, WebSocketState, XmppServiceDomains,
 };
 use crate::server::session_janitors::{
-    spawn_graceful_shutdown_drain, spawn_pending_delivery_claim_janitor, spawn_sm_expiry_janitor,
+    spawn_auth_state_janitor, spawn_graceful_shutdown_drain, spawn_pending_delivery_claim_janitor,
+    spawn_sm_expiry_janitor,
 };
 use crate::server::topology::bootstrap_fresh_xmpp_topology;
 use crate::server::trace::make_request_span;
@@ -185,6 +186,7 @@ pub(crate) async fn create_router(
 
     spawn_sm_expiry_janitor(&websocket_state);
     spawn_pending_delivery_claim_janitor(&websocket_state);
+    spawn_auth_state_janitor(&websocket_state);
     spawn_graceful_shutdown_drain(
         Arc::clone(&websocket_state),
         shutdown_stop_token,
