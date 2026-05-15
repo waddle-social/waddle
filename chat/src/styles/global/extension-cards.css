@@ -1,0 +1,297 @@
+@layer components {
+/* Extension presentation shells — two distinct patterns for two distinct
+ * intents. Replaces the previous one-size-fits-all bordered card that
+ * shipped hard-coded emerald tints for GitHub events and a muted-fill
+ * shell for everything else.
+ *
+ * NOTIFICATION mode (`.chat-extension-card--notification`)
+ *   Read-first. GitHub workflow runs, check results, anything where the
+ *   payload IS the value and the user mostly wants to scan + optionally
+ *   click through. Renders as a compact horizontal snippet on the message
+ *   surface — no background fill, just a thin tone-coloured left accent
+ *   rail (`--rail-color`) and a tight typographic rhythm.
+ *
+ * ACTION mode (`.chat-extension-card--action`)
+ *   Do-first. Link Board "Save", any extension that exposes
+ *   `annotation.actions[]` as the primary purpose. The action button is
+ *   the focal element; the rest of the card supports the decision but
+ *   doesn't compete with it.
+ *
+ * Both modes share a base `.chat-extension-card` for the rail + family
+ * resemblance. Tone (`--rail-color`) is derived from
+ * `presentation.tone`: success → success token, danger → destructive,
+ * warning → warning, neutral → primary. */
+
+.chat-extension-card {
+  --rail-color: var(--primary);
+  position: relative;
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  align-items: stretch;
+  gap: var(--space-sm);
+  padding: var(--space-xs) var(--space-sm) var(--space-xs) calc(var(--space-sm) + 0.625rem);
+  border-radius: var(--radius-md);
+  background: color-mix(in oklab, var(--card) 55%, transparent);
+  border: 1px solid color-mix(in oklab, var(--border) 88%, transparent);
+}
+
+.chat-extension-card::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0.4rem;
+  bottom: 0.4rem;
+  width: 3px;
+  border-radius: 999px;
+  background: var(--rail-color);
+  opacity: 0.6;
+}
+
+.chat-extension-card--tone-success { --rail-color: var(--success); }
+.chat-extension-card--tone-danger  { --rail-color: var(--destructive); }
+.chat-extension-card--tone-warning { --rail-color: var(--warning); }
+
+/* === Notification mode ====================================== */
+.chat-extension-card--notification {
+  flex-direction: column;
+  gap: 0.2rem;
+  padding-block: 0.5rem;
+}
+
+.chat-extension-card__header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  min-width: 0;
+}
+
+.chat-extension-card__icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1rem;
+  height: 1rem;
+  color: var(--rail-color);
+  flex-shrink: 0;
+}
+
+.chat-extension-card__source {
+  font-size: 0.625rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  font-weight: 650;
+  color: color-mix(in oklab, var(--muted-foreground) 92%, transparent);
+  flex-shrink: 0;
+}
+
+.chat-extension-card__tone-pill {
+  display: inline-flex;
+  align-items: center;
+  margin-left: auto;
+  padding: 0.05rem 0.4rem;
+  border-radius: 999px;
+  font-size: 0.625rem;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--rail-color);
+  background: color-mix(in oklab, var(--rail-color) 10%, transparent);
+  flex-shrink: 0;
+}
+
+.chat-extension-card__title {
+  font-size: var(--text-control);
+  font-weight: 650;
+  color: var(--foreground);
+  line-height: 1.35;
+  word-break: break-word;
+}
+
+.chat-extension-card__title-link {
+  color: inherit;
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+}
+
+.chat-extension-card__title-link:hover {
+  color: var(--rail-color);
+}
+
+.chat-extension-card__title-link > svg {
+  width: 0.75rem;
+  height: 0.75rem;
+  opacity: 0.6;
+  flex-shrink: 0;
+}
+
+.chat-extension-card__meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.2rem 0.55rem;
+  font-size: 0.6875rem;
+  color: var(--muted-foreground);
+  line-height: 1.45;
+  margin-top: 0.15rem;
+}
+
+.chat-extension-card__meta-item {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.25rem;
+  min-width: 0;
+}
+
+.chat-extension-card__meta-label {
+  font-size: 0.5625rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: color-mix(in oklab, var(--muted-foreground) 70%, transparent);
+  font-weight: 650;
+}
+
+.chat-extension-card__meta-value {
+  font-variant-numeric: tabular-nums;
+  color: color-mix(in oklab, var(--foreground) 80%, transparent);
+  word-break: break-all;
+}
+
+.chat-extension-card__meta-value--mono {
+  font-family: var(--font-code);
+  font-size: 0.625rem;
+}
+
+.chat-extension-card__meta-item + .chat-extension-card__meta-item::before {
+  content: "·";
+  margin-right: 0.45rem;
+  color: color-mix(in oklab, var(--muted-foreground) 35%, transparent);
+}
+
+/* === Action mode ============================================ */
+.chat-extension-card--action {
+  align-items: center;
+  gap: var(--space-sm);
+  padding-block: 0.45rem;
+}
+
+.chat-extension-card--action .chat-extension-card__body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  min-width: 0;
+  flex: 1;
+}
+
+.chat-extension-card--action .chat-extension-card__header {
+  flex-wrap: wrap;
+}
+
+.chat-extension-card--action .chat-extension-card__source {
+  color: var(--rail-color);
+  opacity: 0.85;
+}
+
+.chat-extension-card--action .chat-extension-card__title {
+  font-size: var(--text-control);
+  font-weight: 600;
+  color: var(--foreground);
+  margin: 0;
+}
+
+.chat-extension-card__url {
+  font-size: 0.6875rem;
+  color: var(--muted-foreground);
+  font-family: var(--font-code);
+  word-break: break-all;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-extension-card__actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-xs);
+  flex-shrink: 0;
+}
+
+.chat-extension-card__action {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  min-height: 1.75rem;
+  padding: 0.35rem 0.7rem;
+  border-radius: var(--radius-sm);
+  border: 0;
+  background: var(--rail-color);
+  color: var(--primary-foreground);
+  font-size: var(--text-control);
+  font-weight: 650;
+  cursor: pointer;
+  transition: transform 0.12s ease, box-shadow 0.12s ease, background-color 0.12s ease;
+  box-shadow: 0 1px 0 oklch(1 0 0 / 0.16) inset;
+}
+
+.chat-extension-card__action:hover:not(:disabled) {
+  transform: translateY(-1px);
+  box-shadow: 0 1px 0 oklch(1 0 0 / 0.2) inset, 0 6px 14px -8px var(--glow-strong);
+}
+
+.chat-extension-card__action:active:not(:disabled) {
+  transform: translateY(0);
+}
+
+.chat-extension-card__action:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.chat-extension-card__action--secondary {
+  background: transparent;
+  color: var(--foreground);
+  border: 1px solid var(--border);
+  box-shadow: none;
+}
+
+.chat-extension-card__action--secondary:hover:not(:disabled) {
+  background: color-mix(in oklab, var(--muted) 60%, transparent);
+  box-shadow: none;
+}
+
+.chat-extension-card__action > svg {
+  width: 0.9rem;
+  height: 0.9rem;
+  flex-shrink: 0;
+}
+
+/* Mobile: actions wrap below body when both don't fit on one row. */
+@media (max-width: 480px) {
+  .chat-extension-card--action {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .chat-extension-card__actions {
+    justify-content: flex-end;
+  }
+}
+
+/* Compact (pinned panel / preview) — drop the rail and tone pill, render
+ * even tighter. Lets the surrounding panel chrome do the framing. */
+.chat-extension-card--compact {
+  padding: 0.3rem 0.5rem;
+  background: transparent;
+  border-color: color-mix(in oklab, var(--border) 60%, transparent);
+}
+
+.chat-extension-card--compact::before {
+  display: none;
+}
+
+.chat-extension-card--compact .chat-extension-card__title {
+  font-size: var(--text-meta);
+}
+}
