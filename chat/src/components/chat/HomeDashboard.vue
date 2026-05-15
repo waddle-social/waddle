@@ -172,7 +172,14 @@ function dmSecondaryText(conversation: { peerUsername?: string; peerJid: string;
             v-for="space in spaces"
             :key="space.id"
             class="chat-list-row flex min-h-16 items-center gap-3 rounded-lg border border-border bg-card px-4 py-3 text-left hover:bg-muted/60"
-            :class="spaceHasChannels(space.id) ? '' : 'cursor-default hover:bg-card'"
+            :class="[
+              spaceHasChannels(space.id) ? '' : 'cursor-default hover:bg-card',
+              groupActivity(`space:${space.id}`).mentions > 0
+                ? 'chat-list-row--unread chat-list-row--mention'
+                : unreadBadgeCount(groupActivity(`space:${space.id}`)) > 0
+                  ? 'chat-list-row--unread'
+                  : '',
+            ]"
             type="button"
             :disabled="!spaceHasChannels(space.id)"
             :aria-label="spaceHomeLabel(space.name, groupActivity(`space:${space.id}`), spaceTargetChannel(space.id)?.name)"
@@ -190,12 +197,12 @@ function dmSecondaryText(conversation: { peerUsername?: string; peerJid: string;
             <span class="flex shrink-0 items-center gap-1">
               <span
                 v-if="groupActivity(`space:${space.id}`).mentions > 0"
-                class="type-count-badge inline-flex min-w-[18px] h-[18px] px-1 items-center justify-center rounded-full bg-destructive text-destructive-foreground"
+                class="chat-list-row--mention-badge type-count-badge inline-flex min-w-[18px] h-[18px] px-1 items-center justify-center rounded-full bg-destructive text-destructive-foreground"
                 aria-hidden="true"
               >@{{ groupActivity(`space:${space.id}`).mentions }}</span>
               <span
                 v-if="unreadBadgeCount(groupActivity(`space:${space.id}`)) > 0"
-                class="type-count-badge inline-flex min-w-[18px] h-[18px] px-1 items-center justify-center rounded-full bg-primary text-primary-foreground"
+                class="chat-list-row--unread-badge type-count-badge inline-flex min-w-[18px] h-[18px] px-1 items-center justify-center rounded-full bg-primary text-primary-foreground"
                 aria-hidden="true"
               >{{ unreadBadgeCount(groupActivity(`space:${space.id}`)) }}</span>
               <span
@@ -249,6 +256,11 @@ function dmSecondaryText(conversation: { peerUsername?: string; peerJid: string;
                 v-for="channel in group.channels"
                 :key="channel.id"
                 class="chat-list-row flex min-h-14 items-center gap-2 rounded-md px-3 py-2 text-left text-muted-foreground hover:bg-muted hover:text-foreground"
+                :class="channelActivity(channel).mentions > 0
+                  ? 'chat-list-row--unread chat-list-row--mention'
+                  : unreadBadgeCount(channelActivity(channel)) > 0
+                    ? 'chat-list-row--unread'
+                    : ''"
                 type="button"
                 :aria-label="channelHomeLabel(channel, channelActivity(channel), activityStamp(channelActivity(channel).lastUpdated))"
                 @click="emit('selectChannel', channel.id)"
@@ -271,12 +283,12 @@ function dmSecondaryText(conversation: { peerUsername?: string; peerJid: string;
                 <span class="flex shrink-0 items-center gap-1">
                   <span
                     v-if="channelActivity(channel).mentions > 0"
-                    class="type-count-badge inline-flex min-w-[18px] h-[18px] px-1 items-center justify-center rounded-full bg-destructive text-destructive-foreground"
+                    class="chat-list-row--mention-badge type-count-badge inline-flex min-w-[18px] h-[18px] px-1 items-center justify-center rounded-full bg-destructive text-destructive-foreground"
                     aria-hidden="true"
                   >@{{ channelActivity(channel).mentions }}</span>
                   <span
                     v-if="unreadBadgeCount(channelActivity(channel)) > 0"
-                    class="type-count-badge inline-flex min-w-[18px] h-[18px] px-1 items-center justify-center rounded-full bg-primary text-primary-foreground"
+                    class="chat-list-row--unread-badge type-count-badge inline-flex min-w-[18px] h-[18px] px-1 items-center justify-center rounded-full bg-primary text-primary-foreground"
                     aria-hidden="true"
                   >{{ unreadBadgeCount(channelActivity(channel)) }}</span>
                   <span
@@ -334,6 +346,7 @@ function dmSecondaryText(conversation: { peerUsername?: string; peerJid: string;
             v-for="conversation in directMessages"
             :key="conversation.peerJid"
             class="chat-list-row flex min-h-14 items-center gap-3 rounded-lg border border-border bg-card px-4 py-3 text-left hover:bg-muted/60"
+            :class="conversation.unreadCount > 0 ? 'chat-list-row--unread' : ''"
             type="button"
             :aria-label="dmHomeLabel(conversation, conversation.lastMessageAt ? formatTimelineStamp(conversation.lastMessageAt) : '')"
             @click="emit('selectContact', conversation.peerJid)"
@@ -360,7 +373,7 @@ function dmSecondaryText(conversation: { peerUsername?: string; peerJid: string;
             </span>
             <span
               v-if="conversation.unreadCount > 0"
-              class="type-count-badge inline-flex min-w-[18px] h-[18px] px-1 items-center justify-center rounded-full bg-primary text-primary-foreground"
+              class="chat-list-row--unread-badge type-count-badge inline-flex min-w-[18px] h-[18px] px-1 items-center justify-center rounded-full bg-primary text-primary-foreground"
               aria-hidden="true"
             >{{ conversation.unreadCount }}</span>
           </button>
