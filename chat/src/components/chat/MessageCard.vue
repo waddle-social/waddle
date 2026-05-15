@@ -329,6 +329,15 @@ function reactionAriaLabel(emoji: string, nicks: readonly string[]): string {
   return `${formatReactors(nicks)} reacted with ${emoji}`;
 }
 
+function userIsReactor(nicks: readonly string[]): boolean {
+  const me = props.currentUser;
+  if (!me) return false;
+  for (const nick of nicks) {
+    if (nick === me) return true;
+  }
+  return false;
+}
+
 // Reaction tooltip is teleported to <body> so that pane-level
 // `overflow-x: hidden` (`.chat-pane-scroll`) cannot clip it. The chip stays
 // in place; on hover/focus we capture the chip's bounding rect and render a
@@ -695,16 +704,18 @@ onBeforeUnmount(() => {
         v-for="(nicks, emoji) in message.reactions"
         :key="emoji"
         type="button"
-        class="chat-reaction-chip type-caption inline-flex h-7 items-center gap-1 px-2 rounded-lg bg-muted/60 hover:bg-muted transition-all duration-200"
+        class="chat-reaction-chip type-caption inline-flex h-7 items-center gap-1 px-2 rounded-lg"
+        :class="userIsReactor(nicks) ? 'chat-reaction-chip--self' : ''"
         :aria-label="reactionAriaLabel(emoji, nicks)"
+        :aria-pressed="userIsReactor(nicks)"
         @click="emit('react', message.id, emoji)"
         @pointerenter="(event) => showReactionFromPointer(emoji, nicks, event)"
         @pointerleave="() => hideReactionTooltip(emoji)"
         @focusin="(event) => showReactionFromFocus(emoji, nicks, event)"
         @focusout="() => hideReactionTooltip(emoji)"
       >
-        <span>{{ emoji }}</span>
-        <span class="type-meta type-numeric text-muted-foreground">{{ nicks.length }}</span>
+        <span class="chat-reaction-chip__glyph">{{ emoji }}</span>
+        <span class="type-meta type-numeric chat-reaction-chip__count">{{ nicks.length }}</span>
       </button>
     </div>
 
