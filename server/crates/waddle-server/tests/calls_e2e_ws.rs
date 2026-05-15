@@ -126,6 +126,7 @@ async fn jmi_propose_is_forwarded_to_peer() {
 async fn jmi_proceed_round_trips_back_to_caller() {
     let (_server, mut alice, mut bob) = start_pair().await;
 
+    let alice_full = alice.full_jid.clone().expect("alice bound");
     let sid = "ce2e2";
     alice
         .send(&format!(
@@ -141,8 +142,11 @@ async fn jmi_proceed_round_trips_back_to_caller() {
         .await
         .expect("bob sees propose");
 
+    // XEP-0353 §0.6: proceed addressed to the *full* JID of the
+    // initiator's accepting resource, not the bare JID, so only the
+    // ringing resource stops ringing.
     bob.send(&format!(
-        r#"<message xmlns="jabber:client" to="alice@localhost">
+        r#"<message xmlns="jabber:client" to="{alice_full}">
              <proceed xmlns="urn:xmpp:jingle-message:0" id="{sid}"/>
            </message>"#
     ))

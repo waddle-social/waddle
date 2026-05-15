@@ -17,7 +17,7 @@
 //! raw [`minidom::Element`] so the client UI layer doesn't have to
 //! know XML.
 
-use jid::{BareJid, Jid};
+use jid::Jid;
 use minidom::Element;
 
 /// Media kinds offered or accepted on a call. Inferred from the
@@ -77,7 +77,14 @@ pub enum CallEventKind {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InboundCallEvent {
-    pub from: BareJid,
+    /// The originator JID, preserved as-sent by the server's `from`
+    /// stamp. For `<propose/>` and Jingle session-initiate this is
+    /// the initiator's *full* JID — XEP-0353 §0.5 / §0.6 require
+    /// JMI responses (`<proceed/>`, `<reject/>`, `<retract/>`,
+    /// `<finish/>`) and Jingle session-accept / session-terminate
+    /// to be addressed to that full JID so the originating resource
+    /// receives the answer, not every resource of the bare JID.
+    pub from: Jid,
     pub sid: String,
     pub kind: CallEventKind,
 }
@@ -93,10 +100,7 @@ pub fn parse_jmi_message(stanza: &Element) -> Option<InboundCallEvent> {
     if stanza.name() != "message" {
         return None;
     }
-    let from = stanza
-        .attr("from")
-        .and_then(|s| s.parse::<Jid>().ok())
-        .map(|j| j.to_bare())?;
+    let from = stanza.attr("from").and_then(|s| s.parse::<Jid>().ok())?;
 
     for child in stanza.children() {
         if child.ns() != NS_JINGLE_MESSAGE {
@@ -124,10 +128,7 @@ pub fn parse_jingle_iq(stanza: &Element) -> Option<InboundCallEvent> {
     if stanza.name() != "iq" {
         return None;
     }
-    let from = stanza
-        .attr("from")
-        .and_then(|s| s.parse::<Jid>().ok())
-        .map(|j| j.to_bare())?;
+    let from = stanza.attr("from").and_then(|s| s.parse::<Jid>().ok())?;
     let jingle = stanza
         .children()
         .find(|c| c.name() == "jingle" && c.ns() == NS_JINGLE)?;
@@ -366,7 +367,10 @@ mod tests {
         </message>"#;
         let elem: Element = xml.parse().unwrap();
         let ev = parse_call_event(&elem).expect("propose parses");
-        assert_eq!(ev.from.to_string(), "alice@waddle.test");
+        // XEP-0353 §0.6: the propose's `from` is stamped by the
+        // server as the initiator's *full* JID so the responder can
+        // address its proceed/reject directly at that resource.
+        assert_eq!(ev.from.to_string(), "alice@waddle.test/desktop");
         assert_eq!(ev.sid, "c1");
         match ev.kind {
             CallEventKind::Propose { media } => assert_eq!(media, CallMedia::audio_video()),
