@@ -74,6 +74,7 @@ const {
   handleRequestNotifications,
   handleToggleNotifications,
   openUserSettings,
+  openHome,
   closeUserSettings,
   handleLogout,
   selectChannel,
@@ -162,6 +163,7 @@ function setPinnedPanelOpen(isOpen: boolean) {
           :waddles="[]"
           :active-space-id="null"
           :active-sidebar-mode="ui.sidebarMode.value"
+          :active-page="ui.activePage.value"
           :has-unread-dms="dmConversations.hasUnread.value"
           :session="connectionStore.session"
           :notification-permission="notifications.permissionState.value"
@@ -170,6 +172,7 @@ function setPinnedPanelOpen(isOpen: boolean) {
           :total-mention-count="channelUnread.totalMentionCount.value"
           :web-commit-sha="version.webCommitSha.value"
           :server-version="version.serverVersion.value"
+          @open-home="openHome"
           @open-settings="openUserSettings"
           @toggle-channels="ui.sidebarMode.value = 'channels'"
           @toggle-dms="ui.sidebarMode.value = 'dms'"

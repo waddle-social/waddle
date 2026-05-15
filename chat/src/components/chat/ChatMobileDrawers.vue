@@ -31,6 +31,7 @@ const {
   activeExtensionRouteKey,
   activeRightPanel,
   openUserSettings,
+  openHome,
   handleLogout,
   handleRequestNotifications,
   handleToggleNotifications,
@@ -76,9 +77,11 @@ function openExtensionRoute(route: DiscoveredExtensionRoute) {
             :waddles="[]"
             :active-space-id="null"
             :active-sidebar-mode="ui.sidebarMode.value"
+            :active-page="ui.activePage.value"
             :has-unread-dms="dmConversations.hasUnread.value"
             :session="null"
             horizontal
+            @open-home="openHome"
             @toggle-channels="ui.sidebarMode.value = 'channels'"
             @toggle-dms="ui.sidebarMode.value = 'dms'"
           />

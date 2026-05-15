@@ -18,12 +18,16 @@ defineProps<{
   horizontal?: boolean;
   webCommitSha?: string;
   serverVersion?: XmppServerVersion | null;
+  /** Current top-level page so the Home/logo button can render an
+   * "active" treatment when we're already on the dashboard. */
+  activePage?: "dashboard" | "chat" | "settings";
 }>();
 
 const emit = defineEmits<{
   toggleChannels: [];
   toggleDms: [];
   openSettings: [];
+  openHome: [];
   logout: [];
   "request-notifications": [];
   "toggle-notifications": [];
@@ -37,15 +41,28 @@ const emit = defineEmits<{
       ? 'chat-rail-horizontal'
       : 'chat-rail-vertical'"
   >
-    <!-- Logo -->
+    <!-- Logo / Home — clicking returns to the dashboard from anywhere.
+         Was a passive img; now a real button so users in a channel have
+         a route back to Home (channel header doesn't currently expose
+         one). Active when `activePage === "dashboard"`. -->
     <div class="chat-rail-logo-slot flex flex-shrink-0 items-center justify-center">
-      <img
-        src="/waddle-logo.svg"
-        alt="Waddle"
-        width="40"
-        height="40"
-        class="chat-rail-logo-mark rounded-lg object-contain"
-      />
+      <button
+        type="button"
+        class="chat-rail-home-button"
+        :class="activePage === 'dashboard' ? 'chat-rail-home-button--active' : ''"
+        :aria-pressed="activePage === 'dashboard'"
+        title="Home"
+        aria-label="Go to home"
+        @click="emit('openHome')"
+      >
+        <img
+          src="/waddle-logo.svg"
+          alt=""
+          width="40"
+          height="40"
+          class="chat-rail-logo-mark rounded-lg object-contain"
+        />
+      </button>
     </div>
 
     <!-- Divider -->
