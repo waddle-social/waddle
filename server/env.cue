@@ -10,6 +10,7 @@ import (
 let _rustInputs = [
 	"Cargo.toml",
 	"Cargo.lock",
+	"rust-toolchain.toml",
 	"crates/**",
 	"extensions/**",
 	"wit/**",
@@ -20,6 +21,7 @@ let _nixInputs = [
 	"../flake.lock",
 	"Cargo.toml",
 	"Cargo.lock",
+	"rust-toolchain.toml",
 	"crates/**",
 	"extensions/**",
 	"wit/**",
@@ -133,7 +135,6 @@ schema.#Project & {
 				defaultBranch: true
 				manual:        true
 			}
-			derivePaths: false
 			provider: github: {
 				permissions: {
 					"id-token":      "write"
@@ -174,9 +175,6 @@ schema.#Project & {
 				pullRequest: true
 			}
 			mode: "expanded"
-			// cuenv currently emits parent-directory inputs as server/../... in
-			// GitHub path filters, which do not reliably match repo-root files.
-			derivePaths: false
 			provider: github: permissions: {
 				"id-token":      "write"
 				contents:        "read"
@@ -194,9 +192,6 @@ schema.#Project & {
 				pullRequest:   true
 				manual:        true
 			}
-			// Keep this broad until cuenv canonicalizes ../ inputs in derived
-			// GitHub path filters; these Nix checks depend on repo-root flake files.
-			derivePaths: false
 			provider: github: permissions: {
 				"id-token":      "write"
 				contents:        "read"
@@ -216,7 +211,11 @@ schema.#Project & {
 		checkCiDrift: schema.#Task & {
 			command: "cuenv"
 			args: ["sync", "ci", "--check", "-A"]
-			inputs: ["**/env.cue", "deployment.cue"]
+			inputs: [
+				"**/env.cue",
+				"deployment.cue",
+				"../.github/workflows/waddle-server-*.yml",
+			]
 		}
 
 		checkRootSyncDrift: schema.#Task & {
@@ -728,7 +727,7 @@ schema.#Project & {
 		nixXmppServerTests: schema.#Task & {
 			command: "nix"
 			args: ["build", "--print-build-logs", "../#checks.x86_64-linux.waddle-server-xmpp-server-tests"]
-			inputs: _nixInputs
+			inputs: list.Concat([_nixInputs, _chartInputs])
 		}
 
 		nixXmppXepIntegration: schema.#Task & {
