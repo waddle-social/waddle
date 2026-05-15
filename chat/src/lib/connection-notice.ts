@@ -1,5 +1,7 @@
 import type { XmppStatusSnapshot } from "@/lib/xmpp/types";
 
+export const CONNECTION_NOTICE_VERSION = "1.0.0";
+
 export type ConnectionNoticeTone = "offline" | "reconnecting" | "error" | "reconnected";
 
 export interface ConnectionNoticeCopy {
@@ -68,8 +70,8 @@ export function getConnectionNoticeCopy({
     return {
       tone: "reconnecting",
       shortLabel: "reconnecting",
-      title: "Reconnecting…",
-      body: `Trying again now. ${queuedRetryCopy(queuedMessageCount)}`,
+      title: "Reconnecting",
+      body: `Trying again. ${queuedRetryCopy(queuedMessageCount)}`,
     };
   }
 

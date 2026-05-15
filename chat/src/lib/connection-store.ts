@@ -19,7 +19,7 @@ interface ConnectionStore {
 
 export const connectionStore: ConnectionStore = shallowReactive({
   client: null,
-  appState: "loading" as AppState,
+  appState: "connecting" as AppState,
   session: null as WaddleSession | null,
   api: null,
   appError: "",
