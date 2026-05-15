@@ -332,20 +332,29 @@ function reactionAriaLabel(emoji: string, nicks: readonly string[]): string {
 // Reaction tooltip is teleported to <body> so that pane-level
 // `overflow-x: hidden` (`.chat-pane-scroll`) cannot clip it. The chip stays
 // in place; on hover/focus we capture the chip's bounding rect and render a
-// fixed-position panel above it. Hiding on scroll/blur keeps the panel from
-// drifting away from its anchor.
+// fixed-position panel above it. Touch devices use the action sheet instead;
+// keyboard reveal is gated on `:focus-visible` so a mouse click does not
+// briefly flash the tooltip alongside the just-applied reaction.
 const hoveredReaction = ref<{
   emoji: string;
   nicks: readonly string[];
   rect: DOMRect;
 } | null>(null);
 
-const REACTION_TOOLTIP_HALF_WIDTH = 160; // matches the 20rem max-width
+const REACTION_TOOLTIP_HALF_WIDTH = 144; // matches max-w-[18rem]
 const REACTION_TOOLTIP_GAP = 8;
 
-function showReactionTooltip(emoji: string, nicks: readonly string[], event: Event) {
+function showReactionFromPointer(emoji: string, nicks: readonly string[], event: PointerEvent) {
+  if (event.pointerType !== "mouse") return;
   const target = event.currentTarget;
   if (!(target instanceof HTMLElement)) return;
+  hoveredReaction.value = { emoji, nicks, rect: target.getBoundingClientRect() };
+}
+
+function showReactionFromFocus(emoji: string, nicks: readonly string[], event: FocusEvent) {
+  const target = event.currentTarget;
+  if (!(target instanceof HTMLElement)) return;
+  if (!target.matches(":focus-visible")) return;
   hoveredReaction.value = { emoji, nicks, rect: target.getBoundingClientRect() };
 }
 
@@ -685,9 +694,9 @@ onBeforeUnmount(() => {
         class="chat-reaction-chip type-caption inline-flex h-7 items-center gap-1 px-2 rounded-lg bg-muted/60 hover:bg-muted transition-all duration-200"
         :aria-label="reactionAriaLabel(emoji, nicks)"
         @click="emit('react', message.id, emoji)"
-        @mouseenter="(event) => showReactionTooltip(emoji, nicks, event)"
-        @mouseleave="() => hideReactionTooltip(emoji)"
-        @focusin="(event) => showReactionTooltip(emoji, nicks, event)"
+        @pointerenter="(event) => showReactionFromPointer(emoji, nicks, event)"
+        @pointerleave="() => hideReactionTooltip(emoji)"
+        @focusin="(event) => showReactionFromFocus(emoji, nicks, event)"
         @focusout="() => hideReactionTooltip(emoji)"
       >
         <span>{{ emoji }}</span>
@@ -926,7 +935,7 @@ onBeforeUnmount(() => {
     <div
       v-if="hoveredReaction && reactionTooltipStyle"
       aria-hidden="true"
-      class="chat-reaction-tooltip pointer-events-none fixed z-popover flex max-w-xs -translate-x-1/2 -translate-y-full flex-col items-center gap-0.5 rounded-md border border-border bg-popover px-2 py-1.5 text-popover-foreground shadow-md"
+      class="chat-reaction-tooltip pointer-events-none fixed z-popover flex max-w-[18rem] -translate-x-1/2 -translate-y-full flex-col items-center gap-0.5 rounded-md border border-border bg-popover px-2 py-1.5 text-popover-foreground shadow-md"
       :style="reactionTooltipStyle"
     >
       <span class="text-lg leading-none" aria-hidden="true">{{ hoveredReaction.emoji }}</span>

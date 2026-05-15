@@ -44,7 +44,7 @@ function close() {
               <X class="w-4 h-4" />
             </button>
           </div>
-          <div class="chat-pane-scroll flex-1 min-h-0 overflow-auto">
+          <div class="chat-pane-scroll flex-1 min-h-0">
             <slot />
           </div>
         </div>
