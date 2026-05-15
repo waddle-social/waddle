@@ -896,18 +896,23 @@ onBeforeUnmount(() => {
     </div>
     </div>
 
-    <!-- Action-sheet trigger. Touch-only; desktop already has the hover toolbar. -->
+    <!-- Action-sheet trigger. Touch-only; desktop already has the hover toolbar.
+         Lives at a quiet 25 % opacity on a relaxed timeline so a column of
+         repeating ••• buttons doesn't out-shout the messages themselves.
+         Lifts to full opacity while the row is focused-within (e.g. mid
+         long-press) or while its action sheet is open. -->
     <button
       v-if="!isEditing"
       type="button"
-      class="z-sticky absolute top-1 right-1 hidden h-8 w-8 [@media(pointer:coarse)]:flex [@media(pointer:coarse)]:h-11 [@media(pointer:coarse)]:w-11 items-center justify-center rounded-lg text-muted-foreground hover:text-foreground hover:bg-muted opacity-70 transition-all duration-150"
+      class="chat-message-action-trigger z-sticky absolute top-1 right-1 hidden [@media(pointer:coarse)]:flex h-11 w-11 items-center justify-center rounded-lg text-muted-foreground hover:text-foreground hover:bg-muted active:bg-muted transition-all duration-150"
+      :class="sheetOpen ? 'opacity-100' : ''"
       title="Message actions"
       aria-label="Message actions"
       :aria-expanded="sheetOpen"
       aria-haspopup="dialog"
       @click="openSheet"
     >
-      <MoreHorizontal class="w-4 h-4 [@media(pointer:coarse)]:w-5 [@media(pointer:coarse)]:h-5" aria-hidden="true" />
+      <MoreHorizontal class="w-5 h-5" aria-hidden="true" />
     </button>
   </div>
 
