@@ -188,6 +188,7 @@ pub(crate) async fn create_router(
     spawn_pending_delivery_claim_janitor(&websocket_state);
     spawn_auth_state_janitor(&websocket_state);
     spawn_room_dormancy_janitor(&websocket_state);
+    crate::server::state_inventory_metrics::spawn_state_inventory_publisher(&websocket_state);
     spawn_graceful_shutdown_drain(
         Arc::clone(&websocket_state),
         shutdown_stop_token,
