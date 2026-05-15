@@ -298,7 +298,8 @@ pub async fn handle_iq_with_conn_state(
     // handler — preserve that.
     let payload_mediates_peer_routing = matches!(
         payload_ns.as_str(),
-        "urn:xmpp:jingle:1" | "urn:xmpp:extdisco:2"
+        s if s == waddle_xmpp::xep::xep0166::NS_JINGLE
+            || s == waddle_xmpp::xep::xep0215::NS_EXT_DISCO
     );
     if !payload_mediates_peer_routing {
         if let Some(target) = iq

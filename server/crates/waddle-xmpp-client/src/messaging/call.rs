@@ -17,8 +17,9 @@
 //! raw [`minidom::Element`] so the client UI layer doesn't have to
 //! know XML.
 
-use jid::Jid;
+use jid::{FullJid, Jid};
 use minidom::Element;
+use xmpp_parsers::jingle::SessionId;
 
 /// Media kinds offered or accepted on a call. Inferred from the
 /// JMI `<description media='…'/>` child or from the Jingle content
@@ -85,7 +86,7 @@ pub struct InboundCallEvent {
     /// to be addressed to that full JID so the originating resource
     /// receives the answer, not every resource of the bare JID.
     pub from: Jid,
-    pub sid: String,
+    pub sid: SessionId,
     pub kind: CallEventKind,
 }
 
@@ -106,7 +107,7 @@ pub fn parse_jmi_message(stanza: &Element) -> Option<InboundCallEvent> {
         if child.ns() != NS_JINGLE_MESSAGE {
             continue;
         }
-        let sid = child.attr("id")?.to_string();
+        let sid = SessionId(child.attr("id")?.to_string());
         let kind = match child.name() {
             "propose" => CallEventKind::Propose {
                 media: media_from_descriptions(child),
@@ -132,7 +133,7 @@ pub fn parse_jingle_iq(stanza: &Element) -> Option<InboundCallEvent> {
     let jingle = stanza
         .children()
         .find(|c| c.name() == "jingle" && c.ns() == NS_JINGLE)?;
-    let sid = jingle.attr("sid")?.to_string();
+    let sid = SessionId(jingle.attr("sid")?.to_string());
     let action = jingle.attr("action")?;
 
     let kind = match action {
@@ -243,8 +244,8 @@ fn extract_terminate_reason(jingle: &Element) -> Option<String> {
 /// one `<description/>` per offered media kind so the responder's UI
 /// can show "audio call" vs. "video call" without waiting for the
 /// session-initiate.
-pub fn build_propose(sid: &str, media: CallMedia) -> Element {
-    let mut builder = Element::builder("propose", NS_JINGLE_MESSAGE).attr("id", sid);
+pub fn build_propose(sid: &SessionId, media: CallMedia) -> Element {
+    let mut builder = Element::builder("propose", NS_JINGLE_MESSAGE).attr("id", sid.0.as_str());
     if media.audio {
         builder = builder.append(rtp_description_element("audio"));
     }
@@ -254,27 +255,27 @@ pub fn build_propose(sid: &str, media: CallMedia) -> Element {
     builder.build()
 }
 
-pub fn build_proceed(sid: &str) -> Element {
+pub fn build_proceed(sid: &SessionId) -> Element {
     Element::builder("proceed", NS_JINGLE_MESSAGE)
-        .attr("id", sid)
+        .attr("id", sid.0.as_str())
         .build()
 }
 
-pub fn build_reject(sid: &str) -> Element {
+pub fn build_reject(sid: &SessionId) -> Element {
     Element::builder("reject", NS_JINGLE_MESSAGE)
-        .attr("id", sid)
+        .attr("id", sid.0.as_str())
         .build()
 }
 
-pub fn build_retract(sid: &str) -> Element {
+pub fn build_retract(sid: &SessionId) -> Element {
     Element::builder("retract", NS_JINGLE_MESSAGE)
-        .attr("id", sid)
+        .attr("id", sid.0.as_str())
         .build()
 }
 
-pub fn build_finish(sid: &str) -> Element {
+pub fn build_finish(sid: &SessionId) -> Element {
     Element::builder("finish", NS_JINGLE_MESSAGE)
-        .attr("id", sid)
+        .attr("id", sid.0.as_str())
         .build()
 }
 
@@ -284,11 +285,11 @@ pub fn build_finish(sid: &str) -> Element {
 /// room scope. One `<content/>` per offered media kind, each
 /// carrying an empty Waddle LiveKit transport for the server to
 /// populate.
-pub fn build_session_initiate(sid: &str, initiator_full_jid: &str, media: CallMedia) -> Element {
+pub fn build_session_initiate(sid: &SessionId, initiator: &FullJid, media: CallMedia) -> Element {
     let mut builder = Element::builder("jingle", NS_JINGLE)
         .attr("action", "session-initiate")
-        .attr("initiator", initiator_full_jid)
-        .attr("sid", sid);
+        .attr("initiator", initiator.to_string())
+        .attr("sid", sid.0.as_str());
     if media.audio {
         builder = builder.append(content_element("audio"));
     }
@@ -303,16 +304,16 @@ pub fn build_session_initiate(sid: &str, initiator_full_jid: &str, media: CallMe
 /// party; the initiator attribute mirrors the originator so the
 /// server can re-derive the call scope.
 pub fn build_session_accept(
-    sid: &str,
-    initiator_full_jid: &str,
-    responder_full_jid: &str,
+    sid: &SessionId,
+    initiator: &FullJid,
+    responder: &FullJid,
     media: CallMedia,
 ) -> Element {
     let mut builder = Element::builder("jingle", NS_JINGLE)
         .attr("action", "session-accept")
-        .attr("initiator", initiator_full_jid)
-        .attr("responder", responder_full_jid)
-        .attr("sid", sid);
+        .attr("initiator", initiator.to_string())
+        .attr("responder", responder.to_string())
+        .attr("sid", sid.0.as_str());
     if media.audio {
         builder = builder.append(content_element("audio"));
     }
@@ -322,16 +323,21 @@ pub fn build_session_accept(
     builder.build()
 }
 
-/// Build the `<jingle/>` body of a session-terminate IQ. Reason is
-/// one of the XEP-0166 §7.4 condition names (`success`, `decline`,
-/// `cancel`, `busy`, `gone`, …). `None` omits the `<reason/>` child.
-pub fn build_session_terminate(sid: &str, reason: Option<&str>) -> Element {
+/// Build the `<jingle/>` body of a session-terminate IQ. `reason`
+/// is one of the XEP-0166 §7.4 condition values; `None` omits the
+/// `<reason/>` child. Using the typed [`xmpp_parsers::jingle::Reason`]
+/// enum here means we cannot ship a malformed condition over the
+/// wire even if a string argument got mishandled at a higher layer.
+pub fn build_session_terminate(
+    sid: &SessionId,
+    reason: Option<xmpp_parsers::jingle::Reason>,
+) -> Element {
     let mut builder = Element::builder("jingle", NS_JINGLE)
         .attr("action", "session-terminate")
-        .attr("sid", sid);
+        .attr("sid", sid.0.as_str());
     if let Some(condition) = reason {
         let reason_elem = Element::builder("reason", NS_JINGLE)
-            .append(Element::builder(condition, NS_JINGLE).build())
+            .append(Element::from(condition))
             .build();
         builder = builder.append(reason_elem);
     }
@@ -371,7 +377,7 @@ mod tests {
         // server as the initiator's *full* JID so the responder can
         // address its proceed/reject directly at that resource.
         assert_eq!(ev.from.to_string(), "alice@waddle.test/desktop");
-        assert_eq!(ev.sid, "c1");
+        assert_eq!(ev.sid.0, "c1");
         match ev.kind {
             CallEventKind::Propose { media } => assert_eq!(media, CallMedia::audio_video()),
             other => panic!("expected Propose, got {other:?}"),
@@ -415,7 +421,7 @@ mod tests {
         </iq>"#;
         let elem: Element = xml.parse().unwrap();
         let ev = parse_call_event(&elem).expect("session-initiate parses");
-        assert_eq!(ev.sid, "c1");
+        assert_eq!(ev.sid.0, "c1");
         match ev.kind {
             CallEventKind::SessionInitiate { join, media } => {
                 assert_eq!(join.url, "wss://livekit.waddle.test");
@@ -445,6 +451,14 @@ mod tests {
         }
     }
 
+    fn sid(s: &str) -> SessionId {
+        SessionId(s.to_string())
+    }
+
+    fn full(s: &str) -> FullJid {
+        s.parse().unwrap()
+    }
+
     #[test]
     fn returns_none_for_non_call_message() {
         let xml =
@@ -468,7 +482,7 @@ mod tests {
 
     #[test]
     fn build_propose_emits_one_description_per_offered_media() {
-        let elem = build_propose("c1", CallMedia::audio_video());
+        let elem = build_propose(&sid("c1"), CallMedia::audio_video());
         assert_eq!(elem.name(), "propose");
         assert_eq!(elem.ns(), NS_JINGLE_MESSAGE);
         assert_eq!(elem.attr("id"), Some("c1"));
@@ -482,7 +496,7 @@ mod tests {
 
     #[test]
     fn build_propose_audio_only_omits_video_description() {
-        let elem = build_propose("c1", CallMedia::audio_only());
+        let elem = build_propose(&sid("c1"), CallMedia::audio_only());
         let media: Vec<_> = elem
             .children()
             .filter(|c| c.name() == "description")
@@ -497,28 +511,28 @@ mod tests {
         // inbound parser pick it up.
         let stanza = Element::builder("message", "jabber:client")
             .attr("from", "bob@waddle.test/desktop")
-            .append(build_proceed("c1"))
+            .append(build_proceed(&sid("c1")))
             .build();
         let ev = parse_call_event(&stanza).expect("proceed parses");
         assert!(matches!(ev.kind, CallEventKind::Proceed));
 
         let stanza = Element::builder("message", "jabber:client")
             .attr("from", "bob@waddle.test/desktop")
-            .append(build_reject("c1"))
+            .append(build_reject(&sid("c1")))
             .build();
         let ev = parse_call_event(&stanza).expect("reject parses");
         assert!(matches!(ev.kind, CallEventKind::Reject));
 
         let stanza = Element::builder("message", "jabber:client")
             .attr("from", "alice@waddle.test/desktop")
-            .append(build_retract("c1"))
+            .append(build_retract(&sid("c1")))
             .build();
         let ev = parse_call_event(&stanza).expect("retract parses");
         assert!(matches!(ev.kind, CallEventKind::Retract));
 
         let stanza = Element::builder("message", "jabber:client")
             .attr("from", "alice@waddle.test/desktop")
-            .append(build_finish("c1"))
+            .append(build_finish(&sid("c1")))
             .build();
         let ev = parse_call_event(&stanza).expect("finish parses");
         assert!(matches!(ev.kind, CallEventKind::Finish));
@@ -526,8 +540,11 @@ mod tests {
 
     #[test]
     fn build_session_initiate_carries_empty_waddle_transport_per_content() {
-        let jingle =
-            build_session_initiate("c1", "alice@waddle.test/desktop", CallMedia::audio_video());
+        let jingle = build_session_initiate(
+            &sid("c1"),
+            &full("alice@waddle.test/desktop"),
+            CallMedia::audio_video(),
+        );
         assert_eq!(jingle.name(), "jingle");
         assert_eq!(jingle.ns(), NS_JINGLE);
         assert_eq!(jingle.attr("action"), Some("session-initiate"));
@@ -561,9 +578,9 @@ mod tests {
     #[test]
     fn build_session_accept_carries_responder_attr_and_empty_transport() {
         let jingle = build_session_accept(
-            "c1",
-            "alice@waddle.test/desktop",
-            "bob@waddle.test/desktop",
+            &sid("c1"),
+            &full("alice@waddle.test/desktop"),
+            &full("bob@waddle.test/desktop"),
             CallMedia::audio_only(),
         );
         assert_eq!(jingle.attr("action"), Some("session-accept"));
@@ -578,14 +595,15 @@ mod tests {
 
     #[test]
     fn build_session_terminate_includes_reason_when_supplied() {
-        let with_reason = build_session_terminate("c1", Some("success"));
+        let with_reason =
+            build_session_terminate(&sid("c1"), Some(xmpp_parsers::jingle::Reason::Success));
         let reason_elem = with_reason
             .children()
             .find(|c| c.name() == "reason")
             .expect("reason child");
         assert!(reason_elem.children().any(|c| c.name() == "success"));
 
-        let without = build_session_terminate("c1", None);
+        let without = build_session_terminate(&sid("c1"), None);
         assert!(without.children().all(|c| c.name() != "reason"));
     }
 

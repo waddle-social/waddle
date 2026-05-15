@@ -45,3 +45,8 @@ pub use types::{
     ModerationPayload, MucAffiliation, MucRole, PresenceHat, ReactionPayload, ReferenceData,
     RetractionPayload, SendMessageOptions, SharedFile, SharedFileDisposition,
 };
+/// Re-export the xmpp-parsers Jingle types Waddle's call surface
+/// owns so downstream crates (notably the wasm bindings, which
+/// don't depend on xmpp-parsers directly) can use the typed
+/// `SessionId` / `Reason` without re-vendoring them.
+pub use xmpp_parsers::jingle::{Reason as JingleReason, SessionId};

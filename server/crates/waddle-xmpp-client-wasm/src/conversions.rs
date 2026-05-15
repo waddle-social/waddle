@@ -425,7 +425,10 @@ pub(crate) fn shared_file_to_js(file: messaging::SharedFile) -> WaddleSharedFile
 pub(crate) fn call_event_to_js(event: InboundCallEvent) -> WaddleCallEvent {
     use waddle_xmpp_client::messaging::CallEventKind;
     let from = event.from.to_string();
-    let sid = event.sid;
+    // The JS surface keeps `sid` as a plain string — boundary
+    // serialization is the explicit I/O exception to the typed-
+    // payloads rule. Convert the typed `SessionId` once here.
+    let sid = event.sid.0;
     match event.kind {
         CallEventKind::Propose { media } => WaddleCallEvent {
             from,
