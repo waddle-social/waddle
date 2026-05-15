@@ -103,6 +103,21 @@
   .chat-message-grid {
     padding-inline-end: var(--chat-touch-action-space);
   }
+
+  /* Quiet ••• action trigger at rest. Long-press is the primary action
+   * surface; this button is a discoverable fallback, not a CTA. Lifts
+   * when its row is focus-within (mid-press, post-tap) so the
+   * affordance reappears the moment the user reaches for it. */
+  .chat-message-action-trigger {
+    opacity: 0.22;
+    transition: opacity 0.18s ease, background-color 0.15s ease;
+  }
+  .chat-message-grid:focus-within .chat-message-action-trigger,
+  .chat-message-grid:active .chat-message-action-trigger,
+  .chat-message-action-trigger:active,
+  .chat-message-action-trigger.opacity-100 {
+    opacity: 1;
+  }
 }
 
 .chat-message-body-stack {
