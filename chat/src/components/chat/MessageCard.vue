@@ -231,7 +231,7 @@ function openThreadFromChip() {
   emit("openThread", props.message.id);
 }
 
-const MAX_CHIP_PARTICIPANTS = 3;
+const MAX_CHIP_PARTICIPANTS = 2;
 const visibleThreadParticipants = computed(() =>
   (props.threadParticipants ?? []).slice(0, MAX_CHIP_PARTICIPANTS),
 );
@@ -799,6 +799,34 @@ onBeforeUnmount(() => {
     >
       <AppAvatar :name="message.author" :src="avatarUrl" :presence="presence" :last-seen="lastSeen" size="message" />
     </button>
+    <!-- Thread participant stack — pulled out of the inline thread chip
+         into the avatar gutter so it sits visually under the main
+         author avatar, sharing the column with the burst rail and the
+         time gutter. Position-absolute relative to the row's grid;
+         centred horizontally in the avatar column, bottom-anchored so
+         it aligns with the chip which is the last body child. -->
+    <div
+      v-if="showThreadChip && visibleThreadParticipants.length > 0"
+      class="chat-thread-chip-gutter"
+      aria-hidden="true"
+    >
+      <span
+        v-for="participant in visibleThreadParticipants"
+        :key="`thread-gutter-avatar:${message.id}:${participant.nick}`"
+        class="chat-thread-chip-gutter__avatar-wrap"
+      >
+        <AppAvatar
+          :name="participant.nick"
+          :src="participant.avatarUrl ?? null"
+          :presence="participant.presence"
+          size="xs"
+        />
+      </span>
+      <span
+        v-if="threadParticipantOverflow > 0"
+        class="chat-thread-chip-gutter__overflow"
+      >+{{ threadParticipantOverflow }}</span>
+    </div>
     <div class="chat-message-body-stack">
       <div v-if="!grouped" class="chat-message-meta-row">
         <span class="type-message-author">{{ message.author }}</span>
@@ -925,35 +953,13 @@ onBeforeUnmount(() => {
     <button
       v-if="showThreadChip"
       type="button"
-      class="chat-thread-chip type-caption inline-flex rounded-md py-0.5 text-primary/85 transition-colors hover:text-primary"
+      class="chat-thread-chip type-caption flex w-full items-center rounded-md py-0.5 text-primary/85 transition-colors hover:text-primary"
       :title="`Open thread (${threadReplyCount} ${threadReplyCount === 1 ? 'reply' : 'replies'})`"
       @click="openThreadFromChip"
     >
-      <MessageSquare class="w-3 h-3 flex-shrink-0" />
-      <span class="min-w-0 truncate">{{ threadReplyCount }} {{ threadReplyCount === 1 ? "reply" : "replies" }}</span>
-      <span
-        v-if="visibleThreadParticipants.length > 0"
-        class="chat-thread-chip__avatars"
-        aria-hidden="true"
-      >
-        <span
-          v-for="participant in visibleThreadParticipants"
-          :key="`thread-chip-avatar:${message.id}:${participant.nick}`"
-          class="chat-thread-chip__avatar-wrap"
-        >
-          <AppAvatar
-            :name="participant.nick"
-            :src="participant.avatarUrl ?? null"
-            :presence="participant.presence"
-            size="xs"
-          />
-        </span>
-        <span
-          v-if="threadParticipantOverflow > 0"
-          class="chat-thread-chip__overflow"
-        >+{{ threadParticipantOverflow }}</span>
-      </span>
-      <span v-if="threadChipRecency" class="chat-thread-chip__recency">· {{ threadChipRecency }}</span>
+      <MessageSquare class="chat-thread-chip__icon w-3 h-3 flex-shrink-0" />
+      <span class="chat-thread-chip__count min-w-0 truncate">{{ threadReplyCount }} {{ threadReplyCount === 1 ? "reply" : "replies" }}</span>
+      <span v-if="threadChipRecency" class="chat-thread-chip__recency">{{ threadChipRecency }}</span>
     </button>
 
     <!-- Existing reactions (inline, always visible when present) -->
