@@ -248,6 +248,19 @@ pub(crate) async fn create_router(
         ));
     }
 
+    // Debug state-inventory route. Mounted only when
+    // `WADDLE_DEBUG_STATE_TOKEN` is set; production canary opts in by
+    // setting the env var. Returns per-map `.len()` counts so a
+    // Prometheus scrape can correlate the offending structure with
+    // process RSS.
+    if let Some(auth) = crate::server::state_inventory_route::debug_state_auth_from_env() {
+        info!("Mounting /debug/state-inventory (WADDLE_DEBUG_STATE_TOKEN set)");
+        router = router.merge(crate::server::state_inventory_route::router(
+            websocket_state.clone(),
+            auth,
+        ));
+    }
+
     // Always merge common routes required by XMPP, auth, upload, and operations.
     let router = router
         // Merge XMPP over WebSocket endpoint
