@@ -9,6 +9,6 @@ deps: {
 }
 custom: {
 	"github.com/cuenv/cuenv": {
-		version: "0.41.1"
+		version: "0.41.3"
 	}
 }
