@@ -33,7 +33,7 @@ spec:
         memory: 512Mi
       limits:
         cpu: "1"
-        memory: 1Gi
+        memory: 4Gi
     config:
       baseUrl: https://xmpp.waddle.social
       corsOrigins: https://waddle.chat,http://localhost:4321
