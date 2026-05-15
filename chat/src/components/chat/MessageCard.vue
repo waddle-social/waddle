@@ -29,6 +29,7 @@ import { richMessageToTiptap, tiptapToRichMessage } from "@/lib/rich-message";
 import type { OccupantHat, OccupantPresence } from "@/lib/xmpp-client";
 import { formatTimelineTimeOfDay } from "@/channels/timeline";
 import { useLongPress } from "@/ui/gestures/long-press";
+import { useHorizontalSwipe } from "@/ui/gestures/horizontal-swipe";
 import type { ExtensionCommandResult } from "@/lib/xmpp/extension-commands";
 import { $desktopToolbarOwnerId } from "@/stores/message-toolbar";
 import { QUICK_REACTION_EMOJIS } from "@/lib/reaction-mode";
@@ -434,6 +435,43 @@ const longPress = useLongPress({
   },
 });
 
+const swipe = useHorizontalSwipe({
+  onSwipeLeft: () => {
+    // Right-to-left drag opens (or enters) the thread for this message.
+    // For root messages this jumps to their existing thread; for replies
+    // it walks into the thread of the parent (matches the toolbar's
+    // "open thread" affordance).
+    const threadId = props.message.threadId ?? props.message.id;
+    emit("openThread", threadId);
+  },
+  onSwipeRight: () => {
+    // Left-to-right drag fills the composer reply chip targeting this
+    // message — same path as the toolbar reply button.
+    emit("reply", props.message);
+  },
+});
+
+function onSwipePointerdown(event: PointerEvent) {
+  swipe.handlers.onPointerdown(event);
+  longPress.handlers.onPointerdown(event);
+}
+function onSwipePointermove(event: PointerEvent) {
+  swipe.handlers.onPointermove(event);
+  longPress.handlers.onPointermove(event);
+}
+function onSwipePointerup(event: PointerEvent) {
+  swipe.handlers.onPointerup(event);
+  longPress.handlers.onPointerup(event);
+}
+function onSwipePointercancel(event: PointerEvent) {
+  swipe.handlers.onPointercancel(event);
+  longPress.handlers.onPointercancel(event);
+}
+function onSwipePointerleave(event: PointerEvent) {
+  swipe.handlers.onPointerleave(event);
+  longPress.handlers.onPointerleave(event);
+}
+
 function onBubbleContextMenu(event: MouseEvent) {
   // Suppress iOS Safari / Android native long-press menu while the gesture is
   // being handled. Desktop right-click (pointerType 'mouse' never sets
@@ -541,7 +579,7 @@ onBeforeUnmount(() => {
     :data-message-id="message.id"
     :data-message-created-at="message.createdAt"
     :data-sheet-open="sheetOpen ? 'true' : 'false'"
-    class="chat-message-grid group relative ring-1 ring-transparent transition-colors duration-150 animate-message-in"
+    class="chat-message-grid group relative ring-1 ring-transparent transition-colors duration-150 animate-message-in chat-message-swipeable"
     :class="[
       isMentioned
         ? 'chat-message-grid--mention'
@@ -554,14 +592,20 @@ onBeforeUnmount(() => {
       longPress.isPressing.value ? 'no-callout' : '',
       grouped ? 'chat-message-grouped' : '',
       reactionModeSelected ? 'chat-message-grid--reaction-selected' : '',
+      swipe.isSwiping.value ? 'chat-message-swipe-active' : '',
+      swipe.isArmed.value && swipe.direction.value === -1 ? 'chat-message-swipe-armed-thread' : '',
+      swipe.isArmed.value && swipe.direction.value === 1 ? 'chat-message-swipe-armed-reply' : '',
     ]"
-    @pointerdown="longPress.handlers.onPointerdown"
-    @pointermove="longPress.handlers.onPointermove"
-    @pointerup="longPress.handlers.onPointerup"
-    @pointercancel="longPress.handlers.onPointercancel"
-    @pointerleave="longPress.handlers.onPointerleave"
+    :style="{ '--chat-swipe-x': swipe.translateX.value + 'px' }"
+    @pointerdown="onSwipePointerdown"
+    @pointermove="onSwipePointermove"
+    @pointerup="onSwipePointerup"
+    @pointercancel="onSwipePointercancel"
+    @pointerleave="onSwipePointerleave"
     @contextmenu="onBubbleContextMenu"
   >
+    <span class="chat-message-swipe-hint chat-message-swipe-hint--reply" aria-hidden="true" />
+    <span class="chat-message-swipe-hint chat-message-swipe-hint--thread" aria-hidden="true" />
     <div v-if="grouped" class="chat-message-avatar-cell chat-message-time-gutter" aria-hidden="true">
       <span class="type-meta type-numeric text-muted-foreground/60">{{ formatTimelineTimeOfDay(message.createdAt) }}</span>
     </div>

@@ -288,6 +288,94 @@
   margin-block-start: calc(-1 * var(--chat-message-row-gap, var(--space-xs)));
 }
 
+/* === Swipe-to-reply / swipe-to-thread (touch only) ===
+ * The row is translated by `--chat-swipe-x` (set inline from the
+ * `useHorizontalSwipe` composable). Hint glyphs sit absolutely-positioned
+ * just outside the row's left/right edges so the translate uncovers them
+ * as the finger drags. Both are hidden at rest; the relevant one fades
+ * in with the swipe progress and pulses into an "armed" state past the
+ * commit threshold. */
+.chat-message-swipeable {
+  touch-action: pan-y;
+  transform: translateX(var(--chat-swipe-x, 0));
+  transition: transform 0.18s cubic-bezier(0.16, 1, 0.3, 1);
+}
+.chat-message-swipeable.chat-message-swipe-active {
+  /* While the finger is down, follow it 1:1. Easing kicks back in the
+   * moment the finger lifts and the inline var snaps back to 0. */
+  transition: none;
+}
+
+.chat-message-swipe-hint {
+  position: absolute;
+  top: 50%;
+  width: 2rem;
+  height: 2rem;
+  border-radius: 9999px;
+  background: color-mix(in oklab, var(--primary) 18%, transparent);
+  border: 1px solid color-mix(in oklab, var(--primary) 32%, transparent);
+  background-repeat: no-repeat;
+  background-position: center;
+  background-size: 1rem 1rem;
+  transform: translateY(-50%) scale(0.85);
+  opacity: 0;
+  transition:
+    opacity 0.18s ease,
+    transform 0.18s cubic-bezier(0.16, 1, 0.3, 1),
+    box-shadow 0.18s ease;
+  pointer-events: none;
+}
+
+.chat-message-swipe-hint--reply {
+  left: -3.25rem;
+  /* lucide "reply" — `--primary` stroke */
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%2300a99d' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><polyline points='9 17 4 12 9 7'/><path d='M20 18v-2a4 4 0 0 0-4-4H4'/></svg>");
+}
+
+.chat-message-swipe-hint--thread {
+  right: -3.25rem;
+  /* lucide "message-square" — `--primary` stroke */
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%2300a99d' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><path d='M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z'/></svg>");
+}
+
+.chat-message-swipeable.chat-message-swipe-active .chat-message-swipe-hint--reply {
+  opacity: clamp(0, calc(var(--chat-swipe-x, 0) / 72), 1);
+}
+.chat-message-swipeable.chat-message-swipe-active .chat-message-swipe-hint--thread {
+  opacity: clamp(0, calc(var(--chat-swipe-x, 0) * -1 / 72), 1);
+}
+
+.chat-message-swipeable.chat-message-swipe-armed-reply .chat-message-swipe-hint--reply,
+.chat-message-swipeable.chat-message-swipe-armed-thread .chat-message-swipe-hint--thread {
+  opacity: 1;
+  transform: translateY(-50%) scale(1);
+  box-shadow: 0 0 18px var(--glow-strong);
+  background-color: color-mix(in oklab, var(--primary) 32%, transparent);
+  border-color: color-mix(in oklab, var(--primary) 55%, transparent);
+}
+
+@media (pointer: fine) {
+  /* Pointer-fine == mouse / pen. The swipe is touch-only; reset the
+   * row so mouse interactions stay exactly as they were. */
+  .chat-message-swipeable {
+    touch-action: auto;
+    transform: none;
+  }
+  .chat-message-swipe-hint {
+    display: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chat-message-swipeable {
+    transition: none;
+  }
+  .chat-message-swipe-hint {
+    transition: opacity 0.05s linear;
+    box-shadow: none;
+  }
+}
+
 .chat-reaction-chip {
   background: color-mix(in oklab, var(--muted) 60%, transparent);
   color: var(--foreground);

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, ref, watch, type ComponentPublicInstance, type Ref } from "vue";
-import { X, CornerDownRight, MessageSquarePlus, ChevronRight, ChevronLeft } from "lucide-vue-next";
+import { X, CornerDownRight, ChevronRight, ChevronLeft } from "lucide-vue-next";
 import MessageCard from "@/components/chat/MessageCard.vue";
 import MessageComposer from "@/components/chat/MessageComposer.vue";
 import VirtualTimeline from "@/components/chat/VirtualTimeline.vue";
@@ -406,10 +406,6 @@ function onSend(body: string, markup: MarkupSpan[], references: MessageReference
   draft.value = "";
 }
 
-function startSubThread(message: TimelineMessage) {
-  emit("pushThread", message.id);
-}
-
 function onOpenThreadFromCard(threadId: string) {
   // Already-open thread id is a no-op; otherwise push it onto the stack.
   if (threadId === activeThreadId.value) return;
@@ -584,25 +580,14 @@ function replyChildHasNestedThread(message: TimelineMessage): boolean {
               @reply="beginReplyInThread"
               @open-thread="onOpenThreadFromCard"
             />
-          <div class="chat-thread-actions">
+          <div v-if="replyChildHasNestedThread(message)" class="chat-thread-actions">
             <button
-              v-if="replyChildHasNestedThread(message)"
               type="button"
               class="type-caption inline-flex items-center gap-1 text-primary/80 hover:text-primary transition-colors"
               @click="onOpenThreadFromCard(message.id)"
             >
               <CornerDownRight class="w-3 h-3" />
               <span>{{ threadIndex.get(message.id)?.count ?? 0 }} in sub-thread</span>
-            </button>
-            <button
-              v-else-if="!isGroupedFollowUp(message.id)"
-              type="button"
-              class="type-caption inline-flex items-center gap-1 text-muted-foreground hover:text-primary transition-colors opacity-50 group-hover/thread-child:opacity-100 focus-visible:opacity-100 [@media(pointer:coarse)]:opacity-40"
-              title="Start sub-thread"
-              @click="startSubThread(message)"
-            >
-              <MessageSquarePlus class="w-3 h-3" />
-              <span>Start sub-thread</span>
             </button>
           </div>
           </div>
