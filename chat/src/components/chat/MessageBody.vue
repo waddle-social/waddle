@@ -22,6 +22,7 @@ import {
   extensionSurfaceLabel,
   renderStyledBody,
   type TimelineMessage,
+  type ExtensionAnnotation,
   type ExtensionAnnotationAction,
 } from "@/lib/chat-ui";
 import { formatFileSize, useMessageAttachments } from "@/channels/message-attachments";
@@ -72,6 +73,28 @@ const extensionCards = computed(() =>
     presentation: extensionPresentation(annotation),
   })),
 );
+// Event-intent cards rendered inline (for the rare case a human-authored
+// message also carries event annotations; bot-authored event messages
+// are intercepted at the MessageCard level and rendered as full-width
+// system bands instead).
+const eventCards = computed(() => extensionCards.value.filter((c) => c.presentation.intent === "event"));
+// All tool-intent actions collapse into a single horizontal chip strip
+// below the body. N extensions × N actions never fans out into N cards.
+interface ToolActionChip {
+  annotation: ExtensionAnnotation;
+  presentation: ReturnType<typeof extensionPresentation>;
+  action: ExtensionAnnotationAction;
+}
+const toolActionChips = computed<ToolActionChip[]>(() => {
+  const chips: ToolActionChip[] = [];
+  for (const card of extensionCards.value) {
+    if (card.presentation.intent !== "tool") continue;
+    for (const action of card.annotation.actions) {
+      chips.push({ annotation: card.annotation, presentation: card.presentation, action });
+    }
+  }
+  return chips;
+});
 
 const {
   actionState: extensionActionState,
@@ -165,175 +188,105 @@ watch(
     </div>
 
     <!-- Waddle extension annotations.
-         Two intents, one shell family:
-           event → notification-led (read-first). Title + structured meta
-                   + optional secondary action chips. GitHub workflow runs,
-                   check results, deploy status.
-           tool  → action-led (do-first). Compact label + context line +
-                   primary action button(s) right-aligned. Link Board,
-                   polls, surveys.
-         Both share `.chat-extension-card` for family resemblance — same
-         soft surface, same tone-coloured left rail; layout differs by
-         intent. -->
-    <div v-if="extensionCards.length > 0" class="flex flex-col gap-2">
-      <div
-        v-for="card in extensionCards"
-        :key="`${card.annotation.extensionId}:${card.annotation.annotationId}`"
-        class="chat-extension-card"
-        :class="[
-          card.presentation.intent === 'tool'
-            ? 'chat-extension-card--action'
-            : 'chat-extension-card--notification',
-          card.presentation.tone === 'success' ? 'chat-extension-card--tone-success' : '',
-          card.presentation.tone === 'danger'  ? 'chat-extension-card--tone-danger'  : '',
-          card.presentation.tone === 'warning' ? 'chat-extension-card--tone-warning' : '',
-          compact ? 'chat-extension-card--compact' : '',
-        ]"
-      >
-        <!-- === EVENT intent (notification) === -->
-        <template v-if="card.presentation.intent === 'event'">
-          <div class="chat-extension-card__header">
-            <span class="chat-extension-card__icon" aria-hidden="true">
-              <MessageSquare v-if="card.annotation.surfaceKind === 'chat-bot'" class="w-full h-full" />
-              <Github v-else-if="card.presentation.kind === 'github-event'" class="w-full h-full" />
-              <LayoutDashboard v-else class="w-full h-full" />
-            </span>
-            <span class="chat-extension-card__source">{{ card.presentation.label || extensionSurfaceLabel(card.annotation.surfaceKind) }}</span>
-            <span v-if="card.presentation.primaryValue" class="chat-extension-card__tone-pill">
-              {{ card.presentation.primaryValue }}
-            </span>
-          </div>
-          <div class="chat-extension-card__title">
-            <a
-              v-if="card.presentation.primaryUrl && !compact"
-              :href="card.presentation.primaryUrl"
-              target="_blank"
-              rel="noreferrer"
-              class="chat-extension-card__title-link"
-              @click.stop
-            >
-              <span class="min-w-0">{{ card.presentation.title }}</span>
-              <ExternalLink aria-hidden="true" />
-            </a>
-            <template v-else>{{ card.presentation.title }}</template>
-          </div>
-          <div
-            v-if="card.presentation.details.length > 0 || card.presentation.secondaryValue"
-            class="chat-extension-card__meta"
-          >
-            <span
-              v-if="card.presentation.secondaryValue"
-              class="chat-extension-card__meta-item"
-            >
-              <span class="chat-extension-card__meta-value">{{ card.presentation.secondaryValue }}</span>
-            </span>
-            <span
-              v-for="detail in card.presentation.details"
-              :key="`${card.annotation.annotationId}:${detail.label}`"
-              class="chat-extension-card__meta-item"
-            >
-              <span class="chat-extension-card__meta-label">{{ detail.label }}</span>
-              <span
-                class="chat-extension-card__meta-value"
-                :class="detail.label === 'Commit' ? 'chat-extension-card__meta-value--mono' : ''"
-                :title="detail.value"
-              >{{ detail.value }}</span>
-            </span>
-          </div>
-          <!-- Event-intent actions: secondary chips, never the focal point. -->
-          <div
-            v-if="!compact && card.annotation.actions.length > 0"
-            class="chat-extension-card__actions"
-            style="margin-top: 0.4rem;"
-          >
-            <button
-              v-for="action in card.annotation.actions"
-              :key="`${card.annotation.annotationId}:${action.route}:${action.label}`"
-              type="button"
-              class="chat-extension-card__action chat-extension-card__action--secondary"
-              :disabled="extensionActionState(card.annotation.annotationId, action)?.state === 'loading' || !action.launch"
-              :title="extensionActionState(card.annotation.annotationId, action)?.detail ?? action.launch?.commandNode ?? action.label"
-              @click.stop="invokeExtension(card.annotation.annotationId, action)"
-            >
-              <LoaderCircle v-if="extensionActionState(card.annotation.annotationId, action)?.state === 'loading'" class="animate-spin" aria-hidden="true" />
-              <CheckCircle2 v-else-if="extensionActionState(card.annotation.annotationId, action)?.state === 'success'" aria-hidden="true" />
-              <AlertCircle v-else-if="extensionActionState(card.annotation.annotationId, action)?.state === 'warning'" aria-hidden="true" />
-              <AlertCircle v-else-if="extensionActionState(card.annotation.annotationId, action)?.state === 'error'" aria-hidden="true" />
-              {{ action.label }}
-            </button>
-          </div>
-        </template>
-
-        <!-- === TOOL intent (action) === -->
-        <template v-else>
-          <span class="chat-extension-card__icon" aria-hidden="true">
-            <MessageSquare v-if="card.annotation.surfaceKind === 'chat-bot'" class="w-full h-full" />
-            <Github v-else-if="card.presentation.kind === 'github-event'" class="w-full h-full" />
-            <LayoutDashboard v-else class="w-full h-full" />
-          </span>
-          <div class="chat-extension-card__body">
-            <div class="chat-extension-card__header">
-              <span class="chat-extension-card__source">{{ card.presentation.label || extensionSurfaceLabel(card.annotation.surfaceKind) }}</span>
-            </div>
-            <div class="chat-extension-card__title">{{ card.presentation.title }}</div>
-            <a
-              v-if="card.presentation.primaryUrl && !compact"
-              :href="card.presentation.primaryUrl"
-              target="_blank"
-              rel="noreferrer"
-              class="chat-extension-card__url"
-              @click.stop
-            >{{ card.presentation.primaryUrl }}</a>
-            <ul
-              v-if="card.presentation.options.length > 0"
-              class="chat-extension-card__meta"
-              style="flex-direction: column; align-items: stretch;"
-            >
-              <li
-                v-for="option in card.presentation.options"
-                :key="`${card.annotation.annotationId}:option:${option.id}`"
-                class="chat-extension-card__meta-item"
-                style="justify-content: space-between;"
-              >
-                <span class="chat-extension-card__meta-value">{{ option.label }}</span>
-                <span v-if="option.value !== undefined" class="chat-extension-card__meta-label">{{ option.value }}</span>
-              </li>
-            </ul>
-          </div>
-          <div v-if="!compact && card.annotation.actions.length > 0" class="chat-extension-card__actions">
-            <button
-              v-for="(action, index) in card.annotation.actions"
-              :key="`${card.annotation.annotationId}:${action.route}:${action.label}`"
-              type="button"
-              class="chat-extension-card__action"
-              :class="index === 0 ? '' : 'chat-extension-card__action--secondary'"
-              :disabled="extensionActionState(card.annotation.annotationId, action)?.state === 'loading' || !action.launch"
-              :title="extensionActionState(card.annotation.annotationId, action)?.detail ?? action.launch?.commandNode ?? action.label"
-              @click.stop="invokeExtension(card.annotation.annotationId, action)"
-            >
-              <LoaderCircle v-if="extensionActionState(card.annotation.annotationId, action)?.state === 'loading'" class="animate-spin" aria-hidden="true" />
-              <CheckCircle2 v-else-if="extensionActionState(card.annotation.annotationId, action)?.state === 'success'" aria-hidden="true" />
-              <AlertCircle v-else-if="extensionActionState(card.annotation.annotationId, action)?.state === 'warning'" aria-hidden="true" />
-              <AlertCircle v-else-if="extensionActionState(card.annotation.annotationId, action)?.state === 'error'" aria-hidden="true" />
-              {{ action.label }}
-            </button>
-          </div>
-        </template>
-
-        <!-- Action error/warning detail strip (both intents) -->
-        <template v-if="!compact">
-          <span
-            v-for="action in card.annotation.actions"
-            :key="`${card.annotation.annotationId}:${action.route}:state`"
-            v-show="extensionActionState(card.annotation.annotationId, action)?.detail && extensionActionState(card.annotation.annotationId, action)?.state !== 'success'"
-            class="type-caption"
-            :class="extensionActionState(card.annotation.annotationId, action)?.state === 'error' ? 'text-destructive' : 'text-warning'"
-            style="flex-basis: 100%; margin-top: 0.25rem;"
-          >
-            {{ extensionActionState(card.annotation.annotationId, action)?.detail }}
-          </span>
-        </template>
+         Event-intent (rare on human-authored messages — bot-authored
+         events are intercepted upstream and rendered as full-width
+         system bands by MessageCard) renders as a compact inline
+         notification card.
+         Tool-intent annotations from ANY number of extensions collapse
+         into a single horizontal action-chip strip beneath this block.
+         No fat boxes fanning out below the message. -->
+    <section
+      v-for="card in eventCards"
+      :key="`${card.annotation.extensionId}:${card.annotation.annotationId}`"
+      class="chat-system-band chat-system-band--inline"
+      :class="[
+        card.presentation.tone === 'success' ? 'chat-system-band--tone-success' : '',
+        card.presentation.tone === 'danger'  ? 'chat-system-band--tone-danger'  : '',
+        card.presentation.tone === 'warning' ? 'chat-system-band--tone-warning' : '',
+      ]"
+    >
+      <div class="chat-system-band__header">
+        <span class="chat-system-band__source">
+          <MessageSquare v-if="card.annotation.surfaceKind === 'chat-bot'" aria-hidden="true" />
+          <Github v-else-if="card.presentation.kind === 'github-event'" aria-hidden="true" />
+          <LayoutDashboard v-else aria-hidden="true" />
+          {{ card.presentation.label || extensionSurfaceLabel(card.annotation.surfaceKind) }}
+        </span>
+        <span v-if="card.presentation.primaryValue" class="chat-system-band__tone-pill">{{ card.presentation.primaryValue }}</span>
       </div>
+      <div class="chat-system-band__title">
+        <a
+          v-if="card.presentation.primaryUrl && !compact"
+          :href="card.presentation.primaryUrl"
+          target="_blank"
+          rel="noreferrer"
+          class="chat-system-band__title-link"
+          @click.stop
+        >
+          <span>{{ card.presentation.title }}</span>
+          <ExternalLink aria-hidden="true" />
+        </a>
+        <template v-else>{{ card.presentation.title }}</template>
+      </div>
+      <div
+        v-if="card.presentation.details.length > 0 || card.presentation.secondaryValue"
+        class="chat-system-band__meta"
+      >
+        <span v-if="card.presentation.secondaryValue" class="chat-system-band__meta-item">
+          <span class="chat-system-band__meta-value">{{ card.presentation.secondaryValue }}</span>
+        </span>
+        <span
+          v-for="detail in card.presentation.details"
+          :key="`${card.annotation.annotationId}:${detail.label}`"
+          class="chat-system-band__meta-item"
+        >
+          <span class="chat-system-band__meta-label">{{ detail.label }}</span>
+          <span
+            class="chat-system-band__meta-value"
+            :class="detail.label === 'Commit' ? 'chat-system-band__meta-value--mono' : ''"
+            :title="detail.value"
+          >{{ detail.value }}</span>
+        </span>
+      </div>
+    </section>
+
+    <!-- Tool-intent extension actions — a single horizontal chip strip
+         under the message body. Multiple extensions each contributing
+         actions to the same message all collapse here; no fat boxes
+         fan out below.  -->
+    <div v-if="!compact && toolActionChips.length > 0" class="chat-extension-action-strip">
+      <button
+        v-for="chip in toolActionChips"
+        :key="`${chip.annotation.annotationId}:${chip.action.route}`"
+        type="button"
+        class="chat-extension-action-chip"
+        :class="extensionActionState(chip.annotation.annotationId, chip.action)?.state
+          ? `chat-extension-action-chip--state-${extensionActionState(chip.annotation.annotationId, chip.action)?.state}`
+          : ''"
+        :disabled="extensionActionState(chip.annotation.annotationId, chip.action)?.state === 'loading' || !chip.action.launch"
+        :title="extensionActionState(chip.annotation.annotationId, chip.action)?.detail
+          ?? `${chip.presentation.label}: ${chip.action.label}`"
+        @click.stop="invokeExtension(chip.annotation.annotationId, chip.action)"
+      >
+        <LoaderCircle v-if="extensionActionState(chip.annotation.annotationId, chip.action)?.state === 'loading'" class="animate-spin" aria-hidden="true" />
+        <CheckCircle2 v-else-if="extensionActionState(chip.annotation.annotationId, chip.action)?.state === 'success'" aria-hidden="true" />
+        <AlertCircle v-else-if="extensionActionState(chip.annotation.annotationId, chip.action)?.state === 'warning'" aria-hidden="true" />
+        <AlertCircle v-else-if="extensionActionState(chip.annotation.annotationId, chip.action)?.state === 'error'" aria-hidden="true" />
+        <MessageSquare v-else-if="chip.annotation.surfaceKind === 'chat-bot'" aria-hidden="true" />
+        <Github v-else-if="chip.presentation.kind === 'github-event'" aria-hidden="true" />
+        <LayoutDashboard v-else aria-hidden="true" />
+        <span class="chat-extension-action-chip__source">{{ chip.presentation.label }}</span>
+        <span>{{ chip.action.label }}</span>
+      </button>
+      <template v-for="chip in toolActionChips" :key="`${chip.annotation.annotationId}:${chip.action.route}:detail`">
+        <span
+          v-if="extensionActionState(chip.annotation.annotationId, chip.action)?.detail && extensionActionState(chip.annotation.annotationId, chip.action)?.state !== 'success'"
+          class="chat-extension-action-detail"
+          :class="extensionActionState(chip.annotation.annotationId, chip.action)?.state === 'error' ? 'chat-extension-action-detail--error' : 'chat-extension-action-detail--warning'"
+        >
+          {{ extensionActionState(chip.annotation.annotationId, chip.action)?.detail }}
+        </span>
+      </template>
     </div>
 
     <!-- Image attachments gallery -->

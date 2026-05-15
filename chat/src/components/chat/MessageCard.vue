@@ -8,6 +8,9 @@ import {
   SmilePlus,
   Trash2,
   CornerDownRight,
+  ExternalLink,
+  Github,
+  LayoutDashboard,
   MessageSquare,
   Pin,
   PinOff,
@@ -19,11 +22,14 @@ import MessageBody from "@/components/chat/MessageBody.vue";
 import EditorBubbleToolbar from "@/components/chat/EditorBubbleToolbar.vue";
 import EmojiPicker from "@/components/chat/EmojiPicker.vue";
 import {
+  extensionPresentation,
   type TimelineMessage,
+  type ExtensionAnnotation,
   type ExtensionAnnotationAction,
   type MarkupSpan,
   type MessageReference,
 } from "@/lib/chat-ui";
+import { useExtensionAnnotationActions } from "@/channels/extension-annotation-actions";
 import { messageMentionsBareJid } from "@/lib/mentions";
 import { richMessageToTiptap, tiptapToRichMessage } from "@/lib/rich-message";
 import type { OccupantHat, OccupantPresence } from "@/lib/xmpp-client";
@@ -119,6 +125,48 @@ const seniorHat = computed<OccupantHat | null>(() => {
     }
   }
   return best;
+});
+
+const isBotAuthor = computed(() =>
+  props.hats?.some((h) => h.uri === "urn:xmpp:hats:bot") ?? false,
+);
+
+const eventBands = computed(() =>
+  (props.message.extensionAnnotations ?? [])
+    .map((annotation) => ({ annotation, presentation: extensionPresentation(annotation) }))
+    .filter((card) => card.presentation.intent === "event"),
+);
+
+// Render as a system band when the author wears the bot hat and the
+// message carries at least one event-intent annotation. The standard
+// avatar+meta+body grid is replaced by a full-width flat notification;
+// the bot's literal body text (often a redundant "GitHub …" sentence)
+// is suppressed because the structured payload already says it better.
+const renderAsSystemBand = computed(() => isBotAuthor.value && eventBands.value.length > 0);
+
+function systemBandIcon(card: { annotation: ExtensionAnnotation; presentation: ReturnType<typeof extensionPresentation> }) {
+  if (card.presentation.kind === "github-event") return Github;
+  if (card.annotation.surfaceKind === "chat-bot") return MessageSquare;
+  return LayoutDashboard;
+}
+
+function systemBandToneClass(tone: string): string {
+  if (tone === "success") return "chat-system-band--tone-success";
+  if (tone === "danger") return "chat-system-band--tone-danger";
+  if (tone === "warning") return "chat-system-band--tone-warning";
+  return "";
+}
+
+// Reuse the same action-state machine MessageBody uses so loading /
+// success / error feedback is consistent across all extension surfaces.
+const allExtensionAnnotations = computed(() => props.message.extensionAnnotations ?? []);
+const invokeExtensionActionRef = computed(() => props.invokeExtensionAction);
+const {
+  actionState: systemBandActionState,
+  invokeExtension: invokeSystemBandAction,
+} = useExtensionAnnotationActions({
+  annotations: allExtensionAnnotations,
+  invokeExtensionAction: invokeExtensionActionRef,
 });
 
 const replyAuthorName = computed(() => {
@@ -557,6 +605,84 @@ onBeforeUnmount(() => {
       </p>
     </div>
   </div>
+
+  <!-- System band: bot-authored messages carrying event-intent extension
+       annotations (GitHub workflow runs, deploy notifications, …).
+       Rendered full-width and flat with no avatar gutter — these aren't
+       chat replies from a person, they're notifications, and they
+       should look like one. The bot's literal body text is suppressed
+       because the structured payload already says it better. -->
+  <template v-else-if="renderAsSystemBand">
+    <section
+      v-for="card in eventBands"
+      :key="`band:${card.annotation.extensionId}:${card.annotation.annotationId}`"
+      :data-message-id="message.id"
+      :data-message-created-at="message.createdAt"
+      class="chat-system-band animate-message-in"
+      :class="systemBandToneClass(card.presentation.tone)"
+    >
+      <div class="chat-system-band__header">
+        <span class="chat-system-band__source">
+          <component :is="systemBandIcon(card)" aria-hidden="true" />
+          {{ card.presentation.label || message.author }}
+        </span>
+        <span class="chat-system-band__stamp">{{ formatTimelineTimeOfDay(message.createdAt) }}</span>
+        <span v-if="card.presentation.primaryValue" class="chat-system-band__tone-pill">
+          {{ card.presentation.primaryValue }}
+        </span>
+      </div>
+      <div class="chat-system-band__title">
+        <a
+          v-if="card.presentation.primaryUrl"
+          :href="card.presentation.primaryUrl"
+          target="_blank"
+          rel="noreferrer"
+          class="chat-system-band__title-link"
+          @click.stop
+        >
+          <span>{{ card.presentation.title }}</span>
+          <ExternalLink aria-hidden="true" />
+        </a>
+        <template v-else>{{ card.presentation.title }}</template>
+      </div>
+      <div
+        v-if="card.presentation.details.length > 0 || card.presentation.secondaryValue"
+        class="chat-system-band__meta"
+      >
+        <span v-if="card.presentation.secondaryValue" class="chat-system-band__meta-item">
+          <span class="chat-system-band__meta-value">{{ card.presentation.secondaryValue }}</span>
+        </span>
+        <span
+          v-for="detail in card.presentation.details"
+          :key="`${card.annotation.annotationId}:${detail.label}`"
+          class="chat-system-band__meta-item"
+        >
+          <span class="chat-system-band__meta-label">{{ detail.label }}</span>
+          <span
+            class="chat-system-band__meta-value"
+            :class="detail.label === 'Commit' ? 'chat-system-band__meta-value--mono' : ''"
+            :title="detail.value"
+          >{{ detail.value }}</span>
+        </span>
+      </div>
+      <div v-if="card.annotation.actions.length > 0" class="chat-system-band__actions">
+        <button
+          v-for="action in card.annotation.actions"
+          :key="`${card.annotation.annotationId}:${action.route}`"
+          type="button"
+          class="chat-extension-action-chip"
+          :class="systemBandActionState(card.annotation.annotationId, action)?.state
+            ? `chat-extension-action-chip--state-${systemBandActionState(card.annotation.annotationId, action)?.state}`
+            : ''"
+          :disabled="systemBandActionState(card.annotation.annotationId, action)?.state === 'loading' || !action.launch"
+          :title="systemBandActionState(card.annotation.annotationId, action)?.detail ?? action.launch?.commandNode ?? action.label"
+          @click.stop="invokeSystemBandAction(card.annotation.annotationId, action)"
+        >
+          {{ action.label }}
+        </button>
+      </div>
+    </section>
+  </template>
 
   <!-- Retracted tombstone -->
   <div
