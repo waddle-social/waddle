@@ -1,0 +1,225 @@
+/* Home page atrium hero — a deliberately atmospheric landing moment.
+ * Slack-as-tool gives you a flat utility surface; Waddle-as-place opens
+ * with a brand-anchored greeting that signals personality and time-of-day
+ * presence. The aurora wash shifts hue across morning / day / evening /
+ * night, the penguin mascot bobs gently as an ambient companion, and the
+ * activity summary speaks in plain language ("3 unread · 2 friends online")
+ * rather than utility metrics. */
+.home-hero {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: clamp(1rem, 2.5vw, 2rem);
+  padding: clamp(1.25rem, 3vw, 2.25rem) clamp(1.25rem, 3vw, 2.5rem);
+  border-radius: var(--radius-xl);
+  border: 1px solid var(--border);
+  background:
+    radial-gradient(at 18% 28%, var(--hero-aurora-a, transparent), transparent 58%),
+    radial-gradient(at 88% 78%, var(--hero-aurora-b, transparent), transparent 62%),
+    var(--card);
+  overflow: hidden;
+  isolation: isolate;
+  box-shadow: var(--shadow-pane);
+}
+
+.home-hero__body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  min-width: 0;
+}
+
+.home-hero__eyebrow {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: var(--text-caption);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted-foreground);
+  font-weight: 650;
+}
+
+.home-hero__pulse {
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 9999px;
+  background: var(--primary);
+  box-shadow: 0 0 8px var(--glow-strong);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .home-hero__pulse {
+    animation: pulse-glow 2.6s ease-in-out infinite;
+  }
+}
+
+.home-hero__greeting {
+  font-size: clamp(1.5rem, 2.6vw, 2rem);
+  line-height: 1.1;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+  color: var(--foreground);
+}
+
+.home-hero__summary {
+  font-size: var(--text-body);
+  line-height: 1.55;
+  color: var(--muted-foreground);
+  max-width: 52ch;
+}
+
+.home-hero__summary strong {
+  color: var(--foreground);
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+}
+
+.home-hero__separator {
+  color: color-mix(in oklab, var(--muted-foreground) 50%, transparent);
+}
+
+.home-hero__cta {
+  align-self: flex-start;
+  margin-top: 0.6rem;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.625rem 1.15rem;
+  border-radius: var(--radius-pill);
+  background: var(--primary);
+  color: var(--primary-foreground);
+  font-weight: 650;
+  font-size: var(--text-control);
+  letter-spacing: 0.005em;
+  border: 0;
+  cursor: pointer;
+  box-shadow:
+    0 1px 0 oklch(1 0 0 / 0.18) inset,
+    0 8px 22px -10px var(--glow-strong);
+  transition: transform 140ms ease, box-shadow 140ms ease;
+}
+
+.home-hero__cta:hover {
+  transform: translateY(-1px);
+  box-shadow:
+    0 1px 0 oklch(1 0 0 / 0.22) inset,
+    0 12px 28px -10px var(--glow-strong);
+}
+
+.home-hero__cta:active {
+  transform: translateY(0);
+}
+
+.home-hero__cta-arrow {
+  transition: transform 140ms ease;
+}
+
+.home-hero__cta:hover .home-hero__cta-arrow {
+  transform: translateX(3px);
+}
+
+.home-hero__mascot-wrap {
+  position: relative;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: clamp(80px, 12vw, 124px);
+  height: clamp(80px, 12vw, 124px);
+}
+
+.home-hero__mascot-halo {
+  position: absolute;
+  inset: -10%;
+  border-radius: 9999px;
+  background: radial-gradient(closest-side, var(--glow-strong), transparent 70%);
+  filter: blur(2px);
+  pointer-events: none;
+}
+
+.home-hero__mascot {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  filter: drop-shadow(0 8px 22px color-mix(in oklab, var(--primary) 32%, transparent));
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .home-hero__mascot {
+    animation: home-hero-bob 4.8s ease-in-out infinite;
+    transform-origin: center 60%;
+  }
+}
+
+@keyframes home-hero-bob {
+  0%, 100% { transform: translateY(0) rotate(-2deg); }
+  50%      { transform: translateY(-6px) rotate(2deg); }
+}
+
+.home-hero__nav-button {
+  position: absolute;
+  top: 0.75rem;
+  right: 0.75rem;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: 2rem;
+  height: 2rem;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border);
+  background: color-mix(in oklab, var(--card) 65%, transparent);
+  backdrop-filter: blur(8px);
+  color: var(--muted-foreground);
+  cursor: pointer;
+}
+
+.home-hero__nav-button:hover {
+  background: var(--muted);
+  color: var(--foreground);
+}
+
+/* === Time-of-day aurora variants === */
+.home-hero--morning {
+  --hero-aurora-a: light-dark(oklch(0.92 0.09 80 / 0.5),  oklch(0.55 0.1 80 / 0.42));
+  --hero-aurora-b: light-dark(oklch(0.88 0.08 220 / 0.42), oklch(0.45 0.12 220 / 0.42));
+}
+
+.home-hero--day {
+  --hero-aurora-a: light-dark(oklch(0.9 0.09 184 / 0.42), oklch(0.5 0.12 184 / 0.4));
+  --hero-aurora-b: light-dark(oklch(0.92 0.08 110 / 0.36), oklch(0.5 0.1 110 / 0.32));
+}
+
+.home-hero--evening {
+  --hero-aurora-a: light-dark(oklch(0.86 0.11 60 / 0.55),  oklch(0.58 0.13 60 / 0.5));
+  --hero-aurora-b: light-dark(oklch(0.8 0.12 310 / 0.42),  oklch(0.5 0.14 310 / 0.45));
+}
+
+.home-hero--night {
+  --hero-aurora-a: light-dark(oklch(0.5 0.13 270 / 0.45),  oklch(0.4 0.14 270 / 0.55));
+  --hero-aurora-b: light-dark(oklch(0.7 0.13 158 / 0.36),  oklch(0.55 0.14 158 / 0.42));
+}
+
+@media (max-width: 720px) {
+  .home-hero {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto auto;
+    padding: 1.25rem;
+    gap: 1rem;
+  }
+  .home-hero__mascot-wrap {
+    grid-row: 1;
+    grid-column: 1;
+    justify-self: flex-end;
+    width: 64px;
+    height: 64px;
+  }
+  .home-hero__body {
+    grid-row: 2;
+    grid-column: 1;
+  }
+  .home-hero__nav-button {
+    display: inline-flex;
+  }
+}
