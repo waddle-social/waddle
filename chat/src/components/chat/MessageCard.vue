@@ -345,7 +345,11 @@ const REACTION_TOOLTIP_HALF_WIDTH = 144; // matches max-w-[18rem]
 const REACTION_TOOLTIP_GAP = 8;
 
 function showReactionFromPointer(emoji: string, nicks: readonly string[], event: PointerEvent) {
-  if (event.pointerType !== "mouse") return;
+  // Touch: skip — touch devices use the action sheet for reactions and the
+  // synthesized pointerenter has no matching pointerleave on tap.
+  // Mouse + pen (stylus): show — both fire pointerleave reliably and
+  // benefit from the hover affordance.
+  if (event.pointerType !== "mouse" && event.pointerType !== "pen") return;
   const target = event.currentTarget;
   if (!(target instanceof HTMLElement)) return;
   hoveredReaction.value = { emoji, nicks, rect: target.getBoundingClientRect() };
