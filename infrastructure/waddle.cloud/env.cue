@@ -2,7 +2,7 @@ package cuenv
 
 import (
 	"github.com/cuenv/cuenv/schema"
-	c "github.com/cuenv/cuenv/contrib/contributors"
+	wc "github.com/waddle-social/waddle/ci/contributors"
 )
 
 let _NamespaceNix = schema.#Contributor & {
@@ -49,7 +49,7 @@ schema.#Project & {
 	let _t = tasks
 
 	ci: providers: ["github"]
-	ci: contributors: [_NamespaceNix, c.#CuenvRelease]
+	ci: contributors: [_NamespaceNix, wc.#PinnedCuenvRelease]
 
 	ci: provider: github: {
 		runner: "namespace-profile-linux-x86"

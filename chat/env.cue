@@ -3,6 +3,7 @@ package cuenv
 import (
 	"github.com/cuenv/cuenv/schema"
 	c "github.com/cuenv/cuenv/contrib/contributors"
+	wc "github.com/waddle-social/waddle/ci/contributors"
 )
 
 let _NamespaceNix = schema.#Contributor & {
@@ -49,7 +50,7 @@ schema.#Project & {
 	ci: providers: ["github"]
 	ci: contributors: [
 		_NamespaceNix,
-		c.#CuenvRelease,
+		wc.#PinnedCuenvRelease,
 		c.#OnePassword,
 		c.#BunWorkspace,
 	]

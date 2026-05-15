@@ -80,7 +80,7 @@ jobs:
           aarch64|arm64) cuenv_asset="cuenv-linux-arm64" ;;
           *) echo "Unsupported Linux architecture: $arch" >&2; exit 1 ;;
         esac
-        curl -sSL -o /usr/local/bin/cuenv "https://github.com/cuenv/cuenv/releases/latest/download/${cuenv_asset}" && chmod +x /usr/local/bin/cuenv && /usr/local/bin/cuenv sync -A
+        curl -fsSL -o /usr/local/bin/cuenv "https://github.com/cuenv/cuenv/releases/download/0.41.3/${cuenv_asset}" && chmod +x /usr/local/bin/cuenv && /usr/local/bin/cuenv sync -A
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
   buildExtensionModules:
@@ -114,7 +114,7 @@ jobs:
           aarch64|arm64) cuenv_asset="cuenv-linux-arm64" ;;
           *) echo "Unsupported Linux architecture: $arch" >&2; exit 1 ;;
         esac
-        curl -sSL -o /usr/local/bin/cuenv "https://github.com/cuenv/cuenv/releases/latest/download/${cuenv_asset}" && chmod +x /usr/local/bin/cuenv && /usr/local/bin/cuenv sync -A
+        curl -fsSL -o /usr/local/bin/cuenv "https://github.com/cuenv/cuenv/releases/download/0.41.3/${cuenv_asset}" && chmod +x /usr/local/bin/cuenv && /usr/local/bin/cuenv sync -A
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     - name: buildExtensionModules
@@ -164,7 +164,7 @@ jobs:
           aarch64|arm64) cuenv_asset="cuenv-linux-arm64" ;;
           *) echo "Unsupported Linux architecture: $arch" >&2; exit 1 ;;
         esac
-        curl -sSL -o /usr/local/bin/cuenv "https://github.com/cuenv/cuenv/releases/latest/download/${cuenv_asset}" && chmod +x /usr/local/bin/cuenv && /usr/local/bin/cuenv sync -A
+        curl -fsSL -o /usr/local/bin/cuenv "https://github.com/cuenv/cuenv/releases/download/0.41.3/${cuenv_asset}" && chmod +x /usr/local/bin/cuenv && /usr/local/bin/cuenv sync -A
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     - name: checkCiDrift
@@ -203,7 +203,7 @@ jobs:
           aarch64|arm64) cuenv_asset="cuenv-linux-arm64" ;;
           *) echo "Unsupported Linux architecture: $arch" >&2; exit 1 ;;
         esac
-        curl -sSL -o /usr/local/bin/cuenv "https://github.com/cuenv/cuenv/releases/latest/download/${cuenv_asset}" && chmod +x /usr/local/bin/cuenv && /usr/local/bin/cuenv sync -A
+        curl -fsSL -o /usr/local/bin/cuenv "https://github.com/cuenv/cuenv/releases/download/0.41.3/${cuenv_asset}" && chmod +x /usr/local/bin/cuenv && /usr/local/bin/cuenv sync -A
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     - name: checkRootSyncDrift
@@ -242,7 +242,7 @@ jobs:
           aarch64|arm64) cuenv_asset="cuenv-linux-arm64" ;;
           *) echo "Unsupported Linux architecture: $arch" >&2; exit 1 ;;
         esac
-        curl -sSL -o /usr/local/bin/cuenv "https://github.com/cuenv/cuenv/releases/latest/download/${cuenv_asset}" && chmod +x /usr/local/bin/cuenv && /usr/local/bin/cuenv sync -A
+        curl -fsSL -o /usr/local/bin/cuenv "https://github.com/cuenv/cuenv/releases/download/0.41.3/${cuenv_asset}" && chmod +x /usr/local/bin/cuenv && /usr/local/bin/cuenv sync -A
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     - name: clippy
@@ -281,7 +281,7 @@ jobs:
           aarch64|arm64) cuenv_asset="cuenv-linux-arm64" ;;
           *) echo "Unsupported Linux architecture: $arch" >&2; exit 1 ;;
         esac
-        curl -sSL -o /usr/local/bin/cuenv "https://github.com/cuenv/cuenv/releases/latest/download/${cuenv_asset}" && chmod +x /usr/local/bin/cuenv && /usr/local/bin/cuenv sync -A
+        curl -fsSL -o /usr/local/bin/cuenv "https://github.com/cuenv/cuenv/releases/download/0.41.3/${cuenv_asset}" && chmod +x /usr/local/bin/cuenv && /usr/local/bin/cuenv sync -A
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     - name: fmt
@@ -325,7 +325,7 @@ jobs:
           aarch64|arm64) cuenv_asset="cuenv-linux-arm64" ;;
           *) echo "Unsupported Linux architecture: $arch" >&2; exit 1 ;;
         esac
-        curl -sSL -o /usr/local/bin/cuenv "https://github.com/cuenv/cuenv/releases/latest/download/${cuenv_asset}" && chmod +x /usr/local/bin/cuenv && /usr/local/bin/cuenv sync -A
+        curl -fsSL -o /usr/local/bin/cuenv "https://github.com/cuenv/cuenv/releases/download/0.41.3/${cuenv_asset}" && chmod +x /usr/local/bin/cuenv && /usr/local/bin/cuenv sync -A
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     - name: publishContainerImage
@@ -376,7 +376,7 @@ jobs:
           aarch64|arm64) cuenv_asset="cuenv-linux-arm64" ;;
           *) echo "Unsupported Linux architecture: $arch" >&2; exit 1 ;;
         esac
-        curl -sSL -o /usr/local/bin/cuenv "https://github.com/cuenv/cuenv/releases/latest/download/${cuenv_asset}" && chmod +x /usr/local/bin/cuenv && /usr/local/bin/cuenv sync -A
+        curl -fsSL -o /usr/local/bin/cuenv "https://github.com/cuenv/cuenv/releases/download/0.41.3/${cuenv_asset}" && chmod +x /usr/local/bin/cuenv && /usr/local/bin/cuenv sync -A
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     - name: renderDeployment
@@ -415,7 +415,7 @@ jobs:
           aarch64|arm64) cuenv_asset="cuenv-linux-arm64" ;;
           *) echo "Unsupported Linux architecture: $arch" >&2; exit 1 ;;
         esac
-        curl -sSL -o /usr/local/bin/cuenv "https://github.com/cuenv/cuenv/releases/latest/download/${cuenv_asset}" && chmod +x /usr/local/bin/cuenv && /usr/local/bin/cuenv sync -A
+        curl -fsSL -o /usr/local/bin/cuenv "https://github.com/cuenv/cuenv/releases/download/0.41.3/${cuenv_asset}" && chmod +x /usr/local/bin/cuenv && /usr/local/bin/cuenv sync -A
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     - name: test
