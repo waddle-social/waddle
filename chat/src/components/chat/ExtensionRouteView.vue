@@ -166,7 +166,7 @@ onMounted(focusPanel);
         <article
           v-for="item in items"
           :key="item.id ?? itemTitle(item)"
-          class="rounded-md border border-border bg-card p-3 shadow-sm"
+          class="min-w-0 rounded-md border border-border bg-card p-3 shadow-sm"
         >
           <div class="flex min-w-0 items-start justify-between gap-3">
             <div class="min-w-0">
@@ -186,7 +186,7 @@ onMounted(focusPanel);
               <ExternalLink class="h-3.5 w-3.5" />
             </a>
           </div>
-          <p v-if="item.description" class="type-caption mt-2 whitespace-pre-line text-card-foreground">
+          <p v-if="item.description" class="type-caption mt-2 whitespace-pre-line break-words [overflow-wrap:anywhere] text-card-foreground">
             {{ item.description }}
           </p>
           <dl v-if="item.fields.length > 0" class="mt-3 grid gap-1">
