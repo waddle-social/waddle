@@ -137,12 +137,24 @@ const eventBands = computed(() =>
     .filter((card) => card.presentation.intent === "event"),
 );
 
-// Render as a system band when the author wears the bot hat and the
-// message carries at least one event-intent annotation. The standard
-// avatar+meta+body grid is replaced by a full-width flat notification;
-// the bot's literal body text (often a redundant "GitHub …" sentence)
-// is suppressed because the structured payload already says it better.
-const renderAsSystemBand = computed(() => isBotAuthor.value && eventBands.value.length > 0);
+// Render as a system band when an event-intent annotation declares the
+// `chat-bot` surface, OR when the message author wears the bot hat
+// and any event annotation is present. The annotation-level surface
+// declaration is the load-bearing signal — the annotation provider
+// itself is saying "I came from a system actor, not a human" — and
+// trusting it makes detection robust even when the underlying XMPP
+// account hasn't been assigned `urn:xmpp:hats:bot` in this particular
+// room (the real-world case for the live GitHub integration today).
+//
+// First pass relied on the hat alone, which is what users were seeing
+// in production: GitHub kept rendering as a human-shaped message
+// because the bot account simply didn't have the hat. surfaceKind on
+// the annotation always does.
+const renderAsSystemBand = computed(() => {
+  if (eventBands.value.length === 0) return false;
+  if (isBotAuthor.value) return true;
+  return eventBands.value.some((band) => band.annotation.surfaceKind === "chat-bot");
+});
 
 function systemBandIcon(card: { annotation: ExtensionAnnotation; presentation: ReturnType<typeof extensionPresentation> }) {
   if (card.presentation.kind === "github-event") return Github;
