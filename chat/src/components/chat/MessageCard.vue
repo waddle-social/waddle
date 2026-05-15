@@ -82,6 +82,13 @@ const props = defineProps<{
   lastSeen?: number;
   authorJid?: string;
   threadReplyCount?: number;
+  /** Unique participants in this thread (capped, current user excluded
+   * by the caller). Rendered as a tiny avatar stack on the thread chip
+   * so the eye can triage threads without opening them. */
+  threadParticipants?: { nick: string; avatarUrl?: string | null; presence: OccupantPresence }[];
+  /** ISO timestamp of the most-recent reply in this thread, used to
+   * suffix the chip with a relative-time hint ("· 2 min ago"). */
+  threadLastReplyAt?: string;
   hideThreadChip?: boolean;
   /**
    * Unconditional kill switch for the inline reply-to chip. The thread
@@ -235,6 +242,35 @@ const showThreadChip = computed(
 function openThreadFromChip() {
   emit("openThread", props.message.id);
 }
+
+const MAX_CHIP_PARTICIPANTS = 3;
+const visibleThreadParticipants = computed(() =>
+  (props.threadParticipants ?? []).slice(0, MAX_CHIP_PARTICIPANTS),
+);
+const threadParticipantOverflow = computed(() => {
+  const total = props.threadParticipants?.length ?? 0;
+  return Math.max(0, total - visibleThreadParticipants.value.length);
+});
+
+function formatThreadRecency(iso: string | undefined): string {
+  if (!iso) return "";
+  const ms = Date.now() - new Date(iso).getTime();
+  if (Number.isNaN(ms) || ms < 0) return "";
+  const seconds = Math.floor(ms / 1000);
+  if (seconds < 45) return "just now";
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 2) return "1 min";
+  if (minutes < 60) return `${minutes} min`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 2) return "1 hour";
+  if (hours < 24) return `${hours} hours`;
+  const days = Math.floor(hours / 24);
+  if (days < 2) return "1 day";
+  if (days < 7) return `${days} days`;
+  return new Date(iso).toLocaleDateString(undefined, { month: "short", day: "numeric" });
+}
+
+const threadChipRecency = computed(() => formatThreadRecency(props.threadLastReplyAt));
 
 function togglePinFromMenu() {
   if (!props.message.id) return;
@@ -894,16 +930,42 @@ onBeforeUnmount(() => {
 
     <!-- Thread replies affordance. Visible in the main channel feed on roots
          that have replies; the thread panel hides it via hideThreadChip since
-         the panel already shows children. -->
+         the panel already shows children. Carries a tiny avatar stack of
+         participants (current user excluded by the caller) and a relative-
+         time suffix so the eye can triage threads at a glance — who's been
+         talking, how recently — without opening the panel. -->
     <button
       v-if="showThreadChip"
       type="button"
-      class="chat-thread-chip type-caption inline-flex items-center gap-1 rounded-md py-0.5 text-primary/85 transition-colors hover:text-primary"
+      class="chat-thread-chip type-caption inline-flex items-center gap-1.5 rounded-md py-0.5 text-primary/85 transition-colors hover:text-primary"
       :title="`Open thread (${threadReplyCount} ${threadReplyCount === 1 ? 'reply' : 'replies'})`"
       @click="openThreadFromChip"
     >
       <MessageSquare class="w-3 h-3 flex-shrink-0" />
       <span class="min-w-0 truncate">{{ threadReplyCount }} {{ threadReplyCount === 1 ? "reply" : "replies" }}</span>
+      <span
+        v-if="visibleThreadParticipants.length > 0"
+        class="chat-thread-chip__avatars"
+        aria-hidden="true"
+      >
+        <span
+          v-for="participant in visibleThreadParticipants"
+          :key="`thread-chip-avatar:${message.id}:${participant.nick}`"
+          class="chat-thread-chip__avatar-wrap"
+        >
+          <AppAvatar
+            :name="participant.nick"
+            :src="participant.avatarUrl ?? null"
+            :presence="participant.presence"
+            size="xs"
+          />
+        </span>
+        <span
+          v-if="threadParticipantOverflow > 0"
+          class="chat-thread-chip__overflow"
+        >+{{ threadParticipantOverflow }}</span>
+      </span>
+      <span v-if="threadChipRecency" class="chat-thread-chip__recency">· {{ threadChipRecency }}</span>
     </button>
 
     <!-- Existing reactions (inline, always visible when present) -->

@@ -752,6 +752,46 @@ function isGroupedFollowUp(messageId: string): boolean {
   return messageDisplayMeta.value.grouped.has(messageId);
 }
 
+const THREAD_CHIP_MAX_PARTICIPANTS = 5;
+
+interface ThreadChipParticipant {
+  nick: string;
+  avatarUrl?: string | null;
+  presence: import("@/lib/xmpp-client").OccupantPresence;
+}
+
+// Distinct participants for a thread chip: walk newest→oldest, dedup,
+// exclude the current user (the chip answers "who else has been talking
+// here?"). Capped at THREAD_CHIP_MAX_PARTICIPANTS — MessageCard renders
+// only the first N visibly and shows a "+N" overflow chip.
+function threadChipParticipants(messageId: string): ThreadChipParticipant[] {
+  const entry = props.threadIndex.get(messageId);
+  if (!entry) return [];
+  const seen = new Set<string>();
+  const ordered: ThreadChipParticipant[] = [];
+  const me = props.currentUser;
+  const children = entry.directChildren;
+  for (let i = children.length - 1; i >= 0; i--) {
+    const c = children[i];
+    if (!c) continue;
+    if (me && c.author === me) continue;
+    if (seen.has(c.author)) continue;
+    seen.add(c.author);
+    ordered.push({
+      nick: c.author,
+      avatarUrl: props.avatarUrlByAuthor[c.author] ?? null,
+      presence: props.roomPresence[c.author] ?? "offline",
+    });
+    if (ordered.length >= THREAD_CHIP_MAX_PARTICIPANTS) break;
+  }
+  return ordered;
+}
+
+function threadChipLastReplyAt(messageId: string): string | undefined {
+  const entry = props.threadIndex.get(messageId);
+  return entry?.directChildren.at(-1)?.createdAt;
+}
+
 function showDayDividerBefore(messageId: string): boolean {
   return messageDisplayMeta.value.dayDivider.has(messageId);
 }
@@ -1174,6 +1214,8 @@ function dayDividerLabel(createdAt: string): string {
             :last-seen="roomLastSeen[msg.author]"
             :author-jid="authorJidByNick?.[msg.author]"
             :thread-reply-count="threadIndex.get(msg.id)?.count ?? 0"
+            :thread-participants="threadChipParticipants(msg.id)"
+            :thread-last-reply-at="threadChipLastReplyAt(msg.id)"
             :grouped="isGroupedFollowUp(msg.id)"
             :reaction-mode-selected="reactionMode?.selectedMessageId === msg.id"
             :invoke-extension-action="props.invokeExtensionAction"
