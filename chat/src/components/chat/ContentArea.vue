@@ -26,7 +26,7 @@ import { useScrollDirectionPreference } from "@/preferences/scroll-direction";
 import type { MessageThreadIndex } from "@/channels/threads";
 import { formatTimelineStamp, formatTimelineDayDivider, isSameTimelineDay } from "@/channels/timeline";
 import { useExtensionLauncher } from "@/channels/extension-launcher";
-import ChatHeader from "@/components/chat/ChatHeader.vue";
+import ChatHeader, { type ChannelHeaderMember } from "@/components/chat/ChatHeader.vue";
 import ExtensionPalette from "@/components/chat/ExtensionPalette.vue";
 import MessageCard from "@/components/chat/MessageCard.vue";
 import MessageComposer from "@/components/chat/MessageComposer.vue";
@@ -133,6 +133,32 @@ const { mode: scrollDirection, isTopPinned } = useScrollDirectionPreference();
 const orderedFeedMessages = computed(() =>
   orderTimelineForScrollDirection(feedMessages.value, scrollDirection.value),
 );
+
+// Materialise the room's current occupant roster for the channel
+// header's live presence stack. Keys of `roomPresence` are the
+// authoritative nick set (XEP-0045 occupant tracking), so we walk
+// that and join in avatar URLs + real JIDs from the per-author
+// indices the timeline already maintains. No new server calls.
+// The current user is excluded — the stack answers "who else is
+// here right now?", which is the question worth answering at a
+// glance. The members panel still shows the full roster.
+const channelHeaderMembers = computed<ChannelHeaderMember[]>(() => {
+  if (!props.channel) return [];
+  const presence = props.roomPresence;
+  if (!presence) return [];
+  const me = props.currentUser;
+  const members: ChannelHeaderMember[] = [];
+  for (const [nick, p] of Object.entries(presence)) {
+    if (me && nick === me) continue;
+    members.push({
+      nick,
+      jid: props.authorJidByNick?.[nick],
+      avatarUrl: props.avatarUrlByAuthor[nick] ?? null,
+      presence: p,
+    });
+  }
+  return members;
+});
 const newMessagesDividerPlacement = computed(() =>
   getNewMessagesDividerPlacement(scrollDirection.value),
 );
@@ -762,12 +788,14 @@ function dayDividerLabel(createdAt: string): string {
       :can-manage-channels="canManageChannels"
       :member-count="memberCount"
       :member-state="memberState"
+      :members="channelHeaderMembers"
       :connection-notice="connectionNotice"
       :connection-status-classes="connectionStatusClasses"
       :connection-status-icon="connectionStatusIcon"
       @open-nav="emit('openNav')"
       @open-details="emit('openDetails')"
       @edit-channel="emit('editChannel')"
+      @select-member="(jid: string) => emit('openDm', jid)"
     />
     <div
       v-if="connectionNotice && connectionStatusClasses"

@@ -40,6 +40,91 @@
   justify-content: center;
 }
 
+/* Live presence stack in the channel header — replaces the static
+ * "Users · N · members ›" button. At a glance you read which specific
+ * people are present right now, not a number. Each visible avatar
+ * carries its own presence ring (iter 17 treatment) so the colour mix
+ * of the stack encodes the room's mood. Click an avatar to open that
+ * person's DM; click the empty space (or overflow chip) to open the
+ * full members panel. */
+.chat-presence-stack {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.25rem 0.5rem;
+  border-radius: var(--radius-pill);
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--muted-foreground);
+  cursor: pointer;
+  transition: background-color 0.15s ease, border-color 0.15s ease;
+}
+
+.chat-presence-stack:hover,
+.chat-presence-stack:focus-visible {
+  background: color-mix(in oklab, var(--muted) 50%, transparent);
+  border-color: color-mix(in oklab, var(--border) 80%, transparent);
+}
+
+.chat-presence-stack__avatars {
+  display: inline-flex;
+  align-items: center;
+  isolation: isolate;
+}
+
+.chat-presence-stack__avatar-wrap {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 9999px;
+  margin-left: -0.45rem;
+  cursor: pointer;
+  transition: transform 0.15s ease;
+  outline: 2px solid var(--background);
+}
+
+.chat-presence-stack__avatar-wrap:first-child {
+  margin-left: 0;
+}
+
+.chat-presence-stack__avatar-wrap:hover,
+.chat-presence-stack__avatar-wrap:focus-visible {
+  transform: translateY(-1px);
+  z-index: 2;
+}
+
+/* Offline avatars dim further when stacked so the eye reads "alive
+ * members" first — those who can actually respond to the room right
+ * now. The AppAvatar's own offline desaturation (iter 17) still
+ * applies; this extra wash makes the read at the stack level. */
+.chat-presence-stack__avatar-wrap--offline {
+  opacity: 0.55;
+}
+
+.chat-presence-stack__overflow {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 1.5rem;
+  height: 1.5rem;
+  padding: 0 0.4rem;
+  border-radius: 9999px;
+  background: color-mix(in oklab, var(--muted) 65%, transparent);
+  border: 1px solid color-mix(in oklab, var(--border) 80%, transparent);
+  font-size: 0.625rem;
+  font-weight: 700;
+  color: var(--muted-foreground);
+  font-variant-numeric: tabular-nums;
+}
+
+.chat-presence-stack__fallback {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  color: var(--muted-foreground);
+  font-size: var(--text-control);
+}
+
 .chat-pane-scroll {
   scrollbar-gutter: stable;
   /* Chat panes never scroll horizontally — long text wraps via
