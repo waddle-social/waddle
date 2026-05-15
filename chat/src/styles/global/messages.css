@@ -297,8 +297,13 @@
  * commit threshold. */
 .chat-message-swipeable {
   touch-action: pan-y;
+  /* `transform` is now bound inline from the component (`:style`) too —
+   * a defensive double-write so the visual is guaranteed even if the CSS
+   * custom-property pipeline ever drops the var. The class still keeps
+   * the CSS-var fallback path so a static (no-JS) page renders sanely. */
   transform: translateX(var(--chat-swipe-x, 0));
   transition: transform 0.18s cubic-bezier(0.16, 1, 0.3, 1);
+  will-change: transform;
 }
 .chat-message-swipeable.chat-message-swipe-active {
   /* While the finger is down, follow it 1:1. Easing kicks back in the
@@ -309,21 +314,31 @@
 .chat-message-swipe-hint {
   position: absolute;
   top: 50%;
-  width: 2rem;
-  height: 2rem;
+  width: 1.5rem;
+  height: 1.5rem;
   border-radius: 9999px;
   background: color-mix(in oklab, var(--primary) 18%, transparent);
   border: 1px solid color-mix(in oklab, var(--primary) 32%, transparent);
   background-repeat: no-repeat;
   background-position: center;
-  background-size: 1rem 1rem;
-  transform: translateY(-50%) scale(0.85);
+  background-size: 0.75rem 0.75rem;
+  transform: translateY(-50%) scale(0.7);
   opacity: 0;
   transition:
     opacity 0.18s ease,
     transform 0.18s cubic-bezier(0.16, 1, 0.3, 1),
     box-shadow 0.18s ease;
   pointer-events: none;
+}
+
+/* Persistent rest-state visibility on touch viewports — small ghost
+ * glyphs sit just outside each row at ~16% opacity, communicating
+ * "this surface is swipeable" without dominating the design. They
+ * dim back to invisibility on desktop / fine pointers. */
+@media (pointer: coarse) {
+  .chat-message-swipeable:not(.chat-message-swipe-active) .chat-message-swipe-hint {
+    opacity: 0.16;
+  }
 }
 
 .chat-message-swipe-hint--reply {

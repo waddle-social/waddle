@@ -69,7 +69,10 @@ export function useHorizontalSwipe(
   options: UseHorizontalSwipeOptions,
 ): UseHorizontalSwipeReturn {
   const {
-    startThreshold = 8,
+    // 8 → 4. Original threshold left the first 8px of any drag inert, so
+    // small swipes appeared to do nothing. 4px engages almost immediately
+    // (still high enough to debounce a stationary tap-and-release).
+    startThreshold = 4,
     commitThreshold = 72,
     maxTranslate = 120,
     verticalLockRatio = 1.2,
