@@ -662,29 +662,39 @@ function replyChildHasNestedThread(message: TimelineMessage): boolean {
             <span class="chat-day-divider__label">{{ dayDividerLabel(message.createdAt) }}</span>
             <div class="chat-day-divider__rule" />
           </div>
-          <div class="chat-thread-root" aria-label="Thread root message">
-            <span class="chat-thread-root__label type-section-label">Thread start</span>
-            <MessageCard
-              :message="message"
-              :current-user="currentUser"
-              :current-user-jid="currentUserJid"
-              :avatar-url="avatarUrlByAuthor[message.author] ?? null"
-              :hats="hatsFor(message.author)"
-              :presence="presenceFor(message.author)"
-              :last-seen="roomLastSeen[message.author]"
-              :author-jid="authorJidByNick?.[message.author]"
-              :thread-reply-count="activeEntry.count"
-              hide-thread-chip
-              hide-reply-chip
-              :reaction-mode-selected="reactionMode?.selectedMessageId === message.id"
-              :invoke-extension-action="props.invokeExtensionAction"
-              @edit="(id, body, m, r) => emit('editMessage', id, body, m, r)"
-              @retract="(id) => emit('retractMessage', id)"
-              @react="(id, emoji) => emit('reactMessage', id, emoji)"
-              @reply="beginReplyInThread"
-              @open-thread="onOpenThreadFromCard"
-            />
-          </div>
+          <!-- Thread root message — rendered as a normal MessageCard.
+               The thread-lobby header at the top of the panel already
+               identifies who started the thread ("Started by …"), so
+               wrapping the root in a primary-tinted card with a loud
+               THREAD START label was redundant chrome. The replies
+               that follow are visually separated by a hairline
+               `.chat-thread-root-divider` instead. -->
+          <MessageCard
+            :message="message"
+            :current-user="currentUser"
+            :current-user-jid="currentUserJid"
+            :avatar-url="avatarUrlByAuthor[message.author] ?? null"
+            :hats="hatsFor(message.author)"
+            :presence="presenceFor(message.author)"
+            :last-seen="roomLastSeen[message.author]"
+            :author-jid="authorJidByNick?.[message.author]"
+            :thread-reply-count="activeEntry.count"
+            hide-thread-chip
+            hide-reply-chip
+            :reaction-mode-selected="reactionMode?.selectedMessageId === message.id"
+            :invoke-extension-action="props.invokeExtensionAction"
+            @edit="(id, body, m, r) => emit('editMessage', id, body, m, r)"
+            @retract="(id) => emit('retractMessage', id)"
+            @react="(id, emoji) => emit('reactMessage', id, emoji)"
+            @reply="beginReplyInThread"
+            @open-thread="onOpenThreadFromCard"
+          />
+          <div
+            v-if="orderedChildren.length > 0"
+            class="chat-thread-root-divider"
+            role="separator"
+            aria-label="Replies"
+          />
         </template>
         <template v-else>
           <div
