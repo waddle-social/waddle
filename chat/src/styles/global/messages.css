@@ -838,6 +838,26 @@
 .chat-message-grouped:hover .chat-message-time-gutter,
 .chat-message-grouped:focus-within .chat-message-time-gutter {
   opacity: 1;
+  /* The iter-19 burst cluster rail runs through the middle of the
+   * avatar gutter. When the row reveals its timestamp on hover the two
+   * elements end up fighting for the same pixels — the rail bisects
+   * the "23:10" text. Give the visible timestamp a solid background
+   * that matches the hover row's composite colour
+   * (`--muted` 36 % over `--background`) so it occludes the rail
+   * cleanly while still reading as part of the row. */
+  background: color-mix(in oklab, var(--muted) 36%, var(--background));
+  border-radius: var(--radius-sm);
+  padding: 0 0.25rem;
+  position: relative;
+  z-index: 1;
+}
+
+/* Thread-mode rows hover with a different background tint (muted 38%
+ * over a primary-tinted base) — match that here too so the time-gutter
+ * blends with whichever row state it's in. */
+.chat-message-grid--thread.chat-message-grouped:hover .chat-message-time-gutter,
+.chat-message-grid--thread.chat-message-grouped:focus-within .chat-message-time-gutter {
+  background: color-mix(in oklab, var(--muted) 38%, var(--background));
 }
 
 @media (pointer: coarse) {
