@@ -543,7 +543,13 @@
   align-items: center;
   gap: var(--space-sm);
   justify-content: center;
-  background: color-mix(in oklab, var(--background) 82%, transparent);
+  /* Light frosted band — backdrop-blur so messages scrolling under the
+   * sticky marker softly fade rather than punching through. Less
+   * opaque than before so the rules and pill carry the structure
+   * visually; the blur is what guarantees legibility. */
+  background: color-mix(in oklab, var(--background) 62%, transparent);
+  backdrop-filter: blur(8px) saturate(135%);
+  -webkit-backdrop-filter: blur(8px) saturate(135%);
   padding-block: 0 0.375rem;
 }
 
@@ -572,16 +578,24 @@
   );
 }
 
+/* Sticky day marker pill — soft glass. The previous bordered + shadowed
+ * treatment read like a dropped toast notification, especially in dark
+ * mode where var(--background) collapsed against the lane backdrop and
+ * the hard border was the only thing separating them. Trade the border
+ * and shadow for a translucent --card surface with backdrop-blur so the
+ * pill sits OVER the rules (and any content that scrolls under) as a
+ * gentle frosted-glass anchor instead of a hard-outlined chip. */
 .chat-current-day-marker__label {
-  border: 1px solid color-mix(in oklab, var(--border) 76%, transparent);
   border-radius: 999px;
-  background: color-mix(in oklab, var(--background) 76%, transparent);
-  box-shadow: 0 1px 2px color-mix(in oklab, var(--foreground) 8%, transparent);
-  padding: 0.25rem 0.625rem;
+  background: color-mix(in oklab, var(--card) 72%, transparent);
+  backdrop-filter: blur(6px) saturate(140%);
+  -webkit-backdrop-filter: blur(6px) saturate(140%);
+  padding: 0.25rem 0.75rem;
   text-transform: uppercase;
-  letter-spacing: 0.04em;
+  letter-spacing: 0.08em;
   font-size: 0.6875rem;
   line-height: 1;
+  color: color-mix(in oklab, var(--muted-foreground) 88%, var(--foreground));
 }
 
 .chat-day-divider {
