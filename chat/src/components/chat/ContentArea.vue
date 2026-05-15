@@ -1072,24 +1072,30 @@ function dayDividerLabel(createdAt: string): string {
       </div>
 
       <div v-else-if="feedMessages.length === 0" class="chat-empty-state">
-        <div class="chat-empty-state__halo">
+        <div v-if="!dmPeer && !isForumChannel" class="chat-empty-state__mascot-wrap" aria-hidden="true">
+          <span class="chat-empty-state__mascot-halo" />
+          <img class="chat-empty-state__mascot" src="/waddle-logo.svg" alt="" />
+        </div>
+        <div v-else class="chat-empty-state__halo">
           <span class="chat-empty-state__halo-glow chat-empty-state__halo-glow--primary" aria-hidden="true" />
           <span class="chat-empty-state__halo-ring chat-empty-state__halo-ring--primary">
-            <component :is="dmPeer ? MessageCircle : isForumChannel ? MessagesSquare : Hash" class="w-6 h-6 text-primary" />
+            <component :is="dmPeer ? MessageCircle : MessagesSquare" class="w-6 h-6 text-primary" />
           </span>
         </div>
         <div class="chat-field-stack">
           <p class="type-empty-title">
             {{ dmPeer
               ? `Just you and @${dmPeer.peerUsername}`
-              : `Welcome to #${channel?.name}` }}
+              : isForumChannel
+                ? `Welcome to #${channel?.name}`
+                : `It's quiet in #${channel?.name}` }}
           </p>
           <p class="type-field text-muted-foreground chat-copy-measure">
             {{ isForumChannel
               ? "Start the first topic with a clear title so people can follow the thread."
               : dmPeer
                 ? "Send the first message to get the conversation going."
-                : "Say hi — this is where the conversation starts." }}
+                : "Be the one who breaks the silence. Drop a hello, share what you're working on, ask the room something interesting." }}
           </p>
         </div>
       </div>
