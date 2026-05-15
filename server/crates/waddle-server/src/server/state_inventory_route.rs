@@ -1,14 +1,13 @@
 //! `/debug/state-inventory` — JSON snapshot of every long-lived
 //! in-memory map's `.len()`.
 //!
-//! Purpose: the server's process RSS has grown faster than the
-//! observable workload would explain, and the existing `/metrics`
-//! Prometheus surface tracks rates / cumulative counters but not the
-//! instantaneous size of the long-lived maps that are the most
-//! likely culprits (room actors, avatar locks, auth flows, SM
-//! sessions, caps cache, etc.). With this endpoint scraped at
-//! 30 s and charted against RSS, the structure responsible for the
-//! climb falls out of the data within minutes.
+//! In production, the primary surface for these values is the OTel
+//! gauge stream published by
+//! [`crate::server::state_inventory_metrics`] — those values flow
+//! through Alloy into Grafana Cloud without any port-forward or
+//! per-pod auth. This route is the operator backstop: a single
+//! `curl` from inside the cluster (or via port-forward) returns the
+//! same shape as the gauges, useful when Grafana isn't reachable.
 //!
 //! Hardening:
 //!
@@ -26,9 +25,9 @@ use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::routing::get;
 use axum::{Json, Router};
-use serde::Serialize;
 
 use crate::server::routes::websocket::WebSocketState;
+use crate::server::state_inventory::{collect_snapshot, StateInventorySnapshot};
 
 const AUTH_HEADER: &str = "x-waddle-debug-token";
 const TOKEN_ENV: &str = "WADDLE_DEBUG_STATE_TOKEN";
@@ -55,65 +54,6 @@ struct RouteState {
     auth: Arc<DebugStateAuth>,
 }
 
-#[derive(Debug, Serialize)]
-struct InventoryResponse {
-    auth: AuthInventory,
-    profile: ProfileInventory,
-    sessions: SessionInventory,
-    caps: CapsInventory,
-    connections: ConnectionInventory,
-    rooms: RoomInventory,
-}
-
-#[derive(Debug, Serialize)]
-struct RoomInventory {
-    /// Total `RoomActor` instances tracked by `RoomRegistryActor`.
-    /// Errors fall through as 0 to keep the endpoint best-effort.
-    total: usize,
-    /// Rooms that report `is_dormant() == true` — zero occupants AND
-    /// no subject AND no pinned entries AND no in-memory affiliations.
-    /// Reclaimable by the room dormancy janitor on its next pass; a
-    /// growing value here is the canary signal that the janitor
-    /// interval should be tightened.
-    dormant: usize,
-}
-
-#[derive(Debug, Serialize)]
-struct AuthInventory {
-    pending_auth: usize,
-    device_auth: usize,
-    xmpp_auth_codes: usize,
-    dynamic_oidc_clients: usize,
-    dynamic_oidc_client_locks: usize,
-}
-
-#[derive(Debug, Serialize)]
-struct ProfileInventory {
-    avatar_source_locks: usize,
-    profile_publish_tracker_in_flight: usize,
-    provider_dispatch_tasks_in_flight: usize,
-}
-
-#[derive(Debug, Serialize)]
-struct SessionInventory {
-    sm_live_sessions: Option<usize>,
-    resumable_sessions: usize,
-}
-
-#[derive(Debug, Serialize)]
-struct CapsInventory {
-    caps_cache: usize,
-    pending_resolutions: usize,
-}
-
-#[derive(Debug, Serialize)]
-struct ConnectionInventory {
-    full_jid_connections: usize,
-    pending_subscription_stanzas: usize,
-    presence_states: usize,
-    last_activity: usize,
-}
-
 pub fn router(websocket: Arc<WebSocketState>, auth: DebugStateAuth) -> Router {
     Router::new()
         .route("/debug/state-inventory", get(handler))
@@ -126,7 +66,7 @@ pub fn router(websocket: Arc<WebSocketState>, auth: DebugStateAuth) -> Router {
 async fn handler(
     State(state): State<RouteState>,
     headers: HeaderMap,
-) -> Result<Json<InventoryResponse>, StatusCode> {
+) -> Result<Json<StateInventorySnapshot>, StatusCode> {
     let Some(provided) = headers
         .get(AUTH_HEADER)
         .and_then(|value| value.to_str().ok())
@@ -137,87 +77,7 @@ async fn handler(
         return Err(StatusCode::UNAUTHORIZED);
     }
 
-    let ws = &state.websocket;
-    let deps = &ws.deps;
-    let auth_state = &deps.auth_state;
-    let protocol = &deps.protocol;
-
-    let sm_live_sessions = protocol
-        .sm_session_registry
-        .live_session_ids()
-        .map(|ids| ids.len());
-
-    let rooms = collect_room_inventory(ws).await;
-
-    let response = InventoryResponse {
-        auth: AuthInventory {
-            pending_auth: auth_state.pending_auth.len(),
-            device_auth: auth_state.device_auth.len(),
-            xmpp_auth_codes: auth_state.xmpp_auth_codes.len(),
-            dynamic_oidc_clients: auth_state.dynamic_oidc_clients.len(),
-            dynamic_oidc_client_locks: auth_state.dynamic_oidc_client_locks.len(),
-        },
-        profile: ProfileInventory {
-            avatar_source_locks: protocol.avatar_source_locks.len(),
-            profile_publish_tracker_in_flight: protocol.profile_publish_tracker.len(),
-            provider_dispatch_tasks_in_flight: deps.provider_dispatch_tasks.len(),
-        },
-        sessions: SessionInventory {
-            sm_live_sessions,
-            resumable_sessions: protocol.resumable_sessions.len(),
-        },
-        caps: CapsInventory {
-            caps_cache: protocol.caps_resolver.cache().len(),
-            pending_resolutions: protocol.caps_resolver.pending_len(),
-        },
-        connections: ConnectionInventory {
-            full_jid_connections: protocol.connection_registry.connection_count(),
-            pending_subscription_stanzas: protocol.connection_registry.pending_subscription_count(),
-            presence_states: protocol.connection_registry.presence_state_count(),
-            last_activity: protocol.connection_registry.last_activity_count(),
-        },
-        rooms,
-    };
-    Ok(Json(response))
-}
-
-/// Best-effort population of `RoomInventory`. Errors fall through as
-/// zeros so the inventory endpoint stays operational even when the
-/// room registry or a per-room actor is overloaded.
-async fn collect_room_inventory(ws: &WebSocketState) -> RoomInventory {
-    use waddle_xmpp::muc::room_actor::IsDormant;
-    use waddle_xmpp::muc::room_registry_actor::{GetRoom, ListRooms, RoomCount};
-    let total: usize = ws
-        .deps
-        .protocol
-        .room_registry
-        .ask(RoomCount)
-        .await
-        .unwrap_or(0);
-    let room_list = match ws.deps.protocol.room_registry.ask(ListRooms).await {
-        Ok(list) => list,
-        Err(_) => {
-            return RoomInventory { total, dormant: 0 };
-        }
-    };
-    let mut dormant = 0usize;
-    for room_jid in room_list {
-        let Ok(Some(actor)) = ws
-            .deps
-            .protocol
-            .room_registry
-            .ask(GetRoom {
-                room_jid: room_jid.clone(),
-            })
-            .await
-        else {
-            continue;
-        };
-        if matches!(actor.ask(IsDormant).await, Ok(true)) {
-            dormant += 1;
-        }
-    }
-    RoomInventory { total, dormant }
+    Ok(Json(collect_snapshot(&state.websocket).await))
 }
 
 /// Constant-time byte slice comparison so the auth check cannot leak
@@ -236,11 +96,19 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, OnceLock};
+
+    /// Serialise the env-var tests against each other so parallel
+    /// `cargo test` execution can't race them on a single
+    /// process-global env slot.
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
 
     #[test]
     fn debug_state_auth_from_env_returns_none_when_unset() {
-        // Use a known-untouched name so we don't disturb live env in
-        // case another test runs in the same process.
+        let _guard = env_lock().lock().expect("lock should not be poisoned");
         let prev = std::env::var(TOKEN_ENV).ok();
         std::env::remove_var(TOKEN_ENV);
         assert!(debug_state_auth_from_env().is_none());
@@ -251,6 +119,7 @@ mod tests {
 
     #[test]
     fn debug_state_auth_from_env_returns_none_when_blank() {
+        let _guard = env_lock().lock().expect("lock should not be poisoned");
         let prev = std::env::var(TOKEN_ENV).ok();
         std::env::set_var(TOKEN_ENV, "   ");
         assert!(debug_state_auth_from_env().is_none());
@@ -262,6 +131,7 @@ mod tests {
 
     #[test]
     fn debug_state_auth_from_env_returns_some_when_set() {
+        let _guard = env_lock().lock().expect("lock should not be poisoned");
         let prev = std::env::var(TOKEN_ENV).ok();
         std::env::set_var(TOKEN_ENV, "  shhh-secret  ");
         let auth = debug_state_auth_from_env().expect("non-blank value parses");

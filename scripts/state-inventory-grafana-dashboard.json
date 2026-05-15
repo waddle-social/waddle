@@ -1,6 +1,6 @@
 {
   "annotations": { "list": [] },
-  "description": "Waddle server long-lived in-memory maps. Charts the /debug/state-inventory snapshot against process RSS so the offending structure for an RSS climb falls out of the data within minutes. State-inventory values come from a sidecar scraper that converts the JSON into Prometheus gauges (e.g. via prom-aggregation-gateway) — sample queries below use the gauge names emitted by scripts/state-inventory-scrape.sh once it's wrapped in such a sidecar. The Grafana dashboard is intentionally hand-buildable from this JSON template, not a Grafana-export of a private dashboard, so it survives Grafana upgrades and is reviewable in PRs.",
+  "description": "Waddle server long-lived in-memory maps, sampled every 15 s by `state_inventory_metrics::spawn_state_inventory_publisher` and exported through the standard OTel meter provider into Grafana Cloud Mimir via the in-cluster grafana-alloy collector. Each panel charts a logical group of maps against `process_resident_memory_bytes` so an RSS climb correlates directly to whichever .len() is growing. Hand-buildable on purpose so it survives Grafana upgrades and is reviewable in PRs.",
   "editable": true,
   "graphTooltip": 1,
   "panels": [
@@ -22,10 +22,11 @@
       "title": "Auth state maps (.len())",
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "targets": [
-        { "expr": "waddle_state_inventory_pending_auth", "legendFormat": "pending_auth" },
-        { "expr": "waddle_state_inventory_device_auth", "legendFormat": "device_auth" },
-        { "expr": "waddle_state_inventory_xmpp_auth_codes", "legendFormat": "xmpp_auth_codes" },
-        { "expr": "waddle_state_inventory_dynamic_oidc_clients", "legendFormat": "dynamic_oidc_clients" }
+        { "expr": "waddle_state_auth_pending_auth", "legendFormat": "pending_auth" },
+        { "expr": "waddle_state_auth_device_auth", "legendFormat": "device_auth" },
+        { "expr": "waddle_state_auth_xmpp_auth_codes", "legendFormat": "xmpp_auth_codes" },
+        { "expr": "waddle_state_auth_dynamic_oidc_clients", "legendFormat": "dynamic_oidc_clients" },
+        { "expr": "waddle_state_auth_dynamic_oidc_client_locks", "legendFormat": "dynamic_oidc_client_locks" }
       ],
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 }
     },
@@ -34,9 +35,9 @@
       "title": "Profile + dispatch in-flight",
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "targets": [
-        { "expr": "waddle_state_inventory_avatar_source_locks", "legendFormat": "avatar_source_locks" },
-        { "expr": "waddle_state_inventory_profile_publish_in_flight", "legendFormat": "profile_publish" },
-        { "expr": "waddle_state_inventory_provider_dispatch_in_flight", "legendFormat": "provider_dispatch" }
+        { "expr": "waddle_state_profile_avatar_source_locks", "legendFormat": "avatar_source_locks" },
+        { "expr": "waddle_state_profile_publish_tracker_in_flight", "legendFormat": "profile_publish" },
+        { "expr": "waddle_state_profile_provider_dispatch_in_flight", "legendFormat": "provider_dispatch" }
       ],
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 }
     },
@@ -45,10 +46,10 @@
       "title": "Sessions + caps",
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "targets": [
-        { "expr": "waddle_state_inventory_sm_live_sessions", "legendFormat": "sm_live" },
-        { "expr": "waddle_state_inventory_resumable_sessions", "legendFormat": "resumable" },
-        { "expr": "waddle_state_inventory_caps_cache", "legendFormat": "caps_cache" },
-        { "expr": "waddle_state_inventory_caps_pending", "legendFormat": "caps_pending" }
+        { "expr": "waddle_state_sessions_sm_live_sessions", "legendFormat": "sm_live" },
+        { "expr": "waddle_state_sessions_resumable_sessions", "legendFormat": "resumable" },
+        { "expr": "waddle_state_caps_caps_cache", "legendFormat": "caps_cache" },
+        { "expr": "waddle_state_caps_pending_resolutions", "legendFormat": "caps_pending" }
       ],
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 }
     },
@@ -57,10 +58,10 @@
       "title": "Connections + presence",
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "targets": [
-        { "expr": "waddle_state_inventory_full_jid_conns", "legendFormat": "connections" },
-        { "expr": "waddle_state_inventory_pending_subs", "legendFormat": "pending_subs" },
-        { "expr": "waddle_state_inventory_presence_states", "legendFormat": "presence_states" },
-        { "expr": "waddle_state_inventory_last_activity", "legendFormat": "last_activity" }
+        { "expr": "waddle_state_connections_full_jid_connections", "legendFormat": "connections" },
+        { "expr": "waddle_state_connections_pending_subscription_stanzas", "legendFormat": "pending_subs" },
+        { "expr": "waddle_state_connections_presence_states", "legendFormat": "presence_states" },
+        { "expr": "waddle_state_connections_last_activity", "legendFormat": "last_activity" }
       ],
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 }
     },
@@ -69,8 +70,8 @@
       "title": "MUC rooms (total vs dormant — reclaimable headroom)",
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "targets": [
-        { "expr": "waddle_state_inventory_rooms_total", "legendFormat": "total" },
-        { "expr": "waddle_state_inventory_rooms_dormant", "legendFormat": "dormant (will be evicted)" }
+        { "expr": "waddle_state_rooms_total", "legendFormat": "total" },
+        { "expr": "waddle_state_rooms_dormant", "legendFormat": "dormant (will be evicted)" }
       ],
       "gridPos": { "h": 8, "w": 24, "x": 0, "y": 24 }
     }
@@ -90,5 +91,5 @@
   "time": { "from": "now-6h", "to": "now" },
   "title": "Waddle server — long-lived state inventory",
   "uid": "waddle-state-inventory",
-  "version": 1
+  "version": 2
 }
