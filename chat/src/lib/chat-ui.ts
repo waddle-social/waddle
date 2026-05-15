@@ -427,6 +427,24 @@ function isInternalExtensionDetailKey(key: string): boolean {
 type ExtensionPresentationKind = "generic" | "github-event";
 type ExtensionPresentationTone = "neutral" | "success" | "warning" | "danger";
 
+/**
+ * Extension intent — declares the user's relationship to the card content,
+ * which drives layout independently of whether `annotation.actions` exists:
+ *
+ *  - `event`  → read-first. The payload IS the value. Server-pushed
+ *               notifications, status updates, workflow runs. Actions
+ *               (when present) render as secondary chips.
+ *  - `tool`   → do-first. The action button(s) ARE why the card exists.
+ *               Link Board "Save", polls/surveys, anything where the user's
+ *               primary motion is to make a decision in-line.
+ *
+ * Intent is encoded in `extensionPresentation()` from the payload shape;
+ * it never collapses to `annotation.actions.length > 0`, because an event
+ * (e.g. a failing CI run) can legitimately offer affordances ("Rerun",
+ * "View logs") without ceasing to be a read-first surface.
+ */
+type ExtensionIntent = "event" | "tool";
+
 interface ExtensionPresentationOption {
   id: string;
   label: string;
@@ -434,6 +452,7 @@ interface ExtensionPresentationOption {
 }
 
 interface ExtensionPresentation {
+  intent: ExtensionIntent;
   kind: ExtensionPresentationKind;
   tone: ExtensionPresentationTone;
   label: string;
@@ -452,14 +471,23 @@ export function extensionPresentation(annotation: ExtensionAnnotation): Extensio
     return githubEventPresentation(annotation, payload);
   }
   const summary = genericExtensionSummary(annotation, payload);
+  const options = payloadOptions(payload);
+  const details = extensionCardDetails(annotation);
+  // A generic card is a `tool` when its primary purpose is the action
+  // (Link Board "Save", forms, surveys with options to pick). Without
+  // actions or options, it degrades to `event` — read-first content
+  // that just happens to come from an extension.
+  const intent: ExtensionIntent =
+    annotation.actions.length > 0 || options.length > 0 ? "tool" : "event";
   return {
+    intent,
     kind: "generic",
     tone: "neutral",
     label: extensionSurfaceLabel(annotation.surfaceKind),
     title: annotation.title,
     ...(summary ? { summary } : {}),
-    options: payloadOptions(payload),
-    details: extensionCardDetails(annotation),
+    options,
+    details,
   };
 }
 
@@ -480,7 +508,11 @@ function githubEventPresentation(
     ...(attrs["event-type"] ? [{ label: "Event", value: humanizeExtensionKey(attrs["event-type"]) }] : []),
   ];
   const primaryUrl = safeExternalUrl(attrs.url);
+  // GitHub events are always `event` intent — even when they carry actions
+  // (rerun, approve, view logs), the user's primary motion is to read and
+  // optionally click through, not to operate the card as a tool.
   return {
+    intent: "event",
     kind: "github-event",
     tone: githubTone(conclusion),
     label: "GitHub",
