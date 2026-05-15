@@ -32,7 +32,12 @@ interface UseLongPressReturn {
  * level so buttons underneath the press don't double-fire.
  */
 export function useLongPress(options: UseLongPressOptions): UseLongPressReturn {
-  const { delay = 500, moveThreshold = 10, onLongPress } = options;
+  // Default delay bumped 500 → 650ms so iOS's native long-press text-selection
+  // window has a chance to win the race. The native UI runs at ~500ms; firing
+  // our timer at the same instant pre-empted text selection and the user had
+  // no way to select-and-copy a message body. 650ms still feels snappy for
+  // the deliberate "open the actions menu" gesture.
+  const { delay = 650, moveThreshold = 10, onLongPress } = options;
 
   const isPressing = ref(false);
   let timer: ReturnType<typeof setTimeout> | null = null;
@@ -41,12 +46,46 @@ export function useLongPress(options: UseLongPressOptions): UseLongPressReturn {
   let activePointerId: number | null = null;
   let fired = false;
   let capturedTarget: Element | null = null;
+  let selectionWatcher: (() => void) | null = null;
+  let selectionChangedDuringPress = false;
 
   function clearTimer() {
     if (timer !== null) {
       clearTimeout(timer);
       timer = null;
     }
+  }
+
+  function stopSelectionWatch() {
+    if (selectionWatcher) {
+      selectionWatcher();
+      selectionWatcher = null;
+    }
+  }
+
+  function watchSelectionForCancellation() {
+    if (typeof document === "undefined") return;
+    selectionChangedDuringPress = false;
+    const handler = () => {
+      const sel = document.getSelection();
+      // Ignore "selection cleared" events (empty selection arrives both at
+      // initial focus and when the user taps elsewhere). We only care about
+      // an active range appearing during the press — that means iOS started
+      // its native text-selection magnifier / handles.
+      if (sel && !sel.isCollapsed && sel.toString().length > 0) {
+        selectionChangedDuringPress = true;
+        // Cancel the timer immediately so we don't even fire onLongPress.
+        reset();
+      }
+    };
+    document.addEventListener("selectionchange", handler);
+    selectionWatcher = () => document.removeEventListener("selectionchange", handler);
+  }
+
+  function hasActiveSelection(): boolean {
+    if (typeof document === "undefined") return false;
+    const sel = document.getSelection();
+    return !!sel && !sel.isCollapsed && sel.toString().length > 0;
   }
 
   function releaseCapture() {
@@ -63,6 +102,7 @@ export function useLongPress(options: UseLongPressOptions): UseLongPressReturn {
   function reset() {
     clearTimer();
     releaseCapture();
+    stopSelectionWatch();
     isPressing.value = false;
     activePointerId = null;
     fired = false;
@@ -98,11 +138,25 @@ export function useLongPress(options: UseLongPressOptions): UseLongPressReturn {
     startY = event.clientY;
     isPressing.value = true;
     fired = false;
+    selectionChangedDuringPress = false;
+
+    // Watch for an active text selection to appear while we're counting
+    // down. If iOS's native selection wins the race we cancel ourselves so
+    // the action sheet doesn't pop on top of the selection handles.
+    watchSelectionForCancellation();
 
     timer = setTimeout(() => {
       if (activePointerId === null) return;
+      // If a non-collapsed selection appeared during the press window, or
+      // exists right now (an existing selection the user is extending),
+      // yield: the user is interacting with text, not asking for actions.
+      if (selectionChangedDuringPress || hasActiveSelection()) {
+        reset();
+        return;
+      }
       fired = true;
       timer = null;
+      stopSelectionWatch();
 
       const target = event.target;
       if (

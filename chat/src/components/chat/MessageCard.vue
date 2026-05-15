@@ -589,7 +589,6 @@ onBeforeUnmount(() => {
             ? 'chat-message-grid--thread'
             : '',
       message.deliveryStatus === 'sending' || message.deliveryStatus === 'queued' ? 'opacity-50' : '',
-      longPress.isPressing.value ? 'no-callout' : '',
       grouped ? 'chat-message-grouped' : '',
       reactionModeSelected ? 'chat-message-grid--reaction-selected' : '',
       swipe.isSwiping.value ? 'chat-message-swipe-active' : '',

@@ -122,15 +122,6 @@
   border-radius: var(--radius-sm, 6px);
 }
 
-/* Suppress the iOS Safari callout / selection while a long-press is in progress.
-   Tailwind's `select-none` omits the iOS-only -webkit-touch-callout property,
-   and without it the system "Copy / Share" magnifier appears mid-gesture. */
-.no-callout {
-  -webkit-touch-callout: none;
-  -webkit-user-select: none;
-  user-select: none;
-}
-
 /* Visible flash when a user jumps to a replied-to message via the reply chip. */
 @keyframes message-jump-flash {
   0% {
