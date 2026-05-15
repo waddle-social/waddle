@@ -1,8 +1,10 @@
 <script setup lang="ts">
 import { computed, type Component } from "vue";
-import { ChevronRight, Hash, Menu, MessageCircle, MessagesSquare, Pin, Search, Settings, Users } from "lucide-vue-next";
+import { Hash, Menu, MessageCircle, MessagesSquare, Pin, Search, Settings, Users } from "lucide-vue-next";
+import AppAvatar from "@/components/ui/AppAvatar.vue";
 import type { ChannelSummary, SpaceSummary } from "@/lib/chat-types";
 import type { ConnectionNoticeCopy } from "@/lib/connection-notice";
+import type { OccupantPresence } from "@/lib/xmpp-client";
 import type { MemberLoadState } from "@/waddles/directory";
 
 interface ConnectionStatusClasses {
@@ -10,6 +12,13 @@ interface ConnectionStatusClasses {
   iconWrap: string;
   chip: string;
   body: string;
+}
+
+export interface ChannelHeaderMember {
+  nick: string;
+  jid?: string;
+  avatarUrl?: string | null;
+  presence: OccupantPresence;
 }
 
 const props = defineProps<{
@@ -20,10 +29,37 @@ const props = defineProps<{
   canManageChannels: boolean;
   memberCount: number | null;
   memberState: MemberLoadState;
+  /** Roster of room occupants with their current presence, used to render
+   * the live presence avatar stack on the right of the header. Sorted
+   * online-first by the caller. */
+  members?: ChannelHeaderMember[];
   connectionNotice: ConnectionNoticeCopy | null;
   connectionStatusClasses: ConnectionStatusClasses | null;
   connectionStatusIcon: Component;
 }>();
+
+const MAX_HEADER_AVATARS = 4;
+
+const sortedMembers = computed<ChannelHeaderMember[]>(() => {
+  const list = props.members ?? [];
+  const rank = (p: OccupantPresence) => {
+    switch (p) {
+      case "online": return 0;
+      case "dnd":    return 1;
+      case "away":   return 2;
+      default:       return 3;
+    }
+  };
+  return [...list].sort((a, b) => {
+    const r = rank(a.presence) - rank(b.presence);
+    if (r !== 0) return r;
+    return a.nick.localeCompare(b.nick);
+  });
+});
+
+const visibleMembers = computed(() => sortedMembers.value.slice(0, MAX_HEADER_AVATARS));
+const overflowCount = computed(() => Math.max(0, sortedMembers.value.length - visibleMembers.value.length));
+const onlineCount = computed(() => sortedMembers.value.filter((m) => m.presence === "online").length);
 
 const showSearch = defineModel<boolean>("showSearch", { required: true });
 const showPinnedPanel = defineModel<boolean>("showPinnedPanel", { default: false });
@@ -32,7 +68,25 @@ const emit = defineEmits<{
   openNav: [];
   openDetails: [];
   editChannel: [];
+  selectMember: [jid: string];
 }>();
+
+function presenceLabel(p: OccupantPresence): string {
+  switch (p) {
+    case "online": return "online";
+    case "away":   return "away";
+    case "dnd":    return "do not disturb";
+    default:       return "offline";
+  }
+}
+
+function onAvatarClick(member: ChannelHeaderMember) {
+  if (!member.jid) {
+    emit("openDetails");
+    return;
+  }
+  emit("selectMember", member.jid);
+}
 
 function presenceText(show?: string): string {
   if (show === "available") return "online";
@@ -159,18 +213,50 @@ const memberButtonCopy = computed(() => {
         >
           <Settings class="w-3.5 h-3.5" />
         </button>
+        <!-- Live presence stack: at-a-glance "who's here right now" instead
+             of a static "N members" count. Replaces the eye's first read
+             of "this is a room labeled #x" with "this is a room with
+             these specific people present right now." -->
         <button
           v-if="channel"
-          class="chat-action-button chat-action-button--secondary text-muted-foreground hover:text-foreground"
+          class="chat-presence-stack"
           type="button"
           :title="memberButtonCopy.title"
-          :aria-label="memberButtonCopy.aria"
+          :aria-label="`${memberButtonCopy.aria}. ${onlineCount} online.`"
           @click="emit('openDetails')"
         >
-          <Users class="w-3.5 h-3.5" />
-          <span class="type-control">{{ memberButtonCopy.primary }}</span>
-          <span class="hidden lg:inline type-control">{{ memberButtonCopy.secondary }}</span>
-          <ChevronRight class="w-3.5 h-3.5 opacity-60" />
+          <span
+            v-if="visibleMembers.length > 0"
+            class="chat-presence-stack__avatars"
+            @click.stop
+          >
+            <span
+              v-for="member in visibleMembers"
+              :key="`hdr-avatar:${member.nick}`"
+              class="chat-presence-stack__avatar-wrap"
+              :class="`chat-presence-stack__avatar-wrap--${member.presence}`"
+              :title="`${member.nick} · ${presenceLabel(member.presence)}`"
+              tabindex="0"
+              @click.stop="onAvatarClick(member)"
+              @keydown.enter.stop="onAvatarClick(member)"
+            >
+              <AppAvatar
+                :name="member.nick"
+                :src="member.avatarUrl ?? null"
+                :presence="member.presence"
+                size="xs"
+              />
+            </span>
+          </span>
+          <span
+            v-if="overflowCount > 0"
+            class="chat-presence-stack__overflow"
+            :title="`${overflowCount} more`"
+          >+{{ overflowCount }}</span>
+          <span v-else-if="visibleMembers.length === 0" class="chat-presence-stack__fallback">
+            <Users class="w-3.5 h-3.5" />
+            <span class="type-control">{{ memberButtonCopy.primary }}</span>
+          </span>
         </button>
       </div>
     </div>
