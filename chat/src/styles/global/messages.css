@@ -496,6 +496,46 @@
   color: color-mix(in oklab, var(--primary) 85%, var(--foreground));
 }
 
+/* Warmth tiers — a count-proportional ambient halo that nudges
+ * reaction chips from "metric chip" toward "ambient acknowledgement".
+ * At a glance the room shows you which posts resonated, not just
+ * which ones got a tap. Tiers compound with the `--self` variant; the
+ * `--self` chip stays primary-tinted but its halo widens with warmth. */
+.chat-reaction-chip--warmth-tepid {
+  box-shadow: 0 0 10px -4px var(--glow);
+}
+
+.chat-reaction-chip--warmth-warm {
+  background: color-mix(in oklab, var(--primary) 8%, var(--muted));
+  border-color: color-mix(in oklab, var(--primary) 18%, transparent);
+  box-shadow: 0 0 14px -3px var(--glow-strong);
+}
+
+.chat-reaction-chip--warmth-warm:hover {
+  background: color-mix(in oklab, var(--primary) 14%, var(--muted));
+}
+
+.chat-reaction-chip--warmth-hot {
+  background: color-mix(in oklab, var(--primary) 14%, var(--muted));
+  border-color: color-mix(in oklab, var(--primary) 26%, transparent);
+  box-shadow:
+    0 0 18px -2px var(--glow-strong),
+    0 0 0 1px color-mix(in oklab, var(--primary) 18%, transparent) inset;
+}
+
+.chat-reaction-chip--warmth-hot:hover {
+  background: color-mix(in oklab, var(--primary) 22%, var(--muted));
+}
+
+/* When the user is themselves a reactor on a hot chip, lift the halo
+ * a step further and bias the count color further toward primary. */
+.chat-reaction-chip--self.chat-reaction-chip--warmth-warm,
+.chat-reaction-chip--self.chat-reaction-chip--warmth-hot {
+  box-shadow:
+    0 0 22px -2px var(--glow-strong),
+    0 0 0 1px color-mix(in oklab, var(--primary) 28%, transparent) inset;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .chat-reaction-chip {
     transition: none;
