@@ -42,6 +42,13 @@
 
 .chat-pane-scroll {
   scrollbar-gutter: stable;
+  /* Chat panes never scroll horizontally — long text wraps via
+   * `.styled-body { overflow-wrap: anywhere }` and `<pre>` blocks carry
+   * their own internal `overflow-x: auto`. Enforcing the rule here means
+   * future scroll panes inherit the guarantee without each component
+   * having to remember the right Tailwind utility. */
+  overflow-x: hidden;
+  overflow-y: auto;
 }
 
 .chat-message-scroll {
