@@ -225,6 +225,14 @@
             WADDLE_TEST_FIXED_ACCOUNT_PASSWORD = "cuenv-test-password";
             WADDLE_UPLOAD_DIR = "./uploads";
             RUST_BACKTRACE = "1";
+            # Cap parallel cargo compile units so the test build doesn't
+            # OOM the runner during release-mode linking of the full
+            # workspace + every extension. The waddle-server-test step
+            # was hitting SIGKILL (exit 137) under default parallelism;
+            # 4 codegen-units in flight keeps peak memory bounded on
+            # the namespace-profile-linux-x86 runner without meaningfully
+            # slowing the build (deps are already cached upstream).
+            CARGO_BUILD_JOBS = "4";
           };
           testArgs = baseArgs // testRuntimeEnv;
           serverTestArgs = testArgs // {
