@@ -301,9 +301,16 @@ watch(
               <template v-for="{ channel, unread } in group.channels" :key="channel.id">
               <button
                 class="chat-list-row w-full min-h-10 flex items-center gap-2.5 px-3 py-2 text-left group"
-                :class="isActiveChannelPage(channel)
-                  ? 'bg-sidebar-accent text-sidebar-foreground'
-                  : 'text-sidebar-muted hover:bg-sidebar-accent/50 hover:text-sidebar-foreground'"
+                :class="[
+                  isActiveChannelPage(channel)
+                    ? 'bg-sidebar-accent text-sidebar-foreground'
+                    : 'text-sidebar-muted hover:bg-sidebar-accent/50 hover:text-sidebar-foreground',
+                  !isActiveChannelPage(channel) && unread.mentions > 0
+                    ? 'chat-list-row--unread chat-list-row--mention'
+                    : !isActiveChannelPage(channel) && unread.unread > 0
+                      ? 'chat-list-row--unread'
+                      : '',
+                ]"
                 :aria-current="isActiveChannelPage(channel) ? 'page' : undefined"
                 :aria-label="channelRowLabel(channel, unread, isActiveChannelPage(channel))"
                 type="button"
@@ -329,12 +336,12 @@ watch(
                 </span>
                 <span
                   v-if="unread.mentions > 0 && !isActiveChannelPage(channel)"
-                  class="type-count-badge inline-flex min-w-[18px] h-[18px] px-1 items-center justify-center rounded-full bg-destructive text-destructive-foreground"
+                  class="chat-list-row--mention-badge type-count-badge inline-flex min-w-[18px] h-[18px] px-1 items-center justify-center rounded-full bg-destructive text-destructive-foreground"
                   aria-hidden="true"
                 >{{ unread.mentions }}</span>
                 <span
                   v-else-if="unread.unread > 0 && !isActiveChannelPage(channel)"
-                  class="type-count-badge inline-flex min-w-[18px] h-[18px] px-1 items-center justify-center rounded-full bg-primary text-primary-foreground"
+                  class="chat-list-row--unread-badge type-count-badge inline-flex min-w-[18px] h-[18px] px-1 items-center justify-center rounded-full bg-primary text-primary-foreground"
                   aria-hidden="true"
                 >{{ unread.unread }}</span>
                 <span

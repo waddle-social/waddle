@@ -170,11 +170,55 @@
 }
 
 .chat-list-row {
+  position: relative;
   border-radius: var(--radius-sm);
   transition:
     background-color 0.18s ease,
     color 0.18s ease,
     border-color 0.18s ease;
+}
+
+/* Unread / mention emphasis for sidebar channel rows. A 2px accent rail
+ * pinned to the inside-left edge picks up the same --primary / --destructive
+ * language used by the composer armed glow, hover toolbar, and reaction
+ * chips — so unread channels read as part of the same brand system instead
+ * of a one-off "bold + dot" treatment. The rail anchors to the row's
+ * rounded corner so it doesn't clip on small radius. */
+.chat-list-row--unread::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 18%;
+  bottom: 18%;
+  width: 2px;
+  border-radius: 0 1px 1px 0;
+  background: var(--primary);
+  box-shadow: 0 0 8px var(--glow-strong);
+  pointer-events: none;
+}
+
+.chat-list-row--mention::before {
+  background: var(--destructive);
+  box-shadow: 0 0 8px color-mix(in oklab, var(--destructive) 38%, transparent);
+}
+
+.chat-list-row--unread-badge {
+  box-shadow: 0 0 10px color-mix(in oklab, var(--primary) 35%, transparent);
+}
+
+.chat-list-row--mention-badge {
+  box-shadow: 0 0 10px color-mix(in oklab, var(--destructive) 38%, transparent);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chat-list-row--unread::before,
+  .chat-list-row--mention::before {
+    box-shadow: none;
+  }
+  .chat-list-row--unread-badge,
+  .chat-list-row--mention-badge {
+    box-shadow: none;
+  }
 }
 
 .chat-message-lane {
