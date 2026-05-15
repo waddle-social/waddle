@@ -575,6 +575,7 @@ function replyChildHasNestedThread(message: TimelineMessage): boolean {
               :thread-reply-count="threadIndex.get(message.id)?.count ?? 0"
               :grouped="isGroupedFollowUp(message.id)"
               hide-thread-chip
+              :hide-reply-chip-if-points-to="activeThreadId ?? undefined"
               :reaction-mode-selected="reactionMode?.selectedMessageId === message.id"
               :invoke-extension-action="props.invokeExtensionAction"
               @edit="(id, body, m, r) => emit('editMessage', id, body, m, r)"
@@ -594,9 +595,9 @@ function replyChildHasNestedThread(message: TimelineMessage): boolean {
               <span>{{ threadIndex.get(message.id)?.count ?? 0 }} in sub-thread</span>
             </button>
             <button
-              v-else
+              v-else-if="!isGroupedFollowUp(message.id)"
               type="button"
-              class="type-caption inline-flex items-center gap-1 text-muted-foreground hover:text-primary transition-colors opacity-60 group-hover/thread-child:opacity-100 focus-visible:opacity-100"
+              class="type-caption inline-flex items-center gap-1 text-muted-foreground hover:text-primary transition-colors opacity-50 group-hover/thread-child:opacity-100 focus-visible:opacity-100 [@media(pointer:coarse)]:opacity-40"
               title="Start sub-thread"
               @click="startSubThread(message)"
             >

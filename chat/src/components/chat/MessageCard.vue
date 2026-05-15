@@ -42,11 +42,11 @@ const HAT_LABELS: Record<string, string> = {
 };
 
 const HAT_COLORS: Record<string, string> = {
-  "urn:xmpp:hats:owner": "bg-warning/10 text-warning",
-  "urn:xmpp:hats:admin": "bg-primary/10 text-primary",
-  "urn:xmpp:hats:moderator": "bg-primary/10 text-primary",
-  "urn:xmpp:hats:bot": "bg-success/10 text-success",
-  "urn:xmpp:hats:verified": "bg-primary/10 text-primary",
+  "urn:xmpp:hats:owner": "bg-warning/10 text-warning/85",
+  "urn:xmpp:hats:admin": "bg-primary/10 text-primary/85",
+  "urn:xmpp:hats:moderator": "bg-primary/10 text-primary/85",
+  "urn:xmpp:hats:bot": "bg-success/10 text-success/85",
+  "urn:xmpp:hats:verified": "bg-primary/10 text-primary/85",
 };
 
 // Higher rank wins when an author holds multiple hats. Owner subsumes
@@ -72,6 +72,13 @@ const props = defineProps<{
   authorJid?: string;
   threadReplyCount?: number;
   hideThreadChip?: boolean;
+  /**
+   * Suppress the inline reply-to chip when it points at this message id.
+   * Used inside thread/sub-thread views where every reply implicitly
+   * targets the root — showing "↪ @author …root preview" on every row
+   * is pure noise.
+   */
+  hideReplyChipIfPointsTo?: string;
   grouped?: boolean;
   reactionModeSelected?: boolean;
   invokeExtensionAction?: (action: ExtensionAnnotationAction) => Promise<ExtensionCommandResult>;
@@ -626,7 +633,7 @@ onBeforeUnmount(() => {
          preview is available we also expand it inline so users still see the
          full quoted text even when the parent has scrolled off-screen or
          hasn't loaded from history yet. -->
-    <div v-if="message.replyTo" class="chat-message-fill">
+    <div v-if="message.replyTo && message.replyTo.id !== hideReplyChipIfPointsTo" class="chat-message-fill">
       <button
         type="button"
         class="type-caption flex min-h-7 max-w-full items-center gap-1.5 rounded-lg bg-muted/35 px-2 text-left text-muted-foreground transition-colors hover:bg-muted/60 hover:text-foreground"
