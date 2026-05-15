@@ -134,6 +134,7 @@ impl kameo::message::Message<LeaveByRealJid> for RoomActor {
             .remove_occupant_session(&nick, &msg.sender_jid)
             .unwrap_or(false);
         let occupant_count = self.room.occupant_count();
+        let is_persistent = self.room.config.persistent;
         Ok(Some(LeaveOutcome {
             nick,
             affiliation,
@@ -141,6 +142,7 @@ impl kameo::message::Message<LeaveByRealJid> for RoomActor {
             remaining_occupants,
             removed_last_session,
             occupant_count,
+            is_persistent,
         }))
     }
 }

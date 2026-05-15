@@ -2,6 +2,7 @@ use super::*;
 use super::{
     replay::drain_outbound_into_replay, state::WsConnState, stream_management::sm_show_from_name,
 };
+use waddle_xmpp::muc::room_actor::LeaveOutcome;
 
 /// Clean up MUC room presence when a connection disconnects
 /// Public alias for the MUC-presence cleanup used by the SM expired-session
@@ -9,6 +10,49 @@ use super::{
 /// to reimplement the room traversal.
 pub async fn cleanup_muc_presence_for_jid(state: &WebSocketState, jid: &FullJid) {
     cleanup_muc_presence(state, jid).await
+}
+
+/// If `outcome` represents the final occupant leaving a
+/// non-persistent (instant-style) MUC room, dispatch `DestroyRoom`
+/// to the room registry so the per-room `RoomActor` is reaped and
+/// its entry is removed from `RoomRegistryActor.rooms`.
+///
+/// Persistent rooms (`RoomConfig.persistent == true`, the default
+/// and the shape Waddle channels use) are intentionally left in
+/// place: the in-memory actor holds the authoritative caches for
+/// affiliations, pin list, and room subject, and a separate
+/// re-hydration audit is required before they can be safely
+/// evicted. Empty persistent rooms therefore continue to retain
+/// their actor across this PR; the residual growth they cause is
+/// the next state-inventory-driven follow-up.
+///
+/// Errors here are logged and swallowed — the leave itself has
+/// already succeeded on the wire; failing the response because the
+/// eviction round-trip flaked would be a worse user-visible
+/// outcome than letting the registry janitor catch this on the
+/// next dead-actor sweep.
+pub(crate) async fn maybe_evict_empty_room(
+    state: &WebSocketState,
+    room_jid: &BareJid,
+    outcome: &LeaveOutcome,
+) {
+    if !(outcome.removed_last_session && outcome.occupant_count == 0 && !outcome.is_persistent) {
+        return;
+    }
+    if destroy_room_actor(state, room_jid).await {
+        debug!(
+            room = %room_jid,
+            "Evicted empty non-persistent MUC room from registry"
+        );
+    } else {
+        // Either the room was already absent (race with another leave
+        // path) or `destroy_room_actor` logged a registry-ask failure.
+        // Either way we don't want to fail the user's leave on this.
+        debug!(
+            room = %room_jid,
+            "Eviction round-trip returned false; registry already cleared or ask failed (logged)"
+        );
+    }
 }
 
 pub(super) async fn cleanup_connection_shutdown(
@@ -227,6 +271,7 @@ async fn cleanup_muc_presence(state: &WebSocketState, jid: &FullJid) {
                     removed_last_session = outcome.removed_last_session,
                     "Removed user from MUC room on disconnect"
                 );
+                maybe_evict_empty_room(state, &room_jid, &outcome).await;
             }
             Ok(None) => {}
             Err(error) => {
@@ -375,5 +420,190 @@ pub(crate) async fn destroy_room_actor(state: &WebSocketState, room_jid: &BareJi
             warn!(room = %room_jid, error = ?error, "Failed to destroy room actor");
             false
         }
+    }
+}
+
+#[cfg(test)]
+mod eviction_tests {
+    use super::super::tests::create_test_websocket_state;
+    use super::*;
+    use waddle_xmpp::muc::{
+        room_actor::{Join, LeaveByRealJid},
+        room_registry_actor::{CreateInstantRoom, CreateRoom, RoomCount},
+        RoomConfig,
+    };
+    use waddle_xmpp_core::{Affiliation, Role};
+
+    fn full_jid(s: &str) -> FullJid {
+        s.parse().expect("valid full jid")
+    }
+
+    fn room_bare_jid(local: &str) -> BareJid {
+        format!("{local}@muc.example.com")
+            .parse()
+            .expect("bare jid")
+    }
+
+    #[tokio::test]
+    async fn evicts_empty_instant_room_after_last_leave() {
+        let state = create_test_websocket_state().await;
+        let room_jid = room_bare_jid("evict-me");
+        let room_actor = state
+            .deps
+            .protocol
+            .room_registry
+            .ask(CreateInstantRoom {
+                room_jid: room_jid.clone(),
+            })
+            .await
+            .expect("create instant room");
+
+        let alice = full_jid("alice@example.com/r1");
+        room_actor
+            .ask(Join {
+                nick: "alice".to_string(),
+                real_jid: alice.clone(),
+                role: Role::Participant,
+                affiliation: Affiliation::Member,
+            })
+            .await
+            .expect("alice joins");
+
+        let count_before: usize = state
+            .deps
+            .protocol
+            .room_registry
+            .ask(RoomCount)
+            .await
+            .expect("room count");
+        assert_eq!(count_before, 1);
+
+        let outcome = room_actor
+            .ask(LeaveByRealJid { sender_jid: alice })
+            .await
+            .expect("leave")
+            .expect("outcome present");
+        assert!(outcome.removed_last_session);
+        assert_eq!(outcome.occupant_count, 0);
+        assert!(!outcome.is_persistent);
+
+        maybe_evict_empty_room(&state, &room_jid, &outcome).await;
+
+        let count_after: usize = state
+            .deps
+            .protocol
+            .room_registry
+            .ask(RoomCount)
+            .await
+            .expect("room count");
+        assert_eq!(
+            count_after, 0,
+            "empty non-persistent room must be evicted from the registry"
+        );
+    }
+
+    #[tokio::test]
+    async fn does_not_evict_empty_persistent_room() {
+        let state = create_test_websocket_state().await;
+        let room_jid = room_bare_jid("keep-me");
+        let room_actor = state
+            .deps
+            .protocol
+            .room_registry
+            .ask(CreateRoom {
+                room_jid: room_jid.clone(),
+                waddle_id: "w".to_string(),
+                channel_id: "c".to_string(),
+                config: RoomConfig::default(), // persistent: true
+            })
+            .await
+            .expect("create persistent room");
+
+        let alice = full_jid("alice@example.com/r1");
+        room_actor
+            .ask(Join {
+                nick: "alice".to_string(),
+                real_jid: alice.clone(),
+                role: Role::Participant,
+                affiliation: Affiliation::Member,
+            })
+            .await
+            .expect("alice joins");
+
+        let outcome = room_actor
+            .ask(LeaveByRealJid { sender_jid: alice })
+            .await
+            .expect("leave")
+            .expect("outcome present");
+        assert!(outcome.removed_last_session);
+        assert_eq!(outcome.occupant_count, 0);
+        assert!(
+            outcome.is_persistent,
+            "default RoomConfig is persistent — outcome must say so"
+        );
+
+        maybe_evict_empty_room(&state, &room_jid, &outcome).await;
+
+        let count_after: usize = state
+            .deps
+            .protocol
+            .room_registry
+            .ask(RoomCount)
+            .await
+            .expect("room count");
+        assert_eq!(
+            count_after, 1,
+            "persistent rooms (Waddle channels) must NOT be evicted on empty"
+        );
+    }
+
+    #[tokio::test]
+    async fn does_not_evict_when_other_occupants_remain() {
+        let state = create_test_websocket_state().await;
+        let room_jid = room_bare_jid("crowded");
+        let room_actor = state
+            .deps
+            .protocol
+            .room_registry
+            .ask(CreateInstantRoom {
+                room_jid: room_jid.clone(),
+            })
+            .await
+            .expect("create instant room");
+
+        let alice = full_jid("alice@example.com/r1");
+        let bob = full_jid("bob@example.com/r1");
+        for (nick, jid) in [("alice", &alice), ("bob", &bob)] {
+            room_actor
+                .ask(Join {
+                    nick: nick.to_string(),
+                    real_jid: jid.clone(),
+                    role: Role::Participant,
+                    affiliation: Affiliation::Member,
+                })
+                .await
+                .expect("join");
+        }
+
+        let outcome = room_actor
+            .ask(LeaveByRealJid { sender_jid: alice })
+            .await
+            .expect("leave")
+            .expect("outcome present");
+        assert_eq!(outcome.occupant_count, 1);
+
+        maybe_evict_empty_room(&state, &room_jid, &outcome).await;
+
+        let count_after: usize = state
+            .deps
+            .protocol
+            .room_registry
+            .ask(RoomCount)
+            .await
+            .expect("room count");
+        assert_eq!(
+            count_after, 1,
+            "room must remain registered while at least one occupant is present"
+        );
     }
 }

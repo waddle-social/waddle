@@ -351,10 +351,12 @@ pub async fn handle_muc_leave(
         }
     }
 
-    vec![build_muc_self_unavailable_xml(
+    let response = vec![build_muc_self_unavailable_xml(
         state,
         room_jid,
         &outcome.nick,
         sender_jid,
-    )]
+    )];
+    super::super::super::cleanup::maybe_evict_empty_room(state, room_jid, &outcome).await;
+    response
 }
