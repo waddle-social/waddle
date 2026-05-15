@@ -95,8 +95,14 @@ watch(
 
 <template>
   <div
-    class="relative flex-shrink-0 leading-none"
-    :class="[wrapperSizeClass, presence === 'offline' ? 'opacity-50' : '']"
+    class="app-avatar relative flex-shrink-0 leading-none"
+    :class="[
+      wrapperSizeClass,
+      presence === 'offline' ? 'app-avatar--offline' : '',
+      presence === 'online' ? 'app-avatar--online' : '',
+      presence === 'away' ? 'app-avatar--away' : '',
+      presence === 'dnd' ? 'app-avatar--dnd' : '',
+    ]"
     :title="presenceTooltip"
   >
     <img

@@ -42,12 +42,16 @@ const HAT_LABELS: Record<string, string> = {
   "urn:xmpp:hats:verified": "VERIFIED",
 };
 
+// Hat badges read as quiet annotations next to the author name now,
+// not chips. We dropped the colored background fills entirely; the
+// inline accent-colored small-cap text from `.chat-hat-tag` does the
+// talking. The map only carries the accent text colour.
 const HAT_COLORS: Record<string, string> = {
-  "urn:xmpp:hats:owner": "bg-warning/10 text-warning/85",
-  "urn:xmpp:hats:admin": "bg-primary/10 text-primary/85",
-  "urn:xmpp:hats:moderator": "bg-primary/10 text-primary/85",
-  "urn:xmpp:hats:bot": "bg-success/10 text-success/85",
-  "urn:xmpp:hats:verified": "bg-primary/10 text-primary/85",
+  "urn:xmpp:hats:owner": "text-warning/70",
+  "urn:xmpp:hats:admin": "text-primary/75",
+  "urn:xmpp:hats:moderator": "text-primary/75",
+  "urn:xmpp:hats:bot": "text-success/75",
+  "urn:xmpp:hats:verified": "text-primary/75",
 };
 
 // Higher rank wins when an author holds multiple hats. Owner subsumes
@@ -625,8 +629,8 @@ onBeforeUnmount(() => {
         <span class="type-message-author">{{ message.author }}</span>
         <span
           v-if="seniorHat"
-          class="type-badge inline-block rounded-md px-1.5 py-px"
-          :class="HAT_COLORS[seniorHat.uri] ?? 'bg-muted text-muted-foreground'"
+          class="chat-hat-tag"
+          :class="HAT_COLORS[seniorHat.uri] ?? 'text-muted-foreground'"
           :title="hats.length > 1 ? hats.map(h => HAT_LABELS[h.uri] ?? h.title).join(' · ') : seniorHat.title"
         >{{ HAT_LABELS[seniorHat.uri] ?? seniorHat.title }}</span>
         <span class="type-meta type-numeric text-muted-foreground/60">
@@ -743,7 +747,7 @@ onBeforeUnmount(() => {
     <button
       v-if="showThreadChip"
       type="button"
-      class="chat-thread-chip type-caption type-emphasis inline-flex h-7 items-center gap-1.5 rounded-md bg-primary/10 px-2 text-primary transition-colors hover:bg-primary/20"
+      class="chat-thread-chip type-caption inline-flex items-center gap-1 rounded-md py-0.5 text-primary/85 transition-colors hover:text-primary"
       :title="`Open thread (${threadReplyCount} ${threadReplyCount === 1 ? 'reply' : 'replies'})`"
       @click="openThreadFromChip"
     >
