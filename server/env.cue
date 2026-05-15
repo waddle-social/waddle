@@ -4,6 +4,7 @@ import (
 	"list"
 	"github.com/cuenv/cuenv/schema"
 	c "github.com/cuenv/cuenv/contrib/contributors"
+	wc "github.com/waddle-social/waddle/ci/contributors"
 	xRust "github.com/cuenv/cuenv/contrib/rust"
 )
 
@@ -81,7 +82,7 @@ schema.#Project & {
 	ci: providers: ["github"]
 	ci: contributors: [
 		_NamespaceNix,
-		c.#CuenvRelease,
+		wc.#PinnedCuenvRelease,
 		c.#OnePassword,
 		schema.#Contributor & {
 			id: "flakehub"
