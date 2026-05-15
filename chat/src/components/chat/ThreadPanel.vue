@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, ref, watch, type ComponentPublicInstance, type Ref } from "vue";
-import { X, CornerDownRight, ChevronRight, ChevronLeft } from "lucide-vue-next";
+import { ArrowDown, ArrowUp, X, CornerDownRight, ChevronRight, ChevronLeft } from "lucide-vue-next";
+import { useJumpToLiveEdge } from "@/ui/use-jump-to-live-edge";
 import AppAvatar from "@/components/ui/AppAvatar.vue";
 import MessageCard from "@/components/chat/MessageCard.vue";
 import MessageComposer from "@/components/chat/MessageComposer.vue";
@@ -179,6 +180,25 @@ type VirtualTimelineHandle = ComponentPublicInstance & {
   scrollToMessageId: (messageId: string, align?: "start" | "center" | "end") => Promise<boolean>;
 };
 const virtualTimelineRef = ref<VirtualTimelineHandle | null>(null);
+
+// "Jump to latest" floating button — same composable as ContentArea
+// so the affordance is consistent between channel and thread surfaces.
+// Live edge flips with scroll-direction preference (top in social,
+// bottom in chat). The pinned-edge scroller already knows the mode,
+// so the scrollToEdge callback just delegates.
+const jumpToLive = useJumpToLiveEdge({
+  scrollElement: computed(() => virtualTimelineRef.value?.scrollElement ?? null),
+  mode: scrollDirectionMode,
+  scrollToEdge: () => {
+    void scrollToPinnedEdge();
+    return true;
+  },
+});
+
+function onThreadScroll() {
+  updateCurrentDayMarker();
+  jumpToLive.updateDistance();
+}
 
 function setComposerRef(el: ComposerHandle | null) {
   composerRef.value = el;
@@ -637,8 +657,8 @@ function replyChildHasNestedThread(message: TimelineMessage): boolean {
       Thread root isn't in the loaded history. Scroll the main channel or reload to backfill.
     </div>
 
+    <div v-if="activeEntry" class="chat-message-pane">
     <VirtualTimeline
-      v-if="activeEntry"
       :ref="setVirtualTimelineRef"
       :items="orderedThreadMessages"
       :has-older="hasOlderReplies ?? false"
@@ -646,7 +666,7 @@ function replyChildHasNestedThread(message: TimelineMessage): boolean {
       :sentinel-position="olderSentinelPosition"
       aria-label="Thread messages"
       content-class="chat-panel-stack"
-      @scroll="updateCurrentDayMarker"
+      @scroll="onThreadScroll"
       @load-older="activeThreadId && emit('loadOlder', activeThreadId)"
     >
       <template #item="{ item: message }">
@@ -734,6 +754,20 @@ function replyChildHasNestedThread(message: TimelineMessage): boolean {
         </template>
       </template>
     </VirtualTimeline>
+    <button
+      v-if="jumpToLive.shouldShow.value"
+      type="button"
+      class="chat-jump-to-live"
+      :class="isTopPinned ? 'chat-jump-to-live--top' : 'chat-jump-to-live--bottom'"
+      title="Jump to latest"
+      aria-label="Jump to latest message"
+      @click="jumpToLive.jump"
+    >
+      <ArrowUp v-if="isTopPinned" class="w-3.5 h-3.5" aria-hidden="true" />
+      <ArrowDown v-else class="w-3.5 h-3.5" aria-hidden="true" />
+      <span>Latest</span>
+    </button>
+    </div>
 
     <div
       v-else
