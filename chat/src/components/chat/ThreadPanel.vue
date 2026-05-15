@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, ref, watch, type ComponentPublicInstance, type Ref } from "vue";
 import { X, CornerDownRight, ChevronRight, ChevronLeft } from "lucide-vue-next";
+import AppAvatar from "@/components/ui/AppAvatar.vue";
 import MessageCard from "@/components/chat/MessageCard.vue";
 import MessageComposer from "@/components/chat/MessageComposer.vue";
 import VirtualTimeline from "@/components/chat/VirtualTimeline.vue";
@@ -364,6 +365,91 @@ const breadcrumbLabels = computed(() =>
   }),
 );
 
+// Thread "lobby" metadata for the rich header. Substitutes the bland
+// "Thread > author" breadcrumb with: who started it, how many replies,
+// who's been participating, and when activity last happened.
+const threadReplyCount = computed(() => activeEntry.value?.count ?? 0);
+
+const threadRootAuthor = computed(() => activeEntry.value?.root?.author ?? null);
+
+const threadPreview = computed(() => {
+  const body = activeEntry.value?.root?.body?.trim() ?? "";
+  if (!body) return "";
+  return body.length > 96 ? `${body.slice(0, 95).trimEnd()}…` : body;
+});
+
+interface ThreadParticipant {
+  nick: string;
+  avatarUrl?: string | null;
+  presence: OccupantPresence;
+}
+
+// Materialise the set of unique authors contributing to this thread —
+// ordered by recency (most-recently-posted first), capped for the
+// avatar stack. Exclude the current user so the stack answers
+// "who else is in this thread?".
+const threadParticipants = computed<ThreadParticipant[]>(() => {
+  const entry = activeEntry.value;
+  if (!entry) return [];
+  const seen = new Set<string>();
+  const ordered: ThreadParticipant[] = [];
+  const me = props.currentUser;
+  // Walk newest → oldest to bias the visible avatars toward recent
+  // participants.
+  const children = entry.directChildren;
+  for (let i = children.length - 1; i >= 0; i--) {
+    const c = children[i];
+    if (!c) continue;
+    if (me && c.author === me) continue;
+    if (seen.has(c.author)) continue;
+    seen.add(c.author);
+    ordered.push({
+      nick: c.author,
+      avatarUrl: props.avatarUrlByAuthor[c.author] ?? null,
+      presence: props.roomPresence[c.author] ?? "offline",
+    });
+  }
+  const root = entry.root;
+  if (root && !seen.has(root.author) && (!me || root.author !== me)) {
+    ordered.push({
+      nick: root.author,
+      avatarUrl: props.avatarUrlByAuthor[root.author] ?? null,
+      presence: props.roomPresence[root.author] ?? "offline",
+    });
+  }
+  return ordered;
+});
+
+const MAX_THREAD_AVATARS = 4;
+const visibleThreadParticipants = computed(() => threadParticipants.value.slice(0, MAX_THREAD_AVATARS));
+const overflowParticipants = computed(() => Math.max(0, threadParticipants.value.length - visibleThreadParticipants.value.length));
+
+const threadLastActivity = computed(() => {
+  const entry = activeEntry.value;
+  if (!entry) return null;
+  const last = entry.directChildren.at(-1) ?? entry.root;
+  return last?.createdAt ?? null;
+});
+
+function formatLastActivity(iso: string | null): string {
+  if (!iso) return "";
+  const ms = Date.now() - new Date(iso).getTime();
+  if (Number.isNaN(ms) || ms < 0) return "";
+  const seconds = Math.floor(ms / 1000);
+  if (seconds < 45) return "just now";
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 2) return "1 min ago";
+  if (minutes < 60) return `${minutes} min ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 2) return "1 hour ago";
+  if (hours < 24) return `${hours} hours ago`;
+  const days = Math.floor(hours / 24);
+  if (days < 2) return "yesterday";
+  return `${days} days ago`;
+}
+
+const threadLastActivityLabel = computed(() => formatLastActivity(threadLastActivity.value));
+
 function hatsFor(author: string): OccupantHat[] {
   return props.roomHats[author] ?? [];
 }
@@ -420,42 +506,95 @@ function replyChildHasNestedThread(message: TimelineMessage): boolean {
 
 <template>
   <div class="flex flex-col flex-1 min-h-0 bg-background border-l border-border">
-    <!-- Header: breadcrumb trail + close / back button -->
-    <div class="chat-pane-header flex-shrink-0 flex items-center justify-between gap-3 border-b border-border px-4 py-0 glass-panel">
-      <div class="type-control flex min-w-0 flex-1 items-center gap-1.5 truncate">
-        <span class="text-muted-foreground">Thread</span>
-        <template v-for="(label, i) in breadcrumbLabels" :key="i">
-          <ChevronRight class="w-3 h-3 text-muted-foreground/60 flex-shrink-0" />
+    <!-- Thread lobby header — substantial metadata that helps you orient
+         inside a thread. Top row: preview of the root message (or
+         breadcrumb when nested). Bottom row: who started it · N replies ·
+         when it last moved · who's been participating · close.
+         When threadStack.length > 1 the top row becomes a breadcrumb
+         trail so the user can pop back through nested sub-threads. -->
+    <div class="chat-thread-header flex-shrink-0 glass-panel">
+      <div class="chat-thread-header__row chat-thread-header__row--top">
+        <template v-if="threadStack.length > 1">
+          <div class="chat-thread-header__breadcrumb type-caption">
+            <span class="chat-thread-header__breadcrumb-label">Threads</span>
+            <template v-for="(label, i) in breadcrumbLabels" :key="i">
+              <ChevronRight class="chat-thread-header__breadcrumb-sep" aria-hidden="true" />
+              <button
+                type="button"
+                class="chat-thread-header__breadcrumb-crumb"
+                :class="i === breadcrumbLabels.length - 1 ? 'chat-thread-header__breadcrumb-crumb--active' : ''"
+                :title="label"
+                @click="emit('popTo', i)"
+              >{{ label }}</button>
+            </template>
+          </div>
+        </template>
+        <template v-else>
+          <p
+            v-if="threadPreview"
+            class="chat-thread-header__preview"
+            :title="threadPreview"
+          >{{ threadPreview }}</p>
+          <p v-else class="chat-thread-header__preview chat-thread-header__preview--empty">Thread</p>
+        </template>
+        <div class="chat-thread-header__actions">
+          <button
+            v-if="threadStack.length > 1"
+            type="button"
+            class="chat-icon-button hover:bg-muted lg:hidden"
+            title="Go back"
+            aria-label="Go back"
+            @click="emit('popTo', threadStack.length - 2)"
+          >
+            <ChevronLeft class="w-4 h-4" />
+          </button>
           <button
             type="button"
-            class="truncate max-w-40 text-left hover:text-primary transition-colors"
-            :class="i === breadcrumbLabels.length - 1 ? 'text-foreground' : 'text-muted-foreground'"
-            :title="label"
-            @click="emit('popTo', i)"
-          >{{ label }}</button>
-        </template>
+            class="chat-icon-button hover:bg-muted"
+            title="Close thread"
+            aria-label="Close thread"
+            @click="emit('close')"
+          >
+            <X class="w-4 h-4" />
+          </button>
+        </div>
       </div>
-      <!-- Mobile back button: goes up one level in the thread stack (hidden on desktop) -->
-      <button
-        v-if="threadStack.length > 1"
-        type="button"
-        class="chat-icon-button flex-shrink-0 hover:bg-muted lg:hidden"
-        title="Go back"
-        aria-label="Go back"
-        @click="emit('popTo', threadStack.length - 2)"
-      >
-        <ChevronLeft class="w-4 h-4" />
-      </button>
-      <!-- Close button: closes the entire thread panel -->
-      <button
-        type="button"
-        class="chat-icon-button flex-shrink-0 hover:bg-muted"
-        title="Close thread"
-        aria-label="Close thread"
-        @click="emit('close')"
-      >
-        <X class="w-4 h-4" />
-      </button>
+      <div class="chat-thread-header__row chat-thread-header__row--meta">
+        <div class="chat-thread-header__meta type-caption">
+          <span v-if="threadRootAuthor" class="chat-thread-header__meta-item">
+            <span class="chat-thread-header__meta-label">Started by</span>
+            <span class="chat-thread-header__meta-value">{{ threadRootAuthor }}</span>
+          </span>
+          <span class="chat-thread-header__meta-item">
+            <span class="chat-thread-header__meta-value">
+              <strong>{{ threadReplyCount }}</strong>
+              {{ threadReplyCount === 1 ? "reply" : "replies" }}
+            </span>
+          </span>
+          <span v-if="threadLastActivityLabel" class="chat-thread-header__meta-item">
+            <span class="chat-thread-header__pulse" aria-hidden="true" />
+            <span class="chat-thread-header__meta-value">active {{ threadLastActivityLabel }}</span>
+          </span>
+        </div>
+        <div v-if="visibleThreadParticipants.length > 0" class="chat-thread-header__participants">
+          <span class="chat-thread-header__avatars">
+            <span
+              v-for="participant in visibleThreadParticipants"
+              :key="`thread-participant:${participant.nick}`"
+              class="chat-thread-header__avatar-wrap"
+              :title="`${participant.nick}`"
+            >
+              <AppAvatar
+                :name="participant.nick"
+                :src="participant.avatarUrl ?? null"
+                :presence="participant.presence"
+                size="xs"
+              />
+            </span>
+          </span>
+          <span v-if="overflowParticipants > 0" class="chat-thread-header__overflow">+{{ overflowParticipants }}</span>
+        </div>
+      </div>
     </div>
 
     <!-- Composer: top-pinned mode (social mode) -->
