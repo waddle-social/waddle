@@ -122,10 +122,37 @@
   background: color-mix(in oklab, var(--card) 72%, transparent);
 }
 
+/* Mention treatment — when the current user is @-mentioned, the row
+ * reads as "this one's for you", not as a warning. Replaces the prior
+ * full warning-yellow border + flat 5% bg (which felt like a danger
+ * outline) with:
+ *
+ *   - A 3 px solid left-edge bar in `--warning` (the "spotlight from
+ *     the side" signal — directional, like a highlighted bookmark)
+ *   - A horizontal gradient sweep that fades the warmth out to the
+ *     right (so the message body stays legible, not tinted)
+ *
+ * Same colour family the user already trains on for amber/warning
+ * states; very different semantics. */
 .chat-message-grid--mention::before {
   opacity: 1;
-  border: 1px solid color-mix(in oklab, var(--warning) 25%, transparent);
-  background: color-mix(in oklab, var(--warning) 5%, transparent);
+  border: 0;
+  box-shadow: inset 3px 0 0 0 color-mix(in oklab, var(--warning) 80%, transparent);
+  background: linear-gradient(
+    to right,
+    color-mix(in oklab, var(--warning) 14%, transparent),
+    color-mix(in oklab, var(--warning) 6%, transparent) 12rem,
+    transparent 28rem
+  );
+}
+
+.chat-message-grid--mention:hover::before {
+  background: linear-gradient(
+    to right,
+    color-mix(in oklab, var(--warning) 18%, transparent),
+    color-mix(in oklab, var(--warning) 8%, transparent) 12rem,
+    color-mix(in oklab, var(--muted) 24%, transparent) 32rem
+  );
 }
 
 .chat-message-grid--thread::before {
