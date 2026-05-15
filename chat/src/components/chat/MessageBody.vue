@@ -200,7 +200,7 @@ watch(
               {{ card.presentation.primaryValue }}
             </span>
           </span>
-          <span class="type-control block break-words text-foreground">
+          <span class="type-control block text-foreground">
             {{ card.presentation.title }}
           </span>
           <a
@@ -214,7 +214,7 @@ watch(
             <span class="min-w-0 truncate">{{ card.presentation.primaryUrl }}</span>
             <ExternalLink class="h-3.5 w-3.5 flex-shrink-0" aria-hidden="true" />
           </a>
-          <span v-if="card.presentation.summary" class="type-caption mt-1 block break-words text-muted-foreground">
+          <span v-if="card.presentation.summary" class="type-caption mt-1 block text-muted-foreground">
             {{ card.presentation.summary }}
           </span>
           <span
@@ -226,7 +226,7 @@ watch(
               :key="`${card.annotation.annotationId}:option:${option.id}`"
               class="type-caption flex min-w-0 items-center justify-between gap-3 rounded-md bg-background/70 px-2 py-1.5 text-foreground ring-1 ring-border/70"
             >
-              <span class="min-w-0 break-words">{{ option.label }}</span>
+              <span class="min-w-0">{{ option.label }}</span>
               <span v-if="option.value !== undefined" class="type-numeric text-muted-foreground">{{ option.value }}</span>
             </span>
           </span>
@@ -239,7 +239,7 @@ watch(
               :key="`${card.annotation.annotationId}:${detail.label}:${detail.value}`"
             >
               <dt class="type-meta text-muted-foreground/70">{{ detail.label }}</dt>
-              <dd class="type-caption min-w-0 break-words text-foreground/85" :title="detail.value">{{ detail.value }}</dd>
+              <dd class="type-caption min-w-0 text-foreground/85" :title="detail.value">{{ detail.value }}</dd>
             </template>
           </dl>
           <!-- Action buttons: only shown in non-compact (timeline) mode -->

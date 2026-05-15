@@ -20,7 +20,7 @@ const props = withDefaults(defineProps<{
   ariaLabel: string;
   contentClass?: string;
 }>(), {
-  contentClass: "chat-message-lane chat-message-list",
+  contentClass: "chat-message-list",
 });
 
 const emit = defineEmits<{
@@ -107,7 +107,7 @@ defineExpose({ scrollElement, scrollToMessageId, scrollToPinnedEdge });
 <template>
   <div
     ref="scrollElement"
-    class="chat-pane-scroll chat-message-scroll flex-1 min-h-0 overflow-auto px-[var(--chat-content-inline)]"
+    class="chat-pane-scroll chat-message-scroll flex-1 min-h-0 px-[var(--chat-content-inline)]"
     :aria-label="ariaLabel"
     @scroll="(event) => { emit('scroll', event); maybeLoadOlder(); }"
   >

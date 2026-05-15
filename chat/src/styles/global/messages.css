@@ -104,7 +104,6 @@
 .chat-message-body-stack > .chat-message-fill {
   width: 100%;
   align-self: stretch;
-  max-width: var(--chat-readable-measure);
 }
 
 .chat-forum-topic-card {
@@ -377,11 +376,16 @@
 .chat-github-card {
   width: var(--chat-attachment-card-width);
   max-width: 100%;
+  overflow-wrap: anywhere;
 }
 
 .chat-extension-card {
   width: var(--chat-attachment-card-width);
   max-width: 100%;
+  /* `overflow-wrap: anywhere` (inherits) so long unbreakable URLs in the
+   * card body / field rows shrink to wrap, instead of pushing the card
+   * past the message lane and getting clipped by `.chat-pane-scroll`. */
+  overflow-wrap: anywhere;
 }
 
 .chat-attachment-card,
