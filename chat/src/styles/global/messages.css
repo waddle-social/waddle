@@ -205,6 +205,29 @@
   white-space: nowrap;
 }
 
+/* Hat / role badge — quiet annotation alongside the author name.
+ * Replaces the previous filled chip ("OWNER" in a yellow pill) with an
+ * inline accent label that reads as metadata, not as a warning. */
+.chat-hat-tag {
+  font-size: 0.625rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  line-height: 1;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+/* Thread "N replies" chip — quieter inline link, not a button. */
+.chat-thread-chip {
+  font-size: 0.6875rem;
+  line-height: 1.4;
+}
+
+.chat-thread-chip > svg {
+  opacity: 0.85;
+}
+
 .chat-current-day-marker {
   flex-shrink: 0;
   padding: var(--space-xs) var(--chat-content-inline) 0;
