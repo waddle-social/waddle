@@ -56,10 +56,11 @@
 
 .chat-message-grid--thread::before {
   opacity: 1;
-  border-color: color-mix(in oklab, var(--primary) 15%, transparent);
+  border-color: color-mix(in oklab, var(--primary) 8%, transparent);
 }
 
 .chat-message-grid--thread:hover::before {
+  border-color: color-mix(in oklab, var(--primary) 16%, transparent);
   background: color-mix(in oklab, var(--muted) 38%, transparent);
 }
 
