@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, watch, onBeforeUnmount } from "vue";
-import { Send, Image, Paperclip, FileText, Music4, Puzzle, X } from "lucide-vue-next";
+import { Send, Image, Paperclip, FileText, Music4, Puzzle, X, Loader2 } from "lucide-vue-next";
 import type { JSONContent } from "@tiptap/core";
 import GifPicker from "@/components/chat/GifPicker.vue";
 import ChatEditor from "@/components/chat/ChatEditor.vue";
@@ -778,7 +778,7 @@ watch(
     />
 
     <div
-      class="chat-composer-input-shell flex min-w-0 flex-nowrap items-center gap-2 bg-muted p-1 transition-all duration-300 has-[:focus]:ring-2 has-[:focus]:ring-primary/20 has-[:focus]:shadow-[0_0_16px_var(--glow)]"
+      class="chat-composer-input-shell flex min-w-0 flex-nowrap items-center gap-2 bg-muted p-1 transition-all duration-300 has-[:focus]:ring-2 has-[:focus]:ring-primary/30 has-[:focus]:shadow-[0_0_22px_var(--glow-strong)]"
     >
       <input
         :ref="setFileInputRef"
@@ -789,7 +789,7 @@ watch(
       />
       <button
         type="button"
-        class="chat-composer-input-action h-9 w-9 shrink-0 flex items-center justify-center transition-all duration-200 text-muted-foreground hover:bg-background/70 hover:text-primary disabled:opacity-40 [@media(pointer:coarse)]:h-11 [@media(pointer:coarse)]:w-11"
+        class="chat-composer-input-action h-9 w-9 shrink-0 flex items-center justify-center transition-all duration-200 text-muted-foreground hover:bg-background/70 hover:text-primary active:scale-[0.94] disabled:opacity-40 disabled:active:scale-100 [@media(pointer:coarse)]:h-11 [@media(pointer:coarse)]:w-11"
         title="Attach files"
         aria-label="Attach files"
         :disabled="disabled"
@@ -800,7 +800,7 @@ watch(
       <button
         :ref="setExtensionButtonRef"
         type="button"
-        class="chat-composer-input-action h-9 w-9 shrink-0 flex items-center justify-center transition-all duration-200 text-muted-foreground hover:bg-background/70 hover:text-primary disabled:opacity-40 [@media(pointer:coarse)]:h-11 [@media(pointer:coarse)]:w-11"
+        class="chat-composer-input-action h-9 w-9 shrink-0 flex items-center justify-center transition-all duration-200 text-muted-foreground hover:bg-background/70 hover:text-primary active:scale-[0.94] disabled:opacity-40 disabled:active:scale-100 [@media(pointer:coarse)]:h-11 [@media(pointer:coarse)]:w-11"
         title="Extensions"
         aria-label="Extensions"
         :aria-expanded="extensionsOpen"
@@ -823,7 +823,7 @@ watch(
       />
       <button
         type="button"
-        class="chat-composer-input-action h-9 w-9 shrink-0 flex items-center justify-center transition-all duration-200 [@media(pointer:coarse)]:h-11 [@media(pointer:coarse)]:w-11"
+        class="chat-composer-input-action h-9 w-9 shrink-0 flex items-center justify-center transition-all duration-200 active:scale-[0.94] disabled:active:scale-100 [@media(pointer:coarse)]:h-11 [@media(pointer:coarse)]:w-11"
         :class="showGifPicker ? 'bg-background/80 text-primary' : 'text-muted-foreground hover:bg-background/70 hover:text-primary'"
         title="Open GIF picker"
         aria-label="Open GIF picker"
@@ -835,12 +835,15 @@ watch(
       </button>
       <button
         type="button"
-        class="chat-composer-input-action h-9 w-9 shrink-0 flex items-center justify-center bg-primary text-primary-foreground hover:shadow-[0_0_20px_var(--glow-strong)] transition-all duration-300 disabled:opacity-20 [@media(pointer:coarse)]:h-11 [@media(pointer:coarse)]:w-11"
+        class="chat-composer-send chat-composer-input-action h-9 w-9 shrink-0 flex items-center justify-center bg-primary text-primary-foreground transition-all duration-200 disabled:opacity-20 active:scale-[0.94] motion-safe:hover:scale-[1.04] [@media(pointer:coarse)]:h-11 [@media(pointer:coarse)]:w-11"
+        :class="canSend ? 'chat-composer-send--armed shadow-[0_0_18px_var(--glow-strong)]' : ''"
         :disabled="!canSend"
-        aria-label="Send message"
+        :aria-label="isSending ? 'Sending message' : 'Send message'"
+        :aria-busy="isSending"
         @click="onSend(editorRef?.getJSON?.() ?? { type: 'doc', content: [] })"
       >
         <span v-if="slowModeCooldown > 0" class="type-meta type-numeric type-strong">{{ slowModeCooldown }}</span>
+        <Loader2 v-else-if="isSending" class="w-4 h-4 motion-safe:animate-spin" aria-hidden="true" />
         <Send v-else class="w-4 h-4" aria-hidden="true" />
       </button>
     </div>
