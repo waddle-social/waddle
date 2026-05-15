@@ -40,6 +40,24 @@
   border-radius: var(--chat-composer-input-control-radius);
 }
 
+/* Typographic "GIF" mark — used in place of a photo-style icon for
+ * the GIF search button. The picker is GIPHY-only, so calling it
+ * out with a 3-letter badge avoids the "is this for any image?"
+ * confusion the Image icon caused. Inherits color from the button so
+ * the hover/active states light it up via `text-primary`. */
+.chat-composer-gif-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0.1rem 0.28rem;
+  border-radius: 0.3rem;
+  border: 1.25px solid currentColor;
+  font-size: 0.6rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  line-height: 1;
+}
+
 .chat-composer-popover {
   left: var(--chat-content-inline);
   right: var(--chat-content-inline);
