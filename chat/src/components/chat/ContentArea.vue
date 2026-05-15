@@ -1058,17 +1058,35 @@ function dayDividerLabel(createdAt: string): string {
     <!-- Typing indicator (social / top-pinned mode) -->
     <div
       v-if="typingUsers.length > 0 && isTopPinned"
-      class="type-caption px-[var(--chat-content-inline)] py-2 text-muted-foreground flex-shrink-0 border-b border-border"
+      class="chat-typing-indicator chat-typing-indicator--social flex-shrink-0 border-b border-border"
     >
-      <div class="chat-message-lane flex items-center gap-2">
-        <span class="flex gap-0.5">
-          <span class="typing-dot" />
-          <span class="typing-dot" />
-          <span class="typing-dot" />
+      <div class="chat-message-lane chat-typing-indicator__lane">
+        <span class="chat-typing-indicator__avatars" aria-hidden="true">
+          <span
+            v-for="nick in typingUsers.slice(0, 3)"
+            :key="`typing-avatar:${nick}`"
+            class="chat-typing-indicator__avatar-wrap"
+          >
+            <AppAvatar
+              :name="nick"
+              :src="avatarUrlByAuthor[nick] ?? null"
+              :presence="roomPresence[nick] ?? 'offline'"
+              size="xs"
+            />
+          </span>
         </span>
-        <span v-if="typingUsers.length === 1">{{ typingUsers[0] }} is typing</span>
-        <span v-else-if="typingUsers.length === 2">{{ typingUsers[0] }} and {{ typingUsers[1] }} are typing</span>
-        <span v-else>{{ typingUsers[0] }} and {{ typingUsers.length - 1 }} others are typing</span>
+        <span class="chat-typing-indicator__bubble">
+          <span class="chat-typing-indicator__wave" aria-hidden="true">
+            <span class="chat-typing-indicator__wave-dot" />
+            <span class="chat-typing-indicator__wave-dot" />
+            <span class="chat-typing-indicator__wave-dot" />
+          </span>
+          <span class="chat-typing-indicator__text">
+            <template v-if="typingUsers.length === 1">{{ typingUsers[0] }} is typing</template>
+            <template v-else-if="typingUsers.length === 2">{{ typingUsers[0] }} and {{ typingUsers[1] }} are typing</template>
+            <template v-else>{{ typingUsers[0] }} and {{ typingUsers.length - 1 }} others are typing</template>
+          </span>
+        </span>
       </div>
     </div>
 
@@ -1279,20 +1297,38 @@ function dayDividerLabel(createdAt: string): string {
     </button>
     </div>
 
-    <!-- Typing indicator -->
+    <!-- Typing indicator (chat / bottom-pinned mode) -->
     <div
       v-if="typingUsers.length > 0 && !isTopPinned"
-      class="type-caption px-[var(--chat-content-inline)] py-2 text-muted-foreground flex-shrink-0"
+      class="chat-typing-indicator chat-typing-indicator--chat flex-shrink-0"
     >
-      <div class="chat-message-lane flex items-center gap-2">
-        <span class="flex gap-0.5">
-          <span class="typing-dot" />
-          <span class="typing-dot" />
-          <span class="typing-dot" />
+      <div class="chat-message-lane chat-typing-indicator__lane">
+        <span class="chat-typing-indicator__avatars" aria-hidden="true">
+          <span
+            v-for="nick in typingUsers.slice(0, 3)"
+            :key="`typing-avatar-bottom:${nick}`"
+            class="chat-typing-indicator__avatar-wrap"
+          >
+            <AppAvatar
+              :name="nick"
+              :src="avatarUrlByAuthor[nick] ?? null"
+              :presence="roomPresence[nick] ?? 'offline'"
+              size="xs"
+            />
+          </span>
         </span>
-        <span v-if="typingUsers.length === 1">{{ typingUsers[0] }} is typing</span>
-        <span v-else-if="typingUsers.length === 2">{{ typingUsers[0] }} and {{ typingUsers[1] }} are typing</span>
-        <span v-else>{{ typingUsers[0] }} and {{ typingUsers.length - 1 }} others are typing</span>
+        <span class="chat-typing-indicator__bubble">
+          <span class="chat-typing-indicator__wave" aria-hidden="true">
+            <span class="chat-typing-indicator__wave-dot" />
+            <span class="chat-typing-indicator__wave-dot" />
+            <span class="chat-typing-indicator__wave-dot" />
+          </span>
+          <span class="chat-typing-indicator__text">
+            <template v-if="typingUsers.length === 1">{{ typingUsers[0] }} is typing</template>
+            <template v-else-if="typingUsers.length === 2">{{ typingUsers[0] }} and {{ typingUsers[1] }} are typing</template>
+            <template v-else>{{ typingUsers[0] }} and {{ typingUsers.length - 1 }} others are typing</template>
+          </span>
+        </span>
       </div>
     </div>
 
