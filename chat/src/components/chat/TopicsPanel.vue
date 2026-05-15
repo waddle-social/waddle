@@ -6,6 +6,7 @@ import type { ChannelSummary, SpaceSummary } from "@/lib/chat-types";
 import type { ChannelThreadInboxEntry } from "@/channels/inbox";
 import { groupChannelsBySpace } from "@/lib/channel-grouping";
 import type { MemberLoadState } from "@/waddles/directory";
+import Skeleton from "@/components/ui/Skeleton.vue";
 
 const props = defineProps<{
   waddle: SpaceSummary | null;
@@ -201,12 +202,25 @@ watch(
     <!-- Channel list -->
     <div class="chat-pane-scroll chat-sidebar-scroll">
       <div class="chat-panel-stack">
-        <div v-if="isLoading" class="type-caption text-center py-10 text-sidebar-muted">
-          <div class="flex items-center justify-center gap-1">
-            <span class="typing-dot" />
-            <span class="typing-dot" />
-            <span class="typing-dot" />
-          </div>
+        <div v-if="isLoading" class="chat-list-stack" aria-hidden="true">
+          <section
+            v-for="i in 2"
+            :key="`topics-skel-group-${i}`"
+            class="grid gap-1"
+          >
+            <div class="flex items-center gap-1.5 px-2 pt-2 pb-1">
+              <Skeleton width="0.625rem" height="0.625rem" radius="0.125rem" />
+              <Skeleton :width="i === 1 ? '40%' : '55%'" height="0.55rem" />
+            </div>
+            <div
+              v-for="j in i === 1 ? 4 : 3"
+              :key="`topics-skel-row-${i}-${j}`"
+              class="flex w-full min-h-10 items-center gap-2.5 px-3 py-2"
+            >
+              <Skeleton width="0.875rem" height="0.875rem" radius="0.25rem" />
+              <Skeleton :width="`${30 + ((j * 13) % 45)}%`" height="0.6rem" />
+            </div>
+          </section>
         </div>
 
         <div v-else-if="channels.length === 0 && spaces.length === 0" class="type-caption text-center py-10 text-sidebar-muted">
