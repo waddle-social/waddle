@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, mock } from "bun:test";
 import { nextTick, ref } from "vue";
 import { useMessageAttachments } from "@/channels/message-attachments";
 import type { TimelineMessage, TimelineSharedFile } from "@/lib/chat-ui";
+import { prepareEncryptedAttachmentUpload } from "@/lib/xmpp/encrypted-attachments";
 
 type MessageRef = Parameters<typeof useMessageAttachments>[0];
 
@@ -244,5 +245,57 @@ describe("useMessageAttachments lightbox state", () => {
 
     expect(attachments.lightboxOpen.value).toBe(false);
     expect(attachments.lightboxIndex.value).toBe(0);
+  });
+});
+
+describe("useMessageAttachments encrypted video decryption", () => {
+  const savedFetch = globalThis.fetch;
+
+  afterEach(() => {
+    globalThis.fetch = savedFetch;
+  });
+
+  it("persists the decrypted URL for an encrypted video so it renders instead of staying at 'Preparing video…'", async () => {
+    const savedWindow = (globalThis as Record<string, unknown>).window;
+    const savedCreateObjectURL = URL.createObjectURL;
+    const savedRevokeObjectURL = URL.revokeObjectURL;
+
+    try {
+      // Simulate a browser context so ensureAttachmentReady proceeds past its
+      // early-return guard (`typeof window === "undefined"`).
+      (globalThis as Record<string, unknown>).window = globalThis;
+
+      const revokedUrls: string[] = [];
+      URL.createObjectURL = mock(() => "blob:fake-decrypted-video") as typeof URL.createObjectURL;
+      URL.revokeObjectURL = mock((url: string) => { revokedUrls.push(url); }) as typeof URL.revokeObjectURL;
+
+      const original = new File(["video content"], "clip.mp4", { type: "video/mp4" });
+      const prepared = await prepareEncryptedAttachmentUpload(original);
+      const encryptedUrl = "https://files.example.com/clip.mp4.enc";
+      const ciphertext = await prepared.uploadFile.arrayBuffer();
+
+      globalThis.fetch = mock(async () => new Response(ciphertext, { status: 200 })) as typeof fetch;
+
+      const file: TimelineSharedFile = {
+        url: encryptedUrl,
+        name: "clip.mp4",
+        mediaType: "video/mp4",
+        disposition: "inline",
+        encrypted: { ...prepared.encrypted, sources: [encryptedUrl] },
+      };
+
+      const attachments = messageAttachments(ref(messageWithFiles([file])));
+
+      // Give the watcher-triggered async decryption time to complete.
+      await new Promise<void>((resolve) => setTimeout(resolve, 50));
+      await nextTick();
+
+      expect(attachments.resolvedAttachmentUrl(file)).toBe("blob:fake-decrypted-video");
+      expect(revokedUrls).not.toContain("blob:fake-decrypted-video");
+    } finally {
+      URL.createObjectURL = savedCreateObjectURL;
+      URL.revokeObjectURL = savedRevokeObjectURL;
+      (globalThis as Record<string, unknown>).window = savedWindow;
+    }
   });
 });
