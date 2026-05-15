@@ -220,7 +220,7 @@ export function useMessageAttachments(message: ReadonlyRef<TimelineMessage>) {
         return null;
       }
       if (!persist) return objectUrl;
-      const stillVisible = imageAttachments.value.some((attachment) => attachmentKey(attachment) === key);
+      const stillVisible = previewableAttachments.value.some((attachment) => attachmentKey(attachment) === key);
       if (!stillVisible) {
         URL.revokeObjectURL(objectUrl);
         return null;
