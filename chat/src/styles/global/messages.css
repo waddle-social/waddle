@@ -275,6 +275,58 @@
   margin-block-start: calc(-1 * var(--chat-message-row-gap, var(--space-xs)));
 }
 
+.chat-reaction-chip {
+  background: color-mix(in oklab, var(--muted) 60%, transparent);
+  color: var(--foreground);
+  border: 1px solid transparent;
+  transition: transform 0.15s ease, background-color 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.chat-reaction-chip:hover {
+  background: var(--muted);
+}
+
+.chat-reaction-chip:active:not(:disabled) {
+  transform: scale(0.94);
+}
+
+.chat-reaction-chip:focus-visible {
+  outline: none;
+  box-shadow:
+    0 0 0 2px var(--background),
+    0 0 0 4px color-mix(in oklab, var(--primary) 45%, transparent);
+}
+
+.chat-reaction-chip__count {
+  color: var(--muted-foreground);
+  transition: color 0.15s ease;
+}
+
+.chat-reaction-chip--self {
+  background: color-mix(in oklab, var(--primary) 14%, transparent);
+  border-color: color-mix(in oklab, var(--primary) 30%, transparent);
+  box-shadow: 0 0 12px -4px var(--glow);
+}
+
+.chat-reaction-chip--self:hover {
+  background: color-mix(in oklab, var(--primary) 20%, transparent);
+  border-color: color-mix(in oklab, var(--primary) 40%, transparent);
+  box-shadow: 0 0 14px -2px var(--glow-strong);
+}
+
+.chat-reaction-chip--self .chat-reaction-chip__count {
+  color: color-mix(in oklab, var(--primary) 85%, var(--foreground));
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chat-reaction-chip {
+    transition: none;
+  }
+  .chat-reaction-chip:active:not(:disabled) {
+    transform: none;
+  }
+}
+
 .chat-hover-action-toolbar-btn {
   transition: transform 0.15s ease, background-color 0.15s ease, color 0.15s ease;
 }
