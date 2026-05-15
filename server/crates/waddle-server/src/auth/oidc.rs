@@ -345,7 +345,9 @@ pub async fn claims_from_oauth2_fallback(
 mod tests {
     use super::*;
     use crate::auth::{AuthProviderKind, AuthProviderTokenEndpointAuthMethod};
+    use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
     use serde_json::json;
+    use std::time::{SystemTime, UNIX_EPOCH};
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -390,6 +392,35 @@ mod tests {
             registration_endpoint: Some(registration_endpoint),
         }
     }
+
+    const TEST_RSA_PRIVATE_KEY: &str = r#"-----BEGIN PRIVATE KEY-----
+MIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQDJETqse41HRBsc
+7cfcq3ak4oZWFCoZlcic525A3FfO4qW9BMtRO/iXiyCCHn8JhiL9y8j5JdVP2Q9Z
+IpfElcFd3/guS9w+5RqQGgCR+H56IVUyHZWtTJbKPcwWXQdNUX0rBFcsBzCRESJL
+eelOEdHIjG7LRkx5l/FUvlqsyHDVJEQsHwegZ8b8C0fz0EgT2MMEdn10t6Ur1rXz
+jMB/wvCg8vG8lvciXmedyo9xJ8oMOh0wUEgxziVDMMovmC+aJctcHUAYubwoGN8T
+yzcvnGqL7JSh36Pwy28iPzXZ2RLhAyJFU39vLaHdljwthUaupldlNyCfa6Ofy4qN
+ctlUPlN1AgMBAAECggEAdESTQjQ70O8QIp1ZSkCYXeZjuhj081CK7jhhp/4ChK7J
+GlFQZMwiBze7d6K84TwAtfQGZhQ7km25E1kOm+3hIDCoKdVSKch/oL54f/BK6sKl
+qlIzQEAenho4DuKCm3I4yAw9gEc0DV70DuMTR0LEpYyXcNJY3KNBOTjN5EYQAR9s
+2MeurpgK2MdJlIuZaIbzSGd+diiz2E6vkmcufJLtmYUT/k/ddWvEtz+1DnO6bRHh
+xuuDMeJA/lGB/EYloSLtdyCF6sII6C6slJJtgfb0bPy7l8VtL5iDyz46IKyzdyzW
+tKAn394dm7MYR1RlUBEfqFUyNK7C+pVMVoTwCC2V4QKBgQD64syfiQ2oeUlLYDm4
+CcKSP3RnES02bcTyEDFSuGyyS1jldI4A8GXHJ/lG5EYgiYa1RUivge4lJrlNfjyf
+dV230xgKms7+JiXqag1FI+3mqjAgg4mYiNjaao8N8O3/PD59wMPeWYImsWXNyeHS
+55rUKiHERtCcvdzKl4u35ZtTqQKBgQDNKnX2bVqOJ4WSqCgHRhOm386ugPHfy+8j
+m6cicmUR46ND6ggBB03bCnEG9OtGisxTo/TuYVRu3WP4KjoJs2LD5fwdwJqpgtHl
+yVsk45Y1Hfo+7M6lAuR8rzCi6kHHNb0HyBmZjysHWZsn79ZM+sQnLpgaYgQGRbKV
+DZWlbw7g7QKBgQCl1u+98UGXAP1jFutwbPsx40IVszP4y5ypCe0gqgon3UiY/G+1
+zTLp79GGe/SjI2VpQ7AlW7TI2A0bXXvDSDi3/5Dfya9ULnFXv9yfvH1QwWToySpW
+Kvd1gYSoiX84/WCtjZOr0e0HmLIb0vw0hqZA4szJSqoxQgvF22EfIWaIaQKBgQCf
+34+OmMYw8fEvSCPxDxVvOwW2i7pvV14hFEDYIeZKW2W1HWBhVMzBfFB5SE8yaCQy
+pRfOzj9aKOCm2FjjiErVNpkQoi6jGtLvScnhZAt/lr2TXTrl8OwVkPrIaN0bG/AS
+aUYxmBPCpXu3UjhfQiWqFq/mFyzlqlgvuCc9g95HPQKBgAscKP8mLxdKwOgX8yFW
+GcZ0izY/30012ajdHY+/QK5lsMoxTnn0skdS+spLxaS5ZEO4qvPVb8RAoCkWMMal
+2pOhmquJQVDPDLuZHdrIiKiDM20dy9sMfHygWcZjQ4WSxf/J7T9canLZIXFhHAZT
+3wc9h4G8BBCtWN2TN/LsGZdB
+-----END PRIVATE KEY-----"#;
 
     #[tokio::test]
     async fn dynamic_registration_accepts_public_client_without_secret() {
@@ -442,6 +473,66 @@ mod tests {
         .to_string();
 
         assert!(err.contains("dynamic registration returned empty client_secret"));
+    }
+
+    #[tokio::test]
+    async fn validate_id_token_verifies_rs256_jwks_with_configured_crypto_backend() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/jwks"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "keys": [{
+                    "kty": "RSA",
+                    "n": "yRE6rHuNR0QbHO3H3Kt2pOKGVhQqGZXInOduQNxXzuKlvQTLUTv4l4sggh5_CYYi_cvI-SXVT9kPWSKXxJXBXd_4LkvcPuUakBoAkfh-eiFVMh2VrUyWyj3MFl0HTVF9KwRXLAcwkREiS3npThHRyIxuy0ZMeZfxVL5arMhw1SRELB8HoGfG_AtH89BIE9jDBHZ9dLelK9a184zAf8LwoPLxvJb3Il5nncqPcSfKDDodMFBIMc4lQzDKL5gvmiXLXB1AGLm8KBjfE8s3L5xqi-yUod-j8MtvIj812dkS4QMiRVN_by2h3ZY8LYVGrqZXZTcgn2ujn8uKjXLZVD5TdQ",
+                    "e": "AQAB",
+                    "kid": "rsa01",
+                    "alg": "RS256",
+                    "use": "sig"
+                }]
+            })))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        let mut provider =
+            dynamic_oidc_provider(AuthProviderTokenEndpointAuthMethod::NoAuthentication);
+        provider.client_id = "waddle-client".to_string();
+
+        let discovery = OidcDiscovery {
+            issuer: "https://issuer.example".to_string(),
+            authorization_endpoint: "https://issuer.example/authorize".to_string(),
+            token_endpoint: "https://issuer.example/token".to_string(),
+            userinfo_endpoint: None,
+            jwks_uri: format!("{}/jwks", mock_server.uri()),
+            registration_endpoint: None,
+        };
+
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock is after unix epoch")
+            .as_secs();
+        let token_claims = json!({
+            "iss": discovery.issuer.as_str(),
+            "aud": provider.client_id.as_str(),
+            "sub": "user-123",
+            "exp": now + 600,
+            "nbf": now - 60
+        });
+        let mut header = Header::new(Algorithm::RS256);
+        header.kid = Some("rsa01".to_string());
+        let id_token = encode(
+            &header,
+            &token_claims,
+            &EncodingKey::from_rsa_pem(TEST_RSA_PRIVATE_KEY.as_bytes())
+                .expect("test RSA key should parse"),
+        )
+        .expect("test ID token should sign");
+
+        let claims = validate_id_token(&Client::new(), &provider, &discovery, &id_token)
+            .await
+            .expect("RS256 ID token should validate through JWKS");
+
+        assert_eq!(claims.get("sub").and_then(Value::as_str), Some("user-123"));
     }
 
     #[test]

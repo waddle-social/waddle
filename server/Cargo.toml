@@ -102,9 +102,9 @@ url = "2.5"
 base64 = "0.22"
 rand = "0.9"
 hex = "0.4"
-lru = "0.12"
+lru = "0.16"
 regex = "1.10"
-jsonwebtoken = "9.3"
+jsonwebtoken = { version = "10.4", features = ["aws_lc_rs"] }
 
 # Markdown/Syntax (CLI)
 pulldown-cmark = "0.12"
