@@ -64,6 +64,18 @@
   background: color-mix(in oklab, var(--muted) 38%, transparent);
 }
 
+/* Grouped follow-ups in a thread visually attach to their burst parent:
+ * drop the outline at rest so a same-author run reads as one block instead
+ * of N stacked cards. Hover re-affirms an individual message can still
+ * receive actions (reactions / reply / etc.). */
+.chat-message-grid--thread.chat-message-grouped::before {
+  border-color: transparent;
+}
+
+.chat-message-grid--thread.chat-message-grouped:hover::before {
+  border-color: color-mix(in oklab, var(--primary) 12%, transparent);
+}
+
 .chat-message-grid--reaction-selected::before {
   opacity: 1;
   border-color: color-mix(in oklab, var(--primary) 16%, transparent);
