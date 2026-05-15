@@ -20,7 +20,7 @@ const props = withDefaults(defineProps<{
   ariaLabel: string;
   contentClass?: string;
 }>(), {
-  contentClass: "chat-message-lane chat-message-list",
+  contentClass: "chat-message-list",
 });
 
 const emit = defineEmits<{
