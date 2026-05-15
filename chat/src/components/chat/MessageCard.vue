@@ -273,8 +273,8 @@ const desktopToolbarLockedByAnother = computed(() =>
 );
 const desktopToolbarVisibilityClass = computed(() => (
   ownsDesktopToolbarLock.value || props.reactionModeSelected
-    ? "opacity-100 pointer-events-auto z-floating"
-    : "opacity-0 group-hover:opacity-100 focus-within:opacity-100 pointer-events-none group-hover:pointer-events-auto focus-within:pointer-events-auto z-sticky"
+    ? "opacity-100 translate-y-0 pointer-events-auto z-floating"
+    : "opacity-0 motion-safe:translate-y-1 group-hover:opacity-100 group-hover:translate-y-0 focus-within:opacity-100 focus-within:translate-y-0 pointer-events-none group-hover:pointer-events-auto focus-within:pointer-events-auto z-sticky"
 ));
 const anyOverlayOpen = computed(() => pickerOpen.value || sheetOpen.value);
 
@@ -715,7 +715,7 @@ onBeforeUnmount(() => {
     <div
       v-if="!isEditing && !desktopToolbarLockedByAnother"
       :class="[
-        'chat-hover-action-toolbar absolute -top-4 right-3 flex items-center gap-1 transition-opacity duration-150 bg-card/95 backdrop-blur border border-border rounded-lg shadow-lg p-1 [@media(pointer:coarse)]:hidden',
+        'chat-hover-action-toolbar absolute -top-4 right-3 flex items-center gap-1 transition-[opacity,transform] duration-150 ease-out bg-card/95 backdrop-blur border border-border rounded-lg shadow-[0_10px_28px_-12px_var(--glow-strong),0_4px_12px_-4px_color-mix(in_oklab,var(--foreground)_20%,transparent)] p-1 [@media(pointer:coarse)]:hidden',
         desktopToolbarVisibilityClass,
         reactionModeSelected ? 'chat-hover-action-toolbar--reaction-mode' : '',
       ]"
@@ -726,7 +726,7 @@ onBeforeUnmount(() => {
         v-for="(e, index) in quickEmojis"
         :key="e"
         type="button"
-        class="type-emoji-button relative h-8 w-8 flex items-center justify-center rounded-md hover:bg-muted hover:scale-105 transition-all duration-150"
+        class="chat-hover-action-toolbar-btn type-emoji-button relative h-8 w-8 flex items-center justify-center rounded-md hover:bg-muted motion-safe:hover:scale-110"
         :title="`React with ${e}`"
         :aria-label="`React to message with ${e}`"
         @click="react(e)"
@@ -742,7 +742,7 @@ onBeforeUnmount(() => {
         <button
           ref="pickerButtonEl"
           type="button"
-          class="h-8 w-8 flex items-center justify-center rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-all duration-150"
+          class="chat-hover-action-toolbar-btn h-8 w-8 flex items-center justify-center rounded-md text-muted-foreground hover:text-foreground hover:bg-muted"
           :class="pickerOpen ? 'bg-muted text-foreground' : ''"
           title="Add reaction"
           aria-label="Add reaction"
@@ -762,7 +762,7 @@ onBeforeUnmount(() => {
       <button
         v-if="canReplyToMessage"
         type="button"
-        class="h-8 w-8 flex items-center justify-center rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-all duration-150"
+        class="chat-hover-action-toolbar-btn h-8 w-8 flex items-center justify-center rounded-md text-muted-foreground hover:text-foreground hover:bg-muted"
         title="Reply"
         aria-label="Reply to message"
         @click="startReplyFromMenu"
@@ -771,7 +771,7 @@ onBeforeUnmount(() => {
       </button>
       <button
         type="button"
-        class="h-8 w-8 flex items-center justify-center rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-all duration-150"
+        class="chat-hover-action-toolbar-btn h-8 w-8 flex items-center justify-center rounded-md text-muted-foreground hover:text-foreground hover:bg-muted"
         :title="threadReplyCount > 0 ? 'Open thread' : 'Reply in thread'"
         :aria-label="threadReplyCount > 0 ? 'Open thread' : 'Reply in thread'"
         @click="startReplyInThreadFromMenu"
@@ -781,7 +781,7 @@ onBeforeUnmount(() => {
       <button
         v-if="canPinMessages && message.id"
         type="button"
-        class="h-8 w-8 flex items-center justify-center rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-all duration-150"
+        class="chat-hover-action-toolbar-btn h-8 w-8 flex items-center justify-center rounded-md text-muted-foreground hover:text-foreground hover:bg-muted"
         :title="isPinned ? 'Unpin from channel' : 'Pin to channel'"
         :aria-label="isPinned ? 'Unpin from channel' : 'Pin to channel'"
         @click="togglePinFromMenu"
@@ -792,7 +792,7 @@ onBeforeUnmount(() => {
         <div class="w-px h-5 bg-border mx-0.5" />
         <button
           type="button"
-          class="h-8 w-8 flex items-center justify-center rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-all duration-150"
+          class="chat-hover-action-toolbar-btn h-8 w-8 flex items-center justify-center rounded-md text-muted-foreground hover:text-foreground hover:bg-muted"
           title="Edit message"
           aria-label="Edit message"
           @click="startEditFromMenu"
@@ -801,7 +801,7 @@ onBeforeUnmount(() => {
         </button>
         <button
           type="button"
-          class="h-8 w-8 flex items-center justify-center rounded-md text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-all duration-150"
+          class="chat-hover-action-toolbar-btn h-8 w-8 flex items-center justify-center rounded-md text-muted-foreground hover:text-destructive hover:bg-destructive/10"
           title="Delete message"
           aria-label="Delete message"
           @click="retractFromMenu"

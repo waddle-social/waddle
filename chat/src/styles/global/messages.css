@@ -275,6 +275,30 @@
   margin-block-start: calc(-1 * var(--chat-message-row-gap, var(--space-xs)));
 }
 
+.chat-hover-action-toolbar-btn {
+  transition: transform 0.15s ease, background-color 0.15s ease, color 0.15s ease;
+}
+
+.chat-hover-action-toolbar-btn:active:not(:disabled) {
+  transform: scale(0.94);
+}
+
+.chat-hover-action-toolbar-btn:focus-visible {
+  outline: none;
+  box-shadow:
+    0 0 0 2px var(--background),
+    0 0 0 4px color-mix(in oklab, var(--primary) 45%, transparent);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chat-hover-action-toolbar-btn {
+    transition: none;
+  }
+  .chat-hover-action-toolbar-btn:active:not(:disabled) {
+    transform: none;
+  }
+}
+
 .chat-message-time-gutter {
   display: flex;
   height: var(--chat-message-first-line-box);
