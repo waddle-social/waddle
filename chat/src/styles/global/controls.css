@@ -178,12 +178,37 @@
     border-color 0.18s ease;
 }
 
-/* Unread / mention emphasis for sidebar channel rows. A 2px accent rail
- * pinned to the inside-left edge picks up the same --primary / --destructive
- * language used by the composer armed glow, hover toolbar, and reaction
- * chips — so unread channels read as part of the same brand system instead
- * of a one-off "bold + dot" treatment. The rail anchors to the row's
- * rounded corner so it doesn't clip on small radius. */
+/* Unread / mention / active emphasis for sidebar channel rows. A
+ * left-edge accent rail picks up the same --primary / --destructive
+ * language used by the composer armed glow, hover toolbar, and
+ * reaction chips — so the sidebar reads as part of the same brand
+ * system instead of a one-off "bold + dot" treatment. Three
+ * intensities tell the user three states at a glance:
+ *
+ *   - **Active** (the channel currently being viewed): 3 px rail,
+ *     full height, strong glow — paired with the existing
+ *     bg-sidebar-accent fill so the row has BOTH a rail and a
+ *     surface signal ("you are here").
+ *   - **Unread** (has unread messages but not active): 2 px rail
+ *     with a quieter glow.
+ *   - **Mention** (unread + you were @-mentioned): 2 px rail but
+ *     in --destructive instead of --primary.
+ *
+ * The rail anchors to the row's rounded corner so it doesn't clip
+ * on small radius. */
+.chat-list-row--active::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 12%;
+  bottom: 12%;
+  width: 3px;
+  border-radius: 0 1.5px 1.5px 0;
+  background: var(--primary);
+  box-shadow: 0 0 12px var(--glow-strong);
+  pointer-events: none;
+}
+
 .chat-list-row--unread::before {
   content: "";
   position: absolute;
@@ -211,6 +236,7 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .chat-list-row--active::before,
   .chat-list-row--unread::before,
   .chat-list-row--mention::before {
     box-shadow: none;
