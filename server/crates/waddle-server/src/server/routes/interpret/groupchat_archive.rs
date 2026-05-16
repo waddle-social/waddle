@@ -331,7 +331,13 @@ pub(super) async fn project_groupchat_inbox(
 /// from `WebSocketState` (Copilot review on PR #279) so unit tests
 /// and non-WebSocket callers can drive the projection without
 /// standing up the full route stack.
-pub(super) async fn push_inbox_update(
+///
+/// Used by the new-message archive path (which observes a fresh
+/// inbox row and broadcasts it) *and* the mark-read IQ handler
+/// (which broadcasts the read-state flip so the user's other
+/// devices clear their unread badges in real time — XEP-0430
+/// §"Mark as read" cross-device sync).
+pub(crate) async fn push_inbox_update(
     connection_registry: &waddle_xmpp::registry::ConnectionRegistry,
     user: &BareJid,
     entry: &InboxEntry,
