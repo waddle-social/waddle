@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, ref, watch, type ComponentPublicInstance } from "vue";
 import { useStore } from "@nanostores/vue";
-import { AlertCircle, CheckCircle2, Hash, MessageCircle, MessagesSquare, RefreshCw, Search, Upload, WifiOff, X } from "lucide-vue-next";
+import { AlertCircle, CheckCircle2, Hash, Loader2, MessageCircle, MessagesSquare, RefreshCw, Search, SearchX, Upload, WifiOff, X } from "lucide-vue-next";
 import { $pinnedStanzaIds } from "@/stores/pinned-messages";
 import { isForumChannel as detectForumChannel } from "@/lib/channel-types";
 import { getConnectionNoticeCopy } from "@/lib/connection-notice";
@@ -951,11 +951,24 @@ function dayDividerLabel(createdAt: string): string {
     <!-- Search results -->
     <div v-if="showSearch && (searchSubmitted || isSearching)" class="border-b border-border glass-surface max-h-56 overflow-auto flex-shrink-0">
       <div class="chat-message-lane">
-        <div v-if="isSearching" class="type-caption px-[var(--chat-content-inline)] py-3 text-muted-foreground">
-          Searching…
+        <!-- Loading state — Loader2 spinner alongside the copy so the
+             user sees the request is in flight, not just frozen. -->
+        <div
+          v-if="isSearching"
+          class="type-caption flex items-center justify-center gap-2 px-[var(--chat-content-inline)] py-5 text-muted-foreground"
+        >
+          <Loader2 class="h-3.5 w-3.5 motion-safe:animate-spin" aria-hidden="true" />
+          <span>Searching…</span>
         </div>
-        <div v-else-if="searchResults.length === 0" class="type-caption px-[var(--chat-content-inline)] py-3 text-muted-foreground">
-          No matching messages.
+        <!-- Empty state — SearchX glyph stacked above the copy so the
+             "no matches" outcome reads as an authored state, not a
+             one-line ghost. -->
+        <div
+          v-else-if="searchResults.length === 0"
+          class="flex flex-col items-center justify-center gap-1.5 px-[var(--chat-content-inline)] py-6 text-center"
+        >
+          <SearchX class="h-5 w-5 text-muted-foreground/60" aria-hidden="true" />
+          <span class="type-caption text-muted-foreground">No matching messages</span>
         </div>
         <div v-else class="divide-y divide-border">
           <button
