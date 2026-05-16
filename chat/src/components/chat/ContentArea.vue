@@ -402,6 +402,17 @@ watch(
 const showSearch = ref(false);
 const searchInput = ref("");
 const searchSubmitted = ref(false);
+const searchInputEl = ref<HTMLInputElement | null>(null);
+
+// Drop the caret straight into the search input when the bar opens —
+// without this the user had to click the input a second time after
+// clicking the header Search button. Matches the autofocus convention
+// the GIF picker already follows.
+watch(showSearch, async (open) => {
+  if (!open) return;
+  await nextTick();
+  searchInputEl.value?.focus();
+});
 const avatarUrlByAuthor = computed(() => props.avatarUrlByAuthor ?? {});
 const isForumChannel = computed(() => detectForumChannel(props.channel));
 
@@ -933,11 +944,13 @@ function dayDividerLabel(createdAt: string): string {
       <div class="chat-message-lane flex items-center gap-3">
         <Search class="w-3.5 h-3.5 text-muted-foreground flex-shrink-0" />
         <input
+          ref="searchInputEl"
           v-model="searchInput"
           placeholder="Search messages…"
           aria-label="Search messages"
           class="type-field flex-1 bg-transparent focus:outline-none placeholder:text-muted-foreground/40"
           @keydown.enter="doSearch"
+          @keydown.escape="closeSearch"
         />
         <button
           v-if="searchInput"
