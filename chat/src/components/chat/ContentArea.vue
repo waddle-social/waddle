@@ -28,6 +28,7 @@ import { formatTimelineStamp, formatTimelineDayDivider, isSameTimelineDay } from
 import { useExtensionLauncher } from "@/channels/extension-launcher";
 import { useJumpToLiveEdge } from "@/ui/use-jump-to-live-edge";
 import { ArrowDown, ArrowUp } from "lucide-vue-next";
+import AppAvatar from "@/components/ui/AppAvatar.vue";
 import ChatHeader, { type ChannelHeaderMember } from "@/components/chat/ChatHeader.vue";
 import ExtensionPalette from "@/components/chat/ExtensionPalette.vue";
 import MessageCard from "@/components/chat/MessageCard.vue";
@@ -958,18 +959,32 @@ function dayDividerLabel(createdAt: string): string {
           No matching messages.
         </div>
         <div v-else class="divide-y divide-border">
+          <!-- Each search result row gets the author's avatar on the
+               left so the eye can triage results by who-said-it at a
+               glance — the same recognition cue the timeline uses.
+               Avatar (xs) + content stack (name + time on row one,
+               truncated body on row two) lets the row read as a
+               compact preview of the matching message. -->
           <button
             v-for="result in searchResults"
             :key="result.id"
-            class="w-full px-[var(--chat-content-inline)] py-3 text-left hover:bg-muted/50 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/25"
+            class="flex w-full items-start gap-3 px-[var(--chat-content-inline)] py-3 text-left hover:bg-muted/50 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/25"
             type="button"
             @click="openSearchResult(result)"
           >
-            <div class="flex items-baseline gap-2">
-              <span class="type-control">{{ result.nick }}</span>
-              <span class="type-meta type-numeric text-muted-foreground">{{ formatTimelineStamp(result.createdAt) }}</span>
+            <AppAvatar
+              :name="result.nick"
+              :src="avatarUrlByAuthor[result.nick] ?? null"
+              :presence="roomPresence[result.nick] ?? 'offline'"
+              size="xs"
+            />
+            <div class="min-w-0 flex-1">
+              <div class="flex items-baseline gap-2">
+                <span class="type-control">{{ result.nick }}</span>
+                <span class="type-meta type-numeric text-muted-foreground">{{ formatTimelineStamp(result.createdAt) }}</span>
+              </div>
+              <p class="type-caption truncate text-muted-foreground">{{ result.body }}</p>
             </div>
-            <p class="type-caption truncate text-muted-foreground">{{ result.body }}</p>
           </button>
         </div>
       </div>
