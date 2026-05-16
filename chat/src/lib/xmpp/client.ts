@@ -63,6 +63,19 @@ import {
   type FeedPostInput,
   type WasmFeedEntry,
 } from "./feed-types";
+import {
+  storyFromWasm,
+  type Story,
+  type StoryPostInput,
+  type WasmStory,
+} from "./story-types";
+import {
+  eventFromWasm,
+  rruleToWasm,
+  type CommunityEvent,
+  type CommunityEventInput,
+  type WasmVEvent,
+} from "./event-types";
 import type { FetchInboxOptions, InboxEntry, InboxResult } from "./inbox-types";
 import type { ActivityPublication, MoodPublication, TunePublication, UserPepProfile } from "./pep-types";
 import {
@@ -878,12 +891,12 @@ export class BrowserXmppClient {
   async fetchThreadInbox(roomJid: string): Promise<InboxResult> { return this.fetchInbox({ room: roomJid, threads: true }); }
 
   /**
-   * Fetch the latest XEP-0472 social feed entries from the spaces service.
-   * Returns entries newest-first as the server orders them.
+   * Fetch the latest XEP-0472 social feed entries from the community
+   * service. Returns entries newest-first as the server orders them.
    */
-  async fetchFeed(spacesJid: string, maxItems: number | undefined = undefined): Promise<FeedEntry[]> {
+  async fetchFeed(communityJid: string, maxItems: number | undefined = undefined): Promise<FeedEntry[]> {
     const xmpp = await this.requireConnectedXmpp();
-    const result = await xmpp.feed_items?.(spacesJid, maxItems ?? null) as WasmFeedEntry[] | undefined;
+    const result = await xmpp.feed_items?.(communityJid, maxItems ?? null) as WasmFeedEntry[] | undefined;
     return (result ?? []).map(feedEntryFromWasm);
   }
 
@@ -892,9 +905,9 @@ export class BrowserXmppClient {
    * server-confirmed entry (with id + published) so callers can append
    * to local state without re-fetching.
    */
-  async publishFeedPost(spacesJid: string, post: FeedPostInput): Promise<FeedEntry> {
+  async publishFeedPost(communityJid: string, post: FeedPostInput): Promise<FeedEntry> {
     const xmpp = await this.requireConnectedXmpp();
-    const result = await xmpp.feed_publish?.(spacesJid, {
+    const result = await xmpp.feed_publish?.(communityJid, {
       body: post.body,
       ...(post.title ? { title: post.title } : {}),
       ...(post.author ? { author: post.author } : {}),
@@ -904,6 +917,70 @@ export class BrowserXmppClient {
       throw new Error("feed_publish returned no entry");
     }
     return feedEntryFromWasm(result);
+  }
+
+  /**
+   * Fetch the latest XEP-0501 stories from the community stories
+   * node. Returns ALL items (including expired); the chat filters
+   * active vs expired locally.
+   */
+  async fetchStories(communityJid: string, maxItems: number | undefined = undefined): Promise<Story[]> {
+    const xmpp = await this.requireConnectedXmpp();
+    const result = await xmpp.stories_items?.(communityJid, maxItems ?? null) as WasmStory[] | undefined;
+    return (result ?? []).map(storyFromWasm);
+  }
+
+  /**
+   * Publish a XEP-0501 story. At least one of `body`/`mediaUrl` is
+   * required (the server rejects empty stories).
+   */
+  async publishStory(communityJid: string, input: StoryPostInput): Promise<Story> {
+    const xmpp = await this.requireConnectedXmpp();
+    const result = await xmpp.stories_publish?.(communityJid, {
+      ...(input.body ? { body: input.body } : {}),
+      ...(input.mediaUrl ? { media_url: input.mediaUrl } : {}),
+      ...(input.author ? { author: input.author } : {}),
+      ...(typeof input.expiryHours === "number" ? { expiry_hours: input.expiryHours } : {}),
+    }) as WasmStory | undefined;
+    if (!result) {
+      throw new Error("stories_publish returned no story");
+    }
+    return storyFromWasm(result);
+  }
+
+  /**
+   * Fetch xCal community events. Returns ALL items (past + upcoming);
+   * the chat sorts upcoming-first.
+   */
+  async fetchCommunityEvents(communityJid: string, maxItems: number | undefined = undefined): Promise<CommunityEvent[]> {
+    const xmpp = await this.requireConnectedXmpp();
+    const result = await xmpp.xcal_items?.(communityJid, maxItems ?? null) as WasmVEvent[] | undefined;
+    return (result ?? []).map(eventFromWasm);
+  }
+
+  /**
+   * Publish an xCal community event. SUMMARY is required; DTSTART
+   * is required for the event to be useful on a timeline.
+   */
+  async publishCommunityEvent(communityJid: string, input: CommunityEventInput): Promise<CommunityEvent> {
+    const xmpp = await this.requireConnectedXmpp();
+    const result = await xmpp.xcal_publish?.(communityJid, {
+      summary: input.summary,
+      ...(input.description ? { description: input.description } : {}),
+      ...(input.location ? { location: input.location } : {}),
+      ...(input.organizer ? { organizer: input.organizer } : {}),
+      ...(typeof input.dtstartMs === "number"
+        ? { dtstart: new Date(input.dtstartMs).toISOString() }
+        : {}),
+      ...(typeof input.dtendMs === "number"
+        ? { dtend: new Date(input.dtendMs).toISOString() }
+        : {}),
+      ...(input.rrule ? { rrule: rruleToWasm(input.rrule) } : {}),
+    }) as WasmVEvent | undefined;
+    if (!result) {
+      throw new Error("xcal_publish returned no event");
+    }
+    return eventFromWasm(result);
   }
   async publishMood(mood: MoodPublication): Promise<void> { const xmpp = await this.requireConnectedXmpp(); await xmpp.publish_mood?.({ kind: mood.kind, ...(mood.text ? { text: mood.text } : {}) }); }
   async retractMood(): Promise<void> { const xmpp = await this.requireConnectedXmpp(); await xmpp.retract_mood?.(); }

@@ -98,12 +98,37 @@ export class WaddleClient {
     set_on_presence(cb: Function): void;
     set_on_session_lifecycle(cb: Function): void;
     set_room_affiliation(room_jid: string, jid: string, affiliation: string): Promise<any>;
+    /**
+     * Fetch the latest stories from the community stories node on
+     * `community_jid`. Returns ALL items including expired ones —
+     * the chat filters active vs expired locally so a story fades
+     * out as the countdown hits zero without a server roundtrip.
+     */
+    stories_items(community_jid: string, max_items?: number | null): Promise<any>;
+    /**
+     * Publish a new story. At least one of `body` / `media_url` is
+     * required (the server rejects empty stories). `expiry_hours`
+     * defaults to 24.
+     */
+    stories_publish(community_jid: string, input: any): Promise<any>;
     subscribe_to_presence(peer_jid: string): Promise<any>;
     /**
      * Publish an unpin request (#414). Same authorization rules as
      * [`Self::pin_message`].
      */
     unpin_message(room_jid: string, target_stanza_id: string): Promise<any>;
+    /**
+     * Fetch the latest calendar events from the community events
+     * node. Returns ALL items including past events; chat-side
+     * composables filter by DTSTART for upcoming-only views.
+     */
+    xcal_items(community_jid: string, max_items?: number | null): Promise<any>;
+    /**
+     * Publish a new calendar event, optionally with an RRULE for
+     * recurrence. SUMMARY is required (per RFC 5545); DTSTART is
+     * required for the event to be useful on a timeline.
+     */
+    xcal_publish(community_jid: string, input: any): Promise<any>;
 }
 
 export class WaddleConfig {

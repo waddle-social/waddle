@@ -11,6 +11,8 @@ import { useServiceWorkerUpdate } from "@/shell/service-worker-update";
 import { usePushNotifications } from "@/shell/notifications";
 import { useChannelInbox } from "@/channels/inbox";
 import { useSocialFeed } from "@/services/social-feed";
+import { useStories } from "@/services/stories";
+import { useCommunityEvents } from "@/services/community-events";
 import { useChatReadActivity } from "@/shell/read-activity";
 import { useDeploymentVersionInfo } from "@/shell/version";
 import { useXmppRosterContacts } from "@/contacts/roster";
@@ -88,7 +90,9 @@ export function useChatAppController(giphyApiKey: string) {
     const domain = jid.split("@")[1]?.split("/")[0];
     return domain ? `community.${domain}` : null;
   });
-  const socialFeed = useSocialFeed(xmppClient, { spacesJid: communityJid });
+  const socialFeed = useSocialFeed(xmppClient, { communityJid });
+  const stories = useStories(xmppClient, { communityJid });
+  const communityEvents = useCommunityEvents(xmppClient, { communityJid });
 
   const dmMessaging = useDirectMessages(
     session,
@@ -696,6 +700,8 @@ export function useChatAppController(giphyApiKey: string) {
       void dmConversations.hydrateFromInbox();
       void channelUnread.hydrateFromInbox();
       void socialFeed.refresh();
+      void stories.refresh();
+      void communityEvents.refresh();
     });
   }, { immediate: true });
 
@@ -1642,6 +1648,8 @@ export function useChatAppController(giphyApiKey: string) {
       channelUnread,
       rosterContacts,
       socialFeed,
+      stories,
+      communityEvents,
       dmMessaging,
       xmppClient,
       activeMessages,
