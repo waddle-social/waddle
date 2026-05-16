@@ -116,20 +116,16 @@ impl PushSecretCipher {
         let tag = tag
             .ok_or_else(|| XmppError::internal("Push Service provider secret missing tag"))
             .and_then(decode_sealed_part)?;
-        if nonce.len() != 16 {
-            return Err(XmppError::internal(
-                "Push Service provider secret nonce has invalid length",
-            ));
-        }
+        let nonce: [u8; 16] = nonce.try_into().map_err(|_| {
+            XmppError::internal("Push Service provider secret nonce has invalid length")
+        })?;
         let expected = provider_secret_tag(&self.mac_key, &nonce, &ciphertext);
         if !constant_time_eq(&expected, &tag) {
             return Err(XmppError::internal(
                 "Push Service provider secret authentication failed",
             ));
         }
-        let mut nonce_array = [0_u8; 16];
-        nonce_array.copy_from_slice(&nonce);
-        let plaintext = xor_keystream(&self.enc_key, &nonce_array, &ciphertext);
+        let plaintext = xor_keystream(&self.enc_key, &nonce, &ciphertext);
         String::from_utf8(plaintext).map_err(|error| {
             XmppError::internal(format!(
                 "Push Service provider secret is invalid UTF-8: {error}"
