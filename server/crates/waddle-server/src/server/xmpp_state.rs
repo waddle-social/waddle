@@ -428,19 +428,6 @@ impl waddle_xmpp::AppState for XmppAppState {
         .await
     }
 
-    async fn mark_inbox_read(
-        &self,
-        user_jid: &jid::BareJid,
-        partner_jid: &jid::BareJid,
-    ) -> Result<(), XmppError> {
-        super::xmpp_user_storage_state::mark_inbox_read(
-            self.inbox_storage.as_deref(),
-            user_jid,
-            partner_jid,
-        )
-        .await
-    }
-
     async fn inbox_total_unread(&self, user_jid: &jid::BareJid) -> Result<u64, XmppError> {
         super::xmpp_user_storage_state::inbox_total_unread(self.inbox_storage.as_deref(), user_jid)
             .await

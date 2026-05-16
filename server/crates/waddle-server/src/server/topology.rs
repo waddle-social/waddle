@@ -122,6 +122,83 @@ async fn seed_initial_xmpp_topology(
         .await
         .map_err(|error| anyhow::anyhow!("failed to configure General space node: {error}"))?;
 
+    // Community service hosts the non-space pubsub nodes (XEP-0472
+    // social feed, XEP-0501 stories). Kept distinct from
+    // `spaces.<domain>` so the spaces disco#items enumeration cleanly
+    // returns only actual community spaces.
+    let community_jid: jid::BareJid = services
+        .community
+        .parse()
+        .map_err(|error| anyhow::anyhow!("invalid community service JID: {error}"))?;
+
+    // XEP-0472 Social Feed — community-wide pubsub feed for
+    // announcements and microblog-style posts. Access model is
+    // `spaces_public()`: anyone can subscribe and read, only entities
+    // with Publisher or Owner affiliation may publish.
+    pubsub_storage
+        .get_or_create_node(&community_jid, waddle_xmpp_core::xep0472::PUBSUB_NODE_FEED)
+        .await
+        .map_err(|error| anyhow::anyhow!("failed to create social feed node: {error}"))?;
+    pubsub_storage
+        .update_node_config(
+            &community_jid,
+            waddle_xmpp_core::xep0472::PUBSUB_NODE_FEED,
+            &NodeConfig::spaces_public(),
+        )
+        .await
+        .map_err(|error| anyhow::anyhow!("failed to configure social feed node: {error}"))?;
+
+    // XEP-0501 Stories — community-wide ephemeral pubsub node. Same
+    // hosting + access model as the social feed; stories carry an
+    // `expires` timestamp and the chat client filters expired items
+    // out of the view. (Server-side eviction of expired items is a
+    // future cleanup job; the items API and pubsub semantics work
+    // unmodified — the `expires` attribute is application-level
+    // metadata.)
+    pubsub_storage
+        .get_or_create_node(
+            &community_jid,
+            waddle_xmpp_core::xep0501::PUBSUB_NODE_STORIES,
+        )
+        .await
+        .map_err(|error| anyhow::anyhow!("failed to create stories node: {error}"))?;
+    pubsub_storage
+        .update_node_config(
+            &community_jid,
+            waddle_xmpp_core::xep0501::PUBSUB_NODE_STORIES,
+            &NodeConfig::spaces_public(),
+        )
+        .await
+        .map_err(|error| anyhow::anyhow!("failed to configure stories node: {error}"))?;
+
+    // XEP-0471 Calendar Events — community-wide pubsub node for
+    // events with optional RSVP tracking. Same hosting + access
+    // model as the social feed; events carry their own scheduling
+    // metadata in the typed `<event/>` payload.
+    pubsub_storage
+        .get_or_create_node(&community_jid, waddle_xmpp_core::xcal::PUBSUB_NODE_EVENTS)
+        .await
+        .map_err(|error| anyhow::anyhow!("failed to create calendar node: {error}"))?;
+    pubsub_storage
+        .update_node_config(
+            &community_jid,
+            waddle_xmpp_core::xcal::PUBSUB_NODE_EVENTS,
+            &NodeConfig::spaces_public(),
+        )
+        .await
+        .map_err(|error| anyhow::anyhow!("failed to configure calendar node: {error}"))?;
+
+    // Server owners get Owner affiliation on the community nodes so
+    // the existing publisher gates accept their publishes. Mirrors
+    // the spaces seed below but scoped to the community service.
+    for owner in state.server_owner_jids.iter() {
+        crate::spaces_pubsub_seed::seed_owner_on_all_nodes(pubsub_storage, &community_jid, owner)
+            .await
+            .map_err(|error| {
+                anyhow::anyhow!("failed to seed community service owner affiliations: {error}")
+            })?;
+    }
+
     for channel in INITIAL_MANAGED_CHANNELS {
         let channel_record = get_xmpp_channel(actor.clone(), channel.id)
             .await

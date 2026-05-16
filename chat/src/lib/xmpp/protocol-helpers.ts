@@ -180,6 +180,24 @@ async function publishMucToSpace(client: HybridClient, spacesServiceJid: string,
   );
 }
 
+/**
+ * Move a MUC bookmark to a different XEP-0503 Space.
+ *
+ * Implemented as a publish to the target Space — the server-side
+ * `handle_spaces_publish` enforces XEP-0503 single-membership by
+ * retracting the same `item-id` from every other Space first, so
+ * the client doesn't have to issue a separate retract.
+ */
+export async function moveMucToSpace(
+  client: HybridClient,
+  spacesServiceJid: string,
+  targetSpaceNode: string,
+  mucJid: string,
+  params: PublishMucToSpaceParams,
+): Promise<void> {
+  await publishMucToSpace(client, spacesServiceJid, targetSpaceNode, mucJid, params);
+}
+
 export async function createMucInSpace(client: HybridClient, mucServiceJid: string, spacesServiceJid: string, params: CreateMucInSpaceParams): Promise<{ roomJid: string; spaceNode: string; spacesServiceJid: string }> {
   const { roomJid } = await createMucRoom(client, mucServiceJid, params);
   await publishMucToSpace(client, spacesServiceJid, params.spaceNode, roomJid, { name: params.name, autojoin: true });

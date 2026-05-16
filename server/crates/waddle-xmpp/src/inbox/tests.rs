@@ -39,7 +39,10 @@ fn test_mark_read_resets_only_that_partner() {
         entry("b@example.com", ConversationKind::Direct, "s2", 2),
         true,
     );
-    inbox.mark_read(&jid("a@example.com"));
+    let updated = inbox
+        .mark_read(&jid("a@example.com"))
+        .expect("entry present");
+    assert_eq!(updated.unread, 0);
     assert_eq!(inbox.get(&jid("a@example.com")).unwrap().unread, 0);
     assert_eq!(inbox.get(&jid("b@example.com")).unwrap().unread, 1);
     assert_eq!(inbox.total_unread(), 1);
@@ -168,7 +171,9 @@ fn test_mark_read_by_key_for_thread() {
     );
 
     let key = InboxKey::thread(jid(room), "t1");
-    inbox.mark_read_by_key(&key);
+    let updated = inbox.mark_read_by_key(&key).expect("entry present");
+    assert_eq!(updated.unread, 0);
+    assert_eq!(updated.thread_id.as_deref(), Some("t1"));
 
     let t1 = inbox.get_by_key(&key).unwrap();
     assert_eq!(t1.unread, 0);

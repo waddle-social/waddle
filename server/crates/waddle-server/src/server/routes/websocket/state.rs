@@ -7,6 +7,11 @@ pub struct XmppServiceDomains {
     pub upload: String,
     pub extensions: String,
     pub push: String,
+    /// Hosts community-wide pubsub features that are NOT space-bookmark
+    /// nodes (XEP-0472 social feed, XEP-0501 stories). Kept distinct
+    /// from `spaces` so the spaces disco#items enumeration only
+    /// surfaces actual community spaces.
+    pub community: String,
 }
 
 impl XmppServiceDomains {
@@ -17,6 +22,7 @@ impl XmppServiceDomains {
             upload: format!("upload.{xmpp_domain}"),
             extensions: format!("extensions.{xmpp_domain}"),
             push: format!("push.{xmpp_domain}"),
+            community: format!("community.{xmpp_domain}"),
         }
     }
 }
@@ -122,6 +128,12 @@ pub struct ProtocolServices {
     /// populated on detach and removed on take/resume (or swept when the
     /// corresponding SM session expires).
     pub resumable_sessions: Arc<dashmap::DashMap<String, Session>>,
+    /// PEP → community feed bridge. Observes successful PEP publishes
+    /// (mood / activity / tune / avatar / vCard4) and shadow-publishes
+    /// a typed feed entry on `community.<domain>` so the community
+    /// Feed pane surfaces user activity automatically. Holds per-
+    /// (user, kind) throttle state.
+    pub pep_feed_bridge: Arc<crate::pep_feed_bridge::PepFeedBridge>,
 }
 
 /// Per-connection mutable state for a single WebSocket XMPP transport.

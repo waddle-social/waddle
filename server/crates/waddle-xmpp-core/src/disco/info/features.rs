@@ -194,6 +194,24 @@ impl Feature {
         Self::new("urn:xmpp:bookmarks:1")
     }
 
+    /// XEP-0472 Pubsub Social Feed.
+    pub fn social_feed() -> Self {
+        Self::new("urn:xmpp:pubsub-social-feed:0")
+    }
+
+    /// XEP-0501 Pubsub Stories.
+    pub fn stories() -> Self {
+        Self::new("urn:xmpp:stories:0")
+    }
+
+    /// xCal calendar events per the XSF ProtoXEP
+    /// "Calendaring Extensions to Publish-Subscribe". The advertised
+    /// feature URI is the xCal namespace itself; the ProtoXEP has
+    /// no assigned XEP number yet (status: ProtoXEP).
+    pub fn xcal() -> Self {
+        Self::new("urn:ietf:params:xml:ns:xcal")
+    }
+
     pub fn bookmarks_compat() -> Self {
         Self::new("urn:xmpp:bookmarks:1#compat")
     }

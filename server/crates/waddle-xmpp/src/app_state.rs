@@ -393,13 +393,6 @@ pub trait AppState: Send + Sync + 'static {
         increment_unread: bool,
     ) -> impl std::future::Future<Output = Result<(), XmppError>> + Send;
 
-    /// Mark a conversation as read in the user's inbox.
-    fn mark_inbox_read(
-        &self,
-        user_jid: &jid::BareJid,
-        partner_jid: &jid::BareJid,
-    ) -> impl std::future::Future<Output = Result<(), XmppError>> + Send;
-
     /// Compute the total unread count across the user's inbox.
     fn inbox_total_unread(
         &self,

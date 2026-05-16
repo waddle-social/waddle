@@ -1,6 +1,9 @@
 <script setup lang="ts">
 import { computed } from "vue";
 import HomeDashboard from "@/components/chat/HomeDashboard.vue";
+import FeedPane from "@/components/community/FeedPane.vue";
+import StoriesPane from "@/components/community/StoriesPane.vue";
+import EventsPane from "@/components/community/EventsPane.vue";
 import ChatAppModals from "@/components/chat/ChatAppModals.vue";
 import ChatMobileDrawers from "@/components/chat/ChatMobileDrawers.vue";
 import ContentArea from "@/components/chat/ContentArea.vue";
@@ -31,6 +34,7 @@ const {
   dmConversations,
   channelUnread,
   rosterContacts,
+  socialFeed,
   xmppClient,
   activeMessages,
   activeFirstUnseenId,
@@ -136,6 +140,18 @@ const contentPaneClass = computed(() => {
   return activeRightPanel.value ? "chat-content-pane--desktop-split" : "";
 });
 
+function onCommunityRsvp(
+  event: { uid: string },
+  partstat: "ACCEPTED" | "DECLINED" | "TENTATIVE" | "NEEDS-ACTION",
+) {
+  const session = connectionStore.session;
+  if (!session) return;
+  const bareJid = session.jid.split("/")[0] ?? session.jid;
+  const localpart = bareJid.split("@")[0];
+  if (!localpart) return;
+  void communityEvents.rsvp(event.uid, localpart, bareJid, partstat);
+}
+
 function selectCurrentChannelExtensionRoute(route: DiscoveredExtensionRoute) {
   const channel = waddles.currentChannel.value;
   if (!channel) return;
@@ -149,6 +165,20 @@ function setPinnedPanelOpen(isOpen: boolean) {
   }
   ui.showPinnedPanel.value = true;
   activateRightPanel("pinned");
+}
+
+function onSelectCommunitySurface(surface: "feed" | "stories" | "events") {
+  // Selecting a community pseudo-channel pushes the user into the
+  // chat page (out of dashboard / settings) and clears any active
+  // real-channel selection so the content area renders the
+  // surface's dedicated pane instead of a channel timeline.
+  ui.activePage.value = "chat";
+  ui.activeCommunitySurface.value = surface;
+}
+
+function onSelectChannelFromSidebar(id: string) {
+  ui.activeCommunitySurface.value = null;
+  selectChannel(id);
 }
 </script>
 
@@ -200,8 +230,12 @@ function setPinnedPanelOpen(isOpen: boolean) {
           :collapsed-group-ids="ui.collapsedSpaceGroupIds.value"
           :channel-unread-map="computedChannelUnreadMap"
           :thread-entries-fn="(roomJid: string) => channelUnread.threadEntries(roomJid)"
-          @select-channel="selectChannel"
+          :active-community-surface="ui.activeCommunitySurface.value"
+          :stories-active-count="stories.activeStories.value.length"
+          :upcoming-event-count="communityEvents.events.value.filter((e: { dtstartMs?: number }) => typeof e.dtstartMs === 'number' && e.dtstartMs > Date.now()).length"
+          @select-channel="onSelectChannelFromSidebar"
           @select-thread="onSelectThread"
+          @select-community-surface="onSelectCommunitySurface"
           @create-channel="openCreateChannelDialog()"
           @create-channel-in-space="openCreateChannelDialog"
           @open-settings="ui.showWaddleSettings.value = true"
@@ -224,6 +258,40 @@ function setPinnedPanelOpen(isOpen: boolean) {
         @select-channel="selectChannel"
         @select-contact="handleOpenDm"
         @open-nav="ui.showMobileNav.value = true"
+      />
+      <FeedPane
+        v-else-if="ui.activeCommunitySurface.value === 'feed'"
+        :entries="socialFeed.entries.value"
+        :is-loading="socialFeed.isLoading.value"
+        :is-posting="socialFeed.isPosting.value"
+        :error="socialFeed.error.value"
+        :can-post="!!connectionStore.session"
+        :self-jid="connectionStore.session?.jid ?? null"
+        @refresh="socialFeed.refresh()"
+        @post="(input) => socialFeed.post(input)"
+      />
+      <StoriesPane
+        v-else-if="ui.activeCommunitySurface.value === 'stories'"
+        :stories="stories.activeStories.value"
+        :is-loading="stories.isLoading.value"
+        :is-posting="stories.isPosting.value"
+        :error="stories.error.value"
+        :can-post="!!connectionStore.session"
+        :self-jid="connectionStore.session?.jid ?? null"
+        @refresh="stories.refresh()"
+        @post="(input) => stories.post(input)"
+      />
+      <EventsPane
+        v-else-if="ui.activeCommunitySurface.value === 'events'"
+        :events="communityEvents.events.value"
+        :is-loading="communityEvents.isLoading.value"
+        :is-posting="communityEvents.isPosting.value"
+        :error="communityEvents.error.value"
+        :can-post="!!connectionStore.session"
+        :self-jid="connectionStore.session?.jid ?? null"
+        @refresh="communityEvents.refresh()"
+        @post="(input) => communityEvents.post(input)"
+        @rsvp="(event, partstat) => onCommunityRsvp(event, partstat)"
       />
       <UserSettingsPage
         v-else-if="ui.activePage.value === 'settings' && connectionStore.session"

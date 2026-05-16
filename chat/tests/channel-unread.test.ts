@@ -213,6 +213,42 @@ describe("useChannelInbox", () => {
     expect(client.markInboxRead).toHaveBeenCalledWith("chat@muc.waddle.social");
   });
 
+  test("hydrate replaces stale local unread state with server-authoritative state", async () => {
+    // Captures the "wrong after reconnect" / "unread counts stay stale"
+    // symptom: device went offline (push stream interrupted), another
+    // device marked-read while disconnected, the fresh reconnection
+    // missed the headline push. On hydrate, the local state must be
+    // overwritten by the server's view — not merged.
+    const liveServerState: InboxEntry[] = [
+      {
+        partner: "space_channel@conference.example.com",
+        kind: "muc",
+        lastStanzaId: "sid-10",
+        lastUpdated: 500,
+        unread: 0,
+      },
+    ];
+    const client = makeClient(liveServerState);
+    const composable = useChannelInbox(ref<BrowserXmppClient | null>(client));
+
+    // Local cache reflects the pre-disconnect state.
+    composable.onInboxPush({
+      partner: "space_channel@conference.example.com",
+      kind: "muc",
+      lastStanzaId: "sid-5",
+      lastUpdated: 100,
+      unread: 7,
+      preview: "old preview",
+    });
+    expect(composable.totalChannelUnreadCount.value).toBe(7);
+
+    // Fresh reconnection triggers hydrate — must replace the stale row.
+    await composable.hydrateFromInbox();
+
+    expect(composable.totalChannelUnreadCount.value).toBe(0);
+    expect(composable.unreadForRoomJid("space_channel@conference.example.com")).toBe(0);
+  });
+
   test("clears stale unread state without a client", async () => {
     const client = ref<BrowserXmppClient | null>(makeClient());
     const composable = useChannelInbox(client);

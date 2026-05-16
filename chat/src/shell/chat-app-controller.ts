@@ -10,6 +10,9 @@ import { useChatShellState } from "@/shell/state";
 import { useServiceWorkerUpdate } from "@/shell/service-worker-update";
 import { usePushNotifications } from "@/shell/notifications";
 import { useChannelInbox } from "@/channels/inbox";
+import { useSocialFeed } from "@/services/social-feed";
+import { useStories } from "@/services/stories";
+import { useCommunityEvents } from "@/services/community-events";
 import { useChatReadActivity } from "@/shell/read-activity";
 import { useDeploymentVersionInfo } from "@/shell/version";
 import { useXmppRosterContacts } from "@/contacts/roster";
@@ -76,6 +79,20 @@ export function useChatAppController(giphyApiKey: string) {
 
   const channelUnread = useChannelInbox(xmppClient);
   const rosterContacts = useXmppRosterContacts(xmppClient);
+
+  // Community service (`community.<user-domain>`) hosts the
+  // XEP-0472 social feed and XEP-0501 stories nodes. Kept distinct
+  // from the spaces service so the spaces sidebar enumerates only
+  // real community spaces, not pubsub leaf nodes.
+  const communityJid = computed(() => {
+    const jid = session.value?.jid;
+    if (!jid) return null;
+    const domain = jid.split("@")[1]?.split("/")[0];
+    return domain ? `community.${domain}` : null;
+  });
+  const socialFeed = useSocialFeed(xmppClient, { communityJid });
+  const stories = useStories(xmppClient, { communityJid });
+  const communityEvents = useCommunityEvents(xmppClient, { communityJid });
 
   const dmMessaging = useDirectMessages(
     session,
@@ -670,12 +687,21 @@ export function useChatAppController(giphyApiKey: string) {
     client.setSessionLifecycleHandler((event) => {
       messaging.onSessionLifecycle(event);
       dmMessaging.onSessionLifecycle(event);
-      // Only re-hydrate inbox on resumptions (reconnect after brief disconnect).
-      // Fresh connections are handled by onConnectionReady() after appState -> "ready".
-      if (event.type === "resumed") {
-        void dmConversations.hydrateFromInbox();
-        void channelUnread.hydrateFromInbox();
-      }
+      // Re-hydrate inbox on every XMPP session-ready, both resumed and
+      // fresh. Stream resume catches up on stanzas the client missed
+      // while disconnected, but a *fresh* reconnection (resume failed
+      // — too much time elapsed, server restart, network blip past the
+      // resume window) means we lost the push stream entirely and the
+      // local unread map is stale. `onConnectionReady` only hydrates
+      // on the first sign-in (one-shot `hasBootstrapped` guard), so
+      // subsequent fresh reconnections would otherwise never refresh.
+      // `hydrateFromInbox` is request-id deduped, so the redundant
+      // call on the very first connection is harmless.
+      void dmConversations.hydrateFromInbox();
+      void channelUnread.hydrateFromInbox();
+      void socialFeed.refresh();
+      void stories.refresh();
+      void communityEvents.refresh();
     });
   }, { immediate: true });
 
@@ -1390,6 +1416,7 @@ export function useChatAppController(giphyApiKey: string) {
     void dmConversations.hydrateFromInbox();
     void channelUnread.hydrateFromInbox();
     void rosterContacts.loadRosterContacts();
+    void socialFeed.refresh();
 
     // Register service worker and sync push subscription (best-effort, non-blocking)
     void (async () => {
@@ -1510,6 +1537,13 @@ export function useChatAppController(giphyApiKey: string) {
     ui.confirmDeleteChannel.value = true;
   }
 
+  async function handleMoveChannelToSpace(targetSpaceId: string) {
+    const channel = waddles.currentChannel.value;
+    if (!channel) return;
+    const ok = await waddles.moveChannelToSpace(channel.id, targetSpaceId);
+    if (ok) ui.showEditChannel.value = false;
+  }
+
   async function confirmDeleteChannel() {
     ui.confirmDeleteChannel.value = false;
     await waddles.deleteChannel();
@@ -1613,6 +1647,9 @@ export function useChatAppController(giphyApiKey: string) {
       dmConversations,
       channelUnread,
       rosterContacts,
+      socialFeed,
+      stories,
+      communityEvents,
       dmMessaging,
       xmppClient,
       activeMessages,
@@ -1677,6 +1714,7 @@ export function useChatAppController(giphyApiKey: string) {
       handleCreateChannel,
       handleUpdateChannel,
       handleDeleteChannel,
+      handleMoveChannelToSpace,
       confirmDeleteChannel,
       handleUpdateWaddle,
       handleDeleteWaddle,

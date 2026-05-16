@@ -242,11 +242,14 @@ fn test_build_upload_slot_response_no_headers() {
 
 #[test]
 fn test_build_upload_error_file_too_large() {
+    // The builder now produces XML via minidom, so the serialised
+    // attribute quotes are double-quoted (XML semantics are
+    // identical to single-quoted; the literal differs).
     let error_response =
         build_upload_error("error-1", &UploadError::FileTooLarge { max_size: 10485760 });
 
-    assert!(error_response.contains("type='error'"));
-    assert!(error_response.contains("id='error-1'"));
+    assert!(error_response.contains("type=\"error\""));
+    assert!(error_response.contains("id=\"error-1\""));
     assert!(error_response.contains("<not-acceptable"));
     assert!(error_response.contains("<file-too-large"));
     assert!(error_response.contains("<max-file-size>10485760</max-file-size>"));
@@ -256,8 +259,8 @@ fn test_build_upload_error_file_too_large() {
 fn test_build_upload_error_not_allowed() {
     let error_response = build_upload_error("error-2", &UploadError::NotAllowed);
 
-    assert!(error_response.contains("type='error'"));
-    assert!(error_response.contains("id='error-2'"));
+    assert!(error_response.contains("type=\"error\""));
+    assert!(error_response.contains("id=\"error-2\""));
     assert!(error_response.contains("<forbidden"));
 }
 
@@ -265,7 +268,7 @@ fn test_build_upload_error_not_allowed() {
 fn test_build_upload_error_quota_reached() {
     let error_response = build_upload_error("error-3", &UploadError::QuotaReached);
 
-    assert!(error_response.contains("type='error'"));
+    assert!(error_response.contains("type=\"error\""));
     assert!(error_response.contains("<resource-constraint"));
     assert!(error_response.contains("<retry"));
 }

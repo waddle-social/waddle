@@ -7,9 +7,9 @@ use waddle_xmpp::{
     commands::{CommandContext, CommandResult},
     disco::{
         build_disco_info_response, build_disco_info_response_with_extensions,
-        build_disco_items_response, muc_room_features, parse_disco_info_query,
-        parse_disco_items_query, push_service_features, spaces_service_features,
-        upload_service_features, DiscoItem, Feature, Identity,
+        build_disco_items_response, community_service_features, muc_room_features,
+        parse_disco_info_query, parse_disco_items_query, push_service_features,
+        spaces_service_features, upload_service_features, DiscoItem, Feature, Identity,
     },
     inbox::runtime::filter_query,
     isr::{build_isr_token_error, build_isr_token_result, is_isr_token_request, IsrToken, ISR_NS},
@@ -122,7 +122,8 @@ use permissions::{
 use pin_query::{handle_pin_query_iq, is_pin_query_iq};
 use pubsub_dispatch::handle_pubsub_iq;
 use pubsub_helpers::{
-    canonical_channel_disco_items, handle_extension_route_items, handle_spaces_items,
+    canonical_channel_disco_items, handle_community_items, handle_community_publish,
+    handle_community_retract, handle_extension_route_items, handle_spaces_items,
     handle_spaces_publish, handle_spaces_retract, is_pep_self_or_to,
     room_space_metadata_extensions, space_details_from_node, spaces_service_bare_jid,
     PubSubItemsRead,
@@ -191,6 +192,7 @@ pub(super) struct IqHandlerContext<'a> {
     pub(super) muc_domain: &'a str,
     pub(super) upload_domain: &'a str,
     pub(super) spaces_domain: &'a str,
+    pub(super) community_domain: &'a str,
     pub(super) extensions_domain: &'a str,
     pub(super) push_domain: &'a str,
     pub(super) response_from: Option<&'a str>,
@@ -207,6 +209,7 @@ pub async fn handle_iq_with_conn_state(
     conn_state: &mut IqConnState<'_>,
 ) -> Vec<String> {
     let spaces_domain = state.deps.service_domains.spaces.clone();
+    let community_domain = state.deps.service_domains.community.clone();
     let upload_domain = state.deps.service_domains.upload.clone();
     let extensions_domain = state.deps.service_domains.extensions.clone();
     let push_domain = state.deps.service_domains.push.clone();
@@ -285,6 +288,7 @@ pub async fn handle_iq_with_conn_state(
         muc_domain,
         upload_domain: upload_domain.as_str(),
         spaces_domain: spaces_domain.as_str(),
+        community_domain: community_domain.as_str(),
         extensions_domain: extensions_domain.as_str(),
         push_domain: push_domain.as_str(),
         response_from,

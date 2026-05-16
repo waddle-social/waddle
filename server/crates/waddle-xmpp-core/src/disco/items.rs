@@ -53,6 +53,12 @@ impl DiscoItem {
         Self::new(domain, name, None)
     }
 
+    /// Community pubsub service that hosts the XEP-0472 feed and
+    /// XEP-0501 stories nodes (`community.<domain>`).
+    pub fn community_service(domain: &str, name: Option<&str>) -> Self {
+        Self::new(domain, name, None)
+    }
+
     pub fn spaces_node(jid: &str, node: &str, name: Option<&str>) -> Self {
         Self {
             jid: jid.to_string(),

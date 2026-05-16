@@ -12,6 +12,7 @@ pub(super) async fn handle_pubsub_iq(
     let id = ctx.id;
     let muc_domain = ctx.muc_domain;
     let spaces_domain = ctx.spaces_domain;
+    let community_domain = ctx.community_domain;
     let extensions_domain = ctx.extensions_domain;
     let push_domain = ctx.push_domain;
     let response_from = ctx.response_from;
@@ -65,6 +66,17 @@ pub(super) async fn handle_pubsub_iq(
                         state,
                         muc_domain,
                         spaces_domain,
+                        &node,
+                        item,
+                        authenticated_session.as_ref(),
+                    )
+                    .await;
+                }
+                if target_jid.to_string() == community_domain {
+                    return handle_community_publish(
+                        iq,
+                        state,
+                        community_domain,
                         &node,
                         item,
                         authenticated_session.as_ref(),
@@ -178,6 +190,32 @@ pub(super) async fn handle_pubsub_iq(
                             },
                         )
                         .await;
+                        // PEP → community feed bridge. Shadow-publish
+                        // a typed feed entry on `community.<domain>`
+                        // for mood / activity / tune / avatar /
+                        // vCard4 PEP updates so the Feed pane
+                        // surfaces user activity automatically.
+                        // Throttled per-(user, kind); failure-silent
+                        // (a bridge error MUST NOT fail the user's
+                        // PEP publish).
+                        if is_pep && target_jid == user_jid {
+                            if let Ok(community_jid) =
+                                state.deps.service_domains.community.parse::<BareJid>()
+                            {
+                                let _ = state
+                                    .deps
+                                    .protocol
+                                    .pep_feed_bridge
+                                    .observe(
+                                        &state.deps.protocol.pubsub_storage,
+                                        &community_jid,
+                                        &user_jid,
+                                        &node,
+                                        &item,
+                                    )
+                                    .await;
+                            }
+                        }
                         // Provenance flip — runs while holding the
                         // per-JID lock above so an OIDC reconcile
                         // either sees the new `'user'` flag or hasn't
@@ -217,6 +255,18 @@ pub(super) async fn handle_pubsub_iq(
                         iq,
                         state,
                         spaces_domain,
+                        &node,
+                        max_items,
+                        &item_ids,
+                    )
+                    .await;
+                }
+
+                if target_jid.to_string() == community_domain {
+                    return handle_community_items(
+                        iq,
+                        state,
+                        community_domain,
                         &node,
                         max_items,
                         &item_ids,
@@ -319,6 +369,18 @@ pub(super) async fn handle_pubsub_iq(
                         state,
                         muc_domain,
                         spaces_domain,
+                        &node,
+                        &item_id,
+                        authenticated_session.as_ref(),
+                    )
+                    .await;
+                }
+
+                if target_jid.to_string() == community_domain {
+                    return handle_community_retract(
+                        iq,
+                        state,
+                        community_domain,
                         &node,
                         &item_id,
                         authenticated_session.as_ref(),

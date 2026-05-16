@@ -471,6 +471,364 @@ pub(super) async fn handle_spaces_publish(
     }
 }
 
+/// Publish to a community pubsub node — XEP-0472 social feed at
+/// `urn:xmpp:pubsub-social-feed:0` or XEP-0501 stories at
+/// `urn:xmpp:stories:0`. Both live on `community.<domain>` (distinct
+/// from the spaces service so the spaces enumeration only returns
+/// real spaces). Same publish gate as spaces (server owners or
+/// space owners) and the standard pubsub fan-out so subscribers see
+/// new posts in real time.
+pub(super) async fn handle_community_publish(
+    iq: &xmpp_parsers::iq::Iq,
+    state: &WebSocketState,
+    community_domain: &str,
+    node: &str,
+    item: PubSubItem,
+    session: Option<&Session>,
+) -> Vec<String> {
+    if node != waddle_xmpp_core::xep0472::PUBSUB_NODE_FEED
+        && node != waddle_xmpp_core::xep0501::PUBSUB_NODE_STORIES
+        && node != waddle_xmpp_core::xcal::PUBSUB_NODE_EVENTS
+    {
+        return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::NodeNotFound))];
+    }
+    // RSVP carve-out: the events node accepts per-attendee RSVP items
+    // from any authenticated session, bypassing the
+    // server-owner/space-owner gate. Each user owns their own RSVP
+    // item (`<master-uid>-rsvp-<localpart>`) carrying a single
+    // attendee whose URI bare-JID matches the publisher. This keeps
+    // RSVPs scoped to the publishing user and avoids granting
+    // Publisher affiliation on the master events node.
+    if node == waddle_xmpp_core::xcal::PUBSUB_NODE_EVENTS && session.is_some() {
+        let user_domain = state.deps.auth_state.xmpp_domain.as_str();
+        if is_well_formed_rsvp_item(session, user_domain, &item) {
+            return handle_community_rsvp_publish(iq, state, community_domain, node, item).await;
+        }
+    }
+    handle_community_non_bookmark_publish(iq, state, community_domain, node, item, session).await
+}
+
+/// `true` when `item` is a well-formed RSVP for the publishing
+/// session: item id of the form `<uid>-rsvp-<localpart>` where
+/// `<localpart>` matches the session, payload is a single VEVENT
+/// carrying exactly one `<attendee>` whose URI bare JID matches
+/// `<localpart>@<user_domain>`, and the event contains no
+/// master-event-only fields (no SUMMARY/DTSTART/RRULE).
+fn is_well_formed_rsvp_item(
+    session: Option<&Session>,
+    user_domain: &str,
+    item: &PubSubItem,
+) -> bool {
+    let Some(session) = session else {
+        return false;
+    };
+    let Some(item_id) = &item.id else {
+        return false;
+    };
+    let Some((master_uid, localpart)) = parse_rsvp_item_id(item_id) else {
+        return false;
+    };
+    if !localpart.eq_ignore_ascii_case(&session.xmpp_localpart) {
+        return false;
+    }
+    // Master UID must be non-empty; we don't constrain its shape
+    // further (matches the master item's id).
+    if master_uid.is_empty() {
+        return false;
+    }
+    let Some(payload) = &item.payload else {
+        return false;
+    };
+    if !waddle_xmpp_core::xcal::is_vcalendar_element(payload) {
+        return false;
+    }
+    let ns_xcal = waddle_xmpp_core::xcal::NS_XCAL;
+    let Some(vevent) = payload
+        .children()
+        .find(|c| c.name() == "vevent" && c.ns() == ns_xcal)
+    else {
+        return false;
+    };
+    // Master-event-only fields MUST NOT appear on an RSVP item.
+    let forbidden = [
+        "summary",
+        "dtstart",
+        "dtend",
+        "rrule",
+        "description",
+        "location",
+        "organizer",
+    ];
+    for child in vevent.children() {
+        if child.ns() != ns_xcal {
+            return false;
+        }
+        if forbidden.contains(&child.name()) {
+            return false;
+        }
+    }
+    let attendees: Vec<_> = vevent
+        .children()
+        .filter(|c| c.name() == "attendee" && c.ns() == ns_xcal)
+        .collect();
+    if attendees.len() != 1 {
+        return false;
+    }
+    let uri = attendees[0].text();
+    let uri_trimmed = uri.trim();
+    let attendee_bare = waddle_xmpp_core::xcal::xmpp_uri_to_bare_jid(uri_trimmed);
+    let expected_jid = format!(
+        "{}@{}",
+        localpart.to_ascii_lowercase(),
+        user_domain.to_ascii_lowercase()
+    );
+    attendee_bare.as_deref() == Some(expected_jid.as_str())
+}
+
+/// Split a string like `evt-launch-rsvp-alice` into
+/// `("evt-launch", "alice")`. Returns `None` for inputs without the
+/// `-rsvp-` separator.
+fn parse_rsvp_item_id(item_id: &str) -> Option<(&str, &str)> {
+    let (master_uid, localpart) = item_id.rsplit_once("-rsvp-")?;
+    if localpart.is_empty() {
+        return None;
+    }
+    Some((master_uid, localpart))
+}
+
+async fn handle_community_rsvp_publish(
+    iq: &xmpp_parsers::iq::Iq,
+    state: &WebSocketState,
+    community_domain: &str,
+    node: &str,
+    item: PubSubItem,
+) -> Vec<String> {
+    let Ok(community_jid) = community_domain.parse::<BareJid>() else {
+        return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::InvalidJid))];
+    };
+    match state
+        .deps
+        .protocol
+        .pubsub_storage
+        .get_node(&community_jid, node)
+        .await
+    {
+        Ok(Some(_)) => {}
+        Ok(None) => return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::NodeNotFound))],
+        Err(error) => {
+            warn!(node, error = %error, "Failed to resolve community node for RSVP publish");
+            return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::NodeNotFound))];
+        }
+    }
+    match state
+        .deps
+        .protocol
+        .pubsub_storage
+        .publish_item(&community_jid, node, &item, None, false)
+        .await
+    {
+        Ok(result) => {
+            pubsub_fanout::fan_out_publish(
+                state,
+                pubsub_fanout::FanOutRequest {
+                    owner: &community_jid,
+                    node,
+                    published_item: &item,
+                    item_id: &result.item_id,
+                    publisher: None,
+                    publisher_full: None,
+                    is_pep: false,
+                },
+            )
+            .await;
+            vec![iq_to_xml(build_pubsub_publish_result(
+                iq,
+                node,
+                &result.item_id,
+            ))]
+        }
+        Err(error) => {
+            warn!(node, error = %error, "Failed to publish community RSVP item");
+            vec![iq_to_xml(build_pubsub_error(
+                iq,
+                PubSubError::InternalServerError,
+            ))]
+        }
+    }
+}
+
+pub(super) async fn handle_community_items(
+    iq: &xmpp_parsers::iq::Iq,
+    state: &WebSocketState,
+    community_domain: &str,
+    node: &str,
+    max_items: Option<u32>,
+    item_ids: &[String],
+) -> Vec<String> {
+    if node != waddle_xmpp_core::xep0472::PUBSUB_NODE_FEED
+        && node != waddle_xmpp_core::xep0501::PUBSUB_NODE_STORIES
+        && node != waddle_xmpp_core::xcal::PUBSUB_NODE_EVENTS
+    {
+        return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::NodeNotFound))];
+    }
+    let Ok(community_jid) = community_domain.parse::<BareJid>() else {
+        return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::InvalidJid))];
+    };
+    match state
+        .deps
+        .protocol
+        .pubsub_storage
+        .get_node(&community_jid, node)
+        .await
+    {
+        Ok(Some(_)) => {}
+        Ok(None) => return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::NodeNotFound))],
+        Err(error) => {
+            warn!(node, error = %error, "Failed to retrieve community node");
+            return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::NodeNotFound))];
+        }
+    }
+    match state
+        .deps
+        .protocol
+        .pubsub_storage
+        .get_items(&community_jid, node, max_items, item_ids)
+        .await
+    {
+        Ok(stored_items) => {
+            let items: Vec<_> = stored_items
+                .iter()
+                .map(|item| item.to_pubsub_item())
+                .collect();
+            vec![iq_to_xml(build_pubsub_items_result(iq, node, &items))]
+        }
+        Err(error) => {
+            warn!(node, error = %error, "Failed to retrieve community items");
+            vec![iq_to_xml(build_pubsub_error(iq, PubSubError::NodeNotFound))]
+        }
+    }
+}
+
+pub(super) async fn handle_community_retract(
+    iq: &xmpp_parsers::iq::Iq,
+    state: &WebSocketState,
+    community_domain: &str,
+    node: &str,
+    item_id: &str,
+    session: Option<&Session>,
+) -> Vec<String> {
+    if node != waddle_xmpp_core::xep0472::PUBSUB_NODE_FEED
+        && node != waddle_xmpp_core::xep0501::PUBSUB_NODE_STORIES
+        && node != waddle_xmpp_core::xcal::PUBSUB_NODE_EVENTS
+    {
+        return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::NodeNotFound))];
+    }
+    match spaces_node_mutation_allowed(state, session, node).await {
+        Ok(true) => {}
+        Ok(false) => return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::Forbidden))],
+        Err(error) => {
+            warn!(node, error = %error, "Failed to authorize community retract");
+            return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::Forbidden))];
+        }
+    }
+    let Ok(community_jid) = community_domain.parse::<BareJid>() else {
+        return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::InvalidJid))];
+    };
+    match state
+        .deps
+        .protocol
+        .pubsub_storage
+        .retract_item(&community_jid, node, item_id)
+        .await
+    {
+        Ok(true) => vec![iq_to_xml(build_pubsub_success(iq))],
+        Ok(false) => vec![iq_to_xml(build_pubsub_error(iq, PubSubError::ItemNotFound))],
+        Err(error) => {
+            warn!(node, item_id, error = %error, "Failed to retract community item");
+            vec![iq_to_xml(build_pubsub_error(
+                iq,
+                PubSubError::InternalServerError,
+            ))]
+        }
+    }
+}
+
+/// Publish a non-bookmark item to a spaces-or-community pubsub node.
+/// Used by `handle_community_publish` (feed + stories on
+/// `community.<domain>`). Same auth gate as space-node mutations
+/// (server owners or space owners) and the standard pubsub fan-out
+/// so subscribers see new posts in real time.
+async fn handle_community_non_bookmark_publish(
+    iq: &xmpp_parsers::iq::Iq,
+    state: &WebSocketState,
+    community_domain: &str,
+    node: &str,
+    item: PubSubItem,
+    session: Option<&Session>,
+) -> Vec<String> {
+    match spaces_node_mutation_allowed(state, session, node).await {
+        Ok(true) => {}
+        Ok(false) => return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::Forbidden))],
+        Err(error) => {
+            warn!(node, error = %error, "Failed to authorize community publish");
+            return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::Forbidden))];
+        }
+    }
+    let Ok(community_jid) = community_domain.parse::<BareJid>() else {
+        return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::InvalidJid))];
+    };
+    match state
+        .deps
+        .protocol
+        .pubsub_storage
+        .get_node(&community_jid, node)
+        .await
+    {
+        Ok(Some(_)) => {}
+        Ok(None) => return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::NodeNotFound))],
+        Err(error) => {
+            warn!(node, error = %error, "Failed to resolve community node for publish");
+            return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::NodeNotFound))];
+        }
+    }
+
+    match state
+        .deps
+        .protocol
+        .pubsub_storage
+        .publish_item(&community_jid, node, &item, None, false)
+        .await
+    {
+        Ok(result) => {
+            pubsub_fanout::fan_out_publish(
+                state,
+                pubsub_fanout::FanOutRequest {
+                    owner: &community_jid,
+                    node,
+                    published_item: &item,
+                    item_id: &result.item_id,
+                    publisher: None,
+                    publisher_full: None,
+                    is_pep: false,
+                },
+            )
+            .await;
+            vec![iq_to_xml(build_pubsub_publish_result(
+                iq,
+                node,
+                &result.item_id,
+            ))]
+        }
+        Err(error) => {
+            warn!(node, error = %error, "Failed to publish community item");
+            vec![iq_to_xml(build_pubsub_error(
+                iq,
+                PubSubError::InternalServerError,
+            ))]
+        }
+    }
+}
+
 pub(super) async fn handle_spaces_retract(
     iq: &xmpp_parsers::iq::Iq,
     state: &WebSocketState,

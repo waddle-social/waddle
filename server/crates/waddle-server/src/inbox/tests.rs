@@ -39,11 +39,31 @@ async fn sqlx_inbox_storage_round_trips_entries() {
     assert_eq!(entries[0].partner, jid("room@muc.example.com"));
     assert_eq!(storage.total_unread(&user).await.expect("unread"), 1);
 
-    storage
+    let updated = storage
         .mark_read(&user, &jid("alice@example.com"), None)
         .await
-        .expect("mark read");
+        .expect("mark read")
+        .expect("entry returned for fan-out");
+    assert_eq!(updated.unread, 0);
+    assert_eq!(updated.partner, jid("alice@example.com"));
+    assert!(updated.thread_id.is_none());
     assert_eq!(storage.total_unread(&user).await.expect("unread"), 0);
+}
+
+#[tokio::test]
+async fn sqlx_inbox_storage_mark_read_returns_none_for_missing_row() {
+    let storage = DatabaseInboxStorage::open(Some("sqlite::memory:"))
+        .await
+        .expect("storage");
+    let user = jid("me@example.com");
+    let result = storage
+        .mark_read(&user, &jid("ghost@example.com"), None)
+        .await
+        .expect("mark read");
+    assert!(
+        result.is_none(),
+        "RETURNING must yield no row when no UPDATE matched so the IQ handler skips fan-out"
+    );
 }
 
 #[tokio::test]
@@ -108,10 +128,13 @@ async fn sqlx_inbox_storage_thread_entries() {
     assert_eq!(updated.thread_title.as_deref(), Some("Discussion"));
 
     // Mark thread read
-    storage
+    let updated = storage
         .mark_read(&user, &room, Some("t1"))
         .await
-        .expect("mark thread read");
+        .expect("mark thread read")
+        .expect("thread entry returned for fan-out");
+    assert_eq!(updated.unread, 0);
+    assert_eq!(updated.thread_id.as_deref(), Some("t1"));
     let threads = storage
         .list_threads(&user, &room)
         .await

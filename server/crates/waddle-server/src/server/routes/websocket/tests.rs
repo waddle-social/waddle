@@ -123,6 +123,7 @@ async fn create_test_websocket_state_with_extension_manager(
                     upload: "upload.example.com".to_string(),
                     extensions: "extensions.example.com".to_string(),
                     push: "push.example.com".to_string(),
+                    community: "community.example.com".to_string(),
                 },
                 protocol: ProtocolServices {
                     connection_registry: Arc::new(ConnectionRegistry::new()),
@@ -162,6 +163,7 @@ async fn create_test_websocket_state_with_extension_manager(
                     ),
                     avatar_source_locks: Arc::new(crate::profile::AvatarLockMap::new()),
                     profile_publish_tracker: tokio_util::task::TaskTracker::new(),
+                    pep_feed_bridge: Arc::new(crate::pep_feed_bridge::PepFeedBridge::new()),
                 },
                 occupant_id_secret: OccupantIdSecret::new(
                     b"test-occupant-id-secret-32-bytes-long".to_vec(),

@@ -311,12 +311,24 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
             .unwrap_or_else(|| sender_jid.resource().to_string());
         let moderated_by = format!("{room_jid}/{moderator_nick}");
         let stamp_time = chrono::Utc::now();
-        let stamp = stamp_time.to_rfc3339();
+        // XEP-0425 v1 §3: the broadcast `<moderated>` element
+        // carries the moderator's XEP-0421 occupant-id so
+        // semi-anonymous rooms still surface a stable attribution
+        // identifier even when `by=` hides the real JID. We pin it
+        // unconditionally — non-anonymous rooms already disclose the
+        // bare JID via `by=`, so the extra `<occupant-id/>` is
+        // harmless and keeps the wire shape uniform across room
+        // configurations.
+        let moderator_occupant_id = waddle_xmpp::xep::xep0421::generate_occupant_id(
+            &sender_jid.to_bare(),
+            &room_jid,
+            &state.deps.occupant_id_secret,
+        );
         let mut moderation = build_moderation_result_message(
             Some(jid::Jid::from(room_jid.clone())),
             &request.target_id,
             &moderated_by,
-            &stamp,
+            Some(moderator_occupant_id.as_str()),
             request.reason.as_deref(),
         );
         let archive_id = uuid::Uuid::now_v7().to_string();

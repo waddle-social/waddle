@@ -171,7 +171,7 @@ pub use super::xep0377::{
     ReportStore, NS_REPORTING,
 };
 
-pub use super::xep0392::{
+pub use waddle_xmpp_core::xep0392::{
     apply_cvd_correction, compute_hue, generate_color, generate_color_with_params, ConsistentColor,
     CvdCorrection, HslColor, DEFAULT_LIGHTNESS, DEFAULT_SATURATION,
 };
@@ -218,10 +218,9 @@ pub use super::xep0424::{
 };
 
 pub use super::xep0425::{
-    build_moderated_retract_element, build_moderation_result_message, extract_moderation_request,
-    extract_moderation_result, is_moderation_request_message, is_moderation_result_message,
-    parse_moderation_iq, ModerationCarrier, ModerationRequest, ModerationResult,
-    NS_MESSAGE_MODERATE,
+    build_moderated_retract_element, build_moderation_result_message, extract_moderation_result,
+    is_moderation_result_message, parse_moderation_iq, ModerationCarrier, ModerationRequest,
+    ModerationResult, NS_MESSAGE_MODERATE,
 };
 
 pub use super::xep0444::{
@@ -327,9 +326,9 @@ pub use super::xep0452::{
     MentionNotificationCarrier, NS_MENTION_NOTIFICATION,
 };
 
-pub use super::xep0471::{
-    build_event_element, is_event_element, parse_event, CalendarEvent, Rsvp, RsvpStatus,
-    NS_CALENDAR, PUBSUB_NODE_EVENTS,
+pub use waddle_xmpp_core::xcal::{
+    build_vcalendar_with_event, is_vcalendar_element, parse_vcalendar_event, Freq, Rrule, RruleEnd,
+    VEvent, Weekday, NS_XCAL, PUBSUB_NODE_EVENTS, PUBSUB_TYPE_XCAL,
 };
 
 pub use super::xep0470::{
@@ -344,7 +343,7 @@ pub use super::xep_waddle_pin::{
     parse_unpinned_element as parse_unpinned_message_element, PinIntent, NS_WADDLE_PIN_V0,
 };
 
-pub use super::xep0472::{
+pub use waddle_xmpp_core::xep0472::{
     build_feed_entry_element, is_feed_entry, parse_feed_entry, FeedEntry, NS_SOCIAL_FEED,
     PUBSUB_NODE_FEED,
 };
@@ -363,7 +362,7 @@ pub use super::xep0469::{
     NS_BOOKMARKS_PINNING,
 };
 
-pub use super::xep0501::{
+pub use waddle_xmpp_core::xep0501::{
     build_story_element, filter_active, is_story_element, parse_story, Story, DEFAULT_EXPIRY_HOURS,
     NS_STORIES, PUBSUB_NODE_STORIES,
 };

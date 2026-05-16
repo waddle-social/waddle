@@ -10,6 +10,20 @@ export class WaddleClient {
     discover_extension_routes(user_jid?: string | null): Promise<any>;
     discover_upload_service(): Promise<any>;
     enable_push_notifications(service_jid: string, node: string, token: string): Promise<any>;
+    /**
+     * Fetch the latest items from the community Social Feed node on
+     * `spaces_jid` (typically `spaces.<domain>`). Returns an array of
+     * JsFeedEntry objects ordered as the server delivered them
+     * (newest first by `last_published`).
+     */
+    feed_items(spaces_jid: string, max_items?: number | null): Promise<any>;
+    /**
+     * Publish a new entry to the community Social Feed. The server
+     * enforces publish authorisation via XEP-0060 affiliations;
+     * callers without Publisher access receive a Forbidden stanza
+     * error which surfaces as a rejected Promise.
+     */
+    feed_publish(spaces_jid: string, entry: any): Promise<any>;
     fetch_dm_history(peer_jid: string, max: number, before_id?: string | null): Promise<any>;
     fetch_dm_history_page(peer_jid: string, max: number, page_param: any): Promise<any>;
     fetch_extension_route_items(route: any, room_jid: string): Promise<any>;
@@ -84,12 +98,44 @@ export class WaddleClient {
     set_on_presence(cb: Function): void;
     set_on_session_lifecycle(cb: Function): void;
     set_room_affiliation(room_jid: string, jid: string, affiliation: string): Promise<any>;
+    /**
+     * Fetch the latest stories from the community stories node on
+     * `community_jid`. Returns ALL items including expired ones —
+     * the chat filters active vs expired locally so a story fades
+     * out as the countdown hits zero without a server roundtrip.
+     */
+    stories_items(community_jid: string, max_items?: number | null): Promise<any>;
+    /**
+     * Publish a new story. At least one of `body` / `media_url` is
+     * required (the server rejects empty stories). `expiry_hours`
+     * defaults to 24.
+     */
+    stories_publish(community_jid: string, input: any): Promise<any>;
     subscribe_to_presence(peer_jid: string): Promise<any>;
     /**
      * Publish an unpin request (#414). Same authorization rules as
      * [`Self::pin_message`].
      */
     unpin_message(room_jid: string, target_stanza_id: string): Promise<any>;
+    /**
+     * Fetch the latest calendar events from the community events
+     * node. Returns ALL items including past events; chat-side
+     * composables filter by DTSTART for upcoming-only views.
+     */
+    xcal_items(community_jid: string, max_items?: number | null): Promise<any>;
+    /**
+     * Publish a new calendar event, optionally with an RRULE for
+     * recurrence. SUMMARY is required (per RFC 5545); DTSTART is
+     * required for the event to be useful on a timeline.
+     */
+    xcal_publish(community_jid: string, input: any): Promise<any>;
+    /**
+     * Publish (or update) this session's RSVP for a calendar event.
+     * `partstat` must be one of "ACCEPTED" | "DECLINED" | "TENTATIVE"
+     * | "NEEDS-ACTION". The chat groups sibling `-rsvp-*` items back
+     * into the master event on the next items fetch.
+     */
+    xcal_rsvp(community_jid: string, master_uid: string, self_localpart: string, self_jid: string, partstat: string): Promise<any>;
 }
 
 export class WaddleConfig {
@@ -105,5 +151,22 @@ export class WaddleResumeState {
     free(): void;
     [Symbol.dispose](): void;
 }
+
+/**
+ * Compute a CSS `hsl(...)` string for `input` using XEP-0392 with
+ * custom saturation/lightness (percentages, 0.0–100.0). The CVD
+ * correction is "none" — pass the hue back through `xep0392_consistent_hue`
+ * and `apply_cvd_correction` in a future iteration if CVD modes
+ * become a user preference.
+ */
+export function xep0392_consistent_color(input: string, saturation: number, lightness: number): string;
+
+/**
+ * Compute the XEP-0392 consistent-color hue (0.0–360.0) for `input`.
+ *
+ * Stateless free function — does not require a WaddleClient instance.
+ * JS callers receive a Number.
+ */
+export function xep0392_consistent_hue(input: string): number;
 
 export default function init(): Promise<void>;

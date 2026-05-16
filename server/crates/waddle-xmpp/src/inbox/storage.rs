@@ -43,12 +43,16 @@ pub trait InboxStorage: Send + Sync {
 
     /// Mark a conversation as read. When `thread_id` is `Some`, only the
     /// specific thread is marked; otherwise the channel-level entry is.
+    ///
+    /// Returns the post-update entry so the caller can fan it out to the
+    /// user's other resources (cross-device sync); `None` when no row
+    /// matched the `(user, partner, thread_id)` triple.
     async fn mark_read(
         &self,
         user: &BareJid,
         partner: &BareJid,
         thread_id: Option<&str>,
-    ) -> Result<(), InboxStorageError>;
+    ) -> Result<Option<InboxEntry>, InboxStorageError>;
 
     /// Return the total unread count for the user (channel-level only).
     async fn total_unread(&self, user: &BareJid) -> Result<u64, InboxStorageError>;
@@ -111,19 +115,19 @@ impl InboxStorage for InMemoryInboxStorage {
         user: &BareJid,
         partner: &BareJid,
         thread_id: Option<&str>,
-    ) -> Result<(), InboxStorageError> {
+    ) -> Result<Option<InboxEntry>, InboxStorageError> {
         let mut guard = self
             .per_user
             .lock()
             .map_err(|e| InboxStorageError::Other(e.to_string()))?;
-        if let Some(view) = guard.get_mut(user) {
-            let key = match thread_id {
-                Some(tid) => InboxKey::thread(partner.clone(), tid),
-                None => InboxKey::channel(partner.clone()),
-            };
-            view.mark_read_by_key(&key);
-        }
-        Ok(())
+        let Some(view) = guard.get_mut(user) else {
+            return Ok(None);
+        };
+        let key = match thread_id {
+            Some(tid) => InboxKey::thread(partner.clone(), tid),
+            None => InboxKey::channel(partner.clone()),
+        };
+        Ok(view.mark_read_by_key(&key))
     }
 
     async fn total_unread(&self, user: &BareJid) -> Result<u64, InboxStorageError> {
@@ -180,11 +184,28 @@ mod tests {
         assert_eq!(snapshot[0].last_stanza_id, "sid-2");
         assert_eq!(store.total_unread(&user).await.unwrap(), 2);
 
-        store
+        let updated = store
             .mark_read(&user, &jid("alice@example.com"), None)
             .await
-            .unwrap();
+            .unwrap()
+            .expect("mark_read returns the post-update entry for fan-out");
+        assert_eq!(updated.unread, 0);
+        assert_eq!(updated.partner, jid("alice@example.com"));
         assert_eq!(store.total_unread(&user).await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_mark_read_returns_none_when_no_row_matches() {
+        let store = InMemoryInboxStorage::new();
+        let user = jid("me@example.com");
+        let result = store
+            .mark_read(&user, &jid("ghost@example.com"), None)
+            .await
+            .unwrap();
+        assert!(
+            result.is_none(),
+            "mark_read must signal no-op so the IQ handler skips fan-out"
+        );
     }
 
     #[tokio::test]
@@ -226,7 +247,13 @@ mod tests {
         assert_eq!(threads[0].thread_id.as_deref(), Some("t1"));
 
         // Mark thread read
-        store.mark_read(&user, &room, Some("t1")).await.unwrap();
+        let updated = store
+            .mark_read(&user, &room, Some("t1"))
+            .await
+            .unwrap()
+            .expect("thread entry returned for fan-out");
+        assert_eq!(updated.unread, 0);
+        assert_eq!(updated.thread_id.as_deref(), Some("t1"));
         let threads = store.list_threads(&user, &room).await.unwrap();
         assert_eq!(threads[0].unread, 0);
 

@@ -7,6 +7,7 @@ pub mod inbox;
 pub mod messages;
 pub mod notification_settings_projection;
 pub mod pending_delivery;
+pub mod pep_feed_bridge;
 pub mod permissions;
 pub mod profile;
 pub mod pubsub;

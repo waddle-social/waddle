@@ -181,6 +181,7 @@ use route_to_connection::route_to_connection;
 use routing::{deliver_peer_to_full, run_headless_recipient_pass};
 
 pub use deps::{Deps, InterpretOutcome};
+pub(crate) use groupchat_archive::push_inbox_update;
 
 /// Execute the side effects described by `events`.
 ///

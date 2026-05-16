@@ -229,58 +229,65 @@ pub fn build_upload_slot_response(original_iq: &Iq, slot: &UploadSlot) -> Iq {
 
 /// Build an upload error response IQ.
 ///
-/// Returns an IQ error with the appropriate XMPP error condition and
-/// XEP-0363 specific error elements.
+/// Returns an IQ error with the appropriate XMPP error condition
+/// and XEP-0363-specific app-error elements per §"Error
+/// conditions": `<file-too-large><max-file-size>` for
+/// FileTooLarge, `<retry/>` for QuotaReached.
+///
+/// The result is the serialised XML string ready to write to the
+/// wire — the typed `minidom::Element` is built first and
+/// serialised exactly once at the I/O boundary, satisfying the
+/// project's XML-via-builder hard rule.
 pub fn build_upload_error(request_id: &str, error: &UploadError) -> String {
-    let (error_type, condition, app_error) = match error {
-        UploadError::FileTooLarge { max_size } => (
-            "modify",
-            "not-acceptable",
-            format!(
-                "<file-too-large xmlns='{}'><max-file-size>{}</max-file-size></file-too-large>",
-                NS_HTTP_UPLOAD, max_size
-            ),
-        ),
-        UploadError::NotAllowed => ("auth", "forbidden", String::new()),
-        UploadError::QuotaReached => (
-            "wait",
-            "resource-constraint",
-            format!("<retry xmlns='{}'/>", NS_HTTP_UPLOAD),
-        ),
-        UploadError::BadRequest(_) => ("modify", "bad-request", String::new()),
-        UploadError::InternalError(_) => ("wait", "internal-server-error", String::new()),
+    const NS_XMPP_STANZAS: &str = "urn:ietf:params:xml:ns:xmpp-stanzas";
+
+    let (error_type, condition) = match error {
+        UploadError::FileTooLarge { .. } => ("modify", "not-acceptable"),
+        UploadError::NotAllowed => ("auth", "forbidden"),
+        UploadError::QuotaReached => ("wait", "resource-constraint"),
+        UploadError::BadRequest(_) => ("modify", "bad-request"),
+        UploadError::InternalError(_) => ("wait", "internal-server-error"),
     };
 
-    let text = format!(
-        "<text xmlns='urn:ietf:params:xml:ns:xmpp-stanzas'>{}</text>",
-        escape_xml(&error.to_string())
-    );
+    let mut err_builder = Element::builder("error", "jabber:client")
+        .attr("type", error_type)
+        .append(Element::builder(condition, NS_XMPP_STANZAS).build())
+        .append(
+            Element::builder("text", NS_XMPP_STANZAS)
+                .append(error.to_string().as_str())
+                .build(),
+        );
 
-    format!(
-        "<iq type='error' id='{}'>\
-            <request xmlns='{}'/>\
-            <error type='{}'>\
-                <{} xmlns='urn:ietf:params:xml:ns:xmpp-stanzas'/>\
-                {}\
-                {}\
-            </error>\
-        </iq>",
-        escape_xml(request_id),
-        NS_HTTP_UPLOAD,
-        error_type,
-        condition,
-        text,
-        app_error
-    )
-}
+    // Append the XEP-0363 §"Error conditions" app-error child for
+    // the variants that have one — minidom's element builder
+    // namespace-qualifies the children so we don't have to
+    // string-template the `xmlns=` attribute.
+    match error {
+        UploadError::FileTooLarge { max_size } => {
+            err_builder = err_builder.append(
+                Element::builder("file-too-large", NS_HTTP_UPLOAD)
+                    .append(
+                        Element::builder("max-file-size", NS_HTTP_UPLOAD)
+                            .append(max_size.to_string().as_str())
+                            .build(),
+                    )
+                    .build(),
+            );
+        }
+        UploadError::QuotaReached => {
+            err_builder = err_builder.append(Element::builder("retry", NS_HTTP_UPLOAD).build());
+        }
+        _ => {}
+    }
 
-/// Escape XML special characters.
-fn escape_xml(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&apos;")
+    let iq = Element::builder("iq", "jabber:client")
+        .attr("type", "error")
+        .attr("id", request_id)
+        .append(Element::builder("request", NS_HTTP_UPLOAD).build())
+        .append(err_builder.build())
+        .build();
+
+    String::from(&iq)
 }
 
 /// Sanitize filename for use in URLs and storage.
