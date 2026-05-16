@@ -47,8 +47,20 @@ function dotClass(show?: DmConversation["presenceShow"]): string {
     </div>
 
     <div class="chat-pane-scroll chat-sidebar-scroll">
-      <div v-if="conversations.length === 0" class="type-caption text-center py-10 text-sidebar-muted">
-        No conversations yet
+      <!-- Empty state — halo + MessageCircle glyph + caption + hint
+           matches the iter-37 / 47 / 48 authored-empty-state pattern
+           used elsewhere in the app. -->
+      <div v-if="conversations.length === 0" class="flex flex-col items-center justify-center gap-2 py-10 text-center">
+        <div class="chat-empty-state__halo">
+          <span class="chat-empty-state__halo-glow chat-empty-state__halo-glow--primary" aria-hidden="true" />
+          <span class="chat-empty-state__halo-ring chat-empty-state__halo-ring--primary">
+            <MessageCircle class="w-4 h-4 text-primary" aria-hidden="true" />
+          </span>
+        </div>
+        <div class="type-control text-sidebar-foreground">No conversations yet</div>
+        <div class="type-caption text-sidebar-muted max-w-[14rem]">
+          Start one with the + button above.
+        </div>
       </div>
 
       <div v-else class="chat-list-stack">
@@ -57,7 +69,7 @@ function dotClass(show?: DmConversation["presenceShow"]): string {
           :key="conversation.peerJid"
           class="chat-list-row w-full min-h-14 flex items-center gap-3 px-3 py-2 text-left group"
           :class="activePeerJid === conversation.peerJid
-            ? 'bg-sidebar-accent text-sidebar-foreground'
+            ? 'chat-list-row--active bg-sidebar-accent text-sidebar-foreground'
             : 'text-sidebar-muted hover:bg-sidebar-accent/50 hover:text-sidebar-foreground'"
           :aria-current="activePeerJid === conversation.peerJid ? 'page' : undefined"
           type="button"
@@ -78,7 +90,7 @@ function dotClass(show?: DmConversation["presenceShow"]): string {
               <span class="type-caption text-sidebar-muted truncate">{{ preview(conversation.lastMessageBody) }}</span>
               <span
                 v-if="conversation.unreadCount > 0"
-                class="type-count-badge ml-auto inline-flex min-w-[18px] h-[18px] px-1 items-center justify-center rounded-full bg-primary text-primary-foreground"
+                class="chat-badge-glow--primary type-count-badge ml-auto inline-flex min-w-[18px] h-[18px] px-1 items-center justify-center rounded-full bg-primary text-primary-foreground"
               >
                 {{ conversation.unreadCount }}
               </span>
