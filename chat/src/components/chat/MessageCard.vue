@@ -740,12 +740,16 @@ onBeforeUnmount(() => {
     </section>
   </template>
 
-  <!-- Retracted tombstone -->
+  <!-- Retracted tombstone — body is gone but author/time/avatar
+       stay for context. Lift the row opacity from 35 % → 55 % so
+       the avatar reads as a faded-but-readable mark rather than
+       a ghost, and pair the italic copy with a Trash2 glyph so
+       the state has a clear iconographic signal next to the prose. -->
   <div
     v-else-if="message.isRetracted"
     :data-message-id="message.id"
     :data-message-created-at="message.createdAt"
-    class="chat-message-grid opacity-35 animate-message-in"
+    class="chat-message-grid opacity-55 animate-message-in"
     :class="grouped ? 'chat-message-grouped' : ''"
   >
     <div v-if="grouped" class="chat-message-avatar-cell chat-message-time-gutter">
@@ -767,7 +771,10 @@ onBeforeUnmount(() => {
           {{ formatTimelineTimeOfDay(message.createdAt) }}
         </span>
       </div>
-      <p class="type-message-body italic text-muted-foreground">This message was deleted.</p>
+      <p class="type-message-body italic text-muted-foreground inline-flex items-center gap-1.5">
+        <Trash2 class="w-3.5 h-3.5 flex-shrink-0 opacity-70" aria-hidden="true" />
+        <span>This message was deleted.</span>
+      </p>
     </div>
   </div>
 
