@@ -670,12 +670,18 @@ export function useChatAppController(giphyApiKey: string) {
     client.setSessionLifecycleHandler((event) => {
       messaging.onSessionLifecycle(event);
       dmMessaging.onSessionLifecycle(event);
-      // Only re-hydrate inbox on resumptions (reconnect after brief disconnect).
-      // Fresh connections are handled by onConnectionReady() after appState -> "ready".
-      if (event.type === "resumed") {
-        void dmConversations.hydrateFromInbox();
-        void channelUnread.hydrateFromInbox();
-      }
+      // Re-hydrate inbox on every XMPP session-ready, both resumed and
+      // fresh. Stream resume catches up on stanzas the client missed
+      // while disconnected, but a *fresh* reconnection (resume failed
+      // — too much time elapsed, server restart, network blip past the
+      // resume window) means we lost the push stream entirely and the
+      // local unread map is stale. `onConnectionReady` only hydrates
+      // on the first sign-in (one-shot `hasBootstrapped` guard), so
+      // subsequent fresh reconnections would otherwise never refresh.
+      // `hydrateFromInbox` is request-id deduped, so the redundant
+      // call on the very first connection is harmless.
+      void dmConversations.hydrateFromInbox();
+      void channelUnread.hydrateFromInbox();
     });
   }, { immediate: true });
 
