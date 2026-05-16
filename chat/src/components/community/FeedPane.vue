@@ -1,9 +1,42 @@
 <script setup lang="ts">
 import { computed, ref } from "vue";
-import { MessageSquareText, RefreshCw, Send } from "lucide-vue-next";
+import {
+  Briefcase,
+  IdCard,
+  MessageSquareText,
+  Music,
+  RefreshCw,
+  Send,
+  Smile,
+  User,
+} from "lucide-vue-next";
 import AppAvatar from "@/components/ui/AppAvatar.vue";
 import Skeleton from "@/components/ui/Skeleton.vue";
-import type { FeedEntry, FeedPostInput } from "@/lib/xmpp-client";
+import type { FeedEntry, FeedPostInput, FeedSourceKind } from "@/lib/xmpp-client";
+
+const SOURCE_ICONS = {
+  mood: Smile,
+  activity: Briefcase,
+  tune: Music,
+  avatar: User,
+  vcard: IdCard,
+} as const;
+
+const SOURCE_LABELS: Record<FeedSourceKind, string> = {
+  mood: "Mood update",
+  activity: "Activity update",
+  tune: "Now listening",
+  avatar: "Avatar update",
+  vcard: "Profile update",
+};
+
+function iconFor(source: FeedSourceKind | undefined) {
+  return source ? SOURCE_ICONS[source] : null;
+}
+
+function labelFor(source: FeedSourceKind | undefined): string {
+  return source ? SOURCE_LABELS[source] : "";
+}
 
 interface FeedPaneProps {
   entries: readonly FeedEntry[];
@@ -115,7 +148,15 @@ function submit() {
             </div>
           </header>
           <h2 v-if="entry.title" class="type-control font-semibold text-foreground">{{ entry.title }}</h2>
-          <p class="whitespace-pre-wrap break-words text-sm text-foreground">{{ entry.body }}</p>
+          <p class="flex items-start gap-1.5 whitespace-pre-wrap break-words text-sm text-foreground">
+            <component
+              :is="iconFor(entry.source)"
+              v-if="entry.source"
+              class="mt-0.5 h-3.5 w-3.5 shrink-0 text-muted-foreground"
+              :aria-label="labelFor(entry.source)"
+            />
+            <span>{{ entry.body }}</span>
+          </p>
           <a
             v-if="entry.link"
             :href="entry.link"
