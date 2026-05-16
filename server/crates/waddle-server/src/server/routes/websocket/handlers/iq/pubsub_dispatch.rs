@@ -176,6 +176,32 @@ pub(super) async fn handle_pubsub_iq(
                             },
                         )
                         .await;
+                        // PEP → community feed bridge. Shadow-publish
+                        // a typed feed entry on `community.<domain>`
+                        // for mood / activity / tune / avatar /
+                        // vCard4 PEP updates so the Feed pane
+                        // surfaces user activity automatically.
+                        // Throttled per-(user, kind); failure-silent
+                        // (a bridge error MUST NOT fail the user's
+                        // PEP publish).
+                        if is_pep && target_jid == user_jid {
+                            if let Ok(community_jid) =
+                                state.deps.service_domains.community.parse::<BareJid>()
+                            {
+                                let _ = state
+                                    .deps
+                                    .protocol
+                                    .pep_feed_bridge
+                                    .observe(
+                                        &state.deps.protocol.pubsub_storage,
+                                        &community_jid,
+                                        &user_jid,
+                                        &node,
+                                        &item,
+                                    )
+                                    .await;
+                            }
+                        }
                         // Provenance flip — runs while holding the
                         // per-JID lock above so an OIDC reconcile
                         // either sees the new `'user'` flag or hasn't
