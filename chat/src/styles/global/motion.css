@@ -11,6 +11,18 @@
   }
 }
 
+/* Text selection — primary-tinted so highlighted text speaks the
+ * brand instead of the OS default (system blue on macOS, varies
+ * elsewhere). Mixes 30% of --primary against the page so the
+ * selection is clearly visible without being jarring, and the
+ * inherited foreground keeps long passages legible. */
+@layer base {
+  ::selection {
+    background: color-mix(in oklab, var(--primary) 30%, transparent);
+    color: var(--foreground);
+  }
+}
+
 /* Scrollbar — ghost-thin, luminous */
 @layer base {
   ::-webkit-scrollbar {
