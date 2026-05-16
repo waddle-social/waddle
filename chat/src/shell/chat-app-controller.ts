@@ -554,6 +554,15 @@ export function useChatAppController(giphyApiKey: string) {
     mergeRoomHats(roomHatsFromMembers(displayedMembers.value), messaging.roomHats.value),
   );
 
+  // Per-occupant MUC authority (affiliation + role) sourced live from
+  // each inbound MUC presence. Distinct from `authorHatsByNick`:
+  // authority is XEP-0045 (owner / admin / moderator / …) and is
+  // enforced by the server; hats are XEP-0317 descriptive metadata
+  // (Bot / Verified / Speaker …) with no protocol semantics. UI
+  // surfaces that render OWNER / ADMIN / MOD chips should read from
+  // here, NOT from `authorHatsByNick`.
+  const authorAuthorityByNick = computed(() => messaging.roomAuthority.value);
+
   watch(
     () => [xmppClient.value, avatarCandidates.value.map((candidate) => candidate.jid).join("\n")] as const,
     ([client]) => {
@@ -1645,6 +1654,7 @@ export function useChatAppController(giphyApiKey: string) {
       membersWithAvatars,
       inferredMemberJids,
       authorHatsByNick,
+      authorAuthorityByNick,
       activeActionError,
       activeErrorActionLabel,
       activeUploadProgress,

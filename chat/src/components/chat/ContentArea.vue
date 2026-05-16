@@ -19,7 +19,7 @@ import { extractFilesFromEvent } from "@/lib/xmpp/file-upload";
 import type { ChannelSummary, SpaceSummary } from "@/lib/chat-types";
 import type { ExtensionAnnotationAction, TimelineMessage, MarkupSpan, MessageReference } from "@/lib/chat-ui";
 import type { MentionCandidate } from "@/lib/mentions";
-import type { BrowserXmppClient, MessageSearchResult, XmppStatusSnapshot, RoomHats, RoomPresence } from "@/lib/xmpp-client";
+import type { BrowserXmppClient, MessageSearchResult, XmppStatusSnapshot, RoomAuthority, RoomHats, RoomPresence } from "@/lib/xmpp-client";
 import type { MemberLoadState } from "@/waddles/directory";
 import type { DiscoveredExtensionCommand, ExtensionCommandAction, ExtensionCommandResult } from "@/lib/xmpp/extension-commands";
 import { useScrollDirectionPreference } from "@/preferences/scroll-direction";
@@ -86,6 +86,7 @@ const props = defineProps<{
   giphyApiKey: string;
   mentionCandidates: MentionCandidate[];
   roomHats: RoomHats;
+  roomAuthority: RoomAuthority;
   roomPresence: RoomPresence;
   roomLastSeen: Record<string, number>;
   slowModeCooldown: number;
@@ -433,27 +434,27 @@ function isPinnedMessage(msg: TimelineMessage): boolean {
   return Boolean(wireIds?.some((wid) => set.has(wid)));
 }
 // #415: pin gate combines the room's pin_permission with the current
-// user's affiliation. AdminsOnly retains the owner/admin check via
-// the hats system; Anyone admits any joined member (a present
-// `currentUser` + the channel being known are sufficient signals
-// that we're a current occupant). The action-sheet updates the
-// instant the local user toggles the policy via the edit dialog;
-// owner-config changes from another client only flow in on the
-// next topology refresh until the server emits status-code-104 on
-// owner-config set (separate follow-up).
+// user's MUC affiliation (XEP-0045 §5.2 — the persistent authority
+// channel, not XEP-0317 hats, which are descriptive and confer no
+// authority). AdminsOnly admits owners and admins; Anyone admits
+// any joined member. Membership uses `roomPresence` because it
+// tracks every joined occupant regardless of authority — a present
+// `currentUser` + a known channel is the canonical "we are in this
+// room" signal.
+//
+// The action-sheet updates the instant the local user toggles the
+// policy via the edit dialog; owner-config changes from another
+// client only flow in on the next topology refresh until the
+// server emits status-code-104 on owner-config set (separate
+// follow-up).
 const currentUserCanPin = computed(() => {
   const me = props.currentUser;
   if (!me) return false;
-  // Membership signal: roomPresence tracks every joined occupant
-  // regardless of hats. roomHats (authorHatsByNick) only keeps
-  // entries for occupants with at least one hat, so a typical
-  // member with no hats would be incorrectly treated as a
-  // non-occupant if we used it as the membership proxy.
   if (props.roomPresence[me] === undefined) return false;
   const channelPolicy = props.channel?.pinPermission ?? "admins-only";
   if (channelPolicy === "anyone") return true;
-  const myHats = props.roomHats[me] ?? [];
-  return myHats.some((hat) => hat.uri === "urn:xmpp:hats:owner" || hat.uri === "urn:xmpp:hats:admin");
+  const myAffiliation = props.roomAuthority[me]?.affiliation ?? "none";
+  return myAffiliation === "owner" || myAffiliation === "admin";
 });
 const canShowComposer = computed(() => !!(props.channel || props.dmPeer));
 const queuedMessageCount = computed(() =>
@@ -1304,6 +1305,7 @@ function dayDividerLabel(createdAt: string): string {
             :current-user-jid="props.currentUserJid"
             :avatar-url="avatarUrlByAuthor[msg.author] ?? null"
             :hats="roomHats[msg.author] ?? []"
+            :authority="roomAuthority[msg.author] ?? null"
             :presence="roomPresence[msg.author] ?? 'offline'"
             :last-seen="roomLastSeen[msg.author]"
             :author-jid="authorJidByNick?.[msg.author]"

@@ -8,7 +8,7 @@ import MessageComposer from "@/components/chat/MessageComposer.vue";
 import VirtualTimeline from "@/components/chat/VirtualTimeline.vue";
 import type { ExtensionAnnotationAction, TimelineMessage, MarkupSpan, MessageReference } from "@/lib/chat-ui";
 import type { MentionCandidate } from "@/lib/mentions";
-import type { OccupantHat, OccupantPresence, RoomHats, RoomPresence } from "@/lib/xmpp-client";
+import type { OccupantAuthority, OccupantHat, OccupantPresence, RoomAuthority, RoomHats, RoomPresence } from "@/lib/xmpp-client";
 import type { MessageThreadEntry, MessageThreadIndex } from "@/channels/threads";
 import { useScrollDirectionPreference } from "@/preferences/scroll-direction";
 import {
@@ -33,6 +33,7 @@ const props = defineProps<{
   avatarUrlByAuthor: Record<string, string | null>;
   authorJidByNick?: Record<string, string>;
   roomHats: RoomHats;
+  roomAuthority: RoomAuthority;
   roomPresence: RoomPresence;
   roomLastSeen: Record<string, number>;
   giphyApiKey: string;
@@ -474,6 +475,10 @@ function hatsFor(author: string): OccupantHat[] {
   return props.roomHats[author] ?? [];
 }
 
+function authorityFor(author: string): OccupantAuthority | null {
+  return props.roomAuthority[author] ?? null;
+}
+
 function presenceFor(author: string): OccupantPresence {
   return props.roomPresence[author] ?? "offline";
 }
@@ -695,6 +700,7 @@ function replyChildHasNestedThread(message: TimelineMessage): boolean {
             :current-user-jid="currentUserJid"
             :avatar-url="avatarUrlByAuthor[message.author] ?? null"
             :hats="hatsFor(message.author)"
+            :authority="authorityFor(message.author)"
             :presence="presenceFor(message.author)"
             :last-seen="roomLastSeen[message.author]"
             :author-jid="authorJidByNick?.[message.author]"
@@ -735,6 +741,7 @@ function replyChildHasNestedThread(message: TimelineMessage): boolean {
               :current-user-jid="currentUserJid"
               :avatar-url="avatarUrlByAuthor[message.author] ?? null"
               :hats="hatsFor(message.author)"
+              :authority="authorityFor(message.author)"
               :presence="presenceFor(message.author)"
               :last-seen="roomLastSeen[message.author]"
               :author-jid="authorJidByNick?.[message.author]"
