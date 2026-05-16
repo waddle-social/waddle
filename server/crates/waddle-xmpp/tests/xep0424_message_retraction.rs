@@ -1,0 +1,274 @@
+//! XEP-0424: Message Retraction — dedicated conformance suite.
+//!
+//! In-crate `xep::xep0424::tests` covers parsing/building of the
+//! `<retract/>` and `<retracted/>` elements. This suite pins the
+//! audit-level invariants that crossing the public-API boundary
+//! exposes:
+//!
+//! - §3 namespace string `urn:xmpp:message-retract:1`.
+//! - §"Tombstones" MUST: any service that replaces retracted MAM
+//!   entries with a tombstone MUST advertise
+//!   `urn:xmpp:message-retract:1#tombstone`. Waddle's MAM layer does
+//!   exactly that (`mam::storage::tombstone::apply_tombstone` +
+//!   `protocol::event::outbound::ReplaceWithTombstone`), so the
+//!   advert is mandatory on every disco surface where retraction is
+//!   advertised at all — server-wide and per MUC room.
+//! - §3 wire shape: `<retract id='ORIGINAL' xmlns='urn:xmpp:message-retract:1'/>`,
+//!   with a `<body/>` fallback on the wrapping message (the
+//!   builder's responsibility).
+//! - §"Tombstones" wire shape: `<retracted id='RETRACTION_MSG_ID'
+//!   stamp='…'/>` — the `id` references the retraction message's
+//!   `id`, NOT the original. The builder must keep that distinction
+//!   so the MAM tombstone can be matched back to its retraction.
+
+use waddle_xmpp::disco::{muc_room_features, server_features, Feature};
+use waddle_xmpp::xep::xep0424::{
+    build_retract_element, build_retracted_element, build_retraction_message,
+    build_tombstone_message, extract_retraction_from_message, is_retract_element,
+    is_retracted_element, is_retraction_message, is_tombstone_message, RetractionKind,
+    NS_MESSAGE_RETRACT,
+};
+
+// ── §3 namespace ─────────────────────────────────────────────────────
+
+#[test]
+fn xep0424_namespace_matches_spec_v1() {
+    // XEP-0424 v1 (the published Proposed-status revision) bumps
+    // the namespace from `:0` to `:1`. This test pins the literal so
+    // a stray import of an old constant can't silently re-version.
+    assert_eq!(NS_MESSAGE_RETRACT, "urn:xmpp:message-retract:1");
+}
+
+// ── §"Tombstones" MUST disco advertisement ───────────────────────────
+
+#[test]
+fn xep0424_server_advertises_tombstone_feature() {
+    // XEP-0424 §"Tombstones": "A service which supports tombstones
+    // MUST advertise the 'urn:xmpp:message-retract:1#tombstone'
+    // feature in its Service Discovery responses." Waddle's MAM
+    // storage replaces retracted entries with tombstones, so the
+    // advert is mandatory.
+    let feats = server_features();
+    let target = Feature::message_retraction_tombstone();
+    assert!(
+        feats.iter().any(|f| f == &target),
+        "server_features() must advertise `urn:xmpp:message-retract:1#tombstone` \
+         because the MAM layer rewrites entries with tombstones"
+    );
+    // Defence-in-depth: base retract feature still ships too.
+    assert!(feats.iter().any(|f| f == &Feature::message_retraction()));
+}
+
+#[test]
+fn xep0424_muc_rooms_advertise_tombstone_feature_in_every_configuration() {
+    // MUC rooms also stamp tombstones in their archives. The advert
+    // travels with the room regardless of (persistent × members_only
+    // × moderated × forum) configuration since the storage layer
+    // doesn't gate tombstones on room config.
+    let target = Feature::message_retraction_tombstone();
+    for persistent in [false, true] {
+        for members_only in [false, true] {
+            for moderated in [false, true] {
+                for forum in [false, true] {
+                    let feats = muc_room_features(persistent, members_only, moderated, forum);
+                    assert!(
+                        feats.iter().any(|f| f == &target),
+                        "muc_room_features(persistent={persistent}, members_only={members_only}, \
+                         moderated={moderated}, forum={forum}) MUST advertise \
+                         `urn:xmpp:message-retract:1#tombstone`"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn xep0424_tombstone_feature_constructor_pins_namespace_string() {
+    // Defence-in-depth against a future rename that silently changes
+    // the wire string.
+    assert_eq!(
+        Feature::message_retraction_tombstone().0,
+        "urn:xmpp:message-retract:1#tombstone"
+    );
+}
+
+// ── §3 wire shape: <retract/> ────────────────────────────────────────
+
+#[test]
+fn xep0424_retract_element_matches_spec_shape() {
+    // XEP-0424 §3 example:
+    //   <retract id='ORIGINAL_ID' xmlns='urn:xmpp:message-retract:1'/>
+    let elem = build_retract_element("origin-id-1");
+    assert_eq!(elem.name(), "retract");
+    assert_eq!(elem.ns(), NS_MESSAGE_RETRACT);
+    assert_eq!(elem.attr("id"), Some("origin-id-1"));
+    assert_eq!(
+        elem.children().count(),
+        0,
+        "<retract/> is a leaf element per §3"
+    );
+}
+
+#[test]
+fn xep0424_classifier_accepts_retract_shape_only() {
+    let canonical = build_retract_element("x");
+    assert!(is_retract_element(&canonical));
+
+    let wrong_ns = minidom::Element::builder("retract", "wrong:ns")
+        .attr("id", "x")
+        .build();
+    assert!(!is_retract_element(&wrong_ns));
+
+    let wrong_name = minidom::Element::builder("retraction", NS_MESSAGE_RETRACT)
+        .attr("id", "x")
+        .build();
+    assert!(!is_retract_element(&wrong_name));
+}
+
+#[test]
+fn xep0424_retraction_message_carries_retract_and_fallback_body() {
+    // §3 RECOMMENDED: the retraction message ships with a `<body/>`
+    // fallback so non-supporting clients still see something. The
+    // helper's responsibility is to provide one; without it the
+    // retraction would silently disappear on legacy clients.
+    let msg = build_retraction_message(
+        Some("lord@capulet.example".parse().expect("jid")),
+        Some("juliet@example.com/web".parse().expect("jid")),
+        "wrong-recipient-1",
+    );
+    assert!(
+        is_retraction_message(&msg),
+        "built retraction MUST classify as one"
+    );
+    assert!(
+        !msg.bodies.is_empty(),
+        "§3 RECOMMENDED <body/> fallback is present"
+    );
+
+    let kind = extract_retraction_from_message(&msg).expect("retraction extracted");
+    match kind {
+        RetractionKind::Request(r) => assert_eq!(r.retracts_id, "wrong-recipient-1"),
+        RetractionKind::Tombstone(_) => panic!("expected Request, got Tombstone"),
+    }
+}
+
+// ── §"Tombstones" wire shape: <retracted/> ──────────────────────────
+
+#[test]
+fn xep0424_retracted_element_uses_retraction_id_not_original_id() {
+    // XEP-0424 §"Tombstones": "the <retracted/> element MUST
+    // include an 'id' attribute that's set to the value of the
+    // retraction's <message/> element's 'id' attribute, so that
+    // clients can match the tombstone to the retraction." That is
+    // emphatically NOT the original message id (which is preserved
+    // as the stanza's own `id`, marking the position in the archive
+    // the tombstone occupies).
+    let elem = build_retracted_element("retract-msg-id-99", Some("2026-05-16T13:00:00Z"));
+    assert_eq!(elem.name(), "retracted");
+    assert_eq!(elem.ns(), NS_MESSAGE_RETRACT);
+    assert_eq!(
+        elem.attr("id"),
+        Some("retract-msg-id-99"),
+        "`id` on <retracted/> is the retraction message's id (§Tombstones MUST)"
+    );
+    assert_eq!(
+        elem.attr("stamp"),
+        Some("2026-05-16T13:00:00Z"),
+        "`stamp` (SHOULD per spec) carries the retraction timestamp"
+    );
+}
+
+#[test]
+fn xep0424_retracted_element_omits_stamp_when_unknown() {
+    // `stamp` is SHOULD, not MUST. The builder must accept absence
+    // without falling back to a placeholder.
+    let elem = build_retracted_element("retract-msg-id-99", None);
+    assert!(
+        elem.attr("stamp").is_none(),
+        "absent stamp MUST NOT be invented"
+    );
+}
+
+#[test]
+fn xep0424_classifier_accepts_retracted_shape_only() {
+    let canonical = build_retracted_element("x", Some("2026-05-16T13:00:00Z"));
+    assert!(is_retracted_element(&canonical));
+
+    let wrong_ns = minidom::Element::builder("retracted", "wrong:ns")
+        .attr("id", "x")
+        .build();
+    assert!(!is_retracted_element(&wrong_ns));
+
+    let wrong_name = minidom::Element::builder("retraction", NS_MESSAGE_RETRACT)
+        .attr("id", "x")
+        .build();
+    assert!(!is_retracted_element(&wrong_name));
+}
+
+#[test]
+fn xep0424_tombstone_message_carries_retracted_and_preserves_original_id() {
+    // The tombstone REPLACES the original archive entry. The
+    // stanza's `id` MUST be the original message id (so MAM keeps
+    // the same archival position), while `<retracted id='…'/>`
+    // points at the retraction's id. Two distinct identifiers; the
+    // helper must keep them straight.
+    let msg = build_tombstone_message(
+        Some("room@muc.example/joiner".parse().expect("jid")),
+        Some("room@muc.example/setter".parse().expect("jid")),
+        "ORIGINAL_MSG_ID",
+        "RETRACTION_MSG_ID",
+        Some("2026-05-16T13:00:00Z"),
+    );
+    assert!(
+        is_tombstone_message(&msg),
+        "tombstone classifier accepts the built message"
+    );
+    assert_eq!(
+        msg.id.as_deref(),
+        Some("ORIGINAL_MSG_ID"),
+        "stanza id MUST equal the ORIGINAL message id (preserves archive position)"
+    );
+
+    let kind = extract_retraction_from_message(&msg).expect("retracted extracted");
+    match kind {
+        RetractionKind::Tombstone(t) => {
+            assert_eq!(
+                t.retraction_id, "RETRACTION_MSG_ID",
+                "<retracted id='…'/> MUST cite the RETRACTION id, not the original"
+            );
+            assert_eq!(t.stamp.as_deref(), Some("2026-05-16T13:00:00Z"));
+        }
+        RetractionKind::Request(_) => panic!("expected Tombstone, got Request"),
+    }
+    // A tombstone is NOT a retraction request — the two classifiers
+    // must be mutually exclusive.
+    assert!(
+        !is_retraction_message(&msg),
+        "tombstone MUST NOT classify as a retraction request"
+    );
+}
+
+// ── Extractor robustness ────────────────────────────────────────────
+
+#[test]
+fn xep0424_extract_returns_none_for_payloads_with_empty_id() {
+    // XEP-0424 makes `id` a required attribute on both <retract/>
+    // and <retracted/>. An attacker stuffing in `id=""` to confuse a
+    // naive consumer must be ignored.
+    let mut msg = xmpp_parsers::message::Message::new(None::<jid::Jid>);
+    msg.payloads.push(
+        minidom::Element::builder("retract", NS_MESSAGE_RETRACT)
+            .attr("id", "")
+            .build(),
+    );
+    msg.payloads.push(
+        minidom::Element::builder("retracted", NS_MESSAGE_RETRACT)
+            .attr("id", "")
+            .build(),
+    );
+    assert!(
+        extract_retraction_from_message(&msg).is_none(),
+        "empty-id retraction/retracted payloads MUST be ignored"
+    );
+}
