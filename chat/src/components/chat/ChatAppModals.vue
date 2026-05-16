@@ -23,6 +23,7 @@ const {
   handleCreateChannel,
   handleUpdateChannel,
   handleDeleteChannel,
+  handleMoveChannelToSpace,
   confirmDeleteChannel,
   handleUpdateWaddle,
   handleDeleteWaddle,
@@ -63,9 +64,12 @@ const {
       :channel="waddles.currentChannel.value"
       :form="waddles.editChannelForm.value"
       :is-submitting="waddles.isSubmitting.value"
+      :spaces="waddles.sortedSpaces.value"
+      :can-move-channel="waddles.canManageChannels.value"
       @update:form="waddles.editChannelForm.value = $event"
       @save="handleUpdateChannel"
       @delete="handleDeleteChannel"
+      @move-to-space="handleMoveChannelToSpace"
     />
 
     <MemberManagement
