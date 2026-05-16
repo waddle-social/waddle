@@ -794,7 +794,7 @@ async fn pep_bookmark_publish_skips_roster_contacts_even_with_matching_caps_noti
 }
 
 #[tokio::test]
-async fn pep_bookmark_publish_skips_explicit_non_owner_subscribers() {
+async fn pep_bookmark_open_config_does_not_grant_non_owner_access() {
     let _serial = TEST_SERIAL.lock().await;
     let alice_password = format!("alice-{}", uuid::Uuid::new_v4());
     let bob_password = format!("bob-{}", uuid::Uuid::new_v4());
@@ -829,7 +829,7 @@ async fn pep_bookmark_publish_skips_explicit_non_owner_subscribers() {
         "pep-bookmark-explicit-create",
         &alice_bare,
         &format!(
-            r#"<pubsub xmlns="{NS_PUBSUB}"><publish node="{node}"><item id="seed-explicit@muc.example.com"><conference xmlns="{node}" name="Seed"/></item></publish></pubsub>"#
+            r#"<pubsub xmlns="{NS_PUBSUB}"><publish node="{node}"><item id="seed-explicit@muc.example.com"><conference xmlns="{node}" name="Seed"><extensions><notify xmlns="urn:xmpp:notification-settings:1"><never/></notify></extensions></conference></item></publish></pubsub>"#
         ),
     )
     .await;
@@ -857,29 +857,34 @@ async fn pep_bookmark_publish_skips_explicit_non_owner_subscribers() {
         ),
     )
     .await;
-    assert!(sub.contains(r#"type="result""#), "subscribe: {sub}");
-
-    ping_anchor(
-        &mut bob,
-        &format!("pep-bookmark-explicit-anchor-{}", uuid::Uuid::new_v4()),
-    )
-    .await;
-
-    let publish = iq_set_to(
-        &mut alice,
-        "pep-bookmark-explicit-pub",
-        &alice_bare,
-        &format!(
-            r#"<pubsub xmlns="{NS_PUBSUB}"><publish node="{node}"><item id="private-explicit@muc.example.com"><conference xmlns="{node}" name="Private"><extensions><notify xmlns="urn:xmpp:notification-settings:1"><never/></notify></extensions></conference></item></publish></pubsub>"#
-        ),
-    )
-    .await;
-    assert!(publish.contains(r#"type="result""#), "publish: {publish}");
-
-    let event = wait_for_event_message(&mut bob, node, Duration::from_millis(700)).await;
     assert!(
-        event.is_none(),
-        "bookmarks are private PEP state and MUST NOT fan out to explicit non-owner subscribers: {event:?}"
+        sub.contains(r#"type="error""#),
+        "bookmark node must stay private even after open config request: {sub}"
+    );
+    assert!(
+        sub.contains("forbidden"),
+        "non-owner bookmark subscribe should fail as forbidden: {sub}"
+    );
+
+    let read = iq_get_to(
+        &mut bob,
+        "pep-bookmark-explicit-read",
+        &alice_bare,
+        &format!(r#"<pubsub xmlns="{NS_PUBSUB}"><items node="{node}"/></pubsub>"#),
+    )
+    .await;
+    assert!(
+        read.contains(r#"type="error""#),
+        "bookmark items must stay private even after open config request: {read}"
+    );
+    assert!(
+        read.contains("forbidden"),
+        "non-owner bookmark items read should fail as forbidden: {read}"
+    );
+    assert!(
+        !read.contains("seed-explicit@muc.example.com")
+            && !read.contains("urn:xmpp:notification-settings:1"),
+        "private bookmark item id and notification settings must not leak: {read}"
     );
 
     let _ = bob.close().await;

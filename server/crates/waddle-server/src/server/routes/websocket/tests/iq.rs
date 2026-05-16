@@ -1123,6 +1123,55 @@ async fn xep0402_bookmark_publish_with_malformed_notify_is_rejected() {
 }
 
 #[tokio::test]
+async fn xep0402_bookmark_publish_with_duplicate_identity_notify_is_rejected() {
+    let state = create_test_websocket_state().await;
+    let jid: FullJid = "alice@example.com/web".parse().expect("valid jid");
+    let owner: BareJid = "alice@example.com".parse().expect("owner");
+    let conversation: BareJid = "room@muc.example.com".parse().expect("conversation");
+    let malformed = r#"<iq xmlns="jabber:client" id="bookmark-duplicate-identity" type="set">
+        <pubsub xmlns="http://jabber.org/protocol/pubsub">
+            <publish node="urn:xmpp:bookmarks:1">
+                <item id="room@muc.example.com">
+                    <conference xmlns="urn:xmpp:bookmarks:1">
+                        <extensions>
+                            <notify xmlns="urn:xmpp:notification-settings:1">
+                                <never identity-category="client" identity-type="pc" />
+                                <never identity-category="client" identity-type="pc" />
+                            </notify>
+                        </extensions>
+                    </conference>
+                </item>
+            </publish>
+        </pubsub>
+    </iq>"#;
+
+    let responses = handle_iq(
+        malformed,
+        "example.com",
+        "muc.example.com",
+        state.as_ref(),
+        &None,
+        &ready_phase(&jid),
+    )
+    .await;
+
+    assert_eq!(responses.len(), 1, "expected one response: {responses:?}");
+    assert!(
+        responses[0].contains(r#"type="error""#) && responses[0].contains("bad-request"),
+        "duplicate XEP-0492 identity settings must be rejected: {}",
+        responses[0]
+    );
+    assert!(state
+        .deps
+        .protocol
+        .notification_settings_projection
+        .get(&owner, &conversation)
+        .await
+        .expect("projection lookup")
+        .is_none());
+}
+
+#[tokio::test]
 async fn xep0402_bookmark_publish_with_malformed_conference_is_rejected() {
     let state = create_test_websocket_state().await;
     let jid: FullJid = "alice@example.com/web".parse().expect("valid jid");

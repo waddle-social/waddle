@@ -1,5 +1,5 @@
 use jid::BareJid;
-use waddle_xmpp::pubsub::{NodeConfig, PubSubNode, PEP_BOOKMARK_MAX_ITEMS};
+use waddle_xmpp::pubsub::{NodeConfig, PubSubNode};
 use waddle_xmpp::XmppError;
 
 use super::{item::clear_bookmark_projection_tx, DatabasePubSubStorage};
@@ -266,13 +266,10 @@ impl DatabasePubSubStorage {
 }
 
 fn bounded_node_config(node_name: &str, config: &NodeConfig) -> NodeConfig {
-    let mut config = config.clone();
-    if is_bookmarks_node(node_name)
-        && (config.max_items == 0 || config.max_items > PEP_BOOKMARK_MAX_ITEMS)
-    {
-        config.max_items = PEP_BOOKMARK_MAX_ITEMS;
+    if is_bookmarks_node(node_name) {
+        return config.clone().normalize_xep0402_bookmarks();
     }
-    config
+    config.clone()
 }
 
 fn is_bookmarks_node(node_name: &str) -> bool {

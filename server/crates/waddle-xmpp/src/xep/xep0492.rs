@@ -25,6 +25,8 @@
 //! - Get mentions-only for low-priority rooms
 //! - Per-room customization in the channel sidebar
 
+use std::collections::HashSet;
+
 use minidom::Element;
 
 /// Namespace for XEP-0492 Chat Notification Settings.
@@ -101,6 +103,8 @@ pub enum NotificationSettingsError {
     MultipleAdvancedElements,
     /// More than one account-wide fallback child is present.
     MultipleFallbackSettings,
+    /// More than one setting has the same name and identity attributes.
+    DuplicateNotificationSetting,
     /// `identity-type` appeared without `identity-category`.
     IdentityTypeWithoutCategory,
 }
@@ -120,6 +124,9 @@ impl std::fmt::Display for NotificationSettingsError {
             }
             Self::MultipleFallbackSettings => {
                 f.write_str("multiple XEP-0492 fallback notification settings")
+            }
+            Self::DuplicateNotificationSetting => {
+                f.write_str("duplicate XEP-0492 notification setting")
             }
             Self::IdentityTypeWithoutCategory => {
                 f.write_str("identity-type must not appear without identity-category")
@@ -323,6 +330,7 @@ pub fn validate_notify_element(elem: &Element) -> Result<(), NotificationSetting
     }
 
     let mut saw_fallback = false;
+    let mut seen_identity_settings = HashSet::new();
     for child in elem.children() {
         if !is_setting_element(child) {
             return Err(NotificationSettingsError::InvalidNotifyChild(
@@ -336,6 +344,12 @@ pub fn validate_notify_element(elem: &Element) -> Result<(), NotificationSetting
                 return Err(NotificationSettingsError::MultipleFallbackSettings);
             }
             saw_fallback = true;
+        } else if !seen_identity_settings.insert((
+            child.name(),
+            child.attr("identity-category"),
+            child.attr("identity-type"),
+        )) {
+            return Err(NotificationSettingsError::DuplicateNotificationSetting);
         }
         validate_setting_children(child)?;
     }

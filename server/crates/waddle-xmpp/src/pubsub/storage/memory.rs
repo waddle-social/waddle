@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use jid::{BareJid, Jid};
 use waddle_xmpp_core::pubsub::{Affiliation, SubId, Subscription, SubscriptionState};
 
-use crate::pubsub::node::{NodeConfig, PEP_BOOKMARK_MAX_ITEMS};
+use crate::pubsub::node::NodeConfig;
 use crate::pubsub::stanzas::PubSubItem;
 use crate::XmppError;
 
@@ -244,13 +244,11 @@ impl PubSubStorage for InMemoryPubSubStorage {
             XmppError::item_not_found(Some(format!("Node '{}' does not exist", node_name)))
         })?;
 
-        let mut config = config.clone();
-        if node_name == crate::xep::xep0402::PEP_NODE
-            && (config.max_items == 0 || config.max_items > PEP_BOOKMARK_MAX_ITEMS)
-        {
-            config.max_items = PEP_BOOKMARK_MAX_ITEMS;
-        }
-        node.config = config;
+        node.config = if node_name == crate::xep::xep0402::PEP_NODE {
+            config.clone().normalize_xep0402_bookmarks()
+        } else {
+            config.clone()
+        };
 
         Ok(())
     }

@@ -51,6 +51,21 @@ fn xep0492_identity_type_requires_identity_category() {
 }
 
 #[test]
+fn xep0492_rejects_duplicate_identity_specific_settings() {
+    let notify: Element = "<notify xmlns='urn:xmpp:notification-settings:1'>\
+            <never identity-category='client' identity-type='pc' />\
+            <never identity-category='client' identity-type='pc' />\
+        </notify>"
+        .parse()
+        .expect("valid XML");
+
+    assert_eq!(
+        validate_notify_element(&notify),
+        Err(NotificationSettingsError::DuplicateNotificationSetting)
+    );
+}
+
+#[test]
 fn xep0492_rejects_unknown_official_notify_children() {
     let notify: Element = "<notify xmlns='urn:xmpp:notification-settings:1'>\
             <sometimes />\

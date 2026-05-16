@@ -193,6 +193,50 @@ async fn xep0402_bookmark_node_config_clamps_unbounded_max_items() {
 }
 
 #[tokio::test]
+async fn xep0402_bookmark_node_config_forces_private_durable_fields() {
+    let storage = DatabasePubSubStorage::open(Some("sqlite::memory:"))
+        .await
+        .expect("storage");
+    let owner = jid("alice@example.com");
+    storage
+        .get_or_create_node(&owner, waddle_xmpp::xep::xep0402::PEP_NODE)
+        .await
+        .expect("node");
+
+    storage
+        .update_node_config(
+            &owner,
+            waddle_xmpp::xep::xep0402::PEP_NODE,
+            &NodeConfig::spaces_public(),
+        )
+        .await
+        .expect("normalize bookmark config");
+
+    let node = storage
+        .get_node(&owner, waddle_xmpp::xep::xep0402::PEP_NODE)
+        .await
+        .expect("node lookup")
+        .expect("node exists");
+    assert_eq!(
+        node.config.access_model,
+        waddle_xmpp::pubsub::AccessModel::Whitelist
+    );
+    assert_eq!(
+        node.config.publish_model,
+        waddle_xmpp::pubsub::PublishModel::Publishers
+    );
+    assert_eq!(
+        node.config.max_items,
+        waddle_xmpp::pubsub::PEP_BOOKMARK_MAX_ITEMS
+    );
+    assert!(node.config.persist_items);
+    assert_eq!(
+        node.config.send_last_published_item,
+        waddle_xmpp::pubsub::SendLastPublishedItem::Never
+    );
+}
+
+#[tokio::test]
 async fn pubsub_database_hosts_notification_settings_projection_schema() {
     let storage = DatabasePubSubStorage::open(Some("sqlite::memory:"))
         .await
