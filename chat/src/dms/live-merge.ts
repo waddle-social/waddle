@@ -14,7 +14,6 @@ import {
 import { compareTimelineMessages } from "@/lib/timeline-timestamps";
 import {
   canUseSelfEchoBodyFallback,
-  withinSelfEchoFallbackWindow,
 } from "@/lib/self-echo-fallback";
 
 // Inbound merge composable for DMs: applies incoming retractions
@@ -158,8 +157,7 @@ export function useDmLiveMerge(deps: UseDmLiveMergeDeps) {
         (m) =>
           pendingEchoClientIds.has(m.id)
           && m.isSelf
-          && m.body === msg.body
-          && withinSelfEchoFallbackWindow(m, msg),
+          && m.body === msg.body,
       )
       : undefined;
     const preservedSelfEcho = bodyFallbackAllowed
@@ -168,8 +166,7 @@ export function useDmLiveMerge(deps: UseDmLiveMergeDeps) {
           m.isSelf
           && m.body === msg.body
           && !!m.deliveryStatus
-          && m.deliveryStatus !== "delivered"
-          && withinSelfEchoFallbackWindow(m, msg),
+          && m.deliveryStatus !== "delivered",
       )
       : undefined;
     const existing = existingById ?? pendingSelfEcho ?? preservedSelfEcho;

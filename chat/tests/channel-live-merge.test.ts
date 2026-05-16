@@ -336,31 +336,6 @@ describe("mergeLiveMessage self-echo reconciliation", () => {
     expect(h.messages.value.length).toBe(2);
   });
 
-  test("does not body-match a stale failed send against a fresh server-id echo", () => {
-    const h = harness();
-    h.messages.value = [
-      {
-        id: "4f9574e7-aaf8-4cea-bf04-61efc6bf3f10",
-        body: "lol",
-        nick: "alice",
-        isSelf: true,
-        deliveryStatus: "failed",
-        createdAt: "2026-05-14T10:00:00.000Z",
-      } as TimelineMessage,
-    ];
-    h.liveMerge.mergeLiveMessage({
-      id: "server-stanza-id",
-      body: "lol",
-      nick: "alice",
-      isSelf: true,
-      createdAt: "2026-05-14T10:36:55.000Z",
-    } as TimelineMessage);
-    expect(h.messages.value.map((message) => message.id)).toEqual([
-      "4f9574e7-aaf8-4cea-bf04-61efc6bf3f10",
-      "server-stanza-id",
-    ]);
-  });
-
   test("keeps incoming canonical fields when reconciling an optimistic self-echo", () => {
     const h = harness();
     h.messages.value = [

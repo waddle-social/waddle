@@ -23,7 +23,6 @@ import { classifyRoomMessage } from "@/lib/xmpp/classify-room-message";
 import { compareTimelineMessages } from "@/lib/timeline-timestamps";
 import {
   canUseSelfEchoBodyFallback,
-  withinSelfEchoFallbackWindow,
 } from "@/lib/self-echo-fallback";
 
 // Inbound merge composable for the channel side: applies incoming
@@ -193,8 +192,7 @@ export function useChannelLiveMerge(deps: UseChannelLiveMergeDeps) {
         (m) =>
           pendingEchoClientIds.has(m.id)
           && m.isSelf
-          && m.body === msg.body
-          && withinSelfEchoFallbackWindow(m, msg),
+          && m.body === msg.body,
       )
       : undefined;
     const preservedSelfEcho = bodyFallbackAllowed
@@ -203,8 +201,7 @@ export function useChannelLiveMerge(deps: UseChannelLiveMergeDeps) {
           m.isSelf
           && m.body === msg.body
           && !!m.deliveryStatus
-          && m.deliveryStatus !== "delivered"
-          && withinSelfEchoFallbackWindow(m, msg),
+          && m.deliveryStatus !== "delivered",
       )
       : undefined;
     const existing = existingById ?? pendingSelfEcho ?? preservedSelfEcho;
