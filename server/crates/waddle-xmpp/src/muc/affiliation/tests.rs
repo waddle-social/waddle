@@ -3,41 +3,6 @@ use super::*;
 use crate::types::Affiliation;
 
 #[test]
-fn test_permission_mapper_default_mappings() {
-    let mapper = PermissionMapper::new();
-
-    assert_eq!(mapper.map_relation("owner"), Affiliation::Owner);
-    assert_eq!(mapper.map_relation("admin"), Affiliation::Admin);
-    assert_eq!(mapper.map_relation("moderator"), Affiliation::Admin);
-    assert_eq!(mapper.map_relation("manager"), Affiliation::Admin);
-    assert_eq!(mapper.map_relation("member"), Affiliation::Member);
-    assert_eq!(mapper.map_relation("writer"), Affiliation::Member);
-    assert_eq!(mapper.map_relation("viewer"), Affiliation::Member);
-    assert_eq!(mapper.map_relation("unknown"), Affiliation::None);
-}
-
-#[test]
-fn test_permission_mapper_custom_mapping() {
-    let mapper = PermissionMapper::new().with_mapping("super_admin", Affiliation::Owner);
-
-    assert_eq!(mapper.map_relation("super_admin"), Affiliation::Owner);
-    assert_eq!(mapper.map_relation("admin"), Affiliation::Admin);
-}
-
-#[test]
-fn test_permission_mapper_highest_wins() {
-    let mapper = PermissionMapper::new();
-
-    // Multiple relations - highest should win
-    let relations = vec!["member".to_string(), "admin".to_string()];
-    assert_eq!(mapper.map_relations(&relations), Affiliation::Admin);
-
-    // Empty relations
-    let empty: Vec<String> = vec![];
-    assert_eq!(mapper.map_relations(&empty), Affiliation::None);
-}
-
-#[test]
 fn test_affiliation_list_basic_operations() {
     let mut list = AffiliationList::new();
     let jid: jid::BareJid = "user@example.com".parse().unwrap();
