@@ -182,6 +182,7 @@ pub enum PubSubError {
     ItemNotFound,
     Forbidden,
     NodeExists,
+    BadRequest,
     InvalidJid,
     PreconditionNotMet,
     NotSubscribed,

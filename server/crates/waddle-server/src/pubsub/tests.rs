@@ -249,6 +249,7 @@ async fn pubsub_database_hosts_notification_settings_projection_schema() {
         "conversation_jid",
         "conversation_kind",
         "mode",
+        "source_version",
         "updated_at_ms",
         "source_node",
         "source_item_id",
@@ -292,17 +293,19 @@ async fn pubsub_database_hosts_notification_settings_projection_schema() {
             conversation_jid,
             conversation_kind,
             mode,
+            source_version,
             updated_at_ms,
             source_node,
             source_item_id
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         "#,
         crate::db_params![
             "alice@example.com",
             "room@muc.example.com",
             "private_group",
             "on-mention",
+            1_i64,
             7_i64,
             "urn:xmpp:bookmarks:1",
             "room@muc.example.com",
@@ -319,17 +322,19 @@ async fn pubsub_database_hosts_notification_settings_projection_schema() {
                 conversation_jid,
                 conversation_kind,
                 mode,
+                source_version,
                 updated_at_ms,
                 source_node,
                 source_item_id
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             "#,
             crate::db_params![
                 "alice@example.com",
                 "mode-error@muc.example.com",
                 "private_group",
                 "mentions-only",
+                1_i64,
                 7_i64,
                 "urn:xmpp:bookmarks:1",
                 "mode-error@muc.example.com",
@@ -349,17 +354,19 @@ async fn pubsub_database_hosts_notification_settings_projection_schema() {
                 conversation_jid,
                 conversation_kind,
                 mode,
+                source_version,
                 updated_at_ms,
                 source_node,
                 source_item_id
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             "#,
             crate::db_params![
                 "alice@example.com",
                 "kind-error@muc.example.com",
                 "channel",
                 "never",
+                1_i64,
                 7_i64,
                 "urn:xmpp:bookmarks:1",
                 "kind-error@muc.example.com",
@@ -373,7 +380,7 @@ async fn pubsub_database_hosts_notification_settings_projection_schema() {
 }
 
 #[tokio::test]
-async fn pubsub_postgres_projection_schema_uses_bigint_timestamp() {
+async fn pubsub_postgres_projection_schema_uses_bigint_revision_columns() {
     let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
         eprintln!(
             "skipping: WADDLE_TEST_POSTGRES_URL not set \
@@ -398,24 +405,26 @@ async fn pubsub_postgres_projection_schema_uses_bigint_timestamp() {
         .expect("postgres pubsub storage");
     let db = storage.database();
     let conn = db.guard().await.expect("postgres guard");
-    let mut rows = conn
-        .query(
-            "SELECT data_type \
-             FROM information_schema.columns \
-             WHERE table_schema = current_schema() \
-               AND table_name = ? \
-               AND column_name = ?",
-            crate::db_params!["notification_settings_projection", "updated_at_ms"],
-        )
-        .await
-        .expect("query projection timestamp column");
-    let row = rows
-        .next()
-        .await
-        .expect("read column type")
-        .expect("column row");
-    let data_type: String = row.get(0).expect("decode column type");
-    assert_eq!(data_type, "bigint");
+    for column in ["source_version", "updated_at_ms"] {
+        let mut rows = conn
+            .query(
+                "SELECT data_type \
+                 FROM information_schema.columns \
+                 WHERE table_schema = current_schema() \
+                   AND table_name = ? \
+                   AND column_name = ?",
+                crate::db_params!["notification_settings_projection", column],
+            )
+            .await
+            .expect("query projection revision column");
+        let row = rows
+            .next()
+            .await
+            .expect("read column type")
+            .expect("column row");
+        let data_type: String = row.get(0).expect("decode column type");
+        assert_eq!(data_type, "bigint", "projection {column} must use BIGINT");
+    }
     drop(conn);
 
     let drop_schema = format!("DROP SCHEMA IF EXISTS {schema} CASCADE");

@@ -76,6 +76,7 @@ pub struct NotificationSettingsProjection {
     pub conversation_jid: BareJid,
     pub conversation_kind: ConversationKind,
     pub mode: NotificationLevel,
+    pub source_version: i64,
     pub updated_at_ms: i64,
     pub source: NotificationSettingsSource,
     pub source_item_jid: BareJid,
@@ -138,14 +139,16 @@ impl NotificationSettingsProjectionStore {
                 conversation_jid,
                 conversation_kind,
                 mode,
+                source_version,
                 updated_at_ms,
                 source_node,
                 source_item_id
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(owner_bare_jid, conversation_jid) DO UPDATE SET
                 conversation_kind = excluded.conversation_kind,
                 mode = excluded.mode,
+                source_version = excluded.source_version,
                 updated_at_ms = excluded.updated_at_ms,
                 source_node = excluded.source_node,
                 source_item_id = excluded.source_item_id
@@ -155,6 +158,7 @@ impl NotificationSettingsProjectionStore {
                 projection.conversation_jid.to_string(),
                 projection.conversation_kind.as_db_value(),
                 projection.mode.element_name(),
+                projection.source_version,
                 projection.updated_at_ms,
                 projection.source.node(),
                 projection.source_item_jid.to_string(),
@@ -213,6 +217,7 @@ impl NotificationSettingsProjectionStore {
                        conversation_jid,
                        conversation_kind,
                        mode,
+                       source_version,
                        updated_at_ms,
                        source_node,
                        source_item_id
@@ -245,6 +250,7 @@ pub fn derive_bookmark_projection_mutation(
     payload: Option<&Element>,
     conversation_kind: ConversationKind,
     updated_at_ms: i64,
+    source_version: i64,
 ) -> Result<NotificationSettingsProjectionMutation, NotificationSettingsProjectionError> {
     let payload = payload.ok_or_else(|| {
         NotificationSettingsProjectionError::InvalidBookmarkPayload(
@@ -252,12 +258,29 @@ pub fn derive_bookmark_projection_mutation(
         )
     })?;
     let bookmark = validate_xep0402_bookmark_publish(item_id, payload)?;
+    derive_validated_bookmark_projection_mutation(
+        owner_bare_jid,
+        &bookmark,
+        payload,
+        conversation_kind,
+        updated_at_ms,
+        source_version,
+    )
+}
 
+pub fn derive_validated_bookmark_projection_mutation(
+    owner_bare_jid: &BareJid,
+    bookmark: &waddle_xmpp::xep::xep0402::Bookmark,
+    payload: &Element,
+    conversation_kind: ConversationKind,
+    updated_at_ms: i64,
+    source_version: i64,
+) -> Result<NotificationSettingsProjectionMutation, NotificationSettingsProjectionError> {
     let notify = bookmark_notify_element(payload)?;
     let Some(notify) = notify else {
         return Ok(NotificationSettingsProjectionMutation::Delete {
             owner_bare_jid: owner_bare_jid.clone(),
-            conversation_jid: bookmark.jid,
+            conversation_jid: bookmark.jid.clone(),
         });
     };
 
@@ -266,7 +289,7 @@ pub fn derive_bookmark_projection_mutation(
         Ok(None) => {
             return Ok(NotificationSettingsProjectionMutation::Delete {
                 owner_bare_jid: owner_bare_jid.clone(),
-                conversation_jid: bookmark.jid,
+                conversation_jid: bookmark.jid.clone(),
             });
         }
         Err(error) => return Err(error.into()),
@@ -278,9 +301,10 @@ pub fn derive_bookmark_projection_mutation(
             conversation_jid: bookmark.jid.clone(),
             conversation_kind,
             mode,
+            source_version,
             updated_at_ms,
             source: NotificationSettingsSource::Xep0402Bookmarks,
-            source_item_jid: bookmark.jid,
+            source_item_jid: bookmark.jid.clone(),
         },
     ))
 }
@@ -401,9 +425,10 @@ fn decode_projection(
     let conversation_raw: String = row.get(1)?;
     let conversation_kind_raw: String = row.get(2)?;
     let mode_raw: String = row.get(3)?;
-    let updated_at_ms: i64 = row.get(4)?;
-    let source_node_raw: String = row.get(5)?;
-    let source_item_raw: String = row.get(6)?;
+    let source_version: i64 = row.get(4)?;
+    let updated_at_ms: i64 = row.get(5)?;
+    let source_node_raw: String = row.get(6)?;
+    let source_item_raw: String = row.get(7)?;
 
     let owner_bare_jid = owner_raw
         .parse()
@@ -424,6 +449,7 @@ fn decode_projection(
         conversation_jid,
         conversation_kind,
         mode,
+        source_version,
         updated_at_ms,
         source,
         source_item_jid,
@@ -500,6 +526,7 @@ mod tests {
                     conversation_jid: conversation.clone(),
                     conversation_kind: ConversationKind::PrivateGroup,
                     mode: NotificationLevel::Never,
+                    source_version: 7,
                     updated_at_ms: 42,
                     source: NotificationSettingsSource::Xep0402Bookmarks,
                     source_item_jid: conversation.clone(),
@@ -520,6 +547,7 @@ mod tests {
                 .expect("row");
             assert_eq!(loaded.mode, NotificationLevel::Never);
             assert_eq!(loaded.conversation_kind, ConversationKind::PrivateGroup);
+            assert_eq!(loaded.source_version, 7);
             assert_eq!(loaded.updated_at_ms, 42);
         }
 
@@ -551,6 +579,7 @@ mod tests {
                     conversation_jid: conversation.clone(),
                     conversation_kind: ConversationKind::PrivateGroup,
                     mode: NotificationLevel::Never,
+                    source_version: 7,
                     updated_at_ms: 42,
                     source: NotificationSettingsSource::Xep0402Bookmarks,
                     source_item_jid: conversation,
@@ -598,6 +627,7 @@ mod tests {
             Some(&payload),
             ConversationKind::PrivateGroup,
             7,
+            11,
         )
         .expect("derive");
 
@@ -607,6 +637,7 @@ mod tests {
         assert_eq!(projection.owner_bare_jid, owner);
         assert_eq!(projection.conversation_jid, bare("room@muc.example.com"));
         assert_eq!(projection.mode, NotificationLevel::Never);
+        assert_eq!(projection.source_version, 11);
     }
 
     #[test]
@@ -629,6 +660,7 @@ mod tests {
             Some(&payload),
             ConversationKind::PrivateGroup,
             7,
+            11,
         )
         .expect_err("malformed official XEP-0492 payload must be rejected");
 
@@ -656,9 +688,41 @@ mod tests {
             Some(&payload),
             ConversationKind::PrivateGroup,
             7,
+            11,
         )
         .expect("derive");
 
+        assert_eq!(
+            mutation,
+            NotificationSettingsProjectionMutation::Delete {
+                owner_bare_jid: owner,
+                conversation_jid: bare("room@muc.example.com"),
+            }
+        );
+    }
+
+    #[test]
+    fn xep0469_pinning_inside_extensions_is_valid_bookmark_payload() {
+        let owner = bare("alice@example.com");
+        let payload: Element = "<conference xmlns='urn:xmpp:bookmarks:1'>\
+                <extensions>\
+                    <pinned xmlns='urn:xmpp:bookmarks-pinning:0' />\
+                </extensions>\
+            </conference>"
+            .parse()
+            .expect("valid XML payload");
+
+        validate_xep0402_bookmark_publish("room@muc.example.com", &payload)
+            .expect("XEP-0469 pinning belongs inside XEP-0402 extensions");
+        let mutation = derive_bookmark_projection_mutation(
+            &owner,
+            "room@muc.example.com",
+            Some(&payload),
+            ConversationKind::PrivateGroup,
+            7,
+            11,
+        )
+        .expect("derive");
         assert_eq!(
             mutation,
             NotificationSettingsProjectionMutation::Delete {

@@ -4,8 +4,8 @@ use waddle_xmpp::XmppError;
 
 use super::DatabasePubSubStorage;
 use crate::notification_settings_projection::{
-    derive_bookmark_projection_mutation, validate_xep0402_bookmark_publish, ConversationKind,
-    NotificationSettingsProjectionMutation,
+    derive_validated_bookmark_projection_mutation, validate_xep0402_bookmark_publish,
+    ConversationKind, NotificationSettingsProjectionMutation,
 };
 
 impl DatabasePubSubStorage {
@@ -21,15 +21,19 @@ impl DatabasePubSubStorage {
             .id
             .clone()
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-        if is_bookmarks_node(node_name) {
+        let validated_bookmark = if is_bookmarks_node(node_name) {
             let payload = item.payload.as_ref().ok_or_else(|| {
                 XmppError::bad_request(Some(
                     "XEP-0402 bookmark publish requires a conference payload".to_string(),
                 ))
             })?;
-            validate_xep0402_bookmark_publish(&item_id, payload)
-                .map_err(|error| XmppError::bad_request(Some(error.to_string())))?;
-        }
+            Some(
+                validate_xep0402_bookmark_publish(&item_id, payload)
+                    .map_err(|error| XmppError::bad_request(Some(error.to_string())))?,
+            )
+        } else {
+            None
+        };
 
         let (node, node_created) = match self.get_node_impl(owner, node_name).await? {
             Some(node) => (node, false),
@@ -80,13 +84,18 @@ impl DatabasePubSubStorage {
         let evicted_item_ids = self
             .enforce_max_items_tx(&mut tx, owner, node_name, node.config.max_items)
             .await?;
-        if is_bookmarks_node(node_name) {
-            let mutation = derive_bookmark_projection_mutation(
+        if let Some(bookmark) = validated_bookmark.as_ref() {
+            let source_version = next_notification_settings_source_version_tx(&mut tx).await?;
+            let payload = item.payload.as_ref().ok_or_else(|| {
+                XmppError::internal("validated bookmark publish lost payload".to_string())
+            })?;
+            let mutation = derive_validated_bookmark_projection_mutation(
                 owner,
-                &item_id,
-                item.payload.as_ref(),
+                bookmark,
+                payload,
                 ConversationKind::PrivateGroup,
                 published_at_ms,
+                source_version,
             )
             .map_err(|error| XmppError::internal(error.to_string()))?;
             apply_projection_mutation_tx(&mut tx, mutation).await?;
@@ -392,14 +401,16 @@ async fn apply_projection_mutation_tx(
                     conversation_jid,
                     conversation_kind,
                     mode,
+                    source_version,
                     updated_at_ms,
                     source_node,
                     source_item_id
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(owner_bare_jid, conversation_jid) DO UPDATE SET
                     conversation_kind = excluded.conversation_kind,
                     mode = excluded.mode,
+                    source_version = excluded.source_version,
                     updated_at_ms = excluded.updated_at_ms,
                     source_node = excluded.source_node,
                     source_item_id = excluded.source_item_id
@@ -409,6 +420,7 @@ async fn apply_projection_mutation_tx(
                     projection.conversation_jid.to_string(),
                     projection.conversation_kind.as_db_value(),
                     projection.mode.element_name(),
+                    projection.source_version,
                     projection.updated_at_ms,
                     projection.source.node(),
                     projection.source_item_jid.to_string(),
@@ -433,6 +445,41 @@ async fn apply_projection_mutation_tx(
         }
     }
     Ok(())
+}
+
+async fn next_notification_settings_source_version_tx(
+    tx: &mut crate::db::Transaction<'_>,
+) -> Result<i64, XmppError> {
+    tx.execute(
+        r#"
+        INSERT INTO notification_settings_projection_source_version (id, current_version)
+        VALUES (1, 0)
+        ON CONFLICT(id) DO NOTHING
+        "#,
+        (),
+    )
+    .await
+    .map_err(|error| XmppError::internal(error.to_string()))?;
+
+    let mut rows = tx
+        .query(
+            r#"
+            UPDATE notification_settings_projection_source_version
+            SET current_version = current_version + 1
+            WHERE id = 1
+            RETURNING current_version
+            "#,
+            (),
+        )
+        .await
+        .map_err(|error| XmppError::internal(error.to_string()))?;
+    let row = rows
+        .next()
+        .await
+        .map_err(|error| XmppError::internal(error.to_string()))?
+        .ok_or_else(|| XmppError::internal("missing projection source version".to_string()))?;
+    row.get(0)
+        .map_err(|error| XmppError::internal(error.to_string()))
 }
 
 fn is_bookmarks_node(node_name: &str) -> bool {

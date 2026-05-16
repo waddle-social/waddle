@@ -845,6 +845,17 @@ async fn xep0402_bookmark_publish_overwrites_existing_xep0492_projection() {
         "expected one response: {first_responses:?}"
     );
 
+    let owner: BareJid = "alice@example.com".parse().expect("owner");
+    let conversation: BareJid = "room@muc.example.com".parse().expect("conversation");
+    let first_projection = state
+        .deps
+        .protocol
+        .notification_settings_projection
+        .get(&owner, &conversation)
+        .await
+        .expect("first projection lookup")
+        .expect("first projection row");
+
     let second_responses = handle_iq(
         second_frame,
         "example.com",
@@ -860,8 +871,6 @@ async fn xep0402_bookmark_publish_overwrites_existing_xep0492_projection() {
         "expected one response: {second_responses:?}"
     );
 
-    let owner: BareJid = "alice@example.com".parse().expect("owner");
-    let conversation: BareJid = "room@muc.example.com".parse().expect("conversation");
     let projection = state
         .deps
         .protocol
@@ -873,6 +882,10 @@ async fn xep0402_bookmark_publish_overwrites_existing_xep0492_projection() {
     assert_eq!(
         projection.mode,
         waddle_xmpp::xep::NotificationLevel::OnMention
+    );
+    assert!(
+        projection.source_version > first_projection.source_version,
+        "projection source_version must advance on overwrite"
     );
 }
 
@@ -999,6 +1012,7 @@ async fn xep0402_bookmark_publish_without_notify_deletes_xep0492_projection() {
                 conversation_kind:
                     crate::notification_settings_projection::ConversationKind::PrivateGroup,
                 mode: waddle_xmpp::xep::NotificationLevel::Never,
+                source_version: 1,
                 updated_at_ms: 1,
                 source: crate::notification_settings_projection::NotificationSettingsSource::Xep0402Bookmarks,
                 source_item_jid: conversation.clone(),

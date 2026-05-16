@@ -2,7 +2,7 @@ use waddle_xmpp::XmppError;
 
 use super::DatabasePubSubStorage;
 
-const PUBSUB_SCHEMA_VERSION: i64 = 3;
+const PUBSUB_SCHEMA_VERSION: i64 = 4;
 
 impl DatabasePubSubStorage {
     pub(super) async fn initialize(&self) -> Result<(), XmppError> {
@@ -35,6 +35,7 @@ impl DatabasePubSubStorage {
             // Drop-and-recreate: CLAUDE.md greenlights breaking changes.
             for table in [
                 "notification_settings_projection",
+                "notification_settings_projection_source_version",
                 "pubsub_items",
                 "pubsub_subscriptions",
                 "pubsub_affiliations",
@@ -109,6 +110,7 @@ impl DatabasePubSubStorage {
                     conversation_jid TEXT NOT NULL,
                     conversation_kind TEXT NOT NULL CHECK (conversation_kind IN ('direct', 'private_group', 'public_group')),
                     mode TEXT NOT NULL CHECK (mode IN ('always', 'on-mention', 'never')),
+                    source_version INTEGER NOT NULL,
                     updated_at_ms INTEGER NOT NULL,
                     source_node TEXT NOT NULL,
                     source_item_id TEXT NOT NULL,
@@ -123,6 +125,7 @@ impl DatabasePubSubStorage {
                     conversation_jid TEXT NOT NULL,
                     conversation_kind TEXT NOT NULL CHECK (conversation_kind IN ('direct', 'private_group', 'public_group')),
                     mode TEXT NOT NULL CHECK (mode IN ('always', 'on-mention', 'never')),
+                    source_version BIGINT NOT NULL,
                     updated_at_ms BIGINT NOT NULL,
                     source_node TEXT NOT NULL,
                     source_item_id TEXT NOT NULL,
@@ -132,6 +135,26 @@ impl DatabasePubSubStorage {
             }
         };
         self.execute(notification_settings_projection_ddl, ())
+            .await?;
+        let notification_settings_projection_source_version_ddl = match self.db.driver() {
+            crate::db::DatabaseDriver::Sqlite => {
+                r#"
+                CREATE TABLE IF NOT EXISTS notification_settings_projection_source_version (
+                    id INTEGER NOT NULL PRIMARY KEY CHECK (id = 1),
+                    current_version INTEGER NOT NULL
+                )
+                "#
+            }
+            crate::db::DatabaseDriver::Postgres => {
+                r#"
+                CREATE TABLE IF NOT EXISTS notification_settings_projection_source_version (
+                    id BIGINT NOT NULL PRIMARY KEY CHECK (id = 1),
+                    current_version BIGINT NOT NULL
+                )
+                "#
+            }
+        };
+        self.execute(notification_settings_projection_source_version_ddl, ())
             .await?;
         self.execute(
             r#"

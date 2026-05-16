@@ -130,11 +130,10 @@ pub(super) async fn handle_pubsub_iq(
                     None
                 };
 
-                if is_pep
-                    && node == waddle_xmpp::xep::xep0402::PEP_NODE
-                    && !is_valid_xep0402_bookmark_item(&item)
-                {
-                    return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::InvalidJid))];
+                if is_pep && node == waddle_xmpp::xep::xep0402::PEP_NODE {
+                    if let Err(error) = validate_xep0402_bookmark_publish_request(&item) {
+                        return vec![iq_to_xml(build_pubsub_error(iq, error))];
+                    }
                 }
 
                 let result = state
@@ -187,7 +186,8 @@ pub(super) async fn handle_pubsub_iq(
                     }
                     Err(e) => {
                         warn!("PubSub publish failed: {}", e);
-                        let error = build_pubsub_error(iq, PubSubError::Forbidden);
+                        let error =
+                            build_pubsub_error(iq, pubsub_publish_error_from_xmpp_error(&e));
                         return vec![iq_to_xml(error)];
                     }
                 }
@@ -384,19 +384,47 @@ fn is_user_avatar_retract(node: &str, item: &waddle_xmpp::pubsub::PubSubItem) ->
     payload.children().next().is_none()
 }
 
-fn is_valid_xep0402_bookmark_item(item: &waddle_xmpp::pubsub::PubSubItem) -> bool {
+fn validate_xep0402_bookmark_publish_request(
+    item: &waddle_xmpp::pubsub::PubSubItem,
+) -> Result<(), PubSubError> {
     let Some(item_id) = item.id.as_deref() else {
-        return false;
+        return Err(PubSubError::InvalidJid);
     };
-    let Some(payload) = item.payload.as_ref() else {
-        return false;
-    };
-    crate::notification_settings_projection::validate_xep0402_bookmark_publish(item_id, payload)
-        .is_ok()
+    if !is_valid_xep0402_bookmark_item_id(item_id) {
+        return Err(PubSubError::InvalidJid);
+    }
+    if item.payload.is_none() {
+        return Err(PubSubError::BadRequest);
+    }
+    Ok(())
 }
 
 fn is_valid_xep0402_bookmark_item_id(item_id: &str) -> bool {
     item_id
         .parse::<BareJid>()
         .is_ok_and(|jid| jid.node().is_some())
+}
+
+fn pubsub_publish_error_from_xmpp_error(error: &waddle_xmpp::XmppError) -> PubSubError {
+    match error {
+        waddle_xmpp::XmppError::Stanza {
+            condition: waddle_xmpp::StanzaErrorCondition::BadRequest,
+            ..
+        } => PubSubError::BadRequest,
+        waddle_xmpp::XmppError::Stanza {
+            condition: waddle_xmpp::StanzaErrorCondition::ItemNotFound,
+            ..
+        } => PubSubError::NodeNotFound,
+        waddle_xmpp::XmppError::Stanza {
+            condition: waddle_xmpp::StanzaErrorCondition::Forbidden,
+            ..
+        }
+        | waddle_xmpp::XmppError::PermissionDenied(_) => PubSubError::Forbidden,
+        waddle_xmpp::XmppError::Stanza {
+            condition: waddle_xmpp::StanzaErrorCondition::InternalServerError,
+            ..
+        }
+        | waddle_xmpp::XmppError::Internal(_) => PubSubError::InternalServerError,
+        _ => PubSubError::Forbidden,
+    }
 }
