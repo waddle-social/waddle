@@ -97,3 +97,39 @@ const NS_ADHOC_COMMANDS: &str = "http://jabber.org/protocol/commands";
 const NS_WADDLE_EXTENSION_1: &str = "urn:waddle:extension:1";
 const EXTENSION_ROUTE_FORM_TYPE: &str = "urn:waddle:extension:1:routes";
 const EXTENSION_ROUTE_ITEM_LIMIT: u32 = 100;
+
+// ── XEP-0392 Consistent Color Generation ─────────────────────────────
+//
+// The chat UI colors avatars/nicknames deterministically per-user. The
+// spec algorithm (XEP-0392 §5.1) is: SHA-1(UTF-8 input) → first 2
+// bytes as a big-endian u16 → hue = (value / 65536) * 360. Browsers
+// expose SHA-1 only via async SubtleCrypto, which would force every
+// chat-ui callsite onto an async render path; instead we expose the
+// Rust SHA-1 impl synchronously through wasm so the existing sync
+// `consistentColor(input)` callsite in chat-ui.ts can swap a single
+// hash function and stay sync.
+
+/// Compute the XEP-0392 consistent-color hue (0.0–360.0) for `input`.
+///
+/// Stateless free function — does not require a WaddleClient instance.
+/// JS callers receive a Number.
+#[wasm_bindgen]
+pub fn xep0392_consistent_hue(input: &str) -> f64 {
+    waddle_xmpp_core::xep0392::compute_hue(input)
+}
+
+/// Compute a CSS `hsl(...)` string for `input` using XEP-0392 with
+/// custom saturation/lightness (percentages, 0.0–100.0). The CVD
+/// correction is "none" — pass the hue back through `xep0392_consistent_hue`
+/// and `apply_cvd_correction` in a future iteration if CVD modes
+/// become a user preference.
+#[wasm_bindgen]
+pub fn xep0392_consistent_color(input: &str, saturation: f64, lightness: f64) -> String {
+    waddle_xmpp_core::xep0392::generate_color_with_params(
+        input,
+        saturation,
+        lightness,
+        waddle_xmpp_core::xep0392::CvdCorrection::None,
+    )
+    .to_css()
+}

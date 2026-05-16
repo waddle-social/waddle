@@ -171,7 +171,7 @@ pub use super::xep0377::{
     ReportStore, NS_REPORTING,
 };
 
-pub use super::xep0392::{
+pub use waddle_xmpp_core::xep0392::{
     apply_cvd_correction, compute_hue, generate_color, generate_color_with_params, ConsistentColor,
     CvdCorrection, HslColor, DEFAULT_LIGHTNESS, DEFAULT_SATURATION,
 };

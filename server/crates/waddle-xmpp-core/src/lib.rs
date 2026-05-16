@@ -14,6 +14,7 @@ pub mod stanza;
 pub mod types;
 pub mod xep0201;
 pub mod xep0359;
+pub mod xep0392;
 
 pub use carbons::{
     build_carbons_result, build_received_carbon, build_sent_carbon, is_carbons_disable,
