@@ -68,9 +68,15 @@ pub fn build_pep_identity() -> Identity {
 }
 
 /// Shared PEP feature advertisement.
+///
+/// XEP-0163 §6 mandates `http://jabber.org/protocol/pubsub#pep`
+/// on the user's bare-JID disco#info as the canonical PEP-support
+/// signal — without it, clients fall back to per-node `+notify`
+/// probing or skip PEP-driven features entirely.
 pub fn pep_features() -> Vec<Feature> {
     vec![
         Feature::pubsub(),
+        Feature::pep(),
         Feature::pubsub_access_presence(),
         Feature::pubsub_access_whitelist(),
         Feature::pubsub_auto_create(),
