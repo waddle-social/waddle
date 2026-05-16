@@ -118,6 +118,23 @@
   --chat-message-body-gap: var(--space-2xs);
   --chat-message-first-line-box: 1.40625rem;
   --chat-message-avatar-size: calc(var(--chat-message-header-height) + var(--chat-message-body-gap) + var(--chat-message-first-line-box));
+  /* Vertical breathing room around every message row. Applied as
+   * symmetric block-padding on .chat-message-grid, so the visible gap
+   * between two non-grouped rows is twice this value. Default of
+   * --space-sm (0.75rem) yields a 1.5rem gap between independent
+   * messages — comfortable, chat-app pace, not Slack-density.
+   *
+   * The chat-message-grouped class for same-author bursts pulls its
+   * row up by --chat-message-burst-overlap so consecutive lines from
+   * one voice stay visually attached without sacrificing the breathing
+   * room between independent voices. */
+  --chat-message-row-pad: var(--space-sm);
+  --chat-message-burst-overlap: 1.1rem;
+  /* Thread-chip lift: the chip is the last child of the body stack and
+   * carries its own avatar row + recency suffix, so it needs more air
+   * above it than the 0.25rem --chat-message-body-gap supplies between
+   * plain inline children. */
+  --chat-thread-chip-gap: var(--space-2xs);
   --chat-attachment-image-width: min(100%, 20rem);
   --chat-attachment-card-width: min(100%, 28rem);
   --chat-composer-block: var(--space-sm);
