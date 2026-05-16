@@ -166,11 +166,6 @@ pub use super::xep0377::{
     ReportStore, NS_REPORTING,
 };
 
-pub use super::xep0393::{
-    blocks_to_html, blocks_to_plain, parse_blocks, parse_spans, spans_to_html, spans_to_plain,
-    Block, Span, StyledBody,
-};
-
 pub use waddle_xmpp_core::xep0359::{
     add_origin_id, add_stanza_id as add_stanza_id_xep0359, build_origin_id_element,
     build_stanza_id_element, extract_origin_id as extract_origin_id_xep0359, extract_origin_id_str,
