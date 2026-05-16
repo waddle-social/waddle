@@ -26,9 +26,9 @@ pub use super::xep0050::{
 };
 
 pub use super::xep0054::{
-    build_empty_vcard_response, build_vcard_element, build_vcard_error, build_vcard_response,
-    build_vcard_success, is_vcard_get, is_vcard_query, is_vcard_set, parse_vcard_element,
-    parse_vcard_from_iq, VCard, VCardError, VCardPhoto, NS_VCARD,
+    build_empty_vcard_response, build_vcard_element, build_vcard_response, build_vcard_success,
+    is_vcard_get, is_vcard_set, parse_vcard_element, parse_vcard_from_iq, VCard, VCardError,
+    VCardPhoto, NS_VCARD,
 };
 
 pub use super::xep0077::{
