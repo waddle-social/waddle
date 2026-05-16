@@ -11,6 +11,7 @@ import { useServiceWorkerUpdate } from "@/shell/service-worker-update";
 import { usePushNotifications } from "@/shell/notifications";
 import { useChannelInbox } from "@/channels/inbox";
 import { useSocialFeed } from "@/services/social-feed";
+import { useStories } from "@/services/stories";
 import { useChatReadActivity } from "@/shell/read-activity";
 import { useDeploymentVersionInfo } from "@/shell/version";
 import { useXmppRosterContacts } from "@/contacts/roster";
@@ -89,6 +90,7 @@ export function useChatAppController(giphyApiKey: string) {
     return domain ? `spaces.${domain}` : null;
   });
   const socialFeed = useSocialFeed(xmppClient, { spacesJid });
+  const stories = useStories(xmppClient, { spacesJid });
 
   const dmMessaging = useDirectMessages(
     session,
@@ -696,6 +698,7 @@ export function useChatAppController(giphyApiKey: string) {
       void dmConversations.hydrateFromInbox();
       void channelUnread.hydrateFromInbox();
       void socialFeed.refresh();
+      void stories.refresh();
     });
   }, { immediate: true });
 
@@ -1411,6 +1414,7 @@ export function useChatAppController(giphyApiKey: string) {
     void channelUnread.hydrateFromInbox();
     void rosterContacts.loadRosterContacts();
     void socialFeed.refresh();
+    void stories.refresh();
 
     // Register service worker and sync push subscription (best-effort, non-blocking)
     void (async () => {
@@ -1642,6 +1646,7 @@ export function useChatAppController(giphyApiKey: string) {
       channelUnread,
       rosterContacts,
       socialFeed,
+      stories,
       dmMessaging,
       xmppClient,
       activeMessages,

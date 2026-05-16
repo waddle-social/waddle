@@ -6,7 +6,9 @@ import type { RosterContact } from "@/lib/xmpp/types";
 import AppAvatar from "@/components/ui/AppAvatar.vue";
 import CommunityFeed from "@/components/chat/CommunityFeed.vue";
 import Skeleton from "@/components/ui/Skeleton.vue";
-import type { FeedPostInput } from "@/lib/xmpp-client";
+import StoriesBar from "@/components/chat/StoriesBar.vue";
+import StoryViewer from "@/components/chat/StoryViewer.vue";
+import type { FeedPostInput, Story, StoryPostInput } from "@/lib/xmpp-client";
 import { isForumChannel } from "@/lib/channel-types";
 import { groupChannelsBySpace } from "@/lib/channel-grouping";
 import { formatTimelineStamp } from "@/channels/timeline";
@@ -33,7 +35,10 @@ const emit = defineEmits<{
   openNav: [];
   refreshFeed: [];
   postFeed: [input: FeedPostInput];
+  postStory: [input: StoryPostInput];
 }>();
+
+const activeStory = ref<Story | null>(null);
 
 const now = ref<Date>(new Date());
 let heroClockHandle: ReturnType<typeof setInterval> | null = null;
@@ -330,6 +335,18 @@ function onHeroCta() {
         </button>
       </section>
 
+      <StoriesBar
+        v-if="stories"
+        :stories="stories.stories"
+        :is-loading="stories.isLoading"
+        :is-posting="stories.isPosting"
+        :error="stories.error"
+        :can-post="stories.canPost"
+        :self-jid="stories.selfJid"
+        @post="(input) => emit('postStory', input)"
+        @view="(story) => (activeStory = story)"
+      />
+
       <CommunityFeed
         v-if="feed"
         :entries="feed.entries"
@@ -340,6 +357,12 @@ function onHeroCta() {
         :self-jid="feed.selfJid"
         @refresh="emit('refreshFeed')"
         @post="(input) => emit('postFeed', input)"
+      />
+
+      <StoryViewer
+        v-if="activeStory"
+        :story="activeStory"
+        @close="activeStory = null"
       />
 
       <section class="grid gap-3">

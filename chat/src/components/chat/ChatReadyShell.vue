@@ -32,6 +32,7 @@ const {
   channelUnread,
   rosterContacts,
   socialFeed,
+  stories,
   xmppClient,
   activeMessages,
   activeFirstUnseenId,
@@ -133,6 +134,14 @@ const homeDashboardProps = computed(() => buildHomeDashboardProps({
     // owners actually have Publisher affiliation, so non-owner posts
     // surface as a stanza error → composer shows the error inline.
     // Per-deployment role-based posting controls is a follow-up.
+    canPost: !!connectionStore.session,
+    selfJid: connectionStore.session?.jid ?? null,
+  },
+  stories: {
+    stories: stories.activeStories.value,
+    isLoading: stories.isLoading.value,
+    isPosting: stories.isPosting.value,
+    error: stories.error.value,
     canPost: !!connectionStore.session,
     selfJid: connectionStore.session?.jid ?? null,
   },
@@ -239,6 +248,7 @@ function setPinnedPanelOpen(isOpen: boolean) {
         @open-nav="ui.showMobileNav.value = true"
         @refresh-feed="socialFeed.refresh()"
         @post-feed="(input) => socialFeed.post(input)"
+        @post-story="(input) => stories.post(input)"
       />
       <UserSettingsPage
         v-else-if="ui.activePage.value === 'settings' && connectionStore.session"

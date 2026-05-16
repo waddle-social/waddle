@@ -63,6 +63,12 @@ import {
   type FeedPostInput,
   type WasmFeedEntry,
 } from "./feed-types";
+import {
+  storyFromWasm,
+  type Story,
+  type StoryPostInput,
+  type WasmStory,
+} from "./story-types";
 import type { FetchInboxOptions, InboxEntry, InboxResult } from "./inbox-types";
 import type { ActivityPublication, MoodPublication, TunePublication, UserPepProfile } from "./pep-types";
 import {
@@ -904,6 +910,37 @@ export class BrowserXmppClient {
       throw new Error("feed_publish returned no entry");
     }
     return feedEntryFromWasm(result);
+  }
+
+  /**
+   * Fetch the latest XEP-0501 community stories. The wasm bridge
+   * returns ALL items including expired ones; the chat filters
+   * active vs expired locally so countdowns fade stories out without
+   * a server roundtrip.
+   */
+  async fetchStories(spacesJid: string, maxItems: number | undefined = undefined): Promise<Story[]> {
+    const xmpp = await this.requireConnectedXmpp();
+    const result = await xmpp.stories_items?.(spacesJid, maxItems ?? null) as WasmStory[] | undefined;
+    return (result ?? []).map(storyFromWasm);
+  }
+
+  /**
+   * Publish a XEP-0501 story to the community stories node. At
+   * least one of `body` or `mediaUrl` must be set; the server
+   * rejects empty stories.
+   */
+  async publishStory(spacesJid: string, input: StoryPostInput): Promise<Story> {
+    const xmpp = await this.requireConnectedXmpp();
+    const result = await xmpp.stories_publish?.(spacesJid, {
+      ...(input.body ? { body: input.body } : {}),
+      ...(input.mediaUrl ? { media_url: input.mediaUrl } : {}),
+      ...(input.author ? { author: input.author } : {}),
+      ...(typeof input.expiryHours === "number" ? { expiry_hours: input.expiryHours } : {}),
+    }) as WasmStory | undefined;
+    if (!result) {
+      throw new Error("stories_publish returned no story");
+    }
+    return storyFromWasm(result);
   }
   async publishMood(mood: MoodPublication): Promise<void> { const xmpp = await this.requireConnectedXmpp(); await xmpp.publish_mood?.({ kind: mood.kind, ...(mood.text ? { text: mood.text } : {}) }); }
   async retractMood(): Promise<void> { const xmpp = await this.requireConnectedXmpp(); await xmpp.retract_mood?.(); }

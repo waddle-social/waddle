@@ -98,6 +98,21 @@ export class WaddleClient {
     set_on_presence(cb: Function): void;
     set_on_session_lifecycle(cb: Function): void;
     set_room_affiliation(room_jid: string, jid: string, affiliation: string): Promise<any>;
+    /**
+     * Fetch the latest items from the community stories node on
+     * `spaces_jid`. Returns ALL items including expired ones —
+     * the chat client filters active vs expired locally so it can
+     * fade out a story right as the countdown hits zero without a
+     * server round-trip.
+     */
+    stories_items(spaces_jid: string, max_items?: number | null): Promise<any>;
+    /**
+     * Publish a new story to the community stories node. Body
+     * and/or media URL must be provided; the server stamps the
+     * publisher's JID separately. `expiry_hours` defaults to 24
+     * (matches XEP-0501 §"Default expiry").
+     */
+    stories_publish(spaces_jid: string, input: any): Promise<any>;
     subscribe_to_presence(peer_jid: string): Promise<any>;
     /**
      * Publish an unpin request (#414). Same authorization rules as
