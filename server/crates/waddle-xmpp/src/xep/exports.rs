@@ -171,11 +171,6 @@ pub use super::xep0377::{
     ReportStore, NS_REPORTING,
 };
 
-pub use super::xep0392::{
-    apply_cvd_correction, compute_hue, generate_color, generate_color_with_params, ConsistentColor,
-    CvdCorrection, HslColor, DEFAULT_LIGHTNESS, DEFAULT_SATURATION,
-};
-
 pub use super::xep0393::{
     blocks_to_html, blocks_to_plain, parse_blocks, parse_spans, spans_to_html, spans_to_plain,
     Block, Span, StyledBody,
