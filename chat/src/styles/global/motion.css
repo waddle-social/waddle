@@ -114,6 +114,46 @@
   animation: slide-up 0.3s cubic-bezier(0.16, 1, 0.3, 1) both;
 }
 
+/* AppDrawer transition — the component wraps its content in
+ * <Transition name="drawer"> but no CSS existed for `.drawer-*`
+ * classes, so the drawer popped in/out instantly. Fade the
+ * outer container (backdrop + panel) for the open/close motion,
+ * and slide the inner panel by a few pixels so the drawer
+ * arrives with directionality. The panel is targeted via its
+ * dialog role since the same Transition wraps both backdrop
+ * and panel. */
+.drawer-enter-active,
+.drawer-leave-active {
+  transition: opacity 0.22s ease;
+}
+
+.drawer-enter-from,
+.drawer-leave-to {
+  opacity: 0;
+}
+
+.drawer-enter-active [role="dialog"],
+.drawer-leave-active [role="dialog"] {
+  transition: transform 0.28s cubic-bezier(0.2, 1, 0.3, 1);
+  will-change: transform;
+}
+
+.drawer-enter-from [role="dialog"],
+.drawer-leave-to [role="dialog"] {
+  transform: translateY(0.5rem);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .drawer-enter-active [role="dialog"],
+  .drawer-leave-active [role="dialog"] {
+    transition: none;
+  }
+  .drawer-enter-from [role="dialog"],
+  .drawer-leave-to [role="dialog"] {
+    transform: none;
+  }
+}
+
 /* Glow ring for focus states */
 @keyframes focus-glow {
   0%, 100% { box-shadow: 0 0 0 2px var(--glow), 0 0 12px 0 var(--glow); }
