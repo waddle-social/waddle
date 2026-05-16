@@ -85,7 +85,9 @@ fn build_feed_publish_iq(spaces_jid: &str, item_id: &str, entry: &FeedEntry) -> 
         .attr("node", PUBSUB_NODE_FEED)
         .append(item)
         .build();
-    let pubsub = Element::builder("pubsub", NS_PUBSUB).append(publish).build();
+    let pubsub = Element::builder("pubsub", NS_PUBSUB)
+        .append(publish)
+        .build();
     Element::builder("iq", NS_CLIENT)
         .attr("type", "set")
         .attr("id", id)
