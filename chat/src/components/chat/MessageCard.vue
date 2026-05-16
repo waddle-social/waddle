@@ -907,20 +907,23 @@ onBeforeUnmount(() => {
     <!-- Reply preview chip. Clicking scrolls to the parent message; if the
          preview is available we also expand it inline so users still see the
          full quoted text even when the parent has scrolled off-screen or
-         hasn't loaded from history yet. -->
+         hasn't loaded from history yet.
+         Visual language matches iter-42's composer reply chip: a 3 px
+         primary-tinted left rail + italic preview text so "you are
+         replying" and "this is a reply" speak one dialect. -->
     <div v-if="message.replyTo && !hideReplyChip" class="chat-message-fill">
       <button
         type="button"
-        class="type-caption flex min-h-7 max-w-full items-center gap-1.5 rounded-lg bg-muted/35 px-2 text-left text-muted-foreground transition-colors hover:bg-muted/60 hover:text-foreground"
+        class="type-caption flex min-h-7 max-w-full items-center gap-1.5 rounded-lg border-l-[3px] border-l-primary/55 bg-muted/35 px-2 text-left text-muted-foreground transition-colors hover:bg-muted/60 hover:text-foreground"
         :aria-expanded="replyChipExpanded"
         :title="message.replyTo.preview ? 'Show full quoted message and jump to it' : 'Jump to replied message'"
         @click="onReplyChipClick"
       >
-        <CornerDownRight class="w-3 h-3 flex-shrink-0" />
+        <CornerDownRight class="w-3 h-3 flex-shrink-0 text-primary/70" />
         <span class="type-emphasis text-primary/80">@{{ replyAuthorName }}</span>
         <span
           v-if="message.replyTo.preview"
-          :class="['flex-1 min-w-0 opacity-70', replyChipExpanded ? 'whitespace-pre-wrap break-words' : 'truncate']"
+          :class="['flex-1 min-w-0 italic opacity-75', replyChipExpanded ? 'whitespace-pre-wrap break-words' : 'truncate']"
         >{{ message.replyTo.preview }}</span>
         <span v-else class="type-mono opacity-60">{{ message.replyTo.id.slice(0, 8) }}</span>
       </button>
