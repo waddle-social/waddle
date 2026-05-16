@@ -65,8 +65,11 @@ scenario: #Scenario & {
 			target: adminPhone
 			contains: [
 				"status code=\"110\"",
-				"urn:xmpp:hats:0",
-				"urn:xmpp:hats:owner",
+				// XEP-0045 affiliation/role carry authority. XEP-0317
+				// hats are descriptive metadata only and MUST NOT be
+				// synthesised from owner/admin/moderator.
+				"affiliation=\"owner\"",
+				"role=\"moderator\"",
 			]
 		},
 		#SendPresence & {
