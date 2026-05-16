@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, ref, watch, type CSSProperties } from "vue";
-import { Search, X } from "lucide-vue-next";
+import { Search, SearchX, X } from "lucide-vue-next";
 import { searchEmoji } from "@/lib/emoji";
 
 const props = withDefaults(
@@ -237,7 +237,14 @@ onBeforeUnmount(detachWindowListeners);
           </div>
         </template>
         <template v-else-if="query.trim().length >= 2">
-          <div class="type-caption flex h-24 items-center justify-center rounded-lg text-muted-foreground">No emoji found</div>
+          <!-- Empty search state — SearchX glyph stacked above the
+               caption matches the iter-47 channel-search empty state
+               so every "your query had no hits" surface in the app
+               speaks one visual language. -->
+          <div class="flex h-24 flex-col items-center justify-center gap-1.5 rounded-lg text-center">
+            <SearchX class="h-5 w-5 text-muted-foreground/60" aria-hidden="true" />
+            <span class="type-caption text-muted-foreground">No emoji found</span>
+          </div>
         </template>
         <template v-else>
           <template v-if="recents.length > 0">
