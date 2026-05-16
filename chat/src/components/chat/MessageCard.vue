@@ -832,11 +832,13 @@ onBeforeUnmount(() => {
       <AppAvatar :name="message.author" :src="avatarUrl" :presence="presence" :last-seen="lastSeen" size="message" />
     </button>
     <!-- Thread rail glyph — a small "messages-stack" icon centred in the
-         avatar column, under the author avatar. Structural marker that
-         this row anchors a thread; the rich summary (who replied, how
-         many, how recently) lives in the in-body chip. Position-absolute
-         relative to the row's grid; bottom-anchored to align with the
-         chip which is the last body child. -->
+         avatar column, vertically aligned with the in-body chip's
+         avatar row. Structural marker that this row anchors a thread;
+         the rich summary (who replied, how many, how recently) lives
+         in the in-body chip. Position-absolute relative to the row's
+         grid; bottom-anchored so its centre line matches the chip
+         avatars' centre line — see .chat-thread-rail-glyph in
+         messages.css for the offset derivation. -->
     <div
       v-if="showThreadChip"
       class="chat-thread-rail-glyph"

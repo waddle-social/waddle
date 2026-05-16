@@ -406,21 +406,27 @@
 }
 
 /* Thread rail glyph — a single "stacked messages" icon centred in the
- * avatar column right under the main author avatar. Structural rail
- * marker that this row anchors a thread; the rich summary (who
- * replied + how many + how recently) lives in the in-body chip.
+ * avatar column, vertically aligned with the chip's avatar row in the
+ * body. Structural rail marker that this row anchors a thread; the
+ * rich summary (who replied + how many + how recently) lives in the
+ * in-body chip.
  *
- * Anchored RIGHT BELOW the avatar (top = avatar-size + gap) rather
- * than at the row bottom, so the relationship "avatar → thread
- * marker → chip" reads as a tight vertical column regardless of
- * message body length. Bottom-anchoring (the previous treatment)
- * left long messages with a big visual gap between the avatar and
- * the icon. */
+ * The chip is the last child of the body stack, so its avatars sit at
+ * a predictable y-offset from the row's bottom edge:
+ *   row pad-bottom (var(--space-xs)) + chip pad-bottom (0.125rem)
+ *     + half chip avatar (0.5625rem of 1.125rem) − half icon (0.5rem)
+ *   = var(--space-xs) + 0.1875rem
+ *
+ * Anchoring the icon by that distance from the bottom makes the
+ * icon's vertical centre line up exactly with the chip avatars'
+ * centre line, so "thread marker (gutter) ↔ thread participants
+ * (body)" reads as one horizontal row instead of a drifting pair. */
 .chat-thread-rail-glyph {
   position: absolute;
-  top: calc(var(--space-xs) + var(--chat-message-avatar-size) + 0.4rem);
+  bottom: calc(var(--space-xs) + 0.1875rem);
   left: 0;
   width: var(--chat-message-avatar-size);
+  height: 1rem;
   display: flex;
   justify-content: center;
   align-items: center;
