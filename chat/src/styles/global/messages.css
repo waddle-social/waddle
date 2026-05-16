@@ -406,28 +406,32 @@
 }
 
 /* Thread rail glyph — a single "stacked messages" icon centred in the
- * avatar column under the main author avatar. Structural rail marker
- * that this row anchors a thread; the rich summary (who replied + how
- * many + how recently) lives in the in-body chip. Absolute-positioned
- * relative to the row's grid (the message-card grid is already
- * `position: relative`), bottom-anchored to align with the chip which
- * is the last body child. */
+ * avatar column right under the main author avatar. Structural rail
+ * marker that this row anchors a thread; the rich summary (who
+ * replied + how many + how recently) lives in the in-body chip.
+ *
+ * Anchored RIGHT BELOW the avatar (top = avatar-size + gap) rather
+ * than at the row bottom, so the relationship "avatar → thread
+ * marker → chip" reads as a tight vertical column regardless of
+ * message body length. Bottom-anchoring (the previous treatment)
+ * left long messages with a big visual gap between the avatar and
+ * the icon. */
 .chat-thread-rail-glyph {
   position: absolute;
-  bottom: 0.4rem;
+  top: calc(var(--space-xs) + var(--chat-message-avatar-size) + 0.4rem);
   left: 0;
   width: var(--chat-message-avatar-size);
-  display: inline-flex;
+  display: flex;
   justify-content: center;
   align-items: center;
   pointer-events: none;
   color: color-mix(in oklab, var(--primary) 55%, var(--muted-foreground));
-  opacity: 0.7;
+  opacity: 0.75;
 }
 
 .chat-thread-rail-glyph__icon {
-  width: 0.95rem;
-  height: 0.95rem;
+  width: 1rem;
+  height: 1rem;
 }
 
 /* Participant stack lives inside the thread chip body, ahead of the

@@ -413,14 +413,14 @@ const threadParticipants = computed<ThreadParticipant[]>(() => {
   if (!entry) return [];
   const seen = new Set<string>();
   const ordered: ThreadParticipant[] = [];
-  const me = props.currentUser;
-  // Walk newest → oldest to bias the visible avatars toward recent
-  // participants.
+  // Include every participant — the thread author themselves and the
+  // current user — so the avatar stack is consistent regardless of
+  // who replies. Walk newest → oldest to bias the visible avatars
+  // toward recent participants.
   const children = entry.directChildren;
   for (let i = children.length - 1; i >= 0; i--) {
     const c = children[i];
     if (!c) continue;
-    if (me && c.author === me) continue;
     if (seen.has(c.author)) continue;
     seen.add(c.author);
     ordered.push({
@@ -430,7 +430,7 @@ const threadParticipants = computed<ThreadParticipant[]>(() => {
     });
   }
   const root = entry.root;
-  if (root && !seen.has(root.author) && (!me || root.author !== me)) {
+  if (root && !seen.has(root.author)) {
     ordered.push({
       nick: root.author,
       avatarUrl: props.avatarUrlByAuthor[root.author] ?? null,
