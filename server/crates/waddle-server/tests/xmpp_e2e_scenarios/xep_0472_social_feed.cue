@@ -14,14 +14,14 @@ scenario: #Scenario & {
 	let adminPhone = users.admin.devices.phone
 
 	steps: [
-		// 1. disco#info on the spaces service MUST advertise the
+		// 1. disco#info on the community service MUST advertise the
 		//    XEP-0472 social feed namespace so clients can discover
 		//    support before subscribing or publishing.
 		#SendIq & {
 			actor: adminPhone
 			type:  "get"
 			id:    "cue-feed-disco"
-			to:    "spaces.\(scenario.domain)"
+			to:    "community.\(scenario.domain)"
 			payload: #XmlElement & {
 				name: "query"
 				ns:   "http://jabber.org/protocol/disco#info"
@@ -43,7 +43,7 @@ scenario: #Scenario & {
 			actor: adminPhone
 			type:  "set"
 			id:    "cue-feed-publish"
-			to:    "spaces.\(scenario.domain)"
+			to:    "community.\(scenario.domain)"
 			payload: #XmlElement & {
 				name: "pubsub"
 				ns:   "http://jabber.org/protocol/pubsub"
@@ -97,7 +97,7 @@ scenario: #Scenario & {
 			actor: adminPhone
 			type:  "get"
 			id:    "cue-feed-items"
-			to:    "spaces.\(scenario.domain)"
+			to:    "community.\(scenario.domain)"
 			payload: #XmlElement & {
 				name: "pubsub"
 				ns:   "http://jabber.org/protocol/pubsub"

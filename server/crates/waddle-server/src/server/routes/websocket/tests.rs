@@ -117,6 +117,7 @@ async fn create_test_websocket_state_with_extension_manager(
                     spaces: "spaces.example.com".to_string(),
                     upload: "upload.example.com".to_string(),
                     extensions: "extensions.example.com".to_string(),
+                    community: "community.example.com".to_string(),
                 },
                 protocol: ProtocolServices {
                     connection_registry: Arc::new(ConnectionRegistry::new()),

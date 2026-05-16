@@ -284,17 +284,6 @@ pub(super) async fn handle_spaces_publish(
     item: PubSubItem,
     session: Option<&Session>,
 ) -> Vec<String> {
-    // XEP-0472 community feed lives on the spaces service alongside
-    // the space-bookmark nodes but its items are <entry/> payloads,
-    // not channel bookmarks. Route through the feed-specific path so
-    // we don't try to parse entries as bookmarks.
-    if node == waddle_xmpp_core::xep0472::PUBSUB_NODE_FEED
-        || node == waddle_xmpp_core::xep0501::PUBSUB_NODE_STORIES
-    {
-        return handle_spaces_non_bookmark_publish(iq, state, spaces_domain, node, item, session)
-            .await;
-    }
-
     match spaces_node_mutation_allowed(state, session, node).await {
         Ok(true) => {}
         Ok(false) => return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::Forbidden))],
@@ -482,19 +471,135 @@ pub(super) async fn handle_spaces_publish(
     }
 }
 
-/// Publish to a spaces-hosted pubsub node that does NOT carry XEP-0402
-/// channel bookmarks. Used by the XEP-0472 social feed
-/// (`urn:xmpp:pubsub-social-feed:0`) and XEP-0501 stories
-/// (`urn:xmpp:stories:0`) — both live on the spaces service alongside
-/// the channel-bookmark nodes but carry typed payloads of their own
-/// (`<entry/>`, `<story/>`), so the space-bookmark validation and
-/// channel-parent-tuple wiring are skipped. Same auth gate as
-/// space-node mutations (server owners or space owners) and the
-/// standard pubsub fan-out so subscribers see new posts in real time.
-async fn handle_spaces_non_bookmark_publish(
+/// Publish to a community pubsub node — XEP-0472 social feed at
+/// `urn:xmpp:pubsub-social-feed:0` or XEP-0501 stories at
+/// `urn:xmpp:stories:0`. Both live on `community.<domain>` (distinct
+/// from the spaces service so the spaces enumeration only returns
+/// real spaces). Same publish gate as spaces (server owners or
+/// space owners) and the standard pubsub fan-out so subscribers see
+/// new posts in real time.
+pub(super) async fn handle_community_publish(
     iq: &xmpp_parsers::iq::Iq,
     state: &WebSocketState,
-    spaces_domain: &str,
+    community_domain: &str,
+    node: &str,
+    item: PubSubItem,
+    session: Option<&Session>,
+) -> Vec<String> {
+    if node != waddle_xmpp_core::xep0472::PUBSUB_NODE_FEED
+        && node != waddle_xmpp_core::xep0501::PUBSUB_NODE_STORIES
+        && node != waddle_xmpp_core::xep0471::PUBSUB_NODE_EVENTS
+    {
+        return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::NodeNotFound))];
+    }
+    handle_community_non_bookmark_publish(iq, state, community_domain, node, item, session).await
+}
+
+pub(super) async fn handle_community_items(
+    iq: &xmpp_parsers::iq::Iq,
+    state: &WebSocketState,
+    community_domain: &str,
+    node: &str,
+    max_items: Option<u32>,
+    item_ids: &[String],
+) -> Vec<String> {
+    if node != waddle_xmpp_core::xep0472::PUBSUB_NODE_FEED
+        && node != waddle_xmpp_core::xep0501::PUBSUB_NODE_STORIES
+        && node != waddle_xmpp_core::xep0471::PUBSUB_NODE_EVENTS
+    {
+        return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::NodeNotFound))];
+    }
+    let Ok(community_jid) = community_domain.parse::<BareJid>() else {
+        return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::InvalidJid))];
+    };
+    match state
+        .deps
+        .protocol
+        .pubsub_storage
+        .get_node(&community_jid, node)
+        .await
+    {
+        Ok(Some(_)) => {}
+        Ok(None) => return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::NodeNotFound))],
+        Err(error) => {
+            warn!(node, error = %error, "Failed to retrieve community node");
+            return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::NodeNotFound))];
+        }
+    }
+    match state
+        .deps
+        .protocol
+        .pubsub_storage
+        .get_items(&community_jid, node, max_items, item_ids)
+        .await
+    {
+        Ok(stored_items) => {
+            let items: Vec<_> = stored_items
+                .iter()
+                .map(|item| item.to_pubsub_item())
+                .collect();
+            vec![iq_to_xml(build_pubsub_items_result(iq, node, &items))]
+        }
+        Err(error) => {
+            warn!(node, error = %error, "Failed to retrieve community items");
+            vec![iq_to_xml(build_pubsub_error(iq, PubSubError::NodeNotFound))]
+        }
+    }
+}
+
+pub(super) async fn handle_community_retract(
+    iq: &xmpp_parsers::iq::Iq,
+    state: &WebSocketState,
+    community_domain: &str,
+    node: &str,
+    item_id: &str,
+    session: Option<&Session>,
+) -> Vec<String> {
+    if node != waddle_xmpp_core::xep0472::PUBSUB_NODE_FEED
+        && node != waddle_xmpp_core::xep0501::PUBSUB_NODE_STORIES
+        && node != waddle_xmpp_core::xep0471::PUBSUB_NODE_EVENTS
+    {
+        return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::NodeNotFound))];
+    }
+    match spaces_node_mutation_allowed(state, session, node).await {
+        Ok(true) => {}
+        Ok(false) => return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::Forbidden))],
+        Err(error) => {
+            warn!(node, error = %error, "Failed to authorize community retract");
+            return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::Forbidden))];
+        }
+    }
+    let Ok(community_jid) = community_domain.parse::<BareJid>() else {
+        return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::InvalidJid))];
+    };
+    match state
+        .deps
+        .protocol
+        .pubsub_storage
+        .retract_item(&community_jid, node, item_id)
+        .await
+    {
+        Ok(true) => vec![iq_to_xml(build_pubsub_success(iq))],
+        Ok(false) => vec![iq_to_xml(build_pubsub_error(iq, PubSubError::ItemNotFound))],
+        Err(error) => {
+            warn!(node, item_id, error = %error, "Failed to retract community item");
+            vec![iq_to_xml(build_pubsub_error(
+                iq,
+                PubSubError::InternalServerError,
+            ))]
+        }
+    }
+}
+
+/// Publish a non-bookmark item to a spaces-or-community pubsub node.
+/// Used by `handle_community_publish` (feed + stories on
+/// `community.<domain>`). Same auth gate as space-node mutations
+/// (server owners or space owners) and the standard pubsub fan-out
+/// so subscribers see new posts in real time.
+async fn handle_community_non_bookmark_publish(
+    iq: &xmpp_parsers::iq::Iq,
+    state: &WebSocketState,
+    community_domain: &str,
     node: &str,
     item: PubSubItem,
     session: Option<&Session>,
@@ -503,24 +608,24 @@ async fn handle_spaces_non_bookmark_publish(
         Ok(true) => {}
         Ok(false) => return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::Forbidden))],
         Err(error) => {
-            warn!(node, error = %error, "Failed to authorize spaces non-bookmark publish");
+            warn!(node, error = %error, "Failed to authorize community publish");
             return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::Forbidden))];
         }
     }
-    let Ok(spaces_jid) = spaces_service_bare_jid(spaces_domain) else {
+    let Ok(community_jid) = community_domain.parse::<BareJid>() else {
         return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::InvalidJid))];
     };
     match state
         .deps
         .protocol
         .pubsub_storage
-        .get_node(&spaces_jid, node)
+        .get_node(&community_jid, node)
         .await
     {
         Ok(Some(_)) => {}
         Ok(None) => return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::NodeNotFound))],
         Err(error) => {
-            warn!(node, error = %error, "Failed to resolve spaces non-bookmark node for publish");
+            warn!(node, error = %error, "Failed to resolve community node for publish");
             return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::NodeNotFound))];
         }
     }
@@ -529,14 +634,14 @@ async fn handle_spaces_non_bookmark_publish(
         .deps
         .protocol
         .pubsub_storage
-        .publish_item(&spaces_jid, node, &item, None, false)
+        .publish_item(&community_jid, node, &item, None, false)
         .await
     {
         Ok(result) => {
             pubsub_fanout::fan_out_publish(
                 state,
                 pubsub_fanout::FanOutRequest {
-                    owner: &spaces_jid,
+                    owner: &community_jid,
                     node,
                     published_item: &item,
                     item_id: &result.item_id,
@@ -553,7 +658,7 @@ async fn handle_spaces_non_bookmark_publish(
             ))]
         }
         Err(error) => {
-            warn!(node, error = %error, "Failed to publish spaces non-bookmark item");
+            warn!(node, error = %error, "Failed to publish community item");
             vec![iq_to_xml(build_pubsub_error(
                 iq,
                 PubSubError::InternalServerError,

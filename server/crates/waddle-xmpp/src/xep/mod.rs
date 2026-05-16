@@ -179,7 +179,6 @@ pub mod xep0452;
 pub mod xep0461;
 pub mod xep0469;
 pub mod xep0470;
-pub mod xep0471;
 pub mod xep0486;
 pub mod xep0488;
 pub mod xep0492;

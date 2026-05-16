@@ -12,7 +12,7 @@ use ws_common::{TestServer, WsXmppClient};
 
 const DOMAIN: &str = "localhost";
 const USERNAME: &str = "admin";
-const SPACES_JID: &str = "spaces.localhost";
+const COMMUNITY_JID: &str = "community.localhost";
 const FEED_NODE: &str = "urn:xmpp:pubsub-social-feed:0";
 const NS_SOCIAL_FEED: &str = "urn:xmpp:pubsub-social-feed:0";
 
@@ -30,13 +30,13 @@ async fn setup() -> (TestServer, WsXmppClient) {
 }
 
 #[tokio::test]
-async fn spaces_disco_info_advertises_social_feed_namespace() {
+async fn community_disco_info_advertises_social_feed_namespace() {
     let _guard = TEST_SERIAL.lock().await;
     let (_server, mut client) = setup().await;
 
     client
         .send(&format!(
-            r#"<iq type="get" id="disco-feed" to="{SPACES_JID}"><query xmlns="http://jabber.org/protocol/disco#info"/></iq>"#
+            r#"<iq type="get" id="disco-feed" to="{COMMUNITY_JID}"><query xmlns="http://jabber.org/protocol/disco#info"/></iq>"#
         ))
         .await
         .expect("send disco#info");
@@ -66,7 +66,7 @@ async fn social_feed_publish_and_items_round_trip() {
     let post_id = format!("post-{}", uuid::Uuid::new_v4());
     client
         .send(&format!(
-            r#"<iq type="set" id="feed-publish" to="{SPACES_JID}">
+            r#"<iq type="set" id="feed-publish" to="{COMMUNITY_JID}">
               <pubsub xmlns="http://jabber.org/protocol/pubsub">
                 <publish node="{FEED_NODE}">
                   <item id="{post_id}">
@@ -96,7 +96,7 @@ async fn social_feed_publish_and_items_round_trip() {
     // typed `<entry/>` payload intact.
     client
         .send(&format!(
-            r#"<iq type="get" id="feed-items" to="{SPACES_JID}">
+            r#"<iq type="get" id="feed-items" to="{COMMUNITY_JID}">
               <pubsub xmlns="http://jabber.org/protocol/pubsub">
                 <items node="{FEED_NODE}"/>
               </pubsub>

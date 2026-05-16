@@ -12,6 +12,7 @@ pub(super) async fn handle_pubsub_iq(
     let id = ctx.id;
     let muc_domain = ctx.muc_domain;
     let spaces_domain = ctx.spaces_domain;
+    let community_domain = ctx.community_domain;
     let extensions_domain = ctx.extensions_domain;
     let response_from = ctx.response_from;
     let response_to = ctx.response_to;
@@ -60,6 +61,17 @@ pub(super) async fn handle_pubsub_iq(
                         state,
                         muc_domain,
                         spaces_domain,
+                        &node,
+                        item,
+                        authenticated_session.as_ref(),
+                    )
+                    .await;
+                }
+                if target_jid.to_string() == community_domain {
+                    return handle_community_publish(
+                        iq,
+                        state,
+                        community_domain,
                         &node,
                         item,
                         authenticated_session.as_ref(),
@@ -210,6 +222,18 @@ pub(super) async fn handle_pubsub_iq(
                     .await;
                 }
 
+                if target_jid.to_string() == community_domain {
+                    return handle_community_items(
+                        iq,
+                        state,
+                        community_domain,
+                        &node,
+                        max_items,
+                        &item_ids,
+                    )
+                    .await;
+                }
+
                 if target_jid.to_string() == extensions_domain {
                     let request = PubSubItemsRead {
                         target_jid: &target_jid,
@@ -305,6 +329,18 @@ pub(super) async fn handle_pubsub_iq(
                         state,
                         muc_domain,
                         spaces_domain,
+                        &node,
+                        &item_id,
+                        authenticated_session.as_ref(),
+                    )
+                    .await;
+                }
+
+                if target_jid.to_string() == community_domain {
+                    return handle_community_retract(
+                        iq,
+                        state,
+                        community_domain,
                         &node,
                         &item_id,
                         authenticated_session.as_ref(),

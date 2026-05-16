@@ -12,6 +12,7 @@ pub(super) async fn handle_disco_items_iq(
     let muc_domain = ctx.muc_domain;
     let upload_domain = ctx.upload_domain;
     let spaces_domain = ctx.spaces_domain;
+    let community_domain = ctx.community_domain;
     let extensions_domain = ctx.extensions_domain;
     let response_from = ctx.response_from;
     let response_to = ctx.response_to;
@@ -92,6 +93,35 @@ pub(super) async fn handle_disco_items_iq(
             return vec![iq_to_xml(response)];
         }
 
+        if target_to == Some(community_domain) {
+            // The community pubsub service hosts exactly two
+            // well-known nodes: the XEP-0472 feed and the XEP-0501
+            // stories node. Surface both so clients can enumerate
+            // before subscribing.
+            let items: Vec<DiscoItem> = match query.node.as_deref() {
+                Some(_) => vec![],
+                None => vec![
+                    DiscoItem::new(
+                        community_domain,
+                        Some("Community Feed"),
+                        Some(waddle_xmpp_core::xep0472::PUBSUB_NODE_FEED),
+                    ),
+                    DiscoItem::new(
+                        community_domain,
+                        Some("Community Stories"),
+                        Some(waddle_xmpp_core::xep0501::PUBSUB_NODE_STORIES),
+                    ),
+                    DiscoItem::new(
+                        community_domain,
+                        Some("Community Events"),
+                        Some(waddle_xmpp_core::xep0471::PUBSUB_NODE_EVENTS),
+                    ),
+                ],
+            };
+            let response = build_disco_items_response(request_iq, &items, query.node.as_deref());
+            return vec![iq_to_xml(response)];
+        }
+
         if target_to == Some(spaces_domain) {
             let items: Vec<DiscoItem> = match query.node.as_deref() {
                 Some(_) => vec![],
@@ -161,6 +191,7 @@ pub(super) async fn handle_disco_items_iq(
             DiscoItem::muc_service(muc_domain, Some("Chatrooms")),
             DiscoItem::upload_service(upload_domain, Some("HTTP File Upload")),
             DiscoItem::spaces_service(spaces_domain, Some("Spaces")),
+            DiscoItem::community_service(community_domain, Some("Community")),
             DiscoItem::pubsub_service(extensions_domain, Some("Extensions")),
         ];
         let response = build_disco_items_response(request_iq, &items, None);

@@ -79,6 +79,14 @@ impl Identity {
         Self::new("pubsub", "service", name)
     }
 
+    /// Identity for the community pubsub service that hosts the
+    /// XEP-0472 social feed and XEP-0501 stories nodes. Same shape
+    /// as a generic pubsub service; the name is what shows up in a
+    /// disco#items enumeration of the deployment.
+    pub fn community_service(name: Option<&str>) -> Self {
+        Self::new("pubsub", "service", name)
+    }
+
     pub fn automation(name: Option<&str>) -> Self {
         Self::new("automation", "command-node", name)
     }
@@ -402,12 +410,34 @@ pub fn spaces_service_features() -> Vec<Feature> {
         Feature::new("http://jabber.org/protocol/pubsub#retract-items"),
         Feature::new("http://jabber.org/protocol/pubsub#multi-items"),
         Feature::new("http://jabber.org/protocol/pubsub#item-ids"),
-        // XEP-0472 Pubsub Social Feed — the spaces service hosts the
-        // community-wide feed node `urn:xmpp:pubsub-social-feed:0`.
+    ]
+}
+
+/// Get features for the community pubsub service component
+/// (`community.<domain>`). Hosts the XEP-0472 social feed node and
+/// the XEP-0501 stories node; kept separate from the spaces service
+/// so the spaces disco#items enumeration only surfaces real
+/// community-space bookmarks.
+pub fn community_service_features() -> Vec<Feature> {
+    vec![
+        Feature::disco_info(),
+        Feature::disco_items(),
+        Feature::pubsub(),
+        Feature::pubsub_retrieve_items(),
+        Feature::new("http://jabber.org/protocol/pubsub#subscribe"),
+        Feature::new("http://jabber.org/protocol/pubsub#publish"),
+        Feature::new("http://jabber.org/protocol/pubsub#persistent-items"),
+        Feature::new("http://jabber.org/protocol/pubsub#meta-data"),
+        Feature::new("http://jabber.org/protocol/pubsub#item-ids"),
+        // XEP-0472 Pubsub Social Feed — community feed node lives
+        // here at `urn:xmpp:pubsub-social-feed:0`.
         Feature::social_feed(),
-        // XEP-0501 Pubsub Stories — the spaces service hosts the
-        // community-wide ephemeral stories node `urn:xmpp:stories:0`.
+        // XEP-0501 Pubsub Stories — community stories node lives
+        // here at `urn:xmpp:stories:0`.
         Feature::stories(),
+        // XEP-0471 Calendar Events — community events node lives
+        // here at `urn:xmpp:calendar:0`.
+        Feature::calendar(),
     ]
 }
 

@@ -1,6 +1,7 @@
 use super::*;
 
 mod account;
+mod community;
 mod extensions;
 mod muc;
 mod server_info;
@@ -17,6 +18,7 @@ struct DiscoInfoRequest<'a> {
     muc_domain: &'a str,
     upload_domain: &'a str,
     spaces_domain: &'a str,
+    community_domain: &'a str,
     extensions_domain: &'a str,
     response_from: Option<&'a str>,
     response_to: Option<&'a str>,
@@ -99,6 +101,7 @@ pub(super) async fn handle_disco_info_iq(
         muc_domain: ctx.muc_domain,
         upload_domain: ctx.upload_domain,
         spaces_domain: ctx.spaces_domain,
+        community_domain: ctx.community_domain,
         extensions_domain: ctx.extensions_domain,
         response_from: ctx.response_from,
         response_to: ctx.response_to,
@@ -119,6 +122,10 @@ pub(super) async fn handle_disco_info_iq(
     if let Some(response) =
         spaces::handle_spaces_disco_info(&request, state, authenticated_session.as_ref()).await
     {
+        return disco_info_xml(response);
+    }
+
+    if let Some(response) = community::handle_community_disco_info(&request) {
         return disco_info_xml(response);
     }
 
