@@ -721,8 +721,10 @@ watch(
           v-for="(candidate, i) in mentionResults"
           :key="candidate.kind === 'broadcast' ? `broadcast:${candidate.username}` : candidate.jid ?? candidate.username"
           type="button"
-          class="type-control w-full h-9 px-3 py-0 text-left hover:bg-muted transition-colors flex items-center gap-2 rounded-lg"
-          :class="i === selectedIndex ? 'bg-muted' : ''"
+          class="type-control w-full h-9 px-3 py-0 text-left transition-colors flex items-center gap-2 rounded-lg"
+          :class="i === selectedIndex
+            ? 'bg-primary/15 hover:bg-primary/20'
+            : 'hover:bg-muted'"
           @mousedown.prevent="insertMention(candidate)"
         >
           <!-- Broadcast mentions get distinct glyphs so @everyone vs @here
@@ -773,8 +775,10 @@ watch(
           v-for="(entry, i) in emojiResults"
           :key="entry.name"
           type="button"
-          class="type-control w-full h-9 px-3 py-0 text-left hover:bg-muted transition-colors flex items-center gap-2 rounded-lg"
-          :class="i === selectedIndex ? 'bg-muted' : ''"
+          class="type-control w-full h-9 px-3 py-0 text-left transition-colors flex items-center gap-2 rounded-lg"
+          :class="i === selectedIndex
+            ? 'bg-primary/15 hover:bg-primary/20'
+            : 'hover:bg-muted'"
           @mousedown.prevent="insertEmoji(entry.emoji)"
         >
           <span>{{ entry.emoji }}</span>

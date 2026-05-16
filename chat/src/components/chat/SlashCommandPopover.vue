@@ -29,8 +29,10 @@ const emit = defineEmits<{
         v-for="(command, i) in candidates"
         :key="command.node"
         type="button"
-        class="type-control w-full h-9 px-3 py-0 text-left hover:bg-muted transition-colors flex items-center gap-2 rounded-lg"
-        :class="i === selectedIndex ? 'bg-muted' : ''"
+        class="type-control w-full h-9 px-3 py-0 text-left transition-colors flex items-center gap-2 rounded-lg"
+        :class="i === selectedIndex
+          ? 'bg-primary/15 hover:bg-primary/20'
+          : 'hover:bg-muted'"
         @mousedown.prevent="emit('pick', command)"
       >
         <Slash class="h-4 w-4 text-primary" aria-hidden="true" />
