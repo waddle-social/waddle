@@ -14,7 +14,7 @@
 // body → "Original message no longer available." italic fallback.
 import { computed } from "vue";
 import { useStore } from "@nanostores/vue";
-import { Pin, X } from "lucide-vue-next";
+import { Loader2, Pin, X } from "lucide-vue-next";
 
 import { $pinnedRooms } from "@/stores/pinned-messages";
 import { $pinnedMessageBodies } from "@/stores/pinned-message-bodies";
@@ -104,8 +104,11 @@ function relativeTime(iso: string): string {
       </button>
     </header>
 
-    <div v-if="!hydrated" class="flex-1 flex items-center justify-center text-muted-foreground type-field">
-      Loading pinned messages…
+    <!-- Loading state — Loader2 spinner converges with iter-47/48/57/58
+         on the same "fetching" affordance across the app. -->
+    <div v-if="!hydrated" class="flex-1 flex items-center justify-center gap-2 text-muted-foreground type-field">
+      <Loader2 class="h-4 w-4 motion-safe:animate-spin" aria-hidden="true" />
+      <span>Loading pinned messages…</span>
     </div>
     <div
       v-else-if="entries.length === 0"
