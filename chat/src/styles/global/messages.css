@@ -413,9 +413,16 @@
  *
  * The chip is the last child of the body stack, so its avatars sit at
  * a predictable y-offset from the row's bottom edge:
- *   row pad-bottom (var(--space-xs)) + chip pad-bottom (0.125rem)
- *     + half chip avatar (0.5625rem of 1.125rem) − half icon (0.5rem)
- *   = var(--space-xs) + 0.1875rem
+ *   row pad-bottom (--chat-message-row-pad, fallback --space-xs)
+ *     + chip pad-bottom (0.125rem)
+ *     + half chip avatar (0.5625rem of 1.125rem)
+ *     − half icon (0.5rem)
+ *   = row-pad + 0.1875rem
+ *
+ * The row-pad token is introduced in a sibling spacing PR; until it
+ * lands the calc falls back to --space-xs (the previous row-pad value)
+ * so this PR is self-consistent on its own. After the spacing PR lands
+ * the glyph automatically retracks the new chip y-offset.
  *
  * Anchoring the icon by that distance from the bottom makes the
  * icon's vertical centre line up exactly with the chip avatars'
@@ -423,7 +430,7 @@
  * (body)" reads as one horizontal row instead of a drifting pair. */
 .chat-thread-rail-glyph {
   position: absolute;
-  bottom: calc(var(--space-xs) + 0.1875rem);
+  bottom: calc(var(--chat-message-row-pad, var(--space-xs)) + 0.1875rem);
   left: 0;
   width: var(--chat-message-avatar-size);
   height: 1rem;
