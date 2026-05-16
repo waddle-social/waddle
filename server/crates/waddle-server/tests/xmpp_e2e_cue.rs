@@ -49,7 +49,9 @@ const ADVERTISED_FEATURE_XEPS: &[(&str, &str)] = &[
     ("urn:xmpp:reactions:0", "XEP-0444"),
     ("urn:xmpp:reference:0", "XEP-0372"),
     ("urn:xmpp:fallback:0", "XEP-0428"),
-    ("urn:xmpp:threads:0", "XEP-0201"),
+    // XEP-0201 is Informational and defines no disco#info feature.
+    // The <thread/> element (with optional parent= attribute) is
+    // emitted on messages without a feature advertisement.
     ("urn:xmpp:sm:3", "XEP-0198"),
     ("urn:xmpp:carbons:2", "XEP-0280"),
     ("urn:xmpp:carbons:rules:0", "XEP-0280"),
