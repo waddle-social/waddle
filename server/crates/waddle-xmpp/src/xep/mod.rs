@@ -35,8 +35,6 @@
 //!   via `<replace/>` element referencing the original message id.
 //! - **XEP-0317**: Hats - Role badges (Admin, Moderator, Bot, Owner) for
 //!   MUC occupants via `<hats/>` in presence, with well-known URIs.
-//! - **XEP-0319**: Last User Interaction in Presence - Idle detection
-//!   via `<idle since='...'/>` in presence stanzas.
 //! - **XEP-0333**: Displayed Markers - `<markable/>` requests and
 //!   `<displayed/>` updates for messages that have been shown.
 //! - **XEP-0372**: References - Structured @mentions and data references
@@ -150,7 +148,6 @@ pub mod xep0297;
 pub mod xep0300;
 pub mod xep0308;
 pub mod xep0317;
-pub mod xep0319;
 pub mod xep0333;
 pub mod xep0334;
 pub mod xep0357;
