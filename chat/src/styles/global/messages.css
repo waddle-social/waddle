@@ -315,6 +315,35 @@
   white-space: nowrap;
 }
 
+/* Author name as a button — opens the same profile drawer the
+ * avatar opens. Strip the default button chrome (bg, border,
+ * padding) so the name reads as plain typography at rest; on hover
+ * the underline + slight colour lift signals the affordance the
+ * same way iter-52 polished body links. */
+.chat-message-author-button {
+  background: none;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  text-decoration: underline transparent;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 2px;
+  transition: text-decoration-color 0.18s ease, color 0.18s ease;
+}
+
+.chat-message-author-button:hover {
+  text-decoration-color: currentColor;
+}
+
+.chat-message-author-button:focus-visible {
+  outline: 2px solid color-mix(in oklab, var(--primary) 55%, transparent);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+
 .chat-message-meta-row > .type-badge,
 .chat-message-meta-row > .type-meta {
   flex-shrink: 0;

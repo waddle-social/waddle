@@ -762,7 +762,12 @@ onBeforeUnmount(() => {
     />
     <div class="chat-message-body-stack">
       <div v-if="!grouped" class="chat-message-meta-row">
-        <span class="type-message-author">{{ message.author }}</span>
+        <button
+          type="button"
+          class="type-message-author chat-message-author-button"
+          :aria-label="`Open profile for ${message.author}`"
+          @click.stop="emitAvatarClick"
+        >{{ message.author }}</button>
         <span class="type-meta type-numeric text-muted-foreground">
           {{ formatTimelineTimeOfDay(message.createdAt) }}
         </span>
@@ -834,7 +839,12 @@ onBeforeUnmount(() => {
     </div>
     <div class="chat-message-body-stack">
       <div v-if="!grouped" class="chat-message-meta-row">
-        <span class="type-message-author">{{ message.author }}</span>
+        <button
+          type="button"
+          class="type-message-author chat-message-author-button"
+          :aria-label="`Open profile for ${message.author}`"
+          @click.stop="emitAvatarClick"
+        >{{ message.author }}</button>
         <span
           v-if="seniorHat"
           class="chat-hat-tag"
