@@ -343,8 +343,13 @@ async fn create_websocket_state(
     {
         warn!(error = %error, "Failed to bootstrap fresh XMPP topology");
     }
-    let push_store: Arc<dyn waddle_xmpp::push::PushSubscriptionStore> =
-        Arc::new(waddle_xmpp::push::InMemoryPushStore::new());
+    let push_store: Arc<dyn waddle_xmpp::push::PushSubscriptionStore> = Arc::new(
+        crate::push_registrations::DatabasePushRegistrationStore::new(
+            state.db_pool.global().clone(),
+        )
+        .await
+        .map_err(|error| anyhow::anyhow!("failed to initialize XEP-0357 storage: {error}"))?,
+    );
     let notification_settings_projection = Arc::new(
         crate::notification_settings_projection::NotificationSettingsProjectionStore::new(
             pubsub_database_storage.database(),

@@ -2,7 +2,6 @@ use chrono;
 use jid::{BareJid, FullJid, Jid};
 use std::{collections::HashSet, sync::Arc};
 use tracing::{debug, warn};
-use url::{Host, Url};
 use waddle_xmpp::{
     carbons::CARBONS_NS,
     commands::{CommandContext, CommandResult},

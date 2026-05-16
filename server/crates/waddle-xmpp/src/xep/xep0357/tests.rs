@@ -10,35 +10,26 @@ fn make_enable_iq(jid_attr: &str, node_attr: Option<&str>, with_form: bool) -> I
     let mut enable_elem = enable.build();
 
     if with_form {
-        let endpoint_value = Element::builder("value", NS_DATA_FORMS)
-            .append("https://push.example.com/abc")
+        let form_type_value = Element::builder("value", NS_DATA_FORMS)
+            .append(NS_PUBSUB_PUBLISH_OPTIONS)
             .build();
-        let endpoint_field = Element::builder("field", NS_DATA_FORMS)
-            .attr("var", "endpoint")
-            .append(endpoint_value)
-            .build();
-
-        let p256dh_value = Element::builder("value", NS_DATA_FORMS)
-            .append("BASE64KEY")
-            .build();
-        let p256dh_field = Element::builder("field", NS_DATA_FORMS)
-            .attr("var", "p256dh")
-            .append(p256dh_value)
+        let form_type_field = Element::builder("field", NS_DATA_FORMS)
+            .attr("var", "FORM_TYPE")
+            .append(form_type_value)
             .build();
 
-        let auth_value = Element::builder("value", NS_DATA_FORMS)
-            .append("BASE64AUTH")
+        let secret_value = Element::builder("value", NS_DATA_FORMS)
+            .append("opaque-secret")
             .build();
-        let auth_field = Element::builder("field", NS_DATA_FORMS)
-            .attr("var", "auth")
-            .append(auth_value)
+        let secret_field = Element::builder("field", NS_DATA_FORMS)
+            .attr("var", "secret")
+            .append(secret_value)
             .build();
 
         let form = Element::builder("x", NS_DATA_FORMS)
             .attr("type", "submit")
-            .append(endpoint_field)
-            .append(p256dh_field)
-            .append(auth_field)
+            .append(form_type_field)
+            .append(secret_field)
             .build();
 
         enable_elem.append_child(form);
@@ -160,20 +151,17 @@ fn test_parse_push_enable_with_options() {
 
     assert_eq!(enable.jid, "push-service.example.com");
     assert_eq!(enable.node.as_deref(), Some("web-push"));
-    assert_eq!(enable.options.len(), 3);
+    assert_eq!(enable.options.len(), 2);
+    assert!(enable.publish_options.is_some());
 
     assert!(enable
         .options
         .iter()
-        .any(|(k, v)| k == "endpoint" && v == "https://push.example.com/abc"));
+        .any(|(k, v)| k == "FORM_TYPE" && v == NS_PUBSUB_PUBLISH_OPTIONS));
     assert!(enable
         .options
         .iter()
-        .any(|(k, v)| k == "p256dh" && v == "BASE64KEY"));
-    assert!(enable
-        .options
-        .iter()
-        .any(|(k, v)| k == "auth" && v == "BASE64AUTH"));
+        .any(|(k, v)| k == "secret" && v == "opaque-secret"));
 }
 
 #[test]
@@ -184,10 +172,11 @@ fn test_parse_push_enable_without_options() {
     assert_eq!(enable.jid, "push-service.example.com");
     assert_eq!(enable.node.as_deref(), Some("web-push"));
     assert!(enable.options.is_empty());
+    assert!(enable.publish_options.is_none());
 }
 
 #[test]
-fn test_parse_push_enable_with_attribute_options() {
+fn test_parse_push_enable_ignores_provider_attribute_options() {
     let elem = Element::builder("enable", NS_PUSH)
         .attr("jid", "push-service.example.com")
         .attr("node", "web-push")
@@ -205,19 +194,8 @@ fn test_parse_push_enable_with_attribute_options() {
 
     assert_eq!(enable.jid, "push-service.example.com");
     assert_eq!(enable.node.as_deref(), Some("web-push"));
-    assert_eq!(enable.options.len(), 3);
-    assert!(enable
-        .options
-        .iter()
-        .any(|(k, v)| k == "endpoint" && v == "https://push.example.com/abc"));
-    assert!(enable
-        .options
-        .iter()
-        .any(|(k, v)| k == "p256dh" && v == "BASE64KEY"));
-    assert!(enable
-        .options
-        .iter()
-        .any(|(k, v)| k == "auth" && v == "BASE64AUTH"));
+    assert!(enable.options.is_empty());
+    assert!(enable.publish_options.is_none());
 }
 
 #[test]
@@ -227,6 +205,7 @@ fn test_parse_push_enable_without_node() {
 
     assert_eq!(enable.jid, "push-service.example.com");
     assert!(enable.node.is_none());
+    assert!(enable.publish_options.is_none());
 }
 
 #[test]
@@ -366,7 +345,11 @@ fn test_parse_data_form_with_empty_value() {
         .build();
     enable_elem.append_child(form);
 
-    let options = parse_data_form_options(&enable_elem);
+    let options = parse_data_form_options(
+        enable_elem
+            .get_child("x", NS_DATA_FORMS)
+            .expect("data form"),
+    );
     assert!(options.is_empty());
 }
 
@@ -387,8 +370,41 @@ fn test_parse_data_form_with_missing_var() {
         .build();
     enable_elem.append_child(form);
 
-    let options = parse_data_form_options(&enable_elem);
+    let options = parse_data_form_options(
+        enable_elem
+            .get_child("x", NS_DATA_FORMS)
+            .expect("data form"),
+    );
     assert!(options.is_empty());
+}
+
+#[test]
+fn test_non_publish_options_form_is_not_registration_publish_options() {
+    let value = Element::builder("value", NS_DATA_FORMS)
+        .append("not-publish-options")
+        .build();
+    let field = Element::builder("field", NS_DATA_FORMS)
+        .attr("var", "FORM_TYPE")
+        .append(value)
+        .build();
+    let form = Element::builder("x", NS_DATA_FORMS)
+        .attr("type", "submit")
+        .append(field)
+        .build();
+    let mut enable_elem = Element::builder("enable", NS_PUSH)
+        .attr("jid", "push.example.com")
+        .build();
+    enable_elem.append_child(form);
+    let iq = Iq {
+        from: None,
+        to: None,
+        id: "test".to_string(),
+        payload: IqType::Set(enable_elem),
+    };
+
+    let enable = parse_push_enable(&iq).expect("enable");
+    assert!(enable.options.is_empty());
+    assert!(enable.publish_options.is_none());
 }
 
 #[test]
@@ -397,6 +413,7 @@ fn test_push_enable_struct_debug() {
         jid: "push.example.com".to_string(),
         node: Some("web-push".to_string()),
         options: vec![("key".to_string(), "val".to_string())],
+        publish_options: None,
     };
     let debug = format!("{:?}", enable);
     assert!(debug.contains("push.example.com"));
@@ -419,6 +436,7 @@ fn test_push_enable_clone_eq() {
         jid: "push.example.com".to_string(),
         node: Some("node1".to_string()),
         options: vec![("k".to_string(), "v".to_string())],
+        publish_options: None,
     };
     let cloned = enable.clone();
     assert_eq!(enable, cloned);
