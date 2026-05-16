@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, watch, onBeforeUnmount } from "vue";
-import { Send, Paperclip, FileText, Music4, Puzzle, X, Loader2, Megaphone, Radio } from "lucide-vue-next";
+import { Send, Paperclip, FileText, Music4, Puzzle, X, Loader2, Megaphone, Radio, CornerDownLeft } from "lucide-vue-next";
 import type { JSONContent } from "@tiptap/core";
 import GifPicker from "@/components/chat/GifPicker.vue";
 import ChatEditor from "@/components/chat/ChatEditor.vue";
@@ -568,14 +568,24 @@ watch(
       v-if="replyingTo || showForumTitleInput || pendingAttachments.length > 0 || uploadProgress.uploading"
       class="chat-composer-aux-stack"
     >
-      <!-- Reply context chip -->
+      <!-- Reply context chip — appears above the composer when the
+           user has clicked Reply on a message. Adds a CornerDownLeft
+           glyph (the universal "reply" affordance) and a 3 px primary-
+           tinted left rail matching the sidebar / active-channel / hover
+           toolbar rail language. The preview text italicises so the eye
+           reads "Replying to @user — <they said this>" as a quoted
+           fragment, not just more chrome. -->
       <div
         v-if="replyingTo"
-        class="type-caption flex items-center gap-2 rounded-lg border border-border bg-muted/70 px-3 py-1.5 animate-fade-in"
+        class="type-caption flex items-center gap-2 rounded-lg border border-border border-l-[3px] border-l-primary/60 bg-muted/70 px-3 py-1.5 animate-fade-in"
       >
+        <CornerDownLeft class="w-3.5 h-3.5 flex-shrink-0 text-primary/75" aria-hidden="true" />
         <span class="text-muted-foreground">Replying to</span>
         <span class="type-emphasis text-primary/90">@{{ replyAuthorName }}</span>
-        <span v-if="replyingTo.preview" class="text-muted-foreground truncate flex-1">{{ replyingTo.preview }}</span>
+        <span
+          v-if="replyingTo.preview"
+          class="italic truncate flex-1 text-muted-foreground/85"
+        >{{ replyingTo.preview }}</span>
         <button
           type="button"
           class="ml-auto h-8 w-8 flex items-center justify-center rounded-lg text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
