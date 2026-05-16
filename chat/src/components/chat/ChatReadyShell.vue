@@ -65,6 +65,7 @@ const {
   version,
   avatarUrlByAuthor,
   authorHatsByNick,
+  authorAuthorityByNick,
   activeActionError,
   activeErrorActionLabel,
   activeUploadProgress,
@@ -291,6 +292,7 @@ function setPinnedPanelOpen(isOpen: boolean) {
               :giphy-api-key="giphyApiKey"
               :mention-candidates="mentionCandidates"
               :room-hats="authorHatsByNick"
+              :room-authority="authorAuthorityByNick"
               :room-presence="messaging.roomPresence.value"
               :room-last-seen="messaging.roomLastSeen.value"
               :slow-mode-cooldown="messaging.slowModeCooldown.value"
@@ -411,6 +413,7 @@ function setPinnedPanelOpen(isOpen: boolean) {
               :avatar-url-by-author="avatarUrlByAuthor"
               :author-jid-by-nick="authorJidByNick"
               :room-hats="authorHatsByNick"
+              :room-authority="authorAuthorityByNick"
               :room-presence="messaging.roomPresence.value"
               :room-last-seen="messaging.roomLastSeen.value"
               :giphy-api-key="giphyApiKey"
@@ -450,6 +453,7 @@ function setPinnedPanelOpen(isOpen: boolean) {
               :avatar-url-by-author="avatarUrlByAuthor"
               :author-jid-by-nick="authorJidByNick"
               :room-hats="authorHatsByNick"
+              :room-authority="authorAuthorityByNick"
               :room-presence="messaging.roomPresence.value"
               :room-last-seen="messaging.roomLastSeen.value"
               :giphy-api-key="giphyApiKey"

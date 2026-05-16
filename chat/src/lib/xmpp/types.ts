@@ -220,6 +220,56 @@ export interface OccupantHat {
 
 export type RoomHats = Record<string, OccupantHat[]>;
 
+/** XEP-0045 §5.2 — persistent room-relationship category. Authority,
+ * not descriptive metadata. Carried by `<x xmlns='muc#user'><item
+ * affiliation='…'/>` on every MUC presence. */
+export type MucAffiliation = "owner" | "admin" | "member" | "outcast" | "none";
+
+/** XEP-0045 §5.1 — runtime session-scoped permission category.
+ * Authority, not descriptive metadata. Carried by `<x xmlns='muc#user'>
+ * <item role='…'/>` on every MUC presence. */
+export type MucRole = "moderator" | "participant" | "visitor" | "none";
+
+/** Pairs the two MUC authority layers per occupant. Distinct from
+ * `OccupantHat` (XEP-0317), which is descriptive social metadata
+ * with no protocol semantics. */
+export interface OccupantAuthority {
+  affiliation: MucAffiliation;
+  role: MucRole;
+}
+
+/** Per-room map of occupant nick → their current MUC authority,
+ * updated from each inbound MUC presence stanza. */
+export type RoomAuthority = Record<string, OccupantAuthority>;
+
+/** Narrow an untyped string (e.g. from the WASM bridge) to the
+ * MucAffiliation union, falling back to "none" for unrecognised
+ * input. */
+export function parseMucAffiliation(raw: string | undefined | null): MucAffiliation {
+  switch (raw) {
+    case "owner":
+    case "admin":
+    case "member":
+    case "outcast":
+      return raw;
+    default:
+      return "none";
+  }
+}
+
+/** Narrow an untyped string (e.g. from the WASM bridge) to the
+ * MucRole union, falling back to "none" for unrecognised input. */
+export function parseMucRole(raw: string | undefined | null): MucRole {
+  switch (raw) {
+    case "moderator":
+    case "participant":
+    case "visitor":
+      return raw;
+    default:
+      return "none";
+  }
+}
+
 export type OccupantPresence = "online" | "away" | "dnd" | "offline";
 export type RoomPresence = Record<string, OccupantPresence>;
 

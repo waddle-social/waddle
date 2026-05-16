@@ -70,7 +70,7 @@ describe("BrowserXmppClient.listRoomMembers", () => {
       jid: "bob@example.com",
       username: "bob",
       avatar_url: null,
-      role: "member",
+      affiliation: "member",
       joined_at: "",
     }]);
     expect(listRoomMembers.mock.calls.map((call) => call[0])).toEqual([

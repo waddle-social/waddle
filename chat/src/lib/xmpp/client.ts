@@ -28,6 +28,7 @@ import type {
   PresenceUpdateEvent,
   ReactionEvent,
   RoomActivityEvent,
+  RoomAuthority,
   RoomHats,
   RoomPresence,
   RosterContact,
@@ -35,7 +36,7 @@ import type {
   XmppErrorEvent,
   XmppStatusSnapshot,
 } from "./types";
-import { mergeOccupantHats, roleHatsForOccupant } from "./occupant-badges";
+import { parseMucAffiliation, parseMucRole } from "./types";
 import { prepareEncryptedAttachmentUpload } from "./encrypted-attachments";
 
 import { discoverChannels, discoverTopology } from "./discovery";
@@ -237,6 +238,7 @@ export class BrowserXmppClient {
   private roomMemberJids: Record<string, string> = {};
   private memberJidHandler: ((nick: string, bareJid: string) => void) | null = null;
   private hatsHandler: ((hats: RoomHats) => void) | null = null;
+  private authorityHandler: ((authority: RoomAuthority) => void) | null = null;
   private activityHandler: ((event: RoomActivityEvent) => void) | null = null;
   private inboxPushHandler: ((entry: InboxEntry) => void) | null = null;
   private roomAvatarHandler: ((roomJid: string, hash: string) => void) | null = null;
@@ -256,6 +258,7 @@ export class BrowserXmppClient {
   private roomSwitchTarget: string | null = null;
   private selfPingTimer: ReturnType<typeof setInterval> | null = null;
   private roomHats: RoomHats = {};
+  private roomAuthority: RoomAuthority = {};
   private roomPresence: RoomPresence = {};
   private uploadServiceJid: string | null = null;
   private discoveredRoomJids = new Map<string, string>();
@@ -295,6 +298,7 @@ export class BrowserXmppClient {
   setPresenceUpdateHandler(h: (event: PresenceUpdateEvent) => void) { this.presenceUpdateHandler = h; }
   setMemberJidHandler(h: (nick: string, bareJid: string) => void) { this.memberJidHandler = h; }
   setHatsHandler(h: (hats: RoomHats) => void) { this.hatsHandler = h; }
+  setAuthorityHandler(h: (authority: RoomAuthority) => void) { this.authorityHandler = h; }
   setActivityHandler(h: (event: RoomActivityEvent) => void) { this.activityHandler = h; }
   setInboxPushHandler(h: (entry: InboxEntry) => void) { this.inboxPushHandler = h; }
   setRoomAvatarHandler(h: (roomJid: string, hash: string) => void) { this.roomAvatarHandler = h; }
@@ -479,6 +483,7 @@ export class BrowserXmppClient {
     this.roomSwitchTarget = null;
     this.uploadServiceJid = null;
     this.roomHats = {};
+    this.roomAuthority = {};
     this.roomPresence = {};
     this.roomMemberJids = {};
     this.xmpp = null;
@@ -548,9 +553,11 @@ export class BrowserXmppClient {
     }
     this.currentRoom = nextRoom;
     this.roomHats = {};
+    this.roomAuthority = {};
     this.roomPresence = {};
     this.roomMemberJids = {};
     this.hatsHandler?.({});
+    this.authorityHandler?.({});
     this.presenceHandler?.({});
     if (xmpp.join_room) {
       const ready = this.waitForRoomSelfPresence(nextRoom, this.session.username);
@@ -951,14 +958,14 @@ export class BrowserXmppClient {
     if (!listMembers) { this.emitError({ kind: "member-query", recoverable: false, detail: "missing list_room_members" }); throw new Error("missing list_room_members"); }
     const affiliations = ["owner", "admin", "member", "outcast"] as const; const members: MemberSummary[] = []; const failedAffiliations: string[] = [];
     for (const affiliation of affiliations) {
-      try { const result = await listMembers(affiliation); for (const item of result ?? []) { if (!item.jid) continue; members.push({ jid: item.jid, username: item.jid.split("@")[0] ?? item.jid, avatar_url: null, role: affiliation, joined_at: "" }); } } catch (error: any) { failedAffiliations.push(affiliation); const condition = error?.condition ?? error?.error?.condition; const detail = condition === "forbidden" ? `forbidden affiliation query — ${roomJid}` : condition === "service-unavailable" ? `unsupported member query — ${roomJid}` : `affiliation query failed for ${affiliation} — ${roomJid}; reconstructed room JID may not match`; this.emitError({ kind: "member-query", recoverable: true, detail, cause: error, condition }); }
+      try { const result = await listMembers(affiliation); for (const item of result ?? []) { if (!item.jid) continue; members.push({ jid: item.jid, username: item.jid.split("@")[0] ?? item.jid, avatar_url: null, affiliation, joined_at: "" }); } } catch (error: any) { failedAffiliations.push(affiliation); const condition = error?.condition ?? error?.error?.condition; const detail = condition === "forbidden" ? `forbidden affiliation query — ${roomJid}` : condition === "service-unavailable" ? `unsupported member query — ${roomJid}` : `affiliation query failed for ${affiliation} — ${roomJid}; reconstructed room JID may not match`; this.emitError({ kind: "member-query", recoverable: true, detail, cause: error, condition }); }
     }
     if (members.length === 0 && failedAffiliations.length > 0) {
       throw new RoomMemberListUnavailableError();
     }
     return members;
   }
-  async setRoomAffiliation(channelId: string, jid: string, affiliation: MemberSummary["role"]): Promise<void> { const xmpp = await this.requireConnectedXmpp(); await xmpp.set_room_affiliation?.(this.roomJidForChannel(channelId), jid, affiliation === "none" ? "none" : affiliation); }
+  async setRoomAffiliation(channelId: string, jid: string, affiliation: MemberSummary["affiliation"]): Promise<void> { const xmpp = await this.requireConnectedXmpp(); await xmpp.set_room_affiliation?.(this.roomJidForChannel(channelId), jid, affiliation === "none" ? "none" : affiliation); }
   async searchUsers(query: string): Promise<UserSearchResult[]> { if (!query.trim()) return []; const xmpp = await this.requireConnectedXmpp(); const users = await xmpp.search_users?.(query) as WasmUserSearchResult[]; return (users ?? []).map((user) => ({ id: user.jid, jid: user.jid, username: user.username ?? user.nick ?? user.jid.split("@")[0] ?? user.jid, display_name: user.display_name ?? user.name ?? null, avatar_url: null })); }
   async fetchUserAvatar(jid: string): Promise<string | null> {
     const xmpp = await this.requireConnectedXmpp();
@@ -1001,9 +1008,40 @@ export class BrowserXmppClient {
     const from = presence.from ?? "";
     if ((presence as any).muc_jid !== undefined) {
       const [room, nick = ""] = from.split("/"); const waiter = this.roomJoinWaiters.get(from); if (waiter && (presence as any).muc_jid) waiter.resolve(); if (!room) return; if (!nick && presence.vcard_avatar) this.roomAvatarHandler?.(room, presence.vcard_avatar); if (room !== this.currentRoom || !nick) return;
-      if (presence.presence_type === "unavailable") { delete this.roomHats[nick]; this.hatsHandler?.({ ...this.roomHats }); this.roomPresence[nick] = "offline"; this.presenceHandler?.({ ...this.roomPresence }); delete this.roomMemberJids[nick]; this.lastSeenHandler?.(nick, Date.now()); return; }
-      this.roomHats[nick] = mergeOccupantHats(roleHatsForOccupant((presence as any).muc_affiliation, (presence as any).muc_role), ((presence as any).hats ?? []).map((hat: any) => ({ uri: hat.uri, title: hat.title })));
-      this.hatsHandler?.({ ...this.roomHats }); this.roomPresence[nick] = parsePresenceShow(presence.show); this.presenceHandler?.({ ...this.roomPresence }); if ((presence as any).muc_jid) { const bare = barePeerJid((presence as any).muc_jid); this.roomMemberJids[nick] = bare; this.memberJidHandler?.(nick, bare); } return;
+      if (presence.presence_type === "unavailable") {
+        delete this.roomHats[nick];
+        this.hatsHandler?.({ ...this.roomHats });
+        delete this.roomAuthority[nick];
+        this.authorityHandler?.({ ...this.roomAuthority });
+        this.roomPresence[nick] = "offline";
+        this.presenceHandler?.({ ...this.roomPresence });
+        delete this.roomMemberJids[nick];
+        this.lastSeenHandler?.(nick, Date.now());
+        return;
+      }
+      // XEP-0317 hats are server-emitted descriptive metadata only.
+      // No client-side fabrication from muc_affiliation/muc_role —
+      // those flow as `roomAuthority` and drive authority chips
+      // independently (see `parseMucAffiliation` / `parseMucRole`
+      // below).
+      this.roomHats[nick] = ((presence as any).hats ?? []).map((hat: any) => ({
+        uri: hat.uri,
+        title: hat.title,
+      }));
+      this.hatsHandler?.({ ...this.roomHats });
+      this.roomAuthority[nick] = {
+        affiliation: parseMucAffiliation((presence as any).muc_affiliation),
+        role: parseMucRole((presence as any).muc_role),
+      };
+      this.authorityHandler?.({ ...this.roomAuthority });
+      this.roomPresence[nick] = parsePresenceShow(presence.show);
+      this.presenceHandler?.({ ...this.roomPresence });
+      if ((presence as any).muc_jid) {
+        const bare = barePeerJid((presence as any).muc_jid);
+        this.roomMemberJids[nick] = bare;
+        this.memberJidHandler?.(nick, bare);
+      }
+      return;
     }
     const bare = barePeerJid(from); if (!bare) return; if (presence.presence_type === "subscribe") return; this.presenceUpdateHandler?.({ bareJid: bare, show: mapPresenceShow(presence), ...(presence.status ? { status: presence.status } : {}) });
   }

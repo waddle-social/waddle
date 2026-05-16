@@ -44,7 +44,7 @@ pub fn build_occupant_presence(
     presence.to = Some(Jid::from(to_jid.clone()));
 
     add_muc_user_payload(&mut presence, affiliation, role, is_self, identity.real_jid);
-    add_presence_identity_payloads(&mut presence, from_room_jid, affiliation, role, identity);
+    add_presence_identity_payloads(&mut presence, from_room_jid, identity);
 
     presence
 }
@@ -64,7 +64,7 @@ pub fn build_occupant_presence_update(
     presence.to = Some(Jid::from(to_jid.clone()));
     strip_server_controlled_presence_payloads(&mut presence);
     add_muc_user_payload(&mut presence, affiliation, role, is_self, identity.real_jid);
-    add_presence_identity_payloads(&mut presence, from_room_jid, affiliation, role, identity);
+    add_presence_identity_payloads(&mut presence, from_room_jid, identity);
 
     presence
 }
@@ -159,13 +159,7 @@ pub fn build_leave_presence(
 
     let muc_element: Element = muc_user.into();
     presence.payloads.push(muc_element);
-    add_presence_identity_payloads(
-        &mut presence,
-        from_room_jid,
-        affiliation,
-        Role::None,
-        identity,
-    );
+    add_presence_identity_payloads(&mut presence, from_room_jid, identity);
 
     presence
 }
@@ -173,27 +167,19 @@ pub fn build_leave_presence(
 fn add_presence_identity_payloads(
     presence: &mut Presence,
     from_room_jid: &FullJid,
-    affiliation: Affiliation,
-    role: Role,
     identity: &OccupantIdentity<'_>,
 ) {
-    let affiliation_name = match affiliation {
-        Affiliation::Owner => "owner",
-        Affiliation::Admin => "admin",
-        Affiliation::Member => "member",
-        Affiliation::None => "none",
-        Affiliation::Outcast => "outcast",
-    };
-    let mut hats = crate::xep::xep0317::hats_from_affiliation(affiliation_name);
-    if role == Role::Moderator && !hats.has_uri(crate::xep::xep0317::well_known::MODERATOR) {
-        hats = hats.with_hat(crate::xep::xep0317::Hat::moderator());
-    }
-    crate::xep::xep0317::set_hats(presence, &hats);
-
     // XEP-0421 §"Business Rules": occupant-id MUST be on every emitted
     // MUC presence regardless of whether the real JID is disclosed.
     // The room service knows `bare_jid` even in fully-anonymous rooms;
     // disclosure is governed independently by `identity.real_jid`.
+    //
+    // No XEP-0317 hats are derived here: hats are descriptive social
+    // metadata, not a duplicate of authority. MUC affiliation and role
+    // are already carried by the `<x xmlns='muc#user'><item …/>`
+    // payload the caller attaches above. Out-of-band descriptive hats
+    // (today, only the extension-bot path) install themselves via
+    // `crate::xep::xep0317::set_hats` after this helper returns.
     let occupant_id = crate::xep::xep0421::generate_occupant_id(
         identity.bare_jid,
         &from_room_jid.to_bare(),
@@ -283,13 +269,7 @@ pub fn build_kick_presence(
 
     let muc_element: Element = muc_user.into();
     presence.payloads.push(muc_element);
-    add_presence_identity_payloads(
-        &mut presence,
-        from_room_jid,
-        affiliation,
-        Role::None,
-        identity,
-    );
+    add_presence_identity_payloads(&mut presence, from_room_jid, identity);
 
     presence
 }
@@ -352,13 +332,7 @@ pub fn build_ban_presence(
 
     let muc_element: Element = muc_user.into();
     presence.payloads.push(muc_element);
-    add_presence_identity_payloads(
-        &mut presence,
-        from_room_jid,
-        Affiliation::Outcast,
-        Role::None,
-        identity,
-    );
+    add_presence_identity_payloads(&mut presence, from_room_jid, identity);
 
     presence
 }
@@ -412,13 +386,7 @@ pub fn build_affiliation_change_presence(
 
     let muc_element: Element = muc_user.into();
     presence.payloads.push(muc_element);
-    add_presence_identity_payloads(
-        &mut presence,
-        from_room_jid,
-        new_affiliation,
-        role,
-        identity,
-    );
+    add_presence_identity_payloads(&mut presence, from_room_jid, identity);
 
     presence
 }
@@ -472,13 +440,7 @@ pub fn build_role_change_presence(
 
     let muc_element: Element = muc_user.into();
     presence.payloads.push(muc_element);
-    add_presence_identity_payloads(
-        &mut presence,
-        from_room_jid,
-        affiliation,
-        new_role,
-        identity,
-    );
+    add_presence_identity_payloads(&mut presence, from_room_jid, identity);
 
     presence
 }

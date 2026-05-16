@@ -36,7 +36,7 @@ import {
 import { useExtensionAnnotationActions } from "@/channels/extension-annotation-actions";
 import { messageMentionsBareJid } from "@/lib/mentions";
 import { richMessageToTiptap, tiptapToRichMessage } from "@/lib/rich-message";
-import type { OccupantHat, OccupantPresence } from "@/lib/xmpp-client";
+import type { MucAffiliation, MucRole, OccupantAuthority, OccupantHat, OccupantPresence } from "@/lib/xmpp-client";
 import { formatTimelineTimeOfDay } from "@/channels/timeline";
 import { useLongPress } from "@/ui/gestures/long-press";
 import { useHorizontalSwipe } from "@/ui/gestures/horizontal-swipe";
@@ -44,43 +44,91 @@ import type { ExtensionCommandResult } from "@/lib/xmpp/extension-commands";
 import { $desktopToolbarOwnerId } from "@/stores/message-toolbar";
 import { QUICK_REACTION_EMOJIS } from "@/lib/reaction-mode";
 
-const HAT_LABELS: Record<string, string> = {
-  "urn:xmpp:hats:owner": "OWNER",
-  "urn:xmpp:hats:admin": "ADMIN",
-  "urn:xmpp:hats:moderator": "MOD",
-  "urn:xmpp:hats:bot": "BOT",
-  "urn:xmpp:hats:verified": "VERIFIED",
+// Two separate badge layers:
+//
+// 1. **Authority badge** — owner / admin / moderator. Derived from the
+//    `authority` prop, which mirrors the XEP-0045 `<x muc#user>` payload
+//    on each presence. Server-enforced; clients render it but don't
+//    invent it.
+//
+// 2. **Descriptive badge** — bot / verified / future descriptive hats.
+//    Derived from XEP-0317 `<hats>`. Client renders; no protocol
+//    semantics.
+//
+// At most one badge is shown next to the author name to keep the meta
+// row breathable. Authority outranks descriptive: if you're an admin
+// and a bot, the badge says ADMIN. Profile drawer surfaces show the
+// full hat list separately.
+interface BadgeView {
+  label: string;
+  /** Tailwind class for the chip's text colour. */
+  colorClass: string;
+  /** Stable sort key used to pick the senior badge when multiple
+   * candidates exist (e.g., admin + bot). Higher wins. */
+  rank: number;
+}
+
+function authorityBadge(authority: OccupantAuthority | null | undefined): BadgeView | null {
+  const affiliation: MucAffiliation = authority?.affiliation ?? "none";
+  const role: MucRole = authority?.role ?? "none";
+  if (affiliation === "owner") {
+    return { label: "OWNER", colorClass: "text-warning/70", rank: 4 };
+  }
+  if (affiliation === "admin") {
+    return { label: "ADMIN", colorClass: "text-primary/75", rank: 3 };
+  }
+  // Role=Moderator without owner/admin affiliation is the "promoted
+  // for this session" case — still authoritative, still rendered.
+  if (role === "moderator") {
+    return { label: "MOD", colorClass: "text-primary/75", rank: 2 };
+  }
+  return null;
+}
+
+// Waddle's descriptive hat URIs live under `urn:waddle:hats:*`, not
+// `urn:xmpp:hats:*`. XEP-0317 deliberately leaves the hat URI value
+// space open; minting Waddle-specific semantics inside the XSF
+// reserve would falsely claim XSF registration. The container
+// namespace `urn:xmpp:hats:0` is unchanged because that one is
+// spec-defined.
+const DESCRIPTIVE_HAT_LABELS: Record<string, string> = {
+  "urn:waddle:hats:bot": "BOT",
+  "urn:waddle:hats:verified": "VERIFIED",
 };
 
-// Hat badges read as quiet annotations next to the author name now,
-// not chips. We dropped the colored background fills entirely; the
-// inline accent-colored small-cap text from `.chat-hat-tag` does the
-// talking. The map only carries the accent text colour.
-const HAT_COLORS: Record<string, string> = {
-  "urn:xmpp:hats:owner": "text-warning/70",
-  "urn:xmpp:hats:admin": "text-primary/75",
-  "urn:xmpp:hats:moderator": "text-primary/75",
-  "urn:xmpp:hats:bot": "text-success/75",
-  "urn:xmpp:hats:verified": "text-primary/75",
+const DESCRIPTIVE_HAT_COLORS: Record<string, string> = {
+  "urn:waddle:hats:bot": "text-success/75",
+  "urn:waddle:hats:verified": "text-primary/75",
 };
 
-// Higher rank wins when an author holds multiple hats. Owner subsumes
-// moderator (an owner can already moderate), so per-message we render only
-// the senior hat to keep the meta row breathable on mobile. The full hat
-// list is still passed through so the avatar/profile surface can show it.
-const HAT_RANK: Record<string, number> = {
-  "urn:xmpp:hats:owner": 4,
-  "urn:xmpp:hats:admin": 3,
-  "urn:xmpp:hats:moderator": 2,
-  "urn:xmpp:hats:verified": 1,
-  "urn:xmpp:hats:bot": 0,
+const DESCRIPTIVE_HAT_RANK: Record<string, number> = {
+  "urn:waddle:hats:verified": 1,
+  "urn:waddle:hats:bot": 0,
 };
+
+function descriptiveBadge(hats: OccupantHat[] | null | undefined): BadgeView | null {
+  if (!hats || hats.length === 0) return null;
+  let best: BadgeView | null = null;
+  for (const hat of hats) {
+    const label = DESCRIPTIVE_HAT_LABELS[hat.uri] ?? hat.title;
+    const colorClass = DESCRIPTIVE_HAT_COLORS[hat.uri] ?? "text-muted-foreground";
+    const rank = DESCRIPTIVE_HAT_RANK[hat.uri] ?? 0;
+    if (best === null || rank > best.rank) {
+      best = { label, colorClass, rank };
+    }
+  }
+  return best;
+}
 
 const props = defineProps<{
   message: TimelineMessage;
   currentUser?: string;
   currentUserJid?: string;
   hats: OccupantHat[];
+  /** XEP-0045 affiliation/role for the message's author. Drives the
+   * OWNER / ADMIN / MOD chip on the meta row. Distinct from `hats`,
+   * which carries XEP-0317 descriptive metadata only. */
+  authority?: OccupantAuthority | null;
   avatarUrl?: string | null;
   presence?: OccupantPresence;
   lastSeen?: number;
@@ -124,18 +172,30 @@ const emit = defineEmits<{
 }>();
 
 const quickEmojis = QUICK_REACTION_EMOJIS;
-const seniorHat = computed<OccupantHat | null>(() => {
-  if (!props.hats || props.hats.length === 0) return null;
-  let best: OccupantHat | null = null;
-  let bestRank = -Infinity;
-  for (const hat of props.hats) {
-    const rank = HAT_RANK[hat.uri] ?? 0;
-    if (rank > bestRank || (rank === bestRank && best && hat.uri < best.uri)) {
-      best = hat;
-      bestRank = rank;
-    }
+
+// Single chip rendered next to the author name. Authority outranks
+// descriptive hats so e.g. an admin who is also a bot shows ADMIN —
+// authority is the load-bearing fact about that occupant in the room;
+// the bot tag is supplementary and visible elsewhere (profile drawer).
+const authorBadge = computed<BadgeView | null>(() => {
+  const authority = authorityBadge(props.authority);
+  const descriptive = descriptiveBadge(props.hats);
+  if (authority && descriptive) {
+    return authority.rank >= descriptive.rank ? authority : descriptive;
   }
-  return best;
+  return authority ?? descriptive;
+});
+
+// Tooltip on the chip lists every layer the occupant carries so a
+// user hovering "ADMIN" still discovers the bot/verified tags.
+const authorBadgeTooltip = computed(() => {
+  const labels: string[] = [];
+  const authority = authorityBadge(props.authority);
+  if (authority) labels.push(authority.label);
+  for (const hat of props.hats ?? []) {
+    labels.push(DESCRIPTIVE_HAT_LABELS[hat.uri] ?? hat.title);
+  }
+  return labels.join(" · ");
 });
 
 const eventBands = computed(() =>
@@ -871,11 +931,11 @@ onBeforeUnmount(() => {
           @click.stop="emitAvatarClick"
         >{{ message.author }}</button>
         <span
-          v-if="seniorHat"
+          v-if="authorBadge"
           class="chat-hat-tag"
-          :class="HAT_COLORS[seniorHat.uri] ?? 'text-muted-foreground'"
-          :title="hats.length > 1 ? hats.map(h => HAT_LABELS[h.uri] ?? h.title).join(' · ') : seniorHat.title"
-        >{{ HAT_LABELS[seniorHat.uri] ?? seniorHat.title }}</span>
+          :class="authorBadge.colorClass"
+          :title="authorBadgeTooltip"
+        >{{ authorBadge.label }}</span>
         <span class="type-meta type-numeric text-muted-foreground/60">
           {{ formatTimelineTimeOfDay(message.createdAt) }}
         </span>

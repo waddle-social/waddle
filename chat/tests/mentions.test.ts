@@ -65,7 +65,7 @@ describe("mention helpers", () => {
         jid: "alice@example.com",
         username: "alice",
         avatar_url: null,
-        role: "owner",
+        affiliation: "owner",
         joined_at: "",
       }],
       roomPresence: {
@@ -90,7 +90,7 @@ describe("mention helpers", () => {
 
   test("autocomplete includes merged presence occupants alongside broadcast mentions", () => {
     const merged = mergeMentionMembers({
-      members: [{ jid: "alice@example.com", username: "alice", avatar_url: null, role: "owner", joined_at: "" }],
+      members: [{ jid: "alice@example.com", username: "alice", avatar_url: null, affiliation: "owner", joined_at: "" }],
       roomPresence: { alice: "online", bob: "online" },
       memberJidsByNick: { Bob: "bob@example.com" },
     });
@@ -103,7 +103,7 @@ describe("mention helpers", () => {
 
   test("displayed member counts include affiliation members and live occupants", () => {
     const merged = mergeMentionMembers({
-      members: [{ jid: "alice@example.com", username: "alice", avatar_url: null, role: "owner", joined_at: "" }],
+      members: [{ jid: "alice@example.com", username: "alice", avatar_url: null, affiliation: "owner", joined_at: "" }],
       roomPresence: { alice: "online", bob: "online", carol: "offline" },
       memberJidsByNick: { Bob: "bob@example.com" },
     });
@@ -115,8 +115,8 @@ describe("mention helpers", () => {
   test("autocomplete candidates include registered offline members once", () => {
     const merged = mergeMentionMembers({
       members: [
-        { jid: "alice@example.com", username: "alice", avatar_url: "https://example.com/alice.png", role: "owner", joined_at: "" },
-        { jid: "bob@example.com", username: "bob", avatar_url: null, role: "member", joined_at: "" },
+        { jid: "alice@example.com", username: "alice", avatar_url: "https://example.com/alice.png", affiliation: "owner", joined_at: "" },
+        { jid: "bob@example.com", username: "bob", avatar_url: null, affiliation: "member", joined_at: "" },
       ],
       roomPresence: {},
       memberJidsByNick: {},
@@ -136,10 +136,10 @@ describe("mention helpers", () => {
 
   test("autocomplete candidates exclude non-participating affiliations and broadcast collisions", () => {
     const candidates = mentionAutocompleteCandidates([
-      { jid: "here@example.com", username: "here", avatar_url: null, role: "member", joined_at: "" },
-      { jid: "mallory@example.com", username: "mallory", avatar_url: null, role: "outcast", joined_at: "" },
-      { jid: "nobody@example.com", username: "nobody", avatar_url: null, role: "none", joined_at: "" },
-      { jid: "alice@example.com", username: "alice", avatar_url: null, role: "admin", joined_at: "" },
+      { jid: "here@example.com", username: "here", avatar_url: null, affiliation: "member", joined_at: "" },
+      { jid: "mallory@example.com", username: "mallory", avatar_url: null, affiliation: "outcast", joined_at: "" },
+      { jid: "nobody@example.com", username: "nobody", avatar_url: null, affiliation: "none", joined_at: "" },
+      { jid: "alice@example.com", username: "alice", avatar_url: null, affiliation: "admin", joined_at: "" },
     ]);
 
     expect(candidates.map((candidate) => candidate.username)).toEqual(["everyone", "here", "alice"]);
@@ -186,7 +186,7 @@ describe("mention helpers", () => {
 
   test("avatar lookup candidates include visible MAM authors missing from members", () => {
     const candidates = avatarLookupCandidates({
-      members: [{ jid: "rawkode@waddle.social", username: "rawkode", avatar_url: null, role: "owner", joined_at: "" }],
+      members: [{ jid: "rawkode@waddle.social", username: "rawkode", avatar_url: null, affiliation: "owner", joined_at: "" }],
       messages: [
         {
           author: "randax",
@@ -250,7 +250,7 @@ describe("mention helpers", () => {
   test("across-contexts merge resolves DM peer via DM authorJid even when nick collides with a channel member", () => {
     const candidates = avatarLookupCandidatesAcrossContexts({
       channelMembers: [
-        { jid: "alice@waddle.social", username: "alice", avatar_url: null, role: "member", joined_at: "" },
+        { jid: "alice@waddle.social", username: "alice", avatar_url: null, affiliation: "member", joined_at: "" },
       ],
       channelMessages: [
         { author: "alice", authorJid: "chat@muc.waddle.social/alice", authorRealJid: "alice@waddle.social/laptop" },

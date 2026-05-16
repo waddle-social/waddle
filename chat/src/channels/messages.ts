@@ -7,6 +7,7 @@ import {
   barePeerJid,
   type RoomActivityEvent,
   type SessionLifecycleEvent,
+  type RoomAuthority,
   type RoomHats,
   type RoomPresence,
 } from "@/lib/xmpp-client";
@@ -73,6 +74,7 @@ export function useChannelMessages(
     virtualScroll: timelineEdgeScroller,
   });
   const roomHats = ref<RoomHats>({});
+  const roomAuthority = ref<RoomAuthority>({});
   const roomPresence = ref<RoomPresence>({});
   const roomLastSeen = ref<Record<string, number>>({});
   const slowModeCooldown = ref(0);
@@ -281,6 +283,9 @@ export function useChannelMessages(
       });
       client.setHatsHandler((hats) => {
         roomHats.value = hats;
+      });
+      client.setAuthorityHandler((authority) => {
+        roomAuthority.value = authority;
       });
       client.setPresenceHandler((presence) => {
         roomPresence.value = presence;
@@ -617,6 +622,7 @@ export function useChannelMessages(
     currentRoomJid,
     typingUsers,
     roomHats,
+    roomAuthority,
     roomPresence,
     roomLastSeen,
     slowModeCooldown,

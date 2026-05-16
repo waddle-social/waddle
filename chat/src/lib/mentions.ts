@@ -2,7 +2,7 @@ import type { MemberSummary } from "@/lib/chat-types";
 import type { TimelineMessage } from "@/lib/chat-ui";
 
 const BROADCAST_MENTION_SET = new Set(["everyone", "here"]);
-const MENTIONABLE_MEMBER_ROLES = new Set<MemberSummary["role"]>(["owner", "admin", "member"]);
+const MENTIONABLE_MEMBER_AFFILIATIONS = new Set<MemberSummary["affiliation"]>(["owner", "admin", "member"]);
 
 /** Fixed broadcast-mention identifiers, ordered for display. */
 const BROADCAST_MENTIONS = ["everyone", "here"] as const;
@@ -85,7 +85,7 @@ export function mentionAutocompleteCandidates(
 
   for (const member of members) {
     const canonical = canonicalMentionIdentifier(member.username);
-    if (!canonical || seen.has(canonical) || !MENTIONABLE_MEMBER_ROLES.has(member.role)) {
+    if (!canonical || seen.has(canonical) || !MENTIONABLE_MEMBER_AFFILIATIONS.has(member.affiliation)) {
       continue;
     }
     candidates.push({
@@ -277,7 +277,7 @@ export function mergeMentionMembers({
   for (const member of members) {
     const canonical = canonicalMentionIdentifier(member.username);
     jidByMemberUsername[canonical] = member.jid;
-    if (MENTIONABLE_MEMBER_ROLES.has(member.role)) {
+    if (MENTIONABLE_MEMBER_AFFILIATIONS.has(member.affiliation)) {
       authorJidByNick[member.username] = member.jid;
     }
   }
@@ -298,7 +298,7 @@ export function mergeMentionMembers({
           jid: jidFromPresence,
           username: nick,
           avatar_url: null,
-          role: "member",
+          affiliation: "member",
           joined_at: "",
         });
         existingNicks.add(canonicalNick);

@@ -139,8 +139,8 @@ pub use super::xep0308::{
 };
 
 pub use super::xep0317::{
-    build_hats_element, extract_hats_from_presence, has_hats, hats_from_affiliation,
-    is_hats_element, parse_hats_element, set_hats, strip_hats, Hat, HatCarrier, HatSet, NS_HATS,
+    build_hats_element, extract_hats_from_presence, has_hats, is_hats_element, parse_hats_element,
+    set_hats, strip_hats, Hat, HatCarrier, HatSet, NS_HATS,
 };
 
 pub use super::xep0319::{

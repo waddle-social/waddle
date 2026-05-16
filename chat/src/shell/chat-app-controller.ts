@@ -16,7 +16,6 @@ import { useXmppRosterContacts } from "@/contacts/roster";
 import { buildDirectMessagePath, buildChannelExtensionPath, buildChannelPath, buildChatSettingsPath, parseChatLocation, pushDirectMessageRoute, pushChannelExtensionRoute, pushChannelRoute, pushChatSettingsRoute, resolveChannelBySlug, shouldLoadWaddleStructureForRoute } from "@/shell/navigation";
 import { barePeerJid, jidDomain, parseManagedRoomBareJid } from "@/lib/xmpp-client";
 import { roomJidForChannelId as resolveRoomJidForChannelId } from "@/lib/channel-room";
-import { mergeRoomHats, roomHatsFromMembers } from "@/lib/xmpp/occupant-badges";
 import { connectionStore } from "@/lib/connection-store";
 import { resetPinnedRooms } from "@/stores/pinned-messages";
 import { hydratePinnedBodiesOnPanelOpen } from "@/services/pinned-message-bodies";
@@ -436,11 +435,11 @@ export function useChatAppController(giphyApiKey: string) {
   watch(mentionSourceDiagnostic, (detail) => {
     if (detail) console.warn(detail);
   });
-  const memberRoleOrder = { owner: 0, admin: 1, member: 2, outcast: 3, none: 4 } as const;
+  const memberAffiliationOrder = { owner: 0, admin: 1, member: 2, outcast: 3, none: 4 } as const;
   const displayedMembers = computed<MemberSummary[]>(() =>
     [...mergedMentionMembers.value.members].sort(
       (a, b) =>
-        (memberRoleOrder[a.role] ?? 4) - (memberRoleOrder[b.role] ?? 4) ||
+        (memberAffiliationOrder[a.affiliation] ?? 4) - (memberAffiliationOrder[b.affiliation] ?? 4) ||
         a.username.localeCompare(b.username, undefined, { sensitivity: "base" }),
     ),
   );
@@ -550,9 +549,19 @@ export function useChatAppController(giphyApiKey: string) {
       avatar_url: fetchedAvatarUrlByJid.value[member.jid] ?? member.avatar_url,
     })),
   );
-  const authorHatsByNick = computed(() =>
-    mergeRoomHats(roomHatsFromMembers(displayedMembers.value), messaging.roomHats.value),
-  );
+  // XEP-0317 hats are server-emitted descriptive metadata only.
+  // No client-side fabrication: owner / admin / moderator state
+  // flows separately as `authorAuthorityByNick` below (XEP-0045
+  // affiliation + role), and the UI renders the two layers
+  // independently in MessageCard.vue.
+  const authorHatsByNick = computed(() => messaging.roomHats.value);
+
+  // Per-occupant MUC authority (affiliation + role) sourced live
+  // from each inbound MUC presence. Distinct from `authorHatsByNick`:
+  // authority is XEP-0045 and server-enforced; hats are XEP-0317
+  // descriptive metadata with no protocol semantics. UI surfaces
+  // that render OWNER / ADMIN / MOD chips read from here.
+  const authorAuthorityByNick = computed(() => messaging.roomAuthority.value);
 
   watch(
     () => [xmppClient.value, avatarCandidates.value.map((candidate) => candidate.jid).join("\n")] as const,
@@ -1645,6 +1654,7 @@ export function useChatAppController(giphyApiKey: string) {
       membersWithAvatars,
       inferredMemberJids,
       authorHatsByNick,
+      authorAuthorityByNick,
       activeActionError,
       activeErrorActionLabel,
       activeUploadProgress,

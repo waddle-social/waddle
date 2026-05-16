@@ -892,6 +892,7 @@ describe("XEP-0198 self-echo reconciliation (group chat)", () => {
       setReactionHandler() {},
       setDisplayedHandler() {},
       setHatsHandler() {},
+      setAuthorityHandler() {},
       setPresenceHandler() {},
       setLastSeenHandler() {},
       setActivityHandler() {},
