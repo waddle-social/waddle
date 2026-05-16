@@ -4,7 +4,9 @@ import { ArrowRight, Hash, MessageCircle, MessagesSquare, Users } from "lucide-v
 import type { ChannelSummary } from "@/lib/chat-types";
 import type { RosterContact } from "@/lib/xmpp/types";
 import AppAvatar from "@/components/ui/AppAvatar.vue";
+import CommunityFeed from "@/components/chat/CommunityFeed.vue";
 import Skeleton from "@/components/ui/Skeleton.vue";
+import type { FeedPostInput } from "@/lib/xmpp-client";
 import { isForumChannel } from "@/lib/channel-types";
 import { groupChannelsBySpace } from "@/lib/channel-grouping";
 import { formatTimelineStamp } from "@/channels/timeline";
@@ -29,6 +31,8 @@ const emit = defineEmits<{
   selectChannel: [id: string];
   selectContact: [jid: string];
   openNav: [];
+  refreshFeed: [];
+  postFeed: [input: FeedPostInput];
 }>();
 
 const now = ref<Date>(new Date());
@@ -325,6 +329,18 @@ function onHeroCta() {
           <Hash class="h-4 w-4" />
         </button>
       </section>
+
+      <CommunityFeed
+        v-if="feed"
+        :entries="feed.entries"
+        :is-loading="feed.isLoading"
+        :is-posting="feed.isPosting"
+        :error="feed.error"
+        :can-post="feed.canPost"
+        :self-jid="feed.selfJid"
+        @refresh="emit('refreshFeed')"
+        @post="(input) => emit('postFeed', input)"
+      />
 
       <section class="grid gap-3">
         <div class="flex items-center gap-2">

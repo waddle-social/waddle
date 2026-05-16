@@ -130,13 +130,13 @@ async fn seed_initial_xmpp_topology(
     // runs after this and gives server owners Publisher access via the
     // existing seed-all-nodes path.
     pubsub_storage
-        .get_or_create_node(spaces_jid, waddle_xmpp::xep::xep0472::PUBSUB_NODE_FEED)
+        .get_or_create_node(spaces_jid, waddle_xmpp_core::xep0472::PUBSUB_NODE_FEED)
         .await
         .map_err(|error| anyhow::anyhow!("failed to create social feed node: {error}"))?;
     pubsub_storage
         .update_node_config(
             spaces_jid,
-            waddle_xmpp::xep::xep0472::PUBSUB_NODE_FEED,
+            waddle_xmpp_core::xep0472::PUBSUB_NODE_FEED,
             &NodeConfig::spaces_public(),
         )
         .await

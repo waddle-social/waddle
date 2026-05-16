@@ -31,6 +31,7 @@ const {
   dmConversations,
   channelUnread,
   rosterContacts,
+  socialFeed,
   xmppClient,
   activeMessages,
   activeFirstUnseenId,
@@ -123,6 +124,18 @@ const homeDashboardProps = computed(() => buildHomeDashboardProps({
   mentionedRoomJids: messaging.mentionedChannelCounts.value,
   activeChannelJids: messaging.activeChannels.value,
   dmConversations: dmConversations.conversations.value,
+  feed: {
+    entries: socialFeed.entries.value,
+    isLoading: socialFeed.isLoading.value,
+    isPosting: socialFeed.isPosting.value,
+    error: socialFeed.error.value,
+    // First iteration: everyone signed in sees the feed; only server
+    // owners actually have Publisher affiliation, so non-owner posts
+    // surface as a stanza error → composer shows the error inline.
+    // Per-deployment role-based posting controls is a follow-up.
+    canPost: !!connectionStore.session,
+    selfJid: connectionStore.session?.jid ?? null,
+  },
 }));
 
 const contentPaneClass = computed(() => {
@@ -224,6 +237,8 @@ function setPinnedPanelOpen(isOpen: boolean) {
         @select-channel="selectChannel"
         @select-contact="handleOpenDm"
         @open-nav="ui.showMobileNav.value = true"
+        @refresh-feed="socialFeed.refresh()"
+        @post-feed="(input) => socialFeed.post(input)"
       />
       <UserSettingsPage
         v-else-if="ui.activePage.value === 'settings' && connectionStore.session"

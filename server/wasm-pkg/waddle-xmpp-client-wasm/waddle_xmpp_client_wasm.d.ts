@@ -10,6 +10,20 @@ export class WaddleClient {
     discover_extension_routes(user_jid?: string | null): Promise<any>;
     discover_upload_service(): Promise<any>;
     enable_push_notifications(service_jid: string, node: string, token: string): Promise<any>;
+    /**
+     * Fetch the latest items from the community Social Feed node on
+     * `spaces_jid` (typically `spaces.<domain>`). Returns an array of
+     * JsFeedEntry objects ordered as the server delivered them
+     * (newest first by `last_published`).
+     */
+    feed_items(spaces_jid: string, max_items?: number | null): Promise<any>;
+    /**
+     * Publish a new entry to the community Social Feed. The server
+     * enforces publish authorisation via XEP-0060 affiliations;
+     * callers without Publisher access receive a Forbidden stanza
+     * error which surfaces as a rejected Promise.
+     */
+    feed_publish(spaces_jid: string, entry: any): Promise<any>;
     fetch_dm_history(peer_jid: string, max: number, before_id?: string | null): Promise<any>;
     fetch_dm_history_page(peer_jid: string, max: number, page_param: any): Promise<any>;
     fetch_extension_route_items(route: any, room_jid: string): Promise<any>;

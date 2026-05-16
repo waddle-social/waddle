@@ -1,7 +1,16 @@
 import type { ChannelSummary, SpaceSummary } from "@/lib/chat-types";
 import type { RosterContact } from "@/lib/xmpp/types";
-import type { DmConversation } from "@/lib/xmpp-client";
+import type { DmConversation, FeedEntry } from "@/lib/xmpp-client";
 import type { ChannelUnreadMap } from "@/home/activity";
+
+export interface HomeDashboardFeedState {
+  entries: readonly FeedEntry[];
+  isLoading: boolean;
+  isPosting: boolean;
+  error: string | null;
+  canPost: boolean;
+  selfJid: string | null;
+}
 
 export interface HomeDashboardProps {
   spaces: SpaceSummary[];
@@ -11,6 +20,7 @@ export interface HomeDashboardProps {
   channelUnreadMap?: ChannelUnreadMap;
   activeChannelJids?: Set<string>;
   dmConversations?: DmConversation[];
+  feed?: HomeDashboardFeedState;
 }
 
 interface HomeDashboardSources extends Omit<HomeDashboardProps, "channelUnreadMap"> {
@@ -31,6 +41,7 @@ export function buildHomeDashboardProps(sources: HomeDashboardSources): HomeDash
     ),
     activeChannelJids: sources.activeChannelJids,
     dmConversations: sources.dmConversations,
+    ...(sources.feed ? { feed: sources.feed } : {}),
   };
 }
 
