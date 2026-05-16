@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, watch } from "vue";
-import { Hash, MessagesSquare, Plus, Settings, Users, ChevronDown, MessageCircle } from "lucide-vue-next";
+import { Hash, MessagesSquare, Plus, Settings, Users, ChevronDown, ChevronRight, MessageCircle } from "lucide-vue-next";
 import { isForumChannel as detectForumChannel } from "@/lib/channel-types";
 import type { ChannelSummary, SpaceSummary } from "@/lib/chat-types";
 import type { ChannelThreadInboxEntry } from "@/channels/inbox";
@@ -382,7 +382,12 @@ watch(
       </div>
     </div>
 
-    <!-- Members footer -->
+    <!-- Members footer — promoted from a flat "Members N" row to a
+         clearly affordant button: the trailing ChevronRight signals
+         "this opens a panel" (matches the iconography of other
+         disclosure actions in the app) and the row lifts on hover.
+         The Users glyph wakes up alongside the chevron so the whole
+         row reads as one armed control. -->
     <div v-if="waddle" class="chat-sidebar-footer">
       <button
         class="chat-sidebar-footer-action chat-list-row w-full flex items-center gap-2.5 bg-sidebar-accent/40 px-3 py-0 text-sidebar-muted hover:bg-sidebar-accent/70 hover:text-sidebar-foreground text-left group"
@@ -392,6 +397,7 @@ watch(
         <Users class="w-3.5 h-3.5 flex-shrink-0 opacity-40 group-hover:opacity-70 transition-opacity" />
         <span class="type-control flex-1">Members</span>
         <span class="type-meta text-sidebar-muted">{{ memberCountLabel() }}</span>
+        <ChevronRight class="w-3.5 h-3.5 flex-shrink-0 opacity-30 group-hover:opacity-70 group-hover:translate-x-0.5 transition-all" aria-hidden="true" />
       </button>
     </div>
   </div>
