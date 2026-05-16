@@ -39,6 +39,20 @@ const wrapperSizeClass = computed(() => {
 });
 
 const bgColor = computed(() => consistentColor(props.name, 55, 45));
+
+// Subtle radial gradient for the letter-fallback avatar — slight
+// highlight up-and-left, base color in the body, slight shade
+// bottom-right. Mixes in OKLab against the name-derived hue so each
+// avatar keeps its identity while gaining a tiny "lit from above"
+// dimensionality. Flat-solid discs read as wireframes; this reads
+// as a finished mark without straying into skeuomorphic territory.
+const fallbackBackground = computed(() =>
+  `radial-gradient(circle at 32% 26%, ` +
+    `color-mix(in oklab, ${bgColor.value}, white 22%), ` +
+    `${bgColor.value} 58%, ` +
+    `color-mix(in oklab, ${bgColor.value}, black 14%))`,
+);
+
 const showImage = computed(() => !!props.src && !imageFailed.value);
 
 const presenceDotColor = computed(() => {
@@ -116,7 +130,10 @@ watch(
     <div
       v-else
       :class="[sizeClass, 'type-avatar-mark flex items-center justify-center rounded-lg text-white']"
-      :style="{ backgroundColor: bgColor, boxShadow: `0 2px 8px ${bgColor}30` }"
+      :style="{
+        background: fallbackBackground,
+        boxShadow: `inset 0 1px 0 rgba(255,255,255,0.18), 0 2px 8px ${bgColor}30`,
+      }"
     >
       {{ initials }}
     </div>
