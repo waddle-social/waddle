@@ -85,19 +85,25 @@ function authorityBadge(authority: OccupantAuthority | null | undefined): BadgeV
   return null;
 }
 
+// Waddle's descriptive hat URIs live under `urn:waddle:hats:*`, not
+// `urn:xmpp:hats:*`. XEP-0317 deliberately leaves the hat URI value
+// space open; minting Waddle-specific semantics inside the XSF
+// reserve would falsely claim XSF registration. The container
+// namespace `urn:xmpp:hats:0` is unchanged because that one is
+// spec-defined.
 const DESCRIPTIVE_HAT_LABELS: Record<string, string> = {
-  "urn:xmpp:hats:bot": "BOT",
-  "urn:xmpp:hats:verified": "VERIFIED",
+  "urn:waddle:hats:bot": "BOT",
+  "urn:waddle:hats:verified": "VERIFIED",
 };
 
 const DESCRIPTIVE_HAT_COLORS: Record<string, string> = {
-  "urn:xmpp:hats:bot": "text-success/75",
-  "urn:xmpp:hats:verified": "text-primary/75",
+  "urn:waddle:hats:bot": "text-success/75",
+  "urn:waddle:hats:verified": "text-primary/75",
 };
 
 const DESCRIPTIVE_HAT_RANK: Record<string, number> = {
-  "urn:xmpp:hats:verified": 1,
-  "urn:xmpp:hats:bot": 0,
+  "urn:waddle:hats:verified": 1,
+  "urn:waddle:hats:bot": 0,
 };
 
 function descriptiveBadge(hats: OccupantHat[] | null | undefined): BadgeView | null {

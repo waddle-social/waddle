@@ -29,7 +29,7 @@
 //!     <item affiliation='admin' role='moderator'/>
 //!   </x>
 //!   <hats xmlns='urn:xmpp:hats:0'>
-//!     <hat title='Bot' uri='urn:xmpp:hats:bot'/>
+//!     <hat title='Bot' uri='urn:waddle:hats:bot'/>
 //!   </hats>
 //! </presence>
 //! ```
@@ -40,14 +40,25 @@ use xmpp_parsers::presence::Presence;
 /// Namespace for XEP-0317 Hats.
 pub const NS_HATS: &str = "urn:xmpp:hats:0";
 
-/// Well-known hat URIs Waddle assigns out-of-band. Note that these are
-/// purely descriptive — they confer no authority. Authority is carried
-/// by MUC role/affiliation, not by hats.
+/// Well-known hat URIs Waddle assigns out-of-band. Purely descriptive —
+/// they confer no authority; authority is carried by MUC role and
+/// affiliation, not by hats.
+///
+/// These URIs live under the `urn:waddle:hats:` prefix, not
+/// `urn:xmpp:hats:`. XEP-0317 deliberately leaves the `name`/`uri`
+/// value space open ("Names can be registered with the XMPP Registrar"
+/// — §3) and uses domain-owned URIs in its own examples
+/// (`http://tech.example.edu/hats#TeacherAssistant`,
+/// `http://schemas.example.com/hats#host`). Minting Waddle-specific
+/// semantics under `urn:xmpp:hats:*` — the XSF reserve — would falsely
+/// claim XSF registration; `urn:waddle:hats:*` is honestly ours. The
+/// spec-defined CONTAINER namespace `urn:xmpp:hats:0` is unchanged on
+/// the wire because that one IS the spec-defined identifier.
 pub mod well_known {
     /// Automated bot.
-    pub const BOT: &str = "urn:xmpp:hats:bot";
+    pub const BOT: &str = "urn:waddle:hats:bot";
     /// Verified/trusted user.
-    pub const VERIFIED: &str = "urn:xmpp:hats:verified";
+    pub const VERIFIED: &str = "urn:waddle:hats:verified";
 }
 
 /// A single hat (role badge).
@@ -244,7 +255,7 @@ mod tests {
         let xml = "<presence xmlns='jabber:client'>\
                     <hats xmlns='urn:xmpp:hats:0'>\
                       <hat title='Speaker' uri='urn:example:speaker'/>\
-                      <hat title='Bot' uri='urn:xmpp:hats:bot'/>\
+                      <hat title='Bot' uri='urn:waddle:hats:bot'/>\
                     </hats>\
                     </presence>";
         let presence =
@@ -293,7 +304,7 @@ mod tests {
     fn strip_removes_existing_hats_payload() {
         let xml = "<presence xmlns='jabber:client'>\
                     <hats xmlns='urn:xmpp:hats:0'>\
-                      <hat title='Bot' uri='urn:xmpp:hats:bot'/>\
+                      <hat title='Bot' uri='urn:waddle:hats:bot'/>\
                     </hats>\
                     </presence>";
         let mut presence =
@@ -307,7 +318,7 @@ mod tests {
     fn hat_carrier_trait_reads_hats_off_presence() {
         let xml = "<presence xmlns='jabber:client'>\
                     <hats xmlns='urn:xmpp:hats:0'>\
-                      <hat title='Bot' uri='urn:xmpp:hats:bot'/>\
+                      <hat title='Bot' uri='urn:waddle:hats:bot'/>\
                     </hats>\
                     </presence>";
         let presence =
@@ -355,7 +366,7 @@ mod tests {
     fn set_hats_with_empty_set_removes_payload_entirely() {
         let xml = "<presence xmlns='jabber:client'>\
                     <hats xmlns='urn:xmpp:hats:0'>\
-                      <hat title='Bot' uri='urn:xmpp:hats:bot'/>\
+                      <hat title='Bot' uri='urn:waddle:hats:bot'/>\
                     </hats>\
                     </presence>";
         let mut presence =
@@ -396,7 +407,7 @@ mod tests {
         // owner/admin/moderator — those are MUC authority, conveyed
         // by the XEP-0045 `<x muc#user><item/>` payload.
         // Only descriptive concepts (Bot, Verified) live here.
-        assert_eq!(well_known::BOT, "urn:xmpp:hats:bot");
-        assert_eq!(well_known::VERIFIED, "urn:xmpp:hats:verified");
+        assert_eq!(well_known::BOT, "urn:waddle:hats:bot");
+        assert_eq!(well_known::VERIFIED, "urn:waddle:hats:verified");
     }
 }
