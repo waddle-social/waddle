@@ -249,8 +249,21 @@
   color: var(--primary);
 }
 
+/* Active rail button — armed treatment: bumped ring alpha (18% → 40%)
+ * plus a primary-tinted glow halo so the active state speaks the
+ * same brand-armed language as the iter-61 header toggle and
+ * iter-54 bell badge. Distinguishes "this panel is currently open"
+ * from "the cursor is hovering this button". */
 .extension-route-rail__button--active {
-  box-shadow: 0 0 0 1px color-mix(in oklab, var(--primary) 18%, transparent);
+  box-shadow:
+    0 0 0 1px color-mix(in oklab, var(--primary) 40%, transparent),
+    0 0 10px color-mix(in oklab, var(--primary) 35%, transparent);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .extension-route-rail__button--active {
+    box-shadow: 0 0 0 1px color-mix(in oklab, var(--primary) 40%, transparent);
+  }
 }
 
 .chat-rail {
