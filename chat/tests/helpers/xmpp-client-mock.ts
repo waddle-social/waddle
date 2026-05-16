@@ -13,6 +13,7 @@ export function handlerStubs() {
     setReactionHandler: () => {},
     setDisplayedHandler: () => {},
     setHatsHandler: () => {},
+    setAuthorityHandler: () => {},
     setPresenceHandler: () => {},
     setLastSeenHandler: () => {},
     setActivityHandler: () => {},

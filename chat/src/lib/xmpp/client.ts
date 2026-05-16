@@ -37,7 +37,6 @@ import type {
   XmppStatusSnapshot,
 } from "./types";
 import { parseMucAffiliation, parseMucRole } from "./types";
-import { mergeOccupantHats, roleHatsForOccupant } from "./occupant-badges";
 import { prepareEncryptedAttachmentUpload } from "./encrypted-attachments";
 
 import { discoverChannels, discoverTopology } from "./discovery";
@@ -1020,7 +1019,15 @@ export class BrowserXmppClient {
         this.lastSeenHandler?.(nick, Date.now());
         return;
       }
-      this.roomHats[nick] = mergeOccupantHats(roleHatsForOccupant((presence as any).muc_affiliation, (presence as any).muc_role), ((presence as any).hats ?? []).map((hat: any) => ({ uri: hat.uri, title: hat.title })));
+      // XEP-0317 hats are server-emitted descriptive metadata only.
+      // No client-side fabrication from muc_affiliation/muc_role —
+      // those flow as `roomAuthority` and drive authority chips
+      // independently (see `parseMucAffiliation` / `parseMucRole`
+      // below).
+      this.roomHats[nick] = ((presence as any).hats ?? []).map((hat: any) => ({
+        uri: hat.uri,
+        title: hat.title,
+      }));
       this.hatsHandler?.({ ...this.roomHats });
       this.roomAuthority[nick] = {
         affiliation: parseMucAffiliation((presence as any).muc_affiliation),
