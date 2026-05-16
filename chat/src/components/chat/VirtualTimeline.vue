@@ -98,6 +98,38 @@ async function scrollToPinnedEdge(mode: ScrollDirectionMode) {
     align: isTopPinnedScrollDirection(mode) ? "start" : "end",
   });
   await nextTick();
+  // The virtualizer's `scrollToIndex` plans the scroll using the
+  // `estimateSize` heights (112px / 44px); real rows — especially
+  // ones with images, code blocks, or extension cards — measure much
+  // taller. After `scrollToIndex` we're "close to" the edge, but the
+  // measurement reconciliation that follows grows scrollHeight, so we
+  // end up several rows shy of the actual last message.
+  //
+  // Pin scrollTop directly across a short raf loop, bailing once the
+  // scrollHeight stops changing for two consecutive frames. The
+  // browser clamps to (scrollHeight - clientHeight) for us so this
+  // always lands at the true edge once measurements settle. Capped
+  // at 8 frames so a runaway re-render can't spin the loop.
+  const el = scrollElement.value;
+  if (!el) return true;
+  await new Promise<void>((resolve) => {
+    const topPinned = isTopPinnedScrollDirection(mode);
+    let lastHeight = -1;
+    let stable = 0;
+    let frames = 0;
+    function tick() {
+      el!.scrollTop = topPinned ? 0 : el!.scrollHeight;
+      if (el!.scrollHeight === lastHeight) {
+        if (++stable >= 2) return resolve();
+      } else {
+        stable = 0;
+        lastHeight = el!.scrollHeight;
+      }
+      if (++frames >= 8) return resolve();
+      requestAnimationFrame(tick);
+    }
+    requestAnimationFrame(tick);
+  });
   return true;
 }
 
