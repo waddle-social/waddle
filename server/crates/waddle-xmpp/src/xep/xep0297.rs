@@ -79,6 +79,12 @@ pub trait ForwardingCarrier {
     }
 }
 
+impl ForwardingCarrier for Message {
+    fn forwarded_message(&self) -> Option<ForwardedMessage> {
+        extract_forwarded_from_message(self)
+    }
+}
+
 // ── Detection ────────────────────────────────────────────────────────
 
 /// Check if an element is a `<forwarded/>` element.
