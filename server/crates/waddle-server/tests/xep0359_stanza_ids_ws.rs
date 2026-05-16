@@ -248,7 +248,6 @@ async fn server_disco_advertises_rich_message_features() {
         "urn:xmpp:reactions:0",
         "urn:xmpp:reference:0",
         "urn:xmpp:fallback:0",
-        "urn:xmpp:threads:0",
     ] {
         assert!(
             response.contains(ns),

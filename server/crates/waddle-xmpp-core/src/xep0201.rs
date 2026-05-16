@@ -15,16 +15,15 @@
 //! thread id; for the optional `parent=` attribute this module exposes helpers
 //! that operate on the raw `minidom::Element` form of the message.
 //!
-//! Waddle advertises `urn:xmpp:threads:0` in disco#info so that clients can
-//! discover thread-aware services/rooms.
+//! XEP-0201 is Informational and does NOT define a disco#info feature.
+//! Waddle therefore does not advertise a `urn:xmpp:threads:*` namespace —
+//! `<thread/>` support is implicit in RFC-6121 conformance and the parent=
+//! attribute is documented purely in this XEP.
 
 use crate::mam::ThreadId;
 use minidom::Element;
 use serde::{Deserialize, Serialize};
 use xmpp_parsers::message::{Message, Thread};
-
-/// Waddle discovery feature string for XEP-0201 thread support.
-pub const NS_THREAD_FEATURE: &str = "urn:xmpp:threads:0";
 
 /// The RFC 6121 thread element name.
 pub const THREAD_ELEMENT: &str = "thread";

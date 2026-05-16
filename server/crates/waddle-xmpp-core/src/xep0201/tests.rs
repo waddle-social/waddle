@@ -165,11 +165,6 @@ fn install_thread_element_preserves_explicit_empty_namespace_thread_payload() {
 }
 
 #[test]
-fn thread_feature_constant() {
-    assert_eq!(NS_THREAD_FEATURE, "urn:xmpp:threads:0");
-}
-
-#[test]
 fn set_and_get_thread_id_round_trip() {
     let mut msg = Message::new(None::<jid::Jid>);
     assert_eq!(thread_id_from_message(&msg), None);

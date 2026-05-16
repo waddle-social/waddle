@@ -83,10 +83,6 @@ impl Feature {
         Self::new("urn:xmpp:fallback:0")
     }
 
-    pub fn threads() -> Self {
-        Self::new("urn:xmpp:threads:0")
-    }
-
     pub fn stream_management() -> Self {
         Self::new("urn:xmpp:sm:3")
     }
