@@ -196,6 +196,22 @@
   text-align: center;
 }
 
+/* Side-rail panel empty state (Saved Links, Pins, etc.) — same halo
+ * pattern as `.chat-empty-state` but scaled for the narrower side
+ * panel: fills the parent's height (the `.chat-pane-scroll` ancestor
+ * isn't a flex container, so we use min-height: 100% instead of
+ * flex-1 to claim the available space), tighter gap, content
+ * stacked and centered both axes. */
+.chat-route-empty {
+  display: flex;
+  min-height: 100%;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-sm);
+  text-align: center;
+}
+
 .chat-empty-state__halo {
   position: relative;
   isolation: isolate;

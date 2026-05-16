@@ -36,6 +36,16 @@ const routeKey = computed(() =>
 );
 
 const surfaceIcon = computed(() => props.route?.surface === "gallery" ? Grid3X3 : List);
+
+// Derives "No saved links yet" / "No pins yet" / etc. from the route's
+// label. Falls back to a generic "Nothing here yet" when no route is
+// resolved (loading / error / missing-route states render different
+// branches; this is purely for the empty `items` happy path).
+const emptyHeadline = computed(() => {
+  const label = props.route?.label?.trim();
+  if (!label) return "Nothing here yet";
+  return `No ${label.toLowerCase()} yet`;
+});
 let refreshRequestId = 0;
 
 async function refreshItems() {
@@ -156,8 +166,22 @@ onMounted(focusPanel);
         <WifiOff class="h-4 w-4 shrink-0" />
         <span class="type-control">{{ actionError }}</span>
       </div>
-      <div v-else-if="items.length === 0" class="type-caption flex h-full items-center justify-center text-muted-foreground">
-        Nothing saved yet.
+      <!-- Empty state — replaces the prior bare "Nothing saved yet."
+           with the iter-20 halo+glyph pattern so the panel feels
+           authored, not empty. Headline derives from the route's
+           label ("No saved links yet", "No pins yet") so any extension
+           route gets a meaningful empty state without per-route copy. -->
+      <div v-else-if="items.length === 0" class="chat-route-empty">
+        <div class="chat-empty-state__halo">
+          <div class="chat-empty-state__halo-glow chat-empty-state__halo-glow--primary"></div>
+          <div class="chat-empty-state__halo-ring chat-empty-state__halo-ring--primary">
+            <component :is="surfaceIcon" class="h-4 w-4 text-primary" aria-hidden="true" />
+          </div>
+        </div>
+        <div class="type-card-title text-foreground">{{ emptyHeadline }}</div>
+        <div class="type-caption text-muted-foreground max-w-[18rem]">
+          Items added through {{ route?.label ?? "this extension" }} will appear here.
+        </div>
       </div>
       <div
         v-else
