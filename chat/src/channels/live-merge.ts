@@ -5,7 +5,7 @@ import {
   type DeliveryStatus,
   type TimelineMessage,
 } from "@/lib/chat-ui";
-import { findMessageById, matchMessageId, mergeMessageIds } from "@/lib/message-ids";
+import { findMessageById, findMessageIndexById, mergeMessageIds } from "@/lib/message-ids";
 import { applyForumContext, isFeedTimelineMessage, mapLiveRoomMessageToTimeline } from "@/channels/timeline";
 import {
   isMucServiceModeration,
@@ -20,6 +20,10 @@ import {
   retractChannelTimelineMessage,
 } from "@/channels/message-timeline-state";
 import { classifyRoomMessage } from "@/lib/xmpp/classify-room-message";
+import { compareTimelineMessages } from "@/lib/timeline-timestamps";
+import {
+  canUseSelfEchoBodyFallback,
+} from "@/lib/self-echo-fallback";
 
 // Inbound merge composable for the channel side: applies incoming
 // retractions (XEP-0424 / 0425), corrections (XEP-0308), reactions
@@ -64,7 +68,7 @@ export function useChannelLiveMerge(deps: UseChannelLiveMergeDeps) {
    * inbound XEP-0333 marker.
    */
   function applyDisplayed(messageId: string, nick: string) {
-    const index = messages.value.findIndex((m) => matchMessageId(m, messageId));
+    const index = findMessageIndexById(messages.value, messageId);
     if (index < 0) return;
     const current = messages.value[index]!;
     const existing = current.readBy ? [...current.readBy] : [];
@@ -113,7 +117,7 @@ export function useChannelLiveMerge(deps: UseChannelLiveMergeDeps) {
    */
   function applyRetraction(msg: LiveRoomMessage) {
     if (!msg.retractsId) return;
-    const index = messages.value.findIndex((m) => matchMessageId(m, msg.retractsId!));
+    const index = findMessageIndexById(messages.value, msg.retractsId);
     if (index < 0) return;
     const target = messages.value[index]!;
     if (msg.moderationTargetId) {
@@ -146,10 +150,10 @@ export function useChannelLiveMerge(deps: UseChannelLiveMergeDeps) {
     extensionAnnotations?: LiveRoomMessage["extensionAnnotations"],
     extensionBodyFallback?: boolean,
   ) {
-    const index = messages.value.findIndex((m) =>
-      matchMessageId(m, replacesId) && isSameMucCorrectionSender(m, correctionSender)
-    );
-    if (index < 0) return;
+    const candidateIndex = findMessageIndexById(messages.value, replacesId);
+    if (candidateIndex < 0) return;
+    if (!isSameMucCorrectionSender(messages.value[candidateIndex]!, correctionSender)) return;
+    const index = candidateIndex;
     const current = messages.value[index]!;
     const updated: TimelineMessage = { ...current, body: newBody.trim(), isEdited: true };
     if (markup && markup.length > 0) updated.markup = markup;
@@ -182,40 +186,54 @@ export function useChannelLiveMerge(deps: UseChannelLiveMergeDeps) {
     const existingById = [msg.id, ...(msg.wireIds ?? [])]
       .map((id) => findMessageById(messages.value, id))
       .find((message): message is TimelineMessage => !!message);
-    const pendingSelfEcho = messages.value.find(
-      (m) => pendingEchoClientIds.has(m.id) && m.isSelf && msg.isSelf && m.body === msg.body,
-    );
-    const preservedSelfEcho = [...messages.value].reverse().find(
-      (m) =>
-        m.isSelf
-        && msg.isSelf
-        && m.body === msg.body
-        && !!m.deliveryStatus
-        && m.deliveryStatus !== "delivered",
-    );
+    const bodyFallbackAllowed = !existingById && canUseSelfEchoBodyFallback(msg);
+    const pendingSelfEcho = bodyFallbackAllowed
+      ? messages.value.find(
+        (m) =>
+          pendingEchoClientIds.has(m.id)
+          && m.isSelf
+          && m.body === msg.body,
+      )
+      : undefined;
+    const preservedSelfEcho = bodyFallbackAllowed
+      ? [...messages.value].reverse().find(
+        (m) =>
+          m.isSelf
+          && m.body === msg.body
+          && !!m.deliveryStatus
+          && m.deliveryStatus !== "delivered",
+      )
+      : undefined;
     const existing = existingById ?? pendingSelfEcho ?? preservedSelfEcho;
     if (existing) {
-      const wasPending = existing.id !== msg.id;
       messages.value = messages.value.map((m) => {
         if (m.id !== existing.id) return m;
+        const mergedIds = mergeMessageIds(m, msg.id, msg.wireIds);
         const updated: TimelineMessage = {
           ...m,
           ...msg,
-          ...mergeMessageIds(m, msg.id, msg.wireIds),
+          id: mergedIds.id,
         };
+        if (mergedIds.wireIds?.length) updated.wireIds = mergedIds.wireIds;
+        else delete updated.wireIds;
         if (m.isSelf && msg.isSelf) {
           // A self-echo from the room is authoritative; it supersedes any
           // prior "sending" / "failed" optimistic state.
           updated.deliveryStatus = "delivered" as DeliveryStatus;
         }
         return updated;
-      });
+      }).sort(compareTimelineMessages);
       messages.value = applyForumContext(messages.value);
-      if (wasPending) pendingEchoClientIds.delete(existing.id);
+      // Drop every pending optimistic id this reconciliation accounted
+      // for — both the previous primary id and any pre-existing wire
+      // aliases — so a later same-body replay within the fallback window
+      // can never retarget the now-delivered row.
+      pendingEchoClientIds.delete(existing.id);
+      for (const alias of existing.wireIds ?? []) pendingEchoClientIds.delete(alias);
       return;
     }
     const channelId = activeChannelId.value;
-    messages.value = applyForumContext([...messages.value, msg]);
+    messages.value = applyForumContext([...messages.value, msg].sort(compareTimelineMessages));
     void scrollToPinnedEdgeAndPin();
     if (channelId && isFeedVisible(msg)) {
       persistLastSeen(channelId, msg.id);
@@ -267,4 +285,3 @@ export function useChannelLiveMerge(deps: UseChannelLiveMergeDeps) {
     handleRoomMessage,
   };
 }
-

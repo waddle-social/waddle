@@ -5,12 +5,16 @@ import {
   type DeliveryStatus,
   type TimelineMessage,
 } from "@/lib/chat-ui";
-import { findMessageById, matchMessageId, mergeMessageIds } from "@/lib/message-ids";
+import { findMessageById, findMessageIndexById, mergeMessageIds } from "@/lib/message-ids";
 import {
   fromLiveDmMessage,
   isSameDmCorrectionSender,
   retractDmTimelineMessage,
 } from "@/dms/message-timeline-state";
+import { compareTimelineMessages } from "@/lib/timeline-timestamps";
+import {
+  canUseSelfEchoBodyFallback,
+} from "@/lib/self-echo-fallback";
 
 // Inbound merge composable for DMs: applies incoming retractions
 // (XEP-0424), corrections (XEP-0308), reactions (XEP-0444), and displayed
@@ -50,7 +54,7 @@ export function useDmLiveMerge(deps: UseDmLiveMergeDeps) {
    * Short-circuits on target miss / already-marked.
    */
   function applyDisplayed(messageId: string, nick: string) {
-    const index = messages.value.findIndex((m) => matchMessageId(m, messageId));
+    const index = findMessageIndexById(messages.value, messageId);
     if (index < 0) return;
     const current = messages.value[index]!;
     const existing = current.readBy ? [...current.readBy] : [];
@@ -69,7 +73,7 @@ export function useDmLiveMerge(deps: UseDmLiveMergeDeps) {
    * mapping in onReaction.) Short-circuits on target miss.
    */
   function applyReaction(messageId: string, nick: string, emojis: string[]) {
-    const index = messages.value.findIndex((m) => matchMessageId(m, messageId));
+    const index = findMessageIndexById(messages.value, messageId);
     if (index < 0) return;
     const current = messages.value[index]!;
     const existing: Record<string, string[]> = current.reactions ? { ...current.reactions } : {};
@@ -95,12 +99,11 @@ export function useDmLiveMerge(deps: UseDmLiveMergeDeps) {
    */
   function applyRetraction(msg: LiveDmMessage) {
     if (!msg.retractsId) return;
-    const index = messages.value.findIndex(
-      (m) => matchMessageId(m, msg.retractsId!) && isSameDmCorrectionSender(m, msg.fromJid),
-    );
-    if (index < 0) return;
+    const candidateIndex = findMessageIndexById(messages.value, msg.retractsId);
+    if (candidateIndex < 0) return;
+    if (!isSameDmCorrectionSender(messages.value[candidateIndex]!, msg.fromJid)) return;
     const next = messages.value.slice();
-    next[index] = retractDmTimelineMessage(messages.value[index]!, msg.retractionId);
+    next[candidateIndex] = retractDmTimelineMessage(messages.value[candidateIndex]!, msg.retractionId);
     messages.value = next;
   }
 
@@ -117,10 +120,10 @@ export function useDmLiveMerge(deps: UseDmLiveMergeDeps) {
     extensionAnnotations?: LiveDmMessage["extensionAnnotations"],
     extensionBodyFallback?: boolean,
   ) {
-    const index = messages.value.findIndex(
-      (m) => matchMessageId(m, replacesId) && isSameDmCorrectionSender(m, correctionFromJid),
-    );
-    if (index < 0) return;
+    const candidateIndex = findMessageIndexById(messages.value, replacesId);
+    if (candidateIndex < 0) return;
+    if (!isSameDmCorrectionSender(messages.value[candidateIndex]!, correctionFromJid)) return;
+    const index = candidateIndex;
     const current = messages.value[index]!;
     const updated: TimelineMessage = { ...current, body: newBody.trim(), isEdited: true };
     if (markup && markup.length > 0) updated.markup = markup;
@@ -148,37 +151,51 @@ export function useDmLiveMerge(deps: UseDmLiveMergeDeps) {
     const existingById = [msg.id, ...(msg.wireIds ?? [])]
       .map((id) => findMessageById(messages.value, id))
       .find((message): message is TimelineMessage => !!message);
-    const pendingSelfEcho = messages.value.find(
-      (m) => pendingEchoClientIds.has(m.id) && m.isSelf && msg.isSelf && m.body === msg.body,
-    );
-    const preservedSelfEcho = [...messages.value].reverse().find(
-      (m) =>
-        m.isSelf
-        && msg.isSelf
-        && m.body === msg.body
-        && !!m.deliveryStatus
-        && m.deliveryStatus !== "delivered",
-    );
+    const bodyFallbackAllowed = !existingById && canUseSelfEchoBodyFallback(msg);
+    const pendingSelfEcho = bodyFallbackAllowed
+      ? messages.value.find(
+        (m) =>
+          pendingEchoClientIds.has(m.id)
+          && m.isSelf
+          && m.body === msg.body,
+      )
+      : undefined;
+    const preservedSelfEcho = bodyFallbackAllowed
+      ? [...messages.value].reverse().find(
+        (m) =>
+          m.isSelf
+          && m.body === msg.body
+          && !!m.deliveryStatus
+          && m.deliveryStatus !== "delivered",
+      )
+      : undefined;
     const existing = existingById ?? pendingSelfEcho ?? preservedSelfEcho;
     if (existing) {
-      const wasPending = existing.id !== msg.id;
       messages.value = messages.value.map((m) => {
         if (m.id !== existing.id) return m;
+        const mergedIds = mergeMessageIds(m, msg.id, msg.wireIds);
         const updated: TimelineMessage = {
           ...m,
           ...msg,
-          ...mergeMessageIds(m, msg.id, msg.wireIds),
+          id: mergedIds.id,
         };
+        if (mergedIds.wireIds?.length) updated.wireIds = mergedIds.wireIds;
+        else delete updated.wireIds;
         if (m.isSelf && msg.isSelf) {
           updated.deliveryStatus = "delivered" as DeliveryStatus;
         }
         return updated;
-      });
-      if (wasPending) pendingEchoClientIds.delete(existing.id);
+      }).sort(compareTimelineMessages);
+      // Drop every pending optimistic id this reconciliation accounted
+      // for — both the previous primary id and any pre-existing wire
+      // aliases — so a later same-body replay within the fallback window
+      // can never retarget the now-delivered row.
+      pendingEchoClientIds.delete(existing.id);
+      for (const alias of existing.wireIds ?? []) pendingEchoClientIds.delete(alias);
       return;
     }
     const peerJid = activePeerJid.value;
-    messages.value = [...messages.value, msg];
+    messages.value = [...messages.value, msg].sort(compareTimelineMessages);
     void scrollToPinnedEdgeAndPin();
     if (peerJid && isFeedVisible(msg)) {
       persistLastSeen(peerJid, msg.id);

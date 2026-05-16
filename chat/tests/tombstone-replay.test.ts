@@ -442,4 +442,59 @@ describe("XEP-0424 tombstone replay", () => {
     expect(timeline[0]?.extensionBodyFallback).toBeUndefined();
     expect(timeline[0]?.mentions).toBeUndefined();
   });
+
+  test("sorts channel MAM timeline by parsed timestamp, not lexical timestamp text", () => {
+    const first: LiveRoomMessage = {
+      id: "m1",
+      roomJid: "room@muc.example.com",
+      nick: "bob",
+      body: "first",
+      createdAt: "2026-05-14T10:36:55Z",
+      type: "message",
+    };
+    const second: LiveRoomMessage = {
+      id: "m2",
+      roomJid: "room@muc.example.com",
+      nick: "bob",
+      body: "second",
+      createdAt: "2026-05-14T10:36:55.100Z",
+      type: "message",
+    };
+
+    const timeline = buildChannelTimelineFromMamResults({
+      session,
+      channelIsForum: false,
+      mamResults: [second, first],
+    });
+
+    expect(timeline.map((message) => message.id)).toEqual(["m1", "m2"]);
+  });
+
+  test("sorts DM MAM timeline by parsed timestamp across RFC3339 variants", () => {
+    const first: LiveDmMessage = {
+      id: "dm-1",
+      peerJid: "bob@example.com",
+      fromJid: "bob@example.com/mobile",
+      nick: "bob",
+      body: "first",
+      createdAt: "2026-05-14T10:36:55+00:00",
+      type: "message",
+    };
+    const second: LiveDmMessage = {
+      id: "dm-2",
+      peerJid: "bob@example.com",
+      fromJid: "bob@example.com/mobile",
+      nick: "bob",
+      body: "second",
+      createdAt: "2026-05-14T10:36:55.100Z",
+      type: "message",
+    };
+
+    const timeline = buildDmTimelineFromMamResults({
+      session,
+      mamResults: [second, first],
+    });
+
+    expect(timeline.map((message) => message.id)).toEqual(["dm-1", "dm-2"]);
+  });
 });

@@ -169,6 +169,27 @@ describe("applyCorrection sender-match gate (XEP-0308)", () => {
 });
 
 describe("mergeLiveMessage self-echo reconciliation", () => {
+  test("keeps timeline ordered when an older catch-up message lands after a newer live message", () => {
+    const h = harness();
+    h.messages.value = [
+      {
+        id: "newer",
+        body: "newer",
+        nick: "bob",
+        isSelf: false,
+        createdAt: "2026-05-14T10:36:56.000Z",
+      } as TimelineMessage,
+    ];
+    h.liveMerge.mergeLiveMessage({
+      id: "older",
+      body: "older",
+      nick: "bob",
+      isSelf: false,
+      createdAt: "2026-05-14T10:36:55Z",
+    } as TimelineMessage);
+    expect(h.messages.value.map((message) => message.id)).toEqual(["older", "newer"]);
+  });
+
   test("body-match fallback only targets messages tracked in pendingEchoClientIds", () => {
     const h = harness();
     h.pendingEchoClientIds.add("client-1");
@@ -180,7 +201,7 @@ describe("mergeLiveMessage self-echo reconciliation", () => {
         isSelf: true,
         deliveryStatus: "sending",
         nick: "alice",
-        timestamp: 0,
+        createdAt: "2026-05-14T10:36:55.000Z",
       } as TimelineMessage,
       // Not pending — must NOT be retargeted by a same-body echo
       {
@@ -193,11 +214,11 @@ describe("mergeLiveMessage self-echo reconciliation", () => {
       } as TimelineMessage,
     ];
     h.liveMerge.mergeLiveMessage({
-      id: "server-id",
+      id: "d09c804f-f862-44df-8c7b-32e058cbf4ea",
       body: "same-body",
       nick: "alice",
       isSelf: true,
-      timestamp: 0,
+      createdAt: "2026-05-14T10:36:56.000Z",
     } as TimelineMessage);
     // Pending one became delivered; older delivered one is untouched.
     expect(h.messages.value.find((m) => m.body === "same-body" && m.deliveryStatus === "delivered")).toBeTruthy();
@@ -214,8 +235,41 @@ describe("mergeLiveMessage self-echo reconciliation", () => {
       body: "from bob",
       nick: "bob",
       isSelf: false,
-      timestamp: 0,
+      createdAt: "2026-05-14T10:36:56.000Z",
     } as TimelineMessage);
     expect(h.messages.value.length).toBe(2);
+  });
+
+  test("keeps incoming canonical fields when reconciling an optimistic self-echo", () => {
+    const h = harness();
+    h.messages.value = [
+      {
+        id: "client-id",
+        wireIds: ["server-id"],
+        body: "draft body",
+        nick: "alice",
+        isSelf: true,
+        createdAt: "2026-05-14T10:36:55.000Z",
+      } as TimelineMessage,
+    ];
+    h.liveMerge.mergeLiveMessage({
+      id: "server-id",
+      body: "canonical body",
+      nick: "alice",
+      isSelf: true,
+      createdAt: "2026-05-14T10:36:55.000Z",
+      extensionAnnotations: [
+        {
+          extensionId: "github",
+          annotationId: "a1",
+          surfaceKind: "message-card",
+          title: "GitHub",
+          fields: {},
+          actions: [],
+        },
+      ],
+    } as TimelineMessage);
+    expect(h.messages.value[0]?.body).toBe("canonical body");
+    expect(h.messages.value[0]?.extensionAnnotations?.[0]?.annotationId).toBe("a1");
   });
 });

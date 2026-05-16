@@ -9,13 +9,14 @@ import {
 import type { PersistedQueuedRoomMessage } from "@/lib/outbound-queue-store";
 import {
   findMessageById,
-  indexMessageByIds,
+  MessageIdIndex,
   mergeMessageIds,
 } from "@/lib/message-ids";
 import {
   applyForumContext,
   mapLiveRoomMessageToTimeline,
 } from "@/channels/timeline";
+import { compareTimelineMessages } from "@/lib/timeline-timestamps";
 
 function mergeReplyToMetadata(
   existing: TimelineMessage["replyTo"],
@@ -301,9 +302,9 @@ export function buildChannelTimelineFromMamResults(params: {
     }
   }
 
-  const byId = new Map<string, TimelineMessage>();
+  const byId = new MessageIdIndex<TimelineMessage>();
   for (const message of existing) {
-    indexMessageByIds(byId, message);
+    byId.add(message);
   }
   const timeline = options.seedExistingOnly ? [] : [...existing];
   for (const raw of regularMessages) {
@@ -320,16 +321,16 @@ export function buildChannelTimelineFromMamResults(params: {
         : mergeMissingThreadMetadata(existingMessage, tm);
       const merged = mergeRetractionTombstone(mergedBase, tm);
       if (options.seedExistingOnly) {
-        indexMessageByIds(byId, merged);
+        byId.add(merged);
         timeline.push(merged);
       } else if (merged !== existingMessage) {
         const index = timeline.indexOf(existingMessage);
         if (index !== -1) timeline[index] = merged;
-        indexMessageByIds(byId, merged);
+        byId.add(merged);
       }
       continue;
     }
-    indexMessageByIds(byId, tm);
+    byId.add(tm);
     timeline.push(tm);
   }
 
@@ -367,7 +368,7 @@ export function buildChannelTimelineFromMamResults(params: {
     if (index === -1) continue;
     const retracted = retractChannelTimelineMessage(target);
     timeline[index] = retracted;
-    indexMessageByIds(byId, retracted);
+    byId.add(retracted);
   }
 
   for (const update of reactionUpdates) {
@@ -389,5 +390,5 @@ export function buildChannelTimelineFromMamResults(params: {
     }
   }
 
-  return applyForumContext(timeline.sort((a, b) => a.createdAt.localeCompare(b.createdAt)), channelIsForum);
+  return applyForumContext(timeline.sort(compareTimelineMessages), channelIsForum);
 }
