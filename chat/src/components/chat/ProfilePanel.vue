@@ -132,14 +132,18 @@ onUnmounted(() => {
     >
       <BellOff v-if="notificationPermission === 'denied' || (notificationPermission === 'granted' && !notificationsEnabled)" class="h-3.5 w-3.5" />
       <Bell v-else class="h-3.5 w-3.5" />
+      <!-- Bell-corner count badges pick up the same glow halo the
+           sidebar unread/mention badges use (iter 39 brand
+           language). The bell is the global unread/mention indicator
+           — it should pull the eye at least as much as a single row. -->
       <span
         v-if="(totalMentionCount ?? 0) > 0"
-        class="type-count-badge absolute -right-0.5 -top-0.5 inline-flex min-w-[14px] h-[14px] px-0.5 items-center justify-center rounded-full bg-destructive text-destructive-foreground"
+        class="chat-badge-glow--mention type-count-badge absolute -right-0.5 -top-0.5 inline-flex min-w-[14px] h-[14px] px-0.5 items-center justify-center rounded-full bg-destructive text-destructive-foreground"
         aria-hidden="true"
       >{{ totalMentionCount }}</span>
       <span
         v-else-if="(totalUnreadCount ?? 0) > 0"
-        class="type-count-badge absolute -right-0.5 -top-0.5 inline-flex min-w-[14px] h-[14px] px-0.5 items-center justify-center rounded-full bg-primary text-primary-foreground"
+        class="chat-badge-glow--primary type-count-badge absolute -right-0.5 -top-0.5 inline-flex min-w-[14px] h-[14px] px-0.5 items-center justify-center rounded-full bg-primary text-primary-foreground"
         aria-hidden="true"
       >{{ totalUnreadCount }}</span>
     </button>
