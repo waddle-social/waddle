@@ -1,33 +1,38 @@
 //! XEP-0317: Hats
 //!
-//! Provides role badges/labels for MUC room occupants. Hats are visual
-//! indicators showing roles like "Admin", "Moderator", "Bot", etc.
+//! Hats are descriptive social metadata about a MUC occupant — badges
+//! such as "Speaker", "Host", "DJ", "Bot", "Verified". They are NOT
+//! a permission system. Authority is carried by MUC role and
+//! affiliation under `<x xmlns='http://jabber.org/protocol/muc#user'>
+//! <item affiliation='…' role='…'/>` (XEP-0045 §5); hats live in a
+//! parallel `<hats xmlns='urn:xmpp:hats:0'>` element and have no
+//! mandatory protocol semantics.
 //!
-//! ## XML Format
+//! XEP-0317 §1 motivates the layer as "extended roles […] beyond"
+//! the standard MUC affiliation/role set — example use cases the
+//! spec lists include presenter, scribe, teacher, teacher's
+//! assistant, comms officer, incident manager, online-game role.
+//! The spec explicitly frames the naming as a way to "prevent
+//! confusion with standard MUC roles".
 //!
-//! In MUC presence:
+//! Therefore this module deliberately does NOT expose constructors for
+//! "owner / admin / moderator" hats — those are MUC authority and
+//! belong in `<x muc#user>`, not in `<hats>`. The only well-known hat
+//! Waddle ships is `Bot`, used by the extension-bot path to socially
+//! identify automated participants.
+//!
+//! ## Wire shape
+//!
 //! ```xml
 //! <presence from='room@muc.example.com/nick'>
 //!   <x xmlns='http://jabber.org/protocol/muc#user'>
 //!     <item affiliation='admin' role='moderator'/>
 //!   </x>
 //!   <hats xmlns='urn:xmpp:hats:0'>
-//!     <hat title='Admin' uri='urn:xmpp:hats:admin'/>
 //!     <hat title='Bot' uri='urn:xmpp:hats:bot'/>
 //!   </hats>
 //! </presence>
 //! ```
-//!
-//! ## Use Cases
-//!
-//! - Show role badges next to usernames in chat (like Discord roles)
-//! - Distinguish admins, moderators, bots from regular users
-//! - Custom room-specific roles/badges
-//!
-//! ## Server Behavior
-//!
-//! The MUC service adds `<hats/>` to occupant presence based on their
-//! affiliations and roles. The server may also allow custom hat assignment.
 
 use minidom::Element;
 use xmpp_parsers::presence::Presence;
@@ -35,14 +40,10 @@ use xmpp_parsers::presence::Presence;
 /// Namespace for XEP-0317 Hats.
 pub const NS_HATS: &str = "urn:xmpp:hats:0";
 
-/// Well-known hat URIs for common roles.
+/// Well-known hat URIs Waddle assigns out-of-band. Note that these are
+/// purely descriptive — they confer no authority. Authority is carried
+/// by MUC role/affiliation, not by hats.
 pub mod well_known {
-    /// Server/community administrator.
-    pub const ADMIN: &str = "urn:xmpp:hats:admin";
-    /// Channel/room moderator.
-    pub const MODERATOR: &str = "urn:xmpp:hats:moderator";
-    /// Room owner.
-    pub const OWNER: &str = "urn:xmpp:hats:owner";
     /// Automated bot.
     pub const BOT: &str = "urn:xmpp:hats:bot";
     /// Verified/trusted user.
@@ -67,22 +68,8 @@ impl Hat {
         }
     }
 
-    /// Create an admin hat.
-    pub fn admin() -> Self {
-        Self::new("Admin", well_known::ADMIN)
-    }
-
-    /// Create a moderator hat.
-    pub fn moderator() -> Self {
-        Self::new("Moderator", well_known::MODERATOR)
-    }
-
-    /// Create an owner hat.
-    pub fn owner() -> Self {
-        Self::new("Owner", well_known::OWNER)
-    }
-
-    /// Create a bot hat.
+    /// Create a bot hat. The bot hat is descriptive — it tells humans
+    /// "this occupant is automated" — and confers no authority.
     pub fn bot() -> Self {
         Self::new("Bot", well_known::BOT)
     }
@@ -127,17 +114,8 @@ impl HatSet {
         self.hats.iter().any(|h| h.uri == uri)
     }
 
-    /// Check if the occupant is an admin.
-    pub fn is_admin(&self) -> bool {
-        self.has_uri(well_known::ADMIN)
-    }
-
-    /// Check if the occupant is a moderator.
-    pub fn is_moderator(&self) -> bool {
-        self.has_uri(well_known::MODERATOR)
-    }
-
-    /// Check if the occupant is a bot.
+    /// Check if the occupant carries the Bot hat. Note this is
+    /// descriptive — it does not imply or check any MUC authority.
     pub fn is_bot(&self) -> bool {
         self.has_uri(well_known::BOT)
     }
@@ -230,28 +208,12 @@ pub fn strip_hats(presence: &mut Presence) {
     presence.payloads.retain(|e| e.ns() != NS_HATS);
 }
 
-/// Generate a hat set from a MUC affiliation.
-///
-/// Maps standard MUC affiliations to well-known hat types.
-pub fn hats_from_affiliation(affiliation: &str) -> HatSet {
-    let mut set = HatSet::new();
-    match affiliation {
-        "owner" => set = set.with_hat(Hat::owner()),
-        "admin" => set = set.with_hat(Hat::admin()),
-        "member" => {} // No hat for regular members
-        "none" => {}
-        "outcast" => {}
-        _ => {}
-    }
-    set
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn test_is_hats_element() {
+    fn is_hats_element_matches_namespace_exactly() {
         let elem = Element::builder("hats", NS_HATS).build();
         assert!(is_hats_element(&elem));
 
@@ -260,10 +222,10 @@ mod tests {
     }
 
     #[test]
-    fn test_build_and_parse() {
+    fn build_then_parse_round_trips_a_descriptive_hat() {
         let set = HatSet::new()
-            .with_hat(Hat::admin())
-            .with_hat(Hat::new("Custom", "urn:example:custom"));
+            .with_hat(Hat::bot())
+            .with_hat(Hat::new("Speaker", "urn:example:speaker"));
 
         let elem = build_hats_element(&set);
         assert_eq!(elem.name(), "hats");
@@ -271,16 +233,17 @@ mod tests {
 
         let parsed = parse_hats_element(&elem);
         assert_eq!(parsed.len(), 2);
-        assert_eq!(parsed.hats[0].title, "Admin");
-        assert_eq!(parsed.hats[0].uri, well_known::ADMIN);
-        assert_eq!(parsed.hats[1].title, "Custom");
+        assert_eq!(parsed.hats[0].title, "Bot");
+        assert_eq!(parsed.hats[0].uri, well_known::BOT);
+        assert_eq!(parsed.hats[1].title, "Speaker");
+        assert_eq!(parsed.hats[1].uri, "urn:example:speaker");
     }
 
     #[test]
-    fn test_parse_from_presence() {
+    fn parse_from_presence_extracts_descriptive_hats() {
         let xml = "<presence xmlns='jabber:client'>\
                     <hats xmlns='urn:xmpp:hats:0'>\
-                      <hat title='Moderator' uri='urn:xmpp:hats:moderator'/>\
+                      <hat title='Speaker' uri='urn:example:speaker'/>\
                       <hat title='Bot' uri='urn:xmpp:hats:bot'/>\
                     </hats>\
                     </presence>";
@@ -289,13 +252,12 @@ mod tests {
 
         let set = extract_hats_from_presence(&presence).expect("has hats");
         assert_eq!(set.len(), 2);
-        assert!(set.is_moderator());
         assert!(set.is_bot());
-        assert!(!set.is_admin());
+        assert!(set.has_uri("urn:example:speaker"));
     }
 
     #[test]
-    fn test_extract_absent() {
+    fn extract_returns_none_when_presence_carries_no_hats() {
         let xml = "<presence xmlns='jabber:client'/>";
         let presence =
             Presence::try_from(xml.parse::<Element>().expect("valid xml")).expect("valid presence");
@@ -303,35 +265,35 @@ mod tests {
     }
 
     #[test]
-    fn test_empty_hats() {
+    fn empty_hat_set_is_empty() {
         let set = HatSet::new();
         assert!(set.is_empty());
         assert_eq!(set.len(), 0);
     }
 
     #[test]
-    fn test_set_hats() {
+    fn set_hats_replaces_any_existing_payload() {
         let xml = "<presence xmlns='jabber:client'/>";
         let mut presence =
             Presence::try_from(xml.parse::<Element>().expect("valid xml")).expect("valid presence");
 
-        let set = HatSet::new().with_hat(Hat::admin());
-        set_hats(&mut presence, &set);
+        let first = HatSet::new().with_hat(Hat::bot());
+        set_hats(&mut presence, &first);
         assert!(has_hats(&presence));
 
-        // Replace
-        let set2 = HatSet::new().with_hat(Hat::moderator());
-        set_hats(&mut presence, &set2);
+        let second = HatSet::new().with_hat(Hat::new("Speaker", "urn:example:speaker"));
+        set_hats(&mut presence, &second);
         let extracted = extract_hats_from_presence(&presence).expect("has hats");
         assert_eq!(extracted.len(), 1);
-        assert!(extracted.is_moderator());
+        assert!(extracted.has_uri("urn:example:speaker"));
+        assert!(!extracted.is_bot());
     }
 
     #[test]
-    fn test_strip_hats() {
+    fn strip_removes_existing_hats_payload() {
         let xml = "<presence xmlns='jabber:client'>\
                     <hats xmlns='urn:xmpp:hats:0'>\
-                      <hat title='Admin' uri='urn:xmpp:hats:admin'/>\
+                      <hat title='Bot' uri='urn:xmpp:hats:bot'/>\
                     </hats>\
                     </presence>";
         let mut presence =
@@ -342,10 +304,10 @@ mod tests {
     }
 
     #[test]
-    fn test_hat_carrier_trait() {
+    fn hat_carrier_trait_reads_hats_off_presence() {
         let xml = "<presence xmlns='jabber:client'>\
                     <hats xmlns='urn:xmpp:hats:0'>\
-                      <hat title='Owner' uri='urn:xmpp:hats:owner'/>\
+                      <hat title='Bot' uri='urn:xmpp:hats:bot'/>\
                     </hats>\
                     </presence>";
         let presence =
@@ -353,39 +315,31 @@ mod tests {
 
         assert!(presence.has_hats());
         let set = presence.hat_set().expect("has hats");
-        assert!(set.has_uri(well_known::OWNER));
+        assert!(set.has_uri(well_known::BOT));
     }
 
     #[test]
-    fn test_hat_display() {
-        let hat = Hat::admin();
-        assert_eq!(hat.to_string(), "Admin");
+    fn hat_display_uses_title() {
+        let hat = Hat::bot();
+        assert_eq!(hat.to_string(), "Bot");
     }
 
     #[test]
-    fn test_hat_constructors() {
-        assert_eq!(Hat::admin().uri, well_known::ADMIN);
-        assert_eq!(Hat::moderator().uri, well_known::MODERATOR);
-        assert_eq!(Hat::owner().uri, well_known::OWNER);
+    fn bot_constructor_pins_well_known_uri() {
         assert_eq!(Hat::bot().uri, well_known::BOT);
+        assert_eq!(Hat::bot().title, "Bot");
     }
 
     #[test]
-    fn test_titles() {
-        let set = HatSet::new().with_hat(Hat::admin()).with_hat(Hat::bot());
-        assert_eq!(set.titles(), vec!["Admin", "Bot"]);
+    fn titles_returns_each_hats_title_in_order() {
+        let set = HatSet::new()
+            .with_hat(Hat::bot())
+            .with_hat(Hat::new("Speaker", "urn:example:speaker"));
+        assert_eq!(set.titles(), vec!["Bot", "Speaker"]);
     }
 
     #[test]
-    fn test_hats_from_affiliation() {
-        assert!(hats_from_affiliation("owner").has_uri(well_known::OWNER));
-        assert!(hats_from_affiliation("admin").has_uri(well_known::ADMIN));
-        assert!(hats_from_affiliation("member").is_empty());
-        assert!(hats_from_affiliation("none").is_empty());
-    }
-
-    #[test]
-    fn test_skip_hat_missing_attrs() {
+    fn parse_skips_hat_entries_missing_required_attrs() {
         let xml = "<hats xmlns='urn:xmpp:hats:0'>\
                     <hat title='Valid' uri='urn:valid'/>\
                     <hat title='' uri='urn:empty-title'/>\
@@ -398,10 +352,10 @@ mod tests {
     }
 
     #[test]
-    fn test_set_empty_hats_removes_element() {
+    fn set_hats_with_empty_set_removes_payload_entirely() {
         let xml = "<presence xmlns='jabber:client'>\
                     <hats xmlns='urn:xmpp:hats:0'>\
-                      <hat title='Admin' uri='urn:xmpp:hats:admin'/>\
+                      <hat title='Bot' uri='urn:xmpp:hats:bot'/>\
                     </hats>\
                     </presence>";
         let mut presence =
@@ -409,5 +363,40 @@ mod tests {
 
         set_hats(&mut presence, &HatSet::new());
         assert!(!has_hats(&presence));
+    }
+
+    // ── XEP-0317 conformance: hats are descriptive, not authoritative ──
+    //
+    // XEP-0317 §1 explicitly defines hats as extended roles "beyond"
+    // the standard MUC affiliation/role system, "to prevent confusion
+    // with standard MUC roles". These tests pin that separation.
+
+    #[test]
+    fn module_exposes_no_constructor_for_muc_authority_concepts() {
+        // The constructor surface intentionally contains only
+        // descriptive hats. `Hat::owner()`, `Hat::admin()`,
+        // `Hat::moderator()` are not — and must not be — provided:
+        // owner/admin/moderator live in `<x xmlns='muc#user'>
+        // <item affiliation='…' role='…'/>`, not in `<hats>`.
+        //
+        // This test is documentation that compiles. The mere fact that
+        // it compiles asserts the public API is restricted to Bot (the
+        // only descriptive hat Waddle ships) plus the open-ended
+        // `Hat::new()` for application-specific descriptive metadata.
+        let _bot = Hat::bot();
+        let _custom = Hat::new("Speaker", "urn:example:speaker");
+        // `Hat::owner();` would not compile.
+        // `Hat::admin();` would not compile.
+        // `Hat::moderator();` would not compile.
+    }
+
+    #[test]
+    fn well_known_uris_do_not_duplicate_muc_authority_concepts() {
+        // The well-known URIs Waddle assigns must not include
+        // owner/admin/moderator — those are MUC authority, conveyed
+        // by the XEP-0045 `<x muc#user><item/>` payload.
+        // Only descriptive concepts (Bot, Verified) live here.
+        assert_eq!(well_known::BOT, "urn:xmpp:hats:bot");
+        assert_eq!(well_known::VERIFIED, "urn:xmpp:hats:verified");
     }
 }
