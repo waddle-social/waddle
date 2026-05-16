@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { X, Search } from "lucide-vue-next";
+import { Loader2, X, Search } from "lucide-vue-next";
 import AppDialog from "@/components/ui/AppDialog.vue";
 import AppAvatar from "@/components/ui/AppAvatar.vue";
 import type { MemberSummary, UserSearchResult } from "@/lib/chat-types";
@@ -96,10 +96,12 @@ const roles: EditableRole[] = ["member", "admin", "owner", "outcast"];
         </button>
       </div>
 
+      <!-- Searching indicator — converges with iter-47/48/57 on
+           Loader2 so every "fetching" surface across the app
+           (channel search, emoji picker, GIF picker, member search)
+           speaks one visual language. -->
       <div v-if="isSearching" class="type-caption text-muted-foreground flex items-center gap-1.5">
-        <span class="typing-dot" />
-        <span class="typing-dot" />
-        <span class="typing-dot" />
+        <Loader2 class="h-3.5 w-3.5 motion-safe:animate-spin" aria-hidden="true" />
         <span>Searching…</span>
       </div>
     </div>
