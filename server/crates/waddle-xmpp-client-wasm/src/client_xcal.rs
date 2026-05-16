@@ -11,8 +11,8 @@ use minidom::Element;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use waddle_xmpp_core::xcal::{
-    build_vcalendar_with_event, parse_vcalendar_event, Attendee, Freq, PartStat, Rrule, RruleEnd,
-    VEvent, Weekday, NS_XCAL, PUBSUB_NODE_EVENTS,
+    build_vcalendar_with_event, build_vcalendar_with_item, parse_vcalendar_item, Attendee,
+    CalendarItem, Freq, PartStat, Rrule, RruleEnd, VEvent, Weekday, NS_XCAL, PUBSUB_NODE_EVENTS,
 };
 use wasm_bindgen::prelude::*;
 
@@ -55,6 +55,12 @@ pub(crate) struct JsVEvent {
     /// folds sibling `-rsvp-*` items into this list before render.
     #[serde(default)]
     pub attendees: Vec<JsAttendee>,
+    /// RFC3339 — set on override VEVENTs (one occurrence of a
+    /// recurring master). `None` on the master event itself.
+    pub recurrence_id: Option<String>,
+    /// RFC3339[] — per-instance cancellations on the master event.
+    #[serde(default)]
+    pub exdates: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -87,6 +93,33 @@ pub(crate) struct JsVEventInput {
     pub dtstart: Option<String>,
     pub dtend: Option<String>,
     pub rrule: Option<JsRrule>,
+}
+
+/// Full CalendarItem write input — master VEVENT plus optional
+/// per-instance overrides and EXDATE cancellations. Each override
+/// MUST carry a `recurrence_id` so the server (and the chat
+/// expander) can correlate it back to a specific occurrence of the
+/// master series.
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct JsCalendarItemInput {
+    pub master: JsVEventInput,
+    #[serde(default)]
+    pub overrides: Vec<JsOverrideInput>,
+    /// RFC3339[] — occurrence DTSTART values to skip on the master.
+    #[serde(default)]
+    pub exdates: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct JsOverrideInput {
+    /// RFC3339. The occurrence this override replaces.
+    pub recurrence_id: String,
+    /// All fields optional — overrides patch a subset of the master.
+    pub summary: Option<String>,
+    pub description: Option<String>,
+    pub location: Option<String>,
+    pub dtstart: Option<String>,
+    pub dtend: Option<String>,
 }
 
 impl From<&Rrule> for JsRrule {
@@ -164,6 +197,8 @@ impl JsVEvent {
             dtend: event.dtend.map(|ts| ts.to_rfc3339()),
             rrule: event.rrule.as_ref().map(JsRrule::from),
             attendees: event.attendees.iter().map(JsAttendee::from).collect(),
+            recurrence_id: event.recurrence_id.map(|ts| ts.to_rfc3339()),
+            exdates: event.exdates.iter().map(|ts| ts.to_rfc3339()).collect(),
         }
     }
 }
@@ -213,6 +248,8 @@ fn build_rsvp_publish_iq(
         organizer: None,
         rrule: None,
         attendees: vec![Attendee::new(format!("xmpp:{self_jid}"), partstat)],
+        recurrence_id: None,
+        exdates: Vec::new(),
     };
     let item = Element::builder("item", NS_PUBSUB)
         .attr("id", item_id.as_str())
@@ -231,6 +268,88 @@ fn build_rsvp_publish_iq(
         .attr("to", community_jid)
         .append(pubsub)
         .build()
+}
+
+/// Build a publish IQ for a CalendarItem (master + overrides) at
+/// the given item id. Used by `xcal_publish_item` to atomically
+/// write a master event plus its per-instance overrides + EXDATEs.
+fn build_item_publish_iq(community_jid: &str, item_id: &str, item: &CalendarItem) -> Element {
+    let id = format!("xcal-publish-{}", Uuid::new_v4());
+    let pubsub_item = Element::builder("item", NS_PUBSUB)
+        .attr("id", item_id)
+        .append(build_vcalendar_with_item(item))
+        .build();
+    let publish = Element::builder("publish", NS_PUBSUB)
+        .attr("node", PUBSUB_NODE_EVENTS)
+        .append(pubsub_item)
+        .build();
+    let pubsub = Element::builder("pubsub", NS_PUBSUB)
+        .append(publish)
+        .build();
+    Element::builder("iq", NS_CLIENT)
+        .attr("type", "set")
+        .attr("id", id)
+        .attr("to", community_jid)
+        .append(pubsub)
+        .build()
+}
+
+fn vevent_from_input(uid: &str, input: JsVEventInput) -> Result<VEvent, JsValue> {
+    let mut event = VEvent::new(uid, input.summary).with_dtstamp(Utc::now());
+    if let Some(dtstart) = input.dtstart {
+        let parsed: DateTime<Utc> = dtstart
+            .parse()
+            .map_err(|err| js_error(format!("invalid dtstart: {err}")))?;
+        event = event.with_dtstart(parsed);
+    }
+    if let Some(dtend) = input.dtend {
+        let parsed: DateTime<Utc> = dtend
+            .parse()
+            .map_err(|err| js_error(format!("invalid dtend: {err}")))?;
+        event = event.with_dtend(parsed);
+    }
+    if let Some(description) = input.description {
+        event = event.with_description(description);
+    }
+    if let Some(location) = input.location {
+        event = event.with_location(location);
+    }
+    if let Some(organizer) = input.organizer {
+        event = event.with_organizer(organizer);
+    }
+    if let Some(rrule) = input.rrule {
+        event = event.with_rrule(rrule.into_rrule()?);
+    }
+    Ok(event)
+}
+
+fn override_from_input(uid: &str, input: JsOverrideInput) -> Result<VEvent, JsValue> {
+    let recurrence_id: DateTime<Utc> = input
+        .recurrence_id
+        .parse()
+        .map_err(|err| js_error(format!("invalid recurrence_id: {err}")))?;
+    let mut event = VEvent::new(uid, input.summary.unwrap_or_default())
+        .with_dtstamp(Utc::now())
+        .with_recurrence_id(recurrence_id);
+    if let Some(dtstart) = input.dtstart {
+        let parsed: DateTime<Utc> = dtstart
+            .parse()
+            .map_err(|err| js_error(format!("invalid override dtstart: {err}")))?;
+        event = event.with_dtstart(parsed);
+    }
+    if let Some(dtend) = input.dtend {
+        let parsed: DateTime<Utc> = dtend
+            .parse()
+            .map_err(|err| js_error(format!("invalid override dtend: {err}")))?;
+        event = event.with_dtend(parsed);
+    }
+    if let Some(description) = input.description {
+        event = event.with_description(description);
+    }
+    if let Some(location) = input.location {
+        event = event.with_location(location);
+    }
+    Ok(event)
 }
 
 fn build_event_publish_iq(community_jid: &str, item_id: &str, event: &VEvent) -> Element {
@@ -261,17 +380,37 @@ fn parse_events_items_result(iq: &Element) -> Vec<JsVEvent> {
     let Some(items) = pubsub.get_child("items", NS_PUBSUB) else {
         return Vec::new();
     };
-    items
+    let mut flattened = Vec::new();
+    for item in items
         .children()
         .filter(|el| el.name() == "item" && el.ns() == NS_PUBSUB)
-        .filter_map(|item| {
-            let item_id = item.attr("id")?;
-            let vcal = item
-                .children()
-                .find(|child| child.name() == "vcalendar" && child.ns() == NS_XCAL)?;
-            parse_vcalendar_event(item_id, vcal).map(|ev| JsVEvent::from_vevent(item_id, ev))
-        })
-        .collect()
+    {
+        let Some(item_id) = item.attr("id") else {
+            continue;
+        };
+        let Some(vcal) = item
+            .children()
+            .find(|child| child.name() == "vcalendar" && child.ns() == NS_XCAL)
+        else {
+            continue;
+        };
+        let Some(parsed) = parse_vcalendar_item(item_id, vcal) else {
+            continue;
+        };
+        // Master comes back under the item id; each override gets a
+        // synthetic id `<item-id>::override::<recurrence-id-rfc3339>`
+        // so the chat can address them individually without losing
+        // the master/override correlation (preserved via `uid`).
+        flattened.push(JsVEvent::from_vevent(item_id, parsed.master));
+        for ov in parsed.overrides {
+            let synthetic = ov
+                .recurrence_id
+                .map(|ts| format!("{item_id}::override::{}", ts.to_rfc3339()))
+                .unwrap_or_else(|| item_id.to_string());
+            flattened.push(JsVEvent::from_vevent(&synthetic, ov));
+        }
+    }
+    flattened
 }
 
 // ── Wasm methods ────────────────────────────────────────────────────
@@ -329,6 +468,76 @@ impl WaddleClient {
             send_iq_command(inner, iq).await?;
             let js_event = JsVEvent::from_vevent(&item_id, event);
             to_js_value(&js_event)
+        })
+    }
+
+    /// Publish (or replace) a full CalendarItem at the given item
+    /// id — master event plus optional per-instance overrides and
+    /// EXDATE cancellations. Use this for the read-modify-write
+    /// flows ("edit this occurrence", "edit all occurrences",
+    /// "cancel this occurrence") after fetching current state via
+    /// `xcal_items`. Passing an existing item id overwrites that
+    /// item atomically; passing a new id creates a new item.
+    pub fn xcal_publish_item(
+        &self,
+        community_jid: String,
+        item_id: String,
+        input: JsValue,
+    ) -> js_sys::Promise {
+        let inner = self.inner.clone();
+        wasm_bindgen_futures::future_to_promise(async move {
+            let input: JsCalendarItemInput = serde_wasm_bindgen::from_value(input)
+                .map_err(|err| js_error(format!("invalid calendar item input: {err}")))?;
+            if item_id.is_empty() {
+                return Err(js_error("item_id must not be empty"));
+            }
+            let mut master = vevent_from_input(&item_id, input.master)?;
+            for exdate in input.exdates {
+                let parsed: DateTime<Utc> = exdate
+                    .parse()
+                    .map_err(|err| js_error(format!("invalid exdate: {err}")))?;
+                master = master.add_exdate(parsed);
+            }
+            let mut item = CalendarItem::new(master);
+            for ov in input.overrides {
+                item = item.add_override(override_from_input(&item_id, ov)?);
+            }
+            let iq = build_item_publish_iq(&community_jid, &item_id, &item);
+            send_iq_command(inner, iq).await?;
+            let js_master = JsVEvent::from_vevent(&item_id, item.master);
+            to_js_value(&js_master)
+        })
+    }
+
+    /// Retract a calendar item from the events node. Used for
+    /// "cancel entire series" — removes the master plus any
+    /// overrides in one shot.
+    pub fn xcal_retract(&self, community_jid: String, item_id: String) -> js_sys::Promise {
+        let inner = self.inner.clone();
+        wasm_bindgen_futures::future_to_promise(async move {
+            if item_id.is_empty() {
+                return Err(js_error("item_id must not be empty"));
+            }
+            let id = format!("xcal-retract-{}", Uuid::new_v4());
+            let item = Element::builder("item", NS_PUBSUB)
+                .attr("id", item_id.as_str())
+                .build();
+            let retract = Element::builder("retract", NS_PUBSUB)
+                .attr("node", PUBSUB_NODE_EVENTS)
+                .attr("notify", "true")
+                .append(item)
+                .build();
+            let pubsub = Element::builder("pubsub", NS_PUBSUB)
+                .append(retract)
+                .build();
+            let iq = Element::builder("iq", NS_CLIENT)
+                .attr("type", "set")
+                .attr("id", id)
+                .attr("to", community_jid)
+                .append(pubsub)
+                .build();
+            send_iq_command(inner, iq).await?;
+            Ok(JsValue::TRUE)
         })
     }
 

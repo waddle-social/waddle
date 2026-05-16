@@ -40,10 +40,10 @@
 //!
 //! ## Out of scope (today)
 //!
-//! VTODO, VJOURNAL, VALARM, VTIMEZONE, ATTENDEE/RSVP via iTIP,
-//! RECURRENCE-ID overrides, EXDATE/EXRULE. These can be layered on
-//! top of the typed model in follow-up work; the wire format leaves
-//! room for them without requiring a redesign.
+//! VTODO, VJOURNAL, VALARM, VTIMEZONE, EXRULE. ATTENDEE (RSVP),
+//! RECURRENCE-ID overrides and EXDATE are modelled; the chat
+//! aggregates per-user RSVP items into the master event and expands
+//! recurring instances client-side.
 
 use chrono::{DateTime, Utc};
 use minidom::Element;
@@ -289,6 +289,38 @@ pub struct VEvent {
     /// aggregates per-attendee RSVPs from sibling pubsub items into
     /// this list on the master event before rendering.
     pub attendees: Vec<Attendee>,
+    /// RFC 5545 §3.8.4.4 RECURRENCE-ID — set on override VEVENT
+    /// components that replace a single occurrence of the master
+    /// series. `None` on the master event itself.
+    pub recurrence_id: Option<DateTime<Utc>>,
+    /// RFC 5545 §3.8.5.1 EXDATE — occurrence DTSTART values that
+    /// should be skipped (per-instance cancellations). Only
+    /// meaningful on the master event.
+    pub exdates: Vec<DateTime<Utc>>,
+}
+
+/// A logical calendar item: one master VEVENT plus any per-instance
+/// override VEVENTs (each identified by `recurrence_id`). All
+/// components share a UID. Per ProtoXEP §"Calendar Items" they MUST
+/// ship inside the same pubsub item.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CalendarItem {
+    pub master: VEvent,
+    pub overrides: Vec<VEvent>,
+}
+
+impl CalendarItem {
+    pub fn new(master: VEvent) -> Self {
+        Self {
+            master,
+            overrides: Vec::new(),
+        }
+    }
+
+    pub fn add_override(mut self, override_event: VEvent) -> Self {
+        self.overrides.push(override_event);
+        self
+    }
 }
 
 impl VEvent {
@@ -304,6 +336,8 @@ impl VEvent {
             organizer: None,
             rrule: None,
             attendees: Vec::new(),
+            recurrence_id: None,
+            exdates: Vec::new(),
         }
     }
 
@@ -349,6 +383,21 @@ impl VEvent {
 
     pub fn add_attendee(mut self, attendee: Attendee) -> Self {
         self.attendees.push(attendee);
+        self
+    }
+
+    pub fn with_recurrence_id(mut self, recurrence_id: DateTime<Utc>) -> Self {
+        self.recurrence_id = Some(recurrence_id);
+        self
+    }
+
+    pub fn with_exdates<I: IntoIterator<Item = DateTime<Utc>>>(mut self, exdates: I) -> Self {
+        self.exdates = exdates.into_iter().collect();
+        self
+    }
+
+    pub fn add_exdate(mut self, exdate: DateTime<Utc>) -> Self {
+        self.exdates.push(exdate);
         self
     }
 
@@ -399,11 +448,35 @@ fn build_rrule_element(rrule: &Rrule) -> Element {
 
 /// Build a `<vcalendar><vevent/></vcalendar>` payload for a single
 /// event. Wraps the VEVENT in a VCALENDAR with `<version>2.0</version>`
-/// per RFC 5545.
+/// per RFC 5545. Equivalent to `build_vcalendar_with_item` for a
+/// non-recurring item with no overrides.
 pub fn build_vcalendar_with_event(event: &VEvent) -> Element {
+    build_vcalendar_with_item(&CalendarItem {
+        master: event.clone(),
+        overrides: Vec::new(),
+    })
+}
+
+/// Build a `<vcalendar/>` payload carrying a master VEVENT plus
+/// zero or more sibling override VEVENTs (one per RECURRENCE-ID).
+/// Per ProtoXEP §"Calendar Items", components sharing a UID MUST
+/// live in the same pubsub item — this is the shape that lets a
+/// recurring event carry per-instance edits.
+pub fn build_vcalendar_with_item(item: &CalendarItem) -> Element {
     let mut vcalendar = Element::builder("vcalendar", NS_XCAL).build();
     append_text_child(&mut vcalendar, "version", "2.0");
+    vcalendar.append_child(build_vevent_element(&item.master));
+    for override_event in &item.overrides {
+        vcalendar.append_child(build_vevent_element(override_event));
+    }
+    vcalendar
+}
 
+/// Build a standalone `<vevent>` element (no enclosing
+/// `<vcalendar>`). Used by both `build_vcalendar_with_event` and
+/// `build_vcalendar_with_item` so master + override events share
+/// exactly one serializer.
+fn build_vevent_element(event: &VEvent) -> Element {
     let mut vevent = Element::builder("vevent", NS_XCAL).build();
     append_text_child(&mut vevent, "uid", &event.uid);
     if let Some(dtstamp) = event.dtstamp {
@@ -415,7 +488,9 @@ pub fn build_vcalendar_with_event(event: &VEvent) -> Element {
     if let Some(dtend) = event.dtend {
         append_text_child(&mut vevent, "dtend", &dtend.to_rfc3339());
     }
-    append_text_child(&mut vevent, "summary", &event.summary);
+    if !event.summary.is_empty() {
+        append_text_child(&mut vevent, "summary", &event.summary);
+    }
     if let Some(ref desc) = event.description {
         append_text_child(&mut vevent, "description", desc);
     }
@@ -428,12 +503,16 @@ pub fn build_vcalendar_with_event(event: &VEvent) -> Element {
     if let Some(ref rrule) = event.rrule {
         vevent.append_child(build_rrule_element(rrule));
     }
+    if let Some(recurrence_id) = event.recurrence_id {
+        append_text_child(&mut vevent, "recurrence-id", &recurrence_id.to_rfc3339());
+    }
+    for exdate in &event.exdates {
+        append_text_child(&mut vevent, "exdate", &exdate.to_rfc3339());
+    }
     for attendee in &event.attendees {
         vevent.append_child(build_attendee_element(attendee));
     }
-
-    vcalendar.append_child(vevent);
-    vcalendar
+    vevent
 }
 
 fn build_attendee_element(attendee: &Attendee) -> Element {
@@ -504,16 +583,54 @@ fn parse_rrule(elem: &Element) -> Option<Rrule> {
     })
 }
 
-/// Parse a VEVENT payload from a `<vcalendar/>` element. Returns the
-/// first VEVENT found; ProtoXEP §3 mandates one logical event per
-/// pubsub item (sibling components must share a UID — which we
-/// don't yet support in this minimal subset).
+/// Parse a single VEVENT child off a `<vcalendar>` element. Returns
+/// the master event (the one without a `<recurrence-id>` child) when
+/// the calendar contains multiple sibling VEVENTs; per-instance
+/// overrides are surfaced via `parse_vcalendar_item`. SUMMARY is
+/// permitted to be empty so that override events (which only patch
+/// a subset of fields) round-trip cleanly.
 pub fn parse_vcalendar_event(item_id: &str, vcalendar: &Element) -> Option<VEvent> {
+    let item = parse_vcalendar_item(item_id, vcalendar)?;
+    Some(item.master)
+}
+
+/// Parse a `<vcalendar/>` into a `CalendarItem` (master + per-
+/// instance overrides). When the calendar carries multiple sibling
+/// VEVENTs, the one *without* a `<recurrence-id>` is the master and
+/// the rest are overrides; when there's only one VEVENT it's the
+/// master and `overrides` is empty.
+pub fn parse_vcalendar_item(item_id: &str, vcalendar: &Element) -> Option<CalendarItem> {
     if !is_vcalendar_element(vcalendar) {
         return None;
     }
-    let vevent = xcal_child(vcalendar, "vevent")?;
-    let summary = xcal_text(vevent, "summary")?;
+    let vevents: Vec<&Element> = vcalendar
+        .children()
+        .filter(|c| c.name() == "vevent" && c.ns() == NS_XCAL)
+        .collect();
+    if vevents.is_empty() {
+        return None;
+    }
+    let mut master: Option<VEvent> = None;
+    let mut overrides: Vec<VEvent> = Vec::new();
+    for vevent in vevents {
+        let parsed = parse_vevent_element(item_id, vevent);
+        if parsed.recurrence_id.is_some() {
+            overrides.push(parsed);
+        } else if master.is_none() {
+            master = Some(parsed);
+        } else {
+            // Multiple components without RECURRENCE-ID share a UID —
+            // unusual but treat the extras as overrides anchored to
+            // their own DTSTART to keep all components reachable.
+            overrides.push(parsed);
+        }
+    }
+    let master = master?;
+    Some(CalendarItem { master, overrides })
+}
+
+fn parse_vevent_element(item_id: &str, vevent: &Element) -> VEvent {
+    let summary = xcal_text(vevent, "summary").unwrap_or_default();
     let uid = xcal_text(vevent, "uid").unwrap_or_else(|| item_id.to_string());
     let dtstamp = xcal_text(vevent, "dtstamp").and_then(|s| s.parse().ok());
     let dtstart = xcal_text(vevent, "dtstart").and_then(|s| s.parse().ok());
@@ -527,7 +644,16 @@ pub fn parse_vcalendar_event(item_id: &str, vcalendar: &Element) -> Option<VEven
         .filter(|c| c.name() == "attendee" && c.ns() == NS_XCAL)
         .filter_map(parse_attendee)
         .collect();
-    Some(VEvent {
+    let recurrence_id = xcal_text(vevent, "recurrence-id").and_then(|s| s.parse().ok());
+    let exdates = vevent
+        .children()
+        .filter(|c| c.name() == "exdate" && c.ns() == NS_XCAL)
+        .filter_map(|c| {
+            let t = c.text();
+            t.trim().parse::<DateTime<Utc>>().ok()
+        })
+        .collect();
+    VEvent {
         uid,
         dtstamp,
         dtstart,
@@ -538,7 +664,9 @@ pub fn parse_vcalendar_event(item_id: &str, vcalendar: &Element) -> Option<VEven
         organizer,
         rrule,
         attendees,
-    })
+        recurrence_id,
+        exdates,
+    }
 }
 
 fn parse_attendee(elem: &Element) -> Option<Attendee> {
@@ -710,7 +838,11 @@ mod tests {
     }
 
     #[test]
-    fn parse_rejects_missing_summary() {
+    fn parse_tolerates_missing_summary_for_overrides() {
+        // RFC 5545 makes SUMMARY optional. Overrides that only patch
+        // a different field (DTSTART, LOCATION, …) ship without one,
+        // so the parser surfaces an empty summary instead of dropping
+        // the whole event.
         let xml = r#"<vcalendar xmlns='urn:ietf:params:xml:ns:xcal'>
   <vevent>
     <uid>no-summary</uid>
@@ -718,7 +850,8 @@ mod tests {
   </vevent>
 </vcalendar>"#;
         let elem: Element = xml.parse().expect("valid xml");
-        assert!(parse_vcalendar_event("no-summary", &elem).is_none());
+        let event = parse_vcalendar_event("no-summary", &elem).expect("parseable");
+        assert!(event.summary.is_empty());
     }
 
     #[test]
@@ -814,6 +947,80 @@ mod tests {
             event.attendees.is_empty(),
             "empty URI attendee must be dropped"
         );
+    }
+
+    #[test]
+    fn build_and_parse_recurring_item_with_overrides_and_exdates() {
+        let rrule = Rrule::new(Freq::Weekly)
+            .with_by_day([Weekday::Friday])
+            .with_count(8);
+        let master = VEvent::new("evt-series", "Game Night")
+            .with_dtstart(ts(2026, 6, 5, 19, 0))
+            .with_dtend(ts(2026, 6, 5, 22, 0))
+            .with_rrule(rrule)
+            .with_exdates([ts(2026, 6, 19, 19, 0), ts(2026, 7, 3, 19, 0)]);
+        let override_a = VEvent::new("evt-series", "Special: Halo")
+            .with_dtstart(ts(2026, 6, 12, 20, 0))
+            .with_recurrence_id(ts(2026, 6, 12, 19, 0));
+        let override_b = VEvent {
+            uid: "evt-series".to_string(),
+            summary: String::new(),
+            location: Some("New venue".to_string()),
+            recurrence_id: Some(ts(2026, 6, 26, 19, 0)),
+            ..VEvent::new("evt-series", "")
+        };
+        let item = CalendarItem::new(master)
+            .add_override(override_a.clone())
+            .add_override(override_b.clone());
+
+        let vcal = build_vcalendar_with_item(&item);
+        let serialised = String::from(&vcal);
+        assert_eq!(serialised.matches("<exdate>").count(), 2);
+        assert_eq!(serialised.matches("<recurrence-id>").count(), 2);
+
+        let parsed = parse_vcalendar_item("evt-series", &vcal).expect("parseable");
+        assert_eq!(parsed.master.uid, "evt-series");
+        assert_eq!(parsed.master.summary, "Game Night");
+        assert_eq!(parsed.master.exdates.len(), 2);
+        assert_eq!(parsed.master.exdates[0], ts(2026, 6, 19, 19, 0));
+        assert_eq!(parsed.overrides.len(), 2);
+        assert_eq!(
+            parsed.overrides[0].recurrence_id,
+            Some(ts(2026, 6, 12, 19, 0))
+        );
+        assert_eq!(parsed.overrides[0].summary, "Special: Halo");
+        assert_eq!(
+            parsed.overrides[1].recurrence_id,
+            Some(ts(2026, 6, 26, 19, 0))
+        );
+        assert_eq!(parsed.overrides[1].location.as_deref(), Some("New venue"));
+        assert!(parsed.overrides[1].summary.is_empty());
+    }
+
+    #[test]
+    fn parse_vcalendar_event_returns_master_when_overrides_are_siblings() {
+        // External xml with master + override mixed in arbitrary order.
+        // The master is the one without RECURRENCE-ID.
+        let xml = r#"<vcalendar xmlns='urn:ietf:params:xml:ns:xcal'>
+  <vevent>
+    <uid>evt-series</uid>
+    <recurrence-id>2026-06-12T19:00:00Z</recurrence-id>
+    <summary>Override</summary>
+  </vevent>
+  <vevent>
+    <uid>evt-series</uid>
+    <dtstart>2026-06-05T19:00:00Z</dtstart>
+    <summary>Master</summary>
+  </vevent>
+</vcalendar>"#;
+        let elem: Element = xml.parse().expect("valid xml");
+        let master = parse_vcalendar_event("evt-series", &elem).expect("parseable");
+        assert_eq!(master.summary, "Master");
+        assert!(master.recurrence_id.is_none());
+
+        let item = parse_vcalendar_item("evt-series", &elem).expect("parseable");
+        assert_eq!(item.overrides.len(), 1);
+        assert_eq!(item.overrides[0].summary, "Override");
     }
 
     #[test]

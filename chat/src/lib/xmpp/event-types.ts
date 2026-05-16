@@ -55,6 +55,17 @@ export interface CommunityEvent {
    * attendee URI bare-JID at the chat layer to dedupe latest-wins.
    */
   attendees?: Attendee[];
+  /**
+   * RFC 5545 RECURRENCE-ID — set on override events that replace a
+   * single occurrence of a recurring master. `undefined` on master
+   * events.
+   */
+  recurrenceIdMs?: number;
+  /**
+   * RFC 5545 EXDATE — occurrence DTSTART values to skip on a
+   * recurring master. Empty on overrides and on non-recurring events.
+   */
+  exdatesMs?: number[];
 }
 
 export interface CommunityEventInput {
@@ -99,6 +110,8 @@ export interface WasmVEvent {
   dtend?: string | null;
   rrule?: WasmRrule | null;
   attendees?: WasmAttendee[] | null;
+  recurrence_id?: string | null;
+  exdates?: string[] | null;
 }
 
 const PARTSTATS: ReadonlySet<PartStat> = new Set([
@@ -165,6 +178,10 @@ export function eventFromWasm(event: WasmVEvent): CommunityEvent {
   const attendees = (event.attendees ?? [])
     .map(attendeeFromWasm)
     .filter((a): a is Attendee => a !== null);
+  const recurrenceIdMs = event.recurrence_id ? Date.parse(event.recurrence_id) : undefined;
+  const exdatesMs = (event.exdates ?? [])
+    .map((s) => Date.parse(s))
+    .filter((n) => Number.isFinite(n));
   return {
     id: event.id,
     uid: event.uid,
@@ -177,6 +194,10 @@ export function eventFromWasm(event: WasmVEvent): CommunityEvent {
     ...(typeof dtend === "number" && Number.isFinite(dtend) ? { dtendMs: dtend } : {}),
     ...(rrule ? { rrule } : {}),
     ...(attendees.length > 0 ? { attendees } : {}),
+    ...(typeof recurrenceIdMs === "number" && Number.isFinite(recurrenceIdMs)
+      ? { recurrenceIdMs }
+      : {}),
+    ...(exdatesMs.length > 0 ? { exdatesMs } : {}),
   };
 }
 

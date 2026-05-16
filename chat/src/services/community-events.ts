@@ -19,6 +19,10 @@ import {
   type CommunityEventInput,
   type PartStat,
 } from "@/lib/xmpp-client";
+import {
+  expandInstances,
+  groupEventsWithOverrides,
+} from "@/lib/xmpp/event-expansion";
 
 export function useCommunityEvents(
   xmppClient: Ref<BrowserXmppClient | null>,
@@ -34,9 +38,18 @@ export function useCommunityEvents(
   const pageSize = options.pageSize ?? 200;
   let fetchRequestId = 0;
 
-  const sortedEvents = computed(() =>
-    sortEventsUpcomingFirst(groupEventsWithRsvps(events.value)),
-  );
+  const sortedEvents = computed(() => {
+    const merged = groupEventsWithRsvps(events.value);
+    const expanded: CommunityEvent[] = [];
+    for (const group of groupEventsWithOverrides(merged)) {
+      if (group.master.rrule) {
+        expanded.push(...expandInstances(group));
+      } else {
+        expanded.push(group.master);
+      }
+    }
+    return sortEventsUpcomingFirst(expanded);
+  });
 
   async function refresh(): Promise<boolean> {
     const client = xmppClient.value;
