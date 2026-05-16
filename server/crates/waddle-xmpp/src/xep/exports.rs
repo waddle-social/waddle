@@ -143,6 +143,11 @@ pub use super::xep0317::{
     set_hats, strip_hats, Hat, HatCarrier, HatSet, NS_HATS,
 };
 
+pub use super::xep0319::{
+    add_idle, build_idle_element, extract_idle_from_presence, has_idle, is_idle_element,
+    parse_idle_element, strip_idle, IdleCarrier, IdleError, IdleInfo, NS_IDLE,
+};
+
 pub use super::xep0333::{
     add_markable, build_displayed_element, build_displayed_message, build_markable_element,
     extract_marker_from_message, extract_marker_id, has_markable, has_marker, is_marker_element,
