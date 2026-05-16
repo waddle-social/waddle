@@ -200,9 +200,12 @@ impl Feature {
         Self::new("urn:xmpp:stories:0")
     }
 
-    /// XEP-0471 Calendar Events.
-    pub fn calendar() -> Self {
-        Self::new("urn:xmpp:calendar:0")
+    /// xCal calendar events per the XSF ProtoXEP
+    /// "Calendaring Extensions to Publish-Subscribe". The advertised
+    /// feature URI is the xCal namespace itself; the ProtoXEP has
+    /// no assigned XEP number yet (status: ProtoXEP).
+    pub fn xcal() -> Self {
+        Self::new("urn:ietf:params:xml:ns:xcal")
     }
 
     pub fn bookmarks_compat() -> Self {
