@@ -22,9 +22,11 @@
 //! ## Runtime Status
 //!
 //! This module provides parser/builder helpers for XEP-0050 payloads.
-//! The server runtime does not currently advertise or dispatch ad-hoc commands.
-//! Unsupported command requests therefore receive the normal
-//! `<service-unavailable/>` IQ error path instead.
+//! The server runtime advertises `http://jabber.org/protocol/commands`
+//! in `server_features()` and dispatches command IQs via the
+//! `CommandRegistry`; unknown commands return XEP-0050 §3.5
+//! `<bad-request/>` / `<item-not-found/>` from the dispatcher
+//! rather than a blanket service-unavailable.
 
 mod element;
 mod iq;
