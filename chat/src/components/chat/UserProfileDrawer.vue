@@ -3,6 +3,7 @@ import { ref, watch } from "vue";
 import { MessageCircle } from "lucide-vue-next";
 import AppDrawer from "@/components/ui/AppDrawer.vue";
 import AppAvatar from "@/components/ui/AppAvatar.vue";
+import Skeleton from "@/components/ui/Skeleton.vue";
 import { formatPepKeyword } from "@/lib/status-publication-ui";
 import type { BrowserXmppClient } from "@/lib/xmpp-client";
 import type { OccupantHat, OccupantPresence, UserPepProfile } from "@/lib/xmpp-client";
@@ -73,15 +74,18 @@ watch(
         </span>
       </div>
 
-      <!-- Loading skeleton -->
-      <div v-if="loading" class="chat-panel-stack">
-        <div class="flex flex-col gap-2 rounded-lg border border-border bg-muted/20 px-3 py-3 animate-pulse">
-          <div class="h-3 w-16 rounded bg-muted/50" />
-          <div class="h-4 w-2/3 rounded bg-muted/50" />
+      <!-- Loading skeleton — uses the shared Skeleton component so
+           the luminous-shimmer treatment (iter-1 chat-skeleton
+           animation) is consistent with every other loading
+           placeholder in the app. -->
+      <div v-if="loading" class="chat-panel-stack" aria-busy="true" aria-label="Loading profile">
+        <div class="flex flex-col gap-2 rounded-lg border border-border bg-muted/20 px-3 py-3">
+          <Skeleton width="4rem" height="0.55rem" />
+          <Skeleton width="65%" height="0.85rem" />
         </div>
-        <div class="flex flex-col gap-2 rounded-lg border border-border bg-muted/20 px-3 py-3 animate-pulse">
-          <div class="h-3 w-20 rounded bg-muted/50" />
-          <div class="h-4 w-1/2 rounded bg-muted/50" />
+        <div class="flex flex-col gap-2 rounded-lg border border-border bg-muted/20 px-3 py-3">
+          <Skeleton width="5rem" height="0.55rem" />
+          <Skeleton width="50%" height="0.85rem" />
         </div>
       </div>
 
