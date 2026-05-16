@@ -564,31 +564,41 @@ const connectionStatusIcon = computed(() => {
 const connectionStatusClasses = computed(() => {
   switch (connectionNotice.value?.tone) {
     case "offline":
+      // Passive state — user already knows they're disconnected.
+      // Keep the chip quiet: muted bg tint, no glow halo.
       return {
         banner: "bg-muted/35 text-foreground",
         iconWrap: "border-border/70 bg-background/60 text-muted-foreground/80",
-        chip: "border-border/70 bg-transparent text-muted-foreground/80",
+        chip: "border-border/70 bg-muted/25 text-muted-foreground/80",
         body: "text-muted-foreground",
       };
     case "reconnecting":
+      // Active reconnection — warning-tinted bg + warning-glow halo
+      // reach the eye without becoming an alarm. The icon's spinner
+      // carries the "moving" signal.
       return {
         banner: "bg-warning/10 text-foreground",
         iconWrap: "border-warning/15 bg-background/60 text-warning/80",
-        chip: "border-warning/15 bg-transparent text-warning/80",
+        chip: "chat-connection-chip-glow--warning border-warning/35 bg-warning/10 text-warning/90",
         body: "text-foreground/75",
       };
     case "error":
+      // Wants user attention (session expired, etc.). Destructive-
+      // tinted bg + destructive-glow halo distinguish it from the
+      // reconnecting tone without escalating to a banner.
       return {
         banner: "bg-destructive/10 text-foreground",
         iconWrap: "border-destructive/15 bg-background/60 text-destructive/80",
-        chip: "border-destructive/15 bg-transparent text-destructive/80",
+        chip: "chat-connection-chip-glow--destructive border-destructive/35 bg-destructive/10 text-destructive/90",
         body: "text-foreground/80",
       };
     case "reconnected":
+      // Brief celebration. Primary-tinted bg + --glow-strong halo
+      // so the chip reads "we're back" before the banner ages out.
       return {
         banner: "bg-primary/8 text-foreground",
         iconWrap: "border-primary/12 bg-background/60 text-primary/80",
-        chip: "border-primary/12 bg-transparent text-primary/80",
+        chip: "chat-connection-chip-glow--primary border-primary/35 bg-primary/10 text-primary/90",
         body: "text-foreground/75",
       };
     default:
