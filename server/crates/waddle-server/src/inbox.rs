@@ -193,14 +193,27 @@ impl InboxStorage for DatabaseInboxStorage {
         user: &BareJid,
         partner: &BareJid,
         thread_id: Option<&str>,
-    ) -> Result<(), InboxStorageError> {
+    ) -> Result<Option<InboxEntry>, InboxStorageError> {
         let tid = thread_id.unwrap_or("");
-        self.execute(
-            "UPDATE inbox_entries SET unread = 0 WHERE user_jid = ? AND partner_jid = ? AND thread_id = ?",
-            crate::db_params![user.to_string(), partner.to_string(), tid.to_string()],
-        )
-        .await?;
-        Ok(())
+        let sql = format!(
+            "UPDATE inbox_entries SET unread = 0 \
+             WHERE user_jid = ? AND partner_jid = ? AND thread_id = ? \
+             RETURNING {SELECT_COLS}"
+        );
+        let mut rows = self
+            .query(
+                &sql,
+                crate::db_params![user.to_string(), partner.to_string(), tid.to_string()],
+            )
+            .await?;
+        let Some(row) = rows
+            .next()
+            .await
+            .map_err(|error| InboxStorageError::Other(error.to_string()))?
+        else {
+            return Ok(None);
+        };
+        Ok(Some(decode_row(&row)?))
     }
 
     #[instrument(skip(self), fields(user = %user))]

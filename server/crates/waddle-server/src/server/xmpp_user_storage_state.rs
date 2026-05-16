@@ -166,26 +166,6 @@ pub(crate) async fn upsert_inbox_entry(
         })
 }
 
-pub(crate) async fn mark_inbox_read(
-    storage: Option<&dyn InboxStorage>,
-    user_jid: &jid::BareJid,
-    partner_jid: &jid::BareJid,
-) -> Result<(), XmppError> {
-    let storage = require_inbox_storage(storage)?;
-    storage
-        .mark_read(user_jid, partner_jid, None)
-        .await
-        .map_err(|error| {
-            warn!(
-                jid = %user_jid,
-                partner = %partner_jid,
-                error = %error,
-                "Failed to mark inbox conversation read"
-            );
-            XmppError::internal(format!("Inbox error: {}", error))
-        })
-}
-
 pub(crate) async fn inbox_total_unread(
     storage: Option<&dyn InboxStorage>,
     user_jid: &jid::BareJid,

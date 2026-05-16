@@ -245,7 +245,7 @@ pub(super) async fn handle_archive_inbox_upload_iq(
                         )];
                     }
                 };
-                if let Err(error) = state
+                let updated = match state
                     .deps
                     .protocol
                     .inbox_storage
@@ -256,13 +256,27 @@ pub(super) async fn handle_archive_inbox_upload_iq(
                     )
                     .await
                 {
-                    warn!(error = %error, jid = %user_jid, partner = %mark_read.partner, "Failed to mark inbox read");
-                    return vec![build_iq_error_xml_typed(
-                        id,
-                        None,
-                        None,
-                        internal_server_error_iq_error("Internal server error."),
-                    )];
+                    Ok(updated) => updated,
+                    Err(error) => {
+                        warn!(error = %error, jid = %user_jid, partner = %mark_read.partner, "Failed to mark inbox read");
+                        return vec![build_iq_error_xml_typed(
+                            id,
+                            None,
+                            None,
+                            internal_server_error_iq_error("Internal server error."),
+                        )];
+                    }
+                };
+                // Cross-device sync: fan the post-update entry out to every
+                // resource bound for this user so other devices clear their
+                // unread badges without waiting for a fresh inbox query.
+                if let Some(entry) = updated {
+                    crate::server::routes::interpret::push_inbox_update(
+                        state.deps.protocol.connection_registry.as_ref(),
+                        &user_jid,
+                        &entry,
+                    )
+                    .await;
                 }
                 return vec![iq_to_xml(build_mark_read_result(request_iq))];
             }

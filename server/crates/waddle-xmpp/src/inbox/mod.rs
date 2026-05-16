@@ -249,16 +249,18 @@ impl InboxView {
         next
     }
 
-    /// Mark a channel-level conversation as read.
-    pub fn mark_read(&mut self, partner: &BareJid) {
-        self.mark_read_by_key(&InboxKey::channel(partner.clone()));
+    /// Mark a channel-level conversation as read. Returns the entry after the
+    /// update, or `None` when no entry matched.
+    pub fn mark_read(&mut self, partner: &BareJid) -> Option<InboxEntry> {
+        self.mark_read_by_key(&InboxKey::channel(partner.clone()))
     }
 
-    /// Mark a specific conversation (channel or thread) as read.
-    pub fn mark_read_by_key(&mut self, key: &InboxKey) {
-        if let Some(e) = self.entries.get_mut(key) {
-            e.unread = 0;
-        }
+    /// Mark a specific conversation (channel or thread) as read. Returns the
+    /// entry after the update so callers can fan it out to other resources.
+    pub fn mark_read_by_key(&mut self, key: &InboxKey) -> Option<InboxEntry> {
+        let entry = self.entries.get_mut(key)?;
+        entry.unread = 0;
+        Some(entry.clone())
     }
 
     pub fn remove(&mut self, partner: &BareJid) -> Option<InboxEntry> {
