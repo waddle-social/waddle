@@ -85,6 +85,7 @@ pub fn pep_features() -> Vec<Feature> {
         Feature::new("urn:xmpp:push:0"),
         Feature::bookmarks_compat(),
         Feature::new("urn:xmpp:bookmarks:1#compat-pep"),
+        Feature::vcard4(),
     ]
 }
 

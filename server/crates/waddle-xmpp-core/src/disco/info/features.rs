@@ -263,6 +263,16 @@ impl Feature {
         Self::new("urn:xmpp:avatar:metadata+notify")
     }
 
+    /// XEP-0292 vCard4 over XMPP — the §8 MUST disco feature any
+    /// client or server that supports the vCard4 namespace has to
+    /// advertise. Distinct from `vcard4_notify`: this one says "I
+    /// understand and serve the `urn:ietf:params:xml:ns:vcard-4.0`
+    /// element"; the notify variant is the PEP `+notify` filter for
+    /// XEP-0163 fan-out.
+    pub fn vcard4() -> Self {
+        Self::new("urn:ietf:params:xml:ns:vcard-4.0")
+    }
+
     /// XEP-0292 vCard4 over XMPP — `+notify` filter advertised by
     /// clients that want to receive vCard4 PEP fan-out per XEP-0163 §3.
     pub fn vcard4_notify() -> Self {
