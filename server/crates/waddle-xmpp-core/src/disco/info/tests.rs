@@ -141,4 +141,7 @@ fn test_spaces_service_features_include_only_supported_pubsub_features() {
     assert!(!features.contains(&Feature::new(
         "http://jabber.org/protocol/pubsub#manage-subscriptions"
     )));
+    // XEP-0472 Pubsub Social Feed — the spaces service hosts the
+    // community-wide feed node, so disco must advertise the namespace.
+    assert!(features.contains(&Feature::social_feed()));
 }
