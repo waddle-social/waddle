@@ -8,8 +8,8 @@ use crate::mam::STANZA_ID_NS;
 use crate::xep::xep0424::extract_retraction_from_message;
 use crate::xep::xep0430::InboxQuery;
 use crate::xep::{
-    has_file_sharing, is_moderation_request_message, is_moderation_result_message,
-    is_reaction_message, is_sticker_message, should_skip_storage,
+    has_file_sharing, is_moderation_result_message, is_reaction_message, is_sticker_message,
+    should_skip_storage,
 };
 
 pub fn should_project_message(msg: &Message) -> bool {
@@ -26,7 +26,6 @@ pub fn should_project_message(msg: &Message) -> bool {
             extract_retraction_from_message(msg),
             Some(crate::xep::RetractionKind::Request(_))
         )
-        || is_moderation_request_message(msg)
         || is_moderation_result_message(msg)
         || has_file_sharing(msg)
         || is_sticker_message(msg)

@@ -21,8 +21,8 @@ use super::context::RoomContext;
 use super::traits::{RoomHandler, RoomHandlerOutcome};
 use crate::xep::xep0424::{extract_retraction_from_message, RetractionKind};
 use crate::xep::{
-    extract_forum_action, has_file_sharing, is_moderation_request_message,
-    is_moderation_result_message, is_reaction_message, is_sticker_message, should_skip_storage,
+    extract_forum_action, has_file_sharing, is_moderation_result_message, is_reaction_message,
+    is_sticker_message, should_skip_storage,
 };
 use waddle_xmpp_core::xep0201::{thread_info_from_message_in_stanza_ns, CLIENT_STANZA_NS};
 use xmpp_parsers::message::{Message, MessageType};
@@ -81,7 +81,6 @@ pub fn is_archivable(message: &Message) -> bool {
             extract_retraction_from_message(message),
             Some(RetractionKind::Request(_))
         )
-        || is_moderation_request_message(message)
         || is_moderation_result_message(message)
         || thread_info_from_message_in_stanza_ns(message, CLIENT_STANZA_NS).is_some()
         || extract_forum_action(message).is_some()

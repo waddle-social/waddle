@@ -1,55 +1,62 @@
-//! XEP-0425: Moderated Message Retraction
+//! XEP-0425: Moderated Message Retraction (v1).
 //!
-//! Allows MUC moderators to retract any occupant's message. Extends
-//! XEP-0424 (Message Retraction) with moderator authority and uses
-//! XEP-0422 (Message Fastening) for targeting.
+//! Allows MUC moderators to retract any occupant's message. Replaces
+//! the v0 XEP-0422 message-fastening shape with a direct IQ from the
+//! moderator and a `<retract>`-shaped broadcast carrying a
+//! `<moderated>` attribution child.
 //!
 //! ## XML Format
 //!
-//! Moderator sends to room:
+//! Moderator → room (IQ request):
 //! ```xml
-//! <message type='groupchat' to='room@muc.example.com' id='mod-1'>
-//!   <apply-to id='target-msg-id' xmlns='urn:xmpp:fasten:0'>
-//!     <moderate xmlns='urn:xmpp:message-moderate:1'>
-//!       <retract xmlns='urn:xmpp:message-retract:1'/>
-//!       <reason>Spam</reason>
-//!     </moderate>
-//!   </apply-to>
+//! <iq type='set' to='room@muc.example.com' id='mod-1'>
+//!   <moderate id='target-stanza-id' xmlns='urn:xmpp:message-moderate:1'>
+//!     <retract xmlns='urn:xmpp:message-retract:1'/>
+//!     <reason>Spam</reason>
+//!   </moderate>
+//! </iq>
+//! ```
+//!
+//! Room → all occupants (groupchat broadcast):
+//! ```xml
+//! <message type='groupchat' from='room@muc.example.com'>
+//!   <retract id='target-stanza-id' xmlns='urn:xmpp:message-retract:1'>
+//!     <moderated by='room@muc.example.com/modnick' xmlns='urn:xmpp:message-moderate:1'>
+//!       <occupant-id xmlns='urn:xmpp:occupant-id:0' id='dd72…'/>
+//!     </moderated>
+//!     <reason>Spam</reason>
+//!   </retract>
 //! </message>
 //! ```
 //!
-//! Server broadcasts to room:
-//! ```xml
-//! <message type='groupchat' from='room@muc.example.com'>
-//!   <apply-to id='target-msg-id' xmlns='urn:xmpp:fasten:0'>
-//!     <moderated xmlns='urn:xmpp:message-moderate:1' by='room@muc.example.com/modnick'>
-//!       <retracted xmlns='urn:xmpp:message-retract:1' stamp='2024-06-01T12:00:00Z'/>
-//!       <reason>Spam</reason>
-//!     </moderated>
-//!   </apply-to>
-//! </message>
-//! ```
+//! Per XEP-0425 v1 §3 spec example, `<moderated>` carries the
+//! moderator's XEP-0421 `<occupant-id/>` child when the room is
+//! semi-anonymous — the `by=` JID alone is insufficient there since
+//! the moderator's real bare JID is hidden.
 //!
 //! ## Server Behavior
 //!
 //! The MUC service MUST:
-//! - Verify the sender has moderator role
-//! - Replace `<moderate>` with `<moderated by='...'>` adding the moderator's JID
-//! - Replace `<retract/>` with `<retracted stamp='...'/>`
-//! - Broadcast to all occupants
+//! - Verify the sender has Moderator role.
+//! - Look up the target message in MAM.
+//! - Broadcast a `<message>` with `<retract id='…'>` containing a
+//!   `<moderated by='…'><occupant-id/></moderated>` child and the
+//!   optional `<reason/>`.
+//! - Replace the archived message contents with a `<retracted/>`
+//!   tombstone (XEP-0424 path) preserving the stanza-id position.
 
 use minidom::Element;
 use xmpp_parsers::iq::{Iq, IqType};
 use xmpp_parsers::message::Message;
 
-/// Namespace for XEP-0425 Message Moderation.
+/// Namespace for XEP-0425 Message Moderation v1.
 pub const NS_MESSAGE_MODERATE: &str = "urn:xmpp:message-moderate:1";
-
-/// Namespace for XEP-0422 Message Fastening.
-pub const NS_FASTEN: &str = "urn:xmpp:fasten:0";
 
 /// Namespace for XEP-0424 Message Retraction (used within moderation).
 const NS_RETRACT: &str = "urn:xmpp:message-retract:1";
+
+/// Namespace for XEP-0421 Occupant Identifiers (embedded in `<moderated>`).
+const NS_OCCUPANT_ID: &str = "urn:xmpp:occupant-id:0";
 
 /// A moderation request from a moderator.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -100,47 +107,37 @@ impl ModerationRequest {
 }
 
 /// A moderation result broadcast by the server.
+///
+/// Carries the moderator's MUC JID **and** their XEP-0421
+/// `<occupant-id/>` when present — the latter is mandatory
+/// attribution in semi-anonymous rooms where the `by=` JID alone
+/// cannot identify the moderator.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModerationResult {
     /// The ID of the moderated message.
     pub target_id: String,
     /// The MUC JID of the moderator who performed the action.
     pub moderated_by: String,
-    /// Timestamp of the moderation action.
-    pub stamp: String,
+    /// XEP-0421 occupant-id of the moderator. Required by v1 §3 in
+    /// semi-anonymous rooms; optional for fully non-anonymous rooms
+    /// where `moderated_by` already discloses the real JID.
+    pub moderator_occupant_id: Option<String>,
     /// Optional reason.
     pub reason: Option<String>,
 }
 
 /// Trait for types that can carry moderation elements.
 pub trait ModerationCarrier {
-    /// Extract a moderation request from this carrier.
-    fn moderation_request(&self) -> Option<ModerationRequest>;
-
     /// Extract a moderation result from this carrier.
     fn moderation_result(&self) -> Option<ModerationResult>;
-
-    /// Returns `true` if this is a moderation request.
-    fn is_moderation_request(&self) -> bool {
-        self.moderation_request().is_some()
-    }
 
     /// Returns `true` if this is a moderation result (broadcast).
     fn is_moderation_result(&self) -> bool {
         self.moderation_result().is_some()
     }
-
-    /// Returns `true` if this carries any moderation element.
-    fn has_moderation(&self) -> bool {
-        self.is_moderation_request() || self.is_moderation_result()
-    }
 }
 
 impl ModerationCarrier for Message {
-    fn moderation_request(&self) -> Option<ModerationRequest> {
-        extract_moderation_request(self)
-    }
-
     fn moderation_result(&self) -> Option<ModerationResult> {
         extract_moderation_result(self)
     }
@@ -148,60 +145,58 @@ impl ModerationCarrier for Message {
 
 // ── Detection ────────────────────────────────────────────────────────
 
-/// Check if a message contains a moderation request (`<apply-to>/<moderate>`).
-pub fn is_moderation_request_message(msg: &Message) -> bool {
-    extract_moderation_request(msg).is_some()
-}
-
-/// Check if a message contains a moderation result (`<apply-to>/<moderated>`).
+/// Check if a message contains a v1 moderation broadcast
+/// (`<retract>` with `<moderated>` child).
 pub fn is_moderation_result_message(msg: &Message) -> bool {
     extract_moderation_result(msg).is_some()
 }
 
 // ── Extraction ───────────────────────────────────────────────────────
 
-/// Extract a moderation request from a message.
-pub fn extract_moderation_request(_msg: &Message) -> Option<ModerationRequest> {
-    None
-}
-
-/// Extract a moderation result from a message.
+/// Extract a moderation result from a message broadcast.
 pub fn extract_moderation_result(msg: &Message) -> Option<ModerationResult> {
-    if let Some(retract) = msg
+    let retract = msg
         .payloads
         .iter()
-        .find(|e| e.name() == "retract" && e.ns() == NS_RETRACT)
-    {
-        let target_id = retract.attr("id").filter(|s| !s.is_empty())?.to_owned();
-        let moderated = retract
-            .children()
-            .find(|c| c.name() == "moderated" && c.ns() == NS_MESSAGE_MODERATE)?;
-        let moderated_by = moderated.attr("by").filter(|s| !s.is_empty())?.to_owned();
-        let reason = retract
-            .children()
-            .find(|c| c.name() == "reason" && c.ns() == NS_RETRACT)
-            .map(|c| c.text())
-            .filter(|t| !t.is_empty());
+        .find(|e| e.name() == "retract" && e.ns() == NS_RETRACT)?;
+    let target_id = retract.attr("id").filter(|s| !s.is_empty())?.to_owned();
+    let moderated = retract
+        .children()
+        .find(|c| c.name() == "moderated" && c.ns() == NS_MESSAGE_MODERATE)?;
+    let moderated_by = moderated.attr("by").filter(|s| !s.is_empty())?.to_owned();
+    let moderator_occupant_id = moderated
+        .children()
+        .find(|c| c.name() == "occupant-id" && c.ns() == NS_OCCUPANT_ID)
+        .and_then(|c| c.attr("id"))
+        .filter(|s| !s.is_empty())
+        .map(ToOwned::to_owned);
+    let reason = retract
+        .children()
+        .find(|c| c.name() == "reason" && c.ns() == NS_RETRACT)
+        .map(|c| c.text())
+        .filter(|t| !t.is_empty());
 
-        return Some(ModerationResult {
-            target_id,
-            moderated_by,
-            stamp: String::new(),
-            reason,
-        });
-    }
-
-    None
+    Some(ModerationResult {
+        target_id,
+        moderated_by,
+        moderator_occupant_id,
+        reason,
+    })
 }
 
 // ── Building ─────────────────────────────────────────────────────────
 
 /// Build a complete moderation result message for broadcasting.
+///
+/// `moderator_occupant_id` is the moderator's XEP-0421 occupant id;
+/// supply it whenever the room would otherwise hide the moderator's
+/// real bare JID (semi-anonymous rooms). For non-anonymous rooms
+/// the spec allows passing `None`, but supplying it is harmless.
 pub fn build_moderation_result_message(
     from_room: impl Into<Option<jid::Jid>>,
     target_id: &str,
     moderated_by: &str,
-    stamp: &str,
+    moderator_occupant_id: Option<&str>,
     reason: Option<&str>,
 ) -> Message {
     let mut msg = Message::new(None::<jid::Jid>);
@@ -211,26 +206,45 @@ pub fn build_moderation_result_message(
     msg.payloads.push(build_moderated_retract_element(
         target_id,
         moderated_by,
-        stamp,
+        moderator_occupant_id,
         reason,
     ));
     msg
 }
 
-/// Build the current XEP-0425 broadcast payload:
-/// `<retract id='target'><moderated by='moderator'/><reason>...</reason></retract>`.
+/// Build the v1 XEP-0425 broadcast payload:
+///
+/// ```xml
+/// <retract id='target' xmlns='urn:xmpp:message-retract:1'>
+///   <moderated by='moderator' xmlns='urn:xmpp:message-moderate:1'>
+///     <occupant-id id='…' xmlns='urn:xmpp:occupant-id:0'/>
+///   </moderated>
+///   <reason>…</reason>
+/// </retract>
+/// ```
+///
+/// The `<occupant-id>` child is emitted when
+/// `moderator_occupant_id` is `Some`. The spec example in §3 shows
+/// it as the canonical attribution mechanism for semi-anonymous
+/// rooms (XEP-0421 §3) — without it, a moderator's identity cannot
+/// be cited from the broadcast alone, breaking audit trails.
 pub fn build_moderated_retract_element(
     target_id: &str,
     moderated_by: &str,
-    stamp: &str,
+    moderator_occupant_id: Option<&str>,
     reason: Option<&str>,
 ) -> Element {
-    let moderated = Element::builder("moderated", NS_MESSAGE_MODERATE)
-        .attr("by", moderated_by)
-        .build();
+    let mut moderated = Element::builder("moderated", NS_MESSAGE_MODERATE).attr("by", moderated_by);
+    if let Some(occupant_id) = moderator_occupant_id.filter(|s| !s.is_empty()) {
+        moderated = moderated.append(
+            Element::builder("occupant-id", NS_OCCUPANT_ID)
+                .attr("id", occupant_id)
+                .build(),
+        );
+    }
     let mut retract = Element::builder("retract", NS_RETRACT)
         .attr("id", target_id)
-        .append(moderated);
+        .append(moderated.build());
     if let Some(reason_text) = reason {
         retract = retract.append(
             Element::builder("reason", NS_RETRACT)
@@ -239,7 +253,6 @@ pub fn build_moderated_retract_element(
         );
     }
 
-    let _ = stamp;
     retract.build()
 }
 
@@ -280,9 +293,14 @@ mod tests {
 
     #[test]
     fn test_parse_moderation_result() {
+        // Note the v1 spec shape: `<retract>` outer, `<moderated>`
+        // inner with its own `<occupant-id>` child for semi-anonymous
+        // attribution.
         let xml = "<message xmlns='jabber:client' type='groupchat'>\
                     <retract xmlns='urn:xmpp:message-retract:1' id='target-1'>\
-                      <moderated xmlns='urn:xmpp:message-moderate:1' by='room@muc.example.com/modnick'/>\
+                      <moderated xmlns='urn:xmpp:message-moderate:1' by='room@muc.example.com/modnick'>\
+                        <occupant-id xmlns='urn:xmpp:occupant-id:0' id='abc123'/>\
+                      </moderated>\
                       <reason>Spam</reason>\
                     </retract>\
                     </message>";
@@ -292,14 +310,13 @@ mod tests {
         let result = extract_moderation_result(&msg).expect("has result");
         assert_eq!(result.target_id, "target-1");
         assert_eq!(result.moderated_by, "room@muc.example.com/modnick");
-        assert_eq!(result.stamp, "");
+        assert_eq!(result.moderator_occupant_id.as_deref(), Some("abc123"));
         assert_eq!(result.reason.as_deref(), Some("Spam"));
     }
 
     #[test]
     fn test_extract_absent() {
         let msg = Message::new(None::<jid::Jid>);
-        assert!(extract_moderation_request(&msg).is_none());
         assert!(extract_moderation_result(&msg).is_none());
     }
 
@@ -308,7 +325,7 @@ mod tests {
         let elem = build_moderated_retract_element(
             "msg-42",
             "room@muc.example.com/admin",
-            "2024-06-01T12:00:00Z",
+            Some("opaque-occupant-id"),
             Some("Spam"),
         );
 
@@ -319,6 +336,10 @@ mod tests {
         let result = extract_moderation_result(&msg).expect("parseable");
         assert_eq!(result.target_id, "msg-42");
         assert_eq!(result.moderated_by, "room@muc.example.com/admin");
+        assert_eq!(
+            result.moderator_occupant_id.as_deref(),
+            Some("opaque-occupant-id")
+        );
         assert_eq!(result.reason.as_deref(), Some("Spam"));
     }
 
@@ -328,31 +349,15 @@ mod tests {
             "room@muc.example.com".parse::<jid::Jid>().ok(),
             "orig-1",
             "room@muc.example.com/mod",
-            "2024-01-01T00:00:00Z",
+            None,
             None,
         );
 
         assert_eq!(msg.type_, MessageType::Groupchat);
         let result = extract_moderation_result(&msg).expect("parseable");
         assert_eq!(result.target_id, "orig-1");
+        assert_eq!(result.moderator_occupant_id, None);
         assert_eq!(result.reason, None);
-    }
-
-    #[test]
-    fn test_moderation_carrier_trait_request() {
-        let xml = "<message xmlns='jabber:client' type='groupchat'>\
-                    <apply-to xmlns='urn:xmpp:fasten:0' id='t-1'>\
-                      <moderate xmlns='urn:xmpp:message-moderate:1'>\
-                        <retract xmlns='urn:xmpp:message-retract:1'/>\
-                      </moderate>\
-                    </apply-to>\
-                    </message>";
-        let msg =
-            Message::try_from(xml.parse::<Element>().expect("valid xml")).expect("valid message");
-
-        assert!(!msg.is_moderation_request());
-        assert!(!msg.is_moderation_result());
-        assert!(!msg.has_moderation());
     }
 
     #[test]
@@ -365,9 +370,7 @@ mod tests {
         let msg =
             Message::try_from(xml.parse::<Element>().expect("valid xml")).expect("valid message");
 
-        assert!(!msg.is_moderation_request());
         assert!(msg.is_moderation_result());
-        assert!(msg.has_moderation());
     }
 
     #[test]
@@ -383,7 +386,6 @@ mod tests {
     #[test]
     fn test_is_helpers() {
         let plain = Message::new(None::<jid::Jid>);
-        assert!(!is_moderation_request_message(&plain));
         assert!(!is_moderation_result_message(&plain));
     }
 }
