@@ -140,6 +140,18 @@ const contentPaneClass = computed(() => {
   return activeRightPanel.value ? "chat-content-pane--desktop-split" : "";
 });
 
+function onCommunityRsvp(
+  event: { uid: string },
+  partstat: "ACCEPTED" | "DECLINED" | "TENTATIVE" | "NEEDS-ACTION",
+) {
+  const session = connectionStore.session;
+  if (!session) return;
+  const bareJid = session.jid.split("/")[0] ?? session.jid;
+  const localpart = bareJid.split("@")[0];
+  if (!localpart) return;
+  void communityEvents.rsvp(event.uid, localpart, bareJid, partstat);
+}
+
 function selectCurrentChannelExtensionRoute(route: DiscoveredExtensionRoute) {
   const channel = waddles.currentChannel.value;
   if (!channel) return;
@@ -279,6 +291,7 @@ function onSelectChannelFromSidebar(id: string) {
         :self-jid="connectionStore.session?.jid ?? null"
         @refresh="communityEvents.refresh()"
         @post="(input) => communityEvents.post(input)"
+        @rsvp="(event, partstat) => onCommunityRsvp(event, partstat)"
       />
       <UserSettingsPage
         v-else-if="ui.activePage.value === 'settings' && connectionStore.session"

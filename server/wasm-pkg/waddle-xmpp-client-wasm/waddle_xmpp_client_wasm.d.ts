@@ -129,6 +129,13 @@ export class WaddleClient {
      * required for the event to be useful on a timeline.
      */
     xcal_publish(community_jid: string, input: any): Promise<any>;
+    /**
+     * Publish (or update) this session's RSVP for a calendar event.
+     * `partstat` must be one of "ACCEPTED" | "DECLINED" | "TENTATIVE"
+     * | "NEEDS-ACTION". The chat groups sibling `-rsvp-*` items back
+     * into the master event on the next items fetch.
+     */
+    xcal_rsvp(community_jid: string, master_uid: string, self_localpart: string, self_jid: string, partstat: string): Promise<any>;
 }
 
 export class WaddleConfig {

@@ -22,6 +22,17 @@ export interface Rrule {
   untilMs?: number;
 }
 
+/** RFC 5545 §3.2.12 participation status. */
+export type PartStat = "NEEDS-ACTION" | "ACCEPTED" | "DECLINED" | "TENTATIVE";
+
+export interface Attendee {
+  /** Typically `xmpp:user@example.com`. */
+  uri: string;
+  partstat: PartStat;
+  role?: string;
+  rsvp?: boolean;
+}
+
 export interface CommunityEvent {
   /** Pubsub item id (UUID). */
   id: string;
@@ -38,6 +49,12 @@ export interface CommunityEvent {
   /** Epoch ms. */
   dtendMs?: number;
   rrule?: Rrule;
+  /**
+   * RSVPs aggregated from sibling `<master-uid>-rsvp-<localpart>`
+   * pubsub items. Empty for events with no RSVPs yet. Keyed by
+   * attendee URI bare-JID at the chat layer to dedupe latest-wins.
+   */
+  attendees?: Attendee[];
 }
 
 export interface CommunityEventInput {
@@ -63,6 +80,13 @@ export interface WasmRrule {
   until?: string | null;
 }
 
+export interface WasmAttendee {
+  uri: string;
+  partstat: string;
+  role?: string | null;
+  rsvp?: boolean | null;
+}
+
 export interface WasmVEvent {
   id: string;
   uid: string;
@@ -74,6 +98,29 @@ export interface WasmVEvent {
   dtstart?: string | null;
   dtend?: string | null;
   rrule?: WasmRrule | null;
+  attendees?: WasmAttendee[] | null;
+}
+
+const PARTSTATS: ReadonlySet<PartStat> = new Set([
+  "NEEDS-ACTION",
+  "ACCEPTED",
+  "DECLINED",
+  "TENTATIVE",
+]);
+
+function isPartStat(value: string): value is PartStat {
+  return PARTSTATS.has(value as PartStat);
+}
+
+function attendeeFromWasm(wasm: WasmAttendee): Attendee | null {
+  if (!wasm.uri) return null;
+  const partstat: PartStat = isPartStat(wasm.partstat) ? wasm.partstat : "NEEDS-ACTION";
+  return {
+    uri: wasm.uri,
+    partstat,
+    ...(wasm.role ? { role: wasm.role } : {}),
+    ...(typeof wasm.rsvp === "boolean" ? { rsvp: wasm.rsvp } : {}),
+  };
 }
 
 function isFreq(value: string): value is Freq {
@@ -115,6 +162,9 @@ export function eventFromWasm(event: WasmVEvent): CommunityEvent {
   const dtstart = event.dtstart ? Date.parse(event.dtstart) : undefined;
   const dtend = event.dtend ? Date.parse(event.dtend) : undefined;
   const rrule = event.rrule ? rruleFromWasm(event.rrule) ?? undefined : undefined;
+  const attendees = (event.attendees ?? [])
+    .map(attendeeFromWasm)
+    .filter((a): a is Attendee => a !== null);
   return {
     id: event.id,
     uid: event.uid,
@@ -126,7 +176,58 @@ export function eventFromWasm(event: WasmVEvent): CommunityEvent {
     ...(typeof dtstart === "number" && Number.isFinite(dtstart) ? { dtstartMs: dtstart } : {}),
     ...(typeof dtend === "number" && Number.isFinite(dtend) ? { dtendMs: dtend } : {}),
     ...(rrule ? { rrule } : {}),
+    ...(attendees.length > 0 ? { attendees } : {}),
   };
+}
+
+function parseRsvpItemId(itemId: string): { masterUid: string; localpart: string } | null {
+  const idx = itemId.lastIndexOf("-rsvp-");
+  if (idx <= 0) return null;
+  const localpart = itemId.slice(idx + "-rsvp-".length);
+  if (!localpart) return null;
+  return { masterUid: itemId.slice(0, idx), localpart };
+}
+
+/**
+ * Group a flat item list (from `xcal_items`) into master events
+ * with their sibling RSVPs folded into the master's `attendees`.
+ * RSVP items override the master's own attendees on a per-URI basis
+ * (latest-wins by item dtstamp where available, else last seen).
+ */
+export function groupEventsWithRsvps(items: readonly CommunityEvent[]): CommunityEvent[] {
+  const masters = new Map<string, CommunityEvent>();
+  const rsvps = new Map<string, Map<string, Attendee>>();
+
+  for (const item of items) {
+    const parsed = parseRsvpItemId(item.id);
+    if (parsed) {
+      const single = item.attendees?.[0];
+      if (single) {
+        const bucket = rsvps.get(parsed.masterUid) ?? new Map<string, Attendee>();
+        bucket.set(single.uri, single);
+        rsvps.set(parsed.masterUid, bucket);
+      }
+      continue;
+    }
+    masters.set(item.uid, item);
+  }
+
+  const out: CommunityEvent[] = [];
+  for (const master of masters.values()) {
+    const merged = new Map<string, Attendee>();
+    for (const attendee of master.attendees ?? []) {
+      merged.set(attendee.uri, attendee);
+    }
+    for (const [uri, attendee] of rsvps.get(master.uid) ?? new Map()) {
+      merged.set(uri, attendee);
+    }
+    const attendees = [...merged.values()];
+    out.push({
+      ...master,
+      ...(attendees.length > 0 ? { attendees } : {}),
+    });
+  }
+  return out;
 }
 
 /** Sort events by upcoming-first, past events at the end newest-first. */

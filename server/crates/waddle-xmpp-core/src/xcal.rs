@@ -197,6 +197,71 @@ impl Rrule {
     }
 }
 
+// ── ATTENDEE / PARTSTAT (RFC 5545 §3.2.12 + §3.8.4.1) ──────────────
+
+/// Participation status of an attendee. RFC 5545 §3.2.12 defines a
+/// small enum; we model the four states the chat UX exposes (Going /
+/// Maybe / Not going + the initial "no answer yet" placeholder).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PartStat {
+    NeedsAction,
+    Accepted,
+    Declined,
+    Tentative,
+}
+
+impl PartStat {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::NeedsAction => "NEEDS-ACTION",
+            Self::Accepted => "ACCEPTED",
+            Self::Declined => "DECLINED",
+            Self::Tentative => "TENTATIVE",
+        }
+    }
+
+    pub fn from_str_value(s: &str) -> Option<Self> {
+        match s {
+            "NEEDS-ACTION" => Some(Self::NeedsAction),
+            "ACCEPTED" => Some(Self::Accepted),
+            "DECLINED" => Some(Self::Declined),
+            "TENTATIVE" => Some(Self::Tentative),
+            _ => None,
+        }
+    }
+}
+
+/// VEVENT ATTENDEE (RFC 5545 §3.8.4.1) — a single participant and
+/// their RSVP status. URI is typically `xmpp:user@example.com`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Attendee {
+    pub uri: String,
+    pub partstat: PartStat,
+    pub role: Option<String>,
+    pub rsvp: Option<bool>,
+}
+
+impl Attendee {
+    pub fn new(uri: impl Into<String>, partstat: PartStat) -> Self {
+        Self {
+            uri: uri.into(),
+            partstat,
+            role: None,
+            rsvp: None,
+        }
+    }
+
+    pub fn with_role(mut self, role: impl Into<String>) -> Self {
+        self.role = Some(role.into());
+        self
+    }
+
+    pub fn with_rsvp(mut self, rsvp: bool) -> Self {
+        self.rsvp = Some(rsvp);
+        self
+    }
+}
+
 // ── VEVENT ──────────────────────────────────────────────────────────
 
 /// Calendar event modelled as the iCalendar VEVENT component.
@@ -220,6 +285,10 @@ pub struct VEvent {
     pub organizer: Option<String>,
     /// Optional RRULE for recurring events.
     pub rrule: Option<Rrule>,
+    /// ATTENDEE list. Empty for events with no RSVPs yet; the chat
+    /// aggregates per-attendee RSVPs from sibling pubsub items into
+    /// this list on the master event before rendering.
+    pub attendees: Vec<Attendee>,
 }
 
 impl VEvent {
@@ -234,6 +303,7 @@ impl VEvent {
             location: None,
             organizer: None,
             rrule: None,
+            attendees: Vec::new(),
         }
     }
 
@@ -269,6 +339,16 @@ impl VEvent {
 
     pub fn with_rrule(mut self, rrule: Rrule) -> Self {
         self.rrule = Some(rrule);
+        self
+    }
+
+    pub fn with_attendees<I: IntoIterator<Item = Attendee>>(mut self, attendees: I) -> Self {
+        self.attendees = attendees.into_iter().collect();
+        self
+    }
+
+    pub fn add_attendee(mut self, attendee: Attendee) -> Self {
+        self.attendees.push(attendee);
         self
     }
 
@@ -348,9 +428,26 @@ pub fn build_vcalendar_with_event(event: &VEvent) -> Element {
     if let Some(ref rrule) = event.rrule {
         vevent.append_child(build_rrule_element(rrule));
     }
+    for attendee in &event.attendees {
+        vevent.append_child(build_attendee_element(attendee));
+    }
 
     vcalendar.append_child(vevent);
     vcalendar
+}
+
+fn build_attendee_element(attendee: &Attendee) -> Element {
+    let mut builder =
+        Element::builder("attendee", NS_XCAL).attr("partstat", attendee.partstat.as_str());
+    if let Some(ref role) = attendee.role {
+        builder = builder.attr("role", role);
+    }
+    if let Some(rsvp) = attendee.rsvp {
+        builder = builder.attr("rsvp", if rsvp { "TRUE" } else { "FALSE" });
+    }
+    let mut elem = builder.build();
+    elem.append_text_node(attendee.uri.as_str());
+    elem
 }
 
 /// `true` when an element is a `<vcalendar/>` in the xCal namespace.
@@ -425,6 +522,11 @@ pub fn parse_vcalendar_event(item_id: &str, vcalendar: &Element) -> Option<VEven
     let location = xcal_text(vevent, "location");
     let organizer = xcal_text(vevent, "organizer");
     let rrule = xcal_child(vevent, "rrule").and_then(parse_rrule);
+    let attendees = vevent
+        .children()
+        .filter(|c| c.name() == "attendee" && c.ns() == NS_XCAL)
+        .filter_map(parse_attendee)
+        .collect();
     Some(VEvent {
         uid,
         dtstamp,
@@ -435,7 +537,45 @@ pub fn parse_vcalendar_event(item_id: &str, vcalendar: &Element) -> Option<VEven
         location,
         organizer,
         rrule,
+        attendees,
     })
+}
+
+fn parse_attendee(elem: &Element) -> Option<Attendee> {
+    let uri = elem.text();
+    let uri = uri.trim();
+    if uri.is_empty() {
+        return None;
+    }
+    let partstat = elem
+        .attr("partstat")
+        .and_then(PartStat::from_str_value)
+        .unwrap_or(PartStat::NeedsAction);
+    let role = elem.attr("role").map(str::to_string);
+    let rsvp = elem.attr("rsvp").and_then(|v| match v {
+        "TRUE" | "true" => Some(true),
+        "FALSE" | "false" => Some(false),
+        _ => None,
+    });
+    Some(Attendee {
+        uri: uri.to_string(),
+        partstat,
+        role,
+        rsvp,
+    })
+}
+
+/// Bare-JID localpart of an `xmpp:` URI, lower-cased. Returns `None`
+/// for non-XMPP URIs or malformed values. Used by the chat to map
+/// attendee URIs back to JIDs and by the server to authorise RSVP
+/// publishes (an attendee URI must match the publisher's bare JID).
+pub fn xmpp_uri_to_bare_jid(uri: &str) -> Option<String> {
+    let rest = uri.strip_prefix("xmpp:")?;
+    let stripped = rest.split(['?', '/']).next().unwrap_or(rest);
+    if !stripped.contains('@') {
+        return None;
+    }
+    Some(stripped.to_ascii_lowercase())
 }
 
 #[cfg(test)]
@@ -595,5 +735,109 @@ mod tests {
 
         let past = VEvent::new("e", "Past").with_dtstart(ts(2020, 1, 1, 0, 0));
         assert!(!past.is_upcoming());
+    }
+
+    #[test]
+    fn partstat_round_trip_covers_every_state() {
+        for ps in [
+            PartStat::NeedsAction,
+            PartStat::Accepted,
+            PartStat::Declined,
+            PartStat::Tentative,
+        ] {
+            assert_eq!(PartStat::from_str_value(ps.as_str()), Some(ps));
+        }
+        assert_eq!(PartStat::from_str_value("UNKNOWN"), None);
+    }
+
+    #[test]
+    fn build_and_parse_event_with_attendees() {
+        let event = VEvent::new("evt-rsvp", "Game Night")
+            .with_dtstart(ts(2026, 6, 5, 19, 0))
+            .add_attendee(
+                Attendee::new("xmpp:alice@example.com", PartStat::Accepted)
+                    .with_role("REQ-PARTICIPANT")
+                    .with_rsvp(true),
+            )
+            .add_attendee(Attendee::new("xmpp:bob@example.com", PartStat::Declined))
+            .add_attendee(Attendee::new("xmpp:carol@example.com", PartStat::Tentative));
+
+        let vcal = build_vcalendar_with_event(&event);
+        let serialised = String::from(&vcal);
+        assert!(
+            serialised.contains("partstat=\"ACCEPTED\"")
+                || serialised.contains("partstat='ACCEPTED'"),
+            "ACCEPTED partstat must appear: {serialised}"
+        );
+        assert!(
+            serialised.contains("xmpp:bob@example.com"),
+            "attendee URI must appear: {serialised}"
+        );
+
+        let parsed = parse_vcalendar_event("evt-rsvp", &vcal).expect("parseable");
+        assert_eq!(parsed.attendees.len(), 3);
+        assert_eq!(parsed.attendees[0].uri, "xmpp:alice@example.com");
+        assert_eq!(parsed.attendees[0].partstat, PartStat::Accepted);
+        assert_eq!(parsed.attendees[0].role.as_deref(), Some("REQ-PARTICIPANT"));
+        assert_eq!(parsed.attendees[0].rsvp, Some(true));
+        assert_eq!(parsed.attendees[1].partstat, PartStat::Declined);
+        assert_eq!(parsed.attendees[2].partstat, PartStat::Tentative);
+    }
+
+    #[test]
+    fn attendee_without_partstat_defaults_to_needs_action() {
+        let xml = r#"<vcalendar xmlns='urn:ietf:params:xml:ns:xcal'>
+          <vevent>
+            <uid>evt-default</uid>
+            <summary>Default partstat</summary>
+            <attendee>xmpp:alice@example.com</attendee>
+          </vevent>
+        </vcalendar>"#;
+        let elem: Element = xml.parse().expect("valid xml");
+        let event = parse_vcalendar_event("evt-default", &elem).expect("parseable");
+        assert_eq!(event.attendees.len(), 1);
+        assert_eq!(event.attendees[0].partstat, PartStat::NeedsAction);
+    }
+
+    #[test]
+    fn attendee_with_empty_uri_is_dropped() {
+        let xml = r#"<vcalendar xmlns='urn:ietf:params:xml:ns:xcal'>
+          <vevent>
+            <uid>evt-empty</uid>
+            <summary>Empty attendee</summary>
+            <attendee partstat='ACCEPTED'></attendee>
+          </vevent>
+        </vcalendar>"#;
+        let elem: Element = xml.parse().expect("valid xml");
+        let event = parse_vcalendar_event("evt-empty", &elem).expect("parseable");
+        assert!(
+            event.attendees.is_empty(),
+            "empty URI attendee must be dropped"
+        );
+    }
+
+    #[test]
+    fn xmpp_uri_to_bare_jid_handles_common_cases() {
+        assert_eq!(
+            xmpp_uri_to_bare_jid("xmpp:alice@example.com").as_deref(),
+            Some("alice@example.com")
+        );
+        // Lowercases — JIDs are case-insensitive at the bare-JID layer.
+        assert_eq!(
+            xmpp_uri_to_bare_jid("xmpp:Alice@Example.COM").as_deref(),
+            Some("alice@example.com")
+        );
+        // Strips resource and query.
+        assert_eq!(
+            xmpp_uri_to_bare_jid("xmpp:alice@example.com/Resource").as_deref(),
+            Some("alice@example.com")
+        );
+        assert_eq!(
+            xmpp_uri_to_bare_jid("xmpp:alice@example.com?message").as_deref(),
+            Some("alice@example.com")
+        );
+        // Rejects non-xmpp URIs and malformed values.
+        assert_eq!(xmpp_uri_to_bare_jid("mailto:alice@example.com"), None);
+        assert_eq!(xmpp_uri_to_bare_jid("xmpp:not-a-jid"), None);
     }
 }
