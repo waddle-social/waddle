@@ -288,7 +288,7 @@ pub(super) async fn handle_spaces_publish(
     // the space-bookmark nodes but its items are <entry/> payloads,
     // not channel bookmarks. Route through the feed-specific path so
     // we don't try to parse entries as bookmarks.
-    if node == waddle_xmpp::xep::xep0472::PUBSUB_NODE_FEED {
+    if node == waddle_xmpp_core::xep0472::PUBSUB_NODE_FEED {
         return handle_social_feed_publish(iq, state, spaces_domain, node, item, session).await;
     }
 

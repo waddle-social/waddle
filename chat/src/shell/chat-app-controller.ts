@@ -10,6 +10,7 @@ import { useChatShellState } from "@/shell/state";
 import { useServiceWorkerUpdate } from "@/shell/service-worker-update";
 import { usePushNotifications } from "@/shell/notifications";
 import { useChannelInbox } from "@/channels/inbox";
+import { useSocialFeed } from "@/services/social-feed";
 import { useChatReadActivity } from "@/shell/read-activity";
 import { useDeploymentVersionInfo } from "@/shell/version";
 import { useXmppRosterContacts } from "@/contacts/roster";
@@ -76,6 +77,18 @@ export function useChatAppController(giphyApiKey: string) {
 
   const channelUnread = useChannelInbox(xmppClient);
   const rosterContacts = useXmppRosterContacts(xmppClient);
+
+  // XEP-0472 community Social Feed. The spaces service hosts the
+  // global feed node at `urn:xmpp:pubsub-social-feed:0`; the spaces
+  // JID is `spaces.<user-domain>` and resolves whenever a session is
+  // bound.
+  const spacesJid = computed(() => {
+    const jid = session.value?.jid;
+    if (!jid) return null;
+    const domain = jid.split("@")[1]?.split("/")[0];
+    return domain ? `spaces.${domain}` : null;
+  });
+  const socialFeed = useSocialFeed(xmppClient, { spacesJid });
 
   const dmMessaging = useDirectMessages(
     session,
@@ -682,6 +695,7 @@ export function useChatAppController(giphyApiKey: string) {
       // call on the very first connection is harmless.
       void dmConversations.hydrateFromInbox();
       void channelUnread.hydrateFromInbox();
+      void socialFeed.refresh();
     });
   }, { immediate: true });
 
@@ -1396,6 +1410,7 @@ export function useChatAppController(giphyApiKey: string) {
     void dmConversations.hydrateFromInbox();
     void channelUnread.hydrateFromInbox();
     void rosterContacts.loadRosterContacts();
+    void socialFeed.refresh();
 
     // Register service worker and sync push subscription (best-effort, non-blocking)
     void (async () => {
@@ -1626,6 +1641,7 @@ export function useChatAppController(giphyApiKey: string) {
       dmConversations,
       channelUnread,
       rosterContacts,
+      socialFeed,
       dmMessaging,
       xmppClient,
       activeMessages,

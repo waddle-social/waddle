@@ -57,6 +57,12 @@ import {
   type ExtensionCommandResult,
   type ExtensionRouteItem,
 } from "./extension-commands";
+import {
+  feedEntryFromWasm,
+  type FeedEntry,
+  type FeedPostInput,
+  type WasmFeedEntry,
+} from "./feed-types";
 import type { FetchInboxOptions, InboxEntry, InboxResult } from "./inbox-types";
 import type { ActivityPublication, MoodPublication, TunePublication, UserPepProfile } from "./pep-types";
 import {
@@ -870,6 +876,35 @@ export class BrowserXmppClient {
 
   async markInboxRead(partnerJid: string, threadId?: string): Promise<void> { const xmpp = await this.requireConnectedXmpp(); await xmpp.mark_inbox_read?.(barePeerJid(partnerJid), threadId ?? null); }
   async fetchThreadInbox(roomJid: string): Promise<InboxResult> { return this.fetchInbox({ room: roomJid, threads: true }); }
+
+  /**
+   * Fetch the latest XEP-0472 social feed entries from the spaces service.
+   * Returns entries newest-first as the server orders them.
+   */
+  async fetchFeed(spacesJid: string, maxItems: number | undefined = undefined): Promise<FeedEntry[]> {
+    const xmpp = await this.requireConnectedXmpp();
+    const result = await xmpp.feed_items?.(spacesJid, maxItems ?? null) as WasmFeedEntry[] | undefined;
+    return (result ?? []).map(feedEntryFromWasm);
+  }
+
+  /**
+   * Publish a XEP-0472 entry to the community feed. Resolves with the
+   * server-confirmed entry (with id + published) so callers can append
+   * to local state without re-fetching.
+   */
+  async publishFeedPost(spacesJid: string, post: FeedPostInput): Promise<FeedEntry> {
+    const xmpp = await this.requireConnectedXmpp();
+    const result = await xmpp.feed_publish?.(spacesJid, {
+      body: post.body,
+      ...(post.title ? { title: post.title } : {}),
+      ...(post.author ? { author: post.author } : {}),
+      ...(post.link ? { link: post.link } : {}),
+    }) as WasmFeedEntry | undefined;
+    if (!result) {
+      throw new Error("feed_publish returned no entry");
+    }
+    return feedEntryFromWasm(result);
+  }
   async publishMood(mood: MoodPublication): Promise<void> { const xmpp = await this.requireConnectedXmpp(); await xmpp.publish_mood?.({ kind: mood.kind, ...(mood.text ? { text: mood.text } : {}) }); }
   async retractMood(): Promise<void> { const xmpp = await this.requireConnectedXmpp(); await xmpp.retract_mood?.(); }
   async publishActivity(activity: ActivityPublication): Promise<void> { const xmpp = await this.requireConnectedXmpp(); await xmpp.publish_activity?.({ general: activity.general, ...(activity.specific ? { specific: activity.specific } : {}), ...(activity.text ? { text: activity.text } : {}) }); }

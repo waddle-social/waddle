@@ -10,6 +10,7 @@ export {
 } from "./jid";
 export type { OutboundFileAttachment } from "./send-types";
 export type { InboxEntry } from "./inbox-types";
+export type { FeedEntry, FeedPostInput } from "./feed-types";
 export type { UserPepProfile } from "./pep-types";
 export type {
   DmChatStateEvent,

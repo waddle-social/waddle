@@ -343,7 +343,7 @@ pub use super::xep_waddle_pin::{
     parse_unpinned_element as parse_unpinned_message_element, PinIntent, NS_WADDLE_PIN_V0,
 };
 
-pub use super::xep0472::{
+pub use waddle_xmpp_core::xep0472::{
     build_feed_entry_element, is_feed_entry, parse_feed_entry, FeedEntry, NS_SOCIAL_FEED,
     PUBSUB_NODE_FEED,
 };

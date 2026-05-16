@@ -56,6 +56,7 @@ mod client_extensions;
 mod client_history;
 mod client_messaging;
 mod client_rooms;
+mod client_social_feed;
 mod commands;
 mod conversions;
 mod driver;
