@@ -200,6 +200,11 @@ impl Feature {
         Self::new("urn:xmpp:stories:0")
     }
 
+    /// XEP-0471 Calendar Events.
+    pub fn calendar() -> Self {
+        Self::new("urn:xmpp:calendar:0")
+    }
+
     pub fn bookmarks_compat() -> Self {
         Self::new("urn:xmpp:bookmarks:1#compat")
     }

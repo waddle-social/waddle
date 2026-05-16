@@ -1,8 +1,8 @@
 package xmpp_e2e_scenarios
 
 scenario: #Scenario & {
-	name: "xep-0501-stories"
-	xeps: ["XEP-0060", "XEP-0501"]
+	name: "xep-0471-calendar"
+	xeps: ["XEP-0060", "XEP-0471"]
 	users: admin: devices: phone: #Actor & {
 		user:     "admin"
 		device:   "phone"
@@ -15,12 +15,12 @@ scenario: #Scenario & {
 
 	steps: [
 		// 1. disco#info on the community service MUST advertise the
-		//    XEP-0501 stories namespace so clients can discover
+		//    XEP-0471 calendar namespace so clients can discover
 		//    support before subscribing or publishing.
 		#SendIq & {
 			actor: adminPhone
 			type:  "get"
-			id:    "cue-stories-disco"
+			id:    "cue-calendar-disco"
 			to:    "community.\(scenario.domain)"
 			payload: #XmlElement & {
 				name: "query"
@@ -29,20 +29,19 @@ scenario: #Scenario & {
 		},
 		#ExpectIq & {
 			target: adminPhone
-			id:     "cue-stories-disco"
+			id:     "cue-calendar-disco"
 			type:   "result"
 			contains: [
-				"var=\"urn:xmpp:stories:0\"",
+				"var=\"urn:xmpp:calendar:0\"",
 			]
 		},
-		// 2. Publish a story to the bootstrapped community stories
-		//    node. The server bootstraps this node at startup with
-		//    spaces_public() access; server-owner affiliation seed
-		//    grants admin Publisher access.
+		// 2. Publish an event to the bootstrapped community events
+		//    node. Server bootstraps with spaces_public(); admin has
+		//    Publisher affiliation via the seed.
 		#SendIq & {
 			actor: adminPhone
 			type:  "set"
-			id:    "cue-story-publish"
+			id:    "cue-event-publish"
 			to:    "community.\(scenario.domain)"
 			payload: #XmlElement & {
 				name: "pubsub"
@@ -51,31 +50,30 @@ scenario: #Scenario & {
 					#XmlElement & {
 						name:  "publish"
 						ns:    "http://jabber.org/protocol/pubsub"
-						attrs: node: "urn:xmpp:stories:0"
+						attrs: node: "urn:xmpp:calendar:0"
 						children: [
 							#XmlElement & {
 								name:  "item"
 								ns:    "http://jabber.org/protocol/pubsub"
-								attrs: id: "cue-story-1"
+								attrs: id: "cue-event-1"
 								children: [
 									#XmlElement & {
-										name: "story"
-										ns:   "urn:xmpp:stories:0"
-										attrs: expires: "2030-01-01T12:00:00Z"
+										name: "event"
+										ns:   "urn:xmpp:calendar:0"
 										children: [
 											#XmlElement & {
-												name: "body"
-												ns:   "urn:xmpp:stories:0"
-												text: "Look at this!"
+												name: "title"
+												ns:   "urn:xmpp:calendar:0"
+												text: "Launch day"
 											},
 											#XmlElement & {
-												name: "media-url"
-												ns:   "urn:xmpp:stories:0"
-												text: "https://example.com/photo.jpg"
+												name: "start"
+												ns:   "urn:xmpp:calendar:0"
+												text: "2030-06-01T18:00:00Z"
 											},
 											#XmlElement & {
-												name: "author"
-												ns:   "urn:xmpp:stories:0"
+												name: "organizer"
+												ns:   "urn:xmpp:calendar:0"
 												text: "admin@\(scenario.domain)"
 											},
 										]
@@ -89,16 +87,16 @@ scenario: #Scenario & {
 		},
 		#ExpectIq & {
 			target: adminPhone
-			id:     "cue-story-publish"
+			id:     "cue-event-publish"
 			type:   "result"
 		},
-		// 3. Items query MUST return the published story with the
-		//    typed <story/> payload intact (id, body, media-url,
-		//    expires).
+		// 3. Items query MUST return the published event with the
+		//    typed <event/> payload intact (id, title, start,
+		//    organizer).
 		#SendIq & {
 			actor: adminPhone
 			type:  "get"
-			id:    "cue-story-items"
+			id:    "cue-event-items"
 			to:    "community.\(scenario.domain)"
 			payload: #XmlElement & {
 				name: "pubsub"
@@ -107,21 +105,20 @@ scenario: #Scenario & {
 					#XmlElement & {
 						name:  "items"
 						ns:    "http://jabber.org/protocol/pubsub"
-						attrs: node: "urn:xmpp:stories:0"
+						attrs: node: "urn:xmpp:calendar:0"
 					},
 				]
 			}
 		},
 		#ExpectIq & {
 			target: adminPhone
-			id:     "cue-story-items"
+			id:     "cue-event-items"
 			type:   "result"
 			contains: [
-				"id=\"cue-story-1\"",
-				"urn:xmpp:stories:0",
-				"Look at this!",
-				"https://example.com/photo.jpg",
-				"2030-01-01T12:00:00Z",
+				"id=\"cue-event-1\"",
+				"urn:xmpp:calendar:0",
+				"Launch day",
+				"2030-06-01T18:00:00Z",
 			]
 		},
 	]

@@ -6,6 +6,11 @@ pub struct XmppServiceDomains {
     pub spaces: String,
     pub upload: String,
     pub extensions: String,
+    /// Hosts community-wide pubsub features that are NOT space-bookmark
+    /// nodes (XEP-0472 social feed, XEP-0501 stories). Kept distinct
+    /// from `spaces` so the spaces disco#items enumeration only
+    /// surfaces actual community spaces.
+    pub community: String,
 }
 
 impl XmppServiceDomains {
@@ -15,6 +20,7 @@ impl XmppServiceDomains {
             spaces: format!("spaces.{xmpp_domain}"),
             upload: format!("upload.{xmpp_domain}"),
             extensions: format!("extensions.{xmpp_domain}"),
+            community: format!("community.{xmpp_domain}"),
         }
     }
 }

@@ -78,17 +78,17 @@ export function useChatAppController(giphyApiKey: string) {
   const channelUnread = useChannelInbox(xmppClient);
   const rosterContacts = useXmppRosterContacts(xmppClient);
 
-  // XEP-0472 community Social Feed. The spaces service hosts the
-  // global feed node at `urn:xmpp:pubsub-social-feed:0`; the spaces
-  // JID is `spaces.<user-domain>` and resolves whenever a session is
-  // bound.
-  const spacesJid = computed(() => {
+  // Community service (`community.<user-domain>`) hosts the
+  // XEP-0472 social feed and XEP-0501 stories nodes. Kept distinct
+  // from the spaces service so the spaces sidebar enumerates only
+  // real community spaces, not pubsub leaf nodes.
+  const communityJid = computed(() => {
     const jid = session.value?.jid;
     if (!jid) return null;
     const domain = jid.split("@")[1]?.split("/")[0];
-    return domain ? `spaces.${domain}` : null;
+    return domain ? `community.${domain}` : null;
   });
-  const socialFeed = useSocialFeed(xmppClient, { spacesJid });
+  const socialFeed = useSocialFeed(xmppClient, { spacesJid: communityJid });
 
   const dmMessaging = useDirectMessages(
     session,

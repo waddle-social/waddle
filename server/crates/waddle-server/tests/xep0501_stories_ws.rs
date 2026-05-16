@@ -12,7 +12,7 @@ use ws_common::{TestServer, WsXmppClient};
 
 const DOMAIN: &str = "localhost";
 const USERNAME: &str = "admin";
-const SPACES_JID: &str = "spaces.localhost";
+const COMMUNITY_JID: &str = "community.localhost";
 const STORIES_NODE: &str = "urn:xmpp:stories:0";
 const NS_STORIES: &str = "urn:xmpp:stories:0";
 
@@ -30,13 +30,13 @@ async fn setup() -> (TestServer, WsXmppClient) {
 }
 
 #[tokio::test]
-async fn spaces_disco_info_advertises_stories_namespace() {
+async fn community_disco_info_advertises_stories_namespace() {
     let _guard = TEST_SERIAL.lock().await;
     let (_server, mut client) = setup().await;
 
     client
         .send(&format!(
-            r#"<iq type="get" id="disco-stories" to="{SPACES_JID}"><query xmlns="http://jabber.org/protocol/disco#info"/></iq>"#
+            r#"<iq type="get" id="disco-stories" to="{COMMUNITY_JID}"><query xmlns="http://jabber.org/protocol/disco#info"/></iq>"#
         ))
         .await
         .expect("send disco#info");
@@ -63,7 +63,7 @@ async fn stories_publish_and_items_round_trip() {
     let expires = "2030-01-01T12:00:00Z";
     client
         .send(&format!(
-            r#"<iq type="set" id="story-publish" to="{SPACES_JID}">
+            r#"<iq type="set" id="story-publish" to="{COMMUNITY_JID}">
               <pubsub xmlns="http://jabber.org/protocol/pubsub">
                 <publish node="{STORIES_NODE}">
                   <item id="{story_id}">
@@ -92,7 +92,7 @@ async fn stories_publish_and_items_round_trip() {
     // typed `<story/>` payload intact (id, expires, body, media-url).
     client
         .send(&format!(
-            r#"<iq type="get" id="story-items" to="{SPACES_JID}">
+            r#"<iq type="get" id="story-items" to="{COMMUNITY_JID}">
               <pubsub xmlns="http://jabber.org/protocol/pubsub">
                 <items node="{STORIES_NODE}"/>
               </pubsub>
