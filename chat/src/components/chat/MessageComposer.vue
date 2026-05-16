@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, watch, onBeforeUnmount } from "vue";
-import { Send, Paperclip, FileText, Music4, Puzzle, X, Loader2 } from "lucide-vue-next";
+import { Send, Paperclip, FileText, Music4, Puzzle, X, Loader2, Megaphone, Radio } from "lucide-vue-next";
 import type { JSONContent } from "@tiptap/core";
 import GifPicker from "@/components/chat/GifPicker.vue";
 import ChatEditor from "@/components/chat/ChatEditor.vue";
@@ -725,9 +725,26 @@ watch(
           :class="i === selectedIndex ? 'bg-muted' : ''"
           @mousedown.prevent="insertMention(candidate)"
         >
+          <!-- Broadcast mentions get distinct glyphs so @everyone vs @here
+               reads at a glance without scanning the username text:
+               Megaphone = announce to everyone, Radio = ping the people
+               who are tuned in (online here). Other broadcast values
+               (future-proof) fall back to a generic @ mark. -->
           <span
-            v-if="candidate.kind === 'broadcast'"
-            class="type-caption text-primary"
+            v-if="candidate.kind === 'broadcast' && candidate.username === 'everyone'"
+            class="flex h-5 w-5 items-center justify-center rounded bg-primary/10 text-primary"
+          >
+            <Megaphone class="h-3 w-3" aria-hidden="true" />
+          </span>
+          <span
+            v-else-if="candidate.kind === 'broadcast' && candidate.username === 'here'"
+            class="flex h-5 w-5 items-center justify-center rounded bg-primary/10 text-primary"
+          >
+            <Radio class="h-3 w-3" aria-hidden="true" />
+          </span>
+          <span
+            v-else-if="candidate.kind === 'broadcast'"
+            class="flex h-5 w-5 items-center justify-center rounded bg-primary/10 text-primary type-caption"
           >@</span>
           <img
             v-else-if="candidate.avatar_url"
