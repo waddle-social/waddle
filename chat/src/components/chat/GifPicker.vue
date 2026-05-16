@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { onMounted, ref, watch } from "vue";
-import { Search, X } from "lucide-vue-next";
+import { Loader2, Search, SearchX, X } from "lucide-vue-next";
 
 const props = defineProps<{
   apiKey: string;
@@ -98,15 +98,29 @@ function selectGif(gif: GiphyGif) {
 
     <!-- Results -->
     <div v-else class="flex-1 overflow-auto p-2">
-      <div v-if="isLoading" class="type-control flex h-24 items-center justify-center text-muted-foreground">
-        <div class="flex items-center justify-center gap-1.5">
-          <span class="typing-dot" />
-          <span class="typing-dot" />
-          <span class="typing-dot" />
-        </div>
+      <!-- Loading state — Loader2 spinner matches the iter-47 channel
+           search loading treatment so every "fetching" surface in the
+           app spins with the same affordance. -->
+      <div v-if="isLoading" class="type-caption flex h-24 items-center justify-center gap-2 text-muted-foreground">
+        <Loader2 class="h-3.5 w-3.5 motion-safe:animate-spin" aria-hidden="true" />
+        <span>Loading…</span>
       </div>
-      <div v-else-if="results.length === 0" class="type-control flex h-24 items-center justify-center rounded-lg text-center text-muted-foreground">
-        {{ query ? "No GIFs found" : "Loading trending GIFs…" }}
+      <!-- Empty search state — SearchX glyph + caption matches the
+           iter-48 EmojiPicker / iter-47 channel-search empty state. -->
+      <div
+        v-else-if="results.length === 0 && query.trim().length > 0"
+        class="flex h-24 flex-col items-center justify-center gap-1.5 rounded-lg text-center"
+      >
+        <SearchX class="h-5 w-5 text-muted-foreground/60" aria-hidden="true" />
+        <span class="type-caption text-muted-foreground">No GIFs found</span>
+      </div>
+      <!-- Idle state — when no query is active but the trending fetch
+           didn't return anything. Rare; keep as a plain caption. -->
+      <div
+        v-else-if="results.length === 0"
+        class="type-caption flex h-24 items-center justify-center rounded-lg text-center text-muted-foreground"
+      >
+        Loading trending GIFs…
       </div>
       <div v-else class="grid grid-cols-3 gap-2">
         <button
