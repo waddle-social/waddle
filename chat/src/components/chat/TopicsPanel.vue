@@ -253,15 +253,21 @@ watch(
                   :class="isGroupCollapsed(group.id) ? '-rotate-90' : ''"
                 />
                 <span class="flex-1 truncate">{{ group.name }}</span>
+                <!-- Rolled-up activity badges on a collapsed group —
+                     match the iter-54 .chat-badge-glow halo so they
+                     pull the eye the same way the rail bell badge
+                     and sidebar unread badges do. Activity dot
+                     already had a glow; mention / unread counts now
+                     get one too. -->
                 <template v-if="isGroupCollapsed(group.id)">
                   <span
                     v-if="groupUnreadSummary(group).mentions > 0"
-                    class="type-count-badge inline-flex min-w-[18px] h-[18px] px-1 items-center justify-center rounded-full bg-destructive text-destructive-foreground"
+                    class="chat-badge-glow--mention type-count-badge inline-flex min-w-[18px] h-[18px] px-1 items-center justify-center rounded-full bg-destructive text-destructive-foreground"
                     aria-hidden="true"
                   >{{ groupUnreadSummary(group).mentions }}</span>
                   <span
                     v-else-if="groupUnreadSummary(group).unread > 0"
-                    class="type-count-badge inline-flex min-w-[18px] h-[18px] px-1 items-center justify-center rounded-full bg-primary text-primary-foreground"
+                    class="chat-badge-glow--primary type-count-badge inline-flex min-w-[18px] h-[18px] px-1 items-center justify-center rounded-full bg-primary text-primary-foreground"
                     aria-hidden="true"
                   >{{ groupUnreadSummary(group).unread }}</span>
                   <span
