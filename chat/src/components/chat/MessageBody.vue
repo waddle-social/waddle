@@ -385,7 +385,7 @@ watch(
         <div class="type-caption text-muted-foreground">
           {{ file.name ?? "Video" }} · {{ file.mediaType ?? "video" }}
           <span v-if="file.size"> · {{ formatFileSize(file.size) }}</span>
-          <span v-if="file.encrypted"> · Encrypted</span>
+          <span v-if="file.encrypted" class="inline-flex items-baseline gap-1"> · <Lock class="h-3 w-3 self-center text-primary/70" aria-hidden="true" /> Encrypted</span>
         </div>
       </div>
     </div>
@@ -423,7 +423,7 @@ watch(
         <div class="type-caption text-muted-foreground">
           {{ file.name ?? "Audio" }} · {{ file.mediaType ?? "audio" }}
           <span v-if="file.size"> · {{ formatFileSize(file.size) }}</span>
-          <span v-if="file.encrypted"> · Encrypted</span>
+          <span v-if="file.encrypted" class="inline-flex items-baseline gap-1"> · <Lock class="h-3 w-3 self-center text-primary/70" aria-hidden="true" /> Encrypted</span>
         </div>
       </div>
     </div>
@@ -462,7 +462,7 @@ watch(
           <div class="type-caption text-muted-foreground">
             {{ file.name ?? "PDF" }} · {{ file.mediaType ?? "application/pdf" }}
             <span v-if="file.size"> · {{ formatFileSize(file.size) }}</span>
-            <span v-if="file.encrypted"> · Encrypted</span>
+            <span v-if="file.encrypted" class="inline-flex items-baseline gap-1"> · <Lock class="h-3 w-3 self-center text-primary/70" aria-hidden="true" /> Encrypted</span>
           </div>
         </div>
       </div>
