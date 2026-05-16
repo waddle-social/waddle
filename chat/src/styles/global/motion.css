@@ -25,6 +25,15 @@
 
 /* Scrollbar — ghost-thin, luminous */
 @layer base {
+  /* Firefox / non-WebKit browsers: standardized scrollbar properties.
+   * Without these, Firefox falls back to chunky platform scrollbars
+   * that visually conflict with the ghost-thin treatment Chrome/Safari
+   * users see via the ::-webkit-scrollbar block below. */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: color-mix(in oklab, var(--muted-foreground) 28%, transparent) transparent;
+  }
+
   ::-webkit-scrollbar {
     width: 5px;
     height: 5px;
@@ -33,13 +42,12 @@
     background: transparent;
   }
   ::-webkit-scrollbar-thumb {
-    background: var(--muted-foreground);
+    background: color-mix(in oklab, var(--muted-foreground) 28%, transparent);
     border-radius: 99px;
-    opacity: 0.2;
+    transition: background-color 0.18s ease;
   }
   ::-webkit-scrollbar-thumb:hover {
-    background: var(--primary);
-    opacity: 0.4;
+    background: color-mix(in oklab, var(--primary) 55%, transparent);
   }
 }
 
