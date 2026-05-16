@@ -425,6 +425,42 @@ fn disco_info_result_has_feature_check() {
 }
 
 #[test]
+fn build_enable_push_iq_omits_publish_options_for_empty_token() {
+    let iq = build_enable_push_iq("push.example.com", "web-push", "");
+    let enable = iq.get_child("enable", PUSH_NS).expect("enable");
+
+    assert_eq!(enable.attr("jid"), Some("push.example.com"));
+    assert_eq!(enable.attr("node"), Some("web-push"));
+    assert!(enable.get_child("x", DATA_FORMS_NS).is_none());
+}
+
+#[test]
+fn build_enable_push_iq_includes_secret_publish_options_for_non_empty_token() {
+    let iq = build_enable_push_iq("push.example.com", "web-push", "opaque-secret");
+    let enable = iq.get_child("enable", PUSH_NS).expect("enable");
+    let form = enable
+        .get_child("x", DATA_FORMS_NS)
+        .expect("publish options");
+    let fields = form
+        .children()
+        .filter(|child| child.name() == "field" && child.ns() == DATA_FORMS_NS)
+        .filter_map(|field| {
+            Some((
+                field.attr("var")?.to_string(),
+                field.get_child("value", DATA_FORMS_NS)?.text(),
+            ))
+        })
+        .collect::<Vec<_>>();
+
+    assert!(fields.iter().any(|(var, value)| {
+        var == "FORM_TYPE" && value == "http://jabber.org/protocol/pubsub#publish-options"
+    }));
+    assert!(fields
+        .iter()
+        .any(|(var, value)| var == "secret" && value == "opaque-secret"));
+}
+
+#[test]
 fn build_and_parse_waddle_inbox_round_trip() {
     let iq = build_waddle_inbox_query_iq(
         "me@example.com",

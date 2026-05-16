@@ -10,6 +10,7 @@ mod store;
 pub use sender::{notify_mentioned_users, HttpWebPushSender, WebPushSender};
 pub use store::{InMemoryPushStore, PushSubscriptionStore};
 
+use minidom::Element;
 use thiserror::Error;
 
 /// Errors that can occur during push operations.
@@ -41,11 +42,16 @@ pub struct PushSubscription {
     pub service_jid: String,
     /// The PubSub node on the push service.
     pub node: Option<String>,
-    /// The Web Push endpoint URL (from data form options).
+    /// XEP-0060 publish-options form supplied via XEP-0357 enable.
+    pub publish_options: Option<Element>,
+    /// Legacy Web Push relay endpoint. Durable XEP-0357 registration storage
+    /// must not persist this provider-specific value.
     pub endpoint: Option<String>,
-    /// The client's P-256 ECDH public key (base64, from data form options).
+    /// Legacy Web Push ECDH key. Durable XEP-0357 registration storage must
+    /// not persist this provider-specific value.
     pub p256dh: Option<String>,
-    /// The client's authentication secret (base64, from data form options).
+    /// Legacy Web Push auth secret. Durable XEP-0357 registration storage must
+    /// not persist this provider-specific value.
     pub auth_key: Option<String>,
 }
 
@@ -75,6 +81,7 @@ mod tests {
             user_jid: "alice@example.com".into(),
             service_jid: "push.example.com".into(),
             node: Some("web-push".into()),
+            publish_options: None,
             endpoint: Some("https://push.example.com/abc".into()),
             p256dh: Some("key".into()),
             auth_key: Some("auth".into()),

@@ -11,6 +11,7 @@ pub mod permissions;
 pub mod profile;
 pub mod pubsub;
 pub mod pubsub_authz;
+pub mod push_registrations;
 pub mod server;
 pub mod sm_persistence;
 pub mod sm_promotion;

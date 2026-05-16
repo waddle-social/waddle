@@ -79,7 +79,12 @@ impl PushSubscriptionStore for InMemoryPushStore {
         let node = node.map(|s| s.to_owned());
         Box::pin(async move {
             if let Some(mut entry) = self.subs.get_mut(&user_jid) {
-                entry.retain(|s| !(s.service_jid == service_jid && s.node == node));
+                entry.retain(|s| {
+                    !(s.service_jid == service_jid
+                        && node
+                            .as_ref()
+                            .is_none_or(|node| s.node.as_ref() == Some(node)))
+                });
             }
             Ok(())
         })
@@ -109,6 +114,7 @@ mod tests {
             user_jid: user.into(),
             service_jid: service.into(),
             node: node.map(|s| s.into()),
+            publish_options: None,
             endpoint: Some("https://push.example.com/ep".into()),
             p256dh: None,
             auth_key: None,
@@ -166,6 +172,29 @@ mod tests {
             .await
             .expect("ok");
         assert!(store.get_for_user("alice@ex").await.expect("ok").is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_remove_without_node_removes_all_service_nodes() {
+        let store = InMemoryPushStore::new();
+        store
+            .register(make_sub("alice@ex", "push.ex", Some("n1")))
+            .await
+            .expect("ok");
+        store
+            .register(make_sub("alice@ex", "push.ex", Some("n2")))
+            .await
+            .expect("ok");
+        store
+            .register(make_sub("alice@ex", "other-push.ex", Some("n1")))
+            .await
+            .expect("ok");
+
+        store.remove("alice@ex", "push.ex", None).await.expect("ok");
+
+        let subs = store.get_for_user("alice@ex").await.expect("ok");
+        assert_eq!(subs.len(), 1);
+        assert_eq!(subs[0].service_jid, "other-push.ex");
     }
 
     #[tokio::test]

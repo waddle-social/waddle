@@ -105,39 +105,39 @@ pub fn build_inbox_iq(bare_jid: &str, query_id: &str, max: u32) -> Element {
 
 pub fn build_enable_push_iq(push_service_jid: &str, node: &str, token: &str) -> Element {
     let id = format!("push-enable-{}", next_id());
-    let form = Element::builder("x", DATA_FORMS_NS)
-        .attr("type", "submit")
-        .append(
-            Element::builder("field", DATA_FORMS_NS)
-                .attr("var", "FORM_TYPE")
-                .append(
-                    Element::builder("value", DATA_FORMS_NS)
-                        .append("http://jabber.org/protocol/pubsub#publish-options")
-                        .build(),
-                )
-                .build(),
-        )
-        .append(
-            Element::builder("field", DATA_FORMS_NS)
-                .attr("var", "secret")
-                .append(
-                    Element::builder("value", DATA_FORMS_NS)
-                        .append(token)
-                        .build(),
-                )
-                .build(),
-        )
-        .build();
+    let mut enable = Element::builder("enable", PUSH_NS)
+        .attr("jid", push_service_jid)
+        .attr("node", node);
+    if !token.is_empty() {
+        let form = Element::builder("x", DATA_FORMS_NS)
+            .attr("type", "submit")
+            .append(
+                Element::builder("field", DATA_FORMS_NS)
+                    .attr("var", "FORM_TYPE")
+                    .append(
+                        Element::builder("value", DATA_FORMS_NS)
+                            .append("http://jabber.org/protocol/pubsub#publish-options")
+                            .build(),
+                    )
+                    .build(),
+            )
+            .append(
+                Element::builder("field", DATA_FORMS_NS)
+                    .attr("var", "secret")
+                    .append(
+                        Element::builder("value", DATA_FORMS_NS)
+                            .append(token)
+                            .build(),
+                    )
+                    .build(),
+            )
+            .build();
+        enable = enable.append(form);
+    }
     Element::builder("iq", CLIENT_NS)
         .attr("type", "set")
         .attr("id", id)
-        .append(
-            Element::builder("enable", PUSH_NS)
-                .attr("jid", push_service_jid)
-                .attr("node", node)
-                .append(form)
-                .build(),
-        )
+        .append(enable.build())
         .build()
 }
 

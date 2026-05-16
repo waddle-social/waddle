@@ -191,7 +191,8 @@ pub use waddle_xmpp_core::xep0359::{
 
 pub use super::xep0357::{
     build_push_disable_result, build_push_enable_result, is_push_disable, is_push_enable,
-    parse_push_disable, parse_push_enable, PushDisable, PushEnable, NS_PUSH,
+    parse_push_disable, parse_push_enable, PushDisable, PushEnable, NS_PUBSUB_PUBLISH_OPTIONS,
+    NS_PUSH,
 };
 
 pub use super::xep0410::{
