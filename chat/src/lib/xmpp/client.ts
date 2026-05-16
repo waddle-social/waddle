@@ -74,6 +74,7 @@ import {
   rruleToWasm,
   type CommunityEvent,
   type CommunityEventInput,
+  type PartStat,
   type WasmVEvent,
 } from "./event-types";
 import type { FetchInboxOptions, InboxEntry, InboxResult } from "./inbox-types";
@@ -981,6 +982,22 @@ export class BrowserXmppClient {
       throw new Error("xcal_publish returned no event");
     }
     return eventFromWasm(result);
+  }
+
+  /**
+   * Publish (or update) this session's RSVP for a calendar event.
+   * The server bridges the call to a sibling pubsub item; the chat
+   * folds it back into the master event on the next refresh.
+   */
+  async rsvpCommunityEvent(
+    communityJid: string,
+    masterUid: string,
+    selfLocalpart: string,
+    selfBareJid: string,
+    partstat: PartStat,
+  ): Promise<void> {
+    const xmpp = await this.requireConnectedXmpp();
+    await xmpp.xcal_rsvp?.(communityJid, masterUid, selfLocalpart, selfBareJid, partstat);
   }
   async publishMood(mood: MoodPublication): Promise<void> { const xmpp = await this.requireConnectedXmpp(); await xmpp.publish_mood?.({ kind: mood.kind, ...(mood.text ? { text: mood.text } : {}) }); }
   async retractMood(): Promise<void> { const xmpp = await this.requireConnectedXmpp(); await xmpp.retract_mood?.(); }

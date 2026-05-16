@@ -12,10 +12,12 @@
  */
 import { computed, ref, type Ref } from "vue";
 import {
+  groupEventsWithRsvps,
   sortEventsUpcomingFirst,
   type BrowserXmppClient,
   type CommunityEvent,
   type CommunityEventInput,
+  type PartStat,
 } from "@/lib/xmpp-client";
 
 export function useCommunityEvents(
@@ -32,7 +34,9 @@ export function useCommunityEvents(
   const pageSize = options.pageSize ?? 200;
   let fetchRequestId = 0;
 
-  const sortedEvents = computed(() => sortEventsUpcomingFirst(events.value));
+  const sortedEvents = computed(() =>
+    sortEventsUpcomingFirst(groupEventsWithRsvps(events.value)),
+  );
 
   async function refresh(): Promise<boolean> {
     const client = xmppClient.value;
@@ -80,6 +84,42 @@ export function useCommunityEvents(
     }
   }
 
+  /**
+   * Publish (or update) this session's RSVP for an event. Server
+   * persists a sibling pubsub item; we optimistically fold the new
+   * attendee into the local master and rely on refresh() for the
+   * authoritative state from peers.
+   */
+  async function rsvp(
+    masterUid: string,
+    selfLocalpart: string,
+    selfBareJid: string,
+    partstat: PartStat,
+  ): Promise<boolean> {
+    const client = xmppClient.value;
+    const jid = options.communityJid.value;
+    if (!client || !jid) return false;
+    if (!masterUid || !selfLocalpart || !selfBareJid) return false;
+    try {
+      await client.rsvpCommunityEvent(jid, masterUid, selfLocalpart, selfBareJid, partstat);
+      const rsvpId = `${masterUid}-rsvp-${selfLocalpart}`;
+      const placeholder: CommunityEvent = {
+        id: rsvpId,
+        uid: masterUid,
+        summary: "",
+        attendees: [{ uri: `xmpp:${selfBareJid}`, partstat }],
+      };
+      events.value = [
+        placeholder,
+        ...events.value.filter((e) => e.id !== rsvpId),
+      ];
+      return true;
+    } catch (err) {
+      error.value = err instanceof Error ? err.message : String(err);
+      return false;
+    }
+  }
+
   function clear() {
     fetchRequestId += 1;
     events.value = [];
@@ -95,6 +135,7 @@ export function useCommunityEvents(
     error,
     refresh,
     post,
+    rsvp,
     clear,
   };
 }

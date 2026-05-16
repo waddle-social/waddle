@@ -11,8 +11,8 @@ use minidom::Element;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use waddle_xmpp_core::xcal::{
-    build_vcalendar_with_event, parse_vcalendar_event, Freq, Rrule, RruleEnd, VEvent, Weekday,
-    NS_XCAL, PUBSUB_NODE_EVENTS,
+    build_vcalendar_with_event, parse_vcalendar_event, Attendee, Freq, PartStat, Rrule, RruleEnd,
+    VEvent, Weekday, NS_XCAL, PUBSUB_NODE_EVENTS,
 };
 use wasm_bindgen::prelude::*;
 
@@ -51,6 +51,30 @@ pub(crate) struct JsVEvent {
     pub dtstart: Option<String>,
     pub dtend: Option<String>,
     pub rrule: Option<JsRrule>,
+    /// ATTENDEE list — empty for events with no RSVPs yet. The chat
+    /// folds sibling `-rsvp-*` items into this list before render.
+    #[serde(default)]
+    pub attendees: Vec<JsAttendee>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct JsAttendee {
+    pub uri: String,
+    /// PartStat: "ACCEPTED"|"DECLINED"|"TENTATIVE"|"NEEDS-ACTION".
+    pub partstat: String,
+    pub role: Option<String>,
+    pub rsvp: Option<bool>,
+}
+
+impl From<&Attendee> for JsAttendee {
+    fn from(a: &Attendee) -> Self {
+        Self {
+            uri: a.uri.clone(),
+            partstat: a.partstat.as_str().to_string(),
+            role: a.role.clone(),
+            rsvp: a.rsvp,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -139,6 +163,7 @@ impl JsVEvent {
             dtstart: event.dtstart.map(|ts| ts.to_rfc3339()),
             dtend: event.dtend.map(|ts| ts.to_rfc3339()),
             rrule: event.rrule.as_ref().map(JsRrule::from),
+            attendees: event.attendees.iter().map(JsAttendee::from).collect(),
         }
     }
 }
@@ -158,6 +183,50 @@ fn build_events_items_iq(community_jid: &str, max_items: Option<u32>) -> Element
         .build();
     Element::builder("iq", NS_CLIENT)
         .attr("type", "get")
+        .attr("id", id)
+        .attr("to", community_jid)
+        .append(pubsub)
+        .build()
+}
+
+/// Build an RSVP item payload for a master event: a VEVENT carrying
+/// only the master UID and a single `<attendee/>` with the chosen
+/// PartStat. Item id uses the canonical `<master-uid>-rsvp-<localpart>`
+/// shape so the chat can fold sibling RSVP items back into the master.
+fn build_rsvp_publish_iq(
+    community_jid: &str,
+    master_uid: &str,
+    self_localpart: &str,
+    self_jid: &str,
+    partstat: PartStat,
+) -> Element {
+    let id = format!("xcal-rsvp-{}", Uuid::new_v4());
+    let item_id = format!("{master_uid}-rsvp-{self_localpart}");
+    let rsvp_event = VEvent {
+        uid: master_uid.to_string(),
+        dtstamp: Some(Utc::now()),
+        dtstart: None,
+        dtend: None,
+        summary: String::new(),
+        description: None,
+        location: None,
+        organizer: None,
+        rrule: None,
+        attendees: vec![Attendee::new(format!("xmpp:{self_jid}"), partstat)],
+    };
+    let item = Element::builder("item", NS_PUBSUB)
+        .attr("id", item_id.as_str())
+        .append(build_vcalendar_with_event(&rsvp_event))
+        .build();
+    let publish = Element::builder("publish", NS_PUBSUB)
+        .attr("node", PUBSUB_NODE_EVENTS)
+        .append(item)
+        .build();
+    let pubsub = Element::builder("pubsub", NS_PUBSUB)
+        .append(publish)
+        .build();
+    Element::builder("iq", NS_CLIENT)
+        .attr("type", "set")
         .attr("id", id)
         .attr("to", community_jid)
         .append(pubsub)
@@ -260,6 +329,48 @@ impl WaddleClient {
             send_iq_command(inner, iq).await?;
             let js_event = JsVEvent::from_vevent(&item_id, event);
             to_js_value(&js_event)
+        })
+    }
+
+    /// Publish (or update) this session's RSVP for a calendar event.
+    /// `partstat` must be one of "ACCEPTED" | "DECLINED" | "TENTATIVE"
+    /// | "NEEDS-ACTION". The chat groups sibling `-rsvp-*` items back
+    /// into the master event on the next items fetch.
+    pub fn xcal_rsvp(
+        &self,
+        community_jid: String,
+        master_uid: String,
+        self_localpart: String,
+        self_jid: String,
+        partstat: String,
+    ) -> js_sys::Promise {
+        let inner = self.inner.clone();
+        wasm_bindgen_futures::future_to_promise(async move {
+            let partstat = PartStat::from_str_value(&partstat)
+                .ok_or_else(|| js_error(format!("invalid partstat: {partstat}")))?;
+            if master_uid.is_empty() {
+                return Err(js_error("master_uid must not be empty"));
+            }
+            if self_localpart.is_empty() {
+                return Err(js_error("self_localpart must not be empty"));
+            }
+            if !self_jid.contains('@') {
+                return Err(js_error("self_jid must be a bare JID"));
+            }
+            let iq = build_rsvp_publish_iq(
+                &community_jid,
+                &master_uid,
+                &self_localpart,
+                &self_jid,
+                partstat,
+            );
+            send_iq_command(inner, iq).await?;
+            to_js_value(&JsAttendee {
+                uri: format!("xmpp:{self_jid}"),
+                partstat: partstat.as_str().to_string(),
+                role: None,
+                rsvp: None,
+            })
         })
     }
 }

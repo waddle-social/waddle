@@ -2,7 +2,14 @@
 import { computed, ref } from "vue";
 import { CalendarDays, Plus, RefreshCw, Repeat, X } from "lucide-vue-next";
 import RecurrencePicker from "@/components/community/RecurrencePicker.vue";
-import type { CommunityEvent, CommunityEventInput, Rrule, Weekday } from "@/lib/xmpp-client";
+import type {
+  Attendee,
+  CommunityEvent,
+  CommunityEventInput,
+  PartStat,
+  Rrule,
+  Weekday,
+} from "@/lib/xmpp-client";
 
 interface EventsPaneProps {
   events: readonly CommunityEvent[];
@@ -17,7 +24,41 @@ const props = defineProps<EventsPaneProps>();
 const emit = defineEmits<{
   refresh: [];
   post: [input: CommunityEventInput];
+  rsvp: [event: CommunityEvent, partstat: PartStat];
 }>();
+
+const selfBareJid = computed(() => {
+  const raw = props.selfJid;
+  return raw ? raw.split("/")[0] ?? raw : null;
+});
+
+const selfAttendeeUri = computed(() => {
+  const bare = selfBareJid.value;
+  return bare ? `xmpp:${bare}` : null;
+});
+
+function attendeesByPartstat(event: CommunityEvent): Record<PartStat, Attendee[]> {
+  const buckets: Record<PartStat, Attendee[]> = {
+    "ACCEPTED": [],
+    "DECLINED": [],
+    "TENTATIVE": [],
+    "NEEDS-ACTION": [],
+  };
+  for (const a of event.attendees ?? []) {
+    (buckets[a.partstat] ??= []).push(a);
+  }
+  return buckets;
+}
+
+function myPartstat(event: CommunityEvent): PartStat | null {
+  const uri = selfAttendeeUri.value;
+  if (!uri) return null;
+  return event.attendees?.find((a) => a.uri === uri)?.partstat ?? null;
+}
+
+function onRsvp(event: CommunityEvent, partstat: PartStat) {
+  emit("rsvp", event, partstat);
+}
 
 const composerOpen = ref(false);
 const summary = ref("");
@@ -233,6 +274,37 @@ function resetComposer() {
           <p v-if="event.organizer" class="type-caption text-muted-foreground">
             Organised by {{ authorLabel(event.organizer) }}
           </p>
+          <div v-if="selfBareJid" class="mt-1 flex flex-wrap items-center gap-1.5">
+            <button
+              type="button"
+              class="inline-flex items-center rounded-full border px-2.5 py-1 text-xs font-medium transition-colors"
+              :class="myPartstat(event) === 'ACCEPTED'
+                ? 'border-primary bg-primary text-primary-foreground'
+                : 'border-border bg-background text-muted-foreground hover:bg-muted/50 hover:text-foreground'"
+              @click="onRsvp(event, 'ACCEPTED')"
+            >Going</button>
+            <button
+              type="button"
+              class="inline-flex items-center rounded-full border px-2.5 py-1 text-xs font-medium transition-colors"
+              :class="myPartstat(event) === 'TENTATIVE'
+                ? 'border-primary bg-primary text-primary-foreground'
+                : 'border-border bg-background text-muted-foreground hover:bg-muted/50 hover:text-foreground'"
+              @click="onRsvp(event, 'TENTATIVE')"
+            >Maybe</button>
+            <button
+              type="button"
+              class="inline-flex items-center rounded-full border px-2.5 py-1 text-xs font-medium transition-colors"
+              :class="myPartstat(event) === 'DECLINED'
+                ? 'border-primary bg-primary text-primary-foreground'
+                : 'border-border bg-background text-muted-foreground hover:bg-muted/50 hover:text-foreground'"
+              @click="onRsvp(event, 'DECLINED')"
+            >Not going</button>
+            <span class="type-caption ml-1 text-muted-foreground">
+              {{ attendeesByPartstat(event)["ACCEPTED"].length }} going ·
+              {{ attendeesByPartstat(event)["TENTATIVE"].length }} maybe ·
+              {{ attendeesByPartstat(event)["DECLINED"].length }} not going
+            </span>
+          </div>
         </article>
         <p
           v-if="upcoming.length === 0 && !isLoading"
