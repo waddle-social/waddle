@@ -100,13 +100,22 @@
 :where(.styled-body, .chat-editor .ProseMirror) li > p {
   margin: 0;
 }
+/* Links in message bodies + editor — the at-rest treatment is no
+ * underline (just the --rich-link colour), with the underline
+ * fading in on hover. Previously the underline appeared abruptly
+ * via `text-decoration: none` → `underline`; using a transparent
+ * text-decoration-color at rest lets the browser animate the
+ * underline colour to current on hover for a smoother reveal. */
 :where(.styled-body, .chat-editor .ProseMirror) a {
   color: var(--rich-link);
-  text-decoration: none;
+  text-decoration: underline transparent;
+  text-decoration-thickness: 1px;
   text-underline-offset: 2px;
+  transition: text-decoration-color 0.18s ease, color 0.18s ease;
 }
 :where(.styled-body, .chat-editor .ProseMirror) a:hover {
-  text-decoration: underline;
+  color: color-mix(in oklab, var(--rich-link), white 14%);
+  text-decoration-color: currentColor;
 }
 .rich-mention {
   color: var(--primary);
