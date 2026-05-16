@@ -159,6 +159,15 @@ const memberButtonCopy = computed(() => {
           <div v-if="dmPeer" class="lg:hidden type-caption text-muted-foreground truncate">
             {{ presenceText(dmPeer.presenceShow) }}
           </div>
+          <!-- Desktop subtitle slot: prefer the channel's own description
+               (its "topic") so rooms with a stated subject get character
+               at the top of the chat instead of an empty title bar.
+               Falls back to the space name (already what mobile shows)
+               when no description is set. Single-line, truncate, muted
+               so it sits behind the H1 title without competing. -->
+          <div v-else-if="channel?.description" class="type-caption text-muted-foreground truncate">
+            {{ channel.description }}
+          </div>
           <div v-else-if="channel && waddle" class="lg:hidden type-caption text-muted-foreground truncate">
             {{ waddle.name }}
           </div>
