@@ -683,6 +683,49 @@
   font-size: 0.6875rem;
 }
 
+/* "New messages" divider — visible between the last read and first
+ * unread message when a channel has activity since the user was
+ * away. Previously typed in text-destructive (red), which read as
+ * "warning / danger" when it should read as "fresh activity from
+ * here on". Switched to --primary to match the language the unread
+ * badges (iter-54/56) already speak. A small pill around the label
+ * gives the divider weight without going full banner. */
+.chat-new-messages-divider {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  padding-block: var(--space-xs);
+  color: color-mix(in oklab, var(--primary) 85%, var(--foreground));
+}
+
+.chat-new-messages-divider__rule {
+  flex: 1;
+  height: 1px;
+  background: color-mix(in oklab, var(--primary) 35%, transparent);
+}
+
+.chat-new-messages-divider__label {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+  padding: 0.125rem 0.5rem;
+  border-radius: var(--radius-pill);
+  border: 1px solid color-mix(in oklab, var(--primary) 30%, transparent);
+  background: color-mix(in oklab, var(--primary) 10%, transparent);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-size: 0.6875rem;
+}
+
+.chat-new-messages-divider__pulse {
+  width: 0.4rem;
+  height: 0.4rem;
+  border-radius: 9999px;
+  background: var(--primary);
+  box-shadow: 0 0 6px var(--glow-strong);
+}
+
 /* Grouped follow-up: same author, < 5 min after the previous rendered
  * message. The avatar column is reserved (visibility: hidden) so the body
  * stays aligned under the burst's first message; the meta row is hidden

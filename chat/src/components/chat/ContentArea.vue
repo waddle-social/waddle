@@ -1286,14 +1286,17 @@ function dayDividerLabel(createdAt: string): string {
           </div>
           <div
             v-if="showDividerBefore(msg.id)"
-            class="type-section-label flex items-center gap-3 py-2 text-destructive"
+            class="chat-new-messages-divider type-section-label"
             data-new-messages-divider
             role="separator"
             aria-label="New messages"
           >
-            <div class="flex-1 h-px bg-destructive/40" />
-            <span>New messages</span>
-            <div class="flex-1 h-px bg-destructive/40" />
+            <div class="chat-new-messages-divider__rule" />
+            <span class="chat-new-messages-divider__label">
+              <span class="chat-new-messages-divider__pulse" aria-hidden="true" />
+              New messages
+            </span>
+            <div class="chat-new-messages-divider__rule" />
           </div>
           <MessageCard
             :message="msg"
@@ -1324,14 +1327,17 @@ function dayDividerLabel(createdAt: string): string {
           />
           <div
             v-if="showDividerAfter(msg.id)"
-            class="type-section-label flex items-center gap-3 py-2 text-destructive"
+            class="chat-new-messages-divider type-section-label"
             data-new-messages-divider
             role="separator"
             aria-label="New messages"
           >
-            <div class="flex-1 h-px bg-destructive/40" />
-            <span>New messages</span>
-            <div class="flex-1 h-px bg-destructive/40" />
+            <div class="chat-new-messages-divider__rule" />
+            <span class="chat-new-messages-divider__label">
+              <span class="chat-new-messages-divider__pulse" aria-hidden="true" />
+              New messages
+            </span>
+            <div class="chat-new-messages-divider__rule" />
           </div>
       </template>
     </VirtualTimeline>
