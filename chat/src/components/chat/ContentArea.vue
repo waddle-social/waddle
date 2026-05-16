@@ -782,20 +782,22 @@ interface ThreadChipParticipant {
 }
 
 // Distinct participants for a thread chip: walk newest→oldest, dedup,
-// exclude the current user (the chip answers "who else has been talking
-// here?"). Capped at THREAD_CHIP_MAX_PARTICIPANTS — MessageCard renders
-// only the first N visibly and shows a "+N" overflow chip.
+// keep EVERYONE who replied — including the thread author themselves
+// and the current user. Previously the current user was excluded
+// (logic: "the chip answers who *else* has been talking"), but that
+// made the chip read inconsistently: a stranger's reply showed an
+// avatar, my own reply showed nothing. Capped at
+// THREAD_CHIP_MAX_PARTICIPANTS — MessageCard renders only the first
+// N visibly and shows a "+N" overflow chip.
 function threadChipParticipants(messageId: string): ThreadChipParticipant[] {
   const entry = props.threadIndex.get(messageId);
   if (!entry) return [];
   const seen = new Set<string>();
   const ordered: ThreadChipParticipant[] = [];
-  const me = props.currentUser;
   const children = entry.directChildren;
   for (let i = children.length - 1; i >= 0; i--) {
     const c = children[i];
     if (!c) continue;
-    if (me && c.author === me) continue;
     if (seen.has(c.author)) continue;
     seen.add(c.author);
     ordered.push({
