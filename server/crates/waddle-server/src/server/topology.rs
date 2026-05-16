@@ -152,19 +152,24 @@ async fn seed_initial_xmpp_topology(
                 )
             })?;
         let item_id = room_jid.to_string();
-        if pubsub_storage
-            .get_items(
-                spaces_jid,
-                "general",
-                Some(1),
-                std::slice::from_ref(&item_id),
-            )
+        // XEP-0503 single-space-membership: only seed the channel
+        // into General if it's not already pinned to ANY space.
+        // The prior `get_items(general, ...)` check was scoped to
+        // General alone, so re-running the seed against a channel
+        // an admin had moved to another Space would re-add it to
+        // General, leaving the room in two Spaces and pinning it
+        // under General via the alphabetical `find_node_for_item`
+        // tiebreak.
+        let existing_space = pubsub_storage
+            .list_node_names_for_item(spaces_jid, &item_id)
             .await
             .map_err(|error| {
-                anyhow::anyhow!("failed to inspect {} bookmark: {error}", channel.name)
-            })?
-            .is_empty()
-        {
+                anyhow::anyhow!(
+                    "failed to inspect {} space membership: {error}",
+                    channel.name
+                )
+            })?;
+        if existing_space.is_empty() {
             let bookmark = waddle_xmpp::xep::xep0402::Bookmark::new(room_jid)
                 .with_name(channel_record.name)
                 .with_autojoin(channel.id == "chat");
