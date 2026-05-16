@@ -4,8 +4,8 @@ import { useWaddleDirectory } from "../src/waddles/directory";
 import type { MemberSummary } from "../src/lib/chat-types";
 import type { BrowserXmppClient } from "../src/lib/xmpp-client";
 
-const ALICE: MemberSummary = { jid: "alice@example.com", username: "alice", avatar_url: null, role: "member", joined_at: "" };
-const BOB: MemberSummary = { jid: "bob@example.com", username: "bob", avatar_url: null, role: "member", joined_at: "" };
+const ALICE: MemberSummary = { jid: "alice@example.com", username: "alice", avatar_url: null, affiliation: "member", joined_at: "" };
+const BOB: MemberSummary = { jid: "bob@example.com", username: "bob", avatar_url: null, affiliation: "member", joined_at: "" };
 
 const BASE_TOPOLOGY = {
   spaces: [],

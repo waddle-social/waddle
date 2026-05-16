@@ -18,7 +18,12 @@ export {
 
 export type AppState = "loading" | "signed-out" | "ready" | "error";
 export type AdminTab = "rooms" | "people" | "settings";
-export type EditableRole = "member" | "admin" | "owner" | "outcast";
+/** The subset of XEP-0045 affiliations the member-management UI lets
+ * an admin assign. Previously named `EditableRole`; XMPP `role`
+ * means moderator/participant/visitor/none (session-scoped), which
+ * isn't what this picker selects — it picks the persistent
+ * affiliation. */
+export type EditableAffiliation = "member" | "admin" | "owner" | "outcast";
 
 /** Delivery status for messages sent by the current user. */
 export type DeliveryStatus = "queued" | "sending" | "delivered" | "failed";

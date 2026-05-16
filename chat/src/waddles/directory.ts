@@ -81,7 +81,7 @@ export function useWaddleDirectory(
   const currentRole = computed(() => {
     if (!session.value || !currentSpace.value) return null;
     return (
-      members.value.find((m) => m.jid === session.value!.jid.split("/")[0])?.role ??
+      members.value.find((m) => m.jid === session.value!.jid.split("/")[0])?.affiliation ??
       currentSpace.value.role ??
       null
     );
@@ -107,7 +107,7 @@ export function useWaddleDirectory(
     const order = { owner: 0, admin: 1, member: 2, outcast: 3, none: 4 } as const;
     return [...members.value].sort(
       (a, b) =>
-        (order[a.role] ?? 4) - (order[b.role] ?? 4) ||
+        (order[a.affiliation] ?? 4) - (order[b.affiliation] ?? 4) ||
         a.username.localeCompare(b.username, undefined, { sensitivity: "base" }),
     );
   });

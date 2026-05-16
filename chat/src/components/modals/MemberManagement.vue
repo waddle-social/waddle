@@ -3,7 +3,7 @@ import { Loader2, X, Search } from "lucide-vue-next";
 import AppDialog from "@/components/ui/AppDialog.vue";
 import AppAvatar from "@/components/ui/AppAvatar.vue";
 import type { MemberSummary, UserSearchResult } from "@/lib/chat-types";
-import type { EditableRole } from "@/lib/chat-ui";
+import type { EditableAffiliation } from "@/lib/chat-ui";
 import type { RoomPresence } from "@/lib/xmpp-client";
 import type { MemberLoadState } from "@/waddles/directory";
 
@@ -14,7 +14,7 @@ defineProps<{
   inferredMemberJids: Set<string>;
   memberState: MemberLoadState;
   memberQuery: string;
-  newMemberRole: EditableRole;
+  newMemberAffiliation: EditableAffiliation;
   searchResults: UserSearchResult[];
   isSearching: boolean;
   canManageMembers: boolean;
@@ -24,22 +24,22 @@ defineProps<{
 
 const emit = defineEmits<{
   "update:memberQuery": [value: string];
-  "update:newMemberRole": [value: EditableRole];
+  "update:newMemberAffiliation": [value: EditableAffiliation];
   addMember: [userId: string];
-  updateRole: [member: MemberSummary, role: EditableRole];
+  updateAffiliation: [member: MemberSummary, affiliation: EditableAffiliation];
   removeMember: [member: MemberSummary];
 }>();
 
-const roles: EditableRole[] = ["member", "admin", "owner", "outcast"];
+const affiliations: EditableAffiliation[] = ["member", "admin", "owner", "outcast"];
 
 /**
  * Display label for an XEP-0045 affiliation. "Outcast" is the wire
  * value and feels harsh as a UI label — render as "Banned" instead.
- * The role *value* (used in events, wire-format, type system) stays
- * "outcast" so XEP conformance is preserved per project hard rule.
+ * The affiliation *value* (used in events, wire-format, type system)
+ * stays "outcast" so XEP conformance is preserved per project hard rule.
  */
-function roleLabel(role: EditableRole): string {
-  return role === "outcast" ? "Banned" : role;
+function affiliationLabel(affiliation: EditableAffiliation): string {
+  return affiliation === "outcast" ? "Banned" : affiliation;
 }
 </script>
 
@@ -72,17 +72,17 @@ function roleLabel(role: EditableRole): string {
 
       <div class="flex gap-1.5">
         <button
-          v-for="role in roles"
-          :key="role"
+          v-for="affiliation in affiliations"
+          :key="affiliation"
           class="type-control chat-action-button border capitalize"
-          :class="newMemberRole === role
+          :class="newMemberAffiliation === affiliation
             ? 'border-primary/30 bg-primary/8 text-foreground shadow-[0_0_12px_var(--glow)]'
             : 'border-border bg-muted/40 hover:bg-muted'"
           type="button"
-          :aria-pressed="newMemberRole === role"
-          @click="$emit('update:newMemberRole', role)"
+          :aria-pressed="newMemberAffiliation === affiliation"
+          @click="$emit('update:newMemberAffiliation', affiliation)"
         >
-          {{ roleLabel(role) }}
+          {{ affiliationLabel(affiliation) }}
         </button>
       </div>
 
@@ -101,7 +101,7 @@ function roleLabel(role: EditableRole): string {
             <div class="type-caption text-muted-foreground">@{{ user.username }}</div>
           </div>
           <span class="type-caption text-muted-foreground capitalize">
-            Add as {{ roleLabel(newMemberRole) }}
+            Add as {{ affiliationLabel(newMemberAffiliation) }}
           </span>
         </button>
       </div>
@@ -133,17 +133,17 @@ function roleLabel(role: EditableRole): string {
         <div class="flex-1 min-w-0">
           <div class="type-control truncate">{{ member.username }}</div>
           <div class="type-caption text-muted-foreground capitalize">
-            {{ inferredMemberJids.has(member.jid) ? "Present now" : roleLabel(member.role as EditableRole) }}
+            {{ inferredMemberJids.has(member.jid) ? "Present now" : affiliationLabel(member.affiliation as EditableAffiliation) }}
           </div>
         </div>
-        <div v-if="canManageMembers && !inferredMemberJids.has(member.jid) && member.role !== 'owner'" class="flex items-center gap-1.5">
+        <div v-if="canManageMembers && !inferredMemberJids.has(member.jid) && member.affiliation !== 'owner'" class="flex items-center gap-1.5">
           <select
-            :value="member.role"
+            :value="member.affiliation"
             class="type-caption type-emphasis h-8 appearance-none rounded-lg border border-border bg-muted/60 px-2.5 capitalize transition-all duration-200 focus:outline-none focus:ring-2 focus:ring-primary/20"
-            :aria-label="`Role for ${member.username}`"
-            @change="emit('updateRole', member, ($event.target as HTMLSelectElement).value as EditableRole)"
+            :aria-label="`Affiliation for ${member.username}`"
+            @change="emit('updateAffiliation', member, ($event.target as HTMLSelectElement).value as EditableAffiliation)"
           >
-            <option v-for="role in roles" :key="role" :value="role">{{ roleLabel(role) }}</option>
+            <option v-for="affiliation in affiliations" :key="affiliation" :value="affiliation">{{ affiliationLabel(affiliation) }}</option>
           </select>
           <button
             class="chat-icon-button text-muted-foreground hover:text-destructive hover:bg-destructive/10"

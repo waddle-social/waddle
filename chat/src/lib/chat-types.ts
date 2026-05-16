@@ -38,7 +38,12 @@ export interface MemberSummary {
   user_id?: string;
   username: string;
   avatar_url: string | null;
-  role: "owner" | "admin" | "member" | "outcast" | "none";
+  /** XEP-0045 §5.2 affiliation — persistent room-relationship.
+   * Previously named `role` here, which was a misnomer: the XMPP
+   * `role` (XEP-0045 §5.1) is the session-scoped permission layer
+   * with values moderator/participant/visitor/none, while this
+   * field holds the persistent affiliation values. */
+  affiliation: "owner" | "admin" | "member" | "outcast" | "none";
   joined_at: string;
 }
 

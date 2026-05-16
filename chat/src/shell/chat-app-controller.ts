@@ -435,11 +435,11 @@ export function useChatAppController(giphyApiKey: string) {
   watch(mentionSourceDiagnostic, (detail) => {
     if (detail) console.warn(detail);
   });
-  const memberRoleOrder = { owner: 0, admin: 1, member: 2, outcast: 3, none: 4 } as const;
+  const memberAffiliationOrder = { owner: 0, admin: 1, member: 2, outcast: 3, none: 4 } as const;
   const displayedMembers = computed<MemberSummary[]>(() =>
     [...mergedMentionMembers.value.members].sort(
       (a, b) =>
-        (memberRoleOrder[a.role] ?? 4) - (memberRoleOrder[b.role] ?? 4) ||
+        (memberAffiliationOrder[a.affiliation] ?? 4) - (memberAffiliationOrder[b.affiliation] ?? 4) ||
         a.username.localeCompare(b.username, undefined, { sensitivity: "base" }),
     ),
   );

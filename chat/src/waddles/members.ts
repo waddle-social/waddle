@@ -1,6 +1,6 @@
 import { ref, watch, type Ref } from "vue";
 import type { MemberSummary, UserSearchResult } from "@/lib/chat-types";
-import type { EditableRole } from "@/lib/chat-ui";
+import type { EditableAffiliation } from "@/lib/chat-ui";
 import type { BrowserXmppClient } from "@/lib/xmpp-client";
 
 export function useWaddleMembers(
@@ -15,7 +15,7 @@ export function useWaddleMembers(
   _reloadStructure: (channelId?: string | null) => Promise<string | null>,
 ) {
   const memberQuery = ref("");
-  const newMemberRole = ref<EditableRole>("member");
+  const newMemberAffiliation = ref<EditableAffiliation>("member");
   const memberSearchResults = ref<UserSearchResult[]>([]);
   const isSearchingUsers = ref(false);
 
@@ -65,15 +65,15 @@ export function useWaddleMembers(
   async function addMember(userId: string) {
     clearActionError();
     if (!xmppClient.value || !activeChannelId.value) return;
-    await xmppClient.value.setRoomAffiliation(activeChannelId.value, userId, newMemberRole.value);
+    await xmppClient.value.setRoomAffiliation(activeChannelId.value, userId, newMemberAffiliation.value);
     members.value = await xmppClient.value.listRoomMembers(activeChannelId.value);
     clearSearch();
   }
 
-  async function updateMemberRole(member: MemberSummary, role: EditableRole) {
+  async function updateMemberAffiliation(member: MemberSummary, affiliation: EditableAffiliation) {
     clearActionError();
     if (!xmppClient.value || !activeChannelId.value) return;
-    await xmppClient.value.setRoomAffiliation(activeChannelId.value, member.jid, role);
+    await xmppClient.value.setRoomAffiliation(activeChannelId.value, member.jid, affiliation);
     members.value = await xmppClient.value.listRoomMembers(activeChannelId.value);
   }
 
@@ -88,7 +88,7 @@ export function useWaddleMembers(
     searchRequestId++;
     memberQuery.value = "";
     memberSearchResults.value = [];
-    newMemberRole.value = "member";
+    newMemberAffiliation.value = "member";
     if (searchTimer) {
       clearTimeout(searchTimer);
       searchTimer = null;
@@ -97,11 +97,11 @@ export function useWaddleMembers(
 
   return {
     memberQuery,
-    newMemberRole,
+    newMemberAffiliation,
     memberSearchResults,
     isSearchingUsers,
     addMember,
-    updateMemberRole,
+    updateMemberAffiliation,
     removeMember,
     clearSearch,
   };
