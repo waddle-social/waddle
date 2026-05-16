@@ -71,7 +71,7 @@ pub struct Bookmark {
     pub nick: Option<String>,
     /// Optional password for password-protected rooms.
     pub password: Option<String>,
-    /// Optional extensions (unrecognized child elements).
+    /// Optional children of the XEP-0402 `<extensions/>` element.
     pub extensions: Vec<Element>,
 }
 
@@ -187,15 +187,10 @@ pub fn parse_bookmark(item_id: &str, payload: &Element) -> Result<Bookmark, Book
         .get_child("password", NS_BOOKMARKS2)
         .map(|e| e.text());
 
-    // Collect unrecognized extensions
     let extensions: Vec<Element> = payload
-        .children()
-        .filter(|c| {
-            let name = c.name();
-            name != "nick" && name != "password" && name != "extensions"
-        })
-        .cloned()
-        .collect();
+        .get_child("extensions", NS_BOOKMARKS2)
+        .map(|extensions| extensions.children().cloned().collect())
+        .unwrap_or_default();
 
     Ok(Bookmark {
         jid,
@@ -237,9 +232,12 @@ pub fn build_bookmark_element(bookmark: &Bookmark) -> Element {
         );
     }
 
-    // Add any extensions
-    for ext in &bookmark.extensions {
-        builder = builder.append(ext.clone());
+    if !bookmark.extensions.is_empty() {
+        let mut extensions = Element::builder("extensions", NS_BOOKMARKS2);
+        for ext in &bookmark.extensions {
+            extensions = extensions.append(ext.clone());
+        }
+        builder = builder.append(extensions.build());
     }
 
     builder.build()

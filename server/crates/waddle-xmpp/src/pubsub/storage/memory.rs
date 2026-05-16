@@ -129,14 +129,16 @@ impl PubSubStorage for InMemoryPubSubStorage {
         }
 
         let max_items = node.config.max_items as usize;
+        let mut evicted_item_ids = Vec::new();
         if max_items > 0 && items.len() > max_items {
             let excess = items.len() - max_items;
-            items.drain(0..excess);
+            evicted_item_ids.extend(items.drain(0..excess).map(|item| item.id));
         }
 
         Ok(PublishResult {
             item_id,
             node_created,
+            evicted_item_ids,
         })
     }
 
@@ -242,7 +244,11 @@ impl PubSubStorage for InMemoryPubSubStorage {
             XmppError::item_not_found(Some(format!("Node '{}' does not exist", node_name)))
         })?;
 
-        node.config = config.clone();
+        node.config = if node_name == crate::xep::xep0402::PEP_NODE {
+            config.clone().normalize_xep0402_bookmarks()
+        } else {
+            config.clone()
+        };
 
         Ok(())
     }

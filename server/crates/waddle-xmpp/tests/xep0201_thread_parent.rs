@@ -9,11 +9,13 @@
 //! rejection (RFC 6121 §5.2.5 incoherence guard at the parser).
 //!
 //! Per the CLAUDE.md "XEP custom test-suite hard rule": every implemented
-//! XEP — including XEP-0201, advertised via `urn:xmpp:threads:0` in
-//! disco#info — MUST have a dedicated Rust test suite. This file is that
-//! suite for the parent-attribute branch of the spec; the basic
-//! `<thread/>` element handling is covered by the unit tests in
-//! `waddle-xmpp-core/src/xep0201.rs`.
+//! XEP MUST have a dedicated Rust test suite. XEP-0201 is Informational
+//! and defines no disco#info feature, so Waddle does NOT advertise a
+//! `urn:xmpp:threads:*` namespace — but the wire behavior (the optional
+//! `parent=` attribute on `<thread/>`) is still implemented per the
+//! spec. This file is that suite for the parent-attribute branch of
+//! the spec; basic `<thread/>` element handling is covered by the
+//! unit tests in `waddle-xmpp-core/src/xep0201.rs`.
 
 use chrono::Utc;
 use jid::{BareJid, Jid};

@@ -2,6 +2,9 @@
 import { useStore } from "@nanostores/vue";
 import { ref, computed, nextTick, onBeforeUnmount, watch } from "vue";
 import {
+  AlertCircle,
+  Clock,
+  Loader2,
   MoreHorizontal,
   Pencil,
   Reply,
@@ -221,6 +224,19 @@ const deliveryStatusClass = computed(() => {
       return "text-destructive/80";
     default:
       return "text-muted-foreground/50";
+  }
+});
+
+const deliveryStatusIcon = computed(() => {
+  switch (props.message.deliveryStatus) {
+    case "queued":
+      return Clock;
+    case "sending":
+      return Loader2;
+    case "failed":
+      return AlertCircle;
+    default:
+      return null;
   }
 });
 
@@ -874,9 +890,16 @@ onBeforeUnmount(() => {
         <span v-if="message.isEdited" class="type-meta text-muted-foreground/50">(edited)</span>
         <span
           v-if="message.isSelf && deliveryStatusLabel"
-          class="type-meta"
+          class="type-meta inline-flex items-center gap-1"
           :class="deliveryStatusClass"
         >
+          <component
+            v-if="deliveryStatusIcon"
+            :is="deliveryStatusIcon"
+            class="w-3 h-3"
+            :class="message.deliveryStatus === 'sending' ? 'motion-safe:animate-spin' : ''"
+            aria-hidden="true"
+          />
           {{ deliveryStatusLabel }}
         </span>
         <span

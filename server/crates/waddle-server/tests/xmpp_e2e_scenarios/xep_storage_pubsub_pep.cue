@@ -15,6 +15,7 @@ scenario: #Scenario & {
 		"XEP-0163",
 		"XEP-0191",
 		"XEP-0402",
+		"XEP-0492",
 	]
 	users: {
 		admin: devices: phone: #Actor & {
@@ -265,7 +266,7 @@ scenario: #Scenario & {
 							#XmlElement & {
 								name:  "item"
 								ns:    "http://jabber.org/protocol/pubsub"
-								attrs: id: "home"
+								attrs: id: roomJid
 								children: [
 									#XmlElement & {
 										name: "conference"
@@ -274,6 +275,24 @@ scenario: #Scenario & {
 											name: "Home"
 											jid:  roomJid
 										}
+										children: [
+											#XmlElement & {
+												name: "extensions"
+												ns:   "urn:xmpp:bookmarks:1"
+												children: [
+													#XmlElement & {
+														name: "notify"
+														ns:   "urn:xmpp:notification-settings:1"
+														children: [
+															#XmlElement & {
+																name: "on-mention"
+																ns:   "urn:xmpp:notification-settings:1"
+															},
+														]
+													},
+												]
+											},
+										]
 									},
 								]
 							},
@@ -304,7 +323,7 @@ scenario: #Scenario & {
 			target:   adminPhone
 			id:       "cue-pep-bookmark-items"
 			type:     "result"
-			contains: ["urn:xmpp:bookmarks:1", roomJid]
+			contains: ["urn:xmpp:bookmarks:1", roomJid, "urn:xmpp:notification-settings:1", "on-mention"]
 		},
 		#SendIq & {
 			actor: adminPhone

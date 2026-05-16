@@ -57,6 +57,9 @@ pub async fn can_subscribe(
     let Some(node_meta) = storage.get_node(target, node).await? else {
         return Ok(false);
     };
+    if is_pep && node == waddle_xmpp::xep::xep0402::PEP_NODE {
+        return Ok(derive_pep_owner(target, entity));
+    }
     match node_meta.config.access_model {
         AccessModel::Open => Ok(true),
         AccessModel::Whitelist => Ok(matches!(
@@ -200,6 +203,70 @@ mod tests {
         assert!(can_subscribe(&storage, &alice, "n", &bob, false)
             .await
             .expect("can_subscribe"));
+    }
+
+    #[tokio::test]
+    async fn pep_bookmarks_are_owner_only_even_if_stored_config_is_open() {
+        let concrete = Arc::new(
+            crate::pubsub::DatabasePubSubStorage::open(Some("sqlite::memory:"))
+                .await
+                .expect("storage"),
+        );
+        let storage: Arc<dyn PubSubStorage> = concrete.clone();
+        let alice = jid("alice@x.com");
+        let bob = jid("bob@x.com");
+        storage
+            .get_or_create_node(&alice, waddle_xmpp::xep::xep0402::PEP_NODE)
+            .await
+            .expect("node");
+        storage
+            .set_affiliation(
+                &alice,
+                waddle_xmpp::xep::xep0402::PEP_NODE,
+                &bob,
+                Affiliation::Member,
+            )
+            .await
+            .expect("affiliation");
+
+        let db = concrete.database();
+        let conn = db.guard().await.expect("db");
+        conn.execute(
+            "UPDATE pubsub_nodes SET access_model = ? WHERE owner_jid = ? AND node_name = ?",
+            crate::db_params![
+                AccessModel::Open.to_string(),
+                alice.to_string(),
+                waddle_xmpp::xep::xep0402::PEP_NODE,
+            ],
+        )
+        .await
+        .expect("force open config");
+        drop(conn);
+
+        assert!(
+            can_subscribe(
+                &storage,
+                &alice,
+                waddle_xmpp::xep::xep0402::PEP_NODE,
+                &alice,
+                true,
+            )
+            .await
+            .expect("owner can_subscribe"),
+            "bookmark owner should retain access to their private PEP node"
+        );
+        assert!(
+            !can_subscribe(
+                &storage,
+                &alice,
+                waddle_xmpp::xep::xep0402::PEP_NODE,
+                &bob,
+                true,
+            )
+            .await
+            .expect("bob can_subscribe"),
+            "non-owner affiliation and open config must not grant bookmark reads"
+        );
     }
 
     #[tokio::test]

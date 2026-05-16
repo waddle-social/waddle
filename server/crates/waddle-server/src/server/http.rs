@@ -319,8 +319,11 @@ async fn create_websocket_state(
     let stanza_dispatcher = Arc::new(stanza_dispatcher);
 
     // Shared durable PubSub/PEP storage for the WebSocket transport (XEP-0060/0163).
-    let pubsub_storage =
-        crate::pubsub::build_pubsub_storage(xmpp_config.pubsub_database_url.clone()).await?;
+    let pubsub_database_storage =
+        crate::pubsub::build_database_pubsub_storage(xmpp_config.pubsub_database_url.clone())
+            .await?;
+    let pubsub_storage: Arc<dyn waddle_xmpp::pubsub::PubSubStorage> =
+        pubsub_database_storage.clone();
     let extension_pubsub_owner: jid::BareJid = service_domains.extensions.parse()?;
     register_extension_commands(
         Arc::clone(&extension_manager),
@@ -342,6 +345,11 @@ async fn create_websocket_state(
     }
     let push_store: Arc<dyn waddle_xmpp::push::PushSubscriptionStore> =
         Arc::new(waddle_xmpp::push::InMemoryPushStore::new());
+    let notification_settings_projection = Arc::new(
+        crate::notification_settings_projection::NotificationSettingsProjectionStore::new(
+            pubsub_database_storage.database(),
+        ),
+    );
 
     let sm_session_registry = create_sm_session_registry(xmpp_config).await;
     let resumable_sessions: Arc<dashmap::DashMap<String, crate::auth::Session>> =
@@ -376,6 +384,7 @@ async fn create_websocket_state(
                 dispatcher: stanza_dispatcher,
                 pubsub_storage,
                 push_store,
+                notification_settings_projection,
                 isr_token_store: waddle_xmpp::isr::create_shared_store(),
                 sm_session_registry,
                 resumable_sessions,

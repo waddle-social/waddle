@@ -1,5 +1,8 @@
 use jid::{BareJid, Jid};
-use waddle_xmpp_core::pubsub::{Affiliation, SubscriptionState};
+use waddle_xmpp_core::pubsub::{
+    AccessModel, Affiliation, PublishModel, SendLastPublishedItem, SubscriptionState,
+    PEP_BOOKMARK_MAX_ITEMS,
+};
 
 use crate::pubsub::node::NodeConfig;
 use crate::pubsub::stanzas::PubSubItem;
@@ -99,6 +102,39 @@ async fn test_in_memory_storage_max_items_enforced() {
 
     assert_eq!(items.len(), 1);
     assert_eq!(items[0].id, "item-5");
+}
+
+#[tokio::test]
+async fn test_in_memory_bookmark_config_forces_private_durable_fields() {
+    let storage = InMemoryPubSubStorage::new();
+    let owner: BareJid = "user@example.com".parse().expect("valid jid");
+
+    storage
+        .get_or_create_node(&owner, crate::xep::xep0402::PEP_NODE)
+        .await
+        .expect("should succeed");
+    storage
+        .update_node_config(
+            &owner,
+            crate::xep::xep0402::PEP_NODE,
+            &NodeConfig::spaces_public(),
+        )
+        .await
+        .expect("should succeed");
+
+    let node = storage
+        .get_node(&owner, crate::xep::xep0402::PEP_NODE)
+        .await
+        .expect("should succeed")
+        .expect("node exists");
+    assert_eq!(node.config.access_model, AccessModel::Whitelist);
+    assert_eq!(node.config.publish_model, PublishModel::Publishers);
+    assert_eq!(node.config.max_items, PEP_BOOKMARK_MAX_ITEMS);
+    assert!(node.config.persist_items);
+    assert_eq!(
+        node.config.send_last_published_item,
+        SendLastPublishedItem::Never
+    );
 }
 
 #[tokio::test]

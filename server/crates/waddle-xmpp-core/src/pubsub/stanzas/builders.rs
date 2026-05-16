@@ -88,7 +88,9 @@ pub fn build_pubsub_error(original_iq: &Iq, error: PubSubError) -> Iq {
         PubSubError::NodeExists | PubSubError::PreconditionNotMet => {
             (ErrorType::Cancel, DefinedCondition::Conflict)
         }
-        PubSubError::InvalidJid => (ErrorType::Modify, DefinedCondition::BadRequest),
+        PubSubError::BadRequest | PubSubError::InvalidJid => {
+            (ErrorType::Modify, DefinedCondition::BadRequest)
+        }
         PubSubError::NotSubscribed => (ErrorType::Cancel, DefinedCondition::UnexpectedRequest),
         PubSubError::InternalServerError => {
             (ErrorType::Wait, DefinedCondition::InternalServerError)
