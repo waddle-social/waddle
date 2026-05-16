@@ -16,6 +16,7 @@ import {
   applyForumContext,
   mapLiveRoomMessageToTimeline,
 } from "@/channels/timeline";
+import { compareTimelineMessages } from "@/lib/timeline-timestamps";
 
 function mergeReplyToMetadata(
   existing: TimelineMessage["replyTo"],
@@ -389,5 +390,5 @@ export function buildChannelTimelineFromMamResults(params: {
     }
   }
 
-  return applyForumContext(timeline.sort((a, b) => a.createdAt.localeCompare(b.createdAt)), channelIsForum);
+  return applyForumContext(timeline.sort(compareTimelineMessages), channelIsForum);
 }

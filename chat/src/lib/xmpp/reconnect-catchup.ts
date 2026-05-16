@@ -151,10 +151,6 @@ function normalizeTimestamp(timestamp: string): string {
 }
 
 function compareTimestamps(left: string, right: string): number {
-  const leftMs = Date.parse(left);
-  const rightMs = Date.parse(right);
-  if (Number.isFinite(leftMs) && Number.isFinite(rightMs)) {
-    return leftMs === rightMs ? 0 : leftMs < rightMs ? -1 : 1;
-  }
-  return left.localeCompare(right);
+  return compareTimelineTimestamps(left, right);
 }
+import { compareTimelineTimestamps } from "@/lib/timeline-timestamps";

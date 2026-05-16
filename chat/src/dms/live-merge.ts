@@ -11,6 +11,7 @@ import {
   isSameDmCorrectionSender,
   retractDmTimelineMessage,
 } from "@/dms/message-timeline-state";
+import { compareTimelineMessages } from "@/lib/timeline-timestamps";
 
 // Inbound merge composable for DMs: applies incoming retractions
 // (XEP-0424), corrections (XEP-0308), reactions (XEP-0444), and displayed
@@ -33,6 +34,24 @@ type UseDmLiveMergeDeps = {
   persistLastSeen: (peerJid: string, messageId: string) => void;
   isFeedVisible: (m: TimelineMessage) => boolean;
 };
+
+const CLIENT_GENERATED_MESSAGE_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const SELF_ECHO_FALLBACK_MAX_DELTA_MS = 5 * 60 * 1000;
+
+function isLikelyClientGeneratedMessageId(id: string): boolean {
+  return CLIENT_GENERATED_MESSAGE_ID_PATTERN.test(id);
+}
+
+function canUseBodyMatchFallback(msg: TimelineMessage): boolean {
+  return msg.isSelf && (msg.wireIds?.length ?? 0) === 0 && isLikelyClientGeneratedMessageId(msg.id);
+}
+
+function withinSelfEchoFallbackWindow(existing: TimelineMessage, incoming: TimelineMessage): boolean {
+  const existingTime = Date.parse(existing.createdAt);
+  const incomingTime = Date.parse(incoming.createdAt);
+  if (!Number.isFinite(existingTime) || !Number.isFinite(incomingTime)) return false;
+  return Math.abs(incomingTime - existingTime) <= SELF_ECHO_FALLBACK_MAX_DELTA_MS;
+}
 
 export function useDmLiveMerge(deps: UseDmLiveMergeDeps) {
   const {
@@ -148,37 +167,49 @@ export function useDmLiveMerge(deps: UseDmLiveMergeDeps) {
     const existingById = [msg.id, ...(msg.wireIds ?? [])]
       .map((id) => findMessageById(messages.value, id))
       .find((message): message is TimelineMessage => !!message);
-    const pendingSelfEcho = messages.value.find(
-      (m) => pendingEchoClientIds.has(m.id) && m.isSelf && msg.isSelf && m.body === msg.body,
-    );
-    const preservedSelfEcho = [...messages.value].reverse().find(
-      (m) =>
-        m.isSelf
-        && msg.isSelf
-        && m.body === msg.body
-        && !!m.deliveryStatus
-        && m.deliveryStatus !== "delivered",
-    );
+    const bodyFallbackAllowed = !existingById && canUseBodyMatchFallback(msg);
+    const pendingSelfEcho = bodyFallbackAllowed
+      ? messages.value.find(
+        (m) =>
+          pendingEchoClientIds.has(m.id)
+          && m.isSelf
+          && m.body === msg.body
+          && withinSelfEchoFallbackWindow(m, msg),
+      )
+      : undefined;
+    const preservedSelfEcho = bodyFallbackAllowed
+      ? [...messages.value].reverse().find(
+        (m) =>
+          m.isSelf
+          && m.body === msg.body
+          && !!m.deliveryStatus
+          && m.deliveryStatus !== "delivered"
+          && withinSelfEchoFallbackWindow(m, msg),
+      )
+      : undefined;
     const existing = existingById ?? pendingSelfEcho ?? preservedSelfEcho;
     if (existing) {
       const wasPending = existing.id !== msg.id;
       messages.value = messages.value.map((m) => {
         if (m.id !== existing.id) return m;
+        const mergedIds = mergeMessageIds(m, msg.id, msg.wireIds);
         const updated: TimelineMessage = {
           ...m,
           ...msg,
-          ...mergeMessageIds(m, msg.id, msg.wireIds),
+          id: mergedIds.id,
         };
+        if (mergedIds.wireIds?.length) updated.wireIds = mergedIds.wireIds;
+        else delete updated.wireIds;
         if (m.isSelf && msg.isSelf) {
           updated.deliveryStatus = "delivered" as DeliveryStatus;
         }
         return updated;
-      });
+      }).sort(compareTimelineMessages);
       if (wasPending) pendingEchoClientIds.delete(existing.id);
       return;
     }
     const peerJid = activePeerJid.value;
-    messages.value = [...messages.value, msg];
+    messages.value = [...messages.value, msg].sort(compareTimelineMessages);
     void scrollToPinnedEdgeAndPin();
     if (peerJid && isFeedVisible(msg)) {
       persistLastSeen(peerJid, msg.id);

@@ -9,6 +9,7 @@ import {
   findMessageById,
   indexMessageByIds,
 } from "@/lib/message-ids";
+import { compareTimelineMessages } from "@/lib/timeline-timestamps";
 
 export function fromLiveDmMessage(
   session: WaddleSession,
@@ -226,5 +227,5 @@ export function buildDmTimelineFromMamResults(params: {
     if (Object.keys(reactions).length > 0) target.reactions = reactions;
     else delete target.reactions;
   }
-  return timeline.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+  return timeline.sort(compareTimelineMessages);
 }

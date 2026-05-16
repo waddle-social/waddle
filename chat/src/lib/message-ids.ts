@@ -47,7 +47,22 @@ export function findMessageById<T extends MessageIdCarrier>(
   messages: readonly T[],
   candidate: string | null | undefined,
 ): T | undefined {
-  return messages.find((message) => matchMessageId(message, candidate));
+  const normalized = normalizeMessageId(candidate);
+  if (!normalized) return undefined;
+
+  const primaryMatch = messages.find((message) => message.id === normalized);
+  if (primaryMatch) return primaryMatch;
+
+  let aliasMatch: T | undefined;
+  for (const message of messages) {
+    if (!message.wireIds?.includes(normalized)) continue;
+    if (!aliasMatch) {
+      aliasMatch = message;
+      continue;
+    }
+    if (aliasMatch.id !== message.id) return undefined;
+  }
+  return aliasMatch;
 }
 
 export function indexMessageByIds<T extends MessageIdCarrier>(
@@ -55,6 +70,8 @@ export function indexMessageByIds<T extends MessageIdCarrier>(
   message: T,
 ): void {
   for (const id of [message.id, ...(message.wireIds ?? [])]) {
+    const existing = index.get(id);
+    if (existing && existing.id !== message.id && id !== message.id) continue;
     index.set(id, message);
   }
 }

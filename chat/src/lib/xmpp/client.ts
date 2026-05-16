@@ -41,6 +41,7 @@ import { prepareEncryptedAttachmentUpload } from "./encrypted-attachments";
 import { discoverChannels, discoverTopology } from "./discovery";
 import { discoverUploadService, uploadFile, type UploadProgress } from "./file-upload";
 import { ReconnectCatchup } from "./reconnect-catchup";
+import { compareTimelineTimestamps } from "../timeline-timestamps";
 import {
   discoverExtensionCommands,
   discoverExtensionRoutes,
@@ -115,12 +116,7 @@ function pageFirstArchiveId(page: WasmMamPage | null | undefined): string | unde
 }
 
 function compareTimestamps(left: string, right: string): number {
-  const leftMs = Date.parse(left);
-  const rightMs = Date.parse(right);
-  if (Number.isFinite(leftMs) && Number.isFinite(rightMs)) {
-    return leftMs === rightMs ? 0 : leftMs < rightMs ? -1 : 1;
-  }
-  return left.localeCompare(right);
+  return compareTimelineTimestamps(left, right);
 }
 
 function pageCrossesSince(page: WasmMamPage | null | undefined, since: string): boolean {
