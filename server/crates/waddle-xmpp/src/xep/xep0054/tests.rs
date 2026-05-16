@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn test_is_vcard_query_get() {
+fn test_is_vcard_get_classifies_only_get_with_correct_payload() {
     let vcard_elem = Element::builder("vCard", NS_VCARD).build();
     let iq = Iq {
         from: None,
@@ -10,13 +10,12 @@ fn test_is_vcard_query_get() {
         payload: xmpp_parsers::iq::IqType::Get(vcard_elem),
     };
 
-    assert!(is_vcard_query(&iq));
     assert!(is_vcard_get(&iq));
     assert!(!is_vcard_set(&iq));
 }
 
 #[test]
-fn test_is_vcard_query_set() {
+fn test_is_vcard_set_classifies_only_set_with_correct_payload() {
     let vcard_elem = Element::builder("vCard", NS_VCARD)
         .append(Element::builder("FN", NS_VCARD).append("John Doe").build())
         .build();
@@ -27,7 +26,6 @@ fn test_is_vcard_query_set() {
         payload: xmpp_parsers::iq::IqType::Set(vcard_elem),
     };
 
-    assert!(is_vcard_query(&iq));
     assert!(!is_vcard_get(&iq));
     assert!(is_vcard_set(&iq));
 }
@@ -42,7 +40,7 @@ fn test_is_not_vcard_query_wrong_ns() {
         payload: xmpp_parsers::iq::IqType::Get(elem),
     };
 
-    assert!(!is_vcard_query(&iq));
+    assert!(!is_vcard_get(&iq));
 }
 
 #[test]
@@ -55,7 +53,7 @@ fn test_is_not_vcard_query_wrong_name() {
         payload: xmpp_parsers::iq::IqType::Get(elem),
     };
 
-    assert!(!is_vcard_query(&iq));
+    assert!(!is_vcard_get(&iq));
 }
 
 #[test]
@@ -241,19 +239,6 @@ fn test_build_vcard_success() {
         response.payload,
         xmpp_parsers::iq::IqType::Result(None)
     ));
-}
-
-#[test]
-fn test_build_vcard_error() {
-    let error_response = build_vcard_error(
-        "error-1",
-        &VCardError::BadRequest("Invalid data".to_string()),
-    );
-
-    assert!(error_response.contains("type='error'"));
-    assert!(error_response.contains("id='error-1'"));
-    assert!(error_response.contains("<bad-request"));
-    assert!(error_response.contains("Invalid data"));
 }
 
 #[test]

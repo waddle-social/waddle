@@ -102,18 +102,6 @@ impl std::fmt::Display for VCardError {
 
 impl std::error::Error for VCardError {}
 
-/// Check if an IQ stanza is a vCard query (XEP-0054).
-///
-/// Returns true for both `get` (retrieve vCard) and `set` (update vCard) types.
-pub fn is_vcard_query(iq: &Iq) -> bool {
-    match &iq.payload {
-        xmpp_parsers::iq::IqType::Get(elem) | xmpp_parsers::iq::IqType::Set(elem) => {
-            elem.name() == "vCard" && elem.ns() == NS_VCARD
-        }
-        _ => false,
-    }
-}
-
 /// Check if an IQ is a vCard get request.
 pub fn is_vcard_get(iq: &Iq) -> bool {
     match &iq.payload {
@@ -438,50 +426,6 @@ pub fn build_vcard_success(original_iq: &Iq) -> Iq {
         id: original_iq.id.clone(),
         payload: xmpp_parsers::iq::IqType::Result(None),
     }
-}
-
-/// Build a vCard error response.
-pub fn build_vcard_error(request_id: &str, error: &VCardError) -> String {
-    let (error_type, condition) = match error {
-        VCardError::NotFound => ("cancel", "item-not-found"),
-        VCardError::BadRequest(_) => ("modify", "bad-request"),
-        VCardError::InternalError(_) => ("wait", "internal-server-error"),
-        VCardError::NotAuthorized => ("auth", "not-authorized"),
-    };
-
-    let text = match error {
-        VCardError::BadRequest(msg) | VCardError::InternalError(msg) => {
-            format!(
-                "<text xmlns='urn:ietf:params:xml:ns:xmpp-stanzas'>{}</text>",
-                escape_xml(msg)
-            )
-        }
-        _ => String::new(),
-    };
-
-    format!(
-        "<iq type='error' id='{}'>\
-            <vCard xmlns='{}'/>\
-            <error type='{}'>\
-                <{} xmlns='urn:ietf:params:xml:ns:xmpp-stanzas'/>\
-                {}\
-            </error>\
-        </iq>",
-        escape_xml(request_id),
-        NS_VCARD,
-        error_type,
-        condition,
-        text
-    )
-}
-
-/// Escape XML special characters.
-fn escape_xml(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&apos;")
 }
 
 #[cfg(test)]
