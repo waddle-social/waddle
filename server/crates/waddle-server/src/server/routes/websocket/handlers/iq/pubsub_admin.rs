@@ -307,7 +307,9 @@ pub(super) async fn handle_pubsub_admin_request(
                 .purge_node(target_jid, &node)
                 .await
             {
-                Ok(_) => vec![iq_to_xml(build_pubsub_success(iq))],
+                Ok(_) => {
+                    vec![iq_to_xml(build_pubsub_success(iq))]
+                }
                 Err(e) => {
                     warn!("PubSub purge failed: {e}");
                     vec![iq_to_xml(build_pubsub_error(iq, PubSubError::NodeNotFound))]

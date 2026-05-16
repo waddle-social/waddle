@@ -79,6 +79,10 @@ pub struct ProtocolServices {
     pub pubsub_storage: Arc<dyn PubSubStorage>,
     /// XEP-0357 push subscription storage.
     pub push_store: Arc<dyn waddle_xmpp::push::PushSubscriptionStore>,
+    /// Durable derived projection of XEP-0492 notification settings from
+    /// canonical XMPP state.
+    pub notification_settings_projection:
+        Arc<crate::notification_settings_projection::NotificationSettingsProjectionStore>,
     /// XEP-0397 Instant Stream Resumption token store.
     pub isr_token_store: waddle_xmpp::isr::SharedIsrTokenStore,
     /// XEP-0198 detached-session registry — holds state for clients whose

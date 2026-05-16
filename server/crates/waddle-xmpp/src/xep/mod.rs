@@ -75,8 +75,8 @@
 //!   with attachment target and typed payloads.
 //! - **XEP-0472**: Pubsub Social Feed - Social posts and activity feeds
 //!   via PubSub with title, body, author, and publication metadata.
-//! - **XEP-0492**: Chat Notification Settings - Per-room notification levels
-//!   (all, mentions-only, mute) with PEP storage and decision logic.
+//! - **XEP-0492**: Chat Notification Settings - Per-chat notification settings
+//!   via `<notify/>` children (`<always/>`, `<on-mention/>`, `<never/>`).
 //! - **XEP-0469**: Bookmark Pinning - Pin favorite channels via `<pinned/>`
 //!   extension on XEP-0402 bookmark elements, with sort helper.
 //! - **XEP-0501**: Pubsub Stories - Ephemeral posts with auto-expiry

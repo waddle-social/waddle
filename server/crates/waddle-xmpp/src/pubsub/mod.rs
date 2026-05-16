@@ -9,7 +9,9 @@ pub mod pep;
 pub mod stanzas;
 pub mod storage;
 
-pub use node::{AccessModel, NodeConfig, PublishModel, SendLastPublishedItem};
+pub use node::{
+    AccessModel, NodeConfig, PublishModel, SendLastPublishedItem, PEP_BOOKMARK_MAX_ITEMS,
+};
 pub use pep::{
     build_pep_identity, is_pep_request, is_pep_request_to, pep_features, PepHandler,
     PEP_NODE_AVATAR_DATA, PEP_NODE_AVATAR_METADATA, PEP_NODE_BOOKMARKS,

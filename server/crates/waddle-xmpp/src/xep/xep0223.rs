@@ -54,6 +54,6 @@ mod tests {
     fn test_pep_nodes_not_private() {
         assert!(!is_private_storage_node("urn:xmpp:avatar:data"));
         assert!(!is_private_storage_node("urn:xmpp:avatar:metadata"));
-        assert!(!is_private_storage_node("urn:xmpp:notification-settings:0"));
+        assert!(!is_private_storage_node("urn:xmpp:notification-settings:1"));
     }
 }

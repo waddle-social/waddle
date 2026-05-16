@@ -9,7 +9,9 @@
 //! ```xml
 //! <item id='room@muc.example.com' xmlns='http://jabber.org/protocol/pubsub'>
 //!   <conference xmlns='urn:xmpp:bookmarks:1' name='General' autojoin='true'>
-//!     <pinned xmlns='urn:xmpp:bookmarks-pinning:0'/>
+//!     <extensions>
+//!       <pinned xmlns='urn:xmpp:bookmarks-pinning:0'/>
+//!     </extensions>
 //!   </conference>
 //! </item>
 //! ```
@@ -71,7 +73,9 @@ pub fn is_pinned_element(elem: &Element) -> bool {
 
 /// Check if a bookmark conference element has a `<pinned/>` child.
 pub fn is_bookmark_pinned(conference_elem: &Element) -> bool {
-    conference_elem.children().any(is_pinned_element)
+    conference_elem
+        .get_child("extensions", crate::xep::xep0402::NS_BOOKMARKS2)
+        .is_some_and(|extensions| extensions.children().any(is_pinned_element))
 }
 
 // ── Building ─────────────────────────────────────────────────────────
@@ -85,14 +89,36 @@ pub fn build_pinned_element() -> Element {
 
 /// Add a `<pinned/>` element to a bookmark conference element.
 pub fn pin_bookmark(conference_elem: &mut Element) {
-    if !is_bookmark_pinned(conference_elem) {
-        conference_elem.append_child(build_pinned_element());
+    if is_bookmark_pinned(conference_elem) {
+        return;
+    }
+
+    match conference_elem.get_child_mut("extensions", crate::xep::xep0402::NS_BOOKMARKS2) {
+        Some(extensions) => {
+            extensions.append_child(build_pinned_element());
+        }
+        None => {
+            conference_elem.append_child(
+                Element::builder("extensions", crate::xep::xep0402::NS_BOOKMARKS2)
+                    .append(build_pinned_element())
+                    .build(),
+            );
+        }
     }
 }
 
 /// Remove the `<pinned/>` element from a bookmark conference element.
 pub fn unpin_bookmark(conference_elem: &mut Element) {
-    conference_elem.remove_child("pinned", NS_BOOKMARKS_PINNING);
+    let remove_extensions = conference_elem
+        .get_child_mut("extensions", crate::xep::xep0402::NS_BOOKMARKS2)
+        .map(|extensions| {
+            extensions.remove_child("pinned", NS_BOOKMARKS_PINNING);
+            extensions.children().next().is_none()
+        })
+        .unwrap_or(false);
+    if remove_extensions {
+        conference_elem.remove_child("extensions", crate::xep::xep0402::NS_BOOKMARKS2);
+    }
 }
 
 /// Set the pin state on a bookmark conference element.
@@ -132,7 +158,7 @@ mod tests {
             .attr("autojoin", "true")
             .build();
         if pinned {
-            elem.append_child(build_pinned_element());
+            pin_bookmark(&mut elem);
         }
         elem
     }
@@ -168,7 +194,16 @@ mod tests {
 
         // Pinning again is idempotent
         pin_bookmark(&mut elem);
-        assert_eq!(elem.children().filter(|c| is_pinned_element(c)).count(), 1);
+        let extensions = elem
+            .get_child("extensions", crate::xep::xep0402::NS_BOOKMARKS2)
+            .expect("extensions");
+        assert_eq!(
+            extensions
+                .children()
+                .filter(|c| is_pinned_element(c))
+                .count(),
+            1
+        );
     }
 
     #[test]

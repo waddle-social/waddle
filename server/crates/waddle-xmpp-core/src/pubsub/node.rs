@@ -4,6 +4,13 @@ use std::{fmt, str::FromStr};
 
 use serde::{Deserialize, Serialize};
 
+/// Bounded default for XEP-0402 bookmark PEP nodes.
+///
+/// XEP-0402 needs many persistent bookmark items, but an unbounded node makes
+/// authenticated storage growth trivial. This is deliberately much larger than
+/// normal client bookmark counts while still finite.
+pub const PEP_BOOKMARK_MAX_ITEMS: u32 = 1024;
+
 /// Access model for a PubSub node.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum AccessModel {
@@ -182,6 +189,28 @@ impl NodeConfig {
         }
     }
 
+    /// Default configuration for a concrete PEP node.
+    pub fn pep_for_node(node: &str) -> Self {
+        let mut config = Self::pep_default();
+        if node == super::pep::PEP_NODE_BOOKMARKS {
+            config.max_items = PEP_BOOKMARK_MAX_ITEMS;
+            config = config.normalize_xep0402_bookmarks();
+        }
+        config
+    }
+
+    /// Force XEP-0402 bookmark privacy and durability invariants onto a config.
+    pub fn normalize_xep0402_bookmarks(mut self) -> Self {
+        self.access_model = AccessModel::Whitelist;
+        self.publish_model = PublishModel::Publishers;
+        if self.max_items == 0 || self.max_items > PEP_BOOKMARK_MAX_ITEMS {
+            self.max_items = PEP_BOOKMARK_MAX_ITEMS;
+        }
+        self.persist_items = true;
+        self.send_last_published_item = SendLastPublishedItem::Never;
+        self
+    }
+
     /// Configuration for a public node.
     pub fn public() -> Self {
         Self {
@@ -237,6 +266,36 @@ mod tests {
         assert_eq!(config, NodeConfig::pep_default());
         assert_eq!(config.max_items, 1);
         assert!(config.persist_items);
+    }
+
+    #[test]
+    fn bookmarks_pep_config_keeps_multiple_private_items() {
+        let config = NodeConfig::pep_for_node(super::super::pep::PEP_NODE_BOOKMARKS);
+        assert_eq!(config.access_model, AccessModel::Whitelist);
+        assert_eq!(config.publish_model, PublishModel::Publishers);
+        assert_eq!(config.max_items, PEP_BOOKMARK_MAX_ITEMS);
+        assert!(config.persist_items);
+        assert_eq!(
+            config.send_last_published_item,
+            SendLastPublishedItem::Never
+        );
+    }
+
+    #[test]
+    fn bookmarks_normalization_preserves_bounded_retention() {
+        let mut config = NodeConfig::spaces_public();
+        config.max_items = 10;
+
+        let normalized = config.normalize_xep0402_bookmarks();
+
+        assert_eq!(normalized.access_model, AccessModel::Whitelist);
+        assert_eq!(normalized.publish_model, PublishModel::Publishers);
+        assert_eq!(normalized.max_items, 10);
+        assert!(normalized.persist_items);
+        assert_eq!(
+            normalized.send_last_published_item,
+            SendLastPublishedItem::Never
+        );
     }
 
     #[test]
