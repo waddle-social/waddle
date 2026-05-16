@@ -188,10 +188,17 @@ const memberButtonCopy = computed(() => {
         <span>{{ connectionNotice.shortLabel }}</span>
       </div>
       <div class="flex items-center gap-1.5">
+        <!-- Header toggle buttons (Search, Pin) — the active state
+             reads as "armed" instead of merely "hovered" by swapping
+             the bg-muted treatment for a primary-tinted fill + a
+             small primary ring. Hover stays bg-muted so the three
+             visual states (rest / hover / armed) separate cleanly. -->
         <button
           v-if="channel || dmPeer"
           class="chat-icon-button chat-icon-button--md transition-all duration-200"
-          :class="showSearch ? 'bg-muted text-primary' : 'text-muted-foreground hover:bg-muted hover:text-foreground'"
+          :class="showSearch
+            ? 'bg-muted text-primary ring-1 ring-primary/40 shadow-[0_0_10px_var(--glow)]'
+            : 'text-muted-foreground hover:bg-muted hover:text-foreground'"
           title="Search messages"
           aria-label="Search messages"
           :aria-pressed="showSearch"
@@ -203,7 +210,9 @@ const memberButtonCopy = computed(() => {
         <button
           v-if="channel"
           class="chat-icon-button chat-icon-button--md transition-all duration-200"
-          :class="showPinnedPanel ? 'bg-muted text-primary' : 'text-muted-foreground hover:bg-muted hover:text-foreground'"
+          :class="showPinnedPanel
+            ? 'bg-muted text-primary ring-1 ring-primary/40 shadow-[0_0_10px_var(--glow)]'
+            : 'text-muted-foreground hover:bg-muted hover:text-foreground'"
           title="Pinned messages"
           aria-label="Pinned messages"
           :aria-pressed="showPinnedPanel"
