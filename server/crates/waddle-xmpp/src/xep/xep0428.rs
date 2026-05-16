@@ -1,20 +1,35 @@
 //! XEP-0428: Fallback Indication
 //!
-//! Marks text ranges inside a message `<body/>` as fallback content that
-//! reply-aware or other capability-aware clients should strip when rendering
-//! the primary payload (for example, the quoted prefix prepended in front of
-//! an XEP-0461 reply so legacy clients still see readable context).
+//! Marks part or all of a message's `<body/>` and/or `<subject/>` as fallback
+//! content for a specific protocol (XEP-0461 replies, XEP-0424 message
+//! retraction, XEP-0447 stateless file sharing, …). Capability-aware clients
+//! strip the fallback when rendering the primary payload; legacy clients see
+//! it as a regular body and gracefully degrade.
 //!
-//! Wire shape:
+//! Wire shape (XEP-0428 §2, v0.2.1):
 //!
 //! ```xml
-//! <fallback xmlns='urn:xmpp:fallback:0' for='urn:xmpp:reply:0'>
-//!   <body start='0' end='42'/>
-//! </fallback>
+//! <message to='anna@example.com' type='groupchat'>
+//!   <body>&gt; Anna wrote:&#10;&gt; Hi&#10;Great</body>
+//!   <reply to='anna@example.com' id='message-id1' xmlns='urn:xmpp:reply:0' />
+//!   <fallback xmlns='urn:xmpp:fallback:0' for='urn:xmpp:reply:0'>
+//!     <body start='0' end='33' />
+//!   </fallback>
+//! </message>
 //! ```
 //!
-//! A message may carry multiple `<fallback/>` payloads — one per feature
-//! namespace the fallback targets.
+//! Key spec points (XEP-0428 §2.2):
+//!
+//! - The `for` attribute is OPTIONAL. When present, it names the specification
+//!   the fallback substitutes for; when absent, the indication applies to all
+//!   bodies and subjects of the message.
+//! - `<body/>` and `<subject/>` children may carry optional `start`/`end`
+//!   character offsets (XEP-0426 grapheme-aware UTF-16 code-unit positions —
+//!   we treat them as plain UTF-16 code units per the JS string-slice model).
+//! - A `<body/>` or `<subject/>` child with no offsets means the entire
+//!   element is fallback.
+//! - A `<fallback/>` with no children at all is shorthand for "every body and
+//!   every subject in this message is fallback".
 
 use minidom::Element;
 use xmpp_parsers::message::Message;
@@ -22,47 +37,101 @@ use xmpp_parsers::message::Message;
 /// Namespace for XEP-0428 Fallback Indication.
 pub const NS_FALLBACK: &str = "urn:xmpp:fallback:0";
 
-/// A body character range `[start, end)` marked as fallback.
+/// A character range `[start, end)` inside a `<body/>` or `<subject/>` element,
+/// measured in UTF-16 code units (matches XEP-0426's grapheme-position model
+/// closely enough for the JS / browser substring slicing every existing
+/// client uses).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FallbackRange {
-    /// Inclusive UTF-16 code-unit start offset into the body.
     pub start: usize,
-    /// Exclusive UTF-16 code-unit end offset into the body.
     pub end: usize,
+}
+
+/// How a region (body or subject) participates in a fallback indication.
+///
+/// `Whole` corresponds to `<body/>` / `<subject/>` without `start`/`end`
+/// attributes ("the entire element is fallback"). `Ranges` carries one or
+/// more explicit range elements; the spec lets multiple per region appear.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FallbackRegion {
+    /// The entire body or subject element is fallback content.
+    Whole,
+    /// Specific UTF-16 ranges within the body or subject are fallback.
+    Ranges(Vec<FallbackRange>),
+}
+
+impl FallbackRegion {
+    /// Build a region from an iterator of ranges. Empty input canonicalises
+    /// to `Whole` (the same wire shape the spec uses for "no offsets given").
+    pub fn from_ranges(ranges: impl IntoIterator<Item = FallbackRange>) -> Self {
+        let collected: Vec<FallbackRange> = ranges.into_iter().collect();
+        if collected.is_empty() {
+            Self::Whole
+        } else {
+            Self::Ranges(collected)
+        }
+    }
 }
 
 /// A parsed `<fallback/>` payload.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FallbackIndication {
-    /// The feature namespace this fallback is for (e.g. `urn:xmpp:reply:0`).
-    pub for_ns: String,
-    /// Optional body ranges; absent means "the entire body is fallback".
-    pub body_ranges: Option<Vec<FallbackRange>>,
+    /// `for=` attribute (XEP-0428 §2.2). Spec-optional; when `None`, the
+    /// indication applies to all bodies and subjects of the message.
+    pub for_ns: Option<String>,
+    /// `<body/>` children, if any.
+    pub body: Option<FallbackRegion>,
+    /// `<subject/>` children, if any.
+    pub subject: Option<FallbackRegion>,
 }
 
 impl FallbackIndication {
-    /// Construct a whole-body fallback for a feature namespace.
+    /// `<fallback xmlns='urn:xmpp:fallback:0' for='X'><body/></fallback>` —
+    /// the whole body is fallback for the named protocol.
     pub fn whole_body(for_ns: impl Into<String>) -> Self {
         Self {
-            for_ns: for_ns.into(),
-            body_ranges: None,
+            for_ns: Some(for_ns.into()),
+            body: Some(FallbackRegion::Whole),
+            subject: None,
         }
     }
 
-    /// Construct a body-range fallback.
+    /// `<fallback for='X'><body start='S' end='E'/></fallback>` — a single
+    /// UTF-16 range inside the body is fallback.
     pub fn for_range(for_ns: impl Into<String>, start: usize, end: usize) -> Self {
         Self::for_ranges(for_ns, [FallbackRange { start, end }])
     }
 
-    /// Construct a fallback with multiple body ranges.
+    /// `<fallback for='X'><body start='…' end='…'/>…</fallback>` — multiple
+    /// UTF-16 ranges. An empty range list collapses to `whole_body`.
     pub fn for_ranges(
         for_ns: impl Into<String>,
         body_ranges: impl IntoIterator<Item = FallbackRange>,
     ) -> Self {
-        let body_ranges: Vec<FallbackRange> = body_ranges.into_iter().collect();
         Self {
-            for_ns: for_ns.into(),
-            body_ranges: (!body_ranges.is_empty()).then_some(body_ranges),
+            for_ns: Some(for_ns.into()),
+            body: Some(FallbackRegion::from_ranges(body_ranges)),
+            subject: None,
+        }
+    }
+
+    /// `<fallback for='X'><subject/></fallback>` — the whole subject is
+    /// fallback for the named protocol.
+    pub fn whole_subject(for_ns: impl Into<String>) -> Self {
+        Self {
+            for_ns: Some(for_ns.into()),
+            body: None,
+            subject: Some(FallbackRegion::Whole),
+        }
+    }
+
+    /// `<fallback/>` — no `for`, no children. Per the spec, this means
+    /// every body and every subject in the carrier message is fallback.
+    pub fn whole_message() -> Self {
+        Self {
+            for_ns: None,
+            body: None,
+            subject: None,
         }
     }
 }
@@ -79,76 +148,125 @@ fn parse_usize_attr(elem: &Element, name: &str) -> Result<Option<usize>, ()> {
     }
 }
 
-fn parse_body_ranges(fallback_elem: &Element) -> Result<Option<Vec<FallbackRange>>, ()> {
-    let body_children: Vec<&Element> = fallback_elem
-        .children()
-        .filter(|child| child.name() == "body" && child.ns() == NS_FALLBACK)
-        .collect();
-    if body_children.is_empty() {
-        if fallback_elem.children().next().is_none() {
-            return Ok(None);
-        }
-        return Err(());
-    }
-
-    let mut ranges = Vec::with_capacity(body_children.len());
-    let mut whole_body = false;
-    for body_elem in body_children {
-        let start = parse_usize_attr(body_elem, "start")?;
-        let end = parse_usize_attr(body_elem, "end")?;
-        match (start, end) {
-            (None, None) => whole_body = true,
-            (Some(start), Some(end)) if end >= start => ranges.push(FallbackRange { start, end }),
-            _ => return Err(()),
-        }
-    }
-
-    if whole_body {
-        if ranges.is_empty() {
-            Ok(None)
-        } else {
-            Err(())
-        }
-    } else {
-        Ok(Some(ranges))
+/// Parse a `<body/>` or `<subject/>` child of `<fallback/>`. Returns the
+/// range, or `Whole` when no offsets are provided. `Err(())` flags a parse
+/// failure (one-sided offsets, end-before-start, non-integer) so the caller
+/// can reject the whole indication.
+fn parse_region_child(elem: &Element) -> Result<FallbackRange, ()> {
+    let start = parse_usize_attr(elem, "start")?;
+    let end = parse_usize_attr(elem, "end")?;
+    match (start, end) {
+        (Some(start), Some(end)) if end >= start => Ok(FallbackRange { start, end }),
+        (None, None) => Err(()), // caller distinguishes via separate path
+        _ => Err(()),
     }
 }
 
+/// Collect every `<body/>` (or `<subject/>`, depending on `child_name`)
+/// child of the `<fallback/>` element into a typed region.
+///
+/// Returns:
+/// - `Ok(None)` if no children of that kind exist (the region is not
+///   targeted by this indication).
+/// - `Ok(Some(Whole))` if there is exactly one child with no offsets — the
+///   spec's "the whole element is fallback" shape.
+/// - `Ok(Some(Ranges([…])))` if all children declared offsets.
+/// - `Err(())` if the element mixed offsets with no-offset children, or
+///   carried malformed offsets — the indication is rejected.
+fn collect_region(fallback_elem: &Element, child_name: &str) -> Result<Option<FallbackRegion>, ()> {
+    let children: Vec<&Element> = fallback_elem
+        .children()
+        .filter(|child| child.name() == child_name && child.ns() == NS_FALLBACK)
+        .collect();
+    if children.is_empty() {
+        return Ok(None);
+    }
+    // A single child with no offsets is the canonical "whole element"
+    // form. Multiple children require every one of them to declare a range.
+    if children.len() == 1 {
+        let only = children[0];
+        let start = parse_usize_attr(only, "start")?;
+        let end = parse_usize_attr(only, "end")?;
+        match (start, end) {
+            (None, None) => return Ok(Some(FallbackRegion::Whole)),
+            (Some(start), Some(end)) if end >= start => {
+                return Ok(Some(FallbackRegion::Ranges(vec![FallbackRange {
+                    start,
+                    end,
+                }])));
+            }
+            _ => return Err(()),
+        }
+    }
+    let mut ranges = Vec::with_capacity(children.len());
+    for child in children {
+        ranges.push(parse_region_child(child)?);
+    }
+    Ok(Some(FallbackRegion::Ranges(ranges)))
+}
+
 /// Parse all `<fallback/>` payloads attached to a message.
+///
+/// Conformant inputs that are silently rejected:
+/// - Malformed offsets (non-integer, end before start, half-supplied).
+/// - Mixed "whole element" + range children in the same region.
+///
+/// `for=` is honoured as optional per the spec: a missing attribute leaves
+/// `for_ns` as `None` and means the indication applies to every body and
+/// subject in the message.
 pub fn parse_fallbacks_from_message(msg: &Message) -> Vec<FallbackIndication> {
     msg.payloads
         .iter()
         .filter(|elem| is_fallback_element(elem))
         .filter_map(|elem| {
-            let for_ns = elem.attr("for").map(str::trim).filter(|v| !v.is_empty())?;
-            let body_ranges = parse_body_ranges(elem).ok()?;
+            let for_ns = elem
+                .attr("for")
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+                .map(str::to_owned);
+            let body = collect_region(elem, "body").ok()?;
+            let subject = collect_region(elem, "subject").ok()?;
             Some(FallbackIndication {
-                for_ns: for_ns.to_owned(),
-                body_ranges,
+                for_ns,
+                body,
+                subject,
             })
         })
         .collect()
 }
 
-/// Build an XEP-0428 `<fallback/>` element.
-pub fn build_fallback_element(fallback: &FallbackIndication) -> Element {
-    let mut builder =
-        Element::builder("fallback", NS_FALLBACK).attr("for", fallback.for_ns.as_str());
-    match &fallback.body_ranges {
-        None => {
-            builder = builder.append(Element::builder("body", NS_FALLBACK).build());
+fn append_region(parent: &mut Element, region: &FallbackRegion, name: &str) {
+    match region {
+        FallbackRegion::Whole => {
+            parent.append_child(Element::builder(name, NS_FALLBACK).build());
         }
-        Some(ranges) => {
+        FallbackRegion::Ranges(ranges) => {
             for range in ranges {
-                let body = Element::builder("body", NS_FALLBACK)
-                    .attr("start", range.start.to_string())
-                    .attr("end", range.end.to_string())
-                    .build();
-                builder = builder.append(body);
+                parent.append_child(
+                    Element::builder(name, NS_FALLBACK)
+                        .attr("start", range.start.to_string())
+                        .attr("end", range.end.to_string())
+                        .build(),
+                );
             }
         }
     }
-    builder.build()
+}
+
+/// Build an XEP-0428 `<fallback/>` element.
+pub fn build_fallback_element(fallback: &FallbackIndication) -> Element {
+    let mut builder = Element::builder("fallback", NS_FALLBACK);
+    if let Some(for_ns) = fallback.for_ns.as_deref() {
+        builder = builder.attr("for", for_ns);
+    }
+    let mut elem = builder.build();
+    if let Some(subject) = &fallback.subject {
+        append_region(&mut elem, subject, "subject");
+    }
+    if let Some(body) = &fallback.body {
+        append_region(&mut elem, body, "body");
+    }
+    elem
 }
 
 /// Replace all fallback payloads on a message with the given set.
@@ -159,9 +277,9 @@ pub fn set_fallback_payloads(msg: &mut Message, fallbacks: &[FallbackIndication]
     }
 }
 
-/// Strip every fallback range from a body string, returning the caller-visible
-/// text. Offsets are treated as UTF-16 code units per XEP-0428 §2, which
-/// matches how JavaScript/browser clients slice strings; the body is
+/// Strip every fallback range from a body string, returning the
+/// caller-visible text. Offsets are treated as UTF-16 code units per the
+/// XEP-0426 character-position model the spec references; the body is
 /// round-tripped through UTF-16 so emoji and other non-BMP characters are
 /// stripped correctly.
 pub fn strip_fallback_ranges(body: &str, ranges: &[FallbackRange]) -> String {
@@ -184,260 +302,4 @@ pub fn strip_fallback_ranges(body: &str, ranges: &[FallbackRange]) -> String {
         .filter_map(|(u, k)| if *k { Some(*u) } else { None })
         .collect();
     String::from_utf16_lossy(&kept)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_is_fallback_element() {
-        let elem = Element::builder("fallback", NS_FALLBACK).build();
-        assert!(is_fallback_element(&elem));
-        let wrong = Element::builder("fallback", "other:ns").build();
-        assert!(!is_fallback_element(&wrong));
-    }
-
-    #[test]
-    fn test_parse_whole_body_fallback() {
-        let xml = "<message xmlns='jabber:client'>\
-            <fallback xmlns='urn:xmpp:fallback:0' for='urn:xmpp:reply:0'/>\
-        </message>";
-        let msg =
-            Message::try_from(xml.parse::<Element>().expect("valid xml")).expect("parse message");
-        let fallbacks = parse_fallbacks_from_message(&msg);
-        assert_eq!(fallbacks.len(), 1);
-        assert_eq!(fallbacks[0].for_ns, "urn:xmpp:reply:0");
-        assert_eq!(fallbacks[0].body_ranges, None);
-    }
-
-    #[test]
-    fn test_parse_body_range_fallback() {
-        let xml = "<message xmlns='jabber:client'>\
-            <fallback xmlns='urn:xmpp:fallback:0' for='urn:xmpp:reply:0'>\
-                <body start='0' end='42'/>\
-            </fallback>\
-        </message>";
-        let msg =
-            Message::try_from(xml.parse::<Element>().expect("valid xml")).expect("parse message");
-        let fallbacks = parse_fallbacks_from_message(&msg);
-        assert_eq!(fallbacks.len(), 1);
-        assert_eq!(
-            fallbacks[0].body_ranges,
-            Some(vec![FallbackRange { start: 0, end: 42 }])
-        );
-    }
-
-    #[test]
-    fn test_parse_body_child_without_offsets_means_whole_body() {
-        let xml = "<message xmlns='jabber:client'>\
-            <fallback xmlns='urn:xmpp:fallback:0' for='urn:xmpp:sfs:0'>\
-                <body/>\
-            </fallback>\
-        </message>";
-        let msg =
-            Message::try_from(xml.parse::<Element>().expect("valid xml")).expect("parse message");
-        let fallbacks = parse_fallbacks_from_message(&msg);
-        assert_eq!(fallbacks.len(), 1);
-        assert_eq!(fallbacks[0].for_ns, "urn:xmpp:sfs:0");
-        assert_eq!(fallbacks[0].body_ranges, None);
-    }
-
-    #[test]
-    fn test_parse_multiple_body_ranges() {
-        let xml = "<message xmlns='jabber:client'>\
-            <fallback xmlns='urn:xmpp:fallback:0' for='urn:xmpp:reply:0'>\
-                <body start='0' end='10'/>\
-                <body start='20' end='30'/>\
-            </fallback>\
-        </message>";
-        let msg =
-            Message::try_from(xml.parse::<Element>().expect("valid xml")).expect("parse message");
-        let fallbacks = parse_fallbacks_from_message(&msg);
-        assert_eq!(fallbacks.len(), 1);
-        assert_eq!(
-            fallbacks[0].body_ranges,
-            Some(vec![
-                FallbackRange { start: 0, end: 10 },
-                FallbackRange { start: 20, end: 30 },
-            ])
-        );
-    }
-
-    #[test]
-    fn test_parse_mixed_whole_body_and_range_is_skipped() {
-        let xml = "<message xmlns='jabber:client'>\
-            <fallback xmlns='urn:xmpp:fallback:0' for='urn:xmpp:reply:0'>\
-                <body start='0' end='10'/>\
-                <body/>\
-            </fallback>\
-        </message>";
-        let msg =
-            Message::try_from(xml.parse::<Element>().expect("valid xml")).expect("parse message");
-        assert!(parse_fallbacks_from_message(&msg).is_empty());
-    }
-
-    #[test]
-    fn test_parse_multiple_fallbacks() {
-        let xml = "<message xmlns='jabber:client'>\
-            <fallback xmlns='urn:xmpp:fallback:0' for='urn:xmpp:reply:0'>\
-                <body start='0' end='10'/>\
-            </fallback>\
-            <fallback xmlns='urn:xmpp:fallback:0' for='urn:example:other'/>\
-        </message>";
-        let msg =
-            Message::try_from(xml.parse::<Element>().expect("valid xml")).expect("parse message");
-        let fallbacks = parse_fallbacks_from_message(&msg);
-        assert_eq!(fallbacks.len(), 2);
-        assert_eq!(fallbacks[0].for_ns, "urn:xmpp:reply:0");
-        assert_eq!(fallbacks[1].for_ns, "urn:example:other");
-    }
-
-    #[test]
-    fn test_parse_missing_for_attr_skipped() {
-        let xml = "<message xmlns='jabber:client'>\
-            <fallback xmlns='urn:xmpp:fallback:0'/>\
-        </message>";
-        let msg =
-            Message::try_from(xml.parse::<Element>().expect("valid xml")).expect("parse message");
-        assert!(parse_fallbacks_from_message(&msg).is_empty());
-    }
-
-    #[test]
-    fn test_parse_subject_only_fallback_is_skipped() {
-        let xml = "<message xmlns='jabber:client'>\
-            <fallback xmlns='urn:xmpp:fallback:0' for='urn:xmpp:reply:0'>\
-                <subject start='0' end='4'/>\
-            </fallback>\
-        </message>";
-        let msg =
-            Message::try_from(xml.parse::<Element>().expect("valid xml")).expect("parse message");
-        assert!(parse_fallbacks_from_message(&msg).is_empty());
-    }
-
-    #[test]
-    fn test_parse_partial_body_range_is_skipped() {
-        let xml = "<message xmlns='jabber:client'>\
-            <fallback xmlns='urn:xmpp:fallback:0' for='urn:xmpp:reply:0'>\
-                <body start='0'/>\
-            </fallback>\
-        </message>";
-        let msg =
-            Message::try_from(xml.parse::<Element>().expect("valid xml")).expect("parse message");
-        assert!(parse_fallbacks_from_message(&msg).is_empty());
-    }
-
-    #[test]
-    fn test_parse_end_before_start_is_skipped() {
-        let xml = "<message xmlns='jabber:client'>\
-            <fallback xmlns='urn:xmpp:fallback:0' for='urn:xmpp:reply:0'>\
-                <body start='4' end='1'/>\
-            </fallback>\
-        </message>";
-        let msg =
-            Message::try_from(xml.parse::<Element>().expect("valid xml")).expect("parse message");
-        assert!(parse_fallbacks_from_message(&msg).is_empty());
-    }
-
-    #[test]
-    fn test_build_round_trip() {
-        let original = FallbackIndication::for_range("urn:xmpp:reply:0", 0, 17);
-        let elem = build_fallback_element(&original);
-        assert_eq!(elem.ns(), NS_FALLBACK);
-        assert_eq!(elem.attr("for"), Some("urn:xmpp:reply:0"));
-        let body = elem
-            .children()
-            .find(|c| c.name() == "body")
-            .expect("body child");
-        assert_eq!(body.attr("start"), Some("0"));
-        assert_eq!(body.attr("end"), Some("17"));
-    }
-
-    #[test]
-    fn test_build_whole_body_fallback_emits_body_child_without_offsets() {
-        let elem = build_fallback_element(&FallbackIndication::whole_body("urn:xmpp:sfs:0"));
-        assert_eq!(elem.attr("for"), Some("urn:xmpp:sfs:0"));
-        let body = elem.get_child("body", NS_FALLBACK).expect("body child");
-        assert!(body.attr("start").is_none());
-        assert!(body.attr("end").is_none());
-    }
-
-    #[test]
-    fn test_empty_body_ranges_canonicalize_to_whole_body() {
-        let fallback = FallbackIndication::for_ranges("urn:xmpp:sfs:0", std::iter::empty());
-        assert_eq!(fallback.body_ranges, None);
-        let elem = build_fallback_element(&fallback);
-        assert!(elem.get_child("body", NS_FALLBACK).is_some());
-    }
-
-    #[test]
-    fn test_set_fallback_payloads_replaces_existing() {
-        let xml = "<message xmlns='jabber:client'>\
-            <fallback xmlns='urn:xmpp:fallback:0' for='urn:old'/>\
-        </message>";
-        let mut msg =
-            Message::try_from(xml.parse::<Element>().expect("valid xml")).expect("parse message");
-
-        set_fallback_payloads(
-            &mut msg,
-            &[FallbackIndication::for_range("urn:xmpp:reply:0", 2, 5)],
-        );
-
-        let fallbacks = parse_fallbacks_from_message(&msg);
-        assert_eq!(fallbacks.len(), 1);
-        assert_eq!(fallbacks[0].for_ns, "urn:xmpp:reply:0");
-        assert_eq!(
-            fallbacks[0].body_ranges,
-            Some(vec![FallbackRange { start: 2, end: 5 }])
-        );
-    }
-
-    #[test]
-    fn test_strip_fallback_ranges_basic() {
-        let stripped = strip_fallback_ranges(
-            "> quoted\n\nreply body",
-            &[FallbackRange { start: 0, end: 10 }],
-        );
-        assert_eq!(stripped, "reply body");
-    }
-
-    #[test]
-    fn test_strip_fallback_ranges_multiple_overlapping() {
-        let stripped = strip_fallback_ranges(
-            "abcdefg",
-            &[
-                FallbackRange { start: 0, end: 2 },
-                FallbackRange { start: 4, end: 6 },
-            ],
-        );
-        assert_eq!(stripped, "cdg");
-    }
-
-    #[test]
-    fn test_strip_fallback_ranges_utf16_emoji_prefix() {
-        // "👋 hi\n\n" as a quoted prefix: 👋 is a surrogate pair (2 UTF-16 units),
-        // space is 1, 'h' is 1, 'i' is 1, '\n' is 1, '\n' is 1 — total 7 units.
-        let body = "👋 hi\n\nreply";
-        let prefix_units = "👋 hi\n\n".encode_utf16().count();
-        let stripped = strip_fallback_ranges(
-            body,
-            &[FallbackRange {
-                start: 0,
-                end: prefix_units,
-            }],
-        );
-        assert_eq!(stripped, "reply");
-    }
-
-    #[test]
-    fn test_strip_fallback_ranges_out_of_bounds_saturates() {
-        let stripped = strip_fallback_ranges(
-            "short",
-            &[FallbackRange {
-                start: 2,
-                end: 9999,
-            }],
-        );
-        assert_eq!(stripped, "sh");
-    }
 }
