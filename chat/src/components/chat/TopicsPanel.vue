@@ -289,6 +289,14 @@ watch(
               </button>
             </div>
             <template v-if="!isGroupCollapsed(group.id)">
+              <!-- Empty group row — when a channel group has no
+                   channels, the "Create" button is the row's only
+                   point of action. Tint it primary so it reads as
+                   "this is the next step here" instead of as a
+                   generic outlined chip lost against the muted
+                   sidebar. Matches the same brand language used by
+                   the composer armed glow / unread rails / mention
+                   spotlight (iter 32/39). -->
               <div
                 v-if="group.channels.length === 0"
                 class="type-caption flex items-center justify-between gap-2 px-6 py-2 text-sidebar-muted"
@@ -296,12 +304,13 @@ watch(
                 <span>No channels yet.</span>
                 <button
                   v-if="canManageChannels"
-                  class="type-control rounded-md border border-border px-2 py-1 text-sidebar-foreground hover:bg-sidebar-accent"
+                  class="type-control inline-flex items-center gap-1 rounded-md border border-primary/25 bg-primary/10 px-2 py-1 text-primary transition-colors hover:bg-primary/20 hover:border-primary/40"
                   type="button"
                   :aria-label="group.space ? `Create channel in ${group.name}` : 'Create standalone channel'"
                   @click="emit('createChannelInSpace', group.space?.id ?? null)"
                 >
-                  Create
+                  <Plus class="h-3 w-3" aria-hidden="true" />
+                  <span>Create</span>
                 </button>
               </div>
               <template v-for="{ channel, unread } in group.channels" :key="channel.id">
