@@ -31,6 +31,16 @@ const emit = defineEmits<{
 }>();
 
 const roles: EditableRole[] = ["member", "admin", "owner", "outcast"];
+
+/**
+ * Display label for an XEP-0045 affiliation. "Outcast" is the wire
+ * value and feels harsh as a UI label — render as "Banned" instead.
+ * The role *value* (used in events, wire-format, type system) stays
+ * "outcast" so XEP conformance is preserved per project hard rule.
+ */
+function roleLabel(role: EditableRole): string {
+  return role === "outcast" ? "Banned" : role;
+}
 </script>
 
 <template>
@@ -72,7 +82,7 @@ const roles: EditableRole[] = ["member", "admin", "owner", "outcast"];
           :aria-pressed="newMemberRole === role"
           @click="$emit('update:newMemberRole', role)"
         >
-          {{ role }}
+          {{ roleLabel(role) }}
         </button>
       </div>
 
@@ -91,7 +101,7 @@ const roles: EditableRole[] = ["member", "admin", "owner", "outcast"];
             <div class="type-caption text-muted-foreground">@{{ user.username }}</div>
           </div>
           <span class="type-caption text-muted-foreground capitalize">
-            Add as {{ newMemberRole }}
+            Add as {{ roleLabel(newMemberRole) }}
           </span>
         </button>
       </div>
@@ -123,7 +133,7 @@ const roles: EditableRole[] = ["member", "admin", "owner", "outcast"];
         <div class="flex-1 min-w-0">
           <div class="type-control truncate">{{ member.username }}</div>
           <div class="type-caption text-muted-foreground capitalize">
-            {{ inferredMemberJids.has(member.jid) ? "Present now" : member.role }}
+            {{ inferredMemberJids.has(member.jid) ? "Present now" : roleLabel(member.role as EditableRole) }}
           </div>
         </div>
         <div v-if="canManageMembers && !inferredMemberJids.has(member.jid) && member.role !== 'owner'" class="flex items-center gap-1.5">
@@ -133,7 +143,7 @@ const roles: EditableRole[] = ["member", "admin", "owner", "outcast"];
             :aria-label="`Role for ${member.username}`"
             @change="emit('updateRole', member, ($event.target as HTMLSelectElement).value as EditableRole)"
           >
-            <option v-for="role in roles" :key="role" :value="role">{{ role }}</option>
+            <option v-for="role in roles" :key="role" :value="role">{{ roleLabel(role) }}</option>
           </select>
           <button
             class="chat-icon-button text-muted-foreground hover:text-destructive hover:bg-destructive/10"
