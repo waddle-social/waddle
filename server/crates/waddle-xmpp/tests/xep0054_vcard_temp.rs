@@ -148,11 +148,7 @@ fn xep0054_build_vcard_success_is_empty_result_iq() {
                 .parse()
                 .expect("valid full jid for from"),
         ),
-        to: Some(
-            "server.example.com"
-                .parse()
-                .expect("valid bare jid for to"),
-        ),
+        to: Some("server.example.com".parse().expect("valid bare jid for to")),
         id: "set-vcard-1".into(),
         payload: IqType::Set(vcard_payload()),
     };

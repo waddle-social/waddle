@@ -32,7 +32,15 @@
 pub fn escape_node(input: &str) -> String {
     let mut result = String::with_capacity(input.len());
 
-    for (i, ch) in input.chars().enumerate() {
+    // `char_indices()` yields `(byte_offset, char)`. Earlier revisions
+    // used `enumerate()` (which yields a CHAR index) and then sliced
+    // the string with `input[i + 1..]` — a byte-offset operation.
+    // For any input with a non-ASCII char before a backslash, char
+    // index and byte offset diverge, and the slice either reads the
+    // wrong bytes or panics by landing inside a multi-byte UTF-8
+    // sequence. Using `char_indices()` keeps both indexes in the
+    // single canonical "byte offset" space.
+    for (byte_idx, ch) in input.char_indices() {
         match ch {
             ' ' => result.push_str("\\20"),
             '"' => result.push_str("\\22"),
@@ -44,14 +52,16 @@ pub fn escape_node(input: &str) -> String {
             '>' => result.push_str("\\3e"),
             '@' => result.push_str("\\40"),
             '\\' => {
-                // Check if this backslash is already an escape sequence
-                // If followed by a valid 2-digit hex, don't double-escape
-                if i + 2 < input.len() {
-                    let next_two: String = input[i + 1..].chars().take(2).collect();
-                    if is_escape_hex(&next_two) {
-                        result.push('\\');
-                        continue;
-                    }
+                // Look past this backslash (one ASCII byte) to see if
+                // the next two chars are an existing `HH` escape
+                // sequence. The check stays byte-correct because the
+                // backslash + the hex digits we care about are all
+                // ASCII (one byte each).
+                let after = &input[byte_idx + 1..];
+                let next_two: String = after.chars().take(2).collect();
+                if next_two.len() == 2 && is_escape_hex(&next_two) {
+                    result.push('\\');
+                    continue;
                 }
                 result.push_str("\\5c");
             }
