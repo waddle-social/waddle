@@ -26,9 +26,23 @@ pub(super) async fn handle_push_iq(
                 bad_request_iq_error("Malformed IQ payload."),
             )];
         };
+        if enable
+            .publish_options
+            .as_ref()
+            .is_some_and(crate::push_registrations::publish_options_contains_provider_credentials)
+        {
+            return vec![build_iq_error_xml_typed(
+                &iq.id,
+                response_from,
+                response_to,
+                bad_request_iq_error(
+                    "Provider push credentials must be registered with the XMPP Push Service.",
+                ),
+            )];
+        }
         let subscription = waddle_xmpp::push::PushSubscription {
             user_jid: bare_jid.clone(),
-            service_jid: enable.jid,
+            service_jid: enable.jid.to_string(),
             node: enable.node,
             publish_options: enable.publish_options,
             endpoint: None,
@@ -55,11 +69,12 @@ pub(super) async fn handle_push_iq(
             bad_request_iq_error("Malformed IQ payload."),
         )];
     };
+    let service_jid = disable.jid.to_string();
     if let Err(error) = state
         .deps
         .protocol
         .push_store
-        .remove(&bare_jid, &disable.jid, disable.node.as_deref())
+        .remove(&bare_jid, &service_jid, disable.node.as_deref())
         .await
     {
         warn!(user = %bare_jid, error = %error, "Failed to remove push subscription");

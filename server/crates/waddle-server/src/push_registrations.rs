@@ -10,10 +10,25 @@ use std::pin::Pin;
 
 use minidom::Element;
 use waddle_xmpp::push::{PushError, PushSubscription, PushSubscriptionStore};
+use waddle_xmpp::xep::NS_DATA_FORMS;
 
 use crate::db::{Database, IntoParams};
 
 const STATUS_ENABLED: &str = "enabled";
+const PROVIDER_CREDENTIAL_FIELD_VARS: &[&str] = &[
+    "endpoint",
+    "p256dh",
+    "auth",
+    "service",
+    "device-token",
+    "device-key",
+    "provider-token",
+    "apns-token",
+    "fcm-token",
+    "web-push-endpoint",
+    "web-push-p256dh",
+    "web-push-auth",
+];
 
 #[derive(Clone)]
 pub struct DatabasePushRegistrationStore {
@@ -92,6 +107,16 @@ impl PushSubscriptionStore for DatabasePushRegistrationStore {
         sub: PushSubscription,
     ) -> Pin<Box<dyn Future<Output = Result<(), PushError>> + Send + '_>> {
         Box::pin(async move {
+            if sub
+                .publish_options
+                .as_ref()
+                .is_some_and(publish_options_contains_provider_credentials)
+            {
+                return Err(PushError::StorageError(
+                    "provider credential fields are not allowed in durable XEP-0357 registrations"
+                        .to_string(),
+                ));
+            }
             let now_ms = crate::time::now_ms();
             let node = sub.node.clone().unwrap_or_default();
             let publish_options_xml = sub.publish_options.as_ref().map(String::from);
@@ -191,6 +216,17 @@ impl PushSubscriptionStore for DatabasePushRegistrationStore {
     }
 }
 
+pub(crate) fn publish_options_contains_provider_credentials(form: &Element) -> bool {
+    form.children()
+        .filter(|child| child.name() == "field" && child.ns() == NS_DATA_FORMS)
+        .filter_map(|field| field.attr("var"))
+        .any(|var| {
+            PROVIDER_CREDENTIAL_FIELD_VARS
+                .iter()
+                .any(|disallowed| var.eq_ignore_ascii_case(disallowed))
+        })
+}
+
 fn decode_registration(row: &crate::db::Row) -> Result<PushSubscription, PushError> {
     let user_jid: String = row
         .get(0)
@@ -228,24 +264,50 @@ mod tests {
     use tempfile::tempdir;
 
     fn publish_options(secret: &str) -> Element {
-        Element::builder("x", "jabber:x:data")
+        Element::builder("x", NS_DATA_FORMS)
             .attr("type", "submit")
             .append(
-                Element::builder("field", "jabber:x:data")
+                Element::builder("field", NS_DATA_FORMS)
                     .attr("var", "FORM_TYPE")
                     .append(
-                        Element::builder("value", "jabber:x:data")
+                        Element::builder("value", NS_DATA_FORMS)
                             .append(waddle_xmpp::xep::NS_PUBSUB_PUBLISH_OPTIONS)
                             .build(),
                     )
                     .build(),
             )
             .append(
-                Element::builder("field", "jabber:x:data")
+                Element::builder("field", NS_DATA_FORMS)
                     .attr("var", "secret")
                     .append(
-                        Element::builder("value", "jabber:x:data")
+                        Element::builder("value", NS_DATA_FORMS)
                             .append(secret)
+                            .build(),
+                    )
+                    .build(),
+            )
+            .build()
+    }
+
+    fn publish_options_with_field(var: &str, value: &str) -> Element {
+        Element::builder("x", NS_DATA_FORMS)
+            .attr("type", "submit")
+            .append(
+                Element::builder("field", NS_DATA_FORMS)
+                    .attr("var", "FORM_TYPE")
+                    .append(
+                        Element::builder("value", NS_DATA_FORMS)
+                            .append(waddle_xmpp::xep::NS_PUBSUB_PUBLISH_OPTIONS)
+                            .build(),
+                    )
+                    .build(),
+            )
+            .append(
+                Element::builder("field", NS_DATA_FORMS)
+                    .attr("var", var)
+                    .append(
+                        Element::builder("value", NS_DATA_FORMS)
+                            .append(value)
                             .build(),
                     )
                     .build(),
@@ -466,5 +528,42 @@ mod tests {
         assert!(registrations[0].endpoint.is_none());
         assert!(registrations[0].p256dh.is_none());
         assert!(registrations[0].auth_key.is_none());
+    }
+
+    #[tokio::test]
+    async fn register_rejects_provider_credentials_in_publish_options() {
+        let store = memory_store().await;
+        let mut sub = registration(
+            "alice@example.com",
+            "push.example.com",
+            Some("n1"),
+            "server-secret",
+        );
+        sub.publish_options = Some(publish_options_with_field(
+            "web-push-endpoint",
+            "https://updates.push.services.mozilla.com/abc",
+        ));
+
+        let err = store.register(sub).await.expect_err("reject provider data");
+        assert!(err.to_string().contains("provider credential fields"));
+
+        let registrations = store
+            .get_for_user("alice@example.com")
+            .await
+            .expect("registrations");
+        assert!(registrations.is_empty());
+    }
+
+    #[test]
+    fn detects_provider_credential_publish_option_fields() {
+        assert!(publish_options_contains_provider_credentials(
+            &publish_options_with_field("device-token", "secret")
+        ));
+        assert!(publish_options_contains_provider_credentials(
+            &publish_options_with_field("WEB-PUSH-AUTH", "secret")
+        ));
+        assert!(!publish_options_contains_provider_credentials(
+            &publish_options("server-secret")
+        ));
     }
 }

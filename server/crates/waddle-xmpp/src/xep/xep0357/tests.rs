@@ -58,6 +58,10 @@ fn make_disable_iq(jid_attr: &str, node_attr: Option<&str>) -> Iq {
     }
 }
 
+fn bare_jid(value: &str) -> jid::BareJid {
+    value.parse().expect("valid bare jid")
+}
+
 #[test]
 fn test_ns_push_constant() {
     assert_eq!(NS_PUSH, "urn:xmpp:push:0");
@@ -149,7 +153,7 @@ fn test_parse_push_enable_with_options() {
     let iq = make_enable_iq("push-service.example.com", Some("web-push"), true);
     let enable = parse_push_enable(&iq).expect("should parse");
 
-    assert_eq!(enable.jid, "push-service.example.com");
+    assert_eq!(enable.jid, bare_jid("push-service.example.com"));
     assert_eq!(enable.node.as_deref(), Some("web-push"));
     assert_eq!(enable.options.len(), 2);
     assert!(enable.publish_options.is_some());
@@ -169,7 +173,7 @@ fn test_parse_push_enable_without_options() {
     let iq = make_enable_iq("push-service.example.com", Some("web-push"), false);
     let enable = parse_push_enable(&iq).expect("should parse");
 
-    assert_eq!(enable.jid, "push-service.example.com");
+    assert_eq!(enable.jid, bare_jid("push-service.example.com"));
     assert_eq!(enable.node.as_deref(), Some("web-push"));
     assert!(enable.options.is_empty());
     assert!(enable.publish_options.is_none());
@@ -192,7 +196,7 @@ fn test_parse_push_enable_ignores_provider_attribute_options() {
     };
     let enable = parse_push_enable(&iq).expect("should parse");
 
-    assert_eq!(enable.jid, "push-service.example.com");
+    assert_eq!(enable.jid, bare_jid("push-service.example.com"));
     assert_eq!(enable.node.as_deref(), Some("web-push"));
     assert!(enable.options.is_empty());
     assert!(enable.publish_options.is_none());
@@ -203,7 +207,7 @@ fn test_parse_push_enable_without_node() {
     let iq = make_enable_iq("push-service.example.com", None, false);
     let enable = parse_push_enable(&iq).expect("should parse");
 
-    assert_eq!(enable.jid, "push-service.example.com");
+    assert_eq!(enable.jid, bare_jid("push-service.example.com"));
     assert!(enable.node.is_none());
     assert!(enable.publish_options.is_none());
 }
@@ -233,6 +237,34 @@ fn test_parse_push_enable_empty_jid() {
 }
 
 #[test]
+fn test_parse_push_enable_invalid_jid() {
+    let elem = Element::builder("enable", NS_PUSH)
+        .attr("jid", "not a jid")
+        .build();
+    let iq = Iq {
+        from: None,
+        to: None,
+        id: "test".to_string(),
+        payload: IqType::Set(elem),
+    };
+    assert!(parse_push_enable(&iq).is_none());
+}
+
+#[test]
+fn test_parse_push_enable_rejects_full_jid() {
+    let elem = Element::builder("enable", NS_PUSH)
+        .attr("jid", "push.example.com/device")
+        .build();
+    let iq = Iq {
+        from: None,
+        to: None,
+        id: "test".to_string(),
+        payload: IqType::Set(elem),
+    };
+    assert!(parse_push_enable(&iq).is_none());
+}
+
+#[test]
 fn test_parse_push_enable_wrong_payload_type() {
     let elem = Element::builder("enable", NS_PUSH)
         .attr("jid", "push.example.com")
@@ -251,7 +283,7 @@ fn test_parse_push_disable() {
     let iq = make_disable_iq("push-service.example.com", Some("web-push"));
     let disable = parse_push_disable(&iq).expect("should parse");
 
-    assert_eq!(disable.jid, "push-service.example.com");
+    assert_eq!(disable.jid, bare_jid("push-service.example.com"));
     assert_eq!(disable.node.as_deref(), Some("web-push"));
 }
 
@@ -260,13 +292,41 @@ fn test_parse_push_disable_without_node() {
     let iq = make_disable_iq("push-service.example.com", None);
     let disable = parse_push_disable(&iq).expect("should parse");
 
-    assert_eq!(disable.jid, "push-service.example.com");
+    assert_eq!(disable.jid, bare_jid("push-service.example.com"));
     assert!(disable.node.is_none());
 }
 
 #[test]
 fn test_parse_push_disable_missing_jid() {
     let elem = Element::builder("disable", NS_PUSH).build();
+    let iq = Iq {
+        from: None,
+        to: None,
+        id: "test".to_string(),
+        payload: IqType::Set(elem),
+    };
+    assert!(parse_push_disable(&iq).is_none());
+}
+
+#[test]
+fn test_parse_push_disable_invalid_jid() {
+    let elem = Element::builder("disable", NS_PUSH)
+        .attr("jid", "not a jid")
+        .build();
+    let iq = Iq {
+        from: None,
+        to: None,
+        id: "test".to_string(),
+        payload: IqType::Set(elem),
+    };
+    assert!(parse_push_disable(&iq).is_none());
+}
+
+#[test]
+fn test_parse_push_disable_rejects_full_jid() {
+    let elem = Element::builder("disable", NS_PUSH)
+        .attr("jid", "push.example.com/device")
+        .build();
     let iq = Iq {
         from: None,
         to: None,
@@ -410,7 +470,7 @@ fn test_non_publish_options_form_is_not_registration_publish_options() {
 #[test]
 fn test_push_enable_struct_debug() {
     let enable = PushEnable {
-        jid: "push.example.com".to_string(),
+        jid: bare_jid("push.example.com"),
         node: Some("web-push".to_string()),
         options: vec![("key".to_string(), "val".to_string())],
         publish_options: None,
@@ -423,7 +483,7 @@ fn test_push_enable_struct_debug() {
 #[test]
 fn test_push_disable_struct_debug() {
     let disable = PushDisable {
-        jid: "push.example.com".to_string(),
+        jid: bare_jid("push.example.com"),
         node: None,
     };
     let debug = format!("{:?}", disable);
@@ -433,7 +493,7 @@ fn test_push_disable_struct_debug() {
 #[test]
 fn test_push_enable_clone_eq() {
     let enable = PushEnable {
-        jid: "push.example.com".to_string(),
+        jid: bare_jid("push.example.com"),
         node: Some("node1".to_string()),
         options: vec![("k".to_string(), "v".to_string())],
         publish_options: None,
@@ -445,7 +505,7 @@ fn test_push_enable_clone_eq() {
 #[test]
 fn test_push_disable_clone_eq() {
     let disable = PushDisable {
-        jid: "push.example.com".to_string(),
+        jid: bare_jid("push.example.com"),
         node: Some("node1".to_string()),
     };
     let cloned = disable.clone();

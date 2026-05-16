@@ -841,12 +841,10 @@ export class BrowserXmppClient {
   async invokeExtensionCommand(command: DiscoveredExtensionCommand): Promise<ExtensionCommandResult> { const xmpp = await this.requireConnectedXmpp(); return invokeExtensionCommand(xmpp as WasmClient, this.session.jid, command); }
   async submitExtensionCommandForm(command: DiscoveredExtensionCommand, sessionId: string, fields: ExtensionCommandFormField[], action?: ExtensionCommandAction, roomJid?: string): Promise<ExtensionCommandResult> { const xmpp = await this.requireConnectedXmpp(); return submitExtensionCommandForm(xmpp as WasmClient, command, sessionId, fields, action, roomJid); }
 
-  async enablePushNotifications(opts: { serviceJid: string; node?: string; endpoint: string; p256dh: string; auth: string }): Promise<boolean> {
+  async enablePushNotifications(opts: { serviceJid: string; node?: string }): Promise<boolean> {
     const xmpp = await this.requireConnectedXmpp();
-    if (!xmpp.send_raw_iq) return false;
-    const node = opts.node ?? "web-push";
-    const xml = `<iq type="set" id="${crypto.randomUUID()}"><enable xmlns="urn:xmpp:push:0" jid="${opts.serviceJid}" node="${node}"><x xmlns="jabber:x:data" type="submit"><field var="FORM_TYPE" type="hidden"><value>http://jabber.org/protocol/pubsub#publish-options</value></field><field var="service"><value>${opts.endpoint}</value></field><field var="device-token"><value>${opts.auth}</value></field><field var="device-key"><value>${opts.p256dh}</value></field></x></enable></iq>`;
-    try { await xmpp.send_raw_iq(xml); return true; } catch { return false; }
+    if (!xmpp.enable_push_notifications) return false;
+    try { await xmpp.enable_push_notifications(opts.serviceJid, opts.node ?? "web-push", ""); return true; } catch { return false; }
   }
 
   async disablePushNotifications(opts: { serviceJid: string; node?: string }): Promise<boolean> {

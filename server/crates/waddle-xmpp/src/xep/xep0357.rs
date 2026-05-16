@@ -32,14 +32,14 @@
 //! 3. When a notification-worthy event occurs, send a push notification
 //!    to the registered push service
 
+use jid::BareJid;
 use minidom::Element;
 use xmpp_parsers::iq::{Iq, IqType};
 
+use super::xep0004::NS_DATA_FORMS;
+
 /// Namespace for XEP-0357 Push Notifications.
 pub const NS_PUSH: &str = "urn:xmpp:push:0";
-
-/// Namespace for XEP-0004 Data Forms (used in enable options).
-const NS_DATA_FORMS: &str = "jabber:x:data";
 
 /// XEP-0060 publish-options FORM_TYPE used by XEP-0357 enable options.
 pub const NS_PUBSUB_PUBLISH_OPTIONS: &str = "http://jabber.org/protocol/pubsub#publish-options";
@@ -48,7 +48,7 @@ pub const NS_PUBSUB_PUBLISH_OPTIONS: &str = "http://jabber.org/protocol/pubsub#p
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PushEnable {
     /// The JID of the push service.
-    pub jid: String,
+    pub jid: BareJid,
     /// The PubSub node on the push service.
     pub node: Option<String>,
     /// Key-value pairs from the XEP-0060 publish-options form.
@@ -61,7 +61,7 @@ pub struct PushEnable {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PushDisable {
     /// The JID of the push service to disable.
-    pub jid: String,
+    pub jid: BareJid,
     /// The PubSub node on the push service to disable.
     pub node: Option<String>,
 }
@@ -95,7 +95,7 @@ pub fn parse_push_enable(iq: &Iq) -> Option<PushEnable> {
         _ => return None,
     };
 
-    let jid = elem.attr("jid").filter(|s| !s.is_empty())?.to_owned();
+    let jid = parse_push_service_jid(elem.attr("jid")?)?;
     let node = elem
         .attr("node")
         .filter(|s| !s.is_empty())
@@ -124,7 +124,7 @@ pub fn parse_push_disable(iq: &Iq) -> Option<PushDisable> {
         _ => return None,
     };
 
-    let jid = elem.attr("jid").filter(|s| !s.is_empty())?.to_owned();
+    let jid = parse_push_service_jid(elem.attr("jid")?)?;
     let node = elem
         .attr("node")
         .filter(|s| !s.is_empty())
@@ -146,6 +146,13 @@ fn parse_data_form_options(form: &Element) -> Vec<(String, String)> {
             Some((var.to_owned(), value))
         })
         .collect()
+}
+
+fn parse_push_service_jid(raw: &str) -> Option<BareJid> {
+    if raw.is_empty() || raw.chars().any(|ch| ch.is_control() || ch.is_whitespace()) {
+        return None;
+    }
+    raw.parse::<BareJid>().ok()
 }
 
 fn parse_publish_options_form(parent: &Element) -> Option<Element> {

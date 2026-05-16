@@ -3,7 +3,6 @@ import type { BrowserXmppClient } from "@/lib/xmpp-client";
 import { getOrRegisterServiceWorker, registerServiceWorker as registerChatServiceWorker } from "@/lib/service-worker-registration";
 
 const STORAGE_KEY = "waddle.chat.notifications-enabled";
-const VAPID_PUBLIC_KEY = (import.meta.env.PUBLIC_WADDLE_WEB_PUSH_VAPID_PUBLIC_KEY ?? "").trim();
 const PUSH_SERVICE_JID = (import.meta.env.PUBLIC_WADDLE_XMPP_PUSH_SERVICE_JID ?? "").trim();
 const NOTIFICATION_ICON_URL = "/android-chrome-192x192.png";
 
@@ -115,16 +114,6 @@ export function usePushNotifications() {
 
   async function syncPushSubscription(xmppClient: BrowserXmppClient, userJid: string): Promise<boolean> {
     if (!notificationsEnabled.value || permissionState.value !== "granted") return false;
-    if (!VAPID_PUBLIC_KEY) return false;
-
-    const sub = await subscribeToPush(VAPID_PUBLIC_KEY);
-    if (!sub) return false;
-
-    const subJson = sub.toJSON();
-    const endpoint = subJson.endpoint ?? sub.endpoint;
-    const p256dh = subJson.keys?.p256dh;
-    const auth = subJson.keys?.auth;
-    if (!endpoint || !p256dh || !auth) return false;
 
     const serviceJid = resolvePushServiceJid(userJid);
     if (!serviceJid) return false;
@@ -132,9 +121,6 @@ export function usePushNotifications() {
     return xmppClient.enablePushNotifications({
       serviceJid,
       node: "web-push",
-      endpoint,
-      p256dh,
-      auth,
     });
   }
 

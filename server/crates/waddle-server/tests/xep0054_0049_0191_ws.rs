@@ -410,6 +410,60 @@ async fn websocket_push_enable_does_not_require_provider_credentials() {
 }
 
 #[tokio::test]
+async fn websocket_push_enable_rejects_provider_credentials_in_publish_options() {
+    let (_server, mut client) = setup().await;
+
+    client
+        .send(
+            r#"<iq xmlns="jabber:client" type="set" id="ws-push-provider-data"><enable xmlns="urn:xmpp:push:0" jid="push.localhost" node="web"><x xmlns="jabber:x:data" type="submit"><field var="FORM_TYPE"><value>http://jabber.org/protocol/pubsub#publish-options</value></field><field var="service"><value>https://updates.push.services.mozilla.com/abc</value></field><field var="device-token"><value>auth-secret</value></field><field var="device-key"><value>p256dh-key</value></field></x></enable></iq>"#,
+        )
+        .await
+        .expect("send push enable with provider data");
+    let response = client
+        .recv_matching(|frame| frame.contains("ws-push-provider-data"))
+        .await
+        .expect("push enable response");
+
+    assert!(
+        response.contains("type=\"error\"") || response.contains("type='error'"),
+        "expected push enable error for provider credentials, got: {response}"
+    );
+    assert!(
+        response.contains("bad-request"),
+        "expected bad-request for provider credentials, got: {response}"
+    );
+
+    let _ = client.close().await;
+}
+
+#[tokio::test]
+async fn websocket_push_enable_rejects_invalid_service_jid() {
+    let (_server, mut client) = setup().await;
+
+    client
+        .send(
+            r#"<iq xmlns="jabber:client" type="set" id="ws-push-invalid-jid"><enable xmlns="urn:xmpp:push:0" jid="not a jid" node="web"/></iq>"#,
+        )
+        .await
+        .expect("send push enable with invalid jid");
+    let response = client
+        .recv_matching(|frame| frame.contains("ws-push-invalid-jid"))
+        .await
+        .expect("push enable response");
+
+    assert!(
+        response.contains("type=\"error\"") || response.contains("type='error'"),
+        "expected push enable error for invalid service jid, got: {response}"
+    );
+    assert!(
+        response.contains("bad-request"),
+        "expected bad-request for invalid service jid, got: {response}"
+    );
+
+    let _ = client.close().await;
+}
+
+#[tokio::test]
 async fn websocket_isr_token_request_returns_token() {
     let (_server, mut client) = setup().await;
 
