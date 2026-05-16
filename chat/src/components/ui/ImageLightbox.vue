@@ -74,16 +74,18 @@ onBeforeUnmount(() => {
           :download="current.name ?? ''"
           target="_blank"
           rel="noopener noreferrer"
-          class="h-9 w-9 flex items-center justify-center rounded-full bg-card/80 backdrop-blur border border-border text-foreground hover:bg-card transition-colors"
-          title="Open original"
+          class="chat-lightbox-control h-9 w-9"
+          title="Download"
+          aria-label="Download original"
           @click.stop
         >
           <Download class="w-4 h-4" />
         </a>
         <button
-          class="h-9 w-9 flex items-center justify-center rounded-full bg-card/80 backdrop-blur border border-border text-foreground hover:bg-card transition-colors"
+          class="chat-lightbox-control h-9 w-9"
           type="button"
-          title="Close"
+          title="Close (Esc)"
+          aria-label="Close lightbox"
           @click="close"
         >
           <X class="w-4 h-4" />
@@ -92,18 +94,20 @@ onBeforeUnmount(() => {
 
       <button
         v-if="hasPrev"
-        class="z-sticky absolute left-3 top-1/2 -translate-y-1/2 h-10 w-10 flex items-center justify-center rounded-full bg-card/80 backdrop-blur border border-border text-foreground hover:bg-card transition-colors"
+        class="chat-lightbox-control z-sticky absolute left-3 top-1/2 -translate-y-1/2 h-10 w-10"
         type="button"
-        title="Previous"
+        title="Previous (←)"
+        aria-label="Previous image"
         @click.stop="prev"
       >
         <ChevronLeft class="w-5 h-5" />
       </button>
       <button
         v-if="hasNext"
-        class="z-sticky absolute right-3 top-1/2 -translate-y-1/2 h-10 w-10 flex items-center justify-center rounded-full bg-card/80 backdrop-blur border border-border text-foreground hover:bg-card transition-colors"
+        class="chat-lightbox-control z-sticky absolute right-3 top-1/2 -translate-y-1/2 h-10 w-10"
         type="button"
-        title="Next"
+        title="Next (→)"
+        aria-label="Next image"
         @click.stop="next"
       >
         <ChevronRight class="w-5 h-5" />

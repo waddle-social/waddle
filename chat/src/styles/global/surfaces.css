@@ -55,6 +55,51 @@
   max-width: var(--chat-lightbox-caption-width);
 }
 
+/* Lightbox control buttons — close, download, prev, next.
+ * Shared treatment so all four chrome controls speak one language:
+ * frosted-card background, soft hover lift, primary-tinted focus ring
+ * for keyboard nav. Position/size come from the component's own
+ * inline classes; only the visual chrome lives here. */
+.chat-lightbox-control {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-pill);
+  border: 1px solid color-mix(in oklab, var(--border) 90%, transparent);
+  background: color-mix(in oklab, var(--card) 80%, transparent);
+  color: var(--foreground);
+  backdrop-filter: blur(8px);
+  transition:
+    background-color 0.15s ease,
+    transform 0.18s cubic-bezier(0.16, 1, 0.3, 1),
+    box-shadow 0.18s ease;
+}
+
+.chat-lightbox-control:hover {
+  background: var(--card);
+  transform: translateY(-1px);
+  box-shadow: 0 6px 18px color-mix(in oklab, oklch(0.12 0.012 248) 22%, transparent);
+}
+
+.chat-lightbox-control:active {
+  transform: translateY(0);
+  box-shadow: none;
+}
+
+.chat-lightbox-control:focus-visible {
+  outline: 2px solid color-mix(in oklab, var(--primary) 55%, transparent);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chat-lightbox-control {
+    transition: background-color 0.15s ease;
+  }
+  .chat-lightbox-control:hover {
+    transform: none;
+  }
+}
+
 @media (min-width: 40rem) {
   .chat-settings-field-row {
     grid-template-columns: minmax(0, var(--chat-settings-label-width)) 1fr;
