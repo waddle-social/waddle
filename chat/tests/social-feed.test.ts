@@ -33,7 +33,7 @@ describe("useSocialFeed", () => {
       { id: "p3", body: "middle", publishedMs: 200 },
     ]);
     const feed = useSocialFeed(ref<BrowserXmppClient | null>(client), {
-      spacesJid: ref<string | null>(SPACES),
+      communityJid: ref<string | null>(SPACES),
     });
 
     const ok = await feed.refresh();
@@ -47,7 +47,7 @@ describe("useSocialFeed", () => {
   test("post appends locally so the UI shows it without re-fetching", async () => {
     const client = makeClient([]);
     const feed = useSocialFeed(ref<BrowserXmppClient | null>(client), {
-      spacesJid: ref<string | null>(SPACES),
+      communityJid: ref<string | null>(SPACES),
     });
 
     const entry = await feed.post({ body: "hello community" });
@@ -63,7 +63,7 @@ describe("useSocialFeed", () => {
   test("post is rejected when body is empty", async () => {
     const client = makeClient([]);
     const feed = useSocialFeed(ref<BrowserXmppClient | null>(client), {
-      spacesJid: ref<string | null>(SPACES),
+      communityJid: ref<string | null>(SPACES),
     });
     const entry = await feed.post({ body: "   " });
     expect(entry).toBe(null);
@@ -75,7 +75,7 @@ describe("useSocialFeed", () => {
     client.publishFeedPost = mock(() => Promise.reject(new Error("Forbidden"))) as unknown as MockClient["publishFeedPost"];
 
     const feed = useSocialFeed(ref<BrowserXmppClient | null>(client), {
-      spacesJid: ref<string | null>(SPACES),
+      communityJid: ref<string | null>(SPACES),
     });
     await feed.refresh();
     const entry = await feed.post({ body: "no-can-do" });
@@ -87,7 +87,7 @@ describe("useSocialFeed", () => {
   test("clear resets state", async () => {
     const client = makeClient([{ id: "p1", body: "x", publishedMs: 1 }]);
     const feed = useSocialFeed(ref<BrowserXmppClient | null>(client), {
-      spacesJid: ref<string | null>(SPACES),
+      communityJid: ref<string | null>(SPACES),
     });
     await feed.refresh();
     expect(feed.entries.value.length).toBe(1);
@@ -100,7 +100,7 @@ describe("useSocialFeed", () => {
   test("refresh skips when spacesJid is null", async () => {
     const client = makeClient([]);
     const feed = useSocialFeed(ref<BrowserXmppClient | null>(client), {
-      spacesJid: ref<string | null>(null),
+      communityJid: ref<string | null>(null),
     });
     const ok = await feed.refresh();
     expect(ok).toBe(false);

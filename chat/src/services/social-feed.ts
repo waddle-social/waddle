@@ -13,8 +13,9 @@ import type { BrowserXmppClient, FeedEntry, FeedPostInput } from "@/lib/xmpp-cli
 export function useSocialFeed(
   xmppClient: Ref<BrowserXmppClient | null>,
   options: {
-    /** Bare JID of the spaces service (e.g. `spaces.waddle.social`). */
-    spacesJid: Ref<string | null>;
+    /** Bare JID of the community service hosting the feed node
+     * (e.g. `community.waddle.social`). */
+    communityJid: Ref<string | null>;
     /** Max items to fetch per refresh. */
     pageSize?: number;
   },
@@ -32,8 +33,8 @@ export function useSocialFeed(
 
   async function refresh(): Promise<boolean> {
     const client = xmppClient.value;
-    const spacesJid = options.spacesJid.value;
-    if (!client || !spacesJid) {
+    const communityJid = options.communityJid.value;
+    if (!client || !communityJid) {
       entries.value = [];
       return false;
     }
@@ -41,7 +42,7 @@ export function useSocialFeed(
     isLoading.value = true;
     error.value = null;
     try {
-      const fetched = await client.fetchFeed(spacesJid, pageSize);
+      const fetched = await client.fetchFeed(communityJid, pageSize);
       if (requestId !== fetchRequestId || client !== xmppClient.value) return false;
       entries.value = fetched;
       return true;
@@ -59,13 +60,13 @@ export function useSocialFeed(
 
   async function post(input: FeedPostInput): Promise<FeedEntry | null> {
     const client = xmppClient.value;
-    const spacesJid = options.spacesJid.value;
-    if (!client || !spacesJid) return null;
+    const communityJid = options.communityJid.value;
+    if (!client || !communityJid) return null;
     if (!input.body.trim()) return null;
     isPosting.value = true;
     error.value = null;
     try {
-      const entry = await client.publishFeedPost(spacesJid, input);
+      const entry = await client.publishFeedPost(communityJid, input);
       // Append to local state at the head — UI doesn't need to wait
       // for a refresh round-trip. The caller can trigger a refresh
       // manually (refresh button) when they want to pull in other

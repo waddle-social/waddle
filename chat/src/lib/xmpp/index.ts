@@ -11,6 +11,16 @@ export {
 export type { OutboundFileAttachment } from "./send-types";
 export type { InboxEntry } from "./inbox-types";
 export type { FeedEntry, FeedPostInput } from "./feed-types";
+export type { Story, StoryPostInput } from "./story-types";
+export { isStoryActive } from "./story-types";
+export type {
+  CommunityEvent,
+  CommunityEventInput,
+  Freq,
+  Rrule,
+  Weekday,
+} from "./event-types";
+export { sortEventsUpcomingFirst } from "./event-types";
 export type { UserPepProfile } from "./pep-types";
 export type {
   DmChatStateEvent,
