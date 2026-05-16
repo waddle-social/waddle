@@ -43,6 +43,11 @@ pub use super::xep0115::{
     CapsCache, NS_CAPS, WADDLE_CAPS_NODE,
 };
 
+pub use super::xep0249::{
+    build_direct_invite, build_invite_message, is_direct_invite, message_has_direct_invite,
+    parse_direct_invite, parse_direct_invite_from_message, DirectInvite, NS_CONFERENCE,
+};
+
 pub use super::xep0363::{
     build_upload_error, build_upload_slot_response, effective_content_type, is_upload_request,
     parse_upload_request, sanitize_filename, UploadError, UploadRequest, UploadSlot,
@@ -138,6 +143,11 @@ pub use super::xep0317::{
     set_hats, strip_hats, Hat, HatCarrier, HatSet, NS_HATS,
 };
 
+pub use super::xep0319::{
+    add_idle, build_idle_element, extract_idle_from_presence, has_idle, is_idle_element,
+    parse_idle_element, strip_idle, IdleCarrier, IdleError, IdleInfo, NS_IDLE,
+};
+
 pub use super::xep0333::{
     add_markable, build_displayed_element, build_displayed_message, build_markable_element,
     extract_marker_from_message, extract_marker_id, has_markable, has_marker, is_marker_element,
@@ -159,6 +169,16 @@ pub use super::xep0372::{
 pub use super::xep0377::{
     build_report_element, is_report_element, parse_report, Report, ReportReason, ReportRecord,
     ReportStore, NS_REPORTING,
+};
+
+pub use super::xep0392::{
+    apply_cvd_correction, compute_hue, generate_color, generate_color_with_params, ConsistentColor,
+    CvdCorrection, HslColor, DEFAULT_LIGHTNESS, DEFAULT_SATURATION,
+};
+
+pub use super::xep0393::{
+    blocks_to_html, blocks_to_plain, parse_blocks, parse_spans, spans_to_html, spans_to_plain,
+    Block, Span, StyledBody,
 };
 
 pub use waddle_xmpp_core::xep0359::{
@@ -306,6 +326,11 @@ pub use super::xep0452::{
     MentionNotificationCarrier, NS_MENTION_NOTIFICATION,
 };
 
+pub use super::xep0471::{
+    build_event_element, is_event_element, parse_event, CalendarEvent, Rsvp, RsvpStatus,
+    NS_CALENDAR, PUBSUB_NODE_EVENTS,
+};
+
 pub use super::xep0470::{
     build_attachments_element, is_attachments_element, parse_attachment_target, Attachment,
     AttachmentPayload, AttachmentTarget, NS_PUBSUB_ATTACHMENTS,
@@ -316,6 +341,11 @@ pub use super::xep_waddle_pin::{
     build_unpinned_element as build_unpinned_message_element, extract_pin_intent_from_message,
     parse_pinned_element as parse_pinned_message_element,
     parse_unpinned_element as parse_unpinned_message_element, PinIntent, NS_WADDLE_PIN_V0,
+};
+
+pub use super::xep0472::{
+    build_feed_entry_element, is_feed_entry, parse_feed_entry, FeedEntry, NS_SOCIAL_FEED,
+    PUBSUB_NODE_FEED,
 };
 
 pub use super::xep0492::{
@@ -332,6 +362,11 @@ pub use super::xep0469::{
     NS_BOOKMARKS_PINNING,
 };
 
+pub use super::xep0501::{
+    build_story_element, filter_active, is_story_element, parse_story, Story, DEFAULT_EXPIRY_HOURS,
+    NS_STORIES, PUBSUB_NODE_STORIES,
+};
+
 pub use super::xep0502::{
     build_activity_notification, build_subscribe_element,
     is_activity_element as is_muc_activity_element, parse_activity_notifications, ActivityTracker,
@@ -344,6 +379,14 @@ pub use super::xep0500::{
 };
 
 pub use super::xep0486::{extract_avatar_hash_from_presence, MucAvatar, MucAvatarCache};
+
+pub use super::xep0488::{
+    build_invite_message_element, build_invite_request, build_invite_response,
+    build_invite_share_message, extract_invite_from_iq, extract_invite_from_message,
+    has_invite_in_message, is_invite_element, is_invite_request, set_invite_on_message,
+    strip_invite_from_message, InviteToken, InviteTokenCarrier, InviteTokenError,
+    NS_MUC_TOKEN_INVITE,
+};
 
 pub use super::xep0513::{
     build_mention_element, build_mentions_elements, extract_explicit_mentions,
