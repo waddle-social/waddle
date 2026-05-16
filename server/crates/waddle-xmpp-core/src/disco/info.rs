@@ -347,6 +347,7 @@ pub fn server_features() -> Vec<Feature> {
         Feature::carbons_rules(),
         Feature::offline_messages(),
         Feature::vcard(),
+        Feature::vcard4(),
         Feature::http_upload(),
         Feature::blocking(),
         Feature::last_activity(),
