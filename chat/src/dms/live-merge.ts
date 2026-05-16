@@ -5,13 +5,17 @@ import {
   type DeliveryStatus,
   type TimelineMessage,
 } from "@/lib/chat-ui";
-import { findMessageById, matchMessageId, mergeMessageIds } from "@/lib/message-ids";
+import { findMessageById, findMessageIndexById, mergeMessageIds } from "@/lib/message-ids";
 import {
   fromLiveDmMessage,
   isSameDmCorrectionSender,
   retractDmTimelineMessage,
 } from "@/dms/message-timeline-state";
 import { compareTimelineMessages } from "@/lib/timeline-timestamps";
+import {
+  canUseSelfEchoBodyFallback,
+  withinSelfEchoFallbackWindow,
+} from "@/lib/self-echo-fallback";
 
 // Inbound merge composable for DMs: applies incoming retractions
 // (XEP-0424), corrections (XEP-0308), reactions (XEP-0444), and displayed
@@ -35,24 +39,6 @@ type UseDmLiveMergeDeps = {
   isFeedVisible: (m: TimelineMessage) => boolean;
 };
 
-const CLIENT_GENERATED_MESSAGE_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-const SELF_ECHO_FALLBACK_MAX_DELTA_MS = 5 * 60 * 1000;
-
-function isLikelyClientGeneratedMessageId(id: string): boolean {
-  return CLIENT_GENERATED_MESSAGE_ID_PATTERN.test(id);
-}
-
-function canUseBodyMatchFallback(msg: TimelineMessage): boolean {
-  return msg.isSelf && (msg.wireIds?.length ?? 0) === 0 && isLikelyClientGeneratedMessageId(msg.id);
-}
-
-function withinSelfEchoFallbackWindow(existing: TimelineMessage, incoming: TimelineMessage): boolean {
-  const existingTime = Date.parse(existing.createdAt);
-  const incomingTime = Date.parse(incoming.createdAt);
-  if (!Number.isFinite(existingTime) || !Number.isFinite(incomingTime)) return false;
-  return Math.abs(incomingTime - existingTime) <= SELF_ECHO_FALLBACK_MAX_DELTA_MS;
-}
-
 export function useDmLiveMerge(deps: UseDmLiveMergeDeps) {
   const {
     session,
@@ -69,7 +55,7 @@ export function useDmLiveMerge(deps: UseDmLiveMergeDeps) {
    * Short-circuits on target miss / already-marked.
    */
   function applyDisplayed(messageId: string, nick: string) {
-    const index = messages.value.findIndex((m) => matchMessageId(m, messageId));
+    const index = findMessageIndexById(messages.value, messageId);
     if (index < 0) return;
     const current = messages.value[index]!;
     const existing = current.readBy ? [...current.readBy] : [];
@@ -88,7 +74,7 @@ export function useDmLiveMerge(deps: UseDmLiveMergeDeps) {
    * mapping in onReaction.) Short-circuits on target miss.
    */
   function applyReaction(messageId: string, nick: string, emojis: string[]) {
-    const index = messages.value.findIndex((m) => matchMessageId(m, messageId));
+    const index = findMessageIndexById(messages.value, messageId);
     if (index < 0) return;
     const current = messages.value[index]!;
     const existing: Record<string, string[]> = current.reactions ? { ...current.reactions } : {};
@@ -114,12 +100,11 @@ export function useDmLiveMerge(deps: UseDmLiveMergeDeps) {
    */
   function applyRetraction(msg: LiveDmMessage) {
     if (!msg.retractsId) return;
-    const index = messages.value.findIndex(
-      (m) => matchMessageId(m, msg.retractsId!) && isSameDmCorrectionSender(m, msg.fromJid),
-    );
-    if (index < 0) return;
+    const candidateIndex = findMessageIndexById(messages.value, msg.retractsId);
+    if (candidateIndex < 0) return;
+    if (!isSameDmCorrectionSender(messages.value[candidateIndex]!, msg.fromJid)) return;
     const next = messages.value.slice();
-    next[index] = retractDmTimelineMessage(messages.value[index]!, msg.retractionId);
+    next[candidateIndex] = retractDmTimelineMessage(messages.value[candidateIndex]!, msg.retractionId);
     messages.value = next;
   }
 
@@ -136,10 +121,10 @@ export function useDmLiveMerge(deps: UseDmLiveMergeDeps) {
     extensionAnnotations?: LiveDmMessage["extensionAnnotations"],
     extensionBodyFallback?: boolean,
   ) {
-    const index = messages.value.findIndex(
-      (m) => matchMessageId(m, replacesId) && isSameDmCorrectionSender(m, correctionFromJid),
-    );
-    if (index < 0) return;
+    const candidateIndex = findMessageIndexById(messages.value, replacesId);
+    if (candidateIndex < 0) return;
+    if (!isSameDmCorrectionSender(messages.value[candidateIndex]!, correctionFromJid)) return;
+    const index = candidateIndex;
     const current = messages.value[index]!;
     const updated: TimelineMessage = { ...current, body: newBody.trim(), isEdited: true };
     if (markup && markup.length > 0) updated.markup = markup;
@@ -167,7 +152,7 @@ export function useDmLiveMerge(deps: UseDmLiveMergeDeps) {
     const existingById = [msg.id, ...(msg.wireIds ?? [])]
       .map((id) => findMessageById(messages.value, id))
       .find((message): message is TimelineMessage => !!message);
-    const bodyFallbackAllowed = !existingById && canUseBodyMatchFallback(msg);
+    const bodyFallbackAllowed = !existingById && canUseSelfEchoBodyFallback(msg);
     const pendingSelfEcho = bodyFallbackAllowed
       ? messages.value.find(
         (m) =>

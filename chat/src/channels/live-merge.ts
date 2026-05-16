@@ -5,7 +5,7 @@ import {
   type DeliveryStatus,
   type TimelineMessage,
 } from "@/lib/chat-ui";
-import { findMessageById, matchMessageId, mergeMessageIds } from "@/lib/message-ids";
+import { findMessageById, findMessageIndexById, mergeMessageIds } from "@/lib/message-ids";
 import { applyForumContext, isFeedTimelineMessage, mapLiveRoomMessageToTimeline } from "@/channels/timeline";
 import {
   isMucServiceModeration,
@@ -21,6 +21,10 @@ import {
 } from "@/channels/message-timeline-state";
 import { classifyRoomMessage } from "@/lib/xmpp/classify-room-message";
 import { compareTimelineMessages } from "@/lib/timeline-timestamps";
+import {
+  canUseSelfEchoBodyFallback,
+  withinSelfEchoFallbackWindow,
+} from "@/lib/self-echo-fallback";
 
 // Inbound merge composable for the channel side: applies incoming
 // retractions (XEP-0424 / 0425), corrections (XEP-0308), reactions
@@ -45,23 +49,6 @@ type UseChannelLiveMergeDeps = {
 };
 
 const isFeedVisible = isFeedTimelineMessage;
-const CLIENT_GENERATED_MESSAGE_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-const SELF_ECHO_FALLBACK_MAX_DELTA_MS = 5 * 60 * 1000;
-
-function isLikelyClientGeneratedMessageId(id: string): boolean {
-  return CLIENT_GENERATED_MESSAGE_ID_PATTERN.test(id);
-}
-
-function canUseBodyMatchFallback(msg: TimelineMessage): boolean {
-  return msg.isSelf && (msg.wireIds?.length ?? 0) === 0 && isLikelyClientGeneratedMessageId(msg.id);
-}
-
-function withinSelfEchoFallbackWindow(existing: TimelineMessage, incoming: TimelineMessage): boolean {
-  const existingTime = Date.parse(existing.createdAt);
-  const incomingTime = Date.parse(incoming.createdAt);
-  if (!Number.isFinite(existingTime) || !Number.isFinite(incomingTime)) return false;
-  return Math.abs(incomingTime - existingTime) <= SELF_ECHO_FALLBACK_MAX_DELTA_MS;
-}
 
 export function useChannelLiveMerge(deps: UseChannelLiveMergeDeps) {
   const {
@@ -82,7 +69,7 @@ export function useChannelLiveMerge(deps: UseChannelLiveMergeDeps) {
    * inbound XEP-0333 marker.
    */
   function applyDisplayed(messageId: string, nick: string) {
-    const index = messages.value.findIndex((m) => matchMessageId(m, messageId));
+    const index = findMessageIndexById(messages.value, messageId);
     if (index < 0) return;
     const current = messages.value[index]!;
     const existing = current.readBy ? [...current.readBy] : [];
@@ -131,7 +118,7 @@ export function useChannelLiveMerge(deps: UseChannelLiveMergeDeps) {
    */
   function applyRetraction(msg: LiveRoomMessage) {
     if (!msg.retractsId) return;
-    const index = messages.value.findIndex((m) => matchMessageId(m, msg.retractsId!));
+    const index = findMessageIndexById(messages.value, msg.retractsId);
     if (index < 0) return;
     const target = messages.value[index]!;
     if (msg.moderationTargetId) {
@@ -164,10 +151,10 @@ export function useChannelLiveMerge(deps: UseChannelLiveMergeDeps) {
     extensionAnnotations?: LiveRoomMessage["extensionAnnotations"],
     extensionBodyFallback?: boolean,
   ) {
-    const index = messages.value.findIndex((m) =>
-      matchMessageId(m, replacesId) && isSameMucCorrectionSender(m, correctionSender)
-    );
-    if (index < 0) return;
+    const candidateIndex = findMessageIndexById(messages.value, replacesId);
+    if (candidateIndex < 0) return;
+    if (!isSameMucCorrectionSender(messages.value[candidateIndex]!, correctionSender)) return;
+    const index = candidateIndex;
     const current = messages.value[index]!;
     const updated: TimelineMessage = { ...current, body: newBody.trim(), isEdited: true };
     if (markup && markup.length > 0) updated.markup = markup;
@@ -200,7 +187,7 @@ export function useChannelLiveMerge(deps: UseChannelLiveMergeDeps) {
     const existingById = [msg.id, ...(msg.wireIds ?? [])]
       .map((id) => findMessageById(messages.value, id))
       .find((message): message is TimelineMessage => !!message);
-    const bodyFallbackAllowed = !existingById && canUseBodyMatchFallback(msg);
+    const bodyFallbackAllowed = !existingById && canUseSelfEchoBodyFallback(msg);
     const pendingSelfEcho = bodyFallbackAllowed
       ? messages.value.find(
         (m) =>

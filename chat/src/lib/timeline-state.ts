@@ -1,5 +1,5 @@
 import type { TimelineMessage } from "@/lib/chat-ui";
-import { matchMessageId } from "@/lib/message-ids";
+import { findMessageIndexById } from "@/lib/message-ids";
 import {
   applyDeliveryEvent,
   type DeliveryEvent,
@@ -39,8 +39,9 @@ export function latestRemoteMessageIdFor(timeline: ReadonlyArray<TimelineMessage
  * no-downgrade short-circuit), so Vue's reactivity skips a re-render and
  * downstream watchers don't fire.
  *
- * Matches the id via `matchMessageId` (primary id OR a XEP-0359-reconciled
- * id in `wireIds`). XEP-0198 SM acks and the wasm queue/failure callbacks
+ * Resolves the id via `findMessageIndexById` (primary id OR a
+ * XEP-0359-reconciled id in `wireIds`) so collisions never target the
+ * wrong message. XEP-0198 SM acks and the wasm queue/failure callbacks
  * fire with the client-assigned id, but by the time they arrive the
  * message's primary id may already have been swapped to the room/server
  * stanza-id while the original client id moved into `wireIds`. Strict
@@ -61,8 +62,8 @@ export function applyDeliveryEventById<M extends TimelineMessage>(
   messageId: string,
   event: DeliveryEvent,
 ): M[] {
-  const index = timeline.findIndex((m) => m.isSelf && matchMessageId(m, messageId));
-  if (index < 0) return timeline;
+  const index = findMessageIndexById(timeline, messageId);
+  if (index < 0 || !timeline[index]!.isSelf) return timeline;
   const current = timeline[index]!;
   const nextStatus = applyDeliveryEvent(current.deliveryStatus, event);
   if (nextStatus === current.deliveryStatus) return timeline;

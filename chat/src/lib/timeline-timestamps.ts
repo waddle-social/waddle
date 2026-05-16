@@ -13,10 +13,8 @@ export function compareTimelineTimestamps(
 }
 
 export function compareTimelineMessages(
-  left: { createdAt?: string; id: string },
-  right: { createdAt?: string; id: string },
+  left: { createdAt?: string },
+  right: { createdAt?: string },
 ): number {
-  const timeOrder = compareTimelineTimestamps(left.createdAt, right.createdAt);
-  if (timeOrder !== 0) return timeOrder;
-  return left.id.localeCompare(right.id);
+  return compareTimelineTimestamps(left.createdAt, right.createdAt);
 }

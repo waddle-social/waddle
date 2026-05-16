@@ -1,3 +1,5 @@
+import { compareTimelineTimestamps } from "@/lib/timeline-timestamps";
+
 /**
  * Per-conversation "last-seen" tracker for XEP-0313 MAM catch-up on reconnect.
  *
@@ -153,4 +155,3 @@ function normalizeTimestamp(timestamp: string): string {
 function compareTimestamps(left: string, right: string): number {
   return compareTimelineTimestamps(left, right);
 }
-import { compareTimelineTimestamps } from "@/lib/timeline-timestamps";
