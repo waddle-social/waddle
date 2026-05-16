@@ -210,13 +210,27 @@
   box-shadow: 0 0 10px color-mix(in oklab, var(--destructive) 38%, transparent);
 }
 
+/* Generic count-badge glow halos — same alphas the sidebar
+ * list-row badges use, but lifted to a non-sidebar-bound class so
+ * other badge surfaces (the rail notification bell) can pull the
+ * eye with the same brand language. */
+.chat-badge-glow--primary {
+  box-shadow: 0 0 10px color-mix(in oklab, var(--primary) 35%, transparent);
+}
+
+.chat-badge-glow--mention {
+  box-shadow: 0 0 10px color-mix(in oklab, var(--destructive) 38%, transparent);
+}
+
 @media (prefers-reduced-motion: reduce) {
   .chat-list-row--unread::before,
   .chat-list-row--mention::before {
     box-shadow: none;
   }
   .chat-list-row--unread-badge,
-  .chat-list-row--mention-badge {
+  .chat-list-row--mention-badge,
+  .chat-badge-glow--primary,
+  .chat-badge-glow--mention {
     box-shadow: none;
   }
 }
