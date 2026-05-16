@@ -95,6 +95,34 @@ async fn spaces_config_keeps_multiple_items() {
 }
 
 #[tokio::test]
+async fn republish_refreshes_retention_order() {
+    let storage = DatabasePubSubStorage::open(Some("sqlite::memory:"))
+        .await
+        .expect("storage");
+    let owner = jid("alice@example.com");
+    storage.get_or_create_node(&owner, "n").await.expect("node");
+
+    for id in ["old", "new", "old"] {
+        let item = PubSubItem {
+            id: Some(id.to_string()),
+            publisher: None,
+            payload: None,
+        };
+        storage
+            .publish_item(&owner, "n", &item, Some(&owner), false)
+            .await
+            .expect("publish");
+    }
+
+    let items = storage
+        .get_items(&owner, "n", None, &[])
+        .await
+        .expect("items");
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].id, "old");
+}
+
+#[tokio::test]
 async fn xep0402_bookmark_node_keeps_multiple_items_by_default() {
     let storage = DatabasePubSubStorage::open(Some("sqlite::memory:"))
         .await

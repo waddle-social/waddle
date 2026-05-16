@@ -66,6 +66,7 @@ impl DatabasePubSubStorage {
             )
             VALUES (?, ?, ?, ?, ?, ?)
             ON CONFLICT(owner_jid, node_name, item_id) DO UPDATE SET
+                seq = excluded.seq,
                 payload_xml = excluded.payload_xml,
                 publisher_jid = excluded.publisher_jid,
                 published_at_ms = excluded.published_at_ms
