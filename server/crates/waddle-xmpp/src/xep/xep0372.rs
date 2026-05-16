@@ -218,6 +218,18 @@ pub fn parse_reference_element(elem: &Element) -> Result<Reference, ReferenceErr
 
     let begin = elem.attr("begin").and_then(|s| s.parse().ok());
     let end = elem.attr("end").and_then(|s| s.parse().ok());
+    // §"Protocol" defines begin/end as a body span — `end` is the
+    // index just past the last character, so `begin <= end` is
+    // the contract. Equal ends (zero-width span) are valid: some
+    // clients use them to anchor a UI affordance without
+    // highlighting any body text. Inverted ranges either render
+    // the mention at the wrong position or panic in a substring
+    // slice on the renderer side.
+    if let (Some(b), Some(e)) = (begin, end) {
+        if b > e {
+            return Err(ReferenceError::InvalidRange { begin: b, end: e });
+        }
+    }
     let uri = elem
         .attr("uri")
         .filter(|s| !s.trim().is_empty())
