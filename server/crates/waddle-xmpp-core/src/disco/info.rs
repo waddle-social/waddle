@@ -405,6 +405,9 @@ pub fn spaces_service_features() -> Vec<Feature> {
         // XEP-0472 Pubsub Social Feed — the spaces service hosts the
         // community-wide feed node `urn:xmpp:pubsub-social-feed:0`.
         Feature::social_feed(),
+        // XEP-0501 Pubsub Stories — the spaces service hosts the
+        // community-wide ephemeral stories node `urn:xmpp:stories:0`.
+        Feature::stories(),
     ]
 }
 

@@ -195,6 +195,11 @@ impl Feature {
         Self::new("urn:xmpp:pubsub-social-feed:0")
     }
 
+    /// XEP-0501 Pubsub Stories.
+    pub fn stories() -> Self {
+        Self::new("urn:xmpp:stories:0")
+    }
+
     pub fn bookmarks_compat() -> Self {
         Self::new("urn:xmpp:bookmarks:1#compat")
     }

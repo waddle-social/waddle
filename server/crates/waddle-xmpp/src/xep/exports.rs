@@ -362,7 +362,7 @@ pub use super::xep0469::{
     NS_BOOKMARKS_PINNING,
 };
 
-pub use super::xep0501::{
+pub use waddle_xmpp_core::xep0501::{
     build_story_element, filter_active, is_story_element, parse_story, Story, DEFAULT_EXPIRY_HOURS,
     NS_STORIES, PUBSUB_NODE_STORIES,
 };

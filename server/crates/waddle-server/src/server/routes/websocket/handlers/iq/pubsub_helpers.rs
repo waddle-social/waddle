@@ -288,8 +288,11 @@ pub(super) async fn handle_spaces_publish(
     // the space-bookmark nodes but its items are <entry/> payloads,
     // not channel bookmarks. Route through the feed-specific path so
     // we don't try to parse entries as bookmarks.
-    if node == waddle_xmpp_core::xep0472::PUBSUB_NODE_FEED {
-        return handle_social_feed_publish(iq, state, spaces_domain, node, item, session).await;
+    if node == waddle_xmpp_core::xep0472::PUBSUB_NODE_FEED
+        || node == waddle_xmpp_core::xep0501::PUBSUB_NODE_STORIES
+    {
+        return handle_spaces_non_bookmark_publish(iq, state, spaces_domain, node, item, session)
+            .await;
     }
 
     match spaces_node_mutation_allowed(state, session, node).await {
@@ -479,15 +482,16 @@ pub(super) async fn handle_spaces_publish(
     }
 }
 
-/// XEP-0472 publish to the community Social Feed node on the spaces
-/// service. Same auth gate as space-node mutations (server owners or
-/// space owners), but the item payload is a `<entry xmlns="urn:xmpp:
-/// pubsub-social-feed:0"/>` rather than a XEP-0402 bookmark, so the
-/// space-bookmark validation and channel-parent-tuple wiring are
-/// skipped. Fans the published event out to subscribers via the
-/// standard pubsub fan-out so other devices and resources see the
-/// new post in real time.
-async fn handle_social_feed_publish(
+/// Publish to a spaces-hosted pubsub node that does NOT carry XEP-0402
+/// channel bookmarks. Used by the XEP-0472 social feed
+/// (`urn:xmpp:pubsub-social-feed:0`) and XEP-0501 stories
+/// (`urn:xmpp:stories:0`) — both live on the spaces service alongside
+/// the channel-bookmark nodes but carry typed payloads of their own
+/// (`<entry/>`, `<story/>`), so the space-bookmark validation and
+/// channel-parent-tuple wiring are skipped. Same auth gate as
+/// space-node mutations (server owners or space owners) and the
+/// standard pubsub fan-out so subscribers see new posts in real time.
+async fn handle_spaces_non_bookmark_publish(
     iq: &xmpp_parsers::iq::Iq,
     state: &WebSocketState,
     spaces_domain: &str,
@@ -499,7 +503,7 @@ async fn handle_social_feed_publish(
         Ok(true) => {}
         Ok(false) => return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::Forbidden))],
         Err(error) => {
-            warn!(node, error = %error, "Failed to authorize social-feed publish");
+            warn!(node, error = %error, "Failed to authorize spaces non-bookmark publish");
             return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::Forbidden))];
         }
     }
@@ -516,7 +520,7 @@ async fn handle_social_feed_publish(
         Ok(Some(_)) => {}
         Ok(None) => return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::NodeNotFound))],
         Err(error) => {
-            warn!(node, error = %error, "Failed to resolve social-feed node for publish");
+            warn!(node, error = %error, "Failed to resolve spaces non-bookmark node for publish");
             return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::NodeNotFound))];
         }
     }
@@ -549,7 +553,7 @@ async fn handle_social_feed_publish(
             ))]
         }
         Err(error) => {
-            warn!(node, error = %error, "Failed to publish social-feed item");
+            warn!(node, error = %error, "Failed to publish spaces non-bookmark item");
             vec![iq_to_xml(build_pubsub_error(
                 iq,
                 PubSubError::InternalServerError,

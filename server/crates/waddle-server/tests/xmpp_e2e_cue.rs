@@ -30,7 +30,7 @@ const SUPPORTED_XEPS: &[&str] = &[
     "XEP-0297", "XEP-0308", "XEP-0313", "XEP-0317", "XEP-0333", "XEP-0334", "XEP-0357", "XEP-0359",
     "XEP-0363", "XEP-0372", "XEP-0402", "XEP-0410", "XEP-0421", "XEP-0424", "XEP-0425", "XEP-0428",
     "XEP-0431", "XEP-0433", "XEP-0444", "XEP-0446", "XEP-0447", "XEP-0461", "XEP-0472", "XEP-0492",
-    "XEP-0503", "XEP-0511", "XEP-0513",
+    "XEP-0501", "XEP-0503", "XEP-0511", "XEP-0513",
 ];
 
 const ADVERTISED_FEATURE_XEPS: &[(&str, &str)] = &[
@@ -124,6 +124,7 @@ const ADVERTISED_FEATURE_XEPS: &[(&str, &str)] = &[
     ("urn:xmpp:mentions:0#channel", "XEP-0513"),
     ("jabber:iq:search", "XEP-0055"),
     ("urn:xmpp:pubsub-social-feed:0", "XEP-0472"),
+    ("urn:xmpp:stories:0", "XEP-0501"),
 ];
 
 const ADVERTISED_FEATURE_EXEMPTIONS: &[&str] = &[

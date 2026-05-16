@@ -142,6 +142,26 @@ async fn seed_initial_xmpp_topology(
         .await
         .map_err(|error| anyhow::anyhow!("failed to configure social feed node: {error}"))?;
 
+    // XEP-0501 Stories — community-wide ephemeral pubsub node. Same
+    // hosting + access model as the social feed; stories carry an
+    // `expires` timestamp and the chat client filters expired items
+    // out of the view. (Server-side eviction of expired items is a
+    // future cleanup job; the items API and pubsub semantics work
+    // unmodified — the `expires` attribute is application-level
+    // metadata.)
+    pubsub_storage
+        .get_or_create_node(spaces_jid, waddle_xmpp_core::xep0501::PUBSUB_NODE_STORIES)
+        .await
+        .map_err(|error| anyhow::anyhow!("failed to create stories node: {error}"))?;
+    pubsub_storage
+        .update_node_config(
+            spaces_jid,
+            waddle_xmpp_core::xep0501::PUBSUB_NODE_STORIES,
+            &NodeConfig::spaces_public(),
+        )
+        .await
+        .map_err(|error| anyhow::anyhow!("failed to configure stories node: {error}"))?;
+
     for channel in INITIAL_MANAGED_CHANNELS {
         let channel_record = get_xmpp_channel(actor.clone(), channel.id)
             .await
