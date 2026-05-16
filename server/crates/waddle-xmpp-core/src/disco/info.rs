@@ -402,6 +402,9 @@ pub fn spaces_service_features() -> Vec<Feature> {
         Feature::new("http://jabber.org/protocol/pubsub#retract-items"),
         Feature::new("http://jabber.org/protocol/pubsub#multi-items"),
         Feature::new("http://jabber.org/protocol/pubsub#item-ids"),
+        // XEP-0472 Pubsub Social Feed — the spaces service hosts the
+        // community-wide feed node `urn:xmpp:pubsub-social-feed:0`.
+        Feature::social_feed(),
     ]
 }
 

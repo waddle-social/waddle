@@ -284,6 +284,14 @@ pub(super) async fn handle_spaces_publish(
     item: PubSubItem,
     session: Option<&Session>,
 ) -> Vec<String> {
+    // XEP-0472 community feed lives on the spaces service alongside
+    // the space-bookmark nodes but its items are <entry/> payloads,
+    // not channel bookmarks. Route through the feed-specific path so
+    // we don't try to parse entries as bookmarks.
+    if node == waddle_xmpp::xep::xep0472::PUBSUB_NODE_FEED {
+        return handle_social_feed_publish(iq, state, spaces_domain, node, item, session).await;
+    }
+
     match spaces_node_mutation_allowed(state, session, node).await {
         Ok(true) => {}
         Ok(false) => return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::Forbidden))],
@@ -463,6 +471,85 @@ pub(super) async fn handle_spaces_publish(
         }
         Err(error) => {
             warn!(item_id, node, error = %error, "Failed to publish Spaces item");
+            vec![iq_to_xml(build_pubsub_error(
+                iq,
+                PubSubError::InternalServerError,
+            ))]
+        }
+    }
+}
+
+/// XEP-0472 publish to the community Social Feed node on the spaces
+/// service. Same auth gate as space-node mutations (server owners or
+/// space owners), but the item payload is a `<entry xmlns="urn:xmpp:
+/// pubsub-social-feed:0"/>` rather than a XEP-0402 bookmark, so the
+/// space-bookmark validation and channel-parent-tuple wiring are
+/// skipped. Fans the published event out to subscribers via the
+/// standard pubsub fan-out so other devices and resources see the
+/// new post in real time.
+async fn handle_social_feed_publish(
+    iq: &xmpp_parsers::iq::Iq,
+    state: &WebSocketState,
+    spaces_domain: &str,
+    node: &str,
+    item: PubSubItem,
+    session: Option<&Session>,
+) -> Vec<String> {
+    match spaces_node_mutation_allowed(state, session, node).await {
+        Ok(true) => {}
+        Ok(false) => return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::Forbidden))],
+        Err(error) => {
+            warn!(node, error = %error, "Failed to authorize social-feed publish");
+            return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::Forbidden))];
+        }
+    }
+    let Ok(spaces_jid) = spaces_service_bare_jid(spaces_domain) else {
+        return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::InvalidJid))];
+    };
+    match state
+        .deps
+        .protocol
+        .pubsub_storage
+        .get_node(&spaces_jid, node)
+        .await
+    {
+        Ok(Some(_)) => {}
+        Ok(None) => return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::NodeNotFound))],
+        Err(error) => {
+            warn!(node, error = %error, "Failed to resolve social-feed node for publish");
+            return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::NodeNotFound))];
+        }
+    }
+
+    match state
+        .deps
+        .protocol
+        .pubsub_storage
+        .publish_item(&spaces_jid, node, &item, None, false)
+        .await
+    {
+        Ok(result) => {
+            pubsub_fanout::fan_out_publish(
+                state,
+                pubsub_fanout::FanOutRequest {
+                    owner: &spaces_jid,
+                    node,
+                    published_item: &item,
+                    item_id: &result.item_id,
+                    publisher: None,
+                    publisher_full: None,
+                    is_pep: false,
+                },
+            )
+            .await;
+            vec![iq_to_xml(build_pubsub_publish_result(
+                iq,
+                node,
+                &result.item_id,
+            ))]
+        }
+        Err(error) => {
+            warn!(node, error = %error, "Failed to publish social-feed item");
             vec![iq_to_xml(build_pubsub_error(
                 iq,
                 PubSubError::InternalServerError,

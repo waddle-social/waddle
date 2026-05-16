@@ -122,6 +122,26 @@ async fn seed_initial_xmpp_topology(
         .await
         .map_err(|error| anyhow::anyhow!("failed to configure General space node: {error}"))?;
 
+    // XEP-0472 Social Feed — community-wide pubsub feed for announcements
+    // and microblog-style posts. Hosted on the spaces service alongside
+    // the channel-bookmark nodes; access model is `spaces_public()` so
+    // anyone can subscribe and read, only entities with Publisher or
+    // Owner affiliation may publish. `seed_spaces_admin_affiliations`
+    // runs after this and gives server owners Publisher access via the
+    // existing seed-all-nodes path.
+    pubsub_storage
+        .get_or_create_node(spaces_jid, waddle_xmpp::xep::xep0472::PUBSUB_NODE_FEED)
+        .await
+        .map_err(|error| anyhow::anyhow!("failed to create social feed node: {error}"))?;
+    pubsub_storage
+        .update_node_config(
+            spaces_jid,
+            waddle_xmpp::xep::xep0472::PUBSUB_NODE_FEED,
+            &NodeConfig::spaces_public(),
+        )
+        .await
+        .map_err(|error| anyhow::anyhow!("failed to configure social feed node: {error}"))?;
+
     for channel in INITIAL_MANAGED_CHANNELS {
         let channel_record = get_xmpp_channel(actor.clone(), channel.id)
             .await
