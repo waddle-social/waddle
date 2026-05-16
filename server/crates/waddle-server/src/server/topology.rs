@@ -176,16 +176,13 @@ async fn seed_initial_xmpp_topology(
     // model as the social feed; events carry their own scheduling
     // metadata in the typed `<event/>` payload.
     pubsub_storage
-        .get_or_create_node(
-            &community_jid,
-            waddle_xmpp_core::xep0471::PUBSUB_NODE_EVENTS,
-        )
+        .get_or_create_node(&community_jid, waddle_xmpp_core::xcal::PUBSUB_NODE_EVENTS)
         .await
         .map_err(|error| anyhow::anyhow!("failed to create calendar node: {error}"))?;
     pubsub_storage
         .update_node_config(
             &community_jid,
-            waddle_xmpp_core::xep0471::PUBSUB_NODE_EVENTS,
+            waddle_xmpp_core::xcal::PUBSUB_NODE_EVENTS,
             &NodeConfig::spaces_public(),
         )
         .await

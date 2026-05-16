@@ -26,7 +26,11 @@ package xmpp_e2e_scenarios
 	...
 }
 
-#XepId: =~"^XEP-[0-9]{4}$"
+// Either a published XEP id ("XEP-NNNN") or a Waddle-internal
+// ProtoXEP label ("PROTO-CALENDAR" etc.) for specs that have no
+// assigned XEP number yet — keeps the coverage check honest about
+// what's actually published vs. draft.
+#XepId: =~"^(XEP-[0-9]{4}|PROTO-[A-Z]+)$"
 
 #Step:
 	#EnableCarbons |

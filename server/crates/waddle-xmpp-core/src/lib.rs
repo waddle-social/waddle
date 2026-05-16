@@ -12,10 +12,10 @@ pub mod pubsub;
 pub mod roster;
 pub mod stanza;
 pub mod types;
+pub mod xcal;
 pub mod xep0201;
 pub mod xep0359;
 pub mod xep0392;
-pub mod xep0471;
 pub mod xep0472;
 pub mod xep0501;
 

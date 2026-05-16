@@ -21,9 +21,7 @@ pub(super) fn handle_community_disco_info<'a>(
             waddle_xmpp_core::xep0501::PUBSUB_NODE_STORIES => {
                 (STORIES_NODE_LABEL, Feature::stories())
             }
-            waddle_xmpp_core::xep0471::PUBSUB_NODE_EVENTS => {
-                (EVENTS_NODE_LABEL, Feature::calendar())
-            }
+            waddle_xmpp_core::xcal::PUBSUB_NODE_EVENTS => (EVENTS_NODE_LABEL, Feature::xcal()),
             _ => {
                 return Some(DiscoInfoResponse::error(
                     req.id,

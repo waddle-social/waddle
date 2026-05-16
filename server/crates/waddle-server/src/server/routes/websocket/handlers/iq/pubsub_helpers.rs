@@ -488,7 +488,7 @@ pub(super) async fn handle_community_publish(
 ) -> Vec<String> {
     if node != waddle_xmpp_core::xep0472::PUBSUB_NODE_FEED
         && node != waddle_xmpp_core::xep0501::PUBSUB_NODE_STORIES
-        && node != waddle_xmpp_core::xep0471::PUBSUB_NODE_EVENTS
+        && node != waddle_xmpp_core::xcal::PUBSUB_NODE_EVENTS
     {
         return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::NodeNotFound))];
     }
@@ -505,7 +505,7 @@ pub(super) async fn handle_community_items(
 ) -> Vec<String> {
     if node != waddle_xmpp_core::xep0472::PUBSUB_NODE_FEED
         && node != waddle_xmpp_core::xep0501::PUBSUB_NODE_STORIES
-        && node != waddle_xmpp_core::xep0471::PUBSUB_NODE_EVENTS
+        && node != waddle_xmpp_core::xcal::PUBSUB_NODE_EVENTS
     {
         return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::NodeNotFound))];
     }
@@ -557,7 +557,7 @@ pub(super) async fn handle_community_retract(
 ) -> Vec<String> {
     if node != waddle_xmpp_core::xep0472::PUBSUB_NODE_FEED
         && node != waddle_xmpp_core::xep0501::PUBSUB_NODE_STORIES
-        && node != waddle_xmpp_core::xep0471::PUBSUB_NODE_EVENTS
+        && node != waddle_xmpp_core::xcal::PUBSUB_NODE_EVENTS
     {
         return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::NodeNotFound))];
     }

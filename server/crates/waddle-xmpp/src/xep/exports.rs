@@ -326,9 +326,9 @@ pub use super::xep0452::{
     MentionNotificationCarrier, NS_MENTION_NOTIFICATION,
 };
 
-pub use waddle_xmpp_core::xep0471::{
-    build_event_element, is_event_element, parse_event, CalendarEvent, Rsvp, RsvpStatus,
-    NS_CALENDAR, PUBSUB_NODE_EVENTS,
+pub use waddle_xmpp_core::xcal::{
+    build_vcalendar_with_event, is_vcalendar_element, parse_vcalendar_event, Freq, Rrule, RruleEnd,
+    VEvent, Weekday, NS_XCAL, PUBSUB_NODE_EVENTS, PUBSUB_TYPE_XCAL,
 };
 
 pub use super::xep0470::{

@@ -114,7 +114,7 @@ pub(super) async fn handle_disco_items_iq(
                     DiscoItem::new(
                         community_domain,
                         Some("Community Events"),
-                        Some(waddle_xmpp_core::xep0471::PUBSUB_NODE_EVENTS),
+                        Some(waddle_xmpp_core::xcal::PUBSUB_NODE_EVENTS),
                     ),
                 ],
             };
