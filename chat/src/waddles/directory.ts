@@ -10,6 +10,7 @@ import {
   createSpaceNode,
   createMucInSpace,
   createSpaceWithMuc,
+  moveMucToSpace,
 } from "@/lib/xmpp/protocol-helpers";
 import { mucServiceDomain, spacesServiceDomain } from "@/lib/xmpp/discovery";
 
@@ -477,6 +478,61 @@ export function useWaddleDirectory(
     actionError.value = "Channel deletion is not available until the XMPP command exists.";
   }
 
+  /**
+   * Move a channel to a different XEP-0503 Space. Returns `true` on
+   * success.
+   *
+   * Implementation publishes the channel's `<conference>` bookmark
+   * to the target Space; the server (per XEP-0503 single-membership
+   * enforcement) retracts the item from every other Space before
+   * persisting, so no separate retract is required here.
+   *
+   * Re-loads the channel structure after a successful move so the
+   * sidebar groups reflect the new membership.
+   */
+  async function moveChannelToSpace(
+    channelId: string,
+    targetSpaceId: string,
+  ): Promise<boolean> {
+    const channel = channels.value.find((c) => c.id === channelId);
+    if (!channel?.jid) {
+      actionError.value = "Cannot move a channel without a known room JID.";
+      return false;
+    }
+    if (channel.spaceId === targetSpaceId) {
+      // No-op: already in the target Space. Surface as success so
+      // the UI clears its pending state.
+      return true;
+    }
+    const client = xmppClient.value;
+    const sess = session.value;
+    if (!client?.agent || !sess) {
+      actionError.value = "XMPP session is not ready.";
+      return false;
+    }
+    const spacesService = spacesServiceJid.value ?? spacesServiceDomain(sess.jid);
+    isSubmitting.value = true;
+    try {
+      await moveMucToSpace(client.agent, spacesService, targetSpaceId, channel.jid, {
+        name: channel.name,
+        autojoin: true,
+      });
+      // Optimistically update local state so the channel re-groups
+      // in the sidebar before the next structure reload.
+      const idx = channels.value.findIndex((c) => c.id === channelId);
+      if (idx >= 0) {
+        channels.value[idx] = { ...channels.value[idx], spaceId: targetSpaceId };
+      }
+      await loadStructure(channelId);
+      return true;
+    } catch (error) {
+      actionError.value = normalizeError(error);
+      return false;
+    } finally {
+      isSubmitting.value = false;
+    }
+  }
+
   function clearData() {
     spaceRequestId++;
     structureRequestId++;
@@ -523,6 +579,7 @@ export function useWaddleDirectory(
     createChannel,
     updateChannel,
     deleteChannel,
+    moveChannelToSpace,
     clearData,
     resetForms,
   };

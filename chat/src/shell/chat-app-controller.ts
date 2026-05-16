@@ -1510,6 +1510,13 @@ export function useChatAppController(giphyApiKey: string) {
     ui.confirmDeleteChannel.value = true;
   }
 
+  async function handleMoveChannelToSpace(targetSpaceId: string) {
+    const channel = waddles.currentChannel.value;
+    if (!channel) return;
+    const ok = await waddles.moveChannelToSpace(channel.id, targetSpaceId);
+    if (ok) ui.showEditChannel.value = false;
+  }
+
   async function confirmDeleteChannel() {
     ui.confirmDeleteChannel.value = false;
     await waddles.deleteChannel();
@@ -1677,6 +1684,7 @@ export function useChatAppController(giphyApiKey: string) {
       handleCreateChannel,
       handleUpdateChannel,
       handleDeleteChannel,
+      handleMoveChannelToSpace,
       confirmDeleteChannel,
       handleUpdateWaddle,
       handleDeleteWaddle,
