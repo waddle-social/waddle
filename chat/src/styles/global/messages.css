@@ -682,45 +682,6 @@
 .chat-message-grouped {
   min-height: var(--chat-message-first-line-box);
   margin-block-start: calc(-1 * var(--chat-message-row-gap, var(--space-xs)));
-  /* Ensure the cluster rail (::after) is contained by THIS row, not the
-   * nearest positioned ancestor (which on skeleton rows is the viewport). */
-  position: relative;
-}
-
-/* Burst cluster rail — a delicate vertical accent in the avatar gutter
- * that connects grouped follow-up messages back to their burst parent.
- * Replaces the awkward "is this its own message or a continuation?"
- * ambiguity with a clear, soft thread line that reads at a glance:
- * one voice, multiple breaths.
- *
- * Positioned on the grid row's `::after` so it spans the full row
- * height (the avatar-cell child is constrained to the time-gutter's
- * 1.4rem height and can't host a rail that reaches the body). The
- * row's existing `::before` belongs to the hover-background and
- * `--forum / --mention / --thread` accents, so we use `::after`. */
-.chat-message-grouped::after {
-  content: "";
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  left: calc(var(--chat-message-avatar-size) / 2 - 1px);
-  width: 2px;
-  margin-block: 0.125rem;
-  border-radius: 1px;
-  background: color-mix(in oklab, var(--primary) 22%, transparent);
-  pointer-events: none;
-  transition: background-color 0.16s ease;
-}
-
-.chat-message-grouped:hover::after,
-.chat-message-grouped:focus-within::after {
-  background: color-mix(in oklab, var(--primary) 42%, transparent);
-}
-
-/* In a thread panel the burst rail already has the panel's own
- * left-edge accent — soften ours further so they don't compete. */
-.chat-message-grid--thread.chat-message-grouped::after {
-  background: color-mix(in oklab, var(--primary) 14%, transparent);
 }
 
 /* === Swipe-to-reply / swipe-to-thread (touch only) ===
