@@ -203,6 +203,12 @@ async function loadWasmModule(): Promise<WasmModule> {
       if (typeof mod.default === "function") {
         await mod.default();
       }
+      // Swap the chat-ui consistent-color implementation over to the
+      // spec-conformant SHA-1 hue (XEP-0392 §5.1). The chat-ui module's
+      // own DJB2 fallback covers the first-paint window before this
+      // runs.
+      const { setConsistentColorBackend } = await import("@/lib/chat-ui");
+      setConsistentColorBackend(mod.xep0392_consistent_hue);
       return mod;
     });
   }

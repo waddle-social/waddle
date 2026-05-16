@@ -308,12 +308,19 @@ export interface ChannelEditFormData {
 }
 
 // ── XEP-0392 Consistent Color Generation ────────────────────────────
+//
+// The spec algorithm is SHA-1(UTF-8 input) → first 2 bytes → hue. The
+// browser's SubtleCrypto SHA-1 is async, which doesn't fit Vue
+// `computed` callsites (e.g. `AppAvatar`'s `bgColor`), so the chat
+// loads the Rust SHA-1 impl through wasm and calls it synchronously
+// once initialised. Until the wasm hue function is installed (early
+// during sign-in, before `AppAvatar` typically renders), a DJB2
+// fallback keeps the first paint deterministic and non-empty.
 
-/** Compute a deterministic hue (0–360) from a string using XEP-0392 algorithm. */
-function consistentHue(input: string): number {
-  // Simple SHA-1-like hash using SubtleCrypto isn't available synchronously.
-  // Use the same algorithm: hash → first 2 bytes → hue mapping.
-  // We use a simple DJB2-variant that gives good distribution for short strings.
+let hueImpl: (input: string) => number = djb2FallbackHue;
+
+/** DJB2 fallback used before the wasm SHA-1 hue is installed. */
+function djb2FallbackHue(input: string): number {
   let h = 5381;
   for (let i = 0; i < input.length; i++) {
     h = ((h << 5) + h + input.charCodeAt(i)) & 0xffff;
@@ -321,9 +328,16 @@ function consistentHue(input: string): number {
   return (h / 65536) * 360;
 }
 
+/** Install the spec-conformant hue implementation. Called at app boot
+ * once the wasm module is loaded; subsequent `consistentColor` calls
+ * return XEP-0392 values. */
+export function setConsistentColorBackend(fn: (input: string) => number): void {
+  hueImpl = fn;
+}
+
 /** Generate a CSS hsl() color string for a username/JID. */
 export function consistentColor(input: string, saturation = 65, lightness = 50): string {
-  const hue = consistentHue(input);
+  const hue = hueImpl(input);
   return `hsl(${Math.round(hue)}, ${saturation}%, ${lightness}%)`;
 }
 
