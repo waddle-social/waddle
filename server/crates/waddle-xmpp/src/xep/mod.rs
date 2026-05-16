@@ -63,24 +63,16 @@
 //!   pack references, built on XEP-0446/0447 file sharing.
 //! - **XEP-0452**: MUC Mention Notifications - @mention alerts with
 //!   notification elements and per-room unread mention counter.
-//! - **XEP-0471**: Calendar Events - Community events with scheduling,
-//!   RSVP tracking (going/interested/not-going), and PubSub storage.
 //! - **XEP-0470**: Pubsub Attachments - Reactions/comments on PubSub items
 //!   with attachment target and typed payloads.
-//! - **XEP-0472**: Pubsub Social Feed - Social posts and activity feeds
-//!   via PubSub with title, body, author, and publication metadata.
 //! - **XEP-0492**: Chat Notification Settings - Per-chat notification settings
 //!   via `<notify/>` children (`<always/>`, `<on-mention/>`, `<never/>`).
 //! - **XEP-0469**: Bookmark Pinning - Pin favorite channels via `<pinned/>`
 //!   extension on XEP-0402 bookmark elements, with sort helper.
-//! - **XEP-0501**: Pubsub Stories - Ephemeral posts with auto-expiry
-//!   (default 24h), media support, and active/expired filtering.
 //! - **XEP-0502**: MUC Activity Indicator - Lightweight room activity tracking
 //!   with subscribe/notify pattern and per-room activity state.
 //! - **XEP-0500**: MUC Slow Mode - Per-room rate limiting with configurable
 //!   cooldown interval, moderator exemption, and per-occupant tracking.
-//! - **XEP-0488**: MUC Token Invite - Shareable invite tokens for MUC rooms
-//!   with URI generation and IQ-based token request/response.
 //! - **XEP-0447**: Stateless File Sharing - Structured file sharing with
 //!   metadata and download sources, building on XEP-0446 and XEP-0363.
 //! - **XEP-0446**: File Metadata Element - Structured file info (name, size,
@@ -101,8 +93,6 @@
 //!   blocklists and silently dropping messages from blocked JIDs.
 //! - **XEP-0199**: XMPP Ping - Simple ping/pong for connection liveness.
 //! - **XEP-0223**: Persistent Storage Best Practices - Profile of PubSub.
-//! - **XEP-0249**: Direct MUC Invitations - Simple message-based invitations
-//!   for inviting users directly to MUC rooms.
 //! - **XEP-0363**: HTTP File Upload - Server-side support for HTTP-based
 //!   file uploads, returning PUT and GET URLs for file transfer.
 //! - **XEP-0402**: PEP Native Bookmarks - MUC room bookmarks stored via PEP.
@@ -110,7 +100,7 @@
 //! - **XEP-0513**: Explicit Mentions - @everyone, @here, @role, @user
 //!   mentions with notification decision logic.
 //! - Private Waddle MUC thread metadata, used until XEP-0508 is implemented
-//!   through PubSub/XEP-0472 forum nodes.
+//!   through PubSub forum nodes.
 //! - **XEP-0503**: Server-side Spaces - Community discovery via pubsub.
 
 pub mod xep0004;
@@ -138,7 +128,6 @@ pub mod xep0199;
 pub mod xep0202;
 pub mod xep0203;
 pub mod xep0223;
-pub mod xep0249;
 pub mod xep0292;
 pub mod xep0297;
 pub mod xep0300;
@@ -171,13 +160,9 @@ pub mod xep0452;
 pub mod xep0461;
 pub mod xep0469;
 pub mod xep0470;
-pub mod xep0471;
-pub mod xep0472;
 pub mod xep0486;
-pub mod xep0488;
 pub mod xep0492;
 pub mod xep0500;
-pub mod xep0501;
 pub mod xep0502;
 pub mod xep0503;
 pub mod xep0508;
@@ -190,7 +175,3 @@ mod exports;
 mod xep_waddle_mam_stanza_id_tests;
 
 pub use exports::*;
-
-pub mod prelude {
-    pub use super::xep0249::message_has_direct_invite;
-}
