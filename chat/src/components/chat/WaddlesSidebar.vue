@@ -78,10 +78,15 @@ const emit = defineEmits<{
 
     <!-- Bottom actions -->
     <div class="chat-rail-actions" :class="horizontal ? 'chat-rail-actions-horizontal' : 'chat-rail-actions-vertical'">
+      <!-- Spaces / DMs rail toggles — active state picks up the same
+           brand-armed treatment as the iter-61 channel-header toggles,
+           iter-54 bell badge, and iter-64 extension-route rail:
+           primary ring + glow halo so "you are currently in this
+           mode" reads distinct from "you are hovering this button". -->
       <button
         class="relative w-10 h-10 flex items-center justify-center rounded-lg transition-all duration-200 hover:scale-105"
         :class="activeSidebarMode === 'channels'
-          ? 'bg-rail-hover text-primary'
+          ? 'bg-rail-hover text-primary ring-1 ring-primary/40 shadow-[0_0_10px_var(--glow)]'
           : 'text-rail-foreground hover:bg-rail-hover hover:text-primary'"
         title="Spaces"
         aria-label="Spaces"
@@ -94,7 +99,7 @@ const emit = defineEmits<{
       <button
         class="relative w-10 h-10 flex items-center justify-center rounded-lg transition-all duration-200 hover:scale-105"
         :class="activeSidebarMode === 'dms'
-          ? 'bg-rail-hover text-primary'
+          ? 'bg-rail-hover text-primary ring-1 ring-primary/40 shadow-[0_0_10px_var(--glow)]'
           : 'text-rail-foreground hover:bg-rail-hover hover:text-primary'"
         title="Direct messages"
         aria-label="Direct messages"
