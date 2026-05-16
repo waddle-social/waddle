@@ -67,6 +67,17 @@ impl Feature {
         Self::new("urn:xmpp:message-retract:1")
     }
 
+    /// XEP-0424 §Tombstones MUST disco feature for services that
+    /// replace retracted MAM entries with `<retracted/>` tombstones.
+    /// Distinct from `message_retraction`: the base feature says
+    /// "I understand retraction requests"; this one says "and I
+    /// rewrite the archive entry rather than dropping it." Both
+    /// surfaces ship on Waddle (`mam/storage/tombstone::apply_tombstone`
+    /// + `protocol/event/outbound::ReplaceWithTombstone`).
+    pub fn message_retraction_tombstone() -> Self {
+        Self::new("urn:xmpp:message-retract:1#tombstone")
+    }
+
     pub fn message_moderation() -> Self {
         Self::new("urn:xmpp:message-moderate:1")
     }

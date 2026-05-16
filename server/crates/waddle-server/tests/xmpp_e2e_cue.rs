@@ -46,6 +46,7 @@ const ADVERTISED_FEATURE_XEPS: &[(&str, &str)] = &[
     ("urn:xmpp:chat-markers:0", "XEP-0333"),
     ("urn:xmpp:receipts", "XEP-0184"),
     ("urn:xmpp:message-retract:1", "XEP-0424"),
+    ("urn:xmpp:message-retract:1#tombstone", "XEP-0424"),
     ("urn:xmpp:message-moderate:1", "XEP-0425"),
     ("urn:xmpp:reactions:0", "XEP-0444"),
     ("urn:xmpp:reference:0", "XEP-0372"),
