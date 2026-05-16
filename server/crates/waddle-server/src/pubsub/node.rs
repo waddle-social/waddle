@@ -138,6 +138,19 @@ impl DatabasePubSubStorage {
         owner: &BareJid,
         item_id: &str,
     ) -> Result<Option<PubSubNode>, XmppError> {
+        // When the same item_id exists in multiple nodes (e.g. a
+        // XEP-0503 room bookmark briefly duplicated across two
+        // Spaces during a move), the prior `ORDER BY n.node_name
+        // ASC` would return the alphabetically-first node, which
+        // had nothing to do with the user's most recent intent.
+        // Concretely it pinned room bookmarks under `general` even
+        // after the client published the bookmark to another space.
+        //
+        // Order by the items table's auto-increment `seq` DESC so
+        // the most recent publish wins. `list_node_names_for_item`
+        // exists for the rare case where the caller actually wants
+        // every membership (the publish path uses it to retract
+        // older duplicates).
         let mut rows = self
             .query(
                 r#"
@@ -148,7 +161,8 @@ impl DatabasePubSubStorage {
                 JOIN pubsub_items i
                   ON i.owner_jid = n.owner_jid AND i.node_name = n.node_name
                 WHERE n.owner_jid = ? AND i.item_id = ?
-                ORDER BY n.node_name ASC
+                ORDER BY i.seq DESC
+                LIMIT 1
                 "#,
                 crate::db_params![owner.to_string(), item_id],
             )
@@ -161,6 +175,39 @@ impl DatabasePubSubStorage {
             return Ok(None);
         };
         Ok(Some(Self::decode_node(&row)?))
+    }
+
+    /// Return the names of every node owned by `owner` that contains an
+    /// item with the given `item_id`. Used by single-membership enforcement
+    /// paths (XEP-0503 channel→space pinning) to identify stale duplicates
+    /// before a publish.
+    pub(super) async fn list_node_names_for_item_impl(
+        &self,
+        owner: &BareJid,
+        item_id: &str,
+    ) -> Result<Vec<String>, XmppError> {
+        let mut rows = self
+            .query(
+                r#"
+                SELECT node_name
+                FROM pubsub_items
+                WHERE owner_jid = ? AND item_id = ?
+                "#,
+                crate::db_params![owner.to_string(), item_id],
+            )
+            .await?;
+        let mut names = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|error| XmppError::internal(error.to_string()))?
+        {
+            names.push(
+                row.get(0)
+                    .map_err(|error| XmppError::internal(error.to_string()))?,
+            );
+        }
+        Ok(names)
     }
 
     pub(super) async fn update_node_config_impl(

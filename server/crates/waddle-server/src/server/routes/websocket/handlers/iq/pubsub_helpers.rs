@@ -342,6 +342,58 @@ pub(super) async fn handle_spaces_publish(
         }
     }
 
+    // XEP-0503 single-space-membership: a channel has exactly one
+    // parent space. If the same bookmark item lives in any other
+    // space node, retract it there first — otherwise we'd ship the
+    // item in two `<items>` listings and `find_node_for_item` would
+    // alphabetically pin the room under whichever space sorted first
+    // (the original "rooms always show up under General" bug).
+    //
+    // Retract failures here are non-fatal: they're logged and the
+    // publish proceeds, since `find_node_for_item` now also tiebreaks
+    // by most-recent `seq` and will route lookups to the new node.
+    // The retract is still attempted so legacy clients listing each
+    // space don't see the room twice.
+    match state
+        .deps
+        .protocol
+        .pubsub_storage
+        .list_node_names_for_item(&spaces_jid, item_id)
+        .await
+    {
+        Ok(stale_nodes) => {
+            for stale in stale_nodes.iter().filter(|name| name.as_str() != node) {
+                if let Err(error) = state
+                    .deps
+                    .protocol
+                    .pubsub_storage
+                    .retract_item(&spaces_jid, stale, item_id)
+                    .await
+                {
+                    warn!(
+                        channel_id = %channel_id,
+                        from_node = %stale,
+                        to_node = node,
+                        item_id,
+                        error = %error,
+                        "Failed to retract room bookmark from prior Space node before re-publish; \
+                         room may briefly appear in multiple Spaces"
+                    );
+                }
+            }
+        }
+        Err(error) => {
+            warn!(
+                channel_id = %channel_id,
+                node,
+                item_id,
+                error = %error,
+                "Failed to enumerate prior Space nodes for room bookmark; \
+                 single-membership invariant may be violated"
+            );
+        }
+    }
+
     match state
         .deps
         .protocol

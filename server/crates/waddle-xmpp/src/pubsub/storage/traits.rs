@@ -95,6 +95,19 @@ pub trait PubSubStorage: Send + Sync + 'static {
         item_id: &str,
     ) -> Result<Option<PubSubNode>, XmppError>;
 
+    /// List the names of every node owned by `owner` that contains an item
+    /// with the given `item_id`. Distinct from `find_node_for_item` (which
+    /// returns at most one): when an item legitimately or accidentally lives
+    /// in multiple nodes, this surfaces the full set so callers can enforce
+    /// single-membership invariants (e.g., XEP-0503 channel→space pinning).
+    ///
+    /// Order of returned names is unspecified.
+    async fn list_node_names_for_item(
+        &self,
+        owner: &BareJid,
+        item_id: &str,
+    ) -> Result<Vec<String>, XmppError>;
+
     /// Update node configuration.
     async fn update_node_config(
         &self,

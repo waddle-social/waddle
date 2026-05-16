@@ -89,6 +89,14 @@ impl PubSubStorage for DatabasePubSubStorage {
         self.find_node_for_item_impl(owner, item_id).await
     }
 
+    async fn list_node_names_for_item(
+        &self,
+        owner: &BareJid,
+        item_id: &str,
+    ) -> Result<Vec<String>, XmppError> {
+        self.list_node_names_for_item_impl(owner, item_id).await
+    }
+
     async fn update_node_config(
         &self,
         owner: &BareJid,

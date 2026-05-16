@@ -232,6 +232,27 @@ impl PubSubStorage for InMemoryPubSubStorage {
         Ok(None)
     }
 
+    async fn list_node_names_for_item(
+        &self,
+        owner: &BareJid,
+        item_id: &str,
+    ) -> Result<Vec<String>, XmppError> {
+        let owner_str = owner.to_string();
+        let mut names = Vec::new();
+        for entry in self.nodes.iter() {
+            if entry.key().0 != owner_str {
+                continue;
+            }
+            let key = entry.key().clone();
+            if let Some(items) = self.items.get(&key) {
+                if items.iter().any(|i| i.id == item_id) {
+                    names.push(entry.value().node_name.clone());
+                }
+            }
+        }
+        Ok(names)
+    }
+
     async fn update_node_config(
         &self,
         owner: &BareJid,
