@@ -100,6 +100,24 @@
   }
 }
 
+/* Connection status chip — header pill that surfaces XMPP connection
+ * state (offline / reconnecting / error / reconnected). The base chip
+ * shape lives inline in ChatHeader.vue; these modifiers add tone-
+ * specific glow halos so an active connection event registers in
+ * peripheral vision without resorting to a banner. Matches the
+ * iter-54 bell badge + iter-56 collapsed-group halo pattern. */
+.chat-connection-chip-glow--warning {
+  box-shadow: 0 0 10px color-mix(in oklab, var(--warning) 30%, transparent);
+}
+
+.chat-connection-chip-glow--destructive {
+  box-shadow: 0 0 10px color-mix(in oklab, var(--destructive) 30%, transparent);
+}
+
+.chat-connection-chip-glow--primary {
+  box-shadow: 0 0 10px var(--glow-strong);
+}
+
 @media (min-width: 40rem) {
   .chat-settings-field-row {
     grid-template-columns: minmax(0, var(--chat-settings-label-width)) 1fr;
