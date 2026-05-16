@@ -10,7 +10,7 @@ const CLIENT_GENERATED_MESSAGE_ID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 /**
- * Cap for the time delta between an optimistic insert's `sentAt` and an
+ * Cap for the time delta between an existing message's `createdAt` and an
  * incoming echo's `createdAt` when reconciling via body match. Sized to
  * comfortably exceed the XEP-0198 resume window so a reconnect-replayed
  * echo is still eligible, while rejecting unrelated history replays.

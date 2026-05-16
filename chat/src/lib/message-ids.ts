@@ -40,20 +40,26 @@ function splitMessageIds(
  * rather than silently picking one — destructive callers (retractions,
  * corrections, displayed markers) must not target either candidate in
  * that case.
+ *
+ * An optional `predicate` narrows the candidate set without losing
+ * collision-safety semantics: filtered-out messages neither match nor
+ * count toward alias ambiguity, so e.g. delivery-event handlers can
+ * scope the lookup to `m.isSelf` without a non-self primary id swallowing
+ * a self message's wire-alias.
  */
 export function findMessageIndexById<T extends MessageIdCarrier>(
   messages: readonly T[],
   candidate: string | null | undefined,
+  predicate?: (message: T) => boolean,
 ): number {
   const normalized = normalizeMessageId(candidate);
   if (!normalized) return -1;
 
-  const primaryIndex = messages.findIndex((message) => message.id === normalized);
-  if (primaryIndex >= 0) return primaryIndex;
-
   let aliasIndex = -1;
   for (let i = 0; i < messages.length; i++) {
     const message = messages[i]!;
+    if (predicate && !predicate(message)) continue;
+    if (message.id === normalized) return i;
     if (!message.wireIds?.includes(normalized)) continue;
     if (aliasIndex < 0) {
       aliasIndex = i;
@@ -67,35 +73,72 @@ export function findMessageIndexById<T extends MessageIdCarrier>(
 export function findMessageById<T extends MessageIdCarrier>(
   messages: readonly T[],
   candidate: string | null | undefined,
+  predicate?: (message: T) => boolean,
 ): T | undefined {
-  const index = findMessageIndexById(messages, candidate);
+  const index = findMessageIndexById(messages, candidate, predicate);
   return index < 0 ? undefined : messages[index];
 }
 
 /**
- * Index `message` under its primary id and each wire alias. When an alias
- * is already indexed against a different message (sender-controlled
- * `origin-id` reuse with distinct content per waddle-social/waddle#484),
- * the alias is dropped from the index entirely so neither message can be
- * resolved through it. Primary ids are never dropped — they uniquely
- * identify their owning message.
+ * Collision-safe id index. Maintains separate primary-id and alias-id
+ * lookups plus a tombstone set so a later collision can never:
+ *
+ *   - drop the primary-id mapping of an earlier message (which would
+ *     break canonical lookups), or
+ *   - re-introduce an ambiguous alias mapping after the collision has
+ *     been observed.
+ *
+ * Primary ids are unique by construction (UUIDs / server stanza-ids) so
+ * they always resolve to their owning message. Aliases (`wireIds`) only
+ * resolve when no other message has claimed the same value either as a
+ * primary id or as an alias.
  */
-export function indexMessageByIds<T extends MessageIdCarrier>(
-  index: Map<string, T>,
-  message: T,
-): void {
-  index.set(message.id, message);
-  for (const alias of message.wireIds ?? []) {
-    if (alias === message.id) continue;
-    const existing = index.get(alias);
-    if (!existing) {
-      index.set(alias, message);
-      continue;
+export class MessageIdIndex<T extends MessageIdCarrier> {
+  private readonly primary = new Map<string, T>();
+  private readonly aliases = new Map<string, T>();
+  private readonly ambiguousAliases = new Set<string>();
+
+  add(message: T): void {
+    this.primary.set(message.id, message);
+    for (const alias of message.wireIds ?? []) {
+      if (alias === message.id) continue;
+      if (this.ambiguousAliases.has(alias)) {
+        this.aliases.delete(alias);
+        continue;
+      }
+      const existingPrimary = this.primary.get(alias);
+      if (existingPrimary && existingPrimary.id !== message.id) {
+        // Alias collides with another message's canonical primary id.
+        // Keep the primary lookup intact; tombstone the alias so future
+        // lookups via `alias` return only the primary owner and no
+        // ambiguous alias claimer.
+        this.ambiguousAliases.add(alias);
+        this.aliases.delete(alias);
+        continue;
+      }
+      const existingAlias = this.aliases.get(alias);
+      if (existingAlias && existingAlias.id !== message.id) {
+        // Two distinct messages claim the same alias — tombstone it so
+        // a third claimant can't sneak back into the unambiguous slot.
+        this.ambiguousAliases.add(alias);
+        this.aliases.delete(alias);
+        continue;
+      }
+      this.aliases.set(alias, message);
     }
-    if (existing.id === message.id) continue;
-    // Collision: two distinct messages claim the same wire alias. Drop the
-    // alias entirely so no caller can resolve it to either candidate.
-    index.delete(alias);
+  }
+
+  get(candidate: string | null | undefined): T | undefined {
+    const normalized = normalizeMessageId(candidate);
+    if (!normalized) return undefined;
+    const primary = this.primary.get(normalized);
+    if (primary) return primary;
+    if (this.ambiguousAliases.has(normalized)) return undefined;
+    return this.aliases.get(normalized);
+  }
+
+  has(candidate: string | null | undefined): boolean {
+    return this.get(candidate) !== undefined;
   }
 }
 

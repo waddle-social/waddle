@@ -62,8 +62,14 @@ export function applyDeliveryEventById<M extends TimelineMessage>(
   messageId: string,
   event: DeliveryEvent,
 ): M[] {
-  const index = findMessageIndexById(timeline, messageId);
-  if (index < 0 || !timeline[index]!.isSelf) return timeline;
+  // Scope the lookup to self messages: delivery events fan out per
+  // outbound stanza id and a non-self message could (e.g. via XEP-0359
+  // origin-id reuse) share that id as its own primary while the self
+  // message holds it only as a wire alias. Without the predicate the
+  // non-self primary would win and the delivery event would silently
+  // drop instead of advancing the self message's status.
+  const index = findMessageIndexById(timeline, messageId, (m) => m.isSelf);
+  if (index < 0) return timeline;
   const current = timeline[index]!;
   const nextStatus = applyDeliveryEvent(current.deliveryStatus, event);
   if (nextStatus === current.deliveryStatus) return timeline;

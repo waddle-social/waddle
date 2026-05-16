@@ -7,7 +7,7 @@ import { barePeerJid, type LiveDmMessage } from "@/lib/xmpp-client";
 import type { PersistedQueuedDmMessage } from "@/lib/outbound-queue-store";
 import {
   findMessageById,
-  indexMessageByIds,
+  MessageIdIndex,
 } from "@/lib/message-ids";
 import { compareTimelineMessages } from "@/lib/timeline-timestamps";
 
@@ -167,8 +167,8 @@ export function buildDmTimelineFromMamResults(params: {
       regular.push(msg);
     }
   }
-  const byId = new Map<string, TimelineMessage>();
-  for (const message of existing) indexMessageByIds(byId, message);
+  const byId = new MessageIdIndex<TimelineMessage>();
+  for (const message of existing) byId.add(message);
   const timeline = [...existing];
   for (const raw of regular) {
     const tm = fromLiveDmMessage(session, raw, (id) => byId.get(id));
@@ -178,11 +178,11 @@ export function buildDmTimelineFromMamResults(params: {
       if (merged !== existingMessage) {
         const index = timeline.indexOf(existingMessage);
         if (index !== -1) timeline[index] = merged;
-        indexMessageByIds(byId, merged);
+        byId.add(merged);
       }
       continue;
     }
-    indexMessageByIds(byId, tm);
+    byId.add(tm);
     timeline.push(tm);
   }
   for (const update of correctionUpdates) {
@@ -210,7 +210,7 @@ export function buildDmTimelineFromMamResults(params: {
     if (index === -1) continue;
     const retracted = retractDmTimelineMessage(target);
     timeline[index] = retracted;
-    indexMessageByIds(byId, retracted);
+    byId.add(retracted);
   }
   for (const update of reactionUpdates) {
     const target = findMessageById(timeline, update.targetId);

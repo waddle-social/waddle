@@ -174,7 +174,6 @@ export function useDmLiveMerge(deps: UseDmLiveMergeDeps) {
       : undefined;
     const existing = existingById ?? pendingSelfEcho ?? preservedSelfEcho;
     if (existing) {
-      const wasPending = existing.id !== msg.id;
       messages.value = messages.value.map((m) => {
         if (m.id !== existing.id) return m;
         const mergedIds = mergeMessageIds(m, msg.id, msg.wireIds);
@@ -190,7 +189,12 @@ export function useDmLiveMerge(deps: UseDmLiveMergeDeps) {
         }
         return updated;
       }).sort(compareTimelineMessages);
-      if (wasPending) pendingEchoClientIds.delete(existing.id);
+      // Drop every pending optimistic id this reconciliation accounted
+      // for — both the previous primary id and any pre-existing wire
+      // aliases — so a later same-body replay within the fallback window
+      // can never retarget the now-delivered row.
+      pendingEchoClientIds.delete(existing.id);
+      for (const alias of existing.wireIds ?? []) pendingEchoClientIds.delete(alias);
       return;
     }
     const peerJid = activePeerJid.value;
