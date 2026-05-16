@@ -350,12 +350,12 @@ async fn websocket_blocking_updates_presence_visibility_for_subscribed_contact()
 }
 
 #[tokio::test]
-async fn websocket_push_enable_disable_acknowledges_requests() {
+async fn websocket_push_enable_rejects_external_service_until_publish_is_wired() {
     let (_server, mut client) = setup().await;
 
     client
         .send(
-            r#"<iq xmlns="jabber:client" type="set" id="ws-push-enable"><enable xmlns="urn:xmpp:push:0" jid="push.localhost" node="web"><x xmlns="jabber:x:data" type="submit"><field var="FORM_TYPE"><value>http://jabber.org/protocol/pubsub#publish-options</value></field><field var="secret"><value>opaque-service-secret</value></field></x></enable></iq>"#,
+            r#"<iq xmlns="jabber:client" type="set" id="ws-push-enable"><enable xmlns="urn:xmpp:push:0" jid="push-provider.localhost" node="web"><x xmlns="jabber:x:data" type="submit"><field var="FORM_TYPE"><value>http://jabber.org/protocol/pubsub#publish-options</value></field><field var="secret"><value>opaque-service-secret</value></field></x></enable></iq>"#,
         )
         .await
         .expect("send push enable");
@@ -364,35 +364,24 @@ async fn websocket_push_enable_disable_acknowledges_requests() {
         .await
         .expect("push enable response");
     assert!(
-        enable_response.contains("type=\"result\"") || enable_response.contains("type='result'"),
-        "expected push enable result, got: {enable_response}"
+        enable_response.contains("type=\"error\"") || enable_response.contains("type='error'"),
+        "expected push enable error, got: {enable_response}"
     );
-
-    client
-        .send(
-            r#"<iq xmlns="jabber:client" type="set" id="ws-push-disable"><disable xmlns="urn:xmpp:push:0" jid="push.localhost" node="web"/></iq>"#,
-        )
-        .await
-        .expect("send push disable");
-    let disable_response = client
-        .recv_matching(|frame| frame.contains("ws-push-disable"))
-        .await
-        .expect("push disable response");
     assert!(
-        disable_response.contains("type=\"result\"") || disable_response.contains("type='result'"),
-        "expected push disable result, got: {disable_response}"
+        enable_response.contains("service-unavailable"),
+        "expected service-unavailable for unsupported external push service, got: {enable_response}"
     );
 
     let _ = client.close().await;
 }
 
 #[tokio::test]
-async fn websocket_push_enable_does_not_require_provider_credentials() {
+async fn websocket_push_enable_rejects_external_service_without_provider_credentials() {
     let (_server, mut client) = setup().await;
 
     client
         .send(
-            r#"<iq xmlns="jabber:client" type="set" id="ws-push-no-provider-data"><enable xmlns="urn:xmpp:push:0" jid="push.localhost" node="web"/></iq>"#,
+            r#"<iq xmlns="jabber:client" type="set" id="ws-push-no-provider-data"><enable xmlns="urn:xmpp:push:0" jid="push-provider.localhost" node="web"/></iq>"#,
         )
         .await
         .expect("send push enable");
@@ -402,8 +391,12 @@ async fn websocket_push_enable_does_not_require_provider_credentials() {
         .expect("push enable response");
 
     assert!(
-        response.contains("type=\"result\"") || response.contains("type='result'"),
-        "expected push enable result without provider credentials, got: {response}"
+        response.contains("type=\"error\"") || response.contains("type='error'"),
+        "expected push enable error for unsupported external push service, got: {response}"
+    );
+    assert!(
+        response.contains("service-unavailable"),
+        "expected service-unavailable for unsupported external push service, got: {response}"
     );
 
     let _ = client.close().await;
@@ -415,7 +408,7 @@ async fn websocket_push_enable_rejects_provider_credentials_in_publish_options()
 
     client
         .send(
-            r#"<iq xmlns="jabber:client" type="set" id="ws-push-provider-data"><enable xmlns="urn:xmpp:push:0" jid="push.localhost" node="web"><x xmlns="jabber:x:data" type="submit"><field var="FORM_TYPE"><value>http://jabber.org/protocol/pubsub#publish-options</value></field><field var="service"><value>https://updates.push.services.mozilla.com/abc</value></field><field var="device-token"><value>auth-secret</value></field><field var="device-key"><value>p256dh-key</value></field></x></enable></iq>"#,
+            r#"<iq xmlns="jabber:client" type="set" id="ws-push-provider-data"><enable xmlns="urn:xmpp:push:0" jid="push-provider.localhost" node="web"><x xmlns="jabber:x:data" type="submit"><field var="FORM_TYPE"><value>http://jabber.org/protocol/pubsub#publish-options</value></field><field var="endpoint"><value>https://updates.push.services.mozilla.com/abc</value></field><field var="p256dh"><value>p256dh-key</value></field><field var="auth"><value>auth-secret</value></field></x></enable></iq>"#,
         )
         .await
         .expect("send push enable with provider data");
@@ -429,8 +422,8 @@ async fn websocket_push_enable_rejects_provider_credentials_in_publish_options()
         "expected push enable error for provider credentials, got: {response}"
     );
     assert!(
-        response.contains("bad-request"),
-        "expected bad-request for provider credentials, got: {response}"
+        response.contains("service-unavailable"),
+        "expected service-unavailable for unsupported external push service, got: {response}"
     );
 
     let _ = client.close().await;

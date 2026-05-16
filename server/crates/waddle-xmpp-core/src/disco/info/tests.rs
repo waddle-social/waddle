@@ -142,3 +142,21 @@ fn test_spaces_service_features_include_only_supported_pubsub_features() {
         "http://jabber.org/protocol/pubsub#manage-subscriptions"
     )));
 }
+
+#[test]
+fn test_push_service_features_match_xep0357_pubsub_boundary() {
+    let identity = Identity::pubsub_push(Some("Push Service"));
+    assert_eq!(identity.category, "pubsub");
+    assert_eq!(identity.type_, "push");
+
+    let features = push_service_features();
+    assert!(features.contains(&Feature::disco_info()));
+    assert!(features.contains(&Feature::disco_items()));
+    assert!(features.contains(&Feature::pubsub()));
+    assert!(features.contains(&Feature::pubsub_publish()));
+    assert!(features.contains(&Feature::pubsub_access_whitelist()));
+    assert!(features.contains(&Feature::pubsub_publish_only_affiliation()));
+    assert!(features.contains(&Feature::push()));
+    assert!(!features.contains(&Feature::pubsub_auto_create()));
+    assert!(!features.contains(&Feature::pubsub_subscribe()));
+}

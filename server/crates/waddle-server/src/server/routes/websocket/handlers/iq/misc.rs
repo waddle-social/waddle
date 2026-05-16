@@ -10,6 +10,7 @@ pub(super) async fn handle_misc_iq(
     let payload_ns = ctx.payload_ns;
     let domain = ctx.domain;
     let muc_domain = ctx.muc_domain;
+    let push_domain = ctx.push_domain;
     let response_from = ctx.response_from;
     let response_to = ctx.response_to;
 
@@ -50,7 +51,15 @@ pub(super) async fn handle_misc_iq(
     }
 
     if is_push_enable(iq) || is_push_disable(iq) {
-        return handle_push_iq(iq, state, phase.bound_jid(), response_from, response_to).await;
+        return handle_push_iq(
+            iq,
+            state,
+            phase.bound_jid(),
+            push_domain,
+            response_from,
+            response_to,
+        )
+        .await;
     }
 
     if is_search_request(iq) {

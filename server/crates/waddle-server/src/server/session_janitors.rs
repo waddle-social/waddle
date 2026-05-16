@@ -406,6 +406,82 @@ pub(crate) fn spawn_pending_delivery_claim_janitor(websocket_state: &Arc<WebSock
     });
 }
 
+pub(crate) fn spawn_push_service_publish_job_janitor(websocket_state: &Arc<WebSocketState>) {
+    let weak_state = Arc::downgrade(websocket_state);
+    let interval_secs = std::env::var("WADDLE_PUSH_SERVICE_JOB_JANITOR_INTERVAL")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .map(|v| v.max(1))
+        .unwrap_or(10);
+    let batch_size = std::env::var("WADDLE_PUSH_SERVICE_JOB_JANITOR_BATCH")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .map(|v| v.clamp(1, 1_000))
+        .unwrap_or(128);
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
+        let mut reconciliation_cursor: Option<crate::push_service::PushRegistrationCursor> = None;
+        ticker.tick().await;
+        loop {
+            ticker.tick().await;
+            let Some(state) = weak_state.upgrade() else {
+                break;
+            };
+            match state
+                .deps
+                .protocol
+                .push_service
+                .reconcile_pending_delivery_notification_jobs(
+                    state.deps.protocol.pending_delivery_storage.as_ref(),
+                    state.deps.service_domains.push.as_str(),
+                    reconciliation_cursor.as_ref(),
+                    batch_size,
+                    batch_size,
+                )
+                .await
+            {
+                Ok(result) => {
+                    reconciliation_cursor = result.next_cursor().cloned();
+                    if result.scanned_registrations() > 0 || result.enqueued_jobs() > 0 {
+                        debug!(
+                            scanned_registrations = result.scanned_registrations(),
+                            enqueued_jobs = result.enqueued_jobs(),
+                            "Push Service publish-job janitor reconciled XEP-0160 rows to durable XEP-0357 jobs"
+                        );
+                    }
+                }
+                Err(error) => {
+                    warn!(
+                        error = %error,
+                        "Push Service publish-job janitor reconciliation failed; queued jobs remain durable"
+                    );
+                }
+            }
+            match state
+                .deps
+                .protocol
+                .push_service
+                .drain_queued_notification_publish_jobs(batch_size)
+                .await
+            {
+                Ok(results) if !results.is_empty() => {
+                    debug!(
+                        drained = results.len(),
+                        "Push Service publish-job janitor drained queued XEP-0357 jobs"
+                    );
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    warn!(
+                        error = %error,
+                        "Push Service publish-job janitor failed; queued jobs remain durable"
+                    );
+                }
+            }
+        }
+    });
+}
+
 pub(crate) fn spawn_graceful_shutdown_drain(
     websocket_state: Arc<WebSocketState>,
     drain_token: tokio_util::sync::CancellationToken,

@@ -292,39 +292,12 @@ scenario: #Scenario & {
 				name: "enable"
 				ns:   "urn:xmpp:push:0"
 				attrs: {
-					jid:  "push.\(scenario.domain)"
+					jid:  "push-provider.\(scenario.domain)"
 					node: "web"
 				}
-				children: [
-					#XmlElement & {
-						name: "x"
-						ns:   "jabber:x:data"
-						attrs: type: "submit"
-						children: [
-							#XmlElement & {
-								name: "field"
-								ns:   "jabber:x:data"
-								attrs: var: "endpoint"
-								children: [#XmlElement & {name: "value", ns: "jabber:x:data", text: "https://updates.push.services.mozilla.com/sub"}]
-							},
-							#XmlElement & {
-								name: "field"
-								ns:   "jabber:x:data"
-								attrs: var: "p256dh"
-								children: [#XmlElement & {name: "value", ns: "jabber:x:data", text: "BASE64KEY"}]
-							},
-							#XmlElement & {
-								name: "field"
-								ns:   "jabber:x:data"
-								attrs: var: "auth"
-								children: [#XmlElement & {name: "value", ns: "jabber:x:data", text: "BASE64AUTH"}]
-							},
-						]
-					},
-				]
 			}
 		},
-		#ExpectIq & {target: adminPhone, id: "cue-push-enable", type: "result"},
+		#ExpectIq & {target: adminPhone, id: "cue-push-enable", type: "error", contains: ["service-unavailable"]},
 		#SendIq & {
 			actor: adminPhone
 			type:  "set"
@@ -333,7 +306,7 @@ scenario: #Scenario & {
 				name: "disable"
 				ns:   "urn:xmpp:push:0"
 				attrs: {
-					jid:  "push.\(scenario.domain)"
+					jid:  "push-provider.\(scenario.domain)"
 					node: "web"
 				}
 			}

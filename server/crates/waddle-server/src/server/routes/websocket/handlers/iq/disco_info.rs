@@ -18,6 +18,7 @@ struct DiscoInfoRequest<'a> {
     upload_domain: &'a str,
     spaces_domain: &'a str,
     extensions_domain: &'a str,
+    push_domain: &'a str,
     response_from: Option<&'a str>,
     response_to: Option<&'a str>,
 }
@@ -100,6 +101,7 @@ pub(super) async fn handle_disco_info_iq(
         upload_domain: ctx.upload_domain,
         spaces_domain: ctx.spaces_domain,
         extensions_domain: ctx.extensions_domain,
+        push_domain: ctx.push_domain,
         response_from: ctx.response_from,
         response_to: ctx.response_to,
     };
@@ -123,6 +125,10 @@ pub(super) async fn handle_disco_info_iq(
     }
 
     if let Some(response) = services::handle_upload_disco_info(&request) {
+        return disco_info_xml(response);
+    }
+
+    if let Some(response) = services::handle_push_service_disco_info(&request, state, phase).await {
         return disco_info_xml(response);
     }
 

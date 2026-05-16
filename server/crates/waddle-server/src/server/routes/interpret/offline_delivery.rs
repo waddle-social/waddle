@@ -27,12 +27,14 @@ pub(super) async fn queue_offline_delivery(
         flushed_in_session: None,
         outbound_sequence: None,
     };
+    let pending_row_id = row.id.clone();
     match storage.insert(row).await {
         Ok(waddle_xmpp::pending_delivery::InsertOutcome::Inserted) => {
             debug!(
                 recipient = %recipient,
                 "pending_delivery row inserted"
             );
+            publish_xep0357_notifications(deps, &recipient, &pending_row_id).await;
         }
         Ok(waddle_xmpp::pending_delivery::InsertOutcome::QuotaExceeded) => {
             waddle_xmpp::prometheus::increment_pending_delivery_quota_exceeded();
@@ -134,4 +136,129 @@ pub(super) async fn queue_offline_delivery(
             );
         }
     }
+}
+
+async fn publish_xep0357_notifications(
+    deps: &Deps<'_>,
+    recipient: &BareJid,
+    pending_row_id: &waddle_xmpp::pending_delivery::PendingRowId,
+) {
+    let Some(state) = deps.web_socket_state else {
+        return;
+    };
+    let registrations = match state
+        .deps
+        .protocol
+        .push_store
+        .get_for_user(&recipient.to_string())
+        .await
+    {
+        Ok(registrations) => registrations,
+        Err(error) => {
+            warn!(
+                recipient = %recipient,
+                error = %error,
+                "XEP-0357 push registration lookup failed after pending_delivery insert"
+            );
+            return;
+        }
+    };
+    let first_party_service = state.deps.service_domains.push.as_str();
+    for registration in registrations {
+        if registration.service_jid != first_party_service {
+            debug!(
+                recipient = %recipient,
+                service = %registration.service_jid,
+                "XEP-0357 external Push Service publish is not wired in this first-party boundary"
+            );
+            continue;
+        }
+        let Some(node) = registration.node.as_deref() else {
+            warn!(
+                recipient = %recipient,
+                service = %registration.service_jid,
+                "first-party XEP-0357 registration missing node; skipping publish"
+            );
+            continue;
+        };
+        let notification =
+            minidom::Element::builder("notification", waddle_xmpp::xep::xep0357::NS_PUSH).build();
+        let item = waddle_xmpp::pubsub::PubSubItem::new(
+            Some(pending_row_id.as_str().to_string()),
+            Some(notification),
+        );
+        let iq = match build_xep0357_pubsub_publish_iq(
+            first_party_service,
+            recipient,
+            node,
+            pending_row_id,
+            &item,
+            registration.publish_options.as_ref(),
+        ) {
+            Ok(iq) => iq,
+            Err(error) => {
+                warn!(
+                    recipient = %recipient,
+                    node,
+                    error = %error,
+                    "XEP-0357 first-party Push Service notification IQ build failed"
+                );
+                continue;
+            }
+        };
+        match state
+            .deps
+            .protocol
+            .push_service
+            .publish_xep0357_pubsub_iq_from_user_server(first_party_service, &iq, recipient)
+            .await
+        {
+            Ok(result) => {
+                debug!(
+                    recipient = %recipient,
+                    node,
+                    item_id = %result.item_id(),
+                    attempted_devices = result.attempted_devices(),
+                    "XEP-0357 first-party Push Service notification published"
+                );
+            }
+            Err(error) => {
+                warn!(
+                    recipient = %recipient,
+                    node,
+                    error = %error,
+                    "XEP-0357 first-party Push Service notification publish failed"
+                );
+            }
+        }
+    }
+}
+
+fn build_xep0357_pubsub_publish_iq(
+    push_service_jid: &str,
+    recipient: &BareJid,
+    node: &str,
+    pending_row_id: &waddle_xmpp::pending_delivery::PendingRowId,
+    item: &waddle_xmpp::pubsub::PubSubItem,
+    publish_options: Option<&minidom::Element>,
+) -> Result<xmpp_parsers::iq::Iq, jid::Error> {
+    let publish = minidom::Element::builder("publish", waddle_xmpp::pubsub::NS_PUBSUB)
+        .attr("node", node)
+        .append(item.to_element(waddle_xmpp::pubsub::NS_PUBSUB))
+        .build();
+    let mut pubsub_builder =
+        minidom::Element::builder("pubsub", waddle_xmpp::pubsub::NS_PUBSUB).append(publish);
+    if let Some(publish_options) = publish_options {
+        pubsub_builder = pubsub_builder.append(
+            minidom::Element::builder("publish-options", waddle_xmpp::pubsub::NS_PUBSUB)
+                .append(publish_options.clone())
+                .build(),
+        );
+    }
+    Ok(xmpp_parsers::iq::Iq {
+        from: Some(recipient.clone().into()),
+        to: Some(push_service_jid.parse()?),
+        id: format!("push-{}", pending_row_id.as_str()),
+        payload: xmpp_parsers::iq::IqType::Set(pubsub_builder.build()),
+    })
 }

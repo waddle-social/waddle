@@ -40,6 +40,35 @@ pub trait PendingDeliveryStorage: Send + Sync {
     /// should filter on `flushed_in_session.is_none()`.
     async fn list(&self, recipient: &BareJid) -> Result<Vec<PendingRow>, PendingStorageError>;
 
+    /// List a bounded page of unclaimed rows for `recipient`, FIFO, optionally
+    /// starting after `after`.
+    ///
+    /// This is the scalable read path for background reconciliation tasks that
+    /// only need a small prefix and must not materialize a recipient's entire
+    /// offline backlog. Implementations with a real database should override
+    /// this with `WHERE flushed_in_session IS NULL ... LIMIT ?`; the default
+    /// keeps older test doubles correct by filtering [`Self::list`].
+    async fn list_unclaimed_after(
+        &self,
+        recipient: &BareJid,
+        after: Option<&PendingRowId>,
+        limit: usize,
+    ) -> Result<Vec<PendingRow>, PendingStorageError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let after = after.map(PendingRowId::as_str);
+        let mut rows = self
+            .list(recipient)
+            .await?
+            .into_iter()
+            .filter(|row| row.flushed_in_session.is_none())
+            .filter(|row| after.is_none_or(|after| row.id.as_str() > after))
+            .collect::<Vec<_>>();
+        rows.truncate(limit);
+        Ok(rows)
+    }
+
     /// Atomically claim every currently-unclaimed row for `recipient`,
     /// tagging it with `session`. Returns the rows that were claimed in
     /// FIFO order. Implements Q7c's per-user-bare-JID lock — concurrent
@@ -248,6 +277,33 @@ impl PendingDeliveryStorage for InMemoryPendingDeliveryStorage {
         Ok(guard
             .get(recipient)
             .map(|q| q.iter().cloned().collect())
+            .unwrap_or_default())
+    }
+
+    async fn list_unclaimed_after(
+        &self,
+        recipient: &BareJid,
+        after: Option<&PendingRowId>,
+        limit: usize,
+    ) -> Result<Vec<PendingRow>, PendingStorageError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let guard = self
+            .inner
+            .lock()
+            .map_err(|e| PendingStorageError::Other(e.to_string()))?;
+        let after = after.map(PendingRowId::as_str);
+        Ok(guard
+            .get(recipient)
+            .map(|q| {
+                q.iter()
+                    .filter(|row| row.flushed_in_session.is_none())
+                    .filter(|row| after.is_none_or(|after| row.id.as_str() > after))
+                    .take(limit)
+                    .cloned()
+                    .collect()
+            })
             .unwrap_or_default())
     }
 

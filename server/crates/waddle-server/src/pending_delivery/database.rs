@@ -270,6 +270,58 @@ impl PendingDeliveryStorage for DatabasePendingDeliveryStorage {
         Ok(out)
     }
 
+    async fn list_unclaimed_after(
+        &self,
+        recipient: &BareJid,
+        after: Option<&PendingRowId>,
+        limit: usize,
+    ) -> Result<Vec<PendingRow>, PendingStorageError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let mut rows = if let Some(after) = after {
+            self.query(
+                "SELECT row_id, recipient_jid, original_receipt_at, payload_kind, \
+                        archive_stanza_by, archive_stanza_id, transient_xml, \
+                        flushed_in_session, outbound_sequence \
+                 FROM pending_delivery \
+                 WHERE recipient_jid = ? \
+                   AND flushed_in_session IS NULL \
+                   AND row_id > ? \
+                 ORDER BY row_id ASC \
+                 LIMIT ?",
+                crate::db_params![
+                    recipient.to_string(),
+                    after.as_str().to_string(),
+                    limit as i64,
+                ],
+            )
+            .await?
+        } else {
+            self.query(
+                "SELECT row_id, recipient_jid, original_receipt_at, payload_kind, \
+                        archive_stanza_by, archive_stanza_id, transient_xml, \
+                        flushed_in_session, outbound_sequence \
+                 FROM pending_delivery \
+                 WHERE recipient_jid = ? \
+                   AND flushed_in_session IS NULL \
+                 ORDER BY row_id ASC \
+                 LIMIT ?",
+                crate::db_params![recipient.to_string(), limit as i64],
+            )
+            .await?
+        };
+        let mut out = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| PendingStorageError::Other(e.to_string()))?
+        {
+            out.push(decode_row(&row)?);
+        }
+        Ok(out)
+    }
+
     async fn claim_for_session(
         &self,
         recipient: &BareJid,

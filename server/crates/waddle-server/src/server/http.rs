@@ -13,7 +13,7 @@ use crate::server::routes::websocket::{
 };
 use crate::server::session_janitors::{
     spawn_auth_state_janitor, spawn_graceful_shutdown_drain, spawn_pending_delivery_claim_janitor,
-    spawn_room_dormancy_janitor, spawn_sm_expiry_janitor,
+    spawn_push_service_publish_job_janitor, spawn_room_dormancy_janitor, spawn_sm_expiry_janitor,
 };
 use crate::server::topology::bootstrap_fresh_xmpp_topology;
 use crate::server::trace::make_request_span;
@@ -21,6 +21,8 @@ use crate::server::{AppState, XmppConfig};
 use anyhow::Result;
 use axum::{routing::get, Router};
 use rustls_acme::tower::TowerHttp01ChallengeService;
+use sqlx::sqlite::SqliteConnectOptions;
+use std::str::FromStr;
 use std::sync::Arc;
 use tower_http::{
     compression::CompressionLayer,
@@ -186,6 +188,7 @@ pub(crate) async fn create_router(
 
     spawn_sm_expiry_janitor(&websocket_state);
     spawn_pending_delivery_claim_janitor(&websocket_state);
+    spawn_push_service_publish_job_janitor(&websocket_state);
     spawn_auth_state_janitor(&websocket_state);
     spawn_room_dormancy_janitor(&websocket_state);
     crate::server::state_inventory_metrics::spawn_state_inventory_publisher(&websocket_state);
@@ -343,12 +346,21 @@ async fn create_websocket_state(
     {
         warn!(error = %error, "Failed to bootstrap fresh XMPP topology");
     }
+    ensure_push_service_global_database_is_durable()?;
     let push_store: Arc<dyn waddle_xmpp::push::PushSubscriptionStore> = Arc::new(
         crate::push_registrations::DatabasePushRegistrationStore::new(
             state.db_pool.global().clone(),
         )
         .await
         .map_err(|error| anyhow::anyhow!("failed to initialize XEP-0357 storage: {error}"))?,
+    );
+    let push_service = Arc::new(
+        crate::push_service::DatabasePushServiceStore::new_with_secret_key(
+            state.db_pool.global().clone(),
+            server_config.session_key.as_bytes(),
+        )
+        .await
+        .map_err(|error| anyhow::anyhow!("failed to initialize XMPP Push Service: {error}"))?,
     );
     let notification_settings_projection = Arc::new(
         crate::notification_settings_projection::NotificationSettingsProjectionStore::new(
@@ -389,6 +401,7 @@ async fn create_websocket_state(
                 dispatcher: stanza_dispatcher,
                 pubsub_storage,
                 push_store,
+                push_service,
                 notification_settings_projection,
                 isr_token_store: waddle_xmpp::isr::create_shared_store(),
                 sm_session_registry,
@@ -595,4 +608,74 @@ async fn create_pending_delivery_storage(
         .await
         .expect("open pending_delivery storage"),
     )
+}
+
+fn ensure_push_service_global_database_is_durable() -> Result<()> {
+    if cfg!(test) {
+        return Ok(());
+    }
+    let db_runtime = crate::config::DatabaseRuntimeConfig::from_env()
+        .map_err(|error| anyhow::anyhow!("failed to load database runtime config: {error}"))?;
+    if push_service_database_is_restart_durable(&db_runtime) {
+        return Ok(());
+    }
+    if env_flag("WADDLE_XMPP_PUSH_SERVICE_ALLOW_IN_MEMORY") {
+        warn!(
+            "WADDLE_XMPP_PUSH_SERVICE_ALLOW_IN_MEMORY is set; XEP-0357 Push Service \
+             publish jobs are using in-memory SQLite and will NOT survive restart. \
+             Use only in tests."
+        );
+        return Ok(());
+    }
+    anyhow::bail!(
+        "XEP-0357 Push Service publish jobs require durable global storage. \
+         Set WADDLE_DATABASE_URL to a durable SQLite/Postgres DSN, or set \
+         WADDLE_XMPP_PUSH_SERVICE_ALLOW_IN_MEMORY=true only for tests."
+    );
+}
+
+pub(crate) fn push_service_database_is_restart_durable(
+    db_runtime: &crate::config::DatabaseRuntimeConfig,
+) -> bool {
+    match db_runtime.driver {
+        crate::db::DatabaseDriver::Postgres => true,
+        crate::db::DatabaseDriver::Sqlite => !sqlite_url_is_in_memory(&db_runtime.database_url),
+    }
+}
+
+fn sqlite_url_is_in_memory(database_url: &str) -> bool {
+    let trimmed = database_url.trim().to_ascii_lowercase();
+    if trimmed == ":memory:" || sqlite_url_query_requests_memory(&trimmed) {
+        return true;
+    }
+    SqliteConnectOptions::from_str(database_url)
+        .map(|options| {
+            options
+                .get_filename()
+                .to_string_lossy()
+                .contains("sqlx-in-memory-")
+        })
+        .unwrap_or(false)
+}
+
+fn sqlite_url_query_requests_memory(database_url: &str) -> bool {
+    let Some((_, query)) = database_url.split_once('?') else {
+        return false;
+    };
+    query.split('&').any(|param| {
+        param
+            .split_once('=')
+            .is_some_and(|(key, value)| key == "mode" && value == "memory")
+    })
+}
+
+fn env_flag(key: &str) -> bool {
+    std::env::var(key)
+        .map(|value| {
+            matches!(
+                value.to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
 }

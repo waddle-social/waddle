@@ -127,6 +127,7 @@ impl TestServer {
             .env("WADDLE_XMPP_DOMAIN", "localhost")
             .env("WADDLE_DB_DRIVER", "sqlite")
             .env("WADDLE_DATABASE_URL", &database_url)
+            .env("WADDLE_XMPP_PUSH_SERVICE_ALLOW_IN_MEMORY", "true")
             .env(
                 "WADDLE_XMPP_MAM_DATABASE_URL",
                 mam_database_url.as_deref().unwrap_or("sqlite::memory:"),

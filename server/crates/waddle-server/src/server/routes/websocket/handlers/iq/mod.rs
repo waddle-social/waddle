@@ -8,8 +8,8 @@ use waddle_xmpp::{
     disco::{
         build_disco_info_response, build_disco_info_response_with_extensions,
         build_disco_items_response, muc_room_features, parse_disco_info_query,
-        parse_disco_items_query, spaces_service_features, upload_service_features, DiscoItem,
-        Feature, Identity,
+        parse_disco_items_query, push_service_features, spaces_service_features,
+        upload_service_features, DiscoItem, Feature, Identity,
     },
     inbox::runtime::filter_query,
     isr::{build_isr_token_error, build_isr_token_result, is_isr_token_request, IsrToken, ISR_NS},
@@ -89,6 +89,7 @@ mod pubsub_admin;
 mod pubsub_dispatch;
 mod pubsub_helpers;
 mod push;
+mod push_service_iq;
 mod roster;
 mod sans_io;
 mod search;
@@ -140,6 +141,7 @@ pub(super) use errors::{
 use misc::handle_misc_iq;
 use muc_admin::handle_muc_admin_iq;
 use push::handle_push_iq;
+use push_service_iq::handle_push_service_iq;
 use roster::handle_roster_iq;
 use sans_io::handle_sans_io_iq;
 use search::{handle_channel_search_iq, handle_user_search_iq};
@@ -190,6 +192,7 @@ pub(super) struct IqHandlerContext<'a> {
     pub(super) upload_domain: &'a str,
     pub(super) spaces_domain: &'a str,
     pub(super) extensions_domain: &'a str,
+    pub(super) push_domain: &'a str,
     pub(super) response_from: Option<&'a str>,
     pub(super) response_to: Option<&'a str>,
 }
@@ -206,6 +209,7 @@ pub async fn handle_iq_with_conn_state(
     let spaces_domain = state.deps.service_domains.spaces.clone();
     let upload_domain = state.deps.service_domains.upload.clone();
     let extensions_domain = state.deps.service_domains.extensions.clone();
+    let push_domain = state.deps.service_domains.push.clone();
 
     let id = iq.id.clone();
     let to = iq.to.as_ref().map(|jid| jid.to_string());
@@ -282,6 +286,7 @@ pub async fn handle_iq_with_conn_state(
         upload_domain: upload_domain.as_str(),
         spaces_domain: spaces_domain.as_str(),
         extensions_domain: extensions_domain.as_str(),
+        push_domain: push_domain.as_str(),
         response_from,
         response_to,
     };
@@ -303,9 +308,14 @@ pub async fn handle_iq_with_conn_state(
         return disco_info_response;
     }
 
-    let disco_items_response = handle_disco_items_iq(handler_ctx, state).await;
+    let disco_items_response = handle_disco_items_iq(handler_ctx, state, phase).await;
     if !disco_items_response.is_empty() {
         return disco_items_response;
+    }
+
+    let push_service_response = handle_push_service_iq(handler_ctx, state, phase).await;
+    if !push_service_response.is_empty() {
+        return push_service_response;
     }
 
     if payload_ns == "http://jabber.org/protocol/commands" {

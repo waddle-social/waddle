@@ -109,6 +109,7 @@ pub enum PubSubRequest {
     Publish {
         node: String,
         item: PubSubItem,
+        publish_options: Option<Box<Element>>,
     },
     Retract {
         node: String,
@@ -263,7 +264,16 @@ pub fn parse_pubsub_iq(iq: &Iq) -> CoreResult<PubSubRequest> {
             .get_child("item", NS_PUBSUB)
             .map(PubSubItem::from_element)
             .unwrap_or_else(|| PubSubItem::new(None, None));
-        return Ok(PubSubRequest::Publish { node, item });
+        let publish_options = pubsub_elem
+            .get_child("publish-options", NS_PUBSUB)
+            .and_then(|options| options.get_child("x", "jabber:x:data"))
+            .cloned()
+            .map(Box::new);
+        return Ok(PubSubRequest::Publish {
+            node,
+            item,
+            publish_options,
+        });
     }
 
     if let Some(retract) = pubsub_elem.get_child("retract", NS_PUBSUB) {

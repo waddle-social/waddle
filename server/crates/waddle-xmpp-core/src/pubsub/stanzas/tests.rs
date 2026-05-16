@@ -20,10 +20,58 @@ fn parse_publish_request() {
     let request = parse_pubsub_iq(&iq).expect("should parse");
 
     match request {
-        PubSubRequest::Publish { node, item } => {
+        PubSubRequest::Publish {
+            node,
+            item,
+            publish_options,
+        } => {
             assert_eq!(node, "urn:xmpp:bookmarks:1");
             assert_eq!(item.id.as_deref(), Some("test@conference.example.org"));
             assert!(item.payload.is_some());
+            assert!(publish_options.is_none());
+        }
+        other => panic!("Expected publish request, got {other:?}"),
+    }
+}
+
+#[test]
+fn parse_publish_request_with_publish_options() {
+    let xml = r#"<iq xmlns='jabber:client' type='set' from='example.com' to='push.example.com' id='push1'>
+        <pubsub xmlns='http://jabber.org/protocol/pubsub'>
+            <publish node='push-node-1'>
+                <item id='pending-row-1'>
+                    <notification xmlns='urn:xmpp:push:0'/>
+                </item>
+            </publish>
+            <publish-options>
+                <x xmlns='jabber:x:data' type='submit'>
+                    <field var='FORM_TYPE' type='hidden'>
+                        <value>http://jabber.org/protocol/pubsub#publish-options</value>
+                    </field>
+                    <field var='secret'>
+                        <value>server-secret</value>
+                    </field>
+                </x>
+            </publish-options>
+        </pubsub>
+    </iq>"#;
+
+    let elem: Element = xml.parse().expect("valid XML");
+    let iq = Iq::try_from(elem).expect("valid IQ");
+    let request = parse_pubsub_iq(&iq).expect("should parse");
+
+    match request {
+        PubSubRequest::Publish {
+            node,
+            item,
+            publish_options,
+        } => {
+            assert_eq!(node, "push-node-1");
+            assert_eq!(item.id.as_deref(), Some("pending-row-1"));
+            let publish_options = publish_options.expect("publish-options form");
+            assert_eq!(publish_options.name(), "x");
+            assert_eq!(publish_options.ns(), "jabber:x:data");
+            assert!(String::from(publish_options.as_ref()).contains("server-secret"));
         }
         other => panic!("Expected publish request, got {other:?}"),
     }

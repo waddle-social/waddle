@@ -122,6 +122,10 @@ impl Feature {
         Self::new("urn:xmpp:http:upload:0")
     }
 
+    pub fn push() -> Self {
+        Self::new("urn:xmpp:push:0")
+    }
+
     pub fn socks5_bytestreams() -> Self {
         Self::new("http://jabber.org/protocol/bytestreams")
     }
@@ -256,6 +260,10 @@ impl Feature {
 
     pub fn pubsub_access_whitelist() -> Self {
         Self::new("http://jabber.org/protocol/pubsub#access-whitelist")
+    }
+
+    pub fn pubsub_publish_only_affiliation() -> Self {
+        Self::new("http://jabber.org/protocol/pubsub#publish-only-affiliation")
     }
 
     pub fn pubsub_access_presence() -> Self {

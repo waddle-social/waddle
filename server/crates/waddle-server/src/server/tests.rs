@@ -286,6 +286,37 @@ fn test_xmpp_config_falls_back_to_main_database_url() {
     std::env::remove_var("WADDLE_DATABASE_URL");
 }
 
+#[test]
+fn push_service_durability_guard_rejects_sqlite_memory_urls() {
+    let runtime = |database_url: &str| crate::config::DatabaseRuntimeConfig {
+        driver: crate::db::DatabaseDriver::Sqlite,
+        database_url: database_url.to_string(),
+    };
+
+    for database_url in [
+        "sqlite::memory:",
+        "sqlite::memory:?cache=shared",
+        "sqlite://:memory:",
+        "sqlite://?mode=memory",
+        "sqlite://?mode=memory&cache=private",
+        ":memory:",
+    ] {
+        assert!(
+            !http::push_service_database_is_restart_durable(&runtime(database_url)),
+            "expected {database_url} to be rejected for durable push publish jobs"
+        );
+    }
+    assert!(http::push_service_database_is_restart_durable(&runtime(
+        "sqlite:///tmp/waddle-push.sqlite3?mode=rwc"
+    )));
+    assert!(http::push_service_database_is_restart_durable(
+        &crate::config::DatabaseRuntimeConfig {
+            driver: crate::db::DatabaseDriver::Postgres,
+            database_url: "postgres://postgres:postgres@localhost/waddle".to_string(),
+        }
+    ));
+}
+
 #[tokio::test]
 async fn test_health_endpoint() {
     let app = test_app().await;
