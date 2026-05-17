@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, onMounted, onUnmounted, ref } from "vue";
 import HomeDashboard from "@/components/chat/HomeDashboard.vue";
 import FeedPane from "@/components/community/FeedPane.vue";
 import StoriesPane from "@/components/community/StoriesPane.vue";
@@ -15,6 +15,8 @@ import TopicsPanel from "@/components/chat/TopicsPanel.vue";
 import PinnedPanel from "@/components/chat/PinnedPanel.vue";
 import UserSettingsPage from "@/components/chat/UserSettingsPage.vue";
 import WaddlesSidebar from "@/components/chat/WaddlesSidebar.vue";
+import AdminView from "@/components/admin/AdminView.vue";
+import { parseChatLocation, type AdminPanel } from "@/shell/navigation";
 import { buildHomeDashboardProps } from "@/home/dashboard-props";
 import type { ChatAppController } from "@/shell/chat-app-controller";
 import type { DiscoveredExtensionRoute } from "@/lib/xmpp/extension-commands";
@@ -182,10 +184,52 @@ function onSelectChannelFromSidebar(id: string) {
   ui.activeCommunitySurface.value = null;
   selectChannel(id);
 }
+
+// ── Admin route plumbing (V1) ───────────────────────────────────────
+// `parseChatLocation` already understands `/admin/<panel>`, but the
+// admin view is rendered straight out of `ChatReadyShell` rather than
+// the chat workspace, so we hold the panel slug separately and react
+// to history-driven changes.
+function parseAdminPanelFromLocation(): AdminPanel {
+  if (typeof window === "undefined") return "users";
+  const parsed = parseChatLocation(window.location.pathname, window.location.search);
+  return parsed.adminPanel ?? "users";
+}
+const adminPanelRef = ref<AdminPanel>(parseAdminPanelFromLocation());
+const adminPanelFromUrl = computed<AdminPanel>(() => adminPanelRef.value);
+function refreshAdminPanelFromUrl() {
+  adminPanelRef.value = parseAdminPanelFromLocation();
+}
+function onAdminNavigate(path: string) {
+  if (typeof window === "undefined") return;
+  if (window.location.pathname + window.location.search !== path) {
+    window.history.pushState({ waddlePage: "admin" }, "", path);
+    refreshAdminPanelFromUrl();
+  }
+}
+function onAdminBack() {
+  if (typeof window === "undefined") return;
+  const state = window.history.state as { waddlePage?: string } | null;
+  if (state?.waddlePage === "admin") {
+    window.history.back();
+  } else {
+    window.history.pushState({ waddlePage: "dashboard" }, "", "/");
+    window.dispatchEvent(new PopStateEvent("popstate"));
+  }
+}
+onMounted(() => window.addEventListener("popstate", refreshAdminPanelFromUrl));
+onUnmounted(() => window.removeEventListener("popstate", refreshAdminPanelFromUrl));
 </script>
 
 <template>
-  <div class="chat-app-shell">
+  <AdminView
+    v-if="ui.activePage.value === 'admin'"
+    :xmpp-client="xmppClient"
+    :active-panel="adminPanelFromUrl"
+    @navigate="onAdminNavigate"
+    @back="onAdminBack"
+  />
+  <div v-else class="chat-app-shell">
     <ChatMobileDrawers :controller="controller" />
 
     <!-- Desktop layout -->

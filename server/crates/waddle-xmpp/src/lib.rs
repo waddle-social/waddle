@@ -22,6 +22,7 @@
 //! - XEP-0280 (Message Carbons)
 //! - XEP-0313 (Message Archive Management)
 
+pub mod admin;
 pub mod auth;
 pub mod c2s;
 pub mod carbons;

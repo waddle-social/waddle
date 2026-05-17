@@ -4,6 +4,15 @@
 export class WaddleClient {
     free(): void;
     [Symbol.dispose](): void;
+    /**
+     * Call the `urn:xmpp:waddle:admin:users:list:0` ad-hoc command
+     * against the user-bearing server domain and return a typed
+     * page of matching users. Errors out (rejecting the returned
+     * Promise) if the server replies with a stanza error — the
+     * chat client interprets `<forbidden/>` as "not the community
+     * owner" and falls back to the empty-state screen.
+     */
+    admin_users_list(prefix?: string | null, page_size?: number | null, after_cursor?: string | null): Promise<any>;
     connect(): Promise<any>;
     disable_push_notifications(service_jid: string, node: string): Promise<any>;
     disconnect(): Promise<any>;
@@ -61,6 +70,15 @@ export class WaddleClient {
     get_resume_state(): any;
     get_resume_state_handle(): WaddleResumeState | undefined;
     get_server_version(): Promise<any>;
+    /**
+     * `true` iff the authenticated user is the community owner — i.e.
+     * the server accepts a probe of the admin Users command. Any
+     * stanza error (including `<forbidden/>`) resolves to `false`;
+     * the wasm boundary doesn't try to distinguish "not owner" from
+     * "server error" because the admin panel's empty state is the
+     * right fallback in either case.
+     */
+    is_community_owner(): Promise<any>;
     join_room(room_jid: string, nick: string): Promise<any>;
     join_room_without_history(room_jid: string, nick: string): Promise<any>;
     leave_room(room_jid: string, nick: string): Promise<any>;

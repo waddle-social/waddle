@@ -1265,6 +1265,15 @@ export function useChatAppController(giphyApiKey: string) {
   function onPopState() {
     const route = parseChatLocation(window.location.pathname, window.location.search);
     ui.activePage.value = route.page === "extension" ? "chat" : route.page;
+    if (route.page === "admin") {
+      // Admin view owns the entire workspace; clear DM/thread state so
+      // a popstate back to /admin doesn't leave a stale right panel
+      // mounted underneath.
+      activeThreadTargetMessageId.value = null;
+      activeThreadStack.value = [];
+      activeExtensionRouteKey.value = null;
+      return;
+    }
     if (route.page === "settings") {
       activeThreadTargetMessageId.value = null;
       activeThreadStack.value = [];
@@ -1296,6 +1305,12 @@ export function useChatAppController(giphyApiKey: string) {
     // #414: sync the pin panel toggle with `?pinned=1`. Channel routes,
     // including extension panels, can keep pinned collapsed beside another panel.
     ui.showPinnedPanel.value = route.pinnedPanelOpen && (route.page === "chat" || route.page === "extension") && !route.dmUsername;
+    if (route.page === "admin") {
+      activeThreadTargetMessageId.value = null;
+      activeThreadStack.value = [];
+      activeExtensionRouteKey.value = null;
+      return;
+    }
     if (route.page === "settings") {
       activeThreadTargetMessageId.value = null;
       activeThreadStack.value = [];
