@@ -1,7 +1,7 @@
 import type { ChannelSummary } from "@/lib/chat-types";
 
 interface RouteState {
-  page: "dashboard" | "chat" | "settings" | "extension";
+  page: "dashboard" | "chat" | "settings" | "extension" | "admin";
   channelSlug: string | null;
   dmUsername: string | null;
   extensionPluginId: string | null;
@@ -10,9 +10,37 @@ interface RouteState {
   threadStack: string[];
   /** #414: pinned-messages right-rail panel (`?pinned=1`). */
   pinnedPanelOpen: boolean;
+  /**
+   * Active admin panel slug when `page === "admin"`. V1 only
+   * implements "users"; the other slugs (spaces / audit / push-health
+   * / settings) parse to the same value so the layout can render a
+   * stub-mode placeholder without a separate route table.
+   */
+  adminPanel: AdminPanel | null;
 }
 
+/** Slugs the admin layout understands. V1 only implements `users`. */
+export type AdminPanel = "users" | "spaces" | "audit" | "push-health" | "settings";
+
 const SETTINGS_PATH = "/settings";
+const ADMIN_PATH_PREFIX = "/admin";
+const DEFAULT_ADMIN_PANEL: AdminPanel = "users";
+
+function parseAdminPanel(slug: string | undefined): AdminPanel | null {
+  switch (slug) {
+    case undefined:
+    case "":
+      return DEFAULT_ADMIN_PANEL;
+    case "users":
+    case "spaces":
+    case "audit":
+    case "push-health":
+    case "settings":
+      return slug;
+    default:
+      return null;
+  }
+}
 
 function parseThreadStack(search: string | null | undefined): string[] {
   if (!search) return [];
@@ -67,6 +95,7 @@ export function parseChatLocation(pathname: string, search?: string): RouteState
       extensionRouteId: null,
       threadStack: [],
       pinnedPanelOpen: false,
+      adminPanel: null,
     };
   }
   if (pathname === SETTINGS_PATH) {
@@ -78,6 +107,20 @@ export function parseChatLocation(pathname: string, search?: string): RouteState
       extensionRouteId: null,
       threadStack: [],
       pinnedPanelOpen: false,
+      adminPanel: null,
+    };
+  }
+  if (segments[0] === "admin") {
+    const panel = parseAdminPanel(segments[1]);
+    return {
+      page: "admin",
+      channelSlug: null,
+      dmUsername: null,
+      extensionPluginId: null,
+      extensionRouteId: null,
+      threadStack: [],
+      pinnedPanelOpen: false,
+      adminPanel: panel,
     };
   }
   if (segments[0] === "r") {
@@ -90,6 +133,7 @@ export function parseChatLocation(pathname: string, search?: string): RouteState
         extensionRouteId: decodeURIComponent(segments[4]),
         threadStack,
         pinnedPanelOpen,
+        adminPanel: null,
       };
     }
     return {
@@ -100,6 +144,7 @@ export function parseChatLocation(pathname: string, search?: string): RouteState
       extensionRouteId: null,
       threadStack,
       pinnedPanelOpen,
+      adminPanel: null,
     };
   }
   if (segments[0] === "dm") {
@@ -111,6 +156,7 @@ export function parseChatLocation(pathname: string, search?: string): RouteState
       extensionRouteId: null,
       threadStack,
       pinnedPanelOpen: false,
+      adminPanel: null,
     };
   }
   return {
@@ -121,6 +167,7 @@ export function parseChatLocation(pathname: string, search?: string): RouteState
     extensionRouteId: null,
     threadStack: [],
     pinnedPanelOpen: false,
+    adminPanel: null,
   };
 }
 
@@ -163,6 +210,10 @@ export function buildDirectMessagePath(username: string | null, threadStack?: st
 
 export function buildChatSettingsPath(): string {
   return SETTINGS_PATH;
+}
+
+export function buildAdminPath(panel: AdminPanel = DEFAULT_ADMIN_PANEL): string {
+  return `${ADMIN_PATH_PREFIX}/${panel}`;
 }
 
 export function pushChannelRoute(

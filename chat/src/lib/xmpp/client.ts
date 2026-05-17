@@ -178,7 +178,29 @@ type WasmModule = typeof import("@waddle/xmpp-client-wasm");
 type WasmClient = import("@waddle/xmpp-client-wasm").WaddleClient & {
   discover_extension_routes?: () => Promise<unknown>;
   fetch_extension_route_items?: (route: unknown, roomJid: string) => Promise<unknown>;
+  admin_users_list?: (
+    prefix: string | null,
+    pageSize: number | null,
+    afterCursor: string | null,
+  ) => Promise<AdminUsersPage>;
+  is_community_owner?: () => Promise<boolean>;
 };
+
+/**
+ * Page returned by the V1 admin Users panel back-end. Typed mirror
+ * of the `WaddleAdminUsersPage` struct on the wasm side so the chat
+ * layer never has to touch raw JSON. `nextCursor` is `null` when
+ * the page is the final one.
+ */
+export interface AdminUserEntry {
+  jid: string;
+  display_name?: string | null;
+  has_owner_hat: boolean;
+}
+export interface AdminUsersPage {
+  entries: AdminUserEntry[];
+  next_cursor?: string | null;
+}
 
 type CompatEmitter = {
   on?: (event: string, handler: (...args: any[]) => void) => void;
@@ -1234,6 +1256,33 @@ export class BrowserXmppClient {
     return members;
   }
   async setRoomAffiliation(channelId: string, jid: string, affiliation: MemberSummary["affiliation"]): Promise<void> { const xmpp = await this.requireConnectedXmpp(); await xmpp.set_room_affiliation?.(this.roomJidForChannel(channelId), jid, affiliation === "none" ? "none" : affiliation); }
+  /**
+   * Probe the `urn:xmpp:waddle:admin:users:list:0` ad-hoc command to
+   * decide whether the authenticated user is the community owner. The
+   * underlying wasm binding swallows stanza errors and returns `false`
+   * — that includes `<forbidden/>` (not an owner) and transient
+   * failures (server-side errors). The admin route treats `false` as
+   * "show the empty state" in both cases.
+   */
+  async isCommunityOwner(): Promise<boolean> {
+    const xmpp = await this.requireConnectedXmpp();
+    if (!xmpp.is_community_owner) return false;
+    try { return await xmpp.is_community_owner(); } catch { return false; }
+  }
+  /**
+   * Call the admin Users panel back-end and return one page of users.
+   * `prefix` is case-insensitive; `pageSize` is clamped server-side to
+   * 1..200 (default 50); `afterCursor` is an opaque value returned by
+   * a previous call. Rejects on stanza error so the UI can render an
+   * explicit failure state.
+   */
+  async adminUsersList(opts: { prefix?: string | null; pageSize?: number | null; afterCursor?: string | null } = {}): Promise<AdminUsersPage> {
+    const xmpp = await this.requireConnectedXmpp();
+    if (!xmpp.admin_users_list) {
+      throw new Error("admin_users_list binding missing — server does not support admin V1");
+    }
+    return await xmpp.admin_users_list(opts.prefix ?? null, opts.pageSize ?? null, opts.afterCursor ?? null);
+  }
   async searchUsers(query: string): Promise<UserSearchResult[]> { if (!query.trim()) return []; const xmpp = await this.requireConnectedXmpp(); const users = await xmpp.search_users?.(query) as WasmUserSearchResult[]; return (users ?? []).map((user) => ({ id: user.jid, jid: user.jid, username: user.username ?? user.nick ?? user.jid.split("@")[0] ?? user.jid, display_name: user.display_name ?? user.name ?? null, avatar_url: null })); }
   async fetchUserAvatar(jid: string): Promise<string | null> {
     const xmpp = await this.requireConnectedXmpp();

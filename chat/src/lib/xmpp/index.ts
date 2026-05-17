@@ -2,6 +2,7 @@ export {
   BrowserXmppClient,
   RoomMemberListUnavailableError,
 } from "./client";
+export type { AdminUserEntry, AdminUsersPage } from "./client";
 export {
   barePeerJid,
   jidDomain,
