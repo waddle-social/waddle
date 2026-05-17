@@ -272,6 +272,20 @@ export interface WasmPepProfile {
   } | null;
 }
 
+/**
+ * XEP-0292 vCard4 payload exchanged over the wasm boundary. Mirrors the Rust
+ * `WaddleVCard4` struct: every property is optional, and the `fn` field uses
+ * the XEP-0292 spelling rather than `fullName` so the serde rename on the Rust
+ * side stays a 1:1 wire mapping.
+ */
+export interface WasmVCard4 {
+  fn?: string;
+  nickname?: string;
+  pronouns?: string;
+  note?: string;
+  url?: string;
+}
+
 /** Options for send_groupchat_message / send_chat_message. */
 export interface WasmSendOptions {
   stanza_id?: string;

@@ -9,3 +9,4 @@ pub mod encrypted_file;
 pub mod fallback;
 pub mod reply;
 pub mod thread;
+pub mod xep0292;

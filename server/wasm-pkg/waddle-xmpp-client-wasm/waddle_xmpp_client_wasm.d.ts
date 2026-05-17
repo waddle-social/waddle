@@ -50,6 +50,7 @@ export class WaddleClient {
      */
     fetch_room_pins(room_jid: string): Promise<any>;
     fetch_user_pep_profile(jid: string): Promise<any>;
+    fetch_vcard4(jid: string): Promise<any>;
     get_resume_state(): any;
     get_resume_state_handle(): WaddleResumeState | undefined;
     get_server_version(): Promise<any>;
@@ -71,6 +72,7 @@ export class WaddleClient {
     publish_activity(activity_json: any): Promise<any>;
     publish_mood(mood_json: any): Promise<any>;
     publish_tune(tune_json: any): Promise<any>;
+    publish_vcard4(vcard_json: any): Promise<any>;
     request_avatar(jid: string): Promise<any>;
     request_upload_slot(service_jid: string, filename: string, size: bigint, content_type: string): Promise<any>;
     retract_activity(): Promise<any>;
