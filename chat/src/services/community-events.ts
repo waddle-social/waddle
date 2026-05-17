@@ -51,6 +51,23 @@ export function useCommunityEvents(
     return sortEventsUpcomingFirst(expanded);
   });
 
+  /**
+   * Look up the unexpanded master event behind an expanded instance
+   * (or a non-recurring event). Returns `null` when the uid isn't
+   * a known master — happens for transient state during a refresh.
+   *
+   * Callers use this to recover the real pubsub item id (so edit /
+   * cancel target the master rather than a synthetic instance id)
+   * and to read the master's RRULE / EXDATEs.
+   */
+  function findMaster(uid: string): CommunityEvent | null {
+    const merged = groupEventsWithRsvps(events.value);
+    for (const group of groupEventsWithOverrides(merged)) {
+      if (group.master.uid === uid) return group.master;
+    }
+    return null;
+  }
+
   async function refresh(): Promise<boolean> {
     const client = xmppClient.value;
     const jid = options.communityJid.value;
@@ -144,6 +161,50 @@ export function useCommunityEvents(
   }
 
   /**
+   * Cancel a single occurrence of a recurring event by appending the
+   * occurrence's DTSTART to the master's EXDATEs and re-publishing
+   * the master in place. Falls back to a full series retract when
+   * the master isn't recurring.
+   */
+  async function cancelInstance(
+    masterUid: string,
+    instanceDtstartMs: number,
+  ): Promise<boolean> {
+    const master = findMaster(masterUid);
+    if (!master) return false;
+    if (!master.rrule) {
+      return cancel(master.id);
+    }
+    const client = xmppClient.value;
+    const jid = options.communityJid.value;
+    if (!client || !jid) return false;
+    const existing = new Set(master.exdatesMs ?? []);
+    existing.add(instanceDtstartMs);
+    const nextExdatesMs = [...existing].sort((a, b) => a - b);
+    isPosting.value = true;
+    error.value = null;
+    try {
+      const updated = await client.updateCommunityEvent(jid, master.id, {
+        summary: master.summary,
+        ...(master.description ? { description: master.description } : {}),
+        ...(master.location ? { location: master.location } : {}),
+        ...(master.organizer ? { organizer: master.organizer } : {}),
+        ...(typeof master.dtstartMs === "number" ? { dtstartMs: master.dtstartMs } : {}),
+        ...(typeof master.dtendMs === "number" ? { dtendMs: master.dtendMs } : {}),
+        ...(master.rrule ? { rrule: master.rrule } : {}),
+        exdatesMs: nextExdatesMs,
+      });
+      events.value = events.value.map((e) => (e.id === master.id ? updated : e));
+      return true;
+    } catch (err) {
+      error.value = err instanceof Error ? err.message : String(err);
+      return false;
+    } finally {
+      isPosting.value = false;
+    }
+  }
+
+  /**
    * Publish (or update) this session's RSVP for an event. Server
    * persists a sibling pubsub item; we optimistically fold the new
    * attendee into the local master and rely on refresh() for the
@@ -196,6 +257,8 @@ export function useCommunityEvents(
     post,
     edit,
     cancel,
+    cancelInstance,
+    findMaster,
     rsvp,
     clear,
   };

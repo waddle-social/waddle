@@ -293,10 +293,12 @@ function onSelectChannelFromSidebar(id: string) {
         :error="communityEvents.error.value"
         :can-post="!!connectionStore.session"
         :self-jid="connectionStore.session?.jid ?? null"
+        :find-master="communityEvents.findMaster"
         @refresh="communityEvents.refresh()"
         @post="(input) => communityEvents.post(input)"
         @edit="(id, input) => communityEvents.edit(id, input)"
-        @cancel-event="(event) => communityEvents.cancel(event.id)"
+        @cancel-series="(id) => communityEvents.cancel(id)"
+        @cancel-instance="(uid, dtstartMs) => communityEvents.cancelInstance(uid, dtstartMs)"
         @rsvp="(event, partstat) => onCommunityRsvp(event, partstat)"
         @open-nav="ui.showMobileNav.value = true"
       />
