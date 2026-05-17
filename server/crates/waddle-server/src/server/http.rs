@@ -336,6 +336,18 @@ async fn create_websocket_state(
         Arc::clone(&state),
     )
     .await;
+    // Admin V1 ad-hoc commands (`urn:xmpp:waddle:admin:*`). Registered
+    // alongside the extension commands so all `<command>` IQs route
+    // through the same `CommandRegistry`. The admin commands rely on
+    // [`crate::admin::is_community_owner`] for ACL; the registry has
+    // no opinion on authorization, so refusing non-owners is the
+    // handler's job.
+    crate::admin::users_list::register(
+        &websocket_command_registry,
+        Arc::clone(&state),
+        xmpp_domain.clone(),
+    )
+    .await;
     if let Err(error) = bootstrap_fresh_xmpp_topology(
         &state,
         Arc::clone(&pubsub_storage),

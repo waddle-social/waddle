@@ -20,5 +20,12 @@ pub fn parse_disco_info_query(iq: &Iq) -> Result<DiscoInfoQuery, XmppError> {
 pub fn server_features() -> Vec<Feature> {
     let mut features = waddle_xmpp_core::disco::info::server_features();
     features.push(Feature::new(crate::xep::xep0430::NS_INBOX));
+    // Admin V1 — XEP-0050 ad-hoc command for listing users with a
+    // prefix filter (owner-gated). The XEP-0050 node identifier
+    // doubles as the disco feature URI so clients can detect support
+    // without enumerating commands first; if the server doesn't ship
+    // admin, this advert is absent and the chat client's admin panel
+    // can fall back to the "Admin only" empty state.
+    features.push(Feature::new(crate::admin::NS_ADMIN_USERS_LIST));
     features
 }
