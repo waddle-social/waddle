@@ -198,6 +198,7 @@ const ADVERTISED_FEATURE_EXEMPTIONS: &[&str] = &[
     "muc_semianonymous",
     "muc_temporary",
     "muc_unmoderated",
+    "urn:waddle:admin:users:list:0",
     "urn:waddle:inbox:0",
     "urn:waddle:mam-thread:0",
 ];

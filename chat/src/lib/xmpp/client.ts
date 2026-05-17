@@ -1257,7 +1257,7 @@ export class BrowserXmppClient {
   }
   async setRoomAffiliation(channelId: string, jid: string, affiliation: MemberSummary["affiliation"]): Promise<void> { const xmpp = await this.requireConnectedXmpp(); await xmpp.set_room_affiliation?.(this.roomJidForChannel(channelId), jid, affiliation === "none" ? "none" : affiliation); }
   /**
-   * Probe the `urn:xmpp:waddle:admin:users:list:0` ad-hoc command to
+   * Probe the `urn:waddle:admin:users:list:0` ad-hoc command to
    * decide whether the authenticated user is the community owner. The
    * underlying wasm binding swallows stanza errors and returns `false`
    * — that includes `<forbidden/>` (not an owner) and transient

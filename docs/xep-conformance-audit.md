@@ -147,11 +147,11 @@ Tracked separately from XEPs because they are intentionally Waddle-specific
 and not derived from any XEP. Each entry must justify why no XEP shape
 applies and what the wire commitment is.
 
-### `urn:xmpp:waddle:admin:users:list:0` — Admin V1 Users panel
+### `urn:waddle:admin:users:list:0` — Admin V1 Users panel
 
 - **Carrier**: XEP-0050 ad-hoc command (`<command>` IQ-set against the
   server domain).
-- **Args** (`<x type='submit'>`, `FORM_TYPE = urn:xmpp:waddle:admin:users:list:0`):
+- **Args** (`<x type='submit'>`, `FORM_TYPE = urn:waddle:admin:users:list:0`):
   `prefix` (text-single, optional), `page_size` (text-single, default 50,
   capped 200), `after_cursor` (text-single, optional).
 - **Result** (`<x type='result'>`, same `FORM_TYPE`): reported columns
@@ -159,7 +159,7 @@ applies and what the wire commitment is.
   optional top-level `next_cursor` text-single.
 - **ACL**: server refuses non-owners (`server_owner_jids`) with
   `<forbidden/>`.
-- **Advert**: `Feature::new("urn:xmpp:waddle:admin:users:list:0")` on
+- **Advert**: `Feature::new("urn:waddle:admin:users:list:0")` on
   `server_features()` so clients can detect support without enumerating
   commands.
 - **Why a Waddle namespace?** No XEP defines "list users with prefix

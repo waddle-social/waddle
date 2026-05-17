@@ -6,11 +6,11 @@
 //! - **No REST**: admin actions flow over XMPP, specifically XEP-0050.
 //! - **Owner gate**: the helper [`is_community_owner`] is the single
 //!   source of truth for "may this JID see admin surfaces?" — the
-//!   `urn:xmpp:waddle:admin:*` command handlers MUST call it before
+//!   `urn:waddle:admin:*` command handlers MUST call it before
 //!   doing anything else and refuse non-owners with `<forbidden/>`.
 //! - **Custom namespace**: no XEP defines "list users with prefix
 //!   search," so the V1 command lives under
-//!   `urn:xmpp:waddle:admin:users:list:0` per the
+//!   `urn:waddle:admin:users:list:0` per the
 //!   "Waddle-namespace only when needed" rule.
 //!
 //! "Community owner" maps onto the server-owner JID set configured

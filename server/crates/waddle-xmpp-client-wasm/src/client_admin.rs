@@ -10,7 +10,7 @@
 //!
 //! Both functions issue an XEP-0050 `iq type='set'` with a
 //! `<command xmlns='http://jabber.org/protocol/commands'
-//! node='urn:xmpp:waddle:admin:users:list:0' action='execute'>`
+//! node='urn:waddle:admin:users:list:0' action='execute'>`
 //! payload to the user-bearing server domain. The return shape is a
 //! typed Serde struct projected into a JS value via
 //! `serde_wasm_bindgen` — no JSON-blob strings cross the boundary
@@ -18,7 +18,7 @@
 
 use super::*;
 
-const NS_ADMIN_USERS_LIST: &str = "urn:xmpp:waddle:admin:users:list:0";
+const NS_ADMIN_USERS_LIST: &str = "urn:waddle:admin:users:list:0";
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct WaddleAdminUserEntry {
@@ -35,7 +35,7 @@ pub struct WaddleAdminUsersPage {
 
 #[wasm_bindgen]
 impl WaddleClient {
-    /// Call the `urn:xmpp:waddle:admin:users:list:0` ad-hoc command
+    /// Call the `urn:waddle:admin:users:list:0` ad-hoc command
     /// against the user-bearing server domain and return a typed
     /// page of matching users. Errors out (rejecting the returned
     /// Promise) if the server replies with a stanza error — the

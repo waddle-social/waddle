@@ -336,7 +336,7 @@ async fn create_websocket_state(
         Arc::clone(&state),
     )
     .await;
-    // Admin V1 ad-hoc commands (`urn:xmpp:waddle:admin:*`). Registered
+    // Admin V1 ad-hoc commands (`urn:waddle:admin:*`). Registered
     // alongside the extension commands so all `<command>` IQs route
     // through the same `CommandRegistry`. The admin commands rely on
     // [`crate::admin::is_community_owner`] for ACL; the registry has

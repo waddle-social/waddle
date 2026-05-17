@@ -1,7 +1,7 @@
 //! Admin protocol namespace constants for Waddle V1.
 //!
 //! The admin command surface is XEP-0050 ad-hoc commands under
-//! `urn:xmpp:waddle:admin:*`. We mint our own namespace prefix
+//! `urn:waddle:admin:*`. We mint our own namespace prefix
 //! because no XEP defines a "list users with prefix search"
 //! command and `urn:waddle:*` is honestly ours (no XSF
 //! registration claimed). The wire shape of the commands and the
@@ -17,7 +17,7 @@
 /// XEP-0050 node identifier and disco feature URI for the
 /// admin users-list command. The same string serves both roles
 /// per XEP-0050 §"Discovering Support" — a client that wants to
-/// know whether `urn:xmpp:waddle:admin:users:list:0` is
+/// know whether `urn:waddle:admin:users:list:0` is
 /// available can either disco#info the server for the feature
 /// var or disco#items the commands node and look for the entry.
-pub const NS_ADMIN_USERS_LIST: &str = "urn:xmpp:waddle:admin:users:list:0";
+pub const NS_ADMIN_USERS_LIST: &str = "urn:waddle:admin:users:list:0";

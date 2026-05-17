@@ -1,11 +1,11 @@
-//! XEP-0050 ad-hoc command `urn:xmpp:waddle:admin:users:list:0`.
+//! XEP-0050 ad-hoc command `urn:waddle:admin:users:list:0`.
 //!
 //! Owner-gated paginated list of registered users with optional
 //! prefix search. Backs the V1 admin Users panel.
 //!
 //! ## Wire shape
 //!
-//! Request (args data form, `FORM_TYPE = urn:xmpp:waddle:admin:users:list:0`):
+//! Request (args data form, `FORM_TYPE = urn:waddle:admin:users:list:0`):
 //!
 //! - `prefix` (text-single, optional): case-insensitive prefix
 //!   matched against `xmpp_localpart` and `display_name`.
@@ -14,7 +14,7 @@
 //! - `after_cursor` (text-single, optional): seek-pagination cursor
 //!   returned by a previous call.
 //!
-//! Result (`result` data form, `FORM_TYPE = urn:xmpp:waddle:admin:users:list:0`):
+//! Result (`result` data form, `FORM_TYPE = urn:waddle:admin:users:list:0`):
 //!
 //! - `reported` columns: `jid`, `display_name`, `has_owner_hat`.
 //! - One `<item/>` per matching user.

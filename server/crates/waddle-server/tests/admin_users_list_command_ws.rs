@@ -1,6 +1,6 @@
 //! Dedicated XEP-style suite for the V1 admin Users panel.
 //!
-//! Covers `urn:xmpp:waddle:admin:users:list:0` end-to-end over the
+//! Covers `urn:waddle:admin:users:list:0` end-to-end over the
 //! production WebSocket transport:
 //!
 //! - owner can list users
@@ -21,7 +21,7 @@ use ws_common::{TestServer, WsXmppClient};
 
 const DOMAIN: &str = "localhost";
 const ADMIN: &str = "admin";
-const ADMIN_COMMAND_NODE: &str = "urn:xmpp:waddle:admin:users:list:0";
+const ADMIN_COMMAND_NODE: &str = "urn:waddle:admin:users:list:0";
 const NS_COMMANDS: &str = "http://jabber.org/protocol/commands";
 const NS_DATA: &str = "jabber:x:data";
 
