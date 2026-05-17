@@ -5,7 +5,7 @@
 //! [`crate::push_registrations`]. Provider endpoints and tokens live here,
 //! behind the `push.<domain>` service boundary.
 
-use std::fmt;
+use std::{fmt, sync::Arc};
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use hmac::{Hmac, Mac};
@@ -14,7 +14,7 @@ use minidom::Element;
 use sha2::Sha256;
 use tracing::warn;
 use waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage;
-use waddle_xmpp::pubsub::{PubSubItem, PubSubRequest};
+use waddle_xmpp::pubsub::{Affiliation, NodeConfig, PubSubItem, PubSubRequest, PubSubStorage};
 use waddle_xmpp::push::{PushError, PushSubscription};
 use waddle_xmpp::xep::xep0357::NS_PUSH;
 use waddle_xmpp::XmppError;
@@ -60,6 +60,13 @@ const PUSH_RECONCILIATION_SCAN_FACTOR: usize = 16;
 pub struct DatabasePushServiceStore {
     db: Database,
     secrets: PushSecretCipher,
+    pubsub_boundary: Option<PushServicePubSubBoundary>,
+}
+
+#[derive(Clone)]
+struct PushServicePubSubBoundary {
+    service_jid: BareJid,
+    storage: Arc<dyn PubSubStorage>,
 }
 
 #[derive(Clone)]
@@ -519,6 +526,25 @@ impl DatabasePushServiceStore {
         let store = Self {
             db,
             secrets: PushSecretCipher::new(secret_key),
+            pubsub_boundary: None,
+        };
+        store.initialize().await?;
+        Ok(store)
+    }
+
+    pub async fn new_with_secret_key_and_pubsub(
+        db: Database,
+        secret_key: &[u8],
+        service_jid: BareJid,
+        pubsub_storage: Arc<dyn PubSubStorage>,
+    ) -> Result<Self, XmppError> {
+        let store = Self {
+            db,
+            secrets: PushSecretCipher::new(secret_key),
+            pubsub_boundary: Some(PushServicePubSubBoundary {
+                service_jid,
+                storage: pubsub_storage,
+            }),
         };
         store.initialize().await?;
         Ok(store)
@@ -526,6 +552,37 @@ impl DatabasePushServiceStore {
 
     pub fn database(&self) -> Database {
         self.db.clone()
+    }
+
+    async fn ensure_xep0060_push_node_for_owner(
+        &self,
+        owner_bare_jid: &BareJid,
+        node: &str,
+    ) -> Result<(), XmppError> {
+        let Some(boundary) = &self.pubsub_boundary else {
+            return Ok(());
+        };
+        let push_node = self
+            .get_node(node)
+            .await?
+            .ok_or_else(|| XmppError::item_not_found(Some("Push node not found".to_string())))?;
+        if push_node.owner_bare_jid != *owner_bare_jid {
+            return Err(XmppError::forbidden(Some(
+                "Push node belongs to another owner".to_string(),
+            )));
+        }
+        if push_node.status != PushNodeStatus::Active {
+            return Err(XmppError::item_not_found(Some(
+                "Push node not active".to_string(),
+            )));
+        }
+        ensure_xep0060_push_node(
+            &boundary.storage,
+            &boundary.service_jid,
+            owner_bare_jid,
+            node,
+        )
+        .await
     }
 
     async fn initialize(&self) -> Result<(), XmppError> {
@@ -718,6 +775,8 @@ impl DatabasePushServiceStore {
         validate_len("Push Service app-id", app_id, MAX_APP_ID_LEN)?;
         if let Some(node) = self.find_node_by_owner_app(owner_bare_jid, app_id).await? {
             if node.status == PushNodeStatus::Active {
+                self.ensure_xep0060_push_node_for_owner(owner_bare_jid, node.node())
+                    .await?;
                 return Ok(node);
             }
         }
@@ -734,6 +793,8 @@ impl DatabasePushServiceStore {
                 tx.commit()
                     .await
                     .map_err(|error| XmppError::internal(error.to_string()))?;
+                self.ensure_xep0060_push_node_for_owner(owner_bare_jid, node.node())
+                    .await?;
                 return Ok(node);
             }
             if count_active_nodes_for_owner_tx(&mut tx, owner_bare_jid).await?
@@ -759,6 +820,8 @@ impl DatabasePushServiceStore {
             tx.commit()
                 .await
                 .map_err(|error| XmppError::internal(error.to_string()))?;
+            self.ensure_xep0060_push_node_for_owner(owner_bare_jid, node.node())
+                .await?;
             return Ok(node);
         }
         prune_disabled_nodes_for_owner_tx(
@@ -806,6 +869,8 @@ impl DatabasePushServiceStore {
         tx.commit()
             .await
             .map_err(|error| XmppError::internal(error.to_string()))?;
+        self.ensure_xep0060_push_node_for_owner(owner_bare_jid, node.node())
+            .await?;
         Ok(node)
     }
 
@@ -882,6 +947,8 @@ impl DatabasePushServiceStore {
         publish_options: Option<&Element>,
     ) -> Result<(), XmppError> {
         validate_len("Push Service node", node, MAX_NODE_ID_LEN)?;
+        self.ensure_xep0060_push_node_for_owner(owner_bare_jid, node)
+            .await?;
         let now_ms = crate::time::now_ms();
         let mut tx = self
             .db
@@ -1420,6 +1487,97 @@ impl DatabasePushServiceStore {
         }
     }
 
+    async fn persist_xep0060_publish_if_configured(
+        &self,
+        push_service_jid: Option<&str>,
+        node: &str,
+        item: &PubSubItem,
+        publisher: &BareJid,
+    ) -> Result<(), XmppError> {
+        let Some(boundary) = &self.pubsub_boundary else {
+            return Ok(());
+        };
+        let Some(push_service_jid) = push_service_jid else {
+            return Ok(());
+        };
+        let parsed_service_jid: BareJid = push_service_jid.parse().map_err(|error| {
+            XmppError::bad_request(Some(format!("Invalid Push Service JID: {error}")))
+        })?;
+        if parsed_service_jid != boundary.service_jid {
+            return Err(XmppError::bad_request(Some(
+                "XEP-0357 Push Service publish target does not match configured service"
+                    .to_string(),
+            )));
+        }
+        validate_xep0357_notification(item)?;
+        let can_publish = crate::pubsub_authz::can_publish(
+            &boundary.storage,
+            &boundary.service_jid,
+            node,
+            publisher,
+            false,
+        )
+        .await?;
+        if !can_publish {
+            return Err(XmppError::forbidden(Some(
+                "Publisher is not affiliated to publish to the Push Service PubSub node"
+                    .to_string(),
+            )));
+        }
+        boundary
+            .storage
+            .publish_item(&boundary.service_jid, node, item, Some(publisher), false)
+            .await?;
+        Ok(())
+    }
+
+    async fn ensure_xep0060_publish_item_backing(
+        &self,
+        job: &PushPublishJob,
+    ) -> Result<(), XmppError> {
+        let Some(boundary) = &self.pubsub_boundary else {
+            return Ok(());
+        };
+        let Some(push_service_jid) = job.push_service_jid() else {
+            return Ok(());
+        };
+        let parsed_service_jid: BareJid = push_service_jid.parse().map_err(|error| {
+            XmppError::bad_request(Some(format!("Invalid Push Service JID: {error}")))
+        })?;
+        if parsed_service_jid != boundary.service_jid {
+            return Err(XmppError::bad_request(Some(
+                "Push publish job service does not match configured Push Service".to_string(),
+            )));
+        }
+        let items = boundary
+            .storage
+            .get_items(
+                &boundary.service_jid,
+                job.node(),
+                Some(1),
+                &[job.item_id().to_string()],
+            )
+            .await?;
+        let item = items.into_iter().next().ok_or_else(|| {
+            XmppError::item_not_found(Some(
+                "Push publish job has no durable XEP-0060 PubSub item".to_string(),
+            ))
+        })?;
+        let payload = item
+            .payload_xml
+            .as_deref()
+            .ok_or_else(|| {
+                XmppError::bad_request(Some("Stored PubSub item has no payload".to_string()))
+            })?
+            .parse::<Element>()
+            .map_err(|error| {
+                XmppError::bad_request(Some(format!(
+                    "Stored PubSub payload is invalid XML: {error}"
+                )))
+            })?;
+        validate_xep0357_notification(&PubSubItem::new(Some(item.id), Some(payload)))
+    }
+
     async fn publish_notification_from_user_server_with_retention_limit(
         &self,
         node: &str,
@@ -1429,10 +1587,13 @@ impl DatabasePushServiceStore {
         publish_options: Option<&Element>,
         retention_limit: i64,
     ) -> Result<PushFanoutResult, XmppError> {
+        let item = push_pubsub_item_with_stable_id(item);
+        self.persist_xep0060_publish_if_configured(push_service_jid, node, &item, publisher)
+            .await?;
         let enqueue = self
             .enqueue_notification_publish_job_from_user_server_with_publish_options(
                 node,
-                item,
+                &item,
                 publisher,
                 push_service_jid,
                 publish_options,
@@ -1500,9 +1661,12 @@ impl DatabasePushServiceStore {
         push_service_jid: Option<&str>,
         publish_options: Option<&Element>,
     ) -> Result<PushPublishJobEnqueue, XmppError> {
+        let item = push_pubsub_item_with_stable_id(item);
+        self.persist_xep0060_publish_if_configured(push_service_jid, node, &item, publisher)
+            .await?;
         self.enqueue_notification_publish_job_with_conflict_mode(
             node,
-            item,
+            &item,
             publisher,
             push_service_jid,
             publish_options,
@@ -1984,6 +2148,7 @@ impl DatabasePushServiceStore {
                 return Err(error);
             }
         }
+        self.ensure_xep0060_publish_item_backing(&job).await?;
 
         let active_devices = active_devices_for_node_tx(&mut tx, job.node()).await?;
         if active_devices.is_empty() {
@@ -2339,6 +2504,32 @@ fn validate_xep0357_notification(item: &PubSubItem) -> Result<(), XmppError> {
             "XEP-0357 PubSub publish payload must be notification in urn:xmpp:push:0".to_string(),
         )));
     }
+    Ok(())
+}
+
+fn push_pubsub_item_with_stable_id(item: &PubSubItem) -> PubSubItem {
+    let mut item = item.clone();
+    if item.id.is_none() {
+        item.id = Some(uuid::Uuid::new_v4().to_string());
+    }
+    item
+}
+
+pub async fn ensure_xep0060_push_node(
+    pubsub_storage: &Arc<dyn PubSubStorage>,
+    push_service_jid: &BareJid,
+    publisher: &BareJid,
+    node: &str,
+) -> Result<(), XmppError> {
+    pubsub_storage
+        .get_or_create_node(push_service_jid, node)
+        .await?;
+    pubsub_storage
+        .update_node_config(push_service_jid, node, &NodeConfig::push_service())
+        .await?;
+    pubsub_storage
+        .set_affiliation(push_service_jid, node, publisher, Affiliation::PublishOnly)
+        .await?;
     Ok(())
 }
 

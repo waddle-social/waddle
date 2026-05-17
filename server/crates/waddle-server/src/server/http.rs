@@ -355,9 +355,11 @@ async fn create_websocket_state(
         .map_err(|error| anyhow::anyhow!("failed to initialize XEP-0357 storage: {error}"))?,
     );
     let push_service = Arc::new(
-        crate::push_service::DatabasePushServiceStore::new_with_secret_key(
+        crate::push_service::DatabasePushServiceStore::new_with_secret_key_and_pubsub(
             state.db_pool.global().clone(),
             server_config.session_key.as_bytes(),
+            service_domains.push.parse()?,
+            Arc::clone(&pubsub_storage),
         )
         .await
         .map_err(|error| anyhow::anyhow!("failed to initialize XMPP Push Service: {error}"))?,

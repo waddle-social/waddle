@@ -229,22 +229,7 @@ fn build_result_with_payload(
 
 fn push_service_error(ctx: IqHandlerContext<'_>, error: XmppError) -> Vec<String> {
     warn!(error = %error, "Push Service IQ failed");
-    let stanza_error = match error {
-        XmppError::Stanza {
-            condition: StanzaErrorCondition::BadRequest,
-            ..
-        } => bad_request_iq_error("Malformed Push Service request."),
-        XmppError::Stanza {
-            condition: StanzaErrorCondition::ItemNotFound,
-            ..
-        } => item_not_found_iq_error("Requested Push Service item not found."),
-        XmppError::Stanza {
-            condition: StanzaErrorCondition::Forbidden,
-            ..
-        }
-        | XmppError::PermissionDenied(_) => forbidden_iq_error("Push Service request forbidden."),
-        _ => internal_server_error_iq_error("Internal server error."),
-    };
+    let stanza_error = push_service_stanza_error(error);
     vec![build_iq_error_xml_typed(
         ctx.id,
         ctx.response_from,

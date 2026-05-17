@@ -34,7 +34,8 @@ pub(super) async fn queue_offline_delivery(
                 recipient = %recipient,
                 "pending_delivery row inserted"
             );
-            publish_xep0357_notifications(deps, &recipient, &pending_row_id).await;
+            publish_xep0357_notifications(deps, &recipient, &pending_row_id, &original_message)
+                .await;
         }
         Ok(waddle_xmpp::pending_delivery::InsertOutcome::QuotaExceeded) => {
             waddle_xmpp::prometheus::increment_pending_delivery_quota_exceeded();
@@ -142,10 +143,14 @@ async fn publish_xep0357_notifications(
     deps: &Deps<'_>,
     recipient: &BareJid,
     pending_row_id: &waddle_xmpp::pending_delivery::PendingRowId,
+    original_message: &Message,
 ) {
     let Some(state) = deps.web_socket_state else {
         return;
     };
+    if !should_publish_xep0357_notification(state, recipient, original_message).await {
+        return;
+    }
     let registrations = match state
         .deps
         .protocol
@@ -230,6 +235,41 @@ async fn publish_xep0357_notifications(
                     "XEP-0357 first-party Push Service notification publish failed"
                 );
             }
+        }
+    }
+}
+
+async fn should_publish_xep0357_notification(
+    state: &WebSocketState,
+    recipient: &BareJid,
+    original_message: &Message,
+) -> bool {
+    let Some(sender) = original_message.from.as_ref().map(|jid| jid.to_bare()) else {
+        return false;
+    };
+    if sender == *recipient {
+        return false;
+    }
+    let setting = state
+        .deps
+        .protocol
+        .notification_settings_projection
+        .effective_setting(
+            recipient,
+            &sender,
+            crate::notification_settings_projection::ConversationKind::Direct,
+        )
+        .await;
+    match setting {
+        Ok(setting) => setting.should_notify(false),
+        Err(error) => {
+            warn!(
+                recipient = %recipient,
+                conversation = %sender,
+                error = %error,
+                "XEP-0492 notification setting lookup failed; suppressing push notification"
+            );
+            false
         }
     }
 }

@@ -114,22 +114,3 @@ pub(super) async fn handle_push_iq(
     }
     vec![iq_to_xml(build_push_disable_result(iq))]
 }
-
-fn push_service_stanza_error(error: XmppError) -> xmpp_parsers::stanza_error::StanzaError {
-    match error {
-        XmppError::Stanza {
-            condition: StanzaErrorCondition::BadRequest,
-            ..
-        } => bad_request_iq_error("Malformed Push Service request."),
-        XmppError::Stanza {
-            condition: StanzaErrorCondition::ItemNotFound,
-            ..
-        } => item_not_found_iq_error("Requested Push Service item not found."),
-        XmppError::Stanza {
-            condition: StanzaErrorCondition::Forbidden,
-            ..
-        }
-        | XmppError::PermissionDenied(_) => forbidden_iq_error("Push Service request forbidden."),
-        _ => internal_server_error_iq_error("Internal server error."),
-    }
-}

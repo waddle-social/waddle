@@ -139,6 +139,25 @@ pub(super) use errors::{
     internal_server_error_iq_error, item_not_found_iq_error, jid_malformed_iq_error,
     not_acceptable_iq_error, not_authorized_iq_error, service_unavailable_iq_error,
 };
+
+fn push_service_stanza_error(error: XmppError) -> xmpp_parsers::stanza_error::StanzaError {
+    match error {
+        XmppError::Stanza {
+            condition: StanzaErrorCondition::BadRequest,
+            ..
+        } => bad_request_iq_error("Malformed Push Service request."),
+        XmppError::Stanza {
+            condition: StanzaErrorCondition::ItemNotFound,
+            ..
+        } => item_not_found_iq_error("Requested Push Service item not found."),
+        XmppError::Stanza {
+            condition: StanzaErrorCondition::Forbidden,
+            ..
+        }
+        | XmppError::PermissionDenied(_) => forbidden_iq_error("Push Service request forbidden."),
+        _ => internal_server_error_iq_error("Internal server error."),
+    }
+}
 use misc::handle_misc_iq;
 use muc_admin::handle_muc_admin_iq;
 use push::handle_push_iq;

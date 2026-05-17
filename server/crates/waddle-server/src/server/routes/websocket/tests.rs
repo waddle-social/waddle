@@ -108,9 +108,14 @@ async fn create_test_websocket_state_with_extension_manager(
         ),
     );
     let push_service = Arc::new(
-        crate::push_service::DatabasePushServiceStore::new(app_state.db_pool.global().clone())
-            .await
-            .expect("push service"),
+        crate::push_service::DatabasePushServiceStore::new_with_secret_key_and_pubsub(
+            app_state.db_pool.global().clone(),
+            b"waddle-push-service-test-secret-key",
+            "push.example.com".parse().expect("push service jid"),
+            pubsub_storage.clone(),
+        )
+        .await
+        .expect("push service"),
     );
 
     Arc::new(WebSocketState {

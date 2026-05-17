@@ -238,6 +238,25 @@ impl NodeConfig {
             send_last_published_item: SendLastPublishedItem::OnSub,
         }
     }
+
+    /// XEP-0357 Push Service node defaults.
+    ///
+    /// A Push Service node is a delivery target, not a subscriber-visible feed:
+    /// use the XEP-0357 recommended whitelist access model and publisher-gated
+    /// writes, keep only a bounded durable item trail, and never replay the last
+    /// push notification to subscribers.
+    pub fn push_service() -> Self {
+        Self {
+            access_model: AccessModel::Whitelist,
+            publish_model: PublishModel::Publishers,
+            max_items: 10_000,
+            persist_items: true,
+            deliver_payloads: false,
+            notify_retract: false,
+            notify_delete: false,
+            send_last_published_item: SendLastPublishedItem::Never,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -311,5 +330,19 @@ mod tests {
         assert_eq!(private.max_items, u32::MAX);
         assert!(private.persist_items);
         assert!(private.notify_retract);
+    }
+
+    #[test]
+    fn push_service_config_matches_xep0357_delivery_target_defaults() {
+        let config = NodeConfig::push_service();
+
+        assert_eq!(config.access_model, AccessModel::Whitelist);
+        assert_eq!(config.publish_model, PublishModel::Publishers);
+        assert!(config.persist_items);
+        assert!(!config.deliver_payloads);
+        assert_eq!(
+            config.send_last_published_item,
+            SendLastPublishedItem::Never
+        );
     }
 }
