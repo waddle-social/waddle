@@ -233,28 +233,41 @@ pub async fn run_users_list_query(
     // exists without a second query. The extra row is dropped from
     // the response and its predecessor's localpart becomes the
     // returned cursor.
+    //
+    // Waddle has two user identity tables: `users` (OIDC-registered
+    // accounts, carries a `display_name`) and `native_users`
+    // (XEP-0077 / SCRAM-only accounts, no `display_name`). The admin
+    // Users panel must surface BOTH; we UNION them by localpart so a
+    // single seek-paginated walk visits every registered identity
+    // regardless of registration path. Native users contribute
+    // `NULL` as `display_name` — the wire form represents this as
+    // the empty string per [`build_result_form`].
     let limit = args.page_size as i64 + 1;
-    let mut sql = String::from("SELECT xmpp_localpart, display_name FROM users WHERE 1 = 1");
+    let mut sql = String::from(
+        "SELECT localpart, display_name FROM (\
+             SELECT xmpp_localpart AS localpart, display_name FROM users \
+             UNION \
+             SELECT username AS localpart, NULL AS display_name FROM native_users\
+         ) WHERE 1 = 1",
+    );
     let mut params: Vec<Value> = Vec::new();
 
     if let Some(prefix) = args.prefix.as_ref() {
         // Match against the localpart OR display_name (case-insensitive).
         // `display_name` may be NULL, so we wrap it in COALESCE for the
         // comparison.
-        sql.push_str(
-            " AND (LOWER(xmpp_localpart) LIKE ? OR LOWER(COALESCE(display_name, '')) LIKE ?)",
-        );
+        sql.push_str(" AND (LOWER(localpart) LIKE ? OR LOWER(COALESCE(display_name, '')) LIKE ?)");
         let pattern = format!("{}%", prefix);
         params.push(pattern.clone().into());
         params.push(pattern.into());
     }
 
     if let Some(cursor) = args.after_cursor.as_ref() {
-        sql.push_str(" AND xmpp_localpart > ?");
+        sql.push_str(" AND localpart > ?");
         params.push(cursor.clone().into());
     }
 
-    sql.push_str(" ORDER BY xmpp_localpart ASC LIMIT ?");
+    sql.push_str(" ORDER BY localpart ASC LIMIT ?");
     params.push(limit.into());
 
     let rows = db
