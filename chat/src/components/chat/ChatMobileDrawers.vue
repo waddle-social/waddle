@@ -41,6 +41,7 @@ const {
   selectExtensionRoute,
   openCreateChannelDialog,
   openChannelEdit,
+  openThreads,
   stories,
   communityEvents,
 } = props.controller;
@@ -112,10 +113,12 @@ function openExtensionRoute(route: DiscoveredExtensionRoute) {
           :active-community-surface="ui.activeCommunitySurface.value"
           :stories-active-count="stories.activeStories.value.length"
           :upcoming-event-count="communityEvents.events.value.filter((e: { dtstartMs?: number }) => typeof e.dtstartMs === 'number' && e.dtstartMs > Date.now()).length"
+          :is-threads-active="ui.activePage.value === 'threads'"
           class="!w-full !border-r-0 !flex-1"
           @select-channel="(id: string) => { ui.activeCommunitySurface.value = null; selectChannel(id); }"
           @select-thread="onSelectThread"
           @select-community-surface="selectCommunitySurface"
+          @select-threads-view="openThreads"
           @create-channel="openCreateChannelDialog()"
           @create-channel-in-space="openCreateChannelDialog"
           @open-settings="ui.showWaddleSettings.value = true"

@@ -1,5 +1,5 @@
-import { describe, expect, test } from "bun:test";
-import { buildDirectMessagePath, buildChannelExtensionPath, buildChannelPath, buildChatSettingsPath, parseChatLocation, resolveChannelBySlug, shouldLoadWaddleStructureForRoute } from "../src/shell/navigation";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { buildDirectMessagePath, buildChannelExtensionPath, buildChannelPath, buildChatSettingsPath, parseChatLocation, pushThreadsRoute, resolveChannelBySlug, shouldLoadWaddleStructureForRoute } from "../src/shell/navigation";
 import type { ChannelSummary } from "../src/lib/chat-types";
 
 const channel: ChannelSummary = {
@@ -129,6 +129,64 @@ describe("parseChatLocation / buildChannelPath threadStack", () => {
     const [pathname, search] = path.split("?");
     const route = parseChatLocation(pathname, search ? `?${search}` : "");
     expect(route.threadStack).toEqual(stack);
+  });
+});
+
+describe("parseChatLocation threads route", () => {
+  test("parses the /threads route", () => {
+    const route = parseChatLocation("/threads");
+    expect(route.page).toBe("threads");
+    expect(route.channelSlug).toBeNull();
+    expect(route.dmUsername).toBeNull();
+    expect(route.adminPanel).toBeNull();
+    expect(route.threadStack).toEqual([]);
+  });
+});
+
+describe("pushThreadsRoute", () => {
+  // pushThreadsRoute reads window.location and calls window.history.pushState.
+  // Bun's runtime doesn't ship a DOM, so we install a minimal fake on the
+  // global scope and tear it back down between cases.
+  let pushed: Array<{ state: unknown; url: string }>;
+  const hadWindow = "window" in globalThis;
+  const previousWindow = hadWindow ? (globalThis as { window?: unknown }).window : undefined;
+
+  beforeEach(() => {
+    pushed = [];
+    const fakeLocation = { pathname: "/", search: "" };
+    const fakeWindow = {
+      location: fakeLocation,
+      history: {
+        pushState(state: unknown, _title: string, url: string) {
+          pushed.push({ state, url });
+          const [path, search] = url.split("?");
+          fakeLocation.pathname = path ?? "/";
+          fakeLocation.search = search ? `?${search}` : "";
+        },
+      },
+    };
+    (globalThis as { window?: unknown }).window = fakeWindow;
+  });
+
+  afterEach(() => {
+    if (hadWindow) {
+      (globalThis as { window?: unknown }).window = previousWindow;
+    } else {
+      delete (globalThis as { window?: unknown }).window;
+    }
+  });
+
+  test("pushes /threads when current pathname is /", () => {
+    pushThreadsRoute();
+    expect(pushed).toHaveLength(1);
+    expect(pushed[0]?.url).toBe("/threads");
+  });
+
+  test("is a no-op when already on /threads", () => {
+    const w = (globalThis as unknown as { window: { location: { pathname: string } } }).window;
+    w.location.pathname = "/threads";
+    pushThreadsRoute();
+    expect(pushed).toHaveLength(0);
   });
 });
 
