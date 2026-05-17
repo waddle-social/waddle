@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from "vue";
 import HomeDashboard from "@/components/chat/HomeDashboard.vue";
+import ThreadsView from "@/components/chat/ThreadsView.vue";
 import FeedPane from "@/components/community/FeedPane.vue";
 import StoriesPane from "@/components/community/StoriesPane.vue";
 import EventsPane from "@/components/community/EventsPane.vue";
@@ -345,6 +346,9 @@ onUnmounted(() => window.removeEventListener("popstate", refreshAdminPanelFromUr
         @cancel-instance="(uid, dtstartMs) => communityEvents.cancelInstance(uid, dtstartMs)"
         @rsvp="(event, partstat) => onCommunityRsvp(event, partstat)"
         @open-nav="ui.showMobileNav.value = true"
+      />
+      <ThreadsView
+        v-else-if="ui.activePage.value === 'threads'"
       />
       <UserSettingsPage
         v-else-if="ui.activePage.value === 'settings' && connectionStore.session"

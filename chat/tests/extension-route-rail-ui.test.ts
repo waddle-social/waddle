@@ -67,7 +67,7 @@ describe("extension route rail UI contract", () => {
     const controller = readFileSync(new URL("../src/shell/chat-app-controller.ts", import.meta.url), "utf8");
     const state = readFileSync(new URL("../src/shell/state.ts", import.meta.url), "utf8");
 
-    expect(state).toContain('ref<"dashboard" | "chat" | "settings" | "admin">');
+    expect(state).toContain('ref<"dashboard" | "chat" | "settings" | "admin" | "threads">');
     expect(readyShell).toContain("<ExtensionRouteRail");
     expect(readyShell).toContain("@close=\"closeExtensionRoutePanel\"");
     expect(readyShell).toContain("@update:pinned-panel-open=\"setPinnedPanelOpen\"");

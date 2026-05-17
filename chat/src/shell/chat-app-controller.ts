@@ -16,7 +16,7 @@ import { useCommunityEvents } from "@/services/community-events";
 import { useChatReadActivity } from "@/shell/read-activity";
 import { useDeploymentVersionInfo } from "@/shell/version";
 import { useXmppRosterContacts } from "@/contacts/roster";
-import { buildDirectMessagePath, buildChannelExtensionPath, buildChannelPath, buildChatSettingsPath, parseChatLocation, pushDirectMessageRoute, pushChannelExtensionRoute, pushChannelRoute, pushChatSettingsRoute, resolveChannelBySlug, shouldLoadWaddleStructureForRoute } from "@/shell/navigation";
+import { buildDirectMessagePath, buildChannelExtensionPath, buildChannelPath, buildChatSettingsPath, parseChatLocation, pushDirectMessageRoute, pushChannelExtensionRoute, pushChannelRoute, pushChatSettingsRoute, pushThreadsRoute, resolveChannelBySlug, shouldLoadWaddleStructureForRoute } from "@/shell/navigation";
 import { barePeerJid, jidDomain, parseManagedRoomBareJid } from "@/lib/xmpp-client";
 import { mdsChatKey, setLastSeen } from "@/lib/last-seen-store";
 import { roomJidForChannelId as resolveRoomJidForChannelId } from "@/lib/channel-room";
@@ -1215,6 +1215,23 @@ export function useChatAppController(giphyApiKey: string) {
   }
 
   /**
+   * Navigate to the global Threads view. Clears any channel/DM
+   * selection, drops local thread-panel state, syncs the URL so a
+   * page refresh lands back on /threads.
+   */
+  function openThreads() {
+    ui.showMobileNav.value = false;
+    ui.showMobileDetails.value = false;
+    ui.activePage.value = "threads";
+    waddles.activeChannelId.value = null;
+    dmConversations.closeDm();
+    activeRightPanel.value = null;
+    activeThreadStack.value = [];
+    activeExtensionRouteKey.value = null;
+    pushThreadsRoute();
+  }
+
+  /**
    * Navigate back to the Home dashboard from anywhere. Clears any
    * channel/DM selection, drops thread state, closes the mobile nav
    * drawer, and resyncs the URL so a refresh returns the user to home
@@ -1274,7 +1291,7 @@ export function useChatAppController(giphyApiKey: string) {
       activeExtensionRouteKey.value = null;
       return;
     }
-    if (route.page === "settings") {
+    if (route.page === "settings" || route.page === "threads") {
       activeThreadTargetMessageId.value = null;
       activeThreadStack.value = [];
       return;
@@ -1311,7 +1328,7 @@ export function useChatAppController(giphyApiKey: string) {
       activeExtensionRouteKey.value = null;
       return;
     }
-    if (route.page === "settings") {
+    if (route.page === "settings" || route.page === "threads") {
       activeThreadTargetMessageId.value = null;
       activeThreadStack.value = [];
       return;
@@ -1726,6 +1743,7 @@ export function useChatAppController(giphyApiKey: string) {
       handleToggleNotifications,
       openUserSettings,
       openHome,
+      openThreads,
       closeUserSettings,
       handleLogout,
       selectChannel,
