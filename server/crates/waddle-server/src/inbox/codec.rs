@@ -1,6 +1,6 @@
 use super::*;
 
-pub(crate) fn decode_row(row: &crate::db::Row) -> Result<InboxEntry, InboxStorageError> {
+pub(super) fn decode_row(row: &crate::db::Row) -> Result<InboxEntry, InboxStorageError> {
     let partner_raw: String = row
         .get(0)
         .map_err(|error| InboxStorageError::Other(error.to_string()))?;
@@ -70,4 +70,4 @@ fn decode_kind(raw: &str) -> Result<ConversationKind, InboxStorageError> {
     }
 }
 
-pub const SELECT_COLS: &str = "partner_jid, thread_id, kind, last_stanza_id, last_updated, unread, preview, thread_title, reply_count, author";
+pub(super) const SELECT_COLS: &str = "partner_jid, thread_id, kind, last_stanza_id, last_updated, unread, preview, thread_title, reply_count, author";

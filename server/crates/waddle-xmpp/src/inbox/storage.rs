@@ -32,6 +32,25 @@ pub trait InboxStorage: Send + Sync {
         room: &BareJid,
     ) -> Result<Vec<InboxEntry>, InboxStorageError>;
 
+    /// Fetch every thread-level inbox entry for `user` across all rooms,
+    /// newest first. Used by the global `urn:waddle:threads:0` view.
+    ///
+    /// Default implementation walks `list` over the user's channel
+    /// conversations and aggregates `list_threads` per room — backends
+    /// SHOULD override with a single-query implementation when one is
+    /// available (the SQL backend does).
+    async fn list_all_threads(&self, user: &BareJid) -> Result<Vec<InboxEntry>, InboxStorageError> {
+        let channels = self.list(user).await?;
+        let mut all = Vec::new();
+        for channel in &channels {
+            let partner = channel.partner.clone();
+            let threads = self.list_threads(user, &partner).await?;
+            all.extend(threads);
+        }
+        all.sort_by_key(|entry| std::cmp::Reverse(entry.last_updated));
+        Ok(all)
+    }
+
     /// Upsert an entry, incrementing unread unless `increment_unread` is
     /// false. Returns the post-upsert state of the entry.
     async fn upsert(

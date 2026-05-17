@@ -17,7 +17,6 @@ mod open;
 mod schema;
 
 use codec::{decode_row, encode_kind, SELECT_COLS};
-pub(crate) use codec::{decode_row as decode_inbox_row, SELECT_COLS as INBOX_SELECT_COLS};
 pub use open::build_inbox_storage;
 
 #[derive(Clone)]
@@ -26,13 +25,6 @@ pub struct DatabaseInboxStorage {
 }
 
 impl DatabaseInboxStorage {
-    /// Borrow the underlying logical database — used by sibling
-    /// projections (e.g. the threads view) so they share the same pool
-    /// and schema lifecycle.
-    pub fn db_handle(&self) -> Database {
-        self.db.clone()
-    }
-
     pub async fn open(database_url: Option<&str>) -> Result<Self, InboxStorageError> {
         let db = match database_url {
             Some(database_url) => open::open_database(database_url).await?,
@@ -120,6 +112,27 @@ impl InboxStorage for DatabaseInboxStorage {
             .query(&sql, crate::db_params![user.to_string(), room.to_string()])
             .await?;
 
+        let mut entries = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|error| InboxStorageError::Other(error.to_string()))?
+        {
+            entries.push(decode_row(&row)?);
+        }
+        Ok(entries)
+    }
+
+    #[instrument(skip(self), fields(user = %user))]
+    async fn list_all_threads(&self, user: &BareJid) -> Result<Vec<InboxEntry>, InboxStorageError> {
+        let sql = format!(
+            "SELECT {SELECT_COLS} FROM inbox_entries \
+             WHERE user_jid = ? AND thread_id != '' \
+             ORDER BY last_updated DESC, partner_jid ASC, thread_id ASC"
+        );
+        let mut rows = self
+            .query(&sql, crate::db_params![user.to_string()])
+            .await?;
         let mut entries = Vec::new();
         while let Some(row) = rows
             .next()

@@ -1,20 +1,21 @@
-//! Storage read for the global threads view. Pulls per-thread rows from
-//! the existing `inbox_entries` table — no schema changes.
+//! Storage read for the global threads view. Pulls per-thread rows via
+//! the existing `InboxStorage::list_all_threads` contract — no new
+//! schema, and works with both the SQL and in-memory inbox backends.
+
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
 use jid::BareJid;
 use serde::{Deserialize, Serialize};
-use waddle_xmpp::inbox::storage::InboxStorageError;
+use waddle_xmpp::inbox::storage::{InboxStorage, InboxStorageError};
 use waddle_xmpp::inbox::InboxEntry;
 
 use super::query::{ThreadEntry, ThreadsPage, MAX_PAGE_SIZE};
-use crate::db::{Database, IntoParams};
-use crate::inbox::{decode_inbox_row, INBOX_SELECT_COLS};
 
-/// Read trait for the threads view. Implementations read from
-/// `inbox_entries` (or a fixture for tests).
+/// Read trait for the threads view. Implementations read per-thread
+/// inbox rows from whichever backend the inbox storage is using.
 #[async_trait]
 pub trait ThreadsStorage: Send + Sync {
     async fn page(
@@ -25,33 +26,18 @@ pub trait ThreadsStorage: Send + Sync {
     ) -> Result<ThreadsPage, InboxStorageError>;
 }
 
-/// SQL-backed implementation, reading the same `inbox_entries` table as
-/// the inbox feature.
+/// Default implementation: layers RSM-style pagination on top of an
+/// `InboxStorage::list_all_threads` snapshot. The pagination is seek-
+/// based over `(last_updated, partner_jid, thread_id)` so it's stable
+/// under concurrent inserts that change the suffix of the list.
 #[derive(Clone)]
-pub struct DatabaseThreadsStorage {
-    db: Database,
+pub struct InboxBackedThreadsStorage {
+    inbox: Arc<dyn InboxStorage>,
 }
 
-impl DatabaseThreadsStorage {
-    /// Construct from a shared logical database — the same one the
-    /// inbox storage uses.
-    pub fn new(db: Database) -> Self {
-        Self { db }
-    }
-
-    async fn query(
-        &self,
-        sql: &str,
-        params: impl IntoParams,
-    ) -> Result<crate::db::Rows, InboxStorageError> {
-        let conn = self
-            .db
-            .guard()
-            .await
-            .map_err(|error| InboxStorageError::Other(error.to_string()))?;
-        conn.query(sql, params)
-            .await
-            .map_err(|error| InboxStorageError::Other(error.to_string()))
+impl InboxBackedThreadsStorage {
+    pub fn new(inbox: Arc<dyn InboxStorage>) -> Self {
+        Self { inbox }
     }
 }
 
@@ -88,6 +74,21 @@ impl Cursor {
     }
 }
 
+/// Sort order: `last_updated DESC`, then `partner_jid ASC`, then
+/// `thread_id ASC`. Inverted because the row with the *greatest*
+/// `last_updated` is considered the "smallest" position in the ordered
+/// list (it appears first).
+fn entry_is_after_cursor(entry: &ThreadEntry, cursor: &Cursor) -> bool {
+    if entry.last_activity_secs != cursor.last_updated {
+        return entry.last_activity_secs < cursor.last_updated;
+    }
+    let partner = entry.channel.to_string();
+    if partner != cursor.partner_jid {
+        return partner > cursor.partner_jid;
+    }
+    entry.thread_id > cursor.thread_id
+}
+
 fn build_thread_entry(row: &InboxEntry) -> Option<ThreadEntry> {
     let thread_id = row.thread_id.clone()?;
     if thread_id.is_empty() {
@@ -111,95 +112,52 @@ fn build_thread_entry(row: &InboxEntry) -> Option<ThreadEntry> {
 }
 
 #[async_trait]
-impl ThreadsStorage for DatabaseThreadsStorage {
+impl ThreadsStorage for InboxBackedThreadsStorage {
     async fn page(
         &self,
         user_jid: &BareJid,
         page_size: u32,
         after_cursor: Option<&str>,
     ) -> Result<ThreadsPage, InboxStorageError> {
-        let limit = page_size.clamp(1, MAX_PAGE_SIZE) as i64;
-
-        // Page (seek-based pagination using the (last_updated, partner_jid,
-        // thread_id) tuple as the sort key — stable under concurrent inserts).
-        let mut entries: Vec<ThreadEntry> = Vec::new();
-        let sql_base = format!(
-            "SELECT {INBOX_SELECT_COLS} FROM inbox_entries \
-             WHERE user_jid = ? AND thread_id != ''"
-        );
-        let mut rows = if let Some(cursor_raw) = after_cursor {
-            let cursor = Cursor::decode(cursor_raw)?;
-            let sql = format!(
-                "{sql_base} AND (\
-                    last_updated < ? \
-                    OR (last_updated = ? AND partner_jid > ?) \
-                    OR (last_updated = ? AND partner_jid = ? AND thread_id > ?)\
-                  ) \
-                  ORDER BY last_updated DESC, partner_jid ASC, thread_id ASC \
-                  LIMIT ?"
-            );
-            self.query(
-                &sql,
-                crate::db_params![
-                    user_jid.to_string(),
-                    cursor.last_updated,
-                    cursor.last_updated,
-                    cursor.partner_jid.clone(),
-                    cursor.last_updated,
-                    cursor.partner_jid,
-                    cursor.thread_id,
-                    limit,
-                ],
-            )
-            .await?
-        } else {
-            let sql = format!(
-                "{sql_base} \
-                 ORDER BY last_updated DESC, partner_jid ASC, thread_id ASC \
-                 LIMIT ?"
-            );
-            self.query(&sql, crate::db_params![user_jid.to_string(), limit])
-                .await?
+        let limit = page_size.clamp(1, MAX_PAGE_SIZE) as usize;
+        let cursor = match after_cursor {
+            Some(raw) => Some(Cursor::decode(raw)?),
+            None => None,
         };
 
-        while let Some(row) = rows
-            .next()
-            .await
-            .map_err(|error| InboxStorageError::Other(error.to_string()))?
-        {
-            let inbox_entry = decode_inbox_row(&row)?;
-            if let Some(thread_entry) = build_thread_entry(&inbox_entry) {
-                entries.push(thread_entry);
+        let mut all_rows = self.inbox.list_all_threads(user_jid).await?;
+        // Backend MAY return rows already ordered; re-sort defensively
+        // to make this layer the single source of truth for ordering.
+        all_rows.sort_by(|a, b| {
+            b.last_updated
+                .cmp(&a.last_updated)
+                .then_with(|| a.partner.to_string().cmp(&b.partner.to_string()))
+                .then_with(|| {
+                    a.thread_id
+                        .as_deref()
+                        .unwrap_or("")
+                        .cmp(b.thread_id.as_deref().unwrap_or(""))
+                })
+        });
+
+        let total: u64 = all_rows.len() as u64;
+        let unread_threads: u64 = all_rows.iter().filter(|e| e.unread > 0).count() as u64;
+
+        let mut entries: Vec<ThreadEntry> = Vec::with_capacity(limit);
+        for row in all_rows {
+            let Some(entry) = build_thread_entry(&row) else {
+                continue;
+            };
+            if let Some(ref c) = cursor {
+                if !entry_is_after_cursor(&entry, c) {
+                    continue;
+                }
+            }
+            entries.push(entry);
+            if entries.len() >= limit {
+                break;
             }
         }
-
-        // Totals: a single round-trip over (count_all_threads,
-        // count_unread_threads) for the same user.
-        let mut totals_rows = self
-            .query(
-                "SELECT \
-                   COUNT(*) AS total, \
-                   COALESCE(SUM(CASE WHEN unread > 0 THEN 1 ELSE 0 END), 0) AS unread_threads \
-                 FROM inbox_entries \
-                 WHERE user_jid = ? AND thread_id != ''",
-                crate::db_params![user_jid.to_string()],
-            )
-            .await?;
-        let (total, unread_threads) = if let Some(row) = totals_rows
-            .next()
-            .await
-            .map_err(|error| InboxStorageError::Other(error.to_string()))?
-        {
-            let total: i64 = row
-                .get(0)
-                .map_err(|error| InboxStorageError::Other(error.to_string()))?;
-            let unread_threads: i64 = row
-                .get(1)
-                .map_err(|error| InboxStorageError::Other(error.to_string()))?;
-            (total.max(0) as u64, unread_threads.max(0) as u64)
-        } else {
-            (0, 0)
-        };
 
         let first_cursor = entries.first().map(Cursor::from_entry);
         let last_cursor = entries.last().map(Cursor::from_entry);
@@ -226,21 +184,19 @@ impl ThreadsStorage for DatabaseThreadsStorage {
 mod tests {
     use super::*;
     use crate::inbox::DatabaseInboxStorage;
-    use waddle_xmpp::inbox::storage::InboxStorage;
     use waddle_xmpp::inbox::{ConversationKind, InboxEntry};
 
     fn jid(value: &str) -> BareJid {
         value.parse().expect("valid JID")
     }
 
-    /// Build a paired (inbox storage, threads storage) backed by the same
-    /// in-memory database. The inbox storage is used to seed rows; the
-    /// threads storage reads via the same `Database` handle.
-    async fn make_storage_pair() -> (DatabaseInboxStorage, DatabaseThreadsStorage) {
-        let inbox = DatabaseInboxStorage::open(Some("sqlite::memory:"))
-            .await
-            .expect("open inbox storage");
-        let threads = DatabaseThreadsStorage::new(inbox.db_handle());
+    async fn make_storage_pair() -> (Arc<DatabaseInboxStorage>, InboxBackedThreadsStorage) {
+        let inbox = Arc::new(
+            DatabaseInboxStorage::open(Some("sqlite::memory:"))
+                .await
+                .expect("open inbox storage"),
+        );
+        let threads = InboxBackedThreadsStorage::new(inbox.clone());
         (inbox, threads)
     }
 
@@ -249,7 +205,6 @@ mod tests {
         let (inbox, threads) = make_storage_pair().await;
         let user = jid("me@example.com");
 
-        // Seed: channel-level row (no thread) — must NOT appear.
         inbox
             .upsert(
                 &user,
@@ -264,7 +219,6 @@ mod tests {
             .await
             .expect("upsert channel");
 
-        // Seed: thread row in room1
         inbox
             .upsert(
                 &user,
@@ -280,7 +234,6 @@ mod tests {
             .await
             .expect("upsert t1");
 
-        // Seed: thread row in room2
         inbox
             .upsert(
                 &user,
@@ -297,11 +250,7 @@ mod tests {
             .expect("upsert t2");
 
         let page = threads.page(&user, 50, None).await.expect("page");
-        assert_eq!(
-            page.entries.len(),
-            2,
-            "expected 2 thread rows, got {page:?}"
-        );
+        assert_eq!(page.entries.len(), 2, "expected 2 thread rows");
         assert!(page.entries.iter().all(|e| !e.thread_id.is_empty()));
         assert_eq!(page.total, 2);
     }
@@ -417,7 +366,6 @@ mod tests {
             )
             .await
             .expect("upsert t2");
-        // Mark t2 as read
         inbox
             .mark_read(&user, &jid("room@muc.example"), Some("t2"))
             .await
@@ -426,5 +374,46 @@ mod tests {
         let page = threads.page(&user, 50, None).await.expect("page");
         assert_eq!(page.total, 2);
         assert_eq!(page.unread_threads, 1);
+    }
+
+    #[tokio::test]
+    async fn page_works_against_in_memory_storage() {
+        let inbox: Arc<dyn InboxStorage> =
+            Arc::new(waddle_xmpp::inbox::storage::InMemoryInboxStorage::new());
+        let threads = InboxBackedThreadsStorage::new(inbox.clone());
+        let user = jid("me@example.com");
+
+        inbox
+            .upsert(
+                &user,
+                InboxEntry::new(
+                    jid("room@muc.example"),
+                    ConversationKind::MucRoom,
+                    "s0",
+                    100,
+                ),
+                true,
+            )
+            .await
+            .expect("upsert channel");
+        inbox
+            .upsert(
+                &user,
+                InboxEntry::new(
+                    jid("room@muc.example"),
+                    ConversationKind::MucRoom,
+                    "s1",
+                    110,
+                )
+                .with_thread("t1"),
+                true,
+            )
+            .await
+            .expect("upsert thread");
+
+        let page = threads.page(&user, 50, None).await.expect("page");
+        assert_eq!(page.entries.len(), 1);
+        assert_eq!(page.total, 1);
+        assert_eq!(page.entries[0].thread_id, "t1");
     }
 }
