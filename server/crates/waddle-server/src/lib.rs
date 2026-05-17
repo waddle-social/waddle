@@ -1,5 +1,6 @@
 #![recursion_limit = "256"]
 
+pub mod admin;
 pub mod auth;
 pub mod config;
 pub mod db;
