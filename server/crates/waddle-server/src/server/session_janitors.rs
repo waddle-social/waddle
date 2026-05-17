@@ -10,6 +10,12 @@ const AUTH_JANITOR_INTERVAL: Duration = Duration::from_secs(60);
 /// Default interval for the persistent-room dormancy janitor.
 const ROOM_DORMANCY_JANITOR_INTERVAL: Duration = Duration::from_secs(300);
 
+fn reset_push_reconciliation_cursor_after_error(
+    reconciliation_cursor: &mut Option<crate::push_service::PushRegistrationCursor>,
+) -> Option<crate::push_service::PushRegistrationCursor> {
+    reconciliation_cursor.take()
+}
+
 fn pending_delivery_max_age_days_from_env() -> u32 {
     const DEFAULT_DAYS: u32 = 30;
     const MIN_DAYS: u32 = 1;
@@ -451,9 +457,12 @@ pub(crate) fn spawn_push_service_publish_job_janitor(websocket_state: &Arc<WebSo
                     }
                 }
                 Err(error) => {
+                    let failed_cursor =
+                        reset_push_reconciliation_cursor_after_error(&mut reconciliation_cursor);
                     warn!(
                         error = %error,
-                        "Push Service publish-job janitor reconciliation failed; queued jobs remain durable"
+                        failed_cursor = ?failed_cursor,
+                        "Push Service publish-job janitor reconciliation failed; reset cursor for next sweep; queued jobs remain durable"
                     );
                 }
             }
@@ -908,6 +917,27 @@ pub(crate) fn spawn_room_dormancy_janitor(websocket_state: &Arc<WebSocketState>)
             }
         }
     });
+}
+
+#[cfg(test)]
+mod push_service_publish_job_janitor_tests {
+    use super::reset_push_reconciliation_cursor_after_error;
+
+    #[test]
+    fn reconciliation_cursor_resets_after_reconcile_error() {
+        let mut reconciliation_cursor = Some(crate::push_service::PushRegistrationCursor::new(
+            "alice@example.com",
+            "web-node-1",
+        ));
+
+        let failed_cursor =
+            reset_push_reconciliation_cursor_after_error(&mut reconciliation_cursor)
+                .expect("failed cursor");
+
+        assert!(reconciliation_cursor.is_none());
+        assert_eq!(failed_cursor.owner_bare_jid(), "alice@example.com");
+        assert_eq!(failed_cursor.node(), "web-node-1");
+    }
 }
 
 #[cfg(test)]

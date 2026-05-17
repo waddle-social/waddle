@@ -516,6 +516,13 @@ impl PushPublishJob {
 }
 
 impl PushRegistrationCursor {
+    pub(crate) fn new(owner_bare_jid: impl Into<String>, node: impl Into<String>) -> Self {
+        Self {
+            owner_bare_jid: owner_bare_jid.into(),
+            node: node.into(),
+        }
+    }
+
     pub fn owner_bare_jid(&self) -> &str {
         &self.owner_bare_jid
     }
@@ -1990,10 +1997,10 @@ impl DatabasePushServiceStore {
         let next_cursor = has_more_registrations
             .then(|| {
                 let registration = registrations.last()?;
-                Some(PushRegistrationCursor {
-                    owner_bare_jid: registration.owner_bare_jid.to_string(),
-                    node: registration.node.clone(),
-                })
+                Some(PushRegistrationCursor::new(
+                    registration.owner_bare_jid.to_string(),
+                    registration.node.clone(),
+                ))
             })
             .flatten();
         let scanned_registrations = registrations.len();
