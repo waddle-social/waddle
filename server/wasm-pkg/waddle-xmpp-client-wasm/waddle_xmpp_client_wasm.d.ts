@@ -5,7 +5,7 @@ export class WaddleClient {
     free(): void;
     [Symbol.dispose](): void;
     /**
-     * Call the `urn:xmpp:waddle:admin:users:list:0` ad-hoc command
+     * Call the `urn:waddle:admin:users:list:0` ad-hoc command
      * against the user-bearing server domain and return a typed
      * page of matching users. Errors out (rejecting the returned
      * Promise) if the server replies with a stanza error — the
