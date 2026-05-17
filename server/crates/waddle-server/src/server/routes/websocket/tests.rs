@@ -125,6 +125,9 @@ async fn create_test_websocket_state_with_extension_manager(
         .expect("notification outbox"),
     );
 
+    let test_inbox_storage: Arc<dyn waddle_xmpp::inbox::storage::InboxStorage> =
+        Arc::new(waddle_xmpp::inbox::storage::InMemoryInboxStorage::new());
+
     Arc::new(WebSocketState {
             deps: WebSocketDeps {
                 app_state: Arc::clone(&app_state),
@@ -145,8 +148,11 @@ async fn create_test_websocket_state_with_extension_manager(
                             .expect("test secret meets length floor"),
                     )),
                     mam_storage,
-                    inbox_storage: Arc::new(
-                        waddle_xmpp::inbox::storage::InMemoryInboxStorage::new(),
+                    inbox_storage: Arc::clone(&test_inbox_storage),
+                    threads_storage: Arc::new(
+                        crate::threads::storage::InboxBackedThreadsStorage::new(Arc::clone(
+                            &test_inbox_storage,
+                        )),
                     ),
                     blocking_storage: Arc::new(
                         waddle_xmpp::xep::xep0191::InMemoryBlockingStorage::new(),

@@ -20,6 +20,7 @@ pub(super) async fn handle_account_disco_info<'a>(
             Feature::mam(),
             Feature::mam_extended(),
             Feature::fulltext_mam(),
+            Feature::threads_query(),
         ];
         features.extend(pep_features());
         let response = build_disco_info_response(req.request_iq, &identities, &features, None);

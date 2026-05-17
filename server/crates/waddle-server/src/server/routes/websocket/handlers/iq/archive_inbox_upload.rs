@@ -291,6 +291,70 @@ pub(super) async fn handle_archive_inbox_upload_iq(
         }
     }
 
+    // urn:waddle:threads:0 — global threads view (PR #671).
+    if crate::threads::handler::is_threads_iq(iq) {
+        use crate::threads::handler::{handle_threads_iq, ThreadsIqOutcome};
+
+        let request_iq = &iq;
+        let Some(user_jid) = phase.bound_jid().map(|jid| jid.to_bare()) else {
+            return vec![build_iq_error_xml_typed(
+                id,
+                None,
+                None,
+                not_authorized_iq_error("Authentication required."),
+            )];
+        };
+
+        let outcome = handle_threads_iq(
+            state.deps.protocol.threads_storage.as_ref(),
+            request_iq,
+            Some(&user_jid),
+        )
+        .await;
+
+        return match outcome {
+            ThreadsIqOutcome::Result(payload) => {
+                let response = xmpp_parsers::iq::Iq {
+                    from: request_iq.to.clone(),
+                    to: request_iq.from.clone(),
+                    id: request_iq.id.clone(),
+                    payload: xmpp_parsers::iq::IqType::Result(Some(payload)),
+                };
+                vec![iq_to_xml(response)]
+            }
+            ThreadsIqOutcome::BadRequest(err) => {
+                warn!(error = %err, "Invalid urn:waddle:threads:0 query");
+                vec![build_iq_error_xml_typed(
+                    id,
+                    None,
+                    None,
+                    bad_request_iq_error("Malformed IQ payload."),
+                )]
+            }
+            ThreadsIqOutcome::Forbidden => vec![build_iq_error_xml_typed(
+                id,
+                None,
+                None,
+                forbidden_iq_error("Threads query refused for cross-user target."),
+            )],
+            ThreadsIqOutcome::NotAuthorized => vec![build_iq_error_xml_typed(
+                id,
+                None,
+                None,
+                not_authorized_iq_error("Authentication required."),
+            )],
+            ThreadsIqOutcome::InternalError(error) => {
+                warn!(error = %error, jid = %user_jid, "Failed to page threads");
+                vec![build_iq_error_xml_typed(
+                    id,
+                    None,
+                    None,
+                    internal_server_error_iq_error("Internal server error."),
+                )]
+            }
+        };
+    }
+
     // urn:xmpp:carbons:2 enable/disable is now served by
     // protocol::handlers::carbons::CarbonsHandler via the short-circuit above.
 

@@ -1,7 +1,7 @@
 import type { ChannelSummary } from "@/lib/chat-types";
 
 interface RouteState {
-  page: "dashboard" | "chat" | "settings" | "extension" | "admin";
+  page: "dashboard" | "chat" | "settings" | "extension" | "admin" | "threads";
   channelSlug: string | null;
   dmUsername: string | null;
   extensionPluginId: string | null;
@@ -25,6 +25,7 @@ export type AdminPanel = "users" | "spaces" | "audit" | "push-health" | "setting
 const SETTINGS_PATH = "/settings";
 const ADMIN_PATH_PREFIX = "/admin";
 const DEFAULT_ADMIN_PANEL: AdminPanel = "users";
+const THREADS_PATH = "/threads";
 
 function parseAdminPanel(slug: string | undefined): AdminPanel | null {
   switch (slug) {
@@ -123,6 +124,18 @@ export function parseChatLocation(pathname: string, search?: string): RouteState
       adminPanel: panel,
     };
   }
+  if (pathname === THREADS_PATH) {
+    return {
+      page: "threads",
+      channelSlug: null,
+      dmUsername: null,
+      extensionPluginId: null,
+      extensionRouteId: null,
+      threadStack: [],
+      pinnedPanelOpen: false,
+      adminPanel: null,
+    };
+  }
   if (segments[0] === "r") {
     if (segments[2] === "x" && segments[3] && segments[4]) {
       return {
@@ -214,6 +227,13 @@ export function buildChatSettingsPath(): string {
 
 export function buildAdminPath(panel: AdminPanel = DEFAULT_ADMIN_PANEL): string {
   return `${ADMIN_PATH_PREFIX}/${panel}`;
+}
+
+export function pushThreadsRoute() {
+  const current = window.location.pathname + window.location.search;
+  if (current !== THREADS_PATH) {
+    window.history.pushState({ waddlePage: "threads" }, "", THREADS_PATH);
+  }
 }
 
 export function pushChannelRoute(

@@ -123,6 +123,27 @@ impl InboxStorage for DatabaseInboxStorage {
         Ok(entries)
     }
 
+    #[instrument(skip(self), fields(user = %user))]
+    async fn list_all_threads(&self, user: &BareJid) -> Result<Vec<InboxEntry>, InboxStorageError> {
+        let sql = format!(
+            "SELECT {SELECT_COLS} FROM inbox_entries \
+             WHERE user_jid = ? AND thread_id != '' \
+             ORDER BY last_updated DESC, partner_jid ASC, thread_id ASC"
+        );
+        let mut rows = self
+            .query(&sql, crate::db_params![user.to_string()])
+            .await?;
+        let mut entries = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|error| InboxStorageError::Other(error.to_string()))?
+        {
+            entries.push(decode_row(&row)?);
+        }
+        Ok(entries)
+    }
+
     #[instrument(skip(self, entry), fields(user = %user, partner = %entry.partner))]
     async fn upsert(
         &self,

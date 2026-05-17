@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from "vue";
 import HomeDashboard from "@/components/chat/HomeDashboard.vue";
+import ThreadsView from "@/components/chat/ThreadsView.vue";
 import FeedPane from "@/components/community/FeedPane.vue";
 import StoriesPane from "@/components/community/StoriesPane.vue";
 import EventsPane from "@/components/community/EventsPane.vue";
@@ -84,6 +85,7 @@ const {
   handleToggleNotifications,
   openUserSettings,
   openHome,
+  openThreads,
   closeUserSettings,
   handleLogout,
   selectChannel,
@@ -279,9 +281,11 @@ onUnmounted(() => window.removeEventListener("popstate", refreshAdminPanelFromUr
           :active-community-surface="ui.activeCommunitySurface.value"
           :stories-active-count="stories.activeStories.value.length"
           :upcoming-event-count="communityEvents.events.value.filter((e: { dtstartMs?: number }) => typeof e.dtstartMs === 'number' && e.dtstartMs > Date.now()).length"
+          :is-threads-active="ui.activePage.value === 'threads'"
           @select-channel="onSelectChannelFromSidebar"
           @select-thread="onSelectThread"
           @select-community-surface="onSelectCommunitySurface"
+          @select-threads-view="openThreads"
           @create-channel="openCreateChannelDialog()"
           @create-channel-in-space="openCreateChannelDialog"
           @open-settings="ui.showWaddleSettings.value = true"
@@ -345,6 +349,9 @@ onUnmounted(() => window.removeEventListener("popstate", refreshAdminPanelFromUr
         @cancel-instance="(uid, dtstartMs) => communityEvents.cancelInstance(uid, dtstartMs)"
         @rsvp="(event, partstat) => onCommunityRsvp(event, partstat)"
         @open-nav="ui.showMobileNav.value = true"
+      />
+      <ThreadsView
+        v-else-if="ui.activePage.value === 'threads'"
       />
       <UserSettingsPage
         v-else-if="ui.activePage.value === 'settings' && connectionStore.session"

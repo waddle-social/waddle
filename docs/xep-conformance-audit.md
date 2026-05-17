@@ -100,7 +100,7 @@ or advertises. One row per XEP. Each gap becomes an isolated PR.
 | 0424 | Message Retraction                                   | urn:xmpp:message-retract:1         |  Y  |  Y   |   Y   | unaudited  | |
 | 0425 | Message Moderation                                   | urn:xmpp:message-moderate:1        |  Y  |  Y   |   Y   | unaudited  | |
 | 0428 | Fallback Indication                                  | urn:xmpp:fallback:0                |  Y  |  Y   |   -   | unaudited  | |
-| 0430 | Inbox                                                | urn:xmpp:inbox:0                   |  Y  |  Y   |   -   | unaudited  | Advert added at server crate level |
+| 0430 | Inbox                                                | urn:waddle:inbox:0 + erlang-solutions.com:xmpp:inbox:0 |  Y  |  Y   |   -   | gap        | Waddle private surface (`urn:waddle:inbox:0`) plus ESL/MongooseIM compat (`erlang-solutions.com:xmpp:inbox:0`). Conformant XEP-0430 (`urn:xmpp:inbox:0` / `urn:xmpp:inbox:1`) migration is a queued follow-up — see plan in `docs/superpowers/specs/2026-05-17-threads-design.md`. |
 | 0431 | -                                                    | (assigned)                         |  -  |  Y   |   -   | unaudited  | Verify XEP number |
 | 0433 | -                                                    |                                    |  -  |  Y   |   -   | unaudited  | Verify XEP number |
 | 0437 | Room Activity Indicators                             | urn:xmpp:rai:0                     |  -  |  Y   |   -   | unaudited  | |
@@ -126,6 +126,7 @@ or advertises. One row per XEP. Each gap becomes an isolated PR.
 | 0503 | Spaces                                               | urn:xmpp:spaces:0                  |  Y  |  Y   |   Y   | unaudited  | Advert gated until owner subs done |
 | 0508 | -                                                    |                                    |  -  |  Y   |   -   | unaudited  | Verify XEP number |
 | 0513 | Explicit Mentions                                    | urn:xmpp:mentions:0                |  Y  |  Y   |   Y   | unaudited  | Plus `#channel` profile |
+| —    | (Waddle) Threads view                                | urn:waddle:threads:0               |  Y  |  Y   |   Y   | fixed      | Waddle-namespaced (no XEP equivalent — Fluux made the same call for their custom conversation list). Server reads `inbox_entries WHERE thread_id != ''`; chat client renders a two-section view (Unread / Following). PR #671. |
 
 ## Currently identified gaps (preliminary, pre-deep-audit)
 

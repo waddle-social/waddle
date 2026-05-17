@@ -7,7 +7,7 @@ import type { AdminTab } from "@/lib/chat-ui";
 export type CommunitySurface = "feed" | "stories" | "events";
 
 export function useChatShellState() {
-  const activePage = ref<"dashboard" | "chat" | "settings" | "admin">("dashboard");
+  const activePage = ref<"dashboard" | "chat" | "settings" | "admin" | "threads">("dashboard");
   const adminTab = ref<AdminTab>("rooms");
   const sidebarMode = ref<"channels" | "dms">("channels");
   /** Which community pseudo-channel is currently active (if any).

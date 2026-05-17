@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, watch } from "vue";
-import { CalendarDays, Camera, Hash, MessageSquareText, MessagesSquare, Plus, Settings, Users, ChevronDown, ChevronRight, MessageCircle } from "lucide-vue-next";
+import { CalendarDays, Camera, Hash, ListTree, MessageSquareText, MessagesSquare, Plus, Settings, Users, ChevronDown, ChevronRight, MessageCircle } from "lucide-vue-next";
 import { isForumChannel as detectForumChannel } from "@/lib/channel-types";
 import type { ChannelSummary, SpaceSummary } from "@/lib/chat-types";
 import type { ChannelThreadInboxEntry } from "@/channels/inbox";
@@ -31,6 +31,10 @@ const props = defineProps<{
   feedNewCount?: number;
   storiesActiveCount?: number;
   upcomingEventCount?: number;
+  /** True when the global Threads view is currently active. */
+  isThreadsActive?: boolean;
+  /** Unread-thread count for the global Threads view badge. */
+  threadsUnreadCount?: number;
 }>();
 
 function hasActivity(channelId: string): boolean {
@@ -141,6 +145,7 @@ const emit = defineEmits<{
   selectChannel: [id: string];
   selectThread: [channelId: string, threadId: string];
   selectCommunitySurface: [surface: "feed" | "stories" | "events"];
+  selectThreadsView: [];
   createChannel: [];
   createChannelInSpace: [spaceId: string | null];
   openSettings: [];
@@ -253,6 +258,20 @@ watch(
                are NOT real channels. Selecting one swaps the
                content area for that surface's content pane. -->
           <section class="grid gap-1" aria-label="Community surfaces">
+            <button
+              type="button"
+              class="chat-list-row flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left hover:bg-sidebar-accent/35"
+              :class="isThreadsActive ? 'bg-sidebar-accent/60 text-sidebar-foreground' : 'text-sidebar-foreground/85'"
+              @click="emit('selectThreadsView')"
+            >
+              <ListTree class="h-3.5 w-3.5 flex-shrink-0 text-primary" aria-hidden="true" />
+              <span class="flex-1 truncate type-control">Threads</span>
+              <span
+                v-if="(threadsUnreadCount ?? 0) > 0"
+                class="type-count-badge inline-flex min-w-[18px] h-[18px] items-center justify-center rounded-full bg-primary px-1 text-primary-foreground"
+                aria-hidden="true"
+              >{{ threadsUnreadCount }}</span>
+            </button>
             <button
               type="button"
               class="chat-list-row flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left hover:bg-sidebar-accent/35"

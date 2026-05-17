@@ -417,6 +417,9 @@ async fn create_websocket_state(
                 room_registry,
                 mam_storage,
                 inbox_storage: Arc::clone(&state.inbox_storage),
+                threads_storage: Arc::new(crate::threads::storage::InboxBackedThreadsStorage::new(
+                    Arc::clone(&state.inbox_storage),
+                )),
                 blocking_storage,
                 pending_delivery_storage,
                 command_registry: websocket_command_registry,

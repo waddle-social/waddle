@@ -5,7 +5,7 @@ export class WaddleClient {
     free(): void;
     [Symbol.dispose](): void;
     /**
-     * Call the `urn:xmpp:waddle:admin:users:list:0` ad-hoc command
+     * Call the `urn:waddle:admin:users:list:0` ad-hoc command
      * against the user-bearing server domain and return a typed
      * page of matching users. Errors out (rejecting the returned
      * Promise) if the server replies with a stanza error — the
@@ -65,6 +65,11 @@ export class WaddleClient {
      * here as a rejected Promise.
      */
     fetch_room_pins(room_jid: string): Promise<any>;
+    /**
+     * Fetch the global threads view (`urn:waddle:threads:0`).
+     * Returns a `WaddleThreadsPage` (empty page on transport failure).
+     */
+    fetch_threads(opts: any): Promise<any>;
     fetch_user_pep_profile(jid: string): Promise<any>;
     fetch_vcard4(jid: string): Promise<any>;
     get_resume_state(): any;

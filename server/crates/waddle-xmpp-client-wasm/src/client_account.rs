@@ -144,6 +144,48 @@ impl WaddleClient {
         })
     }
 
+    /// Fetch the global threads view (`urn:waddle:threads:0`).
+    /// Returns a `WaddleThreadsPage` (empty page on transport failure).
+    pub fn fetch_threads(&self, opts: JsValue) -> Promise {
+        let inner = self.inner.clone();
+        future_to_promise(async move {
+            let opts: WaddleFetchThreadsOptions = if opts.is_null() || opts.is_undefined() {
+                WaddleFetchThreadsOptions::default()
+            } else {
+                serde_wasm_bindgen::from_value(opts).map_err(|err| js_error(err.to_string()))?
+            };
+            let request_id = uuid::Uuid::new_v4().to_string();
+            let iq =
+                build_fetch_threads_iq(&request_id, opts.page_size, opts.after_cursor.as_deref());
+            let page = match send_iq_command(inner, iq).await {
+                Ok(result) => parse_threads_response(&result).unwrap_or_default(),
+                Err(_) => Default::default(),
+            };
+            let payload = WaddleThreadsPage {
+                total: page.total,
+                unread_threads: page.unread_threads,
+                entries: page
+                    .entries
+                    .into_iter()
+                    .map(|e| WaddleThreadEntry {
+                        channel: e.channel,
+                        thread_id: e.thread_id,
+                        last_stanza_id: e.last_stanza_id,
+                        last_activity: e.last_activity,
+                        unread: e.unread,
+                        reply_count: e.reply_count,
+                        has_unread: e.has_unread,
+                        root_author: e.root_author,
+                        preview: e.preview,
+                        thread_title: e.thread_title,
+                    })
+                    .collect(),
+                next_cursor: page.next_cursor,
+            };
+            to_js_value(&payload)
+        })
+    }
+
     pub fn mark_inbox_read(&self, partner_jid: String, thread_id: Option<String>) -> Promise {
         let inner = self.inner.clone();
         future_to_promise(async move {

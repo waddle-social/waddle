@@ -43,6 +43,13 @@ impl Feature {
         Self::new("urn:xmpp:reply:0")
     }
 
+    /// Waddle's global threads view query (`urn:waddle:threads:0`).
+    /// Named `threads_query` rather than `threads` to avoid colliding
+    /// with the deprecated `urn:xmpp:threads:0` namespace.
+    pub fn threads_query() -> Self {
+        Self::new("urn:waddle:threads:0")
+    }
+
     pub fn stanza_ids() -> Self {
         Self::new("urn:xmpp:sid:0")
     }
