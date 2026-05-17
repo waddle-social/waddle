@@ -198,4 +198,69 @@ describe("useCommunityEvents", () => {
     expect(client.retractCommunityEvent).toHaveBeenCalledWith(COMMUNITY, "evt-a");
     expect(events.events.value.map((e) => e.id)).toEqual(["evt-b"]);
   });
+
+  test("cancelInstance appends EXDATE on recurring master and republishes", async () => {
+    const dtstart = Date.parse("2026-06-05T19:00:00Z");
+    const skipInstance = Date.parse("2026-06-12T19:00:00Z");
+    const client = makeClient([
+      {
+        id: "evt-series",
+        uid: "evt-series",
+        summary: "Friday Game Night",
+        dtstartMs: dtstart,
+        rrule: { freq: "WEEKLY", byDay: ["FR"], count: 4 },
+      },
+    ]);
+    const events = useCommunityEvents(ref<BrowserXmppClient | null>(client), {
+      communityJid: ref<string | null>(COMMUNITY),
+    });
+    await events.refresh();
+    const ok = await events.cancelInstance("evt-series", skipInstance);
+    expect(ok).toBe(true);
+    expect(client.updateCommunityEvent).toHaveBeenCalledTimes(1);
+    const updateCall = client.updateCommunityEvent.mock.calls[0];
+    expect(updateCall?.[0]).toBe(COMMUNITY);
+    expect(updateCall?.[1]).toBe("evt-series");
+    expect(updateCall?.[2]?.exdatesMs).toEqual([skipInstance]);
+    expect(client.retractCommunityEvent).not.toHaveBeenCalled();
+  });
+
+  test("cancelInstance falls back to retract for non-recurring events", async () => {
+    const future = Date.now() + 86_400_000;
+    const client = makeClient([
+      { id: "evt-once", uid: "evt-once", summary: "One-off", dtstartMs: future },
+    ]);
+    const events = useCommunityEvents(ref<BrowserXmppClient | null>(client), {
+      communityJid: ref<string | null>(COMMUNITY),
+    });
+    await events.refresh();
+    const ok = await events.cancelInstance("evt-once", future);
+    expect(ok).toBe(true);
+    expect(client.retractCommunityEvent).toHaveBeenCalledWith(COMMUNITY, "evt-once");
+  });
+
+  test("findMaster recovers the unexpanded master by uid", async () => {
+    const dtstart = Date.parse("2026-06-05T19:00:00Z");
+    const client = makeClient([
+      {
+        id: "evt-series",
+        uid: "evt-series",
+        summary: "Friday Game Night",
+        dtstartMs: dtstart,
+        rrule: { freq: "WEEKLY", byDay: ["FR"], count: 4 },
+      },
+    ]);
+    const events = useCommunityEvents(ref<BrowserXmppClient | null>(client), {
+      communityJid: ref<string | null>(COMMUNITY),
+    });
+    await events.refresh();
+    // Sorted view contains synthetic-id instances.
+    const instance = events.events.value[0]!;
+    expect(instance.id).not.toBe(instance.uid);
+    expect(instance.rrule).toBeUndefined();
+    // findMaster routes back to the real pubsub item with RRULE intact.
+    const master = events.findMaster(instance.uid);
+    expect(master?.id).toBe("evt-series");
+    expect(master?.rrule?.freq).toBe("WEEKLY");
+  });
 });

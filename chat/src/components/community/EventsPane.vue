@@ -30,6 +30,12 @@ interface EventsPaneProps {
   error: string | null;
   canPost: boolean;
   selfJid: string | null;
+  /**
+   * Resolver from a UID back to the unexpanded master event so the
+   * pane can edit / cancel the actual pubsub item rather than the
+   * synthetic per-instance id produced by client-side expansion.
+   */
+  findMaster: (uid: string) => CommunityEvent | null;
 }
 
 const props = defineProps<EventsPaneProps>();
@@ -37,7 +43,8 @@ const emit = defineEmits<{
   refresh: [];
   post: [input: CommunityEventInput];
   edit: [itemId: string, input: CommunityEventInput];
-  cancelEvent: [event: CommunityEvent];
+  cancelSeries: [masterId: string];
+  cancelInstance: [masterUid: string, instanceDtstartMs: number];
   rsvp: [event: CommunityEvent, partstat: PartStat];
   openNav: [];
 }>();
@@ -291,21 +298,60 @@ function toDatetimeLocal(ms: number | undefined): string {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
+/**
+ * Edits always target the unexpanded master so the RRULE / EXDATEs
+ * are preserved and the resulting publish lands at the real pubsub
+ * item id. An expanded instance has a synthetic id (`<master>::<ts>`)
+ * which doesn't exist on the server.
+ */
 function startEdit(event: CommunityEvent) {
-  editingId.value = event.id;
-  summary.value = event.summary;
-  description.value = event.description ?? "";
-  location.value = event.location ?? "";
-  dtstart.value = toDatetimeLocal(event.dtstartMs);
-  dtend.value = toDatetimeLocal(event.dtendMs);
-  rrule.value = event.rrule ?? null;
+  const master = props.findMaster(event.uid) ?? event;
+  editingId.value = master.id;
+  summary.value = master.summary;
+  description.value = master.description ?? "";
+  location.value = master.location ?? "";
+  dtstart.value = toDatetimeLocal(master.dtstartMs);
+  dtend.value = toDatetimeLocal(master.dtendMs);
+  rrule.value = master.rrule ?? null;
   composerOpen.value = true;
 }
 
+// ── Cancel action sheet ──────────────────────────────────────────────────────
+// Tracks which event the user just clicked Trash on. For recurring
+// events we pop a small action sheet to choose just-this vs entire-
+// series; for one-off events a plain confirm() is enough.
+const cancelTarget = ref<CommunityEvent | null>(null);
+
 function onCancelEvent(event: CommunityEvent) {
-  const ok = window.confirm(`Cancel "${event.summary}"? This removes the event for everyone.`);
+  const master = props.findMaster(event.uid);
+  if (master?.rrule) {
+    cancelTarget.value = event;
+    return;
+  }
+  const ok = window.confirm(
+    `Cancel "${event.summary}"? This removes the event for everyone.`,
+  );
   if (!ok) return;
-  emit("cancelEvent", event);
+  emit("cancelSeries", (master ?? event).id);
+}
+
+function confirmCancelInstance() {
+  const event = cancelTarget.value;
+  if (!event || typeof event.dtstartMs !== "number") return;
+  emit("cancelInstance", event.uid, event.dtstartMs);
+  cancelTarget.value = null;
+}
+
+function confirmCancelSeries() {
+  const event = cancelTarget.value;
+  if (!event) return;
+  const master = props.findMaster(event.uid) ?? event;
+  emit("cancelSeries", master.id);
+  cancelTarget.value = null;
+}
+
+function dismissCancelSheet() {
+  cancelTarget.value = null;
 }
 
 function submit() {
@@ -776,6 +822,53 @@ const DOW_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
         </p>
       </template>
 
+    </div>
+
+    <!-- Cancel action sheet (recurring events only) -->
+    <div
+      v-if="cancelTarget"
+      class="fixed inset-0 z-50 flex items-end justify-center bg-black/40 p-4 sm:items-center"
+      role="dialog"
+      aria-modal="true"
+      @click.self="dismissCancelSheet"
+    >
+      <div class="w-full max-w-sm rounded-lg border border-border bg-card p-4 shadow-lg">
+        <h2 class="type-pane-title text-foreground">
+          Cancel "{{ cancelTarget.summary }}"
+        </h2>
+        <p class="type-caption mt-1 text-muted-foreground">
+          This event repeats. Choose what to cancel:
+        </p>
+        <div class="mt-3 grid gap-2">
+          <button
+            type="button"
+            class="inline-flex items-center justify-between rounded-md border border-input px-3 py-2 text-sm text-foreground hover:bg-muted/50"
+            @click="confirmCancelInstance"
+          >
+            <span>Just this occurrence</span>
+            <span class="type-caption text-muted-foreground">
+              {{ cancelTarget.dtstartMs ? new Date(cancelTarget.dtstartMs).toLocaleString(undefined, { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : '' }}
+            </span>
+          </button>
+          <button
+            type="button"
+            class="inline-flex items-center justify-between rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2 text-sm text-destructive hover:bg-destructive/10"
+            @click="confirmCancelSeries"
+          >
+            <span>The entire series</span>
+            <span class="type-caption">All future occurrences</span>
+          </button>
+        </div>
+        <div class="mt-3 flex justify-end">
+          <button
+            type="button"
+            class="inline-flex items-center gap-1 rounded-md px-3 py-1.5 text-xs text-muted-foreground hover:bg-muted/50 hover:text-foreground"
+            @click="dismissCancelSheet"
+          >
+            Keep event
+          </button>
+        </div>
+      </div>
     </div>
   </div>
 </template>
