@@ -98,6 +98,52 @@ export function useCommunityEvents(
   }
 
   /**
+   * Replace an existing event in place. The pubsub item id is
+   * preserved so sibling RSVPs (`<itemId>-rsvp-*`) stay grouped
+   * under the same master after the next refresh.
+   */
+  async function edit(
+    itemId: string,
+    input: CommunityEventInput,
+  ): Promise<CommunityEvent | null> {
+    const client = xmppClient.value;
+    const jid = options.communityJid.value;
+    if (!client || !jid) return null;
+    if (!input.summary.trim()) return null;
+    isPosting.value = true;
+    error.value = null;
+    try {
+      const event = await client.updateCommunityEvent(jid, itemId, input);
+      events.value = events.value.map((e) => (e.id === itemId ? event : e));
+      return event;
+    } catch (err) {
+      error.value = err instanceof Error ? err.message : String(err);
+      return null;
+    } finally {
+      isPosting.value = false;
+    }
+  }
+
+  /**
+   * Cancel (retract) an event series entirely. Optimistically drops
+   * the master from local state so the UI updates instantly; the
+   * next refresh confirms.
+   */
+  async function cancel(itemId: string): Promise<boolean> {
+    const client = xmppClient.value;
+    const jid = options.communityJid.value;
+    if (!client || !jid || !itemId) return false;
+    try {
+      await client.retractCommunityEvent(jid, itemId);
+      events.value = events.value.filter((e) => e.id !== itemId);
+      return true;
+    } catch (err) {
+      error.value = err instanceof Error ? err.message : String(err);
+      return false;
+    }
+  }
+
+  /**
    * Publish (or update) this session's RSVP for an event. Server
    * persists a sibling pubsub item; we optimistically fold the new
    * attendee into the local master and rely on refresh() for the
@@ -148,6 +194,8 @@ export function useCommunityEvents(
     error,
     refresh,
     post,
+    edit,
+    cancel,
     rsvp,
     clear,
   };
