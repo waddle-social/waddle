@@ -215,24 +215,66 @@ async fn enqueue_xep0357_notification_candidate_from_committed_archive(
             return NotificationCandidateQueueOutcome::RetryLater;
         }
     };
-    let sender = archived.from.to_bare();
-    let original_message =
-        super::archive_lookup::parse_archived_message_xml(archived.stanza_xml.as_deref())
-            .unwrap_or_else(|| super::archive_lookup::fallback_archived_message(&archived));
+    let parsed_original_message =
+        super::archive_lookup::parse_archived_message_xml(archived.stanza_xml.as_deref());
+    let Some(sender_jid) = notification_sender_jid(&archived, parsed_original_message.as_ref())
+    else {
+        warn!(
+            recipient = %recipient,
+            stanza_id = %archive_stanza_id,
+            archive_sender = %archived.from,
+            "XEP-0357 notification candidate skipped because exact sender resource provenance is unavailable"
+        );
+        return NotificationCandidateQueueOutcome::Completed;
+    };
+    let sender = sender_jid.to_bare();
+    let original_message = parsed_original_message
+        .unwrap_or_else(|| super::archive_lookup::fallback_archived_message(&archived));
     enqueue_xep0357_notification_candidate_for_message(
         state,
         recipient,
         &sender,
+        &sender_jid,
         archive_stanza_id,
         &original_message,
     )
     .await
 }
 
+fn notification_sender_jid(
+    archived: &MamArchivedMessage,
+    original_message: Option<&Message>,
+) -> Option<Jid> {
+    if let Some(from) = original_message.and_then(|message| message.from.clone()) {
+        if let Some(_resource) = from.resource() {
+            if archived.from.resource().is_some() {
+                if from == archived.from {
+                    return Some(from);
+                }
+            } else if from.to_bare() == archived.from.to_bare() {
+                return Some(from);
+            }
+        }
+        warn!(
+            archive_sender = %archived.from,
+            stanza_sender = %from,
+            "Archived stanza XML sender conflicted with MAM row sender; skipping push candidate"
+        );
+        return None;
+    }
+
+    if archived.from.resource().is_some() {
+        Some(archived.from.clone())
+    } else {
+        None
+    }
+}
+
 async fn enqueue_xep0357_notification_candidate_for_message(
     state: &WebSocketState,
     recipient: &BareJid,
     sender: &BareJid,
+    sender_jid: &Jid,
     archive_stanza_id: &waddle_xmpp_core::xep0359::StanzaId,
     original_message: &Message,
 ) -> NotificationCandidateQueueOutcome {
@@ -262,7 +304,7 @@ async fn enqueue_xep0357_notification_candidate_for_message(
     }
     let candidate = match crate::notification_outbox::NotificationCandidate::direct_message(
         recipient.clone(),
-        sender.clone(),
+        sender_jid.clone(),
         archive_stanza_id.clone(),
     ) {
         Ok(candidate) => candidate,

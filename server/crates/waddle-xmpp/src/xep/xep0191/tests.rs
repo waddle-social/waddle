@@ -222,6 +222,31 @@ fn test_build_blocklist_response() {
     }
 }
 
+#[tokio::test]
+async fn in_memory_blocking_storage_preserves_stored_jid_forms() {
+    let storage = InMemoryBlockingStorage::new();
+    let user: BareJid = "alice@example.com".parse().unwrap();
+    let entries: Vec<Jid> = vec![
+        "bob@example.com/phone".parse().unwrap(),
+        "blocked.example.com".parse().unwrap(),
+    ];
+
+    storage.set_blocklist_jids(user.clone(), entries.clone());
+
+    assert_eq!(
+        storage
+            .list_blocked_jid_entries(&user)
+            .await
+            .expect("stored JID entries"),
+        entries
+    );
+    assert!(storage
+        .list_blocked_jids(&user)
+        .await
+        .expect("bare JID snapshot")
+        .contains(&"blocked.example.com".parse().unwrap()));
+}
+
 #[test]
 fn test_build_empty_blocklist_response() {
     let blocklist_elem = Element::builder("blocklist", NS_BLOCKING).build();
