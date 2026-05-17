@@ -183,7 +183,8 @@ fn xep0292_round_trip_preserves_every_supported_property() {
         .with_org("House Montague")
         .with_title("Heir")
         .with_url("https://romeo.example.com")
-        .with_photo("https://example.com/romeo.jpg");
+        .with_photo("https://example.com/romeo.jpg")
+        .with_pronouns("he/him");
 
     let elem = build_vcard4_element(&original);
     let reparsed = parse_vcard4(&elem);
@@ -196,6 +197,7 @@ fn xep0292_round_trip_preserves_every_supported_property() {
     assert_eq!(reparsed.title, original.title);
     assert_eq!(reparsed.url, original.url);
     assert_eq!(reparsed.photo_uri, original.photo_uri);
+    assert_eq!(reparsed.pronouns, original.pronouns);
 }
 
 #[test]
@@ -227,4 +229,102 @@ fn xep0292_parse_tolerates_missing_optional_properties() {
     assert_eq!(parsed.full_name, None);
     assert_eq!(parsed.email, None);
     assert_eq!(parsed.photo_uri, None);
+    assert_eq!(parsed.pronouns, None);
+}
+
+// ── RFC 6350 §6.2.7 / RFC 9554 PRONOUNS round-trip ───────────────────
+
+#[test]
+fn xep0292_parses_pronouns_text_child_per_rfc6350() {
+    // RFC 6350 §6.2 (extended by RFC 9554 §3.1) defines `PRONOUNS` as
+    // a text property. The XEP-0292 XML binding wraps every text
+    // property's value in a `<text>` grandchild — `<pronouns>` is no
+    // different. A conformant client publishes
+    // `<pronouns><text>they/them</text></pronouns>`; the parser must
+    // surface the value as `vcard.pronouns`.
+    let xml = "<vcard xmlns='urn:ietf:params:xml:ns:vcard-4.0'>\
+                  <fn><text>Sam</text></fn>\
+                  <pronouns><text>they/them</text></pronouns>\
+              </vcard>";
+    let elem: Element = xml.parse().expect("valid vCard4 XML");
+    let parsed = parse_vcard4(&elem);
+
+    assert_eq!(parsed.full_name.as_deref(), Some("Sam"));
+    assert_eq!(parsed.pronouns.as_deref(), Some("they/them"));
+}
+
+#[test]
+fn xep0292_pronouns_round_trip_preserves_value() {
+    // Build a vCard4 with only pronouns set, serialize, reparse, and
+    // confirm the value survives. Guards against accidental dropping
+    // of the property by either the builder or the parser.
+    let original = VCard4::new().with_pronouns("xe/xem");
+    let elem = build_vcard4_element(&original);
+    let reparsed = parse_vcard4(&elem);
+
+    assert_eq!(reparsed.pronouns.as_deref(), Some("xe/xem"));
+    assert_eq!(reparsed.full_name, None);
+}
+
+#[test]
+fn xep0292_pronouns_builder_emits_namespaced_text_grandchild() {
+    // Wire-shape contract: the builder MUST emit
+    // `<pronouns xmlns='urn:ietf:params:xml:ns:vcard-4.0'>
+    //    <text xmlns='urn:ietf:params:xml:ns:vcard-4.0'>...</text>
+    //  </pronouns>` — the same shape every other RFC 6350 text
+    // property uses. A peer parser following the spec will look for
+    // exactly this nesting.
+    let vcard = VCard4::new().with_pronouns("she/they");
+    let elem = build_vcard4_element(&vcard);
+
+    let pronouns_child = elem
+        .children()
+        .find(|c| c.name() == "pronouns" && c.ns() == NS_VCARD4)
+        .expect("<pronouns> child present");
+    let pronouns_text = pronouns_child
+        .children()
+        .find(|c| c.name() == "text" && c.ns() == NS_VCARD4)
+        .expect("<pronouns> wraps <text> per RFC 6351 mapping");
+    assert_eq!(pronouns_text.text(), "she/they");
+}
+
+#[test]
+fn xep0292_pronouns_omitted_when_unset() {
+    // Absent pronouns MUST NOT serialize to a ghost
+    // `<pronouns/>` element — an empty element would parse back to
+    // `Some("")` on some implementations and falsely indicate the
+    // user has declared pronouns when they have not.
+    let vcard = VCard4::new().with_full_name("Anonymous");
+    let elem = build_vcard4_element(&vcard);
+
+    assert!(
+        elem.children()
+            .find(|c| c.name() == "pronouns")
+            .is_none(),
+        "unset pronouns must not emit a <pronouns/> element"
+    );
+
+    // And the parser side: an empty `<text/>` under `<pronouns>`
+    // MUST round-trip to `None`, not `Some("")` — the parser already
+    // filters empty text values; this test pins that behaviour for
+    // pronouns specifically.
+    let xml = "<vcard xmlns='urn:ietf:params:xml:ns:vcard-4.0'>\
+                  <fn><text>Anon</text></fn>\
+                  <pronouns><text></text></pronouns>\
+              </vcard>";
+    let parsed = parse_vcard4(&xml.parse::<Element>().expect("valid xml"));
+    assert_eq!(parsed.pronouns, None);
+}
+
+#[test]
+fn xep0292_pronouns_freeform_value_preserved_verbatim() {
+    // RFC 9554 §3.1 explicitly leaves the value freeform — no
+    // enumeration, no normalisation. The parser/builder must not
+    // mangle whitespace, case, or punctuation in the user's chosen
+    // string.
+    let raw = "He/Him  ·  They/Them (formal)";
+    let vcard = VCard4::new().with_pronouns(raw);
+    let elem = build_vcard4_element(&vcard);
+    let parsed = parse_vcard4(&elem);
+    assert_eq!(parsed.pronouns.as_deref(), Some(raw));
 }
