@@ -9,7 +9,7 @@
  * server side `pep_feed_bridge` shadow-published this entry. Manual
  * posts leave `source` undefined.
  */
-export type FeedSourceKind = "mood" | "activity" | "tune" | "avatar" | "vcard";
+export type FeedSourceKind = "mood" | "activity" | "tune" | "avatar" | "vcard" | "rsvp";
 
 export interface FeedEntry {
   /** Pubsub item id assigned by the publisher (UUID). */
@@ -51,6 +51,7 @@ const KNOWN_SOURCE_KINDS: ReadonlySet<FeedSourceKind> = new Set([
   "tune",
   "avatar",
   "vcard",
+  "rsvp",
 ]);
 
 function coerceSource(raw: string | null | undefined): FeedSourceKind | undefined {

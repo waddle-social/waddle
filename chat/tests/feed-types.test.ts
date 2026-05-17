@@ -25,7 +25,7 @@ describe("feedEntryFromWasm", () => {
   });
 
   test("bridged entry surfaces the source kind", () => {
-    for (const kind of ["mood", "activity", "tune", "avatar", "vcard"] as const) {
+    for (const kind of ["mood", "activity", "tune", "avatar", "vcard", "rsvp"] as const) {
       const wasm: WasmFeedEntry = {
         id: `bridged-${kind}`,
         body: "summary",
