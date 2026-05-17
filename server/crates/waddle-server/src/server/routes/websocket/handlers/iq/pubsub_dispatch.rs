@@ -14,6 +14,7 @@ pub(super) async fn handle_pubsub_iq(
     let spaces_domain = ctx.spaces_domain;
     let community_domain = ctx.community_domain;
     let extensions_domain = ctx.extensions_domain;
+    let push_domain = ctx.push_domain;
     let response_from = ctx.response_from;
     let response_to = ctx.response_to;
 
@@ -54,7 +55,11 @@ pub(super) async fn handle_pubsub_iq(
         debug!(?request, "Handling PubSub request via WebSocket");
 
         match request {
-            PubSubRequest::Publish { node, item } => {
+            PubSubRequest::Publish { node, item, .. } => {
+                if !matches!(&iq.payload, xmpp_parsers::iq::IqType::Set(_)) {
+                    return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::BadRequest))];
+                }
+
                 if target_jid.to_string() == spaces_domain {
                     return handle_spaces_publish(
                         iq,
@@ -77,6 +82,15 @@ pub(super) async fn handle_pubsub_iq(
                         authenticated_session.as_ref(),
                     )
                     .await;
+                }
+
+                if target_jid.to_string() == push_domain {
+                    // XEP-0357 publishes to a Push Service are emitted by the
+                    // user's XMPP server, not by arbitrary client full JIDs.
+                    // Durable server-origin publish jobs enter through the
+                    // internal XEP-0060 PubSub IQ path; client WebSocket
+                    // ingress is forbidden.
+                    return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::Forbidden))];
                 }
 
                 let is_pep = is_pep_self_or_to(iq, &target_jid, &user_jid);

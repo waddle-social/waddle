@@ -6,6 +6,7 @@ fn service_domains_use_xmpp_domain_for_all_components() {
 
     assert_eq!(domains.extensions, "extensions.waddle.social");
     assert_eq!(domains.muc, "muc.waddle.social");
+    assert_eq!(domains.push, "push.waddle.social");
     assert_eq!(domains.spaces, "spaces.waddle.social");
     assert_eq!(domains.upload, "upload.waddle.social");
 }

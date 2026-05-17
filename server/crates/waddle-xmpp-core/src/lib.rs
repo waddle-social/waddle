@@ -28,9 +28,9 @@ pub use disco::{
     build_disco_info_response, build_disco_info_response_with_extensions,
     build_disco_items_response, community_service_features, is_disco_info_query,
     is_disco_items_query, muc_room_features, muc_service_features, parse_disco_info_query,
-    parse_disco_items_query, pubsub_service_features, server_features, spaces_service_features,
-    upload_service_features, DiscoInfoQuery, DiscoItem, DiscoItemsQuery, Feature, Identity,
-    DISCO_INFO_NS, DISCO_ITEMS_NS,
+    parse_disco_items_query, pubsub_service_features, push_service_features, server_features,
+    spaces_service_features, upload_service_features, DiscoInfoQuery, DiscoItem, DiscoItemsQuery,
+    Feature, Identity, DISCO_INFO_NS, DISCO_ITEMS_NS,
 };
 pub use domain::{
     managed_room_jid, managed_room_localpart, parse_managed_room_jid, parse_managed_room_localpart,

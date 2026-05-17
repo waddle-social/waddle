@@ -162,12 +162,19 @@ fn parse_occupant_id_secret(raw: Option<&str>) -> Result<OccupantIdSecret, Strin
     })
 }
 
+const SESSION_KEY_MIN_BYTES: usize = 32;
+
 fn parse_session_key(raw: Option<&str>) -> Result<String, String> {
-    raw.filter(|value| !value.is_empty())
-        .map(str::to_string)
-        .ok_or_else(|| {
-            "WADDLE_SESSION_KEY is required (generate with: openssl rand -base64 48)".to_string()
-        })
+    let value = raw.filter(|value| !value.is_empty()).ok_or_else(|| {
+        "WADDLE_SESSION_KEY is required (generate with: openssl rand -base64 48)".to_string()
+    })?;
+    if value.len() < SESSION_KEY_MIN_BYTES {
+        return Err(format!(
+            "WADDLE_SESSION_KEY must be at least {SESSION_KEY_MIN_BYTES} bytes \
+             (generate with: openssl rand -base64 48)"
+        ));
+    }
+    Ok(value.to_string())
 }
 
 #[cfg(test)]
@@ -191,7 +198,7 @@ impl Default for ServerConfig {
         Self {
             mode: ServerMode::default(),
             base_url: "http://localhost:3000".to_string(),
-            session_key: "test-session-key".to_string(),
+            session_key: "test-session-key-32-bytes-minimum".to_string(),
             auth: AuthConfig::default(),
             extensions: ExtensionConfig::default(),
             spicedb: None,
@@ -302,8 +309,21 @@ mod tests {
 
     #[test]
     fn parse_session_key_accepts_value() {
-        let value = "test-session-key";
+        let value = "test-session-key-32-bytes-minimum";
         assert_eq!(parse_session_key(Some(value)).unwrap(), value);
+    }
+
+    #[test]
+    fn parse_session_key_rejects_short_value() {
+        let err = parse_session_key(Some("short")).unwrap_err();
+        assert!(
+            err.contains("at least"),
+            "error must mention the length floor; got: {err}"
+        );
+        assert!(
+            err.contains("openssl rand"),
+            "error must include the generation recipe; got: {err}"
+        );
     }
 
     #[test]

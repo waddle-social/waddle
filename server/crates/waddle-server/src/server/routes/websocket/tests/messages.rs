@@ -1,6 +1,266 @@
 use super::*;
 
 #[tokio::test]
+async fn queue_offline_delivery_publishes_first_party_xep0357_notification_without_touching_external_registrations(
+) {
+    let state = create_test_websocket_state().await;
+    let recipient: BareJid = "bob@example.com".parse().expect("recipient");
+    let node = state
+        .deps
+        .protocol
+        .push_service
+        .ensure_node(&recipient, "web")
+        .await
+        .expect("push node");
+    state
+        .deps
+        .protocol
+        .push_service
+        .upsert_device(
+            &recipient,
+            crate::push_service::PushDeviceRegistration::new(
+                "web-1",
+                node.node(),
+                crate::push_service::PushDevicePlatform::Web,
+                "test",
+            ),
+        )
+        .await
+        .expect("push device");
+    state
+        .deps
+        .protocol
+        .push_service
+        .register_first_party_node_for_owner(&recipient, "push.example.com", node.node(), None)
+        .await
+        .expect("first-party push registration");
+    state
+        .deps
+        .protocol
+        .push_store
+        .register(waddle_xmpp::push::PushSubscription {
+            user_jid: recipient.to_string(),
+            service_jid: "push-provider.example.com".to_string(),
+            node: Some("external-web-node".to_string()),
+            publish_options: Some(
+                Element::builder("x", waddle_xmpp::xep::NS_DATA_FORMS)
+                    .attr("type", "submit")
+                    .append(
+                        Element::builder("field", waddle_xmpp::xep::NS_DATA_FORMS)
+                            .attr("var", "FORM_TYPE")
+                            .append(
+                                Element::builder("value", waddle_xmpp::xep::NS_DATA_FORMS)
+                                    .append(waddle_xmpp::xep::NS_PUBSUB_PUBLISH_OPTIONS)
+                                    .build(),
+                            )
+                            .build(),
+                    )
+                    .append(
+                        Element::builder("field", waddle_xmpp::xep::NS_DATA_FORMS)
+                            .attr("var", "secret")
+                            .append(
+                                Element::builder("value", waddle_xmpp::xep::NS_DATA_FORMS)
+                                    .append("external-provider-secret")
+                                    .build(),
+                            )
+                            .build(),
+                    )
+                    .build(),
+            ),
+            endpoint: None,
+            p256dh: None,
+            auth_key: None,
+        })
+        .await
+        .expect("external push registration");
+
+    let mut message =
+        xmpp_parsers::message::Message::new(Some("bob@example.com".parse().expect("to jid")));
+    message.from = Some("alice@example.com/web".parse().expect("from jid"));
+    message.id = Some("offline-push-1".to_string());
+    message.type_ = XmppMessageType::Chat;
+    message.bodies.insert(
+        String::new(),
+        xmpp_parsers::message::Body("push me".to_string()),
+    );
+    let deps = build_interpret_deps(state.as_ref(), None);
+    crate::server::routes::interpret::interpret(
+        vec![waddle_xmpp::protocol::OutboundEvent::QueueOfflineDelivery {
+            recipient: recipient.clone(),
+            payload: waddle_xmpp::pending_delivery::PendingPayload::Transient(Box::new(
+                message.clone(),
+            )),
+            original_receipt_at: chrono::Utc::now(),
+            original_message: Box::new(message),
+        }],
+        &deps,
+    )
+    .await;
+
+    let attempts = state
+        .deps
+        .protocol
+        .push_service
+        .delivery_attempts_for_node(node.node())
+        .await
+        .expect("delivery attempts");
+    assert_eq!(attempts.len(), 1);
+    assert_eq!(attempts[0].device_id(), "web-1");
+    assert!(!attempts[0].item_id().is_empty());
+    let push_service_jid: BareJid = "push.example.com".parse().expect("push service jid");
+    let pubsub_node = state
+        .deps
+        .protocol
+        .pubsub_storage
+        .get_node(&push_service_jid, node.node())
+        .await
+        .expect("pubsub node lookup")
+        .expect("xep-0060 push node");
+    assert_eq!(
+        pubsub_node.config.access_model,
+        waddle_xmpp::pubsub::AccessModel::Whitelist
+    );
+    assert_eq!(
+        state
+            .deps
+            .protocol
+            .pubsub_storage
+            .get_affiliation(&push_service_jid, node.node(), &recipient)
+            .await
+            .expect("pubsub affiliation"),
+        waddle_xmpp::pubsub::Affiliation::PublishOnly
+    );
+    let stored_items = state
+        .deps
+        .protocol
+        .pubsub_storage
+        .get_items(
+            &push_service_jid,
+            node.node(),
+            Some(1),
+            &[attempts[0].item_id().to_string()],
+        )
+        .await
+        .expect("stored pubsub push item");
+    assert_eq!(stored_items.len(), 1);
+    let stored_payload: Element = stored_items[0]
+        .payload_xml
+        .as_ref()
+        .expect("notification payload")
+        .parse()
+        .expect("notification payload xml");
+    assert!(stored_payload.is("notification", waddle_xmpp::xep::xep0357::NS_PUSH));
+
+    let registrations = state
+        .deps
+        .protocol
+        .push_store
+        .get_for_user(&recipient.to_string())
+        .await
+        .expect("registrations");
+    assert!(registrations.iter().any(|registration| {
+        registration.service_jid == "push.example.com"
+            && registration.node.as_deref() == Some(node.node())
+    }));
+    assert!(registrations.iter().any(|registration| {
+        registration.service_jid == "push-provider.example.com"
+            && registration.node.as_deref() == Some("external-web-node")
+    }));
+}
+
+#[tokio::test]
+async fn queue_offline_delivery_suppresses_xep0357_when_xep0492_direct_chat_is_never() {
+    let state = create_test_websocket_state().await;
+    let recipient: BareJid = "bob@example.com".parse().expect("recipient");
+    let sender: BareJid = "alice@example.com".parse().expect("sender");
+    let node = state
+        .deps
+        .protocol
+        .push_service
+        .ensure_node(&recipient, "web")
+        .await
+        .expect("push node");
+    state
+        .deps
+        .protocol
+        .push_service
+        .upsert_device(
+            &recipient,
+            crate::push_service::PushDeviceRegistration::new(
+                "web-1",
+                node.node(),
+                crate::push_service::PushDevicePlatform::Web,
+                "test",
+            ),
+        )
+        .await
+        .expect("push device");
+    state
+        .deps
+        .protocol
+        .push_service
+        .register_first_party_node_for_owner(&recipient, "push.example.com", node.node(), None)
+        .await
+        .expect("first-party push registration");
+    state
+        .deps
+        .protocol
+        .notification_settings_projection
+        .upsert(&crate::notification_settings_projection::NotificationSettingsProjection {
+            owner_bare_jid: recipient.clone(),
+            conversation_jid: sender.clone(),
+            conversation_kind: crate::notification_settings_projection::ConversationKind::Direct,
+            mode: waddle_xmpp::xep::NotificationLevel::Never,
+            source_version: 1,
+            updated_at_ms: crate::time::now_ms(),
+            source: crate::notification_settings_projection::NotificationSettingsSource::Xep0402Bookmarks,
+            source_item_jid: sender.clone(),
+        })
+        .await
+        .expect("xep-0492 projection");
+
+    let mut message =
+        xmpp_parsers::message::Message::new(Some("bob@example.com".parse().expect("to jid")));
+    message.from = Some("alice@example.com/web".parse().expect("from jid"));
+    message.id = Some("offline-push-muted-1".to_string());
+    message.type_ = XmppMessageType::Chat;
+    message.bodies.insert(
+        String::new(),
+        xmpp_parsers::message::Body("do not push".to_string()),
+    );
+    let deps = build_interpret_deps(state.as_ref(), None);
+    crate::server::routes::interpret::interpret(
+        vec![waddle_xmpp::protocol::OutboundEvent::QueueOfflineDelivery {
+            recipient: recipient.clone(),
+            payload: waddle_xmpp::pending_delivery::PendingPayload::Transient(Box::new(
+                message.clone(),
+            )),
+            original_receipt_at: chrono::Utc::now(),
+            original_message: Box::new(message),
+        }],
+        &deps,
+    )
+    .await;
+
+    let attempts = state
+        .deps
+        .protocol
+        .push_service
+        .delivery_attempts_for_node(node.node())
+        .await
+        .expect("delivery attempts");
+    assert!(attempts.is_empty());
+    let queued = state
+        .deps
+        .protocol
+        .push_service
+        .queued_publish_jobs()
+        .await
+        .expect("queued jobs");
+    assert!(queued.is_empty());
+}
+
+#[tokio::test]
 async fn handle_message_direct_rejects_client_authored_extension_envelope() {
     let sender_jid: FullJid = "alice@example.com/web".parse().expect("sender jid");
     let recipient_jid: FullJid = "bob@example.com/mobile".parse().expect("recipient jid");

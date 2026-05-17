@@ -14,7 +14,7 @@ use waddle_xmpp::xep::NS_DATA_FORMS;
 
 use crate::db::{Database, IntoParams};
 
-const STATUS_ENABLED: &str = "enabled";
+pub(crate) const STATUS_ENABLED: &str = "enabled";
 const PROVIDER_CREDENTIAL_FIELD_VARS: &[&str] = &[
     "endpoint",
     "p256dh",
@@ -22,7 +22,9 @@ const PROVIDER_CREDENTIAL_FIELD_VARS: &[&str] = &[
     "service",
     "device-token",
     "device-key",
+    "provider-endpoint",
     "provider-token",
+    "provider-key-material",
     "apns-token",
     "fcm-token",
     "web-push-endpoint",
@@ -107,52 +109,7 @@ impl PushSubscriptionStore for DatabasePushRegistrationStore {
         sub: PushSubscription,
     ) -> Pin<Box<dyn Future<Output = Result<(), PushError>> + Send + '_>> {
         Box::pin(async move {
-            if sub
-                .publish_options
-                .as_ref()
-                .is_some_and(publish_options_contains_provider_credentials)
-            {
-                return Err(PushError::StorageError(
-                    "provider credential fields are not allowed in durable XEP-0357 registrations"
-                        .to_string(),
-                ));
-            }
-            let now_ms = crate::time::now_ms();
-            let node = sub.node.clone().unwrap_or_default();
-            let publish_options_xml = sub.publish_options.as_ref().map(String::from);
-            self.execute(
-                r#"
-                INSERT INTO push_registrations (
-                    owner_bare_jid,
-                    push_service_jid,
-                    node,
-                    publish_options_xml,
-                    status,
-                    failure_count,
-                    last_error,
-                    next_retry_at_ms,
-                    created_at_ms,
-                    updated_at_ms
-                ) VALUES (?, ?, ?, ?, ?, 0, NULL, NULL, ?, ?)
-                ON CONFLICT(owner_bare_jid, push_service_jid, node) DO UPDATE SET
-                    publish_options_xml = excluded.publish_options_xml,
-                    status = excluded.status,
-                    failure_count = 0,
-                    last_error = NULL,
-                    next_retry_at_ms = NULL,
-                    updated_at_ms = excluded.updated_at_ms
-                "#,
-                crate::db_params![
-                    sub.user_jid,
-                    sub.service_jid,
-                    node,
-                    publish_options_xml,
-                    STATUS_ENABLED,
-                    now_ms,
-                    now_ms,
-                ],
-            )
-            .await?;
+            register_subscription(&self.db, &sub).await?;
             Ok(())
         })
     }
@@ -214,6 +171,146 @@ impl PushSubscriptionStore for DatabasePushRegistrationStore {
             Ok(registrations)
         })
     }
+}
+
+pub(crate) async fn register_subscription_tx(
+    tx: &mut crate::db::Transaction<'_>,
+    sub: &PushSubscription,
+) -> Result<(), PushError> {
+    if sub
+        .publish_options
+        .as_ref()
+        .is_some_and(publish_options_contains_provider_credentials)
+    {
+        return Err(PushError::StorageError(
+            "provider credential fields are not allowed in durable XEP-0357 registrations"
+                .to_string(),
+        ));
+    }
+    let now_ms = crate::time::now_ms();
+    let node = sub.node.clone().unwrap_or_default();
+    let publish_options_xml = sub.publish_options.as_ref().map(String::from);
+    tx.execute(
+        r#"
+        INSERT INTO push_registrations (
+            owner_bare_jid,
+            push_service_jid,
+            node,
+            publish_options_xml,
+            status,
+            failure_count,
+            last_error,
+            next_retry_at_ms,
+            created_at_ms,
+            updated_at_ms
+        ) VALUES (?, ?, ?, ?, ?, 0, NULL, NULL, ?, ?)
+        ON CONFLICT(owner_bare_jid, push_service_jid, node) DO UPDATE SET
+            publish_options_xml = excluded.publish_options_xml,
+            status = excluded.status,
+            failure_count = 0,
+            last_error = NULL,
+            next_retry_at_ms = NULL,
+            updated_at_ms = excluded.updated_at_ms
+        "#,
+        crate::db_params![
+            sub.user_jid.clone(),
+            sub.service_jid.clone(),
+            node,
+            publish_options_xml,
+            STATUS_ENABLED,
+            now_ms,
+            now_ms,
+        ],
+    )
+    .await
+    .map_err(|error| PushError::StorageError(error.to_string()))?;
+    Ok(())
+}
+
+pub(crate) async fn registered_nodes_for_disable_tx(
+    tx: &mut crate::db::Transaction<'_>,
+    owner_bare_jid: &jid::BareJid,
+    service_jid: &str,
+    node: Option<&str>,
+) -> Result<Vec<String>, PushError> {
+    let mut rows = if let Some(node) = node {
+        tx.query(
+            r#"
+            SELECT node
+            FROM push_registrations
+            WHERE owner_bare_jid = ? AND push_service_jid = ? AND node = ?
+            ORDER BY node ASC
+            "#,
+            crate::db_params![owner_bare_jid.to_string(), service_jid, node],
+        )
+        .await
+    } else {
+        tx.query(
+            r#"
+            SELECT node
+            FROM push_registrations
+            WHERE owner_bare_jid = ? AND push_service_jid = ?
+            ORDER BY node ASC
+            "#,
+            crate::db_params![owner_bare_jid.to_string(), service_jid],
+        )
+        .await
+    }
+    .map_err(|error| PushError::StorageError(error.to_string()))?;
+
+    let mut nodes = Vec::new();
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| PushError::StorageError(error.to_string()))?
+    {
+        nodes.push(
+            row.get(0)
+                .map_err(|error| PushError::StorageError(error.to_string()))?,
+        );
+    }
+    Ok(nodes)
+}
+
+pub(crate) async fn remove_subscription_tx(
+    tx: &mut crate::db::Transaction<'_>,
+    owner_bare_jid: &jid::BareJid,
+    service_jid: &str,
+    node: Option<&str>,
+) -> Result<u64, PushError> {
+    let removed = if let Some(node) = node {
+        tx.execute(
+            r#"
+            DELETE FROM push_registrations
+            WHERE owner_bare_jid = ? AND push_service_jid = ? AND node = ?
+            "#,
+            crate::db_params![owner_bare_jid.to_string(), service_jid, node],
+        )
+        .await
+    } else {
+        tx.execute(
+            r#"
+            DELETE FROM push_registrations
+            WHERE owner_bare_jid = ? AND push_service_jid = ?
+            "#,
+            crate::db_params![owner_bare_jid.to_string(), service_jid],
+        )
+        .await
+    }
+    .map_err(|error| PushError::StorageError(error.to_string()))?;
+    Ok(removed)
+}
+
+async fn register_subscription(db: &Database, sub: &PushSubscription) -> Result<(), PushError> {
+    let mut tx = db
+        .begin()
+        .await
+        .map_err(|error| PushError::StorageError(error.to_string()))?;
+    register_subscription_tx(&mut tx, sub).await?;
+    tx.commit()
+        .await
+        .map_err(|error| PushError::StorageError(error.to_string()))?;
+    Ok(())
 }
 
 pub(crate) fn publish_options_contains_provider_credentials(form: &Element) -> bool {
@@ -557,7 +654,22 @@ mod tests {
     #[test]
     fn detects_provider_credential_publish_option_fields() {
         assert!(publish_options_contains_provider_credentials(
+            &publish_options_with_field("endpoint", "https://updates.push.example/abc")
+        ));
+        assert!(publish_options_contains_provider_credentials(
+            &publish_options_with_field("p256dh", "secret")
+        ));
+        assert!(publish_options_contains_provider_credentials(
+            &publish_options_with_field("auth", "secret")
+        ));
+        assert!(publish_options_contains_provider_credentials(
             &publish_options_with_field("device-token", "secret")
+        ));
+        assert!(publish_options_contains_provider_credentials(
+            &publish_options_with_field("provider-endpoint", "https://push.example.com/endpoint")
+        ));
+        assert!(publish_options_contains_provider_credentials(
+            &publish_options_with_field("provider-key-material", "secret")
         ));
         assert!(publish_options_contains_provider_credentials(
             &publish_options_with_field("WEB-PUSH-AUTH", "secret")

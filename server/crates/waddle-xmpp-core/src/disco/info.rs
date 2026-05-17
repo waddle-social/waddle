@@ -71,6 +71,10 @@ impl Identity {
         Self::new("pubsub", "service", name)
     }
 
+    pub fn pubsub_push(name: Option<&str>) -> Self {
+        Self::new("pubsub", "push", name)
+    }
+
     pub fn pubsub_leaf(name: Option<&str>) -> Self {
         Self::new("pubsub", "leaf", name)
     }
@@ -386,6 +390,19 @@ pub fn pubsub_service_features() -> Vec<Feature> {
         Feature::pubsub_subscribe(),
         Feature::pubsub_access_whitelist(),
         Feature::pubsub_access_presence(),
+    ]
+}
+
+/// Get features for an XEP-0357 Push Service component.
+pub fn push_service_features() -> Vec<Feature> {
+    vec![
+        Feature::disco_info(),
+        Feature::disco_items(),
+        Feature::pubsub(),
+        Feature::pubsub_publish(),
+        Feature::pubsub_access_whitelist(),
+        Feature::pubsub_publish_only_affiliation(),
+        Feature::push(),
     ]
 }
 

@@ -10,6 +10,12 @@ const AUTH_JANITOR_INTERVAL: Duration = Duration::from_secs(60);
 /// Default interval for the persistent-room dormancy janitor.
 const ROOM_DORMANCY_JANITOR_INTERVAL: Duration = Duration::from_secs(300);
 
+fn reset_push_reconciliation_cursor_after_error(
+    reconciliation_cursor: &mut Option<crate::push_service::PushRegistrationCursor>,
+) -> Option<crate::push_service::PushRegistrationCursor> {
+    reconciliation_cursor.take()
+}
+
 fn pending_delivery_max_age_days_from_env() -> u32 {
     const DEFAULT_DAYS: u32 = 30;
     const MIN_DAYS: u32 = 1;
@@ -399,6 +405,85 @@ pub(crate) fn spawn_pending_delivery_claim_janitor(websocket_state: &Arc<WebSock
                         %error,
                         "pending_delivery aging janitor: delete_older_than failed; \
                          will retry on next sweep"
+                    );
+                }
+            }
+        }
+    });
+}
+
+pub(crate) fn spawn_push_service_publish_job_janitor(websocket_state: &Arc<WebSocketState>) {
+    let weak_state = Arc::downgrade(websocket_state);
+    let interval_secs = std::env::var("WADDLE_PUSH_SERVICE_JOB_JANITOR_INTERVAL")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .map(|v| v.max(1))
+        .unwrap_or(10);
+    let batch_size = std::env::var("WADDLE_PUSH_SERVICE_JOB_JANITOR_BATCH")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .map(|v| v.clamp(1, 1_000))
+        .unwrap_or(128);
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
+        let mut reconciliation_cursor: Option<crate::push_service::PushRegistrationCursor> = None;
+        ticker.tick().await;
+        loop {
+            ticker.tick().await;
+            let Some(state) = weak_state.upgrade() else {
+                break;
+            };
+            match state
+                .deps
+                .protocol
+                .push_service
+                .reconcile_pending_delivery_notification_jobs(
+                    state.deps.protocol.pending_delivery_storage.as_ref(),
+                    state.deps.service_domains.push.as_str(),
+                    reconciliation_cursor.as_ref(),
+                    batch_size,
+                    batch_size,
+                )
+                .await
+            {
+                Ok(result) => {
+                    reconciliation_cursor = result.next_cursor().cloned();
+                    if result.scanned_registrations() > 0 || result.enqueued_jobs() > 0 {
+                        debug!(
+                            scanned_registrations = result.scanned_registrations(),
+                            enqueued_jobs = result.enqueued_jobs(),
+                            "Push Service publish-job janitor reconciled XEP-0160 rows to durable XEP-0357 jobs"
+                        );
+                    }
+                }
+                Err(error) => {
+                    let failed_cursor =
+                        reset_push_reconciliation_cursor_after_error(&mut reconciliation_cursor);
+                    warn!(
+                        error = %error,
+                        failed_cursor = ?failed_cursor,
+                        "Push Service publish-job janitor reconciliation failed; reset cursor for next sweep; queued jobs remain durable"
+                    );
+                }
+            }
+            match state
+                .deps
+                .protocol
+                .push_service
+                .drain_queued_notification_publish_jobs(batch_size)
+                .await
+            {
+                Ok(results) if !results.is_empty() => {
+                    debug!(
+                        drained = results.len(),
+                        "Push Service publish-job janitor drained queued XEP-0357 jobs"
+                    );
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    warn!(
+                        error = %error,
+                        "Push Service publish-job janitor failed; queued jobs remain durable"
                     );
                 }
             }
@@ -832,6 +917,27 @@ pub(crate) fn spawn_room_dormancy_janitor(websocket_state: &Arc<WebSocketState>)
             }
         }
     });
+}
+
+#[cfg(test)]
+mod push_service_publish_job_janitor_tests {
+    use super::reset_push_reconciliation_cursor_after_error;
+
+    #[test]
+    fn reconciliation_cursor_resets_after_reconcile_error() {
+        let mut reconciliation_cursor = Some(crate::push_service::PushRegistrationCursor::new(
+            "alice@example.com",
+            "web-node-1",
+        ));
+
+        let failed_cursor =
+            reset_push_reconciliation_cursor_after_error(&mut reconciliation_cursor)
+                .expect("failed cursor");
+
+        assert!(reconciliation_cursor.is_none());
+        assert_eq!(failed_cursor.owner_bare_jid(), "alice@example.com");
+        assert_eq!(failed_cursor.node(), "web-node-1");
+    }
 }
 
 #[cfg(test)]

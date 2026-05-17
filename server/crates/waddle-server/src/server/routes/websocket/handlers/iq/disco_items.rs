@@ -3,6 +3,7 @@ use super::*;
 pub(super) async fn handle_disco_items_iq(
     ctx: IqHandlerContext<'_>,
     state: &WebSocketState,
+    phase: &ConnectionPhase,
 ) -> Vec<String> {
     let iq = ctx.iq;
     let id = ctx.id;
@@ -14,6 +15,7 @@ pub(super) async fn handle_disco_items_iq(
     let spaces_domain = ctx.spaces_domain;
     let community_domain = ctx.community_domain;
     let extensions_domain = ctx.extensions_domain;
+    let push_domain = ctx.push_domain;
     let response_from = ctx.response_from;
     let response_to = ctx.response_to;
 
@@ -156,6 +158,38 @@ pub(super) async fn handle_disco_items_iq(
             return vec![iq_to_xml(response)];
         }
 
+        if target_to == Some(push_domain) {
+            let items: Vec<DiscoItem> = match query.node.as_deref() {
+                Some(_) => Vec::new(),
+                None => {
+                    let Some(owner_bare_jid) = phase.bound_jid().map(|jid| jid.to_bare()) else {
+                        let response =
+                            build_disco_items_response(request_iq, &[], query.node.as_deref());
+                        return vec![iq_to_xml(response)];
+                    };
+                    match state
+                        .deps
+                        .protocol
+                        .push_service
+                        .list_node_names_for_owner(&owner_bare_jid)
+                        .await
+                    {
+                        Ok(nodes) => nodes
+                            .into_iter()
+                            .map(|node| DiscoItem::pubsub_node(push_domain, &node))
+                            .collect(),
+                        Err(error) => {
+                            warn!(error = %error, owner = %owner_bare_jid, "Failed to list owner Push Service nodes");
+                            Vec::new()
+                        }
+                    }
+                }
+            };
+
+            let response = build_disco_items_response(request_iq, &items, query.node.as_deref());
+            return vec![iq_to_xml(response)];
+        }
+
         if let Some(target) = target_to {
             if query.node.is_none() {
                 if let Ok(target_bare) = target.parse::<BareJid>() {
@@ -193,6 +227,7 @@ pub(super) async fn handle_disco_items_iq(
             DiscoItem::spaces_service(spaces_domain, Some("Spaces")),
             DiscoItem::community_service(community_domain, Some("Community")),
             DiscoItem::pubsub_service(extensions_domain, Some("Extensions")),
+            DiscoItem::pubsub_service(push_domain, Some("Push Service")),
         ];
         let response = build_disco_items_response(request_iq, &items, None);
         return vec![iq_to_xml(response)];

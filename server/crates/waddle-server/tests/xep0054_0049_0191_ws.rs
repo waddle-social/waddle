@@ -4,9 +4,14 @@ mod ws_common;
 
 use std::time::Duration;
 use ws_common::{disco_info_query, TestServer, WsXmppClient};
+use xmpp_parsers::minidom::Element;
 
+const CLIENT_NS: &str = "jabber:client";
 const DOMAIN: &str = "localhost";
 const USERNAME: &str = "admin";
+const NS_PUBSUB_PUBLISH_OPTIONS: &str = "http://jabber.org/protocol/pubsub#publish-options";
+const NS_PUSH: &str = "urn:xmpp:push:0";
+const NS_XDATA: &str = "jabber:x:data";
 
 async fn setup() -> (TestServer, WsXmppClient) {
     let server = TestServer::start();
@@ -85,6 +90,46 @@ async fn send_roster_get(client: &mut WsXmppClient, id: &str) {
         .recv_matching(|frame| frame.contains(id))
         .await
         .expect("roster get result");
+}
+
+fn element_to_xml(element: Element) -> String {
+    let mut buf = Vec::new();
+    element.write_to(&mut buf).expect("serialize XML element");
+    String::from_utf8(buf).expect("minidom serializes UTF-8")
+}
+
+fn push_enable_iq(id: &str, jid: &str, node: &str, publish_options: Option<Element>) -> String {
+    let mut enable = Element::builder("enable", NS_PUSH)
+        .attr("jid", jid)
+        .attr("node", node);
+    if let Some(publish_options) = publish_options {
+        enable = enable.append(publish_options);
+    }
+
+    element_to_xml(
+        Element::builder("iq", CLIENT_NS)
+            .attr("type", "set")
+            .attr("id", id)
+            .append(enable.build())
+            .build(),
+    )
+}
+
+fn xdata_field(var: &str, value: &str) -> Element {
+    Element::builder("field", NS_XDATA)
+        .attr("var", var)
+        .append(Element::builder("value", NS_XDATA).append(value).build())
+        .build()
+}
+
+fn publish_options_form(fields: impl IntoIterator<Item = Element>) -> Element {
+    let mut form = Element::builder("x", NS_XDATA)
+        .attr("type", "submit")
+        .append(xdata_field("FORM_TYPE", NS_PUBSUB_PUBLISH_OPTIONS));
+    for field in fields {
+        form = form.append(field);
+    }
+    form.build()
 }
 
 async fn establish_subscription_to_alice(alice: &mut WsXmppClient, bob: &mut WsXmppClient) {
@@ -350,60 +395,58 @@ async fn websocket_blocking_updates_presence_visibility_for_subscribed_contact()
 }
 
 #[tokio::test]
-async fn websocket_push_enable_disable_acknowledges_requests() {
+async fn websocket_push_enable_rejects_external_service_until_publish_is_wired() {
     let (_server, mut client) = setup().await;
+    let enable = push_enable_iq(
+        "ws-push-enable",
+        "push-provider.localhost",
+        "web",
+        Some(publish_options_form([xdata_field(
+            "secret",
+            "opaque-service-secret",
+        )])),
+    );
 
-    client
-        .send(
-            r#"<iq xmlns="jabber:client" type="set" id="ws-push-enable"><enable xmlns="urn:xmpp:push:0" jid="push.localhost" node="web"><x xmlns="jabber:x:data" type="submit"><field var="FORM_TYPE"><value>http://jabber.org/protocol/pubsub#publish-options</value></field><field var="secret"><value>opaque-service-secret</value></field></x></enable></iq>"#,
-        )
-        .await
-        .expect("send push enable");
+    client.send(&enable).await.expect("send push enable");
     let enable_response = client
         .recv_matching(|frame| frame.contains("ws-push-enable"))
         .await
         .expect("push enable response");
     assert!(
-        enable_response.contains("type=\"result\"") || enable_response.contains("type='result'"),
-        "expected push enable result, got: {enable_response}"
+        enable_response.contains("type=\"error\"") || enable_response.contains("type='error'"),
+        "expected push enable error, got: {enable_response}"
     );
-
-    client
-        .send(
-            r#"<iq xmlns="jabber:client" type="set" id="ws-push-disable"><disable xmlns="urn:xmpp:push:0" jid="push.localhost" node="web"/></iq>"#,
-        )
-        .await
-        .expect("send push disable");
-    let disable_response = client
-        .recv_matching(|frame| frame.contains("ws-push-disable"))
-        .await
-        .expect("push disable response");
     assert!(
-        disable_response.contains("type=\"result\"") || disable_response.contains("type='result'"),
-        "expected push disable result, got: {disable_response}"
+        enable_response.contains("service-unavailable"),
+        "expected service-unavailable for unsupported external push service, got: {enable_response}"
     );
 
     let _ = client.close().await;
 }
 
 #[tokio::test]
-async fn websocket_push_enable_does_not_require_provider_credentials() {
+async fn websocket_push_enable_rejects_external_service_without_provider_credentials() {
     let (_server, mut client) = setup().await;
+    let enable = push_enable_iq(
+        "ws-push-no-provider-data",
+        "push-provider.localhost",
+        "web",
+        None,
+    );
 
-    client
-        .send(
-            r#"<iq xmlns="jabber:client" type="set" id="ws-push-no-provider-data"><enable xmlns="urn:xmpp:push:0" jid="push.localhost" node="web"/></iq>"#,
-        )
-        .await
-        .expect("send push enable");
+    client.send(&enable).await.expect("send push enable");
     let response = client
         .recv_matching(|frame| frame.contains("ws-push-no-provider-data"))
         .await
         .expect("push enable response");
 
     assert!(
-        response.contains("type=\"result\"") || response.contains("type='result'"),
-        "expected push enable result without provider credentials, got: {response}"
+        response.contains("type=\"error\"") || response.contains("type='error'"),
+        "expected push enable error for unsupported external push service, got: {response}"
+    );
+    assert!(
+        response.contains("service-unavailable"),
+        "expected service-unavailable for unsupported external push service, got: {response}"
     );
 
     let _ = client.close().await;
@@ -412,11 +455,19 @@ async fn websocket_push_enable_does_not_require_provider_credentials() {
 #[tokio::test]
 async fn websocket_push_enable_rejects_provider_credentials_in_publish_options() {
     let (_server, mut client) = setup().await;
+    let enable = push_enable_iq(
+        "ws-push-provider-data",
+        "push-provider.localhost",
+        "web",
+        Some(publish_options_form([
+            xdata_field("endpoint", "https://updates.push.services.mozilla.com/abc"),
+            xdata_field("p256dh", "p256dh-key"),
+            xdata_field("auth", "auth-secret"),
+        ])),
+    );
 
     client
-        .send(
-            r#"<iq xmlns="jabber:client" type="set" id="ws-push-provider-data"><enable xmlns="urn:xmpp:push:0" jid="push.localhost" node="web"><x xmlns="jabber:x:data" type="submit"><field var="FORM_TYPE"><value>http://jabber.org/protocol/pubsub#publish-options</value></field><field var="service"><value>https://updates.push.services.mozilla.com/abc</value></field><field var="device-token"><value>auth-secret</value></field><field var="device-key"><value>p256dh-key</value></field></x></enable></iq>"#,
-        )
+        .send(&enable)
         .await
         .expect("send push enable with provider data");
     let response = client
@@ -429,8 +480,8 @@ async fn websocket_push_enable_rejects_provider_credentials_in_publish_options()
         "expected push enable error for provider credentials, got: {response}"
     );
     assert!(
-        response.contains("bad-request"),
-        "expected bad-request for provider credentials, got: {response}"
+        response.contains("service-unavailable"),
+        "expected service-unavailable for unsupported external push service, got: {response}"
     );
 
     let _ = client.close().await;
@@ -439,11 +490,10 @@ async fn websocket_push_enable_rejects_provider_credentials_in_publish_options()
 #[tokio::test]
 async fn websocket_push_enable_rejects_invalid_service_jid() {
     let (_server, mut client) = setup().await;
+    let enable = push_enable_iq("ws-push-invalid-jid", "not a jid", "web", None);
 
     client
-        .send(
-            r#"<iq xmlns="jabber:client" type="set" id="ws-push-invalid-jid"><enable xmlns="urn:xmpp:push:0" jid="not a jid" node="web"/></iq>"#,
-        )
+        .send(&enable)
         .await
         .expect("send push enable with invalid jid");
     let response = client

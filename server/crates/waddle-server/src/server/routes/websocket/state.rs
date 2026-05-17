@@ -6,6 +6,7 @@ pub struct XmppServiceDomains {
     pub spaces: String,
     pub upload: String,
     pub extensions: String,
+    pub push: String,
     /// Hosts community-wide pubsub features that are NOT space-bookmark
     /// nodes (XEP-0472 social feed, XEP-0501 stories). Kept distinct
     /// from `spaces` so the spaces disco#items enumeration only
@@ -20,6 +21,7 @@ impl XmppServiceDomains {
             spaces: format!("spaces.{xmpp_domain}"),
             upload: format!("upload.{xmpp_domain}"),
             extensions: format!("extensions.{xmpp_domain}"),
+            push: format!("push.{xmpp_domain}"),
             community: format!("community.{xmpp_domain}"),
         }
     }
@@ -85,6 +87,8 @@ pub struct ProtocolServices {
     pub pubsub_storage: Arc<dyn PubSubStorage>,
     /// XEP-0357 push subscription storage.
     pub push_store: Arc<dyn waddle_xmpp::push::PushSubscriptionStore>,
+    /// First-party XMPP Push Service state and fake provider dispatch.
+    pub push_service: Arc<crate::push_service::DatabasePushServiceStore>,
     /// Durable derived projection of XEP-0492 notification settings from
     /// canonical XMPP state.
     pub notification_settings_projection:

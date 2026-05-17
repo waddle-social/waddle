@@ -3,8 +3,9 @@
 pub use waddle_xmpp_core::disco::info::{
     build_disco_info_response, build_disco_info_response_with_extensions,
     community_service_features, is_disco_info_query, muc_room_features, muc_service_features,
-    parse_disco_info_response, pubsub_service_features, spaces_service_features,
-    upload_service_features, DiscoInfoQuery, DiscoInfoResponse, Feature, Identity, DISCO_INFO_NS,
+    parse_disco_info_response, pubsub_service_features, push_service_features,
+    spaces_service_features, upload_service_features, DiscoInfoQuery, DiscoInfoResponse, Feature,
+    Identity, DISCO_INFO_NS,
 };
 use xmpp_parsers::iq::Iq;
 

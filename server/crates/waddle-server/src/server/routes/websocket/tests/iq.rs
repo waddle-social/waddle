@@ -1,5 +1,28 @@
 use super::*;
 
+fn disco_feature_vars_for_test(query: &Element) -> std::collections::BTreeSet<String> {
+    query
+        .children()
+        .filter(|child| {
+            child.name() == "feature" && child.ns() == waddle_xmpp::disco::DISCO_INFO_NS
+        })
+        .filter_map(|child| child.attr("var").map(str::to_string))
+        .collect()
+}
+
+fn disco_items_for_test(query: &Element) -> Vec<(Option<String>, Option<String>)> {
+    query
+        .children()
+        .filter(|child| child.name() == "item" && child.ns() == waddle_xmpp::disco::DISCO_ITEMS_NS)
+        .map(|child| {
+            (
+                child.attr("jid").map(str::to_string),
+                child.attr("node").map(str::to_string),
+            )
+        })
+        .collect()
+}
+
 #[tokio::test]
 async fn handle_iq_roster_query_returns_parseable_result() {
     let state = create_test_websocket_state().await;
@@ -526,6 +549,768 @@ async fn handle_iq_disco_items_server_advertises_spaces_service() {
     assert!(
         response.contains("spaces.example.com"),
         "expected spaces service in server disco#items: {response}"
+    );
+    assert!(
+        response.contains("push.example.com"),
+        "expected Push Service in server disco#items: {response}"
+    );
+}
+
+#[tokio::test]
+async fn handle_iq_disco_info_push_service_reports_xep0357_pubsub_identity() {
+    let state = create_test_websocket_state().await;
+    let query = disco_info_iq_frame("push-info", "push.example.com", None);
+
+    let responses = handle_iq(
+        &query,
+        "example.com",
+        "muc.example.com",
+        state.as_ref(),
+        &None,
+        &ConnectionPhase::Unauthenticated,
+    )
+    .await;
+    let response = responses.first().expect("push service disco response");
+
+    let iq = parse_iq_for_test(response);
+    let query = match iq.payload {
+        IqType::Result(Some(payload)) => payload,
+        other => panic!("expected push service disco#info result, got {other:?}"),
+    };
+    assert_eq!(query.name(), "query");
+    assert_eq!(query.ns(), waddle_xmpp::disco::DISCO_INFO_NS);
+    assert!(
+        query.children().any(|child| {
+            child.name() == "identity"
+                && child.ns() == waddle_xmpp::disco::DISCO_INFO_NS
+                && child.attr("category") == Some("pubsub")
+                && child.attr("type") == Some("push")
+        }),
+        "XEP-0357 requires pubsub/push identity: {response}"
+    );
+    let features = disco_feature_vars_for_test(&query);
+    assert!(
+        features.contains("urn:xmpp:push:0"),
+        "XEP-0357 requires urn:xmpp:push:0 feature: {response}"
+    );
+    assert!(
+        features.contains("http://jabber.org/protocol/pubsub#publish"),
+        "Push Service must advertise PubSub publish support: {response}"
+    );
+    assert!(
+        features.contains("http://jabber.org/protocol/pubsub#access-whitelist"),
+        "Push Service must advertise the XEP-0357 whitelist access profile: {response}"
+    );
+    assert!(
+        features.contains("http://jabber.org/protocol/pubsub#publish-only-affiliation"),
+        "Push Service must advertise the XEP-0357 publish-only affiliation profile: {response}"
+    );
+}
+
+#[tokio::test]
+async fn handle_iq_disco_items_push_service_is_owner_scoped() {
+    let state = create_test_websocket_state().await;
+    let alice: BareJid = "alice@example.com".parse().expect("alice");
+    let bob: BareJid = "bob@example.com".parse().expect("bob");
+    let alice_jid: FullJid = "alice@example.com/web".parse().expect("alice jid");
+    let bob_jid: FullJid = "bob@example.com/web".parse().expect("bob jid");
+    let alice_node = state
+        .deps
+        .protocol
+        .push_service
+        .ensure_node(&alice, "private-app")
+        .await
+        .expect("alice push node");
+    let bob_node = state
+        .deps
+        .protocol
+        .push_service
+        .ensure_node(&bob, "web")
+        .await
+        .expect("bob push node");
+    let query = disco_items_iq_frame("push-items", "push.example.com", None);
+
+    let unauth_responses = handle_iq(
+        &query,
+        "example.com",
+        "muc.example.com",
+        state.as_ref(),
+        &None,
+        &ConnectionPhase::Unauthenticated,
+    )
+    .await;
+    let unauth_response = unauth_responses.first().expect("unauth items");
+    let unauth_iq = parse_iq_for_test(unauth_response);
+    let unauth_query = match unauth_iq.payload {
+        IqType::Result(Some(payload)) => payload,
+        other => panic!("expected unauth disco#items result, got {other:?}"),
+    };
+    assert!(disco_items_for_test(&unauth_query).is_empty());
+
+    let alice_responses = handle_iq(
+        &query,
+        "example.com",
+        "muc.example.com",
+        state.as_ref(),
+        &None,
+        &ready_phase(&alice_jid),
+    )
+    .await;
+    let alice_response = alice_responses.first().expect("alice items");
+    let alice_iq = parse_iq_for_test(alice_response);
+    let alice_query = match alice_iq.payload {
+        IqType::Result(Some(payload)) => payload,
+        other => panic!("expected alice disco#items result, got {other:?}"),
+    };
+    let alice_items = disco_items_for_test(&alice_query);
+    assert_eq!(
+        alice_items,
+        vec![(
+            Some("push.example.com".to_string()),
+            Some(alice_node.node().to_string())
+        )]
+    );
+
+    let bob_responses = handle_iq(
+        &query,
+        "example.com",
+        "muc.example.com",
+        state.as_ref(),
+        &None,
+        &ready_phase(&bob_jid),
+    )
+    .await;
+    let bob_response = bob_responses.first().expect("bob items");
+    let bob_iq = parse_iq_for_test(bob_response);
+    let bob_query = match bob_iq.payload {
+        IqType::Result(Some(payload)) => payload,
+        other => panic!("expected bob disco#items result, got {other:?}"),
+    };
+    let bob_items = disco_items_for_test(&bob_query);
+    assert_eq!(
+        bob_items,
+        vec![(
+            Some("push.example.com".to_string()),
+            Some(bob_node.node().to_string())
+        )]
+    );
+}
+
+#[tokio::test]
+async fn handle_iq_disco_info_push_node_is_owner_scoped() {
+    let state = create_test_websocket_state().await;
+    let owner: BareJid = "alice@example.com".parse().expect("owner");
+    let alice_jid: FullJid = "alice@example.com/web".parse().expect("alice jid");
+    let bob_jid: FullJid = "bob@example.com/web".parse().expect("bob jid");
+    let node = state
+        .deps
+        .protocol
+        .push_service
+        .ensure_node(&owner, "private-app-id")
+        .await
+        .expect("push node");
+    let query = disco_info_iq_frame("push-node-info", "push.example.com", Some(node.node()));
+
+    let bob_responses = handle_iq(
+        &query,
+        "example.com",
+        "muc.example.com",
+        state.as_ref(),
+        &None,
+        &ready_phase(&bob_jid),
+    )
+    .await;
+    let bob_response = bob_responses.first().expect("bob node info");
+    assert!(
+        bob_response.contains("item-not-found"),
+        "non-owner must not discover push node metadata: {bob_response}"
+    );
+
+    let alice_responses = handle_iq(
+        &query,
+        "example.com",
+        "muc.example.com",
+        state.as_ref(),
+        &None,
+        &ready_phase(&alice_jid),
+    )
+    .await;
+    let alice_response = alice_responses.first().expect("alice node info");
+    let alice_iq = parse_iq_for_test(alice_response);
+    let query = match alice_iq.payload {
+        IqType::Result(Some(payload)) => payload,
+        other => panic!("expected owner push node disco#info result, got {other:?}"),
+    };
+    assert_eq!(query.name(), "query");
+    assert_eq!(query.ns(), waddle_xmpp::disco::DISCO_INFO_NS);
+    assert!(
+        !alice_response.contains("private-app-id"),
+        "node disco#info must not leak app metadata: {alice_response}"
+    );
+    assert!(
+        query.children().any(|child| {
+            child.name() == "identity"
+                && child.ns() == waddle_xmpp::disco::DISCO_INFO_NS
+                && child.attr("category") == Some("pubsub")
+                && child.attr("type") == Some("leaf")
+        }),
+        "push node disco#info must identify as a PubSub leaf: {alice_response}"
+    );
+    let features = disco_feature_vars_for_test(&query);
+    for feature in [
+        "http://jabber.org/protocol/disco#info",
+        "http://jabber.org/protocol/pubsub",
+        "http://jabber.org/protocol/pubsub#publish",
+        "http://jabber.org/protocol/pubsub#access-whitelist",
+        "http://jabber.org/protocol/pubsub#publish-only-affiliation",
+        waddle_xmpp::xep::xep0357::NS_PUSH,
+    ] {
+        assert!(
+            features.contains(feature),
+            "push node disco#info missing required feature {feature}: {alice_response}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn handle_iq_push_service_custom_registration_keeps_provider_tokens_inside_service() {
+    let state = create_test_websocket_state().await;
+    let jid: FullJid = "alice@example.com/web".parse().expect("valid jid");
+    let ensure = Element::builder("ensure-node", crate::push_service::WADDLE_PUSH_SERVICE_NS)
+        .attr("app-id", "web")
+        .build();
+    let responses = handle_iq(
+        &iq_set_frame("push-node-1", "push.example.com", ensure),
+        "example.com",
+        "muc.example.com",
+        state.as_ref(),
+        &None,
+        &ready_phase(&jid),
+    )
+    .await;
+    let node_iq = parse_iq_for_test(responses.first().expect("node response"));
+    let node_id = match node_iq.payload {
+        IqType::Result(Some(payload)) => payload.attr("id").expect("node id").to_string(),
+        other => panic!("expected node result, got {other:?}"),
+    };
+
+    let register = Element::builder(
+        "register-device",
+        crate::push_service::WADDLE_PUSH_SERVICE_NS,
+    )
+    .attr("node", node_id.as_str())
+    .attr("device-id", "web-1")
+    .attr("platform", "web")
+    .attr("environment", "test")
+    .append(
+        Element::builder(
+            "provider-endpoint",
+            crate::push_service::WADDLE_PUSH_SERVICE_NS,
+        )
+        .append("https://push.example.com/endpoint")
+        .build(),
+    )
+    .append(
+        Element::builder(
+            "provider-token",
+            crate::push_service::WADDLE_PUSH_SERVICE_NS,
+        )
+        .append("provider-secret")
+        .build(),
+    )
+    .append(
+        Element::builder(
+            "provider-key-material",
+            crate::push_service::WADDLE_PUSH_SERVICE_NS,
+        )
+        .append("provider-key")
+        .build(),
+    )
+    .build();
+    let responses = handle_iq(
+        &iq_set_frame("push-device-1", "push.example.com", register),
+        "example.com",
+        "muc.example.com",
+        state.as_ref(),
+        &None,
+        &ready_phase(&jid),
+    )
+    .await;
+    let device_iq = parse_iq_for_test(responses.first().expect("device response"));
+    match device_iq.payload {
+        IqType::Result(Some(payload)) => {
+            assert_eq!(payload.name(), "device");
+            assert_eq!(payload.attr("status"), Some("active"));
+        }
+        other => panic!("expected device result, got {other:?}"),
+    }
+
+    let device = state
+        .deps
+        .protocol
+        .push_service
+        .get_device_for_owner(&"alice@example.com".parse().expect("owner"), "web-1")
+        .await
+        .expect("device lookup")
+        .expect("device");
+    assert_eq!(
+        device.provider_endpoint(),
+        Some("https://push.example.com/endpoint")
+    );
+    assert_eq!(device.provider_token(), Some("provider-secret"));
+    assert_eq!(device.provider_key_material(), Some("provider-key"));
+}
+
+#[tokio::test]
+async fn handle_iq_push_service_disable_device_is_node_scoped() {
+    let state = create_test_websocket_state().await;
+    let owner: BareJid = "alice@example.com".parse().expect("owner");
+    let jid: FullJid = "alice@example.com/web".parse().expect("valid jid");
+    let first_node = state
+        .deps
+        .protocol
+        .push_service
+        .ensure_node(&owner, "web")
+        .await
+        .expect("first node");
+    let second_node = state
+        .deps
+        .protocol
+        .push_service
+        .ensure_node(&owner, "mobile")
+        .await
+        .expect("second node");
+    for node in [first_node.node(), second_node.node()] {
+        state
+            .deps
+            .protocol
+            .push_service
+            .upsert_device(
+                &owner,
+                crate::push_service::PushDeviceRegistration::new(
+                    "shared-device",
+                    node,
+                    crate::push_service::PushDevicePlatform::Web,
+                    "test",
+                ),
+            )
+            .await
+            .expect("device");
+    }
+
+    let disable = Element::builder(
+        "disable-device",
+        crate::push_service::WADDLE_PUSH_SERVICE_NS,
+    )
+    .attr("node", first_node.node())
+    .attr("device-id", "shared-device")
+    .build();
+    let responses = handle_iq(
+        &iq_set_frame("push-disable-1", "push.example.com", disable),
+        "example.com",
+        "muc.example.com",
+        state.as_ref(),
+        &None,
+        &ready_phase(&jid),
+    )
+    .await;
+    let response_iq = parse_iq_for_test(responses.first().expect("disable response"));
+    match response_iq.payload {
+        IqType::Result(Some(payload)) => {
+            assert_eq!(payload.name(), "device");
+            assert_eq!(payload.attr("node"), Some(first_node.node()));
+            assert_eq!(payload.attr("status"), Some("disabled"));
+        }
+        other => panic!("expected disable-device result, got {other:?}"),
+    }
+
+    let first_publish = state
+        .deps
+        .protocol
+        .push_service
+        .publish_notification_from_user_server(
+            first_node.node(),
+            &waddle_xmpp::pubsub::PubSubItem::new(
+                Some("first".to_string()),
+                Some(Element::builder("notification", waddle_xmpp::xep::xep0357::NS_PUSH).build()),
+            ),
+            &owner,
+        )
+        .await
+        .expect("first publish");
+    let second_publish = state
+        .deps
+        .protocol
+        .push_service
+        .publish_notification_from_user_server(
+            second_node.node(),
+            &waddle_xmpp::pubsub::PubSubItem::new(
+                Some("second".to_string()),
+                Some(Element::builder("notification", waddle_xmpp::xep::xep0357::NS_PUSH).build()),
+            ),
+            &owner,
+        )
+        .await
+        .expect("second publish");
+
+    assert_eq!(first_publish.attempted_devices(), 0);
+    assert_eq!(second_publish.attempted_devices(), 1);
+}
+
+#[tokio::test]
+async fn handle_iq_xep0357_disable_removes_registration_without_retiring_push_service_node() {
+    let state = create_test_websocket_state().await;
+    let owner: BareJid = "alice@example.com".parse().expect("owner");
+    let jid: FullJid = "alice@example.com/web".parse().expect("valid jid");
+    let node = state
+        .deps
+        .protocol
+        .push_service
+        .ensure_node(&owner, "web")
+        .await
+        .expect("push node");
+    state
+        .deps
+        .protocol
+        .push_service
+        .upsert_device(
+            &owner,
+            crate::push_service::PushDeviceRegistration::new(
+                "web-1",
+                node.node(),
+                crate::push_service::PushDevicePlatform::Web,
+                "test",
+            )
+            .with_provider_token(Some("provider-secret".to_string())),
+        )
+        .await
+        .expect("device");
+    state
+        .deps
+        .protocol
+        .push_store
+        .register(waddle_xmpp::push::PushSubscription {
+            user_jid: owner.to_string(),
+            service_jid: "push.example.com".to_string(),
+            node: Some(node.node().to_string()),
+            publish_options: None,
+            endpoint: None,
+            p256dh: None,
+            auth_key: None,
+        })
+        .await
+        .expect("push registration");
+
+    let disable = Element::builder("disable", waddle_xmpp::xep::xep0357::NS_PUSH)
+        .attr("jid", "push.example.com")
+        .attr("node", node.node())
+        .build();
+    let responses = handle_iq(
+        &iq_set_frame("xep0357-disable-first-party", "example.com", disable),
+        "example.com",
+        "muc.example.com",
+        state.as_ref(),
+        &None,
+        &ready_phase(&jid),
+    )
+    .await;
+    let response_iq = parse_iq_for_test(responses.first().expect("disable response"));
+    assert!(matches!(response_iq.payload, IqType::Result(None)));
+
+    let registrations = state
+        .deps
+        .protocol
+        .push_store
+        .get_for_user(&owner.to_string())
+        .await
+        .expect("push registrations after disable");
+    let node_after_disable = state
+        .deps
+        .protocol
+        .push_service
+        .get_node_for_owner(&owner, node.node())
+        .await
+        .expect("node lookup after disable");
+    let internal_publish = state
+        .deps
+        .protocol
+        .push_service
+        .publish_notification_from_user_server(
+            node.node(),
+            &waddle_xmpp::pubsub::PubSubItem::new(
+                Some("disabled".to_string()),
+                Some(Element::builder("notification", waddle_xmpp::xep::xep0357::NS_PUSH).build()),
+            ),
+            &owner,
+        )
+        .await
+        .expect("Push Service provisioning remains usable after XEP-0357 disable");
+
+    let reenabled_node = state
+        .deps
+        .protocol
+        .push_service
+        .ensure_node(&owner, "web")
+        .await
+        .expect("reenabled node");
+    let reenabled_publish = state
+        .deps
+        .protocol
+        .push_service
+        .publish_notification_from_user_server(
+            reenabled_node.node(),
+            &waddle_xmpp::pubsub::PubSubItem::new(
+                Some("reenabled".to_string()),
+                Some(Element::builder("notification", waddle_xmpp::xep::xep0357::NS_PUSH).build()),
+            ),
+            &owner,
+        )
+        .await
+        .expect("reenabled publish");
+
+    assert!(registrations.is_empty());
+    assert!(node_after_disable.is_some());
+    assert_eq!(internal_publish.attempted_devices(), 1);
+    assert_eq!(reenabled_node.node(), node.node());
+    assert_eq!(reenabled_publish.attempted_devices(), 1);
+}
+
+#[tokio::test]
+async fn handle_iq_xep0357_disable_without_node_removes_registrations_only() {
+    let state = create_test_websocket_state().await;
+    let owner: BareJid = "alice@example.com".parse().expect("owner");
+    let jid: FullJid = "alice@example.com/web".parse().expect("valid jid");
+    let first_node = state
+        .deps
+        .protocol
+        .push_service
+        .ensure_node(&owner, "web")
+        .await
+        .expect("first node");
+    let second_node = state
+        .deps
+        .protocol
+        .push_service
+        .ensure_node(&owner, "mobile")
+        .await
+        .expect("second node");
+    for node in [first_node.node(), second_node.node()] {
+        state
+            .deps
+            .protocol
+            .push_service
+            .upsert_device(
+                &owner,
+                crate::push_service::PushDeviceRegistration::new(
+                    format!("device-{node}"),
+                    node,
+                    crate::push_service::PushDevicePlatform::Web,
+                    "test",
+                )
+                .with_provider_token(Some("provider-secret".to_string())),
+            )
+            .await
+            .expect("device");
+        state
+            .deps
+            .protocol
+            .push_store
+            .register(waddle_xmpp::push::PushSubscription {
+                user_jid: owner.to_string(),
+                service_jid: "push.example.com".to_string(),
+                node: Some(node.to_string()),
+                publish_options: None,
+                endpoint: None,
+                p256dh: None,
+                auth_key: None,
+            })
+            .await
+            .expect("push registration");
+    }
+
+    let disable = Element::builder("disable", waddle_xmpp::xep::xep0357::NS_PUSH)
+        .attr("jid", "push.example.com")
+        .build();
+    let responses = handle_iq(
+        &iq_set_frame("xep0357-disable-all-first-party", "example.com", disable),
+        "example.com",
+        "muc.example.com",
+        state.as_ref(),
+        &None,
+        &ready_phase(&jid),
+    )
+    .await;
+    let response_iq = parse_iq_for_test(responses.first().expect("disable response"));
+    assert!(matches!(response_iq.payload, IqType::Result(None)));
+
+    let items_response = handle_iq(
+        &disco_items_iq_frame("push-items-after-disable", "push.example.com", None),
+        "example.com",
+        "muc.example.com",
+        state.as_ref(),
+        &None,
+        &ready_phase(&jid),
+    )
+    .await
+    .into_iter()
+    .next()
+    .expect("items response");
+
+    assert!(items_response.contains(first_node.node()));
+    assert!(items_response.contains(second_node.node()));
+    assert!(state
+        .deps
+        .protocol
+        .push_store
+        .get_for_user(&owner.to_string())
+        .await
+        .expect("registrations")
+        .is_empty());
+}
+
+#[tokio::test]
+async fn handle_iq_xep0357_disable_without_matching_registration_does_not_retire_node() {
+    let state = create_test_websocket_state().await;
+    let owner: BareJid = "alice@example.com".parse().expect("owner");
+    let jid: FullJid = "alice@example.com/web".parse().expect("valid jid");
+    let node = state
+        .deps
+        .protocol
+        .push_service
+        .ensure_node(&owner, "web")
+        .await
+        .expect("node");
+
+    let disable = Element::builder("disable", waddle_xmpp::xep::xep0357::NS_PUSH)
+        .attr("jid", "push.example.com")
+        .attr("node", node.node())
+        .build();
+    let responses = handle_iq(
+        &iq_set_frame("xep0357-disable-unregistered", "example.com", disable),
+        "example.com",
+        "muc.example.com",
+        state.as_ref(),
+        &None,
+        &ready_phase(&jid),
+    )
+    .await;
+    let response_iq = parse_iq_for_test(responses.first().expect("disable response"));
+    assert!(matches!(response_iq.payload, IqType::Result(None)));
+
+    assert!(state
+        .deps
+        .protocol
+        .push_service
+        .get_node_for_owner(&owner, node.node())
+        .await
+        .expect("node lookup")
+        .is_some());
+}
+
+#[tokio::test]
+async fn handle_iq_pubsub_publish_to_push_service_rejects_client_origin_publish() {
+    let state = create_test_websocket_state().await;
+    let owner: BareJid = "alice@example.com".parse().expect("owner");
+    let jid: FullJid = "alice@example.com/web".parse().expect("valid jid");
+    let node = state
+        .deps
+        .protocol
+        .push_service
+        .ensure_node(&owner, "web")
+        .await
+        .expect("push node");
+    state
+        .deps
+        .protocol
+        .push_service
+        .upsert_device(
+            &owner,
+            crate::push_service::PushDeviceRegistration::new(
+                "web-1",
+                node.node(),
+                crate::push_service::PushDevicePlatform::Web,
+                "test",
+            ),
+        )
+        .await
+        .expect("device");
+
+    let notification = Element::builder("notification", waddle_xmpp::xep::xep0357::NS_PUSH).build();
+    let item = Element::builder("item", waddle_xmpp::pubsub::NS_PUBSUB)
+        .attr("id", "push-1")
+        .append(notification)
+        .build();
+    let publish = Element::builder("publish", waddle_xmpp::pubsub::NS_PUBSUB)
+        .attr("node", node.node())
+        .append(item)
+        .build();
+    let pubsub = Element::builder("pubsub", waddle_xmpp::pubsub::NS_PUBSUB)
+        .append(publish)
+        .build();
+
+    let responses = handle_iq(
+        &iq_set_frame("push-publish-1", "push.example.com", pubsub),
+        "example.com",
+        "muc.example.com",
+        state.as_ref(),
+        &None,
+        &ready_phase(&jid),
+    )
+    .await;
+    let response_iq = parse_iq_for_test(responses.first().expect("publish response"));
+    assert_eq!(response_iq.id, "push-publish-1");
+    match response_iq.payload {
+        IqType::Error(_) => {}
+        other => panic!("expected PubSub publish error, got {other:?}"),
+    }
+
+    let attempts = state
+        .deps
+        .protocol
+        .push_service
+        .delivery_attempts_for_node(node.node())
+        .await
+        .expect("attempts");
+    assert!(attempts.is_empty());
+}
+
+#[tokio::test]
+async fn handle_iq_pubsub_publish_rejects_iq_get() {
+    let state = create_test_websocket_state().await;
+    let jid: FullJid = "alice@example.com/web".parse().expect("valid jid");
+    let notification = Element::builder("notification", waddle_xmpp::xep::xep0357::NS_PUSH).build();
+    let item = Element::builder("item", waddle_xmpp::pubsub::NS_PUBSUB)
+        .attr("id", "push-get")
+        .append(notification)
+        .build();
+    let publish = Element::builder("publish", waddle_xmpp::pubsub::NS_PUBSUB)
+        .attr("node", "urn:xmpp:test")
+        .append(item)
+        .build();
+    let pubsub = Element::builder("pubsub", waddle_xmpp::pubsub::NS_PUBSUB)
+        .append(publish)
+        .build();
+    let frame = stanza_to_xml(&Stanza::Iq(Iq {
+        from: None,
+        to: Some("alice@example.com".parse().expect("valid iq destination")),
+        id: "pub-get".to_string(),
+        payload: IqType::Get(pubsub),
+    }));
+
+    let responses = handle_iq(
+        &frame,
+        "example.com",
+        "muc.example.com",
+        state.as_ref(),
+        &None,
+        &ready_phase(&jid),
+    )
+    .await;
+    let response = responses.first().expect("publish get response");
+
+    assert!(
+        response.contains("type=\"error\"") && response.contains("bad-request"),
+        "XEP-0060 publish must be IQ set: {response}"
     );
 }
 

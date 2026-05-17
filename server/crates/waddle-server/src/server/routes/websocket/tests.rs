@@ -107,6 +107,16 @@ async fn create_test_websocket_state_with_extension_manager(
             pubsub_storage.database(),
         ),
     );
+    let push_service = Arc::new(
+        crate::push_service::DatabasePushServiceStore::new_with_secret_key_and_pubsub(
+            app_state.db_pool.global().clone(),
+            b"waddle-push-service-test-secret-key",
+            "push.example.com".parse().expect("push service jid"),
+            pubsub_storage.clone(),
+        )
+        .await
+        .expect("push service"),
+    );
 
     Arc::new(WebSocketState {
             deps: WebSocketDeps {
@@ -117,6 +127,7 @@ async fn create_test_websocket_state_with_extension_manager(
                     spaces: "spaces.example.com".to_string(),
                     upload: "upload.example.com".to_string(),
                     extensions: "extensions.example.com".to_string(),
+                    push: "push.example.com".to_string(),
                     community: "community.example.com".to_string(),
                 },
                 protocol: ProtocolServices {
@@ -140,7 +151,14 @@ async fn create_test_websocket_state_with_extension_manager(
                     extension_manager,
                     dispatcher: Arc::new(dispatcher),
                     pubsub_storage,
-                    push_store: Arc::new(waddle_xmpp::push::InMemoryPushStore::new()),
+                    push_store: Arc::new(
+                        crate::push_registrations::DatabasePushRegistrationStore::new(
+                            app_state.db_pool.global().clone(),
+                        )
+                        .await
+                        .expect("push registration store"),
+                    ),
+                    push_service,
                     notification_settings_projection,
                     isr_token_store: waddle_xmpp::isr::create_shared_store(),
                     sm_session_registry: Arc::new(InMemorySmSessionRegistry::new()),
@@ -351,6 +369,15 @@ fn disco_info_iq_frame(id: &str, to: &str, node: Option<&str>) -> String {
         to: Some(to.parse().expect("valid iq destination")),
         id: id.to_string(),
         payload: IqType::Get(query.build()),
+    }))
+}
+
+fn iq_set_frame(id: &str, to: &str, payload: xmpp_parsers::minidom::Element) -> String {
+    stanza_to_xml(&Stanza::Iq(Iq {
+        from: None,
+        to: Some(to.parse().expect("valid iq destination")),
+        id: id.to_string(),
+        payload: IqType::Set(payload),
     }))
 }
 
