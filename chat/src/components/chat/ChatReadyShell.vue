@@ -35,6 +35,8 @@ const {
   channelUnread,
   rosterContacts,
   socialFeed,
+  stories,
+  communityEvents,
   xmppClient,
   activeMessages,
   activeFirstUnseenId,
