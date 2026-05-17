@@ -195,8 +195,35 @@ impl NodeConfig {
         if node == super::pep::PEP_NODE_BOOKMARKS {
             config.max_items = PEP_BOOKMARK_MAX_ITEMS;
             config = config.normalize_xep0402_bookmarks();
+        } else if node == super::pep::PEP_NODE_MDS_DISPLAYED {
+            config = Self::mds_displayed();
         }
         config
+    }
+
+    /// XEP-0490 §3 Message Displayed Synchronization node defaults.
+    ///
+    /// The XEP mandates the publishing client send these as
+    /// publish-options preconditions:
+    ///   - `pubsub#persist_items=true`
+    ///   - `pubsub#max_items=max`
+    ///   - `pubsub#access_model=whitelist`
+    ///   - `pubsub#send_last_published_item=never`
+    ///
+    /// We bake these into the well-known node defaults so auto-create
+    /// matches the spec without depending on the (currently unenforced)
+    /// publish-options precondition path. `max=max` maps to `u32::MAX`.
+    pub fn mds_displayed() -> Self {
+        Self {
+            access_model: AccessModel::Whitelist,
+            publish_model: PublishModel::Publishers,
+            max_items: u32::MAX,
+            persist_items: true,
+            deliver_payloads: true,
+            notify_retract: true,
+            notify_delete: true,
+            send_last_published_item: SendLastPublishedItem::Never,
+        }
     }
 
     /// Force XEP-0402 bookmark privacy and durability invariants onto a config.

@@ -388,6 +388,12 @@ pub use super::xep0488::{
     NS_MUC_TOKEN_INVITE,
 };
 
+pub use super::xep0490::{
+    build_displayed_element as build_mds_displayed_element, is_displayed_element,
+    parse_displayed_element, MdsDisplayed, MdsDisplayedError, StanzaId as MdsStanzaId,
+    NS_MDS_DISPLAYED, NS_MDS_DISPLAYED_NOTIFY, PEP_NODE_MDS_DISPLAYED,
+};
+
 pub use super::xep0513::{
     build_mention_element, build_mentions_elements, extract_explicit_mentions,
     has_explicit_mentions, is_mention_element, parse_mention_element, set_explicit_mentions,

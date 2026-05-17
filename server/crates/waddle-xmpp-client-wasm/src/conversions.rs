@@ -442,6 +442,14 @@ pub(crate) fn presence_to_js(presence: InboundPresence) -> WaddlePresence {
     }
 }
 
+pub(crate) fn mds_entry_to_js(entry: MdsCatchupEntry) -> WaddleMdsDisplayedEntry {
+    WaddleMdsDisplayedEntry {
+        chat_id: entry.chat_id,
+        stanza_id: entry.stanza_id,
+        stanza_id_by: entry.stanza_id_by,
+    }
+}
+
 pub(crate) fn muc_affiliation_to_string(value: MucAffiliation) -> String {
     match value {
         MucAffiliation::Owner => "owner",

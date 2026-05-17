@@ -99,6 +99,7 @@ import type {
   WasmAvatar,
   WasmInboxResult,
   WasmMamPage,
+  WasmMdsDisplayedEntry,
   WasmMessage,
   WasmPepProfile,
   WasmPresence,
@@ -195,9 +196,29 @@ type XmppClientInstance = Partial<WasmClient> & CompatEmitter & {
   set_on_message_delivery_acked?: (cb: (id: string) => void) => void;
   set_on_message_delivery_failed?: (cb: (id: string) => void) => void;
   set_on_session_lifecycle?: (cb: (event: string) => void) => void;
+  set_on_mds_displayed?: (cb: (entry: WasmMdsDisplayedEntry) => void) => void;
   get_resume_state?: () => XmppResumeState | null;
   get_resume_state_handle?: () => XmppResumeStateHandle | undefined;
+  publish_mds_displayed?: (chatId: string, stanzaId: string, stanzaIdBy: string) => Promise<void>;
+  fetch_mds_displayed?: () => Promise<ReadonlyArray<WasmMdsDisplayedEntry>>;
+  subscribe_mds_displayed?: () => Promise<void>;
 };
+
+/**
+ * Typed XEP-0490 entry surfaced from the WASM client into the chat
+ * layer. Module-private — external consumers can use TypeScript
+ * structural typing (`{ chatId, stanzaId, stanzaIdBy }`) on the
+ * `setMdsDisplayedHandler` callback parameter without importing
+ * this name.
+ */
+interface MdsDisplayedEntry {
+  /** PEP item id = bare JID of the chat (DM contact or MUC room). */
+  chatId: string;
+  /** XEP-0359 id of the latest displayed message. */
+  stanzaId: string;
+  /** JID that injected the stanza-id (room for MUC, user's server for DM). */
+  stanzaIdBy: string;
+}
 
 type XmppResumeState = {
   previd: string;
@@ -254,6 +275,7 @@ export class BrowserXmppClient {
   private statusHandler: ((status: XmppStatusSnapshot) => void) | null = null;
   private reactionHandler: ((event: ReactionEvent) => void) | null = null;
   private displayedHandler: ((event: { roomJid: string; nick: string; messageId: string }) => void) | null = null;
+  private mdsDisplayedHandler: ((entry: MdsDisplayedEntry) => void) | null = null;
   private chatStateHandler: ((event: ChatStateEvent) => void) | null = null;
   private dmChatStateHandler: ((event: DmChatStateEvent) => void) | null = null;
   private dmReactionHandler: ((event: DmReactionEvent) => void) | null = null;
@@ -837,6 +859,53 @@ export class BrowserXmppClient {
   async sendDmCorrection(peerJid: string, body: string, replacesId: string, markup?: SendDirectMessageOptions["markup"], references?: SendDirectMessageOptions["references"]): Promise<string | null> { const xmpp = await this.requireConnectedXmpp(); return await this.compatSendCorrection(xmpp, barePeerJid(peerJid), "chat", body, replacesId, { markup, references }); }
   async sendDmReaction(peerJid: string, messageId: string, emojis: string[]): Promise<void> { const xmpp = await this.requireConnectedXmpp(); await this.compatSendReaction(xmpp, barePeerJid(peerJid), "chat", messageId, emojis); }
 
+  /**
+   * XEP-0490 §3 multi-device "read up to here" publish. `chatId` is
+   * the bare JID of the chat (DM contact or MUC room); `stanzaId` is
+   * the XEP-0359 id of the latest displayed message; `stanzaIdBy` is
+   * the JID that injected that stanza-id (room for MUC, user's own
+   * server for 1:1). Failures are intentionally silent — MDS is a
+   * best-effort multi-device-sync signal, not a UX-visible action.
+   */
+  async publishMdsDisplayed(chatId: string, stanzaId: string, stanzaIdBy: string): Promise<void> {
+    const xmpp = await this.requireConnectedXmpp();
+    if (typeof xmpp.publish_mds_displayed !== "function") return;
+    try { await xmpp.publish_mds_displayed(chatId, stanzaId, stanzaIdBy); } catch { /* best-effort */ }
+  }
+
+  /**
+   * XEP-0490 §3.1 catch-up: fetch every item from the user's own
+   * `urn:xmpp:mds:displayed:0` PEP node. Used on bind / initial
+   * presence to seed local displayed state for chats the user
+   * advanced on another device while this one was offline. Returns
+   * an empty array on first call (no node yet) rather than throwing.
+   */
+  async fetchMdsDisplayed(): Promise<MdsDisplayedEntry[]> {
+    const xmpp = await this.requireConnectedXmpp();
+    if (typeof xmpp.fetch_mds_displayed !== "function") return [];
+    try {
+      const raw = await xmpp.fetch_mds_displayed() as ReadonlyArray<WasmMdsDisplayedEntry> | null;
+      if (!raw) return [];
+      return raw.map((entry) => ({ chatId: entry.chat_id, stanzaId: entry.stanza_id, stanzaIdBy: entry.stanza_id_by }));
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * XEP-0060 explicit subscribe to the MDS node. Used as a fallback
+   * path for receiving `+notify` events when the chat client's
+   * presence does not yet advertise XEP-0115 caps. Failures are
+   * swallowed (the subscribe is best-effort; catch-up still works).
+   */
+  async subscribeMdsDisplayed(): Promise<void> {
+    const xmpp = await this.requireConnectedXmpp();
+    if (typeof xmpp.subscribe_mds_displayed !== "function") return;
+    try { await xmpp.subscribe_mds_displayed(); } catch { /* best-effort */ }
+  }
+
+  setMdsDisplayedHandler(handler: ((entry: MdsDisplayedEntry) => void) | null) { this.mdsDisplayedHandler = handler; }
+
   private async resolveUploadService(): Promise<string> {
     if (this.uploadServiceJid) return this.uploadServiceJid;
     const xmpp = await this.requireConnectedXmpp();
@@ -1188,10 +1257,40 @@ export class BrowserXmppClient {
     this.connected = true; this.reconnectAttempt = 0;
     this.emitStatus({ state: "online", detail: countQueuedMessages(this.queueScope) > 0 ? lifecycle.type === "fresh" ? "Reconnected — replaying queued messages" : "Connection resumed — replaying queued messages" : lifecycle.type === "fresh" ? "Connection ready" : "Connection resumed" });
     const catchupEntries = this.catchup.onSessionStarted();
-    if (lifecycle.type === "fresh") { this.inflightQueuedIds.clear(); void this.enableCarbons(xmpp); }
+    if (lifecycle.type === "fresh") {
+      this.inflightQueuedIds.clear();
+      void this.enableCarbons(xmpp);
+      // XEP-0490 §3.1 + §3.2: catch up displayed state and subscribe
+      // to future +notify events. Both are best-effort and fully
+      // fail-silent (chat works without MDS). Bound to the specific
+      // xmpp reference so the bootstrap aborts cleanly if the client
+      // disconnects before the catch-up IQ resolves.
+      void this.bootstrapMdsDisplayed(xmpp);
+    }
     if (catchupEntries.length > 0) { void this.runReconnectCatchup(xmpp, catchupEntries); }
     this.emitSessionLifecycle(lifecycle); void this.flushQueuedDirectMessages(); if (this.currentRoom) void this.flushQueuedRoomMessages(this.currentRoom);
     if (this.onceConnected) { const done = this.onceConnected; this.onceConnected = null; this.onceConnectFailed = null; done(); }
+  }
+
+  private async bootstrapMdsDisplayed(xmpp: XmppClientInstance) {
+    if (typeof xmpp.fetch_mds_displayed === "function") {
+      try {
+        const raw = await xmpp.fetch_mds_displayed();
+        if (this.xmpp !== xmpp) return;
+        const handler = this.mdsDisplayedHandler;
+        if (handler && raw) {
+          for (const entry of raw) {
+            handler({ chatId: entry.chat_id, stanzaId: entry.stanza_id, stanzaIdBy: entry.stanza_id_by });
+          }
+        }
+      } catch { /* best-effort */ }
+    }
+    if (this.xmpp !== xmpp) return;
+    // XEP-0060 explicit subscribe so future publishes from another
+    // resource fan out as headline events to this one.
+    if (typeof xmpp.subscribe_mds_displayed === "function") {
+      try { await xmpp.subscribe_mds_displayed(); } catch { /* best-effort */ }
+    }
   }
   private handleDisconnected(xmpp: XmppClientInstance, error?: Error) {
     if (this.xmpp !== xmpp) return;
@@ -1419,6 +1518,9 @@ export class BrowserXmppClient {
     xmpp.set_on_presence?.((presence: WasmPresence) => this.handlePresence(presence));
     xmpp.set_on_message_delivery_acked?.((id: string) => this.handleMessageAck(id));
     xmpp.set_on_message_delivery_failed?.((id: string) => this.handleMessageFailed(id));
+    xmpp.set_on_mds_displayed?.((entry: WasmMdsDisplayedEntry) => {
+      this.mdsDisplayedHandler?.({ chatId: entry.chat_id, stanzaId: entry.stanza_id, stanzaIdBy: entry.stanza_id_by });
+    });
     xmpp.on?.("session:started", () => { xmpp.disableKeepAlive?.(); xmpp.enableKeepAlive?.({ interval: 30, timeout: 15 }); this.handleSessionReady(xmpp, { type: "fresh" }); });
     xmpp.on?.("stream:management:resumed", () => this.handleSessionReady(xmpp, { type: "resumed" }));
     xmpp.on?.("disconnected", (error?: Error) => { xmpp.disableKeepAlive?.(); this.handleDisconnected(xmpp, error); });

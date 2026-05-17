@@ -26,6 +26,8 @@ export function fromLiveDmMessage(
   };
   if (msg.correctionTargetId) tm.correctionTargetId = msg.correctionTargetId;
   if (msg.replyableId) tm.replyableId = msg.replyableId;
+  if (msg.stanzaId) tm.stanzaId = msg.stanzaId;
+  if (msg.stanzaIdBy) tm.stanzaIdBy = msg.stanzaIdBy;
   if (msg.isRetracted) tm.isRetracted = true;
   if (msg.retractionId) tm.retractionId = msg.retractionId;
   if (msg.wireIds?.length) tm.wireIds = msg.wireIds;

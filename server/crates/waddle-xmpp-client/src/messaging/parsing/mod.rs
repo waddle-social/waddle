@@ -111,6 +111,16 @@ fn parse_message(el: &Element) -> Option<InboundMessage> {
     let extension_envelope = parse_extension_envelope(el);
     let extension_body_fallback = extension_envelope.is_some()
         && crate::xep::fallback::has_whole_body_fallback_for(el, NS_WADDLE_EXTENSION);
+    let mds_displayed = crate::mds::parse_mds_event(el).map(|entries| {
+        entries
+            .into_iter()
+            .map(|entry| MdsDisplayedEntry {
+                chat_id: entry.chat_id,
+                stanza_id: entry.stanza_id,
+                stanza_id_by: entry.stanza_id_by,
+            })
+            .collect::<Vec<_>>()
+    });
 
     let reply_marker = xep_reply::parse_reply(el);
     let reply_to_id = reply_marker.as_ref().map(|m| m.id.clone());
@@ -332,6 +342,7 @@ fn parse_message(el: &Element) -> Option<InboundMessage> {
         pin_event,
         extension_envelope,
         extension_body_fallback,
+        mds_displayed,
     })
 }
 

@@ -178,6 +178,8 @@ fn xep0163_well_known_node_classifier_covers_registered_nodes() {
         "http://jabber.org/protocol/tune",
         "http://jabber.org/protocol/geoloc",
         "urn:xmpp:microblog:0",
+        // XEP-0490 Message Displayed Synchronization PEP node.
+        "urn:xmpp:mds:displayed:0",
     ];
     for node in known {
         assert!(

@@ -28,6 +28,13 @@ export class WaddleClient {
     fetch_dm_history_page(peer_jid: string, max: number, page_param: any): Promise<any>;
     fetch_extension_route_items(route: any, room_jid: string): Promise<any>;
     fetch_inbox(opts: any): Promise<any>;
+    /**
+     * XEP-0490 §3.1 catch-up: retrieve every item from the user's
+     * own `urn:xmpp:mds:displayed:0` PEP node. Returns an array of
+     * `WaddleMdsDisplayedEntry` records. An empty array on first
+     * call (no node yet) is normal and not an error.
+     */
+    fetch_mds_displayed(): Promise<any>;
     fetch_room_history(room_jid: string, max: number, before_id?: string | null): Promise<any>;
     fetch_room_history_by_thread(room_jid: string, thread_id: string, max: number, before_id?: string | null): Promise<any>;
     fetch_room_history_page(room_jid: string, max: number, page_param: any): Promise<any>;
@@ -70,6 +77,16 @@ export class WaddleClient {
      */
     pin_message(room_jid: string, target_stanza_id: string): Promise<any>;
     publish_activity(activity_json: any): Promise<any>;
+    /**
+     * XEP-0490 §3 publish to `urn:xmpp:mds:displayed:0`. `chat_id` is
+     * the bare JID of the chat (DM contact or MUC room) which becomes
+     * the PEP item id; `stanza_id` is the XEP-0359 id of the latest
+     * displayed message; `stanza_id_by` is the JID that injected
+     * that stanza-id (the MUC room for group chats, the user's own
+     * server for 1:1). The publish carries the spec-mandated
+     * publish-options as preconditions.
+     */
+    publish_mds_displayed(chat_id: string, stanza_id: string, stanza_id_by: string): Promise<any>;
     publish_mood(mood_json: any): Promise<any>;
     publish_tune(tune_json: any): Promise<any>;
     publish_vcard4(vcard_json: any): Promise<any>;
@@ -94,6 +111,12 @@ export class WaddleClient {
     set_on_connected(cb: Function): void;
     set_on_disconnected(cb: Function): void;
     set_on_error(cb: Function): void;
+    /**
+     * XEP-0490 §3.2 PEP event handler. Invoked once per displayed
+     * item carried in an inbound `urn:xmpp:mds:displayed:0` PEP
+     * event, with a `WaddleMdsDisplayedEntry`-shaped JS value.
+     */
+    set_on_mds_displayed(cb: Function): void;
     set_on_message(cb: Function): void;
     set_on_message_delivery_acked(cb: Function): void;
     set_on_message_delivery_failed(cb: Function): void;
@@ -113,6 +136,13 @@ export class WaddleClient {
      * defaults to 24.
      */
     stories_publish(community_jid: string, input: any): Promise<any>;
+    /**
+     * XEP-0060 explicit subscribe to the MDS node, used as a
+     * fallback path for receiving `+notify` events when the chat
+     * client's presence does not yet carry XEP-0115 caps. The
+     * subscriber JID is derived from the bound session JID (bare).
+     */
+    subscribe_mds_displayed(): Promise<any>;
     subscribe_to_presence(peer_jid: string): Promise<any>;
     /**
      * Publish an unpin request (#414). Same authorization rules as

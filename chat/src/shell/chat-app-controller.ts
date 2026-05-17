@@ -18,6 +18,7 @@ import { useDeploymentVersionInfo } from "@/shell/version";
 import { useXmppRosterContacts } from "@/contacts/roster";
 import { buildDirectMessagePath, buildChannelExtensionPath, buildChannelPath, buildChatSettingsPath, parseChatLocation, pushDirectMessageRoute, pushChannelExtensionRoute, pushChannelRoute, pushChatSettingsRoute, resolveChannelBySlug, shouldLoadWaddleStructureForRoute } from "@/shell/navigation";
 import { barePeerJid, jidDomain, parseManagedRoomBareJid } from "@/lib/xmpp-client";
+import { mdsChatKey, setLastSeen } from "@/lib/last-seen-store";
 import { roomJidForChannelId as resolveRoomJidForChannelId } from "@/lib/channel-room";
 import { connectionStore } from "@/lib/connection-store";
 import { resetPinnedRooms } from "@/stores/pinned-messages";
@@ -658,6 +659,14 @@ export function useChatAppController(giphyApiKey: string) {
     client.setDmChatStateHandler(dmMessaging.onChatState);
     client.setDmDisplayedHandler(dmMessaging.onDisplayed);
     client.setDmReactionHandler(dmMessaging.onReaction);
+    // XEP-0490 §3.2: another resource of this account has marked a
+    // chat as displayed. Persist the stanza-id under the MDS-scoped
+    // last-seen key so existing conversation-scoped readers can pick
+    // it up alongside their own divider state. The chat-id is the
+    // bare JID of either the MUC room or the DM peer.
+    client.setMdsDisplayedHandler((entry) => {
+      setLastSeen(mdsChatKey(entry.chatId), entry.stanzaId);
+    });
     client.setPresenceUpdateHandler((event) => {
       dmConversations.updatePresence(event);
       rosterContacts.updatePresence(event.bareJid, event.show);

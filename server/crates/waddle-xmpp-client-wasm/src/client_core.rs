@@ -16,6 +16,7 @@ impl WaddleClient {
                 on_error: None,
                 on_message_delivery_acked: None,
                 on_message_delivery_failed: None,
+                on_mds_displayed: None,
                 resume_state: None,
             })),
         }
@@ -68,6 +69,13 @@ impl WaddleClient {
 
     pub fn set_on_message_delivery_failed(&mut self, cb: Function) {
         self.inner.borrow_mut().on_message_delivery_failed = Some(cb);
+    }
+
+    /// XEP-0490 §3.2 PEP event handler. Invoked once per displayed
+    /// item carried in an inbound `urn:xmpp:mds:displayed:0` PEP
+    /// event, with a `WaddleMdsDisplayedEntry`-shaped JS value.
+    pub fn set_on_mds_displayed(&mut self, cb: Function) {
+        self.inner.borrow_mut().on_mds_displayed = Some(cb);
     }
 
     pub fn connect(&self) -> Promise {

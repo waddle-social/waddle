@@ -152,6 +152,10 @@ export interface LiveRoomMessage {
    * origin-id then message @id, per the same section.
    */
   replyableId?: string;
+  /** XEP-0359 room-assigned stanza-id, used by XEP-0490 MDS for MUC. */
+  stanzaId?: string;
+  /** Bare JID that injected `stanzaId` (the room for MUC). */
+  stanzaIdBy?: string;
   _reactionTarget?: string;
   _reactionEmojis?: string[];
   _reactionSenderId?: string;
@@ -195,6 +199,10 @@ export interface LiveDmMessage {
   forumThreadTitle?: string;
   /** XEP-0461 §3.2 replyable id (origin-id then message @id for DMs). */
   replyableId?: string;
+  /** XEP-0359 user-server-injected stanza-id, used by XEP-0490 MDS. */
+  stanzaId?: string;
+  /** Bare JID that injected `stanzaId` (the user's own server for DMs). */
+  stanzaIdBy?: string;
   _reactionTarget?: string;
   _reactionEmojis?: string[];
 }
