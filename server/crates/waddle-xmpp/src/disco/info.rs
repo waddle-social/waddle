@@ -27,5 +27,27 @@ pub fn server_features() -> Vec<Feature> {
     // admin, this advert is absent and the chat client's admin panel
     // can fall back to the "Admin only" empty state.
     features.push(Feature::new(crate::admin::NS_ADMIN_USERS_LIST));
+    // Admin V2 — Spaces + Channels CRUD commands. Same discovery
+    // contract as V1: the XEP-0050 node identifier doubles as the
+    // disco#info feature URI. Listed here so an admin client can
+    // detect server support for the V2 surface without first
+    // walking the commands list. Order mirrors the wire-protocol
+    // section of `docs/superpowers/specs/2026-05-17-admin-v2-design.md`.
+    features.push(Feature::new(crate::admin::NS_ADMIN_SPACES_LIST));
+    features.push(Feature::new(crate::admin::NS_ADMIN_SPACES_CREATE));
+    features.push(Feature::new(crate::admin::NS_ADMIN_SPACES_UPDATE));
+    features.push(Feature::new(crate::admin::NS_ADMIN_SPACES_DELETE));
+    features.push(Feature::new(crate::admin::NS_ADMIN_SPACES_MEMBERS));
+    features.push(Feature::new(crate::admin::NS_ADMIN_SPACES_SET_ROLE));
+    features.push(Feature::new(crate::admin::NS_ADMIN_CHANNELS_LIST));
+    features.push(Feature::new(crate::admin::NS_ADMIN_CHANNELS_CREATE));
+    features.push(Feature::new(crate::admin::NS_ADMIN_CHANNELS_UPDATE));
+    features.push(Feature::new(crate::admin::NS_ADMIN_CHANNELS_DELETE));
+    features.push(Feature::new(crate::admin::NS_ADMIN_CHANNELS_OCCUPANTS));
+    features.push(Feature::new(crate::admin::NS_ADMIN_CHANNELS_AFFILIATIONS));
+    features.push(Feature::new(
+        crate::admin::NS_ADMIN_CHANNELS_SET_AFFILIATION,
+    ));
+    features.push(Feature::new(crate::admin::NS_ADMIN_CHANNELS_KICK));
     features
 }
