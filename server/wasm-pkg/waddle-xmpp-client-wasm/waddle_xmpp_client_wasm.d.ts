@@ -130,6 +130,22 @@ export class WaddleClient {
      */
     xcal_publish(community_jid: string, input: any): Promise<any>;
     /**
+     * Publish (or replace) a full CalendarItem at the given item
+     * id — master event plus optional per-instance overrides and
+     * EXDATE cancellations. Use this for the read-modify-write
+     * flows ("edit this occurrence", "edit all occurrences",
+     * "cancel this occurrence") after fetching current state via
+     * `xcal_items`. Passing an existing item id overwrites that
+     * item atomically; passing a new id creates a new item.
+     */
+    xcal_publish_item(community_jid: string, item_id: string, input: any): Promise<any>;
+    /**
+     * Retract a calendar item from the events node. Used for
+     * "cancel entire series" — removes the master plus any
+     * overrides in one shot.
+     */
+    xcal_retract(community_jid: string, item_id: string): Promise<any>;
+    /**
      * Publish (or update) this session's RSVP for a calendar event.
      * `partstat` must be one of "ACCEPTED" | "DECLINED" | "TENTATIVE"
      * | "NEEDS-ACTION". The chat groups sibling `-rsvp-*` items back
