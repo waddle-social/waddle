@@ -197,8 +197,26 @@ impl NodeConfig {
             config = config.normalize_xep0402_bookmarks();
         } else if node == super::pep::PEP_NODE_MDS_DISPLAYED {
             config = Self::mds_displayed();
+        } else if node == super::pep::PEP_NODE_VCARD4 {
+            config = Self::vcard4_defaults();
         }
         config
+    }
+
+    /// XEP-0292 §6.1 vCard4 PEP node defaults.
+    ///
+    /// XEP-0292 §6.1 pins `open` as the canonical access model for the
+    /// `urn:xmpp:vcard4` node so any peer (roster relationship or not)
+    /// can resolve a user's published vCard4. `max_items = 1` keeps the
+    /// node single-slot so each publish replaces the prior one rather
+    /// than growing an unbounded item history — matching the
+    /// OIDC-managed publisher in `waddle-server::profile::publish`.
+    pub fn vcard4_defaults() -> Self {
+        Self {
+            access_model: AccessModel::Open,
+            max_items: 1,
+            ..Self::pep_default()
+        }
     }
 
     /// XEP-0490 §3 Message Displayed Synchronization node defaults.
@@ -357,6 +375,31 @@ mod tests {
         assert_eq!(private.max_items, u32::MAX);
         assert!(private.persist_items);
         assert!(private.notify_retract);
+    }
+
+    #[test]
+    fn vcard4_pep_config_is_open_with_single_item_retention() {
+        // XEP-0292 §6.1 canonical access model: `open`. The auto-create
+        // path on a publish to `urn:xmpp:vcard4` MUST land Open, not
+        // Presence — otherwise non-roster peers can't read the vCard
+        // even though the XEP says the node is publicly readable.
+        let config = NodeConfig::pep_for_node(super::super::pep::PEP_NODE_VCARD4);
+        assert_eq!(config.access_model, AccessModel::Open);
+        assert_eq!(config.publish_model, PublishModel::Publishers);
+        assert_eq!(config.max_items, 1);
+        assert!(config.persist_items);
+    }
+
+    #[test]
+    fn vcard4_defaults_helper_matches_pep_for_node() {
+        // Defence-in-depth: `vcard4_defaults()` is the single source of
+        // truth that the publish-handler reconcile path will compare
+        // existing-node configs against, so `pep_for_node` MUST return
+        // the same value.
+        assert_eq!(
+            NodeConfig::pep_for_node(super::super::pep::PEP_NODE_VCARD4),
+            NodeConfig::vcard4_defaults()
+        );
     }
 
     #[test]

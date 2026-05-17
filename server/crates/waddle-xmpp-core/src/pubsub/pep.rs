@@ -17,6 +17,15 @@ pub const PEP_NODE_AVATAR_METADATA: &str = "urn:xmpp:avatar:metadata";
 /// matches the wire shape in the XEP-0490 examples.
 pub const PEP_NODE_MDS_DISPLAYED: &str = "urn:xmpp:mds:displayed:0";
 
+/// XEP-0292 §3 vCard4 PEP node.
+///
+/// Mirrored as `waddle_xmpp::xep::xep0292::PEP_NODE_VCARD4` for use at
+/// the wire-handling layer; defined here so the well-known-node
+/// configuration table in `NodeConfig::pep_for_node` can reference it
+/// without pulling `waddle-xmpp` into `waddle-xmpp-core`. The two
+/// constants are pinned equal by a `waddle-xmpp` test.
+pub const PEP_NODE_VCARD4: &str = "urn:xmpp:vcard4";
+
 /// Check if an IQ is a PEP request for the current user.
 pub fn is_pep_request(iq: &Iq, user_jid: &BareJid) -> bool {
     if !is_pubsub_iq(iq) {
@@ -51,6 +60,7 @@ impl PepHandler {
             || node == PEP_NODE_AVATAR_DATA
             || node == PEP_NODE_AVATAR_METADATA
             || node == PEP_NODE_MDS_DISPLAYED
+            || node == PEP_NODE_VCARD4
             || node == "http://jabber.org/protocol/nick"
             || node == "http://jabber.org/protocol/mood"
             || node == "http://jabber.org/protocol/activity"
@@ -63,6 +73,11 @@ impl PepHandler {
     pub fn default_access_model_for_node(node: &str) -> AccessModel {
         if node == PEP_NODE_BOOKMARKS || node == PEP_NODE_MDS_DISPLAYED {
             return AccessModel::Whitelist;
+        }
+        if node == PEP_NODE_VCARD4 {
+            // XEP-0292 §6.1: vCard4 is publicly readable; the canonical
+            // PEP node access model is `open`.
+            return AccessModel::Open;
         }
 
         AccessModel::Presence

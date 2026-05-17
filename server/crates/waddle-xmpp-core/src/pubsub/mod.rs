@@ -13,6 +13,7 @@ pub use node::{
 pub use pep::{
     build_pep_identity, is_pep_request, is_pep_request_to, pep_features, PepHandler,
     PEP_NODE_AVATAR_DATA, PEP_NODE_AVATAR_METADATA, PEP_NODE_BOOKMARKS, PEP_NODE_MDS_DISPLAYED,
+    PEP_NODE_VCARD4,
 };
 pub use stanzas::{
     build_pubsub_affiliations_result, build_pubsub_configure_form_result, build_pubsub_error,

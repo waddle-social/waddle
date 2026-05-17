@@ -76,7 +76,7 @@ or advertises. One row per XEP. Each gap becomes an isolated PR.
 | 0249 | Direct MUC Invitations                               | jabber:x:conference                |  -  |  Y   |   -   | unaudited  | |
 | 0277 | Microblogging over XMPP                              | urn:xmpp:microblog:0               |  -  |  ?   |   Y   | unaudited  | Test exists, impl path unclear |
 | 0280 | Message Carbons                                      | urn:xmpp:carbons:2 + rules:0       |  Y  |  Y   |   Y   | unaudited  | |
-| 0292 | vCard4 over XMPP                                     | urn:xmpp:vcard4 + +notify          |  Y  |  Y   |   -   | unaudited  | |
+| 0292 | vCard4 over XMPP                                     | urn:xmpp:vcard4 + +notify          |  Y  |  Y   |   Y   | gap (partial) | §6.1 canonical `access_model=open` wired through `NodeConfig::pep_for_node(PEP_NODE_VCARD4)` + reconcile-on-publish for legacy `presence`-access nodes in **PR #669**. Dedicated suite: `crates/waddle-xmpp/tests/xep0292_vcard4.rs` + `crates/waddle-server/tests/xep0292_vcard4_ws.rs`. |
 | 0297 | Stanza Forwarding                                    | urn:xmpp:forward:0                 |  -  |  Y   |   -   | unaudited  | Used by carbons / MAM |
 | 0300 | Use of Cryptographic Hash Functions in XMPP          | urn:xmpp:hashes:2                  |  -  |  Y   |   -   | unaudited  | |
 | 0308 | Last Message Correction                              | urn:xmpp:message-correct:0         |  Y  |  Y   |   Y   | unaudited  | |
