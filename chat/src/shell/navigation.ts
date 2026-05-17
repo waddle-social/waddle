@@ -133,6 +133,7 @@ export function parseChatLocation(pathname: string, search?: string): RouteState
       extensionRouteId: null,
       threadStack: [],
       pinnedPanelOpen: false,
+      adminPanel: null,
     };
   }
   if (segments[0] === "r") {
