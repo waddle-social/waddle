@@ -371,6 +371,11 @@ async fn create_websocket_state(
         xmpp_domain.clone(),
     )
     .await;
+    // Admin V2 ad-hoc commands. The spaces handlers delegate to the
+    // typed dependencies on `AppState` (`spaces_metadata_store`,
+    // `pubsub_storage`, `room_registry`) wired up via #682/#683.
+    crate::admin::spaces::register(&websocket_command_registry, Arc::clone(&state)).await;
+    crate::admin::channels::register(&websocket_command_registry, Arc::clone(&state)).await;
     if let Err(error) = bootstrap_fresh_xmpp_topology(
         &state,
         Arc::clone(&pubsub_storage),
