@@ -6,6 +6,7 @@
 use jid::{BareJid, Jid};
 use minidom::Element;
 use thiserror::Error;
+use waddle_xmpp::inbox::storage::InboxStorage;
 use waddle_xmpp::pubsub::PubSubItem;
 use waddle_xmpp::push::PushSubscriptionStore;
 use waddle_xmpp::xep::{NS_DATA_FORMS, NS_PUBSUB_PUBLISH_OPTIONS};
@@ -119,6 +120,13 @@ impl NotificationReason {
     fn as_db_value(self) -> &'static str {
         match self {
             Self::OfflineDirectMessage => "offline_dm",
+        }
+    }
+
+    fn from_db_value(value: &str) -> Result<Self, NotificationOutboxError> {
+        match value {
+            "offline_dm" => Ok(Self::OfflineDirectMessage),
+            _ => Err(NotificationOutboxError::InvalidReason(value.to_string())),
         }
     }
 }
@@ -289,20 +297,24 @@ impl NotificationOutboxJob {
         self.claim_token.as_deref()
     }
 
-    pub fn to_xep0357_pubsub_item(&self) -> PubSubItem {
+    pub fn to_xep0357_pubsub_item_with_count(&self, message_count: u32) -> PubSubItem {
         PubSubItem::new(
             Some(self.job_id.as_str().to_string()),
             Some(build_xep0357_notification_payload(
-                self.message_count,
+                message_count,
                 &self.context,
             )),
         )
+    }
+
+    pub fn to_xep0357_pubsub_item(&self) -> PubSubItem {
+        self.to_xep0357_pubsub_item_with_count(self.message_count)
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NotificationCandidateInsertOutcome {
-    Inserted { enqueued_jobs: usize },
+    Inserted,
     Duplicate,
 }
 
@@ -338,6 +350,8 @@ pub enum NotificationOutboxError {
     Database(#[from] DatabaseError),
     #[error("push error: {0}")]
     Push(String),
+    #[error("inbox error: {0}")]
+    Inbox(String),
     #[error("XMPP error: {0}")]
     Xmpp(String),
     #[error("invalid push service node")]
@@ -405,6 +419,26 @@ impl NotificationOutboxStore {
         )
         .await?;
         self.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_notification_candidates_identity \
+             ON notification_candidates (recipient_bare_jid, conversation_jid, thread_id, stanza_id, class)",
+            (),
+        )
+        .await?;
+        self.execute(
+            "CREATE INDEX IF NOT EXISTS idx_notification_candidates_pending_worker \
+             ON notification_candidates (created_at_ms, recipient_bare_jid, conversation_jid, thread_id, stanza_id_by, stanza_id, class) \
+             WHERE outboxed_at_ms IS NULL",
+            (),
+        )
+        .await?;
+        self.execute(
+            "CREATE INDEX IF NOT EXISTS idx_notification_candidates_outboxed_prune \
+             ON notification_candidates (outboxed_at_ms, recipient_bare_jid, conversation_jid, thread_id, stanza_id_by, stanza_id, class) \
+             WHERE outboxed_at_ms IS NOT NULL",
+            (),
+        )
+        .await?;
+        self.execute(
             &format!(
                 r#"
                 CREATE TABLE IF NOT EXISTS notification_outbox (
@@ -445,8 +479,21 @@ impl NotificationOutboxStore {
         )
         .await?;
         self.execute(
+            "CREATE INDEX IF NOT EXISTS idx_notification_outbox_conversation_status \
+             ON notification_outbox (recipient_bare_jid, conversation_jid, thread_id, status)",
+            (),
+        )
+        .await?;
+        self.execute(
             "CREATE INDEX IF NOT EXISTS idx_notification_outbox_status_next_attempt \
              ON notification_outbox (status, next_attempt_at_ms, created_at_ms)",
+            (),
+        )
+        .await?;
+        self.execute(
+            "CREATE INDEX IF NOT EXISTS idx_notification_outbox_retention_prune \
+             ON notification_outbox (status, updated_at_ms, job_id) \
+             WHERE status IN ('published', 'failed')",
             (),
         )
         .await?;
@@ -496,14 +543,12 @@ impl NotificationOutboxStore {
         Ok(conn.query(sql, params).await?)
     }
 
-    pub async fn insert_candidate_and_enqueue(
+    pub async fn insert_candidate(
         &self,
         candidate: &NotificationCandidate,
-        targets: &[NotificationOutboxTarget],
     ) -> Result<NotificationCandidateInsertOutcome, NotificationOutboxError> {
         let now_ms = crate::time::now_ms();
-        let mut tx = self.db.begin().await?;
-        let inserted = tx
+        let inserted = self
             .execute(
                 r#"
                 INSERT INTO notification_candidates (
@@ -516,7 +561,7 @@ impl NotificationOutboxStore {
                     reason,
                     created_at_ms,
                     outboxed_at_ms
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)
                 ON CONFLICT DO NOTHING
                 "#,
                 crate::db_params![
@@ -528,24 +573,96 @@ impl NotificationOutboxStore {
                     candidate.class.as_db_value(),
                     candidate.reason.as_db_value(),
                     now_ms,
-                    now_ms,
                 ],
             )
             .await?;
         if inserted == 0 {
-            tx.commit().await?;
             return Ok(NotificationCandidateInsertOutcome::Duplicate);
         }
+        Ok(NotificationCandidateInsertOutcome::Inserted)
+    }
 
-        let context = build_waddle_context(candidate);
-        let context_xml = String::from(&context);
-        let mut enqueued_jobs = 0usize;
-        for target in targets {
-            enqueue_outbox_job_tx(&mut tx, candidate, target, &context_xml, now_ms).await?;
-            enqueued_jobs += 1;
+    pub async fn drain_pending_candidates_into_outbox(
+        &self,
+        push_store: &dyn PushSubscriptionStore,
+        first_party_service_jid: &BareJid,
+        batch_size: usize,
+    ) -> Result<usize, NotificationOutboxError> {
+        let candidates = self.pending_candidates(batch_size).await?;
+        let mut target_cache = std::collections::BTreeMap::<
+            String,
+            Result<Vec<NotificationOutboxTarget>, String>,
+        >::new();
+        let mut processed = 0usize;
+        for candidate in candidates {
+            let recipient_key = candidate.recipient_bare_jid.to_string();
+            if !target_cache.contains_key(&recipient_key) {
+                let resolved = resolve_first_party_targets(
+                    push_store,
+                    &candidate.recipient_bare_jid,
+                    first_party_service_jid,
+                )
+                .await
+                .map_err(|error| error.to_string());
+                target_cache.insert(recipient_key.clone(), resolved);
+            }
+            let targets = target_cache
+                .get(&recipient_key)
+                .expect("target cache populated")
+                .clone()
+                .map_err(NotificationOutboxError::Push)?;
+            let context = build_waddle_context(&candidate);
+            let context_xml = String::from(&context);
+            let now_ms = crate::time::now_ms();
+            let mut tx = self.db.begin().await?;
+            let claimed = mark_candidate_outboxed_tx(&mut tx, &candidate, now_ms).await?;
+            if claimed == 0 {
+                tx.commit().await?;
+                continue;
+            }
+            for target in &targets {
+                enqueue_outbox_job_tx(&mut tx, &candidate, target, &context_xml, now_ms).await?;
+            }
+            tx.commit().await?;
+            processed += 1;
         }
-        tx.commit().await?;
-        Ok(NotificationCandidateInsertOutcome::Inserted { enqueued_jobs })
+        Ok(processed)
+    }
+
+    async fn pending_candidates(
+        &self,
+        batch_size: usize,
+    ) -> Result<Vec<NotificationCandidate>, NotificationOutboxError> {
+        let batch_size = batch_size.clamp(1, 1_000);
+        let mut rows = self
+            .query(
+                r#"
+                SELECT recipient_bare_jid,
+                       conversation_jid,
+                       thread_id,
+                       stanza_id_by,
+                       stanza_id,
+                       class,
+                       reason
+                FROM notification_candidates
+                WHERE outboxed_at_ms IS NULL
+                ORDER BY created_at_ms ASC,
+                         recipient_bare_jid ASC,
+                         conversation_jid ASC,
+                         thread_id ASC,
+                         stanza_id_by ASC,
+                         stanza_id ASC,
+                         class ASC
+                LIMIT ?
+                "#,
+                crate::db_params![batch_size as i64],
+            )
+            .await?;
+        let mut candidates = Vec::new();
+        while let Some(row) = rows.next().await? {
+            candidates.push(decode_candidate(&row)?);
+        }
+        Ok(candidates)
     }
 
     pub async fn pending_outbox_jobs(
@@ -679,6 +796,7 @@ impl NotificationOutboxStore {
         &self,
         push_service: &crate::push_service::DatabasePushServiceStore,
         push_store: &dyn PushSubscriptionStore,
+        inbox_storage: &dyn InboxStorage,
         first_party_service_jid: &BareJid,
         batch_size: usize,
     ) -> Result<Vec<NotificationOutboxPublishOutcome>, NotificationOutboxError> {
@@ -686,7 +804,13 @@ impl NotificationOutboxStore {
         let mut outcomes = Vec::with_capacity(jobs.len());
         for job in jobs {
             match self
-                .publish_claimed_job(&job, push_service, push_store, first_party_service_jid)
+                .publish_claimed_job(
+                    &job,
+                    push_service,
+                    push_store,
+                    inbox_storage,
+                    first_party_service_jid,
+                )
                 .await
             {
                 Ok(outcome) => outcomes.push(outcome),
@@ -815,6 +939,7 @@ impl NotificationOutboxStore {
         job: &NotificationOutboxJob,
         push_service: &crate::push_service::DatabasePushServiceStore,
         push_store: &dyn PushSubscriptionStore,
+        inbox_storage: &dyn InboxStorage,
         first_party_service_jid: &BareJid,
     ) -> Result<NotificationOutboxPublishOutcome, NotificationOutboxError> {
         if job.push_service_jid() != first_party_service_jid {
@@ -869,7 +994,8 @@ impl NotificationOutboxStore {
             });
         }
 
-        let item = job.to_xep0357_pubsub_item();
+        let message_count = current_unread_count_for_job(job, inbox_storage).await?;
+        let item = job.to_xep0357_pubsub_item_with_count(message_count);
         let push_service_jid = job.push_service_jid.to_string();
         match push_service
             .enqueue_registered_notification_from_user_server_with_publish_options(
@@ -1113,6 +1239,8 @@ async fn enqueue_outbox_job_tx(
             UPDATE notification_outbox
             SET message_count = message_count + 1,
                 context_xml = ?,
+                last_error = NULL,
+                next_attempt_at_ms = NULL,
                 updated_at_ms = ?
             WHERE recipient_bare_jid = ?
               AND push_service_jid = ?
@@ -1137,6 +1265,110 @@ async fn enqueue_outbox_job_tx(
         .await?;
     }
     Ok(())
+}
+
+async fn mark_candidate_outboxed_tx(
+    tx: &mut crate::db::Transaction<'_>,
+    candidate: &NotificationCandidate,
+    now_ms: i64,
+) -> Result<u64, NotificationOutboxError> {
+    Ok(tx
+        .execute(
+            r#"
+            UPDATE notification_candidates
+            SET outboxed_at_ms = ?
+            WHERE recipient_bare_jid = ?
+              AND conversation_jid = ?
+              AND thread_id = ?
+              AND stanza_id_by = ?
+              AND stanza_id = ?
+              AND class = ?
+              AND outboxed_at_ms IS NULL
+            "#,
+            crate::db_params![
+                now_ms,
+                candidate.recipient_bare_jid.to_string(),
+                candidate.conversation_jid.to_string(),
+                candidate.thread_id.as_str(),
+                candidate.archive_stanza_id.by.to_string(),
+                candidate.archive_stanza_id.id.clone(),
+                candidate.class.as_db_value(),
+            ],
+        )
+        .await?)
+}
+
+async fn resolve_first_party_targets(
+    push_store: &dyn PushSubscriptionStore,
+    recipient: &BareJid,
+    first_party_service_jid: &BareJid,
+) -> Result<Vec<NotificationOutboxTarget>, NotificationOutboxError> {
+    let registrations = push_store
+        .get_for_user(&recipient.to_string())
+        .await
+        .map_err(|error| NotificationOutboxError::Push(error.to_string()))?;
+    let first_party_service = first_party_service_jid.to_string();
+    let mut targets = Vec::new();
+    for registration in registrations {
+        if registration.service_jid != first_party_service {
+            continue;
+        }
+        let Some(target) = target_from_subscription(&registration)? else {
+            continue;
+        };
+        if target.push_service_jid() == first_party_service_jid {
+            targets.push(target);
+        }
+    }
+    Ok(targets)
+}
+
+async fn current_unread_count_for_job(
+    job: &NotificationOutboxJob,
+    inbox_storage: &dyn InboxStorage,
+) -> Result<u32, NotificationOutboxError> {
+    let entries = if job.thread_id.as_str().is_empty() {
+        inbox_storage
+            .list(job.recipient_bare_jid())
+            .await
+            .map_err(|error| NotificationOutboxError::Inbox(error.to_string()))?
+    } else {
+        inbox_storage
+            .list_threads(job.recipient_bare_jid(), job.conversation_jid())
+            .await
+            .map_err(|error| NotificationOutboxError::Inbox(error.to_string()))?
+    };
+    Ok(entries
+        .into_iter()
+        .find(|entry| {
+            entry.partner == *job.conversation_jid()
+                && entry.thread_id.as_deref().unwrap_or("") == job.thread_id.as_str()
+        })
+        .map(|entry| entry.unread)
+        .unwrap_or(0))
+}
+
+fn decode_candidate(row: &Row) -> Result<NotificationCandidate, NotificationOutboxError> {
+    let recipient_raw: String = row.get(0)?;
+    let conversation_raw: String = row.get(1)?;
+    let stanza_id_by_raw: String = row.get(3)?;
+    Ok(NotificationCandidate {
+        recipient_bare_jid: recipient_raw
+            .parse()
+            .map_err(|_| NotificationOutboxError::InvalidRecipientBareJid(recipient_raw))?,
+        conversation_jid: conversation_raw
+            .parse()
+            .map_err(|_| NotificationOutboxError::InvalidConversationJid(conversation_raw))?,
+        thread_id: NotificationThreadId::new(row.get::<String>(2)?),
+        archive_stanza_id: StanzaId::new(
+            row.get::<String>(4)?,
+            stanza_id_by_raw
+                .parse()
+                .map_err(|_| NotificationOutboxError::InvalidArchiveStanzaIdBy(stanza_id_by_raw))?,
+        ),
+        class: NotificationClass::from_db_value(&row.get::<String>(5)?)?,
+        reason: NotificationReason::from_db_value(&row.get::<String>(6)?)?,
+    })
 }
 
 fn decode_outbox_job(row: &Row) -> Result<NotificationOutboxJob, NotificationOutboxError> {
@@ -1187,8 +1419,21 @@ pub fn build_xep0357_notification_payload(message_count: u32, context: &Element)
 
 fn build_xep0357_summary_form(message_count: u32) -> Element {
     Element::builder("x", NS_DATA_FORMS)
-        .append(xdata_field("FORM_TYPE", XEP0357_SUMMARY_FORM_TYPE))
+        .attr("type", "result")
+        .append(xdata_hidden_field("FORM_TYPE", XEP0357_SUMMARY_FORM_TYPE))
         .append(xdata_field("message-count", &message_count.to_string()))
+        .build()
+}
+
+fn xdata_hidden_field(var: &str, value: &str) -> Element {
+    Element::builder("field", NS_DATA_FORMS)
+        .attr("var", var)
+        .attr("type", "hidden")
+        .append(
+            Element::builder("value", NS_DATA_FORMS)
+                .append(value)
+                .build(),
+        )
         .build()
 }
 
@@ -1278,6 +1523,73 @@ mod tests {
             .expect("store")
     }
 
+    async fn enqueue_jobs_for_test(
+        store: &NotificationOutboxStore,
+        candidate: &NotificationCandidate,
+        targets: &[NotificationOutboxTarget],
+    ) {
+        let _ = store
+            .insert_candidate(candidate)
+            .await
+            .expect("insert candidate");
+        let now_ms = crate::time::now_ms();
+        let context = build_waddle_context(candidate);
+        let context_xml = String::from(&context);
+        let mut tx = store.db.begin().await.expect("begin tx");
+        mark_candidate_outboxed_tx(&mut tx, candidate, now_ms)
+            .await
+            .expect("mark candidate outboxed");
+        for target in targets {
+            enqueue_outbox_job_tx(&mut tx, candidate, target, &context_xml, now_ms)
+                .await
+                .expect("enqueue outbox job");
+        }
+        tx.commit().await.expect("commit tx");
+    }
+
+    async fn register_push_target(
+        push_store: &waddle_xmpp::push::InMemoryPushStore,
+        recipient: &BareJid,
+        target: &NotificationOutboxTarget,
+    ) {
+        push_store
+            .register(waddle_xmpp::push::PushSubscription {
+                user_jid: recipient.to_string(),
+                service_jid: target.push_service_jid().to_string(),
+                node: Some(target.node().as_str().to_string()),
+                publish_options: None,
+                endpoint: None,
+                p256dh: None,
+                auth_key: None,
+            })
+            .await
+            .expect("register push target");
+    }
+
+    async fn inbox_with_unread(
+        recipient: &BareJid,
+        conversation: &BareJid,
+        unread: u32,
+    ) -> waddle_xmpp::inbox::storage::InMemoryInboxStorage {
+        let inbox = waddle_xmpp::inbox::storage::InMemoryInboxStorage::new();
+        for n in 0..unread {
+            inbox
+                .upsert(
+                    recipient,
+                    waddle_xmpp::inbox::InboxEntry::new(
+                        conversation.clone(),
+                        waddle_xmpp::inbox::ConversationKind::Direct,
+                        format!("archive-{n}"),
+                        i64::from(n),
+                    ),
+                    true,
+                )
+                .await
+                .expect("upsert inbox entry");
+        }
+        inbox
+    }
+
     async fn reclaim_stale_job(
         store: &NotificationOutboxStore,
     ) -> (NotificationOutboxJob, NotificationOutboxJob) {
@@ -1309,35 +1621,46 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn candidate_insert_is_idempotent_and_coalesces_distinct_messages() {
+    async fn candidate_insert_is_idempotent_and_worker_coalesces_distinct_messages() {
         let store = store().await;
         let target = target();
+        let push_store = waddle_xmpp::push::InMemoryPushStore::new();
         let first = candidate("archive-1");
         let duplicate = candidate("archive-1");
         let second = candidate("archive-2");
+        register_push_target(&push_store, first.recipient_bare_jid(), &target).await;
 
         assert_eq!(
-            store
-                .insert_candidate_and_enqueue(&first, std::slice::from_ref(&target))
-                .await
-                .expect("first insert"),
-            NotificationCandidateInsertOutcome::Inserted { enqueued_jobs: 1 }
+            store.insert_candidate(&first).await.expect("first insert"),
+            NotificationCandidateInsertOutcome::Inserted
         );
         assert_eq!(
             store
-                .insert_candidate_and_enqueue(&duplicate, std::slice::from_ref(&target))
+                .insert_candidate(&duplicate)
                 .await
                 .expect("duplicate insert"),
             NotificationCandidateInsertOutcome::Duplicate
         );
         assert_eq!(
             store
-                .insert_candidate_and_enqueue(&second, std::slice::from_ref(&target))
+                .insert_candidate(&second)
                 .await
                 .expect("second insert"),
-            NotificationCandidateInsertOutcome::Inserted { enqueued_jobs: 1 }
+            NotificationCandidateInsertOutcome::Inserted
         );
 
+        assert!(store
+            .pending_outbox_jobs()
+            .await
+            .expect("pre-worker jobs")
+            .is_empty());
+        assert_eq!(
+            store
+                .drain_pending_candidates_into_outbox(&push_store, &bare("push.example.com"), 16,)
+                .await
+                .expect("drain candidates"),
+            2
+        );
         let jobs = store.pending_outbox_jobs().await.expect("jobs");
         assert_eq!(jobs.len(), 1);
         assert_eq!(jobs[0].message_count(), 2);
@@ -1359,9 +1682,11 @@ mod tests {
             .children()
             .find(|child| child.is("x", NS_DATA_FORMS))
             .expect("summary form");
+        assert_eq!(summary.attr("type"), Some("result"));
         assert!(summary.children().any(|field| {
             field.is("field", NS_DATA_FORMS)
                 && field.attr("var") == Some("FORM_TYPE")
+                && field.attr("type") == Some("hidden")
                 && field.children().any(|value| {
                     value.is("value", NS_DATA_FORMS) && value.text() == XEP0357_SUMMARY_FORM_TYPE
                 })
@@ -1392,10 +1717,7 @@ mod tests {
         let store = store().await;
         let target = target();
         let candidate = candidate("archive-1");
-        store
-            .insert_candidate_and_enqueue(&candidate, &[target])
-            .await
-            .expect("insert");
+        enqueue_jobs_for_test(&store, &candidate, &[target]).await;
 
         let jobs = store.claim_due_outbox_jobs(16).await.expect("claim");
         assert_eq!(jobs.len(), 1);
@@ -1411,10 +1733,7 @@ mod tests {
         let store = store().await;
         let target = target();
         let candidate = candidate("archive-1");
-        store
-            .insert_candidate_and_enqueue(&candidate, &[target])
-            .await
-            .expect("insert");
+        enqueue_jobs_for_test(&store, &candidate, &[target]).await;
 
         let first_claim = store.claim_due_outbox_jobs(16).await.expect("first claim");
         assert_eq!(first_claim.len(), 1);
@@ -1446,10 +1765,12 @@ mod tests {
     async fn stale_claim_cannot_mark_reclaimed_outbox_job_published() {
         let store = store().await;
         let target = target();
-        store
-            .insert_candidate_and_enqueue(&candidate("archive-1"), std::slice::from_ref(&target))
-            .await
-            .expect("insert");
+        enqueue_jobs_for_test(
+            &store,
+            &candidate("archive-1"),
+            std::slice::from_ref(&target),
+        )
+        .await;
         let (stale_claim, fresh_claim) = reclaim_stale_job(&store).await;
 
         assert!(
@@ -1529,17 +1850,21 @@ mod tests {
             bare("push.example.com"),
             PushServiceNodeName::new(push_node.node()).expect("push node target"),
         );
-        store
-            .insert_candidate_and_enqueue(&candidate("archive-1"), std::slice::from_ref(&target))
-            .await
-            .expect("insert");
+        enqueue_jobs_for_test(
+            &store,
+            &candidate("archive-1"),
+            std::slice::from_ref(&target),
+        )
+        .await;
         let (stale_claim, fresh_claim) = reclaim_stale_job(&store).await;
+        let inbox = inbox_with_unread(&recipient, &bare("bob@example.com"), 1).await;
 
         let outcome = store
             .publish_claimed_job(
                 &stale_claim,
                 &push_service,
                 &push_store,
+                &inbox,
                 &bare("push.example.com"),
             )
             .await
@@ -1566,18 +1891,17 @@ mod tests {
     async fn new_candidate_after_claim_creates_fresh_queued_job() {
         let store = store().await;
         let target = target();
-        store
-            .insert_candidate_and_enqueue(&candidate("archive-1"), std::slice::from_ref(&target))
-            .await
-            .expect("first insert");
+        enqueue_jobs_for_test(
+            &store,
+            &candidate("archive-1"),
+            std::slice::from_ref(&target),
+        )
+        .await;
 
         let claimed = store.claim_due_outbox_jobs(16).await.expect("claim");
         assert_eq!(claimed.len(), 1);
         assert_eq!(claimed[0].message_count(), 1);
-        store
-            .insert_candidate_and_enqueue(&candidate("archive-2"), &[target])
-            .await
-            .expect("second insert");
+        enqueue_jobs_for_test(&store, &candidate("archive-2"), &[target]).await;
 
         let jobs = store.pending_outbox_jobs().await.expect("jobs");
         assert_eq!(jobs.len(), 2);
@@ -1593,12 +1917,88 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn coalescing_new_candidate_clears_retry_backoff() {
+        let store = store().await;
+        let target = target();
+        enqueue_jobs_for_test(
+            &store,
+            &candidate("archive-1"),
+            std::slice::from_ref(&target),
+        )
+        .await;
+        let claimed = store
+            .claim_due_outbox_jobs(16)
+            .await
+            .expect("claim")
+            .into_iter()
+            .next()
+            .expect("claimed job");
+        assert_eq!(
+            store
+                .schedule_retry_or_fail(&claimed, "temporary failure".to_string())
+                .await
+                .expect("schedule retry"),
+            Some(1)
+        );
+        assert!(
+            store
+                .claim_due_outbox_jobs(16)
+                .await
+                .expect("backoff claim")
+                .is_empty(),
+            "retry backoff should hide the job until new work arrives"
+        );
+
+        enqueue_jobs_for_test(&store, &candidate("archive-2"), &[target]).await;
+
+        let reclaimed = store
+            .claim_due_outbox_jobs(16)
+            .await
+            .expect("claim after coalesce");
+        assert_eq!(reclaimed.len(), 1);
+        assert_eq!(reclaimed[0].message_count(), 2);
+        assert_eq!(reclaimed[0].attempt_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn xep0357_publish_count_is_derived_from_current_inbox_unread() {
+        let store = store().await;
+        let recipient = bare("alice@example.com");
+        let conversation = bare("bob@example.com");
+        enqueue_jobs_for_test(&store, &candidate("archive-1"), &[target()]).await;
+        let claimed = store
+            .claim_due_outbox_jobs(16)
+            .await
+            .expect("claim")
+            .into_iter()
+            .next()
+            .expect("claimed job");
+        assert_eq!(claimed.message_count(), 1);
+        let inbox = inbox_with_unread(&recipient, &conversation, 3).await;
+
+        let current_count = current_unread_count_for_job(&claimed, &inbox)
+            .await
+            .expect("current unread");
+        let item = claimed.to_xep0357_pubsub_item_with_count(current_count);
+        let payload = item.payload.expect("payload");
+        let summary = payload
+            .children()
+            .find(|child| child.is("x", NS_DATA_FORMS))
+            .expect("summary form");
+
+        assert!(summary.children().any(|field| {
+            field.is("field", NS_DATA_FORMS)
+                && field.attr("var") == Some("message-count")
+                && field
+                    .children()
+                    .any(|value| value.is("value", NS_DATA_FORMS) && value.text() == "3")
+        }));
+    }
+
+    #[tokio::test]
     async fn publish_rejects_non_first_party_outbox_target() {
         let store = store().await;
-        store
-            .insert_candidate_and_enqueue(&candidate("archive-1"), &[foreign_target()])
-            .await
-            .expect("insert foreign target job");
+        enqueue_jobs_for_test(&store, &candidate("archive-1"), &[foreign_target()]).await;
         let push_service = crate::push_service::DatabasePushServiceStore::new(
             Database::in_memory("push-service").await.unwrap(),
         )
@@ -1609,9 +2009,17 @@ mod tests {
         )
         .await
         .expect("push registrations");
+        let inbox =
+            inbox_with_unread(&bare("alice@example.com"), &bare("bob@example.com"), 1).await;
 
         let outcomes = store
-            .drain_due_outbox_jobs(&push_service, &push_store, &bare("push.example.com"), 16)
+            .drain_due_outbox_jobs(
+                &push_service,
+                &push_store,
+                &inbox,
+                &bare("push.example.com"),
+                16,
+            )
             .await
             .expect("drain outbox");
 
@@ -1684,23 +2092,25 @@ mod tests {
     #[tokio::test]
     async fn push_registration_lookup_error_retries_each_claimed_outbox_job() {
         let store = store().await;
-        store
-            .insert_candidate_and_enqueue(
-                &candidate("archive-1"),
-                &[target_named("web-node-1"), target_named("web-node-2")],
-            )
-            .await
-            .expect("insert jobs");
+        enqueue_jobs_for_test(
+            &store,
+            &candidate("archive-1"),
+            &[target_named("web-node-1"), target_named("web-node-2")],
+        )
+        .await;
         let push_service = crate::push_service::DatabasePushServiceStore::new(
             Database::in_memory("push-service").await.unwrap(),
         )
         .await
         .expect("push service");
+        let inbox =
+            inbox_with_unread(&bare("alice@example.com"), &bare("bob@example.com"), 1).await;
 
         let outcomes = store
             .drain_due_outbox_jobs(
                 &push_service,
                 &FailingPushStore,
+                &inbox,
                 &bare("push.example.com"),
                 16,
             )
@@ -1722,10 +2132,7 @@ mod tests {
     #[tokio::test]
     async fn prune_completed_removes_only_finished_jobs_and_outboxed_candidates() {
         let store = store().await;
-        store
-            .insert_candidate_and_enqueue(&candidate("archive-old"), &[target()])
-            .await
-            .expect("old insert");
+        enqueue_jobs_for_test(&store, &candidate("archive-old"), &[target()]).await;
         let old_job = store
             .claim_due_outbox_jobs(16)
             .await
@@ -1735,10 +2142,7 @@ mod tests {
             .expect("old job");
         assert!(store.mark_job_published(&old_job).await.expect("published"));
 
-        store
-            .insert_candidate_and_enqueue(&candidate("archive-live"), &[target()])
-            .await
-            .expect("live insert");
+        enqueue_jobs_for_test(&store, &candidate("archive-live"), &[target()]).await;
         let cutoff_ms = crate::time::now_ms().saturating_sub(1_000);
         let old_ms = cutoff_ms.saturating_sub(1);
         store

@@ -168,7 +168,7 @@ async fn enqueue_xep0357_notification_candidate(
     let Some(archive_stanza_id) = archive_stanza_id else {
         debug!(
             recipient = %recipient,
-            "Skipping XEP-0357 candidate for transient offline payload"
+            "Skipping XEP-0357 candidate for transient offline payload because no committed archive state exists"
         );
         return NotificationCandidateQueueOutcome::Completed;
     };
@@ -290,7 +290,7 @@ async fn enqueue_xep0357_notification_candidate_for_message(
             return NotificationCandidateQueueOutcome::RetryLater;
         }
     };
-    let mut targets = Vec::new();
+    let mut has_first_party_target = false;
     for registration in registrations {
         if registration.service_jid != first_party_service {
             debug!(
@@ -302,7 +302,7 @@ async fn enqueue_xep0357_notification_candidate_for_message(
         }
         match crate::notification_outbox::target_from_subscription(&registration) {
             Ok(Some(target)) if target.push_service_jid() == &first_party_service_jid => {
-                targets.push(target);
+                has_first_party_target = true;
             }
             Ok(Some(target)) => {
                 warn!(
@@ -328,7 +328,7 @@ async fn enqueue_xep0357_notification_candidate_for_message(
             }
         }
     }
-    if targets.is_empty() {
+    if !has_first_party_target {
         return NotificationCandidateQueueOutcome::Completed;
     }
 
@@ -352,17 +352,14 @@ async fn enqueue_xep0357_notification_candidate_for_message(
         .deps
         .protocol
         .notification_outbox
-        .insert_candidate_and_enqueue(&candidate, &targets)
+        .insert_candidate(&candidate)
         .await
     {
-        Ok(crate::notification_outbox::NotificationCandidateInsertOutcome::Inserted {
-            enqueued_jobs,
-        }) => {
+        Ok(crate::notification_outbox::NotificationCandidateInsertOutcome::Inserted) => {
             debug!(
                 recipient = %recipient,
                 sender = %sender,
-                enqueued_jobs,
-                "XEP-0357 notification candidate inserted into durable outbox"
+                "XEP-0357 notification candidate inserted for durable outbox worker"
             );
             NotificationCandidateQueueOutcome::Completed
         }

@@ -35,6 +35,50 @@ async fn store_committed_dm_archive_for_notification(
         .expect("store committed MAM row");
 }
 
+async fn project_direct_unread_for_notification(
+    state: &WebSocketState,
+    recipient: &BareJid,
+    sender: &BareJid,
+    stanza_id: &str,
+) {
+    state
+        .deps
+        .protocol
+        .inbox_storage
+        .upsert(
+            recipient,
+            waddle_xmpp::inbox::InboxEntry::new(
+                sender.clone(),
+                waddle_xmpp::inbox::ConversationKind::Direct,
+                stanza_id,
+                crate::time::now_ms(),
+            ),
+            true,
+        )
+        .await
+        .expect("project unread inbox entry");
+}
+
+async fn drain_notification_candidates_for_test(state: &WebSocketState) -> usize {
+    let push_service_jid: BareJid = state
+        .deps
+        .service_domains
+        .push
+        .parse()
+        .expect("push service jid");
+    state
+        .deps
+        .protocol
+        .notification_outbox
+        .drain_pending_candidates_into_outbox(
+            state.deps.protocol.push_store.as_ref(),
+            &push_service_jid,
+            16,
+        )
+        .await
+        .expect("drain notification candidates")
+}
+
 #[tokio::test]
 async fn queue_offline_delivery_publishes_first_party_xep0357_notification_without_touching_external_registrations(
 ) {
@@ -135,6 +179,14 @@ async fn queue_offline_delivery_publishes_first_party_xep0357_notification_witho
         &deps,
     )
     .await;
+    let sender_bare: BareJid = "alice@example.com".parse().expect("sender bare jid");
+    project_direct_unread_for_notification(
+        state.as_ref(),
+        &recipient,
+        &sender_bare,
+        "archive-offline-push-1",
+    )
+    .await;
 
     let attempts_before_drain = state
         .deps
@@ -144,6 +196,10 @@ async fn queue_offline_delivery_publishes_first_party_xep0357_notification_witho
         .await
         .expect("delivery attempts before drain");
     assert!(attempts_before_drain.is_empty());
+    assert_eq!(
+        drain_notification_candidates_for_test(state.as_ref()).await,
+        1
+    );
     let outbox_jobs = state
         .deps
         .protocol
@@ -153,7 +209,6 @@ async fn queue_offline_delivery_publishes_first_party_xep0357_notification_witho
         .expect("notification outbox jobs");
     assert_eq!(outbox_jobs.len(), 1);
     assert_eq!(outbox_jobs[0].message_count(), 1);
-    let sender_bare: BareJid = "alice@example.com".parse().expect("sender bare jid");
     assert_eq!(outbox_jobs[0].conversation_jid(), &sender_bare);
     let push_service_jid: BareJid = "push.example.com".parse().expect("push service jid");
     let outbox_results = state
@@ -163,6 +218,7 @@ async fn queue_offline_delivery_publishes_first_party_xep0357_notification_witho
         .drain_due_outbox_jobs(
             state.deps.protocol.push_service.as_ref(),
             state.deps.protocol.push_store.as_ref(),
+            state.deps.protocol.inbox_storage.as_ref(),
             &push_service_jid,
             16,
         )
@@ -457,6 +513,7 @@ async fn drive_xep0492_direct_chat_push_gate(
     )
     .await;
 
+    drain_notification_candidates_for_test(state.as_ref()).await;
     state
         .deps
         .protocol
@@ -801,6 +858,10 @@ async fn notification_candidate_recovery_rebuilds_from_committed_pending_deliver
     )
     .await;
     assert_eq!(recovered, 1);
+    assert_eq!(
+        drain_notification_candidates_for_test(state.as_ref()).await,
+        1
+    );
     let outbox_jobs = state
         .deps
         .protocol

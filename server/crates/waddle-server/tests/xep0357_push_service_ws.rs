@@ -382,14 +382,19 @@ async fn xep0357_offline_dm_emits_durable_summary_pubsub_publish_job() {
     )
     .await
     .expect("admin connection");
-    admin
-        .send(
-            "<message xmlns='jabber:client' type='chat' to='bob@localhost' id='offline-push-dm-1'>\
-             <body>durable notification body must stay private</body>\
-             </message>",
-        )
-        .await
-        .expect("send offline dm");
+    let offline_message = element_to_xml(
+        Element::builder("message", CLIENT_NS)
+            .attr("type", "chat")
+            .attr("to", "bob@localhost")
+            .attr("id", "offline-push-dm-1")
+            .append(
+                Element::builder("body", CLIENT_NS)
+                    .append("durable notification body must stay private")
+                    .build(),
+            )
+            .build(),
+    );
+    admin.send(&offline_message).await.expect("send offline dm");
 
     let payload_xml = wait_for_push_publish_payload(&database_url, node.as_str()).await;
     let payload = Element::from_str(&payload_xml).expect("valid notification payload XML");
@@ -398,6 +403,12 @@ async fn xep0357_offline_dm_emits_durable_summary_pubsub_publish_job() {
         .children()
         .find(|child| child.is("x", waddle_xmpp::xep::NS_DATA_FORMS))
         .expect("XEP-0357 summary data form");
+    assert_eq!(summary.attr("type"), Some("result"));
+    assert!(summary.children().any(|field| {
+        field.is("field", waddle_xmpp::xep::NS_DATA_FORMS)
+            && field.attr("var") == Some("FORM_TYPE")
+            && field.attr("type") == Some("hidden")
+    }));
     assert_eq!(
         xdata_field_value(summary, "FORM_TYPE").as_deref(),
         Some("urn:xmpp:push:summary")
