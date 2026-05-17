@@ -215,20 +215,42 @@ async fn enqueue_xep0357_notification_candidate_from_committed_archive(
             return NotificationCandidateQueueOutcome::RetryLater;
         }
     };
-    let sender_jid = archived.from.clone();
+    let parsed_original_message =
+        super::archive_lookup::parse_archived_message_xml(archived.stanza_xml.as_deref());
+    let (sender_jid, sender_jid_exact) =
+        notification_sender_provenance(&archived, parsed_original_message.as_ref());
     let sender = sender_jid.to_bare();
-    let original_message =
-        super::archive_lookup::parse_archived_message_xml(archived.stanza_xml.as_deref())
-            .unwrap_or_else(|| super::archive_lookup::fallback_archived_message(&archived));
+    let original_message = parsed_original_message
+        .unwrap_or_else(|| super::archive_lookup::fallback_archived_message(&archived));
     enqueue_xep0357_notification_candidate_for_message(
         state,
         recipient,
         &sender,
         &sender_jid,
+        sender_jid_exact,
         archive_stanza_id,
         &original_message,
     )
     .await
+}
+
+fn notification_sender_provenance(
+    archived: &MamArchivedMessage,
+    original_message: Option<&Message>,
+) -> (Jid, bool) {
+    if let Some(from) = original_message.and_then(|message| message.from.clone()) {
+        if from.to_bare() == archived.from.to_bare() {
+            return (from, true);
+        }
+        warn!(
+            archive_sender = %archived.from,
+            stanza_sender = %from,
+            "Archived stanza XML sender did not match MAM row sender; using row sender without exact resource provenance"
+        );
+    }
+
+    let sender_jid_exact = archived.from.resource().is_some();
+    (archived.from.clone(), sender_jid_exact)
 }
 
 async fn enqueue_xep0357_notification_candidate_for_message(
@@ -236,6 +258,7 @@ async fn enqueue_xep0357_notification_candidate_for_message(
     recipient: &BareJid,
     sender: &BareJid,
     sender_jid: &Jid,
+    sender_jid_exact: bool,
     archive_stanza_id: &waddle_xmpp_core::xep0359::StanzaId,
     original_message: &Message,
 ) -> NotificationCandidateQueueOutcome {
@@ -263,9 +286,10 @@ async fn enqueue_xep0357_notification_candidate_for_message(
             return NotificationCandidateQueueOutcome::Completed;
         }
     }
-    let candidate = match crate::notification_outbox::NotificationCandidate::direct_message(
+    let candidate = match crate::notification_outbox::NotificationCandidate::direct_message_with_sender_provenance(
         recipient.clone(),
         sender_jid.clone(),
+        sender_jid_exact,
         archive_stanza_id.clone(),
     ) {
         Ok(candidate) => candidate,

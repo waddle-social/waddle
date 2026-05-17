@@ -172,6 +172,20 @@ impl NotificationCandidate {
         sender_jid: Jid,
         archive_stanza_id: StanzaId,
     ) -> Result<Self, NotificationOutboxError> {
+        Self::direct_message_with_sender_provenance(
+            recipient_bare_jid,
+            sender_jid,
+            true,
+            archive_stanza_id,
+        )
+    }
+
+    pub fn direct_message_with_sender_provenance(
+        recipient_bare_jid: BareJid,
+        sender_jid: Jid,
+        sender_jid_exact: bool,
+        archive_stanza_id: StanzaId,
+    ) -> Result<Self, NotificationOutboxError> {
         let expected_by = Jid::from(recipient_bare_jid.clone());
         if archive_stanza_id.by != expected_by {
             return Err(NotificationOutboxError::ArchiveStanzaIdOwnerMismatch {
@@ -183,7 +197,7 @@ impl NotificationCandidate {
             recipient_bare_jid,
             conversation_jid: sender_jid.to_bare(),
             sender_jid,
-            sender_jid_exact: true,
+            sender_jid_exact,
             thread_id: NotificationThreadId::root(),
             archive_stanza_id,
             class: NotificationClass::DirectMessage,

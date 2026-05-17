@@ -971,6 +971,113 @@ async fn notification_candidate_recovery_rebuilds_from_committed_pending_deliver
 }
 
 #[tokio::test]
+async fn notification_candidate_recovery_preserves_sender_resource_from_archived_stanza_xml() {
+    let state = create_test_websocket_state().await;
+    let recipient: BareJid = "bob@example.com".parse().expect("recipient");
+    let sender_bare: BareJid = "alice@example.com".parse().expect("sender");
+    let sender_full: jid::Jid = "alice@example.com/web".parse().expect("sender full jid");
+    let node = state
+        .deps
+        .protocol
+        .push_service
+        .ensure_node(&recipient, "web")
+        .await
+        .expect("push node");
+    state
+        .deps
+        .protocol
+        .push_service
+        .upsert_device(
+            &recipient,
+            crate::push_service::PushDeviceRegistration::new(
+                "web-1",
+                node.node(),
+                crate::push_service::PushDevicePlatform::Web,
+                "test",
+            ),
+        )
+        .await
+        .expect("push device");
+    state
+        .deps
+        .protocol
+        .push_service
+        .register_first_party_node_for_owner(&recipient, "push.example.com", node.node(), None)
+        .await
+        .expect("first-party push registration");
+
+    let archive_stanza_id = waddle_xmpp_core::xep0359::StanzaId::new(
+        "archive-recovery-resource-1",
+        jid::Jid::from(recipient.clone()),
+    );
+    let mut message = xmpp_parsers::message::Message::new(Some(jid::Jid::from(recipient.clone())));
+    message.from = Some(sender_full.clone());
+    message.id = Some("wire-recovery-resource-1".to_string());
+    message.type_ = XmppMessageType::Chat;
+    message.bodies.insert(
+        String::new(),
+        xmpp_parsers::message::Body("recover me".to_string()),
+    );
+    message
+        .payloads
+        .push(waddle_xmpp_core::xep0359::build_stanza_id_element(
+            archive_stanza_id.id.as_str(),
+            &archive_stanza_id.by,
+        ));
+
+    let deps = build_interpret_deps(state.as_ref(), None);
+    crate::server::routes::interpret::interpret(
+        vec![waddle_xmpp::protocol::OutboundEvent::ArchiveDirect {
+            archive_jid: recipient.clone(),
+            from: sender_bare.clone(),
+            to: recipient.clone(),
+            message: Box::new(message),
+        }],
+        &deps,
+    )
+    .await;
+    state
+        .deps
+        .protocol
+        .pending_delivery_storage
+        .insert(waddle_xmpp::pending_delivery::PendingRow {
+            id: waddle_xmpp::pending_delivery::PendingRowId::fresh(),
+            recipient: recipient.clone(),
+            original_receipt_at: chrono::Utc::now(),
+            payload: waddle_xmpp::pending_delivery::PendingPayload::Archived(archive_stanza_id),
+            flushed_in_session: None,
+            outbound_sequence: None,
+        })
+        .await
+        .expect("insert pending_delivery row");
+
+    let recovered = crate::server::routes::interpret::reconcile_xep0357_notification_candidates(
+        state.as_ref(),
+        16,
+    )
+    .await;
+    assert_eq!(recovered, 1);
+    assert_eq!(
+        drain_notification_candidates_for_test(state.as_ref()).await,
+        1
+    );
+    let outbox_jobs = state
+        .deps
+        .protocol
+        .notification_outbox
+        .pending_outbox_jobs()
+        .await
+        .expect("notification outbox jobs");
+    assert_eq!(outbox_jobs.len(), 1);
+    assert_eq!(outbox_jobs[0].conversation_jid(), &sender_bare);
+    assert!(
+        outbox_jobs[0].sender_jids_exact(),
+        "resource provenance should come from archived stanza_xml, not the bare MAM row"
+    );
+    assert_eq!(outbox_jobs[0].sender_jids(), &[sender_full]);
+}
+
+#[tokio::test]
 async fn handle_message_direct_rejects_client_authored_extension_envelope() {
     let sender_jid: FullJid = "alice@example.com/web".parse().expect("sender jid");
     let recipient_jid: FullJid = "bob@example.com/mobile".parse().expect("recipient jid");
