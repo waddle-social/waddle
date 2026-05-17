@@ -85,6 +85,7 @@ const {
   handleToggleNotifications,
   openUserSettings,
   openHome,
+  openThreads,
   closeUserSettings,
   handleLogout,
   selectChannel,
@@ -280,9 +281,11 @@ onUnmounted(() => window.removeEventListener("popstate", refreshAdminPanelFromUr
           :active-community-surface="ui.activeCommunitySurface.value"
           :stories-active-count="stories.activeStories.value.length"
           :upcoming-event-count="communityEvents.events.value.filter((e: { dtstartMs?: number }) => typeof e.dtstartMs === 'number' && e.dtstartMs > Date.now()).length"
+          :is-threads-active="ui.activePage.value === 'threads'"
           @select-channel="onSelectChannelFromSidebar"
           @select-thread="onSelectThread"
           @select-community-surface="onSelectCommunitySurface"
+          @select-threads-view="openThreads"
           @create-channel="openCreateChannelDialog()"
           @create-channel-in-space="openCreateChannelDialog"
           @open-settings="ui.showWaddleSettings.value = true"
