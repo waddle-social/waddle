@@ -271,6 +271,7 @@ function onSelectChannelFromSidebar(id: string) {
         :self-jid="connectionStore.session?.jid ?? null"
         @refresh="socialFeed.refresh()"
         @post="(input) => socialFeed.post(input)"
+        @open-nav="ui.showMobileNav.value = true"
       />
       <StoriesPane
         v-else-if="ui.activeCommunitySurface.value === 'stories'"
@@ -282,6 +283,7 @@ function onSelectChannelFromSidebar(id: string) {
         :self-jid="connectionStore.session?.jid ?? null"
         @refresh="stories.refresh()"
         @post="(input) => stories.post(input)"
+        @open-nav="ui.showMobileNav.value = true"
       />
       <EventsPane
         v-else-if="ui.activeCommunitySurface.value === 'events'"
@@ -294,6 +296,7 @@ function onSelectChannelFromSidebar(id: string) {
         @refresh="communityEvents.refresh()"
         @post="(input) => communityEvents.post(input)"
         @rsvp="(event, partstat) => onCommunityRsvp(event, partstat)"
+        @open-nav="ui.showMobileNav.value = true"
       />
       <UserSettingsPage
         v-else-if="ui.activePage.value === 'settings' && connectionStore.session"

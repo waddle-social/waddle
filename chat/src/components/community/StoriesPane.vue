@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
-import { Camera, ChevronLeft, ChevronRight, Plus, RefreshCw, X } from "lucide-vue-next";
+import { Camera, ChevronLeft, ChevronRight, Menu, Plus, RefreshCw, X } from "lucide-vue-next";
 import AppAvatar from "@/components/ui/AppAvatar.vue";
 import type { Story, StoryPostInput } from "@/lib/xmpp-client";
 
@@ -17,6 +17,7 @@ const props = defineProps<StoriesPaneProps>();
 const emit = defineEmits<{
   refresh: [];
   post: [input: StoryPostInput];
+  openNav: [];
 }>();
 
 const composerOpen = ref(false);
@@ -101,6 +102,14 @@ function dismissComposer() {
   <div class="chat-pane-scroll flex-1 min-h-0 bg-background px-[var(--chat-content-inline)] py-6">
     <div class="mx-auto grid w-full max-w-4xl gap-4">
       <header class="flex items-center gap-2">
+        <button
+          type="button"
+          class="md:hidden inline-flex h-8 w-8 items-center justify-center rounded-md border border-transparent text-muted-foreground hover:bg-muted/50 hover:text-foreground"
+          aria-label="Open navigation"
+          @click="emit('openNav')"
+        >
+          <Menu class="h-4 w-4" aria-hidden="true" />
+        </button>
         <Camera class="h-5 w-5 text-primary" aria-hidden="true" />
         <h1 class="type-pane-title text-foreground">Stories</h1>
         <span class="type-caption text-muted-foreground">{{ stories.length }} active</span>
