@@ -97,6 +97,7 @@ import {
 import type {
   WasmArchivedMessage,
   WasmAvatar,
+  WasmFetchThreadsOptions,
   WasmInboxResult,
   WasmMamPage,
   WasmMdsDisplayedEntry,
@@ -106,6 +107,7 @@ import type {
   WasmRoomMember,
   WasmRosterContact,
   WasmServerVersion,
+  WasmThreadsPage,
   WasmUserSearchResult,
   WasmVCard4,
 } from "./wasm-types";
@@ -983,6 +985,21 @@ export class BrowserXmppClient {
 
   async markInboxRead(partnerJid: string, threadId?: string): Promise<void> { const xmpp = await this.requireConnectedXmpp(); await xmpp.mark_inbox_read?.(barePeerJid(partnerJid), threadId ?? null); }
   async fetchThreadInbox(roomJid: string): Promise<InboxResult> { return this.fetchInbox({ room: roomJid, threads: true }); }
+
+  /**
+   * Fetch the global cross-channel threads view (`urn:waddle:threads:0`).
+   * Returns an empty page when the wasm client lacks the method or the
+   * server doesn't respond — callers can render the empty state.
+   */
+  async fetchThreads(opts: { pageSize?: number; afterCursor?: string } = {}): Promise<WasmThreadsPage> {
+    const xmpp = await this.requireConnectedXmpp();
+    const payload: WasmFetchThreadsOptions = {
+      ...(typeof opts.pageSize === "number" ? { page_size: opts.pageSize } : {}),
+      ...(opts.afterCursor ? { after_cursor: opts.afterCursor } : {}),
+    };
+    const raw = await xmpp.fetch_threads?.(payload) as WasmThreadsPage | undefined;
+    return raw ?? { total: 0, unread_threads: 0, entries: [] };
+  }
 
   /**
    * Fetch the latest XEP-0472 social feed entries from the community

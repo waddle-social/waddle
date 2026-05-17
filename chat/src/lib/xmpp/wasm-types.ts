@@ -286,6 +286,35 @@ export interface WasmVCard4 {
   url?: string;
 }
 
+/** One entry in a urn:waddle:threads:0 response. */
+export interface WasmThreadEntry {
+  channel: string;
+  thread_id: string;
+  last_stanza_id: string;
+  /** RFC 3339 timestamp. */
+  last_activity: string;
+  unread: number;
+  reply_count: number;
+  has_unread: boolean;
+  root_author?: string;
+  preview?: string;
+  thread_title?: string;
+}
+
+/** Paged response to a urn:waddle:threads:0 query. */
+export interface WasmThreadsPage {
+  total: number;
+  unread_threads: number;
+  entries: WasmThreadEntry[];
+  next_cursor?: string;
+}
+
+/** Options bag for fetchThreads. */
+export interface WasmFetchThreadsOptions {
+  page_size?: number;
+  after_cursor?: string;
+}
+
 /** XEP-0490 §3 displayed entry surfaced from the wasm boundary. */
 export interface WasmMdsDisplayedEntry {
   chat_id: string;
