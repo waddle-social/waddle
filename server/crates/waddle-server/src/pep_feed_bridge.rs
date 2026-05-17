@@ -35,12 +35,18 @@ use tokio::time::Instant;
 use tracing::{debug, warn};
 use uuid::Uuid;
 use waddle_xmpp::pubsub::{PubSubItem, PubSubStorage};
+use waddle_xmpp::xep::xep0292::PEP_NODE_VCARD4;
 
 const NS_MOOD: &str = "http://jabber.org/protocol/mood";
 const NS_ACTIVITY: &str = "http://jabber.org/protocol/activity";
 const NS_TUNE: &str = "http://jabber.org/protocol/tune";
 const NS_AVATAR_METADATA: &str = "urn:xmpp:avatar:metadata";
-const NS_VCARD4: &str = "urn:ietf:params:xml:ns:vcard-4.0";
+/// Payload-element namespace for vCard4 (`<vcard xmlns='…'>`). NOT the
+/// PEP node name — the node is `urn:xmpp:vcard4` (see `PEP_NODE_VCARD4`).
+/// Kept here so the test suite can guard against re-introducing the
+/// historical node/namespace confusion.
+#[cfg(test)]
+const NS_VCARD4_PAYLOAD: &str = "urn:ietf:params:xml:ns:vcard-4.0";
 
 const NS_FEED_SOURCE: &str = "urn:waddle:feed-source:0";
 
@@ -83,16 +89,21 @@ impl PepKind {
         }
     }
 
-    /// Map a PEP node namespace to a `PepKind`, or `None` when the
-    /// node is not a PEP we bridge. RSVPs come in via a separate
-    /// publish path (calendar events node) and aren't covered here.
+    /// Map a PEP node name to a `PepKind`, or `None` when the node is
+    /// not a PEP we bridge. For mood / activity / tune / avatar-metadata
+    /// the PEP node name happens to equal the payload element's XML
+    /// namespace; for vCard4 (XEP-0292) the node is `urn:xmpp:vcard4`
+    /// while the payload is `<vcard xmlns='urn:ietf:params:xml:ns:vcard-4.0'>`,
+    /// so we match on the node-name constant `PEP_NODE_VCARD4`, NOT the
+    /// payload namespace. RSVPs come in via a separate publish path
+    /// (calendar events node) and aren't covered here.
     pub fn from_node(node: &str) -> Option<Self> {
         match node {
             NS_MOOD => Some(Self::Mood),
             NS_ACTIVITY => Some(Self::Activity),
             NS_TUNE => Some(Self::Tune),
             NS_AVATAR_METADATA => Some(Self::Avatar),
-            NS_VCARD4 => Some(Self::VCard),
+            PEP_NODE_VCARD4 => Some(Self::VCard),
             _ => None,
         }
     }
@@ -731,7 +742,7 @@ mod tests {
     }
 
     #[test]
-    fn from_node_recognises_all_bridged_namespaces() {
+    fn from_node_recognises_all_bridged_nodes() {
         assert_eq!(PepKind::from_node(NS_MOOD), Some(PepKind::Mood));
         assert_eq!(PepKind::from_node(NS_ACTIVITY), Some(PepKind::Activity));
         assert_eq!(PepKind::from_node(NS_TUNE), Some(PepKind::Tune));
@@ -739,8 +750,45 @@ mod tests {
             PepKind::from_node(NS_AVATAR_METADATA),
             Some(PepKind::Avatar)
         );
-        assert_eq!(PepKind::from_node(NS_VCARD4), Some(PepKind::VCard));
+        // vCard4 (XEP-0292): the PEP node is `urn:xmpp:vcard4`, NOT
+        // the payload namespace `urn:ietf:params:xml:ns:vcard-4.0`.
+        // Regression guard against the historical bug where the matcher
+        // compared against the payload namespace and silently missed
+        // every real vCard4 publish.
+        assert_eq!(
+            PepKind::from_node(PEP_NODE_VCARD4),
+            Some(PepKind::VCard),
+            "vCard4 PEP node must map to PepKind::VCard"
+        );
+        assert_eq!(
+            PepKind::from_node(NS_VCARD4_PAYLOAD),
+            None,
+            "vCard4 payload namespace must NOT map via from_node — it is the element xmlns, not the PEP node name"
+        );
         assert_eq!(PepKind::from_node("urn:xmpp:avatar:data"), None);
+    }
+
+    /// End-to-end check that a real vCard4 PEP publish flows through
+    /// the bridge: pass the actual PEP node name (`urn:xmpp:vcard4`) and
+    /// a non-empty `<vcard>` payload to `render_summary` indirectly via
+    /// `from_node` + `render_summary`, mirroring what `observe` does.
+    /// This is the integration-style test mandated by the PR plan to
+    /// prove the bridge fires for vCard4 publishes, without spinning up
+    /// full pubsub storage.
+    #[test]
+    fn vcard4_publish_dispatches_through_bridge() {
+        let node = PEP_NODE_VCARD4;
+        let kind = PepKind::from_node(node).expect("PEP node must dispatch to PepKind::VCard");
+        assert_eq!(kind, PepKind::VCard);
+        let item = payload(
+            "<vcard xmlns='urn:ietf:params:xml:ns:vcard-4.0'>\
+                <fn><text>Alice</text></fn>\
+                <pronouns><text>they/them</text></pronouns>\
+            </vcard>",
+        );
+        let summary =
+            render_summary(kind, &item).expect("vCard4 payload must render a feed summary");
+        assert_eq!(summary, "updated their profile");
     }
 
     #[test]
