@@ -4,6 +4,7 @@ import {
   isTopPinnedScrollDirection,
   type ScrollDirectionMode,
 } from "@/lib/scroll-direction";
+import { debugScroll } from "@/lib/debug-scroll";
 
 const PINNED_EDGE_TOLERANCE_PX = 64;
 
@@ -126,17 +127,52 @@ export function createPinnedEdgeScroller(options: {
     const target = captureTarget();
     settleGeneration = target.token;
     settleObserver?.disconnect();
+    const settleStartedAt = typeof performance !== "undefined" ? performance.now() : Date.now();
+    let resizeEventCount = 0;
     settleObserver = new ResizeObserver(() => {
-      if (settleGeneration !== generation) return;
+      if (settleGeneration !== generation) {
+        debugScroll("pinned-edge.settleObserver: stale fire, drop", {
+          settleGeneration,
+          generation,
+        });
+        return;
+      }
+      resizeEventCount++;
+      const elapsed = (typeof performance !== "undefined" ? performance.now() : Date.now()) - settleStartedAt;
+      debugScroll("pinned-edge.settleObserver: fire -> pinTarget", {
+        elapsedMs: Math.round(elapsed),
+        eventCount: resizeEventCount,
+        scrollTop: el.scrollTop,
+        scrollHeight: el.scrollHeight,
+        clientHeight: el.clientHeight,
+        gapFromBottom: el.scrollHeight - el.scrollTop - el.clientHeight,
+      });
       void pinTarget(target);
     });
     settleObserver.observe(el);
+    let childCount = 0;
     for (const child of Array.from(el.children)) {
       settleObserver.observe(child);
+      childCount++;
     }
+    debugScroll("pinned-edge.refreshSettleLock: observer armed", {
+      childCount,
+      windowMs: 500,
+      generation,
+    });
 
     if (settleTimer) clearTimeout(settleTimer);
-    settleTimer = setTimeout(disconnectSettleLock, 500);
+    settleTimer = setTimeout(() => {
+      const elapsed = (typeof performance !== "undefined" ? performance.now() : Date.now()) - settleStartedAt;
+      debugScroll("pinned-edge.settleTimer: expired", {
+        elapsedMs: Math.round(elapsed),
+        resizeEvents: resizeEventCount,
+        scrollTop: el.scrollTop,
+        scrollHeight: el.scrollHeight,
+        gapFromBottom: el.scrollHeight - el.scrollTop - el.clientHeight,
+      });
+      disconnectSettleLock();
+    }, 500);
   }
 
   async function scrollToPinnedEdge(optionsForScroll: { settle?: boolean } = {}) {

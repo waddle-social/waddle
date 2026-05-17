@@ -1,4 +1,5 @@
 import { nextTick, ref, type Ref } from "vue";
+import { debugScroll } from "@/lib/debug-scroll";
 import type { BrowserXmppClient, LiveDmMessage } from "@/lib/xmpp-client";
 import type { WaddleSession } from "@/lib/server-auth";
 import type { TimelineMessage } from "@/lib/chat-ui";
@@ -125,7 +126,18 @@ export function useDmMamPaging(deps: UseDmMamPagingDeps) {
       firstUnseenId.value = unreadAtLoad > 0 && feedTimeline.length >= unreadAtLoad
         ? feedTimeline[feedTimeline.length - unreadAtLoad]?.id ?? null
         : null;
+      debugScroll("dms.loadMessages: about to scrollToPinnedEdgeAndPin", {
+        peerJid,
+        unreadAtLoad,
+        firstUnseenId: firstUnseenId.value,
+        timelineLen: timelineWithQueue.length,
+        feedLen: feedTimeline.length,
+      });
       const pinned = await scrollToPinnedEdgeAndPin();
+      debugScroll("dms.loadMessages: scrollToPinnedEdgeAndPin returned", {
+        peerJid,
+        pinned,
+      });
       if (!pinned || requestId !== messageRequestId || activePeerJid.value !== peerJid) return;
       initialLatestPagePinned = true;
       const newest = [...timelineWithQueue].reverse().find(isFeedVisible);

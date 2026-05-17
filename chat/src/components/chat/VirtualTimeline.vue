@@ -6,6 +6,7 @@ import {
   isTopPinnedScrollDirection,
   type ScrollDirectionMode,
 } from "@/lib/scroll-direction";
+import { debugScroll } from "@/lib/debug-scroll";
 
 const props = withDefaults(defineProps<{
   items: TimelineMessage[];
@@ -92,12 +93,28 @@ async function scrollToMessageId(messageId: string, align: "start" | "center" | 
 }
 
 async function scrollToPinnedEdge(mode: ScrollDirectionMode) {
-  if (props.items.length === 0) return false;
+  if (props.items.length === 0) {
+    debugScroll("VirtualTimeline.scrollToPinnedEdge: empty items, no-op");
+    return false;
+  }
+  const preEl = scrollElement.value;
+  debugScroll("VirtualTimeline.scrollToPinnedEdge: enter", {
+    mode,
+    items: props.items.length,
+    scrollTop: preEl?.scrollTop,
+    scrollHeight: preEl?.scrollHeight,
+    clientHeight: preEl?.clientHeight,
+  });
   const itemIndex = isTopPinnedScrollDirection(mode) ? 0 : props.items.length - 1;
   virtualizer.value.scrollToIndex(virtualIndexForItemIndex(itemIndex), {
     align: isTopPinnedScrollDirection(mode) ? "start" : "end",
   });
   await nextTick();
+  const postIndexEl = scrollElement.value;
+  debugScroll("VirtualTimeline.scrollToPinnedEdge: after scrollToIndex", {
+    scrollTop: postIndexEl?.scrollTop,
+    scrollHeight: postIndexEl?.scrollHeight,
+  });
   // The virtualizer's `scrollToIndex` plans the scroll using the
   // `estimateSize` heights (112px / 44px); real rows — especially
   // ones with images, code blocks, or extension cards — measure much
@@ -111,7 +128,10 @@ async function scrollToPinnedEdge(mode: ScrollDirectionMode) {
   // always lands at the true edge once measurements settle. Capped
   // at 8 frames so a runaway re-render can't spin the loop.
   const el = scrollElement.value;
-  if (!el) return true;
+  if (!el) {
+    debugScroll("VirtualTimeline.scrollToPinnedEdge: no scrollElement, bail");
+    return true;
+  }
   await new Promise<void>((resolve) => {
     const topPinned = isTopPinnedScrollDirection(mode);
     let lastHeight = -1;
@@ -119,16 +139,46 @@ async function scrollToPinnedEdge(mode: ScrollDirectionMode) {
     let frames = 0;
     function tick() {
       el!.scrollTop = topPinned ? 0 : el!.scrollHeight;
-      if (el!.scrollHeight === lastHeight) {
-        if (++stable >= 2) return resolve();
+      const sh = el!.scrollHeight;
+      debugScroll("VirtualTimeline.RAF tick", {
+        frame: frames,
+        scrollHeight: sh,
+        scrollTop: el!.scrollTop,
+        clientHeight: el!.clientHeight,
+        deltaSinceLast: lastHeight < 0 ? null : sh - lastHeight,
+        stableStreak: sh === lastHeight ? stable + 1 : 0,
+      });
+      if (sh === lastHeight) {
+        if (++stable >= 2) {
+          debugScroll("VirtualTimeline.RAF exit: stable", { frames: frames + 1, scrollHeight: sh });
+          return resolve();
+        }
       } else {
         stable = 0;
-        lastHeight = el!.scrollHeight;
+        lastHeight = sh;
       }
-      if (++frames >= 8) return resolve();
+      if (++frames >= 8) {
+        debugScroll("VirtualTimeline.RAF exit: frames cap (bailed mid-growth)", {
+          frames,
+          scrollHeight: sh,
+          scrollTop: el!.scrollTop,
+          gapFromBottom: sh - el!.scrollTop - el!.clientHeight,
+        });
+        return resolve();
+      }
       requestAnimationFrame(tick);
     }
     requestAnimationFrame(tick);
+  });
+  const finalEl = scrollElement.value;
+  debugScroll("VirtualTimeline.scrollToPinnedEdge: return", {
+    scrollTop: finalEl?.scrollTop,
+    scrollHeight: finalEl?.scrollHeight,
+    clientHeight: finalEl?.clientHeight,
+    gapFromBottom:
+      finalEl
+        ? finalEl.scrollHeight - finalEl.scrollTop - finalEl.clientHeight
+        : null,
   });
   return true;
 }

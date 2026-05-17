@@ -27,6 +27,7 @@ import {
   threadCursorFromLatestPage,
 } from "@/lib/xmpp/mam";
 import { hydratePinnedRoom, pinnedRoomsEpoch } from "@/stores/pinned-messages";
+import { debugScroll } from "@/lib/debug-scroll";
 
 const PAGE_SIZE = 100;
 
@@ -189,7 +190,23 @@ export function useChannelMamPaging(deps: UseChannelMamPagingDeps) {
       firstUnseenId.value = unreadAtLoad > 0 && feedTimeline.length >= unreadAtLoad
         ? feedTimeline[feedTimeline.length - unreadAtLoad]?.id ?? null
         : null;
+      debugScroll("channels.loadMessages: about to scrollToPinnedEdgeAndPin", {
+        channelId,
+        spaceId,
+        unreadAtLoad,
+        firstUnseenId: firstUnseenId.value,
+        timelineLen: timelineWithQueue.length,
+        feedLen: feedTimeline.length,
+      });
       const pinned = await scrollToPinnedEdgeAndPin();
+      debugScroll("channels.loadMessages: scrollToPinnedEdgeAndPin returned", {
+        channelId,
+        pinned,
+        requestStale:
+          requestId !== messageRequestId ||
+          (activeSpaceId.value ?? "") !== spaceId ||
+          activeChannelId.value !== channelId,
+      });
       if (
         !pinned ||
         requestId !== messageRequestId ||
