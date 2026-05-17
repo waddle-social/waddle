@@ -171,6 +171,193 @@ fn test_build_leave_presence() {
         .get_child("item", NS_MUC_USER)
         .expect("MUC item payload");
     assert_eq!(item.attr("jid"), Some("leaver@example.com/phone"));
+    assert_eq!(item.attr("affiliation"), Some("member"));
+    // XEP-0045 §7.14: leave presence MUST carry `role='none'` on the
+    // wire so receivers can distinguish "I have left" from a no-op
+    // presence update.
+    assert_eq!(item.attr("role"), Some("none"));
+}
+
+/// XEP-0045 §9.1.1 ("Kicking an Occupant"), normative:
+///
+/// > The service MUST then remove the kicked occupant by sending a
+/// > presence stanza of type "unavailable" to each kicked occupant,
+/// > including status code 307 in the extended presence information,
+/// > optionally along with the reason (if provided) and the JID of
+/// > the actor who initiated the kick.
+///
+/// The wire form is `<presence type='unavailable' from='room/nick'>
+/// <x xmlns='muc#user'><item affiliation='…' role='none'><actor jid='…'/>
+/// <reason>…</reason></item><status code='307'/></x></presence>`.
+#[test]
+fn test_build_kick_presence_self_includes_307_and_110_and_actor_reason() {
+    use jid::BareJid;
+    let from: FullJid = "room@muc.example.com/bob".parse().unwrap();
+    let to: FullJid = "bob@example.com/desk".parse().unwrap();
+    let target_jid: FullJid = "bob@example.com/desk".parse().unwrap();
+    let actor: BareJid = "alice@example.com".parse().unwrap();
+
+    let secret = test_secret();
+    let target_bare = target_jid.to_bare();
+    let presence = build_kick_presence(
+        &from,
+        &to,
+        Affiliation::Member,
+        true,
+        Some("spam"),
+        Some(&actor),
+        &OccupantIdentity {
+            bare_jid: &target_bare,
+            real_jid: Some(&target_jid),
+            secret: &secret,
+        },
+    );
+
+    assert_eq!(presence.type_, PresenceType::Unavailable);
+    let muc_user = presence
+        .payloads
+        .iter()
+        .find(|payload| payload.is("x", NS_MUC_USER))
+        .expect("muc#user payload");
+    let item = muc_user
+        .get_child("item", NS_MUC_USER)
+        .expect("muc#user item");
+
+    assert_eq!(item.attr("affiliation"), Some("member"));
+    assert_eq!(item.attr("role"), Some("none"));
+    assert_eq!(item.attr("jid"), Some("bob@example.com/desk"));
+
+    let actor_elem = item.get_child("actor", NS_MUC_USER).expect("actor element");
+    assert_eq!(actor_elem.attr("jid"), Some("alice@example.com"));
+
+    let reason = item
+        .get_child("reason", NS_MUC_USER)
+        .expect("reason element");
+    assert_eq!(reason.text(), "spam");
+
+    let codes: Vec<&str> = muc_user
+        .children()
+        .filter(|child| child.is("status", NS_MUC_USER))
+        .filter_map(|status| status.attr("code"))
+        .collect();
+    assert!(
+        codes.contains(&"307"),
+        "kick presence MUST carry status code 307; got {codes:?}"
+    );
+    assert!(
+        codes.contains(&"110"),
+        "self-presence to the kicked occupant MUST carry status code 110; got {codes:?}"
+    );
+}
+
+/// XEP-0045 §9.1.1: a kick broadcast to a *remaining* occupant MUST
+/// have status code 307 but MUST NOT carry status code 110, since
+/// 110 means "this presence is about you".
+#[test]
+fn test_build_kick_presence_remaining_excludes_110() {
+    use jid::BareJid;
+    let from: FullJid = "room@muc.example.com/bob".parse().unwrap();
+    let to: FullJid = "charlie@example.com/desk".parse().unwrap();
+    let target_jid: FullJid = "bob@example.com/desk".parse().unwrap();
+    let actor: BareJid = "alice@example.com".parse().unwrap();
+
+    let secret = test_secret();
+    let target_bare = target_jid.to_bare();
+    let presence = build_kick_presence(
+        &from,
+        &to,
+        Affiliation::Member,
+        false,
+        None,
+        Some(&actor),
+        &OccupantIdentity {
+            bare_jid: &target_bare,
+            real_jid: Some(&target_jid),
+            secret: &secret,
+        },
+    );
+
+    let muc_user = presence
+        .payloads
+        .iter()
+        .find(|payload| payload.is("x", NS_MUC_USER))
+        .expect("muc#user payload");
+    let codes: Vec<&str> = muc_user
+        .children()
+        .filter(|child| child.is("status", NS_MUC_USER))
+        .filter_map(|status| status.attr("code"))
+        .collect();
+    assert!(
+        codes.contains(&"307"),
+        "remaining-occupant kick broadcast MUST carry status code 307; got {codes:?}"
+    );
+    assert!(
+        !codes.contains(&"110"),
+        "remaining-occupant kick broadcast MUST NOT carry status code 110; got {codes:?}"
+    );
+
+    let item = muc_user
+        .get_child("item", NS_MUC_USER)
+        .expect("muc#user item");
+    assert_eq!(item.attr("role"), Some("none"));
+    // No reason provided, so no <reason/> child.
+    assert!(item.get_child("reason", NS_MUC_USER).is_none());
+}
+
+/// XEP-0045 §10.2 ("Banning a User"): unavailable presence with
+/// `<item affiliation='outcast' role='none'>` and status code 301.
+#[test]
+fn test_build_ban_presence_self_includes_301_outcast_role_none() {
+    use jid::BareJid;
+    let from: FullJid = "room@muc.example.com/bob".parse().unwrap();
+    let to: FullJid = "bob@example.com/desk".parse().unwrap();
+    let target_jid: FullJid = "bob@example.com/desk".parse().unwrap();
+    let actor: BareJid = "alice@example.com".parse().unwrap();
+
+    let secret = test_secret();
+    let target_bare = target_jid.to_bare();
+    let presence = build_ban_presence(
+        &from,
+        &to,
+        true,
+        Some("trolling"),
+        Some(&actor),
+        &OccupantIdentity {
+            bare_jid: &target_bare,
+            real_jid: Some(&target_jid),
+            secret: &secret,
+        },
+    );
+
+    let muc_user = presence
+        .payloads
+        .iter()
+        .find(|payload| payload.is("x", NS_MUC_USER))
+        .expect("muc#user payload");
+    let item = muc_user
+        .get_child("item", NS_MUC_USER)
+        .expect("muc#user item");
+    assert_eq!(item.attr("affiliation"), Some("outcast"));
+    assert_eq!(item.attr("role"), Some("none"));
+
+    let codes: Vec<&str> = muc_user
+        .children()
+        .filter(|child| child.is("status", NS_MUC_USER))
+        .filter_map(|status| status.attr("code"))
+        .collect();
+    assert!(
+        codes.contains(&"301"),
+        "ban presence MUST carry status code 301; got {codes:?}"
+    );
+    assert!(
+        codes.contains(&"110"),
+        "self-presence to the banned occupant MUST carry status code 110; got {codes:?}"
+    );
+
+    let reason = item
+        .get_child("reason", NS_MUC_USER)
+        .expect("reason element");
+    assert_eq!(reason.text(), "trolling");
 }
 
 #[test]
