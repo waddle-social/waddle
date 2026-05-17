@@ -596,6 +596,35 @@ fn parse_rsvp_item_id(item_id: &str) -> Option<(&str, &str)> {
     Some((master_uid, localpart))
 }
 
+/// Extract (author bare-JID, master event UID, partstat) from a
+/// well-formed RSVP pubsub item. The item is already validated by
+/// `is_well_formed_rsvp_item` at this point — we only return `Some`
+/// when every field needed for the feed bridge is intact.
+fn rsvp_bridge_context(
+    item: &PubSubItem,
+) -> Option<(BareJid, String, waddle_xmpp_core::xcal::PartStat)> {
+    let item_id = item.id.as_deref()?;
+    let (master_uid, _localpart) = parse_rsvp_item_id(item_id)?;
+    let payload = item.payload.as_ref()?;
+    if !waddle_xmpp_core::xcal::is_vcalendar_element(payload) {
+        return None;
+    }
+    let ns_xcal = waddle_xmpp_core::xcal::NS_XCAL;
+    let vevent = payload
+        .children()
+        .find(|c| c.name() == "vevent" && c.ns() == ns_xcal)?;
+    let attendee = vevent
+        .children()
+        .find(|c| c.name() == "attendee" && c.ns() == ns_xcal)?;
+    let partstat = attendee
+        .attr("partstat")
+        .and_then(waddle_xmpp_core::xcal::PartStat::from_str_value)?;
+    let uri = attendee.text();
+    let bare = waddle_xmpp_core::xcal::xmpp_uri_to_bare_jid(uri.trim())?;
+    let author_jid = bare.parse::<BareJid>().ok()?;
+    Some((author_jid, master_uid.to_string(), partstat))
+}
+
 async fn handle_community_rsvp_publish(
     iq: &xmpp_parsers::iq::Iq,
     state: &WebSocketState,
@@ -603,6 +632,7 @@ async fn handle_community_rsvp_publish(
     node: &str,
     item: PubSubItem,
 ) -> Vec<String> {
+    let bridge_context = rsvp_bridge_context(&item);
     let Ok(community_jid) = community_domain.parse::<BareJid>() else {
         return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::InvalidJid))];
     };
@@ -641,6 +671,24 @@ async fn handle_community_rsvp_publish(
                 },
             )
             .await;
+            // Bridge into the social feed so "X is going to <event>"
+            // surfaces alongside manual posts. Best-effort: failures
+            // are logged inside `observe_rsvp` and never block the
+            // RSVP publish itself.
+            if let Some((author_jid, master_uid, partstat)) = bridge_context {
+                let _ = state
+                    .deps
+                    .protocol
+                    .pep_feed_bridge
+                    .observe_rsvp(
+                        &state.deps.protocol.pubsub_storage,
+                        &community_jid,
+                        &author_jid,
+                        &master_uid,
+                        partstat,
+                    )
+                    .await;
+            }
             vec![iq_to_xml(build_pubsub_publish_result(
                 iq,
                 node,

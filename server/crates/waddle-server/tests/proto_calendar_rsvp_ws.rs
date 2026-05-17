@@ -14,6 +14,7 @@ const DOMAIN: &str = "localhost";
 const ADMIN: &str = "admin";
 const COMMUNITY_JID: &str = "community.localhost";
 const EVENTS_NODE: &str = "urn:xmpp:calendar:0";
+const FEED_NODE: &str = "urn:xmpp:pubsub-social-feed:0";
 const NS_XCAL: &str = "urn:ietf:params:xml:ns:xcal";
 
 static TEST_SERIAL: Mutex<()> = Mutex::const_new(());
@@ -247,6 +248,104 @@ async fn malformed_rsvp_for_other_user_is_rejected() {
     assert!(
         rich_result.contains("type=\"error\"") || rich_result.contains("<error"),
         "RSVP item with master-event fields must be rejected: {rich_result}"
+    );
+
+    let _ = admin.close().await;
+    let _ = bob.close().await;
+}
+
+#[tokio::test]
+async fn rsvp_publish_bridges_to_social_feed() {
+    let _guard = TEST_SERIAL.lock().await;
+    let (_server, mut admin, mut bob) = setup().await;
+
+    let event_id = format!("evt-{}", uuid::Uuid::new_v4());
+
+    // Admin publishes the master event with a recognisable summary.
+    admin
+        .send(&format!(
+            r#"<iq type="set" id="cal-publish" to="{COMMUNITY_JID}">
+              <pubsub xmlns="http://jabber.org/protocol/pubsub">
+                <publish node="{EVENTS_NODE}">
+                  <item id="{event_id}">
+                    <vcalendar xmlns="{NS_XCAL}">
+                      <version>2.0</version>
+                      <vevent>
+                        <uid>{event_id}</uid>
+                        <dtstart>2026-06-05T19:00:00Z</dtstart>
+                        <summary>Friday Game Night</summary>
+                      </vevent>
+                    </vcalendar>
+                  </item>
+                </publish>
+              </pubsub>
+            </iq>"#
+        ))
+        .await
+        .expect("send master publish");
+    let _ = admin
+        .recv_matching(|frame| frame.contains("cal-publish"))
+        .await
+        .expect("master publish result");
+
+    // Bob RSVPs ACCEPTED.
+    let rsvp_id = format!("{event_id}-rsvp-bob");
+    bob.send(&format!(
+        r#"<iq type="set" id="rsvp-1" to="{COMMUNITY_JID}">
+          <pubsub xmlns="http://jabber.org/protocol/pubsub">
+            <publish node="{EVENTS_NODE}">
+              <item id="{rsvp_id}">
+                <vcalendar xmlns="{NS_XCAL}">
+                  <vevent>
+                    <uid>{event_id}</uid>
+                    <attendee partstat="ACCEPTED">xmpp:bob@localhost</attendee>
+                  </vevent>
+                </vcalendar>
+              </item>
+            </publish>
+          </pubsub>
+        </iq>"#
+    ))
+    .await
+    .expect("send rsvp");
+    let rsvp_result = bob
+        .recv_matching(|frame| frame.contains("rsvp-1"))
+        .await
+        .expect("rsvp publish result");
+    assert!(
+        rsvp_result.contains("type=\"result\""),
+        "rsvp publish must succeed: {rsvp_result}"
+    );
+
+    // Query the social feed — the bridge should have shadow-published
+    // a "bob is going to Friday Game Night" entry tagged with the
+    // RSVP source kind.
+    admin
+        .send(&format!(
+            r#"<iq type="get" id="feed-items" to="{COMMUNITY_JID}">
+              <pubsub xmlns="http://jabber.org/protocol/pubsub">
+                <items node="{FEED_NODE}"/>
+              </pubsub>
+            </iq>"#
+        ))
+        .await
+        .expect("send feed query");
+    let feed_response = admin
+        .recv_matching(|frame| frame.contains("feed-items") && frame.contains("<entry"))
+        .await
+        .expect("feed response");
+
+    assert!(
+        feed_response.contains("<author>bob@localhost</author>"),
+        "feed entry must carry bob's bare JID: {feed_response}"
+    );
+    assert!(
+        feed_response.contains("is going to Friday Game Night"),
+        "feed entry must carry the RSVP summary: {feed_response}"
+    );
+    assert!(
+        feed_response.contains("kind=\"rsvp\"") || feed_response.contains("kind='rsvp'"),
+        "feed entry must tag the RSVP source kind: {feed_response}"
     );
 
     let _ = admin.close().await;
