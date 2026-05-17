@@ -141,6 +141,40 @@ Resolution options:
 
 Decision pending: check what consumers (clients, tests) read this advert before choosing.
 
+## Waddle-namespaced extensions
+
+Tracked separately from XEPs because they are intentionally Waddle-specific
+and not derived from any XEP. Each entry must justify why no XEP shape
+applies and what the wire commitment is.
+
+### `urn:xmpp:waddle:admin:users:list:0` — Admin V1 Users panel
+
+- **Carrier**: XEP-0050 ad-hoc command (`<command>` IQ-set against the
+  server domain).
+- **Args** (`<x type='submit'>`, `FORM_TYPE = urn:xmpp:waddle:admin:users:list:0`):
+  `prefix` (text-single, optional), `page_size` (text-single, default 50,
+  capped 200), `after_cursor` (text-single, optional).
+- **Result** (`<x type='result'>`, same `FORM_TYPE`): reported columns
+  `jid` / `display_name` / `has_owner_hat`; one `<item/>` per user;
+  optional top-level `next_cursor` text-single.
+- **ACL**: server refuses non-owners (`server_owner_jids`) with
+  `<forbidden/>`.
+- **Advert**: `Feature::new("urn:xmpp:waddle:admin:users:list:0")` on
+  `server_features()` so clients can detect support without enumerating
+  commands.
+- **Why a Waddle namespace?** No XEP defines "list users with prefix
+  search." XEP-0133 ("Service Administration") lists `Get User List`
+  among its `urn:xmpp:adminstration:0` commands, but the spec is a
+  fixed list keyed by command nodes with no prefix/seek-pagination
+  semantics — the V1 chat panel needs a typed, cursor-paginated page
+  to drive UI scroll. The custom node uses `urn:xmpp:waddle:*` so the
+  cross-spec audit table doesn't shadow an official XEP namespace.
+- **Tests**: `server/crates/waddle-server/tests/admin_users_list_command_ws.rs`
+  covers owner-can-list / non-owner-forbidden / prefix-narrows /
+  pagination-cursor-round-trips; unit tests under
+  `server/crates/waddle-server/src/admin/users_list.rs::tests` cover
+  arg parsing + result-form shape.
+
 ## Audit log
 
 (empty — first audit starts at XEP-0004 unless a higher-impact target is chosen first)
