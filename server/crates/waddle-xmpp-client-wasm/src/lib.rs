@@ -56,6 +56,7 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::{future_to_promise, spawn_local};
 
 mod client_account;
+mod client_admin;
 mod client_core;
 mod client_extensions;
 mod client_history;
