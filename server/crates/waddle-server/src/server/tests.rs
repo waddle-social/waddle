@@ -17,7 +17,7 @@ fn env_lock() -> std::sync::MutexGuard<'static, ()> {
     ENV_MUTEX
         .get_or_init(|| std::sync::Mutex::new(()))
         .lock()
-        .expect("env mutex")
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// XmppConfig for unit tests: uses in-memory SQLite for all storage backends.
@@ -241,7 +241,7 @@ fn test_xmpp_config_prefers_dedicated_database_urls() {
     std::env::set_var("WADDLE_XMPP_MAM_DATABASE_URL", "postgres://mam/runtime");
     std::env::set_var("WADDLE_XMPP_INBOX_DATABASE_URL", "postgres://inbox/runtime");
 
-    let config = XmppConfig::from_env();
+    let config = XmppConfig::from_env().expect("config parses");
     assert_eq!(
         config.mam_database_url.as_deref(),
         Some("postgres://mam/runtime")
@@ -273,7 +273,7 @@ fn test_xmpp_config_falls_back_to_main_database_url() {
 
     std::env::set_var("WADDLE_DATABASE_URL", "postgres://main/runtime");
 
-    let config = XmppConfig::from_env();
+    let config = XmppConfig::from_env().expect("config parses");
     assert_eq!(
         config.mam_database_url.as_deref(),
         Some("postgres://main/runtime")
@@ -284,6 +284,89 @@ fn test_xmpp_config_falls_back_to_main_database_url() {
     );
 
     std::env::remove_var("WADDLE_DATABASE_URL");
+}
+
+/// Reset the env vars this test suite mutates between cases. Keeps each
+/// `from_env` call observation-independent of every other.
+fn reset_xmpp_config_env() {
+    for key in [
+        "WADDLE_XMPP_DOMAIN",
+        "WADDLE_SPACES_JID",
+        "WADDLE_MUC_DOMAIN",
+    ] {
+        std::env::remove_var(key);
+    }
+}
+
+#[test]
+fn test_xmpp_config_defaults_spaces_and_muc_from_xmpp_domain() {
+    let _guard = env_lock();
+    reset_xmpp_config_env();
+
+    std::env::set_var("WADDLE_XMPP_DOMAIN", "waddle.example");
+
+    let config = XmppConfig::from_env().expect("config parses");
+    assert_eq!(config.spaces_jid.to_string(), "spaces.waddle.example");
+    assert_eq!(config.muc_domain.as_str(), "muc.waddle.example");
+
+    reset_xmpp_config_env();
+}
+
+#[test]
+fn test_xmpp_config_env_overrides_spaces_and_muc() {
+    let _guard = env_lock();
+    reset_xmpp_config_env();
+
+    std::env::set_var("WADDLE_XMPP_DOMAIN", "waddle.example");
+    std::env::set_var("WADDLE_SPACES_JID", "communities.waddle.example");
+    std::env::set_var("WADDLE_MUC_DOMAIN", "rooms.waddle.example");
+
+    let config = XmppConfig::from_env().expect("config parses");
+    assert_eq!(config.spaces_jid.to_string(), "communities.waddle.example");
+    assert_eq!(config.muc_domain.as_str(), "rooms.waddle.example");
+
+    reset_xmpp_config_env();
+}
+
+#[test]
+fn test_xmpp_config_rejects_invalid_spaces_jid() {
+    let _guard = env_lock();
+    reset_xmpp_config_env();
+
+    // `@<domain>` with an empty nodepart violates `BareJid`'s
+    // grammar (`Error::NodeEmpty`).
+    std::env::set_var("WADDLE_SPACES_JID", "@example.com");
+
+    let error = XmppConfig::from_env().expect_err("invalid spaces jid must fail-fast");
+    let chain = format!("{error:?}");
+    assert!(
+        chain.contains("WADDLE_SPACES_JID"),
+        "error chain should name the offending env var: {chain}"
+    );
+
+    reset_xmpp_config_env();
+}
+
+#[test]
+fn test_xmpp_config_rejects_invalid_muc_domain() {
+    let _guard = env_lock();
+    reset_xmpp_config_env();
+
+    // An empty string violates `DomainPart::from_str`
+    // (`Error::DomainEmpty`); the trim in `parse_optional_env_value`
+    // returns `Ok(None)` only when the trimmed result is empty, so we
+    // need an explicitly invalid non-empty value. A 2000-byte string
+    // exceeds the 1023-byte nameprep limit.
+    std::env::set_var("WADDLE_MUC_DOMAIN", "a".repeat(2000));
+
+    let error = XmppConfig::from_env().expect_err("invalid muc domain must fail-fast");
+    let chain = format!("{error:?}");
+    assert!(
+        chain.contains("WADDLE_MUC_DOMAIN"),
+        "error chain should name the offending env var: {chain}"
+    );
+
+    reset_xmpp_config_env();
 }
 
 #[test]
@@ -598,15 +681,21 @@ async fn test_app() -> Router {
     let state = create_test_state().await;
     let server_config = ServerConfig::test_homeserver();
     let mam_storage = http::create_websocket_mam_storage(None).await.unwrap();
-    http::create_router(
+    let pubsub_database_storage = Arc::new(
+        crate::pubsub::DatabasePubSubStorage::open(Some("sqlite::memory:"))
+            .await
+            .expect("test pubsub storage"),
+    );
+    http::create_router(http::RouterDeps {
         state,
         server_config,
-        test_xmpp_config(),
+        xmpp_config: test_xmpp_config(),
         mam_storage,
-        None,
-        tokio_util::sync::CancellationToken::new(),
-        std::sync::Arc::new(tokio::sync::Notify::new()),
-    )
+        pubsub_database_storage,
+        acme_http01_challenge_service: None,
+        shutdown_stop_token: tokio_util::sync::CancellationToken::new(),
+        drain_complete: std::sync::Arc::new(tokio::sync::Notify::new()),
+    })
     .await
     .unwrap()
 }
