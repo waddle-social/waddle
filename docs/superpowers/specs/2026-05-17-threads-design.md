@@ -16,7 +16,14 @@ This spec adds a global Threads view to fix that, and cleans up an unrelated CLA
 1. A user can open a single global view that lists every thread they have unread in or have participated in, across all channels and DMs.
 2. The view visually separates "unread for me" from "active but caught up," so both halves of the original ask ("which are active" / "which have new") are answered at a glance.
 3. The new wire shape uses a Waddle-owned namespace so no official XEP namespace is overloaded with Waddle-specific semantics.
-4. Restore conformance for `urn:xmpp:inbox:0` (XEP-0430) by moving Waddle thread extras out of that response shape.
+
+## A spec correction made during plan recon
+
+The original draft of this design assumed the existing inbox IQ used `urn:xmpp:inbox:0` (an official XEP-0430 namespace) and that thread extras carried in its `<conversation/>` elements were a CLAUDE.md hard-rule violation.
+
+That was wrong. Waddle's inbox IQ uses `urn:waddle:inbox:0` for the typed query (see `server/crates/waddle-xmpp/src/xep/xep0430.rs:26`) and `erlang-solutions.com:xmpp:inbox:0` for the ESL-compat surface (see `server/crates/waddle-xmpp-client/src/discovery.rs:39`). Neither is an official `urn:xmpp:*` namespace, so carrying Waddle thread fields inside them is not a violation.
+
+The only artifact that still calls the inbox `urn:xmpp:inbox:0` is one row in `docs/xep-conformance-audit.md` — a doc bug. This PR corrects that row but otherwise leaves the inbox surface alone.
 
 ## Non-goals
 
@@ -36,7 +43,7 @@ This spec adds a global Threads view to fix that, and cleans up an unrelated CLA
 | "Active" means | Recent activity timestamp (server-derivable, not presence-based) | User pick, AskUserQuestion 2 |
 | Layout | Two sections — Unread pinned top, Following below; each ordered by `last_activity DESC` | User pick, mockup B in brainstorm screen 02 |
 | Protocol shape | New `urn:waddle:threads:0` query (Option A) | User approval after Fluux review |
-| Inbox cleanup | Same PR (not a follow-up) | User pick |
+| Inbox cleanup | Dropped — there is no namespace violation (see "A spec correction" above). Only the audit doc row needs fixing. | Recon during plan |
 
 ## Wire protocol
 
@@ -102,11 +109,9 @@ ACL: server returns `<forbidden/>` if the requesting full JID's bare doesn't mat
 
 Disco: `urn:waddle:threads:0` advertised on the user's server in disco#info, alongside the existing `urn:xmpp:inbox:0`.
 
-### Cleanup: drop Waddle extras from `urn:xmpp:inbox:0`
+### Audit-doc correction (replaces the original "inbox cleanup")
 
-XEP-0430 §"Inbox results" defines `<conversation/>` with `jid` and `id` attributes; the per-conversation children defined by the spec are the forwarded message and an unread `<count/>`. Waddle has been emitting additional attributes (`thread-id`) and children (`<thread-title>`, `<reply-count>`, `<root-author>`) inside `<conversation/>` elements served under the `urn:xmpp:inbox:0` namespace. That's an extension of an official namespace with Waddle-private semantics, which CLAUDE.md prohibits.
-
-This PR removes those extras. Any consumer that was reading them switches to the new `urn:waddle:threads:0` query, where the same fields are first-class. No compat shim — there's no production data and per CLAUDE.md "Breaking changes by default."
+`docs/xep-conformance-audit.md` lists XEP-0430 with namespace `urn:xmpp:inbox:0`. The implementation actually uses `urn:waddle:inbox:0` and `erlang-solutions.com:xmpp:inbox:0`. The audit row gets corrected — namespace updated, status note added explaining the two surfaces. No code changes.
 
 ### Disco changes
 
@@ -152,10 +157,6 @@ New module `server/crates/waddle-server/src/threads/`:
 
 IQ handler registered alongside the existing inbox IQ handler.
 
-### Inbox handler change
-
-`server/crates/waddle-server/src/inbox/` codec: stop writing `thread-id`, `<thread-title>`, `<reply-count>`, `<root-author>` into the XEP-0430 response. The columns stay in the DB (the threads query reads them); the wire is what becomes spec-clean.
-
 ### ACL
 
 Bare-JID match on the requesting full JID against the addressed JID. Same pattern as the inbox handler.
@@ -168,10 +169,9 @@ Bare-JID match on the requesting full JID against the addressed JID. Same patter
 - Single channel, multiple threads — returns all, sorted by recency.
 - Pagination: page size 2, three results, cursor round-trips.
 - ACL: querying another user's threads returns `<forbidden/>`.
-- Inbox interaction: `urn:xmpp:inbox:0` response no longer carries `thread-id`/`<thread-title>`/`<reply-count>`/`<root-author>` after this PR.
-- Unread counts match what XEP-0430 inbox reports for the parent conversation.
+- Unread counts match what the existing Waddle inbox reports for the parent conversation.
 
-Existing inbox tests are updated to assert the absence of the cleaned-up fields rather than their presence.
+No changes to existing inbox tests.
 
 ## Client architecture
 
@@ -241,15 +241,14 @@ Pragmatic V1: if a clean event-emission hook isn't easy, fall back to refetching
 
 ## Implementation order (PR commits, conventional + scoped)
 
-1. `fix(server): remove Waddle thread fields from urn:xmpp:inbox:0 entries`
-2. `feat(server): urn:waddle:threads:0 query module`
-3. `test(server): waddle_threads_query_ws`
-4. `feat(server): wasm bindings for fetch_threads`
-5. `feat(chat): Threads sidebar nav entry`
-6. `feat(chat): ThreadsListPanel with Unread/Following sections`
-7. `feat(chat): live thread-delta updates from inbox writes` *(may collapse into 6 if event hook is trivial; or note as a follow-up TODO)*
-8. `test(chat): ThreadsListPanel`
-9. `docs(server): conformance audit — urn:waddle:threads:0 + inbox cleanup`
+1. `feat(server): urn:waddle:threads:0 query module`
+2. `test(server): waddle_threads_query_ws`
+3. `feat(server): wasm bindings for fetch_threads`
+4. `feat(chat): Threads sidebar nav entry`
+5. `feat(chat): ThreadsListPanel with Unread/Following sections`
+6. `feat(chat): live thread-delta updates from inbox writes` *(may collapse into 5 if event hook is trivial; or note as a follow-up TODO)*
+7. `test(chat): ThreadsListPanel`
+8. `docs(server): conformance audit — urn:waddle:threads:0 row + XEP-0430 row correction`
 
 ## Risks and open questions
 
@@ -263,3 +262,11 @@ Pragmatic V1: if a clean event-emission hook isn't easy, fall back to refetching
 - Thread mute/pin/archive.
 - Per-channel Threads tab inside a channel view (mockup A from the brainstorm — viable later if global view isn't enough).
 - Cross-device PEP push for thread state (the data is already server-side; this is only relevant if we ever need offline pre-cached thread lists).
+
+## Queued follow-up: migrate Waddle inbox to XEP-0430
+
+During this brainstorm we identified that Waddle's conversation-level inbox runs on a Waddle-private `urn:waddle:inbox:0` IQ shape (plus an ESL-compat `erlang-solutions.com:xmpp:inbox:0` surface), rather than XEP-0430's `urn:xmpp:inbox:0` / `urn:xmpp:inbox:1`. XEP-0430 is Deferred status (not Draft/Active), but it's the standards-track direction.
+
+Migrating is a real refactor — XEP-0430 streams forwarded `<message>` stanzas with a final `<fin/>` IQ rather than returning an inline list — so it gets its own PR. Threads ships independently because the threads view is a separate Waddle-namespaced query that doesn't depend on which inbox shape we run.
+
+Decision deferred to that PR: keep ESL-compat surface or drop it. Tracking: separate audit-doc row + future PR.
