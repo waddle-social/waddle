@@ -241,6 +241,183 @@ async fn queue_offline_delivery_publishes_first_party_xep0357_notification_witho
     }));
 }
 
+/// XEP-0492 enforcement matrix harness — drives the DM offline-delivery
+/// push pipeline with a typed `(NotificationLevel, is_mention)` pair and
+/// returns the count of durable XEP-0357 outbox jobs that escaped the gate.
+///
+/// `0` ⇒ gate suppressed the push candidate. `1` ⇒ gate created a
+/// durable PubSub publish job for the recipient's registered Push Service.
+async fn drive_xep0492_direct_chat_push_gate(
+    level: waddle_xmpp::xep::NotificationLevel,
+    is_mention: bool,
+    message_id: &str,
+) -> usize {
+    let state = create_test_websocket_state().await;
+    let recipient: BareJid = "bob@example.com".parse().expect("recipient");
+    let sender: BareJid = "alice@example.com".parse().expect("sender");
+    let node = state
+        .deps
+        .protocol
+        .push_service
+        .ensure_node(&recipient, "web")
+        .await
+        .expect("push node");
+    state
+        .deps
+        .protocol
+        .push_service
+        .upsert_device(
+            &recipient,
+            crate::push_service::PushDeviceRegistration::new(
+                "web-1",
+                node.node(),
+                crate::push_service::PushDevicePlatform::Web,
+                "test",
+            ),
+        )
+        .await
+        .expect("push device");
+    state
+        .deps
+        .protocol
+        .push_service
+        .register_first_party_node_for_owner(&recipient, "push.example.com", node.node(), None)
+        .await
+        .expect("first-party push registration");
+    state
+        .deps
+        .protocol
+        .notification_settings_projection
+        .upsert(&crate::notification_settings_projection::NotificationSettingsProjection {
+            owner_bare_jid: recipient.clone(),
+            conversation_jid: sender.clone(),
+            conversation_kind: crate::notification_settings_projection::ConversationKind::Direct,
+            mode: level,
+            source_version: 1,
+            updated_at_ms: crate::time::now_ms(),
+            source: crate::notification_settings_projection::NotificationSettingsSource::Xep0402Bookmarks,
+            source_item_jid: sender.clone(),
+        })
+        .await
+        .expect("xep-0492 projection");
+
+    let mut message =
+        xmpp_parsers::message::Message::new(Some("bob@example.com".parse().expect("to jid")));
+    message.from = Some("alice@example.com/web".parse().expect("from jid"));
+    message.id = Some(message_id.to_string());
+    message.type_ = XmppMessageType::Chat;
+    message.bodies.insert(
+        String::new(),
+        xmpp_parsers::message::Body("hello bob".to_string()),
+    );
+    if is_mention {
+        // XEP-0513 explicit mention naming the recipient. This is the
+        // sole signal the gate consults — the `<body/>` text itself is
+        // not parsed for at-mention substrings (XEP-0513 §3 requires
+        // explicit `<mention/>` payloads for machine-detectable
+        // mentions).
+        let mention = waddle_xmpp::xep::build_mention_element(
+            &waddle_xmpp::xep::ExplicitMention::jid(recipient.clone()),
+        );
+        message.payloads.push(mention);
+    }
+
+    let deps = build_interpret_deps(state.as_ref(), None);
+    let archive_stanza_id = waddle_xmpp_core::xep0359::StanzaId::new(
+        format!("archive-{message_id}"),
+        jid::Jid::from(recipient.clone()),
+    );
+    crate::server::routes::interpret::interpret(
+        vec![waddle_xmpp::protocol::OutboundEvent::QueueOfflineDelivery {
+            recipient: recipient.clone(),
+            payload: waddle_xmpp::pending_delivery::PendingPayload::Archived(archive_stanza_id),
+            original_receipt_at: chrono::Utc::now(),
+            original_message: Box::new(message),
+        }],
+        &deps,
+    )
+    .await;
+
+    state
+        .deps
+        .protocol
+        .notification_outbox
+        .pending_outbox_jobs()
+        .await
+        .expect("notification outbox jobs")
+        .len()
+}
+
+#[tokio::test]
+async fn xep0492_direct_chat_always_delivers_push_without_mention() {
+    let attempts = drive_xep0492_direct_chat_push_gate(
+        waddle_xmpp::xep::NotificationLevel::Always,
+        false,
+        "xep0492-always-no-mention",
+    )
+    .await;
+    assert_eq!(
+        attempts, 1,
+        "XEP-0492 <always/> MUST deliver push for every DM regardless of mention"
+    );
+}
+
+#[tokio::test]
+async fn xep0492_direct_chat_always_delivers_push_with_mention() {
+    let attempts = drive_xep0492_direct_chat_push_gate(
+        waddle_xmpp::xep::NotificationLevel::Always,
+        true,
+        "xep0492-always-with-mention",
+    )
+    .await;
+    assert_eq!(
+        attempts, 1,
+        "XEP-0492 <always/> MUST deliver push for mentions too"
+    );
+}
+
+#[tokio::test]
+async fn xep0492_direct_chat_on_mention_suppresses_push_without_mention() {
+    let attempts = drive_xep0492_direct_chat_push_gate(
+        waddle_xmpp::xep::NotificationLevel::OnMention,
+        false,
+        "xep0492-on-mention-no-mention",
+    )
+    .await;
+    assert_eq!(
+        attempts, 0,
+        "XEP-0492 <on-mention/> MUST suppress push when the recipient is not mentioned"
+    );
+}
+
+#[tokio::test]
+async fn xep0492_direct_chat_on_mention_delivers_push_with_mention() {
+    let attempts = drive_xep0492_direct_chat_push_gate(
+        waddle_xmpp::xep::NotificationLevel::OnMention,
+        true,
+        "xep0492-on-mention-with-mention",
+    )
+    .await;
+    assert_eq!(
+        attempts, 1,
+        "XEP-0492 <on-mention/> MUST deliver push when XEP-0513 explicit mention names the recipient"
+    );
+}
+
+#[tokio::test]
+async fn xep0492_direct_chat_never_suppresses_push_with_mention() {
+    let attempts = drive_xep0492_direct_chat_push_gate(
+        waddle_xmpp::xep::NotificationLevel::Never,
+        true,
+        "xep0492-never-with-mention",
+    )
+    .await;
+    assert_eq!(
+        attempts, 0,
+        "XEP-0492 <never/> MUST suppress push even when the recipient is mentioned"
+    );
+}
+
 #[tokio::test]
 async fn queue_offline_delivery_suppresses_xep0357_when_xep0492_direct_chat_is_never() {
     let state = create_test_websocket_state().await;

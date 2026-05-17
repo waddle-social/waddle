@@ -65,6 +65,12 @@ pub struct VCard4 {
     pub url: Option<String>,
     /// Photo URL or base64 data URI.
     pub photo_uri: Option<String>,
+    /// Pronouns (RFC 6350 §6.2.7 / RFC 9554 PRONOUNS property).
+    ///
+    /// Freeform per RFC 6350; the XEP-0292 XML binding wraps the
+    /// value in a `<text>` grandchild like other text properties
+    /// (e.g. `<pronouns><text>they/them</text></pronouns>`).
+    pub pronouns: Option<String>,
 }
 
 impl VCard4 {
@@ -121,6 +127,12 @@ impl VCard4 {
         self
     }
 
+    /// Set the pronouns.
+    pub fn with_pronouns(mut self, pronouns: impl Into<String>) -> Self {
+        self.pronouns = Some(pronouns.into());
+        self
+    }
+
     /// Returns the best display name (full_name > nickname > None).
     pub fn display_name(&self) -> Option<&str> {
         self.full_name.as_deref().or(self.nickname.as_deref())
@@ -137,6 +149,7 @@ impl VCard4 {
             && self.title.is_none()
             && self.url.is_none()
             && self.photo_uri.is_none()
+            && self.pronouns.is_none()
     }
 }
 
@@ -180,6 +193,7 @@ pub fn parse_vcard4(elem: &Element) -> VCard4 {
         title: text_prop("title"),
         url: uri_prop("url"),
         photo_uri: uri_prop("photo"),
+        pronouns: text_prop("pronouns"),
     }
 }
 
@@ -232,6 +246,9 @@ pub fn build_vcard4_element(vcard: &VCard4) -> Element {
     if let Some(ref v) = vcard.photo_uri {
         append_uri_prop(&mut elem, "photo", v);
     }
+    if let Some(ref v) = vcard.pronouns {
+        append_text_prop(&mut elem, "pronouns", v);
+    }
 
     elem
 }
@@ -260,6 +277,7 @@ mod tests {
                     <title><text>Heir</text></title>\
                     <url><uri>https://romeo.example.com</uri></url>\
                     <photo><uri>https://example.com/romeo.jpg</uri></photo>\
+                    <pronouns><text>he/him</text></pronouns>\
                     </vcard>";
         let elem: Element = xml.parse().expect("valid xml");
         let vcard = parse_vcard4(&elem);
@@ -275,6 +293,7 @@ mod tests {
             vcard.photo_uri.as_deref(),
             Some("https://example.com/romeo.jpg")
         );
+        assert_eq!(vcard.pronouns.as_deref(), Some("he/him"));
         assert!(!vcard.is_empty());
     }
 
@@ -307,7 +326,8 @@ mod tests {
             .with_email("juliet@example.com")
             .with_note("Also star-crossed")
             .with_url("https://juliet.example.com")
-            .with_photo("https://example.com/juliet.jpg");
+            .with_photo("https://example.com/juliet.jpg")
+            .with_pronouns("she/her");
 
         let elem = build_vcard4_element(&vcard);
         assert_eq!(elem.name(), "vcard");
@@ -324,6 +344,7 @@ mod tests {
             parsed.photo_uri.as_deref(),
             Some("https://example.com/juliet.jpg")
         );
+        assert_eq!(parsed.pronouns.as_deref(), Some("she/her"));
     }
 
     #[test]
