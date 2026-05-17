@@ -648,15 +648,26 @@ pub(crate) fn push_service_database_is_restart_durable(
 
 fn sqlite_url_is_in_memory(database_url: &str) -> bool {
     let trimmed = database_url.trim().to_ascii_lowercase();
-    if trimmed == ":memory:" || sqlite_url_query_requests_memory(&trimmed) {
+    let base = trimmed
+        .split_once('?')
+        .map_or(trimmed.as_str(), |(base, _)| base);
+    if matches!(
+        base,
+        ":memory:" | "sqlite::memory:" | "sqlite://:memory:" | "sqlite:///:memory:"
+    ) || base.ends_with("file::memory:")
+        || sqlite_url_query_requests_memory(&trimmed)
+    {
         return true;
     }
     SqliteConnectOptions::from_str(database_url)
         .map(|options| {
-            options
+            let filename = options
                 .get_filename()
                 .to_string_lossy()
-                .contains("sqlx-in-memory-")
+                .to_ascii_lowercase();
+            filename == ":memory:"
+                || filename == "file::memory:"
+                || filename.contains("sqlx-in-memory-")
         })
         .unwrap_or(false)
 }

@@ -297,6 +297,8 @@ fn push_service_durability_guard_rejects_sqlite_memory_urls() {
         "sqlite::memory:",
         "sqlite::memory:?cache=shared",
         "sqlite://:memory:",
+        "sqlite:///:memory:",
+        "sqlite://file::memory:?cache=shared",
         "sqlite://?mode=memory",
         "sqlite://?mode=memory&cache=private",
         ":memory:",

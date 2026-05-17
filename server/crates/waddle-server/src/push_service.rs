@@ -281,7 +281,7 @@ impl PushServiceNode {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct PushDeviceRegistration {
     device_id: String,
     node: String,
@@ -323,6 +323,29 @@ impl PushDeviceRegistration {
     pub fn with_provider_key_material(mut self, provider_key_material: Option<String>) -> Self {
         self.provider_key_material = provider_key_material;
         self
+    }
+}
+
+impl fmt::Debug for PushDeviceRegistration {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PushDeviceRegistration")
+            .field("device_id", &self.device_id)
+            .field("node", &self.node)
+            .field("platform", &self.platform)
+            .field("environment", &self.environment)
+            .field(
+                "provider_endpoint",
+                &self.provider_endpoint.as_ref().map(|_| "<redacted>"),
+            )
+            .field(
+                "provider_token",
+                &self.provider_token.as_ref().map(|_| "<redacted>"),
+            )
+            .field(
+                "provider_key_material",
+                &self.provider_key_material.as_ref().map(|_| "<redacted>"),
+            )
+            .finish()
     }
 }
 
@@ -3317,6 +3340,26 @@ mod tests {
     use waddle_xmpp::pending_delivery::storage::PendingStorageError;
     use waddle_xmpp::pending_delivery::{PendingRow, PendingRowId, SmSessionId};
     use waddle_xmpp::push::{PushSubscription, PushSubscriptionStore};
+
+    #[test]
+    fn push_device_registration_debug_redacts_provider_credentials() {
+        let registration =
+            PushDeviceRegistration::new("web-1", "push-node", PushDevicePlatform::Web, "prod")
+                .with_provider_endpoint(Some(
+                    "https://updates.push.services.mozilla.com/secret-endpoint".to_string(),
+                ))
+                .with_provider_token(Some("provider-secret-token".to_string()))
+                .with_provider_key_material(Some("provider-secret-key".to_string()));
+
+        let debug = format!("{registration:?}");
+
+        assert!(debug.contains("PushDeviceRegistration"));
+        assert!(debug.contains("web-1"));
+        assert!(debug.contains("<redacted>"));
+        assert!(!debug.contains("secret-endpoint"));
+        assert!(!debug.contains("provider-secret-token"));
+        assert!(!debug.contains("provider-secret-key"));
+    }
 
     struct ReconciliationPendingStorage {
         failing_recipient: BareJid,

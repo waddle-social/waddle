@@ -3,20 +3,54 @@ use minidom::Element;
 use xmpp_parsers::iq::IqType;
 use xmpp_parsers::message::MessageType;
 
+const NS_XDATA: &str = "jabber:x:data";
+const PUBSUB_PUBLISH_OPTIONS_FORM_TYPE: &str = "http://jabber.org/protocol/pubsub#publish-options";
+
+fn iq_with_payload(id: &str, from: Option<&str>, to: Option<&str>, payload: IqType) -> Iq {
+    Iq {
+        from: from.map(|jid| jid.parse::<Jid>().expect("valid from jid")),
+        to: to.map(|jid| jid.parse::<Jid>().expect("valid to jid")),
+        id: id.to_string(),
+        payload,
+    }
+}
+
+fn pubsub_payload(ns: &str, children: impl IntoIterator<Item = Element>) -> Element {
+    let mut builder = Element::builder("pubsub", ns);
+    for child in children {
+        builder = builder.append(child);
+    }
+    builder.build()
+}
+
+fn xdata_field(var: &str, value: &str) -> Element {
+    Element::builder("field", NS_XDATA)
+        .attr("var", var)
+        .append(Element::builder("value", NS_XDATA).append(value).build())
+        .build()
+}
+
 #[test]
 fn parse_publish_request() {
-    let xml = r#"<iq xmlns='jabber:client' type='set' from='user@example.com' to='user@example.com' id='pub1'>
-        <pubsub xmlns='http://jabber.org/protocol/pubsub'>
-            <publish node='urn:xmpp:bookmarks:1'>
-                <item id='test@conference.example.org'>
-                    <conference xmlns='urn:xmpp:bookmarks:1' autojoin='true'/>
-                </item>
-            </publish>
-        </pubsub>
-    </iq>"#;
-
-    let elem: Element = xml.parse().expect("valid XML");
-    let iq = Iq::try_from(elem).expect("valid IQ");
+    let item = PubSubItem::new(
+        Some("test@conference.example.org".to_string()),
+        Some(
+            Element::builder("conference", "urn:xmpp:bookmarks:1")
+                .attr("autojoin", "true")
+                .build(),
+        ),
+    )
+    .to_element(NS_PUBSUB);
+    let publish = Element::builder("publish", NS_PUBSUB)
+        .attr("node", "urn:xmpp:bookmarks:1")
+        .append(item)
+        .build();
+    let iq = iq_with_payload(
+        "pub1",
+        Some("user@example.com"),
+        Some("user@example.com"),
+        IqType::Set(pubsub_payload(NS_PUBSUB, [publish])),
+    );
     let request = parse_pubsub_iq(&iq).expect("should parse");
 
     match request {
@@ -36,28 +70,40 @@ fn parse_publish_request() {
 
 #[test]
 fn parse_publish_request_with_publish_options() {
-    let xml = r#"<iq xmlns='jabber:client' type='set' from='example.com' to='push.example.com' id='push1'>
-        <pubsub xmlns='http://jabber.org/protocol/pubsub'>
-            <publish node='push-node-1'>
-                <item id='pending-row-1'>
-                    <notification xmlns='urn:xmpp:push:0'/>
-                </item>
-            </publish>
-            <publish-options>
-                <x xmlns='jabber:x:data' type='submit'>
-                    <field var='FORM_TYPE' type='hidden'>
-                        <value>http://jabber.org/protocol/pubsub#publish-options</value>
-                    </field>
-                    <field var='secret'>
-                        <value>server-secret</value>
-                    </field>
-                </x>
-            </publish-options>
-        </pubsub>
-    </iq>"#;
-
-    let elem: Element = xml.parse().expect("valid XML");
-    let iq = Iq::try_from(elem).expect("valid IQ");
+    let item = PubSubItem::new(
+        Some("pending-row-1".to_string()),
+        Some(Element::builder("notification", "urn:xmpp:push:0").build()),
+    )
+    .to_element(NS_PUBSUB);
+    let publish = Element::builder("publish", NS_PUBSUB)
+        .attr("node", "push-node-1")
+        .append(item)
+        .build();
+    let publish_options = Element::builder("publish-options", NS_PUBSUB)
+        .append(
+            Element::builder("x", NS_XDATA)
+                .attr("type", "submit")
+                .append(
+                    Element::builder("field", NS_XDATA)
+                        .attr("var", "FORM_TYPE")
+                        .attr("type", "hidden")
+                        .append(
+                            Element::builder("value", NS_XDATA)
+                                .append(PUBSUB_PUBLISH_OPTIONS_FORM_TYPE)
+                                .build(),
+                        )
+                        .build(),
+                )
+                .append(xdata_field("secret", "server-secret"))
+                .build(),
+        )
+        .build();
+    let iq = iq_with_payload(
+        "push1",
+        Some("example.com"),
+        Some("push.example.com"),
+        IqType::Set(pubsub_payload(NS_PUBSUB, [publish, publish_options])),
+    );
     let request = parse_pubsub_iq(&iq).expect("should parse");
 
     match request {
@@ -79,13 +125,16 @@ fn parse_publish_request_with_publish_options() {
 
 #[test]
 fn parse_subscribe_request_uses_typed_jid() {
-    let xml = r#"<iq xmlns='jabber:client' type='set' from='romeo@example.com' id='sub1'>
-        <pubsub xmlns='http://jabber.org/protocol/pubsub'>
-            <subscribe node='urn:xmpp:nick' jid='romeo@example.com'/>
-        </pubsub>
-    </iq>"#;
-
-    let iq = Iq::try_from(xml.parse::<Element>().expect("valid XML")).expect("valid IQ");
+    let subscribe = Element::builder("subscribe", NS_PUBSUB)
+        .attr("node", "urn:xmpp:nick")
+        .attr("jid", "romeo@example.com")
+        .build();
+    let iq = iq_with_payload(
+        "sub1",
+        Some("romeo@example.com"),
+        None,
+        IqType::Set(pubsub_payload(NS_PUBSUB, [subscribe])),
+    );
     let request = parse_pubsub_iq(&iq).expect("should parse");
 
     match request {
@@ -99,13 +148,15 @@ fn parse_subscribe_request_uses_typed_jid() {
 
 #[test]
 fn parse_configure_request() {
-    let xml = r#"<iq xmlns='jabber:client' type='set' from='user@example.com' id='cfg1'>
-        <pubsub xmlns='http://jabber.org/protocol/pubsub'>
-            <configure node='space'/>
-        </pubsub>
-    </iq>"#;
-
-    let iq = Iq::try_from(xml.parse::<Element>().expect("valid XML")).expect("valid IQ");
+    let configure = Element::builder("configure", NS_PUBSUB)
+        .attr("node", "space")
+        .build();
+    let iq = iq_with_payload(
+        "cfg1",
+        Some("user@example.com"),
+        None,
+        IqType::Set(pubsub_payload(NS_PUBSUB, [configure])),
+    );
     let request = parse_pubsub_iq(&iq).expect("should parse");
 
     match request {
@@ -116,13 +167,15 @@ fn parse_configure_request() {
 
 #[test]
 fn parse_owner_subscriptions_as_unsupported_manage_subscriptions() {
-    let xml = r#"<iq xmlns='jabber:client' type='get' from='owner@example.com' id='subs1'>
-        <pubsub xmlns='http://jabber.org/protocol/pubsub#owner'>
-            <subscriptions node='space'/>
-        </pubsub>
-    </iq>"#;
-
-    let iq = Iq::try_from(xml.parse::<Element>().expect("valid XML")).expect("valid IQ");
+    let subscriptions = Element::builder("subscriptions", NS_PUBSUB_OWNER)
+        .attr("node", "space")
+        .build();
+    let iq = iq_with_payload(
+        "subs1",
+        Some("owner@example.com"),
+        None,
+        IqType::Get(pubsub_payload(NS_PUBSUB_OWNER, [subscriptions])),
+    );
     let request = parse_pubsub_iq(&iq).expect("should parse unsupported feature");
 
     match request {
@@ -135,12 +188,15 @@ fn parse_owner_subscriptions_as_unsupported_manage_subscriptions() {
 
 #[test]
 fn unsupported_feature_error_includes_pubsub_condition() {
-    let xml = r#"<iq xmlns='jabber:client' type='get' from='owner@example.com' id='subs1'>
-        <pubsub xmlns='http://jabber.org/protocol/pubsub#owner'>
-            <subscriptions node='space'/>
-        </pubsub>
-    </iq>"#;
-    let iq = Iq::try_from(xml.parse::<Element>().expect("valid XML")).expect("valid IQ");
+    let subscriptions = Element::builder("subscriptions", NS_PUBSUB_OWNER)
+        .attr("node", "space")
+        .build();
+    let iq = iq_with_payload(
+        "subs1",
+        Some("owner@example.com"),
+        None,
+        IqType::Get(pubsub_payload(NS_PUBSUB_OWNER, [subscriptions])),
+    );
     let response = build_pubsub_error(
         &iq,
         PubSubError::UnsupportedFeature(PubSubUnsupportedFeature::ManageSubscriptions),
@@ -224,14 +280,15 @@ fn pubsub_item_omits_publisher_when_unset() {
 
 #[test]
 fn is_pubsub_iq_detects_pubsub_requests() {
-    let xml = r#"<iq xmlns='jabber:client' type='get' id='test1'>
-        <pubsub xmlns='http://jabber.org/protocol/pubsub'>
-            <items node='test'/>
-        </pubsub>
-    </iq>"#;
-
-    let elem: Element = xml.parse().expect("valid XML");
-    let iq = Iq::try_from(elem).expect("valid IQ");
+    let items = Element::builder("items", NS_PUBSUB)
+        .attr("node", "test")
+        .build();
+    let iq = iq_with_payload(
+        "test1",
+        None,
+        None,
+        IqType::Get(pubsub_payload(NS_PUBSUB, [items])),
+    );
 
     assert!(is_pubsub_iq(&iq));
 }
