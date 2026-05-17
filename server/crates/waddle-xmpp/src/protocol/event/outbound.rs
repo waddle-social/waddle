@@ -247,8 +247,9 @@ pub enum OutboundEvent {
     },
     /// Project a groupchat message into one user's inbox (Waddle product
     /// surface). Sibling to [`OutboundEvent::ProjectInbox`] for the
-    /// MUC-locality chain — emitted once per occupant by the room
-    /// handler chain's inbox handler.
+    /// MUC-locality chain — emitted once per durable recipient plus
+    /// any currently joined occupant that is not represented by the
+    /// durable affiliation snapshot.
     ///
     /// `is_recipient` is `true` for everyone except the sender, who
     /// gets their own copy without bumping the unread counter.
@@ -266,6 +267,15 @@ pub enum OutboundEvent {
         message: Box<Message>,
         /// `true` for recipients (bumps unread); `false` for the sender.
         is_recipient: bool,
+        /// `true` when this recipient is currently joined to the room.
+        /// Used by notification policy for XEP-0513 active channel
+        /// mentions; it must not become the authoritative recipient set.
+        is_live_occupant: bool,
+        /// `true` when the room is members-only. Used by the server-side
+        /// XEP-0492 projection gate to choose the group-chat default
+        /// (`private_group` vs `public_group`) without re-querying room
+        /// config after the dispatch snapshot.
+        room_members_only: bool,
         /// Optional thread metadata for the thread-level row.
         thread: Option<GroupchatThreadProjection>,
         /// Single dispatch timestamp (Unix epoch seconds) shared

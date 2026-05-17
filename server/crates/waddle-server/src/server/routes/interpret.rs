@@ -91,7 +91,7 @@ use waddle_xmpp::mam::{
 };
 use waddle_xmpp::muc::room_actor::{
     ApplyPin, GetAffiliation, GetNicknameGeneration, GetRoomSnapshot, JoinWithAffiliation,
-    RoomActor, SetSubject,
+    ListAffiliations, RoomActor, SetSubject,
 };
 use waddle_xmpp::muc::room_registry_actor::{GetRoom, RoomRegistryActor};
 use waddle_xmpp::parse_managed_room_jid;
@@ -160,7 +160,7 @@ use direct_retraction::apply_retraction_tombstone;
 use groupchat_archive::{
     apply_groupchat_retraction_tombstone, archive_groupchat_message, project_groupchat_inbox,
 };
-use groupchat_inbox::project_groupchat_inbox_event;
+use groupchat_inbox::{project_groupchat_inbox_event, ProjectGroupchatInboxEvent};
 use groupchat_validation::{
     bad_request_error, build_message_error_reply, remove_framework_envelopes,
     service_unavailable_error, validate_groupchat_rich_targets,
@@ -481,18 +481,22 @@ async fn interpret_with_depth(
                 room,
                 message,
                 is_recipient,
+                is_live_occupant,
+                room_members_only,
                 thread,
                 dispatch_timestamp,
             } => {
-                project_groupchat_inbox_event(
+                project_groupchat_inbox_event(ProjectGroupchatInboxEvent {
                     deps,
                     owner,
                     room,
                     message,
                     is_recipient,
+                    is_live_occupant,
+                    room_members_only,
                     thread,
                     dispatch_timestamp,
-                )
+                })
                 .await;
             }
             OutboundEvent::ArchiveDirect {

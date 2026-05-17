@@ -42,7 +42,12 @@ impl RoomHandler for MucInboxHandler {
         }
         let thread = thread_projection(message);
         let mut seen: HashSet<BareJid> = HashSet::new();
-        let mut events = Vec::with_capacity(ctx.occupants.len());
+        let live_recipient_bares: HashSet<BareJid> = ctx
+            .recipient_occupants()
+            .map(|occupant| occupant.bare_jid())
+            .collect();
+        let mut events =
+            Vec::with_capacity(ctx.occupants.len() + ctx.durable_recipient_bare_jids.len());
         let sender_bare = ctx.sender_full.to_bare();
         // Always project the sender's own row (no unread bump). The
         // legacy code did this independent of whether the sender was
@@ -54,17 +59,34 @@ impl RoomHandler for MucInboxHandler {
             && seen.insert(sender_bare.clone())
         {
             events.push(OutboundEvent::ProjectGroupchatInbox {
-                owner: sender_bare,
+                owner: sender_bare.clone(),
                 room: ctx.room.clone(),
                 message: Box::new(message.clone()),
                 is_recipient: false,
+                is_live_occupant: true,
+                room_members_only: ctx.room_members_only,
+                thread: thread.clone(),
+                dispatch_timestamp: ctx.dispatch_timestamp,
+            });
+        }
+        for bare in ctx.durable_recipient_bare_jids {
+            if bare == &sender_bare || !seen.insert(bare.clone()) {
+                continue;
+            }
+            events.push(OutboundEvent::ProjectGroupchatInbox {
+                owner: bare.clone(),
+                room: ctx.room.clone(),
+                message: Box::new(message.clone()),
+                is_recipient: true,
+                is_live_occupant: live_recipient_bares.contains(bare),
+                room_members_only: ctx.room_members_only,
                 thread: thread.clone(),
                 dispatch_timestamp: ctx.dispatch_timestamp,
             });
         }
         for occupant in ctx.recipient_occupants() {
             let bare = occupant.bare_jid();
-            if !seen.insert(bare.clone()) {
+            if bare == sender_bare || !seen.insert(bare.clone()) {
                 continue;
             }
             events.push(OutboundEvent::ProjectGroupchatInbox {
@@ -72,6 +94,8 @@ impl RoomHandler for MucInboxHandler {
                 room: ctx.room.clone(),
                 message: Box::new(message.clone()),
                 is_recipient: true,
+                is_live_occupant: true,
+                room_members_only: ctx.room_members_only,
                 thread: thread.clone(),
                 dispatch_timestamp: ctx.dispatch_timestamp,
             });
@@ -152,14 +176,27 @@ mod tests {
         occupants: &[OccupantSnapshot],
         msg: &mut Message,
     ) -> Vec<OutboundEvent> {
+        run_with_durable(room, sender_full, occupants, &[], false, msg)
+    }
+
+    fn run_with_durable(
+        room: &BareJid,
+        sender_full: &FullJid,
+        occupants: &[OccupantSnapshot],
+        durable_recipient_bare_jids: &[BareJid],
+        room_members_only: bool,
+        msg: &mut Message,
+    ) -> Vec<OutboundEvent> {
         let id_gen = FixedIdGenerator("ignored".to_string());
         let secret = OccupantIdSecret::for_testing(b"test-secret".to_vec());
         let ctx = RoomContext {
             room,
             sender_full,
             occupants,
+            durable_recipient_bare_jids,
             managed_room_forbidden: false,
             room_moderated: false,
+            room_members_only,
             pin_permission: crate::muc::PinPermission::default(),
             id_gen: &id_gen,
             occupant_id_secret: &secret,
@@ -241,6 +278,53 @@ mod tests {
         let proj = projections(&events);
         // Sender + one bob row (the second bob session collapsed).
         assert_eq!(proj.len(), 2);
+    }
+
+    #[test]
+    fn xep_0430_projects_durable_affiliates_without_duplicating_live_occupants() {
+        let room = bare("team@conf.example.com");
+        let alice = full("alice@example.com/web");
+        let bob = full("bob@example.com/desk");
+        let charlie = bare("charlie@example.com");
+        let occupants = vec![occ(alice.clone(), "alice"), occ(bob, "bob")];
+        let durable_recipients = vec![bare("bob@example.com"), charlie];
+        let mut msg = groupchat(&room, &alice, "hello everyone");
+
+        let events = run_with_durable(
+            &room,
+            &alice,
+            &occupants,
+            &durable_recipients,
+            true,
+            &mut msg,
+        );
+
+        let projections: Vec<(String, bool, bool, bool)> = events
+            .iter()
+            .filter_map(|event| match event {
+                OutboundEvent::ProjectGroupchatInbox {
+                    owner,
+                    is_recipient,
+                    is_live_occupant,
+                    room_members_only,
+                    ..
+                } => Some((
+                    owner.to_string(),
+                    *is_recipient,
+                    *is_live_occupant,
+                    *room_members_only,
+                )),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            projections,
+            vec![
+                ("alice@example.com".to_string(), false, true, true),
+                ("bob@example.com".to_string(), true, true, true),
+                ("charlie@example.com".to_string(), true, false, true),
+            ]
+        );
     }
 
     #[test]

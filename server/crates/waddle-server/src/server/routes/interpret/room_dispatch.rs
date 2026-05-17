@@ -117,6 +117,8 @@ pub(super) async fn dispatch_to_room(
             role: o.role,
         })
         .collect();
+    let durable_recipient_bare_jids =
+        durable_groupchat_recipient_bare_jids(&room_actor, &room_jid).await;
     let id_gen = UuidV4Generator;
     // Capture a single dispatch timestamp here so every per-occupant
     // `ProjectGroupchatInbox` event the chain emits carries the same
@@ -128,8 +130,10 @@ pub(super) async fn dispatch_to_room(
         room: &room_jid,
         sender_full: &sender_full,
         occupants: &occupants,
+        durable_recipient_bare_jids: &durable_recipient_bare_jids,
         managed_room_forbidden,
         room_moderated: snapshot.config.moderated,
+        room_members_only: snapshot.config.members_only,
         pin_permission: snapshot.config.pin_permission,
         id_gen: &id_gen,
         occupant_id_secret: &state.deps.occupant_id_secret,
@@ -241,6 +245,7 @@ pub(super) async fn dispatch_to_room(
         room: &room_jid,
         sender_full: &sender_full,
         occupants: &occupants,
+        durable_recipient_bare_jids: &durable_recipient_bare_jids,
         managed_room_forbidden,
         // XEP-0045 §7.5 (Copilot review on PR #279): the chain's
         // `OccupancyValidationHandler` enforces visitor-may-not-speak
@@ -248,6 +253,7 @@ pub(super) async fn dispatch_to_room(
         // the legacy `RoomActor::BuildGroupchatBroadcast` check that
         // previously emitted `RoomActorError::VisitorMayNotSpeak`.
         room_moderated: snapshot.config.moderated,
+        room_members_only: snapshot.config.members_only,
         pin_permission: snapshot.config.pin_permission,
         id_gen: &id_gen,
         occupant_id_secret: &state.deps.occupant_id_secret,
@@ -322,4 +328,31 @@ pub(super) async fn dispatch_to_room(
     }
 
     outcome
+}
+
+pub(super) async fn durable_groupchat_recipient_bare_jids(
+    room_actor: &ActorRef<RoomActor>,
+    room_jid: &BareJid,
+) -> Vec<BareJid> {
+    match room_actor.ask(ListAffiliations { filter: None }).await {
+        Ok(entries) => {
+            let mut recipients: Vec<BareJid> = entries
+                .into_iter()
+                .filter(|entry| entry.affiliation >= waddle_xmpp::Affiliation::Member)
+                .map(|entry| entry.jid)
+                .collect();
+            recipients.sort();
+            recipients.dedup();
+            recipients
+        }
+        Err(error) => {
+            warn!(
+                room = %room_jid,
+                error = ?error,
+                "DispatchToRoom: failed to load durable MUC affiliations; \
+                 falling back to live occupants for this projection"
+            );
+            Vec::new()
+        }
+    }
 }

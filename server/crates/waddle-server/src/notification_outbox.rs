@@ -116,18 +116,30 @@ impl NotificationClass {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NotificationReason {
     OfflineDirectMessage,
+    GroupchatPersonalMention,
+    GroupchatChannelMention,
+    GroupchatActiveChannelMention,
+    GroupchatNotifyAll,
 }
 
 impl NotificationReason {
     fn as_db_value(self) -> &'static str {
         match self {
             Self::OfflineDirectMessage => "offline_dm",
+            Self::GroupchatPersonalMention => "groupchat_personal_mention",
+            Self::GroupchatChannelMention => "groupchat_channel_mention",
+            Self::GroupchatActiveChannelMention => "groupchat_active_channel_mention",
+            Self::GroupchatNotifyAll => "groupchat_notify_all",
         }
     }
 
     fn from_db_value(value: &str) -> Result<Self, NotificationOutboxError> {
         match value {
             "offline_dm" => Ok(Self::OfflineDirectMessage),
+            "groupchat_personal_mention" => Ok(Self::GroupchatPersonalMention),
+            "groupchat_channel_mention" => Ok(Self::GroupchatChannelMention),
+            "groupchat_active_channel_mention" => Ok(Self::GroupchatActiveChannelMention),
+            "groupchat_notify_all" => Ok(Self::GroupchatNotifyAll),
             _ => Err(NotificationOutboxError::InvalidReason(value.to_string())),
         }
     }
@@ -187,6 +199,48 @@ impl NotificationCandidate {
             archive_stanza_id,
             class: NotificationClass::DirectMessage,
             reason: NotificationReason::OfflineDirectMessage,
+            policy_error_count: 0,
+        })
+    }
+
+    pub fn groupchat(
+        recipient_bare_jid: BareJid,
+        conversation_jid: BareJid,
+        sender_jid: Jid,
+        thread_id: NotificationThreadId,
+        archive_stanza_id: StanzaId,
+        class: NotificationClass,
+    ) -> Result<Self, NotificationOutboxError> {
+        require_full_sender_jid(&sender_jid)?;
+        require_sender_matches_conversation(&sender_jid, &conversation_jid)?;
+        let expected_by = Jid::from(conversation_jid.clone());
+        if archive_stanza_id.by != expected_by {
+            return Err(NotificationOutboxError::ArchiveStanzaIdOwnerMismatch {
+                expected: expected_by,
+                actual: archive_stanza_id.by,
+            });
+        }
+        let reason = match class {
+            NotificationClass::PersonalMention => NotificationReason::GroupchatPersonalMention,
+            NotificationClass::ChannelMention => NotificationReason::GroupchatChannelMention,
+            NotificationClass::ActiveChannelMention => {
+                NotificationReason::GroupchatActiveChannelMention
+            }
+            NotificationClass::NotifyAll => NotificationReason::GroupchatNotifyAll,
+            NotificationClass::DirectMessage => {
+                return Err(NotificationOutboxError::InvalidClass(
+                    class.as_db_value().to_string(),
+                ));
+            }
+        };
+        Ok(Self {
+            recipient_bare_jid,
+            conversation_jid,
+            sender_jid,
+            thread_id,
+            archive_stanza_id,
+            class,
+            reason,
             policy_error_count: 0,
         })
     }
@@ -498,7 +552,7 @@ impl NotificationOutboxStore {
                     stanza_id_by TEXT NOT NULL,
                     stanza_id TEXT NOT NULL,
                     class TEXT NOT NULL CHECK (class IN ('dm', 'personal_mention', 'channel_mention', 'active_channel_mention', 'notify_all')),
-                    reason TEXT NOT NULL CHECK (reason IN ('offline_dm')),
+                    reason TEXT NOT NULL CHECK (reason IN ('offline_dm', 'groupchat_personal_mention', 'groupchat_channel_mention', 'groupchat_active_channel_mention', 'groupchat_notify_all')),
                     created_at_ms {i64_type} NOT NULL,
                     policy_error_count INTEGER NOT NULL DEFAULT 0,
                     next_attempt_at_ms {i64_type},

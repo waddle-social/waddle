@@ -1568,9 +1568,11 @@ async fn extension_room_message_dispatches_threaded_muc_message() {
         BotGroupchatDispatch {
             room_jid: &room_jid,
             occupants: &occupants,
+            durable_recipient_bare_jids: &[],
             sender_full: &bot,
             room_actor: None,
             room_moderated: false,
+            room_members_only: false,
             pin_permission: waddle_xmpp::muc::PinPermission::default(),
             dispatch_timestamp: 1777629203,
             recursion_depth: 0,
