@@ -12,8 +12,9 @@ use crate::server::routes::websocket::{
     ProtocolServices, WebSocketDeps, WebSocketState, XmppServiceDomains,
 };
 use crate::server::session_janitors::{
-    spawn_auth_state_janitor, spawn_graceful_shutdown_drain, spawn_pending_delivery_claim_janitor,
-    spawn_push_service_publish_job_janitor, spawn_room_dormancy_janitor, spawn_sm_expiry_janitor,
+    spawn_auth_state_janitor, spawn_graceful_shutdown_drain, spawn_notification_outbox_janitor,
+    spawn_pending_delivery_claim_janitor, spawn_push_service_publish_job_janitor,
+    spawn_room_dormancy_janitor, spawn_sm_expiry_janitor,
 };
 use crate::server::topology::bootstrap_fresh_xmpp_topology;
 use crate::server::trace::make_request_span;
@@ -188,6 +189,7 @@ pub(crate) async fn create_router(
 
     spawn_sm_expiry_janitor(&websocket_state);
     spawn_pending_delivery_claim_janitor(&websocket_state);
+    spawn_notification_outbox_janitor(&websocket_state);
     spawn_push_service_publish_job_janitor(&websocket_state);
     spawn_auth_state_janitor(&websocket_state);
     spawn_room_dormancy_janitor(&websocket_state);
@@ -364,6 +366,13 @@ async fn create_websocket_state(
         .await
         .map_err(|error| anyhow::anyhow!("failed to initialize XMPP Push Service: {error}"))?,
     );
+    let notification_outbox = Arc::new(
+        crate::notification_outbox::NotificationOutboxStore::new(state.db_pool.global().clone())
+            .await
+            .map_err(|error| {
+                anyhow::anyhow!("failed to initialize notification candidate outbox: {error}")
+            })?,
+    );
     let notification_settings_projection = Arc::new(
         crate::notification_settings_projection::NotificationSettingsProjectionStore::new(
             pubsub_database_storage.database(),
@@ -404,6 +413,7 @@ async fn create_websocket_state(
                 pubsub_storage,
                 push_store,
                 push_service,
+                notification_outbox,
                 notification_settings_projection,
                 isr_token_store: waddle_xmpp::isr::create_shared_store(),
                 sm_session_registry,

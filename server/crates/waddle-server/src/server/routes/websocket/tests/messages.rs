@@ -83,13 +83,15 @@ async fn queue_offline_delivery_publishes_first_party_xep0357_notification_witho
         String::new(),
         xmpp_parsers::message::Body("push me".to_string()),
     );
+    let archive_stanza_id = waddle_xmpp_core::xep0359::StanzaId::new(
+        "archive-offline-push-1",
+        jid::Jid::from(recipient.clone()),
+    );
     let deps = build_interpret_deps(state.as_ref(), None);
     crate::server::routes::interpret::interpret(
         vec![waddle_xmpp::protocol::OutboundEvent::QueueOfflineDelivery {
             recipient: recipient.clone(),
-            payload: waddle_xmpp::pending_delivery::PendingPayload::Transient(Box::new(
-                message.clone(),
-            )),
+            payload: waddle_xmpp::pending_delivery::PendingPayload::Archived(archive_stanza_id),
             original_receipt_at: chrono::Utc::now(),
             original_message: Box::new(message),
         }],
@@ -97,6 +99,55 @@ async fn queue_offline_delivery_publishes_first_party_xep0357_notification_witho
     )
     .await;
 
+    let attempts_before_drain = state
+        .deps
+        .protocol
+        .push_service
+        .delivery_attempts_for_node(node.node())
+        .await
+        .expect("delivery attempts before drain");
+    assert!(attempts_before_drain.is_empty());
+    let outbox_jobs = state
+        .deps
+        .protocol
+        .notification_outbox
+        .pending_outbox_jobs()
+        .await
+        .expect("notification outbox jobs");
+    assert_eq!(outbox_jobs.len(), 1);
+    assert_eq!(outbox_jobs[0].message_count(), 1);
+    let sender_bare: BareJid = "alice@example.com".parse().expect("sender bare jid");
+    assert_eq!(outbox_jobs[0].conversation_jid(), &sender_bare);
+    let push_service_jid: BareJid = "push.example.com".parse().expect("push service jid");
+    let outbox_results = state
+        .deps
+        .protocol
+        .notification_outbox
+        .drain_due_outbox_jobs(
+            state.deps.protocol.push_service.as_ref(),
+            state.deps.protocol.push_store.as_ref(),
+            &push_service_jid,
+            16,
+        )
+        .await
+        .expect("drain notification outbox");
+    assert_eq!(outbox_results.len(), 1);
+    let queued_publish_jobs = state
+        .deps
+        .protocol
+        .push_service
+        .queued_publish_jobs()
+        .await
+        .expect("queued push publish jobs");
+    assert_eq!(queued_publish_jobs.len(), 1);
+    assert_eq!(queued_publish_jobs[0].node(), node.node());
+    state
+        .deps
+        .protocol
+        .push_service
+        .drain_queued_notification_publish_jobs(16)
+        .await
+        .expect("drain push publish jobs");
     let attempts = state
         .deps
         .protocol
@@ -107,7 +158,6 @@ async fn queue_offline_delivery_publishes_first_party_xep0357_notification_witho
     assert_eq!(attempts.len(), 1);
     assert_eq!(attempts[0].device_id(), "web-1");
     assert!(!attempts[0].item_id().is_empty());
-    let push_service_jid: BareJid = "push.example.com".parse().expect("push service jid");
     let pubsub_node = state
         .deps
         .protocol
@@ -150,6 +200,29 @@ async fn queue_offline_delivery_publishes_first_party_xep0357_notification_witho
         .parse()
         .expect("notification payload xml");
     assert!(stored_payload.is("notification", waddle_xmpp::xep::xep0357::NS_PUSH));
+    let summary = stored_payload
+        .children()
+        .find(|child| child.is("x", waddle_xmpp::xep::NS_DATA_FORMS))
+        .expect("xep-0357 summary form");
+    assert!(summary.children().any(|field| {
+        field.is("field", waddle_xmpp::xep::NS_DATA_FORMS)
+            && field.attr("var") == Some("FORM_TYPE")
+            && field.children().any(|value| {
+                value.is("value", waddle_xmpp::xep::NS_DATA_FORMS)
+                    && value.text() == "urn:xmpp:push:summary"
+            })
+    }));
+    assert!(summary.children().any(|field| {
+        field.is("field", waddle_xmpp::xep::NS_DATA_FORMS)
+            && field.attr("var") == Some("message-count")
+            && field.children().any(|value| {
+                value.is("value", waddle_xmpp::xep::NS_DATA_FORMS) && value.text() == "1"
+            })
+    }));
+    assert!(stored_payload.children().any(|child| child.is(
+        "context",
+        crate::notification_outbox::WADDLE_PUSH_CONTEXT_NS
+    )));
 
     let registrations = state
         .deps
@@ -228,13 +301,15 @@ async fn queue_offline_delivery_suppresses_xep0357_when_xep0492_direct_chat_is_n
         String::new(),
         xmpp_parsers::message::Body("do not push".to_string()),
     );
+    let archive_stanza_id = waddle_xmpp_core::xep0359::StanzaId::new(
+        "archive-offline-muted-1",
+        jid::Jid::from(recipient.clone()),
+    );
     let deps = build_interpret_deps(state.as_ref(), None);
     crate::server::routes::interpret::interpret(
         vec![waddle_xmpp::protocol::OutboundEvent::QueueOfflineDelivery {
             recipient: recipient.clone(),
-            payload: waddle_xmpp::pending_delivery::PendingPayload::Transient(Box::new(
-                message.clone(),
-            )),
+            payload: waddle_xmpp::pending_delivery::PendingPayload::Archived(archive_stanza_id),
             original_receipt_at: chrono::Utc::now(),
             original_message: Box::new(message),
         }],
@@ -258,6 +333,97 @@ async fn queue_offline_delivery_suppresses_xep0357_when_xep0492_direct_chat_is_n
         .await
         .expect("queued jobs");
     assert!(queued.is_empty());
+    let outbox_jobs = state
+        .deps
+        .protocol
+        .notification_outbox
+        .pending_outbox_jobs()
+        .await
+        .expect("notification outbox jobs");
+    assert!(outbox_jobs.is_empty());
+}
+
+#[tokio::test]
+async fn queue_offline_delivery_suppresses_xep0357_for_transient_no_permanent_store_payloads() {
+    let state = create_test_websocket_state().await;
+    let recipient: BareJid = "bob@example.com".parse().expect("recipient");
+    let node = state
+        .deps
+        .protocol
+        .push_service
+        .ensure_node(&recipient, "web")
+        .await
+        .expect("push node");
+    state
+        .deps
+        .protocol
+        .push_service
+        .upsert_device(
+            &recipient,
+            crate::push_service::PushDeviceRegistration::new(
+                "web-1",
+                node.node(),
+                crate::push_service::PushDevicePlatform::Web,
+                "test",
+            ),
+        )
+        .await
+        .expect("push device");
+    state
+        .deps
+        .protocol
+        .push_service
+        .register_first_party_node_for_owner(&recipient, "push.example.com", node.node(), None)
+        .await
+        .expect("first-party push registration");
+
+    let mut message =
+        xmpp_parsers::message::Message::new(Some("bob@example.com".parse().expect("to jid")));
+    message.from = Some("alice@example.com/web".parse().expect("from jid"));
+    message.id = Some("offline-push-transient-1".to_string());
+    message.type_ = XmppMessageType::Chat;
+    message.bodies.insert(
+        String::new(),
+        xmpp_parsers::message::Body("do not push transient".to_string()),
+    );
+    let deps = build_interpret_deps(state.as_ref(), None);
+    crate::server::routes::interpret::interpret(
+        vec![waddle_xmpp::protocol::OutboundEvent::QueueOfflineDelivery {
+            recipient: recipient.clone(),
+            payload: waddle_xmpp::pending_delivery::PendingPayload::Transient(Box::new(
+                message.clone(),
+            )),
+            original_receipt_at: chrono::Utc::now(),
+            original_message: Box::new(message),
+        }],
+        &deps,
+    )
+    .await;
+
+    let outbox_jobs = state
+        .deps
+        .protocol
+        .notification_outbox
+        .pending_outbox_jobs()
+        .await
+        .expect("notification outbox jobs");
+    assert!(outbox_jobs.is_empty());
+    let queued = state
+        .deps
+        .protocol
+        .push_service
+        .queued_publish_jobs()
+        .await
+        .expect("queued jobs");
+    assert!(queued.is_empty());
+    let attempts = state
+        .deps
+        .protocol
+        .push_service
+        .delivery_attempts_for_node(node.node())
+        .await
+        .expect("delivery attempts");
+    assert!(attempts.is_empty());
 }
 
 #[tokio::test]

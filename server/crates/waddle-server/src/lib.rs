@@ -5,6 +5,7 @@ pub mod config;
 pub mod db;
 pub mod inbox;
 pub mod messages;
+pub mod notification_outbox;
 pub mod notification_settings_projection;
 pub mod pending_delivery;
 pub mod pep_feed_bridge;

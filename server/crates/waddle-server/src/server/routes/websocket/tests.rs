@@ -117,6 +117,13 @@ async fn create_test_websocket_state_with_extension_manager(
         .await
         .expect("push service"),
     );
+    let notification_outbox = Arc::new(
+        crate::notification_outbox::NotificationOutboxStore::new(
+            app_state.db_pool.global().clone(),
+        )
+        .await
+        .expect("notification outbox"),
+    );
 
     Arc::new(WebSocketState {
             deps: WebSocketDeps {
@@ -159,6 +166,7 @@ async fn create_test_websocket_state_with_extension_manager(
                         .expect("push registration store"),
                     ),
                     push_service,
+                    notification_outbox,
                     notification_settings_projection,
                     isr_token_store: waddle_xmpp::isr::create_shared_store(),
                     sm_session_registry: Arc::new(InMemorySmSessionRegistry::new()),

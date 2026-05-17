@@ -19,6 +19,12 @@ pub(super) async fn queue_offline_delivery(
         );
         return;
     };
+    let notification_archive_stanza_id = match &payload {
+        waddle_xmpp::pending_delivery::PendingPayload::Archived(stanza_id) => {
+            Some(stanza_id.clone())
+        }
+        waddle_xmpp::pending_delivery::PendingPayload::Transient(_) => None,
+    };
     let row = waddle_xmpp::pending_delivery::PendingRow {
         id: waddle_xmpp::pending_delivery::PendingRowId::fresh(),
         recipient: recipient.clone(),
@@ -27,15 +33,19 @@ pub(super) async fn queue_offline_delivery(
         flushed_in_session: None,
         outbound_sequence: None,
     };
-    let pending_row_id = row.id.clone();
     match storage.insert(row).await {
         Ok(waddle_xmpp::pending_delivery::InsertOutcome::Inserted) => {
             debug!(
                 recipient = %recipient,
                 "pending_delivery row inserted"
             );
-            publish_xep0357_notifications(deps, &recipient, &pending_row_id, &original_message)
-                .await;
+            enqueue_xep0357_notification_candidate(
+                deps,
+                &recipient,
+                notification_archive_stanza_id.as_ref(),
+                &original_message,
+            )
+            .await;
         }
         Ok(waddle_xmpp::pending_delivery::InsertOutcome::QuotaExceeded) => {
             waddle_xmpp::prometheus::increment_pending_delivery_quota_exceeded();
@@ -139,16 +149,26 @@ pub(super) async fn queue_offline_delivery(
     }
 }
 
-async fn publish_xep0357_notifications(
+async fn enqueue_xep0357_notification_candidate(
     deps: &Deps<'_>,
     recipient: &BareJid,
-    pending_row_id: &waddle_xmpp::pending_delivery::PendingRowId,
+    archive_stanza_id: Option<&waddle_xmpp_core::xep0359::StanzaId>,
     original_message: &Message,
 ) {
+    let Some(archive_stanza_id) = archive_stanza_id else {
+        debug!(
+            recipient = %recipient,
+            "Skipping XEP-0357 candidate for transient offline payload"
+        );
+        return;
+    };
     let Some(state) = deps.web_socket_state else {
         return;
     };
-    if !should_publish_xep0357_notification(state, recipient, original_message).await {
+    let Some(sender) = original_message.from.as_ref().map(|jid| jid.to_bare()) else {
+        return;
+    };
+    if !should_publish_xep0357_notification(state, recipient, &sender).await {
         return;
     }
     let registrations = match state
@@ -169,6 +189,19 @@ async fn publish_xep0357_notifications(
         }
     };
     let first_party_service = state.deps.service_domains.push.as_str();
+    let first_party_service_jid: BareJid = match first_party_service.parse() {
+        Ok(jid) => jid,
+        Err(error) => {
+            warn!(
+                recipient = %recipient,
+                push_service = first_party_service,
+                error = %error,
+                "first-party Push Service JID is invalid; skipping notification candidate"
+            );
+            return;
+        }
+    };
+    let mut targets = Vec::new();
     for registration in registrations {
         if registration.service_jid != first_party_service {
             debug!(
@@ -178,63 +211,85 @@ async fn publish_xep0357_notifications(
             );
             continue;
         }
-        let Some(node) = registration.node.as_deref() else {
+        match crate::notification_outbox::target_from_subscription(&registration) {
+            Ok(Some(target)) if target.push_service_jid() == &first_party_service_jid => {
+                targets.push(target);
+            }
+            Ok(Some(target)) => {
+                warn!(
+                    recipient = %recipient,
+                    registration_service = %registration.service_jid,
+                    target_service = %target.push_service_jid(),
+                    "first-party XEP-0357 registration target did not parse back to the configured service"
+                );
+            }
+            Ok(None) => {
+                warn!(
+                    recipient = %recipient,
+                    service = %registration.service_jid,
+                    "first-party XEP-0357 registration missing node; skipping notification candidate target"
+                );
+            }
+            Err(error) => {
+                warn!(
+                    recipient = %recipient,
+                    error = %error,
+                    "first-party XEP-0357 registration could not be converted into an outbox target"
+                );
+            }
+        }
+    }
+    if targets.is_empty() {
+        return;
+    }
+
+    let candidate = match crate::notification_outbox::NotificationCandidate::direct_message(
+        recipient.clone(),
+        sender.clone(),
+        archive_stanza_id.clone(),
+    ) {
+        Ok(candidate) => candidate,
+        Err(error) => {
             warn!(
                 recipient = %recipient,
-                service = %registration.service_jid,
-                "first-party XEP-0357 registration missing node; skipping publish"
+                sender = %sender,
+                error = %error,
+                "XEP-0357 notification candidate rejected"
             );
-            continue;
-        };
-        let notification =
-            minidom::Element::builder("notification", waddle_xmpp::xep::xep0357::NS_PUSH).build();
-        let item = waddle_xmpp::pubsub::PubSubItem::new(
-            Some(pending_row_id.as_str().to_string()),
-            Some(notification),
-        );
-        let iq = match build_xep0357_pubsub_publish_iq(
-            first_party_service,
-            recipient,
-            node,
-            pending_row_id,
-            &item,
-            registration.publish_options.as_ref(),
-        ) {
-            Ok(iq) => iq,
-            Err(error) => {
-                warn!(
-                    recipient = %recipient,
-                    node,
-                    error = %error,
-                    "XEP-0357 first-party Push Service notification IQ build failed"
-                );
-                continue;
-            }
-        };
-        match state
-            .deps
-            .protocol
-            .push_service
-            .publish_xep0357_pubsub_iq_from_user_server(first_party_service, &iq, recipient)
-            .await
-        {
-            Ok(result) => {
-                debug!(
-                    recipient = %recipient,
-                    node,
-                    item_id = %result.item_id(),
-                    attempted_devices = result.attempted_devices(),
-                    "XEP-0357 first-party Push Service notification published"
-                );
-            }
-            Err(error) => {
-                warn!(
-                    recipient = %recipient,
-                    node,
-                    error = %error,
-                    "XEP-0357 first-party Push Service notification publish failed"
-                );
-            }
+            return;
+        }
+    };
+    match state
+        .deps
+        .protocol
+        .notification_outbox
+        .insert_candidate_and_enqueue(&candidate, &targets)
+        .await
+    {
+        Ok(crate::notification_outbox::NotificationCandidateInsertOutcome::Inserted {
+            enqueued_jobs,
+        }) => {
+            debug!(
+                recipient = %recipient,
+                sender = %sender,
+                enqueued_jobs,
+                "XEP-0357 notification candidate inserted into durable outbox"
+            );
+        }
+        Ok(crate::notification_outbox::NotificationCandidateInsertOutcome::Duplicate) => {
+            debug!(
+                recipient = %recipient,
+                sender = %sender,
+                "Duplicate XEP-0357 notification candidate ignored"
+            );
+        }
+        Err(error) => {
+            warn!(
+                recipient = %recipient,
+                sender = %sender,
+                error = %error,
+                "XEP-0357 notification candidate insert failed"
+            );
         }
     }
 }
@@ -242,12 +297,9 @@ async fn publish_xep0357_notifications(
 async fn should_publish_xep0357_notification(
     state: &WebSocketState,
     recipient: &BareJid,
-    original_message: &Message,
+    sender: &BareJid,
 ) -> bool {
-    let Some(sender) = original_message.from.as_ref().map(|jid| jid.to_bare()) else {
-        return false;
-    };
-    if sender == *recipient {
+    if sender == recipient {
         return false;
     }
     let setting = state
@@ -256,7 +308,7 @@ async fn should_publish_xep0357_notification(
         .notification_settings_projection
         .effective_setting(
             recipient,
-            &sender,
+            sender,
             crate::notification_settings_projection::ConversationKind::Direct,
         )
         .await;
@@ -272,33 +324,4 @@ async fn should_publish_xep0357_notification(
             false
         }
     }
-}
-
-fn build_xep0357_pubsub_publish_iq(
-    push_service_jid: &str,
-    recipient: &BareJid,
-    node: &str,
-    pending_row_id: &waddle_xmpp::pending_delivery::PendingRowId,
-    item: &waddle_xmpp::pubsub::PubSubItem,
-    publish_options: Option<&minidom::Element>,
-) -> Result<xmpp_parsers::iq::Iq, jid::Error> {
-    let publish = minidom::Element::builder("publish", waddle_xmpp::pubsub::NS_PUBSUB)
-        .attr("node", node)
-        .append(item.to_element(waddle_xmpp::pubsub::NS_PUBSUB))
-        .build();
-    let mut pubsub_builder =
-        minidom::Element::builder("pubsub", waddle_xmpp::pubsub::NS_PUBSUB).append(publish);
-    if let Some(publish_options) = publish_options {
-        pubsub_builder = pubsub_builder.append(
-            minidom::Element::builder("publish-options", waddle_xmpp::pubsub::NS_PUBSUB)
-                .append(publish_options.clone())
-                .build(),
-        );
-    }
-    Ok(xmpp_parsers::iq::Iq {
-        from: Some(recipient.clone().into()),
-        to: Some(push_service_jid.parse()?),
-        id: format!("push-{}", pending_row_id.as_str()),
-        payload: xmpp_parsers::iq::IqType::Set(pubsub_builder.build()),
-    })
 }
