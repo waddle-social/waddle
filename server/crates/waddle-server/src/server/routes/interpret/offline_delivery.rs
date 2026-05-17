@@ -148,8 +148,24 @@ async fn publish_xep0357_notifications(
     let Some(state) = deps.web_socket_state else {
         return;
     };
-    if !should_publish_xep0357_notification(state, recipient, original_message).await {
-        return;
+    // XEP-0492 gate: consult the recipient's per-conversation notification
+    // level (defaulting to XEP-0492 conversation-kind defaults via the
+    // projection store) and the XEP-0513 mention bit. The decision is a
+    // typed `PushDispatchDecision` — never a stringly-typed diagnostic —
+    // so the suppression reason flows through to the typed log line.
+    let decision =
+        evaluate_xep0492_push_dispatch_decision(state, recipient, original_message).await;
+    match decision {
+        crate::notification_settings_projection::PushDispatchDecision::Deliver => {}
+        crate::notification_settings_projection::PushDispatchDecision::Suppressed { reason } => {
+            info!(
+                recipient = %recipient,
+                sender = ?original_message.from.as_ref().map(|jid| jid.to_bare()),
+                reason = %reason,
+                "XEP-0492 push gate suppressed XEP-0357 push fan-out"
+            );
+            return;
+        }
     }
     let registrations = match state
         .deps
@@ -239,18 +255,47 @@ async fn publish_xep0357_notifications(
     }
 }
 
-async fn should_publish_xep0357_notification(
+/// Resolve the XEP-0492 push-dispatch gate for a single inbound DM that
+/// is about to be projected into the recipient's offline queue.
+///
+/// The gate combines the recipient's typed
+/// [`waddle_xmpp::xep::NotificationLevel`] (resolved by the
+/// `NotificationSettingsProjectionStore`, falling back to the XEP-0492
+/// conversation-kind defaults) with the XEP-0513 mention bit derived
+/// directly from the inbound `<message>` payloads. Both inputs flow as
+/// typed values; there are no string-typed payloads on the gate boundary.
+///
+/// `QueueOfflineDelivery` only fires for DM intake
+/// ([`waddle_xmpp::protocol::handlers::offline_delivery::OfflineDeliveryHandler`]
+/// is gated on `Locality::Recipient` + headless pass for `<message
+/// type='chat'>`), so the conversation kind on this path is always
+/// `ConversationKind::Direct`. The shared pure reducer
+/// [`crate::notification_settings_projection::PushDispatchDecision::evaluate`]
+/// is the single decision point — when MUC push fan-out lands it will
+/// reuse the same reducer rather than re-implementing the level matrix.
+async fn evaluate_xep0492_push_dispatch_decision(
     state: &WebSocketState,
     recipient: &BareJid,
     original_message: &Message,
-) -> bool {
+) -> crate::notification_settings_projection::PushDispatchDecision {
     let Some(sender) = original_message.from.as_ref().map(|jid| jid.to_bare()) else {
-        return false;
+        // Sender bare-JID missing — refuse to fan out because we cannot
+        // resolve a per-conversation setting. Treated as suppression with
+        // the strictest typed reason so the audit log is unambiguous.
+        return crate::notification_settings_projection::PushDispatchDecision::Suppressed {
+            reason: waddle_xmpp::xep::NotificationLevel::Never,
+        };
     };
     if sender == *recipient {
-        return false;
+        // Self-DM: never push to your own offline queue. Per XEP-0492
+        // semantics this is a hard suppression independent of the
+        // configured level; surface it as `Never` to keep the typed log
+        // path uniform.
+        return crate::notification_settings_projection::PushDispatchDecision::Suppressed {
+            reason: waddle_xmpp::xep::NotificationLevel::Never,
+        };
     }
-    let setting = state
+    let level = match state
         .deps
         .protocol
         .notification_settings_projection
@@ -259,9 +304,9 @@ async fn should_publish_xep0357_notification(
             &sender,
             crate::notification_settings_projection::ConversationKind::Direct,
         )
-        .await;
-    match setting {
-        Ok(setting) => setting.should_notify(false),
+        .await
+    {
+        Ok(level) => level,
         Err(error) => {
             warn!(
                 recipient = %recipient,
@@ -269,9 +314,28 @@ async fn should_publish_xep0357_notification(
                 error = %error,
                 "XEP-0492 notification setting lookup failed; suppressing push notification"
             );
-            false
+            return crate::notification_settings_projection::PushDispatchDecision::Suppressed {
+                reason: waddle_xmpp::xep::NotificationLevel::Never,
+            };
         }
-    }
+    };
+    let is_mention = message_is_mention_for_recipient(original_message, recipient);
+    crate::notification_settings_projection::PushDispatchDecision::evaluate(level, is_mention)
+}
+
+/// Returns `true` when the inbound XEP-0513 explicit-mention payloads
+/// name `recipient` as a mentioned `<mention jid='…'/>`.
+///
+/// The recipient JID is the bare JID that owns the offline queue; that
+/// is the canonical identity referenced by `<mention jid='…'/>` per
+/// XEP-0513 §3. Channel-wide `<mention mentions='urn:xmpp:mentions:0#channel'/>`
+/// is intentionally NOT treated as an individual mention here — the
+/// XEP-0492 `<on-mention/>` semantics target explicit user mentions; the
+/// channel-mention surface is for MUC reflector announcements, which do
+/// not flow through the DM `QueueOfflineDelivery` arm.
+fn message_is_mention_for_recipient(message: &Message, recipient: &BareJid) -> bool {
+    waddle_xmpp::xep::extract_explicit_mentions(message)
+        .is_some_and(|mentions| mentions.mentions_jid(recipient))
 }
 
 fn build_xep0357_pubsub_publish_iq(

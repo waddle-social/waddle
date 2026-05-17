@@ -244,6 +244,56 @@ impl NotificationSettingsProjectionStore {
     }
 }
 
+/// Typed outcome of the XEP-0492 push-dispatch gate.
+///
+/// The gate is consulted at the message → push-fan-out boundary
+/// (`OutboundEvent::QueueOfflineDelivery` interpret arm). The recipient's
+/// effective notification level (resolved via [`NotificationSettingsProjectionStore::effective_setting`])
+/// is combined with the per-message mention bit (resolved via
+/// [`message_is_mention_for_recipient`]) and reduced to one of two typed
+/// outcomes: `Deliver` (fan out to the user's registered XEP-0357 Push
+/// Service) or `Suppressed { reason }` (drop, never call APNs/FCM).
+///
+/// Per the typed-payloads hard rule, `reason` carries the resolved typed
+/// [`NotificationLevel`] — not a string diagnostic — so callers (and
+/// adversarial tests) can branch on the exact suppression cause without
+/// stringly-typed sniffing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PushDispatchDecision {
+    /// Push notification MUST be delivered to the recipient's registered
+    /// Push Service node.
+    Deliver,
+    /// Push notification MUST be suppressed; do not call the provider.
+    ///
+    /// `reason` is the effective XEP-0492 [`NotificationLevel`] that
+    /// caused suppression. Callers SHOULD emit a typed log carrying
+    /// `reason` so deployments can observe per-conversation suppression
+    /// without re-querying the projection.
+    Suppressed { reason: NotificationLevel },
+}
+
+impl PushDispatchDecision {
+    /// Pure reducer for the XEP-0492 push gate.
+    ///
+    /// This is the single decision point invoked immediately before
+    /// device fan-out per the PR plan. It is intentionally pure so the
+    /// dedicated XEP-0492 enforcement test suite can exercise every
+    /// `(level, is_mention)` pair without spinning up storage or the
+    /// WebSocket transport.
+    pub fn evaluate(level: NotificationLevel, is_mention: bool) -> Self {
+        if level.should_notify(is_mention) {
+            Self::Deliver
+        } else {
+            Self::Suppressed { reason: level }
+        }
+    }
+
+    /// Returns `true` if the gate decided to deliver.
+    pub fn should_deliver(self) -> bool {
+        matches!(self, Self::Deliver)
+    }
+}
+
 pub fn derive_bookmark_projection_mutation(
     owner_bare_jid: &BareJid,
     item_id: &str,
