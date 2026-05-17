@@ -49,12 +49,7 @@ async fn alice_client(server: &TestServer, password: &str, resource: &str) -> Ws
         .expect("alice connect")
 }
 
-async fn send_command(
-    client: &mut WsXmppClient,
-    node: &str,
-    id: &str,
-    form_xml: &str,
-) -> String {
+async fn send_command(client: &mut WsXmppClient, node: &str, id: &str, form_xml: &str) -> String {
     let body = format!(
         r#"<command xmlns="{NS_COMMANDS}" node="{node}" action="execute">{form_xml}</command>"#
     );
@@ -145,7 +140,10 @@ async fn spaces_list_forbidden_for_non_owner() {
     )
     .await;
     assert!(is_error(&resp), "expected error, got: {resp}");
-    assert!(resp.contains("forbidden"), "expected <forbidden/>, got: {resp}");
+    assert!(
+        resp.contains("forbidden"),
+        "expected <forbidden/>, got: {resp}"
+    );
     let _ = alice.close().await;
 }
 
@@ -169,7 +167,10 @@ async fn spaces_create_persists_new_space() {
     .await;
     assert!(is_result(&resp), "expected result, got: {resp}");
     let space_jid = extract_field(&resp, "space_jid").expect("space_jid in response");
-    assert!(space_jid.contains("@"), "expected bare JID, got: {space_jid}");
+    assert!(
+        space_jid.contains("@"),
+        "expected bare JID, got: {space_jid}"
+    );
 
     // List should now include the new space.
     let list_resp = send_command(
@@ -179,7 +180,10 @@ async fn spaces_create_persists_new_space() {
         &submit_form(NODE_SPACES_LIST, ""),
     )
     .await;
-    assert!(is_result(&list_resp), "expected list result, got: {list_resp}");
+    assert!(
+        is_result(&list_resp),
+        "expected list result, got: {list_resp}"
+    );
     assert!(
         list_resp.contains(&space_jid),
         "list missing the created space JID '{space_jid}', got: {list_resp}"
@@ -201,7 +205,10 @@ async fn spaces_create_rejects_invalid_name() {
         &submit_form(NODE_SPACES_CREATE, &text_field("name", "")),
     )
     .await;
-    assert!(is_error(&resp), "expected error for empty name, got: {resp}");
+    assert!(
+        is_error(&resp),
+        "expected error for empty name, got: {resp}"
+    );
 
     // 81-char name violates the 80-char ceiling.
     let long = "a".repeat(81);
@@ -212,7 +219,10 @@ async fn spaces_create_rejects_invalid_name() {
         &submit_form(NODE_SPACES_CREATE, &text_field("name", &long)),
     )
     .await;
-    assert!(is_error(&resp), "expected error for overlong name, got: {resp}");
+    assert!(
+        is_error(&resp),
+        "expected error for overlong name, got: {resp}"
+    );
     let _ = admin.close().await;
 }
 
@@ -230,7 +240,10 @@ async fn spaces_create_forbidden_for_non_owner() {
     )
     .await;
     assert!(is_error(&resp), "expected error, got: {resp}");
-    assert!(resp.contains("forbidden"), "expected <forbidden/>, got: {resp}");
+    assert!(
+        resp.contains("forbidden"),
+        "expected <forbidden/>, got: {resp}"
+    );
     let _ = alice.close().await;
 }
 
@@ -292,7 +305,10 @@ async fn spaces_update_rejects_unknown_space() {
         &submit_form(NODE_SPACES_UPDATE, &extra),
     )
     .await;
-    assert!(is_error(&resp), "expected error for unknown space, got: {resp}");
+    assert!(
+        is_error(&resp),
+        "expected error for unknown space, got: {resp}"
+    );
     assert!(
         resp.contains("item-not-found") || resp.contains("not-found"),
         "expected item-not-found, got: {resp}"
@@ -319,7 +335,10 @@ async fn spaces_update_forbidden_for_non_owner() {
     )
     .await;
     assert!(is_error(&resp), "expected error, got: {resp}");
-    assert!(resp.contains("forbidden"), "expected <forbidden/>, got: {resp}");
+    assert!(
+        resp.contains("forbidden"),
+        "expected <forbidden/>, got: {resp}"
+    );
     let _ = alice.close().await;
 }
 
@@ -358,7 +377,10 @@ async fn spaces_delete_requires_confirm_yes() {
         ),
     )
     .await;
-    assert!(is_error(&resp), "expected error without confirm=yes, got: {resp}");
+    assert!(
+        is_error(&resp),
+        "expected error without confirm=yes, got: {resp}"
+    );
     let _ = admin.close().await;
 }
 
@@ -429,7 +451,10 @@ async fn spaces_delete_forbidden_for_non_owner() {
     )
     .await;
     assert!(is_error(&resp), "expected error, got: {resp}");
-    assert!(resp.contains("forbidden"), "expected <forbidden/>, got: {resp}");
+    assert!(
+        resp.contains("forbidden"),
+        "expected <forbidden/>, got: {resp}"
+    );
     let _ = alice.close().await;
 }
 
@@ -454,7 +479,10 @@ async fn spaces_members_forbidden_for_non_owner() {
     )
     .await;
     assert!(is_error(&resp), "expected error, got: {resp}");
-    assert!(resp.contains("forbidden"), "expected <forbidden/>, got: {resp}");
+    assert!(
+        resp.contains("forbidden"),
+        "expected <forbidden/>, got: {resp}"
+    );
     let _ = alice.close().await;
 }
 
@@ -497,7 +525,10 @@ async fn spaces_set_role_round_trips_through_members() {
         &submit_form(NODE_SPACES_MEMBERS, &text_field("space_jid", &space_jid)),
     )
     .await;
-    assert!(is_result(&list_resp), "expected members list, got: {list_resp}");
+    assert!(
+        is_result(&list_resp),
+        "expected members list, got: {list_resp}"
+    );
     assert!(
         list_resp.contains("bystander@localhost"),
         "members list missing promoted user, got: {list_resp}"
@@ -538,7 +569,10 @@ async fn spaces_set_role_removes_with_none() {
             &submit_form(NODE_SPACES_SET_ROLE, &extra),
         )
         .await;
-        assert!(is_result(&resp), "expected set-role {role} success, got: {resp}");
+        assert!(
+            is_result(&resp),
+            "expected set-role {role} success, got: {resp}"
+        );
     }
 
     let list_resp = send_command(
@@ -575,6 +609,9 @@ async fn spaces_set_role_forbidden_for_non_owner() {
     )
     .await;
     assert!(is_error(&resp), "expected error, got: {resp}");
-    assert!(resp.contains("forbidden"), "expected <forbidden/>, got: {resp}");
+    assert!(
+        resp.contains("forbidden"),
+        "expected <forbidden/>, got: {resp}"
+    );
     let _ = alice.close().await;
 }

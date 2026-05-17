@@ -22,6 +22,7 @@
 //! from the authoritative server-owner set rather than from
 //! decorative hat URIs.
 
+pub mod channels;
 pub mod spaces;
 pub mod users_list;
 
