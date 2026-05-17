@@ -47,6 +47,7 @@ use crate::config::ServerConfig;
 use crate::db::DatabasePool;
 use crate::inbox::build_inbox_storage;
 use crate::permissions::PermissionActor;
+use crate::spaces_metadata::build_spaces_metadata_store;
 use acme::start_acme_runtime;
 use anyhow::Result;
 use fixed_account::{ensure_fixed_test_account, fixed_test_account_enabled};
@@ -132,6 +133,12 @@ pub async fn start_with_config(
     let inbox_storage = build_inbox_storage(xmpp_config.inbox_database_url.clone())
         .await
         .map_err(|error| anyhow::anyhow!("Failed to initialize inbox storage: {}", error))?;
+    let spaces_metadata_store =
+        build_spaces_metadata_store(xmpp_config.spaces_metadata_database_url.clone())
+            .await
+            .map_err(|error| {
+                anyhow::anyhow!("Failed to initialize spaces metadata storage: {}", error)
+            })?;
 
     // Create HTTP state (shares db_pool via Arc)
     let blob_storage = crate::storage::build_blob_storage()
@@ -144,6 +151,7 @@ pub async fn start_with_config(
         Arc::clone(&db_pool),
         blob_storage,
         Arc::clone(&inbox_storage),
+        Arc::clone(&spaces_metadata_store),
         permission_actor.clone(),
         server_owner_jids,
     ));
