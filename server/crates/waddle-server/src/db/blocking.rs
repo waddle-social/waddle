@@ -4,7 +4,7 @@
 //! persistent storage.
 
 use crate::db::IntoParams;
-use jid::BareJid;
+use jid::{BareJid, Jid};
 use tracing::{debug, instrument};
 
 use super::Database;
@@ -90,6 +90,35 @@ impl DatabaseBlockingStorage {
             }
         }
         debug!(count = entries.len(), "Loaded typed blocklist");
+        Ok(entries)
+    }
+
+    /// Get all blocked JIDs for a user as their stored XEP-0191 JID form.
+    ///
+    /// This preserves full-JID and domain-JID entries for policy checks that
+    /// must honor the complete XEP-0191 matching surface. Malformed legacy rows
+    /// are skipped with the same warning policy as [`Self::list_blocked_jids`].
+    #[instrument(skip(self), fields(user = %user_jid))]
+    pub async fn list_blocked_jid_entries(
+        &self,
+        user_jid: &BareJid,
+    ) -> Result<Vec<Jid>, BlockingStorageError> {
+        let raw = self.get_blocklist(user_jid).await?;
+        let mut entries = Vec::with_capacity(raw.len());
+        for blocked in raw {
+            match blocked.parse::<Jid>() {
+                Ok(jid) => entries.push(jid),
+                Err(error) => {
+                    tracing::warn!(
+                        user = %user_jid,
+                        blocked = %blocked,
+                        %error,
+                        "Skipping malformed blocklist row"
+                    );
+                }
+            }
+        }
+        debug!(count = entries.len(), "Loaded typed blocklist entries");
         Ok(entries)
     }
 
@@ -248,6 +277,15 @@ impl waddle_xmpp::xep::xep0191::BlockingStorage for DatabaseBlockingStorage {
             .await
             .map_err(waddle_xmpp::xep::xep0191::BlockingStorageError::new)
     }
+
+    async fn list_blocked_jid_entries(
+        &self,
+        user: &BareJid,
+    ) -> Result<Vec<Jid>, waddle_xmpp::xep::xep0191::BlockingStorageError> {
+        Self::list_blocked_jid_entries(self, user)
+            .await
+            .map_err(waddle_xmpp::xep::xep0191::BlockingStorageError::new)
+    }
 }
 
 #[cfg(test)]
@@ -376,6 +414,26 @@ mod tests {
         assert_eq!(entries.len(), 1);
         let bob: BareJid = "bob@example.com".parse().unwrap();
         assert_eq!(entries[0], bob);
+    }
+
+    #[tokio::test]
+    async fn list_blocked_jid_entries_preserves_full_and_domain_jids() {
+        let db = setup_test_db().await;
+        let storage = DatabaseBlockingStorage::new(db);
+
+        let user_jid: BareJid = "alice@example.com".parse().unwrap();
+        let blocked = vec![
+            "bob@example.com/phone".to_string(),
+            "blocked.example.com".to_string(),
+        ];
+        storage.add_blocks(&user_jid, &blocked).await.unwrap();
+
+        let entries = storage.list_blocked_jid_entries(&user_jid).await.unwrap();
+        let expected: Vec<Jid> = blocked
+            .iter()
+            .map(|entry| entry.parse().expect("valid blocked JID"))
+            .collect();
+        assert_eq!(entries, expected);
     }
 
     #[tokio::test]

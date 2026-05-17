@@ -48,7 +48,7 @@
 //! ```
 
 use async_trait::async_trait;
-use jid::BareJid;
+use jid::{BareJid, Jid};
 use minidom::Element;
 use tracing::debug;
 use xmpp_parsers::iq::Iq;
@@ -107,16 +107,34 @@ pub trait BlockingStorage: Send + Sync {
     /// [`super::super::protocol::handlers::blocking_filter::BlockingFilterHandler`].
     async fn list_blocked_jids(&self, user: &BareJid)
         -> Result<Vec<BareJid>, BlockingStorageError>;
+
+    /// Return blocked JID entries in their stored XEP-0191 form.
+    ///
+    /// XEP-0191 block items may be bare JIDs, full JIDs, or domain JIDs.
+    /// Existing session snapshots still consume [`Self::list_blocked_jids`]
+    /// because that path currently performs bare-JID matching only; policy
+    /// gates that must honor full/domain entries use this read.
+    async fn list_blocked_jid_entries(
+        &self,
+        user: &BareJid,
+    ) -> Result<Vec<Jid>, BlockingStorageError> {
+        Ok(self
+            .list_blocked_jids(user)
+            .await?
+            .into_iter()
+            .map(Jid::from)
+            .collect())
+    }
 }
 
 /// In-memory [`BlockingStorage`] implementation for tests.
 ///
-/// Backed by a `Mutex<HashMap<BareJid, Vec<BareJid>>>`. Used by the
+/// Backed by a `Mutex<HashMap<BareJid, Vec<Jid>>>`. Used by the
 /// offline-recipient-pass tests in `waddle-server` and any handler-level
 /// fixture that wants to seed a blocklist without a real database.
 #[derive(Debug, Default)]
 pub struct InMemoryBlockingStorage {
-    per_user: std::sync::Mutex<std::collections::HashMap<BareJid, Vec<BareJid>>>,
+    per_user: std::sync::Mutex<std::collections::HashMap<BareJid, Vec<Jid>>>,
 }
 
 impl InMemoryBlockingStorage {
@@ -127,6 +145,11 @@ impl InMemoryBlockingStorage {
 
     /// Replace the blocklist for `user` with `entries`.
     pub fn set_blocklist(&self, user: BareJid, entries: Vec<BareJid>) {
+        self.set_blocklist_jids(user, entries.into_iter().map(Jid::from).collect());
+    }
+
+    /// Replace the blocklist for `user` with full XEP-0191 JID entries.
+    pub fn set_blocklist_jids(&self, user: BareJid, entries: Vec<Jid>) {
         let mut guard = self
             .per_user
             .lock()
@@ -152,6 +175,23 @@ impl BlockingStorage for InMemoryBlockingStorage {
         &self,
         user: &BareJid,
     ) -> Result<Vec<BareJid>, BlockingStorageError> {
+        let guard = self
+            .per_user
+            .lock()
+            .map_err(|_| BlockingStorageError::new(InMemoryBlockingStorageError))?;
+        Ok(guard
+            .get(user)
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|entry| entry.try_into().ok())
+            .collect())
+    }
+
+    async fn list_blocked_jid_entries(
+        &self,
+        user: &BareJid,
+    ) -> Result<Vec<Jid>, BlockingStorageError> {
         let guard = self
             .per_user
             .lock()

@@ -72,6 +72,7 @@ async fn drain_notification_candidates_for_test(state: &WebSocketState) -> usize
         .notification_outbox
         .drain_pending_candidates_into_outbox(
             state.deps.protocol.push_store.as_ref(),
+            state.deps.protocol.blocking_storage.as_ref(),
             &push_service_jid,
             16,
         )
@@ -219,6 +220,7 @@ async fn queue_offline_delivery_publishes_first_party_xep0357_notification_witho
             state.deps.protocol.push_service.as_ref(),
             state.deps.protocol.push_store.as_ref(),
             state.deps.protocol.inbox_storage.as_ref(),
+            state.deps.protocol.blocking_storage.as_ref(),
             &push_service_jid,
             16,
         )

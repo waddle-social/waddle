@@ -523,6 +523,7 @@ pub(crate) fn spawn_notification_outbox_janitor(websocket_state: &Arc<WebSocketS
                 .notification_outbox
                 .drain_pending_candidates_into_outbox(
                     state.deps.protocol.push_store.as_ref(),
+                    state.deps.protocol.blocking_storage.as_ref(),
                     &first_party_service_jid,
                     batch_size,
                 )
@@ -550,6 +551,7 @@ pub(crate) fn spawn_notification_outbox_janitor(websocket_state: &Arc<WebSocketS
                     state.deps.protocol.push_service.as_ref(),
                     state.deps.protocol.push_store.as_ref(),
                     state.deps.protocol.inbox_storage.as_ref(),
+                    state.deps.protocol.blocking_storage.as_ref(),
                     &first_party_service_jid,
                     batch_size,
                 )

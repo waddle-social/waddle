@@ -215,7 +215,8 @@ async fn enqueue_xep0357_notification_candidate_from_committed_archive(
             return NotificationCandidateQueueOutcome::RetryLater;
         }
     };
-    let sender = archived.from.to_bare();
+    let sender_jid = archived.from.clone();
+    let sender = sender_jid.to_bare();
     let original_message =
         super::archive_lookup::parse_archived_message_xml(archived.stanza_xml.as_deref())
             .unwrap_or_else(|| super::archive_lookup::fallback_archived_message(&archived));
@@ -223,6 +224,7 @@ async fn enqueue_xep0357_notification_candidate_from_committed_archive(
         state,
         recipient,
         &sender,
+        &sender_jid,
         archive_stanza_id,
         &original_message,
     )
@@ -233,6 +235,7 @@ async fn enqueue_xep0357_notification_candidate_for_message(
     state: &WebSocketState,
     recipient: &BareJid,
     sender: &BareJid,
+    sender_jid: &Jid,
     archive_stanza_id: &waddle_xmpp_core::xep0359::StanzaId,
     original_message: &Message,
 ) -> NotificationCandidateQueueOutcome {
@@ -262,7 +265,7 @@ async fn enqueue_xep0357_notification_candidate_for_message(
     }
     let candidate = match crate::notification_outbox::NotificationCandidate::direct_message(
         recipient.clone(),
-        sender.clone(),
+        sender_jid.clone(),
         archive_stanza_id.clone(),
     ) {
         Ok(candidate) => candidate,
