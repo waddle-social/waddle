@@ -589,30 +589,25 @@ impl NotificationOutboxStore {
         batch_size: usize,
     ) -> Result<usize, NotificationOutboxError> {
         let candidates = self.pending_candidates(batch_size).await?;
-        let mut target_cache = std::collections::BTreeMap::<
-            String,
-            Result<Vec<NotificationOutboxTarget>, String>,
-        >::new();
+        let mut target_cache =
+            std::collections::BTreeMap::<BareJid, Vec<NotificationOutboxTarget>>::new();
         let mut processed = 0usize;
         for candidate in candidates {
-            let recipient_key = candidate.recipient_bare_jid.to_string();
+            let recipient_key = candidate.recipient_bare_jid.clone();
             if !target_cache.contains_key(&recipient_key) {
                 let resolved = resolve_first_party_targets(
                     push_store,
                     &candidate.recipient_bare_jid,
                     first_party_service_jid,
                 )
-                .await
-                .map_err(|error| error.to_string());
+                .await?;
                 target_cache.insert(recipient_key.clone(), resolved);
             }
             let targets = target_cache
                 .get(&recipient_key)
                 .expect("target cache populated")
-                .clone()
-                .map_err(NotificationOutboxError::Push)?;
+                .clone();
             let context = build_waddle_context(&candidate);
-            let context_xml = String::from(&context);
             let now_ms = crate::time::now_ms();
             let mut tx = self.db.begin().await?;
             let claimed = mark_candidate_outboxed_tx(&mut tx, &candidate, now_ms).await?;
@@ -621,7 +616,7 @@ impl NotificationOutboxStore {
                 continue;
             }
             for target in &targets {
-                enqueue_outbox_job_tx(&mut tx, &candidate, target, &context_xml, now_ms).await?;
+                enqueue_outbox_job_tx(&mut tx, &candidate, target, &context, now_ms).await?;
             }
             tx.commit().await?;
             processed += 1;
@@ -1189,10 +1184,12 @@ async fn enqueue_outbox_job_tx(
     tx: &mut crate::db::Transaction<'_>,
     candidate: &NotificationCandidate,
     target: &NotificationOutboxTarget,
-    context_xml: &str,
+    context: &Element,
     now_ms: i64,
 ) -> Result<(), NotificationOutboxError> {
     let job_id = NotificationOutboxJobId::fresh();
+    // The durable schema stores XML as TEXT; keep protocol context typed until this DB write edge.
+    let context_xml = String::from(context);
     let inserted = tx
         .execute(
             r#"
@@ -1226,7 +1223,7 @@ async fn enqueue_outbox_job_tx(
                 candidate.conversation_jid.to_string(),
                 candidate.thread_id.as_str(),
                 candidate.class.as_db_value(),
-                context_xml,
+                context_xml.as_str(),
                 STATUS_QUEUED,
                 now_ms,
                 now_ms,
@@ -1251,7 +1248,7 @@ async fn enqueue_outbox_job_tx(
               AND status = ?
             "#,
             crate::db_params![
-                context_xml,
+                context_xml.as_str(),
                 now_ms,
                 candidate.recipient_bare_jid.to_string(),
                 target.push_service_jid.to_string(),
@@ -1558,13 +1555,12 @@ mod tests {
             .expect("insert candidate");
         let now_ms = crate::time::now_ms();
         let context = build_waddle_context(candidate);
-        let context_xml = String::from(&context);
         let mut tx = store.db.begin().await.expect("begin tx");
         mark_candidate_outboxed_tx(&mut tx, candidate, now_ms)
             .await
             .expect("mark candidate outboxed");
         for target in targets {
-            enqueue_outbox_job_tx(&mut tx, candidate, target, &context_xml, now_ms)
+            enqueue_outbox_job_tx(&mut tx, candidate, target, &context, now_ms)
                 .await
                 .expect("enqueue outbox job");
         }
