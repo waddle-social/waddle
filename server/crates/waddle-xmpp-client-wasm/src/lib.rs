@@ -26,6 +26,10 @@ use waddle_xmpp_client::messaging::{
     MarkupSpanData, MarkupSpanType, MucAffiliation, MucRole, ReferenceData, SendMessageOptions,
     SharedFileDisposition,
 };
+use waddle_xmpp_client::mds::{
+    build_mds_catchup_iq, build_mds_publish_iq, build_mds_subscribe_iq, parse_mds_catchup_result,
+    MdsCatchupEntry,
+};
 use waddle_xmpp_client::pep::{
     build_pep_items_iq, build_publish_activity_iq, build_publish_mood_iq, build_publish_tune_iq,
     build_retract_activity_iq, build_retract_mood_iq, build_retract_tune_iq, parse_pep_activity,

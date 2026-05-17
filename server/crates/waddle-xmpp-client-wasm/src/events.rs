@@ -40,6 +40,26 @@ pub(crate) fn dispatch_client_event(inner: &Rc<RefCell<WaddleClientInner>>, even
             }
         }
         ClientEvent::Messaging(waddle_xmpp_client::MessagingEvent::Message(message)) => {
+            // XEP-0490 §3.2: surface MDS PEP events through the
+            // dedicated `on_mds_displayed` callback as well as the
+            // generic on_message stream. Either path is safe; the
+            // chat layer applies state from `on_mds_displayed` and
+            // drops the message-shaped echo for MDS events.
+            if let Some(entries) = message.mds_displayed.as_ref() {
+                let callback = inner.borrow().on_mds_displayed.clone();
+                if let Some(callback) = callback {
+                    for entry in entries {
+                        let js_entry = WaddleMdsDisplayedEntry {
+                            chat_id: entry.chat_id.clone(),
+                            stanza_id: entry.stanza_id.clone(),
+                            stanza_id_by: entry.stanza_id_by.clone(),
+                        };
+                        if let Ok(value) = to_js_value(&js_entry) {
+                            let _ = callback.call1(&JsValue::NULL, &value);
+                        }
+                    }
+                }
+            }
             if let Some(callback) = inner.borrow().on_message.as_ref() {
                 if let Ok(value) = to_js_value(&inbound_to_js(*message)) {
                     let _ = callback.call1(&JsValue::NULL, &value);

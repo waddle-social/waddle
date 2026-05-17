@@ -26,10 +26,23 @@ export function useDmReadMarkers(deps: UseDmReadMarkersDeps) {
 
   function markDisplayed(messageId: string) {
     if (!xmppClient.value || !activePeerJid.value) return;
-    const targetId = findMessageById(messages.value, messageId)?.id ?? messageId;
-    void xmppClient.value
-      .sendDmDisplayed(activePeerJid.value, targetId)
+    const target = findMessageById(messages.value, messageId);
+    const targetId = target?.id ?? messageId;
+    const client = xmppClient.value;
+    const peerJid = activePeerJid.value;
+    void client
+      .sendDmDisplayed(peerJid, targetId)
       .catch(() => undefined);
+    // XEP-0490 §3 publish for the DM. The chat id is the peer bare
+    // JID; `stanza_id_by` is the user's own server JID (carried on
+    // the inbound message). Only fires when both are surfaced.
+    const stanzaId = target?.stanzaId;
+    const stanzaIdBy = target?.stanzaIdBy;
+    if (stanzaId && stanzaIdBy) {
+      void client
+        .publishMdsDisplayed(barePeerJid(peerJid), stanzaId, stanzaIdBy)
+        .catch(() => undefined);
+    }
   }
 
   function persistLastSeen(peerJid: string, messageId: string) {

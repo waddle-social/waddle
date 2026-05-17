@@ -165,6 +165,29 @@ pub struct InboundMessage {
     pub extension_envelope: Option<ExtensionEnvelopeData>,
     /// XEP-0428 marks the readable body as fallback for the Waddle extension payload.
     pub extension_body_fallback: bool,
+    /// XEP-0490 §3 Message Displayed Synchronization PEP event
+    /// entries, when the inbound `<message>` carries a
+    /// `<event xmlns='...#event'><items node='urn:xmpp:mds:displayed:0'>`
+    /// payload. Each entry maps a chat JID (PEP item id) to the
+    /// XEP-0359 stanza-id of the latest displayed message in that
+    /// chat. Empty `Vec` is distinct from `None`: `None` means the
+    /// message is not an MDS event, `Some(vec![])` means an MDS
+    /// event with no items (e.g. retracted via empty publish — not
+    /// a shape XEP-0490 currently defines but cheap to surface
+    /// faithfully).
+    pub mds_displayed: Option<Vec<MdsDisplayedEntry>>,
+}
+
+/// XEP-0490 §3 displayed entry as surfaced from a PEP event.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MdsDisplayedEntry {
+    /// PEP item id = bare JID of the chat (DM contact or MUC room).
+    pub chat_id: String,
+    /// XEP-0359 id of the displayed message.
+    pub stanza_id: String,
+    /// JID that injected the stanza-id (the MUC room for group
+    /// chats; the user's own server for 1:1 chats).
+    pub stanza_id_by: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -11,6 +11,7 @@ pub mod discovery;
 pub mod error;
 pub mod event;
 pub mod mam;
+pub mod mds;
 pub mod messaging;
 pub mod pep;
 pub mod pin;

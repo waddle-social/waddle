@@ -146,6 +146,11 @@ export interface TimelineMessage {
    * to the wire id.
    */
   replyableId?: string;
+  /** XEP-0359 stanza-id of this message (room-injected for MUC,
+   *  user-server-injected for DM). Used by XEP-0490 MDS publish. */
+  stanzaId?: string;
+  /** Bare JID that injected `stanzaId` (room for MUC, server for DM). */
+  stanzaIdBy?: string;
   body: string;
   createdAt: string;
   isSelf: boolean;

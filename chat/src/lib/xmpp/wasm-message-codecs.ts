@@ -389,6 +389,9 @@ export function roomMessageFromArchived(message: WasmArchivedMessage): LiveRoomM
     ...(message.moderation_reason ? { moderationReason: message.moderation_reason } : {}),
     ...(message.stanza_id ?? message.origin_id ? { correctionTargetId: message.origin_id ?? message.id ?? "" } : {}),
     ...(stampedByRoom ? { replyableId: stampedByRoom } : {}),
+    // XEP-0490 needs the room-injected stanza-id (by=room) so the
+    // MDS publish carries the spec-correct stanza-id for group chats.
+    ...(stampedByRoom ? { stanzaId: stampedByRoom, stanzaIdBy: roomJid } : {}),
   };
   return stripReplyFallback(base, message.reply_fallback_start, message.reply_fallback_end);
 }
@@ -470,6 +473,11 @@ export function dmMessageFromArchived(message: WasmArchivedMessage, selfBareJid:
     ...(message.retraction_id ? { retractionId: message.retraction_id } : {}),
     ...(message.origin_id || message.id ? { correctionTargetId: message.origin_id ?? message.id ?? "" } : {}),
     ...(message.origin_id || message.id ? { replyableId: message.origin_id ?? message.id ?? undefined } : {}),
+    // XEP-0490 needs the user-server-injected stanza-id for DM
+    // displayed-sync. `message.stanza_id` plus its `by` JID round-
+    // trip from the wasm parser.
+    ...(message.stanza_id ? { stanzaId: message.stanza_id } : {}),
+    ...(message.stanza_id_by ? { stanzaIdBy: message.stanza_id_by } : {}),
     ...(dmWireIds.length > 0
       ? { wireIds: dmWireIds }
       : {}),

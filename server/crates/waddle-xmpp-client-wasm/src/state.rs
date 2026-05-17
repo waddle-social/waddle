@@ -107,6 +107,11 @@ pub(crate) struct WaddleClientInner {
     pub(crate) on_error: Option<Function>,
     pub(crate) on_message_delivery_acked: Option<Function>,
     pub(crate) on_message_delivery_failed: Option<Function>,
+    /// XEP-0490 §3 displayed-event callback. Receives one
+    /// `WaddleMdsDisplayedEntry`-shaped value per item carried in the
+    /// inbound PEP event, so the chat layer can apply each one
+    /// independently without re-parsing the message.
+    pub(crate) on_mds_displayed: Option<Function>,
     pub(crate) resume_state: Option<waddle_xmpp_client::SmResumeState>,
 }
 

@@ -50,6 +50,69 @@ impl WaddleClient {
         })
     }
 
+    /// XEP-0490 §3 publish to `urn:xmpp:mds:displayed:0`. `chat_id` is
+    /// the bare JID of the chat (DM contact or MUC room) which becomes
+    /// the PEP item id; `stanza_id` is the XEP-0359 id of the latest
+    /// displayed message; `stanza_id_by` is the JID that injected
+    /// that stanza-id (the MUC room for group chats, the user's own
+    /// server for 1:1). The publish carries the spec-mandated
+    /// publish-options as preconditions.
+    pub fn publish_mds_displayed(
+        &self,
+        chat_id: String,
+        stanza_id: String,
+        stanza_id_by: String,
+    ) -> Promise {
+        let inner = self.inner.clone();
+        future_to_promise(async move {
+            let iq_id = uuid::Uuid::new_v4().to_string();
+            let iq = build_mds_publish_iq(&iq_id, &chat_id, &stanza_id, &stanza_id_by);
+            let _ = send_iq_command(inner, iq).await?;
+            Ok(JsValue::UNDEFINED)
+        })
+    }
+
+    /// XEP-0490 §3.1 catch-up: retrieve every item from the user's
+    /// own `urn:xmpp:mds:displayed:0` PEP node. Returns an array of
+    /// `WaddleMdsDisplayedEntry` records. An empty array on first
+    /// call (no node yet) is normal and not an error.
+    pub fn fetch_mds_displayed(&self) -> Promise {
+        let inner = self.inner.clone();
+        future_to_promise(async move {
+            let iq_id = uuid::Uuid::new_v4().to_string();
+            let iq = build_mds_catchup_iq(&iq_id);
+            let result = match send_iq_command(inner, iq).await {
+                Ok(result) => result,
+                // No node yet -> treat as empty catch-up. Surface
+                // every other error as a JS rejection.
+                Err(_) => return to_js_value::<Vec<WaddleMdsDisplayedEntry>>(&Vec::new()),
+            };
+            let entries: Vec<WaddleMdsDisplayedEntry> = parse_mds_catchup_result(&result)
+                .into_iter()
+                .map(mds_entry_to_js)
+                .collect();
+            to_js_value(&entries)
+        })
+    }
+
+    /// XEP-0060 explicit subscribe to the MDS node, used as a
+    /// fallback path for receiving `+notify` events when the chat
+    /// client's presence does not yet carry XEP-0115 caps. The
+    /// subscriber JID is derived from the bound session JID (bare).
+    pub fn subscribe_mds_displayed(&self) -> Promise {
+        let inner = self.inner.clone();
+        future_to_promise(async move {
+            let bare = {
+                let stored = inner.borrow().config.clone();
+                bare_jid(&stored.jid)
+            };
+            let iq_id = uuid::Uuid::new_v4().to_string();
+            let iq = build_mds_subscribe_iq(&iq_id, &bare);
+            let _ = send_iq_command(inner, iq).await?;
+            Ok(JsValue::UNDEFINED)
+        })
+    }
+
     pub fn send_reaction(
         &self,
         to: String,
