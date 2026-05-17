@@ -214,8 +214,10 @@ async fn groupchat_notification_class(
             return None;
         }
     };
-    let personal_mention = groupchat_mentions_owner(message, owner);
-    let channel_mention = groupchat_channel_mention_scope(message);
+    let owner_occupant_id =
+        waddle_xmpp::xep::generate_occupant_id(owner, room, &state.deps.occupant_id_secret);
+    let personal_mention = groupchat_mentions_owner(message, owner, owner_occupant_id.as_str());
+    let channel_mention = groupchat_channel_mention_scope(message, room);
     let is_mention = personal_mention || channel_mention.is_some();
     if !crate::notification_settings_projection::PushDispatchDecision::evaluate(level, is_mention)
         .should_deliver()
@@ -240,14 +242,18 @@ async fn groupchat_notification_class(
     None
 }
 
-fn groupchat_mentions_owner(message: &Message, owner: &BareJid) -> bool {
+fn groupchat_mentions_owner(message: &Message, owner: &BareJid, owner_occupant_id: &str) -> bool {
     let xep0513 = extract_explicit_mentions(message).is_some_and(|mentions| {
         mentions.mentions.iter().any(|mention| {
             !mention.noping
-                && mention
+                && (mention
                     .jid
                     .as_ref()
                     .is_some_and(|mentioned| mentioned == owner)
+                    || mention
+                        .occupant_id
+                        .as_deref()
+                        .is_some_and(|mentioned| mentioned == owner_occupant_id))
         })
     });
     let owner_raw = owner.to_string();
@@ -265,18 +271,42 @@ enum GroupchatChannelMentionScope {
     Active,
 }
 
-fn groupchat_channel_mention_scope(message: &Message) -> Option<GroupchatChannelMentionScope> {
+fn groupchat_channel_mention_scope(
+    message: &Message,
+    room: &BareJid,
+) -> Option<GroupchatChannelMentionScope> {
     let mentions = extract_explicit_mentions(message)?;
     if mentions
         .mentions
         .iter()
-        .any(|mention| mention.is_channel() && mention.active && !mention.noping)
+        .any(|mention| current_room_channel_mention(mention, room) && !mention.active)
     {
-        return Some(GroupchatChannelMentionScope::Active);
+        return Some(GroupchatChannelMentionScope::All);
     }
     mentions
         .mentions
         .iter()
-        .any(|mention| mention.is_channel() && !mention.noping)
-        .then_some(GroupchatChannelMentionScope::All)
+        .any(|mention| current_room_channel_mention(mention, room) && mention.active)
+        .then_some(GroupchatChannelMentionScope::Active)
+}
+
+fn current_room_channel_mention(
+    mention: &waddle_xmpp::xep::ExplicitMention,
+    room: &BareJid,
+) -> bool {
+    if !mention.is_channel() || mention.noping {
+        return false;
+    }
+    mention
+        .uri
+        .as_deref()
+        .is_none_or(|uri| xmpp_uri_bare_jid(uri).is_some_and(|target| target == room.clone()))
+}
+
+fn xmpp_uri_bare_jid(uri: &str) -> Option<BareJid> {
+    let jid_part = uri.strip_prefix("xmpp:")?.split(['?', ';']).next()?.trim();
+    if jid_part.is_empty() {
+        return None;
+    }
+    jid_part.parse::<Jid>().ok().map(|jid| jid.to_bare())
 }

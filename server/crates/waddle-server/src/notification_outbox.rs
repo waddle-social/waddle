@@ -1575,9 +1575,6 @@ async fn xep0191_blocks_notification_job(
     job: &NotificationOutboxJob,
     blocking_storage: &dyn BlockingStorage,
 ) -> Result<bool, BlockingStorageError> {
-    if job.class() != NotificationClass::DirectMessage {
-        return Ok(false);
-    }
     let blocked = blocking_storage
         .list_blocked_jid_entries(job.recipient_bare_jid())
         .await?;
@@ -1590,9 +1587,6 @@ async fn xep0191_blocks_notification_candidate(
     candidate: &NotificationCandidate,
     blocking_storage: &dyn BlockingStorage,
 ) -> Result<bool, BlockingStorageError> {
-    if candidate.class() != NotificationClass::DirectMessage {
-        return Ok(false);
-    }
     let blocked = blocking_storage
         .list_blocked_jid_entries(candidate.recipient_bare_jid())
         .await?;
@@ -2187,6 +2181,24 @@ mod tests {
             StanzaId::new(id, Jid::from(recipient.clone())),
         )
         .expect("candidate")
+    }
+
+    fn groupchat_candidate_for(
+        recipient: &BareJid,
+        room: &BareJid,
+        sender_jid: Jid,
+        id: &str,
+        class: NotificationClass,
+    ) -> NotificationCandidate {
+        NotificationCandidate::groupchat(
+            recipient.clone(),
+            room.clone(),
+            sender_jid,
+            NotificationThreadId::root(),
+            StanzaId::new(id, Jid::from(room.clone())),
+            class,
+        )
+        .expect("groupchat candidate")
     }
 
     async fn failed_outbox_jobs_count(store: &NotificationOutboxStore) -> i64 {
@@ -3286,6 +3298,83 @@ mod tests {
         assert_eq!(jobs[0].conversation_jid(), &bare("bob@example.com"));
         assert_eq!(jobs[0].sender_jid().to_string(), "bob@example.com/laptop");
         assert_eq!(jobs[0].message_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn candidate_worker_applies_xep0191_to_groupchat_notifications() {
+        let store = store().await;
+        let target = target();
+        let push_store = waddle_xmpp::push::InMemoryPushStore::new();
+        let blocking = waddle_xmpp::xep::xep0191::InMemoryBlockingStorage::new();
+        let recipient = bare("alice@example.com");
+        let room = bare("team@muc.example.com");
+        register_push_target(&push_store, &recipient, &target).await;
+        blocking.set_blocklist_jids(recipient.clone(), vec![Jid::from(room.clone())]);
+
+        let candidate = groupchat_candidate_for(
+            &recipient,
+            &room,
+            "team@muc.example.com/bob".parse().expect("room occupant"),
+            "archive-blocked-groupchat",
+            NotificationClass::ChannelMention,
+        );
+        store
+            .insert_candidate(&candidate)
+            .await
+            .expect("groupchat insert");
+
+        assert_eq!(
+            store
+                .drain_pending_candidates_into_outbox(
+                    &push_store,
+                    &blocking,
+                    &bare("push.example.com"),
+                    16,
+                )
+                .await
+                .expect("drain candidates"),
+            1
+        );
+
+        assert!(
+            store.pending_outbox_jobs().await.expect("jobs").is_empty(),
+            "XEP-0191-blocked groupchat notifications must not enqueue outbox jobs"
+        );
+    }
+
+    #[tokio::test]
+    async fn publish_worker_applies_xep0191_to_groupchat_notifications() {
+        let blocking = waddle_xmpp::xep::xep0191::InMemoryBlockingStorage::new();
+        let recipient = bare("alice@example.com");
+        let room = bare("team@muc.example.com");
+        let sender: Jid = "team@muc.example.com/bob"
+            .parse()
+            .expect("room occupant sender");
+        blocking.set_blocklist_jids(recipient.clone(), vec![Jid::from(room.clone())]);
+        let job = NotificationOutboxJob {
+            job_id: NotificationOutboxJobId::from("groupchat-blocked-job".to_string()),
+            recipient_bare_jid: recipient,
+            push_service_jid: bare("push.example.com"),
+            node: PushServiceNodeName::new("web-node").expect("node"),
+            conversation_jid: room,
+            sender_jid: sender.clone(),
+            sender_jids: vec![sender],
+            thread_id: NotificationThreadId::root(),
+            class: NotificationClass::ChannelMention,
+            message_count: 1,
+            context: Element::builder("notification", waddle_xmpp::xep::xep0357::NS_PUSH).build(),
+            status: NotificationOutboxStatus::Queued,
+            attempt_count: 0,
+            policy_error_count: 0,
+            claim_token: None,
+        };
+
+        assert!(
+            xep0191_blocks_notification_job(&job, &blocking)
+                .await
+                .expect("block check"),
+            "publish-time XEP-0191 checks must apply to groupchat notification classes"
+        );
     }
 
     #[tokio::test]
