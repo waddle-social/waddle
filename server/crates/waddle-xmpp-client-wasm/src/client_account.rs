@@ -255,6 +255,47 @@ impl WaddleClient {
         })
     }
 
+    pub fn fetch_vcard4(&self, jid: String) -> Promise {
+        let inner = self.inner.clone();
+        future_to_promise(async move {
+            let request_id = uuid::Uuid::new_v4().to_string();
+            let iq = build_fetch_vcard4_iq(&jid, &request_id);
+            let vcard = match send_iq_command(inner, iq).await {
+                Ok(result) => parse_pep_vcard4(&result),
+                Err(_) => None,
+            };
+            match vcard {
+                Some(vcard) => to_js_value(&WaddleVCard4 {
+                    full_name: vcard.full_name,
+                    nickname: vcard.nickname,
+                    pronouns: vcard.pronouns,
+                    note: vcard.note,
+                    url: vcard.url,
+                }),
+                None => Ok(JsValue::NULL),
+            }
+        })
+    }
+
+    pub fn publish_vcard4(&self, vcard_json: JsValue) -> Promise {
+        let inner = self.inner.clone();
+        future_to_promise(async move {
+            let payload: WaddleVCard4 = serde_wasm_bindgen::from_value(vcard_json)
+                .map_err(|err| js_error(err.to_string()))?;
+            let vcard = VCard4 {
+                full_name: payload.full_name,
+                nickname: payload.nickname,
+                pronouns: payload.pronouns,
+                note: payload.note,
+                url: payload.url,
+            };
+            let request_id = uuid::Uuid::new_v4().to_string();
+            let iq = build_publish_vcard4_iq(&vcard, &request_id);
+            let _ = send_iq_command(inner, iq).await?;
+            Ok(JsValue::UNDEFINED)
+        })
+    }
+
     pub fn fetch_user_pep_profile(&self, jid: String) -> Promise {
         let inner = self.inner.clone();
         future_to_promise(async move {

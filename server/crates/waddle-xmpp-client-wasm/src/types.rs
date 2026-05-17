@@ -476,6 +476,27 @@ pub struct WaddlePepProfile {
     pub tune: Option<WaddleTuneResult>,
 }
 
+/// Typed vCard4 payload exchanged with JS. Every property is optional and is
+/// dropped from the published payload when `None` / undefined.
+///
+/// `pronouns` is carried through the wasm boundary even if the connected
+/// server has not yet learned to round-trip XEP-0292 `PRONOUNS` — the editor
+/// always offers the field, and the server is responsible for preserving or
+/// dropping it.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct WaddleVCard4 {
+    #[serde(rename = "fn", default, skip_serializing_if = "Option::is_none")]
+    pub full_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nickname: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pronouns: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct WaddleMamPageParam {
     #[serde(rename = "type")]
