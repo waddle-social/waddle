@@ -1,5 +1,40 @@
 use super::*;
 
+async fn store_committed_dm_archive_for_notification(
+    state: &WebSocketState,
+    archive_jid: &BareJid,
+    archive_stanza_id: &waddle_xmpp_core::xep0359::StanzaId,
+    message: &xmpp_parsers::message::Message,
+) {
+    let from = message.from.clone().expect("archived message from");
+    let to = message
+        .to
+        .clone()
+        .unwrap_or_else(|| jid::Jid::from(archive_jid.clone()));
+    let body = message
+        .bodies
+        .get("")
+        .or_else(|| message.bodies.values().next())
+        .map(|body| body.0.clone());
+    let archived = waddle_xmpp::mam::ArchivedMessage {
+        id: archive_stanza_id.id.clone(),
+        body,
+        stanza_id: Some(archive_stanza_id.clone()),
+        message_type: message.type_.clone(),
+        stanza_xml: Some(
+            waddle_xmpp::parser::message_to_string(message).expect("serialize archived message"),
+        ),
+        ..waddle_xmpp::mam::ArchivedMessage::for_test(from, to)
+    };
+    state
+        .deps
+        .protocol
+        .mam_storage
+        .store_message(archive_jid, &archived)
+        .await
+        .expect("store committed MAM row");
+}
+
 #[tokio::test]
 async fn queue_offline_delivery_publishes_first_party_xep0357_notification_without_touching_external_registrations(
 ) {
@@ -87,6 +122,8 @@ async fn queue_offline_delivery_publishes_first_party_xep0357_notification_witho
         "archive-offline-push-1",
         jid::Jid::from(recipient.clone()),
     );
+    store_committed_dm_archive_for_notification(&state, &recipient, &archive_stanza_id, &message)
+        .await;
     let deps = build_interpret_deps(state.as_ref(), None);
     crate::server::routes::interpret::interpret(
         vec![waddle_xmpp::protocol::OutboundEvent::QueueOfflineDelivery {
@@ -241,6 +278,86 @@ async fn queue_offline_delivery_publishes_first_party_xep0357_notification_witho
     }));
 }
 
+#[tokio::test]
+async fn queue_offline_delivery_skips_xep0357_when_committed_mam_row_is_missing() {
+    let state = create_test_websocket_state().await;
+    let recipient: BareJid = "bob@example.com".parse().expect("recipient");
+    let node = state
+        .deps
+        .protocol
+        .push_service
+        .ensure_node(&recipient, "web")
+        .await
+        .expect("push node");
+    state
+        .deps
+        .protocol
+        .push_service
+        .upsert_device(
+            &recipient,
+            crate::push_service::PushDeviceRegistration::new(
+                "web-1",
+                node.node(),
+                crate::push_service::PushDevicePlatform::Web,
+                "test",
+            ),
+        )
+        .await
+        .expect("push device");
+    state
+        .deps
+        .protocol
+        .push_service
+        .register_first_party_node_for_owner(&recipient, "push.example.com", node.node(), None)
+        .await
+        .expect("first-party push registration");
+
+    let mut message =
+        xmpp_parsers::message::Message::new(Some("bob@example.com".parse().expect("to jid")));
+    message.from = Some("alice@example.com/web".parse().expect("from jid"));
+    message.id = Some("offline-push-no-mam".to_string());
+    message.type_ = XmppMessageType::Chat;
+    message.bodies.insert(
+        String::new(),
+        xmpp_parsers::message::Body("do not push without committed archive".to_string()),
+    );
+    let archive_stanza_id = waddle_xmpp_core::xep0359::StanzaId::new(
+        "archive-offline-no-mam",
+        jid::Jid::from(recipient.clone()),
+    );
+    let deps = build_interpret_deps(state.as_ref(), None);
+    crate::server::routes::interpret::interpret(
+        vec![waddle_xmpp::protocol::OutboundEvent::QueueOfflineDelivery {
+            recipient: recipient.clone(),
+            payload: waddle_xmpp::pending_delivery::PendingPayload::Archived(archive_stanza_id),
+            original_receipt_at: chrono::Utc::now(),
+            original_message: Box::new(message),
+        }],
+        &deps,
+    )
+    .await;
+
+    let outbox_jobs = state
+        .deps
+        .protocol
+        .notification_outbox
+        .pending_outbox_jobs()
+        .await
+        .expect("notification outbox jobs");
+    assert!(outbox_jobs.is_empty());
+    let unoutboxed = state
+        .deps
+        .protocol
+        .pending_delivery_storage
+        .list_unoutboxed_archived(16)
+        .await
+        .expect("unoutboxed archived rows");
+    assert!(
+        unoutboxed.is_empty(),
+        "missing committed MAM row is a completed no-push notification decision"
+    );
+}
+
 /// XEP-0492 enforcement matrix harness — drives the DM offline-delivery
 /// push pipeline with a typed `(NotificationLevel, is_mention)` pair and
 /// returns the count of durable XEP-0357 outbox jobs that escaped the gate.
@@ -327,6 +444,8 @@ async fn drive_xep0492_direct_chat_push_gate(
         format!("archive-{message_id}"),
         jid::Jid::from(recipient.clone()),
     );
+    store_committed_dm_archive_for_notification(&state, &recipient, &archive_stanza_id, &message)
+        .await;
     crate::server::routes::interpret::interpret(
         vec![waddle_xmpp::protocol::OutboundEvent::QueueOfflineDelivery {
             recipient: recipient.clone(),
@@ -482,6 +601,8 @@ async fn queue_offline_delivery_suppresses_xep0357_when_xep0492_direct_chat_is_n
         "archive-offline-muted-1",
         jid::Jid::from(recipient.clone()),
     );
+    store_committed_dm_archive_for_notification(&state, &recipient, &archive_stanza_id, &message)
+        .await;
     let deps = build_interpret_deps(state.as_ref(), None);
     crate::server::routes::interpret::interpret(
         vec![waddle_xmpp::protocol::OutboundEvent::QueueOfflineDelivery {

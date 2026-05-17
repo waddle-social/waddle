@@ -44,7 +44,6 @@ pub(super) async fn queue_offline_delivery(
                 deps,
                 &recipient,
                 notification_archive_stanza_id.as_ref(),
-                &original_message,
             )
             .await;
             if notification_archive_stanza_id.is_some()
@@ -165,7 +164,6 @@ async fn enqueue_xep0357_notification_candidate(
     deps: &Deps<'_>,
     recipient: &BareJid,
     archive_stanza_id: Option<&waddle_xmpp_core::xep0359::StanzaId>,
-    original_message: &Message,
 ) -> NotificationCandidateQueueOutcome {
     let Some(archive_stanza_id) = archive_stanza_id else {
         debug!(
@@ -177,15 +175,56 @@ async fn enqueue_xep0357_notification_candidate(
     let Some(state) = deps.web_socket_state else {
         return NotificationCandidateQueueOutcome::RetryLater;
     };
-    let Some(sender) = original_message.from.as_ref().map(|jid| jid.to_bare()) else {
-        return NotificationCandidateQueueOutcome::Completed;
+    enqueue_xep0357_notification_candidate_from_committed_archive(
+        state,
+        recipient,
+        archive_stanza_id,
+    )
+    .await
+}
+
+async fn enqueue_xep0357_notification_candidate_from_committed_archive(
+    state: &WebSocketState,
+    recipient: &BareJid,
+    archive_stanza_id: &waddle_xmpp_core::xep0359::StanzaId,
+) -> NotificationCandidateQueueOutcome {
+    let archive_bare = archive_stanza_id.by.to_bare();
+    let archived = match state
+        .deps
+        .protocol
+        .mam_storage
+        .get_message_by_archive_or_stanza_id(&archive_bare, archive_stanza_id.as_str())
+        .await
+    {
+        Ok(Some(archived)) => archived,
+        Ok(None) => {
+            warn!(
+                recipient = %recipient,
+                stanza_id = %archive_stanza_id,
+                "XEP-0357 notification candidate skipped because committed MAM row is missing"
+            );
+            return NotificationCandidateQueueOutcome::Completed;
+        }
+        Err(error) => {
+            warn!(
+                recipient = %recipient,
+                stanza_id = %archive_stanza_id,
+                error = %error,
+                "XEP-0357 notification candidate could not load committed MAM row"
+            );
+            return NotificationCandidateQueueOutcome::RetryLater;
+        }
     };
+    let sender = archived.from.to_bare();
+    let original_message =
+        super::archive_lookup::parse_archived_message_xml(archived.stanza_xml.as_deref())
+            .unwrap_or_else(|| super::archive_lookup::fallback_archived_message(&archived));
     enqueue_xep0357_notification_candidate_for_message(
         state,
         recipient,
         &sender,
         archive_stanza_id,
-        original_message,
+        &original_message,
     )
     .await
 }
@@ -461,47 +500,10 @@ pub(crate) async fn reconcile_xep0357_notification_candidates(
         else {
             continue;
         };
-        let archive_bare = archive_stanza_id.by.to_bare();
-        let archived = match state
-            .deps
-            .protocol
-            .mam_storage
-            .get_message_by_archive_or_stanza_id(&archive_bare, archive_stanza_id.as_str())
-            .await
-        {
-            Ok(Some(archived)) => archived,
-            Ok(None) => {
-                warn!(
-                    recipient = %row.recipient,
-                    row_id = %row.id,
-                    stanza_id = %archive_stanza_id,
-                    "XEP-0357 notification candidate recovery found pending_delivery row without matching MAM row"
-                );
-                mark_pending_notification_outboxed(pending_storage, &row.id, &row.recipient).await;
-                completed += 1;
-                continue;
-            }
-            Err(error) => {
-                warn!(
-                    recipient = %row.recipient,
-                    row_id = %row.id,
-                    stanza_id = %archive_stanza_id,
-                    error = %error,
-                    "XEP-0357 notification candidate recovery MAM lookup failed"
-                );
-                continue;
-            }
-        };
-        let sender = archived.from.to_bare();
-        let original_message =
-            super::archive_lookup::parse_archived_message_xml(archived.stanza_xml.as_deref())
-                .unwrap_or_else(|| super::archive_lookup::fallback_archived_message(&archived));
-        let outcome = enqueue_xep0357_notification_candidate_for_message(
+        let outcome = enqueue_xep0357_notification_candidate_from_committed_archive(
             state,
             &row.recipient,
-            &sender,
             archive_stanza_id,
-            &original_message,
         )
         .await;
         if outcome == NotificationCandidateQueueOutcome::Completed {

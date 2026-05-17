@@ -266,6 +266,23 @@ impl InMemoryPendingDeliveryStorage {
     pub fn unlimited() -> Self {
         Self::new(QuotaPolicy::Unlimited)
     }
+
+    fn clear_notification_outboxed_markers(
+        &self,
+        ids: &[PendingRowId],
+    ) -> Result<(), PendingStorageError> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let mut notification_outboxed = self
+            .notification_outboxed
+            .lock()
+            .map_err(|e| PendingStorageError::Other(e.to_string()))?;
+        for id in ids {
+            notification_outboxed.remove(id);
+        }
+        Ok(())
+    }
 }
 
 impl Default for InMemoryPendingDeliveryStorage {
@@ -367,6 +384,18 @@ impl PendingDeliveryStorage for InMemoryPendingDeliveryStorage {
         &self,
         id: &PendingRowId,
     ) -> Result<u64, PendingStorageError> {
+        let guard = self
+            .inner
+            .lock()
+            .map_err(|e| PendingStorageError::Other(e.to_string()))?;
+        if !guard
+            .values()
+            .flat_map(|queue| queue.iter())
+            .any(|row| &row.id == id)
+        {
+            return Ok(0);
+        }
+        drop(guard);
         let mut notification_outboxed = self
             .notification_outboxed
             .lock()
@@ -409,12 +438,22 @@ impl PendingDeliveryStorage for InMemoryPendingDeliveryStorage {
             .lock()
             .map_err(|e| PendingStorageError::Other(e.to_string()))?;
         let mut removed = 0u64;
+        let mut removed_ids = Vec::new();
         for queue in guard.values_mut() {
-            let before = queue.len();
-            queue.retain(|row| row.flushed_in_session.as_ref() != Some(session));
-            removed += (before - queue.len()) as u64;
+            let mut kept = VecDeque::with_capacity(queue.len());
+            for row in queue.drain(..) {
+                if row.flushed_in_session.as_ref() == Some(session) {
+                    removed_ids.push(row.id);
+                    removed += 1;
+                } else {
+                    kept.push_back(row);
+                }
+            }
+            *queue = kept;
         }
         guard.retain(|_, q| !q.is_empty());
+        drop(guard);
+        self.clear_notification_outboxed_markers(&removed_ids)?;
         Ok(removed)
     }
 
@@ -430,6 +469,10 @@ impl PendingDeliveryStorage for InMemoryPendingDeliveryStorage {
             removed += (before - queue.len()) as u64;
         }
         guard.retain(|_, q| !q.is_empty());
+        drop(guard);
+        if removed > 0 {
+            self.clear_notification_outboxed_markers(std::slice::from_ref(id))?;
+        }
         Ok(removed)
     }
 
@@ -526,16 +569,24 @@ impl PendingDeliveryStorage for InMemoryPendingDeliveryStorage {
             .lock()
             .map_err(|e| PendingStorageError::Other(e.to_string()))?;
         let mut removed = 0u64;
+        let mut removed_ids = Vec::new();
         for queue in guard.values_mut() {
-            let before = queue.len();
-            queue.retain(|row| {
+            let mut kept = VecDeque::with_capacity(queue.len());
+            for row in queue.drain(..) {
                 let claimed_by_session = row.flushed_in_session.as_ref() == Some(session);
                 let acked = matches!(row.outbound_sequence, Some(seq) if seq <= sequence_max);
-                !(claimed_by_session && acked)
-            });
-            removed += (before - queue.len()) as u64;
+                if claimed_by_session && acked {
+                    removed_ids.push(row.id);
+                    removed += 1;
+                } else {
+                    kept.push_back(row);
+                }
+            }
+            *queue = kept;
         }
         guard.retain(|_, q| !q.is_empty());
+        drop(guard);
+        self.clear_notification_outboxed_markers(&removed_ids)?;
         Ok(removed)
     }
 
@@ -581,12 +632,22 @@ impl PendingDeliveryStorage for InMemoryPendingDeliveryStorage {
             .lock()
             .map_err(|e| PendingStorageError::Other(e.to_string()))?;
         let mut removed = 0u64;
+        let mut removed_ids = Vec::new();
         for queue in guard.values_mut() {
-            let before = queue.len();
-            queue.retain(|row| row.original_receipt_at >= cutoff);
-            removed += (before - queue.len()) as u64;
+            let mut kept = VecDeque::with_capacity(queue.len());
+            for row in queue.drain(..) {
+                if row.original_receipt_at < cutoff {
+                    removed_ids.push(row.id);
+                    removed += 1;
+                } else {
+                    kept.push_back(row);
+                }
+            }
+            *queue = kept;
         }
         guard.retain(|_, q| !q.is_empty());
+        drop(guard);
+        self.clear_notification_outboxed_markers(&removed_ids)?;
         Ok(removed)
     }
 }

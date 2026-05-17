@@ -237,6 +237,7 @@ pub struct NotificationOutboxJob {
     context: Element,
     status: NotificationOutboxStatus,
     attempt_count: i64,
+    claim_token: Option<String>,
 }
 
 impl NotificationOutboxJob {
@@ -282,6 +283,10 @@ impl NotificationOutboxJob {
 
     pub fn attempt_count(&self) -> i64 {
         self.attempt_count
+    }
+
+    pub fn claim_token(&self) -> Option<&str> {
+        self.claim_token.as_deref()
     }
 
     pub fn to_xep0357_pubsub_item(&self) -> PubSubItem {
@@ -417,6 +422,7 @@ impl NotificationOutboxStore {
                     last_error TEXT,
                     next_attempt_at_ms {i64_type},
                     claimed_at_ms {i64_type},
+                    claim_token TEXT,
                     created_at_ms {i64_type} NOT NULL,
                     updated_at_ms {i64_type} NOT NULL,
                     published_at_ms {i64_type}
@@ -444,6 +450,31 @@ impl NotificationOutboxStore {
             (),
         )
         .await?;
+        self.add_column_if_missing("notification_outbox", "claim_token TEXT")
+            .await?;
+        Ok(())
+    }
+
+    async fn add_column_if_missing(
+        &self,
+        table: &str,
+        column_def: &str,
+    ) -> Result<(), NotificationOutboxError> {
+        let alter_sql = match self.db.driver() {
+            crate::db::DatabaseDriver::Postgres => {
+                format!("ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column_def}")
+            }
+            crate::db::DatabaseDriver::Sqlite => {
+                format!("ALTER TABLE {table} ADD COLUMN {column_def}")
+            }
+        };
+        if let Err(error) = self.execute(&alter_sql, ()).await {
+            let msg = error.to_string().to_lowercase();
+            if msg.contains("duplicate column") || msg.contains("already exists") {
+                return Ok(());
+            }
+            return Err(error);
+        }
         Ok(())
     }
 
@@ -533,7 +564,8 @@ impl NotificationOutboxStore {
                        message_count,
                        context_xml,
                        status,
-                       attempt_count
+                       attempt_count,
+                       claim_token
                 FROM notification_outbox
                 WHERE status IN (?, ?)
                 ORDER BY created_at_ms ASC, job_id ASC
@@ -568,7 +600,8 @@ impl NotificationOutboxStore {
                        message_count,
                        context_xml,
                        status,
-                       attempt_count
+                       attempt_count,
+                       claim_token
                 FROM notification_outbox
                 WHERE (
                     status = ?
@@ -597,12 +630,14 @@ impl NotificationOutboxStore {
 
         let mut claimed = Vec::new();
         for job in selected {
+            let claim_token = uuid::Uuid::new_v4().to_string();
             let affected = self
                 .execute(
                     r#"
                     UPDATE notification_outbox
                     SET status = ?,
                         claimed_at_ms = ?,
+                        claim_token = ?,
                         updated_at_ms = ?
                     WHERE job_id = ?
                       AND (
@@ -619,6 +654,7 @@ impl NotificationOutboxStore {
                     crate::db_params![
                         STATUS_IN_PROGRESS,
                         now_ms,
+                        claim_token.as_str(),
                         now_ms,
                         job.job_id.as_str(),
                         STATUS_QUEUED,
@@ -631,6 +667,7 @@ impl NotificationOutboxStore {
             if affected > 0 {
                 claimed.push(NotificationOutboxJob {
                     status: NotificationOutboxStatus::InProgress,
+                    claim_token: Some(claim_token),
                     ..job
                 });
             }
@@ -648,10 +685,18 @@ impl NotificationOutboxStore {
         let jobs = self.claim_due_outbox_jobs(batch_size).await?;
         let mut outcomes = Vec::with_capacity(jobs.len());
         for job in jobs {
-            outcomes.push(
-                self.publish_claimed_job(&job, push_service, push_store, first_party_service_jid)
-                    .await?,
-            );
+            match self
+                .publish_claimed_job(&job, push_service, push_store, first_party_service_jid)
+                .await
+            {
+                Ok(outcome) => outcomes.push(outcome),
+                Err(error) => {
+                    outcomes.push(
+                        self.retry_or_fail_outcome_for_claimed_job(&job, error.to_string())
+                            .await?,
+                    );
+                }
+            }
         }
         Ok(outcomes)
     }
@@ -773,12 +818,18 @@ impl NotificationOutboxStore {
         first_party_service_jid: &BareJid,
     ) -> Result<NotificationOutboxPublishOutcome, NotificationOutboxError> {
         if job.push_service_jid() != first_party_service_jid {
-            self.mark_job_failed(
-                job,
-                "notification outbox job targets a non-first-party XEP-0357 Push Service",
-            )
-            .await?;
-            return Ok(NotificationOutboxPublishOutcome::Failed {
+            if self
+                .mark_job_failed(
+                    job,
+                    "notification outbox job targets a non-first-party XEP-0357 Push Service",
+                )
+                .await?
+            {
+                return Ok(NotificationOutboxPublishOutcome::Failed {
+                    job_id: job.job_id.clone(),
+                });
+            }
+            return Ok(NotificationOutboxPublishOutcome::RetryScheduled {
                 job_id: job.job_id.clone(),
             });
         }
@@ -786,19 +837,37 @@ impl NotificationOutboxStore {
         let registrations = push_store
             .get_for_user(&job.recipient_bare_jid.to_string())
             .await
-            .map_err(|error| NotificationOutboxError::Push(error.to_string()))?;
+            .map_err(|error| error.to_string());
+        let registrations = match registrations {
+            Ok(registrations) => registrations,
+            Err(error) => {
+                return self.retry_or_fail_outcome_for_claimed_job(job, error).await;
+            }
+        };
         let service = job.push_service_jid.to_string();
         let registration = registrations.into_iter().find(|registration| {
             registration.service_jid == service
                 && registration.node.as_deref() == Some(job.node.as_str())
         });
         let Some(registration) = registration else {
-            self.mark_job_failed(job, "first-party XEP-0357 registration is no longer active")
-                .await?;
-            return Ok(NotificationOutboxPublishOutcome::Failed {
+            if self
+                .mark_job_failed(job, "first-party XEP-0357 registration is no longer active")
+                .await?
+            {
+                return Ok(NotificationOutboxPublishOutcome::Failed {
+                    job_id: job.job_id.clone(),
+                });
+            }
+            return Ok(NotificationOutboxPublishOutcome::RetryScheduled {
                 job_id: job.job_id.clone(),
             });
         };
+
+        if !self.claimed_job_is_current(job).await? {
+            return Ok(NotificationOutboxPublishOutcome::RetryScheduled {
+                job_id: job.job_id.clone(),
+            });
+        }
 
         let item = job.to_xep0357_pubsub_item();
         let push_service_jid = job.push_service_jid.to_string();
@@ -813,108 +882,180 @@ impl NotificationOutboxStore {
             .await
         {
             Ok(result) => {
-                self.mark_job_published(job).await?;
+                if !self.mark_job_published(job).await? {
+                    return Ok(NotificationOutboxPublishOutcome::RetryScheduled {
+                        job_id: job.job_id.clone(),
+                    });
+                }
                 Ok(NotificationOutboxPublishOutcome::Published {
                     job_id: job.job_id.clone(),
                     item_id: result.item_id().to_string(),
                 })
             }
             Err(error) => {
-                let attempts = self.schedule_retry_or_fail(job, error.to_string()).await?;
-                if attempts >= MAX_OUTBOX_ATTEMPTS {
-                    Ok(NotificationOutboxPublishOutcome::Failed {
-                        job_id: job.job_id.clone(),
-                    })
-                } else {
-                    Ok(NotificationOutboxPublishOutcome::RetryScheduled {
-                        job_id: job.job_id.clone(),
-                    })
-                }
+                self.retry_or_fail_outcome_for_claimed_job(job, error.to_string())
+                    .await
             }
+        }
+    }
+
+    async fn claimed_job_is_current(
+        &self,
+        job: &NotificationOutboxJob,
+    ) -> Result<bool, NotificationOutboxError> {
+        let mut rows = self
+            .query(
+                r#"
+                SELECT 1
+                FROM notification_outbox
+                WHERE job_id = ?
+                  AND status = ?
+                  AND claim_token = ?
+                LIMIT 1
+                "#,
+                crate::db_params![
+                    job.job_id.as_str(),
+                    STATUS_IN_PROGRESS,
+                    job.claim_token.as_deref(),
+                ],
+            )
+            .await?;
+        Ok(rows.next().await?.is_some())
+    }
+
+    async fn retry_or_fail_outcome_for_claimed_job(
+        &self,
+        job: &NotificationOutboxJob,
+        error: String,
+    ) -> Result<NotificationOutboxPublishOutcome, NotificationOutboxError> {
+        let Some(attempts) = self.schedule_retry_or_fail(job, error).await? else {
+            return Ok(NotificationOutboxPublishOutcome::RetryScheduled {
+                job_id: job.job_id.clone(),
+            });
+        };
+        if attempts >= MAX_OUTBOX_ATTEMPTS {
+            Ok(NotificationOutboxPublishOutcome::Failed {
+                job_id: job.job_id.clone(),
+            })
+        } else {
+            Ok(NotificationOutboxPublishOutcome::RetryScheduled {
+                job_id: job.job_id.clone(),
+            })
         }
     }
 
     async fn mark_job_published(
         &self,
         job: &NotificationOutboxJob,
-    ) -> Result<(), NotificationOutboxError> {
+    ) -> Result<bool, NotificationOutboxError> {
         let now_ms = crate::time::now_ms();
-        self.execute(
-            r#"
+        let affected = self
+            .execute(
+                r#"
             UPDATE notification_outbox
             SET status = ?,
                 last_error = NULL,
                 next_attempt_at_ms = NULL,
                 claimed_at_ms = NULL,
+                claim_token = NULL,
                 updated_at_ms = ?,
                 published_at_ms = ?
             WHERE job_id = ?
+              AND status = ?
+              AND claim_token = ?
             "#,
-            crate::db_params![STATUS_PUBLISHED, now_ms, now_ms, job.job_id.as_str()],
-        )
-        .await?;
-        Ok(())
+                crate::db_params![
+                    STATUS_PUBLISHED,
+                    now_ms,
+                    now_ms,
+                    job.job_id.as_str(),
+                    STATUS_IN_PROGRESS,
+                    job.claim_token.as_deref(),
+                ],
+            )
+            .await?;
+        Ok(affected > 0)
     }
 
     async fn mark_job_failed(
         &self,
         job: &NotificationOutboxJob,
         error: &str,
-    ) -> Result<(), NotificationOutboxError> {
+    ) -> Result<bool, NotificationOutboxError> {
         let now_ms = crate::time::now_ms();
-        self.execute(
-            r#"
+        let affected = self
+            .execute(
+                r#"
             UPDATE notification_outbox
             SET status = ?,
                 last_error = ?,
                 next_attempt_at_ms = NULL,
                 claimed_at_ms = NULL,
+                claim_token = NULL,
                 updated_at_ms = ?
             WHERE job_id = ?
+              AND status = ?
+              AND claim_token = ?
             "#,
-            crate::db_params![STATUS_FAILED, error, now_ms, job.job_id.as_str()],
-        )
-        .await?;
-        Ok(())
+                crate::db_params![
+                    STATUS_FAILED,
+                    error,
+                    now_ms,
+                    job.job_id.as_str(),
+                    STATUS_IN_PROGRESS,
+                    job.claim_token.as_deref(),
+                ],
+            )
+            .await?;
+        Ok(affected > 0)
     }
 
     async fn schedule_retry_or_fail(
         &self,
         job: &NotificationOutboxJob,
         error: String,
-    ) -> Result<i64, NotificationOutboxError> {
-        let now_ms = crate::time::now_ms();
+    ) -> Result<Option<i64>, NotificationOutboxError> {
         let next_attempt_count = job.attempt_count + 1;
+        let now_ms = crate::time::now_ms();
         let (status, next_attempt_at_ms) = if next_attempt_count >= MAX_OUTBOX_ATTEMPTS {
             (STATUS_FAILED, None)
         } else {
             (
                 STATUS_QUEUED,
-                Some(now_ms + retry_delay_ms(next_attempt_count)),
+                Some(now_ms.saturating_add(retry_delay_ms(next_attempt_count))),
             )
         };
-        self.execute(
-            r#"
+        let affected = self
+            .execute(
+                r#"
             UPDATE notification_outbox
             SET status = ?,
                 attempt_count = ?,
                 last_error = ?,
                 next_attempt_at_ms = ?,
                 claimed_at_ms = NULL,
+                claim_token = NULL,
                 updated_at_ms = ?
             WHERE job_id = ?
+              AND status = ?
+              AND claim_token = ?
             "#,
-            crate::db_params![
-                status,
-                next_attempt_count,
-                error,
-                next_attempt_at_ms,
-                now_ms,
-                job.job_id.as_str(),
-            ],
-        )
-        .await?;
-        Ok(next_attempt_count)
+                crate::db_params![
+                    status,
+                    next_attempt_count,
+                    error,
+                    next_attempt_at_ms,
+                    now_ms,
+                    job.job_id.as_str(),
+                    STATUS_IN_PROGRESS,
+                    job.claim_token.as_deref(),
+                ],
+            )
+            .await?;
+        if affected == 0 {
+            return Ok(None);
+        }
+        Ok(Some(next_attempt_count))
     }
 }
 
@@ -944,10 +1085,11 @@ async fn enqueue_outbox_job_tx(
                 last_error,
                 next_attempt_at_ms,
                 claimed_at_ms,
+                claim_token,
                 created_at_ms,
                 updated_at_ms,
                 published_at_ms
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, 0, NULL, NULL, NULL, ?, ?, NULL)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, 0, NULL, NULL, NULL, NULL, ?, ?, NULL)
             ON CONFLICT DO NOTHING
             "#,
             crate::db_params![
@@ -1024,6 +1166,7 @@ fn decode_outbox_job(row: &Row) -> Result<NotificationOutboxJob, NotificationOut
             .map_err(|error| NotificationOutboxError::InvalidContextXml(error.to_string()))?,
         status: NotificationOutboxStatus::from_db_value(&row.get::<String>(9)?)?,
         attempt_count: row.get(10)?,
+        claim_token: row.get(11)?,
     })
 }
 
@@ -1112,9 +1255,13 @@ mod tests {
     }
 
     fn target() -> NotificationOutboxTarget {
+        target_named("web-node")
+    }
+
+    fn target_named(node: &str) -> NotificationOutboxTarget {
         NotificationOutboxTarget::new(
             bare("push.example.com"),
-            PushServiceNodeName::new("web-node").expect("node"),
+            PushServiceNodeName::new(node).expect("node"),
         )
     }
 
@@ -1129,6 +1276,36 @@ mod tests {
         NotificationOutboxStore::new(Database::in_memory("notification-outbox").await.unwrap())
             .await
             .expect("store")
+    }
+
+    async fn reclaim_stale_job(
+        store: &NotificationOutboxStore,
+    ) -> (NotificationOutboxJob, NotificationOutboxJob) {
+        let stale_claim = store
+            .claim_due_outbox_jobs(16)
+            .await
+            .expect("claim")
+            .into_iter()
+            .next()
+            .expect("claimed job");
+        let stale_claimed_at_ms = crate::time::now_ms()
+            .saturating_sub(OUTBOX_CLAIM_TIMEOUT_MS)
+            .saturating_sub(1);
+        store
+            .execute(
+                "UPDATE notification_outbox SET claimed_at_ms = ? WHERE job_id = ?",
+                crate::db_params![stale_claimed_at_ms, stale_claim.job_id().as_str()],
+            )
+            .await
+            .expect("make claim stale");
+        let fresh_claim = store
+            .claim_due_outbox_jobs(16)
+            .await
+            .expect("reclaim")
+            .into_iter()
+            .next()
+            .expect("reclaimed job");
+        (stale_claim, fresh_claim)
     }
 
     #[tokio::test]
@@ -1262,6 +1439,127 @@ mod tests {
         assert_eq!(reclaimed.len(), 1);
         assert_eq!(reclaimed[0].job_id(), first_claim[0].job_id());
         assert_eq!(reclaimed[0].status(), NotificationOutboxStatus::InProgress);
+        assert_ne!(reclaimed[0].claim_token(), first_claim[0].claim_token());
+    }
+
+    #[tokio::test]
+    async fn stale_claim_cannot_mark_reclaimed_outbox_job_published() {
+        let store = store().await;
+        let target = target();
+        store
+            .insert_candidate_and_enqueue(&candidate("archive-1"), std::slice::from_ref(&target))
+            .await
+            .expect("insert");
+        let (stale_claim, fresh_claim) = reclaim_stale_job(&store).await;
+
+        assert!(
+            !store
+                .mark_job_published(&stale_claim)
+                .await
+                .expect("stale publish mark should not fail"),
+            "stale worker must not complete a job after another worker reclaimed it"
+        );
+        let pending = store.pending_outbox_jobs().await.expect("pending jobs");
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].status(), NotificationOutboxStatus::InProgress);
+        assert_eq!(pending[0].claim_token(), fresh_claim.claim_token());
+
+        assert!(store
+            .mark_job_published(&fresh_claim)
+            .await
+            .expect("fresh publish mark should succeed"));
+        assert!(store
+            .pending_outbox_jobs()
+            .await
+            .expect("pending after fresh mark")
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn stale_claim_does_not_enqueue_push_service_publish_job() {
+        let store = store().await;
+        let recipient = bare("alice@example.com");
+        let push_service = crate::push_service::DatabasePushServiceStore::new(
+            Database::in_memory("push-service").await.unwrap(),
+        )
+        .await
+        .expect("push service");
+        crate::push_registrations::DatabasePushRegistrationStore::new(push_service.database())
+            .await
+            .expect("push registration schema");
+        let push_node = push_service
+            .ensure_node(&recipient, "web")
+            .await
+            .expect("push node");
+        push_service
+            .upsert_device(
+                &recipient,
+                crate::push_service::PushDeviceRegistration::new(
+                    "web-1",
+                    push_node.node(),
+                    crate::push_service::PushDevicePlatform::Web,
+                    "test",
+                ),
+            )
+            .await
+            .expect("push device");
+        push_service
+            .register_first_party_node_for_owner(
+                &recipient,
+                "push.example.com",
+                push_node.node(),
+                None,
+            )
+            .await
+            .expect("first-party registration");
+        let push_store = waddle_xmpp::push::InMemoryPushStore::new();
+        push_store
+            .register(waddle_xmpp::push::PushSubscription {
+                user_jid: recipient.to_string(),
+                service_jid: "push.example.com".to_string(),
+                node: Some(push_node.node().to_string()),
+                publish_options: None,
+                endpoint: None,
+                p256dh: None,
+                auth_key: None,
+            })
+            .await
+            .expect("xep0357 registration");
+        let target = NotificationOutboxTarget::new(
+            bare("push.example.com"),
+            PushServiceNodeName::new(push_node.node()).expect("push node target"),
+        );
+        store
+            .insert_candidate_and_enqueue(&candidate("archive-1"), std::slice::from_ref(&target))
+            .await
+            .expect("insert");
+        let (stale_claim, fresh_claim) = reclaim_stale_job(&store).await;
+
+        let outcome = store
+            .publish_claimed_job(
+                &stale_claim,
+                &push_service,
+                &push_store,
+                &bare("push.example.com"),
+            )
+            .await
+            .expect("stale publish");
+
+        assert!(matches!(
+            outcome,
+            NotificationOutboxPublishOutcome::RetryScheduled { .. }
+        ));
+        assert!(
+            push_service
+                .queued_publish_jobs()
+                .await
+                .expect("queued push jobs")
+                .is_empty(),
+            "stale claims must not enqueue durable Push Service publish jobs"
+        );
+        let pending = store.pending_outbox_jobs().await.expect("pending jobs");
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].claim_token(), fresh_claim.claim_token());
     }
 
     #[tokio::test]
@@ -1332,6 +1630,95 @@ mod tests {
         );
     }
 
+    struct FailingPushStore;
+
+    impl waddle_xmpp::push::PushSubscriptionStore for FailingPushStore {
+        fn register(
+            &self,
+            _sub: waddle_xmpp::push::PushSubscription,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<Output = Result<(), waddle_xmpp::push::PushError>>
+                    + Send
+                    + '_,
+            >,
+        > {
+            Box::pin(std::future::ready(Ok(())))
+        }
+
+        fn remove(
+            &self,
+            _user_jid: &str,
+            _service_jid: &str,
+            _node: Option<&str>,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<Output = Result<(), waddle_xmpp::push::PushError>>
+                    + Send
+                    + '_,
+            >,
+        > {
+            Box::pin(std::future::ready(Ok(())))
+        }
+
+        fn get_for_user(
+            &self,
+            _user_jid: &str,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = Result<
+                            Vec<waddle_xmpp::push::PushSubscription>,
+                            waddle_xmpp::push::PushError,
+                        >,
+                    > + Send
+                    + '_,
+            >,
+        > {
+            Box::pin(std::future::ready(Err(
+                waddle_xmpp::push::PushError::StorageError("registration store unavailable".into()),
+            )))
+        }
+    }
+
+    #[tokio::test]
+    async fn push_registration_lookup_error_retries_each_claimed_outbox_job() {
+        let store = store().await;
+        store
+            .insert_candidate_and_enqueue(
+                &candidate("archive-1"),
+                &[target_named("web-node-1"), target_named("web-node-2")],
+            )
+            .await
+            .expect("insert jobs");
+        let push_service = crate::push_service::DatabasePushServiceStore::new(
+            Database::in_memory("push-service").await.unwrap(),
+        )
+        .await
+        .expect("push service");
+
+        let outcomes = store
+            .drain_due_outbox_jobs(
+                &push_service,
+                &FailingPushStore,
+                &bare("push.example.com"),
+                16,
+            )
+            .await
+            .expect("drain");
+
+        assert_eq!(outcomes.len(), 2);
+        assert!(outcomes.iter().all(|outcome| matches!(
+            outcome,
+            NotificationOutboxPublishOutcome::RetryScheduled { .. }
+        )));
+        let pending = store.pending_outbox_jobs().await.expect("pending");
+        assert_eq!(pending.len(), 2);
+        assert!(pending.iter().all(|job| {
+            job.status() == NotificationOutboxStatus::Queued && job.attempt_count() == 1
+        }));
+    }
+
     #[tokio::test]
     async fn prune_completed_removes_only_finished_jobs_and_outboxed_candidates() {
         let store = store().await;
@@ -1346,7 +1733,7 @@ mod tests {
             .into_iter()
             .next()
             .expect("old job");
-        store.mark_job_published(&old_job).await.expect("published");
+        assert!(store.mark_job_published(&old_job).await.expect("published"));
 
         store
             .insert_candidate_and_enqueue(&candidate("archive-live"), &[target()])
