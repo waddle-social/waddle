@@ -295,6 +295,8 @@ function onSelectChannelFromSidebar(id: string) {
         :self-jid="connectionStore.session?.jid ?? null"
         @refresh="communityEvents.refresh()"
         @post="(input) => communityEvents.post(input)"
+        @edit="(id, input) => communityEvents.edit(id, input)"
+        @cancel-event="(event) => communityEvents.cancel(event.id)"
         @rsvp="(event, partstat) => onCommunityRsvp(event, partstat)"
         @open-nav="ui.showMobileNav.value = true"
       />

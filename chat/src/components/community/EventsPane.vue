@@ -6,9 +6,11 @@ import {
   ChevronRight,
   List,
   Menu,
+  Pencil,
   Plus,
   RefreshCw,
   Repeat,
+  Trash2,
   X,
 } from "lucide-vue-next";
 import RecurrencePicker from "@/components/community/RecurrencePicker.vue";
@@ -34,9 +36,28 @@ const props = defineProps<EventsPaneProps>();
 const emit = defineEmits<{
   refresh: [];
   post: [input: CommunityEventInput];
+  edit: [itemId: string, input: CommunityEventInput];
+  cancelEvent: [event: CommunityEvent];
   rsvp: [event: CommunityEvent, partstat: PartStat];
   openNav: [];
 }>();
+
+/**
+ * Strip `xmpp:` URI prefix and trim any resource so attendee /
+ * organiser URIs compare cleanly against a session's bare JID.
+ */
+function bareFromUri(uri: string | undefined | null): string | null {
+  if (!uri) return null;
+  const stripped = uri.startsWith("xmpp:") ? uri.slice(5) : uri;
+  return stripped.split("/")[0] ?? stripped;
+}
+
+function isOrganiser(event: CommunityEvent): boolean {
+  const self = selfBareJid.value;
+  if (!self) return false;
+  const eventOrganiser = bareFromUri(event.organizer);
+  return !!eventOrganiser && eventOrganiser === self;
+}
 
 // ─── Identity ────────────────────────────────────────────────────────────────
 
@@ -250,6 +271,7 @@ function authorLabel(jid: string | undefined): string {
 // ─── Composer ─────────────────────────────────────────────────────────────────
 
 const composerOpen = ref(false);
+const editingId = ref<string | null>(null);
 const summary = ref("");
 const description = ref("");
 const location = ref("");
@@ -260,6 +282,31 @@ const rrule = ref<Rrule | null>(null);
 const canSubmit = computed(
   () => props.canPost && !props.isPosting && summary.value.trim().length > 0,
 );
+
+/** Format an epoch-ms timestamp for the `<input type="datetime-local">` widget. */
+function toDatetimeLocal(ms: number | undefined): string {
+  if (typeof ms !== "number") return "";
+  const d = new Date(ms);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+function startEdit(event: CommunityEvent) {
+  editingId.value = event.id;
+  summary.value = event.summary;
+  description.value = event.description ?? "";
+  location.value = event.location ?? "";
+  dtstart.value = toDatetimeLocal(event.dtstartMs);
+  dtend.value = toDatetimeLocal(event.dtendMs);
+  rrule.value = event.rrule ?? null;
+  composerOpen.value = true;
+}
+
+function onCancelEvent(event: CommunityEvent) {
+  const ok = window.confirm(`Cancel "${event.summary}"? This removes the event for everyone.`);
+  if (!ok) return;
+  emit("cancelEvent", event);
+}
 
 function submit() {
   const summaryValue = summary.value.trim();
@@ -275,12 +322,17 @@ function submit() {
     ...(dtend.value ? { dtendMs: Date.parse(dtend.value) } : {}),
     ...(rrule.value ? { rrule: rrule.value } : {}),
   };
-  emit("post", input);
+  if (editingId.value) {
+    emit("edit", editingId.value, input);
+  } else {
+    emit("post", input);
+  }
   resetComposer();
 }
 
 function resetComposer() {
   composerOpen.value = false;
+  editingId.value = null;
   summary.value = "";
   description.value = "";
   location.value = "";
@@ -354,10 +406,10 @@ const DOW_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
           v-if="canPost"
           type="button"
           class="inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground shadow-sm hover:bg-primary/90"
-          @click="composerOpen = !composerOpen"
+          @click="composerOpen ? resetComposer() : (composerOpen = true)"
         >
           <Plus class="h-3.5 w-3.5" aria-hidden="true" />
-          {{ composerOpen ? "Close" : "New event" }}
+          {{ composerOpen ? (editingId ? "Cancel edit" : "Close") : "New event" }}
         </button>
         <button
           v-else
@@ -440,7 +492,7 @@ const DOW_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
             class="inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground shadow-sm hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-60"
             :disabled="!canSubmit"
           >
-            {{ isPosting ? "Publishing…" : "Publish event" }}
+            {{ isPosting ? (editingId ? "Saving…" : "Publishing…") : (editingId ? "Save changes" : "Publish event") }}
           </button>
         </div>
       </form>
@@ -461,9 +513,29 @@ const DOW_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
             >
               <header class="flex items-baseline justify-between gap-3">
                 <h3 class="type-control font-semibold text-foreground">{{ event.summary }}</h3>
-                <span class="type-caption shrink-0 text-muted-foreground">
-                  {{ formatTime(event) }}
-                </span>
+                <div class="flex shrink-0 items-center gap-1">
+                  <span class="type-caption text-muted-foreground">
+                    {{ formatTime(event) }}
+                  </span>
+                  <template v-if="isOrganiser(event)">
+                    <button
+                      type="button"
+                      class="inline-flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground hover:bg-muted/50 hover:text-foreground"
+                      aria-label="Edit event"
+                      @click="startEdit(event)"
+                    >
+                      <Pencil class="h-3.5 w-3.5" aria-hidden="true" />
+                    </button>
+                    <button
+                      type="button"
+                      class="inline-flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
+                      aria-label="Cancel event"
+                      @click="onCancelEvent(event)"
+                    >
+                      <Trash2 class="h-3.5 w-3.5" aria-hidden="true" />
+                    </button>
+                  </template>
+                </div>
               </header>
               <p v-if="event.location" class="type-caption text-muted-foreground">
                 📍 {{ event.location }}
@@ -627,7 +699,27 @@ const DOW_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
           >
             <header class="flex items-baseline justify-between gap-3">
               <h3 class="type-control font-semibold text-foreground">{{ event.summary }}</h3>
-              <span class="type-caption shrink-0 text-muted-foreground">{{ formatStart(event) }}</span>
+              <div class="flex shrink-0 items-center gap-1">
+                <span class="type-caption text-muted-foreground">{{ formatStart(event) }}</span>
+                <template v-if="isOrganiser(event)">
+                  <button
+                    type="button"
+                    class="inline-flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground hover:bg-muted/50 hover:text-foreground"
+                    aria-label="Edit event"
+                    @click="startEdit(event)"
+                  >
+                    <Pencil class="h-3.5 w-3.5" aria-hidden="true" />
+                  </button>
+                  <button
+                    type="button"
+                    class="inline-flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
+                    aria-label="Cancel event"
+                    @click="onCancelEvent(event)"
+                  >
+                    <Trash2 class="h-3.5 w-3.5" aria-hidden="true" />
+                  </button>
+                </template>
+              </div>
             </header>
             <p v-if="event.location" class="type-caption text-muted-foreground">
               📍 {{ event.location }}

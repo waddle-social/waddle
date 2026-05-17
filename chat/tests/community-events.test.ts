@@ -8,6 +8,8 @@ const COMMUNITY = "community.example.com";
 type MockClient = BrowserXmppClient & {
   fetchCommunityEvents: ReturnType<typeof mock>;
   publishCommunityEvent: ReturnType<typeof mock>;
+  updateCommunityEvent: ReturnType<typeof mock>;
+  retractCommunityEvent: ReturnType<typeof mock>;
   rsvpCommunityEvent: ReturnType<typeof mock>;
 };
 
@@ -27,6 +29,20 @@ function makeClient(events: CommunityEvent[] = []): MockClient {
         ...(input.rrule ? { rrule: input.rrule } : {}),
       } satisfies CommunityEvent),
     ),
+    updateCommunityEvent: mock((_jid: string, itemId: string, input: CommunityEventInput) =>
+      Promise.resolve({
+        id: itemId,
+        uid: itemId,
+        summary: input.summary,
+        ...(input.description ? { description: input.description } : {}),
+        ...(input.location ? { location: input.location } : {}),
+        ...(input.organizer ? { organizer: input.organizer } : {}),
+        ...(typeof input.dtstartMs === "number" ? { dtstartMs: input.dtstartMs } : {}),
+        ...(typeof input.dtendMs === "number" ? { dtendMs: input.dtendMs } : {}),
+        ...(input.rrule ? { rrule: input.rrule } : {}),
+      } satisfies CommunityEvent),
+    ),
+    retractCommunityEvent: mock(() => Promise.resolve()),
     rsvpCommunityEvent: mock(() => Promise.resolve()),
   } as unknown as MockClient;
 }
@@ -131,5 +147,55 @@ describe("useCommunityEvents", () => {
     });
     const ok = await events.rsvp("evt", "alice", "alice@example.com", "ACCEPTED");
     expect(ok).toBe(false);
+  });
+
+  test("edit replaces the existing event by id and keeps it sorted", async () => {
+    const future = Date.now() + 86_400_000;
+    const client = makeClient([
+      { id: "evt-a", uid: "evt-a", summary: "Original", dtstartMs: future },
+    ]);
+    const events = useCommunityEvents(ref<BrowserXmppClient | null>(client), {
+      communityJid: ref<string | null>(COMMUNITY),
+    });
+    await events.refresh();
+    const updated = await events.edit("evt-a", {
+      summary: "Renamed",
+      dtstartMs: future,
+    });
+    expect(updated?.summary).toBe("Renamed");
+    expect(client.updateCommunityEvent).toHaveBeenCalledWith(
+      COMMUNITY,
+      "evt-a",
+      expect.objectContaining({ summary: "Renamed" }),
+    );
+    expect(events.events.value.find((e) => e.id === "evt-a")?.summary).toBe("Renamed");
+  });
+
+  test("edit rejects empty summary", async () => {
+    const client = makeClient([
+      { id: "evt-a", uid: "evt-a", summary: "Original", dtstartMs: Date.now() + 1000 },
+    ]);
+    const events = useCommunityEvents(ref<BrowserXmppClient | null>(client), {
+      communityJid: ref<string | null>(COMMUNITY),
+    });
+    const result = await events.edit("evt-a", { summary: "   " });
+    expect(result).toBe(null);
+    expect(client.updateCommunityEvent).not.toHaveBeenCalled();
+  });
+
+  test("cancel retracts and removes the event optimistically", async () => {
+    const future = Date.now() + 86_400_000;
+    const client = makeClient([
+      { id: "evt-a", uid: "evt-a", summary: "Going away", dtstartMs: future },
+      { id: "evt-b", uid: "evt-b", summary: "Stays", dtstartMs: future + 1000 },
+    ]);
+    const events = useCommunityEvents(ref<BrowserXmppClient | null>(client), {
+      communityJid: ref<string | null>(COMMUNITY),
+    });
+    await events.refresh();
+    const ok = await events.cancel("evt-a");
+    expect(ok).toBe(true);
+    expect(client.retractCommunityEvent).toHaveBeenCalledWith(COMMUNITY, "evt-a");
+    expect(events.events.value.map((e) => e.id)).toEqual(["evt-b"]);
   });
 });

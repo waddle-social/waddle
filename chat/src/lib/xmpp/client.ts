@@ -985,6 +985,51 @@ export class BrowserXmppClient {
   }
 
   /**
+   * Replace an existing community event item with new master values.
+   * Uses `xcal_publish_item` which atomically overwrites the item at
+   * `itemId`, preserving any sibling RSVPs (those live on their own
+   * `-rsvp-*` item ids).
+   */
+  async updateCommunityEvent(
+    communityJid: string,
+    itemId: string,
+    input: CommunityEventInput,
+  ): Promise<CommunityEvent> {
+    const xmpp = await this.requireConnectedXmpp();
+    const result = await xmpp.xcal_publish_item?.(communityJid, itemId, {
+      master: {
+        summary: input.summary,
+        ...(input.description ? { description: input.description } : {}),
+        ...(input.location ? { location: input.location } : {}),
+        ...(input.organizer ? { organizer: input.organizer } : {}),
+        ...(typeof input.dtstartMs === "number"
+          ? { dtstart: new Date(input.dtstartMs).toISOString() }
+          : {}),
+        ...(typeof input.dtendMs === "number"
+          ? { dtend: new Date(input.dtendMs).toISOString() }
+          : {}),
+        ...(input.rrule ? { rrule: rruleToWasm(input.rrule) } : {}),
+      },
+      overrides: [],
+      exdates: [],
+    }) as WasmVEvent | undefined;
+    if (!result) {
+      throw new Error("xcal_publish_item returned no event");
+    }
+    return eventFromWasm(result);
+  }
+
+  /**
+   * Retract (delete) a community event item. Removes the master plus
+   * any per-instance overrides in one shot; sibling RSVP items live
+   * under their own ids and stay behind until separately retracted.
+   */
+  async retractCommunityEvent(communityJid: string, itemId: string): Promise<void> {
+    const xmpp = await this.requireConnectedXmpp();
+    await xmpp.xcal_retract?.(communityJid, itemId);
+  }
+
+  /**
    * Publish (or update) this session's RSVP for a calendar event.
    * The server bridges the call to a sibling pubsub item; the chat
    * folds it back into the master event on the next refresh.
