@@ -236,9 +236,18 @@ mod tests {
         assert!(xml.contains("pubsub#max_items"), "{xml}");
         assert!(xml.contains("pubsub#access_model"), "{xml}");
         assert!(xml.contains("pubsub#send_last_published_item"), "{xml}");
-        assert!(xml.contains(">max<"), "max_items value must be the literal max: {xml}");
-        assert!(xml.contains(">whitelist<"), "access_model value must be whitelist: {xml}");
-        assert!(xml.contains(">never<"), "send_last_published_item must be never: {xml}");
+        assert!(
+            xml.contains(">max<"),
+            "max_items value must be the literal max: {xml}"
+        );
+        assert!(
+            xml.contains(">whitelist<"),
+            "access_model value must be whitelist: {xml}"
+        );
+        assert!(
+            xml.contains(">never<"),
+            "send_last_published_item must be never: {xml}"
+        );
     }
 
     #[test]
@@ -286,7 +295,10 @@ mod tests {
         assert_eq!(entries[0].stanza_id, "dm-sid");
         assert_eq!(entries[0].stanza_id_by, "juliet@capulet.lit");
         assert_eq!(entries[1].chat_id, "example@conference.shakespeare.lit");
-        assert_eq!(entries[1].stanza_id_by, "example@conference.shakespeare.lit");
+        assert_eq!(
+            entries[1].stanza_id_by,
+            "example@conference.shakespeare.lit"
+        );
     }
 
     #[test]

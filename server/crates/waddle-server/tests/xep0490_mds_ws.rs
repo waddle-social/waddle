@@ -426,9 +426,7 @@ async fn xep0490_other_resource_with_notify_caps_receives_event() {
 
     let event = wait_for_event_message(&mut alice_b, MDS_NODE, Duration::from_secs(2))
         .await
-        .expect(
-            "alice-B advertising MDS +notify MUST receive the §3.4 owner-self fan-out event",
-        );
+        .expect("alice-B advertising MDS +notify MUST receive the §3.4 owner-self fan-out event");
     // Per XEP-0490 the event MUST carry the chat-jid item id.
     assert!(
         event.contains(r#"id="romeo@montague.lit""#),
@@ -489,7 +487,10 @@ async fn xep0490_muc_stanza_id_by_attribute_round_trips_through_publish_and_catc
     )
     .await;
 
-    assert!(items.contains(&format!(r#"id="{room_jid}""#)), "item: {items}");
+    assert!(
+        items.contains(&format!(r#"id="{room_jid}""#)),
+        "item: {items}"
+    );
     assert!(
         items.contains(&format!(r#"by="{room_jid}""#)),
         "MUC stanza-id by= must carry the room JID through publish + catch-up: {items}"
