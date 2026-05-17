@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref } from "vue";
-import { CalendarDays, Plus, RefreshCw, Repeat, X } from "lucide-vue-next";
+import { CalendarDays, Menu, Plus, RefreshCw, Repeat, X } from "lucide-vue-next";
 import RecurrencePicker from "@/components/community/RecurrencePicker.vue";
 import type {
   Attendee,
@@ -25,6 +25,7 @@ const emit = defineEmits<{
   refresh: [];
   post: [input: CommunityEventInput];
   rsvp: [event: CommunityEvent, partstat: PartStat];
+  openNav: [];
 }>();
 
 const selfBareJid = computed(() => {
@@ -160,6 +161,14 @@ function resetComposer() {
   <div class="chat-pane-scroll flex-1 min-h-0 bg-background px-[var(--chat-content-inline)] py-6">
     <div class="mx-auto grid w-full max-w-3xl gap-4">
       <header class="flex items-center gap-2">
+        <button
+          type="button"
+          class="md:hidden inline-flex h-8 w-8 items-center justify-center rounded-md border border-transparent text-muted-foreground hover:bg-muted/50 hover:text-foreground"
+          aria-label="Open navigation"
+          @click="emit('openNav')"
+        >
+          <Menu class="h-4 w-4" aria-hidden="true" />
+        </button>
         <CalendarDays class="h-5 w-5 text-primary" aria-hidden="true" />
         <h1 class="type-pane-title text-foreground">Community Events</h1>
         <button
