@@ -15,6 +15,10 @@
 //!   (no live occupants without a join),
 //! - `channels:kick` is a no-op on a room with no occupant matching the
 //!   given JID; the wire surface remains stable.
+//! - `channels:kick` against a live occupant fires the XEP-0045 §9.1.1
+//!   `<status code='307'/>` presence broadcast to every remaining
+//!   occupant *and* the kicked occupant, even when the admin V2 caller
+//!   is not joined to the room.
 
 mod ws_common;
 
