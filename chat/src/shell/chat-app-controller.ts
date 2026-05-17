@@ -1223,6 +1223,12 @@ export function useChatAppController(giphyApiKey: string) {
     ui.showMobileNav.value = false;
     ui.showMobileDetails.value = false;
     ui.activePage.value = "threads";
+    // ChatReadyShell renders FeedPane / StoriesPane / EventsPane on
+    // `activeCommunitySurface` v-else-if branches BEFORE the threads
+    // branch — leaving the surface non-null would let one of those win
+    // and ThreadsView would silently not render even though the URL
+    // changed. Clear the surface so the threads v-else-if matches.
+    ui.activeCommunitySurface.value = null;
     waddles.activeChannelId.value = null;
     dmConversations.closeDm();
     activeRightPanel.value = null;
