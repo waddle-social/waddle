@@ -176,6 +176,84 @@ applies and what the wire commitment is.
   `server/crates/waddle-server/src/admin/users_list.rs::tests` cover
   arg parsing + result-form shape.
 
+### `urn:waddle:admin:spaces:*` — Admin V2 Spaces panel (PR #685)
+
+Six XEP-0050 ad-hoc commands keyed by the namespace URI (which doubles
+as the `FORM_TYPE` for the args/result forms). Owner-gated via the same
+`is_community_owner(state, requesting_jid)` chokepoint as Admin V1.
+
+- `urn:waddle:admin:spaces:list:0` — paginated read; reports
+  `space_jid`/`name`/`description`/`icon_url`/`channel_count`/`member_count`
+  with optional `next_cursor`.
+- `urn:waddle:admin:spaces:create:0` — args `name` (1–80) plus optional
+  `description`/`icon_url`; mints a slugified space localpart, writes
+  the metadata row + the backing PubSub node, seeds server-owner
+  PubSub Owner affiliations.
+- `urn:waddle:admin:spaces:update:0` — args `space_jid` + optional
+  patch fields; rejects unknown space with `<item-not-found/>`.
+- `urn:waddle:admin:spaces:delete:0` — args `space_jid` + `confirm` (must
+  equal `"yes"`); cascade-destroys child MUC rooms via `DestroyRoom`,
+  deletes the PubSub node and metadata row.
+- `urn:waddle:admin:spaces:members:0` — paginated read of PubSub
+  affiliations on the space node; collapses `Outcast` to "none" for the
+  V2 spaces wire surface.
+- `urn:waddle:admin:spaces:set-role:0` — args `space_jid`,
+  `member_jid`, `role ∈ {owner,admin,member,none}`; projects onto
+  XEP-0060 affiliations (`owner` ↔ `Owner`, `admin` ↔ `Publisher`,
+  `member` ↔ `Member`, `none` removes the row).
+
+**Why Waddle-namespaced?** No XEP defines "manage spaces"; XEP-0133 is
+fixed and doesn't cover the cursor-paginated CRUD the admin panel
+needs. XEP-0503 covers the space discovery surface only.
+
+**Advert**: each URI is also pushed onto `server_features()` so chat
+clients can detect Admin V2 support without enumerating commands.
+
+**Tests**:
+`server/crates/waddle-server/tests/admin_spaces_ws.rs` — 15 #[tokio::test]
+cases exercising the wire surface end-to-end.
+Unit tests under `server/crates/waddle-server/src/admin/spaces.rs::tests`
+cover arg parsing, the role vocabulary, and the result-form shape.
+
+### `urn:waddle:admin:channels:*` — Admin V2 Channels panel (PR #685)
+
+Eight XEP-0050 ad-hoc commands; owner-gated identically to spaces.
+
+- `urn:waddle:admin:channels:list:0` — walks `RoomRegistryActor::ListRooms`,
+  asks each `RoomActor` for its config + occupant count + affiliation
+  histogram. Reports occupant + per-tier affiliation counts. The
+  `space_jid` filter parses but is a no-op in V2; future PRs link
+  channels to spaces via the PubSub bookmark surface.
+- `urn:waddle:admin:channels:create:0` — args `name` (1–80) + optional
+  `topic` + optional `is_public` (default true). Mints a managed room
+  localpart, creates the room with `persistent=true`,
+  `members_only=!is_public`.
+- `urn:waddle:admin:channels:update:0` — patches name/topic/is_public
+  via the actor's `UpdateConfig`.
+- `urn:waddle:admin:channels:delete:0` — `confirm='yes'` required;
+  delegates to `RoomRegistryActor::DestroyRoom`.
+- `urn:waddle:admin:channels:occupants:0` — `RoomActor::ListOccupants`
+  paged; surfaces nick/real_jid/role/affiliation.
+- `urn:waddle:admin:channels:affiliations:0` — `RoomActor::ListAffiliations
+  { filter }` paged; filter accepts owner/admin/member/none/outcast.
+- `urn:waddle:admin:channels:set-affiliation:0` —
+  `RoomActor::ChangeAffiliation`; outcast = XEP-0045 §10.2 ban.
+- `urn:waddle:admin:channels:kick:0` — looks up the occupant by
+  bare-JID-to-nick mapping and asks the actor to `Leave`. The
+  XEP-0045 §9.1 §307 presence broadcast happens via the wire-side
+  machinery in #680; this admin path is best-effort state mutation when
+  the occupant is currently joined.
+
+**Why Waddle-namespaced?** Same justification as spaces: XEP-0133 lacks
+the cursor-paginated CRUD shape. The underlying MUC operations conform
+to XEP-0045 §10 (affiliations) and §9.1 (kick role-change to none).
+
+**Tests**: `server/crates/waddle-server/tests/admin_channels_ws.rs` —
+20 #[tokio::test] cases. Unit tests under
+`server/crates/waddle-server/src/admin/channels.rs::tests` cover the
+wire-affiliation vocabulary, the public-by-default default, and result-form
+shape.
+
 ## Audit log
 
 (empty — first audit starts at XEP-0004 unless a higher-impact target is chosen first)
