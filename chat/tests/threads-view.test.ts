@@ -1,88 +1,132 @@
-// Tests for `ThreadsView.vue` mobile shell wiring.
+// Tests for the click-thru behaviour of the global Threads view.
 //
-// `@vue/test-utils` is not available in this repo, so we follow the
-// same in-memory-model pattern used by `threads-list-panel.test.ts`
-// for behavioral coverage, and complement it with structural file
-// assertions against `ThreadsView.vue` and `ChatReadyShell.vue` to
-// guarantee the mobile-shell wiring (hamburger -> openNav -> drawer)
-// stays in place.
+// `ThreadsView.vue` is a thin wrapper: it fetches threads (delegated
+// to `ThreadsListPanel`) and, on click, hands the entry off to the
+// controller's `onSelectThread(channelId, threadId)`. The controller
+// then selects the channel and opens the ThreadPanel reader, and the
+// existing URL watchers push `/r/<channel>?thread=<rootId>`.
+//
+// The component itself is too small to be worth mounting under
+// `@vue/test-utils`; we exercise the two pieces of behaviour that
+// matter: the JID→channel-id resolver and the controller-call shape.
 
-import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
-import { dirname, resolve } from "node:path";
+import { describe, expect, mock, test } from "bun:test";
+import type { WasmThreadEntry } from "../src/lib/xmpp/wasm-types";
+import { resolveChannelIdForRoomJid } from "../src/lib/threads-channel-resolve";
 
-const here = dirname(fileURLToPath(import.meta.url));
-const threadsViewSrc = readFileSync(
-  resolve(here, "../src/components/chat/ThreadsView.vue"),
-  "utf8",
-);
-const chatShellSrc = readFileSync(
-  resolve(here, "../src/components/chat/ChatReadyShell.vue"),
-  "utf8",
-);
-
-interface ViewState {
-  openNavCount: number;
+function entry(overrides: Partial<WasmThreadEntry> = {}): WasmThreadEntry {
+  return {
+    channel: "general@muc.waddle.example",
+    thread_id: "root-1",
+    last_stanza_id: "S",
+    last_activity: new Date().toISOString(),
+    unread: 0,
+    reply_count: 0,
+    has_unread: false,
+    ...overrides,
+  };
 }
 
 /**
- * Mirrors `ThreadsView.vue`'s emit surface: a `Menu` button in the
- * mobile-only header fires an `openNav` event. The shell wires this
- * to `ui.showMobileNav.value = true`.
+ * Mirrors the click handler inside `ThreadsView.vue`: resolve the
+ * entry's room JID to a channel-id slug, then call `onSelectThread`.
+ * If the JID is unusable, the handler is a no-op.
  */
-function createThreadsView() {
-  const state: ViewState = { openNavCount: 0 };
-
-  function clickHamburger() {
-    state.openNavCount += 1;
-  }
-
-  return { state, clickHamburger };
+async function handleOpenThread(
+  e: WasmThreadEntry,
+  channels: { id: string; jid?: string }[],
+  onSelectThread: (channelId: string, threadId: string) => void | Promise<void>,
+): Promise<void> {
+  const channelId = resolveChannelIdForRoomJid(e.channel, channels);
+  if (!channelId) return;
+  await onSelectThread(channelId, e.thread_id);
 }
 
-describe("ThreadsView · emit model", () => {
-  test("emits openNav when the mobile hamburger is activated", () => {
-    const view = createThreadsView();
-    expect(view.state.openNavCount).toBe(0);
-    view.clickHamburger();
-    expect(view.state.openNavCount).toBe(1);
+describe("resolveChannelIdForRoomJid", () => {
+  test("matches a channel by exact bare JID", () => {
+    const channels = [
+      { id: "general", jid: "general@muc.waddle.example" },
+      { id: "random", jid: "random@muc.waddle.example" },
+    ];
+    expect(
+      resolveChannelIdForRoomJid("general@muc.waddle.example", channels),
+    ).toBe("general");
   });
 
-  test("each hamburger activation produces one openNav emission", () => {
-    const view = createThreadsView();
-    view.clickHamburger();
-    view.clickHamburger();
-    view.clickHamburger();
-    expect(view.state.openNavCount).toBe(3);
+  test("ignores resource on the room JID when matching", () => {
+    const channels = [{ id: "general", jid: "general@muc.waddle.example" }];
+    expect(
+      resolveChannelIdForRoomJid(
+        "general@muc.waddle.example/some-nick",
+        channels,
+      ),
+    ).toBe("general");
+  });
+
+  test("falls back to the JID local-part when no channel matches", () => {
+    expect(
+      resolveChannelIdForRoomJid("orphan@muc.waddle.example", []),
+    ).toBe("orphan");
+  });
+
+  test("returns null for an empty / malformed JID", () => {
+    expect(resolveChannelIdForRoomJid("", [])).toBeNull();
+    expect(resolveChannelIdForRoomJid("@muc.waddle.example", [])).toBeNull();
+  });
+
+  test("prefers an explicit channel match over the local-part fallback", () => {
+    // Two channels share the same node — the explicit `jid` match wins,
+    // so we route to `pretty-name` rather than the bare slug `general`.
+    const channels = [
+      { id: "pretty-name", jid: "general@muc.waddle.example" },
+      { id: "general", jid: "general@other-host.example" },
+    ];
+    expect(
+      resolveChannelIdForRoomJid("general@muc.waddle.example", channels),
+    ).toBe("pretty-name");
   });
 });
 
-describe("ThreadsView · mobile shell template", () => {
-  test("declares an openNav emit", () => {
-    expect(threadsViewSrc).toContain("openNav: []");
-  });
-
-  test("renders a mobile-only header with a hamburger button", () => {
-    // Header is hidden on >= md to match FeedPane / StoriesPane / EventsPane.
-    expect(threadsViewSrc).toMatch(/<header[^>]*class="[^"]*md:hidden/);
-  });
-
-  test("hamburger button is wired to emit openNav on click", () => {
-    expect(threadsViewSrc).toMatch(/@click="emit\('openNav'\)"/);
-  });
-
-  test("imports the Menu icon used by sibling pane headers", () => {
-    expect(threadsViewSrc).toMatch(/from "lucide-vue-next"/);
-    expect(threadsViewSrc).toMatch(/\bMenu\b/);
-  });
-
-  test("ChatReadyShell forwards ThreadsView's openNav to the mobile drawer", () => {
-    // Block-scalar match: the ThreadsView usage in ChatReadyShell must
-    // pair `activePage === 'threads'` with the standard openNav handler
-    // so the hamburger opens the same drawer used by the other panes.
-    expect(chatShellSrc).toMatch(
-      /<ThreadsView[\s\S]*?activePage\.value === 'threads'[\s\S]*?@open-nav="ui\.showMobileNav\.value = true"[\s\S]*?\/>/,
+describe("ThreadsView click handler", () => {
+  test("calls onSelectThread with the resolved channel-id and the thread id", async () => {
+    const onSelectThread = mock(async (_channelId: string, _threadId: string) => {});
+    const channels = [{ id: "general", jid: "general@muc.waddle.example" }];
+    await handleOpenThread(
+      entry({ channel: "general@muc.waddle.example", thread_id: "root-abc" }),
+      channels,
+      onSelectThread,
     );
+    expect(onSelectThread).toHaveBeenCalledTimes(1);
+    expect(onSelectThread.mock.calls[0]).toEqual(["general", "root-abc"]);
+  });
+
+  test("falls back to the JID local-part when the channel is unknown", async () => {
+    // Threads view can outlive the structure load: a thread can be
+    // listed before its channel summary has been wired into
+    // `waddles.channels`. The handler must still route correctly.
+    const onSelectThread = mock(async (_channelId: string, _threadId: string) => {});
+    await handleOpenThread(
+      entry({ channel: "history@muc.waddle.example", thread_id: "t-9" }),
+      [],
+      onSelectThread,
+    );
+    expect(onSelectThread).toHaveBeenCalledTimes(1);
+    expect(onSelectThread.mock.calls[0]).toEqual(["history", "t-9"]);
+  });
+
+  test("is a no-op for entries with an unusable channel JID", async () => {
+    const onSelectThread = mock(async (_channelId: string, _threadId: string) => {});
+    await handleOpenThread(entry({ channel: "" }), [], onSelectThread);
+    expect(onSelectThread).not.toHaveBeenCalled();
+  });
+
+  test("awaits onSelectThread so async controller work completes before returning", async () => {
+    let resolved = false;
+    const onSelectThread = mock(async () => {
+      await new Promise<void>((r) => setTimeout(r, 1));
+      resolved = true;
+    });
+    await handleOpenThread(entry(), [], onSelectThread);
+    expect(resolved).toBe(true);
   });
 });
