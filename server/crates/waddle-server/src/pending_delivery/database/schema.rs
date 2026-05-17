@@ -30,7 +30,8 @@ pub(super) async fn initialize(
             archive_stanza_id TEXT,
             transient_xml TEXT,
             flushed_in_session TEXT,
-            outbound_sequence INTEGER
+            outbound_sequence INTEGER,
+            notification_outboxed_at_ms {bigint}
         )
         "#
             ),
@@ -90,6 +91,22 @@ pub(super) async fn initialize(
             return Err(error);
         }
     }
+    let alter_sql = match storage.db.driver() {
+        DatabaseDriver::Postgres => {
+            "ALTER TABLE pending_delivery ADD COLUMN IF NOT EXISTS notification_outboxed_at_ms BIGINT"
+        }
+        DatabaseDriver::Sqlite => {
+            "ALTER TABLE pending_delivery ADD COLUMN notification_outboxed_at_ms INTEGER"
+        }
+    };
+    if let Err(error) = storage.execute(alter_sql, ()).await {
+        let msg = error.to_string().to_lowercase();
+        if msg.contains("duplicate column") || msg.contains("already exists") {
+            debug!("pending_delivery.notification_outboxed_at_ms column already present");
+        } else {
+            return Err(error);
+        }
+    }
     storage
         .execute(
             "CREATE INDEX IF NOT EXISTS idx_pending_delivery_recipient \
@@ -119,6 +136,14 @@ pub(super) async fn initialize(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_pending_delivery_archived_unique \
          ON pending_delivery (recipient_jid, archive_stanza_id) \
          WHERE payload_kind = 'archived'",
+            (),
+        )
+        .await?;
+    storage
+        .execute(
+            "CREATE INDEX IF NOT EXISTS idx_pending_delivery_notification_outbox \
+         ON pending_delivery (notification_outboxed_at_ms, row_id) \
+         WHERE payload_kind = 'archived' AND flushed_in_session IS NULL",
             (),
         )
         .await?;

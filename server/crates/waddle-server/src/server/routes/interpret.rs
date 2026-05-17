@@ -166,6 +166,7 @@ use groupchat_validation::{
     service_unavailable_error, validate_groupchat_rich_targets,
 };
 use offline_delivery::queue_offline_delivery;
+pub(crate) use offline_delivery::reconcile_xep0357_notification_candidates;
 use room_dispatch::dispatch_to_room;
 #[cfg(test)]
 use room_helpers::available_bot_nick;

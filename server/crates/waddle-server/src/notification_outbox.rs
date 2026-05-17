@@ -315,6 +315,18 @@ pub enum NotificationOutboxPublishOutcome {
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NotificationOutboxPruneOutcome {
+    pub candidates_deleted: u64,
+    pub jobs_deleted: u64,
+}
+
+impl NotificationOutboxPruneOutcome {
+    pub fn total_deleted(self) -> u64 {
+        self.candidates_deleted + self.jobs_deleted
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum NotificationOutboxError {
     #[error("database error: {0}")]
@@ -644,6 +656,115 @@ impl NotificationOutboxStore {
         Ok(outcomes)
     }
 
+    pub async fn prune_completed_before(
+        &self,
+        cutoff_ms: i64,
+        batch_size: usize,
+    ) -> Result<NotificationOutboxPruneOutcome, NotificationOutboxError> {
+        let batch_size = batch_size.clamp(1, 10_000);
+        let candidates_deleted = self
+            .prune_outboxed_candidates_before(cutoff_ms, batch_size)
+            .await?;
+        let jobs_deleted = self
+            .execute(
+                r#"
+                DELETE FROM notification_outbox
+                WHERE job_id IN (
+                    SELECT job_id
+                    FROM notification_outbox
+                    WHERE status IN (?, ?)
+                      AND updated_at_ms < ?
+                    ORDER BY updated_at_ms ASC, job_id ASC
+                    LIMIT ?
+                )
+                "#,
+                crate::db_params![
+                    STATUS_PUBLISHED,
+                    STATUS_FAILED,
+                    cutoff_ms,
+                    batch_size as i64,
+                ],
+            )
+            .await?;
+        Ok(NotificationOutboxPruneOutcome {
+            candidates_deleted,
+            jobs_deleted,
+        })
+    }
+
+    async fn prune_outboxed_candidates_before(
+        &self,
+        cutoff_ms: i64,
+        batch_size: usize,
+    ) -> Result<u64, NotificationOutboxError> {
+        let mut rows = self
+            .query(
+                r#"
+                SELECT recipient_bare_jid,
+                       conversation_jid,
+                       thread_id,
+                       stanza_id_by,
+                       stanza_id,
+                       class
+                FROM notification_candidates
+                WHERE outboxed_at_ms IS NOT NULL
+                  AND outboxed_at_ms < ?
+                ORDER BY outboxed_at_ms ASC,
+                         recipient_bare_jid ASC,
+                         conversation_jid ASC,
+                         thread_id ASC,
+                         stanza_id_by ASC,
+                         stanza_id ASC,
+                         class ASC
+                LIMIT ?
+                "#,
+                crate::db_params![cutoff_ms, batch_size as i64],
+            )
+            .await?;
+        let mut keys = Vec::new();
+        while let Some(row) = rows.next().await? {
+            keys.push((
+                row.get::<String>(0)?,
+                row.get::<String>(1)?,
+                row.get::<String>(2)?,
+                row.get::<String>(3)?,
+                row.get::<String>(4)?,
+                row.get::<String>(5)?,
+            ));
+        }
+        if keys.is_empty() {
+            return Ok(0);
+        }
+
+        let mut tx = self.db.begin().await?;
+        let mut deleted = 0u64;
+        for (recipient, conversation, thread, stanza_by, stanza_id, class) in keys {
+            deleted += tx
+                .execute(
+                    r#"
+                    DELETE FROM notification_candidates
+                    WHERE recipient_bare_jid = ?
+                      AND conversation_jid = ?
+                      AND thread_id = ?
+                      AND stanza_id_by = ?
+                      AND stanza_id = ?
+                      AND class = ?
+                    "#,
+                    crate::db_params![
+                        recipient,
+                        conversation,
+                        thread,
+                        stanza_by,
+                        stanza_id,
+                        class,
+                    ],
+                )
+                .await?;
+        }
+        tx.commit().await?;
+        Ok(deleted)
+    }
+
     async fn publish_claimed_job(
         &self,
         job: &NotificationOutboxJob,
@@ -651,11 +772,22 @@ impl NotificationOutboxStore {
         push_store: &dyn PushSubscriptionStore,
         first_party_service_jid: &BareJid,
     ) -> Result<NotificationOutboxPublishOutcome, NotificationOutboxError> {
+        if job.push_service_jid() != first_party_service_jid {
+            self.mark_job_failed(
+                job,
+                "notification outbox job targets a non-first-party XEP-0357 Push Service",
+            )
+            .await?;
+            return Ok(NotificationOutboxPublishOutcome::Failed {
+                job_id: job.job_id.clone(),
+            });
+        }
+
         let registrations = push_store
             .get_for_user(&job.recipient_bare_jid.to_string())
             .await
             .map_err(|error| NotificationOutboxError::Push(error.to_string()))?;
-        let service = first_party_service_jid.to_string();
+        let service = job.push_service_jid.to_string();
         let registration = registrations.into_iter().find(|registration| {
             registration.service_jid == service
                 && registration.node.as_deref() == Some(job.node.as_str())
@@ -669,7 +801,7 @@ impl NotificationOutboxStore {
         };
 
         let item = job.to_xep0357_pubsub_item();
-        let push_service_jid = first_party_service_jid.to_string();
+        let push_service_jid = job.push_service_jid.to_string();
         match push_service
             .enqueue_registered_notification_from_user_server_with_publish_options(
                 push_service_jid.as_str(),
@@ -986,6 +1118,13 @@ mod tests {
         )
     }
 
+    fn foreign_target() -> NotificationOutboxTarget {
+        NotificationOutboxTarget::new(
+            bare("push-provider.example.com"),
+            PushServiceNodeName::new("web-node").expect("node"),
+        )
+    }
+
     async fn store() -> NotificationOutboxStore {
         NotificationOutboxStore::new(Database::in_memory("notification-outbox").await.unwrap())
             .await
@@ -1153,5 +1292,102 @@ mod tests {
             .expect("fresh queued job");
         assert_eq!(queued.message_count(), 1);
         assert_ne!(queued.job_id(), claimed[0].job_id());
+    }
+
+    #[tokio::test]
+    async fn publish_rejects_non_first_party_outbox_target() {
+        let store = store().await;
+        store
+            .insert_candidate_and_enqueue(&candidate("archive-1"), &[foreign_target()])
+            .await
+            .expect("insert foreign target job");
+        let push_service = crate::push_service::DatabasePushServiceStore::new(
+            Database::in_memory("push-service").await.unwrap(),
+        )
+        .await
+        .expect("push service");
+        let push_store = crate::push_registrations::DatabasePushRegistrationStore::new(
+            Database::in_memory("push-regs").await.unwrap(),
+        )
+        .await
+        .expect("push registrations");
+
+        let outcomes = store
+            .drain_due_outbox_jobs(&push_service, &push_store, &bare("push.example.com"), 16)
+            .await
+            .expect("drain outbox");
+
+        assert_eq!(outcomes.len(), 1);
+        assert!(matches!(
+            outcomes[0],
+            NotificationOutboxPublishOutcome::Failed { .. }
+        ));
+        assert!(
+            push_service
+                .queued_publish_jobs()
+                .await
+                .expect("queued push jobs")
+                .is_empty(),
+            "foreign outbox target must not enqueue a first-party Push Service job"
+        );
+    }
+
+    #[tokio::test]
+    async fn prune_completed_removes_only_finished_jobs_and_outboxed_candidates() {
+        let store = store().await;
+        store
+            .insert_candidate_and_enqueue(&candidate("archive-old"), &[target()])
+            .await
+            .expect("old insert");
+        let old_job = store
+            .claim_due_outbox_jobs(16)
+            .await
+            .expect("claim old job")
+            .into_iter()
+            .next()
+            .expect("old job");
+        store.mark_job_published(&old_job).await.expect("published");
+
+        store
+            .insert_candidate_and_enqueue(&candidate("archive-live"), &[target()])
+            .await
+            .expect("live insert");
+        let cutoff_ms = crate::time::now_ms().saturating_sub(1_000);
+        let old_ms = cutoff_ms.saturating_sub(1);
+        store
+            .execute(
+                "UPDATE notification_candidates SET outboxed_at_ms = ? WHERE stanza_id = ?",
+                crate::db_params![old_ms, "archive-old"],
+            )
+            .await
+            .expect("age old candidate");
+        store
+            .execute(
+                "UPDATE notification_outbox SET updated_at_ms = ? WHERE job_id = ?",
+                crate::db_params![old_ms, old_job.job_id().as_str()],
+            )
+            .await
+            .expect("age old job");
+
+        let pruned = store
+            .prune_completed_before(cutoff_ms, 100)
+            .await
+            .expect("prune");
+
+        assert_eq!(pruned.candidates_deleted, 1);
+        assert_eq!(pruned.jobs_deleted, 1);
+        let mut candidate_count = store
+            .query("SELECT COUNT(*) FROM notification_candidates", ())
+            .await
+            .expect("candidate count query");
+        let candidate_row = candidate_count
+            .next()
+            .await
+            .expect("candidate count row")
+            .expect("candidate count");
+        assert_eq!(candidate_row.get::<i64>(0).expect("candidate count"), 1);
+        let pending_jobs = store.pending_outbox_jobs().await.expect("pending jobs");
+        assert_eq!(pending_jobs.len(), 1);
+        assert_eq!(pending_jobs[0].status(), NotificationOutboxStatus::Queued);
     }
 }

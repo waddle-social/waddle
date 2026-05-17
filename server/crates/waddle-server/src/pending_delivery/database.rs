@@ -322,6 +322,54 @@ impl PendingDeliveryStorage for DatabasePendingDeliveryStorage {
         Ok(out)
     }
 
+    async fn list_unoutboxed_archived(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<PendingRow>, PendingStorageError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let mut rows = self
+            .query(
+                "SELECT row_id, recipient_jid, original_receipt_at, payload_kind, \
+                        archive_stanza_by, archive_stanza_id, transient_xml, \
+                        flushed_in_session, outbound_sequence \
+                 FROM pending_delivery \
+                 WHERE payload_kind = 'archived' \
+                   AND flushed_in_session IS NULL \
+                   AND notification_outboxed_at_ms IS NULL \
+                 ORDER BY row_id ASC \
+                 LIMIT ?",
+                crate::db_params![limit as i64],
+            )
+            .await?;
+        let mut out = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| PendingStorageError::Other(e.to_string()))?
+        {
+            out.push(decode_row(&row)?);
+        }
+        Ok(out)
+    }
+
+    async fn mark_notification_outboxed(
+        &self,
+        id: &PendingRowId,
+    ) -> Result<u64, PendingStorageError> {
+        self.execute(
+            "UPDATE pending_delivery \
+             SET notification_outboxed_at_ms = ? \
+             WHERE row_id = ? AND notification_outboxed_at_ms IS NULL",
+            crate::db_params![
+                chrono::Utc::now().timestamp_millis(),
+                id.as_str().to_string()
+            ],
+        )
+        .await
+    }
+
     async fn claim_for_session(
         &self,
         recipient: &BareJid,

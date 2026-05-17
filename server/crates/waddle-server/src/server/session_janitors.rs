@@ -44,6 +44,28 @@ fn max_drain_duration_from_env() -> std::time::Duration {
     std::time::Duration::from_secs(secs)
 }
 
+fn notification_outbox_retention_days_from_env() -> u32 {
+    const DEFAULT_DAYS: u32 = 30;
+    const MIN_DAYS: u32 = 1;
+    const MAX_DAYS: u32 = 365;
+    std::env::var("WADDLE_NOTIFICATION_OUTBOX_RETENTION_DAYS")
+        .ok()
+        .and_then(|raw| raw.parse::<u32>().ok())
+        .map(|v| v.clamp(MIN_DAYS, MAX_DAYS))
+        .unwrap_or(DEFAULT_DAYS)
+}
+
+fn notification_outbox_prune_batch_from_env() -> usize {
+    const DEFAULT_BATCH: usize = 1_000;
+    const MIN_BATCH: usize = 1;
+    const MAX_BATCH: usize = 10_000;
+    std::env::var("WADDLE_NOTIFICATION_OUTBOX_PRUNE_BATCH")
+        .ok()
+        .and_then(|raw| raw.parse::<usize>().ok())
+        .map(|v| v.clamp(MIN_BATCH, MAX_BATCH))
+        .unwrap_or(DEFAULT_BATCH)
+}
+
 pub(crate) fn spawn_sm_expiry_janitor(websocket_state: &Arc<WebSocketState>) {
     // XEP-0198 expired-session janitor. Without this, detached SM sessions
     // whose resume window elapses leave MUC occupants in their rooms forever
@@ -463,6 +485,8 @@ pub(crate) fn spawn_notification_outbox_janitor(websocket_state: &Arc<WebSocketS
         .and_then(|s| s.parse::<usize>().ok())
         .map(|v| v.clamp(1, 1_000))
         .unwrap_or(128);
+    let retention_days = notification_outbox_retention_days_from_env();
+    let prune_batch_size = notification_outbox_prune_batch_from_env();
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
         ticker.tick().await;
@@ -482,6 +506,17 @@ pub(crate) fn spawn_notification_outbox_janitor(websocket_state: &Arc<WebSocketS
                     continue;
                 }
             };
+            let recovered = routes::interpret::reconcile_xep0357_notification_candidates(
+                state.as_ref(),
+                batch_size,
+            )
+            .await;
+            if recovered > 0 {
+                debug!(
+                    recovered,
+                    "Notification outbox janitor recovered XEP-0357 candidates from pending_delivery"
+                );
+            }
             match state
                 .deps
                 .protocol
@@ -505,6 +540,30 @@ pub(crate) fn spawn_notification_outbox_janitor(websocket_state: &Arc<WebSocketS
                     warn!(
                         error = %error,
                         "Notification outbox janitor failed; outbox jobs remain durable"
+                    );
+                }
+            }
+            let cutoff_ms = crate::time::now_ms()
+                .saturating_sub(i64::from(retention_days) * 24 * 60 * 60 * 1_000);
+            match state
+                .deps
+                .protocol
+                .notification_outbox
+                .prune_completed_before(cutoff_ms, prune_batch_size)
+                .await
+            {
+                Ok(outcome) if outcome.total_deleted() > 0 => {
+                    debug!(
+                        candidates_deleted = outcome.candidates_deleted,
+                        jobs_deleted = outcome.jobs_deleted,
+                        "Notification outbox janitor pruned completed rows"
+                    );
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    warn!(
+                        error = %error,
+                        "Notification outbox janitor prune failed; completed rows remain durable"
                     );
                 }
             }

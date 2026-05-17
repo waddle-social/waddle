@@ -4,7 +4,7 @@
 //! the contract; an in-memory fake here serves handler tests; the real
 //! libSQL/Postgres implementation lives in `waddle-server`.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Mutex;
 
 use async_trait::async_trait;
@@ -67,6 +67,32 @@ pub trait PendingDeliveryStorage: Send + Sync {
             .collect::<Vec<_>>();
         rows.truncate(limit);
         Ok(rows)
+    }
+
+    /// List a bounded global page of unclaimed Archived rows that have
+    /// not yet been acknowledged by the notification candidate pipeline.
+    ///
+    /// This is intentionally global rather than per-recipient: the
+    /// recovery janitor must be able to find crash gaps after a durable
+    /// XEP-0160 pending row was committed but before the durable XEP-0357
+    /// candidate/outbox write completed. Implementations that do not
+    /// support this recovery path may keep the default empty page.
+    async fn list_unoutboxed_archived(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<PendingRow>, PendingStorageError> {
+        let _ = limit;
+        Ok(Vec::new())
+    }
+
+    /// Mark an Archived pending row as having completed notification
+    /// candidate handling. Returns the number of rows marked.
+    async fn mark_notification_outboxed(
+        &self,
+        id: &PendingRowId,
+    ) -> Result<u64, PendingStorageError> {
+        let _ = id;
+        Ok(0)
     }
 
     /// Atomically claim every currently-unclaimed row for `recipient`,
@@ -217,6 +243,7 @@ pub trait PendingDeliveryStorage: Send + Sync {
 #[derive(Debug)]
 pub struct InMemoryPendingDeliveryStorage {
     inner: Mutex<HashMap<BareJid, VecDeque<PendingRow>>>,
+    notification_outboxed: Mutex<HashSet<PendingRowId>>,
     quota: QuotaPolicy,
 }
 
@@ -225,6 +252,7 @@ impl InMemoryPendingDeliveryStorage {
     pub fn new(quota: QuotaPolicy) -> Self {
         Self {
             inner: Mutex::new(HashMap::new()),
+            notification_outboxed: Mutex::new(HashSet::new()),
             quota,
         }
     }
@@ -305,6 +333,45 @@ impl PendingDeliveryStorage for InMemoryPendingDeliveryStorage {
                     .collect()
             })
             .unwrap_or_default())
+    }
+
+    async fn list_unoutboxed_archived(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<PendingRow>, PendingStorageError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let guard = self
+            .inner
+            .lock()
+            .map_err(|e| PendingStorageError::Other(e.to_string()))?;
+        let notification_outboxed = self
+            .notification_outboxed
+            .lock()
+            .map_err(|e| PendingStorageError::Other(e.to_string()))?;
+        let mut rows = guard
+            .values()
+            .flat_map(|queue| queue.iter())
+            .filter(|row| row.flushed_in_session.is_none())
+            .filter(|row| row.payload.is_archived())
+            .filter(|row| !notification_outboxed.contains(&row.id))
+            .cloned()
+            .collect::<Vec<_>>();
+        rows.sort_by(|left, right| left.id.as_str().cmp(right.id.as_str()));
+        rows.truncate(limit);
+        Ok(rows)
+    }
+
+    async fn mark_notification_outboxed(
+        &self,
+        id: &PendingRowId,
+    ) -> Result<u64, PendingStorageError> {
+        let mut notification_outboxed = self
+            .notification_outboxed
+            .lock()
+            .map_err(|e| PendingStorageError::Other(e.to_string()))?;
+        Ok(u64::from(notification_outboxed.insert(id.clone())))
     }
 
     async fn claim_for_session(
