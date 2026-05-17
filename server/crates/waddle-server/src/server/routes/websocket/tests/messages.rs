@@ -335,6 +335,92 @@ async fn queue_offline_delivery_publishes_first_party_xep0357_notification_witho
 }
 
 #[tokio::test]
+async fn queue_offline_delivery_persists_candidate_before_xep0357_registration_exists() {
+    let state = create_test_websocket_state().await;
+    let recipient: BareJid = "bob@example.com".parse().expect("recipient");
+    let sender: BareJid = "alice@example.com".parse().expect("sender");
+    let node = state
+        .deps
+        .protocol
+        .push_service
+        .ensure_node(&recipient, "web")
+        .await
+        .expect("push node");
+    state
+        .deps
+        .protocol
+        .push_service
+        .upsert_device(
+            &recipient,
+            crate::push_service::PushDeviceRegistration::new(
+                "web-1",
+                node.node(),
+                crate::push_service::PushDevicePlatform::Web,
+                "test",
+            ),
+        )
+        .await
+        .expect("push device");
+
+    let mut message =
+        xmpp_parsers::message::Message::new(Some("bob@example.com".parse().expect("to jid")));
+    message.from = Some("alice@example.com/web".parse().expect("from jid"));
+    message.id = Some("offline-push-registration-late".to_string());
+    message.type_ = XmppMessageType::Chat;
+    message.bodies.insert(
+        String::new(),
+        xmpp_parsers::message::Body("candidate first".to_string()),
+    );
+    let archive_stanza_id = waddle_xmpp_core::xep0359::StanzaId::new(
+        "archive-offline-push-registration-late",
+        jid::Jid::from(recipient.clone()),
+    );
+    store_committed_dm_archive_for_notification(&state, &recipient, &archive_stanza_id, &message)
+        .await;
+    let deps = build_interpret_deps(state.as_ref(), None);
+    crate::server::routes::interpret::interpret(
+        vec![waddle_xmpp::protocol::OutboundEvent::QueueOfflineDelivery {
+            recipient: recipient.clone(),
+            payload: waddle_xmpp::pending_delivery::PendingPayload::Archived(archive_stanza_id),
+            original_receipt_at: chrono::Utc::now(),
+            original_message: Box::new(message),
+        }],
+        &deps,
+    )
+    .await;
+
+    state
+        .deps
+        .protocol
+        .push_service
+        .register_first_party_node_for_owner(&recipient, "push.example.com", node.node(), None)
+        .await
+        .expect("late first-party push registration");
+    project_direct_unread_for_notification(
+        state.as_ref(),
+        &recipient,
+        &sender,
+        "archive-offline-push-registration-late",
+    )
+    .await;
+
+    assert_eq!(
+        drain_notification_candidates_for_test(state.as_ref()).await,
+        1
+    );
+    let outbox_jobs = state
+        .deps
+        .protocol
+        .notification_outbox
+        .pending_outbox_jobs()
+        .await
+        .expect("notification outbox jobs");
+    assert_eq!(outbox_jobs.len(), 1);
+    assert_eq!(outbox_jobs[0].conversation_jid(), &sender);
+    assert_eq!(outbox_jobs[0].node().as_str(), node.node());
+}
+
+#[tokio::test]
 async fn queue_offline_delivery_skips_xep0357_when_committed_mam_row_is_missing() {
     let state = create_test_websocket_state().await;
     let recipient: BareJid = "bob@example.com".parse().expect("recipient");

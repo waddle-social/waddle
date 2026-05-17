@@ -1157,9 +1157,8 @@ async fn enqueue_outbox_job_tx(
     let job_id = NotificationOutboxJobId::fresh();
     // The durable schema stores XML as TEXT; keep protocol context typed until this DB write edge.
     let context_xml = String::from(context);
-    let inserted = tx
-        .execute(
-            r#"
+    tx.execute(
+        r#"
             INSERT INTO notification_outbox (
                 job_id,
                 recipient_bare_jid,
@@ -1180,54 +1179,36 @@ async fn enqueue_outbox_job_tx(
                 updated_at_ms,
                 published_at_ms
             ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, 0, NULL, NULL, NULL, NULL, ?, ?, NULL)
-            ON CONFLICT DO NOTHING
-            "#,
-            crate::db_params![
-                job_id.as_str(),
-                candidate.recipient_bare_jid.to_string(),
-                target.push_service_jid.to_string(),
-                target.node.as_str(),
-                candidate.conversation_jid.to_string(),
-                candidate.thread_id.as_str(),
-                candidate.class.as_db_value(),
-                context_xml.as_str(),
-                STATUS_QUEUED,
-                now_ms,
-                now_ms,
-            ],
-        )
-        .await?;
-    if inserted == 0 {
-        tx.execute(
-            r#"
-            UPDATE notification_outbox
-            SET message_count = message_count + 1,
-                context_xml = ?,
+            ON CONFLICT (
+                recipient_bare_jid,
+                push_service_jid,
+                node,
+                conversation_jid,
+                thread_id,
+                class
+            ) WHERE status = 'queued'
+            DO UPDATE SET
+                message_count = notification_outbox.message_count + 1,
+                context_xml = excluded.context_xml,
                 last_error = NULL,
                 next_attempt_at_ms = NULL,
-                updated_at_ms = ?
-            WHERE recipient_bare_jid = ?
-              AND push_service_jid = ?
-              AND node = ?
-              AND conversation_jid = ?
-              AND thread_id = ?
-              AND class = ?
-              AND status = ?
+                updated_at_ms = excluded.updated_at_ms
             "#,
-            crate::db_params![
-                context_xml.as_str(),
-                now_ms,
-                candidate.recipient_bare_jid.to_string(),
-                target.push_service_jid.to_string(),
-                target.node.as_str(),
-                candidate.conversation_jid.to_string(),
-                candidate.thread_id.as_str(),
-                candidate.class.as_db_value(),
-                STATUS_QUEUED,
-            ],
-        )
-        .await?;
-    }
+        crate::db_params![
+            job_id.as_str(),
+            candidate.recipient_bare_jid.to_string(),
+            target.push_service_jid.to_string(),
+            target.node.as_str(),
+            candidate.conversation_jid.to_string(),
+            candidate.thread_id.as_str(),
+            candidate.class.as_db_value(),
+            context_xml.as_str(),
+            STATUS_QUEUED,
+            now_ms,
+            now_ms,
+        ],
+    )
+    .await?;
     Ok(())
 }
 
