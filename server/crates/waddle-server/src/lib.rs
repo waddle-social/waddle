@@ -22,6 +22,7 @@ pub mod sm_promotion;
 pub mod spaces_pubsub_seed;
 pub mod storage;
 pub mod telemetry;
+pub mod threads;
 pub mod time;
 pub mod vcard;
 
