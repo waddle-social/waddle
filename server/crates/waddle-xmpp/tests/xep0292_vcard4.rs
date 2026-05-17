@@ -39,6 +39,21 @@ fn xep0292_pep_node_matches_spec() {
     assert_eq!(PEP_NODE_VCARD4, "urn:xmpp:vcard4");
 }
 
+#[test]
+fn xep0292_pep_node_constant_mirrors_waddle_xmpp_core() {
+    // `waddle-xmpp-core` keeps an independent `PEP_NODE_VCARD4`
+    // constant so the `NodeConfig::pep_for_node` well-known-node
+    // table can reference it without depending on `waddle-xmpp`. The
+    // two MUST stay equal — otherwise a publish would route through
+    // one identifier and the auto-create config table would key off
+    // the other, and the user's vCard4 node could land with the
+    // wrong access model.
+    assert_eq!(
+        PEP_NODE_VCARD4,
+        waddle_xmpp_core::pubsub::pep::PEP_NODE_VCARD4
+    );
+}
+
 // ── §8 MUST disco advertisement ──────────────────────────────────────
 
 #[test]
