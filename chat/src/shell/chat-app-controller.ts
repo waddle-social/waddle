@@ -1096,6 +1096,22 @@ export function useChatAppController(giphyApiKey: string) {
       pushChatSettingsRoute("app");
       return;
     }
+    if (ui.activePage.value === "threads") {
+      // Without this branch the fall-through below would push
+      // `pushChannelRoute(null)` ("/") every time a watcher fires
+      // after `openThreads()` — bouncing the URL off /threads
+      // immediately, and reverting /threads back to / on initial
+      // load when `onConnectionReady`'s `finally` calls updateUrl.
+      pushThreadsRoute();
+      return;
+    }
+    if (ui.activePage.value === "admin") {
+      // Admin owns the entire workspace and is mounted out of
+      // ChatReadyShell's own popstate-driven adminPanelRef, but
+      // updateUrl still needs an admin-aware branch so a stray
+      // activePage watcher doesn't drag the user back to /.
+      return;
+    }
     if (ui.activePage.value === "dashboard") {
       pushChannelRoute(null);
       return;
