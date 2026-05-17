@@ -452,6 +452,7 @@ fn render_vcard(payload: &Element) -> Option<String> {
         && vcard.note.is_none()
         && vcard.org.is_none()
         && vcard.title.is_none()
+        && vcard.pronouns.is_none()
     {
         return None;
     }
@@ -641,6 +642,21 @@ mod tests {
             </vcard>",
         );
         let summary = render_summary(PepKind::VCard, &with_name).expect("renders");
+        assert_eq!(summary, "updated their profile");
+    }
+
+    #[test]
+    fn vcard_summary_triggers_on_pronouns_only_update() {
+        // A user can publish a vCard4 item carrying only pronouns
+        // (RFC 6350 §6.2.7 / RFC 9554 PRONOUNS) — every other field
+        // can stay untouched. The feed bridge must still treat this
+        // as a meaningful profile update so subscribers see it.
+        let with_pronouns = payload(
+            "<vcard xmlns='urn:ietf:params:xml:ns:vcard-4.0'>\
+                <pronouns><text>they/them</text></pronouns>\
+            </vcard>",
+        );
+        let summary = render_summary(PepKind::VCard, &with_pronouns).expect("renders");
         assert_eq!(summary, "updated their profile");
     }
 
