@@ -361,6 +361,39 @@ async fn has_unread_attribute_present_on_each_entry() {
 }
 
 #[tokio::test]
+async fn disco_info_on_self_advertises_threads_query_feature() {
+    let _guard = TEST_SERIAL.lock().await;
+    let server = TestServer::start();
+    let mut client = admin_client(&server, "th-disco").await;
+    let self_bare = format!("{USERNAME}@{DOMAIN}");
+
+    let disco_payload = Element::builder("query", "http://jabber.org/protocol/disco#info").build();
+    let iq = Element::builder("iq", CLIENT_NS)
+        .attr("type", "get")
+        .attr("id", "th-disco-1")
+        .attr("to", &self_bare)
+        .append(disco_payload)
+        .build();
+    let resp = send_iq(&mut client, element_to_xml(iq), "th-disco-1").await;
+    let iq = parse_iq_element(&resp, "th-disco-1", "result");
+    let query = iq
+        .children()
+        .find(|c| c.name() == "query" && c.ns() == "http://jabber.org/protocol/disco#info")
+        .expect("disco#info query");
+    let features: Vec<&str> = query
+        .children()
+        .filter(|c| c.name() == "feature")
+        .filter_map(|c| c.attr("var"))
+        .collect();
+    assert!(
+        features.contains(&"urn:waddle:threads:0"),
+        "disco#info on self must advertise urn:waddle:threads:0: features={features:?}"
+    );
+
+    let _ = client.close().await;
+}
+
+#[tokio::test]
 async fn response_includes_rsm_set_with_count() {
     let _guard = TEST_SERIAL.lock().await;
     let server = TestServer::start();
