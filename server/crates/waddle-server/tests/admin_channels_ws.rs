@@ -250,7 +250,10 @@ async fn channels_create_forbidden_for_non_owner() {
     )
     .await;
     assert!(is_error(&resp), "expected error, got: {resp}");
-    assert!(resp.contains("forbidden"), "expected <forbidden/>, got: {resp}");
+    assert!(
+        resp.contains("forbidden"),
+        "expected <forbidden/>, got: {resp}"
+    );
     let _ = alice.close().await;
 }
 
@@ -311,7 +314,10 @@ async fn channels_update_forbidden_for_non_owner() {
     )
     .await;
     assert!(is_error(&resp), "expected error, got: {resp}");
-    assert!(resp.contains("forbidden"), "expected <forbidden/>, got: {resp}");
+    assert!(
+        resp.contains("forbidden"),
+        "expected <forbidden/>, got: {resp}"
+    );
     let _ = alice.close().await;
 }
 
@@ -336,7 +342,10 @@ async fn channels_delete_requires_confirm_yes() {
         &submit_form(NODE_CHANNELS_DELETE, &extra),
     )
     .await;
-    assert!(is_error(&resp), "expected error without confirm, got: {resp}");
+    assert!(
+        is_error(&resp),
+        "expected error without confirm, got: {resp}"
+    );
     let _ = admin.close().await;
 }
 
@@ -400,7 +409,10 @@ async fn channels_delete_forbidden_for_non_owner() {
     )
     .await;
     assert!(is_error(&resp), "expected error, got: {resp}");
-    assert!(resp.contains("forbidden"), "expected <forbidden/>, got: {resp}");
+    assert!(
+        resp.contains("forbidden"),
+        "expected <forbidden/>, got: {resp}"
+    );
     let _ = alice.close().await;
 }
 
@@ -456,7 +468,10 @@ async fn channels_occupants_forbidden_for_non_owner() {
     )
     .await;
     assert!(is_error(&resp), "expected error, got: {resp}");
-    assert!(resp.contains("forbidden"), "expected <forbidden/>, got: {resp}");
+    assert!(
+        resp.contains("forbidden"),
+        "expected <forbidden/>, got: {resp}"
+    );
     let _ = alice.close().await;
 }
 
@@ -536,7 +551,10 @@ async fn channels_affiliations_reflects_assignment() {
         ),
     )
     .await;
-    assert!(is_result(&resp), "expected affiliations result, got: {resp}");
+    assert!(
+        is_result(&resp),
+        "expected affiliations result, got: {resp}"
+    );
     assert!(
         resp.contains("bystander@localhost"),
         "affiliations list should include promoted user, got: {resp}"
@@ -559,10 +577,7 @@ async fn channels_affiliations_filter_narrows() {
     let channel_jid = extract_field(&create_resp, "channel_jid").expect("channel_jid");
 
     // Ban one, promote another.
-    for (jid, aff) in [
-        ("badguy@localhost", "outcast"),
-        ("hero@localhost", "owner"),
-    ] {
+    for (jid, aff) in [("badguy@localhost", "outcast"), ("hero@localhost", "owner")] {
         let extra = format!(
             "{}{}{}",
             text_field("channel_jid", &channel_jid),
@@ -622,7 +637,10 @@ async fn channels_affiliations_forbidden_for_non_owner() {
     )
     .await;
     assert!(is_error(&resp), "expected error, got: {resp}");
-    assert!(resp.contains("forbidden"), "expected <forbidden/>, got: {resp}");
+    assert!(
+        resp.contains("forbidden"),
+        "expected <forbidden/>, got: {resp}"
+    );
     let _ = alice.close().await;
 }
 
@@ -646,7 +664,10 @@ async fn channels_set_affiliation_forbidden_for_non_owner() {
     )
     .await;
     assert!(is_error(&resp), "expected error, got: {resp}");
-    assert!(resp.contains("forbidden"), "expected <forbidden/>, got: {resp}");
+    assert!(
+        resp.contains("forbidden"),
+        "expected <forbidden/>, got: {resp}"
+    );
     let _ = alice.close().await;
 }
 
@@ -704,6 +725,9 @@ async fn channels_kick_forbidden_for_non_owner() {
     )
     .await;
     assert!(is_error(&resp), "expected error, got: {resp}");
-    assert!(resp.contains("forbidden"), "expected <forbidden/>, got: {resp}");
+    assert!(
+        resp.contains("forbidden"),
+        "expected <forbidden/>, got: {resp}"
+    );
     let _ = alice.close().await;
 }
