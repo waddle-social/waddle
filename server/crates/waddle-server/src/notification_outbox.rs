@@ -861,72 +861,39 @@ impl NotificationOutboxStore {
         cutoff_ms: i64,
         batch_size: usize,
     ) -> Result<u64, NotificationOutboxError> {
-        let mut rows = self
-            .query(
-                r#"
-                SELECT recipient_bare_jid,
-                       conversation_jid,
-                       thread_id,
-                       stanza_id_by,
-                       stanza_id,
-                       class
-                FROM notification_candidates
-                WHERE outboxed_at_ms IS NOT NULL
-                  AND outboxed_at_ms < ?
-                ORDER BY outboxed_at_ms ASC,
-                         recipient_bare_jid ASC,
-                         conversation_jid ASC,
-                         thread_id ASC,
-                         stanza_id_by ASC,
-                         stanza_id ASC,
-                         class ASC
-                LIMIT ?
-                "#,
-                crate::db_params![cutoff_ms, batch_size as i64],
-            )
-            .await?;
-        let mut keys = Vec::new();
-        while let Some(row) = rows.next().await? {
-            keys.push((
-                row.get::<String>(0)?,
-                row.get::<String>(1)?,
-                row.get::<String>(2)?,
-                row.get::<String>(3)?,
-                row.get::<String>(4)?,
-                row.get::<String>(5)?,
-            ));
-        }
-        if keys.is_empty() {
-            return Ok(0);
-        }
-
-        let mut tx = self.db.begin().await?;
-        let mut deleted = 0u64;
-        for (recipient, conversation, thread, stanza_by, stanza_id, class) in keys {
-            deleted += tx
-                .execute(
-                    r#"
-                    DELETE FROM notification_candidates
-                    WHERE recipient_bare_jid = ?
-                      AND conversation_jid = ?
-                      AND thread_id = ?
-                      AND stanza_id_by = ?
-                      AND stanza_id = ?
-                      AND class = ?
-                    "#,
-                    crate::db_params![
-                        recipient,
-                        conversation,
-                        thread,
-                        stanza_by,
-                        stanza_id,
-                        class,
-                    ],
+        self.execute(
+            r#"
+                DELETE FROM notification_candidates
+                WHERE (
+                    recipient_bare_jid,
+                    conversation_jid,
+                    thread_id,
+                    stanza_id_by,
+                    stanza_id,
+                    class
+                ) IN (
+                    SELECT recipient_bare_jid,
+                           conversation_jid,
+                           thread_id,
+                           stanza_id_by,
+                           stanza_id,
+                           class
+                    FROM notification_candidates
+                    WHERE outboxed_at_ms IS NOT NULL
+                      AND outboxed_at_ms < ?
+                    ORDER BY outboxed_at_ms ASC,
+                             recipient_bare_jid ASC,
+                             conversation_jid ASC,
+                             thread_id ASC,
+                             stanza_id_by ASC,
+                             stanza_id ASC,
+                             class ASC
+                    LIMIT ?
                 )
-                .await?;
-        }
-        tx.commit().await?;
-        Ok(deleted)
+                "#,
+            crate::db_params![cutoff_ms, batch_size as i64],
+        )
+        .await
     }
 
     async fn publish_claimed_job(
@@ -2254,5 +2221,61 @@ mod tests {
         let pending_jobs = store.pending_outbox_jobs().await.expect("pending jobs");
         assert_eq!(pending_jobs.len(), 1);
         assert_eq!(pending_jobs[0].status(), NotificationOutboxStatus::Queued);
+    }
+
+    #[tokio::test]
+    async fn prune_completed_deletes_outboxed_candidates_in_ordered_batches() {
+        let store = store().await;
+        enqueue_jobs_for_test(&store, &candidate("archive-oldest"), &[target()]).await;
+        enqueue_jobs_for_test(&store, &candidate("archive-older"), &[target()]).await;
+        enqueue_jobs_for_test(&store, &candidate("archive-live"), &[target()]).await;
+        let cutoff_ms = crate::time::now_ms().saturating_sub(1_000);
+        let oldest_ms = cutoff_ms.saturating_sub(2);
+        let older_ms = cutoff_ms.saturating_sub(1);
+        let live_ms = cutoff_ms.saturating_add(1);
+        store
+            .execute(
+                "UPDATE notification_candidates SET outboxed_at_ms = ? WHERE stanza_id = ?",
+                crate::db_params![oldest_ms, "archive-oldest"],
+            )
+            .await
+            .expect("age oldest candidate");
+        store
+            .execute(
+                "UPDATE notification_candidates SET outboxed_at_ms = ? WHERE stanza_id = ?",
+                crate::db_params![older_ms, "archive-older"],
+            )
+            .await
+            .expect("age older candidate");
+        store
+            .execute(
+                "UPDATE notification_candidates SET outboxed_at_ms = ? WHERE stanza_id = ?",
+                crate::db_params![live_ms, "archive-live"],
+            )
+            .await
+            .expect("keep live candidate");
+
+        let pruned = store
+            .prune_completed_before(cutoff_ms, 1)
+            .await
+            .expect("prune");
+
+        assert_eq!(pruned.candidates_deleted, 1);
+        assert_eq!(pruned.jobs_deleted, 0);
+        let mut rows = store
+            .query(
+                "SELECT stanza_id FROM notification_candidates ORDER BY outboxed_at_ms ASC",
+                (),
+            )
+            .await
+            .expect("candidate query");
+        let mut remaining = Vec::new();
+        while let Some(row) = rows.next().await.expect("candidate row") {
+            remaining.push(row.get::<String>(0).expect("stanza id"));
+        }
+        assert_eq!(
+            remaining,
+            vec!["archive-older".to_string(), "archive-live".to_string()]
+        );
     }
 }
