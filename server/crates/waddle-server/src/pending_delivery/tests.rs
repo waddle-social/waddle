@@ -27,6 +27,21 @@ fn transient_row(recipient: &str, body: &str) -> PendingRow {
     }
 }
 
+fn archived_row(recipient: &str, archive_id: &str) -> PendingRow {
+    let recipient_bare = bare(recipient);
+    PendingRow {
+        id: PendingRowId::fresh(),
+        recipient: recipient_bare.clone(),
+        original_receipt_at: Utc::now(),
+        payload: PendingPayload::Archived(StanzaId::new(
+            archive_id,
+            jid::Jid::from(recipient_bare),
+        )),
+        flushed_in_session: None,
+        outbound_sequence: None,
+    }
+}
+
 fn message_xml(message: Message) -> String {
     let element: xmpp_parsers::minidom::Element = message.into();
     let mut buf = Vec::new();
@@ -422,6 +437,67 @@ async fn db_storage_round_trips_archived_and_transient_rows() {
     // FIFO: archived inserted first.
     assert!(rows[0].payload.is_archived());
     assert!(rows[1].payload.is_transient());
+}
+
+#[tokio::test]
+async fn db_storage_lists_only_unoutboxed_unclaimed_archived_rows() {
+    let storage = DatabasePendingDeliveryStorage::open(None, QuotaPolicy::Unlimited)
+        .await
+        .expect("open in-memory storage");
+    let keep = archived_row("alice@example.com", "archive-keep");
+    let keep_id = keep.id.clone();
+    let marked = archived_row("alice@example.com", "archive-marked");
+    let marked_id = marked.id.clone();
+    let claimed = archived_row("bob@example.com", "archive-claimed");
+
+    assert_eq!(storage.insert(keep).await.unwrap(), InsertOutcome::Inserted);
+    assert_eq!(
+        storage.insert(marked).await.unwrap(),
+        InsertOutcome::Inserted
+    );
+    assert_eq!(
+        storage.insert(claimed).await.unwrap(),
+        InsertOutcome::Inserted
+    );
+    assert_eq!(
+        storage
+            .insert(transient_row("alice@example.com", "transient"))
+            .await
+            .unwrap(),
+        InsertOutcome::Inserted
+    );
+    assert_eq!(
+        storage
+            .mark_notification_outboxed(&marked_id)
+            .await
+            .unwrap(),
+        1
+    );
+    let claimed_rows = storage
+        .claim_for_session(
+            &bare("bob@example.com"),
+            &SmSessionId::new("claimed-session"),
+        )
+        .await
+        .expect("claim bob rows");
+    assert_eq!(claimed_rows.len(), 1);
+
+    let unoutboxed = storage
+        .list_unoutboxed_archived(16)
+        .await
+        .expect("list unoutboxed archived");
+
+    assert_eq!(unoutboxed.len(), 1);
+    assert_eq!(unoutboxed[0].id, keep_id);
+    assert_eq!(
+        storage.mark_notification_outboxed(&keep_id).await.unwrap(),
+        1
+    );
+    assert!(storage
+        .list_unoutboxed_archived(16)
+        .await
+        .expect("list after mark")
+        .is_empty());
 }
 
 #[tokio::test]

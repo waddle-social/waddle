@@ -89,6 +89,10 @@ pub struct ProtocolServices {
     pub push_store: Arc<dyn waddle_xmpp::push::PushSubscriptionStore>,
     /// First-party XMPP Push Service state and fake provider dispatch.
     pub push_service: Arc<crate::push_service::DatabasePushServiceStore>,
+    /// User-server notification candidate/outbox state. This coalesces
+    /// committed XMPP state into durable XEP-0357 PubSub publish jobs while
+    /// leaving canonical registration state in `push_store`.
+    pub notification_outbox: Arc<crate::notification_outbox::NotificationOutboxStore>,
     /// Durable derived projection of XEP-0492 notification settings from
     /// canonical XMPP state.
     pub notification_settings_projection:

@@ -4,7 +4,7 @@
 //! the contract; an in-memory fake here serves handler tests; the real
 //! libSQL/Postgres implementation lives in `waddle-server`.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Mutex;
 
 use async_trait::async_trait;
@@ -67,6 +67,32 @@ pub trait PendingDeliveryStorage: Send + Sync {
             .collect::<Vec<_>>();
         rows.truncate(limit);
         Ok(rows)
+    }
+
+    /// List a bounded global page of unclaimed Archived rows that have
+    /// not yet been acknowledged by the notification candidate pipeline.
+    ///
+    /// This is intentionally global rather than per-recipient: the
+    /// recovery janitor must be able to find crash gaps after a durable
+    /// XEP-0160 pending row was committed but before the durable XEP-0357
+    /// candidate/outbox write completed. Implementations that do not
+    /// support this recovery path may keep the default empty page.
+    async fn list_unoutboxed_archived(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<PendingRow>, PendingStorageError> {
+        let _ = limit;
+        Ok(Vec::new())
+    }
+
+    /// Mark an Archived pending row as having completed notification
+    /// candidate handling. Returns the number of rows marked.
+    async fn mark_notification_outboxed(
+        &self,
+        id: &PendingRowId,
+    ) -> Result<u64, PendingStorageError> {
+        let _ = id;
+        Ok(0)
     }
 
     /// Atomically claim every currently-unclaimed row for `recipient`,
@@ -217,6 +243,7 @@ pub trait PendingDeliveryStorage: Send + Sync {
 #[derive(Debug)]
 pub struct InMemoryPendingDeliveryStorage {
     inner: Mutex<HashMap<BareJid, VecDeque<PendingRow>>>,
+    notification_outboxed: Mutex<HashSet<PendingRowId>>,
     quota: QuotaPolicy,
 }
 
@@ -225,6 +252,7 @@ impl InMemoryPendingDeliveryStorage {
     pub fn new(quota: QuotaPolicy) -> Self {
         Self {
             inner: Mutex::new(HashMap::new()),
+            notification_outboxed: Mutex::new(HashSet::new()),
             quota,
         }
     }
@@ -237,6 +265,23 @@ impl InMemoryPendingDeliveryStorage {
     /// Build with no cap — useful for tests that don't exercise quota.
     pub fn unlimited() -> Self {
         Self::new(QuotaPolicy::Unlimited)
+    }
+
+    fn clear_notification_outboxed_markers(
+        &self,
+        ids: &[PendingRowId],
+    ) -> Result<(), PendingStorageError> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let mut notification_outboxed = self
+            .notification_outboxed
+            .lock()
+            .map_err(|e| PendingStorageError::Other(e.to_string()))?;
+        for id in ids {
+            notification_outboxed.remove(id);
+        }
+        Ok(())
     }
 }
 
@@ -307,6 +352,57 @@ impl PendingDeliveryStorage for InMemoryPendingDeliveryStorage {
             .unwrap_or_default())
     }
 
+    async fn list_unoutboxed_archived(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<PendingRow>, PendingStorageError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let guard = self
+            .inner
+            .lock()
+            .map_err(|e| PendingStorageError::Other(e.to_string()))?;
+        let notification_outboxed = self
+            .notification_outboxed
+            .lock()
+            .map_err(|e| PendingStorageError::Other(e.to_string()))?;
+        let mut rows = guard
+            .values()
+            .flat_map(|queue| queue.iter())
+            .filter(|row| row.flushed_in_session.is_none())
+            .filter(|row| row.payload.is_archived())
+            .filter(|row| !notification_outboxed.contains(&row.id))
+            .cloned()
+            .collect::<Vec<_>>();
+        rows.sort_by(|left, right| left.id.as_str().cmp(right.id.as_str()));
+        rows.truncate(limit);
+        Ok(rows)
+    }
+
+    async fn mark_notification_outboxed(
+        &self,
+        id: &PendingRowId,
+    ) -> Result<u64, PendingStorageError> {
+        let guard = self
+            .inner
+            .lock()
+            .map_err(|e| PendingStorageError::Other(e.to_string()))?;
+        if !guard
+            .values()
+            .flat_map(|queue| queue.iter())
+            .any(|row| &row.id == id)
+        {
+            return Ok(0);
+        }
+        drop(guard);
+        let mut notification_outboxed = self
+            .notification_outboxed
+            .lock()
+            .map_err(|e| PendingStorageError::Other(e.to_string()))?;
+        Ok(u64::from(notification_outboxed.insert(id.clone())))
+    }
+
     async fn claim_for_session(
         &self,
         recipient: &BareJid,
@@ -342,12 +438,22 @@ impl PendingDeliveryStorage for InMemoryPendingDeliveryStorage {
             .lock()
             .map_err(|e| PendingStorageError::Other(e.to_string()))?;
         let mut removed = 0u64;
+        let mut removed_ids = Vec::new();
         for queue in guard.values_mut() {
-            let before = queue.len();
-            queue.retain(|row| row.flushed_in_session.as_ref() != Some(session));
-            removed += (before - queue.len()) as u64;
+            let mut kept = VecDeque::with_capacity(queue.len());
+            for row in queue.drain(..) {
+                if row.flushed_in_session.as_ref() == Some(session) {
+                    removed_ids.push(row.id);
+                    removed += 1;
+                } else {
+                    kept.push_back(row);
+                }
+            }
+            *queue = kept;
         }
         guard.retain(|_, q| !q.is_empty());
+        drop(guard);
+        self.clear_notification_outboxed_markers(&removed_ids)?;
         Ok(removed)
     }
 
@@ -363,6 +469,10 @@ impl PendingDeliveryStorage for InMemoryPendingDeliveryStorage {
             removed += (before - queue.len()) as u64;
         }
         guard.retain(|_, q| !q.is_empty());
+        drop(guard);
+        if removed > 0 {
+            self.clear_notification_outboxed_markers(std::slice::from_ref(id))?;
+        }
         Ok(removed)
     }
 
@@ -459,16 +569,24 @@ impl PendingDeliveryStorage for InMemoryPendingDeliveryStorage {
             .lock()
             .map_err(|e| PendingStorageError::Other(e.to_string()))?;
         let mut removed = 0u64;
+        let mut removed_ids = Vec::new();
         for queue in guard.values_mut() {
-            let before = queue.len();
-            queue.retain(|row| {
+            let mut kept = VecDeque::with_capacity(queue.len());
+            for row in queue.drain(..) {
                 let claimed_by_session = row.flushed_in_session.as_ref() == Some(session);
                 let acked = matches!(row.outbound_sequence, Some(seq) if seq <= sequence_max);
-                !(claimed_by_session && acked)
-            });
-            removed += (before - queue.len()) as u64;
+                if claimed_by_session && acked {
+                    removed_ids.push(row.id);
+                    removed += 1;
+                } else {
+                    kept.push_back(row);
+                }
+            }
+            *queue = kept;
         }
         guard.retain(|_, q| !q.is_empty());
+        drop(guard);
+        self.clear_notification_outboxed_markers(&removed_ids)?;
         Ok(removed)
     }
 
@@ -514,12 +632,22 @@ impl PendingDeliveryStorage for InMemoryPendingDeliveryStorage {
             .lock()
             .map_err(|e| PendingStorageError::Other(e.to_string()))?;
         let mut removed = 0u64;
+        let mut removed_ids = Vec::new();
         for queue in guard.values_mut() {
-            let before = queue.len();
-            queue.retain(|row| row.original_receipt_at >= cutoff);
-            removed += (before - queue.len()) as u64;
+            let mut kept = VecDeque::with_capacity(queue.len());
+            for row in queue.drain(..) {
+                if row.original_receipt_at < cutoff {
+                    removed_ids.push(row.id);
+                    removed += 1;
+                } else {
+                    kept.push_back(row);
+                }
+            }
+            *queue = kept;
         }
         guard.retain(|_, q| !q.is_empty());
+        drop(guard);
+        self.clear_notification_outboxed_markers(&removed_ids)?;
         Ok(removed)
     }
 }

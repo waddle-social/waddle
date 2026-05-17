@@ -2,8 +2,12 @@
 
 mod ws_common;
 
-use std::str::FromStr;
+use std::{
+    str::FromStr,
+    time::{Duration, Instant},
+};
 
+use sqlx::Row;
 use ws_common::{TestServer, WsXmppClient};
 use xmpp_parsers::minidom::Element;
 
@@ -13,6 +17,7 @@ const DISCO_ITEMS_NS: &str = "http://jabber.org/protocol/disco#items";
 const NS_PUBSUB: &str = "http://jabber.org/protocol/pubsub";
 const NS_PUSH: &str = "urn:xmpp:push:0";
 const NS_WADDLE_PUSH_SERVICE: &str = "urn:waddle:push-service:0";
+const NS_WADDLE_PUSH_CONTEXT: &str = "urn:waddle:push:context:0";
 const STANZA_ERROR_NS: &str = "urn:ietf:params:xml:ns:xmpp-stanzas";
 
 const DOMAIN: &str = "localhost";
@@ -97,6 +102,19 @@ fn disco_feature_vars(query: &Element) -> std::collections::BTreeSet<String> {
         .collect()
 }
 
+fn xdata_field_value(form: &Element, var: &str) -> Option<String> {
+    form.children()
+        .find(|child| {
+            child.is("field", waddle_xmpp::xep::NS_DATA_FORMS) && child.attr("var") == Some(var)
+        })
+        .and_then(|field| {
+            field
+                .children()
+                .find(|child| child.is("value", waddle_xmpp::xep::NS_DATA_FORMS))
+        })
+        .map(Element::text)
+}
+
 fn assert_iq_error_condition(xml: &str, id: &str, condition: &str) {
     let iq = parse_iq_element(xml, id, "error");
     let error = single_child(&iq, "error", CLIENT_NS);
@@ -106,6 +124,50 @@ fn assert_iq_error_condition(xml: &str, id: &str, condition: &str) {
             .any(|child| child.name() == condition && child.ns() == STANZA_ERROR_NS),
         "expected {condition} stanza error: {xml}"
     );
+}
+
+async fn wait_for_push_publish_payload(database_url: &str, node: &str) -> String {
+    let pool = sqlx::SqlitePool::connect(database_url)
+        .await
+        .expect("open sqlite db");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        if let Some(row) = sqlx::query(
+            "SELECT payload_xml \
+             FROM push_publish_jobs \
+             WHERE node = ? \
+             ORDER BY created_at_ms DESC \
+             LIMIT 1",
+        )
+        .bind(node)
+        .fetch_optional(&pool)
+        .await
+        .expect("query push publish job")
+        {
+            return row.get("payload_xml");
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for Push Service publish job for node {node}"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+async fn notification_candidate_count(database_url: &str, recipient: &str) -> i64 {
+    let pool = sqlx::SqlitePool::connect(database_url)
+        .await
+        .expect("open sqlite db");
+    let row = sqlx::query(
+        "SELECT COUNT(*) AS count \
+         FROM notification_candidates \
+         WHERE recipient_bare_jid = ?",
+    )
+    .bind(recipient)
+    .fetch_one(&pool)
+    .await
+    .expect("query notification candidates");
+    row.get("count")
 }
 
 #[tokio::test]
@@ -241,6 +303,136 @@ async fn xep0357_push_service_rejects_client_origin_pubsub_notification_publish(
     assert_iq_error_condition(&publish_response, "push-publish", "forbidden");
 
     let _ = client.close().await;
+}
+
+#[tokio::test]
+async fn xep0357_offline_dm_emits_durable_summary_pubsub_publish_job() {
+    let temp_dir = tempfile::tempdir().expect("temp dir");
+    let db_path = temp_dir.path().join("xep0357-offline-push.sqlite3");
+    let database_url = format!("sqlite://{}?mode=rwc", db_path.display());
+    let server =
+        TestServer::start_persistent_with_extra_accounts(&database_url, &[("bob", "bob-password")]);
+    let ws_url = server.ws_url();
+    let mut bob = WsXmppClient::connect_and_auth(
+        &ws_url,
+        DOMAIN,
+        "bob",
+        "bob-password",
+        &format!("xep0357-bob-offline-{}", uuid::Uuid::new_v4()),
+    )
+    .await
+    .expect("bob connection");
+
+    let node_response = send_iq(
+        &mut bob,
+        iq_frame(
+            "set",
+            "bob-offline-push-ensure-node",
+            PUSH_SERVICE_JID,
+            Element::builder("ensure-node", NS_WADDLE_PUSH_SERVICE)
+                .attr("app-id", "web")
+                .build(),
+        ),
+        "bob-offline-push-ensure-node",
+    )
+    .await;
+    let node = child_attr(&node_response, "node", "id").expect("node id");
+    let register_device = Element::builder("register-device", NS_WADDLE_PUSH_SERVICE)
+        .attr("node", node.as_str())
+        .attr("device-id", "bob-web-1")
+        .attr("platform", "web")
+        .attr("environment", "test")
+        .append(
+            Element::builder("provider-token", NS_WADDLE_PUSH_SERVICE)
+                .append("bob-provider-secret")
+                .build(),
+        )
+        .build();
+    let _ = send_iq(
+        &mut bob,
+        iq_frame(
+            "set",
+            "bob-offline-push-register-device",
+            PUSH_SERVICE_JID,
+            register_device,
+        ),
+        "bob-offline-push-register-device",
+    )
+    .await;
+    let enable = Element::builder("enable", NS_PUSH)
+        .attr("jid", PUSH_SERVICE_JID)
+        .attr("node", node.as_str())
+        .build();
+    let enable_response = send_iq(
+        &mut bob,
+        iq_frame("set", "bob-offline-push-enable", DOMAIN, enable),
+        "bob-offline-push-enable",
+    )
+    .await;
+    let enable_iq = parse_iq_element(&enable_response, "bob-offline-push-enable", "result");
+    assert!(enable_iq.children().next().is_none());
+    let _ = bob.close().await;
+
+    let mut admin = WsXmppClient::connect_and_auth(
+        &ws_url,
+        DOMAIN,
+        USERNAME,
+        server.fixed_account_password(),
+        &format!("xep0357-admin-sender-{}", uuid::Uuid::new_v4()),
+    )
+    .await
+    .expect("admin connection");
+    let offline_message = element_to_xml(
+        Element::builder("message", CLIENT_NS)
+            .attr("type", "chat")
+            .attr("to", "bob@localhost")
+            .attr("id", "offline-push-dm-1")
+            .append(
+                Element::builder("body", CLIENT_NS)
+                    .append("durable notification body must stay private")
+                    .build(),
+            )
+            .build(),
+    );
+    admin.send(&offline_message).await.expect("send offline dm");
+
+    let payload_xml = wait_for_push_publish_payload(&database_url, node.as_str()).await;
+    let payload = Element::from_str(&payload_xml).expect("valid notification payload XML");
+    assert!(payload.is("notification", NS_PUSH));
+    let summary = payload
+        .children()
+        .find(|child| child.is("x", waddle_xmpp::xep::NS_DATA_FORMS))
+        .expect("XEP-0357 summary data form");
+    assert_eq!(summary.attr("type"), Some("result"));
+    assert!(summary.children().any(|field| {
+        field.is("field", waddle_xmpp::xep::NS_DATA_FORMS)
+            && field.attr("var") == Some("FORM_TYPE")
+            && field.attr("type") == Some("hidden")
+    }));
+    assert_eq!(
+        xdata_field_value(summary, "FORM_TYPE").as_deref(),
+        Some("urn:xmpp:push:summary")
+    );
+    assert_eq!(
+        xdata_field_value(summary, "message-count").as_deref(),
+        Some("1")
+    );
+    let context = payload
+        .children()
+        .find(|child| child.is("context", NS_WADDLE_PUSH_CONTEXT))
+        .expect("Waddle push context");
+    assert_eq!(context.attr("conversation"), Some("admin@localhost"));
+    assert_eq!(context.attr("class"), Some("dm"));
+    assert!(
+        !payload_xml.contains("durable notification body"),
+        "minimal XEP-0357 payload must not leak the message body"
+    );
+    assert_eq!(
+        notification_candidate_count(&database_url, "bob@localhost").await,
+        1
+    );
+
+    let _ = admin.close().await;
 }
 
 #[tokio::test]

@@ -1,5 +1,84 @@
 use super::*;
 
+async fn store_committed_dm_archive_for_notification(
+    state: &WebSocketState,
+    archive_jid: &BareJid,
+    archive_stanza_id: &waddle_xmpp_core::xep0359::StanzaId,
+    message: &xmpp_parsers::message::Message,
+) {
+    let from = message.from.clone().expect("archived message from");
+    let to = message
+        .to
+        .clone()
+        .unwrap_or_else(|| jid::Jid::from(archive_jid.clone()));
+    let body = message
+        .bodies
+        .get("")
+        .or_else(|| message.bodies.values().next())
+        .map(|body| body.0.clone());
+    let archived = waddle_xmpp::mam::ArchivedMessage {
+        id: archive_stanza_id.id.clone(),
+        body,
+        stanza_id: Some(archive_stanza_id.clone()),
+        message_type: message.type_.clone(),
+        stanza_xml: Some(
+            waddle_xmpp::parser::message_to_string(message).expect("serialize archived message"),
+        ),
+        ..waddle_xmpp::mam::ArchivedMessage::for_test(from, to)
+    };
+    state
+        .deps
+        .protocol
+        .mam_storage
+        .store_message(archive_jid, &archived)
+        .await
+        .expect("store committed MAM row");
+}
+
+async fn project_direct_unread_for_notification(
+    state: &WebSocketState,
+    recipient: &BareJid,
+    sender: &BareJid,
+    stanza_id: &str,
+) {
+    state
+        .deps
+        .protocol
+        .inbox_storage
+        .upsert(
+            recipient,
+            waddle_xmpp::inbox::InboxEntry::new(
+                sender.clone(),
+                waddle_xmpp::inbox::ConversationKind::Direct,
+                stanza_id,
+                crate::time::now_ms(),
+            ),
+            true,
+        )
+        .await
+        .expect("project unread inbox entry");
+}
+
+async fn drain_notification_candidates_for_test(state: &WebSocketState) -> usize {
+    let push_service_jid: BareJid = state
+        .deps
+        .service_domains
+        .push
+        .parse()
+        .expect("push service jid");
+    state
+        .deps
+        .protocol
+        .notification_outbox
+        .drain_pending_candidates_into_outbox(
+            state.deps.protocol.push_store.as_ref(),
+            &push_service_jid,
+            16,
+        )
+        .await
+        .expect("drain notification candidates")
+}
+
 #[tokio::test]
 async fn queue_offline_delivery_publishes_first_party_xep0357_notification_without_touching_external_registrations(
 ) {
@@ -83,20 +162,85 @@ async fn queue_offline_delivery_publishes_first_party_xep0357_notification_witho
         String::new(),
         xmpp_parsers::message::Body("push me".to_string()),
     );
+    let archive_stanza_id = waddle_xmpp_core::xep0359::StanzaId::new(
+        "archive-offline-push-1",
+        jid::Jid::from(recipient.clone()),
+    );
+    store_committed_dm_archive_for_notification(&state, &recipient, &archive_stanza_id, &message)
+        .await;
     let deps = build_interpret_deps(state.as_ref(), None);
     crate::server::routes::interpret::interpret(
         vec![waddle_xmpp::protocol::OutboundEvent::QueueOfflineDelivery {
             recipient: recipient.clone(),
-            payload: waddle_xmpp::pending_delivery::PendingPayload::Transient(Box::new(
-                message.clone(),
-            )),
+            payload: waddle_xmpp::pending_delivery::PendingPayload::Archived(archive_stanza_id),
             original_receipt_at: chrono::Utc::now(),
             original_message: Box::new(message),
         }],
         &deps,
     )
     .await;
+    let sender_bare: BareJid = "alice@example.com".parse().expect("sender bare jid");
+    project_direct_unread_for_notification(
+        state.as_ref(),
+        &recipient,
+        &sender_bare,
+        "archive-offline-push-1",
+    )
+    .await;
 
+    let attempts_before_drain = state
+        .deps
+        .protocol
+        .push_service
+        .delivery_attempts_for_node(node.node())
+        .await
+        .expect("delivery attempts before drain");
+    assert!(attempts_before_drain.is_empty());
+    assert_eq!(
+        drain_notification_candidates_for_test(state.as_ref()).await,
+        1
+    );
+    let outbox_jobs = state
+        .deps
+        .protocol
+        .notification_outbox
+        .pending_outbox_jobs()
+        .await
+        .expect("notification outbox jobs");
+    assert_eq!(outbox_jobs.len(), 1);
+    assert_eq!(outbox_jobs[0].message_count(), 1);
+    assert_eq!(outbox_jobs[0].conversation_jid(), &sender_bare);
+    let push_service_jid: BareJid = "push.example.com".parse().expect("push service jid");
+    let outbox_results = state
+        .deps
+        .protocol
+        .notification_outbox
+        .drain_due_outbox_jobs(
+            state.deps.protocol.push_service.as_ref(),
+            state.deps.protocol.push_store.as_ref(),
+            state.deps.protocol.inbox_storage.as_ref(),
+            &push_service_jid,
+            16,
+        )
+        .await
+        .expect("drain notification outbox");
+    assert_eq!(outbox_results.len(), 1);
+    let queued_publish_jobs = state
+        .deps
+        .protocol
+        .push_service
+        .queued_publish_jobs()
+        .await
+        .expect("queued push publish jobs");
+    assert_eq!(queued_publish_jobs.len(), 1);
+    assert_eq!(queued_publish_jobs[0].node(), node.node());
+    state
+        .deps
+        .protocol
+        .push_service
+        .drain_queued_notification_publish_jobs(16)
+        .await
+        .expect("drain push publish jobs");
     let attempts = state
         .deps
         .protocol
@@ -107,7 +251,6 @@ async fn queue_offline_delivery_publishes_first_party_xep0357_notification_witho
     assert_eq!(attempts.len(), 1);
     assert_eq!(attempts[0].device_id(), "web-1");
     assert!(!attempts[0].item_id().is_empty());
-    let push_service_jid: BareJid = "push.example.com".parse().expect("push service jid");
     let pubsub_node = state
         .deps
         .protocol
@@ -150,6 +293,29 @@ async fn queue_offline_delivery_publishes_first_party_xep0357_notification_witho
         .parse()
         .expect("notification payload xml");
     assert!(stored_payload.is("notification", waddle_xmpp::xep::xep0357::NS_PUSH));
+    let summary = stored_payload
+        .children()
+        .find(|child| child.is("x", waddle_xmpp::xep::NS_DATA_FORMS))
+        .expect("xep-0357 summary form");
+    assert!(summary.children().any(|field| {
+        field.is("field", waddle_xmpp::xep::NS_DATA_FORMS)
+            && field.attr("var") == Some("FORM_TYPE")
+            && field.children().any(|value| {
+                value.is("value", waddle_xmpp::xep::NS_DATA_FORMS)
+                    && value.text() == "urn:xmpp:push:summary"
+            })
+    }));
+    assert!(summary.children().any(|field| {
+        field.is("field", waddle_xmpp::xep::NS_DATA_FORMS)
+            && field.attr("var") == Some("message-count")
+            && field.children().any(|value| {
+                value.is("value", waddle_xmpp::xep::NS_DATA_FORMS) && value.text() == "1"
+            })
+    }));
+    assert!(stored_payload.children().any(|child| child.is(
+        "context",
+        crate::notification_outbox::WADDLE_PUSH_CONTEXT_NS
+    )));
 
     let registrations = state
         .deps
@@ -168,12 +334,178 @@ async fn queue_offline_delivery_publishes_first_party_xep0357_notification_witho
     }));
 }
 
+#[tokio::test]
+async fn queue_offline_delivery_persists_candidate_before_xep0357_registration_exists() {
+    let state = create_test_websocket_state().await;
+    let recipient: BareJid = "bob@example.com".parse().expect("recipient");
+    let sender: BareJid = "alice@example.com".parse().expect("sender");
+    let node = state
+        .deps
+        .protocol
+        .push_service
+        .ensure_node(&recipient, "web")
+        .await
+        .expect("push node");
+    state
+        .deps
+        .protocol
+        .push_service
+        .upsert_device(
+            &recipient,
+            crate::push_service::PushDeviceRegistration::new(
+                "web-1",
+                node.node(),
+                crate::push_service::PushDevicePlatform::Web,
+                "test",
+            ),
+        )
+        .await
+        .expect("push device");
+
+    let mut message =
+        xmpp_parsers::message::Message::new(Some("bob@example.com".parse().expect("to jid")));
+    message.from = Some("alice@example.com/web".parse().expect("from jid"));
+    message.id = Some("offline-push-registration-late".to_string());
+    message.type_ = XmppMessageType::Chat;
+    message.bodies.insert(
+        String::new(),
+        xmpp_parsers::message::Body("candidate first".to_string()),
+    );
+    let archive_stanza_id = waddle_xmpp_core::xep0359::StanzaId::new(
+        "archive-offline-push-registration-late",
+        jid::Jid::from(recipient.clone()),
+    );
+    store_committed_dm_archive_for_notification(&state, &recipient, &archive_stanza_id, &message)
+        .await;
+    let deps = build_interpret_deps(state.as_ref(), None);
+    crate::server::routes::interpret::interpret(
+        vec![waddle_xmpp::protocol::OutboundEvent::QueueOfflineDelivery {
+            recipient: recipient.clone(),
+            payload: waddle_xmpp::pending_delivery::PendingPayload::Archived(archive_stanza_id),
+            original_receipt_at: chrono::Utc::now(),
+            original_message: Box::new(message),
+        }],
+        &deps,
+    )
+    .await;
+
+    state
+        .deps
+        .protocol
+        .push_service
+        .register_first_party_node_for_owner(&recipient, "push.example.com", node.node(), None)
+        .await
+        .expect("late first-party push registration");
+    project_direct_unread_for_notification(
+        state.as_ref(),
+        &recipient,
+        &sender,
+        "archive-offline-push-registration-late",
+    )
+    .await;
+
+    assert_eq!(
+        drain_notification_candidates_for_test(state.as_ref()).await,
+        1
+    );
+    let outbox_jobs = state
+        .deps
+        .protocol
+        .notification_outbox
+        .pending_outbox_jobs()
+        .await
+        .expect("notification outbox jobs");
+    assert_eq!(outbox_jobs.len(), 1);
+    assert_eq!(outbox_jobs[0].conversation_jid(), &sender);
+    assert_eq!(outbox_jobs[0].node().as_str(), node.node());
+}
+
+#[tokio::test]
+async fn queue_offline_delivery_skips_xep0357_when_committed_mam_row_is_missing() {
+    let state = create_test_websocket_state().await;
+    let recipient: BareJid = "bob@example.com".parse().expect("recipient");
+    let node = state
+        .deps
+        .protocol
+        .push_service
+        .ensure_node(&recipient, "web")
+        .await
+        .expect("push node");
+    state
+        .deps
+        .protocol
+        .push_service
+        .upsert_device(
+            &recipient,
+            crate::push_service::PushDeviceRegistration::new(
+                "web-1",
+                node.node(),
+                crate::push_service::PushDevicePlatform::Web,
+                "test",
+            ),
+        )
+        .await
+        .expect("push device");
+    state
+        .deps
+        .protocol
+        .push_service
+        .register_first_party_node_for_owner(&recipient, "push.example.com", node.node(), None)
+        .await
+        .expect("first-party push registration");
+
+    let mut message =
+        xmpp_parsers::message::Message::new(Some("bob@example.com".parse().expect("to jid")));
+    message.from = Some("alice@example.com/web".parse().expect("from jid"));
+    message.id = Some("offline-push-no-mam".to_string());
+    message.type_ = XmppMessageType::Chat;
+    message.bodies.insert(
+        String::new(),
+        xmpp_parsers::message::Body("do not push without committed archive".to_string()),
+    );
+    let archive_stanza_id = waddle_xmpp_core::xep0359::StanzaId::new(
+        "archive-offline-no-mam",
+        jid::Jid::from(recipient.clone()),
+    );
+    let deps = build_interpret_deps(state.as_ref(), None);
+    crate::server::routes::interpret::interpret(
+        vec![waddle_xmpp::protocol::OutboundEvent::QueueOfflineDelivery {
+            recipient: recipient.clone(),
+            payload: waddle_xmpp::pending_delivery::PendingPayload::Archived(archive_stanza_id),
+            original_receipt_at: chrono::Utc::now(),
+            original_message: Box::new(message),
+        }],
+        &deps,
+    )
+    .await;
+
+    let outbox_jobs = state
+        .deps
+        .protocol
+        .notification_outbox
+        .pending_outbox_jobs()
+        .await
+        .expect("notification outbox jobs");
+    assert!(outbox_jobs.is_empty());
+    let unoutboxed = state
+        .deps
+        .protocol
+        .pending_delivery_storage
+        .list_unoutboxed_archived(16)
+        .await
+        .expect("unoutboxed archived rows");
+    assert!(
+        unoutboxed.is_empty(),
+        "missing committed MAM row is a completed no-push notification decision"
+    );
+}
+
 /// XEP-0492 enforcement matrix harness — drives the DM offline-delivery
 /// push pipeline with a typed `(NotificationLevel, is_mention)` pair and
-/// returns the count of XEP-0357 delivery attempts that escaped the gate.
+/// returns the count of durable XEP-0357 outbox jobs that escaped the gate.
 ///
-/// `0` ⇒ gate suppressed the push (no APNs/FCM call). `1` ⇒ gate
-/// delivered the push to the recipient's registered device.
+/// `0` ⇒ gate suppressed the push candidate. `1` ⇒ gate created a
+/// durable PubSub publish job for the recipient's registered Push Service.
 async fn drive_xep0492_direct_chat_push_gate(
     level: waddle_xmpp::xep::NotificationLevel,
     is_mention: bool,
@@ -250,12 +582,16 @@ async fn drive_xep0492_direct_chat_push_gate(
     }
 
     let deps = build_interpret_deps(state.as_ref(), None);
+    let archive_stanza_id = waddle_xmpp_core::xep0359::StanzaId::new(
+        format!("archive-{message_id}"),
+        jid::Jid::from(recipient.clone()),
+    );
+    store_committed_dm_archive_for_notification(&state, &recipient, &archive_stanza_id, &message)
+        .await;
     crate::server::routes::interpret::interpret(
         vec![waddle_xmpp::protocol::OutboundEvent::QueueOfflineDelivery {
             recipient: recipient.clone(),
-            payload: waddle_xmpp::pending_delivery::PendingPayload::Transient(Box::new(
-                message.clone(),
-            )),
+            payload: waddle_xmpp::pending_delivery::PendingPayload::Archived(archive_stanza_id),
             original_receipt_at: chrono::Utc::now(),
             original_message: Box::new(message),
         }],
@@ -263,13 +599,14 @@ async fn drive_xep0492_direct_chat_push_gate(
     )
     .await;
 
+    drain_notification_candidates_for_test(state.as_ref()).await;
     state
         .deps
         .protocol
-        .push_service
-        .delivery_attempts_for_node(node.node())
+        .notification_outbox
+        .pending_outbox_jobs()
         .await
-        .expect("delivery attempts")
+        .expect("notification outbox jobs")
         .len()
 }
 
@@ -403,13 +740,17 @@ async fn queue_offline_delivery_suppresses_xep0357_when_xep0492_direct_chat_is_n
         String::new(),
         xmpp_parsers::message::Body("do not push".to_string()),
     );
+    let archive_stanza_id = waddle_xmpp_core::xep0359::StanzaId::new(
+        "archive-offline-muted-1",
+        jid::Jid::from(recipient.clone()),
+    );
+    store_committed_dm_archive_for_notification(&state, &recipient, &archive_stanza_id, &message)
+        .await;
     let deps = build_interpret_deps(state.as_ref(), None);
     crate::server::routes::interpret::interpret(
         vec![waddle_xmpp::protocol::OutboundEvent::QueueOfflineDelivery {
             recipient: recipient.clone(),
-            payload: waddle_xmpp::pending_delivery::PendingPayload::Transient(Box::new(
-                message.clone(),
-            )),
+            payload: waddle_xmpp::pending_delivery::PendingPayload::Archived(archive_stanza_id),
             original_receipt_at: chrono::Utc::now(),
             original_message: Box::new(message),
         }],
@@ -433,6 +774,198 @@ async fn queue_offline_delivery_suppresses_xep0357_when_xep0492_direct_chat_is_n
         .await
         .expect("queued jobs");
     assert!(queued.is_empty());
+    let outbox_jobs = state
+        .deps
+        .protocol
+        .notification_outbox
+        .pending_outbox_jobs()
+        .await
+        .expect("notification outbox jobs");
+    assert!(outbox_jobs.is_empty());
+}
+
+#[tokio::test]
+async fn queue_offline_delivery_suppresses_xep0357_for_transient_no_permanent_store_payloads() {
+    let state = create_test_websocket_state().await;
+    let recipient: BareJid = "bob@example.com".parse().expect("recipient");
+    let node = state
+        .deps
+        .protocol
+        .push_service
+        .ensure_node(&recipient, "web")
+        .await
+        .expect("push node");
+    state
+        .deps
+        .protocol
+        .push_service
+        .upsert_device(
+            &recipient,
+            crate::push_service::PushDeviceRegistration::new(
+                "web-1",
+                node.node(),
+                crate::push_service::PushDevicePlatform::Web,
+                "test",
+            ),
+        )
+        .await
+        .expect("push device");
+    state
+        .deps
+        .protocol
+        .push_service
+        .register_first_party_node_for_owner(&recipient, "push.example.com", node.node(), None)
+        .await
+        .expect("first-party push registration");
+
+    let mut message =
+        xmpp_parsers::message::Message::new(Some("bob@example.com".parse().expect("to jid")));
+    message.from = Some("alice@example.com/web".parse().expect("from jid"));
+    message.id = Some("offline-push-transient-1".to_string());
+    message.type_ = XmppMessageType::Chat;
+    message.bodies.insert(
+        String::new(),
+        xmpp_parsers::message::Body("do not push transient".to_string()),
+    );
+    let deps = build_interpret_deps(state.as_ref(), None);
+    crate::server::routes::interpret::interpret(
+        vec![waddle_xmpp::protocol::OutboundEvent::QueueOfflineDelivery {
+            recipient: recipient.clone(),
+            payload: waddle_xmpp::pending_delivery::PendingPayload::Transient(Box::new(
+                message.clone(),
+            )),
+            original_receipt_at: chrono::Utc::now(),
+            original_message: Box::new(message),
+        }],
+        &deps,
+    )
+    .await;
+
+    let outbox_jobs = state
+        .deps
+        .protocol
+        .notification_outbox
+        .pending_outbox_jobs()
+        .await
+        .expect("notification outbox jobs");
+    assert!(outbox_jobs.is_empty());
+    let queued = state
+        .deps
+        .protocol
+        .push_service
+        .queued_publish_jobs()
+        .await
+        .expect("queued jobs");
+    assert!(queued.is_empty());
+    let attempts = state
+        .deps
+        .protocol
+        .push_service
+        .delivery_attempts_for_node(node.node())
+        .await
+        .expect("delivery attempts");
+    assert!(attempts.is_empty());
+}
+
+#[tokio::test]
+async fn notification_candidate_recovery_rebuilds_from_committed_pending_delivery_and_mam() {
+    let state = create_test_websocket_state().await;
+    let recipient: BareJid = "bob@example.com".parse().expect("recipient");
+    let sender: BareJid = "alice@example.com".parse().expect("sender");
+    let node = state
+        .deps
+        .protocol
+        .push_service
+        .ensure_node(&recipient, "web")
+        .await
+        .expect("push node");
+    state
+        .deps
+        .protocol
+        .push_service
+        .upsert_device(
+            &recipient,
+            crate::push_service::PushDeviceRegistration::new(
+                "web-1",
+                node.node(),
+                crate::push_service::PushDevicePlatform::Web,
+                "test",
+            ),
+        )
+        .await
+        .expect("push device");
+    state
+        .deps
+        .protocol
+        .push_service
+        .register_first_party_node_for_owner(&recipient, "push.example.com", node.node(), None)
+        .await
+        .expect("first-party push registration");
+
+    let archive_stanza_id = waddle_xmpp_core::xep0359::StanzaId::new(
+        "archive-recovery-1",
+        jid::Jid::from(recipient.clone()),
+    );
+    let archived = waddle_xmpp_core::mam::ArchivedMessage {
+        id: archive_stanza_id.id.clone(),
+        body: Some("recover me".to_string()),
+        stanza_id: Some(archive_stanza_id.clone()),
+        message_type: XmppMessageType::Chat,
+        ..waddle_xmpp_core::mam::ArchivedMessage::for_test(
+            "alice@example.com/web".parse().expect("sender jid"),
+            jid::Jid::from(recipient.clone()),
+        )
+    };
+    state
+        .deps
+        .protocol
+        .mam_storage
+        .store_message(&recipient, &archived)
+        .await
+        .expect("store MAM row");
+    state
+        .deps
+        .protocol
+        .pending_delivery_storage
+        .insert(waddle_xmpp::pending_delivery::PendingRow {
+            id: waddle_xmpp::pending_delivery::PendingRowId::fresh(),
+            recipient: recipient.clone(),
+            original_receipt_at: chrono::Utc::now(),
+            payload: waddle_xmpp::pending_delivery::PendingPayload::Archived(archive_stanza_id),
+            flushed_in_session: None,
+            outbound_sequence: None,
+        })
+        .await
+        .expect("insert pending_delivery row");
+
+    let recovered = crate::server::routes::interpret::reconcile_xep0357_notification_candidates(
+        state.as_ref(),
+        16,
+    )
+    .await;
+    assert_eq!(recovered, 1);
+    assert_eq!(
+        drain_notification_candidates_for_test(state.as_ref()).await,
+        1
+    );
+    let outbox_jobs = state
+        .deps
+        .protocol
+        .notification_outbox
+        .pending_outbox_jobs()
+        .await
+        .expect("notification outbox jobs");
+    assert_eq!(outbox_jobs.len(), 1);
+    assert_eq!(outbox_jobs[0].conversation_jid(), &sender);
+    assert_eq!(
+        crate::server::routes::interpret::reconcile_xep0357_notification_candidates(
+            state.as_ref(),
+            16,
+        )
+        .await,
+        0,
+        "pending_delivery marker should prevent repeated recovery of the same committed row"
+    );
 }
 
 #[tokio::test]

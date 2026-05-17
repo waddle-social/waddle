@@ -10,12 +10,6 @@ const AUTH_JANITOR_INTERVAL: Duration = Duration::from_secs(60);
 /// Default interval for the persistent-room dormancy janitor.
 const ROOM_DORMANCY_JANITOR_INTERVAL: Duration = Duration::from_secs(300);
 
-fn reset_push_reconciliation_cursor_after_error(
-    reconciliation_cursor: &mut Option<crate::push_service::PushRegistrationCursor>,
-) -> Option<crate::push_service::PushRegistrationCursor> {
-    reconciliation_cursor.take()
-}
-
 fn pending_delivery_max_age_days_from_env() -> u32 {
     const DEFAULT_DAYS: u32 = 30;
     const MIN_DAYS: u32 = 1;
@@ -48,6 +42,28 @@ fn max_drain_duration_from_env() -> std::time::Duration {
         .map(|v| v.clamp(MIN_SECS, MAX_SECS))
         .unwrap_or(DEFAULT_SECS);
     std::time::Duration::from_secs(secs)
+}
+
+fn notification_outbox_retention_days_from_env() -> u32 {
+    const DEFAULT_DAYS: u32 = 30;
+    const MIN_DAYS: u32 = 1;
+    const MAX_DAYS: u32 = 365;
+    std::env::var("WADDLE_NOTIFICATION_OUTBOX_RETENTION_DAYS")
+        .ok()
+        .and_then(|raw| raw.parse::<u32>().ok())
+        .map(|v| v.clamp(MIN_DAYS, MAX_DAYS))
+        .unwrap_or(DEFAULT_DAYS)
+}
+
+fn notification_outbox_prune_batch_from_env() -> usize {
+    const DEFAULT_BATCH: usize = 1_000;
+    const MIN_BATCH: usize = 1;
+    const MAX_BATCH: usize = 10_000;
+    std::env::var("WADDLE_NOTIFICATION_OUTBOX_PRUNE_BATCH")
+        .ok()
+        .and_then(|raw| raw.parse::<usize>().ok())
+        .map(|v| v.clamp(MIN_BATCH, MAX_BATCH))
+        .unwrap_or(DEFAULT_BATCH)
 }
 
 pub(crate) fn spawn_sm_expiry_janitor(websocket_state: &Arc<WebSocketState>) {
@@ -426,46 +442,12 @@ pub(crate) fn spawn_push_service_publish_job_janitor(websocket_state: &Arc<WebSo
         .unwrap_or(128);
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
-        let mut reconciliation_cursor: Option<crate::push_service::PushRegistrationCursor> = None;
         ticker.tick().await;
         loop {
             ticker.tick().await;
             let Some(state) = weak_state.upgrade() else {
                 break;
             };
-            match state
-                .deps
-                .protocol
-                .push_service
-                .reconcile_pending_delivery_notification_jobs(
-                    state.deps.protocol.pending_delivery_storage.as_ref(),
-                    state.deps.service_domains.push.as_str(),
-                    reconciliation_cursor.as_ref(),
-                    batch_size,
-                    batch_size,
-                )
-                .await
-            {
-                Ok(result) => {
-                    reconciliation_cursor = result.next_cursor().cloned();
-                    if result.scanned_registrations() > 0 || result.enqueued_jobs() > 0 {
-                        debug!(
-                            scanned_registrations = result.scanned_registrations(),
-                            enqueued_jobs = result.enqueued_jobs(),
-                            "Push Service publish-job janitor reconciled XEP-0160 rows to durable XEP-0357 jobs"
-                        );
-                    }
-                }
-                Err(error) => {
-                    let failed_cursor =
-                        reset_push_reconciliation_cursor_after_error(&mut reconciliation_cursor);
-                    warn!(
-                        error = %error,
-                        failed_cursor = ?failed_cursor,
-                        "Push Service publish-job janitor reconciliation failed; reset cursor for next sweep; queued jobs remain durable"
-                    );
-                }
-            }
             match state
                 .deps
                 .protocol
@@ -484,6 +466,130 @@ pub(crate) fn spawn_push_service_publish_job_janitor(websocket_state: &Arc<WebSo
                     warn!(
                         error = %error,
                         "Push Service publish-job janitor failed; queued jobs remain durable"
+                    );
+                }
+            }
+        }
+    });
+}
+
+pub(crate) fn spawn_notification_outbox_janitor(websocket_state: &Arc<WebSocketState>) {
+    let weak_state = Arc::downgrade(websocket_state);
+    let interval_secs = std::env::var("WADDLE_NOTIFICATION_OUTBOX_JANITOR_INTERVAL")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .map(|v| v.max(1))
+        .unwrap_or(5);
+    let batch_size = std::env::var("WADDLE_NOTIFICATION_OUTBOX_JANITOR_BATCH")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .map(|v| v.clamp(1, 1_000))
+        .unwrap_or(128);
+    let retention_days = notification_outbox_retention_days_from_env();
+    let prune_batch_size = notification_outbox_prune_batch_from_env();
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
+        ticker.tick().await;
+        loop {
+            ticker.tick().await;
+            let Some(state) = weak_state.upgrade() else {
+                break;
+            };
+            let first_party_service_jid = match state.deps.service_domains.push.parse() {
+                Ok(jid) => jid,
+                Err(error) => {
+                    warn!(
+                        error = %error,
+                        push_service = %state.deps.service_domains.push,
+                        "Notification outbox janitor cannot parse first-party Push Service JID"
+                    );
+                    continue;
+                }
+            };
+            let recovered = routes::interpret::reconcile_xep0357_notification_candidates(
+                state.as_ref(),
+                batch_size,
+            )
+            .await;
+            if recovered > 0 {
+                debug!(
+                    recovered,
+                    "Notification outbox janitor recovered XEP-0357 candidates from pending_delivery"
+                );
+            }
+            match state
+                .deps
+                .protocol
+                .notification_outbox
+                .drain_pending_candidates_into_outbox(
+                    state.deps.protocol.push_store.as_ref(),
+                    &first_party_service_jid,
+                    batch_size,
+                )
+                .await
+            {
+                Ok(processed) if processed > 0 => {
+                    debug!(
+                        processed,
+                        "Notification outbox janitor expanded XEP-0357 candidates into outbox jobs"
+                    );
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    warn!(
+                        error = %error,
+                        "Notification outbox janitor failed to process candidates; candidates remain durable"
+                    );
+                }
+            }
+            match state
+                .deps
+                .protocol
+                .notification_outbox
+                .drain_due_outbox_jobs(
+                    state.deps.protocol.push_service.as_ref(),
+                    state.deps.protocol.push_store.as_ref(),
+                    state.deps.protocol.inbox_storage.as_ref(),
+                    &first_party_service_jid,
+                    batch_size,
+                )
+                .await
+            {
+                Ok(results) if !results.is_empty() => {
+                    debug!(
+                        drained = results.len(),
+                        "Notification outbox janitor emitted durable XEP-0357 PubSub publish jobs"
+                    );
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    warn!(
+                        error = %error,
+                        "Notification outbox janitor failed; outbox jobs remain durable"
+                    );
+                }
+            }
+            let cutoff_ms = crate::time::now_ms()
+                .saturating_sub(i64::from(retention_days) * 24 * 60 * 60 * 1_000);
+            match state
+                .deps
+                .protocol
+                .notification_outbox
+                .prune_completed_before(cutoff_ms, prune_batch_size)
+                .await
+            {
+                Ok(outcome) if outcome.total_deleted() > 0 => {
+                    debug!(
+                        candidates_deleted = outcome.candidates_deleted,
+                        jobs_deleted = outcome.jobs_deleted,
+                        "Notification outbox janitor pruned completed rows"
+                    );
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    warn!(
+                        error = %error,
+                        "Notification outbox janitor prune failed; completed rows remain durable"
                     );
                 }
             }
@@ -917,27 +1023,6 @@ pub(crate) fn spawn_room_dormancy_janitor(websocket_state: &Arc<WebSocketState>)
             }
         }
     });
-}
-
-#[cfg(test)]
-mod push_service_publish_job_janitor_tests {
-    use super::reset_push_reconciliation_cursor_after_error;
-
-    #[test]
-    fn reconciliation_cursor_resets_after_reconcile_error() {
-        let mut reconciliation_cursor = Some(crate::push_service::PushRegistrationCursor::new(
-            "alice@example.com",
-            "web-node-1",
-        ));
-
-        let failed_cursor =
-            reset_push_reconciliation_cursor_after_error(&mut reconciliation_cursor)
-                .expect("failed cursor");
-
-        assert!(reconciliation_cursor.is_none());
-        assert_eq!(failed_cursor.owner_bare_jid(), "alice@example.com");
-        assert_eq!(failed_cursor.node(), "web-node-1");
-    }
 }
 
 #[cfg(test)]

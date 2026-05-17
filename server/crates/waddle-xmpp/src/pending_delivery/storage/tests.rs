@@ -168,6 +168,36 @@ async fn transient_payload_round_trips() {
 }
 
 #[tokio::test]
+async fn mark_notification_outboxed_requires_existing_row() {
+    let store = InMemoryPendingDeliveryStorage::unlimited();
+    let missing = PendingRowId::fresh();
+
+    assert_eq!(store.mark_notification_outboxed(&missing).await.unwrap(), 0);
+
+    let row = archived_row("alice@example.com", "archive-1");
+    let row_id = row.id.clone();
+    store.insert(row).await.unwrap();
+    assert_eq!(store.mark_notification_outboxed(&row_id).await.unwrap(), 1);
+    assert_eq!(store.mark_notification_outboxed(&row_id).await.unwrap(), 0);
+    assert!(store
+        .list_unoutboxed_archived(16)
+        .await
+        .expect("unoutboxed")
+        .is_empty());
+}
+
+#[tokio::test]
+async fn delete_row_clears_notification_outboxed_marker() {
+    let store = InMemoryPendingDeliveryStorage::unlimited();
+    let row = archived_row("alice@example.com", "archive-1");
+    let row_id = row.id.clone();
+    store.insert(row).await.unwrap();
+    assert_eq!(store.mark_notification_outboxed(&row_id).await.unwrap(), 1);
+    assert_eq!(store.delete_row(&row_id).await.unwrap(), 1);
+    assert_eq!(store.mark_notification_outboxed(&row_id).await.unwrap(), 0);
+}
+
+#[tokio::test]
 async fn empty_recipient_count_is_zero() {
     let store = InMemoryPendingDeliveryStorage::unlimited();
     assert_eq!(store.count(&bare("nobody@example.com")).await.unwrap(), 0);

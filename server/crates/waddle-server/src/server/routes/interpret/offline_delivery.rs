@@ -19,23 +19,38 @@ pub(super) async fn queue_offline_delivery(
         );
         return;
     };
+    let notification_archive_stanza_id = match &payload {
+        waddle_xmpp::pending_delivery::PendingPayload::Archived(stanza_id) => {
+            Some(stanza_id.clone())
+        }
+        waddle_xmpp::pending_delivery::PendingPayload::Transient(_) => None,
+    };
+    let row_id = waddle_xmpp::pending_delivery::PendingRowId::fresh();
     let row = waddle_xmpp::pending_delivery::PendingRow {
-        id: waddle_xmpp::pending_delivery::PendingRowId::fresh(),
+        id: row_id.clone(),
         recipient: recipient.clone(),
         original_receipt_at,
         payload,
         flushed_in_session: None,
         outbound_sequence: None,
     };
-    let pending_row_id = row.id.clone();
     match storage.insert(row).await {
         Ok(waddle_xmpp::pending_delivery::InsertOutcome::Inserted) => {
             debug!(
                 recipient = %recipient,
                 "pending_delivery row inserted"
             );
-            publish_xep0357_notifications(deps, &recipient, &pending_row_id, &original_message)
-                .await;
+            let outcome = enqueue_xep0357_notification_candidate(
+                deps,
+                &recipient,
+                notification_archive_stanza_id.as_ref(),
+            )
+            .await;
+            if notification_archive_stanza_id.is_some()
+                && outcome == NotificationCandidateQueueOutcome::Completed
+            {
+                mark_pending_notification_outboxed(storage.as_ref(), &row_id, &recipient).await;
+            }
         }
         Ok(waddle_xmpp::pending_delivery::InsertOutcome::QuotaExceeded) => {
             waddle_xmpp::prometheus::increment_pending_delivery_quota_exceeded();
@@ -139,118 +154,159 @@ pub(super) async fn queue_offline_delivery(
     }
 }
 
-async fn publish_xep0357_notifications(
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NotificationCandidateQueueOutcome {
+    Completed,
+    RetryLater,
+}
+
+async fn enqueue_xep0357_notification_candidate(
     deps: &Deps<'_>,
     recipient: &BareJid,
-    pending_row_id: &waddle_xmpp::pending_delivery::PendingRowId,
-    original_message: &Message,
-) {
-    let Some(state) = deps.web_socket_state else {
-        return;
+    archive_stanza_id: Option<&waddle_xmpp_core::xep0359::StanzaId>,
+) -> NotificationCandidateQueueOutcome {
+    let Some(archive_stanza_id) = archive_stanza_id else {
+        debug!(
+            recipient = %recipient,
+            "Skipping XEP-0357 candidate for transient offline payload because no committed archive state exists"
+        );
+        return NotificationCandidateQueueOutcome::Completed;
     };
+    let Some(state) = deps.web_socket_state else {
+        return NotificationCandidateQueueOutcome::RetryLater;
+    };
+    enqueue_xep0357_notification_candidate_from_committed_archive(
+        state,
+        recipient,
+        archive_stanza_id,
+    )
+    .await
+}
+
+async fn enqueue_xep0357_notification_candidate_from_committed_archive(
+    state: &WebSocketState,
+    recipient: &BareJid,
+    archive_stanza_id: &waddle_xmpp_core::xep0359::StanzaId,
+) -> NotificationCandidateQueueOutcome {
+    let archive_bare = archive_stanza_id.by.to_bare();
+    let archived = match state
+        .deps
+        .protocol
+        .mam_storage
+        .get_message_by_archive_or_stanza_id(&archive_bare, archive_stanza_id.as_str())
+        .await
+    {
+        Ok(Some(archived)) => archived,
+        Ok(None) => {
+            warn!(
+                recipient = %recipient,
+                stanza_id = %archive_stanza_id,
+                "XEP-0357 notification candidate skipped because committed MAM row is missing"
+            );
+            return NotificationCandidateQueueOutcome::Completed;
+        }
+        Err(error) => {
+            warn!(
+                recipient = %recipient,
+                stanza_id = %archive_stanza_id,
+                error = %error,
+                "XEP-0357 notification candidate could not load committed MAM row"
+            );
+            return NotificationCandidateQueueOutcome::RetryLater;
+        }
+    };
+    let sender = archived.from.to_bare();
+    let original_message =
+        super::archive_lookup::parse_archived_message_xml(archived.stanza_xml.as_deref())
+            .unwrap_or_else(|| super::archive_lookup::fallback_archived_message(&archived));
+    enqueue_xep0357_notification_candidate_for_message(
+        state,
+        recipient,
+        &sender,
+        archive_stanza_id,
+        &original_message,
+    )
+    .await
+}
+
+async fn enqueue_xep0357_notification_candidate_for_message(
+    state: &WebSocketState,
+    recipient: &BareJid,
+    sender: &BareJid,
+    archive_stanza_id: &waddle_xmpp_core::xep0359::StanzaId,
+    original_message: &Message,
+) -> NotificationCandidateQueueOutcome {
     // XEP-0492 gate: consult the recipient's per-conversation notification
     // level (defaulting to XEP-0492 conversation-kind defaults via the
     // projection store) and the XEP-0513 mention bit. The decision is a
     // typed `PushDispatchDecision` — never a stringly-typed diagnostic —
     // so the suppression reason flows through to the typed log line.
     let decision =
-        evaluate_xep0492_push_dispatch_decision(state, recipient, original_message).await;
+        match evaluate_xep0492_push_dispatch_decision(state, recipient, sender, original_message)
+            .await
+        {
+            Ok(decision) => decision,
+            Err(()) => return NotificationCandidateQueueOutcome::RetryLater,
+        };
     match decision {
         crate::notification_settings_projection::PushDispatchDecision::Deliver => {}
         crate::notification_settings_projection::PushDispatchDecision::Suppressed { reason } => {
             info!(
                 recipient = %recipient,
-                sender = ?original_message.from.as_ref().map(|jid| jid.to_bare()),
+                sender = %sender,
                 reason = %reason,
-                "XEP-0492 push gate suppressed XEP-0357 push fan-out"
+                "XEP-0492 push gate suppressed XEP-0357 notification candidate"
             );
-            return;
+            return NotificationCandidateQueueOutcome::Completed;
         }
     }
-    let registrations = match state
-        .deps
-        .protocol
-        .push_store
-        .get_for_user(&recipient.to_string())
-        .await
-    {
-        Ok(registrations) => registrations,
+    let candidate = match crate::notification_outbox::NotificationCandidate::direct_message(
+        recipient.clone(),
+        sender.clone(),
+        archive_stanza_id.clone(),
+    ) {
+        Ok(candidate) => candidate,
         Err(error) => {
             warn!(
                 recipient = %recipient,
+                sender = %sender,
                 error = %error,
-                "XEP-0357 push registration lookup failed after pending_delivery insert"
+                "XEP-0357 notification candidate rejected"
             );
-            return;
+            return NotificationCandidateQueueOutcome::Completed;
         }
     };
-    let first_party_service = state.deps.service_domains.push.as_str();
-    for registration in registrations {
-        if registration.service_jid != first_party_service {
+    match state
+        .deps
+        .protocol
+        .notification_outbox
+        .insert_candidate(&candidate)
+        .await
+    {
+        Ok(crate::notification_outbox::NotificationCandidateInsertOutcome::Inserted) => {
             debug!(
                 recipient = %recipient,
-                service = %registration.service_jid,
-                "XEP-0357 external Push Service publish is not wired in this first-party boundary"
+                sender = %sender,
+                "XEP-0357 notification candidate inserted for durable outbox worker"
             );
-            continue;
+            NotificationCandidateQueueOutcome::Completed
         }
-        let Some(node) = registration.node.as_deref() else {
+        Ok(crate::notification_outbox::NotificationCandidateInsertOutcome::Duplicate) => {
+            debug!(
+                recipient = %recipient,
+                sender = %sender,
+                "Duplicate XEP-0357 notification candidate ignored"
+            );
+            NotificationCandidateQueueOutcome::Completed
+        }
+        Err(error) => {
             warn!(
                 recipient = %recipient,
-                service = %registration.service_jid,
-                "first-party XEP-0357 registration missing node; skipping publish"
+                sender = %sender,
+                error = %error,
+                "XEP-0357 notification candidate insert failed"
             );
-            continue;
-        };
-        let notification =
-            minidom::Element::builder("notification", waddle_xmpp::xep::xep0357::NS_PUSH).build();
-        let item = waddle_xmpp::pubsub::PubSubItem::new(
-            Some(pending_row_id.as_str().to_string()),
-            Some(notification),
-        );
-        let iq = match build_xep0357_pubsub_publish_iq(
-            first_party_service,
-            recipient,
-            node,
-            pending_row_id,
-            &item,
-            registration.publish_options.as_ref(),
-        ) {
-            Ok(iq) => iq,
-            Err(error) => {
-                warn!(
-                    recipient = %recipient,
-                    node,
-                    error = %error,
-                    "XEP-0357 first-party Push Service notification IQ build failed"
-                );
-                continue;
-            }
-        };
-        match state
-            .deps
-            .protocol
-            .push_service
-            .publish_xep0357_pubsub_iq_from_user_server(first_party_service, &iq, recipient)
-            .await
-        {
-            Ok(result) => {
-                debug!(
-                    recipient = %recipient,
-                    node,
-                    item_id = %result.item_id(),
-                    attempted_devices = result.attempted_devices(),
-                    "XEP-0357 first-party Push Service notification published"
-                );
-            }
-            Err(error) => {
-                warn!(
-                    recipient = %recipient,
-                    node,
-                    error = %error,
-                    "XEP-0357 first-party Push Service notification publish failed"
-                );
-            }
+            NotificationCandidateQueueOutcome::RetryLater
         }
     }
 }
@@ -276,24 +332,19 @@ async fn publish_xep0357_notifications(
 async fn evaluate_xep0492_push_dispatch_decision(
     state: &WebSocketState,
     recipient: &BareJid,
+    sender: &BareJid,
     original_message: &Message,
-) -> crate::notification_settings_projection::PushDispatchDecision {
-    let Some(sender) = original_message.from.as_ref().map(|jid| jid.to_bare()) else {
-        // Sender bare-JID missing — refuse to fan out because we cannot
-        // resolve a per-conversation setting. Treated as suppression with
-        // the strictest typed reason so the audit log is unambiguous.
-        return crate::notification_settings_projection::PushDispatchDecision::Suppressed {
-            reason: waddle_xmpp::xep::NotificationLevel::Never,
-        };
-    };
-    if sender == *recipient {
+) -> Result<crate::notification_settings_projection::PushDispatchDecision, ()> {
+    if sender == recipient {
         // Self-DM: never push to your own offline queue. Per XEP-0492
         // semantics this is a hard suppression independent of the
         // configured level; surface it as `Never` to keep the typed log
         // path uniform.
-        return crate::notification_settings_projection::PushDispatchDecision::Suppressed {
-            reason: waddle_xmpp::xep::NotificationLevel::Never,
-        };
+        return Ok(
+            crate::notification_settings_projection::PushDispatchDecision::Suppressed {
+                reason: waddle_xmpp::xep::NotificationLevel::Never,
+            },
+        );
     }
     let level = match state
         .deps
@@ -301,7 +352,7 @@ async fn evaluate_xep0492_push_dispatch_decision(
         .notification_settings_projection
         .effective_setting(
             recipient,
-            &sender,
+            sender,
             crate::notification_settings_projection::ConversationKind::Direct,
         )
         .await
@@ -312,15 +363,13 @@ async fn evaluate_xep0492_push_dispatch_decision(
                 recipient = %recipient,
                 conversation = %sender,
                 error = %error,
-                "XEP-0492 notification setting lookup failed; suppressing push notification"
+                "XEP-0492 notification setting lookup failed; retrying notification candidate later"
             );
-            return crate::notification_settings_projection::PushDispatchDecision::Suppressed {
-                reason: waddle_xmpp::xep::NotificationLevel::Never,
-            };
+            return Err(());
         }
     };
     let is_mention = message_is_mention_for_recipient(original_message, recipient);
-    crate::notification_settings_projection::PushDispatchDecision::evaluate(level, is_mention)
+    Ok(crate::notification_settings_projection::PushDispatchDecision::evaluate(level, is_mention))
 }
 
 /// Returns `true` when the inbound XEP-0513 explicit-mention payloads
@@ -338,31 +387,54 @@ fn message_is_mention_for_recipient(message: &Message, recipient: &BareJid) -> b
         .is_some_and(|mentions| mentions.mentions_jid(recipient))
 }
 
-fn build_xep0357_pubsub_publish_iq(
-    push_service_jid: &str,
+async fn mark_pending_notification_outboxed(
+    storage: &dyn waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage,
+    row_id: &waddle_xmpp::pending_delivery::PendingRowId,
     recipient: &BareJid,
-    node: &str,
-    pending_row_id: &waddle_xmpp::pending_delivery::PendingRowId,
-    item: &waddle_xmpp::pubsub::PubSubItem,
-    publish_options: Option<&minidom::Element>,
-) -> Result<xmpp_parsers::iq::Iq, jid::Error> {
-    let publish = minidom::Element::builder("publish", waddle_xmpp::pubsub::NS_PUBSUB)
-        .attr("node", node)
-        .append(item.to_element(waddle_xmpp::pubsub::NS_PUBSUB))
-        .build();
-    let mut pubsub_builder =
-        minidom::Element::builder("pubsub", waddle_xmpp::pubsub::NS_PUBSUB).append(publish);
-    if let Some(publish_options) = publish_options {
-        pubsub_builder = pubsub_builder.append(
-            minidom::Element::builder("publish-options", waddle_xmpp::pubsub::NS_PUBSUB)
-                .append(publish_options.clone())
-                .build(),
+) {
+    if let Err(error) = storage.mark_notification_outboxed(row_id).await {
+        warn!(
+            recipient = %recipient,
+            row_id = %row_id,
+            error = %error,
+            "pending_delivery notification outbox marker write failed; janitor will retry"
         );
     }
-    Ok(xmpp_parsers::iq::Iq {
-        from: Some(recipient.clone().into()),
-        to: Some(push_service_jid.parse()?),
-        id: format!("push-{}", pending_row_id.as_str()),
-        payload: xmpp_parsers::iq::IqType::Set(pubsub_builder.build()),
-    })
+}
+
+pub(crate) async fn reconcile_xep0357_notification_candidates(
+    state: &WebSocketState,
+    batch_size: usize,
+) -> usize {
+    let batch_size = batch_size.clamp(1, 1_000);
+    let pending_storage = state.deps.protocol.pending_delivery_storage.as_ref();
+    let rows = match pending_storage.list_unoutboxed_archived(batch_size).await {
+        Ok(rows) => rows,
+        Err(error) => {
+            warn!(
+                error = %error,
+                "XEP-0357 notification candidate recovery could not read pending_delivery rows"
+            );
+            return 0;
+        }
+    };
+    let mut completed = 0usize;
+    for row in rows {
+        let waddle_xmpp::pending_delivery::PendingPayload::Archived(archive_stanza_id) =
+            &row.payload
+        else {
+            continue;
+        };
+        let outcome = enqueue_xep0357_notification_candidate_from_committed_archive(
+            state,
+            &row.recipient,
+            archive_stanza_id,
+        )
+        .await;
+        if outcome == NotificationCandidateQueueOutcome::Completed {
+            mark_pending_notification_outboxed(pending_storage, &row.id, &row.recipient).await;
+            completed += 1;
+        }
+    }
+    completed
 }
