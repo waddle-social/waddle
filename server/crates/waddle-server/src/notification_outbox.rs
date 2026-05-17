@@ -158,7 +158,6 @@ pub struct NotificationCandidate {
     recipient_bare_jid: BareJid,
     conversation_jid: BareJid,
     sender_jid: Jid,
-    sender_jid_exact: bool,
     thread_id: NotificationThreadId,
     archive_stanza_id: StanzaId,
     class: NotificationClass,
@@ -172,20 +171,7 @@ impl NotificationCandidate {
         sender_jid: Jid,
         archive_stanza_id: StanzaId,
     ) -> Result<Self, NotificationOutboxError> {
-        Self::direct_message_with_sender_provenance(
-            recipient_bare_jid,
-            sender_jid,
-            true,
-            archive_stanza_id,
-        )
-    }
-
-    pub fn direct_message_with_sender_provenance(
-        recipient_bare_jid: BareJid,
-        sender_jid: Jid,
-        sender_jid_exact: bool,
-        archive_stanza_id: StanzaId,
-    ) -> Result<Self, NotificationOutboxError> {
+        require_full_sender_jid(&sender_jid)?;
         let expected_by = Jid::from(recipient_bare_jid.clone());
         if archive_stanza_id.by != expected_by {
             return Err(NotificationOutboxError::ArchiveStanzaIdOwnerMismatch {
@@ -197,7 +183,6 @@ impl NotificationCandidate {
             recipient_bare_jid,
             conversation_jid: sender_jid.to_bare(),
             sender_jid,
-            sender_jid_exact,
             thread_id: NotificationThreadId::root(),
             archive_stanza_id,
             class: NotificationClass::DirectMessage,
@@ -216,10 +201,6 @@ impl NotificationCandidate {
 
     pub fn sender_jid(&self) -> &Jid {
         &self.sender_jid
-    }
-
-    pub fn sender_jid_exact(&self) -> bool {
-        self.sender_jid_exact
     }
 
     pub fn thread_id(&self) -> &NotificationThreadId {
@@ -271,7 +252,6 @@ pub struct NotificationOutboxJob {
     conversation_jid: BareJid,
     sender_jid: Jid,
     sender_jids: Vec<Jid>,
-    sender_jids_exact: bool,
     thread_id: NotificationThreadId,
     class: NotificationClass,
     message_count: u32,
@@ -309,10 +289,6 @@ impl NotificationOutboxJob {
 
     pub fn sender_jids(&self) -> &[Jid] {
         &self.sender_jids
-    }
-
-    pub fn sender_jids_exact(&self) -> bool {
-        self.sender_jids_exact
     }
 
     pub fn thread_id(&self) -> &NotificationThreadId {
@@ -424,6 +400,14 @@ pub enum NotificationOutboxError {
     InvalidSenderJid(String),
     #[error("invalid sender JID set in notification outbox: {0}")]
     InvalidSenderJids(String),
+    #[error("notification sender JID must include a resource: {0}")]
+    SenderJidMissingResource(Jid),
+    #[error("notification sender JID set must not be empty")]
+    MissingSenderJidSet,
+    #[error("notification sender JID {sender} does not match conversation JID {conversation}")]
+    SenderConversationMismatch { sender: Jid, conversation: BareJid },
+    #[error("notification sender JID set does not include scalar sender JID {0}")]
+    SenderJidSetMissingScalar(Jid),
     #[error("invalid archive stanza-id by JID in notification candidate: {0}")]
     InvalidArchiveStanzaIdBy(String),
     #[error("invalid stored notification context XML: {0}")]
@@ -432,6 +416,61 @@ pub enum NotificationOutboxError {
     ArchiveStanzaIdOwnerMismatch { expected: Jid, actual: Jid },
     #[error("message count is out of range: {0}")]
     InvalidMessageCount(i64),
+    #[error("notification outbox coalesce contention persisted after retry")]
+    OutboxCoalesceContention,
+}
+
+fn require_full_sender_jid(sender_jid: &Jid) -> Result<(), NotificationOutboxError> {
+    if sender_jid.resource().is_some() {
+        Ok(())
+    } else {
+        Err(NotificationOutboxError::SenderJidMissingResource(
+            sender_jid.clone(),
+        ))
+    }
+}
+
+fn require_full_sender_jid_set(sender_jids: &[Jid]) -> Result<(), NotificationOutboxError> {
+    if sender_jids.is_empty() {
+        return Err(NotificationOutboxError::MissingSenderJidSet);
+    }
+    sender_jids.iter().try_for_each(require_full_sender_jid)
+}
+
+fn require_sender_matches_conversation(
+    sender_jid: &Jid,
+    conversation_jid: &BareJid,
+) -> Result<(), NotificationOutboxError> {
+    if sender_jid.to_bare() == *conversation_jid {
+        Ok(())
+    } else {
+        Err(NotificationOutboxError::SenderConversationMismatch {
+            sender: sender_jid.clone(),
+            conversation: conversation_jid.clone(),
+        })
+    }
+}
+
+fn require_sender_set_matches_conversation(
+    sender_jids: &[Jid],
+    conversation_jid: &BareJid,
+) -> Result<(), NotificationOutboxError> {
+    sender_jids.iter().try_for_each(|sender_jid| {
+        require_sender_matches_conversation(sender_jid, conversation_jid)
+    })
+}
+
+fn require_sender_set_contains_scalar(
+    sender_jids: &[Jid],
+    sender_jid: &Jid,
+) -> Result<(), NotificationOutboxError> {
+    if sender_jids.iter().any(|candidate| candidate == sender_jid) {
+        Ok(())
+    } else {
+        Err(NotificationOutboxError::SenderJidSetMissingScalar(
+            sender_jid.clone(),
+        ))
+    }
 }
 
 #[derive(Clone)]
@@ -455,7 +494,6 @@ impl NotificationOutboxStore {
                     recipient_bare_jid TEXT NOT NULL,
                     conversation_jid TEXT NOT NULL,
                     sender_jid TEXT NOT NULL,
-                    sender_jid_exact INTEGER NOT NULL DEFAULT 1,
                     thread_id TEXT NOT NULL DEFAULT '',
                     stanza_id_by TEXT NOT NULL,
                     stanza_id TEXT NOT NULL,
@@ -472,16 +510,8 @@ impl NotificationOutboxStore {
             (),
         )
         .await?;
-        self.add_column_if_missing(
-            "notification_candidates",
-            "sender_jid TEXT NOT NULL DEFAULT ''",
-        )
-        .await?;
-        self.add_column_if_missing(
-            "notification_candidates",
-            "sender_jid_exact INTEGER NOT NULL DEFAULT 0",
-        )
-        .await?;
+        self.query("SELECT sender_jid FROM notification_candidates LIMIT 0", ())
+            .await?;
         self.add_column_if_missing(
             "notification_candidates",
             "policy_error_count INTEGER NOT NULL DEFAULT 0",
@@ -490,11 +520,6 @@ impl NotificationOutboxStore {
         let candidate_next_attempt_column = format!("next_attempt_at_ms {i64_type}");
         self.add_column_if_missing("notification_candidates", &candidate_next_attempt_column)
             .await?;
-        self.execute(
-            "UPDATE notification_candidates SET sender_jid = conversation_jid WHERE sender_jid = ''",
-            (),
-        )
-        .await?;
         self.execute(
             "CREATE INDEX IF NOT EXISTS idx_notification_candidates_recipient_created \
              ON notification_candidates (recipient_bare_jid, created_at_ms)",
@@ -531,8 +556,7 @@ impl NotificationOutboxStore {
                     node TEXT NOT NULL,
                     conversation_jid TEXT NOT NULL,
                     sender_jid TEXT NOT NULL,
-                    sender_jids TEXT NOT NULL DEFAULT '[]',
-                    sender_jids_exact INTEGER NOT NULL DEFAULT 1,
+                    sender_jids TEXT NOT NULL,
                     thread_id TEXT NOT NULL DEFAULT '',
                     class TEXT NOT NULL CHECK (class IN ('dm', 'personal_mention', 'channel_mention', 'active_channel_mention', 'notify_all')),
                     message_count INTEGER NOT NULL,
@@ -553,28 +577,16 @@ impl NotificationOutboxStore {
             (),
         )
         .await?;
+        self.query(
+            "SELECT sender_jid, sender_jids FROM notification_outbox LIMIT 0",
+            (),
+        )
+        .await?;
         self.add_column_if_missing("notification_outbox", "claim_token TEXT")
             .await?;
-        self.add_column_if_missing("notification_outbox", "sender_jid TEXT NOT NULL DEFAULT ''")
-            .await?;
-        self.add_column_if_missing(
-            "notification_outbox",
-            "sender_jids TEXT NOT NULL DEFAULT '[]'",
-        )
-        .await?;
-        self.add_column_if_missing(
-            "notification_outbox",
-            "sender_jids_exact INTEGER NOT NULL DEFAULT 0",
-        )
-        .await?;
         self.add_column_if_missing(
             "notification_outbox",
             "policy_error_count INTEGER NOT NULL DEFAULT 0",
-        )
-        .await?;
-        self.execute(
-            "UPDATE notification_outbox SET sender_jid = conversation_jid WHERE sender_jid = ''",
-            (),
         )
         .await?;
         self.execute(
@@ -669,7 +681,6 @@ impl NotificationOutboxStore {
                     recipient_bare_jid,
                     conversation_jid,
                     sender_jid,
-                    sender_jid_exact,
                     thread_id,
                     stanza_id_by,
                     stanza_id,
@@ -679,18 +690,13 @@ impl NotificationOutboxStore {
                     policy_error_count,
                     next_attempt_at_ms,
                     outboxed_at_ms
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)
                 ON CONFLICT DO NOTHING
                 "#,
                 crate::db_params![
                     candidate.recipient_bare_jid.to_string(),
                     candidate.conversation_jid.to_string(),
                     candidate.sender_jid.to_string(),
-                    if candidate.sender_jid_exact {
-                        1_i64
-                    } else {
-                        0_i64
-                    },
                     candidate.thread_id.as_str(),
                     candidate.archive_stanza_id.by.to_string(),
                     candidate.archive_stanza_id.id.clone(),
@@ -820,7 +826,6 @@ impl NotificationOutboxStore {
                 SELECT recipient_bare_jid,
                        conversation_jid,
                        sender_jid,
-                       sender_jid_exact,
                        thread_id,
                        stanza_id_by,
                        stanza_id,
@@ -845,9 +850,62 @@ impl NotificationOutboxStore {
             .await?;
         let mut candidates = Vec::new();
         while let Some(row) = rows.next().await? {
-            candidates.push(decode_candidate(&row)?);
+            match decode_candidate(&row) {
+                Ok(candidate) => candidates.push(candidate),
+                Err(error) => {
+                    self.mark_malformed_candidate_outboxed(&row, &error).await?;
+                }
+            }
         }
         Ok(candidates)
+    }
+
+    async fn mark_malformed_candidate_outboxed(
+        &self,
+        row: &Row,
+        error: &NotificationOutboxError,
+    ) -> Result<(), NotificationOutboxError> {
+        let recipient_raw: String = row.get(0)?;
+        let conversation_raw: String = row.get(1)?;
+        let sender_raw = row
+            .get::<Option<String>>(2)?
+            .unwrap_or_else(|| "<null>".to_string());
+        let thread_id: String = row.get(3)?;
+        let stanza_id_by_raw: String = row.get(4)?;
+        let stanza_id: String = row.get(5)?;
+        let class: String = row.get(6)?;
+        tracing::warn!(
+            recipient = %recipient_raw,
+            conversation = %conversation_raw,
+            sender = %sender_raw,
+            stanza_id = %stanza_id,
+            %error,
+            "dropping malformed XEP-0357 notification candidate fail-closed"
+        );
+        self.execute(
+            r#"
+            UPDATE notification_candidates
+            SET outboxed_at_ms = ?
+            WHERE recipient_bare_jid = ?
+              AND conversation_jid = ?
+              AND thread_id = ?
+              AND stanza_id_by = ?
+              AND stanza_id = ?
+              AND class = ?
+              AND outboxed_at_ms IS NULL
+            "#,
+            crate::db_params![
+                crate::time::now_ms(),
+                recipient_raw,
+                conversation_raw,
+                thread_id,
+                stanza_id_by_raw,
+                stanza_id,
+                class,
+            ],
+        )
+        .await?;
+        Ok(())
     }
 
     pub async fn pending_outbox_jobs(
@@ -863,7 +921,6 @@ impl NotificationOutboxStore {
                        conversation_jid,
                        sender_jid,
                        sender_jids,
-                       sender_jids_exact,
                        thread_id,
                        class,
                        message_count,
@@ -903,7 +960,6 @@ impl NotificationOutboxStore {
                        conversation_jid,
                        sender_jid,
                        sender_jids,
-                       sender_jids_exact,
                        thread_id,
                        class,
                        message_count,
@@ -935,7 +991,19 @@ impl NotificationOutboxStore {
             .await?;
         let mut selected = Vec::new();
         while let Some(row) = rows.next().await? {
-            selected.push(decode_outbox_job(&row)?);
+            let job_id_raw: String = row.get(0)?;
+            match decode_outbox_job(&row) {
+                Ok(job) => selected.push(job),
+                Err(error) => {
+                    tracing::warn!(
+                        job_id = %job_id_raw,
+                        %error,
+                        "failing malformed XEP-0357 notification outbox job fail-closed"
+                    );
+                    self.mark_malformed_outbox_job_failed(job_id_raw.as_str(), &error.to_string())
+                        .await?;
+                }
+            }
         }
 
         let mut claimed = Vec::new();
@@ -983,6 +1051,38 @@ impl NotificationOutboxStore {
             }
         }
         Ok(claimed)
+    }
+
+    async fn mark_malformed_outbox_job_failed(
+        &self,
+        job_id: &str,
+        error: &str,
+    ) -> Result<(), NotificationOutboxError> {
+        let now_ms = crate::time::now_ms();
+        self.execute(
+            r#"
+            UPDATE notification_outbox
+            SET status = ?,
+                policy_error_count = 0,
+                last_error = ?,
+                next_attempt_at_ms = NULL,
+                claimed_at_ms = NULL,
+                claim_token = NULL,
+                updated_at_ms = ?
+            WHERE job_id = ?
+              AND status IN (?, ?)
+            "#,
+            crate::db_params![
+                STATUS_FAILED,
+                format!("malformed notification outbox job: {error}"),
+                now_ms,
+                job_id,
+                STATUS_QUEUED,
+                STATUS_IN_PROGRESS,
+            ],
+        )
+        .await?;
+        Ok(())
     }
 
     pub async fn drain_due_outbox_jobs(
@@ -1443,23 +1543,15 @@ async fn xep0191_blocks_notification_candidate(
         .list_blocked_jid_entries(candidate.recipient_bare_jid())
         .await?;
     Ok(blocked.into_iter().any(|blocked_jid| {
-        xep0191_block_entry_matches_sender(
-            &blocked_jid,
-            candidate.sender_jid(),
-            candidate.sender_jid_exact(),
-        )
+        xep0191_block_entry_matches_sender(&blocked_jid, candidate.sender_jid())
     }))
 }
 
 fn xep0191_block_entry_matches_outbox_job(blocked_jid: &Jid, job: &NotificationOutboxJob) -> bool {
     if blocked_jid.resource().is_some() {
-        if job.sender_jids_exact() {
-            job.sender_jids()
-                .iter()
-                .any(|sender_jid| blocked_jid == sender_jid)
-        } else {
-            blocked_jid.to_bare() == *job.conversation_jid()
-        }
+        job.sender_jids()
+            .iter()
+            .any(|sender_jid| blocked_jid == sender_jid)
     } else if blocked_jid.node().is_some() {
         blocked_jid.to_bare() == *job.conversation_jid()
     } else {
@@ -1467,17 +1559,9 @@ fn xep0191_block_entry_matches_outbox_job(blocked_jid: &Jid, job: &NotificationO
     }
 }
 
-fn xep0191_block_entry_matches_sender(
-    blocked_jid: &Jid,
-    sender_jid: &Jid,
-    sender_jid_exact: bool,
-) -> bool {
+fn xep0191_block_entry_matches_sender(blocked_jid: &Jid, sender_jid: &Jid) -> bool {
     if blocked_jid.resource().is_some() {
-        if sender_jid_exact {
-            blocked_jid == sender_jid
-        } else {
-            blocked_jid.to_bare() == sender_jid.to_bare()
-        }
+        blocked_jid == sender_jid
     } else if blocked_jid.node().is_some() {
         blocked_jid.to_bare() == sender_jid.to_bare()
     } else {
@@ -1511,15 +1595,34 @@ async fn enqueue_outbox_job_tx(
     context: &Element,
     now_ms: i64,
 ) -> Result<(), NotificationOutboxError> {
-    let job_id = NotificationOutboxJobId::fresh();
     // The durable schema stores XML as TEXT; keep protocol context typed until this DB write edge.
     let context_xml = String::from(context);
-    let sender_jids = if candidate.sender_jid_exact() {
-        encode_sender_jids(std::slice::from_ref(&candidate.sender_jid))?
-    } else {
-        encode_sender_jids(&[])?
-    };
-    let inserted = tx
+    for _ in 0..8 {
+        let inserted =
+            insert_outbox_job_tx(tx, candidate, target, context_xml.as_str(), now_ms).await?;
+        if inserted > 0 {
+            return Ok(());
+        }
+        match merge_outbox_job_tx(tx, candidate, target, context_xml.as_str(), now_ms).await? {
+            OutboxMergeOutcome::Merged => return Ok(()),
+            OutboxMergeOutcome::MalformedExistingJobFailed
+            | OutboxMergeOutcome::QueuedJobNotFound
+            | OutboxMergeOutcome::QueuedJobChanged => {}
+        }
+    }
+    Err(NotificationOutboxError::OutboxCoalesceContention)
+}
+
+async fn insert_outbox_job_tx(
+    tx: &mut crate::db::Transaction<'_>,
+    candidate: &NotificationCandidate,
+    target: &NotificationOutboxTarget,
+    context_xml: &str,
+    now_ms: i64,
+) -> Result<u64, NotificationOutboxError> {
+    let job_id = NotificationOutboxJobId::fresh();
+    let sender_jids = encode_sender_jids(std::slice::from_ref(&candidate.sender_jid))?;
+    Ok(tx
         .execute(
             r#"
             INSERT INTO notification_outbox (
@@ -1530,7 +1633,6 @@ async fn enqueue_outbox_job_tx(
                 conversation_jid,
                 sender_jid,
                 sender_jids,
-                sender_jids_exact,
                 thread_id,
                 class,
                 message_count,
@@ -1545,7 +1647,7 @@ async fn enqueue_outbox_job_tx(
                 created_at_ms,
                 updated_at_ms,
                 published_at_ms
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, 0, 0, NULL, NULL, NULL, NULL, ?, ?, NULL)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, 0, 0, NULL, NULL, NULL, NULL, ?, ?, NULL)
             ON CONFLICT DO NOTHING
             "#,
             crate::db_params![
@@ -1556,20 +1658,22 @@ async fn enqueue_outbox_job_tx(
                 candidate.conversation_jid.to_string(),
                 candidate.sender_jid.to_string(),
                 sender_jids,
-                if candidate.sender_jid_exact() { 1_i64 } else { 0_i64 },
                 candidate.thread_id.as_str(),
                 candidate.class.as_db_value(),
-                context_xml.as_str(),
+                context_xml,
                 STATUS_QUEUED,
                 now_ms,
                 now_ms,
             ],
         )
-        .await?;
-    if inserted == 0 {
-        merge_outbox_job_tx(tx, candidate, target, context_xml.as_str(), now_ms).await?;
-    }
-    Ok(())
+        .await?)
+}
+
+enum OutboxMergeOutcome {
+    Merged,
+    MalformedExistingJobFailed,
+    QueuedJobNotFound,
+    QueuedJobChanged,
 }
 
 async fn merge_outbox_job_tx(
@@ -1578,11 +1682,11 @@ async fn merge_outbox_job_tx(
     target: &NotificationOutboxTarget,
     context_xml: &str,
     now_ms: i64,
-) -> Result<(), NotificationOutboxError> {
+) -> Result<OutboxMergeOutcome, NotificationOutboxError> {
     let mut rows = tx
         .query(
             r#"
-            SELECT sender_jid, sender_jids, sender_jids_exact
+            SELECT job_id, sender_jid, sender_jids
             FROM notification_outbox
             WHERE recipient_bare_jid = ?
               AND push_service_jid = ?
@@ -1605,65 +1709,116 @@ async fn merge_outbox_job_tx(
         )
         .await?;
     let Some(row) = rows.next().await? else {
-        return Ok(());
+        return Ok(OutboxMergeOutcome::QueuedJobNotFound);
     };
-    let existing_sender_raw: String = row.get(0)?;
-    let mut sender_jids = decode_sender_jids(&row.get::<String>(1)?)?;
-    let sender_jids_exact = row.get::<i64>(2)? != 0;
-    let merged_sender_jids_exact = sender_jids_exact && candidate.sender_jid_exact();
-    if !merged_sender_jids_exact {
-        sender_jids.clear();
-    } else if sender_jids.is_empty() {
-        sender_jids.push(
-            existing_sender_raw
-                .parse()
-                .map_err(|_| NotificationOutboxError::InvalidSenderJid(existing_sender_raw))?,
-        );
-    }
-    if merged_sender_jids_exact
-        && !sender_jids
-            .iter()
-            .any(|sender_jid| sender_jid == &candidate.sender_jid)
+    let job_id_raw: String = row.get(0)?;
+    let sender_raw = row
+        .get::<Option<String>>(1)?
+        .ok_or_else(|| NotificationOutboxError::InvalidSenderJid("<null>".to_string()));
+    let sender_jids_raw = row
+        .get::<Option<String>>(2)?
+        .ok_or(NotificationOutboxError::MissingSenderJidSet);
+    let existing_sender_jid = match sender_raw.and_then(|raw| {
+        let sender_jid = raw
+            .parse()
+            .map_err(|_| NotificationOutboxError::InvalidSenderJid(raw))?;
+        require_full_sender_jid(&sender_jid)?;
+        require_sender_matches_conversation(&sender_jid, &candidate.conversation_jid)?;
+        Ok(sender_jid)
+    }) {
+        Ok(sender_jid) => sender_jid,
+        Err(error) => {
+            mark_malformed_outbox_job_failed_tx(
+                tx,
+                job_id_raw.as_str(),
+                &error.to_string(),
+                now_ms,
+            )
+            .await?;
+            return Ok(OutboxMergeOutcome::MalformedExistingJobFailed);
+        }
+    };
+    let mut sender_jids = match sender_jids_raw.and_then(|raw| {
+        let sender_jids = decode_sender_jids(&raw)?;
+        require_full_sender_jid_set(&sender_jids)?;
+        require_sender_set_matches_conversation(&sender_jids, &candidate.conversation_jid)?;
+        require_sender_set_contains_scalar(&sender_jids, &existing_sender_jid)?;
+        Ok(sender_jids)
+    }) {
+        Ok(sender_jids) => sender_jids,
+        Err(error) => {
+            mark_malformed_outbox_job_failed_tx(
+                tx,
+                job_id_raw.as_str(),
+                &error.to_string(),
+                now_ms,
+            )
+            .await?;
+            return Ok(OutboxMergeOutcome::MalformedExistingJobFailed);
+        }
+    };
+    if !sender_jids
+        .iter()
+        .any(|sender_jid| sender_jid == &candidate.sender_jid)
     {
         sender_jids.push(candidate.sender_jid.clone());
     }
     let sender_jids = encode_sender_jids(&sender_jids)?;
-    tx.execute(
-        r#"
+    let affected = tx
+        .execute(
+            r#"
         UPDATE notification_outbox
         SET message_count = message_count + 1,
             context_xml = ?,
             sender_jid = ?,
             sender_jids = ?,
-            sender_jids_exact = ?,
             policy_error_count = 0,
             last_error = NULL,
             next_attempt_at_ms = NULL,
             updated_at_ms = ?
-        WHERE recipient_bare_jid = ?
-          AND push_service_jid = ?
-          AND node = ?
-          AND conversation_jid = ?
-          AND thread_id = ?
-          AND class = ?
+        WHERE job_id = ?
+          AND status = ?
+        "#,
+            crate::db_params![
+                context_xml,
+                candidate.sender_jid.to_string(),
+                sender_jids,
+                now_ms,
+                job_id_raw,
+                STATUS_QUEUED,
+            ],
+        )
+        .await?;
+    if affected == 0 {
+        return Ok(OutboxMergeOutcome::QueuedJobChanged);
+    }
+    Ok(OutboxMergeOutcome::Merged)
+}
+
+async fn mark_malformed_outbox_job_failed_tx(
+    tx: &mut crate::db::Transaction<'_>,
+    job_id: &str,
+    error: &str,
+    now_ms: i64,
+) -> Result<(), NotificationOutboxError> {
+    tx.execute(
+        r#"
+        UPDATE notification_outbox
+        SET status = ?,
+            policy_error_count = 0,
+            last_error = ?,
+            next_attempt_at_ms = NULL,
+            claimed_at_ms = NULL,
+            claim_token = NULL,
+            updated_at_ms = ?
+        WHERE job_id = ?
           AND status = ?
         "#,
         crate::db_params![
-            context_xml,
-            candidate.sender_jid.to_string(),
-            sender_jids,
-            if merged_sender_jids_exact {
-                1_i64
-            } else {
-                0_i64
-            },
+            STATUS_FAILED,
+            format!("malformed notification outbox job: {error}"),
             now_ms,
-            candidate.recipient_bare_jid.to_string(),
-            target.push_service_jid.to_string(),
-            target.node.as_str(),
-            candidate.conversation_jid.to_string(),
-            candidate.thread_id.as_str(),
-            candidate.class.as_db_value(),
+            job_id,
             STATUS_QUEUED,
         ],
     )
@@ -1778,29 +1933,34 @@ async fn current_unread_count_for_job(
 fn decode_candidate(row: &Row) -> Result<NotificationCandidate, NotificationOutboxError> {
     let recipient_raw: String = row.get(0)?;
     let conversation_raw: String = row.get(1)?;
-    let sender_raw: String = row.get(2)?;
-    let stanza_id_by_raw: String = row.get(5)?;
+    let sender_raw = row
+        .get::<Option<String>>(2)?
+        .ok_or_else(|| NotificationOutboxError::InvalidSenderJid("<null>".to_string()))?;
+    let sender_jid = sender_raw
+        .parse()
+        .map_err(|_| NotificationOutboxError::InvalidSenderJid(sender_raw))?;
+    require_full_sender_jid(&sender_jid)?;
+    let conversation_jid: BareJid = conversation_raw
+        .parse()
+        .map_err(|_| NotificationOutboxError::InvalidConversationJid(conversation_raw))?;
+    require_sender_matches_conversation(&sender_jid, &conversation_jid)?;
+    let stanza_id_by_raw: String = row.get(4)?;
     Ok(NotificationCandidate {
         recipient_bare_jid: recipient_raw
             .parse()
             .map_err(|_| NotificationOutboxError::InvalidRecipientBareJid(recipient_raw))?,
-        conversation_jid: conversation_raw
-            .parse()
-            .map_err(|_| NotificationOutboxError::InvalidConversationJid(conversation_raw))?,
-        sender_jid: sender_raw
-            .parse()
-            .map_err(|_| NotificationOutboxError::InvalidSenderJid(sender_raw))?,
-        sender_jid_exact: row.get::<i64>(3)? != 0,
-        thread_id: NotificationThreadId::new(row.get::<String>(4)?),
+        conversation_jid,
+        sender_jid,
+        thread_id: NotificationThreadId::new(row.get::<String>(3)?),
         archive_stanza_id: StanzaId::new(
-            row.get::<String>(6)?,
+            row.get::<String>(5)?,
             stanza_id_by_raw
                 .parse()
                 .map_err(|_| NotificationOutboxError::InvalidArchiveStanzaIdBy(stanza_id_by_raw))?,
         ),
-        class: NotificationClass::from_db_value(&row.get::<String>(7)?)?,
-        reason: NotificationReason::from_db_value(&row.get::<String>(8)?)?,
-        policy_error_count: row.get(9)?,
+        class: NotificationClass::from_db_value(&row.get::<String>(6)?)?,
+        reason: NotificationReason::from_db_value(&row.get::<String>(7)?)?,
+        policy_error_count: row.get(8)?,
     })
 }
 
@@ -1808,14 +1968,26 @@ fn decode_outbox_job(row: &Row) -> Result<NotificationOutboxJob, NotificationOut
     let recipient_raw: String = row.get(1)?;
     let push_service_raw: String = row.get(2)?;
     let conversation_raw: String = row.get(4)?;
-    let sender_raw: String = row.get(5)?;
-    let sender_jids_raw: String = row.get(6)?;
-    let message_count: i64 = row.get(10)?;
-    let context_xml: String = row.get(11)?;
+    let sender_raw = row
+        .get::<Option<String>>(5)?
+        .ok_or_else(|| NotificationOutboxError::InvalidSenderJid("<null>".to_string()))?;
+    let sender_jids_raw = row
+        .get::<Option<String>>(6)?
+        .ok_or(NotificationOutboxError::MissingSenderJidSet)?;
+    let message_count: i64 = row.get(9)?;
+    let context_xml: String = row.get(10)?;
     let sender_jid: Jid = sender_raw
         .parse()
         .map_err(|_| NotificationOutboxError::InvalidSenderJid(sender_raw))?;
+    require_full_sender_jid(&sender_jid)?;
+    let conversation_jid: BareJid = conversation_raw
+        .parse()
+        .map_err(|_| NotificationOutboxError::InvalidConversationJid(conversation_raw))?;
+    require_sender_matches_conversation(&sender_jid, &conversation_jid)?;
     let sender_jids = decode_sender_jids(&sender_jids_raw)?;
+    require_full_sender_jid_set(&sender_jids)?;
+    require_sender_set_matches_conversation(&sender_jids, &conversation_jid)?;
+    require_sender_set_contains_scalar(&sender_jids, &sender_jid)?;
     Ok(NotificationOutboxJob {
         job_id: NotificationOutboxJobId::from(row.get::<String>(0)?),
         recipient_bare_jid: recipient_raw
@@ -1825,23 +1997,20 @@ fn decode_outbox_job(row: &Row) -> Result<NotificationOutboxJob, NotificationOut
             .parse()
             .map_err(|_| NotificationOutboxError::InvalidPushServiceBareJid(push_service_raw))?,
         node: PushServiceNodeName::new(row.get::<String>(3)?)?,
-        conversation_jid: conversation_raw
-            .parse()
-            .map_err(|_| NotificationOutboxError::InvalidConversationJid(conversation_raw))?,
+        conversation_jid,
         sender_jid,
         sender_jids,
-        sender_jids_exact: row.get::<i64>(7)? != 0,
-        thread_id: NotificationThreadId::new(row.get::<String>(8)?),
-        class: NotificationClass::from_db_value(&row.get::<String>(9)?)?,
+        thread_id: NotificationThreadId::new(row.get::<String>(7)?),
+        class: NotificationClass::from_db_value(&row.get::<String>(8)?)?,
         message_count: u32::try_from(message_count)
             .map_err(|_| NotificationOutboxError::InvalidMessageCount(message_count))?,
         context: context_xml
             .parse::<Element>()
             .map_err(|error| NotificationOutboxError::InvalidContextXml(error.to_string()))?,
-        status: NotificationOutboxStatus::from_db_value(&row.get::<String>(12)?)?,
-        attempt_count: row.get(13)?,
-        policy_error_count: row.get(14)?,
-        claim_token: row.get(15)?,
+        status: NotificationOutboxStatus::from_db_value(&row.get::<String>(11)?)?,
+        attempt_count: row.get(12)?,
+        policy_error_count: row.get(13)?,
+        claim_token: row.get(14)?,
     })
 }
 
@@ -1944,7 +2113,13 @@ mod tests {
     }
 
     fn candidate_for(recipient: &BareJid, sender: &BareJid, id: &str) -> NotificationCandidate {
-        candidate_for_sender_jid(recipient, Jid::from(sender.clone()), id)
+        candidate_for_sender_jid(
+            recipient,
+            format!("{sender}/test-resource")
+                .parse()
+                .expect("full sender jid"),
+            id,
+        )
     }
 
     fn candidate_for_sender_jid(
@@ -1958,6 +2133,22 @@ mod tests {
             StanzaId::new(id, Jid::from(recipient.clone())),
         )
         .expect("candidate")
+    }
+
+    async fn failed_outbox_jobs_count(store: &NotificationOutboxStore) -> i64 {
+        let mut rows = store
+            .query(
+                "SELECT COUNT(*) FROM notification_outbox WHERE status = ?",
+                crate::db_params![STATUS_FAILED],
+            )
+            .await
+            .expect("failed outbox count query");
+        rows.next()
+            .await
+            .expect("failed outbox count row")
+            .expect("failed outbox count")
+            .get(0)
+            .expect("failed outbox count")
     }
 
     fn target() -> NotificationOutboxTarget {
@@ -1984,6 +2175,89 @@ mod tests {
             .expect("store")
     }
 
+    #[tokio::test]
+    async fn store_initialization_rejects_candidate_schema_without_sender_provenance_column() {
+        let db = Database::in_memory("notification-outbox-missing-candidate-sender")
+            .await
+            .unwrap();
+        let conn = db.guard().await.expect("db guard");
+        conn.execute(
+            r#"
+            CREATE TABLE notification_candidates (
+                recipient_bare_jid TEXT NOT NULL,
+                conversation_jid TEXT NOT NULL,
+                thread_id TEXT NOT NULL DEFAULT '',
+                stanza_id_by TEXT NOT NULL,
+                stanza_id TEXT NOT NULL,
+                class TEXT NOT NULL,
+                reason TEXT NOT NULL,
+                created_at_ms INTEGER NOT NULL,
+                policy_error_count INTEGER NOT NULL DEFAULT 0,
+                next_attempt_at_ms INTEGER,
+                outboxed_at_ms INTEGER,
+                PRIMARY KEY (recipient_bare_jid, conversation_jid, thread_id, stanza_id_by, stanza_id, class)
+            )
+            "#,
+            (),
+        )
+        .await
+        .expect("create incompatible candidate table");
+        drop(conn);
+
+        match NotificationOutboxStore::new(db).await {
+            Ok(_) => panic!("store must not add missing sender provenance candidate columns"),
+            Err(error) => assert!(
+                error.to_string().contains("sender_jid"),
+                "unexpected schema error: {error}"
+            ),
+        }
+    }
+
+    #[tokio::test]
+    async fn store_initialization_rejects_outbox_schema_without_sender_provenance_columns() {
+        let db = Database::in_memory("notification-outbox-missing-job-senders")
+            .await
+            .unwrap();
+        let conn = db.guard().await.expect("db guard");
+        conn.execute(
+            r#"
+            CREATE TABLE notification_outbox (
+                job_id TEXT PRIMARY KEY,
+                recipient_bare_jid TEXT NOT NULL,
+                push_service_jid TEXT NOT NULL,
+                node TEXT NOT NULL,
+                conversation_jid TEXT NOT NULL,
+                thread_id TEXT NOT NULL DEFAULT '',
+                class TEXT NOT NULL,
+                message_count INTEGER NOT NULL,
+                context_xml TEXT NOT NULL,
+                status TEXT NOT NULL,
+                attempt_count INTEGER NOT NULL DEFAULT 0,
+                policy_error_count INTEGER NOT NULL DEFAULT 0,
+                last_error TEXT,
+                next_attempt_at_ms INTEGER,
+                claimed_at_ms INTEGER,
+                claim_token TEXT,
+                created_at_ms INTEGER NOT NULL,
+                updated_at_ms INTEGER NOT NULL,
+                published_at_ms INTEGER
+            )
+            "#,
+            (),
+        )
+        .await
+        .expect("create incompatible outbox table");
+        drop(conn);
+
+        match NotificationOutboxStore::new(db).await {
+            Ok(_) => panic!("store must not add missing sender provenance outbox columns"),
+            Err(error) => assert!(
+                error.to_string().contains("sender_jid"),
+                "unexpected schema error: {error}"
+            ),
+        }
+    }
+
     async fn enqueue_jobs_for_test(
         store: &NotificationOutboxStore,
         candidate: &NotificationCandidate,
@@ -2005,6 +2279,21 @@ mod tests {
                 .expect("enqueue outbox job");
         }
         tx.commit().await.expect("commit tx");
+    }
+
+    #[test]
+    fn direct_message_candidate_requires_full_sender_jid() {
+        let recipient = bare("alice@example.com");
+        let result = NotificationCandidate::direct_message(
+            recipient.clone(),
+            Jid::from(bare("bob@example.com")),
+            StanzaId::new("archive-bare-sender", Jid::from(recipient)),
+        );
+
+        assert!(matches!(
+            result,
+            Err(NotificationOutboxError::SenderJidMissingResource(_))
+        ));
     }
 
     async fn register_push_target(
@@ -2242,6 +2531,248 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn candidate_worker_marks_malformed_bare_sender_candidate_terminal() {
+        let store = store().await;
+        let target = target();
+        let push_store = waddle_xmpp::push::InMemoryPushStore::new();
+        let blocking = waddle_xmpp::xep::xep0191::InMemoryBlockingStorage::new();
+        let recipient = bare("alice@example.com");
+        register_push_target(&push_store, &recipient, &target).await;
+        let candidate = candidate_for_sender_jid(
+            &recipient,
+            "bob@example.com/phone".parse().expect("phone sender"),
+            "archive-malformed-candidate-bare-sender",
+        );
+        store
+            .insert_candidate(&candidate)
+            .await
+            .expect("candidate insert");
+        store
+            .execute(
+                "UPDATE notification_candidates SET sender_jid = ? WHERE stanza_id = ?",
+                crate::db_params!["bob@example.com", "archive-malformed-candidate-bare-sender"],
+            )
+            .await
+            .expect("make candidate sender malformed");
+
+        assert_eq!(
+            store
+                .drain_pending_candidates_into_outbox(
+                    &push_store,
+                    &blocking,
+                    &bare("push.example.com"),
+                    16,
+                )
+                .await
+                .expect("drain candidates"),
+            0
+        );
+
+        assert!(store
+            .pending_outbox_jobs()
+            .await
+            .expect("pending jobs")
+            .is_empty());
+        assert!(store
+            .pending_candidates(16)
+            .await
+            .expect("pending candidates")
+            .is_empty());
+        let mut rows = store
+            .query(
+                "SELECT outboxed_at_ms FROM notification_candidates WHERE stanza_id = ?",
+                crate::db_params!["archive-malformed-candidate-bare-sender"],
+            )
+            .await
+            .expect("candidate marker query");
+        let row = rows
+            .next()
+            .await
+            .expect("candidate marker row")
+            .expect("candidate marker row");
+        assert!(row
+            .get::<Option<i64>>(0)
+            .expect("outboxed marker")
+            .is_some());
+    }
+
+    #[tokio::test]
+    async fn candidate_worker_marks_empty_sender_candidate_terminal_without_conversation_fallback()
+    {
+        let store = store().await;
+        let target = target();
+        let push_store = waddle_xmpp::push::InMemoryPushStore::new();
+        let blocking = waddle_xmpp::xep::xep0191::InMemoryBlockingStorage::new();
+        let recipient = bare("alice@example.com");
+        register_push_target(&push_store, &recipient, &target).await;
+        let candidate = candidate_for_sender_jid(
+            &recipient,
+            "bob@example.com/phone".parse().expect("phone sender"),
+            "archive-malformed-candidate-empty-sender",
+        );
+        store
+            .insert_candidate(&candidate)
+            .await
+            .expect("candidate insert");
+        store
+            .execute(
+                "UPDATE notification_candidates SET sender_jid = ? WHERE stanza_id = ?",
+                crate::db_params!["", "archive-malformed-candidate-empty-sender"],
+            )
+            .await
+            .expect("make candidate sender empty");
+
+        assert_eq!(
+            store
+                .drain_pending_candidates_into_outbox(
+                    &push_store,
+                    &blocking,
+                    &bare("push.example.com"),
+                    16,
+                )
+                .await
+                .expect("drain candidates"),
+            0
+        );
+
+        assert!(store
+            .pending_outbox_jobs()
+            .await
+            .expect("pending jobs")
+            .is_empty());
+        assert!(store
+            .pending_candidates(16)
+            .await
+            .expect("pending candidates")
+            .is_empty());
+        let mut rows = store
+            .query(
+                "SELECT outboxed_at_ms FROM notification_candidates WHERE stanza_id = ?",
+                crate::db_params!["archive-malformed-candidate-empty-sender"],
+            )
+            .await
+            .expect("candidate marker query");
+        let row = rows
+            .next()
+            .await
+            .expect("candidate marker row")
+            .expect("candidate marker row");
+        assert!(row
+            .get::<Option<i64>>(0)
+            .expect("outboxed marker")
+            .is_some());
+    }
+
+    #[tokio::test]
+    async fn candidate_worker_marks_mismatched_sender_candidate_terminal() {
+        let store = store().await;
+        let target = target();
+        let push_store = waddle_xmpp::push::InMemoryPushStore::new();
+        let blocking = waddle_xmpp::xep::xep0191::InMemoryBlockingStorage::new();
+        let recipient = bare("alice@example.com");
+        register_push_target(&push_store, &recipient, &target).await;
+        let candidate = candidate_for_sender_jid(
+            &recipient,
+            "bob@example.com/phone".parse().expect("phone sender"),
+            "archive-malformed-candidate-mismatch",
+        );
+        store
+            .insert_candidate(&candidate)
+            .await
+            .expect("candidate insert");
+        store
+            .execute(
+                "UPDATE notification_candidates SET conversation_jid = ? WHERE stanza_id = ?",
+                crate::db_params!["carol@example.com", "archive-malformed-candidate-mismatch"],
+            )
+            .await
+            .expect("make candidate sender mismatch conversation");
+
+        assert_eq!(
+            store
+                .drain_pending_candidates_into_outbox(
+                    &push_store,
+                    &blocking,
+                    &bare("push.example.com"),
+                    16,
+                )
+                .await
+                .expect("drain candidates"),
+            0
+        );
+
+        assert!(store
+            .pending_outbox_jobs()
+            .await
+            .expect("pending jobs")
+            .is_empty());
+        assert!(store
+            .pending_candidates(16)
+            .await
+            .expect("pending candidates")
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn candidate_worker_marks_malformed_conversation_candidate_terminal_and_continues() {
+        let store = store().await;
+        let target = target();
+        let push_store = waddle_xmpp::push::InMemoryPushStore::new();
+        let blocking = waddle_xmpp::xep::xep0191::InMemoryBlockingStorage::new();
+        let malformed_recipient = bare("alice@example.com");
+        let valid_recipient = bare("carol@example.com");
+        register_push_target(&push_store, &malformed_recipient, &target).await;
+        register_push_target(&push_store, &valid_recipient, &target).await;
+        let malformed = candidate_for_sender_jid(
+            &malformed_recipient,
+            "bob@example.com/phone".parse().expect("phone sender"),
+            "archive-malformed-candidate-conversation",
+        );
+        let valid = candidate_for_sender_jid(
+            &valid_recipient,
+            "dave@example.com/phone".parse().expect("valid sender"),
+            "archive-valid-after-malformed-candidate",
+        );
+        store
+            .insert_candidate(&malformed)
+            .await
+            .expect("malformed candidate insert");
+        store
+            .insert_candidate(&valid)
+            .await
+            .expect("valid candidate insert");
+        store
+            .execute(
+                "UPDATE notification_candidates SET conversation_jid = ? WHERE stanza_id = ?",
+                crate::db_params!["not a jid", "archive-malformed-candidate-conversation"],
+            )
+            .await
+            .expect("make candidate conversation malformed");
+
+        assert_eq!(
+            store
+                .drain_pending_candidates_into_outbox(
+                    &push_store,
+                    &blocking,
+                    &bare("push.example.com"),
+                    16,
+                )
+                .await
+                .expect("drain candidates"),
+            1
+        );
+
+        assert!(store
+            .pending_candidates(16)
+            .await
+            .expect("pending candidates")
+            .is_empty());
+        let jobs = store.pending_outbox_jobs().await.expect("jobs");
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].recipient_bare_jid(), &valid_recipient);
+    }
+
+    #[tokio::test]
     async fn candidate_worker_coalesces_distinct_sender_resources_into_one_bare_conversation_job() {
         let store = store().await;
         let target = target();
@@ -2305,7 +2836,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn candidate_worker_downgrades_coalesced_outbox_job_when_legacy_sender_is_merged() {
+    async fn candidate_worker_fails_malformed_coalesced_job_before_requeueing_exact_sender() {
         let store = store().await;
         let target = target();
         let push_store = waddle_xmpp::push::InMemoryPushStore::new();
@@ -2313,12 +2844,12 @@ mod tests {
         let recipient = bare("alice@example.com");
         register_push_target(&push_store, &recipient, &target).await;
 
-        let exact = candidate_for_sender_jid(
+        let phone = candidate_for_sender_jid(
             &recipient,
             "bob@example.com/phone".parse().expect("phone sender"),
-            "archive-exact-phone",
+            "archive-malformed-existing-phone",
         );
-        store.insert_candidate(&exact).await.expect("exact insert");
+        store.insert_candidate(&phone).await.expect("phone insert");
         assert_eq!(
             store
                 .drain_pending_candidates_into_outbox(
@@ -2328,26 +2859,27 @@ mod tests {
                     16,
                 )
                 .await
-                .expect("drain exact candidate"),
+                .expect("drain first candidate"),
             1
         );
-
-        let legacy = candidate_for_sender_jid(
-            &recipient,
-            "bob@example.com/laptop".parse().expect("laptop sender"),
-            "archive-legacy-laptop",
-        );
-        store
-            .insert_candidate(&legacy)
-            .await
-            .expect("legacy insert");
         store
             .execute(
-                "UPDATE notification_candidates SET sender_jid = conversation_jid, sender_jid_exact = 0 WHERE stanza_id = ?",
-                crate::db_params!["archive-legacy-laptop"],
+                "UPDATE notification_outbox SET sender_jid = ?, sender_jids = ?",
+                crate::db_params!["bob@example.com", "[]"],
             )
             .await
-            .expect("simulate legacy backfill");
+            .expect("make queued job malformed");
+
+        let laptop_sender = "bob@example.com/laptop".parse().expect("laptop sender");
+        let laptop = candidate_for_sender_jid(
+            &recipient,
+            laptop_sender,
+            "archive-malformed-existing-laptop",
+        );
+        store
+            .insert_candidate(&laptop)
+            .await
+            .expect("laptop insert");
         assert_eq!(
             store
                 .drain_pending_candidates_into_outbox(
@@ -2357,15 +2889,297 @@ mod tests {
                     16,
                 )
                 .await
-                .expect("drain legacy candidate"),
+                .expect("drain second candidate"),
             1
         );
 
+        assert_eq!(failed_outbox_jobs_count(&store).await, 1);
         let jobs = store.pending_outbox_jobs().await.expect("jobs");
         assert_eq!(jobs.len(), 1);
-        assert_eq!(jobs[0].message_count(), 2);
-        assert!(!jobs[0].sender_jids_exact());
-        assert!(jobs[0].sender_jids().is_empty());
+        assert_eq!(jobs[0].message_count(), 1);
+        assert_eq!(
+            jobs[0].sender_jids(),
+            &["bob@example.com/laptop"
+                .parse::<Jid>()
+                .expect("laptop sender")]
+        );
+    }
+
+    #[tokio::test]
+    async fn candidate_worker_fails_malformed_sender_jids_json_before_requeueing_exact_sender() {
+        let store = store().await;
+        let target = target();
+        let push_store = waddle_xmpp::push::InMemoryPushStore::new();
+        let blocking = waddle_xmpp::xep::xep0191::InMemoryBlockingStorage::new();
+        let recipient = bare("alice@example.com");
+        register_push_target(&push_store, &recipient, &target).await;
+
+        let phone = candidate_for_sender_jid(
+            &recipient,
+            "bob@example.com/phone".parse().expect("phone sender"),
+            "archive-malformed-json-phone",
+        );
+        store.insert_candidate(&phone).await.expect("phone insert");
+        assert_eq!(
+            store
+                .drain_pending_candidates_into_outbox(
+                    &push_store,
+                    &blocking,
+                    &bare("push.example.com"),
+                    16,
+                )
+                .await
+                .expect("drain first candidate"),
+            1
+        );
+        store
+            .execute(
+                "UPDATE notification_outbox SET sender_jid = ?, sender_jids = ?",
+                crate::db_params!["bob@example.com/phone", "not-json"],
+            )
+            .await
+            .expect("make queued job sender_jids malformed");
+
+        let laptop = candidate_for_sender_jid(
+            &recipient,
+            "bob@example.com/laptop".parse().expect("laptop sender"),
+            "archive-malformed-json-laptop",
+        );
+        store
+            .insert_candidate(&laptop)
+            .await
+            .expect("laptop insert");
+        assert_eq!(
+            store
+                .drain_pending_candidates_into_outbox(
+                    &push_store,
+                    &blocking,
+                    &bare("push.example.com"),
+                    16,
+                )
+                .await
+                .expect("drain second candidate"),
+            1
+        );
+
+        assert_eq!(failed_outbox_jobs_count(&store).await, 1);
+        let jobs = store.pending_outbox_jobs().await.expect("jobs");
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].message_count(), 1);
+        assert_eq!(
+            jobs[0].sender_jids(),
+            &["bob@example.com/laptop"
+                .parse::<Jid>()
+                .expect("laptop sender")]
+        );
+    }
+
+    #[tokio::test]
+    async fn candidate_worker_fails_sender_set_missing_scalar_before_requeueing_exact_sender() {
+        let store = store().await;
+        let target = target();
+        let push_store = waddle_xmpp::push::InMemoryPushStore::new();
+        let blocking = waddle_xmpp::xep::xep0191::InMemoryBlockingStorage::new();
+        let recipient = bare("alice@example.com");
+        register_push_target(&push_store, &recipient, &target).await;
+
+        let phone = candidate_for_sender_jid(
+            &recipient,
+            "bob@example.com/phone".parse().expect("phone sender"),
+            "archive-missing-scalar-phone",
+        );
+        store.insert_candidate(&phone).await.expect("phone insert");
+        assert_eq!(
+            store
+                .drain_pending_candidates_into_outbox(
+                    &push_store,
+                    &blocking,
+                    &bare("push.example.com"),
+                    16,
+                )
+                .await
+                .expect("drain first candidate"),
+            1
+        );
+        store
+            .execute(
+                "UPDATE notification_outbox SET sender_jids = ?",
+                crate::db_params!["[\"bob@example.com/laptop\"]"],
+            )
+            .await
+            .expect("make queued job sender_jids omit scalar sender");
+
+        let laptop = candidate_for_sender_jid(
+            &recipient,
+            "bob@example.com/laptop".parse().expect("laptop sender"),
+            "archive-missing-scalar-laptop",
+        );
+        store
+            .insert_candidate(&laptop)
+            .await
+            .expect("laptop insert");
+        assert_eq!(
+            store
+                .drain_pending_candidates_into_outbox(
+                    &push_store,
+                    &blocking,
+                    &bare("push.example.com"),
+                    16,
+                )
+                .await
+                .expect("drain second candidate"),
+            1
+        );
+
+        assert_eq!(failed_outbox_jobs_count(&store).await, 1);
+        let jobs = store.pending_outbox_jobs().await.expect("jobs");
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].message_count(), 1);
+        assert_eq!(
+            jobs[0].sender_jids(),
+            &["bob@example.com/laptop"
+                .parse::<Jid>()
+                .expect("laptop sender")]
+        );
+    }
+
+    #[tokio::test]
+    async fn candidate_worker_fails_semantically_invalid_sender_jids_before_requeueing_exact_sender(
+    ) {
+        let store = store().await;
+        let target = target();
+        let push_store = waddle_xmpp::push::InMemoryPushStore::new();
+        let blocking = waddle_xmpp::xep::xep0191::InMemoryBlockingStorage::new();
+        let recipient = bare("alice@example.com");
+        register_push_target(&push_store, &recipient, &target).await;
+
+        let phone = candidate_for_sender_jid(
+            &recipient,
+            "bob@example.com/phone".parse().expect("phone sender"),
+            "archive-invalid-sender-jids-phone",
+        );
+        store.insert_candidate(&phone).await.expect("phone insert");
+        assert_eq!(
+            store
+                .drain_pending_candidates_into_outbox(
+                    &push_store,
+                    &blocking,
+                    &bare("push.example.com"),
+                    16,
+                )
+                .await
+                .expect("drain first candidate"),
+            1
+        );
+        store
+            .execute(
+                "UPDATE notification_outbox SET sender_jid = ?, sender_jids = ?",
+                crate::db_params!["bob@example.com/phone", "[\"carol@example.com/phone\"]"],
+            )
+            .await
+            .expect("make queued job sender_jids semantically invalid");
+
+        let laptop = candidate_for_sender_jid(
+            &recipient,
+            "bob@example.com/laptop".parse().expect("laptop sender"),
+            "archive-invalid-sender-jids-laptop",
+        );
+        store
+            .insert_candidate(&laptop)
+            .await
+            .expect("laptop insert");
+        assert_eq!(
+            store
+                .drain_pending_candidates_into_outbox(
+                    &push_store,
+                    &blocking,
+                    &bare("push.example.com"),
+                    16,
+                )
+                .await
+                .expect("drain second candidate"),
+            1
+        );
+
+        assert_eq!(failed_outbox_jobs_count(&store).await, 1);
+        let jobs = store.pending_outbox_jobs().await.expect("jobs");
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].message_count(), 1);
+        assert_eq!(
+            jobs[0].sender_jids(),
+            &["bob@example.com/laptop"
+                .parse::<Jid>()
+                .expect("laptop sender")]
+        );
+    }
+
+    #[tokio::test]
+    async fn candidate_worker_fails_mismatched_scalar_sender_before_requeueing_exact_sender() {
+        let store = store().await;
+        let target = target();
+        let push_store = waddle_xmpp::push::InMemoryPushStore::new();
+        let blocking = waddle_xmpp::xep::xep0191::InMemoryBlockingStorage::new();
+        let recipient = bare("alice@example.com");
+        register_push_target(&push_store, &recipient, &target).await;
+
+        let phone = candidate_for_sender_jid(
+            &recipient,
+            "bob@example.com/phone".parse().expect("phone sender"),
+            "archive-invalid-scalar-phone",
+        );
+        store.insert_candidate(&phone).await.expect("phone insert");
+        assert_eq!(
+            store
+                .drain_pending_candidates_into_outbox(
+                    &push_store,
+                    &blocking,
+                    &bare("push.example.com"),
+                    16,
+                )
+                .await
+                .expect("drain first candidate"),
+            1
+        );
+        store
+            .execute(
+                "UPDATE notification_outbox SET sender_jid = ?",
+                crate::db_params!["carol@example.com/phone"],
+            )
+            .await
+            .expect("make queued job scalar sender invalid");
+
+        let laptop = candidate_for_sender_jid(
+            &recipient,
+            "bob@example.com/laptop".parse().expect("laptop sender"),
+            "archive-invalid-scalar-laptop",
+        );
+        store
+            .insert_candidate(&laptop)
+            .await
+            .expect("laptop insert");
+        assert_eq!(
+            store
+                .drain_pending_candidates_into_outbox(
+                    &push_store,
+                    &blocking,
+                    &bare("push.example.com"),
+                    16,
+                )
+                .await
+                .expect("drain second candidate"),
+            1
+        );
+
+        assert_eq!(failed_outbox_jobs_count(&store).await, 1);
+        let jobs = store.pending_outbox_jobs().await.expect("jobs");
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].message_count(), 1);
+        assert_eq!(
+            jobs[0].sender_jids(),
+            &["bob@example.com/laptop"
+                .parse::<Jid>()
+                .expect("laptop sender")]
+        );
     }
 
     #[tokio::test]
@@ -2418,60 +3232,6 @@ mod tests {
         assert_eq!(jobs[0].conversation_jid(), &bare("bob@example.com"));
         assert_eq!(jobs[0].sender_jid().to_string(), "bob@example.com/laptop");
         assert_eq!(jobs[0].message_count(), 1);
-    }
-
-    #[tokio::test]
-    async fn candidate_worker_full_jid_block_suppresses_legacy_candidate_without_exact_sender() {
-        let store = store().await;
-        let target = target();
-        let push_store = waddle_xmpp::push::InMemoryPushStore::new();
-        let blocking = waddle_xmpp::xep::xep0191::InMemoryBlockingStorage::new();
-        let recipient = bare("alice@example.com");
-        register_push_target(&push_store, &recipient, &target).await;
-        blocking.set_blocklist_jids(
-            recipient.clone(),
-            vec!["bob@example.com/phone".parse().expect("blocked sender")],
-        );
-        let candidate = candidate_for_sender_jid(
-            &recipient,
-            "bob@example.com/phone".parse().expect("phone sender"),
-            "archive-legacy-candidate",
-        );
-        store
-            .insert_candidate(&candidate)
-            .await
-            .expect("candidate insert");
-        store
-            .execute(
-                "UPDATE notification_candidates SET sender_jid = conversation_jid, sender_jid_exact = 0 WHERE stanza_id = ?",
-                crate::db_params!["archive-legacy-candidate"],
-            )
-            .await
-            .expect("simulate legacy backfill");
-
-        assert_eq!(
-            store
-                .drain_pending_candidates_into_outbox(
-                    &push_store,
-                    &blocking,
-                    &bare("push.example.com"),
-                    16,
-                )
-                .await
-                .expect("drain candidates"),
-            1
-        );
-
-        assert!(store
-            .pending_outbox_jobs()
-            .await
-            .expect("pending jobs")
-            .is_empty());
-        assert!(store
-            .pending_candidates(16)
-            .await
-            .expect("pending candidates")
-            .is_empty());
     }
 
     #[tokio::test]
@@ -2595,40 +3355,6 @@ mod tests {
             .await
             .expect("pending jobs")
             .is_empty());
-    }
-
-    #[test]
-    fn xep0191_full_jid_block_fails_closed_for_legacy_outbox_job_without_sender_provenance() {
-        let job = NotificationOutboxJob {
-            job_id: NotificationOutboxJobId::fresh(),
-            recipient_bare_jid: bare("alice@example.com"),
-            push_service_jid: bare("push.example.com"),
-            node: PushServiceNodeName::new("web-node").expect("node"),
-            conversation_jid: bare("bob@example.com"),
-            sender_jid: Jid::from(bare("bob@example.com")),
-            sender_jids: Vec::new(),
-            sender_jids_exact: false,
-            thread_id: NotificationThreadId::root(),
-            class: NotificationClass::DirectMessage,
-            message_count: 1,
-            context: Element::builder("context", WADDLE_PUSH_CONTEXT_NS).build(),
-            status: NotificationOutboxStatus::Queued,
-            attempt_count: 0,
-            policy_error_count: 0,
-            claim_token: None,
-        };
-
-        assert!(xep0191_block_entry_matches_outbox_job(
-            &"bob@example.com/phone".parse().expect("full blocked JID"),
-            &job,
-        ));
-        assert!(
-            !xep0191_block_entry_matches_outbox_job(
-                &"carol@example.com".parse().expect("bare blocked JID"),
-                &job,
-            ),
-            "bare-JID blocks still match the durable bare conversation identity"
-        );
     }
 
     #[tokio::test]
@@ -2843,6 +3569,200 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn claim_due_outbox_jobs_fails_malformed_sender_set_before_publish() {
+        let store = store().await;
+        enqueue_jobs_for_test(&store, &candidate("archive-malformed-claim"), &[target()]).await;
+        store
+            .execute(
+                "UPDATE notification_outbox SET sender_jid = ?, sender_jids = ?",
+                crate::db_params!["bob@example.com", "[]"],
+            )
+            .await
+            .expect("make queued job malformed");
+
+        let claimed = store.claim_due_outbox_jobs(16).await.expect("claim");
+
+        assert!(claimed.is_empty());
+        assert_eq!(failed_outbox_jobs_count(&store).await, 1);
+        assert!(store
+            .pending_outbox_jobs()
+            .await
+            .expect("pending jobs")
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn claim_due_outbox_jobs_fails_empty_sender_without_conversation_fallback() {
+        let store = store().await;
+        enqueue_jobs_for_test(
+            &store,
+            &candidate("archive-empty-sender-claim"),
+            &[target()],
+        )
+        .await;
+        store
+            .execute(
+                "UPDATE notification_outbox SET sender_jid = ?, sender_jids = ?",
+                crate::db_params!["", "[]"],
+            )
+            .await
+            .expect("make queued job sender provenance empty");
+
+        let claimed = store.claim_due_outbox_jobs(16).await.expect("claim");
+
+        assert!(claimed.is_empty());
+        assert_eq!(failed_outbox_jobs_count(&store).await, 1);
+        assert!(store
+            .pending_outbox_jobs()
+            .await
+            .expect("pending jobs")
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn claim_due_outbox_jobs_fails_malformed_sender_jids_json_before_publish() {
+        let store = store().await;
+        enqueue_jobs_for_test(
+            &store,
+            &candidate("archive-malformed-json-claim"),
+            &[target()],
+        )
+        .await;
+        store
+            .execute(
+                "UPDATE notification_outbox SET sender_jid = ?, sender_jids = ?",
+                crate::db_params!["bob@example.com/test-resource", "not-json"],
+            )
+            .await
+            .expect("make queued job sender_jids malformed");
+
+        let claimed = store.claim_due_outbox_jobs(16).await.expect("claim");
+
+        assert!(claimed.is_empty());
+        assert_eq!(failed_outbox_jobs_count(&store).await, 1);
+        assert!(store
+            .pending_outbox_jobs()
+            .await
+            .expect("pending jobs")
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn claim_due_outbox_jobs_fails_sender_set_missing_scalar_before_publish() {
+        let store = store().await;
+        enqueue_jobs_for_test(
+            &store,
+            &candidate("archive-missing-scalar-claim"),
+            &[target()],
+        )
+        .await;
+        store
+            .execute(
+                "UPDATE notification_outbox SET sender_jids = ?",
+                crate::db_params!["[\"bob@example.com/laptop\"]"],
+            )
+            .await
+            .expect("make queued job sender_jids omit scalar sender");
+
+        let claimed = store.claim_due_outbox_jobs(16).await.expect("claim");
+
+        assert!(claimed.is_empty());
+        assert_eq!(failed_outbox_jobs_count(&store).await, 1);
+        assert!(store
+            .pending_outbox_jobs()
+            .await
+            .expect("pending jobs")
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn claim_due_outbox_jobs_fails_semantically_invalid_sender_jids_before_publish() {
+        let store = store().await;
+        enqueue_jobs_for_test(
+            &store,
+            &candidate("archive-invalid-sender-jids-claim"),
+            &[target()],
+        )
+        .await;
+        store
+            .execute(
+                "UPDATE notification_outbox SET sender_jid = ?, sender_jids = ?",
+                crate::db_params![
+                    "bob@example.com/test-resource",
+                    "[\"carol@example.com/phone\"]"
+                ],
+            )
+            .await
+            .expect("make queued job sender_jids semantically invalid");
+
+        let claimed = store.claim_due_outbox_jobs(16).await.expect("claim");
+
+        assert!(claimed.is_empty());
+        assert_eq!(failed_outbox_jobs_count(&store).await, 1);
+        assert!(store
+            .pending_outbox_jobs()
+            .await
+            .expect("pending jobs")
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn claim_due_outbox_jobs_fails_mismatched_scalar_sender_before_publish() {
+        let store = store().await;
+        enqueue_jobs_for_test(
+            &store,
+            &candidate("archive-invalid-scalar-sender-claim"),
+            &[target()],
+        )
+        .await;
+        store
+            .execute(
+                "UPDATE notification_outbox SET sender_jid = ?",
+                crate::db_params!["carol@example.com/phone"],
+            )
+            .await
+            .expect("make queued job scalar sender invalid");
+
+        let claimed = store.claim_due_outbox_jobs(16).await.expect("claim");
+
+        assert!(claimed.is_empty());
+        assert_eq!(failed_outbox_jobs_count(&store).await, 1);
+        assert!(store
+            .pending_outbox_jobs()
+            .await
+            .expect("pending jobs")
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn claim_due_outbox_jobs_fails_malformed_context_before_publish() {
+        let store = store().await;
+        enqueue_jobs_for_test(
+            &store,
+            &candidate("archive-malformed-context-claim"),
+            &[target()],
+        )
+        .await;
+        store
+            .execute(
+                "UPDATE notification_outbox SET context_xml = ?",
+                crate::db_params!["<context"],
+            )
+            .await
+            .expect("make queued job context malformed");
+
+        let claimed = store.claim_due_outbox_jobs(16).await.expect("claim");
+
+        assert!(claimed.is_empty());
+        assert_eq!(failed_outbox_jobs_count(&store).await, 1);
+        assert!(store
+            .pending_outbox_jobs()
+            .await
+            .expect("pending jobs")
+            .is_empty());
+    }
+
+    #[tokio::test]
     async fn stale_in_progress_outbox_job_is_claimable_again() {
         let store = store().await;
         let target = target();
@@ -3030,6 +3950,76 @@ mod tests {
             .expect("fresh queued job");
         assert_eq!(queued.message_count(), 1);
         assert_ne!(queued.job_id(), claimed[0].job_id());
+    }
+
+    #[tokio::test]
+    async fn coalesce_retry_creates_fresh_job_when_queued_job_is_claimed_after_select() {
+        let store = store().await;
+        let target = target();
+        enqueue_jobs_for_test(
+            &store,
+            &candidate("archive-race-1"),
+            std::slice::from_ref(&target),
+        )
+        .await;
+        store
+            .db
+            .guard()
+            .await
+            .expect("db guard")
+            .execute(
+                r#"
+                CREATE TRIGGER simulate_notification_outbox_claim_race
+                BEFORE UPDATE OF message_count ON notification_outbox
+                WHEN OLD.status = 'queued'
+                BEGIN
+                    UPDATE notification_outbox
+                    SET status = 'in-progress',
+                        claimed_at_ms = OLD.updated_at_ms + 1,
+                        claim_token = 'race-claim',
+                        updated_at_ms = OLD.updated_at_ms + 1
+                    WHERE job_id = OLD.job_id;
+                    SELECT RAISE(IGNORE);
+                END;
+                "#,
+                (),
+            )
+            .await
+            .expect("install coalesce race trigger");
+
+        enqueue_jobs_for_test(&store, &candidate("archive-race-2"), &[target]).await;
+
+        let jobs = store.pending_outbox_jobs().await.expect("jobs");
+        assert_eq!(jobs.len(), 2);
+        assert!(jobs
+            .iter()
+            .any(|job| job.status() == NotificationOutboxStatus::InProgress
+                && job.message_count() == 1
+                && job.claim_token() == Some("race-claim")));
+        let queued = jobs
+            .iter()
+            .find(|job| job.status() == NotificationOutboxStatus::Queued)
+            .expect("fresh queued job from retry");
+        assert_eq!(queued.message_count(), 1);
+        assert_eq!(
+            queued.sender_jids(),
+            &["bob@example.com/test-resource"
+                .parse::<Jid>()
+                .expect("sender resource")]
+        );
+        let claimed = store
+            .claim_due_outbox_jobs(16)
+            .await
+            .expect("claim replacement job");
+        assert_eq!(claimed.len(), 1);
+        assert_eq!(claimed[0].status(), NotificationOutboxStatus::InProgress);
+        assert_eq!(claimed[0].message_count(), 1);
+        assert_ne!(claimed[0].claim_token(), Some("race-claim"));
+        assert!(store
+            .pending_candidates(16)
+            .await
+            .expect("pending candidates")
+            .is_empty());
     }
 
     #[tokio::test]

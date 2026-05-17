@@ -1070,11 +1070,396 @@ async fn notification_candidate_recovery_preserves_sender_resource_from_archived
         .expect("notification outbox jobs");
     assert_eq!(outbox_jobs.len(), 1);
     assert_eq!(outbox_jobs[0].conversation_jid(), &sender_bare);
-    assert!(
-        outbox_jobs[0].sender_jids_exact(),
-        "resource provenance should come from archived stanza_xml, not the bare MAM row"
-    );
     assert_eq!(outbox_jobs[0].sender_jids(), &[sender_full]);
+}
+
+#[tokio::test]
+async fn notification_candidate_recovery_skips_full_mam_sender_when_stanza_sender_conflicts() {
+    let state = create_test_websocket_state().await;
+    let recipient: BareJid = "bob@example.com".parse().expect("recipient");
+    let sender_full: jid::Jid = "alice@example.com/web".parse().expect("sender full jid");
+    let node = state
+        .deps
+        .protocol
+        .push_service
+        .ensure_node(&recipient, "web")
+        .await
+        .expect("push node");
+    state
+        .deps
+        .protocol
+        .push_service
+        .upsert_device(
+            &recipient,
+            crate::push_service::PushDeviceRegistration::new(
+                "web-1",
+                node.node(),
+                crate::push_service::PushDevicePlatform::Web,
+                "test",
+            ),
+        )
+        .await
+        .expect("push device");
+    state
+        .deps
+        .protocol
+        .push_service
+        .register_first_party_node_for_owner(&recipient, "push.example.com", node.node(), None)
+        .await
+        .expect("first-party push registration");
+
+    let archive_stanza_id = waddle_xmpp_core::xep0359::StanzaId::new(
+        "archive-recovery-full-row-mismatched-stanza-1",
+        jid::Jid::from(recipient.clone()),
+    );
+    let mut stanza_message =
+        xmpp_parsers::message::Message::new(Some(jid::Jid::from(recipient.clone())));
+    stanza_message.from = Some("alice@example.com/phone".parse().expect("stanza sender"));
+    stanza_message.id = Some("wire-recovery-full-row-mismatched-stanza-1".to_string());
+    stanza_message.type_ = XmppMessageType::Chat;
+    stanza_message.bodies.insert(
+        String::new(),
+        xmpp_parsers::message::Body("recover from full MAM row".to_string()),
+    );
+    let archived = waddle_xmpp_core::mam::ArchivedMessage {
+        id: archive_stanza_id.id.clone(),
+        body: Some("recover from full MAM row".to_string()),
+        stanza_id: Some(archive_stanza_id.clone()),
+        message_type: XmppMessageType::Chat,
+        stanza_xml: Some(
+            waddle_xmpp::parser::message_to_string(&stanza_message)
+                .expect("serialize mismatched archived message"),
+        ),
+        ..waddle_xmpp_core::mam::ArchivedMessage::for_test(
+            sender_full.clone(),
+            jid::Jid::from(recipient.clone()),
+        )
+    };
+    state
+        .deps
+        .protocol
+        .mam_storage
+        .store_message(&recipient, &archived)
+        .await
+        .expect("store MAM row");
+    state
+        .deps
+        .protocol
+        .pending_delivery_storage
+        .insert(waddle_xmpp::pending_delivery::PendingRow {
+            id: waddle_xmpp::pending_delivery::PendingRowId::fresh(),
+            recipient: recipient.clone(),
+            original_receipt_at: chrono::Utc::now(),
+            payload: waddle_xmpp::pending_delivery::PendingPayload::Archived(archive_stanza_id),
+            flushed_in_session: None,
+            outbound_sequence: None,
+        })
+        .await
+        .expect("insert pending_delivery row");
+
+    assert_eq!(
+        crate::server::routes::interpret::reconcile_xep0357_notification_candidates(
+            state.as_ref(),
+            16,
+        )
+        .await,
+        1
+    );
+    assert_eq!(
+        drain_notification_candidates_for_test(state.as_ref()).await,
+        0
+    );
+    assert!(state
+        .deps
+        .protocol
+        .notification_outbox
+        .pending_outbox_jobs()
+        .await
+        .expect("notification outbox jobs")
+        .is_empty());
+    assert_eq!(
+        crate::server::routes::interpret::reconcile_xep0357_notification_candidates(
+            state.as_ref(),
+            16,
+        )
+        .await,
+        0,
+        "conflicted sender provenance is terminal"
+    );
+}
+
+#[tokio::test]
+async fn notification_candidate_recovery_skips_bare_stanza_sender_even_with_full_mam_sender() {
+    let state = create_test_websocket_state().await;
+    let recipient: BareJid = "bob@example.com".parse().expect("recipient");
+    let sender_bare: BareJid = "alice@example.com".parse().expect("sender");
+    let sender_full: jid::Jid = "alice@example.com/web".parse().expect("sender full jid");
+    let node = state
+        .deps
+        .protocol
+        .push_service
+        .ensure_node(&recipient, "web")
+        .await
+        .expect("push node");
+    state
+        .deps
+        .protocol
+        .push_service
+        .upsert_device(
+            &recipient,
+            crate::push_service::PushDeviceRegistration::new(
+                "web-1",
+                node.node(),
+                crate::push_service::PushDevicePlatform::Web,
+                "test",
+            ),
+        )
+        .await
+        .expect("push device");
+    state
+        .deps
+        .protocol
+        .push_service
+        .register_first_party_node_for_owner(&recipient, "push.example.com", node.node(), None)
+        .await
+        .expect("first-party push registration");
+
+    let archive_stanza_id = waddle_xmpp_core::xep0359::StanzaId::new(
+        "archive-recovery-full-row-bare-stanza-1",
+        jid::Jid::from(recipient.clone()),
+    );
+    let mut stanza_message =
+        xmpp_parsers::message::Message::new(Some(jid::Jid::from(recipient.clone())));
+    stanza_message.from = Some(jid::Jid::from(sender_bare));
+    stanza_message.id = Some("wire-recovery-full-row-bare-stanza-1".to_string());
+    stanza_message.type_ = XmppMessageType::Chat;
+    stanza_message.bodies.insert(
+        String::new(),
+        xmpp_parsers::message::Body("do not recover bare stanza sender".to_string()),
+    );
+    let archived = waddle_xmpp_core::mam::ArchivedMessage {
+        id: archive_stanza_id.id.clone(),
+        body: Some("do not recover bare stanza sender".to_string()),
+        stanza_id: Some(archive_stanza_id.clone()),
+        message_type: XmppMessageType::Chat,
+        stanza_xml: Some(
+            waddle_xmpp::parser::message_to_string(&stanza_message)
+                .expect("serialize bare-sender archived message"),
+        ),
+        ..waddle_xmpp_core::mam::ArchivedMessage::for_test(
+            sender_full,
+            jid::Jid::from(recipient.clone()),
+        )
+    };
+    state
+        .deps
+        .protocol
+        .mam_storage
+        .store_message(&recipient, &archived)
+        .await
+        .expect("store MAM row");
+    state
+        .deps
+        .protocol
+        .pending_delivery_storage
+        .insert(waddle_xmpp::pending_delivery::PendingRow {
+            id: waddle_xmpp::pending_delivery::PendingRowId::fresh(),
+            recipient: recipient.clone(),
+            original_receipt_at: chrono::Utc::now(),
+            payload: waddle_xmpp::pending_delivery::PendingPayload::Archived(archive_stanza_id),
+            flushed_in_session: None,
+            outbound_sequence: None,
+        })
+        .await
+        .expect("insert pending_delivery row");
+
+    assert_eq!(
+        crate::server::routes::interpret::reconcile_xep0357_notification_candidates(
+            state.as_ref(),
+            16,
+        )
+        .await,
+        1
+    );
+    assert_eq!(
+        drain_notification_candidates_for_test(state.as_ref()).await,
+        0
+    );
+    assert!(state
+        .deps
+        .protocol
+        .notification_outbox
+        .pending_outbox_jobs()
+        .await
+        .expect("notification outbox jobs")
+        .is_empty());
+    assert_eq!(
+        crate::server::routes::interpret::reconcile_xep0357_notification_candidates(
+            state.as_ref(),
+            16,
+        )
+        .await,
+        0,
+        "bare stanza sender conflicts with exact MAM sender provenance"
+    );
+}
+
+#[tokio::test]
+async fn notification_candidate_recovery_skips_bare_only_sender_provenance_terminally() {
+    let state = create_test_websocket_state().await;
+    let recipient: BareJid = "bob@example.com".parse().expect("recipient");
+    let sender: BareJid = "alice@example.com".parse().expect("sender");
+    let archive_stanza_id = waddle_xmpp_core::xep0359::StanzaId::new(
+        "archive-recovery-bare-sender-1",
+        jid::Jid::from(recipient.clone()),
+    );
+    let archived = waddle_xmpp_core::mam::ArchivedMessage {
+        id: archive_stanza_id.id.clone(),
+        body: Some("do not recover without resource".to_string()),
+        stanza_id: Some(archive_stanza_id.clone()),
+        message_type: XmppMessageType::Chat,
+        stanza_xml: None,
+        ..waddle_xmpp_core::mam::ArchivedMessage::for_test(
+            jid::Jid::from(sender),
+            jid::Jid::from(recipient.clone()),
+        )
+    };
+    state
+        .deps
+        .protocol
+        .mam_storage
+        .store_message(&recipient, &archived)
+        .await
+        .expect("store MAM row");
+    state
+        .deps
+        .protocol
+        .pending_delivery_storage
+        .insert(waddle_xmpp::pending_delivery::PendingRow {
+            id: waddle_xmpp::pending_delivery::PendingRowId::fresh(),
+            recipient: recipient.clone(),
+            original_receipt_at: chrono::Utc::now(),
+            payload: waddle_xmpp::pending_delivery::PendingPayload::Archived(archive_stanza_id),
+            flushed_in_session: None,
+            outbound_sequence: None,
+        })
+        .await
+        .expect("insert pending_delivery row");
+
+    assert_eq!(
+        crate::server::routes::interpret::reconcile_xep0357_notification_candidates(
+            state.as_ref(),
+            16,
+        )
+        .await,
+        1
+    );
+    assert_eq!(
+        drain_notification_candidates_for_test(state.as_ref()).await,
+        0
+    );
+    assert!(state
+        .deps
+        .protocol
+        .notification_outbox
+        .pending_outbox_jobs()
+        .await
+        .expect("notification outbox jobs")
+        .is_empty());
+    assert_eq!(
+        crate::server::routes::interpret::reconcile_xep0357_notification_candidates(
+            state.as_ref(),
+            16,
+        )
+        .await,
+        0,
+        "pending_delivery marker should prevent retrying terminal no-provenance rows"
+    );
+}
+
+#[tokio::test]
+async fn notification_candidate_recovery_skips_mismatched_stanza_sender_terminally() {
+    let state = create_test_websocket_state().await;
+    let recipient: BareJid = "bob@example.com".parse().expect("recipient");
+    let archive_sender: BareJid = "alice@example.com".parse().expect("archive sender");
+    let archive_stanza_id = waddle_xmpp_core::xep0359::StanzaId::new(
+        "archive-recovery-mismatched-sender-1",
+        jid::Jid::from(recipient.clone()),
+    );
+    let mut stanza_message =
+        xmpp_parsers::message::Message::new(Some(jid::Jid::from(recipient.clone())));
+    stanza_message.from = Some("mallory@example.com/web".parse().expect("stanza sender"));
+    stanza_message.id = Some("wire-recovery-mismatched-sender-1".to_string());
+    stanza_message.type_ = XmppMessageType::Chat;
+    stanza_message.bodies.insert(
+        String::new(),
+        xmpp_parsers::message::Body("do not recover mismatched sender".to_string()),
+    );
+    let archived = waddle_xmpp_core::mam::ArchivedMessage {
+        id: archive_stanza_id.id.clone(),
+        body: Some("do not recover mismatched sender".to_string()),
+        stanza_id: Some(archive_stanza_id.clone()),
+        message_type: XmppMessageType::Chat,
+        stanza_xml: Some(
+            waddle_xmpp::parser::message_to_string(&stanza_message)
+                .expect("serialize mismatched archived message"),
+        ),
+        ..waddle_xmpp_core::mam::ArchivedMessage::for_test(
+            jid::Jid::from(archive_sender),
+            jid::Jid::from(recipient.clone()),
+        )
+    };
+    state
+        .deps
+        .protocol
+        .mam_storage
+        .store_message(&recipient, &archived)
+        .await
+        .expect("store MAM row");
+    state
+        .deps
+        .protocol
+        .pending_delivery_storage
+        .insert(waddle_xmpp::pending_delivery::PendingRow {
+            id: waddle_xmpp::pending_delivery::PendingRowId::fresh(),
+            recipient: recipient.clone(),
+            original_receipt_at: chrono::Utc::now(),
+            payload: waddle_xmpp::pending_delivery::PendingPayload::Archived(archive_stanza_id),
+            flushed_in_session: None,
+            outbound_sequence: None,
+        })
+        .await
+        .expect("insert pending_delivery row");
+
+    assert_eq!(
+        crate::server::routes::interpret::reconcile_xep0357_notification_candidates(
+            state.as_ref(),
+            16,
+        )
+        .await,
+        1
+    );
+    assert_eq!(
+        drain_notification_candidates_for_test(state.as_ref()).await,
+        0
+    );
+    assert!(state
+        .deps
+        .protocol
+        .notification_outbox
+        .pending_outbox_jobs()
+        .await
+        .expect("notification outbox jobs")
+        .is_empty());
+    assert_eq!(
+        crate::server::routes::interpret::reconcile_xep0357_notification_candidates(
+            state.as_ref(),
+            16,
+        )
+        .await,
+        0,
+        "pending_delivery marker should prevent retrying terminal mismatched-provenance rows"
+    );
 }
 
 #[tokio::test]
@@ -1438,8 +1823,8 @@ async fn handle_message_direct_chat_to_bare_jid_fans_out_to_all_connected_resour
         mobile_chat.expect("mobile resource should receive original bare-JID message");
     // RFC 6121 §8.5.2.1.1: bare-JID fan-out delivers the original
     // stanza to each available resource without rewriting the
-    // `to` attribute. The dispatcher path preserves this; legacy
-    // `handle_message` rewrote `to` to the per-resource full JID,
+    // `to` attribute. The dispatcher path preserves this; the prior
+    // `handle_message` behavior rewrote `to` to the per-resource full JID,
     // which was a deviation from the RFC. Both resources received
     // the stanza — the reachability semantic — and that is what
     // this unit test now asserts.
