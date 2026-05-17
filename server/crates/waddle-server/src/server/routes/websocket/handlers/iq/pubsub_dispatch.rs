@@ -1,4 +1,5 @@
 use super::pubsub_admin::handle_pubsub_admin_request;
+use super::pubsub_helpers;
 use super::*;
 use crate::server::routes::websocket::handlers::pubsub_fanout;
 
@@ -160,6 +161,16 @@ pub(super) async fn handle_pubsub_iq(
                     if let Err(error) = validate_xep0402_bookmark_publish_request(&item) {
                         return vec![iq_to_xml(build_pubsub_error(iq, error))];
                     }
+                }
+
+                // Pre-publish reconcile for well-known PEP nodes whose
+                // canonical XEP-defined config is stricter than the
+                // generic `pep_default()`. Only the owner's own PEP
+                // service is affected — peer fetches go through the
+                // Items arm, not Publish.
+                if is_pep && target_jid == user_jid {
+                    pubsub_helpers::reconcile_well_known_pep_node_config(state, &user_jid, &node)
+                        .await;
                 }
 
                 let result = state
