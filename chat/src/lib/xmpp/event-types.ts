@@ -78,6 +78,12 @@ export interface CommunityEventInput {
   /** Epoch ms. */
   dtendMs?: number;
   rrule?: Rrule;
+  /**
+   * EXDATE list (epoch ms) — occurrence DTSTARTs to skip on a
+   * recurring master. Only meaningful when `rrule` is set. Empty /
+   * absent means no occurrences are excluded.
+   */
+  exdatesMs?: number[];
 }
 
 // ── Wasm boundary ───────────────────────────────────────────────────

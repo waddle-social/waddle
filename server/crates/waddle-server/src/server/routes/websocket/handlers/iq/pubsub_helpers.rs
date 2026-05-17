@@ -722,6 +722,12 @@ pub(super) async fn handle_community_items(
     let Ok(community_jid) = community_domain.parse::<BareJid>() else {
         return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::InvalidJid))];
     };
+    // Community nodes (feed/stories/events) are server-managed: the
+    // topology bootstrap creates them on every startup. If a read
+    // hits before that bootstrap has run (or pre-dates the node's
+    // introduction in an older prod DB), surface an empty result
+    // rather than `item-not-found` so the chat lands on its empty
+    // state instead of an error banner.
     match state
         .deps
         .protocol
@@ -730,7 +736,7 @@ pub(super) async fn handle_community_items(
         .await
     {
         Ok(Some(_)) => {}
-        Ok(None) => return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::NodeNotFound))],
+        Ok(None) => return vec![iq_to_xml(build_pubsub_items_result(iq, node, &[]))],
         Err(error) => {
             warn!(node, error = %error, "Failed to retrieve community node");
             return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::NodeNotFound))];

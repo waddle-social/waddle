@@ -996,6 +996,7 @@ export class BrowserXmppClient {
     input: CommunityEventInput,
   ): Promise<CommunityEvent> {
     const xmpp = await this.requireConnectedXmpp();
+    const exdates = (input.exdatesMs ?? []).map((ms) => new Date(ms).toISOString());
     const result = await xmpp.xcal_publish_item?.(communityJid, itemId, {
       master: {
         summary: input.summary,
@@ -1011,7 +1012,7 @@ export class BrowserXmppClient {
         ...(input.rrule ? { rrule: rruleToWasm(input.rrule) } : {}),
       },
       overrides: [],
-      exdates: [],
+      exdates,
     }) as WasmVEvent | undefined;
     if (!result) {
       throw new Error("xcal_publish_item returned no event");
