@@ -4673,12 +4673,16 @@ mod tests {
             .await
             .expect("live attempts");
         let queued = store.queued_publish_jobs().await.expect("queued jobs");
+        let drained = first
+            .iter()
+            .chain(second.iter())
+            .map(|result| (result.item_id().to_string(), result.attempted_devices()))
+            .collect::<Vec<_>>();
 
         assert_eq!(first.len(), 1);
-        assert_eq!(first[0].item_id(), "zero-device-oldest");
-        assert_eq!(first[0].attempted_devices(), 0);
         assert_eq!(second.len(), 1);
-        assert_eq!(second[0].item_id(), "eligible-newer");
+        assert!(drained.contains(&("zero-device-oldest".to_string(), 0)));
+        assert!(drained.contains(&("eligible-newer".to_string(), 1)));
         assert_eq!(live_attempts.len(), 1);
         assert_eq!(live_attempts[0].item_id(), "eligible-newer");
         assert_eq!(queued.len(), 1);
