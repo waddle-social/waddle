@@ -13,6 +13,79 @@ use xmpp_parsers::presence::{Presence, Type as PresenceType};
 use crate::types::{Affiliation, Role};
 use crate::xep::xep0421::OccupantIdentity;
 
+/// Serialize an `Affiliation` to its XEP-0045 wire token. The
+/// `xmpp_parsers` `MucAffiliation` enum's `IntoAttributeValue` impl
+/// omits the attribute entirely when it equals the default
+/// (`MucAffiliation::None`), which violates XEP-0045 §9.1.1 / §10.2
+/// where `affiliation` is `Required` on `<item>`. Building the `<item>`
+/// via `minidom::Element` lets us write the literal token every time.
+fn affiliation_token(aff: Affiliation) -> &'static str {
+    match aff {
+        Affiliation::Owner => "owner",
+        Affiliation::Admin => "admin",
+        Affiliation::Member => "member",
+        Affiliation::Outcast => "outcast",
+        Affiliation::None => "none",
+    }
+}
+
+/// Build the `<item>` child of an `<x xmlns='muc#user'>` payload with
+/// the `affiliation` and `role` attributes ALWAYS present on the wire,
+/// regardless of value. `xmpp_parsers`' macro-generated serializer
+/// elides default attribute values, so building the element directly
+/// is the only way to satisfy XEP-0045 §9.1.1 / §10.2 / §7.14, where
+/// the wire form requires `role='none'` on the kicked/banned/leaving
+/// occupant's item.
+fn build_muc_user_item(
+    affiliation: Affiliation,
+    role_token: &'static str,
+    occupant_real_jid: Option<&FullJid>,
+    reason: Option<&str>,
+    actor: Option<&BareJid>,
+) -> Element {
+    let mut item = Element::builder("item", NS_MUC_USER)
+        .attr("affiliation", affiliation_token(affiliation))
+        .attr("role", role_token);
+    if let Some(jid) = occupant_real_jid {
+        item = item.attr("jid", jid.to_string());
+    }
+    if let Some(actor_bare) = actor {
+        // XEP-0045 §9.1.2 / §10.2 example: `<actor jid='admin'/>`. The
+        // schema accepts either a bare JID or a `nick` attribute; we
+        // emit `jid` because the room knows the kicker's real bare JID
+        // via the IQ `from`.
+        item = item.append(
+            Element::builder("actor", NS_MUC_USER)
+                .attr("jid", actor_bare.to_string())
+                .build(),
+        );
+    }
+    if let Some(reason_text) = reason {
+        item = item.append(
+            Element::builder("reason", NS_MUC_USER)
+                .append(reason_text)
+                .build(),
+        );
+    }
+    item.build()
+}
+
+/// Build the `<x xmlns='muc#user'>` payload that wraps a single
+/// occupant `<item>` plus the supplied status codes. Used by the
+/// kick / ban / leave builders, all of which need
+/// `affiliation` and `role` present on the wire.
+fn build_muc_user_x_element(item: Element, status_codes: &[&str]) -> Element {
+    let mut x = Element::builder("x", NS_MUC_USER).append(item);
+    for code in status_codes {
+        x = x.append(
+            Element::builder("status", NS_MUC_USER)
+                .attr("code", *code)
+                .build(),
+        );
+    }
+    x.build()
+}
+
 mod outbound;
 mod parser;
 #[cfg(test)]
@@ -119,6 +192,17 @@ fn strip_server_controlled_presence_payloads(presence: &mut Presence) {
 }
 
 /// Build a MUC unavailable presence for when a user leaves.
+///
+/// Per XEP-0045 §7.14 the wire form is
+/// `<presence type='unavailable' from='room/nick' to='occupant'>
+///     <x xmlns='muc#user'>
+///       <item affiliation='…' role='none'/>
+///     </x>
+///   </presence>`.
+/// The `role='none'` attribute is required on the wire even though
+/// it is the default for `xmpp_parsers::muc::user::Role`; we therefore
+/// build the `<x>` payload via `minidom::Element` so the attribute
+/// is always serialized.
 pub fn build_leave_presence(
     from_room_jid: &FullJid, // room@domain/nick of the user leaving
     to_jid: &FullJid,        // recipient's real JID
@@ -130,35 +214,18 @@ pub fn build_leave_presence(
     presence.from = Some(Jid::from(from_room_jid.clone()));
     presence.to = Some(Jid::from(to_jid.clone()));
 
-    // Build the MUC user element
-    let mut statuses = Vec::new();
-
+    let mut status_codes: Vec<&str> = Vec::new();
     if identity.real_jid.is_some() {
-        statuses.push(Status::NonAnonymousRoom);
+        status_codes.push("100");
     }
-
     if is_self {
-        statuses.push(Status::SelfPresence);
+        status_codes.push("110");
     }
 
-    // For leave, role is None
-    let item = Item {
-        affiliation: affiliation_to_muc(affiliation),
-        role: MucRole::None,
-        jid: identity.real_jid.cloned(),
-        nick: None,
-        actor: None,
-        continue_: None,
-        reason: None,
-    };
-
-    let muc_user = MucUser {
-        status: statuses,
-        items: vec![item],
-    };
-
-    let muc_element: Element = muc_user.into();
-    presence.payloads.push(muc_element);
+    let item = build_muc_user_item(affiliation, "none", identity.real_jid, None, None);
+    presence
+        .payloads
+        .push(build_muc_user_x_element(item, &status_codes));
     add_presence_identity_payloads(&mut presence, from_room_jid, identity);
 
     presence
@@ -211,9 +278,26 @@ fn role_to_muc(role: Role) -> MucRole {
 
 /// Build a kick presence notification (role changed to none).
 ///
-/// Per XEP-0045 §8.2: When a user is kicked, an unavailable presence is sent
-/// with status code 307 to all occupants. The kicked user also receives
-/// status code 110 to indicate it's about themselves.
+/// Per XEP-0045 §9.1.1 ("Kicking an Occupant"), normative:
+///
+/// > The service MUST then remove the kicked occupant by sending a
+/// > presence stanza of type "unavailable" to each kicked occupant,
+/// > including status code 307 in the extended presence information,
+/// > optionally along with the reason (if provided) and the JID of
+/// > the actor who initiated the kick.
+/// >
+/// > The service MUST then inform all of the remaining occupants that
+/// > the kicked occupant is no longer in the room by sending presence
+/// > stanzas of type "unavailable" from the individual's room-nick
+/// > (i.e., `<room@service/nick>`) to all the remaining occupants.
+///
+/// The kicked occupant additionally receives `<status code='110'/>`
+/// (XEP-0045 §6.6) so the client recognises the presence as its own.
+///
+/// We build the `<x xmlns='muc#user'>` payload via `minidom::Element`
+/// because `xmpp_parsers`' macro-generated `Item` serializer omits
+/// `role='none'` when role is the default — and XEP-0045 §9.1.1
+/// example shows `role='none'` is required on the wire for kicks.
 ///
 /// # Arguments
 /// * `from_room_jid` - The room@domain/nick of the kicked user
@@ -221,7 +305,7 @@ fn role_to_muc(role: Role) -> MucRole {
 /// * `affiliation` - The kicked user's affiliation (unchanged by kick)
 /// * `is_self` - True if this presence is going to the kicked user
 /// * `reason` - Optional reason for the kick
-/// * `actor` - Optional JID of who performed the kick
+/// * `actor` - Optional bare JID of who performed the kick
 pub fn build_kick_presence(
     from_room_jid: &FullJid,
     to_jid: &FullJid,
@@ -235,40 +319,18 @@ pub fn build_kick_presence(
     presence.from = Some(Jid::from(from_room_jid.clone()));
     presence.to = Some(Jid::from(to_jid.clone()));
 
-    let mut statuses = vec![Status::Kicked];
+    let mut status_codes: Vec<&str> = vec!["307"];
     if identity.real_jid.is_some() {
-        statuses.push(Status::NonAnonymousRoom);
+        status_codes.push("100");
     }
     if is_self {
-        statuses.push(Status::SelfPresence);
+        status_codes.push("110");
     }
 
-    // Build actor element if provided
-    // Actor is an enum with Jid(FullJid) or Nick(String) variants
-    // We use the FullJid variant, adding a synthetic resource to the BareJid
-    let actor_elem = actor.and_then(|a| {
-        a.with_resource_str("admin")
-            .ok()
-            .map(xmpp_parsers::muc::user::Actor::Jid)
-    });
-
-    let item = Item {
-        affiliation: affiliation_to_muc(affiliation),
-        role: MucRole::None, // Kicked = role none
-        jid: identity.real_jid.cloned(),
-        nick: None,
-        actor: actor_elem,
-        continue_: None,
-        reason: reason.map(|r| xmpp_parsers::muc::user::Reason(r.to_string())),
-    };
-
-    let muc_user = MucUser {
-        status: statuses,
-        items: vec![item],
-    };
-
-    let muc_element: Element = muc_user.into();
-    presence.payloads.push(muc_element);
+    let item = build_muc_user_item(affiliation, "none", identity.real_jid, reason, actor);
+    presence
+        .payloads
+        .push(build_muc_user_x_element(item, &status_codes));
     add_presence_identity_payloads(&mut presence, from_room_jid, identity);
 
     presence
@@ -276,16 +338,23 @@ pub fn build_kick_presence(
 
 /// Build a ban presence notification (affiliation changed to outcast).
 ///
-/// Per XEP-0045 §9.1: When a user is banned, an unavailable presence is sent
-/// with status code 301 to all occupants. The banned user also receives
-/// status code 110 to indicate it's about themselves.
+/// Per XEP-0045 §10.2 ("Banning a User"), normative:
+///
+/// > The service MUST remove the banned user from the room and inform
+/// > all remaining occupants by sending presence of type "unavailable"
+/// > with status code 301 from the affected occupant's room-nick.
+///
+/// The wire form is `<item affiliation='outcast' role='none' …>` —
+/// both attributes MUST appear on the wire. We build the `<x>` payload
+/// via `minidom::Element` because `xmpp_parsers`' macro-generated
+/// serializer drops attributes that match their default.
 ///
 /// # Arguments
 /// * `from_room_jid` - The room@domain/nick of the banned user
 /// * `to_jid` - The recipient's full JID
 /// * `is_self` - True if this presence is going to the banned user
 /// * `reason` - Optional reason for the ban
-/// * `actor` - Optional JID of who performed the ban
+/// * `actor` - Optional bare JID of who performed the ban
 pub fn build_ban_presence(
     from_room_jid: &FullJid,
     to_jid: &FullJid,
@@ -298,40 +367,24 @@ pub fn build_ban_presence(
     presence.from = Some(Jid::from(from_room_jid.clone()));
     presence.to = Some(Jid::from(to_jid.clone()));
 
-    let mut statuses = vec![Status::Banned];
+    let mut status_codes: Vec<&str> = vec!["301"];
     if identity.real_jid.is_some() {
-        statuses.push(Status::NonAnonymousRoom);
+        status_codes.push("100");
     }
     if is_self {
-        statuses.push(Status::SelfPresence);
+        status_codes.push("110");
     }
 
-    // Build actor element if provided
-    // Actor is an enum with Jid(FullJid) or Nick(String) variants
-    // We use the FullJid variant, adding a synthetic resource to the BareJid
-    let actor_elem = actor.and_then(|a| {
-        a.with_resource_str("admin")
-            .ok()
-            .map(xmpp_parsers::muc::user::Actor::Jid)
-    });
-
-    let item = Item {
-        affiliation: MucAffiliation::Outcast, // Banned = outcast
-        role: MucRole::None,                  // Banned = role none
-        jid: identity.real_jid.cloned(),
-        nick: None,
-        actor: actor_elem,
-        continue_: None,
-        reason: reason.map(|r| xmpp_parsers::muc::user::Reason(r.to_string())),
-    };
-
-    let muc_user = MucUser {
-        status: statuses,
-        items: vec![item],
-    };
-
-    let muc_element: Element = muc_user.into();
-    presence.payloads.push(muc_element);
+    let item = build_muc_user_item(
+        Affiliation::Outcast,
+        "none",
+        identity.real_jid,
+        reason,
+        actor,
+    );
+    presence
+        .payloads
+        .push(build_muc_user_x_element(item, &status_codes));
     add_presence_identity_payloads(&mut presence, from_room_jid, identity);
 
     presence
