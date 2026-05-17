@@ -298,9 +298,7 @@ fn xep0292_pronouns_omitted_when_unset() {
     let elem = build_vcard4_element(&vcard);
 
     assert!(
-        elem.children()
-            .find(|c| c.name() == "pronouns")
-            .is_none(),
+        elem.children().find(|c| c.name() == "pronouns").is_none(),
         "unset pronouns must not emit a <pronouns/> element"
     );
 
