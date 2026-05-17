@@ -99,6 +99,7 @@ import type {
   WasmAvatar,
   WasmInboxResult,
   WasmMamPage,
+  WasmMdsDisplayedEntry,
   WasmMessage,
   WasmPepProfile,
   WasmPresence,
@@ -195,11 +196,11 @@ type XmppClientInstance = Partial<WasmClient> & CompatEmitter & {
   set_on_message_delivery_acked?: (cb: (id: string) => void) => void;
   set_on_message_delivery_failed?: (cb: (id: string) => void) => void;
   set_on_session_lifecycle?: (cb: (event: string) => void) => void;
-  set_on_mds_displayed?: (cb: (entry: { chat_id: string; stanza_id: string; stanza_id_by: string }) => void) => void;
+  set_on_mds_displayed?: (cb: (entry: WasmMdsDisplayedEntry) => void) => void;
   get_resume_state?: () => XmppResumeState | null;
   get_resume_state_handle?: () => XmppResumeStateHandle | undefined;
   publish_mds_displayed?: (chatId: string, stanzaId: string, stanzaIdBy: string) => Promise<void>;
-  fetch_mds_displayed?: () => Promise<ReadonlyArray<{ chat_id: string; stanza_id: string; stanza_id_by: string }>>;
+  fetch_mds_displayed?: () => Promise<ReadonlyArray<WasmMdsDisplayedEntry>>;
   subscribe_mds_displayed?: () => Promise<void>;
 };
 
@@ -883,7 +884,7 @@ export class BrowserXmppClient {
     const xmpp = await this.requireConnectedXmpp();
     if (typeof xmpp.fetch_mds_displayed !== "function") return [];
     try {
-      const raw = await xmpp.fetch_mds_displayed() as ReadonlyArray<{ chat_id: string; stanza_id: string; stanza_id_by: string }> | null;
+      const raw = await xmpp.fetch_mds_displayed() as ReadonlyArray<WasmMdsDisplayedEntry> | null;
       if (!raw) return [];
       return raw.map((entry) => ({ chatId: entry.chat_id, stanzaId: entry.stanza_id, stanzaIdBy: entry.stanza_id_by }));
     } catch {
@@ -1517,7 +1518,7 @@ export class BrowserXmppClient {
     xmpp.set_on_presence?.((presence: WasmPresence) => this.handlePresence(presence));
     xmpp.set_on_message_delivery_acked?.((id: string) => this.handleMessageAck(id));
     xmpp.set_on_message_delivery_failed?.((id: string) => this.handleMessageFailed(id));
-    xmpp.set_on_mds_displayed?.((entry) => {
+    xmpp.set_on_mds_displayed?.((entry: WasmMdsDisplayedEntry) => {
       this.mdsDisplayedHandler?.({ chatId: entry.chat_id, stanzaId: entry.stanza_id, stanzaIdBy: entry.stanza_id_by });
     });
     xmpp.on?.("session:started", () => { xmpp.disableKeepAlive?.(); xmpp.enableKeepAlive?.({ interval: 30, timeout: 15 }); this.handleSessionReady(xmpp, { type: "fresh" }); });

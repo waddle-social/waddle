@@ -286,6 +286,13 @@ export interface WasmVCard4 {
   url?: string;
 }
 
+/** XEP-0490 §3 displayed entry surfaced from the wasm boundary. */
+export interface WasmMdsDisplayedEntry {
+  chat_id: string;
+  stanza_id: string;
+  stanza_id_by: string;
+}
+
 /** Options for send_groupchat_message / send_chat_message. */
 export interface WasmSendOptions {
   stanza_id?: string;
