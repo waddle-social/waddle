@@ -64,6 +64,9 @@ pub struct ProtocolServices {
     pub mam_storage: Arc<dyn MamStorage>,
     /// Shared Waddle inbox projection storage.
     pub inbox_storage: Arc<dyn InboxStorage>,
+    /// Per-thread cross-channel view (urn:waddle:threads:0). Reads
+    /// from the same backend as the inbox projection.
+    pub threads_storage: Arc<dyn crate::threads::storage::ThreadsStorage>,
     /// Shared XEP-0191 blocking-list storage. Used by the headless
     /// offline-recipient pass (#229 PR15) to seed a transient
     /// recipient state machine's blocklist when delivering to a

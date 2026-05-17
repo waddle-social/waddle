@@ -10,6 +10,7 @@
 //! Data source: the existing `inbox_entries` table (rows with non-empty
 //! `thread_id`). No new schema.
 
+pub mod handler;
 pub mod query;
 pub mod storage;
 pub mod wire;
