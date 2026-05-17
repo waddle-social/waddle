@@ -17,6 +17,7 @@ mod open;
 mod schema;
 
 use codec::{decode_row, encode_kind, SELECT_COLS};
+pub(crate) use codec::{decode_row as decode_inbox_row, SELECT_COLS as INBOX_SELECT_COLS};
 pub use open::build_inbox_storage;
 
 #[derive(Clone)]
@@ -25,6 +26,13 @@ pub struct DatabaseInboxStorage {
 }
 
 impl DatabaseInboxStorage {
+    /// Borrow the underlying logical database — used by sibling
+    /// projections (e.g. the threads view) so they share the same pool
+    /// and schema lifecycle.
+    pub fn db_handle(&self) -> Database {
+        self.db.clone()
+    }
+
     pub async fn open(database_url: Option<&str>) -> Result<Self, InboxStorageError> {
         let db = match database_url {
             Some(database_url) => open::open_database(database_url).await?,
