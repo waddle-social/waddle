@@ -27,5 +27,26 @@ pub fn server_features() -> Vec<Feature> {
     // admin, this advert is absent and the chat client's admin panel
     // can fall back to the "Admin only" empty state.
     features.push(Feature::new(crate::admin::NS_ADMIN_USERS_LIST));
+    // Admin V2 — XEP-0050 ad-hoc commands for Spaces + Channels CRUD.
+    // Each node identifier is an owner-gated `<command/>` URI plus the
+    // disco feature URI so clients can detect support without enumerating
+    // commands first. The handlers are registered alongside admin V1's
+    // `users:list` in the WebSocket command registry.
+    features.push(Feature::new(crate::admin::NS_ADMIN_SPACES_LIST));
+    features.push(Feature::new(crate::admin::NS_ADMIN_SPACES_CREATE));
+    features.push(Feature::new(crate::admin::NS_ADMIN_SPACES_UPDATE));
+    features.push(Feature::new(crate::admin::NS_ADMIN_SPACES_DELETE));
+    features.push(Feature::new(crate::admin::NS_ADMIN_SPACES_MEMBERS));
+    features.push(Feature::new(crate::admin::NS_ADMIN_SPACES_SET_ROLE));
+    features.push(Feature::new(crate::admin::NS_ADMIN_CHANNELS_LIST));
+    features.push(Feature::new(crate::admin::NS_ADMIN_CHANNELS_CREATE));
+    features.push(Feature::new(crate::admin::NS_ADMIN_CHANNELS_UPDATE));
+    features.push(Feature::new(crate::admin::NS_ADMIN_CHANNELS_DELETE));
+    features.push(Feature::new(crate::admin::NS_ADMIN_CHANNELS_OCCUPANTS));
+    features.push(Feature::new(crate::admin::NS_ADMIN_CHANNELS_AFFILIATIONS));
+    features.push(Feature::new(
+        crate::admin::NS_ADMIN_CHANNELS_SET_AFFILIATION,
+    ));
+    features.push(Feature::new(crate::admin::NS_ADMIN_CHANNELS_KICK));
     features
 }
