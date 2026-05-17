@@ -1,5 +1,6 @@
 use crate::permissions::PermissionActor;
 use crate::server::bootstrap_membership;
+use crate::spaces_metadata::SpacesMetadataStore;
 use jid::BareJid;
 use kameo::actor::ActorRef;
 use std::sync::Arc;
@@ -14,6 +15,11 @@ pub struct AppState {
     pub blob_storage: Arc<dyn crate::storage::BlobStorage>,
     /// Shared Waddle inbox projection storage.
     pub inbox_storage: Arc<dyn InboxStorage>,
+    /// Spaces metadata storage (`name`, `description`, `icon_url`) — read
+    /// and written by the admin V2 `spaces:create` / `spaces:update`
+    /// commands. XEP-0503 has no opinion on these human-facing fields;
+    /// they live here as a Waddle-specific projection.
+    pub spaces_metadata_store: Arc<dyn SpacesMetadataStore>,
     /// Shared permission actor handle.
     pub permission_actor: ActorRef<PermissionActor>,
     /// Bare JIDs of server owners (resolved from
@@ -39,6 +45,7 @@ impl AppState {
             db_pool,
             blob_storage,
             Arc::new(waddle_xmpp::inbox::storage::InMemoryInboxStorage::new()),
+            Arc::new(crate::spaces_metadata::InMemorySpacesMetadataStore::new()),
             permission_actor,
             Arc::from(Vec::<BareJid>::new()),
         )
@@ -48,6 +55,7 @@ impl AppState {
         db_pool: Arc<crate::db::DatabasePool>,
         blob_storage: Arc<dyn crate::storage::BlobStorage>,
         inbox_storage: Arc<dyn InboxStorage>,
+        spaces_metadata_store: Arc<dyn SpacesMetadataStore>,
         permission_actor: ActorRef<PermissionActor>,
         server_owner_jids: Arc<[BareJid]>,
     ) -> Self {
@@ -55,6 +63,7 @@ impl AppState {
             db_pool,
             blob_storage,
             inbox_storage,
+            spaces_metadata_store,
             permission_actor,
             server_owner_jids,
         }

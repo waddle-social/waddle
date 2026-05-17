@@ -30,6 +30,7 @@ async fn create_test_upload_state() -> (Arc<UploadState>, std::path::PathBuf) {
         Arc::clone(&db_pool),
         blob_storage,
         Arc::new(waddle_xmpp::inbox::storage::InMemoryInboxStorage::new()),
+        Arc::new(crate::spaces_metadata::InMemorySpacesMetadataStore::new()),
         permission_actor,
         Arc::from(Vec::<jid::BareJid>::new()),
     ));

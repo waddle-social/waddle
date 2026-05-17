@@ -19,6 +19,7 @@ pub mod push_service;
 pub mod server;
 pub mod sm_persistence;
 pub mod sm_promotion;
+pub mod spaces_metadata;
 pub mod spaces_pubsub_seed;
 pub mod storage;
 pub mod telemetry;
