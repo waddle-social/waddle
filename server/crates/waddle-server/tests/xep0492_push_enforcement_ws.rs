@@ -33,9 +33,7 @@
 //! lives next to the existing offline-delivery harness in
 //! `tests/messages.rs` — see `xep0492_direct_chat_*` tests there.
 
-use waddle_server::notification_settings_projection::{
-    ConversationKind, PushDispatchDecision,
-};
+use waddle_server::notification_settings_projection::{ConversationKind, PushDispatchDecision};
 use waddle_xmpp::xep::NotificationLevel;
 
 // ---------------------------------------------------------------------------
@@ -222,18 +220,14 @@ fn xep0492_public_group_default_path_delivers_with_mention() {
 #[test]
 fn xep0492_decision_should_deliver_matches_variant() {
     assert!(PushDispatchDecision::Deliver.should_deliver());
-    assert!(
-        !PushDispatchDecision::Suppressed {
-            reason: NotificationLevel::Never
-        }
-        .should_deliver()
-    );
-    assert!(
-        !PushDispatchDecision::Suppressed {
-            reason: NotificationLevel::OnMention
-        }
-        .should_deliver()
-    );
+    assert!(!PushDispatchDecision::Suppressed {
+        reason: NotificationLevel::Never
+    }
+    .should_deliver());
+    assert!(!PushDispatchDecision::Suppressed {
+        reason: NotificationLevel::OnMention
+    }
+    .should_deliver());
 }
 
 #[test]
