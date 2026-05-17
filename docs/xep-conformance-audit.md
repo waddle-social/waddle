@@ -118,7 +118,7 @@ or advertises. One row per XEP. Each gap becomes an isolated PR.
 | 0472 | Pubsub Social Feed                                   | urn:xmpp:pubsub-social-feed:0      |  -  |  Y   |   -   | unaudited  | |
 | 0486 | -                                                    |                                    |  -  |  Y   |   -   | unaudited  | Verify XEP number |
 | 0488 | Pinning Chat Messages                                | urn:xmpp:pin:0                     |  -  |  Y   |   -   | unaudited  | |
-| 0492 | Chat Notification Settings                           | urn:xmpp:notification-settings:0   |  -  |  Y   |   -   | unaudited  | |
+| 0492 | Chat Notification Settings                           | urn:xmpp:notification-settings:1   |  -  |  Y   |   Y   | partial    | Wire+projection in `xep0492_chat_notification_settings`; gate enforced at DM push fan-out via `PushDispatchDecision::evaluate` — covered by `xep0492_push_enforcement_ws` (matrix) + `tests/messages.rs::xep0492_direct_chat_*` (wire). MUC push fan-out is not yet wired (`QueueOfflineDelivery` only fires for DMs); reducer matrix locks the contract for when it lands. |
 | 0500 | -                                                    |                                    |  -  |  Y   |   -   | unaudited  | Verify XEP number |
 | 0501 | -                                                    |                                    |  -  |  Y   |   -   | unaudited  | Verify XEP number |
 | 0502 | -                                                    |                                    |  -  |  Y   |   -   | unaudited  | Verify XEP number |
