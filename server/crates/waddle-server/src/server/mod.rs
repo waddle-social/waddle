@@ -41,7 +41,7 @@ pub(crate) mod routes;
 pub mod xmpp_state;
 
 pub use config::{XmppAcmeConfig, XmppConfig};
-pub use state::{resolve_server_owner_jids, AppState};
+pub use state::{resolve_server_owner_jids, AppState, AppStateDeps};
 
 use crate::config::ServerConfig;
 use crate::db::DatabasePool;
@@ -64,7 +64,8 @@ pub async fn start(
     server_config: ServerConfig,
     inherited: Option<waddle_ecdysis::ListenerSet>,
 ) -> Result<()> {
-    let xmpp_config = XmppConfig::from_env();
+    let xmpp_config = XmppConfig::from_env()
+        .map_err(|error| anyhow::anyhow!("Failed to load XMPP configuration: {}", error))?;
 
     start_with_config(db_pool, xmpp_config, server_config, inherited).await
 }
@@ -139,6 +140,26 @@ pub async fn start_with_config(
             .map_err(|error| {
                 anyhow::anyhow!("Failed to initialize spaces metadata storage: {}", error)
             })?;
+    // Build the shared XEP-0060 PubSub/PEP storage and the MUC
+    // (XEP-0045) room registry here so the resulting handles live on
+    // `AppState`. Admin V2 handlers reach them via `state.*` instead of
+    // threading per-connection `ProtocolServices` references through
+    // every site that mutates rooms or pubsub nodes. The concrete
+    // `DatabasePubSubStorage` handle is also passed onward into the
+    // HTTP server so the notification-settings projection can read the
+    // same database without re-opening it.
+    let pubsub_database_storage =
+        crate::pubsub::build_database_pubsub_storage(xmpp_config.pubsub_database_url.clone())
+            .await
+            .map_err(|error| anyhow::anyhow!("Failed to initialize PubSub storage: {}", error))?;
+    let pubsub_storage: Arc<dyn waddle_xmpp::pubsub::PubSubStorage> =
+        pubsub_database_storage.clone();
+    let room_registry = kameo::spawn(
+        waddle_xmpp::muc::room_registry_actor::RoomRegistryActor::new(
+            xmpp_config.muc_domain.to_string(),
+            server_config.occupant_id_secret.clone(),
+        ),
+    );
 
     // Create HTTP state (shares db_pool via Arc)
     let blob_storage = crate::storage::build_blob_storage()
@@ -147,14 +168,18 @@ pub async fn start_with_config(
         &bootstrap_membership::BootstrapMembershipConfig::from_env(),
         &xmpp_config.domain,
     );
-    let state = Arc::new(AppState::new_with_deps(
-        Arc::clone(&db_pool),
+    let state = Arc::new(AppState::new_with_deps(AppStateDeps {
+        db_pool: Arc::clone(&db_pool),
         blob_storage,
-        Arc::clone(&inbox_storage),
-        Arc::clone(&spaces_metadata_store),
-        permission_actor.clone(),
+        inbox_storage: Arc::clone(&inbox_storage),
+        spaces_metadata_store: Arc::clone(&spaces_metadata_store),
+        pubsub_storage: Arc::clone(&pubsub_storage),
+        room_registry: room_registry.clone(),
+        spaces_jid: xmpp_config.spaces_jid.clone(),
+        muc_domain: xmpp_config.muc_domain.clone(),
+        permission_actor: permission_actor.clone(),
         server_owner_jids,
-    ));
+    }));
     let websocket_mam_storage =
         create_websocket_mam_storage(xmpp_config.mam_database_url.clone()).await?;
     let acme_runtime = start_acme_runtime(&xmpp_config, stop_token.clone());
@@ -174,12 +199,14 @@ pub async fn start_with_config(
     // stop_token cancels so axum doesn't tear down mid-drain.
     let drain_complete = Arc::new(tokio::sync::Notify::new());
     let http_drain_complete = Arc::clone(&drain_complete);
+    let http_pubsub_database_storage = Arc::clone(&pubsub_database_storage);
     let http_handle = tokio::spawn(async move {
         start_http_server(HttpServerDeps {
             state: http_state,
             server_config: http_server_config,
             xmpp_config: http_xmpp_config,
             mam_storage: http_mam_storage,
+            pubsub_database_storage: http_pubsub_database_storage,
             acme_http01_challenge_service,
             listener: http_listener,
             stop_token: http_stop,

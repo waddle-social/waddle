@@ -1,11 +1,13 @@
 use crate::permissions::PermissionActor;
 use crate::server::bootstrap_membership;
 use crate::spaces_metadata::SpacesMetadataStore;
-use jid::BareJid;
+use jid::{BareJid, DomainPart};
 use kameo::actor::ActorRef;
 use std::sync::Arc;
 use tracing::warn;
 use waddle_xmpp::inbox::storage::InboxStorage;
+use waddle_xmpp::muc::room_registry_actor::RoomRegistryActor;
+use waddle_xmpp::pubsub::PubSubStorage;
 
 /// Server application state
 pub struct AppState {
@@ -20,6 +22,29 @@ pub struct AppState {
     /// commands. XEP-0503 has no opinion on these human-facing fields;
     /// they live here as a Waddle-specific projection.
     pub spaces_metadata_store: Arc<dyn SpacesMetadataStore>,
+    /// Shared PubSub/PEP storage (XEP-0060/XEP-0163). Exposed on
+    /// `AppState` so admin V2 `spaces:list` / `channels:list` handlers
+    /// can enumerate pubsub-tree node membership without re-routing
+    /// through the per-connection `ProtocolServices` graph.
+    pub pubsub_storage: Arc<dyn PubSubStorage>,
+    /// Actor-backed MUC room registry (XEP-0045). Exposed on `AppState`
+    /// so admin V2 channel CRUD handlers (`channels:create`,
+    /// `channels:update`, `channels:delete`, `channels:kick`,
+    /// `channels:set-affiliation`) can issue room messages independent
+    /// of any user's live WebSocket connection.
+    pub room_registry: ActorRef<RoomRegistryActor>,
+    /// Bare JID of the community spaces (XEP-0503) service for this
+    /// deployment. Resolved from [`crate::server::XmppConfig::spaces_jid`]
+    /// (env override `WADDLE_SPACES_JID`, defaulted to
+    /// `spaces.<xmpp-domain>`). Admin V2 `spaces:*` handlers use this to
+    /// scope pubsub-tree reads/writes.
+    pub spaces_jid: BareJid,
+    /// MUC (XEP-0045) service domain for this deployment. Resolved
+    /// from [`crate::server::XmppConfig::muc_domain`] (env override
+    /// `WADDLE_MUC_DOMAIN`, defaulted to `muc.<xmpp-domain>`). Admin V2
+    /// `channels:create` constructs new managed room JIDs against this
+    /// domain.
+    pub muc_domain: DomainPart,
     /// Shared permission actor handle.
     pub permission_actor: ActorRef<PermissionActor>,
     /// Bare JIDs of server owners (resolved from
@@ -36,38 +61,88 @@ impl AppState {
     /// dependency is explicit.
     #[cfg(test)]
     pub fn new(db_pool: Arc<crate::db::DatabasePool>) -> Self {
+        use std::str::FromStr;
+        use waddle_xmpp::pubsub::InMemoryPubSubStorage;
+        use waddle_xmpp::xep::xep0421::OccupantIdSecret;
+
         let blob_storage = crate::storage::build_blob_storage()
             .unwrap_or_else(|e| panic!("failed to initialize blob storage: {e}"));
         let permission_actor = kameo::spawn(PermissionActor::new_for_tests(Arc::new(
             db_pool.global().clone(),
         )));
-        Self::new_with_deps(
+        let muc_domain = DomainPart::from_str("muc.localhost")
+            .expect("test MUC domain 'muc.localhost' parses as DomainPart");
+        let occupant_id_secret =
+            OccupantIdSecret::new(b"test-occupant-id-secret-32-bytes-long".to_vec())
+                .expect("test occupant-id secret meets length floor");
+        let room_registry = kameo::spawn(RoomRegistryActor::new(
+            muc_domain.to_string(),
+            occupant_id_secret,
+        ));
+        let spaces_jid: BareJid = "spaces.localhost"
+            .parse()
+            .expect("test spaces JID 'spaces.localhost' parses as BareJid");
+        Self::new_with_deps(AppStateDeps {
             db_pool,
             blob_storage,
-            Arc::new(waddle_xmpp::inbox::storage::InMemoryInboxStorage::new()),
-            Arc::new(crate::spaces_metadata::InMemorySpacesMetadataStore::new()),
+            inbox_storage: Arc::new(waddle_xmpp::inbox::storage::InMemoryInboxStorage::new()),
+            spaces_metadata_store: Arc::new(
+                crate::spaces_metadata::InMemorySpacesMetadataStore::new(),
+            ),
+            pubsub_storage: Arc::new(InMemoryPubSubStorage::new()),
+            room_registry,
+            spaces_jid,
+            muc_domain,
             permission_actor,
-            Arc::from(Vec::<BareJid>::new()),
-        )
+            server_owner_jids: Arc::from(Vec::<BareJid>::new()),
+        })
     }
 
-    pub fn new_with_deps(
-        db_pool: Arc<crate::db::DatabasePool>,
-        blob_storage: Arc<dyn crate::storage::BlobStorage>,
-        inbox_storage: Arc<dyn InboxStorage>,
-        spaces_metadata_store: Arc<dyn SpacesMetadataStore>,
-        permission_actor: ActorRef<PermissionActor>,
-        server_owner_jids: Arc<[BareJid]>,
-    ) -> Self {
+    /// Construct an `AppState` from its explicit dependencies. Callers
+    /// pass [`AppStateDeps`] so adding a new dependency does not widen
+    /// the constructor signature.
+    pub fn new_with_deps(deps: AppStateDeps) -> Self {
+        let AppStateDeps {
+            db_pool,
+            blob_storage,
+            inbox_storage,
+            spaces_metadata_store,
+            pubsub_storage,
+            room_registry,
+            spaces_jid,
+            muc_domain,
+            permission_actor,
+            server_owner_jids,
+        } = deps;
         Self {
             db_pool,
             blob_storage,
             inbox_storage,
             spaces_metadata_store,
+            pubsub_storage,
+            room_registry,
+            spaces_jid,
+            muc_domain,
             permission_actor,
             server_owner_jids,
         }
     }
+}
+
+/// Explicit `AppState` dependency bundle. Construction grouped into a
+/// single struct so adding a new dependency does not widen the
+/// `new_with_deps` argument list (clippy `too_many_arguments`).
+pub struct AppStateDeps {
+    pub db_pool: Arc<crate::db::DatabasePool>,
+    pub blob_storage: Arc<dyn crate::storage::BlobStorage>,
+    pub inbox_storage: Arc<dyn InboxStorage>,
+    pub spaces_metadata_store: Arc<dyn SpacesMetadataStore>,
+    pub pubsub_storage: Arc<dyn PubSubStorage>,
+    pub room_registry: ActorRef<RoomRegistryActor>,
+    pub spaces_jid: BareJid,
+    pub muc_domain: DomainPart,
+    pub permission_actor: ActorRef<PermissionActor>,
+    pub server_owner_jids: Arc<[BareJid]>,
 }
 
 /// Resolve `WADDLE_SERVER_OWNER_LOCALPARTS` localparts into bare JIDs against
@@ -91,4 +166,33 @@ pub fn resolve_server_owner_jids(
         }
     }
     Arc::from(jids)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::{DatabaseConfig, DatabasePool, MigrationRunner, PoolConfig};
+
+    #[tokio::test]
+    async fn new_with_deps_populates_admin_v2_dependencies() {
+        let db_pool = DatabasePool::new(DatabaseConfig::default(), PoolConfig)
+            .await
+            .expect("db pool");
+        MigrationRunner::global()
+            .run(db_pool.global())
+            .await
+            .expect("migrations");
+        let state = AppState::new(Arc::new(db_pool));
+
+        // pubsub_storage and room_registry are concrete handles — their
+        // mere existence is the contract, since admin V2 talks to them
+        // via the trait / actor protocol.
+        assert!(Arc::strong_count(&state.pubsub_storage) >= 1);
+        assert!(
+            state.room_registry.is_alive(),
+            "room registry actor should be live immediately after spawn"
+        );
+        assert_eq!(state.spaces_jid.to_string(), "spaces.localhost");
+        assert_eq!(state.muc_domain.as_str(), "muc.localhost");
+    }
 }

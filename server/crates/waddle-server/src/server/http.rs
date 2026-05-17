@@ -31,13 +31,19 @@ use tower_http::{
 };
 use tracing::{info, warn, Level};
 use waddle_xmpp::mam::{MamStorage, SqlxMamStorage};
-use waddle_xmpp::{muc::room_registry_actor::RoomRegistryActor, registry::ConnectionRegistry};
+use waddle_xmpp::registry::ConnectionRegistry;
 
 pub(crate) struct HttpServerDeps {
     pub(crate) state: Arc<AppState>,
     pub(crate) server_config: ServerConfig,
     pub(crate) xmpp_config: XmppConfig,
     pub(crate) mam_storage: Arc<dyn MamStorage>,
+    /// Concrete `DatabasePubSubStorage` handle built once in
+    /// `start_with_config`. Threaded down here so the notification
+    /// settings projection can attach to the same SQL database without
+    /// re-opening it. The trait-object view lives on
+    /// [`AppState::pubsub_storage`] for the rest of the WebSocket graph.
+    pub(crate) pubsub_database_storage: Arc<crate::pubsub::DatabasePubSubStorage>,
     pub(crate) acme_http01_challenge_service: Option<TowerHttp01ChallengeService>,
     pub(crate) listener: tokio::net::TcpListener,
     pub(crate) stop_token: tokio_util::sync::CancellationToken,
@@ -55,21 +61,23 @@ pub(crate) async fn start_http_server(deps: HttpServerDeps) -> Result<()> {
         server_config,
         xmpp_config,
         mam_storage,
+        pubsub_database_storage,
         acme_http01_challenge_service,
         listener,
         stop_token,
         drain_complete,
     } = deps;
 
-    let app = create_router(
+    let app = create_router(RouterDeps {
         state,
         server_config,
         xmpp_config,
         mam_storage,
+        pubsub_database_storage,
         acme_http01_challenge_service,
-        stop_token.clone(),
-        drain_complete.clone(),
-    )
+        shutdown_stop_token: stop_token.clone(),
+        drain_complete: drain_complete.clone(),
+    })
     .await?;
 
     let addr = listener.local_addr()?;
@@ -107,16 +115,33 @@ pub(crate) async fn create_websocket_mam_storage(
     Ok(Arc::new(storage))
 }
 
+/// Explicit dependency bundle for [`create_router`]. Grouped into a
+/// single struct so the signature stays under clippy's
+/// `too_many_arguments` threshold as new deps are wired in (e.g. the
+/// admin V2 plumbing PR additions to `AppState`).
+pub(crate) struct RouterDeps {
+    pub(crate) state: Arc<AppState>,
+    pub(crate) server_config: ServerConfig,
+    pub(crate) xmpp_config: XmppConfig,
+    pub(crate) mam_storage: Arc<dyn MamStorage>,
+    pub(crate) pubsub_database_storage: Arc<crate::pubsub::DatabasePubSubStorage>,
+    pub(crate) acme_http01_challenge_service: Option<TowerHttp01ChallengeService>,
+    pub(crate) shutdown_stop_token: tokio_util::sync::CancellationToken,
+    pub(crate) drain_complete: Arc<tokio::sync::Notify>,
+}
+
 /// Create the Axum router with all routes and middleware.
-pub(crate) async fn create_router(
-    state: Arc<AppState>,
-    server_config: ServerConfig,
-    xmpp_config: XmppConfig,
-    mam_storage: Arc<dyn MamStorage>,
-    acme_http01_challenge_service: Option<TowerHttp01ChallengeService>,
-    shutdown_stop_token: tokio_util::sync::CancellationToken,
-    drain_complete: Arc<tokio::sync::Notify>,
-) -> Result<Router> {
+pub(crate) async fn create_router(deps: RouterDeps) -> Result<Router> {
+    let RouterDeps {
+        state,
+        server_config,
+        xmpp_config,
+        mam_storage,
+        pubsub_database_storage,
+        acme_http01_challenge_service,
+        shutdown_stop_token,
+        drain_complete,
+    } = deps;
     // Create auth broker state
     let auth_state = Arc::new(AuthState::new(
         state.clone(),
@@ -130,6 +155,7 @@ pub(crate) async fn create_router(
         &xmpp_config,
         Arc::clone(&auth_state),
         mam_storage,
+        pubsub_database_storage,
     )
     .await?;
 
@@ -292,17 +318,18 @@ async fn create_websocket_state(
     xmpp_config: &XmppConfig,
     auth_state: Arc<AuthState>,
     mam_storage: Arc<dyn MamStorage>,
+    pubsub_database_storage: Arc<crate::pubsub::DatabasePubSubStorage>,
 ) -> Result<Arc<WebSocketState>> {
     // Create connection registry for WebSocket message routing
     let connection_registry = Arc::new(ConnectionRegistry::new());
 
-    // Create MUC room registry with the XMPP domain (not the HTTP base_url host)
+    // Read the MUC room registry and PubSub storage off the shared
+    // `AppState` — both are built in `start_with_config` so admin V2
+    // handlers and the WebSocket transport operate on the same handles.
     let xmpp_domain = auth_state.xmpp_domain.clone();
     let service_domains = XmppServiceDomains::new(&xmpp_domain);
-    let room_registry = kameo::spawn(RoomRegistryActor::new(
-        service_domains.muc.clone(),
-        server_config.occupant_id_secret.clone(),
-    ));
+    let room_registry = state.room_registry.clone();
+    let pubsub_storage = Arc::clone(&state.pubsub_storage);
 
     let deferred_extension_host_tools = Arc::new(DeferredExtensionHostTools::default());
     let extension_manager = build_extension_manager(
@@ -323,12 +350,6 @@ async fn create_websocket_state(
     waddle_xmpp::protocol::handlers::register_default_message_handlers(&mut stanza_dispatcher);
     let stanza_dispatcher = Arc::new(stanza_dispatcher);
 
-    // Shared durable PubSub/PEP storage for the WebSocket transport (XEP-0060/0163).
-    let pubsub_database_storage =
-        crate::pubsub::build_database_pubsub_storage(xmpp_config.pubsub_database_url.clone())
-            .await?;
-    let pubsub_storage: Arc<dyn waddle_xmpp::pubsub::PubSubStorage> =
-        pubsub_database_storage.clone();
     let extension_pubsub_owner: jid::BareJid = service_domains.extensions.parse()?;
     register_extension_commands(
         Arc::clone(&extension_manager),
