@@ -568,3 +568,41 @@ pub struct WaddleSendOptions {
     pub markup_spans: Vec<WaddleMarkupSpanInput>,
     pub references: Vec<WaddleReference>,
 }
+
+/// XEP-style payload for one entry in a urn:waddle:threads:0 response,
+/// shaped for JS consumption.
+#[derive(Debug, Clone, Serialize)]
+pub struct WaddleThreadEntry {
+    pub channel: String,
+    pub thread_id: String,
+    pub last_stanza_id: String,
+    /// RFC 3339 timestamp.
+    pub last_activity: String,
+    pub unread: u32,
+    pub reply_count: u32,
+    pub has_unread: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub root_author: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preview: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thread_title: Option<String>,
+}
+
+/// Paged response to a urn:waddle:threads:0 query, shaped for JS.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct WaddleThreadsPage {
+    pub total: u64,
+    pub unread_threads: u64,
+    pub entries: Vec<WaddleThreadEntry>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+}
+
+/// Options bag for `fetch_threads`. All fields optional.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct WaddleFetchThreadsOptions {
+    pub page_size: Option<u32>,
+    pub after_cursor: Option<String>,
+}

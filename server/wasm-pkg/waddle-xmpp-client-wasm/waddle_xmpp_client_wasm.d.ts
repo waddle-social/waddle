@@ -65,6 +65,11 @@ export class WaddleClient {
      * here as a rejected Promise.
      */
     fetch_room_pins(room_jid: string): Promise<any>;
+    /**
+     * Fetch the global threads view (`urn:waddle:threads:0`).
+     * Returns a `WaddleThreadsPage` (empty page on transport failure).
+     */
+    fetch_threads(opts: any): Promise<any>;
     fetch_user_pep_profile(jid: string): Promise<any>;
     fetch_vcard4(jid: string): Promise<any>;
     get_resume_state(): any;
