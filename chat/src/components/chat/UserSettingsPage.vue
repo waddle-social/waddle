@@ -3,6 +3,7 @@ import { computed, reactive, ref } from "vue";
 import { ChevronLeft, MessageCircle, ScanText, UserRound } from "lucide-vue-next";
 import AppAvatar from "@/components/ui/AppAvatar.vue";
 import ScrollDirectionSwitcher from "@/components/chat/ScrollDirectionSwitcher.vue";
+import VCardEditor from "@/components/chat/VCardEditor.vue";
 import VersionFooter from "@/components/chat/VersionFooter.vue";
 import type { XmppServerVersion } from "@/shell/version";
 import type { WaddleSession } from "@/lib/server-auth";
@@ -369,6 +370,8 @@ async function clearTuneStatus() {
           </div>
         </div>
       </section>
+
+      <VCardEditor :xmpp-client="xmppClient" :self-jid="session.jid" />
 
       <section class="chat-section-card glass-panel">
         <div class="flex items-start gap-3 pb-4">
