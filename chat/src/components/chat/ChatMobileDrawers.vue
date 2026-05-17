@@ -41,7 +41,15 @@ const {
   selectExtensionRoute,
   openCreateChannelDialog,
   openChannelEdit,
+  stories,
+  communityEvents,
 } = props.controller;
+
+function selectCommunitySurface(surface: "feed" | "stories" | "events") {
+  ui.activePage.value = "chat";
+  ui.activeCommunitySurface.value = surface;
+  ui.showMobileNav.value = false;
+}
 
 const drawerExtensionRoutes = computed(() =>
   extensionRouteRailItems(
@@ -101,9 +109,13 @@ function openExtensionRoute(route: DiscoveredExtensionRoute) {
           :collapsed-group-ids="ui.collapsedSpaceGroupIds.value"
           :channel-unread-map="computedChannelUnreadMap"
           :thread-entries-fn="(roomJid: string) => channelUnread.threadEntries(roomJid)"
+          :active-community-surface="ui.activeCommunitySurface.value"
+          :stories-active-count="stories.activeStories.value.length"
+          :upcoming-event-count="communityEvents.events.value.filter((e: { dtstartMs?: number }) => typeof e.dtstartMs === 'number' && e.dtstartMs > Date.now()).length"
           class="!w-full !border-r-0 !flex-1"
-          @select-channel="selectChannel"
+          @select-channel="(id: string) => { ui.activeCommunitySurface.value = null; selectChannel(id); }"
           @select-thread="onSelectThread"
+          @select-community-surface="selectCommunitySurface"
           @create-channel="openCreateChannelDialog()"
           @create-channel-in-space="openCreateChannelDialog"
           @open-settings="ui.showWaddleSettings.value = true"
