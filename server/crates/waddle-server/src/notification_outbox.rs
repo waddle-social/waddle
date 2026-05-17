@@ -1313,11 +1313,32 @@ async fn resolve_first_party_targets(
         if registration.service_jid != first_party_service {
             continue;
         }
-        let Some(target) = target_from_subscription(&registration)? else {
-            continue;
-        };
-        if target.push_service_jid() == first_party_service_jid {
-            targets.push(target);
+        match target_from_subscription(&registration) {
+            Ok(Some(target)) if target.push_service_jid() == first_party_service_jid => {
+                targets.push(target);
+            }
+            Ok(Some(target)) => {
+                tracing::warn!(
+                    recipient = %recipient,
+                    registration_service = %registration.service_jid,
+                    target_service = %target.push_service_jid(),
+                    "first-party XEP-0357 registration target did not parse back to the configured service"
+                );
+            }
+            Ok(None) => {
+                tracing::warn!(
+                    recipient = %recipient,
+                    service = %registration.service_jid,
+                    "first-party XEP-0357 registration missing node; skipping notification outbox target"
+                );
+            }
+            Err(error) => {
+                tracing::warn!(
+                    recipient = %recipient,
+                    error = %error,
+                    "first-party XEP-0357 registration could not be converted into a notification outbox target"
+                );
+            }
         }
     }
     Ok(targets)
@@ -1490,11 +1511,14 @@ mod tests {
     }
 
     fn candidate(id: &str) -> NotificationCandidate {
-        let recipient = bare("alice@example.com");
+        candidate_for(&bare("alice@example.com"), &bare("bob@example.com"), id)
+    }
+
+    fn candidate_for(recipient: &BareJid, sender: &BareJid, id: &str) -> NotificationCandidate {
         NotificationCandidate::direct_message(
             recipient.clone(),
-            bare("bob@example.com"),
-            StanzaId::new(id, Jid::from(recipient)),
+            sender.clone(),
+            StanzaId::new(id, Jid::from(recipient.clone())),
         )
         .expect("candidate")
     }
@@ -1666,6 +1690,60 @@ mod tests {
         assert_eq!(jobs[0].message_count(), 2);
         assert_eq!(jobs[0].conversation_jid(), &bare("bob@example.com"));
         assert_eq!(jobs[0].class(), NotificationClass::DirectMessage);
+    }
+
+    #[tokio::test]
+    async fn candidate_worker_skips_malformed_registration_and_continues_batch() {
+        let store = store().await;
+        let target = target();
+        let push_store = waddle_xmpp::push::InMemoryPushStore::new();
+        let alice = bare("alice@example.com");
+        let carol = bare("carol@example.com");
+        let bob = bare("bob@example.com");
+        let bad_candidate = candidate_for(&alice, &bob, "archive-bad-target");
+        let good_candidate = candidate_for(&carol, &bob, "archive-good-target");
+
+        push_store
+            .register(waddle_xmpp::push::PushSubscription {
+                user_jid: alice.to_string(),
+                service_jid: "push.example.com".to_string(),
+                node: Some(String::new()),
+                publish_options: None,
+                endpoint: None,
+                p256dh: None,
+                auth_key: None,
+            })
+            .await
+            .expect("register malformed push target");
+        register_push_target(&push_store, &carol, &target).await;
+
+        assert_eq!(
+            store
+                .insert_candidate(&bad_candidate)
+                .await
+                .expect("bad candidate insert"),
+            NotificationCandidateInsertOutcome::Inserted
+        );
+        assert_eq!(
+            store
+                .insert_candidate(&good_candidate)
+                .await
+                .expect("good candidate insert"),
+            NotificationCandidateInsertOutcome::Inserted
+        );
+
+        assert_eq!(
+            store
+                .drain_pending_candidates_into_outbox(&push_store, &bare("push.example.com"), 16,)
+                .await
+                .expect("drain candidates"),
+            2
+        );
+
+        let jobs = store.pending_outbox_jobs().await.expect("jobs");
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].recipient_bare_jid(), &carol);
+        assert_eq!(jobs[0].message_count(), 1);
     }
 
     #[test]
