@@ -57,9 +57,9 @@
 //! - [`OutboundEvent::ApplyGroupchatRetractionTombstone`] — XEP-0424
 //!   §"prevent further distribution" tombstone replace against the
 //!   room archive (mirrors the 1:1 retraction tombstone arm).
-//! - [`OutboundEvent::ProjectGroupchatInbox`] — per-occupant inbox
-//!   upsert (channel + thread rows) plus the XEP-0430 inbox push to
-//!   the owner's other resources.
+//! - [`OutboundEvent::ProjectGroupchatInbox`] — sender plus durable
+//!   recipient inbox upsert (channel + thread rows) plus the XEP-0430
+//!   inbox push to the owner's other resources.
 //!
 //! Stubbed (warn-logged until migration steps land them):
 //! - `AskSfu`, `QueryMam`, `LoadScramCredentials`,
@@ -360,7 +360,7 @@ async fn interpret_with_depth(
                 // §7.5 visitor-may-not-speak, XEP-0359 stanza-id
                 // stamping, XEP-0421 occupant-id stamping, XEP-0313
                 // archive-eligibility, XEP-0424 retraction tombstone
-                // emission, per-occupant inbox projection, and
+                // emission, durable-recipient inbox projection, and
                 // per-occupant fan-out — emitting typed
                 // [`OutboundEvent`]s the interpreter then resolves
                 // recursively below.
@@ -481,6 +481,7 @@ async fn interpret_with_depth(
                 room,
                 message,
                 is_recipient,
+                is_durable_recipient,
                 is_live_occupant,
                 room_members_only,
                 thread,
@@ -492,6 +493,7 @@ async fn interpret_with_depth(
                     room,
                     message,
                     is_recipient,
+                    is_durable_recipient,
                     is_live_occupant,
                     room_members_only,
                     thread,

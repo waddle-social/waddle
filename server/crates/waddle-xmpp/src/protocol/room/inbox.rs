@@ -1,11 +1,11 @@
-//! Per-occupant inbox projection for the room handler chain.
+//! Durable-recipient inbox projection for the room handler chain.
 //!
-//! Mirrors the legacy `deliver_groupchat_via_room_actor` per-occupant
+//! Mirrors the legacy `deliver_groupchat_via_room_actor` groupchat
 //! `inbox_storage.upsert(...)` calls (channel-level + thread-level
-//! entries) by emitting one
+//! entries) by emitting one sender row plus one
 //! [`super::super::event::OutboundEvent::ProjectGroupchatInbox`] event
-//! per occupant. The interpreter performs the actual upsert and
-//! per-occupant inbox push (XEP-0430).
+//! per durable affiliation-derived recipient. The interpreter performs
+//! the actual upsert and groupchat notification candidate projection.
 //!
 //! Eligibility mirrors the legacy
 //! [`crate::inbox::runtime::should_project_message`] check — body- /
@@ -15,7 +15,7 @@
 //!
 //! The sender is projected with `is_recipient = false` (no unread bump)
 //! to mirror the legacy `upsert(..., false)` for the sender's own row;
-//! every other occupant gets `is_recipient = true`.
+//! durable recipients get `is_recipient = true`.
 
 use super::super::event::{GroupchatThreadProjection, OutboundEvent};
 use super::context::RoomContext;
@@ -46,8 +46,7 @@ impl RoomHandler for MucInboxHandler {
             .recipient_occupants()
             .map(|occupant| occupant.bare_jid())
             .collect();
-        let mut events =
-            Vec::with_capacity(ctx.occupants.len() + ctx.durable_recipient_bare_jids.len());
+        let mut events = Vec::with_capacity(1 + ctx.durable_recipient_bare_jids.len());
         let sender_bare = ctx.sender_full.to_bare();
         // Always project the sender's own row (no unread bump). The
         // legacy code did this independent of whether the sender was
@@ -63,6 +62,7 @@ impl RoomHandler for MucInboxHandler {
                 room: ctx.room.clone(),
                 message: Box::new(message.clone()),
                 is_recipient: false,
+                is_durable_recipient: false,
                 is_live_occupant: true,
                 room_members_only: ctx.room_members_only,
                 thread: thread.clone(),
@@ -78,23 +78,8 @@ impl RoomHandler for MucInboxHandler {
                 room: ctx.room.clone(),
                 message: Box::new(message.clone()),
                 is_recipient: true,
+                is_durable_recipient: true,
                 is_live_occupant: live_recipient_bares.contains(bare),
-                room_members_only: ctx.room_members_only,
-                thread: thread.clone(),
-                dispatch_timestamp: ctx.dispatch_timestamp,
-            });
-        }
-        for occupant in ctx.recipient_occupants() {
-            let bare = occupant.bare_jid();
-            if bare == sender_bare || !seen.insert(bare.clone()) {
-                continue;
-            }
-            events.push(OutboundEvent::ProjectGroupchatInbox {
-                owner: bare,
-                room: ctx.room.clone(),
-                message: Box::new(message.clone()),
-                is_recipient: true,
-                is_live_occupant: true,
                 room_members_only: ctx.room_members_only,
                 thread: thread.clone(),
                 dispatch_timestamp: ctx.dispatch_timestamp,
@@ -230,13 +215,21 @@ mod tests {
     }
 
     #[test]
-    fn xep_0430_projects_per_occupant_inbox_with_sender_unread_false() {
+    fn xep_0430_projects_durable_inbox_with_sender_unread_false() {
         let room = bare("team@conf.example.com");
         let alice = full("alice@example.com/web");
         let bob = full("bob@example.com/desk");
         let occupants = vec![occ(alice.clone(), "alice"), occ(bob.clone(), "bob")];
+        let durable_recipients = vec![bob.to_bare()];
         let mut msg = groupchat(&room, &alice, "hi everyone");
-        let events = run_with(&room, &alice, &occupants, &mut msg);
+        let events = run_with_durable(
+            &room,
+            &alice,
+            &occupants,
+            &durable_recipients,
+            false,
+            &mut msg,
+        );
         let proj = projections(&events);
         assert_eq!(proj.len(), 2);
         let alice_bare: BareJid = "alice@example.com".parse().unwrap();
@@ -244,7 +237,7 @@ mod tests {
         let alice_row = proj.iter().find(|(o, _, _)| o == &alice_bare).unwrap();
         let bob_row = proj.iter().find(|(o, _, _)| o == &bob_bare).unwrap();
         assert!(!alice_row.1, "sender's own row must not bump unread");
-        assert!(bob_row.1, "other occupants get unread bumped");
+        assert!(bob_row.1, "durable recipients get unread bumped");
     }
 
     #[test]
@@ -263,18 +256,27 @@ mod tests {
     }
 
     #[test]
-    fn xep_0430_dedups_multi_session_occupant_to_one_inbox_row() {
+    fn xep_0430_dedups_multi_session_live_durable_recipient_to_one_inbox_row() {
         let room = bare("team@conf.example.com");
         let alice = full("alice@example.com/web");
         let bob_web = full("bob@example.com/web");
         let bob_desk = full("bob@example.com/desk");
+        let bob_bare = bob_web.to_bare();
         let occupants = vec![
             occ(alice.clone(), "alice"),
             occ(bob_web, "bob"),
             occ(bob_desk, "bob"),
         ];
+        let durable_recipients = vec![bob_bare];
         let mut msg = groupchat(&room, &alice, "hello bob");
-        let events = run_with(&room, &alice, &occupants, &mut msg);
+        let events = run_with_durable(
+            &room,
+            &alice,
+            &occupants,
+            &durable_recipients,
+            false,
+            &mut msg,
+        );
         let proj = projections(&events);
         // Sender + one bob row (the second bob session collapsed).
         assert_eq!(proj.len(), 2);
@@ -285,8 +287,13 @@ mod tests {
         let room = bare("team@conf.example.com");
         let alice = full("alice@example.com/web");
         let bob = full("bob@example.com/desk");
+        let dave = full("dave@example.com/phone");
         let charlie = bare("charlie@example.com");
-        let occupants = vec![occ(alice.clone(), "alice"), occ(bob, "bob")];
+        let occupants = vec![
+            occ(alice.clone(), "alice"),
+            occ(bob, "bob"),
+            occ(dave, "dave"),
+        ];
         let durable_recipients = vec![bare("bob@example.com"), charlie];
         let mut msg = groupchat(&room, &alice, "hello everyone");
 
@@ -299,18 +306,20 @@ mod tests {
             &mut msg,
         );
 
-        let projections: Vec<(String, bool, bool, bool)> = events
+        let projections: Vec<(String, bool, bool, bool, bool)> = events
             .iter()
             .filter_map(|event| match event {
                 OutboundEvent::ProjectGroupchatInbox {
                     owner,
                     is_recipient,
+                    is_durable_recipient,
                     is_live_occupant,
                     room_members_only,
                     ..
                 } => Some((
                     owner.to_string(),
                     *is_recipient,
+                    *is_durable_recipient,
                     *is_live_occupant,
                     *room_members_only,
                 )),
@@ -320,10 +329,16 @@ mod tests {
         assert_eq!(
             projections,
             vec![
-                ("alice@example.com".to_string(), false, true, true),
-                ("bob@example.com".to_string(), true, true, true),
-                ("charlie@example.com".to_string(), true, false, true),
+                ("alice@example.com".to_string(), false, false, true, true),
+                ("bob@example.com".to_string(), true, true, true, true),
+                ("charlie@example.com".to_string(), true, true, false, true),
             ]
+        );
+        assert!(
+            !projections
+                .iter()
+                .any(|(owner, _, _, _, _)| owner == "dave@example.com"),
+            "live occupants outside the durable affiliation set must not get inbox/push projection"
         );
     }
 

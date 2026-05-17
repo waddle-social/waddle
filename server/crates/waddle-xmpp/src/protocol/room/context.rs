@@ -126,7 +126,7 @@ pub struct RoomContext<'a> {
     /// for MUC canonicalization.
     pub project_sender_inbox: bool,
     /// Single dispatch timestamp (Unix epoch seconds) shared across
-    /// every per-occupant
+    /// every groupchat inbox
     /// [`super::super::event::OutboundEvent::ProjectGroupchatInbox`]
     /// projection emitted by [`super::inbox::MucInboxHandler`].
     /// Captured by the interpreter at dispatch start so projections
@@ -148,12 +148,12 @@ impl<'a> RoomContext<'a> {
             .find(|o| &o.full_jid == self.sender_full)
     }
 
-    /// Occupants that should receive delivery and recipient-owned inbox projection.
+    /// Occupants that should receive live delivery.
     ///
     /// Normal user-originated dispatches use the full occupant set.
     /// Server-authored synthetic dispatches may include a sender-only
     /// snapshot so canonicalization can produce `room/nick` without
-    /// treating that synthetic sender as a real recipient.
+    /// treating that synthetic sender as a live delivery recipient.
     pub fn recipient_occupants(&'a self) -> Box<dyn Iterator<Item = &'a OccupantSnapshot> + 'a> {
         if self.project_sender_inbox {
             Box::new(self.occupants.iter())

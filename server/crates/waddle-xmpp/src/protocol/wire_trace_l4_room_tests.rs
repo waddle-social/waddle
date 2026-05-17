@@ -350,11 +350,11 @@ fn xep_0424_groupchat_retraction_emits_archive_and_tombstone_events() {
 }
 
 #[test]
-fn xep_0430_groupchat_message_emits_per_occupant_inbox_projection() {
-    // #229 PR18 regression: the room chain emits one
-    // `ProjectGroupchatInbox` per *unique-bare* occupant, with
+fn xep_0430_groupchat_message_emits_durable_recipient_inbox_projection() {
+    // #524 compliance: the room chain emits one
+    // `ProjectGroupchatInbox` per durable affiliation recipient, with
     // `is_recipient=false` for the sender's own row and
-    // `is_recipient=true` for everyone else.
+    // `is_recipient=true` for durable recipients.
     let room = bare("team@conf.example.com");
     let alice = full("alice@example.com/web");
     let bob = full("bob@example.com/desk");
@@ -366,13 +366,14 @@ fn xep_0430_groupchat_message_emits_per_occupant_inbox_projection() {
         occ(charlie_a.clone(), "charlie"),
         occ(charlie_b.clone(), "charlie"),
     ];
+    let durable_recipients = vec![bob.to_bare(), charlie_a.to_bare()];
     let id_gen = FixedIdGenerator("inbox-archive".to_string());
     let secret = test_occupant_id_secret();
     let ctx = RoomContext {
         room: &room,
         sender_full: &alice,
         occupants: &occupants,
-        durable_recipient_bare_jids: &[],
+        durable_recipient_bare_jids: &durable_recipients,
         managed_room_forbidden: false,
         room_moderated: false,
         room_members_only: false,
@@ -399,7 +400,8 @@ fn xep_0430_groupchat_message_emits_per_occupant_inbox_projection() {
             _ => None,
         })
         .collect();
-    // Three unique bare JIDs (charlie's two sessions collapse).
+    // Sender + two durable bare JIDs (charlie's two sessions collapse for
+    // the active-channel live flag, not recipient expansion).
     assert_eq!(projections.len(), 3);
     let alice_bare: BareJid = "alice@example.com".parse().unwrap();
     let bob_bare: BareJid = "bob@example.com".parse().unwrap();
@@ -411,8 +413,8 @@ fn xep_0430_groupchat_message_emits_per_occupant_inbox_projection() {
         .find(|(o, _)| o == &charlie_bare)
         .unwrap();
     assert!(!alice_row.1, "sender's own row must not bump unread");
-    assert!(bob_row.1, "non-sender occupants get unread bumped");
-    assert!(charlie_row.1, "non-sender occupants get unread bumped");
+    assert!(bob_row.1, "durable recipients get unread bumped");
+    assert!(charlie_row.1, "durable recipients get unread bumped");
 }
 
 // ── XEP-0045 §8.1 subject change capture ─────────────────────────────────

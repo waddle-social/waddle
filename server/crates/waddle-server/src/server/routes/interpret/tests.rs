@@ -1480,7 +1480,7 @@ async fn send_stanza_preserves_xep_0201_thread_on_wire() {
 // #229 PR18 — DispatchToRoom interpreter arm runs the room handler
 // chain (Q7 option C). The end-to-end semantics (managed-room owner
 // check, rich-target validation, MAM archive, retraction
-// tombstones, per-occupant inbox projection, occupant fan-out) are
+// tombstones, durable-recipient inbox projection, occupant fan-out) are
 // exercised by the integration tests in
 // `crates/waddle-server/tests/*_ws.rs`; the L1 unit test below pins
 // the chain wiring against the lightweight in-process `Deps` shape.

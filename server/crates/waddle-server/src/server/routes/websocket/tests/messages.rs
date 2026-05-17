@@ -1088,6 +1088,13 @@ async fn groupchat_active_channel_mention_pushes_live_occupants_only() {
     .expect("create room");
     room_actor
         .ask(ChangeAffiliation {
+            jid: bob_bare.clone(),
+            affiliation: Affiliation::Member,
+        })
+        .await
+        .expect("affiliate live recipient");
+    room_actor
+        .ask(ChangeAffiliation {
             jid: charlie,
             affiliation: Affiliation::Member,
         })
@@ -1152,6 +1159,84 @@ async fn groupchat_active_channel_mention_pushes_live_occupants_only() {
 }
 
 #[tokio::test]
+async fn groupchat_active_channel_mention_does_not_expand_to_live_unaffiliated_occupants() {
+    let state = create_test_websocket_state().await;
+    let alice_session = create_test_session(state.as_ref(), "alice").await;
+    let alice_jid: FullJid = format!("{}@example.com/web", alice_session.xmpp_localpart)
+        .parse()
+        .expect("alice jid");
+    let bob_jid: FullJid = "bob-live-only@example.com/web".parse().expect("bob jid");
+    let bob_bare = bob_jid.to_bare();
+    register_first_party_push_for_test(state.as_ref(), &bob_bare, "bob-live-only-web").await;
+    let room_jid: BareJid = "active-channel-live-not-durable@muc.example.com"
+        .parse()
+        .expect("room jid");
+    let room_actor = get_or_create_room_actor(
+        state.as_ref(),
+        &room_jid,
+        RoomConfig {
+            members_only: false,
+            ..RoomConfig::default()
+        },
+        "space".to_string(),
+        "active-channel-live-not-durable".to_string(),
+    )
+    .await
+    .expect("create room");
+    room_actor
+        .ask(JoinWithAffiliation {
+            sender_jid: alice_jid.clone(),
+            nick: "alice".to_string(),
+            effective_affiliation: Affiliation::Member,
+            local_domain: "example.com".to_string(),
+        })
+        .await
+        .expect("join alice");
+    room_actor
+        .ask(JoinWithAffiliation {
+            sender_jid: bob_jid,
+            nick: "bob".to_string(),
+            effective_affiliation: Affiliation::None,
+            local_domain: "example.com".to_string(),
+        })
+        .await
+        .expect("join bob without durable affiliation");
+
+    let mut message = xmpp_parsers::message::Message::new(Some(jid::Jid::from(room_jid)));
+    message.id = Some("active-channel-live-not-durable-push".to_string());
+    message.type_ = XmppMessageType::Groupchat;
+    message.bodies.insert(
+        String::new(),
+        xmpp_parsers::message::Body("heads up".to_string()),
+    );
+    message
+        .payloads
+        .push(waddle_xmpp::xep::build_mention_element(
+            &waddle_xmpp::xep::ExplicitMention::active_channel(),
+        ));
+
+    let responses =
+        handle_message_for_test(state.as_ref(), &alice_jid, Some(&alice_session), message).await;
+    assert!(
+        responses.is_empty(),
+        "valid active channel mention should not return an error: {responses:?}"
+    );
+    let drained = drain_notification_candidates_for_test(state.as_ref()).await;
+    let jobs = state
+        .deps
+        .protocol
+        .notification_outbox
+        .pending_outbox_jobs()
+        .await
+        .expect("notification outbox jobs");
+    assert_eq!(
+        drained, 0,
+        "live occupancy alone must not expand the durable groupchat push recipient set: {jobs:?}"
+    );
+    assert!(jobs.is_empty());
+}
+
+#[tokio::test]
 async fn groupchat_active_channel_mention_preserves_notify_all_for_non_live_always_members() {
     let state = create_test_websocket_state().await;
     let alice_session = create_test_session(state.as_ref(), "alice").await;
@@ -1178,6 +1263,13 @@ async fn groupchat_active_channel_mention_preserves_notify_all_for_non_live_alwa
     )
     .await
     .expect("create room");
+    room_actor
+        .ask(ChangeAffiliation {
+            jid: bob_bare.clone(),
+            affiliation: Affiliation::Member,
+        })
+        .await
+        .expect("affiliate live recipient");
     room_actor
         .ask(ChangeAffiliation {
             jid: charlie.clone(),

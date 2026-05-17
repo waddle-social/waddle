@@ -268,7 +268,7 @@ pub(super) async fn scrub_unacked_for_tombstone(
 
 /// Apply the `(owner, room, message)` projection against the inbox
 /// storage. Mirrors the legacy
-/// `deliver_groupchat_via_room_actor`'s per-occupant
+/// `deliver_groupchat_via_room_actor`'s groupchat
 /// channel + thread upserts and the XEP-0430 inbox push to the
 /// owner's other resources.
 #[allow(clippy::too_many_arguments)]

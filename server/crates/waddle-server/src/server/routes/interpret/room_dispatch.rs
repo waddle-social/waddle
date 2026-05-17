@@ -120,9 +120,9 @@ pub(super) async fn dispatch_to_room(
     let durable_recipient_bare_jids =
         durable_groupchat_recipient_bare_jids(&room_actor, &room_jid).await;
     let id_gen = UuidV4Generator;
-    // Capture a single dispatch timestamp here so every per-occupant
+    // Capture a single dispatch timestamp here so every
     // `ProjectGroupchatInbox` event the chain emits carries the same
-    // value (Copilot review on PR #279). Avoids per-occupant
+    // value (Copilot review on PR #279). Avoids per-projection
     // `Utc::now()` drift across a second-boundary.
     let dispatch_timestamp = chrono::Utc::now().timestamp();
     normalize_thread_create_source(&mut prototype);
@@ -350,7 +350,7 @@ pub(super) async fn durable_groupchat_recipient_bare_jids(
                 room = %room_jid,
                 error = ?error,
                 "DispatchToRoom: failed to load durable MUC affiliations; \
-                 falling back to live occupants for this projection"
+                 skipping durable groupchat recipient projection for this dispatch"
             );
             Vec::new()
         }

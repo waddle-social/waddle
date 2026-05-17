@@ -247,9 +247,8 @@ pub enum OutboundEvent {
     },
     /// Project a groupchat message into one user's inbox (Waddle product
     /// surface). Sibling to [`OutboundEvent::ProjectInbox`] for the
-    /// MUC-locality chain — emitted once per durable recipient plus
-    /// any currently joined occupant that is not represented by the
-    /// durable affiliation snapshot.
+    /// MUC-locality chain — emitted once for the sender's own row plus
+    /// once per durable affiliation-derived recipient.
     ///
     /// `is_recipient` is `true` for everyone except the sender, who
     /// gets their own copy without bumping the unread counter.
@@ -267,6 +266,10 @@ pub enum OutboundEvent {
         message: Box<Message>,
         /// `true` for recipients (bumps unread); `false` for the sender.
         is_recipient: bool,
+        /// `true` when the owner came from the durable affiliation-derived
+        /// recipient set. XEP-0357 groupchat notification enqueue requires
+        /// this; live occupancy alone must never expand push recipients.
+        is_durable_recipient: bool,
         /// `true` when this recipient is currently joined to the room.
         /// Used by notification policy for XEP-0513 active channel
         /// mentions; it must not become the authoritative recipient set.
@@ -279,9 +282,9 @@ pub enum OutboundEvent {
         /// Optional thread metadata for the thread-level row.
         thread: Option<GroupchatThreadProjection>,
         /// Single dispatch timestamp (Unix epoch seconds) shared
-        /// across every per-occupant projection of this groupchat
+        /// across every inbox projection of this groupchat
         /// message. The chain captures `Utc::now().timestamp()` once
-        /// at dispatch start and copies it into each per-occupant
+        /// at dispatch start and copies it into each projection
         /// event so projections don't drift across a second-boundary
         /// (Copilot review on PR #279).
         dispatch_timestamp: i64,

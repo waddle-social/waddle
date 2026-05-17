@@ -7,6 +7,7 @@ pub(super) struct ProjectGroupchatInboxEvent<'a, 'deps> {
     pub room: BareJid,
     pub message: Box<Message>,
     pub is_recipient: bool,
+    pub is_durable_recipient: bool,
     pub is_live_occupant: bool,
     pub room_members_only: bool,
     pub thread: Option<GroupchatThreadProjection>,
@@ -20,6 +21,7 @@ pub(super) async fn project_groupchat_inbox_event(input: ProjectGroupchatInboxEv
         room,
         message,
         is_recipient,
+        is_durable_recipient,
         is_live_occupant,
         room_members_only,
         thread,
@@ -50,6 +52,7 @@ pub(super) async fn project_groupchat_inbox_event(input: ProjectGroupchatInboxEv
         room: &room,
         message: &message,
         is_recipient,
+        is_durable_recipient,
         is_live_occupant,
         room_members_only,
         thread: &thread,
@@ -64,6 +67,7 @@ struct GroupchatNotificationProjection<'a, 'deps> {
     room: &'a BareJid,
     message: &'a Message,
     is_recipient: bool,
+    is_durable_recipient: bool,
     is_live_occupant: bool,
     room_members_only: bool,
     thread: &'a Option<GroupchatThreadProjection>,
@@ -79,12 +83,13 @@ async fn maybe_enqueue_groupchat_notification_candidate(
         room,
         message,
         is_recipient,
+        is_durable_recipient,
         is_live_occupant,
         room_members_only,
         thread,
         outcome,
     } = input;
-    if !is_recipient {
+    if !is_recipient || !is_durable_recipient {
         return;
     }
     let projection_committed = thread
