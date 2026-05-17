@@ -106,7 +106,9 @@ import type {
   WasmRosterContact,
   WasmServerVersion,
   WasmUserSearchResult,
+  WasmVCard4,
 } from "./wasm-types";
+import type { VCard4Profile } from "./vcard4-types";
 
 export { dmMessageFromArchived, roomMessageFromArchived } from "./wasm-message-codecs";
 
@@ -1055,6 +1057,28 @@ export class BrowserXmppClient {
     const xmpp = await this.requireConnectedXmpp();
     const profile = await xmpp.fetch_user_pep_profile?.(jid) as WasmPepProfile | null;
     return { mood: profile?.mood ? { kind: profile.mood.kind as any, ...(profile.mood.text ? { text: profile.mood.text } : {}) } : null, activity: profile?.activity ? { general: profile.activity.general as any, ...(profile.activity.specific ? { specific: profile.activity.specific } : {}), ...(profile.activity.text ? { text: profile.activity.text } : {}) } : null, tune: profile?.tune ? { ...profile.tune } : null };
+  }
+  async fetchVCard4(jid: string): Promise<VCard4Profile | null> {
+    const xmpp = await this.requireConnectedXmpp();
+    const payload = await xmpp.fetch_vcard4?.(jid) as WasmVCard4 | null;
+    if (!payload) return null;
+    const profile: VCard4Profile = {};
+    if (payload.fn) profile.fullName = payload.fn;
+    if (payload.nickname) profile.nickname = payload.nickname;
+    if (payload.pronouns) profile.pronouns = payload.pronouns;
+    if (payload.note) profile.note = payload.note;
+    if (payload.url) profile.url = payload.url;
+    return profile;
+  }
+  async publishVCard4(profile: VCard4Profile): Promise<void> {
+    const xmpp = await this.requireConnectedXmpp();
+    const payload: WasmVCard4 = {};
+    if (profile.fullName) payload.fn = profile.fullName;
+    if (profile.nickname) payload.nickname = profile.nickname;
+    if (profile.pronouns) payload.pronouns = profile.pronouns;
+    if (profile.note) payload.note = profile.note;
+    if (profile.url) payload.url = profile.url;
+    await xmpp.publish_vcard4?.(payload);
   }
 
   private roomMamPageToMessages(page: WasmMamPage): MamHistoryPage<LiveRoomMessage> {
