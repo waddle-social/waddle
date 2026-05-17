@@ -425,9 +425,17 @@ fn parse_configure_form(form: &Element) -> CoreResult<NodeConfig> {
                 })?;
             }
             "pubsub#max_items" => {
-                config.max_items = value.parse::<u32>().map_err(|_| {
-                    CoreError::bad_request(Some(format!("invalid pubsub#max_items: {value}")))
-                })?;
+                // XEP-0060 §16.4.3 + XEP-0490 §3 publish-options use the
+                // literal token "max" to mean "no upper bound". Accept it
+                // alongside the numeric form so MDS-style publish-options
+                // round-trip without a precondition-not-met error.
+                config.max_items = if value.eq_ignore_ascii_case("max") {
+                    u32::MAX
+                } else {
+                    value.parse::<u32>().map_err(|_| {
+                        CoreError::bad_request(Some(format!("invalid pubsub#max_items: {value}")))
+                    })?
+                };
             }
             "pubsub#persist_items" => {
                 config.persist_items = match value.as_str() {

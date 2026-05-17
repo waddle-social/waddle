@@ -316,6 +316,22 @@ impl Feature {
         Self::new("urn:xmpp:vcard4+notify")
     }
 
+    /// XEP-0490 Message Displayed Synchronization — payload namespace
+    /// and PEP node identifier. Distinct from `mds_displayed_notify`:
+    /// this one identifies the payload element; the notify variant is
+    /// the PEP `+notify` filter advertised in XEP-0115 caps by the
+    /// publisher's other resources so they receive the XEP-0163 §3.4
+    /// owner-self fan-out.
+    pub fn mds_displayed() -> Self {
+        Self::new("urn:xmpp:mds:displayed:0")
+    }
+
+    /// XEP-0490 §3.2 / XEP-0163 §3 `+notify` filter advertised by chat
+    /// clients participating in Message Displayed Synchronization.
+    pub fn mds_displayed_notify() -> Self {
+        Self::new("urn:xmpp:mds:displayed:0+notify")
+    }
+
     pub fn private_storage() -> Self {
         Self::new("jabber:iq:private")
     }

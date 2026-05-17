@@ -113,6 +113,8 @@
 //!   file uploads, returning PUT and GET URLs for file transfer.
 //! - **XEP-0402**: PEP Native Bookmarks - MUC room bookmarks stored via PEP.
 //! - **XEP-0461**: Message Replies - Reply references and thread metadata.
+//! - **XEP-0490**: Message Displayed Synchronization - multi-device "read up
+//!   to here" sync via the `urn:xmpp:mds:displayed:0` PEP node.
 //! - **XEP-0513**: Explicit Mentions - @everyone, @here, @role, @user
 //!   mentions with notification decision logic.
 //! - Private Waddle MUC thread metadata, used until XEP-0508 is implemented
@@ -181,6 +183,7 @@ pub mod xep0469;
 pub mod xep0470;
 pub mod xep0486;
 pub mod xep0488;
+pub mod xep0490;
 pub mod xep0492;
 pub mod xep0500;
 pub mod xep0502;

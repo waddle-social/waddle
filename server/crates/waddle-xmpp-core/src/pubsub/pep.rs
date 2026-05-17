@@ -11,6 +11,12 @@ pub const PEP_NODE_BOOKMARKS: &str = "urn:xmpp:bookmarks:1";
 pub const PEP_NODE_AVATAR_DATA: &str = "urn:xmpp:avatar:data";
 pub const PEP_NODE_AVATAR_METADATA: &str = "urn:xmpp:avatar:metadata";
 
+/// XEP-0490 §3 Message Displayed Synchronization PEP node + namespace.
+///
+/// The same string is both the PEP node id and the payload namespace —
+/// matches the wire shape in the XEP-0490 examples.
+pub const PEP_NODE_MDS_DISPLAYED: &str = "urn:xmpp:mds:displayed:0";
+
 /// Check if an IQ is a PEP request for the current user.
 pub fn is_pep_request(iq: &Iq, user_jid: &BareJid) -> bool {
     if !is_pubsub_iq(iq) {
@@ -44,6 +50,7 @@ impl PepHandler {
         node == PEP_NODE_BOOKMARKS
             || node == PEP_NODE_AVATAR_DATA
             || node == PEP_NODE_AVATAR_METADATA
+            || node == PEP_NODE_MDS_DISPLAYED
             || node == "http://jabber.org/protocol/nick"
             || node == "http://jabber.org/protocol/mood"
             || node == "http://jabber.org/protocol/activity"
@@ -54,7 +61,7 @@ impl PepHandler {
 
     /// Get the default access model for a well-known PEP node.
     pub fn default_access_model_for_node(node: &str) -> AccessModel {
-        if node == PEP_NODE_BOOKMARKS {
+        if node == PEP_NODE_BOOKMARKS || node == PEP_NODE_MDS_DISPLAYED {
             return AccessModel::Whitelist;
         }
 
