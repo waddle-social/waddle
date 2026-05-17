@@ -11,6 +11,7 @@ use kameo::Actor;
 use std::convert::Infallible;
 use thiserror::Error;
 
+use super::affiliation::AffiliationEntry;
 use super::pin::{PinStateChange, PinnedEntry};
 use super::room_registry::RoomInfo;
 use super::{MucRoom, RoomConfig, RoomSubjectTexts, SubjectState};
@@ -425,6 +426,50 @@ impl kameo::message::Message<GetAffiliation> for RoomActor {
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         Ok(self.room.get_affiliation(&msg.jid))
+    }
+}
+
+/// Read the full persistent affiliation roster for the room,
+/// optionally filtered to a single tier.
+///
+/// Returns every JID currently recorded in the room's
+/// [`super::affiliation::AffiliationList`], wrapped as
+/// [`AffiliationEntry`] values and sorted by JID ascending so callers
+/// get a stable, deterministic ordering. When `filter` is
+/// `Some(tier)`, only entries whose `affiliation == tier` are
+/// returned; when `None`, every entry is returned.
+///
+/// Plumbing for the admin V2 `channels:affiliations` command (see
+/// `docs/superpowers/specs/2026-05-17-admin-v2-design.md`). The
+/// per-JID [`GetAffiliation`] message remains for point lookups;
+/// batched roster readers must use this message rather than folding
+/// over `GetAffiliation`.
+///
+/// `Affiliation::None` is never stored, so passing
+/// `filter = Some(Affiliation::None)` always yields an empty `Vec`.
+pub struct ListAffiliations {
+    pub filter: Option<Affiliation>,
+}
+
+impl kameo::message::Message<ListAffiliations> for RoomActor {
+    type Reply = Vec<AffiliationEntry>;
+
+    async fn handle(
+        &mut self,
+        msg: ListAffiliations,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        let mut entries: Vec<AffiliationEntry> = self
+            .room
+            .get_all_affiliations()
+            .into_iter()
+            .filter(|entry| match msg.filter {
+                Some(tier) => entry.affiliation == tier,
+                None => true,
+            })
+            .collect();
+        entries.sort_by(|a, b| a.jid.cmp(&b.jid));
+        entries
     }
 }
 

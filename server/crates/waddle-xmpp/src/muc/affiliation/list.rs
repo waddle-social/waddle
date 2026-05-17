@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use chrono::{DateTime, Utc};
 use jid::BareJid;
 
 use crate::types::Affiliation;
@@ -11,6 +12,14 @@ pub struct AffiliationEntry {
     pub jid: BareJid,
     /// The user's affiliation
     pub affiliation: Affiliation,
+    /// When this affiliation was granted, if recorded.
+    ///
+    /// Today's in-memory `AffiliationList` does not record grant
+    /// timestamps, so this field is always `None`. Persistence of
+    /// `granted_at` is a follow-up tracked under the admin V2
+    /// spaces-metadata plumbing (see
+    /// `docs/superpowers/specs/2026-05-17-admin-v2-design.md`).
+    pub granted_at: Option<DateTime<Utc>>,
     /// Optional reason/notes
     pub reason: Option<String>,
 }
@@ -21,6 +30,7 @@ impl AffiliationEntry {
         Self {
             jid,
             affiliation,
+            granted_at: None,
             reason: None,
         }
     }

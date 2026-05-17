@@ -631,3 +631,170 @@ async fn is_dormant_true_after_last_occupant_leaves_with_no_stored_state() {
          and safe for the room dormancy janitor to reap"
     );
 }
+
+// ---------------------------------------------------------------------------
+// ListAffiliations
+// ---------------------------------------------------------------------------
+
+fn bare(s: &str) -> BareJid {
+    s.parse().expect("valid bare jid")
+}
+
+async fn seed_one_per_tier(actor: &ActorRef<RoomActor>) {
+    // Distinct local parts so the JID-ascending sort order is well
+    // defined and verifiable in each test: alice < bob < carol < dave.
+    actor
+        .ask(ChangeAffiliation {
+            jid: bare("alice@example.com"),
+            affiliation: Affiliation::Owner,
+        })
+        .await
+        .expect("seed owner");
+    actor
+        .ask(ChangeAffiliation {
+            jid: bare("bob@example.com"),
+            affiliation: Affiliation::Admin,
+        })
+        .await
+        .expect("seed admin");
+    actor
+        .ask(ChangeAffiliation {
+            jid: bare("carol@example.com"),
+            affiliation: Affiliation::Member,
+        })
+        .await
+        .expect("seed member");
+    actor
+        .ask(ChangeAffiliation {
+            jid: bare("dave@example.com"),
+            affiliation: Affiliation::Outcast,
+        })
+        .await
+        .expect("seed outcast");
+}
+
+#[tokio::test]
+async fn list_affiliations_empty_room_returns_empty_vec() {
+    let actor = spawn_room_actor().await;
+
+    let entries = actor
+        .ask(ListAffiliations { filter: None })
+        .await
+        .expect("ask");
+    assert!(entries.is_empty(), "fresh room has no stored affiliations");
+}
+
+#[tokio::test]
+async fn list_affiliations_no_filter_returns_all_tiers_sorted_by_jid() {
+    let actor = spawn_room_actor().await;
+    seed_one_per_tier(&actor).await;
+
+    let entries = actor
+        .ask(ListAffiliations { filter: None })
+        .await
+        .expect("ask");
+
+    let jids: Vec<String> = entries.iter().map(|e| e.jid.to_string()).collect();
+    assert_eq!(
+        jids,
+        vec![
+            "alice@example.com".to_string(),
+            "bob@example.com".to_string(),
+            "carol@example.com".to_string(),
+            "dave@example.com".to_string(),
+        ],
+        "entries must be sorted ascending by JID"
+    );
+
+    let tiers: Vec<Affiliation> = entries.iter().map(|e| e.affiliation).collect();
+    assert_eq!(
+        tiers,
+        vec![
+            Affiliation::Owner,
+            Affiliation::Admin,
+            Affiliation::Member,
+            Affiliation::Outcast,
+        ],
+        "each seeded tier must be present"
+    );
+
+    // granted_at is intentionally None today — storage gap noted in
+    // AffiliationEntry's doc-comment.
+    assert!(
+        entries.iter().all(|e| e.granted_at.is_none()),
+        "granted_at is not yet recorded by the in-memory store"
+    );
+}
+
+#[tokio::test]
+async fn list_affiliations_filter_outcast_returns_only_outcasts() {
+    let actor = spawn_room_actor().await;
+    seed_one_per_tier(&actor).await;
+
+    let entries = actor
+        .ask(ListAffiliations {
+            filter: Some(Affiliation::Outcast),
+        })
+        .await
+        .expect("ask");
+
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].jid, bare("dave@example.com"));
+    assert_eq!(entries[0].affiliation, Affiliation::Outcast);
+}
+
+#[tokio::test]
+async fn list_affiliations_filter_member_returns_only_members() {
+    let actor = spawn_room_actor().await;
+    seed_one_per_tier(&actor).await;
+    // Add a second member to verify filter returns *all* matches, not
+    // just the first.
+    actor
+        .ask(ChangeAffiliation {
+            jid: bare("erin@example.com"),
+            affiliation: Affiliation::Member,
+        })
+        .await
+        .expect("seed second member");
+
+    let entries = actor
+        .ask(ListAffiliations {
+            filter: Some(Affiliation::Member),
+        })
+        .await
+        .expect("ask");
+
+    let jids: Vec<String> = entries.iter().map(|e| e.jid.to_string()).collect();
+    assert_eq!(
+        jids,
+        vec![
+            "carol@example.com".to_string(),
+            "erin@example.com".to_string(),
+        ],
+        "member filter returns all members in JID-ascending order"
+    );
+    assert!(entries.iter().all(|e| e.affiliation == Affiliation::Member));
+}
+
+#[tokio::test]
+async fn list_affiliations_filter_none_tier_returns_empty() {
+    // Affiliation::None is the implicit default and is never stored in
+    // the affiliation list (see `AffiliationList::set` — assigning
+    // Affiliation::None removes the entry). A filter request for it
+    // must therefore always come back empty even when other tiers are
+    // populated.
+    let actor = spawn_room_actor().await;
+    seed_one_per_tier(&actor).await;
+
+    let entries = actor
+        .ask(ListAffiliations {
+            filter: Some(Affiliation::None),
+        })
+        .await
+        .expect("ask");
+
+    assert!(
+        entries.is_empty(),
+        "Affiliation::None is not stored; filter must return empty"
+    );
+}
