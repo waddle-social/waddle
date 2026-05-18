@@ -28,6 +28,13 @@ const BASE_POLICY_RETRY_DELAY_MS: i64 = 60_000;
 const MAX_RETRY_DELAY_MS: i64 = 300_000;
 const OUTBOX_CLAIM_TIMEOUT_MS: i64 = 300_000;
 const NOTIFICATION_CANDIDATES_REASON_CHECK_NAME: &str = "notification_candidates_reason_check";
+const NOTIFICATION_CANDIDATES_REASON_VALUES: [&str; 5] = [
+    "offline_dm",
+    "groupchat_personal_mention",
+    "groupchat_channel_mention",
+    "groupchat_active_channel_mention",
+    "groupchat_notify_all",
+];
 const NOTIFICATION_CANDIDATES_REASON_CHECK_SQL: &str = "reason IN ('offline_dm', 'groupchat_personal_mention', 'groupchat_channel_mention', 'groupchat_active_channel_mention', 'groupchat_notify_all')";
 const NOTIFICATION_CANDIDATES_INDEXES: [&str; 4] = [
     "idx_notification_candidates_recipient_created",
@@ -558,6 +565,14 @@ fn notification_candidates_table_sql(i64_type: &str, if_not_exists: bool) -> Str
     )
 }
 
+fn notification_candidates_reason_constraint_matches_expected(definition: &str) -> bool {
+    let normalized = definition.to_ascii_lowercase();
+    normalized.contains("reason")
+        && NOTIFICATION_CANDIDATES_REASON_VALUES
+            .iter()
+            .all(|reason| normalized.contains(reason))
+}
+
 #[derive(Clone)]
 pub struct NotificationOutboxStore {
     db: Database,
@@ -713,28 +728,20 @@ impl NotificationOutboxStore {
     async fn migrate_postgres_notification_candidates_reason_constraint(
         &self,
     ) -> Result<(), NotificationOutboxError> {
-        let mut rows = self
-            .query(
-                r#"
-                SELECT quote_ident(conname)
-                FROM pg_constraint
-                WHERE conrelid = 'notification_candidates'::regclass
-                  AND contype = 'c'
-                  AND pg_get_constraintdef(oid) ILIKE '%reason%'
-                "#,
-                (),
-            )
-            .await?;
-        while let Some(row) = rows.next().await? {
-            let constraint_name: String = row.get(0)?;
-            self.execute(
-                &format!(
-                    "ALTER TABLE notification_candidates DROP CONSTRAINT IF EXISTS {constraint_name}"
-                ),
-                (),
-            )
-            .await?;
+        if !self
+            .postgres_notification_candidates_reason_constraint_is_stale()
+            .await?
+        {
+            return Ok(());
         }
+
+        self.execute(
+            &format!(
+                "ALTER TABLE notification_candidates DROP CONSTRAINT IF EXISTS {NOTIFICATION_CANDIDATES_REASON_CHECK_NAME}"
+            ),
+            (),
+        )
+        .await?;
         self.execute(
             &format!(
                 "ALTER TABLE notification_candidates ADD CONSTRAINT {NOTIFICATION_CANDIDATES_REASON_CHECK_NAME} CHECK ({NOTIFICATION_CANDIDATES_REASON_CHECK_SQL})"
@@ -743,6 +750,30 @@ impl NotificationOutboxStore {
         )
         .await?;
         Ok(())
+    }
+
+    async fn postgres_notification_candidates_reason_constraint_is_stale(
+        &self,
+    ) -> Result<bool, NotificationOutboxError> {
+        let mut rows = self
+            .query(
+                r#"
+                SELECT pg_get_constraintdef(oid)
+                FROM pg_constraint
+                WHERE conrelid = 'notification_candidates'::regclass
+                  AND conname = ?
+                  AND contype = 'c'
+                "#,
+                crate::db_params![NOTIFICATION_CANDIDATES_REASON_CHECK_NAME],
+            )
+            .await?;
+        let Some(row) = rows.next().await? else {
+            return Ok(true);
+        };
+        let definition: String = row.get(0)?;
+        Ok(!notification_candidates_reason_constraint_matches_expected(
+            &definition,
+        ))
     }
 
     async fn migrate_sqlite_notification_candidates_reason_constraint(
@@ -821,10 +852,9 @@ impl NotificationOutboxStore {
             return Ok(false);
         };
         let create_sql: String = row.get(0)?;
-        let normalized = create_sql.to_ascii_lowercase();
-        Ok(normalized.contains("reason")
-            && normalized.contains("check")
-            && !normalized.contains("groupchat_notify_all"))
+        Ok(!notification_candidates_reason_constraint_matches_expected(
+            &create_sql,
+        ))
     }
 
     async fn add_column_if_missing(
@@ -2344,6 +2374,22 @@ mod tests {
             class,
         )
         .expect("groupchat candidate")
+    }
+
+    #[test]
+    fn postgres_reason_constraint_match_accepts_current_definition() {
+        let postgres_definition = "CHECK (((reason)::text = ANY ((ARRAY['offline_dm'::character varying, 'groupchat_personal_mention'::character varying, 'groupchat_channel_mention'::character varying, 'groupchat_active_channel_mention'::character varying, 'groupchat_notify_all'::character varying])::text[])))";
+        assert!(notification_candidates_reason_constraint_matches_expected(
+            postgres_definition
+        ));
+    }
+
+    #[test]
+    fn postgres_reason_constraint_match_rejects_legacy_definition() {
+        let postgres_definition = "CHECK (((reason)::text = 'offline_dm'::character varying))";
+        assert!(!notification_candidates_reason_constraint_matches_expected(
+            postgres_definition
+        ));
     }
 
     async fn failed_outbox_jobs_count(store: &NotificationOutboxStore) -> i64 {
