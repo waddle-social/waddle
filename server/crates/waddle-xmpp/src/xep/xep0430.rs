@@ -344,10 +344,13 @@ pub struct InboxLastMessage<'a> {
 
 /// Build one streamed `<message/>` stanza for an inbox entry.
 ///
-/// The `<message/>` always carries an `<entry/>` element. When
-/// `last_message` is `Some(_)`, the message also carries a
-/// `<result xmlns='urn:xmpp:mam:2' queryid='…' id='…'><forwarded/></result>`
-/// payload pinning the conversation's most recent archived message.
+/// The `<message/>` always carries an `<entry/>` element stamped with
+/// `queryid` so clients can disambiguate streamed query responses from
+/// unsolicited inbox pushes (XEP-0430 reuses `<entry/>` for both
+/// surfaces). When `last_message` is `Some(_)`, the message also
+/// carries a `<result xmlns='urn:xmpp:mam:2' queryid='…' id='…'>`
+/// payload pinning the conversation's most recent archived message —
+/// the embedded MAM payload is omitted under `messages='false'`.
 ///
 /// `to` is the recipient's full JID (the requesting client); `query_id`
 /// is the IQ id correlating with the eventual `<fin/>` response.
@@ -359,7 +362,9 @@ pub fn build_inbox_entry_message(
 ) -> Message {
     let mut msg = Message::new(Some(to));
     msg.type_ = MessageType::Normal;
-    msg.payloads.push(build_inbox_entry_element(entry));
+    let mut entry_elem = build_inbox_entry_element(entry);
+    entry_elem.set_attr("queryid", query_id);
+    msg.payloads.push(entry_elem);
     if let Some(last) = last_message {
         let mut forwarded = Element::builder("forwarded", NS_FORWARD);
         if let Some(stamp) = last.delay_stamp {
