@@ -180,7 +180,7 @@ impl InboxMessage for InboxEntry {
     }
 
     fn to_element(&self) -> Element {
-        crate::xep::xep0430::build_entry_element(self)
+        crate::xep::xep0430::build_inbox_entry_element(self)
     }
 }
 

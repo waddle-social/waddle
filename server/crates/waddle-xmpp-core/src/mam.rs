@@ -10,7 +10,9 @@ mod tests;
 mod types;
 
 pub use query::{build_query_form_iq, is_mam_query, is_mam_query_form_request, parse_mam_query};
-pub use response::{build_fin_iq, build_result_messages, message_type_wire_str};
+pub use response::{
+    archived_inner_message, build_fin_iq, build_result_messages, message_type_wire_str,
+};
 pub use stanza_id_filter::{
     MamFilterStanzaId, MAX_FILTER_STANZA_IDS, MAX_FILTER_STANZA_ID_LEN, STANZA_ID_FILTER_FIELD,
 };

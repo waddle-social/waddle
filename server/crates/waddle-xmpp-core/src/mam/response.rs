@@ -66,7 +66,16 @@ fn build_result_message(query_id: &str, to_jid: &Jid, archived: &ArchivedMessage
     msg
 }
 
-fn archived_inner_message(archived: &ArchivedMessage) -> Element {
+/// Reconstruct the inner `<message/>` for an archived row, used both
+/// by the MAM `<result/>` envelope (XEP-0313 §4.2) and by adjacent
+/// surfaces that need to forward an archived stanza (XEP-0430 inbox
+/// `<message>` payloads embed the same shape).
+///
+/// Prefers the canonical archived XML when present, falls back to the
+/// typed reconstruction for legacy or partial rows. Exposed as `pub`
+/// so neighbouring crates can share the single source of truth for
+/// "what does the forwarded inner message look like".
+pub fn archived_inner_message(archived: &ArchivedMessage) -> Element {
     if let Some(stanza_xml) = archived.stanza_xml.as_deref() {
         match stanza_xml.parse::<Element>() {
             Ok(element) => return normalize_archived_inner_message(element, archived),
