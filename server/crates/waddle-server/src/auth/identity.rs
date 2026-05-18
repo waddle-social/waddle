@@ -239,18 +239,9 @@ impl IdentityService {
                         user_id.clone().into(),
                         username.clone().into(),
                         xmpp_localpart.clone().into(),
-                        claims
-                            .name
-                            .clone()
-                            .map_or(crate::db::Value::Null, crate::db::Value::from),
-                        claims
-                            .avatar_url
-                            .clone()
-                            .map_or(crate::db::Value::Null, crate::db::Value::from),
-                        claims
-                            .email
-                            .clone()
-                            .map_or(crate::db::Value::Null, crate::db::Value::from),
+                        claims.name.clone().into(),
+                        claims.avatar_url.clone().into(),
+                        claims.email.clone().into(),
                         now.clone().into(),
                         now.clone().into(),
                     ],
@@ -316,9 +307,9 @@ impl IdentityService {
                     params: vec![
                         username.clone().into(),
                         xmpp_localpart.clone().into(),
-                        claims.name.clone().map_or(crate::db::Value::Null, crate::db::Value::from),
-                        claims.avatar_url.clone().map_or(crate::db::Value::Null, crate::db::Value::from),
-                        claims.email.clone().map_or(crate::db::Value::Null, crate::db::Value::from),
+                        claims.name.clone().into(),
+                        claims.avatar_url.clone().into(),
+                        claims.email.clone().into(),
                         now.clone().into(),
                         existing.id.clone().into(),
                     ],
@@ -381,18 +372,14 @@ impl IdentityService {
                     provider.id.clone().into(),
                     issuer.into(),
                     claims.subject.clone().into(),
-                    claims
-                        .email
-                        .clone()
-                        .map_or(crate::db::Value::Null, crate::db::Value::from),
-                    // `email_verified` is an `INTEGER` column. The
-                    // typed-null path (`From<Option<i64>>`) emits
-                    // `Value::NullInteger` for `None`, which the Postgres
-                    // bind site routes through `Option::<i64>::None`.
-                    // Binding `Value::Null` directly here would emit
-                    // TEXT NULL and Postgres rejects it on integer
-                    // columns — same failure mode as the
-                    // `replay_gap_through` regression.
+                    claims.email.clone().into(),
+                    // `email_verified` is INTEGER. Map through i64 so
+                    // the typed-null path picks `NullInteger` for None
+                    // (Postgres binds `Option::<i64>::None`); a bare
+                    // `Option<bool>::into()` would also produce
+                    // `NullInteger`, but the explicit `i64::from` keeps
+                    // the Some-arm wire shape obvious next to the email
+                    // text bind above.
                     claims.email_verified.map(i64::from).into(),
                     raw.into(),
                     now.clone().into(),
@@ -425,9 +412,8 @@ impl IdentityService {
                 params: vec![
                     now.into(),
                     provider.id.clone().into(),
-                    claims.email.clone().map_or(crate::db::Value::Null, crate::db::Value::from),
-                    // INTEGER column — typed-null path. See the matching
-                    // comment on the insert path above.
+                    claims.email.clone().into(),
+                    // INTEGER column — see comment on the insert path above.
                     claims.email_verified.map(i64::from).into(),
                     raw.into(),
                     issuer.into(),

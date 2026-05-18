@@ -274,7 +274,7 @@ fn bind_sqlite<'q>(
     // same regardless of declared column type, so we collapse all
     // null variants onto a single bind.
     match value {
-        Value::Null | Value::NullInteger | Value::NullReal | Value::NullText | Value::NullBlob => {
+        Value::NullInteger | Value::NullReal | Value::NullText | Value::NullBlob => {
             query.bind(Option::<String>::None)
         }
         Value::Integer(v) => query.bind(v),
@@ -292,11 +292,11 @@ fn bind_postgres<'q>(
     // `Option::<String>::None` against a `bigint` column is rejected
     // with "expression is of type text", so each typed NULL must bind
     // through an `Option<T>::None` whose `T` matches the column's SQL
-    // type. `Value::Null` keeps the legacy text-null behaviour for
-    // back-compat with callers that construct it directly without
-    // going through `From<Option<T>>`.
+    // type. There is intentionally no untyped-null arm — `Value` has
+    // no untyped-null variant, so the bind site cannot accidentally
+    // emit a wrong-typed NULL.
     match value {
-        Value::Null | Value::NullText => query.bind(Option::<String>::None),
+        Value::NullText => query.bind(Option::<String>::None),
         Value::NullInteger => query.bind(Option::<i64>::None),
         Value::NullReal => query.bind(Option::<f64>::None),
         Value::NullBlob => query.bind(Option::<Vec<u8>>::None),
@@ -329,22 +329,22 @@ fn sqlite_rows_to_rows(rows: Vec<SqliteRow>) -> Result<Rows, DatabaseError> {
 
 fn sqlite_value_from_row(row: &SqliteRow, idx: usize) -> Result<Value, DatabaseError> {
     if let Ok(value) = row.try_get::<Option<i64>, _>(idx) {
-        return Ok(value.map_or(Value::Null, Value::Integer));
+        return Ok(value.map_or(Value::NullInteger, Value::Integer));
     }
 
     if let Ok(value) = row.try_get::<Option<f64>, _>(idx) {
-        return Ok(value.map_or(Value::Null, Value::Real));
+        return Ok(value.map_or(Value::NullReal, Value::Real));
     }
 
     if let Ok(value) = row.try_get::<Option<String>, _>(idx) {
-        return Ok(value.map_or(Value::Null, Value::Text));
+        return Ok(value.map_or(Value::NullText, Value::Text));
     }
 
     if let Ok(value) = row.try_get::<Option<Vec<u8>>, _>(idx) {
-        return Ok(value.map_or(Value::Null, Value::Blob));
+        return Ok(value.map_or(Value::NullBlob, Value::Blob));
     }
 
-    Ok(Value::Null)
+    Ok(Value::NullText)
 }
 
 fn postgres_rows_to_rows(rows: Vec<PgRow>) -> Result<Rows, DatabaseError> {
@@ -369,30 +369,30 @@ fn postgres_rows_to_rows(rows: Vec<PgRow>) -> Result<Rows, DatabaseError> {
 
 fn postgres_value_from_row(row: &PgRow, idx: usize) -> Result<Value, DatabaseError> {
     if let Ok(value) = row.try_get::<Option<i64>, _>(idx) {
-        return Ok(value.map_or(Value::Null, Value::Integer));
+        return Ok(value.map_or(Value::NullInteger, Value::Integer));
     }
 
     if let Ok(value) = row.try_get::<Option<i32>, _>(idx) {
-        return Ok(value.map_or(Value::Null, |v| Value::Integer(i64::from(v))));
+        return Ok(value.map_or(Value::NullInteger, |v| Value::Integer(i64::from(v))));
     }
 
     if let Ok(value) = row.try_get::<Option<bool>, _>(idx) {
-        return Ok(value.map_or(Value::Null, |v| Value::Integer(i64::from(v))));
+        return Ok(value.map_or(Value::NullInteger, |v| Value::Integer(i64::from(v))));
     }
 
     if let Ok(value) = row.try_get::<Option<f64>, _>(idx) {
-        return Ok(value.map_or(Value::Null, Value::Real));
+        return Ok(value.map_or(Value::NullReal, Value::Real));
     }
 
     if let Ok(value) = row.try_get::<Option<String>, _>(idx) {
-        return Ok(value.map_or(Value::Null, Value::Text));
+        return Ok(value.map_or(Value::NullText, Value::Text));
     }
 
     if let Ok(value) = row.try_get::<Option<Vec<u8>>, _>(idx) {
-        return Ok(value.map_or(Value::Null, Value::Blob));
+        return Ok(value.map_or(Value::NullBlob, Value::Blob));
     }
 
-    Ok(Value::Null)
+    Ok(Value::NullText)
 }
 
 /// Connection guard that delegates to the configured SQLx backend.

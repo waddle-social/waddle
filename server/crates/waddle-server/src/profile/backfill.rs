@@ -506,10 +506,7 @@ async fn persist_attempt(
     error_kind: Option<&str>,
 ) -> Result<(), BackfillError> {
     let now_str = now.to_rfc3339();
-    let error_value: crate::db::Value = match error_kind {
-        Some(k) => k.into(),
-        None => crate::db::Value::Null,
-    };
+    let error_value: crate::db::Value = error_kind.into();
     let digest = fetch_policy_digest().to_string();
     db_actor
         .ask(DbExecute {

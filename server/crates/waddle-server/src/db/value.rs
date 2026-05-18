@@ -1,15 +1,14 @@
 use super::DatabaseError;
 
+/// Typed query value. Each NULL variant is paired with the SQL column
+/// type it binds to so Postgres (which types every parameter) accepts
+/// the bind. There is no untyped-null variant: callers must produce
+/// `None` through `Value::from(Option<T>::None)` (which dispatches via
+/// [`TypedNull`]) or by constructing the matching `NullX` variant
+/// explicitly. SQLite ignores parameter types, so the variant choice
+/// is only load-bearing on Postgres.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
-    /// Untyped NULL. Postgres types parameters by their bound Rust type,
-    /// so an untyped null has to pick one: the legacy choice was TEXT,
-    /// and we keep that for any caller that constructs `Value::Null`
-    /// directly. New code that goes through `Value::from(Option<T>)`
-    /// gets a typed-null variant (see `TypedNull`) that binds with the
-    /// correct Postgres type, so e.g. `Option<i64>::None` binds as
-    /// `bigint NULL` rather than `text NULL`.
-    Null,
     NullInteger,
     NullReal,
     NullText,
@@ -24,7 +23,7 @@ impl Value {
     pub fn is_null(&self) -> bool {
         matches!(
             self,
-            Value::Null | Value::NullInteger | Value::NullReal | Value::NullText | Value::NullBlob
+            Value::NullInteger | Value::NullReal | Value::NullText | Value::NullBlob
         )
     }
 }
@@ -322,11 +321,9 @@ impl DbDecode for String {
             Value::Blob(value) => String::from_utf8(value).map_err(|e| {
                 DatabaseError::QueryFailed(format!("failed to decode utf8 string: {}", e))
             }),
-            Value::Null
-            | Value::NullInteger
-            | Value::NullReal
-            | Value::NullText
-            | Value::NullBlob => unreachable!("guarded by is_null check above"),
+            Value::NullInteger | Value::NullReal | Value::NullText | Value::NullBlob => {
+                unreachable!("guarded by is_null check above")
+            }
         }
     }
 }
@@ -356,11 +353,9 @@ impl DbDecode for i64 {
             Value::Blob(_) => Err(DatabaseError::QueryFailed(
                 "cannot decode blob into i64".to_string(),
             )),
-            Value::Null
-            | Value::NullInteger
-            | Value::NullReal
-            | Value::NullText
-            | Value::NullBlob => unreachable!("guarded by is_null check above"),
+            Value::NullInteger | Value::NullReal | Value::NullText | Value::NullBlob => {
+                unreachable!("guarded by is_null check above")
+            }
         }
     }
 }
@@ -423,11 +418,9 @@ impl DbDecode for f64 {
             Value::Blob(_) => Err(DatabaseError::QueryFailed(
                 "cannot decode blob into f64".to_string(),
             )),
-            Value::Null
-            | Value::NullInteger
-            | Value::NullReal
-            | Value::NullText
-            | Value::NullBlob => unreachable!("guarded by is_null check above"),
+            Value::NullInteger | Value::NullReal | Value::NullText | Value::NullBlob => {
+                unreachable!("guarded by is_null check above")
+            }
         }
     }
 }
@@ -452,11 +445,9 @@ impl DbDecode for Vec<u8> {
             Value::Integer(_) | Value::Real(_) => Err(DatabaseError::QueryFailed(
                 "cannot decode numeric value into blob".to_string(),
             )),
-            Value::Null
-            | Value::NullInteger
-            | Value::NullReal
-            | Value::NullText
-            | Value::NullBlob => unreachable!("guarded by is_null check above"),
+            Value::NullInteger | Value::NullReal | Value::NullText | Value::NullBlob => {
+                unreachable!("guarded by is_null check above")
+            }
         }
     }
 }
@@ -545,12 +536,13 @@ mod tests {
     #[test]
     fn option_i64_none_picks_typed_integer_null() {
         // Regression: `Value::from(Option::<i64>::None)` used to fold
-        // every nullable type onto `Value::Null`, which the Postgres
-        // bind site binds as `Option::<String>::None` (text NULL). That
-        // is rejected on `bigint` columns with "column is of type
-        // bigint but expression is of type text", which in production
-        // rolled back every SM session detach and froze MAM/inbox
-        // writes for two hours.
+        // every nullable type onto a single untyped null, which the
+        // Postgres bind site bound as `Option::<String>::None` (text
+        // NULL). That was rejected on `bigint` columns with "column is
+        // of type bigint but expression is of type text", which in
+        // production rolled back every SM session detach and froze
+        // MAM/inbox writes for two hours. The fix: typed-null variants
+        // per Rust type, dispatched through `TypedNull`.
         assert_eq!(Value::from(Option::<i64>::None), Value::NullInteger);
         assert_eq!(Value::from(Option::<i32>::None), Value::NullInteger);
         assert_eq!(Value::from(Option::<u32>::None), Value::NullInteger);
@@ -585,11 +577,10 @@ mod tests {
 
     #[test]
     fn db_decode_option_treats_every_null_variant_as_none() {
-        // Decoders accept the legacy `Value::Null` and every typed
-        // null variant uniformly — read-side code never has to know
-        // which variant the writer chose.
+        // Decoders accept every typed null variant uniformly — read-side
+        // code never has to know which variant the writer chose, only
+        // that the cell is null.
         for v in [
-            Value::Null,
             Value::NullInteger,
             Value::NullReal,
             Value::NullText,
