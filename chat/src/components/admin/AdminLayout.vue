@@ -1,20 +1,31 @@
 <script setup lang="ts">
-import { computed } from "vue";
-import { ChevronLeft, Users, FolderTree, ScrollText, BellRing, Settings as SettingsIcon } from "lucide-vue-next";
+// Admin V2 — responsive shell. The left navigation is a pinned 16rem
+// column on `lg+` and slides in as a drawer from the left on `<lg`.
+// The hamburger toggle in the mobile header opens the drawer; tapping
+// the backdrop or selecting a panel closes it.
+import { computed, ref } from "vue";
+import {
+  BellRing,
+  ChevronLeft,
+  FolderTree,
+  Hash,
+  Menu,
+  ScrollText,
+  Settings as SettingsIcon,
+  Users,
+  X,
+} from "lucide-vue-next";
 import { buildAdminPath, type AdminPanel } from "@/shell/navigation";
-
-type StubPanel = Exclude<AdminPanel, "users">;
 
 interface PanelDef {
   slug: AdminPanel;
   label: string;
   icon: typeof Users;
-  /** V1 stubs are visually present so the IA is legible but cannot be navigated to. */
   enabled: boolean;
 }
 
 const props = defineProps<{
-  /** Slug of the currently rendered panel. V1 only renders "users"; other slugs receive a stub view. */
+  /** Slug of the currently rendered panel. */
   activePanel: AdminPanel;
 }>();
 
@@ -25,11 +36,14 @@ const emit = defineEmits<{
 
 const PANELS: ReadonlyArray<PanelDef> = [
   { slug: "users", label: "Users", icon: Users, enabled: true },
-  { slug: "spaces", label: "Spaces", icon: FolderTree, enabled: false },
+  { slug: "spaces", label: "Spaces", icon: FolderTree, enabled: true },
+  { slug: "channels", label: "Channels", icon: Hash, enabled: true },
   { slug: "audit", label: "Audit log", icon: ScrollText, enabled: false },
   { slug: "push-health", label: "Push health", icon: BellRing, enabled: false },
   { slug: "settings", label: "Settings", icon: SettingsIcon, enabled: false },
 ];
+
+const sidebarOpen = ref(false);
 
 function isActive(panel: PanelDef): boolean {
   return panel.slug === props.activePanel;
@@ -37,61 +51,153 @@ function isActive(panel: PanelDef): boolean {
 
 function onPanelClick(panel: PanelDef): void {
   if (!panel.enabled) return;
+  sidebarOpen.value = false;
   emit("navigate", buildAdminPath(panel.slug));
 }
 
-const stubLabel = computed(() => {
+const activeLabel = computed(() => {
   const found = PANELS.find((p) => p.slug === props.activePanel);
   return found ? found.label : "Admin";
+});
+
+const isStub = computed(() => {
+  const found = PANELS.find((p) => p.slug === props.activePanel);
+  return !found || !found.enabled;
 });
 </script>
 
 <template>
-  <div class="admin-layout">
-    <aside class="admin-sidebar" aria-label="Admin sections">
-      <header class="admin-sidebar-header">
+  <div class="grid h-[100dvh] w-full grid-cols-1 lg:grid-cols-[16rem_1fr] bg-background text-foreground">
+    <!-- Mobile header with hamburger (visible <lg) -->
+    <header class="flex h-12 items-center gap-2 border-b border-border px-3 lg:hidden">
+      <button
+        type="button"
+        class="chat-icon-button hover:bg-muted"
+        aria-label="Open admin navigation"
+        @click="sidebarOpen = true"
+      >
+        <Menu class="h-5 w-5" />
+      </button>
+      <span class="type-pane-title flex-1 truncate">{{ activeLabel }}</span>
+      <button
+        type="button"
+        class="chat-icon-button hover:bg-muted"
+        aria-label="Back to chat"
+        @click="emit('back')"
+      >
+        <ChevronLeft class="h-5 w-5" />
+      </button>
+    </header>
+
+    <!-- Sidebar: pinned on lg+, slide-from-left drawer on <lg -->
+    <aside
+      class="hidden flex-col gap-3 border-r border-border bg-card/50 p-3 lg:flex lg:row-span-2"
+      aria-label="Admin sections"
+    >
+      <div class="flex flex-col gap-1.5 px-2 pt-2">
         <button
           type="button"
-          class="admin-back-button"
+          class="inline-flex items-center gap-1 self-start type-caption text-muted-foreground hover:text-foreground"
           aria-label="Back to chat"
           @click="emit('back')"
         >
-          <ChevronLeft :size="16" aria-hidden="true" />
+          <ChevronLeft class="h-4 w-4" />
           <span>Back to chat</span>
         </button>
-        <h1 class="admin-title">Admin</h1>
-      </header>
-      <nav class="admin-nav">
-        <ul>
+        <h1 class="type-pane-title">Admin</h1>
+      </div>
+      <nav>
+        <ul class="flex flex-col gap-0.5">
           <li v-for="panel in PANELS" :key="panel.slug">
             <button
               type="button"
-              class="admin-nav-item"
-              :class="{
-                'is-active': isActive(panel),
-                'is-disabled': !panel.enabled,
-              }"
+              class="flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 type-control text-left transition-colors"
+              :class="[
+                isActive(panel) ? 'bg-primary/10 text-primary font-semibold' : 'hover:bg-muted',
+                !panel.enabled ? 'opacity-50 cursor-not-allowed' : '',
+              ]"
               :aria-current="isActive(panel) ? 'page' : undefined"
               :aria-disabled="!panel.enabled"
               :disabled="!panel.enabled"
               :title="!panel.enabled ? 'Coming soon' : undefined"
               @click="onPanelClick(panel)"
             >
-              <component :is="panel.icon" :size="16" aria-hidden="true" />
-              <span>{{ panel.label }}</span>
-              <span v-if="!panel.enabled" class="admin-soon-pill" aria-hidden="true">Soon</span>
+              <component :is="panel.icon" class="h-4 w-4 flex-shrink-0" aria-hidden="true" />
+              <span class="truncate flex-1">{{ panel.label }}</span>
+              <span v-if="!panel.enabled" class="rounded-full bg-muted px-2 py-0.5 type-caption">Soon</span>
             </button>
           </li>
         </ul>
       </nav>
     </aside>
-    <main class="admin-main" role="main">
+
+    <!-- Mobile drawer overlay -->
+    <Teleport to="body">
+      <Transition name="drawer">
+        <div
+          v-if="sidebarOpen"
+          class="z-modal fixed inset-0 lg:hidden"
+          @keydown.esc="sidebarOpen = false"
+        >
+          <div
+            class="absolute inset-0 bg-background/60 backdrop-blur-md"
+            aria-hidden="true"
+            @click="sidebarOpen = false"
+          />
+          <aside
+            class="absolute left-0 top-0 h-[100dvh] w-[var(--chat-drawer-width)] glass-panel border-r border-border shadow-2xl flex flex-col"
+            role="dialog"
+            aria-modal="true"
+            aria-label="Admin navigation drawer"
+            @click.stop
+          >
+            <div class="h-12 flex items-center justify-between px-3 border-b border-border">
+              <span class="type-pane-title">Admin</span>
+              <button
+                type="button"
+                class="chat-icon-button hover:bg-muted"
+                aria-label="Close admin navigation"
+                @click="sidebarOpen = false"
+              >
+                <X class="w-4 h-4" />
+              </button>
+            </div>
+            <nav class="flex-1 overflow-y-auto p-3">
+              <ul class="flex flex-col gap-0.5">
+                <li v-for="panel in PANELS" :key="panel.slug">
+                  <button
+                    type="button"
+                    class="flex w-full items-center gap-2 rounded-md px-2.5 py-2 type-control text-left transition-colors"
+                    :class="[
+                      isActive(panel) ? 'bg-primary/10 text-primary font-semibold' : 'hover:bg-muted',
+                      !panel.enabled ? 'opacity-50 cursor-not-allowed' : '',
+                    ]"
+                    :aria-current="isActive(panel) ? 'page' : undefined"
+                    :aria-disabled="!panel.enabled"
+                    :disabled="!panel.enabled"
+                    @click="onPanelClick(panel)"
+                  >
+                    <component :is="panel.icon" class="h-4 w-4 flex-shrink-0" aria-hidden="true" />
+                    <span class="truncate flex-1">{{ panel.label }}</span>
+                    <span v-if="!panel.enabled" class="rounded-full bg-muted px-2 py-0.5 type-caption">Soon</span>
+                  </button>
+                </li>
+              </ul>
+            </nav>
+          </aside>
+        </div>
+      </Transition>
+    </Teleport>
+
+    <!-- Main panel mount -->
+    <main class="overflow-y-auto" role="main">
       <slot v-if="activePanel === 'users'" name="users" />
-      <div v-else class="admin-stub" role="status">
-        <h2>{{ stubLabel }}</h2>
-        <p>
-          This admin panel is part of the V1 frame but isn't implemented yet.
-          The Users panel is the only fully wired surface for now.
+      <slot v-else-if="activePanel === 'spaces'" name="spaces" />
+      <slot v-else-if="activePanel === 'channels'" name="channels" />
+      <div v-else-if="isStub" class="mx-auto max-w-md p-6 text-center" role="status">
+        <h2 class="type-pane-title mb-2">{{ activeLabel }}</h2>
+        <p class="type-caption text-muted-foreground">
+          This admin panel is in the IA but isn't implemented yet.
         </p>
       </div>
     </main>
@@ -99,105 +205,12 @@ const stubLabel = computed(() => {
 </template>
 
 <style scoped>
-.admin-layout {
-  display: grid;
-  grid-template-columns: 16rem 1fr;
-  height: 100dvh;
-  background: var(--background, #f4f5f7);
-  color: var(--foreground, #0c0d12);
+.drawer-enter-active,
+.drawer-leave-active {
+  transition: opacity 150ms ease;
 }
-
-.admin-sidebar {
-  display: flex;
-  flex-direction: column;
-  border-right: 1px solid var(--border, rgba(15, 18, 25, 0.08));
-  background: var(--sidebar, rgba(255, 255, 255, 0.72));
-  padding: 1rem 0.75rem;
-  gap: 0.75rem;
+.drawer-enter-from,
+.drawer-leave-to {
+  opacity: 0;
 }
-
-.admin-sidebar-header {
-  display: flex;
-  flex-direction: column;
-  gap: 0.5rem;
-  padding: 0.25rem 0.5rem;
-}
-
-.admin-back-button {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.25rem;
-  font-size: 0.85rem;
-  color: var(--muted-foreground, rgba(15, 18, 25, 0.65));
-  background: transparent;
-  border: 0;
-  cursor: pointer;
-  padding: 0.25rem 0;
-}
-
-.admin-back-button:hover { color: var(--foreground, #0c0d12); }
-
-.admin-title {
-  font-size: 1.1rem;
-  font-weight: 600;
-  letter-spacing: -0.01em;
-  margin: 0;
-}
-
-.admin-nav { padding-top: 0.5rem; }
-.admin-nav ul { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 0.125rem; }
-
-.admin-nav-item {
-  width: 100%;
-  display: inline-flex;
-  align-items: center;
-  gap: 0.5rem;
-  padding: 0.5rem 0.625rem;
-  border-radius: 0.5rem;
-  background: transparent;
-  border: 0;
-  color: var(--foreground, #0c0d12);
-  font-size: 0.9rem;
-  cursor: pointer;
-  text-align: left;
-  transition: background-color 120ms ease;
-}
-
-.admin-nav-item:hover:not(.is-disabled) { background: var(--accent, rgba(15, 18, 25, 0.06)); }
-
-.admin-nav-item.is-active {
-  background: var(--accent-strong, rgba(53, 99, 233, 0.12));
-  color: var(--accent-foreground, #1f3aa3);
-  font-weight: 600;
-}
-
-.admin-nav-item.is-disabled {
-  cursor: not-allowed;
-  color: var(--muted-foreground, rgba(15, 18, 25, 0.45));
-}
-
-.admin-soon-pill {
-  margin-left: auto;
-  font-size: 0.65rem;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  background: rgba(15, 18, 25, 0.06);
-  padding: 0.05rem 0.4rem;
-  border-radius: 999px;
-}
-
-.admin-main {
-  overflow: auto;
-  padding: 1.5rem 2rem;
-}
-
-.admin-stub {
-  margin: 4rem auto;
-  max-width: 32rem;
-  text-align: center;
-  color: var(--muted-foreground, rgba(15, 18, 25, 0.65));
-}
-
-.admin-stub h2 { font-size: 1.25rem; margin: 0 0 0.5rem 0; color: var(--foreground, #0c0d12); }
-.admin-stub p { font-size: 0.9rem; line-height: 1.5; }
 </style>
