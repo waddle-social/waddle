@@ -23,19 +23,20 @@
 
 use std::sync::Arc;
 
-use jid::BareJid;
+use jid::{BareJid, FullJid};
 use waddle_xmpp::commands::{CommandContext, CommandResult};
 use waddle_xmpp::muc::room_registry_actor::{CreateRoom, DestroyRoom, GetRoom, ListRooms};
 use waddle_xmpp::muc::{
     room_actor::{
-        ChangeAffiliation, GetConfig, Leave, ListAffiliations, ListOccupants, OccupantCount,
-        UpdateConfig,
+        ApplyAdminItems, ChangeAffiliation, GetConfig, ListAffiliations, ListOccupants,
+        OccupantCount, UpdateConfig,
     },
-    RoomConfig,
+    AdminItem, RoomConfig,
 };
+use waddle_xmpp::registry::ConnectionRegistry;
 use waddle_xmpp::xep::xep0004::{DataForm, Field, FieldType, FormType};
-use waddle_xmpp::Affiliation;
 use waddle_xmpp::XmppError;
+use waddle_xmpp::{Affiliation, Role, Stanza};
 
 use crate::admin::is_community_owner;
 use crate::server::AppState;
@@ -260,7 +261,11 @@ pub struct ChannelsKickResult {
 // Registration
 // ---------------------------------------------------------------------------
 
-pub async fn register(registry: &waddle_xmpp::commands::CommandRegistry, app_state: Arc<AppState>) {
+pub async fn register(
+    registry: &waddle_xmpp::commands::CommandRegistry,
+    app_state: Arc<AppState>,
+    connection_registry: Arc<ConnectionRegistry>,
+) {
     {
         let state = Arc::clone(&app_state);
         registry
@@ -330,10 +335,12 @@ pub async fn register(registry: &waddle_xmpp::commands::CommandRegistry, app_sta
     }
     {
         let state = Arc::clone(&app_state);
+        let connections = Arc::clone(&connection_registry);
         registry
             .register(NODE_KICK, "Admin · Kick occupant", move |ctx| {
                 let state = Arc::clone(&state);
-                async move { handle_kick(ctx, state).await }
+                let connections = Arc::clone(&connections);
+                async move { handle_kick(ctx, state, connections).await }
             })
             .await;
     }
@@ -484,15 +491,38 @@ async fn handle_set_affiliation(ctx: CommandContext, state: Arc<AppState>) -> Co
     }
 }
 
-async fn handle_kick(ctx: CommandContext, state: Arc<AppState>) -> CommandResult {
-    if let Err(forbidden) = caller_or_forbidden(&ctx, &state) {
-        return *forbidden;
-    }
+async fn handle_kick(
+    ctx: CommandContext,
+    state: Arc<AppState>,
+    connections: Arc<ConnectionRegistry>,
+) -> CommandResult {
+    let caller_bare = match caller_or_forbidden(&ctx, &state) {
+        Ok(bare) => bare,
+        Err(forbidden) => return *forbidden,
+    };
+    let caller_full = match ctx.from.clone().try_into_full() {
+        Ok(full) => full,
+        Err(_) => {
+            // Synthesize a full JID with a fixed "admin-v2" resource so
+            // the `ApplyAdminItems` actor message has the FullJid it
+            // requires — only `.to_bare()` is read off it for the
+            // §9.1.1 `<actor jid='…'/>` stamp, which collapses to
+            // the same bare JID either way.
+            match caller_bare.with_resource_str("admin-v2") {
+                Ok(full) => full,
+                Err(error) => {
+                    return *internal_err(format!(
+                        "admin caller JID '{caller_bare}' is not a valid full JID base: {error}"
+                    ));
+                }
+            }
+        }
+    };
     let args = match parse_kick_args(ctx.command.form.as_ref()) {
         Ok(args) => args,
         Err(error) => return *bad_request(error),
     };
-    match run_kick(&state, &args).await {
+    match run_kick(&state, &connections, &caller_full, &args).await {
         Ok(result) => CommandResult::Completed {
             form: Some(build_kick_form(&result)),
             notes: vec![],
@@ -1061,14 +1091,19 @@ async fn run_set_affiliation(
 
 async fn run_kick(
     state: &AppState,
+    connections: &ConnectionRegistry,
+    caller_full: &FullJid,
     args: &ChannelsKickArgs,
 ) -> Result<ChannelsKickResult, AdminErr> {
-    // XEP-0045 §9.1 — role-change to "none" removes the occupant from
-    // the live presence map. Admin doesn't need to be joined; we look up
-    // the occupant by their bare JID and call `Leave` on the actor. The
-    // §307 presence broadcast happens via the wire-side machinery
-    // (#680); this admin path is best-effort state mutation when the
-    // occupant is currently joined.
+    // XEP-0045 §9.1.1 — kicking an occupant is a role-change to "none";
+    // the service MUST send `<presence type='unavailable'>` carrying
+    // `<status code='307'/>` to every occupant, including the kicked
+    // one (which additionally receives `<status code='110'/>` per
+    // §6.6). The regular admin-IQ path (#680) does this by routing
+    // through `RoomActor::ApplyAdminItems`, which builds the per-
+    // occupant presence stanzas via `build_kick_presence`. Admin V2
+    // reuses the same actor message so the broadcast shape is
+    // exactly identical to the IQ path.
     let actor = state
         .room_registry
         .ask(GetRoom {
@@ -1081,24 +1116,68 @@ async fn run_kick(
                 format!("no channel '{}'", args.channel_jid),
             ))))
         })?;
-    // Walk the occupant list to find an entry whose real_jid bare equals
-    // the requested occupant_jid; nick is needed to call Leave.
+    // Resolve the occupant's nick — `ApplyAdminItems` looks up by nick
+    // in the role-change branch, so we must translate the caller's
+    // bare-JID handle into the room-nick first. If the target isn't
+    // currently joined, there's nothing on the wire to broadcast and
+    // no persistent state to mutate; complete with a stable result
+    // (see §9.1.1: the kick verb is about live occupants).
     let occupants = actor
         .ask(ListOccupants)
         .await
         .map_err(send_err("room actor ListOccupants"))?;
-    let nick = occupants
+    let Some(target_nick) = occupants
         .into_iter()
         .find(|info| info.real_jid.to_bare() == args.occupant_jid)
-        .map(|info| info.nick);
-    if let Some(nick) = nick {
-        // Best-effort — actor returns Err if the occupant disappears
-        // between the list and the leave; we treat that as success.
-        let _ = actor.ask(Leave { nick }).await;
+        .map(|info| info.nick)
+    else {
+        return Ok(ChannelsKickResult {
+            occupant_jid: args.occupant_jid.clone(),
+        });
+    };
+
+    let items = vec![AdminItem {
+        jid: None,
+        nick: Some(target_nick),
+        affiliation: None,
+        role: Some(Role::None),
+        reason: args.reason.clone(),
+    }];
+    let updates = match actor
+        .ask(ApplyAdminItems {
+            sender_jid: caller_full.clone(),
+            // Community-owner admin V2 callers are not necessarily
+            // joined to the room; declare them as `Affiliation::Owner`
+            // so `ApplyAdminItems` short-circuits the can-modify gate.
+            // §9.1 doesn't require the kicker to be in the room — the
+            // gate is "MAY be performed by an admin", which the V2
+            // owner ACL has already established via
+            // `caller_or_forbidden`.
+            sender_affiliation: Affiliation::Owner,
+            sender_role: Role::Moderator,
+            items,
+        })
+        .await
+    {
+        Ok(updates) => updates,
+        Err(kameo::error::SendError::HandlerError(error)) => {
+            return Err(internal_err(format!(
+                "room actor ApplyAdminItems (kick) rejected: {error}"
+            )));
+        }
+        Err(error) => {
+            return Err(internal_err(format!(
+                "room actor ApplyAdminItems (kick) failed: {error}"
+            )));
+        }
+    };
+
+    for (recipient, presence) in updates {
+        let _ = connections
+            .send_to(&recipient, Stanza::Presence(presence))
+            .await;
     }
-    // Reason is recorded in the response but not pushed through the
-    // (unavailable) broadcast path in this minimal cut.
-    let _ = args.reason.as_ref();
+
     Ok(ChannelsKickResult {
         occupant_jid: args.occupant_jid.clone(),
     })
