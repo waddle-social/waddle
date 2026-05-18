@@ -352,6 +352,7 @@ onUnmounted(() => window.removeEventListener("popstate", refreshAdminPanelFromUr
       />
       <ThreadsView
         v-else-if="ui.activePage.value === 'threads'"
+        @open-nav="ui.showMobileNav.value = true"
       />
       <UserSettingsPage
         v-else-if="ui.activePage.value === 'settings' && connectionStore.session"
