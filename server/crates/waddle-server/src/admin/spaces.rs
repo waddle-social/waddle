@@ -740,23 +740,43 @@ async fn run_update(state: &AppState, args: &SpacesUpdateArgs) -> Result<SpaceRe
 }
 
 async fn run_delete(state: &AppState, args: &SpacesDeleteArgs) -> Result<(), AdminErr> {
-    // Cascade destroy: every channel bookmark item on the space node is
-    // a managed-room JID; ask the room registry to destroy them, then
-    // delete the node + metadata row.
+    // Cascade destroy. There are two sources of "channels in this
+    // space" we need to honor:
+    //   1. The persistent channel↔space link projection
+    //      (`channel_space_link_store`) — populated by admin V2's
+    //      `channels:create`. This is the authoritative source for
+    //      admin-managed channels.
+    //   2. Legacy/bookmark items stored on the space's pubsub node
+    //      (each item's `id` is a managed-room JID).
+    // Both are unioned so the cascade is total.
     let Some(node_name) = space_node_name(&args.space_jid) else {
         return Err(bad_request("space_jid must have a localpart"));
     };
+
+    // Collect channels-to-destroy from both sources.
+    let mut targets: std::collections::BTreeSet<BareJid> = std::collections::BTreeSet::new();
+
+    let linked = state
+        .channel_space_link_store
+        .list_channels_in_space(&args.space_jid)
+        .await
+        .map_err(|e| internal_err(format!("channel-space link storage: {e}")))?;
+    for jid in linked {
+        targets.insert(jid);
+    }
 
     let items = state
         .pubsub_storage
         .get_items(&state.spaces_jid, &node_name, None, &[])
         .await
         .map_err(|e| internal_err(format!("pubsub get_items failed: {e}")))?;
-
     for stored in items {
-        let Ok(room_jid) = stored.id.parse::<BareJid>() else {
-            continue;
-        };
+        if let Ok(room_jid) = stored.id.parse::<BareJid>() {
+            targets.insert(room_jid);
+        }
+    }
+
+    for room_jid in targets {
         // Best-effort destroy — non-existent rooms are fine.
         if let Err(error) = state
             .room_registry
@@ -769,6 +789,17 @@ async fn run_delete(state: &AppState, args: &SpacesDeleteArgs) -> Result<(), Adm
                 error = %error,
                 room = %room_jid,
                 "cascade destroy: room registry ask failed",
+            );
+        }
+        // Drop the link row regardless of room-destroy outcome; the
+        // space is being torn down, so leaving the link row dangling
+        // would make `channels:list space_jid=…` keep returning JIDs
+        // for a space that no longer exists.
+        if let Err(error) = state.channel_space_link_store.clear(&room_jid).await {
+            tracing::warn!(
+                error = %error,
+                room = %room_jid,
+                "cascade destroy: clearing channel-space link failed",
             );
         }
     }

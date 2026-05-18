@@ -39,6 +39,7 @@ use waddle_xmpp::XmppError;
 use waddle_xmpp::{Affiliation, Role, Stanza};
 
 use crate::admin::is_community_owner;
+use crate::channel_space_links::{ChannelSpaceLink, ChannelSpaceLinkError};
 use crate::server::AppState;
 
 // ---------------------------------------------------------------------------
@@ -759,6 +760,20 @@ async fn run_list(
         .map_err(send_err("room_registry ask ListRooms"))?;
     rooms.sort();
 
+    // Narrow by `space_jid` against the channel↔space link projection.
+    // A channel belongs to at most one space; rooms with no link row
+    // are not in any space, so they are filtered out when a
+    // `space_jid` filter is supplied.
+    if let Some(space_jid) = args.space_jid.as_ref() {
+        let in_space = state
+            .channel_space_link_store
+            .list_channels_in_space(space_jid)
+            .await
+            .map_err(map_link_err)?;
+        let permitted: std::collections::HashSet<BareJid> = in_space.into_iter().collect();
+        rooms.retain(|jid| permitted.contains(jid));
+    }
+
     if let Some(cursor) = args.after_cursor.as_deref() {
         rooms.retain(|jid| jid.to_string().as_str() > cursor);
     }
@@ -831,16 +846,18 @@ async fn run_list(
     } else {
         None
     };
-    // V2 scope: space_jid filter is a no-op in this minimal cut because the
-    // server doesn't yet track channel→space links via the room registry;
-    // the filter parses successfully so the wire surface is stable, and
-    // future PRs can implement the actual filtering against the spaces
-    // metadata projection.
-    let _ = args.space_jid.as_ref();
     Ok(ChannelsListResult {
         entries,
         next_cursor,
     })
+}
+
+fn map_link_err(error: ChannelSpaceLinkError) -> AdminErr {
+    internal_err(format!("channel-space link storage: {error}"))
+}
+
+fn now_unix_seconds() -> i64 {
+    chrono::Utc::now().timestamp()
 }
 
 fn mint_channel_localpart(name: &str) -> String {
@@ -896,6 +913,22 @@ async fn run_create(state: &AppState, args: &ChannelsCreateArgs) -> Result<Chann
         })
         .await
         .map_err(send_err("room_registry ask CreateRoom"))?;
+
+    // Persist the channel↔space link when the caller supplied a
+    // `space_jid`. The link drives `channels:list` filtering and
+    // `spaces:delete` cascade behavior; the room itself lives in the
+    // MUC registry independent of any space.
+    if let Some(space_jid) = args.space_jid.as_ref() {
+        state
+            .channel_space_link_store
+            .set(&ChannelSpaceLink {
+                channel_jid: channel_jid.clone(),
+                space_jid: space_jid.clone(),
+                created_at: now_unix_seconds(),
+            })
+            .await
+            .map_err(map_link_err)?;
+    }
 
     Ok(ChannelRef {
         channel_jid,
@@ -960,6 +993,14 @@ async fn run_delete(state: &AppState, args: &ChannelsDeleteArgs) -> Result<(), A
         })
         .await
         .map_err(send_err("room_registry ask DestroyRoom"))?;
+    // Best-effort: drop the channel↔space link row if any. We
+    // intentionally don't fail the delete on a missing link; the room
+    // is gone, the link projection has nothing left to point at.
+    let _ = state
+        .channel_space_link_store
+        .clear(&args.channel_jid)
+        .await
+        .map_err(map_link_err)?;
     Ok(())
 }
 
