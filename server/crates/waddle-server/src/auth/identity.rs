@@ -385,10 +385,15 @@ impl IdentityService {
                         .email
                         .clone()
                         .map_or(crate::db::Value::Null, crate::db::Value::from),
-                    claims
-                        .email_verified
-                        .map(|v| crate::db::Value::from(i64::from(v)))
-                        .unwrap_or(crate::db::Value::Null),
+                    // `email_verified` is an `INTEGER` column. The
+                    // typed-null path (`From<Option<i64>>`) emits
+                    // `Value::NullInteger` for `None`, which the Postgres
+                    // bind site routes through `Option::<i64>::None`.
+                    // Binding `Value::Null` directly here would emit
+                    // TEXT NULL and Postgres rejects it on integer
+                    // columns — same failure mode as the
+                    // `replay_gap_through` regression.
+                    claims.email_verified.map(i64::from).into(),
                     raw.into(),
                     now.clone().into(),
                     now.into(),
@@ -421,10 +426,9 @@ impl IdentityService {
                     now.into(),
                     provider.id.clone().into(),
                     claims.email.clone().map_or(crate::db::Value::Null, crate::db::Value::from),
-                    claims
-                        .email_verified
-                        .map(|v| crate::db::Value::from(i64::from(v)))
-                        .unwrap_or(crate::db::Value::Null),
+                    // INTEGER column — typed-null path. See the matching
+                    // comment on the insert path above.
+                    claims.email_verified.map(i64::from).into(),
                     raw.into(),
                     issuer.into(),
                     subject.into(),

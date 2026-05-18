@@ -33,7 +33,7 @@ impl Value {
 /// matches the SQL column type `T` binds to. Used by the blanket
 /// `From<Option<T>> for Value` so that `None` arrives at the
 /// Postgres bind site with a type the target column accepts.
-pub trait TypedNull {
+pub(crate) trait TypedNull {
     fn typed_null() -> Value;
 }
 
