@@ -5,6 +5,9 @@ import { BrowserXmppClient } from "@/lib/xmpp-client";
 import { connectionStore } from "@/lib/connection-store";
 import { $xmppStatus, OFFLINE_SNAPSHOT } from "@/stores/xmpp-status";
 import { installInstrumentation } from "@/lib/xmpp/xmpp-instrumentation";
+import IncomingCallToast from "@/components/calls/IncomingCallToast.vue";
+import OutgoingCallToast from "@/components/calls/OutgoingCallToast.vue";
+import CallOverlay from "@/components/calls/CallOverlay.vue";
 
 const props = defineProps<{
   serverBaseUrl: string;
@@ -75,5 +78,10 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <!-- Renderless persistent island — manages XMPP connection lifecycle -->
+  <!-- Persistent island — manages XMPP connection lifecycle plus the
+       global call surfaces (incoming-call toast, outgoing-ring +
+       ended toast, in-call overlay). -->
+  <IncomingCallToast />
+  <OutgoingCallToast />
+  <CallOverlay />
 </template>

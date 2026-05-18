@@ -51,3 +51,83 @@ pub fn server_features() -> Vec<Feature> {
     features.push(Feature::new(crate::admin::NS_ADMIN_CHANNELS_KICK));
     features
 }
+
+/// XMPP-native A/V calling feature namespaces. Returned as a separate
+/// list so disco-info builders only emit them when the
+/// LiveKit-backed handlers are actually registered at startup. Each
+/// namespace is covered by a custom test suite (per the CLAUDE.md
+/// "advertised feature must have testable behavior" rule) and a real
+/// handler — see [`crate::protocol::handlers::jingle`],
+/// [`crate::protocol::handlers::extdisco`], and the typed XEP
+/// modules under `crate::xep`.
+pub fn call_features() -> Vec<Feature> {
+    // `Feature::waddle_muc_call()` is advertised once
+    // `register_call_handlers` has wired the `MucCallHandler` IQ
+    // surface — that handler is the backing behavior for the
+    // namespace (mints per-room join tokens, registers participants
+    // in the SFU registry, and unwinds via request-leave). The
+    // `<call xmlns='urn:waddle:muc-call:0'/>` presence extension is
+    // a permissive marker that flows through the MUC presence
+    // pipeline unchanged; chat-side parsers ignore malformed shapes.
+    vec![
+        Feature::jingle(),
+        Feature::jingle_rtp(),
+        Feature::jingle_rtp_audio(),
+        Feature::jingle_rtp_video(),
+        Feature::jingle_message(),
+        Feature::ext_disco(),
+        Feature::waddle_livekit_transport(),
+        Feature::waddle_muc_call(),
+    ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn server_features_omit_call_namespaces_by_default() {
+        // The base list is used by tests that don't register call
+        // handlers; advertising A/V features there would be a lie.
+        let features = server_features();
+        for feature in call_features() {
+            assert!(
+                !features.contains(&feature),
+                "{} leaked into server_features() — gating must be done by callers, not here",
+                feature.0
+            );
+        }
+    }
+
+    #[test]
+    fn call_features_returns_eight_canonical_namespaces() {
+        let features = call_features();
+        let expected = [
+            "urn:xmpp:jingle:1",
+            "urn:xmpp:jingle:apps:rtp:1",
+            "urn:xmpp:jingle:apps:rtp:audio",
+            "urn:xmpp:jingle:apps:rtp:video",
+            "urn:xmpp:jingle-message:0",
+            "urn:xmpp:extdisco:2",
+            "urn:waddle:transports:livekit:0",
+            "urn:waddle:muc-call:0",
+        ];
+        assert_eq!(features.len(), expected.len());
+        for ns in expected {
+            assert!(
+                features.contains(&Feature::new(ns)),
+                "call_features() missing {ns}"
+            );
+        }
+    }
+
+    #[test]
+    fn call_features_advertises_muc_call_with_backing_handler() {
+        // urn:waddle:muc-call:0 IQ surface is implemented by
+        // `MucCallHandler` (request-join / request-leave). Advertising
+        // it is now correct per the CLAUDE.md rule "advertised feature
+        // must have testable backing behavior."
+        let features = call_features();
+        assert!(features.contains(&Feature::waddle_muc_call()));
+    }
+}

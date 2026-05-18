@@ -26,6 +26,7 @@ pub(super) fn dispatch_event(event: ClientEvent, listener: &dyn WaddleEventListe
             listener.on_message(inbound_to_ffi(*msg));
         }
         ClientEvent::Messaging(MessagingEvent::Presence(pres)) => {
+            let pres = *pres;
             listener.on_presence(WaddlePresence {
                 from: pres.from,
                 to: pres.to,

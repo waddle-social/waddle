@@ -43,6 +43,12 @@ pub(super) fn parse_presence(el: &Element) -> InboundPresence {
         .map(|photo| photo.text())
         .filter(|hash| !hash.is_empty());
 
+    let muc_call = el.get_child("call", NS_WADDLE_MUC_CALL).and_then(|call| {
+        let state = call.attr("state").and_then(MucCallPresenceState::parse)?;
+        let call_id = call.attr("call-id")?.to_string();
+        Some(MucCallPresence { state, call_id })
+    });
+
     InboundPresence {
         from,
         to,
@@ -54,5 +60,52 @@ pub(super) fn parse_presence(el: &Element) -> InboundPresence {
         muc_role,
         muc_jid,
         vcard_avatar,
+        muc_call,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_muc_call_extension_active() {
+        let xml = r#"<presence xmlns="jabber:client" from="room@muc.test/alice">
+            <call xmlns="urn:waddle:muc-call:0" state="active" call-id="room@muc.test"/>
+        </presence>"#;
+        let elem: Element = xml.parse().unwrap();
+        let p = parse_presence(&elem);
+        let call = p.muc_call.expect("call extension parsed");
+        assert_eq!(call.state, MucCallPresenceState::Active);
+        assert_eq!(call.call_id, "room@muc.test");
+    }
+
+    #[test]
+    fn parses_muc_call_extension_inactive() {
+        let xml = r#"<presence xmlns="jabber:client" from="room@muc.test/alice">
+            <call xmlns="urn:waddle:muc-call:0" state="inactive" call-id="room@muc.test"/>
+        </presence>"#;
+        let elem: Element = xml.parse().unwrap();
+        let p = parse_presence(&elem);
+        assert_eq!(p.muc_call.unwrap().state, MucCallPresenceState::Inactive);
+    }
+
+    #[test]
+    fn missing_extension_yields_none() {
+        let xml = r#"<presence xmlns="jabber:client" from="room@muc.test/alice"/>"#;
+        let elem: Element = xml.parse().unwrap();
+        let p = parse_presence(&elem);
+        assert!(p.muc_call.is_none());
+    }
+
+    #[test]
+    fn malformed_state_is_dropped() {
+        // No `state` attr → extension parser returns None, so the
+        // whole field stays None. Permissive parsing as documented.
+        let xml = r#"<presence xmlns="jabber:client" from="room@muc.test/alice">
+            <call xmlns="urn:waddle:muc-call:0" call-id="room@muc.test"/>
+        </presence>"#;
+        let elem: Element = xml.parse().unwrap();
+        assert!(parse_presence(&elem).muc_call.is_none());
     }
 }

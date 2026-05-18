@@ -10,6 +10,14 @@ import {
   removeQueuedMessage,
   type PersistedQueuedDmMessage,
 } from "../outbound-queue-store";
+import { $callState, applyCallEvent, clearCallState, tearDownActiveCall } from "@/lib/calls/call-store";
+import { handleCallEventSideEffect } from "@/lib/calls/call-effects";
+import {
+  applyMucCallPresence,
+  clearMucCallParticipants,
+} from "@/lib/calls/muc-call-presence";
+import type { CallWireSender } from "@/lib/calls/outbound";
+import type { CallEvent } from "@/lib/calls/types";
 import { barePeerJid, jidDomain, roomBareJidFor } from "./jid";
 import type {
   ChatStateEvent,
@@ -243,6 +251,7 @@ type XmppClientInstance = Partial<WasmClient> & CompatEmitter & {
   set_on_presence?: (cb: (presence: WasmPresence) => void) => void;
   set_on_message_delivery_acked?: (cb: (id: string) => void) => void;
   set_on_message_delivery_failed?: (cb: (id: string) => void) => void;
+  set_on_call?: (cb: (event: CallEvent) => void) => void;
   set_on_session_lifecycle?: (cb: (event: string) => void) => void;
   set_on_mds_displayed?: (cb: (entry: WasmMdsDisplayedEntry) => void) => void;
   get_resume_state?: () => XmppResumeState | null;
@@ -377,6 +386,13 @@ export class BrowserXmppClient {
   readonly catchup = new ReconnectCatchup();
 
   constructor(session: WaddleSession) { this.session = session; }
+
+  /** Full JID (`bare/resource`) for this session. Needed by the
+   * call layer when constructing Jingle session-initiate / accept,
+   * which must address the peer's full JID and stamp our own. */
+  get fullJid(): string { return `${this.session.jid}/${this.resource}`; }
+  /** Bare JID for this session. */
+  get bareJid(): string { return this.session.jid; }
 
   setMessageHandler(h: (message: LiveRoomMessage) => void) { this.messageHandler = h; }
   /** #414: receive `<pin-event/>` system messages from a room. */
@@ -580,6 +596,11 @@ export class BrowserXmppClient {
     this.roomAuthority = {};
     this.roomPresence = {};
     this.roomMemberJids = {};
+    // Best-effort hangup: if we're in a call when the user logs out
+    // we want the peer to see session-terminate before the stream
+    // closes. `tearDownActiveCall` handles every phase and clears
+    // `$callState`.
+    await tearDownActiveCall(xmpp as unknown as CallWireSender | null, "success");
     this.xmpp = null;
     try {
       if (xmpp && roomBefore && xmpp.leave_room) {
@@ -1532,6 +1553,13 @@ export class BrowserXmppClient {
   private handleDisconnected(xmpp: XmppClientInstance, error?: Error) {
     if (this.xmpp !== xmpp) return;
     this.connected = false; this.stopSelfPing(); this.xmpp = null;
+    // The wire is gone — no point trying to send session-terminate.
+    // Clear the local call slot so the UI doesn't strand on a stale
+    // active overlay across reconnect; the reconnect path doesn't
+    // re-establish call state (XEP-0353 has no resume semantics for
+    // an in-flight call once the responder's connection drops).
+    clearCallState();
+    clearMucCallParticipants();
     if (this.destroying) { this.clearResumeState(); this.emitStatus({ state: "offline", detail: error?.message ?? "Disconnected" }); return; }
     this.setResumeStateHandle(xmpp.get_resume_state_handle?.() ?? null);
     this.resumeState = xmpp.get_resume_state?.() ?? null;
@@ -1752,11 +1780,23 @@ export class BrowserXmppClient {
     xmpp.set_on_disconnected?.(() => this.handleDisconnected(xmpp));
     xmpp.set_on_error?.((detail: string) => this.emitError({ kind: "stream", recoverable: !this.destroying, detail }));
     xmpp.set_on_message?.((message: WasmMessage) => this.handleMessage(message));
-    xmpp.set_on_presence?.((presence: WasmPresence) => this.handlePresence(presence));
+    xmpp.set_on_presence?.((presence: WasmPresence) => {
+      this.handlePresence(presence);
+      // Side-effect track: MUC presence carrying the call extension
+      // populates the per-room participants store so any consumer
+      // (channel header, sidebar, list) can render "N in call"
+      // without subscribing to the raw presence stream.
+      applyMucCallPresence(presence);
+    });
     xmpp.set_on_message_delivery_acked?.((id: string) => this.handleMessageAck(id));
     xmpp.set_on_message_delivery_failed?.((id: string) => this.handleMessageFailed(id));
     xmpp.set_on_mds_displayed?.((entry: WasmMdsDisplayedEntry) => {
       this.mdsDisplayedHandler?.({ chatId: entry.chat_id, stanzaId: entry.stanza_id, stanzaIdBy: entry.stanza_id_by });
+    });
+    xmpp.set_on_call?.((event: CallEvent) => {
+      const prev = $callState.get();
+      applyCallEvent(event);
+      void handleCallEventSideEffect(event, prev, xmpp as unknown as CallWireSender, this.fullJid);
     });
     xmpp.on?.("session:started", () => { xmpp.disableKeepAlive?.(); xmpp.enableKeepAlive?.({ interval: 30, timeout: 15 }); this.handleSessionReady(xmpp, { type: "fresh" }); });
     xmpp.on?.("stream:management:resumed", () => this.handleSessionReady(xmpp, { type: "resumed" }));

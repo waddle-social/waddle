@@ -422,6 +422,100 @@ pub(crate) fn shared_file_to_js(file: messaging::SharedFile) -> WaddleSharedFile
     }
 }
 
+pub(crate) fn call_event_to_js(event: InboundCallEvent) -> WaddleCallEvent {
+    use waddle_xmpp_client::messaging::CallEventKind;
+    let from = event.from.to_string();
+    // The JS surface keeps `sid` as a plain string — boundary
+    // serialization is the explicit I/O exception to the typed-
+    // payloads rule. Convert the typed `SessionId` once here.
+    let sid = event.sid.0;
+    match event.kind {
+        CallEventKind::Propose { media } => WaddleCallEvent {
+            from,
+            sid,
+            kind: "propose",
+            media: Some(WaddleCallMedia {
+                audio: media.audio,
+                video: media.video,
+            }),
+            join: None,
+            reason: None,
+        },
+        CallEventKind::Proceed => WaddleCallEvent {
+            from,
+            sid,
+            kind: "proceed",
+            media: None,
+            join: None,
+            reason: None,
+        },
+        CallEventKind::Reject => WaddleCallEvent {
+            from,
+            sid,
+            kind: "reject",
+            media: None,
+            join: None,
+            reason: None,
+        },
+        CallEventKind::Retract => WaddleCallEvent {
+            from,
+            sid,
+            kind: "retract",
+            media: None,
+            join: None,
+            reason: None,
+        },
+        CallEventKind::Finish => WaddleCallEvent {
+            from,
+            sid,
+            kind: "finish",
+            media: None,
+            join: None,
+            reason: None,
+        },
+        CallEventKind::SessionInitiate { join, media } => WaddleCallEvent {
+            from,
+            sid,
+            kind: "session-initiate",
+            media: Some(WaddleCallMedia {
+                audio: media.audio,
+                video: media.video,
+            }),
+            join: Some(WaddleLiveKitJoin {
+                url: join.url,
+                room: join.room,
+                identity: join.identity,
+                token: join.token,
+            }),
+            reason: None,
+        },
+        CallEventKind::SessionAccept { join, media } => WaddleCallEvent {
+            from,
+            sid,
+            kind: "session-accept",
+            media: Some(WaddleCallMedia {
+                audio: media.audio,
+                video: media.video,
+            }),
+            join: Some(WaddleLiveKitJoin {
+                url: join.url,
+                room: join.room,
+                identity: join.identity,
+                token: join.token,
+            }),
+            reason: None,
+        },
+        CallEventKind::SessionTerminate { reason } => WaddleCallEvent {
+            from,
+            sid,
+            kind: "session-terminate",
+            media: None,
+            join: None,
+            reason,
+        },
+    }
+}
+
 pub(crate) fn presence_to_js(presence: InboundPresence) -> WaddlePresence {
     WaddlePresence {
         from: presence.from,
@@ -443,6 +537,10 @@ pub(crate) fn presence_to_js(presence: InboundPresence) -> WaddlePresence {
         muc_role: presence.muc_role.map(muc_role_to_string),
         muc_jid: presence.muc_jid,
         vcard_avatar: presence.vcard_avatar,
+        muc_call: presence.muc_call.map(|c| WaddleMucCallPresence {
+            state: c.state.as_attr(),
+            call_id: c.call_id,
+        }),
     }
 }
 

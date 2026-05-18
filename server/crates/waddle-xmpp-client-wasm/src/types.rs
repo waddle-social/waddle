@@ -224,6 +224,43 @@ pub struct WaddlePresenceHat {
 }
 
 #[derive(Debug, Serialize)]
+pub struct WaddleCallMedia {
+    pub audio: bool,
+    pub video: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct WaddleLiveKitJoin {
+    pub url: String,
+    pub room: String,
+    pub identity: String,
+    pub token: String,
+}
+
+/// JS-facing call event. The `kind` discriminator drives a switch
+/// on the chat side: `propose|proceed|reject|retract|finish|
+/// session-initiate|session-accept|session-terminate`.
+///
+/// For `propose`, `session-initiate`, and `session-accept`, the
+/// `media` field is populated. For `session-initiate` and
+/// `session-accept`, the `join` field is populated with the
+/// server-issued LiveKit credentials. For `session-terminate`, the
+/// `reason` field carries the Jingle reason element name (e.g.
+/// `success`, `busy`, `decline`).
+#[derive(Debug, Serialize)]
+pub struct WaddleCallEvent {
+    pub from: String,
+    pub sid: String,
+    pub kind: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub media: Option<WaddleCallMedia>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub join: Option<WaddleLiveKitJoin>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
 pub struct WaddlePresence {
     pub from: Option<String>,
     pub to: Option<String>,
@@ -235,6 +272,16 @@ pub struct WaddlePresence {
     pub muc_role: Option<String>,
     pub muc_jid: Option<String>,
     pub vcard_avatar: Option<String>,
+    /// `urn:waddle:muc-call:0` extension on a MUC occupant's presence,
+    /// surfaced as `{ state: "active" | "inactive", call_id }` for the
+    /// chat-side participant-tracking store.
+    pub muc_call: Option<WaddleMucCallPresence>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct WaddleMucCallPresence {
+    pub state: &'static str,
+    pub call_id: String,
 }
 
 #[derive(Debug, Serialize)]

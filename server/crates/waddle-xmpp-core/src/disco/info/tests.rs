@@ -174,3 +174,28 @@ fn test_push_service_features_match_xep0357_pubsub_boundary() {
     assert!(!features.contains(&Feature::pubsub_auto_create()));
     assert!(!features.contains(&Feature::pubsub_subscribe()));
 }
+
+#[test]
+fn test_call_feature_helpers_pin_canonical_xep_namespaces() {
+    // Per CLAUDE.md, every Feature::* helper advertised in disco
+    // MUST match the canonical XEP namespace exactly. This test
+    // pins the call-related namespaces against the literal strings
+    // so a typo in a helper would surface immediately.
+    assert_eq!(Feature::jingle().0, "urn:xmpp:jingle:1");
+    assert_eq!(Feature::jingle_rtp().0, "urn:xmpp:jingle:apps:rtp:1");
+    assert_eq!(
+        Feature::jingle_rtp_audio().0,
+        "urn:xmpp:jingle:apps:rtp:audio"
+    );
+    assert_eq!(
+        Feature::jingle_rtp_video().0,
+        "urn:xmpp:jingle:apps:rtp:video"
+    );
+    assert_eq!(Feature::jingle_message().0, "urn:xmpp:jingle-message:0");
+    assert_eq!(Feature::ext_disco().0, "urn:xmpp:extdisco:2");
+    assert_eq!(
+        Feature::waddle_livekit_transport().0,
+        "urn:waddle:transports:livekit:0"
+    );
+    assert_eq!(Feature::waddle_muc_call().0, "urn:waddle:muc-call:0");
+}

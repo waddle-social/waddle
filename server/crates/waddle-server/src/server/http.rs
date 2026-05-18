@@ -348,6 +348,31 @@ async fn create_websocket_state(
     let mut stanza_dispatcher = waddle_xmpp::protocol::StanzaDispatcher::new();
     waddle_xmpp::protocol::handlers::register_default_handlers(&mut stanza_dispatcher);
     waddle_xmpp::protocol::handlers::register_default_message_handlers(&mut stanza_dispatcher);
+    match waddle_sfu::SfuConfig::from_env() {
+        Ok(Some(sfu_config)) => {
+            let turn_tls_port = sfu_config.turn_tls_port;
+            let turn_udp_port = sfu_config.turn_udp_port;
+            let sfu: std::sync::Arc<dyn waddle_sfu::SfuService> =
+                std::sync::Arc::new(waddle_sfu::LiveKitSfu::new(sfu_config));
+            waddle_xmpp::protocol::handlers::register_call_handlers(
+                &mut stanza_dispatcher,
+                sfu,
+                turn_tls_port,
+                turn_udp_port,
+            );
+            tracing::info!(
+                "LiveKit SFU configured; XEP-0166 Jingle + XEP-0215 extdisco handlers registered"
+            );
+        }
+        Ok(None) => {
+            tracing::info!(
+                "LIVEKIT_* env vars unset; XMPP-native A/V calling disabled for this process"
+            );
+        }
+        Err(error) => {
+            warn!(%error, "invalid LiveKit configuration; A/V calling will be unavailable");
+        }
+    }
     let stanza_dispatcher = Arc::new(stanza_dispatcher);
 
     let extension_pubsub_owner: jid::BareJid = service_domains.extensions.parse()?;

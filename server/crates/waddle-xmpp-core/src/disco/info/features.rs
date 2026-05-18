@@ -346,4 +346,44 @@ impl Feature {
     pub fn spaces() -> Self {
         Self::new("urn:xmpp:spaces:0")
     }
+
+    /// XEP-0166 Jingle.
+    pub fn jingle() -> Self {
+        Self::new("urn:xmpp:jingle:1")
+    }
+
+    /// XEP-0167 Jingle RTP Sessions.
+    pub fn jingle_rtp() -> Self {
+        Self::new("urn:xmpp:jingle:apps:rtp:1")
+    }
+
+    /// XEP-0167 audio capability.
+    pub fn jingle_rtp_audio() -> Self {
+        Self::new("urn:xmpp:jingle:apps:rtp:audio")
+    }
+
+    /// XEP-0167 video capability.
+    pub fn jingle_rtp_video() -> Self {
+        Self::new("urn:xmpp:jingle:apps:rtp:video")
+    }
+
+    /// XEP-0353 Jingle Message Initiation.
+    pub fn jingle_message() -> Self {
+        Self::new("urn:xmpp:jingle-message:0")
+    }
+
+    /// XEP-0215 External Service Discovery.
+    pub fn ext_disco() -> Self {
+        Self::new("urn:xmpp:extdisco:2")
+    }
+
+    /// Custom: Waddle's LiveKit-backed Jingle transport.
+    pub fn waddle_livekit_transport() -> Self {
+        Self::new("urn:waddle:transports:livekit:0")
+    }
+
+    /// Custom: Waddle's MUC group-call presence extension.
+    pub fn waddle_muc_call() -> Self {
+        Self::new("urn:waddle:muc-call:0")
+    }
 }

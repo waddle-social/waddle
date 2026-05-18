@@ -31,14 +31,18 @@ pub mod carbons;
 pub mod carbons_message;
 pub mod enrichment_dispatch;
 pub mod errors;
+pub mod extdisco;
 pub mod framework_envelope;
 pub mod inbox;
+pub mod jingle;
+pub mod muc_call;
 pub mod offline_delivery;
 pub mod ping;
 pub mod receipts;
 pub mod rich_target_validation;
 pub mod route;
 pub mod session;
+pub mod session_initiate_rate_limit;
 pub mod time;
 pub mod version;
 
@@ -58,6 +62,26 @@ pub fn register_default_handlers(dispatcher: &mut StanzaDispatcher) {
     dispatcher.register_iq(Arc::new(carbons::CarbonsHandler));
     dispatcher.register_iq(Arc::new(version::VersionHandler));
     dispatcher.register_iq(Arc::new(time::TimeHandler));
+}
+
+/// Register the XMPP-native A/V calling handlers (XEP-0166 Jingle +
+/// XEP-0215 external service discovery) backed by the supplied
+/// LiveKit SFU service. Kept separate from
+/// [`register_default_handlers`] so non-call deployments and unit
+/// tests don't need to construct a [`waddle_sfu::SfuService`].
+pub fn register_call_handlers(
+    dispatcher: &mut StanzaDispatcher,
+    sfu: Arc<dyn waddle_sfu::SfuService>,
+    turn_tls_port: u16,
+    turn_udp_port: u16,
+) {
+    dispatcher.register_iq(Arc::new(jingle::JingleHandler::new(sfu.clone())));
+    dispatcher.register_iq(Arc::new(extdisco::ExtDiscoHandler::new(
+        sfu.clone(),
+        turn_tls_port,
+        turn_udp_port,
+    )));
+    dispatcher.register_iq(Arc::new(muc_call::MucCallHandler::new(sfu)));
 }
 
 /// Register the full message-pipeline handler chain in the order
