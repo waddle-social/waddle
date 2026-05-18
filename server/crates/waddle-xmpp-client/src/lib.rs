@@ -48,10 +48,10 @@ pub use discovery::{
     build_user_search_form_iq, build_user_search_iq, build_waddle_inbox_mark_read_iq,
     build_waddle_inbox_query_iq, parse_muc_admin_affiliation_query, parse_roster_result,
     parse_user_search_form, parse_user_search_result, parse_waddle_inbox_result, DiscoFeature,
-    DiscoIdentity, DiscoInfoResult, DiscoItem, DiscoveredChannel, InboxEntry,
-    MucAdminAffiliationItem, RosterResult, UploadSlot, UserSearchForm, UserSearchItem,
-    UserSearchQuery, UserSearchResult, WaddleInboxConversation, WaddleInboxMarkRead,
-    WaddleInboxQuery, WaddleInboxResult, MUC_ADMIN_NS, USER_SEARCH_NS, WADDLE_INBOX_NS,
+    DiscoIdentity, DiscoInfoResult, DiscoItem, DiscoveredChannel, MucAdminAffiliationItem,
+    RosterResult, UploadSlot, UserSearchForm, UserSearchItem, UserSearchQuery, UserSearchResult,
+    WaddleInboxConversation, WaddleInboxMarkRead, WaddleInboxQuery, WaddleInboxResult,
+    MUC_ADMIN_NS, USER_SEARCH_NS, WADDLE_INBOX_NS,
 };
 pub use error::{ClientError, ClientResult, StanzaError, StanzaErrorType};
 pub use event::{

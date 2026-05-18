@@ -648,14 +648,3 @@ fn build_and_parse_muc_admin_affiliation_queries() {
     assert_eq!(parsed[0].affiliation, Some(MucAffiliation::Admin));
     assert_eq!(parsed[0].reason.as_deref(), Some("promoted"));
 }
-
-#[test]
-fn parse_inbox_result_returns_none_for_plain_message() {
-    let message = Element::builder("message", CLIENT_NS)
-        .attr("from", "alice@example.com")
-        .attr("to", "me@example.com")
-        .append(Element::builder("body", CLIENT_NS).append("Hello!").build())
-        .build();
-
-    assert!(parse_inbox_result(&message).is_none());
-}

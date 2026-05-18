@@ -11,8 +11,8 @@ use super::types::{
     WaddleInboxQuery, WaddleInboxResult,
 };
 use super::{
-    CLIENT_NS, DATA_FORMS_NS, DISCO_INFO_NS, DISCO_ITEMS_NS, INBOX_NS, MUC_ADMIN_NS, PUBSUB_NS,
-    PUSH_NS, ROSTER_NS, RSM_NS, UPLOAD_NS, USER_SEARCH_NS, WADDLE_INBOX_NS,
+    CLIENT_NS, DATA_FORMS_NS, DISCO_INFO_NS, DISCO_ITEMS_NS, MUC_ADMIN_NS, PUBSUB_NS, PUSH_NS,
+    ROSTER_NS, UPLOAD_NS, USER_SEARCH_NS, WADDLE_INBOX_NS,
 };
 
 // ── IQ builders ──────────────────────────────────────────────────────────────
@@ -79,25 +79,6 @@ pub fn build_upload_slot_iq(
                 .attr("filename", filename)
                 .attr("size", size.to_string())
                 .attr("content-type", content_type)
-                .build(),
-        )
-        .build()
-}
-
-pub fn build_inbox_iq(bare_jid: &str, query_id: &str, max: u32) -> Element {
-    let id = format!("inbox-{}", next_id());
-    Element::builder("iq", CLIENT_NS)
-        .attr("type", "set")
-        .attr("to", bare_jid)
-        .attr("id", id)
-        .append(
-            Element::builder("inbox", INBOX_NS)
-                .attr("queryid", query_id)
-                .append(
-                    Element::builder("max", RSM_NS)
-                        .append(max.to_string())
-                        .build(),
-                )
                 .build(),
         )
         .build()

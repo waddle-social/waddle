@@ -77,14 +77,6 @@ pub struct UploadSlot {
     pub put_headers: Vec<(String, String)>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub struct InboxEntry {
-    pub jid: String,
-    pub unread_count: u32,
-    pub last_message_body: Option<String>,
-    pub timestamp: Option<chrono::DateTime<chrono::Utc>>,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SpaceNode(String);
 
