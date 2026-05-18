@@ -133,6 +133,7 @@ pub(super) async fn dispatch_to_room(
         managed_room_forbidden,
         room_moderated: snapshot.config.moderated,
         room_members_only: snapshot.config.members_only,
+        mention_permissions: snapshot.config.mention_permissions,
         pin_permission: snapshot.config.pin_permission,
         id_gen: &id_gen,
         occupant_id_secret: &state.deps.occupant_id_secret,
@@ -253,6 +254,7 @@ pub(super) async fn dispatch_to_room(
         // previously emitted `RoomActorError::VisitorMayNotSpeak`.
         room_moderated: snapshot.config.moderated,
         room_members_only: snapshot.config.members_only,
+        mention_permissions: snapshot.config.mention_permissions,
         pin_permission: snapshot.config.pin_permission,
         id_gen: &id_gen,
         occupant_id_secret: &state.deps.occupant_id_secret,

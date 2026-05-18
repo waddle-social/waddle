@@ -410,23 +410,11 @@ async fn evaluate_xep0492_push_dispatch_decision(
             return Err(());
         }
     };
-    let is_mention = message_is_mention_for_recipient(original_message, recipient);
+    let is_mention = crate::notification_mentions::direct_message_mentions_recipient(
+        original_message,
+        recipient,
+    );
     Ok(crate::notification_settings_projection::PushDispatchDecision::evaluate(level, is_mention))
-}
-
-/// Returns `true` when the inbound XEP-0513 explicit-mention payloads
-/// name `recipient` as a mentioned `<mention jid='…'/>`.
-///
-/// The recipient JID is the bare JID that owns the offline queue; that
-/// is the canonical identity referenced by `<mention jid='…'/>` per
-/// XEP-0513 §3. Channel-wide `<mention mentions='urn:xmpp:mentions:0#channel'/>`
-/// is intentionally NOT treated as an individual mention here — the
-/// XEP-0492 `<on-mention/>` semantics target explicit user mentions; the
-/// channel-mention surface is for MUC reflector announcements, which do
-/// not flow through the DM `QueueOfflineDelivery` arm.
-fn message_is_mention_for_recipient(message: &Message, recipient: &BareJid) -> bool {
-    waddle_xmpp::xep::extract_explicit_mentions(message)
-        .is_some_and(|mentions| mentions.mentions_jid(recipient))
 }
 
 async fn mark_pending_notification_outboxed(

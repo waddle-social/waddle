@@ -7,6 +7,7 @@ pub mod config;
 pub mod db;
 pub mod inbox;
 pub mod messages;
+mod notification_mentions;
 pub mod notification_outbox;
 pub mod notification_settings_projection;
 pub mod pending_delivery;

@@ -58,6 +58,29 @@ fn test_build_config_form() {
         .filter_map(|opt| opt.get_child("value", DATA_FORMS_NS).map(|v| v.text()))
         .collect();
     assert_eq!(option_values, vec!["admins-only", "anyone"]);
+
+    let mention_count = form
+        .children()
+        .find(|c| c.attr("var") == Some(crate::xep::FIELD_MENTIONS_COUNT))
+        .expect("mention count field should exist");
+    assert_eq!(mention_count.attr("type"), Some("text-single"));
+    assert_eq!(
+        mention_count
+            .get_child("value", DATA_FORMS_NS)
+            .map(|value| value.text()),
+        Some("5".to_string())
+    );
+    let mention_channel = form
+        .children()
+        .find(|c| c.attr("var") == Some(crate::xep::FIELD_MENTIONS_CHANNEL))
+        .expect("mention channel permission field should exist");
+    assert_eq!(mention_channel.attr("type"), Some("list-single"));
+    assert_eq!(
+        mention_channel
+            .get_child("value", DATA_FORMS_NS)
+            .map(|value| value.text()),
+        Some("participants".to_string())
+    );
 }
 
 /// #415: rooms persisted before the pin_permission field was added
@@ -77,5 +100,24 @@ fn legacy_room_config_deserializes_to_admins_only() {
     assert_eq!(
         config.pin_permission,
         super::super::pin::PinPermission::AdminsOnly
+    );
+}
+
+/// Rooms persisted before mention permissions were added must deserialize to
+/// the XEP-0513 default permission set.
+#[test]
+fn legacy_room_config_deserializes_to_default_mention_permissions() {
+    let mut value =
+        serde_json::to_value(RoomConfig::default()).expect("default RoomConfig serializes");
+    let obj = value.as_object_mut().expect("object");
+    assert!(
+        obj.remove("mention_permissions").is_some(),
+        "fixture must drop mention_permissions to simulate pre-XEP-0513 on-disk shape"
+    );
+    let config: RoomConfig = serde_json::from_value(value)
+        .expect("RoomConfig sans mention_permissions must deserialize");
+    assert_eq!(
+        config.mention_permissions,
+        crate::xep::MentionPermissions::default()
     );
 }

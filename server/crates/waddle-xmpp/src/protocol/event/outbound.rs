@@ -279,6 +279,15 @@ pub enum OutboundEvent {
         /// (`private_group` vs `public_group`) without re-querying room
         /// config after the dispatch snapshot.
         room_members_only: bool,
+        /// Sender role frozen at dispatch start. Used by XEP-0513 mention
+        /// permission gates in the notification classifier.
+        sender_role: crate::Role,
+        /// XEP-0513 mention permissions frozen at dispatch start.
+        mention_permissions: crate::xep::xep0513::MentionPermissions,
+        /// XEP-0421 occupant-id to bare-JID mappings frozen at dispatch
+        /// start. Used by push policy to count logical mention targets
+        /// deterministically across every recipient and retry.
+        occupant_id_bare_jids: Vec<(crate::xep::xep0421::OccupantId, BareJid)>,
         /// Optional thread metadata for the thread-level row.
         thread: Option<GroupchatThreadProjection>,
         /// Single dispatch timestamp (Unix epoch seconds) shared

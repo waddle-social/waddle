@@ -249,8 +249,8 @@ impl NotificationSettingsProjectionStore {
 /// The gate is consulted at the message → push-fan-out boundary
 /// (`OutboundEvent::QueueOfflineDelivery` interpret arm). The recipient's
 /// effective notification level (resolved via [`NotificationSettingsProjectionStore::effective_setting`])
-/// is combined with the per-message mention bit (resolved via
-/// [`message_is_mention_for_recipient`]) and reduced to one of two typed
+/// is combined with the per-message mention bit (resolved from structured
+/// XMPP mention payloads) and reduced to one of two typed
 /// outcomes: `Deliver` (fan out to the user's registered XEP-0357 Push
 /// Service) or `Suppressed { reason }` (drop, never call APNs/FCM).
 ///

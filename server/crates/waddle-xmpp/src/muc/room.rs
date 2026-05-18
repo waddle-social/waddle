@@ -7,6 +7,7 @@ use super::affiliation::{AffiliationList, FederatedAffiliationConfig, FederatedP
 use super::pin::{PinPermission, PinnedEntry};
 use super::subject::SubjectState;
 use crate::types::{Affiliation, Role};
+use crate::xep::xep0513::MentionPermissions;
 
 /// Check if a JID is from a remote server.
 ///
@@ -47,6 +48,10 @@ pub struct RoomConfig {
     /// the standard XEP-0045 owner-config form.
     #[serde(default)]
     pub pin_permission: PinPermission,
+    /// XEP-0513 mention notification permissions advertised on room disco
+    /// and consumed by the server push decision path.
+    #[serde(default)]
+    pub mention_permissions: MentionPermissions,
     /// Federation permission policy retained for serialized room configs.
     ///
     /// Remote XMPP federation is not served by Waddle, so active joins must still be local
@@ -68,6 +73,7 @@ impl Default for RoomConfig {
             enable_logging: true,
             forum: false,
             pin_permission: PinPermission::default(),
+            mention_permissions: MentionPermissions::default(),
             federation_policy: FederatedPermissionPolicy::default(),
             federated_affiliation_config: FederatedAffiliationConfig::open_member(),
         }

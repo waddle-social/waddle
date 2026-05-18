@@ -14,6 +14,9 @@ use super::pin::PinPermission;
 use super::MucRoom;
 #[cfg(test)]
 use super::RoomConfig;
+use crate::xep::xep0513::{
+    MentionPermission, FIELD_MENTIONS_CHANNEL, FIELD_MENTIONS_COUNT, FIELD_MENTIONS_INDIVIDUAL,
+};
 
 /// XEP-0045 owner-config form field var for the per-room pin
 /// permission policy (#415).
@@ -82,7 +85,48 @@ pub fn build_config_form(room: &MucRoom) -> Element {
                     PinPermission::Anyone.as_form_value(),
                 )),
         )
+        .add_field(
+            Field::text_single(
+                FIELD_MENTIONS_COUNT,
+                room.config.mention_permissions.count.to_string(),
+            )
+            .with_label("How many mentions are allowed in a message?")
+            .with_required(),
+        )
+        .add_field(mention_permission_field(
+            FIELD_MENTIONS_INDIVIDUAL,
+            "Who can mention individual users?",
+            room.config.mention_permissions.individual,
+        ))
+        .add_field(mention_permission_field(
+            FIELD_MENTIONS_CHANNEL,
+            "Who can mention rooms?",
+            room.config.mention_permissions.channel,
+        ))
         .into_element()
+}
+
+fn mention_permission_field(
+    var: &'static str,
+    label: &'static str,
+    value: MentionPermission,
+) -> Field {
+    Field::new(var, FieldType::ListSingle)
+        .with_label(label)
+        .with_required()
+        .with_value(value.as_form_value())
+        .add_option(FieldOption::with_label(
+            "Participants",
+            MentionPermission::Participants.as_form_value(),
+        ))
+        .add_option(FieldOption::with_label(
+            "Moderators Only",
+            MentionPermission::Moderators.as_form_value(),
+        ))
+        .add_option(FieldOption::with_label(
+            "Nobody",
+            MentionPermission::None.as_form_value(),
+        ))
 }
 
 #[cfg(test)]

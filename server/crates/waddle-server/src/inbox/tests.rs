@@ -18,6 +18,43 @@ async fn groupchat_notification_recovery_row_count(storage: &DatabaseInboxStorag
     row.get(0).expect("decode recovery row count")
 }
 
+#[test]
+fn groupchat_notification_recovery_decode_failures_are_typed() {
+    let sender_role_error = decode_sender_role("owner").expect_err("sender role error");
+    assert!(matches!(
+        sender_role_error,
+        InboxStorageError::InvalidGroupchatNotificationSenderRole { value } if value == "owner"
+    ));
+
+    let permission_error =
+        decode_mention_permission("owners").expect_err("mention permission error");
+    assert!(matches!(
+        permission_error,
+        InboxStorageError::InvalidGroupchatNotificationMentionPermission { value } if value == "owners"
+    ));
+
+    let count_error = decode_mentions_count(-1).expect_err("mention count error");
+    assert!(matches!(
+        count_error,
+        InboxStorageError::InvalidGroupchatNotificationMentionCount { value } if value == -1
+    ));
+
+    let map_json_error =
+        decode_occupant_id_bare_jids("not json").expect_err("occupant-id map JSON error");
+    assert!(matches!(
+        map_json_error,
+        InboxStorageError::InvalidGroupchatOccupantIdMapJson { .. }
+    ));
+
+    let bare_jid_error =
+        decode_occupant_id_bare_jids(r#"[["occupant-id","room@muc.example.com/resource"]]"#)
+            .expect_err("occupant-id map bare JID error");
+    assert!(matches!(
+        bare_jid_error,
+        InboxStorageError::InvalidGroupchatOccupantIdMapBareJid { value, .. } if value == "room@muc.example.com/resource"
+    ));
+}
+
 #[tokio::test]
 async fn sqlx_inbox_storage_round_trips_entries() {
     let storage = DatabaseInboxStorage::open(Some("sqlite::memory:"))
@@ -169,6 +206,11 @@ async fn sqlx_inbox_storage_tracks_groupchat_notification_recovery() {
         "groupchat-recovery-1",
         "room@muc.example.com".parse().expect("stanza-id by"),
     );
+    let recovery_permissions = waddle_xmpp::xep::MentionPermissions {
+        count: 3,
+        individual: waddle_xmpp::xep::MentionPermission::Moderators,
+        channel: waddle_xmpp::xep::MentionPermission::None,
+    };
     let recovery = GroupchatNotificationRecovery {
         key: GroupchatNotificationRecoveryKey {
             recipient: user.clone(),
@@ -179,6 +221,12 @@ async fn sqlx_inbox_storage_tracks_groupchat_notification_recovery() {
         sender_jid: "room@muc.example.com/alice".parse().expect("sender jid"),
         is_live_occupant: true,
         room_members_only: false,
+        sender_role: waddle_xmpp::Role::Moderator,
+        mention_permissions: recovery_permissions,
+        occupant_id_bare_jids: vec![(
+            waddle_xmpp::xep::OccupantId::new("room-stable-me"),
+            user.clone(),
+        )],
         created_at_ms: 42,
     };
     let second_recovery = GroupchatNotificationRecovery {
@@ -196,6 +244,9 @@ async fn sqlx_inbox_storage_tracks_groupchat_notification_recovery() {
             .expect("second sender jid"),
         is_live_occupant: false,
         room_members_only: true,
+        sender_role: waddle_xmpp::Role::Participant,
+        mention_permissions: waddle_xmpp::xep::MentionPermissions::default(),
+        occupant_id_bare_jids: Vec::new(),
         created_at_ms: 43,
     };
 
@@ -264,6 +315,186 @@ async fn sqlx_inbox_storage_tracks_groupchat_notification_recovery() {
         1
     );
     assert_eq!(groupchat_notification_recovery_row_count(&storage).await, 0);
+}
+
+#[tokio::test]
+async fn sqlx_inbox_storage_completes_malformed_groupchat_recovery_without_blocking_later_rows() {
+    let storage = DatabaseInboxStorage::open(Some("sqlite::memory:"))
+        .await
+        .expect("storage");
+    storage
+        .execute(
+            r#"
+            INSERT INTO groupchat_notification_recovery (
+                recipient_bare_jid,
+                room_jid,
+                thread_id,
+                stanza_id_by,
+                stanza_id,
+                sender_jid,
+                is_live_occupant,
+                room_members_only,
+                sender_role,
+                mentions_count,
+                mentions_individual,
+                mentions_channel,
+                occupant_id_bare_jids,
+                created_at_ms,
+                completed_at_ms
+            ) VALUES (?, ?, '', ?, ?, ?, 0, 0, 'bogus-role', 1, 'anyone', 'anyone', '[]', 1, NULL)
+            "#,
+            crate::db_params![
+                "broken@example.com",
+                "room@muc.example.com",
+                "room@muc.example.com",
+                "broken-stanza",
+                "room@muc.example.com/alice",
+            ],
+        )
+        .await
+        .expect("insert malformed recovery");
+
+    let valid = GroupchatNotificationRecovery {
+        key: GroupchatNotificationRecoveryKey {
+            recipient: jid("valid@example.com"),
+            room: jid("room@muc.example.com"),
+            thread_id: None,
+            archive_stanza_id: StanzaId::new(
+                "valid-stanza",
+                "room@muc.example.com".parse().expect("stanza-id by"),
+            ),
+        },
+        sender_jid: "room@muc.example.com/bob".parse().expect("sender jid"),
+        is_live_occupant: true,
+        room_members_only: false,
+        sender_role: waddle_xmpp::Role::Participant,
+        mention_permissions: waddle_xmpp::xep::MentionPermissions::default(),
+        occupant_id_bare_jids: Vec::new(),
+        created_at_ms: 2,
+    };
+    storage
+        .insert_groupchat_notification_recovery(valid.clone())
+        .await
+        .expect("insert valid recovery");
+
+    assert_eq!(
+        storage
+            .list_pending_groupchat_notification_recoveries(16)
+            .await
+            .expect("pending recoveries"),
+        vec![valid]
+    );
+
+    let mut rows = storage
+        .query(
+            "SELECT COUNT(*) FROM groupchat_notification_recovery \
+             WHERE stanza_id = 'broken-stanza' AND completed_at_ms IS NOT NULL",
+            (),
+        )
+        .await
+        .expect("malformed completion query");
+    let completed: i64 = rows
+        .next()
+        .await
+        .expect("advance completion row")
+        .expect("completion row")
+        .get(0)
+        .expect("decode completion count");
+    assert_eq!(completed, 1);
+}
+
+#[tokio::test]
+async fn sqlx_inbox_storage_rejects_legacy_groupchat_recovery_schema() {
+    let artifacts = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/test-artifacts");
+    std::fs::create_dir_all(&artifacts).expect("artifacts dir");
+    let path = artifacts.join(format!("inbox-legacy-recovery-{}.db", uuid::Uuid::new_v4()));
+    let database_url = format!("sqlite://{}", path.display());
+    let db = Database::from_config(
+        "legacy-inbox-recovery",
+        &DatabaseConfig::new(DatabaseDriver::Sqlite, database_url.clone()),
+    )
+    .await
+    .expect("legacy db");
+    let conn = db.guard().await.expect("legacy conn");
+    conn.execute(
+        r#"
+            CREATE TABLE groupchat_notification_recovery (
+                recipient_bare_jid TEXT NOT NULL,
+                room_jid TEXT NOT NULL,
+                thread_id TEXT NOT NULL DEFAULT '',
+                stanza_id_by TEXT NOT NULL,
+                stanza_id TEXT NOT NULL,
+                sender_jid TEXT NOT NULL,
+                is_live_occupant INTEGER NOT NULL,
+                room_members_only INTEGER NOT NULL,
+                created_at_ms INTEGER NOT NULL,
+                completed_at_ms INTEGER,
+                PRIMARY KEY (recipient_bare_jid, room_jid, thread_id, stanza_id_by, stanza_id)
+            )
+            "#,
+        (),
+    )
+    .await
+    .expect("legacy recovery table");
+    conn.execute(
+        r#"
+            INSERT INTO groupchat_notification_recovery (
+                recipient_bare_jid, room_jid, thread_id, stanza_id_by, stanza_id,
+                sender_jid, is_live_occupant, room_members_only, created_at_ms, completed_at_ms
+            ) VALUES (?, ?, '', ?, ?, ?, 0, 0, 42, NULL)
+            "#,
+        crate::db_params![
+            "legacy@example.com",
+            "room@muc.example.com",
+            "room@muc.example.com",
+            "legacy-stanza",
+            "room@muc.example.com/alice"
+        ],
+    )
+    .await
+    .expect("legacy recovery row");
+    drop(conn);
+    drop(db);
+
+    let error = match DatabaseInboxStorage::open(Some(&database_url)).await {
+        Ok(_) => panic!("legacy recovery schema must not be patched at initialization"),
+        Err(error) => error,
+    };
+    let missing_columns = match error {
+        InboxStorageError::InvalidGroupchatNotificationRecoverySchema { missing_columns } => {
+            missing_columns
+        }
+        other => panic!("unexpected legacy schema error: {other}"),
+    };
+    assert!(missing_columns.contains(&"sender_role".to_string()));
+    assert!(missing_columns.contains(&"mentions_count".to_string()));
+    assert!(missing_columns.contains(&"occupant_id_bare_jids".to_string()));
+
+    let db = Database::from_config(
+        "legacy-inbox-recovery-check",
+        &DatabaseConfig::new(DatabaseDriver::Sqlite, database_url),
+    )
+    .await
+    .expect("reopen legacy db");
+    let conn = db.guard().await.expect("legacy check conn");
+    let mut rows = conn
+        .query(
+            "SELECT COUNT(*) FROM pragma_table_info('groupchat_notification_recovery') \
+             WHERE name = 'sender_role'",
+            (),
+        )
+        .await
+        .expect("schema check");
+    let row = rows
+        .next()
+        .await
+        .expect("advance schema check row")
+        .expect("schema check row");
+    let sender_role_columns: i64 = row.get(0).expect("decode schema check count");
+    assert_eq!(
+        sender_role_columns, 0,
+        "initialization must not add compatibility columns to legacy recovery tables"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

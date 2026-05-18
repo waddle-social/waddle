@@ -110,7 +110,6 @@ use extension_forms::{
     EXTENSION_COMMAND_FORM_TYPE, EXTENSION_ROUTE_FORM_TYPE,
 };
 use last_activity::handle_last_activity_iq;
-use muc_owner_config::apply_muc_owner_config;
 use muc_owner_moderation::handle_muc_owner_and_moderation_iq;
 pub(crate) use permissions::managed_channel_permission_allowed;
 use permissions::{

@@ -166,6 +166,80 @@ ALTER TABLE attachments
 ALTER COLUMN size_bytes TYPE BIGINT;
 "#;
 
+/// Persist XEP-0513 room mention permissions for managed channels so dormant
+/// room disco and actor rehydration reflect the last saved room policy.
+pub const V1004_ADD_CHANNEL_MENTION_PERMISSIONS: &str = r#"
+ALTER TABLE channels
+ADD COLUMN mention_permissions_count INTEGER NOT NULL DEFAULT 5;
+
+ALTER TABLE channels
+ADD COLUMN mention_permissions_individual TEXT NOT NULL DEFAULT 'participants';
+
+ALTER TABLE channels
+ADD COLUMN mention_permissions_channel TEXT NOT NULL DEFAULT 'participants';
+"#;
+
+/// Postgres variant is idempotent for hot-patched databases and normalizes
+/// any manually-created nullable columns before the migration is recorded.
+pub const V1004_ADD_CHANNEL_MENTION_PERMISSIONS_POSTGRES: &str = r#"
+DO $$
+BEGIN
+    IF to_regclass('channels') IS NOT NULL THEN
+        ALTER TABLE channels
+        ADD COLUMN IF NOT EXISTS mention_permissions_count INTEGER;
+
+        ALTER TABLE channels
+        ALTER COLUMN mention_permissions_count TYPE INTEGER
+        USING CASE
+            WHEN mention_permissions_count::text ~ '^[0-9]+$'
+             AND mention_permissions_count::text::numeric <= 2147483647
+            THEN mention_permissions_count::text::integer
+            ELSE 5
+        END;
+
+        UPDATE channels
+        SET mention_permissions_count = 5
+        WHERE mention_permissions_count IS NULL;
+
+        ALTER TABLE channels
+        ALTER COLUMN mention_permissions_count SET DEFAULT 5,
+        ALTER COLUMN mention_permissions_count SET NOT NULL;
+
+        ALTER TABLE channels
+        ADD COLUMN IF NOT EXISTS mention_permissions_individual TEXT;
+
+        ALTER TABLE channels
+        ALTER COLUMN mention_permissions_individual TYPE TEXT
+        USING mention_permissions_individual::text;
+
+        UPDATE channels
+        SET mention_permissions_individual = 'participants'
+        WHERE mention_permissions_individual IS NULL
+           OR mention_permissions_individual NOT IN ('participants', 'moderators', 'none');
+
+        ALTER TABLE channels
+        ALTER COLUMN mention_permissions_individual SET DEFAULT 'participants',
+        ALTER COLUMN mention_permissions_individual SET NOT NULL;
+
+        ALTER TABLE channels
+        ADD COLUMN IF NOT EXISTS mention_permissions_channel TEXT;
+
+        ALTER TABLE channels
+        ALTER COLUMN mention_permissions_channel TYPE TEXT
+        USING mention_permissions_channel::text;
+
+        UPDATE channels
+        SET mention_permissions_channel = 'participants'
+        WHERE mention_permissions_channel IS NULL
+           OR mention_permissions_channel NOT IN ('participants', 'moderators', 'none');
+
+        ALTER TABLE channels
+        ALTER COLUMN mention_permissions_channel SET DEFAULT 'participants',
+        ALTER COLUMN mention_permissions_channel SET NOT NULL;
+    END IF;
+END $$;
+"#;
+
 /// Get all waddle schema migrations in order.
 ///
 /// Versions are intentionally offset from global migrations so a single
@@ -189,6 +263,12 @@ pub fn all() -> Vec<Migration> {
             description: "Widen attachment sizes to bigint on Postgres".to_string(),
             sql_sqlite: V1003_ATTACHMENT_SIZES_BIGINT,
             sql_postgres: V1003_ATTACHMENT_SIZES_BIGINT_POSTGRES,
+        },
+        Migration {
+            version: 1004,
+            description: "Add channel mention permission policy".to_string(),
+            sql_sqlite: V1004_ADD_CHANNEL_MENTION_PERMISSIONS,
+            sql_postgres: V1004_ADD_CHANNEL_MENTION_PERMISSIONS_POSTGRES,
         },
     ]
 }

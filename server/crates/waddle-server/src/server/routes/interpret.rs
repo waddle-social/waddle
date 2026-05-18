@@ -494,6 +494,9 @@ async fn interpret_with_depth(
                 is_durable_recipient,
                 is_live_occupant,
                 room_members_only,
+                sender_role,
+                mention_permissions,
+                occupant_id_bare_jids,
                 thread,
                 dispatch_timestamp,
             } => {
@@ -506,6 +509,9 @@ async fn interpret_with_depth(
                     is_durable_recipient,
                     is_live_occupant,
                     room_members_only,
+                    sender_role,
+                    mention_permissions,
+                    occupant_id_bare_jids,
                     thread,
                     dispatch_timestamp,
                 })

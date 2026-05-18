@@ -1,5 +1,38 @@
 use super::*;
 
+fn data_form_field(var: &str, value: &str) -> Element {
+    Element::builder("field", waddle_xmpp::muc::DATA_FORMS_NS)
+        .attr("var", var)
+        .append(
+            Element::builder("value", waddle_xmpp::muc::DATA_FORMS_NS)
+                .append(value)
+                .build(),
+        )
+        .build()
+}
+
+fn data_form_field_without_value(var: &str) -> Element {
+    Element::builder("field", waddle_xmpp::muc::DATA_FORMS_NS)
+        .attr("var", var)
+        .build()
+}
+
+fn data_form_field_values(var: &str, values: &[&str]) -> Element {
+    values
+        .iter()
+        .fold(
+            Element::builder("field", waddle_xmpp::muc::DATA_FORMS_NS).attr("var", var),
+            |field, value| {
+                field.append(
+                    Element::builder("value", waddle_xmpp::muc::DATA_FORMS_NS)
+                        .append(*value)
+                        .build(),
+                )
+            },
+        )
+        .build()
+}
+
 #[tokio::test]
 async fn muc_stale_leave_does_not_remove_current_resource() {
     let state = create_test_websocket_state().await;
@@ -324,36 +357,18 @@ async fn standard_muc_owner_config_persists_room_and_enforces_nonanonymous_defau
 
     let submit_form = Element::builder("x", waddle_xmpp::muc::DATA_FORMS_NS)
         .attr("type", "submit")
-        .append(
-            Element::builder("field", waddle_xmpp::muc::DATA_FORMS_NS)
-                .attr("var", "muc#roomconfig_roomname")
-                .append(
-                    Element::builder("value", waddle_xmpp::muc::DATA_FORMS_NS)
-                        .append("Project Room")
-                        .build(),
-                )
-                .build(),
-        )
-        .append(
-            Element::builder("field", waddle_xmpp::muc::DATA_FORMS_NS)
-                .attr("var", "muc#roomconfig_persistentroom")
-                .append(
-                    Element::builder("value", waddle_xmpp::muc::DATA_FORMS_NS)
-                        .append("0")
-                        .build(),
-                )
-                .build(),
-        )
-        .append(
-            Element::builder("field", waddle_xmpp::muc::DATA_FORMS_NS)
-                .attr("var", "muc#roomconfig_whois")
-                .append(
-                    Element::builder("value", waddle_xmpp::muc::DATA_FORMS_NS)
-                        .append("moderators")
-                        .build(),
-                )
-                .build(),
-        )
+        .append(data_form_field("muc#roomconfig_roomname", "Project Room"))
+        .append(data_form_field("muc#roomconfig_persistentroom", "0"))
+        .append(data_form_field("muc#roomconfig_whois", "moderators"))
+        .append(data_form_field(waddle_xmpp::xep::FIELD_MENTIONS_COUNT, "2"))
+        .append(data_form_field(
+            waddle_xmpp::xep::FIELD_MENTIONS_INDIVIDUAL,
+            "moderators",
+        ))
+        .append(data_form_field(
+            waddle_xmpp::xep::FIELD_MENTIONS_CHANNEL,
+            "none",
+        ))
         .build();
     let owner_iq = element_to_xml(
         Element::builder("iq", waddle_xmpp::ns::JABBER_CLIENT)
@@ -386,6 +401,15 @@ async fn standard_muc_owner_config_persists_room_and_enforces_nonanonymous_defau
         .expect("channel lookup")
         .expect("persisted channel");
     assert_eq!(channel.name, "Project Room");
+    assert_eq!(channel.mention_permissions.count, 2);
+    assert_eq!(
+        channel.mention_permissions.individual,
+        waddle_xmpp::xep::MentionPermission::Moderators
+    );
+    assert_eq!(
+        channel.mention_permissions.channel,
+        waddle_xmpp::xep::MentionPermission::None
+    );
 
     let snapshot = get_room_actor(state.as_ref(), &room_jid)
         .await
@@ -395,6 +419,10 @@ async fn standard_muc_owner_config_persists_room_and_enforces_nonanonymous_defau
         .expect("snapshot")
         .room;
     assert!(snapshot.config.persistent);
+    assert_eq!(
+        snapshot.config.mention_permissions,
+        channel.mention_permissions
+    );
 
     let disco = disco_items_iq_frame("muc-items", "muc.example.com", None);
     let responses = handle_iq(
@@ -407,6 +435,313 @@ async fn standard_muc_owner_config_persists_room_and_enforces_nonanonymous_defau
     )
     .await;
     assert!(responses[0].contains("project@muc.example.com"));
+}
+
+#[tokio::test]
+async fn standard_muc_owner_config_rejects_invalid_mentions_count() {
+    let state = create_test_websocket_state().await;
+    let session = create_test_server_owner_session(state.as_ref(), "alice").await;
+    let alice_jid: FullJid = format!("{}@example.com/web", session.xmpp_localpart)
+        .parse()
+        .expect("alice jid");
+    let ready = ready_phase(&alice_jid);
+
+    for (channel_id, submitted_count) in [
+        ("count-limit-overflow", "2147483648"),
+        ("count-limit-negative", "-1"),
+        ("count-limit-spaced", " 2147483648"),
+    ] {
+        let room_jid: BareJid = format!("{channel_id}@muc.example.com")
+            .parse()
+            .expect("room jid");
+
+        handle_muc_join(
+            state.as_ref(),
+            "example.com",
+            &room_jid,
+            &alice_jid,
+            "alice",
+            &Some(session.clone()),
+        )
+        .await;
+
+        let submit_form = Element::builder("x", waddle_xmpp::muc::DATA_FORMS_NS)
+            .attr("type", "submit")
+            .append(data_form_field(
+                waddle_xmpp::xep::FIELD_MENTIONS_COUNT,
+                submitted_count,
+            ))
+            .build();
+        let owner_iq = element_to_xml(
+            Element::builder("iq", waddle_xmpp::ns::JABBER_CLIENT)
+                .attr("id", format!("owner-submit-{channel_id}"))
+                .attr("type", "set")
+                .attr("to", room_jid.to_string())
+                .append(
+                    Element::builder("query", waddle_xmpp::muc::NS_MUC_OWNER)
+                        .append(submit_form)
+                        .build(),
+                )
+                .build(),
+        );
+
+        let responses = handle_iq(
+            &owner_iq,
+            "example.com",
+            "muc.example.com",
+            state.as_ref(),
+            &Some(session.clone()),
+            &ready,
+        )
+        .await;
+        assert_eq!(responses.len(), 1, "owner config response: {responses:?}");
+        assert!(responses[0].contains("type=\"error\""));
+        assert!(responses[0].contains("bad-request"));
+        assert!(responses[0].contains("mentions#count"));
+
+        let snapshot = get_room_actor(state.as_ref(), &room_jid)
+            .await
+            .expect("room actor")
+            .ask(GetSnapshot)
+            .await
+            .expect("snapshot")
+            .room;
+        assert_eq!(
+            snapshot.config.mention_permissions.count,
+            waddle_xmpp::xep::MentionPermissions::default().count
+        );
+
+        let actor = state.deps.app_state.db_pool.global_actor().clone();
+        let channel = crate::server::xmpp_state::get_xmpp_channel(actor, channel_id)
+            .await
+            .expect("channel lookup");
+        assert!(channel.is_none());
+    }
+}
+
+#[tokio::test]
+async fn standard_muc_owner_config_rejects_invalid_typed_fields_without_partial_update() {
+    let state = create_test_websocket_state().await;
+    let session = create_test_server_owner_session(state.as_ref(), "alice").await;
+    let alice_jid: FullJid = format!("{}@example.com/web", session.xmpp_localpart)
+        .parse()
+        .expect("alice jid");
+    let ready = ready_phase(&alice_jid);
+
+    let cases = vec![
+        (
+            "invalid-roomname-duplicate",
+            vec![data_form_field("muc#roomconfig_roomname", "Duplicate")],
+        ),
+        (
+            "invalid-roomdesc-no-value",
+            vec![data_form_field_without_value("muc#roomconfig_roomdesc")],
+        ),
+        (
+            "invalid-roomdesc-multi-value",
+            vec![data_form_field_values(
+                "muc#roomconfig_roomdesc",
+                &["first", "second"],
+            )],
+        ),
+        (
+            "invalid-roomdesc-duplicate",
+            vec![
+                data_form_field("muc#roomconfig_roomdesc", "first"),
+                data_form_field("muc#roomconfig_roomdesc", "second"),
+            ],
+        ),
+        (
+            "invalid-members-only",
+            vec![data_form_field("muc#roomconfig_membersonly", "maybe")],
+        ),
+        (
+            "invalid-members-only-no-value",
+            vec![data_form_field_without_value("muc#roomconfig_membersonly")],
+        ),
+        (
+            "invalid-members-only-multi-value",
+            vec![data_form_field_values(
+                "muc#roomconfig_membersonly",
+                &["1", "0"],
+            )],
+        ),
+        (
+            "invalid-members-only-duplicate",
+            vec![
+                data_form_field("muc#roomconfig_membersonly", "1"),
+                data_form_field("muc#roomconfig_membersonly", "0"),
+            ],
+        ),
+        (
+            "invalid-moderated",
+            vec![data_form_field("muc#roomconfig_moderatedroom", "maybe")],
+        ),
+        (
+            "invalid-logging",
+            vec![data_form_field("muc#roomconfig_enablelogging", "maybe")],
+        ),
+        (
+            "invalid-forum",
+            vec![data_form_field("muc#roomconfig_forum", "maybe")],
+        ),
+        (
+            "invalid-mention-individual",
+            vec![data_form_field(
+                waddle_xmpp::xep::FIELD_MENTIONS_INDIVIDUAL,
+                "owners",
+            )],
+        ),
+        (
+            "invalid-mention-count-no-value",
+            vec![data_form_field_without_value(
+                waddle_xmpp::xep::FIELD_MENTIONS_COUNT,
+            )],
+        ),
+        (
+            "invalid-mention-count-multi-value",
+            vec![data_form_field_values(
+                waddle_xmpp::xep::FIELD_MENTIONS_COUNT,
+                &["1", "2"],
+            )],
+        ),
+        (
+            "invalid-mention-individual-no-value",
+            vec![data_form_field_without_value(
+                waddle_xmpp::xep::FIELD_MENTIONS_INDIVIDUAL,
+            )],
+        ),
+        (
+            "invalid-mention-individual-multi-value",
+            vec![data_form_field_values(
+                waddle_xmpp::xep::FIELD_MENTIONS_INDIVIDUAL,
+                &["participants", "moderators"],
+            )],
+        ),
+        (
+            "invalid-mention-individual-duplicate",
+            vec![
+                data_form_field(waddle_xmpp::xep::FIELD_MENTIONS_INDIVIDUAL, "participants"),
+                data_form_field(waddle_xmpp::xep::FIELD_MENTIONS_INDIVIDUAL, "moderators"),
+            ],
+        ),
+        (
+            "invalid-mention-channel",
+            vec![data_form_field(
+                waddle_xmpp::xep::FIELD_MENTIONS_CHANNEL,
+                "admins",
+            )],
+        ),
+        (
+            "invalid-mention-channel-no-value",
+            vec![data_form_field_without_value(
+                waddle_xmpp::xep::FIELD_MENTIONS_CHANNEL,
+            )],
+        ),
+        (
+            "invalid-mention-channel-multi-value",
+            vec![data_form_field_values(
+                waddle_xmpp::xep::FIELD_MENTIONS_CHANNEL,
+                &["participants", "none"],
+            )],
+        ),
+        (
+            "invalid-pin-permission",
+            vec![data_form_field(
+                waddle_xmpp::muc::owner::FIELD_PIN_PERMISSION,
+                "moderators",
+            )],
+        ),
+        (
+            "invalid-pin-permission-no-value",
+            vec![data_form_field_without_value(
+                waddle_xmpp::muc::owner::FIELD_PIN_PERMISSION,
+            )],
+        ),
+        (
+            "invalid-pin-permission-multi-value",
+            vec![data_form_field_values(
+                waddle_xmpp::muc::owner::FIELD_PIN_PERMISSION,
+                &["admins-only", "anyone"],
+            )],
+        ),
+        (
+            "invalid-pin-permission-duplicate",
+            vec![
+                data_form_field(waddle_xmpp::muc::owner::FIELD_PIN_PERMISSION, "admins-only"),
+                data_form_field(waddle_xmpp::muc::owner::FIELD_PIN_PERMISSION, "anyone"),
+            ],
+        ),
+    ];
+
+    for (channel_id, invalid_fields) in cases {
+        let room_jid: BareJid = format!("{channel_id}@muc.example.com")
+            .parse()
+            .expect("room jid");
+
+        handle_muc_join(
+            state.as_ref(),
+            "example.com",
+            &room_jid,
+            &alice_jid,
+            "alice",
+            &Some(session.clone()),
+        )
+        .await;
+
+        let submit_form = invalid_fields
+            .into_iter()
+            .fold(
+                Element::builder("x", waddle_xmpp::muc::DATA_FORMS_NS)
+                    .attr("type", "submit")
+                    .append(data_form_field(
+                        "muc#roomconfig_roomname",
+                        "Should Not Persist",
+                    )),
+                |form, invalid_field| form.append(invalid_field),
+            )
+            .build();
+        let owner_iq = element_to_xml(
+            Element::builder("iq", waddle_xmpp::ns::JABBER_CLIENT)
+                .attr("id", format!("owner-submit-{channel_id}"))
+                .attr("type", "set")
+                .attr("to", room_jid.to_string())
+                .append(
+                    Element::builder("query", waddle_xmpp::muc::NS_MUC_OWNER)
+                        .append(submit_form)
+                        .build(),
+                )
+                .build(),
+        );
+
+        let responses = handle_iq(
+            &owner_iq,
+            "example.com",
+            "muc.example.com",
+            state.as_ref(),
+            &Some(session.clone()),
+            &ready,
+        )
+        .await;
+        assert_eq!(responses.len(), 1, "owner config response: {responses:?}");
+        assert!(responses[0].contains("type=\"error\""));
+        assert!(responses[0].contains("bad-request"));
+
+        let snapshot = get_room_actor(state.as_ref(), &room_jid)
+            .await
+            .expect("room actor")
+            .ask(GetSnapshot)
+            .await
+            .expect("snapshot")
+            .room;
+        assert_ne!(snapshot.config.name, "Should Not Persist");
+
+        let actor = state.deps.app_state.db_pool.global_actor().clone();
+        let channel = crate::server::xmpp_state::get_xmpp_channel(actor, channel_id)
+            .await
+            .expect("channel lookup");
+        assert!(channel.is_none());
+    }
 }
 
 #[tokio::test]
@@ -567,11 +902,23 @@ async fn room_disco_info_advertises_parent_space_metadata_for_linked_channel() {
     let space_db = state.deps.app_state.db_pool.global();
     let conn = space_db.guard().await.expect("persistent connection");
     conn.execute(
-            "INSERT INTO channels (id, name, description, channel_type, position, is_default) VALUES (?, ?, ?, 'text', 0, 0)",
-            crate::db_params!["linked", "Linked", "Linked channel description"],
-        )
-        .await
-        .expect("insert channel");
+        "INSERT INTO channels (
+                id, name, description, channel_type, position, is_default,
+                mention_permissions_count,
+                mention_permissions_individual,
+                mention_permissions_channel
+            ) VALUES (?, ?, ?, 'text', 0, 0, ?, ?, ?)",
+        crate::db_params![
+            "linked",
+            "Linked",
+            "Linked channel description",
+            1_i64,
+            "moderators",
+            "none"
+        ],
+    )
+    .await
+    .expect("insert channel");
     drop(conn);
     let spaces_jid: BareJid = "spaces.example.com".parse().expect("spaces jid");
     state
@@ -615,6 +962,44 @@ async fn room_disco_info_advertises_parent_space_metadata_for_linked_channel() {
     assert!(response.contains("muc#roomconfig_pubsub"));
     assert!(response.contains("muc#roominfo_description"));
     assert!(response.contains("Linked channel description"));
+    assert!(response.contains(r#"var="urn:xmpp:mentions:0""#));
+    assert!(response.contains(r#"var="urn:xmpp:mentions:0#channel""#));
+    assert!(response.contains("urn:xmpp:mentions:0"));
+    assert!(response.contains("mentions#count"));
+    assert!(response.contains("<value>1</value>"));
+    assert!(response.contains("mentions#individual"));
+    assert!(response.contains("<value>moderators</value>"));
+    assert!(response.contains("mentions#channel"));
+    assert!(response.contains("<value>none</value>"));
+}
+
+#[tokio::test]
+async fn dormant_room_disco_advertises_default_mention_permissions_without_channel_row() {
+    let state = create_test_websocket_state().await;
+
+    let query = disco_info_iq_frame("default-room-info", "unmanaged@muc.example.com", None);
+    let responses = handle_iq(
+        &query,
+        "example.com",
+        "muc.example.com",
+        state.as_ref(),
+        &None,
+        &ConnectionPhase::Unauthenticated,
+    )
+    .await;
+
+    let response = responses.first().expect("room disco response");
+    assert!(response.contains(r#"var="urn:xmpp:mentions:0""#));
+    assert!(response.contains(r#"var="urn:xmpp:mentions:0#channel""#));
+    assert!(response.contains("urn:xmpp:mentions:0"));
+    assert!(response.contains("mentions#count"));
+    assert!(response.contains("<value>5</value>"));
+    assert!(response.contains("mentions#individual"));
+    assert!(response.contains("mentions#channel"));
+    assert!(
+        response.matches("<value>participants</value>").count() >= 2,
+        "default individual and channel mention permissions should allow participants: {response}"
+    );
 }
 
 #[tokio::test]

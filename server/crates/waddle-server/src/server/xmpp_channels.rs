@@ -1,6 +1,7 @@
 use kameo::actor::ActorRef;
 use serde::Serialize;
 use waddle_xmpp::muc::PinPermission;
+use waddle_xmpp::xep::{MentionPermission, MentionPermissions};
 
 use crate::db::actor::{DbActor, DbQuery, DbQueryOne};
 use crate::db::{row_value, ValueExt};
@@ -16,6 +17,9 @@ pub(crate) struct XmppChannelRecord {
     /// #422: persisted pin permission so disco-info on a dormant
     /// room reflects the configured policy.
     pub pin_permission: PinPermission,
+    /// XEP-0513 mention permission policy used for dormant disco-info
+    /// and managed-room actor rehydration.
+    pub mention_permissions: MentionPermissions,
     pub created_at: String,
     pub updated_at: Option<String>,
 }
@@ -59,6 +63,32 @@ fn parse_channel_record(row: &crate::db::actor::RowValues) -> Result<XmppChannel
     let pin_permission = PinPermission::from_form_value(&pin_permission_raw).ok_or_else(|| {
         format!("Failed to get pin_permission: unexpected value {pin_permission_raw:?}")
     })?;
+    let mentions_count = match row_value(row, 7)
+        .map_err(|e| format!("Failed to get mention_permissions_count: {e}"))?
+    {
+        crate::db::Value::Integer(value) => u32::try_from(*value).map_err(|_| {
+            format!("Failed to get mention_permissions_count: unexpected value {value}")
+        })?,
+        other => {
+            return Err(format!(
+                "Failed to get mention_permissions_count: unexpected value {other:?}"
+            ));
+        }
+    };
+    let mentions_individual_raw = db_string(row, 8, "mention_permissions_individual")?;
+    let mentions_individual = MentionPermission::from_form_value(&mentions_individual_raw)
+        .ok_or_else(|| {
+            format!(
+                "Failed to get mention_permissions_individual: unexpected value {mentions_individual_raw:?}"
+            )
+        })?;
+    let mentions_channel_raw = db_string(row, 9, "mention_permissions_channel")?;
+    let mentions_channel =
+        MentionPermission::from_form_value(&mentions_channel_raw).ok_or_else(|| {
+            format!(
+                "Failed to get mention_permissions_channel: unexpected value {mentions_channel_raw:?}"
+            )
+        })?;
     Ok(XmppChannelRecord {
         id: db_string(row, 0, "id")?,
         name: db_string(row, 1, "name")?,
@@ -67,8 +97,13 @@ fn parse_channel_record(row: &crate::db::actor::RowValues) -> Result<XmppChannel
         position: db_i32(row, 4, "position")?,
         is_default: db_bool(row, 5, "is_default")?,
         pin_permission,
-        created_at: db_string(row, 7, "created_at")?,
-        updated_at: db_optional_string(row, 8, "updated_at")?,
+        mention_permissions: MentionPermissions {
+            count: mentions_count,
+            individual: mentions_individual,
+            channel: mentions_channel,
+        },
+        created_at: db_string(row, 10, "created_at")?,
+        updated_at: db_optional_string(row, 11, "updated_at")?,
     })
 }
 
@@ -79,7 +114,12 @@ pub(crate) async fn get_xmpp_channel(
     let row = actor
         .ask(DbQueryOne {
             sql: r#"
-                SELECT id, name, description, channel_type, position, is_default, pin_permission, created_at, updated_at
+                SELECT id, name, description, channel_type, position, is_default,
+                       pin_permission,
+                       mention_permissions_count,
+                       mention_permissions_individual,
+                       mention_permissions_channel,
+                       created_at, updated_at
                 FROM channels
                 WHERE id = ?
             "#
@@ -100,7 +140,12 @@ pub(crate) async fn list_xmpp_channels(
     let rows = actor
         .ask(DbQuery {
             sql: r#"
-                SELECT id, name, description, channel_type, position, is_default, pin_permission, created_at, updated_at
+                SELECT id, name, description, channel_type, position, is_default,
+                       pin_permission,
+                       mention_permissions_count,
+                       mention_permissions_individual,
+                       mention_permissions_channel,
+                       created_at, updated_at
                 FROM channels
                 ORDER BY position ASC, created_at ASC
                 LIMIT ? OFFSET ?

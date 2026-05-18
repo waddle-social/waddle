@@ -129,14 +129,14 @@ impl DatabaseBackend {
         match self {
             DatabaseBackend::Sqlite(pool) => {
                 let mut tx = pool.begin().await?;
-                for statement in sql.split(';').map(str::trim).filter(|s| !s.is_empty()) {
+                for statement in split_sql_statements(sql) {
                     sqlx::query(statement).execute(&mut *tx).await?;
                 }
                 tx.commit().await?;
             }
             DatabaseBackend::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
-                for statement in sql.split(';').map(str::trim).filter(|s| !s.is_empty()) {
+                for statement in split_sql_statements(sql) {
                     sqlx::query(statement).execute(&mut *tx).await?;
                 }
                 tx.commit().await?;
@@ -166,6 +166,138 @@ impl DatabaseBackend {
             }
         }
     }
+}
+
+fn split_sql_statements(sql: &str) -> Vec<&str> {
+    let bytes = sql.as_bytes();
+    let mut statements = Vec::new();
+    let mut start = 0;
+    let mut index = 0;
+    let mut in_single_quote = false;
+    let mut in_double_quote = false;
+    let mut in_line_comment = false;
+    let mut block_comment_depth = 0usize;
+    let mut dollar_quote: Option<String> = None;
+
+    while index < bytes.len() {
+        if let Some(delimiter) = dollar_quote.as_deref() {
+            if bytes[index] == b'$' && sql[index..].starts_with(delimiter) {
+                index += delimiter.len();
+                dollar_quote = None;
+            } else {
+                index += 1;
+            }
+            continue;
+        }
+
+        if in_line_comment {
+            in_line_comment = bytes[index] != b'\n';
+            index += 1;
+            continue;
+        }
+
+        if block_comment_depth > 0 {
+            if bytes[index] == b'/' && bytes.get(index + 1) == Some(&b'*') {
+                block_comment_depth += 1;
+                index += 2;
+            } else if bytes[index] == b'*' && bytes.get(index + 1) == Some(&b'/') {
+                block_comment_depth -= 1;
+                index += 2;
+            } else {
+                index += 1;
+            }
+            continue;
+        }
+
+        if in_single_quote {
+            if bytes[index] == b'\'' {
+                if bytes.get(index + 1) == Some(&b'\'') {
+                    index += 2;
+                } else {
+                    in_single_quote = false;
+                    index += 1;
+                }
+            } else {
+                index += 1;
+            }
+            continue;
+        }
+
+        if in_double_quote {
+            if bytes[index] == b'"' {
+                if bytes.get(index + 1) == Some(&b'"') {
+                    index += 2;
+                } else {
+                    in_double_quote = false;
+                    index += 1;
+                }
+            } else {
+                index += 1;
+            }
+            continue;
+        }
+
+        match bytes[index] {
+            b'\'' => {
+                in_single_quote = true;
+                index += 1;
+            }
+            b'"' => {
+                in_double_quote = true;
+                index += 1;
+            }
+            b'-' if bytes.get(index + 1) == Some(&b'-') => {
+                in_line_comment = true;
+                index += 2;
+            }
+            b'/' if bytes.get(index + 1) == Some(&b'*') => {
+                block_comment_depth = 1;
+                index += 2;
+            }
+            b'$' => {
+                if let Some(delimiter) = dollar_quote_delimiter(sql, index) {
+                    index += delimiter.len();
+                    dollar_quote = Some(delimiter);
+                } else {
+                    index += 1;
+                }
+            }
+            b';' => {
+                let statement = sql[start..index].trim();
+                if !statement.is_empty() {
+                    statements.push(statement);
+                }
+                start = index + 1;
+                index += 1;
+            }
+            _ => index += 1,
+        }
+    }
+
+    let statement = sql[start..].trim();
+    if !statement.is_empty() {
+        statements.push(statement);
+    }
+
+    statements
+}
+
+fn dollar_quote_delimiter(sql: &str, start: usize) -> Option<String> {
+    let bytes = sql.as_bytes();
+    if bytes.get(start) != Some(&b'$') {
+        return None;
+    }
+
+    let mut end = start + 1;
+    while end < bytes.len() && bytes[end] != b'$' {
+        let byte = bytes[end];
+        if !byte.is_ascii_alphanumeric() && byte != b'_' {
+            return None;
+        }
+        end += 1;
+    }
+
+    (end < bytes.len()).then(|| sql[start..=end].to_string())
 }
 
 fn rewrite_positional_for_postgres(sql: &str) -> String {
@@ -498,5 +630,50 @@ impl<'a> Transaction<'a> {
             TransactionInner::Postgres(tx) => tx.commit().await?,
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn split_sql_statements_preserves_quoted_semicolons() {
+        let statements = split_sql_statements(
+            r#"
+            SELECT ';' AS literal;
+            -- ignored ; comment
+            SELECT "semi;colon" AS ident;
+            SELECT 'escaped '' ; quote';
+            "#,
+        );
+
+        assert_eq!(statements.len(), 3);
+        assert_eq!(statements[0], "SELECT ';' AS literal");
+        assert!(statements[1].starts_with("-- ignored ; comment"));
+        assert!(statements[1].ends_with(r#"SELECT "semi;colon" AS ident"#));
+        assert_eq!(statements[2], "SELECT 'escaped '' ; quote'");
+    }
+
+    #[test]
+    fn split_sql_statements_preserves_postgres_dollar_quoted_blocks() {
+        let statements = split_sql_statements(
+            r#"
+            DO $$
+            BEGIN
+                IF to_regclass('channels') IS NOT NULL THEN
+                    UPDATE channels SET mention_permissions_count = 5;
+                END IF;
+            END $$;
+
+            SELECT 1;
+            "#,
+        );
+
+        assert_eq!(statements.len(), 2);
+        assert!(statements[0].starts_with("DO $$"));
+        assert!(statements[0].contains("UPDATE channels SET mention_permissions_count = 5;"));
+        assert!(statements[0].ends_with("END $$"));
+        assert_eq!(statements[1], "SELECT 1");
     }
 }

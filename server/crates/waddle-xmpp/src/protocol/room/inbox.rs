@@ -21,7 +21,9 @@ use super::super::event::{GroupchatThreadProjection, OutboundEvent};
 use super::context::RoomContext;
 use super::traits::{RoomHandler, RoomHandlerOutcome};
 use crate::inbox::runtime::{preview_text, should_project_message};
+use crate::xep::xep0421::{generate_occupant_id, OccupantId};
 use crate::xep::xep0508::{extract_forum_action, ForumAction};
+use crate::xep::xep0513::extract_explicit_mentions;
 use jid::BareJid;
 use std::collections::HashSet;
 use waddle_xmpp_core::xep0201::thread_info_from_message;
@@ -48,6 +50,10 @@ impl RoomHandler for MucInboxHandler {
             .collect();
         let mut events = Vec::with_capacity(1 + ctx.durable_recipient_bare_jids.len());
         let sender_bare = ctx.sender_full.to_bare();
+        let sender_role = ctx
+            .sender_snapshot()
+            .map_or(crate::Role::None, |sender| sender.role);
+        let occupant_id_bare_jids = mentioned_occupant_id_bare_jids(message, ctx);
         // Always project the sender's own row (no unread bump). The
         // legacy code did this independent of whether the sender was
         // also enumerated as an occupant, and this matches RFC
@@ -65,6 +71,9 @@ impl RoomHandler for MucInboxHandler {
                 is_durable_recipient: false,
                 is_live_occupant: true,
                 room_members_only: ctx.room_members_only,
+                sender_role,
+                mention_permissions: ctx.mention_permissions,
+                occupant_id_bare_jids: occupant_id_bare_jids.clone(),
                 thread: thread.clone(),
                 dispatch_timestamp: ctx.dispatch_timestamp,
             });
@@ -81,11 +90,74 @@ impl RoomHandler for MucInboxHandler {
                 is_durable_recipient: true,
                 is_live_occupant: live_recipient_bares.contains(bare),
                 room_members_only: ctx.room_members_only,
+                sender_role,
+                mention_permissions: ctx.mention_permissions,
+                occupant_id_bare_jids: occupant_id_bare_jids.clone(),
                 thread: thread.clone(),
                 dispatch_timestamp: ctx.dispatch_timestamp,
             });
         }
         RoomHandlerOutcome::Continue(events)
+    }
+}
+
+fn mentioned_occupant_id_bare_jids(
+    message: &Message,
+    ctx: &RoomContext<'_>,
+) -> Vec<(OccupantId, BareJid)> {
+    let mentioned_occupant_ids = mentioned_occupant_ids(message);
+    if mentioned_occupant_ids.is_empty() {
+        return Vec::new();
+    }
+    let mut seen = HashSet::new();
+    let mut mappings = Vec::new();
+    for bare in ctx.durable_recipient_bare_jids {
+        push_mentioned_occupant_id_mapping(
+            &mentioned_occupant_ids,
+            &mut seen,
+            &mut mappings,
+            ctx,
+            bare.clone(),
+        );
+    }
+    for occupant in ctx.occupants {
+        push_mentioned_occupant_id_mapping(
+            &mentioned_occupant_ids,
+            &mut seen,
+            &mut mappings,
+            ctx,
+            occupant.bare_jid(),
+        );
+    }
+    mappings
+}
+
+fn mentioned_occupant_ids(message: &Message) -> HashSet<OccupantId> {
+    extract_explicit_mentions(message)
+        .map(|mentions| {
+            mentions
+                .mentions
+                .iter()
+                .filter_map(|mention| mention.occupant_id.as_ref())
+                .map(OccupantId::new)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn push_mentioned_occupant_id_mapping(
+    mentioned_occupant_ids: &HashSet<OccupantId>,
+    seen: &mut HashSet<BareJid>,
+    mappings: &mut Vec<(OccupantId, BareJid)>,
+    ctx: &RoomContext<'_>,
+    bare: BareJid,
+) {
+    if !seen.insert(bare.clone()) {
+        return;
+    }
+    let occupant_id = generate_occupant_id(&bare, ctx.room, ctx.occupant_id_secret);
+    if mentioned_occupant_ids.contains(&occupant_id) {
+        mappings.push((occupant_id, bare));
     }
 }
 
@@ -182,6 +254,7 @@ mod tests {
             managed_room_forbidden: false,
             room_moderated: false,
             room_members_only,
+            mention_permissions: crate::xep::xep0513::MentionPermissions::default(),
             pin_permission: crate::muc::PinPermission::default(),
             id_gen: &id_gen,
             occupant_id_secret: &secret,
@@ -340,6 +413,47 @@ mod tests {
                 .any(|(owner, _, _, _, _)| owner == "dave@example.com"),
             "live occupants outside the durable affiliation set must not get inbox/push projection"
         );
+    }
+
+    #[test]
+    fn xep_0430_freezes_only_mentioned_occupant_id_mappings() {
+        let room = bare("team@conf.example.com");
+        let alice = full("alice@example.com/web");
+        let bob = full("bob@example.com/desk");
+        let charlie = bare("charlie@example.com");
+        let secret = OccupantIdSecret::for_testing(b"test-secret".to_vec());
+        let bob_bare = bob.to_bare();
+        let bob_occupant_id = generate_occupant_id(&bob_bare, &room, &secret);
+        let occupants = vec![occ(alice.clone(), "alice"), occ(bob, "bob")];
+        let durable_recipients = vec![bob_bare.clone(), charlie];
+        let mut msg = groupchat(&room, &alice, "hello bob");
+        msg.payloads.push(crate::xep::build_mention_element(
+            &crate::xep::ExplicitMention::occupant_id(bob_occupant_id.as_str()),
+        ));
+
+        let events = run_with_durable(
+            &room,
+            &alice,
+            &occupants,
+            &durable_recipients,
+            true,
+            &mut msg,
+        );
+        let mappings: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                OutboundEvent::ProjectGroupchatInbox {
+                    occupant_id_bare_jids,
+                    ..
+                } => Some(occupant_id_bare_jids.clone()),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(mappings.len(), 3);
+        for mapping in mappings {
+            assert_eq!(mapping, vec![(bob_occupant_id.clone(), bob_bare.clone())]);
+        }
     }
 
     #[test]

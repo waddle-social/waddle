@@ -99,6 +99,10 @@ pub struct RoomContext<'a> {
     /// gate can apply XEP-0492's private/public group defaults from the
     /// same frozen room snapshot.
     pub room_members_only: bool,
+    /// XEP-0513 mention permission snapshot. The inbox projection carries
+    /// this into server-side push classification so retries do not re-read
+    /// mutable room config after dispatch.
+    pub mention_permissions: crate::xep::xep0513::MentionPermissions,
     /// #415: per-room pin permission policy (`urn:waddle:roomconfig:pinpermission`).
     /// Frozen at dispatch start from `RoomConfig.pin_permission`; the
     /// `MucPinHandler` reads this to decide whether non-admin members

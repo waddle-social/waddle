@@ -6,12 +6,14 @@ use std::sync::Arc;
 use crate::db::{DatabaseConfig, DatabaseDriver, IntoParams};
 use async_trait::async_trait;
 use jid::BareJid;
-use tracing::{info, instrument};
+use tracing::{info, instrument, warn};
 use waddle_xmpp::inbox::storage::{
     GroupchatNotificationRecovery, GroupchatNotificationRecoveryKey, InboxStorage,
     InboxStorageError,
 };
 use waddle_xmpp::inbox::{ConversationKind, InboxEntry};
+use waddle_xmpp::xep::{MentionPermission, MentionPermissions, OccupantId};
+use waddle_xmpp::Role;
 use waddle_xmpp_core::xep0359::StanzaId;
 
 use crate::db::Database;
@@ -23,7 +25,7 @@ mod schema;
 use codec::{decode_row, encode_kind, SELECT_COLS};
 pub use open::build_inbox_storage;
 
-const GROUPCHAT_NOTIFICATION_RECOVERY_SELECT_COLS: &str = "recipient_bare_jid, room_jid, thread_id, stanza_id_by, stanza_id, sender_jid, is_live_occupant, room_members_only, created_at_ms";
+const GROUPCHAT_NOTIFICATION_RECOVERY_SELECT_COLS: &str = "recipient_bare_jid, room_jid, thread_id, stanza_id_by, stanza_id, sender_jid, is_live_occupant, room_members_only, sender_role, mentions_count, mentions_individual, mentions_channel, occupant_id_bare_jids, created_at_ms";
 
 #[derive(Clone)]
 pub struct DatabaseInboxStorage {
@@ -94,13 +96,23 @@ fn insert_groupchat_notification_recovery_sql() -> &'static str {
         sender_jid,
         is_live_occupant,
         room_members_only,
+        sender_role,
+        mentions_count,
+        mentions_individual,
+        mentions_channel,
+        occupant_id_bare_jids,
         created_at_ms,
         completed_at_ms
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
     ON CONFLICT(recipient_bare_jid, room_jid, thread_id, stanza_id_by, stanza_id) DO UPDATE SET
         sender_jid = excluded.sender_jid,
         is_live_occupant = excluded.is_live_occupant,
         room_members_only = excluded.room_members_only,
+        sender_role = excluded.sender_role,
+        mentions_count = excluded.mentions_count,
+        mentions_individual = excluded.mentions_individual,
+        mentions_channel = excluded.mentions_channel,
+        occupant_id_bare_jids = excluded.occupant_id_bare_jids,
         created_at_ms = excluded.created_at_ms,
         completed_at_ms = NULL
     "#
@@ -118,8 +130,75 @@ fn groupchat_notification_recovery_params(
         recovery.sender_jid.to_string(),
         recovery.is_live_occupant,
         recovery.room_members_only,
+        encode_sender_role(recovery.sender_role),
+        i64::from(recovery.mention_permissions.count),
+        recovery.mention_permissions.individual.as_form_value(),
+        recovery.mention_permissions.channel.as_form_value(),
+        encode_occupant_id_bare_jids(&recovery.occupant_id_bare_jids),
         recovery.created_at_ms,
     ]
+}
+
+fn encode_sender_role(role: Role) -> &'static str {
+    match role {
+        Role::None => "none",
+        Role::Visitor => "visitor",
+        Role::Participant => "participant",
+        Role::Moderator => "moderator",
+    }
+}
+
+fn decode_sender_role(value: &str) -> Result<Role, InboxStorageError> {
+    match value {
+        "none" => Ok(Role::None),
+        "visitor" => Ok(Role::Visitor),
+        "participant" => Ok(Role::Participant),
+        "moderator" => Ok(Role::Moderator),
+        _ => Err(InboxStorageError::InvalidGroupchatNotificationSenderRole {
+            value: value.to_string(),
+        }),
+    }
+}
+
+fn decode_mention_permission(value: &str) -> Result<MentionPermission, InboxStorageError> {
+    MentionPermission::from_form_value(value).ok_or_else(|| {
+        InboxStorageError::InvalidGroupchatNotificationMentionPermission {
+            value: value.to_string(),
+        }
+    })
+}
+
+fn decode_mentions_count(value: i64) -> Result<u32, InboxStorageError> {
+    u32::try_from(value)
+        .map_err(|_| InboxStorageError::InvalidGroupchatNotificationMentionCount { value })
+}
+
+fn encode_occupant_id_bare_jids(mappings: &[(OccupantId, BareJid)]) -> String {
+    let wire = mappings
+        .iter()
+        .map(|(occupant_id, bare_jid)| [occupant_id.to_string(), bare_jid.to_string()])
+        .collect::<Vec<_>>();
+    serde_json::to_string(&wire).unwrap_or_else(|_| "[]".to_string())
+}
+
+fn decode_occupant_id_bare_jids(
+    value: &str,
+) -> Result<Vec<(OccupantId, BareJid)>, InboxStorageError> {
+    let wire: Vec<[String; 2]> = serde_json::from_str(value)
+        .map_err(|source| InboxStorageError::InvalidGroupchatOccupantIdMapJson { source })?;
+    wire.into_iter()
+        .map(|[occupant_id, bare_jid]| {
+            Ok((
+                OccupantId::new(occupant_id),
+                bare_jid.parse().map_err(|source| {
+                    InboxStorageError::InvalidGroupchatOccupantIdMapBareJid {
+                        value: bare_jid.clone(),
+                        source,
+                    }
+                })?,
+            ))
+        })
+        .collect()
 }
 
 fn decode_groupchat_notification_recovery(
@@ -149,8 +228,23 @@ fn decode_groupchat_notification_recovery(
     let room_members_only: i64 = row
         .get(7)
         .map_err(|error| InboxStorageError::Other(error.to_string()))?;
-    let created_at_ms: i64 = row
+    let sender_role: String = row
         .get(8)
+        .map_err(|error| InboxStorageError::Other(error.to_string()))?;
+    let mentions_count: i64 = row
+        .get(9)
+        .map_err(|error| InboxStorageError::Other(error.to_string()))?;
+    let mentions_individual: String = row
+        .get(10)
+        .map_err(|error| InboxStorageError::Other(error.to_string()))?;
+    let mentions_channel: String = row
+        .get(11)
+        .map_err(|error| InboxStorageError::Other(error.to_string()))?;
+    let occupant_id_bare_jids: String = row
+        .get(12)
+        .map_err(|error| InboxStorageError::Other(error.to_string()))?;
+    let created_at_ms: i64 = row
+        .get(13)
         .map_err(|error| InboxStorageError::Other(error.to_string()))?;
     Ok(GroupchatNotificationRecovery {
         key: GroupchatNotificationRecoveryKey {
@@ -173,8 +267,87 @@ fn decode_groupchat_notification_recovery(
             .map_err(|error| InboxStorageError::Other(format!("invalid sender JID: {error}")))?,
         is_live_occupant: is_live_occupant != 0,
         room_members_only: room_members_only != 0,
+        sender_role: decode_sender_role(&sender_role)?,
+        mention_permissions: MentionPermissions {
+            count: decode_mentions_count(mentions_count)?,
+            individual: decode_mention_permission(&mentions_individual)?,
+            channel: decode_mention_permission(&mentions_channel)?,
+        },
+        occupant_id_bare_jids: decode_occupant_id_bare_jids(&occupant_id_bare_jids)?,
         created_at_ms,
     })
+}
+
+fn raw_groupchat_notification_recovery_key(
+    row: &crate::db::Row,
+) -> Result<(String, String, String, String, String), InboxStorageError> {
+    Ok((
+        row.get(0)
+            .map_err(|error| InboxStorageError::Other(error.to_string()))?,
+        row.get(1)
+            .map_err(|error| InboxStorageError::Other(error.to_string()))?,
+        row.get(2)
+            .map_err(|error| InboxStorageError::Other(error.to_string()))?,
+        row.get(3)
+            .map_err(|error| InboxStorageError::Other(error.to_string()))?,
+        row.get(4)
+            .map_err(|error| InboxStorageError::Other(error.to_string()))?,
+    ))
+}
+
+async fn complete_malformed_groupchat_notification_recovery(
+    storage: &DatabaseInboxStorage,
+    row: &crate::db::Row,
+    decode_error: &InboxStorageError,
+) {
+    let (recipient, room, thread_id, stanza_id_by, stanza_id) =
+        match raw_groupchat_notification_recovery_key(row) {
+            Ok(key) => key,
+            Err(key_error) => {
+                warn!(
+                    error = %decode_error,
+                    key_error = %key_error,
+                    "Malformed groupchat notification recovery row could not be identified"
+                );
+                return;
+            }
+        };
+    match storage
+        .execute(
+            "UPDATE groupchat_notification_recovery \
+             SET completed_at_ms = ? \
+             WHERE recipient_bare_jid = ? \
+               AND room_jid = ? \
+               AND thread_id = ? \
+               AND stanza_id_by = ? \
+               AND stanza_id = ? \
+               AND completed_at_ms IS NULL",
+            crate::db_params![
+                crate::time::now_ms(),
+                recipient,
+                room,
+                thread_id,
+                stanza_id_by,
+                stanza_id,
+            ],
+        )
+        .await
+    {
+        Ok(marked) => {
+            warn!(
+                marked,
+                error = %decode_error,
+                "Completed malformed groupchat notification recovery row"
+            );
+        }
+        Err(mark_error) => {
+            warn!(
+                error = %decode_error,
+                mark_error = %mark_error,
+                "Malformed groupchat notification recovery row could not be completed"
+            );
+        }
+    }
 }
 
 #[async_trait]
@@ -422,7 +595,12 @@ impl InboxStorage for DatabaseInboxStorage {
             .await
             .map_err(|error| InboxStorageError::Other(error.to_string()))?
         {
-            recoveries.push(decode_groupchat_notification_recovery(&row)?);
+            match decode_groupchat_notification_recovery(&row) {
+                Ok(recovery) => recoveries.push(recovery),
+                Err(error) => {
+                    complete_malformed_groupchat_notification_recovery(self, &row, &error).await;
+                }
+            }
         }
         Ok(recoveries)
     }

@@ -137,6 +137,7 @@ pub async fn handle_muc_join(
                     // snapshot matches the channel's last-saved value
                     // even after eviction.
                     pin_permission: channel.pin_permission,
+                    mention_permissions: channel.mention_permissions,
                     ..Default::default()
                 })
                 .unwrap_or_else(|| RoomConfig {

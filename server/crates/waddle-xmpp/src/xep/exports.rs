@@ -397,10 +397,11 @@ pub use super::xep0490::{
 };
 
 pub use super::xep0513::{
-    build_mention_element, build_mentions_elements, extract_explicit_mentions,
-    has_explicit_mentions, is_mention_element, parse_mention_element, set_explicit_mentions,
-    strip_explicit_mentions, ExplicitMention, ExplicitMentionCarrier, ExplicitMentions,
-    CHANNEL_MENTION, NS_EXPLICIT_MENTIONS,
+    build_mention_element, build_mentions_elements, build_mentions_permissions_form,
+    extract_explicit_mentions, has_explicit_mentions, is_mention_element, parse_mention_element,
+    set_explicit_mentions, strip_explicit_mentions, ExplicitMention, ExplicitMentionCarrier,
+    ExplicitMentions, MentionPermission, MentionPermissions, CHANNEL_MENTION,
+    FIELD_MENTIONS_CHANNEL, FIELD_MENTIONS_COUNT, FIELD_MENTIONS_INDIVIDUAL, NS_EXPLICIT_MENTIONS,
 };
 
 pub use super::xep0508::{

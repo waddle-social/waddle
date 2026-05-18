@@ -29,12 +29,36 @@ pub struct GroupchatNotificationRecovery {
     pub sender_jid: Jid,
     pub is_live_occupant: bool,
     pub room_members_only: bool,
+    pub sender_role: crate::Role,
+    pub mention_permissions: crate::xep::xep0513::MentionPermissions,
+    pub occupant_id_bare_jids: Vec<(crate::xep::xep0421::OccupantId, BareJid)>,
     pub created_at_ms: i64,
 }
 
 /// Errors returned by [`InboxStorage`] implementations.
 #[derive(Debug, thiserror::Error)]
 pub enum InboxStorageError {
+    #[error("invalid groupchat notification sender role: {value}")]
+    InvalidGroupchatNotificationSenderRole { value: String },
+    #[error("invalid groupchat notification mention permission: {value}")]
+    InvalidGroupchatNotificationMentionPermission { value: String },
+    #[error("invalid groupchat notification mention count: {value}")]
+    InvalidGroupchatNotificationMentionCount { value: i64 },
+    #[error("invalid groupchat occupant-id map JSON")]
+    InvalidGroupchatOccupantIdMapJson {
+        #[source]
+        source: serde_json::Error,
+    },
+    #[error("invalid groupchat occupant-id map bare JID: {value}")]
+    InvalidGroupchatOccupantIdMapBareJid {
+        value: String,
+        #[source]
+        source: jid::Error,
+    },
+    #[error(
+        "groupchat_notification_recovery schema is missing required columns {missing_columns:?}; apply a versioned schema migration or recreate the inbox database"
+    )]
+    InvalidGroupchatNotificationRecoverySchema { missing_columns: Vec<String> },
     #[error("inbox storage error: {0}")]
     Other(String),
 }
@@ -512,6 +536,12 @@ mod tests {
             sender_jid: "room@muc.example.com/alice".parse().unwrap(),
             is_live_occupant: true,
             room_members_only: false,
+            sender_role: crate::Role::Participant,
+            mention_permissions: crate::xep::xep0513::MentionPermissions::default(),
+            occupant_id_bare_jids: vec![(
+                crate::xep::xep0421::OccupantId::new("room-stable-me"),
+                "me@example.com".parse().unwrap(),
+            )],
             created_at_ms: 42,
         };
 

@@ -544,9 +544,32 @@ async fn queue_offline_delivery_skips_xep0357_when_committed_mam_row_is_missing(
 ///
 /// `0` ⇒ gate suppressed the push candidate. `1` ⇒ gate created a
 /// durable PubSub publish job for the recipient's registered Push Service.
+enum DirectChatMentionPayload {
+    None,
+    Xep0513,
+    Xep0372,
+}
+
 async fn drive_xep0492_direct_chat_push_gate(
     level: waddle_xmpp::xep::NotificationLevel,
     is_mention: bool,
+    message_id: &str,
+) -> usize {
+    drive_xep0492_direct_chat_push_gate_with_payload(
+        level,
+        if is_mention {
+            DirectChatMentionPayload::Xep0513
+        } else {
+            DirectChatMentionPayload::None
+        },
+        message_id,
+    )
+    .await
+}
+
+async fn drive_xep0492_direct_chat_push_gate_with_payload(
+    level: waddle_xmpp::xep::NotificationLevel,
+    mention_payload: DirectChatMentionPayload,
     message_id: &str,
 ) -> usize {
     let state = create_test_websocket_state().await;
@@ -607,16 +630,24 @@ async fn drive_xep0492_direct_chat_push_gate(
         String::new(),
         xmpp_parsers::message::Body("hello bob".to_string()),
     );
-    if is_mention {
-        // XEP-0513 explicit mention naming the recipient. This is the
-        // sole signal the gate consults — the `<body/>` text itself is
-        // not parsed for at-mention substrings (XEP-0513 §3 requires
-        // explicit `<mention/>` payloads for machine-detectable
-        // mentions).
-        let mention = waddle_xmpp::xep::build_mention_element(
-            &waddle_xmpp::xep::ExplicitMention::jid(recipient.clone()),
-        );
-        message.payloads.push(mention);
+    match mention_payload {
+        DirectChatMentionPayload::None => {}
+        DirectChatMentionPayload::Xep0513 => {
+            // XEP-0513 explicit mention naming the recipient. The gate also
+            // accepts XEP-0372 references, but never parses `<body/>` text for
+            // at-mention substrings.
+            let mention = waddle_xmpp::xep::build_mention_element(
+                &waddle_xmpp::xep::ExplicitMention::jid(recipient.clone()),
+            );
+            message.payloads.push(mention);
+        }
+        DirectChatMentionPayload::Xep0372 => {
+            message
+                .payloads
+                .push(waddle_xmpp::xep::build_reference_element(
+                    &waddle_xmpp::xep::Reference::mention(format!("xmpp:{recipient}")),
+                ));
+        }
     }
 
     let deps = build_interpret_deps(state.as_ref(), None);
@@ -701,6 +732,20 @@ async fn xep0492_direct_chat_on_mention_delivers_push_with_mention() {
     assert_eq!(
         attempts, 1,
         "XEP-0492 <on-mention/> MUST deliver push when XEP-0513 explicit mention names the recipient"
+    );
+}
+
+#[tokio::test]
+async fn xep0492_direct_chat_on_mention_delivers_push_with_xep0372_reference() {
+    let attempts = drive_xep0492_direct_chat_push_gate_with_payload(
+        waddle_xmpp::xep::NotificationLevel::OnMention,
+        DirectChatMentionPayload::Xep0372,
+        "xep0492-on-mention-with-xep0372-reference",
+    )
+    .await;
+    assert_eq!(
+        attempts, 1,
+        "XEP-0492 <on-mention/> MUST deliver push when XEP-0372 mention reference names the recipient"
     );
 }
 
@@ -887,6 +932,187 @@ async fn groupchat_xep0513_occupant_id_mention_pushes_affiliated_member() {
 }
 
 #[tokio::test]
+async fn groupchat_xep0513_individual_permission_denies_participant_push() {
+    let state = create_test_websocket_state().await;
+    let alice_session = create_test_session(state.as_ref(), "alice").await;
+    let alice_jid: FullJid = format!("{}@example.com/web", alice_session.xmpp_localpart)
+        .parse()
+        .expect("alice jid");
+    let recipient: BareJid = "charlie-denied@example.com".parse().expect("recipient");
+    register_first_party_push_for_test(state.as_ref(), &recipient, "charlie-denied-web").await;
+    let room_jid: BareJid = "individual-denied@muc.example.com"
+        .parse()
+        .expect("room jid");
+    let room_actor = get_or_create_room_actor(
+        state.as_ref(),
+        &room_jid,
+        RoomConfig {
+            members_only: false,
+            mention_permissions: waddle_xmpp::xep::MentionPermissions {
+                individual: waddle_xmpp::xep::MentionPermission::Moderators,
+                ..waddle_xmpp::xep::MentionPermissions::default()
+            },
+            ..RoomConfig::default()
+        },
+        "space".to_string(),
+        "individual-denied".to_string(),
+    )
+    .await
+    .expect("create room");
+    room_actor
+        .ask(ChangeAffiliation {
+            jid: recipient.clone(),
+            affiliation: Affiliation::Member,
+        })
+        .await
+        .expect("affiliate recipient");
+    room_actor
+        .ask(JoinWithAffiliation {
+            sender_jid: alice_jid.clone(),
+            nick: "alice".to_string(),
+            effective_affiliation: Affiliation::Member,
+            local_domain: "example.com".to_string(),
+        })
+        .await
+        .expect("join alice as participant");
+
+    let occupant_id = waddle_xmpp::xep::generate_occupant_id(
+        &recipient,
+        &room_jid,
+        &state.deps.occupant_id_secret,
+    );
+    let mut message = xmpp_parsers::message::Message::new(Some(jid::Jid::from(room_jid)));
+    message.id = Some("groupchat-individual-denied-push".to_string());
+    message.type_ = XmppMessageType::Groupchat;
+    message.bodies.insert(
+        String::new(),
+        xmpp_parsers::message::Body("@charlie, take a look".to_string()),
+    );
+    message
+        .payloads
+        .push(waddle_xmpp::xep::build_mention_element(
+            &waddle_xmpp::xep::ExplicitMention::occupant_id(occupant_id.as_str()),
+        ));
+
+    let responses =
+        handle_message_for_test(state.as_ref(), &alice_jid, Some(&alice_session), message).await;
+    assert!(
+        responses.is_empty(),
+        "role-denied XEP-0513 mention should still preserve normal stanza handling: {responses:?}"
+    );
+    assert_eq!(
+        drain_notification_candidates_for_test(state.as_ref()).await,
+        0,
+        "participants must not trigger individual mention push when room policy requires moderators"
+    );
+}
+
+#[tokio::test]
+async fn groupchat_xep0513_active_personal_mention_pushes_live_members_only() {
+    let state = create_test_websocket_state().await;
+    let alice_session = create_test_session(state.as_ref(), "alice").await;
+    let alice_jid: FullJid = format!("{}@example.com/web", alice_session.xmpp_localpart)
+        .parse()
+        .expect("alice jid");
+    let bob_jid: FullJid = "bob-active-personal@example.com/web"
+        .parse()
+        .expect("bob jid");
+    let bob_bare = bob_jid.to_bare();
+    let charlie: BareJid = "charlie-active-personal@example.com"
+        .parse()
+        .expect("recipient");
+    register_first_party_push_for_test(state.as_ref(), &bob_bare, "bob-active-personal-web").await;
+    register_first_party_push_for_test(state.as_ref(), &charlie, "charlie-active-personal-web")
+        .await;
+    let room_jid: BareJid = "active-personal@muc.example.com".parse().expect("room jid");
+    let room_actor = get_or_create_room_actor(
+        state.as_ref(),
+        &room_jid,
+        RoomConfig {
+            members_only: false,
+            ..RoomConfig::default()
+        },
+        "space".to_string(),
+        "active-personal".to_string(),
+    )
+    .await
+    .expect("create room");
+    for jid in [&bob_bare, &charlie] {
+        room_actor
+            .ask(ChangeAffiliation {
+                jid: jid.clone(),
+                affiliation: Affiliation::Member,
+            })
+            .await
+            .expect("affiliate recipient");
+    }
+    room_actor
+        .ask(JoinWithAffiliation {
+            sender_jid: alice_jid.clone(),
+            nick: "alice".to_string(),
+            effective_affiliation: Affiliation::Member,
+            local_domain: "example.com".to_string(),
+        })
+        .await
+        .expect("join alice");
+    room_actor
+        .ask(JoinWithAffiliation {
+            sender_jid: bob_jid,
+            nick: "bob".to_string(),
+            effective_affiliation: Affiliation::Member,
+            local_domain: "example.com".to_string(),
+        })
+        .await
+        .expect("join bob");
+
+    let mut message = xmpp_parsers::message::Message::new(Some(jid::Jid::from(room_jid.clone())));
+    message.id = Some("groupchat-active-personal-push".to_string());
+    message.type_ = XmppMessageType::Groupchat;
+    message.bodies.insert(
+        String::new(),
+        xmpp_parsers::message::Body("@bob and @charlie, take a look".to_string()),
+    );
+    for recipient in [&bob_bare, &charlie] {
+        let mut mention = waddle_xmpp::xep::ExplicitMention::occupant_id(
+            waddle_xmpp::xep::generate_occupant_id(
+                recipient,
+                &room_jid,
+                &state.deps.occupant_id_secret,
+            )
+            .as_str(),
+        );
+        mention.active = true;
+        message
+            .payloads
+            .push(waddle_xmpp::xep::build_mention_element(&mention));
+    }
+
+    let responses =
+        handle_message_for_test(state.as_ref(), &alice_jid, Some(&alice_session), message).await;
+    assert!(
+        responses.is_empty(),
+        "valid active personal mentions should not return an error: {responses:?}"
+    );
+    assert_eq!(
+        drain_notification_candidates_for_test(state.as_ref()).await,
+        1
+    );
+    let jobs = state
+        .deps
+        .protocol
+        .notification_outbox
+        .pending_outbox_jobs()
+        .await
+        .expect("notification outbox jobs");
+    assert_eq!(jobs.len(), 1);
+    assert_eq!(jobs[0].recipient_bare_jid(), &bob_bare);
+    assert_eq!(
+        jobs[0].class(),
+        crate::notification_outbox::NotificationClass::PersonalMention
+    );
+}
+
+#[tokio::test]
 async fn groupchat_xep0492_never_suppresses_personal_mentions_and_plain_messages() {
     async fn drive(message_id: &str, mention: bool) -> usize {
         let state = create_test_websocket_state().await;
@@ -1040,6 +1266,12 @@ async fn groupchat_notification_recovery_retries_committed_inbox_projection() {
                 sender_jid,
                 is_live_occupant: false,
                 room_members_only: false,
+                sender_role: waddle_xmpp::Role::Participant,
+                mention_permissions: waddle_xmpp::xep::MentionPermissions::default(),
+                occupant_id_bare_jids: vec![(
+                    waddle_xmpp::xep::OccupantId::new("room-stable-charlie"),
+                    recipient.clone(),
+                )],
                 created_at_ms: crate::time::now_ms(),
             },
         )
@@ -1083,6 +1315,177 @@ async fn groupchat_notification_recovery_retries_committed_inbox_projection() {
     assert_eq!(
         jobs[0].class(),
         crate::notification_outbox::NotificationClass::PersonalMention
+    );
+}
+
+#[tokio::test]
+async fn groupchat_notification_recovery_replays_frozen_occupant_id_mapping() {
+    let state = create_test_websocket_state().await;
+    let recipient: BareJid = "charlie-recover-occupant@example.com"
+        .parse()
+        .expect("recipient");
+    register_first_party_push_for_test(state.as_ref(), &recipient, "charlie-recover-occupant-web")
+        .await;
+    let room_jid: BareJid = "groupchat-recovery-occupant@muc.example.com"
+        .parse()
+        .expect("room jid");
+    let archive_stanza_id = waddle_xmpp_core::xep0359::StanzaId::new(
+        "groupchat-recovery-occupant-archive",
+        jid::Jid::from(room_jid.clone()),
+    );
+    let sender_jid: jid::Jid = "groupchat-recovery-occupant@muc.example.com/alice"
+        .parse()
+        .expect("sender jid");
+    let frozen_occupant_id = waddle_xmpp::xep::OccupantId::new("frozen-charlie-occupant");
+    let mut message = xmpp_parsers::message::Message::new(Some(jid::Jid::from(room_jid.clone())));
+    message.from = Some(sender_jid.clone());
+    message.id = Some("groupchat-recovery-occupant-wire".to_string());
+    message.type_ = XmppMessageType::Groupchat;
+    message.bodies.insert(
+        String::new(),
+        xmpp_parsers::message::Body("charlie, this occupant-id mention should recover".to_string()),
+    );
+    message
+        .payloads
+        .push(waddle_xmpp::xep::build_mention_element(
+            &waddle_xmpp::xep::ExplicitMention::occupant_id(frozen_occupant_id.as_str()),
+        ));
+    waddle_xmpp_core::xep0359::add_stanza_id(&mut message, &archive_stanza_id);
+    store_committed_dm_archive_for_notification(&state, &room_jid, &archive_stanza_id, &message)
+        .await;
+
+    state
+        .deps
+        .protocol
+        .inbox_storage
+        .insert_groupchat_notification_recovery(
+            waddle_xmpp::inbox::storage::GroupchatNotificationRecovery {
+                key: waddle_xmpp::inbox::storage::GroupchatNotificationRecoveryKey {
+                    recipient: recipient.clone(),
+                    room: room_jid.clone(),
+                    thread_id: None,
+                    archive_stanza_id,
+                },
+                sender_jid,
+                is_live_occupant: false,
+                room_members_only: false,
+                sender_role: waddle_xmpp::Role::Participant,
+                mention_permissions: waddle_xmpp::xep::MentionPermissions::default(),
+                occupant_id_bare_jids: vec![(frozen_occupant_id, recipient.clone())],
+                created_at_ms: crate::time::now_ms(),
+            },
+        )
+        .await
+        .expect("insert recovery item");
+
+    assert_eq!(
+        crate::server::routes::interpret::reconcile_groupchat_notification_candidates(
+            state.as_ref(),
+            16,
+        )
+        .await,
+        1,
+        "recovery should complete the durable item after enqueueing the frozen occupant-id candidate"
+    );
+    assert_eq!(
+        drain_notification_candidates_for_test(state.as_ref()).await,
+        1,
+        "recovery must use the frozen occupant-id map instead of recomputing current IDs"
+    );
+    let jobs = state
+        .deps
+        .protocol
+        .notification_outbox
+        .pending_outbox_jobs()
+        .await
+        .expect("notification outbox jobs");
+    assert_eq!(jobs.len(), 1);
+    assert_eq!(jobs[0].recipient_bare_jid(), &recipient);
+    assert_eq!(jobs[0].conversation_jid(), &room_jid);
+    assert_eq!(
+        jobs[0].class(),
+        crate::notification_outbox::NotificationClass::PersonalMention
+    );
+}
+
+#[tokio::test]
+async fn groupchat_notification_recovery_replays_frozen_mention_permissions() {
+    let state = create_test_websocket_state().await;
+    let recipient: BareJid = "charlie-recover-denied@example.com"
+        .parse()
+        .expect("recipient");
+    register_first_party_push_for_test(state.as_ref(), &recipient, "charlie-recover-denied-web")
+        .await;
+    let room_jid: BareJid = "groupchat-recovery-denied@muc.example.com"
+        .parse()
+        .expect("room jid");
+    let archive_stanza_id = waddle_xmpp_core::xep0359::StanzaId::new(
+        "groupchat-recovery-denied-archive",
+        jid::Jid::from(room_jid.clone()),
+    );
+    let sender_jid: jid::Jid = "groupchat-recovery-denied@muc.example.com/alice"
+        .parse()
+        .expect("sender jid");
+    let mut message = xmpp_parsers::message::Message::new(Some(jid::Jid::from(room_jid.clone())));
+    message.from = Some(sender_jid.clone());
+    message.id = Some("groupchat-recovery-denied-wire".to_string());
+    message.type_ = XmppMessageType::Groupchat;
+    message.bodies.insert(
+        String::new(),
+        xmpp_parsers::message::Body("charlie, this mention is policy-denied".to_string()),
+    );
+    message
+        .payloads
+        .push(waddle_xmpp::xep::build_reference_element(
+            &waddle_xmpp::xep::Reference::mention(format!("xmpp:{recipient}")),
+        ));
+    waddle_xmpp_core::xep0359::add_stanza_id(&mut message, &archive_stanza_id);
+    store_committed_dm_archive_for_notification(&state, &room_jid, &archive_stanza_id, &message)
+        .await;
+
+    state
+        .deps
+        .protocol
+        .inbox_storage
+        .insert_groupchat_notification_recovery(
+            waddle_xmpp::inbox::storage::GroupchatNotificationRecovery {
+                key: waddle_xmpp::inbox::storage::GroupchatNotificationRecoveryKey {
+                    recipient: recipient.clone(),
+                    room: room_jid,
+                    thread_id: None,
+                    archive_stanza_id,
+                },
+                sender_jid,
+                is_live_occupant: false,
+                room_members_only: false,
+                sender_role: waddle_xmpp::Role::Participant,
+                mention_permissions: waddle_xmpp::xep::MentionPermissions {
+                    individual: waddle_xmpp::xep::MentionPermission::Moderators,
+                    ..waddle_xmpp::xep::MentionPermissions::default()
+                },
+                occupant_id_bare_jids: vec![(
+                    waddle_xmpp::xep::OccupantId::new("room-stable-charlie"),
+                    recipient.clone(),
+                )],
+                created_at_ms: crate::time::now_ms(),
+            },
+        )
+        .await
+        .expect("insert recovery item");
+
+    assert_eq!(
+        crate::server::routes::interpret::reconcile_groupchat_notification_candidates(
+            state.as_ref(),
+            16,
+        )
+        .await,
+        1,
+        "policy-denied recovery should complete without enqueueing a candidate"
+    );
+    assert_eq!(
+        drain_notification_candidates_for_test(state.as_ref()).await,
+        0,
+        "recovery must use the frozen moderators-only policy instead of defaulting to participants"
     );
 }
 

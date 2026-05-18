@@ -1,3 +1,4 @@
+use super::muc_owner_config::{apply_muc_owner_config, MucOwnerConfigError};
 use super::*;
 use waddle_xmpp::muc::{build_destroy_notification, DestroyRequest, NS_MUC_OWNER};
 
@@ -198,11 +199,17 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
                 error = %error,
                 "Failed to apply MUC owner config"
             );
+            let iq_error = match error {
+                MucOwnerConfigError::BadRequest(text) => bad_request_iq_error(text),
+                MucOwnerConfigError::Internal(_) => {
+                    internal_server_error_iq_error("Internal server error.")
+                }
+            };
             return vec![build_iq_error_xml_typed(
                 id,
                 response_from,
                 response_to,
-                internal_server_error_iq_error("Internal server error."),
+                iq_error,
             )];
         }
 

@@ -1573,6 +1573,7 @@ async fn extension_room_message_dispatches_threaded_muc_message() {
             room_actor: None,
             room_moderated: false,
             room_members_only: false,
+            mention_permissions: waddle_xmpp::xep::MentionPermissions::default(),
             pin_permission: waddle_xmpp::muc::PinPermission::default(),
             dispatch_timestamp: 1777629203,
             recursion_depth: 0,

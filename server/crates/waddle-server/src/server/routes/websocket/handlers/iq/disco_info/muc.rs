@@ -70,6 +70,9 @@ pub(super) async fn handle_muc_disco_info<'a>(
             channel_type,
             snapshot.config.pin_permission.as_form_value(),
         ));
+        extensions.push(waddle_xmpp::xep::build_mentions_permissions_form(
+            &snapshot.config.mention_permissions,
+        ));
         let response = build_disco_info_response_with_extensions(
             req.request_iq,
             &identities,
@@ -84,35 +87,55 @@ pub(super) async fn handle_muc_disco_info<'a>(
         return None;
     }
 
-    if let Ok(Some(channel)) = get_managed_channel_for_room(state, &room_jid).await {
-        let identities = vec![Identity::muc_room(Some(&channel.name))];
-        let mut features = muc_room_features(
-            true,
-            true,
-            channel.channel_type == "announcement",
-            channel.channel_type == "forum",
-        );
-        features.extend(extension_features_for_disco(state));
-        let mut extensions =
-            room_space_metadata_extensions(state, &room_jid, channel.description.as_deref()).await;
-        let has_space_metadata = !extensions.is_empty();
-        if has_space_metadata {
-            features.push(Feature::spaces());
+    match get_managed_channel_for_room(state, &room_jid).await {
+        Ok(Some(channel)) => {
+            let identities = vec![Identity::muc_room(Some(&channel.name))];
+            let mut features = muc_room_features(
+                true,
+                true,
+                channel.channel_type == "announcement",
+                channel.channel_type == "forum",
+            );
+            features.extend(extension_features_for_disco(state));
+            let mut extensions =
+                room_space_metadata_extensions(state, &room_jid, channel.description.as_deref())
+                    .await;
+            let has_space_metadata = !extensions.is_empty();
+            if has_space_metadata {
+                features.push(Feature::spaces());
+            }
+            // #422: read the persisted pin policy from the channel record so
+            // dormant rooms advertise the truth, not the default.
+            extensions.push(build_room_metadata_form(
+                &channel.channel_type,
+                channel.pin_permission.as_form_value(),
+            ));
+            extensions.push(waddle_xmpp::xep::build_mentions_permissions_form(
+                &channel.mention_permissions,
+            ));
+            let response = build_disco_info_response_with_extensions(
+                req.request_iq,
+                &identities,
+                &features,
+                None,
+                &extensions,
+            );
+            return Some(DiscoInfoResponse::iq(response));
         }
-        // #422: read the persisted pin policy from the channel record so
-        // dormant rooms advertise the truth, not the default.
-        extensions.push(build_room_metadata_form(
-            &channel.channel_type,
-            channel.pin_permission.as_form_value(),
-        ));
-        let response = build_disco_info_response_with_extensions(
-            req.request_iq,
-            &identities,
-            &features,
-            None,
-            &extensions,
-        );
-        return Some(DiscoInfoResponse::iq(response));
+        Ok(None) => {}
+        Err(error) => {
+            warn!(
+                room = %room_jid,
+                error = ?error,
+                "Failed to load managed channel for dormant room disco#info"
+            );
+            return Some(DiscoInfoResponse::error(
+                req.id,
+                req.response_from,
+                req.response_to,
+                internal_server_error_iq_error("Internal server error."),
+            ));
+        }
     }
 
     let room_name = room_jid
@@ -122,6 +145,15 @@ pub(super) async fn handle_muc_disco_info<'a>(
     let identities = vec![Identity::muc_room(Some(&room_name))];
     let mut features = muc_room_features(false, false, false, false);
     features.extend(extension_features_for_disco(state));
-    let response = build_disco_info_response(req.request_iq, &identities, &features, None);
+    let extensions = vec![waddle_xmpp::xep::build_mentions_permissions_form(
+        &waddle_xmpp::xep::MentionPermissions::default(),
+    )];
+    let response = build_disco_info_response_with_extensions(
+        req.request_iq,
+        &identities,
+        &features,
+        None,
+        &extensions,
+    );
     Some(DiscoInfoResponse::iq(response))
 }

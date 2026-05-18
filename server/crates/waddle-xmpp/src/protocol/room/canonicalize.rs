@@ -194,6 +194,7 @@ mod tests {
             managed_room_forbidden: false,
             room_moderated: false,
             room_members_only: false,
+            mention_permissions: crate::xep::xep0513::MentionPermissions::default(),
             pin_permission: crate::muc::PinPermission::default(),
             id_gen: &id_gen,
             occupant_id_secret: &secret,

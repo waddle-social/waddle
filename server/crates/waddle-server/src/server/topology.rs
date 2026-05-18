@@ -218,6 +218,7 @@ async fn seed_initial_xmpp_topology(
                     moderated: channel_record.channel_type == "announcement",
                     forum: channel_record.channel_type == "forum",
                     pin_permission: channel_record.pin_permission,
+                    mention_permissions: channel_record.mention_permissions,
                     ..Default::default()
                 },
             })
