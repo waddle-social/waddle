@@ -493,6 +493,20 @@ async fn groupchat_notification_class(
         waddle_xmpp::xep::generate_occupant_id(owner, room, &state.deps.occupant_id_secret);
     let personal_mention = groupchat_mentions_owner(message, owner, owner_occupant_id.as_str());
     let channel_mention = groupchat_channel_mention_scope(message, room);
+    groupchat_notification_class_for_level(
+        level,
+        personal_mention,
+        channel_mention,
+        is_live_occupant,
+    )
+}
+
+fn groupchat_notification_class_for_level(
+    level: waddle_xmpp::xep::NotificationLevel,
+    personal_mention: bool,
+    channel_mention: Option<GroupchatChannelMentionScope>,
+    is_live_occupant: bool,
+) -> GroupchatNotificationClassDecision {
     let is_mention = personal_mention || channel_mention.is_some();
     if !crate::notification_settings_projection::PushDispatchDecision::evaluate(level, is_mention)
         .should_deliver()
@@ -592,4 +606,196 @@ fn xmpp_uri_bare_jid(uri: &str) -> Option<BareJid> {
         return None;
     }
     jid_part.parse::<Jid>().ok().map(|jid| jid.to_bare())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn bare(value: &str) -> BareJid {
+        value.parse().expect("valid bare JID")
+    }
+
+    fn message_with_mention(mention: waddle_xmpp::xep::ExplicitMention) -> Message {
+        let mut message = Message::new(None::<Jid>);
+        message
+            .payloads
+            .push(waddle_xmpp::xep::build_mention_element(&mention));
+        message
+    }
+
+    #[test]
+    fn xep0492_groupchat_push_policy_matrix() {
+        use crate::notification_outbox::NotificationClass;
+        use waddle_xmpp::xep::NotificationLevel;
+
+        let cases = [
+            (
+                NotificationLevel::Always,
+                false,
+                None,
+                false,
+                GroupchatNotificationClassDecision::Deliver(NotificationClass::NotifyAll),
+            ),
+            (
+                NotificationLevel::Always,
+                true,
+                None,
+                false,
+                GroupchatNotificationClassDecision::Deliver(NotificationClass::PersonalMention),
+            ),
+            (
+                NotificationLevel::Always,
+                false,
+                Some(GroupchatChannelMentionScope::All),
+                false,
+                GroupchatNotificationClassDecision::Deliver(NotificationClass::ChannelMention),
+            ),
+            (
+                NotificationLevel::Always,
+                false,
+                Some(GroupchatChannelMentionScope::Active),
+                false,
+                GroupchatNotificationClassDecision::Deliver(NotificationClass::NotifyAll),
+            ),
+            (
+                NotificationLevel::OnMention,
+                false,
+                None,
+                true,
+                GroupchatNotificationClassDecision::Suppress,
+            ),
+            (
+                NotificationLevel::OnMention,
+                true,
+                None,
+                false,
+                GroupchatNotificationClassDecision::Deliver(NotificationClass::PersonalMention),
+            ),
+            (
+                NotificationLevel::OnMention,
+                false,
+                Some(GroupchatChannelMentionScope::All),
+                false,
+                GroupchatNotificationClassDecision::Deliver(NotificationClass::ChannelMention),
+            ),
+            (
+                NotificationLevel::OnMention,
+                false,
+                Some(GroupchatChannelMentionScope::Active),
+                true,
+                GroupchatNotificationClassDecision::Deliver(
+                    NotificationClass::ActiveChannelMention,
+                ),
+            ),
+            (
+                NotificationLevel::OnMention,
+                false,
+                Some(GroupchatChannelMentionScope::Active),
+                false,
+                GroupchatNotificationClassDecision::Suppress,
+            ),
+            (
+                NotificationLevel::Never,
+                true,
+                None,
+                true,
+                GroupchatNotificationClassDecision::Suppress,
+            ),
+            (
+                NotificationLevel::Never,
+                false,
+                Some(GroupchatChannelMentionScope::All),
+                true,
+                GroupchatNotificationClassDecision::Suppress,
+            ),
+            (
+                NotificationLevel::Never,
+                false,
+                None,
+                false,
+                GroupchatNotificationClassDecision::Suppress,
+            ),
+        ];
+
+        for (level, personal_mention, channel_mention, is_live_occupant, expected) in cases {
+            assert_eq!(
+                groupchat_notification_class_for_level(
+                    level,
+                    personal_mention,
+                    channel_mention,
+                    is_live_occupant,
+                ),
+                expected,
+                "unexpected groupchat XEP-0492 decision for {level:?}, personal_mention={personal_mention}, channel_mention={channel_mention:?}, is_live_occupant={is_live_occupant}"
+            );
+        }
+    }
+
+    #[test]
+    fn xep0513_groupchat_personal_mentions_match_jid_or_occupant_id_and_respect_noping() {
+        let owner = bare("charlie@example.com");
+        let occupant_id = "room-stable-charlie";
+
+        assert!(groupchat_mentions_owner(
+            &message_with_mention(waddle_xmpp::xep::ExplicitMention::jid(owner.clone())),
+            &owner,
+            occupant_id,
+        ));
+        assert!(groupchat_mentions_owner(
+            &message_with_mention(waddle_xmpp::xep::ExplicitMention::occupant_id(occupant_id)),
+            &owner,
+            occupant_id,
+        ));
+
+        let mut noping = waddle_xmpp::xep::ExplicitMention::occupant_id(occupant_id);
+        noping.noping = true;
+        assert!(!groupchat_mentions_owner(
+            &message_with_mention(noping),
+            &owner,
+            occupant_id,
+        ));
+
+        assert!(!groupchat_mentions_owner(
+            &message_with_mention(waddle_xmpp::xep::ExplicitMention::occupant_id(
+                "somebody-else",
+            )),
+            &owner,
+            occupant_id,
+        ));
+    }
+
+    #[test]
+    fn xep0513_groupchat_channel_mentions_are_room_scoped_and_active_aware() {
+        let room = bare("team@muc.example.com");
+
+        assert_eq!(
+            groupchat_channel_mention_scope(
+                &message_with_mention(waddle_xmpp::xep::ExplicitMention::channel()),
+                &room,
+            ),
+            Some(GroupchatChannelMentionScope::All)
+        );
+
+        let mut active = waddle_xmpp::xep::ExplicitMention::active_channel();
+        active.uri = Some("xmpp:team@muc.example.com".to_string());
+        assert_eq!(
+            groupchat_channel_mention_scope(&message_with_mention(active), &room),
+            Some(GroupchatChannelMentionScope::Active)
+        );
+
+        let mut foreign = waddle_xmpp::xep::ExplicitMention::channel();
+        foreign.uri = Some("xmpp:other@muc.example.com".to_string());
+        assert_eq!(
+            groupchat_channel_mention_scope(&message_with_mention(foreign), &room),
+            None
+        );
+
+        let mut noping = waddle_xmpp::xep::ExplicitMention::channel();
+        noping.noping = true;
+        assert_eq!(
+            groupchat_channel_mention_scope(&message_with_mention(noping), &room),
+            None
+        );
+    }
 }
