@@ -74,6 +74,34 @@ async fn round_trip_session_preserves_every_field() {
 }
 
 #[tokio::test]
+async fn upsert_session_persists_with_all_nullable_bigint_fields_unset() {
+    // Regression for the prod incident where every SM detach failed on
+    // Postgres because `replay_gap_through`/`max_resume_time` came in as
+    // `None`. The bind path used to fold every `None` onto
+    // `Value::Null`, which the Postgres binder typed as TEXT — rejected
+    // by the `bigint` column. SQLite is type-loose enough not to trip
+    // on the bug directly, but exercising the all-None path here at
+    // least pins the API surface: writes succeed and reads return
+    // `None` round-tripped to `None`.
+    let storage = DatabaseSmPersistence::open(None).await.unwrap();
+    let mut s = fixture_session("stream-null-fields");
+    s.replay_gap_through = None;
+    s.max_resume_time = None;
+    s.presence_show = None;
+    s.presence_status = None;
+    storage.upsert_session(s.clone()).await.unwrap();
+    let loaded = storage
+        .get_session(&SmSessionId::new("stream-null-fields"))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(loaded.replay_gap_through, None);
+    assert_eq!(loaded.max_resume_time, None);
+    assert_eq!(loaded.presence_show, None);
+    assert_eq!(loaded.presence_status, None);
+}
+
+#[tokio::test]
 async fn upsert_replaces_existing_session() {
     let storage = DatabaseSmPersistence::open(None).await.unwrap();
     let mut s = fixture_session("stream-1");

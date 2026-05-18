@@ -270,8 +270,13 @@ fn bind_sqlite<'q>(
     query: sqlx::query::Query<'q, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'q>>,
     value: Value,
 ) -> sqlx::query::Query<'q, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'q>> {
+    // SQLite parameters are dynamically typed — every NULL binds the
+    // same regardless of declared column type, so we collapse all
+    // null variants onto a single bind.
     match value {
-        Value::Null => query.bind(Option::<String>::None),
+        Value::Null | Value::NullInteger | Value::NullReal | Value::NullText | Value::NullBlob => {
+            query.bind(Option::<String>::None)
+        }
         Value::Integer(v) => query.bind(v),
         Value::Real(v) => query.bind(v),
         Value::Text(v) => query.bind(v),
@@ -283,8 +288,18 @@ fn bind_postgres<'q>(
     query: sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments>,
     value: Value,
 ) -> sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments> {
+    // Postgres types every parameter by its bound Rust type. Binding
+    // `Option::<String>::None` against a `bigint` column is rejected
+    // with "expression is of type text", so each typed NULL must bind
+    // through an `Option<T>::None` whose `T` matches the column's SQL
+    // type. `Value::Null` keeps the legacy text-null behaviour for
+    // back-compat with callers that construct it directly without
+    // going through `From<Option<T>>`.
     match value {
-        Value::Null => query.bind(Option::<String>::None),
+        Value::Null | Value::NullText => query.bind(Option::<String>::None),
+        Value::NullInteger => query.bind(Option::<i64>::None),
+        Value::NullReal => query.bind(Option::<f64>::None),
+        Value::NullBlob => query.bind(Option::<Vec<u8>>::None),
         Value::Integer(v) => query.bind(v),
         Value::Real(v) => query.bind(v),
         Value::Text(v) => query.bind(v),
