@@ -35,8 +35,8 @@ use waddle_xmpp::muc::{
 };
 use waddle_xmpp::registry::ConnectionRegistry;
 use waddle_xmpp::xep::xep0004::{DataForm, Field, FieldType, FormType};
-use waddle_xmpp::{Affiliation, Role, Stanza};
 use waddle_xmpp::XmppError;
+use waddle_xmpp::{Affiliation, Role, Stanza};
 
 use crate::admin::is_community_owner;
 use crate::server::AppState;
