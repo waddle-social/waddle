@@ -114,7 +114,7 @@ async fn handle(
     xmpp_domain: String,
 ) -> CommandResult {
     let caller_bare = bare_from_jid(&ctx.from);
-    if !caller_is_owner(&caller_bare, &app_state) {
+    if !caller_is_owner(&caller_bare, &app_state).await {
         return CommandResult::Error(XmppError::forbidden(Some(
             "Admin commands require the community owner role".to_string(),
         )));
@@ -145,10 +145,11 @@ async fn handle(
     }
 }
 
-fn caller_is_owner(caller: &Option<BareJid>, app_state: &AppState) -> bool {
-    caller
-        .as_ref()
-        .is_some_and(|jid| is_community_owner(app_state, jid))
+async fn caller_is_owner(caller: &Option<BareJid>, app_state: &AppState) -> bool {
+    let Some(jid) = caller.as_ref() else {
+        return false;
+    };
+    is_community_owner(app_state, jid).await
 }
 
 fn bare_from_jid(jid: &Jid) -> Option<BareJid> {
