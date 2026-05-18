@@ -124,29 +124,57 @@ pub(crate) async fn managed_channel_permission_allowed(
     Ok(false)
 }
 
+/// Derive the requester's server-level [`SpaceAffiliation`] from the
+/// same dynamic community-owner signal that gates every admin command.
+///
+/// After #696 the admin ACL is "PubSub-Owner row on the Spaces JID, or
+/// bootstrap localpart from `WADDLE_SERVER_OWNER_LOCALPARTS`" — see
+/// [`crate::admin::is_community_owner`]. This helper drives the
+/// `waddle#server_affiliation` field emitted by server-targeted
+/// `disco#info` (see [`super::disco_info::server_info`]) so the chat
+/// client's `canManageCommunity` UI affordance flips on the same edge
+/// as the ACL. Previously the disco field was driven off the Zanzibar
+/// permission graph, which could disagree with the PubSub affiliation
+/// table for users promoted dynamically.
+///
+/// Returns:
+/// - `Some(Owner)` if [`is_community_owner`] returns `true` for the
+///   session's bare JID,
+/// - `None` otherwise (including unauthenticated callers and sessions
+///   whose JID cannot be derived — the disco field is then omitted
+///   rather than asserting a tier that wasn't earned).
+///
+/// The intermediate Zanzibar-derived tiers (`Publisher`, `Member`)
+/// previously surfaced here had no consumer on the chat side; the
+/// Zanzibar graph itself remains the authority for per-channel and
+/// per-space authorization via [`permission_allowed`] and
+/// [`managed_channel_permission_allowed`].
+///
+/// [`is_community_owner`]: crate::admin::is_community_owner
 pub(super) async fn server_affiliation_for_requester(
     state: &WebSocketState,
     session: Option<&Session>,
 ) -> Option<SpaceAffiliation> {
-    if server_permission_allowed(state, session, Permission::Owner)
-        .await
-        .unwrap_or(false)
-    {
-        return Some(SpaceAffiliation::Owner);
+    let session = session?;
+    let bare_jid = session_bare_jid(state, session)?;
+    if crate::admin::is_community_owner(&state.deps.app_state, &bare_jid).await {
+        Some(SpaceAffiliation::Owner)
+    } else {
+        None
     }
-    if server_permission_allowed(state, session, Permission::Admin)
-        .await
-        .unwrap_or(false)
-    {
-        return Some(SpaceAffiliation::Publisher);
-    }
-    if server_permission_allowed(state, session, Permission::Member)
-        .await
-        .unwrap_or(false)
-    {
-        return Some(SpaceAffiliation::Member);
-    }
-    None
+}
+
+/// Build the session's bare JID from `xmpp_localpart` + the deployment's
+/// configured `xmpp_domain`. Returns `None` if the localpart is missing
+/// or the combination fails to parse as a [`BareJid`] — both cases are
+/// treated as "no derivable identity" rather than panicking, because
+/// this helper feeds disco#info responses on a hot path.
+fn session_bare_jid(state: &WebSocketState, session: &Session) -> Option<BareJid> {
+    let raw = format!(
+        "{}@{}",
+        session.xmpp_localpart, state.deps.auth_state.xmpp_domain
+    );
+    raw.parse().ok()
 }
 
 pub(super) async fn space_affiliation_for_requester(
