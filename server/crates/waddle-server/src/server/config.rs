@@ -29,6 +29,12 @@ pub struct XmppConfig {
     /// When unset, the store falls back to in-memory SQLite — suitable
     /// for tests only.
     pub spaces_metadata_database_url: Option<String>,
+    /// Channel-space-link database URL — prefers dedicated XMPP DSN,
+    /// otherwise the main runtime DSN. Resolution order:
+    /// `WADDLE_XMPP_CHANNEL_SPACE_LINKS_DATABASE_URL` →
+    /// `WADDLE_DATABASE_URL`. When unset, the store falls back to
+    /// in-memory SQLite — suitable for tests only.
+    pub channel_space_links_database_url: Option<String>,
     /// XEP-0160 offline-message (`pending_delivery`) database URL —
     /// prefers dedicated XMPP DSN, otherwise the main runtime DSN.
     /// Resolution order (matches `resolve_xmpp_database_url`):
@@ -83,6 +89,7 @@ impl Default for XmppConfig {
             mam_database_url: None,
             inbox_database_url: None,
             spaces_metadata_database_url: None,
+            channel_space_links_database_url: None,
             pending_delivery_database_url: None,
             sm_database_url: None,
             pubsub_database_url: None,
@@ -142,6 +149,8 @@ impl XmppConfig {
         let inbox_database_url = resolve_xmpp_database_url("WADDLE_XMPP_INBOX_DATABASE_URL");
         let spaces_metadata_database_url =
             resolve_xmpp_database_url("WADDLE_XMPP_SPACES_METADATA_DATABASE_URL");
+        let channel_space_links_database_url =
+            resolve_xmpp_database_url("WADDLE_XMPP_CHANNEL_SPACE_LINKS_DATABASE_URL");
         let pending_delivery_database_url =
             resolve_xmpp_database_url("WADDLE_XMPP_PENDING_DELIVERY_DATABASE_URL");
         let sm_database_url = resolve_xmpp_database_url("WADDLE_XMPP_SM_DATABASE_URL");
@@ -173,6 +182,7 @@ impl XmppConfig {
             mam_database_url,
             inbox_database_url,
             spaces_metadata_database_url,
+            channel_space_links_database_url,
             pending_delivery_database_url,
             sm_database_url,
             pubsub_database_url,

@@ -2,6 +2,7 @@
 
 pub mod admin;
 pub mod auth;
+pub mod channel_space_links;
 pub mod config;
 pub mod db;
 pub mod inbox;
