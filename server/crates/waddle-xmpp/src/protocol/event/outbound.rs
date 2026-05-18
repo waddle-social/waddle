@@ -304,6 +304,32 @@ pub enum OutboundEvent {
         kind: CarbonKind,
         exclude: FullJid,
     },
+    /// XEP-0333 §3 — the sender displayed a message up to
+    /// `displayed_message_id` in a MUC room. The interpreter resolves
+    /// the message's thread via MAM and clears the matching inbox row(s)
+    /// — both the channel-level row and the thread-level row when the
+    /// displayed message belongs to a thread.
+    ///
+    /// Emitted by the room handler chain's displayed-marker handler at
+    /// most once per dispatch — for the **sender only**, since a
+    /// displayed marker reports the sender's own read state. Reflected
+    /// markers received as recipients do NOT trigger a mark-read here:
+    /// that would cross-clear other users' inboxes.
+    ///
+    /// `room` is the MUC bare JID (where the displayed message was
+    /// archived); `owner` is the sender's bare JID (whose inbox is
+    /// being mark-read); `displayed_message_id` is the wire id
+    /// referenced by the `<displayed id='…'/>` element. The interpreter
+    /// looks it up in `MamStorage` keyed by `room` to derive the
+    /// thread.
+    MarkInboxReadFromDisplayed {
+        /// Sender's bare JID — whose inbox is being mark-read.
+        owner: BareJid,
+        /// Room bare JID — the MAM archive holding the displayed message.
+        room: BareJid,
+        /// Wire id from `<displayed id='…' xmlns='urn:xmpp:chat-markers:0'/>`.
+        displayed_message_id: String,
+    },
 
     // -------------------------------------------------------------------
     // Async delegations (two-phase callback pattern — see plan §Design

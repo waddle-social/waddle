@@ -352,6 +352,9 @@ onUnmounted(() => window.removeEventListener("popstate", refreshAdminPanelFromUr
       />
       <ThreadsView
         v-else-if="ui.activePage.value === 'threads'"
+        :channels="waddles.sortedChannels.value"
+        :on-select-thread="onSelectThread"
+        @open-nav="ui.showMobileNav.value = true"
       />
       <UserSettingsPage
         v-else-if="ui.activePage.value === 'settings' && connectionStore.session"

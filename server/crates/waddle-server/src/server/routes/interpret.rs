@@ -136,6 +136,7 @@ mod deps;
 mod direct_archive;
 mod direct_inbox;
 mod direct_retraction;
+mod displayed_marker;
 mod groupchat_archive;
 mod groupchat_inbox;
 mod groupchat_validation;
@@ -157,6 +158,7 @@ use carbons::send_carbons;
 use direct_archive::archive_direct;
 use direct_inbox::project_direct_inbox;
 use direct_retraction::apply_retraction_tombstone;
+use displayed_marker::mark_inbox_read_from_displayed;
 use groupchat_archive::{
     apply_groupchat_retraction_tombstone, archive_groupchat_message, project_groupchat_inbox,
 };
@@ -395,6 +397,13 @@ async fn interpret_with_depth(
                 exclude,
             } => {
                 send_carbons(registry, deps, owner, message, kind, exclude).await;
+            }
+            OutboundEvent::MarkInboxReadFromDisplayed {
+                owner,
+                room,
+                displayed_message_id,
+            } => {
+                mark_inbox_read_from_displayed(deps, owner, room, displayed_message_id).await;
             }
             OutboundEvent::LookupArchivedMessage {
                 id,

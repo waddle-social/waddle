@@ -1,10 +1,15 @@
 use super::*;
 use crate::db::{DatabaseConfig, DatabasePool, MigrationRunner, PoolConfig};
 use crate::permissions::PermissionActor;
+use crate::server::AppStateDeps;
 use axum::body::Body;
 use axum::http::Request;
 use http_body_util::BodyExt;
+use std::str::FromStr;
 use tower::ServiceExt;
+use waddle_xmpp::muc::room_registry_actor::RoomRegistryActor;
+use waddle_xmpp::pubsub::InMemoryPubSubStorage;
+use waddle_xmpp::xep::xep0421::OccupantIdSecret;
 
 async fn create_test_upload_state() -> (Arc<UploadState>, std::path::PathBuf) {
     let config = DatabaseConfig::default();
@@ -26,14 +31,29 @@ async fn create_test_upload_state() -> (Arc<UploadState>, std::path::PathBuf) {
     let permission_actor = kameo::spawn(PermissionActor::new_for_tests(Arc::new(
         db_pool.global().clone(),
     )));
-    let app_state = Arc::new(AppState::new_with_deps(
-        Arc::clone(&db_pool),
-        blob_storage,
-        Arc::new(waddle_xmpp::inbox::storage::InMemoryInboxStorage::new()),
-        Arc::new(crate::spaces_metadata::InMemorySpacesMetadataStore::new()),
-        permission_actor,
-        Arc::from(Vec::<jid::BareJid>::new()),
+    let muc_domain = jid::DomainPart::from_str("muc.example.com").expect("muc domain parses");
+    let occupant_id_secret =
+        OccupantIdSecret::new(b"test-occupant-id-secret-32-bytes-long".to_vec())
+            .expect("test occupant-id secret meets length floor");
+    let room_registry = kameo::spawn(RoomRegistryActor::new(
+        muc_domain.to_string(),
+        occupant_id_secret,
     ));
+    let app_state = Arc::new(AppState::new_with_deps(AppStateDeps {
+        db_pool: Arc::clone(&db_pool),
+        blob_storage,
+        inbox_storage: Arc::new(waddle_xmpp::inbox::storage::InMemoryInboxStorage::new()),
+        spaces_metadata_store: Arc::new(crate::spaces_metadata::InMemorySpacesMetadataStore::new()),
+        channel_space_link_store: Arc::new(
+            crate::channel_space_links::InMemoryChannelSpaceLinkStore::new(),
+        ),
+        pubsub_storage: Arc::new(InMemoryPubSubStorage::new()),
+        room_registry,
+        spaces_jid: "spaces.example.com".parse().expect("spaces JID parses"),
+        muc_domain,
+        permission_actor,
+        server_owner_jids: Arc::from(Vec::<jid::BareJid>::new()),
+    }));
 
     (Arc::new(UploadState::new(app_state)), upload_dir)
 }

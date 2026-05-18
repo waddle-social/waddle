@@ -36,6 +36,7 @@ pub mod archive;
 pub mod canonicalize;
 pub mod context;
 pub mod dispatch;
+pub mod displayed_marker;
 pub mod errors;
 pub mod inbox;
 pub mod occupancy_validation;
@@ -58,6 +59,7 @@ pub fn register_default_room_handlers(dispatcher: &mut RoomDispatcher) {
     dispatcher.register(Arc::new(subject::MucSubjectHandler));
     dispatcher.register(Arc::new(archive::MucArchiveHandler));
     dispatcher.register(Arc::new(inbox::MucInboxHandler));
+    dispatcher.register(Arc::new(displayed_marker::MucDisplayedMarkerHandler));
     dispatcher.register(Arc::new(reflector::ReflectorHandler));
 }
 
@@ -82,6 +84,7 @@ pub fn register_room_pipeline_handlers(dispatcher: &mut RoomDispatcher) {
     dispatcher.register(Arc::new(subject::MucSubjectHandler));
     dispatcher.register(Arc::new(archive::MucArchiveHandler));
     dispatcher.register(Arc::new(inbox::MucInboxHandler));
+    dispatcher.register(Arc::new(displayed_marker::MucDisplayedMarkerHandler));
     dispatcher.register(Arc::new(reflector::ReflectorHandler));
 }
 
@@ -99,15 +102,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_dispatcher_registers_seven_handlers() {
+    fn default_dispatcher_registers_eight_handlers() {
         let d = default_room_dispatcher();
-        assert_eq!(d.handler_count(), 7);
+        assert_eq!(d.handler_count(), 8);
     }
 
     #[test]
-    fn pipeline_dispatcher_registers_six_handlers() {
+    fn pipeline_dispatcher_registers_seven_handlers() {
         let d = default_room_pipeline_dispatcher();
-        assert_eq!(d.handler_count(), 6);
+        assert_eq!(d.handler_count(), 7);
     }
 
     #[test]

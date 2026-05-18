@@ -3,6 +3,21 @@ export {
   RoomMemberListUnavailableError,
 } from "./client";
 export type { AdminUserEntry, AdminUsersPage } from "./client";
+// Admin V2 — types re-exported for consumption by SpacesPanel,
+// ChannelsPanel, and their detail drawers. The `*Ref` /
+// `*SetRoleResult` / `*SetAffiliationResult` / `*KickResult` shapes
+// are not re-exported because they only ever flow back to the panel
+// via the wrapper return type and never need to be named at a
+// component boundary.
+export type {
+  WasmAdminChannelAffiliationEntry,
+  WasmAdminChannelListEntry,
+  WasmAdminChannelOccupantEntry,
+  WasmAdminChannelsListResult,
+  WasmAdminSpaceListEntry,
+  WasmAdminSpaceMemberEntry,
+  WasmAdminSpacesListResult,
+} from "./wasm-types";
 export {
   barePeerJid,
   jidDomain,

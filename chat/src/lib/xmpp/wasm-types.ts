@@ -342,3 +342,110 @@ export interface WasmSendOptions {
   markup_spans?: WasmMarkupSpan[];
   references?: WasmReference[];
 }
+
+// ─── Admin V2 — Spaces ────────────────────────────────────────────────
+//
+// TypeScript mirrors of the typed Result structs in
+// `server/crates/waddle-xmpp-client-wasm/src/client_admin_v2.rs`.
+// snake_case matches the serde wire form. The Args structs are not
+// re-exported here because `BrowserXmppClient` wrappers expose
+// camelCase parameter objects and translate to snake_case before
+// invoking wasm.
+
+export interface WasmAdminSpaceListEntry {
+  space_jid: string;
+  name: string;
+  description?: string | null;
+  icon_url?: string | null;
+  channel_count: number;
+  member_count: number;
+}
+
+export interface WasmAdminSpacesListResult {
+  entries: WasmAdminSpaceListEntry[];
+  next_cursor?: string | null;
+}
+
+export interface WasmAdminSpaceRef {
+  space_jid: string;
+  name: string;
+  description?: string | null;
+  icon_url?: string | null;
+}
+
+export interface WasmAdminSpaceMemberEntry {
+  jid: string;
+  /** `owner` | `admin` | `member` | `none`. */
+  role: string;
+}
+
+export interface WasmAdminSpacesMembersResult {
+  entries: WasmAdminSpaceMemberEntry[];
+  next_cursor?: string | null;
+}
+
+export interface WasmAdminSpacesSetRoleResult {
+  member_jid: string;
+  role: string;
+}
+
+// ─── Admin V2 — Channels ──────────────────────────────────────────────
+
+export interface WasmAdminChannelListEntry {
+  channel_jid: string;
+  name: string;
+  topic?: string | null;
+  is_public: boolean;
+  members_only: boolean;
+  occupant_count: number;
+  owner_count: number;
+  admin_count: number;
+  member_count: number;
+  outcast_count: number;
+}
+
+export interface WasmAdminChannelsListResult {
+  entries: WasmAdminChannelListEntry[];
+  next_cursor?: string | null;
+}
+
+export interface WasmAdminChannelRef {
+  channel_jid: string;
+  name: string;
+  topic?: string | null;
+  is_public: boolean;
+}
+
+export interface WasmAdminChannelOccupantEntry {
+  nick: string;
+  real_jid: string;
+  /** `moderator` | `participant` | `visitor` | `none`. */
+  role: string;
+  /** `owner` | `admin` | `member` | `none` | `outcast`. */
+  affiliation: string;
+}
+
+export interface WasmAdminChannelsOccupantsResult {
+  entries: WasmAdminChannelOccupantEntry[];
+  next_cursor?: string | null;
+}
+
+export interface WasmAdminChannelAffiliationEntry {
+  jid: string;
+  affiliation: string;
+  reason?: string | null;
+}
+
+export interface WasmAdminChannelsAffiliationsResult {
+  entries: WasmAdminChannelAffiliationEntry[];
+  next_cursor?: string | null;
+}
+
+export interface WasmAdminChannelsSetAffiliationResult {
+  member_jid: string;
+  affiliation: string;
+}
+
+export interface WasmAdminChannelsKickResult {
+  occupant_jid: string;
+}

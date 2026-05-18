@@ -19,8 +19,14 @@ interface RouteState {
   adminPanel: AdminPanel | null;
 }
 
-/** Slugs the admin layout understands. V1 only implements `users`. */
-export type AdminPanel = "users" | "spaces" | "audit" | "push-health" | "settings";
+/** Slugs the admin layout understands. */
+export type AdminPanel =
+  | "users"
+  | "spaces"
+  | "channels"
+  | "audit"
+  | "push-health"
+  | "settings";
 
 const SETTINGS_PATH = "/settings";
 const ADMIN_PATH_PREFIX = "/admin";
@@ -34,6 +40,7 @@ function parseAdminPanel(slug: string | undefined): AdminPanel | null {
       return DEFAULT_ADMIN_PANEL;
     case "users":
     case "spaces":
+    case "channels":
     case "audit":
     case "push-health":
     case "settings":
