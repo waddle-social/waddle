@@ -12,8 +12,8 @@
 //! the fan-out for no-op requests.
 //!
 //! They also pin the wire shape of the resulting headline push so
-//! clients can parse the unread=0 flip with the same `<conversation>`
-//! decoder they already use for `build_inbox_query_result` entries.
+//! clients can parse the unread=0 flip with the same `<entry/>`
+//! decoder they use for streamed XEP-0430 query results.
 
 use jid::{BareJid, Jid};
 use waddle_xmpp::inbox::storage::{InMemoryInboxStorage, InboxStorage};
@@ -151,7 +151,7 @@ fn build_inbox_push_emits_headline_with_inbox_namespace_payload() {
         .expect("inbox-namespaced payload present");
     assert_eq!(
         payload.name(),
-        "conversation",
-        "the headline carries a <conversation> element — same shape as query-result rows"
+        "entry",
+        "the headline carries an <entry/> element — same shape as XEP-0430 streamed query results"
     );
 }

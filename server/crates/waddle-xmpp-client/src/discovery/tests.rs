@@ -461,52 +461,6 @@ fn build_enable_push_iq_includes_secret_publish_options_for_non_empty_token() {
 }
 
 #[test]
-fn build_and_parse_waddle_inbox_round_trip() {
-    let iq = build_waddle_inbox_query_iq(
-        "me@example.com",
-        &WaddleInboxQuery {
-            since: Some(1700000),
-            only_unread: true,
-            room: Some("room@muc.example.com".to_string()),
-            threads: true,
-        },
-    );
-    let query = iq.get_child("query", WADDLE_INBOX_NS).expect("inbox query");
-    assert_eq!(query.attr("since"), Some("1700000"));
-    assert_eq!(query.attr("only-unread"), Some("true"));
-    assert_eq!(query.attr("room"), Some("room@muc.example.com"));
-    assert_eq!(query.attr("threads"), Some("true"));
-
-    let result = Element::builder("iq", CLIENT_NS)
-        .attr("type", "result")
-        .append(
-            Element::builder("query", WADDLE_INBOX_NS)
-                .attr("total-unread", "3")
-                .append(
-                    Element::builder("conversation", WADDLE_INBOX_NS)
-                        .attr("partner", "alice@example.com")
-                        .attr("kind", "direct")
-                        .attr("last-stanza-id", "sid-1")
-                        .attr("last-updated", "1700001")
-                        .attr("unread", "2")
-                        .append(
-                            Element::builder("preview", WADDLE_INBOX_NS)
-                                .append("hi there")
-                                .build(),
-                        )
-                        .build(),
-                )
-                .build(),
-        )
-        .build();
-    let parsed = parse_waddle_inbox_result(&result).expect("parse inbox result");
-    assert_eq!(parsed.total_unread, Some(3));
-    assert_eq!(parsed.conversations.len(), 1);
-    assert_eq!(parsed.conversations[0].partner, "alice@example.com");
-    assert_eq!(parsed.conversations[0].preview.as_deref(), Some("hi there"));
-}
-
-#[test]
 fn build_waddle_inbox_mark_read_supports_thread() {
     let iq = build_waddle_inbox_mark_read_iq(
         "me@example.com",
@@ -647,15 +601,4 @@ fn build_and_parse_muc_admin_affiliation_queries() {
     assert_eq!(parsed[0].jid.as_deref(), Some("alice@example.com"));
     assert_eq!(parsed[0].affiliation, Some(MucAffiliation::Admin));
     assert_eq!(parsed[0].reason.as_deref(), Some("promoted"));
-}
-
-#[test]
-fn parse_inbox_result_returns_none_for_plain_message() {
-    let message = Element::builder("message", CLIENT_NS)
-        .attr("from", "alice@example.com")
-        .attr("to", "me@example.com")
-        .append(Element::builder("body", CLIENT_NS).append("Hello!").build())
-        .build();
-
-    assert!(parse_inbox_result(&message).is_none());
 }

@@ -113,11 +113,14 @@ pub fn groupchat_thread_entry(
     entry
 }
 
+/// Apply XEP-0430 query filters to a list of inbox entries.
+///
+/// XEP-0430 §"Querying" defines `unread-only` as the only protocol-level
+/// filter on the result set (the `messages` knob controls payload shape,
+/// not row selection). Entries come back newest-first with a stable
+/// tiebreak on partner JID so RSM cursors remain deterministic.
 pub fn filter_query(mut entries: Vec<InboxEntry>, query: &InboxQuery) -> Vec<InboxEntry> {
-    if let Some(since) = query.since {
-        entries.retain(|entry| entry.last_updated >= since);
-    }
-    if query.only_unread {
+    if query.unread_only {
         entries.retain(|entry| entry.unread > 0);
     }
     entries.sort_by(|left, right| {
@@ -191,24 +194,24 @@ mod tests {
         let unread_only = filter_query(
             entries.clone(),
             &InboxQuery {
-                since: None,
-                only_unread: true,
+                unread_only: true,
                 ..Default::default()
             },
         );
         assert_eq!(unread_only.len(), 2);
         assert_eq!(unread_only[0].partner, jid("c@example.com"));
 
-        let since = filter_query(
+        let all = filter_query(
             entries,
             &InboxQuery {
-                since: Some(20),
-                only_unread: false,
+                unread_only: false,
                 ..Default::default()
             },
         );
-        assert_eq!(since.len(), 2);
-        assert_eq!(since[0].partner, jid("c@example.com"));
-        assert_eq!(since[1].partner, jid("b@example.com"));
+        assert_eq!(all.len(), 3);
+        // newest-first
+        assert_eq!(all[0].partner, jid("c@example.com"));
+        assert_eq!(all[1].partner, jid("b@example.com"));
+        assert_eq!(all[2].partner, jid("a@example.com"));
     }
 }

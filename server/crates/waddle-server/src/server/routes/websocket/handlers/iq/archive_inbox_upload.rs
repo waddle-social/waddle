@@ -141,154 +141,11 @@ pub(super) async fn handle_archive_inbox_upload_iq(
     }
 
     if is_inbox_iq(iq) {
-        let request_iq = &iq;
-        let Some(user_jid) = phase.bound_jid().map(|jid| jid.to_bare()) else {
-            return vec![build_iq_error_xml_typed(
-                id,
-                None,
-                None,
-                not_authorized_iq_error("Authentication required."),
-            )];
-        };
+        return handle_inbox_query_iq(iq, id, state, phase).await;
+    }
 
-        match &request_iq.payload {
-            xmpp_parsers::iq::IqType::Get(_) => {
-                let query = match parse_inbox_query(request_iq) {
-                    Ok(query) => query,
-                    Err(error) => {
-                        warn!(error = %error, "Invalid inbox query");
-                        return vec![build_iq_error_xml_typed(
-                            id,
-                            None,
-                            None,
-                            bad_request_iq_error("Malformed IQ payload."),
-                        )];
-                    }
-                };
-                let entries = if query.threads {
-                    if let Some(room) = &query.room {
-                        match state
-                            .deps
-                            .protocol
-                            .inbox_storage
-                            .list_threads(&user_jid, room)
-                            .await
-                        {
-                            Ok(entries) => entries,
-                            Err(error) => {
-                                warn!(error = %error, jid = %user_jid, "Failed to list thread inbox");
-                                return vec![build_iq_error_xml_typed(
-                                    id,
-                                    None,
-                                    None,
-                                    internal_server_error_iq_error("Internal server error."),
-                                )];
-                            }
-                        }
-                    } else {
-                        return vec![build_iq_error_xml_typed(
-                            id,
-                            None,
-                            None,
-                            bad_request_iq_error("Malformed IQ payload."),
-                        )];
-                    }
-                } else {
-                    match state.deps.protocol.inbox_storage.list(&user_jid).await {
-                        Ok(entries) => entries,
-                        Err(error) => {
-                            warn!(error = %error, jid = %user_jid, "Failed to list inbox");
-                            return vec![build_iq_error_xml_typed(
-                                id,
-                                None,
-                                None,
-                                internal_server_error_iq_error("Internal server error."),
-                            )];
-                        }
-                    }
-                };
-                let total_unread = match state
-                    .deps
-                    .protocol
-                    .inbox_storage
-                    .total_unread(&user_jid)
-                    .await
-                {
-                    Ok(total_unread) => total_unread,
-                    Err(error) => {
-                        warn!(error = %error, jid = %user_jid, "Failed to count inbox unread");
-                        return vec![build_iq_error_xml_typed(
-                            id,
-                            None,
-                            None,
-                            internal_server_error_iq_error("Internal server error."),
-                        )];
-                    }
-                };
-                let response = build_inbox_query_result(
-                    request_iq,
-                    &filter_query(entries, &query),
-                    total_unread,
-                );
-                return vec![iq_to_xml(response)];
-            }
-            xmpp_parsers::iq::IqType::Set(_) => {
-                let mark_read = match parse_mark_read(request_iq) {
-                    Ok(mark_read) => mark_read,
-                    Err(error) => {
-                        warn!(error = %error, "Invalid inbox mark-read");
-                        return vec![build_iq_error_xml_typed(
-                            id,
-                            None,
-                            None,
-                            bad_request_iq_error("Malformed IQ payload."),
-                        )];
-                    }
-                };
-                let updated = match state
-                    .deps
-                    .protocol
-                    .inbox_storage
-                    .mark_read(
-                        &user_jid,
-                        &mark_read.partner,
-                        mark_read.thread_id.as_deref(),
-                    )
-                    .await
-                {
-                    Ok(updated) => updated,
-                    Err(error) => {
-                        warn!(error = %error, jid = %user_jid, partner = %mark_read.partner, "Failed to mark inbox read");
-                        return vec![build_iq_error_xml_typed(
-                            id,
-                            None,
-                            None,
-                            internal_server_error_iq_error("Internal server error."),
-                        )];
-                    }
-                };
-                // Cross-device sync: fan the post-update entry out to every
-                // resource bound for this user so other devices clear their
-                // unread badges without waiting for a fresh inbox query.
-                if let Some(entry) = updated {
-                    crate::server::routes::interpret::push_inbox_update(
-                        state.deps.protocol.connection_registry.as_ref(),
-                        &user_jid,
-                        &entry,
-                    )
-                    .await;
-                }
-                return vec![iq_to_xml(build_mark_read_result(request_iq))];
-            }
-            _ => {
-                return vec![build_iq_error_xml_typed(
-                    id,
-                    None,
-                    None,
-                    bad_request_iq_error("Malformed IQ payload."),
-                )];
-            }
-        }
+    if is_mark_read_iq(iq) {
+        return handle_inbox_mark_read_iq(iq, id, state, phase).await;
     }
 
     // urn:waddle:threads:0 — global threads view (PR #671).
@@ -451,4 +308,327 @@ pub(super) async fn handle_archive_inbox_upload_iq(
         }
     }
     Vec::new()
+}
+
+/// Handle the XEP-0430 `<inbox xmlns='urn:xmpp:inbox:0'/>` IQ-get
+/// streaming response. Emits one `<message/>` per matched conversation
+/// (with an optional embedded MAM `<result>/<forwarded>` body when
+/// `messages='true'`) followed by the final `<iq type='result'><fin/></iq>`.
+async fn handle_inbox_query_iq(
+    iq: &xmpp_parsers::iq::Iq,
+    id: &str,
+    state: &WebSocketState,
+    phase: &ConnectionPhase,
+) -> Vec<String> {
+    let Some(user_jid) = phase.bound_jid().map(|jid| jid.to_bare()) else {
+        return vec![build_iq_error_xml_typed(
+            id,
+            None,
+            None,
+            not_authorized_iq_error("Authentication required."),
+        )];
+    };
+
+    if !matches!(iq.payload, xmpp_parsers::iq::IqType::Get(_)) {
+        return vec![build_iq_error_xml_typed(
+            id,
+            None,
+            None,
+            bad_request_iq_error("Malformed IQ payload."),
+        )];
+    }
+
+    let query = match parse_inbox_query(iq) {
+        Ok(query) => query,
+        Err(error) => {
+            warn!(error = %error, "Invalid XEP-0430 inbox query");
+            return vec![build_iq_error_xml_typed(
+                id,
+                None,
+                None,
+                bad_request_iq_error("Malformed IQ payload."),
+            )];
+        }
+    };
+
+    let entries = match state.deps.protocol.inbox_storage.list(&user_jid).await {
+        Ok(entries) => entries,
+        Err(error) => {
+            warn!(error = %error, jid = %user_jid, "Failed to list inbox");
+            return vec![build_iq_error_xml_typed(
+                id,
+                None,
+                None,
+                internal_server_error_iq_error("Internal server error."),
+            )];
+        }
+    };
+
+    let all_unread_total = match state
+        .deps
+        .protocol
+        .inbox_storage
+        .total_unread(&user_jid)
+        .await
+    {
+        Ok(total) => total,
+        Err(error) => {
+            warn!(error = %error, jid = %user_jid, "Failed to count inbox unread");
+            return vec![build_iq_error_xml_typed(
+                id,
+                None,
+                None,
+                internal_server_error_iq_error("Internal server error."),
+            )];
+        }
+    };
+
+    // XEP-0430 filtering: drop read conversations when `unread-only`.
+    let mut filtered: Vec<_> = entries
+        .into_iter()
+        .filter(|entry| !query.unread_only || entry.unread > 0)
+        .collect();
+    filtered.sort_by(|left, right| {
+        right
+            .last_updated
+            .cmp(&left.last_updated)
+            .then_with(|| left.partner.cmp(&right.partner))
+    });
+
+    // Apply RSM `<max/>` paging. Other RSM cursors (`<after/>`,
+    // `<before/>`, `<index/>`) are best-effort: the inbox is
+    // small per-user and clients typically request the full set;
+    // a future iteration can switch to opaque cursor encoding.
+    let (page, rsm_response) = apply_inbox_rsm(filtered, query.rsm.as_ref());
+
+    // Determine the recipient JID for the streamed messages. Use the
+    // requesting client's full JID when available; fall back to the
+    // bound JID.
+    let Some(recipient_jid) = iq
+        .from
+        .clone()
+        .or_else(|| phase.bound_jid().cloned().map(jid::Jid::from))
+    else {
+        return vec![build_iq_error_xml_typed(
+            id,
+            None,
+            None,
+            bad_request_iq_error("Malformed IQ payload."),
+        )];
+    };
+
+    let mut responses: Vec<String> = Vec::with_capacity(page.len() + 1);
+    let mut page_unread = 0u32;
+    let mut page_unread_sum: u32 = 0;
+    for entry in &page {
+        if entry.unread > 0 {
+            page_unread = page_unread.saturating_add(1);
+            page_unread_sum = page_unread_sum.saturating_add(entry.unread);
+        }
+        let last_message = if query.messages {
+            inbox_last_message_for_entry(state, &user_jid, entry).await
+        } else {
+            None
+        };
+        let archive_keepalive;
+        let last_message_borrowed: Option<InboxLastMessage<'_>> = match &last_message {
+            Some(payload) => {
+                archive_keepalive = payload;
+                Some(InboxLastMessage {
+                    mam_id: archive_keepalive.mam_id.as_str(),
+                    forwarded_inner: archive_keepalive.forwarded_inner.clone(),
+                    delay_stamp: Some(archive_keepalive.delay_stamp.as_str()),
+                })
+            }
+            None => None,
+        };
+        let message = build_inbox_entry_message(
+            recipient_jid.clone(),
+            iq.id.as_str(),
+            entry,
+            last_message_borrowed,
+        );
+        responses.push(stanza_to_xml(&Stanza::Message(message)));
+    }
+
+    let counts = InboxFinCounts {
+        total: u32::try_from(page.len()).unwrap_or(u32::MAX),
+        unread: page_unread,
+        all_unread: u32::try_from(all_unread_total)
+            .unwrap_or(u32::MAX)
+            .max(page_unread_sum),
+    };
+    let fin = build_inbox_fin_iq(iq, counts, rsm_response);
+    responses.push(iq_to_xml(fin));
+    responses
+}
+
+/// Owned form of the inbox `<result/><forwarded/>` payload kept on
+/// the async heap so the typed [`InboxLastMessage`] borrow can be
+/// reconstructed when handing it to [`build_inbox_entry_message`].
+struct OwnedLastMessage {
+    mam_id: String,
+    forwarded_inner: xmpp_parsers::minidom::Element,
+    delay_stamp: String,
+}
+
+/// Resolve the most-recent archived `<message/>` body for one inbox
+/// entry by looking it up in MAM keyed on the entry's
+/// `last_stanza_id`. Returns `None` when the archive lookup fails or
+/// the row is missing — the streamed `<entry/>` still carries the id
+/// so clients can decide whether to back-fill via a follow-up MAM
+/// query.
+async fn inbox_last_message_for_entry(
+    state: &WebSocketState,
+    user_jid: &BareJid,
+    entry: &waddle_xmpp::inbox::InboxEntry,
+) -> Option<OwnedLastMessage> {
+    // 1:1 conversations archive under the user's bare JID; MUC
+    // conversations archive under the room JID. The inbox entry's
+    // `partner` field is the right archive key for MUC rows; for
+    // direct rows we resolve via the requesting user's archive.
+    let archive_jid = match entry.kind {
+        waddle_xmpp::inbox::ConversationKind::Direct => user_jid,
+        waddle_xmpp::inbox::ConversationKind::MucRoom => &entry.partner,
+    };
+
+    let archived = match state
+        .deps
+        .protocol
+        .mam_storage
+        .get_message_by_archive_or_stanza_id(archive_jid, entry.last_stanza_id.as_str())
+        .await
+    {
+        Ok(Some(archived)) => archived,
+        Ok(None) => return None,
+        Err(error) => {
+            warn!(
+                error = %error,
+                archive = %archive_jid,
+                stanza_id = %entry.last_stanza_id,
+                "Inbox: MAM lookup for last message failed"
+            );
+            return None;
+        }
+    };
+
+    let inner = waddle_xmpp::mam::archived_inner_message(&archived);
+    Some(OwnedLastMessage {
+        mam_id: archived.id,
+        forwarded_inner: inner,
+        delay_stamp: archived.timestamp.to_rfc3339(),
+    })
+}
+
+/// Apply RSM `<max/>` paging to a sorted inbox list and produce the
+/// matching `<set/>` response with `first`/`last`/`count`.
+fn apply_inbox_rsm(
+    entries: Vec<waddle_xmpp::inbox::InboxEntry>,
+    rsm: Option<&waddle_xmpp::xep::xep0059::RsmRequest>,
+) -> (
+    Vec<waddle_xmpp::inbox::InboxEntry>,
+    Option<waddle_xmpp::xep::xep0059::RsmResponse>,
+) {
+    use waddle_xmpp::xep::xep0059::RsmResponse;
+
+    let total = u32::try_from(entries.len()).unwrap_or(u32::MAX);
+    let max = rsm.and_then(|r| r.max).map(|m| m as usize);
+
+    let page: Vec<_> = match max {
+        Some(max) if max < entries.len() => entries.into_iter().take(max).collect(),
+        _ => entries,
+    };
+
+    // Carry RSM response only when the client asked for paging; the
+    // empty case is still meaningful (signals "page complete" with
+    // total=count).
+    if rsm.is_none() {
+        return (page, None);
+    }
+
+    let first = page.first().map(inbox_rsm_cursor);
+    let last = page.last().map(inbox_rsm_cursor);
+    let response = RsmResponse {
+        first,
+        first_index: Some(0),
+        last,
+        count: Some(total),
+    };
+    (page, Some(response))
+}
+
+fn inbox_rsm_cursor(entry: &waddle_xmpp::inbox::InboxEntry) -> String {
+    // Composite cursor: partner JID + optional thread id, opaque to
+    // the client per XEP-0059 §2.1. Encoding stays inside this module
+    // so server-side paging can evolve without a wire-shape break.
+    match &entry.thread_id {
+        Some(thread) => format!("{}#{}", entry.partner, thread),
+        None => entry.partner.to_string(),
+    }
+}
+
+/// Handle the Waddle-private `<mark-read xmlns='urn:waddle:inbox:0'/>`
+/// IQ-set. Returns the IQ result and fans the post-update entry out to
+/// the user's other resources for cross-device unread-state sync.
+async fn handle_inbox_mark_read_iq(
+    iq: &xmpp_parsers::iq::Iq,
+    id: &str,
+    state: &WebSocketState,
+    phase: &ConnectionPhase,
+) -> Vec<String> {
+    let Some(user_jid) = phase.bound_jid().map(|jid| jid.to_bare()) else {
+        return vec![build_iq_error_xml_typed(
+            id,
+            None,
+            None,
+            not_authorized_iq_error("Authentication required."),
+        )];
+    };
+
+    let mark_read = match parse_mark_read(iq) {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            warn!(error = %error, "Invalid inbox mark-read");
+            return vec![build_iq_error_xml_typed(
+                id,
+                None,
+                None,
+                bad_request_iq_error("Malformed IQ payload."),
+            )];
+        }
+    };
+
+    let updated = match state
+        .deps
+        .protocol
+        .inbox_storage
+        .mark_read(
+            &user_jid,
+            &mark_read.partner,
+            mark_read.thread_id.as_deref(),
+        )
+        .await
+    {
+        Ok(updated) => updated,
+        Err(error) => {
+            warn!(error = %error, jid = %user_jid, partner = %mark_read.partner, "Failed to mark inbox read");
+            return vec![build_iq_error_xml_typed(
+                id,
+                None,
+                None,
+                internal_server_error_iq_error("Internal server error."),
+            )];
+        }
+    };
+
+    if let Some(entry) = updated {
+        crate::server::routes::interpret::push_inbox_update(
+            state.deps.protocol.connection_registry.as_ref(),
+            &user_jid,
+            &entry,
+        )
+        .await;
+    }
+
+    vec![iq_to_xml(build_mark_read_result(iq))]
 }

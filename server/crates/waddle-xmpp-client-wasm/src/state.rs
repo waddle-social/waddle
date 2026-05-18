@@ -129,6 +129,11 @@ pub(crate) enum WasmCommand {
         query_id: String,
         responder: oneshot::Sender<DriverResult<waddle_xmpp_client::MamPage>>,
     },
+    SendInboxQuery {
+        stanza: Element,
+        query_id: String,
+        responder: oneshot::Sender<DriverResult<InboxPage>>,
+    },
     Disconnect {
         responder: oneshot::Sender<DriverResult<()>>,
     },
@@ -148,6 +153,18 @@ pub(crate) enum DeferredWasmCommand {
         query_id: String,
         responder: oneshot::Sender<DriverResult<waddle_xmpp_client::MamPage>>,
     },
+    InboxQuery {
+        stanza: Element,
+        query_id: String,
+        responder: oneshot::Sender<DriverResult<InboxPage>>,
+    },
+}
+
+/// Result of one streamed XEP-0430 inbox query.
+#[derive(Debug, Clone)]
+pub(crate) struct InboxPage {
+    pub entries: Vec<waddle_xmpp_client::inbox::InboxStreamEntry>,
+    pub fin: waddle_xmpp_client::inbox::InboxFin,
 }
 
 pub(crate) enum DriverEvent {
@@ -167,6 +184,12 @@ pub(crate) struct PendingMamQuery {
     pub(crate) responder: oneshot::Sender<DriverResult<waddle_xmpp_client::MamPage>>,
 }
 
+pub(crate) struct PendingInboxQuery {
+    pub(crate) query_id: String,
+    pub(crate) entries: Vec<waddle_xmpp_client::inbox::InboxStreamEntry>,
+    pub(crate) responder: oneshot::Sender<DriverResult<InboxPage>>,
+}
+
 pub(crate) struct WasmDriverTask {
     pub(crate) runtime: XmppRuntime,
     pub(crate) ws: WasmWebSocket,
@@ -174,6 +197,7 @@ pub(crate) struct WasmDriverTask {
     pub(crate) event_tx: mpsc::Sender<DriverEvent>,
     pub(crate) pending_iqs: HashMap<String, oneshot::Sender<DriverResult<Element>>>,
     pub(crate) pending_mam_queries: HashMap<String, PendingMamQuery>,
+    pub(crate) pending_inbox_queries: HashMap<String, PendingInboxQuery>,
     pub(crate) deferred_commands: VecDeque<DeferredWasmCommand>,
     pub(crate) explicit_disconnect: bool,
 }

@@ -214,7 +214,12 @@ export interface WasmInboxConversation {
 }
 
 export interface WasmInboxResult {
+  /** XEP-0430 `<fin all-unread/>` — total unread across the inbox. */
   total_unread: number;
+  /** XEP-0430 `<fin total/>` — number of conversations in this page. */
+  total: number;
+  /** XEP-0430 `<fin unread/>` — number of conversations with unread > 0. */
+  unread_conversations: number;
   conversations: WasmInboxConversation[];
 }
 

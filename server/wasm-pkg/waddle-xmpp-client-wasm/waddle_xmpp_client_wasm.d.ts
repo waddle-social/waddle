@@ -50,6 +50,16 @@ export class WaddleClient {
     fetch_dm_history(peer_jid: string, max: number, before_id?: string | null): Promise<any>;
     fetch_dm_history_page(peer_jid: string, max: number, page_param: any): Promise<any>;
     fetch_extension_route_items(route: any, room_jid: string): Promise<any>;
+    /**
+     * Fetch the user's inbox via XEP-0430 (`urn:xmpp:inbox:0`).
+     *
+     * Wire-shape: IQ-get with `<inbox/>`, server streams
+     * `<message><entry/></message>` per conversation, terminating
+     * with `<iq type='result'><fin/></iq>`. The streaming reducer
+     * lives in the wasm driver; this method registers the pending
+     * inbox query, drives the IQ send, and resolves the JS promise
+     * once the closing fin arrives.
+     */
     fetch_inbox(opts: any): Promise<any>;
     /**
      * XEP-0490 §3.1 catch-up: retrieve every item from the user's

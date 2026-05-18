@@ -16,7 +16,8 @@ pub fn parse_disco_info_query(iq: &Iq) -> Result<DiscoInfoQuery, XmppError> {
     waddle_xmpp_core::disco::info::parse_disco_info_query(iq).map_err(Into::into)
 }
 
-/// Server-level disco features, extended with Waddle inbox advertisement.
+/// Server-level disco features, extended with the XEP-0430 inbox
+/// advertisement (canonical `urn:xmpp:inbox:0` namespace).
 pub fn server_features() -> Vec<Feature> {
     let mut features = waddle_xmpp_core::disco::info::server_features();
     features.push(Feature::new(crate::xep::xep0430::NS_INBOX));

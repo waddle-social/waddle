@@ -3,11 +3,11 @@ use minidom::Element;
 
 use super::types::{
     DiscoDataField, DiscoDataForm, DiscoIdentity, DiscoInfoResult, DiscoItem, DiscoveredChannel,
-    DiscoveredChannelType, DiscoveredSpace, InboxEntry, SpaceNode, UploadSlot,
+    DiscoveredChannelType, DiscoveredSpace, SpaceNode, UploadSlot,
 };
 use super::{
-    BOOKMARKS_NS, CLIENT_NS, DATA_FORMS_NS, DISCO_INFO_NS, DISCO_ITEMS_NS, INBOX_NS,
-    PUBSUB_METADATA_FORM_TYPE, PUBSUB_NS, SPACES_NS, UPLOAD_NS,
+    BOOKMARKS_NS, DATA_FORMS_NS, DISCO_INFO_NS, DISCO_ITEMS_NS, PUBSUB_METADATA_FORM_TYPE,
+    PUBSUB_NS, SPACES_NS, UPLOAD_NS,
 };
 
 // ── Parse helpers ─────────────────────────────────────────────────────────────
@@ -208,50 +208,4 @@ pub fn parse_upload_slot(iq: &Element) -> Option<UploadSlot> {
         get_url,
         put_headers,
     })
-}
-
-/// Parse an inbox result element (XEP-0430 / erlang-solutions inbox).
-///
-/// Accepts either a bare `<result xmlns='...inbox:0'>` element or a wrapping
-/// stanza (e.g. `<message>`) that contains one as a child.  Returns `None` for
-/// plain stanzas that carry no inbox result.
-pub fn parse_inbox_result(element: &Element) -> Option<InboxEntry> {
-    let (result_el, jid) = if element.name() == "result" && element.ns() == INBOX_NS {
-        let jid = element
-            .attr("from")
-            .or_else(|| element.attr("to"))
-            .map(str::to_string)
-            .unwrap_or_default();
-        (element, jid)
-    } else {
-        let result_el = element.get_child("result", INBOX_NS)?;
-        let jid = element
-            .attr("from")
-            .or_else(|| element.attr("to"))
-            .map(str::to_string)
-            .unwrap_or_default();
-        (result_el, jid)
-    };
-
-    let unread_count = result_el
-        .get_child("unread", INBOX_NS)
-        .and_then(|e| e.text().parse::<u32>().ok())
-        .unwrap_or(0);
-
-    let last_message_body = extract_forwarded_body(result_el);
-
-    Some(InboxEntry {
-        jid,
-        unread_count,
-        last_message_body,
-        timestamp: None,
-    })
-}
-
-fn extract_forwarded_body(result_el: &Element) -> Option<String> {
-    const FORWARD_NS: &str = "urn:xmpp:forward:0";
-    let forwarded = result_el.get_child("forwarded", FORWARD_NS)?;
-    let message = forwarded.get_child("message", CLIENT_NS)?;
-    let body = message.get_child("body", CLIENT_NS)?;
-    Some(body.text())
 }

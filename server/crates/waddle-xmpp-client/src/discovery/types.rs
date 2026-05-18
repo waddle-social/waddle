@@ -77,14 +77,6 @@ pub struct UploadSlot {
     pub put_headers: Vec<(String, String)>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub struct InboxEntry {
-    pub jid: String,
-    pub unread_count: u32,
-    pub last_message_body: Option<String>,
-    pub timestamp: Option<chrono::DateTime<chrono::Utc>>,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SpaceNode(String);
 
@@ -154,38 +146,13 @@ pub struct DiscoveredTopology {
     pub channels: Vec<DiscoveredChannel>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct WaddleInboxQuery {
-    pub since: Option<u64>,
-    pub only_unread: bool,
-    pub room: Option<String>,
-    pub threads: bool,
-}
-
+/// Waddle-private `<mark-read/>` IQ-set parameters carried under
+/// `urn:waddle:inbox:0`. The query/response side of inbox lives on the
+/// XEP-0430 surface (`waddle_xmpp_client::inbox`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WaddleInboxMarkRead {
     pub partner: String,
     pub thread: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct WaddleInboxConversation {
-    pub partner: String,
-    pub kind: String,
-    pub last_stanza_id: Option<String>,
-    pub last_updated: Option<u64>,
-    pub unread: u32,
-    pub preview: Option<String>,
-    pub thread: Option<String>,
-    pub thread_title: Option<String>,
-    pub reply_count: Option<u32>,
-    pub author: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct WaddleInboxResult {
-    pub total_unread: Option<u32>,
-    pub conversations: Vec<WaddleInboxConversation>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

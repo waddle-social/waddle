@@ -68,6 +68,26 @@ pub(crate) async fn send_mam_query_command(
         .map_err(|err| js_error(err.to_string()))
 }
 
+pub(crate) async fn send_inbox_query_command(
+    inner: Rc<RefCell<WaddleClientInner>>,
+    stanza: Element,
+    query_id: String,
+) -> Result<crate::state::InboxPage, JsValue> {
+    let mut cmd_tx = command_sender(&inner)?;
+    let (responder, rx) = oneshot::channel();
+    cmd_tx
+        .send(WasmCommand::SendInboxQuery {
+            stanza,
+            query_id,
+            responder,
+        })
+        .await
+        .map_err(|_| js_error("client is disconnected"))?;
+    rx.await
+        .map_err(|_| js_error("client is disconnected"))?
+        .map_err(|err| js_error(err.to_string()))
+}
+
 pub(crate) async fn disconnect_client(
     inner: Rc<RefCell<WaddleClientInner>>,
 ) -> Result<(), JsValue> {

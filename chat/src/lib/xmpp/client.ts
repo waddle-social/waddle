@@ -1001,14 +1001,29 @@ export class BrowserXmppClient {
     try { await xmpp.disable_push_notifications(opts.serviceJid, opts.node ?? "web-push"); return true; } catch { return false; }
   }
 
+  /**
+   * Fetch the user's XEP-0430 inbox. The wasm bridge runs the
+   * streaming reducer (sends `<inbox/>` IQ, accumulates the streamed
+   * `<message><entry/></message>` frames matching the IQ's `queryid`,
+   * resolves once the closing `<fin/>` IQ arrives).
+   */
   async fetchInbox(opts: FetchInboxOptions = {}): Promise<InboxResult> {
     const xmpp = await this.requireConnectedXmpp();
-    const result = await xmpp.fetch_inbox?.({ ...(typeof opts.since === "number" ? { since: opts.since } : {}), ...(opts.onlyUnread ? { only_unread: true } : {}), ...(opts.room ? { room: opts.room } : {}), ...(opts.threads ? { threads: true } : {}) }) as WasmInboxResult | undefined;
-    return { totalUnread: result?.total_unread ?? 0, conversations: (result?.conversations ?? []).map(inboxEntryFromWasm) };
+    const result = await xmpp.fetch_inbox?.({
+      ...(opts.onlyUnread ? { only_unread: true } : {}),
+      ...(opts.noMessages ? { no_messages: true } : {}),
+    }) as WasmInboxResult | undefined;
+    return {
+      totalUnread: result?.total_unread ?? 0,
+      total: result?.total ?? (result?.conversations?.length ?? 0),
+      unreadConversations:
+        result?.unread_conversations
+          ?? (result?.conversations ?? []).filter((c) => c.unread > 0).length,
+      conversations: (result?.conversations ?? []).map(inboxEntryFromWasm),
+    };
   }
 
   async markInboxRead(partnerJid: string, threadId?: string): Promise<void> { const xmpp = await this.requireConnectedXmpp(); await xmpp.mark_inbox_read?.(barePeerJid(partnerJid), threadId ?? null); }
-  async fetchThreadInbox(roomJid: string): Promise<InboxResult> { return this.fetchInbox({ room: roomJid, threads: true }); }
 
   /**
    * Fetch the global cross-channel threads view (`urn:waddle:threads:0`).

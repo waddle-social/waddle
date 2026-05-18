@@ -381,27 +381,31 @@ pub(crate) fn mam_page_to_js(page: waddle_xmpp_client::MamPage) -> WaddleMamPage
     }
 }
 
-pub(crate) fn inbox_result_to_js(result: discovery::WaddleInboxResult) -> WaddleInboxResult {
+pub(crate) fn inbox_page_to_js(page: crate::state::InboxPage) -> WaddleInboxResult {
+    let conversations = page
+        .entries
+        .into_iter()
+        .map(|entry| WaddleInboxConversation {
+            partner: entry.partner,
+            kind: entry.kind.unwrap_or_else(|| "direct".to_string()),
+            last_stanza_id: entry.last_stanza_id,
+            last_updated: entry.last_updated.unwrap_or(0),
+            unread: entry.unread,
+            preview: entry.preview,
+            thread: entry.thread_id,
+            thread_title: entry.thread_title,
+            reply_count: entry.reply_count,
+            author: entry.author,
+        })
+        .collect();
     WaddleInboxResult {
-        total_unread: result.total_unread.unwrap_or(0),
-        conversations: result
-            .conversations
-            .into_iter()
-            .filter_map(|conversation| {
-                Some(WaddleInboxConversation {
-                    partner: conversation.partner,
-                    kind: conversation.kind,
-                    last_stanza_id: conversation.last_stanza_id?,
-                    last_updated: i64::try_from(conversation.last_updated?).ok()?,
-                    unread: conversation.unread,
-                    preview: conversation.preview,
-                    thread: conversation.thread,
-                    thread_title: conversation.thread_title,
-                    reply_count: conversation.reply_count,
-                    author: conversation.author,
-                })
-            })
-            .collect(),
+        // `all-unread` is the XEP-0430 server-wide unread sum; mirror it
+        // under the legacy `total_unread` field the chat layer reads so
+        // the JS shape stays additive on this change.
+        total_unread: page.fin.counts.all_unread,
+        total: page.fin.counts.total,
+        unread_conversations: page.fin.counts.unread,
+        conversations,
     }
 }
 

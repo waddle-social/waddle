@@ -1988,9 +1988,12 @@ async fn direct_messages_round_trip_through_inbox_query_and_mark_read() {
     .await;
     assert!(responses.is_empty(), "plain DM should not echo to sender");
 
+    // XEP-0430: streamed `<message><entry/></message>` per row plus a
+    // closing `<iq><fin/></iq>`. The handler returns each row's
+    // message stanza followed by the fin IQ as the last element.
     let inbox_query = format!(
         "<iq xmlns='jabber:client' type='get' to='{}' id='inbox-1'>\
-                <query xmlns='urn:waddle:inbox:0'/>\
+                <inbox xmlns='urn:xmpp:inbox:0'/>\
              </iq>",
         bob_jid.to_bare()
     );
@@ -2003,18 +2006,28 @@ async fn direct_messages_round_trip_through_inbox_query_and_mark_read() {
         &ready_phase(&bob_jid),
     )
     .await;
-    let inbox_xml = inbox_responses.first().expect("inbox response");
+    let entry_xml = inbox_responses
+        .iter()
+        .find(|frame| frame.contains("<entry "))
+        .expect("at least one streamed inbox entry");
     assert!(
-        inbox_xml.contains("partner=\"alice@example.com\""),
-        "inbox response should include Alice conversation: {inbox_xml}"
+        entry_xml.contains("jid=\"alice@example.com\""),
+        "streamed inbox entry should reference Alice: {entry_xml}"
     );
     assert!(
-        inbox_xml.contains("unread=\"1\""),
-        "inbox response should report one unread DM: {inbox_xml}"
+        entry_xml.contains("unread=\"1\""),
+        "streamed inbox entry should report one unread DM: {entry_xml}"
+    );
+    let fin_xml = inbox_responses
+        .last()
+        .expect("inbox response ends with fin IQ");
+    assert!(
+        fin_xml.contains("<fin"),
+        "last frame is the XEP-0430 fin IQ: {fin_xml}"
     );
     assert!(
-        inbox_xml.contains("<preview>Hello from Alice</preview>"),
-        "inbox response should include preview text: {inbox_xml}"
+        fin_xml.contains("total=\"1\""),
+        "fin reports a single matched conversation: {fin_xml}"
     );
 
     let mark_read = format!(
@@ -2040,7 +2053,7 @@ async fn direct_messages_round_trip_through_inbox_query_and_mark_read() {
 
     let unread_only_query = format!(
         "<iq xmlns='jabber:client' type='get' to='{}' id='inbox-3'>\
-                <query xmlns='urn:waddle:inbox:0' only-unread='true'/>\
+                <inbox xmlns='urn:xmpp:inbox:0' unread-only='true'/>\
              </iq>",
         bob_jid.to_bare()
     );
@@ -2053,14 +2066,18 @@ async fn direct_messages_round_trip_through_inbox_query_and_mark_read() {
         &ready_phase(&bob_jid),
     )
     .await;
-    let unread_only_xml = unread_only_responses.first().expect("unread-only response");
+    let unread_only_fin = unread_only_responses
+        .last()
+        .expect("unread-only response ends with fin IQ");
     assert!(
-        unread_only_xml.contains("total-unread=\"0\""),
-        "mark-read should clear the unread count: {unread_only_xml}"
+        unread_only_fin.contains("total=\"0\""),
+        "mark-read clears unread, fin should report no matches: {unread_only_fin}"
     );
     assert!(
-        !unread_only_xml.contains("<conversation "),
-        "unread-only query should be empty after mark-read: {unread_only_xml}"
+        unread_only_responses
+            .iter()
+            .all(|frame| !frame.contains("<entry ")),
+        "unread-only query should emit no entry messages after mark-read"
     );
 }
 
@@ -2071,7 +2088,7 @@ async fn inbox_query_requires_ready_phase() {
     let pending_jid: FullJid = "bob@example.com/pending".parse().expect("pending jid");
     let mut carbons_enabled = false;
     let mut roster_interested = false;
-    let frame = r#"<iq xmlns='jabber:client' type='get' to='bob@example.com' id='inbox-prebind-1'><query xmlns='urn:waddle:inbox:0'/></iq>"#;
+    let frame = r#"<iq xmlns='jabber:client' type='get' to='bob@example.com' id='inbox-prebind-1'><inbox xmlns='urn:xmpp:inbox:0'/></iq>"#;
     let mut conn_state = IqConnState {
         carbons_enabled: &mut carbons_enabled,
         roster_interested: &mut roster_interested,
@@ -2134,7 +2151,7 @@ async fn encrypted_sfs_messages_without_bodies_still_project_into_inbox() {
 
     let inbox_query = format!(
         "<iq xmlns='jabber:client' type='get' to='{}' id='inbox-esfs-1'>\
-                <query xmlns='urn:waddle:inbox:0'/>\
+                <inbox xmlns='urn:xmpp:inbox:0'/>\
              </iq>",
         bob_jid.to_bare()
     );
@@ -2147,18 +2164,21 @@ async fn encrypted_sfs_messages_without_bodies_still_project_into_inbox() {
         &ready_phase(&bob_jid),
     )
     .await;
-    let inbox_xml = inbox_responses.first().expect("inbox response");
+    let entry_xml = inbox_responses
+        .iter()
+        .find(|frame| frame.contains("<entry "))
+        .expect("streamed inbox entry for the bodyless file-sharing DM");
     assert!(
-        inbox_xml.contains("partner=\"alice@example.com\""),
-        "encrypted file-sharing inbox entry should target Alice: {inbox_xml}"
+        entry_xml.contains("jid=\"alice@example.com\""),
+        "encrypted file-sharing inbox entry should target Alice: {entry_xml}"
     );
     assert!(
-        inbox_xml.contains("unread=\"1\""),
-        "encrypted file-sharing inbox entry should increment unread: {inbox_xml}"
+        entry_xml.contains("unread=\"1\""),
+        "encrypted file-sharing inbox entry should increment unread: {entry_xml}"
     );
     assert!(
-        !inbox_xml.contains("<preview>"),
-        "bodyless encrypted file-sharing message should not invent preview text: {inbox_xml}"
+        !entry_xml.contains("preview="),
+        "bodyless encrypted file-sharing message should not invent preview text: {entry_xml}"
     );
 }
 

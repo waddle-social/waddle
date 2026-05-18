@@ -1,23 +1,19 @@
-use std::time::Duration;
-
 use jid::BareJid;
 
 use crate::client::ClientHandle;
 use crate::error::{ClientError, ClientResult, StanzaError, StanzaErrorType};
-use crate::event::ClientEvent;
 
-use super::ids::next_id;
 use super::iq::{
     build_disable_push_iq, build_disco_info_iq, build_disco_items_iq, build_enable_push_iq,
-    build_inbox_iq, build_pubsub_items_iq, build_upload_slot_iq,
+    build_pubsub_items_iq, build_upload_slot_iq,
 };
 use super::parsing::{
-    parse_disco_info_result, parse_disco_items_result, parse_inbox_result,
-    parse_space_channels_result, parse_upload_slot, space_from_disco_item,
+    parse_disco_info_result, parse_disco_items_result, parse_space_channels_result,
+    parse_upload_slot, space_from_disco_item,
 };
 use super::types::{
     DiscoInfoResult, DiscoItem, DiscoveredChannel, DiscoveredChannelType, DiscoveredSpace,
-    DiscoveredTopology, InboxEntry, SpaceNode, UploadSlot,
+    DiscoveredTopology, SpaceNode, UploadSlot,
 };
 use super::{UPLOAD_NS, WADDLE_ROOM_METADATA_FORM_TYPE};
 
@@ -58,12 +54,6 @@ pub trait DiscoveryExt {
         size: u64,
         content_type: &str,
     ) -> ClientResult<UploadSlot>;
-
-    /// Fetch inbox entries (XEP-0430 / erlang-solutions inbox extension).
-    ///
-    /// Sends the inbox IQ and collects streamed `UnhandledStanza` results until
-    /// the final `<fin>` IQ result arrives or the 30-second timeout fires.
-    async fn fetch_inbox(&self, max: u32) -> ClientResult<Vec<InboxEntry>>;
 
     /// Enable push notifications via a push service (XEP-0357).
     async fn enable_push_notifications(
@@ -132,60 +122,6 @@ impl DiscoveryExt for ClientHandle {
         let iq = build_upload_slot_iq(service_jid, filename, size, content_type);
         let result = self.send_iq(iq).await?;
         parse_upload_slot(&result).ok_or_else(parse_error)
-    }
-
-    async fn fetch_inbox(&self, max: u32) -> ClientResult<Vec<InboxEntry>> {
-        // Subscribe before sending so we don't miss early stanzas.
-        let mut events = self.events();
-
-        let query_id = format!("inbox-q-{}", next_id());
-        let snapshot = self.snapshot();
-        let binding = snapshot.binding.ok_or(ClientError::Disconnected)?;
-        let bare_jid = {
-            let full = binding.jid.to_string();
-            if let Some(idx) = full.rfind('/') {
-                full[..idx].to_string()
-            } else {
-                full
-            }
-        };
-        let iq = build_inbox_iq(&bare_jid, &query_id, max);
-
-        let (done_tx, mut done_rx) = tokio::sync::oneshot::channel::<ClientResult<()>>();
-        let handle = self.clone();
-        tokio::spawn(async move {
-            let res = handle.send_iq(iq).await.map(|_| ());
-            let _ = done_tx.send(res);
-        });
-
-        let mut entries = Vec::new();
-        let sleep = tokio::time::sleep(Duration::from_secs(30));
-        tokio::pin!(sleep);
-
-        loop {
-            tokio::select! {
-                result = &mut done_rx => {
-                    match result {
-                        Ok(Ok(())) => {}
-                        Ok(Err(e)) => return Err(e),
-                        Err(_) => return Err(ClientError::Disconnected),
-                    }
-                    break;
-                }
-                event = events.recv() => {
-                    if let Ok(ClientEvent::UnhandledStanza(el)) = event {
-                        if let Some(entry) = parse_inbox_result(&el) {
-                            entries.push(entry);
-                        }
-                    }
-                }
-                _ = &mut sleep => {
-                    break;
-                }
-            }
-        }
-
-        Ok(entries)
     }
 
     async fn enable_push_notifications(

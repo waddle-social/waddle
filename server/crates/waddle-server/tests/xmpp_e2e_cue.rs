@@ -71,6 +71,7 @@ const SUPPORTED_XEPS: &[&str] = &[
     "XEP-0424",
     "XEP-0425",
     "XEP-0428",
+    "XEP-0430",
     "XEP-0431",
     "XEP-0433",
     "XEP-0444",
@@ -180,6 +181,7 @@ const ADVERTISED_FEATURE_XEPS: &[(&str, &str)] = &[
     ("jabber:iq:search", "XEP-0055"),
     ("urn:xmpp:pubsub-social-feed:0", "XEP-0472"),
     ("urn:xmpp:stories:0", "XEP-0501"),
+    ("urn:xmpp:inbox:0", "XEP-0430"),
     // xCal calendar — XSF ProtoXEP "Calendaring Extensions to
     // Publish-Subscribe", no assigned XEP number. Mapped to
     // "PROTO-CALENDAR" so the coverage check accepts it without
@@ -213,7 +215,6 @@ const ADVERTISED_FEATURE_EXEMPTIONS: &[&str] = &[
     "urn:waddle:admin:spaces:set-role:0",
     "urn:waddle:admin:spaces:update:0",
     "urn:waddle:admin:users:list:0",
-    "urn:waddle:inbox:0",
     "urn:waddle:mam-thread:0",
 ];
 

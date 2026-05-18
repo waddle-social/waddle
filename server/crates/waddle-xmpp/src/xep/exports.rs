@@ -235,9 +235,11 @@ pub use super::xep0428::{
 };
 
 pub use super::xep0430::{
-    build_entry_element, build_inbox_query_result, build_mark_read_result, is_inbox_iq,
-    parse_entry_element, parse_inbox_query, parse_mark_read, InboxError, InboxMarkRead, InboxQuery,
-    NS_INBOX,
+    build_inbox_entry_element, build_inbox_entry_message, build_inbox_fin_iq, build_inbox_push,
+    build_inbox_query_iq, build_mark_read_result, is_inbox_iq, is_mark_read_iq,
+    parse_inbox_entry_element, parse_inbox_fin, parse_inbox_query, parse_mark_read, InboxError,
+    InboxFin, InboxFinCounts, InboxLastMessage, InboxMarkRead, InboxQuery, NS_INBOX,
+    NS_INBOX_MARK_READ, NS_MAM,
 };
 
 pub use super::xep0402::{

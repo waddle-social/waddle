@@ -11,23 +11,20 @@ mod ext;
 
 pub use iq::{
     build_disable_push_iq, build_disco_info_iq, build_disco_items_iq, build_enable_push_iq,
-    build_inbox_iq, build_muc_admin_affiliation_list_iq, build_muc_admin_affiliation_set_iq,
-    build_pubsub_items_iq, build_roster_get_iq, build_upload_slot_iq, build_user_search_form_iq,
-    build_user_search_iq, build_waddle_inbox_mark_read_iq, build_waddle_inbox_query_iq,
-    parse_muc_admin_affiliation_query, parse_roster_result, parse_user_search_form,
-    parse_user_search_result, parse_waddle_inbox_result,
+    build_muc_admin_affiliation_list_iq, build_muc_admin_affiliation_set_iq, build_pubsub_items_iq,
+    build_roster_get_iq, build_upload_slot_iq, build_user_search_form_iq, build_user_search_iq,
+    build_waddle_inbox_mark_read_iq, parse_muc_admin_affiliation_query, parse_roster_result,
+    parse_user_search_form, parse_user_search_result,
 };
 pub use parsing::{
-    parse_disco_info_result, parse_disco_items_result, parse_inbox_result,
-    parse_space_channels_result, parse_spaces_from_disco_items, parse_upload_slot,
-    space_from_disco_item,
+    parse_disco_info_result, parse_disco_items_result, parse_space_channels_result,
+    parse_spaces_from_disco_items, parse_upload_slot, space_from_disco_item,
 };
 pub use types::{
     DiscoDataField, DiscoDataForm, DiscoFeature, DiscoIdentity, DiscoInfoResult, DiscoItem,
-    DiscoveredChannel, DiscoveredChannelType, DiscoveredSpace, DiscoveredTopology, InboxEntry,
+    DiscoveredChannel, DiscoveredChannelType, DiscoveredSpace, DiscoveredTopology,
     MucAdminAffiliationItem, RosterResult, SpaceNode, UploadSlot, UserSearchForm, UserSearchItem,
-    UserSearchQuery, UserSearchResult, WaddleInboxConversation, WaddleInboxMarkRead,
-    WaddleInboxQuery, WaddleInboxResult,
+    UserSearchQuery, UserSearchResult, WaddleInboxMarkRead,
 };
 
 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
@@ -36,7 +33,12 @@ pub use ext::DiscoveryExt;
 pub const DISCO_INFO_NS: &str = "http://jabber.org/protocol/disco#info";
 pub const DISCO_ITEMS_NS: &str = "http://jabber.org/protocol/disco#items";
 pub const UPLOAD_NS: &str = "urn:xmpp:http:upload:0";
-pub const INBOX_NS: &str = "erlang-solutions.com:xmpp:inbox:0";
+/// Waddle-private namespace retained for the legacy `<mark-read/>` IQ.
+///
+/// XEP-0430's conformant `urn:xmpp:inbox:0` surface lives in
+/// [`waddle_xmpp::xep::xep0430`] — the server-side wire types live in
+/// that crate. The native discovery client doesn't consume the stream
+/// today; the WASM browser client does, via the inbox-streaming flow.
 pub const WADDLE_INBOX_NS: &str = "urn:waddle:inbox:0";
 pub const PUSH_NS: &str = "urn:xmpp:push:0";
 pub const CLIENT_NS: &str = "jabber:client";

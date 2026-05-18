@@ -112,6 +112,14 @@ impl WaddleClient {
         })
     }
 
+    /// Fetch the user's inbox via XEP-0430 (`urn:xmpp:inbox:0`).
+    ///
+    /// Wire-shape: IQ-get with `<inbox/>`, server streams
+    /// `<message><entry/></message>` per conversation, terminating
+    /// with `<iq type='result'><fin/></iq>`. The streaming reducer
+    /// lives in the wasm driver; this method registers the pending
+    /// inbox query, drives the IQ send, and resolves the JS promise
+    /// once the closing fin arrives.
     pub fn fetch_inbox(&self, opts: JsValue) -> Promise {
         let inner = self.inner.clone();
         future_to_promise(async move {
@@ -120,27 +128,24 @@ impl WaddleClient {
             } else {
                 serde_wasm_bindgen::from_value(opts).map_err(|err| js_error(err.to_string()))?
             };
-            let bare_jid = {
-                let stored = inner.borrow().config.clone();
-                bare_jid(&stored.jid)
-            };
-            let iq = build_waddle_inbox_query_iq(
-                bare_jid.as_str(),
-                &WaddleInboxQuery {
-                    since: opts.since.and_then(|value| u64::try_from(value).ok()),
-                    only_unread: opts.only_unread,
-                    room: opts.room,
-                    threads: opts.threads,
-                },
+            let request_id = uuid::Uuid::new_v4().to_string();
+            // XEP-0430: the `<inbox/>` IQ is addressed to the user's
+            // bare JID (the inbox is per-user state). The wire-id is
+            // also the `queryid` correlation for streamed entries.
+            let iq = waddle_xmpp_client::inbox::build_inbox_query_iq_element(
+                request_id.as_str(),
+                opts.only_unread,
+                !opts.no_messages,
             );
-            let result = send_iq_command(inner, iq).await?;
-            let inbox = parse_waddle_inbox_result(&result)
-                .map(inbox_result_to_js)
-                .unwrap_or(WaddleInboxResult {
-                    total_unread: 0,
-                    conversations: Vec::new(),
-                });
-            to_js_value(&inbox)
+            let page = match send_inbox_query_command(inner, iq, request_id).await {
+                Ok(page) => page,
+                Err(_) => crate::state::InboxPage {
+                    entries: Vec::new(),
+                    fin: waddle_xmpp_client::inbox::InboxFin::default(),
+                },
+            };
+            let result = inbox_page_to_js(page);
+            to_js_value(&result)
         })
     }
 
