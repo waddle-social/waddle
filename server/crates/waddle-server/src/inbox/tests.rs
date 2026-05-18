@@ -5,6 +5,19 @@ fn jid(value: &str) -> BareJid {
     value.parse().expect("valid JID")
 }
 
+async fn groupchat_notification_recovery_row_count(storage: &DatabaseInboxStorage) -> i64 {
+    let mut rows = storage
+        .query("SELECT COUNT(*) FROM groupchat_notification_recovery", ())
+        .await
+        .expect("count recovery rows");
+    let row = rows
+        .next()
+        .await
+        .expect("advance count row")
+        .expect("count row");
+    row.get(0).expect("decode recovery row count")
+}
+
 #[tokio::test]
 async fn sqlx_inbox_storage_round_trips_entries() {
     let storage = DatabaseInboxStorage::open(Some("sqlite::memory:"))
@@ -168,6 +181,23 @@ async fn sqlx_inbox_storage_tracks_groupchat_notification_recovery() {
         room_members_only: false,
         created_at_ms: 42,
     };
+    let second_recovery = GroupchatNotificationRecovery {
+        key: GroupchatNotificationRecoveryKey {
+            recipient: user.clone(),
+            room: room.clone(),
+            thread_id: None,
+            archive_stanza_id: StanzaId::new(
+                "groupchat-recovery-2",
+                "room@muc.example.com".parse().expect("second stanza-id by"),
+            ),
+        },
+        sender_jid: "room@muc.example.com/bob"
+            .parse()
+            .expect("second sender jid"),
+        is_live_occupant: false,
+        room_members_only: true,
+        created_at_ms: 43,
+    };
 
     storage
         .upsert_with_groupchat_notification_recovery(
@@ -197,6 +227,43 @@ async fn sqlx_inbox_storage_tracks_groupchat_notification_recovery() {
         .await
         .expect("list after complete")
         .is_empty());
+    storage
+        .insert_groupchat_notification_recovery(second_recovery.clone())
+        .await
+        .expect("insert second recovery");
+    assert_eq!(
+        storage
+            .mark_groupchat_notification_recovery_completed(&second_recovery.key)
+            .await
+            .expect("mark second completed"),
+        1
+    );
+    assert_eq!(groupchat_notification_recovery_row_count(&storage).await, 2);
+    assert_eq!(
+        storage
+            .prune_completed_groupchat_notification_recoveries(0, 16)
+            .await
+            .expect("prune before cutoff"),
+        0
+    );
+    assert_eq!(groupchat_notification_recovery_row_count(&storage).await, 2);
+    let future_cutoff_ms = crate::time::now_ms().saturating_add(1_000);
+    assert_eq!(
+        storage
+            .prune_completed_groupchat_notification_recoveries(future_cutoff_ms, 1)
+            .await
+            .expect("bounded prune first row"),
+        1
+    );
+    assert_eq!(groupchat_notification_recovery_row_count(&storage).await, 1);
+    assert_eq!(
+        storage
+            .prune_completed_groupchat_notification_recoveries(future_cutoff_ms, 16)
+            .await
+            .expect("prune remaining row"),
+        1
+    );
+    assert_eq!(groupchat_notification_recovery_row_count(&storage).await, 0);
 }
 
 #[tokio::test(flavor = "multi_thread")]

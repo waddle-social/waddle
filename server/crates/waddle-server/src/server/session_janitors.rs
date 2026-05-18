@@ -607,6 +607,27 @@ pub(crate) fn spawn_notification_outbox_janitor(websocket_state: &Arc<WebSocketS
                     );
                 }
             }
+            match state
+                .deps
+                .protocol
+                .inbox_storage
+                .prune_completed_groupchat_notification_recoveries(cutoff_ms, prune_batch_size)
+                .await
+            {
+                Ok(deleted) if deleted > 0 => {
+                    debug!(
+                        deleted,
+                        "Notification outbox janitor pruned completed groupchat notification recovery rows"
+                    );
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    warn!(
+                        error = %error,
+                        "Notification outbox janitor failed to prune completed groupchat notification recovery rows"
+                    );
+                }
+            }
         }
     });
 }

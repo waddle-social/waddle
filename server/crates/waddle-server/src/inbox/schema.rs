@@ -102,6 +102,13 @@ pub(super) async fn initialize(storage: &DatabaseInboxStorage) -> Result<(), Inb
         (),
     )
     .await?;
+    storage.execute(
+        "CREATE INDEX IF NOT EXISTS idx_groupchat_notification_recovery_completed_prune \
+         ON groupchat_notification_recovery (completed_at_ms, recipient_bare_jid, room_jid, thread_id, stanza_id_by, stanza_id) \
+         WHERE completed_at_ms IS NOT NULL",
+        (),
+    )
+    .await?;
     Ok(())
 }
 

@@ -452,6 +452,29 @@ impl InboxStorage for DatabaseInboxStorage {
         .await
     }
 
+    async fn prune_completed_groupchat_notification_recoveries(
+        &self,
+        cutoff_ms: i64,
+        limit: usize,
+    ) -> Result<u64, InboxStorageError> {
+        if limit == 0 {
+            return Ok(0);
+        }
+        self.execute(
+            "DELETE FROM groupchat_notification_recovery \
+             WHERE (recipient_bare_jid, room_jid, thread_id, stanza_id_by, stanza_id) IN ( \
+                 SELECT recipient_bare_jid, room_jid, thread_id, stanza_id_by, stanza_id \
+                 FROM groupchat_notification_recovery \
+                 WHERE completed_at_ms IS NOT NULL \
+                   AND completed_at_ms < ? \
+                 ORDER BY completed_at_ms ASC, recipient_bare_jid ASC, room_jid ASC, thread_id ASC, stanza_id_by ASC, stanza_id ASC \
+                 LIMIT ? \
+             )",
+            crate::db_params![cutoff_ms, limit],
+        )
+        .await
+    }
+
     #[instrument(skip(self), fields(user = %user, partner = %partner))]
     async fn mark_read(
         &self,
