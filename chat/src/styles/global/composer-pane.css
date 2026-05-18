@@ -2,6 +2,54 @@
 .chat-composer {
   padding: var(--chat-composer-block) var(--chat-content-inline);
   box-shadow: var(--shadow-pane);
+  /* The composer measures its own width — sidebar/thread-panel state can
+   * leave plenty of viewport but very little composer, so a viewport-level
+   * breakpoint would misclassify those layouts. */
+  container-type: inline-size;
+  container-name: composer;
+}
+
+/* Persistent formatting cluster — wide-only. Inline `display: flex` mirrors
+ * what the component renders; below the container-query threshold the
+ * cluster yields to the Aa toggle + format strip. */
+.chat-composer-format-wide {
+  display: flex;
+}
+
+.chat-composer-format-aa {
+  display: none;
+}
+
+.chat-composer-format-strip {
+  display: none;
+  padding-top: var(--space-2xs);
+}
+
+@container composer (width < 520px) {
+  .chat-composer-format-wide {
+    display: none;
+  }
+
+  .chat-composer-format-aa {
+    display: flex;
+  }
+
+  /* The v-if on the strip controls open/closed; this rule only governs the
+   * wide-mode hide. Once the v-if elects to render the strip on narrow, it
+   * gets `display: flex` here. */
+  .chat-composer-format-strip {
+    display: flex;
+  }
+}
+
+/* The link popover is intentionally narrower than the full-width composer
+ * popovers (mentions, emoji, slash, GIF). A URL input + 3 buttons doesn't
+ * need to span the whole composer, and a smaller popover sits closer to the
+ * trigger so the visual link between the Link button and its panel survives. */
+.chat-composer-format-link-popover {
+  left: var(--chat-content-inline);
+  right: auto;
+  width: min(28rem, calc(100% - 2 * var(--chat-content-inline)));
 }
 
 /* The composer input-shell is where the user writes — the most

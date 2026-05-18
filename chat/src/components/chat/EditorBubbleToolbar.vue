@@ -1,22 +1,16 @@
 <script setup lang="ts">
-import { computed, nextTick, ref } from "vue";
+import { computed } from "vue";
 import type { Editor } from "@tiptap/core";
 import { BubbleMenu } from "@tiptap/vue-3/menus";
-import { Bold, Italic, Strikethrough, Code, Link, List, ListOrdered, TextQuote, SquareCode } from "lucide-vue-next";
+import { Strikethrough, List, ListOrdered, TextQuote, SquareCode } from "lucide-vue-next";
+import { formatModShortcut } from "@/lib/composer/format-shortcut";
 
 const props = defineProps<{
   editor: Editor;
 }>();
 
-const linkUrl = ref("");
-const editingLink = ref(false);
-const linkInputRef = ref<HTMLInputElement | null>(null);
-
 type ToolbarAction =
-  | "bold"
-  | "italic"
   | "strike"
-  | "code"
   | "bulletList"
   | "orderedList"
   | "blockquote"
@@ -25,17 +19,8 @@ type ToolbarAction =
 function runCommand(action: ToolbarAction) {
   const chain = props.editor.chain().focus();
   switch (action) {
-    case "bold":
-      chain.toggleBold().run();
-      break;
-    case "italic":
-      chain.toggleItalic().run();
-      break;
     case "strike":
       chain.toggleStrike().run();
-      break;
-    case "code":
-      chain.toggleCode().run();
       break;
     case "bulletList":
       chain.toggleBulletList().run();
@@ -50,101 +35,43 @@ function runCommand(action: ToolbarAction) {
       chain.toggleCodeBlock().run();
       break;
   }
-  editingLink.value = false;
-}
-
-function openLinkInput() {
-  editingLink.value = true;
-  const href = props.editor.getAttributes("link").href;
-  linkUrl.value = typeof href === "string" && href ? href : "https://";
-  void nextTick(() => linkInputRef.value?.focus());
-}
-
-function applyLink() {
-  const href = sanitizeLinkUrl(linkUrl.value);
-  if (href) {
-    props.editor.chain().focus().extendMarkRange("link").setLink({ href }).run();
-  } else {
-    props.editor.chain().focus().extendMarkRange("link").unsetLink().run();
-  }
-  editingLink.value = false;
-}
-
-function sanitizeLinkUrl(url: string): string | null {
-  const trimmed = url.trim();
-  if (!trimmed) return null;
-  try {
-    const parsed = new URL(trimmed);
-    if (!["http:", "https:", "mailto:"].includes(parsed.protocol)) return null;
-    return parsed.toString();
-  } catch {
-    return null;
-  }
 }
 
 const items = computed(() => [
   {
-    name: "bold",
-    icon: Bold,
-    title: "Bold",
-    action: () => runCommand("bold"),
-    isActive: () => props.editor.isActive("bold"),
-  },
-  {
-    name: "italic",
-    icon: Italic,
-    title: "Italic",
-    action: () => runCommand("italic"),
-    isActive: () => props.editor.isActive("italic"),
-  },
-  {
     name: "strike",
     icon: Strikethrough,
-    title: "Strikethrough",
+    title: `Strikethrough (${formatModShortcut("Mod-Shift-X")})`,
     action: () => runCommand("strike"),
     isActive: () => props.editor.isActive("strike"),
   },
   {
-    name: "code",
-    icon: Code,
-    title: "Inline code",
-    action: () => runCommand("code"),
-    isActive: () => props.editor.isActive("code"),
-  },
-  {
     name: "bullet-list",
     icon: List,
-    title: "Bullet list",
+    title: `Bullet list (${formatModShortcut("Mod-Shift-8")})`,
     action: () => runCommand("bulletList"),
     isActive: () => props.editor.isActive("bulletList"),
   },
   {
     name: "ordered-list",
     icon: ListOrdered,
-    title: "Numbered list",
+    title: `Numbered list (${formatModShortcut("Mod-Shift-7")})`,
     action: () => runCommand("orderedList"),
     isActive: () => props.editor.isActive("orderedList"),
   },
   {
     name: "blockquote",
     icon: TextQuote,
-    title: "Quote",
+    title: `Quote (${formatModShortcut("Mod-Shift-B")})`,
     action: () => runCommand("blockquote"),
     isActive: () => props.editor.isActive("blockquote"),
   },
   {
     name: "code-block",
     icon: SquareCode,
-    title: "Code block",
+    title: `Code block (${formatModShortcut("Mod-Alt-C")})`,
     action: () => runCommand("codeBlock"),
     isActive: () => props.editor.isActive("codeBlock"),
-  },
-  {
-    name: "link",
-    icon: Link,
-    title: "Link",
-    action: openLinkInput,
-    isActive: () => props.editor.isActive("link"),
   },
 ]);
 </script>
@@ -160,27 +87,17 @@ const items = computed(() => [
         type="button"
         class="type-control h-8 w-8 flex items-center justify-center rounded-md transition-all duration-150"
         :class="
-          (editingLink && item.name === 'link') || item.isActive?.()
+          item.isActive?.()
             ? 'bg-primary/10 text-primary'
             : 'text-muted-foreground hover:bg-muted hover:text-foreground'
         "
         :title="item.title"
+        :aria-label="item.title"
+        :aria-pressed="item.isActive?.() ?? false"
         @mousedown.prevent="item.action"
       >
-        <component :is="item.icon" class="w-3.5 h-3.5" />
+        <component :is="item.icon" class="w-3.5 h-3.5" aria-hidden="true" />
       </button>
-      <input
-        v-if="editingLink"
-        ref="linkInputRef"
-        v-model="linkUrl"
-        type="url"
-        inputmode="url"
-        class="type-caption h-8 w-48 rounded-md border border-border bg-background px-2 text-foreground outline-none focus:border-primary"
-        placeholder="https://example.com"
-        @keydown.enter.prevent="applyLink"
-        @keydown.esc.prevent="editingLink = false"
-        @mousedown.stop
-      />
     </div>
   </BubbleMenu>
 </template>

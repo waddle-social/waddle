@@ -1,11 +1,12 @@
 <script setup lang="ts">
-import { ref, computed, watch, onBeforeUnmount } from "vue";
-import { Send, Paperclip, FileText, Music4, Puzzle, X, Loader2, Megaphone, Radio, CornerDownLeft } from "lucide-vue-next";
-import type { JSONContent } from "@tiptap/core";
+import { ref, computed, watch, onBeforeUnmount, nextTick } from "vue";
+import { Send, Paperclip, FileText, Music4, Puzzle, X, Loader2, Megaphone, Radio, CornerDownLeft, CaseSensitive } from "lucide-vue-next";
+import type { JSONContent, Editor as TiptapEditor } from "@tiptap/core";
 import GifPicker from "@/components/chat/GifPicker.vue";
 import ChatEditor from "@/components/chat/ChatEditor.vue";
 import EditorBubbleToolbar from "@/components/chat/EditorBubbleToolbar.vue";
 import SlashCommandPopover from "@/components/chat/SlashCommandPopover.vue";
+import ComposerFormatButtons from "@/components/chat/ComposerFormatButtons.vue";
 import { searchEmoji } from "@/lib/emoji";
 import { getComposerAutocompleteAction, getComposerEscapeAction } from "@/lib/reply-ux";
 import { tiptapToRichMessage } from "@/lib/rich-message";
@@ -15,6 +16,9 @@ import { parseSlashTrigger } from "@/lib/slash-trigger";
 import { filterSlashCandidates, resolveSlashCommand } from "@/lib/slash-match";
 import { buildSlashInvocation, type SlashInvocation } from "@/lib/slash-dispatch";
 import type { DiscoveredExtensionCommand } from "@/lib/xmpp/extension-commands";
+import { sanitizeLinkUrl } from "@/lib/composer/link-url";
+import { formatStripExpanded } from "@/lib/composer/format-strip-state";
+import { formatModShortcut } from "@/lib/composer/format-shortcut";
 import {
   isAudioFile,
   isImageFile,
@@ -93,10 +97,147 @@ const setExtensionButtonRef = (el: HTMLButtonElement | null) => {
   extensionButtonRef.value = el;
 };
 
-const tiptapEditor = computed(() => {
+const tiptapEditor = computed<TiptapEditor | null>(() => {
   const e = editorRef.value as any;
   return e?.editor?.value ?? e?.editor ?? null;
 });
+
+/**
+ * Bumped on every TipTap transaction so reactive consumers (format-button
+ * active state, link-active hint) re-evaluate `editor.isActive(...)`. Vue's
+ * reactivity doesn't track changes inside the Editor instance, so we need an
+ * external ref to invalidate dependent computeds.
+ */
+const formatVersion = ref(0);
+let detachFormatTracker: (() => void) | null = null;
+
+function attachFormatTracker(editor: TiptapEditor): () => void {
+  // selectionUpdate + update cover the two state changes that affect
+  // mark-active reads — caret moves and document edits. Subscribing to
+  // `transaction` would also fire on every IME/Pmod intermediate that
+  // doesn't change visible state, which is wasted reactivity.
+  const bump = () => {
+    formatVersion.value++;
+  };
+  editor.on("selectionUpdate", bump);
+  editor.on("update", bump);
+  return () => {
+    editor.off("selectionUpdate", bump);
+    editor.off("update", bump);
+  };
+}
+
+watch(
+  tiptapEditor,
+  (editor) => {
+    detachFormatTracker?.();
+    detachFormatTracker = null;
+    if (editor) detachFormatTracker = attachFormatTracker(editor);
+  },
+  { immediate: true },
+);
+
+onBeforeUnmount(() => {
+  detachFormatTracker?.();
+  detachFormatTracker = null;
+});
+
+const formattingDisabled = computed(() => props.disabled || props.slowModeCooldown > 0);
+
+const linkActive = computed(() => {
+  void formatVersion.value;
+  return tiptapEditor.value?.isActive("link") ?? false;
+});
+
+const showLinkPopover = ref(false);
+const linkInputValue = ref("");
+const linkInputRef = ref<HTMLInputElement | null>(null);
+const setLinkInputRef = (el: HTMLInputElement | null) => {
+  linkInputRef.value = el;
+};
+const linkDialogRef = ref<HTMLElement | null>(null);
+const setLinkDialogRef = (el: HTMLElement | null) => {
+  linkDialogRef.value = el;
+};
+
+const linkShortcutLabel = computed(() => formatModShortcut("Mod-K"));
+
+const canApplyLink = computed(() => sanitizeLinkUrl(linkInputValue.value) !== null);
+
+function toggleMark(mark: "bold" | "italic" | "code") {
+  const editor = tiptapEditor.value;
+  if (!editor || formattingDisabled.value) return;
+  const chain = editor.chain().focus();
+  if (mark === "bold") chain.toggleBold().run();
+  else if (mark === "italic") chain.toggleItalic().run();
+  else chain.toggleCode().run();
+}
+
+function openLinkPopover() {
+  const editor = tiptapEditor.value;
+  if (!editor || formattingDisabled.value) return;
+  const href = editor.getAttributes("link").href;
+  linkInputValue.value = typeof href === "string" && href ? href : "";
+  showLinkPopover.value = true;
+  void nextTick(() => {
+    const input = linkInputRef.value;
+    if (!input) return;
+    input.focus();
+    input.select();
+  });
+}
+
+function cancelLinkPopover() {
+  showLinkPopover.value = false;
+  linkInputValue.value = "";
+  // Hand focus back to the editor so the next keystroke types into the draft.
+  tiptapEditor.value?.commands.focus();
+}
+
+function applyLinkPopover() {
+  const editor = tiptapEditor.value;
+  if (!editor) return;
+  const href = sanitizeLinkUrl(linkInputValue.value);
+  // Apply is only valid for a sanitizable href; the popover disables the
+  // Apply button otherwise. Empty-input → no-op (the Remove button handles
+  // explicit removal so an accidental Apply on an empty field can't silently
+  // strip an existing link).
+  if (!href) return;
+  editor.chain().focus().extendMarkRange("link").setLink({ href }).run();
+  showLinkPopover.value = false;
+  linkInputValue.value = "";
+}
+
+function removeLinkFromSelection() {
+  const editor = tiptapEditor.value;
+  if (!editor) return;
+  editor.chain().focus().extendMarkRange("link").unsetLink().run();
+  showLinkPopover.value = false;
+  linkInputValue.value = "";
+}
+
+function onLinkDialogTab(e: KeyboardEvent) {
+  const root = linkDialogRef.value;
+  if (!root) return;
+  const focusables = Array.from(
+    root.querySelectorAll<HTMLElement>("input, button"),
+  ).filter((el) => !el.hasAttribute("disabled"));
+  if (focusables.length === 0) return;
+  const first = focusables[0];
+  const last = focusables[focusables.length - 1];
+  const active = document.activeElement as HTMLElement | null;
+  if (e.shiftKey && active === first) {
+    e.preventDefault();
+    last.focus();
+  } else if (!e.shiftKey && active === last) {
+    e.preventDefault();
+    first.focus();
+  }
+}
+
+function toggleFormatStrip() {
+  formatStripExpanded.value = !formatStripExpanded.value;
+}
 
 const pendingAttachments = ref<PendingAttachment[]>([]);
 
@@ -504,6 +645,25 @@ function onEditorCancel() {
 }
 
 function onKeydown(e: KeyboardEvent) {
+  // The composer hosts several sibling inputs (forum title, link popover
+  // URL). Mod-K and the autocomplete navigation keys belong to the message
+  // draft, not those inputs — early-return when the event originates from a
+  // native form control so we don't steal keystrokes from them.
+  const target = e.target as HTMLElement | null;
+  if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) {
+    return;
+  }
+
+  // Mod-K opens the link popover, regardless of autocomplete state. The
+  // existing keymap doesn't bind this combo, so intercepting here matches
+  // the tooltip without colliding with editor or autocomplete handlers.
+  if ((e.key === "k" || e.key === "K") && (e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey) {
+    e.preventDefault();
+    e.stopPropagation();
+    openLinkPopover();
+    return;
+  }
+
   if (activeResults.value.length > 0 && (showMentions.value || showEmoji.value || showSlash.value)) {
     if (e.key === "ArrowDown") {
       e.preventDefault();
@@ -844,6 +1004,46 @@ watch(
       >
         <span class="chat-composer-gif-badge" aria-hidden="true">GIF</span>
       </button>
+      <!-- Persistent formatting cluster — wide viewport. Container query in
+           composer-pane.css hides this whole cluster below the threshold
+           where the row would crowd the editor; the Aa toggle + format strip
+           below take over there. `ml-3` is the wider gap that separates the
+           "add to draft" cluster (Paperclip, GIF) from the "format the text"
+           cluster (B, I, Code, Link) — wider than the surrounding `gap-2`
+           between buttons (8px → 12px) so the seam reads as cluster boundary,
+           not as a tighter grouping inside the row. The wrapper exists so CSS
+           owns `display`; the inner `flex` utility from ComposerFormatButtons
+           would win over our container-query rule otherwise (utilities layer
+           beats components). -->
+      <div class="chat-composer-format-wide ml-3">
+        <ComposerFormatButtons
+          :editor="tiptapEditor"
+          :disabled="formattingDisabled"
+          :format-version="formatVersion"
+          :link-active="linkActive"
+          @toggle="toggleMark"
+          @open-link="openLinkPopover"
+        />
+      </div>
+      <!-- Aa toggle — narrow viewport only. Tap to reveal the format strip
+           below the input shell. Disclosure semantics: aria-expanded +
+           aria-controls; not aria-pressed (this isn't a persistent toggled
+           mode in the editor, it just shows/hides a region). `mousedown.prevent`
+           keeps the editor focused so any active selection survives the click. -->
+      <button
+        type="button"
+        class="chat-composer-format-aa chat-composer-input-action ml-3 h-9 w-9 shrink-0 items-center justify-center transition-all duration-200 active:scale-[0.94] disabled:opacity-40 disabled:active:scale-100 [@media(pointer:coarse)]:h-11 [@media(pointer:coarse)]:w-11"
+        :class="formatStripExpanded ? 'bg-background/80 text-primary' : 'text-muted-foreground hover:bg-background/70 hover:text-primary'"
+        title="Formatting"
+        aria-label="Formatting"
+        :aria-expanded="formatStripExpanded"
+        aria-controls="composer-format-strip"
+        :disabled="formattingDisabled"
+        @mousedown.prevent
+        @click="toggleFormatStrip"
+      >
+        <CaseSensitive class="w-4 h-4" aria-hidden="true" />
+      </button>
       <ChatEditor
         :ref="setEditorRef"
         class="min-w-0"
@@ -885,6 +1085,81 @@ watch(
         <Loader2 v-else-if="isSending" class="w-4 h-4 motion-safe:animate-spin" aria-hidden="true" />
         <Send v-else class="w-4 h-4" aria-hidden="true" />
       </button>
+    </div>
+    <!-- Format strip — narrow viewport only, revealed by the Aa toggle.
+         Hidden via the container query on wide; the v-if controls the open/
+         closed state on narrow. State is session-sticky via the shared
+         `formatStripExpanded` ref. `id` matches the Aa button's
+         `aria-controls`. -->
+    <div
+      v-if="formatStripExpanded"
+      id="composer-format-strip"
+      class="chat-composer-format-strip animate-fade-in"
+    >
+      <ComposerFormatButtons
+        :editor="tiptapEditor"
+        :disabled="formattingDisabled"
+        :format-version="formatVersion"
+        :link-active="linkActive"
+        @toggle="toggleMark"
+        @open-link="openLinkPopover"
+      />
+    </div>
+    <!-- Link URL popover — opened by the Link button in either cluster, or
+         by Mod-K. Anchored to the composer with the same isTopPinned-aware
+         positioning as the other popovers (mentions, emoji, slash). Modeled
+         as a modal dialog: focus moves into the input, is trapped via Tab/
+         Shift-Tab, and returns to the editor on close. The Esc handler lives
+         on the dialog root so it fires regardless of which inner control has
+         focus. -->
+    <div
+      v-if="showLinkPopover"
+      :ref="setLinkDialogRef"
+      class="chat-composer-format-link-popover z-popover absolute glass-panel border border-border rounded-lg shadow-xl animate-fade-in p-2"
+      :class="isTopPinned ? 'top-full mt-2' : 'bottom-full mb-2'"
+      role="dialog"
+      aria-modal="true"
+      :aria-label="linkActive ? `Edit link (${linkShortcutLabel})` : `Add link (${linkShortcutLabel})`"
+      @keydown.esc.prevent.stop="cancelLinkPopover"
+      @keydown.tab="onLinkDialogTab"
+    >
+      <div class="chat-composer-format-link-row flex items-center gap-2">
+        <input
+          :ref="setLinkInputRef"
+          v-model="linkInputValue"
+          type="url"
+          inputmode="url"
+          autocomplete="off"
+          spellcheck="false"
+          class="type-control h-9 min-w-0 flex-1 rounded-md border border-border bg-background px-2 text-foreground outline-none focus:border-primary"
+          placeholder="https://example.com"
+          @keydown.enter.prevent="applyLinkPopover"
+          @mousedown.stop
+        />
+        <button
+          type="button"
+          class="type-control h-9 px-3 rounded-md bg-primary text-primary-foreground transition-all duration-150 hover:brightness-110 active:scale-[0.96] disabled:opacity-40 disabled:hover:brightness-100"
+          :disabled="!canApplyLink"
+          @click="applyLinkPopover"
+        >
+          Apply
+        </button>
+        <button
+          v-if="linkActive"
+          type="button"
+          class="type-control h-9 px-3 rounded-md text-destructive hover:bg-destructive/10 transition-colors"
+          @click="removeLinkFromSelection"
+        >
+          Remove
+        </button>
+        <button
+          type="button"
+          class="type-control h-9 px-3 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
+          @click="cancelLinkPopover"
+        >
+          Cancel
+        </button>
+      </div>
     </div>
     <EditorBubbleToolbar v-if="tiptapEditor" :editor="tiptapEditor" />
   </div>
