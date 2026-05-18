@@ -81,9 +81,7 @@ async fn resolve_thread_id(
         .get_message_by_message_id(room, displayed_message_id)
         .await
     {
-        Ok(Some(archived)) => archived
-            .thread
-            .map(|thread| thread.id.as_str().to_owned()),
+        Ok(Some(archived)) => archived.thread.map(|thread| thread.id.as_str().to_owned()),
         Ok(None) => {
             debug!(
                 %room,
@@ -148,7 +146,8 @@ mod tests {
     use waddle_xmpp::mam::storage::{InMemoryMamStorage, MamStorage};
     use waddle_xmpp::mam::{ArchivedMessage as MamArchivedMessage, RichMessageId};
     use waddle_xmpp::registry::ConnectionRegistry;
-    use waddle_xmpp_core::mam::{ThreadId, ThreadInfo};
+    use waddle_xmpp_core::mam::ThreadId;
+    use waddle_xmpp_core::ThreadInfo;
     use waddle_xmpp_core::xep0359::StanzaId as Xep0359StanzaId;
     use xmpp_parsers::message::MessageType;
 
@@ -165,7 +164,10 @@ mod tests {
         let thread_info = thread.and_then(|raw| {
             ThreadId::new(raw.to_string()).map(|id| ThreadInfo { id, parent: None })
         });
-        let stanza_id = Some(Xep0359StanzaId::new(wire_id.to_string(), archive_jid.clone()));
+        let stanza_id = Some(Xep0359StanzaId::new(
+            wire_id.to_string(),
+            archive_jid.clone(),
+        ));
         MamArchivedMessage {
             id: wire_id.to_string(),
             timestamp: chrono::Utc::now(),
@@ -256,7 +258,10 @@ mod tests {
         let channels = inbox.list(&owner).await.expect("list channels");
         assert_eq!(channels.len(), 1);
         assert_eq!(channels[0].unread, 0, "channel row must clear");
-        let threads = inbox.list_threads(&owner, &room).await.expect("list threads");
+        let threads = inbox
+            .list_threads(&owner, &room)
+            .await
+            .expect("list threads");
         assert_eq!(threads.len(), 1);
         assert_eq!(
             threads[0].unread, 0,
@@ -277,13 +282,8 @@ mod tests {
         let deps = deps_for_test(&registry, &mam, &inbox);
 
         // MAM has no message → channel row still clears, thread row stays.
-        mark_inbox_read_from_displayed(
-            &deps,
-            owner.clone(),
-            room.clone(),
-            "missing-id".into(),
-        )
-        .await;
+        mark_inbox_read_from_displayed(&deps, owner.clone(), room.clone(), "missing-id".into())
+            .await;
 
         let channels = inbox.list(&owner).await.expect("list");
         assert_eq!(channels[0].unread, 0, "channel still clears");

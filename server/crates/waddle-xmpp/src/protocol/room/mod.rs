@@ -35,8 +35,8 @@
 pub mod archive;
 pub mod canonicalize;
 pub mod context;
-pub mod displayed_marker;
 pub mod dispatch;
+pub mod displayed_marker;
 pub mod errors;
 pub mod inbox;
 pub mod occupancy_validation;
