@@ -538,11 +538,12 @@ mod tests {
         // Regression: `Value::from(Option::<i64>::None)` used to fold
         // every nullable type onto a single untyped null, which the
         // Postgres bind site bound as `Option::<String>::None` (text
-        // NULL). That was rejected on `bigint` columns with "column is
-        // of type bigint but expression is of type text", which in
-        // production rolled back every SM session detach and froze
-        // MAM/inbox writes for two hours. The fix: typed-null variants
-        // per Rust type, dispatched through `TypedNull`.
+        // NULL). That was rejected on `bigint`/`integer` columns with
+        // "column is of type bigint but expression is of type text",
+        // and in production rolled back every SM session detach (the
+        // "Failed to detach SM session; falling back to full cleanup"
+        // log line). The fix: typed-null variants per Rust type,
+        // dispatched through `TypedNull`.
         assert_eq!(Value::from(Option::<i64>::None), Value::NullInteger);
         assert_eq!(Value::from(Option::<i32>::None), Value::NullInteger);
         assert_eq!(Value::from(Option::<u32>::None), Value::NullInteger);
@@ -589,13 +590,19 @@ mod tests {
             assert!(<Option<i64> as DbDecode>::decode(v.clone())
                 .unwrap()
                 .is_none());
+            assert!(<Option<i32> as DbDecode>::decode(v.clone())
+                .unwrap()
+                .is_none());
             assert!(<Option<String> as DbDecode>::decode(v.clone())
                 .unwrap()
                 .is_none());
             assert!(<Option<f64> as DbDecode>::decode(v.clone())
                 .unwrap()
                 .is_none());
-            assert!(<Option<bool> as DbDecode>::decode(v).unwrap().is_none());
+            assert!(<Option<bool> as DbDecode>::decode(v.clone())
+                .unwrap()
+                .is_none());
+            assert!(<Option<Vec<u8>> as DbDecode>::decode(v).unwrap().is_none());
         }
     }
 }

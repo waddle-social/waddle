@@ -75,13 +75,14 @@ async fn round_trip_session_preserves_every_field() {
 
 #[tokio::test]
 async fn upsert_session_persists_with_all_nullable_bigint_fields_unset() {
-    // Regression for the prod incident where every SM detach failed on
-    // Postgres because `replay_gap_through`/`max_resume_time` came in
-    // as `None` and the bind path folded every `None` onto an untyped
-    // null that the Postgres binder typed as TEXT — rejected by the
-    // `bigint` column. SQLite is type-loose enough not to trip on the
-    // bug directly, but exercising the all-None path here pins the API
-    // surface: writes succeed and reads round-trip `None` to `None`.
+    // Regression for the SM-detach failure mode where every detach
+    // attempt failed on Postgres because `replay_gap_through` /
+    // `max_resume_time` came in as `None` and the bind path folded
+    // every `None` onto an untyped null that the Postgres binder
+    // typed as TEXT — rejected by the `bigint` column. SQLite is
+    // type-loose enough not to trip on the bug directly, but
+    // exercising the all-None path here pins the API surface: writes
+    // succeed and reads round-trip `None` to `None`.
     let storage = DatabaseSmPersistence::open(None).await.unwrap();
     let mut s = fixture_session("stream-null-fields");
     s.replay_gap_through = None;
