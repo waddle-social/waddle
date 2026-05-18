@@ -43,6 +43,7 @@ pub mod xmpp_state;
 pub use config::{XmppAcmeConfig, XmppConfig};
 pub use state::{resolve_server_owner_jids, AppState, AppStateDeps};
 
+use crate::channel_space_links::build_channel_space_link_store;
 use crate::config::ServerConfig;
 use crate::db::DatabasePool;
 use crate::inbox::build_inbox_storage;
@@ -140,6 +141,12 @@ pub async fn start_with_config(
             .map_err(|error| {
                 anyhow::anyhow!("Failed to initialize spaces metadata storage: {}", error)
             })?;
+    let channel_space_link_store =
+        build_channel_space_link_store(xmpp_config.channel_space_links_database_url.clone())
+            .await
+            .map_err(|error| {
+                anyhow::anyhow!("Failed to initialize channel-space link storage: {}", error)
+            })?;
     // Build the shared XEP-0060 PubSub/PEP storage and the MUC
     // (XEP-0045) room registry here so the resulting handles live on
     // `AppState`. Admin V2 handlers reach them via `state.*` instead of
@@ -173,6 +180,7 @@ pub async fn start_with_config(
         blob_storage,
         inbox_storage: Arc::clone(&inbox_storage),
         spaces_metadata_store: Arc::clone(&spaces_metadata_store),
+        channel_space_link_store: Arc::clone(&channel_space_link_store),
         pubsub_storage: Arc::clone(&pubsub_storage),
         room_registry: room_registry.clone(),
         spaces_jid: xmpp_config.spaces_jid.clone(),

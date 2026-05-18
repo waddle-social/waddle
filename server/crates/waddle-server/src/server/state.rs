@@ -1,3 +1,4 @@
+use crate::channel_space_links::ChannelSpaceLinkStore;
 use crate::permissions::PermissionActor;
 use crate::server::bootstrap_membership;
 use crate::spaces_metadata::SpacesMetadataStore;
@@ -22,6 +23,12 @@ pub struct AppState {
     /// commands. XEP-0503 has no opinion on these human-facing fields;
     /// they live here as a Waddle-specific projection.
     pub spaces_metadata_store: Arc<dyn SpacesMetadataStore>,
+    /// Channel → space link storage. Records which space (XEP-0503)
+    /// owns a given channel (XEP-0045 room) so admin V2's
+    /// `channels:list` `space_jid` filter can narrow results to the
+    /// channels of a single space, and so `spaces:delete` can cascade
+    /// destroy its linked channels.
+    pub channel_space_link_store: Arc<dyn ChannelSpaceLinkStore>,
     /// Shared PubSub/PEP storage (XEP-0060/XEP-0163). Exposed on
     /// `AppState` so admin V2 `spaces:list` / `channels:list` handlers
     /// can enumerate pubsub-tree node membership without re-routing
@@ -89,6 +96,9 @@ impl AppState {
             spaces_metadata_store: Arc::new(
                 crate::spaces_metadata::InMemorySpacesMetadataStore::new(),
             ),
+            channel_space_link_store: Arc::new(
+                crate::channel_space_links::InMemoryChannelSpaceLinkStore::new(),
+            ),
             pubsub_storage: Arc::new(InMemoryPubSubStorage::new()),
             room_registry,
             spaces_jid,
@@ -107,6 +117,7 @@ impl AppState {
             blob_storage,
             inbox_storage,
             spaces_metadata_store,
+            channel_space_link_store,
             pubsub_storage,
             room_registry,
             spaces_jid,
@@ -119,6 +130,7 @@ impl AppState {
             blob_storage,
             inbox_storage,
             spaces_metadata_store,
+            channel_space_link_store,
             pubsub_storage,
             room_registry,
             spaces_jid,
@@ -137,6 +149,7 @@ pub struct AppStateDeps {
     pub blob_storage: Arc<dyn crate::storage::BlobStorage>,
     pub inbox_storage: Arc<dyn InboxStorage>,
     pub spaces_metadata_store: Arc<dyn SpacesMetadataStore>,
+    pub channel_space_link_store: Arc<dyn ChannelSpaceLinkStore>,
     pub pubsub_storage: Arc<dyn PubSubStorage>,
     pub room_registry: ActorRef<RoomRegistryActor>,
     pub spaces_jid: BareJid,

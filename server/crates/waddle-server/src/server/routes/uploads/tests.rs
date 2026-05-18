@@ -44,6 +44,9 @@ async fn create_test_upload_state() -> (Arc<UploadState>, std::path::PathBuf) {
         blob_storage,
         inbox_storage: Arc::new(waddle_xmpp::inbox::storage::InMemoryInboxStorage::new()),
         spaces_metadata_store: Arc::new(crate::spaces_metadata::InMemorySpacesMetadataStore::new()),
+        channel_space_link_store: Arc::new(
+            crate::channel_space_links::InMemoryChannelSpaceLinkStore::new(),
+        ),
         pubsub_storage: Arc::new(InMemoryPubSubStorage::new()),
         room_registry,
         spaces_jid: "spaces.example.com".parse().expect("spaces JID parses"),
