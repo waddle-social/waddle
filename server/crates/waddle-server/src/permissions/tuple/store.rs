@@ -46,10 +46,7 @@ impl TupleStore {
                     tuple.relation.name.as_str().into(),
                     tuple.subject.subject_type.to_string().into(),
                     tuple.subject.id.as_str().into(),
-                    match subject_relation {
-                        Some(relation) => relation.into(),
-                        None => crate::db::Value::Null,
-                    },
+                    crate::db::Value::from(subject_relation),
                 ],
             })
             .await
@@ -86,14 +83,8 @@ impl TupleStore {
                     tuple.relation.name.as_str().into(),
                     tuple.subject.subject_type.to_string().into(),
                     tuple.subject.id.as_str().into(),
-                    match subject_relation {
-                        Some(relation) => relation.into(),
-                        None => crate::db::Value::Null,
-                    },
-                    match subject_relation {
-                        Some(relation) => relation.into(),
-                        None => crate::db::Value::Null,
-                    },
+                    crate::db::Value::from(subject_relation),
+                    crate::db::Value::from(subject_relation),
                 ],
             })
             .await
@@ -132,14 +123,8 @@ impl TupleStore {
                     relation.into(),
                     subject.subject_type.to_string().into(),
                     subject.id.as_str().into(),
-                    match subject_relation {
-                        Some(relation) => relation.into(),
-                        None => crate::db::Value::Null,
-                    },
-                    match subject_relation {
-                        Some(relation) => relation.into(),
-                        None => crate::db::Value::Null,
-                    },
+                    crate::db::Value::from(subject_relation),
+                    crate::db::Value::from(subject_relation),
                 ],
             })
             .await
@@ -171,14 +156,8 @@ impl TupleStore {
                     object.id.as_str().into(),
                     subject.subject_type.to_string().into(),
                     subject.id.as_str().into(),
-                    match subject_relation {
-                        Some(relation) => relation.into(),
-                        None => crate::db::Value::Null,
-                    },
-                    match subject_relation {
-                        Some(relation) => relation.into(),
-                        None => crate::db::Value::Null,
-                    },
+                    crate::db::Value::from(subject_relation),
+                    crate::db::Value::from(subject_relation),
                 ],
             })
             .await

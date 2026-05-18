@@ -1,8 +1,25 @@
 use super::DatabaseError;
 
+/// SQL type carried by a `Value::Null` bind so the driver can send the
+/// correct OID. Postgres rejects a bind whose declared OID doesn't
+/// match the target column (e.g. `column "replay_gap_through" is of
+/// type bigint but expression is of type text`); SQLite ignores it.
+///
+/// The `From<Option<T>>` impls below set this from `T`, so call sites
+/// don't need to know it explicitly — only the rare site that
+/// constructs a `Value::Null` without going through an `Option<T>`
+/// (e.g. `match` arms binding raw `None`) must pick a kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NullKind {
+    Integer,
+    Real,
+    Text,
+    Blob,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
-    Null,
+    Null(NullKind),
     Integer(i64),
     Real(f64),
     Text(String),
@@ -117,12 +134,125 @@ impl From<&[u8]> for Value {
     }
 }
 
-impl<T> From<Option<T>> for Value
-where
-    Value: From<T>,
-{
-    fn from(value: Option<T>) -> Self {
-        value.map_or(Self::Null, Value::from)
+// Per-type `Option` conversions. We can't use a blanket
+// `impl<T> From<Option<T>> for Value where Value: From<T>` because
+// the blanket can't decide the `NullKind` for the `None` arm — `T`
+// is erased before we reach the binder, and Postgres needs the
+// concrete OID. Each impl encodes its own kind.
+
+impl From<Option<String>> for Value {
+    fn from(value: Option<String>) -> Self {
+        value.map_or(Self::Null(NullKind::Text), Self::Text)
+    }
+}
+
+impl From<Option<&str>> for Value {
+    fn from(value: Option<&str>) -> Self {
+        value.map_or(Self::Null(NullKind::Text), |v| Self::Text(v.to_string()))
+    }
+}
+
+impl From<Option<&String>> for Value {
+    fn from(value: Option<&String>) -> Self {
+        value.map_or(Self::Null(NullKind::Text), |v| Self::Text(v.clone()))
+    }
+}
+
+impl From<Option<i64>> for Value {
+    fn from(value: Option<i64>) -> Self {
+        value.map_or(Self::Null(NullKind::Integer), Self::Integer)
+    }
+}
+
+impl From<Option<i32>> for Value {
+    fn from(value: Option<i32>) -> Self {
+        value.map_or(Self::Null(NullKind::Integer), |v| {
+            Self::Integer(i64::from(v))
+        })
+    }
+}
+
+impl From<Option<i16>> for Value {
+    fn from(value: Option<i16>) -> Self {
+        value.map_or(Self::Null(NullKind::Integer), |v| {
+            Self::Integer(i64::from(v))
+        })
+    }
+}
+
+impl From<Option<i8>> for Value {
+    fn from(value: Option<i8>) -> Self {
+        value.map_or(Self::Null(NullKind::Integer), |v| {
+            Self::Integer(i64::from(v))
+        })
+    }
+}
+
+impl From<Option<u64>> for Value {
+    fn from(value: Option<u64>) -> Self {
+        value.map_or(Self::Null(NullKind::Integer), |v| Self::Integer(v as i64))
+    }
+}
+
+impl From<Option<u32>> for Value {
+    fn from(value: Option<u32>) -> Self {
+        value.map_or(Self::Null(NullKind::Integer), |v| {
+            Self::Integer(i64::from(v))
+        })
+    }
+}
+
+impl From<Option<u16>> for Value {
+    fn from(value: Option<u16>) -> Self {
+        value.map_or(Self::Null(NullKind::Integer), |v| {
+            Self::Integer(i64::from(v))
+        })
+    }
+}
+
+impl From<Option<u8>> for Value {
+    fn from(value: Option<u8>) -> Self {
+        value.map_or(Self::Null(NullKind::Integer), |v| {
+            Self::Integer(i64::from(v))
+        })
+    }
+}
+
+impl From<Option<usize>> for Value {
+    fn from(value: Option<usize>) -> Self {
+        value.map_or(Self::Null(NullKind::Integer), |v| Self::Integer(v as i64))
+    }
+}
+
+impl From<Option<isize>> for Value {
+    fn from(value: Option<isize>) -> Self {
+        value.map_or(Self::Null(NullKind::Integer), |v| Self::Integer(v as i64))
+    }
+}
+
+impl From<Option<bool>> for Value {
+    fn from(value: Option<bool>) -> Self {
+        value.map_or(Self::Null(NullKind::Integer), |v| {
+            Self::Integer(i64::from(v))
+        })
+    }
+}
+
+impl From<Option<f64>> for Value {
+    fn from(value: Option<f64>) -> Self {
+        value.map_or(Self::Null(NullKind::Real), Self::Real)
+    }
+}
+
+impl From<Option<f32>> for Value {
+    fn from(value: Option<f32>) -> Self {
+        value.map_or(Self::Null(NullKind::Real), |v| Self::Real(f64::from(v)))
+    }
+}
+
+impl From<Option<Vec<u8>>> for Value {
+    fn from(value: Option<Vec<u8>>) -> Self {
+        value.map_or(Self::Null(NullKind::Blob), Self::Blob)
     }
 }
 
@@ -197,7 +327,7 @@ impl DbDecode for String {
             Value::Blob(value) => String::from_utf8(value).map_err(|e| {
                 DatabaseError::QueryFailed(format!("failed to decode utf8 string: {}", e))
             }),
-            Value::Null => Err(DatabaseError::QueryFailed(
+            Value::Null(_) => Err(DatabaseError::QueryFailed(
                 "cannot decode NULL into String".to_string(),
             )),
         }
@@ -207,7 +337,7 @@ impl DbDecode for String {
 impl DbDecode for Option<String> {
     fn decode(value: Value) -> Result<Self, DatabaseError> {
         match value {
-            Value::Null => Ok(None),
+            Value::Null(_) => Ok(None),
             other => String::decode(other).map(Some),
         }
     }
@@ -221,7 +351,7 @@ impl DbDecode for i64 {
             Value::Text(value) => value.parse::<i64>().map_err(|e| {
                 DatabaseError::QueryFailed(format!("failed to parse integer '{}': {}", value, e))
             }),
-            Value::Null => Err(DatabaseError::QueryFailed(
+            Value::Null(_) => Err(DatabaseError::QueryFailed(
                 "cannot decode NULL into i64".to_string(),
             )),
             Value::Blob(_) => Err(DatabaseError::QueryFailed(
@@ -234,7 +364,7 @@ impl DbDecode for i64 {
 impl DbDecode for Option<i64> {
     fn decode(value: Value) -> Result<Self, DatabaseError> {
         match value {
-            Value::Null => Ok(None),
+            Value::Null(_) => Ok(None),
             other => i64::decode(other).map(Some),
         }
     }
@@ -252,7 +382,7 @@ impl DbDecode for i32 {
 impl DbDecode for Option<i32> {
     fn decode(value: Value) -> Result<Self, DatabaseError> {
         match value {
-            Value::Null => Ok(None),
+            Value::Null(_) => Ok(None),
             other => i32::decode(other).map(Some),
         }
     }
@@ -267,7 +397,7 @@ impl DbDecode for bool {
 impl DbDecode for Option<bool> {
     fn decode(value: Value) -> Result<Self, DatabaseError> {
         match value {
-            Value::Null => Ok(None),
+            Value::Null(_) => Ok(None),
             other => bool::decode(other).map(Some),
         }
     }
@@ -281,7 +411,7 @@ impl DbDecode for f64 {
             Value::Text(value) => value.parse::<f64>().map_err(|e| {
                 DatabaseError::QueryFailed(format!("failed to parse float '{}': {}", value, e))
             }),
-            Value::Null => Err(DatabaseError::QueryFailed(
+            Value::Null(_) => Err(DatabaseError::QueryFailed(
                 "cannot decode NULL into f64".to_string(),
             )),
             Value::Blob(_) => Err(DatabaseError::QueryFailed(
@@ -294,7 +424,7 @@ impl DbDecode for f64 {
 impl DbDecode for Option<f64> {
     fn decode(value: Value) -> Result<Self, DatabaseError> {
         match value {
-            Value::Null => Ok(None),
+            Value::Null(_) => Ok(None),
             other => f64::decode(other).map(Some),
         }
     }
@@ -305,7 +435,7 @@ impl DbDecode for Vec<u8> {
         match value {
             Value::Blob(value) => Ok(value),
             Value::Text(value) => Ok(value.into_bytes()),
-            Value::Null => Ok(Vec::new()),
+            Value::Null(_) => Ok(Vec::new()),
             Value::Integer(_) | Value::Real(_) => Err(DatabaseError::QueryFailed(
                 "cannot decode numeric value into blob".to_string(),
             )),
@@ -316,7 +446,7 @@ impl DbDecode for Vec<u8> {
 impl DbDecode for Option<Vec<u8>> {
     fn decode(value: Value) -> Result<Self, DatabaseError> {
         match value {
-            Value::Null => Ok(None),
+            Value::Null(_) => Ok(None),
             other => Vec::<u8>::decode(other).map(Some),
         }
     }
@@ -355,7 +485,7 @@ impl ValueExt for Value {
     fn as_string(&self) -> Result<String, DatabaseError> {
         match self {
             Value::Text(s) => Ok(s.clone()),
-            Value::Null => Err(DatabaseError::QueryFailed("expected text, got null".into())),
+            Value::Null(_) => Err(DatabaseError::QueryFailed("expected text, got null".into())),
             other => Err(DatabaseError::QueryFailed(format!(
                 "expected text, got {:?}",
                 other
@@ -365,7 +495,7 @@ impl ValueExt for Value {
 
     fn as_optional_string(&self) -> Result<Option<String>, DatabaseError> {
         match self {
-            Value::Null => Ok(None),
+            Value::Null(_) => Ok(None),
             Value::Text(s) => Ok(Some(s.clone())),
             other => Err(DatabaseError::QueryFailed(format!(
                 "expected text or null, got {:?}",

@@ -239,18 +239,9 @@ impl IdentityService {
                         user_id.clone().into(),
                         username.clone().into(),
                         xmpp_localpart.clone().into(),
-                        claims
-                            .name
-                            .clone()
-                            .map_or(crate::db::Value::Null, crate::db::Value::from),
-                        claims
-                            .avatar_url
-                            .clone()
-                            .map_or(crate::db::Value::Null, crate::db::Value::from),
-                        claims
-                            .email
-                            .clone()
-                            .map_or(crate::db::Value::Null, crate::db::Value::from),
+                        crate::db::Value::from(claims.name.clone()),
+                        crate::db::Value::from(claims.avatar_url.clone()),
+                        crate::db::Value::from(claims.email.clone()),
                         now.clone().into(),
                         now.clone().into(),
                     ],
@@ -316,9 +307,9 @@ impl IdentityService {
                     params: vec![
                         username.clone().into(),
                         xmpp_localpart.clone().into(),
-                        claims.name.clone().map_or(crate::db::Value::Null, crate::db::Value::from),
-                        claims.avatar_url.clone().map_or(crate::db::Value::Null, crate::db::Value::from),
-                        claims.email.clone().map_or(crate::db::Value::Null, crate::db::Value::from),
+                        crate::db::Value::from(claims.name.clone()),
+                        crate::db::Value::from(claims.avatar_url.clone()),
+                        crate::db::Value::from(claims.email.clone()),
                         now.clone().into(),
                         existing.id.clone().into(),
                     ],
@@ -381,14 +372,8 @@ impl IdentityService {
                     provider.id.clone().into(),
                     issuer.into(),
                     claims.subject.clone().into(),
-                    claims
-                        .email
-                        .clone()
-                        .map_or(crate::db::Value::Null, crate::db::Value::from),
-                    claims
-                        .email_verified
-                        .map(|v| crate::db::Value::from(i64::from(v)))
-                        .unwrap_or(crate::db::Value::Null),
+                    crate::db::Value::from(claims.email.clone()),
+                    crate::db::Value::from(claims.email_verified),
                     raw.into(),
                     now.clone().into(),
                     now.into(),
@@ -420,11 +405,8 @@ impl IdentityService {
                 params: vec![
                     now.into(),
                     provider.id.clone().into(),
-                    claims.email.clone().map_or(crate::db::Value::Null, crate::db::Value::from),
-                    claims
-                        .email_verified
-                        .map(|v| crate::db::Value::from(i64::from(v)))
-                        .unwrap_or(crate::db::Value::Null),
+                    crate::db::Value::from(claims.email.clone()),
+                    crate::db::Value::from(claims.email_verified),
                     raw.into(),
                     issuer.into(),
                     subject.into(),

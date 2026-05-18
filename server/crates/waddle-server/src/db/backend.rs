@@ -9,7 +9,7 @@ use sqlx::sqlite::{
 };
 use sqlx::Row as SqlxRow;
 
-use super::{DatabaseError, IntoParams, Row, Rows, Value};
+use super::{DatabaseError, IntoParams, NullKind, Row, Rows, Value};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DatabaseDriver {
@@ -271,7 +271,11 @@ fn bind_sqlite<'q>(
     value: Value,
 ) -> sqlx::query::Query<'q, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'q>> {
     match value {
-        Value::Null => query.bind(Option::<String>::None),
+        // SQLite is dynamically typed: the bound NULL's declared type
+        // never affects storage or comparison, so a TEXT-typed NULL is
+        // fine regardless of `kind`. Kept uniform with `bind_postgres`
+        // shape for readability.
+        Value::Null(_) => query.bind(Option::<String>::None),
         Value::Integer(v) => query.bind(v),
         Value::Real(v) => query.bind(v),
         Value::Text(v) => query.bind(v),
@@ -284,7 +288,15 @@ fn bind_postgres<'q>(
     value: Value,
 ) -> sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments> {
     match value {
-        Value::Null => query.bind(Option::<String>::None),
+        // Postgres rejects a parameter whose declared OID doesn't
+        // match the target column ("column X is of type bigint but
+        // expression is of type text"), so each `NullKind` must bind
+        // a `None` of the corresponding Rust type to drive sqlx's
+        // OID selection.
+        Value::Null(NullKind::Integer) => query.bind(Option::<i64>::None),
+        Value::Null(NullKind::Real) => query.bind(Option::<f64>::None),
+        Value::Null(NullKind::Text) => query.bind(Option::<String>::None),
+        Value::Null(NullKind::Blob) => query.bind(Option::<Vec<u8>>::None),
         Value::Integer(v) => query.bind(v),
         Value::Real(v) => query.bind(v),
         Value::Text(v) => query.bind(v),
@@ -314,22 +326,22 @@ fn sqlite_rows_to_rows(rows: Vec<SqliteRow>) -> Result<Rows, DatabaseError> {
 
 fn sqlite_value_from_row(row: &SqliteRow, idx: usize) -> Result<Value, DatabaseError> {
     if let Ok(value) = row.try_get::<Option<i64>, _>(idx) {
-        return Ok(value.map_or(Value::Null, Value::Integer));
+        return Ok(value.map_or(Value::Null(NullKind::Integer), Value::Integer));
     }
 
     if let Ok(value) = row.try_get::<Option<f64>, _>(idx) {
-        return Ok(value.map_or(Value::Null, Value::Real));
+        return Ok(value.map_or(Value::Null(NullKind::Real), Value::Real));
     }
 
     if let Ok(value) = row.try_get::<Option<String>, _>(idx) {
-        return Ok(value.map_or(Value::Null, Value::Text));
+        return Ok(value.map_or(Value::Null(NullKind::Text), Value::Text));
     }
 
     if let Ok(value) = row.try_get::<Option<Vec<u8>>, _>(idx) {
-        return Ok(value.map_or(Value::Null, Value::Blob));
+        return Ok(value.map_or(Value::Null(NullKind::Blob), Value::Blob));
     }
 
-    Ok(Value::Null)
+    Ok(Value::Null(NullKind::Text))
 }
 
 fn postgres_rows_to_rows(rows: Vec<PgRow>) -> Result<Rows, DatabaseError> {
@@ -354,30 +366,34 @@ fn postgres_rows_to_rows(rows: Vec<PgRow>) -> Result<Rows, DatabaseError> {
 
 fn postgres_value_from_row(row: &PgRow, idx: usize) -> Result<Value, DatabaseError> {
     if let Ok(value) = row.try_get::<Option<i64>, _>(idx) {
-        return Ok(value.map_or(Value::Null, Value::Integer));
+        return Ok(value.map_or(Value::Null(NullKind::Integer), Value::Integer));
     }
 
     if let Ok(value) = row.try_get::<Option<i32>, _>(idx) {
-        return Ok(value.map_or(Value::Null, |v| Value::Integer(i64::from(v))));
+        return Ok(value.map_or(Value::Null(NullKind::Integer), |v| {
+            Value::Integer(i64::from(v))
+        }));
     }
 
     if let Ok(value) = row.try_get::<Option<bool>, _>(idx) {
-        return Ok(value.map_or(Value::Null, |v| Value::Integer(i64::from(v))));
+        return Ok(value.map_or(Value::Null(NullKind::Integer), |v| {
+            Value::Integer(i64::from(v))
+        }));
     }
 
     if let Ok(value) = row.try_get::<Option<f64>, _>(idx) {
-        return Ok(value.map_or(Value::Null, Value::Real));
+        return Ok(value.map_or(Value::Null(NullKind::Real), Value::Real));
     }
 
     if let Ok(value) = row.try_get::<Option<String>, _>(idx) {
-        return Ok(value.map_or(Value::Null, Value::Text));
+        return Ok(value.map_or(Value::Null(NullKind::Text), Value::Text));
     }
 
     if let Ok(value) = row.try_get::<Option<Vec<u8>>, _>(idx) {
-        return Ok(value.map_or(Value::Null, Value::Blob));
+        return Ok(value.map_or(Value::Null(NullKind::Blob), Value::Blob));
     }
 
-    Ok(Value::Null)
+    Ok(Value::Null(NullKind::Text))
 }
 
 /// Connection guard that delegates to the configured SQLx backend.
