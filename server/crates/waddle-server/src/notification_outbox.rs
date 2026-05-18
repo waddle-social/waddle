@@ -27,6 +27,14 @@ const BASE_RETRY_DELAY_MS: i64 = 5_000;
 const BASE_POLICY_RETRY_DELAY_MS: i64 = 60_000;
 const MAX_RETRY_DELAY_MS: i64 = 300_000;
 const OUTBOX_CLAIM_TIMEOUT_MS: i64 = 300_000;
+const NOTIFICATION_CANDIDATES_REASON_CHECK_NAME: &str = "notification_candidates_reason_check";
+const NOTIFICATION_CANDIDATES_REASON_CHECK_SQL: &str = "reason IN ('offline_dm', 'groupchat_personal_mention', 'groupchat_channel_mention', 'groupchat_active_channel_mention', 'groupchat_notify_all')";
+const NOTIFICATION_CANDIDATES_INDEXES: [&str; 4] = [
+    "idx_notification_candidates_recipient_created",
+    "idx_notification_candidates_identity",
+    "idx_notification_candidates_pending_worker",
+    "idx_notification_candidates_outboxed_prune",
+];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NotificationThreadId(String);
@@ -527,6 +535,29 @@ fn require_sender_set_contains_scalar(
     }
 }
 
+fn notification_candidates_table_sql(i64_type: &str, if_not_exists: bool) -> String {
+    let if_not_exists = if if_not_exists { "IF NOT EXISTS " } else { "" };
+    format!(
+        r#"
+        CREATE TABLE {if_not_exists}notification_candidates (
+            recipient_bare_jid TEXT NOT NULL,
+            conversation_jid TEXT NOT NULL,
+            sender_jid TEXT NOT NULL,
+            thread_id TEXT NOT NULL DEFAULT '',
+            stanza_id_by TEXT NOT NULL,
+            stanza_id TEXT NOT NULL,
+            class TEXT NOT NULL CHECK (class IN ('dm', 'personal_mention', 'channel_mention', 'active_channel_mention', 'notify_all')),
+            reason TEXT NOT NULL CONSTRAINT {NOTIFICATION_CANDIDATES_REASON_CHECK_NAME} CHECK ({NOTIFICATION_CANDIDATES_REASON_CHECK_SQL}),
+            created_at_ms {i64_type} NOT NULL,
+            policy_error_count INTEGER NOT NULL DEFAULT 0,
+            next_attempt_at_ms {i64_type},
+            outboxed_at_ms {i64_type},
+            PRIMARY KEY (recipient_bare_jid, conversation_jid, thread_id, stanza_id_by, stanza_id, class)
+        )
+        "#
+    )
+}
+
 #[derive(Clone)]
 pub struct NotificationOutboxStore {
     db: Database,
@@ -541,29 +572,8 @@ impl NotificationOutboxStore {
 
     async fn initialize(&self) -> Result<(), NotificationOutboxError> {
         let i64_type = crate::db::i64_sql_type(self.db.driver());
-        self.execute(
-            &format!(
-                r#"
-                CREATE TABLE IF NOT EXISTS notification_candidates (
-                    recipient_bare_jid TEXT NOT NULL,
-                    conversation_jid TEXT NOT NULL,
-                    sender_jid TEXT NOT NULL,
-                    thread_id TEXT NOT NULL DEFAULT '',
-                    stanza_id_by TEXT NOT NULL,
-                    stanza_id TEXT NOT NULL,
-                    class TEXT NOT NULL CHECK (class IN ('dm', 'personal_mention', 'channel_mention', 'active_channel_mention', 'notify_all')),
-                    reason TEXT NOT NULL CHECK (reason IN ('offline_dm', 'groupchat_personal_mention', 'groupchat_channel_mention', 'groupchat_active_channel_mention', 'groupchat_notify_all')),
-                    created_at_ms {i64_type} NOT NULL,
-                    policy_error_count INTEGER NOT NULL DEFAULT 0,
-                    next_attempt_at_ms {i64_type},
-                    outboxed_at_ms {i64_type},
-                    PRIMARY KEY (recipient_bare_jid, conversation_jid, thread_id, stanza_id_by, stanza_id, class)
-                )
-                "#
-            ),
-            (),
-        )
-        .await?;
+        self.execute(&notification_candidates_table_sql(i64_type, true), ())
+            .await?;
         self.query("SELECT sender_jid FROM notification_candidates LIMIT 0", ())
             .await?;
         self.add_column_if_missing(
@@ -573,6 +583,8 @@ impl NotificationOutboxStore {
         .await?;
         let candidate_next_attempt_column = format!("next_attempt_at_ms {i64_type}");
         self.add_column_if_missing("notification_candidates", &candidate_next_attempt_column)
+            .await?;
+        self.migrate_notification_candidates_reason_constraint(i64_type)
             .await?;
         self.execute(
             "CREATE INDEX IF NOT EXISTS idx_notification_candidates_recipient_created \
@@ -680,6 +692,139 @@ impl NotificationOutboxStore {
         )
         .await?;
         Ok(())
+    }
+
+    async fn migrate_notification_candidates_reason_constraint(
+        &self,
+        i64_type: &str,
+    ) -> Result<(), NotificationOutboxError> {
+        match self.db.driver() {
+            crate::db::DatabaseDriver::Postgres => {
+                self.migrate_postgres_notification_candidates_reason_constraint()
+                    .await
+            }
+            crate::db::DatabaseDriver::Sqlite => {
+                self.migrate_sqlite_notification_candidates_reason_constraint(i64_type)
+                    .await
+            }
+        }
+    }
+
+    async fn migrate_postgres_notification_candidates_reason_constraint(
+        &self,
+    ) -> Result<(), NotificationOutboxError> {
+        let mut rows = self
+            .query(
+                r#"
+                SELECT quote_ident(conname)
+                FROM pg_constraint
+                WHERE conrelid = 'notification_candidates'::regclass
+                  AND contype = 'c'
+                  AND pg_get_constraintdef(oid) ILIKE '%reason%'
+                "#,
+                (),
+            )
+            .await?;
+        while let Some(row) = rows.next().await? {
+            let constraint_name: String = row.get(0)?;
+            self.execute(
+                &format!(
+                    "ALTER TABLE notification_candidates DROP CONSTRAINT IF EXISTS {constraint_name}"
+                ),
+                (),
+            )
+            .await?;
+        }
+        self.execute(
+            &format!(
+                "ALTER TABLE notification_candidates ADD CONSTRAINT {NOTIFICATION_CANDIDATES_REASON_CHECK_NAME} CHECK ({NOTIFICATION_CANDIDATES_REASON_CHECK_SQL})"
+            ),
+            (),
+        )
+        .await?;
+        Ok(())
+    }
+
+    async fn migrate_sqlite_notification_candidates_reason_constraint(
+        &self,
+        i64_type: &str,
+    ) -> Result<(), NotificationOutboxError> {
+        if !self
+            .sqlite_notification_candidates_reason_constraint_is_stale()
+            .await?
+        {
+            return Ok(());
+        }
+
+        let mut tx = self.db.begin().await?;
+        for index in NOTIFICATION_CANDIDATES_INDEXES {
+            tx.execute(&format!("DROP INDEX IF EXISTS {index}"), ())
+                .await?;
+        }
+        tx.execute(
+            "ALTER TABLE notification_candidates RENAME TO notification_candidates_old_reason_check",
+            (),
+        )
+        .await?;
+        tx.execute(&notification_candidates_table_sql(i64_type, false), ())
+            .await?;
+        tx.execute(
+            r#"
+            INSERT INTO notification_candidates (
+                recipient_bare_jid,
+                conversation_jid,
+                sender_jid,
+                thread_id,
+                stanza_id_by,
+                stanza_id,
+                class,
+                reason,
+                created_at_ms,
+                policy_error_count,
+                next_attempt_at_ms,
+                outboxed_at_ms
+            )
+            SELECT
+                recipient_bare_jid,
+                conversation_jid,
+                sender_jid,
+                thread_id,
+                stanza_id_by,
+                stanza_id,
+                class,
+                reason,
+                created_at_ms,
+                policy_error_count,
+                next_attempt_at_ms,
+                outboxed_at_ms
+            FROM notification_candidates_old_reason_check
+            "#,
+            (),
+        )
+        .await?;
+        tx.execute("DROP TABLE notification_candidates_old_reason_check", ())
+            .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    async fn sqlite_notification_candidates_reason_constraint_is_stale(
+        &self,
+    ) -> Result<bool, NotificationOutboxError> {
+        let mut rows = self
+            .query(
+                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'notification_candidates'",
+                (),
+            )
+            .await?;
+        let Some(row) = rows.next().await? else {
+            return Ok(false);
+        };
+        let create_sql: String = row.get(0)?;
+        let normalized = create_sql.to_ascii_lowercase();
+        Ok(normalized.contains("reason")
+            && normalized.contains("check")
+            && !normalized.contains("groupchat_notify_all"))
     }
 
     async fn add_column_if_missing(
@@ -2277,6 +2422,116 @@ mod tests {
                 "unexpected schema error: {error}"
             ),
         }
+    }
+
+    #[tokio::test]
+    async fn store_initialization_migrates_legacy_candidate_reason_check() {
+        let db = Database::in_memory("notification-outbox-legacy-candidate-reason")
+            .await
+            .unwrap();
+        let conn = db.guard().await.expect("db guard");
+        conn.execute(
+            r#"
+            CREATE TABLE notification_candidates (
+                recipient_bare_jid TEXT NOT NULL,
+                conversation_jid TEXT NOT NULL,
+                sender_jid TEXT NOT NULL,
+                thread_id TEXT NOT NULL DEFAULT '',
+                stanza_id_by TEXT NOT NULL,
+                stanza_id TEXT NOT NULL,
+                class TEXT NOT NULL CHECK (class IN ('dm', 'personal_mention', 'channel_mention', 'active_channel_mention', 'notify_all')),
+                reason TEXT NOT NULL CHECK (reason IN ('offline_dm')),
+                created_at_ms INTEGER NOT NULL,
+                policy_error_count INTEGER NOT NULL DEFAULT 0,
+                next_attempt_at_ms INTEGER,
+                outboxed_at_ms INTEGER,
+                PRIMARY KEY (recipient_bare_jid, conversation_jid, thread_id, stanza_id_by, stanza_id, class)
+            )
+            "#,
+            (),
+        )
+        .await
+        .expect("create legacy candidate table");
+        conn.execute(
+            r#"
+            INSERT INTO notification_candidates (
+                recipient_bare_jid,
+                conversation_jid,
+                sender_jid,
+                thread_id,
+                stanza_id_by,
+                stanza_id,
+                class,
+                reason,
+                created_at_ms,
+                policy_error_count,
+                next_attempt_at_ms,
+                outboxed_at_ms
+            ) VALUES (
+                'bob@example.com',
+                'alice@example.com',
+                'alice@example.com/web',
+                '',
+                'bob@example.com',
+                'legacy-direct',
+                'dm',
+                'offline_dm',
+                1,
+                0,
+                NULL,
+                NULL
+            )
+            "#,
+            (),
+        )
+        .await
+        .expect("insert legacy direct candidate");
+        drop(conn);
+
+        let store = NotificationOutboxStore::new(db)
+            .await
+            .expect("store initializes and migrates legacy reason check");
+        let recipient = bare("charlie@example.com");
+        let room = bare("legacy-reason@muc.example.com");
+        let groupchat = groupchat_candidate_for(
+            &recipient,
+            &room,
+            "legacy-reason@muc.example.com/alice"
+                .parse()
+                .expect("room sender jid"),
+            "legacy-group",
+            NotificationClass::ChannelMention,
+        );
+
+        assert_eq!(
+            store
+                .insert_candidate(&groupchat)
+                .await
+                .expect("insert groupchat"),
+            NotificationCandidateInsertOutcome::Inserted
+        );
+        let mut rows = store
+            .query(
+                "SELECT reason FROM notification_candidates ORDER BY stanza_id",
+                (),
+            )
+            .await
+            .expect("query migrated candidates");
+        let first = rows
+            .next()
+            .await
+            .expect("first row query")
+            .expect("legacy row");
+        let second = rows
+            .next()
+            .await
+            .expect("second row query")
+            .expect("group row");
+        assert_eq!(first.get::<String>(0).expect("legacy reason"), "offline_dm");
+        assert_eq!(
+            second.get::<String>(0).expect("group reason"),
+            "groupchat_channel_mention"
+        );
     }
 
     #[tokio::test]
