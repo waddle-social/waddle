@@ -11,7 +11,6 @@ use waddle_xmpp::{
         parse_disco_info_query, parse_disco_items_query, push_service_features,
         spaces_service_features, upload_service_features, DiscoItem, Feature, Identity,
     },
-    inbox::runtime::filter_query,
     isr::{build_isr_token_error, build_isr_token_result, is_isr_token_request, IsrToken, ISR_NS},
     mam::{
         build_fin_iq, build_query_form_iq, build_result_messages, is_mam_query,
@@ -53,8 +52,8 @@ use waddle_xmpp::{
         parse_upload_request, sanitize_filename, UploadError, UploadSlot,
     },
     xep::xep0430::{
-        build_inbox_query_result, build_mark_read_result, is_inbox_iq, parse_inbox_query,
-        parse_mark_read,
+        build_inbox_entry_message, build_inbox_fin_iq, build_mark_read_result, is_inbox_iq,
+        is_mark_read_iq, parse_inbox_query, parse_mark_read, InboxFinCounts, InboxLastMessage,
     },
     xep::{
         add_stanza_id_xep0359, build_command_items, build_command_result,
