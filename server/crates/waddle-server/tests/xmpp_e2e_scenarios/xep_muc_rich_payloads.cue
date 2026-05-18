@@ -452,11 +452,11 @@ scenario: #Scenario & {
 		},
 		#DrainFrames & {
 			target:   adminPhone
-			contains: ["urn:waddle:inbox:0", "cue-fulltext-nonmatch"]
+			contains: ["urn:xmpp:inbox:0", "cue-fulltext-nonmatch"]
 		},
 		#DrainFrames & {
 			target:   adminPhone
-			contains: ["urn:waddle:inbox:0", "cue-reply"]
+			contains: ["urn:xmpp:inbox:0", "cue-reply"]
 		},
 		#DrainFrames & {
 			target:   bobPhone
@@ -468,7 +468,7 @@ scenario: #Scenario & {
 		},
 		#DrainFrames & {
 			target:   bobPhone
-			contains: ["urn:waddle:inbox:0", "cue-rich-original"]
+			contains: ["urn:xmpp:inbox:0", "cue-rich-original"]
 			min:      2
 			max:      2
 		},
@@ -482,7 +482,7 @@ scenario: #Scenario & {
 		},
 		#DrainFrames & {
 			target:   bobPhone
-			contains: ["urn:waddle:inbox:0", "cue-retract"]
+			contains: ["urn:xmpp:inbox:0", "cue-retract"]
 		},
 		#DrainFrames & {
 			target:   bobPhone
@@ -490,7 +490,7 @@ scenario: #Scenario & {
 		},
 		#DrainFrames & {
 			target:   bobPhone
-			contains: ["urn:waddle:inbox:0", "cue-moderate-original"]
+			contains: ["urn:xmpp:inbox:0", "cue-moderate-original"]
 		},
 		#DrainFrames & {
 			target:   bobPhone

@@ -136,7 +136,7 @@ scenario: #Scenario & {
 		},
 		#DrainFrames & {
 			target:   alicePhone
-			contains: ["urn:waddle:inbox:0", "cue-pin-target"]
+			contains: ["urn:xmpp:inbox:0", "cue-pin-target"]
 		},
 		#DrainFrames & {
 			target:   bobPhone
