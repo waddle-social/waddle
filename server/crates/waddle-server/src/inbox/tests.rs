@@ -145,6 +145,60 @@ async fn sqlx_inbox_storage_thread_entries() {
     assert_eq!(storage.total_unread(&user).await.expect("unread"), 1);
 }
 
+#[tokio::test]
+async fn sqlx_inbox_storage_tracks_groupchat_notification_recovery() {
+    let storage = DatabaseInboxStorage::open(Some("sqlite::memory:"))
+        .await
+        .expect("storage");
+    let user = jid("me@example.com");
+    let room = jid("room@muc.example.com");
+    let stanza_id = StanzaId::new(
+        "groupchat-recovery-1",
+        "room@muc.example.com".parse().expect("stanza-id by"),
+    );
+    let recovery = GroupchatNotificationRecovery {
+        key: GroupchatNotificationRecoveryKey {
+            recipient: user.clone(),
+            room: room.clone(),
+            thread_id: Some("thread-1".to_string()),
+            archive_stanza_id: stanza_id.clone(),
+        },
+        sender_jid: "room@muc.example.com/alice".parse().expect("sender jid"),
+        is_live_occupant: true,
+        room_members_only: false,
+        created_at_ms: 42,
+    };
+
+    storage
+        .upsert_with_groupchat_notification_recovery(
+            &user,
+            InboxEntry::new(room.clone(), ConversationKind::MucRoom, "s2", 200)
+                .with_thread("thread-1"),
+            true,
+            Some(recovery.clone()),
+        )
+        .await
+        .expect("atomic upsert + recovery");
+
+    let pending = storage
+        .list_pending_groupchat_notification_recoveries(16)
+        .await
+        .expect("list pending recoveries");
+    assert_eq!(pending, vec![recovery.clone()]);
+    assert_eq!(
+        storage
+            .mark_groupchat_notification_recovery_completed(&recovery.key)
+            .await
+            .expect("mark completed"),
+        1
+    );
+    assert!(storage
+        .list_pending_groupchat_notification_recoveries(16)
+        .await
+        .expect("list after complete")
+        .is_empty());
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn sqlx_inbox_storage_persists_file_backing() {
     let artifacts = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/test-artifacts");

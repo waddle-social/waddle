@@ -1,5 +1,4 @@
 use super::groupchat_archive::{extract_room_stanza_id, room_scoped_reply_to_attr};
-use super::room_dispatch::durable_groupchat_recipient_bare_jids;
 use super::*;
 
 pub(super) struct BotGroupchatDispatch<'a> {
@@ -352,8 +351,7 @@ pub(crate) async fn dispatch_extension_bot_groupchat_response(
             role: o.role,
         })
         .collect();
-    let durable_recipient_bare_jids =
-        durable_groupchat_recipient_bare_jids(&room_actor, &room_jid).await;
+    let durable_recipient_bare_jids = snapshot.durable_recipient_bare_jids.clone();
     let nested = dispatch_bot_groupchat_response(
         deps,
         BotGroupchatDispatch {

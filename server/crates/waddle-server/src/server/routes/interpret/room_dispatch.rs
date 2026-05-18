@@ -117,8 +117,7 @@ pub(super) async fn dispatch_to_room(
             role: o.role,
         })
         .collect();
-    let durable_recipient_bare_jids =
-        durable_groupchat_recipient_bare_jids(&room_actor, &room_jid).await;
+    let durable_recipient_bare_jids = snapshot.durable_recipient_bare_jids.clone();
     let id_gen = UuidV4Generator;
     // Capture a single dispatch timestamp here so every
     // `ProjectGroupchatInbox` event the chain emits carries the same
@@ -328,31 +327,4 @@ pub(super) async fn dispatch_to_room(
     }
 
     outcome
-}
-
-pub(super) async fn durable_groupchat_recipient_bare_jids(
-    room_actor: &ActorRef<RoomActor>,
-    room_jid: &BareJid,
-) -> Vec<BareJid> {
-    match room_actor.ask(ListAffiliations { filter: None }).await {
-        Ok(entries) => {
-            let mut recipients: Vec<BareJid> = entries
-                .into_iter()
-                .filter(|entry| entry.affiliation >= waddle_xmpp::Affiliation::Member)
-                .map(|entry| entry.jid)
-                .collect();
-            recipients.sort();
-            recipients.dedup();
-            recipients
-        }
-        Err(error) => {
-            warn!(
-                room = %room_jid,
-                error = ?error,
-                "DispatchToRoom: failed to load durable MUC affiliations; \
-                 skipping durable groupchat recipient projection for this dispatch"
-            );
-            Vec::new()
-        }
-    }
 }

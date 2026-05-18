@@ -35,6 +35,20 @@ pub(super) async fn project_groupchat_inbox_event(input: ProjectGroupchatInboxEv
         );
         return;
     };
+    let notification_recovery = groupchat_notification_recovery_item(
+        &owner,
+        &room,
+        &message,
+        is_recipient,
+        is_durable_recipient,
+        is_live_occupant,
+        room_members_only,
+        &thread,
+        dispatch_timestamp,
+    );
+    let notification_recovery_key = notification_recovery
+        .as_ref()
+        .map(|recovery| recovery.key.clone());
     let outcome = project_groupchat_inbox(
         inbox_storage,
         deps.connection_registry,
@@ -44,6 +58,7 @@ pub(super) async fn project_groupchat_inbox_event(input: ProjectGroupchatInboxEv
         is_recipient,
         &thread,
         dispatch_timestamp,
+        notification_recovery,
     )
     .await;
     maybe_enqueue_groupchat_notification_candidate(GroupchatNotificationProjection {
@@ -57,6 +72,7 @@ pub(super) async fn project_groupchat_inbox_event(input: ProjectGroupchatInboxEv
         room_members_only,
         thread: &thread,
         outcome,
+        recovery_key: notification_recovery_key.as_ref(),
     })
     .await;
 }
@@ -72,6 +88,44 @@ struct GroupchatNotificationProjection<'a, 'deps> {
     room_members_only: bool,
     thread: &'a Option<GroupchatThreadProjection>,
     outcome: GroupchatInboxProjectionOutcome,
+    recovery_key: Option<&'a waddle_xmpp::inbox::storage::GroupchatNotificationRecoveryKey>,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn groupchat_notification_recovery_item(
+    owner: &BareJid,
+    room: &BareJid,
+    message: &Message,
+    is_recipient: bool,
+    is_durable_recipient: bool,
+    is_live_occupant: bool,
+    room_members_only: bool,
+    thread: &Option<GroupchatThreadProjection>,
+    dispatch_timestamp: i64,
+) -> Option<waddle_xmpp::inbox::storage::GroupchatNotificationRecovery> {
+    if !is_recipient || !is_durable_recipient {
+        return None;
+    }
+    let archive_id = extract_room_stanza_id(message, room)?;
+    let sender_jid = message.from.clone()?;
+    Some(waddle_xmpp::inbox::storage::GroupchatNotificationRecovery {
+        key: waddle_xmpp::inbox::storage::GroupchatNotificationRecoveryKey {
+            recipient: owner.clone(),
+            room: room.clone(),
+            thread_id: thread.as_ref().map(|thread| thread.thread_id.clone()),
+            archive_stanza_id: Xep0359StanzaId::new(archive_id, Jid::from(room.clone())),
+        },
+        sender_jid,
+        is_live_occupant,
+        room_members_only,
+        created_at_ms: dispatch_timestamp.saturating_mul(1_000),
+    })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GroupchatNotificationCandidateQueueOutcome {
+    Completed,
+    RetryLater,
 }
 
 async fn maybe_enqueue_groupchat_notification_candidate(
@@ -88,18 +142,56 @@ async fn maybe_enqueue_groupchat_notification_candidate(
         room_members_only,
         thread,
         outcome,
+        recovery_key,
+    } = input;
+    let queue_outcome = enqueue_groupchat_notification_candidate(GroupchatNotificationProjection {
+        deps,
+        owner,
+        room,
+        message,
+        is_recipient,
+        is_durable_recipient,
+        is_live_occupant,
+        room_members_only,
+        thread,
+        outcome,
+        recovery_key,
+    })
+    .await;
+    if queue_outcome == GroupchatNotificationCandidateQueueOutcome::Completed {
+        if let Some(key) = recovery_key {
+            mark_groupchat_notification_recovery_completed(deps, key).await;
+        }
+    }
+}
+
+async fn enqueue_groupchat_notification_candidate(
+    input: GroupchatNotificationProjection<'_, '_>,
+) -> GroupchatNotificationCandidateQueueOutcome {
+    let GroupchatNotificationProjection {
+        deps,
+        owner,
+        room,
+        message,
+        is_recipient,
+        is_durable_recipient,
+        is_live_occupant,
+        room_members_only,
+        thread,
+        outcome,
+        recovery_key: _,
     } = input;
     if !is_recipient || !is_durable_recipient {
-        return;
+        return GroupchatNotificationCandidateQueueOutcome::Completed;
     }
     let projection_committed = thread
         .as_ref()
         .map_or(outcome.channel_committed, |_| outcome.thread_committed);
     if !projection_committed {
-        return;
+        return GroupchatNotificationCandidateQueueOutcome::Completed;
     }
     let Some(state) = deps.web_socket_state else {
-        return;
+        return GroupchatNotificationCandidateQueueOutcome::RetryLater;
     };
     let Some(archive_id) = extract_room_stanza_id(message, room) else {
         warn!(
@@ -107,7 +199,7 @@ async fn maybe_enqueue_groupchat_notification_candidate(
             room = %room,
             "ProjectGroupchatInbox: skipping XEP-0357 candidate; message has no room stanza-id"
         );
-        return;
+        return GroupchatNotificationCandidateQueueOutcome::Completed;
     };
     let Some(sender_jid) = message.from.clone() else {
         warn!(
@@ -115,9 +207,41 @@ async fn maybe_enqueue_groupchat_notification_candidate(
             room = %room,
             "ProjectGroupchatInbox: skipping XEP-0357 candidate; message has no sender"
         );
-        return;
+        return GroupchatNotificationCandidateQueueOutcome::Completed;
     };
-    let Some(class) = groupchat_notification_class(
+    let thread_id = thread
+        .as_ref()
+        .map(|thread| {
+            crate::notification_outbox::NotificationThreadId::new(thread.thread_id.clone())
+        })
+        .unwrap_or_else(crate::notification_outbox::NotificationThreadId::root);
+    insert_groupchat_notification_candidate(
+        state,
+        owner,
+        room,
+        message,
+        sender_jid,
+        thread_id,
+        Xep0359StanzaId::new(archive_id, Jid::from(room.clone())),
+        is_live_occupant,
+        room_members_only,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn insert_groupchat_notification_candidate(
+    state: &WebSocketState,
+    owner: &BareJid,
+    room: &BareJid,
+    message: &Message,
+    sender_jid: Jid,
+    thread_id: crate::notification_outbox::NotificationThreadId,
+    archive_stanza_id: Xep0359StanzaId,
+    is_live_occupant: bool,
+    room_members_only: bool,
+) -> GroupchatNotificationCandidateQueueOutcome {
+    let class = match groupchat_notification_class(
         state,
         owner,
         room,
@@ -126,21 +250,21 @@ async fn maybe_enqueue_groupchat_notification_candidate(
         room_members_only,
     )
     .await
-    else {
-        return;
+    {
+        GroupchatNotificationClassDecision::Deliver(class) => class,
+        GroupchatNotificationClassDecision::Suppress => {
+            return GroupchatNotificationCandidateQueueOutcome::Completed;
+        }
+        GroupchatNotificationClassDecision::RetryLater => {
+            return GroupchatNotificationCandidateQueueOutcome::RetryLater;
+        }
     };
-    let thread_id = thread
-        .as_ref()
-        .map(|thread| {
-            crate::notification_outbox::NotificationThreadId::new(thread.thread_id.clone())
-        })
-        .unwrap_or_else(crate::notification_outbox::NotificationThreadId::root);
     let candidate = match crate::notification_outbox::NotificationCandidate::groupchat(
         owner.clone(),
         room.clone(),
         sender_jid,
         thread_id,
-        Xep0359StanzaId::new(archive_id, Jid::from(room.clone())),
+        archive_stanza_id,
         class,
     ) {
         Ok(candidate) => candidate,
@@ -151,7 +275,7 @@ async fn maybe_enqueue_groupchat_notification_candidate(
                 error = %error,
                 "ProjectGroupchatInbox: XEP-0357 notification candidate rejected"
             );
-            return;
+            return GroupchatNotificationCandidateQueueOutcome::Completed;
         }
     };
     match state
@@ -168,6 +292,7 @@ async fn maybe_enqueue_groupchat_notification_candidate(
                 class = ?class,
                 "ProjectGroupchatInbox: inserted XEP-0357 groupchat notification candidate"
             );
+            GroupchatNotificationCandidateQueueOutcome::Completed
         }
         Ok(crate::notification_outbox::NotificationCandidateInsertOutcome::Duplicate) => {
             debug!(
@@ -176,6 +301,7 @@ async fn maybe_enqueue_groupchat_notification_candidate(
                 class = ?class,
                 "ProjectGroupchatInbox: duplicate XEP-0357 groupchat notification candidate ignored"
             );
+            GroupchatNotificationCandidateQueueOutcome::Completed
         }
         Err(error) => {
             warn!(
@@ -184,8 +310,152 @@ async fn maybe_enqueue_groupchat_notification_candidate(
                 error = %error,
                 "ProjectGroupchatInbox: XEP-0357 groupchat notification candidate insert failed"
             );
+            GroupchatNotificationCandidateQueueOutcome::RetryLater
         }
     }
+}
+
+async fn mark_groupchat_notification_recovery_completed(
+    deps: &Deps<'_>,
+    key: &waddle_xmpp::inbox::storage::GroupchatNotificationRecoveryKey,
+) {
+    let Some(inbox_storage) = deps.inbox_storage else {
+        return;
+    };
+    if let Err(error) = inbox_storage
+        .mark_groupchat_notification_recovery_completed(key)
+        .await
+    {
+        warn!(
+            recipient = %key.recipient,
+            room = %key.room,
+            stanza_id = %key.archive_stanza_id,
+            error = %error,
+            "ProjectGroupchatInbox: groupchat notification recovery completion marker failed"
+        );
+    }
+}
+
+pub(crate) async fn reconcile_groupchat_notification_candidates(
+    state: &WebSocketState,
+    batch_size: usize,
+) -> usize {
+    let batch_size = batch_size.clamp(1, 1_000);
+    let recoveries = match state
+        .deps
+        .protocol
+        .inbox_storage
+        .list_pending_groupchat_notification_recoveries(batch_size)
+        .await
+    {
+        Ok(recoveries) => recoveries,
+        Err(error) => {
+            warn!(
+                error = %error,
+                "Groupchat notification candidate recovery could not read inbox recovery rows"
+            );
+            return 0;
+        }
+    };
+    let mut completed = 0usize;
+    for recovery in recoveries {
+        let archive_room = recovery.key.archive_stanza_id.by.to_bare();
+        let archived = match state
+            .deps
+            .protocol
+            .mam_storage
+            .get_message_by_archive_or_stanza_id(
+                &archive_room,
+                recovery.key.archive_stanza_id.as_str(),
+            )
+            .await
+        {
+            Ok(Some(archived)) => archived,
+            Ok(None) => {
+                warn!(
+                    recipient = %recovery.key.recipient,
+                    room = %recovery.key.room,
+                    stanza_id = %recovery.key.archive_stanza_id,
+                    "Groupchat notification candidate recovery completed because the committed MAM row is missing"
+                );
+                if mark_recovery_completed_from_state(state, &recovery.key).await {
+                    completed += 1;
+                }
+                continue;
+            }
+            Err(error) => {
+                warn!(
+                    recipient = %recovery.key.recipient,
+                    room = %recovery.key.room,
+                    stanza_id = %recovery.key.archive_stanza_id,
+                    error = %error,
+                    "Groupchat notification candidate recovery could not load committed MAM row"
+                );
+                continue;
+            }
+        };
+        let message =
+            super::archive_lookup::parse_archived_message_xml(archived.stanza_xml.as_deref())
+                .unwrap_or_else(|| super::archive_lookup::fallback_archived_message(&archived));
+        let thread_id = recovery
+            .key
+            .thread_id
+            .as_ref()
+            .map(|thread_id| {
+                crate::notification_outbox::NotificationThreadId::new(thread_id.clone())
+            })
+            .unwrap_or_else(crate::notification_outbox::NotificationThreadId::root);
+        let outcome = insert_groupchat_notification_candidate(
+            state,
+            &recovery.key.recipient,
+            &recovery.key.room,
+            &message,
+            recovery.sender_jid.clone(),
+            thread_id,
+            recovery.key.archive_stanza_id.clone(),
+            recovery.is_live_occupant,
+            recovery.room_members_only,
+        )
+        .await;
+        if outcome == GroupchatNotificationCandidateQueueOutcome::Completed
+            && mark_recovery_completed_from_state(state, &recovery.key).await
+        {
+            completed += 1;
+        }
+    }
+    completed
+}
+
+async fn mark_recovery_completed_from_state(
+    state: &WebSocketState,
+    key: &waddle_xmpp::inbox::storage::GroupchatNotificationRecoveryKey,
+) -> bool {
+    match state
+        .deps
+        .protocol
+        .inbox_storage
+        .mark_groupchat_notification_recovery_completed(key)
+        .await
+    {
+        Ok(marked) => marked > 0,
+        Err(error) => {
+            warn!(
+                recipient = %key.recipient,
+                room = %key.room,
+                stanza_id = %key.archive_stanza_id,
+                error = %error,
+                "Groupchat notification recovery completion marker failed"
+            );
+            false
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GroupchatNotificationClassDecision {
+    Deliver(crate::notification_outbox::NotificationClass),
+    Suppress,
+    RetryLater,
 }
 
 async fn groupchat_notification_class(
@@ -195,7 +465,7 @@ async fn groupchat_notification_class(
     message: &Message,
     is_live_occupant: bool,
     room_members_only: bool,
-) -> Option<crate::notification_outbox::NotificationClass> {
+) -> GroupchatNotificationClassDecision {
     let conversation_kind = if room_members_only {
         crate::notification_settings_projection::ConversationKind::PrivateGroup
     } else {
@@ -214,9 +484,9 @@ async fn groupchat_notification_class(
                 recipient = %owner,
                 room = %room,
                 error = %error,
-                "ProjectGroupchatInbox: XEP-0492 setting lookup failed; suppressing groupchat push fail-closed"
+                "ProjectGroupchatInbox: XEP-0492 setting lookup failed; retrying groupchat push candidate later"
             );
-            return None;
+            return GroupchatNotificationClassDecision::RetryLater;
         }
     };
     let owner_occupant_id =
@@ -227,24 +497,32 @@ async fn groupchat_notification_class(
     if !crate::notification_settings_projection::PushDispatchDecision::evaluate(level, is_mention)
         .should_deliver()
     {
-        return None;
+        return GroupchatNotificationClassDecision::Suppress;
     }
     if personal_mention {
-        return Some(crate::notification_outbox::NotificationClass::PersonalMention);
+        return GroupchatNotificationClassDecision::Deliver(
+            crate::notification_outbox::NotificationClass::PersonalMention,
+        );
     }
     match channel_mention {
         Some(GroupchatChannelMentionScope::Active) if is_live_occupant => {
-            return Some(crate::notification_outbox::NotificationClass::ActiveChannelMention);
+            return GroupchatNotificationClassDecision::Deliver(
+                crate::notification_outbox::NotificationClass::ActiveChannelMention,
+            );
         }
         Some(GroupchatChannelMentionScope::All) => {
-            return Some(crate::notification_outbox::NotificationClass::ChannelMention);
+            return GroupchatNotificationClassDecision::Deliver(
+                crate::notification_outbox::NotificationClass::ChannelMention,
+            );
         }
         _ => {}
     }
     if level == waddle_xmpp::xep::NotificationLevel::Always {
-        return Some(crate::notification_outbox::NotificationClass::NotifyAll);
+        return GroupchatNotificationClassDecision::Deliver(
+            crate::notification_outbox::NotificationClass::NotifyAll,
+        );
     }
-    None
+    GroupchatNotificationClassDecision::Suppress
 }
 
 fn groupchat_mentions_owner(message: &Message, owner: &BareJid, owner_occupant_id: &str) -> bool {

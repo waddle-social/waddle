@@ -517,6 +517,18 @@ pub(crate) fn spawn_notification_outbox_janitor(websocket_state: &Arc<WebSocketS
                     "Notification outbox janitor recovered XEP-0357 candidates from pending_delivery"
                 );
             }
+            let recovered_groupchat =
+                routes::interpret::reconcile_groupchat_notification_candidates(
+                    state.as_ref(),
+                    batch_size,
+                )
+                .await;
+            if recovered_groupchat > 0 {
+                debug!(
+                    recovered = recovered_groupchat,
+                    "Notification outbox janitor recovered XEP-0357 groupchat candidates from inbox projections"
+                );
+            }
             match state
                 .deps
                 .protocol

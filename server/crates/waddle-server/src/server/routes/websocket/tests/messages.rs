@@ -887,6 +887,206 @@ async fn groupchat_xep0513_occupant_id_mention_pushes_affiliated_member() {
 }
 
 #[tokio::test]
+async fn groupchat_xep0492_never_suppresses_personal_mentions_and_plain_messages() {
+    async fn drive(message_id: &str, mention: bool) -> usize {
+        let state = create_test_websocket_state().await;
+        let alice_session = create_test_session(state.as_ref(), "alice").await;
+        let alice_jid: FullJid = format!("{}@example.com/web", alice_session.xmpp_localpart)
+            .parse()
+            .expect("alice jid");
+        let recipient: BareJid = "charlie-never@example.com".parse().expect("recipient");
+        register_first_party_push_for_test(state.as_ref(), &recipient, "charlie-never-web").await;
+        let room_jid: BareJid = format!("{message_id}@muc.example.com")
+            .parse()
+            .expect("room jid");
+        let room_actor = get_or_create_room_actor(
+            state.as_ref(),
+            &room_jid,
+            RoomConfig {
+                members_only: false,
+                ..RoomConfig::default()
+            },
+            "space".to_string(),
+            message_id.to_string(),
+        )
+        .await
+        .expect("create room");
+        room_actor
+            .ask(ChangeAffiliation {
+                jid: recipient.clone(),
+                affiliation: Affiliation::Member,
+            })
+            .await
+            .expect("affiliate recipient");
+        room_actor
+            .ask(JoinWithAffiliation {
+                sender_jid: alice_jid.clone(),
+                nick: "alice".to_string(),
+                effective_affiliation: Affiliation::Member,
+                local_domain: "example.com".to_string(),
+            })
+            .await
+            .expect("join alice");
+        state
+            .deps
+            .protocol
+            .notification_settings_projection
+            .upsert(&crate::notification_settings_projection::NotificationSettingsProjection {
+                owner_bare_jid: recipient.clone(),
+                conversation_jid: room_jid.clone(),
+                conversation_kind:
+                    crate::notification_settings_projection::ConversationKind::PublicGroup,
+                mode: waddle_xmpp::xep::NotificationLevel::Never,
+                source_version: 1,
+                updated_at_ms: crate::time::now_ms(),
+                source:
+                    crate::notification_settings_projection::NotificationSettingsSource::Xep0402Bookmarks,
+                source_item_jid: room_jid.clone(),
+            })
+            .await
+            .expect("xep-0492 projection");
+
+        let mut message =
+            xmpp_parsers::message::Message::new(Some(jid::Jid::from(room_jid.clone())));
+        message.id = Some(message_id.to_string());
+        message.type_ = XmppMessageType::Groupchat;
+        message.bodies.insert(
+            String::new(),
+            xmpp_parsers::message::Body("never means never".to_string()),
+        );
+        if mention {
+            message
+                .payloads
+                .push(waddle_xmpp::xep::build_reference_element(
+                    &waddle_xmpp::xep::Reference::mention(format!("xmpp:{recipient}")),
+                ));
+        }
+
+        let responses =
+            handle_message_for_test(state.as_ref(), &alice_jid, Some(&alice_session), message)
+                .await;
+        assert!(
+            responses.is_empty(),
+            "valid groupchat message should not return an error: {responses:?}"
+        );
+
+        drain_notification_candidates_for_test(state.as_ref()).await;
+        state
+            .deps
+            .protocol
+            .notification_outbox
+            .pending_outbox_jobs()
+            .await
+            .expect("notification outbox jobs")
+            .len()
+    }
+
+    assert_eq!(
+        drive("group-never-mention", true).await,
+        0,
+        "XEP-0492 <never/> MUST suppress mention-derived groupchat push candidates"
+    );
+    assert_eq!(
+        drive("group-never-plain", false).await,
+        0,
+        "XEP-0492 <never/> MUST suppress plain groupchat push candidates"
+    );
+}
+
+#[tokio::test]
+async fn groupchat_notification_recovery_retries_committed_inbox_projection() {
+    let state = create_test_websocket_state().await;
+    let recipient: BareJid = "charlie-recover@example.com".parse().expect("recipient");
+    register_first_party_push_for_test(state.as_ref(), &recipient, "charlie-recover-web").await;
+    let room_jid: BareJid = "groupchat-recovery@muc.example.com"
+        .parse()
+        .expect("room jid");
+    let archive_stanza_id = waddle_xmpp_core::xep0359::StanzaId::new(
+        "groupchat-recovery-archive",
+        jid::Jid::from(room_jid.clone()),
+    );
+    let sender_jid: jid::Jid = "groupchat-recovery@muc.example.com/alice"
+        .parse()
+        .expect("sender jid");
+    let mut message = xmpp_parsers::message::Message::new(Some(jid::Jid::from(room_jid.clone())));
+    message.from = Some(sender_jid.clone());
+    message.id = Some("groupchat-recovery-wire".to_string());
+    message.type_ = XmppMessageType::Groupchat;
+    message.bodies.insert(
+        String::new(),
+        xmpp_parsers::message::Body("charlie, this should recover".to_string()),
+    );
+    message
+        .payloads
+        .push(waddle_xmpp::xep::build_reference_element(
+            &waddle_xmpp::xep::Reference::mention(format!("xmpp:{recipient}")),
+        ));
+    waddle_xmpp_core::xep0359::add_stanza_id(&mut message, &archive_stanza_id);
+    store_committed_dm_archive_for_notification(&state, &room_jid, &archive_stanza_id, &message)
+        .await;
+
+    state
+        .deps
+        .protocol
+        .inbox_storage
+        .insert_groupchat_notification_recovery(
+            waddle_xmpp::inbox::storage::GroupchatNotificationRecovery {
+                key: waddle_xmpp::inbox::storage::GroupchatNotificationRecoveryKey {
+                    recipient: recipient.clone(),
+                    room: room_jid.clone(),
+                    thread_id: None,
+                    archive_stanza_id,
+                },
+                sender_jid,
+                is_live_occupant: false,
+                room_members_only: false,
+                created_at_ms: crate::time::now_ms(),
+            },
+        )
+        .await
+        .expect("insert recovery item");
+
+    assert_eq!(
+        crate::server::routes::interpret::reconcile_groupchat_notification_candidates(
+            state.as_ref(),
+            16,
+        )
+        .await,
+        1,
+        "recovery should complete the durable item after enqueueing the candidate"
+    );
+    assert!(
+        state
+            .deps
+            .protocol
+            .inbox_storage
+            .list_pending_groupchat_notification_recoveries(16)
+            .await
+            .expect("list recovery")
+            .is_empty(),
+        "completed groupchat recovery items must not be retried"
+    );
+    assert_eq!(
+        drain_notification_candidates_for_test(state.as_ref()).await,
+        1
+    );
+    let jobs = state
+        .deps
+        .protocol
+        .notification_outbox
+        .pending_outbox_jobs()
+        .await
+        .expect("notification outbox jobs");
+    assert_eq!(jobs.len(), 1);
+    assert_eq!(jobs[0].recipient_bare_jid(), &recipient);
+    assert_eq!(jobs[0].conversation_jid(), &room_jid);
+    assert_eq!(
+        jobs[0].class(),
+        crate::notification_outbox::NotificationClass::PersonalMention
+    );
+}
+
+#[tokio::test]
 async fn groupchat_public_default_suppresses_plain_push_until_always() {
     async fn drive(level: Option<waddle_xmpp::xep::NotificationLevel>, message_id: &str) -> usize {
         let state = create_test_websocket_state().await;

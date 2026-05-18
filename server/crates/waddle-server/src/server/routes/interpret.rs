@@ -91,7 +91,7 @@ use waddle_xmpp::mam::{
 };
 use waddle_xmpp::muc::room_actor::{
     ApplyPin, GetAffiliation, GetNicknameGeneration, GetRoomSnapshot, JoinWithAffiliation,
-    ListAffiliations, RoomActor, SetSubject,
+    RoomActor, SetSubject,
 };
 use waddle_xmpp::muc::room_registry_actor::{GetRoom, RoomRegistryActor};
 use waddle_xmpp::parse_managed_room_jid;
@@ -160,6 +160,7 @@ use direct_retraction::apply_retraction_tombstone;
 use groupchat_archive::{
     apply_groupchat_retraction_tombstone, archive_groupchat_message, project_groupchat_inbox,
 };
+pub(crate) use groupchat_inbox::reconcile_groupchat_notification_candidates;
 use groupchat_inbox::{project_groupchat_inbox_event, ProjectGroupchatInboxEvent};
 use groupchat_validation::{
     bad_request_error, build_message_error_reply, remove_framework_envelopes,

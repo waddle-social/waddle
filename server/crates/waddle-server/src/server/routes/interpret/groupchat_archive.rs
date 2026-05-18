@@ -281,10 +281,19 @@ pub(super) async fn project_groupchat_inbox(
     is_recipient: bool,
     thread: &Option<GroupchatThreadProjection>,
     dispatch_timestamp: i64,
+    notification_recovery: Option<waddle_xmpp::inbox::storage::GroupchatNotificationRecovery>,
 ) -> GroupchatInboxProjectionOutcome {
     let mut outcome = GroupchatInboxProjectionOutcome::default();
     let entry = groupchat_entry(room.clone(), message, dispatch_timestamp);
-    match inbox_storage.upsert(owner, entry, is_recipient).await {
+    let channel_recovery = if thread.is_none() {
+        notification_recovery.clone()
+    } else {
+        None
+    };
+    match inbox_storage
+        .upsert_with_groupchat_notification_recovery(owner, entry, is_recipient, channel_recovery)
+        .await
+    {
         Ok(updated) if is_recipient => {
             outcome.channel_committed = true;
             push_inbox_update(connection_registry, owner, &updated).await;
@@ -313,7 +322,12 @@ pub(super) async fn project_groupchat_inbox(
         thread.author_nick.as_deref(),
     );
     match inbox_storage
-        .upsert(owner, thread_entry, is_recipient)
+        .upsert_with_groupchat_notification_recovery(
+            owner,
+            thread_entry,
+            is_recipient,
+            notification_recovery,
+        )
         .await
     {
         Ok(updated) if is_recipient => {
