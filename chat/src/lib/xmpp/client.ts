@@ -10,7 +10,7 @@ import {
   removeQueuedMessage,
   type PersistedQueuedDmMessage,
 } from "../outbound-queue-store";
-import { $callState, applyCallEvent } from "@/lib/calls/call-store";
+import { $callState, applyCallEvent, clearCallState, tearDownActiveCall } from "@/lib/calls/call-store";
 import { handleCallEventSideEffect } from "@/lib/calls/call-effects";
 import type { CallWireSender } from "@/lib/calls/outbound";
 import type { CallEvent } from "@/lib/calls/types";
@@ -592,6 +592,11 @@ export class BrowserXmppClient {
     this.roomAuthority = {};
     this.roomPresence = {};
     this.roomMemberJids = {};
+    // Best-effort hangup: if we're in a call when the user logs out
+    // we want the peer to see session-terminate before the stream
+    // closes. `tearDownActiveCall` handles every phase and clears
+    // `$callState`.
+    await tearDownActiveCall(xmpp as unknown as CallWireSender | null, "success");
     this.xmpp = null;
     try {
       if (xmpp && roomBefore && xmpp.leave_room) {
@@ -1544,6 +1549,12 @@ export class BrowserXmppClient {
   private handleDisconnected(xmpp: XmppClientInstance, error?: Error) {
     if (this.xmpp !== xmpp) return;
     this.connected = false; this.stopSelfPing(); this.xmpp = null;
+    // The wire is gone — no point trying to send session-terminate.
+    // Clear the local call slot so the UI doesn't strand on a stale
+    // active overlay across reconnect; the reconnect path doesn't
+    // re-establish call state (XEP-0353 has no resume semantics for
+    // an in-flight call once the responder's connection drops).
+    clearCallState();
     if (this.destroying) { this.clearResumeState(); this.emitStatus({ state: "offline", detail: error?.message ?? "Disconnected" }); return; }
     this.setResumeStateHandle(xmpp.get_resume_state_handle?.() ?? null);
     this.resumeState = xmpp.get_resume_state?.() ?? null;

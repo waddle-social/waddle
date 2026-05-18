@@ -114,6 +114,11 @@ impl WaddleClient {
         let inner = self.inner.clone();
         future_to_promise(async move {
             let initiator = parse_full_jid(&initiator_full_jid)?;
+            // Validate peer_full_jid at the wasm boundary so a bare or
+            // malformed JID surfaces as a clear JsError instead of
+            // silently shipping an invalid stanza that the server's
+            // Jingle handler then rejects with a generic bad-request.
+            let _ = parse_full_jid(&peer_full_jid)?;
             let stanza = iq_set(
                 &peer_full_jid,
                 build_session_initiate(&sid(sid_str), &initiator, media_from_flags(audio, video)),
@@ -140,6 +145,7 @@ impl WaddleClient {
         future_to_promise(async move {
             let initiator = parse_full_jid(&initiator_full_jid)?;
             let responder = parse_full_jid(&responder_full_jid)?;
+            let _ = parse_full_jid(&peer_full_jid)?;
             let stanza = iq_set(
                 &peer_full_jid,
                 build_session_accept(
@@ -175,6 +181,7 @@ impl WaddleClient {
                 ),
                 None => None,
             };
+            let _ = parse_full_jid(&peer_full_jid)?;
             let stanza = iq_set(
                 &peer_full_jid,
                 build_session_terminate(&sid(sid_str), typed_reason),
@@ -182,5 +189,38 @@ impl WaddleClient {
             send_iq_command(inner, stanza).await?;
             Ok(JsValue::UNDEFINED)
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use jid::FullJid;
+    use std::str::FromStr;
+
+    /// `parse_full_jid` itself returns `Result<FullJid, JsValue>`,
+    /// and `wasm_bindgen::JsValue` panics under `cargo test` on
+    /// native targets (it's only safe on `wasm32`). The validation
+    /// is a thin `s.parse::<FullJid>()` call though, so we test the
+    /// underlying parse directly — same coverage, no JsValue
+    /// instantiation on native.
+    #[test]
+    fn full_jid_parse_accepts_full_jid() {
+        assert!(FullJid::from_str("alice@waddle.test/desktop").is_ok());
+    }
+
+    #[test]
+    fn full_jid_parse_rejects_bare_jid() {
+        // `send_call_session_initiate / accept / terminate` all
+        // validate `peer_full_jid` via this parse at the wasm
+        // boundary; a bare JID must be rejected before we ship the
+        // stanza.
+        assert!(FullJid::from_str("alice@waddle.test").is_err());
+    }
+
+    #[test]
+    fn full_jid_parse_rejects_garbage() {
+        assert!(FullJid::from_str("not-a-jid").is_err());
+        assert!(FullJid::from_str("@domain/res").is_err());
+        assert!(FullJid::from_str("").is_err());
     }
 }

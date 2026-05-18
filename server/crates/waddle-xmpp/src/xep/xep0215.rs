@@ -37,33 +37,51 @@ pub fn build_services(
     cred: &TurnCredential,
 ) -> Vec<Service> {
     vec![
-        Service {
-            action: Action::Add,
-            type_: ServiceType::Turn,
-            transport: Some(Transport::Tcp),
-            host: turn_host.as_str().to_string(),
-            port: Some(turn_tls_port),
-            username: Some(cred.username.as_str().to_string()),
-            password: Some(cred.password.as_str().to_string()),
-            expires: Some(xmpp_parsers::date::DateTime(cred.expires_at.fixed_offset())),
-            name: None,
-            restricted: Restricted::True,
-            ext_info: Vec::new(),
-        },
-        Service {
-            action: Action::Add,
-            type_: ServiceType::Stun,
-            transport: Some(Transport::Udp),
-            host: turn_host.as_str().to_string(),
-            port: Some(stun_udp_port),
-            username: None,
-            password: None,
-            expires: None,
-            name: None,
-            restricted: Restricted::False,
-            ext_info: Vec::new(),
-        },
+        build_turn_service(turn_host, turn_tls_port, cred),
+        build_stun_service(turn_host, stun_udp_port),
     ]
+}
+
+/// XEP-0215 TURN entry with HMAC-derived credentials. Split out so
+/// the `type='stun'`-filtered request path can skip the TURN mint
+/// entirely.
+pub fn build_turn_service(
+    turn_host: &TurnHost,
+    turn_tls_port: u16,
+    cred: &TurnCredential,
+) -> Service {
+    Service {
+        action: Action::Add,
+        type_: ServiceType::Turn,
+        transport: Some(Transport::Tcp),
+        host: turn_host.as_str().to_string(),
+        port: Some(turn_tls_port),
+        username: Some(cred.username.as_str().to_string()),
+        password: Some(cred.password.as_str().to_string()),
+        expires: Some(xmpp_parsers::date::DateTime(cred.expires_at.fixed_offset())),
+        name: None,
+        restricted: Restricted::True,
+        ext_info: Vec::new(),
+    }
+}
+
+/// XEP-0215 STUN entry. No credentials, so it's cheap to build and
+/// safe to serve to anyone who can already authenticate to the XMPP
+/// stream.
+pub fn build_stun_service(turn_host: &TurnHost, stun_udp_port: u16) -> Service {
+    Service {
+        action: Action::Add,
+        type_: ServiceType::Stun,
+        transport: Some(Transport::Udp),
+        host: turn_host.as_str().to_string(),
+        port: Some(stun_udp_port),
+        username: None,
+        password: None,
+        expires: None,
+        name: None,
+        restricted: Restricted::False,
+        ext_info: Vec::new(),
+    }
 }
 
 #[cfg(test)]

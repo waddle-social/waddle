@@ -2,11 +2,12 @@
 import { computed } from "vue";
 import { useStore } from "@nanostores/vue";
 import { Phone, PhoneOff, Video } from "lucide-vue-next";
-import { $callState, clearCallState } from "@/lib/calls/call-store";
+import { $callState, $lastCallError, clearCallState, reportCallError } from "@/lib/calls/call-store";
 import { outboundCalls } from "@/lib/calls/outbound";
 import { connectionStore } from "@/lib/connection-store";
 
 const state = useStore($callState);
+const lastError = useStore($lastCallError);
 
 const peerLabel = computed(() => {
   if (state.value.phase === "outgoing") {
@@ -41,6 +42,8 @@ const endedCopy = computed(() => {
       return "Call cancelled";
     case "busy":
       return "Peer is busy";
+    case "timeout":
+      return "No answer";
     default:
       return `Call ended (${r})`;
   }
@@ -56,11 +59,15 @@ async function cancel(): Promise<void> {
   const { to, sid } = state.value;
   const sender = getSender();
   if (sender) {
-    // XEP-0353 §0.4 retract — caller aborts the propose before
-    // the peer answered. The reducer flips state to `ended` when
-    // the reflected retract loops back, but optimistically clear
-    // the slot here so the toast disappears immediately.
-    await outboundCalls.retract(sender, to, sid).catch(() => undefined);
+    try {
+      // XEP-0353 §0.4 retract — caller aborts the propose before
+      // the peer answered. Optimistically clear the slot here so
+      // the toast disappears immediately; the reflected retract
+      // (if any) is then a no-op against the empty state.
+      await outboundCalls.retract(sender, to, sid);
+    } catch (err) {
+      reportCallError(err);
+    }
   }
   clearCallState();
 }
@@ -89,6 +96,13 @@ function dismissEnded(): void {
         <div class="type-chat-title truncate">{{ peerLabel }}</div>
         <div class="type-caption text-muted-foreground">{{ mediaLabel }} · calling…</div>
       </div>
+    </div>
+    <div
+      v-if="lastError"
+      class="mt-2 rounded-md border border-destructive/30 bg-destructive/10 px-2 py-1 type-caption text-destructive"
+      role="alert"
+    >
+      {{ lastError }}
     </div>
     <div class="mt-3 flex items-center justify-end gap-2">
       <button

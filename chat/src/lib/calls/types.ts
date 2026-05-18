@@ -50,9 +50,12 @@ export type CallState =
   | { phase: "outgoing"; to: string; sid: string; media: CallMedia }
   | {
       phase: "active";
+      /** 1:1 calls track the peer's full JID here; group calls
+       *  store the room's bare JID. Distinguish via `kind`. */
       peer: string;
       sid: string;
       media: CallMedia;
       join: LiveKitJoin;
+      kind: "dm" | "muc";
     }
   | { phase: "ended"; sid: string; reason: string | null };

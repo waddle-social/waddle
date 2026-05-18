@@ -345,8 +345,13 @@ pub fn build_session_terminate(
 }
 
 fn rtp_description_element(media: &str) -> Element {
+    // XEP-0167 §3.3: advertise `<rtcp-mux/>` on every RTP description.
+    // LiveKit multiplexes RTP and RTCP on a single port and refuses
+    // separate RTCP, so omitting this is a protocol downgrade against
+    // every modern WebRTC peer.
     Element::builder("description", NS_JINGLE_RTP)
         .attr("media", media)
+        .append(Element::builder("rtcp-mux", NS_JINGLE_RTP).build())
         .build()
 }
 
@@ -503,6 +508,57 @@ mod tests {
             .filter_map(|c| c.attr("media"))
             .collect();
         assert_eq!(media, vec!["audio"]);
+    }
+
+    #[test]
+    fn build_propose_descriptions_include_rtcp_mux() {
+        let elem = build_propose(&sid("c1"), CallMedia::audio_video());
+        for desc in elem
+            .children()
+            .filter(|c| c.name() == "description" && c.ns() == NS_JINGLE_RTP)
+        {
+            assert!(
+                desc.children()
+                    .any(|c| c.name() == "rtcp-mux" && c.ns() == NS_JINGLE_RTP),
+                "XEP-0167 §3.3: <description/> must advertise <rtcp-mux/>"
+            );
+        }
+    }
+
+    #[test]
+    fn build_session_initiate_descriptions_include_rtcp_mux() {
+        let initiator: FullJid = "alice@waddle.test/desktop".parse().unwrap();
+        let elem = build_session_initiate(&sid("c1"), &initiator, CallMedia::audio_video());
+        for content in elem.children().filter(|c| c.name() == "content") {
+            let desc = content
+                .children()
+                .find(|c| c.name() == "description" && c.ns() == NS_JINGLE_RTP)
+                .expect("each content carries an RTP description");
+            assert!(
+                desc.children()
+                    .any(|c| c.name() == "rtcp-mux" && c.ns() == NS_JINGLE_RTP),
+                "XEP-0167 §3.3 conformance on session-initiate"
+            );
+        }
+    }
+
+    #[test]
+    fn build_session_accept_descriptions_include_rtcp_mux() {
+        let initiator: FullJid = "alice@waddle.test/desktop".parse().unwrap();
+        let responder: FullJid = "bob@waddle.test/desktop".parse().unwrap();
+        let elem =
+            build_session_accept(&sid("c1"), &initiator, &responder, CallMedia::audio_video());
+        for content in elem.children().filter(|c| c.name() == "content") {
+            let desc = content
+                .children()
+                .find(|c| c.name() == "description" && c.ns() == NS_JINGLE_RTP)
+                .expect("each content carries an RTP description");
+            assert!(
+                desc.children()
+                    .any(|c| c.name() == "rtcp-mux" && c.ns() == NS_JINGLE_RTP),
+                "XEP-0167 §3.3 conformance on session-accept"
+            );
+        }
     }
 
     #[test]

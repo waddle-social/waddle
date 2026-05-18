@@ -35,12 +35,14 @@ pub mod extdisco;
 pub mod framework_envelope;
 pub mod inbox;
 pub mod jingle;
+pub mod muc_call;
 pub mod offline_delivery;
 pub mod ping;
 pub mod receipts;
 pub mod rich_target_validation;
 pub mod route;
 pub mod session;
+pub mod session_initiate_rate_limit;
 pub mod time;
 pub mod version;
 
@@ -75,10 +77,11 @@ pub fn register_call_handlers(
 ) {
     dispatcher.register_iq(Arc::new(jingle::JingleHandler::new(sfu.clone())));
     dispatcher.register_iq(Arc::new(extdisco::ExtDiscoHandler::new(
-        sfu,
+        sfu.clone(),
         turn_tls_port,
         turn_udp_port,
     )));
+    dispatcher.register_iq(Arc::new(muc_call::MucCallHandler::new(sfu)));
 }
 
 /// Register the full message-pipeline handler chain in the order

@@ -21,6 +21,7 @@ use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
 use waddle_sfu::{CallId, Identity, MediaCapabilities, SfuError, SfuService};
 
 use crate::protocol::event::{OutboundEvent, StanzaContext};
+use crate::protocol::handlers::session_initiate_rate_limit::SessionInitiateRateLimit;
 use crate::protocol::traits::IqHandler;
 use crate::xep::xep0166::NS_JINGLE;
 use crate::xep::xep_waddle_livekit_transport::{
@@ -31,6 +32,10 @@ use crate::Stanza;
 #[derive(Clone)]
 pub struct JingleHandler {
     sfu: Arc<dyn SfuService>,
+    // Per-bare-JID rate limit on `session-initiate` only. Shared via
+    // Arc so cloning the handler (the dispatcher clones it on
+    // registration) keeps every clone hitting the same bucket map.
+    rate_limit: Arc<SessionInitiateRateLimit>,
 }
 
 impl std::fmt::Debug for JingleHandler {
@@ -41,7 +46,19 @@ impl std::fmt::Debug for JingleHandler {
 
 impl JingleHandler {
     pub fn new(sfu: Arc<dyn SfuService>) -> Self {
-        Self { sfu }
+        Self {
+            sfu,
+            rate_limit: Arc::new(SessionInitiateRateLimit::with_defaults()),
+        }
+    }
+
+    /// Test-only constructor allowing a custom rate-limit policy.
+    #[cfg(test)]
+    pub fn with_rate_limit(
+        sfu: Arc<dyn SfuService>,
+        rate_limit: Arc<SessionInitiateRateLimit>,
+    ) -> Self {
+        Self { sfu, rate_limit }
     }
 }
 
@@ -78,10 +95,38 @@ impl IqHandler for JingleHandler {
             );
         };
 
+        // Same-domain guard. Federation isn't supported until the
+        // cross-server token / SFU trust story is designed (see PR
+        // description). Reject cross-domain Jingle stanzas at the
+        // boundary with a clear `feature-not-implemented` so the
+        // initiator sees an actionable error instead of a token
+        // their peer's server can't make use of.
+        if peer.domain() != ctx.full_jid.domain() {
+            return error_reply(
+                iq,
+                DefinedCondition::FeatureNotImplemented,
+                "Jingle calling is currently single-domain only; federation is not yet supported",
+            );
+        }
+
         match jingle.action {
-            Action::SessionInitiate | Action::SessionAccept => {
+            Action::SessionInitiate => {
+                // Rate-limit only session-initiate (creates a new SFU
+                // registry entry + mints a JWT). Session-accept on an
+                // existing initiate doesn't grow registry footprint
+                // beyond what the matching initiate already paid for.
+                let initiator_bare = ctx.full_jid.to_bare();
+                if let Err(exceeded) = self.rate_limit.check_and_record(&initiator_bare) {
+                    tracing::warn!(jid = %initiator_bare, %exceeded, "rate-limit dropped session-initiate");
+                    return error_reply(
+                        iq,
+                        DefinedCondition::PolicyViolation,
+                        "session-initiate rate limit exceeded",
+                    );
+                }
                 self.handle_session_negotiation(iq, jingle, peer, ctx)
             }
+            Action::SessionAccept => self.handle_session_negotiation(iq, jingle, peer, ctx),
             Action::SessionTerminate => self.handle_session_terminate(iq, jingle, peer, ctx),
             Action::SessionInfo
             | Action::TransportInfo
@@ -673,6 +718,71 @@ mod tests {
             fwd.from.as_ref().map(|j| j.to_string()),
             Some("alice@waddle.test/desktop".to_string())
         );
+    }
+
+    #[test]
+    fn cross_domain_jingle_returns_feature_not_implemented() {
+        let iq = session_initiate_iq("alice@waddle.test/desktop", "bob@other.test/desktop", "c1");
+        let jid = test_ctx_jid();
+        let handler = JingleHandler::new(fixture_sfu());
+        let events = handler.handle(&iq, &ctx(&jid));
+        match &events[0] {
+            OutboundEvent::SendStanza(stanza) => match stanza.as_ref() {
+                Stanza::Iq(reply) => {
+                    let IqType::Error(err) = &reply.payload else {
+                        panic!("expected error")
+                    };
+                    assert_eq!(
+                        err.defined_condition,
+                        DefinedCondition::FeatureNotImplemented,
+                        "federation is intentionally not supported yet"
+                    );
+                }
+                _ => panic!("expected Iq"),
+            },
+            _ => panic!("expected SendStanza"),
+        }
+    }
+
+    #[test]
+    fn rate_limited_session_initiate_returns_policy_violation() {
+        use std::time::Duration;
+        // Tight budget: 1 initiate per 30s.
+        let rl = Arc::new(SessionInitiateRateLimit::new(1, Duration::from_secs(30)));
+        let handler = JingleHandler::with_rate_limit(fixture_sfu(), rl);
+        let jid = test_ctx_jid();
+        let ctx = ctx(&jid);
+
+        let first = handler.handle(
+            &session_initiate_iq("alice@waddle.test/desktop", "bob@waddle.test/desktop", "c1"),
+            &ctx,
+        );
+        assert!(
+            first
+                .iter()
+                .any(|ev| matches!(ev, OutboundEvent::RouteToConnection { .. })),
+            "first initiate forwards normally"
+        );
+
+        // Second initiate within the window must be rejected with
+        // policy-violation; no forward, no SFU registration.
+        let second = handler.handle(
+            &session_initiate_iq("alice@waddle.test/desktop", "bob@waddle.test/desktop", "c2"),
+            &ctx,
+        );
+        assert_eq!(second.len(), 1);
+        match &second[0] {
+            OutboundEvent::SendStanza(stanza) => match stanza.as_ref() {
+                Stanza::Iq(reply) => {
+                    let IqType::Error(err) = &reply.payload else {
+                        panic!("expected error reply, got {reply:?}");
+                    };
+                    assert_eq!(err.defined_condition, DefinedCondition::PolicyViolation);
+                }
+                other => panic!("expected Iq, got {other:?}"),
+            },
+            other => panic!("expected SendStanza, got {other:?}"),
+        }
     }
 
     #[test]

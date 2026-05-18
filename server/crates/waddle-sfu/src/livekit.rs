@@ -6,12 +6,12 @@
 
 use std::collections::HashSet;
 
-use dashmap::DashMap;
+use dashmap::{DashMap, DashSet};
 
 use crate::call::{CallId, CallState, Identity, MediaCapabilities};
 use crate::config::{SfuConfig, WebsocketUrl};
 use crate::error::SfuError;
-use crate::token::{mint_join_token, JoinToken, MintInputs};
+use crate::token::{mint_join_token, JoinToken, Jti, MintInputs};
 use crate::turn::{mint_turn_credential, TurnCredential, TurnHost};
 use crate::SfuService;
 
@@ -19,6 +19,18 @@ use crate::SfuService;
 pub struct LiveKitSfu {
     config: SfuConfig,
     calls: DashMap<CallId, HashSet<Identity>>,
+    /// Live JWT identifiers per `(call, identity)` so we can
+    /// individually revoke every token a participant was ever
+    /// issued for a call (someone reconnects → fresh jti → both
+    /// stay tracked until the participant unregisters).
+    issued: DashMap<(CallId, Identity), Vec<Jti>>,
+    /// Set of revoked JWT identifiers. Bookkeeping today — LiveKit
+    /// itself doesn't call back to verify jti, so a stolen token
+    /// stays usable until its `exp`. Documented limitation; the
+    /// path-to-real-revocation needs LiveKit cooperation (webhook
+    /// validation hook) or a shared revocation store (Redis) once
+    /// Waddle scales past a single SFU instance.
+    revoked: DashSet<Jti>,
 }
 
 impl LiveKitSfu {
@@ -26,6 +38,8 @@ impl LiveKitSfu {
         Self {
             config,
             calls: DashMap::new(),
+            issued: DashMap::new(),
+            revoked: DashSet::new(),
         }
     }
 
@@ -49,7 +63,7 @@ impl SfuService for LiveKitSfu {
         identity: &Identity,
         capabilities: MediaCapabilities,
     ) -> Result<JoinToken, SfuError> {
-        mint_join_token(MintInputs {
+        let token = mint_join_token(MintInputs {
             api_key: &self.config.api_key,
             api_secret: &self.config.api_secret,
             ws_url: &self.config.ws_url,
@@ -57,7 +71,15 @@ impl SfuService for LiveKitSfu {
             identity,
             capabilities,
             ttl: self.config.token_ttl,
-        })
+        })?;
+        // Track the jti against `(call, identity)` so a subsequent
+        // unregister revokes every JWT this participant ever held
+        // for the call.
+        self.issued
+            .entry((call_id.clone(), identity.clone()))
+            .or_default()
+            .push(token.jti.clone());
+        Ok(token)
     }
 
     fn issue_turn_credentials(&self, identity: &Identity) -> Result<TurnCredential, SfuError> {
@@ -84,12 +106,26 @@ impl SfuService for LiveKitSfu {
             None => 0,
         };
 
+        // Revoke every JWT issued to this (call, identity). Token
+        // theft after the legitimate hangup is the threat model;
+        // see `revoked` field comment for the LiveKit-cooperation
+        // gap that makes this advisory today.
+        if let Some((_, jtis)) = self.issued.remove(&(call_id.clone(), identity.clone())) {
+            for jti in jtis {
+                self.revoked.insert(jti);
+            }
+        }
+
         if remaining == 0 {
             self.calls.remove(call_id);
             CallState::Ended
         } else {
             CallState::Active { remaining }
         }
+    }
+
+    fn is_revoked(&self, jti: &Jti) -> bool {
+        self.revoked.contains(jti)
     }
 
     fn ws_url(&self) -> &WebsocketUrl {
@@ -177,6 +213,53 @@ mod tests {
             .username
             .as_str()
             .contains("alice@waddle.social/desktop"));
+    }
+
+    #[test]
+    fn unregister_revokes_every_jti_issued_to_the_participant() {
+        let sfu = LiveKitSfu::new(fixture_config());
+        let call = CallId::new("c-revoke").unwrap();
+        let alice = fixture_identity("alice");
+
+        let t1 = sfu
+            .issue_join_token(&call, &alice, MediaCapabilities::full_participant())
+            .unwrap();
+        let t2 = sfu
+            .issue_join_token(&call, &alice, MediaCapabilities::full_participant())
+            .unwrap();
+        assert!(!sfu.is_revoked(&t1.jti));
+        assert!(!sfu.is_revoked(&t2.jti));
+
+        // Register + unregister: every previously-issued jti must
+        // be revoked once the participant has left the call.
+        sfu.register_call_participant(&call, &alice);
+        sfu.unregister_call_participant(&call, &alice);
+
+        assert!(sfu.is_revoked(&t1.jti));
+        assert!(sfu.is_revoked(&t2.jti));
+    }
+
+    #[test]
+    fn revocation_is_scoped_per_participant() {
+        let sfu = LiveKitSfu::new(fixture_config());
+        let call = CallId::new("c-scope").unwrap();
+        let alice = fixture_identity("alice");
+        let bob = fixture_identity("bob");
+
+        let alice_token = sfu
+            .issue_join_token(&call, &alice, MediaCapabilities::full_participant())
+            .unwrap();
+        let bob_token = sfu
+            .issue_join_token(&call, &bob, MediaCapabilities::full_participant())
+            .unwrap();
+
+        sfu.register_call_participant(&call, &alice);
+        sfu.register_call_participant(&call, &bob);
+        sfu.unregister_call_participant(&call, &alice);
+
+        // Alice's hangup must not revoke bob's still-active token.
+        assert!(sfu.is_revoked(&alice_token.jti));
+        assert!(!sfu.is_revoked(&bob_token.jti));
     }
 
     #[test]

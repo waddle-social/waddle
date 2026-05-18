@@ -2,12 +2,13 @@
 import { computed, onBeforeUnmount, ref, watch } from "vue";
 import { useStore } from "@nanostores/vue";
 import { Mic, MicOff, PhoneOff, Video, VideoOff } from "lucide-vue-next";
-import { $callState, clearCallState } from "@/lib/calls/call-store";
+import { $callState, $lastCallError, clearCallState, reportCallError, sendMucCallLeave, tearDownActiveCall } from "@/lib/calls/call-store";
 import { outboundCalls } from "@/lib/calls/outbound";
 import { useCallEngine } from "@/lib/calls/use-call-engine";
 import { connectionStore } from "@/lib/connection-store";
 
 const state = useStore($callState);
+const lastError = useStore($lastCallError);
 const { engine, remoteTracks } = useCallEngine();
 
 const connecting = ref(false);
@@ -63,12 +64,18 @@ async function hangup(): Promise<void> {
     clearCallState();
     return;
   }
-  const { peer, sid } = state.value;
+  const active = state.value;
   const sender = getSender();
   if (sender) {
-    await outboundCalls
-      .sessionTerminate(sender, peer, sid, "success")
-      .catch(() => undefined);
+    try {
+      if (active.kind === "dm") {
+        await outboundCalls.sessionTerminate(sender, active.peer, active.sid, "success");
+      } else {
+        await sendMucCallLeave(sender as unknown as Parameters<typeof sendMucCallLeave>[0], active.peer);
+      }
+    } catch (err) {
+      reportCallError(err);
+    }
   }
   await engine.disconnect();
   clearCallState();
@@ -77,7 +84,10 @@ async function hangup(): Promise<void> {
 const peerLabel = computed(() => {
   if (state.value.phase !== "active") return "";
   const at = state.value.peer.indexOf("@");
-  return at > 0 ? state.value.peer.slice(0, at) : state.value.peer;
+  const localpart = at > 0 ? state.value.peer.slice(0, at) : state.value.peer;
+  // MUC group call: prefix the room's localpart with `#` so the
+  // header reads as a channel reference, not a DM peer name.
+  return state.value.kind === "muc" ? `#${localpart}` : localpart;
 });
 
 function attachTrack(el: HTMLMediaElement | null, track: { attach: (target: HTMLMediaElement) => void; detach: () => HTMLMediaElement[] } | null): void {
@@ -86,6 +96,11 @@ function attachTrack(el: HTMLMediaElement | null, track: { attach: (target: HTML
 }
 
 onBeforeUnmount(() => {
+  // Tab close mid-call: best-effort session-terminate (reason
+  // "gone" per XEP-0166 §7.4 for the no-longer-reachable case) so
+  // the peer's overlay closes immediately instead of waiting for
+  // the LiveKit room to drop them.
+  void tearDownActiveCall(getSender(), "gone");
   void engine.disconnect();
 });
 </script>
@@ -101,6 +116,13 @@ onBeforeUnmount(() => {
       <div class="type-chat-title">{{ peerLabel }}</div>
       <div v-if="connecting" class="type-caption text-muted-foreground">Connecting…</div>
     </header>
+    <div
+      v-if="lastError"
+      class="border-b border-destructive/30 bg-destructive/10 px-6 py-2 type-caption text-destructive"
+      role="alert"
+    >
+      {{ lastError }}
+    </div>
     <div class="grid flex-1 auto-rows-fr gap-3 p-6 sm:grid-cols-2">
       <template v-for="track in remoteTracks" :key="track.publicationSid">
         <video

@@ -2,7 +2,7 @@
 import { computed } from "vue";
 import { useStore } from "@nanostores/vue";
 import { Phone, Video } from "lucide-vue-next";
-import { $callState, beginOutgoingCall } from "@/lib/calls/call-store";
+import { $callState, beginOutgoingCall, reportCallError, scheduleOutgoingTimeout } from "@/lib/calls/call-store";
 import { newCallSid, outboundCalls } from "@/lib/calls/outbound";
 import { connectionStore } from "@/lib/connection-store";
 import type { CallMedia } from "@/lib/calls/types";
@@ -36,14 +36,20 @@ async function startCall(media: CallMedia): Promise<void> {
   beginOutgoingCall(props.peerBareJid, sid, media);
   try {
     await outboundCalls.propose(sender, props.peerBareJid, sid, media);
-  } catch {
-    // The propose stanza failed at the wire boundary; surface
-    // the failure by snapping the slot back to idle so the UI
-    // doesn't strand on an outgoing toast that will never
-    // resolve. The caller can retry by clicking again.
-    if ($callState.get().phase === "outgoing" && $callState.get().sid === sid) {
+    // Arm the auto-retract once the propose is on the wire — if we
+    // armed earlier and the propose itself failed, the timer would
+    // race the rollback.
+    scheduleOutgoingTimeout(sender, sid);
+  } catch (err) {
+    // The propose stanza failed at the wire boundary. Snap the slot
+    // back to idle so the UI doesn't strand on an outgoing toast
+    // that never resolves, and surface the error via the global
+    // call-error atom so the user knows the click did something.
+    const current = $callState.get();
+    if (current.phase === "outgoing" && current.sid === sid) {
       $callState.set({ phase: "idle" });
     }
+    reportCallError(err);
   }
 }
 </script>

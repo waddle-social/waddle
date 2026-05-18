@@ -8,10 +8,39 @@
 use chrono::{DateTime, Duration, Utc};
 use jsonwebtoken::{encode, EncodingKey, Header};
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 use crate::call::{CallId, Identity, MediaCapabilities};
 use crate::config::{ApiKey, ApiSecret, WebsocketUrl};
 use crate::error::SfuError;
+
+/// JWT identifier (RFC 7519 §4.1.7). A fresh UUID is minted per
+/// token so the SFU can track and revoke individual issuances even
+/// when the same (call, identity) pair gets multiple tokens.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Jti(String);
+
+impl Jti {
+    pub fn new() -> Self {
+        Self(Uuid::new_v4().to_string())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl Default for Jti {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl std::fmt::Display for Jti {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
 
 /// Opaque encoded JWT. Wire boundary value; never inspected by the
 /// XMPP layer apart from being placed in a `<token/>` child of the
@@ -51,6 +80,7 @@ pub struct JoinToken {
     pub room: CallId,
     pub identity: Identity,
     pub jwt: Jwt,
+    pub jti: Jti,
     pub expires_at: DateTime<Utc>,
 }
 
@@ -89,6 +119,10 @@ struct Claims {
     iat: i64,
     nbf: i64,
     exp: i64,
+    /// RFC 7519 §4.1.7 token identifier; lets the SFU revocation
+    /// surface refer to an individual token without round-tripping
+    /// the opaque JWT string.
+    jti: String,
     video: VideoGrant,
 }
 
@@ -107,6 +141,7 @@ pub(crate) struct MintInputs<'a> {
 pub(crate) fn mint_join_token(inputs: MintInputs<'_>) -> Result<JoinToken, SfuError> {
     let now = Utc::now();
     let expires_at = now + inputs.ttl;
+    let jti = Jti::new();
 
     let claims = Claims {
         iss: inputs.api_key.as_str().to_string(),
@@ -114,6 +149,7 @@ pub(crate) fn mint_join_token(inputs: MintInputs<'_>) -> Result<JoinToken, SfuEr
         iat: now.timestamp(),
         nbf: now.timestamp(),
         exp: expires_at.timestamp(),
+        jti: jti.as_str().to_string(),
         video: VideoGrant::from_capabilities(inputs.call_id, inputs.capabilities),
     };
 
@@ -126,6 +162,7 @@ pub(crate) fn mint_join_token(inputs: MintInputs<'_>) -> Result<JoinToken, SfuEr
         room: inputs.call_id.clone(),
         identity: inputs.identity.clone(),
         jwt: Jwt(encoded),
+        jti,
         expires_at,
     })
 }
@@ -166,6 +203,7 @@ mod tests {
         iat: i64,
         nbf: i64,
         exp: i64,
+        jti: String,
         video: VideoGrant,
     }
 
@@ -199,11 +237,33 @@ mod tests {
         assert_eq!(claims.sub, identity.as_livekit_identity());
         assert!(claims.exp > claims.iat);
         assert_eq!(claims.iat, claims.nbf);
+        assert_eq!(claims.jti, token.jti.as_str());
+        assert!(!claims.jti.is_empty());
         assert!(claims.video.room_join);
         assert_eq!(claims.video.room, call_id.as_str());
         assert!(claims.video.can_publish);
         assert!(claims.video.can_subscribe);
         assert!(claims.video.can_publish_data);
+    }
+
+    #[test]
+    fn each_mint_emits_a_unique_jti() {
+        let api_key = ApiKey::new("APIxxxxxxxx");
+        let secret = ApiSecret::from_text("super-secret-secret-32-bytes-min")
+            .expect("test secret meets min length");
+        let ws_url = WebsocketUrl::new("wss://livekit.waddle.social".parse().expect("valid URL"))
+            .expect("valid ws url");
+        let call_id = CallId::new("call-abc-123").expect("valid call id");
+        let identity = fixture_identity();
+        let a = mint_join_token(fixture_inputs(
+            &api_key, &secret, &ws_url, &call_id, &identity,
+        ))
+        .unwrap();
+        let b = mint_join_token(fixture_inputs(
+            &api_key, &secret, &ws_url, &call_id, &identity,
+        ))
+        .unwrap();
+        assert_ne!(a.jti, b.jti, "every issuance must have a fresh jti");
     }
 
     #[test]

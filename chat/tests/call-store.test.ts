@@ -49,20 +49,34 @@ describe("call-store reducer", () => {
     expect(next).toBe(current);
   });
 
-  test("session-initiate transitions to active with credentials", () => {
-    const next = reduceCallState({ phase: "idle" }, {
-      kind: "session-initiate",
-      from: "alice@waddle.test",
-      sid: "c1",
-      media: audioVideo,
-      join,
-    });
+  test("session-initiate transitions incoming → active with credentials", () => {
+    // Per XEP-0166 §6.2, session-initiate is only valid after the
+    // responder has accepted via JMI proceed — so it MUST arrive
+    // while the slot is `incoming`. Stale or out-of-order
+    // session-initiate arriving while idle is dropped (see the sid
+    // guards section below).
+    const next = reduceCallState(
+      {
+        phase: "incoming",
+        from: "alice@waddle.test",
+        sid: "c1",
+        media: audioVideo,
+      },
+      {
+        kind: "session-initiate",
+        from: "alice@waddle.test/desktop",
+        sid: "c1",
+        media: audioVideo,
+        join,
+      },
+    );
     expect(next).toEqual({
       phase: "active",
-      peer: "alice@waddle.test",
+      peer: "alice@waddle.test/desktop",
       sid: "c1",
       media: audioVideo,
       join,
+      kind: "dm",
     });
   });
 
@@ -183,6 +197,7 @@ describe("call-store reducer", () => {
       sid: "c9",
       media: audioVideo,
       join,
+      kind: "dm",
     });
   });
 
@@ -210,5 +225,130 @@ describe("call-store reducer", () => {
       { kind: "retract", from: "alice@waddle.test", sid: "c9" },
     );
     expect(next).toEqual({ phase: "ended", sid: "c9", reason: "retract" });
+  });
+
+  // -- sid + phase guards --------------------------------------------
+
+  test("session-initiate is dropped when phase is not incoming", () => {
+    const current = { phase: "idle" as const };
+    const next = reduceCallState(current, {
+      kind: "session-initiate",
+      from: "alice@waddle.test/desktop",
+      sid: "c9",
+      media: audioVideo,
+      join,
+    });
+    expect(next).toBe(current);
+  });
+
+  test("session-initiate is dropped when sid does not match incoming", () => {
+    const current = {
+      phase: "incoming" as const,
+      from: "alice@waddle.test",
+      sid: "c-live",
+      media: audioVideo,
+    };
+    const next = reduceCallState(current, {
+      kind: "session-initiate",
+      from: "alice@waddle.test/desktop",
+      sid: "c-stale",
+      media: audioVideo,
+      join,
+    });
+    expect(next).toBe(current);
+  });
+
+  test("session-accept is dropped when phase is not outgoing", () => {
+    const current = { phase: "idle" as const };
+    const next = reduceCallState(current, {
+      kind: "session-accept",
+      from: "bob@waddle.test/desktop",
+      sid: "c9",
+      media: audioVideo,
+      join,
+    });
+    expect(next).toBe(current);
+  });
+
+  test("session-accept is dropped when sid does not match outgoing", () => {
+    const current = {
+      phase: "outgoing" as const,
+      to: "bob@waddle.test",
+      sid: "c-live",
+      media: audioVideo,
+    };
+    const next = reduceCallState(current, {
+      kind: "session-accept",
+      from: "bob@waddle.test/desktop",
+      sid: "c-stale",
+      media: audioVideo,
+      join,
+    });
+    expect(next).toBe(current);
+  });
+
+  test("session-terminate with mismatched sid is a no-op", () => {
+    const current = {
+      phase: "active" as const,
+      peer: "bob@waddle.test/desktop",
+      sid: "c-live",
+      media: audioVideo,
+      join,
+    };
+    const next = reduceCallState(current, {
+      kind: "session-terminate",
+      from: "bob@waddle.test/desktop",
+      sid: "c-stale",
+      reason: "success",
+    });
+    expect(next).toBe(current);
+  });
+
+  test("finish with mismatched sid is a no-op", () => {
+    const current = {
+      phase: "active" as const,
+      peer: "bob@waddle.test/desktop",
+      sid: "c-live",
+      media: audioVideo,
+      join,
+    };
+    const next = reduceCallState(current, {
+      kind: "finish",
+      from: "bob@waddle.test/desktop",
+      sid: "c-stale",
+    });
+    expect(next).toBe(current);
+  });
+
+  test("reject with mismatched sid is a no-op", () => {
+    const current = {
+      phase: "outgoing" as const,
+      to: "bob@waddle.test",
+      sid: "c-live",
+      media: audioVideo,
+    };
+    const next = reduceCallState(current, {
+      kind: "reject",
+      from: "bob@waddle.test",
+      sid: "c-stale",
+    });
+    expect(next).toBe(current);
+  });
+
+  test("propose while active is retained as current state", () => {
+    const current = {
+      phase: "active" as const,
+      peer: "carol@waddle.test/desktop",
+      sid: "c-live",
+      media: audioVideo,
+      join,
+    };
+    const next = reduceCallState(current, {
+      kind: "propose",
+      from: "dave@waddle.test",
+      sid: "c-new",
+      media: audioVideo,
+    });
+    expect(next).toBe(current);
   });
 });

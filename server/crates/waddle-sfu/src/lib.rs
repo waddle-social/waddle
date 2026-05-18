@@ -31,7 +31,7 @@ pub use call::{CallId, CallState, Identity, MediaCapabilities};
 pub use config::{ApiKey, ApiSecret, FromEnvError, SfuConfig, TurnSharedSecret, WebsocketUrl};
 pub use error::SfuError;
 pub use livekit::LiveKitSfu;
-pub use token::{JoinToken, Jwt, VideoGrant};
+pub use token::{JoinToken, Jti, Jwt, VideoGrant};
 pub use turn::{TurnCredential, TurnHost, TurnPassword, TurnUsername};
 
 /// Abstract SFU service consumed by the XMPP layer.
@@ -68,8 +68,20 @@ pub trait SfuService: Send + Sync + 'static {
     /// the call is still active. When the last participant leaves,
     /// the call entry is removed and [`CallState::Ended`] is
     /// returned, allowing the caller to clear the MUC presence
-    /// extension.
+    /// extension. Also revokes every JWT the SFU has minted for the
+    /// `(call_id, identity)` pair so a stolen token can't be replayed
+    /// after the legitimate hangup. (Revocation is bookkeeping —
+    /// LiveKit itself doesn't call back to verify jti, so the value
+    /// is local-side replay-resistance + an audit trail; see
+    /// [`Self::is_revoked`].)
     fn unregister_call_participant(&self, call_id: &CallId, identity: &Identity) -> CallState;
+
+    /// Returns `true` if the SFU has marked `jti` as revoked. Useful
+    /// for tests + future LiveKit-cooperative validation: when
+    /// LiveKit gains the ability to delegate token verification back
+    /// to the issuer (e.g. via a webhook), this is the source of
+    /// truth.
+    fn is_revoked(&self, jti: &Jti) -> bool;
 
     /// LiveKit client-facing websocket URL (e.g.
     /// `wss://livekit.waddle.social`). Embedded verbatim into the

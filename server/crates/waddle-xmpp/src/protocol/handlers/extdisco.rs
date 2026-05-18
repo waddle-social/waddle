@@ -16,7 +16,9 @@ use waddle_sfu::{Identity, SfuService};
 
 use crate::protocol::event::{OutboundEvent, StanzaContext};
 use crate::protocol::traits::IqHandler;
-use crate::xep::xep0215::{build_services, ServicesResult, NS_EXT_DISCO};
+use crate::xep::xep0215::{
+    build_stun_service, build_turn_service, ServiceType, ServicesResult, NS_EXT_DISCO,
+};
 use crate::Stanza;
 
 #[derive(Clone)]
@@ -66,26 +68,55 @@ impl IqHandler for ExtDiscoHandler {
             );
         }
 
-        // Mint credentials scoped to the authenticated session JID,
-        // never the client-supplied `iq.from` (which could spoof any
-        // identity into the TURN username).
-        let identity = Identity::from_jid(ctx.full_jid.clone());
-        let cred = match self.sfu.issue_turn_credentials(&identity) {
-            Ok(c) => c,
-            Err(e) => {
-                tracing::error!(error = %e, "TURN credential mint failed");
-                return error_reply(iq, DefinedCondition::InternalServerError, "internal error");
+        // XEP-0215 §3.6.1: optional `type` attribute restricts the
+        // response to a single service type. Unknown values are
+        // rejected; an absent attribute returns every supported
+        // service.
+        let type_filter = match query.attr("type") {
+            None => None,
+            Some("turn") => Some(ServiceType::Turn),
+            Some("stun") => Some(ServiceType::Stun),
+            Some(other) => {
+                return error_reply(
+                    iq,
+                    DefinedCondition::BadRequest,
+                    &format!("unsupported services type filter: {other}"),
+                );
             }
         };
 
-        let services = build_services(
-            self.sfu.turn_host(),
-            self.turn_tls_port,
-            self.turn_udp_port,
-            &cred,
-        );
+        // Mint TURN credentials only when the response will actually
+        // include the TURN entry. Avoids a wasted HMAC for clients
+        // that explicitly filter to `type='stun'`.
+        let want_turn = type_filter != Some(ServiceType::Stun);
+        let want_stun = type_filter != Some(ServiceType::Turn);
+        let mut services = Vec::with_capacity(2);
+        if want_turn {
+            // Mint credentials scoped to the authenticated session
+            // JID, never the client-supplied `iq.from` (which could
+            // spoof any identity into the TURN username).
+            let identity = Identity::from_jid(ctx.full_jid.clone());
+            match self.sfu.issue_turn_credentials(&identity) {
+                Ok(cred) => services.push(build_turn_service(
+                    self.sfu.turn_host(),
+                    self.turn_tls_port,
+                    &cred,
+                )),
+                Err(e) => {
+                    tracing::error!(error = %e, "TURN credential mint failed");
+                    return error_reply(
+                        iq,
+                        DefinedCondition::InternalServerError,
+                        "internal error",
+                    );
+                }
+            }
+        }
+        if want_stun {
+            services.push(build_stun_service(self.sfu.turn_host(), self.turn_udp_port));
+        }
         let result = ServicesResult {
-            type_: None,
+            type_: type_filter,
             services,
         };
         let reply = Iq {
@@ -222,6 +253,88 @@ mod tests {
             to: Some("waddle.test".parse().unwrap()),
             id: "e4".into(),
             payload: IqType::Get(Element::builder("services", "urn:xmpp:other:1").build()),
+        };
+        let jid = test_jid();
+        let handler = ExtDiscoHandler::new(fixture_sfu(), 443, 3478);
+        let events = handler.handle(&iq, &ctx(&jid));
+        let OutboundEvent::SendStanza(stanza) = events.into_iter().next().unwrap() else {
+            panic!()
+        };
+        let Stanza::Iq(reply) = *stanza else { panic!() };
+        let IqType::Error(err) = reply.payload else {
+            panic!("expected error")
+        };
+        assert_eq!(err.defined_condition, DefinedCondition::BadRequest);
+    }
+
+    #[test]
+    fn services_query_with_type_turn_returns_only_turn_entry() {
+        let iq = Iq {
+            from: Some("alice@waddle.test/desktop".parse().unwrap()),
+            to: Some("waddle.test".parse().unwrap()),
+            id: "f1".into(),
+            payload: IqType::Get(
+                Element::builder("services", NS_EXT_DISCO)
+                    .attr("type", "turn")
+                    .build(),
+            ),
+        };
+        let jid = test_jid();
+        let handler = ExtDiscoHandler::new(fixture_sfu(), 443, 3478);
+        let events = handler.handle(&iq, &ctx(&jid));
+        let OutboundEvent::SendStanza(stanza) = events.into_iter().next().unwrap() else {
+            panic!()
+        };
+        let Stanza::Iq(reply) = *stanza else { panic!() };
+        let IqType::Result(Some(elem)) = reply.payload else {
+            panic!("expected result")
+        };
+        let parsed = ServicesResult::try_from(elem).expect("services result parses");
+        assert_eq!(parsed.type_, Some(ServiceType::Turn));
+        assert_eq!(parsed.services.len(), 1);
+        assert_eq!(parsed.services[0].type_, ServiceType::Turn);
+    }
+
+    #[test]
+    fn services_query_with_type_stun_skips_turn_mint() {
+        let iq = Iq {
+            from: Some("alice@waddle.test/desktop".parse().unwrap()),
+            to: Some("waddle.test".parse().unwrap()),
+            id: "f2".into(),
+            payload: IqType::Get(
+                Element::builder("services", NS_EXT_DISCO)
+                    .attr("type", "stun")
+                    .build(),
+            ),
+        };
+        let jid = test_jid();
+        let handler = ExtDiscoHandler::new(fixture_sfu(), 443, 3478);
+        let events = handler.handle(&iq, &ctx(&jid));
+        let OutboundEvent::SendStanza(stanza) = events.into_iter().next().unwrap() else {
+            panic!()
+        };
+        let Stanza::Iq(reply) = *stanza else { panic!() };
+        let IqType::Result(Some(elem)) = reply.payload else {
+            panic!("expected result")
+        };
+        let parsed = ServicesResult::try_from(elem).expect("services result parses");
+        assert_eq!(parsed.type_, Some(ServiceType::Stun));
+        assert_eq!(parsed.services.len(), 1);
+        assert_eq!(parsed.services[0].type_, ServiceType::Stun);
+        assert!(parsed.services[0].username.is_none());
+    }
+
+    #[test]
+    fn services_query_with_unsupported_type_returns_bad_request() {
+        let iq = Iq {
+            from: Some("alice@waddle.test/desktop".parse().unwrap()),
+            to: Some("waddle.test".parse().unwrap()),
+            id: "f3".into(),
+            payload: IqType::Get(
+                Element::builder("services", NS_EXT_DISCO)
+                    .attr("type", "ftp")
+                    .build(),
+            ),
         };
         let jid = test_jid();
         let handler = ExtDiscoHandler::new(fixture_sfu(), 443, 3478);

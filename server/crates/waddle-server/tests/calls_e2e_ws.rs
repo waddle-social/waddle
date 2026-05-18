@@ -76,19 +76,16 @@ async fn server_disco_advertises_call_features_when_livekit_enabled() {
         "urn:xmpp:jingle-message:0",
         "urn:xmpp:extdisco:2",
         "urn:waddle:transports:livekit:0",
+        // `urn:waddle:muc-call:0` is now backed by `MucCallHandler`
+        // (request-join / request-leave IQ surface) so the gating
+        // rule is satisfied — see `register_call_handlers`.
+        "urn:waddle:muc-call:0",
     ] {
         assert!(
             resp.contains(ns),
             "disco#info must advertise {ns}; got: {resp}"
         );
     }
-    // urn:waddle:muc-call:0 is intentionally NOT advertised yet — no
-    // backing handler. Locking this in prevents accidental
-    // regression of the gating fix from the earlier review.
-    assert!(
-        !resp.contains("urn:waddle:muc-call:0"),
-        "muc-call must stay unadvertised until handler ships; got: {resp}"
-    );
 }
 
 #[tokio::test]
