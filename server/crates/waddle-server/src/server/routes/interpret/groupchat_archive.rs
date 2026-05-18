@@ -268,7 +268,7 @@ pub(super) async fn scrub_unacked_for_tombstone(
 
 /// Apply the `(owner, room, message)` projection against the inbox
 /// storage. Mirrors the legacy
-/// `deliver_groupchat_via_room_actor`'s per-occupant
+/// `deliver_groupchat_via_room_actor`'s groupchat
 /// channel + thread upserts and the XEP-0430 inbox push to the
 /// owner's other resources.
 #[allow(clippy::too_many_arguments)]
@@ -281,13 +281,26 @@ pub(super) async fn project_groupchat_inbox(
     is_recipient: bool,
     thread: &Option<GroupchatThreadProjection>,
     dispatch_timestamp: i64,
-) {
+    notification_recovery: Option<waddle_xmpp::inbox::storage::GroupchatNotificationRecovery>,
+) -> GroupchatInboxProjectionOutcome {
+    let mut outcome = GroupchatInboxProjectionOutcome::default();
     let entry = groupchat_entry(room.clone(), message, dispatch_timestamp);
-    match inbox_storage.upsert(owner, entry, is_recipient).await {
+    let channel_recovery = if thread.is_none() {
+        notification_recovery.clone()
+    } else {
+        None
+    };
+    match inbox_storage
+        .upsert_with_groupchat_notification_recovery(owner, entry, is_recipient, channel_recovery)
+        .await
+    {
         Ok(updated) if is_recipient => {
+            outcome.channel_committed = true;
             push_inbox_update(connection_registry, owner, &updated).await;
         }
-        Ok(_) => {}
+        Ok(_) => {
+            outcome.channel_committed = true;
+        }
         Err(error) => {
             warn!(
                 jid = %owner,
@@ -298,7 +311,7 @@ pub(super) async fn project_groupchat_inbox(
         }
     }
     let Some(thread) = thread else {
-        return;
+        return outcome;
     };
     let thread_entry = groupchat_thread_entry(
         room.clone(),
@@ -309,13 +322,21 @@ pub(super) async fn project_groupchat_inbox(
         thread.author_nick.as_deref(),
     );
     match inbox_storage
-        .upsert(owner, thread_entry, is_recipient)
+        .upsert_with_groupchat_notification_recovery(
+            owner,
+            thread_entry,
+            is_recipient,
+            notification_recovery,
+        )
         .await
     {
         Ok(updated) if is_recipient => {
+            outcome.thread_committed = true;
             push_inbox_update(connection_registry, owner, &updated).await;
         }
-        Ok(_) => {}
+        Ok(_) => {
+            outcome.thread_committed = true;
+        }
         Err(error) => {
             warn!(
                 jid = %owner,
@@ -325,6 +346,13 @@ pub(super) async fn project_groupchat_inbox(
             );
         }
     }
+    outcome
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(super) struct GroupchatInboxProjectionOutcome {
+    pub channel_committed: bool,
+    pub thread_committed: bool,
 }
 
 /// XEP-0430 inbox push to all live resources of `user`. Decoupled

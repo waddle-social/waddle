@@ -27,6 +27,21 @@ const BASE_RETRY_DELAY_MS: i64 = 5_000;
 const BASE_POLICY_RETRY_DELAY_MS: i64 = 60_000;
 const MAX_RETRY_DELAY_MS: i64 = 300_000;
 const OUTBOX_CLAIM_TIMEOUT_MS: i64 = 300_000;
+const NOTIFICATION_CANDIDATES_REASON_CHECK_NAME: &str = "notification_candidates_reason_check";
+const NOTIFICATION_CANDIDATES_REASON_VALUES: [&str; 5] = [
+    "offline_dm",
+    "groupchat_personal_mention",
+    "groupchat_channel_mention",
+    "groupchat_active_channel_mention",
+    "groupchat_notify_all",
+];
+const NOTIFICATION_CANDIDATES_REASON_CHECK_SQL: &str = "reason IN ('offline_dm', 'groupchat_personal_mention', 'groupchat_channel_mention', 'groupchat_active_channel_mention', 'groupchat_notify_all')";
+const NOTIFICATION_CANDIDATES_INDEXES: [&str; 4] = [
+    "idx_notification_candidates_recipient_created",
+    "idx_notification_candidates_identity",
+    "idx_notification_candidates_pending_worker",
+    "idx_notification_candidates_outboxed_prune",
+];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NotificationThreadId(String);
@@ -116,18 +131,30 @@ impl NotificationClass {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NotificationReason {
     OfflineDirectMessage,
+    GroupchatPersonalMention,
+    GroupchatChannelMention,
+    GroupchatActiveChannelMention,
+    GroupchatNotifyAll,
 }
 
 impl NotificationReason {
     fn as_db_value(self) -> &'static str {
         match self {
             Self::OfflineDirectMessage => "offline_dm",
+            Self::GroupchatPersonalMention => "groupchat_personal_mention",
+            Self::GroupchatChannelMention => "groupchat_channel_mention",
+            Self::GroupchatActiveChannelMention => "groupchat_active_channel_mention",
+            Self::GroupchatNotifyAll => "groupchat_notify_all",
         }
     }
 
     fn from_db_value(value: &str) -> Result<Self, NotificationOutboxError> {
         match value {
             "offline_dm" => Ok(Self::OfflineDirectMessage),
+            "groupchat_personal_mention" => Ok(Self::GroupchatPersonalMention),
+            "groupchat_channel_mention" => Ok(Self::GroupchatChannelMention),
+            "groupchat_active_channel_mention" => Ok(Self::GroupchatActiveChannelMention),
+            "groupchat_notify_all" => Ok(Self::GroupchatNotifyAll),
             _ => Err(NotificationOutboxError::InvalidReason(value.to_string())),
         }
     }
@@ -187,6 +214,48 @@ impl NotificationCandidate {
             archive_stanza_id,
             class: NotificationClass::DirectMessage,
             reason: NotificationReason::OfflineDirectMessage,
+            policy_error_count: 0,
+        })
+    }
+
+    pub fn groupchat(
+        recipient_bare_jid: BareJid,
+        conversation_jid: BareJid,
+        sender_jid: Jid,
+        thread_id: NotificationThreadId,
+        archive_stanza_id: StanzaId,
+        class: NotificationClass,
+    ) -> Result<Self, NotificationOutboxError> {
+        require_full_sender_jid(&sender_jid)?;
+        require_sender_matches_conversation(&sender_jid, &conversation_jid)?;
+        let expected_by = Jid::from(conversation_jid.clone());
+        if archive_stanza_id.by != expected_by {
+            return Err(NotificationOutboxError::ArchiveStanzaIdOwnerMismatch {
+                expected: expected_by,
+                actual: archive_stanza_id.by,
+            });
+        }
+        let reason = match class {
+            NotificationClass::PersonalMention => NotificationReason::GroupchatPersonalMention,
+            NotificationClass::ChannelMention => NotificationReason::GroupchatChannelMention,
+            NotificationClass::ActiveChannelMention => {
+                NotificationReason::GroupchatActiveChannelMention
+            }
+            NotificationClass::NotifyAll => NotificationReason::GroupchatNotifyAll,
+            NotificationClass::DirectMessage => {
+                return Err(NotificationOutboxError::InvalidClass(
+                    class.as_db_value().to_string(),
+                ));
+            }
+        };
+        Ok(Self {
+            recipient_bare_jid,
+            conversation_jid,
+            sender_jid,
+            thread_id,
+            archive_stanza_id,
+            class,
+            reason,
             policy_error_count: 0,
         })
     }
@@ -473,6 +542,37 @@ fn require_sender_set_contains_scalar(
     }
 }
 
+fn notification_candidates_table_sql(i64_type: &str, if_not_exists: bool) -> String {
+    let if_not_exists = if if_not_exists { "IF NOT EXISTS " } else { "" };
+    format!(
+        r#"
+        CREATE TABLE {if_not_exists}notification_candidates (
+            recipient_bare_jid TEXT NOT NULL,
+            conversation_jid TEXT NOT NULL,
+            sender_jid TEXT NOT NULL,
+            thread_id TEXT NOT NULL DEFAULT '',
+            stanza_id_by TEXT NOT NULL,
+            stanza_id TEXT NOT NULL,
+            class TEXT NOT NULL CHECK (class IN ('dm', 'personal_mention', 'channel_mention', 'active_channel_mention', 'notify_all')),
+            reason TEXT NOT NULL CONSTRAINT {NOTIFICATION_CANDIDATES_REASON_CHECK_NAME} CHECK ({NOTIFICATION_CANDIDATES_REASON_CHECK_SQL}),
+            created_at_ms {i64_type} NOT NULL,
+            policy_error_count INTEGER NOT NULL DEFAULT 0,
+            next_attempt_at_ms {i64_type},
+            outboxed_at_ms {i64_type},
+            PRIMARY KEY (recipient_bare_jid, conversation_jid, thread_id, stanza_id_by, stanza_id, class)
+        )
+        "#
+    )
+}
+
+fn notification_candidates_reason_constraint_matches_expected(definition: &str) -> bool {
+    let normalized = definition.to_ascii_lowercase();
+    normalized.contains("reason")
+        && NOTIFICATION_CANDIDATES_REASON_VALUES
+            .iter()
+            .all(|reason| normalized.contains(reason))
+}
+
 #[derive(Clone)]
 pub struct NotificationOutboxStore {
     db: Database,
@@ -487,29 +587,8 @@ impl NotificationOutboxStore {
 
     async fn initialize(&self) -> Result<(), NotificationOutboxError> {
         let i64_type = crate::db::i64_sql_type(self.db.driver());
-        self.execute(
-            &format!(
-                r#"
-                CREATE TABLE IF NOT EXISTS notification_candidates (
-                    recipient_bare_jid TEXT NOT NULL,
-                    conversation_jid TEXT NOT NULL,
-                    sender_jid TEXT NOT NULL,
-                    thread_id TEXT NOT NULL DEFAULT '',
-                    stanza_id_by TEXT NOT NULL,
-                    stanza_id TEXT NOT NULL,
-                    class TEXT NOT NULL CHECK (class IN ('dm', 'personal_mention', 'channel_mention', 'active_channel_mention', 'notify_all')),
-                    reason TEXT NOT NULL CHECK (reason IN ('offline_dm')),
-                    created_at_ms {i64_type} NOT NULL,
-                    policy_error_count INTEGER NOT NULL DEFAULT 0,
-                    next_attempt_at_ms {i64_type},
-                    outboxed_at_ms {i64_type},
-                    PRIMARY KEY (recipient_bare_jid, conversation_jid, thread_id, stanza_id_by, stanza_id, class)
-                )
-                "#
-            ),
-            (),
-        )
-        .await?;
+        self.execute(&notification_candidates_table_sql(i64_type, true), ())
+            .await?;
         self.query("SELECT sender_jid FROM notification_candidates LIMIT 0", ())
             .await?;
         self.add_column_if_missing(
@@ -519,6 +598,8 @@ impl NotificationOutboxStore {
         .await?;
         let candidate_next_attempt_column = format!("next_attempt_at_ms {i64_type}");
         self.add_column_if_missing("notification_candidates", &candidate_next_attempt_column)
+            .await?;
+        self.migrate_notification_candidates_reason_constraint(i64_type)
             .await?;
         self.execute(
             "CREATE INDEX IF NOT EXISTS idx_notification_candidates_recipient_created \
@@ -626,6 +707,154 @@ impl NotificationOutboxStore {
         )
         .await?;
         Ok(())
+    }
+
+    async fn migrate_notification_candidates_reason_constraint(
+        &self,
+        i64_type: &str,
+    ) -> Result<(), NotificationOutboxError> {
+        match self.db.driver() {
+            crate::db::DatabaseDriver::Postgres => {
+                self.migrate_postgres_notification_candidates_reason_constraint()
+                    .await
+            }
+            crate::db::DatabaseDriver::Sqlite => {
+                self.migrate_sqlite_notification_candidates_reason_constraint(i64_type)
+                    .await
+            }
+        }
+    }
+
+    async fn migrate_postgres_notification_candidates_reason_constraint(
+        &self,
+    ) -> Result<(), NotificationOutboxError> {
+        if !self
+            .postgres_notification_candidates_reason_constraint_is_stale()
+            .await?
+        {
+            return Ok(());
+        }
+
+        self.execute(
+            &format!(
+                "ALTER TABLE notification_candidates DROP CONSTRAINT IF EXISTS {NOTIFICATION_CANDIDATES_REASON_CHECK_NAME}"
+            ),
+            (),
+        )
+        .await?;
+        self.execute(
+            &format!(
+                "ALTER TABLE notification_candidates ADD CONSTRAINT {NOTIFICATION_CANDIDATES_REASON_CHECK_NAME} CHECK ({NOTIFICATION_CANDIDATES_REASON_CHECK_SQL})"
+            ),
+            (),
+        )
+        .await?;
+        Ok(())
+    }
+
+    async fn postgres_notification_candidates_reason_constraint_is_stale(
+        &self,
+    ) -> Result<bool, NotificationOutboxError> {
+        let mut rows = self
+            .query(
+                r#"
+                SELECT pg_get_constraintdef(oid)
+                FROM pg_constraint
+                WHERE conrelid = 'notification_candidates'::regclass
+                  AND conname = ?
+                  AND contype = 'c'
+                "#,
+                crate::db_params![NOTIFICATION_CANDIDATES_REASON_CHECK_NAME],
+            )
+            .await?;
+        let Some(row) = rows.next().await? else {
+            return Ok(true);
+        };
+        let definition: String = row.get(0)?;
+        Ok(!notification_candidates_reason_constraint_matches_expected(
+            &definition,
+        ))
+    }
+
+    async fn migrate_sqlite_notification_candidates_reason_constraint(
+        &self,
+        i64_type: &str,
+    ) -> Result<(), NotificationOutboxError> {
+        if !self
+            .sqlite_notification_candidates_reason_constraint_is_stale()
+            .await?
+        {
+            return Ok(());
+        }
+
+        let mut tx = self.db.begin().await?;
+        for index in NOTIFICATION_CANDIDATES_INDEXES {
+            tx.execute(&format!("DROP INDEX IF EXISTS {index}"), ())
+                .await?;
+        }
+        tx.execute(
+            "ALTER TABLE notification_candidates RENAME TO notification_candidates_old_reason_check",
+            (),
+        )
+        .await?;
+        tx.execute(&notification_candidates_table_sql(i64_type, false), ())
+            .await?;
+        tx.execute(
+            r#"
+            INSERT INTO notification_candidates (
+                recipient_bare_jid,
+                conversation_jid,
+                sender_jid,
+                thread_id,
+                stanza_id_by,
+                stanza_id,
+                class,
+                reason,
+                created_at_ms,
+                policy_error_count,
+                next_attempt_at_ms,
+                outboxed_at_ms
+            )
+            SELECT
+                recipient_bare_jid,
+                conversation_jid,
+                sender_jid,
+                thread_id,
+                stanza_id_by,
+                stanza_id,
+                class,
+                reason,
+                created_at_ms,
+                policy_error_count,
+                next_attempt_at_ms,
+                outboxed_at_ms
+            FROM notification_candidates_old_reason_check
+            "#,
+            (),
+        )
+        .await?;
+        tx.execute("DROP TABLE notification_candidates_old_reason_check", ())
+            .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    async fn sqlite_notification_candidates_reason_constraint_is_stale(
+        &self,
+    ) -> Result<bool, NotificationOutboxError> {
+        let mut rows = self
+            .query(
+                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'notification_candidates'",
+                (),
+            )
+            .await?;
+        let Some(row) = rows.next().await? else {
+            return Ok(false);
+        };
+        let create_sql: String = row.get(0)?;
+        Ok(!notification_candidates_reason_constraint_matches_expected(
+            &create_sql,
+        ))
     }
 
     async fn add_column_if_missing(
@@ -1521,9 +1750,6 @@ async fn xep0191_blocks_notification_job(
     job: &NotificationOutboxJob,
     blocking_storage: &dyn BlockingStorage,
 ) -> Result<bool, BlockingStorageError> {
-    if job.class() != NotificationClass::DirectMessage {
-        return Ok(false);
-    }
     let blocked = blocking_storage
         .list_blocked_jid_entries(job.recipient_bare_jid())
         .await?;
@@ -1536,9 +1762,6 @@ async fn xep0191_blocks_notification_candidate(
     candidate: &NotificationCandidate,
     blocking_storage: &dyn BlockingStorage,
 ) -> Result<bool, BlockingStorageError> {
-    if candidate.class() != NotificationClass::DirectMessage {
-        return Ok(false);
-    }
     let blocked = blocking_storage
         .list_blocked_jid_entries(candidate.recipient_bare_jid())
         .await?;
@@ -2135,6 +2358,40 @@ mod tests {
         .expect("candidate")
     }
 
+    fn groupchat_candidate_for(
+        recipient: &BareJid,
+        room: &BareJid,
+        sender_jid: Jid,
+        id: &str,
+        class: NotificationClass,
+    ) -> NotificationCandidate {
+        NotificationCandidate::groupchat(
+            recipient.clone(),
+            room.clone(),
+            sender_jid,
+            NotificationThreadId::root(),
+            StanzaId::new(id, Jid::from(room.clone())),
+            class,
+        )
+        .expect("groupchat candidate")
+    }
+
+    #[test]
+    fn postgres_reason_constraint_match_accepts_current_definition() {
+        let postgres_definition = "CHECK (((reason)::text = ANY ((ARRAY['offline_dm'::character varying, 'groupchat_personal_mention'::character varying, 'groupchat_channel_mention'::character varying, 'groupchat_active_channel_mention'::character varying, 'groupchat_notify_all'::character varying])::text[])))";
+        assert!(notification_candidates_reason_constraint_matches_expected(
+            postgres_definition
+        ));
+    }
+
+    #[test]
+    fn postgres_reason_constraint_match_rejects_legacy_definition() {
+        let postgres_definition = "CHECK (((reason)::text = 'offline_dm'::character varying))";
+        assert!(!notification_candidates_reason_constraint_matches_expected(
+            postgres_definition
+        ));
+    }
+
     async fn failed_outbox_jobs_count(store: &NotificationOutboxStore) -> i64 {
         let mut rows = store
             .query(
@@ -2211,6 +2468,116 @@ mod tests {
                 "unexpected schema error: {error}"
             ),
         }
+    }
+
+    #[tokio::test]
+    async fn store_initialization_migrates_legacy_candidate_reason_check() {
+        let db = Database::in_memory("notification-outbox-legacy-candidate-reason")
+            .await
+            .unwrap();
+        let conn = db.guard().await.expect("db guard");
+        conn.execute(
+            r#"
+            CREATE TABLE notification_candidates (
+                recipient_bare_jid TEXT NOT NULL,
+                conversation_jid TEXT NOT NULL,
+                sender_jid TEXT NOT NULL,
+                thread_id TEXT NOT NULL DEFAULT '',
+                stanza_id_by TEXT NOT NULL,
+                stanza_id TEXT NOT NULL,
+                class TEXT NOT NULL CHECK (class IN ('dm', 'personal_mention', 'channel_mention', 'active_channel_mention', 'notify_all')),
+                reason TEXT NOT NULL CHECK (reason IN ('offline_dm')),
+                created_at_ms INTEGER NOT NULL,
+                policy_error_count INTEGER NOT NULL DEFAULT 0,
+                next_attempt_at_ms INTEGER,
+                outboxed_at_ms INTEGER,
+                PRIMARY KEY (recipient_bare_jid, conversation_jid, thread_id, stanza_id_by, stanza_id, class)
+            )
+            "#,
+            (),
+        )
+        .await
+        .expect("create legacy candidate table");
+        conn.execute(
+            r#"
+            INSERT INTO notification_candidates (
+                recipient_bare_jid,
+                conversation_jid,
+                sender_jid,
+                thread_id,
+                stanza_id_by,
+                stanza_id,
+                class,
+                reason,
+                created_at_ms,
+                policy_error_count,
+                next_attempt_at_ms,
+                outboxed_at_ms
+            ) VALUES (
+                'bob@example.com',
+                'alice@example.com',
+                'alice@example.com/web',
+                '',
+                'bob@example.com',
+                'legacy-direct',
+                'dm',
+                'offline_dm',
+                1,
+                0,
+                NULL,
+                NULL
+            )
+            "#,
+            (),
+        )
+        .await
+        .expect("insert legacy direct candidate");
+        drop(conn);
+
+        let store = NotificationOutboxStore::new(db)
+            .await
+            .expect("store initializes and migrates legacy reason check");
+        let recipient = bare("charlie@example.com");
+        let room = bare("legacy-reason@muc.example.com");
+        let groupchat = groupchat_candidate_for(
+            &recipient,
+            &room,
+            "legacy-reason@muc.example.com/alice"
+                .parse()
+                .expect("room sender jid"),
+            "legacy-group",
+            NotificationClass::ChannelMention,
+        );
+
+        assert_eq!(
+            store
+                .insert_candidate(&groupchat)
+                .await
+                .expect("insert groupchat"),
+            NotificationCandidateInsertOutcome::Inserted
+        );
+        let mut rows = store
+            .query(
+                "SELECT reason FROM notification_candidates ORDER BY stanza_id",
+                (),
+            )
+            .await
+            .expect("query migrated candidates");
+        let first = rows
+            .next()
+            .await
+            .expect("first row query")
+            .expect("legacy row");
+        let second = rows
+            .next()
+            .await
+            .expect("second row query")
+            .expect("group row");
+        assert_eq!(first.get::<String>(0).expect("legacy reason"), "offline_dm");
+        assert_eq!(
+            second.get::<String>(0).expect("group reason"),
+            "groupchat_channel_mention"
+        );
     }
 
     #[tokio::test]
@@ -3232,6 +3599,83 @@ mod tests {
         assert_eq!(jobs[0].conversation_jid(), &bare("bob@example.com"));
         assert_eq!(jobs[0].sender_jid().to_string(), "bob@example.com/laptop");
         assert_eq!(jobs[0].message_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn candidate_worker_applies_xep0191_to_groupchat_notifications() {
+        let store = store().await;
+        let target = target();
+        let push_store = waddle_xmpp::push::InMemoryPushStore::new();
+        let blocking = waddle_xmpp::xep::xep0191::InMemoryBlockingStorage::new();
+        let recipient = bare("alice@example.com");
+        let room = bare("team@muc.example.com");
+        register_push_target(&push_store, &recipient, &target).await;
+        blocking.set_blocklist_jids(recipient.clone(), vec![Jid::from(room.clone())]);
+
+        let candidate = groupchat_candidate_for(
+            &recipient,
+            &room,
+            "team@muc.example.com/bob".parse().expect("room occupant"),
+            "archive-blocked-groupchat",
+            NotificationClass::ChannelMention,
+        );
+        store
+            .insert_candidate(&candidate)
+            .await
+            .expect("groupchat insert");
+
+        assert_eq!(
+            store
+                .drain_pending_candidates_into_outbox(
+                    &push_store,
+                    &blocking,
+                    &bare("push.example.com"),
+                    16,
+                )
+                .await
+                .expect("drain candidates"),
+            1
+        );
+
+        assert!(
+            store.pending_outbox_jobs().await.expect("jobs").is_empty(),
+            "XEP-0191-blocked groupchat notifications must not enqueue outbox jobs"
+        );
+    }
+
+    #[tokio::test]
+    async fn publish_worker_applies_xep0191_to_groupchat_notifications() {
+        let blocking = waddle_xmpp::xep::xep0191::InMemoryBlockingStorage::new();
+        let recipient = bare("alice@example.com");
+        let room = bare("team@muc.example.com");
+        let sender: Jid = "team@muc.example.com/bob"
+            .parse()
+            .expect("room occupant sender");
+        blocking.set_blocklist_jids(recipient.clone(), vec![Jid::from(room.clone())]);
+        let job = NotificationOutboxJob {
+            job_id: NotificationOutboxJobId::from("groupchat-blocked-job".to_string()),
+            recipient_bare_jid: recipient,
+            push_service_jid: bare("push.example.com"),
+            node: PushServiceNodeName::new("web-node").expect("node"),
+            conversation_jid: room,
+            sender_jid: sender.clone(),
+            sender_jids: vec![sender],
+            thread_id: NotificationThreadId::root(),
+            class: NotificationClass::ChannelMention,
+            message_count: 1,
+            context: Element::builder("notification", waddle_xmpp::xep::xep0357::NS_PUSH).build(),
+            status: NotificationOutboxStatus::Queued,
+            attempt_count: 0,
+            policy_error_count: 0,
+            claim_token: None,
+        };
+
+        assert!(
+            xep0191_blocks_notification_job(&job, &blocking)
+                .await
+                .expect("block check"),
+            "publish-time XEP-0191 checks must apply to groupchat notification classes"
+        );
     }
 
     #[tokio::test]

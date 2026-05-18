@@ -5,6 +5,19 @@ fn jid(value: &str) -> BareJid {
     value.parse().expect("valid JID")
 }
 
+async fn groupchat_notification_recovery_row_count(storage: &DatabaseInboxStorage) -> i64 {
+    let mut rows = storage
+        .query("SELECT COUNT(*) FROM groupchat_notification_recovery", ())
+        .await
+        .expect("count recovery rows");
+    let row = rows
+        .next()
+        .await
+        .expect("advance count row")
+        .expect("count row");
+    row.get(0).expect("decode recovery row count")
+}
+
 #[tokio::test]
 async fn sqlx_inbox_storage_round_trips_entries() {
     let storage = DatabaseInboxStorage::open(Some("sqlite::memory:"))
@@ -143,6 +156,114 @@ async fn sqlx_inbox_storage_thread_entries() {
 
     // Channel unread unaffected
     assert_eq!(storage.total_unread(&user).await.expect("unread"), 1);
+}
+
+#[tokio::test]
+async fn sqlx_inbox_storage_tracks_groupchat_notification_recovery() {
+    let storage = DatabaseInboxStorage::open(Some("sqlite::memory:"))
+        .await
+        .expect("storage");
+    let user = jid("me@example.com");
+    let room = jid("room@muc.example.com");
+    let stanza_id = StanzaId::new(
+        "groupchat-recovery-1",
+        "room@muc.example.com".parse().expect("stanza-id by"),
+    );
+    let recovery = GroupchatNotificationRecovery {
+        key: GroupchatNotificationRecoveryKey {
+            recipient: user.clone(),
+            room: room.clone(),
+            thread_id: Some("thread-1".to_string()),
+            archive_stanza_id: stanza_id.clone(),
+        },
+        sender_jid: "room@muc.example.com/alice".parse().expect("sender jid"),
+        is_live_occupant: true,
+        room_members_only: false,
+        created_at_ms: 42,
+    };
+    let second_recovery = GroupchatNotificationRecovery {
+        key: GroupchatNotificationRecoveryKey {
+            recipient: user.clone(),
+            room: room.clone(),
+            thread_id: None,
+            archive_stanza_id: StanzaId::new(
+                "groupchat-recovery-2",
+                "room@muc.example.com".parse().expect("second stanza-id by"),
+            ),
+        },
+        sender_jid: "room@muc.example.com/bob"
+            .parse()
+            .expect("second sender jid"),
+        is_live_occupant: false,
+        room_members_only: true,
+        created_at_ms: 43,
+    };
+
+    storage
+        .upsert_with_groupchat_notification_recovery(
+            &user,
+            InboxEntry::new(room.clone(), ConversationKind::MucRoom, "s2", 200)
+                .with_thread("thread-1"),
+            true,
+            Some(recovery.clone()),
+        )
+        .await
+        .expect("atomic upsert + recovery");
+
+    let pending = storage
+        .list_pending_groupchat_notification_recoveries(16)
+        .await
+        .expect("list pending recoveries");
+    assert_eq!(pending, vec![recovery.clone()]);
+    assert_eq!(
+        storage
+            .mark_groupchat_notification_recovery_completed(&recovery.key)
+            .await
+            .expect("mark completed"),
+        1
+    );
+    assert!(storage
+        .list_pending_groupchat_notification_recoveries(16)
+        .await
+        .expect("list after complete")
+        .is_empty());
+    storage
+        .insert_groupchat_notification_recovery(second_recovery.clone())
+        .await
+        .expect("insert second recovery");
+    assert_eq!(
+        storage
+            .mark_groupchat_notification_recovery_completed(&second_recovery.key)
+            .await
+            .expect("mark second completed"),
+        1
+    );
+    assert_eq!(groupchat_notification_recovery_row_count(&storage).await, 2);
+    assert_eq!(
+        storage
+            .prune_completed_groupchat_notification_recoveries(0, 16)
+            .await
+            .expect("prune before cutoff"),
+        0
+    );
+    assert_eq!(groupchat_notification_recovery_row_count(&storage).await, 2);
+    let future_cutoff_ms = crate::time::now_ms().saturating_add(1_000);
+    assert_eq!(
+        storage
+            .prune_completed_groupchat_notification_recoveries(future_cutoff_ms, 1)
+            .await
+            .expect("bounded prune first row"),
+        1
+    );
+    assert_eq!(groupchat_notification_recovery_row_count(&storage).await, 1);
+    assert_eq!(
+        storage
+            .prune_completed_groupchat_notification_recoveries(future_cutoff_ms, 16)
+            .await
+            .expect("prune remaining row"),
+        1
+    );
+    assert_eq!(groupchat_notification_recovery_row_count(&storage).await, 0);
 }
 
 #[tokio::test(flavor = "multi_thread")]

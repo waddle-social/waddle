@@ -1480,7 +1480,7 @@ async fn send_stanza_preserves_xep_0201_thread_on_wire() {
 // #229 PR18 — DispatchToRoom interpreter arm runs the room handler
 // chain (Q7 option C). The end-to-end semantics (managed-room owner
 // check, rich-target validation, MAM archive, retraction
-// tombstones, per-occupant inbox projection, occupant fan-out) are
+// tombstones, durable-recipient inbox projection, occupant fan-out) are
 // exercised by the integration tests in
 // `crates/waddle-server/tests/*_ws.rs`; the L1 unit test below pins
 // the chain wiring against the lightweight in-process `Deps` shape.
@@ -1568,9 +1568,11 @@ async fn extension_room_message_dispatches_threaded_muc_message() {
         BotGroupchatDispatch {
             room_jid: &room_jid,
             occupants: &occupants,
+            durable_recipient_bare_jids: &[],
             sender_full: &bot,
             room_actor: None,
             room_moderated: false,
+            room_members_only: false,
             pin_permission: waddle_xmpp::muc::PinPermission::default(),
             dispatch_timestamp: 1777629203,
             recursion_depth: 0,

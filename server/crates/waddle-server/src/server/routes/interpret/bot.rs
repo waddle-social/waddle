@@ -4,9 +4,11 @@ use super::*;
 pub(super) struct BotGroupchatDispatch<'a> {
     pub(super) room_jid: &'a BareJid,
     pub(super) occupants: &'a [OccupantSnapshot],
+    pub(super) durable_recipient_bare_jids: &'a [BareJid],
     pub(super) sender_full: &'a FullJid,
     pub(super) room_actor: Option<&'a ActorRef<RoomActor>>,
     pub(super) room_moderated: bool,
+    pub(super) room_members_only: bool,
     pub(super) pin_permission: waddle_xmpp::muc::PinPermission,
     pub(super) dispatch_timestamp: i64,
     pub(super) recursion_depth: u8,
@@ -93,8 +95,10 @@ pub(super) async fn dispatch_bot_groupchat_response(
         room: bot_ctx.room_jid,
         sender_full: bot_ctx.sender_full,
         occupants: bot_ctx.occupants,
+        durable_recipient_bare_jids: bot_ctx.durable_recipient_bare_jids,
         managed_room_forbidden: false,
         room_moderated: bot_ctx.room_moderated,
+        room_members_only: bot_ctx.room_members_only,
         pin_permission: bot_ctx.pin_permission,
         id_gen: &id_gen,
         occupant_id_secret: bot_ctx.occupant_id_secret,
@@ -347,14 +351,17 @@ pub(crate) async fn dispatch_extension_bot_groupchat_response(
             role: o.role,
         })
         .collect();
+    let durable_recipient_bare_jids = snapshot.durable_recipient_bare_jids.clone();
     let nested = dispatch_bot_groupchat_response(
         deps,
         BotGroupchatDispatch {
             room_jid: &room_jid,
             occupants: &occupants,
+            durable_recipient_bare_jids: &durable_recipient_bare_jids,
             sender_full: &bot_full,
             room_actor: Some(&room_actor),
             room_moderated: snapshot.config.moderated,
+            room_members_only: snapshot.config.members_only,
             pin_permission: snapshot.config.pin_permission,
             dispatch_timestamp: chrono::Utc::now().timestamp(),
             recursion_depth: 0,

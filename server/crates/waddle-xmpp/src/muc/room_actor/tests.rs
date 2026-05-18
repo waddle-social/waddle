@@ -727,6 +727,42 @@ async fn list_affiliations_no_filter_returns_all_tiers_sorted_by_jid() {
 }
 
 #[tokio::test]
+async fn room_snapshot_includes_durable_member_recipients_from_same_actor_read() {
+    let actor = spawn_room_actor().await;
+    seed_one_per_tier(&actor).await;
+    let sender = test_full_jid("sender");
+    actor
+        .ask(Join {
+            nick: "sender".to_string(),
+            real_jid: sender.clone(),
+            role: Role::Participant,
+            affiliation: Affiliation::Member,
+        })
+        .await
+        .expect("join sender");
+
+    let snapshot = actor
+        .ask(GetRoomSnapshot { sender_jid: sender })
+        .await
+        .expect("snapshot");
+
+    let recipients = snapshot
+        .durable_recipient_bare_jids
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        recipients,
+        vec![
+            "alice@example.com".to_string(),
+            "bob@example.com".to_string(),
+            "carol@example.com".to_string(),
+        ],
+        "snapshot recipients must be affiliation-derived and exclude outcasts/non-members"
+    );
+}
+
+#[tokio::test]
 async fn list_affiliations_filter_outcast_returns_only_outcasts() {
     let actor = spawn_room_actor().await;
     seed_one_per_tier(&actor).await;

@@ -8,9 +8,29 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 use async_trait::async_trait;
-use jid::BareJid;
+use jid::{BareJid, Jid};
+use waddle_xmpp_core::xep0359::StanzaId;
 
 use super::{InboxEntry, InboxKey, InboxView};
+
+/// Durable key for one groupchat notification recovery item.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct GroupchatNotificationRecoveryKey {
+    pub recipient: BareJid,
+    pub room: BareJid,
+    pub thread_id: Option<String>,
+    pub archive_stanza_id: StanzaId,
+}
+
+/// Durable retry item created alongside a committed groupchat inbox row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GroupchatNotificationRecovery {
+    pub key: GroupchatNotificationRecoveryKey,
+    pub sender_jid: Jid,
+    pub is_live_occupant: bool,
+    pub room_members_only: bool,
+    pub created_at_ms: i64,
+}
 
 /// Errors returned by [`InboxStorage`] implementations.
 #[derive(Debug, thiserror::Error)]
@@ -60,6 +80,63 @@ pub trait InboxStorage: Send + Sync {
         increment_unread: bool,
     ) -> Result<InboxEntry, InboxStorageError>;
 
+    /// Upsert an inbox row and, when present, durably record the
+    /// notification recovery item that corresponds to that committed
+    /// projection.
+    async fn upsert_with_groupchat_notification_recovery(
+        &self,
+        user: &BareJid,
+        entry: InboxEntry,
+        increment_unread: bool,
+        recovery: Option<GroupchatNotificationRecovery>,
+    ) -> Result<InboxEntry, InboxStorageError> {
+        let updated = self.upsert(user, entry, increment_unread).await?;
+        if let Some(recovery) = recovery {
+            self.insert_groupchat_notification_recovery(recovery)
+                .await?;
+        }
+        Ok(updated)
+    }
+
+    /// Insert a pending groupchat notification recovery item.
+    async fn insert_groupchat_notification_recovery(
+        &self,
+        recovery: GroupchatNotificationRecovery,
+    ) -> Result<(), InboxStorageError> {
+        let _ = recovery;
+        Ok(())
+    }
+
+    /// List a bounded global page of uncompleted groupchat notification
+    /// recovery items.
+    async fn list_pending_groupchat_notification_recoveries(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<GroupchatNotificationRecovery>, InboxStorageError> {
+        let _ = limit;
+        Ok(Vec::new())
+    }
+
+    /// Mark a groupchat notification recovery item as complete.
+    async fn mark_groupchat_notification_recovery_completed(
+        &self,
+        key: &GroupchatNotificationRecoveryKey,
+    ) -> Result<u64, InboxStorageError> {
+        let _ = key;
+        Ok(0)
+    }
+
+    /// Delete completed groupchat notification recovery items older than
+    /// `cutoff_ms`, bounded by `limit`.
+    async fn prune_completed_groupchat_notification_recoveries(
+        &self,
+        cutoff_ms: i64,
+        limit: usize,
+    ) -> Result<u64, InboxStorageError> {
+        let _ = (cutoff_ms, limit);
+        Ok(0)
+    }
+
     /// Mark a conversation as read. When `thread_id` is `Some`, only the
     /// specific thread is marked; otherwise the channel-level entry is.
     ///
@@ -82,6 +159,10 @@ pub trait InboxStorage: Send + Sync {
 #[derive(Debug, Default)]
 pub struct InMemoryInboxStorage {
     per_user: Mutex<HashMap<BareJid, InboxView>>,
+    groupchat_notification_recoveries:
+        Mutex<HashMap<GroupchatNotificationRecoveryKey, GroupchatNotificationRecovery>>,
+    completed_groupchat_notification_recoveries:
+        Mutex<HashMap<GroupchatNotificationRecoveryKey, i64>>,
 }
 
 impl InMemoryInboxStorage {
@@ -127,6 +208,139 @@ impl InboxStorage for InMemoryInboxStorage {
             .map_err(|e| InboxStorageError::Other(e.to_string()))?;
         let view = guard.entry(user.clone()).or_default();
         Ok(view.observe_message(entry, increment_unread))
+    }
+
+    async fn upsert_with_groupchat_notification_recovery(
+        &self,
+        user: &BareJid,
+        entry: InboxEntry,
+        increment_unread: bool,
+        recovery: Option<GroupchatNotificationRecovery>,
+    ) -> Result<InboxEntry, InboxStorageError> {
+        let updated = {
+            let mut guard = self
+                .per_user
+                .lock()
+                .map_err(|e| InboxStorageError::Other(e.to_string()))?;
+            let view = guard.entry(user.clone()).or_default();
+            view.observe_message(entry, increment_unread)
+        };
+
+        if let Some(recovery) = recovery {
+            self.insert_groupchat_notification_recovery(recovery)
+                .await?;
+        }
+        Ok(updated)
+    }
+
+    async fn insert_groupchat_notification_recovery(
+        &self,
+        recovery: GroupchatNotificationRecovery,
+    ) -> Result<(), InboxStorageError> {
+        let mut recoveries = self
+            .groupchat_notification_recoveries
+            .lock()
+            .map_err(|e| InboxStorageError::Other(e.to_string()))?;
+        let mut completed = self
+            .completed_groupchat_notification_recoveries
+            .lock()
+            .map_err(|e| InboxStorageError::Other(e.to_string()))?;
+        completed.remove(&recovery.key);
+        recoveries.insert(recovery.key.clone(), recovery);
+        Ok(())
+    }
+
+    async fn list_pending_groupchat_notification_recoveries(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<GroupchatNotificationRecovery>, InboxStorageError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let recoveries = self
+            .groupchat_notification_recoveries
+            .lock()
+            .map_err(|e| InboxStorageError::Other(e.to_string()))?;
+        let completed = self
+            .completed_groupchat_notification_recoveries
+            .lock()
+            .map_err(|e| InboxStorageError::Other(e.to_string()))?;
+        let mut pending = recoveries
+            .iter()
+            .filter(|(key, _)| !completed.contains_key(*key))
+            .map(|(_, recovery)| recovery.clone())
+            .collect::<Vec<_>>();
+        pending.sort_by(|a, b| {
+            a.created_at_ms
+                .cmp(&b.created_at_ms)
+                .then_with(|| a.key.recipient.cmp(&b.key.recipient))
+                .then_with(|| a.key.room.cmp(&b.key.room))
+                .then_with(|| a.key.thread_id.cmp(&b.key.thread_id))
+                .then_with(|| a.key.archive_stanza_id.by.cmp(&b.key.archive_stanza_id.by))
+                .then_with(|| a.key.archive_stanza_id.id.cmp(&b.key.archive_stanza_id.id))
+        });
+        pending.truncate(limit);
+        Ok(pending)
+    }
+
+    async fn mark_groupchat_notification_recovery_completed(
+        &self,
+        key: &GroupchatNotificationRecoveryKey,
+    ) -> Result<u64, InboxStorageError> {
+        let recoveries = self
+            .groupchat_notification_recoveries
+            .lock()
+            .map_err(|e| InboxStorageError::Other(e.to_string()))?;
+        if !recoveries.contains_key(key) {
+            return Ok(0);
+        }
+        drop(recoveries);
+        let mut completed = self
+            .completed_groupchat_notification_recoveries
+            .lock()
+            .map_err(|e| InboxStorageError::Other(e.to_string()))?;
+        let was_pending = !completed.contains_key(key);
+        completed.insert(key.clone(), chrono::Utc::now().timestamp_millis());
+        Ok(u64::from(was_pending))
+    }
+
+    async fn prune_completed_groupchat_notification_recoveries(
+        &self,
+        cutoff_ms: i64,
+        limit: usize,
+    ) -> Result<u64, InboxStorageError> {
+        if limit == 0 {
+            return Ok(0);
+        }
+        let mut recoveries = self
+            .groupchat_notification_recoveries
+            .lock()
+            .map_err(|e| InboxStorageError::Other(e.to_string()))?;
+        let mut completed = self
+            .completed_groupchat_notification_recoveries
+            .lock()
+            .map_err(|e| InboxStorageError::Other(e.to_string()))?;
+        let mut prune_keys = completed
+            .iter()
+            .filter(|(_, completed_at_ms)| **completed_at_ms < cutoff_ms)
+            .map(|(key, completed_at_ms)| (key.clone(), *completed_at_ms))
+            .collect::<Vec<_>>();
+        prune_keys.sort_by(|(a_key, a_completed_at), (b_key, b_completed_at)| {
+            a_completed_at
+                .cmp(b_completed_at)
+                .then_with(|| a_key.recipient.cmp(&b_key.recipient))
+                .then_with(|| a_key.room.cmp(&b_key.room))
+                .then_with(|| a_key.thread_id.cmp(&b_key.thread_id))
+                .then_with(|| a_key.archive_stanza_id.by.cmp(&b_key.archive_stanza_id.by))
+                .then_with(|| a_key.archive_stanza_id.id.cmp(&b_key.archive_stanza_id.id))
+        });
+        prune_keys.truncate(limit);
+        let deleted = prune_keys.len();
+        for (key, _) in prune_keys {
+            completed.remove(&key);
+            recoveries.remove(&key);
+        }
+        Ok(deleted as u64)
     }
 
     async fn mark_read(
@@ -278,5 +492,73 @@ mod tests {
 
         // Channel unread unaffected
         assert_eq!(store.total_unread(&user).await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_groupchat_notification_recovery_prune() {
+        let store = InMemoryInboxStorage::new();
+        let user = jid("me@example.com");
+        let room = jid("room@muc.example.com");
+        let recovery = GroupchatNotificationRecovery {
+            key: GroupchatNotificationRecoveryKey {
+                recipient: user,
+                room,
+                thread_id: Some("t1".to_string()),
+                archive_stanza_id: StanzaId::new(
+                    "groupchat-recovery-1",
+                    "room@muc.example.com".parse().unwrap(),
+                ),
+            },
+            sender_jid: "room@muc.example.com/alice".parse().unwrap(),
+            is_live_occupant: true,
+            room_members_only: false,
+            created_at_ms: 42,
+        };
+
+        store
+            .insert_groupchat_notification_recovery(recovery.clone())
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .list_pending_groupchat_notification_recoveries(16)
+                .await
+                .unwrap(),
+            vec![recovery.clone()]
+        );
+        assert_eq!(
+            store
+                .mark_groupchat_notification_recovery_completed(&recovery.key)
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            store
+                .prune_completed_groupchat_notification_recoveries(0, 16)
+                .await
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            store
+                .prune_completed_groupchat_notification_recoveries(
+                    chrono::Utc::now().timestamp_millis().saturating_add(1_000),
+                    16,
+                )
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            store
+                .prune_completed_groupchat_notification_recoveries(
+                    chrono::Utc::now().timestamp_millis().saturating_add(1_000),
+                    16,
+                )
+                .await
+                .unwrap(),
+            0
+        );
     }
 }

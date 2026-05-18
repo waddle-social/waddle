@@ -1,6 +1,6 @@
 use std::convert::Infallible;
 
-use jid::FullJid;
+use jid::{BareJid, FullJid};
 use kameo::message::Context;
 use xmpp_parsers::message::Message;
 
@@ -52,6 +52,8 @@ pub struct RoomChainSnapshot {
     pub sender_nickname_generation: Option<u64>,
     /// Snapshot of the room config (members_only, moderated, etc.).
     pub config: RoomConfig,
+    /// Durable affiliation-derived recipients at dispatch start.
+    pub durable_recipient_bare_jids: Vec<BareJid>,
 }
 
 /// One occupant session in a [`RoomChainSnapshot`].
@@ -114,6 +116,15 @@ impl kameo::message::Message<GetRoomSnapshot> for RoomActor {
         let sender_nickname_generation = sender_nick
             .as_deref()
             .and_then(|nick| self.room.current_nickname_generation(nick));
+        let mut durable_recipient_bare_jids = self
+            .room
+            .get_all_affiliations()
+            .into_iter()
+            .filter(|entry| entry.affiliation >= Affiliation::Member)
+            .map(|entry| entry.jid)
+            .collect::<Vec<_>>();
+        durable_recipient_bare_jids.sort();
+        durable_recipient_bare_jids.dedup();
 
         Ok(RoomChainSnapshot {
             occupants,
@@ -122,6 +133,7 @@ impl kameo::message::Message<GetRoomSnapshot> for RoomActor {
             sender_affiliation,
             sender_nickname_generation,
             config: self.room.config.clone(),
+            durable_recipient_bare_jids,
         })
     }
 }

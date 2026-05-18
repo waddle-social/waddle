@@ -73,6 +73,42 @@ pub(super) async fn initialize(storage: &DatabaseInboxStorage) -> Result<(), Inb
         (),
     )
     .await?;
+    storage
+        .execute(
+            &format!(
+                r#"
+            CREATE TABLE IF NOT EXISTS groupchat_notification_recovery (
+                recipient_bare_jid TEXT NOT NULL,
+                room_jid TEXT NOT NULL,
+                thread_id TEXT NOT NULL DEFAULT '',
+                stanza_id_by TEXT NOT NULL,
+                stanza_id TEXT NOT NULL,
+                sender_jid TEXT NOT NULL,
+                is_live_occupant INTEGER NOT NULL,
+                room_members_only INTEGER NOT NULL,
+                created_at_ms {i64_type} NOT NULL,
+                completed_at_ms {i64_type},
+                PRIMARY KEY (recipient_bare_jid, room_jid, thread_id, stanza_id_by, stanza_id)
+            )
+            "#
+            ),
+            (),
+        )
+        .await?;
+    storage.execute(
+        "CREATE INDEX IF NOT EXISTS idx_groupchat_notification_recovery_pending \
+         ON groupchat_notification_recovery (created_at_ms, recipient_bare_jid, room_jid, thread_id, stanza_id) \
+         WHERE completed_at_ms IS NULL",
+        (),
+    )
+    .await?;
+    storage.execute(
+        "CREATE INDEX IF NOT EXISTS idx_groupchat_notification_recovery_completed_prune \
+         ON groupchat_notification_recovery (completed_at_ms, recipient_bare_jid, room_jid, thread_id, stanza_id_by, stanza_id) \
+         WHERE completed_at_ms IS NOT NULL",
+        (),
+    )
+    .await?;
     Ok(())
 }
 

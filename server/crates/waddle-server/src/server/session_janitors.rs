@@ -517,6 +517,18 @@ pub(crate) fn spawn_notification_outbox_janitor(websocket_state: &Arc<WebSocketS
                     "Notification outbox janitor recovered XEP-0357 candidates from pending_delivery"
                 );
             }
+            let recovered_groupchat =
+                routes::interpret::reconcile_groupchat_notification_candidates(
+                    state.as_ref(),
+                    batch_size,
+                )
+                .await;
+            if recovered_groupchat > 0 {
+                debug!(
+                    recovered = recovered_groupchat,
+                    "Notification outbox janitor recovered XEP-0357 groupchat candidates from inbox projections"
+                );
+            }
             match state
                 .deps
                 .protocol
@@ -592,6 +604,27 @@ pub(crate) fn spawn_notification_outbox_janitor(websocket_state: &Arc<WebSocketS
                     warn!(
                         error = %error,
                         "Notification outbox janitor prune failed; completed rows remain durable"
+                    );
+                }
+            }
+            match state
+                .deps
+                .protocol
+                .inbox_storage
+                .prune_completed_groupchat_notification_recoveries(cutoff_ms, prune_batch_size)
+                .await
+            {
+                Ok(deleted) if deleted > 0 => {
+                    debug!(
+                        deleted,
+                        "Notification outbox janitor pruned completed groupchat notification recovery rows"
+                    );
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    warn!(
+                        error = %error,
+                        "Notification outbox janitor failed to prune completed groupchat notification recovery rows"
                     );
                 }
             }

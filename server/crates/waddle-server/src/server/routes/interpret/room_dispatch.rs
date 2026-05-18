@@ -117,10 +117,11 @@ pub(super) async fn dispatch_to_room(
             role: o.role,
         })
         .collect();
+    let durable_recipient_bare_jids = snapshot.durable_recipient_bare_jids.clone();
     let id_gen = UuidV4Generator;
-    // Capture a single dispatch timestamp here so every per-occupant
+    // Capture a single dispatch timestamp here so every
     // `ProjectGroupchatInbox` event the chain emits carries the same
-    // value (Copilot review on PR #279). Avoids per-occupant
+    // value (Copilot review on PR #279). Avoids per-projection
     // `Utc::now()` drift across a second-boundary.
     let dispatch_timestamp = chrono::Utc::now().timestamp();
     normalize_thread_create_source(&mut prototype);
@@ -128,8 +129,10 @@ pub(super) async fn dispatch_to_room(
         room: &room_jid,
         sender_full: &sender_full,
         occupants: &occupants,
+        durable_recipient_bare_jids: &durable_recipient_bare_jids,
         managed_room_forbidden,
         room_moderated: snapshot.config.moderated,
+        room_members_only: snapshot.config.members_only,
         pin_permission: snapshot.config.pin_permission,
         id_gen: &id_gen,
         occupant_id_secret: &state.deps.occupant_id_secret,
@@ -241,6 +244,7 @@ pub(super) async fn dispatch_to_room(
         room: &room_jid,
         sender_full: &sender_full,
         occupants: &occupants,
+        durable_recipient_bare_jids: &durable_recipient_bare_jids,
         managed_room_forbidden,
         // XEP-0045 §7.5 (Copilot review on PR #279): the chain's
         // `OccupancyValidationHandler` enforces visitor-may-not-speak
@@ -248,6 +252,7 @@ pub(super) async fn dispatch_to_room(
         // the legacy `RoomActor::BuildGroupchatBroadcast` check that
         // previously emitted `RoomActorError::VisitorMayNotSpeak`.
         room_moderated: snapshot.config.moderated,
+        room_members_only: snapshot.config.members_only,
         pin_permission: snapshot.config.pin_permission,
         id_gen: &id_gen,
         occupant_id_secret: &state.deps.occupant_id_secret,

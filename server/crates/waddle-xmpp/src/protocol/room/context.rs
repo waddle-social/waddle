@@ -68,6 +68,12 @@ pub struct RoomContext<'a> {
     /// semantic). Indexed iteration only — handlers don't need a
     /// hash lookup at this scale (typical room ≤ 200 occupants).
     pub occupants: &'a [OccupantSnapshot],
+    /// Durable bare-JID recipients derived from persistent room
+    /// affiliations/membership at dispatch start. The inbox projection
+    /// uses this as the authoritative recipient set for durable
+    /// per-user rows; current occupancy is only a live-delivery and
+    /// active-mention filter.
+    pub durable_recipient_bare_jids: &'a [BareJid],
     /// True when the room is the managed `announcements` room and the
     /// sender is NOT a server owner.
     ///
@@ -88,6 +94,11 @@ pub struct RoomContext<'a> {
     /// chain didn't, until this field landed (Copilot review on
     /// PR #279).
     pub room_moderated: bool,
+    /// True when the room is configured as members-only. This is
+    /// carried into projection events so the server-side notification
+    /// gate can apply XEP-0492's private/public group defaults from the
+    /// same frozen room snapshot.
+    pub room_members_only: bool,
     /// #415: per-room pin permission policy (`urn:waddle:roomconfig:pinpermission`).
     /// Frozen at dispatch start from `RoomConfig.pin_permission`; the
     /// `MucPinHandler` reads this to decide whether non-admin members
@@ -115,7 +126,7 @@ pub struct RoomContext<'a> {
     /// for MUC canonicalization.
     pub project_sender_inbox: bool,
     /// Single dispatch timestamp (Unix epoch seconds) shared across
-    /// every per-occupant
+    /// every groupchat inbox
     /// [`super::super::event::OutboundEvent::ProjectGroupchatInbox`]
     /// projection emitted by [`super::inbox::MucInboxHandler`].
     /// Captured by the interpreter at dispatch start so projections
@@ -137,12 +148,12 @@ impl<'a> RoomContext<'a> {
             .find(|o| &o.full_jid == self.sender_full)
     }
 
-    /// Occupants that should receive delivery and recipient-owned inbox projection.
+    /// Occupants that should receive live delivery.
     ///
     /// Normal user-originated dispatches use the full occupant set.
     /// Server-authored synthetic dispatches may include a sender-only
     /// snapshot so canonicalization can produce `room/nick` without
-    /// treating that synthetic sender as a real recipient.
+    /// treating that synthetic sender as a live delivery recipient.
     pub fn recipient_occupants(&'a self) -> Box<dyn Iterator<Item = &'a OccupantSnapshot> + 'a> {
         if self.project_sender_inbox {
             Box::new(self.occupants.iter())

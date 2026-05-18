@@ -57,9 +57,9 @@
 //! - [`OutboundEvent::ApplyGroupchatRetractionTombstone`] — XEP-0424
 //!   §"prevent further distribution" tombstone replace against the
 //!   room archive (mirrors the 1:1 retraction tombstone arm).
-//! - [`OutboundEvent::ProjectGroupchatInbox`] — per-occupant inbox
-//!   upsert (channel + thread rows) plus the XEP-0430 inbox push to
-//!   the owner's other resources.
+//! - [`OutboundEvent::ProjectGroupchatInbox`] — sender plus durable
+//!   recipient inbox upsert (channel + thread rows) plus the XEP-0430
+//!   inbox push to the owner's other resources.
 //!
 //! Stubbed (warn-logged until migration steps land them):
 //! - `AskSfu`, `QueryMam`, `LoadScramCredentials`,
@@ -162,7 +162,8 @@ use displayed_marker::mark_inbox_read_from_displayed;
 use groupchat_archive::{
     apply_groupchat_retraction_tombstone, archive_groupchat_message, project_groupchat_inbox,
 };
-use groupchat_inbox::project_groupchat_inbox_event;
+pub(crate) use groupchat_inbox::reconcile_groupchat_notification_candidates;
+use groupchat_inbox::{project_groupchat_inbox_event, ProjectGroupchatInboxEvent};
 use groupchat_validation::{
     bad_request_error, build_message_error_reply, remove_framework_envelopes,
     service_unavailable_error, validate_groupchat_rich_targets,
@@ -362,7 +363,7 @@ async fn interpret_with_depth(
                 // §7.5 visitor-may-not-speak, XEP-0359 stanza-id
                 // stamping, XEP-0421 occupant-id stamping, XEP-0313
                 // archive-eligibility, XEP-0424 retraction tombstone
-                // emission, per-occupant inbox projection, and
+                // emission, durable-recipient inbox projection, and
                 // per-occupant fan-out — emitting typed
                 // [`OutboundEvent`]s the interpreter then resolves
                 // recursively below.
@@ -490,18 +491,24 @@ async fn interpret_with_depth(
                 room,
                 message,
                 is_recipient,
+                is_durable_recipient,
+                is_live_occupant,
+                room_members_only,
                 thread,
                 dispatch_timestamp,
             } => {
-                project_groupchat_inbox_event(
+                project_groupchat_inbox_event(ProjectGroupchatInboxEvent {
                     deps,
                     owner,
                     room,
                     message,
                     is_recipient,
+                    is_durable_recipient,
+                    is_live_occupant,
+                    room_members_only,
                     thread,
                     dispatch_timestamp,
-                )
+                })
                 .await;
             }
             OutboundEvent::ArchiveDirect {
