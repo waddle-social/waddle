@@ -116,8 +116,15 @@ export function reduceCallState(current: CallState, event: CallEvent): CallState
 
 /**
  * Apply an inbound `CallEvent` from the WASM `on_call` callback to
- * the global store. Clears the last-error slot on a successful
- * state transition so old errors don't linger over a fresh call.
+ * the global store. Composes the pure `reduceCallState` with two
+ * lifecycle side-effects (NOT pure — `reduceCallState` alone is
+ * what unit tests exercise):
+ *
+ * 1. Clear `$lastCallError` on any non-trivial transition so an
+ *    error from a prior call doesn't linger over a fresh one.
+ * 2. Cancel the outgoing-ring auto-retract timer when leaving the
+ *    `outgoing` phase. Done here, not in the reducer, because
+ *    `setTimeout`/`clearTimeout` are global-state side-effects.
  */
 export function applyCallEvent(event: CallEvent): void {
   const before = $callState.get();
@@ -247,13 +254,13 @@ export async function tearDownActiveCall(
           } else {
             // MUC group call: leave via the muc-call:0 IQ surface
             // AND clear our presence extension so other occupants
-            // stop showing us as in-call.
+            // stop showing us as in-call. Both errors flow through
+            // the outer try/catch + reportCallError so failures are
+            // surfaced consistently with every other call-wire op.
             await sendMucCallLeave(sender, s.peer);
             const raw = sender as RawIqSender;
             if (s.selfNick && raw.update_muc_call_presence) {
-              await raw
-                .update_muc_call_presence(s.peer, s.selfNick, false, s.peer)
-                .catch(() => undefined);
+              await raw.update_muc_call_presence(s.peer, s.selfNick, false, s.peer);
             }
           }
           break;
@@ -274,52 +281,39 @@ export async function tearDownActiveCall(
 }
 
 /**
- * Type for `BrowserXmppClient.xmpp.send_raw_iq` — used by the MUC
- * call IQ surface, which is XML-based rather than typed (the
- * wasm bindings only expose typed methods for the JMI/Jingle 1:1
- * flow). Decoupled so unit tests can stub a partial client.
- *
- * Also covers `update_muc_call_presence` since both MUC-call ops
- * are typically called from the same wasm-client instance.
+ * Subset of the wasm `WaddleClient` API used by the MUC group-call
+ * surface. Typed methods only — no `send_raw_iq` string-concat
+ * escape hatch (CLAUDE.md XML-generation rule). Optional fields so
+ * unit tests can stub a partial client.
  */
 export type RawIqSender = {
-  send_raw_iq?: (xml: string) => Promise<string>;
+  send_muc_call_join?: (room_jid: string) => Promise<LiveKitJoin>;
+  send_muc_call_leave?: (room_jid: string) => Promise<void>;
   update_muc_call_presence?: (
     room_jid: string,
     nick: string,
     active: boolean,
     call_id: string,
-  ) => Promise<unknown>;
+  ) => Promise<void>;
 };
-
-const NS_WADDLE_MUC_CALL = "urn:waddle:muc-call:0";
-
-function uuid(): string {
-  return crypto.randomUUID();
-}
 
 /**
  * Send `<request-join xmlns='urn:waddle:muc-call:0' room='...'/>`
- * and parse the issued LiveKit transport out of the response.
- * Returns the join details ready to hand to `CallEngine.connect`.
+ * via the typed wasm method and return the issued LiveKit join
+ * credentials. The wasm side builds the IQ via `minidom::Element`
+ * and parses the response into a typed `WaddleLiveKitJoin`, so no
+ * XML touches the chat-side wire layer.
  */
 async function sendMucCallJoin(
   sender: RawIqSender,
   roomJid: string,
 ): Promise<LiveKitJoin> {
-  if (!sender.send_raw_iq) {
-    throw new Error("wasm client does not expose send_raw_iq; rebuild the wasm bundle");
+  if (!sender.send_muc_call_join) {
+    throw new Error(
+      "wasm client does not expose send_muc_call_join; rebuild the wasm bundle",
+    );
   }
-  const id = uuid();
-  // Use double-quoted attribute values; the `room` attribute carries
-  // a JID with no characters that need XML-escaping for our roomJid
-  // shape (`local@domain`), but a paranoid escape would belong here
-  // if we ever passed user-supplied strings.
-  const xml = `<iq type="set" id="${id}" to="${roomJid}">`
-    + `<request-join xmlns="${NS_WADDLE_MUC_CALL}" room="${roomJid}"/>`
-    + `</iq>`;
-  const resultXml = await sender.send_raw_iq(xml);
-  return parseMucJoinResult(resultXml);
+  return await sender.send_muc_call_join(roomJid);
 }
 
 /**
@@ -331,39 +325,12 @@ export async function sendMucCallLeave(
   roomJid: string,
 ): Promise<void> {
   const rawSender = sender as RawIqSender;
-  if (!rawSender.send_raw_iq) {
-    throw new Error("wasm client does not expose send_raw_iq; rebuild the wasm bundle");
+  if (!rawSender.send_muc_call_leave) {
+    throw new Error(
+      "wasm client does not expose send_muc_call_leave; rebuild the wasm bundle",
+    );
   }
-  const id = uuid();
-  const xml = `<iq type="set" id="${id}" to="${roomJid}">`
-    + `<request-leave xmlns="${NS_WADDLE_MUC_CALL}" room="${roomJid}"/>`
-    + `</iq>`;
-  await rawSender.send_raw_iq(xml);
-}
-
-/**
- * Parse the `<joined><transport xmlns="urn:waddle:transports:livekit:0">…</transport></joined>`
- * response into a typed `LiveKitJoin`. Throws on malformed input.
- *
- * Regex-based on purpose: keeps the chat layer free of an XML
- * parser dependency for a single well-known response shape, and
- * works identically across the browser, Bun's test runtime, and
- * Node-without-DOMParser.
- */
-function parseMucJoinResult(xml: string): LiveKitJoin {
-  const field = (name: string): string => {
-    const re = new RegExp(`<${name}>([^<]*)</${name}>`);
-    const m = xml.match(re);
-    return m ? m[1] : "";
-  };
-  const url = field("url");
-  const room = field("room");
-  const identity = field("identity");
-  const token = field("token");
-  if (!url || !room || !identity || !token) {
-    throw new Error("muc-call: response transport missing required fields");
-  }
-  return { url, room, identity, token };
+  await rawSender.send_muc_call_leave(roomJid);
 }
 
 /**

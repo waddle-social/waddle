@@ -22,7 +22,15 @@ const props = defineProps<{
 const state = useStore($callState);
 const inCall = computed(() => state.value.phase !== "idle" && state.value.phase !== "ended");
 const participants = useStore($mucCallParticipants);
-const participantCount = computed(() => participants.value[props.roomJid]?.length ?? 0);
+/** Other occupants currently in the call. We see our own nick
+ *  echoed back in our presence broadcast, so subtract it; the
+ *  indicator should read "N others are in this call", and when
+ *  it's just us, the regular call button is the right CTA. */
+const participantCount = computed(() => {
+  const all = participants.value[props.roomJid] ?? [];
+  const selfNick = connectionStore.session?.username;
+  return all.filter((n) => n !== selfNick).length;
+});
 
 function getSender(): RawIqSender | null {
   // BrowserXmppClient stores the wasm client as `xmpp`; we cast

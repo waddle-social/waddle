@@ -5,6 +5,8 @@ use waddle_xmpp_client::messaging::{
     build_session_initiate, build_session_terminate, CallMedia, JingleReason, SessionId,
 };
 
+const NS_WADDLE_MUC_CALL: &str = "urn:waddle:muc-call:0";
+
 const NS_JABBER_CLIENT: &str = "jabber:client";
 
 fn message_with_jmi(to: &str, jmi: Element) -> Element {
@@ -166,6 +168,74 @@ impl WaddleClient {
     /// `xmpp_parsers::jingle::Reason`; unknown values are rejected
     /// at the wasm boundary so a typo can't ship a malformed
     /// condition over the wire.
+    /// Send `<request-join xmlns='urn:waddle:muc-call:0' room='ROOM_JID'/>`
+    /// to the MUC room and return the issued LiveKit join credentials
+    /// as a typed `{ url, room, identity, token }` object. The XML
+    /// is built via `minidom::Element::builder` (XML hard rule
+    /// from CLAUDE.md — no string concatenation at the wire
+    /// boundary).
+    pub fn send_muc_call_join(&self, room_jid: String) -> Promise {
+        let inner = self.inner.clone();
+        future_to_promise(async move {
+            // Build the request-join IQ via the typed Element builder.
+            let payload = Element::builder("request-join", NS_WADDLE_MUC_CALL)
+                .attr("room", room_jid.as_str())
+                .build();
+            let stanza = Element::builder("iq", NS_JABBER_CLIENT)
+                .attr("type", "set")
+                .attr("id", uuid::Uuid::new_v4().to_string())
+                .attr("to", room_jid.as_str())
+                .append(payload)
+                .build();
+            let result = send_iq_command(inner, stanza).await?;
+            // Walk `<iq><joined xmlns='urn:waddle:muc-call:0'>
+            // <transport xmlns='urn:waddle:transports:livekit:0'>
+            // <url/><room/><identity/><token/></transport></joined>`
+            // and return a typed JS object.
+            let joined = result
+                .get_child("joined", NS_WADDLE_MUC_CALL)
+                .ok_or_else(|| js_error("muc-call: response missing <joined/>"))?;
+            let transport = joined
+                .get_child("transport", "urn:waddle:transports:livekit:0")
+                .ok_or_else(|| js_error("muc-call: <joined/> missing <transport/>"))?;
+            let field = |name: &str| -> Result<String, JsValue> {
+                let child = transport.get_child(name, "urn:waddle:transports:livekit:0");
+                match child {
+                    Some(c) => Ok(c.text()),
+                    None => Err(js_error(format!("muc-call: transport missing <{name}/>"))),
+                }
+            };
+            let join = crate::types::WaddleLiveKitJoin {
+                url: field("url")?,
+                room: field("room")?,
+                identity: field("identity")?,
+                token: field("token")?,
+            };
+            to_js_value(&join)
+        })
+    }
+
+    /// Send `<request-leave xmlns='urn:waddle:muc-call:0' room='ROOM_JID'/>`
+    /// to the MUC room. Server unregisters the participant + revokes
+    /// every jti it minted for `(room, identity)`. Resolves with no
+    /// payload.
+    pub fn send_muc_call_leave(&self, room_jid: String) -> Promise {
+        let inner = self.inner.clone();
+        future_to_promise(async move {
+            let payload = Element::builder("request-leave", NS_WADDLE_MUC_CALL)
+                .attr("room", room_jid.as_str())
+                .build();
+            let stanza = Element::builder("iq", NS_JABBER_CLIENT)
+                .attr("type", "set")
+                .attr("id", uuid::Uuid::new_v4().to_string())
+                .attr("to", room_jid.as_str())
+                .append(payload)
+                .build();
+            send_iq_command(inner, stanza).await?;
+            Ok(JsValue::UNDEFINED)
+        })
+    }
+
     pub fn send_call_session_terminate(
         &self,
         peer_full_jid: String,

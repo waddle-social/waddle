@@ -121,20 +121,12 @@ describe("tearDownActiveCall", () => {
 describe("MUC group call", () => {
   test("beginMucCall sets active(kind: 'muc') after parsing the issued transport", async () => {
     const sender = {
-      send_raw_iq: mock(async () => {
-        return [
-          '<iq type="result" id="x">',
-          '<joined xmlns="urn:waddle:muc-call:0">',
-          '<transport xmlns="urn:waddle:transports:livekit:0">',
-          "<url>wss://livekit.test</url>",
-          "<room>chan@muc.test</room>",
-          "<identity>alice@waddle.test/web</identity>",
-          "<token>jwt.payload.sig</token>",
-          "</transport>",
-          "</joined>",
-          "</iq>",
-        ].join("");
-      }),
+      send_muc_call_join: mock(async () => ({
+        url: "wss://livekit.test",
+        room: "chan@muc.test",
+        identity: "alice@waddle.test/web",
+        token: "jwt.payload.sig",
+      })),
     };
     const { beginMucCall } = await import("../src/lib/calls/call-store");
     await beginMucCall(sender, "chan@muc.test", audioVideo);
@@ -156,24 +148,16 @@ describe("MUC group call", () => {
   });
 
   test("beginMucCall with a nick also pushes a MUC presence update", async () => {
-    const send_raw_iq = mock(async () => {
-      return [
-        '<iq type="result" id="x">',
-        '<joined xmlns="urn:waddle:muc-call:0">',
-        '<transport xmlns="urn:waddle:transports:livekit:0">',
-        "<url>wss://livekit.test</url>",
-        "<room>chan@muc.test</room>",
-        "<identity>alice@waddle.test/web</identity>",
-        "<token>jwt.payload.sig</token>",
-        "</transport>",
-        "</joined>",
-        "</iq>",
-      ].join("");
-    });
+    const send_muc_call_join = mock(async () => ({
+      url: "wss://livekit.test",
+      room: "chan@muc.test",
+      identity: "alice@waddle.test/web",
+      token: "jwt.payload.sig",
+    }));
     const update_muc_call_presence = mock(async () => undefined);
     const { beginMucCall } = await import("../src/lib/calls/call-store");
     await beginMucCall(
-      { send_raw_iq, update_muc_call_presence } as unknown as Parameters<
+      { send_muc_call_join, update_muc_call_presence } as unknown as Parameters<
         typeof beginMucCall
       >[0],
       "chan@muc.test",
@@ -190,7 +174,7 @@ describe("MUC group call", () => {
   });
 
   test("tearDownActiveCall on a MUC call dispatches request-leave and clears the call presence", async () => {
-    const send_raw_iq = mock(async () => "<iq type='result' id='x'/>");
+    const send_muc_call_leave = mock(async () => undefined);
     const update_muc_call_presence = mock(async () => undefined);
     $callState.set({
       phase: "active",
@@ -202,12 +186,13 @@ describe("MUC group call", () => {
       selfNick: "alice",
     });
     await tearDownActiveCall(
-      { send_raw_iq, update_muc_call_presence } as unknown as Parameters<
+      { send_muc_call_leave, update_muc_call_presence } as unknown as Parameters<
         typeof tearDownActiveCall
       >[0],
       "gone",
     );
-    expect(send_raw_iq).toHaveBeenCalledTimes(1);
+    expect(send_muc_call_leave).toHaveBeenCalledTimes(1);
+    expect(send_muc_call_leave).toHaveBeenCalledWith("chan@muc.test");
     expect(update_muc_call_presence).toHaveBeenCalledTimes(1);
     expect(update_muc_call_presence).toHaveBeenCalledWith(
       "chan@muc.test",
@@ -215,9 +200,6 @@ describe("MUC group call", () => {
       false,
       "chan@muc.test",
     );
-    const xml = (send_raw_iq.mock.calls[0] as string[])[0];
-    expect(xml).toContain('request-leave');
-    expect(xml).toContain('chan@muc.test');
     expect($callState.get()).toEqual({ phase: "idle" });
   });
 });
