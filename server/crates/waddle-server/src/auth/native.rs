@@ -108,7 +108,7 @@ impl NativeUserStore {
                     i64::from(DEFAULT_SCRAM_ITERATIONS).into(),
                     stored_key.into(),
                     server_key.into(),
-                    email_str.map_or(crate::db::Value::Null, crate::db::Value::from),
+                    email_str.into(),
                 ],
             })
             .await

@@ -52,17 +52,11 @@ impl MessageRepository {
                     create.channel_id.clone().into(),
                     create.author_user_id.clone().into(),
                     content.clone().into(),
-                    create
-                        .reply_to_id
-                        .clone()
-                        .map_or(crate::db::Value::Null, crate::db::Value::from),
-                    create
-                        .thread_id
-                        .clone()
-                        .map_or(crate::db::Value::Null, crate::db::Value::from),
+                    create.reply_to_id.clone().into(),
+                    create.thread_id.clone().into(),
                     flags_bits.into(),
                     created_at_str.into(),
-                    expires_at_str.map_or(crate::db::Value::Null, crate::db::Value::from),
+                    expires_at_str.into(),
                 ],
             })
             .await
