@@ -4,6 +4,20 @@
 export class WaddleClient {
     free(): void;
     [Symbol.dispose](): void;
+    admin_channels_affiliations(args: any): Promise<any>;
+    admin_channels_create(args: any): Promise<any>;
+    admin_channels_delete(args: any): Promise<any>;
+    admin_channels_kick(args: any): Promise<any>;
+    admin_channels_list(args: any): Promise<any>;
+    admin_channels_occupants(args: any): Promise<any>;
+    admin_channels_set_affiliation(args: any): Promise<any>;
+    admin_channels_update(args: any): Promise<any>;
+    admin_spaces_create(args: any): Promise<any>;
+    admin_spaces_delete(args: any): Promise<any>;
+    admin_spaces_list(args: any): Promise<any>;
+    admin_spaces_members(args: any): Promise<any>;
+    admin_spaces_set_role(args: any): Promise<any>;
+    admin_spaces_update(args: any): Promise<any>;
     /**
      * Call the `urn:waddle:admin:users:list:0` ad-hoc command
      * against the user-bearing server domain and return a typed

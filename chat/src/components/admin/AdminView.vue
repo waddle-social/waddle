@@ -3,6 +3,8 @@ import { computed, onMounted, ref } from "vue";
 import { ChevronLeft } from "lucide-vue-next";
 import AdminLayout from "@/components/admin/AdminLayout.vue";
 import UsersPanel from "@/components/admin/UsersPanel.vue";
+import SpacesPanel from "@/components/admin/SpacesPanel.vue";
+import ChannelsPanel from "@/components/admin/ChannelsPanel.vue";
 import type { BrowserXmppClient } from "@/lib/xmpp-client";
 import type { AdminPanel } from "@/shell/navigation";
 
@@ -79,6 +81,12 @@ onMounted(() => {
   >
     <template #users>
       <UsersPanel :load-page="loadUsers" />
+    </template>
+    <template #spaces>
+      <SpacesPanel :xmpp-client="xmppClient" />
+    </template>
+    <template #channels>
+      <ChannelsPanel :xmpp-client="xmppClient" />
     </template>
   </AdminLayout>
 </template>

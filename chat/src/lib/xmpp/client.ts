@@ -95,6 +95,16 @@ import {
   roomMessageFromArchived,
 } from "./wasm-message-codecs";
 import type {
+  WasmAdminChannelRef,
+  WasmAdminChannelsAffiliationsResult,
+  WasmAdminChannelsKickResult,
+  WasmAdminChannelsListResult,
+  WasmAdminChannelsOccupantsResult,
+  WasmAdminChannelsSetAffiliationResult,
+  WasmAdminSpaceRef,
+  WasmAdminSpacesListResult,
+  WasmAdminSpacesMembersResult,
+  WasmAdminSpacesSetRoleResult,
   WasmArchivedMessage,
   WasmAvatar,
   WasmFetchThreadsOptions,
@@ -186,6 +196,20 @@ type WasmClient = import("@waddle/xmpp-client-wasm").WaddleClient & {
     afterCursor: string | null,
   ) => Promise<AdminUsersPage>;
   is_community_owner?: () => Promise<boolean>;
+  admin_spaces_list?: (args: unknown) => Promise<WasmAdminSpacesListResult>;
+  admin_spaces_create?: (args: unknown) => Promise<WasmAdminSpaceRef>;
+  admin_spaces_update?: (args: unknown) => Promise<WasmAdminSpaceRef>;
+  admin_spaces_delete?: (args: unknown) => Promise<boolean>;
+  admin_spaces_members?: (args: unknown) => Promise<WasmAdminSpacesMembersResult>;
+  admin_spaces_set_role?: (args: unknown) => Promise<WasmAdminSpacesSetRoleResult>;
+  admin_channels_list?: (args: unknown) => Promise<WasmAdminChannelsListResult>;
+  admin_channels_create?: (args: unknown) => Promise<WasmAdminChannelRef>;
+  admin_channels_update?: (args: unknown) => Promise<WasmAdminChannelRef>;
+  admin_channels_delete?: (args: unknown) => Promise<boolean>;
+  admin_channels_occupants?: (args: unknown) => Promise<WasmAdminChannelsOccupantsResult>;
+  admin_channels_affiliations?: (args: unknown) => Promise<WasmAdminChannelsAffiliationsResult>;
+  admin_channels_set_affiliation?: (args: unknown) => Promise<WasmAdminChannelsSetAffiliationResult>;
+  admin_channels_kick?: (args: unknown) => Promise<WasmAdminChannelsKickResult>;
 };
 
 /**
@@ -1299,6 +1323,138 @@ export class BrowserXmppClient {
       throw new Error("admin_users_list binding missing — server does not support admin V1");
     }
     return await xmpp.admin_users_list(opts.prefix ?? null, opts.pageSize ?? null, opts.afterCursor ?? null);
+  }
+  /**
+   * Admin V2 spaces: list. Wraps `WaddleClient.admin_spaces_list`.
+   *
+   * The wasm method consumes a serde-typed `WaddleAdminSpacesListArgs`
+   * struct, so this wrapper must pass snake_case keys verbatim.
+   */
+  async adminSpacesList(opts: { prefix?: string | null; pageSize?: number | null; afterCursor?: string | null } = {}): Promise<WasmAdminSpacesListResult> {
+    const xmpp = await this.requireConnectedXmpp();
+    if (!xmpp.admin_spaces_list) {
+      throw new Error("admin_spaces_list binding missing — server does not support admin V2");
+    }
+    return await xmpp.admin_spaces_list({
+      prefix: opts.prefix ?? null,
+      page_size: opts.pageSize ?? null,
+      after_cursor: opts.afterCursor ?? null,
+    });
+  }
+  async adminSpacesCreate(opts: { name: string; description?: string | null; iconUrl?: string | null }): Promise<WasmAdminSpaceRef> {
+    const xmpp = await this.requireConnectedXmpp();
+    if (!xmpp.admin_spaces_create) throw new Error("admin_spaces_create binding missing");
+    return await xmpp.admin_spaces_create({
+      name: opts.name,
+      description: opts.description ?? null,
+      icon_url: opts.iconUrl ?? null,
+    });
+  }
+  async adminSpacesUpdate(opts: { spaceJid: string; name?: string | null; description?: string | null; iconUrl?: string | null }): Promise<WasmAdminSpaceRef> {
+    const xmpp = await this.requireConnectedXmpp();
+    if (!xmpp.admin_spaces_update) throw new Error("admin_spaces_update binding missing");
+    return await xmpp.admin_spaces_update({
+      space_jid: opts.spaceJid,
+      name: opts.name ?? null,
+      description: opts.description ?? null,
+      icon_url: opts.iconUrl ?? null,
+    });
+  }
+  async adminSpacesDelete(opts: { spaceJid: string }): Promise<boolean> {
+    const xmpp = await this.requireConnectedXmpp();
+    if (!xmpp.admin_spaces_delete) throw new Error("admin_spaces_delete binding missing");
+    return await xmpp.admin_spaces_delete({ space_jid: opts.spaceJid, confirm: "yes" });
+  }
+  async adminSpacesMembers(opts: { spaceJid: string; pageSize?: number | null; afterCursor?: string | null }): Promise<WasmAdminSpacesMembersResult> {
+    const xmpp = await this.requireConnectedXmpp();
+    if (!xmpp.admin_spaces_members) throw new Error("admin_spaces_members binding missing");
+    return await xmpp.admin_spaces_members({
+      space_jid: opts.spaceJid,
+      page_size: opts.pageSize ?? null,
+      after_cursor: opts.afterCursor ?? null,
+    });
+  }
+  async adminSpacesSetRole(opts: { spaceJid: string; memberJid: string; role: "owner" | "admin" | "member" | "none" }): Promise<WasmAdminSpacesSetRoleResult> {
+    const xmpp = await this.requireConnectedXmpp();
+    if (!xmpp.admin_spaces_set_role) throw new Error("admin_spaces_set_role binding missing");
+    return await xmpp.admin_spaces_set_role({
+      space_jid: opts.spaceJid,
+      member_jid: opts.memberJid,
+      role: opts.role,
+    });
+  }
+  async adminChannelsList(opts: { spaceJid?: string | null; prefix?: string | null; pageSize?: number | null; afterCursor?: string | null } = {}): Promise<WasmAdminChannelsListResult> {
+    const xmpp = await this.requireConnectedXmpp();
+    if (!xmpp.admin_channels_list) throw new Error("admin_channels_list binding missing");
+    return await xmpp.admin_channels_list({
+      space_jid: opts.spaceJid ?? null,
+      prefix: opts.prefix ?? null,
+      page_size: opts.pageSize ?? null,
+      after_cursor: opts.afterCursor ?? null,
+    });
+  }
+  async adminChannelsCreate(opts: { name: string; topic?: string | null; spaceJid?: string | null; isPublic?: boolean | null }): Promise<WasmAdminChannelRef> {
+    const xmpp = await this.requireConnectedXmpp();
+    if (!xmpp.admin_channels_create) throw new Error("admin_channels_create binding missing");
+    return await xmpp.admin_channels_create({
+      name: opts.name,
+      topic: opts.topic ?? null,
+      space_jid: opts.spaceJid ?? null,
+      is_public: opts.isPublic ?? null,
+    });
+  }
+  async adminChannelsUpdate(opts: { channelJid: string; name?: string | null; topic?: string | null; isPublic?: boolean | null }): Promise<WasmAdminChannelRef> {
+    const xmpp = await this.requireConnectedXmpp();
+    if (!xmpp.admin_channels_update) throw new Error("admin_channels_update binding missing");
+    return await xmpp.admin_channels_update({
+      channel_jid: opts.channelJid,
+      name: opts.name ?? null,
+      topic: opts.topic ?? null,
+      is_public: opts.isPublic ?? null,
+    });
+  }
+  async adminChannelsDelete(opts: { channelJid: string }): Promise<boolean> {
+    const xmpp = await this.requireConnectedXmpp();
+    if (!xmpp.admin_channels_delete) throw new Error("admin_channels_delete binding missing");
+    return await xmpp.admin_channels_delete({ channel_jid: opts.channelJid, confirm: "yes" });
+  }
+  async adminChannelsOccupants(opts: { channelJid: string; pageSize?: number | null; afterCursor?: string | null }): Promise<WasmAdminChannelsOccupantsResult> {
+    const xmpp = await this.requireConnectedXmpp();
+    if (!xmpp.admin_channels_occupants) throw new Error("admin_channels_occupants binding missing");
+    return await xmpp.admin_channels_occupants({
+      channel_jid: opts.channelJid,
+      page_size: opts.pageSize ?? null,
+      after_cursor: opts.afterCursor ?? null,
+    });
+  }
+  async adminChannelsAffiliations(opts: { channelJid: string; filter?: string | null; pageSize?: number | null; afterCursor?: string | null }): Promise<WasmAdminChannelsAffiliationsResult> {
+    const xmpp = await this.requireConnectedXmpp();
+    if (!xmpp.admin_channels_affiliations) throw new Error("admin_channels_affiliations binding missing");
+    return await xmpp.admin_channels_affiliations({
+      channel_jid: opts.channelJid,
+      filter: opts.filter ?? null,
+      page_size: opts.pageSize ?? null,
+      after_cursor: opts.afterCursor ?? null,
+    });
+  }
+  async adminChannelsSetAffiliation(opts: { channelJid: string; memberJid: string; affiliation: "owner" | "admin" | "member" | "none" | "outcast"; reason?: string | null }): Promise<WasmAdminChannelsSetAffiliationResult> {
+    const xmpp = await this.requireConnectedXmpp();
+    if (!xmpp.admin_channels_set_affiliation) throw new Error("admin_channels_set_affiliation binding missing");
+    return await xmpp.admin_channels_set_affiliation({
+      channel_jid: opts.channelJid,
+      member_jid: opts.memberJid,
+      affiliation: opts.affiliation,
+      reason: opts.reason ?? null,
+    });
+  }
+  async adminChannelsKick(opts: { channelJid: string; occupantJid: string; reason?: string | null }): Promise<WasmAdminChannelsKickResult> {
+    const xmpp = await this.requireConnectedXmpp();
+    if (!xmpp.admin_channels_kick) throw new Error("admin_channels_kick binding missing");
+    return await xmpp.admin_channels_kick({
+      channel_jid: opts.channelJid,
+      occupant_jid: opts.occupantJid,
+      reason: opts.reason ?? null,
+    });
   }
   async searchUsers(query: string): Promise<UserSearchResult[]> { if (!query.trim()) return []; const xmpp = await this.requireConnectedXmpp(); const users = await xmpp.search_users?.(query) as WasmUserSearchResult[]; return (users ?? []).map((user) => ({ id: user.jid, jid: user.jid, username: user.username ?? user.nick ?? user.jid.split("@")[0] ?? user.jid, display_name: user.display_name ?? user.name ?? null, avatar_url: null })); }
   async fetchUserAvatar(jid: string): Promise<string | null> {
