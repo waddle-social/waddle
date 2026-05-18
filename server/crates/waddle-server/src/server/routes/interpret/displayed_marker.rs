@@ -147,8 +147,8 @@ mod tests {
     use waddle_xmpp::mam::{ArchivedMessage as MamArchivedMessage, RichMessageId};
     use waddle_xmpp::registry::ConnectionRegistry;
     use waddle_xmpp_core::mam::ThreadId;
-    use waddle_xmpp_core::ThreadInfo;
     use waddle_xmpp_core::xep0359::StanzaId as Xep0359StanzaId;
+    use waddle_xmpp_core::ThreadInfo;
     use xmpp_parsers::message::MessageType;
 
     fn bare(value: &str) -> BareJid {
