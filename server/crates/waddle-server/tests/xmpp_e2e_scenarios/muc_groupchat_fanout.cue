@@ -2,7 +2,7 @@ package xmpp_e2e_scenarios
 
 scenario: #Scenario & {
 	name: "muc-groupchat-fanout"
-	xeps: ["XEP-0045"]
+	xeps: ["XEP-0045", "XEP-0430"]
 	users: {
 		alice: devices: {
 			phone: #Actor & {

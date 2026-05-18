@@ -71,6 +71,7 @@ const SUPPORTED_XEPS: &[&str] = &[
     "XEP-0424",
     "XEP-0425",
     "XEP-0428",
+    "XEP-0430",
     "XEP-0431",
     "XEP-0433",
     "XEP-0444",

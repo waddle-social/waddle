@@ -546,8 +546,8 @@ fn apply_inbox_rsm(
         return (page, None);
     }
 
-    let first = page.first().map(|entry| inbox_rsm_cursor(entry));
-    let last = page.last().map(|entry| inbox_rsm_cursor(entry));
+    let first = page.first().map(inbox_rsm_cursor);
+    let last = page.last().map(inbox_rsm_cursor);
     let response = RsmResponse {
         first,
         first_index: Some(0),
