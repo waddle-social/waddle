@@ -87,7 +87,7 @@ pub(crate) fn dispatch_client_event(inner: &Rc<RefCell<WaddleClientInner>>, even
         ClientEvent::Messaging(waddle_xmpp_client::MessagingEvent::Presence(presence)) => {
             let callback = inner.borrow().on_presence.clone();
             if let Some(callback) = callback {
-                if let Ok(value) = to_js_value(&presence_to_js(presence)) {
+                if let Ok(value) = to_js_value(&presence_to_js(*presence)) {
                     let _ = callback.call1(&JsValue::NULL, &value);
                 }
             }

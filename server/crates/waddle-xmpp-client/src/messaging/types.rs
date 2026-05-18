@@ -516,12 +516,50 @@ pub struct InboundPresence {
     pub muc_role: Option<MucRole>,
     pub muc_jid: Option<String>,
     pub vcard_avatar: Option<String>,
+    /// XEP-style Waddle extension — `<call xmlns='urn:waddle:muc-call:0' state='active|inactive' call-id='ROOM_JID'/>`
+    /// — carried on a MUC occupant's presence to advertise that
+    /// they have joined / left the room's group call. Drives the
+    /// chat-side "N in call" indicator.
+    pub muc_call: Option<MucCallPresence>,
+}
+
+/// Parsed `<call xmlns='urn:waddle:muc-call:0'/>` extension on a
+/// MUC presence. Wire-typed because chat-side consumers want the
+/// strong "active vs inactive" distinction without re-parsing
+/// strings.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MucCallPresence {
+    pub state: MucCallPresenceState,
+    pub call_id: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MucCallPresenceState {
+    Active,
+    Inactive,
+}
+
+impl MucCallPresenceState {
+    pub fn as_attr(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Inactive => "inactive",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "active" => Some(Self::Active),
+            "inactive" => Some(Self::Inactive),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum MessagingEvent {
     Message(Box<InboundMessage>),
-    Presence(InboundPresence),
+    Presence(Box<InboundPresence>),
 }
 
 // ─── Outbound options ────────────────────────────────────────────────────

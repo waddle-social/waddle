@@ -185,6 +185,12 @@ export interface WasmPresence {
   muc_role?: string;
   muc_jid?: string;
   vcard_avatar?: string;
+  muc_call?: WasmMucCallPresence;
+}
+
+export interface WasmMucCallPresence {
+  state: "active" | "inactive";
+  call_id: string;
 }
 
 export interface WasmArchivedMessage extends WasmMessage {

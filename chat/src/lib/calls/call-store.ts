@@ -245,9 +245,16 @@ export async function tearDownActiveCall(
           if (s.kind === "dm") {
             await outboundCalls.sessionTerminate(sender, s.peer, s.sid, reason);
           } else {
-            // MUC group call: leave via the muc-call:0 IQ surface.
-            // `peer` here is the room's bare JID (sid mirrors it).
+            // MUC group call: leave via the muc-call:0 IQ surface
+            // AND clear our presence extension so other occupants
+            // stop showing us as in-call.
             await sendMucCallLeave(sender, s.peer);
+            const raw = sender as RawIqSender;
+            if (s.selfNick && raw.update_muc_call_presence) {
+              await raw
+                .update_muc_call_presence(s.peer, s.selfNick, false, s.peer)
+                .catch(() => undefined);
+            }
           }
           break;
         case "outgoing":
@@ -271,9 +278,18 @@ export async function tearDownActiveCall(
  * call IQ surface, which is XML-based rather than typed (the
  * wasm bindings only expose typed methods for the JMI/Jingle 1:1
  * flow). Decoupled so unit tests can stub a partial client.
+ *
+ * Also covers `update_muc_call_presence` since both MUC-call ops
+ * are typically called from the same wasm-client instance.
  */
 export type RawIqSender = {
   send_raw_iq?: (xml: string) => Promise<string>;
+  update_muc_call_presence?: (
+    room_jid: string,
+    nick: string,
+    active: boolean,
+    call_id: string,
+  ) => Promise<unknown>;
 };
 
 const NS_WADDLE_MUC_CALL = "urn:waddle:muc-call:0";
@@ -361,6 +377,7 @@ export async function beginMucCall(
   sender: RawIqSender,
   roomJid: string,
   media: CallMedia,
+  selfNick?: string,
 ): Promise<void> {
   const join = await sendMucCallJoin(sender, roomJid);
   $callState.set({
@@ -370,6 +387,18 @@ export async function beginMucCall(
     media,
     join,
     kind: "muc",
+    selfNick,
   });
   $lastCallError.set(null);
+  // Advertise our in-call status via MUC presence so other
+  // occupants can show a "you have a live call in this channel"
+  // indicator. Best-effort: if the wasm method is missing (stale
+  // bundle), the call still works — just no in-band discovery.
+  if (selfNick && sender.update_muc_call_presence) {
+    try {
+      await sender.update_muc_call_presence(roomJid, selfNick, true, roomJid);
+    } catch (err) {
+      reportCallError(err);
+    }
+  }
 }

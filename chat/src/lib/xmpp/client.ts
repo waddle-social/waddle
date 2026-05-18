@@ -12,6 +12,10 @@ import {
 } from "../outbound-queue-store";
 import { $callState, applyCallEvent, clearCallState, tearDownActiveCall } from "@/lib/calls/call-store";
 import { handleCallEventSideEffect } from "@/lib/calls/call-effects";
+import {
+  applyMucCallPresence,
+  clearMucCallParticipants,
+} from "@/lib/calls/muc-call-presence";
 import type { CallWireSender } from "@/lib/calls/outbound";
 import type { CallEvent } from "@/lib/calls/types";
 import { barePeerJid, jidDomain, roomBareJidFor } from "./jid";
@@ -1555,6 +1559,7 @@ export class BrowserXmppClient {
     // re-establish call state (XEP-0353 has no resume semantics for
     // an in-flight call once the responder's connection drops).
     clearCallState();
+    clearMucCallParticipants();
     if (this.destroying) { this.clearResumeState(); this.emitStatus({ state: "offline", detail: error?.message ?? "Disconnected" }); return; }
     this.setResumeStateHandle(xmpp.get_resume_state_handle?.() ?? null);
     this.resumeState = xmpp.get_resume_state?.() ?? null;
@@ -1775,7 +1780,14 @@ export class BrowserXmppClient {
     xmpp.set_on_disconnected?.(() => this.handleDisconnected(xmpp));
     xmpp.set_on_error?.((detail: string) => this.emitError({ kind: "stream", recoverable: !this.destroying, detail }));
     xmpp.set_on_message?.((message: WasmMessage) => this.handleMessage(message));
-    xmpp.set_on_presence?.((presence: WasmPresence) => this.handlePresence(presence));
+    xmpp.set_on_presence?.((presence: WasmPresence) => {
+      this.handlePresence(presence);
+      // Side-effect track: MUC presence carrying the call extension
+      // populates the per-room participants store so any consumer
+      // (channel header, sidebar, list) can render "N in call"
+      // without subscribing to the raw presence stream.
+      applyMucCallPresence(presence);
+    });
     xmpp.set_on_message_delivery_acked?.((id: string) => this.handleMessageAck(id));
     xmpp.set_on_message_delivery_failed?.((id: string) => this.handleMessageFailed(id));
     xmpp.set_on_mds_displayed?.((entry: WasmMdsDisplayedEntry) => {

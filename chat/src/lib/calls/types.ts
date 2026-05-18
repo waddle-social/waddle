@@ -57,5 +57,10 @@ export type CallState =
       media: CallMedia;
       join: LiveKitJoin;
       kind: "dm" | "muc";
+      /** MUC group calls only: the nick we used to join the room.
+       *  Stored so `tearDownActiveCall` can emit the matching
+       *  `<presence to='room@muc/nick'><call state='inactive'/></presence>`
+       *  to clear our in-call indicator across other occupants. */
+      selfNick?: string;
     }
   | { phase: "ended"; sid: string; reason: string | null };

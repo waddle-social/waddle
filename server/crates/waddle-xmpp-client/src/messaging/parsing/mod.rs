@@ -27,7 +27,7 @@ pub fn parse(element: &Element) -> Option<MessagingEvent> {
         "message" => {
             parse_message(element).map(|message| MessagingEvent::Message(Box::new(message)))
         }
-        "presence" => Some(MessagingEvent::Presence(parse_presence(element))),
+        "presence" => Some(MessagingEvent::Presence(Box::new(parse_presence(element)))),
         _ => None,
     }
 }

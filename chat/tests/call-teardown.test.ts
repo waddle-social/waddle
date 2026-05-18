@@ -151,11 +151,47 @@ describe("MUC group call", () => {
         token: "jwt.payload.sig",
       },
       kind: "muc",
+      selfNick: undefined,
     });
   });
 
-  test("tearDownActiveCall on a MUC call dispatches request-leave", async () => {
+  test("beginMucCall with a nick also pushes a MUC presence update", async () => {
+    const send_raw_iq = mock(async () => {
+      return [
+        '<iq type="result" id="x">',
+        '<joined xmlns="urn:waddle:muc-call:0">',
+        '<transport xmlns="urn:waddle:transports:livekit:0">',
+        "<url>wss://livekit.test</url>",
+        "<room>chan@muc.test</room>",
+        "<identity>alice@waddle.test/web</identity>",
+        "<token>jwt.payload.sig</token>",
+        "</transport>",
+        "</joined>",
+        "</iq>",
+      ].join("");
+    });
+    const update_muc_call_presence = mock(async () => undefined);
+    const { beginMucCall } = await import("../src/lib/calls/call-store");
+    await beginMucCall(
+      { send_raw_iq, update_muc_call_presence } as unknown as Parameters<
+        typeof beginMucCall
+      >[0],
+      "chan@muc.test",
+      audioVideo,
+      "alice",
+    );
+    expect(update_muc_call_presence).toHaveBeenCalledTimes(1);
+    expect(update_muc_call_presence).toHaveBeenCalledWith(
+      "chan@muc.test",
+      "alice",
+      true,
+      "chan@muc.test",
+    );
+  });
+
+  test("tearDownActiveCall on a MUC call dispatches request-leave and clears the call presence", async () => {
     const send_raw_iq = mock(async () => "<iq type='result' id='x'/>");
+    const update_muc_call_presence = mock(async () => undefined);
     $callState.set({
       phase: "active",
       peer: "chan@muc.test",
@@ -163,9 +199,22 @@ describe("MUC group call", () => {
       media: audioVideo,
       join,
       kind: "muc",
+      selfNick: "alice",
     });
-    await tearDownActiveCall({ send_raw_iq } as unknown as Parameters<typeof tearDownActiveCall>[0], "gone");
+    await tearDownActiveCall(
+      { send_raw_iq, update_muc_call_presence } as unknown as Parameters<
+        typeof tearDownActiveCall
+      >[0],
+      "gone",
+    );
     expect(send_raw_iq).toHaveBeenCalledTimes(1);
+    expect(update_muc_call_presence).toHaveBeenCalledTimes(1);
+    expect(update_muc_call_presence).toHaveBeenCalledWith(
+      "chan@muc.test",
+      "alice",
+      false,
+      "chan@muc.test",
+    );
     const xml = (send_raw_iq.mock.calls[0] as string[])[0];
     expect(xml).toContain('request-leave');
     expect(xml).toContain('chan@muc.test');

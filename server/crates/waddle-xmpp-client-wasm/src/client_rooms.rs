@@ -68,6 +68,38 @@ impl WaddleClient {
         })
     }
 
+    /// Update our MUC presence in `room_jid/nick` with (or without)
+    /// the `<call xmlns='urn:waddle:muc-call:0'/>` extension. Sent as
+    /// a fresh available-presence so other occupants discover that
+    /// we've joined or left the room's group call without polling.
+    ///
+    /// `active=true` advertises us as a current participant; `false`
+    /// emits the extension with `state='inactive'` so legacy
+    /// presence-replay buffers eventually drop the prior `active`.
+    pub fn update_muc_call_presence(
+        &self,
+        room_jid: String,
+        nick: String,
+        active: bool,
+        call_id: String,
+    ) -> Promise {
+        let inner = self.inner.clone();
+        future_to_promise(async move {
+            let to = format!("{room_jid}/{nick}");
+            let state_attr = if active { "active" } else { "inactive" };
+            let call = Element::builder("call", "urn:waddle:muc-call:0")
+                .attr("state", state_attr)
+                .attr("call-id", call_id.as_str())
+                .build();
+            let stanza = Element::builder("presence", NS_CLIENT)
+                .attr("to", to.as_str())
+                .append(call)
+                .build();
+            send_stanza_command(inner, stanza).await?;
+            Ok(JsValue::UNDEFINED)
+        })
+    }
+
     pub fn send_presence(&self, status: Option<String>, show: Option<String>) -> Promise {
         let inner = self.inner.clone();
         future_to_promise(async move {

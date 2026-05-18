@@ -24,3 +24,9 @@ pub(crate) const NS_MUC_USER: &str = "http://jabber.org/protocol/muc#user";
 pub(crate) const NS_STICKERS: &str = "urn:xmpp:stickers:0";
 pub(crate) const NS_VCARD_UPDATE: &str = "vcard-temp:x:update";
 pub const NS_WADDLE_PIN_V0: &str = "urn:waddle:pin:0";
+/// `urn:waddle:muc-call:0` — Waddle MUC presence extension that
+/// signals an occupant has joined a group call in the room. Mirrors
+/// `waddle_xmpp::xep::xep_waddle_muc_call::NS_WADDLE_MUC_CALL` —
+/// the client crate cannot depend on the server crate, so the
+/// constant is duplicated and kept in sync via a test.
+pub(crate) const NS_WADDLE_MUC_CALL: &str = "urn:waddle:muc-call:0";
