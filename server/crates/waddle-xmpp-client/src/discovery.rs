@@ -13,9 +13,8 @@ pub use iq::{
     build_disable_push_iq, build_disco_info_iq, build_disco_items_iq, build_enable_push_iq,
     build_muc_admin_affiliation_list_iq, build_muc_admin_affiliation_set_iq, build_pubsub_items_iq,
     build_roster_get_iq, build_upload_slot_iq, build_user_search_form_iq, build_user_search_iq,
-    build_waddle_inbox_mark_read_iq, build_waddle_inbox_query_iq,
-    parse_muc_admin_affiliation_query, parse_roster_result, parse_user_search_form,
-    parse_user_search_result, parse_waddle_inbox_result,
+    build_waddle_inbox_mark_read_iq, parse_muc_admin_affiliation_query, parse_roster_result,
+    parse_user_search_form, parse_user_search_result,
 };
 pub use parsing::{
     parse_disco_info_result, parse_disco_items_result, parse_space_channels_result,
@@ -25,8 +24,7 @@ pub use types::{
     DiscoDataField, DiscoDataForm, DiscoFeature, DiscoIdentity, DiscoInfoResult, DiscoItem,
     DiscoveredChannel, DiscoveredChannelType, DiscoveredSpace, DiscoveredTopology,
     MucAdminAffiliationItem, RosterResult, SpaceNode, UploadSlot, UserSearchForm, UserSearchItem,
-    UserSearchQuery, UserSearchResult, WaddleInboxConversation, WaddleInboxMarkRead,
-    WaddleInboxQuery, WaddleInboxResult,
+    UserSearchQuery, UserSearchResult, WaddleInboxMarkRead,
 };
 
 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]

@@ -32,6 +32,7 @@ impl WasmDriverTask {
             event_tx,
             pending_iqs: HashMap::new(),
             pending_mam_queries: HashMap::new(),
+            pending_inbox_queries: HashMap::new(),
             deferred_commands: VecDeque::new(),
             explicit_disconnect: false,
         })
@@ -156,6 +157,24 @@ impl WasmDriverTask {
                 self.send_mam_query_command(stanza, query_id, responder)
                     .await
             }
+            Some(WasmCommand::SendInboxQuery {
+                stanza,
+                query_id,
+                responder,
+            }) => {
+                if !self.runtime.can_send_app_stanza() {
+                    self.deferred_commands
+                        .push_back(DeferredWasmCommand::InboxQuery {
+                            stanza,
+                            query_id,
+                            responder,
+                        });
+                    return true;
+                }
+
+                self.send_inbox_query_command(stanza, query_id, responder)
+                    .await
+            }
             Some(WasmCommand::Disconnect { responder }) => {
                 self.explicit_disconnect = true;
                 let result = self
@@ -252,6 +271,42 @@ impl WasmDriverTask {
         }
     }
 
+    async fn send_inbox_query_command(
+        &mut self,
+        stanza: Element,
+        query_id: String,
+        responder: oneshot::Sender<DriverResult<InboxPage>>,
+    ) -> bool {
+        let id = stanza.attr("id").map(|value| value.to_string());
+        match self
+            .send_transport_message(TransportMessage::Element(stanza))
+            .await
+        {
+            Ok(()) => match id {
+                Some(id) => {
+                    self.pending_inbox_queries.insert(
+                        id,
+                        PendingInboxQuery {
+                            query_id,
+                            entries: Vec::new(),
+                            responder,
+                        },
+                    );
+                    true
+                }
+                None => {
+                    let _ = responder.send(Err(ClientError::Disconnected));
+                    false
+                }
+            },
+            Err(err) => {
+                self.emit_error(err.to_string()).await;
+                let _ = responder.send(Err(err));
+                false
+            }
+        }
+    }
+
     async fn flush_deferred_commands(&mut self) -> bool {
         while self.runtime.can_send_app_stanza() {
             let Some(command) = self.deferred_commands.pop_front() else {
@@ -271,6 +326,14 @@ impl WasmDriverTask {
                     responder,
                 } => {
                     self.send_mam_query_command(stanza, query_id, responder)
+                        .await
+                }
+                DeferredWasmCommand::InboxQuery {
+                    stanza,
+                    query_id,
+                    responder,
+                } => {
+                    self.send_inbox_query_command(stanza, query_id, responder)
                         .await
                 }
             };
@@ -408,6 +471,18 @@ impl WasmDriverTask {
                         Err(ClientError::StanzaError(parse_stanza_error(&element)))
                     };
                     let _ = pending.responder.send(result);
+                } else if let Some(pending) = self.pending_inbox_queries.remove(&id) {
+                    let result = if element.attr("type") == Some("result") {
+                        let fin = waddle_xmpp_client::inbox::parse_inbox_fin(&element)
+                            .unwrap_or_default();
+                        Ok(InboxPage {
+                            entries: pending.entries,
+                            fin,
+                        })
+                    } else {
+                        Err(ClientError::StanzaError(parse_stanza_error(&element)))
+                    };
+                    let _ = pending.responder.send(result);
                 }
                 None
             }
@@ -420,6 +495,16 @@ impl WasmDriverTask {
                     {
                         pending.messages.push(archived);
                     }
+                }
+                None
+            }
+            ClientEvent::InboxStreamEntry(entry) => {
+                if let Some((_, pending)) = self
+                    .pending_inbox_queries
+                    .iter_mut()
+                    .find(|(_, pending)| pending.query_id == entry.query_id)
+                {
+                    pending.entries.push(entry);
                 }
                 None
             }
@@ -486,12 +571,18 @@ impl WasmDriverTask {
                 DeferredWasmCommand::MamQuery { responder, .. } => {
                     let _ = responder.send(Err(ClientError::Disconnected));
                 }
+                DeferredWasmCommand::InboxQuery { responder, .. } => {
+                    let _ = responder.send(Err(ClientError::Disconnected));
+                }
             }
         }
         for (_, responder) in self.pending_iqs.drain() {
             let _ = responder.send(Err(ClientError::Disconnected));
         }
         for (_, pending) in self.pending_mam_queries.drain() {
+            let _ = pending.responder.send(Err(ClientError::Disconnected));
+        }
+        for (_, pending) in self.pending_inbox_queries.drain() {
             let _ = pending.responder.send(Err(ClientError::Disconnected));
         }
 

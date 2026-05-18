@@ -393,17 +393,30 @@ pub struct WaddleInboxConversation {
 
 #[derive(Debug, Serialize)]
 pub struct WaddleInboxResult {
+    /// Sum of unread counts across the requesting user's whole inbox
+    /// (server-side total). For backwards compatibility this is also
+    /// surfaced under the same name the chat layer used pre-XEP-0430.
     pub total_unread: u32,
+    /// XEP-0430 fin `total` — number of conversations matched.
+    pub total: u32,
+    /// XEP-0430 fin `unread` — number of conversations with unread > 0.
+    pub unread_conversations: u32,
     pub conversations: Vec<WaddleInboxConversation>,
 }
 
+/// JS-facing options for [`crate::WaddleClient::fetch_inbox`].
+///
+/// Maps to XEP-0430 query attributes: `only_unread` ↔ `unread-only`,
+/// `no_messages` ↔ `!messages` (inverted so the JS default — embedding
+/// MAM bodies — needs no flag). The `since`/`room`/`threads` fields
+/// from the legacy Waddle-private surface are removed; thread paging
+/// now lives behind `fetch_threads` and time-window filtering is a
+/// follow-up.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct WaddleFetchInboxOptions {
-    pub since: Option<i64>,
     pub only_unread: bool,
-    pub room: Option<String>,
-    pub threads: bool,
+    pub no_messages: bool,
 }
 
 #[derive(Debug, Serialize)]

@@ -7,8 +7,7 @@ use crate::messaging::MucAffiliation;
 use super::ids::next_id;
 use super::types::{
     MucAdminAffiliationItem, RosterResult, SpaceNode, UserSearchForm, UserSearchItem,
-    UserSearchQuery, UserSearchResult, WaddleInboxConversation, WaddleInboxMarkRead,
-    WaddleInboxQuery, WaddleInboxResult,
+    UserSearchQuery, UserSearchResult, WaddleInboxMarkRead,
 };
 use super::{
     CLIENT_NS, DATA_FORMS_NS, DISCO_INFO_NS, DISCO_ITEMS_NS, MUC_ADMIN_NS, PUBSUB_NS, PUSH_NS,
@@ -136,29 +135,6 @@ pub fn build_disable_push_iq(push_service_jid: &str, node: &str) -> Element {
         .build()
 }
 
-pub fn build_waddle_inbox_query_iq(to: &str, query: &WaddleInboxQuery) -> Element {
-    let id = format!("waddle-inbox-{}", next_id());
-    let mut builder = Element::builder("query", WADDLE_INBOX_NS);
-    if let Some(since) = query.since {
-        builder = builder.attr("since", since.to_string());
-    }
-    if query.only_unread {
-        builder = builder.attr("only-unread", "true");
-    }
-    if let Some(room) = query.room.as_deref() {
-        builder = builder.attr("room", room);
-    }
-    if query.threads {
-        builder = builder.attr("threads", "true");
-    }
-    Element::builder("iq", CLIENT_NS)
-        .attr("type", "get")
-        .attr("to", to)
-        .attr("id", id)
-        .append(builder.build())
-        .build()
-}
-
 pub fn build_waddle_inbox_mark_read_iq(to: &str, mark_read: &WaddleInboxMarkRead) -> Element {
     let id = format!("waddle-mark-read-{}", next_id());
     let mut builder =
@@ -172,47 +148,6 @@ pub fn build_waddle_inbox_mark_read_iq(to: &str, mark_read: &WaddleInboxMarkRead
         .attr("id", id)
         .append(builder.build())
         .build()
-}
-
-pub fn parse_waddle_inbox_result(iq: &Element) -> Option<WaddleInboxResult> {
-    let query = iq.get_child("query", WADDLE_INBOX_NS)?;
-    let total_unread = query
-        .attr("total-unread")
-        .and_then(|value| value.parse().ok());
-    let conversations = query
-        .children()
-        .filter(|child| child.name() == "conversation" && child.ns() == WADDLE_INBOX_NS)
-        .filter_map(|conversation| {
-            let partner = conversation.attr("partner")?.to_string();
-            let kind = conversation.attr("kind").unwrap_or("direct").to_string();
-            let unread = conversation
-                .attr("unread")
-                .and_then(|value| value.parse().ok())
-                .unwrap_or(0);
-            Some(WaddleInboxConversation {
-                partner,
-                kind,
-                last_stanza_id: conversation.attr("last-stanza-id").map(str::to_string),
-                last_updated: conversation
-                    .attr("last-updated")
-                    .and_then(|value| value.parse().ok()),
-                unread,
-                preview: conversation
-                    .get_child("preview", WADDLE_INBOX_NS)
-                    .map(|child| child.text()),
-                thread: conversation.attr("thread").map(str::to_string),
-                thread_title: conversation.attr("thread-title").map(str::to_string),
-                reply_count: conversation
-                    .attr("reply-count")
-                    .and_then(|value| value.parse().ok()),
-                author: conversation.attr("author").map(str::to_string),
-            })
-        })
-        .collect();
-    Some(WaddleInboxResult {
-        total_unread,
-        conversations,
-    })
 }
 
 pub fn build_roster_get_iq(to: Option<&str>, ver: Option<&str>) -> Element {

@@ -3,6 +3,7 @@ use minidom::Element;
 use crate::bootstrap::{
     AuthenticationRequest, ResourceBindingRequest, SaslFailure, StreamFeatures,
 };
+use crate::inbox::InboxStreamEntry;
 use crate::mam::ArchivedMessage;
 use crate::messaging::MessagingEvent;
 use crate::pep::PepItem;
@@ -23,6 +24,10 @@ pub enum ClientEvent {
     Messaging(MessagingEvent),
     /// Typed MAM archived message from an active history query.
     MamResult(ArchivedMessage),
+    /// Typed streamed XEP-0430 inbox `<entry/>` from an active inbox
+    /// query. Correlated to the pending inbox request via
+    /// [`InboxStreamEntry::query_id`].
+    InboxStreamEntry(InboxStreamEntry),
     /// Typed PEP user-state event (mood, activity, tune).
     PepEvent(PepItem),
     /// Transport-level delivery status for outbound message stanzas.

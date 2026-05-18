@@ -11,7 +11,7 @@ impl XmppRuntime {
     /// handlers in priority order: MAM results, PEP events, then general messaging.
     /// Unrecognised stanzas fall through to [`ClientEvent::UnhandledStanza`].
     pub fn handle_app_stanza(&mut self, element: &minidom::Element) -> Vec<ClientEvent> {
-        use crate::{mam, messaging, pep};
+        use crate::{inbox, mam, messaging, pep};
 
         let type_attr = element.attr("type").unwrap_or("");
 
@@ -25,6 +25,15 @@ impl XmppRuntime {
         }
 
         if element.name() == "message" {
+            // XEP-0430 streamed entries take priority over the MAM
+            // parser: an inbox `<message/>` may embed a MAM `<result/>`
+            // (when `messages='true'`), and routing it to `MamResult`
+            // would drop the `<entry/>` that the inbox driver actually
+            // needs to accumulate.
+            if let Some(entry) = inbox::parse_inbox_stream_message(element) {
+                return vec![ClientEvent::InboxStreamEntry(entry)];
+            }
+
             if let Some(archived) = mam::parse_mam_result(element) {
                 return vec![ClientEvent::MamResult(archived)];
             }
