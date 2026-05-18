@@ -145,16 +145,73 @@ export class WaddleClient {
     search_dm_history(peer_jid: string, query: string, max: number): Promise<any>;
     search_room_history(room_jid: string, query: string, max: number): Promise<any>;
     search_users(query: string): Promise<any>;
+    send_call_finish(peer_full_jid: string, sid_str: string): Promise<any>;
+    send_call_proceed(peer_full_jid: string, sid_str: string): Promise<any>;
+    /**
+     * Send a JMI `<propose/>` to the peer's bare JID (XEP-0353
+     * §5.1.1). The bare JID lets the responder's server ring every
+     * connected resource until one of them proceeds/rejects.
+     */
+    send_call_propose(peer_bare_jid: string, sid_str: string, audio: boolean, video: boolean): Promise<any>;
+    send_call_reject(peer_full_jid: string, sid_str: string): Promise<any>;
+    send_call_retract(peer_full_jid: string, sid_str: string): Promise<any>;
+    /**
+     * Send a Jingle `session-accept` IQ in response to a received
+     * session-initiate. `initiator` and `responder` are validated
+     * as full JIDs at the wasm boundary so a malformed JID surfaces
+     * as a clear `JsError` rather than a wire-rejected stanza.
+     */
+    send_call_session_accept(peer_full_jid: string, initiator_full_jid: string, responder_full_jid: string, sid_str: string, audio: boolean, video: boolean): Promise<any>;
+    /**
+     * Send a Jingle `session-initiate` IQ to the peer's full JID
+     * (XEP-0166 §6.4). The `initiator` attribute names the call
+     * originator; the server's Jingle handler additionally
+     * validates the authenticated session matches it.
+     */
+    send_call_session_initiate(peer_full_jid: string, initiator_full_jid: string, sid_str: string, audio: boolean, video: boolean): Promise<any>;
+    send_call_session_terminate(peer_full_jid: string, sid_str: string, reason?: string | null): Promise<any>;
     send_chat_message(peer_jid: string, body: string, options: any): Promise<any>;
     send_chat_state(to: string, msg_type: string, state: string): Promise<any>;
     send_correction(to: string, msg_type: string, body: string, replaces_id: string, options: any): Promise<any>;
     send_displayed(to: string, msg_type: string, message_id: string): Promise<any>;
     send_groupchat_message(room_jid: string, body: string, options: any): Promise<any>;
     send_moderation(to: string, msg_type: string, target_id: string, reason?: string | null): Promise<any>;
+    /**
+     * Send a Jingle `session-terminate` IQ to hang up. `reason` is
+     * one of the XEP-0166 §7.4 condition names ("success",
+     * "decline", "cancel", "busy", "gone", …) parsed against
+     * `xmpp_parsers::jingle::Reason`; unknown values are rejected
+     * at the wasm boundary so a typo can't ship a malformed
+     * condition over the wire.
+     * Send `<request-join xmlns='urn:waddle:muc-call:0' room='ROOM_JID'/>`
+     * to the MUC room and return the issued LiveKit join credentials
+     * as a typed `{ url, room, identity, token }` object. The XML
+     * is built via `minidom::Element::builder` (XML hard rule
+     * from CLAUDE.md — no string concatenation at the wire
+     * boundary).
+     */
+    send_muc_call_join(room_jid: string): Promise<any>;
+    /**
+     * Send `<request-leave xmlns='urn:waddle:muc-call:0' room='ROOM_JID'/>`
+     * to the MUC room. Server unregisters the participant + revokes
+     * every jti it minted for `(room, identity)`. Resolves with no
+     * payload.
+     */
+    send_muc_call_leave(room_jid: string): Promise<any>;
     send_presence(status?: string | null, show?: string | null): Promise<any>;
     send_raw_iq(xml: string): Promise<any>;
     send_reaction(to: string, msg_type: string, target_id: string, emojis: string[]): Promise<any>;
     send_retraction(to: string, msg_type: string, retracts_id: string): Promise<any>;
+    /**
+     * Register a callback for inbound XMPP-native call events
+     * (XEP-0353 JMI envelopes + XEP-0166 Jingle session control
+     * carrying a `urn:waddle:transports:livekit:0` transport).
+     * The callback receives a [`WaddleCallEvent`]-shaped object
+     * with a `kind` discriminator and optional `media` / `join` /
+     * `reason` fields. See `messaging::call::parse_call_event` on
+     * the Rust side for the typed input.
+     */
+    set_on_call(cb: Function): void;
     set_on_connected(cb: Function): void;
     set_on_disconnected(cb: Function): void;
     set_on_error(cb: Function): void;
@@ -196,6 +253,17 @@ export class WaddleClient {
      * [`Self::pin_message`].
      */
     unpin_message(room_jid: string, target_stanza_id: string): Promise<any>;
+    /**
+     * Update our MUC presence in `room_jid/nick` with (or without)
+     * the `<call xmlns='urn:waddle:muc-call:0'/>` extension. Sent as
+     * a fresh available-presence so other occupants discover that
+     * we've joined or left the room's group call without polling.
+     *
+     * `active=true` advertises us as a current participant; `false`
+     * emits the extension with `state='inactive'` so legacy
+     * presence-replay buffers eventually drop the prior `active`.
+     */
+    update_muc_call_presence(room_jid: string, nick: string, active: boolean, call_id: string): Promise<any>;
     /**
      * Fetch the latest calendar events from the community events
      * node. Returns ALL items including past events; chat-side

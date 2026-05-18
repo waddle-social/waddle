@@ -335,8 +335,15 @@ function djb2FallbackHue(input: string): number {
 
 /** Install the spec-conformant hue implementation. Called at app boot
  * once the wasm module is loaded; subsequent `consistentColor` calls
- * return XEP-0392 values. */
+ * return XEP-0392 values.
+ *
+ * Refuses non-function inputs so a stale wasm bundle that lacks
+ * `xep0392_consistent_hue` (e.g. when wasm-pack's named re-export list
+ * has fallen behind the Rust source) degrades to the DJB2 fallback
+ * instead of replacing `hueImpl` with `undefined` and crashing every
+ * `AppAvatar` render with "T is not a function". */
 export function setConsistentColorBackend(fn: (input: string) => number): void {
+  if (typeof fn !== "function") return;
   hueImpl = fn;
 }
 
