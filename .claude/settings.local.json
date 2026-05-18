@@ -25,7 +25,8 @@
       "Bash(cargo build:*)",
       "Bash(gh issue *)",
       "Bash(git fetch *)",
-      "Bash(git push *)"
+      "Bash(git push *)",
+      "mcp__44250d65-44ab-4757-890c-015051bb22e5__exec"
     ]
   }
 }
