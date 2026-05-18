@@ -2,6 +2,7 @@
 import { computed, type Component } from "vue";
 import { Hash, Menu, MessageCircle, MessagesSquare, Pin, Search, Settings, Users } from "lucide-vue-next";
 import AppAvatar from "@/components/ui/AppAvatar.vue";
+import CallButton from "@/components/calls/CallButton.vue";
 import type { ChannelSummary, SpaceSummary } from "@/lib/chat-types";
 import type { ConnectionNoticeCopy } from "@/lib/connection-notice";
 import type { OccupantPresence } from "@/lib/xmpp-client";
@@ -231,6 +232,10 @@ const memberButtonCopy = computed(() => {
         >
           <Settings class="w-3.5 h-3.5" />
         </button>
+        <CallButton
+          v-if="dmPeer?.peerJid"
+          :peer-bare-jid="dmPeer.peerJid"
+        />
         <!-- Live presence stack — desktop only. The mobile header is
              already crowded with hamburger + channel chip + search/pin/
              settings + the user's own profile avatar at the very right;

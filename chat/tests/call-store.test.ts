@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   $callState,
   applyCallEvent,
+  beginOutgoingCall,
   clearCallState,
   reduceCallState,
 } from "../src/lib/calls/call-store";
@@ -131,5 +132,83 @@ describe("call-store reducer", () => {
     });
     clearCallState();
     expect($callState.get()).toEqual({ phase: "idle" });
+  });
+
+  test("beginOutgoingCall transitions to the outgoing phase", () => {
+    clearCallState();
+    beginOutgoingCall("bob@waddle.test", "c9", audioVideo);
+    expect($callState.get()).toEqual({
+      phase: "outgoing",
+      to: "bob@waddle.test",
+      sid: "c9",
+      media: audioVideo,
+    });
+    clearCallState();
+  });
+
+  test("proceed leaves outgoing intact (side-effect emits session-initiate)", () => {
+    const current = {
+      phase: "outgoing" as const,
+      to: "bob@waddle.test",
+      sid: "c9",
+      media: audioVideo,
+    };
+    const next = reduceCallState(current, {
+      kind: "proceed",
+      from: "bob@waddle.test/desktop",
+      sid: "c9",
+    });
+    expect(next).toBe(current);
+  });
+
+  test("session-accept transitions outgoing to active", () => {
+    const next = reduceCallState(
+      {
+        phase: "outgoing",
+        to: "bob@waddle.test",
+        sid: "c9",
+        media: audioVideo,
+      },
+      {
+        kind: "session-accept",
+        from: "bob@waddle.test/desktop",
+        sid: "c9",
+        media: audioVideo,
+        join,
+      },
+    );
+    expect(next).toEqual({
+      phase: "active",
+      peer: "bob@waddle.test/desktop",
+      sid: "c9",
+      media: audioVideo,
+      join,
+    });
+  });
+
+  test("reject from outgoing ends the call with reject reason", () => {
+    const next = reduceCallState(
+      {
+        phase: "outgoing",
+        to: "bob@waddle.test",
+        sid: "c9",
+        media: audioVideo,
+      },
+      { kind: "reject", from: "bob@waddle.test", sid: "c9" },
+    );
+    expect(next).toEqual({ phase: "ended", sid: "c9", reason: "reject" });
+  });
+
+  test("retract from outgoing ends the call with retract reason", () => {
+    const next = reduceCallState(
+      {
+        phase: "outgoing",
+        to: "bob@waddle.test",
+        sid: "c9",
+        media: audioVideo,
+      },
+      { kind: "retract", from: "alice@waddle.test", sid: "c9" },
+    );
+    expect(next).toEqual({ phase: "ended", sid: "c9", reason: "retract" });
   });
 });

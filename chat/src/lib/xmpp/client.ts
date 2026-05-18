@@ -10,7 +10,9 @@ import {
   removeQueuedMessage,
   type PersistedQueuedDmMessage,
 } from "../outbound-queue-store";
-import { applyCallEvent } from "@/lib/calls/call-store";
+import { $callState, applyCallEvent } from "@/lib/calls/call-store";
+import { handleCallEventSideEffect } from "@/lib/calls/call-effects";
+import type { CallWireSender } from "@/lib/calls/outbound";
 import type { CallEvent } from "@/lib/calls/types";
 import { barePeerJid, jidDomain, roomBareJidFor } from "./jid";
 import type {
@@ -380,6 +382,13 @@ export class BrowserXmppClient {
   readonly catchup = new ReconnectCatchup();
 
   constructor(session: WaddleSession) { this.session = session; }
+
+  /** Full JID (`bare/resource`) for this session. Needed by the
+   * call layer when constructing Jingle session-initiate / accept,
+   * which must address the peer's full JID and stamp our own. */
+  get fullJid(): string { return `${this.session.jid}/${this.resource}`; }
+  /** Bare JID for this session. */
+  get bareJid(): string { return this.session.jid; }
 
   setMessageHandler(h: (message: LiveRoomMessage) => void) { this.messageHandler = h; }
   /** #414: receive `<pin-event/>` system messages from a room. */
@@ -1761,7 +1770,11 @@ export class BrowserXmppClient {
     xmpp.set_on_mds_displayed?.((entry: WasmMdsDisplayedEntry) => {
       this.mdsDisplayedHandler?.({ chatId: entry.chat_id, stanzaId: entry.stanza_id, stanzaIdBy: entry.stanza_id_by });
     });
-    xmpp.set_on_call?.((event: CallEvent) => applyCallEvent(event));
+    xmpp.set_on_call?.((event: CallEvent) => {
+      const prev = $callState.get();
+      applyCallEvent(event);
+      void handleCallEventSideEffect(event, prev, xmpp as unknown as CallWireSender, this.fullJid);
+    });
     xmpp.on?.("session:started", () => { xmpp.disableKeepAlive?.(); xmpp.enableKeepAlive?.({ interval: 30, timeout: 15 }); this.handleSessionReady(xmpp, { type: "fresh" }); });
     xmpp.on?.("stream:management:resumed", () => this.handleSessionReady(xmpp, { type: "resumed" }));
     xmpp.on?.("disconnected", (error?: Error) => { xmpp.disableKeepAlive?.(); this.handleDisconnected(xmpp, error); });

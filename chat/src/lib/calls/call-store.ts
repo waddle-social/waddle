@@ -1,5 +1,5 @@
 import { atom } from "nanostores";
-import type { CallEvent, CallState } from "./types";
+import type { CallEvent, CallMedia, CallState } from "./types";
 
 /**
  * Single-slot call lifecycle store. Updated by `applyCallEvent`
@@ -33,9 +33,11 @@ export function reduceCallState(current: CallState, event: CallEvent): CallState
       }
       return current;
     case "proceed":
-      // Our outbound propose was accepted; the next stanza will be
-      // session-initiate. UI stays in `outgoing` until the
-      // SessionInitiate flow lands.
+      // Our outbound propose was accepted; the next stanza we send
+      // is session-initiate. The reducer keeps the call in
+      // `outgoing` until session-accept lands; the side-effect
+      // handler in `call-effects.ts` reads `proceed.from` (the
+      // responder's full JID) and emits the session-initiate stanza.
       return current;
     case "reject":
     case "retract":
@@ -77,4 +79,14 @@ export function applyCallEvent(event: CallEvent): void {
  */
 export function clearCallState(): void {
   $callState.set({ phase: "idle" });
+}
+
+/**
+ * Originator-side transition: snapshot the outbound `<propose/>`
+ * intent into the store so the UI can render the outgoing-ring
+ * overlay. The wire send is the caller's responsibility — keep
+ * the store side-effect free for clean unit testing.
+ */
+export function beginOutgoingCall(to: string, sid: string, media: CallMedia): void {
+  $callState.set({ phase: "outgoing", to, sid, media });
 }
