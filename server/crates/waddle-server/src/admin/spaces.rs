@@ -289,9 +289,9 @@ pub async fn register(registry: &waddle_xmpp::commands::CommandRegistry, app_sta
 /// compact `Result` without tripping `clippy::result_large_err`.
 type AdminErr = Box<CommandResult>;
 
-fn caller_or_forbidden(ctx: &CommandContext, state: &AppState) -> Result<BareJid, AdminErr> {
+async fn caller_or_forbidden(ctx: &CommandContext, state: &AppState) -> Result<BareJid, AdminErr> {
     let bare = ctx.from.to_bare();
-    if !is_community_owner(state, &bare) {
+    if !is_community_owner(state, &bare).await {
         return Err(Box::new(CommandResult::Error(XmppError::forbidden(Some(
             "Admin commands require the community owner role".to_string(),
         )))));
@@ -314,7 +314,7 @@ fn map_metadata_err(error: SpacesMetadataError) -> AdminErr {
 }
 
 async fn handle_list(ctx: CommandContext, state: Arc<AppState>) -> CommandResult {
-    if let Err(forbidden) = caller_or_forbidden(&ctx, &state) {
+    if let Err(forbidden) = caller_or_forbidden(&ctx, &state).await {
         return *forbidden;
     }
     let args = match parse_list_args(ctx.command.form.as_ref()) {
@@ -331,7 +331,7 @@ async fn handle_list(ctx: CommandContext, state: Arc<AppState>) -> CommandResult
 }
 
 async fn handle_create(ctx: CommandContext, state: Arc<AppState>) -> CommandResult {
-    if let Err(forbidden) = caller_or_forbidden(&ctx, &state) {
+    if let Err(forbidden) = caller_or_forbidden(&ctx, &state).await {
         return *forbidden;
     }
     let args = match parse_create_args(ctx.command.form.as_ref()) {
@@ -348,7 +348,7 @@ async fn handle_create(ctx: CommandContext, state: Arc<AppState>) -> CommandResu
 }
 
 async fn handle_update(ctx: CommandContext, state: Arc<AppState>) -> CommandResult {
-    if let Err(forbidden) = caller_or_forbidden(&ctx, &state) {
+    if let Err(forbidden) = caller_or_forbidden(&ctx, &state).await {
         return *forbidden;
     }
     let args = match parse_update_args(ctx.command.form.as_ref()) {
@@ -365,7 +365,7 @@ async fn handle_update(ctx: CommandContext, state: Arc<AppState>) -> CommandResu
 }
 
 async fn handle_delete(ctx: CommandContext, state: Arc<AppState>) -> CommandResult {
-    if let Err(forbidden) = caller_or_forbidden(&ctx, &state) {
+    if let Err(forbidden) = caller_or_forbidden(&ctx, &state).await {
         return *forbidden;
     }
     let args = match parse_delete_args(ctx.command.form.as_ref()) {
@@ -382,7 +382,7 @@ async fn handle_delete(ctx: CommandContext, state: Arc<AppState>) -> CommandResu
 }
 
 async fn handle_members(ctx: CommandContext, state: Arc<AppState>) -> CommandResult {
-    if let Err(forbidden) = caller_or_forbidden(&ctx, &state) {
+    if let Err(forbidden) = caller_or_forbidden(&ctx, &state).await {
         return *forbidden;
     }
     let args = match parse_members_args(ctx.command.form.as_ref()) {
@@ -399,7 +399,7 @@ async fn handle_members(ctx: CommandContext, state: Arc<AppState>) -> CommandRes
 }
 
 async fn handle_set_role(ctx: CommandContext, state: Arc<AppState>) -> CommandResult {
-    if let Err(forbidden) = caller_or_forbidden(&ctx, &state) {
+    if let Err(forbidden) = caller_or_forbidden(&ctx, &state).await {
         return *forbidden;
     }
     let args = match parse_set_role_args(ctx.command.form.as_ref()) {
