@@ -3,6 +3,23 @@ export {
   RoomMemberListUnavailableError,
 } from "./client";
 export type { AdminUserEntry, AdminUsersPage } from "./client";
+export type {
+  WasmAdminChannelAffiliationEntry,
+  WasmAdminChannelListEntry,
+  WasmAdminChannelOccupantEntry,
+  WasmAdminChannelRef,
+  WasmAdminChannelsAffiliationsResult,
+  WasmAdminChannelsKickResult,
+  WasmAdminChannelsListResult,
+  WasmAdminChannelsOccupantsResult,
+  WasmAdminChannelsSetAffiliationResult,
+  WasmAdminSpaceListEntry,
+  WasmAdminSpaceMemberEntry,
+  WasmAdminSpaceRef,
+  WasmAdminSpacesListResult,
+  WasmAdminSpacesMembersResult,
+  WasmAdminSpacesSetRoleResult,
+} from "./wasm-types";
 export {
   barePeerJid,
   jidDomain,
