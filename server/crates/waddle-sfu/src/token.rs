@@ -71,6 +71,17 @@ impl std::fmt::Debug for Jwt {
     }
 }
 
+/// A `(jti, exp)` pair the SFU records for an issued join token.
+/// Used by [`crate::LiveKitSfu`] to bound the revocation registry:
+/// the `exp` lets the SFU drop revoked entries once the token
+/// would have lapsed anyway, since a token past its `exp` is
+/// unusable regardless of whether its jti is still remembered.
+#[derive(Debug, Clone)]
+pub(crate) struct IssuedJti {
+    pub jti: Jti,
+    pub exp: DateTime<Utc>,
+}
+
 /// Fully-issued join credential. Returned by
 /// [`crate::SfuService::issue_join_token`] and used to populate the
 /// outbound `urn:waddle:transports:livekit:0` transport.
