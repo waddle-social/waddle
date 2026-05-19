@@ -183,6 +183,7 @@ async fn create_test_websocket_state_with_extension_manager(
                     avatar_source_locks: Arc::new(crate::profile::AvatarLockMap::new()),
                     profile_publish_tracker: tokio_util::task::TaskTracker::new(),
                     pep_feed_bridge: Arc::new(crate::pep_feed_bridge::PepFeedBridge::new()),
+                    sfu: None,
                 },
                 occupant_id_secret: OccupantIdSecret::new(
                     b"test-occupant-id-secret-32-bytes-long".to_vec(),

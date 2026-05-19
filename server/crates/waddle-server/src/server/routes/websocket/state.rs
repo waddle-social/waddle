@@ -141,6 +141,14 @@ pub struct ProtocolServices {
     /// Feed pane surfaces user activity automatically. Holds per-
     /// (user, kind) throttle state.
     pub pep_feed_bridge: Arc<crate::pep_feed_bridge::PepFeedBridge>,
+    /// LiveKit SFU bridge — `Some` iff `LIVEKIT_*` env vars are set
+    /// and `register_call_handlers` was invoked at startup. The
+    /// WebSocket cleanup paths call
+    /// [`waddle_sfu::SfuService::unregister_call_participant`] when a
+    /// session leaves a MUC so a participant's SFU presence doesn't
+    /// outlive their XMPP presence (graceful unavailable, tab close,
+    /// SM-expiry — all go through `cleanup_muc_presence`).
+    pub sfu: Option<Arc<dyn waddle_sfu::SfuService>>,
 }
 
 /// Per-connection mutable state for a single WebSocket XMPP transport.

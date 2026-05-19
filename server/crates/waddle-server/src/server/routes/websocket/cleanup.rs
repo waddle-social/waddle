@@ -258,12 +258,24 @@ async fn cleanup_muc_presence(state: &WebSocketState, jid: &FullJid) {
         let Some(room_actor) = get_room_actor(state, &room_jid).await else {
             continue;
         };
-        match room_actor
+        let leave_result = room_actor
             .ask(LeaveByRealJid {
                 sender_jid: jid.clone(),
             })
-            .await
-        {
+            .await;
+        // SFU teardown runs *after* the room actor has dropped the
+        // session so the MUC's view of the world is the leading edge
+        // (the membership gate immediately reports the user as a
+        // non-occupant) and the SFU's view is the trailing edge —
+        // matches `handle_muc_leave`'s "XMPP says they left, then
+        // notify SFU" semantics. Tab close / SM-expiry: the client
+        // never sends a graceful `request-leave` on
+        // `urn:waddle:muc-call:0`, so without this call the SFU
+        // would otherwise hold the participant slot until its own
+        // (long) timeout. Idempotent on the SFU side — calling for
+        // rooms where the user was never in a call is a no-op.
+        super::muc_call_sfu::unregister_participant_from_room(state, &room_jid, jid);
+        match leave_result {
             Ok(Some(outcome)) => {
                 debug!(
                     room = %room_jid,

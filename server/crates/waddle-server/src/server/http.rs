@@ -348,6 +348,15 @@ async fn create_websocket_state(
     let mut stanza_dispatcher = waddle_xmpp::protocol::StanzaDispatcher::new();
     waddle_xmpp::protocol::handlers::register_default_handlers(&mut stanza_dispatcher);
     waddle_xmpp::protocol::handlers::register_default_message_handlers(&mut stanza_dispatcher);
+    // Holds the `SfuService` after `register_call_handlers` so the
+    // WebSocket layer can also call `unregister_call_participant`
+    // when a session leaves a MUC (graceful unavailable or
+    // disconnect/SM-expiry cleanup). Without this the SFU
+    // participant lingers until LiveKit times them out — a stolen
+    // JWT could replay in the meantime, and the channel UI keeps
+    // showing the user as "in call" until the SFU notices on its
+    // own.
+    let mut sfu_service: Option<std::sync::Arc<dyn waddle_sfu::SfuService>> = None;
     match waddle_sfu::SfuConfig::from_env() {
         Ok(Some(sfu_config)) => {
             let turn_tls_port = sfu_config.turn_tls_port;
@@ -356,10 +365,11 @@ async fn create_websocket_state(
                 std::sync::Arc::new(waddle_sfu::LiveKitSfu::new(sfu_config));
             waddle_xmpp::protocol::handlers::register_call_handlers(
                 &mut stanza_dispatcher,
-                sfu,
+                Arc::clone(&sfu),
                 turn_tls_port,
                 turn_udp_port,
             );
+            sfu_service = Some(sfu);
             tracing::info!(
                 "LiveKit SFU configured; XEP-0166 Jingle + XEP-0215 extdisco handlers registered"
             );
@@ -493,6 +503,7 @@ async fn create_websocket_state(
                 avatar_source_locks: Arc::new(crate::profile::AvatarLockMap::new()),
                 profile_publish_tracker: tokio_util::task::TaskTracker::new(),
                 pep_feed_bridge: Arc::new(crate::pep_feed_bridge::PepFeedBridge::new()),
+                sfu: sfu_service,
             },
             occupant_id_secret: server_config.occupant_id_secret.clone(),
             provider_ingress,

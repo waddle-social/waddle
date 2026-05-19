@@ -80,6 +80,7 @@ mod extension_forms;
 mod last_activity;
 mod misc;
 mod muc_admin;
+mod muc_call_gate;
 mod muc_owner_config;
 mod muc_owner_moderation;
 mod permissions;
