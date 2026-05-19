@@ -121,6 +121,61 @@ impl PubSubStorage for DatabasePubSubStorage {
         // `list_deliverable_subscribers`. This prevents outcast-filter bypass when a
         // subscription arrives with a resource but the affiliation is stored bare.
         let subscriber_bare = subscriber.to_bare();
+        let subscriber_bare_str = subscriber_bare.to_string();
+
+        // Idempotency + lazy dedupe (XEP-0060 §6.1.4 allows reusing an
+        // existing subscription). Without this guard, every reconnect
+        // re-subscribes and the chat-side bind-time `<subscribe/>` for
+        // nodes like `urn:xmpp:mds:displayed:0` inserts a fresh row
+        // each time. The fanout query then returns hundreds of rows
+        // for the same bare subscriber, blowing the recipient's
+        // outbound channel and dropping most stanzas — observed in
+        // prod with `intended=490 dropped_full=289` for a single
+        // user/node pair. Reusing the oldest existing row turns
+        // re-subscribe into a no-op AND, when we find leftover
+        // duplicates from before this fix, deletes them so the
+        // backlog drains lazily as users reconnect.
+        let mut rows = self
+            .query(
+                "SELECT subid, subscriber_jid, state, created_at_ms \
+                 FROM pubsub_subscriptions \
+                 WHERE owner_jid = ? AND node_name = ? AND subscriber_jid = ? \
+                 ORDER BY created_at_ms ASC, subid ASC",
+                crate::db_params![owner.to_string(), node_name, subscriber_bare_str.clone(),],
+            )
+            .await?;
+        let mut existing: Vec<Subscription> = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| XmppError::internal(e.to_string()))?
+        {
+            existing.push(decode_subscription(&row)?);
+        }
+        if let Some(keep) = existing.first().cloned() {
+            if existing.len() > 1 {
+                self.execute(
+                    "DELETE FROM pubsub_subscriptions \
+                     WHERE owner_jid = ? AND node_name = ? AND subscriber_jid = ? AND subid <> ?",
+                    crate::db_params![
+                        owner.to_string(),
+                        node_name,
+                        subscriber_bare_str.clone(),
+                        keep.subid.as_str().to_string(),
+                    ],
+                )
+                .await?;
+                tracing::warn!(
+                    owner = %owner,
+                    node = node_name,
+                    subscriber = %subscriber_bare,
+                    removed = existing.len() - 1,
+                    "cleaned up duplicate pubsub subscriptions (legacy leak from pre-idempotent subscribe path)"
+                );
+            }
+            return Ok(keep);
+        }
+
         let subid = SubId::generate();
         let now = crate::time::now_ms();
         self.execute(
@@ -132,7 +187,7 @@ impl PubSubStorage for DatabasePubSubStorage {
                 owner.to_string(),
                 node_name,
                 subid.as_str().to_string(),
-                subscriber_bare.to_string(),
+                subscriber_bare_str,
                 now,
             ],
         )

@@ -3,6 +3,7 @@ use super::{
     interpret_loop::build_interpret_deps, replay::drive_interpret_loop, send::send_ws_message,
     state::WsConnState, stream_management::is_countable_stanza, transport_xml::stanza_to_xml,
 };
+use waddle_xmpp::stream_management::SmRequest;
 
 pub(super) async fn handle_outbound_stanza<S, E>(
     sender: &mut S,
@@ -22,13 +23,15 @@ where
             let xml = stanza_to_xml(&outbound_stanza.stanza);
             let pending_row_id = outbound_stanza.pending_row_id.clone();
             let pending_row_receipt_at = outbound_stanza.pending_row_original_receipt_at;
+            let mut request_ack_after = false;
             if conn.sm_state.enabled && is_countable_stanza(&xml) {
-                match pending_row_receipt_at {
+                let record_result = match pending_row_receipt_at {
                     Some(receipt_at) => conn
                         .sm_state
                         .record_outbound_with_receipt_at(xml.clone(), receipt_at),
                     None => conn.sm_state.record_outbound(xml.clone()),
-                }
+                };
+                request_ack_after = record_result.request_ack;
                 // Locked Q7b SM-ack lifecycle: bind the just-assigned outbound
                 // counter back onto pending_delivery flush rows before the next
                 // queued SM ack can range-delete them.
@@ -87,7 +90,25 @@ where
                     }
                 }
             }
-            send_ws_message(sender, Message::Text(xml), "Failed to send outbound stanza").await
+            let sent =
+                send_ws_message(sender, Message::Text(xml), "Failed to send outbound stanza").await;
+            // SM cadence: when `record_outbound` flagged the threshold,
+            // follow the just-written stanza with an `<r/>` so the
+            // client knows to send `<a h='N'/>`. The wasm client never
+            // acks proactively, so without this nudge the unacked queue
+            // grows unbounded until eviction permanently breaks resume.
+            if sent
+                && request_ack_after
+                && !send_ws_message(
+                    sender,
+                    Message::Text(SmRequest::to_xml()),
+                    "Failed to send SM <r/> request",
+                )
+                .await
+            {
+                return false;
+            }
+            sent
         }
         DeliveryKind::PeerStanza => {
             // #229 PR11: peer-routed stanza. Run the recipient pass before
@@ -109,9 +130,11 @@ where
             // Always best-effort flush the accumulated frames first, even if
             // `close=true`, so a final error stanza or stream-close frame is
             // visible before transport teardown.
+            let mut request_ack_after = false;
             for xml in frames {
                 if conn.sm_state.enabled && is_countable_stanza(&xml) {
-                    conn.sm_state.record_outbound(xml.clone());
+                    let result = conn.sm_state.record_outbound(xml.clone());
+                    request_ack_after |= result.request_ack;
                 }
                 if !send_ws_message(
                     sender,
@@ -122,6 +145,21 @@ where
                 {
                     return false;
                 }
+            }
+            // Emit one `<r/>` per batch once threshold has been
+            // reached — see DirectFrame branch comment above. Coalescing
+            // per-batch (rather than per-frame) keeps wire traffic tight
+            // when the recipient pass produces many countable stanzas at
+            // once (carbons + receipts + archive side-effects).
+            if request_ack_after
+                && !send_ws_message(
+                    sender,
+                    Message::Text(SmRequest::to_xml()),
+                    "Failed to send SM <r/> request",
+                )
+                .await
+            {
+                return false;
             }
             if close {
                 info!("PeerStanza dispatch requested transport close");

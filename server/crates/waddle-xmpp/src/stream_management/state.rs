@@ -41,6 +41,16 @@ pub struct StreamManagementState {
     pub outbound_count: u32,
     /// Last acknowledged outbound stanza count (from client's <a/>)
     pub last_acked: u32,
+    /// `outbound_count` at the moment we most recently emitted an
+    /// `<r/>` ack request. Drives the per-N cadence in
+    /// [`Self::record_outbound_with_receipt_at`]: the next request
+    /// fires once `outbound_count - last_request_outbound_count >=
+    /// ack_threshold`. Without this gate the SM unacked queue grows
+    /// monotonically, hits the 1000-cap, starts evicting the oldest
+    /// stanzas, and every future resume from the stream is rejected
+    /// because `replay_gap_through` permanently outruns the client's
+    /// last-acked `h`.
+    last_request_outbound_count: u32,
     /// Highest evicted outbound sequence not yet covered by a client ack.
     replay_gap_through: Option<u32>,
     /// Maximum resumption timeout in seconds
@@ -51,6 +61,23 @@ pub struct StreamManagementState {
     ack_threshold: u32,
     /// When this SM state was created
     created_at: Instant,
+}
+
+/// Side-channel signal returned from [`StreamManagementState::record_outbound`]
+/// telling the caller whether to follow the just-written stanza with an
+/// `<r/>` to elicit an SM `<a h='N'/>` ack from the client.
+///
+/// `#[must_use]` so a refactor that drops the return value gets caught at
+/// compile time — silently swallowing the request would re-introduce the
+/// monotonically-growing unacked-queue bug.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[must_use = "the request_ack signal drives the SM <r/> cadence; ignoring it \
+              lets the unacked queue grow unbounded"]
+pub struct RecordOutboundResult {
+    /// `true` once the count of stanzas since the last `<r/>` reached
+    /// `ack_threshold`. Callers MUST emit an `<r/>` on the same
+    /// wire after the stanza so the client knows to send `<a/>`.
+    pub request_ack: bool,
 }
 
 impl Default for StreamManagementState {
@@ -69,6 +96,7 @@ impl StreamManagementState {
             inbound_count: 0,
             outbound_count: 0,
             last_acked: 0,
+            last_request_outbound_count: 0,
             replay_gap_through: None,
             max_resume_time: None,
             unacked_queue: UnackedQueue::new(DEFAULT_MAX_UNACKED_QUEUE_SIZE),
@@ -86,6 +114,7 @@ impl StreamManagementState {
             inbound_count: 0,
             outbound_count: 0,
             last_acked: 0,
+            last_request_outbound_count: 0,
             replay_gap_through: None,
             max_resume_time: None,
             unacked_queue: UnackedQueue::new(max_queue_size),
@@ -123,8 +152,8 @@ impl StreamManagementState {
     /// means a subsequent `<resume/>` from a client whose `h` is older
     /// than the retained window must fail instead of returning a
     /// misleading `<resumed/>` with missing stanzas.
-    pub fn record_outbound(&mut self, stanza_xml: String) {
-        self.record_outbound_with_receipt_at(stanza_xml, chrono::Utc::now());
+    pub fn record_outbound(&mut self, stanza_xml: String) -> RecordOutboundResult {
+        self.record_outbound_with_receipt_at(stanza_xml, chrono::Utc::now())
     }
 
     /// Record an outbound stanza with an explicit `original_receipt_at`.
@@ -141,7 +170,7 @@ impl StreamManagementState {
         &mut self,
         stanza_xml: String,
         original_receipt_at: chrono::DateTime<chrono::Utc>,
-    ) {
+    ) -> RecordOutboundResult {
         self.outbound_count = self.outbound_count.wrapping_add(1);
         match self.unacked_queue.push_with_receipt_at(
             self.outbound_count,
@@ -160,6 +189,22 @@ impl StreamManagementState {
                 );
             }
         }
+        // Cadence: once `ack_threshold` stanzas have flowed since the
+        // last `<r/>` (or the stream was enabled / resumed), tell the
+        // caller to follow this stanza with an `<r/>`. The wasm
+        // client only sends `<a h='N'/>` in response to an explicit
+        // request, so without this signal the unacked queue grows
+        // unbounded and eventually starts evicting — breaking SM
+        // resume forever for that stream.
+        let request_ack = self.enabled
+            && self
+                .outbound_count
+                .wrapping_sub(self.last_request_outbound_count)
+                >= self.ack_threshold;
+        if request_ack {
+            self.last_request_outbound_count = self.outbound_count;
+        }
+        RecordOutboundResult { request_ack }
     }
 
     /// Update the last acknowledged count from a client ack.
@@ -184,18 +229,6 @@ impl StreamManagementState {
     /// Get the number of unacknowledged outbound stanzas.
     pub fn unacked_count(&self) -> u32 {
         self.outbound_count.wrapping_sub(self.last_acked)
-    }
-
-    /// Check if we should request an ack from the client.
-    ///
-    /// Returns true if there are many unacked stanzas.
-    pub fn should_request_ack(&self, threshold: u32) -> bool {
-        self.enabled && self.unacked_count() >= threshold
-    }
-
-    /// Check if we should request an ack using the configured threshold.
-    pub fn should_request_ack_auto(&self) -> bool {
-        self.should_request_ack(self.ack_threshold)
     }
 
     /// Get stanzas that need to be resent after resumption.
@@ -284,6 +317,12 @@ impl StreamManagementState {
         self.inbound_count = session.inbound_count;
         self.outbound_count = session.outbound_count;
         self.last_acked = session.last_acked;
+        // Resume just replayed every still-unacked stanza on the new
+        // wire. The next `<r/>` cadence window starts fresh from the
+        // current outbound_count so the very next post-resume stanza
+        // doesn't immediately re-request — give it ack_threshold of
+        // headroom like a freshly-enabled session would have.
+        self.last_request_outbound_count = session.outbound_count;
         self.replay_gap_through = session.replay_gap_through;
         self.max_resume_time = session.max_resume_time;
 
@@ -321,9 +360,9 @@ mod tests {
         let mut state = StreamManagementState::new();
         state.enable("test-id".to_string(), true, Some(300));
 
-        state.record_outbound("<message id='1'/>".to_string());
-        state.record_outbound("<message id='2'/>".to_string());
-        state.record_outbound("<message id='3'/>".to_string());
+        let _ = state.record_outbound("<message id='1'/>".to_string());
+        let _ = state.record_outbound("<message id='2'/>".to_string());
+        let _ = state.record_outbound("<message id='3'/>".to_string());
 
         assert_eq!(state.outbound_count, 3);
         assert_eq!(state.queue_len(), 3);
@@ -359,13 +398,13 @@ mod tests {
         let mut state = StreamManagementState::with_config(3, 5);
         state.enable("tiny-cap".to_string(), true, Some(300));
 
-        state.record_outbound("<message id='1'/>".to_string());
-        state.record_outbound("<message id='2'/>".to_string());
-        state.record_outbound("<message id='3'/>".to_string());
+        let _ = state.record_outbound("<message id='1'/>".to_string());
+        let _ = state.record_outbound("<message id='2'/>".to_string());
+        let _ = state.record_outbound("<message id='3'/>".to_string());
         assert_eq!(state.queue_len(), 3);
 
         // 4th push evicts seq=1
-        state.record_outbound("<message id='4'/>".to_string());
+        let _ = state.record_outbound("<message id='4'/>".to_string());
         assert_eq!(state.queue_len(), 3);
 
         let after_render = prometheus::render_metrics();
@@ -396,10 +435,10 @@ mod tests {
         let mut state = StreamManagementState::with_config(3, 5);
         state.enable("tiny-cap".to_string(), true, Some(300));
 
-        state.record_outbound("<message id='1'/>".to_string());
-        state.record_outbound("<message id='2'/>".to_string());
-        state.record_outbound("<message id='3'/>".to_string());
-        state.record_outbound("<message id='4'/>".to_string());
+        let _ = state.record_outbound("<message id='1'/>".to_string());
+        let _ = state.record_outbound("<message id='2'/>".to_string());
+        let _ = state.record_outbound("<message id='3'/>".to_string());
+        let _ = state.record_outbound("<message id='4'/>".to_string());
 
         assert_eq!(state.replay_gap_through(), Some(1));
         assert!(
@@ -481,6 +520,93 @@ mod tests {
         assert!(
             detached_on.carbons_enabled,
             "carbons_enabled=true must round-trip so resume preserves opt-in"
+        );
+    }
+
+    /// XEP-0198 §4 servers SHOULD request `<a/>` periodically; without
+    /// it the wasm client (which only acks in response to `<r/>`,
+    /// `runtime/sm.rs`) lets the unacked queue grow unbounded until
+    /// it hits the 1000-cap and starts evicting — which permanently
+    /// breaks every future resume from the stream. The cadence below
+    /// guarantees `<r/>` is requested on a tight schedule.
+    #[test]
+    fn record_outbound_requests_ack_at_threshold_and_only_once_per_window() {
+        // ack_threshold=3 keeps the assertions short while still
+        // proving the "request once per N, not on every push" rule.
+        let mut state = StreamManagementState::with_config(1000, 3);
+        state.enable("cadence".to_string(), true, Some(300));
+
+        // Push 1, 2 — below threshold, no request yet.
+        assert!(!state.record_outbound("<m id='1'/>".to_string()).request_ack);
+        assert!(!state.record_outbound("<m id='2'/>".to_string()).request_ack);
+        // Push 3 — threshold met, request fires.
+        assert!(state.record_outbound("<m id='3'/>".to_string()).request_ack);
+        // Push 4, 5 — request_ack must NOT keep firing on every
+        // subsequent stanza; that would spam the client with one
+        // `<r/>` per stanza.
+        assert!(!state.record_outbound("<m id='4'/>".to_string()).request_ack);
+        assert!(!state.record_outbound("<m id='5'/>".to_string()).request_ack);
+        // Push 6 — three more since the last request, next request fires.
+        assert!(state.record_outbound("<m id='6'/>".to_string()).request_ack);
+    }
+
+    #[test]
+    fn record_outbound_does_not_request_ack_when_sm_disabled() {
+        // Without SM enabled there's no `<r/>`/`<a/>` cycle at all —
+        // the cadence signal must stay silent regardless of how many
+        // outbound stanzas accumulate, otherwise the websocket layer
+        // would write `<r/>` onto a stream the client isn't tracking.
+        let mut state = StreamManagementState::with_config(1000, 1);
+        // NOTE: `enable` deliberately NOT called.
+
+        let result = state.record_outbound("<m id='1'/>".to_string());
+        assert!(!result.request_ack);
+    }
+
+    #[test]
+    fn restore_from_session_resets_request_window_so_no_immediate_re_request() {
+        // After XEP-0198 resume the server has just replayed every
+        // un-acked stanza on the new wire. The next post-resume
+        // `<r/>` must wait for `ack_threshold` *new* stanzas — if it
+        // fired on stanza #1 we'd be re-requesting against the same
+        // pre-resume backlog the resume itself already covered.
+        let detached = DetachedSession {
+            stream_id: "previd".to_string(),
+            user_id: "u@h".to_string(),
+            jid: "u@h/r".parse().unwrap(),
+            inbound_count: 10,
+            outbound_count: 42,
+            last_acked: 40,
+            replay_gap_through: None,
+            unacked_stanzas: Vec::new(),
+            max_resume_time: Some(300),
+            detached_at: Instant::now(),
+            carbons_enabled: false,
+            roster_interested: false,
+            presence_available: false,
+            presence_show: None,
+            presence_status: None,
+            presence_priority: 0,
+        };
+        let mut state = StreamManagementState::with_config(1000, 3);
+        state.restore_from_session(&detached);
+
+        // Push 1, 2 — below the post-resume threshold.
+        assert!(
+            !state
+                .record_outbound("<m id='post-1'/>".to_string())
+                .request_ack
+        );
+        assert!(
+            !state
+                .record_outbound("<m id='post-2'/>".to_string())
+                .request_ack
+        );
+        // Push 3 — threshold met against the *post-resume* baseline.
+        assert!(
+            state
+                .record_outbound("<m id='post-3'/>".to_string())
+                .request_ack
         );
     }
 }
