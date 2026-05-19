@@ -10,6 +10,7 @@ import {
   type RemoteTrackPublication,
 } from "livekit-client";
 import type { LiveKitJoin } from "./types";
+import { $devicePrefs } from "./device-prefs";
 
 /**
  * Identifies a remote media track surfaced to the UI. The `kind`
@@ -88,10 +89,19 @@ export class CallEngine {
 
   async connect(join: LiveKitJoin, opts: { audio: boolean; video: boolean }): Promise<void> {
     if (this.room) throw new Error("CallEngine already connected");
+    const prefs = $devicePrefs.get();
     const room = new Room({
       adaptiveStream: true,
       dynacast: true,
-      audioCaptureDefaults: { autoGainControl: true, echoCancellation: true, noiseSuppression: true },
+      audioCaptureDefaults: {
+        autoGainControl: true,
+        echoCancellation: true,
+        noiseSuppression: true,
+        deviceId: prefs.mic ?? undefined,
+      },
+      videoCaptureDefaults: {
+        deviceId: prefs.cam ?? undefined,
+      },
     });
     room.on(RoomEvent.TrackSubscribed, this.handleTrackSubscribed);
     room.on(RoomEvent.TrackUnsubscribed, this.handleTrackUnsubscribed);
@@ -103,6 +113,13 @@ export class CallEngine {
     this.room = room;
     if (opts.audio) await room.localParticipant.setMicrophoneEnabled(true);
     if (opts.video) await room.localParticipant.setCameraEnabled(true);
+    // Re-apply the speaker preference now that the room has remote
+    // audio elements to retarget; the engine ignores it on connect
+    // because no `<audio>` exists yet, but every subsequent
+    // RoomEvent.TrackSubscribed wires through this.applySpeaker.
+    if (prefs.speaker) {
+      await this.applySpeakerDevice(prefs.speaker).catch(() => undefined);
+    }
   }
 
   async setMicEnabled(enabled: boolean): Promise<void> {
@@ -113,6 +130,46 @@ export class CallEngine {
   async setCameraEnabled(enabled: boolean): Promise<void> {
     if (!this.room) return;
     await this.room.localParticipant.setCameraEnabled(enabled);
+  }
+
+  /**
+   * Switch the active microphone device mid-call. LiveKit's
+   * `switchActiveDevice('audioinput', id)` rewrites the existing
+   * publication in place — no re-publish, no Jingle round-trip — so
+   * the change is invisible to the peer.
+   */
+  async setMicDevice(deviceId: string): Promise<void> {
+    if (!this.room) return;
+    await this.room.switchActiveDevice("audioinput", deviceId);
+  }
+
+  /**
+   * Same shape as `setMicDevice` but for the camera device.
+   */
+  async setCameraDevice(deviceId: string): Promise<void> {
+    if (!this.room) return;
+    await this.room.switchActiveDevice("videoinput", deviceId);
+  }
+
+  /**
+   * Route the room's remote audio through a specific output device.
+   * Uses LiveKit's built-in `audiooutput` switch for browsers that
+   * implement `HTMLMediaElement.setSinkId`; falls back to a no-op on
+   * browsers that don't (Firefox today).
+   */
+  async setSpeakerDevice(deviceId: string): Promise<void> {
+    await this.applySpeakerDevice(deviceId);
+  }
+
+  private async applySpeakerDevice(deviceId: string): Promise<void> {
+    if (!this.room) return;
+    if (typeof this.room.switchActiveDevice !== "function") return;
+    try {
+      await this.room.switchActiveDevice("audiooutput", deviceId);
+    } catch {
+      // Browser doesn't support sinkId; the user already saw the
+      // disabled chip in the picker. Swallow silently here.
+    }
   }
 
   async disconnect(): Promise<void> {
