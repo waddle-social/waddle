@@ -278,21 +278,15 @@ async fn enqueue_xep0357_notification_candidate_for_message(
     archive_stanza_id: &waddle_xmpp_core::xep0359::StanzaId,
     original_message: &Message,
 ) -> NotificationCandidateQueueOutcome {
-    // Self-DM short-circuit. The sender_jid landing in the offline queue
-    // for one's own bare JID is message-intrinsic provenance — never a
-    // recipient-state read — so this stays at T0. The headless
-    // OfflineDeliveryHandler should never project a self-DM into the
-    // pending queue today, but we keep the guard as a defense-in-depth
-    // emission no-op so we never insert a self-DM candidate that the T1
-    // evaluator would have to learn to ignore.
-    if sender == recipient {
-        debug!(
-            recipient = %recipient,
-            sender = %sender,
-            "XEP-0357 notification candidate skipped: self-DM is intrinsic to message provenance"
-        );
-        return NotificationCandidateQueueOutcome::Completed;
-    }
+    // Self-DM suppression has moved to T1 (#506 Q3 strict (A): no T0
+    // carve-outs based on routing recipient). The candidate is emitted
+    // unconditionally here; `drain_pending_candidates_into_outbox`
+    // applies the self-DM check by comparing `sender_jid.to_bare()`
+    // against `recipient_bare_jid` — both message-frozen columns
+    // already on the candidate row — and marks the row outboxed
+    // without enqueuing a push job (same pattern as XEP-0191 blocked
+    // and XEP-0492 suppressed).
+    //
     // XEP-0513 mention bit is message-intrinsic and frozen at T0; T1
     // reads it back from the candidate row when running the XEP-0492
     // dispatch gate.

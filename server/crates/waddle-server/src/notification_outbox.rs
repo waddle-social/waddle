@@ -545,10 +545,12 @@ pub enum NotificationOutboxError {
 /// — the kind drives both the XEP-0492 default level and the projection
 /// store lookup.
 ///
-/// Returning `Ok(None)` signals "room not currently live" — when the room
-/// actor is not registered we treat the room as public-by-default rather
-/// than failing closed, mirroring the slice-1 limitation that there is
-/// no durable T1 projection of MUC config yet.
+/// Returning `Ok(None)` signals "room not currently live" — the T1
+/// evaluator treats this as an *unknown* signal (not a public one)
+/// and defers the candidate via the policy-error backoff so the next
+/// drain pass can retry once the actor is reachable. Slice 2 will
+/// replace the live-actor lookup with a durable T1 projection of
+/// MUC config that does not have this hole.
 #[async_trait::async_trait]
 pub trait RoomPolicyStore: Send + Sync {
     async fn room_members_only(
@@ -1356,8 +1358,36 @@ impl NotificationOutboxStore {
         let candidates = self.pending_candidates(batch_size).await?;
         let mut target_cache =
             std::collections::BTreeMap::<BareJid, Vec<NotificationOutboxTarget>>::new();
+        let mut room_policy_cache =
+            std::collections::BTreeMap::<BareJid, RoomPolicyCacheEntry>::new();
         let mut processed = 0usize;
         for candidate in candidates {
+            // Self-DM suppression at T1 (#506 Q3 strict (A): no T0
+            // carve-outs based on routing recipient). Derived
+            // entirely from message-frozen columns already on the
+            // candidate row, so no extra read is required. XEP-0357
+            // §8 "online with active resource" semantics will be
+            // expanded in slice 2; for now self-DM is the only
+            // condition we suppress here, consistent with the
+            // headless `OfflineDeliveryHandler` no longer carving it
+            // out at T0.
+            if candidate.sender_jid().to_bare() == *candidate.recipient_bare_jid() {
+                tracing::info!(
+                    recipient = %candidate.recipient_bare_jid(),
+                    conversation = %candidate.conversation_jid(),
+                    sender = %candidate.sender_jid(),
+                    class = ?candidate.class(),
+                    "self-DM suppressed at T1; marking notification candidate outboxed without job"
+                );
+                let now_ms = crate::time::now_ms();
+                let mut tx = self.db.begin().await?;
+                let claimed = mark_candidate_outboxed_tx(&mut tx, &candidate, now_ms).await?;
+                tx.commit().await?;
+                if claimed > 0 {
+                    processed += 1;
+                }
+                continue;
+            }
             match xep0191_blocks_notification_candidate(&candidate, blocking_storage).await {
                 Ok(true) => {
                     let now_ms = crate::time::now_ms();
@@ -1385,43 +1415,59 @@ impl NotificationOutboxStore {
             // is purely message-derived from T0; combined with the
             // recipient's effective notification level (consulted fresh
             // here against the projection store) the typed reducer
-            // decides publish-or-suppress.
-            let decision =
-                match evaluate_xep0492_at_dispatch(settings_projection, room_policy, &candidate)
-                    .await
-                {
-                    Ok(decision) => decision,
-                    Err(error) => {
-                        tracing::warn!(
-                            recipient = %candidate.recipient_bare_jid(),
-                            conversation = %candidate.conversation_jid(),
-                            %error,
-                            "XEP-0492 notification setting lookup failed at T1; deferring candidate"
-                        );
-                        self.defer_candidate_policy_error(&candidate).await?;
-                        continue;
-                    }
-                };
-            if let crate::notification_settings_projection::PushDispatchDecision::Suppressed {
-                reason,
-            } = decision
+            // decides publish-or-suppress. The room-policy lookup is
+            // cached for the duration of this drain pass so a 100-
+            // member groupchat does not produce 100 actor round-trips.
+            let outcome = match evaluate_xep0492_at_dispatch(
+                settings_projection,
+                room_policy,
+                &candidate,
+                &mut room_policy_cache,
+            )
+            .await
             {
-                tracing::info!(
-                    recipient = %candidate.recipient_bare_jid(),
-                    conversation = %candidate.conversation_jid(),
-                    sender = %candidate.sender_jid(),
-                    class = ?candidate.class(),
-                    %reason,
-                    "XEP-0492 push gate suppressed XEP-0357 notification candidate at T1"
-                );
-                let now_ms = crate::time::now_ms();
-                let mut tx = self.db.begin().await?;
-                let claimed = mark_candidate_outboxed_tx(&mut tx, &candidate, now_ms).await?;
-                tx.commit().await?;
-                if claimed > 0 {
-                    processed += 1;
+                Ok(outcome) => outcome,
+                Err(error) => {
+                    tracing::warn!(
+                        recipient = %candidate.recipient_bare_jid(),
+                        conversation = %candidate.conversation_jid(),
+                        %error,
+                        "XEP-0492 notification setting lookup failed at T1; deferring candidate"
+                    );
+                    self.defer_candidate_policy_error(&candidate).await?;
+                    continue;
                 }
-                continue;
+            };
+            match outcome {
+                T1PushDispatchOutcome::Suppressed { reason } => {
+                    tracing::info!(
+                        recipient = %candidate.recipient_bare_jid(),
+                        conversation = %candidate.conversation_jid(),
+                        sender = %candidate.sender_jid(),
+                        class = ?candidate.class(),
+                        %reason,
+                        "XEP-0492 push gate suppressed XEP-0357 notification candidate at T1"
+                    );
+                    let now_ms = crate::time::now_ms();
+                    let mut tx = self.db.begin().await?;
+                    let claimed = mark_candidate_outboxed_tx(&mut tx, &candidate, now_ms).await?;
+                    tx.commit().await?;
+                    if claimed > 0 {
+                        processed += 1;
+                    }
+                    continue;
+                }
+                T1PushDispatchOutcome::DeferUnknownRoomPolicy => {
+                    tracing::warn!(
+                        recipient = %candidate.recipient_bare_jid(),
+                        conversation = %candidate.conversation_jid(),
+                        class = ?candidate.class(),
+                        "MUC config unavailable at T1; deferring candidate (unknown room policy is not 'public')"
+                    );
+                    self.defer_candidate_policy_error(&candidate).await?;
+                    continue;
+                }
+                T1PushDispatchOutcome::Deliver => {}
             }
             let recipient_key = candidate.recipient_bare_jid.clone();
             if !target_cache.contains_key(&recipient_key) {
@@ -2192,6 +2238,63 @@ impl NotificationOutboxStore {
     }
 }
 
+/// Typed outcome of `evaluate_xep0492_at_dispatch`.
+///
+/// Extends [`crate::notification_settings_projection::PushDispatchDecision`]
+/// with a third state — `DeferUnknownRoomPolicy` — that surfaces the
+/// "room actor not currently live" signal as a retry rather than
+/// silently defaulting to public. Slice 1 has no durable T1
+/// projection of MUC `members_only`; if the actor lookup returns
+/// `Ok(None)` we cannot know whether the room is private (default
+/// `Always` level → `NotifyAll` candidates SHOULD push) or public
+/// (default `OnMention` level → `NotifyAll` candidates SHOULD NOT
+/// push), and silently picking either would either drop legitimate
+/// private-room pushes or fan out unwanted public-room pushes. Slice
+/// 2 will replace the live actor lookup with a durable projection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum T1PushDispatchOutcome {
+    /// XEP-0492 gate decided to fan out; enqueue the push job.
+    Deliver,
+    /// XEP-0492 gate decided to suppress; mark candidate outboxed
+    /// without enqueuing a job. `reason` is the resolved
+    /// `NotificationLevel` that caused suppression.
+    Suppressed {
+        reason: waddle_xmpp::xep::NotificationLevel,
+    },
+    /// MUC config could not be resolved (room actor unavailable or
+    /// failed). Defer with policy-error backoff so the next drain
+    /// pass can retry once the actor (or, slice 2, the durable
+    /// projection) is available.
+    DeferUnknownRoomPolicy,
+}
+
+/// Typed per-batch cache entry for the [`RoomPolicyStore`] lookup.
+///
+/// `Unknown` is deliberately distinct from `Public` — see
+/// [`T1PushDispatchOutcome::DeferUnknownRoomPolicy`] for the
+/// reasoning. Once a room resolves to `Unknown` for a given batch,
+/// every candidate for that room in the same batch reuses that
+/// outcome to avoid retrying the same failing actor 100×.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RoomPolicyCacheEntry {
+    Public,
+    Private,
+    Unknown,
+}
+
+impl RoomPolicyCacheEntry {
+    fn from_lookup(result: Result<Option<bool>, NotificationOutboxError>) -> Self {
+        match result {
+            Ok(Some(true)) => Self::Private,
+            Ok(Some(false)) => Self::Public,
+            // `Ok(None)` = room not currently live; `Err(_)` = actor
+            // transport failure. Both collapse to `Unknown` so the
+            // batch defers identically rather than guessing.
+            Ok(None) | Err(_) => Self::Unknown,
+        }
+    }
+}
+
 /// T1 XEP-0492 push-dispatch evaluator.
 ///
 /// Derives `(level, is_mention)` from the recorded candidate class +
@@ -2203,15 +2306,20 @@ impl NotificationOutboxStore {
 ///   [`NotificationClass::DirectMessageMention`]).
 /// - Groupchat classes encode both mention scope and
 ///   live-occupant scope; the room is private/public per the
-///   [`RoomPolicyStore`] lookup at dispatch time (slice 1 limitation:
-///   no durable T1 projection of MUC config exists yet, so we read
-///   live actor state, defaulting to public when unknown).
+///   [`RoomPolicyStore`] lookup, cached per drain batch through
+///   `room_policy_cache` so a 100-member groupchat does not produce
+///   100 actor round-trips. When the lookup yields
+///   `Ok(None)`/`Err(_)`, the evaluator returns
+///   [`T1PushDispatchOutcome::DeferUnknownRoomPolicy`] — slice 1 has
+///   no durable T1 projection of MUC config yet, so an unknown
+///   policy must defer rather than default-to-public.
 async fn evaluate_xep0492_at_dispatch(
     settings_projection: &crate::notification_settings_projection::NotificationSettingsProjectionStore,
     room_policy: &dyn RoomPolicyStore,
     candidate: &NotificationCandidate,
+    room_policy_cache: &mut std::collections::BTreeMap<BareJid, RoomPolicyCacheEntry>,
 ) -> Result<
-    crate::notification_settings_projection::PushDispatchDecision,
+    T1PushDispatchOutcome,
     crate::notification_settings_projection::NotificationSettingsProjectionError,
 > {
     let (conversation_kind, is_mention) = match candidate.class() {
@@ -2226,32 +2334,46 @@ async fn evaluate_xep0492_at_dispatch(
         NotificationClass::PersonalMention
         | NotificationClass::ChannelMention
         | NotificationClass::ActiveChannelMention => {
-            let members_only = room_policy
-                .room_members_only(candidate.conversation_jid())
-                .await
-                .ok()
-                .flatten()
-                .unwrap_or(false);
-            let kind = if members_only {
-                crate::notification_settings_projection::ConversationKind::PrivateGroup
-            } else {
-                crate::notification_settings_projection::ConversationKind::PublicGroup
-            };
-            (kind, true)
+            match resolve_cached_room_policy(
+                room_policy,
+                candidate.conversation_jid(),
+                room_policy_cache,
+            )
+            .await
+            {
+                RoomPolicyCacheEntry::Private => (
+                    crate::notification_settings_projection::ConversationKind::PrivateGroup,
+                    true,
+                ),
+                RoomPolicyCacheEntry::Public => (
+                    crate::notification_settings_projection::ConversationKind::PublicGroup,
+                    true,
+                ),
+                RoomPolicyCacheEntry::Unknown => {
+                    return Ok(T1PushDispatchOutcome::DeferUnknownRoomPolicy);
+                }
+            }
         }
         NotificationClass::NotifyAll => {
-            let members_only = room_policy
-                .room_members_only(candidate.conversation_jid())
-                .await
-                .ok()
-                .flatten()
-                .unwrap_or(false);
-            let kind = if members_only {
-                crate::notification_settings_projection::ConversationKind::PrivateGroup
-            } else {
-                crate::notification_settings_projection::ConversationKind::PublicGroup
-            };
-            (kind, false)
+            match resolve_cached_room_policy(
+                room_policy,
+                candidate.conversation_jid(),
+                room_policy_cache,
+            )
+            .await
+            {
+                RoomPolicyCacheEntry::Private => (
+                    crate::notification_settings_projection::ConversationKind::PrivateGroup,
+                    false,
+                ),
+                RoomPolicyCacheEntry::Public => (
+                    crate::notification_settings_projection::ConversationKind::PublicGroup,
+                    false,
+                ),
+                RoomPolicyCacheEntry::Unknown => {
+                    return Ok(T1PushDispatchOutcome::DeferUnknownRoomPolicy);
+                }
+            }
         }
     };
     let level = settings_projection
@@ -2261,7 +2383,30 @@ async fn evaluate_xep0492_at_dispatch(
             conversation_kind,
         )
         .await?;
-    Ok(crate::notification_settings_projection::PushDispatchDecision::evaluate(level, is_mention))
+    let decision =
+        crate::notification_settings_projection::PushDispatchDecision::evaluate(level, is_mention);
+    Ok(match decision {
+        crate::notification_settings_projection::PushDispatchDecision::Deliver => {
+            T1PushDispatchOutcome::Deliver
+        }
+        crate::notification_settings_projection::PushDispatchDecision::Suppressed { reason } => {
+            T1PushDispatchOutcome::Suppressed { reason }
+        }
+    })
+}
+
+/// Looks up `room` in the per-batch policy cache, populating on miss.
+async fn resolve_cached_room_policy(
+    room_policy: &dyn RoomPolicyStore,
+    room: &BareJid,
+    cache: &mut std::collections::BTreeMap<BareJid, RoomPolicyCacheEntry>,
+) -> RoomPolicyCacheEntry {
+    if let Some(entry) = cache.get(room) {
+        return *entry;
+    }
+    let entry = RoomPolicyCacheEntry::from_lookup(room_policy.room_members_only(room).await);
+    cache.insert(room.clone(), entry);
+    entry
 }
 
 async fn xep0191_blocks_notification_job(
@@ -3023,6 +3168,66 @@ mod tests {
             &self,
             _room: &BareJid,
         ) -> Result<Option<bool>, NotificationOutboxError> {
+            Ok(Some(false))
+        }
+    }
+
+    /// Test stub that returns `Ok(None)` — the "room not currently
+    /// live" signal that the T1 evaluator must treat as `Unknown`
+    /// (defer) rather than `Public` (default-OnMention). The counter
+    /// proves the per-batch cache short-circuits repeat lookups.
+    struct UnknownRoomPolicy {
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    impl UnknownRoomPolicy {
+        fn new() -> Self {
+            Self {
+                calls: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+
+        fn call_count(&self) -> usize {
+            self.calls.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl RoomPolicyStore for UnknownRoomPolicy {
+        async fn room_members_only(
+            &self,
+            _room: &BareJid,
+        ) -> Result<Option<bool>, NotificationOutboxError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(None)
+        }
+    }
+
+    /// Test stub that returns `Ok(Some(false))` (public) but counts
+    /// the calls so the per-batch cache can be asserted as effective.
+    struct CountingPublicRoomPolicy {
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    impl CountingPublicRoomPolicy {
+        fn new() -> Self {
+            Self {
+                calls: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+
+        fn call_count(&self) -> usize {
+            self.calls.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl RoomPolicyStore for CountingPublicRoomPolicy {
+        async fn room_members_only(
+            &self,
+            _room: &BareJid,
+        ) -> Result<Option<bool>, NotificationOutboxError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Ok(Some(false))
         }
     }
@@ -6003,6 +6208,273 @@ mod tests {
         assert_eq!(
             remaining,
             vec!["archive-older".to_string(), "archive-live".to_string()]
+        );
+    }
+
+    /// Regression for the self-DM suppression migration from T0 to T1
+    /// (#506 Q3 strict (A) — no T0 carve-outs based on routing
+    /// recipient). The candidate row is now inserted unconditionally
+    /// at T0; the T1 evaluator detects
+    /// `sender_jid.to_bare() == recipient_bare_jid` from the frozen
+    /// columns and marks the candidate outboxed without enqueuing a
+    /// push job — same shape as the XEP-0191 blocked path and the
+    /// XEP-0492 suppressed path.
+    #[tokio::test]
+    async fn self_dm_candidate_is_suppressed_at_t1_with_no_job_enqueued() {
+        let store = store().await;
+        let target = target();
+        let push_store = waddle_xmpp::push::InMemoryPushStore::new();
+        let blocking = waddle_xmpp::xep::xep0191::InMemoryBlockingStorage::new();
+        let projection = settings_projection().await;
+        let room_policy = StubRoomPolicy::new();
+        let recipient = bare("alice@example.com");
+        register_push_target(&push_store, &recipient, &target).await;
+
+        // Self-DM: sender's bare JID equals recipient's bare JID.
+        let candidate = NotificationCandidate::direct_message(
+            recipient.clone(),
+            "alice@example.com/desktop"
+                .parse()
+                .expect("full self sender"),
+            StanzaId::new("self-dm-archive", Jid::from(recipient.clone())),
+            false,
+        )
+        .expect("self-dm candidate");
+        assert_eq!(
+            store
+                .insert_candidate(&candidate)
+                .await
+                .expect("self-dm insert"),
+            NotificationCandidateInsertOutcome::Inserted,
+            "T0 must insert the self-DM candidate row unconditionally — \
+             suppression is a T1 concern"
+        );
+
+        // Sanity: candidate is pending pre-drain.
+        assert_eq!(
+            store
+                .pending_candidates(16)
+                .await
+                .expect("pre-drain pending")
+                .len(),
+            1
+        );
+
+        assert_eq!(
+            store
+                .drain_pending_candidates_into_outbox(
+                    &push_store,
+                    &blocking,
+                    &projection,
+                    &room_policy,
+                    &bare("push.example.com"),
+                    16,
+                )
+                .await
+                .expect("drain candidates"),
+            1,
+            "self-DM candidate is processed (marked outboxed), counted toward 'processed'",
+        );
+
+        assert!(
+            store.pending_outbox_jobs().await.expect("jobs").is_empty(),
+            "self-DM at T1 must NOT enqueue a push outbox job",
+        );
+        assert!(
+            store
+                .pending_candidates(16)
+                .await
+                .expect("pending candidates")
+                .is_empty(),
+            "self-DM candidate must be marked outboxed after T1 suppression",
+        );
+    }
+
+    /// Regression for the unknown-room-policy deferral behavior. When
+    /// the [`RoomPolicyStore`] returns `Ok(None)` (room actor not
+    /// currently live), the T1 evaluator MUST defer the candidate via
+    /// the policy-error backoff rather than silently defaulting to
+    /// public — see [`T1PushDispatchOutcome::DeferUnknownRoomPolicy`].
+    /// Dropped pushes for members-only rooms (`Always` default level
+    /// → `NotifyAll` candidates SHOULD push) would otherwise be the
+    /// blast radius.
+    #[tokio::test]
+    async fn unknown_room_policy_defers_groupchat_candidate_at_t1() {
+        let store = store().await;
+        let target = target();
+        let push_store = waddle_xmpp::push::InMemoryPushStore::new();
+        let blocking = waddle_xmpp::xep::xep0191::InMemoryBlockingStorage::new();
+        let projection = settings_projection().await;
+        let room_policy = UnknownRoomPolicy::new();
+        let recipient = bare("alice@example.com");
+        let room = bare("team@muc.example.com");
+        register_push_target(&push_store, &recipient, &target).await;
+
+        let candidate = groupchat_candidate_for(
+            &recipient,
+            &room,
+            "team@muc.example.com/bob".parse().expect("room occupant"),
+            "archive-unknown-policy",
+            NotificationClass::NotifyAll,
+        );
+        store
+            .insert_candidate(&candidate)
+            .await
+            .expect("groupchat insert");
+
+        // Drain returns 0 processed because the candidate deferred
+        // (not marked outboxed, not enqueued).
+        assert_eq!(
+            store
+                .drain_pending_candidates_into_outbox(
+                    &push_store,
+                    &blocking,
+                    &projection,
+                    &room_policy,
+                    &bare("push.example.com"),
+                    16,
+                )
+                .await
+                .expect("drain candidates"),
+            0,
+            "unknown room policy must NOT count as a processed candidate",
+        );
+
+        assert!(
+            store.pending_outbox_jobs().await.expect("jobs").is_empty(),
+            "unknown room policy must NOT enqueue a push job",
+        );
+        // The candidate is still un-outboxed but has its
+        // policy_error_count incremented and next_attempt_at_ms set
+        // in the future, so it is NOT pending right now but WILL be
+        // retried by the next drain pass after the backoff elapses.
+        let mut rows = store
+            .query(
+                "SELECT policy_error_count, next_attempt_at_ms, outboxed_at_ms FROM notification_candidates WHERE stanza_id = ?",
+                crate::db_params!["archive-unknown-policy"],
+            )
+            .await
+            .expect("candidate row query");
+        let row = rows
+            .next()
+            .await
+            .expect("candidate row read")
+            .expect("candidate row");
+        let policy_error_count: i64 = row.get(0).expect("policy_error_count");
+        let next_attempt: Option<i64> = row.get(1).expect("next_attempt_at_ms");
+        let outboxed: Option<i64> = row.get(2).expect("outboxed_at_ms");
+        assert_eq!(
+            policy_error_count, 1,
+            "deferral must bump policy_error_count",
+        );
+        assert!(
+            next_attempt.is_some(),
+            "deferral must schedule a retry via next_attempt_at_ms",
+        );
+        assert!(
+            outboxed.is_none(),
+            "deferral must NOT mark the candidate outboxed",
+        );
+    }
+
+    /// The per-batch room-policy cache MUST collapse repeat lookups
+    /// for the same room into a single [`RoomPolicyStore`]
+    /// round-trip. With one room and N candidates, only one actor
+    /// call is permitted.
+    #[tokio::test]
+    async fn room_policy_lookup_is_cached_within_drain_batch() {
+        let store = store().await;
+        let target = target();
+        let push_store = waddle_xmpp::push::InMemoryPushStore::new();
+        let blocking = waddle_xmpp::xep::xep0191::InMemoryBlockingStorage::new();
+        let projection = settings_projection().await;
+        let room_policy = CountingPublicRoomPolicy::new();
+        let recipient = bare("alice@example.com");
+        let room = bare("team@muc.example.com");
+        register_push_target(&push_store, &recipient, &target).await;
+
+        // Three distinct groupchat candidates for the *same* room
+        // (different archive ids, all PersonalMention so they hit
+        // the room-policy path).
+        for id in ["arc-1", "arc-2", "arc-3"] {
+            let candidate = groupchat_candidate_for(
+                &recipient,
+                &room,
+                "team@muc.example.com/bob".parse().expect("room occupant"),
+                id,
+                NotificationClass::PersonalMention,
+            );
+            store
+                .insert_candidate(&candidate)
+                .await
+                .expect("groupchat insert");
+        }
+
+        let _ = store
+            .drain_pending_candidates_into_outbox(
+                &push_store,
+                &blocking,
+                &projection,
+                &room_policy,
+                &bare("push.example.com"),
+                16,
+            )
+            .await
+            .expect("drain candidates");
+
+        assert_eq!(
+            room_policy.call_count(),
+            1,
+            "per-batch room-policy cache must collapse repeat lookups for the same room",
+        );
+    }
+
+    /// The per-batch deferral cache MUST short-circuit
+    /// `RoomPolicyCacheEntry::Unknown` once observed — subsequent
+    /// candidates for the same room in the same batch SHOULD reuse
+    /// the deferral outcome instead of re-asking a failing actor.
+    #[tokio::test]
+    async fn unknown_room_policy_lookup_is_cached_within_drain_batch() {
+        let store = store().await;
+        let target = target();
+        let push_store = waddle_xmpp::push::InMemoryPushStore::new();
+        let blocking = waddle_xmpp::xep::xep0191::InMemoryBlockingStorage::new();
+        let projection = settings_projection().await;
+        let room_policy = UnknownRoomPolicy::new();
+        let recipient = bare("alice@example.com");
+        let room = bare("team@muc.example.com");
+        register_push_target(&push_store, &recipient, &target).await;
+
+        for id in ["arc-1", "arc-2", "arc-3"] {
+            let candidate = groupchat_candidate_for(
+                &recipient,
+                &room,
+                "team@muc.example.com/bob".parse().expect("room occupant"),
+                id,
+                NotificationClass::NotifyAll,
+            );
+            store
+                .insert_candidate(&candidate)
+                .await
+                .expect("groupchat insert");
+        }
+
+        let _ = store
+            .drain_pending_candidates_into_outbox(
+                &push_store,
+                &blocking,
+                &projection,
+                &room_policy,
+                &bare("push.example.com"),
+                16,
+            )
+            .await
+            .expect("drain candidates");
+
+        assert_eq!(
+            room_policy.call_count(),
+            1,
+            "deferral outcomes must be cached per-batch — failing actor must NOT be re-queried per candidate",
         );
     }
 }

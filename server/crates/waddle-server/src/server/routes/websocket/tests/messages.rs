@@ -1009,6 +1009,23 @@ async fn groupchat_notification_recovery_retries_committed_inbox_projection() {
     let room_jid: BareJid = "groupchat-recovery@muc.example.com"
         .parse()
         .expect("room jid");
+    // The T1 push evaluator now defers candidates when the room
+    // actor is not live (no durable T1 projection of MUC config in
+    // slice 1), so the recovery test must spin up the room actor
+    // before draining — otherwise the candidate row is deferred
+    // with policy_error_count = 1 instead of becoming a push job.
+    let _room_actor = get_or_create_room_actor(
+        state.as_ref(),
+        &room_jid,
+        RoomConfig {
+            members_only: false,
+            ..RoomConfig::default()
+        },
+        "space".to_string(),
+        "groupchat-recovery".to_string(),
+    )
+    .await
+    .expect("create recovery room");
     let archive_stanza_id = waddle_xmpp_core::xep0359::StanzaId::new(
         "groupchat-recovery-archive",
         jid::Jid::from(room_jid.clone()),

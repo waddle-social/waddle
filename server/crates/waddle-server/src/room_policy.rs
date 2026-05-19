@@ -5,8 +5,11 @@
 //! whether a groupchat conversation is members-only to project the
 //! correct [`ConversationKind`] (PrivateGroup vs PublicGroup) and
 //! pick the right default notification level. Slice 1 of #526 reads
-//! this fresh from the live actor; slice 2 will replace it with a
-//! durable T1 projection alongside `notification_activity`.
+//! this fresh from the live actor; when the actor is unavailable
+//! (`Ok(None)` or transport error here) the evaluator defers the
+//! candidate via policy-error backoff rather than guessing. Slice 2
+//! will replace this with a durable T1 projection alongside
+//! `notification_activity`, eliminating the deferral hole.
 //!
 //! [`RoomRegistryActor`]: waddle_xmpp::muc::room_registry_actor::RoomRegistryActor
 //! [`RoomPolicyStore`]: crate::notification_outbox::RoomPolicyStore
@@ -51,7 +54,7 @@ impl RoomPolicyStore for RoomRegistryActorPolicy {
                 tracing::warn!(
                     room = %room,
                     %error,
-                    "room registry GetRoom failed at T1 push gate; defaulting to public"
+                    "room registry GetRoom failed at T1 push gate; evaluator will defer candidate"
                 );
                 return Ok(None);
             }
@@ -62,7 +65,7 @@ impl RoomPolicyStore for RoomRegistryActorPolicy {
                 tracing::warn!(
                     room = %room,
                     %error,
-                    "room actor GetConfig failed at T1 push gate; defaulting to public"
+                    "room actor GetConfig failed at T1 push gate; evaluator will defer candidate"
                 );
                 Ok(None)
             }
