@@ -221,26 +221,8 @@
   transform: translate(50%, 50%);
 }
 
-/* Active / inactive presence treatment on the avatar itself.
- * Goal: at a glance, an online avatar should pop and an offline one
- * should clearly recede — without making either feel "broken". */
-.app-avatar.app-avatar--online > img,
-.app-avatar.app-avatar--online > .type-avatar-mark {
-  box-shadow:
-    0 0 0 1.5px color-mix(in oklab, var(--success) 55%, transparent),
-    0 0 8px color-mix(in oklab, var(--success) 22%, transparent);
-}
-
-.app-avatar.app-avatar--away > img,
-.app-avatar.app-avatar--away > .type-avatar-mark {
-  box-shadow: 0 0 0 1.5px color-mix(in oklab, var(--warning) 50%, transparent);
-}
-
-.app-avatar.app-avatar--dnd > img,
-.app-avatar.app-avatar--dnd > .type-avatar-mark {
-  box-shadow: 0 0 0 1.5px color-mix(in oklab, var(--destructive) 50%, transparent);
-}
-
+/* Offline avatars recede; active states are signaled by the
+ * presence dot at the bottom-right, not by a ring around the avatar. */
 .app-avatar.app-avatar--offline {
   opacity: 0.55;
 }
