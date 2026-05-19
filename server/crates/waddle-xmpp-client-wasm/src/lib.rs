@@ -66,6 +66,7 @@ mod client_messaging;
 mod client_rooms;
 mod client_social_feed;
 mod client_stories;
+mod client_story_reads;
 mod client_xcal;
 mod commands;
 mod conversions;

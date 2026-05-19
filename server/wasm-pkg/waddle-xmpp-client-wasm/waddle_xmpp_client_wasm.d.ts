@@ -241,6 +241,20 @@ export class WaddleClient {
      */
     stories_publish(community_jid: string, input: any): Promise<any>;
     /**
+     * Fetch the latest read-state from the user's own PEP node.
+     *
+     * Per XEP-0223 §Security Considerations (CVE-2023-28686), the
+     * result IQ's `from` attribute MUST be either absent or equal to
+     * the account's bare JID. Anything else is treated as spoofed
+     * and produces an empty result.
+     */
+    story_reads_fetch(): Promise<any>;
+    /**
+     * Publish the user's read-state. Overwrites the single `current`
+     * item on every call.
+     */
+    story_reads_publish(input: any): Promise<any>;
+    /**
      * XEP-0060 explicit subscribe to the MDS node, used as a
      * fallback path for receiving `+notify` events when the chat
      * client's presence does not yet carry XEP-0115 caps. The

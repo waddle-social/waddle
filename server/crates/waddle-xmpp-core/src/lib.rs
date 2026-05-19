@@ -12,6 +12,7 @@ pub mod pubsub;
 pub mod roster;
 pub mod stanza;
 pub mod types;
+pub mod waddle_story_reads;
 pub mod xcal;
 pub mod xep0201;
 pub mod xep0359;
