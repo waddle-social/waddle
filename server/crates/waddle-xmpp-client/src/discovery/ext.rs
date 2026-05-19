@@ -9,13 +9,13 @@ use super::iq::{
 };
 use super::parsing::{
     parse_disco_info_result, parse_disco_items_result, parse_space_channels_result,
-    parse_upload_slot, space_from_disco_item,
+    parse_upload_slot, resolve_component_services, space_from_disco_item,
 };
 use super::types::{
-    DiscoInfoResult, DiscoItem, DiscoveredChannel, DiscoveredChannelType, DiscoveredSpace,
-    DiscoveredTopology, SpaceNode, UploadSlot,
+    DiscoInfoResult, DiscoItem, DiscoveredChannel, DiscoveredChannelType,
+    DiscoveredComponentServices, DiscoveredSpace, DiscoveredTopology, SpaceNode, UploadSlot,
 };
-use super::{UPLOAD_NS, WADDLE_ROOM_METADATA_FORM_TYPE};
+use super::{STANDALONE_SPACE_ID, UPLOAD_NS, WADDLE_ROOM_METADATA_FORM_TYPE};
 
 // ── Private helpers ───────────────────────────────────────────────────────────
 
@@ -80,8 +80,27 @@ pub trait DiscoveryExt {
         space_id: &SpaceNode,
     ) -> ClientResult<Vec<DiscoveredChannel>>;
 
-    /// Discover the native spaces + channels topology.
-    async fn discover_topology(&self, spaces_jid: &BareJid) -> ClientResult<DiscoveredTopology>;
+    /// Resolve the MUC and Spaces service JIDs against `server_domain`
+    /// via `disco#items` + `disco#info`. Falls back to the conventional
+    /// `muc.<domain>` and `spaces.<domain>` subdomains when the
+    /// server does not explicitly advertise the relevant features
+    /// (XEP-0045 `http://jabber.org/protocol/muc` for MUC, the
+    /// `urn:xmpp:spaces:0` feature for Spaces).
+    async fn discover_component_services(
+        &self,
+        server_domain: &str,
+    ) -> ClientResult<DiscoveredComponentServices>;
+
+    /// Discover the native spaces + channels topology against the
+    /// server domain. Resolves both the MUC and Spaces service JIDs
+    /// (via [`discover_component_services`](Self::discover_component_services)),
+    /// reads XEP-0503 space bookmarks, **and** enumerates the MUC
+    /// component directly so rooms without a space bookmark still
+    /// surface to the UI. Rooms not bookmarked into any space are
+    /// attached to a synthetic space with id [`STANDALONE_SPACE_ID`]
+    /// so a single channel list can be rendered without
+    /// special-casing.
+    async fn discover_topology(&self, server_domain: &str) -> ClientResult<DiscoveredTopology>;
 }
 
 // ── Implementation ────────────────────────────────────────────────────────────
@@ -195,12 +214,154 @@ impl DiscoveryExt for ClientHandle {
         Ok(channels)
     }
 
-    async fn discover_topology(&self, spaces_jid: &BareJid) -> ClientResult<DiscoveredTopology> {
-        let spaces = self.discover_spaces(spaces_jid).await?;
-        let mut channels = Vec::new();
-        for space in &spaces {
-            channels.extend(self.discover_space_channels(spaces_jid, &space.id).await?);
+    async fn discover_component_services(
+        &self,
+        server_domain: &str,
+    ) -> ClientResult<DiscoveredComponentServices> {
+        // Conventional defaults: many waddle deployments don't advertise
+        // their components via server disco (or the fallback is plenty).
+        // Parse failures here would be a misconfigured server domain
+        // and would have already failed connect; bubble up the error.
+        let fallback_muc: BareJid =
+            format!("muc.{server_domain}")
+                .parse()
+                .map_err(|e: jid::Error| {
+                    ClientError::StanzaError(StanzaError {
+                        error_type: StanzaErrorType::Cancel,
+                        condition: "bad-request".to_string(),
+                        text: Some(format!("invalid MUC fallback JID: {e}")),
+                    })
+                })?;
+        let fallback_spaces: BareJid =
+            format!("spaces.{server_domain}")
+                .parse()
+                .map_err(|e: jid::Error| {
+                    ClientError::StanzaError(StanzaError {
+                        error_type: StanzaErrorType::Cancel,
+                        condition: "bad-request".to_string(),
+                        text: Some(format!("invalid Spaces fallback JID: {e}")),
+                    })
+                })?;
+
+        // Best-effort: if disco#items fails on the server domain (some
+        // small servers reject it), fall back to the conventional
+        // subdomains rather than refusing to load the topology entirely.
+        let Ok(items) = self.discover_items(server_domain, None).await else {
+            return Ok(DiscoveredComponentServices {
+                muc: fallback_muc,
+                spaces: fallback_spaces,
+            });
+        };
+
+        // Hydrate each disco#items entry with its disco#info so the
+        // service-selection logic can dispatch on advertised features.
+        // Disco#info failures are tolerated: they downgrade the entry
+        // to "feature unknown", which never wins against the fallback.
+        let mut hydrated: Vec<(BareJid, Option<DiscoInfoResult>)> = Vec::new();
+        for item in items {
+            let Ok(jid) = item.jid.parse::<BareJid>() else {
+                continue;
+            };
+            let info = self.discover_info(&item.jid, None).await.ok();
+            hydrated.push((jid, info));
         }
+        Ok(resolve_component_services(
+            &hydrated,
+            fallback_muc,
+            fallback_spaces,
+        ))
+    }
+
+    async fn discover_topology(&self, server_domain: &str) -> ClientResult<DiscoveredTopology> {
+        let services = self.discover_component_services(server_domain).await?;
+
+        // (1) XEP-0503 space bookmarks via the Spaces component.
+        // discover_spaces returns an empty list when the user has no
+        // spaces; that's fine — we still want to surface raw MUC rooms.
+        let spaces = self
+            .discover_spaces(&services.spaces)
+            .await
+            .unwrap_or_default();
+        let mut channels: Vec<DiscoveredChannel> = Vec::new();
+        for space in &spaces {
+            if let Ok(space_channels) = self
+                .discover_space_channels(&services.spaces, &space.id)
+                .await
+            {
+                channels.extend(space_channels);
+            }
+        }
+
+        // (2) Direct MUC component enumeration. Any room not already
+        // surfaced as a space bookmark is attached to a synthetic
+        // "standalone" space so the UI's space-keyed channel list can
+        // render every room a user might want to join without
+        // requiring server-side bookmark administration first.
+        let bookmarked: std::collections::HashSet<BareJid> = channels
+            .iter()
+            .map(|channel| channel.room_jid.clone())
+            .collect();
+
+        let mut spaces = spaces;
+        let standalone_space_id = SpaceNode::new(STANDALONE_SPACE_ID).ok_or_else(parse_error)?;
+        let mut standalone_count = 0usize;
+        if let Ok(rooms) = self.discover_items(&services.muc.to_string(), None).await {
+            for (offset, room) in rooms.into_iter().enumerate() {
+                let Ok(room_jid) = room.jid.parse::<BareJid>() else {
+                    continue;
+                };
+                if bookmarked.contains(&room_jid) {
+                    continue;
+                }
+                let mut channel_type = DiscoveredChannelType::Text;
+                let mut description = None;
+                if let Ok(info) = self.discover_info(&room.jid, None).await {
+                    if let Some(parsed_type) = info
+                        .form_value(WADDLE_ROOM_METADATA_FORM_TYPE, "waddle#channel_type")
+                        .and_then(DiscoveredChannelType::from_metadata)
+                    {
+                        channel_type = parsed_type;
+                    }
+                    description = info
+                        .form_value(
+                            "http://jabber.org/protocol/muc#roominfo",
+                            "muc#roominfo_description",
+                        )
+                        .filter(|description| !description.trim().is_empty())
+                        .map(str::to_string);
+                }
+                let name = room
+                    .name
+                    .filter(|name| !name.trim().is_empty())
+                    .unwrap_or_else(|| {
+                        room_jid
+                            .node()
+                            .map(|node| node.as_str().to_string())
+                            .unwrap_or_else(|| room_jid.to_string())
+                    });
+                let id = format!("{}::{}", STANDALONE_SPACE_ID, room_jid);
+                channels.push(DiscoveredChannel {
+                    id,
+                    room_jid,
+                    name,
+                    description,
+                    channel_type,
+                    position: offset as i32,
+                    space_id: standalone_space_id.clone(),
+                });
+                standalone_count += 1;
+            }
+        }
+
+        if standalone_count > 0 {
+            spaces.push(DiscoveredSpace {
+                id: standalone_space_id,
+                service_jid: services.muc.clone(),
+                name: "Rooms".to_string(),
+                description: None,
+            });
+        }
+
         Ok(DiscoveredTopology { spaces, channels })
     }
 }

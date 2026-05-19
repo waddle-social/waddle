@@ -111,6 +111,54 @@ pub fn parse_spaces_from_disco_items(
         .collect()
 }
 
+/// Resolve the MUC and Spaces service JIDs from a server's
+/// `disco#items` items list, hydrated with each item's `disco#info`
+/// where available. The result preserves the supplied fallbacks for
+/// any component that the server does not explicitly advertise
+/// (most small deployments only advertise the MUC component).
+///
+/// MUC services are identified by the XEP-0045 feature
+/// `http://jabber.org/protocol/muc` (or the `conference` disco
+/// category as a legacy fallback). Spaces services are identified
+/// strictly by the `urn:xmpp:spaces:0` feature — a generic pubsub
+/// identity is not enough because Waddle's extensions component is
+/// also pubsub but unrelated to spaces (this is the same shape the
+/// chat web client uses; see `chat/src/lib/xmpp/discovery.ts`).
+///
+/// The first matching service wins for each component; subsequent
+/// matches are ignored.
+pub fn resolve_component_services(
+    items: &[(jid::BareJid, Option<DiscoInfoResult>)],
+    fallback_muc: jid::BareJid,
+    fallback_spaces: jid::BareJid,
+) -> super::types::DiscoveredComponentServices {
+    use super::{MUC_NS, SPACES_NS};
+
+    let mut muc: Option<jid::BareJid> = None;
+    let mut spaces: Option<jid::BareJid> = None;
+    for (jid, info_opt) in items {
+        let Some(info) = info_opt else {
+            continue;
+        };
+        if muc.is_none()
+            && (info.has_feature(MUC_NS)
+                || info
+                    .identities
+                    .iter()
+                    .any(|identity| identity.category == "conference"))
+        {
+            muc = Some(jid.clone());
+        }
+        if spaces.is_none() && info.has_feature(SPACES_NS) {
+            spaces = Some(jid.clone());
+        }
+    }
+    super::types::DiscoveredComponentServices {
+        muc: muc.unwrap_or(fallback_muc),
+        spaces: spaces.unwrap_or(fallback_spaces),
+    }
+}
+
 pub fn space_from_disco_item(
     spaces_jid: &BareJid,
     item: DiscoItem,
