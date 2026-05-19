@@ -176,6 +176,13 @@ export class CallEngine {
     const room = this.room;
     this.room = null;
     if (!room) return;
+    // Drop subscribers' track caches synchronously. The LiveKit
+    // `Disconnected` event is the natural trigger, but we unregister
+    // `handleDisconnected` immediately below so the event never reaches
+    // us — without this synthetic emit, `useCallEngine` would carry the
+    // last call's tracks into the next session and the overlay would
+    // render duplicate tiles.
+    this.emit("disconnected", "local");
     room.off(RoomEvent.TrackSubscribed, this.handleTrackSubscribed);
     room.off(RoomEvent.TrackUnsubscribed, this.handleTrackUnsubscribed);
     room.off(RoomEvent.LocalTrackPublished, this.handleLocalTrackPublished);

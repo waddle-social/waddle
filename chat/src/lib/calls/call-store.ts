@@ -266,15 +266,31 @@ export async function tearDownActiveCall(
           if (s.kind === "dm") {
             await outboundCalls.sessionTerminate(sender, s.peer, s.sid, reason);
           } else {
-            // MUC group call: leave via the muc-call:0 IQ surface
-            // AND clear our presence extension so other occupants
-            // stop showing us as in-call. Both errors flow through
-            // the outer try/catch + reportCallError so failures are
-            // surfaced consistently with every other call-wire op.
-            await sendMucCallLeave(sender, s.peer);
+            // MUC group call: clear our presence extension AND leave
+            // via the muc-call:0 IQ surface. Presence-first ordering
+            // is deliberate — other occupants drive the "N in call"
+            // indicator off our `<call/>` extension, so dropping the
+            // advertisement is what makes the call visibly stop. Each
+            // side gets its own try/catch so a single failure (e.g. a
+            // stale wasm bundle without `send_muc_call_leave`) can't
+            // swallow the other and leave us advertising as in-call.
             const raw = sender as RawIqSender;
             if (s.selfNick && raw.update_muc_call_presence) {
-              await raw.update_muc_call_presence(s.peer, s.selfNick, false, s.peer);
+              try {
+                await raw.update_muc_call_presence(
+                  s.peer,
+                  s.selfNick,
+                  false,
+                  s.peer,
+                );
+              } catch (err) {
+                reportCallError(err);
+              }
+            }
+            try {
+              await sendMucCallLeave(raw, s.peer);
+            } catch (err) {
+              reportCallError(err);
             }
           }
           break;
@@ -334,7 +350,7 @@ async function sendMucCallJoin(
  * Send `<request-leave/>` so the SFU unregisters us and revokes
  * any tokens it minted for this `(room, identity)` pair.
  */
-export async function sendMucCallLeave(
+async function sendMucCallLeave(
   sender: RawIqSender | CallWireSender,
   roomJid: string,
 ): Promise<void> {

@@ -67,6 +67,42 @@ describe("call-engine module", () => {
     expect(classify("video")).toBe("v");
   });
 
+  test("disconnect() emits the synthetic 'disconnected' event so subscribers drain stale caches", async () => {
+    // Regression guard for the "I see myself twice on rejoin" bug:
+    // `engine.disconnect()` unregisters the LiveKit `Disconnected`
+    // listener before awaiting `room.disconnect()`, so the real event
+    // never reaches our handler. We compensate with a synthetic emit
+    // at the top of `disconnect()`. Without it, `useCallEngine` would
+    // never clear its `localTracks` / `remoteTracks` refs and the
+    // next call's tiles would inherit stale entries.
+    const { CallEngine } = await import("../src/lib/calls/engine");
+    const engine = new CallEngine();
+    let disconnects = 0;
+    engine.on("disconnected", () => {
+      disconnects += 1;
+    });
+    // Inject a minimal Room stub matching the surface `disconnect()`
+    // touches. `livekit-client`'s real `Room` needs browser globals.
+    const stub = {
+      off: () => stub,
+      disconnect: async () => undefined,
+    };
+    (engine as unknown as { room: typeof stub }).room = stub;
+    await engine.disconnect();
+    expect(disconnects).toBe(1);
+  });
+
+  test("disconnect() is a no-op when no room was connected", async () => {
+    const { CallEngine } = await import("../src/lib/calls/engine");
+    const engine = new CallEngine();
+    let disconnects = 0;
+    engine.on("disconnected", () => {
+      disconnects += 1;
+    });
+    await engine.disconnect();
+    expect(disconnects).toBe(0);
+  });
+
   test("LocalMediaTrack mirrors RemoteMediaTrack's shape so one tile component renders both", () => {
     // The overlay's `Tile.videoTrack` accepts either side via a
     // duck-typed `attach`/`detach` callback. This assertion is a

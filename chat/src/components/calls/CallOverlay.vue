@@ -6,10 +6,9 @@ import {
   $lastCallError,
   clearCallState,
   reportCallError,
-  sendMucCallLeave,
   tearDownActiveCall,
 } from "@/lib/calls/call-store";
-import { outboundCalls } from "@/lib/calls/outbound";
+import type { CallWireSender } from "@/lib/calls/outbound";
 import { useCallEngine } from "@/lib/calls/use-call-engine";
 import { connectionStore } from "@/lib/connection-store";
 import {
@@ -102,7 +101,7 @@ watch(
 
 function getSender() {
   const client = connectionStore.client as unknown as { xmpp?: unknown } | null;
-  return (client?.xmpp as Parameters<typeof outboundCalls.sessionTerminate>[0] | undefined) ?? null;
+  return (client?.xmpp as CallWireSender | undefined) ?? null;
 }
 
 async function toggleMic(): Promise<void> {
@@ -126,25 +125,16 @@ async function toggleCam(): Promise<void> {
 }
 
 async function hangup(): Promise<void> {
-  if (state.value.phase !== "active") {
-    clearCallState();
-    return;
-  }
-  const active = state.value;
-  const sender = getSender();
-  if (sender) {
-    try {
-      if (active.kind === "dm") {
-        await outboundCalls.sessionTerminate(sender, active.peer, active.sid, "success");
-      } else {
-        await sendMucCallLeave(sender as unknown as Parameters<typeof sendMucCallLeave>[0], active.peer);
-      }
-    } catch (err) {
-      reportCallError(err);
-    }
-  }
+  // `tearDownActiveCall` emits the appropriate XEP-0166 /
+  // urn:waddle:muc-call:0 stanza for the current phase AND, for MUC
+  // calls, clears the `<call state="active"/>` presence advertisement
+  // so neither the user's own client nor other occupants keep
+  // rendering the room as "in call" after we leave. Previously the
+  // hangup path sent `<request-leave/>` but skipped the presence
+  // cleanup, leaving the "N in call" indicator visible until the XMPP
+  // session disconnected — which read as "the call won't stop".
+  await tearDownActiveCall(getSender(), "success");
   await engine.disconnect();
-  clearCallState();
 }
 
 const peerLabel = computed(() => {
