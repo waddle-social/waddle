@@ -28,19 +28,38 @@ const BASE_POLICY_RETRY_DELAY_MS: i64 = 60_000;
 const MAX_RETRY_DELAY_MS: i64 = 300_000;
 const OUTBOX_CLAIM_TIMEOUT_MS: i64 = 300_000;
 const NOTIFICATION_CANDIDATES_REASON_CHECK_NAME: &str = "notification_candidates_reason_check";
-const NOTIFICATION_CANDIDATES_REASON_VALUES: [&str; 5] = [
+const NOTIFICATION_CANDIDATES_REASON_VALUES: [&str; 6] = [
     "offline_dm",
+    "offline_dm_mention",
     "groupchat_personal_mention",
     "groupchat_channel_mention",
     "groupchat_active_channel_mention",
     "groupchat_notify_all",
 ];
-const NOTIFICATION_CANDIDATES_REASON_CHECK_SQL: &str = "reason IN ('offline_dm', 'groupchat_personal_mention', 'groupchat_channel_mention', 'groupchat_active_channel_mention', 'groupchat_notify_all')";
+const NOTIFICATION_CANDIDATES_REASON_CHECK_SQL: &str = "reason IN ('offline_dm', 'offline_dm_mention', 'groupchat_personal_mention', 'groupchat_channel_mention', 'groupchat_active_channel_mention', 'groupchat_notify_all')";
+const NOTIFICATION_CANDIDATES_CLASS_CHECK_NAME: &str = "notification_candidates_class_check";
+const NOTIFICATION_CANDIDATES_CLASS_VALUES: [&str; 6] = [
+    "dm",
+    "dm_mention",
+    "personal_mention",
+    "channel_mention",
+    "active_channel_mention",
+    "notify_all",
+];
+const NOTIFICATION_CANDIDATES_CLASS_CHECK_SQL: &str = "class IN ('dm', 'dm_mention', 'personal_mention', 'channel_mention', 'active_channel_mention', 'notify_all')";
+const NOTIFICATION_OUTBOX_CLASS_CHECK_NAME: &str = "notification_outbox_class_check";
+const NOTIFICATION_OUTBOX_CLASS_CHECK_SQL: &str = "class IN ('dm', 'dm_mention', 'personal_mention', 'channel_mention', 'active_channel_mention', 'notify_all')";
 const NOTIFICATION_CANDIDATES_INDEXES: [&str; 4] = [
     "idx_notification_candidates_recipient_created",
     "idx_notification_candidates_identity",
     "idx_notification_candidates_pending_worker",
     "idx_notification_candidates_outboxed_prune",
+];
+const NOTIFICATION_OUTBOX_INDEXES: [&str; 4] = [
+    "idx_notification_outbox_queued_coalesce",
+    "idx_notification_outbox_conversation_status",
+    "idx_notification_outbox_status_next_attempt",
+    "idx_notification_outbox_retention_prune",
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -99,6 +118,7 @@ impl From<String> for NotificationOutboxJobId {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NotificationClass {
     DirectMessage,
+    DirectMessageMention,
     PersonalMention,
     ChannelMention,
     ActiveChannelMention,
@@ -109,6 +129,7 @@ impl NotificationClass {
     fn as_db_value(self) -> &'static str {
         match self {
             Self::DirectMessage => "dm",
+            Self::DirectMessageMention => "dm_mention",
             Self::PersonalMention => "personal_mention",
             Self::ChannelMention => "channel_mention",
             Self::ActiveChannelMention => "active_channel_mention",
@@ -119,6 +140,7 @@ impl NotificationClass {
     fn from_db_value(value: &str) -> Result<Self, NotificationOutboxError> {
         match value {
             "dm" => Ok(Self::DirectMessage),
+            "dm_mention" => Ok(Self::DirectMessageMention),
             "personal_mention" => Ok(Self::PersonalMention),
             "channel_mention" => Ok(Self::ChannelMention),
             "active_channel_mention" => Ok(Self::ActiveChannelMention),
@@ -131,6 +153,7 @@ impl NotificationClass {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NotificationReason {
     OfflineDirectMessage,
+    OfflineDirectMessageMention,
     GroupchatPersonalMention,
     GroupchatChannelMention,
     GroupchatActiveChannelMention,
@@ -141,6 +164,7 @@ impl NotificationReason {
     fn as_db_value(self) -> &'static str {
         match self {
             Self::OfflineDirectMessage => "offline_dm",
+            Self::OfflineDirectMessageMention => "offline_dm_mention",
             Self::GroupchatPersonalMention => "groupchat_personal_mention",
             Self::GroupchatChannelMention => "groupchat_channel_mention",
             Self::GroupchatActiveChannelMention => "groupchat_active_channel_mention",
@@ -151,6 +175,7 @@ impl NotificationReason {
     fn from_db_value(value: &str) -> Result<Self, NotificationOutboxError> {
         match value {
             "offline_dm" => Ok(Self::OfflineDirectMessage),
+            "offline_dm_mention" => Ok(Self::OfflineDirectMessageMention),
             "groupchat_personal_mention" => Ok(Self::GroupchatPersonalMention),
             "groupchat_channel_mention" => Ok(Self::GroupchatChannelMention),
             "groupchat_active_channel_mention" => Ok(Self::GroupchatActiveChannelMention),
@@ -197,6 +222,7 @@ impl NotificationCandidate {
         recipient_bare_jid: BareJid,
         sender_jid: Jid,
         archive_stanza_id: StanzaId,
+        is_mention: bool,
     ) -> Result<Self, NotificationOutboxError> {
         require_full_sender_jid(&sender_jid)?;
         let expected_by = Jid::from(recipient_bare_jid.clone());
@@ -206,14 +232,25 @@ impl NotificationCandidate {
                 actual: archive_stanza_id.by,
             });
         }
+        let (class, reason) = if is_mention {
+            (
+                NotificationClass::DirectMessageMention,
+                NotificationReason::OfflineDirectMessageMention,
+            )
+        } else {
+            (
+                NotificationClass::DirectMessage,
+                NotificationReason::OfflineDirectMessage,
+            )
+        };
         Ok(Self {
             recipient_bare_jid,
             conversation_jid: sender_jid.to_bare(),
             sender_jid,
             thread_id: NotificationThreadId::root(),
             archive_stanza_id,
-            class: NotificationClass::DirectMessage,
-            reason: NotificationReason::OfflineDirectMessage,
+            class,
+            reason,
             policy_error_count: 0,
         })
     }
@@ -242,7 +279,7 @@ impl NotificationCandidate {
                 NotificationReason::GroupchatActiveChannelMention
             }
             NotificationClass::NotifyAll => NotificationReason::GroupchatNotifyAll,
-            NotificationClass::DirectMessage => {
+            NotificationClass::DirectMessage | NotificationClass::DirectMessageMention => {
                 return Err(NotificationOutboxError::InvalidClass(
                     class.as_db_value().to_string(),
                 ));
@@ -489,6 +526,29 @@ pub enum NotificationOutboxError {
     OutboxCoalesceContention,
 }
 
+/// T1 lookup of XEP-0045 room policy state needed to project a
+/// candidate's conversation kind for the XEP-0492 evaluator.
+///
+/// At T0 (candidate emission) we record the message-derived
+/// [`NotificationClass`] only. At T1 (outbox dispatch) the evaluator
+/// needs to know whether the room is members-only to pick
+/// [`crate::notification_settings_projection::ConversationKind::PrivateGroup`]
+/// or [`crate::notification_settings_projection::ConversationKind::PublicGroup`]
+/// — the kind drives both the XEP-0492 default level and the projection
+/// store lookup.
+///
+/// Returning `Ok(None)` signals "room not currently live" — when the room
+/// actor is not registered we treat the room as public-by-default rather
+/// than failing closed, mirroring the slice-1 limitation that there is
+/// no durable T1 projection of MUC config yet.
+#[async_trait::async_trait]
+pub trait RoomPolicyStore: Send + Sync {
+    async fn room_members_only(
+        &self,
+        room: &BareJid,
+    ) -> Result<Option<bool>, NotificationOutboxError>;
+}
+
 fn require_full_sender_jid(sender_jid: &Jid) -> Result<(), NotificationOutboxError> {
     if sender_jid.resource().is_some() {
         Ok(())
@@ -553,7 +613,7 @@ fn notification_candidates_table_sql(i64_type: &str, if_not_exists: bool) -> Str
             thread_id TEXT NOT NULL DEFAULT '',
             stanza_id_by TEXT NOT NULL,
             stanza_id TEXT NOT NULL,
-            class TEXT NOT NULL CHECK (class IN ('dm', 'personal_mention', 'channel_mention', 'active_channel_mention', 'notify_all')),
+            class TEXT NOT NULL CONSTRAINT {NOTIFICATION_CANDIDATES_CLASS_CHECK_NAME} CHECK ({NOTIFICATION_CANDIDATES_CLASS_CHECK_SQL}),
             reason TEXT NOT NULL CONSTRAINT {NOTIFICATION_CANDIDATES_REASON_CHECK_NAME} CHECK ({NOTIFICATION_CANDIDATES_REASON_CHECK_SQL}),
             created_at_ms {i64_type} NOT NULL,
             policy_error_count INTEGER NOT NULL DEFAULT 0,
@@ -565,12 +625,59 @@ fn notification_candidates_table_sql(i64_type: &str, if_not_exists: bool) -> Str
     )
 }
 
+fn notification_outbox_table_sql(i64_type: &str, if_not_exists: bool) -> String {
+    let if_not_exists = if if_not_exists { "IF NOT EXISTS " } else { "" };
+    format!(
+        r#"
+        CREATE TABLE {if_not_exists}notification_outbox (
+            job_id TEXT PRIMARY KEY,
+            recipient_bare_jid TEXT NOT NULL,
+            push_service_jid TEXT NOT NULL,
+            node TEXT NOT NULL,
+            conversation_jid TEXT NOT NULL,
+            sender_jid TEXT NOT NULL,
+            sender_jids TEXT NOT NULL,
+            thread_id TEXT NOT NULL DEFAULT '',
+            class TEXT NOT NULL CONSTRAINT {NOTIFICATION_OUTBOX_CLASS_CHECK_NAME} CHECK ({NOTIFICATION_OUTBOX_CLASS_CHECK_SQL}),
+            message_count INTEGER NOT NULL,
+            context_xml TEXT NOT NULL,
+            status TEXT NOT NULL CHECK (status IN ('queued', 'in-progress', 'published', 'failed')),
+            attempt_count INTEGER NOT NULL DEFAULT 0,
+            policy_error_count INTEGER NOT NULL DEFAULT 0,
+            last_error TEXT,
+            next_attempt_at_ms {i64_type},
+            claimed_at_ms {i64_type},
+            claim_token TEXT,
+            created_at_ms {i64_type} NOT NULL,
+            updated_at_ms {i64_type} NOT NULL,
+            published_at_ms {i64_type}
+        )
+        "#
+    )
+}
+
 fn notification_candidates_reason_constraint_matches_expected(definition: &str) -> bool {
     let normalized = definition.to_ascii_lowercase();
     normalized.contains("reason")
         && NOTIFICATION_CANDIDATES_REASON_VALUES
             .iter()
             .all(|reason| normalized.contains(reason))
+}
+
+fn notification_candidates_class_constraint_matches_expected(definition: &str) -> bool {
+    let normalized = definition.to_ascii_lowercase();
+    normalized.contains("class")
+        && NOTIFICATION_CANDIDATES_CLASS_VALUES
+            .iter()
+            .all(|class| normalized.contains(class))
+}
+
+fn notification_outbox_class_constraint_matches_expected(definition: &str) -> bool {
+    let normalized = definition.to_ascii_lowercase();
+    normalized.contains("class")
+        && NOTIFICATION_CANDIDATES_CLASS_VALUES
+            .iter()
+            .all(|class| normalized.contains(class))
 }
 
 #[derive(Clone)]
@@ -601,6 +708,8 @@ impl NotificationOutboxStore {
             .await?;
         self.migrate_notification_candidates_reason_constraint(i64_type)
             .await?;
+        self.migrate_notification_candidates_class_constraint(i64_type)
+            .await?;
         self.execute(
             "CREATE INDEX IF NOT EXISTS idx_notification_candidates_recipient_created \
              ON notification_candidates (recipient_bare_jid, created_at_ms)",
@@ -627,37 +736,8 @@ impl NotificationOutboxStore {
             (),
         )
         .await?;
-        self.execute(
-            &format!(
-                r#"
-                CREATE TABLE IF NOT EXISTS notification_outbox (
-                    job_id TEXT PRIMARY KEY,
-                    recipient_bare_jid TEXT NOT NULL,
-                    push_service_jid TEXT NOT NULL,
-                    node TEXT NOT NULL,
-                    conversation_jid TEXT NOT NULL,
-                    sender_jid TEXT NOT NULL,
-                    sender_jids TEXT NOT NULL,
-                    thread_id TEXT NOT NULL DEFAULT '',
-                    class TEXT NOT NULL CHECK (class IN ('dm', 'personal_mention', 'channel_mention', 'active_channel_mention', 'notify_all')),
-                    message_count INTEGER NOT NULL,
-                    context_xml TEXT NOT NULL,
-                    status TEXT NOT NULL CHECK (status IN ('queued', 'in-progress', 'published', 'failed')),
-                    attempt_count INTEGER NOT NULL DEFAULT 0,
-                    policy_error_count INTEGER NOT NULL DEFAULT 0,
-                    last_error TEXT,
-                    next_attempt_at_ms {i64_type},
-                    claimed_at_ms {i64_type},
-                    claim_token TEXT,
-                    created_at_ms {i64_type} NOT NULL,
-                    updated_at_ms {i64_type} NOT NULL,
-                    published_at_ms {i64_type}
-                )
-                "#
-            ),
-            (),
-        )
-        .await?;
+        self.execute(&notification_outbox_table_sql(i64_type, true), ())
+            .await?;
         self.query(
             "SELECT sender_jid, sender_jids FROM notification_outbox LIMIT 0",
             (),
@@ -670,6 +750,8 @@ impl NotificationOutboxStore {
             "policy_error_count INTEGER NOT NULL DEFAULT 0",
         )
         .await?;
+        self.migrate_notification_outbox_class_constraint(i64_type)
+            .await?;
         self.execute(
             "DROP INDEX IF EXISTS idx_notification_outbox_queued_coalesce",
             (),
@@ -857,6 +939,323 @@ impl NotificationOutboxStore {
         ))
     }
 
+    async fn migrate_notification_candidates_class_constraint(
+        &self,
+        i64_type: &str,
+    ) -> Result<(), NotificationOutboxError> {
+        match self.db.driver() {
+            crate::db::DatabaseDriver::Postgres => {
+                self.migrate_postgres_notification_candidates_class_constraint()
+                    .await
+            }
+            crate::db::DatabaseDriver::Sqlite => {
+                self.migrate_sqlite_notification_candidates_class_constraint(i64_type)
+                    .await
+            }
+        }
+    }
+
+    async fn migrate_postgres_notification_candidates_class_constraint(
+        &self,
+    ) -> Result<(), NotificationOutboxError> {
+        if !self
+            .postgres_notification_candidates_class_constraint_is_stale()
+            .await?
+        {
+            return Ok(());
+        }
+
+        self.execute(
+            &format!(
+                "ALTER TABLE notification_candidates DROP CONSTRAINT IF EXISTS {NOTIFICATION_CANDIDATES_CLASS_CHECK_NAME}"
+            ),
+            (),
+        )
+        .await?;
+        self.execute(
+            &format!(
+                "ALTER TABLE notification_candidates ADD CONSTRAINT {NOTIFICATION_CANDIDATES_CLASS_CHECK_NAME} CHECK ({NOTIFICATION_CANDIDATES_CLASS_CHECK_SQL})"
+            ),
+            (),
+        )
+        .await?;
+        Ok(())
+    }
+
+    async fn postgres_notification_candidates_class_constraint_is_stale(
+        &self,
+    ) -> Result<bool, NotificationOutboxError> {
+        let mut rows = self
+            .query(
+                r#"
+                SELECT pg_get_constraintdef(oid)
+                FROM pg_constraint
+                WHERE conrelid = 'notification_candidates'::regclass
+                  AND conname = ?
+                  AND contype = 'c'
+                "#,
+                crate::db_params![NOTIFICATION_CANDIDATES_CLASS_CHECK_NAME],
+            )
+            .await?;
+        let Some(row) = rows.next().await? else {
+            // No named class CHECK constraint exists yet — Postgres
+            // emits anonymous CHECKs from the table-level CHECK literal.
+            // Treat as stale so the migration adds the named constraint.
+            return Ok(true);
+        };
+        let definition: String = row.get(0)?;
+        Ok(!notification_candidates_class_constraint_matches_expected(
+            &definition,
+        ))
+    }
+
+    async fn migrate_sqlite_notification_candidates_class_constraint(
+        &self,
+        i64_type: &str,
+    ) -> Result<(), NotificationOutboxError> {
+        if !self
+            .sqlite_notification_candidates_class_constraint_is_stale()
+            .await?
+        {
+            return Ok(());
+        }
+
+        let mut tx = self.db.begin().await?;
+        for index in NOTIFICATION_CANDIDATES_INDEXES {
+            tx.execute(&format!("DROP INDEX IF EXISTS {index}"), ())
+                .await?;
+        }
+        tx.execute(
+            "ALTER TABLE notification_candidates RENAME TO notification_candidates_old_class_check",
+            (),
+        )
+        .await?;
+        tx.execute(&notification_candidates_table_sql(i64_type, false), ())
+            .await?;
+        tx.execute(
+            r#"
+            INSERT INTO notification_candidates (
+                recipient_bare_jid,
+                conversation_jid,
+                sender_jid,
+                thread_id,
+                stanza_id_by,
+                stanza_id,
+                class,
+                reason,
+                created_at_ms,
+                policy_error_count,
+                next_attempt_at_ms,
+                outboxed_at_ms
+            )
+            SELECT
+                recipient_bare_jid,
+                conversation_jid,
+                sender_jid,
+                thread_id,
+                stanza_id_by,
+                stanza_id,
+                class,
+                reason,
+                created_at_ms,
+                policy_error_count,
+                next_attempt_at_ms,
+                outboxed_at_ms
+            FROM notification_candidates_old_class_check
+            "#,
+            (),
+        )
+        .await?;
+        tx.execute("DROP TABLE notification_candidates_old_class_check", ())
+            .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    async fn sqlite_notification_candidates_class_constraint_is_stale(
+        &self,
+    ) -> Result<bool, NotificationOutboxError> {
+        let mut rows = self
+            .query(
+                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'notification_candidates'",
+                (),
+            )
+            .await?;
+        let Some(row) = rows.next().await? else {
+            return Ok(false);
+        };
+        let create_sql: String = row.get(0)?;
+        Ok(!notification_candidates_class_constraint_matches_expected(
+            &create_sql,
+        ))
+    }
+
+    async fn migrate_notification_outbox_class_constraint(
+        &self,
+        i64_type: &str,
+    ) -> Result<(), NotificationOutboxError> {
+        match self.db.driver() {
+            crate::db::DatabaseDriver::Postgres => {
+                self.migrate_postgres_notification_outbox_class_constraint()
+                    .await
+            }
+            crate::db::DatabaseDriver::Sqlite => {
+                self.migrate_sqlite_notification_outbox_class_constraint(i64_type)
+                    .await
+            }
+        }
+    }
+
+    async fn migrate_postgres_notification_outbox_class_constraint(
+        &self,
+    ) -> Result<(), NotificationOutboxError> {
+        if !self
+            .postgres_notification_outbox_class_constraint_is_stale()
+            .await?
+        {
+            return Ok(());
+        }
+
+        self.execute(
+            &format!(
+                "ALTER TABLE notification_outbox DROP CONSTRAINT IF EXISTS {NOTIFICATION_OUTBOX_CLASS_CHECK_NAME}"
+            ),
+            (),
+        )
+        .await?;
+        self.execute(
+            &format!(
+                "ALTER TABLE notification_outbox ADD CONSTRAINT {NOTIFICATION_OUTBOX_CLASS_CHECK_NAME} CHECK ({NOTIFICATION_OUTBOX_CLASS_CHECK_SQL})"
+            ),
+            (),
+        )
+        .await?;
+        Ok(())
+    }
+
+    async fn postgres_notification_outbox_class_constraint_is_stale(
+        &self,
+    ) -> Result<bool, NotificationOutboxError> {
+        let mut rows = self
+            .query(
+                r#"
+                SELECT pg_get_constraintdef(oid)
+                FROM pg_constraint
+                WHERE conrelid = 'notification_outbox'::regclass
+                  AND conname = ?
+                  AND contype = 'c'
+                "#,
+                crate::db_params![NOTIFICATION_OUTBOX_CLASS_CHECK_NAME],
+            )
+            .await?;
+        let Some(row) = rows.next().await? else {
+            return Ok(true);
+        };
+        let definition: String = row.get(0)?;
+        Ok(!notification_outbox_class_constraint_matches_expected(
+            &definition,
+        ))
+    }
+
+    async fn migrate_sqlite_notification_outbox_class_constraint(
+        &self,
+        i64_type: &str,
+    ) -> Result<(), NotificationOutboxError> {
+        if !self
+            .sqlite_notification_outbox_class_constraint_is_stale()
+            .await?
+        {
+            return Ok(());
+        }
+
+        let mut tx = self.db.begin().await?;
+        for index in NOTIFICATION_OUTBOX_INDEXES {
+            tx.execute(&format!("DROP INDEX IF EXISTS {index}"), ())
+                .await?;
+        }
+        tx.execute(
+            "ALTER TABLE notification_outbox RENAME TO notification_outbox_old_class_check",
+            (),
+        )
+        .await?;
+        tx.execute(&notification_outbox_table_sql(i64_type, false), ())
+            .await?;
+        tx.execute(
+            r#"
+            INSERT INTO notification_outbox (
+                job_id,
+                recipient_bare_jid,
+                push_service_jid,
+                node,
+                conversation_jid,
+                sender_jid,
+                sender_jids,
+                thread_id,
+                class,
+                message_count,
+                context_xml,
+                status,
+                attempt_count,
+                policy_error_count,
+                last_error,
+                next_attempt_at_ms,
+                claimed_at_ms,
+                claim_token,
+                created_at_ms,
+                updated_at_ms,
+                published_at_ms
+            )
+            SELECT
+                job_id,
+                recipient_bare_jid,
+                push_service_jid,
+                node,
+                conversation_jid,
+                sender_jid,
+                sender_jids,
+                thread_id,
+                class,
+                message_count,
+                context_xml,
+                status,
+                attempt_count,
+                policy_error_count,
+                last_error,
+                next_attempt_at_ms,
+                claimed_at_ms,
+                claim_token,
+                created_at_ms,
+                updated_at_ms,
+                published_at_ms
+            FROM notification_outbox_old_class_check
+            "#,
+            (),
+        )
+        .await?;
+        tx.execute("DROP TABLE notification_outbox_old_class_check", ())
+            .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    async fn sqlite_notification_outbox_class_constraint_is_stale(
+        &self,
+    ) -> Result<bool, NotificationOutboxError> {
+        let mut rows = self
+            .query(
+                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'notification_outbox'",
+                (),
+            )
+            .await?;
+        let Some(row) = rows.next().await? else {
+            return Ok(false);
+        };
+        let create_sql: String = row.get(0)?;
+        Ok(!notification_outbox_class_constraint_matches_expected(
+            &create_sql,
+        ))
+    }
+
     async fn add_column_if_missing(
         &self,
         table: &str,
@@ -946,6 +1345,8 @@ impl NotificationOutboxStore {
         &self,
         push_store: &dyn PushSubscriptionStore,
         blocking_storage: &dyn BlockingStorage,
+        settings_projection: &crate::notification_settings_projection::NotificationSettingsProjectionStore,
+        room_policy: &dyn RoomPolicyStore,
         first_party_service_jid: &BareJid,
         batch_size: usize,
     ) -> Result<usize, NotificationOutboxError> {
@@ -976,6 +1377,48 @@ impl NotificationOutboxStore {
                     self.defer_candidate_policy_error(&candidate).await?;
                     continue;
                 }
+            }
+            // T1 XEP-0492 push-dispatch gate. The class on the candidate
+            // is purely message-derived from T0; combined with the
+            // recipient's effective notification level (consulted fresh
+            // here against the projection store) the typed reducer
+            // decides publish-or-suppress.
+            let decision =
+                match evaluate_xep0492_at_dispatch(settings_projection, room_policy, &candidate)
+                    .await
+                {
+                    Ok(decision) => decision,
+                    Err(error) => {
+                        tracing::warn!(
+                            recipient = %candidate.recipient_bare_jid(),
+                            conversation = %candidate.conversation_jid(),
+                            %error,
+                            "XEP-0492 notification setting lookup failed at T1; deferring candidate"
+                        );
+                        self.defer_candidate_policy_error(&candidate).await?;
+                        continue;
+                    }
+                };
+            if let crate::notification_settings_projection::PushDispatchDecision::Suppressed {
+                reason,
+            } = decision
+            {
+                tracing::info!(
+                    recipient = %candidate.recipient_bare_jid(),
+                    conversation = %candidate.conversation_jid(),
+                    sender = %candidate.sender_jid(),
+                    class = ?candidate.class(),
+                    %reason,
+                    "XEP-0492 push gate suppressed XEP-0357 notification candidate at T1"
+                );
+                let now_ms = crate::time::now_ms();
+                let mut tx = self.db.begin().await?;
+                let claimed = mark_candidate_outboxed_tx(&mut tx, &candidate, now_ms).await?;
+                tx.commit().await?;
+                if claimed > 0 {
+                    processed += 1;
+                }
+                continue;
             }
             let recipient_key = candidate.recipient_bare_jid.clone();
             if !target_cache.contains_key(&recipient_key) {
@@ -1746,6 +2189,78 @@ impl NotificationOutboxStore {
     }
 }
 
+/// T1 XEP-0492 push-dispatch evaluator.
+///
+/// Derives `(level, is_mention)` from the recorded candidate class +
+/// recipient state and feeds them into the shared pure reducer
+/// [`crate::notification_settings_projection::PushDispatchDecision::evaluate`].
+///
+/// - DM classes encode the mention bit directly
+///   ([`NotificationClass::DirectMessage`] vs
+///   [`NotificationClass::DirectMessageMention`]).
+/// - Groupchat classes encode both mention scope and
+///   live-occupant scope; the room is private/public per the
+///   [`RoomPolicyStore`] lookup at dispatch time (slice 1 limitation:
+///   no durable T1 projection of MUC config exists yet, so we read
+///   live actor state, defaulting to public when unknown).
+async fn evaluate_xep0492_at_dispatch(
+    settings_projection: &crate::notification_settings_projection::NotificationSettingsProjectionStore,
+    room_policy: &dyn RoomPolicyStore,
+    candidate: &NotificationCandidate,
+) -> Result<
+    crate::notification_settings_projection::PushDispatchDecision,
+    crate::notification_settings_projection::NotificationSettingsProjectionError,
+> {
+    let (conversation_kind, is_mention) = match candidate.class() {
+        NotificationClass::DirectMessage => (
+            crate::notification_settings_projection::ConversationKind::Direct,
+            false,
+        ),
+        NotificationClass::DirectMessageMention => (
+            crate::notification_settings_projection::ConversationKind::Direct,
+            true,
+        ),
+        NotificationClass::PersonalMention
+        | NotificationClass::ChannelMention
+        | NotificationClass::ActiveChannelMention => {
+            let members_only = room_policy
+                .room_members_only(candidate.conversation_jid())
+                .await
+                .ok()
+                .flatten()
+                .unwrap_or(false);
+            let kind = if members_only {
+                crate::notification_settings_projection::ConversationKind::PrivateGroup
+            } else {
+                crate::notification_settings_projection::ConversationKind::PublicGroup
+            };
+            (kind, true)
+        }
+        NotificationClass::NotifyAll => {
+            let members_only = room_policy
+                .room_members_only(candidate.conversation_jid())
+                .await
+                .ok()
+                .flatten()
+                .unwrap_or(false);
+            let kind = if members_only {
+                crate::notification_settings_projection::ConversationKind::PrivateGroup
+            } else {
+                crate::notification_settings_projection::ConversationKind::PublicGroup
+            };
+            (kind, false)
+        }
+    };
+    let level = settings_projection
+        .effective_setting(
+            candidate.recipient_bare_jid(),
+            candidate.conversation_jid(),
+            conversation_kind,
+        )
+        .await?;
+    Ok(crate::notification_settings_projection::PushDispatchDecision::evaluate(level, is_mention))
+}
+
 async fn xep0191_blocks_notification_job(
     job: &NotificationOutboxJob,
     blocking_storage: &dyn BlockingStorage,
@@ -2354,6 +2869,7 @@ mod tests {
             recipient.clone(),
             sender_jid,
             StanzaId::new(id, Jid::from(recipient.clone())),
+            false,
         )
         .expect("candidate")
     }
@@ -2378,7 +2894,7 @@ mod tests {
 
     #[test]
     fn postgres_reason_constraint_match_accepts_current_definition() {
-        let postgres_definition = "CHECK (((reason)::text = ANY ((ARRAY['offline_dm'::character varying, 'groupchat_personal_mention'::character varying, 'groupchat_channel_mention'::character varying, 'groupchat_active_channel_mention'::character varying, 'groupchat_notify_all'::character varying])::text[])))";
+        let postgres_definition = "CHECK (((reason)::text = ANY ((ARRAY['offline_dm'::character varying, 'offline_dm_mention'::character varying, 'groupchat_personal_mention'::character varying, 'groupchat_channel_mention'::character varying, 'groupchat_active_channel_mention'::character varying, 'groupchat_notify_all'::character varying])::text[])))";
         assert!(notification_candidates_reason_constraint_matches_expected(
             postgres_definition
         ));
@@ -2388,6 +2904,25 @@ mod tests {
     fn postgres_reason_constraint_match_rejects_legacy_definition() {
         let postgres_definition = "CHECK (((reason)::text = 'offline_dm'::character varying))";
         assert!(!notification_candidates_reason_constraint_matches_expected(
+            postgres_definition
+        ));
+    }
+
+    #[test]
+    fn postgres_class_constraint_match_accepts_current_definition() {
+        let postgres_definition = "CHECK (((class)::text = ANY ((ARRAY['dm'::character varying, 'dm_mention'::character varying, 'personal_mention'::character varying, 'channel_mention'::character varying, 'active_channel_mention'::character varying, 'notify_all'::character varying])::text[])))";
+        assert!(notification_candidates_class_constraint_matches_expected(
+            postgres_definition
+        ));
+        assert!(notification_outbox_class_constraint_matches_expected(
+            postgres_definition
+        ));
+    }
+
+    #[test]
+    fn postgres_class_constraint_match_rejects_legacy_definition() {
+        let postgres_definition = "CHECK (((class)::text = ANY ((ARRAY['dm'::character varying, 'personal_mention'::character varying])::text[])))";
+        assert!(!notification_candidates_class_constraint_matches_expected(
             postgres_definition
         ));
     }
@@ -2430,6 +2965,52 @@ mod tests {
         NotificationOutboxStore::new(Database::in_memory("notification-outbox").await.unwrap())
             .await
             .expect("store")
+    }
+
+    /// Test stub for [`RoomPolicyStore`] — defaults rooms to public
+    /// (`members_only = false`) unless explicitly mapped to private.
+    #[derive(Default)]
+    struct StubRoomPolicy {
+        private_rooms: std::sync::Mutex<std::collections::BTreeSet<BareJid>>,
+    }
+
+    impl StubRoomPolicy {
+        fn new() -> Self {
+            Self::default()
+        }
+
+        #[allow(dead_code)]
+        fn mark_private(&self, room: BareJid) {
+            self.private_rooms
+                .lock()
+                .expect("stub room policy lock")
+                .insert(room);
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl RoomPolicyStore for StubRoomPolicy {
+        async fn room_members_only(
+            &self,
+            room: &BareJid,
+        ) -> Result<Option<bool>, NotificationOutboxError> {
+            Ok(Some(
+                self.private_rooms
+                    .lock()
+                    .expect("stub room policy lock")
+                    .contains(room),
+            ))
+        }
+    }
+
+    async fn settings_projection(
+    ) -> crate::notification_settings_projection::NotificationSettingsProjectionStore {
+        let storage = crate::pubsub::DatabasePubSubStorage::open(Some("sqlite::memory:"))
+            .await
+            .expect("settings pubsub storage");
+        crate::notification_settings_projection::NotificationSettingsProjectionStore::new(
+            storage.database(),
+        )
     }
 
     #[tokio::test]
@@ -2655,6 +3236,7 @@ mod tests {
             recipient.clone(),
             Jid::from(bare("bob@example.com")),
             StanzaId::new("archive-bare-sender", Jid::from(recipient)),
+            false,
         );
 
         assert!(matches!(
@@ -2849,6 +3431,8 @@ mod tests {
         let target = target();
         let push_store = waddle_xmpp::push::InMemoryPushStore::new();
         let blocking = waddle_xmpp::xep::xep0191::InMemoryBlockingStorage::new();
+        let projection = settings_projection().await;
+        let room_policy = StubRoomPolicy::new();
         let first = candidate("archive-1");
         let duplicate = candidate("archive-1");
         let second = candidate("archive-2");
@@ -2883,6 +3467,8 @@ mod tests {
                 .drain_pending_candidates_into_outbox(
                     &push_store,
                     &blocking,
+                    &projection,
+                    &room_policy,
                     &bare("push.example.com"),
                     16,
                 )
@@ -2903,6 +3489,8 @@ mod tests {
         let target = target();
         let push_store = waddle_xmpp::push::InMemoryPushStore::new();
         let blocking = waddle_xmpp::xep::xep0191::InMemoryBlockingStorage::new();
+        let projection = settings_projection().await;
+        let room_policy = StubRoomPolicy::new();
         let recipient = bare("alice@example.com");
         register_push_target(&push_store, &recipient, &target).await;
         let candidate = candidate_for_sender_jid(
@@ -2927,6 +3515,8 @@ mod tests {
                 .drain_pending_candidates_into_outbox(
                     &push_store,
                     &blocking,
+                    &projection,
+                    &room_policy,
                     &bare("push.example.com"),
                     16,
                 )
@@ -2970,6 +3560,8 @@ mod tests {
         let target = target();
         let push_store = waddle_xmpp::push::InMemoryPushStore::new();
         let blocking = waddle_xmpp::xep::xep0191::InMemoryBlockingStorage::new();
+        let projection = settings_projection().await;
+        let room_policy = StubRoomPolicy::new();
         let recipient = bare("alice@example.com");
         register_push_target(&push_store, &recipient, &target).await;
         let candidate = candidate_for_sender_jid(
@@ -2994,6 +3586,8 @@ mod tests {
                 .drain_pending_candidates_into_outbox(
                     &push_store,
                     &blocking,
+                    &projection,
+                    &room_policy,
                     &bare("push.example.com"),
                     16,
                 )
@@ -3036,6 +3630,8 @@ mod tests {
         let target = target();
         let push_store = waddle_xmpp::push::InMemoryPushStore::new();
         let blocking = waddle_xmpp::xep::xep0191::InMemoryBlockingStorage::new();
+        let projection = settings_projection().await;
+        let room_policy = StubRoomPolicy::new();
         let recipient = bare("alice@example.com");
         register_push_target(&push_store, &recipient, &target).await;
         let candidate = candidate_for_sender_jid(
@@ -3060,6 +3656,8 @@ mod tests {
                 .drain_pending_candidates_into_outbox(
                     &push_store,
                     &blocking,
+                    &projection,
+                    &room_policy,
                     &bare("push.example.com"),
                     16,
                 )
@@ -3086,6 +3684,8 @@ mod tests {
         let target = target();
         let push_store = waddle_xmpp::push::InMemoryPushStore::new();
         let blocking = waddle_xmpp::xep::xep0191::InMemoryBlockingStorage::new();
+        let projection = settings_projection().await;
+        let room_policy = StubRoomPolicy::new();
         let malformed_recipient = bare("alice@example.com");
         let valid_recipient = bare("carol@example.com");
         register_push_target(&push_store, &malformed_recipient, &target).await;
@@ -3121,6 +3721,8 @@ mod tests {
                 .drain_pending_candidates_into_outbox(
                     &push_store,
                     &blocking,
+                    &projection,
+                    &room_policy,
                     &bare("push.example.com"),
                     16,
                 )
@@ -3145,6 +3747,8 @@ mod tests {
         let target = target();
         let push_store = waddle_xmpp::push::InMemoryPushStore::new();
         let blocking = waddle_xmpp::xep::xep0191::InMemoryBlockingStorage::new();
+        let projection = settings_projection().await;
+        let room_policy = StubRoomPolicy::new();
         let recipient = bare("alice@example.com");
         register_push_target(&push_store, &recipient, &target).await;
 
@@ -3175,6 +3779,8 @@ mod tests {
                 .drain_pending_candidates_into_outbox(
                     &push_store,
                     &blocking,
+                    &projection,
+                    &room_policy,
                     &bare("push.example.com"),
                     16,
                 )
@@ -3208,6 +3814,8 @@ mod tests {
         let target = target();
         let push_store = waddle_xmpp::push::InMemoryPushStore::new();
         let blocking = waddle_xmpp::xep::xep0191::InMemoryBlockingStorage::new();
+        let projection = settings_projection().await;
+        let room_policy = StubRoomPolicy::new();
         let recipient = bare("alice@example.com");
         register_push_target(&push_store, &recipient, &target).await;
 
@@ -3222,6 +3830,8 @@ mod tests {
                 .drain_pending_candidates_into_outbox(
                     &push_store,
                     &blocking,
+                    &projection,
+                    &room_policy,
                     &bare("push.example.com"),
                     16,
                 )
@@ -3252,6 +3862,8 @@ mod tests {
                 .drain_pending_candidates_into_outbox(
                     &push_store,
                     &blocking,
+                    &projection,
+                    &room_policy,
                     &bare("push.example.com"),
                     16,
                 )
@@ -3278,6 +3890,8 @@ mod tests {
         let target = target();
         let push_store = waddle_xmpp::push::InMemoryPushStore::new();
         let blocking = waddle_xmpp::xep::xep0191::InMemoryBlockingStorage::new();
+        let projection = settings_projection().await;
+        let room_policy = StubRoomPolicy::new();
         let recipient = bare("alice@example.com");
         register_push_target(&push_store, &recipient, &target).await;
 
@@ -3292,6 +3906,8 @@ mod tests {
                 .drain_pending_candidates_into_outbox(
                     &push_store,
                     &blocking,
+                    &projection,
+                    &room_policy,
                     &bare("push.example.com"),
                     16,
                 )
@@ -3321,6 +3937,8 @@ mod tests {
                 .drain_pending_candidates_into_outbox(
                     &push_store,
                     &blocking,
+                    &projection,
+                    &room_policy,
                     &bare("push.example.com"),
                     16,
                 )
@@ -3347,6 +3965,8 @@ mod tests {
         let target = target();
         let push_store = waddle_xmpp::push::InMemoryPushStore::new();
         let blocking = waddle_xmpp::xep::xep0191::InMemoryBlockingStorage::new();
+        let projection = settings_projection().await;
+        let room_policy = StubRoomPolicy::new();
         let recipient = bare("alice@example.com");
         register_push_target(&push_store, &recipient, &target).await;
 
@@ -3361,6 +3981,8 @@ mod tests {
                 .drain_pending_candidates_into_outbox(
                     &push_store,
                     &blocking,
+                    &projection,
+                    &room_policy,
                     &bare("push.example.com"),
                     16,
                 )
@@ -3390,6 +4012,8 @@ mod tests {
                 .drain_pending_candidates_into_outbox(
                     &push_store,
                     &blocking,
+                    &projection,
+                    &room_policy,
                     &bare("push.example.com"),
                     16,
                 )
@@ -3417,6 +4041,8 @@ mod tests {
         let target = target();
         let push_store = waddle_xmpp::push::InMemoryPushStore::new();
         let blocking = waddle_xmpp::xep::xep0191::InMemoryBlockingStorage::new();
+        let projection = settings_projection().await;
+        let room_policy = StubRoomPolicy::new();
         let recipient = bare("alice@example.com");
         register_push_target(&push_store, &recipient, &target).await;
 
@@ -3431,6 +4057,8 @@ mod tests {
                 .drain_pending_candidates_into_outbox(
                     &push_store,
                     &blocking,
+                    &projection,
+                    &room_policy,
                     &bare("push.example.com"),
                     16,
                 )
@@ -3460,6 +4088,8 @@ mod tests {
                 .drain_pending_candidates_into_outbox(
                     &push_store,
                     &blocking,
+                    &projection,
+                    &room_policy,
                     &bare("push.example.com"),
                     16,
                 )
@@ -3486,6 +4116,8 @@ mod tests {
         let target = target();
         let push_store = waddle_xmpp::push::InMemoryPushStore::new();
         let blocking = waddle_xmpp::xep::xep0191::InMemoryBlockingStorage::new();
+        let projection = settings_projection().await;
+        let room_policy = StubRoomPolicy::new();
         let recipient = bare("alice@example.com");
         register_push_target(&push_store, &recipient, &target).await;
 
@@ -3500,6 +4132,8 @@ mod tests {
                 .drain_pending_candidates_into_outbox(
                     &push_store,
                     &blocking,
+                    &projection,
+                    &room_policy,
                     &bare("push.example.com"),
                     16,
                 )
@@ -3529,6 +4163,8 @@ mod tests {
                 .drain_pending_candidates_into_outbox(
                     &push_store,
                     &blocking,
+                    &projection,
+                    &room_policy,
                     &bare("push.example.com"),
                     16,
                 )
@@ -3555,6 +4191,8 @@ mod tests {
         let target = target();
         let push_store = waddle_xmpp::push::InMemoryPushStore::new();
         let blocking = waddle_xmpp::xep::xep0191::InMemoryBlockingStorage::new();
+        let projection = settings_projection().await;
+        let room_policy = StubRoomPolicy::new();
         let recipient = bare("alice@example.com");
         register_push_target(&push_store, &recipient, &target).await;
         blocking.set_blocklist_jids(
@@ -3586,6 +4224,8 @@ mod tests {
                 .drain_pending_candidates_into_outbox(
                     &push_store,
                     &blocking,
+                    &projection,
+                    &room_policy,
                     &bare("push.example.com"),
                     16,
                 )
@@ -3607,6 +4247,8 @@ mod tests {
         let target = target();
         let push_store = waddle_xmpp::push::InMemoryPushStore::new();
         let blocking = waddle_xmpp::xep::xep0191::InMemoryBlockingStorage::new();
+        let projection = settings_projection().await;
+        let room_policy = StubRoomPolicy::new();
         let recipient = bare("alice@example.com");
         let room = bare("team@muc.example.com");
         register_push_target(&push_store, &recipient, &target).await;
@@ -3629,6 +4271,8 @@ mod tests {
                 .drain_pending_candidates_into_outbox(
                     &push_store,
                     &blocking,
+                    &projection,
+                    &room_policy,
                     &bare("push.example.com"),
                     16,
                 )
@@ -3684,6 +4328,8 @@ mod tests {
         let recipient = bare("alice@example.com");
         let push_store = waddle_xmpp::push::InMemoryPushStore::new();
         let blocking = waddle_xmpp::xep::xep0191::InMemoryBlockingStorage::new();
+        let projection = settings_projection().await;
+        let room_policy = StubRoomPolicy::new();
         let push_service = crate::push_service::DatabasePushServiceStore::new(
             Database::in_memory("push-service-coalesced-full-jid-block")
                 .await
@@ -3746,6 +4392,8 @@ mod tests {
                 .drain_pending_candidates_into_outbox(
                     &push_store,
                     &blocking,
+                    &projection,
+                    &room_policy,
                     &bare("push.example.com"),
                     16,
                 )
@@ -3807,6 +4455,8 @@ mod tests {
         let target = target();
         let push_store = waddle_xmpp::push::InMemoryPushStore::new();
         let blocking = waddle_xmpp::xep::xep0191::InMemoryBlockingStorage::new();
+        let projection = settings_projection().await;
+        let room_policy = StubRoomPolicy::new();
         let alice = bare("alice@example.com");
         let carol = bare("carol@example.com");
         let bob = bare("bob@example.com");
@@ -3847,6 +4497,8 @@ mod tests {
                 .drain_pending_candidates_into_outbox(
                     &push_store,
                     &blocking,
+                    &projection,
+                    &room_policy,
                     &bare("push.example.com"),
                     16,
                 )
@@ -3866,6 +4518,8 @@ mod tests {
         let store = store().await;
         let target = target();
         let push_store = waddle_xmpp::push::InMemoryPushStore::new();
+        let projection = settings_projection().await;
+        let room_policy = StubRoomPolicy::new();
         let recipient = bare("alice@example.com");
         register_push_target(&push_store, &recipient, &target).await;
         store
@@ -3890,6 +4544,8 @@ mod tests {
                 .drain_pending_candidates_into_outbox(
                     &push_store,
                     &FailingBlockingStorage,
+                    &projection,
+                    &room_policy,
                     &bare("push.example.com"),
                     16,
                 )
@@ -3935,6 +4591,8 @@ mod tests {
                 .drain_pending_candidates_into_outbox(
                     &push_store,
                     &blocking,
+                    &projection,
+                    &room_policy,
                     &bare("push.example.com"),
                     16,
                 )

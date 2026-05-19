@@ -1,3 +1,4 @@
+use crate::room_policy::RoomRegistryActorPolicy;
 use crate::server::routes;
 use crate::server::routes::websocket::WebSocketState;
 use std::sync::Arc;
@@ -529,6 +530,8 @@ pub(crate) fn spawn_notification_outbox_janitor(websocket_state: &Arc<WebSocketS
                     "Notification outbox janitor recovered XEP-0357 groupchat candidates from inbox projections"
                 );
             }
+            let room_policy =
+                RoomRegistryActorPolicy::new(state.deps.protocol.room_registry.clone());
             match state
                 .deps
                 .protocol
@@ -536,6 +539,12 @@ pub(crate) fn spawn_notification_outbox_janitor(websocket_state: &Arc<WebSocketS
                 .drain_pending_candidates_into_outbox(
                     state.deps.protocol.push_store.as_ref(),
                     state.deps.protocol.blocking_storage.as_ref(),
+                    state
+                        .deps
+                        .protocol
+                        .notification_settings_projection
+                        .as_ref(),
+                    &room_policy,
                     &first_party_service_jid,
                     batch_size,
                 )

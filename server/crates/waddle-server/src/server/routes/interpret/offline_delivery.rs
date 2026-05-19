@@ -278,34 +278,30 @@ async fn enqueue_xep0357_notification_candidate_for_message(
     archive_stanza_id: &waddle_xmpp_core::xep0359::StanzaId,
     original_message: &Message,
 ) -> NotificationCandidateQueueOutcome {
-    // XEP-0492 gate: consult the recipient's per-conversation notification
-    // level (defaulting to XEP-0492 conversation-kind defaults via the
-    // projection store) and the XEP-0513 mention bit. The decision is a
-    // typed `PushDispatchDecision` — never a stringly-typed diagnostic —
-    // so the suppression reason flows through to the typed log line.
-    let decision =
-        match evaluate_xep0492_push_dispatch_decision(state, recipient, sender, original_message)
-            .await
-        {
-            Ok(decision) => decision,
-            Err(()) => return NotificationCandidateQueueOutcome::RetryLater,
-        };
-    match decision {
-        crate::notification_settings_projection::PushDispatchDecision::Deliver => {}
-        crate::notification_settings_projection::PushDispatchDecision::Suppressed { reason } => {
-            info!(
-                recipient = %recipient,
-                sender = %sender,
-                reason = %reason,
-                "XEP-0492 push gate suppressed XEP-0357 notification candidate"
-            );
-            return NotificationCandidateQueueOutcome::Completed;
-        }
+    // Self-DM short-circuit. The sender_jid landing in the offline queue
+    // for one's own bare JID is message-intrinsic provenance — never a
+    // recipient-state read — so this stays at T0. The headless
+    // OfflineDeliveryHandler should never project a self-DM into the
+    // pending queue today, but we keep the guard as a defense-in-depth
+    // emission no-op so we never insert a self-DM candidate that the T1
+    // evaluator would have to learn to ignore.
+    if sender == recipient {
+        debug!(
+            recipient = %recipient,
+            sender = %sender,
+            "XEP-0357 notification candidate skipped: self-DM is intrinsic to message provenance"
+        );
+        return NotificationCandidateQueueOutcome::Completed;
     }
+    // XEP-0513 mention bit is message-intrinsic and frozen at T0; T1
+    // reads it back from the candidate row when running the XEP-0492
+    // dispatch gate.
+    let is_mention = message_is_mention_for_recipient(original_message, recipient);
     let candidate = match crate::notification_outbox::NotificationCandidate::direct_message(
         recipient.clone(),
         sender_jid.clone(),
         archive_stanza_id.clone(),
+        is_mention,
     ) {
         Ok(candidate) => candidate,
         Err(error) => {
@@ -329,6 +325,7 @@ async fn enqueue_xep0357_notification_candidate_for_message(
             debug!(
                 recipient = %recipient,
                 sender = %sender,
+                is_mention,
                 "XEP-0357 notification candidate inserted for durable outbox worker"
             );
             NotificationCandidateQueueOutcome::Completed
@@ -351,67 +348,6 @@ async fn enqueue_xep0357_notification_candidate_for_message(
             NotificationCandidateQueueOutcome::RetryLater
         }
     }
-}
-
-/// Resolve the XEP-0492 push-dispatch gate for a single inbound DM that
-/// is about to be projected into the recipient's offline queue.
-///
-/// The gate combines the recipient's typed
-/// [`waddle_xmpp::xep::NotificationLevel`] (resolved by the
-/// `NotificationSettingsProjectionStore`, falling back to the XEP-0492
-/// conversation-kind defaults) with the XEP-0513 mention bit derived
-/// directly from the inbound `<message>` payloads. Both inputs flow as
-/// typed values; there are no string-typed payloads on the gate boundary.
-///
-/// `QueueOfflineDelivery` only fires for DM intake
-/// ([`waddle_xmpp::protocol::handlers::offline_delivery::OfflineDeliveryHandler`]
-/// is gated on `Locality::Recipient` + headless pass for `<message
-/// type='chat'>`), so the conversation kind on this path is always
-/// `ConversationKind::Direct`. The shared pure reducer
-/// [`crate::notification_settings_projection::PushDispatchDecision::evaluate`]
-/// is the single decision point — when MUC push fan-out lands it will
-/// reuse the same reducer rather than re-implementing the level matrix.
-async fn evaluate_xep0492_push_dispatch_decision(
-    state: &WebSocketState,
-    recipient: &BareJid,
-    sender: &BareJid,
-    original_message: &Message,
-) -> Result<crate::notification_settings_projection::PushDispatchDecision, ()> {
-    if sender == recipient {
-        // Self-DM: never push to your own offline queue. Per XEP-0492
-        // semantics this is a hard suppression independent of the
-        // configured level; surface it as `Never` to keep the typed log
-        // path uniform.
-        return Ok(
-            crate::notification_settings_projection::PushDispatchDecision::Suppressed {
-                reason: waddle_xmpp::xep::NotificationLevel::Never,
-            },
-        );
-    }
-    let level = match state
-        .deps
-        .protocol
-        .notification_settings_projection
-        .effective_setting(
-            recipient,
-            sender,
-            crate::notification_settings_projection::ConversationKind::Direct,
-        )
-        .await
-    {
-        Ok(level) => level,
-        Err(error) => {
-            warn!(
-                recipient = %recipient,
-                conversation = %sender,
-                error = %error,
-                "XEP-0492 notification setting lookup failed; retrying notification candidate later"
-            );
-            return Err(());
-        }
-    };
-    let is_mention = message_is_mention_for_recipient(original_message, recipient);
-    Ok(crate::notification_settings_projection::PushDispatchDecision::evaluate(level, is_mention))
 }
 
 /// Returns `true` when the inbound XEP-0513 explicit-mention payloads

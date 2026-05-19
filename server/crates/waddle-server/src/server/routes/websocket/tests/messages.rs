@@ -66,6 +66,8 @@ async fn drain_notification_candidates_for_test(state: &WebSocketState) -> usize
         .push
         .parse()
         .expect("push service jid");
+    let room_policy =
+        crate::room_policy::RoomRegistryActorPolicy::new(state.deps.protocol.room_registry.clone());
     state
         .deps
         .protocol
@@ -73,6 +75,12 @@ async fn drain_notification_candidates_for_test(state: &WebSocketState) -> usize
         .drain_pending_candidates_into_outbox(
             state.deps.protocol.push_store.as_ref(),
             state.deps.protocol.blocking_storage.as_ref(),
+            state
+                .deps
+                .protocol
+                .notification_settings_projection
+                .as_ref(),
+            &room_policy,
             &push_service_jid,
             16,
         )
@@ -1254,9 +1262,20 @@ async fn groupchat_channel_mention_for_foreign_room_does_not_ping_current_room()
         responses.is_empty(),
         "valid foreign-room channel mention should not return an error: {responses:?}"
     );
-    assert_eq!(
-        drain_notification_candidates_for_test(state.as_ref()).await,
-        0,
+    // Post-#526 slice 1: foreign-room mentions are not personal/channel
+    // mentions for current-room members, so T0 classifies the candidate
+    // as NotifyAll. The XEP-0492 public-group default (`OnMention`)
+    // then suppresses publication at T1.
+    drain_notification_candidates_for_test(state.as_ref()).await;
+    assert!(
+        state
+            .deps
+            .protocol
+            .notification_outbox
+            .pending_outbox_jobs()
+            .await
+            .expect("notification outbox jobs")
+            .is_empty(),
         "a XEP-0513 #channel mention with a foreign room URI must not notify current-room members"
     );
 }
@@ -1338,10 +1357,11 @@ async fn groupchat_active_channel_mention_pushes_live_occupants_only() {
         responses.is_empty(),
         "valid active channel mention should not return an error: {responses:?}"
     );
-    assert_eq!(
-        drain_notification_candidates_for_test(state.as_ref()).await,
-        1
-    );
+    // Post-#526 slice 1: T0 emits one candidate per affiliated recipient
+    // (bob = live, charlie = non-live), and T1 suppresses charlie's
+    // candidate via the XEP-0492 public-group `OnMention` default once
+    // the non-live `NotifyAll` class is classified at T0.
+    drain_notification_candidates_for_test(state.as_ref()).await;
     let jobs = state
         .deps
         .protocol
