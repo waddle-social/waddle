@@ -113,9 +113,6 @@ watch(
     :class="[
       wrapperSizeClass,
       presence === 'offline' ? 'app-avatar--offline' : '',
-      presence === 'online' ? 'app-avatar--online' : '',
-      presence === 'away' ? 'app-avatar--away' : '',
-      presence === 'dnd' ? 'app-avatar--dnd' : '',
     ]"
     :title="presenceTooltip"
   >
