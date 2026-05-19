@@ -147,6 +147,17 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
                                 .connection_registry
                                 .try_send_to(&occupant.real_jid, Stanza::Presence(presence));
                         }
+                        // XEP-0045 §10.9 destroy ends every occupant's
+                        // session in the room — their LiveKit
+                        // participant must end with it. Without this
+                        // the SFU keeps the room populated until its
+                        // own timeout even though the XMPP room is
+                        // gone. Idempotent for non-call participants.
+                        super::super::super::muc_call_sfu::unregister_participant_from_room(
+                            state,
+                            &room_jid,
+                            &occupant.real_jid,
+                        );
                     }
                 }
             }
