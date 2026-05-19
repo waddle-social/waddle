@@ -391,6 +391,16 @@ export class BrowserXmppClient {
   private readonly roomJoinWaiters = new Map<string, { resolve: () => void; reject: (error: Error) => void }>();
   private readonly carbonDedupIds = new Set<string>();
   readonly catchup = new ReconnectCatchup();
+  // Per-resume gate: non-zero while `handleSessionReady` is draining
+  // MAM catch-up. Live body messages received during that window are
+  // buffered in `pendingLiveDuringResume` and replayed after catch-up
+  // finishes, so a live arrival can never advance the catch-up cursor
+  // mid-pagination (see XEP-0313 §3.3 "Querying the archive" — server
+  // pagination is relative to the cursor we send, and shifting it while
+  // a `before=` page is in flight can skip or duplicate messages near
+  // the page boundary).
+  private resumeInFlight = 0;
+  private pendingLiveDuringResume: Array<WasmMessage & { carbon?: { sent?: boolean; received?: boolean }; inboxPush?: InboxEntry; _fromCarbon?: boolean }> = [];
 
   constructor(session: WaddleSession) { this.session = session; }
 
@@ -1577,6 +1587,10 @@ export class BrowserXmppClient {
   private handleMessageAck(id: string) { const wasQueued = this.inflightQueuedIds.delete(id); if (wasQueued) removeQueuedMessage(this.queueScope, id); this.messageAckHandler?.(id); const pending = this.pendingSendAt.get(id); if (pending) { this.pendingSendAt.delete(id); this.fireHook(this.messageAckHooks, id, { kind: pending.kind, latencyMs: performance.now() - pending.at }); } if (wasQueued) this.emitQueueDepth(); }
   private handleMessageFailed(id: string) { const wasQueued = this.inflightQueuedIds.delete(id); this.messageDeliveryFailureHandler?.(id); const pending = this.pendingSendAt.get(id); if (pending) { this.pendingSendAt.delete(id); this.fireHook(this.messageFailHooks, id, { kind: pending.kind }); } if (wasQueued) this.emitQueueDepth(); }
   private handleSessionReady(xmpp: XmppClientInstance, lifecycle: SessionLifecycleEvent) {
+    void this.runSessionReady(xmpp, lifecycle);
+  }
+
+  private async runSessionReady(xmpp: XmppClientInstance, lifecycle: SessionLifecycleEvent) {
     if (this.xmpp !== xmpp) return;
     this.connected = true; this.reconnectAttempt = 0;
     this.emitStatus({ state: "online", detail: countQueuedMessages(this.queueScope) > 0 ? lifecycle.type === "fresh" ? "Reconnected — replaying queued messages" : "Connection resumed — replaying queued messages" : lifecycle.type === "fresh" ? "Connection ready" : "Connection resumed" });
@@ -1591,8 +1605,28 @@ export class BrowserXmppClient {
       // disconnects before the catch-up IQ resolves.
       void this.bootstrapMdsDisplayed(xmpp);
     }
-    if (catchupEntries.length > 0) { void this.runReconnectCatchup(xmpp, catchupEntries); }
-    this.emitSessionLifecycle(lifecycle); void this.flushQueuedDirectMessages(); if (this.currentRoom) void this.flushQueuedRoomMessages(this.currentRoom);
+    this.emitSessionLifecycle(lifecycle);
+    if (catchupEntries.length > 0) {
+      const resumeId = ++this.resumeInFlight;
+      this.pendingLiveDuringResume = [];
+      try {
+        await this.runReconnectCatchup(xmpp, catchupEntries);
+      } finally {
+        if (this.xmpp === xmpp && this.resumeInFlight === resumeId) {
+          const buffered = this.pendingLiveDuringResume;
+          this.pendingLiveDuringResume = [];
+          this.resumeInFlight = 0;
+          // Drain in arrival order. Each replay flows through the same
+          // `dispatchLiveBodyMessage` path that a fresh socket arrival
+          // would, so cursor advance + downstream `messageHandler` /
+          // `directMessageHandler` dedup behave identically.
+          for (const buffered_message of buffered) this.dispatchLiveBodyMessage(buffered_message);
+        }
+      }
+      if (this.xmpp !== xmpp) return;
+    }
+    void this.flushQueuedDirectMessages();
+    if (this.currentRoom) void this.flushQueuedRoomMessages(this.currentRoom);
     if (this.onceConnected) { const done = this.onceConnected; this.onceConnected = null; this.onceConnectFailed = null; done(); }
   }
 
@@ -1704,6 +1738,14 @@ export class BrowserXmppClient {
       // the user sees "alice pinned a message" inline (#414). The
       // pin store update has already happened above.
     }
+    if (this.resumeInFlight > 0) {
+      this.pendingLiveDuringResume.push(message);
+      return;
+    }
+    this.dispatchLiveBodyMessage(message);
+  }
+
+  private dispatchLiveBodyMessage(message: WasmMessage & { carbon?: { sent?: boolean; received?: boolean }; inboxPush?: InboxEntry; _fromCarbon?: boolean }) {
     if (message.is_muc) {
       const converted = roomMessageFromArchived({ ...message, mam_id: message.id ?? crypto.randomUUID() } as WasmArchivedMessage);
       if (!converted) return;
