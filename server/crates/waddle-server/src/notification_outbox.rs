@@ -2977,22 +2977,15 @@ mod tests {
 
     /// Test stub for [`RoomPolicyStore`] — defaults rooms to public
     /// (`members_only = false`) unless explicitly mapped to private.
-    #[derive(Default)]
-    struct StubRoomPolicy {
-        private_rooms: std::sync::Mutex<std::collections::BTreeSet<BareJid>>,
-    }
+    /// Test double for [`RoomPolicyStore`] that pretends every room is
+    /// public. Slice 1's tests do not exercise private-room dispatch
+    /// policy; when slice 2 adds those paths it will grow this stub
+    /// (or replace it with a richer fixture).
+    struct StubRoomPolicy;
 
     impl StubRoomPolicy {
         fn new() -> Self {
-            Self::default()
-        }
-
-        #[allow(dead_code)]
-        fn mark_private(&self, room: BareJid) {
-            self.private_rooms
-                .lock()
-                .expect("stub room policy lock")
-                .insert(room);
+            Self
         }
     }
 
@@ -3000,14 +2993,9 @@ mod tests {
     impl RoomPolicyStore for StubRoomPolicy {
         async fn room_members_only(
             &self,
-            room: &BareJid,
+            _room: &BareJid,
         ) -> Result<Option<bool>, NotificationOutboxError> {
-            Ok(Some(
-                self.private_rooms
-                    .lock()
-                    .expect("stub room policy lock")
-                    .contains(room),
-            ))
+            Ok(Some(false))
         }
     }
 
