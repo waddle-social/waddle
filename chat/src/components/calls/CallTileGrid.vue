@@ -1,8 +1,10 @@
 <script setup lang="ts">
-import { computed, ref } from "vue";
+import { computed, inject, ref } from "vue";
 import { MicOff } from "lucide-vue-next";
 import AppAvatar from "@/components/ui/AppAvatar.vue";
 import type { LocalMediaTrack, RemoteMediaTrack } from "@/lib/calls/engine";
+import { callVideoRegistryKey, type CallVideoRegistry } from "@/lib/calls/video-registry";
+import { TileAttachments, type TileAttachable } from "@/lib/calls/tile-attach";
 
 /**
  * One tile = one (identity, role) slot in the grid. Each
@@ -16,8 +18,14 @@ type Tile = {
   label: string;
   isSelf: boolean;
   micEnabledHint: boolean;
-  videoTrack: { attach: (el: HTMLMediaElement) => void; detach: () => HTMLMediaElement[] } | null;
-  audioTrack: { attach: (el: HTMLMediaElement) => void; detach: () => HTMLMediaElement[] } | null;
+  videoTrack: {
+    attach: (el: HTMLMediaElement) => void;
+    detach: (el: HTMLMediaElement) => HTMLMediaElement;
+  } | null;
+  audioTrack: {
+    attach: (el: HTMLMediaElement) => void;
+    detach: (el: HTMLMediaElement) => HTMLMediaElement;
+  } | null;
 };
 
 const props = defineProps<{
@@ -112,12 +120,31 @@ function toggleFocus(tile: Tile) {
   focusedKey.value = focusedKey.value === tile.key ? null : tile.key;
 }
 
+/**
+ * Optional injected registry shared with CallOverlay so PIP can look
+ * up a tile's `<video>` element without crossing the LiveKit SDK's
+ * private `attachedElements` surface. Resolved at component setup;
+ * `null` when no overlay provided one (e.g. standalone snapshots in
+ * tests).
+ */
+const videoRegistry = inject<CallVideoRegistry | null>(callVideoRegistryKey, null);
+
+/**
+ * Per-tile bookkeeping for the (element, track) pair currently
+ * attached. See `tile-attach.ts` for the contract — short version:
+ * every `:ref` change goes through `sync` which reconciles the
+ * previous record so LiveKit's `attachedElements` array never grows
+ * stale entries.
+ */
+const attachments = new TileAttachments();
+
 function attachTrack(
+  key: string,
   el: HTMLMediaElement | null,
-  track: { attach: (target: HTMLMediaElement) => void } | null,
+  track: TileAttachable | null,
+  identity: string | null,
 ): void {
-  if (!el || !track) return;
-  track.attach(el);
+  attachments.sync(key, el, track, identity, videoRegistry);
 }
 </script>
 
@@ -136,7 +163,7 @@ function attachTrack(
         >
           <video
             v-if="focusedTile.videoTrack"
-            :ref="(el) => attachTrack(el as HTMLVideoElement | null, focusedTile?.videoTrack ?? null)"
+            :ref="(el) => attachTrack(`${focusedTile?.key}:video`, el as HTMLVideoElement | null, focusedTile?.videoTrack ?? null, focusedTile?.identity ?? null)"
             class="call-tile__video"
             :class="focusedTile.isSelf ? 'call-tile__video--mirrored' : ''"
             autoplay
@@ -148,7 +175,7 @@ function attachTrack(
           </div>
           <audio
             v-if="focusedTile.audioTrack && !focusedTile.isSelf"
-            :ref="(el) => attachTrack(el as HTMLAudioElement | null, focusedTile?.audioTrack ?? null)"
+            :ref="(el) => attachTrack(`${focusedTile?.key}:audio`, el as HTMLAudioElement | null, focusedTile?.audioTrack ?? null, null)"
             autoplay
           />
           <div class="call-tile__nameplate">
@@ -175,7 +202,7 @@ function attachTrack(
         >
           <video
             v-if="tile.videoTrack"
-            :ref="(el) => attachTrack(el as HTMLVideoElement | null, tile.videoTrack)"
+            :ref="(el) => attachTrack(`${tile.key}:video`, el as HTMLVideoElement | null, tile.videoTrack, tile.identity)"
             class="call-tile__video"
             :class="tile.isSelf ? 'call-tile__video--mirrored' : ''"
             autoplay
@@ -187,7 +214,7 @@ function attachTrack(
           </div>
           <audio
             v-if="tile.audioTrack && !tile.isSelf"
-            :ref="(el) => attachTrack(el as HTMLAudioElement | null, tile.audioTrack)"
+            :ref="(el) => attachTrack(`${tile.key}:audio`, el as HTMLAudioElement | null, tile.audioTrack, null)"
             autoplay
           />
           <div class="call-tile__nameplate">
@@ -220,7 +247,7 @@ function attachTrack(
         >
           <video
             v-if="tile.videoTrack"
-            :ref="(el) => attachTrack(el as HTMLVideoElement | null, tile.videoTrack)"
+            :ref="(el) => attachTrack(`${tile.key}:video`, el as HTMLVideoElement | null, tile.videoTrack, tile.identity)"
             class="call-tile__video"
             :class="tile.isSelf ? 'call-tile__video--mirrored' : ''"
             autoplay
@@ -232,7 +259,7 @@ function attachTrack(
           </div>
           <audio
             v-if="tile.audioTrack && !tile.isSelf"
-            :ref="(el) => attachTrack(el as HTMLAudioElement | null, tile.audioTrack)"
+            :ref="(el) => attachTrack(`${tile.key}:audio`, el as HTMLAudioElement | null, tile.audioTrack, null)"
             autoplay
           />
           <div class="call-tile__nameplate">

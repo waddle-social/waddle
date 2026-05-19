@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref, watch } from "vue";
+import { computed, onBeforeUnmount, onMounted, provide, ref, watch } from "vue";
 import { useStore } from "@nanostores/vue";
 import {
   $callState,
@@ -10,6 +10,10 @@ import {
 } from "@/lib/calls/call-store";
 import type { CallWireSender } from "@/lib/calls/outbound";
 import { useCallEngine } from "@/lib/calls/use-call-engine";
+import {
+  callVideoRegistryKey,
+  createCallVideoRegistry,
+} from "@/lib/calls/video-registry";
 import { connectionStore } from "@/lib/connection-store";
 import {
   $callUiMode,
@@ -46,6 +50,13 @@ const micEnabled = ref(true);
 const camEnabled = ref(true);
 const settingsOpen = ref(false);
 const pipVideoEl = ref<HTMLVideoElement | null>(null);
+
+// Shared registry of `<video>` elements currently attached to call
+// tracks. CallTileGrid populates it through its `:ref` callbacks; the
+// PIP toggle below reads it instead of reaching into LiveKit's
+// private `attachedElements` array on a `RemoteTrack` / `LocalTrack`.
+const videoRegistry = createCallVideoRegistry();
+provide(callVideoRegistryKey, videoRegistry);
 
 /** Effective mode for rendering — pip falls back to the stored
  *  non-pip mode while still in PIP, because PIP isn't a "surface" we
@@ -180,19 +191,17 @@ async function togglePip(): Promise<void> {
   if (typeof document === "undefined" || !document.pictureInPictureEnabled) return;
   // Prefer the first remote video; fall back to a local one only if
   // no remote video exists (1:1 self-view PIP for self-debugging).
+  // Resolved via the shared registry that CallTileGrid populates on
+  // every `<video>` attach — no LiveKit-private API access.
   let target: HTMLVideoElement | null = null;
   const fromRemote = remoteTracks.value.find((t) => t.kind === "video");
   if (fromRemote) {
-    target = (fromRemote.track as unknown as { attachedElements: HTMLMediaElement[] }).attachedElements.find(
-      (el) => el instanceof HTMLVideoElement,
-    ) as HTMLVideoElement | undefined ?? null;
+    target = videoRegistry.get(fromRemote.participantIdentity);
   }
   if (!target) {
     const fromLocal = localTracks.value.find((t) => t.kind === "video");
     if (fromLocal) {
-      target = (fromLocal.track as unknown as { attachedElements: HTMLMediaElement[] }).attachedElements.find(
-        (el) => el instanceof HTMLVideoElement,
-      ) as HTMLVideoElement | undefined ?? null;
+      target = videoRegistry.get(fromLocal.participantIdentity);
     }
   }
   if (!target) return;
@@ -218,12 +227,57 @@ async function togglePip(): Promise<void> {
   }
 }
 
+/**
+ * Best-effort synchronous teardown for the tab-close path.
+ *
+ * `onBeforeUnmount` runs too late for tab close — the browser will
+ * tear the WebSocket down before our async wire-send completes, and
+ * the peer ends up stuck on a dangling "Connecting…" overlay until
+ * the LiveKit room times them out. `pagehide` fires earlier in the
+ * unload sequence and is the documented hook for best-effort
+ * networking on unload (the modern replacement for `beforeunload`
+ * for this purpose). We fire-and-forget the terminate stanza — any
+ * await would race the unload — and rely on the wasm side queueing
+ * the bytes onto the socket synchronously.
+ */
+function handlePageHide(): void {
+  const sender = getSender();
+  if (!sender) return;
+  // `tearDownActiveCall` is async but the wire methods it calls
+  // synchronously enqueue stanzas into the wasm client's outbound
+  // queue. We don't await — the browser is unloading.
+  void tearDownActiveCall(sender, "gone");
+}
+
+onMounted(() => {
+  if (typeof window !== "undefined") {
+    window.addEventListener("pagehide", handlePageHide);
+  }
+});
+
 onBeforeUnmount(() => {
   // Tab close mid-call: best-effort session-terminate so the peer's
   // overlay closes immediately instead of waiting for the LiveKit
-  // room to drop them.
+  // room to drop them. The `pagehide` handler above is the primary
+  // route on actual tab-close; this branch handles in-app overlay
+  // unmounts (e.g. route change away from a call surface).
   void tearDownActiveCall(getSender(), "gone");
   void engine.disconnect();
+  // Exit PIP if our video was the one in the floating window —
+  // otherwise the browser leaves a frozen still-frame window visible
+  // after the call has ended, confusing the user about whether the
+  // call is still running.
+  if (
+    typeof document !== "undefined" &&
+    pipVideoEl.value &&
+    document.pictureInPictureElement === pipVideoEl.value
+  ) {
+    void document.exitPictureInPicture().catch(() => undefined);
+  }
+  pipVideoEl.value = null;
+  if (typeof window !== "undefined") {
+    window.removeEventListener("pagehide", handlePageHide);
+  }
 });
 
 const localIdentity = computed(() => engine.localIdentity);
