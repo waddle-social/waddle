@@ -249,6 +249,73 @@ async fn test_send_to_waits_for_capacity_instead_of_dropping() {
     );
 }
 
+/// Issue #699: the MUC reflector emits one `RouteToConnection` per
+/// occupant. If even ONE recipient's per-connection mpsc is full
+/// (slow consumer, zombie WebSocket, paused VM, …) the reflector's
+/// caller must NOT block — every subsequent groupchat dispatch goes
+/// through the same interpreter loop, and a blocking send wedges
+/// archive + inbox writes for the whole room until the pod
+/// restarts. `try_send_peer_to` is the non-blocking variant the
+/// reflector now uses.
+#[tokio::test(start_paused = true)]
+async fn try_send_peer_to_returns_immediately_when_recipient_channel_is_full() {
+    let registry = ConnectionRegistry::new();
+    let jid = test_jid("zombie");
+    // Capacity 1 + never-drained receiver simulates the zombie
+    // WebSocket: consumer task hung on `Sink::send`, mpsc is full,
+    // producer must not stall.
+    let (tx, _rx_never_drains) = mpsc::channel(1);
+    registry.register(jid.clone(), tx);
+
+    // Saturate the channel.
+    let prime = make_test_message("zombie@example.com");
+    assert!(matches!(
+        registry.send_to(&jid, Stanza::Message(prime)).await,
+        SendResult::Sent
+    ));
+
+    // Now the channel is full. A blocking `send_peer_to` would
+    // await forever (1.5h+ in prod before this fix). The
+    // non-blocking variant returns `DroppedFull` synchronously.
+    let drop_target = make_test_message("zombie@example.com");
+    let start = tokio::time::Instant::now();
+    let outcome = registry.try_send_peer_to(&jid, Stanza::Message(drop_target));
+    let elapsed = start.elapsed();
+
+    assert_eq!(outcome, BroadcastOutcome::DroppedFull);
+    // The whole point: bounded synchronous cost regardless of
+    // recipient state.
+    assert!(
+        elapsed < Duration::from_millis(10),
+        "try_send_peer_to must not await capacity — took {elapsed:?}"
+    );
+}
+
+/// `try_send_peer_to` must tag the outbound as `PeerStanza` so the
+/// destination's main loop runs the recipient pass (XEP-0359
+/// recipient stanza-id, XEP-0313 archive, XEP-0280 received-carbons,
+/// inbox projection). If this regressed to `DirectFrame`, groupchat
+/// reflection would skip every recipient-side side-effect and look
+/// like silent message loss to anyone other than the sender.
+#[tokio::test]
+async fn try_send_peer_to_emits_peer_stanza_kind() {
+    let registry = ConnectionRegistry::new();
+    let jid = test_jid("alice");
+    let (tx, mut rx) = mpsc::channel(4);
+    registry.register(jid.clone(), tx);
+
+    let msg = make_test_message("alice@example.com");
+    let outcome = registry.try_send_peer_to(&jid, Stanza::Message(msg));
+    assert_eq!(outcome, BroadcastOutcome::Delivered);
+
+    let outbound = rx.recv().await.expect("queued stanza");
+    assert_eq!(
+        outbound.kind,
+        DeliveryKind::PeerStanza,
+        "groupchat reflection must run through the recipient-pass pipeline"
+    );
+}
+
 #[test]
 fn test_list_connections() {
     let registry = ConnectionRegistry::new();

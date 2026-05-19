@@ -120,20 +120,64 @@ impl ConnectionRegistry {
         }
     }
 
-    /// Non-blocking send. Returns a typed `BroadcastOutcome` describing
-    /// delivery, absence, or which silent-drop path was taken.
+    /// Non-blocking send as [`DeliveryKind::DirectFrame`]. Returns a
+    /// typed `BroadcastOutcome` describing delivery, absence, or
+    /// which silent-drop path was taken.
     ///
-    /// Intended for fan-out paths (MUC broadcasts) where a slow or zombied
-    /// consumer must never stall the producer task. On `Closed` the stale
-    /// entry is evicted, but only if the current registry entry's sender is
-    /// still closed — a concurrent `register` for the same FullJid may have
-    /// installed a fresh, live sender between our `get` and `try_send`, and
-    /// we must not wipe the newcomer. On `Full` the stanza is dropped
-    /// without touching the registry (the consumer may just be catching up).
+    /// Intended for fan-out paths (XEP-0163 PEP fanout, MUC presence
+    /// broadcasts, roster pushes, …) where a slow or zombied
+    /// consumer must never stall the producer task.
     ///
-    /// Every outcome bumps a Prometheus counter so production drop rates
-    /// are visible even when callers discard the return value.
+    /// For peer-routed groupchat reflection that needs the recipient
+    /// pass (XEP-0359 recipient stamp, XEP-0313 archive, XEP-0280
+    /// received-carbons, inbox projection), use
+    /// [`Self::try_send_peer_to`] instead — same non-blocking
+    /// guarantees, but the destination's main loop runs its state
+    /// machine before writing to the wire.
     pub fn try_send_to(&self, jid: &FullJid, stanza: Stanza) -> BroadcastOutcome {
+        self.try_send_to_with_kind(jid, stanza, DeliveryKind::DirectFrame)
+    }
+
+    /// Non-blocking [`DeliveryKind::PeerStanza`] send. Locked Q-fix
+    /// #699: the MUC reflector emits one `RouteToConnection` per
+    /// occupant and must NOT block on any single connection's mpsc
+    /// — one zombie WebSocket peer with a hung consumer task was
+    /// enough to stall every groupchat dispatch through the same
+    /// interpreter loop (and therefore archive + inbox writes for
+    /// every other user of the room) until the pod restarted.
+    ///
+    /// Same `BroadcastOutcome` contract as [`Self::try_send_to`];
+    /// the destination's main loop feeds the stanza through its
+    /// state machine as `InboundEvent::StanzaFromPeer` so the
+    /// recipient pass still runs when the channel has capacity.
+    pub fn try_send_peer_to(&self, jid: &FullJid, stanza: Stanza) -> BroadcastOutcome {
+        self.try_send_to_with_kind(jid, stanza, DeliveryKind::PeerStanza)
+    }
+
+    /// Shared non-blocking send path. The only thing the public
+    /// callers vary is the [`DeliveryKind`] tag on the queued
+    /// [`OutboundStanza`], which is built via the same
+    /// [`OutboundStanza::new`] / [`OutboundStanza::peer_stanza`]
+    /// constructors as the blocking [`Self::send_to_with_kind`] — no
+    /// manual struct literal here so the kind→constructor mapping
+    /// stays in one place.
+    ///
+    /// On `Closed` the stale entry is evicted, but only if the
+    /// current registry entry's sender is still closed — a
+    /// concurrent `register` for the same FullJid may have installed
+    /// a fresh, live sender between our `get` and `try_send`, and we
+    /// must not wipe the newcomer. On `Full` the stanza is dropped
+    /// without touching the registry (the consumer may just be
+    /// catching up).
+    ///
+    /// Every outcome bumps a Prometheus counter so production drop
+    /// rates are visible even when callers discard the return value.
+    fn try_send_to_with_kind(
+        &self,
+        jid: &FullJid,
+        stanza: Stanza,
+        kind: DeliveryKind,
+    ) -> BroadcastOutcome {
         let sender = match self.connections.get(jid) {
             Some(entry) => entry.value().sender.clone(),
             None => {
@@ -142,7 +186,10 @@ impl ConnectionRegistry {
             }
         };
 
-        let outbound = OutboundStanza::new(stanza);
+        let outbound = match kind {
+            DeliveryKind::DirectFrame => OutboundStanza::new(stanza),
+            DeliveryKind::PeerStanza => OutboundStanza::peer_stanza(stanza),
+        };
 
         match sender.try_send(outbound) {
             Ok(()) => {
@@ -160,6 +207,7 @@ impl ConnectionRegistry {
                 // out every other signal on the pod.
                 debug!(
                     jid = %jid,
+                    ?kind,
                     "Outbound channel full; broadcast stanza dropped"
                 );
                 BroadcastOutcome::DroppedFull

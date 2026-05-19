@@ -103,6 +103,45 @@ pub(super) async fn deliver_peer_to_full(
     target: &jid::FullJid,
     stanza: &Stanza,
 ) {
+    // Issue #699: the MUC reflector emits one `RouteToConnection` per
+    // occupant. Sending with the blocking `send_peer_to` (which
+    // `mpsc::Sender::send().await`s on a 256-slot per-connection
+    // channel) means a single zombie WebSocket peer — TCP gone
+    // without FIN, consumer task hung on `Sink::send` — wedges every
+    // subsequent groupchat dispatch through the same interpreter
+    // loop. In prod that froze global MAM + inbox writes for hours
+    // until a pod restart. Groupchat reflection is a fan-out by
+    // design, so route it through the non-blocking `try_send_peer_to`
+    // and tolerate `DroppedFull` for slow consumers. 1:1 chat
+    // (message type='chat', IQ, presence-to-full-JID) keeps the
+    // blocking path: those targets are singular and the natural
+    // backpressure is desirable.
+    let is_groupchat_reflection = matches!(
+        stanza,
+        Stanza::Message(message)
+            if message.type_ == xmpp_parsers::message::MessageType::Groupchat
+    );
+    if is_groupchat_reflection {
+        match registry.try_send_peer_to(target, stanza.clone()) {
+            waddle_xmpp::registry::BroadcastOutcome::Delivered => {
+                debug!(jid = %target, "RouteToConnection: groupchat reflection queued for recipient pass");
+            }
+            waddle_xmpp::registry::BroadcastOutcome::DroppedFull => {
+                // Per-recipient log at debug; the broadcast-level
+                // Prometheus counter (`waddle_broadcast_dropped_full_total`)
+                // is the canonical signal under load.
+                debug!(
+                    jid = %target,
+                    "RouteToConnection: groupchat reflection dropped (recipient mpsc full)"
+                );
+            }
+            waddle_xmpp::registry::BroadcastOutcome::NotConnected
+            | waddle_xmpp::registry::BroadcastOutcome::DroppedClosed => {
+                deliver_to_detached(sm_session_registry, target, stanza).await;
+            }
+        }
+        return;
+    }
     // The live-send path needs ownership for `send_peer_to`; the
     // detached fallback only borrows. Clone once here on the live
     // branch so the caller hands us an `&Stanza` and avoids a
@@ -114,46 +153,56 @@ pub(super) async fn deliver_peer_to_full(
         }
         waddle_xmpp::registry::SendResult::NotConnected
         | waddle_xmpp::registry::SendResult::ChannelClosed => {
-            // Known limitation (Copilot review on PR #276): queues the
-            // pre-recipient-pass stanza into the detached XEP-0198
-            // replay buffer. Replay sends the stored XML verbatim
-            // WITHOUT a recipient-pass dispatch, so the replayed
-            // message is missing the recipient-side
-            // `<stanza-id by='recipient'/>` (XEP-0359 §5) and
-            // recipient-side filtering / archive / inbox effects don't
-            // fire. Matches LEGACY behaviour (which had no recipient
-            // pass at all) and is therefore not a regression. Closing
-            // the gap properly requires running the headless recipient
-            // pass per detached target and queueing its `SendStanza`
-            // output — tracked as a follow-up to #229.
-            if let Some(sm) = sm_session_registry {
-                match sm
-                    .record_stanza_for_detached_bound_resource(target, stanza, chrono::Utc::now())
-                    .await
-                {
-                    Ok(true) => {
-                        debug!(
-                            jid = %target,
-                            "RouteToConnection: recipient detached, queued for XEP-0198 replay"
-                        );
-                    }
-                    Ok(false) => {
-                        debug!(
-                            jid = %target,
-                            "RouteToConnection: target offline and no detached session, dropping"
-                        );
-                    }
-                    Err(error) => {
-                        warn!(
-                            jid = %target,
-                            %error,
-                            "RouteToConnection: failed to record stanza for detached resource"
-                        );
-                    }
-                }
-            } else {
-                debug!(jid = %target, "RouteToConnection: target offline, dropping");
-            }
+            deliver_to_detached(sm_session_registry, target, stanza).await;
+        }
+    }
+}
+
+/// Shared "live target unavailable" fallback. Queues the stanza
+/// into the recipient's detached XEP-0198 replay buffer if a
+/// resumable session exists, otherwise drops with a debug log.
+///
+/// Known limitation (Copilot review on PR #276): the buffered XML
+/// is the pre-recipient-pass form, so replay on resume sends it
+/// verbatim WITHOUT running the recipient-pass chain. The replayed
+/// message is missing the recipient-side `<stanza-id by='recipient'/>`
+/// (XEP-0359 §5) and recipient-side filtering / archive / inbox
+/// effects don't fire. Matches LEGACY behaviour (which had no
+/// recipient pass at all) and is therefore not a regression. Closing
+/// the gap properly requires running the headless recipient pass per
+/// detached target and queueing its `SendStanza` output — tracked as
+/// a follow-up to #229.
+async fn deliver_to_detached(
+    sm_session_registry: Option<&Arc<InMemorySmSessionRegistry>>,
+    target: &jid::FullJid,
+    stanza: &Stanza,
+) {
+    let Some(sm) = sm_session_registry else {
+        debug!(jid = %target, "RouteToConnection: target offline, dropping");
+        return;
+    };
+    match sm
+        .record_stanza_for_detached_bound_resource(target, stanza, chrono::Utc::now())
+        .await
+    {
+        Ok(true) => {
+            debug!(
+                jid = %target,
+                "RouteToConnection: recipient detached, queued for XEP-0198 replay"
+            );
+        }
+        Ok(false) => {
+            debug!(
+                jid = %target,
+                "RouteToConnection: target offline and no detached session, dropping"
+            );
+        }
+        Err(error) => {
+            warn!(
+                jid = %target,
+                %error,
+                "RouteToConnection: failed to record stanza for detached resource"
+            );
         }
     }
 }
