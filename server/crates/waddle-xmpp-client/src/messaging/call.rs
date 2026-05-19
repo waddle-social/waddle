@@ -20,6 +20,7 @@
 use jid::{FullJid, Jid};
 use minidom::Element;
 use xmpp_parsers::jingle::SessionId;
+use xmpp_parsers::message::{Message, MessageType};
 
 /// Media kinds offered or accepted on a call. Inferred from the
 /// JMI `<description media='…'/>` child or from the Jingle content
@@ -94,6 +95,11 @@ const NS_JINGLE: &str = "urn:xmpp:jingle:1";
 const NS_JINGLE_MESSAGE: &str = "urn:xmpp:jingle-message:0";
 const NS_JINGLE_RTP: &str = "urn:xmpp:jingle:apps:rtp:1";
 const NS_WADDLE_LIVEKIT_TRANSPORT: &str = "urn:waddle:transports:livekit:0";
+/// XEP-0334 Message Processing Hints namespace. The `<store/>` hint
+/// is mandatory on every JMI envelope per XEP-0353 §3 so MAM
+/// archives keep the call timeline reconstructible even when the
+/// stanza carries no body.
+const NS_HINTS: &str = "urn:xmpp:hints";
 
 /// Parse a `<message>` stanza for a JMI envelope. Returns `None`
 /// when no `urn:xmpp:jingle-message:0` child is present.
@@ -277,6 +283,29 @@ pub fn build_finish(sid: &SessionId) -> Element {
     Element::builder("finish", NS_JINGLE_MESSAGE)
         .attr("id", sid.0.as_str())
         .build()
+}
+
+/// Wrap a JMI body (`<propose/>` / `<proceed/>` / `<reject/>` /
+/// `<retract/>` / `<finish/>`) in the XEP-0353 §3-conformant
+/// `<message type='chat'>` envelope. The envelope MUST be `type='chat'`
+/// and MUST carry the XEP-0334 `<store/>` hint so MAM archives keep
+/// the call timeline reconstructible even when the body is empty.
+///
+/// The envelope is constructed via the typed
+/// [`xmpp_parsers::message::Message`] so `type='chat'` flows through the
+/// dedicated `MessageType::Chat` variant instead of an ad-hoc attribute
+/// (typed-payloads rule). The store hint is the only payload Waddle
+/// adds — the JMI body itself is appended next so the responder's
+/// parser still sees it as the first non-hint child.
+pub fn wrap_jmi_message(to: &Jid, jmi: Element) -> Element {
+    let mut msg = Message::new_with_type(MessageType::Chat, Some(to.clone()));
+    msg.payloads.push(store_hint_element());
+    msg.payloads.push(jmi);
+    Element::from(msg)
+}
+
+fn store_hint_element() -> Element {
+    Element::builder("store", NS_HINTS).build()
 }
 
 /// Build the `<jingle/>` body of a session-initiate IQ. The
@@ -661,6 +690,68 @@ mod tests {
 
         let without = build_session_terminate(&sid("c1"), None);
         assert!(without.children().all(|c| c.name() != "reason"));
+    }
+
+    #[test]
+    fn wrap_jmi_message_stamps_type_chat_and_store_hint() {
+        // XEP-0353 §3: every JMI message (propose / proceed / reject /
+        // retract / finish) MUST be `type='chat'` and MUST contain a
+        // XEP-0334 `<store/>` hint. Without this envelope, JMI stanzas
+        // ship as `type='normal'` and skip MAM archival, breaking call
+        // history reconstruction.
+        let to: Jid = "bob@waddle.test".parse().unwrap();
+        let stanza = wrap_jmi_message(&to, build_propose(&sid("c1"), CallMedia::audio_video()));
+        assert_eq!(stanza.name(), "message");
+        assert_eq!(stanza.attr("type"), Some("chat"));
+        assert_eq!(stanza.attr("to"), Some("bob@waddle.test"));
+        let store = stanza
+            .children()
+            .find(|c| c.name() == "store" && c.ns() == NS_HINTS)
+            .expect("XEP-0334 <store/> hint required by XEP-0353 §3");
+        assert!(store.children().next().is_none());
+        // The JMI body itself rides along, so the responder's parser
+        // still surfaces it via parse_jmi_message → CallEventKind.
+        let ev = parse_call_event(
+            &Element::builder("message", "jabber:client")
+                .attr("from", "alice@waddle.test/desktop")
+                .attr("type", stanza.attr("type").unwrap_or_default())
+                .append_all(stanza.children().cloned())
+                .build(),
+        )
+        .expect("wrapped JMI body still parses as a call event");
+        assert!(matches!(ev.kind, CallEventKind::Propose { .. }));
+    }
+
+    #[test]
+    fn wrap_jmi_message_preserves_jmi_body_for_every_variant() {
+        // Every JMI variant must survive the envelope.
+        let to: Jid = "bob@waddle.test".parse().unwrap();
+        let cases: Vec<(&str, Element)> = vec![
+            (
+                "propose",
+                build_propose(&sid("c1"), CallMedia::audio_only()),
+            ),
+            ("proceed", build_proceed(&sid("c1"))),
+            ("reject", build_reject(&sid("c1"))),
+            ("retract", build_retract(&sid("c1"))),
+            ("finish", build_finish(&sid("c1"))),
+        ];
+        for (name, body) in cases {
+            let stanza = wrap_jmi_message(&to, body);
+            assert_eq!(stanza.attr("type"), Some("chat"), "{name}: type=chat");
+            assert!(
+                stanza
+                    .children()
+                    .any(|c| c.name() == name && c.ns() == NS_JINGLE_MESSAGE),
+                "{name}: JMI body preserved"
+            );
+            assert!(
+                stanza
+                    .children()
+                    .any(|c| c.name() == "store" && c.ns() == NS_HINTS),
+                "{name}: store hint attached"
+            );
+        }
     }
 
     #[test]

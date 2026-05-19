@@ -2,7 +2,8 @@ use super::*;
 use std::str::FromStr;
 use waddle_xmpp_client::messaging::{
     build_finish, build_proceed, build_propose, build_reject, build_retract, build_session_accept,
-    build_session_initiate, build_session_terminate, CallMedia, JingleReason, SessionId,
+    build_session_initiate, build_session_terminate, wrap_jmi_message, CallMedia, JingleReason,
+    SessionId,
 };
 
 const NS_WADDLE_MUC_CALL: &str = "urn:waddle:muc-call:0";
@@ -60,11 +61,17 @@ fn parse_muc_call_join_result(result: &Element) -> Result<crate::types::WaddleLi
     })
 }
 
-fn message_with_jmi(to: &str, jmi: Element) -> Element {
-    Element::builder("message", NS_JABBER_CLIENT)
-        .attr("to", to)
-        .append(jmi)
-        .build()
+/// Wrap a JMI body in the XEP-0353 §3-conformant `<message type='chat'>`
+/// envelope with a XEP-0334 `<store/>` hint. Routes through
+/// [`waddle_xmpp_client::messaging::wrap_jmi_message`] so the wasm and
+/// native clients ship byte-identical envelopes; the only wasm-local
+/// concern is parsing the JS `String` `to` into a typed
+/// [`jid::Jid`] at the boundary.
+fn message_with_jmi(to: &str, jmi: Element) -> Result<Element, JsValue> {
+    let to_jid: jid::Jid = to
+        .parse()
+        .map_err(|_| js_error(format!("invalid JID for JMI envelope: {to}")))?;
+    Ok(wrap_jmi_message(&to_jid, jmi))
 }
 
 fn iq_set(to: &str, payload: Element) -> Element {
@@ -110,7 +117,7 @@ impl WaddleClient {
             let stanza = message_with_jmi(
                 &peer_bare_jid,
                 build_propose(&sid(sid_str), media_from_flags(audio, video)),
-            );
+            )?;
             send_stanza_command(inner, stanza).await?;
             Ok(JsValue::UNDEFINED)
         })
@@ -119,7 +126,7 @@ impl WaddleClient {
     pub fn send_call_proceed(&self, peer_full_jid: String, sid_str: String) -> Promise {
         let inner = self.inner.clone();
         future_to_promise(async move {
-            let stanza = message_with_jmi(&peer_full_jid, build_proceed(&sid(sid_str)));
+            let stanza = message_with_jmi(&peer_full_jid, build_proceed(&sid(sid_str)))?;
             send_stanza_command(inner, stanza).await?;
             Ok(JsValue::UNDEFINED)
         })
@@ -128,7 +135,7 @@ impl WaddleClient {
     pub fn send_call_reject(&self, peer_full_jid: String, sid_str: String) -> Promise {
         let inner = self.inner.clone();
         future_to_promise(async move {
-            let stanza = message_with_jmi(&peer_full_jid, build_reject(&sid(sid_str)));
+            let stanza = message_with_jmi(&peer_full_jid, build_reject(&sid(sid_str)))?;
             send_stanza_command(inner, stanza).await?;
             Ok(JsValue::UNDEFINED)
         })
@@ -137,7 +144,7 @@ impl WaddleClient {
     pub fn send_call_retract(&self, peer_full_jid: String, sid_str: String) -> Promise {
         let inner = self.inner.clone();
         future_to_promise(async move {
-            let stanza = message_with_jmi(&peer_full_jid, build_retract(&sid(sid_str)));
+            let stanza = message_with_jmi(&peer_full_jid, build_retract(&sid(sid_str)))?;
             send_stanza_command(inner, stanza).await?;
             Ok(JsValue::UNDEFINED)
         })
@@ -146,7 +153,7 @@ impl WaddleClient {
     pub fn send_call_finish(&self, peer_full_jid: String, sid_str: String) -> Promise {
         let inner = self.inner.clone();
         future_to_promise(async move {
-            let stanza = message_with_jmi(&peer_full_jid, build_finish(&sid(sid_str)));
+            let stanza = message_with_jmi(&peer_full_jid, build_finish(&sid(sid_str)))?;
             send_stanza_command(inner, stanza).await?;
             Ok(JsValue::UNDEFINED)
         })
@@ -407,5 +414,46 @@ mod tests {
         assert!(FullJid::from_str("not-a-jid").is_err());
         assert!(FullJid::from_str("@domain/res").is_err());
         assert!(FullJid::from_str("").is_err());
+    }
+
+    /// XEP-0353 §3: every JMI envelope MUST be `type='chat'` and MUST
+    /// contain a XEP-0334 `<store/>` hint. Tests against the shared
+    /// helper which both the native and wasm clients route through —
+    /// keeps the wire shape locked from the wasm boundary down.
+    #[test]
+    fn message_with_jmi_stamps_chat_type_and_store_hint() {
+        use waddle_xmpp_client::messaging::build_propose;
+        let body = build_propose(
+            &waddle_xmpp_client::messaging::SessionId("c1".into()),
+            waddle_xmpp_client::messaging::CallMedia::audio_only(),
+        );
+        let stanza = super::message_with_jmi("bob@waddle.test", body).expect("valid JID accepted");
+        assert_eq!(stanza.name(), "message");
+        assert_eq!(stanza.attr("type"), Some("chat"));
+        assert_eq!(stanza.attr("to"), Some("bob@waddle.test"));
+        assert!(
+            stanza
+                .children()
+                .any(|c| c.name() == "store" && c.ns() == "urn:xmpp:hints"),
+            "XEP-0334 <store/> hint required by XEP-0353 §3"
+        );
+        assert!(
+            stanza
+                .children()
+                .any(|c| c.name() == "propose" && c.ns() == "urn:xmpp:jingle-message:0"),
+            "JMI body preserved"
+        );
+    }
+
+    /// `message_with_jmi` returns `Result<_, JsValue>` on the error
+    /// path, and `JsValue::from_str` panics under `cargo test` on
+    /// native (it's only safe on wasm32). The JID parse itself is a
+    /// thin `s.parse::<jid::Jid>()` call though, so we test the
+    /// underlying parse directly — same coverage, no JsValue
+    /// instantiation on native.
+    #[test]
+    fn jmi_envelope_jid_parse_rejects_garbage() {
+        assert!("@bogus".parse::<jid::Jid>().is_err());
+        assert!("".parse::<jid::Jid>().is_err());
     }
 }
