@@ -78,6 +78,12 @@ import {
   type WasmStory,
 } from "./story-types";
 import {
+  storyReadsFromWasm,
+  storyReadsToWasm,
+  type StoryReads,
+  type WasmStoryReads,
+} from "./story-reads-types";
+import {
   eventFromWasm,
   rruleToWasm,
   type CommunityEvent,
@@ -985,6 +991,40 @@ export class BrowserXmppClient {
     return jid;
   }
 
+  /**
+   * Upload a single file/blob for a story (or other plaintext-broadcast
+   * surface). Unlike `uploadAttachments`, the payload is uploaded as-is
+   * without OMEMO encryption — stories are community-broadcast content,
+   * not DMs.
+   *
+   * The caller is expected to pre-validate `blob.size <=
+   * MAX_FILE_UPLOAD_BYTES`; the upload service may still reject with
+   * 413 if its own cap is lower. Filename is replaced with a random
+   * UUID-based name so user-facing names don't leak into the public
+   * GET URL or OTel spans.
+   */
+  async uploadStoryMedia(
+    blob: Blob | File,
+    onProgress?: (progress: UploadProgress) => void,
+  ): Promise<{ url: string; size: number; contentType: string }> {
+    const xmpp = await this.requireConnectedXmpp();
+    const uploadDomain = await this.resolveUploadService();
+    const contentType = blob.type || "application/octet-stream";
+    const ext = contentType.split("/")[1]?.split(";")[0] || "bin";
+    const safeName = `story-${crypto.randomUUID()}.${ext}`;
+    const sanitised =
+      blob instanceof File
+        ? new File([blob], safeName, { type: contentType })
+        : new File([blob], safeName, { type: contentType });
+    const result = await uploadFile(
+      xmpp as WasmClient,
+      sanitised,
+      uploadDomain,
+      onProgress,
+    );
+    return { url: result.getUrl, size: result.size, contentType: result.contentType };
+  }
+
   async uploadAttachments(files: ReadonlyArray<File | Blob>, onProgress?: (overall: UploadProgress, index: number) => void): Promise<OutboundFileAttachment[]> {
     const xmpp = await this.requireConnectedXmpp();
     const uploadDomain = await this.resolveUploadService();
@@ -1099,6 +1139,31 @@ export class BrowserXmppClient {
     const xmpp = await this.requireConnectedXmpp();
     const result = await xmpp.stories_items?.(communityJid, maxItems ?? null) as WasmStory[] | undefined;
     return (result ?? []).map(storyFromWasm);
+  }
+
+  /**
+   * Fetch the current user's story read-state from their private PEP
+   * node (XEP-0223 `urn:waddle:story:reads:0`). Read-state is
+   * non-critical: any failure (no item yet, network error, spoofed
+   * `from`) silently produces an empty result rather than surfacing
+   * an error to the UI.
+   */
+  async fetchStoryReads(): Promise<StoryReads> {
+    const xmpp = await this.requireConnectedXmpp();
+    const result = (await xmpp.story_reads_fetch?.()) as WasmStoryReads | undefined;
+    return storyReadsFromWasm(result);
+  }
+
+  /**
+   * Publish the current user's story read-state. Overwrites the
+   * single `current` item on every call.
+   */
+  async publishStoryReads(reads: StoryReads): Promise<StoryReads> {
+    const xmpp = await this.requireConnectedXmpp();
+    const result = (await xmpp.story_reads_publish?.(
+      storyReadsToWasm(reads),
+    )) as WasmStoryReads | undefined;
+    return storyReadsFromWasm(result);
   }
 
   /**
