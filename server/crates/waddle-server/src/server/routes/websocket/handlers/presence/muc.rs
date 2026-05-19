@@ -219,6 +219,13 @@ pub async fn handle_muc_join(
         .filter(|existing| existing.nick != nick)
         .filter(|existing| replayed_nicks.insert(existing.nick.clone()))
     {
+        // XEP-0045 §7.2 conformant occupant-list replay, plus the
+        // typed `<call xmlns='urn:waddle:muc-call:0'/>` extension when
+        // the room actor's snapshot still has an active advertisement
+        // for that occupant. Without this enrichment the joiner only
+        // sees the chip light up via the NEXT presence update from a
+        // call participant, which never happens if the call is steady
+        // state — the late joiner is the one we're trying to help.
         responses.push(build_muc_join_presence_xml(MucJoinPresence {
             occupant_id_secret: &state.deps.occupant_id_secret,
             room_jid,
@@ -228,6 +235,7 @@ pub async fn handle_muc_join(
             role: existing.role,
             real_jid: &existing.jid,
             include_self_status: false,
+            call_extension: existing.call_extension.as_ref(),
         }));
     }
 
@@ -267,6 +275,9 @@ pub async fn handle_muc_join(
         role: join_outcome.new_occupant_role,
         real_jid: sender_jid,
         include_self_status: true,
+        // Fresh join has no active call advertisement of its own —
+        // the joiner has not yet asserted one.
+        call_extension: None,
     }));
 
     // XEP-0045 §7.2.15 historical room subject. The typed builder

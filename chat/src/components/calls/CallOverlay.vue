@@ -1,7 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from "vue";
 import { useStore } from "@nanostores/vue";
-import { Mic, MicOff, PhoneOff, Video, VideoOff } from "lucide-vue-next";
 import {
   $callState,
   $lastCallError,
@@ -13,24 +12,73 @@ import {
 import { outboundCalls } from "@/lib/calls/outbound";
 import { useCallEngine } from "@/lib/calls/use-call-engine";
 import { connectionStore } from "@/lib/connection-store";
-import AppAvatar from "@/components/ui/AppAvatar.vue";
+import {
+  $callUiMode,
+  nonPipFallbackMode,
+  rememberNonPipMode,
+  type CallUiMode,
+} from "@/lib/calls/ui-mode";
+import CallTileGrid from "./CallTileGrid.vue";
+import CallControls from "./CallControls.vue";
+import CallFloatingWindow from "./CallFloatingWindow.vue";
+import CallMinimizedChip from "./CallMinimizedChip.vue";
+import CallSettingsDialog from "./CallSettingsDialog.vue";
 
+/**
+ * Thin shell — routes the active call between docked / floating /
+ * minimized / pip surfaces. Engine wiring (connect/disconnect, mic
+ * + cam toggles, hangup, tab-close cleanup) is owned here so each
+ * surface stays free of lifecycle plumbing.
+ *
+ * The previous implementation was a single 320-line component with
+ * a hardcoded dock-right layout. The user-reported pain — "overlay
+ * blocks the view, can't be popped out, can't change settings" — was
+ * a direct consequence of that monolith. Splitting the presentation
+ * surfaces lets each one own only its concern: tile grid, drag
+ * window, chip, controls, settings popover.
+ */
 const state = useStore($callState);
 const lastError = useStore($lastCallError);
+const uiMode = useStore($callUiMode);
 const { engine, remoteTracks, localTracks } = useCallEngine();
 
 const connecting = ref(false);
 const micEnabled = ref(true);
 const camEnabled = ref(true);
+const settingsOpen = ref(false);
+const pipVideoEl = ref<HTMLVideoElement | null>(null);
 
-// Connect to LiveKit as soon as the call transitions to `active` with
-// a populated join. Disconnect on the way out. Re-runs whenever the
-// active session id changes — guards against stale subscriptions
-// when the user accepts a second call after the first ended.
+/** Effective mode for rendering — pip falls back to the stored
+ *  non-pip mode while still in PIP, because PIP isn't a "surface" we
+ *  paint inline. */
+const effectiveMode = computed<Exclude<CallUiMode, "pip">>(() => {
+  if (uiMode.value === "pip") return nonPipFallbackMode();
+  return uiMode.value;
+});
+
+watch(uiMode, (next) => {
+  rememberNonPipMode(next);
+});
+
+// Connect to LiveKit as soon as the call transitions to `active`
+// with a populated join. Disconnect on the way out. Tracks the
+// session id as a PRIMITIVE — Vue's `watch` only re-fires when the
+// returned value's reference changes, and constructing an object
+// literal inside the source would re-trigger on every unrelated
+// `$callState.set` (e.g. setting `selfNick` mid-teardown), which
+// would tear down the engine right after it connected. That was the
+// "publishing track → disconnect from room" cycle in the
+// LiveKit-client logs. Keying on `sid` alone means: a fresh call
+// with a new sid reconnects; status pokes don't.
 watch(
-  () => (state.value.phase === "active" ? state.value : null),
-  async (active, _prev, onCleanup) => {
-    if (!active) return;
+  () => (state.value.phase === "active" ? state.value.sid : null),
+  async (sid, _prev, onCleanup) => {
+    if (!sid) return;
+    // Re-read the call state at fire time; the snapshot we use for
+    // the LiveKit connect is the one that was current when the sid
+    // was assigned.
+    const active = state.value;
+    if (active.phase !== "active" || active.sid !== sid) return;
     connecting.value = true;
     try {
       await engine.connect(active.join, active.media);
@@ -68,16 +116,10 @@ async function toggleMic(): Promise<void> {
 }
 
 async function toggleCam(): Promise<void> {
-  // First click on an audio-started call publishes the camera for
-  // the first time; LiveKit's `setCameraEnabled(true)` handles both
-  // the initial publish AND subsequent unmute, so we don't need a
-  // separate "promote audio call to video" path.
   camEnabled.value = !camEnabled.value;
   try {
     await engine.setCameraEnabled(camEnabled.value);
   } catch (err) {
-    // Camera permission denied / no device — roll back the toggle so
-    // the button reflects the actual published state.
     camEnabled.value = !camEnabled.value;
     reportCallError(err);
   }
@@ -109,87 +151,19 @@ const peerLabel = computed(() => {
   if (state.value.phase !== "active") return "";
   const at = state.value.peer.indexOf("@");
   const localpart = at > 0 ? state.value.peer.slice(0, at) : state.value.peer;
-  // MUC group call: prefix the room's localpart with `#` so the
-  // header reads as a channel reference, not a DM peer name.
   return state.value.kind === "muc" ? `#${localpart}` : localpart;
 });
 
-/**
- * Pretty display name for a LiveKit identity. The SFU mints the
- * identity from the XMPP full JID (e.g. `alice@waddle.social/web-…`),
- * so the localpart is the meaningful label. Falls back to the raw
- * identity if it doesn't look like a JID.
- */
-function displayNameForIdentity(identity: string): string {
-  const at = identity.indexOf("@");
-  if (at <= 0) return identity;
-  return identity.slice(0, at);
-}
-
-/**
- * Tiles to render in the call dock. One per (identity, kind=video)
- * pair (so each participant gets exactly one video tile if they have
- * one), plus one avatar tile per audio-only participant. The local
- * participant always gets its own tile at the front — even before
- * they publish a camera — so the user knows the dock is alive and
- * pointed at them.
- */
-type Tile = {
-  key: string;
-  identity: string;
-  label: string;
-  isSelf: boolean;
-  /** Present when this tile has a video track to attach. */
-  videoTrack: { attach: (el: HTMLMediaElement) => void; detach: () => HTMLMediaElement[] } | null;
-  /** Off-screen audio sink — every audio track needs an `<audio>` to
-   *  actually play, but the visible card is the per-identity tile. */
-  audioTrack: { attach: (el: HTMLMediaElement) => void; detach: () => HTMLMediaElement[] } | null;
-};
-
-const tiles = computed<Tile[]>(() => {
-  const byIdentity = new Map<string, Tile>();
-  // Local participant first so it always anchors the dock — even
-  // pre-publish the user sees an "awaiting camera" placeholder for
-  // their own slot.
-  const selfId = engine.localIdentity ?? "you";
-  byIdentity.set(selfId, {
-    key: `self:${selfId}`,
-    identity: selfId,
-    label: "You",
-    isSelf: true,
-    videoTrack: null,
-    audioTrack: null,
-  });
-  for (const local of localTracks.value) {
-    const tile = byIdentity.get(local.participantIdentity)
-      ?? {
-        key: `self:${local.participantIdentity}`,
-        identity: local.participantIdentity,
-        label: "You",
-        isSelf: true,
-        videoTrack: null,
-        audioTrack: null,
-      };
-    if (local.kind === "video") tile.videoTrack = local.track;
-    // The local mic playback is intentionally suppressed (no echo),
-    // so we DON'T attach `local.audioTrack` even when published.
-    byIdentity.set(local.participantIdentity, tile);
+const subline = computed(() => {
+  if (state.value.phase !== "active") return "";
+  if (connecting.value) return "Connecting…";
+  if (state.value.kind === "muc") {
+    const others = remoteParticipantCount.value;
+    return others === 0
+      ? "Waiting for others to join…"
+      : `${others} other${others === 1 ? "" : "s"} in call`;
   }
-  for (const remote of remoteTracks.value) {
-    const tile = byIdentity.get(remote.participantIdentity)
-      ?? {
-        key: `remote:${remote.participantIdentity}`,
-        identity: remote.participantIdentity,
-        label: displayNameForIdentity(remote.participantIdentity),
-        isSelf: false,
-        videoTrack: null,
-        audioTrack: null,
-      };
-    if (remote.kind === "video") tile.videoTrack = remote.track;
-    if (remote.kind === "audio") tile.audioTrack = remote.track;
-    byIdentity.set(remote.participantIdentity, tile);
-  }
-  return Array.from(byIdentity.values());
+  return state.value.media.video ? "Video call" : "Audio call";
 });
 
 const remoteParticipantCount = computed(() => {
@@ -198,134 +172,221 @@ const remoteParticipantCount = computed(() => {
   return ids.size;
 });
 
-function attachTrack(
-  el: HTMLMediaElement | null,
-  track: { attach: (target: HTMLMediaElement) => void } | null,
-): void {
-  if (!el || !track) return;
-  track.attach(el);
+const pipSupported = computed(() => {
+  if (typeof document === "undefined") return false;
+  return Boolean(document.pictureInPictureEnabled);
+});
+
+const hasVideoForPip = computed(() => {
+  return remoteTracks.value.some((t) => t.kind === "video")
+    || localTracks.value.some((t) => t.kind === "video");
+});
+
+function setMode(mode: CallUiMode): void {
+  $callUiMode.set(mode);
+}
+
+async function togglePip(): Promise<void> {
+  if (typeof document === "undefined" || !document.pictureInPictureEnabled) return;
+  // Prefer the first remote video; fall back to a local one only if
+  // no remote video exists (1:1 self-view PIP for self-debugging).
+  let target: HTMLVideoElement | null = null;
+  const fromRemote = remoteTracks.value.find((t) => t.kind === "video");
+  if (fromRemote) {
+    target = (fromRemote.track as unknown as { attachedElements: HTMLMediaElement[] }).attachedElements.find(
+      (el) => el instanceof HTMLVideoElement,
+    ) as HTMLVideoElement | undefined ?? null;
+  }
+  if (!target) {
+    const fromLocal = localTracks.value.find((t) => t.kind === "video");
+    if (fromLocal) {
+      target = (fromLocal.track as unknown as { attachedElements: HTMLMediaElement[] }).attachedElements.find(
+        (el) => el instanceof HTMLVideoElement,
+      ) as HTMLVideoElement | undefined ?? null;
+    }
+  }
+  if (!target) return;
+  try {
+    if (document.pictureInPictureElement) {
+      await document.exitPictureInPicture();
+      setMode(nonPipFallbackMode());
+    } else {
+      await target.requestPictureInPicture();
+      pipVideoEl.value = target;
+      setMode("pip");
+      target.addEventListener(
+        "leavepictureinpicture",
+        () => {
+          if (uiMode.value === "pip") setMode(nonPipFallbackMode());
+          pipVideoEl.value = null;
+        },
+        { once: true },
+      );
+    }
+  } catch (err) {
+    reportCallError(err);
+  }
 }
 
 onBeforeUnmount(() => {
-  // Tab close mid-call: best-effort session-terminate (reason
-  // "gone" per XEP-0166 §7.4 for the no-longer-reachable case) so
-  // the peer's overlay closes immediately instead of waiting for
-  // the LiveKit room to drop them.
+  // Tab close mid-call: best-effort session-terminate so the peer's
+  // overlay closes immediately instead of waiting for the LiveKit
+  // room to drop them.
   void tearDownActiveCall(getSender(), "gone");
   void engine.disconnect();
 });
+
+const localIdentity = computed(() => engine.localIdentity);
 </script>
 
 <template>
-  <!--
-    Dock-right on desktop (`md:` ≥ 768px), fullscreen on mobile.
-    The channel timeline behind the dock stays interactive on
-    desktop so users can keep reading / typing while in a call —
-    this was the "group chat not wired correctly to channels"
-    complaint: the previous `fixed inset-0` overlay completely
-    covered the room and made it impossible to use both at once.
-  -->
-  <aside
-    v-if="state.phase === 'active'"
-    class="fixed inset-0 z-40 flex flex-col bg-background/95 backdrop-blur-sm md:inset-y-0 md:left-auto md:right-0 md:w-[400px] md:border-l md:border-border"
-    role="dialog"
-    aria-label="Active call"
-  >
-    <header class="flex items-start justify-between gap-3 border-b border-border px-4 py-3">
-      <div class="min-w-0 flex-1">
-        <div class="type-chat-title truncate">{{ peerLabel }}</div>
-        <div class="type-caption text-muted-foreground">
-          <span v-if="connecting">Connecting…</span>
-          <span v-else-if="state.kind === 'muc'">
-            {{ remoteParticipantCount }} other{{ remoteParticipantCount === 1 ? "" : "s" }} in call
-          </span>
-          <span v-else>{{ state.media.video ? "Video call" : "Audio call" }}</span>
+  <template v-if="state.phase === 'active'">
+    <!-- Minimized: small chip in the corner. Doesn't render the grid
+         or settings dialog (settings can still be opened by restoring). -->
+    <CallMinimizedChip
+      v-if="effectiveMode === 'minimized'"
+      :label="peerLabel"
+      :connecting="connecting"
+      @restore="setMode('docked')"
+      @hangup="hangup"
+    />
+
+    <!-- Floating window: draggable, smaller, leaves the channel pane
+         full-width behind it. -->
+    <CallFloatingWindow v-else-if="effectiveMode === 'floating'">
+      <template #header>
+        <div class="min-w-0 flex-1">
+          <div class="type-chat-title truncate">{{ peerLabel }}</div>
+          <div class="type-caption text-muted-foreground truncate">{{ subline }}</div>
         </div>
-      </div>
-    </header>
-
-    <div
-      v-if="lastError"
-      class="border-b border-destructive/30 bg-destructive/10 px-4 py-2 type-caption text-destructive"
-      role="alert"
-    >
-      {{ lastError }}
-    </div>
-
-    <div class="grid flex-1 auto-rows-fr gap-2 overflow-y-auto p-3">
+      </template>
       <div
-        v-for="tile in tiles"
-        :key="tile.key"
-        class="relative aspect-video w-full overflow-hidden rounded-lg border border-border bg-muted"
+        v-if="lastError"
+        class="border-b border-destructive/30 bg-destructive/10 px-3 py-2 type-caption text-destructive"
+        role="alert"
       >
-        <!--
-          Video element is always mounted for tiles that have or
-          MIGHT have video (every tile, since the toggle can publish
-          mid-call). Tiles without a current video track show the
-          avatar placeholder on top via the v-if below; the <video>
-          stays in the DOM so the ref callback fires the moment a
-          track lands.
-        -->
-        <video
-          v-if="tile.videoTrack"
-          :ref="(el) => attachTrack(el as HTMLVideoElement | null, tile.videoTrack)"
-          class="h-full w-full object-cover"
-          :class="tile.isSelf ? 'scale-x-[-1]' : ''"
-          autoplay
-          playsinline
-          :muted="tile.isSelf"
-        />
-        <div
-          v-else
-          class="flex h-full w-full items-center justify-center"
-        >
-          <AppAvatar :name="tile.label" size="lg" />
-        </div>
-
-        <audio
-          v-if="tile.audioTrack && !tile.isSelf"
-          :ref="(el) => attachTrack(el as HTMLAudioElement | null, tile.audioTrack)"
-          autoplay
-        />
-
-        <div class="absolute inset-x-0 bottom-0 flex items-center justify-between gap-2 bg-gradient-to-t from-black/60 to-transparent px-2 py-1.5 text-white">
-          <span class="type-caption truncate">{{ tile.label }}</span>
-          <span
-            v-if="tile.isSelf && !micEnabled"
-            class="flex items-center"
-            aria-label="Your mic is muted"
-          >
-            <MicOff class="h-3.5 w-3.5" />
-          </span>
-        </div>
+        {{ lastError }}
       </div>
-    </div>
+      <CallTileGrid
+        :remote-tracks="remoteTracks"
+        :local-tracks="localTracks"
+        :local-identity="localIdentity"
+        :mic-enabled="micEnabled"
+      />
+      <template #footer>
+        <CallControls
+          :mic-enabled="micEnabled"
+          :cam-enabled="camEnabled"
+          :pip-supported="pipSupported"
+          :has-video-for-pip="hasVideoForPip"
+          :mode="uiMode"
+          @toggle-mic="toggleMic"
+          @toggle-cam="toggleCam"
+          @toggle-pip="togglePip"
+          @set-mode="setMode"
+          @open-settings="settingsOpen = true"
+          @hangup="hangup"
+        />
+      </template>
+    </CallFloatingWindow>
 
-    <footer class="flex items-center justify-center gap-2 border-t border-border px-4 py-3">
-      <button
-        class="chat-action-button"
-        :class="micEnabled ? 'chat-action-button--secondary' : 'chat-action-button--primary'"
-        type="button"
-        :aria-pressed="!micEnabled"
-        @click="toggleMic"
+    <!-- Docked panel (default): full-height right-edge dock on
+         desktop, fullscreen takeover on mobile. -->
+    <aside
+      v-else
+      class="call-docked-panel"
+      role="dialog"
+      aria-label="Active call"
+    >
+      <header class="call-docked-panel__header">
+        <div class="min-w-0 flex-1">
+          <div class="type-chat-title truncate">{{ peerLabel }}</div>
+          <div class="type-caption text-muted-foreground truncate">{{ subline }}</div>
+        </div>
+      </header>
+
+      <div
+        v-if="lastError"
+        class="call-docked-panel__error"
+        role="alert"
       >
-        <component :is="micEnabled ? Mic : MicOff" class="w-4 h-4" />
-        <span class="type-control">{{ micEnabled ? "Mute" : "Unmute" }}</span>
-      </button>
-      <button
-        class="chat-action-button"
-        :class="camEnabled ? 'chat-action-button--secondary' : 'chat-action-button--primary'"
-        type="button"
-        :aria-pressed="!camEnabled"
-        @click="toggleCam"
-      >
-        <component :is="camEnabled ? Video : VideoOff" class="w-4 h-4" />
-        <span class="type-control">{{ camEnabled ? "Camera off" : "Camera on" }}</span>
-      </button>
-      <button class="chat-action-button chat-action-button--destructive" type="button" @click="hangup">
-        <PhoneOff class="w-4 h-4" />
-        <span class="type-control">Hang up</span>
-      </button>
-    </footer>
-  </aside>
+        {{ lastError }}
+      </div>
+
+      <CallTileGrid
+        :remote-tracks="remoteTracks"
+        :local-tracks="localTracks"
+        :local-identity="localIdentity"
+        :mic-enabled="micEnabled"
+      />
+
+      <footer class="call-docked-panel__footer">
+        <CallControls
+          :mic-enabled="micEnabled"
+          :cam-enabled="camEnabled"
+          :pip-supported="pipSupported"
+          :has-video-for-pip="hasVideoForPip"
+          :mode="uiMode"
+          @toggle-mic="toggleMic"
+          @toggle-cam="toggleCam"
+          @toggle-pip="togglePip"
+          @set-mode="setMode"
+          @open-settings="settingsOpen = true"
+          @hangup="hangup"
+        />
+      </footer>
+    </aside>
+
+    <CallSettingsDialog v-model:open="settingsOpen" />
+  </template>
 </template>
+
+<style scoped>
+.call-docked-panel {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: flex;
+  flex-direction: column;
+  background: color-mix(in oklab, var(--background) 95%, transparent);
+  backdrop-filter: blur(12px);
+}
+
+@media (min-width: 768px) {
+  .call-docked-panel {
+    inset: 0 0 0 auto;
+    width: 22rem;
+    border-left: 1px solid var(--border);
+  }
+}
+
+@media (min-width: 1024px) {
+  .call-docked-panel {
+    width: 26rem;
+  }
+}
+
+.call-docked-panel__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-sm);
+  border-bottom: 1px solid var(--border);
+  padding: 0.75rem 1rem;
+}
+
+.call-docked-panel__footer {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-top: 1px solid var(--border);
+  padding: 0.75rem 1rem;
+}
+
+.call-docked-panel__error {
+  border-bottom: 1px solid color-mix(in oklab, var(--destructive) 30%, transparent);
+  background: color-mix(in oklab, var(--destructive) 10%, transparent);
+  padding: 0.5rem 1rem;
+  color: var(--destructive);
+}
+</style>

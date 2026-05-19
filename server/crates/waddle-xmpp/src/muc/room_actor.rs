@@ -25,8 +25,8 @@ mod tests;
 
 pub use admin_handlers::{ApplyAdminItems, GetAdminContext, IsOwner};
 pub use occupancy_handlers::{
-    JoinWithAffiliation, LeaveByRealJid, PingSelfCheck, PresenceUpdateData,
-    ReconcileChannelBackedRoom,
+    CallPresenceUpdateOutcome, JoinWithAffiliation, LeaveByRealJid, PingSelfCheck,
+    PresenceUpdateData, ReconcileChannelBackedRoom, UpsertCallPresence,
 };
 pub use snapshot_handlers::{
     BuildGroupchatBroadcast, GetNicknameGeneration, GetRoomSnapshot, GroupchatBroadcastResult,
@@ -57,6 +57,14 @@ pub struct JoinExistingOccupant {
     pub nick: String,
     pub affiliation: Affiliation,
     pub role: Role,
+    /// Snapshot of this occupant's currently-advertised
+    /// `urn:waddle:muc-call:0` presence extension at the moment the
+    /// new joiner asked to enter. The replay path appends this to the
+    /// occupant's reflected presence so the joiner immediately sees
+    /// the "in call" chip light up — no separate discovery
+    /// round-trip. `None` when the occupant has no live call
+    /// advertisement.
+    pub call_extension: Option<crate::xep::xep_waddle_muc_call::MucCallExtension>,
 }
 
 #[derive(Debug, Clone)]

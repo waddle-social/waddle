@@ -26,8 +26,8 @@ pub use call::{
     parse_jmi_message, CallEventKind, CallMedia, InboundCallEvent, LiveKitJoin,
 };
 pub use namespaces::{
-    NS_CHAT_MARKERS, NS_CHAT_STATES, NS_MESSAGE_CORRECT, NS_MESSAGE_MODERATE, NS_MESSAGE_RETRACT,
-    NS_REACTIONS, NS_WADDLE_PIN_V0,
+    build_muc_call_extension_element, NS_CHAT_MARKERS, NS_CHAT_STATES, NS_MESSAGE_CORRECT,
+    NS_MESSAGE_MODERATE, NS_MESSAGE_RETRACT, NS_REACTIONS, NS_WADDLE_MUC_CALL, NS_WADDLE_PIN_V0,
 };
 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 pub use native::MessagingExt;

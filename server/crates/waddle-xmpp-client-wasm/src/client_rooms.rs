@@ -86,11 +86,19 @@ impl WaddleClient {
         let inner = self.inner.clone();
         future_to_promise(async move {
             let to = format!("{room_jid}/{nick}");
-            let state_attr = if active { "active" } else { "inactive" };
-            let call = Element::builder("call", "urn:waddle:muc-call:0")
-                .attr("state", state_attr)
-                .attr("call-id", call_id.as_str())
-                .build();
+            // CLAUDE.md typed-payloads + XML-hard-rule: build the
+            // extension element via the canonical helper in
+            // waddle-xmpp-client::messaging so the wire shape stays
+            // locked to a single definition site rather than
+            // re-spelling element/attr names + state tokens at the
+            // wasm boundary. The wasm crate cannot pull the
+            // server-only `MucCallExtension` type in, so the
+            // builder helper is the seam — it lives in the client
+            // crate and is exposed both crates can reach.
+            let call = waddle_xmpp_client::messaging::build_muc_call_extension_element(
+                active,
+                call_id.as_str(),
+            );
             let stanza = Element::builder("presence", NS_CLIENT)
                 .attr("to", to.as_str())
                 .append(call)

@@ -57,15 +57,17 @@ impl kameo::message::Message<JoinWithAffiliation> for RoomActor {
             .occupants
             .values()
             .flat_map(|o| {
-                self.room
-                    .get_occupant_sessions(&o.nick)
-                    .into_iter()
-                    .map(move |jid| JoinExistingOccupant {
+                let call_extension = self.room.call_state_for_nick(&o.nick).cloned();
+                self.room.get_occupant_sessions(&o.nick).into_iter().map({
+                    let call_extension = call_extension.clone();
+                    move |jid| JoinExistingOccupant {
                         jid,
                         nick: o.nick.clone(),
                         affiliation: o.affiliation,
                         role: o.role,
-                    })
+                        call_extension: call_extension.clone(),
+                    }
+                })
             })
             .collect();
 
@@ -180,6 +182,69 @@ impl kameo::message::Message<PresenceUpdateData> for RoomActor {
             sender_affiliation,
             room_jid,
             recipients,
+        }))
+    }
+}
+
+/// Upsert the `<call xmlns='urn:waddle:muc-call:0'/>` advertised
+/// state for the calling session's nick. Returns a presence-update
+/// outcome (occupant identity + room recipients) and the
+/// post-update extension state to embed in the broadcast.
+///
+/// XEP-0045 §5.1.3 / §7.1: the room is responsible for reflecting
+/// in-room presence to every occupant. Sender authentication —
+/// "the session is actually an occupant of this room" — happens
+/// here via `find_occupant_by_real_jid`; if the sender isn't an
+/// occupant, the actor returns `Ok(None)` and the caller falls
+/// back to the regular join path.
+pub struct UpsertCallPresence {
+    pub sender_jid: FullJid,
+    pub extension: crate::xep::xep_waddle_muc_call::MucCallExtension,
+}
+
+#[derive(Debug, Clone)]
+pub struct CallPresenceUpdateOutcome {
+    pub update: PresenceUpdateOutcome,
+    /// `Some(ext)` if the call indicator should be broadcast as
+    /// active; `None` if the extension transitioned to inactive
+    /// (the broadcast omits the `<call/>` child entirely, signalling
+    /// that the occupant is no longer in a live call).
+    pub active_extension: Option<crate::xep::xep_waddle_muc_call::MucCallExtension>,
+}
+
+impl kameo::message::Message<UpsertCallPresence> for RoomActor {
+    type Reply = Result<Option<CallPresenceUpdateOutcome>, Infallible>;
+
+    async fn handle(
+        &mut self,
+        msg: UpsertCallPresence,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        let Some(sender_occupant) = self.room.find_occupant_by_real_jid(&msg.sender_jid) else {
+            return Ok(None);
+        };
+        let sender_nick = sender_occupant.nick.clone();
+        let sender_real_jid = sender_occupant.real_jid.clone();
+        let sender_role = sender_occupant.role;
+        let sender_affiliation = sender_occupant.affiliation;
+        let room_jid = self.room.room_jid.clone();
+        let recipients = self
+            .room
+            .occupants
+            .values()
+            .flat_map(|o| self.room.get_occupant_sessions(&o.nick))
+            .collect();
+        let active_extension = self.room.upsert_call_state(&sender_nick, msg.extension);
+        Ok(Some(CallPresenceUpdateOutcome {
+            update: PresenceUpdateOutcome {
+                sender_nick,
+                sender_real_jid,
+                sender_role,
+                sender_affiliation,
+                room_jid,
+                recipients,
+            },
+            active_extension,
         }))
     }
 }
