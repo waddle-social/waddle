@@ -22,13 +22,18 @@ export function compareTimelineTimestamps(
 // happened to run first — i.e. it changes across reloads.
 //
 // Ordering rules:
-//   0. Pending self-sends (deliveryStatus ∈ {queued, sending, failed})
-//      always sort *after* delivered/peer messages, regardless of
-//      `createdAt`. Optimistic rows carry client-wall-clock timestamps
-//      and a backwards-drifted client clock could otherwise slot them
-//      into the middle of the timeline; reconciliation in
-//      `mergeLiveMessage` swaps the optimistic row for the
-//      server-stamped copy and a normal sort then places it correctly.
+//   0. Pending self-sends (deliveryStatus ∈ {queued, sending}) always
+//      sort *after* delivered/peer messages, regardless of `createdAt`.
+//      Optimistic rows carry client-wall-clock timestamps and a
+//      backwards-drifted client clock could otherwise slot them into
+//      the middle of the timeline; reconciliation in `mergeLiveMessage`
+//      swaps the optimistic row for the server-stamped copy and a
+//      normal sort then places it correctly.
+//
+//      `failed` is intentionally *not* in this bucket — it's a terminal
+//      status and the row keeps the position the user expects to retry
+//      or delete it from, alongside whatever was being sent at that
+//      moment.
 //   1. `createdAt` (server time when present).
 //   2. `stanzaId` — XEP-0359 unique stable IDs, lexicographically
 //      monotonic per archive (the canonical wire identity assigned by
@@ -53,6 +58,8 @@ export function compareTimelineMessages(
 function isPendingDelivery(status: string | undefined): boolean {
   // `deliveryStatus` is only set for self-sent rows. Peer messages and
   // delivered self-sends leave it `undefined` — treat those as the
-  // synced (non-pending) bucket.
-  return status === "queued" || status === "sending" || status === "failed";
+  // synced (non-pending) bucket. `failed` is a terminal state; keep
+  // the row at its attempt position so the user can retry / delete it
+  // in context.
+  return status === "queued" || status === "sending";
 }

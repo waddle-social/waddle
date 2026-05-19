@@ -78,7 +78,7 @@ describe("compareTimelineMessages", () => {
     }
   });
 
-  test("pending self-sends always sort after delivered/peer messages", () => {
+  test("pending self-sends (queued, sending) always sort after delivered/peer messages", () => {
     const delivered: SortableMessage = {
       id: "delivered",
       createdAt: "2026-05-20T10:00:00.000Z",
@@ -98,18 +98,27 @@ describe("compareTimelineMessages", () => {
       createdAt: "2026-05-20T09:00:00.000Z",
       deliveryStatus: "sending",
     };
+    expect(compareTimelineMessages(queued, delivered)).toBeGreaterThan(0);
+    expect(compareTimelineMessages(queued, peer)).toBeGreaterThan(0);
+    expect(compareTimelineMessages(sending, delivered)).toBeGreaterThan(0);
+    // Among pending rows, normal createdAt ordering applies.
+    expect(compareTimelineMessages(sending, queued)).toBeLessThan(0);
+  });
+
+  test("failed self-sends are NOT in the pending bucket — they keep their attempt position", () => {
     const failed: SortableMessage = {
       id: "failed",
       createdAt: "2026-05-20T08:00:00.000Z",
       deliveryStatus: "failed",
     };
-    expect(compareTimelineMessages(queued, delivered)).toBeGreaterThan(0);
-    expect(compareTimelineMessages(queued, peer)).toBeGreaterThan(0);
-    expect(compareTimelineMessages(sending, delivered)).toBeGreaterThan(0);
-    expect(compareTimelineMessages(failed, peer)).toBeGreaterThan(0);
-    // Among pending rows, normal ordering still applies.
-    expect(compareTimelineMessages(failed, sending)).toBeLessThan(0);
-    expect(compareTimelineMessages(sending, queued)).toBeLessThan(0);
+    const delivered: SortableMessage = {
+      id: "delivered",
+      createdAt: "2026-05-20T10:00:00.000Z",
+      deliveryStatus: "delivered",
+    };
+    // Failed precedes delivered by createdAt — keep that order so the
+    // user retries the failed send in the context where it happened.
+    expect(compareTimelineMessages(failed, delivered)).toBeLessThan(0);
   });
 
   test("sort is stable across permutations (final order is identical)", () => {
