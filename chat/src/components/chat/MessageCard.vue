@@ -41,7 +41,12 @@ import { formatTimelineTimeOfDay } from "@/channels/timeline";
 import { useLongPress } from "@/ui/gestures/long-press";
 import { useHorizontalSwipe } from "@/ui/gestures/horizontal-swipe";
 import type { ExtensionCommandResult } from "@/lib/xmpp/extension-commands";
-import { $desktopToolbarOwnerId } from "@/stores/message-toolbar";
+import {
+  $desktopToolbarOwnerId,
+  $desktopToolbarSuppressed,
+  $desktopToolbarSuspensionEpoch,
+  clearDesktopToolbarOwner,
+} from "@/stores/message-toolbar";
 import { QUICK_REACTION_EMOJIS } from "@/lib/reaction-mode";
 
 // Two separate badge layers:
@@ -456,15 +461,21 @@ type SheetView = "actions" | "emoji";
 const sheetView = ref<SheetView>("actions");
 
 const desktopToolbarOwnerId = useStore($desktopToolbarOwnerId);
+const desktopToolbarSuppressed = useStore($desktopToolbarSuppressed);
+const desktopToolbarSuspensionEpoch = useStore($desktopToolbarSuspensionEpoch);
 const ownsDesktopToolbarLock = computed(() => desktopToolbarOwnerId.value === props.message.id);
 const desktopToolbarLockedByAnother = computed(() =>
   desktopToolbarOwnerId.value !== null && desktopToolbarOwnerId.value !== props.message.id,
 );
-const desktopToolbarVisibilityClass = computed(() => (
-  ownsDesktopToolbarLock.value || props.reactionModeSelected
-    ? "opacity-100 translate-y-0 pointer-events-auto z-floating"
-    : "opacity-0 motion-safe:translate-y-1 group-hover:opacity-100 group-hover:translate-y-0 focus-within:opacity-100 focus-within:translate-y-0 pointer-events-none group-hover:pointer-events-auto focus-within:pointer-events-auto z-sticky"
-));
+const desktopToolbarVisibilityClass = computed(() => {
+  if (desktopToolbarSuppressed.value) {
+    return "opacity-0 motion-safe:translate-y-1 pointer-events-none z-sticky";
+  }
+  if (ownsDesktopToolbarLock.value || props.reactionModeSelected) {
+    return "opacity-100 translate-y-0 pointer-events-auto z-floating";
+  }
+  return "opacity-0 motion-safe:translate-y-1 group-hover:opacity-100 group-hover:translate-y-0 focus-within:opacity-100 focus-within:translate-y-0 pointer-events-none group-hover:pointer-events-auto focus-within:pointer-events-auto z-sticky";
+});
 const anyOverlayOpen = computed(() => pickerOpen.value || sheetOpen.value);
 
 function blurToolbarFocus() {
@@ -484,6 +495,14 @@ function closePicker(blur = false) {
 function closeSheet() {
   sheetOpen.value = false;
   sheetView.value = "actions";
+}
+
+function closeTransientMessageSurfaces() {
+  pickerOpen.value = false;
+  closeSheet();
+  hoveredReaction.value = null;
+  if (ownsDesktopToolbarLock.value) clearDesktopToolbarOwner();
+  blurToolbarFocus();
 }
 
 function openSheet() {
@@ -690,6 +709,13 @@ watch(
     if (typeof window === "undefined") return;
     if (open) window.addEventListener("keydown", onWindowKeydown);
     else window.removeEventListener("keydown", onWindowKeydown);
+  },
+);
+
+watch(
+  () => desktopToolbarSuspensionEpoch.value,
+  () => {
+    closeTransientMessageSurfaces();
   },
 );
 

@@ -21,6 +21,7 @@ import { parseChatLocation, type AdminPanel } from "@/shell/navigation";
 import { buildHomeDashboardProps } from "@/home/dashboard-props";
 import type { ChatAppController } from "@/shell/chat-app-controller";
 import type { DiscoveredExtensionRoute } from "@/lib/xmpp/extension-commands";
+import { installMessageToolbarLifecycleSuppression } from "@/stores/message-toolbar";
 
 const props = defineProps<{
   controller: ChatAppController;
@@ -219,8 +220,18 @@ function onAdminBack() {
     window.dispatchEvent(new PopStateEvent("popstate"));
   }
 }
-onMounted(() => window.addEventListener("popstate", refreshAdminPanelFromUrl));
-onUnmounted(() => window.removeEventListener("popstate", refreshAdminPanelFromUrl));
+let disconnectMessageToolbarLifecycle: (() => void) | null = null;
+
+onMounted(() => {
+  window.addEventListener("popstate", refreshAdminPanelFromUrl);
+  disconnectMessageToolbarLifecycle = installMessageToolbarLifecycleSuppression();
+});
+
+onUnmounted(() => {
+  window.removeEventListener("popstate", refreshAdminPanelFromUrl);
+  disconnectMessageToolbarLifecycle?.();
+  disconnectMessageToolbarLifecycle = null;
+});
 </script>
 
 <template>
