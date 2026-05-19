@@ -2,6 +2,9 @@ import {
   Room,
   RoomEvent,
   Track,
+  type LocalParticipant,
+  type LocalTrack,
+  type LocalTrackPublication,
   type RemoteParticipant,
   type RemoteTrack,
   type RemoteTrackPublication,
@@ -20,9 +23,38 @@ export type RemoteMediaTrack = {
   track: RemoteTrack;
 };
 
+/**
+ * Identifies a local media track (the user's own camera / mic /
+ * screenshare) so the overlay can render a self-preview tile next to
+ * the remote ones. Symmetric with [`RemoteMediaTrack`] so the renderer
+ * can branch on `kind` alone.
+ *
+ * `participantIdentity` is the LiveKit identity the SFU minted the
+ * JWT for — typically the full XMPP JID of the device that started
+ * the call.
+ */
+export type LocalMediaTrack = {
+  participantIdentity: string;
+  publicationSid: string;
+  kind: "audio" | "video";
+  track: LocalTrack;
+};
+
 export type CallEngineEvents = {
   trackSubscribed: (track: RemoteMediaTrack) => void;
   trackUnsubscribed: (track: RemoteMediaTrack) => void;
+  /**
+   * Fires when the local participant publishes a track (camera on,
+   * mic on, screenshare, …). Gives the overlay a reactive hook for
+   * the self-preview tile — strictly better than the one-shot
+   * `attachLocalCamera` snapshot it superseded.
+   */
+  localTrackPublished: (track: LocalMediaTrack) => void;
+  /**
+   * Fires when the local participant unpublishes (camera off, mic
+   * mute via unpublish path, etc).
+   */
+  localTrackUnpublished: (track: LocalMediaTrack) => void;
   participantDisconnected: (identity: string) => void;
   disconnected: (reason?: string) => void;
 };
@@ -41,9 +73,18 @@ export class CallEngine {
   private listeners: { [K in keyof CallEngineEvents]: Set<CallEngineEvents[K]> } = {
     trackSubscribed: new Set(),
     trackUnsubscribed: new Set(),
+    localTrackPublished: new Set(),
+    localTrackUnpublished: new Set(),
     participantDisconnected: new Set(),
     disconnected: new Set(),
   };
+
+  /** LiveKit identity of the local participant, populated once
+   *  `connect()` resolves. Exposed so the overlay can render the
+   *  self-preview tile with the same label as remote tiles use. */
+  get localIdentity(): string | null {
+    return this.room?.localParticipant.identity ?? null;
+  }
 
   async connect(join: LiveKitJoin, opts: { audio: boolean; video: boolean }): Promise<void> {
     if (this.room) throw new Error("CallEngine already connected");
@@ -54,6 +95,8 @@ export class CallEngine {
     });
     room.on(RoomEvent.TrackSubscribed, this.handleTrackSubscribed);
     room.on(RoomEvent.TrackUnsubscribed, this.handleTrackUnsubscribed);
+    room.on(RoomEvent.LocalTrackPublished, this.handleLocalTrackPublished);
+    room.on(RoomEvent.LocalTrackUnpublished, this.handleLocalTrackUnpublished);
     room.on(RoomEvent.ParticipantDisconnected, this.handleParticipantDisconnected);
     room.on(RoomEvent.Disconnected, this.handleDisconnected);
     await room.connect(join.url, join.token);
@@ -72,19 +115,14 @@ export class CallEngine {
     await this.room.localParticipant.setCameraEnabled(enabled);
   }
 
-  /** Attach the local camera preview to an HTMLVideoElement, if a camera track exists. */
-  attachLocalCamera(target: HTMLVideoElement): void {
-    if (!this.room) return;
-    const pub = this.room.localParticipant.getTrackPublication(Track.Source.Camera);
-    pub?.videoTrack?.attach(target);
-  }
-
   async disconnect(): Promise<void> {
     const room = this.room;
     this.room = null;
     if (!room) return;
     room.off(RoomEvent.TrackSubscribed, this.handleTrackSubscribed);
     room.off(RoomEvent.TrackUnsubscribed, this.handleTrackUnsubscribed);
+    room.off(RoomEvent.LocalTrackPublished, this.handleLocalTrackPublished);
+    room.off(RoomEvent.LocalTrackUnpublished, this.handleLocalTrackUnpublished);
     room.off(RoomEvent.ParticipantDisconnected, this.handleParticipantDisconnected);
     room.off(RoomEvent.Disconnected, this.handleDisconnected);
     await room.disconnect();
@@ -126,6 +164,36 @@ export class CallEngine {
     const kind = mapKind(track.kind);
     if (!kind) return;
     this.emit("trackUnsubscribed", {
+      participantIdentity: participant.identity,
+      publicationSid: publication.trackSid,
+      kind,
+      track,
+    });
+  };
+
+  private handleLocalTrackPublished = (
+    publication: LocalTrackPublication,
+    participant: LocalParticipant,
+  ) => {
+    const track = publication.track;
+    const kind = mapKind(publication.kind);
+    if (!track || !kind) return;
+    this.emit("localTrackPublished", {
+      participantIdentity: participant.identity,
+      publicationSid: publication.trackSid,
+      kind,
+      track,
+    });
+  };
+
+  private handleLocalTrackUnpublished = (
+    publication: LocalTrackPublication,
+    participant: LocalParticipant,
+  ) => {
+    const track = publication.track;
+    const kind = mapKind(publication.kind);
+    if (!track || !kind) return;
+    this.emit("localTrackUnpublished", {
       participantIdentity: participant.identity,
       publicationSid: publication.trackSid,
       kind,

@@ -1,5 +1,5 @@
 import { ref, type Ref } from "vue";
-import { CallEngine, type RemoteMediaTrack } from "./engine";
+import { CallEngine, type LocalMediaTrack, type RemoteMediaTrack } from "./engine";
 
 /**
  * Process-wide singleton: only one call engine should ever exist
@@ -10,10 +10,19 @@ import { CallEngine, type RemoteMediaTrack } from "./engine";
  */
 let singletonEngine: CallEngine | null = null;
 const remoteTracks: Ref<RemoteMediaTrack[]> = ref([]);
+/**
+ * Local tracks the user has currently published (camera, mic, …).
+ * Drives the self-preview tile in `CallOverlay`. Without this the
+ * user only sees other participants — the most common call-UI bug
+ * report ("can't see my own camera"). Symmetric with `remoteTracks`
+ * so the renderer can use one tile component for both.
+ */
+const localTracks: Ref<LocalMediaTrack[]> = ref([]);
 
 export function useCallEngine(): {
   engine: CallEngine;
   remoteTracks: Ref<RemoteMediaTrack[]>;
+  localTracks: Ref<LocalMediaTrack[]>;
 } {
   if (!singletonEngine) {
     singletonEngine = new CallEngine();
@@ -25,9 +34,18 @@ export function useCallEngine(): {
         (existing) => existing.publicationSid !== track.publicationSid,
       );
     });
+    singletonEngine.on("localTrackPublished", (track) => {
+      localTracks.value = [...localTracks.value, track];
+    });
+    singletonEngine.on("localTrackUnpublished", (track) => {
+      localTracks.value = localTracks.value.filter(
+        (existing) => existing.publicationSid !== track.publicationSid,
+      );
+    });
     singletonEngine.on("disconnected", () => {
       remoteTracks.value = [];
+      localTracks.value = [];
     });
   }
-  return { engine: singletonEngine, remoteTracks };
+  return { engine: singletonEngine, remoteTracks, localTracks };
 }
