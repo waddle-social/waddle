@@ -3157,6 +3157,201 @@ mod tests {
         );
     }
 
+    /// Regression for slice 1 of #526: a database created before the
+    /// `dm_mention` class variant existed still has the legacy class
+    /// CHECK constraint (`dm`/`personal_mention`/`channel_mention`/
+    /// `active_channel_mention`/`notify_all`). After
+    /// `NotificationOutboxStore::new` runs the class-constraint
+    /// migration, the new `dm_mention` variant must be insertable.
+    #[tokio::test]
+    async fn store_initialization_migrates_legacy_candidate_class_check() {
+        let db = Database::in_memory("notification-outbox-legacy-candidate-class")
+            .await
+            .unwrap();
+        let conn = db.guard().await.expect("db guard");
+        conn.execute(
+            r#"
+            CREATE TABLE notification_candidates (
+                recipient_bare_jid TEXT NOT NULL,
+                conversation_jid TEXT NOT NULL,
+                sender_jid TEXT NOT NULL,
+                thread_id TEXT NOT NULL DEFAULT '',
+                stanza_id_by TEXT NOT NULL,
+                stanza_id TEXT NOT NULL,
+                class TEXT NOT NULL CHECK (class IN ('dm', 'personal_mention', 'channel_mention', 'active_channel_mention', 'notify_all')),
+                reason TEXT NOT NULL CHECK (reason IN ('offline_dm', 'groupchat_personal_mention', 'groupchat_channel_mention', 'groupchat_active_channel_mention', 'groupchat_notify_all')),
+                created_at_ms INTEGER NOT NULL,
+                policy_error_count INTEGER NOT NULL DEFAULT 0,
+                next_attempt_at_ms INTEGER,
+                outboxed_at_ms INTEGER,
+                PRIMARY KEY (recipient_bare_jid, conversation_jid, thread_id, stanza_id_by, stanza_id, class)
+            )
+            "#,
+            (),
+        )
+        .await
+        .expect("create legacy candidate table");
+        conn.execute(
+            r#"
+            INSERT INTO notification_candidates (
+                recipient_bare_jid,
+                conversation_jid,
+                sender_jid,
+                thread_id,
+                stanza_id_by,
+                stanza_id,
+                class,
+                reason,
+                created_at_ms,
+                policy_error_count,
+                next_attempt_at_ms,
+                outboxed_at_ms
+            ) VALUES (
+                'bob@example.com',
+                'alice@example.com',
+                'alice@example.com/web',
+                '',
+                'bob@example.com',
+                'legacy-direct',
+                'dm',
+                'offline_dm',
+                1,
+                0,
+                NULL,
+                NULL
+            )
+            "#,
+            (),
+        )
+        .await
+        .expect("insert legacy direct candidate");
+        drop(conn);
+
+        let store = NotificationOutboxStore::new(db)
+            .await
+            .expect("store initializes and migrates legacy class check");
+        let recipient = bare("bob@example.com");
+        let sender_bare = bare("alice@example.com");
+        let mention_candidate = NotificationCandidate::direct_message(
+            recipient.clone(),
+            "alice@example.com/web".parse().expect("full sender jid"),
+            StanzaId::new("post-migration-mention", Jid::from(recipient.clone())),
+            true,
+        )
+        .expect("dm_mention candidate after migration");
+        assert_eq!(mention_candidate.class(), NotificationClass::DirectMessageMention);
+        assert_eq!(
+            store
+                .insert_candidate(&mention_candidate)
+                .await
+                .expect("insert dm_mention candidate post-migration"),
+            NotificationCandidateInsertOutcome::Inserted
+        );
+        let mut rows = store
+            .query(
+                "SELECT class FROM notification_candidates ORDER BY stanza_id",
+                (),
+            )
+            .await
+            .expect("query migrated candidates");
+        let first = rows
+            .next()
+            .await
+            .expect("first row query")
+            .expect("legacy row");
+        let second = rows
+            .next()
+            .await
+            .expect("second row query")
+            .expect("dm_mention row");
+        assert_eq!(first.get::<String>(0).expect("legacy class"), "dm");
+        assert_eq!(
+            second.get::<String>(0).expect("dm_mention class"),
+            "dm_mention"
+        );
+        // Touch unused fields to keep them documented as required
+        // identity inputs for the candidate row.
+        let _ = sender_bare;
+    }
+
+    /// Round-trip regression for the new `DirectMessageMention` class /
+    /// `OfflineDirectMessageMention` reason variants introduced in
+    /// slice 1 of #526. Inserts a DM candidate with `is_mention=true`
+    /// and asserts the persisted row carries the typed `dm_mention`
+    /// class and `offline_dm_mention` reason values.
+    #[tokio::test]
+    async fn direct_message_mention_class_round_trips_through_storage() {
+        let db = Database::in_memory("notification-outbox-dm-mention-roundtrip")
+            .await
+            .unwrap();
+        let store = NotificationOutboxStore::new(db)
+            .await
+            .expect("store init");
+        let recipient = bare("bob@example.com");
+        let plain = NotificationCandidate::direct_message(
+            recipient.clone(),
+            "alice@example.com/web".parse().expect("full sender jid"),
+            StanzaId::new("plain-dm", Jid::from(recipient.clone())),
+            false,
+        )
+        .expect("plain dm candidate");
+        let mention = NotificationCandidate::direct_message(
+            recipient.clone(),
+            "alice@example.com/web".parse().expect("full sender jid"),
+            StanzaId::new("mention-dm", Jid::from(recipient.clone())),
+            true,
+        )
+        .expect("dm_mention candidate");
+        assert_eq!(plain.class(), NotificationClass::DirectMessage);
+        assert_eq!(plain.reason(), NotificationReason::OfflineDirectMessage);
+        assert_eq!(mention.class(), NotificationClass::DirectMessageMention);
+        assert_eq!(
+            mention.reason(),
+            NotificationReason::OfflineDirectMessageMention
+        );
+        assert_eq!(
+            store.insert_candidate(&plain).await.expect("insert plain"),
+            NotificationCandidateInsertOutcome::Inserted
+        );
+        assert_eq!(
+            store
+                .insert_candidate(&mention)
+                .await
+                .expect("insert mention"),
+            NotificationCandidateInsertOutcome::Inserted
+        );
+        let mut rows = store
+            .query(
+                "SELECT class, reason FROM notification_candidates ORDER BY stanza_id",
+                (),
+            )
+            .await
+            .expect("query round-trip candidates");
+        let mention_row = rows
+            .next()
+            .await
+            .expect("first row query")
+            .expect("mention row");
+        let plain_row = rows
+            .next()
+            .await
+            .expect("second row query")
+            .expect("plain row");
+        assert_eq!(
+            mention_row.get::<String>(0).expect("mention class"),
+            "dm_mention"
+        );
+        assert_eq!(
+            mention_row.get::<String>(1).expect("mention reason"),
+            "offline_dm_mention"
+        );
+        assert_eq!(plain_row.get::<String>(0).expect("plain class"), "dm");
+        assert_eq!(
+            plain_row.get::<String>(1).expect("plain reason"),
+            "offline_dm"
+        );
+    }
+
     #[tokio::test]
     async fn store_initialization_rejects_outbox_schema_without_sender_provenance_columns() {
         let db = Database::in_memory("notification-outbox-missing-job-senders")
