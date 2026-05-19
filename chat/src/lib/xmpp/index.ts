@@ -29,6 +29,12 @@ export type { InboxEntry } from "./inbox-types";
 export type { FeedEntry, FeedPostInput, FeedSourceKind } from "./feed-types";
 export type { Story, StoryPostInput } from "./story-types";
 export { isStoryActive } from "./story-types";
+export type { StoryRead, StoryReads } from "./story-reads-types";
+export {
+  pruneStoryReads,
+  STORY_READS_MAX_ENTRIES,
+  STORY_READS_PRUNE_MS,
+} from "./story-reads-types";
 export type {
   Attendee,
   CommunityEvent,

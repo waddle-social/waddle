@@ -340,8 +340,10 @@ onUnmounted(() => {
         :error="stories.error.value"
         :can-post="!!connectionStore.session"
         :self-jid="connectionStore.session?.jid ?? null"
+        :is-story-read="stories.isStoryRead"
         @refresh="stories.refresh()"
         @post="(input) => stories.post(input)"
+        @story-selected="(id) => stories.markStoryRead(id)"
         @open-nav="ui.showMobileNav.value = true"
       />
       <EventsPane

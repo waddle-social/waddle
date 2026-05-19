@@ -77,7 +77,18 @@ pub async fn fan_out_publish(state: &WebSocketState, req: FanOutRequest<'_>) {
     let publisher = req.publisher;
     let publisher_full = req.publisher_full;
     let is_pep = req.is_pep;
+    // Private PEP nodes (whitelist-access) carve out of roster + CAPS
+    // fan-out even though the published payload is broadcast at the
+    // pubsub layer. Whitelist `access_model` only gates the items-fetch
+    // path; without this check a contact with `+notify` for the node's
+    // namespace would still receive headline events. New entries here
+    // require an integration test asserting roster contacts do NOT
+    // receive the event (see `xep0402_bookmarks_*` and the
+    // `urn:waddle:story:reads:0` fan-out test).
     let is_private_bookmarks_node = is_pep && node == waddle_xmpp::xep::xep0402::PEP_NODE;
+    let is_private_story_reads_node =
+        is_pep && node == waddle_xmpp_core::waddle_story_reads::PEP_NODE_WADDLE_STORY_READS;
+    let is_private_pep_node = is_private_bookmarks_node || is_private_story_reads_node;
     let storage = &state.deps.protocol.pubsub_storage;
 
     let node_cfg = match storage.get_node(owner, node).await {
@@ -156,7 +167,7 @@ pub async fn fan_out_publish(state: &WebSocketState, req: FanOutRequest<'_>) {
     }
 
     for sub in subscribers {
-        if is_private_bookmarks_node && sub.subscriber.to_bare() != *owner {
+        if is_private_pep_node && sub.subscriber.to_bare() != *owner {
             continue;
         }
 
@@ -297,7 +308,7 @@ pub async fn fan_out_publish(state: &WebSocketState, req: FanOutRequest<'_>) {
     // would leak the event to roster contacts that advertise
     // `<node>+notify` for an unrelated node URI.
     let (roster_metrics, self_metrics) = if is_pep {
-        let roster = if is_private_bookmarks_node {
+        let roster = if is_private_pep_node {
             FanOutMetrics::default()
         } else {
             roster_caps_fan_out(state, owner, &ctx, &mut already_delivered).await

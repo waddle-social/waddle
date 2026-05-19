@@ -4,9 +4,23 @@
  * entries locally — the wasm bridge returns ALL items, and we
  * re-derive `activeStories` every minute so stories fade out as
  * their countdowns hit zero without a server roundtrip.
+ *
+ * Read state is synced via a private PEP node (XEP-0223) — see
+ * `services/story-read-store.ts`. Marking a story read is fire-and-
+ * forget; publishing your own story auto-marks it so other devices
+ * don't show it as unread.
  */
 import { computed, onScopeDispose, ref, type Ref } from "vue";
-import { isStoryActive, type BrowserXmppClient, type Story, type StoryPostInput } from "@/lib/xmpp-client";
+import {
+  isStoryActive,
+  type BrowserXmppClient,
+  type Story,
+  type StoryPostInput,
+} from "@/lib/xmpp-client";
+import {
+  createStoryReadStore,
+  type StoryReadStore,
+} from "@/services/story-read-store";
 
 const TICK_INTERVAL_MS = 60_000;
 
@@ -27,12 +41,34 @@ export function useStories(
   const tickHandle = setInterval(() => {
     nowMs.value = Date.now();
   }, TICK_INTERVAL_MS);
-  onScopeDispose(() => clearInterval(tickHandle));
+
+  const readStore: StoryReadStore = createStoryReadStore(xmppClient);
+  // `readVersion` bumps whenever a story is marked read so computed
+  // values depending on the read set re-evaluate. The store itself
+  // owns a plain Map; this ref is the reactive cursor on top of it.
+  const readVersion = ref(0);
+
+  onScopeDispose(() => {
+    clearInterval(tickHandle);
+    readStore.dispose();
+  });
 
   const activeStories = computed(() => {
     const live = stories.value.filter((s) => isStoryActive(s, nowMs.value));
     return [...live].sort((a, b) => (b.postedMs ?? 0) - (a.postedMs ?? 0));
   });
+
+  function isStoryRead(id: string): boolean {
+    void readVersion.value;
+    return readStore.isRead(id);
+  }
+
+  function markStoryRead(id: string): void {
+    if (!id) return;
+    if (readStore.isRead(id)) return;
+    readStore.markRead(id);
+    readVersion.value += 1;
+  }
 
   async function refresh(): Promise<boolean> {
     const client = xmppClient.value;
@@ -48,6 +84,12 @@ export function useStories(
       const fetched = await client.fetchStories(jid, pageSize);
       if (requestId !== fetchRequestId || client !== xmppClient.value) return false;
       stories.value = fetched;
+      if (!readStore.loaded()) {
+        // Hydrate after the first stories fetch so the rail doesn't
+        // pop unread→read on first paint.
+        await readStore.init();
+        readVersion.value += 1;
+      }
       return true;
     } catch (err) {
       if (requestId === fetchRequestId) {
@@ -71,6 +113,10 @@ export function useStories(
     try {
       const story = await client.publishStory(jid, input);
       stories.value = [story, ...stories.value.filter((s) => s.id !== story.id)];
+      // Auto-mark: a user should never see their own freshly-posted
+      // story as unread on another device. XEP-0501 has no
+      // server-side read affordance, so we drive this client-side.
+      markStoryRead(story.id);
       return story;
     } catch (err) {
       error.value = err instanceof Error ? err.message : String(err);
@@ -86,6 +132,8 @@ export function useStories(
     error.value = null;
     isLoading.value = false;
     isPosting.value = false;
+    readStore.dispose();
+    readVersion.value += 1;
   }
 
   return {
@@ -97,5 +145,7 @@ export function useStories(
     post,
     clear,
     nowMs,
+    isStoryRead,
+    markStoryRead,
   };
 }

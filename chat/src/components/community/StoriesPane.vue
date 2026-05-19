@@ -2,6 +2,8 @@
 import { computed, ref, watch } from "vue";
 import { Camera, ChevronLeft, ChevronRight, Menu, Plus, RefreshCw, X } from "lucide-vue-next";
 import AppAvatar from "@/components/ui/AppAvatar.vue";
+import StoryComposer from "@/components/community/StoryComposer.vue";
+import { connectionStore } from "@/lib/connection-store";
 import type { Story, StoryPostInput } from "@/lib/xmpp-client";
 
 interface StoriesPaneProps {
@@ -11,19 +13,24 @@ interface StoriesPaneProps {
   error: string | null;
   canPost: boolean;
   selfJid: string | null;
+  isStoryRead?: (id: string) => boolean;
 }
 
-const props = defineProps<StoriesPaneProps>();
+const props = withDefaults(defineProps<StoriesPaneProps>(), {
+  isStoryRead: () => () => false,
+});
+
 const emit = defineEmits<{
   refresh: [];
   post: [input: StoryPostInput];
+  storySelected: [id: string];
   openNav: [];
 }>();
 
 const composerOpen = ref(false);
-const composerBody = ref("");
-const composerMediaUrl = ref("");
 const activeIndex = ref<number | null>(null);
+const composerError = ref<string | null>(null);
+const composerBusy = ref(false);
 
 function authorLabel(author: string | undefined): string {
   if (!author) return "Anonymous";
@@ -38,11 +45,6 @@ function timeRemaining(story: Story, nowMs: number = Date.now()): string {
   if (delta < 3_600_000) return `${Math.floor(delta / 60_000)}m`;
   return `${Math.floor(delta / 3_600_000)}h`;
 }
-
-const canSubmit = computed(() => {
-  if (props.isPosting) return false;
-  return composerBody.value.trim().length > 0 || composerMediaUrl.value.trim().length > 0;
-});
 
 const activeStory = computed<Story | null>(() => {
   if (activeIndex.value === null) return null;
@@ -61,6 +63,8 @@ watch(
 function selectStory(index: number) {
   activeIndex.value = index;
   composerOpen.value = false;
+  const story = props.stories[index];
+  if (story?.id) emit("storySelected", story.id);
 }
 
 function closeReader() {
@@ -70,31 +74,44 @@ function closeReader() {
 function prevStory() {
   if (activeIndex.value === null || activeIndex.value <= 0) return;
   activeIndex.value -= 1;
+  const story = activeStory.value;
+  if (story?.id) emit("storySelected", story.id);
 }
 
 function nextStory() {
   if (activeIndex.value === null || activeIndex.value >= props.stories.length - 1) return;
   activeIndex.value += 1;
+  const story = activeStory.value;
+  if (story?.id) emit("storySelected", story.id);
 }
 
-function submit() {
-  const body = composerBody.value.trim();
-  const mediaUrl = composerMediaUrl.value.trim();
-  if (!body && !mediaUrl) return;
-  emit("post", {
-    ...(body ? { body } : {}),
-    ...(mediaUrl ? { mediaUrl } : {}),
-    ...(props.selfJid ? { author: props.selfJid.split("/")[0] } : {}),
-  });
-  composerBody.value = "";
-  composerMediaUrl.value = "";
-  composerOpen.value = false;
+async function handleComposerSubmit(payload: { body?: string; file: Blob; mediaKind: "image" | "video" }) {
+  const client = connectionStore.client;
+  if (!client) {
+    composerError.value = "Not connected.";
+    return;
+  }
+  composerError.value = null;
+  composerBusy.value = true;
+  try {
+    const uploaded = await client.uploadStoryMedia(payload.file);
+    const input: StoryPostInput = {
+      ...(payload.body ? { body: payload.body } : {}),
+      mediaUrl: uploaded.url,
+      ...(props.selfJid ? { author: props.selfJid.split("/")[0] } : {}),
+    };
+    emit("post", input);
+    composerOpen.value = false;
+  } catch (err) {
+    composerError.value = err instanceof Error ? err.message : "Couldn't upload — please try again.";
+  } finally {
+    composerBusy.value = false;
+  }
 }
 
-function dismissComposer() {
+function handleComposerCancel() {
   composerOpen.value = false;
-  composerBody.value = "";
-  composerMediaUrl.value = "";
+  composerError.value = null;
 }
 </script>
 
@@ -128,8 +145,10 @@ function dismissComposer() {
       <div v-if="error" class="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
         Couldn't post: {{ error }}
       </div>
+      <div v-if="composerError" class="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+        {{ composerError }}
+      </div>
 
-      <!-- Horizontal rail -->
       <div class="flex gap-3 overflow-x-auto pb-2">
         <button
           v-if="canPost"
@@ -154,7 +173,11 @@ function dismissComposer() {
         >
           <span class="relative">
             <AppAvatar :name="authorLabel(story.author)" :src="story.mediaUrl ?? null" size="md" />
-            <span class="pointer-events-none absolute inset-0 rounded-full ring-2 ring-primary/70 ring-offset-1 ring-offset-background" aria-hidden="true"></span>
+            <span
+              class="pointer-events-none absolute inset-0 rounded-full ring-2 ring-offset-1 ring-offset-background"
+              :class="isStoryRead(story.id) ? 'ring-muted/50' : 'ring-primary/70'"
+              aria-hidden="true"
+            ></span>
           </span>
           <span class="min-w-0 type-caption text-foreground">
             <span class="block truncate">{{ authorLabel(story.author) }}</span>
@@ -170,50 +193,13 @@ function dismissComposer() {
         </div>
       </div>
 
-      <form
+      <StoryComposer
         v-if="composerOpen"
-        class="grid gap-2 rounded-lg border border-border bg-card p-3"
-        @submit.prevent="submit"
-      >
-        <textarea
-          v-model="composerBody"
-          class="min-h-[3rem] w-full resize-y rounded-md border border-input bg-background px-3 py-2 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-          placeholder="Share a quick update…"
-          :disabled="isPosting"
-          aria-label="Story body"
-        />
-        <input
-          v-model="composerMediaUrl"
-          type="url"
-          class="w-full rounded-md border border-input bg-background px-3 py-2 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-          placeholder="Optional image / video URL"
-          :disabled="isPosting"
-          aria-label="Story media URL"
-        />
-        <div class="flex items-center justify-between gap-2">
-          <span class="type-caption text-muted-foreground">Expires in 24h</span>
-          <div class="flex items-center gap-2">
-            <button
-              type="button"
-              class="inline-flex items-center gap-1 rounded-md border border-input px-3 py-1.5 text-xs text-muted-foreground hover:bg-muted/50 hover:text-foreground"
-              :disabled="isPosting"
-              @click="dismissComposer"
-            >
-              <X class="h-3.5 w-3.5" aria-hidden="true" />
-              Cancel
-            </button>
-            <button
-              type="submit"
-              class="inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground shadow-sm hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-60"
-              :disabled="!canSubmit"
-            >
-              {{ isPosting ? "Posting…" : "Share" }}
-            </button>
-          </div>
-        </div>
-      </form>
+        :busy="composerBusy || isPosting"
+        @submit="handleComposerSubmit"
+        @cancel="handleComposerCancel"
+      />
 
-      <!-- Reader -->
       <article
         v-if="activeStory"
         class="grid gap-3 rounded-xl border border-border bg-card p-4"
@@ -236,8 +222,16 @@ function dismissComposer() {
           </button>
         </header>
 
+        <video
+          v-if="activeStory.mediaUrl && /\.(mp4|webm|mov)(\?|$)/i.test(activeStory.mediaUrl)"
+          :src="activeStory.mediaUrl"
+          class="max-h-[60vh] w-full rounded-md"
+          controls
+          playsinline
+          referrerpolicy="no-referrer"
+        ></video>
         <img
-          v-if="activeStory.mediaUrl"
+          v-else-if="activeStory.mediaUrl"
           :src="activeStory.mediaUrl"
           :alt="`Story media from ${authorLabel(activeStory.author)}`"
           class="max-h-[60vh] w-full rounded-md object-contain"
