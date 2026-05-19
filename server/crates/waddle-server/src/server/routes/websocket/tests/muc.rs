@@ -884,15 +884,7 @@ async fn cleanup_muc_presence_broadcasts_unavailable_to_remaining_occupants() {
         &Some(owner_session),
     )
     .await;
-    let _ = handle_muc_join(
-        state.as_ref(),
-        "example.com",
-        &room_jid,
-        &bob,
-        "bob",
-        &None,
-    )
-    .await;
+    let _ = handle_muc_join(state.as_ref(), "example.com", &room_jid, &bob, "bob", &None).await;
 
     // Drain the join broadcast (Alice's room → Bob's mailbox is the
     // self-presence on join; Bob's room → Alice's mailbox would be

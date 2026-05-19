@@ -361,10 +361,7 @@ pub async fn handle_muc_leave(
     // both the explicit-leave path and the tab-close path produce the
     // same wire shape.
     super::super::super::cleanup::broadcast_muc_leave_to_remaining(
-        state,
-        room_jid,
-        sender_jid,
-        &outcome,
+        state, room_jid, sender_jid, &outcome,
     );
 
     let response = vec![build_muc_self_unavailable_xml(
