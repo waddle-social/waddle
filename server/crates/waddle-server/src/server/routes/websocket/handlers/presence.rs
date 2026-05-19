@@ -33,6 +33,7 @@ use crate::server::xmpp_state::{get_xmpp_channel, XmppChannelRecord};
 use waddle_xmpp::protocol::ConnectionPhase;
 
 mod muc;
+mod muc_update;
 mod probe;
 mod regular;
 mod subscription;
@@ -78,6 +79,24 @@ pub async fn handle_presence(
 
         if is_unavailable {
             return handle_muc_leave(state, &room_jid, sender_jid, nick).await;
+        }
+
+        // XEP-0045 §5.1.3 / §7.7: an in-room presence update from an
+        // existing occupant is reflected to all occupants — not
+        // re-routed as a fresh join. The dispatcher's prior behavior
+        // (always route non-unavailable MUC presence to
+        // `handle_muc_join`) silently dropped extension payloads like
+        // `<call xmlns='urn:waddle:muc-call:0'/>` because the join's
+        // server-built presence template doesn't carry them. Try the
+        // update path first; fall through to join if the sender isn't
+        // an occupant yet (then the join handler is the correct path
+        // and the very next presence update will land here).
+        if let Some(replies) = muc_update::try_handle_muc_presence_update(
+            state, &room_jid, sender_jid, nick, &presence,
+        )
+        .await
+        {
+            return replies;
         }
 
         return handle_muc_join(

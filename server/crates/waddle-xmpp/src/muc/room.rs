@@ -7,6 +7,7 @@ use super::affiliation::{AffiliationList, FederatedAffiliationConfig, FederatedP
 use super::pin::{PinPermission, PinnedEntry};
 use super::subject::SubjectState;
 use crate::types::{Affiliation, Role};
+use crate::xep::xep_waddle_muc_call::{CallPresenceState, MucCallExtension};
 
 /// Check if a JID is from a remote server.
 ///
@@ -120,6 +121,25 @@ pub struct MucRoom {
     /// room-actor shutdown by design (#414); persistence is a follow-up
     /// concern. Bounded by [`super::pin::MAX_PINNED_ENTRIES`].
     pub(super) pinned_entries: Vec<PinnedEntry>,
+    /// Per-occupant `<call xmlns='urn:waddle:muc-call:0'/>` advertised
+    /// state, keyed by nick. Mirrors the client-emitted presence
+    /// extension so:
+    ///
+    /// 1. Joining occupants see existing call indicators when their
+    ///    initial occupant-list replay runs (the join handler reads
+    ///    from this map and appends the `<call/>` payload to the
+    ///    replayed presence for any nick that has one).
+    /// 2. Presence-update broadcasts can use the persisted state as
+    ///    the source of truth rather than echoing a possibly-stale
+    ///    payload from the client.
+    ///
+    /// Entries are cleared on occupant leave so a tab-close mid-call
+    /// doesn't leave the chip lit forever; the SFU teardown hook
+    /// (`muc_call_sfu::unregister_participant_from_room`) is the
+    /// authoritative call-end signal, but clearing here keeps the
+    /// XMPP indicator coherent without depending on the SFU's
+    /// timeout.
+    pub(super) call_state: HashMap<String, MucCallExtension>,
 }
 
 impl MucRoom {
@@ -142,7 +162,44 @@ impl MucRoom {
             nickname_generation: HashMap::new(),
             generation_floor: u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or(0),
             pinned_entries: Vec::new(),
+            call_state: HashMap::new(),
         }
+    }
+
+    /// Apply a `<call xmlns='urn:waddle:muc-call:0'/>` presence-extension
+    /// update from `nick`. `state='active'` stores the extension;
+    /// `state='inactive'` clears it (we DO NOT preserve an "inactive"
+    /// entry — the room-actor's perspective is binary: this nick is
+    /// currently advertising a live call, or they aren't).
+    ///
+    /// Returns the post-update extension state for `nick`:
+    /// `Some(ext)` if a live `active` advertisement is now present,
+    /// `None` if the nick has no active call state. The presence
+    /// broadcaster uses the return value to decide what to put on the
+    /// wire — `None` means "rebroadcast a presence WITHOUT the
+    /// `<call/>` child" so other occupants stop seeing the indicator.
+    pub fn upsert_call_state(
+        &mut self,
+        nick: &str,
+        ext: MucCallExtension,
+    ) -> Option<MucCallExtension> {
+        match ext.state {
+            CallPresenceState::Active => {
+                self.call_state.insert(nick.to_owned(), ext.clone());
+                Some(ext)
+            }
+            CallPresenceState::Inactive => {
+                self.call_state.remove(nick);
+                None
+            }
+        }
+    }
+
+    /// Currently-advertised `<call/>` extension for `nick`, if any.
+    /// Used by the join handler to enrich the replayed occupant
+    /// presence list with active-call indicators for late joiners.
+    pub fn call_state_for_nick(&self, nick: &str) -> Option<&MucCallExtension> {
+        self.call_state.get(nick)
     }
 
     /// Add an occupant to the room.
@@ -173,6 +230,7 @@ impl MucRoom {
     /// Remove an occupant from the room.
     pub fn remove_occupant(&mut self, nick: &str) -> Option<Occupant> {
         self.occupant_sessions.remove(nick);
+        self.call_state.remove(nick);
         self.occupants.remove(nick)
     }
 
@@ -215,6 +273,7 @@ impl MucRoom {
 
         if sessions.is_empty() {
             self.occupant_sessions.remove(nick);
+            self.call_state.remove(nick);
             self.occupants.remove(nick);
             return Some(true);
         }
