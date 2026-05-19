@@ -17,10 +17,17 @@
    token shrinks the box's min-content intrinsic size to a single character —
    otherwise long URLs/slugs hold the message body wider than the pane and
    produce a horizontal scrollbar on flex/grid layouts. The composer applies
-   the same rule on `.ProseMirror` (see ChatEditor.vue). */
+   the same rule on `.ProseMirror` (see ChatEditor.vue).
+   `width: 100%; max-width: 100%` pin the body to its container width even in
+   flex parents that use `align-items: flex-start` (see
+   `.chat-message-media-stack` in composer-pane.css). Without these the box
+   sizes to its widest *block* child — a long-line `<pre>` would push the
+   styled-body wider than the grid cell instead of scrolling internally. */
 .styled-body {
   overflow-wrap: anywhere;
   min-width: 0;
+  width: 100%;
+  max-width: 100%;
 }
 :where(.styled-body, .chat-editor .ProseMirror) p {
   margin: 0;
@@ -56,6 +63,10 @@
   background: var(--rich-code-bg);
   border: 1px solid var(--rich-code-border);
   border-radius: 8px;
+  /* `max-width: 100%` pins the pre to its container so very-long lines
+     scroll inside the pre instead of pushing the styled-body wider —
+     a sibling-element defense matching the one on `.styled-body`. */
+  max-width: 100%;
   overflow-x: auto;
   margin: 0.5em 0;
 }
