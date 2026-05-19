@@ -345,6 +345,15 @@ private final class _EventListener: WaddleEventListener {
     func onMessageDeliveryFailed(stanzaId: String) {
         continuation.yield(.messageDeliveryFailed(stanzaID: stanzaId))
     }
+
+    func onCall(event: WaddleCallEvent) {
+        // XEP-0353 JMI + XEP-0166 Jingle session control events come
+        // through here pre-typed; the AppModel consumes them to drive
+        // the ringing UI, the floating PIP window, and the hang-up
+        // path. Mapping to a Swift-native value (`XMPPCallEvent`)
+        // keeps UniFFI's generated types out of the AppModel surface.
+        continuation.yield(.call(makeCallEvent(event)))
+    }
 }
 
 // MARK: - Conversion helpers
@@ -393,6 +402,71 @@ private func makeEncryptedSource(
         ivBase64: encrypted.ivB64,
         cipher: encrypted.cipher
     )
+}
+
+private func makeCallMedia(_ media: WaddleCallMedia) -> XMPPCallMedia {
+    XMPPCallMedia(audio: media.audio, video: media.video)
+}
+
+private func makeLiveKitJoin(_ join: WaddleLiveKitJoin) -> XMPPLiveKitJoin {
+    XMPPLiveKitJoin(url: join.url, room: join.room, identity: join.identity, token: join.token)
+}
+
+private func makeJingleReason(_ reason: WaddleJingleReason) -> XMPPJingleReason {
+    // Exhaustive match: adding a XEP-0166 condition upstream is a
+    // compile error here, by design — silently mapping a new wire
+    // value to a placeholder would leave the call UI in a wrong
+    // post-hangup state.
+    switch reason {
+    case .alternativeSession: return .alternativeSession
+    case .busy: return .busy
+    case .cancel: return .cancel
+    case .connectivityError: return .connectivityError
+    case .decline: return .decline
+    case .expired: return .expired
+    case .failedApplication: return .failedApplication
+    case .failedTransport: return .failedTransport
+    case .generalError: return .generalError
+    case .gone: return .gone
+    case .incompatibleParameters: return .incompatibleParameters
+    case .mediaError: return .mediaError
+    case .securityError: return .securityError
+    case .success: return .success
+    case .timeout: return .timeout
+    case .unsupportedApplications: return .unsupportedApplications
+    case .unsupportedTransports: return .unsupportedTransports
+    }
+}
+
+/// Translate the UniFFI-generated call event into the Swift-native
+/// `XMPPCallEvent`. Strict pattern match — every variant of
+/// `WaddleCallEventKind` must be handled here, so adding a new
+/// variant in the Rust crate is a compile error in Swift until
+/// the UI catches up. That's deliberate: ringing/finish/terminate
+/// is the kind of state machine where silently dropping a variant
+/// would surface as a stuck UI bug.
+private func makeCallEvent(_ event: WaddleCallEvent) -> XMPPCallEvent {
+    let kind: XMPPCallEventKind = {
+        switch event.kind {
+        case let .propose(media):
+            return .propose(media: makeCallMedia(media))
+        case .proceed:
+            return .proceed
+        case .reject:
+            return .reject
+        case .retract:
+            return .retract
+        case .finish:
+            return .finish
+        case let .sessionInitiate(join, media):
+            return .sessionInitiate(join: makeLiveKitJoin(join), media: makeCallMedia(media))
+        case let .sessionAccept(join, media):
+            return .sessionAccept(join: makeLiveKitJoin(join), media: makeCallMedia(media))
+        case let .sessionTerminate(reason):
+            return .sessionTerminate(reason: reason.map(makeJingleReason))
+        }
+    }()
+    return XMPPCallEvent(from: event.from, sid: event.sid, kind: kind)
 }
 
 private func makeSharedFile(_ file: WaddleSharedFile) -> XMPPSharedFile {

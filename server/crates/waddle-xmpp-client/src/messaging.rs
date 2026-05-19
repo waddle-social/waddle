@@ -22,12 +22,14 @@ pub use builders::{
 };
 pub use call::{
     build_finish, build_proceed, build_propose, build_reject, build_retract, build_session_accept,
-    build_session_initiate, build_session_terminate, parse_call_event, parse_jingle_iq,
-    parse_jmi_message, wrap_jmi_message, CallEventKind, CallMedia, InboundCallEvent, LiveKitJoin,
+    build_session_initiate, build_session_terminate, jingle_reason_wire_name, parse_call_event,
+    parse_jingle_iq, parse_jmi_message, wrap_jmi_message, CallEventKind, CallMedia,
+    InboundCallEvent, LiveKitJoin,
 };
 pub use namespaces::{
-    build_muc_call_extension_element, NS_CHAT_MARKERS, NS_CHAT_STATES, NS_MESSAGE_CORRECT,
-    NS_MESSAGE_MODERATE, NS_MESSAGE_RETRACT, NS_REACTIONS, NS_WADDLE_MUC_CALL, NS_WADDLE_PIN_V0,
+    build_muc_call_extension_element, NS_CHAT_MARKERS, NS_CHAT_STATES, NS_CLIENT,
+    NS_MESSAGE_CORRECT, NS_MESSAGE_MODERATE, NS_MESSAGE_RETRACT, NS_REACTIONS, NS_WADDLE_MUC_CALL,
+    NS_WADDLE_PIN_V0,
 };
 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 pub use native::MessagingExt;
@@ -41,10 +43,10 @@ pub use types::{
     ExtensionLaunchContextData, ExtensionLaunchData, ExtensionNamespace,
     ExtensionPayloadAttributeData, ExtensionPayloadElementData, ExtensionPluginId,
     ExtensionRoomJid, ExtensionSourceData, ExtensionTextId, ExtensionTimestamp, ExtensionXmlName,
-    InboundMessage, InboundPresence, MarkupSpan, MarkupSpanData, MarkupSpanType, MessagingEvent,
-    ModerationPayload, MucAffiliation, MucCallPresence, MucCallPresenceState, MucRole, PresenceHat,
-    ReactionPayload, ReferenceData, RetractionPayload, SendMessageOptions, SharedFile,
-    SharedFileDisposition,
+    InboundMessage, InboundPresence, MarkupSpan, MarkupSpanData, MarkupSpanType, MdsDisplayedEntry,
+    MessagingEvent, ModerationPayload, MucAffiliation, MucCallPresence, MucCallPresenceState,
+    MucRole, PresenceHat, ReactionPayload, ReferenceData, RetractionPayload, SendMessageOptions,
+    SharedFile, SharedFileDisposition,
 };
 /// Re-export the xmpp-parsers Jingle types Waddle's call surface
 /// owns so downstream crates (notably the wasm bindings, which

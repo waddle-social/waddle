@@ -17,9 +17,11 @@
 //! raw [`minidom::Element`] so the client UI layer doesn't have to
 //! know XML.
 
+use std::str::FromStr;
+
 use jid::{FullJid, Jid};
 use minidom::Element;
-use xmpp_parsers::jingle::SessionId;
+use xmpp_parsers::jingle::{Reason as JingleReason, SessionId};
 use xmpp_parsers::message::{Message, MessageType};
 
 /// Media kinds offered or accepted on a call. Inferred from the
@@ -65,19 +67,38 @@ pub struct LiveKitJoin {
     pub token: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+// `xmpp_parsers::jingle::Reason` is `PartialEq` but not `Eq`, so the
+// enum drops `Eq` to compose. Equality semantics are unchanged for
+// the call-event use cases (we compare variants and IDs, never any
+// f-prefixed numerics).
+#[derive(Debug, Clone, PartialEq)]
 pub enum CallEventKind {
-    Propose { media: CallMedia },
+    Propose {
+        media: CallMedia,
+    },
     Proceed,
     Reject,
     Retract,
     Finish,
-    SessionInitiate { join: LiveKitJoin, media: CallMedia },
-    SessionAccept { join: LiveKitJoin, media: CallMedia },
-    SessionTerminate { reason: Option<String> },
+    SessionInitiate {
+        join: LiveKitJoin,
+        media: CallMedia,
+    },
+    SessionAccept {
+        join: LiveKitJoin,
+        media: CallMedia,
+    },
+    /// XEP-0166 §7.4 session-terminate. `reason` is the typed
+    /// `JingleReason` condition; unknown wire conditions are
+    /// surfaced as `None` (the parser drops untyped strings rather
+    /// than passing them through — typed-payloads hard rule in
+    /// `CLAUDE.md`).
+    SessionTerminate {
+        reason: Option<JingleReason>,
+    },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct InboundCallEvent {
     /// The originator JID, preserved as-sent by the server's `from`
     /// stamp. For `<propose/>` and Jingle session-initiate this is
@@ -227,9 +248,43 @@ fn extract_livekit_join(jingle: &Element) -> Option<LiveKitJoin> {
     None
 }
 
-fn extract_terminate_reason(jingle: &Element) -> Option<String> {
+/// Pull the typed XEP-0166 §7.4 condition out of a `<reason/>`
+/// child. Unknown condition names (e.g. a non-conforming server)
+/// resolve to `None` rather than passing through as an opaque
+/// string — the typed-payloads hard rule says protocol data
+/// crosses the parser boundary as typed values exactly once, and
+/// the untyped form is dropped immediately.
+fn extract_terminate_reason(jingle: &Element) -> Option<JingleReason> {
     let reason = jingle.children().find(|c| c.name() == "reason")?;
-    reason.children().next().map(|c| c.name().to_string())
+    let condition = reason.children().next()?;
+    JingleReason::from_str(condition.name()).ok()
+}
+
+/// Canonical XEP-0166 §7.4 wire name for a typed `JingleReason`.
+/// Public so wasm/FFI consumers can emit the typed value as the
+/// stable XEP-defined string when crossing into untyped languages
+/// (the JS side carries it as a string; UniFFI carries the typed
+/// enum and never needs this).
+pub fn jingle_reason_wire_name(reason: JingleReason) -> &'static str {
+    match reason {
+        JingleReason::AlternativeSession => "alternative-session",
+        JingleReason::Busy => "busy",
+        JingleReason::Cancel => "cancel",
+        JingleReason::ConnectivityError => "connectivity-error",
+        JingleReason::Decline => "decline",
+        JingleReason::Expired => "expired",
+        JingleReason::FailedApplication => "failed-application",
+        JingleReason::FailedTransport => "failed-transport",
+        JingleReason::GeneralError => "general-error",
+        JingleReason::Gone => "gone",
+        JingleReason::IncompatibleParameters => "incompatible-parameters",
+        JingleReason::MediaError => "media-error",
+        JingleReason::SecurityError => "security-error",
+        JingleReason::Success => "success",
+        JingleReason::Timeout => "timeout",
+        JingleReason::UnsupportedApplications => "unsupported-applications",
+        JingleReason::UnsupportedTransports => "unsupported-transports",
+    }
 }
 
 // ---------------------------------------------------------------------
@@ -479,8 +534,81 @@ mod tests {
         let ev = parse_call_event(&elem).expect("session-terminate parses");
         match ev.kind {
             CallEventKind::SessionTerminate { reason } => {
-                assert_eq!(reason.as_deref(), Some("success"))
+                // The wire `<success/>` parses into the typed
+                // variant — not a raw string.
+                assert_eq!(reason, Some(JingleReason::Success));
             }
+            other => panic!("expected SessionTerminate, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn jingle_reason_wire_names_match_xep_0166_spec() {
+        // XEP-0166 §7.4 normative wire condition names. Every
+        // typed variant must serialise to the spec-defined string;
+        // every spec-defined string must round-trip back to the
+        // same variant via `JingleReason::from_str`. A typo in any
+        // single arm of `jingle_reason_wire_name` (the table used
+        // by the wasm chat client to emit the reason to JS) would
+        // be invisible at runtime until a peer rejected the
+        // stanza — this table-driven test makes the failure
+        // catchable at PR time instead.
+        let cases: &[(JingleReason, &str)] = &[
+            (JingleReason::AlternativeSession, "alternative-session"),
+            (JingleReason::Busy, "busy"),
+            (JingleReason::Cancel, "cancel"),
+            (JingleReason::ConnectivityError, "connectivity-error"),
+            (JingleReason::Decline, "decline"),
+            (JingleReason::Expired, "expired"),
+            (JingleReason::FailedApplication, "failed-application"),
+            (JingleReason::FailedTransport, "failed-transport"),
+            (JingleReason::GeneralError, "general-error"),
+            (JingleReason::Gone, "gone"),
+            (
+                JingleReason::IncompatibleParameters,
+                "incompatible-parameters",
+            ),
+            (JingleReason::MediaError, "media-error"),
+            (JingleReason::SecurityError, "security-error"),
+            (JingleReason::Success, "success"),
+            (JingleReason::Timeout, "timeout"),
+            (
+                JingleReason::UnsupportedApplications,
+                "unsupported-applications",
+            ),
+            (
+                JingleReason::UnsupportedTransports,
+                "unsupported-transports",
+            ),
+        ];
+        for (variant, expected) in cases {
+            assert_eq!(
+                jingle_reason_wire_name(variant.clone()),
+                *expected,
+                "wire name for {variant:?} must match XEP-0166 §7.4"
+            );
+            let round_tripped = JingleReason::from_str(expected)
+                .expect("XEP wire name parses back to JingleReason");
+            assert_eq!(
+                &round_tripped, variant,
+                "{expected} must round-trip to {variant:?} via FromStr"
+            );
+        }
+    }
+
+    #[test]
+    fn session_terminate_unknown_condition_drops_to_none() {
+        // Non-conforming servers MUST NOT leak unknown reason
+        // names through the typed boundary. Parser surfaces None.
+        let xml = r#"<iq xmlns='jabber:client' type='set' from='bob@waddle.test/d' id='t1'>
+            <jingle xmlns='urn:xmpp:jingle:1' action='session-terminate' sid='c1'>
+              <reason><not-a-real-condition/></reason>
+            </jingle>
+        </iq>"#;
+        let elem: Element = xml.parse().unwrap();
+        let ev = parse_call_event(&elem).expect("session-terminate parses");
+        match ev.kind {
+            CallEventKind::SessionTerminate { reason } => assert_eq!(reason, None),
             other => panic!("expected SessionTerminate, got {other:?}"),
         }
     }

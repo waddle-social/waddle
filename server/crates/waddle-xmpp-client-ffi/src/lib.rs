@@ -4,7 +4,8 @@ uniffi::setup_scaffolding!("waddle_xmpp_client");
 
 use std::sync::Arc;
 
-use jid::BareJid;
+use jid::{BareJid, FullJid, Jid};
+use minidom::Element;
 use tokio::sync::Mutex;
 use url::Url;
 
@@ -14,12 +15,19 @@ mod types;
 pub use types::*;
 
 use convert::{
-    dispatch_event, empty_mam_page, empty_topology, jid_domain, mam_page_to_ffi,
-    send_options_from_ffi, topology_to_ffi, upload_slot_to_ffi,
+    dispatch_event, empty_mam_page, empty_topology, jid_domain, jingle_reason_from_ffi,
+    mam_page_to_ffi, send_options_from_ffi, topology_to_ffi, upload_slot_to_ffi,
 };
 use waddle_xmpp_client::{
-    avatar::AvatarExt, discovery::DiscoveryExt, mam::MamExt, messaging::MessagingExt, AccessToken,
-    ClientConfig, ClientHandle, ConnectionConfig, OAuthBearerConfig, WebSocketConfig,
+    avatar::AvatarExt,
+    discovery::DiscoveryExt,
+    mam::MamExt,
+    messaging::{
+        build_finish, build_proceed, build_propose, build_reject, build_retract,
+        build_session_accept, build_session_initiate, build_session_terminate, CallMedia,
+        MessagingExt, SessionId, NS_CLIENT,
+    },
+    AccessToken, ClientConfig, ClientHandle, ConnectionConfig, OAuthBearerConfig, WebSocketConfig,
 };
 use waddle_xmpp_client::{ClientResource, XmppClient};
 
@@ -459,4 +467,305 @@ impl WaddleClient {
             },
         }
     }
+
+    // ── A/V calls (XEP-0353 + XEP-0166) ──────────────────────────────
+
+    /// Send a XEP-0353 §5.1.1 `<propose/>` to the peer's bare JID.
+    /// The bare JID lets the responder's server ring every connected
+    /// resource until one of them proceeds or rejects.
+    pub async fn send_call_propose(
+        &self,
+        peer_bare_jid: String,
+        sid: String,
+        audio: bool,
+        video: bool,
+    ) -> bool {
+        let Some(peer) = self.parse_bare_jid(&peer_bare_jid, "send_call_propose") else {
+            return false;
+        };
+        let Some(sid) = self.parse_session_id(sid, "send_call_propose") else {
+            return false;
+        };
+        let stanza = message_with_jmi(
+            &peer.into(),
+            build_propose(&sid, CallMedia { audio, video }),
+        );
+        self.send_stanza_or_error(stanza, "send_call_propose").await
+    }
+
+    /// Send a XEP-0353 §5.1.2 `<proceed/>` to the *full* JID of the
+    /// originator (preserved from the propose `from` per §0.6).
+    pub async fn send_call_proceed(&self, peer_full_jid: String, sid: String) -> bool {
+        let Some(peer) = self.parse_full_jid(&peer_full_jid, "send_call_proceed") else {
+            return false;
+        };
+        let Some(sid) = self.parse_session_id(sid, "send_call_proceed") else {
+            return false;
+        };
+        let stanza = message_with_jmi(&peer.into(), build_proceed(&sid));
+        self.send_stanza_or_error(stanza, "send_call_proceed").await
+    }
+
+    /// Send a XEP-0353 §5.1.3 `<reject/>` to the originator's full JID.
+    pub async fn send_call_reject(&self, peer_full_jid: String, sid: String) -> bool {
+        let Some(peer) = self.parse_full_jid(&peer_full_jid, "send_call_reject") else {
+            return false;
+        };
+        let Some(sid) = self.parse_session_id(sid, "send_call_reject") else {
+            return false;
+        };
+        let stanza = message_with_jmi(&peer.into(), build_reject(&sid));
+        self.send_stanza_or_error(stanza, "send_call_reject").await
+    }
+
+    /// Send a XEP-0353 §5.1.4 `<retract/>` to cancel a ringing call
+    /// before the peer answers. Addressed to the responder's *bare*
+    /// JID so every resource that may have been ringing receives the
+    /// cancellation (XEP-0353 §5.1.4: a retract is addressed to the
+    /// callee's bare JID, exactly like the originating propose).
+    pub async fn send_call_retract(&self, peer_bare_jid: String, sid: String) -> bool {
+        let Some(peer) = self.parse_bare_jid(&peer_bare_jid, "send_call_retract") else {
+            return false;
+        };
+        let Some(sid) = self.parse_session_id(sid, "send_call_retract") else {
+            return false;
+        };
+        let stanza = message_with_jmi(&peer.into(), build_retract(&sid));
+        self.send_stanza_or_error(stanza, "send_call_retract").await
+    }
+
+    /// Send a `<finish/>` Waddle JMI extension signaling clean
+    /// teardown after a call ended. Addressed to the peer's full JID
+    /// so the originating resource sees the finish notice.
+    pub async fn send_call_finish(&self, peer_full_jid: String, sid: String) -> bool {
+        let Some(peer) = self.parse_full_jid(&peer_full_jid, "send_call_finish") else {
+            return false;
+        };
+        let Some(sid) = self.parse_session_id(sid, "send_call_finish") else {
+            return false;
+        };
+        let stanza = message_with_jmi(&peer.into(), build_finish(&sid));
+        self.send_stanza_or_error(stanza, "send_call_finish").await
+    }
+
+    /// Send a XEP-0166 §6.4 `session-initiate` IQ to the peer's full
+    /// JID. `initiator_full_jid` names the call originator per §7.1;
+    /// the server's Jingle handler additionally validates that the
+    /// authenticated session matches. Validating both JIDs as
+    /// `FullJid` at the FFI boundary surfaces a clear error rather
+    /// than letting a malformed stanza hit the wire.
+    pub async fn send_call_session_initiate(
+        &self,
+        peer_full_jid: String,
+        initiator_full_jid: String,
+        sid: String,
+        audio: bool,
+        video: bool,
+    ) -> bool {
+        let Some(peer) = self.parse_full_jid(&peer_full_jid, "send_call_session_initiate") else {
+            return false;
+        };
+        let Some(initiator) =
+            self.parse_full_jid(&initiator_full_jid, "send_call_session_initiate")
+        else {
+            return false;
+        };
+        let Some(sid) = self.parse_session_id(sid, "send_call_session_initiate") else {
+            return false;
+        };
+        let payload = build_session_initiate(&sid, &initiator, CallMedia { audio, video });
+        let iq = iq_set(&peer.into(), payload);
+        self.send_iq_or_error(iq, "send_call_session_initiate")
+            .await
+    }
+
+    /// Send a XEP-0166 §7.2 `session-accept` IQ. `initiator` and
+    /// `responder` are both validated as full JIDs at the FFI
+    /// boundary so a malformed JID surfaces as an error before the
+    /// stanza hits the wire.
+    pub async fn send_call_session_accept(
+        &self,
+        peer_full_jid: String,
+        initiator_full_jid: String,
+        responder_full_jid: String,
+        sid: String,
+        audio: bool,
+        video: bool,
+    ) -> bool {
+        let Some(peer) = self.parse_full_jid(&peer_full_jid, "send_call_session_accept") else {
+            return false;
+        };
+        let Some(initiator) = self.parse_full_jid(&initiator_full_jid, "send_call_session_accept")
+        else {
+            return false;
+        };
+        let Some(responder) = self.parse_full_jid(&responder_full_jid, "send_call_session_accept")
+        else {
+            return false;
+        };
+        let Some(sid) = self.parse_session_id(sid, "send_call_session_accept") else {
+            return false;
+        };
+        let payload =
+            build_session_accept(&sid, &initiator, &responder, CallMedia { audio, video });
+        let iq = iq_set(&peer.into(), payload);
+        self.send_iq_or_error(iq, "send_call_session_accept").await
+    }
+
+    /// Send a XEP-0166 §7.4 `session-terminate` IQ. `reason` is the
+    /// typed XEP-0166 condition (the FFI rejects unknown values at
+    /// the Swift boundary by virtue of `reason` being a UniFFI enum
+    /// — there is no way to express an unsupported condition in
+    /// Swift, so the wire can't carry one either).
+    pub async fn send_call_session_terminate(
+        &self,
+        peer_full_jid: String,
+        sid: String,
+        reason: Option<WaddleJingleReason>,
+    ) -> bool {
+        let Some(peer) = self.parse_full_jid(&peer_full_jid, "send_call_session_terminate") else {
+            return false;
+        };
+        let Some(sid) = self.parse_session_id(sid, "send_call_session_terminate") else {
+            return false;
+        };
+        let typed_reason = reason.map(jingle_reason_from_ffi);
+        let payload = build_session_terminate(&sid, typed_reason);
+        let iq = iq_set(&peer.into(), payload);
+        self.send_iq_or_error(iq, "send_call_session_terminate")
+            .await
+    }
+}
+
+// ── Send helpers ────────────────────────────────────────────────────────────
+
+impl WaddleClient {
+    /// Send a built stanza fire-and-forget. Returns `true` on success.
+    /// On failure (not connected, transport closed) emits an
+    /// `on_error` and returns `false` so callers can short-circuit.
+    ///
+    /// Holds the client mutex only long enough to clone the
+    /// [`ClientHandle`] (cheap — it is `Arc`-backed) and releases
+    /// before awaiting the underlying send. Holding across the
+    /// `send_stanza` await would be safe today (it returns once the
+    /// stanza hits the command channel) but matches the same shape
+    /// used by `send_iq_or_error`, which *must* release because
+    /// `send_iq` awaits the correlated server reply.
+    async fn send_stanza_or_error(&self, stanza: Element, op: &'static str) -> bool {
+        let Some(handle) = self.clone_handle().await else {
+            return false;
+        };
+        match handle.send_stanza(stanza).await {
+            Ok(()) => true,
+            Err(e) => {
+                self.listener.on_error(format!("{op} failed: {e}"));
+                false
+            }
+        }
+    }
+
+    /// Send a built IQ and await its correlated result. Returns
+    /// `true` on `<iq type='result'>`, `false` on `<iq type='error'>`
+    /// or transport failure (with an `on_error` for both).
+    ///
+    /// Clones the [`ClientHandle`] under the mutex and **drops the
+    /// guard before awaiting** the IQ response. `send_iq` blocks on
+    /// a `oneshot::Receiver` until the server replies — holding the
+    /// mutex across that wait would serialise every concurrent
+    /// FFI call against the slowest in-flight IQ.
+    async fn send_iq_or_error(&self, stanza: Element, op: &'static str) -> bool {
+        let Some(handle) = self.clone_handle().await else {
+            return false;
+        };
+        match handle.send_iq(stanza).await {
+            Ok(_) => true,
+            Err(e) => {
+                self.listener.on_error(format!("{op} failed: {e}"));
+                false
+            }
+        }
+    }
+
+    /// Take a cheap [`ClientHandle`] clone under the mutex, dropping
+    /// the guard before returning so callers can await freely.
+    async fn clone_handle(&self) -> Option<ClientHandle> {
+        let guard = self.handle.lock().await;
+        match guard.as_ref() {
+            None => {
+                drop(guard);
+                self.listener.on_error("Not connected".to_string());
+                None
+            }
+            Some(h) => {
+                let handle = h.clone();
+                drop(guard);
+                Some(handle)
+            }
+        }
+    }
+
+    fn parse_full_jid(&self, value: &str, op: &'static str) -> Option<FullJid> {
+        match value.parse::<FullJid>() {
+            Ok(j) => Some(j),
+            Err(e) => {
+                self.listener
+                    .on_error(format!("{op} failed: invalid full JID '{value}': {e}"));
+                None
+            }
+        }
+    }
+
+    fn parse_bare_jid(&self, value: &str, op: &'static str) -> Option<BareJid> {
+        match value.parse::<BareJid>() {
+            Ok(j) => Some(j),
+            Err(e) => {
+                self.listener
+                    .on_error(format!("{op} failed: invalid bare JID '{value}': {e}"));
+                None
+            }
+        }
+    }
+
+    /// Wrap a caller-supplied id in [`SessionId`] after rejecting
+    /// empty or whitespace-only inputs. XEP-0166 §7 uses `sid` as
+    /// the correlation key for every later stanza in the call; a
+    /// whitespace-only string passes the empty check but never
+    /// matches anything on the wire, leaving the call UI in a
+    /// stuck state. `SessionId(String)` is a thin newtype with no
+    /// runtime check, so this method is the gate.
+    fn parse_session_id(&self, value: String, op: &'static str) -> Option<SessionId> {
+        if value.trim().is_empty() {
+            self.listener.on_error(format!(
+                "{op} failed: session id must be a non-empty, non-whitespace string"
+            ));
+            return None;
+        }
+        Some(SessionId(value))
+    }
+}
+
+// ── XML envelopes ───────────────────────────────────────────────────────────
+
+/// Wrap a JMI payload in a `<message to='...'/>` envelope.
+/// The destination is taken as a typed [`Jid`] so the caller has
+/// already validated the JID at the FFI entry point; the `to`
+/// attribute is rendered from the typed value.
+fn message_with_jmi(to: &Jid, jmi: Element) -> Element {
+    Element::builder("message", NS_CLIENT)
+        .attr("to", to.to_string())
+        .append(jmi)
+        .build()
+}
+
+/// Wrap a Jingle payload in an `<iq type='set' id='...' to='...'/>`
+/// envelope. A v4 UUID id is minted so the correlator in
+/// [`ClientHandle::send_iq`] can route the result. `to` is a typed
+/// [`Jid`] — see [`message_with_jmi`].
+fn iq_set(to: &Jid, payload: Element) -> Element {
+    Element::builder("iq", NS_CLIENT)
+        .attr("type", "set")
+        .attr("id", uuid::Uuid::new_v4().to_string())
+        .attr("to", to.to_string())
+        .append(payload)
+        .build()
 }

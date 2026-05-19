@@ -265,6 +265,74 @@ enum XMPPEvent: Sendable, Equatable {
     case streamError(name: String, text: String?)
     case error(String)
     case disconnected
+    /// XEP-0353 JMI or XEP-0166 Jingle session control event surfaced
+    /// by the Rust client. Drives the ringing UI and the in-call HUD.
+    case call(XMPPCallEvent)
+}
+
+// MARK: - A/V call event (XEP-0353 JMI + XEP-0166 Jingle)
+
+/// Media kinds offered or accepted on a call.
+struct XMPPCallMedia: Sendable, Equatable {
+    let audio: Bool
+    let video: Bool
+}
+
+/// LiveKit join credentials supplied by the server on
+/// `session-initiate` / `session-accept` via the
+/// `urn:waddle:transports:livekit:0` transport.
+struct XMPPLiveKitJoin: Sendable, Equatable {
+    let url: String
+    let room: String
+    let identity: String
+    let token: String
+}
+
+/// XEP-0166 §7.4 session-terminate condition. Mirrors the 17
+/// variants of `xmpp_parsers::jingle::Reason` (carried through the
+/// FFI as a typed enum, never a raw string).
+enum XMPPJingleReason: Sendable, Equatable {
+    case alternativeSession
+    case busy
+    case cancel
+    case connectivityError
+    case decline
+    case expired
+    case failedApplication
+    case failedTransport
+    case generalError
+    case gone
+    case incompatibleParameters
+    case mediaError
+    case securityError
+    case success
+    case timeout
+    case unsupportedApplications
+    case unsupportedTransports
+}
+
+/// Inbound A/V call event variants. Mirrors `WaddleCallEventKind`
+/// from the Rust FFI 1:1 so the AppModel can pattern-match without
+/// importing UniFFI types into its own surface.
+enum XMPPCallEventKind: Sendable, Equatable {
+    case propose(media: XMPPCallMedia)
+    case proceed
+    case reject
+    case retract
+    case finish
+    case sessionInitiate(join: XMPPLiveKitJoin, media: XMPPCallMedia)
+    case sessionAccept(join: XMPPLiveKitJoin, media: XMPPCallMedia)
+    case sessionTerminate(reason: XMPPJingleReason?)
+}
+
+struct XMPPCallEvent: Sendable, Equatable {
+    /// Sender JID stamped by the server. A *full* JID for
+    /// propose / session-initiate (XEP-0353 §0.6) so responses can
+    /// be addressed back to the originating resource.
+    let from: String
+    /// Jingle session id correlating every stanza for this call.
+    let sid: String
+    let kind: XMPPCallEventKind
 }
 
 struct XMPPDiscoItem: Sendable, Equatable {
