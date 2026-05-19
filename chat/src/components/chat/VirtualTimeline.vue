@@ -1,11 +1,12 @@
 <script setup lang="ts">
-import { computed, nextTick, ref, watch, watchEffect } from "vue";
+import { computed, nextTick, onBeforeUnmount, ref, watch, watchEffect } from "vue";
 import { useVirtualizer } from "@tanstack/vue-virtual";
 import type { TimelineMessage } from "@/lib/chat-ui";
 import {
   isTopPinnedScrollDirection,
   type ScrollDirectionMode,
 } from "@/lib/scroll-direction";
+import { installVirtualTimelineMeasurementRecovery } from "@/ui/virtual-timeline-measurement";
 
 const props = withDefaults(defineProps<{
   items: TimelineMessage[];
@@ -64,6 +65,28 @@ const virtualizer = useVirtualizer(computed(() => ({
   overscan: 8,
   getItemKey: (index: number) => itemForVirtualIndex(index)?.id ?? "older-history-sentinel",
 })));
+
+let disconnectMeasurementRecovery: (() => void) | null = null;
+
+watch(
+  scrollElement,
+  (el) => {
+    disconnectMeasurementRecovery?.();
+    disconnectMeasurementRecovery = null;
+    if (!el) return;
+    disconnectMeasurementRecovery = installVirtualTimelineMeasurementRecovery({
+      scrollElement: el,
+      measure: () => virtualizer.value.measure(),
+      measureElement: (row) => virtualizer.value.measureElement(row),
+    });
+  },
+  { flush: "post", immediate: true },
+);
+
+onBeforeUnmount(() => {
+  disconnectMeasurementRecovery?.();
+  disconnectMeasurementRecovery = null;
+});
 
 const virtualItems = computed(() => virtualizer.value.getVirtualItems());
 const totalSize = computed(() => virtualizer.value.getTotalSize());
