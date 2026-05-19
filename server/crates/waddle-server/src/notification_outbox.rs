@@ -3239,7 +3239,10 @@ mod tests {
             true,
         )
         .expect("dm_mention candidate after migration");
-        assert_eq!(mention_candidate.class(), NotificationClass::DirectMessageMention);
+        assert_eq!(
+            mention_candidate.class(),
+            NotificationClass::DirectMessageMention
+        );
         assert_eq!(
             store
                 .insert_candidate(&mention_candidate)
@@ -3284,9 +3287,7 @@ mod tests {
         let db = Database::in_memory("notification-outbox-dm-mention-roundtrip")
             .await
             .unwrap();
-        let store = NotificationOutboxStore::new(db)
-            .await
-            .expect("store init");
+        let store = NotificationOutboxStore::new(db).await.expect("store init");
         let recipient = bare("bob@example.com");
         let plain = NotificationCandidate::direct_message(
             recipient.clone(),
