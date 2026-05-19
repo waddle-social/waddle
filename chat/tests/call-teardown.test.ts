@@ -173,6 +173,39 @@ describe("MUC group call", () => {
     );
   });
 
+  test("tearDownActiveCall still clears the call presence when sendMucCallLeave throws", async () => {
+    // Regression guard: a stale wasm bundle without
+    // `send_muc_call_leave` makes `sendMucCallLeave` throw. The
+    // presence cleanup MUST still run — otherwise the user's
+    // `<call state='active'/>` advertisement lingers until the XMPP
+    // session disconnects, exactly the bug this teardown path exists
+    // to fix.
+    const update_muc_call_presence = mock(async () => undefined);
+    $callState.set({
+      phase: "active",
+      peer: "chan@muc.test",
+      sid: "chan@muc.test",
+      media: audioVideo,
+      join,
+      kind: "muc",
+      selfNick: "alice",
+    });
+    await tearDownActiveCall(
+      { update_muc_call_presence } as unknown as Parameters<
+        typeof tearDownActiveCall
+      >[0],
+      "success",
+    );
+    expect(update_muc_call_presence).toHaveBeenCalledTimes(1);
+    expect(update_muc_call_presence).toHaveBeenCalledWith(
+      "chan@muc.test",
+      "alice",
+      false,
+      "chan@muc.test",
+    );
+    expect($callState.get()).toEqual({ phase: "idle" });
+  });
+
   test("tearDownActiveCall on a MUC call dispatches request-leave and clears the call presence", async () => {
     const send_muc_call_leave = mock(async () => undefined);
     const update_muc_call_presence = mock(async () => undefined);

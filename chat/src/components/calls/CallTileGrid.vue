@@ -49,8 +49,14 @@ const tiles = computed<Tile[]>(() => {
   const byIdentity = new Map<string, Tile>();
   // Local participant always anchors slot 0 so the user sees a
   // self-preview even pre-publish ("yes, the call is alive and
-  // pointed at me").
-  const selfId = props.localIdentity ?? "you";
+  // pointed at me"). Prefer the first local track's identity over
+  // `props.localIdentity` because the parent reads it from a
+  // non-reactive getter (`engine.localIdentity`) and may pass null on
+  // the first render; falling back to "you" then minting a separate
+  // tile under the real identity when tracks land would render the
+  // local participant twice.
+  const selfId =
+    props.localTracks[0]?.participantIdentity ?? props.localIdentity ?? "you";
   byIdentity.set(selfId, {
     key: `self:${selfId}`,
     identity: selfId,
