@@ -16,6 +16,7 @@ import {
   applyMucCallPresence,
   clearMucCallParticipants,
 } from "@/lib/calls/muc-call-presence";
+import { useCallEngine } from "@/lib/calls/use-call-engine";
 import type { CallWireSender } from "@/lib/calls/outbound";
 import type { CallEvent } from "@/lib/calls/types";
 import { barePeerJid, jidDomain, roomBareJidFor } from "./jid";
@@ -1623,8 +1624,17 @@ export class BrowserXmppClient {
     // active overlay across reconnect; the reconnect path doesn't
     // re-establish call state (XEP-0353 has no resume semantics for
     // an in-flight call once the responder's connection drops).
+    //
+    // We MUST also drop the LiveKit room. The CallOverlay's
+    // `onBeforeUnmount` is the usual route, but it won't fire when the
+    // overlay re-renders to `phase: idle` and stays mounted (the parent
+    // tree owns it) — the engine would keep an open SFU socket
+    // pumping bytes until the next call replaced it. Tearing the
+    // singleton engine down here is idempotent (no-op when nothing's
+    // connected).
     clearCallState();
     clearMucCallParticipants();
+    void useCallEngine().engine.disconnect();
     if (this.destroying) { this.clearResumeState(); this.emitStatus({ state: "offline", detail: error?.message ?? "Disconnected" }); return; }
     this.setResumeStateHandle(xmpp.get_resume_state_handle?.() ?? null);
     this.resumeState = xmpp.get_resume_state?.() ?? null;
