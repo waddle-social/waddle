@@ -48,6 +48,14 @@ const NOTIFICATION_CANDIDATES_CLASS_VALUES: [&str; 6] = [
 ];
 const NOTIFICATION_CANDIDATES_CLASS_CHECK_SQL: &str = "class IN ('dm', 'dm_mention', 'personal_mention', 'channel_mention', 'active_channel_mention', 'notify_all')";
 const NOTIFICATION_OUTBOX_CLASS_CHECK_NAME: &str = "notification_outbox_class_check";
+const NOTIFICATION_OUTBOX_CLASS_VALUES: [&str; 6] = [
+    "dm",
+    "dm_mention",
+    "personal_mention",
+    "channel_mention",
+    "active_channel_mention",
+    "notify_all",
+];
 const NOTIFICATION_OUTBOX_CLASS_CHECK_SQL: &str = "class IN ('dm', 'dm_mention', 'personal_mention', 'channel_mention', 'active_channel_mention', 'notify_all')";
 const NOTIFICATION_CANDIDATES_INDEXES: [&str; 4] = [
     "idx_notification_candidates_recipient_created",
@@ -675,7 +683,7 @@ fn notification_candidates_class_constraint_matches_expected(definition: &str) -
 fn notification_outbox_class_constraint_matches_expected(definition: &str) -> bool {
     let normalized = definition.to_ascii_lowercase();
     normalized.contains("class")
-        && NOTIFICATION_CANDIDATES_CLASS_VALUES
+        && NOTIFICATION_OUTBOX_CLASS_VALUES
             .iter()
             .all(|class| normalized.contains(class))
 }
