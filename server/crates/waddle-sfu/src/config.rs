@@ -10,6 +10,7 @@ use std::fmt;
 
 use chrono::Duration;
 use url::Url;
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 /// LiveKit API key (the `iss` claim on minted JWTs).
 #[derive(Clone)]
@@ -35,7 +36,11 @@ impl fmt::Debug for ApiKey {
 }
 
 /// LiveKit API secret. HMAC-SHA256 signing key for join JWTs.
-#[derive(Clone)]
+///
+/// The inner `Vec<u8>` is zeroed on drop via [`ZeroizeOnDrop`] so the
+/// raw key material does not linger in freed allocations after the
+/// secret goes out of scope.
+#[derive(Clone, Zeroize, ZeroizeOnDrop)]
 pub struct ApiSecret(Vec<u8>);
 
 /// Minimum acceptable length of an HMAC-SHA256 signing key. RFC 2104
@@ -106,7 +111,10 @@ pub enum InvalidWebsocketUrl {
 
 /// Shared secret for TURN time-limited credentials. Same HMAC-SHA1
 /// shape as the coturn `static-auth-secret` LiveKit's chart sets.
-#[derive(Clone)]
+///
+/// The inner `Vec<u8>` is zeroed on drop via [`ZeroizeOnDrop`] so the
+/// shared secret cannot be recovered from freed heap memory.
+#[derive(Clone, Zeroize, ZeroizeOnDrop)]
 pub struct TurnSharedSecret(Vec<u8>);
 
 impl TurnSharedSecret {
@@ -410,6 +418,37 @@ mod tests {
             err,
             FromEnvError::InvalidNumber("LIVEKIT_TURN_TLS_PORT")
         ));
+    }
+
+    // `Vec<u8>::zeroize` writes zeros into every byte then resets
+    // `len = 0`. Both surface-observable effects together — bytes
+    // cleared and the secret reduced to empty — are the signal
+    // that the derive on the secret newtypes is wired up, since
+    // without it the secret would still report its original
+    // contents.
+    #[test]
+    fn api_secret_zeroize_empties_the_secret() {
+        use zeroize::Zeroize;
+        let mut secret = ApiSecret::from_text("super-secret-secret-32-bytes-min")
+            .expect("test secret meets min length");
+        assert!(secret.as_bytes().iter().any(|b| *b != 0));
+        secret.zeroize();
+        assert!(
+            secret.as_bytes().is_empty(),
+            "ApiSecret::zeroize must reduce the secret to an empty buffer"
+        );
+    }
+
+    #[test]
+    fn turn_shared_secret_zeroize_empties_the_secret() {
+        use zeroize::Zeroize;
+        let mut secret = TurnSharedSecret::from_text("turn-shared-secret-value");
+        assert!(secret.as_bytes().iter().any(|b| *b != 0));
+        secret.zeroize();
+        assert!(
+            secret.as_bytes().is_empty(),
+            "TurnSharedSecret::zeroize must reduce the secret to an empty buffer"
+        );
     }
 
     #[test]

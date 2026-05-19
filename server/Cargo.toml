@@ -95,6 +95,7 @@ sha2 = "0.10"
 p256 = { version = "0.13", features = ["ecdsa", "jwk"] }
 elliptic-curve = { version = "0.13", features = ["jwk"] }
 argon2 = "0.5"
+zeroize = { version = "1", features = ["derive"] }
 
 # Utilities
 uuid = { version = "1.11", features = ["v4", "v7", "serde", "js"] }
