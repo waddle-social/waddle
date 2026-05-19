@@ -8,6 +8,7 @@ import { installInstrumentation } from "@/lib/xmpp/xmpp-instrumentation";
 import IncomingCallToast from "@/components/calls/IncomingCallToast.vue";
 import OutgoingCallToast from "@/components/calls/OutgoingCallToast.vue";
 import CallOverlay from "@/components/calls/CallOverlay.vue";
+import CallErrorToast from "@/components/calls/CallErrorToast.vue";
 
 const props = defineProps<{
   serverBaseUrl: string;
@@ -84,4 +85,7 @@ onUnmounted(() => {
   <IncomingCallToast />
   <OutgoingCallToast />
   <CallOverlay />
+  <!-- Renders only when phase is idle/ended; covers pre-transition
+       call errors that the other three surfaces never see. -->
+  <CallErrorToast />
 </template>

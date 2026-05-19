@@ -1,10 +1,13 @@
 import { describe, expect, test } from "bun:test";
 import {
   $callState,
+  $lastCallError,
   applyCallEvent,
   beginOutgoingCall,
   clearCallState,
+  clearLastCallError,
   reduceCallState,
+  reportCallError,
 } from "../src/lib/calls/call-store";
 import type { CallMedia, LiveKitJoin } from "../src/lib/calls/types";
 
@@ -350,5 +353,21 @@ describe("call-store reducer", () => {
       media: audioVideo,
     });
     expect(next).toBe(current);
+  });
+});
+
+describe("clearLastCallError", () => {
+  test("clears the error without touching $callState", () => {
+    // Pre-transition rejection scenario: a `beginMucCall` failure
+    // sets the error while phase stays idle. `clearCallState` is
+    // overkill here (it would emit a redundant state set);
+    // `clearLastCallError` is the targeted helper.
+    clearCallState();
+    reportCallError(new Error("muc-call: transport missing @url"));
+    expect($lastCallError.get()).toBe("muc-call: transport missing @url");
+    const phaseBefore = $callState.get().phase;
+    clearLastCallError();
+    expect($lastCallError.get()).toBeNull();
+    expect($callState.get().phase).toBe(phaseBefore);
   });
 });

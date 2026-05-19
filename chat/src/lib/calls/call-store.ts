@@ -230,6 +230,20 @@ export function reportCallError(err: unknown): void {
 }
 
 /**
+ * Drop the active error without touching `$callState`. Used by the
+ * global error toast's dismiss button — `clearCallState` is the
+ * wrong tool when phase is already `idle` or `ended`, since it
+ * would still emit a redundant state set.
+ */
+export function clearLastCallError(): void {
+  if (clearTimer) {
+    clearTimeout(clearTimer);
+    clearTimer = null;
+  }
+  $lastCallError.set(null);
+}
+
+/**
  * Best-effort teardown for the live call slot before the XMPP
  * connection drops or the call surface unmounts. Sends the
  * appropriate XEP-0166 / XEP-0353 stanza to the peer (so they don't
