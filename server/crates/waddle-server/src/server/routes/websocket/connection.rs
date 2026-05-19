@@ -9,6 +9,7 @@ use super::{
     state::WsConnState,
     stream_management::{is_countable_stanza, SmRegistrationFinalization},
 };
+use waddle_xmpp::stream_management::SmRequest;
 
 /// Create the WebSocket router
 pub fn router(state: Arc<WebSocketState>) -> Router {
@@ -141,12 +142,14 @@ async fn handle_xmpp_websocket(socket: WebSocket, state: Arc<WebSocketState>) {
                         // Re-recording them would bump `outbound_count` past
                         // reality and push duplicate queue entries, breaking
                         // subsequent acks and a second resume.
+                        let mut request_ack_after = false;
                         if conn.suppress_sm_record_next_batch {
                             conn.suppress_sm_record_next_batch = false;
                         } else if conn.sm_state.enabled {
                             for frame in &responses {
                                 if is_countable_stanza(frame) {
-                                    conn.sm_state.record_outbound(frame.clone());
+                                    let result = conn.sm_state.record_outbound(frame.clone());
+                                    request_ack_after |= result.request_ack;
                                 }
                             }
                         }
@@ -157,6 +160,24 @@ async fn handle_xmpp_websocket(socket: WebSocket, state: Arc<WebSocketState>) {
                             "Failed to send WebSocket message",
                         )
                         .await
+                        {
+                            break;
+                        }
+                        // SM cadence (XEP-0198 §4): once the unacked
+                        // outbound stanza count since the last `<r/>`
+                        // hits the threshold, follow the batch with an
+                        // `<r/>` so the wasm client sends back `<a
+                        // h='N'/>`. Without this, the unacked queue
+                        // grows monotonically until the 1000-cap
+                        // triggers eviction and resume is permanently
+                        // broken for the stream.
+                        if request_ack_after
+                            && !send_ws_message(
+                                &mut ws_sender,
+                                Message::Text(SmRequest::to_xml()),
+                                "Failed to send SM <r/> request",
+                            )
+                            .await
                         {
                             break;
                         }

@@ -642,3 +642,150 @@ async fn database_deliverable_subscribers_excludes_outcast() {
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0].subscriber.to_string(), "alice@x.com");
 }
+
+/// Re-subscribing with the same `(owner, node, subscriber)` MUST be a
+/// no-op — return the existing subscription's `subid` and leave the
+/// row count at one. Without this, the chat's bind-time
+/// `<subscribe/>` to e.g. `urn:xmpp:mds:displayed:0` inserts a fresh
+/// row on every reconnect; production observed 490 rows for a single
+/// user/node pair, blowing the fanout's per-recipient outbound
+/// channel and dropping most stanzas (the chat-side reconcile-to-
+/// "delivered" never fires).
+#[tokio::test]
+async fn subscribe_is_idempotent_for_same_owner_node_subscriber_bare() {
+    let storage = DatabasePubSubStorage::open(Some("sqlite::memory:"))
+        .await
+        .expect("storage");
+    let owner = jid("alice@example.com");
+    storage
+        .get_or_create_node(&owner, "urn:xmpp:mds:displayed:0")
+        .await
+        .expect("node");
+    let alice_full: jid::Jid = "alice@example.com/web-1".parse().expect("jid");
+
+    let first = storage
+        .subscribe(&owner, "urn:xmpp:mds:displayed:0", &alice_full)
+        .await
+        .expect("first subscribe");
+    let second = storage
+        .subscribe(&owner, "urn:xmpp:mds:displayed:0", &alice_full)
+        .await
+        .expect("second subscribe");
+    assert_eq!(
+        first.subid.as_str(),
+        second.subid.as_str(),
+        "re-subscribe must return the original subid, not mint a new one"
+    );
+
+    let listed = storage
+        .list_deliverable_subscribers(&owner, "urn:xmpp:mds:displayed:0")
+        .await
+        .expect("list");
+    assert_eq!(
+        listed.len(),
+        1,
+        "re-subscribe must NOT add another row for the same (owner, node, subscriber_bare)"
+    );
+}
+
+/// Re-subscribing with a different resource on the same bare JID must
+/// also collapse to one row — full-JID subscriptions aren't stored,
+/// and matching `list_deliverable_subscribers` semantics requires the
+/// bare-JID dedupe to span resources.
+#[tokio::test]
+async fn subscribe_is_idempotent_across_resources_for_same_bare_jid() {
+    let storage = DatabasePubSubStorage::open(Some("sqlite::memory:"))
+        .await
+        .expect("storage");
+    let owner = jid("alice@example.com");
+    storage
+        .get_or_create_node(&owner, "urn:xmpp:mds:displayed:0")
+        .await
+        .expect("node");
+
+    for resource in ["web-1", "web-2", "web-3", "desktop"] {
+        let jid_with_resource: jid::Jid = format!("alice@example.com/{resource}")
+            .parse()
+            .expect("jid");
+        storage
+            .subscribe(&owner, "urn:xmpp:mds:displayed:0", &jid_with_resource)
+            .await
+            .expect("subscribe");
+    }
+
+    let listed = storage
+        .list_deliverable_subscribers(&owner, "urn:xmpp:mds:displayed:0")
+        .await
+        .expect("list");
+    assert_eq!(
+        listed.len(),
+        1,
+        "four resource-suffixed subscribes to the same bare JID must collapse to one row"
+    );
+}
+
+/// The migration path: when prod already has duplicate rows from
+/// before this fix (the icepuma/mds:displayed:0 incident left 490
+/// rows), the next `subscribe` call MUST notice and delete them. The
+/// rows aren't separately schema-migrated; lazy cleanup on each
+/// touch is the recovery contract.
+#[tokio::test]
+async fn subscribe_cleans_up_pre_existing_duplicate_rows() {
+    let storage = DatabasePubSubStorage::open(Some("sqlite::memory:"))
+        .await
+        .expect("storage");
+    let owner = jid("alice@example.com");
+    storage
+        .get_or_create_node(&owner, "urn:xmpp:mds:displayed:0")
+        .await
+        .expect("node");
+
+    // Simulate the leak: insert five raw duplicate rows for the same
+    // (owner, node, subscriber_bare) triple — what the pre-fix
+    // `subscribe` path would have produced over five reconnects.
+    let alice_bare = "alice@example.com";
+    for (i, subid) in ["a", "b", "c", "d", "e"].iter().enumerate() {
+        storage
+            .execute(
+                "INSERT INTO pubsub_subscriptions (owner_jid, node_name, subid, subscriber_jid, state, created_at_ms) \
+                 VALUES (?, ?, ?, ?, 'subscribed', ?)",
+                crate::db_params![
+                    owner.to_string(),
+                    "urn:xmpp:mds:displayed:0".to_string(),
+                    subid.to_string(),
+                    alice_bare.to_string(),
+                    1_000_000_i64 + i as i64,
+                ],
+            )
+            .await
+            .expect("insert raw duplicate");
+    }
+    let pre = storage
+        .list_deliverable_subscribers(&owner, "urn:xmpp:mds:displayed:0")
+        .await
+        .expect("list before");
+    assert_eq!(pre.len(), 5, "leak scenario must seed five duplicates");
+
+    // Next subscribe call MUST collapse the backlog down to the
+    // oldest row.
+    let alice: jid::Jid = "alice@example.com/web-now".parse().expect("jid");
+    let kept = storage
+        .subscribe(&owner, "urn:xmpp:mds:displayed:0", &alice)
+        .await
+        .expect("subscribe");
+    assert_eq!(
+        kept.subid.as_str(),
+        "a",
+        "subscribe must keep the oldest row by created_at_ms, not mint a new one"
+    );
+
+    let post = storage
+        .list_deliverable_subscribers(&owner, "urn:xmpp:mds:displayed:0")
+        .await
+        .expect("list after");
+    assert_eq!(
+        post.len(),
+        1,
+        "subscribe must garbage-collect duplicate rows for the (owner, node, subscriber) triple"
+    );
+}

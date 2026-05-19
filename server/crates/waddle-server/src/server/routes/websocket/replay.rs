@@ -117,7 +117,10 @@ async fn record_drained_xml(
         }
         return;
     }
-    sm_state.record_outbound_with_receipt_at(xml.clone(), original_receipt_at);
+    // Drain path: we're recording into the unacked queue for replay
+    // on the next resume, NOT writing to a live wire. The SM cadence
+    // signal is moot — there is no socket to follow up with `<r/>`.
+    let _ = sm_state.record_outbound_with_receipt_at(xml.clone(), original_receipt_at);
     let sequence = sm_state.outbound_count;
     if let Some(row_id) = pending_row_id.as_ref() {
         if let Err(error) = state

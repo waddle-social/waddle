@@ -1460,7 +1460,7 @@ async fn xep0160_promoted_stanzas_carry_original_receipt_time_in_delay() {
         }
         _ => panic!("expected Message"),
     };
-    sm_state.record_outbound_with_receipt_at(xml, t1);
+    let _ = sm_state.record_outbound_with_receipt_at(xml, t1);
 
     // Convert to detached session (simulates transport drop).
     let detached = sm_state
