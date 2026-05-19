@@ -294,19 +294,14 @@ pub async fn handle_muc_leave(
 ) -> Vec<String> {
     info!(room = %room_jid, nick = %nick, sender = %sender_jid, "MUC leave request");
 
-    // Tear down the leaver's SFU participant before the MUC actor
-    // forgets about them. Idempotent on the SFU side, so it's safe
-    // to call even if they were never in a call. Doing it here
-    // (rather than only in the explicit `urn:waddle:muc-call:0`
-    // request-leave path) closes the gap where a client leaves the
-    // MUC without sending the call-specific leave — their SFU
-    // participant otherwise lingers until LiveKit's own timeout.
-    super::super::super::muc_call_sfu::unregister_participant_from_room(
-        state, room_jid, sender_jid,
-    );
-
     let Some(room_actor) = get_room_actor(state, room_jid).await else {
         debug!(room = %room_jid, "Room not found for leave");
+        // Idempotent on the SFU side — the user could have an SFU
+        // participant even when the room actor is gone (process
+        // restart, eviction). Tear that down too.
+        super::super::super::muc_call_sfu::unregister_participant_from_room(
+            state, room_jid, sender_jid,
+        );
         return vec![build_muc_self_unavailable_xml(
             state, room_jid, nick, sender_jid,
         )];
@@ -321,6 +316,11 @@ pub async fn handle_muc_leave(
         Ok(Some(outcome)) => outcome,
         Ok(None) => {
             debug!(room = %room_jid, nick = %nick, sender = %sender_jid, "MUC leave for absent occupant");
+            // No occupant slot to remove, but a stale SFU
+            // participant could still exist — clear it.
+            super::super::super::muc_call_sfu::unregister_participant_from_room(
+                state, room_jid, sender_jid,
+            );
             return vec![build_muc_self_unavailable_xml(
                 state, room_jid, nick, sender_jid,
             )];
@@ -332,6 +332,17 @@ pub async fn handle_muc_leave(
             )];
         }
     };
+
+    // SFU teardown runs after `LeaveByRealJid` so the MUC's
+    // authoritative view drops the occupant first; the membership
+    // gate immediately reports the user as a non-occupant and any
+    // subsequent `request-join` is rejected before the SFU is
+    // touched again. Closes the gap where a client leaves the MUC
+    // without sending the call-specific `request-leave` — their SFU
+    // participant would otherwise linger until LiveKit's timeout.
+    super::super::super::muc_call_sfu::unregister_participant_from_room(
+        state, room_jid, sender_jid,
+    );
 
     // Broadcast unavailable presence to remaining occupants (non-blocking).
     // Drop accounting is handled inside `try_send_to`.

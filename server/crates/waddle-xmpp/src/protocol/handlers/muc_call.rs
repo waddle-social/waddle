@@ -101,9 +101,24 @@ impl IqHandler for MucCallHandler {
 }
 
 impl MucCallHandler {
+    /// Parse the `room` attribute into a SFU `CallId` using the JID's
+    /// **canonical form** (lowercased localpart + domain per the
+    /// `jid` crate's stringprep pass).
+    ///
+    /// Using the raw attribute value would let a single MUC room map
+    /// to many distinct SFU rooms when clients submit case-variant
+    /// spellings (`General@MUC.example.com` vs
+    /// `general@muc.example.com`): the membership gate normalizes
+    /// before looking up the room actor, so both spellings pass the
+    /// gate, but the SFU would mint tokens for two separate SFU
+    /// rooms and the participants would end up in different LiveKit
+    /// rooms despite XEP-0045 considering them the same MUC. Always
+    /// normalize via `BareJid::to_string()` so a single MUC has a
+    /// single SFU room.
     fn parse_room(&self, payload: &Element) -> Result<CallId, &'static str> {
         let room = payload.attr(ATTR_ROOM).ok_or("missing 'room' attribute")?;
-        CallId::new(room.to_string()).map_err(|_| "invalid room JID")
+        let bare: jid::BareJid = room.parse().map_err(|_| "invalid room JID")?;
+        CallId::new(bare.to_string()).map_err(|_| "invalid room JID")
     }
 
     fn handle_join(
@@ -360,5 +375,44 @@ mod tests {
             panic!()
         };
         assert_eq!(err.defined_condition, DefinedCondition::BadRequest);
+    }
+
+    #[test]
+    fn request_join_normalizes_room_case_into_canonical_call_id() {
+        // Two clients submitting different case-variant spellings
+        // of the same MUC JID must land on the SAME SFU room, or
+        // they'll talk past each other in LiveKit even though
+        // XEP-0045 treats their room as identical. Verified by
+        // requesting joins with mixed-case spellings and asserting
+        // the SFU's participant count goes up under the canonical
+        // lowercase form only.
+        let sfu = fixture_sfu();
+        let handler = MucCallHandler::new(sfu.clone());
+        let alice: FullJid = "alice@waddle.test/desktop".parse().unwrap();
+        let bob: FullJid = "bob@waddle.test/desktop".parse().unwrap();
+
+        let mixed_case_join = |from: &FullJid, room: &str| -> Iq {
+            let payload = Element::builder(REQUEST_JOIN, NS_WADDLE_MUC_CALL)
+                .attr(ATTR_ROOM, room)
+                .build();
+            Iq {
+                from: Some(jid::Jid::from(from.clone())),
+                to: Some(room.parse().unwrap()),
+                id: "case".into(),
+                payload: IqType::Set(payload),
+            }
+        };
+
+        let _ = handler.handle(&mixed_case_join(&alice, "Room@MUC.Test"), &ctx(&alice));
+        let _ = handler.handle(&mixed_case_join(&bob, "room@muc.test"), &ctx(&bob));
+
+        // Both join requests must have resolved to the same SFU
+        // room — the canonical lowercase form.
+        let canonical = CallId::new("room@muc.test").unwrap();
+        assert_eq!(
+            sfu.participant_count(&canonical),
+            2,
+            "case-variant join attributes must collapse to a single SFU room"
+        );
     }
 }

@@ -30,7 +30,7 @@ use xmpp_parsers::stanza_error::StanzaError;
 
 use super::super::super::cleanup::get_room_actor;
 use super::super::super::WebSocketState;
-use super::errors::{bad_request_iq_error, forbidden_iq_error};
+use super::errors::{bad_request_iq_error, forbidden_iq_error, internal_server_error_iq_error};
 
 const NS_WADDLE_MUC_CALL: &str = "urn:waddle:muc-call:0";
 const REQUEST_JOIN: &str = "request-join";
@@ -103,11 +103,16 @@ pub(super) async fn verify_muc_call_request(
             "not an occupant of the requested room — join the MUC first",
         ))),
         Err(_) => {
-            // Actor ask flaked — fail closed. Better to surface a
-            // transient `forbidden` than to issue a token in an
-            // ambiguous state. The user can retry; a retry that
-            // succeeds proves they were always entitled.
-            GateOutcome::Deny(Box::new(forbidden_iq_error(
+            // Actor ask flaked — this is a transient server-side
+            // failure, not an authorization decision. RFC 6120
+            // §8.3.3 maps "the server could not process the request
+            // because of a misconfiguration or other transient
+            // problem" to `<internal-server-error/>` with
+            // `type='wait'`, which is also the conventional retry
+            // hint to the client. Returning `forbidden` here would
+            // mis-classify a transient failure as an entitlement
+            // decision and make retries cosmetically wrong.
+            GateOutcome::Deny(Box::new(internal_server_error_iq_error(
                 "could not verify MUC membership; please retry",
             )))
         }
@@ -193,6 +198,54 @@ mod tests {
             verify_muc_call_request(&state, &alice, &request_join_iq("general@muc.example.com"))
                 .await;
         assert!(matches!(outcome, GateOutcome::Allow));
+    }
+
+    #[tokio::test]
+    async fn deny_after_caller_has_left_the_room() {
+        // Regression guard for the leave→gate coupling: a session
+        // that was a valid occupant at one point in time but has
+        // since left must NOT be able to mint a fresh JWT for the
+        // room. Without the gate consulting the live actor on
+        // every request-join, a stale snapshot would let a recently
+        // departed user keep minting tokens.
+        use waddle_xmpp::muc::room_actor::LeaveByRealJid;
+        let state = create_test_websocket_state().await;
+        let room: BareJid = "general@muc.example.com".parse().unwrap();
+        let alice = full("alice@example.com/web");
+        create_room_and_join(&state, &room, "alice", &alice).await;
+
+        // Sanity: alice is in the room, gate allows.
+        let outcome =
+            verify_muc_call_request(&state, &alice, &request_join_iq("general@muc.example.com"))
+                .await;
+        assert!(matches!(outcome, GateOutcome::Allow));
+
+        // alice leaves.
+        let actor = state
+            .deps
+            .protocol
+            .room_registry
+            .ask(waddle_xmpp::muc::room_registry_actor::GetRoom {
+                room_jid: room.clone(),
+            })
+            .await
+            .expect("room ask")
+            .expect("room actor present");
+        actor
+            .ask(LeaveByRealJid {
+                sender_jid: alice.clone(),
+            })
+            .await
+            .expect("leave");
+
+        // After leave, the gate must deny.
+        let outcome =
+            verify_muc_call_request(&state, &alice, &request_join_iq("general@muc.example.com"))
+                .await;
+        let GateOutcome::Deny(err) = outcome else {
+            panic!("expected Deny after leaving the room");
+        };
+        assert_eq!(err.defined_condition, DefinedCondition::Forbidden);
     }
 
     #[tokio::test]
