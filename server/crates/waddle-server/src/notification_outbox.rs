@@ -3695,12 +3695,17 @@ mod tests {
         drop(conn);
         drop(rows);
 
-        // Drive the migration helper directly against our scoped
+        // Drive the migration helpers directly against our scoped
         // table. This sidesteps the full `NotificationOutboxStore::new`
         // initialization (which targets the hard-coded
-        // `notification_candidates` table name).
+        // `notification_candidates` table name). We migrate BOTH the
+        // class and reason anonymous CHECK constraints because the
+        // post-migration insert below carries `dm_mention` (new class
+        // value) AND `offline_dm_mention` (new reason value) — Postgres
+        // enforces every constraint on the row, so leaving either
+        // anonymous CHECK in place will reject the insert.
         let store = NotificationOutboxStore { db: db.clone() };
-        let migrate_result = store
+        let class_migrate = store
             .migrate_postgres_check_constraint_on_column(
                 &table,
                 "class",
@@ -3709,9 +3714,22 @@ mod tests {
                 notification_candidates_class_constraint_matches_expected,
             )
             .await;
-        if let Err(error) = &migrate_result {
+        if let Err(error) = &class_migrate {
             cleanup.await;
-            panic!("migration failed: {error}");
+            panic!("class migration failed: {error}");
+        }
+        let reason_migrate = store
+            .migrate_postgres_check_constraint_on_column(
+                &table,
+                "reason",
+                NOTIFICATION_CANDIDATES_REASON_CHECK_NAME,
+                NOTIFICATION_CANDIDATES_REASON_CHECK_SQL,
+                notification_candidates_reason_constraint_matches_expected,
+            )
+            .await;
+        if let Err(error) = &reason_migrate {
+            cleanup.await;
+            panic!("reason migration failed: {error}");
         }
 
         // Post-migration: only the canonical named CHECK should
