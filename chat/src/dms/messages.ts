@@ -11,6 +11,7 @@ import type {
 import { barePeerJid } from "@/lib/xmpp-client";
 import type { WaddleSession } from "@/lib/server-auth";
 import { findMessageById } from "@/lib/message-ids";
+import { compareTimelineMessages } from "@/lib/timeline-timestamps";
 import { findMessageElementById } from "@/lib/message-targeting";
 import { isTopPinnedScrollDirection, type ScrollDirectionMode } from "@/lib/scroll-direction";
 import { createPinnedEdgeScroller } from "@/lib/pinned-edge-scroll";
@@ -97,7 +98,15 @@ export function useDirectMessages(
 
   function appendQueuedMessages(timeline: TimelineMessage[], peerJid: string): TimelineMessage[] {
     const queued = queuedMessagesForPeer(peerJid).filter((message) => !findMessageById(timeline, message.id));
-    return queued.length > 0 ? [...timeline, ...queued] : timeline;
+    if (queued.length === 0) return timeline;
+    // Both inputs are individually sorted (timeline via compareTimelineMessages,
+    // queued via outbound-queue-store's createdAt+id sort) and the queued rows
+    // are all in the pending bucket — but a concat alone can mis-interleave if
+    // `timeline` already contains a still-pending optimistic row whose
+    // client-wall-clock createdAt sits inside the queued range. Sort the merged
+    // array through the canonical total-order comparator so the pending tail is
+    // internally consistent regardless of clock drift.
+    return [...timeline, ...queued].sort(compareTimelineMessages);
   }
 
   async function scrollToPinnedEdge() {
