@@ -668,6 +668,12 @@ struct ScenarioContext {
     last_mam_frames: Vec<String>,
     last_mam_frame_index: usize,
     captures: HashMap<String, String>,
+    /// Per-actor XEP-0198 stream-management state. Tracks SM
+    /// enabled-ness so we only auto-ack on streams that negotiated
+    /// it, plus the inbound countable-stanza counter we send back as
+    /// `<a h='N'/>`. Populated lazily — actors without SM never get
+    /// an entry.
+    sm_state: HashMap<String, ActorSmState>,
     ws_url: String,
     domain: String,
     admin_password: String,
@@ -883,6 +889,7 @@ async fn run_scenario(scenario: Scenario) -> Result<()> {
         last_mam_frames: Vec::new(),
         last_mam_frame_index: 0,
         captures: HashMap::new(),
+        sm_state: HashMap::new(),
         ws_url,
         domain: scenario.domain.clone(),
         admin_password,
@@ -960,6 +967,13 @@ async fn disconnect_actor(ctx: &mut ScenarioContext, actor: &Actor, graceful: bo
     let key = actor_key(actor);
     assert_actor_has_no_pending_frames(ctx, actor)?;
     ctx.pending_frames.remove(&key);
+    // SM state is per-stream — the next ConnectActor opens a fresh
+    // TCP/WebSocket and any continuation comes through a `<resume/>`
+    // action that re-flips `enabled`. Carrying stale state across
+    // the disconnect boundary would let the harness auto-ack on a
+    // new stream that the server hasn't actually negotiated SM on
+    // yet.
+    ctx.sm_state.remove(&key);
     if let Some(client) = ctx.clients.remove(&key) {
         if graceful {
             client
@@ -1063,6 +1077,25 @@ async fn execute_step(ctx: &mut ScenarioContext, step: &Step) -> Result<()> {
                 .send(&xml)
                 .await
                 .map_err(|error| anyhow!(error))?;
+            // Mark SM negotiated on the actor's stream so subsequent
+            // server-side `<r/>` requests get auto-acked by
+            // `recv_timeout`. `RequestAck` is a client-initiated
+            // probe that doesn't change SM enabled-ness.
+            //
+            // We flip the flag eagerly (before waiting for
+            // `<enabled/>` / `<resumed/>`) because the negotiation
+            // response arrives back through `recv_timeout` itself —
+            // we'd deadlock if the auto-ack path waited for
+            // negotiation to complete first. A premature auto-ack on
+            // a stream the server rejects with `<failed/>` is
+            // harmless: the server is tearing the stream down anyway.
+            if matches!(
+                action,
+                StreamManagementAction::Enable | StreamManagementAction::Resume
+            ) {
+                let state = ctx.sm_state.entry(actor_key(actor)).or_default();
+                state.enabled = true;
+            }
         }
         Step::DisconnectActor { actor, graceful } => {
             disconnect_actor(ctx, actor, graceful.unwrap_or(true)).await?;
@@ -1859,18 +1892,93 @@ async fn recv_timeout(
     timeout: Duration,
 ) -> Result<Option<String>> {
     let key = actor_key(actor);
-    if let Some(frame) = ctx
-        .pending_frames
-        .get_mut(&key)
-        .and_then(VecDeque::pop_front)
-    {
-        return Ok(Some(frame));
+    // Two transport-layer concerns that scenarios are written above:
+    //
+    // 1. XEP-0198 `<r/>` ack requests — the server now emits one per
+    //    N countable outbound stanzas. A real client replies with
+    //    `<a h='N'/>` after every `<r/>`; the cue harness models the
+    //    same so scenarios don't have to mention SM mechanics.
+    //    Eviction / resume-rejection behavior is covered by direct
+    //    websocket-frame tests in `routes/websocket/tests/
+    //    stream_management.rs` and by `state.rs` unit tests — the
+    //    cue layer doesn't need to re-validate it.
+    //
+    // 2. `inbound_count` accounting: bumped whenever a countable
+    //    stanza (message/presence/iq) crosses from the wire to the
+    //    scenario. Frames replayed from `pending_frames` were already
+    //    counted on their first wire arrival, so the pop branch does
+    //    NOT bump again — that would double-count and desync `h`.
+    loop {
+        if let Some(frame) = ctx
+            .pending_frames
+            .get_mut(&key)
+            .and_then(VecDeque::pop_front)
+        {
+            return Ok(Some(frame));
+        }
+        let frame = match client_mut(ctx, actor)?.recv_timeout(timeout).await {
+            Ok(frame) => frame,
+            Err(error) if error == "Timeout waiting for message" => return Ok(None),
+            Err(error) => return Err(anyhow!(error)),
+        };
+        match classify_frame(&frame) {
+            FrameKind::SmRequestAck => {
+                let state = ctx.sm_state.entry(key.clone()).or_default();
+                if state.enabled {
+                    let ack = Element::builder("a", "urn:xmpp:sm:3")
+                        .attr("h", state.inbound_count.to_string())
+                        .build();
+                    let ack_xml = element_xml(&ack)?;
+                    client_mut(ctx, actor)?
+                        .send(&ack_xml)
+                        .await
+                        .map_err(|error| anyhow!(error))?;
+                }
+                continue;
+            }
+            FrameKind::CountableStanza => {
+                let state = ctx.sm_state.entry(key.clone()).or_default();
+                state.inbound_count = state.inbound_count.wrapping_add(1);
+                return Ok(Some(frame));
+            }
+            FrameKind::Other => return Ok(Some(frame)),
+        }
     }
-    match client_mut(ctx, actor)?.recv_timeout(timeout).await {
-        Ok(frame) => Ok(Some(frame)),
-        Err(error) if error == "Timeout waiting for message" => Ok(None),
-        Err(error) => Err(anyhow!(error)),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FrameKind {
+    /// `<r xmlns='urn:xmpp:sm:3'/>` — server asks us to ack.
+    SmRequestAck,
+    /// `<message>`, `<presence>`, `<iq>` — bumps the XEP-0198 inbound count.
+    CountableStanza,
+    /// Anything else (`<a/>`, `<enabled/>`, `<resumed/>`, `<failed/>`,
+    /// stream features, raw text, etc). Returned as-is, not counted.
+    Other,
+}
+
+fn classify_frame(xml: &str) -> FrameKind {
+    let Ok(element) = Element::from_str(xml) else {
+        return FrameKind::Other;
+    };
+    if element.name() == "r" && element.ns() == "urn:xmpp:sm:3" {
+        return FrameKind::SmRequestAck;
     }
+    match element.name() {
+        "message" | "presence" | "iq" => FrameKind::CountableStanza,
+        _ => FrameKind::Other,
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+struct ActorSmState {
+    /// True after the server's `<enabled/>` or `<resumed/>` lands.
+    /// Gates auto-ack so the harness doesn't reply to `<r/>` on a
+    /// connection that hasn't actually negotiated SM.
+    enabled: bool,
+    /// Count of countable inbound stanzas surfaced to the scenario,
+    /// used as the `h` value when auto-acking.
+    inbound_count: u32,
 }
 
 fn push_pending_front(ctx: &mut ScenarioContext, actor: &Actor, frame: String) {
