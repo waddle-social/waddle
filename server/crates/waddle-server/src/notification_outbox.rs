@@ -664,12 +664,30 @@ fn notification_outbox_table_sql(i64_type: &str, if_not_exists: bool) -> String 
     )
 }
 
+/// Returns `true` iff `definition` quotes `value` as a SQL string literal,
+/// e.g. `'value'`.
+///
+/// Postgres' `pg_get_constraintdef` and SQLite's `sqlite_master.sql` both
+/// render IN-list literals with single quotes around each enum value
+/// (Postgres adds a `::character varying` cast but the leading `'value'`
+/// token is the same). Matching against the quoted form prevents false
+/// positives where one enum value is a substring of another — e.g.
+/// `'dm_mention'` contains the substring `dm`, but the bare token `'dm'`
+/// is absent from a CHECK list that only allows `dm_mention`.
+fn constraint_definition_quotes_value(definition: &str, value: &str) -> bool {
+    let mut needle = String::with_capacity(value.len() + 2);
+    needle.push('\'');
+    needle.push_str(value);
+    needle.push('\'');
+    definition.contains(&needle)
+}
+
 fn notification_candidates_reason_constraint_matches_expected(definition: &str) -> bool {
     let normalized = definition.to_ascii_lowercase();
     normalized.contains("reason")
         && NOTIFICATION_CANDIDATES_REASON_VALUES
             .iter()
-            .all(|reason| normalized.contains(reason))
+            .all(|reason| constraint_definition_quotes_value(&normalized, reason))
 }
 
 fn notification_candidates_class_constraint_matches_expected(definition: &str) -> bool {
@@ -677,7 +695,7 @@ fn notification_candidates_class_constraint_matches_expected(definition: &str) -
     normalized.contains("class")
         && NOTIFICATION_CANDIDATES_CLASS_VALUES
             .iter()
-            .all(|class| normalized.contains(class))
+            .all(|class| constraint_definition_quotes_value(&normalized, class))
 }
 
 fn notification_outbox_class_constraint_matches_expected(definition: &str) -> bool {
@@ -685,7 +703,7 @@ fn notification_outbox_class_constraint_matches_expected(definition: &str) -> bo
     normalized.contains("class")
         && NOTIFICATION_OUTBOX_CLASS_VALUES
             .iter()
-            .all(|class| normalized.contains(class))
+            .all(|class| constraint_definition_quotes_value(&normalized, class))
 }
 
 #[derive(Clone)]
@@ -2933,6 +2951,39 @@ mod tests {
         assert!(!notification_candidates_class_constraint_matches_expected(
             postgres_definition
         ));
+    }
+
+    /// Regression: a constraint definition that contains the substring
+    /// `dm` only because the longer value `dm_mention` is present (i.e.
+    /// `'dm'` is NOT a quoted literal in the IN-list) must be flagged
+    /// stale. Earlier code used `definition.contains("dm")` which
+    /// false-positively accepted such a constraint and skipped the
+    /// migration — leaving a stale CHECK that rejects new
+    /// `'dm'` inserts.
+    #[test]
+    fn postgres_class_constraint_match_rejects_substring_only_definition() {
+        let postgres_definition = "CHECK (((class)::text = ANY ((ARRAY['dm_mention'::character varying, 'personal_mention'::character varying, 'channel_mention'::character varying, 'active_channel_mention'::character varying, 'notify_all'::character varying])::text[])))";
+        assert!(
+            !notification_candidates_class_constraint_matches_expected(postgres_definition),
+            "stale constraint missing 'dm' must NOT be treated as current",
+        );
+        assert!(
+            !notification_outbox_class_constraint_matches_expected(postgres_definition),
+            "stale outbox constraint missing 'dm' must NOT be treated as current",
+        );
+    }
+
+    /// Regression: a SQLite `CREATE TABLE` body that contains the
+    /// substring `offline_dm` only because the longer value
+    /// `offline_dm_mention` is present must be flagged stale for the
+    /// reason CHECK migration.
+    #[test]
+    fn sqlite_reason_constraint_match_rejects_substring_only_definition() {
+        let sqlite_create_sql = "CREATE TABLE notification_candidates (reason TEXT NOT NULL CHECK (reason IN ('offline_dm_mention', 'groupchat_personal_mention', 'groupchat_channel_mention', 'groupchat_active_channel_mention', 'groupchat_notify_all')))";
+        assert!(
+            !notification_candidates_reason_constraint_matches_expected(sqlite_create_sql),
+            "stale reason constraint missing 'offline_dm' must NOT be treated as current",
+        );
     }
 
     async fn failed_outbox_jobs_count(store: &NotificationOutboxStore) -> i64 {
