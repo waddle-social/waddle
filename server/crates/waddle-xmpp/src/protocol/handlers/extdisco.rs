@@ -17,7 +17,8 @@ use waddle_sfu::{Identity, SfuService};
 use crate::protocol::event::{OutboundEvent, StanzaContext};
 use crate::protocol::traits::IqHandler;
 use crate::xep::xep0215::{
-    build_stun_service, build_turn_service, ServiceType, ServicesResult, NS_EXT_DISCO,
+    build_services_result_element, build_stun_service_element, build_turn_service, ServiceType,
+    NS_EXT_DISCO,
 };
 use crate::Stanza;
 
@@ -90,7 +91,7 @@ impl IqHandler for ExtDiscoHandler {
         // that explicitly filter to `type='stun'`.
         let want_turn = type_filter != Some(ServiceType::Stun);
         let want_stun = type_filter != Some(ServiceType::Turn);
-        let mut services = Vec::with_capacity(2);
+        let mut services: Vec<minidom::Element> = Vec::with_capacity(2);
         if want_turn {
             // Mint credentials scoped to the authenticated session
             // JID, never the client-supplied `iq.from` (which could
@@ -113,19 +114,37 @@ impl IqHandler for ExtDiscoHandler {
             }
         }
         if want_stun {
-            services.push(build_stun_service(self.sfu.turn_host(), self.turn_udp_port));
+            services.push(build_stun_service_element(
+                self.sfu.turn_host(),
+                self.turn_udp_port,
+            ));
         }
-        let result = ServicesResult {
-            type_: type_filter,
-            services,
-        };
+        // The wrapper element is built manually rather than via
+        // `ServicesResult` so it can carry the manually-built
+        // `<service type='turns'/>` child — `ServicesResult.services:
+        // Vec<Service>` can only hold the typed `Stun`/`Turn`
+        // variants and would emit `type='turn'` (wrong per XEP-0215
+        // §3.6.5).
+        let type_filter_str = type_filter.map(service_type_wire_str);
+        let result = build_services_result_element(type_filter_str, services);
         let reply = Iq {
             from: iq.to.clone(),
             to: iq.from.clone(),
             id: iq.id.clone(),
-            payload: IqType::Result(Some(result.into())),
+            payload: IqType::Result(Some(result)),
         };
         vec![OutboundEvent::SendStanza(Box::new(Stanza::Iq(reply)))]
+    }
+}
+
+/// Wire-form `type` value for the (typed) filter on the inbound
+/// request. The TLS-protected `turns` variant is only ever emitted
+/// in the response (XEP-0215 §3.6.5); the filter on the request
+/// itself uses the typed surface, which never includes `turns`.
+fn service_type_wire_str(t: ServiceType) -> &'static str {
+    match t {
+        ServiceType::Stun => "stun",
+        ServiceType::Turn => "turn",
     }
 }
 
@@ -142,7 +161,7 @@ fn error_reply(original: &Iq, cond: DefinedCondition, text: &str) -> Vec<Outboun
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::xep::xep0215::{ServiceType, Transport};
+    use crate::xep::xep0215::TYPE_TURNS;
     use chrono::Duration;
     use jid::FullJid;
     use minidom::Element;
@@ -195,7 +214,7 @@ mod tests {
     }
 
     #[test]
-    fn services_query_returns_turn_and_stun_entries() {
+    fn services_query_returns_turns_and_stun_entries() {
         let iq = services_get_iq();
         let jid = test_jid();
         let handler = ExtDiscoHandler::new(fixture_sfu(), 443, 3478);
@@ -211,17 +230,28 @@ mod tests {
         let IqType::Result(Some(elem)) = reply.payload else {
             panic!("expected Iq result with payload")
         };
-        let parsed = ServicesResult::try_from(elem).expect("services result parses");
-        assert_eq!(parsed.services.len(), 2);
-        assert_eq!(parsed.services[0].type_, ServiceType::Turn);
-        assert_eq!(parsed.services[0].transport, Some(Transport::Tcp));
-        assert_eq!(parsed.services[0].port, Some(443));
-        assert!(parsed.services[0].username.is_some());
-        assert!(parsed.services[0].password.is_some());
-        assert!(parsed.services[0].expires.is_some());
-        assert_eq!(parsed.services[1].type_, ServiceType::Stun);
-        assert_eq!(parsed.services[1].transport, Some(Transport::Udp));
-        assert_eq!(parsed.services[1].port, Some(3478));
+        assert_eq!(elem.name(), "services");
+        assert_eq!(elem.ns(), NS_EXT_DISCO);
+
+        let entries: Vec<&Element> = elem.children().filter(|c| c.name() == "service").collect();
+        assert_eq!(entries.len(), 2);
+
+        // XEP-0215 §3.6.5: TLS-protected TURN must go out as
+        // `type='turns'`. The manual element-building path is
+        // exactly what makes this possible — `ServicesResult`'s
+        // typed `Vec<Service>` cannot represent this value.
+        let turns = entries[0];
+        assert_eq!(turns.attr("type"), Some(TYPE_TURNS));
+        assert_eq!(turns.attr("transport"), Some("tcp"));
+        assert_eq!(turns.attr("port"), Some("443"));
+        assert!(turns.attr("username").is_some());
+        assert!(turns.attr("password").is_some());
+        assert!(turns.attr("expires").is_some());
+
+        let stun = entries[1];
+        assert_eq!(stun.attr("type"), Some("stun"));
+        assert_eq!(stun.attr("transport"), Some("udp"));
+        assert_eq!(stun.attr("port"), Some("3478"));
     }
 
     #[test]
@@ -268,7 +298,7 @@ mod tests {
     }
 
     #[test]
-    fn services_query_with_type_turn_returns_only_turn_entry() {
+    fn services_query_with_type_turn_returns_only_turns_entry() {
         let iq = Iq {
             from: Some("alice@waddle.test/desktop".parse().unwrap()),
             to: Some("waddle.test".parse().unwrap()),
@@ -289,10 +319,12 @@ mod tests {
         let IqType::Result(Some(elem)) = reply.payload else {
             panic!("expected result")
         };
-        let parsed = ServicesResult::try_from(elem).expect("services result parses");
-        assert_eq!(parsed.type_, Some(ServiceType::Turn));
-        assert_eq!(parsed.services.len(), 1);
-        assert_eq!(parsed.services[0].type_, ServiceType::Turn);
+        assert_eq!(elem.attr("type"), Some("turn"));
+        let entries: Vec<&Element> = elem.children().filter(|c| c.name() == "service").collect();
+        assert_eq!(entries.len(), 1);
+        // The filter on the request is the typed surface ("turn"),
+        // but the response is the XEP-conformant "turns" wire value.
+        assert_eq!(entries[0].attr("type"), Some(TYPE_TURNS));
     }
 
     #[test]
@@ -317,11 +349,11 @@ mod tests {
         let IqType::Result(Some(elem)) = reply.payload else {
             panic!("expected result")
         };
-        let parsed = ServicesResult::try_from(elem).expect("services result parses");
-        assert_eq!(parsed.type_, Some(ServiceType::Stun));
-        assert_eq!(parsed.services.len(), 1);
-        assert_eq!(parsed.services[0].type_, ServiceType::Stun);
-        assert!(parsed.services[0].username.is_none());
+        assert_eq!(elem.attr("type"), Some("stun"));
+        let entries: Vec<&Element> = elem.children().filter(|c| c.name() == "service").collect();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].attr("type"), Some("stun"));
+        assert!(entries[0].attr("username").is_none());
     }
 
     #[test]
