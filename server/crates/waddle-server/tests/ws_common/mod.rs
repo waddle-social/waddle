@@ -485,7 +485,35 @@ impl WsXmppClient {
                     Ok(tungstenite::Message::Text(text)) if text.contains("<close") => {
                         return Ok(());
                     }
+                    Ok(tungstenite::Message::Text(text))
+                        if text.contains("<stream:error") =>
+                    {
+                        // A stream-level error during close is a protocol
+                        // violation we want the test to surface, not a
+                        // benign in-flight stanza we should drain.
+                        return Err(format!(
+                            "Stream error during close handshake: {text}"
+                        ));
+                    }
+                    Ok(tungstenite::Message::Text(text))
+                        if text.starts_with("<message")
+                            || text.starts_with("<presence")
+                            || text.starts_with("<iq") =>
+                    {
+                        // In-flight stanzas can still arrive between our
+                        // `</close>` and the server's ack — for example,
+                        // an `unavailable` MUC presence broadcast from
+                        // another occupant whose own teardown is being
+                        // processed concurrently. The XMPP spec doesn't
+                        // forbid the server from delivering already-queued
+                        // stanzas during the close handshake, so drain
+                        // them rather than failing the scenario.
+                        continue;
+                    }
                     Ok(tungstenite::Message::Text(text)) => {
+                        // Unknown text frame that isn't a close ack, a
+                        // known stanza, or a stream:error. Surface it so
+                        // unexpected protocol behavior fails loudly.
                         return Err(format!(
                             "Unexpected text frame while waiting for XMPP close acknowledgement: {text}"
                         ));
@@ -509,6 +537,22 @@ impl WsXmppClient {
             while let Some(message) = self.ws.next().await {
                 match message {
                     Ok(tungstenite::Message::Close(_)) => return Ok(()),
+                    Ok(tungstenite::Message::Text(text)) if text.contains("<stream:error") => {
+                        return Err(format!(
+                            "Stream error after WebSocket close request: {text}"
+                        ));
+                    }
+                    Ok(tungstenite::Message::Text(text))
+                        if text.starts_with("<message")
+                            || text.starts_with("<presence")
+                            || text.starts_with("<iq") =>
+                    {
+                        // Same rationale as above: any stanza arriving
+                        // after our `<close/>` ack but before the WS
+                        // close frame is an in-flight reflection of
+                        // another occupant's teardown — drain.
+                        continue;
+                    }
                     Ok(tungstenite::Message::Text(text)) => {
                         return Err(format!(
                             "Unexpected text frame after WebSocket close request: {text}"

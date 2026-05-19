@@ -109,7 +109,17 @@ export class CallEngine {
     room.on(RoomEvent.LocalTrackUnpublished, this.handleLocalTrackUnpublished);
     room.on(RoomEvent.ParticipantDisconnected, this.handleParticipantDisconnected);
     room.on(RoomEvent.Disconnected, this.handleDisconnected);
-    await room.connect(join.url, join.token);
+    try {
+      await room.connect(join.url, join.token);
+    } catch (err) {
+      // Connect itself failed; the listeners we bound above would
+      // otherwise dangle on a `Room` that nothing references but the
+      // closure inside the listener — strip them so a future GC has
+      // a clean path. `this.room` was never set so the caller stays
+      // on the well-defined "not connected" path.
+      room.removeAllListeners();
+      throw err;
+    }
     this.room = room;
     // Post-connect setup must be atomic from the caller's POV: if a
     // permission prompt is denied for the mic or cam, throwing without

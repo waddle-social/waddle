@@ -228,24 +228,28 @@ async function togglePip(): Promise<void> {
 }
 
 /**
- * Best-effort synchronous teardown for the tab-close path.
+ * Best-effort teardown for the tab-close path.
  *
  * `onBeforeUnmount` runs too late for tab close — the browser will
- * tear the WebSocket down before our async wire-send completes, and
- * the peer ends up stuck on a dangling "Connecting…" overlay until
- * the LiveKit room times them out. `pagehide` fires earlier in the
- * unload sequence and is the documented hook for best-effort
- * networking on unload (the modern replacement for `beforeunload`
- * for this purpose). We fire-and-forget the terminate stanza — any
- * await would race the unload — and rely on the wasm side queueing
- * the bytes onto the socket synchronously.
+ * tear the WebSocket down before our async wire-send completes.
+ * `pagehide` fires earlier in the unload sequence and is the modern
+ * documented hook for unload-side networking.
+ *
+ * IMPORTANT: this is best-effort, not a guarantee. `tearDownActiveCall`
+ * awaits an actor round-trip for stanza acknowledgement, and the
+ * browser will not yield long enough for the full chain to complete
+ * before the WebSocket is torn down. Some of the wire frames will
+ * make it (typically the first synchronous send), some may not.
+ *
+ * The authoritative chip-clear path is server-side: the unclean
+ * disconnect handler (`cleanup_muc_presence`) now broadcasts an
+ * `unavailable` presence to remaining occupants regardless of whether
+ * this client managed to send a graceful `state='inactive'` first.
+ * This handler is here to shorten the gap, not to be relied on.
  */
 function handlePageHide(): void {
   const sender = getSender();
   if (!sender) return;
-  // `tearDownActiveCall` is async but the wire methods it calls
-  // synchronously enqueue stanzas into the wasm client's outbound
-  // queue. We don't await — the browser is unloading.
   void tearDownActiveCall(sender, "gone");
 }
 
