@@ -1057,3 +1057,157 @@ async fn leaving_occupant_clears_call_state() {
     // verify indirectly via the `is_dormant` predicate once carol
     // also leaves — the room MUST be dormant.
 }
+
+#[tokio::test]
+async fn leaving_originator_session_clears_call_state_even_with_peer_sessions_remaining() {
+    // Multi-resource ghost regression. alice has two sessions on the
+    // same nick — desktop on the call, mobile in the room but not on
+    // the call. When desktop disconnects, the call advertisement
+    // bound to that specific session must clear; previously the
+    // chip stayed lit because `call_state` was keyed only by nick
+    // and only cleared when the LAST session for that nick left.
+    let actor = spawn_room_actor().await;
+    let desktop: FullJid = "alice@example.com/desktop".parse().expect("desktop");
+    let mobile: FullJid = "alice@example.com/mobile".parse().expect("mobile");
+
+    actor
+        .ask(JoinWithAffiliation {
+            sender_jid: desktop.clone(),
+            nick: "alice".to_string(),
+            effective_affiliation: Affiliation::Member,
+            local_domain: "example.com".to_string(),
+        })
+        .await
+        .expect("desktop join");
+    actor
+        .ask(JoinWithAffiliation {
+            sender_jid: mobile.clone(),
+            nick: "alice".to_string(),
+            effective_affiliation: Affiliation::Member,
+            local_domain: "example.com".to_string(),
+        })
+        .await
+        .expect("mobile join recognized as same-bare multi-session");
+
+    let call_id = waddle_sfu::CallId::new("testroom@muc.example.com").unwrap();
+    // Desktop is the session that advertised the active call.
+    let active_outcome = actor
+        .ask(crate::muc::room_actor::UpsertCallPresence {
+            sender_jid: desktop.clone(),
+            extension: crate::xep::xep_waddle_muc_call::MucCallExtension::active(call_id.clone()),
+        })
+        .await
+        .expect("ask")
+        .expect("alice is an occupant");
+    assert!(
+        active_outcome.active_extension.is_some(),
+        "desktop's active advertisement is stored",
+    );
+
+    // Desktop disconnects uncleanly; mobile is still in the room.
+    let leave_outcome = actor
+        .ask(crate::muc::room_actor::LeaveByRealJid {
+            sender_jid: desktop.clone(),
+        })
+        .await
+        .expect("desktop leave");
+    let leave_outcome = leave_outcome.expect("alice present");
+    assert!(
+        !leave_outcome.removed_last_session,
+        "mobile is still in the room, so alice's nick is not vacated"
+    );
+
+    // A late joiner (carol) must NOT see alice's stale call ad —
+    // even though alice's mobile is still in the room, no session
+    // is actually on the call.
+    let carol = test_full_jid("carol");
+    let join_outcome = actor
+        .ask(JoinWithAffiliation {
+            sender_jid: carol,
+            nick: "carol".to_string(),
+            effective_affiliation: Affiliation::Member,
+            local_domain: "example.com".to_string(),
+        })
+        .await
+        .expect("carol join");
+    let alice_replay = join_outcome
+        .existing_occupants
+        .iter()
+        .find(|o| o.nick == "alice")
+        .expect("alice (via mobile) still in occupant list");
+    assert!(
+        alice_replay.call_extension.is_none(),
+        "call extension cleared when originating session left, even with peer sessions remaining",
+    );
+}
+
+#[tokio::test]
+async fn leaving_non_originator_session_preserves_call_state() {
+    // The mirror of the multi-session ghost test: if alice has two
+    // sessions and only the NON-call session leaves, the call
+    // advertisement bound to the still-present originator must
+    // survive. This pins that the per-session keying isn't
+    // over-eager.
+    let actor = spawn_room_actor().await;
+    let desktop: FullJid = "alice@example.com/desktop".parse().expect("desktop");
+    let mobile: FullJid = "alice@example.com/mobile".parse().expect("mobile");
+
+    actor
+        .ask(JoinWithAffiliation {
+            sender_jid: desktop.clone(),
+            nick: "alice".to_string(),
+            effective_affiliation: Affiliation::Member,
+            local_domain: "example.com".to_string(),
+        })
+        .await
+        .expect("desktop join");
+    actor
+        .ask(JoinWithAffiliation {
+            sender_jid: mobile.clone(),
+            nick: "alice".to_string(),
+            effective_affiliation: Affiliation::Member,
+            local_domain: "example.com".to_string(),
+        })
+        .await
+        .expect("mobile join");
+
+    let call_id = waddle_sfu::CallId::new("testroom@muc.example.com").unwrap();
+    // Desktop owns the call advertisement.
+    actor
+        .ask(crate::muc::room_actor::UpsertCallPresence {
+            sender_jid: desktop.clone(),
+            extension: crate::xep::xep_waddle_muc_call::MucCallExtension::active(call_id.clone()),
+        })
+        .await
+        .expect("ask")
+        .expect("alice is an occupant");
+
+    // Mobile (NOT the originator) disconnects.
+    actor
+        .ask(crate::muc::room_actor::LeaveByRealJid { sender_jid: mobile })
+        .await
+        .expect("mobile leave");
+
+    // A late joiner sees alice still on the call — desktop is the
+    // originator and is still in the room.
+    let carol = test_full_jid("carol");
+    let join_outcome = actor
+        .ask(JoinWithAffiliation {
+            sender_jid: carol,
+            nick: "carol".to_string(),
+            effective_affiliation: Affiliation::Member,
+            local_domain: "example.com".to_string(),
+        })
+        .await
+        .expect("carol join");
+    let alice_replay = join_outcome
+        .existing_occupants
+        .iter()
+        .find(|o| o.nick == "alice")
+        .expect("alice still in room via desktop");
+    let ext = alice_replay
+        .call_extension
+        .as_ref()
+        .expect("call advertisement preserved when non-originator session leaves");
+    assert_eq!(ext.call_id.as_str(), call_id.as_str());
+}

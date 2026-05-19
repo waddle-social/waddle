@@ -109,16 +109,38 @@ export class CallEngine {
     room.on(RoomEvent.LocalTrackUnpublished, this.handleLocalTrackUnpublished);
     room.on(RoomEvent.ParticipantDisconnected, this.handleParticipantDisconnected);
     room.on(RoomEvent.Disconnected, this.handleDisconnected);
-    await room.connect(join.url, join.token);
+    try {
+      await room.connect(join.url, join.token);
+    } catch (err) {
+      // Connect itself failed; the listeners we bound above would
+      // otherwise dangle on a `Room` that nothing references but the
+      // closure inside the listener — strip them so a future GC has
+      // a clean path. `this.room` was never set so the caller stays
+      // on the well-defined "not connected" path.
+      room.removeAllListeners();
+      throw err;
+    }
     this.room = room;
-    if (opts.audio) await room.localParticipant.setMicrophoneEnabled(true);
-    if (opts.video) await room.localParticipant.setCameraEnabled(true);
-    // Re-apply the speaker preference now that the room has remote
-    // audio elements to retarget; the engine ignores it on connect
-    // because no `<audio>` exists yet, but every subsequent
-    // RoomEvent.TrackSubscribed wires through this.applySpeaker.
-    if (prefs.speaker) {
-      await this.applySpeakerDevice(prefs.speaker).catch(() => undefined);
+    // Post-connect setup must be atomic from the caller's POV: if a
+    // permission prompt is denied for the mic or cam, throwing without
+    // first tearing down the half-initialized room would leave
+    // `this.room` set against a connected LiveKit session that nothing
+    // will ever close. Subsequent `connect()` calls would then fail on
+    // the "already connected" guard for a session the user never sees.
+    try {
+      if (opts.audio) await room.localParticipant.setMicrophoneEnabled(true);
+      if (opts.video) await room.localParticipant.setCameraEnabled(true);
+      // Re-apply the speaker preference now that the room has remote
+      // audio elements to retarget; the engine ignores it on connect
+      // because no `<audio>` exists yet, but every subsequent
+      // RoomEvent.TrackSubscribed wires through this.applySpeaker.
+      if (prefs.speaker) {
+        await this.applySpeakerDevice(prefs.speaker).catch(() => undefined);
+      }
+    } catch (err) {
+      this.room = null;
+      await room.disconnect().catch(() => undefined);
+      throw err;
     }
   }
 

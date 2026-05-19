@@ -356,33 +356,13 @@ pub async fn handle_muc_leave(
     );
 
     // Broadcast unavailable presence to remaining occupants (non-blocking).
-    // Drop accounting is handled inside `try_send_to`.
-    if outcome.removed_last_session {
-        for occupant_jid in &outcome.remaining_occupants {
-            let from_jid = room_jid
-                .clone()
-                .with_resource_str(&outcome.nick)
-                .unwrap_or_else(|_| sender_jid.clone());
-            let sender_bare = sender_jid.to_bare();
-            let presence = waddle_xmpp::muc::build_leave_presence(
-                &from_jid,
-                occupant_jid,
-                Affiliation::Member,
-                false,
-                &waddle_xmpp::xep::xep0421::OccupantIdentity {
-                    bare_jid: &sender_bare,
-                    real_jid: Some(sender_jid),
-                    secret: &state.deps.occupant_id_secret,
-                },
-            );
-            let stanza = Stanza::Presence(presence);
-            let _outcome = state
-                .deps
-                .protocol
-                .connection_registry
-                .try_send_to(occupant_jid, stanza);
-        }
-    }
+    // Drop accounting is handled inside `try_send_to`. The same helper
+    // is used by `cleanup_muc_presence` for unclean disconnects, so
+    // both the explicit-leave path and the tab-close path produce the
+    // same wire shape.
+    super::super::super::cleanup::broadcast_muc_leave_to_remaining(
+        state, room_jid, sender_jid, &outcome,
+    );
 
     let response = vec![build_muc_self_unavailable_xml(
         state,

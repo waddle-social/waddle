@@ -3,6 +3,59 @@ use super::{
     replay::drain_outbound_into_replay, state::WsConnState, stream_management::sm_show_from_name,
 };
 use waddle_xmpp::muc::room_actor::LeaveOutcome;
+use waddle_xmpp::xep::xep0421::OccupantIdentity;
+
+/// Broadcast a `<presence type='unavailable'/>` from the leaving
+/// occupant's room-nick JID to every remaining occupant when their
+/// LAST session for that nick departs.
+///
+/// XEP-0045 §7.14: the room is responsible for telling remaining
+/// occupants that an occupant has left. The wire shape (room/nick
+/// `from`, hat-less, `<x xmlns='muc#user'>` with role/affiliation,
+/// XEP-0421 `<occupant-id/>`) is produced by the typed
+/// `waddle_xmpp::muc::build_leave_presence` builder.
+///
+/// Used by both the explicit-leave path (`handle_muc_leave`) and the
+/// unclean-disconnect path (`cleanup_muc_presence`) so the two cannot
+/// drift. Prior to this helper, `cleanup_muc_presence` skipped the
+/// broadcast entirely, which manifested as the "N in call" chip
+/// staying lit forever after a tab close: other occupants never
+/// received the leave signal, so their client-side
+/// `$mucCallParticipants` never cleared the stale nick.
+pub(crate) fn broadcast_muc_leave_to_remaining(
+    state: &WebSocketState,
+    room_jid: &BareJid,
+    sender_jid: &FullJid,
+    outcome: &LeaveOutcome,
+) {
+    if !outcome.removed_last_session {
+        return;
+    }
+    let from_jid = room_jid
+        .clone()
+        .with_resource_str(&outcome.nick)
+        .unwrap_or_else(|_| sender_jid.clone());
+    let sender_bare = sender_jid.to_bare();
+    let identity = OccupantIdentity {
+        bare_jid: &sender_bare,
+        real_jid: Some(sender_jid),
+        secret: &state.deps.occupant_id_secret,
+    };
+    for occupant_jid in &outcome.remaining_occupants {
+        let presence = waddle_xmpp::muc::build_leave_presence(
+            &from_jid,
+            occupant_jid,
+            outcome.affiliation,
+            false,
+            &identity,
+        );
+        let _ = state
+            .deps
+            .protocol
+            .connection_registry
+            .try_send_to(occupant_jid, Stanza::Presence(presence));
+    }
+}
 
 /// Clean up MUC room presence when a connection disconnects
 /// Public alias for the MUC-presence cleanup used by the SM expired-session
@@ -283,6 +336,16 @@ async fn cleanup_muc_presence(state: &WebSocketState, jid: &FullJid) {
                     removed_last_session = outcome.removed_last_session,
                     "Removed user from MUC room on disconnect"
                 );
+                // Tell remaining occupants the user is gone. Without
+                // this fan-out, a tab-close / SM-expiry / panic-shed
+                // disconnect on a participant who had advertised the
+                // `<call xmlns='urn:waddle:muc-call:0'/>` extension
+                // leaves the "N in call" chip lit on every other
+                // occupant's client. The explicit-leave path
+                // (`handle_muc_leave`) calls the same helper, so the
+                // wire shape is identical regardless of how the
+                // session ended.
+                broadcast_muc_leave_to_remaining(state, &room_jid, jid, &outcome);
                 maybe_evict_empty_room(state, &room_jid, &outcome).await;
             }
             Ok(None) => {}

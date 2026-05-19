@@ -133,13 +133,29 @@ pub struct MucRoom {
     ///    the source of truth rather than echoing a possibly-stale
     ///    payload from the client.
     ///
-    /// Entries are cleared on occupant leave so a tab-close mid-call
-    /// doesn't leave the chip lit forever; the SFU teardown hook
-    /// (`muc_call_sfu::unregister_participant_from_room`) is the
-    /// authoritative call-end signal, but clearing here keeps the
-    /// XMPP indicator coherent without depending on the SFU's
-    /// timeout.
-    pub(super) call_state: HashMap<String, MucCallExtension>,
+    /// Each entry records the originating `FullJid` so that when a
+    /// user has multiple sessions sharing the same nick (web + mobile),
+    /// the call advertisement is tied to the specific session that
+    /// joined the call. When that session leaves — clean hangup OR
+    /// unclean disconnect — its `<call/>` advertisement is cleared
+    /// even if the user's other sessions are still in the room. Without
+    /// this per-session keying, alice's mobile staying in the channel
+    /// after her desktop (which was on the call) drops would keep the
+    /// chip lit forever for late joiners.
+    pub(super) call_state: HashMap<String, CallStateEntry>,
+}
+
+/// One advertised `<call/>` entry plus the session that owns it.
+///
+/// The `originator` field is the `FullJid` of the session that emitted
+/// the `state='active'` presence update. When that exact session leaves
+/// the room (or its WebSocket drops), the entry is removed regardless
+/// of whether other sessions for the same nick remain — preventing
+/// ghost call advertisements on multi-resource occupants.
+#[derive(Debug, Clone)]
+pub(super) struct CallStateEntry {
+    pub originator: FullJid,
+    pub extension: MucCallExtension,
 }
 
 impl MucRoom {
@@ -167,10 +183,12 @@ impl MucRoom {
     }
 
     /// Apply a `<call xmlns='urn:waddle:muc-call:0'/>` presence-extension
-    /// update from `nick`. `state='active'` stores the extension;
-    /// `state='inactive'` clears it (we DO NOT preserve an "inactive"
-    /// entry — the room-actor's perspective is binary: this nick is
-    /// currently advertising a live call, or they aren't).
+    /// update from `nick`, identified by the specific session
+    /// (`originator`) that emitted it. `state='active'` stores the
+    /// extension; `state='inactive'` clears it (we DO NOT preserve an
+    /// "inactive" entry — the room-actor's perspective is binary:
+    /// this nick is currently advertising a live call, or they
+    /// aren't).
     ///
     /// Returns the post-update extension state for `nick`:
     /// `Some(ext)` if a live `active` advertisement is now present,
@@ -181,11 +199,18 @@ impl MucRoom {
     pub fn upsert_call_state(
         &mut self,
         nick: &str,
+        originator: FullJid,
         ext: MucCallExtension,
     ) -> Option<MucCallExtension> {
         match ext.state {
             CallPresenceState::Active => {
-                self.call_state.insert(nick.to_owned(), ext.clone());
+                self.call_state.insert(
+                    nick.to_owned(),
+                    CallStateEntry {
+                        originator,
+                        extension: ext.clone(),
+                    },
+                );
                 Some(ext)
             }
             CallPresenceState::Inactive => {
@@ -199,7 +224,7 @@ impl MucRoom {
     /// Used by the join handler to enrich the replayed occupant
     /// presence list with active-call indicators for late joiners.
     pub fn call_state_for_nick(&self, nick: &str) -> Option<&MucCallExtension> {
-        self.call_state.get(nick)
+        self.call_state.get(nick).map(|entry| &entry.extension)
     }
 
     /// Add an occupant to the room.
@@ -253,6 +278,14 @@ impl MucRoom {
     /// Returns `Some(true)` if that session was the last one for the nick and
     /// the occupant was removed, `Some(false)` if the nick still has active
     /// sessions, and `None` if the nickname doesn't exist in the room.
+    ///
+    /// If `call_state[nick]` was originated by the leaving session,
+    /// the entry is cleared even when other sessions for the same
+    /// nick remain. This avoids ghost call advertisements when one
+    /// resource of a multi-resource occupant disconnects mid-call:
+    /// alice/desktop on the call, alice/mobile in the room (not on
+    /// the call), desktop drops → the call advertisement must clear,
+    /// not persist under mobile's session.
     pub fn remove_occupant_session(&mut self, nick: &str, jid: &FullJid) -> Option<bool> {
         if !self.occupants.contains_key(nick) {
             return None;
@@ -269,6 +302,18 @@ impl MucRoom {
 
         if previous_len == sessions.len() {
             return Some(false);
+        }
+
+        // Clear call advertisement when the originating session leaves
+        // even if peer sessions for the same nick remain. Without this
+        // clause the chip would stay lit (and replay to late joiners)
+        // until the user's LAST session for this nick departs.
+        if self
+            .call_state
+            .get(nick)
+            .is_some_and(|entry| entry.originator == *jid)
+        {
+            self.call_state.remove(nick);
         }
 
         if sessions.is_empty() {

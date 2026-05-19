@@ -23,7 +23,7 @@ pub use builders::{
 pub use call::{
     build_finish, build_proceed, build_propose, build_reject, build_retract, build_session_accept,
     build_session_initiate, build_session_terminate, parse_call_event, parse_jingle_iq,
-    parse_jmi_message, CallEventKind, CallMedia, InboundCallEvent, LiveKitJoin,
+    parse_jmi_message, wrap_jmi_message, CallEventKind, CallMedia, InboundCallEvent, LiveKitJoin,
 };
 pub use namespaces::{
     build_muc_call_extension_element, NS_CHAT_MARKERS, NS_CHAT_STATES, NS_MESSAGE_CORRECT,

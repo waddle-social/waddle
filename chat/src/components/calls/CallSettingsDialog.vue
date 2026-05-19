@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, onUnmounted, ref, watch } from "vue";
+import { ref, watch } from "vue";
 import { useStore } from "@nanostores/vue";
 import { Check, Mic, Speaker, Video, X } from "lucide-vue-next";
 import AppDialog from "@/components/ui/AppDialog.vue";
@@ -42,6 +42,18 @@ function detectSpeakerSupport(): boolean {
   return typeof audio.setSinkId === "function";
 }
 
+/**
+ * Epoch counter incremented on every dialog close. `refresh()` reads
+ * the current epoch before awaiting `enumerateCallDevices()` and
+ * compares it against the snapshot afterward: if they differ, the
+ * dialog has been closed (or re-opened) in the meantime and we drop
+ * the stale result instead of overwriting whatever the next session
+ * already set. This is the lighter-weight equivalent of an
+ * AbortController — the underlying `enumerateDevices` call has no
+ * abort signal anyway, so the epoch guard is the surgical fix.
+ */
+let enumerateEpoch = 0;
+
 async function refresh(): Promise<void> {
   // The browser only populates `label` after the user has granted
   // permission for at least one input device. Calling `getUserMedia`
@@ -49,7 +61,10 @@ async function refresh(): Promise<void> {
   // intrusive here. So before granting: labels are blank, and we
   // render a "Grant access to see device names" hint inside each
   // picker. The deviceId column still works for selection.
-  devices.value = await enumerateCallDevices();
+  const epoch = enumerateEpoch;
+  const next = await enumerateCallDevices();
+  if (epoch !== enumerateEpoch) return;
+  devices.value = next;
 }
 
 const { engine } = useCallEngine();
@@ -87,31 +102,54 @@ async function selectSpeaker(id: string | null): Promise<void> {
   }
 }
 
-let unsubscribe: (() => void) | null = null;
+/**
+ * `devicechange` listener wired up only while the dialog is open.
+ * Previously this was mounted for the entire call lifetime, which
+ * meant a hot-plug during the call would re-enumerate even when the
+ * picker wasn't visible — pointless work and an extra permission
+ * probe on some browsers. Scoping to the open watcher keeps the call
+ * surface idle when the user isn't actively choosing a device.
+ */
+let unsubscribeDeviceChange: (() => void) | null = null;
+let debounceTimer: ReturnType<typeof setTimeout> | null = null;
+
+function teardownDeviceChange(): void {
+  if (debounceTimer) {
+    clearTimeout(debounceTimer);
+    debounceTimer = null;
+  }
+  unsubscribeDeviceChange?.();
+  unsubscribeDeviceChange = null;
+}
 
 watch(open, async (isOpen) => {
-  if (!isOpen) return;
+  if (!isOpen) {
+    // Closing: bump the epoch so any in-flight enumerate result
+    // gets dropped on resolve, and detach the devicechange listener.
+    enumerateEpoch += 1;
+    teardownDeviceChange();
+    return;
+  }
   speakerSupported.value = detectSpeakerSupport();
   await refresh();
-});
-
-onMounted(() => {
-  // `devicechange` fires when a device is plugged in/out. Re-
-  // enumerate so the picker reflects current hardware.
+  // Mount the devicechange listener after the first refresh so the
+  // initial enumeration isn't fighting a hot-plug event arriving in
+  // the same tick. Debounced 200ms because hot-plugs commonly fire
+  // multiple `devicechange` events in quick succession (one per
+  // device flavor) and we only need one re-enumerate per cluster.
   if (typeof navigator !== "undefined" && navigator.mediaDevices?.addEventListener) {
     const handler = () => {
-      void refresh();
+      if (debounceTimer) clearTimeout(debounceTimer);
+      debounceTimer = setTimeout(() => {
+        debounceTimer = null;
+        void refresh();
+      }, 200);
     };
     navigator.mediaDevices.addEventListener("devicechange", handler);
-    unsubscribe = () => {
+    unsubscribeDeviceChange = () => {
       navigator.mediaDevices.removeEventListener("devicechange", handler);
     };
   }
-});
-
-onUnmounted(() => {
-  unsubscribe?.();
-  unsubscribe = null;
 });
 
 function close(): void {

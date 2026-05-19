@@ -265,6 +265,17 @@ export async function tearDownActiveCall(
         case "active":
           if (s.kind === "dm") {
             await outboundCalls.sessionTerminate(sender, s.peer, s.sid, reason);
+            // XEP-0353 §3.5: both parties SHOULD send `<finish/>` after
+            // the call ends so MAM archives both sides consistently
+            // (the JMI message stack uses the finish marker to bookend
+            // the call record). Best-effort: a wasm bundle that
+            // doesn't expose `send_call_finish` shouldn't keep the
+            // terminate from clearing the local slot.
+            try {
+              await outboundCalls.finish(sender, s.peer, s.sid);
+            } catch (err) {
+              reportCallError(err);
+            }
           } else {
             // MUC group call: clear our presence extension AND leave
             // via the muc-call:0 IQ surface. Presence-first ordering

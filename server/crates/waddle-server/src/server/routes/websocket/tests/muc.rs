@@ -841,3 +841,81 @@ async fn muc_nick_collision_returns_conflict_presence() {
     assert!(room.find_nick_by_real_jid(&bob).is_none());
     assert_eq!(room.occupant_count(), 1);
 }
+
+#[tokio::test]
+async fn cleanup_muc_presence_broadcasts_unavailable_to_remaining_occupants() {
+    // Regression for the "1 in call" ghost: when a user's connection
+    // drops uncleanly (tab close, SM-expiry, panic-shed), the cleanup
+    // path used to remove them from the room actor but never tell
+    // the remaining occupants. Other clients then kept the leaver's
+    // nick in their `$mucCallParticipants[room]` indefinitely, so
+    // the "N in call" chip stayed lit with nobody actually present.
+    //
+    // The fix routes both the explicit-leave path AND the unclean
+    // disconnect path through `broadcast_muc_leave_to_remaining`, so
+    // remaining occupants receive a `<presence type='unavailable'/>`
+    // either way. This test pins that contract.
+    use super::cleanup::cleanup_muc_presence_for_jid;
+
+    let state = create_test_websocket_state().await;
+    let owner_session = create_test_server_owner_session(state.as_ref(), "alice").await;
+    let room_jid: BareJid = "ghost-call-channel@muc.example.com"
+        .parse()
+        .expect("room jid");
+    let alice: FullJid = "alice@example.com/web".parse().expect("alice jid");
+    let bob: FullJid = "bob@example.com/desktop".parse().expect("bob jid");
+
+    // Register Bob's outbound channel so we can capture the broadcast
+    // his client would receive.
+    let (bob_tx, mut bob_rx) = mpsc::channel::<OutboundStanza>(4);
+    state
+        .deps
+        .protocol
+        .connection_registry
+        .register(bob.clone(), bob_tx);
+
+    // Both Alice and Bob join the MUC.
+    let _ = handle_muc_join(
+        state.as_ref(),
+        "example.com",
+        &room_jid,
+        &alice,
+        "alice",
+        &Some(owner_session),
+    )
+    .await;
+    let _ = handle_muc_join(state.as_ref(), "example.com", &room_jid, &bob, "bob", &None).await;
+
+    // Drain the join broadcast (Alice's room → Bob's mailbox is the
+    // self-presence on join; Bob's room → Alice's mailbox would be
+    // the cross-broadcast Alice would receive, but we registered only
+    // Bob so we just need to drain his existing traffic).
+    while bob_rx.try_recv().is_ok() {}
+
+    // Simulate Alice's unclean disconnect — same entry point the SM
+    // janitor and `cleanup_connection_shutdown` reach.
+    cleanup_muc_presence_for_jid(state.as_ref(), &alice).await;
+
+    // The room actor must have evicted Alice's occupant slot.
+    let room = snapshot_room(state.as_ref(), &room_jid).await.room;
+    assert!(
+        room.find_nick_by_real_jid(&alice).is_none(),
+        "Alice's occupant slot must be cleared on unclean disconnect",
+    );
+    assert_eq!(room.find_nick_by_real_jid(&bob), Some("bob"));
+
+    // The fix: Bob receives an `unavailable` presence from
+    // `room/alice` so his client can drop Alice from any
+    // call-participants set keyed by nick.
+    let broadcast = bob_rx
+        .try_recv()
+        .expect("Bob must receive Alice's unavailable broadcast on her unclean disconnect");
+    let xml = stanza_to_xml(&broadcast.stanza);
+    let presence = Element::from_str(&xml).expect("broadcast presence XML");
+    assert_eq!(presence.name(), "presence");
+    assert_eq!(presence.attr("type"), Some("unavailable"));
+    let expected_from = format!("{room_jid}/alice");
+    let expected_to = bob.to_string();
+    assert_eq!(presence.attr("from"), Some(expected_from.as_str()));
+    assert_eq!(presence.attr("to"), Some(expected_to.as_str()));
+}

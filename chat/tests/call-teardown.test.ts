@@ -55,6 +55,54 @@ describe("tearDownActiveCall", () => {
     expect($callState.get()).toEqual({ phase: "idle" });
   });
 
+  test("active DM call: also dispatches XEP-0353 finish after sessionTerminate", async () => {
+    // XEP-0353 §3.5: after either side terminates a call, both SHOULD
+    // emit `<finish/>` so the MAM bookend pairing stays consistent.
+    // Without this the responder's archive only carries the `propose`
+    // / `proceed` half of the JMI handshake and the initiator's UI
+    // can't render a clean "call ended" row.
+    const sender = mockSender();
+    $callState.set({
+      phase: "active",
+      peer: "bob@waddle.test/desktop",
+      sid: "c1",
+      media: audioVideo,
+      join,
+      kind: "dm",
+    });
+    await tearDownActiveCall(sender, "success");
+    expect(sender.send_call_session_terminate).toHaveBeenCalledTimes(1);
+    expect(sender.send_call_finish).toHaveBeenCalledTimes(1);
+    expect(sender.send_call_finish).toHaveBeenCalledWith(
+      "bob@waddle.test/desktop",
+      "c1",
+    );
+    expect($callState.get()).toEqual({ phase: "idle" });
+  });
+
+  test("active DM call: finish failure does not block clearing the slot", async () => {
+    // A stale wasm bundle without `send_call_finish` (or a transient
+    // I/O error inside the finish stanza) MUST NOT keep us stuck on
+    // `phase: active` after the terminate already went out — the
+    // local UI would still render the call overlay while the peer
+    // has already ended.
+    const sender: CallWireSender = {
+      send_call_session_terminate: mock(async () => undefined),
+      // No send_call_finish → outboundCalls.finish throws.
+    };
+    $callState.set({
+      phase: "active",
+      peer: "bob@waddle.test/desktop",
+      sid: "c1",
+      media: audioVideo,
+      join,
+      kind: "dm",
+    });
+    await tearDownActiveCall(sender, "success");
+    expect(sender.send_call_session_terminate).toHaveBeenCalledTimes(1);
+    expect($callState.get()).toEqual({ phase: "idle" });
+  });
+
   test("active call: success reason for graceful logout", async () => {
     const sender = mockSender();
     $callState.set({

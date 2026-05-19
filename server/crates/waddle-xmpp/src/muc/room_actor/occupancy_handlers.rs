@@ -234,7 +234,13 @@ impl kameo::message::Message<UpsertCallPresence> for RoomActor {
             .values()
             .flat_map(|o| self.room.get_occupant_sessions(&o.nick))
             .collect();
-        let active_extension = self.room.upsert_call_state(&sender_nick, msg.extension);
+        // Bind the call advertisement to the specific session that
+        // emitted it so a partial-session leave (one resource of a
+        // multi-resource occupant) clears the chip even when the
+        // user's other sessions remain in the room.
+        let active_extension =
+            self.room
+                .upsert_call_state(&sender_nick, msg.sender_jid.clone(), msg.extension);
         Ok(Some(CallPresenceUpdateOutcome {
             update: PresenceUpdateOutcome {
                 sender_nick,
