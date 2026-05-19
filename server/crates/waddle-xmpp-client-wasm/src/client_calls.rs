@@ -6,8 +6,59 @@ use waddle_xmpp_client::messaging::{
 };
 
 const NS_WADDLE_MUC_CALL: &str = "urn:waddle:muc-call:0";
+const NS_WADDLE_LIVEKIT_TRANSPORT: &str = "urn:waddle:transports:livekit:0";
 
 const NS_JABBER_CLIENT: &str = "jabber:client";
+
+/// Walk an `<iq type='result'>` payload from the server's
+/// `<request-join xmlns='urn:waddle:muc-call:0'/>` IQ and pull out
+/// the typed `WaddleLiveKitJoin`.
+///
+/// The wire shape (canonical, see `WaddleLiveKitTransport::to_element`
+/// in `waddle-xmpp/src/xep/xep_waddle_livekit_transport.rs`) is:
+///
+/// ```xml
+/// <iq type='result'>
+///   <joined xmlns='urn:waddle:muc-call:0'>
+///     <transport xmlns='urn:waddle:transports:livekit:0'
+///                url='...' room='...' identity='...'>
+///       <token>JWT</token>
+///     </transport>
+///   </joined>
+/// </iq>
+/// ```
+///
+/// `url`, `room`, `identity` are **attributes** of `<transport>`;
+/// `<token>` is the sole child element. Reading any of the first
+/// three via `get_child(...)` (as a pre-#495 draft of this parser
+/// did) silently turns every server-issued join into a parse
+/// error, which surfaces as a never-resolved call promise on the
+/// chat side and a UI that does nothing when the user clicks the
+/// channel call button.
+fn parse_muc_call_join_result(result: &Element) -> Result<crate::types::WaddleLiveKitJoin, String> {
+    let joined = result
+        .get_child("joined", NS_WADDLE_MUC_CALL)
+        .ok_or_else(|| "muc-call: response missing <joined/>".to_string())?;
+    let transport = joined
+        .get_child("transport", NS_WADDLE_LIVEKIT_TRANSPORT)
+        .ok_or_else(|| "muc-call: <joined/> missing <transport/>".to_string())?;
+    let attr = |name: &str| -> Result<String, String> {
+        transport
+            .attr(name)
+            .map(str::to_owned)
+            .ok_or_else(|| format!("muc-call: transport missing @{name}"))
+    };
+    let token = transport
+        .get_child("token", NS_WADDLE_LIVEKIT_TRANSPORT)
+        .map(|c| c.text())
+        .ok_or_else(|| "muc-call: transport missing <token/>".to_string())?;
+    Ok(crate::types::WaddleLiveKitJoin {
+        url: attr("url")?,
+        room: attr("room")?,
+        identity: attr("identity")?,
+        token,
+    })
+}
 
 fn message_with_jmi(to: &str, jmi: Element) -> Element {
     Element::builder("message", NS_JABBER_CLIENT)
@@ -188,29 +239,7 @@ impl WaddleClient {
                 .append(payload)
                 .build();
             let result = send_iq_command(inner, stanza).await?;
-            // Walk `<iq><joined xmlns='urn:waddle:muc-call:0'>
-            // <transport xmlns='urn:waddle:transports:livekit:0'>
-            // <url/><room/><identity/><token/></transport></joined>`
-            // and return a typed JS object.
-            let joined = result
-                .get_child("joined", NS_WADDLE_MUC_CALL)
-                .ok_or_else(|| js_error("muc-call: response missing <joined/>"))?;
-            let transport = joined
-                .get_child("transport", "urn:waddle:transports:livekit:0")
-                .ok_or_else(|| js_error("muc-call: <joined/> missing <transport/>"))?;
-            let field = |name: &str| -> Result<String, JsValue> {
-                let child = transport.get_child(name, "urn:waddle:transports:livekit:0");
-                match child {
-                    Some(c) => Ok(c.text()),
-                    None => Err(js_error(format!("muc-call: transport missing <{name}/>"))),
-                }
-            };
-            let join = crate::types::WaddleLiveKitJoin {
-                url: field("url")?,
-                room: field("room")?,
-                identity: field("identity")?,
-                token: field("token")?,
-            };
+            let join = parse_muc_call_join_result(&result).map_err(js_error)?;
             to_js_value(&join)
         })
     }
@@ -264,8 +293,94 @@ impl WaddleClient {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use jid::FullJid;
     use std::str::FromStr;
+
+    fn canonical_join_iq_result() -> Element {
+        // Mirrors the exact byte layout emitted by
+        // `MucCallHandler::handle_join` (see
+        // `waddle-xmpp/src/protocol/handlers/muc_call.rs`) — keeps
+        // this parser locked to the real wire shape rather than a
+        // hand-typed approximation.
+        let xml = "<iq xmlns='jabber:client' type='result' id='abc'>\
+                <joined xmlns='urn:waddle:muc-call:0'>\
+                    <transport xmlns='urn:waddle:transports:livekit:0' \
+                               url='wss://livekit.waddle.test/' \
+                               room='chat@muc.waddle.test' \
+                               identity='alice@waddle.test/web-1'>\
+                        <token>eyJhbGciOiJIUzI1NiJ9.payload.sig</token>\
+                    </transport>\
+                </joined>\
+            </iq>";
+        xml.parse().expect("test fixture parses")
+    }
+
+    #[test]
+    fn parse_muc_call_join_result_reads_canonical_response() {
+        let iq = canonical_join_iq_result();
+        let join = parse_muc_call_join_result(&iq).expect("canonical response parses");
+        assert_eq!(join.url, "wss://livekit.waddle.test/");
+        assert_eq!(join.room, "chat@muc.waddle.test");
+        assert_eq!(join.identity, "alice@waddle.test/web-1");
+        assert_eq!(join.token, "eyJhbGciOiJIUzI1NiJ9.payload.sig");
+    }
+
+    #[test]
+    fn parse_muc_call_join_result_rejects_missing_joined() {
+        let iq: Element = "<iq xmlns='jabber:client' type='result' id='abc'/>"
+            .parse()
+            .unwrap();
+        let err = parse_muc_call_join_result(&iq).unwrap_err();
+        assert!(err.contains("missing <joined/>"), "got: {err}");
+    }
+
+    #[test]
+    fn parse_muc_call_join_result_rejects_missing_transport() {
+        let iq: Element = "<iq xmlns='jabber:client' type='result' id='abc'>\
+                <joined xmlns='urn:waddle:muc-call:0'/>\
+            </iq>"
+            .parse()
+            .unwrap();
+        let err = parse_muc_call_join_result(&iq).unwrap_err();
+        assert!(err.contains("missing <transport/>"), "got: {err}");
+    }
+
+    #[test]
+    fn parse_muc_call_join_result_rejects_missing_attribute() {
+        // Drop the `url` attribute — parser must reject rather than
+        // silently leaving the field blank and propagating a half-
+        // valid join object to the chat client.
+        let iq: Element = "<iq xmlns='jabber:client' type='result' id='abc'>\
+                <joined xmlns='urn:waddle:muc-call:0'>\
+                    <transport xmlns='urn:waddle:transports:livekit:0' \
+                               room='chat@muc.waddle.test' \
+                               identity='alice@waddle.test/web-1'>\
+                        <token>jwt</token>\
+                    </transport>\
+                </joined>\
+            </iq>"
+            .parse()
+            .unwrap();
+        let err = parse_muc_call_join_result(&iq).unwrap_err();
+        assert!(err.contains("@url"), "got: {err}");
+    }
+
+    #[test]
+    fn parse_muc_call_join_result_rejects_missing_token() {
+        let iq: Element = "<iq xmlns='jabber:client' type='result' id='abc'>\
+                <joined xmlns='urn:waddle:muc-call:0'>\
+                    <transport xmlns='urn:waddle:transports:livekit:0' \
+                               url='wss://livekit.waddle.test/' \
+                               room='chat@muc.waddle.test' \
+                               identity='alice@waddle.test/web-1'/>\
+                </joined>\
+            </iq>"
+            .parse()
+            .unwrap();
+        let err = parse_muc_call_join_result(&iq).unwrap_err();
+        assert!(err.contains("missing <token/>"), "got: {err}");
+    }
 
     /// `parse_full_jid` itself returns `Result<FullJid, JsValue>`,
     /// and `wasm_bindgen::JsValue` panics under `cargo test` on
