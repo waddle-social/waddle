@@ -294,6 +294,17 @@ pub async fn handle_muc_leave(
 ) -> Vec<String> {
     info!(room = %room_jid, nick = %nick, sender = %sender_jid, "MUC leave request");
 
+    // Tear down the leaver's SFU participant before the MUC actor
+    // forgets about them. Idempotent on the SFU side, so it's safe
+    // to call even if they were never in a call. Doing it here
+    // (rather than only in the explicit `urn:waddle:muc-call:0`
+    // request-leave path) closes the gap where a client leaves the
+    // MUC without sending the call-specific leave — their SFU
+    // participant otherwise lingers until LiveKit's own timeout.
+    super::super::super::muc_call_sfu::unregister_participant_from_room(
+        state, room_jid, sender_jid,
+    );
+
     let Some(room_actor) = get_room_actor(state, room_jid).await else {
         debug!(room = %room_jid, "Room not found for leave");
         return vec![build_muc_self_unavailable_xml(

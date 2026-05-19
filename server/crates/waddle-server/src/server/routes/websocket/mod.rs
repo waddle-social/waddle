@@ -73,6 +73,7 @@ mod cleanup;
 mod connection;
 mod frame;
 mod interpret_loop;
+mod muc_call_sfu;
 mod outbound;
 mod parse_errors;
 mod registration;

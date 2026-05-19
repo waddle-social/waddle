@@ -116,11 +116,16 @@ impl MucCallHandler {
             Ok(c) => c,
             Err(text) => return error_reply(iq, DefinedCondition::BadRequest, text),
         };
-        // The room JID is opaque to the SFU — we don't enforce
-        // membership here (the MUC's affiliation rules are
-        // orthogonal). What we DO enforce is that the authenticated
-        // session matches the LiveKit identity: a peer can't mint a
-        // token claiming to be someone else.
+        // MUC membership enforcement happens upstream in the
+        // waddle-server IQ dispatch path, before the dispatcher
+        // reaches this handler — see `handle_sans_io_iq` and the
+        // pre-dispatch room-actor occupancy check. By the time
+        // execution reaches this handler the caller is known to be
+        // a current occupant of `call_id`'s room (or the request
+        // would never have been dispatched). What we DO enforce
+        // here is that the authenticated session matches the
+        // LiveKit identity: a peer can't mint a token claiming to
+        // be someone else.
         let identity = Identity::from_jid(ctx.full_jid.clone());
 
         let token = match self.sfu.issue_join_token(

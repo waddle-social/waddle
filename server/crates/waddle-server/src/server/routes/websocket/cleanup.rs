@@ -258,6 +258,14 @@ async fn cleanup_muc_presence(state: &WebSocketState, jid: &FullJid) {
         let Some(room_actor) = get_room_actor(state, &room_jid).await else {
             continue;
         };
+        // Tab close / SM-expiry: the client never sends a graceful
+        // `request-leave` on `urn:waddle:muc-call:0`, so the SFU
+        // would otherwise hold the participant slot until its own
+        // timeout. Unregister here, before the room actor's `Leave`,
+        // so both XMPP presence and SFU presence go away together.
+        // Idempotent on the SFU side — calling for rooms where the
+        // user was never in a call is a no-op.
+        super::muc_call_sfu::unregister_participant_from_room(state, &room_jid, jid);
         match room_actor
             .ask(LeaveByRealJid {
                 sender_jid: jid.clone(),
