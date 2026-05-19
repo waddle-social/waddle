@@ -16,7 +16,12 @@ pub(crate) const NS_SIMS: &str = "urn:xmpp:sims:1";
 pub(crate) const NS_SFS: &str = "urn:xmpp:sfs:0";
 pub(crate) const NS_FILE_METADATA: &str = "urn:xmpp:file:metadata:0";
 pub(crate) const NS_URL_DATA: &str = "http://jabber.org/protocol/url-data";
-pub(crate) const NS_CLIENT: &str = "jabber:client";
+/// `jabber:client` — top-level namespace stamped on every C2S
+/// stanza. `pub` so the wasm and Apple FFI crates can borrow the
+/// canonical constant rather than re-declare it (typed-payloads
+/// hard rule: namespaces live in dedicated constants, not at
+/// call sites).
+pub const NS_CLIENT: &str = "jabber:client";
 pub(crate) const NS_WADDLE_EXTENSION: &str = "urn:waddle:extension:1";
 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 pub(crate) const NS_MUC: &str = "http://jabber.org/protocol/muc";

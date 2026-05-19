@@ -1020,6 +1020,15 @@ final class AppModel: ObservableObject {
             chatStore.setBannerState(.disconnected(message: "Disconnected from live chat."))
             scheduleReconnectIfNeeded()
             updateChatSurfaceState()
+        case .call(let callEvent):
+            // The Rust FFI delivers fully-typed XEP-0353 JMI + XEP-0166
+            // Jingle session control events here. The dedicated call UI
+            // and Jingle/LiveKit pipeline lands in a follow-up PR; for
+            // now we log the event so it is visible during development
+            // builds without surfacing any UI. Letting this case fall
+            // through is intentional — the ringing UI is gated on the
+            // call surface PR, not on FFI plumbing.
+            logger.info("XMPP call event sid=\(callEvent.sid, privacy: .public) kind=\(String(describing: callEvent.kind), privacy: .public)")
         }
     }
 

@@ -6173,9 +6173,11 @@ name = "waddle-xmpp-client-ffi"
 version = "0.1.0"
 dependencies = [
  "jid",
+ "minidom",
  "tokio",
  "uniffi",
  "url",
+ "uuid",
  "waddle-xmpp-client",
 ]
 

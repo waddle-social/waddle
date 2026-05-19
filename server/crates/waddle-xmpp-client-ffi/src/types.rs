@@ -35,6 +35,27 @@ pub struct WaddleMessage {
     pub reply_fallback_end: Option<u32>,
     /// XEP-0446 / XEP-0447 shared files attached to the message.
     pub shared_files: Vec<WaddleSharedFile>,
+    /// XEP-0490 Message Displayed Synchronization PEP event payload.
+    /// `None` when the message is not an MDS event; `Some(entries)`
+    /// when it is — including `Some(vec![])` for an MDS event with
+    /// zero items (rare but distinct from "not an MDS event").
+    pub mds_displayed: Option<Vec<WaddleMdsDisplayedEntry>>,
+}
+
+/// XEP-0490 §3 displayed-marker entry surfaced to Swift. Mirrors
+/// `waddle_xmpp_client::messaging::MdsDisplayedEntry` 1:1 — the
+/// FFI does not collapse or rename fields so the Swift consumer
+/// can correlate `chat_id` (PEP item id = bare JID of the chat)
+/// with its locally-tracked conversation list directly.
+#[derive(uniffi::Record, Clone)]
+pub struct WaddleMdsDisplayedEntry {
+    /// PEP item id = bare JID of the chat (DM contact or MUC room).
+    pub chat_id: String,
+    /// XEP-0359 id of the displayed message.
+    pub stanza_id: String,
+    /// JID that injected the stanza-id (the MUC room for group
+    /// chats; the user's own server for 1:1 chats).
+    pub stanza_id_by: String,
 }
 
 #[derive(uniffi::Record, Clone)]
@@ -101,6 +122,30 @@ pub struct WaddlePresence {
     pub hats: Vec<WaddlePresenceHat>,
     pub muc_affiliation: Option<WaddleMucAffiliation>,
     pub muc_role: Option<WaddleMucRole>,
+    /// Waddle-specific MUC presence extension
+    /// `<call xmlns='urn:waddle:muc-call:0' state='…' call-id='…'/>`
+    /// advertising that the occupant has joined / left the room's
+    /// group call. `None` when the presence carries no `<call/>`
+    /// child. Drives the chat-side "N in call" indicator and the
+    /// per-tile call badge.
+    pub muc_call: Option<WaddleMucCallPresence>,
+}
+
+/// Typed payload of the `urn:waddle:muc-call:0` MUC presence
+/// extension.
+#[derive(uniffi::Record, Clone)]
+pub struct WaddleMucCallPresence {
+    pub state: WaddleMucCallPresenceState,
+    /// `call-id` attribute from the wire — the room JID the
+    /// presence describes (mirrors the source value verbatim so
+    /// Swift consumers can match against their own room registry).
+    pub call_id: String,
+}
+
+#[derive(uniffi::Enum, Clone, Debug)]
+pub enum WaddleMucCallPresenceState {
+    Active,
+    Inactive,
 }
 
 #[derive(uniffi::Record, Clone)]
@@ -235,6 +280,103 @@ pub struct WaddleSendOptions {
     pub shared_files: Vec<WaddleSharedFile>,
 }
 
+// ── A/V calls (XEP-0353 JMI + XEP-0166 Jingle) ──────────────────────────────
+
+/// Media kinds offered or accepted on a call. Mirrors
+/// `waddle_xmpp_client::messaging::CallMedia` 1:1 so the Swift side
+/// can read the boolean flags directly without a wrapper enum.
+#[derive(uniffi::Record, Clone, Debug)]
+pub struct WaddleCallMedia {
+    pub audio: bool,
+    pub video: bool,
+}
+
+/// LiveKit join credentials extracted from the server-issued
+/// `urn:waddle:transports:livekit:0` transport on a Jingle
+/// session-initiate / session-accept. The Swift app feeds these
+/// straight to the LiveKit iOS/macOS SDK.
+#[derive(uniffi::Record, Clone, Debug)]
+pub struct WaddleLiveKitJoin {
+    pub url: String,
+    pub room: String,
+    pub identity: String,
+    pub token: String,
+}
+
+/// Variants of an inbound A/V call event. Matches the wire shapes
+/// `messaging::call::CallEventKind` already parses for the wasm
+/// chat client — flattened for UniFFI (no nested struct payloads
+/// per variant).
+#[derive(uniffi::Enum, Clone, Debug)]
+pub enum WaddleCallEventKind {
+    /// XEP-0353 §5.1.1 `<propose/>` — the ringing UI start signal.
+    Propose { media: WaddleCallMedia },
+    /// XEP-0353 §5.1.2 `<proceed/>` — peer is accepting the call.
+    Proceed,
+    /// XEP-0353 §5.1.3 `<reject/>` — peer declined the call.
+    Reject,
+    /// XEP-0353 §5.1.4 `<retract/>` — caller cancelled before answer.
+    Retract,
+    /// `<finish/>` Waddle extension — call ended cleanly.
+    Finish,
+    /// XEP-0166 §6.4 `session-initiate` with a populated LiveKit
+    /// transport. The Swift app uses `join` to connect to the room.
+    SessionInitiate {
+        join: WaddleLiveKitJoin,
+        media: WaddleCallMedia,
+    },
+    /// XEP-0166 §7.2 `session-accept`. Carries the responder's
+    /// LiveKit credentials.
+    SessionAccept {
+        join: WaddleLiveKitJoin,
+        media: WaddleCallMedia,
+    },
+    /// XEP-0166 §7.4 `session-terminate`. `reason` is the typed
+    /// XEP-0166 condition; `None` when the terminate carries no
+    /// `<reason/>` child. Unknown conditions seen on the wire are
+    /// surfaced as `None` and logged via `on_error` rather than
+    /// passed through as an opaque string (typed-payloads hard
+    /// rule in `CLAUDE.md`).
+    SessionTerminate { reason: Option<WaddleJingleReason> },
+}
+
+/// XEP-0166 §7.4 session-terminate reason conditions. Mirrors the
+/// 17 variants in `xmpp_parsers::jingle::Reason` so the wire
+/// parser's enum is the single source of truth — outbound calls
+/// re-parse via `FromStr` and inbound events are emitted only when
+/// the wire value resolves to one of these variants.
+#[derive(uniffi::Enum, Clone, Debug, Copy, PartialEq, Eq)]
+pub enum WaddleJingleReason {
+    AlternativeSession,
+    Busy,
+    Cancel,
+    ConnectivityError,
+    Decline,
+    Expired,
+    FailedApplication,
+    FailedTransport,
+    GeneralError,
+    Gone,
+    IncompatibleParameters,
+    MediaError,
+    SecurityError,
+    Success,
+    Timeout,
+    UnsupportedApplications,
+    UnsupportedTransports,
+}
+
+/// Typed A/V call event surfaced to Swift via `on_call(...)`.
+/// `from` is the stamped sender JID (a *full* JID for propose /
+/// session-initiate per XEP-0353 §0.6); `sid` is the Jingle
+/// session id used to correlate every later event in the call.
+#[derive(uniffi::Record, Clone)]
+pub struct WaddleCallEvent {
+    pub from: String,
+    pub sid: String,
+    pub kind: WaddleCallEventKind,
+}
+
 // ── Callback interface ───────────────────────────────────────────────────────
 
 #[uniffi::export(callback_interface)]
@@ -247,4 +389,9 @@ pub trait WaddleEventListener: Send + Sync {
     fn on_connected(&self);
     fn on_disconnected(&self);
     fn on_error(&self, description: String);
+    /// XEP-0353 / XEP-0166 inbound call event. Fires for every
+    /// JMI envelope and Jingle session control stanza addressed to
+    /// the bound resource. The Swift app surfaces it as the
+    /// ringing UI, the in-call HUD, and the hang-up handler.
+    fn on_call(&self, event: WaddleCallEvent);
 }

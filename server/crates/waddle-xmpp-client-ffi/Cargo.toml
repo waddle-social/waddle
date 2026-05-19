@@ -23,7 +23,15 @@ waddle-xmpp-client = { path = "../waddle-xmpp-client" }
 uniffi = { version = "0.29", features = ["tokio"] }
 tokio = { workspace = true, features = ["rt-multi-thread"] }
 jid = { workspace = true }
+minidom = { workspace = true }
 url = { workspace = true }
+# Native FFI build: take `v4` only and drop the workspace-wide `js`
+# feature. The workspace pins `uuid` with `js` because the wasm crate
+# needs `getrandom`'s JS backend, but enabling `js` for an iOS/macOS
+# binary would pull `wasm-bindgen` into the static library and route
+# `Uuid::new_v4` through `Math.random` at runtime — fatal for the
+# Jingle IQ id mint on the hot call path.
+uuid = { version = "1.11", default-features = false, features = ["v4"] }
 
 [build-dependencies]
 uniffi = { version = "0.29", features = ["build"] }

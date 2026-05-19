@@ -511,7 +511,13 @@ pub(crate) fn call_event_to_js(event: InboundCallEvent) -> WaddleCallEvent {
             kind: "session-terminate",
             media: None,
             join: None,
-            reason,
+            // Surface the typed reason as its canonical XEP-0166
+            // §7.4 wire name. The crate boundary into JS can only
+            // carry strings, so the typed-payloads guarantee ends
+            // here — but the string is produced from a typed enum,
+            // not a free-form passthrough.
+            reason: reason
+                .map(|r| waddle_xmpp_client::messaging::jingle_reason_wire_name(r).to_string()),
         },
     }
 }

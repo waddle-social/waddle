@@ -1,7 +1,10 @@
 use jid::Jid;
 
 use waddle_xmpp_client::{
-    messaging::{self, SendMessageOptions},
+    messaging::{
+        self, parse_call_event, CallEventKind, CallMedia, InboundCallEvent, JingleReason,
+        LiveKitJoin, MdsDisplayedEntry, MucCallPresence, MucCallPresenceState, SendMessageOptions,
+    },
     request::StanzaId,
     xep::{
         reply::{FallbackRange, ReplyMarker},
@@ -11,10 +14,12 @@ use waddle_xmpp_client::{
 };
 
 use crate::{
-    WaddleArchivedMessage, WaddleChannel, WaddleEncryptedFile, WaddleEncryptedFileHash,
-    WaddleEventListener, WaddleMamPage, WaddleMessage, WaddleMucAffiliation, WaddleMucRole,
-    WaddlePresence, WaddlePresenceHat, WaddleSendOptions, WaddleSharedFile, WaddleSpace,
-    WaddleTopology, WaddleUploadHeader, WaddleUploadSlot,
+    WaddleArchivedMessage, WaddleCallEvent, WaddleCallEventKind, WaddleCallMedia, WaddleChannel,
+    WaddleEncryptedFile, WaddleEncryptedFileHash, WaddleEventListener, WaddleJingleReason,
+    WaddleLiveKitJoin, WaddleMamPage, WaddleMdsDisplayedEntry, WaddleMessage, WaddleMucAffiliation,
+    WaddleMucCallPresence, WaddleMucCallPresenceState, WaddleMucRole, WaddlePresence,
+    WaddlePresenceHat, WaddleSendOptions, WaddleSharedFile, WaddleSpace, WaddleTopology,
+    WaddleUploadHeader, WaddleUploadSlot,
 };
 
 // ── Event dispatch ───────────────────────────────────────────────────────────
@@ -38,6 +43,7 @@ pub(super) fn dispatch_event(event: ClientEvent, listener: &dyn WaddleEventListe
                 hats: pres.hats.into_iter().map(presence_hat_to_ffi).collect(),
                 muc_affiliation: pres.muc_affiliation.map(muc_affiliation_to_ffi),
                 muc_role: pres.muc_role.map(muc_role_to_ffi),
+                muc_call: pres.muc_call.map(muc_call_presence_to_ffi),
             });
         }
         ClientEvent::MamResult(archived) => {
@@ -48,6 +54,22 @@ pub(super) fn dispatch_event(event: ClientEvent, listener: &dyn WaddleEventListe
         }
         ClientEvent::MessageDelivery(MessageDeliveryEvent::Failed { stanza_id }) => {
             listener.on_message_delivery_failed(stanza_id.to_string());
+        }
+        // XEP-0353 JMI envelopes and XEP-0166 Jingle session control
+        // stanzas are not claimed by the built-in messaging parser,
+        // so they surface here as UnhandledStanza. Run them through
+        // the call parser; if it matches, deliver a typed
+        // `WaddleCallEvent` to the Swift listener — mirroring how the
+        // wasm chat client surfaces calls (see
+        // `waddle-xmpp-client-wasm/src/events.rs`). Stanzas the call
+        // parser doesn't recognise are intentionally dropped: the
+        // Swift app has no general-purpose XML escape hatch and a
+        // stanza nobody routes is a bug somewhere else, not data the
+        // app should be expected to render.
+        ClientEvent::UnhandledStanza(element) => {
+            if let Some(call) = parse_call_event(&element) {
+                listener.on_call(call_event_to_ffi(call));
+            }
         }
         _ => {}
     }
@@ -214,6 +236,121 @@ fn muc_role_to_ffi(role: waddle_xmpp_client::messaging::MucRole) -> WaddleMucRol
     }
 }
 
+fn muc_call_presence_state_to_ffi(state: MucCallPresenceState) -> WaddleMucCallPresenceState {
+    match state {
+        MucCallPresenceState::Active => WaddleMucCallPresenceState::Active,
+        MucCallPresenceState::Inactive => WaddleMucCallPresenceState::Inactive,
+    }
+}
+
+fn muc_call_presence_to_ffi(call: MucCallPresence) -> WaddleMucCallPresence {
+    WaddleMucCallPresence {
+        state: muc_call_presence_state_to_ffi(call.state),
+        call_id: call.call_id,
+    }
+}
+
+fn mds_entry_to_ffi(entry: MdsDisplayedEntry) -> WaddleMdsDisplayedEntry {
+    WaddleMdsDisplayedEntry {
+        chat_id: entry.chat_id,
+        stanza_id: entry.stanza_id,
+        stanza_id_by: entry.stanza_id_by,
+    }
+}
+
+fn call_media_to_ffi(media: CallMedia) -> WaddleCallMedia {
+    WaddleCallMedia {
+        audio: media.audio,
+        video: media.video,
+    }
+}
+
+fn livekit_join_to_ffi(join: LiveKitJoin) -> WaddleLiveKitJoin {
+    WaddleLiveKitJoin {
+        url: join.url,
+        room: join.room,
+        identity: join.identity,
+        token: join.token,
+    }
+}
+
+pub(super) fn jingle_reason_to_ffi(reason: JingleReason) -> WaddleJingleReason {
+    match reason {
+        JingleReason::AlternativeSession => WaddleJingleReason::AlternativeSession,
+        JingleReason::Busy => WaddleJingleReason::Busy,
+        JingleReason::Cancel => WaddleJingleReason::Cancel,
+        JingleReason::ConnectivityError => WaddleJingleReason::ConnectivityError,
+        JingleReason::Decline => WaddleJingleReason::Decline,
+        JingleReason::Expired => WaddleJingleReason::Expired,
+        JingleReason::FailedApplication => WaddleJingleReason::FailedApplication,
+        JingleReason::FailedTransport => WaddleJingleReason::FailedTransport,
+        JingleReason::GeneralError => WaddleJingleReason::GeneralError,
+        JingleReason::Gone => WaddleJingleReason::Gone,
+        JingleReason::IncompatibleParameters => WaddleJingleReason::IncompatibleParameters,
+        JingleReason::MediaError => WaddleJingleReason::MediaError,
+        JingleReason::SecurityError => WaddleJingleReason::SecurityError,
+        JingleReason::Success => WaddleJingleReason::Success,
+        JingleReason::Timeout => WaddleJingleReason::Timeout,
+        JingleReason::UnsupportedApplications => WaddleJingleReason::UnsupportedApplications,
+        JingleReason::UnsupportedTransports => WaddleJingleReason::UnsupportedTransports,
+    }
+}
+
+pub(super) fn jingle_reason_from_ffi(reason: WaddleJingleReason) -> JingleReason {
+    match reason {
+        WaddleJingleReason::AlternativeSession => JingleReason::AlternativeSession,
+        WaddleJingleReason::Busy => JingleReason::Busy,
+        WaddleJingleReason::Cancel => JingleReason::Cancel,
+        WaddleJingleReason::ConnectivityError => JingleReason::ConnectivityError,
+        WaddleJingleReason::Decline => JingleReason::Decline,
+        WaddleJingleReason::Expired => JingleReason::Expired,
+        WaddleJingleReason::FailedApplication => JingleReason::FailedApplication,
+        WaddleJingleReason::FailedTransport => JingleReason::FailedTransport,
+        WaddleJingleReason::GeneralError => JingleReason::GeneralError,
+        WaddleJingleReason::Gone => JingleReason::Gone,
+        WaddleJingleReason::IncompatibleParameters => JingleReason::IncompatibleParameters,
+        WaddleJingleReason::MediaError => JingleReason::MediaError,
+        WaddleJingleReason::SecurityError => JingleReason::SecurityError,
+        WaddleJingleReason::Success => JingleReason::Success,
+        WaddleJingleReason::Timeout => JingleReason::Timeout,
+        WaddleJingleReason::UnsupportedApplications => JingleReason::UnsupportedApplications,
+        WaddleJingleReason::UnsupportedTransports => JingleReason::UnsupportedTransports,
+    }
+}
+
+/// Convert an [`InboundCallEvent`] into its FFI mirror. The
+/// session-terminate reason is already a typed `JingleReason` at
+/// this point (the upstream `messaging::call` parser handled the
+/// untyped → typed transition at the wire boundary) so this layer
+/// is a pure variant rewrite.
+pub(super) fn call_event_to_ffi(event: InboundCallEvent) -> WaddleCallEvent {
+    let kind = match event.kind {
+        CallEventKind::Propose { media } => WaddleCallEventKind::Propose {
+            media: call_media_to_ffi(media),
+        },
+        CallEventKind::Proceed => WaddleCallEventKind::Proceed,
+        CallEventKind::Reject => WaddleCallEventKind::Reject,
+        CallEventKind::Retract => WaddleCallEventKind::Retract,
+        CallEventKind::Finish => WaddleCallEventKind::Finish,
+        CallEventKind::SessionInitiate { join, media } => WaddleCallEventKind::SessionInitiate {
+            join: livekit_join_to_ffi(join),
+            media: call_media_to_ffi(media),
+        },
+        CallEventKind::SessionAccept { join, media } => WaddleCallEventKind::SessionAccept {
+            join: livekit_join_to_ffi(join),
+            media: call_media_to_ffi(media),
+        },
+        CallEventKind::SessionTerminate { reason } => WaddleCallEventKind::SessionTerminate {
+            reason: reason.map(jingle_reason_to_ffi),
+        },
+    };
+    WaddleCallEvent {
+        from: event.from.to_string(),
+        sid: event.sid.0,
+        kind,
+    }
+}
+
 /// Convert a parsed inbound message into the UniFFI record, flattening the
 /// XEP-0428 char range into two optional `u32` fields (UniFFI has no tuple
 /// support).
@@ -248,6 +385,9 @@ fn inbound_to_ffi(msg: InboundMessage) -> WaddleMessage {
             .into_iter()
             .map(shared_file_to_ffi)
             .collect(),
+        mds_displayed: msg
+            .mds_displayed
+            .map(|entries| entries.into_iter().map(mds_entry_to_ffi).collect()),
     }
 }
 
@@ -383,4 +523,285 @@ pub(super) fn send_options_from_ffi(opts: WaddleSendOptions) -> Result<SendMessa
         markup_spans: vec![],
         references: vec![],
     })
+}
+
+#[cfg(test)]
+mod tests {
+    //! Unit tests for the FFI-side conversion layer.
+    //!
+    //! These pin down two contracts the Swift bindings rely on:
+    //!
+    //! 1. Inbound XMPP stanzas that the wasm client surfaces as
+    //!    typed events also surface on Swift via the same shape —
+    //!    XEP-0353 JMI + XEP-0166 Jingle session control map to
+    //!    `WaddleCallEvent` variants, and XEP-0490 MDS payloads
+    //!    survive the `InboundMessage` → `WaddleMessage` hop.
+    //! 2. The MUC `<call xmlns='urn:waddle:muc-call:0' …/>` presence
+    //!    extension carries `state` and `call-id` through unchanged.
+    use super::*;
+    use minidom::Element;
+
+    fn assert_audio_video(media: &WaddleCallMedia) {
+        assert!(media.audio, "audio flag survives the conversion");
+        assert!(media.video, "video flag survives the conversion");
+    }
+
+    #[test]
+    fn jmi_propose_round_trips_through_call_event_to_ffi() {
+        // Canonical wire shape: server stamps the propose with a
+        // *full* JID so the responder can reply to the originating
+        // resource (XEP-0353 §0.6). The FFI must preserve that
+        // verbatim — collapsing to a bare JID would defeat the
+        // routing guarantee.
+        let xml = r#"<message xmlns='jabber:client' from='alice@waddle.test/desktop' to='bob@waddle.test'>
+            <propose xmlns='urn:xmpp:jingle-message:0' id='c1'>
+              <description xmlns='urn:xmpp:jingle:apps:rtp:1' media='audio'/>
+              <description xmlns='urn:xmpp:jingle:apps:rtp:1' media='video'/>
+            </propose>
+        </message>"#;
+        let stanza: Element = xml.parse().expect("fixture parses");
+        let parsed = parse_call_event(&stanza).expect("propose parses");
+        let ffi = call_event_to_ffi(parsed);
+        assert_eq!(ffi.from, "alice@waddle.test/desktop");
+        assert_eq!(ffi.sid, "c1");
+        match ffi.kind {
+            WaddleCallEventKind::Propose { media } => assert_audio_video(&media),
+            other => panic!("expected Propose, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn session_initiate_carries_livekit_join_through_ffi() {
+        // The server-side Jingle handler rewrites the empty
+        // `urn:waddle:transports:livekit:0` transport with a
+        // populated one before forwarding; the FFI must surface all
+        // four credentials (url, room, identity, token) so the
+        // Swift LiveKit SDK can connect.
+        let xml = r#"<iq xmlns='jabber:client' type='set' from='alice@waddle.test/desktop' to='bob@waddle.test/desktop' id='i1'>
+            <jingle xmlns='urn:xmpp:jingle:1' action='session-initiate' sid='c1' initiator='alice@waddle.test/desktop'>
+              <content creator='initiator' name='audio'>
+                <description xmlns='urn:xmpp:jingle:apps:rtp:1' media='audio'/>
+                <transport xmlns='urn:waddle:transports:livekit:0'
+                           url='wss://livekit.waddle.test'
+                           room='alice@waddle.test::c1'
+                           identity='bob@waddle.test/desktop'>
+                  <token xmlns='urn:waddle:transports:livekit:0'>eyJhbGc.payload.sig</token>
+                </transport>
+              </content>
+            </jingle>
+        </iq>"#;
+        let stanza: Element = xml.parse().expect("fixture parses");
+        let parsed = parse_call_event(&stanza).expect("session-initiate parses");
+        let ffi = call_event_to_ffi(parsed);
+        match ffi.kind {
+            WaddleCallEventKind::SessionInitiate { join, media } => {
+                assert_eq!(join.url, "wss://livekit.waddle.test");
+                assert_eq!(join.room, "alice@waddle.test::c1");
+                assert_eq!(join.identity, "bob@waddle.test/desktop");
+                assert_eq!(join.token, "eyJhbGc.payload.sig");
+                assert!(media.audio);
+                assert!(!media.video);
+            }
+            other => panic!("expected SessionInitiate, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn session_terminate_reason_survives_round_trip() {
+        let xml = r#"<iq xmlns='jabber:client' type='set' from='bob@waddle.test/desktop' id='t1'>
+            <jingle xmlns='urn:xmpp:jingle:1' action='session-terminate' sid='c1'>
+              <reason><success/></reason>
+            </jingle>
+        </iq>"#;
+        let stanza: Element = xml.parse().expect("fixture parses");
+        let parsed = parse_call_event(&stanza).expect("session-terminate parses");
+        let ffi = call_event_to_ffi(parsed);
+        match ffi.kind {
+            WaddleCallEventKind::SessionTerminate { reason } => {
+                // The wire condition `<success/>` must resolve into
+                // the typed `Success` variant — no string passthrough.
+                assert_eq!(reason, Some(WaddleJingleReason::Success));
+            }
+            other => panic!("expected SessionTerminate, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn session_terminate_with_unknown_reason_surfaces_as_none() {
+        // The upstream `messaging::call` parser already drops
+        // unknown conditions to `None` at the wire boundary
+        // (typed-payloads hard rule). The FFI just carries that
+        // `None` through unchanged.
+        let xml = r#"<iq xmlns='jabber:client' type='set' from='bob@waddle.test/desktop' id='t1'>
+            <jingle xmlns='urn:xmpp:jingle:1' action='session-terminate' sid='c1'>
+              <reason><not-a-real-condition/></reason>
+            </jingle>
+        </iq>"#;
+        let stanza: Element = xml.parse().expect("fixture parses");
+        let parsed = parse_call_event(&stanza).expect("session-terminate parses");
+        let ffi = call_event_to_ffi(parsed);
+        match ffi.kind {
+            WaddleCallEventKind::SessionTerminate { reason } => assert_eq!(reason, None),
+            other => panic!("expected SessionTerminate, got {other:?}"),
+        }
+    }
+
+    /// Parse a wire-shape stanza through the real messaging parser
+    /// and extract its `InboundMessage`. Using the real parser
+    /// rather than a hand-built struct literal makes the test
+    /// resilient to fields being added to `InboundMessage` upstream.
+    fn parse_message(xml: &str) -> InboundMessage {
+        let stanza: Element = xml.parse().expect("fixture parses");
+        match messaging::parse(&stanza) {
+            Some(MessagingEvent::Message(msg)) => *msg,
+            other => panic!("expected Message variant, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn mds_displayed_entries_survive_inbound_to_ffi() {
+        // XEP-0490 §3 PEP event payload pushed by the user's own
+        // server. The FFI must distinguish "not an MDS event"
+        // (`None`) from "an MDS event with N entries" (`Some(_)`);
+        // collapsing to `Vec` would lose the signal at the Swift
+        // boundary (an empty publish on an MDS node would become
+        // indistinguishable from an unrelated message).
+        let xml = r#"<message xmlns='jabber:client' from='alice@waddle.test' to='alice@waddle.test/desktop'>
+            <event xmlns='http://jabber.org/protocol/pubsub#event'>
+                <items node='urn:xmpp:mds:displayed:0'>
+                    <item id='room@conf.waddle.test'>
+                        <displayed xmlns='urn:xmpp:mds:displayed:0'>
+                            <stanza-id xmlns='urn:xmpp:sid:0' id='s-42' by='conf.waddle.test'/>
+                        </displayed>
+                    </item>
+                </items>
+            </event>
+        </message>"#;
+        let ffi = inbound_to_ffi(parse_message(xml));
+        let entries = ffi.mds_displayed.expect("MDS event surfaces as Some(...)");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].chat_id, "room@conf.waddle.test");
+        assert_eq!(entries[0].stanza_id, "s-42");
+        assert_eq!(entries[0].stanza_id_by, "conf.waddle.test");
+    }
+
+    #[test]
+    fn non_mds_message_surfaces_as_none() {
+        let xml = r#"<message xmlns='jabber:client' from='alice@waddle.test' to='bob@waddle.test' type='chat'>
+            <body>hi</body>
+        </message>"#;
+        assert!(inbound_to_ffi(parse_message(xml)).mds_displayed.is_none());
+    }
+
+    /// In-test listener that captures every callback invocation in
+    /// order. Used to verify the `dispatch_event` routing without
+    /// spinning up the tokio broadcast bus.
+    #[derive(Default)]
+    struct CapturingListener {
+        // Mutex so we can mutate from `&self` callbacks. `parking_lot`
+        // would be lighter but the test-only `std::sync::Mutex` is
+        // available everywhere the workspace builds.
+        events: std::sync::Mutex<Vec<&'static str>>,
+        calls: std::sync::Mutex<Vec<WaddleCallEvent>>,
+    }
+
+    impl CapturingListener {
+        fn record(&self, tag: &'static str) {
+            self.events
+                .lock()
+                .expect("test capture mutex poisoned")
+                .push(tag);
+        }
+    }
+
+    impl WaddleEventListener for CapturingListener {
+        fn on_message(&self, _message: WaddleMessage) {
+            self.record("message");
+        }
+        fn on_presence(&self, _presence: WaddlePresence) {
+            self.record("presence");
+        }
+        fn on_mam_result(&self, _message: WaddleArchivedMessage) {
+            self.record("mam");
+        }
+        fn on_message_delivery_acked(&self, _stanza_id: String) {
+            self.record("delivery_acked");
+        }
+        fn on_message_delivery_failed(&self, _stanza_id: String) {
+            self.record("delivery_failed");
+        }
+        fn on_connected(&self) {
+            self.record("connected");
+        }
+        fn on_disconnected(&self) {
+            self.record("disconnected");
+        }
+        fn on_error(&self, _description: String) {
+            self.record("error");
+        }
+        fn on_call(&self, event: WaddleCallEvent) {
+            self.record("call");
+            self.calls
+                .lock()
+                .expect("test capture mutex poisoned")
+                .push(event);
+        }
+    }
+
+    #[test]
+    fn unhandled_stanza_routes_to_on_call_when_recognisable() {
+        // The FFI's `_ => {}` swallow was the bug pre-PR: JMI
+        // envelopes flowed through `ClientEvent::UnhandledStanza`
+        // and never reached Swift. This test pins down the fix.
+        let xml = "<message xmlns='jabber:client' from='bob@waddle.test/desktop'>\
+            <proceed xmlns='urn:xmpp:jingle-message:0' id='c1'/>\
+        </message>";
+        let stanza: Element = xml.parse().expect("fixture parses");
+        let listener = CapturingListener::default();
+        dispatch_event(ClientEvent::UnhandledStanza(stanza), &listener);
+        assert_eq!(
+            &*listener.events.lock().expect("test capture mutex poisoned"),
+            &["call"]
+        );
+        let calls = listener.calls.lock().expect("test capture mutex poisoned");
+        assert_eq!(calls.len(), 1);
+        assert!(matches!(calls[0].kind, WaddleCallEventKind::Proceed));
+    }
+
+    #[test]
+    fn unhandled_stanza_silently_drops_unrecognised_xml() {
+        // Anything that isn't a JMI / Jingle envelope must not
+        // synthesise a spurious call event. The Swift app has no
+        // general escape hatch and a misclassified call would
+        // surface as a ringing UI for a non-existent session.
+        let xml =
+            "<message xmlns='jabber:client' from='alice@waddle.test'><body>hi</body></message>";
+        let stanza: Element = xml.parse().expect("fixture parses");
+        let listener = CapturingListener::default();
+        dispatch_event(ClientEvent::UnhandledStanza(stanza), &listener);
+        assert!(listener
+            .events
+            .lock()
+            .expect("test capture mutex poisoned")
+            .is_empty());
+    }
+
+    #[test]
+    fn muc_call_presence_state_maps_both_variants() {
+        let active = muc_call_presence_to_ffi(MucCallPresence {
+            state: MucCallPresenceState::Active,
+            call_id: "room@conf.waddle.test".to_string(),
+        });
+        assert!(matches!(active.state, WaddleMucCallPresenceState::Active));
+        assert_eq!(active.call_id, "room@conf.waddle.test");
+
+        let inactive = muc_call_presence_to_ffi(MucCallPresence {
+            state: MucCallPresenceState::Inactive,
+            call_id: "room@conf.waddle.test".to_string(),
+        });
+        assert!(matches!(
+            inactive.state,
+            WaddleMucCallPresenceState::Inactive
+        ));
+    }
 }
