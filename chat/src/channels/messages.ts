@@ -19,6 +19,7 @@ import {
   type TimelineMessage,
 } from "@/lib/chat-ui";
 import { findMessageById } from "@/lib/message-ids";
+import { compareTimelineMessages } from "@/lib/timeline-timestamps";
 import { findMessageElementById } from "@/lib/message-targeting";
 import { isTopPinnedScrollDirection, type ScrollDirectionMode } from "@/lib/scroll-direction";
 import { createPinnedEdgeScroller } from "@/lib/pinned-edge-scroll";
@@ -152,7 +153,11 @@ export function useChannelMessages(
 
   function appendQueuedMessages(timeline: TimelineMessage[], roomJid: string): TimelineMessage[] {
     const queued = queuedMessagesForRoom(roomJid).filter((message) => !findMessageById(timeline, message.id));
-    return queued.length > 0 ? applyForumContext([...timeline, ...queued]) : timeline;
+    if (queued.length === 0) return timeline;
+    // See dms/messages.ts:appendQueuedMessages — the concat alone is correct
+    // only when clocks don't drift. Sort through the canonical total-order
+    // comparator so the pending tail is internally consistent.
+    return applyForumContext([...timeline, ...queued].sort(compareTimelineMessages));
   }
 
   watch(xmppClient, (client) => {
