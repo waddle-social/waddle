@@ -263,6 +263,15 @@ export function useMucSend(deps: UseMucSendDeps) {
 
     clearActionError();
 
+    // XEP-0201 §3 + XEP-0308: a correction targeting a threaded message
+    // SHOULD repeat the original `<thread/>` so receivers attribute the
+    // edit to the right thread instead of the parent channel.
+    const thread = message?.threadId
+      ? message.parentThreadId
+        ? { id: message.threadId, parent: message.parentThreadId }
+        : { id: message.threadId }
+      : undefined;
+
     try {
       await xmppClient.value.sendCorrection(
         activeSpaceId.value ?? "",
@@ -271,6 +280,7 @@ export function useMucSend(deps: UseMucSendDeps) {
         targetId,
         markup,
         references,
+        thread,
       );
     } catch (e) {
       actionError.value = normalizeError(e);

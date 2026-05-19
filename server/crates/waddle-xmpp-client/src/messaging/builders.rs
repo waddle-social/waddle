@@ -14,6 +14,7 @@ pub fn build_chat_state_message(
     to: &str,
     state: &str,
     message_type: &str,
+    thread: Option<&xep_thread::ThreadRef>,
 ) -> ClientResult<Element> {
     let state = validate_chat_state(state)?;
     let stanza_id = Uuid::new_v4().to_string();
@@ -21,6 +22,9 @@ pub fn build_chat_state_message(
         .attr("to", to)
         .attr("type", message_type)
         .append(Element::builder(state, NS_CHAT_STATES).build());
+    if let Some(thread) = thread {
+        builder = builder.append(xep_thread::build_thread_element(thread));
+    }
     if should_stamp_origin_id(message_type) {
         builder = builder
             .attr("id", stanza_id.as_str())
@@ -29,7 +33,12 @@ pub fn build_chat_state_message(
     Ok(builder.build())
 }
 
-pub fn build_displayed_message(to: &str, message_id: &str, message_type: &str) -> Element {
+pub fn build_displayed_message(
+    to: &str,
+    message_id: &str,
+    message_type: &str,
+    thread: Option<&xep_thread::ThreadRef>,
+) -> Element {
     let stanza_id = Uuid::new_v4().to_string();
     let mut builder = Element::builder("message", NS_CLIENT)
         .attr("to", to)
@@ -39,6 +48,9 @@ pub fn build_displayed_message(to: &str, message_id: &str, message_type: &str) -
                 .attr("id", message_id)
                 .build(),
         );
+    if let Some(thread) = thread {
+        builder = builder.append(xep_thread::build_thread_element(thread));
+    }
     if should_stamp_origin_id(message_type) {
         builder = builder
             .attr("id", stanza_id.as_str())
@@ -52,6 +64,7 @@ pub fn build_reaction_message(
     message_type: &str,
     target_id: &str,
     emojis: &[String],
+    thread: Option<&xep_thread::ThreadRef>,
 ) -> Element {
     let stanza_id = Uuid::new_v4().to_string();
     let mut reactions = Element::builder("reactions", NS_REACTIONS)
@@ -65,12 +78,16 @@ pub fn build_reaction_message(
         );
     }
 
-    Element::builder("message", NS_CLIENT)
+    let mut builder = Element::builder("message", NS_CLIENT)
         .attr("to", to)
         .attr("type", message_type)
         .attr("id", stanza_id.as_str())
         .append(build_origin_id(&stanza_id))
-        .append(reactions)
+        .append(reactions);
+    if let Some(thread) = thread {
+        builder = builder.append(xep_thread::build_thread_element(thread));
+    }
+    builder
         .append(Element::builder("store", NS_HINTS).build())
         .build()
 }
@@ -109,9 +126,14 @@ pub fn build_unpinned_message(to: &str, target_stanza_id: &str) -> Element {
         .build()
 }
 
-pub fn build_retraction_message(to: &str, message_type: &str, retracts_id: &str) -> Element {
+pub fn build_retraction_message(
+    to: &str,
+    message_type: &str,
+    retracts_id: &str,
+    thread: Option<&xep_thread::ThreadRef>,
+) -> Element {
     let stanza_id = Uuid::new_v4().to_string();
-    Element::builder("message", NS_CLIENT)
+    let mut builder = Element::builder("message", NS_CLIENT)
         .attr("to", to)
         .attr("type", message_type)
         .attr("id", stanza_id.as_str())
@@ -125,7 +147,11 @@ pub fn build_retraction_message(to: &str, message_type: &str, retracts_id: &str)
             Element::builder("body", NS_CLIENT)
                 .append("This person attempted to retract a previous message.")
                 .build(),
-        )
+        );
+    if let Some(thread) = thread {
+        builder = builder.append(xep_thread::build_thread_element(thread));
+    }
+    builder
         .append(Element::builder("store", NS_HINTS).build())
         .build()
 }

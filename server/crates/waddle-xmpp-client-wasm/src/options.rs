@@ -1,5 +1,21 @@
 use super::*;
 
+/// Build an optional `ThreadRef` from a pair of `Option<String>` wasm
+/// arguments. An empty/missing `thread_id` yields `None` so callers can
+/// thread context through without conditionals at every site. A
+/// `thread_parent` without a `thread_id` is ignored — XEP-0201 only
+/// defines `parent` as a qualifier on a present `<thread/>`.
+pub(crate) fn thread_ref_from_args(
+    thread_id: Option<String>,
+    thread_parent: Option<String>,
+) -> Option<ThreadRef> {
+    let id = thread_id.filter(|s| !s.is_empty())?;
+    Some(ThreadRef {
+        id,
+        parent: thread_parent.filter(|s| !s.is_empty()),
+    })
+}
+
 pub(crate) fn send_options_from_js(options: JsValue) -> Result<SendMessageOptions, JsValue> {
     let options = if options.is_null() || options.is_undefined() {
         WaddleSendOptions::default()

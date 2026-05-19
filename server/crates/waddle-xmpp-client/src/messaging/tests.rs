@@ -1236,18 +1236,53 @@ fn xep0394_markup_roundtrip_parse_and_build() {
 
 #[test]
 fn build_chat_state_message_validates_state() {
-    let stanza = build_chat_state_message("alice@example.com", "composing", "chat")
+    let stanza = build_chat_state_message("alice@example.com", "composing", "chat", None)
         .expect("valid chat state");
     assert_eq!(stanza.attr("to"), Some("alice@example.com"));
     assert_eq!(stanza.attr("type"), Some("chat"));
     assert_origin_id_matches_message_id(&stanza);
     assert!(stanza.get_child("composing", NS_CHAT_STATES).is_some());
-    assert!(build_chat_state_message("alice@example.com", "typing", "chat").is_err());
+    assert!(build_chat_state_message("alice@example.com", "typing", "chat", None).is_err());
+}
+
+#[test]
+fn build_chat_state_message_includes_thread_when_present() {
+    // XEP-0201 §3 — chat-state notifications related to a threaded
+    // conversation SHOULD echo the same `<thread/>`. Without it, peers
+    // see typing as channel-wide instead of "in thread X".
+    let thread = crate::xep::thread::ThreadRef {
+        id: "thread-42".to_string(),
+        parent: None,
+    };
+    let stanza =
+        build_chat_state_message("room@muc.example", "composing", "groupchat", Some(&thread))
+            .expect("valid chat state");
+    let thread_el = stanza
+        .get_child("thread", "jabber:client")
+        .expect("thread child present");
+    assert_eq!(thread_el.text(), "thread-42");
+    assert!(thread_el.attr("parent").is_none());
+}
+
+#[test]
+fn build_chat_state_message_carries_parent_for_nested_threads() {
+    let thread = crate::xep::thread::ThreadRef {
+        id: "child".to_string(),
+        parent: Some("root".to_string()),
+    };
+    let stanza =
+        build_chat_state_message("room@muc.example", "composing", "groupchat", Some(&thread))
+            .expect("valid chat state");
+    let thread_el = stanza
+        .get_child("thread", "jabber:client")
+        .expect("thread child present");
+    assert_eq!(thread_el.text(), "child");
+    assert_eq!(thread_el.attr("parent"), Some("root"));
 }
 
 #[test]
 fn build_displayed_message_has_expected_shape() {
-    let stanza = build_displayed_message("room@muc.example", "msg-1", "groupchat");
+    let stanza = build_displayed_message("room@muc.example", "msg-1", "groupchat", None);
     assert_eq!(stanza.attr("to"), Some("room@muc.example"));
     assert_origin_id_matches_message_id(&stanza);
     assert!(stanza.get_child("displayed", NS_CHAT_MARKERS).is_some());
@@ -1257,6 +1292,23 @@ fn build_displayed_message_has_expected_shape() {
             .and_then(|child| child.attr("id")),
         Some("msg-1")
     );
+    assert!(stanza.get_child("thread", "jabber:client").is_none());
+}
+
+#[test]
+fn build_displayed_message_includes_thread_when_present() {
+    // XEP-0201 §3 — read markers for a threaded message SHOULD carry the
+    // same `<thread/>` so other clients can scope the marker to the right
+    // thread instead of treating it as a channel-wide displayed.
+    let thread = crate::xep::thread::ThreadRef {
+        id: "thread-99".to_string(),
+        parent: None,
+    };
+    let stanza = build_displayed_message("room@muc.example", "msg-1", "groupchat", Some(&thread));
+    let thread_el = stanza
+        .get_child("thread", "jabber:client")
+        .expect("thread child present");
+    assert_eq!(thread_el.text(), "thread-99");
 }
 
 #[test]
@@ -1295,7 +1347,7 @@ fn build_correction_message_with_markup_spans() {
 #[test]
 fn build_reaction_message_has_expected_shape() {
     let emojis = vec!["👍".to_string(), "❤️".to_string()];
-    let stanza = build_reaction_message("room@muc.example", "groupchat", "msg-1", &emojis);
+    let stanza = build_reaction_message("room@muc.example", "groupchat", "msg-1", &emojis, None);
     assert_origin_id_matches_message_id(&stanza);
     let reactions = stanza
         .get_child("reactions", NS_REACTIONS)
@@ -1308,11 +1360,35 @@ fn build_reaction_message_has_expected_shape() {
         .collect();
     assert_eq!(values, vec!["👍", "❤️"]);
     assert!(stanza.get_child("store", NS_HINTS).is_some());
+    assert!(stanza.get_child("thread", "jabber:client").is_none());
+}
+
+#[test]
+fn build_reaction_message_includes_thread_when_present() {
+    // XEP-0201 §3 + XEP-0444 — reactions targeting a threaded message
+    // SHOULD repeat the message's `<thread/>` so the reaction routes to
+    // the same conversation context on receiving clients.
+    let emojis = vec!["🎉".to_string()];
+    let thread = crate::xep::thread::ThreadRef {
+        id: "thread-react".to_string(),
+        parent: None,
+    };
+    let stanza = build_reaction_message(
+        "room@muc.example",
+        "groupchat",
+        "msg-1",
+        &emojis,
+        Some(&thread),
+    );
+    let thread_el = stanza
+        .get_child("thread", "jabber:client")
+        .expect("thread child present");
+    assert_eq!(thread_el.text(), "thread-react");
 }
 
 #[test]
 fn build_retraction_message_has_expected_shape() {
-    let stanza = build_retraction_message("room@muc.example", "groupchat", "msg-1");
+    let stanza = build_retraction_message("room@muc.example", "groupchat", "msg-1", None);
     assert_origin_id_matches_message_id(&stanza);
     assert_eq!(
         stanza
@@ -1327,6 +1403,23 @@ fn build_retraction_message_has_expected_shape() {
         Some("This person attempted to retract a previous message.".to_string())
     );
     assert!(stanza.get_child("store", NS_HINTS).is_some());
+    assert!(stanza.get_child("thread", "jabber:client").is_none());
+}
+
+#[test]
+fn build_retraction_message_includes_thread_when_present() {
+    // XEP-0201 §3 + XEP-0424 — retracting a threaded message SHOULD
+    // repeat the message's `<thread/>` so the tombstone routes to the
+    // same thread on receiving clients.
+    let thread = crate::xep::thread::ThreadRef {
+        id: "thread-retract".to_string(),
+        parent: None,
+    };
+    let stanza = build_retraction_message("room@muc.example", "groupchat", "msg-1", Some(&thread));
+    let thread_el = stanza
+        .get_child("thread", "jabber:client")
+        .expect("thread child present");
+    assert_eq!(thread_el.text(), "thread-retract");
 }
 
 #[test]

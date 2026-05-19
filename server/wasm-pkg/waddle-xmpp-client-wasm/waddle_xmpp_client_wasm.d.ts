@@ -171,9 +171,9 @@ export class WaddleClient {
     send_call_session_initiate(peer_full_jid: string, initiator_full_jid: string, sid_str: string, audio: boolean, video: boolean): Promise<any>;
     send_call_session_terminate(peer_full_jid: string, sid_str: string, reason?: string | null): Promise<any>;
     send_chat_message(peer_jid: string, body: string, options: any): Promise<any>;
-    send_chat_state(to: string, msg_type: string, state: string): Promise<any>;
+    send_chat_state(to: string, msg_type: string, state: string, thread_id?: string | null, thread_parent?: string | null): Promise<any>;
     send_correction(to: string, msg_type: string, body: string, replaces_id: string, options: any): Promise<any>;
-    send_displayed(to: string, msg_type: string, message_id: string): Promise<any>;
+    send_displayed(to: string, msg_type: string, message_id: string, thread_id?: string | null, thread_parent?: string | null): Promise<any>;
     send_groupchat_message(room_jid: string, body: string, options: any): Promise<any>;
     send_moderation(to: string, msg_type: string, target_id: string, reason?: string | null): Promise<any>;
     /**
@@ -200,8 +200,8 @@ export class WaddleClient {
     send_muc_call_leave(room_jid: string): Promise<any>;
     send_presence(status?: string | null, show?: string | null): Promise<any>;
     send_raw_iq(xml: string): Promise<any>;
-    send_reaction(to: string, msg_type: string, target_id: string, emojis: string[]): Promise<any>;
-    send_retraction(to: string, msg_type: string, retracts_id: string): Promise<any>;
+    send_reaction(to: string, msg_type: string, target_id: string, emojis: string[], thread_id?: string | null, thread_parent?: string | null): Promise<any>;
+    send_retraction(to: string, msg_type: string, retracts_id: string, thread_id?: string | null, thread_parent?: string | null): Promise<any>;
     /**
      * Register a callback for inbound XMPP-native call events
      * (XEP-0353 JMI envelopes + XEP-0166 Jingle session control

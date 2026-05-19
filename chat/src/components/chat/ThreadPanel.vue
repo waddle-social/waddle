@@ -70,8 +70,14 @@ const emit = defineEmits<{
   retractMessage: [messageId: string];
   reactMessage: [messageId: string, emoji: string];
   displayed: [messageId: string];
-  selectGif: [url: string];
-  typing: [];
+  selectGif: [
+    url: string,
+    threadOverride: { threadId: string; parentThreadId?: string },
+  ];
+  // Typing notifications from inside a thread carry the active thread so
+  // the outbound XEP-0085 chat-state can include an XEP-0201 `<thread/>`
+  // and peers can show "typing in thread X" instead of channel-wide.
+  typing: [threadOverride?: { threadId: string; parentThreadId?: string }];
   loadOlder: [threadId: string];
 }>();
 
@@ -517,6 +523,30 @@ function onSend(body: string, markup: MarkupSpan[], references: MessageReference
   draft.value = "";
 }
 
+// GIF picks mirror onSend's thread routing: derive the active thread (and
+// parent, when nested) so the GIF message joins the open thread instead of
+// landing in the parent channel timeline.
+function onSelectGif(url: string) {
+  const threadId = activeThreadId.value;
+  if (!threadId) return;
+  const override: { threadId: string; parentThreadId?: string } = { threadId };
+  if (parentThreadId.value) override.parentThreadId = parentThreadId.value;
+  emit("selectGif", url, override);
+}
+
+// Forward composer typing with the active thread context attached so the
+// outbound XEP-0085 chat-state stanza can include the matching `<thread/>`.
+function onTyping() {
+  const threadId = activeThreadId.value;
+  if (!threadId) {
+    emit("typing");
+    return;
+  }
+  const override: { threadId: string; parentThreadId?: string } = { threadId };
+  if (parentThreadId.value) override.parentThreadId = parentThreadId.value;
+  emit("typing", override);
+}
+
 function onOpenThreadFromCard(threadId: string) {
   // Already-open thread id is a no-op; otherwise push it onto the stack.
   if (threadId === activeThreadId.value) return;
@@ -638,8 +668,8 @@ function replyChildHasNestedThread(message: TimelineMessage): boolean {
         :is-top-pinned="true"
         @send="onSend"
         @cancel-reply="cancelReplyInThread"
-        @typing="emit('typing')"
-        @select-gif="(url: string) => emit('selectGif', url)"
+        @typing="onTyping"
+        @select-gif="onSelectGif"
       />
     </div>
 
@@ -820,8 +850,8 @@ function replyChildHasNestedThread(message: TimelineMessage): boolean {
         :is-top-pinned="false"
         @send="onSend"
         @cancel-reply="cancelReplyInThread"
-        @typing="emit('typing')"
-        @select-gif="(url: string) => emit('selectGif', url)"
+        @typing="onTyping"
+        @select-gif="onSelectGif"
       />
     </div>
   </div>

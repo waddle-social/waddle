@@ -29,22 +29,38 @@ impl WaddleClient {
         })
     }
 
-    pub fn send_chat_state(&self, to: String, msg_type: String, state: String) -> Promise {
+    pub fn send_chat_state(
+        &self,
+        to: String,
+        msg_type: String,
+        state: String,
+        thread_id: Option<String>,
+        thread_parent: Option<String>,
+    ) -> Promise {
         let inner = self.inner.clone();
         future_to_promise(async move {
             let _ = NS_CHAT_STATES;
-            let stanza = build_chat_state_message(&to, &state, &msg_type)
+            let thread = thread_ref_from_args(thread_id, thread_parent);
+            let stanza = build_chat_state_message(&to, &state, &msg_type, thread.as_ref())
                 .map_err(|err| js_error(err.to_string()))?;
             send_stanza_command(inner, stanza).await?;
             Ok(JsValue::UNDEFINED)
         })
     }
 
-    pub fn send_displayed(&self, to: String, msg_type: String, message_id: String) -> Promise {
+    pub fn send_displayed(
+        &self,
+        to: String,
+        msg_type: String,
+        message_id: String,
+        thread_id: Option<String>,
+        thread_parent: Option<String>,
+    ) -> Promise {
         let inner = self.inner.clone();
         future_to_promise(async move {
             let _ = NS_CHAT_MARKERS;
-            let stanza = build_displayed_message(&to, &message_id, &msg_type);
+            let thread = thread_ref_from_args(thread_id, thread_parent);
+            let stanza = build_displayed_message(&to, &message_id, &msg_type, thread.as_ref());
             send_stanza_command(inner, stanza).await?;
             Ok(JsValue::UNDEFINED)
         })
@@ -119,11 +135,15 @@ impl WaddleClient {
         msg_type: String,
         target_id: String,
         emojis: Vec<String>,
+        thread_id: Option<String>,
+        thread_parent: Option<String>,
     ) -> Promise {
         let inner = self.inner.clone();
         future_to_promise(async move {
             let _ = (NS_REACTIONS, NS_HINTS);
-            let stanza = build_reaction_message(&to, &msg_type, &target_id, &emojis);
+            let thread = thread_ref_from_args(thread_id, thread_parent);
+            let stanza =
+                build_reaction_message(&to, &msg_type, &target_id, &emojis, thread.as_ref());
             send_stanza_command(inner, stanza).await?;
             Ok(JsValue::UNDEFINED)
         })
@@ -154,11 +174,19 @@ impl WaddleClient {
         })
     }
 
-    pub fn send_retraction(&self, to: String, msg_type: String, retracts_id: String) -> Promise {
+    pub fn send_retraction(
+        &self,
+        to: String,
+        msg_type: String,
+        retracts_id: String,
+        thread_id: Option<String>,
+        thread_parent: Option<String>,
+    ) -> Promise {
         let inner = self.inner.clone();
         future_to_promise(async move {
             let _ = (NS_RETRACT, NS_HINTS);
-            let stanza = build_retraction_message(&to, &msg_type, &retracts_id);
+            let thread = thread_ref_from_args(thread_id, thread_parent);
+            let stanza = build_retraction_message(&to, &msg_type, &retracts_id, thread.as_ref());
             send_stanza_command(inner, stanza).await?;
             Ok(JsValue::UNDEFINED)
         })

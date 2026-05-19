@@ -45,8 +45,16 @@ export function useChannelReadMarkers(deps: UseChannelReadMarkersDeps) {
     const client = xmppClient.value;
     const spaceId = activeSpaceId.value ?? "";
     const channelId = activeChannelId.value;
+    // XEP-0201 §3 + XEP-0333: a displayed marker for a threaded message
+    // SHOULD echo that message's <thread/> so the marker scopes to the
+    // right thread instead of being treated as a channel-wide read.
+    const thread = target?.threadId
+      ? target.parentThreadId
+        ? { id: target.threadId, parent: target.parentThreadId }
+        : { id: target.threadId }
+      : undefined;
     void client
-      .sendDisplayed(spaceId, channelId, targetId)
+      .sendDisplayed(spaceId, channelId, targetId, thread)
       .catch(() => undefined);
     // XEP-0490 §3 publish — MUC stanza-id by= room JID. Only fires
     // when the room actually stamped the message (XEP-0359 §3.4
