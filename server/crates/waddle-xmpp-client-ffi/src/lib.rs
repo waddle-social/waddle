@@ -331,28 +331,20 @@ impl WaddleClient {
     }
 
     pub async fn discover_topology(&self) -> WaddleTopology {
-        let guard = self.handle.lock().await;
-        let Some(h) = guard.as_ref() else {
-            drop(guard);
-            self.listener.on_error("Not connected".to_string());
+        let Some(handle) = self.clone_handle().await else {
             return empty_topology();
         };
-
-        let spaces_domain = format!("spaces.{}", jid_domain(&self.config.jid));
-        let spaces_jid: BareJid = match spaces_domain.parse() {
-            Ok(jid) => jid,
-            Err(e) => {
-                drop(guard);
-                self.listener
-                    .on_error(format!("discover_topology: invalid spaces JID: {e}"));
-                return empty_topology();
-            }
-        };
-
-        match h.discover_topology(&spaces_jid).await {
+        // `discover_topology` now resolves the MUC and Spaces service
+        // JIDs from the server domain itself (with conventional
+        // subdomain fallbacks), enumerates rooms via *both* the
+        // Spaces bookmarks and the MUC component directly, and
+        // attaches non-bookmarked rooms to a synthetic "standalone"
+        // space. So a fresh waddle deployment with no XEP-0503 space
+        // bookmarks still produces a usable channel list.
+        let server_domain = jid_domain(&self.config.jid);
+        match handle.discover_topology(server_domain).await {
             Ok(topology) => topology_to_ffi(topology),
             Err(e) => {
-                drop(guard);
                 self.listener
                     .on_error(format!("discover_topology failed: {e}"));
                 empty_topology()

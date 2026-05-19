@@ -22,9 +22,9 @@ pub use parsing::{
 };
 pub use types::{
     DiscoDataField, DiscoDataForm, DiscoFeature, DiscoIdentity, DiscoInfoResult, DiscoItem,
-    DiscoveredChannel, DiscoveredChannelType, DiscoveredSpace, DiscoveredTopology,
-    MucAdminAffiliationItem, RosterResult, SpaceNode, UploadSlot, UserSearchForm, UserSearchItem,
-    UserSearchQuery, UserSearchResult, WaddleInboxMarkRead,
+    DiscoveredChannel, DiscoveredChannelType, DiscoveredComponentServices, DiscoveredSpace,
+    DiscoveredTopology, MucAdminAffiliationItem, RosterResult, SpaceNode, UploadSlot,
+    UserSearchForm, UserSearchItem, UserSearchQuery, UserSearchResult, WaddleInboxMarkRead,
 };
 
 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
@@ -49,6 +49,16 @@ pub const PUBSUB_METADATA_FORM_TYPE: &str = "http://jabber.org/protocol/pubsub#m
 pub const BOOKMARKS_NS: &str = "urn:xmpp:bookmarks:1";
 pub const SPACES_NS: &str = "urn:xmpp:spaces:0";
 pub const WADDLE_ROOM_METADATA_FORM_TYPE: &str = "urn:waddle:room:0";
+/// `http://jabber.org/protocol/muc` — the XEP-0045 feature
+/// advertised by Multi-User Chat services. Used at service
+/// discovery time to identify which component hosts MUC rooms.
+pub const MUC_NS: &str = "http://jabber.org/protocol/muc";
+/// Synthetic space id assigned to MUC rooms that are *not* bookmarked
+/// into any XEP-0503 space. Lets the UI place every joinable room
+/// under some space without requiring server-side bookmark
+/// administration first. Keep stable: clients may store the id as
+/// part of their last-selected-space state.
+pub const STANDALONE_SPACE_ID: &str = "standalone";
 pub const USER_SEARCH_NS: &str = "jabber:iq:search";
 pub const MUC_ADMIN_NS: &str = "http://jabber.org/protocol/muc#admin";
 pub use waddle_xmpp_core::roster::ROSTER_NS;

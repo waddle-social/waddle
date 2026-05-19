@@ -146,6 +146,19 @@ pub struct DiscoveredTopology {
     pub channels: Vec<DiscoveredChannel>,
 }
 
+/// Service JIDs hosting the MUC and Spaces components for a Waddle
+/// deployment, resolved via service discovery against the server
+/// domain. Falls back to the conventional `muc.<domain>` and
+/// `spaces.<domain>` subdomains when the server does not advertise
+/// either feature explicitly — so clients keep working on
+/// minimally-configured servers and on standalone single-Waddle
+/// builds where the components share the bare domain.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiscoveredComponentServices {
+    pub muc: BareJid,
+    pub spaces: BareJid,
+}
+
 /// Waddle-private `<mark-read/>` IQ-set parameters carried under
 /// `urn:waddle:inbox:0`. The query/response side of inbox lives on the
 /// XEP-0430 surface (`waddle_xmpp_client::inbox`).

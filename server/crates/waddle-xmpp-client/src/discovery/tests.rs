@@ -3,6 +3,7 @@ use minidom::Element;
 
 use crate::messaging::MucAffiliation;
 
+use super::parsing::resolve_component_services;
 use super::*;
 
 #[test]
@@ -601,4 +602,149 @@ fn build_and_parse_muc_admin_affiliation_queries() {
     assert_eq!(parsed[0].jid.as_deref(), Some("alice@example.com"));
     assert_eq!(parsed[0].affiliation, Some(MucAffiliation::Admin));
     assert_eq!(parsed[0].reason.as_deref(), Some("promoted"));
+}
+
+// ── Component service resolution ─────────────────────────────────────
+
+fn info(jid: &str, features: &[&str], identities: &[(&str, &str)]) -> DiscoInfoResult {
+    DiscoInfoResult {
+        jid: jid.to_string(),
+        node: None,
+        identities: identities
+            .iter()
+            .map(|(category, identity_type)| DiscoIdentity {
+                category: (*category).to_string(),
+                identity_type: (*identity_type).to_string(),
+                name: None,
+            })
+            .collect(),
+        features: features.iter().map(|f| (*f).to_string()).collect(),
+        forms: Vec::new(),
+    }
+}
+
+fn bare(jid: &str) -> BareJid {
+    jid.parse().expect("test JID parses")
+}
+
+#[test]
+fn resolve_component_services_picks_explicitly_advertised_jids() {
+    // Standard waddle deployment: the bare server domain advertises
+    // both component children via disco#items + disco#info; resolver
+    // returns those, ignoring the fallback values.
+    let items = vec![
+        (
+            bare("muc.waddle.test"),
+            Some(info("muc.waddle.test", &[MUC_NS], &[])),
+        ),
+        (
+            bare("spaces.waddle.test"),
+            Some(info("spaces.waddle.test", &[SPACES_NS], &[])),
+        ),
+    ];
+    let resolved = resolve_component_services(
+        &items,
+        bare("muc-fallback.waddle.test"),
+        bare("spaces-fallback.waddle.test"),
+    );
+    assert_eq!(resolved.muc, bare("muc.waddle.test"));
+    assert_eq!(resolved.spaces, bare("spaces.waddle.test"));
+}
+
+#[test]
+fn resolve_component_services_falls_back_for_unadvertised_components() {
+    // Minimally configured server that only advertises MUC. The
+    // resolver must still produce a Spaces fallback so
+    // discover_topology can attempt the pubsub query (and
+    // gracefully return zero spaces if the fallback JID doesn't
+    // exist either).
+    let items = vec![(
+        bare("muc.waddle.test"),
+        Some(info("muc.waddle.test", &[MUC_NS], &[])),
+    )];
+    let resolved = resolve_component_services(
+        &items,
+        bare("muc-fallback.waddle.test"),
+        bare("spaces.waddle.test"),
+    );
+    assert_eq!(resolved.muc, bare("muc.waddle.test"));
+    assert_eq!(resolved.spaces, bare("spaces.waddle.test"));
+}
+
+#[test]
+fn resolve_component_services_accepts_conference_identity_as_muc_fallback() {
+    // Legacy XEP-0045 deployments often advertise the MUC component
+    // only by identity category, not feature URI. The resolver
+    // honours either.
+    let items = vec![(
+        bare("rooms.legacy.test"),
+        Some(info("rooms.legacy.test", &[], &[("conference", "text")])),
+    )];
+    let resolved = resolve_component_services(
+        &items,
+        bare("muc-fallback.legacy.test"),
+        bare("spaces-fallback.legacy.test"),
+    );
+    assert_eq!(resolved.muc, bare("rooms.legacy.test"));
+}
+
+#[test]
+fn resolve_component_services_does_not_pick_generic_pubsub_as_spaces() {
+    // Waddle's extensions component is also pubsub. Selecting it
+    // for "Spaces" would route every space query at the wrong
+    // service. Only the explicit XEP-0503 feature counts.
+    let items = vec![(
+        bare("pubsub.waddle.test"),
+        Some(info(
+            "pubsub.waddle.test",
+            &["http://jabber.org/protocol/pubsub"],
+            &[],
+        )),
+    )];
+    let resolved = resolve_component_services(
+        &items,
+        bare("muc-fallback.waddle.test"),
+        bare("spaces-fallback.waddle.test"),
+    );
+    // Spaces falls back — extensions component is not eligible.
+    assert_eq!(resolved.spaces, bare("spaces-fallback.waddle.test"));
+}
+
+#[test]
+fn resolve_component_services_skips_entries_without_info() {
+    // disco#info on the component can fail (timeout, error iq).
+    // Entries with `None` info are skipped so the fallback wins
+    // rather than the resolver mis-classifying an unknown
+    // component.
+    let items = vec![(bare("unknown.waddle.test"), None)];
+    let resolved = resolve_component_services(
+        &items,
+        bare("muc-fallback.waddle.test"),
+        bare("spaces-fallback.waddle.test"),
+    );
+    assert_eq!(resolved.muc, bare("muc-fallback.waddle.test"));
+    assert_eq!(resolved.spaces, bare("spaces-fallback.waddle.test"));
+}
+
+#[test]
+fn resolve_component_services_first_match_wins() {
+    // Two MUC components — resolver picks the first encountered
+    // and ignores subsequent matches (server presents components
+    // in a stable order, so this is deterministic on the wire).
+    let items = vec![
+        (
+            bare("muc1.waddle.test"),
+            Some(info("muc1.waddle.test", &[MUC_NS], &[])),
+        ),
+        (
+            bare("muc2.waddle.test"),
+            Some(info("muc2.waddle.test", &[MUC_NS], &[])),
+        ),
+    ];
+    let resolved = resolve_component_services(
+        &items,
+        bare("muc-fallback.waddle.test"),
+        bare("spaces-fallback.waddle.test"),
+    );
+    assert_eq!(resolved.muc, bare("muc1.waddle.test"));
 }
