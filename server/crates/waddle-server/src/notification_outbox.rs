@@ -836,52 +836,14 @@ impl NotificationOutboxStore {
     async fn migrate_postgres_notification_candidates_reason_constraint(
         &self,
     ) -> Result<(), NotificationOutboxError> {
-        if !self
-            .postgres_notification_candidates_reason_constraint_is_stale()
-            .await?
-        {
-            return Ok(());
-        }
-
-        self.execute(
-            &format!(
-                "ALTER TABLE notification_candidates DROP CONSTRAINT IF EXISTS {NOTIFICATION_CANDIDATES_REASON_CHECK_NAME}"
-            ),
-            (),
+        self.migrate_postgres_check_constraint_on_column(
+            "notification_candidates",
+            "reason",
+            NOTIFICATION_CANDIDATES_REASON_CHECK_NAME,
+            NOTIFICATION_CANDIDATES_REASON_CHECK_SQL,
+            notification_candidates_reason_constraint_matches_expected,
         )
-        .await?;
-        self.execute(
-            &format!(
-                "ALTER TABLE notification_candidates ADD CONSTRAINT {NOTIFICATION_CANDIDATES_REASON_CHECK_NAME} CHECK ({NOTIFICATION_CANDIDATES_REASON_CHECK_SQL})"
-            ),
-            (),
-        )
-        .await?;
-        Ok(())
-    }
-
-    async fn postgres_notification_candidates_reason_constraint_is_stale(
-        &self,
-    ) -> Result<bool, NotificationOutboxError> {
-        let mut rows = self
-            .query(
-                r#"
-                SELECT pg_get_constraintdef(oid)
-                FROM pg_constraint
-                WHERE conrelid = 'notification_candidates'::regclass
-                  AND conname = ?
-                  AND contype = 'c'
-                "#,
-                crate::db_params![NOTIFICATION_CANDIDATES_REASON_CHECK_NAME],
-            )
-            .await?;
-        let Some(row) = rows.next().await? else {
-            return Ok(true);
-        };
-        let definition: String = row.get(0)?;
-        Ok(!notification_candidates_reason_constraint_matches_expected(
-            &definition,
-        ))
+        .await
     }
 
     async fn migrate_sqlite_notification_candidates_reason_constraint(
@@ -984,55 +946,14 @@ impl NotificationOutboxStore {
     async fn migrate_postgres_notification_candidates_class_constraint(
         &self,
     ) -> Result<(), NotificationOutboxError> {
-        if !self
-            .postgres_notification_candidates_class_constraint_is_stale()
-            .await?
-        {
-            return Ok(());
-        }
-
-        self.execute(
-            &format!(
-                "ALTER TABLE notification_candidates DROP CONSTRAINT IF EXISTS {NOTIFICATION_CANDIDATES_CLASS_CHECK_NAME}"
-            ),
-            (),
+        self.migrate_postgres_check_constraint_on_column(
+            "notification_candidates",
+            "class",
+            NOTIFICATION_CANDIDATES_CLASS_CHECK_NAME,
+            NOTIFICATION_CANDIDATES_CLASS_CHECK_SQL,
+            notification_candidates_class_constraint_matches_expected,
         )
-        .await?;
-        self.execute(
-            &format!(
-                "ALTER TABLE notification_candidates ADD CONSTRAINT {NOTIFICATION_CANDIDATES_CLASS_CHECK_NAME} CHECK ({NOTIFICATION_CANDIDATES_CLASS_CHECK_SQL})"
-            ),
-            (),
-        )
-        .await?;
-        Ok(())
-    }
-
-    async fn postgres_notification_candidates_class_constraint_is_stale(
-        &self,
-    ) -> Result<bool, NotificationOutboxError> {
-        let mut rows = self
-            .query(
-                r#"
-                SELECT pg_get_constraintdef(oid)
-                FROM pg_constraint
-                WHERE conrelid = 'notification_candidates'::regclass
-                  AND conname = ?
-                  AND contype = 'c'
-                "#,
-                crate::db_params![NOTIFICATION_CANDIDATES_CLASS_CHECK_NAME],
-            )
-            .await?;
-        let Some(row) = rows.next().await? else {
-            // No named class CHECK constraint exists yet — Postgres
-            // emits anonymous CHECKs from the table-level CHECK literal.
-            // Treat as stale so the migration adds the named constraint.
-            return Ok(true);
-        };
-        let definition: String = row.get(0)?;
-        Ok(!notification_candidates_class_constraint_matches_expected(
-            &definition,
-        ))
+        .await
     }
 
     async fn migrate_sqlite_notification_candidates_class_constraint(
@@ -1135,52 +1056,108 @@ impl NotificationOutboxStore {
     async fn migrate_postgres_notification_outbox_class_constraint(
         &self,
     ) -> Result<(), NotificationOutboxError> {
-        if !self
-            .postgres_notification_outbox_class_constraint_is_stale()
-            .await?
-        {
+        self.migrate_postgres_check_constraint_on_column(
+            "notification_outbox",
+            "class",
+            NOTIFICATION_OUTBOX_CLASS_CHECK_NAME,
+            NOTIFICATION_OUTBOX_CLASS_CHECK_SQL,
+            notification_outbox_class_constraint_matches_expected,
+        )
+        .await
+    }
+
+    /// Drops every CHECK constraint on `table.column` whose definition
+    /// does NOT match the expected value set, and ensures a single
+    /// named CHECK constraint is in place.
+    ///
+    /// Old schemas (created before this PR via inline
+    /// `CHECK (column IN (...))` literals in `CREATE TABLE`) carry
+    /// **anonymous** CHECK constraints with autogenerated names like
+    /// `notification_candidates_class_check1`. Dropping only the named
+    /// constraint we own would leave those anonymous ones in place,
+    /// rejecting any newly-added enum value indefinitely. Walking
+    /// `pg_constraint` + `pg_attribute` and dropping every
+    /// non-matching CHECK on the column closes that gap.
+    async fn migrate_postgres_check_constraint_on_column(
+        &self,
+        table: &str,
+        column: &str,
+        expected_name: &str,
+        expected_check_sql: &str,
+        matches_expected: fn(&str) -> bool,
+    ) -> Result<(), NotificationOutboxError> {
+        let existing = self
+            .postgres_check_constraints_on_column(table, column)
+            .await?;
+        let mut current_named_present = false;
+        let mut to_drop: Vec<String> = Vec::new();
+        for (conname, definition) in &existing {
+            if conname == expected_name && matches_expected(definition) {
+                current_named_present = true;
+            } else {
+                to_drop.push(conname.clone());
+            }
+        }
+        if current_named_present && to_drop.is_empty() {
             return Ok(());
         }
-
-        self.execute(
-            &format!(
-                "ALTER TABLE notification_outbox DROP CONSTRAINT IF EXISTS {NOTIFICATION_OUTBOX_CLASS_CHECK_NAME}"
-            ),
-            (),
-        )
-        .await?;
-        self.execute(
-            &format!(
-                "ALTER TABLE notification_outbox ADD CONSTRAINT {NOTIFICATION_OUTBOX_CLASS_CHECK_NAME} CHECK ({NOTIFICATION_OUTBOX_CLASS_CHECK_SQL})"
-            ),
-            (),
-        )
-        .await?;
+        for conname in &to_drop {
+            // Identifier-safe: conname comes from `pg_constraint` and
+            // matches the Postgres identifier rules; we additionally
+            // quote it to defend against unexpected characters.
+            self.execute(
+                &format!("ALTER TABLE {table} DROP CONSTRAINT IF EXISTS \"{conname}\""),
+                (),
+            )
+            .await?;
+        }
+        if !current_named_present {
+            self.execute(
+                &format!(
+                    "ALTER TABLE {table} ADD CONSTRAINT {expected_name} CHECK ({expected_check_sql})"
+                ),
+                (),
+            )
+            .await?;
+        }
         Ok(())
     }
 
-    async fn postgres_notification_outbox_class_constraint_is_stale(
+    /// Returns every CHECK constraint on `table` that references
+    /// `column` exclusively, as `(conname, pg_get_constraintdef)`.
+    ///
+    /// The `conkey = ARRAY[<attnum>]::int2[]` filter narrows to
+    /// single-column CHECKs against the target column — multi-column
+    /// CHECKs covering other columns are deliberately out of scope
+    /// since they encode different invariants.
+    async fn postgres_check_constraints_on_column(
         &self,
-    ) -> Result<bool, NotificationOutboxError> {
+        table: &str,
+        column: &str,
+    ) -> Result<Vec<(String, String)>, NotificationOutboxError> {
         let mut rows = self
             .query(
                 r#"
-                SELECT pg_get_constraintdef(oid)
-                FROM pg_constraint
-                WHERE conrelid = 'notification_outbox'::regclass
-                  AND conname = ?
-                  AND contype = 'c'
+                SELECT c.conname,
+                       pg_get_constraintdef(c.oid)
+                FROM pg_constraint AS c
+                JOIN pg_attribute AS a
+                  ON a.attrelid = c.conrelid
+                 AND a.attname = ?
+                WHERE c.conrelid = (? :: regclass)
+                  AND c.contype = 'c'
+                  AND c.conkey = ARRAY[a.attnum]::int2[]
                 "#,
-                crate::db_params![NOTIFICATION_OUTBOX_CLASS_CHECK_NAME],
+                crate::db_params![column, table],
             )
             .await?;
-        let Some(row) = rows.next().await? else {
-            return Ok(true);
-        };
-        let definition: String = row.get(0)?;
-        Ok(!notification_outbox_class_constraint_matches_expected(
-            &definition,
-        ))
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().await? {
+            let conname: String = row.get(0)?;
+            let definition: String = row.get(1)?;
+            out.push((conname, definition));
+        }
+        Ok(out)
     }
 
     async fn migrate_sqlite_notification_outbox_class_constraint(
@@ -3402,6 +3379,208 @@ mod tests {
             plain_row.get::<String>(1).expect("plain reason"),
             "offline_dm"
         );
+    }
+
+    /// Postgres-only regression for the anonymous CHECK constraint bug:
+    /// schemas created before this PR via inline
+    /// `CHECK (class IN (...))` literals in `CREATE TABLE` end up with
+    /// **anonymous** CHECK constraints whose name is autogenerated
+    /// (e.g. `notification_candidates_class_check1`). The migration
+    /// must walk `pg_constraint` and drop every CHECK on the target
+    /// column — not just the named one we own — otherwise the
+    /// anonymous CHECK keeps rejecting newly-added enum values
+    /// (`dm_mention` here) on upgraded deployments.
+    ///
+    /// Opt-in via `WADDLE_TEST_POSTGRES_URL` since the project's
+    /// default test backend is SQLite (which uses a different
+    /// CREATE-TABLE-rebuild migration path).
+    #[tokio::test]
+    async fn store_initialization_drops_anonymous_postgres_class_check_constraint() {
+        let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+            eprintln!(
+                "skipping: WADDLE_TEST_POSTGRES_URL not set \
+                 (postgres-only regression for anonymous CHECK drop)"
+            );
+            return;
+        };
+
+        // Use a UUID-suffixed table name so concurrent runs against
+        // the same Postgres do not clobber each other.
+        let table_suffix = uuid::Uuid::new_v4().simple().to_string();
+        let table = format!("notification_candidates_{table_suffix}");
+        let scoped_url = database_url;
+        let db = Database::from_config(
+            "notification-outbox-anonymous-pg-check",
+            &crate::db::DatabaseConfig::new(crate::db::DatabaseDriver::Postgres, scoped_url),
+        )
+        .await
+        .expect("connect postgres");
+        let conn = db.guard().await.expect("db guard");
+
+        // Anonymous CHECK: no `CONSTRAINT name` clause means Postgres
+        // generates one (e.g. `<table>_class_check`). The legacy class
+        // set deliberately excludes `'dm_mention'` to mirror the
+        // pre-#526 schema.
+        let create_sql = format!(
+            r#"
+            CREATE TABLE "{table}" (
+                recipient_bare_jid TEXT NOT NULL,
+                conversation_jid TEXT NOT NULL,
+                sender_jid TEXT NOT NULL,
+                thread_id TEXT NOT NULL DEFAULT '',
+                stanza_id_by TEXT NOT NULL,
+                stanza_id TEXT NOT NULL,
+                class TEXT NOT NULL CHECK (class IN ('dm', 'personal_mention', 'channel_mention', 'active_channel_mention', 'notify_all')),
+                reason TEXT NOT NULL CHECK (reason IN ('offline_dm', 'groupchat_personal_mention', 'groupchat_channel_mention', 'groupchat_active_channel_mention', 'groupchat_notify_all')),
+                created_at_ms BIGINT NOT NULL,
+                policy_error_count INTEGER NOT NULL DEFAULT 0,
+                next_attempt_at_ms BIGINT,
+                outboxed_at_ms BIGINT,
+                PRIMARY KEY (recipient_bare_jid, conversation_jid, thread_id, stanza_id_by, stanza_id, class)
+            )
+            "#
+        );
+        conn.execute(&create_sql, ())
+            .await
+            .expect("create scoped table");
+
+        // Cleanup on test exit: scope-guard pattern via a closure
+        // that captures `&db` (we can't use `Drop` because it would
+        // require async cleanup).
+        let cleanup_table = table.clone();
+        let cleanup_db = db.clone();
+        let cleanup = async move {
+            let conn = cleanup_db.guard().await.expect("cleanup db guard");
+            let _ = conn
+                .execute(&format!(r#"DROP TABLE IF EXISTS "{cleanup_table}""#), ())
+                .await;
+        };
+
+        // Sanity check: pre-migration, the anonymous CHECK exists
+        // and is named (any non-empty `conname` qualifies — Postgres
+        // never emits truly nameless constraints, but autogenerated
+        // names are still NOT ours).
+        let mut rows = conn
+            .query(
+                r#"
+                SELECT c.conname
+                FROM pg_constraint AS c
+                JOIN pg_attribute AS a
+                  ON a.attrelid = c.conrelid
+                 AND a.attname = 'class'
+                WHERE c.conrelid = ($1 :: regclass)
+                  AND c.contype = 'c'
+                  AND c.conkey = ARRAY[a.attnum]::int2[]
+                "#,
+                crate::db_params![table.as_str()],
+            )
+            .await
+            .expect("pre-migration check constraint query");
+        let mut found_anonymous = false;
+        while let Some(row) = rows.next().await.expect("row") {
+            let conname: String = row.get(0).expect("conname");
+            if conname != NOTIFICATION_CANDIDATES_CLASS_CHECK_NAME {
+                found_anonymous = true;
+            }
+        }
+        assert!(
+            found_anonymous,
+            "test fixture must produce an anonymous (non-canonical-name) CHECK on the class column"
+        );
+        drop(conn);
+        drop(rows);
+
+        // Drive the migration helper directly against our scoped
+        // table. This sidesteps the full `NotificationOutboxStore::new`
+        // initialization (which targets the hard-coded
+        // `notification_candidates` table name).
+        let store = NotificationOutboxStore { db: db.clone() };
+        let migrate_result = store
+            .migrate_postgres_check_constraint_on_column(
+                &table,
+                "class",
+                NOTIFICATION_CANDIDATES_CLASS_CHECK_NAME,
+                NOTIFICATION_CANDIDATES_CLASS_CHECK_SQL,
+                notification_candidates_class_constraint_matches_expected,
+            )
+            .await;
+        if let Err(error) = &migrate_result {
+            cleanup.await;
+            panic!("migration failed: {error}");
+        }
+
+        // Post-migration: only the canonical named CHECK should
+        // remain on the class column, and it should accept the new
+        // `dm_mention` value.
+        let conn = db.guard().await.expect("db guard");
+        let mut rows = conn
+            .query(
+                r#"
+                SELECT c.conname
+                FROM pg_constraint AS c
+                JOIN pg_attribute AS a
+                  ON a.attrelid = c.conrelid
+                 AND a.attname = 'class'
+                WHERE c.conrelid = ($1 :: regclass)
+                  AND c.contype = 'c'
+                  AND c.conkey = ARRAY[a.attnum]::int2[]
+                "#,
+                crate::db_params![table.as_str()],
+            )
+            .await
+            .expect("post-migration check constraint query");
+        let mut remaining: Vec<String> = Vec::new();
+        while let Some(row) = rows.next().await.expect("row") {
+            remaining.push(row.get(0).expect("conname"));
+        }
+        let canonical_present = remaining
+            .iter()
+            .any(|n| n == NOTIFICATION_CANDIDATES_CLASS_CHECK_NAME);
+        let anonymous_present = remaining
+            .iter()
+            .any(|n| n != NOTIFICATION_CANDIDATES_CLASS_CHECK_NAME);
+        let dm_mention_insert = conn
+            .execute(
+                &format!(
+                    r#"
+                    INSERT INTO "{table}" (
+                        recipient_bare_jid,
+                        conversation_jid,
+                        sender_jid,
+                        thread_id,
+                        stanza_id_by,
+                        stanza_id,
+                        class,
+                        reason,
+                        created_at_ms,
+                        policy_error_count
+                    ) VALUES (
+                        'bob@example.com',
+                        'alice@example.com',
+                        'alice@example.com/web',
+                        '',
+                        'bob@example.com',
+                        'post-migration-mention',
+                        'dm_mention',
+                        'offline_dm_mention',
+                        1,
+                        0
+                    )
+                    "#
+                ),
+                (),
+            )
+            .await;
+        cleanup.await;
+        assert!(
+            canonical_present,
+            "named CHECK constraint must remain after migration; saw {remaining:?}"
+        );
+        assert!(
+            !anonymous_present,
+            "anonymous CHECK constraint(s) must be dropped by migration; saw {remaining:?}"
+        );
+        dm_mention_insert.expect("dm_mention insert must succeed post-migration");
     }
 
     #[tokio::test]
