@@ -60,20 +60,25 @@ watch(uiMode, (next) => {
   rememberNonPipMode(next);
 });
 
-// Connect to LiveKit as soon as the call transitions to `active` with
-// a populated join. Disconnect on the way out. Re-runs whenever the
-// active session id changes — guards against stale subscriptions
-// when the user accepts a second call after the first ended.
+// Connect to LiveKit as soon as the call transitions to `active`
+// with a populated join. Disconnect on the way out. Tracks the
+// session id as a PRIMITIVE — Vue's `watch` only re-fires when the
+// returned value's reference changes, and constructing an object
+// literal inside the source would re-trigger on every unrelated
+// `$callState.set` (e.g. setting `selfNick` mid-teardown), which
+// would tear down the engine right after it connected. That was the
+// "publishing track → disconnect from room" cycle in the
+// LiveKit-client logs. Keying on `sid` alone means: a fresh call
+// with a new sid reconnects; status pokes don't.
 watch(
-  // Track sid + a snapshot of join — NOT the entire state object
-  // — so unrelated `$callState.set` calls (e.g. setting media
-  // flags or selfNick during teardown) don't trigger a reconnect.
-  () =>
-    state.value.phase === "active"
-      ? { sid: state.value.sid, join: state.value.join, media: state.value.media }
-      : null,
-  async (active, _prev, onCleanup) => {
-    if (!active) return;
+  () => (state.value.phase === "active" ? state.value.sid : null),
+  async (sid, _prev, onCleanup) => {
+    if (!sid) return;
+    // Re-read the call state at fire time; the snapshot we use for
+    // the LiveKit connect is the one that was current when the sid
+    // was assigned.
+    const active = state.value;
+    if (active.phase !== "active" || active.sid !== sid) return;
     connecting.value = true;
     try {
       await engine.connect(active.join, active.media);

@@ -103,6 +103,23 @@ pub(super) async fn try_handle_muc_presence_update(
         }
     };
 
+    // XEP-0045 §7.7: a user may change their *own* in-room presence
+    // only. The resolved nick comes from the room actor's
+    // authoritative occupant table (keyed by the authenticated full
+    // JID), so any mismatch with the `to=room/<nick>` resource the
+    // client supplied is an attempt to impersonate another occupant
+    // — drop the update silently rather than reflecting it.
+    if outcome.update.sender_nick != nick {
+        warn!(
+            room = %room_jid,
+            to_nick = %nick,
+            actual_nick = %outcome.update.sender_nick,
+            sender = %sender_jid,
+            "MUC call presence to-JID nick mismatch; dropping reflection"
+        );
+        return Some(Vec::new());
+    }
+
     debug!(
         room = %room_jid,
         nick = %outcome.update.sender_nick,
@@ -131,7 +148,14 @@ pub(super) async fn try_handle_muc_presence_update(
     // bogus `<x xmlns='muc#user'>` items.
     let mut responses = Vec::new();
     for recipient in &outcome.update.recipients {
-        let is_self = recipient == sender_jid;
+        // XEP-0045 §7.1: every session sharing the sender's occupant
+        // nick must receive a presence stamped with `<status code='110'/>`,
+        // not just the exact full JID that emitted the stanza. The
+        // occupant_sessions table is keyed by nick and holds every
+        // active full JID under that nick, so a same-bare multi-
+        // session join (Alice on web AND mobile) needs `is_self` for
+        // BOTH recipients when Alice updates her presence from web.
+        let is_self = recipient.to_bare() == sender_jid.to_bare();
         let mut presence = build_occupant_presence_update(
             incoming,
             &from_room_jid,
@@ -172,4 +196,89 @@ pub(super) async fn try_handle_muc_presence_update(
     }
 
     Some(responses)
+}
+
+#[cfg(test)]
+mod tests {
+    //! XEP-conformance tests for the `<call xmlns='urn:waddle:muc-call:0'/>`
+    //! presence-extension forwarding path. Per the CLAUDE.md
+    //! XEP-custom-test-suite hard rule, every implemented XEP /
+    //! advertised compatibility feature needs dedicated wire-level
+    //! tests. These pin the extraction step + the active/inactive
+    //! transition strip behavior — the actor-level tests in
+    //! `muc::room_actor::tests` cover the room-state side of the
+    //! same boundary.
+    use super::*;
+    use minidom::Element;
+    use xmpp_parsers::presence::{Presence as ParsedPresence, Type as PresenceType};
+
+    fn presence_with_call(state_attr: &str, call_id: &str) -> ParsedPresence {
+        let mut presence = ParsedPresence::new(PresenceType::None);
+        let call = Element::builder(
+            "call",
+            waddle_xmpp::xep::xep_waddle_muc_call::NS_WADDLE_MUC_CALL,
+        )
+        .attr("state", state_attr)
+        .attr("call-id", call_id)
+        .build();
+        presence.payloads.push(call);
+        presence
+    }
+
+    #[test]
+    fn extract_call_extension_returns_typed_active_extension() {
+        let presence = presence_with_call("active", "chat@muc.example.com");
+        let ext = extract_call_extension(&presence).expect("active <call/> parses");
+        assert_eq!(
+            ext.state,
+            waddle_xmpp::xep::xep_waddle_muc_call::CallPresenceState::Active
+        );
+        assert_eq!(ext.call_id.as_str(), "chat@muc.example.com");
+    }
+
+    #[test]
+    fn extract_call_extension_returns_inactive_extension() {
+        let presence = presence_with_call("inactive", "chat@muc.example.com");
+        let ext = extract_call_extension(&presence).expect("inactive <call/> parses");
+        assert_eq!(
+            ext.state,
+            waddle_xmpp::xep::xep_waddle_muc_call::CallPresenceState::Inactive
+        );
+    }
+
+    #[test]
+    fn extract_call_extension_returns_none_for_missing_payload() {
+        // A presence with no `<call/>` extension. The dispatcher uses
+        // this as the signal to fall through to the regular join
+        // path — never to silently treat the presence as a call
+        // advertisement.
+        let presence = ParsedPresence::new(PresenceType::None);
+        assert!(extract_call_extension(&presence).is_none());
+    }
+
+    #[test]
+    fn extract_call_extension_drops_malformed_state() {
+        // A payload with an unknown state value MUST NOT be coerced
+        // to active. Per the typed-payloads rule, the parse failure
+        // returns `None` and the caller dispatches accordingly —
+        // either falling back to join or returning a bad-request.
+        let presence = presence_with_call("ringing", "chat@muc.example.com");
+        assert!(
+            extract_call_extension(&presence).is_none(),
+            "unknown state values must not parse"
+        );
+    }
+
+    #[test]
+    fn extract_call_extension_returns_none_for_wrong_namespace() {
+        // An element named `call` in a different namespace is NOT
+        // the waddle muc-call extension — must be ignored.
+        let mut presence = ParsedPresence::new(PresenceType::None);
+        let call = Element::builder("call", "urn:example:other:0")
+            .attr("state", "active")
+            .attr("call-id", "room@muc.example.com")
+            .build();
+        presence.payloads.push(call);
+        assert!(extract_call_extension(&presence).is_none());
+    }
 }

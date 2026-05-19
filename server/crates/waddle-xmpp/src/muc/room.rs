@@ -315,10 +315,18 @@ impl MucRoom {
     /// NOT dormant — those caches are in-memory only today and
     /// dropping them would lose user-visible state.
     pub fn is_dormant(&self) -> bool {
+        // call_state is included in the predicate so a panic-shed
+        // session leaving stale call advertisements in the actor
+        // can't trigger eviction while a chip is still lit. The
+        // happy path keeps call_state in lock-step with occupants
+        // (removing the last session clears the entry), so the new
+        // check fires only on bug paths — but the alternative is a
+        // silent "in-call indicator for nobody" UX.
         self.occupants.is_empty()
             && self.subject.is_none()
             && self.pinned_entries.is_empty()
             && self.affiliation_list.is_empty()
+            && self.call_state.is_empty()
     }
 
     /// Whether `bare_jid` is currently joined to this room as an

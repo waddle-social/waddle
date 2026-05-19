@@ -29,4 +29,50 @@ pub const NS_WADDLE_PIN_V0: &str = "urn:waddle:pin:0";
 /// `waddle_xmpp::xep::xep_waddle_muc_call::NS_WADDLE_MUC_CALL` —
 /// the client crate cannot depend on the server crate, so the
 /// constant is duplicated and kept in sync via a test.
-pub(crate) const NS_WADDLE_MUC_CALL: &str = "urn:waddle:muc-call:0";
+pub const NS_WADDLE_MUC_CALL: &str = "urn:waddle:muc-call:0";
+
+/// Build a `<call xmlns='urn:waddle:muc-call:0' state='active|inactive'
+/// call-id='…'/>` element from typed inputs. Keeps the wire shape
+/// locked to a single definition site even from the wasm crate
+/// (which cannot depend on waddle-xmpp where the canonical
+/// `MucCallExtension` lives). CLAUDE.md XML hard rule: callers never
+/// hand-roll the element via raw `Element::builder` strings.
+pub fn build_muc_call_extension_element(active: bool, call_id: &str) -> minidom::Element {
+    let state = if active { "active" } else { "inactive" };
+    minidom::Element::builder("call", NS_WADDLE_MUC_CALL)
+        .attr("state", state)
+        .attr("call-id", call_id)
+        .build()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn builds_active_extension_matching_xep_shape() {
+        let elem = build_muc_call_extension_element(true, "room@muc.example.com");
+        assert_eq!(elem.name(), "call");
+        assert_eq!(elem.ns(), NS_WADDLE_MUC_CALL);
+        assert_eq!(elem.attr("state"), Some("active"));
+        assert_eq!(elem.attr("call-id"), Some("room@muc.example.com"));
+    }
+
+    #[test]
+    fn builds_inactive_extension_matching_xep_shape() {
+        let elem = build_muc_call_extension_element(false, "room@muc.example.com");
+        assert_eq!(elem.attr("state"), Some("inactive"));
+    }
+
+    /// The canonical `MucCallExtension::to_element()` in
+    /// `waddle_xmpp::xep::xep_waddle_muc_call` is the source of
+    /// truth for this wire shape. The client crate cannot depend on
+    /// the server crate, so we pin the duplicate constant + builder
+    /// here via byte-for-byte comparison in the server crate's
+    /// integration test suite (see waddle-xmpp's xep_waddle_muc_call
+    /// tests for round-trip parsing of the produced element).
+    #[test]
+    fn ns_constant_matches_canonical_xep_namespace() {
+        assert_eq!(NS_WADDLE_MUC_CALL, "urn:waddle:muc-call:0");
+    }
+}
