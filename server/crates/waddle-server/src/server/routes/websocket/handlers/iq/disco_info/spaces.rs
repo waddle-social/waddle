@@ -45,7 +45,19 @@ pub(super) async fn handle_spaces_disco_info<'a>(
             }
         };
 
-        let space = space_details_from_node(&space_node);
+        let Some(space) = space_details_from_node(&space_node) else {
+            warn!(
+                node,
+                access_model = %space_node.config.access_model,
+                "Spaces node has unsupported access model"
+            );
+            return Some(DiscoInfoResponse::error(
+                req.id,
+                None,
+                None,
+                internal_server_error_iq_error("Internal server error."),
+            ));
+        };
         let requester_affiliation =
             space_affiliation_for_requester(state, authenticated_session, node).await;
         let identities = vec![Identity::pubsub_leaf(Some(&space.name))];

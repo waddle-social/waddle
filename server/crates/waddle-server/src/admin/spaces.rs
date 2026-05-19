@@ -32,11 +32,18 @@ use std::sync::Arc;
 
 use jid::BareJid;
 use waddle_xmpp::commands::{CommandContext, CommandResult};
-use waddle_xmpp::pubsub::Affiliation as PubSubAffiliation;
+use waddle_xmpp::muc::room_actor::GetConfig;
+use waddle_xmpp::muc::room_registry_actor::GetRoom;
+use waddle_xmpp::pubsub::{Affiliation as PubSubAffiliation, PubSubItem};
 use waddle_xmpp::xep::xep0004::{DataForm, Field, FieldType, FormType};
-use waddle_xmpp::XmppError;
+use waddle_xmpp::{ChannelInfo, XmppError};
 
 use crate::admin::is_community_owner;
+use crate::channel_space_links::ChannelSpaceLink;
+use crate::permissions::{
+    DeleteTuple, Object, ObjectType, PermissionError, Relation, Subject, SubjectType, Tuple,
+    WriteTuple,
+};
 use crate::server::AppState;
 use crate::spaces_metadata::{SpaceMetadata, SpacesMetadataError};
 
@@ -633,6 +640,202 @@ async fn counts_for_space(state: &AppState, space_jid: &BareJid) -> Result<(u32,
     Ok((channel_count, member_count))
 }
 
+async fn delete_channel_parent_tuple(
+    state: &AppState,
+    channel_id: &str,
+    space_node: &str,
+) -> Result<bool, AdminErr> {
+    let tuple = Tuple::new(
+        Object::new(ObjectType::Channel, channel_id),
+        Relation::new("parent"),
+        Subject::userset(SubjectType::Space, space_node, ""),
+    );
+    match state.permission_actor.ask(DeleteTuple { tuple }).await {
+        Ok(()) => Ok(true),
+        Err(kameo::error::SendError::HandlerError(PermissionError::TupleNotFound)) => Ok(false),
+        Err(error) => Err(internal_err(format!(
+            "permission actor failed deleting channel parent tuple: {error}"
+        ))),
+    }
+}
+
+async fn write_channel_parent_tuple(
+    state: &AppState,
+    channel_id: &str,
+    space_node: &str,
+) -> Result<(), AdminErr> {
+    let tuple = Tuple::new(
+        Object::new(ObjectType::Channel, channel_id),
+        Relation::new("parent"),
+        Subject::userset(SubjectType::Space, space_node, ""),
+    );
+    match state.permission_actor.ask(WriteTuple { tuple }).await {
+        Ok(()) => Ok(()),
+        Err(kameo::error::SendError::HandlerError(PermissionError::TupleAlreadyExists)) => Ok(()),
+        Err(error) => Err(internal_err(format!(
+            "permission actor failed writing channel parent tuple: {error}"
+        ))),
+    }
+}
+
+struct SpaceDeleteCleanup {
+    room_jid: BareJid,
+    channel_id: Option<String>,
+    parent_tuple_deleted: bool,
+    had_bookmark_item: bool,
+    rollback_bookmark_item: Option<PubSubItem>,
+    removed_link: Option<ChannelSpaceLink>,
+}
+
+async fn rollback_space_delete_cleanups(
+    state: &AppState,
+    cleanups: &[SpaceDeleteCleanup],
+    space_node: &str,
+    skip_rooms: &std::collections::BTreeSet<BareJid>,
+    skip_parent_tuple_rooms: &std::collections::BTreeSet<BareJid>,
+) {
+    for cleanup in cleanups.iter().rev() {
+        if skip_rooms.contains(&cleanup.room_jid) {
+            continue;
+        }
+        let mut bookmark_available =
+            cleanup.had_bookmark_item && !skip_parent_tuple_rooms.contains(&cleanup.room_jid);
+        if !cleanup.had_bookmark_item {
+            if let Some(item) = cleanup.rollback_bookmark_item.as_ref() {
+                match state
+                    .pubsub_storage
+                    .publish_item(&state.spaces_jid, space_node, item, None, false)
+                    .await
+                {
+                    Ok(_) => {
+                        bookmark_available = true;
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            error = %error,
+                            room = %cleanup.room_jid,
+                            space_node = %space_node,
+                            "spaces:delete rollback failed to restore missing channel bookmark",
+                        );
+                    }
+                }
+            }
+        }
+        if cleanup.parent_tuple_deleted && bookmark_available {
+            if let Some(channel_id) = cleanup.channel_id.as_deref() {
+                if write_channel_parent_tuple(state, channel_id, space_node)
+                    .await
+                    .is_err()
+                {
+                    tracing::warn!(
+                        room = %cleanup.room_jid,
+                        space_node = %space_node,
+                        "spaces:delete rollback failed to restore channel parent tuple",
+                    );
+                }
+            }
+        }
+        if let Some(link) = cleanup.removed_link.as_ref() {
+            if let Err(error) = state.channel_space_link_store.set(link).await {
+                tracing::warn!(
+                    error = %error,
+                    room = %cleanup.room_jid,
+                    space = %link.space_jid,
+                    "spaces:delete rollback failed to restore channel-space link",
+                );
+            }
+        }
+    }
+}
+
+async fn restore_space_node_items(
+    state: &AppState,
+    space_node: &str,
+    items: &[(String, PubSubItem)],
+    skip_rooms: &std::collections::BTreeSet<BareJid>,
+) -> std::collections::BTreeSet<BareJid> {
+    let mut failed_rooms = std::collections::BTreeSet::new();
+    for (item_id, item) in items.iter().rev() {
+        if item_id
+            .parse::<BareJid>()
+            .is_ok_and(|room_jid| skip_rooms.contains(&room_jid))
+        {
+            continue;
+        }
+        if let Err(error) = state
+            .pubsub_storage
+            .publish_item(&state.spaces_jid, space_node, item, None, false)
+            .await
+        {
+            tracing::warn!(
+                error = %error,
+                item_id = %item_id,
+                space_node = %space_node,
+                "spaces:delete rollback failed to restore PubSub item",
+            );
+            if let Ok(room_jid) = item_id.parse::<BareJid>() {
+                failed_rooms.insert(room_jid);
+            }
+        }
+    }
+    failed_rooms
+}
+
+async fn rollback_channel_bookmark_item(
+    state: &AppState,
+    room_jid: &BareJid,
+    channel_id: &str,
+) -> Option<PubSubItem> {
+    let actor = match state
+        .room_registry
+        .ask(GetRoom {
+            room_jid: room_jid.clone(),
+        })
+        .await
+    {
+        Ok(Some(actor)) => actor,
+        Ok(None) => return None,
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                room = %room_jid,
+                "spaces:delete rollback could not snapshot room for missing channel bookmark",
+            );
+            return None;
+        }
+    };
+    let config = match actor.ask(GetConfig).await {
+        Ok(config) => config,
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                room = %room_jid,
+                "spaces:delete rollback could not snapshot room config for missing channel bookmark",
+            );
+            return None;
+        }
+    };
+    let channel_type = if config.forum { "forum" } else { "text" };
+    match waddle_xmpp::xep::build_channel_item(
+        &ChannelInfo {
+            id: channel_id.to_string(),
+            name: config.name,
+            channel_type: channel_type.to_string(),
+        },
+        &state.muc_domain.to_string(),
+    ) {
+        Ok(item) => Some(item),
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                room = %room_jid,
+                "spaces:delete rollback could not build missing channel bookmark",
+            );
+            None
+        }
+    }
+}
+
 async fn run_create(state: &AppState, args: &SpacesCreateArgs) -> Result<SpaceRef, AdminErr> {
     // Mint a fresh localpart for this space. Mirror the chat-side
     // convention of slugified-name + short-id by lowercasing+slugifying
@@ -644,26 +847,31 @@ async fn run_create(state: &AppState, args: &SpacesCreateArgs) -> Result<SpaceRe
         .map_err(|e| internal_err(format!("constructed space JID is invalid: {e}")))?;
 
     let now = now_unix_seconds();
-    let metadata = SpaceMetadata {
-        space_jid: space_jid.clone(),
-        name: args.name.clone(),
-        description: args.description.clone(),
-        icon_url: args.icon_url.clone(),
-        created_at: now,
-        updated_at: now,
-    };
-    state
-        .spaces_metadata_store
-        .upsert(&metadata)
-        .await
-        .map_err(map_metadata_err)?;
-
     // Create the pubsub node that backs the space's channel list.
-    state
+    let (_, created_node) = state
         .pubsub_storage
         .get_or_create_node(&state.spaces_jid, &localpart)
         .await
         .map_err(|e| internal_err(format!("pubsub create node failed: {e}")))?;
+    if let Err(error) = state
+        .pubsub_storage
+        .update_node_config(
+            &state.spaces_jid,
+            &localpart,
+            &waddle_xmpp::pubsub::NodeConfig::spaces_public(),
+        )
+        .await
+    {
+        if created_node {
+            let _ = state
+                .pubsub_storage
+                .delete_node(&state.spaces_jid, &localpart)
+                .await;
+        }
+        return Err(internal_err(format!(
+            "pubsub configure space node failed: {error}"
+        )));
+    }
 
     // Seed server-owners as PubSub owners on the new node so they can
     // administer it. Mirrors `spaces_pubsub_seed::seed_owners_on_node`.
@@ -674,6 +882,22 @@ async fn run_create(state: &AppState, args: &SpacesCreateArgs) -> Result<SpaceRe
         &state.server_owner_jids,
     )
     .await;
+
+    let metadata = SpaceMetadata {
+        space_jid: space_jid.clone(),
+        name: args.name.clone(),
+        description: args.description.clone(),
+        icon_url: args.icon_url.clone(),
+        created_at: now,
+        updated_at: now,
+    };
+    if let Err(error) = state.spaces_metadata_store.upsert(&metadata).await {
+        let _ = state
+            .pubsub_storage
+            .delete_node(&state.spaces_jid, &localpart)
+            .await;
+        return Err(map_metadata_err(error));
+    }
 
     Ok(SpaceRef {
         space_jid,
@@ -770,14 +994,168 @@ async fn run_delete(state: &AppState, args: &SpacesDeleteArgs) -> Result<(), Adm
         .get_items(&state.spaces_jid, &node_name, None, &[])
         .await
         .map_err(|e| internal_err(format!("pubsub get_items failed: {e}")))?;
-    for stored in items {
+    for stored in &items {
         if let Ok(room_jid) = stored.id.parse::<BareJid>() {
             targets.insert(room_jid);
         }
     }
+    let bookmarked_rooms: std::collections::BTreeSet<BareJid> = items
+        .iter()
+        .filter_map(|stored| stored.id.parse::<BareJid>().ok())
+        .collect();
 
-    for room_jid in targets {
-        // Best-effort destroy — non-existent rooms are fine.
+    let mut cleanups: Vec<SpaceDeleteCleanup> = Vec::new();
+    let mut destroy_targets: std::collections::BTreeSet<BareJid> =
+        std::collections::BTreeSet::new();
+    for room_jid in &targets {
+        let mut cleanup = SpaceDeleteCleanup {
+            room_jid: room_jid.clone(),
+            channel_id: None,
+            parent_tuple_deleted: false,
+            had_bookmark_item: bookmarked_rooms.contains(room_jid),
+            rollback_bookmark_item: None,
+            removed_link: None,
+        };
+        if let Some(channel_id) = waddle_xmpp::parse_managed_room_jid(room_jid) {
+            cleanup.channel_id = Some(channel_id.clone());
+            match delete_channel_parent_tuple(state, &channel_id, &node_name).await {
+                Ok(true) => {
+                    cleanup.parent_tuple_deleted = true;
+                    if !cleanup.had_bookmark_item {
+                        cleanup.rollback_bookmark_item =
+                            rollback_channel_bookmark_item(state, room_jid, &channel_id).await;
+                        if cleanup.rollback_bookmark_item.is_none() {
+                            let _ =
+                                write_channel_parent_tuple(state, &channel_id, &node_name).await;
+                            rollback_space_delete_cleanups(
+                                state,
+                                &cleanups,
+                                &node_name,
+                                &std::collections::BTreeSet::new(),
+                                &std::collections::BTreeSet::new(),
+                            )
+                            .await;
+                            return Err(internal_err(format!(
+                                "could not snapshot missing Spaces bookmark for linked channel {room_jid}"
+                            )));
+                        }
+                    }
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    tracing::warn!(
+                        room = %room_jid,
+                        space_node = %node_name,
+                        "cascade destroy: clearing channel parent tuple failed",
+                    );
+                    rollback_space_delete_cleanups(
+                        state,
+                        &cleanups,
+                        &node_name,
+                        &std::collections::BTreeSet::new(),
+                        &std::collections::BTreeSet::new(),
+                    )
+                    .await;
+                    return Err(error);
+                }
+            }
+        }
+
+        let existing_link = match state.channel_space_link_store.get(room_jid).await {
+            Ok(link) => link,
+            Err(error) => {
+                cleanups.push(cleanup);
+                rollback_space_delete_cleanups(
+                    state,
+                    &cleanups,
+                    &node_name,
+                    &std::collections::BTreeSet::new(),
+                    &std::collections::BTreeSet::new(),
+                )
+                .await;
+                return Err(internal_err(format!("channel-space link storage: {error}")));
+            }
+        };
+
+        if existing_link
+            .as_ref()
+            .is_some_and(|link| link.space_jid != args.space_jid)
+        {
+            cleanups.push(cleanup);
+            continue;
+        }
+
+        // Drop the link row only after the parent tuple is gone. If this
+        // fails, the link remains so a retry can still find the target.
+        match state.channel_space_link_store.clear(room_jid).await {
+            Ok(true) => {
+                cleanup.removed_link = existing_link.or_else(|| {
+                    Some(ChannelSpaceLink {
+                        channel_jid: room_jid.clone(),
+                        space_jid: args.space_jid.clone(),
+                        created_at: now_unix_seconds(),
+                    })
+                });
+            }
+            Ok(false) => {}
+            Err(error) => {
+                cleanups.push(cleanup);
+                rollback_space_delete_cleanups(
+                    state,
+                    &cleanups,
+                    &node_name,
+                    &std::collections::BTreeSet::new(),
+                    &std::collections::BTreeSet::new(),
+                )
+                .await;
+                tracing::warn!(
+                    error = %error,
+                    room = %room_jid,
+                    "cascade destroy: clearing channel-space link failed",
+                );
+                return Err(internal_err(format!(
+                    "clearing channel-space link failed for {room_jid}: {error}"
+                )));
+            }
+        }
+        destroy_targets.insert(room_jid.clone());
+        cleanups.push(cleanup);
+    }
+
+    let mut retracted_items: Vec<(String, PubSubItem)> = Vec::new();
+    for stored in &items {
+        let item_id = stored.id.clone();
+        let item = stored.to_pubsub_item();
+        if let Err(error) = state
+            .pubsub_storage
+            .retract_item(&state.spaces_jid, &node_name, &item_id)
+            .await
+        {
+            let failed_restores = restore_space_node_items(
+                state,
+                &node_name,
+                &retracted_items,
+                &std::collections::BTreeSet::new(),
+            )
+            .await;
+            rollback_space_delete_cleanups(
+                state,
+                &cleanups,
+                &node_name,
+                &std::collections::BTreeSet::new(),
+                &failed_restores,
+            )
+            .await;
+            return Err(internal_err(format!(
+                "pubsub retract space item failed for {item_id}: {error}"
+            )));
+        }
+        retracted_items.push((item_id, item));
+    }
+
+    let mut destroyed_rooms: std::collections::BTreeSet<BareJid> =
+        std::collections::BTreeSet::new();
+    for room_jid in &destroy_targets {
         if let Err(error) = state
             .room_registry
             .ask(waddle_xmpp::muc::room_registry_actor::DestroyRoom {
@@ -785,24 +1163,34 @@ async fn run_delete(state: &AppState, args: &SpacesDeleteArgs) -> Result<(), Adm
             })
             .await
         {
+            let failed_restores =
+                restore_space_node_items(state, &node_name, &retracted_items, &destroyed_rooms)
+                    .await;
+            rollback_space_delete_cleanups(
+                state,
+                &cleanups,
+                &node_name,
+                &destroyed_rooms,
+                &failed_restores,
+            )
+            .await;
             tracing::warn!(
                 error = %error,
                 room = %room_jid,
                 "cascade destroy: room registry ask failed",
             );
+            return Err(internal_err(format!(
+                "cascade destroy failed for room {room_jid}: {error}"
+            )));
         }
-        // Drop the link row regardless of room-destroy outcome; the
-        // space is being torn down, so leaving the link row dangling
-        // would make `channels:list space_jid=…` keep returning JIDs
-        // for a space that no longer exists.
-        if let Err(error) = state.channel_space_link_store.clear(&room_jid).await {
-            tracing::warn!(
-                error = %error,
-                room = %room_jid,
-                "cascade destroy: clearing channel-space link failed",
-            );
-        }
+        destroyed_rooms.insert(room_jid.clone());
     }
+
+    state
+        .pubsub_storage
+        .purge_node(&state.spaces_jid, &node_name)
+        .await
+        .map_err(|e| internal_err(format!("pubsub purge_node failed: {e}")))?;
 
     let _deleted = state
         .pubsub_storage

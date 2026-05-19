@@ -33,13 +33,18 @@ use waddle_xmpp::muc::{
     },
     AdminItem, RoomConfig,
 };
+use waddle_xmpp::pubsub::PubSubItem;
 use waddle_xmpp::registry::ConnectionRegistry;
 use waddle_xmpp::xep::xep0004::{DataForm, Field, FieldType, FormType};
 use waddle_xmpp::XmppError;
-use waddle_xmpp::{Affiliation, Role, Stanza};
+use waddle_xmpp::{Affiliation, ChannelInfo, Role, Stanza};
 
 use crate::admin::is_community_owner;
 use crate::channel_space_links::{ChannelSpaceLink, ChannelSpaceLinkError};
+use crate::permissions::{
+    DeleteTuple, Object, ObjectType, PermissionError, Relation, Subject, SubjectType, Tuple,
+    WriteTuple,
+};
 use crate::server::AppState;
 
 // ---------------------------------------------------------------------------
@@ -882,12 +887,336 @@ fn mint_channel_localpart(name: &str) -> String {
     format!("{base}-{short_tail}")
 }
 
+fn space_node_name(space_jid: &BareJid) -> Option<String> {
+    space_jid.node().map(|n| n.to_string())
+}
+
+async fn existing_space_node(state: &AppState, space_jid: &BareJid) -> Result<String, AdminErr> {
+    if space_jid.domain() != state.spaces_jid.domain() {
+        return Err(bad_request(format!(
+            "space_jid must target {}",
+            state.spaces_jid.domain()
+        )));
+    }
+    let Some(node) = space_node_name(space_jid) else {
+        return Err(bad_request("space_jid must have a localpart"));
+    };
+    let exists = state
+        .pubsub_storage
+        .get_node(&state.spaces_jid, &node)
+        .await
+        .map_err(|e| internal_err(format!("pubsub get_node failed: {e}")))?;
+    if exists.is_none() {
+        return Err(Box::new(CommandResult::Error(XmppError::item_not_found(
+            Some(format!("no space '{}'", space_jid)),
+        ))));
+    }
+    Ok(node)
+}
+
+async fn publish_channel_space_bookmark(
+    state: &AppState,
+    node: &str,
+    channel_id: &str,
+    name: &str,
+    channel_type: &str,
+) -> Result<bool, AdminErr> {
+    let item_id = format!("{}@{}", channel_id, state.muc_domain);
+    let item_filter = [item_id.clone()];
+    let previous_item = state
+        .pubsub_storage
+        .get_items(&state.spaces_jid, node, Some(1), &item_filter)
+        .await
+        .map_err(|e| internal_err(format!("pubsub read existing channel bookmark failed: {e}")))?
+        .into_iter()
+        .next()
+        .map(|stored| stored.to_pubsub_item());
+    let item = waddle_xmpp::xep::build_channel_item(
+        &ChannelInfo {
+            id: channel_id.to_string(),
+            name: name.to_string(),
+            channel_type: channel_type.to_string(),
+        },
+        &state.muc_domain.to_string(),
+    )
+    .map_err(|e| internal_err(format!("failed to build XEP-0503 channel bookmark: {e}")))?;
+    state
+        .pubsub_storage
+        .publish_item(&state.spaces_jid, node, &item, None, false)
+        .await
+        .map_err(|e| internal_err(format!("pubsub publish channel bookmark failed: {e}")))?;
+    match write_channel_parent_tuple_if_absent(state, channel_id, node).await {
+        Ok(created) => Ok(created),
+        Err(error) => {
+            if let Some(previous_item) = previous_item.as_ref() {
+                let _ = state
+                    .pubsub_storage
+                    .publish_item(&state.spaces_jid, node, previous_item, None, false)
+                    .await;
+            } else {
+                let _ = state
+                    .pubsub_storage
+                    .retract_item(&state.spaces_jid, node, &item_id)
+                    .await;
+            }
+            Err(error)
+        }
+    }
+}
+
+async fn restore_channel_space_bookmark(
+    state: &AppState,
+    node: &str,
+    item_id: &str,
+    channel_id: &str,
+    previous_item: Option<&PubSubItem>,
+    parent_tuple_created: bool,
+) {
+    if let Some(previous_item) = previous_item {
+        if parent_tuple_created {
+            match delete_channel_parent_tuple(state, channel_id, node).await {
+                Ok(_) => {}
+                Err(_error) => {
+                    tracing::warn!(
+                        node = %node,
+                        item_id = %item_id,
+                        "channels:update rollback failed to delete operation-created parent tuple; preserving newly-published Spaces bookmark",
+                    );
+                    return;
+                }
+            }
+        }
+        match state
+            .pubsub_storage
+            .publish_item(&state.spaces_jid, node, previous_item, None, false)
+            .await
+        {
+            Ok(_) => {}
+            Err(error) => {
+                if parent_tuple_created {
+                    let _ = write_channel_parent_tuple(state, channel_id, node).await;
+                }
+                tracing::warn!(
+                    node = %node,
+                    item_id = %item_id,
+                    error = %error,
+                    "channels:update rollback failed to restore previous Spaces bookmark",
+                );
+            }
+        }
+    } else {
+        if parent_tuple_created {
+            match delete_channel_parent_tuple(state, channel_id, node).await {
+                Ok(_) => {}
+                Err(_error) => {
+                    tracing::warn!(
+                        node = %node,
+                        item_id = %item_id,
+                        "channels:update rollback failed to delete operation-created parent tuple; preserving newly-published Spaces bookmark",
+                    );
+                    return;
+                }
+            }
+        }
+        if let Err(error) = state
+            .pubsub_storage
+            .retract_item(&state.spaces_jid, node, item_id)
+            .await
+        {
+            if parent_tuple_created {
+                let _ = write_channel_parent_tuple(state, channel_id, node).await;
+            }
+            tracing::warn!(
+                node = %node,
+                item_id = %item_id,
+                error = %error,
+                "channels:update rollback failed to retract newly-published Spaces bookmark",
+            );
+        }
+    }
+}
+
+async fn write_channel_parent_tuple(
+    state: &AppState,
+    channel_id: &str,
+    space_node: &str,
+) -> Result<(), AdminErr> {
+    write_channel_parent_tuple_if_absent(state, channel_id, space_node)
+        .await
+        .map(|_| ())
+}
+
+async fn write_channel_parent_tuple_if_absent(
+    state: &AppState,
+    channel_id: &str,
+    space_node: &str,
+) -> Result<bool, AdminErr> {
+    let tuple = Tuple::new(
+        Object::new(ObjectType::Channel, channel_id),
+        Relation::new("parent"),
+        Subject::userset(SubjectType::Space, space_node, ""),
+    );
+    match state.permission_actor.ask(WriteTuple { tuple }).await {
+        Ok(()) => Ok(true),
+        Err(kameo::error::SendError::HandlerError(PermissionError::TupleAlreadyExists)) => {
+            Ok(false)
+        }
+        Err(error) => Err(internal_err(format!(
+            "permission actor failed writing channel parent tuple: {error}"
+        ))),
+    }
+}
+
+async fn delete_channel_parent_tuple(
+    state: &AppState,
+    channel_id: &str,
+    space_node: &str,
+) -> Result<bool, AdminErr> {
+    let tuple = Tuple::new(
+        Object::new(ObjectType::Channel, channel_id),
+        Relation::new("parent"),
+        Subject::userset(SubjectType::Space, space_node, ""),
+    );
+    match state.permission_actor.ask(DeleteTuple { tuple }).await {
+        Ok(()) => Ok(true),
+        Err(kameo::error::SendError::HandlerError(PermissionError::TupleNotFound)) => Ok(false),
+        Err(error) => Err(internal_err(format!(
+            "permission actor failed deleting channel parent tuple: {error}"
+        ))),
+    }
+}
+
+struct RemovedChannelBookmark {
+    node: String,
+    item: Option<PubSubItem>,
+    fallback_item: Option<PubSubItem>,
+    parent_tuple_deleted: bool,
+}
+
+async fn retract_duplicate_channel_bookmarks(
+    state: &AppState,
+    keep_node: &str,
+    channel_id: &str,
+    channel_jid: &BareJid,
+) -> Result<(), AdminErr> {
+    let item_id = channel_jid.to_string();
+    let nodes = state
+        .pubsub_storage
+        .list_node_names_for_item(&state.spaces_jid, &item_id)
+        .await
+        .map_err(|e| internal_err(format!("pubsub list channel bookmark nodes failed: {e}")))?;
+    let mut removed = Vec::new();
+    for node in nodes.into_iter().filter(|node| node != keep_node) {
+        let snapshot = match snapshot_channel_bookmark(state, &node, &item_id).await {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                restore_removed_channel_bookmarks(state, &removed, &item_id, Some(channel_id))
+                    .await;
+                return Err(error);
+            }
+        };
+        let fallback_item = if snapshot.is_none() {
+            match rollback_channel_bookmark_item(state, channel_jid, channel_id).await {
+                Some(item) => Some(item),
+                None => {
+                    restore_removed_channel_bookmarks(state, &removed, &item_id, Some(channel_id))
+                        .await;
+                    return Err(internal_err(format!(
+                        "could not snapshot missing Spaces bookmark for linked channel {channel_jid}"
+                    )));
+                }
+            }
+        } else {
+            None
+        };
+        match retract_channel_bookmark_and_parent(state, &node, &item_id, Some(channel_id)).await {
+            Ok(parent_tuple_deleted) => removed.push(RemovedChannelBookmark {
+                node,
+                item: snapshot,
+                fallback_item,
+                parent_tuple_deleted,
+            }),
+            Err(error) => {
+                restore_removed_channel_bookmarks(state, &removed, &item_id, Some(channel_id))
+                    .await;
+                return Err(error);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn channel_type_from_config(config: &RoomConfig) -> &'static str {
+    if config.forum {
+        "forum"
+    } else {
+        "text"
+    }
+}
+
+async fn rollback_channel_bookmark_item(
+    state: &AppState,
+    room_jid: &BareJid,
+    channel_id: &str,
+) -> Option<PubSubItem> {
+    let actor = match state
+        .room_registry
+        .ask(GetRoom {
+            room_jid: room_jid.clone(),
+        })
+        .await
+    {
+        Ok(Some(actor)) => actor,
+        Ok(None) => return None,
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                room = %room_jid,
+                "channels rollback could not snapshot room for missing Spaces bookmark",
+            );
+            return None;
+        }
+    };
+    let config = match actor.ask(GetConfig).await {
+        Ok(config) => config,
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                room = %room_jid,
+                "channels rollback could not snapshot room config for missing Spaces bookmark",
+            );
+            return None;
+        }
+    };
+    let channel_type = channel_type_from_config(&config).to_string();
+    waddle_xmpp::xep::build_channel_item(
+        &ChannelInfo {
+            id: channel_id.to_string(),
+            name: config.name,
+            channel_type,
+        },
+        &state.muc_domain.to_string(),
+    )
+    .map_err(|error| {
+        tracing::warn!(
+            error = %error,
+            room = %room_jid,
+            "channels rollback could not build missing Spaces bookmark",
+        );
+    })
+    .ok()
+}
+
 async fn run_create(state: &AppState, args: &ChannelsCreateArgs) -> Result<ChannelRef, AdminErr> {
     let localpart = mint_channel_localpart(&args.name);
     let muc_domain = state.muc_domain.to_string();
     let channel_jid: BareJid = format!("{localpart}@{muc_domain}")
         .parse()
         .map_err(|e| internal_err(format!("constructed channel JID is invalid: {e}")))?;
+    let space_node = match args.space_jid.as_ref() {
+        Some(space_jid) => Some(existing_space_node(state, space_jid).await?),
+        None => None,
+    };
 
     // Spec: public, persistent, not members-only.
     let mut config = RoomConfig {
@@ -917,9 +1246,30 @@ async fn run_create(state: &AppState, args: &ChannelsCreateArgs) -> Result<Chann
     // Persist the channel↔space link when the caller supplied a
     // `space_jid`. The link drives `channels:list` filtering and
     // `spaces:delete` cascade behavior; the room itself lives in the
-    // MUC registry independent of any space.
-    if let Some(space_jid) = args.space_jid.as_ref() {
-        state
+    // MUC registry independent of any space. The matching XEP-0503
+    // bookmark is the public discovery source for native clients.
+    if let (Some(space_jid), Some(node)) = (args.space_jid.as_ref(), space_node.as_deref()) {
+        let parent_tuple_created = match publish_channel_space_bookmark(
+            state,
+            node,
+            &localpart,
+            &args.name,
+            channel_type_from_config(&config),
+        )
+        .await
+        {
+            Ok(created) => created,
+            Err(error) => {
+                let _ = state
+                    .room_registry
+                    .ask(DestroyRoom {
+                        room_jid: channel_jid.clone(),
+                    })
+                    .await;
+                return Err(error);
+            }
+        };
+        if let Err(error) = state
             .channel_space_link_store
             .set(&ChannelSpaceLink {
                 channel_jid: channel_jid.clone(),
@@ -927,7 +1277,51 @@ async fn run_create(state: &AppState, args: &ChannelsCreateArgs) -> Result<Chann
                 created_at: now_unix_seconds(),
             })
             .await
-            .map_err(map_link_err)?;
+        {
+            let tuple_ready_for_retract = if parent_tuple_created {
+                match delete_channel_parent_tuple(state, &localpart, node).await {
+                    Ok(_) => true,
+                    Err(_delete_error) => {
+                        tracing::warn!(
+                            node = %node,
+                            channel = %channel_jid,
+                            "channels:create failed to persist channel-space link and could not delete operation-created parent tuple; preserving room and Spaces bookmark",
+                        );
+                        false
+                    }
+                }
+            } else {
+                true
+            };
+            if tuple_ready_for_retract {
+                match state
+                    .pubsub_storage
+                    .retract_item(&state.spaces_jid, node, &channel_jid.to_string())
+                    .await
+                {
+                    Ok(_) => {
+                        let _ = state
+                            .room_registry
+                            .ask(DestroyRoom {
+                                room_jid: channel_jid.clone(),
+                            })
+                            .await;
+                    }
+                    Err(retract_error) => {
+                        if parent_tuple_created {
+                            let _ = write_channel_parent_tuple(state, &localpart, node).await;
+                        }
+                        tracing::warn!(
+                            node = %node,
+                            channel = %channel_jid,
+                            error = %retract_error,
+                            "channels:create failed to persist channel-space link and could not retract Spaces bookmark; preserving room and parent tuple for consistency",
+                        );
+                    }
+                }
+            }
+            return Err(map_link_err(error));
+        }
     }
 
     Ok(ChannelRef {
@@ -968,14 +1362,77 @@ async fn run_update(state: &AppState, args: &ChannelsUpdateArgs) -> Result<Chann
         name: new_name.clone(),
         description: new_topic.clone(),
         members_only: new_members_only,
-        ..existing
+        ..existing.clone()
     };
+    let linked_bookmark = if let Some(link) = state
+        .channel_space_link_store
+        .get(&args.channel_jid)
+        .await
+        .map_err(map_link_err)?
+    {
+        let Some(node) = space_node_name(&link.space_jid) else {
+            return Err(bad_request("stored space_jid must have a localpart"));
+        };
+        let Some(channel_id) = waddle_xmpp::parse_managed_room_jid(&args.channel_jid) else {
+            return Err(internal_err(format!(
+                "linked channel JID is not managed: {}",
+                args.channel_jid
+            )));
+        };
+        let item_id = args.channel_jid.to_string();
+        let previous_bookmark = snapshot_channel_bookmark(state, &node, &item_id).await?;
+        Some((node, channel_id, item_id, previous_bookmark))
+    } else {
+        None
+    };
+
     actor
         .ask(UpdateConfig {
             config: updated.clone(),
         })
         .await
         .map_err(send_err("room actor UpdateConfig"))?;
+
+    if let Some((node, channel_id, item_id, previous_bookmark)) = linked_bookmark {
+        let parent_tuple_created = match publish_channel_space_bookmark(
+            state,
+            &node,
+            &channel_id,
+            &new_name,
+            channel_type_from_config(&updated),
+        )
+        .await
+        {
+            Ok(created) => created,
+            Err(error) => {
+                let _ = actor
+                    .ask(UpdateConfig {
+                        config: existing.clone(),
+                    })
+                    .await;
+                return Err(error);
+            }
+        };
+        if let Err(error) =
+            retract_duplicate_channel_bookmarks(state, &node, &channel_id, &args.channel_jid).await
+        {
+            let _ = actor
+                .ask(UpdateConfig {
+                    config: existing.clone(),
+                })
+                .await;
+            restore_channel_space_bookmark(
+                state,
+                &node,
+                &item_id,
+                &channel_id,
+                previous_bookmark.as_ref(),
+                parent_tuple_created,
+            )
+            .await;
+            return Err(error);
+        }
+    }
 
     Ok(ChannelRef {
         channel_jid: args.channel_jid.clone(),
@@ -986,22 +1443,322 @@ async fn run_update(state: &AppState, args: &ChannelsUpdateArgs) -> Result<Chann
 }
 
 async fn run_delete(state: &AppState, args: &ChannelsDeleteArgs) -> Result<(), AdminErr> {
-    let _removed = state
+    let link = state
+        .channel_space_link_store
+        .get(&args.channel_jid)
+        .await
+        .map_err(map_link_err)?;
+    let linked_node = link
+        .as_ref()
+        .and_then(|link| space_node_name(&link.space_jid));
+    let item_id = args.channel_jid.to_string();
+    let channel_id = waddle_xmpp::parse_managed_room_jid(&args.channel_jid);
+    let mut bookmark_nodes: std::collections::BTreeSet<String> = state
+        .pubsub_storage
+        .list_node_names_for_item(&state.spaces_jid, &item_id)
+        .await
+        .map_err(|e| internal_err(format!("pubsub list channel bookmark nodes failed: {e}")))?
+        .into_iter()
+        .collect();
+    if let Some(node) = linked_node.as_ref() {
+        bookmark_nodes.insert(node.clone());
+    }
+
+    let mut bookmark_snapshots: std::collections::BTreeMap<String, Option<PubSubItem>> =
+        std::collections::BTreeMap::new();
+    for node in &bookmark_nodes {
+        bookmark_snapshots.insert(
+            node.clone(),
+            snapshot_channel_bookmark(state, node, &item_id).await?,
+        );
+    }
+
+    let mut removed_bookmarks: Vec<RemovedChannelBookmark> = Vec::new();
+
+    for node in bookmark_nodes
+        .iter()
+        .filter(|node| Some(node.as_str()) != linked_node.as_deref())
+    {
+        let snapshot = bookmark_snapshots.get(node).cloned().unwrap_or(None);
+        let fallback_item = if snapshot.is_none() {
+            if let Some(channel_id) = channel_id.as_deref() {
+                match rollback_channel_bookmark_item(state, &args.channel_jid, channel_id).await {
+                    Some(item) => Some(item),
+                    None => {
+                        restore_removed_channel_bookmarks(
+                            state,
+                            &removed_bookmarks,
+                            &item_id,
+                            Some(channel_id),
+                        )
+                        .await;
+                        return Err(internal_err(format!(
+                            "could not snapshot missing Spaces bookmark for linked channel {}",
+                            args.channel_jid
+                        )));
+                    }
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        match retract_channel_bookmark_and_parent(state, node, &item_id, channel_id.as_deref())
+            .await
+        {
+            Ok(parent_tuple_deleted) => removed_bookmarks.push(RemovedChannelBookmark {
+                node: node.clone(),
+                item: snapshot,
+                fallback_item,
+                parent_tuple_deleted,
+            }),
+            Err(error) => {
+                restore_removed_channel_bookmarks(
+                    state,
+                    &removed_bookmarks,
+                    &item_id,
+                    channel_id.as_deref(),
+                )
+                .await;
+                return Err(error);
+            }
+        }
+    }
+
+    if link.is_some() {
+        if let Err(error) = state
+            .channel_space_link_store
+            .clear(&args.channel_jid)
+            .await
+        {
+            restore_removed_channel_bookmarks(
+                state,
+                &removed_bookmarks,
+                &item_id,
+                channel_id.as_deref(),
+            )
+            .await;
+            return Err(map_link_err(error));
+        }
+    }
+
+    if let Some(node) = linked_node.as_ref() {
+        let snapshot = bookmark_snapshots.get(node).cloned().unwrap_or(None);
+        let fallback_item = if snapshot.is_none() {
+            if let Some(channel_id) = channel_id.as_deref() {
+                match rollback_channel_bookmark_item(state, &args.channel_jid, channel_id).await {
+                    Some(item) => Some(item),
+                    None => {
+                        if let Some(link) = link.as_ref() {
+                            if let Err(rollback_error) =
+                                state.channel_space_link_store.set(link).await
+                            {
+                                tracing::warn!(
+                                    error = %rollback_error,
+                                    channel = %args.channel_jid,
+                                    space = %link.space_jid,
+                                    "channels:delete rollback failed to restore channel-space link",
+                                );
+                            }
+                        }
+                        restore_removed_channel_bookmarks(
+                            state,
+                            &removed_bookmarks,
+                            &item_id,
+                            Some(channel_id),
+                        )
+                        .await;
+                        return Err(internal_err(format!(
+                            "could not snapshot missing Spaces bookmark for linked channel {}",
+                            args.channel_jid
+                        )));
+                    }
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        match retract_channel_bookmark_and_parent(state, node, &item_id, channel_id.as_deref())
+            .await
+        {
+            Ok(parent_tuple_deleted) => removed_bookmarks.push(RemovedChannelBookmark {
+                node: node.clone(),
+                item: snapshot,
+                fallback_item,
+                parent_tuple_deleted,
+            }),
+            Err(error) => {
+                if let Some(link) = link.as_ref() {
+                    if let Err(rollback_error) = state.channel_space_link_store.set(link).await {
+                        tracing::warn!(
+                            error = %rollback_error,
+                            channel = %args.channel_jid,
+                            space = %link.space_jid,
+                            "channels:delete rollback failed to restore channel-space link",
+                        );
+                    }
+                }
+                restore_removed_channel_bookmarks(
+                    state,
+                    &removed_bookmarks,
+                    &item_id,
+                    channel_id.as_deref(),
+                )
+                .await;
+                return Err(error);
+            }
+        }
+    }
+
+    match state
         .room_registry
         .ask(DestroyRoom {
             room_jid: args.channel_jid.clone(),
         })
         .await
-        .map_err(send_err("room_registry ask DestroyRoom"))?;
-    // Best-effort: drop the channel↔space link row if any. We
-    // intentionally don't fail the delete on a missing link; the room
-    // is gone, the link projection has nothing left to point at.
-    let _ = state
-        .channel_space_link_store
-        .clear(&args.channel_jid)
-        .await
-        .map_err(map_link_err)?;
+    {
+        Ok(_removed) => {}
+        Err(error) => {
+            restore_removed_channel_bookmarks(
+                state,
+                &removed_bookmarks,
+                &item_id,
+                channel_id.as_deref(),
+            )
+            .await;
+            if let Some(link) = link.as_ref() {
+                if let Err(rollback_error) = state.channel_space_link_store.set(link).await {
+                    tracing::warn!(
+                        error = %rollback_error,
+                        channel = %args.channel_jid,
+                        space = %link.space_jid,
+                        "channels:delete rollback failed to restore channel-space link",
+                    );
+                }
+            }
+            return Err(send_err("room_registry ask DestroyRoom")(error));
+        }
+    }
     Ok(())
+}
+
+async fn snapshot_channel_bookmark(
+    state: &AppState,
+    node: &str,
+    item_id: &str,
+) -> Result<Option<PubSubItem>, AdminErr> {
+    let item_filter = [item_id.to_string()];
+    Ok(state
+        .pubsub_storage
+        .get_items(&state.spaces_jid, node, Some(1), &item_filter)
+        .await
+        .map_err(|e| internal_err(format!("pubsub read channel bookmark failed: {e}")))?
+        .into_iter()
+        .next()
+        .map(|stored| stored.to_pubsub_item()))
+}
+
+async fn restore_removed_channel_bookmarks(
+    state: &AppState,
+    removed: &[RemovedChannelBookmark],
+    item_id: &str,
+    channel_id: Option<&str>,
+) {
+    for removed in removed.iter().rev() {
+        if let Some(item) = removed.item.as_ref() {
+            match state
+                .pubsub_storage
+                .publish_item(&state.spaces_jid, &removed.node, item, None, false)
+                .await
+            {
+                Ok(_) => {
+                    if removed.parent_tuple_deleted {
+                        if let Some(channel_id) = channel_id {
+                            let _ =
+                                write_channel_parent_tuple(state, channel_id, &removed.node).await;
+                        }
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        error = %error,
+                        node = %removed.node,
+                        item_id = %item_id,
+                        "channels:delete failed to restore Spaces bookmark",
+                    );
+                }
+            }
+        } else if removed.parent_tuple_deleted {
+            if let Some(item) = removed.fallback_item.as_ref() {
+                match state
+                    .pubsub_storage
+                    .publish_item(&state.spaces_jid, &removed.node, item, None, false)
+                    .await
+                {
+                    Ok(_) => {
+                        if removed.parent_tuple_deleted {
+                            if let Some(channel_id) = channel_id {
+                                let _ =
+                                    write_channel_parent_tuple(state, channel_id, &removed.node)
+                                        .await;
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            error = %error,
+                            node = %removed.node,
+                            item_id = %item_id,
+                            "channels:delete failed to restore fallback Spaces bookmark",
+                        );
+                    }
+                }
+            } else {
+                tracing::warn!(
+                    node = %removed.node,
+                    item_id = %item_id,
+                    "channels:delete skipped parent tuple restore because no Spaces bookmark item was restored",
+                );
+            }
+        }
+    }
+}
+
+async fn retract_channel_bookmark_and_parent(
+    state: &AppState,
+    node: &str,
+    item_id: &str,
+    channel_id: Option<&str>,
+) -> Result<bool, AdminErr> {
+    let parent_tuple_deleted = if let Some(channel_id) = channel_id {
+        delete_channel_parent_tuple(state, channel_id, node).await?
+    } else {
+        false
+    };
+    if let Err(error) = state
+        .pubsub_storage
+        .retract_item(&state.spaces_jid, node, item_id)
+        .await
+    {
+        if parent_tuple_deleted {
+            if let Some(channel_id) = channel_id {
+                let _ = write_channel_parent_tuple(state, channel_id, node).await;
+            }
+        }
+        tracing::warn!(
+            node = %node,
+            item_id = %item_id,
+            error = %error,
+            "channels:delete failed to retract a Spaces bookmark",
+        );
+        return Err(internal_err(format!(
+            "pubsub retract channel bookmark failed: {error}"
+        )));
+    }
+    Ok(parent_tuple_deleted)
 }
 
 async fn run_occupants(

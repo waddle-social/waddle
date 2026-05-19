@@ -4,6 +4,32 @@ use xmpp_parsers::minidom::Element;
 
 use crate::{inbox, roster, Affiliation, XmppError};
 
+/// XEP-0503 access models Waddle can currently serve correctly for Spaces.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpaceAccessModel {
+    Open,
+    Whitelist,
+}
+
+impl SpaceAccessModel {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Open => "open",
+            Self::Whitelist => "whitelist",
+        }
+    }
+
+    pub fn from_pubsub(access_model: crate::pubsub::AccessModel) -> Option<Self> {
+        match access_model {
+            crate::pubsub::AccessModel::Open => Some(Self::Open),
+            crate::pubsub::AccessModel::Whitelist => Some(Self::Whitelist),
+            crate::pubsub::AccessModel::Presence
+            | crate::pubsub::AccessModel::Roster
+            | crate::pubsub::AccessModel::Authorize => None,
+        }
+    }
+}
+
 /// Detailed canonical space information for XEP-0503.
 #[derive(Debug, Clone)]
 pub struct SpaceDetails {
@@ -19,6 +45,8 @@ pub struct SpaceDetails {
     pub icon_url: Option<String>,
     /// Whether the space is public.
     pub is_public: bool,
+    /// XEP-0060 PubSub access model advertised for the Space node.
+    pub access_model: SpaceAccessModel,
     /// Creation timestamp in ISO 8601 format.
     pub created_at: String,
 }

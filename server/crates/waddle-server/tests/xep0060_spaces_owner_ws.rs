@@ -106,6 +106,21 @@ async fn server_owner_can_configure_set_general_space() {
         is_result(&resp),
         "expected configure-set result, got: {resp}"
     );
+    let cfg = iq_get_to(
+        &mut admin,
+        "spaces-cfg-set-readback",
+        SPACES_JID,
+        &format!(r#"<pubsub xmlns="{NS_PUBSUB_OWNER}"><configure node="general"/></pubsub>"#),
+    )
+    .await;
+    assert!(
+        cfg.contains("pubsub#access_model") && cfg.contains(">open<"),
+        "partial configure-set must preserve the public Spaces access model: {cfg}"
+    );
+    assert!(
+        cfg.contains("pubsub#max_items") && cfg.contains(">200<"),
+        "partial configure-set should apply the submitted max_items field: {cfg}"
+    );
     let _ = admin.close().await;
 }
 

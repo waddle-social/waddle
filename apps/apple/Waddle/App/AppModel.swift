@@ -89,6 +89,11 @@ final class AppModel: ObservableObject {
     private var uploadServiceJID: String?
     private var rustClient: RustXmppClient?
     private var xmppEventsTask: Task<Void, Never>?
+    private var isStructureLoadRunning = false
+    private var structureLoadRerunRequested = false
+    private var structureLoadWaiters: [CheckedContinuation<Void, Never>] = []
+    private var structureLoadGeneration = 0
+    private var structureLoadSurfaceError: (title: String, message: String)?
     private var messagesByRoomJID: [String: [ChatTimelineMessage]] = [:]
     private var presenceByRoomJID: [String: [String: ChatPresenceState]] = [:]
     private var hatsByRoomJID: [String: [String: [XMPPPresenceHat]]] = [:]
@@ -1034,72 +1039,136 @@ final class AppModel: ObservableObject {
 
     /// Loads the XEP-0503 spaces topology and member list.
     private func loadRooms() async {
+        if isStructureLoadRunning {
+            structureLoadRerunRequested = true
+            await withCheckedContinuation { continuation in
+                structureLoadWaiters.append(continuation)
+            }
+            return
+        }
+
+        isStructureLoadRunning = true
+        defer {
+            isStructureLoadRunning = false
+            let waiters = structureLoadWaiters
+            structureLoadWaiters.removeAll()
+            waiters.forEach { $0.resume() }
+        }
+
+        repeat {
+            structureLoadRerunRequested = false
+            await performLoadRooms()
+        } while structureLoadRerunRequested
+    }
+
+    private func performLoadRooms() async {
         guard let session, let rustClient else {
             updateChatSurfaceState()
             return
         }
 
+        let loadingSessionID = session.sessionID
+        structureLoadGeneration += 1
+        let loadingGeneration = structureLoadGeneration
         isLoadingStructure = true
         updateChatSurfaceState()
-
-        do {
-            async let xmppTopology = rustClient.discoverTopology()
-            async let loadedMembers = client.listMembers(sessionID: session.sessionID)
-
-            let (topology, loadedMembersValue) = try await (xmppTopology, loadedMembers)
-            dlog(" loadRooms: \(topology.spaces.count) spaces, \(topology.channels.count) rooms, \(loadedMembersValue.count) members")
-
-            spaces = topology.spaces.map { space in
-                SpaceSummary(
-                    id: space.id,
-                    name: space.name,
-                    description: space.description
-                )
+        defer {
+            if structureLoadGeneration == loadingGeneration {
+                isLoadingStructure = false
+                updateChatSurfaceState()
             }
-
-            channels = topology.channels
-                .map { channel in
-                    return ChannelSummary(
-                        id: channel.id,
-                        apiID: parseManagedRoomBareJID(channel.roomJID),
-                        roomJid: channel.roomJID,
-                        name: channel.name,
-                        description: channel.description,
-                        channelType: channel.channelType,
-                        position: channel.position,
-                        spaceID: channel.spaceID
-                    )
-                }
-                .sorted {
-                    ($0.position ?? 0, $0.name.lowercased()) < ($1.position ?? 0, $1.name.lowercased())
-                }
-            members = loadedMembersValue.sorted { $0.username.lowercased() < $1.username.lowercased() }
-
-            if let selectedChannelID,
-               let selectedChannel = channels.first(where: { $0.id == selectedChannelID }) {
-                self.selectedChannelID = selectedChannelID
-                selectedSpaceID = selectedChannel.spaceID
-            } else {
-                self.selectedChannelID = channels.first?.id
-                selectedSpaceID = channels.first?.spaceID ?? spaces.first?.id
-            }
-            spaceName = selectedSpace?.name ?? serverURL.host ?? "Waddle"
-
-            syncChatRooms()
-            syncChatMembers()
-            syncChatMessages()
-            updateChatSurfaceState()
-
-            if let channelID = self.selectedChannelID {
-                await selectChannel(channelID)
-            }
-        } catch {
-            errorMessage = error.localizedDescription
-            chatStore.setSurfaceState(.error(title: "Unable to load channels", message: error.localizedDescription))
         }
 
-        isLoadingStructure = false
+        let topologyResult = await rustClient.discoverTopology()
+        let loadedMembersValue: [MemberSummary]
+        let memberRefreshError: String?
+        do {
+            loadedMembersValue = try await client.listMembers(sessionID: session.sessionID)
+            memberRefreshError = nil
+        } catch {
+            loadedMembersValue = members
+            memberRefreshError = error.localizedDescription
+        }
+        dlog(" loadRooms: \(topologyResult.topology.spaces.count) spaces, \(topologyResult.topology.channels.count) rooms, \(loadedMembersValue.count) members")
+
+        guard self.session?.sessionID == loadingSessionID, self.rustClient === rustClient else {
+            return
+        }
+
+        let discoveredSpaces = topologyResult.topology.spaces.map { space in
+            SpaceSummary(
+                id: space.id,
+                name: space.name,
+                description: space.description
+            )
+        }
+
+        let discoveredChannels = topologyResult.topology.channels
+            .map { channel in
+                return ChannelSummary(
+                    id: channel.id,
+                    apiID: parseManagedRoomBareJID(channel.roomJID),
+                    roomJid: channel.roomJID,
+                    name: channel.name,
+                    description: channel.description,
+                    channelType: channel.channelType,
+                    position: channel.position,
+                    spaceID: channel.spaceID
+                )
+            }
+            .sorted {
+                ($0.position ?? 0, $0.name.lowercased()) < ($1.position ?? 0, $1.name.lowercased())
+            }
+        var loadWarning: String?
+        if let discoveryError = topologyResult.errorDescription {
+            if !spaces.isEmpty || !channels.isEmpty {
+                let message = "Space discovery failed; keeping the current topology."
+                errorMessage = discoveryError
+                loadWarning = message
+                structureLoadSurfaceError = nil
+            } else {
+                errorMessage = discoveryError
+                loadWarning = "Space discovery failed."
+                structureLoadSurfaceError = (
+                    title: "Space discovery failed",
+                    message: "Reconnect to retry loading spaces and channels."
+                )
+                spaces = []
+                channels = []
+            }
+        } else {
+            structureLoadSurfaceError = nil
+            spaces = discoveredSpaces
+            channels = discoveredChannels
+        }
+        if let memberRefreshError {
+            errorMessage = memberRefreshError
+            loadWarning = "Members could not be refreshed: \(memberRefreshError)"
+        }
+        members = loadedMembersValue.sorted { $0.username.lowercased() < $1.username.lowercased() }
+
+        if let selectedChannelID,
+           let selectedChannel = channels.first(where: { $0.id == selectedChannelID }) {
+            self.selectedChannelID = selectedChannelID
+            selectedSpaceID = selectedChannel.spaceID
+        } else {
+            self.selectedChannelID = channels.first?.id
+            selectedSpaceID = channels.first?.spaceID ?? spaces.first?.id
+        }
+        spaceName = selectedSpace?.name ?? serverURL.host ?? "Waddle"
+
+        syncChatRooms()
+        syncChatMembers()
+        syncChatMessages()
         updateChatSurfaceState()
+
+        if let channelID = self.selectedChannelID {
+            await selectChannel(channelID)
+        }
+
+        if let loadWarning {
+            chatStore.setBannerState(.error(message: loadWarning))
+        }
     }
 
     private func joinSelectedChannel() async throws {
@@ -1927,6 +1996,14 @@ final class AppModel: ObservableObject {
             return
         }
 
+        if let structureLoadSurfaceError, channels.isEmpty {
+            chatStore.setSurfaceState(.error(
+                title: structureLoadSurfaceError.title,
+                message: structureLoadSurfaceError.message
+            ))
+            return
+        }
+
         guard !channels.isEmpty || isLoadingStructure else {
             chatStore.setSurfaceState(.empty(title: "Connecting to space", message: "Loading channels…"))
             return
@@ -2033,6 +2110,9 @@ final class AppModel: ObservableObject {
         chatStore.replaceMessages([])
         chatStore.setBannerState(.hidden)
         chatStore.setSurfaceState(.empty(title: "Sign in", message: "Sign in to load the server space and connect to live rooms."))
+        structureLoadGeneration += 1
+        structureLoadSurfaceError = nil
+        isLoadingStructure = false
     }
 
     func handleAppBecameActive() {

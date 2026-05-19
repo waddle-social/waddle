@@ -117,7 +117,7 @@ pub fn build_spaces_metadata_form_for_requester(
         ))
         .add_field(Field::text_single(
             "pubsub#access_model",
-            if space.is_public { "open" } else { "whitelist" },
+            space.access_model.as_str(),
         ));
 
     if let Some(affiliation) = requester_affiliation {
@@ -242,6 +242,7 @@ mod tests {
             owner_id: "alice".to_string(),
             icon_url: None,
             is_public: true,
+            access_model: crate::SpaceAccessModel::Open,
             created_at: "2026-01-15T10:00:00Z".to_string(),
         }
     }
@@ -461,6 +462,7 @@ mod tests {
     fn test_build_spaces_metadata_form_private_space() {
         let mut space = test_space();
         space.is_public = false;
+        space.access_model = crate::SpaceAccessModel::Whitelist;
         space.description = None;
 
         let form = build_spaces_metadata_form(&space);

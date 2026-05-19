@@ -192,6 +192,35 @@ fn parse_configure_request() {
 }
 
 #[test]
+fn parse_configure_set_keeps_partial_fields_partial() {
+    let configure = Element::builder("configure", NS_PUBSUB_OWNER)
+        .attr(minidom::rxml::xml_ncname!("node").to_owned(), "space")
+        .append(
+            Element::builder("x", NS_XDATA)
+                .attr(minidom::rxml::xml_ncname!("type").to_owned(), "submit")
+                .append(xdata_field("pubsub#max_items", "200"))
+                .build(),
+        )
+        .build();
+    let iq = iq_with_payload(
+        "cfg-set1",
+        Some("owner@example.com"),
+        None,
+        TestIqPayload::Set(pubsub_payload(NS_PUBSUB_OWNER, [configure])),
+    );
+    let request = parse_pubsub_iq(&iq).expect("should parse");
+
+    match request {
+        PubSubRequest::ConfigureNodeSet { node, config } => {
+            assert_eq!(node, "space");
+            assert_eq!(config.max_items, Some(200));
+            assert_eq!(config.access_model, None);
+        }
+        other => panic!("Expected configure-set request, got {other:?}"),
+    }
+}
+
+#[test]
 fn parse_owner_subscriptions_as_unsupported_manage_subscriptions() {
     let subscriptions = Element::builder("subscriptions", NS_PUBSUB_OWNER)
         .attr(minidom::rxml::xml_ncname!("node").to_owned(), "space")
