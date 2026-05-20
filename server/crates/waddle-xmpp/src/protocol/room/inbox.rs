@@ -21,11 +21,25 @@ use super::super::event::{GroupchatThreadProjection, OutboundEvent};
 use super::context::RoomContext;
 use super::traits::{RoomHandler, RoomHandlerOutcome};
 use crate::inbox::runtime::{preview_text, should_project_message};
+use crate::types::Role;
 use crate::xep::xep0508::{extract_forum_action, ForumAction};
 use jid::BareJid;
 use std::collections::HashSet;
 use waddle_xmpp_core::xep0201::thread_info_from_message;
 use xmpp_parsers::message::Message;
+
+/// XEP-0513 §"Multi-User Chats Permissions": server-internal default
+/// for `mentions#channel` is `moderators` — only senders with role
+/// `Role::Moderator` may broadcast `urn:xmpp:mentions:0#channel` for
+/// push purposes. Returning `false` when the sender has no occupancy
+/// snapshot is the strict reading of XEP-0045 §7.4 (only joined
+/// occupants may message the room) combined with XEP-0513 §"Multi-User
+/// Chats Permissions" (receiving entities SHOULD ignore mentions from
+/// senders below the minimum role).
+fn sender_may_broadcast_channel_mention(ctx: &RoomContext<'_>) -> bool {
+    ctx.sender_snapshot()
+        .is_some_and(|sender| sender.role >= Role::Moderator)
+}
 
 /// Per-occupant inbox projection handler for the room handler chain.
 #[derive(Debug, Default, Clone, Copy)]
@@ -48,6 +62,13 @@ impl RoomHandler for MucInboxHandler {
             .collect();
         let mut events = Vec::with_capacity(1 + ctx.durable_recipient_bare_jids.len());
         let sender_bare = ctx.sender_full.to_bare();
+        // XEP-0513 §"Multi-User Chats Permissions": freeze the sender's
+        // permission to broadcast `urn:xmpp:mentions:0#channel` for push
+        // purposes at dispatch time, before the per-recipient fan-out.
+        // Same shape as `room_members_only`: one typed bool snapshotted
+        // here, read by the T0 candidate classifier; never re-derived
+        // per recipient.
+        let sender_can_broadcast_channel_mention = sender_may_broadcast_channel_mention(ctx);
         // Always project the sender's own row (no unread bump). The
         // legacy code did this independent of whether the sender was
         // also enumerated as an occupant, and this matches RFC
@@ -65,6 +86,7 @@ impl RoomHandler for MucInboxHandler {
                 is_durable_recipient: false,
                 is_live_occupant: true,
                 room_members_only: ctx.room_members_only,
+                sender_can_broadcast_channel_mention,
                 thread: thread.clone(),
                 dispatch_timestamp: ctx.dispatch_timestamp,
             });
@@ -81,6 +103,7 @@ impl RoomHandler for MucInboxHandler {
                 is_durable_recipient: true,
                 is_live_occupant: live_recipient_bares.contains(bare),
                 room_members_only: ctx.room_members_only,
+                sender_can_broadcast_channel_mention,
                 thread: thread.clone(),
                 dispatch_timestamp: ctx.dispatch_timestamp,
             });
@@ -342,6 +365,143 @@ mod tests {
                 .any(|(owner, _, _, _, _)| owner == "dave@example.com"),
             "live occupants outside the durable affiliation set must not get inbox/push projection"
         );
+    }
+
+    /// XEP-0513 §"Multi-User Chats Permissions" §304: the typed
+    /// frozen permission snapshot is taken at room-dispatch time, NOT
+    /// later. This test pins the helper: only senders whose frozen
+    /// occupancy role is `Role::Moderator` may broadcast a channel
+    /// mention; participants and visitors get `false`. The class
+    /// downgrade itself is exercised in the `groupchat_inbox.rs`
+    /// classifier tests — this test only locks the snapshot helper.
+    #[test]
+    fn xep0513_sender_may_broadcast_channel_mention_requires_moderator() {
+        let room = bare("team@conf.example.com");
+        let moderator = full("alice@example.com/web");
+        let participant = full("bob@example.com/desk");
+        let outsider = full("eve@example.com/cli");
+
+        let mut moderator_occ = occ(moderator.clone(), "alice");
+        moderator_occ.role = Role::Moderator;
+        let mut participant_occ = occ(participant.clone(), "bob");
+        participant_occ.role = Role::Participant;
+        let occupants = vec![moderator_occ, participant_occ];
+
+        let id_gen = FixedIdGenerator("ignored".to_string());
+        let secret = OccupantIdSecret::for_testing(b"test-secret".to_vec());
+
+        for (sender, expected, label) in [
+            (&moderator, true, "Role::Moderator MUST be permitted"),
+            (
+                &participant,
+                false,
+                "Role::Participant MUST NOT be permitted — XEP-0513 §304 \
+                 default policy is `mentions#channel = moderators`",
+            ),
+            // Sender outside the occupancy snapshot (XEP-0045 §7.4
+            // gate would already reject this before the inbox handler
+            // runs, but the helper MUST still deny defensively).
+            (
+                &outsider,
+                false,
+                "absent occupancy snapshot MUST deny channel broadcast",
+            ),
+        ] {
+            let ctx = RoomContext {
+                room: &room,
+                sender_full: sender,
+                occupants: &occupants,
+                durable_recipient_bare_jids: &[],
+                managed_room_forbidden: false,
+                room_moderated: false,
+                room_members_only: false,
+                pin_permission: crate::muc::PinPermission::default(),
+                id_gen: &id_gen,
+                occupant_id_secret: &secret,
+                sender_nickname_generation: 0,
+                project_sender_inbox: true,
+                dispatch_timestamp: 0,
+            };
+            assert_eq!(
+                sender_may_broadcast_channel_mention(&ctx),
+                expected,
+                "{label}"
+            );
+        }
+    }
+
+    /// Lock-in: the typed `sender_can_broadcast_channel_mention` field
+    /// flows from the frozen sender role to EVERY emitted
+    /// `ProjectGroupchatInbox` event in a single dispatch (sender row
+    /// plus every durable recipient row). This is the same snapshot
+    /// invariant as `room_members_only` (Q5 frozen-snapshot semantic).
+    #[test]
+    fn xep0513_channel_permission_is_frozen_per_dispatch_across_all_recipients() {
+        let room = bare("team@conf.example.com");
+        let moderator = full("alice@example.com/web");
+        let participant = full("bob@example.com/desk");
+        let mut mod_occ = occ(moderator.clone(), "alice");
+        mod_occ.role = Role::Moderator;
+        let participant_occ = occ(participant.clone(), "bob");
+        let occupants = vec![mod_occ, participant_occ];
+        let durable_recipients = vec![bob_bare(), bare("dave@example.com")];
+
+        let mut msg = groupchat(&room, &moderator, "hello everyone");
+        let events = run_with_durable(
+            &room,
+            &moderator,
+            &occupants,
+            &durable_recipients,
+            false,
+            &mut msg,
+        );
+
+        let permissions: Vec<bool> = events
+            .iter()
+            .filter_map(|event| match event {
+                OutboundEvent::ProjectGroupchatInbox {
+                    sender_can_broadcast_channel_mention,
+                    ..
+                } => Some(*sender_can_broadcast_channel_mention),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            permissions.iter().all(|granted| *granted),
+            "moderator sender must produce a permission bool of `true` on \
+             every emitted ProjectGroupchatInbox event — frozen snapshot \
+             must not vary per recipient"
+        );
+
+        // Same dispatch with a participant sender → `false` everywhere.
+        let mut msg = groupchat(&room, &participant, "another message");
+        let events = run_with_durable(
+            &room,
+            &participant,
+            &occupants,
+            &durable_recipients,
+            false,
+            &mut msg,
+        );
+        let permissions: Vec<bool> = events
+            .iter()
+            .filter_map(|event| match event {
+                OutboundEvent::ProjectGroupchatInbox {
+                    sender_can_broadcast_channel_mention,
+                    ..
+                } => Some(*sender_can_broadcast_channel_mention),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            permissions.iter().all(|granted| !*granted),
+            "participant sender must produce a permission bool of `false` \
+             on every emitted ProjectGroupchatInbox event"
+        );
+    }
+
+    fn bob_bare() -> BareJid {
+        bare("bob@example.com")
     }
 
     #[test]

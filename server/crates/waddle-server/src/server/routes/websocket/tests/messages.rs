@@ -1584,7 +1584,14 @@ async fn groupchat_active_channel_mention_pushes_live_occupants_only() {
         .ask(JoinWithAffiliation {
             sender_jid: alice_jid.clone(),
             nick: "alice".to_string(),
-            effective_affiliation: Affiliation::Member,
+            // XEP-0513 §"Multi-User Chats Permissions" §304: alice
+            // MUST hold the minimum-role-required (server default
+            // `mentions#channel = moderators`) to broadcast a channel
+            // mention. `Affiliation::Admin` derives `Role::Moderator`
+            // via `room_affiliations`, satisfying the gate. The point
+            // of this test is the `<active/>` recipient filter; the
+            // sender's role is fixture scaffolding.
+            effective_affiliation: Affiliation::Admin,
             local_domain: "example.com".to_string(),
         })
         .await
@@ -1768,7 +1775,12 @@ async fn groupchat_active_channel_mention_preserves_notify_all_for_non_live_alwa
         .ask(JoinWithAffiliation {
             sender_jid: alice_jid.clone(),
             nick: "alice".to_string(),
-            effective_affiliation: Affiliation::Member,
+            // XEP-0513 §"Multi-User Chats Permissions" §304: alice
+            // needs role >= moderator to broadcast a channel mention
+            // under the server's default `mentions#channel = moderators`
+            // policy. Test focus is the live-occupancy + Always
+            // members-only path; sender role is scaffolding.
+            effective_affiliation: Affiliation::Admin,
             local_domain: "example.com".to_string(),
         })
         .await

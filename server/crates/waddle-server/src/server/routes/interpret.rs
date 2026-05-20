@@ -498,6 +498,7 @@ async fn interpret_with_depth(
                 is_durable_recipient,
                 is_live_occupant,
                 room_members_only,
+                sender_can_broadcast_channel_mention,
                 thread,
                 dispatch_timestamp,
             } => {
@@ -510,6 +511,7 @@ async fn interpret_with_depth(
                     is_durable_recipient,
                     is_live_occupant,
                     room_members_only,
+                    sender_can_broadcast_channel_mention,
                     thread,
                     dispatch_timestamp,
                 })
