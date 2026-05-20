@@ -775,6 +775,52 @@ impl NotificationActivityStore {
         Ok(())
     }
 
+    /// Mark `(owner, conversation)` as no longer active. Used for the
+    /// XEP-0085 `<gone/>` signal: the user has ended participation in
+    /// the conversation, so any prior activity window must be
+    /// invalidated regardless of how recent it was. Bypasses the
+    /// monotonic clamp on `last_active_at_ms` — `<gone/>` is the only
+    /// path that legitimately regresses activity, because semantically
+    /// it tells us the recipient is *not* currently engaged. The T1
+    /// XEP-0513 `<active/>` filter then sees `now_ms - 0` which is
+    /// huge, so the `ActiveChannelMention` is suppressed with
+    /// `Xep0513ActiveMiss`. The audit trail preserves the chat-state
+    /// token as `gone` for diagnostics (Codex review on PR #731).
+    pub async fn record_chat_state_gone(
+        &self,
+        owner: &BareJid,
+        conversation: &BareJid,
+        now_ms: i64,
+    ) -> Result<(), NotificationActivityError> {
+        self.execute(
+            r#"
+            INSERT INTO notification_activity (
+                owner_bare_jid,
+                conversation_jid,
+                last_active_at_ms,
+                last_chat_state,
+                last_read_at_ms,
+                presence_show,
+                created_at_ms,
+                updated_at_ms
+            ) VALUES (?, ?, 0, ?, NULL, NULL, ?, ?)
+            ON CONFLICT (owner_bare_jid, conversation_jid) DO UPDATE SET
+                last_active_at_ms = 0,
+                last_chat_state = excluded.last_chat_state,
+                updated_at_ms = excluded.updated_at_ms
+            "#,
+            crate::db_params![
+                owner.to_string(),
+                conversation.to_string(),
+                NotificationChatState::Gone.as_db_value(),
+                now_ms,
+                now_ms,
+            ],
+        )
+        .await?;
+        Ok(())
+    }
+
     /// Record a XEP-0490 read-marker advance as activity for the user
     /// on the named conversation. Updates both `last_read_at_ms` and
     /// `last_active_at_ms` — a read-marker advance is by definition a
@@ -1205,6 +1251,73 @@ mod tests {
             Some(NotificationChatState::Active),
             "stale chat-state MUST NOT overwrite the fresh chat-state token"
         );
+    }
+
+    /// XEP-0085 `<gone/>` is an explicit inactivity signal. The writer
+    /// MUST zero `last_active_at_ms` regardless of how recent the prior
+    /// activity was so the T1 XEP-0513 `<active/>` filter immediately
+    /// stops treating the user as engaged in the conversation. The
+    /// chat-state token is preserved as `gone` for diagnostics.
+    #[tokio::test]
+    async fn record_chat_state_gone_zeroes_last_active_unconditionally() {
+        let store = store().await;
+        let owner = bare("alice@example.com");
+        let conversation = bare("room@muc.example.com");
+        // Seed a fresh active state at t=5000.
+        store
+            .record_chat_state(&owner, &conversation, NotificationChatState::Active, 5_000)
+            .await
+            .expect("seed active");
+        let seeded = store
+            .read(&owner, &conversation)
+            .await
+            .expect("read seed")
+            .expect("row");
+        assert_eq!(seeded.last_active_at_ms, 5_000);
+        // <gone/> at t=6000 MUST zero last_active_at_ms even though
+        // the prior write is more recent than this would otherwise be
+        // allowed under the monotonic clamp.
+        store
+            .record_chat_state_gone(&owner, &conversation, 6_000)
+            .await
+            .expect("record gone");
+        let after = store
+            .read(&owner, &conversation)
+            .await
+            .expect("read post-gone")
+            .expect("row");
+        assert_eq!(
+            after.last_active_at_ms, 0,
+            "<gone/> MUST unconditionally regress last_active_at_ms to 0",
+        );
+        assert_eq!(
+            after.last_chat_state,
+            Some(NotificationChatState::Gone),
+            "<gone/> MUST preserve the typed chat-state token for diagnostics",
+        );
+    }
+
+    /// `record_chat_state_gone` works as an UPSERT against a row that
+    /// does not yet exist for the (owner, conversation) pair — the
+    /// first signal we ever see for this user in this conversation can
+    /// legitimately be a `<gone/>` (a client sending its departure on
+    /// disconnect without ever having sent another chat-state).
+    #[tokio::test]
+    async fn record_chat_state_gone_upserts_missing_row() {
+        let store = store().await;
+        let owner = bare("alice@example.com");
+        let conversation = bare("room@muc.example.com");
+        store
+            .record_chat_state_gone(&owner, &conversation, 1_000)
+            .await
+            .expect("record gone");
+        let after = store
+            .read(&owner, &conversation)
+            .await
+            .expect("read")
+            .expect("row");
+        assert_eq!(after.last_active_at_ms, 0);
+        assert_eq!(after.last_chat_state, Some(NotificationChatState::Gone));
     }
 
     /// XEP-0490 read-marker writes persist `last_read_at_ms` alongside

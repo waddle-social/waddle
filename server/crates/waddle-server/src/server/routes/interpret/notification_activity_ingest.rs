@@ -58,13 +58,20 @@ fn activity_store<'a>(
 /// emits a chat-state, a read marker, an outbound message, or a
 /// presence event in that conversation).
 ///
-/// Two XEP-conformance filters apply BEFORE the projection write:
+/// Two XEP-conformance filters apply on the projection write path:
 ///
 /// 1. **XEP-0085 `<gone/>` (§"Definitions" + §"Use in Groupchat" item 3):**
 ///    `<gone/>` signals the user has ended their participation in the
-///    conversation. Recording it as activity would extend the XEP-0513
-///    `<active/>` TTL for a user who just left — wrong semantics.
-///    Skip without writing.
+///    conversation. We persist it as an *explicit inactivity* signal
+///    via `record_chat_state_gone`, which UNCONDITIONALLY zeroes
+///    `last_active_at_ms`. The XEP-0513 `<active/>` filter at T1 then
+///    sees `now - 0` which is huge → `> TTL` → suppressed with
+///    `Xep0513ActiveMiss`. XEP-0085's "SHOULD ignore `<gone/>` in
+///    groupchat" guidance applies to client UI state — the
+///    server-internal push-filter projection is a separate layer,
+///    and treating `<gone/>` as an explicit inactivity signal there
+///    is XEP-conformant for push-filter purposes (Codex review on
+///    PR #731).
 /// 2. **XEP-0203 `<delay/>`:** A delayed stanza is a historical replay
 ///    (MAM catchup, offline-stored stanza, room subject replay on
 ///    join). Persisting "the user is active now" off a 3-hour-old
@@ -79,15 +86,6 @@ pub(super) async fn record_chat_state_activity(
     let Some(state) = message.chat_state() else {
         return;
     };
-    if matches!(state, ChatState::Gone) {
-        debug!(
-            owner = %sender,
-            conversation = %conversation,
-            "notification_activity: skipping <gone/> chat-state \
-             (XEP-0085 'gone' = departure, not engagement)"
-        );
-        return;
-    }
     if has_delay(message) {
         debug!(
             owner = %sender,
@@ -101,8 +99,29 @@ pub(super) async fn record_chat_state_activity(
     let Some(store) = activity_store(deps) else {
         return;
     };
-    let typed = NotificationChatState::from_xep0085(state);
     let now_ms = crate::time::now_ms();
+    if matches!(state, ChatState::Gone) {
+        debug!(
+            owner = %sender,
+            conversation = %conversation,
+            "notification_activity: recording <gone/> as explicit inactivity \
+             (XEP-0085 'gone' = departure → zero last_active_at_ms)"
+        );
+        if let Err(error) = store
+            .record_chat_state_gone(sender, conversation, now_ms)
+            .await
+        {
+            warn!(
+                owner = %sender,
+                conversation = %conversation,
+                %error,
+                "notification_activity: record_chat_state_gone failed; \
+                 projection write skipped (XMPP routing unaffected)",
+            );
+        }
+        return;
+    }
+    let typed = NotificationChatState::from_xep0085(state);
     if let Err(error) = store
         .record_chat_state(sender, conversation, typed, now_ms)
         .await
@@ -252,13 +271,14 @@ mod tests {
     use waddle_xmpp::xep::xep0085::build_chat_state_message;
     use waddle_xmpp::xep::xep0203::build_delay_element_simple;
 
-    /// XEP-0085 §"Use in Groupchat" item 3 says clients SHOULD ignore
-    /// `<gone/>` chat-states in MUC, and §"Definitions" describes
-    /// `<gone/>` as the user having ended participation in the
-    /// conversation. Persisting it as "currently active" would extend
-    /// the XEP-0513 `<active/>` TTL for a user who just left. Lock the
-    /// typed predicate the helper relies on so a refactor cannot
-    /// silently re-introduce the conformance gap.
+    /// XEP-0085 §"Definitions" describes `<gone/>` as the user having
+    /// ended participation in the conversation. The helper distinguishes
+    /// `<gone/>` from other chat-states because it routes through
+    /// `record_chat_state_gone` (which zeroes `last_active_at_ms`) rather
+    /// than the monotonic `record_chat_state` path. Lock the typed
+    /// predicate so a refactor cannot silently merge the two paths and
+    /// re-introduce the XEP-0513 `<active/>` TTL inflation bug (Codex
+    /// review on PR #731).
     #[test]
     fn xep0085_gone_state_is_detected_for_filter() {
         let to: jid::Jid = "alice@example.com".parse().expect("to");
