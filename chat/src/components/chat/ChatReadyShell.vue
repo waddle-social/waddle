@@ -19,7 +19,7 @@ import PinnedPanel from "@/components/chat/PinnedPanel.vue";
 import UserSettingsPage from "@/components/chat/UserSettingsPage.vue";
 import WaddlesSidebar from "@/components/chat/WaddlesSidebar.vue";
 import AdminView from "@/components/admin/AdminView.vue";
-import { matchLocation, type AdminPanel } from "@/router";
+import { navigate, useRouteMatch, type AdminMatch, type AdminPanel } from "@/router";
 import { buildHomeDashboardProps } from "@/home/dashboard-props";
 import type { ChatAppController } from "@/shell/chat-app-controller";
 import type { DiscoveredExtensionRoute } from "@/lib/xmpp/extension-commands";
@@ -202,47 +202,29 @@ function onSelectChannelFromSidebar(id: string) {
   selectChannel(id);
 }
 
-// ── Admin route plumbing (V1) ───────────────────────────────────────
-// `matchLocation` already understands `/admin/<panel>`, but the admin
-// view is rendered straight out of `ChatReadyShell` rather than the
-// chat workspace, so we hold the panel slug separately and react to
-// history-driven changes.
-function parseAdminPanelFromLocation(): AdminPanel {
-  if (typeof window === "undefined") return "users";
-  const match = matchLocation(window.location.pathname, window.location.search);
-  return match.id === "admin" ? match.params.panel : "users";
-}
-const adminPanelRef = ref<AdminPanel>(parseAdminPanelFromLocation());
-const adminPanelFromUrl = computed<AdminPanel>(() => adminPanelRef.value);
-function refreshAdminPanelFromUrl() {
-  adminPanelRef.value = parseAdminPanelFromLocation();
-}
-function onAdminNavigate(path: string) {
-  if (typeof window === "undefined") return;
-  if (window.location.pathname + window.location.search !== path) {
-    window.history.pushState({ waddleRouteId: "admin" }, "", path);
-    refreshAdminPanelFromUrl();
-  }
+// ── Admin route plumbing ────────────────────────────────────────────
+// The admin view is rendered straight out of ChatReadyShell rather
+// than from a per-route page Vue island, so the panel slug is
+// derived directly from the reactive route match. `navigate()`
+// updates the match synchronously, so panel switches re-render this
+// tick without any manual pushState / popstate plumbing.
+const routeMatch = useRouteMatch();
+const adminPanelFromUrl = computed<AdminPanel>(() =>
+  routeMatch.value.id === "admin" ? routeMatch.value.params.panel : "users",
+);
+function onAdminNavigate(match: AdminMatch) {
+  navigate(match);
 }
 function onAdminBack() {
-  if (typeof window === "undefined") return;
-  const state = window.history.state as { waddleRouteId?: string } | null;
-  if (state?.waddleRouteId === "admin") {
-    window.history.back();
-  } else {
-    window.history.pushState({ waddleRouteId: "home" }, "", "/");
-    window.dispatchEvent(new PopStateEvent("popstate"));
-  }
+  openHome();
 }
 let disconnectMessageToolbarLifecycle: (() => void) | null = null;
 
 onMounted(() => {
-  window.addEventListener("popstate", refreshAdminPanelFromUrl);
   disconnectMessageToolbarLifecycle = installMessageToolbarLifecycleSuppression();
 });
 
 onUnmounted(() => {
-  window.removeEventListener("popstate", refreshAdminPanelFromUrl);
   disconnectMessageToolbarLifecycle?.();
   disconnectMessageToolbarLifecycle = null;
 });

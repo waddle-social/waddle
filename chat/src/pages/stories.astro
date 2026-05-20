@@ -1,11 +1,11 @@
 ---
 import AppLayout from "@/layouts/AppLayout.astro";
-import StoriesPage from "@/components/pages/StoriesPage.vue";
+import RoutePageShell from "@/components/pages/RoutePageShell.vue";
 import { routes } from "@/router";
 
 const initialMatch = routes.stories.match();
 ---
 
 <AppLayout initialMatch={initialMatch}>
-  <StoriesPage client:only="vue" initialMatch={initialMatch} />
+  <RoutePageShell client:only="vue" routeId="stories" initialMatch={initialMatch} />
 </AppLayout>

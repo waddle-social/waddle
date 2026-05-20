@@ -8,6 +8,7 @@ import { homeRoute } from "./routes/home";
 import { settingsRoute } from "./routes/settings";
 import { storiesRoute } from "./routes/stories";
 import { threadsRoute } from "./routes/threads";
+import { currentMatch } from "./use-route-match";
 import type { RouteMatch } from "./registry";
 
 export function buildHref(match: RouteMatch): string {
@@ -40,14 +41,21 @@ interface NavigateOptions {
 }
 
 // Pushes (or replaces) a browser history entry to the canonical URL for
-// `match`. No-op when the current URL already equals the target — keeps
-// reactive watchers idempotent (this used to be inlined into each
-// `push*Route` helper in the old navigation.ts).
+// `match`, and writes `match` into the shared `currentMatch` ref so
+// every `useRouteMatch()` consumer (including the controller's
+// state-from-match logic) re-renders this tick. `pushState` doesn't
+// fire `popstate`, so without the explicit write here the reactive
+// match would stay stale until the next back/forward.
+//
+// No-op when the current URL already equals the target.
 export function navigate(match: RouteMatch, opts?: NavigateOptions): void {
   if (typeof window === "undefined") return;
   const href = buildHref(match);
   const current = window.location.pathname + window.location.search;
-  if (current === href) return;
+  if (current === href) {
+    currentMatch.value = match;
+    return;
+  }
   const state: { waddleRouteId: RouteMatch["id"]; origin?: "app" | "direct" } =
     match.id === "settings" && match.origin
       ? { waddleRouteId: "settings", origin: match.origin }
@@ -57,4 +65,5 @@ export function navigate(match: RouteMatch, opts?: NavigateOptions): void {
   } else {
     window.history.pushState(state, "", href);
   }
+  currentMatch.value = match;
 }

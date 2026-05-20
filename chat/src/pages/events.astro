@@ -1,11 +1,11 @@
 ---
 import AppLayout from "@/layouts/AppLayout.astro";
-import EventsPage from "@/components/pages/EventsPage.vue";
+import RoutePageShell from "@/components/pages/RoutePageShell.vue";
 import { routes } from "@/router";
 
 const initialMatch = routes.events.match();
 ---
 
 <AppLayout initialMatch={initialMatch}>
-  <EventsPage client:only="vue" initialMatch={initialMatch} />
+  <RoutePageShell client:only="vue" routeId="events" initialMatch={initialMatch} />
 </AppLayout>

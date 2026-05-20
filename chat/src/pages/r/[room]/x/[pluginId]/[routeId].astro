@@ -1,6 +1,6 @@
 ---
 import AppLayout from "@/layouts/AppLayout.astro";
-import ChannelExtensionPage from "@/components/pages/ChannelExtensionPage.vue";
+import RoutePageShell from "@/components/pages/RoutePageShell.vue";
 import { routes } from "@/router";
 
 const { room, pluginId, routeId } = Astro.params;
@@ -14,5 +14,5 @@ const initialMatch = routes.channelExtension.match({
 ---
 
 <AppLayout initialMatch={initialMatch}>
-  <ChannelExtensionPage client:only="vue" initialMatch={initialMatch} />
+  <RoutePageShell client:only="vue" routeId="channelExtension" initialMatch={initialMatch} />
 </AppLayout>

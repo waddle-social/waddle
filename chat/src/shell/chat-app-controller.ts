@@ -16,8 +16,8 @@ import { useCommunityEvents } from "@/services/community-events";
 import { useChatReadActivity } from "@/shell/read-activity";
 import { useDeploymentVersionInfo } from "@/shell/version";
 import { useXmppRosterContacts } from "@/contacts/roster";
-import { matchLocation, navigate, routes, type RouteMatch } from "@/router";
-import { resolveChannelBySlug, shouldLoadStructureForMatch } from "@/shell/route-helpers";
+import { matchLocation, navigate, type RouteMatch } from "@/router";
+import { resolveChannelBySlug } from "@/shell/route-helpers";
 import { barePeerJid, jidDomain, parseManagedRoomBareJid } from "@/lib/xmpp-client";
 import { mdsChatKey, setLastSeen } from "@/lib/last-seen-store";
 import { roomJidForChannelId as resolveRoomJidForChannelId } from "@/lib/channel-room";
@@ -727,38 +727,6 @@ export function useChatAppController(giphyApiKey: string, initialMatch?: RouteMa
     });
   }, { immediate: true });
 
-  function hrefForCurrent(): string {
-    const channel = waddles.currentChannel.value;
-    if (
-      ui.activePage.value === "chat"
-      && activeRightPanel.value === "extension"
-      && activeExtensionRouteKey.value
-      && channel
-    ) {
-      return routes.channelExtension.href({
-        params: {
-          channelId: channel.id,
-          pluginId: activeExtensionRouteKey.value.pluginId,
-          routeId: activeExtensionRouteKey.value.routeId,
-        },
-        search: { thread: activeThreadStack.value, pinned: ui.showPinnedPanel.value },
-      });
-    }
-    if (ui.sidebarMode.value === "dms" && activeDmPeer.value) {
-      return routes.dm.href({
-        params: { username: activeDmPeer.value.peerUsername },
-        search: { thread: [] },
-      });
-    }
-    if (!channel) return "/";
-    return routes.channel.href({
-      params: { channelId: channel.id },
-      search: { thread: activeThreadStack.value, pinned: ui.showPinnedPanel.value },
-    });
-  }
-
-  const currentChatPath = computed(() => hrefForCurrent());
-
   async function setupPushSubscription() {
     if (!xmppClient.value || !connectionStore.session) return;
     await notifications.syncPushSubscription(xmppClient.value, connectionStore.session.jid);
@@ -1364,37 +1332,13 @@ export function useChatAppController(giphyApiKey: string, initialMatch?: RouteMa
       window.history.back();
       return;
     }
+    // Set the page we want to land on; updateUrl() reads the rest of
+    // the controller state and constructs the right typed match
+    // (channel / extension / DM / home / community surface).
     ui.activePage.value = waddles.currentChannel.value || activeDmPeer.value
-        ? "chat"
-        : "dashboard";
-    if (window.location.pathname + window.location.search !== currentChatPath.value) {
-      const channel = waddles.currentChannel.value;
-      if (activeRightPanel.value === "extension" && channel && activeExtensionRouteKey.value) {
-        navigate({
-          id: "channelExtension",
-          params: {
-            channelId: channel.id,
-            pluginId: activeExtensionRouteKey.value.pluginId,
-            routeId: activeExtensionRouteKey.value.routeId,
-          },
-          search: { thread: activeThreadStack.value, pinned: ui.showPinnedPanel.value },
-        });
-      } else if (ui.sidebarMode.value === "dms" && activeDmPeer.value) {
-        navigate({
-          id: "dm",
-          params: { username: activeDmPeer.value.peerUsername },
-          search: { thread: [] },
-        });
-      } else if (channel) {
-        navigate({
-          id: "channel",
-          params: { channelId: channel.id },
-          search: { thread: activeThreadStack.value, pinned: false },
-        });
-      } else {
-        navigate({ id: "home" });
-      }
-    }
+      ? "chat"
+      : "dashboard";
+    updateUrl();
   }
 
   function activePageFromMatch(match: RouteMatch): "dashboard" | "chat" | "settings" | "admin" | "threads" {
@@ -1419,48 +1363,12 @@ export function useChatAppController(giphyApiKey: string, initialMatch?: RouteMa
   }
 
   function onPopState() {
+    // applyRouteTarget is the single state-from-match handler — it
+    // covers every route id and is the only place that mutates
+    // controller state in response to a URL change. onPopState's job
+    // is just to invoke it with the new URL and manage the
+    // `isApplyingRoute` lifecycle.
     const match = matchLocation(window.location.pathname, window.location.search);
-    ui.activePage.value = activePageFromMatch(match);
-    // Community-surface routes drive the same in-page panel that the
-    // sidebar toggle used to mutate directly. Routes that aren't a
-    // community surface must clear it, otherwise a back-navigation from
-    // /feed → /r/foo would leave the feed pane covering the channel.
-    ui.activeCommunitySurface.value = communitySurfaceFromMatch(match);
-    if (match.id === "feed" || match.id === "stories" || match.id === "events") {
-      ui.sidebarMode.value = "channels";
-      dmConversations.closeDm();
-      waddles.activeChannelId.value = null;
-      activeExtensionRouteKey.value = null;
-      activeRightPanel.value = null;
-      activeThreadTargetMessageId.value = null;
-      activeThreadStack.value = [];
-      return;
-    }
-    if (match.id === "admin") {
-      // Admin view owns the entire workspace; clear DM/thread state so
-      // a popstate back to /admin doesn't leave a stale right panel
-      // mounted underneath.
-      activeThreadTargetMessageId.value = null;
-      activeThreadStack.value = [];
-      activeExtensionRouteKey.value = null;
-      return;
-    }
-    if (match.id === "settings" || match.id === "threads") {
-      activeThreadTargetMessageId.value = null;
-      activeThreadStack.value = [];
-      return;
-    }
-    if (match.id === "home") {
-      ui.sidebarMode.value = "channels";
-      dmConversations.closeDm();
-      waddles.activeChannelId.value = null;
-      activeExtensionRouteKey.value = null;
-      messaging.clearMessages();
-      activeThreadTargetMessageId.value = null;
-      activeThreadStack.value = [];
-      return;
-    }
-
     const requestId = ++routeRequestId;
     isApplyingRoute.value = true;
     void applyRouteTarget(match, requestId).finally(() => {
@@ -1506,9 +1414,6 @@ export function useChatAppController(giphyApiKey: string, initialMatch?: RouteMa
       messaging.clearMessages();
       activeThreadTargetMessageId.value = null;
       activeThreadStack.value = [];
-      if (shouldLoadStructureForMatch(match, waddles.channels.value.length)) {
-        await waddles.loadStructure(null, { noChannelSelect: true });
-      }
       return;
     }
     if (match.id === "dm") {
@@ -1522,12 +1427,6 @@ export function useChatAppController(giphyApiKey: string, initialMatch?: RouteMa
       return;
     }
 
-    if (shouldLoadStructureForMatch(match, waddles.channels.value.length)) {
-      // applyRouteTarget sets activeChannelId from match.params.channelId
-      // a few lines down — auto-selecting here would race that.
-      await waddles.loadStructure(null, { noChannelSelect: true });
-      if (requestId !== routeRequestId) return;
-    }
 
     if (match.id === "channelExtension") {
       ui.sidebarMode.value = "channels";

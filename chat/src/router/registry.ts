@@ -34,4 +34,4 @@ export type RouteMatch =
   | SettingsMatch
   | AdminMatch;
 
-export { type AdminPanel, ADMIN_PANELS, DEFAULT_ADMIN_PANEL } from "./routes/admin";
+export { type AdminMatch, type AdminPanel, ADMIN_PANELS, DEFAULT_ADMIN_PANEL } from "./routes/admin";
