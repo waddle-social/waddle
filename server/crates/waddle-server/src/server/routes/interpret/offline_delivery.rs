@@ -291,11 +291,27 @@ async fn enqueue_xep0357_notification_candidate_for_message(
     // at the typed constructor boundary alongside the existing
     // full-sender-JID and archive-id owner checks.
     let is_mention = message_is_mention_for_recipient(original_message, recipient);
-    let candidate = match crate::notification_outbox::NotificationCandidate::direct_message(
+    let hints = crate::notification_outbox::NotificationMessageHints::none()
+        .with_noping(message_carries_recipient_noping(
+            original_message,
+            recipient,
+        ))
+        .with_xep0334(
+            waddle_xmpp::xep::xep0334::has_hint(
+                original_message,
+                waddle_xmpp::xep::xep0334::Hint::NoStore,
+            ),
+            waddle_xmpp::xep::xep0334::has_hint(
+                original_message,
+                waddle_xmpp::xep::xep0334::Hint::NoPermanentStore,
+            ),
+        );
+    let candidate = match crate::notification_outbox::NotificationCandidate::direct_message_with_hints(
         recipient.clone(),
         sender_jid.clone(),
         archive_stanza_id.clone(),
         is_mention,
+        hints,
     ) {
         Ok(candidate) => candidate,
         Err(
@@ -332,6 +348,9 @@ async fn enqueue_xep0357_notification_candidate_for_message(
         BareJid,
         crate::notification_outbox::RoomPolicyCacheEntry,
     >::new();
+    let dnd_reader = crate::notification_outbox::NoopDndReader;
+    let mut dnd_cache =
+        std::collections::BTreeMap::<BareJid, crate::notification_outbox::DndState>::new();
     let outcome = match crate::notification_outbox::evaluate_xep0492_at_dispatch(
         state
             .deps
@@ -339,8 +358,10 @@ async fn enqueue_xep0357_notification_candidate_for_message(
             .notification_settings_projection
             .as_ref(),
         &room_policy,
+        &dnd_reader,
         &candidate,
         &mut room_policy_cache,
+        &mut dnd_cache,
     )
     .await
     {
@@ -363,8 +384,9 @@ async fn enqueue_xep0357_notification_candidate_for_message(
                 sender = %sender,
                 is_mention,
                 %reason,
-                "XEP-0492 push gate suppressed XEP-0357 DM candidate at T0; no candidate row persisted"
+                "T0 push gate suppressed XEP-0357 DM candidate; no candidate row persisted"
             );
+            waddle_xmpp::prometheus::increment_push_suppressed(reason.as_db_value());
             return NotificationCandidateQueueOutcome::Completed;
         }
         crate::notification_outbox::T1PushDispatchOutcome::DeferUnknownRoomPolicy => {
@@ -428,6 +450,24 @@ async fn enqueue_xep0357_notification_candidate_for_message(
 fn message_is_mention_for_recipient(message: &Message, recipient: &BareJid) -> bool {
     waddle_xmpp::xep::extract_explicit_mentions(message)
         .is_some_and(|mentions| mentions.mentions_jid(recipient))
+}
+
+/// Returns `true` when the inbound XEP-0513 explicit mention naming
+/// `recipient` also carries the `<noping/>` child element — the sender
+/// explicitly opted the recipient out of being pinged for this mention.
+///
+/// Message-frozen at T0 onto the candidate row; the T1 evaluator reads
+/// it back and suppresses with `SuppressedReason::Xep0513Noping`.
+fn message_carries_recipient_noping(message: &Message, recipient: &BareJid) -> bool {
+    waddle_xmpp::xep::extract_explicit_mentions(message).is_some_and(|mentions| {
+        mentions.mentions.iter().any(|mention| {
+            mention.noping
+                && mention
+                    .jid
+                    .as_ref()
+                    .is_some_and(|mentioned| mentioned == recipient)
+        })
+    })
 }
 
 async fn mark_pending_notification_outboxed(

@@ -384,7 +384,7 @@ mod tests {
         // <resumed/> replays have holes".
         use crate::prometheus;
 
-        let _metrics_guard = prometheus::metrics_test_lock().lock().unwrap();
+        let _metrics_guard = prometheus::metrics_test_lock().blocking_lock();
 
         // Baseline the counter since other tests run in the same process.
         let before_render = prometheus::render_metrics();
@@ -430,7 +430,7 @@ mod tests {
 
     #[test]
     fn test_evicted_unacked_stanza_blocks_resume_until_client_h_covers_gap() {
-        let _metrics_guard = crate::prometheus::metrics_test_lock().lock().unwrap();
+        let _metrics_guard = crate::prometheus::metrics_test_lock().blocking_lock();
 
         let mut state = StreamManagementState::with_config(3, 5);
         state.enable("tiny-cap".to_string(), true, Some(300));

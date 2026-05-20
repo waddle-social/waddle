@@ -249,13 +249,29 @@ async fn insert_groupchat_notification_candidate(
 ) -> GroupchatNotificationCandidateQueueOutcome {
     let GroupchatNotificationClassDecision::Deliver(class) =
         groupchat_notification_class(state, owner, room, message, is_live_occupant);
-    let candidate = match crate::notification_outbox::NotificationCandidate::groupchat(
+    let owner_occupant_id =
+        waddle_xmpp::xep::generate_occupant_id(owner, room, &state.deps.occupant_id_secret);
+    let hints = crate::notification_outbox::NotificationMessageHints::none()
+        .with_noping(groupchat_message_carries_owner_noping(
+            message,
+            owner,
+            owner_occupant_id.as_str(),
+        ))
+        .with_xep0334(
+            waddle_xmpp::xep::xep0334::has_hint(message, waddle_xmpp::xep::xep0334::Hint::NoStore),
+            waddle_xmpp::xep::xep0334::has_hint(
+                message,
+                waddle_xmpp::xep::xep0334::Hint::NoPermanentStore,
+            ),
+        );
+    let candidate = match crate::notification_outbox::NotificationCandidate::groupchat_with_hints(
         owner.clone(),
         room.clone(),
         sender_jid,
         thread_id,
         archive_stanza_id,
         class,
+        hints,
     ) {
         Ok(candidate) => candidate,
         Err(error) => {
@@ -294,6 +310,9 @@ async fn insert_groupchat_notification_candidate(
             crate::notification_outbox::RoomPolicyCacheEntry::Public
         },
     );
+    let dnd_reader = crate::notification_outbox::NoopDndReader;
+    let mut dnd_cache =
+        std::collections::BTreeMap::<BareJid, crate::notification_outbox::DndState>::new();
     let outcome = match crate::notification_outbox::evaluate_xep0492_at_dispatch(
         state
             .deps
@@ -301,8 +320,10 @@ async fn insert_groupchat_notification_candidate(
             .notification_settings_projection
             .as_ref(),
         &room_policy,
+        &dnd_reader,
         &candidate,
         &mut room_policy_cache,
+        &mut dnd_cache,
     )
     .await
     {
@@ -325,8 +346,9 @@ async fn insert_groupchat_notification_candidate(
                 room = %room,
                 class = ?class,
                 %reason,
-                "ProjectGroupchatInbox: XEP-0492 push gate suppressed groupchat candidate at T0; no candidate row persisted"
+                "ProjectGroupchatInbox: T0 push gate suppressed groupchat candidate; no candidate row persisted"
             );
+            waddle_xmpp::prometheus::increment_push_suppressed(reason.as_db_value());
             return GroupchatNotificationCandidateQueueOutcome::Completed;
         }
         crate::notification_outbox::T1PushDispatchOutcome::DeferUnknownRoomPolicy => {
@@ -581,6 +603,30 @@ fn groupchat_notification_class_from_message(
     GroupchatNotificationClassDecision::Deliver(
         crate::notification_outbox::NotificationClass::NotifyAll,
     )
+}
+
+/// Returns `true` when an XEP-0513 explicit mention naming `owner`
+/// also carries `<noping/>`. Snapshotted onto the candidate row at T0
+/// so the T1 evaluator can suppress with
+/// `SuppressedReason::Xep0513Noping`.
+fn groupchat_message_carries_owner_noping(
+    message: &Message,
+    owner: &BareJid,
+    owner_occupant_id: &str,
+) -> bool {
+    extract_explicit_mentions(message).is_some_and(|mentions| {
+        mentions.mentions.iter().any(|mention| {
+            mention.noping
+                && (mention
+                    .jid
+                    .as_ref()
+                    .is_some_and(|mentioned| mentioned == owner)
+                    || mention
+                        .occupant_id
+                        .as_deref()
+                        .is_some_and(|mentioned| mentioned == owner_occupant_id))
+        })
+    })
 }
 
 fn groupchat_mentions_owner(message: &Message, owner: &BareJid, owner_occupant_id: &str) -> bool {

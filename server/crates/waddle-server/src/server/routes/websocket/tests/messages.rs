@@ -68,6 +68,8 @@ async fn drain_notification_candidates_for_test(state: &WebSocketState) -> usize
         .expect("push service jid");
     let room_policy =
         crate::room_policy::RoomRegistryActorPolicy::new(state.deps.protocol.room_registry.clone());
+    let dnd_reader = crate::notification_outbox::NoopDndReader;
+    let deps = crate::notification_outbox::NotificationDrainDeps::new(&room_policy, &dnd_reader);
     state
         .deps
         .protocol
@@ -80,7 +82,7 @@ async fn drain_notification_candidates_for_test(state: &WebSocketState) -> usize
                 .protocol
                 .notification_settings_projection
                 .as_ref(),
-            &room_policy,
+            deps,
             &push_service_jid,
             16,
         )

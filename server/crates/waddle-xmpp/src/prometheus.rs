@@ -4,8 +4,7 @@
 //! operational health dashboards and exposes them in Prometheus text format.
 
 use std::sync::atomic::{AtomicU64, Ordering};
-#[cfg(test)]
-use std::sync::{Mutex, OnceLock};
+use std::sync::OnceLock;
 
 static CONNECTED_USERS: AtomicU64 = AtomicU64::new(0);
 static ROOM_COUNT: AtomicU64 = AtomicU64::new(0);
@@ -79,11 +78,40 @@ static SM_DRAIN_TIMEOUT: AtomicU64 = AtomicU64::new(0);
 // tight for the client population.
 static SM_RESUME_WINDOW_CLAMPED: AtomicU64 = AtomicU64::new(0);
 
+// `waddle_push_suppressed_total{reason="..."}` — incremented every
+// time a XEP-0357 push candidate is suppressed at either T0 emission
+// or the T1 drain. Labeled by the typed `SuppressedReason` enum;
+// because the enum is a closed set, the storage shape is a fixed
+// `&'static str → AtomicU64` map populated lazily on first sample
+// per reason so deployments observe per-rule suppression rates
+// without a labels-cardinality blowup.
+//
+// Reason strings MUST stay in lockstep with
+// `SuppressedReason::as_db_value` in
+// `waddle_server::notification_outbox`; the helper accepts only the
+// closed-set values populated by that enum.
+static PUSH_SUPPRESSED_COUNTERS: OnceLock<
+    std::sync::Mutex<std::collections::BTreeMap<&'static str, AtomicU64>>,
+> = OnceLock::new();
+
+fn push_suppressed_counters(
+) -> &'static std::sync::Mutex<std::collections::BTreeMap<&'static str, AtomicU64>> {
+    PUSH_SUPPRESSED_COUNTERS
+        .get_or_init(|| std::sync::Mutex::new(std::collections::BTreeMap::new()))
+}
+
 /// Serializes unit tests that mutate process-global metrics.
-#[cfg(test)]
-pub(crate) fn metrics_test_lock() -> &'static Mutex<()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
+///
+/// Re-exported under `cfg(any(test, feature = "test-utils"))` so the
+/// `waddle-server` test suite (which exercises the labeled
+/// push-suppressed counter) can serialize against the same lock the
+/// in-crate tests use. Backed by an async-aware mutex so async tests
+/// can hold the lock across `.await` without tripping clippy's
+/// `await_holding_lock`.
+#[cfg(any(test, feature = "test-utils"))]
+pub fn metrics_test_lock() -> &'static tokio::sync::Mutex<()> {
+    static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
 }
 
 fn unix_timestamp_secs() -> u64 {
@@ -195,6 +223,43 @@ pub fn increment_sm_resume_window_clamped() {
     SM_RESUME_WINDOW_CLAMPED.fetch_add(1, Ordering::Relaxed);
 }
 
+/// Increment the `waddle_push_suppressed_total{reason}` counter.
+///
+/// `reason` MUST be a static string from the closed
+/// `SuppressedReason::as_db_value` set in
+/// `waddle_server::notification_outbox`. The bound between caller and
+/// metric label is `&'static str` so the labels-cardinality cannot
+/// grow at runtime — any other call site would fail to compile.
+pub fn increment_push_suppressed(reason: &'static str) {
+    let counters = push_suppressed_counters();
+    let map = counters.lock().expect("push suppressed counters mutex");
+    if let Some(counter) = map.get(reason) {
+        counter.fetch_add(1, Ordering::Relaxed);
+        return;
+    }
+    drop(map);
+    let mut map = counters.lock().expect("push suppressed counters mutex");
+    map.entry(reason)
+        .or_insert_with(|| AtomicU64::new(0))
+        .fetch_add(1, Ordering::Relaxed);
+}
+
+/// Snapshot of every push-suppressed counter for rendering.
+fn render_push_suppressed_lines(out: &mut String) {
+    out.push_str("# HELP waddle_push_suppressed_total XEP-0357 push notification candidates suppressed by a XEP/Waddle rule. Labeled by the typed `SuppressedReason` enum.\n");
+    out.push_str("# TYPE waddle_push_suppressed_total counter\n");
+    let counters = push_suppressed_counters();
+    let map = counters.lock().expect("push suppressed counters mutex");
+    for (reason, counter) in map.iter() {
+        let value = counter.load(Ordering::Relaxed);
+        out.push_str("waddle_push_suppressed_total{reason=\"");
+        out.push_str(reason);
+        out.push_str("\"} ");
+        out.push_str(&value.to_string());
+        out.push('\n');
+    }
+}
+
 #[cfg(any(test, feature = "test-utils"))]
 pub fn reset_metrics_for_test() {
     CONNECTED_USERS.store(0, Ordering::Release);
@@ -218,6 +283,11 @@ pub fn reset_metrics_for_test() {
     SM_PROMOTION_DEAD_LETTERED.store(0, Ordering::Release);
     SM_DRAIN_TIMEOUT.store(0, Ordering::Release);
     SM_RESUME_WINDOW_CLAMPED.store(0, Ordering::Release);
+    let counters = push_suppressed_counters();
+    let map = counters.lock().expect("push suppressed counters mutex");
+    for counter in map.values() {
+        counter.store(0, Ordering::Release);
+    }
 }
 
 pub fn render_metrics() -> String {
@@ -303,6 +373,7 @@ pub fn render_metrics() -> String {
             "# HELP waddle_sm_resume_window_clamped_total Client-requested XEP-0198 resume window exceeded WADDLE_SM_MAX_RESUME_SECS and was silently lowered.\n",
             "# TYPE waddle_sm_resume_window_clamped_total counter\n",
             "waddle_sm_resume_window_clamped_total {sm_resume_window_clamped}\n",
+            "{push_suppressed_lines}",
         ),
         connected_users = connected_users,
         room_count = room_count,
@@ -323,6 +394,11 @@ pub fn render_metrics() -> String {
         sm_promotion_dead_lettered = sm_promotion_dead_lettered,
         sm_drain_timeout = sm_drain_timeout,
         sm_resume_window_clamped = sm_resume_window_clamped,
+        push_suppressed_lines = {
+            let mut buf = String::new();
+            render_push_suppressed_lines(&mut buf);
+            buf
+        },
     )
 }
 
@@ -330,9 +406,9 @@ pub fn render_metrics() -> String {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_decrement_saturates_at_zero() {
-        let _guard = metrics_test_lock().lock().unwrap();
+    #[tokio::test]
+    async fn test_decrement_saturates_at_zero() {
+        let _guard = metrics_test_lock().lock().await;
         reset_metrics_for_test();
 
         decrement_connected_users();
@@ -342,9 +418,9 @@ mod tests {
         assert_eq!(ROOM_COUNT.load(Ordering::Acquire), 0);
     }
 
-    #[test]
-    fn test_increment_and_decrement_round_trip() {
-        let _guard = metrics_test_lock().lock().unwrap();
+    #[tokio::test]
+    async fn test_increment_and_decrement_round_trip() {
+        let _guard = metrics_test_lock().lock().await;
         reset_metrics_for_test();
 
         increment_connected_users();
@@ -358,9 +434,9 @@ mod tests {
         assert_eq!(ROOM_COUNT.load(Ordering::Acquire), 0);
     }
 
-    #[test]
-    fn test_rotate_second_bucket_moves_current_to_last() {
-        let _guard = metrics_test_lock().lock().unwrap();
+    #[tokio::test]
+    async fn test_rotate_second_bucket_moves_current_to_last() {
+        let _guard = metrics_test_lock().lock().await;
         reset_metrics_for_test();
 
         CURRENT_SECOND.store(100, Ordering::Release);
@@ -373,9 +449,9 @@ mod tests {
         assert_eq!(LAST_SECOND_MESSAGES.load(Ordering::Acquire), 7);
     }
 
-    #[test]
-    fn test_render_metrics_contains_expected_families() {
-        let _guard = metrics_test_lock().lock().unwrap();
+    #[tokio::test]
+    async fn test_render_metrics_contains_expected_families() {
+        let _guard = metrics_test_lock().lock().await;
         reset_metrics_for_test();
 
         increment_connected_users();
@@ -397,9 +473,9 @@ mod tests {
         assert!(rendered.contains("waddle_messages_total 1"));
     }
 
-    #[test]
-    fn test_broadcast_counters_increment_and_render() {
-        let _guard = metrics_test_lock().lock().unwrap();
+    #[tokio::test]
+    async fn test_broadcast_counters_increment_and_render() {
+        let _guard = metrics_test_lock().lock().await;
         reset_metrics_for_test();
 
         increment_broadcast_delivered();
@@ -423,9 +499,9 @@ mod tests {
     /// offline-DM / SM-expiry surface MUST appear in the rendered
     /// output with HELP+TYPE headers. Without these headers, a
     /// scraper accepts the line but dashboards lose the metric type.
-    #[test]
-    fn test_issue_209_finding_11_metric_families_render() {
-        let _guard = metrics_test_lock().lock().unwrap();
+    #[tokio::test]
+    async fn test_issue_209_finding_11_metric_families_render() {
+        let _guard = metrics_test_lock().lock().await;
         reset_metrics_for_test();
 
         increment_pending_delivery_quota_exceeded();
@@ -470,9 +546,9 @@ mod tests {
         assert!(rendered.contains("waddle_sm_resume_window_clamped_total 1"));
     }
 
-    #[test]
-    fn test_reset_metrics_for_test_clears_sm_promotion_not_promotable() {
-        let _guard = metrics_test_lock().lock().unwrap();
+    #[tokio::test]
+    async fn test_reset_metrics_for_test_clears_sm_promotion_not_promotable() {
+        let _guard = metrics_test_lock().lock().await;
         reset_metrics_for_test();
 
         increment_sm_promotion_not_promotable();
@@ -482,9 +558,9 @@ mod tests {
         assert!(rendered.contains("waddle_sm_promotion_not_promotable_total 0"));
     }
 
-    #[test]
-    fn test_sm_unacked_evicted_counter_increments_and_renders() {
-        let _guard = metrics_test_lock().lock().unwrap();
+    #[tokio::test]
+    async fn test_sm_unacked_evicted_counter_increments_and_renders() {
+        let _guard = metrics_test_lock().lock().await;
         reset_metrics_for_test();
 
         increment_sm_unacked_evicted();

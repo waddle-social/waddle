@@ -57,6 +57,24 @@ const NOTIFICATION_OUTBOX_CLASS_VALUES: [&str; 6] = [
     "notify_all",
 ];
 const NOTIFICATION_OUTBOX_CLASS_CHECK_SQL: &str = "class IN ('dm', 'dm_mention', 'personal_mention', 'channel_mention', 'active_channel_mention', 'notify_all')";
+const NOTIFICATION_CANDIDATES_SUPPRESSED_REASON_CHECK_NAME: &str =
+    "notification_candidates_suppressed_reason_check";
+const NOTIFICATION_CANDIDATES_SUPPRESSED_REASON_VALUES: [&str; 13] = [
+    "xep0357_self",
+    "xep0357_no_registration",
+    "xep0357_registration_disabled",
+    "xep0492_never",
+    "xep0492_on_mention_miss",
+    "xep0191_blocked",
+    "xep0513_noping",
+    "xep0513_active_miss",
+    "xep0334_no_store",
+    "xep0334_no_permanent_store",
+    "waddle_dnd",
+    "provider_rejected",
+    "provider_token_expired",
+];
+const NOTIFICATION_CANDIDATES_SUPPRESSED_REASON_CHECK_SQL: &str = "suppressed_reason IS NULL OR suppressed_reason IN ('xep0357_self', 'xep0357_no_registration', 'xep0357_registration_disabled', 'xep0492_never', 'xep0492_on_mention_miss', 'xep0191_blocked', 'xep0513_noping', 'xep0513_active_miss', 'xep0334_no_store', 'xep0334_no_permanent_store', 'waddle_dnd', 'provider_rejected', 'provider_token_expired')";
 const NOTIFICATION_CANDIDATES_INDEXES: [&str; 4] = [
     "idx_notification_candidates_recipient_created",
     "idx_notification_candidates_identity",
@@ -193,6 +211,124 @@ impl NotificationReason {
     }
 }
 
+/// Typed audit reason for a suppressed XEP-0357 notification candidate.
+///
+/// Closed set — one variant per XEP/Waddle rule that can suppress a
+/// push notification. Persisted into `notification_candidates.suppressed_reason`
+/// alongside the existing `class`/`reason` columns whenever the T1
+/// drain decides to mark a candidate outboxed *without* enqueueing a
+/// job. Also labels the `waddle_push_suppressed_total` metric so
+/// deployments can observe per-rule suppression rates.
+///
+/// `SuppressedReason` is the **audit shape**, distinct from the
+/// dispatch shape ([`T1PushDispatchOutcome`]): the evaluator decides
+/// publish/suppress/defer, this enum records *why* a suppression
+/// happened so adversarial review can branch on the exact rule
+/// without stringly-typed sniffing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum SuppressedReason {
+    /// Self-DM rejected at the [`NotificationCandidate`] constructor
+    /// boundary. Reserved variant; emitted by the constructor-rejection
+    /// path is structurally a no-row outcome, but the audit shape
+    /// exists so race-window state changes can record it.
+    Xep0357Self,
+    /// Recipient has no XEP-0357 push registration. Reserved variant;
+    /// emitted by the publish-layer disable transitions
+    /// (XEP-0357 §6) in later slices.
+    Xep0357NoRegistration,
+    /// Recipient's XEP-0357 push registration was disabled in
+    /// response to a stanza-error from the push service
+    /// (XEP-0357 §6). Reserved variant; emitted at publish time.
+    Xep0357RegistrationDisabled,
+    /// XEP-0492 setting resolved to `<never/>` at T1.
+    Xep0492Never,
+    /// XEP-0492 setting resolved to `<on-mention/>` and the candidate
+    /// is not a mention class.
+    Xep0492OnMentionMiss,
+    /// XEP-0191 blocklist matched the candidate's sender/conversation.
+    Xep0191Blocked,
+    /// XEP-0513 explicit mention carried `<noping/>` — sender opted
+    /// out of pinging this recipient for the mention.
+    Xep0513Noping,
+    /// XEP-0513 `<active/>` filter missed — reserved variant; emitted
+    /// in slice 2b once the `notification_activity` projection lands.
+    Xep0513ActiveMiss,
+    /// XEP-0334 `<no-store/>` hint on the message.
+    Xep0334NoStore,
+    /// XEP-0334 `<no-permanent-store/>` hint on the message.
+    Xep0334NoPermanentStore,
+    /// Waddle DnD state is active for the recipient.
+    WaddleDnd,
+    /// Push provider rejected the published payload. Reserved variant;
+    /// emitted by provider slices (#528 / #529 / #530).
+    ProviderRejected,
+    /// Push provider returned an expired-token signal. Reserved
+    /// variant; emitted by provider slices.
+    ProviderTokenExpired,
+}
+
+impl SuppressedReason {
+    /// Every variant of the closed audit set, in declaration order.
+    ///
+    /// Exposed so the runtime schema migration / test surface can
+    /// iterate the typed values without re-declaring them. Reserved
+    /// variants (`Xep0357Self`, the provider variants, and
+    /// `Xep0513ActiveMiss`) are kept in this list deliberately — they
+    /// are part of the closed audit shape today; provider slices and
+    /// slice 2b wire the emitters.
+    pub(crate) const ALL: &'static [SuppressedReason] = &[
+        Self::Xep0357Self,
+        Self::Xep0357NoRegistration,
+        Self::Xep0357RegistrationDisabled,
+        Self::Xep0492Never,
+        Self::Xep0492OnMentionMiss,
+        Self::Xep0191Blocked,
+        Self::Xep0513Noping,
+        Self::Xep0513ActiveMiss,
+        Self::Xep0334NoStore,
+        Self::Xep0334NoPermanentStore,
+        Self::WaddleDnd,
+        Self::ProviderRejected,
+        Self::ProviderTokenExpired,
+    ];
+
+    pub(crate) fn as_db_value(self) -> &'static str {
+        match self {
+            Self::Xep0357Self => "xep0357_self",
+            Self::Xep0357NoRegistration => "xep0357_no_registration",
+            Self::Xep0357RegistrationDisabled => "xep0357_registration_disabled",
+            Self::Xep0492Never => "xep0492_never",
+            Self::Xep0492OnMentionMiss => "xep0492_on_mention_miss",
+            Self::Xep0191Blocked => "xep0191_blocked",
+            Self::Xep0513Noping => "xep0513_noping",
+            Self::Xep0513ActiveMiss => "xep0513_active_miss",
+            Self::Xep0334NoStore => "xep0334_no_store",
+            Self::Xep0334NoPermanentStore => "xep0334_no_permanent_store",
+            Self::WaddleDnd => "waddle_dnd",
+            Self::ProviderRejected => "provider_rejected",
+            Self::ProviderTokenExpired => "provider_token_expired",
+        }
+    }
+
+    pub(crate) fn from_db_value(value: &str) -> Result<Self, NotificationOutboxError> {
+        // Iterate the closed `ALL` set rather than re-listing the
+        // variants in a `match` arm — keeps the audit shape, the
+        // schema CHECK list, and the prometheus label set in
+        // lockstep without three independently-edited match arms.
+        Self::ALL
+            .iter()
+            .copied()
+            .find(|variant| variant.as_db_value() == value)
+            .ok_or_else(|| NotificationOutboxError::InvalidSuppressedReason(value.to_string()))
+    }
+}
+
+impl std::fmt::Display for SuppressedReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_db_value())
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NotificationOutboxStatus {
     Queued,
@@ -223,6 +359,52 @@ pub struct NotificationCandidate {
     class: NotificationClass,
     reason: NotificationReason,
     policy_error_count: i64,
+    /// XEP-0513 `<noping/>` mention hint, message-frozen at T0. When
+    /// `true`, the T1 evaluator suppresses the candidate with
+    /// [`SuppressedReason::Xep0513Noping`] — sender opted the
+    /// recipient out of being pinged for this mention.
+    noping: bool,
+    /// XEP-0334 `<no-store/>` hint, message-frozen at T0. When `true`
+    /// the T1 evaluator suppresses with
+    /// [`SuppressedReason::Xep0334NoStore`].
+    no_store: bool,
+    /// XEP-0334 `<no-permanent-store/>` hint, message-frozen at T0.
+    /// When `true` the T1 evaluator suppresses with
+    /// [`SuppressedReason::Xep0334NoPermanentStore`].
+    no_permanent_store: bool,
+}
+
+/// Message-frozen suppression hints carried on a
+/// [`NotificationCandidate`] from T0 emission to T1 dispatch.
+///
+/// Per locked Q3 (see #506), T0 declines candidates only for
+/// structural-validity reasons (self-DM). Message-frozen suppression
+/// hints like XEP-0513 `<noping/>` and XEP-0334 storage hints are
+/// recipient-level signals from the sender — the candidate is still
+/// constructed and persisted, and the T1 evaluator reads the hint
+/// back and suppresses with the typed `SuppressedReason`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct NotificationMessageHints {
+    pub noping: bool,
+    pub no_store: bool,
+    pub no_permanent_store: bool,
+}
+
+impl NotificationMessageHints {
+    pub fn none() -> Self {
+        Self::default()
+    }
+
+    pub fn with_noping(mut self, noping: bool) -> Self {
+        self.noping = noping;
+        self
+    }
+
+    pub fn with_xep0334(mut self, no_store: bool, no_permanent_store: bool) -> Self {
+        self.no_store = no_store;
+        self.no_permanent_store = no_permanent_store;
+        self
+    }
 }
 
 impl NotificationCandidate {
@@ -231,6 +413,22 @@ impl NotificationCandidate {
         sender_jid: Jid,
         archive_stanza_id: StanzaId,
         is_mention: bool,
+    ) -> Result<Self, NotificationOutboxError> {
+        Self::direct_message_with_hints(
+            recipient_bare_jid,
+            sender_jid,
+            archive_stanza_id,
+            is_mention,
+            NotificationMessageHints::none(),
+        )
+    }
+
+    pub fn direct_message_with_hints(
+        recipient_bare_jid: BareJid,
+        sender_jid: Jid,
+        archive_stanza_id: StanzaId,
+        is_mention: bool,
+        hints: NotificationMessageHints,
     ) -> Result<Self, NotificationOutboxError> {
         require_full_sender_jid(&sender_jid)?;
         // Structural invariant: a notification candidate cannot be
@@ -276,6 +474,9 @@ impl NotificationCandidate {
             class,
             reason,
             policy_error_count: 0,
+            noping: hints.noping,
+            no_store: hints.no_store,
+            no_permanent_store: hints.no_permanent_store,
         })
     }
 
@@ -286,6 +487,26 @@ impl NotificationCandidate {
         thread_id: NotificationThreadId,
         archive_stanza_id: StanzaId,
         class: NotificationClass,
+    ) -> Result<Self, NotificationOutboxError> {
+        Self::groupchat_with_hints(
+            recipient_bare_jid,
+            conversation_jid,
+            sender_jid,
+            thread_id,
+            archive_stanza_id,
+            class,
+            NotificationMessageHints::none(),
+        )
+    }
+
+    pub fn groupchat_with_hints(
+        recipient_bare_jid: BareJid,
+        conversation_jid: BareJid,
+        sender_jid: Jid,
+        thread_id: NotificationThreadId,
+        archive_stanza_id: StanzaId,
+        class: NotificationClass,
+        hints: NotificationMessageHints,
     ) -> Result<Self, NotificationOutboxError> {
         require_full_sender_jid(&sender_jid)?;
         require_sender_matches_conversation(&sender_jid, &conversation_jid)?;
@@ -318,6 +539,9 @@ impl NotificationCandidate {
             class,
             reason,
             policy_error_count: 0,
+            noping: hints.noping,
+            no_store: hints.no_store,
+            no_permanent_store: hints.no_permanent_store,
         })
     }
 
@@ -347,6 +571,18 @@ impl NotificationCandidate {
 
     pub fn reason(&self) -> NotificationReason {
         self.reason
+    }
+
+    pub fn noping(&self) -> bool {
+        self.noping
+    }
+
+    pub fn no_store(&self) -> bool {
+        self.no_store
+    }
+
+    pub fn no_permanent_store(&self) -> bool {
+        self.no_permanent_store
     }
 }
 
@@ -518,6 +754,12 @@ pub enum NotificationOutboxError {
     InvalidClass(String),
     #[error("invalid candidate reason: {0}")]
     InvalidReason(String),
+    #[error("invalid suppressed reason: {0}")]
+    InvalidSuppressedReason(String),
+    #[error("notification settings projection error: {0}")]
+    NotificationSettings(
+        #[from] crate::notification_settings_projection::NotificationSettingsProjectionError,
+    ),
     #[error("invalid outbox status: {0}")]
     InvalidStatus(String),
     #[error("invalid recipient bare JID in notification outbox: {0}")]
@@ -603,6 +845,70 @@ impl RoomPolicyStore for NoopRoomPolicy {
     }
 }
 
+/// Typed recipient-level Do Not Disturb state, consulted at T1 push
+/// dispatch.
+///
+/// `Inactive` means the recipient is NOT in DND; the evaluator
+/// proceeds with the XEP-0492 / XEP-0191 / XEP-0513 / XEP-0334 gates.
+/// `Active` means the evaluator MUST suppress the candidate with
+/// [`SuppressedReason::WaddleDnd`]. The DND state is a recipient-state
+/// read (not a message-frozen fact), so the consultation belongs at
+/// T1 alongside XEP-0492 — the same race-window semantics apply.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DndState {
+    Inactive,
+    Active,
+}
+
+/// T1 lookup of the recipient's Waddle DnD state.
+///
+/// Slice 2a wires this trait into the evaluator with [`NoopDndReader`]
+/// at every call site so the typed signature flows end-to-end without
+/// behavior change. Issue #367 lands the real implementation backed by
+/// a `urn:waddle:dnd:0` PEP projection — that PR can swap the noop
+/// for the production reader without touching the evaluator.
+#[async_trait::async_trait]
+pub trait DndReader: Send + Sync {
+    async fn dnd_state(&self, user: &BareJid) -> Result<DndState, NotificationOutboxError>;
+}
+
+/// Default [`DndReader`] that reports every user as not-in-DND.
+///
+/// Used at every call site in slice 2a as a typed placeholder. The
+/// real impl arrives in #367.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct NoopDndReader;
+
+#[async_trait::async_trait]
+impl DndReader for NoopDndReader {
+    async fn dnd_state(&self, _user: &BareJid) -> Result<DndState, NotificationOutboxError> {
+        Ok(DndState::Inactive)
+    }
+}
+
+/// Typed bundle of T1 recipient-state readers consulted by
+/// [`NotificationOutboxStore::drain_pending_candidates_into_outbox`].
+///
+/// Bundling these reduces the drain method's argument count below
+/// the clippy `too_many_arguments` threshold without losing
+/// explicitness — each field is a trait object, so call sites pass
+/// distinct concrete implementations rather than a single composite
+/// dependency.
+#[derive(Copy, Clone)]
+pub struct NotificationDrainDeps<'a> {
+    pub room_policy: &'a dyn RoomPolicyStore,
+    pub dnd_reader: &'a dyn DndReader,
+}
+
+impl<'a> NotificationDrainDeps<'a> {
+    pub fn new(room_policy: &'a dyn RoomPolicyStore, dnd_reader: &'a dyn DndReader) -> Self {
+        Self {
+            room_policy,
+            dnd_reader,
+        }
+    }
+}
+
 fn require_full_sender_jid(sender_jid: &Jid) -> Result<(), NotificationOutboxError> {
     if sender_jid.resource().is_some() {
         Ok(())
@@ -673,6 +979,10 @@ fn notification_candidates_table_sql(i64_type: &str, if_not_exists: bool) -> Str
             policy_error_count INTEGER NOT NULL DEFAULT 0,
             next_attempt_at_ms {i64_type},
             outboxed_at_ms {i64_type},
+            suppressed_reason TEXT CONSTRAINT {NOTIFICATION_CANDIDATES_SUPPRESSED_REASON_CHECK_NAME} CHECK ({NOTIFICATION_CANDIDATES_SUPPRESSED_REASON_CHECK_SQL}),
+            noping INTEGER NOT NULL DEFAULT 0,
+            no_store INTEGER NOT NULL DEFAULT 0,
+            no_permanent_store INTEGER NOT NULL DEFAULT 0,
             PRIMARY KEY (recipient_bare_jid, conversation_jid, thread_id, stanza_id_by, stanza_id, class)
         )
         "#
@@ -752,6 +1062,14 @@ fn notification_outbox_class_constraint_matches_expected(definition: &str) -> bo
             .all(|class| constraint_definition_quotes_value(&normalized, class))
 }
 
+fn notification_candidates_suppressed_reason_constraint_matches_expected(definition: &str) -> bool {
+    let normalized = definition.to_ascii_lowercase();
+    normalized.contains("suppressed_reason")
+        && NOTIFICATION_CANDIDATES_SUPPRESSED_REASON_VALUES
+            .iter()
+            .all(|reason| constraint_definition_quotes_value(&normalized, reason))
+}
+
 #[derive(Clone)]
 pub struct NotificationOutboxStore {
     db: Database,
@@ -765,6 +1083,22 @@ impl NotificationOutboxStore {
     }
 
     async fn initialize(&self) -> Result<(), NotificationOutboxError> {
+        // Startup invariant: every closed-set typed `SuppressedReason`
+        // db value MUST round-trip through `from_db_value`. This is a
+        // typed sanity check that the enum, its db values, the schema
+        // CHECK constraint, and the prometheus labels are in lockstep.
+        // A mismatched build fails fast at process start rather than
+        // surfacing as a confusing `CHECK violation` during the first
+        // real suppression.
+        for reason in SuppressedReason::ALL.iter().copied() {
+            let db = reason.as_db_value();
+            let decoded = SuppressedReason::from_db_value(db)?;
+            if decoded != reason {
+                return Err(NotificationOutboxError::InvalidSuppressedReason(format!(
+                    "round-trip mismatch for {db}: decoded {decoded:?}",
+                )));
+            }
+        }
         let i64_type = crate::db::i64_sql_type(self.db.driver());
         self.execute(&notification_candidates_table_sql(i64_type, true), ())
             .await?;
@@ -778,9 +1112,35 @@ impl NotificationOutboxStore {
         let candidate_next_attempt_column = format!("next_attempt_at_ms {i64_type}");
         self.add_column_if_missing("notification_candidates", &candidate_next_attempt_column)
             .await?;
+        // Reason/class CHECK migrations rebuild the table from a legacy
+        // schema; they MUST run before the slice-2a columns are added
+        // because the rebuild INSERT only copies the original column
+        // set. Adding the slice-2a columns afterward then either creates
+        // the column for-the-first-time (legacy upgrade) or is a no-op
+        // (cold init, since `notification_candidates_table_sql` already
+        // declares them).
         self.migrate_notification_candidates_reason_constraint(i64_type)
             .await?;
         self.migrate_notification_candidates_class_constraint(i64_type)
+            .await?;
+        self.add_column_if_missing("notification_candidates", "suppressed_reason TEXT")
+            .await?;
+        self.add_column_if_missing(
+            "notification_candidates",
+            "noping INTEGER NOT NULL DEFAULT 0",
+        )
+        .await?;
+        self.add_column_if_missing(
+            "notification_candidates",
+            "no_store INTEGER NOT NULL DEFAULT 0",
+        )
+        .await?;
+        self.add_column_if_missing(
+            "notification_candidates",
+            "no_permanent_store INTEGER NOT NULL DEFAULT 0",
+        )
+        .await?;
+        self.migrate_notification_candidates_suppressed_reason_constraint(i64_type)
             .await?;
         self.execute(
             "CREATE INDEX IF NOT EXISTS idx_notification_candidates_recipient_created \
@@ -1083,6 +1443,130 @@ impl NotificationOutboxStore {
         ))
     }
 
+    async fn migrate_notification_candidates_suppressed_reason_constraint(
+        &self,
+        i64_type: &str,
+    ) -> Result<(), NotificationOutboxError> {
+        match self.db.driver() {
+            crate::db::DatabaseDriver::Postgres => {
+                self.migrate_postgres_notification_candidates_suppressed_reason_constraint()
+                    .await
+            }
+            crate::db::DatabaseDriver::Sqlite => {
+                self.migrate_sqlite_notification_candidates_suppressed_reason_constraint(i64_type)
+                    .await
+            }
+        }
+    }
+
+    async fn migrate_postgres_notification_candidates_suppressed_reason_constraint(
+        &self,
+    ) -> Result<(), NotificationOutboxError> {
+        self.migrate_postgres_check_constraint_on_column(
+            "notification_candidates",
+            "suppressed_reason",
+            NOTIFICATION_CANDIDATES_SUPPRESSED_REASON_CHECK_NAME,
+            NOTIFICATION_CANDIDATES_SUPPRESSED_REASON_CHECK_SQL,
+            notification_candidates_suppressed_reason_constraint_matches_expected,
+        )
+        .await
+    }
+
+    /// SQLite does not enforce CHECK constraints added after CREATE
+    /// TABLE for existing rows, and adding a new CHECK requires a
+    /// rebuild. Following the existing pattern, when the current
+    /// schema text does not advertise the expected suppressed_reason
+    /// CHECK we rebuild via rename-old → create-new → copy.
+    async fn migrate_sqlite_notification_candidates_suppressed_reason_constraint(
+        &self,
+        i64_type: &str,
+    ) -> Result<(), NotificationOutboxError> {
+        if !self
+            .sqlite_notification_candidates_suppressed_reason_constraint_is_stale()
+            .await?
+        {
+            return Ok(());
+        }
+
+        let mut tx = self.db.begin().await?;
+        for index in NOTIFICATION_CANDIDATES_INDEXES {
+            tx.execute(&format!("DROP INDEX IF EXISTS {index}"), ())
+                .await?;
+        }
+        tx.execute(
+            "ALTER TABLE notification_candidates RENAME TO notification_candidates_old_suppressed_reason_check",
+            (),
+        )
+        .await?;
+        tx.execute(&notification_candidates_table_sql(i64_type, false), ())
+            .await?;
+        tx.execute(
+            r#"
+            INSERT INTO notification_candidates (
+                recipient_bare_jid,
+                conversation_jid,
+                sender_jid,
+                thread_id,
+                stanza_id_by,
+                stanza_id,
+                class,
+                reason,
+                created_at_ms,
+                policy_error_count,
+                next_attempt_at_ms,
+                outboxed_at_ms,
+                suppressed_reason,
+                noping,
+                no_store,
+                no_permanent_store
+            )
+            SELECT
+                recipient_bare_jid,
+                conversation_jid,
+                sender_jid,
+                thread_id,
+                stanza_id_by,
+                stanza_id,
+                class,
+                reason,
+                created_at_ms,
+                policy_error_count,
+                next_attempt_at_ms,
+                outboxed_at_ms,
+                suppressed_reason,
+                noping,
+                no_store,
+                no_permanent_store
+            FROM notification_candidates_old_suppressed_reason_check
+            "#,
+            (),
+        )
+        .await?;
+        tx.execute(
+            "DROP TABLE notification_candidates_old_suppressed_reason_check",
+            (),
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    async fn sqlite_notification_candidates_suppressed_reason_constraint_is_stale(
+        &self,
+    ) -> Result<bool, NotificationOutboxError> {
+        let mut rows = self
+            .query(
+                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'notification_candidates'",
+                (),
+            )
+            .await?;
+        let Some(row) = rows.next().await? else {
+            return Ok(false);
+        };
+        let create_sql: String = row.get(0)?;
+        Ok(!notification_candidates_suppressed_reason_constraint_matches_expected(&create_sql))
+    }
+
     async fn migrate_notification_outbox_class_constraint(
         &self,
         i64_type: &str,
@@ -1366,8 +1850,12 @@ impl NotificationOutboxStore {
                     created_at_ms,
                     policy_error_count,
                     next_attempt_at_ms,
-                    outboxed_at_ms
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)
+                    outboxed_at_ms,
+                    suppressed_reason,
+                    noping,
+                    no_store,
+                    no_permanent_store
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, ?, ?, ?)
                 ON CONFLICT DO NOTHING
                 "#,
                 crate::db_params![
@@ -1381,6 +1869,9 @@ impl NotificationOutboxStore {
                     candidate.reason.as_db_value(),
                     now_ms,
                     0_i64,
+                    i64::from(candidate.noping),
+                    i64::from(candidate.no_store),
+                    i64::from(candidate.no_permanent_store),
                 ],
             )
             .await?;
@@ -1395,15 +1886,20 @@ impl NotificationOutboxStore {
         push_store: &dyn PushSubscriptionStore,
         blocking_storage: &dyn BlockingStorage,
         settings_projection: &crate::notification_settings_projection::NotificationSettingsProjectionStore,
-        room_policy: &dyn RoomPolicyStore,
+        deps: NotificationDrainDeps<'_>,
         first_party_service_jid: &BareJid,
         batch_size: usize,
     ) -> Result<usize, NotificationOutboxError> {
+        let NotificationDrainDeps {
+            room_policy,
+            dnd_reader,
+        } = deps;
         let candidates = self.pending_candidates(batch_size).await?;
         let mut target_cache =
             std::collections::BTreeMap::<BareJid, Vec<NotificationOutboxTarget>>::new();
         let mut room_policy_cache =
             std::collections::BTreeMap::<BareJid, RoomPolicyCacheEntry>::new();
+        let mut dnd_cache = std::collections::BTreeMap::<BareJid, DndState>::new();
         let mut processed = 0usize;
         for candidate in candidates {
             // Self-DM filtering happens at the `NotificationCandidate`
@@ -1417,9 +1913,18 @@ impl NotificationOutboxStore {
                 Ok(true) => {
                     let now_ms = crate::time::now_ms();
                     let mut tx = self.db.begin().await?;
+                    record_candidate_suppressed_reason_tx(
+                        &mut tx,
+                        &candidate,
+                        SuppressedReason::Xep0191Blocked,
+                    )
+                    .await?;
                     let claimed = mark_candidate_outboxed_tx(&mut tx, &candidate, now_ms).await?;
                     tx.commit().await?;
                     if claimed > 0 {
+                        waddle_xmpp::prometheus::increment_push_suppressed(
+                            SuppressedReason::Xep0191Blocked.as_db_value(),
+                        );
                         processed += 1;
                     }
                     continue;
@@ -1466,8 +1971,10 @@ impl NotificationOutboxStore {
             let outcome = match evaluate_xep0492_at_dispatch(
                 settings_projection,
                 room_policy,
+                dnd_reader,
                 &candidate,
                 &mut room_policy_cache,
+                &mut dnd_cache,
             )
             .await
             {
@@ -1491,13 +1998,15 @@ impl NotificationOutboxStore {
                         sender = %candidate.sender_jid(),
                         class = ?candidate.class(),
                         %reason,
-                        "XEP-0492 push gate suppressed XEP-0357 notification candidate at T1"
+                        "T1 push gate suppressed XEP-0357 notification candidate"
                     );
                     let now_ms = crate::time::now_ms();
                     let mut tx = self.db.begin().await?;
+                    record_candidate_suppressed_reason_tx(&mut tx, &candidate, reason).await?;
                     let claimed = mark_candidate_outboxed_tx(&mut tx, &candidate, now_ms).await?;
                     tx.commit().await?;
                     if claimed > 0 {
+                        waddle_xmpp::prometheus::increment_push_suppressed(reason.as_db_value());
                         processed += 1;
                     }
                     continue;
@@ -1603,7 +2112,10 @@ impl NotificationOutboxStore {
                        stanza_id,
                        class,
                        reason,
-                       policy_error_count
+                       policy_error_count,
+                       noping,
+                       no_store,
+                       no_permanent_store
                 FROM notification_candidates
                 WHERE outboxed_at_ms IS NULL
                   AND (next_attempt_at_ms IS NULL OR next_attempt_at_ms <= ?)
@@ -2327,12 +2839,12 @@ impl NotificationOutboxStore {
 pub(crate) enum T1PushDispatchOutcome {
     /// XEP-0492 gate decided to fan out; enqueue the push job.
     Deliver,
-    /// XEP-0492 gate decided to suppress; mark candidate outboxed
-    /// without enqueuing a job. `reason` is the resolved
-    /// `NotificationLevel` that caused suppression.
-    Suppressed {
-        reason: waddle_xmpp::xep::NotificationLevel,
-    },
+    /// Push gate decided to suppress; mark candidate outboxed without
+    /// enqueueing a job. `reason` is the typed audit reason that
+    /// caused suppression (XEP-0492 `<never/>` / `<on-mention/>` miss,
+    /// XEP-0191 blocking, XEP-0513 `<noping/>`, XEP-0334 hint, or
+    /// Waddle DnD).
+    Suppressed { reason: SuppressedReason },
     /// MUC config could not be resolved (room actor unavailable or
     /// failed). Defer with policy-error backoff so the next drain
     /// pass can retry once the actor (or, slice 2, the durable
@@ -2421,12 +2933,32 @@ pub(crate) enum UnknownRoomPolicySource {
 pub(crate) async fn evaluate_xep0492_at_dispatch(
     settings_projection: &crate::notification_settings_projection::NotificationSettingsProjectionStore,
     room_policy: &dyn RoomPolicyStore,
+    dnd_reader: &dyn DndReader,
     candidate: &NotificationCandidate,
     room_policy_cache: &mut std::collections::BTreeMap<BareJid, RoomPolicyCacheEntry>,
-) -> Result<
-    T1PushDispatchOutcome,
-    crate::notification_settings_projection::NotificationSettingsProjectionError,
-> {
+    dnd_cache: &mut std::collections::BTreeMap<BareJid, DndState>,
+) -> Result<T1PushDispatchOutcome, NotificationOutboxError> {
+    // Message-frozen suppressors take precedence over recipient-state
+    // reads: a sender's `<noping/>` mention or XEP-0334 storage hint
+    // is a final decision by the sender and cannot be overridden by
+    // recipient settings. Evaluate these before issuing storage reads
+    // so the typed outcome captures the most-specific signal first.
+    if candidate.noping() {
+        return Ok(T1PushDispatchOutcome::Suppressed {
+            reason: SuppressedReason::Xep0513Noping,
+        });
+    }
+    if candidate.no_store() {
+        return Ok(T1PushDispatchOutcome::Suppressed {
+            reason: SuppressedReason::Xep0334NoStore,
+        });
+    }
+    if candidate.no_permanent_store() {
+        return Ok(T1PushDispatchOutcome::Suppressed {
+            reason: SuppressedReason::Xep0334NoPermanentStore,
+        });
+    }
+
     let (conversation_kind, is_mention) = match candidate.class() {
         NotificationClass::DirectMessage => (
             crate::notification_settings_projection::ConversationKind::Direct,
@@ -2481,6 +3013,17 @@ pub(crate) async fn evaluate_xep0492_at_dispatch(
             }
         }
     };
+    // Waddle DnD is a recipient-state read, fresh-at-T1 alongside
+    // XEP-0492. The per-batch cache keys on (user → state) so a
+    // recipient with many candidates in the same drain pass only
+    // reads DnD once.
+    let dnd_state =
+        resolve_cached_dnd_state(dnd_reader, candidate.recipient_bare_jid(), dnd_cache).await?;
+    if matches!(dnd_state, DndState::Active) {
+        return Ok(T1PushDispatchOutcome::Suppressed {
+            reason: SuppressedReason::WaddleDnd,
+        });
+    }
     let level = settings_projection
         .effective_setting(
             candidate.recipient_bare_jid(),
@@ -2495,9 +3038,51 @@ pub(crate) async fn evaluate_xep0492_at_dispatch(
             T1PushDispatchOutcome::Deliver
         }
         crate::notification_settings_projection::PushDispatchDecision::Suppressed { reason } => {
-            T1PushDispatchOutcome::Suppressed { reason }
+            T1PushDispatchOutcome::Suppressed {
+                reason: suppressed_reason_for_level(reason, is_mention),
+            }
         }
     })
+}
+
+/// Translates a XEP-0492 [`waddle_xmpp::xep::NotificationLevel`]
+/// suppression outcome into the typed [`SuppressedReason`] audit
+/// variant.
+///
+/// `<never/>` always maps to `Xep0492Never`. `<on-mention/>` maps to
+/// `Xep0492OnMentionMiss` because the XEP-0492 evaluator only emits
+/// the `Suppressed` outcome when `should_notify(is_mention)` is false
+/// — and for `OnMention` that means `is_mention == false`.
+/// `<always/>` never produces a `Suppressed` outcome.
+fn suppressed_reason_for_level(
+    level: waddle_xmpp::xep::NotificationLevel,
+    _is_mention: bool,
+) -> SuppressedReason {
+    match level {
+        waddle_xmpp::xep::NotificationLevel::Never => SuppressedReason::Xep0492Never,
+        waddle_xmpp::xep::NotificationLevel::OnMention => SuppressedReason::Xep0492OnMentionMiss,
+        waddle_xmpp::xep::NotificationLevel::Always => {
+            // Unreachable in practice — `Always.should_notify(_) ==
+            // true` so the evaluator never produces `Suppressed` for
+            // it. Default to OnMention-miss to keep the closed-set
+            // invariant if the upstream reducer ever drifts; the
+            // dedicated XEP-0492 unit tests cover the live mapping.
+            SuppressedReason::Xep0492OnMentionMiss
+        }
+    }
+}
+
+async fn resolve_cached_dnd_state(
+    dnd_reader: &dyn DndReader,
+    user: &BareJid,
+    cache: &mut std::collections::BTreeMap<BareJid, DndState>,
+) -> Result<DndState, NotificationOutboxError> {
+    if let Some(state) = cache.get(user) {
+        return Ok(*state);
+    }
+    let state = dnd_reader.dnd_state(user).await?;
+    cache.insert(user.clone(), state);
+    Ok(state)
 }
 
 /// Looks up `room` in the per-batch policy cache, populating on miss.
@@ -2872,6 +3457,44 @@ async fn mark_candidate_outboxed_tx(
         .await?)
 }
 
+/// Records a typed [`SuppressedReason`] onto a not-yet-outboxed
+/// candidate row inside an active transaction. Always called BEFORE
+/// [`mark_candidate_outboxed_tx`] in the T1 suppression path so the
+/// `suppressed_reason` column persists for the row's lifetime in the
+/// outboxed-prune retention window.
+async fn record_candidate_suppressed_reason_tx(
+    tx: &mut crate::db::Transaction<'_>,
+    candidate: &NotificationCandidate,
+    reason: SuppressedReason,
+) -> Result<u64, NotificationOutboxError> {
+    Ok(tx
+        .execute(
+            r#"
+            UPDATE notification_candidates
+            SET suppressed_reason = ?
+            WHERE recipient_bare_jid = ?
+              AND conversation_jid = ?
+              AND sender_jid = ?
+              AND thread_id = ?
+              AND stanza_id_by = ?
+              AND stanza_id = ?
+              AND class = ?
+              AND outboxed_at_ms IS NULL
+            "#,
+            crate::db_params![
+                reason.as_db_value(),
+                candidate.recipient_bare_jid.to_string(),
+                candidate.conversation_jid.to_string(),
+                candidate.sender_jid.to_string(),
+                candidate.thread_id.as_str(),
+                candidate.archive_stanza_id.by.to_string(),
+                candidate.archive_stanza_id.id.clone(),
+                candidate.class.as_db_value(),
+            ],
+        )
+        .await?)
+}
+
 async fn resolve_first_party_targets(
     push_store: &dyn PushSubscriptionStore,
     recipient: &BareJid,
@@ -2974,6 +3597,9 @@ fn decode_candidate(row: &Row) -> Result<NotificationCandidate, NotificationOutb
         class: NotificationClass::from_db_value(&row.get::<String>(6)?)?,
         reason: NotificationReason::from_db_value(&row.get::<String>(7)?)?,
         policy_error_count: row.get(8)?,
+        noping: row.get::<i64>(9)? != 0,
+        no_store: row.get::<i64>(10)? != 0,
+        no_permanent_store: row.get::<i64>(11)? != 0,
     })
 }
 
@@ -4273,7 +4899,7 @@ mod tests {
                     &push_store,
                     &blocking,
                     &projection,
-                    &room_policy,
+                    NotificationDrainDeps::new(&room_policy, &NoopDndReader),
                     &bare("push.example.com"),
                     16,
                 )
@@ -4360,7 +4986,7 @@ mod tests {
                     &push_store,
                     &blocking,
                     &projection,
-                    &room_policy,
+                    NotificationDrainDeps::new(&room_policy, &NoopDndReader),
                     &bare("push.example.com"),
                     16,
                 )
@@ -4434,7 +5060,7 @@ mod tests {
                     &push_store,
                     &blocking,
                     &projection,
-                    &room_policy,
+                    NotificationDrainDeps::new(&room_policy, &NoopDndReader),
                     &bare("push.example.com"),
                     16,
                 )
@@ -4505,7 +5131,7 @@ mod tests {
                     &push_store,
                     &blocking,
                     &projection,
-                    &room_policy,
+                    NotificationDrainDeps::new(&room_policy, &NoopDndReader),
                     &bare("push.example.com"),
                     16,
                 )
@@ -4575,7 +5201,7 @@ mod tests {
                     &push_store,
                     &blocking,
                     &projection,
-                    &room_policy,
+                    NotificationDrainDeps::new(&room_policy, &NoopDndReader),
                     &bare("push.example.com"),
                     16,
                 )
@@ -4640,7 +5266,7 @@ mod tests {
                     &push_store,
                     &blocking,
                     &projection,
-                    &room_policy,
+                    NotificationDrainDeps::new(&room_policy, &NoopDndReader),
                     &bare("push.example.com"),
                     16,
                 )
@@ -4698,7 +5324,7 @@ mod tests {
                     &push_store,
                     &blocking,
                     &projection,
-                    &room_policy,
+                    NotificationDrainDeps::new(&room_policy, &NoopDndReader),
                     &bare("push.example.com"),
                     16,
                 )
@@ -4749,7 +5375,7 @@ mod tests {
                     &push_store,
                     &blocking,
                     &projection,
-                    &room_policy,
+                    NotificationDrainDeps::new(&room_policy, &NoopDndReader),
                     &bare("push.example.com"),
                     16,
                 )
@@ -4781,7 +5407,7 @@ mod tests {
                     &push_store,
                     &blocking,
                     &projection,
-                    &room_policy,
+                    NotificationDrainDeps::new(&room_policy, &NoopDndReader),
                     &bare("push.example.com"),
                     16,
                 )
@@ -4825,7 +5451,7 @@ mod tests {
                     &push_store,
                     &blocking,
                     &projection,
-                    &room_policy,
+                    NotificationDrainDeps::new(&room_policy, &NoopDndReader),
                     &bare("push.example.com"),
                     16,
                 )
@@ -4856,7 +5482,7 @@ mod tests {
                     &push_store,
                     &blocking,
                     &projection,
-                    &room_policy,
+                    NotificationDrainDeps::new(&room_policy, &NoopDndReader),
                     &bare("push.example.com"),
                     16,
                 )
@@ -4900,7 +5526,7 @@ mod tests {
                     &push_store,
                     &blocking,
                     &projection,
-                    &room_policy,
+                    NotificationDrainDeps::new(&room_policy, &NoopDndReader),
                     &bare("push.example.com"),
                     16,
                 )
@@ -4931,7 +5557,7 @@ mod tests {
                     &push_store,
                     &blocking,
                     &projection,
-                    &room_policy,
+                    NotificationDrainDeps::new(&room_policy, &NoopDndReader),
                     &bare("push.example.com"),
                     16,
                 )
@@ -4976,7 +5602,7 @@ mod tests {
                     &push_store,
                     &blocking,
                     &projection,
-                    &room_policy,
+                    NotificationDrainDeps::new(&room_policy, &NoopDndReader),
                     &bare("push.example.com"),
                     16,
                 )
@@ -5007,7 +5633,7 @@ mod tests {
                     &push_store,
                     &blocking,
                     &projection,
-                    &room_policy,
+                    NotificationDrainDeps::new(&room_policy, &NoopDndReader),
                     &bare("push.example.com"),
                     16,
                 )
@@ -5051,7 +5677,7 @@ mod tests {
                     &push_store,
                     &blocking,
                     &projection,
-                    &room_policy,
+                    NotificationDrainDeps::new(&room_policy, &NoopDndReader),
                     &bare("push.example.com"),
                     16,
                 )
@@ -5082,7 +5708,7 @@ mod tests {
                     &push_store,
                     &blocking,
                     &projection,
-                    &room_policy,
+                    NotificationDrainDeps::new(&room_policy, &NoopDndReader),
                     &bare("push.example.com"),
                     16,
                 )
@@ -5143,7 +5769,7 @@ mod tests {
                     &push_store,
                     &blocking,
                     &projection,
-                    &room_policy,
+                    NotificationDrainDeps::new(&room_policy, &NoopDndReader),
                     &bare("push.example.com"),
                     16,
                 )
@@ -5190,7 +5816,7 @@ mod tests {
                     &push_store,
                     &blocking,
                     &projection,
-                    &room_policy,
+                    NotificationDrainDeps::new(&room_policy, &NoopDndReader),
                     &bare("push.example.com"),
                     16,
                 )
@@ -5311,7 +5937,7 @@ mod tests {
                     &push_store,
                     &blocking,
                     &projection,
-                    &room_policy,
+                    NotificationDrainDeps::new(&room_policy, &NoopDndReader),
                     &bare("push.example.com"),
                     16,
                 )
@@ -5416,7 +6042,7 @@ mod tests {
                     &push_store,
                     &blocking,
                     &projection,
-                    &room_policy,
+                    NotificationDrainDeps::new(&room_policy, &NoopDndReader),
                     &bare("push.example.com"),
                     16,
                 )
@@ -5463,7 +6089,7 @@ mod tests {
                     &push_store,
                     &FailingBlockingStorage,
                     &projection,
-                    &room_policy,
+                    NotificationDrainDeps::new(&room_policy, &NoopDndReader),
                     &bare("push.example.com"),
                     16,
                 )
@@ -5510,7 +6136,7 @@ mod tests {
                     &push_store,
                     &blocking,
                     &projection,
-                    &room_policy,
+                    NotificationDrainDeps::new(&room_policy, &NoopDndReader),
                     &bare("push.example.com"),
                     16,
                 )
@@ -6612,7 +7238,7 @@ mod tests {
                     &push_store,
                     &blocking,
                     &projection,
-                    &room_policy,
+                    NotificationDrainDeps::new(&room_policy, &NoopDndReader),
                     &bare("push.example.com"),
                     16,
                 )
@@ -6697,7 +7323,7 @@ mod tests {
                 &push_store,
                 &blocking,
                 &projection,
-                &room_policy,
+                NotificationDrainDeps::new(&room_policy, &NoopDndReader),
                 &bare("push.example.com"),
                 16,
             )
@@ -6746,7 +7372,7 @@ mod tests {
                 &push_store,
                 &blocking,
                 &projection,
-                &room_policy,
+                NotificationDrainDeps::new(&room_policy, &NoopDndReader),
                 &bare("push.example.com"),
                 16,
             )
@@ -6812,5 +7438,747 @@ mod tests {
             RoomPolicyCacheEntry::Unknown(UnknownRoomPolicySource::NotLive),
             "Ok(None) must classify as NotLive, distinct from LookupError"
         );
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // Slice 2a — SuppressedReason audit + new suppressors (#526).
+    // ─────────────────────────────────────────────────────────────
+
+    /// `SuppressedReason` is the canonical audit shape. Every variant
+    /// MUST round-trip through `as_db_value` / `from_db_value` so a
+    /// row written today can be decoded tomorrow without ambiguity.
+    /// The closed-set discipline is what keeps the CHECK constraint
+    /// + the labeled prometheus counter in lockstep.
+    #[test]
+    fn suppressed_reason_round_trip_covers_every_variant() {
+        let variants = [
+            SuppressedReason::Xep0357Self,
+            SuppressedReason::Xep0357NoRegistration,
+            SuppressedReason::Xep0357RegistrationDisabled,
+            SuppressedReason::Xep0492Never,
+            SuppressedReason::Xep0492OnMentionMiss,
+            SuppressedReason::Xep0191Blocked,
+            SuppressedReason::Xep0513Noping,
+            SuppressedReason::Xep0513ActiveMiss,
+            SuppressedReason::Xep0334NoStore,
+            SuppressedReason::Xep0334NoPermanentStore,
+            SuppressedReason::WaddleDnd,
+            SuppressedReason::ProviderRejected,
+            SuppressedReason::ProviderTokenExpired,
+        ];
+        // The closed-set CHECK constraint values MUST stay in lockstep
+        // with the enum — every db value the enum knows about MUST be
+        // accepted by the constraint, and vice versa.
+        assert_eq!(
+            variants.len(),
+            NOTIFICATION_CANDIDATES_SUPPRESSED_REASON_VALUES.len(),
+            "variant count must match CHECK constraint value list",
+        );
+        for variant in variants {
+            let db = variant.as_db_value();
+            assert!(
+                NOTIFICATION_CANDIDATES_SUPPRESSED_REASON_VALUES.contains(&db),
+                "variant {variant:?} db value {db} missing from CHECK constraint list",
+            );
+            let decoded = SuppressedReason::from_db_value(db).expect("decode");
+            assert_eq!(
+                decoded, variant,
+                "round-trip failed for {variant:?} (db value {db})"
+            );
+        }
+        assert!(matches!(
+            SuppressedReason::from_db_value("nonsense"),
+            Err(NotificationOutboxError::InvalidSuppressedReason(_))
+        ));
+    }
+
+    #[test]
+    fn postgres_suppressed_reason_constraint_match_accepts_current_definition() {
+        let postgres_definition = "CHECK (((suppressed_reason IS NULL) OR ((suppressed_reason)::text = ANY ((ARRAY['xep0357_self'::character varying, 'xep0357_no_registration'::character varying, 'xep0357_registration_disabled'::character varying, 'xep0492_never'::character varying, 'xep0492_on_mention_miss'::character varying, 'xep0191_blocked'::character varying, 'xep0513_noping'::character varying, 'xep0513_active_miss'::character varying, 'xep0334_no_store'::character varying, 'xep0334_no_permanent_store'::character varying, 'waddle_dnd'::character varying, 'provider_rejected'::character varying, 'provider_token_expired'::character varying])::text[]))))";
+        assert!(
+            notification_candidates_suppressed_reason_constraint_matches_expected(
+                postgres_definition
+            )
+        );
+    }
+
+    #[test]
+    fn sqlite_suppressed_reason_constraint_match_rejects_partial_definition() {
+        // A schema that advertises only some of the typed reasons must
+        // be flagged stale so the migration rebuilds the CHECK.
+        let sqlite_create_sql = "CREATE TABLE notification_candidates (suppressed_reason TEXT CHECK (suppressed_reason IS NULL OR suppressed_reason IN ('xep0492_never')))";
+        assert!(
+            !notification_candidates_suppressed_reason_constraint_matches_expected(
+                sqlite_create_sql
+            ),
+        );
+    }
+
+    /// On a fresh store, cold-init MUST advertise the
+    /// `suppressed_reason` column with the CHECK constraint that
+    /// accepts the full closed-set of typed reasons. A direct INSERT
+    /// using each typed db value MUST succeed; an INSERT with a
+    /// nonsense value MUST be rejected by the CHECK.
+    #[tokio::test]
+    async fn suppressed_reason_check_constraint_accepts_every_typed_value() {
+        let store = store().await;
+        let recipient = bare("alice@example.com");
+        let sender_jid: Jid = "bob@example.com/web".parse().expect("full sender");
+        for (idx, reason) in [
+            SuppressedReason::Xep0357Self,
+            SuppressedReason::Xep0357NoRegistration,
+            SuppressedReason::Xep0357RegistrationDisabled,
+            SuppressedReason::Xep0492Never,
+            SuppressedReason::Xep0492OnMentionMiss,
+            SuppressedReason::Xep0191Blocked,
+            SuppressedReason::Xep0513Noping,
+            SuppressedReason::Xep0513ActiveMiss,
+            SuppressedReason::Xep0334NoStore,
+            SuppressedReason::Xep0334NoPermanentStore,
+            SuppressedReason::WaddleDnd,
+            SuppressedReason::ProviderRejected,
+            SuppressedReason::ProviderTokenExpired,
+        ]
+        .iter()
+        .enumerate()
+        {
+            let stanza_id = format!("audit-{idx}");
+            let candidate = NotificationCandidate::direct_message(
+                recipient.clone(),
+                sender_jid.clone(),
+                StanzaId::new(stanza_id.clone(), Jid::from(recipient.clone())),
+                false,
+            )
+            .expect("candidate");
+            assert_eq!(
+                store
+                    .insert_candidate(&candidate)
+                    .await
+                    .expect("insert candidate"),
+                NotificationCandidateInsertOutcome::Inserted,
+            );
+            let mut tx = store.db.begin().await.expect("begin tx");
+            record_candidate_suppressed_reason_tx(&mut tx, &candidate, *reason)
+                .await
+                .expect("record reason");
+            tx.commit().await.expect("commit");
+        }
+
+        // A nonsense value MUST be rejected by the CHECK.
+        let insert_result = store
+            .execute(
+                r#"
+                INSERT INTO notification_candidates (
+                    recipient_bare_jid, conversation_jid, sender_jid, thread_id,
+                    stanza_id_by, stanza_id, class, reason, created_at_ms,
+                    policy_error_count, next_attempt_at_ms, outboxed_at_ms,
+                    suppressed_reason, noping, no_store, no_permanent_store
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, 0, 0, 0)
+                "#,
+                crate::db_params![
+                    "alice@example.com",
+                    "bob@example.com",
+                    "bob@example.com/web",
+                    "",
+                    "alice@example.com",
+                    "bad-value",
+                    "dm",
+                    "offline_dm",
+                    1_i64,
+                    0_i64,
+                    "not-a-real-reason",
+                ],
+            )
+            .await;
+        assert!(
+            insert_result.is_err(),
+            "CHECK constraint must reject nonsense suppressed_reason"
+        );
+    }
+
+    /// XEP-0492 `<never/>` suppression at T1 MUST persist
+    /// `Xep0492Never` onto the candidate row's `suppressed_reason`
+    /// column, NOT enqueue a job, and increment the metric counter
+    /// labeled by the typed db value.
+    #[tokio::test]
+    async fn t1_xep0492_never_records_typed_suppressed_reason() {
+        let _guard = waddle_xmpp::prometheus::metrics_test_lock().lock().await;
+        waddle_xmpp::prometheus::reset_metrics_for_test();
+        let store = store().await;
+        let push_store = waddle_xmpp::push::InMemoryPushStore::new();
+        let blocking = waddle_xmpp::xep::xep0191::InMemoryBlockingStorage::new();
+        let projection = settings_projection().await;
+        let room_policy = StubRoomPolicy::new();
+        let dnd_reader = NoopDndReader;
+        let recipient = bare("alice@example.com");
+        let sender = bare("bob@example.com");
+
+        // Persist a `<never/>` notification setting for the recipient
+        // against `sender`'s DM conversation.
+        projection
+            .upsert(&crate::notification_settings_projection::NotificationSettingsProjection {
+                owner_bare_jid: recipient.clone(),
+                conversation_jid: sender.clone(),
+                conversation_kind:
+                    crate::notification_settings_projection::ConversationKind::Direct,
+                mode: waddle_xmpp::xep::NotificationLevel::Never,
+                source:
+                    crate::notification_settings_projection::NotificationSettingsSource::Xep0402Bookmarks,
+                source_item_jid: sender.clone(),
+                updated_at_ms: 1,
+                source_version: 1,
+            })
+            .await
+            .expect("seed never level");
+
+        let candidate = candidate_for(&recipient, &sender, "t1-never");
+        store
+            .insert_candidate(&candidate)
+            .await
+            .expect("insert candidate");
+
+        let deps = NotificationDrainDeps::new(&room_policy, &dnd_reader);
+        store
+            .drain_pending_candidates_into_outbox(
+                &push_store,
+                &blocking,
+                &projection,
+                deps,
+                &bare("push.example.com"),
+                16,
+            )
+            .await
+            .expect("drain candidates");
+
+        let mut rows = store
+            .query(
+                "SELECT suppressed_reason, outboxed_at_ms FROM notification_candidates WHERE stanza_id = ?",
+                crate::db_params!["t1-never"],
+            )
+            .await
+            .expect("query suppressed_reason");
+        let row = rows.next().await.expect("row").expect("row exists");
+        let reason: Option<String> = row.get(0).expect("reason");
+        let outboxed: Option<i64> = row.get(1).expect("outboxed_at_ms");
+        assert_eq!(reason.as_deref(), Some("xep0492_never"));
+        assert!(
+            outboxed.is_some(),
+            "T1 suppression must mark candidate outboxed"
+        );
+        assert!(
+            store.pending_outbox_jobs().await.expect("jobs").is_empty(),
+            "T1 suppression MUST NOT enqueue a job",
+        );
+
+        let rendered = waddle_xmpp::prometheus::render_metrics();
+        assert!(
+            rendered.contains("waddle_push_suppressed_total{reason=\"xep0492_never\"} 1"),
+            "metric counter for xep0492_never must increment; rendered={rendered}",
+        );
+    }
+
+    /// XEP-0492 `<on-mention/>` setting with a non-mention candidate
+    /// (DM without explicit mention) MUST suppress at T1 with the
+    /// typed `Xep0492OnMentionMiss` audit reason.
+    #[tokio::test]
+    async fn t1_xep0492_on_mention_miss_records_typed_suppressed_reason() {
+        let _guard = waddle_xmpp::prometheus::metrics_test_lock().lock().await;
+        waddle_xmpp::prometheus::reset_metrics_for_test();
+        let store = store().await;
+        let push_store = waddle_xmpp::push::InMemoryPushStore::new();
+        let blocking = waddle_xmpp::xep::xep0191::InMemoryBlockingStorage::new();
+        let projection = settings_projection().await;
+        let room_policy = StubRoomPolicy::new();
+        let dnd_reader = NoopDndReader;
+        let recipient = bare("alice@example.com");
+        let sender = bare("bob@example.com");
+
+        projection
+            .upsert(&crate::notification_settings_projection::NotificationSettingsProjection {
+                owner_bare_jid: recipient.clone(),
+                conversation_jid: sender.clone(),
+                conversation_kind:
+                    crate::notification_settings_projection::ConversationKind::Direct,
+                mode: waddle_xmpp::xep::NotificationLevel::OnMention,
+                source:
+                    crate::notification_settings_projection::NotificationSettingsSource::Xep0402Bookmarks,
+                source_item_jid: sender.clone(),
+                updated_at_ms: 1,
+                source_version: 1,
+            })
+            .await
+            .expect("seed on-mention level");
+
+        let candidate = candidate_for(&recipient, &sender, "t1-on-mention");
+        store
+            .insert_candidate(&candidate)
+            .await
+            .expect("insert candidate");
+
+        let deps = NotificationDrainDeps::new(&room_policy, &dnd_reader);
+        store
+            .drain_pending_candidates_into_outbox(
+                &push_store,
+                &blocking,
+                &projection,
+                deps,
+                &bare("push.example.com"),
+                16,
+            )
+            .await
+            .expect("drain candidates");
+
+        let mut rows = store
+            .query(
+                "SELECT suppressed_reason FROM notification_candidates WHERE stanza_id = ?",
+                crate::db_params!["t1-on-mention"],
+            )
+            .await
+            .expect("query");
+        let row = rows.next().await.expect("row").expect("row exists");
+        let reason: Option<String> = row.get(0).expect("reason");
+        assert_eq!(reason.as_deref(), Some("xep0492_on_mention_miss"));
+
+        let rendered = waddle_xmpp::prometheus::render_metrics();
+        assert!(
+            rendered.contains("waddle_push_suppressed_total{reason=\"xep0492_on_mention_miss\"} 1"),
+        );
+    }
+
+    /// XEP-0191 blocking at T1 MUST record `Xep0191Blocked` onto the
+    /// candidate row before marking it outboxed-without-job.
+    #[tokio::test]
+    async fn t1_xep0191_blocked_records_typed_suppressed_reason() {
+        let _guard = waddle_xmpp::prometheus::metrics_test_lock().lock().await;
+        waddle_xmpp::prometheus::reset_metrics_for_test();
+        let store = store().await;
+        let push_store = waddle_xmpp::push::InMemoryPushStore::new();
+        let blocking = waddle_xmpp::xep::xep0191::InMemoryBlockingStorage::new();
+        let projection = settings_projection().await;
+        let room_policy = StubRoomPolicy::new();
+        let dnd_reader = NoopDndReader;
+        let recipient = bare("alice@example.com");
+        let sender = bare("bob@example.com");
+
+        // Block the sender on the recipient's blocklist.
+        blocking.set_blocklist(recipient.clone(), vec![sender.clone()]);
+
+        let candidate = candidate_for(&recipient, &sender, "t1-blocked");
+        store
+            .insert_candidate(&candidate)
+            .await
+            .expect("insert candidate");
+
+        let deps = NotificationDrainDeps::new(&room_policy, &dnd_reader);
+        store
+            .drain_pending_candidates_into_outbox(
+                &push_store,
+                &blocking,
+                &projection,
+                deps,
+                &bare("push.example.com"),
+                16,
+            )
+            .await
+            .expect("drain candidates");
+
+        let mut rows = store
+            .query(
+                "SELECT suppressed_reason FROM notification_candidates WHERE stanza_id = ?",
+                crate::db_params!["t1-blocked"],
+            )
+            .await
+            .expect("query");
+        let row = rows.next().await.expect("row").expect("row exists");
+        let reason: Option<String> = row.get(0).expect("reason");
+        assert_eq!(reason.as_deref(), Some("xep0191_blocked"));
+        let rendered = waddle_xmpp::prometheus::render_metrics();
+        assert!(rendered.contains("waddle_push_suppressed_total{reason=\"xep0191_blocked\"} 1"),);
+    }
+
+    /// XEP-0513 `<noping/>` carried on the candidate row MUST suppress
+    /// at T1 with the typed `Xep0513Noping` reason. Tests the
+    /// message-frozen path: candidate is constructed with the noping
+    /// bit set, persisted, then the drain reads it back and suppresses.
+    #[tokio::test]
+    async fn t1_noping_records_typed_suppressed_reason() {
+        let _guard = waddle_xmpp::prometheus::metrics_test_lock().lock().await;
+        waddle_xmpp::prometheus::reset_metrics_for_test();
+        let store = store().await;
+        let push_store = waddle_xmpp::push::InMemoryPushStore::new();
+        let blocking = waddle_xmpp::xep::xep0191::InMemoryBlockingStorage::new();
+        let projection = settings_projection().await;
+        let room_policy = StubRoomPolicy::new();
+        let dnd_reader = NoopDndReader;
+        let recipient = bare("alice@example.com");
+        let sender_jid: Jid = "bob@example.com/web".parse().expect("full sender");
+        let candidate = NotificationCandidate::direct_message_with_hints(
+            recipient.clone(),
+            sender_jid,
+            StanzaId::new("t1-noping", Jid::from(recipient.clone())),
+            false,
+            NotificationMessageHints::none().with_noping(true),
+        )
+        .expect("candidate");
+        assert!(candidate.noping());
+        store
+            .insert_candidate(&candidate)
+            .await
+            .expect("insert candidate");
+
+        let deps = NotificationDrainDeps::new(&room_policy, &dnd_reader);
+        store
+            .drain_pending_candidates_into_outbox(
+                &push_store,
+                &blocking,
+                &projection,
+                deps,
+                &bare("push.example.com"),
+                16,
+            )
+            .await
+            .expect("drain candidates");
+
+        let mut rows = store
+            .query(
+                "SELECT suppressed_reason, noping FROM notification_candidates WHERE stanza_id = ?",
+                crate::db_params!["t1-noping"],
+            )
+            .await
+            .expect("query");
+        let row = rows.next().await.expect("row").expect("row exists");
+        assert_eq!(
+            row.get::<Option<String>>(0).expect("reason").as_deref(),
+            Some("xep0513_noping")
+        );
+        assert_eq!(row.get::<i64>(1).expect("noping"), 1);
+        let rendered = waddle_xmpp::prometheus::render_metrics();
+        assert!(rendered.contains("waddle_push_suppressed_total{reason=\"xep0513_noping\"} 1"),);
+    }
+
+    /// XEP-0334 `<no-store/>` hint snapshotted onto a candidate row
+    /// MUST suppress at T1 with the typed `Xep0334NoStore` reason.
+    #[tokio::test]
+    async fn t1_no_store_records_typed_suppressed_reason() {
+        let _guard = waddle_xmpp::prometheus::metrics_test_lock().lock().await;
+        waddle_xmpp::prometheus::reset_metrics_for_test();
+        let store = store().await;
+        let push_store = waddle_xmpp::push::InMemoryPushStore::new();
+        let blocking = waddle_xmpp::xep::xep0191::InMemoryBlockingStorage::new();
+        let projection = settings_projection().await;
+        let room_policy = StubRoomPolicy::new();
+        let dnd_reader = NoopDndReader;
+        let recipient = bare("alice@example.com");
+        let sender_jid: Jid = "bob@example.com/web".parse().expect("full sender");
+        let candidate = NotificationCandidate::direct_message_with_hints(
+            recipient.clone(),
+            sender_jid,
+            StanzaId::new("t1-no-store", Jid::from(recipient.clone())),
+            false,
+            NotificationMessageHints::none().with_xep0334(true, false),
+        )
+        .expect("candidate");
+        assert!(candidate.no_store());
+        assert!(!candidate.no_permanent_store());
+        store
+            .insert_candidate(&candidate)
+            .await
+            .expect("insert candidate");
+
+        let deps = NotificationDrainDeps::new(&room_policy, &dnd_reader);
+        store
+            .drain_pending_candidates_into_outbox(
+                &push_store,
+                &blocking,
+                &projection,
+                deps,
+                &bare("push.example.com"),
+                16,
+            )
+            .await
+            .expect("drain candidates");
+
+        let mut rows = store
+            .query(
+                "SELECT suppressed_reason FROM notification_candidates WHERE stanza_id = ?",
+                crate::db_params!["t1-no-store"],
+            )
+            .await
+            .expect("query");
+        let row = rows.next().await.expect("row").expect("row exists");
+        assert_eq!(
+            row.get::<Option<String>>(0).expect("reason").as_deref(),
+            Some("xep0334_no_store"),
+        );
+    }
+
+    /// XEP-0334 `<no-permanent-store/>` hint snapshotted onto a
+    /// candidate row MUST suppress at T1 with
+    /// `Xep0334NoPermanentStore`.
+    #[tokio::test]
+    async fn t1_no_permanent_store_records_typed_suppressed_reason() {
+        let _guard = waddle_xmpp::prometheus::metrics_test_lock().lock().await;
+        waddle_xmpp::prometheus::reset_metrics_for_test();
+        let store = store().await;
+        let push_store = waddle_xmpp::push::InMemoryPushStore::new();
+        let blocking = waddle_xmpp::xep::xep0191::InMemoryBlockingStorage::new();
+        let projection = settings_projection().await;
+        let room_policy = StubRoomPolicy::new();
+        let dnd_reader = NoopDndReader;
+        let recipient = bare("alice@example.com");
+        let sender_jid: Jid = "bob@example.com/web".parse().expect("full sender");
+        let candidate = NotificationCandidate::direct_message_with_hints(
+            recipient.clone(),
+            sender_jid,
+            StanzaId::new("t1-no-perm-store", Jid::from(recipient.clone())),
+            false,
+            NotificationMessageHints::none().with_xep0334(false, true),
+        )
+        .expect("candidate");
+        store
+            .insert_candidate(&candidate)
+            .await
+            .expect("insert candidate");
+
+        let deps = NotificationDrainDeps::new(&room_policy, &dnd_reader);
+        store
+            .drain_pending_candidates_into_outbox(
+                &push_store,
+                &blocking,
+                &projection,
+                deps,
+                &bare("push.example.com"),
+                16,
+            )
+            .await
+            .expect("drain candidates");
+
+        let mut rows = store
+            .query(
+                "SELECT suppressed_reason FROM notification_candidates WHERE stanza_id = ?",
+                crate::db_params!["t1-no-perm-store"],
+            )
+            .await
+            .expect("query");
+        let row = rows.next().await.expect("row").expect("row exists");
+        assert_eq!(
+            row.get::<Option<String>>(0).expect("reason").as_deref(),
+            Some("xep0334_no_permanent_store"),
+        );
+    }
+
+    /// `NoopDndReader` MUST report every user as `Inactive` so slice
+    /// 2a's defaulted call sites never trigger DnD suppression while
+    /// the real impl is still pending (#367).
+    #[tokio::test]
+    async fn noop_dnd_reader_reports_inactive() {
+        let reader = NoopDndReader;
+        let user = bare("alice@example.com");
+        let state = reader.dnd_state(&user).await.expect("noop dnd");
+        assert_eq!(state, DndState::Inactive);
+    }
+
+    /// A `DndReader` that reports `Active` MUST suppress at T1 with
+    /// `WaddleDnd`, even when the recipient has no other suppressors
+    /// in play.
+    #[tokio::test]
+    async fn t1_active_dnd_suppresses_with_typed_reason() {
+        let _guard = waddle_xmpp::prometheus::metrics_test_lock().lock().await;
+        waddle_xmpp::prometheus::reset_metrics_for_test();
+
+        struct ActiveDndReader;
+        #[async_trait::async_trait]
+        impl DndReader for ActiveDndReader {
+            async fn dnd_state(
+                &self,
+                _user: &BareJid,
+            ) -> Result<DndState, NotificationOutboxError> {
+                Ok(DndState::Active)
+            }
+        }
+
+        let store = store().await;
+        let push_store = waddle_xmpp::push::InMemoryPushStore::new();
+        let blocking = waddle_xmpp::xep::xep0191::InMemoryBlockingStorage::new();
+        let projection = settings_projection().await;
+        let room_policy = StubRoomPolicy::new();
+        let dnd_reader = ActiveDndReader;
+        let recipient = bare("alice@example.com");
+        let sender = bare("bob@example.com");
+        let candidate = candidate_for(&recipient, &sender, "t1-dnd");
+        store
+            .insert_candidate(&candidate)
+            .await
+            .expect("insert candidate");
+
+        let deps = NotificationDrainDeps::new(&room_policy, &dnd_reader);
+        store
+            .drain_pending_candidates_into_outbox(
+                &push_store,
+                &blocking,
+                &projection,
+                deps,
+                &bare("push.example.com"),
+                16,
+            )
+            .await
+            .expect("drain candidates");
+
+        let mut rows = store
+            .query(
+                "SELECT suppressed_reason FROM notification_candidates WHERE stanza_id = ?",
+                crate::db_params!["t1-dnd"],
+            )
+            .await
+            .expect("query");
+        let row = rows.next().await.expect("row").expect("row exists");
+        assert_eq!(
+            row.get::<Option<String>>(0).expect("reason").as_deref(),
+            Some("waddle_dnd"),
+        );
+        let rendered = waddle_xmpp::prometheus::render_metrics();
+        assert!(rendered.contains("waddle_push_suppressed_total{reason=\"waddle_dnd\"} 1"));
+    }
+
+    /// Schema regression: cold-init MUST produce a
+    /// `notification_candidates.suppressed_reason` column with the
+    /// named CHECK constraint accepting every typed db value.
+    #[tokio::test]
+    async fn cold_init_creates_suppressed_reason_column_and_check() {
+        let store = store().await;
+        // Insert a row, then update suppressed_reason to every typed
+        // db value in turn — all MUST succeed.
+        let recipient = bare("alice@example.com");
+        let sender_jid: Jid = "bob@example.com/web".parse().expect("full sender");
+        let candidate = NotificationCandidate::direct_message(
+            recipient.clone(),
+            sender_jid,
+            StanzaId::new("schema-probe", Jid::from(recipient.clone())),
+            false,
+        )
+        .expect("candidate");
+        store
+            .insert_candidate(&candidate)
+            .await
+            .expect("insert candidate");
+        for reason_db in NOTIFICATION_CANDIDATES_SUPPRESSED_REASON_VALUES {
+            store
+                .execute(
+                    "UPDATE notification_candidates SET suppressed_reason = ? WHERE stanza_id = ?",
+                    crate::db_params![reason_db, "schema-probe"],
+                )
+                .await
+                .expect("update suppressed_reason");
+        }
+        // Reset to NULL also OK (unsuppressed/delivered shape).
+        store
+            .execute(
+                "UPDATE notification_candidates SET suppressed_reason = NULL WHERE stanza_id = ?",
+                crate::db_params!["schema-probe"],
+            )
+            .await
+            .expect("reset to NULL");
+    }
+
+    /// Legacy upgrade regression: a database created with an
+    /// older schema that lacks the `suppressed_reason`, `noping`,
+    /// `no_store`, and `no_permanent_store` columns MUST upgrade
+    /// cleanly when `NotificationOutboxStore::new` runs the
+    /// `add_column_if_missing` + suppressed-reason migration.
+    /// Both legacy rows AND newly-inserted rows are insertable
+    /// and decodable after migration.
+    #[tokio::test]
+    async fn legacy_schema_upgrade_adds_suppressed_reason_and_hints() {
+        let db = Database::in_memory("notification-outbox-legacy-suppressed")
+            .await
+            .unwrap();
+        let conn = db.guard().await.expect("db guard");
+        conn.execute(
+            r#"
+            CREATE TABLE notification_candidates (
+                recipient_bare_jid TEXT NOT NULL,
+                conversation_jid TEXT NOT NULL,
+                sender_jid TEXT NOT NULL,
+                thread_id TEXT NOT NULL DEFAULT '',
+                stanza_id_by TEXT NOT NULL,
+                stanza_id TEXT NOT NULL,
+                class TEXT NOT NULL CHECK (class IN ('dm', 'dm_mention', 'personal_mention', 'channel_mention', 'active_channel_mention', 'notify_all')),
+                reason TEXT NOT NULL CHECK (reason IN ('offline_dm', 'offline_dm_mention', 'groupchat_personal_mention', 'groupchat_channel_mention', 'groupchat_active_channel_mention', 'groupchat_notify_all')),
+                created_at_ms INTEGER NOT NULL,
+                policy_error_count INTEGER NOT NULL DEFAULT 0,
+                next_attempt_at_ms INTEGER,
+                outboxed_at_ms INTEGER,
+                PRIMARY KEY (recipient_bare_jid, conversation_jid, thread_id, stanza_id_by, stanza_id, class)
+            )
+            "#,
+            (),
+        )
+        .await
+        .expect("create legacy candidate table");
+        conn.execute(
+            r#"
+            INSERT INTO notification_candidates (
+                recipient_bare_jid, conversation_jid, sender_jid, thread_id,
+                stanza_id_by, stanza_id, class, reason, created_at_ms,
+                policy_error_count, next_attempt_at_ms, outboxed_at_ms
+            ) VALUES (
+                'alice@example.com', 'bob@example.com', 'bob@example.com/web', '',
+                'alice@example.com', 'legacy-row', 'dm', 'offline_dm', 1, 0, NULL, NULL
+            )
+            "#,
+            (),
+        )
+        .await
+        .expect("insert legacy candidate");
+        drop(conn);
+
+        let store = NotificationOutboxStore::new(db)
+            .await
+            .expect("store migrates legacy schema");
+        // Insert a new candidate with the noping bit set; the column
+        // must exist and accept the value.
+        let recipient = bare("alice@example.com");
+        let sender_jid: Jid = "bob@example.com/web".parse().expect("full sender");
+        let new_candidate = NotificationCandidate::direct_message_with_hints(
+            recipient.clone(),
+            sender_jid,
+            StanzaId::new("post-upgrade", Jid::from(recipient.clone())),
+            true,
+            NotificationMessageHints::none()
+                .with_noping(true)
+                .with_xep0334(true, true),
+        )
+        .expect("post-upgrade candidate");
+        store
+            .insert_candidate(&new_candidate)
+            .await
+            .expect("insert post-upgrade candidate");
+        let mut rows = store
+            .query(
+                "SELECT suppressed_reason, noping, no_store, no_permanent_store FROM notification_candidates WHERE stanza_id = ?",
+                crate::db_params!["post-upgrade"],
+            )
+            .await
+            .expect("query post-upgrade row");
+        let row = rows.next().await.expect("row").expect("row exists");
+        let reason: Option<String> = row.get(0).expect("reason");
+        assert!(reason.is_none());
+        assert_eq!(row.get::<i64>(1).expect("noping"), 1);
+        assert_eq!(row.get::<i64>(2).expect("no_store"), 1);
+        assert_eq!(row.get::<i64>(3).expect("no_permanent_store"), 1);
+
+        // Legacy row's hint columns must default to 0.
+        let mut rows = store
+            .query(
+                "SELECT noping, no_store, no_permanent_store, suppressed_reason FROM notification_candidates WHERE stanza_id = ?",
+                crate::db_params!["legacy-row"],
+            )
+            .await
+            .expect("query legacy row");
+        let row = rows.next().await.expect("row").expect("legacy row");
+        assert_eq!(row.get::<i64>(0).expect("noping"), 0);
+        assert_eq!(row.get::<i64>(1).expect("no_store"), 0);
+        assert_eq!(row.get::<i64>(2).expect("no_permanent_store"), 0);
+        assert!(row.get::<Option<String>>(3).expect("reason").is_none());
     }
 }
