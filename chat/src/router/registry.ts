@@ -1,6 +1,7 @@
 import { adminRoute, type AdminMatch } from "./routes/admin";
 import { channelExtensionRoute, type ChannelExtensionMatch } from "./routes/channel-extension";
 import { channelRoute, type ChannelMatch } from "./routes/channel";
+import { dmListRoute, type DmListMatch } from "./routes/dm-list";
 import { dmRoute, type DmMatch } from "./routes/dm";
 import { eventsRoute, type EventsMatch } from "./routes/events";
 import { feedRoute, type FeedMatch } from "./routes/feed";
@@ -14,6 +15,7 @@ export const routes = {
   channel: channelRoute,
   channelExtension: channelExtensionRoute,
   dm: dmRoute,
+  dmList: dmListRoute,
   feed: feedRoute,
   stories: storiesRoute,
   events: eventsRoute,
@@ -27,6 +29,7 @@ export type RouteMatch =
   | ChannelMatch
   | ChannelExtensionMatch
   | DmMatch
+  | DmListMatch
   | FeedMatch
   | StoriesMatch
   | EventsMatch

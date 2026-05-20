@@ -62,6 +62,10 @@ describe("matchLocation", () => {
     });
   });
 
+  test("parses /dm as the DM list route (distinct from /dm/:username)", () => {
+    expect(matchLocation("/dm", "")).toEqual({ id: "dmList" });
+  });
+
   test("parses admin with explicit panel", () => {
     expect(matchLocation("/admin/spaces", "")).toEqual({
       id: "admin",
@@ -125,6 +129,10 @@ describe("buildHref", () => {
     expect(buildHref({ id: "feed" })).toBe("/feed");
     expect(buildHref({ id: "stories" })).toBe("/stories");
     expect(buildHref({ id: "events" })).toBe("/events");
+  });
+
+  test("dmList", () => {
+    expect(buildHref({ id: "dmList" })).toBe("/dm");
   });
 
   test("settings (with and without origin)", () => {

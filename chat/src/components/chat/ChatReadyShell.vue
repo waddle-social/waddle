@@ -88,6 +88,7 @@ const {
   handleToggleNotifications,
   openUserSettings,
   openHome,
+  openDmList,
   openThreads,
   openCommunitySurface,
   closeUserSettings,
@@ -260,8 +261,8 @@ onUnmounted(() => {
           :server-version="version.serverVersion.value"
           @open-home="openHome"
           @open-settings="openUserSettings"
-          @toggle-channels="ui.sidebarMode.value = 'channels'"
-          @toggle-dms="ui.sidebarMode.value = 'dms'"
+          @toggle-channels="openHome"
+          @toggle-dms="openDmList"
           @logout="handleLogout"
           @request-notifications="handleRequestNotifications"
           @toggle-notifications="handleToggleNotifications"

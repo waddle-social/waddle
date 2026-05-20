@@ -1,6 +1,7 @@
 import { adminRoute } from "./routes/admin";
 import { channelExtensionRoute } from "./routes/channel-extension";
 import { channelRoute } from "./routes/channel";
+import { dmListRoute } from "./routes/dm-list";
 import { dmRoute } from "./routes/dm";
 import { eventsRoute } from "./routes/events";
 import { feedRoute } from "./routes/feed";
@@ -12,12 +13,14 @@ import type { RouteMatch } from "./registry";
 
 // Order matters: longer-prefix routes must be tried before their
 // shorter prefixes. `channelExtension` (`/r/:c/x/:p/:r`) must beat
-// `channel` (`/r/:c`); `home` (`/` only) sits last and `matchLocation`
-// falls back to it for anything that didn't match a real route.
+// `channel` (`/r/:c`); `dm` (`/dm/:user`) must beat `dmList` (`/dm`).
+// `home` (`/` only) sits last and `matchLocation` falls back to it
+// for anything that didn't match a real route.
 const ORDER = [
   channelExtensionRoute,
   channelRoute,
   dmRoute,
+  dmListRoute,
   feedRoute,
   storiesRoute,
   eventsRoute,

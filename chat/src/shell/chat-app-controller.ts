@@ -47,13 +47,15 @@ export function useChatAppController(giphyApiKey: string, initialMatch?: RouteMa
   // Seed page-level UI state from the SSR-known match (handed in by the
   // Astro page via AppLayout → AppShell) so the first render lands on
   // the right page. Without this, every cold load flashes the default
-  // home dashboard for one tick before `onConnectionReady` runs
-  // `applyRouteTarget` and snaps to the real page. `activePageFromMatch`
-  // and `communitySurfaceFromMatch` are hoisted function declarations
-  // defined further down in this scope.
+  // home dashboard / channels-sidebar for one tick before
+  // `onConnectionReady` runs `applyRouteTarget` and snaps to the real
+  // page. `activePageFromMatch`, `communitySurfaceFromMatch`, and
+  // `sidebarModeFromMatch` are hoisted function declarations defined
+  // further down in this scope.
   if (initialMatch) {
     ui.activePage.value = activePageFromMatch(initialMatch);
     ui.activeCommunitySurface.value = communitySurfaceFromMatch(initialMatch);
+    ui.sidebarMode.value = sidebarModeFromMatch(initialMatch);
   }
 
   const xmppClient = computed(() => connectionStore.client);
@@ -1148,12 +1150,16 @@ export function useChatAppController(giphyApiKey: string, initialMatch?: RouteMa
       }
       return;
     }
-    if (ui.sidebarMode.value === "dms" && activeDmPeer.value) {
-      navigate({
-        id: "dm",
-        params: { username: activeDmPeer.value.peerUsername },
-        search: { thread: [] },
-      });
+    if (ui.sidebarMode.value === "dms") {
+      if (activeDmPeer.value) {
+        navigate({
+          id: "dm",
+          params: { username: activeDmPeer.value.peerUsername },
+          search: { thread: [] },
+        });
+      } else {
+        navigate({ id: "dmList" });
+      }
     } else if (channel) {
       navigate({
         id: "channel",
@@ -1314,12 +1320,34 @@ export function useChatAppController(giphyApiKey: string, initialMatch?: RouteMa
     ui.showMobileNav.value = false;
     ui.showMobileDetails.value = false;
     ui.activePage.value = "dashboard";
+    ui.sidebarMode.value = "channels";
+    ui.activeCommunitySurface.value = null;
     waddles.activeChannelId.value = null;
     dmConversations.closeDm();
     activeRightPanel.value = null;
     activeThreadStack.value = [];
     activeExtensionRouteKey.value = null;
     navigate({ id: "home" });
+  }
+
+  /**
+   * Navigate to the DM list (`/dm`). Mirrors `openHome` / `openThreads`:
+   * mutates the in-page state up front so the v-else-if cascade in
+   * ChatReadyShell switches to DM mode this tick, then pushes the URL
+   * so refresh and back/forward land on the same place.
+   */
+  function openDmList() {
+    ui.showMobileNav.value = false;
+    ui.showMobileDetails.value = false;
+    ui.activePage.value = "chat";
+    ui.sidebarMode.value = "dms";
+    ui.activeCommunitySurface.value = null;
+    waddles.activeChannelId.value = null;
+    dmConversations.closeDm();
+    activeRightPanel.value = null;
+    activeThreadStack.value = [];
+    activeExtensionRouteKey.value = null;
+    navigate({ id: "dmList" });
   }
 
   function closeUserSettings() {
@@ -1347,6 +1375,7 @@ export function useChatAppController(giphyApiKey: string, initialMatch?: RouteMa
       case "channel":
       case "channelExtension":
       case "dm":
+      case "dmList":
       case "feed":
       case "stories":
       case "events": return "chat";
@@ -1360,6 +1389,10 @@ export function useChatAppController(giphyApiKey: string, initialMatch?: RouteMa
     return match.id === "feed" || match.id === "stories" || match.id === "events"
       ? match.id
       : null;
+  }
+
+  function sidebarModeFromMatch(match: RouteMatch): "channels" | "dms" {
+    return match.id === "dm" || match.id === "dmList" ? "dms" : "channels";
   }
 
   function onPopState() {
@@ -1412,6 +1445,19 @@ export function useChatAppController(giphyApiKey: string, initialMatch?: RouteMa
       waddles.activeChannelId.value = null;
       activeExtensionRouteKey.value = null;
       messaging.clearMessages();
+      activeThreadTargetMessageId.value = null;
+      activeThreadStack.value = [];
+      return;
+    }
+    if (match.id === "dmList") {
+      // DM list view: sidebar in DM mode, no peer selected. The DM
+      // pane in the sidebar shows the conversation list; the main
+      // content area renders the "select a conversation" empty state.
+      ui.sidebarMode.value = "dms";
+      dmConversations.closeDm();
+      waddles.activeChannelId.value = null;
+      activeExtensionRouteKey.value = null;
+      activeRightPanel.value = null;
       activeThreadTargetMessageId.value = null;
       activeThreadStack.value = [];
       return;
@@ -1810,6 +1856,7 @@ export function useChatAppController(giphyApiKey: string, initialMatch?: RouteMa
       handleToggleNotifications,
       openUserSettings,
       openHome,
+      openDmList,
       openThreads,
       openCommunitySurface,
       closeUserSettings,
