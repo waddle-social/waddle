@@ -132,10 +132,12 @@ const weekEventsByDay = computed<Map<string, CommunityEvent[]>>(() => {
   const now = Date.now();
   const horizon = now + SEVEN_DAYS_MS;
   const groups = new Map<string, CommunityEvent[]>();
-  for (const e of filteredEvents.value) {
-    const ms = e.dtstartMs;
-    if (typeof ms !== "number" || ms < now || ms > horizon) continue;
-    const key = new Date(ms).toLocaleDateString(undefined, {
+  const sorted = [...filteredEvents.value]
+    .filter((e): e is CommunityEvent & { dtstartMs: number } => typeof e.dtstartMs === "number")
+    .sort((a, b) => a.dtstartMs - b.dtstartMs);
+  for (const e of sorted) {
+    if (e.dtstartMs < now || e.dtstartMs > horizon) continue;
+    const key = new Date(e.dtstartMs).toLocaleDateString(undefined, {
       weekday: "long",
       month: "short",
       day: "numeric",
@@ -716,7 +718,7 @@ const DOW_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
                   cell.day === selectedDay ? 'bg-primary/10' : '',
                 ]"
                 :disabled="cell.day === null"
-                @click="cell.day !== null && (selectedDay = selectedDay === cell.day ? null : cell.day)"
+                @click="cell.day !== null && (selectedDay = cell.day)"
               >
                 <span
                   v-if="cell.day !== null"
