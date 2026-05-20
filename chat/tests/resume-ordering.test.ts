@@ -5,21 +5,20 @@
  * next `before=` page fetch to skip or duplicate messages near the
  * page boundary.
  *
- * These tests exercise the `resumeInFlight` gate in `handleMessage`
- * directly. Driving the full session lifecycle through a mocked
+ * These tests exercise the resume-gate in `handleMessage` directly.
+ * Driving the full session lifecycle through a mocked
  * `XmppClientInstance` would require modelling the WASM client; the
- * gate's contract is independent of that machinery — when it is set,
- * live arrivals stay in `pendingLiveDuringResume`; when it is cleared
- * and the buffer is drained, the message dispatchers fire exactly
- * once per buffered entry in arrival order.
+ * gate's contract is independent of that machinery — when
+ * `pendingDuringResume` is an array, live arrivals are pushed onto
+ * it; when it is `null` (the post-drain state), they dispatch
+ * synchronously.
  */
 import { describe, expect, test } from "bun:test";
 import type { WaddleSession } from "../src/lib/server-auth";
 import { BrowserXmppClient, type LiveDmMessage, type LiveRoomMessage } from "../src/lib/xmpp-client";
 
 type PrivateState = {
-  resumeInFlight: number;
-  pendingLiveDuringResume: unknown[];
+  pendingDuringResume: unknown[] | null;
   handleMessage: (message: unknown) => void;
 };
 
@@ -67,21 +66,21 @@ function roomWasmMessage(id: string, body: string, timestamp: string) {
 }
 
 describe("resume-time live-message buffering", () => {
-  test("DM live messages arriving while resumeInFlight is set are deferred", () => {
+  test("DM live messages arriving while the resume buffer is open are deferred", () => {
     const client = new BrowserXmppClient(session());
     const state = client as unknown as PrivateState;
     const seen: LiveDmMessage[] = [];
     client.setDirectMessageHandler((message) => { seen.push(message); });
 
-    state.resumeInFlight = 1;
+    state.pendingDuringResume = [];
     state.handleMessage(dmWasmMessage("dm-1", "during-catchup-1", "2026-05-20T10:00:00.000Z"));
     state.handleMessage(dmWasmMessage("dm-2", "during-catchup-2", "2026-05-20T10:00:01.000Z"));
 
     expect(seen).toHaveLength(0);
-    expect(state.pendingLiveDuringResume).toHaveLength(2);
+    expect(state.pendingDuringResume).toHaveLength(2);
   });
 
-  test("room live messages arriving while resumeInFlight is set are deferred", () => {
+  test("room live messages arriving while the resume buffer is open are deferred", () => {
     const client = new BrowserXmppClient(session());
     const state = client as unknown as PrivateState;
     const seen: LiveRoomMessage[] = [];
@@ -90,14 +89,14 @@ describe("resume-time live-message buffering", () => {
     // divert it to the activityHandler.
     (client as unknown as { currentRoom: string }).currentRoom = "general@conference.example.com";
 
-    state.resumeInFlight = 1;
+    state.pendingDuringResume = [];
     state.handleMessage(roomWasmMessage("room-1", "during-catchup-room-1", "2026-05-20T10:00:00.000Z"));
 
     expect(seen).toHaveLength(0);
-    expect(state.pendingLiveDuringResume).toHaveLength(1);
+    expect(state.pendingDuringResume).toHaveLength(1);
   });
 
-  test("clearing resumeInFlight and dispatching the buffer fires handlers in arrival order", () => {
+  test("closing the resume buffer and dispatching it fires handlers in arrival order", () => {
     const client = new BrowserXmppClient(session());
     const state = client as unknown as PrivateState & {
       dispatchLiveBodyMessage: (message: unknown) => void;
@@ -105,16 +104,15 @@ describe("resume-time live-message buffering", () => {
     const seen: LiveDmMessage[] = [];
     client.setDirectMessageHandler((message) => { seen.push(message); });
 
-    state.resumeInFlight = 1;
+    state.pendingDuringResume = [];
     state.handleMessage(dmWasmMessage("dm-1", "first", "2026-05-20T10:00:00.000Z"));
     state.handleMessage(dmWasmMessage("dm-2", "second", "2026-05-20T10:00:01.000Z"));
     state.handleMessage(dmWasmMessage("dm-3", "third", "2026-05-20T10:00:02.000Z"));
     expect(seen).toHaveLength(0);
 
     // Drain — mirror the finally-block in runSessionReady.
-    const buffered = state.pendingLiveDuringResume as Parameters<typeof state.dispatchLiveBodyMessage>[0][];
-    state.pendingLiveDuringResume = [];
-    state.resumeInFlight = 0;
+    const buffered = state.pendingDuringResume as Parameters<typeof state.dispatchLiveBodyMessage>[0][];
+    state.pendingDuringResume = null;
     for (const message of buffered) state.dispatchLiveBodyMessage(message);
 
     expect(seen.map((m) => m.body)).toEqual(["first", "second", "third"]);
@@ -126,11 +124,11 @@ describe("resume-time live-message buffering", () => {
     const seen: LiveDmMessage[] = [];
     client.setDirectMessageHandler((message) => { seen.push(message); });
 
-    // resumeInFlight starts at 0 (no resume in progress) — the normal
-    // post-catchup state. Live arrivals dispatch synchronously.
+    // `pendingDuringResume === null` (the post-catchup state) means
+    // live arrivals dispatch synchronously.
+    expect(state.pendingDuringResume).toBeNull();
     state.handleMessage(dmWasmMessage("dm-late", "after-resume", "2026-05-20T10:00:03.000Z"));
     expect(seen).toHaveLength(1);
-    expect(state.pendingLiveDuringResume).toHaveLength(0);
   });
 
   test("non-body events (chat-state, displayed marker) bypass the resume buffer", () => {
@@ -143,7 +141,7 @@ describe("resume-time live-message buffering", () => {
     client.setDmChatStateHandler(() => { chatStateFired += 1; });
     client.setDmDisplayedHandler(() => { displayedFired += 1; });
 
-    state.resumeInFlight = 1;
+    state.pendingDuringResume = [];
     state.handleMessage({
       id: "cs-1",
       from: "bob@example.com/phone",
@@ -166,6 +164,6 @@ describe("resume-time live-message buffering", () => {
     expect(chatStateFired).toBe(1);
     expect(displayedFired).toBe(1);
     expect(dmSeen).toHaveLength(0);
-    expect(state.pendingLiveDuringResume).toHaveLength(0);
+    expect(state.pendingDuringResume).toHaveLength(0);
   });
 });
