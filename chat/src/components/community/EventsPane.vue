@@ -721,7 +721,7 @@ const DOW_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
                 class="min-h-[4rem] p-1.5 text-left align-top transition-colors"
                 :class="[
                   cell.day === null ? 'bg-muted/20 cursor-default' : 'hover:bg-muted/30 cursor-pointer',
-                  cell.day === selectedDay ? 'bg-primary/10' : '',
+                  cell.day === selectedDay || cell.isToday ? 'bg-primary/10' : '',
                 ]"
                 :disabled="cell.day === null"
                 @click="cell.day !== null && (selectedDay = selectedDay === cell.day ? null : cell.day)"
