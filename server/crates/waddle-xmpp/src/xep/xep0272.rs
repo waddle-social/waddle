@@ -128,9 +128,7 @@ impl MujiContent {
             .ok_or(MujiParseError::MissingAttribute(ATTR_NAME))?;
         let description = elem
             .children()
-            .find(|c| {
-                c.name() == DESCRIPTION_NAME && c.ns() == crate::xep::xep0167::NS_JINGLE_RTP
-            })
+            .find(|c| c.name() == DESCRIPTION_NAME && c.ns() == crate::xep::xep0167::NS_JINGLE_RTP)
             .ok_or(MujiParseError::MissingDescription)?;
         let media_raw = description
             .attr(ATTR_MEDIA)
@@ -224,9 +222,9 @@ impl TryFrom<&Element> for Muji {
             return Err(MujiParseError::WrongElement);
         }
         let room = match elem.attr(ATTR_ROOM) {
-            Some(raw) => Some(
-                BareJid::new(raw).map_err(|_| MujiParseError::InvalidRoom(raw.to_owned()))?,
-            ),
+            Some(raw) => {
+                Some(BareJid::new(raw).map_err(|_| MujiParseError::InvalidRoom(raw.to_owned()))?)
+            }
             None => None,
         };
         let mut preparing = false;
