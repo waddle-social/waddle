@@ -32,7 +32,7 @@ use jid::BareJid;
 use tracing::{debug, warn};
 use xmpp_parsers::message::Message;
 
-use crate::notification_activity::NotificationChatState;
+use crate::notification_activity::{NotificationChatState, NotificationPresenceShow};
 use crate::server::routes::websocket::WebSocketState;
 use waddle_xmpp::xep::xep0085::{ChatState, ChatStateCarrier};
 use waddle_xmpp::xep::xep0203::has_delay;
@@ -191,13 +191,14 @@ pub(super) async fn record_outbound_message_activity(
 
 /// XEP-0045: bump `(owner, room)` activity when `owner` sends a
 /// MUC presence (join or in-room show/status change). `show` is the
-/// typed `<show/>` token if any; the store bounds the persisted
-/// length so adversarial input is truncated rather than rejected.
+/// typed [`NotificationPresenceShow`] token if any; the closed enum
+/// guarantees the persisted value is one of the four RFC 6121
+/// §4.7.2.1 tokens (`Away`, `Chat`, `Dnd`, `Xa`).
 pub(crate) async fn record_presence_available_activity_on_state(
     state: &WebSocketState,
     owner: &BareJid,
     room: &BareJid,
-    show: Option<&str>,
+    show: Option<NotificationPresenceShow>,
 ) {
     let now_ms = crate::time::now_ms();
     if let Err(error) = state

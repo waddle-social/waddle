@@ -1015,7 +1015,7 @@ async fn handle_muc_join_records_notification_activity_for_sender() {
         &room_jid,
         &alice,
         "alice",
-        Some("away"),
+        Some(crate::notification_activity::NotificationPresenceShow::Away),
         &Some(owner_session),
     )
     .await;
@@ -1034,8 +1034,8 @@ async fn handle_muc_join_records_notification_activity_for_sender() {
         after.last_active_at_ms,
     );
     assert_eq!(
-        after.presence_show.as_deref(),
-        Some("away"),
+        after.presence_show,
+        Some(crate::notification_activity::NotificationPresenceShow::Away),
         "join MUST persist the typed `<show/>` token; got {:?}",
         after.presence_show,
     );
@@ -1059,7 +1059,7 @@ async fn handle_muc_leave_records_notification_activity_and_clears_show() {
         &room_jid,
         &alice,
         "alice",
-        Some("chat"),
+        Some(crate::notification_activity::NotificationPresenceShow::Chat),
         &Some(owner_session),
     )
     .await;
@@ -1071,7 +1071,10 @@ async fn handle_muc_leave_records_notification_activity_and_clears_show() {
         .await
         .expect("read post-join")
         .expect("activity post-join");
-    assert_eq!(after_join.presence_show.as_deref(), Some("chat"));
+    assert_eq!(
+        after_join.presence_show,
+        Some(crate::notification_activity::NotificationPresenceShow::Chat)
+    );
 
     // Ensure `now_ms()` strictly advances between the join and leave
     // writes — the monotonic UPSERT clause keeps the `<show/>` column

@@ -27,6 +27,7 @@ use crate::db::blocking::DatabaseBlockingStorage;
 use crate::db::roster::{
     DatabaseRosterStorage, RosterItemRow, RosterRowChange, RosterStorageError,
 };
+use crate::notification_activity::NotificationPresenceShow;
 use crate::permissions::{CheckPermission, Object, ObjectType, Permission, Subject};
 use crate::server::bootstrap_membership::DEPLOYMENT_SERVER_ID;
 use crate::server::xmpp_state::{get_xmpp_channel, XmppChannelRecord};
@@ -42,7 +43,7 @@ mod subscription;
 pub use muc::parse_room_jid_context;
 pub use muc::{get_managed_channel_for_room, handle_muc_join, handle_muc_leave};
 use probe::handle_presence_probe;
-use regular::{handle_regular_presence_update, show_name as regular_presence_show_name};
+use regular::handle_regular_presence_update;
 pub use subscription::broadcast_unavailable_for_expired_detached_session;
 use subscription::{handle_directed_presence, handle_subscription_presence};
 pub(super) use subscription::{
@@ -99,14 +100,17 @@ pub async fn handle_presence(
             return replies;
         }
 
-        let presence_show_token = presence.show.as_ref().map(regular_presence_show_name);
+        let presence_show = presence
+            .show
+            .clone()
+            .map(NotificationPresenceShow::from_xep0045);
         return handle_muc_join(
             state,
             domain,
             &room_jid,
             sender_jid,
             nick,
-            presence_show_token,
+            presence_show,
             _authenticated_session,
         )
         .await;

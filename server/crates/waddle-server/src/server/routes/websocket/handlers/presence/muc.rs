@@ -18,7 +18,7 @@ pub async fn handle_muc_join(
     room_jid: &BareJid,
     sender_jid: &FullJid,
     nick: &str,
-    presence_show: Option<&str>,
+    presence_show: Option<crate::notification_activity::NotificationPresenceShow>,
     authenticated_session: &Option<Session>,
 ) -> Vec<String> {
     info!(room = %room_jid, nick = %nick, sender = %sender_jid, "MUC join request");
