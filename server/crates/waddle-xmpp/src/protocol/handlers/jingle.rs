@@ -15,7 +15,7 @@ use std::sync::Arc;
 use jid::{BareJid, Jid};
 use minidom::Element;
 use xmpp_parsers::iq::Iq;
-use xmpp_parsers::jingle::{Action, Content, Jingle, Transport};
+use xmpp_parsers::jingle::{Action, Content, Jingle, SessionId, Transport};
 use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
 
 use waddle_sfu::{CallId, Identity, MediaCapabilities, SfuError, SfuService};
@@ -246,7 +246,18 @@ impl JingleHandler {
         for content in &mut jingle.contents {
             match rewrite_content_transport(content, &call_id, &peer_identity, &*self.sfu) {
                 Ok(()) => {}
-                Err(reason) => return reason.into_error_reply(iq),
+                Err(reason) => {
+                    // 1:1 P2P path — the "responder" perspective of
+                    // the session-terminate is the authenticated
+                    // session (we're the server, but for the
+                    // requester the rejection comes from where the
+                    // call was addressed). XEP-0166 §10.2 doesn't
+                    // strictly mandate the `from` JID; using the
+                    // authenticated full JID keeps the wire
+                    // self-consistent with the rest of the 1:1
+                    // forwarding flow.
+                    return reason.into_error_reply(iq, &jingle.sid, &ctx.full_jid.clone().into());
+                }
             }
         }
 
@@ -376,10 +387,14 @@ impl JingleHandler {
         // Every content shares the same token because LiveKit's
         // identity model is "one identity per participant"; the
         // audio/video split lives below the LiveKit layer.
+        // Mixer JID becomes the `from` of any session-terminate
+        // we emit per XEP-0166 §10.2 — the conference focus is the
+        // source of the rejection, not the requester.
+        let mixer_jid: Jid = calls_mixer_jid(ctx.domain).into();
         for content in &mut jingle.contents {
             match rewrite_content_transport(content, &call_id, &identity, &*self.sfu) {
                 Ok(()) => {}
-                Err(reason) => return reason.into_error_reply(iq),
+                Err(reason) => return reason.into_error_reply(iq, &jingle.sid, &mixer_jid),
             }
         }
         self.sfu.register_call_participant(&call_id, &identity);
@@ -595,19 +610,20 @@ enum RewriteError {
 }
 
 impl RewriteError {
-    fn into_error_reply(self, iq: &Iq) -> Vec<OutboundEvent> {
+    /// Convert the rewrite error into the appropriate outbound
+    /// stanza shape. `UnsupportedTransport` follows the XEP-0166
+    /// §10.2 "Recovering from a Negotiation Failure" pattern:
+    /// empty IQ-result ack + a SEPARATE server-initiated
+    /// `<iq type='set'><jingle action='session-terminate'>
+    /// <reason><unsupported-transports/></reason></jingle></iq>`
+    /// — the Jingle-specific reason condition for an unacceptable
+    /// transport method. The other variants stay as stanza errors
+    /// because they represent protocol-level errors (XEP-0166
+    /// §10.4 / RFC 6120 stanza errors) rather than Jingle
+    /// negotiation failures with a defined `<reason/>` condition.
+    fn into_error_reply(self, iq: &Iq, sid: &SessionId, from: &Jid) -> Vec<OutboundEvent> {
         match self {
-            // The server acts as a transport-policy gate: only
-            // urn:waddle:transports:livekit:0 is acceptable. A
-            // conformant peer-style termination flow (ACK +
-            // session-terminate with `unsupported-transports`) is
-            // deferred; an XMPP-error response here is well-formed
-            // and the WaddleClient already understands it.
-            Self::UnsupportedTransport => error_reply(
-                iq,
-                DefinedCondition::FeatureNotImplemented,
-                "only urn:waddle:transports:livekit:0 is supported",
-            ),
+            Self::UnsupportedTransport => unsupported_transports_termination(iq, sid, from),
             // Don't reflect the inner error string to the client —
             // it can leak parser internals or signing details. Log
             // it server-side and return a generic message.
@@ -625,6 +641,46 @@ impl RewriteError {
             }
         }
     }
+}
+
+/// XEP-0166 §10.2 conformant rejection of a session-initiate with
+/// an unsupported transport. Emits two stanzas:
+///
+/// 1. Empty `<iq type='result'/>` ack of the session-initiate (the
+///    XEP-0166 §6.3 IQ ack — required because the responder must
+///    acknowledge the stanza before any Jingle-level negotiation
+///    failure is communicated).
+/// 2. Server-initiated `<iq type='set'>` carrying
+///    `<jingle action='session-terminate'><reason>
+///    <unsupported-transports/></reason></jingle>`. This is the
+///    Jingle-specific reason condition for "the transport method
+///    is unacceptable" per XEP-0166 §7.4.
+///
+/// `from` is the JID the server presents as the source of the
+/// session-terminate. For 1:1 P2P sessions this is the
+/// authenticated full JID (the peer the requester tried to call);
+/// for Muji sessions this is the mixer JID.
+fn unsupported_transports_termination(iq: &Iq, sid: &SessionId, from: &Jid) -> Vec<OutboundEvent> {
+    let ack = Iq::Result {
+        from: iq.to().cloned(),
+        to: iq.from().cloned(),
+        id: iq.id().to_string(),
+        payload: None,
+    };
+    let terminate = crate::xep::xep0166::session_terminate(
+        sid.clone(),
+        xmpp_parsers::jingle::Reason::UnsupportedTransports,
+    );
+    let terminate_iq = Iq::Set {
+        from: Some(from.clone()),
+        to: iq.from().cloned(),
+        id: format!("jingle-terminate-{}", uuid::Uuid::new_v4()),
+        payload: terminate.into(),
+    };
+    vec![
+        OutboundEvent::SendStanza(Box::new(Stanza::Iq(Box::new(ack)))),
+        OutboundEvent::SendStanza(Box::new(Stanza::Iq(Box::new(terminate_iq)))),
+    ]
 }
 
 fn rewrite_content_transport(
@@ -834,7 +890,14 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_transport_returns_feature_not_implemented() {
+    fn unsupported_transport_emits_xep_0166_section_10_2_termination() {
+        // XEP-0166 §10.2: a session-initiate with an unacceptable
+        // transport MUST be rejected with an IQ-result ack followed
+        // by a SEPARATE server-initiated session-terminate IQ
+        // carrying `<reason><unsupported-transports/></reason>`.
+        // Stanza errors like `<feature-not-implemented/>` are
+        // NOT the right shape for Jingle negotiation failures
+        // with a defined `<reason/>` condition.
         let mut content = Content::new(Creator::Initiator, ContentId("audio".into()));
         content.description = Some(xmpp_parsers::jingle::Description::Rtp(
             opus_audio_description(),
@@ -857,21 +920,51 @@ mod tests {
         let handler = JingleHandler::new(fixture_sfu());
         let events = handler.handle(&iq, &ctx(&jid));
 
-        match &events[0] {
-            OutboundEvent::SendStanza(stanza) => match stanza.as_ref() {
-                Stanza::Iq(reply) => {
-                    let Iq::Error { error: err, .. } = &**reply else {
-                        panic!("expected error reply")
-                    };
-                    assert_eq!(
-                        err.defined_condition,
-                        DefinedCondition::FeatureNotImplemented
-                    );
-                }
-                other => panic!("expected Iq, got {other:?}"),
-            },
-            other => panic!("expected SendStanza, got {other:?}"),
-        }
+        assert_eq!(
+            events.len(),
+            2,
+            "expected ack + session-terminate per XEP-0166 §10.2"
+        );
+
+        // First stanza: empty IQ-result ack.
+        let OutboundEvent::SendStanza(ack_stanza) = &events[0] else {
+            panic!("expected SendStanza for ack");
+        };
+        let Stanza::Iq(ack_iq) = ack_stanza.as_ref() else {
+            panic!("expected Iq for ack");
+        };
+        assert!(
+            matches!(&**ack_iq, Iq::Result { payload: None, .. }),
+            "ack must be an empty IQ result"
+        );
+
+        // Second stanza: server-initiated session-terminate.
+        let OutboundEvent::SendStanza(term_stanza) = &events[1] else {
+            panic!("expected SendStanza for terminate");
+        };
+        let Stanza::Iq(term_iq) = term_stanza.as_ref() else {
+            panic!("expected Iq for terminate");
+        };
+        let Iq::Set { payload, .. } = &**term_iq else {
+            panic!("expected IQ-set for the session-terminate");
+        };
+        let term_jingle =
+            Jingle::try_from(payload.clone()).expect("session-terminate Jingle reparses");
+        assert_eq!(
+            term_jingle.action,
+            xmpp_parsers::jingle::Action::SessionTerminate
+        );
+        let reason = term_jingle
+            .reason
+            .as_ref()
+            .expect("session-terminate must carry a <reason/>");
+        assert!(
+            matches!(
+                reason.reason,
+                xmpp_parsers::jingle::Reason::UnsupportedTransports
+            ),
+            "reason must be <unsupported-transports/> per XEP-0166 §7.4"
+        );
     }
 
     #[test]
