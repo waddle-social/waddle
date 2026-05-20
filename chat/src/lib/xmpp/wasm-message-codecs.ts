@@ -384,7 +384,15 @@ export function roomMessageFromArchived(
   const markupSpans = message.markup_spans ?? [];
   const references = message.references ?? [];
   const extensionAnnotations = extensionAnnotationsFromWasm(message.extension_envelope);
-  if (!message.body && !message.subject && !sharedFiles.length && !extensionAnnotations.length && !message.thread && !message.forum_post_kind && !message.is_retracted) {
+  // XEP-0201 `<thread/>` is scope metadata, not content. A stanza that
+  // carries only a thread reference (no body, no subject, no attachments,
+  // no extension annotations, no forum-post payload, not a retraction)
+  // is a chat-state / displayed-marker / etc. echoed inside a thread per
+  // XEP-0201 §3 — it MUST drop here so it never materialises as an empty
+  // row inside the thread panel. The server-side `is_archivable` already
+  // refuses to persist these; this is the defence-in-depth pass for
+  // foreign servers and legacy archive rows.
+  if (!message.body && !message.subject && !sharedFiles.length && !extensionAnnotations.length && !message.forum_post_kind && !message.is_retracted) {
     return null;
   }
   const base: LiveRoomMessage = {
@@ -485,7 +493,11 @@ export function dmMessageFromArchived(
   const extensionAnnotations = extensionAnnotationsFromWasm(message.extension_envelope);
   const dmWireIds = [message.id, message.origin_id]
     .filter((value): value is string => !!value && value !== dmPrimaryId);
-  if (!message.body && !message.subject && !sharedFiles.length && !extensionAnnotations.length && !message.thread && !message.is_retracted) return null;
+  // See `roomMessageFromArchived` for the rationale: `<thread/>` alone is
+  // metadata, not content. DMs don't currently surface threads in the UI
+  // anyway, but the codec stays symmetric with the room path so a stray
+  // foreign-server archive row can't manifest a bodyless DM ghost either.
+  if (!message.body && !message.subject && !sharedFiles.length && !extensionAnnotations.length && !message.is_retracted) return null;
   const base: LiveDmMessage = {
     id: dmPrimaryId,
     archiveId: message.mam_id,

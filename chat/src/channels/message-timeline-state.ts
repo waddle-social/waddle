@@ -313,11 +313,17 @@ export function buildChannelTimelineFromMamResults(params: {
       || msg.isRetracted
       || (msg.sharedFiles && msg.sharedFiles.length > 0)
       || msg.isSticker
-      || msg.threadId
       || msg.replyTo
       || msg.forumPostKind
       || (msg.extensionAnnotations && msg.extensionAnnotations.length > 0)
     ) {
+      // NB: `msg.threadId` is intentionally absent from this gate.
+      // XEP-0201 `<thread/>` is scope metadata, not content — see
+      // `wasm-message-codecs.ts` (`roomMessageFromArchived`) and
+      // `server/.../room/archive.rs` (`is_archivable`). A stanza whose
+      // only "content" is a thread reference is a chat-state /
+      // displayed-marker / etc. echoed per XEP-0201 §3 and must not
+      // materialise as a timeline row.
       regularMessages.push(msg);
     }
   }
