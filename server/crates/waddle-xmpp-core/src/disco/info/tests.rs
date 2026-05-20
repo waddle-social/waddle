@@ -204,5 +204,5 @@ fn test_call_feature_helpers_pin_canonical_xep_namespaces() {
         Feature::waddle_livekit_transport().0,
         "urn:waddle:transports:livekit:0"
     );
-    assert_eq!(Feature::waddle_muc_call().0, "urn:waddle:muc-call:0");
+    assert_eq!(Feature::muji().0, "urn:xmpp:jingle:muji:0");
 }
