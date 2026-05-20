@@ -1672,6 +1672,27 @@ impl NotificationOutboxStore {
         Ok(())
     }
 
+    /// Test/diagnostic helper: total count of `notification_candidates`
+    /// rows, including ones already marked outboxed.
+    ///
+    /// Compliance regression tests use this to assert that a
+    /// T0-suppressed XEP-0492 outcome persists *no* row at all
+    /// (`count_all_candidates == 0`), distinct from the older
+    /// "row exists, marked outboxed without a job" shape.
+    pub async fn count_all_candidates(&self) -> Result<i64, NotificationOutboxError> {
+        let mut rows = self
+            .query("SELECT COUNT(*) FROM notification_candidates", ())
+            .await?;
+        // `COUNT(*)` is guaranteed to return exactly one row on every
+        // SQL backend; an empty result here would mean a corrupted
+        // driver. Default to 0 fail-loud-via-row-decode instead of
+        // panicking.
+        let Some(row) = rows.next().await? else {
+            return Ok(0);
+        };
+        Ok(row.get::<i64>(0)?)
+    }
+
     pub async fn pending_outbox_jobs(
         &self,
     ) -> Result<Vec<NotificationOutboxJob>, NotificationOutboxError> {

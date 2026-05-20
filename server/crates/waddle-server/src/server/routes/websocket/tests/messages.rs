@@ -726,6 +726,215 @@ async fn xep0492_direct_chat_never_suppresses_push_with_mention() {
     );
 }
 
+/// Compliance-shape probe — drives DM emission and returns the
+/// post-emission `notification_candidates` row count and outbox job
+/// count.
+///
+/// The T0 emission gate asserts on the *row count*: a suppressed
+/// XEP-0492 outcome MUST leave zero rows behind (not "one row marked
+/// outboxed"). The outbox-job count is reported alongside so the
+/// caller can assert push-output equivalence — the previous T1-only
+/// design preserved push output but persisted an audit row; this
+/// shape preserves both push output AND row-zero on suppression.
+async fn drive_xep0492_direct_chat_emission_shape(
+    level: waddle_xmpp::xep::NotificationLevel,
+    is_mention: bool,
+    message_id: &str,
+) -> (i64, usize) {
+    let state = create_test_websocket_state().await;
+    let recipient: BareJid = "bob@example.com".parse().expect("recipient");
+    let sender: BareJid = "alice@example.com".parse().expect("sender");
+    let node = state
+        .deps
+        .protocol
+        .push_service
+        .ensure_node(&recipient, "web")
+        .await
+        .expect("push node");
+    state
+        .deps
+        .protocol
+        .push_service
+        .upsert_device(
+            &recipient,
+            crate::push_service::PushDeviceRegistration::new(
+                "web-1",
+                node.node(),
+                crate::push_service::PushDevicePlatform::Web,
+                "test",
+            ),
+        )
+        .await
+        .expect("push device");
+    state
+        .deps
+        .protocol
+        .push_service
+        .register_first_party_node_for_owner(&recipient, "push.example.com", node.node(), None)
+        .await
+        .expect("first-party push registration");
+    state
+        .deps
+        .protocol
+        .notification_settings_projection
+        .upsert(&crate::notification_settings_projection::NotificationSettingsProjection {
+            owner_bare_jid: recipient.clone(),
+            conversation_jid: sender.clone(),
+            conversation_kind: crate::notification_settings_projection::ConversationKind::Direct,
+            mode: level,
+            source_version: 1,
+            updated_at_ms: crate::time::now_ms(),
+            source: crate::notification_settings_projection::NotificationSettingsSource::Xep0402Bookmarks,
+            source_item_jid: sender.clone(),
+        })
+        .await
+        .expect("xep-0492 projection");
+
+    let mut message =
+        xmpp_parsers::message::Message::new(Some("bob@example.com".parse().expect("to jid")));
+    message.from = Some("alice@example.com/web".parse().expect("from jid"));
+    message.id = Some(message_id.to_string());
+    message.type_ = XmppMessageType::Chat;
+    message.bodies.insert(
+        String::new(),
+        xmpp_parsers::message::Body("hello bob".to_string()),
+    );
+    if is_mention {
+        let mention = waddle_xmpp::xep::build_mention_element(
+            &waddle_xmpp::xep::ExplicitMention::jid(recipient.clone()),
+        );
+        message.payloads.push(mention);
+    }
+
+    let deps = build_interpret_deps(state.as_ref(), None);
+    let archive_stanza_id = waddle_xmpp_core::xep0359::StanzaId::new(
+        format!("archive-{message_id}"),
+        jid::Jid::from(recipient.clone()),
+    );
+    store_committed_dm_archive_for_notification(&state, &recipient, &archive_stanza_id, &message)
+        .await;
+    crate::server::routes::interpret::interpret(
+        vec![waddle_xmpp::protocol::OutboundEvent::QueueOfflineDelivery {
+            recipient: recipient.clone(),
+            payload: waddle_xmpp::pending_delivery::PendingPayload::Archived(archive_stanza_id),
+            original_receipt_at: chrono::Utc::now(),
+            original_message: Box::new(message),
+        }],
+        &deps,
+    )
+    .await;
+
+    // Read the candidate count BEFORE draining. The T0 gate must
+    // suppress the insert outright; if a row exists here the
+    // compliance rule is violated regardless of what the drain
+    // subsequently does with it.
+    let candidate_count = state
+        .deps
+        .protocol
+        .notification_outbox
+        .count_all_candidates()
+        .await
+        .expect("count notification candidates");
+    drain_notification_candidates_for_test(state.as_ref()).await;
+    let outbox_jobs = state
+        .deps
+        .protocol
+        .notification_outbox
+        .pending_outbox_jobs()
+        .await
+        .expect("notification outbox jobs")
+        .len();
+    (candidate_count, outbox_jobs)
+}
+
+/// Compliance regression: XEP-0492 `<never/>` MUST leave no row at all
+/// in `notification_candidates` — not even one marked outboxed.
+///
+/// The previous T1-only design persisted every DM candidate at T0 and
+/// then marked it outboxed at T1 without enqueuing a job; the row was
+/// still observable in the table. Compliance review rejected that
+/// shape — the row itself is leakage of recipient state to the user-
+/// server schema. The T0 emission gate must short-circuit the insert.
+#[tokio::test]
+async fn xep0492_direct_chat_never_persists_no_candidate_row_at_all() {
+    let (candidates, jobs) = drive_xep0492_direct_chat_emission_shape(
+        waddle_xmpp::xep::NotificationLevel::Never,
+        false,
+        "xep0492-never-no-row",
+    )
+    .await;
+    assert_eq!(
+        candidates, 0,
+        "XEP-0492 <never/> MUST NOT persist a notification_candidates row \
+         (compliance: no audit trail for suppressed candidates)"
+    );
+    assert_eq!(jobs, 0, "XEP-0492 <never/> MUST NOT enqueue an outbox job");
+}
+
+/// Compliance regression: XEP-0492 `<on-mention/>` with a non-mention
+/// DM MUST leave no row at all in `notification_candidates`.
+#[tokio::test]
+async fn xep0492_direct_chat_on_mention_without_mention_persists_no_candidate_row() {
+    let (candidates, jobs) = drive_xep0492_direct_chat_emission_shape(
+        waddle_xmpp::xep::NotificationLevel::OnMention,
+        false,
+        "xep0492-on-mention-no-mention-no-row",
+    )
+    .await;
+    assert_eq!(
+        candidates, 0,
+        "XEP-0492 <on-mention/> with no XEP-0513 mention MUST NOT persist a candidate row"
+    );
+    assert_eq!(
+        jobs, 0,
+        "XEP-0492 <on-mention/> with no mention MUST NOT enqueue a job"
+    );
+}
+
+/// Compliance regression: XEP-0492 `<on-mention/>` with an explicit
+/// XEP-0513 mention naming the recipient DOES produce a candidate row
+/// (and an outbox job). This is the positive side of the compliance
+/// rule — suppression only zeroes rows when the evaluator says
+/// `Suppressed`.
+#[tokio::test]
+async fn xep0492_direct_chat_on_mention_with_mention_persists_candidate_row() {
+    let (candidates, jobs) = drive_xep0492_direct_chat_emission_shape(
+        waddle_xmpp::xep::NotificationLevel::OnMention,
+        true,
+        "xep0492-on-mention-with-mention-row",
+    )
+    .await;
+    assert_eq!(
+        candidates, 1,
+        "XEP-0492 <on-mention/> with XEP-0513 mention MUST persist exactly one candidate row"
+    );
+    assert_eq!(
+        jobs, 1,
+        "XEP-0492 <on-mention/> with mention MUST enqueue exactly one outbox job"
+    );
+}
+
+/// Compliance regression: XEP-0492 `<always/>` (default for DMs) MUST
+/// persist a candidate row and enqueue a job regardless of mention
+/// state. This guards against the T0 gate over-suppressing.
+#[tokio::test]
+async fn xep0492_direct_chat_always_persists_candidate_row_without_mention() {
+    let (candidates, jobs) = drive_xep0492_direct_chat_emission_shape(
+        waddle_xmpp::xep::NotificationLevel::Always,
+        false,
+        "xep0492-always-no-mention-row",
+    )
+    .await;
+    assert_eq!(
+        candidates, 1,
+        "XEP-0492 <always/> MUST persist a candidate row for every DM"
+    );
+    assert_eq!(
+        jobs, 1,
+        "XEP-0492 <always/> MUST enqueue exactly one outbox job"
+    );
+}
+
 #[tokio::test]
 async fn groupchat_personal_mention_pushes_affiliated_non_live_member() {
     let state = create_test_websocket_state().await;
