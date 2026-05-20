@@ -29,6 +29,7 @@
     "@opentelemetry/api": "^1.9.1",
     "@tailwindcss/vite": "^4.2.3",
     "@tanstack/vue-query": "^5.100.6",
+    "@tanstack/vue-router": "^1.170.5",
     "@tanstack/vue-virtual": "^3.13.24",
     "@tiptap/core": "^3.22.4",
     "@tiptap/extension-code-block": "^3.22.4",
