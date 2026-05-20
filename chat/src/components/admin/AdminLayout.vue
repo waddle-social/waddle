@@ -15,7 +15,7 @@ import {
   Users,
   X,
 } from "lucide-vue-next";
-import { buildAdminPath, type AdminPanel } from "@/shell/navigation";
+import type { AdminMatch, AdminPanel } from "@/router";
 
 interface PanelDef {
   slug: AdminPanel;
@@ -30,7 +30,7 @@ const props = defineProps<{
 }>();
 
 const emit = defineEmits<{
-  navigate: [path: string];
+  navigate: [match: AdminMatch];
   back: [];
 }>();
 
@@ -52,7 +52,7 @@ function isActive(panel: PanelDef): boolean {
 function onPanelClick(panel: PanelDef): void {
   if (!panel.enabled) return;
   sidebarOpen.value = false;
-  emit("navigate", buildAdminPath(panel.slug));
+  emit("navigate", { id: "admin", params: { panel: panel.slug } });
 }
 
 const activeLabel = computed(() => {

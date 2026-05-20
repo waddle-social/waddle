@@ -1,7 +1,7 @@
 {
   "$schema": "https://unpkg.com/knip@5/schema.json",
   "entry": [
-    "src/components/ChatApp.vue",
+    "src/components/AppShell.vue",
     "src/components/XmppProvider.vue",
     "src/vue-app.ts",
     "src/service-worker/sw-template.js",

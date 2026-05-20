@@ -19,7 +19,7 @@ import PinnedPanel from "@/components/chat/PinnedPanel.vue";
 import UserSettingsPage from "@/components/chat/UserSettingsPage.vue";
 import WaddlesSidebar from "@/components/chat/WaddlesSidebar.vue";
 import AdminView from "@/components/admin/AdminView.vue";
-import { parseChatLocation, type AdminPanel } from "@/shell/navigation";
+import { navigate, useRouteMatch, type AdminMatch, type AdminPanel } from "@/router";
 import { buildHomeDashboardProps } from "@/home/dashboard-props";
 import type { ChatAppController } from "@/shell/chat-app-controller";
 import type { DiscoveredExtensionRoute } from "@/lib/xmpp/extension-commands";
@@ -88,7 +88,9 @@ const {
   handleToggleNotifications,
   openUserSettings,
   openHome,
+  openDmList,
   openThreads,
+  openCommunitySurface,
   closeUserSettings,
   handleLogout,
   selectChannel,
@@ -193,12 +195,7 @@ function setPinnedPanelOpen(isOpen: boolean) {
 }
 
 function onSelectCommunitySurface(surface: "feed" | "stories" | "events") {
-  // Selecting a community pseudo-channel pushes the user into the
-  // chat page (out of dashboard / settings) and clears any active
-  // real-channel selection so the content area renders the
-  // surface's dedicated pane instead of a channel timeline.
-  ui.activePage.value = "chat";
-  ui.activeCommunitySurface.value = surface;
+  openCommunitySurface(surface);
 }
 
 function onSelectChannelFromSidebar(id: string) {
@@ -206,47 +203,29 @@ function onSelectChannelFromSidebar(id: string) {
   selectChannel(id);
 }
 
-// ── Admin route plumbing (V1) ───────────────────────────────────────
-// `parseChatLocation` already understands `/admin/<panel>`, but the
-// admin view is rendered straight out of `ChatReadyShell` rather than
-// the chat workspace, so we hold the panel slug separately and react
-// to history-driven changes.
-function parseAdminPanelFromLocation(): AdminPanel {
-  if (typeof window === "undefined") return "users";
-  const parsed = parseChatLocation(window.location.pathname, window.location.search);
-  return parsed.adminPanel ?? "users";
-}
-const adminPanelRef = ref<AdminPanel>(parseAdminPanelFromLocation());
-const adminPanelFromUrl = computed<AdminPanel>(() => adminPanelRef.value);
-function refreshAdminPanelFromUrl() {
-  adminPanelRef.value = parseAdminPanelFromLocation();
-}
-function onAdminNavigate(path: string) {
-  if (typeof window === "undefined") return;
-  if (window.location.pathname + window.location.search !== path) {
-    window.history.pushState({ waddlePage: "admin" }, "", path);
-    refreshAdminPanelFromUrl();
-  }
+// ── Admin route plumbing ────────────────────────────────────────────
+// The admin view is rendered straight out of ChatReadyShell rather
+// than from a per-route page Vue island, so the panel slug is
+// derived directly from the reactive route match. `navigate()`
+// updates the match synchronously, so panel switches re-render this
+// tick without any manual pushState / popstate plumbing.
+const routeMatch = useRouteMatch();
+const adminPanelFromUrl = computed<AdminPanel>(() =>
+  routeMatch.value.id === "admin" ? routeMatch.value.params.panel : "users",
+);
+function onAdminNavigate(match: AdminMatch) {
+  navigate(match);
 }
 function onAdminBack() {
-  if (typeof window === "undefined") return;
-  const state = window.history.state as { waddlePage?: string } | null;
-  if (state?.waddlePage === "admin") {
-    window.history.back();
-  } else {
-    window.history.pushState({ waddlePage: "dashboard" }, "", "/");
-    window.dispatchEvent(new PopStateEvent("popstate"));
-  }
+  openHome();
 }
 let disconnectMessageToolbarLifecycle: (() => void) | null = null;
 
 onMounted(() => {
-  window.addEventListener("popstate", refreshAdminPanelFromUrl);
   disconnectMessageToolbarLifecycle = installMessageToolbarLifecycleSuppression();
 });
 
 onUnmounted(() => {
-  window.removeEventListener("popstate", refreshAdminPanelFromUrl);
   disconnectMessageToolbarLifecycle?.();
   disconnectMessageToolbarLifecycle = null;
 });
@@ -282,8 +261,8 @@ onUnmounted(() => {
           :server-version="version.serverVersion.value"
           @open-home="openHome"
           @open-settings="openUserSettings"
-          @toggle-channels="ui.sidebarMode.value = 'channels'"
-          @toggle-dms="ui.sidebarMode.value = 'dms'"
+          @toggle-channels="openHome"
+          @toggle-dms="openDmList"
           @logout="handleLogout"
           @request-notifications="handleRequestNotifications"
           @toggle-notifications="handleToggleNotifications"
