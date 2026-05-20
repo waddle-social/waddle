@@ -1501,7 +1501,13 @@ impl NotificationOutboxStore {
                     continue;
                 }
                 T1PushDispatchOutcome::DeferUnknownRoomPolicy => {
-                    tracing::warn!(
+                    // Actionable diagnostics for `Err(_)` lookups already
+                    // fired exactly once per (drain batch, room) in
+                    // `resolve_cached_room_policy`. The per-candidate
+                    // deferral is `debug!` here so the cache-miss warn
+                    // stays the single source-of-truth signal for
+                    // operators triaging room-policy lookup failures.
+                    tracing::debug!(
                         recipient = %candidate.recipient_bare_jid(),
                         conversation = %candidate.conversation_jid(),
                         class = ?candidate.class(),
@@ -2343,20 +2349,29 @@ pub(crate) enum T1PushDispatchOutcome {
 pub(crate) enum RoomPolicyCacheEntry {
     Public,
     Private,
-    Unknown,
+    /// MUC policy could not be resolved. Wrapped source distinguishes
+    /// the expected/normal `Ok(None)` (room not currently live) case
+    /// from the actionable `Err(_)` (actor transport / lookup failure)
+    /// case so production debugging and alert triage can act on the
+    /// distinction. Both still defer identically at the dispatch site
+    /// (the typed `T1PushDispatchOutcome::DeferUnknownRoomPolicy`).
+    Unknown(UnknownRoomPolicySource),
 }
 
-impl RoomPolicyCacheEntry {
-    fn from_lookup(result: Result<Option<bool>, NotificationOutboxError>) -> Self {
-        match result {
-            Ok(Some(true)) => Self::Private,
-            Ok(Some(false)) => Self::Public,
-            // `Ok(None)` = room not currently live; `Err(_)` = actor
-            // transport failure. Both collapse to `Unknown` so the
-            // batch defers identically rather than guessing.
-            Ok(None) | Err(_) => Self::Unknown,
-        }
-    }
+/// Why a [`RoomPolicyCacheEntry::Unknown`] was produced. Logged at
+/// most once per (drain batch, room) thanks to the cache.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum UnknownRoomPolicySource {
+    /// `RoomPolicyStore::room_members_only` returned `Ok(None)` —
+    /// the room actor is not currently live. Expected/normal on
+    /// restart windows or for rooms with no recent activity.
+    NotLive,
+    /// `RoomPolicyStore::room_members_only` returned `Err(_)` —
+    /// an actor transport failure or other lookup error. Actionable;
+    /// surfaces the underlying error string at cache-miss time so
+    /// operators can correlate without needing every per-candidate
+    /// log line.
+    LookupError,
 }
 
 /// T1 XEP-0492 push-dispatch evaluator.
@@ -2437,7 +2452,7 @@ pub(crate) async fn evaluate_xep0492_at_dispatch(
                     crate::notification_settings_projection::ConversationKind::PublicGroup,
                     true,
                 ),
-                RoomPolicyCacheEntry::Unknown => {
+                RoomPolicyCacheEntry::Unknown(_) => {
                     return Ok(T1PushDispatchOutcome::DeferUnknownRoomPolicy);
                 }
             }
@@ -2458,7 +2473,7 @@ pub(crate) async fn evaluate_xep0492_at_dispatch(
                     crate::notification_settings_projection::ConversationKind::PublicGroup,
                     false,
                 ),
-                RoomPolicyCacheEntry::Unknown => {
+                RoomPolicyCacheEntry::Unknown(_) => {
                     return Ok(T1PushDispatchOutcome::DeferUnknownRoomPolicy);
                 }
             }
@@ -2484,6 +2499,16 @@ pub(crate) async fn evaluate_xep0492_at_dispatch(
 }
 
 /// Looks up `room` in the per-batch policy cache, populating on miss.
+///
+/// On miss the raw `room_members_only` result is handled explicitly:
+///
+/// - `Ok(Some(true/false))` → cache `Private`/`Public`.
+/// - `Ok(None)` → cache `Unknown(NotLive)` — expected/normal.
+/// - `Err(error)` → emit a `tracing::warn!` with the error string,
+///   then cache `Unknown(LookupError)`. Because the result is cached,
+///   the warn fires at most once per (drain batch, room) — every
+///   subsequent candidate for the same room in this batch hits the
+///   cache silently.
 async fn resolve_cached_room_policy(
     room_policy: &dyn RoomPolicyStore,
     room: &BareJid,
@@ -2492,7 +2517,19 @@ async fn resolve_cached_room_policy(
     if let Some(entry) = cache.get(room) {
         return *entry;
     }
-    let entry = RoomPolicyCacheEntry::from_lookup(room_policy.room_members_only(room).await);
+    let entry = match room_policy.room_members_only(room).await {
+        Ok(Some(true)) => RoomPolicyCacheEntry::Private,
+        Ok(Some(false)) => RoomPolicyCacheEntry::Public,
+        Ok(None) => RoomPolicyCacheEntry::Unknown(UnknownRoomPolicySource::NotLive),
+        Err(error) => {
+            tracing::warn!(
+                %room,
+                %error,
+                "RoomPolicyStore::room_members_only failed; deferring T1 candidates for this room in the current drain batch"
+            );
+            RoomPolicyCacheEntry::Unknown(UnknownRoomPolicySource::LookupError)
+        }
+    };
     cache.insert(room.clone(), entry);
     entry
 }
