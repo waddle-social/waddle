@@ -247,13 +247,29 @@ async fn insert_groupchat_notification_candidate(
     // even though the same bit is already in hand.
     room_members_only: bool,
 ) -> GroupchatNotificationCandidateQueueOutcome {
-    let GroupchatNotificationClassDecision::Deliver(class) =
-        groupchat_notification_class(state, owner, room, message, is_live_occupant);
+    // Parse explicit mentions ONCE per message and derive every
+    // XEP-0513 signal (personal-mention bit, channel-mention scope,
+    // owner-`<noping/>`) from the same parsed structure. The previous
+    // shape ran `extract_explicit_mentions` three times per recipient
+    // (class derivation + channel scope + noping), so a 100-member
+    // groupchat fan-out paid 300× the parser cost when 1× suffices.
     let owner_occupant_id =
         waddle_xmpp::xep::generate_occupant_id(owner, room, &state.deps.occupant_id_secret);
+    let explicit_mentions = waddle_xmpp::xep::extract_explicit_mentions(message);
+    let mentions_slice: &[waddle_xmpp::xep::ExplicitMention] = explicit_mentions
+        .as_ref()
+        .map_or(&[], |mentions| mentions.mentions.as_slice());
+    let GroupchatNotificationClassDecision::Deliver(class) = groupchat_notification_class(
+        mentions_slice,
+        message,
+        owner,
+        room,
+        owner_occupant_id.as_str(),
+        is_live_occupant,
+    );
     let hints = crate::notification_outbox::NotificationMessageHints::none()
-        .with_noping(groupchat_message_carries_owner_noping(
-            message,
+        .with_noping(groupchat_mentions_carry_owner_noping(
+            mentions_slice,
             owner,
             owner_occupant_id.as_str(),
         ))
@@ -540,11 +556,20 @@ enum GroupchatNotificationClassDecision {
     Deliver(crate::notification_outbox::NotificationClass),
 }
 
+/// Classify a groupchat candidate from a pre-parsed mention slice.
+///
+/// Callers MUST pass the result of a single
+/// `extract_explicit_mentions(message)` parse so the
+/// XEP-0513 traversal is not repeated per derivation. The `message`
+/// argument is held only for the XEP-0372 references fallback in
+/// `groupchat_mentions_owner` — that XEP carries data outside the
+/// explicit-mentions tree and is parsed independently.
 fn groupchat_notification_class(
-    state: &WebSocketState,
+    mentions: &[waddle_xmpp::xep::ExplicitMention],
+    message: &Message,
     owner: &BareJid,
     room: &BareJid,
-    message: &Message,
+    owner_occupant_id: &str,
     // `is_live_occupant` here is **message-time-frozen presence** — the
     // XMPP room handler computes it at room-dispatch time
     // (`live_recipient_bares.contains(bare)` in
@@ -563,10 +588,8 @@ fn groupchat_notification_class(
     // — that augments this T0 snapshot, it does not relocate it.
     is_live_occupant: bool,
 ) -> GroupchatNotificationClassDecision {
-    let owner_occupant_id =
-        waddle_xmpp::xep::generate_occupant_id(owner, room, &state.deps.occupant_id_secret);
-    let personal_mention = groupchat_mentions_owner(message, owner, owner_occupant_id.as_str());
-    let channel_mention = groupchat_channel_mention_scope(message, room);
+    let personal_mention = groupchat_mentions_owner(mentions, message, owner, owner_occupant_id);
+    let channel_mention = groupchat_channel_mention_scope(mentions, room);
     groupchat_notification_class_from_message(personal_mention, channel_mention, is_live_occupant)
 }
 
@@ -606,43 +629,45 @@ fn groupchat_notification_class_from_message(
     )
 }
 
-/// Returns `true` when an XEP-0513 explicit mention naming `owner`
-/// also carries `<noping/>`. Snapshotted onto the candidate row at T0
-/// so the T1 evaluator can suppress with
-/// `SuppressedReason::Xep0513Noping`.
-fn groupchat_message_carries_owner_noping(
+/// Returns `true` when any XEP-0513 explicit mention naming `owner`
+/// (by JID or occupant-id) also carries `<noping/>`. Snapshotted onto
+/// the candidate row at T0 so the T1 evaluator can suppress with
+/// `SuppressedReason::Xep0513Noping`. Operates on a pre-parsed slice
+/// so the XEP-0513 traversal happens once per message.
+fn groupchat_mentions_carry_owner_noping(
+    mentions: &[waddle_xmpp::xep::ExplicitMention],
+    owner: &BareJid,
+    owner_occupant_id: &str,
+) -> bool {
+    mentions.iter().any(|mention| {
+        mention.noping
+            && (mention
+                .jid
+                .as_ref()
+                .is_some_and(|mentioned| mentioned == owner)
+                || mention
+                    .occupant_id
+                    .as_deref()
+                    .is_some_and(|mentioned| mentioned == owner_occupant_id))
+    })
+}
+
+fn groupchat_mentions_owner(
+    mentions: &[waddle_xmpp::xep::ExplicitMention],
     message: &Message,
     owner: &BareJid,
     owner_occupant_id: &str,
 ) -> bool {
-    extract_explicit_mentions(message).is_some_and(|mentions| {
-        mentions.mentions.iter().any(|mention| {
-            mention.noping
-                && (mention
-                    .jid
-                    .as_ref()
-                    .is_some_and(|mentioned| mentioned == owner)
-                    || mention
-                        .occupant_id
-                        .as_deref()
-                        .is_some_and(|mentioned| mentioned == owner_occupant_id))
-        })
-    })
-}
-
-fn groupchat_mentions_owner(message: &Message, owner: &BareJid, owner_occupant_id: &str) -> bool {
-    let xep0513 = extract_explicit_mentions(message).is_some_and(|mentions| {
-        mentions.mentions.iter().any(|mention| {
-            !mention.noping
-                && (mention
-                    .jid
-                    .as_ref()
-                    .is_some_and(|mentioned| mentioned == owner)
-                    || mention
-                        .occupant_id
-                        .as_deref()
-                        .is_some_and(|mentioned| mentioned == owner_occupant_id))
-        })
+    let xep0513 = mentions.iter().any(|mention| {
+        !mention.noping
+            && (mention
+                .jid
+                .as_ref()
+                .is_some_and(|mentioned| mentioned == owner)
+                || mention
+                    .occupant_id
+                    .as_deref()
+                    .is_some_and(|mentioned| mentioned == owner_occupant_id))
     });
     let owner_raw = owner.to_string();
     let xep0372 = extract_references_from_message(message)
@@ -660,19 +685,16 @@ enum GroupchatChannelMentionScope {
 }
 
 fn groupchat_channel_mention_scope(
-    message: &Message,
+    mentions: &[waddle_xmpp::xep::ExplicitMention],
     room: &BareJid,
 ) -> Option<GroupchatChannelMentionScope> {
-    let mentions = extract_explicit_mentions(message)?;
     if mentions
-        .mentions
         .iter()
         .any(|mention| current_room_channel_mention(mention, room) && !mention.active)
     {
         return Some(GroupchatChannelMentionScope::All);
     }
     mentions
-        .mentions
         .iter()
         .any(|mention| current_room_channel_mention(mention, room) && mention.active)
         .then_some(GroupchatChannelMentionScope::Active)
@@ -713,6 +735,70 @@ mod tests {
             .payloads
             .push(waddle_xmpp::xep::build_mention_element(&mention));
         message
+    }
+
+    /// Test helper: parses the message's explicit mentions once and
+    /// returns the slice the production code passes to the helpers.
+    fn parsed_mentions(message: &Message) -> Vec<waddle_xmpp::xep::ExplicitMention> {
+        waddle_xmpp::xep::extract_explicit_mentions(message)
+            .map(|m| m.mentions)
+            .unwrap_or_default()
+    }
+
+    /// Dedup regression: `groupchat_mentions_carry_owner_noping`
+    /// MUST derive the same `<noping/>` bit from a pre-parsed slice
+    /// that the previous `message`-taking shape derived per-call.
+    #[test]
+    fn groupchat_owner_noping_single_parse_matches_pre_dedup_behavior() {
+        let owner = bare("charlie@example.com");
+        let occupant_id = "room-stable-charlie";
+
+        // No mentions → false.
+        let no_mention = Message::new(None::<Jid>);
+        assert!(!groupchat_mentions_carry_owner_noping(
+            &parsed_mentions(&no_mention),
+            &owner,
+            occupant_id,
+        ));
+
+        // Plain mention naming the owner → false (no `<noping/>`).
+        let plain = message_with_mention(waddle_xmpp::xep::ExplicitMention::jid(owner.clone()));
+        assert!(!groupchat_mentions_carry_owner_noping(
+            &parsed_mentions(&plain),
+            &owner,
+            occupant_id,
+        ));
+
+        // `<noping/>` mention by JID → true.
+        let mut noping_by_jid = waddle_xmpp::xep::ExplicitMention::jid(owner.clone());
+        noping_by_jid.noping = true;
+        let msg_jid = message_with_mention(noping_by_jid);
+        assert!(groupchat_mentions_carry_owner_noping(
+            &parsed_mentions(&msg_jid),
+            &owner,
+            occupant_id,
+        ));
+
+        // `<noping/>` mention by occupant-id → true.
+        let mut noping_by_occ = waddle_xmpp::xep::ExplicitMention::occupant_id(occupant_id);
+        noping_by_occ.noping = true;
+        let msg_occ = message_with_mention(noping_by_occ);
+        assert!(groupchat_mentions_carry_owner_noping(
+            &parsed_mentions(&msg_occ),
+            &owner,
+            occupant_id,
+        ));
+
+        // `<noping/>` mention naming someone else → false.
+        let other = bare("dave@example.com");
+        let mut noping_other = waddle_xmpp::xep::ExplicitMention::jid(other);
+        noping_other.noping = true;
+        let msg_other = message_with_mention(noping_other);
+        assert!(!groupchat_mentions_carry_owner_noping(
+            &parsed_mentions(&msg_other),
+            &owner,
+            occupant_id,
+        ));
     }
 
     #[test]
@@ -783,29 +869,39 @@ mod tests {
         let owner = bare("charlie@example.com");
         let occupant_id = "room-stable-charlie";
 
+        let msg_by_jid =
+            message_with_mention(waddle_xmpp::xep::ExplicitMention::jid(owner.clone()));
         assert!(groupchat_mentions_owner(
-            &message_with_mention(waddle_xmpp::xep::ExplicitMention::jid(owner.clone())),
+            &parsed_mentions(&msg_by_jid),
+            &msg_by_jid,
             &owner,
             occupant_id,
         ));
+        let msg_by_occ =
+            message_with_mention(waddle_xmpp::xep::ExplicitMention::occupant_id(occupant_id));
         assert!(groupchat_mentions_owner(
-            &message_with_mention(waddle_xmpp::xep::ExplicitMention::occupant_id(occupant_id)),
+            &parsed_mentions(&msg_by_occ),
+            &msg_by_occ,
             &owner,
             occupant_id,
         ));
 
         let mut noping = waddle_xmpp::xep::ExplicitMention::occupant_id(occupant_id);
         noping.noping = true;
+        let msg_noping = message_with_mention(noping);
         assert!(!groupchat_mentions_owner(
-            &message_with_mention(noping),
+            &parsed_mentions(&msg_noping),
+            &msg_noping,
             &owner,
             occupant_id,
         ));
 
+        let msg_other = message_with_mention(waddle_xmpp::xep::ExplicitMention::occupant_id(
+            "somebody-else",
+        ));
         assert!(!groupchat_mentions_owner(
-            &message_with_mention(waddle_xmpp::xep::ExplicitMention::occupant_id(
-                "somebody-else",
-            )),
+            &parsed_mentions(&msg_other),
+            &msg_other,
             &owner,
             occupant_id,
         ));
@@ -815,32 +911,33 @@ mod tests {
     fn xep0513_groupchat_channel_mentions_are_room_scoped_and_active_aware() {
         let room = bare("team@muc.example.com");
 
+        let msg_channel = message_with_mention(waddle_xmpp::xep::ExplicitMention::channel());
         assert_eq!(
-            groupchat_channel_mention_scope(
-                &message_with_mention(waddle_xmpp::xep::ExplicitMention::channel()),
-                &room,
-            ),
+            groupchat_channel_mention_scope(&parsed_mentions(&msg_channel), &room),
             Some(GroupchatChannelMentionScope::All)
         );
 
         let mut active = waddle_xmpp::xep::ExplicitMention::active_channel();
         active.uri = Some("xmpp:team@muc.example.com".to_string());
+        let msg_active = message_with_mention(active);
         assert_eq!(
-            groupchat_channel_mention_scope(&message_with_mention(active), &room),
+            groupchat_channel_mention_scope(&parsed_mentions(&msg_active), &room),
             Some(GroupchatChannelMentionScope::Active)
         );
 
         let mut foreign = waddle_xmpp::xep::ExplicitMention::channel();
         foreign.uri = Some("xmpp:other@muc.example.com".to_string());
+        let msg_foreign = message_with_mention(foreign);
         assert_eq!(
-            groupchat_channel_mention_scope(&message_with_mention(foreign), &room),
+            groupchat_channel_mention_scope(&parsed_mentions(&msg_foreign), &room),
             None
         );
 
         let mut noping = waddle_xmpp::xep::ExplicitMention::channel();
         noping.noping = true;
+        let msg_noping = message_with_mention(noping);
         assert_eq!(
-            groupchat_channel_mention_scope(&message_with_mention(noping), &room),
+            groupchat_channel_mention_scope(&parsed_mentions(&msg_noping), &room),
             None
         );
     }
