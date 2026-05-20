@@ -7684,6 +7684,45 @@ mod tests {
         ));
     }
 
+    /// Wire-contract lockstep guard: every `SuppressedReason` variant
+    /// MUST have its `as_db_value()` listed in
+    /// `waddle_xmpp::prometheus::push_suppressed_reasons()`. The
+    /// prometheus parallel constant lives upstream of this enum (in
+    /// `waddle-xmpp`) and cannot import the typed enum, so the
+    /// invariant is enforced from this side. Drift here means an
+    /// `increment_push_suppressed(...)` call for the missing variant
+    /// would hit the `waddle_push_suppressed_unknown_reason_total`
+    /// catch-all instead of the typed counter — observable but
+    /// incorrect.
+    #[test]
+    fn suppressed_reason_wire_contract_matches_prometheus_parallel_constant() {
+        let wire = waddle_xmpp::prometheus::push_suppressed_reasons();
+        for reason in SuppressedReason::ALL.iter().copied() {
+            let db = reason.as_db_value();
+            assert!(
+                wire.contains(&db),
+                "`SuppressedReason::{reason:?}` (db value `{db}`) is missing from \
+                 `waddle_xmpp::prometheus::PUSH_SUPPRESSED_REASONS`; the parallel \
+                 constant has drifted from the typed enum"
+            );
+        }
+        // Reverse direction: any string in the parallel constant that
+        // does NOT round-trip through `SuppressedReason::from_db_value`
+        // is dead weight in the metrics surface.
+        for label in wire.iter().copied() {
+            assert!(
+                SuppressedReason::from_db_value(label).is_ok(),
+                "`PUSH_SUPPRESSED_REASONS` entry `{label}` is not a known \
+                 `SuppressedReason::as_db_value()`; the parallel constant has drifted"
+            );
+        }
+        assert_eq!(
+            wire.len(),
+            SuppressedReason::ALL.len(),
+            "wire-contract length must match the typed enum cardinality"
+        );
+    }
+
     #[test]
     fn postgres_suppressed_reason_constraint_match_accepts_current_definition() {
         let postgres_definition = "CHECK (((suppressed_reason IS NULL) OR ((suppressed_reason)::text = ANY ((ARRAY['xep0357_self'::character varying, 'xep0357_no_registration'::character varying, 'xep0357_registration_disabled'::character varying, 'xep0492_never'::character varying, 'xep0492_on_mention_miss'::character varying, 'xep0191_blocked'::character varying, 'xep0513_noping'::character varying, 'xep0513_active_miss'::character varying, 'xep0334_no_store'::character varying, 'xep0334_no_permanent_store'::character varying, 'waddle_dnd'::character varying, 'provider_rejected'::character varying, 'provider_token_expired'::character varying])::text[]))))";
@@ -8193,6 +8232,11 @@ mod tests {
             row.get::<Option<String>>(0).expect("reason").as_deref(),
             Some("xep0334_no_store"),
         );
+        let rendered = waddle_xmpp::prometheus::render_metrics();
+        assert!(
+            rendered.contains("waddle_push_suppressed_total{reason=\"xep0334_no_store\"} 1"),
+            "T1 XEP-0334 <no-store/> suppression must increment the typed metric counter",
+        );
     }
 
     /// XEP-0334 `<no-permanent-store/>` hint snapshotted onto a
@@ -8247,6 +8291,12 @@ mod tests {
         assert_eq!(
             row.get::<Option<String>>(0).expect("reason").as_deref(),
             Some("xep0334_no_permanent_store"),
+        );
+        let rendered = waddle_xmpp::prometheus::render_metrics();
+        assert!(
+            rendered
+                .contains("waddle_push_suppressed_total{reason=\"xep0334_no_permanent_store\"} 1"),
+            "T1 XEP-0334 <no-permanent-store/> suppression must increment the typed metric counter",
         );
     }
 

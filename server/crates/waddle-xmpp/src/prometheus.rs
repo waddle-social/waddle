@@ -4,6 +4,7 @@
 //! operational health dashboards and exposes them in Prometheus text format.
 
 use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(any(test, feature = "test-utils"))]
 use std::sync::OnceLock;
 
 static CONNECTED_USERS: AtomicU64 = AtomicU64::new(0);
@@ -80,24 +81,89 @@ static SM_RESUME_WINDOW_CLAMPED: AtomicU64 = AtomicU64::new(0);
 
 // `waddle_push_suppressed_total{reason="..."}` — incremented every
 // time a XEP-0357 push candidate is suppressed at either T0 emission
-// or the T1 drain. Labeled by the typed `SuppressedReason` enum;
-// because the enum is a closed set, the storage shape is a fixed
-// `&'static str → AtomicU64` map populated lazily on first sample
-// per reason so deployments observe per-rule suppression rates
-// without a labels-cardinality blowup.
+// or the T1 drain. Labeled by the typed `SuppressedReason` enum.
 //
-// Reason strings MUST stay in lockstep with
-// `SuppressedReason::as_db_value` in
-// `waddle_server::notification_outbox`; the helper accepts only the
-// closed-set values populated by that enum.
-static PUSH_SUPPRESSED_COUNTERS: OnceLock<
-    std::sync::Mutex<std::collections::BTreeMap<&'static str, AtomicU64>>,
-> = OnceLock::new();
+// **Wire contract**: [`PUSH_SUPPRESSED_REASONS`] is the source-of-truth
+// parallel constant of every label string the caller is allowed to
+// pass. It MUST stay in lockstep with `SuppressedReason::as_db_value`
+// in `waddle_server::notification_outbox` (i.e. every entry in
+// `SuppressedReason::ALL.iter().map(as_db_value)` MUST appear here,
+// in declaration order). The `waddle-server` test suite enforces this
+// invariant — `waddle-xmpp` is upstream and cannot import the enum.
+//
+// Storage is a fixed `[AtomicU64; N]` array indexed by the position
+// of the reason string in `PUSH_SUPPRESSED_REASONS`. No mutex, no
+// allocations, no cardinality growth at runtime. An unknown label
+// (contract drift) increments `PUSH_SUPPRESSED_UNKNOWN_REASON` and
+// emits a `warn!` so the failure is observable.
+pub(crate) const PUSH_SUPPRESSED_REASONS: &[&str] = &[
+    "xep0357_self",
+    "xep0357_no_registration",
+    "xep0357_registration_disabled",
+    "xep0492_never",
+    "xep0492_on_mention_miss",
+    "xep0191_blocked",
+    "xep0513_noping",
+    "xep0513_active_miss",
+    "xep0334_no_store",
+    "xep0334_no_permanent_store",
+    "waddle_dnd",
+    "provider_rejected",
+    "provider_token_expired",
+];
 
-fn push_suppressed_counters(
-) -> &'static std::sync::Mutex<std::collections::BTreeMap<&'static str, AtomicU64>> {
-    PUSH_SUPPRESSED_COUNTERS
-        .get_or_init(|| std::sync::Mutex::new(std::collections::BTreeMap::new()))
+const PUSH_SUPPRESSED_COUNTERS_LEN: usize = PUSH_SUPPRESSED_REASONS.len();
+
+static PUSH_SUPPRESSED_COUNTERS: [AtomicU64; PUSH_SUPPRESSED_COUNTERS_LEN] = {
+    // `AtomicU64` is not `Copy`, so the array initializer must spell
+    // every slot. The length is locked at compile time to
+    // `PUSH_SUPPRESSED_REASONS.len()` via a `const _: () = assert!`
+    // below, so a future reason addition that forgets a slot fails to
+    // compile.
+    [
+        AtomicU64::new(0),
+        AtomicU64::new(0),
+        AtomicU64::new(0),
+        AtomicU64::new(0),
+        AtomicU64::new(0),
+        AtomicU64::new(0),
+        AtomicU64::new(0),
+        AtomicU64::new(0),
+        AtomicU64::new(0),
+        AtomicU64::new(0),
+        AtomicU64::new(0),
+        AtomicU64::new(0),
+        AtomicU64::new(0),
+    ]
+};
+
+// Compile-time guard: a future reason addition that grows
+// `PUSH_SUPPRESSED_REASONS` MUST also grow the counter array, or
+// this assertion will fail at build time.
+const _: () = assert!(
+    PUSH_SUPPRESSED_REASONS.len() == PUSH_SUPPRESSED_COUNTERS_LEN,
+    "PUSH_SUPPRESSED_REASONS and PUSH_SUPPRESSED_COUNTERS must stay the same length"
+);
+
+// Catch-all gauge for caller/contract drift: any
+// `increment_push_suppressed` call site passing a value that is NOT
+// in `PUSH_SUPPRESSED_REASONS` increments this and emits a `warn!`.
+// A non-zero sample at scrape time means the parallel constant has
+// drifted from `SuppressedReason::as_db_value` and needs a same-PR
+// fix.
+static PUSH_SUPPRESSED_UNKNOWN_REASON: AtomicU64 = AtomicU64::new(0);
+
+/// Public read-only view of the parallel reason list. The
+/// `waddle-server` test suite uses this to assert that every
+/// `SuppressedReason::as_db_value()` appears in the wire contract.
+pub fn push_suppressed_reasons() -> &'static [&'static str] {
+    PUSH_SUPPRESSED_REASONS
+}
+
+/// Returns the index of `reason` in `PUSH_SUPPRESSED_REASONS`, or
+/// `None` if the reason is not a recognized wire-contract value.
+fn push_suppressed_index(reason: &str) -> Option<usize> {
+    PUSH_SUPPRESSED_REASONS.iter().position(|r| *r == reason)
 }
 
 /// Serializes unit tests that mutate process-global metrics.
@@ -225,39 +291,53 @@ pub fn increment_sm_resume_window_clamped() {
 
 /// Increment the `waddle_push_suppressed_total{reason}` counter.
 ///
-/// `reason` MUST be a static string from the closed
-/// `SuppressedReason::as_db_value` set in
-/// `waddle_server::notification_outbox`. The bound between caller and
-/// metric label is `&'static str` so the labels-cardinality cannot
-/// grow at runtime — any other call site would fail to compile.
+/// `reason` is a wire-contract value drawn from
+/// [`PUSH_SUPPRESSED_REASONS`], populated in lockstep with
+/// `SuppressedReason::as_db_value` over in
+/// `waddle_server::notification_outbox` (the `waddle-server` test
+/// suite enforces the bijection; `waddle-xmpp` is upstream of the
+/// enum). The bound is `&'static str` so no dynamic labels exist at
+/// runtime; cardinality is bounded by the parallel constant.
+///
+/// Lookup is a linear scan over `PUSH_SUPPRESSED_REASONS` (small N,
+/// closed set) followed by an `AtomicU64::fetch_add` on a fixed slot
+/// — no mutex, no allocation, no async-hot-path stalls. A value not
+/// present in the parallel constant is a contract-drift bug: the
+/// catch-all [`PUSH_SUPPRESSED_UNKNOWN_REASON`] counter is bumped and
+/// a `warn!` fires so the drift is observable both in metrics and in
+/// logs.
 pub fn increment_push_suppressed(reason: &'static str) {
-    let counters = push_suppressed_counters();
-    let map = counters.lock().expect("push suppressed counters mutex");
-    if let Some(counter) = map.get(reason) {
-        counter.fetch_add(1, Ordering::Relaxed);
+    if let Some(idx) = push_suppressed_index(reason) {
+        PUSH_SUPPRESSED_COUNTERS[idx].fetch_add(1, Ordering::Relaxed);
         return;
     }
-    drop(map);
-    let mut map = counters.lock().expect("push suppressed counters mutex");
-    map.entry(reason)
-        .or_insert_with(|| AtomicU64::new(0))
-        .fetch_add(1, Ordering::Relaxed);
+    PUSH_SUPPRESSED_UNKNOWN_REASON.fetch_add(1, Ordering::Relaxed);
+    tracing::warn!(
+        reason,
+        "push suppressed counter received an unknown reason; \
+         waddle_xmpp::prometheus::PUSH_SUPPRESSED_REASONS has drifted \
+         from waddle_server::notification_outbox::SuppressedReason"
+    );
 }
 
 /// Snapshot of every push-suppressed counter for rendering.
 fn render_push_suppressed_lines(out: &mut String) {
     out.push_str("# HELP waddle_push_suppressed_total XEP-0357 push notification candidates suppressed by a XEP/Waddle rule. Labeled by the typed `SuppressedReason` enum.\n");
     out.push_str("# TYPE waddle_push_suppressed_total counter\n");
-    let counters = push_suppressed_counters();
-    let map = counters.lock().expect("push suppressed counters mutex");
-    for (reason, counter) in map.iter() {
-        let value = counter.load(Ordering::Relaxed);
+    for (idx, reason) in PUSH_SUPPRESSED_REASONS.iter().enumerate() {
+        let value = PUSH_SUPPRESSED_COUNTERS[idx].load(Ordering::Relaxed);
         out.push_str("waddle_push_suppressed_total{reason=\"");
         out.push_str(reason);
         out.push_str("\"} ");
         out.push_str(&value.to_string());
         out.push('\n');
     }
+    let unknown = PUSH_SUPPRESSED_UNKNOWN_REASON.load(Ordering::Relaxed);
+    out.push_str("# HELP waddle_push_suppressed_unknown_reason_total Push suppression events that arrived with a reason string not present in the parallel `PUSH_SUPPRESSED_REASONS` wire-contract constant. A non-zero sample indicates the constant has drifted from `SuppressedReason::as_db_value`.\n");
+    out.push_str("# TYPE waddle_push_suppressed_unknown_reason_total counter\n");
+    out.push_str("waddle_push_suppressed_unknown_reason_total ");
+    out.push_str(&unknown.to_string());
+    out.push('\n');
 }
 
 #[cfg(any(test, feature = "test-utils"))]
@@ -283,11 +363,10 @@ pub fn reset_metrics_for_test() {
     SM_PROMOTION_DEAD_LETTERED.store(0, Ordering::Release);
     SM_DRAIN_TIMEOUT.store(0, Ordering::Release);
     SM_RESUME_WINDOW_CLAMPED.store(0, Ordering::Release);
-    let counters = push_suppressed_counters();
-    let map = counters.lock().expect("push suppressed counters mutex");
-    for counter in map.values() {
+    for counter in PUSH_SUPPRESSED_COUNTERS.iter() {
         counter.store(0, Ordering::Release);
     }
+    PUSH_SUPPRESSED_UNKNOWN_REASON.store(0, Ordering::Release);
 }
 
 pub fn render_metrics() -> String {
