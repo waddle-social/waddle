@@ -278,18 +278,18 @@ async fn enqueue_xep0357_notification_candidate_for_message(
     archive_stanza_id: &waddle_xmpp_core::xep0359::StanzaId,
     original_message: &Message,
 ) -> NotificationCandidateQueueOutcome {
-    // Self-DM suppression has moved to T1 (#506 Q3 strict (A): no T0
-    // carve-outs based on routing recipient). The candidate is emitted
-    // unconditionally here; `drain_pending_candidates_into_outbox`
-    // applies the self-DM check by comparing `sender_jid.to_bare()`
-    // against `recipient_bare_jid` — both message-frozen columns
-    // already on the candidate row — and marks the row outboxed
-    // without enqueuing a push job (same pattern as XEP-0191 blocked
-    // and XEP-0492 suppressed).
-    //
     // XEP-0513 mention bit is message-intrinsic and frozen at T0; T1
     // reads it back from the candidate row when running the XEP-0492
     // dispatch gate.
+    //
+    // Self-directed candidates (sender bare JID == recipient bare JID)
+    // are rejected at the `NotificationCandidate::direct_message`
+    // constructor as `SelfDirectedNotificationCandidate` — no row is
+    // persisted, satisfying the compliance requirement that
+    // self-notifications produce no candidate/outbox entry. This is
+    // input validation, not recipient-state suppression, so it lives
+    // at the typed constructor boundary alongside the existing
+    // full-sender-JID and archive-id owner checks.
     let is_mention = message_is_mention_for_recipient(original_message, recipient);
     let candidate = match crate::notification_outbox::NotificationCandidate::direct_message(
         recipient.clone(),
@@ -298,6 +298,18 @@ async fn enqueue_xep0357_notification_candidate_for_message(
         is_mention,
     ) {
         Ok(candidate) => candidate,
+        Err(
+            crate::notification_outbox::NotificationOutboxError::SelfDirectedNotificationCandidate(
+                _,
+            ),
+        ) => {
+            debug!(
+                recipient = %recipient,
+                sender = %sender,
+                "XEP-0357 notification candidate skipped: self-directed (sender bare JID == recipient bare JID)"
+            );
+            return NotificationCandidateQueueOutcome::Completed;
+        }
         Err(error) => {
             warn!(
                 recipient = %recipient,

@@ -233,6 +233,22 @@ impl NotificationCandidate {
         is_mention: bool,
     ) -> Result<Self, NotificationOutboxError> {
         require_full_sender_jid(&sender_jid)?;
+        // Structural invariant: a notification candidate cannot be
+        // self-directed. A self-DM (sender bare JID == recipient bare
+        // JID) is not a valid push candidate at all — there is no
+        // distinct recipient to notify, so the candidate is malformed
+        // by construction. This is *input validation*, not recipient-
+        // state suppression, so it lives at the constructor boundary
+        // alongside the existing full-sender-JID and archive-id owner
+        // checks. T0 emission paths surface this error as a typed
+        // emission no-op; no candidate row is persisted. (Per #506 Q3:
+        // T0 has no recipient-state reads — sender vs recipient JID
+        // comparison is message-intrinsic provenance.)
+        if sender_jid.to_bare() == recipient_bare_jid {
+            return Err(NotificationOutboxError::SelfDirectedNotificationCandidate(
+                recipient_bare_jid,
+            ));
+        }
         let expected_by = Jid::from(recipient_bare_jid.clone());
         if archive_stanza_id.by != expected_by {
             return Err(NotificationOutboxError::ArchiveStanzaIdOwnerMismatch {
@@ -528,6 +544,8 @@ pub enum NotificationOutboxError {
     InvalidContextXml(String),
     #[error("archive stanza-id by mismatch: expected {expected}, got {actual}")]
     ArchiveStanzaIdOwnerMismatch { expected: Jid, actual: Jid },
+    #[error("notification candidate sender bare JID equals recipient bare JID: {0}")]
+    SelfDirectedNotificationCandidate(BareJid),
     #[error("message count is out of range: {0}")]
     InvalidMessageCount(i64),
     #[error("notification outbox coalesce contention persisted after retry")]
@@ -1362,32 +1380,13 @@ impl NotificationOutboxStore {
             std::collections::BTreeMap::<BareJid, RoomPolicyCacheEntry>::new();
         let mut processed = 0usize;
         for candidate in candidates {
-            // Self-DM suppression at T1 (#506 Q3 strict (A): no T0
-            // carve-outs based on routing recipient). Derived
-            // entirely from message-frozen columns already on the
-            // candidate row, so no extra read is required. XEP-0357
-            // §8 "online with active resource" semantics will be
-            // expanded in slice 2; for now self-DM is the only
-            // condition we suppress here, consistent with the
-            // headless `OfflineDeliveryHandler` no longer carving it
-            // out at T0.
-            if candidate.sender_jid().to_bare() == *candidate.recipient_bare_jid() {
-                tracing::info!(
-                    recipient = %candidate.recipient_bare_jid(),
-                    conversation = %candidate.conversation_jid(),
-                    sender = %candidate.sender_jid(),
-                    class = ?candidate.class(),
-                    "self-DM suppressed at T1; marking notification candidate outboxed without job"
-                );
-                let now_ms = crate::time::now_ms();
-                let mut tx = self.db.begin().await?;
-                let claimed = mark_candidate_outboxed_tx(&mut tx, &candidate, now_ms).await?;
-                tx.commit().await?;
-                if claimed > 0 {
-                    processed += 1;
-                }
-                continue;
-            }
+            // Self-DM filtering happens at the `NotificationCandidate`
+            // constructor (`SelfDirectedNotificationCandidate` typed
+            // error). A self-directed candidate is structurally
+            // invalid and is rejected before it can be persisted, so
+            // the T1 drain loop never observes one. See
+            // `NotificationCandidate::direct_message` for the typed
+            // boundary.
             match xep0191_blocks_notification_candidate(&candidate, blocking_storage).await {
                 Ok(true) => {
                     let now_ms = crate::time::now_ms();
@@ -6229,82 +6228,73 @@ mod tests {
         );
     }
 
-    /// Regression for the self-DM suppression migration from T0 to T1
-    /// (#506 Q3 strict (A) — no T0 carve-outs based on routing
-    /// recipient). The candidate row is now inserted unconditionally
-    /// at T0; the T1 evaluator detects
-    /// `sender_jid.to_bare() == recipient_bare_jid` from the frozen
-    /// columns and marks the candidate outboxed without enqueuing a
-    /// push job — same shape as the XEP-0191 blocked path and the
-    /// XEP-0492 suppressed path.
+    /// Regression for self-DM structural-validity rejection at the
+    /// `NotificationCandidate::direct_message` constructor (#506
+    /// compliance: no push candidate/outbox entry for self-directed
+    /// notifications). Self-DM is *input validation*, not recipient-
+    /// state suppression, so it lives at the typed constructor
+    /// boundary alongside `require_full_sender_jid` and
+    /// `ArchiveStanzaIdOwnerMismatch`. No candidate row is ever
+    /// persisted, satisfying both:
+    ///   (a) #506 Q3: T0 has no recipient-state reads — sender vs
+    ///       recipient JID comparison is message-intrinsic provenance.
+    ///   (b) compliance: self-notifications produce no candidate or
+    ///       outbox entry.
     #[tokio::test]
-    async fn self_dm_candidate_is_suppressed_at_t1_with_no_job_enqueued() {
-        let store = store().await;
-        let target = target();
-        let push_store = waddle_xmpp::push::InMemoryPushStore::new();
-        let blocking = waddle_xmpp::xep::xep0191::InMemoryBlockingStorage::new();
-        let projection = settings_projection().await;
-        let room_policy = StubRoomPolicy::new();
+    async fn self_directed_dm_candidate_is_rejected_at_constructor() {
         let recipient = bare("alice@example.com");
-        register_push_target(&push_store, &recipient, &target).await;
-
-        // Self-DM: sender's bare JID equals recipient's bare JID.
-        let candidate = NotificationCandidate::direct_message(
+        let result = NotificationCandidate::direct_message(
             recipient.clone(),
             "alice@example.com/desktop"
                 .parse()
                 .expect("full self sender"),
             StanzaId::new("self-dm-archive", Jid::from(recipient.clone())),
             false,
-        )
-        .expect("self-dm candidate");
-        assert_eq!(
-            store
-                .insert_candidate(&candidate)
-                .await
-                .expect("self-dm insert"),
-            NotificationCandidateInsertOutcome::Inserted,
-            "T0 must insert the self-DM candidate row unconditionally — \
-             suppression is a T1 concern"
         );
+        assert!(matches!(
+            result,
+            Err(NotificationOutboxError::SelfDirectedNotificationCandidate(jid))
+                if jid == recipient
+        ));
+    }
 
-        // Sanity: candidate is pending pre-drain.
-        assert_eq!(
-            store
-                .pending_candidates(16)
-                .await
-                .expect("pre-drain pending")
-                .len(),
-            1
+    /// Regression that the offline-delivery path silently drops self-
+    /// directed notification attempts without persisting anything to
+    /// `notification_candidates` or `notification_outbox`. End-to-end
+    /// surface of the constructor rejection above: insert is attempted
+    /// once, fails fast as a typed error, and the candidate table
+    /// stays empty.
+    #[tokio::test]
+    async fn self_directed_dm_inserts_no_candidate_row() {
+        let store = store().await;
+        let recipient = bare("alice@example.com");
+        let result = NotificationCandidate::direct_message(
+            recipient.clone(),
+            "alice@example.com/desktop"
+                .parse()
+                .expect("full self sender"),
+            StanzaId::new("self-dm-archive", Jid::from(recipient.clone())),
+            false,
         );
-
-        assert_eq!(
-            store
-                .drain_pending_candidates_into_outbox(
-                    &push_store,
-                    &blocking,
-                    &projection,
-                    &room_policy,
-                    &bare("push.example.com"),
-                    16,
-                )
-                .await
-                .expect("drain candidates"),
-            1,
-            "self-DM candidate is processed (marked outboxed), counted toward 'processed'",
-        );
-
-        assert!(
-            store.pending_outbox_jobs().await.expect("jobs").is_empty(),
-            "self-DM at T1 must NOT enqueue a push outbox job",
-        );
+        assert!(matches!(
+            result,
+            Err(NotificationOutboxError::SelfDirectedNotificationCandidate(
+                _
+            ))
+        ));
+        // No candidate insert attempted because the constructor refused
+        // to produce one. Verify the candidate table is empty.
         assert!(
             store
                 .pending_candidates(16)
                 .await
                 .expect("pending candidates")
                 .is_empty(),
-            "self-DM candidate must be marked outboxed after T1 suppression",
+            "self-DM must not persist a candidate row"
+        );
+        assert!(
+            store.pending_outbox_jobs().await.expect("jobs").is_empty(),
+            "self-DM must not persist an outbox job"
         );
     }
 
