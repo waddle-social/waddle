@@ -522,9 +522,22 @@ fn groupchat_notification_class(
     owner: &BareJid,
     room: &BareJid,
     message: &Message,
-    // TODO(#526 slice 2): move is_live_occupant evaluation to T1 against
-    // the notification_activity projection. For slice 1 the bit stays
-    // here because there is no T1 projection of MUC presence yet.
+    // `is_live_occupant` here is **message-time-frozen presence** — the
+    // XMPP room handler computes it at room-dispatch time
+    // (`live_recipient_bares.contains(bare)` in
+    // `waddle_xmpp::protocol::room::inbox`) and propagates it on the
+    // `ProjectGroupchatInbox` event. That makes it a T0 message-frozen
+    // input on the same axis as XEP-0513 `<active/>` (sender intent)
+    // and XEP-0421 occupant-id (sender provenance), NOT a T1 recipient-
+    // state read. Per #506 Q2 the candidate row snapshots message-
+    // intrinsic facts and the T1 evaluator reads fresh recipient
+    // state; encoding the message-time live-occupant bit into the
+    // [`NotificationClass`] taxonomy (`ActiveChannelMention` vs
+    // `ChannelMention`) is the snapshot mechanism here. Slice 2 will
+    // add a richer `notification_activity` projection so the T1
+    // evaluator can additionally consult *current* recipient activity
+    // (XEP-0513 §"active mention" §"the receiving server may filter")
+    // — that augments this T0 snapshot, it does not relocate it.
     is_live_occupant: bool,
 ) -> GroupchatNotificationClassDecision {
     let owner_occupant_id =
