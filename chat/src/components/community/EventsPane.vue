@@ -149,7 +149,7 @@ const weekEventsByDay = computed<Map<string, CommunityEvent[]>>(() => {
 
 const calYear = ref(new Date().getFullYear());
 const calMonth = ref(new Date().getMonth()); // 0-indexed
-const selectedDay = ref<number | null>(null); // day-of-month
+const selectedDay = ref<number | null>(new Date().getDate()); // day-of-month — preselect today
 
 const calTitle = computed(() =>
   new Date(calYear.value, calMonth.value).toLocaleDateString(undefined, {
