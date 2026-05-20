@@ -36,22 +36,6 @@ pub(super) async fn dispatch_to_room(
         return outcome;
     };
 
-    // Notification activity ingest (slice 2b): a XEP-0085 chat-state on
-    // an inbound MUC stanza represents the sender being currently
-    // active in the room. Record `(sender_bare, room)` BEFORE the
-    // occupancy gate so chat-states from soon-to-be-occupants still
-    // produce activity; the projection key is the user's own JID, and
-    // gating it on occupancy would create a chicken-and-egg with
-    // mention delivery (recipient's activity is consulted by the T1
-    // evaluator against the projection, not against occupancy).
-    super::notification_activity_ingest::record_chat_state_activity(
-        deps,
-        &sender_full.to_bare(),
-        &room_jid,
-        &incoming,
-    )
-    .await;
-
     // 1. Prepare the prototype the room gate sees. Enrichment is delayed
     //    until after occupancy / managed-room validation so unauthorized
     //    senders receive the XEP-0045 room error before any Waddle-specific
@@ -175,6 +159,22 @@ pub(super) async fn dispatch_to_room(
         outcome.feedback.extend(nested.feedback);
         return outcome;
     }
+
+    // Notification activity ingest (slice 2b): a XEP-0085 chat-state on
+    // an inbound MUC stanza represents the sender being currently
+    // active in the room. Record `(sender_bare, room)` only AFTER the
+    // occupancy / managed-room gate has admitted the sender — otherwise
+    // a non-occupant or managed-room-forbidden sender whose stanza is
+    // rejected could still bump their activity projection and appear
+    // "recently active" for the XEP-0513 `<active/>` filter (Codex
+    // review on PR #731).
+    super::notification_activity_ingest::record_chat_state_activity(
+        deps,
+        &sender_full.to_bare(),
+        &room_jid,
+        &incoming,
+    )
+    .await;
 
     if message_has_framework_envelope(&prototype) {
         let mut sanitized = incoming.clone();
