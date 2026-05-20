@@ -8,25 +8,37 @@ pub(super) async fn route_to_connection(
     recursion_depth: u8,
 ) {
     // Notification activity ingest (slice 2b): when the routed stanza
-    // is a typed XEP-0085 chat-state on a DM Message, record the
-    // sender's `(sender_bare, recipient_bare)` activity. The sender is
-    // the acting party; we DO NOT bump the recipient's projection
-    // here — the recipient's activity column is updated only when the
-    // recipient herself emits typed activity (chat-state, read marker,
-    // outbound commit, presence). The recipient bare JID is derived
-    // from the routing target `jid` (full or bare), not from
-    // `message.to`, because the routing arm is invoked for each
-    // resolved resource and the typed conversation key MUST always be
-    // the bare form.
+    // is a typed XEP-0085 chat-state on a DM Message (type
+    // chat/normal), record the sender's `(sender_bare,
+    // recipient_bare)` activity. The sender is the acting party; we
+    // DO NOT bump the recipient's projection here — the recipient's
+    // activity column is updated only when the recipient herself emits
+    // typed activity (chat-state, read marker, outbound commit,
+    // presence). The recipient bare JID is derived from the routing
+    // target `jid` (full or bare), not from `message.to`, because the
+    // routing arm is invoked for each resolved resource and the typed
+    // conversation key MUST always be the bare form.
+    //
+    // MUC reflection also uses `RouteToConnection` (per-occupant
+    // delivery from the room reflector), so we must scope to DM
+    // message types — for groupchat the activity is already recorded
+    // at the sender-pass `DispatchToRoom` entry, and recording the
+    // per-occupant reflection here would store `(room_bare,
+    // occupant_bare)` rows which is the wrong key shape.
     if let Stanza::Message(ref message) = *stanza {
-        if let Some(sender) = message.from.as_ref().map(|jid| jid.to_bare()) {
-            super::notification_activity_ingest::record_chat_state_activity(
-                deps,
-                &sender,
-                &jid.to_bare(),
-                message,
-            )
-            .await;
+        if matches!(
+            message.type_,
+            xmpp_parsers::message::MessageType::Chat | xmpp_parsers::message::MessageType::Normal,
+        ) {
+            if let Some(sender) = message.from.as_ref().map(|jid| jid.to_bare()) {
+                super::notification_activity_ingest::record_chat_state_activity(
+                    deps,
+                    &sender,
+                    &jid.to_bare(),
+                    message,
+                )
+                .await;
+            }
         }
     }
 
