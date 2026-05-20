@@ -1,4 +1,5 @@
 import type { PinPermission } from "@/lib/chat-types";
+import type { TimestampSource } from "@/lib/timeline-timestamps";
 import type { WaddleEncryptedFile } from "@/lib/xmpp/extensions/encrypted-file";
 import {
   renderRichMessageHtml,
@@ -153,6 +154,13 @@ export interface TimelineMessage {
   stanzaIdBy?: string;
   body: string;
   createdAt: string;
+  /**
+   * Provenance of `createdAt`. Merges across producers prefer the
+   * higher-authority source so a redelivered live stanza without a
+   * `<delay/>` (decoded as `fallback`) cannot overwrite a true
+   * server stamp (`archive`/`delay`) that landed via MAM first.
+   */
+  createdAtSource: TimestampSource;
   isSelf: boolean;
   /** Delivery status — only meaningful for self-sent messages. */
   deliveryStatus?: DeliveryStatus;

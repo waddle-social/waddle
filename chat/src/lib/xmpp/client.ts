@@ -1340,7 +1340,7 @@ export class BrowserXmppClient {
   }
 
   private roomMamPageToMessages(page: WasmMamPage): MamHistoryPage<LiveRoomMessage> {
-    return { messages: page.messages.map(roomMessageFromArchived).filter((message): message is LiveRoomMessage => !!message), ...(page.first_id ? { firstArchiveId: page.first_id } : {}), ...(page.last_id ? { lastArchiveId: page.last_id } : {}), complete: page.is_complete };
+    return { messages: page.messages.map((message) => roomMessageFromArchived(message)).filter((message): message is LiveRoomMessage => !!message), ...(page.first_id ? { firstArchiveId: page.first_id } : {}), ...(page.last_id ? { lastArchiveId: page.last_id } : {}), complete: page.is_complete };
   }
   private dmMamPageToMessages(page: WasmMamPage): MamHistoryPage<LiveDmMessage> {
     const selfBare = barePeerJid(this.session.jid);
@@ -1761,13 +1761,13 @@ export class BrowserXmppClient {
 
   private dispatchLiveBodyMessage(message: WasmMessage & { carbon?: { sent?: boolean; received?: boolean }; inboxPush?: InboxEntry; _fromCarbon?: boolean }) {
     if (message.is_muc) {
-      const converted = roomMessageFromArchived({ ...message, mam_id: message.id ?? crypto.randomUUID() } as WasmArchivedMessage);
+      const converted = roomMessageFromArchived({ ...message, mam_id: message.id ?? crypto.randomUUID() } as WasmArchivedMessage, "live");
       if (!converted) return;
       this.catchup.recordRoomSeen(converted.roomJid, converted.createdAt, undefined, rawMessageSeenIds(message));
       if (converted.roomJid !== this.currentRoom && isRoomActivityMessage(converted)) { this.activityHandler?.(roomActivityEventFromMessage(converted)); return; }
       this.messageHandler?.(converted); return;
     }
-    const converted = dmMessageFromArchived({ ...message, mam_id: message.id ?? crypto.randomUUID() } as WasmArchivedMessage, barePeerJid(this.session.jid));
+    const converted = dmMessageFromArchived({ ...message, mam_id: message.id ?? crypto.randomUUID() } as WasmArchivedMessage, barePeerJid(this.session.jid), "live");
     if (converted) {
       this.catchup.recordDmSeen(converted.peerJid, converted.createdAt, undefined, rawMessageSeenIds(message));
       this.directMessageHandler?.(converted);

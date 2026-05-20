@@ -12,6 +12,66 @@ export function compareTimelineTimestamps(
   return leftValue.localeCompare(rightValue);
 }
 
+// Provenance of a message's `createdAt` value. The same logical message
+// can flow through multiple producers (live socket, MAM catch-up,
+// queued outbound, stream-resume redelivery) and each producer can
+// supply a different timestamp with a different degree of authority.
+// We tag the source so merges can pick the most trustworthy stamp
+// instead of letting "whoever wrote last wins" reorder the timeline
+// on tab restore (see PR1 plan).
+//
+// Authority ranking (highest first):
+//   * archive: XEP-0313 MAM forwarded `<delay/>` — the server's own
+//     copy of the message in its archive. Canonical.
+//   * delay:   XEP-0203 `<delay/>` on a live stanza — added by the
+//     server when the message was buffered/redelivered. Also server-
+//     authoritative for the original send time.
+//   * queued:  client wall-clock captured at the moment the user
+//     pressed send. Only used for self-sent rows awaiting echo.
+//   * fallback: client wall-clock at decode of a live stanza that
+//     arrived without any `<delay/>`. This is correct for genuinely-
+//     new arrivals ("now" really is the right answer) but is wrong
+//     for redelivered stanzas (XEP-0198 resume, carbons that lose
+//     delay, server replays). Lowest authority — any other source
+//     replaces it on merge.
+export type TimestampSource = "archive" | "delay" | "queued" | "fallback";
+
+const TIMESTAMP_SOURCE_RANK: Record<TimestampSource, number> = {
+  archive: 3,
+  delay: 2,
+  queued: 1,
+  fallback: 0,
+};
+
+interface DatedTimelineFields {
+  createdAt: string;
+  createdAtSource: TimestampSource;
+}
+
+// Pick the more authoritative of two stamps for the *same* logical
+// message. On equal authority, prefer the earlier wall-clock value:
+// for `archive`/`delay` the server stamp is deterministic so equal
+// authority implies equal value; for `queued`/`fallback` the earlier
+// stamp is the one closer to when the user actually performed the
+// action.
+//
+// An unknown / undefined source ranks below every named source — test
+// fixtures sometimes build `TimelineMessage` via `as TimelineMessage`
+// casts that omit the field, and we never want such a row to suppress
+// a properly-tagged authoritative stamp on merge.
+export function pickAuthoritativeTimestamp(
+  existing: DatedTimelineFields,
+  incoming: DatedTimelineFields,
+): DatedTimelineFields {
+  const existingRank = TIMESTAMP_SOURCE_RANK[existing.createdAtSource] ?? -1;
+  const incomingRank = TIMESTAMP_SOURCE_RANK[incoming.createdAtSource] ?? -1;
+  if (incomingRank > existingRank) return incoming;
+  if (existingRank > incomingRank) return existing;
+  return compareTimelineTimestamps(existing.createdAt, incoming.createdAt) <= 0
+    ? existing
+    : incoming;
+}
+
 // `compareTimelineMessages` must be a *total* order over distinct
 // messages: never return 0 for two messages with different identities.
 // Burst messages share `createdAt` to the millisecond, optimistic echoes

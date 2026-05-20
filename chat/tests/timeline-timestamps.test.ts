@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   compareTimelineMessages,
   compareTimelineTimestamps,
+  pickAuthoritativeTimestamp,
 } from "../src/lib/timeline-timestamps";
 
 type SortableMessage = {
@@ -137,5 +138,55 @@ describe("compareTimelineMessages", () => {
       const sorted = shuffled.sort(compareTimelineMessages).map((m) => m.id);
       expect(sorted).toEqual(reference);
     }
+  });
+});
+
+describe("pickAuthoritativeTimestamp", () => {
+  test("higher-authority source wins regardless of value", () => {
+    // The exact scenario that produced the user-visible bug: a live
+    // wire stanza without `<delay/>` decoded as `fallback` with a
+    // wall-clock-now timestamp, then the MAM hit lands later with
+    // `archive` authority and an older server stamp. The merge MUST
+    // keep the archive copy.
+    const fallbackNow = {
+      createdAt: "2026-05-20T11:00:00.000Z",
+      createdAtSource: "fallback" as const,
+    };
+    const archiveOlder = {
+      createdAt: "2026-05-20T10:00:00.000Z",
+      createdAtSource: "archive" as const,
+    };
+    expect(pickAuthoritativeTimestamp(fallbackNow, archiveOlder)).toBe(archiveOlder);
+    // Symmetric: same outcome regardless of arrival order.
+    expect(pickAuthoritativeTimestamp(archiveOlder, fallbackNow)).toBe(archiveOlder);
+  });
+
+  test("authority order: archive > delay > queued > fallback", () => {
+    const archive = { createdAt: "2026-05-20T10:00:00.000Z", createdAtSource: "archive" as const };
+    const delay = { createdAt: "2026-05-20T10:00:00.000Z", createdAtSource: "delay" as const };
+    const queued = { createdAt: "2026-05-20T10:00:00.000Z", createdAtSource: "queued" as const };
+    const fallback = { createdAt: "2026-05-20T10:00:00.000Z", createdAtSource: "fallback" as const };
+    expect(pickAuthoritativeTimestamp(delay, archive)).toBe(archive);
+    expect(pickAuthoritativeTimestamp(queued, delay)).toBe(delay);
+    expect(pickAuthoritativeTimestamp(fallback, queued)).toBe(queued);
+  });
+
+  test("on equal authority, the earlier wall-clock value wins", () => {
+    // For queued/fallback, "earlier" is closer to when the event
+    // actually happened. For archive/delay, equal authority implies
+    // equal value (server stamp is deterministic) so this tiebreaker
+    // is a no-op for them; it matters for client-stamped rows.
+    const earlier = { createdAt: "2026-05-20T10:00:00.000Z", createdAtSource: "queued" as const };
+    const later = { createdAt: "2026-05-20T10:00:01.000Z", createdAtSource: "queued" as const };
+    expect(pickAuthoritativeTimestamp(later, earlier)).toBe(earlier);
+    expect(pickAuthoritativeTimestamp(earlier, later)).toBe(earlier);
+  });
+
+  test("symmetric: same result regardless of argument order", () => {
+    const a = { createdAt: "2026-05-20T10:00:00.000Z", createdAtSource: "delay" as const };
+    const b = { createdAt: "2026-05-20T11:00:00.000Z", createdAtSource: "fallback" as const };
+    const r1 = pickAuthoritativeTimestamp(a, b);
+    const r2 = pickAuthoritativeTimestamp(b, a);
+    expect(r1).toEqual(r2);
   });
 });

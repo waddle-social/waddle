@@ -9,7 +9,7 @@ import {
   findMessageById,
   MessageIdIndex,
 } from "@/lib/message-ids";
-import { compareTimelineMessages } from "@/lib/timeline-timestamps";
+import { compareTimelineMessages, pickAuthoritativeTimestamp } from "@/lib/timeline-timestamps";
 
 export function fromLiveDmMessage(
   session: WaddleSession,
@@ -22,6 +22,7 @@ export function fromLiveDmMessage(
     authorJid: msg.fromJid,
     body: msg.body,
     createdAt: msg.createdAt,
+    createdAtSource: msg.createdAtSource,
     isSelf: barePeerJid(msg.fromJid) === barePeerJid(session.jid),
   };
   if (msg.correctionTargetId) tm.correctionTargetId = msg.correctionTargetId;
@@ -62,6 +63,7 @@ export function queuedDmMessageToTimeline(
     authorJid: session.jid,
     body: queued.body || (queued.files?.[0]?.url ?? ""),
     createdAt: queued.createdAt,
+    createdAtSource: "queued",
     isSelf: true,
     deliveryStatus: "queued",
   };
@@ -123,7 +125,28 @@ function mergeDmRetractionTombstone(
   existing: TimelineMessage,
   incoming: TimelineMessage,
 ): TimelineMessage {
-  return incoming.isRetracted ? retractDmTimelineMessage(existing, incoming.retractionId) : existing;
+  let result = incoming.isRetracted
+    ? retractDmTimelineMessage(existing, incoming.retractionId)
+    : existing;
+  // Upgrade the timestamp if the MAM hit carries a higher-authority
+  // stamp than the row we already had — this is the path that
+  // corrects a previously-fallback live insert once the archive
+  // result lands.
+  const authoritativeTimestamp = pickAuthoritativeTimestamp(
+    { createdAt: result.createdAt, createdAtSource: result.createdAtSource },
+    { createdAt: incoming.createdAt, createdAtSource: incoming.createdAtSource },
+  );
+  if (
+    authoritativeTimestamp.createdAt !== result.createdAt
+    || authoritativeTimestamp.createdAtSource !== result.createdAtSource
+  ) {
+    result = {
+      ...result,
+      createdAt: authoritativeTimestamp.createdAt,
+      createdAtSource: authoritativeTimestamp.createdAtSource,
+    };
+  }
+  return result;
 }
 
 export function buildDmTimelineFromMamResults(params: {
@@ -174,7 +197,15 @@ export function buildDmTimelineFromMamResults(params: {
   const timeline = [...existing];
   for (const raw of regular) {
     const tm = fromLiveDmMessage(session, raw, (id) => byId.get(id));
-    const existingMessage = findMessageById(timeline, tm.id);
+    // Look up via every wire alias, not just the primary id — when
+    // the live arrival landed first with a client-side id and MAM
+    // later returns the canonical stanza-id, a bare `findMessageById`
+    // (on `tm.id` only) would miss the existing row and insert a
+    // duplicate. Channel side has done this for a while; this is the
+    // matching DM-side fix (Bug 5 in PR1).
+    const existingMessage = [tm.id, ...(tm.wireIds ?? [])]
+      .map((id) => byId.get(id))
+      .find((message): message is TimelineMessage => !!message);
     if (existingMessage) {
       const merged = mergeDmRetractionTombstone(existingMessage, tm);
       if (merged !== existingMessage) {

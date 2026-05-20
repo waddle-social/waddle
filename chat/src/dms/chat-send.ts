@@ -126,6 +126,7 @@ export function useChatSend(deps: UseChatSendDeps) {
             authorJid: session.value.jid,
             body: bodyText || (attachments?.[0]?.url ?? ""),
             createdAt: new Date().toISOString(),
+            createdAtSource: "queued",
             isSelf: true,
             deliveryStatus: (result?.state ?? "sending") as DeliveryStatus,
             ...(markup && markup.length > 0 ? { markup } : {}),

@@ -13,6 +13,7 @@ import {
   type SendDirectMessageOptions,
   type SendGroupMessageOptions,
 } from "./send-types";
+import type { TimestampSource } from "@/lib/timeline-timestamps";
 import type { LiveDmMessage, LiveRoomMessage, OccupantPresence, PresenceUpdateEvent, SharedFileInfo } from "./types";
 import type {
   WasmArchivedMessage,
@@ -274,6 +275,36 @@ function extensionAnnotationsFromWasm(envelope?: WasmExtensionEnvelope): Extensi
   });
 }
 
+/**
+ * Codec source distinguishes a true MAM archive result from a live
+ * wire stanza that was reshaped into the archived struct via
+ * `{ ...message, mam_id: ... }`. The two cases share a codec but
+ * carry different timestamp authority — see `TimestampSource`.
+ */
+type CodecSource = "archive" | "live";
+
+function deriveCreatedAt(
+  rawTimestamp: string | undefined | null,
+  source: CodecSource,
+): { createdAt: string; createdAtSource: TimestampSource } {
+  if (typeof rawTimestamp === "string" && rawTimestamp.length > 0) {
+    return {
+      createdAt: rawTimestamp,
+      createdAtSource: source === "archive" ? "archive" : "delay",
+    };
+  }
+  // Live wire stanza without a `<delay/>` element — the message is
+  // genuinely arriving "now" in most cases (peer just sent it), so
+  // `Date.now()` is a sensible best-effort. For redelivered stanzas
+  // (XEP-0198 resume tail, carbons that dropped delay, MUC join
+  // history) this is wrong, but a later MAM hit with `archive` /
+  // `delay` authority will replace it via `pickAuthoritativeTimestamp`.
+  return {
+    createdAt: new Date().toISOString(),
+    createdAtSource: "fallback",
+  };
+}
+
 function roomAssignedStanzaId(message: WasmArchivedMessage, roomJid: string): string | undefined {
   const byScoped = message.stanza_ids?.find((stanzaId) => stanzaId.by === roomJid);
   if (byScoped?.id) return byScoped.id;
@@ -282,11 +313,14 @@ function roomAssignedStanzaId(message: WasmArchivedMessage, roomJid: string): st
     : undefined;
 }
 
-export function roomMessageFromArchived(message: WasmArchivedMessage): LiveRoomMessage | null {
+export function roomMessageFromArchived(
+  message: WasmArchivedMessage,
+  source: CodecSource = "archive",
+): LiveRoomMessage | null {
   const fromJid = message.from ?? "";
   const roomJid = barePeerJid(fromJid || message.to || "");
   const nick = fromJid.split("/")[1] ?? "unknown";
-  const createdAt = message.timestamp ?? new Date().toISOString();
+  const { createdAt, createdAtSource } = deriveCreatedAt(message.timestamp, source);
   const stampedByRoom = roomAssignedStanzaId(message, roomJid);
   const moderationTargetId = message.moderation_target_id && fromJid === roomJid
     ? message.moderation_target_id
@@ -304,6 +338,7 @@ export function roomMessageFromArchived(message: WasmArchivedMessage): LiveRoomM
       nick,
       body: "",
       createdAt,
+      createdAtSource,
       type: "message",
       retractsId: activeRetractionTarget,
       ...(message.retraction_id ? { retractionId: message.retraction_id } : {}),
@@ -321,6 +356,7 @@ export function roomMessageFromArchived(message: WasmArchivedMessage): LiveRoomM
       nick,
       body: "",
       createdAt,
+      createdAtSource,
       type: "subject",
       _reactionTarget: message.reaction_target_id,
       _reactionEmojis: message.reaction_emojis,
@@ -338,6 +374,7 @@ export function roomMessageFromArchived(message: WasmArchivedMessage): LiveRoomM
       nick: "",
       body: message.body ?? "",
       createdAt,
+      createdAtSource,
       type: "pin-event",
       pinEventAction: message.pin_event.action,
     };
@@ -358,6 +395,7 @@ export function roomMessageFromArchived(message: WasmArchivedMessage): LiveRoomM
     nick,
     body: message.is_retracted ? "" : (message.body ?? message.subject ?? ""),
     createdAt,
+    createdAtSource,
     type: message.subject && !message.body ? "subject" : "message",
     ...(message.replaces_id ? { replacesId: message.replaces_id } : {}),
     ...(roomWireIds.length > 0
@@ -396,7 +434,11 @@ export function roomMessageFromArchived(message: WasmArchivedMessage): LiveRoomM
   return stripReplyFallback(base, message.reply_fallback_start, message.reply_fallback_end);
 }
 
-export function dmMessageFromArchived(message: WasmArchivedMessage, selfBareJid: string): LiveDmMessage | null {
+export function dmMessageFromArchived(
+  message: WasmArchivedMessage,
+  selfBareJid: string,
+  source: CodecSource = "archive",
+): LiveDmMessage | null {
   const fromBare = barePeerJid(message.from ?? "");
   const toBare = barePeerJid(message.to ?? "");
   const isSelf = fromBare === selfBareJid;
@@ -404,7 +446,7 @@ export function dmMessageFromArchived(message: WasmArchivedMessage, selfBareJid:
   if (!peerJid) return null;
   const fromJid = message.from ?? fromBare;
   const nick = barePeerJid(fromJid).split("@")[0] ?? "unknown";
-  const createdAt = message.timestamp ?? new Date().toISOString();
+  const { createdAt, createdAtSource } = deriveCreatedAt(message.timestamp, source);
   const dmPrimaryId = message.id ?? message.origin_id ?? message.mam_id;
   if (message.retracts_id) {
     return {
@@ -415,6 +457,7 @@ export function dmMessageFromArchived(message: WasmArchivedMessage, selfBareJid:
       nick,
       body: "",
       createdAt,
+      createdAtSource,
       type: "message",
       retractsId: message.retracts_id,
       ...(message.retraction_id ? { retractionId: message.retraction_id } : {}),
@@ -429,6 +472,7 @@ export function dmMessageFromArchived(message: WasmArchivedMessage, selfBareJid:
       nick,
       body: "",
       createdAt,
+      createdAtSource,
       type: "message",
       _reactionTarget: message.reaction_target_id,
       _reactionEmojis: message.reaction_emojis,
@@ -450,6 +494,7 @@ export function dmMessageFromArchived(message: WasmArchivedMessage, selfBareJid:
     nick,
     body: message.is_retracted ? "" : (message.body ?? message.subject ?? ""),
     createdAt,
+    createdAtSource,
     type: "message",
     ...(message.replaces_id ? { replacesId: message.replaces_id } : {}),
     ...(message.reply_to_id
