@@ -17,6 +17,7 @@ import {
   type ScrollDirectionMode,
 } from "@/lib/scroll-direction";
 import { createPinnedEdgeScroller } from "@/lib/pinned-edge-scroll";
+import { useChatWindowVisibility } from "@/shell/window-visibility";
 import { formatTimelineDayDivider, isSameTimelineDay } from "@/channels/timeline";
 
 const props = defineProps<{
@@ -325,6 +326,16 @@ watch(
 
 watch(scrollDirectionMode, () => {
   void scrollToPinnedEdge();
+});
+
+// Browser-tab refocus: re-pin the thread panel if the user was already at
+// the edge before switching away. Mirrors the channel/DM message-list
+// watchers; see `channels/messages.ts` / `dms/messages.ts`.
+const { isWindowFocused } = useChatWindowVisibility();
+watch(isWindowFocused, (focused, prev) => {
+  if (focused && !prev && pinnedEdgeScroller.isPinnedAtEdge.value) {
+    void scrollToPinnedEdge();
+  }
 });
 
 watch(
