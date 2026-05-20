@@ -7,7 +7,10 @@ import {
   scheduleOutgoingTimeout,
   tearDownActiveCall,
 } from "../src/lib/calls/call-store";
-import { applyMucCallPresence } from "../src/lib/calls/muc-call-presence";
+import {
+  applyMucCallPresence,
+  clearMucCallParticipants,
+} from "../src/lib/calls/muc-call-presence";
 import type { CallWireSender } from "../src/lib/calls/outbound";
 import type { CallMedia, LiveKitJoin } from "../src/lib/calls/types";
 
@@ -95,6 +98,11 @@ function mockSender(): CallWireSender {
 
 afterEach(() => {
   clearCallState();
+  // The Muji mocks above fire `applyMucCallPresence` to simulate
+  // MUC echoes; clearing the participants store between tests
+  // keeps that state from leaking into other test files (e.g.
+  // `muc-call-presence.test.ts`) that expect an empty store.
+  clearMucCallParticipants();
 });
 
 describe("tearDownActiveCall", () => {
