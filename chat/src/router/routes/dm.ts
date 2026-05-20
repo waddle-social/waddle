@@ -28,9 +28,10 @@ export const dmRoute = {
     const segments = pathname.split("/").filter(Boolean);
     if (segments.length !== 2) return null;
     if (segments[0] !== "dm") return null;
+    if (!segments[1]) return null;
     return {
       id: "dm",
-      params: { username: decodeURIComponent(segments[1]!) },
+      params: { username: decodeURIComponent(segments[1]) },
       search: threadSearch.decode(searchString),
     };
   },

@@ -41,7 +41,9 @@ export const adminRoute = {
   tryParse(pathname: string, _searchString: string): AdminMatch | null {
     const segments = pathname.split("/").filter(Boolean);
     if (segments[0] !== "admin") return null;
-    if (segments.length > 2) return null;
+    // Match the prior parser's tolerance: extra segments after the
+    // panel are ignored (e.g. `/admin/users/anything` → admin/users)
+    // rather than falling through to the home fallback.
     return {
       id: "admin",
       params: { panel: decodeAdminPanel(segments[1]) },

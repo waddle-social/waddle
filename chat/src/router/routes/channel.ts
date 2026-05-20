@@ -34,7 +34,8 @@ export const channelRoute = {
     const segments = pathname.split("/").filter(Boolean);
     if (segments.length !== 2) return null;
     if (segments[0] !== "r") return null;
-    const channelId = decodeURIComponent(segments[1]!);
+    if (!segments[1]) return null;
+    const channelId = decodeURIComponent(segments[1]);
     return {
       id: "channel",
       params: { channelId },

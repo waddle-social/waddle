@@ -43,12 +43,13 @@ export const channelExtensionRoute = {
     const segments = pathname.split("/").filter(Boolean);
     if (segments.length !== 5) return null;
     if (segments[0] !== "r" || segments[2] !== "x") return null;
+    if (!segments[1] || !segments[3] || !segments[4]) return null;
     return {
       id: "channelExtension",
       params: {
-        channelId: decodeURIComponent(segments[1]!),
-        pluginId: decodeURIComponent(segments[3]!),
-        routeId: decodeURIComponent(segments[4]!),
+        channelId: decodeURIComponent(segments[1]),
+        pluginId: decodeURIComponent(segments[3]),
+        routeId: decodeURIComponent(segments[4]),
       },
       search: threadAndPinnedSearch.decode(searchString),
     };

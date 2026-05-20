@@ -77,6 +77,25 @@ describe("matchLocation", () => {
     });
   });
 
+  test("extra path segments after a known admin panel are ignored", () => {
+    expect(matchLocation("/admin/users/anything/here", "")).toEqual({
+      id: "admin",
+      params: { panel: "users" },
+    });
+  });
+
+  test("falls back to home for /r/ with no channel id", () => {
+    expect(matchLocation("/r/", "")).toEqual({ id: "home" });
+  });
+
+  test("falls back to home for /dm/ with no username", () => {
+    expect(matchLocation("/dm/", "")).toEqual({ id: "home" });
+  });
+
+  test("falls back to home for /r/foo/x/ with missing extension params", () => {
+    expect(matchLocation("/r/foo/x/", "")).toEqual({ id: "home" });
+  });
+
   test("ignores empty segments in the thread stack", () => {
     const m = matchLocation("/r/room-id-1", "?thread=root,,,child");
     expect(m).toEqual({
