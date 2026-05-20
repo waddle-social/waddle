@@ -577,6 +577,30 @@ pub trait RoomPolicyStore: Send + Sync {
     ) -> Result<Option<bool>, NotificationOutboxError>;
 }
 
+/// Zero-state [`RoomPolicyStore`] for DM emission paths.
+///
+/// The T0 emission gate for direct messages calls
+/// [`evaluate_xep0492_at_dispatch`] on a candidate whose class is
+/// [`NotificationClass::DirectMessage`] or
+/// [`NotificationClass::DirectMessageMention`]. Those arms never
+/// dispatch into `room_policy`, so the trait object is held only to
+/// satisfy the typed signature. This adapter encodes that no-op shape
+/// once at the type level; if the evaluator ever did consult it for a
+/// DM, it would surface as [`T1PushDispatchOutcome::DeferUnknownRoomPolicy`]
+/// rather than a silent default — fail-loud per the slice 1 design.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct NoopRoomPolicy;
+
+#[async_trait::async_trait]
+impl RoomPolicyStore for NoopRoomPolicy {
+    async fn room_members_only(
+        &self,
+        _room: &BareJid,
+    ) -> Result<Option<bool>, NotificationOutboxError> {
+        Ok(None)
+    }
+}
+
 fn require_full_sender_jid(sender_jid: &Jid) -> Result<(), NotificationOutboxError> {
     if sender_jid.resource().is_some() {
         Ok(())
@@ -1410,13 +1434,33 @@ impl NotificationOutboxStore {
                     continue;
                 }
             }
-            // T1 XEP-0492 push-dispatch gate. The class on the candidate
-            // is purely message-derived from T0; combined with the
-            // recipient's effective notification level (consulted fresh
-            // here against the projection store) the typed reducer
-            // decides publish-or-suppress. The room-policy lookup is
-            // cached for the duration of this drain pass so a 100-
-            // member groupchat does not produce 100 actor round-trips.
+            // T1 XEP-0492 push-dispatch re-evaluation — race-window
+            // guard, defense-in-depth.
+            //
+            // The same typed evaluator already ran at T0 (DM emission
+            // in `offline_delivery.rs`, groupchat emission in
+            // `groupchat_inbox.rs`) and a Suppressed outcome there
+            // short-circuits the candidate insert entirely. Per the
+            // compliance rule the common case is "no row in
+            // `notification_candidates` for suppressed outcomes."
+            //
+            // This T1 invocation catches the race where recipient
+            // state changed *between* the T0 emission and the T1
+            // dispatch (e.g. the user flipped XEP-0492 to `<never/>`
+            // mid-flight, or a groupchat config change toggled
+            // members-only). If the projection has changed the drain
+            // marks the candidate outboxed without enqueueing a job —
+            // the row exists only briefly during the race window,
+            // which is acceptable per the locked Q2 design (push
+            // output is preserved).
+            //
+            // The class on the candidate is purely message-derived
+            // from T0; combined with the recipient's effective
+            // notification level (consulted fresh here against the
+            // projection store) the typed reducer decides
+            // publish-or-suppress. The room-policy lookup is cached
+            // for the duration of this drain pass so a 100-member
+            // groupchat does not produce 100 actor round-trips.
             let outcome = match evaluate_xep0492_at_dispatch(
                 settings_projection,
                 room_policy,
@@ -2251,7 +2295,7 @@ impl NotificationOutboxStore {
 /// private-room pushes or fan out unwanted public-room pushes. Slice
 /// 2 will replace the live actor lookup with a durable projection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum T1PushDispatchOutcome {
+pub(crate) enum T1PushDispatchOutcome {
     /// XEP-0492 gate decided to fan out; enqueue the push job.
     Deliver,
     /// XEP-0492 gate decided to suppress; mark candidate outboxed
@@ -2275,7 +2319,7 @@ enum T1PushDispatchOutcome {
 /// every candidate for that room in the same batch reuses that
 /// outcome to avoid retrying the same failing actor 100×.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RoomPolicyCacheEntry {
+pub(crate) enum RoomPolicyCacheEntry {
     Public,
     Private,
     Unknown,
@@ -2296,23 +2340,47 @@ impl RoomPolicyCacheEntry {
 
 /// T1 XEP-0492 push-dispatch evaluator.
 ///
+/// **Same typed evaluator called at two invocation moments**:
+///
+/// - **T0 (candidate emission gate, compliance)** — DM
+///   ([`crate::server::routes::interpret::offline_delivery`]) and
+///   groupchat
+///   ([`crate::server::routes::interpret::groupchat_inbox`])
+///   emission paths invoke this on a constructed-but-not-inserted
+///   [`NotificationCandidate`] before persisting it. A `Suppressed`
+///   outcome short-circuits emission entirely — no row is written.
+///   This satisfies the compliance rule that suppressed candidates
+///   leave no audit trail in `notification_candidates`.
+/// - **T1 (drain re-evaluator, race-window guard)** — the same
+///   function runs again inside
+///   [`NotificationOutboxStore::drain_pending_candidates_into_outbox`]
+///   against fresh recipient state. If the projection changed
+///   between T0 and T1 (e.g. the user flipped XEP-0492 to
+///   `<never/>` mid-flight), the drain marks the candidate outboxed
+///   without enqueuing a job. The brief race window where a row
+///   exists then gets retroactively suppressed is acceptable per
+///   the locked Q2 design.
+///
 /// Derives `(level, is_mention)` from the recorded candidate class +
 /// recipient state and feeds them into the shared pure reducer
 /// [`crate::notification_settings_projection::PushDispatchDecision::evaluate`].
 ///
 /// - DM classes encode the mention bit directly
 ///   ([`NotificationClass::DirectMessage`] vs
-///   [`NotificationClass::DirectMessageMention`]).
+///   [`NotificationClass::DirectMessageMention`]). DM evaluation
+///   never consults `room_policy` and may pass any [`RoomPolicyStore`]
+///   (e.g. [`NoopRoomPolicy`]) at the T0 call site.
 /// - Groupchat classes encode both mention scope and
 ///   live-occupant scope; the room is private/public per the
-///   [`RoomPolicyStore`] lookup, cached per drain batch through
+///   [`RoomPolicyStore`] lookup, cached per call through
 ///   `room_policy_cache` so a 100-member groupchat does not produce
-///   100 actor round-trips. When the lookup yields
+///   100 actor round-trips at T1, and a single-message emission at
+///   T0 trivially hits one entry. When the lookup yields
 ///   `Ok(None)`/`Err(_)`, the evaluator returns
 ///   [`T1PushDispatchOutcome::DeferUnknownRoomPolicy`] — slice 1 has
 ///   no durable T1 projection of MUC config yet, so an unknown
 ///   policy must defer rather than default-to-public.
-async fn evaluate_xep0492_at_dispatch(
+pub(crate) async fn evaluate_xep0492_at_dispatch(
     settings_projection: &crate::notification_settings_projection::NotificationSettingsProjectionStore,
     room_policy: &dyn RoomPolicyStore,
     candidate: &NotificationCandidate,

@@ -320,6 +320,65 @@ async fn enqueue_xep0357_notification_candidate_for_message(
             return NotificationCandidateQueueOutcome::Completed;
         }
     };
+    // T0 XEP-0492 push-dispatch gate — compliance: suppressed
+    // outcomes leave no row in `notification_candidates`. The same
+    // typed evaluator runs again at T1 inside
+    // `drain_pending_candidates_into_outbox` as a race-window guard.
+    // DM evaluation never consults `room_policy`, so the no-op
+    // adapter is sufficient here; the per-call cache is a fresh empty
+    // map (one-shot eval).
+    let room_policy = crate::notification_outbox::NoopRoomPolicy;
+    let mut room_policy_cache = std::collections::BTreeMap::<
+        BareJid,
+        crate::notification_outbox::RoomPolicyCacheEntry,
+    >::new();
+    let outcome = match crate::notification_outbox::evaluate_xep0492_at_dispatch(
+        state
+            .deps
+            .protocol
+            .notification_settings_projection
+            .as_ref(),
+        &room_policy,
+        &candidate,
+        &mut room_policy_cache,
+    )
+    .await
+    {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            warn!(
+                recipient = %recipient,
+                sender = %sender,
+                error = %error,
+                "XEP-0492 notification setting lookup failed at T0; deferring DM candidate"
+            );
+            return NotificationCandidateQueueOutcome::RetryLater;
+        }
+    };
+    match outcome {
+        crate::notification_outbox::T1PushDispatchOutcome::Deliver => {}
+        crate::notification_outbox::T1PushDispatchOutcome::Suppressed { reason } => {
+            info!(
+                recipient = %recipient,
+                sender = %sender,
+                is_mention,
+                %reason,
+                "XEP-0492 push gate suppressed XEP-0357 DM candidate at T0; no candidate row persisted"
+            );
+            return NotificationCandidateQueueOutcome::Completed;
+        }
+        crate::notification_outbox::T1PushDispatchOutcome::DeferUnknownRoomPolicy => {
+            // DM evaluation does not consult room_policy, so this is
+            // a structural invariant violation. Fail-loud and retry.
+            warn!(
+                recipient = %recipient,
+                sender = %sender,
+                "XEP-0492 evaluator returned DeferUnknownRoomPolicy for a DM candidate; \
+                 this is structurally impossible — retrying"
+            );
+            return NotificationCandidateQueueOutcome::RetryLater;
+        }
+    }
     match state
         .deps
         .protocol

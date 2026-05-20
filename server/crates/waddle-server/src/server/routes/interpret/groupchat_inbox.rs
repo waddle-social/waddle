@@ -266,6 +266,61 @@ async fn insert_groupchat_notification_candidate(
             return GroupchatNotificationCandidateQueueOutcome::Completed;
         }
     };
+    // T0 XEP-0492 push-dispatch gate — compliance: suppressed
+    // outcomes leave no row in `notification_candidates`. The same
+    // typed evaluator runs again at T1 inside
+    // `drain_pending_candidates_into_outbox` as a race-window guard.
+    let room_policy =
+        crate::room_policy::RoomRegistryActorPolicy::new(state.deps.protocol.room_registry.clone());
+    let mut room_policy_cache = std::collections::BTreeMap::<
+        BareJid,
+        crate::notification_outbox::RoomPolicyCacheEntry,
+    >::new();
+    let outcome = match crate::notification_outbox::evaluate_xep0492_at_dispatch(
+        state
+            .deps
+            .protocol
+            .notification_settings_projection
+            .as_ref(),
+        &room_policy,
+        &candidate,
+        &mut room_policy_cache,
+    )
+    .await
+    {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            warn!(
+                recipient = %owner,
+                room = %room,
+                error = %error,
+                "ProjectGroupchatInbox: XEP-0492 notification setting lookup failed at T0; deferring candidate"
+            );
+            return GroupchatNotificationCandidateQueueOutcome::RetryLater;
+        }
+    };
+    match outcome {
+        crate::notification_outbox::T1PushDispatchOutcome::Deliver => {}
+        crate::notification_outbox::T1PushDispatchOutcome::Suppressed { reason } => {
+            info!(
+                recipient = %owner,
+                room = %room,
+                class = ?class,
+                %reason,
+                "ProjectGroupchatInbox: XEP-0492 push gate suppressed groupchat candidate at T0; no candidate row persisted"
+            );
+            return GroupchatNotificationCandidateQueueOutcome::Completed;
+        }
+        crate::notification_outbox::T1PushDispatchOutcome::DeferUnknownRoomPolicy => {
+            warn!(
+                recipient = %owner,
+                room = %room,
+                class = ?class,
+                "ProjectGroupchatInbox: MUC config unavailable at T0; deferring groupchat candidate (unknown room policy is not 'public')"
+            );
+            return GroupchatNotificationCandidateQueueOutcome::RetryLater;
+        }
+    }
     match state
         .deps
         .protocol
