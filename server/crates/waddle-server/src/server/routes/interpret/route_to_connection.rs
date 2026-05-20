@@ -75,7 +75,11 @@ pub(super) async fn route_to_connection(
         // headless-pass guard are intentionally dropped, so they
         // MUST NOT mutate the activity projection either (Codex
         // review on PR #731).
-        if let Stanza::Message(ref message) = *stanza {
+        // Borrow the boxed Stanza via `as_ref()` so the inner Message
+        // is matched by reference — `stanza` MUST remain owned for the
+        // delivery branches below. Match ergonomics binds `message`
+        // as `&Message` automatically.
+        if let Stanza::Message(message) = stanza.as_ref() {
             if matches!(
                 message.type_,
                 xmpp_parsers::message::MessageType::Chat
