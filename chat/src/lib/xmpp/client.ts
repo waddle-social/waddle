@@ -51,6 +51,10 @@ import { prepareEncryptedAttachmentUpload } from "./encrypted-attachments";
 import { discoverChannels, discoverTopology } from "./discovery";
 import { discoverUploadService, uploadFile, type UploadProgress } from "./file-upload";
 import { ReconnectCatchup } from "./reconnect-catchup";
+import {
+  createLocalStorageResumePersistence,
+  type ResumePersistence,
+} from "./resume-persistence";
 import { compareTimelineTimestamps } from "../timeline-timestamps";
 import {
   discoverExtensionCommands,
@@ -390,7 +394,8 @@ export class BrowserXmppClient {
   private readonly errorHooks: Array<(event: XmppErrorEvent) => void> = [];
   private readonly roomJoinWaiters = new Map<string, { resolve: () => void; reject: (error: Error) => void }>();
   private readonly carbonDedupIds = new Set<string>();
-  readonly catchup = new ReconnectCatchup();
+  readonly catchup: ReconnectCatchup;
+  private readonly resumePersistence: ResumePersistence;
   // Per-resume gate: non-zero while `handleSessionReady` is draining
   // MAM catch-up. Live body messages received during that window are
   // buffered in `pendingDuringResume` and replayed after catch-up
@@ -425,7 +430,21 @@ export class BrowserXmppClient {
   private resumeBarrier: { xmpp: XmppClientInstance; promise: Promise<void> } | null = null;
   private pendingDuringResume: Array<WasmMessage & { carbon?: { sent?: boolean; received?: boolean }; inboxPush?: InboxEntry; _fromCarbon?: boolean }> | null = null;
 
-  constructor(session: WaddleSession) { this.session = session; }
+  constructor(session: WaddleSession, persistence?: ResumePersistence) {
+    this.session = session;
+    // Per-account so a logout/login on the same browser doesn't mix
+    // cursors. `session.jid` is the bare JID — already unique per
+    // identity — and matches the `accountKey` used by the outbound
+    // queue store.
+    this.resumePersistence = persistence ?? createLocalStorageResumePersistence(session.jid);
+    this.catchup = new ReconnectCatchup(this.resumePersistence);
+    // Restore any XEP-0198 resume state persisted by a prior tab
+    // session. If a `resumeStateHandle` is also recovered via the
+    // WASM client (live, same JS context), that takes precedence in
+    // `doConnect`. The POD `resumeState` is the only piece that
+    // survives a full page reload, so hydrate it eagerly.
+    this.resumeState = this.resumePersistence.loadSm();
+  }
 
   /** Full JID (`bare/resource`) for this session. Needed by the
    * call layer when constructing Jingle session-initiate / accept,
@@ -524,6 +543,14 @@ export class BrowserXmppClient {
   private clearResumeState() {
     this.resumeState = null;
     this.setResumeStateHandle(null);
+    this.resumePersistence.clearSm();
+    // Only called from the `destroying` path — i.e. intentional
+    // logout / shutdown. Drop the catch-up cursors too so a future
+    // login on the same account (same browser) doesn't replay
+    // ancient MAM history. (Transient disconnects do NOT go through
+    // this method; they intentionally keep cursors so the next
+    // resume can fill the gap.)
+    this.catchup.reset();
   }
 
   private setResumeStateHandle(handle: XmppResumeStateHandle | null | undefined) {
@@ -1768,6 +1795,12 @@ export class BrowserXmppClient {
     if (this.destroying) { this.clearResumeState(); this.emitStatus({ state: "offline", detail: error?.message ?? "Disconnected" }); return; }
     this.setResumeStateHandle(xmpp.get_resume_state_handle?.() ?? null);
     this.resumeState = xmpp.get_resume_state?.() ?? null;
+    // Persist the POD form so the next page-load can resume the
+    // XEP-0198 stream without re-binding. The live handle is a JS
+    // object that can't be serialized, so `doConnect` always tries
+    // the handle first (this JS context only) and falls back to
+    // the persisted POD across reloads.
+    if (this.resumeState) this.resumePersistence.saveSm(this.resumeState);
     this.emitStatus({ state: "reconnecting", detail: countQueuedMessages(this.queueScope) > 0 ? "Connection lost — queued messages will send when reconnected" : (error?.message ?? "Connection lost, reconnecting...") });
     if (this.onceConnectFailed) { const fail = this.onceConnectFailed; this.onceConnected = null; this.onceConnectFailed = null; fail(error ?? new Error("XMPP connection failed")); }
     this.scheduleReconnect();
