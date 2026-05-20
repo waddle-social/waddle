@@ -278,36 +278,38 @@ async fn enqueue_xep0357_notification_candidate_for_message(
     archive_stanza_id: &waddle_xmpp_core::xep0359::StanzaId,
     original_message: &Message,
 ) -> NotificationCandidateQueueOutcome {
-    // XEP-0492 gate: consult the recipient's per-conversation notification
-    // level (defaulting to XEP-0492 conversation-kind defaults via the
-    // projection store) and the XEP-0513 mention bit. The decision is a
-    // typed `PushDispatchDecision` — never a stringly-typed diagnostic —
-    // so the suppression reason flows through to the typed log line.
-    let decision =
-        match evaluate_xep0492_push_dispatch_decision(state, recipient, sender, original_message)
-            .await
-        {
-            Ok(decision) => decision,
-            Err(()) => return NotificationCandidateQueueOutcome::RetryLater,
-        };
-    match decision {
-        crate::notification_settings_projection::PushDispatchDecision::Deliver => {}
-        crate::notification_settings_projection::PushDispatchDecision::Suppressed { reason } => {
-            info!(
-                recipient = %recipient,
-                sender = %sender,
-                reason = %reason,
-                "XEP-0492 push gate suppressed XEP-0357 notification candidate"
-            );
-            return NotificationCandidateQueueOutcome::Completed;
-        }
-    }
+    // XEP-0513 mention bit is message-intrinsic and frozen at T0; T1
+    // reads it back from the candidate row when running the XEP-0492
+    // dispatch gate.
+    //
+    // Self-directed candidates (sender bare JID == recipient bare JID)
+    // are rejected at the `NotificationCandidate::direct_message`
+    // constructor as `SelfDirectedNotificationCandidate` — no row is
+    // persisted, satisfying the compliance requirement that
+    // self-notifications produce no candidate/outbox entry. This is
+    // input validation, not recipient-state suppression, so it lives
+    // at the typed constructor boundary alongside the existing
+    // full-sender-JID and archive-id owner checks.
+    let is_mention = message_is_mention_for_recipient(original_message, recipient);
     let candidate = match crate::notification_outbox::NotificationCandidate::direct_message(
         recipient.clone(),
         sender_jid.clone(),
         archive_stanza_id.clone(),
+        is_mention,
     ) {
         Ok(candidate) => candidate,
+        Err(
+            crate::notification_outbox::NotificationOutboxError::SelfDirectedNotificationCandidate(
+                _,
+            ),
+        ) => {
+            debug!(
+                recipient = %recipient,
+                sender = %sender,
+                "XEP-0357 notification candidate skipped: self-directed (sender bare JID == recipient bare JID)"
+            );
+            return NotificationCandidateQueueOutcome::Completed;
+        }
         Err(error) => {
             warn!(
                 recipient = %recipient,
@@ -318,6 +320,65 @@ async fn enqueue_xep0357_notification_candidate_for_message(
             return NotificationCandidateQueueOutcome::Completed;
         }
     };
+    // T0 XEP-0492 push-dispatch gate — compliance: suppressed
+    // outcomes leave no row in `notification_candidates`. The same
+    // typed evaluator runs again at T1 inside
+    // `drain_pending_candidates_into_outbox` as a race-window guard.
+    // DM evaluation never consults `room_policy`, so the no-op
+    // adapter is sufficient here; the per-call cache is a fresh empty
+    // map (one-shot eval).
+    let room_policy = crate::notification_outbox::NoopRoomPolicy;
+    let mut room_policy_cache = std::collections::BTreeMap::<
+        BareJid,
+        crate::notification_outbox::RoomPolicyCacheEntry,
+    >::new();
+    let outcome = match crate::notification_outbox::evaluate_xep0492_at_dispatch(
+        state
+            .deps
+            .protocol
+            .notification_settings_projection
+            .as_ref(),
+        &room_policy,
+        &candidate,
+        &mut room_policy_cache,
+    )
+    .await
+    {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            warn!(
+                recipient = %recipient,
+                sender = %sender,
+                error = %error,
+                "XEP-0492 notification setting lookup failed at T0; deferring DM candidate"
+            );
+            return NotificationCandidateQueueOutcome::RetryLater;
+        }
+    };
+    match outcome {
+        crate::notification_outbox::T1PushDispatchOutcome::Deliver => {}
+        crate::notification_outbox::T1PushDispatchOutcome::Suppressed { reason } => {
+            info!(
+                recipient = %recipient,
+                sender = %sender,
+                is_mention,
+                %reason,
+                "XEP-0492 push gate suppressed XEP-0357 DM candidate at T0; no candidate row persisted"
+            );
+            return NotificationCandidateQueueOutcome::Completed;
+        }
+        crate::notification_outbox::T1PushDispatchOutcome::DeferUnknownRoomPolicy => {
+            // DM evaluation does not consult room_policy, so this is
+            // a structural invariant violation. Fail-loud and retry.
+            warn!(
+                recipient = %recipient,
+                sender = %sender,
+                "XEP-0492 evaluator returned DeferUnknownRoomPolicy for a DM candidate; \
+                 this is structurally impossible — retrying"
+            );
+            return NotificationCandidateQueueOutcome::RetryLater;
+        }
+    }
     match state
         .deps
         .protocol
@@ -329,6 +390,7 @@ async fn enqueue_xep0357_notification_candidate_for_message(
             debug!(
                 recipient = %recipient,
                 sender = %sender,
+                is_mention,
                 "XEP-0357 notification candidate inserted for durable outbox worker"
             );
             NotificationCandidateQueueOutcome::Completed
@@ -351,67 +413,6 @@ async fn enqueue_xep0357_notification_candidate_for_message(
             NotificationCandidateQueueOutcome::RetryLater
         }
     }
-}
-
-/// Resolve the XEP-0492 push-dispatch gate for a single inbound DM that
-/// is about to be projected into the recipient's offline queue.
-///
-/// The gate combines the recipient's typed
-/// [`waddle_xmpp::xep::NotificationLevel`] (resolved by the
-/// `NotificationSettingsProjectionStore`, falling back to the XEP-0492
-/// conversation-kind defaults) with the XEP-0513 mention bit derived
-/// directly from the inbound `<message>` payloads. Both inputs flow as
-/// typed values; there are no string-typed payloads on the gate boundary.
-///
-/// `QueueOfflineDelivery` only fires for DM intake
-/// ([`waddle_xmpp::protocol::handlers::offline_delivery::OfflineDeliveryHandler`]
-/// is gated on `Locality::Recipient` + headless pass for `<message
-/// type='chat'>`), so the conversation kind on this path is always
-/// `ConversationKind::Direct`. The shared pure reducer
-/// [`crate::notification_settings_projection::PushDispatchDecision::evaluate`]
-/// is the single decision point — when MUC push fan-out lands it will
-/// reuse the same reducer rather than re-implementing the level matrix.
-async fn evaluate_xep0492_push_dispatch_decision(
-    state: &WebSocketState,
-    recipient: &BareJid,
-    sender: &BareJid,
-    original_message: &Message,
-) -> Result<crate::notification_settings_projection::PushDispatchDecision, ()> {
-    if sender == recipient {
-        // Self-DM: never push to your own offline queue. Per XEP-0492
-        // semantics this is a hard suppression independent of the
-        // configured level; surface it as `Never` to keep the typed log
-        // path uniform.
-        return Ok(
-            crate::notification_settings_projection::PushDispatchDecision::Suppressed {
-                reason: waddle_xmpp::xep::NotificationLevel::Never,
-            },
-        );
-    }
-    let level = match state
-        .deps
-        .protocol
-        .notification_settings_projection
-        .effective_setting(
-            recipient,
-            sender,
-            crate::notification_settings_projection::ConversationKind::Direct,
-        )
-        .await
-    {
-        Ok(level) => level,
-        Err(error) => {
-            warn!(
-                recipient = %recipient,
-                conversation = %sender,
-                error = %error,
-                "XEP-0492 notification setting lookup failed; retrying notification candidate later"
-            );
-            return Err(());
-        }
-    };
-    let is_mention = message_is_mention_for_recipient(original_message, recipient);
-    Ok(crate::notification_settings_projection::PushDispatchDecision::evaluate(level, is_mention))
 }
 
 /// Returns `true` when the inbound XEP-0513 explicit-mention payloads

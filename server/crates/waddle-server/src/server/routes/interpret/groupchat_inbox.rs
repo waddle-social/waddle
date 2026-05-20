@@ -239,26 +239,16 @@ async fn insert_groupchat_notification_candidate(
     thread_id: crate::notification_outbox::NotificationThreadId,
     archive_stanza_id: Xep0359StanzaId,
     is_live_occupant: bool,
+    // `room_members_only` is known message-locally on this T0 path
+    // (the projection event carries it) and is consumed below to
+    // pre-populate the policy cache so the synchronous T0 evaluator
+    // never asks the live `RoomRegistryActor`. Each recipient in a
+    // groupchat fan-out would otherwise produce an actor round-trip,
+    // even though the same bit is already in hand.
     room_members_only: bool,
 ) -> GroupchatNotificationCandidateQueueOutcome {
-    let class = match groupchat_notification_class(
-        state,
-        owner,
-        room,
-        message,
-        is_live_occupant,
-        room_members_only,
-    )
-    .await
-    {
-        GroupchatNotificationClassDecision::Deliver(class) => class,
-        GroupchatNotificationClassDecision::Suppress => {
-            return GroupchatNotificationCandidateQueueOutcome::Completed;
-        }
-        GroupchatNotificationClassDecision::RetryLater => {
-            return GroupchatNotificationCandidateQueueOutcome::RetryLater;
-        }
-    };
+    let GroupchatNotificationClassDecision::Deliver(class) =
+        groupchat_notification_class(state, owner, room, message, is_live_occupant);
     let candidate = match crate::notification_outbox::NotificationCandidate::groupchat(
         owner.clone(),
         room.clone(),
@@ -278,6 +268,77 @@ async fn insert_groupchat_notification_candidate(
             return GroupchatNotificationCandidateQueueOutcome::Completed;
         }
     };
+    // T0 XEP-0492 push-dispatch gate — compliance: suppressed
+    // outcomes leave no row in `notification_candidates`. The same
+    // typed evaluator runs again at T1 inside
+    // `drain_pending_candidates_into_outbox` as a race-window guard.
+    //
+    // Pre-populate the policy cache with the known `room_members_only`
+    // bit so the typed evaluator hits the cache on its first lookup
+    // and never reaches the (unused) `RoomPolicyStore`. This avoids
+    // N actor round-trips for an N-member fan-out — every recipient's
+    // T0 emission already carries the same bit. The `NoopRoomPolicy`
+    // is held only to satisfy the trait-object signature; if the
+    // cache ever misses (it won't, given the pre-insert) it would
+    // surface as `DeferUnknownRoomPolicy` rather than a silent default.
+    let room_policy = crate::notification_outbox::NoopRoomPolicy;
+    let mut room_policy_cache = std::collections::BTreeMap::<
+        BareJid,
+        crate::notification_outbox::RoomPolicyCacheEntry,
+    >::new();
+    room_policy_cache.insert(
+        room.clone(),
+        if room_members_only {
+            crate::notification_outbox::RoomPolicyCacheEntry::Private
+        } else {
+            crate::notification_outbox::RoomPolicyCacheEntry::Public
+        },
+    );
+    let outcome = match crate::notification_outbox::evaluate_xep0492_at_dispatch(
+        state
+            .deps
+            .protocol
+            .notification_settings_projection
+            .as_ref(),
+        &room_policy,
+        &candidate,
+        &mut room_policy_cache,
+    )
+    .await
+    {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            warn!(
+                recipient = %owner,
+                room = %room,
+                error = %error,
+                "ProjectGroupchatInbox: XEP-0492 notification setting lookup failed at T0; deferring candidate"
+            );
+            return GroupchatNotificationCandidateQueueOutcome::RetryLater;
+        }
+    };
+    match outcome {
+        crate::notification_outbox::T1PushDispatchOutcome::Deliver => {}
+        crate::notification_outbox::T1PushDispatchOutcome::Suppressed { reason } => {
+            info!(
+                recipient = %owner,
+                room = %room,
+                class = ?class,
+                %reason,
+                "ProjectGroupchatInbox: XEP-0492 push gate suppressed groupchat candidate at T0; no candidate row persisted"
+            );
+            return GroupchatNotificationCandidateQueueOutcome::Completed;
+        }
+        crate::notification_outbox::T1PushDispatchOutcome::DeferUnknownRoomPolicy => {
+            warn!(
+                recipient = %owner,
+                room = %room,
+                class = ?class,
+                "ProjectGroupchatInbox: MUC config unavailable at T0; deferring groupchat candidate (unknown room policy is not 'public')"
+            );
+            return GroupchatNotificationCandidateQueueOutcome::RetryLater;
+        }
+    }
     match state
         .deps
         .protocol
@@ -454,65 +515,51 @@ async fn mark_recovery_completed_from_state(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum GroupchatNotificationClassDecision {
     Deliver(crate::notification_outbox::NotificationClass),
-    Suppress,
-    RetryLater,
 }
 
-async fn groupchat_notification_class(
+fn groupchat_notification_class(
     state: &WebSocketState,
     owner: &BareJid,
     room: &BareJid,
     message: &Message,
+    // `is_live_occupant` here is **message-time-frozen presence** — the
+    // XMPP room handler computes it at room-dispatch time
+    // (`live_recipient_bares.contains(bare)` in
+    // `waddle_xmpp::protocol::room::inbox`) and propagates it on the
+    // `ProjectGroupchatInbox` event. That makes it a T0 message-frozen
+    // input on the same axis as XEP-0513 `<active/>` (sender intent)
+    // and XEP-0421 occupant-id (sender provenance), NOT a T1 recipient-
+    // state read. Per #506 Q2 the candidate row snapshots message-
+    // intrinsic facts and the T1 evaluator reads fresh recipient
+    // state; encoding the message-time live-occupant bit into the
+    // [`NotificationClass`] taxonomy (`ActiveChannelMention` vs
+    // `ChannelMention`) is the snapshot mechanism here. Slice 2 will
+    // add a richer `notification_activity` projection so the T1
+    // evaluator can additionally consult *current* recipient activity
+    // (XEP-0513 §"active mention" §"the receiving server may filter")
+    // — that augments this T0 snapshot, it does not relocate it.
     is_live_occupant: bool,
-    room_members_only: bool,
 ) -> GroupchatNotificationClassDecision {
-    let conversation_kind = if room_members_only {
-        crate::notification_settings_projection::ConversationKind::PrivateGroup
-    } else {
-        crate::notification_settings_projection::ConversationKind::PublicGroup
-    };
-    let level = match state
-        .deps
-        .protocol
-        .notification_settings_projection
-        .effective_setting(owner, room, conversation_kind)
-        .await
-    {
-        Ok(level) => level,
-        Err(error) => {
-            warn!(
-                recipient = %owner,
-                room = %room,
-                error = %error,
-                "ProjectGroupchatInbox: XEP-0492 setting lookup failed; retrying groupchat push candidate later"
-            );
-            return GroupchatNotificationClassDecision::RetryLater;
-        }
-    };
     let owner_occupant_id =
         waddle_xmpp::xep::generate_occupant_id(owner, room, &state.deps.occupant_id_secret);
     let personal_mention = groupchat_mentions_owner(message, owner, owner_occupant_id.as_str());
     let channel_mention = groupchat_channel_mention_scope(message, room);
-    groupchat_notification_class_for_level(
-        level,
-        personal_mention,
-        channel_mention,
-        is_live_occupant,
-    )
+    groupchat_notification_class_from_message(personal_mention, channel_mention, is_live_occupant)
 }
 
-fn groupchat_notification_class_for_level(
-    level: waddle_xmpp::xep::NotificationLevel,
+/// Message-derived classification of a groupchat notification candidate.
+///
+/// After the T0 → T1 push-decision move (#526 slice 1) the class is a
+/// pure function of the message payloads + scope: there is no
+/// XEP-0492 recipient-state read here. The T1 evaluator at outbox
+/// dispatch time consults the projection store and decides
+/// publish-or-suppress based on the recorded class + recipient's
+/// effective notification level.
+fn groupchat_notification_class_from_message(
     personal_mention: bool,
     channel_mention: Option<GroupchatChannelMentionScope>,
     is_live_occupant: bool,
 ) -> GroupchatNotificationClassDecision {
-    let is_mention = personal_mention || channel_mention.is_some();
-    if !crate::notification_settings_projection::PushDispatchDecision::evaluate(level, is_mention)
-        .should_deliver()
-    {
-        return GroupchatNotificationClassDecision::Suppress;
-    }
     if personal_mention {
         return GroupchatNotificationClassDecision::Deliver(
             crate::notification_outbox::NotificationClass::PersonalMention,
@@ -531,12 +578,9 @@ fn groupchat_notification_class_for_level(
         }
         _ => {}
     }
-    if level == waddle_xmpp::xep::NotificationLevel::Always {
-        return GroupchatNotificationClassDecision::Deliver(
-            crate::notification_outbox::NotificationClass::NotifyAll,
-        );
-    }
-    GroupchatNotificationClassDecision::Suppress
+    GroupchatNotificationClassDecision::Deliver(
+        crate::notification_outbox::NotificationClass::NotifyAll,
+    )
 }
 
 fn groupchat_mentions_owner(message: &Message, owner: &BareJid, owner_occupant_id: &str) -> bool {
@@ -625,62 +669,39 @@ mod tests {
     }
 
     #[test]
-    fn xep0492_groupchat_push_policy_matrix() {
+    fn groupchat_message_classification_matrix() {
         use crate::notification_outbox::NotificationClass;
-        use waddle_xmpp::xep::NotificationLevel;
 
+        // Post-#526 slice 1: the T0 classifier is purely message-derived
+        // (personal mention, channel mention scope, live-occupant gate).
+        // XEP-0492 enforcement lives at T1, exercised separately in the
+        // notification_outbox dispatcher tests.
         let cases = [
             (
-                NotificationLevel::Always,
                 false,
                 None,
                 false,
                 GroupchatNotificationClassDecision::Deliver(NotificationClass::NotifyAll),
             ),
             (
-                NotificationLevel::Always,
                 true,
                 None,
                 false,
                 GroupchatNotificationClassDecision::Deliver(NotificationClass::PersonalMention),
             ),
             (
-                NotificationLevel::Always,
                 false,
                 Some(GroupchatChannelMentionScope::All),
                 false,
                 GroupchatNotificationClassDecision::Deliver(NotificationClass::ChannelMention),
             ),
             (
-                NotificationLevel::Always,
                 false,
                 Some(GroupchatChannelMentionScope::Active),
                 false,
                 GroupchatNotificationClassDecision::Deliver(NotificationClass::NotifyAll),
             ),
             (
-                NotificationLevel::OnMention,
-                false,
-                None,
-                true,
-                GroupchatNotificationClassDecision::Suppress,
-            ),
-            (
-                NotificationLevel::OnMention,
-                true,
-                None,
-                false,
-                GroupchatNotificationClassDecision::Deliver(NotificationClass::PersonalMention),
-            ),
-            (
-                NotificationLevel::OnMention,
-                false,
-                Some(GroupchatChannelMentionScope::All),
-                false,
-                GroupchatNotificationClassDecision::Deliver(NotificationClass::ChannelMention),
-            ),
-            (
-                NotificationLevel::OnMention,
                 false,
                 Some(GroupchatChannelMentionScope::Active),
                 true,
@@ -689,45 +710,23 @@ mod tests {
                 ),
             ),
             (
-                NotificationLevel::OnMention,
-                false,
-                Some(GroupchatChannelMentionScope::Active),
-                false,
-                GroupchatNotificationClassDecision::Suppress,
-            ),
-            (
-                NotificationLevel::Never,
                 true,
-                None,
-                true,
-                GroupchatNotificationClassDecision::Suppress,
-            ),
-            (
-                NotificationLevel::Never,
-                false,
                 Some(GroupchatChannelMentionScope::All),
-                true,
-                GroupchatNotificationClassDecision::Suppress,
-            ),
-            (
-                NotificationLevel::Never,
                 false,
-                None,
-                false,
-                GroupchatNotificationClassDecision::Suppress,
+                // Personal mention wins over channel-wide mention.
+                GroupchatNotificationClassDecision::Deliver(NotificationClass::PersonalMention),
             ),
         ];
 
-        for (level, personal_mention, channel_mention, is_live_occupant, expected) in cases {
+        for (personal_mention, channel_mention, is_live_occupant, expected) in cases {
             assert_eq!(
-                groupchat_notification_class_for_level(
-                    level,
+                groupchat_notification_class_from_message(
                     personal_mention,
                     channel_mention,
                     is_live_occupant,
                 ),
                 expected,
-                "unexpected groupchat XEP-0492 decision for {level:?}, personal_mention={personal_mention}, channel_mention={channel_mention:?}, is_live_occupant={is_live_occupant}"
+                "unexpected groupchat T0 class for personal_mention={personal_mention}, channel_mention={channel_mention:?}, is_live_occupant={is_live_occupant}"
             );
         }
     }
