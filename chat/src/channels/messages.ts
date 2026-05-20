@@ -44,6 +44,7 @@ import { useChannelLiveMerge } from "@/channels/live-merge";
 import { useChannelChatStates } from "@/channels/chat-states";
 import { useChannelReadMarkers } from "@/channels/read-markers";
 import { useChannelMessageSearch } from "@/channels/message-search";
+import { useChatWindowVisibility } from "@/shell/window-visibility";
 
 export function useChannelMessages(
   session: Ref<WaddleSession | null>,
@@ -581,6 +582,15 @@ export function useChannelMessages(
 
   watch(scrollDirection, () => {
     void alignTimelineToPreference();
+  });
+
+  // Browser-tab refocus: re-pin if the user was already at the edge before
+  // switching away. Mirrors the DM-side watcher; see `dms/messages.ts`.
+  const { isWindowFocused } = useChatWindowVisibility();
+  watch(isWindowFocused, (focused, prev) => {
+    if (focused && !prev && pinnedEdgeScroller.isPinnedAtEdge.value) {
+      void scrollToPinnedEdgeAndPin();
+    }
   });
 
   watch(

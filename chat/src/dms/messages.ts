@@ -27,6 +27,7 @@ import { useDmLiveMerge } from "@/dms/live-merge";
 import { useDmChatStates } from "@/dms/chat-states";
 import { useDmReadMarkers } from "@/dms/read-markers";
 import { useDmMessageSearch } from "@/dms/message-search";
+import { useChatWindowVisibility } from "@/shell/window-visibility";
 
 export function useDirectMessages(
   session: Ref<WaddleSession | null>,
@@ -314,6 +315,17 @@ export function useDirectMessages(
 
   watch(scrollDirection, () => {
     void alignTimelineToPreference();
+  });
+
+  // Browser-tab refocus: re-pin if the user was already at the edge before
+  // switching away. New messages that arrived while hidden didn't get a
+  // chance to settle (rAF/RO throttled, virtualizer didn't measure
+  // offscreen rows), so the position drifts away from the latest message.
+  const { isWindowFocused } = useChatWindowVisibility();
+  watch(isWindowFocused, (focused, prev) => {
+    if (focused && !prev && pinnedEdgeScroller.isPinnedAtEdge.value) {
+      void scrollToPinnedEdgeAndPin();
+    }
   });
 
   watch(
