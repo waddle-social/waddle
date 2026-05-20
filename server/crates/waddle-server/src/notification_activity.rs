@@ -490,9 +490,21 @@ impl NotificationActivityStore {
                 updated_at_ms
             ) VALUES (?, ?, ?, ?, NULL, NULL, ?, ?)
             ON CONFLICT (owner_bare_jid, conversation_jid) DO UPDATE SET
-                last_active_at_ms = excluded.last_active_at_ms,
-                last_chat_state = excluded.last_chat_state,
-                updated_at_ms = excluded.updated_at_ms
+                last_active_at_ms = CASE
+                    WHEN excluded.last_active_at_ms > notification_activity.last_active_at_ms
+                    THEN excluded.last_active_at_ms
+                    ELSE notification_activity.last_active_at_ms
+                END,
+                last_chat_state = CASE
+                    WHEN excluded.last_active_at_ms > notification_activity.last_active_at_ms
+                    THEN excluded.last_chat_state
+                    ELSE notification_activity.last_chat_state
+                END,
+                updated_at_ms = CASE
+                    WHEN excluded.updated_at_ms > notification_activity.updated_at_ms
+                    THEN excluded.updated_at_ms
+                    ELSE notification_activity.updated_at_ms
+                END
             "#,
             crate::db_params![
                 owner.to_string(),
@@ -510,7 +522,10 @@ impl NotificationActivityStore {
     /// Record a XEP-0490 read-marker advance as activity for the user
     /// on the named conversation. Updates both `last_read_at_ms` and
     /// `last_active_at_ms` — a read-marker advance is by definition a
-    /// currently-engaged signal.
+    /// currently-engaged signal. Both timestamp columns advance
+    /// monotonically: a late-arriving stale write CANNOT regress
+    /// either column (XEP-0490 read-marker invariant + general
+    /// projection monotonicity under concurrent writers).
     pub async fn record_read_marker(
         &self,
         owner: &BareJid,
@@ -530,9 +545,22 @@ impl NotificationActivityStore {
                 updated_at_ms
             ) VALUES (?, ?, ?, NULL, ?, NULL, ?, ?)
             ON CONFLICT (owner_bare_jid, conversation_jid) DO UPDATE SET
-                last_active_at_ms = excluded.last_active_at_ms,
-                last_read_at_ms = excluded.last_read_at_ms,
-                updated_at_ms = excluded.updated_at_ms
+                last_active_at_ms = CASE
+                    WHEN excluded.last_active_at_ms > notification_activity.last_active_at_ms
+                    THEN excluded.last_active_at_ms
+                    ELSE notification_activity.last_active_at_ms
+                END,
+                last_read_at_ms = CASE
+                    WHEN notification_activity.last_read_at_ms IS NULL THEN excluded.last_read_at_ms
+                    WHEN excluded.last_read_at_ms > notification_activity.last_read_at_ms
+                    THEN excluded.last_read_at_ms
+                    ELSE notification_activity.last_read_at_ms
+                END,
+                updated_at_ms = CASE
+                    WHEN excluded.updated_at_ms > notification_activity.updated_at_ms
+                    THEN excluded.updated_at_ms
+                    ELSE notification_activity.updated_at_ms
+                END
             "#,
             crate::db_params![
                 owner.to_string(),
@@ -569,8 +597,16 @@ impl NotificationActivityStore {
                 updated_at_ms
             ) VALUES (?, ?, ?, NULL, NULL, NULL, ?, ?)
             ON CONFLICT (owner_bare_jid, conversation_jid) DO UPDATE SET
-                last_active_at_ms = excluded.last_active_at_ms,
-                updated_at_ms = excluded.updated_at_ms
+                last_active_at_ms = CASE
+                    WHEN excluded.last_active_at_ms > notification_activity.last_active_at_ms
+                    THEN excluded.last_active_at_ms
+                    ELSE notification_activity.last_active_at_ms
+                END,
+                updated_at_ms = CASE
+                    WHEN excluded.updated_at_ms > notification_activity.updated_at_ms
+                    THEN excluded.updated_at_ms
+                    ELSE notification_activity.updated_at_ms
+                END
             "#,
             crate::db_params![
                 owner.to_string(),
@@ -610,9 +646,21 @@ impl NotificationActivityStore {
                 updated_at_ms
             ) VALUES (?, ?, ?, NULL, NULL, ?, ?, ?)
             ON CONFLICT (owner_bare_jid, conversation_jid) DO UPDATE SET
-                last_active_at_ms = excluded.last_active_at_ms,
-                presence_show = excluded.presence_show,
-                updated_at_ms = excluded.updated_at_ms
+                last_active_at_ms = CASE
+                    WHEN excluded.last_active_at_ms > notification_activity.last_active_at_ms
+                    THEN excluded.last_active_at_ms
+                    ELSE notification_activity.last_active_at_ms
+                END,
+                presence_show = CASE
+                    WHEN excluded.last_active_at_ms > notification_activity.last_active_at_ms
+                    THEN excluded.presence_show
+                    ELSE notification_activity.presence_show
+                END,
+                updated_at_ms = CASE
+                    WHEN excluded.updated_at_ms > notification_activity.updated_at_ms
+                    THEN excluded.updated_at_ms
+                    ELSE notification_activity.updated_at_ms
+                END
             "#,
             crate::db_params![
                 owner.to_string(),
@@ -650,9 +698,21 @@ impl NotificationActivityStore {
                 updated_at_ms
             ) VALUES (?, ?, ?, NULL, NULL, NULL, ?, ?)
             ON CONFLICT (owner_bare_jid, conversation_jid) DO UPDATE SET
-                last_active_at_ms = excluded.last_active_at_ms,
-                presence_show = NULL,
-                updated_at_ms = excluded.updated_at_ms
+                last_active_at_ms = CASE
+                    WHEN excluded.last_active_at_ms > notification_activity.last_active_at_ms
+                    THEN excluded.last_active_at_ms
+                    ELSE notification_activity.last_active_at_ms
+                END,
+                presence_show = CASE
+                    WHEN excluded.last_active_at_ms > notification_activity.last_active_at_ms
+                    THEN NULL
+                    ELSE notification_activity.presence_show
+                END,
+                updated_at_ms = CASE
+                    WHEN excluded.updated_at_ms > notification_activity.updated_at_ms
+                    THEN excluded.updated_at_ms
+                    ELSE notification_activity.updated_at_ms
+                END
             "#,
             crate::db_params![
                 owner.to_string(),
@@ -843,6 +903,47 @@ mod tests {
         );
     }
 
+    /// Monotonic invariant: a stale chat-state write whose `now_ms` is
+    /// older than the projection's stored `last_active_at_ms` MUST NOT
+    /// regress either `last_active_at_ms` or `last_chat_state`. This
+    /// guards against concurrent UPSERT races where a slow writer
+    /// commits AFTER a fresh writer with a smaller event timestamp.
+    #[tokio::test]
+    async fn record_chat_state_does_not_regress_on_stale_write() {
+        let store = store().await;
+        let owner = bare("alice@example.com");
+        let conversation = bare("room@muc.example.com");
+        // Fresh write at t=2000.
+        store
+            .record_chat_state(&owner, &conversation, NotificationChatState::Active, 2_000)
+            .await
+            .expect("fresh chat-state");
+        // Stale write at t=1000 arrives second.
+        store
+            .record_chat_state(
+                &owner,
+                &conversation,
+                NotificationChatState::Inactive,
+                1_000,
+            )
+            .await
+            .expect("stale chat-state");
+        let activity = store
+            .read(&owner, &conversation)
+            .await
+            .expect("read")
+            .expect("row");
+        assert_eq!(
+            activity.last_active_at_ms, 2_000,
+            "stale chat-state MUST NOT regress last_active_at_ms"
+        );
+        assert_eq!(
+            activity.last_chat_state,
+            Some(NotificationChatState::Active),
+            "stale chat-state MUST NOT overwrite the fresh chat-state token"
+        );
+    }
+
     /// XEP-0490 read-marker writes persist `last_read_at_ms` alongside
     /// `last_active_at_ms` and leave other columns untouched.
     #[tokio::test]
@@ -877,6 +978,41 @@ mod tests {
             activity.last_chat_state,
             Some(NotificationChatState::Composing),
             "read-marker MUST NOT overwrite chat-state",
+        );
+    }
+
+    /// XEP-0490 monotonic invariant: a stale read-marker write whose
+    /// `now_ms` is older than the stored `last_read_at_ms` MUST NOT
+    /// regress the marker. XEP-0490 §3 mandates monotonic advance of
+    /// the displayed marker; the projection enforces it at the
+    /// UPSERT layer so out-of-order arrivals (network reorder,
+    /// concurrent writers) cannot violate the wire-level invariant.
+    #[tokio::test]
+    async fn record_read_marker_does_not_regress_on_stale_write() {
+        let store = store().await;
+        let owner = bare("alice@example.com");
+        let conversation = bare("room@muc.example.com");
+        store
+            .record_read_marker(&owner, &conversation, 2_000)
+            .await
+            .expect("fresh marker");
+        store
+            .record_read_marker(&owner, &conversation, 1_000)
+            .await
+            .expect("stale marker");
+        let activity = store
+            .read(&owner, &conversation)
+            .await
+            .expect("read")
+            .expect("row");
+        assert_eq!(
+            activity.last_active_at_ms, 2_000,
+            "stale read-marker MUST NOT regress last_active_at_ms"
+        );
+        assert_eq!(
+            activity.last_read_at_ms,
+            Some(2_000),
+            "stale read-marker MUST NOT regress last_read_at_ms (XEP-0490 monotonicity)"
         );
     }
 
