@@ -90,7 +90,7 @@ pub fn build_direct_archived_message(
     let stanza_id = message
         .id
         .clone()
-        .map(|id| StanzaId::new(id, archive_jid.clone()));
+        .map(|id| StanzaId::new(id.0, archive_jid.clone()));
 
     // Storage shape mirrors the legacy `archive_direct_message`:
     // `id` is the canonical XEP-0359 stamp (the archive's primary
@@ -143,7 +143,7 @@ fn prototype_body(message: &Message) -> Option<String> {
         .bodies
         .get("")
         .or_else(|| message.bodies.values().next())
-        .map(|body| body.0.clone())
+        .cloned()
 }
 
 /// Extract the XEP-0461 `<reply id='X' to='Y'/>` reference from a
@@ -164,7 +164,7 @@ fn extract_reply_reference(message: &Message) -> Option<ArchivedReply> {
         Ok(jid) => Some(jid),
         Err(error) => {
             warn!(
-                message_id = message.id.as_deref().unwrap_or(""),
+                message_id = message.id.as_ref().map(|id| id.0.as_str()).unwrap_or(""),
                 reply_to = raw,
                 %error,
                 "XEP-0461 reply reference: malformed `to` JID dropped, keeping reply id only"
@@ -184,7 +184,7 @@ fn serialize_message_xml(message: &Message) -> Option<String> {
             // typed metadata; warn-log so serializer regressions don't
             // hide behind a silent `None`.
             warn!(
-                message_id = message.id.as_deref().unwrap_or(""),
+                message_id = message.id.as_ref().map(|id| id.0.as_str()).unwrap_or(""),
                 %error,
                 "MAM projection: failed to serialize message XML; storing without stanza_xml"
             );
@@ -206,11 +206,14 @@ fn rich_archive_payload(message: &Message) -> Option<ArchivedRichMessage> {
                         ArchivedRichPayload::Retraction(ArchivedRetraction {
                             target_id,
                             stamp: None,
-                            retraction_id: message.id.clone().and_then(RichMessageId::new),
+                            retraction_id: message
+                                .id
+                                .clone()
+                                .and_then(|id| RichMessageId::new(id.0)),
                         })
                     }),
                 RetractionKind::Tombstone(retracted) => message.id.clone().and_then(|id| {
-                    RichMessageId::new(id).map(|target_id| {
+                    RichMessageId::new(id.0).map(|target_id| {
                         ArchivedRichPayload::Retraction(ArchivedRetraction {
                             target_id,
                             stamp: retracted
@@ -240,7 +243,7 @@ fn rich_archive_payload(message: &Message) -> Option<ArchivedRichMessage> {
         });
 
     let reply = parse_reply_from_message(message).and_then(|reply| {
-        RichMessageId::new(reply.id).map(|id| ArchivedReply { id, to: reply.to })
+        RichMessageId::new(reply.id.as_str()).map(|id| ArchivedReply { id, to: reply.to })
     });
 
     let references = extract_references_from_message(message)

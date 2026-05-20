@@ -106,11 +106,14 @@ pub fn build_legacy_bookmarks_element(bookmarks: &[LegacyBookmark]) -> Element {
 
     for bookmark in bookmarks {
         let mut conf_builder = Element::builder("conference", NS_BOOKMARKS_LEGACY)
-            .attr("jid", &bookmark.jid)
-            .attr("autojoin", if bookmark.autojoin { "true" } else { "false" });
+            .attr(minidom::rxml::xml_ncname!("jid").to_owned(), &bookmark.jid)
+            .attr(
+                minidom::rxml::xml_ncname!("autojoin").to_owned(),
+                if bookmark.autojoin { "true" } else { "false" },
+            );
 
         if let Some(ref name) = bookmark.name {
-            conf_builder = conf_builder.attr("name", name);
+            conf_builder = conf_builder.attr(minidom::rxml::xml_ncname!("name").to_owned(), name);
         }
 
         if let Some(ref nick) = bookmark.nick {

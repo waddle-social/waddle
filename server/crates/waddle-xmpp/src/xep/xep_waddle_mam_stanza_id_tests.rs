@@ -232,7 +232,7 @@ async fn stanza_id_filter_preserves_rich_payload_roundtrip() {
     const SFS_NS: &str = "urn:xmpp:sfs:0";
 
     let encrypted_header = Element::builder("header", OMEMO_AXOLOTL_NS)
-        .attr("sid", "12345")
+        .attr(minidom::rxml::xml_ncname!("sid").to_owned(), "12345")
         .build();
     let encrypted = Element::builder("encrypted", OMEMO_AXOLOTL_NS)
         .append(encrypted_header)
@@ -245,9 +245,12 @@ async fn stanza_id_filter_preserves_rich_payload_roundtrip() {
         .build();
 
     let message = Element::builder("message", CLIENT_NS)
-        .attr("from", "room@conference.example.com/alice")
-        .attr("type", "groupchat")
-        .attr("id", "sid-rich")
+        .attr(
+            minidom::rxml::xml_ncname!("from").to_owned(),
+            "room@conference.example.com/alice",
+        )
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "groupchat")
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), "sid-rich")
         .append(encrypted)
         .append(file_sharing)
         .build();

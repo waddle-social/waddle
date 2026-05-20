@@ -516,13 +516,18 @@ fn build_vevent_element(event: &VEvent) -> Element {
 }
 
 fn build_attendee_element(attendee: &Attendee) -> Element {
-    let mut builder =
-        Element::builder("attendee", NS_XCAL).attr("partstat", attendee.partstat.as_str());
+    let mut builder = Element::builder("attendee", NS_XCAL).attr(
+        minidom::rxml::xml_ncname!("partstat").to_owned(),
+        attendee.partstat.as_str(),
+    );
     if let Some(ref role) = attendee.role {
-        builder = builder.attr("role", role);
+        builder = builder.attr(minidom::rxml::xml_ncname!("role").to_owned(), role);
     }
     if let Some(rsvp) = attendee.rsvp {
-        builder = builder.attr("rsvp", if rsvp { "TRUE" } else { "FALSE" });
+        builder = builder.attr(
+            minidom::rxml::xml_ncname!("rsvp").to_owned(),
+            if rsvp { "TRUE" } else { "FALSE" },
+        );
     }
     let mut elem = builder.build();
     elem.append_text_node(attendee.uri.as_str());
@@ -783,7 +788,7 @@ mod tests {
         // RFC 5545 / xCal-Basic.
         assert!(
             serialised.contains(&format!("xmlns='{NS_XCAL}'"))
-                || serialised.contains(&format!("xmlns=\"{NS_XCAL}\"")),
+                || serialised.contains(&format!("xmlns='{NS_XCAL}'")),
             "xCal namespace must be declared on the root: {serialised}"
         );
         assert!(
@@ -898,7 +903,7 @@ mod tests {
         let vcal = build_vcalendar_with_event(&event);
         let serialised = String::from(&vcal);
         assert!(
-            serialised.contains("partstat=\"ACCEPTED\"")
+            serialised.contains("partstat='ACCEPTED'")
                 || serialised.contains("partstat='ACCEPTED'"),
             "ACCEPTED partstat must appear: {serialised}"
         );

@@ -104,16 +104,20 @@ impl std::error::Error for VCardError {}
 
 /// Check if an IQ is a vCard get request.
 pub fn is_vcard_get(iq: &Iq) -> bool {
-    match &iq.payload {
-        xmpp_parsers::iq::IqType::Get(elem) => elem.name() == "vCard" && elem.ns() == NS_VCARD,
+    match iq {
+        xmpp_parsers::iq::Iq::Get { payload: elem, .. } => {
+            elem.name() == "vCard" && elem.ns() == NS_VCARD
+        }
         _ => false,
     }
 }
 
 /// Check if an IQ is a vCard set request.
 pub fn is_vcard_set(iq: &Iq) -> bool {
-    match &iq.payload {
-        xmpp_parsers::iq::IqType::Set(elem) => elem.name() == "vCard" && elem.ns() == NS_VCARD,
+    match iq {
+        xmpp_parsers::iq::Iq::Set { payload: elem, .. } => {
+            elem.name() == "vCard" && elem.ns() == NS_VCARD
+        }
         _ => false,
     }
 }
@@ -122,8 +126,8 @@ pub fn is_vcard_set(iq: &Iq) -> bool {
 ///
 /// Returns the parsed VCard data for storage.
 pub fn parse_vcard_from_iq(iq: &Iq) -> Result<VCard, VCardError> {
-    let elem = match &iq.payload {
-        xmpp_parsers::iq::IqType::Set(elem) => {
+    let elem = match iq {
+        xmpp_parsers::iq::Iq::Set { payload: elem, .. } => {
             if elem.name() == "vCard" && elem.ns() == NS_VCARD {
                 elem
             } else {
@@ -397,11 +401,11 @@ pub fn build_vcard_element(vcard: &VCard) -> Element {
 pub fn build_vcard_response(original_iq: &Iq, vcard: &VCard) -> Iq {
     let vcard_elem = build_vcard_element(vcard);
 
-    Iq {
-        from: original_iq.to.clone(),
-        to: original_iq.from.clone(),
-        id: original_iq.id.clone(),
-        payload: xmpp_parsers::iq::IqType::Result(Some(vcard_elem)),
+    Iq::Result {
+        from: original_iq.to().cloned(),
+        to: original_iq.from().cloned(),
+        id: original_iq.id().to_string(),
+        payload: Some(vcard_elem),
     }
 }
 
@@ -410,21 +414,21 @@ pub fn build_empty_vcard_response(original_iq: &Iq) -> Iq {
     // Return an empty vCard element for not-found case
     let vcard_elem = Element::builder("vCard", NS_VCARD).build();
 
-    Iq {
-        from: original_iq.to.clone(),
-        to: original_iq.from.clone(),
-        id: original_iq.id.clone(),
-        payload: xmpp_parsers::iq::IqType::Result(Some(vcard_elem)),
+    Iq::Result {
+        from: original_iq.to().cloned(),
+        to: original_iq.from().cloned(),
+        id: original_iq.id().to_string(),
+        payload: Some(vcard_elem),
     }
 }
 
 /// Build a vCard set success response (empty result).
 pub fn build_vcard_success(original_iq: &Iq) -> Iq {
-    Iq {
-        from: original_iq.to.clone(),
-        to: original_iq.from.clone(),
-        id: original_iq.id.clone(),
-        payload: xmpp_parsers::iq::IqType::Result(None),
+    Iq::Result {
+        from: original_iq.to().cloned(),
+        to: original_iq.from().cloned(),
+        id: original_iq.id().to_string(),
+        payload: None,
     }
 }
 

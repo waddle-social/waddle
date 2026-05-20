@@ -90,8 +90,8 @@ async fn driver_resolves_iq_result_to_oneshot() {
     task.pending_iqs.insert("req-1".to_string(), iq_tx);
 
     let result_el = Element::builder("iq", crate::NS_CLIENT)
-        .attr("type", "result")
-        .attr("id", "req-1")
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "result")
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), "req-1")
         .build();
 
     task.dispatch_client_event(ClientEvent::IqResult {
@@ -116,11 +116,11 @@ async fn driver_resolves_iq_error_to_oneshot() {
     task.pending_iqs.insert("req-1".to_string(), iq_tx);
 
     let error_el = Element::builder("iq", crate::NS_CLIENT)
-        .attr("type", "error")
-        .attr("id", "req-1")
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "error")
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), "req-1")
         .append(
             Element::builder("error", crate::NS_CLIENT)
-                .attr("type", "cancel")
+                .attr(minidom::rxml::xml_ncname!("type").to_owned(), "cancel")
                 .append(
                     Element::builder("not-found", "urn:ietf:params:xml:ns:xmpp-stanzas").build(),
                 )
@@ -149,8 +149,8 @@ async fn driver_ignores_iq_with_unknown_id() {
 
     // No pending IQ — dispatch should silently drop the event.
     let result_el = Element::builder("iq", crate::NS_CLIENT)
-        .attr("type", "result")
-        .attr("id", "unknown")
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "result")
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), "unknown")
         .build();
 
     task.dispatch_client_event(ClientEvent::IqResult {
@@ -175,8 +175,8 @@ async fn send_iq_resolves_via_mock_driver() {
     };
 
     let iq = Element::builder("iq", crate::NS_CLIENT)
-        .attr("type", "get")
-        .attr("id", "test-1")
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "get")
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), "test-1")
         .build();
 
     // Mock driver: read one command and immediately respond.
@@ -187,8 +187,8 @@ async fn send_iq_resolves_via_mock_driver() {
         }) = cmd_rx.recv().await
         {
             let reply = Element::builder("iq", crate::NS_CLIENT)
-                .attr("type", "result")
-                .attr("id", "test-1")
+                .attr(minidom::rxml::xml_ncname!("type").to_owned(), "result")
+                .attr(minidom::rxml::xml_ncname!("id").to_owned(), "test-1")
                 .build();
             let _ = responder.send(Ok(reply));
         }
@@ -662,14 +662,18 @@ fn post_auth_features() -> Element {
 fn post_auth_features_with_sm() -> Element {
     Element::builder("features", NS_STREAMS)
         .append(Element::builder("bind", NS_BIND).build())
-        .append(Element::builder("sm", NS_SM).attr("resume", "true").build())
+        .append(
+            Element::builder("sm", NS_SM)
+                .attr(minidom::rxml::xml_ncname!("resume").to_owned(), "true")
+                .build(),
+        )
         .build()
 }
 
 fn bind_result(stanza_id: &str) -> Element {
     Element::builder("iq", crate::NS_CLIENT)
-        .attr("id", stanza_id)
-        .attr("type", "result")
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), stanza_id)
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "result")
         .append(
             Element::builder("bind", NS_BIND)
                 .append(
@@ -684,8 +688,8 @@ fn bind_result(stanza_id: &str) -> Element {
 
 fn message_stanza(stanza_id: &str) -> Element {
     Element::builder("message", crate::NS_CLIENT)
-        .attr("id", stanza_id)
-        .attr("type", "chat")
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), stanza_id)
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "chat")
         .append(
             Element::builder("body", crate::NS_CLIENT)
                 .append("queued")
@@ -696,21 +700,21 @@ fn message_stanza(stanza_id: &str) -> Element {
 
 fn resumed(previd: &str, h: u32) -> Element {
     Element::builder("resumed", NS_SM)
-        .attr("previd", previd)
-        .attr("h", h.to_string())
+        .attr(minidom::rxml::xml_ncname!("previd").to_owned(), previd)
+        .attr(minidom::rxml::xml_ncname!("h").to_owned(), h.to_string())
         .build()
 }
 
 fn failed_sm(h: u32) -> Element {
     Element::builder("failed", NS_SM)
-        .attr("h", h.to_string())
+        .attr(minidom::rxml::xml_ncname!("h").to_owned(), h.to_string())
         .build()
 }
 
 fn enabled_sm(previd: &str) -> Element {
     Element::builder("enabled", NS_SM)
-        .attr("resume", "true")
-        .attr("id", previd)
+        .attr(minidom::rxml::xml_ncname!("resume").to_owned(), "true")
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), previd)
         .build()
 }
 

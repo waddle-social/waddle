@@ -131,12 +131,18 @@ pub fn parse_inbox_fin(iq: &Element) -> Option<InboxFin> {
 /// them explicitly so the wire form is unambiguous on the receiver.
 pub fn build_inbox_query_iq_element(id: &str, unread_only: bool, messages: bool) -> Element {
     let inbox = Element::builder("inbox", NS_INBOX)
-        .attr("unread-only", if unread_only { "true" } else { "false" })
-        .attr("messages", if messages { "true" } else { "false" })
+        .attr(
+            minidom::rxml::xml_ncname!("unread-only").to_owned(),
+            if unread_only { "true" } else { "false" },
+        )
+        .attr(
+            minidom::rxml::xml_ncname!("messages").to_owned(),
+            if messages { "true" } else { "false" },
+        )
         .build();
     Element::builder("iq", "jabber:client")
-        .attr("type", "get")
-        .attr("id", id)
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "get")
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), id)
         .append(inbox)
         .build()
 }

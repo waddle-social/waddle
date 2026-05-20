@@ -12,7 +12,7 @@
 use jid::{BareJid, Jid};
 use minidom::Element;
 use tracing::{debug, instrument};
-use xmpp_parsers::iq::{Iq, IqType};
+use xmpp_parsers::iq::Iq;
 
 use crate::types::{Affiliation, Role};
 use crate::XmppError;
@@ -27,30 +27,30 @@ pub const NS_MUC_OWNER: &str = "http://jabber.org/protocol/muc#owner";
 ///
 /// Returns true if the IQ is a 'get' request to the muc#admin namespace.
 pub fn is_muc_admin_get(iq: &Iq) -> bool {
-    matches!(&iq.payload, IqType::Get(elem) if elem.is("query", NS_MUC_ADMIN))
+    matches!(iq, Iq::Get { payload: elem, .. } if elem.is("query", NS_MUC_ADMIN))
 }
 
 /// Check if an IQ is a MUC admin set (modify affiliations/roles).
 ///
 /// Returns true if the IQ is a 'set' request to the muc#admin namespace.
 pub fn is_muc_admin_set(iq: &Iq) -> bool {
-    matches!(&iq.payload, IqType::Set(elem) if elem.is("query", NS_MUC_ADMIN))
+    matches!(iq, Iq::Set { payload: elem, .. } if elem.is("query", NS_MUC_ADMIN))
 }
 
 /// Check if an IQ is a MUC owner query (get room config).
 pub fn is_muc_owner_get(iq: &Iq) -> bool {
-    matches!(&iq.payload, IqType::Get(elem) if elem.is("query", NS_MUC_OWNER))
+    matches!(iq, Iq::Get { payload: elem, .. } if elem.is("query", NS_MUC_OWNER))
 }
 
 /// Check if an IQ is a MUC owner set (set room config or destroy).
 pub fn is_muc_owner_set(iq: &Iq) -> bool {
-    matches!(&iq.payload, IqType::Set(elem) if elem.is("query", NS_MUC_OWNER))
+    matches!(iq, Iq::Set { payload: elem, .. } if elem.is("query", NS_MUC_OWNER))
 }
 
 /// Check if an IQ is directed at a MUC room (for routing purposes).
 pub fn is_muc_admin_iq(iq: &Iq, muc_domain: &str) -> bool {
     // Check if the 'to' JID is in the MUC domain
-    let to_jid = match &iq.to {
+    let to_jid = match iq.to() {
         Some(jid) => jid,
         None => return false,
     };
@@ -97,12 +97,11 @@ pub struct AdminItem {
 ///
 /// Extracts the room JID, items to query/modify, and determines
 /// whether this is a get or set operation.
-#[instrument(skip(iq), fields(iq_id = %iq.id))]
+#[instrument(skip(iq), fields(iq_id = %iq.id()))]
 pub fn parse_admin_query(iq: &Iq, muc_domain: &str) -> Result<AdminQuery, XmppError> {
     // Get the room JID from the 'to' attribute
     let room_jid = iq
-        .to
-        .as_ref()
+        .to()
         .ok_or_else(|| XmppError::bad_request(Some("Missing 'to' attribute".into())))?
         .to_bare();
 
@@ -116,14 +115,14 @@ pub fn parse_admin_query(iq: &Iq, muc_domain: &str) -> Result<AdminQuery, XmppEr
 
     // Get the sender's JID
     let from = iq
-        .from
-        .clone()
+        .from()
+        .cloned()
         .ok_or_else(|| XmppError::bad_request(Some("Missing 'from' attribute".into())))?;
 
     // Determine if this is a get or set request
-    let (is_get, query_elem) = match &iq.payload {
-        IqType::Get(elem) => (true, elem),
-        IqType::Set(elem) => (false, elem),
+    let (is_get, query_elem) = match iq {
+        Iq::Get { payload: elem, .. } => (true, elem),
+        Iq::Set { payload: elem, .. } => (false, elem),
         _ => {
             return Err(XmppError::bad_request(Some(
                 "Expected get or set IQ".into(),
@@ -143,7 +142,7 @@ pub fn parse_admin_query(iq: &Iq, muc_domain: &str) -> Result<AdminQuery, XmppEr
 
     Ok(AdminQuery {
         room_jid,
-        iq_id: iq.id.clone(),
+        iq_id: iq.id().to_string(),
         from,
         items,
         is_get,
@@ -245,27 +244,33 @@ pub fn build_admin_result(
 
     for (jid, affiliation) in items {
         let item = Element::builder("item", NS_MUC_ADMIN)
-            .attr("jid", jid.to_string())
-            .attr("affiliation", affiliation_to_str(*affiliation))
+            .attr(
+                minidom::rxml::xml_ncname!("jid").to_owned(),
+                jid.to_string(),
+            )
+            .attr(
+                minidom::rxml::xml_ncname!("affiliation").to_owned(),
+                affiliation_to_str(*affiliation),
+            )
             .build();
         query = query.append(item);
     }
 
-    Iq {
+    Iq::Result {
         from: Some(Jid::from(from_room_jid.clone())),
         to: Some(to_jid.clone()),
         id: iq_id.to_string(),
-        payload: IqType::Result(Some(query.build())),
+        payload: Some(query.build()),
     }
 }
 
 /// Build an empty admin set result (success).
 pub fn build_admin_set_result(iq_id: &str, from_room_jid: &BareJid, to_jid: &Jid) -> Iq {
-    Iq {
+    Iq::Result {
         from: Some(Jid::from(from_room_jid.clone())),
         to: Some(to_jid.clone()),
         id: iq_id.to_string(),
-        payload: IqType::Result(None),
+        payload: None,
     }
 }
 
@@ -338,21 +343,25 @@ pub fn build_role_result(
 
     for (nick, role, jid) in items {
         let mut item_builder = Element::builder("item", NS_MUC_ADMIN)
-            .attr("nick", nick.as_str())
-            .attr("role", role_to_str(*role));
+            .attr(minidom::rxml::xml_ncname!("nick").to_owned(), nick.as_str())
+            .attr(
+                minidom::rxml::xml_ncname!("role").to_owned(),
+                role_to_str(*role),
+            );
 
         if let Some(j) = jid {
-            item_builder = item_builder.attr("jid", j.to_string());
+            item_builder =
+                item_builder.attr(minidom::rxml::xml_ncname!("jid").to_owned(), j.to_string());
         }
 
         query = query.append(item_builder.build());
     }
 
-    Iq {
+    Iq::Result {
         from: Some(Jid::from(from_room_jid.clone())),
         to: Some(to_jid.clone()),
         id: iq_id.to_string(),
-        payload: IqType::Result(Some(query.build())),
+        payload: Some(query.build()),
     }
 }
 

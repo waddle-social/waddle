@@ -35,7 +35,6 @@ pub mod extdisco;
 pub mod framework_envelope;
 pub mod inbox;
 pub mod jingle;
-pub mod muc_call;
 pub mod offline_delivery;
 pub mod ping;
 pub mod receipts;
@@ -48,7 +47,7 @@ pub mod version;
 
 use super::dispatch::StanzaDispatcher;
 use std::sync::Arc;
-use xmpp_parsers::iq::{Iq, IqType};
+use xmpp_parsers::iq::Iq;
 
 /// Register every sync IQ handler that has been migrated so far.
 ///
@@ -75,13 +74,19 @@ pub fn register_call_handlers(
     turn_tls_port: u16,
     turn_udp_port: u16,
 ) {
+    // JingleHandler claims `urn:xmpp:jingle:1` and handles BOTH the
+    // 1:1 P2P forwarding flow (XEP-0166 + XEP-0353 JMI) and the
+    // SFU-focus flow for MUC group calls — a `<jingle/>` carrying a
+    // `<muji xmlns='urn:xmpp:jingle:muji:0'/>` child (XEP-0272) is
+    // routed internally to the focus branch which mints a LiveKit
+    // token and replies with a session-accept + COIN isfocus
+    // marker.
     dispatcher.register_iq(Arc::new(jingle::JingleHandler::new(sfu.clone())));
     dispatcher.register_iq(Arc::new(extdisco::ExtDiscoHandler::new(
-        sfu.clone(),
+        sfu,
         turn_tls_port,
         turn_udp_port,
     )));
-    dispatcher.register_iq(Arc::new(muc_call::MucCallHandler::new(sfu)));
 }
 
 /// Register the full message-pipeline handler chain in the order
@@ -138,10 +143,10 @@ pub fn register_default_message_handlers(dispatcher: &mut StanzaDispatcher) {
 /// Used by handlers that need to acknowledge an IQ-set with no payload
 /// (XEP-0199 ping, RFC 3921 session establishment, and several others).
 pub(crate) fn empty_iq_result(original: &Iq) -> Iq {
-    Iq {
-        from: original.to.clone(),
-        to: original.from.clone(),
-        id: original.id.clone(),
-        payload: IqType::Result(None),
+    Iq::Result {
+        from: original.to().cloned(),
+        to: original.from().cloned(),
+        id: original.id().to_string(),
+        payload: None,
     }
 }

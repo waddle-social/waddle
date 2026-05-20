@@ -10,25 +10,17 @@ pub(super) fn build_xmpp_error_response(
             error_type,
             text,
         } => waddle_xmpp::generate_iq_error(
-            &request_iq.id,
-            request_iq
-                .from
-                .as_ref()
-                .map(|jid| jid.to_string())
-                .as_deref(),
-            request_iq.to.as_ref().map(|jid| jid.to_string()).as_deref(),
+            request_iq.id(),
+            request_iq.from().map(|jid| jid.to_string()).as_deref(),
+            request_iq.to().map(|jid| jid.to_string()).as_deref(),
             condition,
             error_type,
             text.as_deref(),
         ),
         other => waddle_xmpp::generate_iq_error(
-            &request_iq.id,
-            request_iq
-                .from
-                .as_ref()
-                .map(|jid| jid.to_string())
-                .as_deref(),
-            request_iq.to.as_ref().map(|jid| jid.to_string()).as_deref(),
+            request_iq.id(),
+            request_iq.from().map(|jid| jid.to_string()).as_deref(),
+            request_iq.to().map(|jid| jid.to_string()).as_deref(),
             StanzaErrorCondition::InternalServerError,
             StanzaErrorType::Wait,
             Some(&other.to_string()),

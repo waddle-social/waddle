@@ -136,7 +136,7 @@ fn build_room_error_reply(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use xmpp_parsers::message::{Body, Message, MessageType};
+    use xmpp_parsers::message::{Message, MessageType};
 
     fn bare(s: &str) -> BareJid {
         s.parse().expect("valid bare jid")
@@ -149,7 +149,8 @@ mod tests {
         let mut m = Message::new(Some(Jid::from(room.clone())));
         m.from = Some(Jid::from(sender.clone()));
         m.type_ = MessageType::Groupchat;
-        m.bodies.insert(String::new(), Body(body.to_string()));
+        m.bodies
+            .insert(xmpp_parsers::message::Lang::new(), body.to_string());
         m
     }
 
@@ -256,7 +257,7 @@ mod tests {
             "original payloads must survive into the error reply",
         );
         assert_eq!(
-            reply.bodies.get("").map(|b| b.0.as_str()),
+            reply.bodies.get("").map(|b| b.as_str()),
             Some("correlation body"),
             "original body must survive into the error reply",
         );

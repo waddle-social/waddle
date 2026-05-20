@@ -1,5 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from "vue";
+import { useStore } from "@nanostores/vue";
+import { $mucCallParticipants } from "@/lib/calls/muc-call-presence";
 import HomeDashboard from "@/components/chat/HomeDashboard.vue";
 import ThreadsView from "@/components/chat/ThreadsView.vue";
 import FeedPane from "@/components/community/FeedPane.vue";
@@ -135,6 +137,22 @@ const homeDashboardProps = computed(() => buildHomeDashboardProps({
   activeChannelJids: messaging.activeChannels.value,
   dmConversations: dmConversations.conversations.value,
 }));
+
+/**
+ * XEP-0272 Muji participant counts keyed by room JID. Derived from
+ * the per-room nick list so the sidebar badge updates as occupants
+ * join and leave the call without any extra round-trip. Computed
+ * once here and threaded through TopicsPanel so per-row lookups
+ * stay O(1).
+ */
+const mucCallParticipantsStore = useStore($mucCallParticipants);
+const callParticipantCounts = computed<Record<string, number>>(() => {
+  const counts: Record<string, number> = {};
+  for (const [jid, nicks] of Object.entries(mucCallParticipantsStore.value)) {
+    counts[jid] = nicks.length;
+  }
+  return counts;
+});
 
 const contentPaneClass = computed(() => {
   if (ui.sidebarMode.value !== "channels") return "";
@@ -288,6 +306,7 @@ onUnmounted(() => {
           :active-channel-jids="messaging.activeChannels.value"
           :collapsed-group-ids="ui.collapsedSpaceGroupIds.value"
           :channel-unread-map="computedChannelUnreadMap"
+          :call-participant-counts="callParticipantCounts"
           :thread-entries-fn="(roomJid: string) => channelUnread.threadEntries(roomJid)"
           :active-community-surface="ui.activeCommunitySurface.value"
           :stories-active-count="stories.activeStories.value.length"

@@ -43,10 +43,14 @@ pub(super) fn parse_presence(el: &Element) -> InboundPresence {
         .map(|photo| photo.text())
         .filter(|hash| !hash.is_empty());
 
-    let muc_call = el.get_child("call", NS_WADDLE_MUC_CALL).and_then(|call| {
-        let state = call.attr("state").and_then(MucCallPresenceState::parse)?;
-        let call_id = call.attr("call-id")?.to_string();
-        Some(MucCallPresence { state, call_id })
+    // XEP-0272 Muji presence: `<muji xmlns='urn:xmpp:jingle:muji:0'/>`
+    // with optional `<preparing/>` and/or `<content/>` children.
+    // Active = has at least one `<content/>` (XEP-0272 §Joining).
+    // Absent = the occupant has left the call (XEP-0272 §Leaving).
+    let muji = el.get_child("muji", NS_MUJI).map(|muji_el| {
+        let preparing = muji_el.children().any(|c| c.name() == "preparing");
+        let active = muji_el.children().any(|c| c.name() == "content");
+        MujiPresence { preparing, active }
     });
 
     InboundPresence {
@@ -60,7 +64,7 @@ pub(super) fn parse_presence(el: &Element) -> InboundPresence {
         muc_role,
         muc_jid,
         vcard_avatar,
-        muc_call,
+        muji,
     }
 }
 
@@ -69,43 +73,52 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_muc_call_extension_active() {
+    fn parses_muji_active_with_content() {
         let xml = r#"<presence xmlns="jabber:client" from="room@muc.test/alice">
-            <call xmlns="urn:waddle:muc-call:0" state="active" call-id="room@muc.test"/>
+            <muji xmlns="urn:xmpp:jingle:muji:0">
+                <content creator="initiator" name="audio">
+                    <description xmlns="urn:xmpp:jingle:apps:rtp:1" media="audio"/>
+                </content>
+            </muji>
         </presence>"#;
         let elem: Element = xml.parse().unwrap();
         let p = parse_presence(&elem);
-        let call = p.muc_call.expect("call extension parsed");
-        assert_eq!(call.state, MucCallPresenceState::Active);
-        assert_eq!(call.call_id, "room@muc.test");
+        let muji = p.muji.expect("muji extension parsed");
+        assert!(muji.active);
+        assert!(!muji.preparing);
     }
 
     #[test]
-    fn parses_muc_call_extension_inactive() {
+    fn parses_muji_preparing_phase() {
         let xml = r#"<presence xmlns="jabber:client" from="room@muc.test/alice">
-            <call xmlns="urn:waddle:muc-call:0" state="inactive" call-id="room@muc.test"/>
+            <muji xmlns="urn:xmpp:jingle:muji:0"><preparing/></muji>
         </presence>"#;
         let elem: Element = xml.parse().unwrap();
         let p = parse_presence(&elem);
-        assert_eq!(p.muc_call.unwrap().state, MucCallPresenceState::Inactive);
+        let muji = p.muji.expect("preparing muji parsed");
+        assert!(muji.preparing);
+        assert!(
+            !muji.active,
+            "preparing-only muji is not yet active (XEP-0272 §Joining two-phase flow)"
+        );
     }
 
     #[test]
-    fn missing_extension_yields_none() {
+    fn missing_muji_yields_none() {
+        // XEP-0272 §Leaving — the absence of the `<muji/>` element is
+        // itself the leave marker; the parser surfaces this as `None`.
         let xml = r#"<presence xmlns="jabber:client" from="room@muc.test/alice"/>"#;
         let elem: Element = xml.parse().unwrap();
         let p = parse_presence(&elem);
-        assert!(p.muc_call.is_none());
+        assert!(p.muji.is_none());
     }
 
     #[test]
-    fn malformed_state_is_dropped() {
-        // No `state` attr → extension parser returns None, so the
-        // whole field stays None. Permissive parsing as documented.
+    fn wrong_namespace_is_ignored() {
         let xml = r#"<presence xmlns="jabber:client" from="room@muc.test/alice">
-            <call xmlns="urn:waddle:muc-call:0" call-id="room@muc.test"/>
+            <muji xmlns="urn:waddle:not-muji"/>
         </presence>"#;
         let elem: Element = xml.parse().unwrap();
-        assert!(parse_presence(&elem).muc_call.is_none());
+        assert!(parse_presence(&elem).muji.is_none());
     }
 }

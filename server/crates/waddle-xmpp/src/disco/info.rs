@@ -61,14 +61,13 @@ pub fn server_features() -> Vec<Feature> {
 /// [`crate::protocol::handlers::extdisco`], and the typed XEP
 /// modules under `crate::xep`.
 pub fn call_features() -> Vec<Feature> {
-    // `Feature::waddle_muc_call()` is advertised once
-    // `register_call_handlers` has wired the `MucCallHandler` IQ
-    // surface — that handler is the backing behavior for the
-    // namespace (mints per-room join tokens, registers participants
-    // in the SFU registry, and unwinds via request-leave). The
-    // `<call xmlns='urn:waddle:muc-call:0'/>` presence extension is
-    // a permissive marker that flows through the MUC presence
-    // pipeline unchanged; chat-side parsers ignore malformed shapes.
+    // `Feature::muji()` (XEP-0272) is advertised once the Jingle
+    // dispatcher has been wired to accept session-initiate stanzas
+    // addressed to the mixer JID and carrying `<muji room='…'/>` —
+    // see [`crate::protocol::handlers::jingle`]. The presence-side
+    // `<muji/>` shape flows through the MUC presence pipeline
+    // unchanged; the room actor stores typed Muji elements per
+    // occupant (`MucRoom::muji_state`) and re-broadcasts them.
     vec![
         Feature::jingle(),
         Feature::jingle_rtp(),
@@ -77,7 +76,7 @@ pub fn call_features() -> Vec<Feature> {
         Feature::jingle_message(),
         Feature::ext_disco(),
         Feature::waddle_livekit_transport(),
-        Feature::waddle_muc_call(),
+        Feature::muji(),
     ]
 }
 
@@ -110,7 +109,7 @@ mod tests {
             "urn:xmpp:jingle-message:0",
             "urn:xmpp:extdisco:2",
             "urn:waddle:transports:livekit:0",
-            "urn:waddle:muc-call:0",
+            "urn:xmpp:jingle:muji:0",
         ];
         assert_eq!(features.len(), expected.len());
         for ns in expected {
@@ -122,12 +121,13 @@ mod tests {
     }
 
     #[test]
-    fn call_features_advertises_muc_call_with_backing_handler() {
-        // urn:waddle:muc-call:0 IQ surface is implemented by
-        // `MucCallHandler` (request-join / request-leave). Advertising
-        // it is now correct per the CLAUDE.md rule "advertised feature
-        // must have testable backing behavior."
+    fn call_features_advertises_muji_with_backing_handler() {
+        // XEP-0272's `urn:xmpp:jingle:muji:0` IQ surface is
+        // implemented as a Muji branch in the Jingle dispatcher
+        // (session-initiate to mixer JID + `<muji room='…'/>`).
+        // Advertising it is correct per the CLAUDE.md rule
+        // "advertised feature must have testable backing behavior."
         let features = call_features();
-        assert!(features.contains(&Feature::waddle_muc_call()));
+        assert!(features.contains(&Feature::muji()));
     }
 }

@@ -65,8 +65,8 @@ pub fn build_fetch_threads_iq(
     }
 
     Element::builder("iq", NS_CLIENT)
-        .attr("type", "get")
-        .attr("id", request_id)
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "get")
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), request_id)
         .append(query)
         .build()
 }

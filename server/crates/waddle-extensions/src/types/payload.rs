@@ -142,7 +142,15 @@ impl XmlElement {
         let mut builder = Element::builder(self.local_name.as_str(), self.namespace.as_str());
         for attr in &self.attributes {
             debug_assert!(attr.namespace.is_none());
-            builder = builder.attr(attr.local_name.as_str(), attr.value.as_str());
+            // Extension payload attribute names are validated at
+            // `XmlAttribute::new` time; they are therefore well-formed
+            // NcNames and the conversion below is infallible.
+            let name: minidom::rxml::NcName = attr
+                .local_name
+                .as_str()
+                .try_into()
+                .expect("XmlAttribute local_name is a validated NcName");
+            builder = builder.attr(name, attr.value.as_str());
         }
         for child in &self.children {
             builder = match child {
@@ -186,10 +194,11 @@ impl XmlElement {
         let namespace = PayloadNamespace::new(element.ns())?;
         let attributes = element
             .attrs()
-            .map(|(name, value)| XmlAttribute {
+            .iter()
+            .map(|((_ns, name), value)| XmlAttribute {
                 namespace: None,
-                local_name: name.to_string(),
-                value: value.to_string(),
+                local_name: name.as_str().to_string(),
+                value: value.clone(),
             })
             .collect::<Vec<_>>();
         let mut children = Vec::with_capacity(element.nodes().count());

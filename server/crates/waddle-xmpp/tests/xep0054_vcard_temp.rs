@@ -21,7 +21,7 @@
 use minidom::Element;
 use waddle_xmpp::disco::{server_features, Feature};
 use waddle_xmpp::xep::xep0054::{build_vcard_success, is_vcard_get, is_vcard_set, NS_VCARD};
-use xmpp_parsers::iq::{Iq, IqType};
+use xmpp_parsers::iq::Iq;
 
 // ── §3 namespace ─────────────────────────────────────────────────────
 
@@ -67,11 +67,11 @@ fn vcard_payload() -> Element {
 fn xep0054_is_vcard_get_accepts_spec_shape() {
     // XEP-0054 §3.1: client retrieves its own vCard via
     //   <iq type='get'><vCard xmlns='vcard-temp'/></iq>
-    let iq = Iq {
+    let iq = Iq::Get {
         from: None,
         to: None,
         id: "v1".into(),
-        payload: IqType::Get(vcard_payload()),
+        payload: vcard_payload(),
     };
     assert!(is_vcard_get(&iq));
     assert!(!is_vcard_set(&iq));
@@ -80,11 +80,11 @@ fn xep0054_is_vcard_get_accepts_spec_shape() {
 #[test]
 fn xep0054_is_vcard_get_rejects_wrong_iq_type() {
     // A set with the same payload is the §3.2 update path, not get.
-    let iq = Iq {
+    let iq = Iq::Set {
         from: None,
         to: None,
         id: "v2".into(),
-        payload: IqType::Set(vcard_payload()),
+        payload: vcard_payload(),
     };
     assert!(!is_vcard_get(&iq));
     assert!(is_vcard_set(&iq));
@@ -95,11 +95,11 @@ fn xep0054_classifier_rejects_wrong_payload_namespace() {
     // Wrong-ns `vCard` (e.g. an attacker putting an XEP-0054-shaped
     // element under a different namespace to confuse the routing).
     let elem = Element::builder("vCard", "wrong:namespace").build();
-    let iq = Iq {
+    let iq = Iq::Get {
         from: None,
         to: None,
         id: "v3".into(),
-        payload: IqType::Get(elem),
+        payload: elem,
     };
     assert!(!is_vcard_get(&iq));
     assert!(!is_vcard_set(&iq));
@@ -110,11 +110,11 @@ fn xep0054_classifier_rejects_wrong_payload_element_name() {
     // Right ns, wrong local name (a `<query/>` in `vcard-temp` is
     // not the spec-defined element — XEP-0054 §3 uses `<vCard/>`).
     let elem = Element::builder("query", NS_VCARD).build();
-    let iq = Iq {
+    let iq = Iq::Get {
         from: None,
         to: None,
         id: "v4".into(),
-        payload: IqType::Get(elem),
+        payload: elem,
     };
     assert!(!is_vcard_get(&iq));
     assert!(!is_vcard_set(&iq));
@@ -124,11 +124,11 @@ fn xep0054_classifier_rejects_wrong_payload_element_name() {
 fn xep0054_classifier_rejects_iq_result_and_error_types() {
     // Only `type=get` / `type=set` are request shapes per §3; result
     // and error stanzas must not be misclassified as requests.
-    let result_iq = Iq {
+    let result_iq = Iq::Result {
         from: None,
         to: None,
         id: "v5".into(),
-        payload: IqType::Result(Some(vcard_payload())),
+        payload: Some(vcard_payload()),
     };
     assert!(!is_vcard_get(&result_iq));
     assert!(!is_vcard_set(&result_iq));
@@ -142,7 +142,7 @@ fn xep0054_build_vcard_success_is_empty_result_iq() {
     // empty IQ result that echoes the request id, swaps from/to.
     // Anything else (e.g. embedding the stored vCard) would violate
     // the spec's "MUST" minimal-acknowledgement requirement.
-    let request = Iq {
+    let request = Iq::Set {
         from: Some(
             "alice@example.com/web"
                 .parse()
@@ -150,25 +150,28 @@ fn xep0054_build_vcard_success_is_empty_result_iq() {
         ),
         to: Some("server.example.com".parse().expect("valid bare jid for to")),
         id: "set-vcard-1".into(),
-        payload: IqType::Set(vcard_payload()),
+        payload: vcard_payload(),
     };
 
     let response = build_vcard_success(&request);
 
     assert_eq!(
-        response.id, "set-vcard-1",
+        response.id(),
+        "set-vcard-1",
         "result MUST echo the request id (RFC 6120 §8.2.3)"
     );
     assert_eq!(
-        response.from, request.to,
+        response.from(),
+        request.to(),
         "result from = request to (origin-flip)"
     );
     assert_eq!(
-        response.to, request.from,
+        response.to(),
+        request.from(),
         "result to = request from (origin-flip)"
     );
     assert!(
-        matches!(response.payload, IqType::Result(None)),
+        matches!(response, Iq::Result { payload: None, .. }),
         "XEP-0054 §3.2 acknowledgement carries no payload"
     );
 }

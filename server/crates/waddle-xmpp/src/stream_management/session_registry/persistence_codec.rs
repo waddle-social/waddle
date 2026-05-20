@@ -55,10 +55,10 @@ pub(super) fn parse_xml_to_persisted_unacked(
             xmpp_parsers::message::Message::try_from(element)
                 .map_err(|e| SmRegistryError::Internal(e.to_string()))?,
         ),
-        "iq" => crate::Stanza::Iq(
+        "iq" => crate::Stanza::Iq(Box::new(
             xmpp_parsers::iq::Iq::try_from(element)
                 .map_err(|e| SmRegistryError::Internal(e.to_string()))?,
-        ),
+        )),
         "presence" => crate::Stanza::Presence(
             xmpp_parsers::presence::Presence::try_from(element)
                 .map_err(|e| SmRegistryError::Internal(e.to_string()))?,
@@ -101,7 +101,7 @@ pub(super) fn persisted_to_detached(
         .map(|row| {
             let element: minidom::Element = match &*row.stanza {
                 crate::Stanza::Message(m) => m.clone().into(),
-                crate::Stanza::Iq(iq) => iq.clone().into(),
+                crate::Stanza::Iq(iq) => (**iq).clone().into(),
                 crate::Stanza::Presence(p) => p.clone().into(),
             };
             let mut buf = Vec::new();

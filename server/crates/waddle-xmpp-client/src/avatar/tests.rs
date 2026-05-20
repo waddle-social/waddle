@@ -2,53 +2,59 @@ use super::*;
 
 fn make_metadata_iq(id: &str, mime: &str) -> Element {
     let info = Element::builder("info", NS_AVATAR_METADATA)
-        .attr("id", id)
-        .attr("type", mime)
-        .attr("bytes", "42")
-        .attr("width", "64")
-        .attr("height", "64")
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), id)
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), mime)
+        .attr(minidom::rxml::xml_ncname!("bytes").to_owned(), "42")
+        .attr(minidom::rxml::xml_ncname!("width").to_owned(), "64")
+        .attr(minidom::rxml::xml_ncname!("height").to_owned(), "64")
         .build();
     let metadata = Element::builder("metadata", NS_AVATAR_METADATA)
         .append(info)
         .build();
     let item = Element::builder("item", NS_PUBSUB)
-        .attr("id", id)
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), id)
         .append(metadata)
         .build();
     let items = Element::builder("items", NS_PUBSUB)
-        .attr("node", NS_AVATAR_METADATA)
+        .attr(
+            minidom::rxml::xml_ncname!("node").to_owned(),
+            NS_AVATAR_METADATA,
+        )
         .append(item)
         .build();
     let pubsub = Element::builder("pubsub", NS_PUBSUB).append(items).build();
     Element::builder("iq", NS_CLIENT)
-        .attr("type", "result")
-        .attr("id", "abc")
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "result")
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), "abc")
         .append(pubsub)
         .build()
 }
 
 fn make_metadata_url_iq(id: &str, mime: &str, url: &str) -> Element {
     let info = Element::builder("info", NS_AVATAR_METADATA)
-        .attr("id", id)
-        .attr("type", mime)
-        .attr("bytes", "42")
-        .attr("url", url)
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), id)
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), mime)
+        .attr(minidom::rxml::xml_ncname!("bytes").to_owned(), "42")
+        .attr(minidom::rxml::xml_ncname!("url").to_owned(), url)
         .build();
     let metadata = Element::builder("metadata", NS_AVATAR_METADATA)
         .append(info)
         .build();
     let item = Element::builder("item", NS_PUBSUB)
-        .attr("id", id)
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), id)
         .append(metadata)
         .build();
     let items = Element::builder("items", NS_PUBSUB)
-        .attr("node", NS_AVATAR_METADATA)
+        .attr(
+            minidom::rxml::xml_ncname!("node").to_owned(),
+            NS_AVATAR_METADATA,
+        )
         .append(item)
         .build();
     let pubsub = Element::builder("pubsub", NS_PUBSUB).append(items).build();
     Element::builder("iq", NS_CLIENT)
-        .attr("type", "result")
-        .attr("id", "abc")
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "result")
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), "abc")
         .append(pubsub)
         .build()
 }
@@ -58,17 +64,20 @@ fn make_data_iq(id: &str, base64_data: &str) -> Element {
         .append(minidom::Node::Text(base64_data.to_string()))
         .build();
     let item = Element::builder("item", NS_PUBSUB)
-        .attr("id", id)
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), id)
         .append(data)
         .build();
     let items = Element::builder("items", NS_PUBSUB)
-        .attr("node", NS_AVATAR_DATA)
+        .attr(
+            minidom::rxml::xml_ncname!("node").to_owned(),
+            NS_AVATAR_DATA,
+        )
         .append(item)
         .build();
     let pubsub = Element::builder("pubsub", NS_PUBSUB).append(items).build();
     Element::builder("iq", NS_CLIENT)
-        .attr("type", "result")
-        .attr("id", "abc")
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "result")
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), "abc")
         .append(pubsub)
         .build()
 }
@@ -86,8 +95,8 @@ fn make_vcard_binval_iq(mime: &str, base64_data: &str) -> Element {
         .append(photo)
         .build();
     Element::builder("iq", NS_CLIENT)
-        .attr("type", "result")
-        .attr("id", "abc")
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "result")
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), "abc")
         .append(vcard)
         .build()
 }
@@ -104,8 +113,8 @@ fn make_vcard_extval_iq(url: &str) -> Element {
         .append(photo)
         .build();
     Element::builder("iq", NS_CLIENT)
-        .attr("type", "result")
-        .attr("id", "abc")
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "result")
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), "abc")
         .append(vcard)
         .build()
 }
@@ -132,14 +141,17 @@ fn parse_metadata_extracts_url() {
 #[test]
 fn parse_metadata_returns_none_without_info() {
     let empty_items = Element::builder("items", NS_PUBSUB)
-        .attr("node", NS_AVATAR_METADATA)
+        .attr(
+            minidom::rxml::xml_ncname!("node").to_owned(),
+            NS_AVATAR_METADATA,
+        )
         .build();
     let pubsub = Element::builder("pubsub", NS_PUBSUB)
         .append(empty_items)
         .build();
     let iq = Element::builder("iq", NS_CLIENT)
-        .attr("type", "result")
-        .attr("id", "x")
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "result")
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), "x")
         .append(pubsub)
         .build();
     assert!(parse_metadata_response(&iq).is_none());
@@ -148,7 +160,10 @@ fn parse_metadata_returns_none_without_info() {
 #[test]
 fn parse_metadata_rejects_wrong_node() {
     let items = Element::builder("items", NS_PUBSUB)
-        .attr("node", "some:other:node")
+        .attr(
+            minidom::rxml::xml_ncname!("node").to_owned(),
+            "some:other:node",
+        )
         .build();
     let pubsub = Element::builder("pubsub", NS_PUBSUB).append(items).build();
     let iq = Element::builder("iq", NS_CLIENT).append(pubsub).build();

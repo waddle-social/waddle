@@ -3869,9 +3869,18 @@ fn decode_outbox_job(row: &Row) -> Result<NotificationOutboxJob, NotificationOut
 
 fn build_waddle_context(candidate: &NotificationCandidate) -> Element {
     Element::builder("context", WADDLE_PUSH_CONTEXT_NS)
-        .attr("conversation", candidate.conversation_jid.to_string())
-        .attr("thread", candidate.thread_id.as_str())
-        .attr("class", candidate.class.as_db_value())
+        .attr(
+            minidom::rxml::xml_ncname!("conversation").to_owned(),
+            candidate.conversation_jid.to_string(),
+        )
+        .attr(
+            minidom::rxml::xml_ncname!("thread").to_owned(),
+            candidate.thread_id.as_str(),
+        )
+        .attr(
+            minidom::rxml::xml_ncname!("class").to_owned(),
+            candidate.class.as_db_value(),
+        )
         .build()
 }
 
@@ -3884,7 +3893,7 @@ pub fn build_xep0357_notification_payload(message_count: u32, context: &Element)
 
 fn build_xep0357_summary_form(message_count: u32) -> Element {
     Element::builder("x", NS_DATA_FORMS)
-        .attr("type", "result")
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "result")
         .append(xdata_hidden_field("FORM_TYPE", XEP0357_SUMMARY_FORM_TYPE))
         .append(xdata_field("message-count", &message_count.to_string()))
         .build()
@@ -3892,8 +3901,8 @@ fn build_xep0357_summary_form(message_count: u32) -> Element {
 
 fn xdata_hidden_field(var: &str, value: &str) -> Element {
     Element::builder("field", NS_DATA_FORMS)
-        .attr("var", var)
-        .attr("type", "hidden")
+        .attr(minidom::rxml::xml_ncname!("var").to_owned(), var)
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "hidden")
         .append(
             Element::builder("value", NS_DATA_FORMS)
                 .append(value)
@@ -3904,7 +3913,7 @@ fn xdata_hidden_field(var: &str, value: &str) -> Element {
 
 fn xdata_field(var: &str, value: &str) -> Element {
     Element::builder("field", NS_DATA_FORMS)
-        .attr("var", var)
+        .attr(minidom::rxml::xml_ncname!("var").to_owned(), var)
         .append(
             Element::builder("value", NS_DATA_FORMS)
                 .append(value)
@@ -6691,9 +6700,12 @@ mod tests {
     #[test]
     fn xep0357_payload_uses_summary_form_and_waddle_context_only() {
         let context = Element::builder("context", WADDLE_PUSH_CONTEXT_NS)
-            .attr("conversation", "bob@example.com")
-            .attr("thread", "")
-            .attr("class", "dm")
+            .attr(
+                minidom::rxml::xml_ncname!("conversation").to_owned(),
+                "bob@example.com",
+            )
+            .attr(minidom::rxml::xml_ncname!("thread").to_owned(), "")
+            .attr(minidom::rxml::xml_ncname!("class").to_owned(), "dm")
             .build();
         let payload = build_xep0357_notification_payload(3, &context);
 

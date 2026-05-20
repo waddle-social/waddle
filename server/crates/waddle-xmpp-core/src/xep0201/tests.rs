@@ -41,7 +41,7 @@ fn explicit_empty_namespace_thread_is_not_stanza_thread() {
     let xml = Element::builder("message", "jabber:client")
         .append(
             Element::builder(THREAD_ELEMENT, "")
-                .attr("parent", "root-1")
+                .attr(minidom::rxml::xml_ncname!("parent").to_owned(), "root-1")
                 .append("not-stanza-thread")
                 .build(),
         )
@@ -138,7 +138,7 @@ fn install_thread_element_preserves_explicit_empty_namespace_thread_payload() {
     let mut xml = Element::builder("message", "jabber:client")
         .append(
             Element::builder(THREAD_ELEMENT, "")
-                .attr("kind", "extension")
+                .attr(minidom::rxml::xml_ncname!("kind").to_owned(), "extension")
                 .append("keep me")
                 .build(),
         )
@@ -191,7 +191,7 @@ fn thread_info_from_message_recovers_parent_from_payload_form() {
     let mut msg = Message::new(None::<jid::Jid>);
     msg.payloads.push(
         Element::builder(THREAD_ELEMENT, "jabber:client")
-            .attr("parent", "root-1")
+            .attr(minidom::rxml::xml_ncname!("parent").to_owned(), "root-1")
             .append("child-2")
             .build(),
     );
@@ -220,7 +220,7 @@ fn thread_info_from_message_payload_takes_precedence_over_typed_field() {
     set_thread_id(&mut msg, "stale-id");
     msg.payloads.push(
         Element::builder(THREAD_ELEMENT, "jabber:client")
-            .attr("parent", "root-1")
+            .attr(minidom::rxml::xml_ncname!("parent").to_owned(), "root-1")
             .append("authoritative-id")
             .build(),
     );
@@ -235,7 +235,10 @@ fn thread_info_from_message_ignores_empty_namespace_payload() {
     set_thread_id(&mut msg, "typed-thread");
     msg.payloads.push(
         Element::builder(THREAD_ELEMENT, "")
-            .attr("parent", "foreign-root")
+            .attr(
+                minidom::rxml::xml_ncname!("parent").to_owned(),
+                "foreign-root",
+            )
             .append("foreign-thread")
             .build(),
     );
@@ -251,7 +254,10 @@ fn thread_info_from_message_ignores_wrong_stanza_namespace_payload() {
     set_thread_id(&mut msg, "typed-thread");
     msg.payloads.push(
         Element::builder(THREAD_ELEMENT, SERVER_STANZA_NS)
-            .attr("parent", "foreign-root")
+            .attr(
+                minidom::rxml::xml_ncname!("parent").to_owned(),
+                "foreign-root",
+            )
             .append("foreign-thread")
             .build(),
     );
@@ -266,7 +272,10 @@ fn thread_info_from_message_can_read_server_stanza_namespace() {
     let mut msg = Message::new(None::<jid::Jid>);
     msg.payloads.push(
         Element::builder(THREAD_ELEMENT, SERVER_STANZA_NS)
-            .attr("parent", "server-root")
+            .attr(
+                minidom::rxml::xml_ncname!("parent").to_owned(),
+                "server-root",
+            )
             .append("server-child")
             .build(),
     );
@@ -298,7 +307,7 @@ fn thread_info_from_message_payload_with_empty_id_is_rejected() {
     let mut msg = Message::new(None::<jid::Jid>);
     msg.payloads.push(
         Element::builder(THREAD_ELEMENT, "jabber:client")
-            .attr("parent", "root-1")
+            .attr(minidom::rxml::xml_ncname!("parent").to_owned(), "root-1")
             .build(),
     );
     assert_eq!(thread_info_from_message(&msg), None);

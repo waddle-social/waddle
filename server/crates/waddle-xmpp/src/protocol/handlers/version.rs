@@ -10,7 +10,7 @@ use crate::protocol::event::{OutboundEvent, StanzaContext};
 use crate::protocol::traits::IqHandler;
 use crate::xep::xep0092::{build_version_response, is_version_query, SoftwareVersion, NS_VERSION};
 use crate::Stanza;
-use xmpp_parsers::iq::{Iq, IqType};
+use xmpp_parsers::iq::Iq;
 use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
 
 /// Handler for `jabber:iq:version` (XEP-0092).
@@ -32,8 +32,7 @@ impl IqHandler for VersionHandler {
         }
 
         if iq
-            .to
-            .as_ref()
+            .to()
             .is_some_and(|target| target.to_bare().as_str() != ctx.domain)
         {
             return vec![send_iq(build_version_error(
@@ -54,15 +53,16 @@ impl IqHandler for VersionHandler {
 }
 
 fn send_iq(iq: Iq) -> OutboundEvent {
-    OutboundEvent::SendStanza(Box::new(Stanza::Iq(iq)))
+    OutboundEvent::SendStanza(Box::new(Stanza::Iq(Box::new(iq))))
 }
 
 fn build_version_error(iq: &Iq, error_type: ErrorType, condition: DefinedCondition) -> Iq {
-    Iq {
-        from: iq.to.clone(),
-        to: iq.from.clone(),
-        id: iq.id.clone(),
-        payload: IqType::Error(StanzaError::new(error_type, condition, "en", "")),
+    Iq::Error {
+        from: iq.to().cloned(),
+        to: iq.from().cloned(),
+        id: iq.id().to_string(),
+        error: StanzaError::new(error_type, condition, "en", ""),
+        payload: None,
     }
 }
 
@@ -79,7 +79,7 @@ mod tests {
     use super::*;
     use minidom::Element;
     use std::sync::Mutex;
-    use xmpp_parsers::iq::{Iq, IqType};
+    use xmpp_parsers::iq::Iq;
 
     // Serializes tests that mutate version env vars so they don't race each other.
     static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -138,11 +138,11 @@ mod tests {
         std::env::set_var("WADDLE_GIT_SHA", "  deadbeef1234567890abcdef  ");
 
         let query = Element::builder("query", NS_VERSION).build();
-        let iq = Iq {
+        let iq = Iq::Get {
             from: Some("alice@waddle.social/web".parse().expect("valid jid")),
             to: Some("waddle.social".parse().expect("valid jid")),
             id: "v1".to_string(),
-            payload: IqType::Get(query),
+            payload: query,
         };
         let jid = test_ctx_jid();
         let ctx = StanzaContext {
@@ -156,17 +156,21 @@ mod tests {
         match &events[0] {
             OutboundEvent::SendStanza(stanza) => match stanza.as_ref() {
                 Stanza::Iq(reply) => {
-                    assert_eq!(reply.id, "v1");
+                    assert_eq!(reply.id(), "v1");
                     assert_eq!(
-                        reply.from.as_ref().map(|jid| jid.to_string()),
+                        reply.from().map(|jid| jid.to_string()),
                         Some("waddle.social".to_string())
                     );
                     assert_eq!(
-                        reply.to.as_ref().map(|jid| jid.to_string()),
+                        reply.to().map(|jid| jid.to_string()),
                         Some("alice@waddle.social/web".to_string())
                     );
-                    let IqType::Result(Some(payload)) = &reply.payload else {
-                        panic!("expected version result payload, got {:?}", reply.payload);
+                    let Iq::Result {
+                        payload: Some(payload),
+                        ..
+                    } = reply.as_ref()
+                    else {
+                        panic!("expected version result payload, got {reply:?}");
                     };
                     assert_eq!(payload.name(), "query");
                     assert_eq!(payload.ns(), NS_VERSION);
@@ -188,11 +192,11 @@ mod tests {
         std::env::remove_var("WADDLE_GIT_SHA");
 
         let query = Element::builder("query", NS_VERSION).build();
-        let iq = Iq {
+        let iq = Iq::Get {
             from: Some("alice@waddle.social/web".parse().expect("valid jid")),
             to: Some("waddle.social".parse().expect("valid jid")),
             id: "v2".to_string(),
-            payload: IqType::Get(query),
+            payload: query,
         };
         let jid = test_ctx_jid();
         let ctx = StanzaContext {
@@ -206,7 +210,11 @@ mod tests {
         match &events[0] {
             OutboundEvent::SendStanza(stanza) => match stanza.as_ref() {
                 Stanza::Iq(reply) => {
-                    let IqType::Result(Some(payload)) = &reply.payload else {
+                    let Iq::Result {
+                        payload: Some(payload),
+                        ..
+                    } = reply.as_ref()
+                    else {
                         panic!("expected version result payload");
                     };
                     let version = payload.get_child("version", NS_VERSION).expect("version");
@@ -221,11 +229,11 @@ mod tests {
     #[test]
     fn version_query_rejects_non_get_iq() {
         let query = Element::builder("query", NS_VERSION).build();
-        let iq = Iq {
+        let iq = Iq::Set {
             from: Some("alice@waddle.social/web".parse().expect("valid jid")),
             to: Some("waddle.social".parse().expect("valid jid")),
             id: "v4".to_string(),
-            payload: IqType::Set(query),
+            payload: query,
         };
         let jid = test_ctx_jid();
         let ctx = StanzaContext {
@@ -236,8 +244,8 @@ mod tests {
         let events = VersionHandler.handle(&iq, &ctx);
         let reply = reply_iq(&events);
 
-        assert_eq!(reply.id, "v4");
-        let IqType::Error(error) = &reply.payload else {
+        assert_eq!(reply.id(), "v4");
+        let Iq::Error { error, .. } = reply else {
             panic!("expected version error payload");
         };
         assert_eq!(error.type_, ErrorType::Modify);
@@ -247,11 +255,11 @@ mod tests {
     #[test]
     fn version_query_rejects_non_server_target() {
         let query = Element::builder("query", NS_VERSION).build();
-        let iq = Iq {
+        let iq = Iq::Get {
             from: Some("alice@waddle.social/web".parse().expect("valid jid")),
             to: Some("alice@waddle.social".parse().expect("valid jid")),
             id: "v5".to_string(),
-            payload: IqType::Get(query),
+            payload: query,
         };
         let jid = test_ctx_jid();
         let ctx = StanzaContext {
@@ -262,8 +270,8 @@ mod tests {
         let events = VersionHandler.handle(&iq, &ctx);
         let reply = reply_iq(&events);
 
-        assert_eq!(reply.id, "v5");
-        let IqType::Error(error) = &reply.payload else {
+        assert_eq!(reply.id(), "v5");
+        let Iq::Error { error, .. } = reply else {
             panic!("expected version error payload");
         };
         assert_eq!(error.type_, ErrorType::Cancel);

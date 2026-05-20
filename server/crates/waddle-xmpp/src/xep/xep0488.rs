@@ -37,7 +37,7 @@
 
 use minidom::Element;
 use thiserror::Error;
-use xmpp_parsers::iq::{Iq, IqType};
+use xmpp_parsers::iq::Iq;
 use xmpp_parsers::message::Message;
 
 /// Namespace for XEP-0488 MUC Token Invite.
@@ -120,8 +120,7 @@ pub fn is_invite_element(elem: &Element) -> bool {
 
 /// Check if an IQ is an invite token request.
 pub fn is_invite_request(iq: &Iq) -> bool {
-    matches!(&iq.payload, IqType::Set(elem)
-        if elem.name() == "request" && elem.ns() == NS_MUC_TOKEN_INVITE)
+    matches!(iq, Iq::Set { payload: elem, .. } if elem.name() == "request" && elem.ns() == NS_MUC_TOKEN_INVITE)
 }
 
 /// Check if a message contains an invite token.
@@ -135,17 +134,16 @@ pub fn has_invite_in_message(msg: &Message) -> bool {
 
 /// Extract an invite token from an IQ result.
 pub fn extract_invite_from_iq(iq: &Iq) -> Option<InviteToken> {
-    let elem = match &iq.payload {
-        IqType::Result(Some(elem))
-            if elem.name() == "invite" && elem.ns() == NS_MUC_TOKEN_INVITE =>
-        {
-            elem
-        }
+    let elem = match iq {
+        Iq::Result {
+            payload: Some(elem),
+            ..
+        } if elem.name() == "invite" && elem.ns() == NS_MUC_TOKEN_INVITE => elem,
         _ => return None,
     };
 
     let token = elem.attr("token").filter(|t| !t.is_empty())?.to_owned();
-    let room_jid = iq.from.as_ref().map(|j| j.to_string());
+    let room_jid = iq.from().map(|j| j.to_string());
 
     Some(InviteToken { token, room_jid })
 }
@@ -171,32 +169,32 @@ pub fn extract_invite_from_message(msg: &Message) -> Option<InviteToken> {
 /// Build an invite token request IQ.
 pub fn build_invite_request(to_room: jid::Jid, id: &str) -> Iq {
     let request_elem = Element::builder("request", NS_MUC_TOKEN_INVITE).build();
-    Iq {
+    Iq::Set {
         from: None,
         to: Some(to_room),
         id: id.to_owned(),
-        payload: IqType::Set(request_elem),
+        payload: request_elem,
     }
 }
 
 /// Build an invite token response IQ.
 pub fn build_invite_response(original_iq: &Iq, token: &str) -> Iq {
     let invite_elem = Element::builder("invite", NS_MUC_TOKEN_INVITE)
-        .attr("token", token)
+        .attr(minidom::rxml::xml_ncname!("token").to_owned(), token)
         .build();
-    Iq {
-        from: original_iq.to.clone(),
-        to: original_iq.from.clone(),
-        id: original_iq.id.clone(),
-        payload: IqType::Result(Some(invite_elem)),
+    Iq::Result {
+        from: original_iq.to().cloned(),
+        to: original_iq.from().cloned(),
+        id: original_iq.id().to_string(),
+        payload: Some(invite_elem),
     }
 }
 
 /// Build an invite element for inclusion in a message.
 pub fn build_invite_message_element(token: &str, room_jid: &str) -> Element {
     Element::builder("invite", NS_MUC_TOKEN_INVITE)
-        .attr("token", token)
-        .attr("jid", room_jid)
+        .attr(minidom::rxml::xml_ncname!("token").to_owned(), token)
+        .attr(minidom::rxml::xml_ncname!("jid").to_owned(), room_jid)
         .build()
 }
 
@@ -213,8 +211,8 @@ pub fn build_invite_share_message(
     msg.from = from.into();
     msg.type_ = xmpp_parsers::message::MessageType::Chat;
     msg.bodies.insert(
-        String::new(),
-        xmpp_parsers::message::Body(format!("You've been invited to join: {uri}")),
+        xmpp_parsers::message::Lang::new(),
+        format!("You've been invited to join: {uri}"),
     );
     msg.payloads
         .push(build_invite_message_element(&token.token, room_jid));
@@ -250,11 +248,11 @@ mod tests {
     #[test]
     fn test_is_invite_request_false() {
         let elem = Element::builder("query", "jabber:iq:roster").build();
-        let iq = Iq {
+        let iq = Iq::Set {
             from: None,
             to: None,
             id: "inv-2".to_owned(),
-            payload: IqType::Set(elem),
+            payload: elem,
         };
         assert!(!is_invite_request(&iq));
     }

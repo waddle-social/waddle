@@ -79,19 +79,25 @@ pub(crate) struct JsFeedEntryInput {
 
 fn build_feed_items_iq(spaces_jid: &str, max_items: Option<u32>) -> Element {
     let id = format!("feed-items-{}", Uuid::new_v4());
-    let mut items_builder = Element::builder("items", NS_PUBSUB).attr("node", PUBSUB_NODE_FEED);
+    let mut items_builder = Element::builder("items", NS_PUBSUB).attr(
+        minidom::rxml::xml_ncname!("node").to_owned(),
+        PUBSUB_NODE_FEED,
+    );
     let max_items_value;
     if let Some(max) = max_items {
         max_items_value = max.to_string();
-        items_builder = items_builder.attr("max_items", max_items_value.as_str());
+        items_builder = items_builder.attr(
+            minidom::rxml::xml_ncname!("max_items").to_owned(),
+            max_items_value.as_str(),
+        );
     }
     let pubsub = Element::builder("pubsub", NS_PUBSUB)
         .append(items_builder.build())
         .build();
     Element::builder("iq", NS_CLIENT)
-        .attr("type", "get")
-        .attr("id", id)
-        .attr("to", spaces_jid)
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "get")
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), id)
+        .attr(minidom::rxml::xml_ncname!("to").to_owned(), spaces_jid)
         .append(pubsub)
         .build()
 }
@@ -99,20 +105,23 @@ fn build_feed_items_iq(spaces_jid: &str, max_items: Option<u32>) -> Element {
 fn build_feed_publish_iq(spaces_jid: &str, item_id: &str, entry: &FeedEntry) -> Element {
     let id = format!("feed-publish-{}", Uuid::new_v4());
     let item = Element::builder("item", NS_PUBSUB)
-        .attr("id", item_id)
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), item_id)
         .append(build_feed_entry_element(entry))
         .build();
     let publish = Element::builder("publish", NS_PUBSUB)
-        .attr("node", PUBSUB_NODE_FEED)
+        .attr(
+            minidom::rxml::xml_ncname!("node").to_owned(),
+            PUBSUB_NODE_FEED,
+        )
         .append(item)
         .build();
     let pubsub = Element::builder("pubsub", NS_PUBSUB)
         .append(publish)
         .build();
     Element::builder("iq", NS_CLIENT)
-        .attr("type", "set")
-        .attr("id", id)
-        .attr("to", spaces_jid)
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "set")
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), id)
+        .attr(minidom::rxml::xml_ncname!("to").to_owned(), spaces_jid)
         .append(pubsub)
         .build()
 }

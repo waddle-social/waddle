@@ -52,7 +52,7 @@ mod tests {
     use crate::types::{Affiliation, Role};
     use crate::xep::xep0421::OccupantIdSecret;
     use jid::{BareJid, FullJid};
-    use xmpp_parsers::message::{Body, Message, MessageType};
+    use xmpp_parsers::message::{Message, MessageType};
 
     fn full(s: &str) -> FullJid {
         s.parse().expect("valid full jid")
@@ -112,8 +112,10 @@ mod tests {
     fn make_groupchat() -> Message {
         let mut m = Message::new(None::<jid::Jid>);
         m.type_ = MessageType::Groupchat;
-        m.bodies
-            .insert(String::new(), Body("hi everyone".to_string()));
+        m.bodies.insert(
+            xmpp_parsers::message::Lang::new(),
+            "hi everyone".to_string(),
+        );
         m
     }
 

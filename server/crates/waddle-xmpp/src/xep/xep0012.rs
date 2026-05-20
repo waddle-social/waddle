@@ -14,14 +14,14 @@
 //! Advertises `jabber:iq:last` as a feature in disco#info responses.
 
 use minidom::Element;
-use xmpp_parsers::iq::{Iq, IqType};
+use xmpp_parsers::iq::Iq;
 
 /// Namespace for XEP-0012 Last Activity.
 pub const NS_LAST_ACTIVITY: &str = "jabber:iq:last";
 
 /// Check if an IQ stanza is a last activity query (XEP-0012).
 pub fn is_last_activity_query(iq: &Iq) -> bool {
-    matches!(&iq.payload, IqType::Get(elem) if elem.name() == "query" && elem.ns() == NS_LAST_ACTIVITY)
+    matches!(iq, Iq::Get { payload: elem, .. } if elem.name() == "query" && elem.ns() == NS_LAST_ACTIVITY)
 }
 
 /// Build a last activity result IQ.
@@ -32,18 +32,21 @@ pub fn is_last_activity_query(iq: &Iq) -> bool {
 /// * `status` - Optional status text (e.g., last unavailable presence status).
 pub fn build_last_activity_response(original_iq: &Iq, seconds: u64, status: Option<&str>) -> Iq {
     let mut query = Element::builder("query", NS_LAST_ACTIVITY)
-        .attr("seconds", seconds.to_string())
+        .attr(
+            minidom::rxml::xml_ncname!("seconds").to_owned(),
+            seconds.to_string(),
+        )
         .build();
 
     if let Some(text) = status {
         query.append_text_node(text);
     }
 
-    Iq {
-        from: original_iq.to.clone(),
-        to: original_iq.from.clone(),
-        id: original_iq.id.clone(),
-        payload: IqType::Result(Some(query)),
+    Iq::Result {
+        from: original_iq.to().cloned(),
+        to: original_iq.from().cloned(),
+        id: original_iq.id().to_string(),
+        payload: Some(query),
     }
 }
 
@@ -54,11 +57,11 @@ mod tests {
     #[test]
     fn test_is_last_activity_query() {
         let query_elem = Element::builder("query", NS_LAST_ACTIVITY).build();
-        let iq = Iq {
+        let iq = Iq::Get {
             from: Some("alice@example.com".parse().unwrap()),
             to: Some("bob@example.com".parse().unwrap()),
             id: "last-1".to_string(),
-            payload: IqType::Get(query_elem),
+            payload: query_elem,
         };
 
         assert!(is_last_activity_query(&iq));
@@ -67,11 +70,11 @@ mod tests {
     #[test]
     fn test_is_last_activity_query_false_for_other_ns() {
         let other_elem = Element::builder("query", "jabber:iq:roster").build();
-        let iq = Iq {
+        let iq = Iq::Get {
             from: None,
             to: None,
             id: "last-2".to_string(),
-            payload: IqType::Get(other_elem),
+            payload: other_elem,
         };
 
         assert!(!is_last_activity_query(&iq));
@@ -80,11 +83,11 @@ mod tests {
     #[test]
     fn test_is_last_activity_query_false_for_set() {
         let query_elem = Element::builder("query", NS_LAST_ACTIVITY).build();
-        let iq = Iq {
+        let iq = Iq::Set {
             from: None,
             to: None,
             id: "last-3".to_string(),
-            payload: IqType::Set(query_elem),
+            payload: query_elem,
         };
 
         assert!(!is_last_activity_query(&iq));
@@ -93,20 +96,24 @@ mod tests {
     #[test]
     fn test_build_last_activity_response_server_uptime() {
         let query_elem = Element::builder("query", NS_LAST_ACTIVITY).build();
-        let iq = Iq {
+        let iq = Iq::Get {
             from: Some("alice@example.com".parse().unwrap()),
             to: Some("example.com".parse().unwrap()),
             id: "last-4".to_string(),
-            payload: IqType::Get(query_elem),
+            payload: query_elem,
         };
 
         let result = build_last_activity_response(&iq, 3600, None);
 
-        assert_eq!(result.id, "last-4");
-        assert_eq!(result.from, iq.to);
-        assert_eq!(result.to, iq.from);
+        assert_eq!(result.id(), "last-4");
+        assert_eq!(result.from(), iq.to());
+        assert_eq!(result.to(), iq.from());
 
-        if let IqType::Result(Some(elem)) = &result.payload {
+        if let Iq::Result {
+            payload: Some(elem),
+            ..
+        } = &result
+        {
             assert_eq!(elem.name(), "query");
             assert_eq!(elem.ns(), NS_LAST_ACTIVITY);
             assert_eq!(elem.attr("seconds"), Some("3600"));
@@ -119,16 +126,20 @@ mod tests {
     #[test]
     fn test_build_last_activity_response_with_status() {
         let query_elem = Element::builder("query", NS_LAST_ACTIVITY).build();
-        let iq = Iq {
+        let iq = Iq::Get {
             from: Some("romeo@montague.net".parse().unwrap()),
             to: Some("juliet@capulet.com".parse().unwrap()),
             id: "last-5".to_string(),
-            payload: IqType::Get(query_elem),
+            payload: query_elem,
         };
 
         let result = build_last_activity_response(&iq, 903, Some("Heading Home"));
 
-        if let IqType::Result(Some(elem)) = &result.payload {
+        if let Iq::Result {
+            payload: Some(elem),
+            ..
+        } = &result
+        {
             assert_eq!(elem.attr("seconds"), Some("903"));
             assert_eq!(elem.text(), "Heading Home");
         } else {
@@ -139,16 +150,20 @@ mod tests {
     #[test]
     fn test_build_last_activity_response_online_user() {
         let query_elem = Element::builder("query", NS_LAST_ACTIVITY).build();
-        let iq = Iq {
+        let iq = Iq::Get {
             from: Some("alice@example.com".parse().unwrap()),
             to: Some("bob@example.com".parse().unwrap()),
             id: "last-6".to_string(),
-            payload: IqType::Get(query_elem),
+            payload: query_elem,
         };
 
         let result = build_last_activity_response(&iq, 0, None);
 
-        if let IqType::Result(Some(elem)) = &result.payload {
+        if let Iq::Result {
+            payload: Some(elem),
+            ..
+        } = &result
+        {
             assert_eq!(elem.attr("seconds"), Some("0"));
         } else {
             panic!("Expected Result with payload");
@@ -158,16 +173,16 @@ mod tests {
     #[test]
     fn test_build_last_activity_response_swaps_to_from() {
         let query_elem = Element::builder("query", NS_LAST_ACTIVITY).build();
-        let iq = Iq {
+        let iq = Iq::Get {
             from: Some("alice@example.com".parse().unwrap()),
             to: Some("example.com".parse().unwrap()),
             id: "last-7".to_string(),
-            payload: IqType::Get(query_elem),
+            payload: query_elem,
         };
 
         let result = build_last_activity_response(&iq, 42, None);
 
-        assert_eq!(result.from, iq.to);
-        assert_eq!(result.to, iq.from);
+        assert_eq!(result.from(), iq.to());
+        assert_eq!(result.to(), iq.from());
     }
 }

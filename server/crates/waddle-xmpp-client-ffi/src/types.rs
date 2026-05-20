@@ -122,30 +122,26 @@ pub struct WaddlePresence {
     pub hats: Vec<WaddlePresenceHat>,
     pub muc_affiliation: Option<WaddleMucAffiliation>,
     pub muc_role: Option<WaddleMucRole>,
-    /// Waddle-specific MUC presence extension
-    /// `<call xmlns='urn:waddle:muc-call:0' state='…' call-id='…'/>`
-    /// advertising that the occupant has joined / left the room's
-    /// group call. `None` when the presence carries no `<call/>`
-    /// child. Drives the chat-side "N in call" indicator and the
-    /// per-tile call badge.
-    pub muc_call: Option<WaddleMucCallPresence>,
+    /// XEP-0272 Muji presence advertisement
+    /// `<muji xmlns='urn:xmpp:jingle:muji:0'/>` indicating the
+    /// occupant has joined the room's group call. `None` when the
+    /// presence carries no `<muji/>` child — per XEP-0272 §Leaving,
+    /// that absence IS the leave marker. Drives the chat-side
+    /// "N in call" indicator and the per-tile call badge.
+    pub muji: Option<WaddleMujiPresence>,
 }
 
-/// Typed payload of the `urn:waddle:muc-call:0` MUC presence
-/// extension.
+/// Typed payload of the `urn:xmpp:jingle:muji:0` MUC presence
+/// extension (XEP-0272).
 #[derive(uniffi::Record, Clone)]
-pub struct WaddleMucCallPresence {
-    pub state: WaddleMucCallPresenceState,
-    /// `call-id` attribute from the wire — the room JID the
-    /// presence describes (mirrors the source value verbatim so
-    /// Swift consumers can match against their own room registry).
-    pub call_id: String,
-}
-
-#[derive(uniffi::Enum, Clone, Debug)]
-pub enum WaddleMucCallPresenceState {
-    Active,
-    Inactive,
+pub struct WaddleMujiPresence {
+    /// True when the presence carried a `<preparing/>` child
+    /// (XEP-0272 §Joining two-phase flow). UIs typically don't
+    /// surface a chip until contents are advertised.
+    pub preparing: bool,
+    /// True when the presence advertised at least one `<content/>`
+    /// child — the occupant is actively participating in the call.
+    pub active: bool,
 }
 
 #[derive(uniffi::Record, Clone)]

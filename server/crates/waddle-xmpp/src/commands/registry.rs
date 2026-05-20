@@ -420,13 +420,11 @@ mod tests {
             .dispatch(CommandContext {
                 from: "user@localhost".parse().unwrap(),
                 authenticated_user_id: Some("user-123".to_string()),
-                iq: Iq {
+                iq: Iq::Set {
                     from: None,
                     to: None,
                     id: "test-iq".to_string(),
-                    payload: xmpp_parsers::iq::IqType::Set(
-                        "<query xmlns='urn:test'/>".parse().unwrap(),
-                    ),
+                    payload: "<query xmlns='urn:test'/>".parse().unwrap(),
                 },
                 command: Command::new("test:command").with_action(Action::Execute),
             })

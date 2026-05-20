@@ -237,13 +237,12 @@ mod tests {
                 defined_condition: DefinedCondition::ServiceUnavailable,
                 texts: std::collections::BTreeMap::new(),
                 other: None,
-                alternate_address: None,
             },
         );
         let expected = "<iq xmlns='jabber:client' \
-                        from=\"from@example\" id=\"abc\" \
-                        to=\"to@example\" type=\"error\">\
-                        <error type=\"cancel\">\
+                        from='from@example' id='abc' \
+                        to='to@example' type='error'>\
+                        <error type='cancel'>\
                         <service-unavailable xmlns='urn:ietf:params:xml:ns:xmpp-stanzas'/>\
                         </error></iq>";
         assert_eq!(typed, expected);

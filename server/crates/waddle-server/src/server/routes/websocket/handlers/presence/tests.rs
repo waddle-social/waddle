@@ -28,21 +28,21 @@ fn muc_join_presence_carries_authority_in_xep_0045_payload_only() {
         role: Role::Moderator,
         real_jid: &real_jid,
         include_self_status: false,
-        call_extension: None,
+        muji: None,
     });
 
     // XEP-0045: authority lives in the muc#user payload.
     assert!(
-        xml.contains("xmlns=\"http://jabber.org/protocol/muc#user\"")
+        xml.contains("xmlns='http://jabber.org/protocol/muc#user'")
             || xml.contains("xmlns='http://jabber.org/protocol/muc#user'"),
         "join presence must carry the XEP-0045 muc#user payload: {xml}"
     );
     assert!(
-        xml.contains("affiliation=\"owner\"") || xml.contains("affiliation='owner'"),
+        xml.contains("affiliation='owner'") || xml.contains("affiliation='owner'"),
         "join presence must declare affiliation in muc#user item: {xml}"
     );
     assert!(
-        xml.contains("role=\"moderator\"") || xml.contains("role='moderator'"),
+        xml.contains("role='moderator'") || xml.contains("role='moderator'"),
         "join presence must declare role in muc#user item: {xml}"
     );
 

@@ -62,7 +62,7 @@ fn dm_xml(from: &str, to: &str, body: &str) -> String {
     m.from = Some(from.parse::<jid::Jid>().unwrap());
     m.type_ = xmpp_parsers::message::MessageType::Chat;
     m.bodies
-        .insert(String::new(), xmpp_parsers::message::Body(body.to_string()));
+        .insert(xmpp_parsers::message::Lang::new(), body.to_string());
     let element: xmpp_parsers::minidom::Element = m.into();
     let mut buf = Vec::new();
     element.write_to(&mut buf).unwrap();
@@ -78,8 +78,8 @@ fn mam_replay_xml(child_name: &str) -> String {
     let payload = match child_name {
         "result" => {
             xmpp_parsers::minidom::Element::builder("result", waddle_xmpp_core::mam::MAM_NS)
-                .attr("queryid", "q1")
-                .attr("id", "archive-id-1")
+                .attr(minidom::rxml::xml_ncname!("queryid").to_owned(), "q1")
+                .attr(minidom::rxml::xml_ncname!("id").to_owned(), "archive-id-1")
                 .append(
                     xmpp_parsers::minidom::Element::builder(
                         "forwarded",
@@ -111,11 +111,11 @@ fn dm_with_mam_payload_xml(from: &str, to: &str, body: &str) -> String {
     m.from = Some(from.parse::<jid::Jid>().unwrap());
     m.type_ = xmpp_parsers::message::MessageType::Chat;
     m.bodies
-        .insert(String::new(), xmpp_parsers::message::Body(body.to_string()));
+        .insert(xmpp_parsers::message::Lang::new(), body.to_string());
     m.payloads.push(
         xmpp_parsers::minidom::Element::builder("result", waddle_xmpp_core::mam::MAM_NS)
-            .attr("queryid", "q1")
-            .attr("id", "archive-id-1")
+            .attr(minidom::rxml::xml_ncname!("queryid").to_owned(), "q1")
+            .attr(minidom::rxml::xml_ncname!("id").to_owned(), "archive-id-1")
             .append(
                 xmpp_parsers::minidom::Element::builder(
                     "forwarded",
@@ -345,10 +345,8 @@ async fn drops_no_store_hint_stanzas_silently() {
         xmpp_parsers::message::Message::new(Some("alice@example.com".parse::<jid::Jid>().unwrap()));
     m.from = Some("bob@elsewhere/x".parse::<jid::Jid>().unwrap());
     m.type_ = xmpp_parsers::message::MessageType::Chat;
-    m.bodies.insert(
-        String::new(),
-        xmpp_parsers::message::Body("ephemeral".to_string()),
-    );
+    m.bodies
+        .insert(xmpp_parsers::message::Lang::new(), "ephemeral".to_string());
     waddle_xmpp::xep::xep0334::add_hint(&mut m, waddle_xmpp::xep::xep0334::Hint::NoStore);
     let element: xmpp_parsers::minidom::Element = m.into();
     let mut buf = Vec::new();
@@ -396,7 +394,7 @@ async fn full_jid_target_falls_back_to_bare_jid_fanout() {
         m.from = Some("bob@elsewhere/x".parse::<jid::Jid>().unwrap());
         m.type_ = xmpp_parsers::message::MessageType::Chat;
         m.bodies
-            .insert(String::new(), xmpp_parsers::message::Body("hi".to_string()));
+            .insert(xmpp_parsers::message::Lang::new(), "hi".to_string());
         let element: xmpp_parsers::minidom::Element = m.into();
         let mut buf = Vec::new();
         element.write_to(&mut buf).unwrap();
@@ -470,11 +468,11 @@ async fn iq_unacked_promoted_to_alt_resource_when_addressed_resource_online() {
 
     // Build an IQ result addressed to alice/laptop.
     let iq_xml = {
-        let iq = xmpp_parsers::iq::Iq {
-            from: Some("server.example/srv".parse().unwrap()),
-            to: Some("alice@example.com/laptop".parse().unwrap()),
+        let iq = xmpp_parsers::iq::Iq::Result {
+            from: Some("server.example/srv".parse().expect("valid full jid")),
+            to: Some("alice@example.com/laptop".parse().expect("valid full jid")),
             id: "iq-1".to_string(),
-            payload: xmpp_parsers::iq::IqType::Result(None),
+            payload: None,
         };
         let element: xmpp_parsers::minidom::Element = iq.into();
         let mut buf = Vec::new();
@@ -512,11 +510,11 @@ async fn iq_unacked_dropped_when_no_resource_online() {
         Arc::new(InMemoryPendingDeliveryStorage::unlimited());
     let registry = ConnectionRegistry::new();
     let iq_xml = {
-        let iq = xmpp_parsers::iq::Iq {
-            from: Some("server.example/srv".parse().unwrap()),
-            to: Some("alice@example.com/laptop".parse().unwrap()),
+        let iq = xmpp_parsers::iq::Iq::Result {
+            from: Some("server.example/srv".parse().expect("valid full jid")),
+            to: Some("alice@example.com/laptop".parse().expect("valid full jid")),
             id: "iq-1".to_string(),
-            payload: xmpp_parsers::iq::IqType::Result(None),
+            payload: None,
         };
         let element: xmpp_parsers::minidom::Element = iq.into();
         let mut buf = Vec::new();

@@ -144,7 +144,10 @@ fn xep0372_parse_rejects_reference_missing_type_attribute() {
     // can't tell a mention from a data reference; parser MUST
     // surface MissingType as an error.
     let elem = Element::builder("reference", NS_REFERENCE)
-        .attr("uri", "xmpp:alice@example.com")
+        .attr(
+            minidom::rxml::xml_ncname!("uri").to_owned(),
+            "xmpp:alice@example.com",
+        )
         .build();
     let err = parse_reference_element(&elem).expect_err("missing type");
     assert!(matches!(err, ReferenceError::MissingType));
@@ -155,7 +158,7 @@ fn xep0372_parse_rejects_reference_missing_uri_attribute() {
     // §"Protocol" makes `uri` REQUIRED — it's the entire point of
     // the reference. Missing means "reference to nothing."
     let elem = Element::builder("reference", NS_REFERENCE)
-        .attr("type", "mention")
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "mention")
         .build();
     let err = parse_reference_element(&elem).expect_err("missing uri");
     assert!(matches!(err, ReferenceError::MissingUri));
@@ -168,10 +171,13 @@ fn xep0372_parse_rejects_inverted_range() {
     // mention at the wrong position. Parser MUST flag inverted
     // ranges instead of letting them propagate to renderers.
     let elem = Element::builder("reference", NS_REFERENCE)
-        .attr("type", "mention")
-        .attr("uri", "xmpp:alice@example.com")
-        .attr("begin", "10")
-        .attr("end", "5")
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "mention")
+        .attr(
+            minidom::rxml::xml_ncname!("uri").to_owned(),
+            "xmpp:alice@example.com",
+        )
+        .attr(minidom::rxml::xml_ncname!("begin").to_owned(), "10")
+        .attr(minidom::rxml::xml_ncname!("end").to_owned(), "5")
         .build();
     let err = parse_reference_element(&elem).expect_err("inverted range");
     assert!(matches!(

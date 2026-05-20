@@ -6,8 +6,11 @@ impl WaddleClient {
         let inner = self.inner.clone();
         future_to_promise(async move {
             let stanza = Element::builder("presence", NS_CLIENT)
-                .attr("type", "subscribe")
-                .attr("to", peer_jid.as_str())
+                .attr(minidom::rxml::xml_ncname!("type").to_owned(), "subscribe")
+                .attr(
+                    minidom::rxml::xml_ncname!("to").to_owned(),
+                    peer_jid.as_str(),
+                )
                 .build();
             send_stanza_command(inner, stanza).await?;
             Ok(JsValue::UNDEFINED)
@@ -45,9 +48,12 @@ impl WaddleClient {
                 jid_domain(&stored.jid)
             };
             let iq = Element::builder("iq", NS_CLIENT)
-                .attr("type", "get")
-                .attr("to", domain.as_str())
-                .attr("id", uuid::Uuid::new_v4().to_string())
+                .attr(minidom::rxml::xml_ncname!("type").to_owned(), "get")
+                .attr(minidom::rxml::xml_ncname!("to").to_owned(), domain.as_str())
+                .attr(
+                    minidom::rxml::xml_ncname!("id").to_owned(),
+                    uuid::Uuid::new_v4().to_string(),
+                )
                 .append(Element::builder("query", NS_VERSION).build())
                 .build();
             let result = match send_iq_command(inner, iq).await {

@@ -271,18 +271,32 @@ pub fn extract_mentioned_jids(msg: &Message) -> Vec<String> {
 
 /// Build a `<reference/>` element from a Reference.
 pub fn build_reference_element(reference: &Reference) -> Element {
-    let mut builder =
-        Element::builder("reference", NS_REFERENCE).attr("type", reference.ref_type.as_str());
+    let mut builder = Element::builder("reference", NS_REFERENCE).attr(
+        minidom::rxml::xml_ncname!("type").to_owned(),
+        reference.ref_type.as_str(),
+    );
 
     if let Some(begin) = reference.begin {
-        builder = builder.attr("begin", begin.to_string());
+        builder = builder.attr(
+            minidom::rxml::xml_ncname!("begin").to_owned(),
+            begin.to_string(),
+        );
     }
     if let Some(end) = reference.end {
-        builder = builder.attr("end", end.to_string());
+        builder = builder.attr(
+            minidom::rxml::xml_ncname!("end").to_owned(),
+            end.to_string(),
+        );
     }
-    builder = builder.attr("uri", reference.uri.as_str());
+    builder = builder.attr(
+        minidom::rxml::xml_ncname!("uri").to_owned(),
+        reference.uri.as_str(),
+    );
     if let Some(ref anchor) = reference.anchor {
-        builder = builder.attr("anchor", anchor.as_str());
+        builder = builder.attr(
+            minidom::rxml::xml_ncname!("anchor").to_owned(),
+            anchor.as_str(),
+        );
     }
 
     builder.build()

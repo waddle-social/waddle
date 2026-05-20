@@ -7,13 +7,9 @@ pub(super) async fn handle_channel_search_iq(
     response_from: Option<&str>,
     response_to: Option<&str>,
 ) -> Vec<String> {
-    if iq
-        .to
-        .as_ref()
-        .is_some_and(|to| to.to_string() != muc_domain)
-    {
+    if iq.to().is_some_and(|to| to.to_string() != muc_domain) {
         return vec![build_iq_error_xml_typed(
-            &iq.id,
+            iq.id(),
             response_from,
             response_to,
             item_not_found_iq_error("Requested item not found."),
@@ -21,7 +17,7 @@ pub(super) async fn handle_channel_search_iq(
     }
     let Some(request) = parse_search_request(iq) else {
         return vec![build_iq_error_xml_typed(
-            &iq.id,
+            iq.id(),
             response_from,
             response_to,
             bad_request_iq_error("Malformed IQ payload."),
@@ -35,7 +31,7 @@ pub(super) async fn handle_channel_search_iq(
             Err(error) => {
                 warn!(error = %error, "Failed to load channels for WebSocket search");
                 return vec![build_iq_error_xml_typed(
-                    &iq.id,
+                    iq.id(),
                     response_from,
                     response_to,
                     internal_server_error_iq_error("Internal server error."),
@@ -69,8 +65,8 @@ pub(super) async fn handle_user_search_iq(
 ) -> Vec<String> {
     const MIN_USER_SEARCH_TERM_CHARS: usize = 2;
 
-    match &iq.payload {
-        xmpp_parsers::iq::IqType::Get(_) => {
+    match iq {
+        xmpp_parsers::iq::Iq::Get { .. } => {
             let payload = Element::builder("query", "jabber:iq:search")
                 .append(
                     Element::builder("instructions", "jabber:iq:search")
@@ -80,13 +76,13 @@ pub(super) async fn handle_user_search_iq(
                 .append(Element::builder("nick", "jabber:iq:search").build())
                 .build();
             vec![build_iq_result_xml(
-                &iq.id,
+                iq.id(),
                 response_from,
                 response_to,
                 Some(payload),
             )]
         }
-        xmpp_parsers::iq::IqType::Set(query) => {
+        xmpp_parsers::iq::Iq::Set { payload: query, .. } => {
             let term = query
                 .children()
                 .find(|child| child.name() == "nick" && child.ns() == "jabber:iq:search")
@@ -95,7 +91,7 @@ pub(super) async fn handle_user_search_iq(
             let term = term.trim();
             if term.chars().count() < MIN_USER_SEARCH_TERM_CHARS {
                 return vec![build_iq_error_xml_typed(
-                    &iq.id,
+                    iq.id(),
                     response_from,
                     response_to,
                     bad_request_iq_error("Malformed IQ payload."),
@@ -118,7 +114,7 @@ pub(super) async fn handle_user_search_iq(
                 Err(error) => {
                     warn!(error = %error, "Failed to search native users over WebSocket");
                     return vec![build_iq_error_xml_typed(
-                                    &iq.id,
+                                    iq.id(),
                                     response_from,
                                     response_to,
                                     internal_server_error_iq_error("Internal server error."),
@@ -134,7 +130,10 @@ pub(super) async fn handle_user_search_iq(
                     continue;
                 }
                 let item = Element::builder("item", "jabber:iq:search")
-                    .attr("jid", format!("{username}@{domain}"))
+                    .attr(
+                        minidom::rxml::xml_ncname!("jid").to_owned(),
+                        format!("{username}@{domain}"),
+                    )
                     .append(
                         Element::builder("nick", "jabber:iq:search")
                             .append(username.clone())
@@ -144,14 +143,14 @@ pub(super) async fn handle_user_search_iq(
                 query = query.append(item);
             }
             vec![build_iq_result_xml(
-                &iq.id,
+                iq.id(),
                 response_from,
                 response_to,
                 Some(query.build()),
             )]
         }
         _ => vec![build_iq_error_xml_typed(
-            &iq.id,
+            iq.id(),
             response_from,
             response_to,
             bad_request_iq_error("Malformed IQ payload."),

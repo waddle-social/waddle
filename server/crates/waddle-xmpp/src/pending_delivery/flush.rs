@@ -165,7 +165,7 @@ mod tests {
     use chrono::TimeZone;
     use jid::{BareJid, Jid};
     use waddle_xmpp_core::xep0359::StanzaId;
-    use xmpp_parsers::message::{Body, MessageType};
+    use xmpp_parsers::message::MessageType;
 
     fn bare(s: &str) -> BareJid {
         s.parse().expect("bare jid")
@@ -175,7 +175,8 @@ mod tests {
         let mut m = Message::new(Some(to.parse::<Jid>().expect("jid")));
         m.from = Some(from.parse::<Jid>().expect("jid"));
         m.type_ = MessageType::Chat;
-        m.bodies.insert(String::new(), Body(body.to_string()));
+        m.bodies
+            .insert(xmpp_parsers::message::Lang::new(), body.to_string());
         m
     }
 

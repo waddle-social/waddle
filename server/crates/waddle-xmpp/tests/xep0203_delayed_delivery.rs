@@ -27,7 +27,7 @@ use waddle_xmpp::pending_delivery::flush::{
 };
 use waddle_xmpp::pending_delivery::{PendingPayload, PendingRow, PendingRowId};
 use waddle_xmpp::xep::NS_DELAY;
-use xmpp_parsers::message::{Body, Message, MessageType};
+use xmpp_parsers::message::{Message, MessageType};
 
 fn bare(s: &str) -> BareJid {
     s.parse().expect("bare jid")
@@ -37,7 +37,8 @@ fn dm(from: &str, to: &str, body: &str) -> Message {
     let mut m = Message::new(Some(to.parse::<Jid>().expect("jid")));
     m.from = Some(from.parse::<Jid>().expect("jid"));
     m.type_ = MessageType::Chat;
-    m.bodies.insert(String::new(), Body(body.to_string()));
+    m.bodies
+        .insert(xmpp_parsers::message::Lang::new(), body.to_string());
     m
 }
 
@@ -189,7 +190,7 @@ fn xep0203_delay_lives_in_stanza_payloads_not_body() {
     );
     // Body is unchanged; delay is in payloads.
     assert_eq!(
-        replayed.bodies.get("").map(|b| b.0.as_str()),
+        replayed.bodies.get("").map(|b| b.as_str()),
         Some("hi-with-body")
     );
     let delay = replayed

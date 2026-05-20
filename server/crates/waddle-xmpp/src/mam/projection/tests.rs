@@ -1,5 +1,5 @@
 use super::*;
-use xmpp_parsers::message::{Body, MessageType};
+use xmpp_parsers::message::MessageType;
 
 fn jid(value: &str) -> Jid {
     value.parse::<Jid>().expect("valid jid literal")
@@ -9,8 +9,9 @@ fn chat_with_body(from: &str, to: &str, body: &str) -> Message {
     let mut m = Message::new(Some(to.parse().expect("jid")));
     m.from = Some(from.parse().expect("jid"));
     m.type_ = MessageType::Chat;
-    m.id = Some("orig-1".to_string());
-    m.bodies.insert(String::new(), Body(body.to_string()));
+    m.id = Some(xmpp_parsers::message::Id("orig-1".to_string()));
+    m.bodies
+        .insert(xmpp_parsers::message::Lang::new(), body.to_string());
     m
 }
 
@@ -63,7 +64,7 @@ fn xep_0359_canonical_stamp_drives_archive_id_and_stanza_id() {
     // pivot uses the canonical stamp via `id`.
     use waddle_xmpp_core::xep0359::build_stanza_id_element;
     let mut msg = chat_with_body("alice@example.com/web", "bob@example.com", "hi");
-    msg.id = Some("wire-id-1".to_string());
+    msg.id = Some(xmpp_parsers::message::Id("wire-id-1".to_string()));
     msg.payloads.push(build_stanza_id_element(
         "canon-1",
         &jid("alice@example.com"),
@@ -94,7 +95,7 @@ fn xep_0359_canonical_stamp_picks_archive_jid_specific_stamp() {
     // the wire `id` attribute for legacy-style retraction lookups.
     use waddle_xmpp_core::xep0359::build_stanza_id_element;
     let mut msg = chat_with_body("alice@example.com/web", "bob@example.com", "hi");
-    msg.id = Some("wire-id-2".to_string());
+    msg.id = Some(xmpp_parsers::message::Id("wire-id-2".to_string()));
     msg.payloads.push(build_stanza_id_element(
         "alice-A1",
         &jid("alice@example.com"),
@@ -165,7 +166,7 @@ fn xep_0201_direct_chat_projects_nested_thread_with_parent() {
     let mut msg = chat_with_body("alice@example.com/web", "bob@example.com", "hi");
     msg.payloads.push(
         Element::builder("thread", "jabber:client")
-            .attr("parent", "root-1")
+            .attr(minidom::rxml::xml_ncname!("parent").to_owned(), "root-1")
             .append("child-2")
             .build(),
     );
@@ -187,7 +188,10 @@ fn xep_0201_direct_chat_ignores_wrong_stanza_namespace_payload() {
     waddle_xmpp_core::xep0201::set_thread_id(&mut msg, "typed-thread");
     msg.payloads.push(
         Element::builder("thread", waddle_xmpp_core::xep0201::SERVER_STANZA_NS)
-            .attr("parent", "foreign-root")
+            .attr(
+                minidom::rxml::xml_ncname!("parent").to_owned(),
+                "foreign-root",
+            )
             .append("foreign-thread")
             .build(),
     );

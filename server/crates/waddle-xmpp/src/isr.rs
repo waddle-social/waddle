@@ -207,8 +207,8 @@ fn extract_attr(xml: &str, name: &str) -> Option<String> {
 /// Per XEP-0397 §4, clients can request a new token during an active session
 /// using this IQ stanza.
 pub fn is_isr_token_request(iq: &xmpp_parsers::iq::Iq) -> bool {
-    match &iq.payload {
-        xmpp_parsers::iq::IqType::Get(elem) => {
+    match iq {
+        xmpp_parsers::iq::Iq::Get { payload: elem, .. } => {
             elem.name() == "token-request" && elem.ns() == ISR_NS
         }
         _ => false,
@@ -230,15 +230,18 @@ pub fn build_isr_token_result(
     use minidom::Element;
 
     let token_elem = Element::builder("token", ISR_NS)
-        .attr("expiry", token.expiry.to_rfc3339())
+        .attr(
+            minidom::rxml::xml_ncname!("expiry").to_owned(),
+            token.expiry.to_rfc3339(),
+        )
         .append(token.token.clone())
         .build();
 
-    xmpp_parsers::iq::Iq {
-        from: original_iq.to.clone(),
-        to: original_iq.from.clone(),
-        id: original_iq.id.clone(),
-        payload: xmpp_parsers::iq::IqType::Result(Some(token_elem)),
+    xmpp_parsers::iq::Iq::Result {
+        from: original_iq.to().cloned(),
+        to: original_iq.from().cloned(),
+        id: original_iq.id().to_string(),
+        payload: Some(token_elem),
     }
 }
 
@@ -269,11 +272,12 @@ pub fn build_isr_token_error(
         "", // Empty text
     );
 
-    xmpp_parsers::iq::Iq {
-        from: original_iq.to.clone(),
-        to: original_iq.from.clone(),
-        id: original_iq.id.clone(),
-        payload: xmpp_parsers::iq::IqType::Error(stanza_error),
+    xmpp_parsers::iq::Iq::Error {
+        from: original_iq.to().cloned(),
+        to: original_iq.from().cloned(),
+        id: original_iq.id().to_string(),
+        error: stanza_error,
+        payload: None,
     }
 }
 

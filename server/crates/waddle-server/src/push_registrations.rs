@@ -362,10 +362,10 @@ mod tests {
 
     fn publish_options(secret: &str) -> Element {
         Element::builder("x", NS_DATA_FORMS)
-            .attr("type", "submit")
+            .attr(minidom::rxml::xml_ncname!("type").to_owned(), "submit")
             .append(
                 Element::builder("field", NS_DATA_FORMS)
-                    .attr("var", "FORM_TYPE")
+                    .attr(minidom::rxml::xml_ncname!("var").to_owned(), "FORM_TYPE")
                     .append(
                         Element::builder("value", NS_DATA_FORMS)
                             .append(waddle_xmpp::xep::NS_PUBSUB_PUBLISH_OPTIONS)
@@ -375,7 +375,7 @@ mod tests {
             )
             .append(
                 Element::builder("field", NS_DATA_FORMS)
-                    .attr("var", "secret")
+                    .attr(minidom::rxml::xml_ncname!("var").to_owned(), "secret")
                     .append(
                         Element::builder("value", NS_DATA_FORMS)
                             .append(secret)
@@ -388,10 +388,10 @@ mod tests {
 
     fn publish_options_with_field(var: &str, value: &str) -> Element {
         Element::builder("x", NS_DATA_FORMS)
-            .attr("type", "submit")
+            .attr(minidom::rxml::xml_ncname!("type").to_owned(), "submit")
             .append(
                 Element::builder("field", NS_DATA_FORMS)
-                    .attr("var", "FORM_TYPE")
+                    .attr(minidom::rxml::xml_ncname!("var").to_owned(), "FORM_TYPE")
                     .append(
                         Element::builder("value", NS_DATA_FORMS)
                             .append(waddle_xmpp::xep::NS_PUBSUB_PUBLISH_OPTIONS)
@@ -401,7 +401,7 @@ mod tests {
             )
             .append(
                 Element::builder("field", NS_DATA_FORMS)
-                    .attr("var", var)
+                    .attr(minidom::rxml::xml_ncname!("var").to_owned(), var)
                     .append(
                         Element::builder("value", NS_DATA_FORMS)
                             .append(value)

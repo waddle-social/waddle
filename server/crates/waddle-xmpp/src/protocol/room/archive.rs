@@ -108,7 +108,7 @@ mod tests {
     use jid::{BareJid, FullJid, Jid};
     use minidom::Element;
     use waddle_xmpp_core::xep0201::CLIENT_STANZA_NS;
-    use xmpp_parsers::message::{Body, Message, MessageType};
+    use xmpp_parsers::message::{Message, MessageType};
 
     fn full(s: &str) -> FullJid {
         s.parse().expect("valid full jid")
@@ -122,7 +122,8 @@ mod tests {
         m.from = Some(Jid::from(sender.clone()));
         m.type_ = MessageType::Groupchat;
         if !body.is_empty() {
-            m.bodies.insert(String::new(), Body(body.to_string()));
+            m.bodies
+                .insert(xmpp_parsers::message::Lang::new(), body.to_string());
         }
         m
     }
@@ -212,8 +213,11 @@ mod tests {
         let mut msg = groupchat(&room, &sender, "");
         msg.payloads.push(
             Element::builder("retracted", crate::xep::xep0424::NS_MESSAGE_RETRACT)
-                .attr("id", "retract-1")
-                .attr("stamp", "2024-06-01T09:00:00Z")
+                .attr(minidom::rxml::xml_ncname!("id").to_owned(), "retract-1")
+                .attr(
+                    minidom::rxml::xml_ncname!("stamp").to_owned(),
+                    "2024-06-01T09:00:00Z",
+                )
                 .build(),
         );
 
@@ -309,7 +313,7 @@ mod tests {
         let mut msg = groupchat(&room, &sender, "");
         msg.payloads.push(
             Element::builder("displayed", "urn:xmpp:chat-markers:0")
-                .attr("id", "target-sid")
+                .attr(minidom::rxml::xml_ncname!("id").to_owned(), "target-sid")
                 .build(),
         );
         waddle_xmpp_core::xep0201::set_thread_id(&mut msg, "topic-root");
@@ -367,9 +371,15 @@ mod tests {
         // builders::build_reaction_message` puts on the wire for the
         // WASM client's `send_reaction` path.
         let stanza = Element::builder("message", CLIENT_STANZA_NS)
-            .attr("to", "room@muc.example.com")
-            .attr("type", "groupchat")
-            .attr("id", "reaction-uuid-1")
+            .attr(
+                minidom::rxml::xml_ncname!("to").to_owned(),
+                "room@muc.example.com",
+            )
+            .attr(minidom::rxml::xml_ncname!("type").to_owned(), "groupchat")
+            .attr(
+                minidom::rxml::xml_ncname!("id").to_owned(),
+                "reaction-uuid-1",
+            )
             .append(crate::xep::xep0444::build_reactions_element(
                 "target-sid",
                 &["❤️"],
@@ -396,24 +406,24 @@ mod tests {
             .push(Element::builder("thread-create", crate::xep::xep0508::NS_FORUMS).build());
         msg.payloads.push(
             Element::builder("thread-create", crate::xep::xep0508::NS_FORUMS)
-                .attr("title", "")
+                .attr(minidom::rxml::xml_ncname!("title").to_owned(), "")
                 .build(),
         );
         msg.payloads.push(
             Element::builder("thread-create", crate::xep::xep0508::NS_FORUMS)
-                .attr("title", "   ")
+                .attr(minidom::rxml::xml_ncname!("title").to_owned(), "   ")
                 .build(),
         );
         msg.payloads
             .push(Element::builder("thread-reply", crate::xep::xep0508::NS_FORUMS).build());
         msg.payloads.push(
             Element::builder("thread-reply", crate::xep::xep0508::NS_FORUMS)
-                .attr("thread-id", "")
+                .attr(minidom::rxml::xml_ncname!("thread-id").to_owned(), "")
                 .build(),
         );
         msg.payloads.push(
             Element::builder("thread-reply", crate::xep::xep0508::NS_FORUMS)
-                .attr("thread-id", "   ")
+                .attr(minidom::rxml::xml_ncname!("thread-id").to_owned(), "   ")
                 .build(),
         );
 

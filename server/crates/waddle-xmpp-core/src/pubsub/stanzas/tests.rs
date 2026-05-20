@@ -1,17 +1,34 @@
 use super::*;
 use minidom::Element;
-use xmpp_parsers::iq::IqType;
 use xmpp_parsers::message::MessageType;
 
 const NS_XDATA: &str = "jabber:x:data";
 const PUBSUB_PUBLISH_OPTIONS_FORM_TYPE: &str = "http://jabber.org/protocol/pubsub#publish-options";
 
-fn iq_with_payload(id: &str, from: Option<&str>, to: Option<&str>, payload: IqType) -> Iq {
-    Iq {
-        from: from.map(|jid| jid.parse::<Jid>().expect("valid from jid")),
-        to: to.map(|jid| jid.parse::<Jid>().expect("valid to jid")),
-        id: id.to_string(),
-        payload,
+/// Test-local payload kind so the iq_with_payload helper can stay shaped
+/// the same way regardless of which Iq variant it is producing.
+enum TestIqPayload {
+    Get(Element),
+    Set(Element),
+}
+
+fn iq_with_payload(id: &str, from: Option<&str>, to: Option<&str>, payload: TestIqPayload) -> Iq {
+    let from = from.map(|jid| jid.parse::<Jid>().expect("valid from jid"));
+    let to = to.map(|jid| jid.parse::<Jid>().expect("valid to jid"));
+    let id = id.to_string();
+    match payload {
+        TestIqPayload::Get(payload) => Iq::Get {
+            from,
+            to,
+            id,
+            payload,
+        },
+        TestIqPayload::Set(payload) => Iq::Set {
+            from,
+            to,
+            id,
+            payload,
+        },
     }
 }
 
@@ -25,7 +42,7 @@ fn pubsub_payload(ns: &str, children: impl IntoIterator<Item = Element>) -> Elem
 
 fn xdata_field(var: &str, value: &str) -> Element {
     Element::builder("field", NS_XDATA)
-        .attr("var", var)
+        .attr(minidom::rxml::xml_ncname!("var").to_owned(), var)
         .append(Element::builder("value", NS_XDATA).append(value).build())
         .build()
 }
@@ -36,20 +53,23 @@ fn parse_publish_request() {
         Some("test@conference.example.org".to_string()),
         Some(
             Element::builder("conference", "urn:xmpp:bookmarks:1")
-                .attr("autojoin", "true")
+                .attr(minidom::rxml::xml_ncname!("autojoin").to_owned(), "true")
                 .build(),
         ),
     )
     .to_element(NS_PUBSUB);
     let publish = Element::builder("publish", NS_PUBSUB)
-        .attr("node", "urn:xmpp:bookmarks:1")
+        .attr(
+            minidom::rxml::xml_ncname!("node").to_owned(),
+            "urn:xmpp:bookmarks:1",
+        )
         .append(item)
         .build();
     let iq = iq_with_payload(
         "pub1",
         Some("user@example.com"),
         Some("user@example.com"),
-        IqType::Set(pubsub_payload(NS_PUBSUB, [publish])),
+        TestIqPayload::Set(pubsub_payload(NS_PUBSUB, [publish])),
     );
     let request = parse_pubsub_iq(&iq).expect("should parse");
 
@@ -76,17 +96,17 @@ fn parse_publish_request_with_publish_options() {
     )
     .to_element(NS_PUBSUB);
     let publish = Element::builder("publish", NS_PUBSUB)
-        .attr("node", "push-node-1")
+        .attr(minidom::rxml::xml_ncname!("node").to_owned(), "push-node-1")
         .append(item)
         .build();
     let publish_options = Element::builder("publish-options", NS_PUBSUB)
         .append(
             Element::builder("x", NS_XDATA)
-                .attr("type", "submit")
+                .attr(minidom::rxml::xml_ncname!("type").to_owned(), "submit")
                 .append(
                     Element::builder("field", NS_XDATA)
-                        .attr("var", "FORM_TYPE")
-                        .attr("type", "hidden")
+                        .attr(minidom::rxml::xml_ncname!("var").to_owned(), "FORM_TYPE")
+                        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "hidden")
                         .append(
                             Element::builder("value", NS_XDATA)
                                 .append(PUBSUB_PUBLISH_OPTIONS_FORM_TYPE)
@@ -102,7 +122,7 @@ fn parse_publish_request_with_publish_options() {
         "push1",
         Some("example.com"),
         Some("push.example.com"),
-        IqType::Set(pubsub_payload(NS_PUBSUB, [publish, publish_options])),
+        TestIqPayload::Set(pubsub_payload(NS_PUBSUB, [publish, publish_options])),
     );
     let request = parse_pubsub_iq(&iq).expect("should parse");
 
@@ -126,14 +146,20 @@ fn parse_publish_request_with_publish_options() {
 #[test]
 fn parse_subscribe_request_uses_typed_jid() {
     let subscribe = Element::builder("subscribe", NS_PUBSUB)
-        .attr("node", "urn:xmpp:nick")
-        .attr("jid", "romeo@example.com")
+        .attr(
+            minidom::rxml::xml_ncname!("node").to_owned(),
+            "urn:xmpp:nick",
+        )
+        .attr(
+            minidom::rxml::xml_ncname!("jid").to_owned(),
+            "romeo@example.com",
+        )
         .build();
     let iq = iq_with_payload(
         "sub1",
         Some("romeo@example.com"),
         None,
-        IqType::Set(pubsub_payload(NS_PUBSUB, [subscribe])),
+        TestIqPayload::Set(pubsub_payload(NS_PUBSUB, [subscribe])),
     );
     let request = parse_pubsub_iq(&iq).expect("should parse");
 
@@ -149,13 +175,13 @@ fn parse_subscribe_request_uses_typed_jid() {
 #[test]
 fn parse_configure_request() {
     let configure = Element::builder("configure", NS_PUBSUB)
-        .attr("node", "space")
+        .attr(minidom::rxml::xml_ncname!("node").to_owned(), "space")
         .build();
     let iq = iq_with_payload(
         "cfg1",
         Some("user@example.com"),
         None,
-        IqType::Set(pubsub_payload(NS_PUBSUB, [configure])),
+        TestIqPayload::Set(pubsub_payload(NS_PUBSUB, [configure])),
     );
     let request = parse_pubsub_iq(&iq).expect("should parse");
 
@@ -168,13 +194,13 @@ fn parse_configure_request() {
 #[test]
 fn parse_owner_subscriptions_as_unsupported_manage_subscriptions() {
     let subscriptions = Element::builder("subscriptions", NS_PUBSUB_OWNER)
-        .attr("node", "space")
+        .attr(minidom::rxml::xml_ncname!("node").to_owned(), "space")
         .build();
     let iq = iq_with_payload(
         "subs1",
         Some("owner@example.com"),
         None,
-        IqType::Get(pubsub_payload(NS_PUBSUB_OWNER, [subscriptions])),
+        TestIqPayload::Get(pubsub_payload(NS_PUBSUB_OWNER, [subscriptions])),
     );
     let request = parse_pubsub_iq(&iq).expect("should parse unsupported feature");
 
@@ -189,19 +215,19 @@ fn parse_owner_subscriptions_as_unsupported_manage_subscriptions() {
 #[test]
 fn unsupported_feature_error_includes_pubsub_condition() {
     let subscriptions = Element::builder("subscriptions", NS_PUBSUB_OWNER)
-        .attr("node", "space")
+        .attr(minidom::rxml::xml_ncname!("node").to_owned(), "space")
         .build();
     let iq = iq_with_payload(
         "subs1",
         Some("owner@example.com"),
         None,
-        IqType::Get(pubsub_payload(NS_PUBSUB_OWNER, [subscriptions])),
+        TestIqPayload::Get(pubsub_payload(NS_PUBSUB_OWNER, [subscriptions])),
     );
     let response = build_pubsub_error(
         &iq,
         PubSubError::UnsupportedFeature(PubSubUnsupportedFeature::ManageSubscriptions),
     );
-    let IqType::Error(error) = response.payload else {
+    let Iq::Error { error, .. } = response else {
         panic!("expected error response");
     };
 
@@ -245,7 +271,7 @@ fn build_and_parse_pubsub_event_message() {
 #[test]
 fn pubsub_item_round_trips() {
     let payload = Element::builder("test", "test:ns")
-        .attr("foo", "bar")
+        .attr(minidom::rxml::xml_ncname!("foo").to_owned(), "bar")
         .build();
     let item = PubSubItem::new(Some("item-1".to_string()), Some(payload));
     let elem = item.to_element(NS_PUBSUB);
@@ -281,13 +307,13 @@ fn pubsub_item_omits_publisher_when_unset() {
 #[test]
 fn is_pubsub_iq_detects_pubsub_requests() {
     let items = Element::builder("items", NS_PUBSUB)
-        .attr("node", "test")
+        .attr(minidom::rxml::xml_ncname!("node").to_owned(), "test")
         .build();
     let iq = iq_with_payload(
         "test1",
         None,
         None,
-        IqType::Get(pubsub_payload(NS_PUBSUB, [items])),
+        TestIqPayload::Get(pubsub_payload(NS_PUBSUB, [items])),
     );
 
     assert!(is_pubsub_iq(&iq));
@@ -295,15 +321,17 @@ fn is_pubsub_iq_detects_pubsub_requests() {
 
 #[test]
 fn build_pubsub_success_preserves_iq_routing() {
-    let iq = Iq {
-        from: Some("romeo@example.com".parse().expect("valid jid")),
-        to: Some("juliet@example.com".parse().expect("valid jid")),
+    let from: Option<Jid> = Some("romeo@example.com".parse().expect("valid jid"));
+    let to: Option<Jid> = Some("juliet@example.com".parse().expect("valid jid"));
+    let iq = Iq::Get {
+        from: from.clone(),
+        to: to.clone(),
         id: "ok-1".to_string(),
-        payload: IqType::Get(Element::builder("ping", "urn:xmpp:ping").build()),
+        payload: Element::builder("ping", "urn:xmpp:ping").build(),
     };
 
     let response = build_pubsub_success(&iq);
-    assert_eq!(response.id, "ok-1");
-    assert_eq!(response.from, iq.to);
-    assert_eq!(response.to, iq.from);
+    assert_eq!(response.id(), "ok-1");
+    assert_eq!(response.from(), to.as_ref());
+    assert_eq!(response.to(), from.as_ref());
 }

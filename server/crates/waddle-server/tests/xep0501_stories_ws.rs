@@ -45,7 +45,7 @@ async fn community_disco_info_advertises_stories_namespace() {
         .await
         .expect("disco#info response");
     assert!(
-        frame.contains(&format!("var=\"{NS_STORIES}\""))
+        frame.contains(&format!("var='{NS_STORIES}'"))
             || frame.contains(&format!("var='{NS_STORIES}'")),
         "spaces disco#info missing stories namespace: {frame}"
     );
@@ -84,7 +84,7 @@ async fn stories_publish_and_items_round_trip() {
         .await
         .expect("publish result");
     assert!(
-        publish_result.contains("type=\"result\""),
+        publish_result.contains("type='result'"),
         "publish must succeed against the bootstrapped stories node: {publish_result}"
     );
 

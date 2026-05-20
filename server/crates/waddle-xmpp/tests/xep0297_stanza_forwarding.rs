@@ -20,7 +20,7 @@ use waddle_xmpp::xep::xep0297::{
     extract_forwarded_from_message, is_forwarded_element, parse_forwarded_element,
     ForwardedMessage, ForwardingCarrier, NS_FORWARD,
 };
-use xmpp_parsers::message::{Body, Message, MessageType};
+use xmpp_parsers::message::{Message, MessageType};
 
 // ── §3 namespace ─────────────────────────────────────────────────────
 
@@ -62,9 +62,10 @@ fn xep0297_builder_emits_namespaced_forwarded_with_inner_message() {
             .expect("valid jid"),
     );
     original.type_ = MessageType::Chat;
-    original
-        .bodies
-        .insert(String::new(), Body("O Romeo, Romeo!".to_owned()));
+    original.bodies.insert(
+        xmpp_parsers::message::Lang::new(),
+        "O Romeo, Romeo!".to_owned(),
+    );
 
     let elem = build_forwarded_element(&ForwardedMessage::new(original));
     assert_eq!(elem.name(), "forwarded");
@@ -96,7 +97,8 @@ fn spec_message() -> Message {
             .expect("valid jid"),
     );
     msg.type_ = MessageType::Chat;
-    msg.bodies.insert(String::new(), Body("Hello".to_owned()));
+    msg.bodies
+        .insert(xmpp_parsers::message::Lang::new(), "Hello".to_owned());
     msg
 }
 
@@ -127,7 +129,7 @@ fn xep0297_round_trip_preserves_body_and_addressing() {
         Some("juliet@capulet.example/chamber".to_owned()),
     );
     assert_eq!(
-        parsed.message.bodies.get("").map(|b| b.0.clone()),
+        parsed.message.bodies.get("").cloned(),
         Some("Hello".to_owned())
     );
 }
@@ -241,7 +243,7 @@ fn xep0297_carrier_trait_surfaces_forwarded_from_message_payload() {
 
     let fwd = extract_forwarded_from_message(&wrapper).expect("forwarded surfaces");
     assert_eq!(
-        fwd.message.bodies.get("").map(|b| b.0.clone()),
+        fwd.message.bodies.get("").cloned(),
         Some("Hello".to_owned())
     );
     assert!(wrapper.has_forwarded());

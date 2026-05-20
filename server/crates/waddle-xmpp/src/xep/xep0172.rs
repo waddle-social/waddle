@@ -166,7 +166,7 @@ impl From<Nickname> for xmpp_parsers::nick::Nick {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use xmpp_parsers::message::{Body, Message};
+    use xmpp_parsers::message::Message;
 
     #[test]
     fn test_is_nick_element() {
@@ -220,7 +220,8 @@ mod tests {
     #[test]
     fn test_set_nickname() {
         let mut msg = Message::new(None::<jid::Jid>);
-        msg.bodies.insert(String::new(), Body("Hi".to_string()));
+        msg.bodies
+            .insert(xmpp_parsers::message::Lang::new(), "Hi".to_string());
         set_nickname(&mut msg, "Romeo");
 
         assert!(has_nick(&msg));

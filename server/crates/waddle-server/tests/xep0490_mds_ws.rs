@@ -58,7 +58,7 @@ async fn iq_set_to(client: &mut WsXmppClient, id: &str, to: &str, body: &str) ->
         .await
         .expect("send iq set");
     client
-        .recv_matching(|frame| frame.contains(&format!(r#"id="{id}""#)) && frame.contains("<iq"))
+        .recv_matching(|frame| frame.contains(&format!(r#"id='{id}'"#)) && frame.contains("<iq"))
         .await
         .expect("iq set response")
 }
@@ -71,7 +71,7 @@ async fn iq_get_to(client: &mut WsXmppClient, id: &str, to: &str, body: &str) ->
         .await
         .expect("send iq get");
     client
-        .recv_matching(|frame| frame.contains(&format!(r#"id="{id}""#)) && frame.contains("<iq"))
+        .recv_matching(|frame| frame.contains(&format!(r#"id='{id}'"#)) && frame.contains("<iq"))
         .await
         .expect("iq get response")
 }
@@ -145,7 +145,7 @@ async fn xep0490_first_publish_with_spec_publish_options_succeeds() {
     )
     .await;
     assert!(
-        resp.contains(r#"type="result""#),
+        resp.contains(r#"type='result'"#),
         "first MDS publish with spec publish-options must succeed: {resp}"
     );
     assert!(
@@ -195,13 +195,13 @@ async fn xep0490_catchup_returns_all_displayed_items() {
     )
     .await;
 
-    assert!(resp.contains(r#"type="result""#), "catch-up get: {resp}");
+    assert!(resp.contains(r#"type='result'"#), "catch-up get: {resp}");
     assert!(
-        resp.contains(r#"id="romeo@montague.lit""#),
+        resp.contains(r#"id='romeo@montague.lit'"#),
         "catch-up missing DM item: {resp}"
     );
     assert!(
-        resp.contains(r#"id="example@conference.shakespeare.lit""#),
+        resp.contains(r#"id='example@conference.shakespeare.lit'"#),
         "catch-up missing MUC item: {resp}"
     );
     assert_eq!(
@@ -212,7 +212,7 @@ async fn xep0490_catchup_returns_all_displayed_items() {
     // The MUC stanza-id retained its by=room JID — clients need this
     // to know which scope the id is valid in.
     assert!(
-        resp.contains(r#"by="example@conference.shakespeare.lit""#),
+        resp.contains(r#"by='example@conference.shakespeare.lit'"#),
         "MUC stanza-id by= must survive round-trip: {resp}"
     );
 }
@@ -257,11 +257,11 @@ async fn xep0490_republish_same_chat_overwrites_prior_item() {
         "republishing same chat must yield exactly one item: {resp}"
     );
     assert!(
-        resp.contains(r#"id="stanza-id-new""#),
+        resp.contains(r#"id='stanza-id-new'"#),
         "the new stanza-id must replace the old one: {resp}"
     );
     assert!(
-        !resp.contains(r#"id="stanza-id-old""#),
+        !resp.contains(r#"id='stanza-id-old'"#),
         "the old stanza-id must be evicted: {resp}"
     );
 }
@@ -311,11 +311,11 @@ async fn xep0490_third_party_cannot_subscribe_or_read_items() {
     )
     .await;
     assert!(
-        sub.contains(r#"type="error""#),
+        sub.contains(r#"type='error'"#),
         "third-party subscribe to MDS node must be rejected (whitelist): {sub}"
     );
     assert!(
-        !sub.contains(r#"type="result""#),
+        !sub.contains(r#"type='result'"#),
         "no success on third-party subscribe: {sub}"
     );
 
@@ -328,7 +328,7 @@ async fn xep0490_third_party_cannot_subscribe_or_read_items() {
     )
     .await;
     assert!(
-        items.contains(r#"type="error""#),
+        items.contains(r#"type='error'"#),
         "third-party items query must be rejected (whitelist): {items}"
     );
 
@@ -388,7 +388,7 @@ async fn xep0490_other_resource_with_notify_caps_receives_event() {
     // advertised set.
     let disco_query = alice_b
         .recv_matching(|f| {
-            f.contains("<iq") && f.contains(r#"type="get""#) && f.contains(NS_DISCO_INFO)
+            f.contains("<iq") && f.contains(r#"type='get'"#) && f.contains(NS_DISCO_INFO)
         })
         .await
         .expect("server caps disco to alice-B");
@@ -422,25 +422,25 @@ async fn xep0490_other_resource_with_notify_caps_receives_event() {
         ),
     )
     .await;
-    assert!(pub_resp.contains(r#"type="result""#), "publish: {pub_resp}");
+    assert!(pub_resp.contains(r#"type='result'"#), "publish: {pub_resp}");
 
     let event = wait_for_event_message(&mut alice_b, MDS_NODE, Duration::from_secs(2))
         .await
         .expect("alice-B advertising MDS +notify MUST receive the §3.4 owner-self fan-out event");
     // Per XEP-0490 the event MUST carry the chat-jid item id.
     assert!(
-        event.contains(r#"id="romeo@montague.lit""#),
+        event.contains(r#"id='romeo@montague.lit'"#),
         "event must carry chat-jid item id: {event}"
     );
     // Per XEP-0163 §4.3 the from is the bare account JID.
     assert!(
-        event.contains(&format!(r#"from="{alice_bare}""#))
+        event.contains(&format!(r#"from='{alice_bare}'"#))
             || event.contains(&format!(r#"from='{alice_bare}'"#)),
         "event from must be the account bare JID: {event}"
     );
     // Per XEP-0060 §12.18 the message MUST be type=headline.
     assert!(
-        event.contains(r#"type="headline""#) || event.contains(r#"type='headline'"#),
+        event.contains(r#"type='headline'"#) || event.contains(r#"type='headline'"#),
         "PEP event must be type=headline: {event}"
     );
     // Payload must round-trip the typed displayed payload.
@@ -449,7 +449,7 @@ async fn xep0490_other_resource_with_notify_caps_receives_event() {
         "event must carry the displayed payload: {event}"
     );
     assert!(
-        event.contains(r#"id="0f710f2b-52ed-4d52-b928-784dad74a52b""#),
+        event.contains(r#"id='0f710f2b-52ed-4d52-b928-784dad74a52b'"#),
         "displayed stanza-id must round-trip: {event}"
     );
 
@@ -488,15 +488,15 @@ async fn xep0490_muc_stanza_id_by_attribute_round_trips_through_publish_and_catc
     .await;
 
     assert!(
-        items.contains(&format!(r#"id="{room_jid}""#)),
+        items.contains(&format!(r#"id='{room_jid}'"#)),
         "item: {items}"
     );
     assert!(
-        items.contains(&format!(r#"by="{room_jid}""#)),
+        items.contains(&format!(r#"by='{room_jid}'"#)),
         "MUC stanza-id by= must carry the room JID through publish + catch-up: {items}"
     );
     assert!(
-        items.contains(&format!(r#"id="{stanza_id}""#)),
+        items.contains(&format!(r#"id='{stanza_id}'"#)),
         "stanza-id id must survive: {items}"
     );
 }
@@ -535,7 +535,7 @@ async fn ping_anchor(client: &mut WsXmppClient, id: &str) {
         .await
         .expect("send ping");
     let _ = client
-        .recv_matching(|frame| frame.contains(&format!(r#"id="{id}""#)) && frame.contains("<iq"))
+        .recv_matching(|frame| frame.contains(&format!(r#"id='{id}'"#)) && frame.contains("<iq"))
         .await
         .expect("ping result");
 }
@@ -555,7 +555,7 @@ async fn wait_for_event_message(
             Ok(frame) => {
                 if frame.contains("<message")
                     && frame.contains(NS_PUBSUB_EVENT)
-                    && (frame.contains(&format!(r#"node="{node}""#))
+                    && (frame.contains(&format!(r#"node='{node}'"#))
                         || frame.contains(&format!(r#"node='{node}'"#)))
                 {
                     return Some(frame);

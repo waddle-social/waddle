@@ -54,7 +54,7 @@ async fn websocket_last_activity_query_returns_server_uptime() {
         .expect("last activity response");
 
     assert!(
-        response.contains("type=\"result\"") || response.contains("type='result'"),
+        response.contains("type='result'") || response.contains("type='result'"),
         "expected result IQ, got: {response}"
     );
     assert!(
@@ -78,7 +78,7 @@ async fn websocket_entity_time_query_returns_utc_and_tzo() {
         .expect("entity time response");
 
     assert!(
-        response.contains("type=\"result\"") || response.contains("type='result'"),
+        response.contains("type='result'") || response.contains("type='result'"),
         "expected result IQ, got: {response}"
     );
     assert!(
@@ -109,7 +109,7 @@ async fn websocket_entity_time_rejects_non_get_iq() {
         .expect("entity time error response");
 
     assert!(
-        response.contains("type=\"error\"") || response.contains("type='error'"),
+        response.contains("type='error'") || response.contains("type='error'"),
         "expected error IQ, got: {response}"
     );
     assert!(
@@ -136,7 +136,7 @@ async fn websocket_entity_time_rejects_non_server_target() {
         .expect("entity time error response");
 
     assert!(
-        response.contains("type=\"error\"") || response.contains("type='error'"),
+        response.contains("type='error'") || response.contains("type='error'"),
         "expected error IQ, got: {response}"
     );
     assert!(

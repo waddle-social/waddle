@@ -249,7 +249,7 @@ pub(crate) async fn create_router(deps: RouterDeps) -> Result<Router> {
 
     if let Some(challenge_service) = acme_http01_challenge_service {
         router = router.route_service(
-            "/.well-known/acme-challenge/:challenge_token",
+            "/.well-known/acme-challenge/{challenge_token}",
             challenge_service,
         );
     }
@@ -755,7 +755,7 @@ fn sqlite_url_is_in_memory(database_url: &str) -> bool {
         .map_or(trimmed.as_str(), |(base, _)| base);
     if matches!(
         base,
-        ":memory:" | "sqlite::memory:" | "sqlite://:memory:" | "sqlite:///:memory:"
+        ":memory:" | "sqlite::memory:" | "sqlite://{memory}:" | "sqlite:///{memory}:"
     ) || base.ends_with("file::memory:")
         || sqlite_url_query_requests_memory(&trimmed)
     {

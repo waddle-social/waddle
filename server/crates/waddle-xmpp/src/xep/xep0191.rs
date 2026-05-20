@@ -241,11 +241,11 @@ impl std::error::Error for BlockingError {}
 ///
 /// Returns true for `get` (retrieve blocklist) and `set` (block/unblock) types.
 pub fn is_blocking_query(iq: &Iq) -> bool {
-    match &iq.payload {
-        xmpp_parsers::iq::IqType::Get(elem) => {
+    match iq {
+        xmpp_parsers::iq::Iq::Get { payload: elem, .. } => {
             elem.name() == "blocklist" && elem.ns() == NS_BLOCKING
         }
-        xmpp_parsers::iq::IqType::Set(elem) => {
+        xmpp_parsers::iq::Iq::Set { payload: elem, .. } => {
             (elem.name() == "block" || elem.name() == "unblock") && elem.ns() == NS_BLOCKING
         }
         _ => false,
@@ -254,8 +254,8 @@ pub fn is_blocking_query(iq: &Iq) -> bool {
 
 /// Check if an IQ is a blocklist get request.
 pub fn is_blocklist_get(iq: &Iq) -> bool {
-    match &iq.payload {
-        xmpp_parsers::iq::IqType::Get(elem) => {
+    match iq {
+        xmpp_parsers::iq::Iq::Get { payload: elem, .. } => {
             elem.name() == "blocklist" && elem.ns() == NS_BLOCKING
         }
         _ => false,
@@ -264,24 +264,28 @@ pub fn is_blocklist_get(iq: &Iq) -> bool {
 
 /// Check if an IQ is a block set request.
 pub fn is_block_set(iq: &Iq) -> bool {
-    match &iq.payload {
-        xmpp_parsers::iq::IqType::Set(elem) => elem.name() == "block" && elem.ns() == NS_BLOCKING,
+    match iq {
+        xmpp_parsers::iq::Iq::Set { payload: elem, .. } => {
+            elem.name() == "block" && elem.ns() == NS_BLOCKING
+        }
         _ => false,
     }
 }
 
 /// Check if an IQ is an unblock set request.
 pub fn is_unblock_set(iq: &Iq) -> bool {
-    match &iq.payload {
-        xmpp_parsers::iq::IqType::Set(elem) => elem.name() == "unblock" && elem.ns() == NS_BLOCKING,
+    match iq {
+        xmpp_parsers::iq::Iq::Set { payload: elem, .. } => {
+            elem.name() == "unblock" && elem.ns() == NS_BLOCKING
+        }
         _ => false,
     }
 }
 
 /// Parse a blocking request from an IQ stanza.
 pub fn parse_blocking_request(iq: &Iq) -> Result<BlockingRequest, BlockingError> {
-    match &iq.payload {
-        xmpp_parsers::iq::IqType::Get(elem) => {
+    match iq {
+        xmpp_parsers::iq::Iq::Get { payload: elem, .. } => {
             if elem.name() == "blocklist" && elem.ns() == NS_BLOCKING {
                 Ok(BlockingRequest::GetBlocklist)
             } else {
@@ -290,7 +294,7 @@ pub fn parse_blocking_request(iq: &Iq) -> Result<BlockingRequest, BlockingError>
                 ))
             }
         }
-        xmpp_parsers::iq::IqType::Set(elem) => {
+        xmpp_parsers::iq::Iq::Set { payload: elem, .. } => {
             if elem.ns() != NS_BLOCKING {
                 return Err(BlockingError::BadRequest(
                     "Invalid namespace for blocking request".to_string(),
@@ -351,28 +355,28 @@ pub fn build_blocklist_response(original_iq: &Iq, blocked_jids: &[String]) -> Iq
 
     for jid in blocked_jids {
         let item = Element::builder("item", NS_BLOCKING)
-            .attr("jid", jid.as_str())
+            .attr(minidom::rxml::xml_ncname!("jid").to_owned(), jid.as_str())
             .build();
         blocklist_builder = blocklist_builder.append(item);
     }
 
     let blocklist = blocklist_builder.build();
 
-    Iq {
-        from: original_iq.to.clone(),
-        to: original_iq.from.clone(),
-        id: original_iq.id.clone(),
-        payload: xmpp_parsers::iq::IqType::Result(Some(blocklist)),
+    Iq::Result {
+        from: original_iq.to().cloned(),
+        to: original_iq.from().cloned(),
+        id: original_iq.id().to_string(),
+        payload: Some(blocklist),
     }
 }
 
 /// Build a success response for block/unblock operations.
 pub fn build_blocking_success(original_iq: &Iq) -> Iq {
-    Iq {
-        from: original_iq.to.clone(),
-        to: original_iq.from.clone(),
-        id: original_iq.id.clone(),
-        payload: xmpp_parsers::iq::IqType::Result(None),
+    Iq::Result {
+        from: original_iq.to().cloned(),
+        to: original_iq.from().cloned(),
+        id: original_iq.id().to_string(),
+        payload: None,
     }
 }
 
@@ -384,18 +388,18 @@ pub fn build_block_push(to: &jid::Jid, blocked_jids: &[String]) -> Iq {
 
     for jid in blocked_jids {
         let item = Element::builder("item", NS_BLOCKING)
-            .attr("jid", jid.as_str())
+            .attr(minidom::rxml::xml_ncname!("jid").to_owned(), jid.as_str())
             .build();
         block_builder = block_builder.append(item);
     }
 
     let block = block_builder.build();
 
-    Iq {
+    Iq::Set {
         from: None,
         to: Some(to.clone()),
         id: format!("push-block-{}", uuid::Uuid::new_v4()),
-        payload: xmpp_parsers::iq::IqType::Set(block),
+        payload: block,
     }
 }
 
@@ -408,18 +412,18 @@ pub fn build_unblock_push(to: &jid::Jid, unblocked_jids: &[String]) -> Iq {
 
     for jid in unblocked_jids {
         let item = Element::builder("item", NS_BLOCKING)
-            .attr("jid", jid.as_str())
+            .attr(minidom::rxml::xml_ncname!("jid").to_owned(), jid.as_str())
             .build();
         unblock_builder = unblock_builder.append(item);
     }
 
     let unblock = unblock_builder.build();
 
-    Iq {
+    Iq::Set {
         from: None,
         to: Some(to.clone()),
         id: format!("push-unblock-{}", uuid::Uuid::new_v4()),
-        payload: xmpp_parsers::iq::IqType::Set(unblock),
+        payload: unblock,
     }
 }
 

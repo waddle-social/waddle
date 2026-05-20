@@ -31,18 +31,18 @@ pub(super) async fn dispatch_bot_groupchat_response(
     }
 
     let mut working = Message::new(Some(Jid::from(bot_ctx.room_jid.clone())));
-    working.id = Some(
+    working.id = Some(xmpp_parsers::message::Id(
         response
             .stanza_id
             .as_ref()
             .map(|id| id.as_str().to_string())
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
-    );
+    ));
     working.from = Some(Jid::from(bot_ctx.sender_full.clone()));
     working.type_ = XmppMessageType::Groupchat;
     working.bodies.insert(
-        String::new(),
-        xmpp_parsers::message::Body(response.body.as_str().to_string()),
+        xmpp_parsers::message::Lang::new(),
+        response.body.as_str().to_string(),
     );
 
     if let Some(thread_id) = response.thread_id.as_ref() {

@@ -2,7 +2,7 @@ use super::*;
 use chrono::Utc;
 use waddle_xmpp::pending_delivery::storage::InMemoryPendingDeliveryStorage;
 use waddle_xmpp::pending_delivery::{PendingPayload, PendingRow};
-use xmpp_parsers::message::{Body, Message, MessageType};
+use xmpp_parsers::message::{Message, MessageType};
 
 fn bare(s: &str) -> BareJid {
     s.parse().expect("bare jid")
@@ -16,7 +16,8 @@ fn transient_row(recipient: &str, body: &str) -> PendingRow {
     let mut m = Message::new(Some(recipient.parse::<jid::Jid>().expect("jid")));
     m.from = Some("bob@elsewhere/x".parse::<jid::Jid>().expect("jid"));
     m.type_ = MessageType::Chat;
-    m.bodies.insert(String::new(), Body(body.to_string()));
+    m.bodies
+        .insert(xmpp_parsers::message::Lang(String::new()), body.to_string());
     PendingRow {
         id: PendingRowId::fresh(),
         recipient: bare(recipient),
@@ -53,7 +54,8 @@ fn transient_message_xml(recipient: &str, body: &str) -> String {
     let mut m = Message::new(Some(recipient.parse::<jid::Jid>().expect("jid")));
     m.from = Some("bob@elsewhere/x".parse::<jid::Jid>().expect("jid"));
     m.type_ = MessageType::Chat;
-    m.bodies.insert(String::new(), Body(body.to_string()));
+    m.bodies
+        .insert(xmpp_parsers::message::Lang(String::new()), body.to_string());
     message_xml(m)
 }
 
@@ -64,8 +66,8 @@ fn mam_query_frame_xml(recipient: &str, child_name: &str) -> String {
     let payload = match child_name {
         "result" => {
             xmpp_parsers::minidom::Element::builder("result", waddle_xmpp_core::mam::MAM_NS)
-                .attr("queryid", "q1")
-                .attr("id", "archive-id-1")
+                .attr(minidom::rxml::xml_ncname!("queryid").to_owned(), "q1")
+                .attr(minidom::rxml::xml_ncname!("id").to_owned(), "archive-id-1")
                 .append(
                     xmpp_parsers::minidom::Element::builder(
                         "forwarded",
@@ -93,11 +95,12 @@ fn transient_message_with_mam_payload_xml(recipient: &str, body: &str) -> String
     let mut m = Message::new(Some(recipient.parse::<jid::Jid>().expect("jid")));
     m.from = Some("bob@elsewhere/x".parse::<jid::Jid>().expect("jid"));
     m.type_ = MessageType::Chat;
-    m.bodies.insert(String::new(), Body(body.to_string()));
+    m.bodies
+        .insert(xmpp_parsers::message::Lang(String::new()), body.to_string());
     m.payloads.push(
         xmpp_parsers::minidom::Element::builder("result", waddle_xmpp_core::mam::MAM_NS)
-            .attr("queryid", "q1")
-            .attr("id", "archive-id-1")
+            .attr(minidom::rxml::xml_ncname!("queryid").to_owned(), "q1")
+            .attr(minidom::rxml::xml_ncname!("id").to_owned(), "archive-id-1")
             .append(
                 xmpp_parsers::minidom::Element::builder(
                     "forwarded",
@@ -215,9 +218,7 @@ async fn db_storage_startup_deletes_legacy_mam_query_frames() {
     let mut bodies = rows
         .iter()
         .filter_map(|row| match &row.payload {
-            PendingPayload::Transient(message) => {
-                message.bodies.get("").map(|body| body.0.as_str())
-            }
+            PendingPayload::Transient(message) => message.bodies.get("").map(|body| body.as_str()),
             PendingPayload::Archived(_) => None,
         })
         .collect::<Vec<_>>();
@@ -1216,9 +1217,7 @@ async fn janitor_releases_rows_with_dead_sessions() {
         .iter()
         .map(|row| {
             let body_marker = match &row.payload {
-                PendingPayload::Transient(m) => {
-                    m.bodies.get("").map(|b| b.0.as_str()).unwrap_or("")
-                }
+                PendingPayload::Transient(m) => m.bodies.get("").map(|b| b.as_str()).unwrap_or(""),
                 _ => "",
             };
             (body_marker, row)
@@ -1563,7 +1562,7 @@ async fn xep0160_pending_delivery_survives_server_restart() {
         "row durably persisted across the process-restart boundary"
     );
     let body = match &rows[0].payload {
-        PendingPayload::Transient(m) => m.bodies.get("").map(|b| b.0.as_str()),
+        PendingPayload::Transient(m) => m.bodies.get("").map(|b| b.as_str()),
         _ => None,
     };
     assert_eq!(body, Some("across-restart"));

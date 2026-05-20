@@ -133,7 +133,7 @@ pub fn extract_replaces_id(msg: &Message) -> Option<String> {
 /// Build a `<replace xmlns='urn:xmpp:message-correct:0' id='...'/>` element.
 pub fn build_replace_element(original_id: &str) -> Element {
     Element::builder("replace", NS_MESSAGE_CORRECT)
-        .attr("id", original_id)
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), original_id)
         .build()
 }
 
@@ -147,13 +147,12 @@ pub fn build_correction_message(
     new_body: &str,
     original_id: &str,
 ) -> Message {
-    use xmpp_parsers::message::Body;
-
     let mut msg = Message::new(to.into());
     msg.from = from.into();
     msg.type_ = xmpp_parsers::message::MessageType::Chat;
-    msg.id = Some(uuid::Uuid::new_v4().to_string());
-    msg.bodies.insert(String::new(), Body(new_body.to_owned()));
+    msg.id = Some(xmpp_parsers::message::Id(uuid::Uuid::new_v4().to_string()));
+    msg.bodies
+        .insert(xmpp_parsers::message::Lang::new(), new_body.to_owned());
     msg.payloads.push(build_replace_element(original_id));
     msg
 }
@@ -175,14 +174,14 @@ pub fn strip_correction(msg: &mut Message) {
 
 impl From<xmpp_parsers::message_correct::Replace> for Correction {
     fn from(replace: xmpp_parsers::message_correct::Replace) -> Self {
-        Self::new(replace.id)
+        Self::new(replace.id.0)
     }
 }
 
 impl From<Correction> for xmpp_parsers::message_correct::Replace {
     fn from(correction: Correction) -> Self {
         Self {
-            id: correction.replaces_id,
+            id: xmpp_parsers::message::Id(correction.replaces_id),
         }
     }
 }
@@ -190,12 +189,12 @@ impl From<Correction> for xmpp_parsers::message_correct::Replace {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use xmpp_parsers::message::{Body, Message, MessageType};
+    use xmpp_parsers::message::{Message, MessageType};
 
     #[test]
     fn test_is_replace_element() {
         let replace = Element::builder("replace", NS_MESSAGE_CORRECT)
-            .attr("id", "orig-1")
+            .attr(minidom::rxml::xml_ncname!("id").to_owned(), "orig-1")
             .build();
         assert!(is_replace_element(&replace));
 
@@ -316,7 +315,7 @@ mod tests {
         assert_eq!(msg.from, Some(from));
         assert_eq!(msg.type_, MessageType::Chat);
         assert!(msg.id.is_some());
-        assert_eq!(msg.bodies.get("").map(|b| b.0.as_str()), Some("Fixed text"));
+        assert_eq!(msg.bodies.get("").map(|b| b.as_str()), Some("Fixed text"));
         assert_eq!(extract_replaces_id(&msg), Some("orig-1".to_owned()));
     }
 
@@ -324,7 +323,7 @@ mod tests {
     fn test_set_correction() {
         let mut msg = Message::new(None::<jid::Jid>);
         msg.bodies
-            .insert(String::new(), Body("Updated".to_string()));
+            .insert(xmpp_parsers::message::Lang::new(), "Updated".to_string());
 
         set_correction(&mut msg, "orig-5");
         assert_eq!(extract_replaces_id(&msg), Some("orig-5".to_owned()));
@@ -377,7 +376,7 @@ mod tests {
     fn test_roundtrip_conversion() {
         let correction = Correction::new("test-id");
         let replace: xmpp_parsers::message_correct::Replace = correction.clone().into();
-        assert_eq!(replace.id, "test-id");
+        assert_eq!(replace.id.0, "test-id");
 
         let back: Correction = replace.into();
         assert_eq!(back, correction);

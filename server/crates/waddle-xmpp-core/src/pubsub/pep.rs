@@ -32,7 +32,7 @@ pub fn is_pep_request(iq: &Iq, user_jid: &BareJid) -> bool {
         return false;
     }
 
-    match &iq.to {
+    match iq.to() {
         None => true,
         Some(to_jid) => to_jid.to_bare() == *user_jid,
     }
@@ -44,7 +44,7 @@ pub fn is_pep_request_to(iq: &Iq, target_jid: &BareJid) -> bool {
         return false;
     }
 
-    match &iq.to {
+    match iq.to() {
         Some(to_jid) => to_jid.to_bare() == *target_jid,
         None => false,
     }
@@ -121,22 +121,21 @@ pub fn pep_features() -> Vec<Feature> {
 mod tests {
     use super::*;
     use minidom::Element;
-    use xmpp_parsers::iq::IqType;
 
     fn make_pubsub_iq(to: Option<&str>) -> Iq {
         let pubsub = Element::builder("pubsub", super::super::stanzas::NS_PUBSUB)
             .append(
                 Element::builder("items", super::super::stanzas::NS_PUBSUB)
-                    .attr("node", "test")
+                    .attr(minidom::rxml::xml_ncname!("node").to_owned(), "test")
                     .build(),
             )
             .build();
 
-        Iq {
+        Iq::Get {
             from: Some("user@example.com/resource".parse().expect("valid jid")),
             to: to.map(|s| s.parse().expect("valid jid")),
             id: "test-1".to_string(),
-            payload: IqType::Get(pubsub),
+            payload: pubsub,
         }
     }
 

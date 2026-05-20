@@ -25,7 +25,7 @@
 //! ```
 
 use minidom::Element;
-use xmpp_parsers::iq::{Iq, IqType};
+use xmpp_parsers::iq::Iq;
 
 /// Namespace for XEP-0092 Software Version.
 pub const NS_VERSION: &str = "jabber:iq:version";
@@ -40,7 +40,7 @@ pub struct SoftwareVersion {
 
 /// Check if an IQ stanza is a software version query.
 pub fn is_version_query(iq: &Iq) -> bool {
-    matches!(&iq.payload, IqType::Get(elem) if elem.name() == "query" && elem.ns() == NS_VERSION)
+    matches!(iq, Iq::Get { payload: elem, .. } if elem.name() == "query" && elem.ns() == NS_VERSION)
 }
 
 /// Build a software version response element.
@@ -70,18 +70,21 @@ pub fn build_version_element(info: &SoftwareVersion) -> Element {
 
 /// Build a software version response IQ.
 pub fn build_version_response(original_iq: &Iq, info: &SoftwareVersion) -> Iq {
-    Iq {
-        from: original_iq.to.clone(),
-        to: original_iq.from.clone(),
-        id: original_iq.id.clone(),
-        payload: IqType::Result(Some(build_version_element(info))),
+    Iq::Result {
+        from: original_iq.to().cloned(),
+        to: original_iq.from().cloned(),
+        id: original_iq.id().to_string(),
+        payload: Some(build_version_element(info)),
     }
 }
 
 /// Parse a software version response back into a struct.
 pub fn parse_version_response(iq: &Iq) -> Option<SoftwareVersion> {
-    let elem = match &iq.payload {
-        IqType::Result(Some(elem)) if elem.name() == "query" && elem.ns() == NS_VERSION => elem,
+    let elem = match iq {
+        Iq::Result {
+            payload: Some(elem),
+            ..
+        } if elem.name() == "query" && elem.ns() == NS_VERSION => elem,
         _ => return None,
     };
 
@@ -110,11 +113,11 @@ mod tests {
 
     fn make_version_query() -> Iq {
         let query_elem = Element::builder("query", NS_VERSION).build();
-        Iq {
+        Iq::Get {
             from: Some("alice@example.com".parse().expect("valid jid")),
             to: Some("example.com".parse().expect("valid jid")),
             id: "v-1".to_string(),
-            payload: IqType::Get(query_elem),
+            payload: query_elem,
         }
     }
 
@@ -135,11 +138,11 @@ mod tests {
     #[test]
     fn xep0092_negative_ignores_non_version_namespace() {
         let other = Element::builder("query", "jabber:iq:roster").build();
-        let iq = Iq {
+        let iq = Iq::Get {
             from: None,
             to: None,
             id: "v-ns".to_string(),
-            payload: IqType::Get(other),
+            payload: other,
         };
         assert!(!is_version_query(&iq));
     }
@@ -147,11 +150,11 @@ mod tests {
     #[test]
     fn xep0092_negative_ignores_set_iq() {
         let query = Element::builder("query", NS_VERSION).build();
-        let iq = Iq {
+        let iq = Iq::Set {
             from: None,
             to: None,
             id: "v-set".to_string(),
-            payload: IqType::Set(query),
+            payload: query,
         };
         assert!(!is_version_query(&iq));
     }
@@ -159,11 +162,11 @@ mod tests {
     #[test]
     fn xep0092_negative_ignores_result_iq() {
         let query = Element::builder("query", NS_VERSION).build();
-        let iq = Iq {
+        let iq = Iq::Result {
             from: None,
             to: None,
             id: "v-res".to_string(),
-            payload: IqType::Result(Some(query)),
+            payload: Some(query),
         };
         assert!(!is_version_query(&iq));
     }
@@ -174,11 +177,15 @@ mod tests {
         let info = sample_info();
         let response = build_version_response(&query, &info);
 
-        assert_eq!(response.id, "v-1");
-        assert_eq!(response.from, query.to);
-        assert_eq!(response.to, query.from);
+        assert_eq!(response.id(), "v-1");
+        assert_eq!(response.from(), query.to());
+        assert_eq!(response.to(), query.from());
 
-        let IqType::Result(Some(elem)) = &response.payload else {
+        let Iq::Result {
+            payload: Some(elem),
+            ..
+        } = &response
+        else {
             panic!("Expected Result payload");
         };
         assert_eq!(elem.name(), "query");
@@ -213,7 +220,11 @@ mod tests {
         };
         let response = build_version_response(&query, &info);
 
-        let IqType::Result(Some(elem)) = &response.payload else {
+        let Iq::Result {
+            payload: Some(elem),
+            ..
+        } = &response
+        else {
             panic!("Expected Result payload");
         };
         assert!(elem.children().all(|c| !c.is("os", NS_VERSION)));
@@ -244,11 +255,11 @@ mod tests {
                     .build(),
             )
             .build();
-        let iq = Iq {
+        let iq = Iq::Result {
             from: None,
             to: None,
             id: "v-parse".to_string(),
-            payload: IqType::Result(Some(incomplete)),
+            payload: Some(incomplete),
         };
         assert!(parse_version_response(&iq).is_none());
     }
@@ -264,7 +275,7 @@ mod tests {
         let info = sample_info();
         let response = build_version_response(&query, &info);
 
-        assert_eq!(response.from, query.to);
-        assert_eq!(response.to, query.from);
+        assert_eq!(response.from(), query.to());
+        assert_eq!(response.to(), query.from());
     }
 }

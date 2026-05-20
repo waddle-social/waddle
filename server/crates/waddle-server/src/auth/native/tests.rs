@@ -1,5 +1,6 @@
 use super::*;
 use crate::db::{Database, MigrationRunner};
+use kameo::actor::Spawn;
 use std::sync::Arc;
 
 fn test_password() -> String {
@@ -22,7 +23,7 @@ async fn create_test_db() -> Arc<Database> {
 #[tokio::test]
 async fn test_register_user() {
     let db = create_test_db().await;
-    let actor = kameo::spawn(crate::db::actor::DbActor::new((*db).clone()));
+    let actor = crate::db::actor::DbActor::spawn(crate::db::actor::DbActor::new((*db).clone()));
     let store = NativeUserStore::new(actor);
     let password = test_password();
 
@@ -47,7 +48,7 @@ async fn test_register_user() {
 #[tokio::test]
 async fn test_duplicate_user() {
     let db = create_test_db().await;
-    let actor = kameo::spawn(crate::db::actor::DbActor::new((*db).clone()));
+    let actor = crate::db::actor::DbActor::spawn(crate::db::actor::DbActor::new((*db).clone()));
     let store = NativeUserStore::new(actor);
     let password = test_password();
 
@@ -71,7 +72,7 @@ async fn test_duplicate_user() {
 #[tokio::test]
 async fn test_get_scram_credentials() {
     let db = create_test_db().await;
-    let actor = kameo::spawn(crate::db::actor::DbActor::new((*db).clone()));
+    let actor = crate::db::actor::DbActor::spawn(crate::db::actor::DbActor::new((*db).clone()));
     let store = NativeUserStore::new(actor);
     let password = test_password();
 
@@ -102,7 +103,7 @@ async fn test_get_scram_credentials() {
 #[tokio::test]
 async fn test_verify_password() {
     let db = create_test_db().await;
-    let actor = kameo::spawn(crate::db::actor::DbActor::new((*db).clone()));
+    let actor = crate::db::actor::DbActor::spawn(crate::db::actor::DbActor::new((*db).clone()));
     let store = NativeUserStore::new(actor);
     let correct_password = test_password();
     let wrong_password = test_password();
@@ -142,7 +143,7 @@ async fn test_verify_password() {
 #[tokio::test]
 async fn test_update_password() {
     let db = create_test_db().await;
-    let actor = kameo::spawn(crate::db::actor::DbActor::new((*db).clone()));
+    let actor = crate::db::actor::DbActor::spawn(crate::db::actor::DbActor::new((*db).clone()));
     let store = NativeUserStore::new(actor);
     let old_password = test_password();
     let new_password = test_password();
@@ -180,7 +181,7 @@ async fn test_update_password() {
 #[tokio::test]
 async fn test_delete_user() {
     let db = create_test_db().await;
-    let actor = kameo::spawn(crate::db::actor::DbActor::new((*db).clone()));
+    let actor = crate::db::actor::DbActor::spawn(crate::db::actor::DbActor::new((*db).clone()));
     let store = NativeUserStore::new(actor);
     let password = test_password();
 

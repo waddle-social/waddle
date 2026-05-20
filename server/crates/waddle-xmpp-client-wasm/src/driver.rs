@@ -493,7 +493,7 @@ impl WasmDriverTask {
                         .iter_mut()
                         .find(|(_, pending)| pending.query_id == query_id)
                     {
-                        pending.messages.push(archived);
+                        pending.messages.push(*archived);
                     }
                 }
                 None

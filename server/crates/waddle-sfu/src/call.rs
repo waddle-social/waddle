@@ -9,9 +9,13 @@ use jid::FullJid;
 
 use crate::error::SfuError;
 
-/// Opaque LiveKit room name. For 1:1 calls this is the Jingle `sid`;
-/// for MUC calls it is the `call-id` carried on the
-/// `urn:waddle:muc-call:0` presence extension.
+/// Opaque LiveKit room name. For 1:1 calls this is the Jingle `sid`
+/// (scoped by the initiator's bare JID, see `scoped_call_id`); for
+/// MUC group calls it is the MUC room JID itself, as set by the
+/// XEP-0272 Muji branch of the Jingle handler — every occupant who
+/// joins the call lands in the SAME LiveKit room because the Muji
+/// `<jingle/>` carries `<muji room='…'/>` and the room JID maps
+/// directly onto the SFU `CallId`.
 ///
 /// LiveKit accepts arbitrary UTF-8 room names but Waddle constrains
 /// them to a printable ASCII subset (alphanumerics + `-`, `_`, `:`)
@@ -99,7 +103,8 @@ pub enum CallState {
     /// removing the caller.
     Active { remaining: usize },
     /// The caller was the last participant; the call entry has been
-    /// removed from the registry. The MUC handler clears the
-    /// `urn:waddle:muc-call:0` presence extension on this transition.
+    /// removed from the registry. Clients drop their XEP-0272 Muji
+    /// presence advertisement on this transition (per §Leaving —
+    /// absence of `<muji/>` is the leave marker).
     Ended,
 }

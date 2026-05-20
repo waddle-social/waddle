@@ -193,14 +193,17 @@ pub(super) fn fallback_archived_message(row: &MamArchivedMessage) -> Message {
     // break downstream ownership/retraction logic that branches on
     // `msg.type_`.
     msg.type_ = row.message_type.clone();
-    msg.id = row.stanza_id.as_ref().map(|s| s.id.clone());
+    msg.id = row
+        .stanza_id
+        .as_ref()
+        .map(|s| xmpp_parsers::message::Id(s.id.clone()));
     // RFC 6121 §5.2.3: only emit `<body>` if the archived row recorded
     // one. `Some("")` round-trips as an empty `<body></body>` element;
     // `None` produces no `<body>` element at all (subject-only,
     // reaction-only, etc.).
     if let Some(body) = row.body.as_deref() {
         msg.bodies
-            .insert(String::new(), xmpp_parsers::message::Body(body.to_owned()));
+            .insert(xmpp_parsers::message::Lang::new(), body.to_owned());
     }
     msg
 }
@@ -233,7 +236,7 @@ impl ToElementString for waddle_xmpp::Stanza {
     fn to_element_string(&self) -> Result<String, waddle_xmpp::XmppError> {
         use waddle_xmpp::Stanza;
         match self {
-            Stanza::Iq(iq) => stanza_to_string(iq.clone()),
+            Stanza::Iq(iq) => stanza_to_string(*iq.clone()),
             Stanza::Message(msg) => message_to_string(msg),
             Stanza::Presence(p) => stanza_to_string(p.clone()),
         }

@@ -38,7 +38,12 @@ impl MessageHandler for ReceiptsHandler {
             return HandlerOutcome::Continue(Vec::new());
         }
 
-        let Some(original_id) = message.id.as_deref().filter(|id| !id.is_empty()) else {
+        let Some(original_id) = message
+            .id
+            .as_ref()
+            .map(|id| id.0.as_str())
+            .filter(|id| !id.is_empty())
+        else {
             return HandlerOutcome::Continue(Vec::new());
         };
         let Some(target) = message.from.clone() else {
@@ -84,7 +89,7 @@ mod tests {
         let mut message = Message::new(Some("bob@example.com".parse().expect("jid")));
         message.from = Some("alice@example.com/web".parse().expect("jid"));
         message.type_ = MessageType::Chat;
-        message.id = Some("msg-1".to_string());
+        message.id = Some(xmpp_parsers::message::Id("msg-1".to_string()));
         message
             .payloads
             .push(crate::xep::xep0184::build_receipt_request_element());

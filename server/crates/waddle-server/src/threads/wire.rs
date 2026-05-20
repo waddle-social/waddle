@@ -2,7 +2,7 @@
 //! so no XML is ever concatenated as strings (CLAUDE.md hard rule).
 
 use minidom::Element;
-use xmpp_parsers::iq::{Iq, IqType};
+use xmpp_parsers::iq::Iq;
 
 use super::query::{ThreadEntry, ThreadsError, ThreadsPage, ThreadsQuery, NS_THREADS};
 
@@ -12,8 +12,8 @@ const NS_RSM: &str = "http://jabber.org/protocol/rsm";
 /// Parse a `<query xmlns='urn:waddle:threads:0'/>` IQ payload into a
 /// `ThreadsQuery`. The IQ MUST be a `get` for this to succeed.
 pub fn parse_threads_query(iq: &Iq) -> Result<ThreadsQuery, ThreadsError> {
-    let payload = match &iq.payload {
-        IqType::Get(el) => el,
+    let payload = match iq {
+        Iq::Get { payload: el, .. } => el,
         _ => return Err(ThreadsError::WrongIqType),
     };
     if !payload.is("query", NS_THREADS) {
@@ -43,8 +43,14 @@ pub fn parse_threads_query(iq: &Iq) -> Result<ThreadsQuery, ThreadsError> {
 /// Build the `<threads>` response element for `page`.
 pub fn build_threads_response(page: &ThreadsPage) -> Element {
     let mut threads = Element::builder("threads", NS_THREADS)
-        .attr("total", page.total.to_string())
-        .attr("unread-threads", page.unread_threads.to_string())
+        .attr(
+            minidom::rxml::xml_ncname!("total").to_owned(),
+            page.total.to_string(),
+        )
+        .attr(
+            minidom::rxml::xml_ncname!("unread-threads").to_owned(),
+            page.unread_threads.to_string(),
+        )
         .build();
 
     for entry in &page.entries {
@@ -77,14 +83,32 @@ fn build_thread_entry(entry: &ThreadEntry) -> Element {
             .unwrap_or_else(|| "1970-01-01T00:00:00Z".to_string());
 
     let mut t = Element::builder("thread", NS_THREADS)
-        .attr("channel", entry.channel.to_string())
-        .attr("thread-id", entry.thread_id.clone())
-        .attr("last-stanza-id", entry.last_stanza_id.clone())
-        .attr("last-activity", last_activity_iso)
-        .attr("unread", entry.unread.to_string())
-        .attr("reply-count", entry.reply_count.to_string())
         .attr(
-            "has-unread",
+            minidom::rxml::xml_ncname!("channel").to_owned(),
+            entry.channel.to_string(),
+        )
+        .attr(
+            minidom::rxml::xml_ncname!("thread-id").to_owned(),
+            entry.thread_id.clone(),
+        )
+        .attr(
+            minidom::rxml::xml_ncname!("last-stanza-id").to_owned(),
+            entry.last_stanza_id.clone(),
+        )
+        .attr(
+            minidom::rxml::xml_ncname!("last-activity").to_owned(),
+            last_activity_iso,
+        )
+        .attr(
+            minidom::rxml::xml_ncname!("unread").to_owned(),
+            entry.unread.to_string(),
+        )
+        .attr(
+            minidom::rxml::xml_ncname!("reply-count").to_owned(),
+            entry.reply_count.to_string(),
+        )
+        .attr(
+            minidom::rxml::xml_ncname!("has-unread").to_owned(),
             if entry.has_unread() { "true" } else { "false" },
         )
         .build();
@@ -113,11 +137,11 @@ mod tests {
     use xmpp_parsers::iq::Iq;
 
     fn make_get_iq(payload: Element) -> Iq {
-        Iq {
+        Iq::Get {
             from: None,
             to: None,
             id: "test".into(),
-            payload: IqType::Get(payload),
+            payload,
         }
     }
 
@@ -148,11 +172,11 @@ mod tests {
     #[test]
     fn parse_rejects_non_get_iq() {
         let payload = Element::builder("query", NS_THREADS).build();
-        let iq = Iq {
+        let iq = Iq::Set {
             from: None,
             to: None,
             id: "x".into(),
-            payload: IqType::Set(payload),
+            payload,
         };
         assert!(matches!(
             parse_threads_query(&iq),

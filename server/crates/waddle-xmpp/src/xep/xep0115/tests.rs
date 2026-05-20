@@ -3,10 +3,11 @@ use super::*;
 use crate::disco::info::{Feature, Identity, DISCO_INFO_NS};
 
 fn data_form_field(var: &str, field_type: Option<&str>, values: &[&str]) -> Element {
-    let mut builder = Element::builder("field", DATA_FORMS_NS).attr("var", var);
+    let mut builder = Element::builder("field", DATA_FORMS_NS)
+        .attr(minidom::rxml::xml_ncname!("var").to_owned(), var);
 
     if let Some(field_type) = field_type {
-        builder = builder.attr("type", field_type);
+        builder = builder.attr(minidom::rxml::xml_ncname!("type").to_owned(), field_type);
     }
 
     for value in values {
@@ -22,7 +23,7 @@ fn data_form_field(var: &str, field_type: Option<&str>, values: &[&str]) -> Elem
 
 fn software_info_form() -> Element {
     Element::builder("x", DATA_FORMS_NS)
-        .attr("type", "result")
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "result")
         .append(data_form_field(
             FORM_TYPE_FIELD,
             Some("hidden"),
@@ -42,13 +43,17 @@ fn software_info_form() -> Element {
 
 fn software_info_form_with_type(form_type: &str) -> Element {
     let mut form = software_info_form();
-    form.set_attr("type", form_type);
+    form.set_attr(
+        minidom::rxml::Namespace::NONE,
+        minidom::rxml::xml_ncname!("type").to_owned(),
+        form_type,
+    );
     form
 }
 
 fn software_info_form_with_form_type_field_type(field_type: &str) -> Element {
     Element::builder("x", DATA_FORMS_NS)
-        .attr("type", "result")
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "result")
         .append(data_form_field(
             FORM_TYPE_FIELD,
             Some(field_type),
@@ -60,7 +65,7 @@ fn software_info_form_with_form_type_field_type(field_type: &str) -> Element {
 
 fn software_info_form_with_foreign_children() -> Element {
     Element::builder("x", DATA_FORMS_NS)
-        .attr("type", "result")
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "result")
         .append(data_form_field(
             FORM_TYPE_FIELD,
             Some("hidden"),
@@ -68,7 +73,7 @@ fn software_info_form_with_foreign_children() -> Element {
         ))
         .append(
             Element::builder("field", "urn:waddle:test:foreign")
-                .attr("var", "rogue-field")
+                .attr(minidom::rxml::xml_ncname!("var").to_owned(), "rogue-field")
                 .append(
                     Element::builder("value", "urn:waddle:test:foreign")
                         .append("rogue")
@@ -78,7 +83,7 @@ fn software_info_form_with_foreign_children() -> Element {
         )
         .append(
             Element::builder("field", DATA_FORMS_NS)
-                .attr("var", "software")
+                .attr(minidom::rxml::xml_ncname!("var").to_owned(), "software")
                 .append(
                     Element::builder("value", DATA_FORMS_NS)
                         .append("Psi")
@@ -96,7 +101,7 @@ fn software_info_form_with_foreign_children() -> Element {
 
 fn software_info_form_with_empty_value_field() -> Element {
     Element::builder("x", DATA_FORMS_NS)
-        .attr("type", "result")
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "result")
         .append(data_form_field(
             FORM_TYPE_FIELD,
             Some("hidden"),
@@ -104,7 +109,7 @@ fn software_info_form_with_empty_value_field() -> Element {
         ))
         .append(
             Element::builder("field", DATA_FORMS_NS)
-                .attr("var", "software")
+                .attr(minidom::rxml::xml_ncname!("var").to_owned(), "software")
                 .build(),
         )
         .build()
@@ -112,7 +117,7 @@ fn software_info_form_with_empty_value_field() -> Element {
 
 fn software_info_form_with_duplicate_form_type() -> Element {
     Element::builder("x", DATA_FORMS_NS)
-        .attr("type", "result")
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "result")
         .append(data_form_field(
             FORM_TYPE_FIELD,
             Some("hidden"),
@@ -129,7 +134,7 @@ fn software_info_form_with_duplicate_form_type() -> Element {
 
 fn software_info_form_with_missing_var() -> Element {
     Element::builder("x", DATA_FORMS_NS)
-        .attr("type", "result")
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "result")
         .append(data_form_field(
             FORM_TYPE_FIELD,
             Some("hidden"),
@@ -184,9 +189,12 @@ fn test_caps_build_element() {
 #[test]
 fn test_caps_from_element() {
     let elem = Element::builder("c", NS_CAPS)
-        .attr("hash", "sha-1")
-        .attr("node", "https://test.com")
-        .attr("ver", "xyz789")
+        .attr(minidom::rxml::xml_ncname!("hash").to_owned(), "sha-1")
+        .attr(
+            minidom::rxml::xml_ncname!("node").to_owned(),
+            "https://test.com",
+        )
+        .attr(minidom::rxml::xml_ncname!("ver").to_owned(), "xyz789")
         .build();
 
     let caps = Caps::from_element(&elem).unwrap();
@@ -198,9 +206,12 @@ fn test_caps_from_element() {
 #[test]
 fn test_caps_from_element_wrong_name() {
     let elem = Element::builder("x", NS_CAPS)
-        .attr("hash", "sha-1")
-        .attr("node", "https://test.com")
-        .attr("ver", "xyz789")
+        .attr(minidom::rxml::xml_ncname!("hash").to_owned(), "sha-1")
+        .attr(
+            minidom::rxml::xml_ncname!("node").to_owned(),
+            "https://test.com",
+        )
+        .attr(minidom::rxml::xml_ncname!("ver").to_owned(), "xyz789")
         .build();
 
     assert!(Caps::from_element(&elem).is_none());
@@ -209,9 +220,12 @@ fn test_caps_from_element_wrong_name() {
 #[test]
 fn test_caps_from_element_wrong_ns() {
     let elem = Element::builder("c", "wrong:ns")
-        .attr("hash", "sha-1")
-        .attr("node", "https://test.com")
-        .attr("ver", "xyz789")
+        .attr(minidom::rxml::xml_ncname!("hash").to_owned(), "sha-1")
+        .attr(
+            minidom::rxml::xml_ncname!("node").to_owned(),
+            "https://test.com",
+        )
+        .attr(minidom::rxml::xml_ncname!("ver").to_owned(), "xyz789")
         .build();
 
     assert!(Caps::from_element(&elem).is_none());
@@ -220,7 +234,7 @@ fn test_caps_from_element_wrong_ns() {
 #[test]
 fn test_caps_from_element_missing_attrs() {
     let elem = Element::builder("c", NS_CAPS)
-        .attr("hash", "sha-1")
+        .attr(minidom::rxml::xml_ncname!("hash").to_owned(), "sha-1")
         // missing node and ver
         .build();
 
@@ -485,7 +499,7 @@ fn test_compute_caps_hash_ignores_foreign_namespaced_form_children() {
     let identities = vec![Identity::server(Some("Waddle"))];
     let features = vec![Feature::disco_info(), Feature::disco_items()];
     let clean_extensions = vec![Element::builder("x", DATA_FORMS_NS)
-        .attr("type", "result")
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "result")
         .append(data_form_field(
             FORM_TYPE_FIELD,
             Some("hidden"),

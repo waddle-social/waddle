@@ -3,11 +3,11 @@ use super::*;
 #[test]
 fn test_is_disco_info_query() {
     let query_elem = Element::builder("query", DISCO_INFO_NS).build();
-    let iq = Iq {
+    let iq = Iq::Get {
         from: None,
         to: None,
         id: "test-1".to_string(),
-        payload: xmpp_parsers::iq::IqType::Get(query_elem),
+        payload: query_elem,
     };
 
     assert!(is_disco_info_query(&iq));
@@ -16,13 +16,13 @@ fn test_is_disco_info_query() {
 #[test]
 fn test_parse_disco_info_query() {
     let query_elem = Element::builder("query", DISCO_INFO_NS)
-        .attr("node", "caps#hash")
+        .attr(minidom::rxml::xml_ncname!("node").to_owned(), "caps#hash")
         .build();
-    let iq = Iq {
+    let iq = Iq::Get {
         from: Some("user@example.com".parse().unwrap()),
         to: Some("example.com".parse().unwrap()),
         id: "test-1".to_string(),
-        payload: xmpp_parsers::iq::IqType::Get(query_elem),
+        payload: query_elem,
     };
 
     let query = parse_disco_info_query(&iq).unwrap();
@@ -33,11 +33,11 @@ fn test_parse_disco_info_query() {
 #[test]
 fn test_build_disco_info_response() {
     let query_elem = Element::builder("query", DISCO_INFO_NS).build();
-    let iq = Iq {
+    let iq = Iq::Get {
         from: Some("user@example.com".parse().unwrap()),
         to: Some("example.com".parse().unwrap()),
         id: "disco-1".to_string(),
-        payload: xmpp_parsers::iq::IqType::Get(query_elem),
+        payload: query_elem,
     };
 
     let response = build_disco_info_response(
@@ -47,16 +47,23 @@ fn test_build_disco_info_response() {
         None,
     );
 
-    assert_eq!(response.id, "disco-1");
+    assert_eq!(response.id(), "disco-1");
 
-    let xmpp_parsers::iq::IqType::Result(Some(query)) = response.payload else {
+    let Iq::Result {
+        payload: Some(query),
+        ..
+    } = response
+    else {
         panic!("expected disco#info result payload");
     };
     let identity = query
         .children()
         .find(|child| child.name() == "identity")
         .expect("identity should be present");
-    assert_eq!(identity.attr("xml:lang"), Some("en"));
+    assert_eq!(
+        identity.attr_ns(&minidom::rxml::Namespace::XML, "lang"),
+        Some("en")
+    );
 }
 
 #[test]
@@ -197,5 +204,5 @@ fn test_call_feature_helpers_pin_canonical_xep_namespaces() {
         Feature::waddle_livekit_transport().0,
         "urn:waddle:transports:livekit:0"
     );
-    assert_eq!(Feature::waddle_muc_call().0, "urn:waddle:muc-call:0");
+    assert_eq!(Feature::muji().0, "urn:xmpp:jingle:muji:0");
 }

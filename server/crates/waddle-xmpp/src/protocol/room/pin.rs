@@ -35,7 +35,7 @@ use chrono::{DateTime, Utc};
 use jid::Jid;
 use minidom::Element;
 use waddle_xmpp_core::xep0359::StanzaId;
-use xmpp_parsers::message::{Body, Message, MessageType};
+use xmpp_parsers::message::{Message, MessageType};
 use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
 
 /// Pin-event handler for the MUC room chain.
@@ -191,12 +191,22 @@ fn build_pin_event_element(
     reason: Option<&str>,
 ) -> Element {
     let mut element = Element::builder("pin-event", NS_WADDLE_PIN_V0)
-        .attr("action", action)
-        .attr("target", target_stanza_id.id.as_str())
-        .attr("by", pinner_jid.to_string().as_str())
+        .attr(minidom::rxml::xml_ncname!("action").to_owned(), action)
+        .attr(
+            minidom::rxml::xml_ncname!("target").to_owned(),
+            target_stanza_id.id.as_str(),
+        )
+        .attr(
+            minidom::rxml::xml_ncname!("by").to_owned(),
+            pinner_jid.to_string().as_str(),
+        )
         .build();
     if let Some(reason) = reason {
-        element.set_attr("reason", reason);
+        element.set_attr(
+            minidom::rxml::Namespace::NONE,
+            minidom::rxml::xml_ncname!("reason").to_owned(),
+            reason,
+        );
     }
     if let Some(preview) = preview {
         element.append_child(build_preview_element(preview));
@@ -208,7 +218,7 @@ fn new_room_message(room: &jid::BareJid, body: String, payload: Element) -> Mess
     let mut msg = Message::new(Some(Jid::from(room.clone())));
     msg.from = Some(Jid::from(room.clone()));
     msg.type_ = MessageType::Groupchat;
-    msg.bodies.insert(String::new(), Body(body));
+    msg.bodies.insert(xmpp_parsers::message::Lang::new(), body);
     msg.payloads.push(payload);
     msg
 }
@@ -216,10 +226,17 @@ fn new_room_message(room: &jid::BareJid, body: String, payload: Element) -> Mess
 fn build_preview_element(preview: &PinPreview) -> Element {
     let mut elem = Element::builder("preview", NS_WADDLE_PIN_V0).build();
     let mut author = Element::builder("author", NS_WADDLE_PIN_V0)
-        .attr("jid", preview.author_jid.to_string().as_str())
+        .attr(
+            minidom::rxml::xml_ncname!("jid").to_owned(),
+            preview.author_jid.to_string().as_str(),
+        )
         .build();
     if let Some(ref nick) = preview.author_nick {
-        author.set_attr("nick", nick);
+        author.set_attr(
+            minidom::rxml::Namespace::NONE,
+            minidom::rxml::xml_ncname!("nick").to_owned(),
+            nick,
+        );
     }
     elem.append_child(author);
 
@@ -383,7 +400,8 @@ mod tests {
         let mut msg = Message::new(Some(Jid::from(room.clone())));
         msg.from = Some(Jid::from(sender.clone()));
         msg.type_ = MessageType::Groupchat;
-        msg.bodies.insert(String::new(), Body("hi".into()));
+        msg.bodies
+            .insert(xmpp_parsers::message::Lang::new(), "hi".into());
         match MucPinHandler.handle(&mut msg, &ctx) {
             RoomHandlerOutcome::Continue(events) => assert!(events.is_empty()),
             RoomHandlerOutcome::Halt(_) => panic!("non-pin message should pass through"),
@@ -506,7 +524,7 @@ mod tests {
         // Empty target — should be bad-request.
         msg.payloads.push(
             Element::builder("pinned", NS_WADDLE_PIN_V0)
-                .attr("target", "")
+                .attr(minidom::rxml::xml_ncname!("target").to_owned(), "")
                 .build(),
         );
         let outcome = MucPinHandler.handle(&mut msg, &ctx);

@@ -1,7 +1,7 @@
 use super::*;
 use crate::xep::xep0085::{build_chat_state_element, ChatState};
 use crate::xep::xep0334::{add_hint, Hint};
-use xmpp_parsers::message::{Body, MessageType};
+use xmpp_parsers::message::MessageType;
 
 fn full(s: &str) -> FullJid {
     s.parse().expect("valid full jid")
@@ -16,7 +16,8 @@ fn dm(from: &str, to: &str, message_type: MessageType, body: Option<&str>) -> Me
     m.from = Some(from.parse::<Jid>().expect("valid jid"));
     m.type_ = message_type;
     if let Some(body_text) = body {
-        m.bodies.insert(String::new(), Body(body_text.to_string()));
+        m.bodies
+            .insert(xmpp_parsers::message::Lang::new(), body_text.to_string());
     }
     m
 }

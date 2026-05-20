@@ -69,11 +69,11 @@ pub(super) fn normalize_thread_create_source(message: &mut Message) -> Option<St
     let thread_id = message
         .thread
         .as_ref()
-        .map(|thread| thread.0.clone())
-        .or_else(|| message.id.clone())
+        .map(|thread| thread.id.clone())
+        .or_else(|| message.id.as_ref().map(|id| id.0.clone()))
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     if message.id.is_none() {
-        message.id = Some(thread_id.clone());
+        message.id = Some(xmpp_parsers::message::Id(thread_id.clone()));
     }
     if message.thread.is_none() {
         set_thread_id(message, &thread_id);
@@ -86,11 +86,11 @@ pub(super) fn message_thread_id(message: &Message) -> Option<String> {
     message
         .thread
         .as_ref()
-        .map(|thread| thread.0.clone())
+        .map(|thread| thread.id.clone())
         .or_else(|| {
             extract_forum_action(message).and_then(|action| match action {
                 ForumAction::Reply(reply) => Some(reply.thread_id),
-                ForumAction::CreateThread(_) => message.id.clone(),
+                ForumAction::CreateThread(_) => message.id.as_ref().map(|id| id.0.clone()),
             })
         })
 }

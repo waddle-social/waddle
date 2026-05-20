@@ -31,8 +31,7 @@ pub(super) async fn handle_command_iq(
 
     let node = command.node.clone();
     let target = request_iq
-        .to
-        .as_ref()
+        .to()
         .map(|jid| jid.to_bare().to_string())
         .unwrap_or_else(|| domain.to_string());
     let extension_command = is_extension_command_node(&node);

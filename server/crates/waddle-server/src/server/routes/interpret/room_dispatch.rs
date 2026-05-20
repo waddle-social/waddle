@@ -58,7 +58,7 @@ pub(super) async fn dispatch_to_room(
     //    extension payload checks or extension runtime calls.
     let mut prototype = incoming.clone();
     if prototype.id.is_none() {
-        prototype.id = Some(uuid::Uuid::new_v4().to_string());
+        prototype.id = Some(xmpp_parsers::message::Id(uuid::Uuid::new_v4().to_string()));
     }
     prototype.type_ = XmppMessageType::Groupchat;
     // Strip any client-claimed `<stanza-id by='room'/>` so the chain's

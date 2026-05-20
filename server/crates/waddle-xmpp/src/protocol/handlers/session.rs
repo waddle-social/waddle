@@ -23,9 +23,9 @@ impl IqHandler for SessionHandler {
     }
 
     fn handle(&self, iq: &Iq, _ctx: &StanzaContext<'_>) -> Vec<OutboundEvent> {
-        vec![OutboundEvent::SendStanza(Box::new(Stanza::Iq(
+        vec![OutboundEvent::SendStanza(Box::new(Stanza::Iq(Box::new(
             empty_iq_result(iq),
-        )))]
+        ))))]
     }
 }
 
@@ -33,7 +33,7 @@ impl IqHandler for SessionHandler {
 mod tests {
     use super::*;
     use minidom::Element;
-    use xmpp_parsers::iq::{Iq, IqType};
+    use xmpp_parsers::iq::Iq;
 
     fn test_jid() -> jid::FullJid {
         "alice@waddle.social/web".parse().expect("valid test JID")
@@ -47,11 +47,11 @@ mod tests {
     #[test]
     fn session_iq_set_produces_empty_result() {
         let session_elem = Element::builder("session", ns::SESSION).build();
-        let iq = Iq {
+        let iq = Iq::Set {
             from: Some("alice@waddle.social/web".parse().expect("valid jid")),
             to: Some("waddle.social".parse().expect("valid jid")),
             id: "s1".to_string(),
-            payload: IqType::Set(session_elem),
+            payload: session_elem,
         };
         let jid = test_jid();
         let ctx = StanzaContext {
@@ -65,14 +65,14 @@ mod tests {
         match &events[0] {
             OutboundEvent::SendStanza(stanza) => match stanza.as_ref() {
                 Stanza::Iq(reply) => {
-                    assert_eq!(reply.id, "s1");
-                    assert!(matches!(reply.payload, IqType::Result(None)));
+                    assert_eq!(reply.id(), "s1");
+                    assert!(matches!(reply.as_ref(), Iq::Result { payload: None, .. }));
                     assert_eq!(
-                        reply.from.as_ref().map(|j| j.to_string()),
+                        reply.from().map(|j| j.to_string()),
                         Some("waddle.social".to_string())
                     );
                     assert_eq!(
-                        reply.to.as_ref().map(|j| j.to_string()),
+                        reply.to().map(|j| j.to_string()),
                         Some("alice@waddle.social/web".to_string())
                     );
                 }

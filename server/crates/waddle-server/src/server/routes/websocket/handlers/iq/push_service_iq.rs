@@ -27,7 +27,7 @@ pub(super) async fn handle_push_service_iq(
         )];
     };
 
-    let xmpp_parsers::iq::IqType::Set(payload) = &ctx.iq.payload else {
+    let xmpp_parsers::iq::Iq::Set { payload, .. } = ctx.iq else {
         return vec![build_iq_error_xml_typed(
             ctx.id,
             ctx.response_from,
@@ -73,9 +73,15 @@ async fn ensure_node(
     {
         Ok(node) => {
             let response = Element::builder("node", WADDLE_PUSH_SERVICE_NS)
-                .attr("id", node.node())
-                .attr("jid", ctx.push_domain)
-                .attr("app-id", node.app_id())
+                .attr(minidom::rxml::xml_ncname!("id").to_owned(), node.node())
+                .attr(
+                    minidom::rxml::xml_ncname!("jid").to_owned(),
+                    ctx.push_domain,
+                )
+                .attr(
+                    minidom::rxml::xml_ncname!("app-id").to_owned(),
+                    node.app_id(),
+                )
                 .build();
             vec![iq_to_xml(build_result_with_payload(ctx.iq, response))]
         }
@@ -150,9 +156,12 @@ async fn register_device(
     {
         Ok(device) => {
             let response = Element::builder("device", WADDLE_PUSH_SERVICE_NS)
-                .attr("id", device.device_id())
-                .attr("node", device.node())
-                .attr("status", "active")
+                .attr(
+                    minidom::rxml::xml_ncname!("id").to_owned(),
+                    device.device_id(),
+                )
+                .attr(minidom::rxml::xml_ncname!("node").to_owned(), device.node())
+                .attr(minidom::rxml::xml_ncname!("status").to_owned(), "active")
                 .build();
             vec![iq_to_xml(build_result_with_payload(ctx.iq, response))]
         }
@@ -192,9 +201,9 @@ async fn disable_device(
     {
         Ok(true) => {
             let response = Element::builder("device", WADDLE_PUSH_SERVICE_NS)
-                .attr("id", device_id)
-                .attr("node", node)
-                .attr("status", "disabled")
+                .attr(minidom::rxml::xml_ncname!("id").to_owned(), device_id)
+                .attr(minidom::rxml::xml_ncname!("node").to_owned(), node)
+                .attr(minidom::rxml::xml_ncname!("status").to_owned(), "disabled")
                 .build();
             vec![iq_to_xml(build_result_with_payload(ctx.iq, response))]
         }
@@ -219,11 +228,11 @@ fn build_result_with_payload(
     request_iq: &xmpp_parsers::iq::Iq,
     payload: Element,
 ) -> xmpp_parsers::iq::Iq {
-    xmpp_parsers::iq::Iq {
-        from: request_iq.to.clone(),
-        to: request_iq.from.clone(),
-        id: request_iq.id.clone(),
-        payload: xmpp_parsers::iq::IqType::Result(Some(payload)),
+    xmpp_parsers::iq::Iq::Result {
+        from: request_iq.to().cloned(),
+        to: request_iq.from().cloned(),
+        id: request_iq.id().to_string(),
+        payload: Some(payload),
     }
 }
 

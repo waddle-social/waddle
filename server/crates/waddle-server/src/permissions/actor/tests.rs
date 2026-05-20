@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use kameo::actor::ActorRef;
+use kameo::actor::{ActorRef, Spawn};
 
 use super::*;
 use crate::config::ServerConfig;
@@ -15,7 +15,7 @@ async fn spawn_test_actor() -> ActorRef<PermissionActor> {
     let runner = MigrationRunner::global();
     runner.run(&db).await.expect("migrations");
 
-    kameo::spawn(PermissionActor::new_for_tests(db))
+    PermissionActor::spawn(PermissionActor::new_for_tests(db))
 }
 
 #[tokio::test]

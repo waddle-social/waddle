@@ -34,7 +34,7 @@
 //! - Discover public rooms in a community
 
 use minidom::Element;
-use xmpp_parsers::iq::{Iq, IqType};
+use xmpp_parsers::iq::Iq;
 
 /// Namespace for XEP-0433 Extended Channel Search.
 pub const NS_CHANNEL_SEARCH: &str = "urn:xmpp:channel-search:0";
@@ -139,16 +139,19 @@ impl Searchable for ChannelResult {
 
 /// Check if an IQ is a channel search request.
 pub fn is_search_request(iq: &Iq) -> bool {
-    matches!(&iq.payload, IqType::Get(elem)
-        if elem.name() == "search" && elem.ns() == NS_CHANNEL_SEARCH)
+    matches!(iq, Iq::Get { payload: elem, .. } if elem.name() == "search" && elem.ns() == NS_CHANNEL_SEARCH)
 }
 
 // ── Extraction ───────────────────────────────────────────────────────
 
 /// Parse a search request from an IQ.
 pub fn parse_search_request(iq: &Iq) -> Option<SearchRequest> {
-    let elem = match &iq.payload {
-        IqType::Get(elem) if elem.name() == "search" && elem.ns() == NS_CHANNEL_SEARCH => elem,
+    let elem = match iq {
+        Iq::Get { payload: elem, .. }
+            if elem.name() == "search" && elem.ns() == NS_CHANNEL_SEARCH =>
+        {
+            elem
+        }
         _ => return None,
     };
 
@@ -168,10 +171,11 @@ pub fn parse_search_request(iq: &Iq) -> Option<SearchRequest> {
 
 /// Parse search results from an IQ response.
 pub fn parse_search_results(iq: &Iq) -> Vec<ChannelResult> {
-    let elem = match &iq.payload {
-        IqType::Result(Some(elem)) if elem.name() == "result" && elem.ns() == NS_CHANNEL_SEARCH => {
-            elem
-        }
+    let elem = match iq {
+        Iq::Result {
+            payload: Some(elem),
+            ..
+        } if elem.name() == "result" && elem.ns() == NS_CHANNEL_SEARCH => elem,
         _ => return Vec::new(),
     };
 
@@ -214,11 +218,11 @@ pub fn build_search_request(to: jid::Jid, request: &SearchRequest, id: &str) -> 
         search.append_child(max_elem);
     }
 
-    Iq {
+    Iq::Get {
         from: None,
         to: Some(to),
         id: id.to_owned(),
-        payload: IqType::Get(search),
+        payload: search,
     }
 }
 
@@ -228,25 +232,40 @@ pub fn build_search_response(original_iq: &Iq, results: &[ChannelResult]) -> Iq 
 
     for ch in results {
         let mut channel = Element::builder("channel", NS_CHANNEL_SEARCH)
-            .attr("jid", ch.jid.as_str())
+            .attr(
+                minidom::rxml::xml_ncname!("jid").to_owned(),
+                ch.jid.as_str(),
+            )
             .build();
         if let Some(ref name) = ch.name {
-            channel.set_attr("name", name);
+            channel.set_attr(
+                minidom::rxml::Namespace::NONE,
+                minidom::rxml::xml_ncname!("name").to_owned(),
+                name,
+            );
         }
         if let Some(ref desc) = ch.description {
-            channel.set_attr("description", desc);
+            channel.set_attr(
+                minidom::rxml::Namespace::NONE,
+                minidom::rxml::xml_ncname!("description").to_owned(),
+                desc,
+            );
         }
         if let Some(occ) = ch.occupants {
-            channel.set_attr("occupants", occ.to_string());
+            channel.set_attr(
+                minidom::rxml::Namespace::NONE,
+                minidom::rxml::xml_ncname!("occupants").to_owned(),
+                occ.to_string(),
+            );
         }
         result_elem.append_child(channel);
     }
 
-    Iq {
-        from: original_iq.to.clone(),
-        to: original_iq.from.clone(),
-        id: original_iq.id.clone(),
-        payload: IqType::Result(Some(result_elem)),
+    Iq::Result {
+        from: original_iq.to().cloned(),
+        to: original_iq.from().cloned(),
+        id: original_iq.id().to_string(),
+        payload: Some(result_elem),
     }
 }
 
@@ -271,11 +290,11 @@ mod tests {
     #[test]
     fn test_is_search_request_false() {
         let elem = Element::builder("query", "jabber:iq:roster").build();
-        let iq = Iq {
+        let iq = Iq::Get {
             from: None,
             to: None,
             id: "x".to_owned(),
-            payload: IqType::Get(elem),
+            payload: elem,
         };
         assert!(!is_search_request(&iq));
     }
@@ -313,11 +332,11 @@ mod tests {
 
     #[test]
     fn test_parse_empty_results() {
-        let iq = Iq {
+        let iq = Iq::Result {
             from: None,
             to: None,
             id: "x".to_owned(),
-            payload: IqType::Result(None),
+            payload: None,
         };
         assert!(parse_search_results(&iq).is_empty());
     }

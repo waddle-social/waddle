@@ -116,7 +116,7 @@ fn test_parse_rsm_response_full() {
     let elem = Element::builder("set", NS_RSM)
         .append(
             Element::builder("first", NS_RSM)
-                .attr("index", "0")
+                .attr(minidom::rxml::xml_ncname!("index").to_owned(), "0")
                 .append("item-001")
                 .build(),
         )

@@ -330,10 +330,19 @@ impl ArtifactReference {
 
     pub(super) fn add_attrs(&self, builder: minidom::ElementBuilder) -> minidom::ElementBuilder {
         let mut builder = builder
-            .attr("artifact-uri", self.uri.as_str())
-            .attr("artifact-sha256", self.sha256.as_str());
+            .attr(
+                minidom::rxml::xml_ncname!("artifact-uri").to_owned(),
+                self.uri.as_str(),
+            )
+            .attr(
+                minidom::rxml::xml_ncname!("artifact-sha256").to_owned(),
+                self.sha256.as_str(),
+            );
         if let Some(media_type) = &self.media_type {
-            builder = builder.attr("media-type", media_type.as_str());
+            builder = builder.attr(
+                minidom::rxml::xml_ncname!("media-type").to_owned(),
+                media_type.as_str(),
+            );
         }
         builder
     }

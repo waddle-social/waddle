@@ -28,7 +28,7 @@ fn xep0333_markable_requires_message_id_for_traceability() {
 fn xep0333_markable_with_message_id_is_detected() {
     let to: Jid = "peer@localhost".parse().expect("valid jid");
     let mut msg = Message::new(Some(to));
-    msg.id = Some("msg-1".to_string());
+    msg.id = Some(xmpp_parsers::message::Id("msg-1".to_string()));
     add_markable(&mut msg);
 
     assert!(has_markable(&msg));

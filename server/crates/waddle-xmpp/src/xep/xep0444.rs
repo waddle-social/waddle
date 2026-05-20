@@ -170,7 +170,7 @@ where
 /// Build a `<reactions id='...'><reaction>...</reaction>...</reactions>` element.
 pub fn build_reactions_element(message_id: &str, emojis: &[&str]) -> Element {
     let mut reactions = Element::builder("reactions", NS_REACTIONS)
-        .attr("id", message_id)
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), message_id)
         .build();
     for emoji in normalize_reactions(emojis.iter().copied()) {
         reactions.append_child(build_reaction_element(&emoji));
@@ -191,7 +191,7 @@ pub fn build_reaction_message(
     let mut msg = Message::new(to.into());
     msg.from = from.into();
     msg.type_ = message_type;
-    msg.id = Some(uuid::Uuid::new_v4().to_string());
+    msg.id = Some(xmpp_parsers::message::Id(uuid::Uuid::new_v4().to_string()));
     msg.payloads
         .push(build_reactions_element(message_id, emojis));
     msg
@@ -227,7 +227,7 @@ mod tests {
     #[test]
     fn test_is_reactions_element() {
         let reactions = Element::builder("reactions", NS_REACTIONS)
-            .attr("id", "msg-1")
+            .attr(minidom::rxml::xml_ncname!("id").to_owned(), "msg-1")
             .build();
         assert!(is_reactions_element(&reactions));
 
@@ -487,7 +487,7 @@ mod tests {
         let reactions = build_reactions_element("msg-1", &[emoji]);
         let msg_elem: Element = {
             let mut m = Element::builder("message", "jabber:client")
-                .attr("type", "groupchat")
+                .attr(minidom::rxml::xml_ncname!("type").to_owned(), "groupchat")
                 .build();
             m.append_child(reactions);
             m

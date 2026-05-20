@@ -87,7 +87,7 @@ pub async fn promote_session_unacked(
                 };
                 promote_one(message, entry.sequence, ctx).await
             }
-            Some(Stanza::Iq(iq)) => promote_iq(iq, registry).await,
+            Some(Stanza::Iq(iq)) => promote_iq(*iq, registry).await,
             Some(Stanza::Presence(presence)) => promote_presence(presence, registry).await,
             None => PromotedOutcome::Unparseable,
         };

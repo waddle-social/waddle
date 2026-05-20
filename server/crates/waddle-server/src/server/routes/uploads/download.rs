@@ -1,6 +1,6 @@
 use super::*;
 
-/// GET /api/files/:slot_id/:filename
+/// GET /api/files/{slot_id}/{filename}
 ///
 /// Download an uploaded file. The slot must:
 /// - Exist in the database
@@ -109,7 +109,7 @@ pub(super) async fn download_handler(
         headers.insert(header::CONTENT_LENGTH, content_length);
     }
 
-    let disposition = format!("inline; filename=\"{}\"", slot.filename);
+    let disposition = format!("inline; filename='{}'", slot.filename);
     if let Ok(disp) = disposition.parse() {
         headers.insert(header::CONTENT_DISPOSITION, disp);
     }

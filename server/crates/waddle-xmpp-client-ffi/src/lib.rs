@@ -744,7 +744,7 @@ impl WaddleClient {
 /// attribute is rendered from the typed value.
 fn message_with_jmi(to: &Jid, jmi: Element) -> Element {
     Element::builder("message", NS_CLIENT)
-        .attr("to", to.to_string())
+        .attr(minidom::rxml::xml_ncname!("to").to_owned(), to.to_string())
         .append(jmi)
         .build()
 }
@@ -755,9 +755,12 @@ fn message_with_jmi(to: &Jid, jmi: Element) -> Element {
 /// [`Jid`] — see [`message_with_jmi`].
 fn iq_set(to: &Jid, payload: Element) -> Element {
     Element::builder("iq", NS_CLIENT)
-        .attr("type", "set")
-        .attr("id", uuid::Uuid::new_v4().to_string())
-        .attr("to", to.to_string())
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "set")
+        .attr(
+            minidom::rxml::xml_ncname!("id").to_owned(),
+            uuid::Uuid::new_v4().to_string(),
+        )
+        .attr(minidom::rxml::xml_ncname!("to").to_owned(), to.to_string())
         .append(payload)
         .build()
 }

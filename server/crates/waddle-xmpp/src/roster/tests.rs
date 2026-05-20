@@ -85,10 +85,16 @@ fn test_roster_item_to_element() {
 #[test]
 fn test_roster_item_from_element() {
     let elem = Element::builder("item", ROSTER_NS)
-        .attr("jid", "contact@example.com")
-        .attr("name", "Alice")
-        .attr("subscription", "both")
-        .attr("ask", "subscribe")
+        .attr(
+            minidom::rxml::xml_ncname!("jid").to_owned(),
+            "contact@example.com",
+        )
+        .attr(minidom::rxml::xml_ncname!("name").to_owned(), "Alice")
+        .attr(
+            minidom::rxml::xml_ncname!("subscription").to_owned(),
+            "both",
+        )
+        .attr(minidom::rxml::xml_ncname!("ask").to_owned(), "subscribe")
         .append(
             Element::builder("group", ROSTER_NS)
                 .append("Friends")
@@ -108,7 +114,10 @@ fn test_roster_item_from_element() {
 #[test]
 fn test_roster_item_from_element_minimal() {
     let elem = Element::builder("item", ROSTER_NS)
-        .attr("jid", "contact@example.com")
+        .attr(
+            minidom::rxml::xml_ncname!("jid").to_owned(),
+            "contact@example.com",
+        )
         .build();
 
     let item = RosterItem::from_element(&elem).unwrap();
@@ -123,7 +132,7 @@ fn test_roster_item_from_element_minimal() {
 #[test]
 fn test_roster_item_from_element_missing_jid() {
     let elem = Element::builder("item", ROSTER_NS)
-        .attr("name", "Alice")
+        .attr(minidom::rxml::xml_ncname!("name").to_owned(), "Alice")
         .build();
 
     let result = RosterItem::from_element(&elem);
@@ -133,11 +142,11 @@ fn test_roster_item_from_element_missing_jid() {
 #[test]
 fn test_is_roster_get() {
     let query_elem = Element::builder("query", ROSTER_NS).build();
-    let iq = Iq {
+    let iq = Iq::Get {
         from: None,
         to: None,
         id: "roster-1".to_string(),
-        payload: xmpp_parsers::iq::IqType::Get(query_elem),
+        payload: query_elem,
     };
 
     assert!(is_roster_get(&iq));
@@ -146,11 +155,11 @@ fn test_is_roster_get() {
 #[test]
 fn test_is_not_roster_get_wrong_ns() {
     let query_elem = Element::builder("query", "wrong:ns").build();
-    let iq = Iq {
+    let iq = Iq::Get {
         from: None,
         to: None,
         id: "roster-1".to_string(),
-        payload: xmpp_parsers::iq::IqType::Get(query_elem),
+        payload: query_elem,
     };
 
     assert!(!is_roster_get(&iq));
@@ -159,11 +168,11 @@ fn test_is_not_roster_get_wrong_ns() {
 #[test]
 fn test_is_not_roster_get_wrong_type() {
     let query_elem = Element::builder("query", ROSTER_NS).build();
-    let iq = Iq {
+    let iq = Iq::Set {
         from: None,
         to: None,
         id: "roster-1".to_string(),
-        payload: xmpp_parsers::iq::IqType::Set(query_elem),
+        payload: query_elem,
     };
 
     assert!(!is_roster_get(&iq));
@@ -174,15 +183,18 @@ fn test_is_roster_set() {
     let query_elem = Element::builder("query", ROSTER_NS)
         .append(
             Element::builder("item", ROSTER_NS)
-                .attr("jid", "contact@example.com")
+                .attr(
+                    minidom::rxml::xml_ncname!("jid").to_owned(),
+                    "contact@example.com",
+                )
                 .build(),
         )
         .build();
-    let iq = Iq {
+    let iq = Iq::Set {
         from: None,
         to: None,
         id: "roster-1".to_string(),
-        payload: xmpp_parsers::iq::IqType::Set(query_elem),
+        payload: query_elem,
     };
 
     assert!(is_roster_set(&iq));
@@ -191,13 +203,13 @@ fn test_is_roster_set() {
 #[test]
 fn test_parse_roster_get() {
     let query_elem = Element::builder("query", ROSTER_NS)
-        .attr("ver", "abc123")
+        .attr(minidom::rxml::xml_ncname!("ver").to_owned(), "abc123")
         .build();
-    let iq = Iq {
+    let iq = Iq::Get {
         from: Some("user@example.com".parse().unwrap()),
         to: Some("example.com".parse().unwrap()),
         id: "roster-1".to_string(),
-        payload: xmpp_parsers::iq::IqType::Get(query_elem),
+        payload: query_elem,
     };
 
     let query = parse_roster_get(&iq).unwrap();
@@ -213,17 +225,23 @@ fn test_parse_roster_set() {
     let query_elem = Element::builder("query", ROSTER_NS)
         .append(
             Element::builder("item", ROSTER_NS)
-                .attr("jid", "contact@example.com")
-                .attr("name", "Alice")
-                .attr("subscription", "both")
+                .attr(
+                    minidom::rxml::xml_ncname!("jid").to_owned(),
+                    "contact@example.com",
+                )
+                .attr(minidom::rxml::xml_ncname!("name").to_owned(), "Alice")
+                .attr(
+                    minidom::rxml::xml_ncname!("subscription").to_owned(),
+                    "both",
+                )
                 .build(),
         )
         .build();
-    let iq = Iq {
+    let iq = Iq::Set {
         from: Some("user@example.com".parse().unwrap()),
         to: Some("example.com".parse().unwrap()),
         id: "roster-1".to_string(),
-        payload: xmpp_parsers::iq::IqType::Set(query_elem),
+        payload: query_elem,
     };
 
     let query = parse_roster_set(&iq).unwrap();
@@ -238,16 +256,22 @@ fn test_parse_roster_set_remove() {
     let query_elem = Element::builder("query", ROSTER_NS)
         .append(
             Element::builder("item", ROSTER_NS)
-                .attr("jid", "contact@example.com")
-                .attr("subscription", "remove")
+                .attr(
+                    minidom::rxml::xml_ncname!("jid").to_owned(),
+                    "contact@example.com",
+                )
+                .attr(
+                    minidom::rxml::xml_ncname!("subscription").to_owned(),
+                    "remove",
+                )
                 .build(),
         )
         .build();
-    let iq = Iq {
+    let iq = Iq::Set {
         from: Some("user@example.com".parse().unwrap()),
         to: Some("example.com".parse().unwrap()),
         id: "roster-1".to_string(),
-        payload: xmpp_parsers::iq::IqType::Set(query_elem),
+        payload: query_elem,
     };
 
     let query = parse_roster_set(&iq).unwrap();
@@ -260,16 +284,22 @@ fn test_parse_roster_set_invalid_subscription_ignored() {
     let query_elem = Element::builder("query", ROSTER_NS)
         .append(
             Element::builder("item", ROSTER_NS)
-                .attr("jid", "contact@example.com")
-                .attr("subscription", "foobar")
+                .attr(
+                    minidom::rxml::xml_ncname!("jid").to_owned(),
+                    "contact@example.com",
+                )
+                .attr(
+                    minidom::rxml::xml_ncname!("subscription").to_owned(),
+                    "foobar",
+                )
                 .build(),
         )
         .build();
-    let iq = Iq {
+    let iq = Iq::Set {
         from: Some("user@example.com".parse().unwrap()),
         to: Some("example.com".parse().unwrap()),
         id: "roster-1".to_string(),
-        payload: xmpp_parsers::iq::IqType::Set(query_elem),
+        payload: query_elem,
     };
 
     let query = parse_roster_set(&iq).unwrap();
@@ -280,11 +310,11 @@ fn test_parse_roster_set_invalid_subscription_ignored() {
 #[test]
 fn test_parse_roster_set_empty_items() {
     let query_elem = Element::builder("query", ROSTER_NS).build();
-    let iq = Iq {
+    let iq = Iq::Set {
         from: Some("user@example.com".parse().unwrap()),
         to: Some("example.com".parse().unwrap()),
         id: "roster-1".to_string(),
-        payload: xmpp_parsers::iq::IqType::Set(query_elem),
+        payload: query_elem,
     };
 
     let result = parse_roster_set(&iq);
@@ -296,7 +326,10 @@ fn test_parse_roster_set_duplicate_groups_rejected() {
     let query_elem = Element::builder("query", ROSTER_NS)
         .append(
             Element::builder("item", ROSTER_NS)
-                .attr("jid", "contact@example.com")
+                .attr(
+                    minidom::rxml::xml_ncname!("jid").to_owned(),
+                    "contact@example.com",
+                )
                 .append(
                     Element::builder("group", ROSTER_NS)
                         .append("Friends")
@@ -310,11 +343,11 @@ fn test_parse_roster_set_duplicate_groups_rejected() {
                 .build(),
         )
         .build();
-    let iq = Iq {
+    let iq = Iq::Set {
         from: Some("user@example.com".parse().unwrap()),
         to: Some("example.com".parse().unwrap()),
         id: "roster-1".to_string(),
-        payload: xmpp_parsers::iq::IqType::Set(query_elem),
+        payload: query_elem,
     };
 
     let result = parse_roster_set(&iq);
@@ -326,16 +359,19 @@ fn test_parse_roster_set_empty_group_rejected() {
     let query_elem = Element::builder("query", ROSTER_NS)
         .append(
             Element::builder("item", ROSTER_NS)
-                .attr("jid", "contact@example.com")
+                .attr(
+                    minidom::rxml::xml_ncname!("jid").to_owned(),
+                    "contact@example.com",
+                )
                 .append(Element::builder("group", ROSTER_NS).append("").build())
                 .build(),
         )
         .build();
-    let iq = Iq {
+    let iq = Iq::Set {
         from: Some("user@example.com".parse().unwrap()),
         to: Some("example.com".parse().unwrap()),
         id: "roster-1".to_string(),
-        payload: xmpp_parsers::iq::IqType::Set(query_elem),
+        payload: query_elem,
     };
 
     let result = parse_roster_set(&iq);
@@ -351,11 +387,11 @@ fn test_parse_roster_set_empty_group_rejected() {
 #[test]
 fn test_build_roster_result() {
     let query_elem = Element::builder("query", ROSTER_NS).build();
-    let original_iq = Iq {
+    let original_iq = Iq::Get {
         from: Some("user@example.com".parse().unwrap()),
         to: Some("example.com".parse().unwrap()),
         id: "roster-1".to_string(),
-        payload: xmpp_parsers::iq::IqType::Get(query_elem),
+        payload: query_elem,
     };
 
     let items = vec![
@@ -368,13 +404,20 @@ fn test_build_roster_result() {
     let ver: RosterVersion = "ver123".parse().unwrap();
     let response = build_roster_result(&original_iq, &items, Some(&ver));
 
-    assert_eq!(response.id, "roster-1");
+    assert_eq!(response.id(), "roster-1");
     assert!(matches!(
-        response.payload,
-        xmpp_parsers::iq::IqType::Result(Some(_))
+        response,
+        xmpp_parsers::iq::Iq::Result {
+            payload: Some(_),
+            ..
+        }
     ));
 
-    if let xmpp_parsers::iq::IqType::Result(Some(elem)) = response.payload {
+    if let xmpp_parsers::iq::Iq::Result {
+        payload: Some(elem),
+        ..
+    } = response
+    {
         assert_eq!(elem.attr("ver"), Some("ver123"));
         let item_count = elem.children().filter(|c| c.name() == "item").count();
         assert_eq!(item_count, 2);
@@ -384,19 +427,19 @@ fn test_build_roster_result() {
 #[test]
 fn test_build_roster_result_empty() {
     let query_elem = Element::builder("query", ROSTER_NS).build();
-    let original_iq = Iq {
+    let original_iq = Iq::Set {
         from: Some("user@example.com".parse().unwrap()),
         to: Some("example.com".parse().unwrap()),
         id: "roster-1".to_string(),
-        payload: xmpp_parsers::iq::IqType::Set(query_elem),
+        payload: query_elem,
     };
 
     let response = build_roster_result_empty(&original_iq);
 
-    assert_eq!(response.id, "roster-1");
+    assert_eq!(response.id(), "roster-1");
     assert!(matches!(
-        response.payload,
-        xmpp_parsers::iq::IqType::Result(None)
+        response,
+        xmpp_parsers::iq::Iq::Result { payload: None, .. }
     ));
 }
 
@@ -410,14 +453,11 @@ fn test_build_roster_push() {
     let ver: RosterVersion = "ver456".parse().unwrap();
     let push = build_roster_push("push-1", &from_jid, &to_jid, &item, Some(&ver));
 
-    assert_eq!(push.id, "push-1");
-    assert_eq!(
-        push.to.as_ref().unwrap().to_string(),
-        "user@example.com/resource"
-    );
-    assert_eq!(push.from.as_ref().unwrap().to_string(), "user@example.com");
+    assert_eq!(push.id(), "push-1");
+    assert_eq!(push.to().unwrap().to_string(), "user@example.com/resource");
+    assert_eq!(push.from().unwrap().to_string(), "user@example.com");
 
-    if let xmpp_parsers::iq::IqType::Set(elem) = push.payload {
+    if let Iq::Set { payload: elem, .. } = push {
         assert_eq!(elem.name(), "query");
         assert_eq!(elem.ns(), ROSTER_NS);
         assert_eq!(elem.attr("ver"), Some("ver456"));
@@ -450,20 +490,26 @@ fn test_parse_roster_set_multiple_items_rejected() {
     let query_elem = Element::builder("query", ROSTER_NS)
         .append(
             Element::builder("item", ROSTER_NS)
-                .attr("jid", "contact1@example.com")
+                .attr(
+                    minidom::rxml::xml_ncname!("jid").to_owned(),
+                    "contact1@example.com",
+                )
                 .build(),
         )
         .append(
             Element::builder("item", ROSTER_NS)
-                .attr("jid", "contact2@example.com")
+                .attr(
+                    minidom::rxml::xml_ncname!("jid").to_owned(),
+                    "contact2@example.com",
+                )
                 .build(),
         )
         .build();
-    let iq = Iq {
+    let iq = Iq::Set {
         from: Some("user@example.com".parse().unwrap()),
         to: Some("example.com".parse().unwrap()),
         id: "roster-1".to_string(),
-        payload: xmpp_parsers::iq::IqType::Set(query_elem),
+        payload: query_elem,
     };
 
     let result = parse_roster_set(&iq);

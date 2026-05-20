@@ -101,7 +101,8 @@ fn thread_projection(message: &Message) -> Option<GroupchatThreadProjection> {
         ForumAction::CreateThread(tc) => Some(tc.title),
         _ => None,
     });
-    let is_thread_root = info.parent.is_none() && message.id.as_deref() == Some(info.id.as_str());
+    let is_thread_root = info.parent.is_none()
+        && message.id.as_ref().map(|id| id.0.as_str()) == Some(info.id.as_str());
     let title = forum_title.or_else(|| is_thread_root.then(|| preview_text(message)).flatten());
     let author_nick = title.as_ref().and_then(|_| {
         message
@@ -126,7 +127,7 @@ mod tests {
     use jid::{FullJid, Jid};
     use waddle_xmpp_core::parser_utils::reattach_thread_parent;
     use waddle_xmpp_core::xep0201::{set_thread_id, CLIENT_STANZA_NS};
-    use xmpp_parsers::message::{Body, Message, MessageType};
+    use xmpp_parsers::message::{Message, MessageType};
 
     fn full(s: &str) -> FullJid {
         s.parse().expect("valid full jid")
@@ -149,7 +150,8 @@ mod tests {
         m.from = Some(Jid::from(sender_nick_jid.clone()));
         m.type_ = MessageType::Groupchat;
         if !body.is_empty() {
-            m.bodies.insert(String::new(), Body(body.to_string()));
+            m.bodies
+                .insert(xmpp_parsers::message::Lang::new(), body.to_string());
         }
         let _ = room;
         m
@@ -347,7 +349,7 @@ mod tests {
         let room = bare("team@conf.example.com");
         let bot = full("team@conf.example.com/waddle");
         let mut msg = groupchat(&room, &bot, "AI answer");
-        msg.id = Some("reply-stanza".to_string());
+        msg.id = Some(xmpp_parsers::message::Id("reply-stanza".to_string()));
         set_thread_id(&mut msg, "root-stanza");
 
         let thread = thread_projection(&msg).expect("thread projection");
@@ -362,7 +364,7 @@ mod tests {
         let room = bare("team@conf.example.com");
         let alice = full("team@conf.example.com/alice");
         let mut msg = groupchat(&room, &alice, "Root prompt");
-        msg.id = Some("root-stanza".to_string());
+        msg.id = Some(xmpp_parsers::message::Id("root-stanza".to_string()));
         set_thread_id(&mut msg, "root-stanza");
 
         let thread = thread_projection(&msg).expect("thread projection");
@@ -380,7 +382,7 @@ mod tests {
         let room = bare("team@conf.example.com");
         let alice = full("team@conf.example.com/alice");
         let mut msg = groupchat(&room, &alice, "child reply");
-        msg.id = Some("reply-stanza".to_string());
+        msg.id = Some(xmpp_parsers::message::Id("reply-stanza".to_string()));
         set_thread_id(&mut msg, "child-2");
         reattach_thread_parent(&mut msg, "root-1".to_string(), CLIENT_STANZA_NS);
         assert!(

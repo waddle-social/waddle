@@ -2,7 +2,7 @@ use super::*;
 use chrono::Datelike;
 use jid::Jid;
 use minidom::Element;
-use xmpp_parsers::iq::{Iq, IqType};
+use xmpp_parsers::iq::Iq;
 use xmpp_parsers::message::{Message, MessageType};
 
 fn filter_id(s: &str) -> MamFilterStanzaId {
@@ -48,8 +48,8 @@ fn identifies_mam_query_response_messages() {
     result_message.type_ = MessageType::Normal;
     result_message.payloads.push(
         Element::builder("result", MAM_NS)
-            .attr("queryid", "query-1")
-            .attr("id", "archive-id-1")
+            .attr(minidom::rxml::xml_ncname!("queryid").to_owned(), "query-1")
+            .attr(minidom::rxml::xml_ncname!("id").to_owned(), "archive-id-1")
             .append(Element::builder("forwarded", FORWARD_NS).build())
             .build(),
     );
@@ -71,7 +71,7 @@ fn ordinary_messages_are_not_mam_query_responses() {
     message.type_ = MessageType::Chat;
     message.payloads.push(
         Element::builder("result", "urn:example:not-mam")
-            .attr("queryid", "query-1")
+            .attr(minidom::rxml::xml_ncname!("queryid").to_owned(), "query-1")
             .build(),
     );
 
@@ -84,11 +84,11 @@ fn body_messages_with_mam_payload_are_not_mam_query_responses() {
     message.type_ = MessageType::Chat;
     message
         .bodies
-        .insert(String::new(), xmpp_parsers::message::Body("keep me".into()));
+        .insert(xmpp_parsers::message::Lang::new(), "keep me".into());
     message.payloads.push(
         Element::builder("result", MAM_NS)
-            .attr("queryid", "query-1")
-            .attr("id", "archive-id-1")
+            .attr(minidom::rxml::xml_ncname!("queryid").to_owned(), "query-1")
+            .attr(minidom::rxml::xml_ncname!("id").to_owned(), "archive-id-1")
             .append(Element::builder("forwarded", FORWARD_NS).build())
             .build(),
     );
@@ -98,91 +98,92 @@ fn body_messages_with_mam_payload_are_not_mam_query_responses() {
 
 #[test]
 fn parses_mam_query_with_form_and_rsm() {
-    let iq = Iq {
+    let iq = Iq::Set {
         from: None,
         to: None,
         id: "mam-1".to_string(),
-        payload: IqType::Set(
-            Element::builder("query", MAM_NS)
-                .attr("queryid", "query-1")
-                .append(
-                    Element::builder("x", DATA_FORMS_NS)
-                        .attr("type", "submit")
-                        .append(
-                            Element::builder("field", DATA_FORMS_NS)
-                                .attr("var", "start")
-                                .append(
-                                    Element::builder("value", DATA_FORMS_NS)
-                                        .append("2024-01-15T10:30:00Z")
-                                        .build(),
-                                )
-                                .build(),
-                        )
-                        .append(
-                            Element::builder("field", DATA_FORMS_NS)
-                                .attr("var", "with")
-                                .append(
-                                    Element::builder("value", DATA_FORMS_NS)
-                                        .append("juliet@example.com")
-                                        .build(),
-                                )
-                                .build(),
-                        )
-                        .append(
-                            Element::builder("field", DATA_FORMS_NS)
-                                .attr("var", "before-id")
-                                .append(
-                                    Element::builder("value", DATA_FORMS_NS)
-                                        .append("msg-20")
-                                        .build(),
-                                )
-                                .build(),
-                        )
-                        .append(
-                            Element::builder("field", DATA_FORMS_NS)
-                                .attr("var", "after-id")
-                                .append(
-                                    Element::builder("value", DATA_FORMS_NS)
-                                        .append("msg-2")
-                                        .build(),
-                                )
-                                .build(),
-                        )
-                        .append(
-                            Element::builder("field", DATA_FORMS_NS)
-                                .attr("var", "ids")
-                                .append(
-                                    Element::builder("value", DATA_FORMS_NS)
-                                        .append("msg-5")
-                                        .build(),
-                                )
-                                .append(
-                                    Element::builder("value", DATA_FORMS_NS)
-                                        .append("msg-7")
-                                        .build(),
-                                )
-                                .build(),
-                        )
-                        .append(
-                            Element::builder("field", DATA_FORMS_NS)
-                                .attr("var", FULLTEXT_MAM_FIELD)
-                                .append(
-                                    Element::builder("value", DATA_FORMS_NS)
-                                        .append("release notes")
-                                        .build(),
-                                )
-                                .build(),
-                        )
-                        .build(),
-                )
-                .append(
-                    Element::builder("set", RSM_NS)
-                        .append(Element::builder("max", RSM_NS).append("10").build())
-                        .append(Element::builder("after", RSM_NS).append("msg-9").build())
-                        .build(),
-                )
-                .build(),
-        ),
+        payload: Element::builder("query", MAM_NS)
+            .attr(minidom::rxml::xml_ncname!("queryid").to_owned(), "query-1")
+            .append(
+                Element::builder("x", DATA_FORMS_NS)
+                    .attr(minidom::rxml::xml_ncname!("type").to_owned(), "submit")
+                    .append(
+                        Element::builder("field", DATA_FORMS_NS)
+                            .attr(minidom::rxml::xml_ncname!("var").to_owned(), "start")
+                            .append(
+                                Element::builder("value", DATA_FORMS_NS)
+                                    .append("2024-01-15T10:30:00Z")
+                                    .build(),
+                            )
+                            .build(),
+                    )
+                    .append(
+                        Element::builder("field", DATA_FORMS_NS)
+                            .attr(minidom::rxml::xml_ncname!("var").to_owned(), "with")
+                            .append(
+                                Element::builder("value", DATA_FORMS_NS)
+                                    .append("juliet@example.com")
+                                    .build(),
+                            )
+                            .build(),
+                    )
+                    .append(
+                        Element::builder("field", DATA_FORMS_NS)
+                            .attr(minidom::rxml::xml_ncname!("var").to_owned(), "before-id")
+                            .append(
+                                Element::builder("value", DATA_FORMS_NS)
+                                    .append("msg-20")
+                                    .build(),
+                            )
+                            .build(),
+                    )
+                    .append(
+                        Element::builder("field", DATA_FORMS_NS)
+                            .attr(minidom::rxml::xml_ncname!("var").to_owned(), "after-id")
+                            .append(
+                                Element::builder("value", DATA_FORMS_NS)
+                                    .append("msg-2")
+                                    .build(),
+                            )
+                            .build(),
+                    )
+                    .append(
+                        Element::builder("field", DATA_FORMS_NS)
+                            .attr(minidom::rxml::xml_ncname!("var").to_owned(), "ids")
+                            .append(
+                                Element::builder("value", DATA_FORMS_NS)
+                                    .append("msg-5")
+                                    .build(),
+                            )
+                            .append(
+                                Element::builder("value", DATA_FORMS_NS)
+                                    .append("msg-7")
+                                    .build(),
+                            )
+                            .build(),
+                    )
+                    .append(
+                        Element::builder("field", DATA_FORMS_NS)
+                            .attr(
+                                minidom::rxml::xml_ncname!("var").to_owned(),
+                                FULLTEXT_MAM_FIELD,
+                            )
+                            .append(
+                                Element::builder("value", DATA_FORMS_NS)
+                                    .append("release notes")
+                                    .build(),
+                            )
+                            .build(),
+                    )
+                    .build(),
+            )
+            .append(
+                Element::builder("set", RSM_NS)
+                    .append(Element::builder("max", RSM_NS).append("10").build())
+                    .append(Element::builder("after", RSM_NS).append("msg-9").build())
+                    .build(),
+            )
+            .build(),
     };
 
     let (query_id, query) = parse_mam_query(&iq).expect("valid MAM query");
@@ -209,39 +210,40 @@ fn parses_mam_query_with_form_and_rsm() {
 
 #[test]
 fn parses_waddle_mam_thread_field() {
-    let iq = Iq {
+    let iq = Iq::Set {
         from: None,
         to: None,
         id: "mam-thread".to_string(),
-        payload: IqType::Set(
-            Element::builder("query", MAM_NS)
-                .append(
-                    Element::builder("x", DATA_FORMS_NS)
-                        .attr("type", "submit")
-                        .append(
-                            Element::builder("field", DATA_FORMS_NS)
-                                .attr("var", WADDLE_MAM_THREAD_FIELD)
-                                .append(
-                                    Element::builder("value", DATA_FORMS_NS)
-                                        .append("thread-root")
-                                        .build(),
-                                )
-                                .build(),
-                        )
-                        .append(
-                            Element::builder("field", DATA_FORMS_NS)
-                                .attr("var", "FORM_TYPE")
-                                .append(
-                                    Element::builder("value", DATA_FORMS_NS)
-                                        .append(MAM_NS)
-                                        .build(),
-                                )
-                                .build(),
-                        )
-                        .build(),
-                )
-                .build(),
-        ),
+        payload: Element::builder("query", MAM_NS)
+            .append(
+                Element::builder("x", DATA_FORMS_NS)
+                    .attr(minidom::rxml::xml_ncname!("type").to_owned(), "submit")
+                    .append(
+                        Element::builder("field", DATA_FORMS_NS)
+                            .attr(
+                                minidom::rxml::xml_ncname!("var").to_owned(),
+                                WADDLE_MAM_THREAD_FIELD,
+                            )
+                            .append(
+                                Element::builder("value", DATA_FORMS_NS)
+                                    .append("thread-root")
+                                    .build(),
+                            )
+                            .build(),
+                    )
+                    .append(
+                        Element::builder("field", DATA_FORMS_NS)
+                            .attr(minidom::rxml::xml_ncname!("var").to_owned(), "FORM_TYPE")
+                            .append(
+                                Element::builder("value", DATA_FORMS_NS)
+                                    .append(MAM_NS)
+                                    .build(),
+                            )
+                            .build(),
+                    )
+                    .build(),
+            )
+            .build(),
     };
 
     let (_, query) = parse_mam_query(&iq).expect("valid MAM query");
@@ -254,29 +256,30 @@ fn parses_waddle_mam_thread_field() {
 
 #[test]
 fn rejects_unsupported_mam_form_fields() {
-    let iq = Iq {
+    let iq = Iq::Set {
         from: None,
         to: None,
         id: "mam-thread".to_string(),
-        payload: IqType::Set(
-            Element::builder("query", MAM_NS)
-                .append(
-                    Element::builder("x", DATA_FORMS_NS)
-                        .attr("type", "submit")
-                        .append(
-                            Element::builder("field", DATA_FORMS_NS)
-                                .attr("var", "{urn:xmpp:mam:2}thread")
-                                .append(
-                                    Element::builder("value", DATA_FORMS_NS)
-                                        .append("wrong-thread")
-                                        .build(),
-                                )
-                                .build(),
-                        )
-                        .build(),
-                )
-                .build(),
-        ),
+        payload: Element::builder("query", MAM_NS)
+            .append(
+                Element::builder("x", DATA_FORMS_NS)
+                    .attr(minidom::rxml::xml_ncname!("type").to_owned(), "submit")
+                    .append(
+                        Element::builder("field", DATA_FORMS_NS)
+                            .attr(
+                                minidom::rxml::xml_ncname!("var").to_owned(),
+                                "{urn:xmpp:mam:2}thread",
+                            )
+                            .append(
+                                Element::builder("value", DATA_FORMS_NS)
+                                    .append("wrong-thread")
+                                    .build(),
+                            )
+                            .build(),
+                    )
+                    .build(),
+            )
+            .build(),
     };
 
     let err = parse_mam_query(&iq).expect_err("unsupported MAM field");
@@ -285,29 +288,27 @@ fn rejects_unsupported_mam_form_fields() {
 
 #[test]
 fn rejects_legacy_bare_fulltext_mam_form_field() {
-    let iq = Iq {
+    let iq = Iq::Set {
         from: None,
         to: None,
         id: "mam-legacy-fulltext".to_string(),
-        payload: IqType::Set(
-            Element::builder("query", MAM_NS)
-                .append(
-                    Element::builder("x", DATA_FORMS_NS)
-                        .attr("type", "submit")
-                        .append(
-                            Element::builder("field", DATA_FORMS_NS)
-                                .attr("var", "fulltext")
-                                .append(
-                                    Element::builder("value", DATA_FORMS_NS)
-                                        .append("release notes")
-                                        .build(),
-                                )
-                                .build(),
-                        )
-                        .build(),
-                )
-                .build(),
-        ),
+        payload: Element::builder("query", MAM_NS)
+            .append(
+                Element::builder("x", DATA_FORMS_NS)
+                    .attr(minidom::rxml::xml_ncname!("type").to_owned(), "submit")
+                    .append(
+                        Element::builder("field", DATA_FORMS_NS)
+                            .attr(minidom::rxml::xml_ncname!("var").to_owned(), "fulltext")
+                            .append(
+                                Element::builder("value", DATA_FORMS_NS)
+                                    .append("release notes")
+                                    .build(),
+                            )
+                            .build(),
+                    )
+                    .build(),
+            )
+            .build(),
     };
 
     let err = parse_mam_query(&iq).expect_err("unsupported MAM field");
@@ -316,16 +317,20 @@ fn rejects_legacy_bare_fulltext_mam_form_field() {
 
 #[test]
 fn builds_mam_query_form_with_waddle_thread_field() {
-    let iq = Iq {
+    let iq = Iq::Get {
         from: Some("juliet@example.com/chamber".parse().expect("from jid")),
         to: Some("room@muc.example.com".parse().expect("to jid")),
         id: "mam-form".to_string(),
-        payload: IqType::Get(Element::builder("query", MAM_NS).build()),
+        payload: Element::builder("query", MAM_NS).build(),
     };
 
     assert!(is_mam_query_form_request(&iq));
     let result = build_query_form_iq(&iq);
-    let IqType::Result(Some(query)) = result.payload else {
+    let Iq::Result {
+        payload: Some(query),
+        ..
+    } = result
+    else {
         panic!("expected query form result");
     };
     let form = query.get_child("x", DATA_FORMS_NS).expect("form");
@@ -358,15 +363,19 @@ fn builds_mam_query_form_with_waddle_thread_field() {
 
 #[test]
 fn disco_form_advertises_stanza_id_filter_field() {
-    let iq = Iq {
+    let iq = Iq::Get {
         from: None,
         to: None,
         id: "disco".to_string(),
-        payload: IqType::Get(Element::builder("query", MAM_NS).build()),
+        payload: Element::builder("query", MAM_NS).build(),
     };
 
     let response = build_query_form_iq(&iq);
-    let IqType::Result(Some(query)) = response.payload else {
+    let Iq::Result {
+        payload: Some(query),
+        ..
+    } = response
+    else {
         panic!("expected query form result");
     };
     let form = query.get_child("x", DATA_FORMS_NS).expect("form");
@@ -383,19 +392,17 @@ fn disco_form_advertises_stanza_id_filter_field() {
 
 #[test]
 fn parses_last_page_rsm_before() {
-    let iq = Iq {
+    let iq = Iq::Set {
         from: None,
         to: None,
         id: "mam-2".to_string(),
-        payload: IqType::Set(
-            Element::builder("query", MAM_NS)
-                .append(
-                    Element::builder("set", RSM_NS)
-                        .append(Element::builder("before", RSM_NS).build())
-                        .build(),
-                )
-                .build(),
-        ),
+        payload: Element::builder("query", MAM_NS)
+            .append(
+                Element::builder("set", RSM_NS)
+                    .append(Element::builder("before", RSM_NS).build())
+                    .build(),
+            )
+            .build(),
     };
 
     let (_, query) = parse_mam_query(&iq).expect("valid MAM query");
@@ -405,28 +412,26 @@ fn parses_last_page_rsm_before() {
 
 #[test]
 fn rejects_invalid_datetime() {
-    let iq = Iq {
+    let iq = Iq::Set {
         from: None,
         to: None,
         id: "mam-3".to_string(),
-        payload: IqType::Set(
-            Element::builder("query", MAM_NS)
-                .append(
-                    Element::builder("x", DATA_FORMS_NS)
-                        .append(
-                            Element::builder("field", DATA_FORMS_NS)
-                                .attr("var", "start")
-                                .append(
-                                    Element::builder("value", DATA_FORMS_NS)
-                                        .append("not-a-date")
-                                        .build(),
-                                )
-                                .build(),
-                        )
-                        .build(),
-                )
-                .build(),
-        ),
+        payload: Element::builder("query", MAM_NS)
+            .append(
+                Element::builder("x", DATA_FORMS_NS)
+                    .append(
+                        Element::builder("field", DATA_FORMS_NS)
+                            .attr(minidom::rxml::xml_ncname!("var").to_owned(), "start")
+                            .append(
+                                Element::builder("value", DATA_FORMS_NS)
+                                    .append("not-a-date")
+                                    .build(),
+                            )
+                            .build(),
+                    )
+                    .build(),
+            )
+            .build(),
     };
 
     let err = parse_mam_query(&iq).expect_err("invalid MAM query");
@@ -683,11 +688,11 @@ fn preserves_archived_stanza_payload() {
 
 #[test]
 fn builds_fin_iq_with_rsm_metadata() {
-    let original = Iq {
+    let original = Iq::Get {
         from: Some(jid("romeo@example.com/orchard")),
         to: Some(jid("juliet@example.com/balcony")),
         id: "iq-1".to_string(),
-        payload: IqType::Get(Element::builder("query", MAM_NS).build()),
+        payload: Element::builder("query", MAM_NS).build(),
     };
     let result = MamResult {
         messages: Vec::new(),
@@ -698,8 +703,11 @@ fn builds_fin_iq_with_rsm_metadata() {
     };
 
     let fin = build_fin_iq(&original, &result);
-    let payload = match fin.payload {
-        IqType::Result(Some(payload)) => payload,
+    let payload = match fin {
+        Iq::Result {
+            payload: Some(payload),
+            ..
+        } => payload,
         other => panic!("unexpected fin payload: {:?}", other),
     };
     let set = payload
@@ -905,11 +913,12 @@ fn stanza_xml_strips_to_for_groupchat_on_raw_element_fallback() {
 }
 
 fn build_mam_iq_with_form_fields(fields: &[(&str, Vec<&str>)]) -> Iq {
-    let mut form = Element::builder("x", DATA_FORMS_NS).attr("type", "submit");
+    let mut form = Element::builder("x", DATA_FORMS_NS)
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "submit");
     form = form.append(
         Element::builder("field", DATA_FORMS_NS)
-            .attr("var", "FORM_TYPE")
-            .attr("type", "hidden")
+            .attr(minidom::rxml::xml_ncname!("var").to_owned(), "FORM_TYPE")
+            .attr(minidom::rxml::xml_ncname!("type").to_owned(), "hidden")
             .append(
                 Element::builder("value", DATA_FORMS_NS)
                     .append(MAM_NS)
@@ -918,7 +927,8 @@ fn build_mam_iq_with_form_fields(fields: &[(&str, Vec<&str>)]) -> Iq {
             .build(),
     );
     for (var, values) in fields {
-        let mut field = Element::builder("field", DATA_FORMS_NS).attr("var", *var);
+        let mut field = Element::builder("field", DATA_FORMS_NS)
+            .attr(minidom::rxml::xml_ncname!("var").to_owned(), *var);
         for value in values {
             field = field.append(
                 Element::builder("value", DATA_FORMS_NS)
@@ -931,11 +941,11 @@ fn build_mam_iq_with_form_fields(fields: &[(&str, Vec<&str>)]) -> Iq {
     let query = Element::builder("query", MAM_NS)
         .append(form.build())
         .build();
-    Iq {
+    Iq::Set {
         from: None,
         to: None,
         id: "q1".to_string(),
-        payload: IqType::Set(query),
+        payload: query,
     }
 }
 

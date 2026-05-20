@@ -76,16 +76,59 @@ async fn server_disco_advertises_call_features_when_livekit_enabled() {
         "urn:xmpp:jingle-message:0",
         "urn:xmpp:extdisco:2",
         "urn:waddle:transports:livekit:0",
-        // `urn:waddle:muc-call:0` is now backed by `MucCallHandler`
-        // (request-join / request-leave IQ surface) so the gating
-        // rule is satisfied — see `register_call_handlers`.
-        "urn:waddle:muc-call:0",
+        // XEP-0272 (Muji) — MUC group call presence advertisement +
+        // Jingle session-initiate join surface to the SFU mixer.
+        // Backed by the Muji branch in `JingleHandler`; the legacy
+        // `urn:waddle:muc-call:0` IQ surface and `MucCallHandler`
+        // have been removed.
+        "urn:xmpp:jingle:muji:0",
     ] {
         assert!(
             resp.contains(ns),
             "disco#info must advertise {ns}; got: {resp}"
         );
     }
+}
+
+#[tokio::test]
+async fn mixer_jid_disco_info_advertises_muji_and_focus_identity() {
+    // XEP-0030 / XEP-0272 §Discovery: a strict client SHOULD be
+    // able to disco#info the `calls.<domain>` mixer and find a
+    // `<identity category='conference' type='audio-video'/>` plus
+    // the `urn:xmpp:jingle:muji:0` feature BEFORE sending a
+    // session-initiate. Without this round-trip, a Muji-compliant
+    // peer can't safely discover the mixer.
+    let server = TestServer::start_with_extra_envs(&[], &livekit_test_envs());
+    let mut admin = WsXmppClient::connect_and_auth(
+        &server.ws_url(),
+        DOMAIN,
+        "admin",
+        server.fixed_account_password(),
+        "ax",
+    )
+    .await
+    .expect("admin connect");
+
+    let resp = disco_info_query(&mut admin, &format!("calls.{DOMAIN}"), "mixer-disco-1")
+        .await
+        .expect("mixer disco#info");
+
+    assert!(
+        resp.contains("category='conference'") && resp.contains("type='audio-video'"),
+        "mixer must advertise the XEP-0272 / av-conferences identity; got: {resp}"
+    );
+    assert!(
+        resp.contains("urn:xmpp:jingle:muji:0"),
+        "mixer must advertise the Muji feature; got: {resp}"
+    );
+    assert!(
+        resp.contains("urn:xmpp:jingle:1"),
+        "mixer must advertise base Jingle feature; got: {resp}"
+    );
+    assert!(
+        resp.contains("urn:waddle:transports:livekit:0"),
+        "mixer must advertise the LiveKit transport feature; got: {resp}"
+    );
 }
 
 #[tokio::test]
@@ -111,12 +154,13 @@ async fn jmi_propose_is_forwarded_to_peer() {
         .await
         .expect("bob receives propose");
     assert!(
-        received.contains(r#"from="alice@localhost"#),
-        "from missing"
+        received.contains(r#"from='alice@localhost"#)
+            || received.contains(r#"from="alice@localhost"#),
+        "from missing: {received}"
     );
     assert!(received.contains("urn:xmpp:jingle-message:0"));
-    assert!(received.contains(r#"media="audio""#));
-    assert!(received.contains(r#"media="video""#));
+    assert!(received.contains(r#"media='audio'"#));
+    assert!(received.contains(r#"media='video'"#));
 }
 
 #[tokio::test]
@@ -154,7 +198,10 @@ async fn jmi_proceed_round_trips_back_to_caller() {
         .recv_matching(|frame| frame.contains("<proceed") && frame.contains(sid))
         .await
         .expect("alice receives proceed");
-    assert!(proceed.contains(r#"from="bob@localhost"#), "from missing");
+    assert!(
+        proceed.contains(r#"from='bob@localhost"#) || proceed.contains(r#"from="bob@localhost"#),
+        "from missing: {proceed}"
+    );
     assert!(proceed.contains("urn:xmpp:jingle-message:0"));
 }
 
@@ -182,7 +229,7 @@ async fn session_initiate_from_blocked_peer_is_dropped() {
     )
     .await
     .expect("bob blocks alice");
-    bob.recv_matching(|f| f.contains(r#"id="block-1""#))
+    bob.recv_matching(|f| f.contains(r#"id='block-1'"#))
         .await
         .expect("block ack");
 
@@ -206,7 +253,7 @@ async fn session_initiate_from_blocked_peer_is_dropped() {
 
     let dropped = bob
         .recv_matching(|frame| {
-            frame.contains("session-initiate") && frame.contains(&format!(r#"sid="{sid}""#))
+            frame.contains("session-initiate") && frame.contains(&format!(r#"sid='{sid}'"#))
                 || frame.contains(&format!(r#"sid='{sid}'"#))
         })
         .await;
@@ -250,7 +297,7 @@ async fn session_initiate_rewrites_empty_waddle_transport() {
     // present after the JingleHandler stamps it.
     let forwarded = bob
         .recv_matching(|frame| {
-            (frame.contains(&format!(r#"sid="{sid}""#))
+            (frame.contains(&format!(r#"sid='{sid}'"#))
                 || frame.contains(&format!(r#"sid='{sid}'"#)))
                 && frame.contains("session-initiate")
                 && frame.contains("url=")
@@ -270,12 +317,12 @@ async fn session_initiate_rewrites_empty_waddle_transport() {
         "url mismatch; got: {forwarded}"
     );
     assert!(
-        forwarded.contains(&format!(r#"room="alice@localhost::{sid}""#)),
+        forwarded.contains(&format!(r#"room='alice@localhost::{sid}'"#)),
         "room must be scoped by initiator bare jid; got: {forwarded}"
     );
     assert!(
         forwarded.contains(&format!(r#"identity='{bob_full}'"#))
-            || forwarded.contains(&format!(r#"identity="{bob_full}""#)),
+            || forwarded.contains(&format!(r#"identity='{bob_full}'"#)),
         "identity mismatch; got: {forwarded}"
     );
     // <token> is a child element, not an attribute — look for an

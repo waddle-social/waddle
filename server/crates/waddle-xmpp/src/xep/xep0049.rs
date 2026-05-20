@@ -20,8 +20,8 @@ pub struct PrivateStorageKey {
 
 /// Check if an IQ is a private XML storage query (XEP-0049).
 pub fn is_private_storage_query(iq: &Iq) -> bool {
-    match &iq.payload {
-        xmpp_parsers::iq::IqType::Get(elem) | xmpp_parsers::iq::IqType::Set(elem) => {
+    match iq {
+        Iq::Get { payload: elem, .. } | Iq::Set { payload: elem, .. } => {
             elem.name() == "query" && elem.ns() == NS_PRIVATE
         }
         _ => false,
@@ -32,7 +32,7 @@ pub fn is_private_storage_query(iq: &Iq) -> bool {
 ///
 /// Returns the namespace of the child element being requested.
 pub fn parse_private_storage_get(iq: &Iq) -> Option<PrivateStorageKey> {
-    if let xmpp_parsers::iq::IqType::Get(elem) = &iq.payload {
+    if let Iq::Get { payload: elem, .. } = &iq {
         if elem.name() == "query" && elem.ns() == NS_PRIVATE {
             if let Some(child) = elem.children().next() {
                 return Some(PrivateStorageKey {
@@ -49,7 +49,7 @@ pub fn parse_private_storage_get(iq: &Iq) -> Option<PrivateStorageKey> {
 ///
 /// Returns the namespace and the full XML content to store.
 pub fn parse_private_storage_set(iq: &Iq) -> Option<(PrivateStorageKey, String)> {
-    if let xmpp_parsers::iq::IqType::Set(elem) = &iq.payload {
+    if let Iq::Set { payload: elem, .. } = &iq {
         if elem.name() == "query" && elem.ns() == NS_PRIVATE {
             if let Some(child) = elem.children().next() {
                 let key = PrivateStorageKey {
@@ -89,21 +89,21 @@ pub fn build_private_storage_result(
 
     let query = query_builder.build();
 
-    Iq {
-        from: original_iq.to.clone(),
-        to: original_iq.from.clone(),
-        id: original_iq.id.clone(),
-        payload: xmpp_parsers::iq::IqType::Result(Some(query)),
+    Iq::Result {
+        from: original_iq.to().cloned(),
+        to: original_iq.from().cloned(),
+        id: original_iq.id().to_string(),
+        payload: Some(query),
     }
 }
 
 /// Build a private storage success response (response to SET).
 pub fn build_private_storage_success(original_iq: &Iq) -> Iq {
-    Iq {
-        from: original_iq.to.clone(),
-        to: original_iq.from.clone(),
-        id: original_iq.id.clone(),
-        payload: xmpp_parsers::iq::IqType::Result(None),
+    Iq::Result {
+        from: original_iq.to().cloned(),
+        to: original_iq.from().cloned(),
+        id: original_iq.id().to_string(),
+        payload: None,
     }
 }
 
@@ -115,11 +115,11 @@ mod tests {
     fn test_is_private_storage_query_get() {
         let child = Element::builder("storage", "storage:bookmarks").build();
         let query = Element::builder("query", NS_PRIVATE).append(child).build();
-        let iq = Iq {
+        let iq = Iq::Get {
             from: None,
             to: None,
             id: "test-1".to_string(),
-            payload: xmpp_parsers::iq::IqType::Get(query),
+            payload: query,
         };
         assert!(is_private_storage_query(&iq));
     }
@@ -128,11 +128,11 @@ mod tests {
     fn test_is_private_storage_query_set() {
         let child = Element::builder("storage", "storage:bookmarks").build();
         let query = Element::builder("query", NS_PRIVATE).append(child).build();
-        let iq = Iq {
+        let iq = Iq::Set {
             from: None,
             to: None,
             id: "test-2".to_string(),
-            payload: xmpp_parsers::iq::IqType::Set(query),
+            payload: query,
         };
         assert!(is_private_storage_query(&iq));
     }
@@ -141,11 +141,11 @@ mod tests {
     fn test_parse_private_storage_get() {
         let child = Element::builder("storage", "storage:bookmarks").build();
         let query = Element::builder("query", NS_PRIVATE).append(child).build();
-        let iq = Iq {
+        let iq = Iq::Get {
             from: None,
             to: None,
             id: "test-3".to_string(),
-            payload: xmpp_parsers::iq::IqType::Get(query),
+            payload: query,
         };
         let key = parse_private_storage_get(&iq);
         assert!(key.is_some());
@@ -160,11 +160,11 @@ mod tests {
             .append(Element::builder("conference", "storage:bookmarks").build())
             .build();
         let query = Element::builder("query", NS_PRIVATE).append(child).build();
-        let iq = Iq {
+        let iq = Iq::Set {
             from: None,
             to: None,
             id: "test-4".to_string(),
-            payload: xmpp_parsers::iq::IqType::Set(query),
+            payload: query,
         };
         let result = parse_private_storage_set(&iq);
         assert!(result.is_some());

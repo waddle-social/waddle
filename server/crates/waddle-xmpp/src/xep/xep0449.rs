@@ -179,7 +179,10 @@ pub fn extract_sticker_ref(msg: &Message) -> Option<StickerRef> {
 /// Build a `<sticker xmlns='urn:xmpp:stickers:0' pack='...'/>` element.
 pub fn build_sticker_element(sticker_ref: &StickerRef) -> Element {
     Element::builder("sticker", NS_STICKERS)
-        .attr("pack", sticker_ref.pack.as_str())
+        .attr(
+            minidom::rxml::xml_ncname!("pack").to_owned(),
+            sticker_ref.pack.as_str(),
+        )
         .build()
 }
 
@@ -193,13 +196,11 @@ pub fn build_sticker_message(
     image_url: &str,
     media_type: &str,
 ) -> Message {
-    use xmpp_parsers::message::Body;
-
     let mut msg = Message::new(to.into());
     msg.type_ = xmpp_parsers::message::MessageType::Groupchat;
-    msg.id = Some(uuid::Uuid::new_v4().to_string());
+    msg.id = Some(xmpp_parsers::message::Id(uuid::Uuid::new_v4().to_string()));
     msg.bodies
-        .insert(String::new(), Body(fallback_text.to_owned()));
+        .insert(xmpp_parsers::message::Lang::new(), fallback_text.to_owned());
     msg.payloads.push(build_sticker_element(sticker_ref));
 
     // Add file-sharing element
@@ -237,7 +238,7 @@ mod tests {
     #[test]
     fn test_is_sticker_element() {
         let elem = Element::builder("sticker", NS_STICKERS)
-            .attr("pack", "pack-1")
+            .attr(minidom::rxml::xml_ncname!("pack").to_owned(), "pack-1")
             .build();
         assert!(is_sticker_element(&elem));
 

@@ -416,7 +416,7 @@ ALTER TABLE user_avatar_fetch_state ADD COLUMN IF NOT EXISTS last_fetch_policy_d
 "#;
 
 /// Delivery ledger for provider webhook ingress
-/// (`/webhooks/providers/:provider_id/:plugin_id`). The unique
+/// (`/webhooks/providers/{provider_id}/{plugin_id}`). The unique
 /// `(provider_id, delivery_id)` primary key deduplicates retried
 /// deliveries from the provider (GitHub redelivers up to 8 times),
 /// and the `status` index supports operator queries for stuck

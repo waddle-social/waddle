@@ -71,7 +71,7 @@ pub fn reattach_thread_parent(msg: &mut Message, thread_parent: String, stanza_n
     let Some(thread) = msg.thread.take() else {
         return;
     };
-    let Some(id) = crate::mam::ThreadId::new(thread.0) else {
+    let Some(id) = crate::mam::ThreadId::new(thread.id) else {
         // Empty thread body would render as a malformed
         // `<thread parent='X'></thread>` (XEP-0201 implicitly forbids
         // an empty thread body when `parent` is present). Drop the
@@ -93,7 +93,10 @@ mod tests {
     #[test]
     fn test_ensure_thread_element_adds_thread() {
         let mut element = Element::builder("message", "jabber:client")
-            .attr("from", "alice@localhost")
+            .attr(
+                minidom::rxml::xml_ncname!("from").to_owned(),
+                "alice@localhost",
+            )
             .build();
 
         ensure_thread_element(&mut element, Some("thread-123"));
@@ -132,7 +135,7 @@ mod tests {
         let mut element = Element::builder("message", "jabber:client")
             .append(
                 Element::builder("thread", "urn:example:other:0")
-                    .attr("kind", "extension")
+                    .attr(minidom::rxml::xml_ncname!("kind").to_owned(), "extension")
                     .append("not-xep-0201")
                     .build(),
             )
@@ -154,7 +157,7 @@ mod tests {
         let mut element = Element::builder("message", "jabber:client")
             .append(
                 Element::builder("thread", "")
-                    .attr("kind", "extension")
+                    .attr(minidom::rxml::xml_ncname!("kind").to_owned(), "extension")
                     .append("not-xep-0201")
                     .build(),
             )
@@ -176,7 +179,10 @@ mod tests {
         let element = Element::builder("message", "jabber:client")
             .append(
                 Element::builder("thread", "jabber:client")
-                    .attr("parent", "parent-123")
+                    .attr(
+                        minidom::rxml::xml_ncname!("parent").to_owned(),
+                        "parent-123",
+                    )
                     .append("thread-456")
                     .build(),
             )
@@ -205,7 +211,10 @@ mod tests {
         let element = Element::builder("message", "jabber:client")
             .append(
                 Element::builder("thread", "")
-                    .attr("parent", "not-a-stanza-parent")
+                    .attr(
+                        minidom::rxml::xml_ncname!("parent").to_owned(),
+                        "not-a-stanza-parent",
+                    )
                     .append("thread-456")
                     .build(),
             )

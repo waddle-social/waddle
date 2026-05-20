@@ -116,12 +116,12 @@ fn xep0424_classifier_accepts_retract_shape_only() {
     assert!(is_retract_element(&canonical));
 
     let wrong_ns = minidom::Element::builder("retract", "wrong:ns")
-        .attr("id", "x")
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), "x")
         .build();
     assert!(!is_retract_element(&wrong_ns));
 
     let wrong_name = minidom::Element::builder("retraction", NS_MESSAGE_RETRACT)
-        .attr("id", "x")
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), "x")
         .build();
     assert!(!is_retract_element(&wrong_name));
 }
@@ -196,12 +196,12 @@ fn xep0424_classifier_accepts_retracted_shape_only() {
     assert!(is_retracted_element(&canonical));
 
     let wrong_ns = minidom::Element::builder("retracted", "wrong:ns")
-        .attr("id", "x")
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), "x")
         .build();
     assert!(!is_retracted_element(&wrong_ns));
 
     let wrong_name = minidom::Element::builder("retraction", NS_MESSAGE_RETRACT)
-        .attr("id", "x")
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), "x")
         .build();
     assert!(!is_retracted_element(&wrong_name));
 }
@@ -225,7 +225,7 @@ fn xep0424_tombstone_message_carries_retracted_and_preserves_original_id() {
         "tombstone classifier accepts the built message"
     );
     assert_eq!(
-        msg.id.as_deref(),
+        msg.id.as_ref().map(|id| id.0.as_str()),
         Some("ORIGINAL_MSG_ID"),
         "stanza id MUST equal the ORIGINAL message id (preserves archive position)"
     );
@@ -259,12 +259,12 @@ fn xep0424_extract_returns_none_for_payloads_with_empty_id() {
     let mut msg = xmpp_parsers::message::Message::new(None::<jid::Jid>);
     msg.payloads.push(
         minidom::Element::builder("retract", NS_MESSAGE_RETRACT)
-            .attr("id", "")
+            .attr(minidom::rxml::xml_ncname!("id").to_owned(), "")
             .build(),
     );
     msg.payloads.push(
         minidom::Element::builder("retracted", NS_MESSAGE_RETRACT)
-            .attr("id", "")
+            .attr(minidom::rxml::xml_ncname!("id").to_owned(), "")
             .build(),
     );
     assert!(

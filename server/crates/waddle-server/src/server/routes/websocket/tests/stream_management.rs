@@ -29,8 +29,11 @@ use xmpp_parsers::minidom::Element;
 fn resume_frame_xml(stream_id: &str, handled_count: u32) -> String {
     element_to_xml(
         Element::builder("resume", SM_NS)
-            .attr("previd", stream_id)
-            .attr("h", handled_count.to_string())
+            .attr(minidom::rxml::xml_ncname!("previd").to_owned(), stream_id)
+            .attr(
+                minidom::rxml::xml_ncname!("h").to_owned(),
+                handled_count.to_string(),
+            )
             .build(),
     )
 }
@@ -92,7 +95,7 @@ async fn handle_xmpp_frame_drops_oversized_sm_nonza_before_parse() {
     let huge = element_to_xml(
         Element::builder("r", SM_NS)
             .attr(
-                "note",
+                minidom::rxml::xml_ncname!("note").to_owned(),
                 "a".repeat(waddle_xmpp::protocol::frame::MAX_FRAME_SIZE),
             )
             .build(),
@@ -144,7 +147,10 @@ async fn sm_resume_is_rejected_during_scram_and_scram_can_still_complete() {
 
     let auth_frame = element_to_xml(
         Element::builder("auth", waddle_xmpp::ns::SASL)
-            .attr("mechanism", "SCRAM-SHA-256")
+            .attr(
+                minidom::rxml::xml_ncname!("mechanism").to_owned(),
+                "SCRAM-SHA-256",
+            )
             .append(BASE64_STANDARD.encode(format!("n,,n=alice,r={client_nonce}")))
             .build(),
     );
@@ -193,7 +199,10 @@ async fn sm_resume_is_allowed_after_auth_before_bind() {
     let payload = BASE64_STANDARD.encode(format!("n,,\x01auth=Bearer {}\x01\x01", session.id));
     let auth_frame = element_to_xml(
         Element::builder("auth", waddle_xmpp::ns::SASL)
-            .attr("mechanism", "OAUTHBEARER")
+            .attr(
+                minidom::rxml::xml_ncname!("mechanism").to_owned(),
+                "OAUTHBEARER",
+            )
             .append(payload)
             .build(),
     );
@@ -227,7 +236,10 @@ async fn sm_resume_rejects_when_replay_window_has_gap() {
     let payload = BASE64_STANDARD.encode(format!("n,,\x01auth=Bearer {}\x01\x01", session.id));
     let auth_frame = element_to_xml(
         Element::builder("auth", waddle_xmpp::ns::SASL)
-            .attr("mechanism", "OAUTHBEARER")
+            .attr(
+                minidom::rxml::xml_ncname!("mechanism").to_owned(),
+                "OAUTHBEARER",
+            )
             .append(payload)
             .build(),
     );
@@ -304,7 +316,10 @@ async fn sm_resume_rejects_authenticated_identity_mismatch_and_preserves_session
     let payload = BASE64_STANDARD.encode(format!("n,,\x01auth=Bearer {}\x01\x01", session.id));
     let auth_frame = element_to_xml(
         Element::builder("auth", waddle_xmpp::ns::SASL)
-            .attr("mechanism", "OAUTHBEARER")
+            .attr(
+                minidom::rxml::xml_ncname!("mechanism").to_owned(),
+                "OAUTHBEARER",
+            )
             .append(payload)
             .build(),
     );
@@ -375,7 +390,10 @@ async fn sm_resume_matching_authenticated_identity_preserves_current_session_wit
     let payload = BASE64_STANDARD.encode(format!("n,,\x01auth=Bearer {}\x01\x01", session.id));
     let auth_frame = element_to_xml(
         Element::builder("auth", waddle_xmpp::ns::SASL)
-            .attr("mechanism", "OAUTHBEARER")
+            .attr(
+                minidom::rxml::xml_ncname!("mechanism").to_owned(),
+                "OAUTHBEARER",
+            )
             .append(payload)
             .build(),
     );
@@ -446,7 +464,10 @@ async fn sm_resume_matching_authenticated_identity_prefers_detached_sidecar_sess
         BASE64_STANDARD.encode(format!("n,,\x01auth=Bearer {}\x01\x01", fresh_session.id));
     let auth_frame = element_to_xml(
         Element::builder("auth", waddle_xmpp::ns::SASL)
-            .attr("mechanism", "OAUTHBEARER")
+            .attr(
+                minidom::rxml::xml_ncname!("mechanism").to_owned(),
+                "OAUTHBEARER",
+            )
             .append(payload)
             .build(),
     );
@@ -719,9 +740,9 @@ async fn sm_resume_rejects_impossible_client_handled_count() {
         responses[0].contains("stream:error")
             && responses[0].contains("undefined-condition")
             && responses[0].contains("handled-count-too-high")
-            && (responses[0].contains("h=\"3\"") || responses[0].contains("h='3'"))
-            && (responses[0].contains("send-count=\"2\"")
-                || responses[0].contains("send-count='2'")),
+            && (responses[0].contains("h='3'") || responses[0].contains("h=\"3\""))
+            && (responses[0].contains("send-count='2'")
+                || responses[0].contains("send-count=\"2\"")),
         "invalid resume count should be a handled-count-too-high stream error: {responses:?}"
     );
     assert!(
@@ -783,14 +804,15 @@ async fn sm_resume_replays_roster_push_recorded_while_detached() {
             .sm_session_registry
             .record_stanza_for_detached_resource(
                 &jid,
-                &Stanza::Iq(
-                    Element::from_str(
-                        "<iq xmlns='jabber:client' type='set' id='detached-roster-push'><query xmlns='jabber:iq:roster'/></iq>",
+                &Stanza::Iq(Box::new(
+                    xmpp_parsers::iq::Iq::try_from(
+                        Element::from_str(
+                            "<iq xmlns='jabber:client' type='set' id='detached-roster-push'><query xmlns='jabber:iq:roster'/></iq>",
+                        )
+                        .expect("iq element"),
                     )
-                    .expect("iq element")
-                    .try_into()
                     .expect("iq stanza"),
-                ),
+                )),
                 chrono::Utc::now(),
             )
             .await
@@ -1199,9 +1221,9 @@ async fn duplicate_subscribe_ack_reaches_non_roster_interested_resource() {
         .expect("ack stanza");
     let frame = stanza_to_xml(&ack.stanza);
     assert!(
-        frame.contains("from=\"alice@example.com\"")
-            && frame.contains("to=\"bob@example.com\"")
-            && frame.contains("type=\"subscribed\""),
+        frame.contains("from='alice@example.com'")
+            && frame.contains("to='bob@example.com'")
+            && frame.contains("type='subscribed'"),
         "duplicate subscribe ack should reach a live resource even before roster get: {frame}"
     );
 }
@@ -1249,10 +1271,9 @@ async fn roster_set_records_push_for_detached_interested_resource() {
         )
         .await;
     assert!(
-        responses
-            .iter()
-            .any(|frame| frame.contains("roster-detached-fanout")
-                && frame.contains("type=\"result\"")),
+        responses.iter().any(
+            |frame| frame.contains("roster-detached-fanout") && frame.contains("type='result'")
+        ),
         "roster set should succeed: {responses:?}"
     );
 
@@ -1352,7 +1373,7 @@ async fn subscription_approval_replays_current_presence_from_detached_available_
     }
     assert!(
         delivered.iter().any(|frame| {
-            frame.contains("from=\"alice@example.com/web\"")
+            frame.contains("from='alice@example.com/web'")
                 && frame.contains("<show>chat</show>")
                 && frame.contains("<status>ready from detach</status>")
                 && frame.contains("<priority>7</priority>")
@@ -1436,8 +1457,8 @@ async fn presence_probe_returns_detached_available_resource_presence() {
         .expect("outbound stanza");
     let frame = stanza_to_xml(&outbound.stanza);
     assert!(
-        frame.contains("from=\"alice@example.com/phone\"")
-            && frame.contains("to=\"bob@example.com\"")
+        frame.contains("from='alice@example.com/phone'")
+            && frame.contains("to='bob@example.com'")
             && frame.contains("<show>away</show>")
             && frame.contains("<status>stepped away</status>")
             && frame.contains("<priority>5</priority>"),
@@ -1535,8 +1556,8 @@ async fn full_jid_presence_probe_returns_only_that_resources_availability() {
         .expect("outbound stanza");
     let frame = stanza_to_xml(&outbound.stanza);
     assert!(
-        frame.contains("from=\"alice@example.com/phone\"")
-            && frame.contains("to=\"bob@example.com\"")
+        frame.contains("from='alice@example.com/phone'")
+            && frame.contains("to='bob@example.com'")
             && frame.contains("<show>away</show>")
             && frame.contains("<status>phone detail</status>")
             && frame.contains("<priority>5</priority>")
@@ -1605,9 +1626,9 @@ async fn presence_probe_without_subscription_does_not_reveal_detached_presence()
         .expect("outbound stanza");
     let frame = stanza_to_xml(&outbound.stanza);
     assert!(
-        frame.contains("from=\"alice@example.com\"")
-            && frame.contains("to=\"mallory@example.com\"")
-            && frame.contains("type=\"unsubscribed\"")
+        frame.contains("from='alice@example.com'")
+            && frame.contains("to='mallory@example.com'")
+            && frame.contains("type='unsubscribed'")
             && !frame.contains("alice@example.com/phone")
             && !frame.contains("private"),
         "unauthorized probe must return only an unsubscribed signal: {frame}"
@@ -1677,9 +1698,9 @@ async fn expired_detached_available_session_broadcasts_unavailable_to_subscriber
         .expect("outbound stanza");
     let frame = stanza_to_xml(&outbound.stanza);
     assert!(
-        frame.contains("from=\"alice@example.com/phone\"")
-            && frame.contains("to=\"bob@example.com\"")
-            && frame.contains("type=\"unavailable\""),
+        frame.contains("from='alice@example.com/phone'")
+            && frame.contains("to='bob@example.com'")
+            && frame.contains("type='unavailable'"),
         "expired detached session should broadcast unavailable presence: {frame}"
     );
     let sibling_outbound = tokio::time::timeout(
@@ -1691,9 +1712,9 @@ async fn expired_detached_available_session_broadcasts_unavailable_to_subscriber
     .expect("outbound stanza");
     let sibling_frame = stanza_to_xml(&sibling_outbound.stanza);
     assert!(
-        sibling_frame.contains("from=\"alice@example.com/phone\"")
-            && sibling_frame.contains("to=\"alice@example.com\"")
-            && sibling_frame.contains("type=\"unavailable\""),
+        sibling_frame.contains("from='alice@example.com/phone'")
+            && sibling_frame.contains("to='alice@example.com'")
+            && sibling_frame.contains("type='unavailable'"),
         "expired detached session should notify sibling resources: {sibling_frame}"
     );
 }
@@ -1767,7 +1788,7 @@ async fn subscription_approval_records_roster_push_for_detached_interested_resou
         replay.iter().any(|frame| {
             frame.contains("jabber:iq:roster")
                 && frame.contains("alice@example.com")
-                && frame.contains("subscription=\"to\"")
+                && frame.contains("subscription='to'")
         }),
         "detached interested resource should replay subscription roster push: {replay:?}"
     );
@@ -1823,7 +1844,7 @@ async fn subscribe_to_detached_available_resource_replays_on_resume() {
         handle_xmpp_frame(&resume_frame, "example.com", state.as_ref(), &mut resumed).await;
     assert!(
         replay.iter().any(|frame| {
-            frame.contains("type=\"subscribe\"") && frame.contains("from=\"bob@example.com\"")
+            frame.contains("type='subscribe'") && frame.contains("from='bob@example.com'")
         }),
         "detached available recipient should replay inbound subscribe: {replay:?}"
     );
@@ -1897,7 +1918,7 @@ async fn presence_broadcast_to_detached_available_subscriber_replays_on_resume()
         handle_xmpp_frame(&resume_frame, "example.com", state.as_ref(), &mut resumed).await;
     assert!(
         replay.iter().any(|frame| {
-            frame.contains("from=\"alice@example.com/web\"")
+            frame.contains("from='alice@example.com/web'")
                 && frame.contains("<show>away</show>")
                 && frame.contains("<status>broadcast while detached</status>")
                 && frame.contains("<priority>5</priority>")

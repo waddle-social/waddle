@@ -28,7 +28,7 @@ scenario: #Scenario & {
 		#JoinMuc & {actor: alicePhone, room: roomJid, nick: "alice"},
 		#ExpectFrame & {
 			target:   alicePhone
-			contains: ["from=\"\(roomJid)\"", "<subject></subject>"]
+			contains: ["from='\(roomJid)'", "<subject></subject>"]
 		},
 		#SetMucAffiliation & {
 			actor:       alicePhone
@@ -82,15 +82,15 @@ scenario: #Scenario & {
 		#JoinMuc & {actor: bobPhone, room: roomJid, nick: "bob"},
 		#ExpectPresence & {
 			target:   bobPhone
-			contains: ["from=\"\(roomJid)/alice\""]
+			contains: ["from='\(roomJid)/alice'"]
 		},
 		#ExpectFrame & {
 			target:   bobPhone
-			contains: ["from=\"\(roomJid)\"", "<subject></subject>"]
+			contains: ["from='\(roomJid)'", "<subject></subject>"]
 		},
 		#ExpectPresence & {
 			target:   alicePhone
-			contains: ["from=\"\(roomJid)/bob\""]
+			contains: ["from='\(roomJid)/bob'"]
 		},
 		#ExpectMucAdminDenied & {
 			actor:       bobPhone

@@ -37,10 +37,9 @@ fn fixture_unacked(stream_id: &str, sequence: u32) -> PersistedUnackedStanza {
     // any future xmpp-parsers minidom upgrades that change the
     // string-form XML shape (whitespace, attribute order, etc.).
     let mut message = xmpp_parsers::message::Message::new(None::<jid::Jid>);
-    message.bodies.insert(
-        String::new(),
-        xmpp_parsers::message::Body(format!("m{sequence}")),
-    );
+    message
+        .bodies
+        .insert(xmpp_parsers::message::Lang::new(), format!("m{sequence}"));
     PersistedUnackedStanza {
         stream_id: sid(stream_id),
         sequence,

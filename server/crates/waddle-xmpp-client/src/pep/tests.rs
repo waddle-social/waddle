@@ -2,15 +2,18 @@ use super::*;
 
 fn make_pep_message(node: &str, payload: Element) -> Element {
     Element::builder("message", NS_CLIENT)
-        .attr("from", "user@example.com")
+        .attr(
+            minidom::rxml::xml_ncname!("from").to_owned(),
+            "user@example.com",
+        )
         .append(
             Element::builder("event", NS_PUBSUB_EVENT)
                 .append(
                     Element::builder("items", NS_PUBSUB_EVENT)
-                        .attr("node", node)
+                        .attr(minidom::rxml::xml_ncname!("node").to_owned(), node)
                         .append(
                             Element::builder("item", NS_PUBSUB_EVENT)
-                                .attr("id", "current")
+                                .attr(minidom::rxml::xml_ncname!("id").to_owned(), "current")
                                 .append(payload)
                                 .build(),
                         )
@@ -159,15 +162,15 @@ fn build_pep_items_iq_targets_requested_jid_and_node() {
 #[test]
 fn parse_pep_iq_results_round_trip() {
     let mood_iq = Element::builder("iq", NS_CLIENT)
-        .attr("type", "result")
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "result")
         .append(
             Element::builder("pubsub", NS_PUBSUB)
                 .append(
                     Element::builder("items", NS_PUBSUB)
-                        .attr("node", NS_MOOD)
+                        .attr(minidom::rxml::xml_ncname!("node").to_owned(), NS_MOOD)
                         .append(
                             Element::builder("item", NS_PUBSUB)
-                                .attr("id", "current")
+                                .attr(minidom::rxml::xml_ncname!("id").to_owned(), "current")
                                 .append(build_mood_element("happy", Some("great")))
                                 .build(),
                         )
@@ -185,15 +188,15 @@ fn parse_pep_iq_results_round_trip() {
     );
 
     let activity_iq = Element::builder("iq", NS_CLIENT)
-        .attr("type", "result")
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "result")
         .append(
             Element::builder("pubsub", NS_PUBSUB)
                 .append(
                     Element::builder("items", NS_PUBSUB)
-                        .attr("node", NS_ACTIVITY)
+                        .attr(minidom::rxml::xml_ncname!("node").to_owned(), NS_ACTIVITY)
                         .append(
                             Element::builder("item", NS_PUBSUB)
-                                .attr("id", "current")
+                                .attr(minidom::rxml::xml_ncname!("id").to_owned(), "current")
                                 .append(build_activity_element_with_specific(
                                     "working",
                                     Some("coding"),
@@ -216,15 +219,15 @@ fn parse_pep_iq_results_round_trip() {
     );
 
     let tune_iq = Element::builder("iq", NS_CLIENT)
-        .attr("type", "result")
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "result")
         .append(
             Element::builder("pubsub", NS_PUBSUB)
                 .append(
                     Element::builder("items", NS_PUBSUB)
-                        .attr("node", NS_TUNE)
+                        .attr(minidom::rxml::xml_ncname!("node").to_owned(), NS_TUNE)
                         .append(
                             Element::builder("item", NS_PUBSUB)
-                                .attr("id", "current")
+                                .attr(minidom::rxml::xml_ncname!("id").to_owned(), "current")
                                 .append(build_tune_element(&UserTune {
                                     artist: Some("Artist".to_string()),
                                     title: Some("Track".to_string()),
@@ -258,7 +261,7 @@ fn parse_pep_iq_results_round_trip() {
 #[test]
 fn parse_ignores_non_pep_message() {
     let msg = Element::builder("message", NS_CLIENT)
-        .attr("type", "chat")
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "chat")
         .append(Element::builder("body", NS_CLIENT).append("Hello!").build())
         .build();
     assert_eq!(parse(&msg), None);
@@ -267,8 +270,8 @@ fn parse_ignores_non_pep_message() {
 #[test]
 fn parse_ignores_iq() {
     let iq = Element::builder("iq", NS_CLIENT)
-        .attr("type", "get")
-        .attr("id", "some-id")
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "get")
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), "some-id")
         .build();
     assert_eq!(parse(&iq), None);
 }

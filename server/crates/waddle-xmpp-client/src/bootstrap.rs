@@ -211,7 +211,10 @@ pub struct OAuthBearerRequest {
 impl OAuthBearerRequest {
     pub fn to_element(&self) -> Element {
         Element::builder("auth", NS_SASL)
-            .attr("mechanism", AuthMechanism::OAuthBearer.as_str())
+            .attr(
+                minidom::rxml::xml_ncname!("mechanism").to_owned(),
+                AuthMechanism::OAuthBearer.as_str(),
+            )
             .append(self.encoded_initial_response())
             .build()
     }
@@ -273,8 +276,11 @@ impl ResourceBindingRequest {
 
     pub fn to_element(&self) -> Element {
         Element::builder("iq", NS_CLIENT)
-            .attr("id", self.stanza_id.as_str())
-            .attr("type", "set")
+            .attr(
+                minidom::rxml::xml_ncname!("id").to_owned(),
+                self.stanza_id.as_str(),
+            )
+            .attr(minidom::rxml::xml_ncname!("type").to_owned(), "set")
             .append(
                 Element::builder("bind", NS_BIND)
                     .append(

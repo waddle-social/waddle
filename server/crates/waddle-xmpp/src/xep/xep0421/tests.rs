@@ -110,7 +110,7 @@ fn test_secret_debug_redacts_bytes() {
 #[test]
 fn test_is_occupant_id_element() {
     let elem = Element::builder("occupant-id", NS_OCCUPANT_ID)
-        .attr("id", "abc123")
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), "abc123")
         .build();
     assert!(is_occupant_id_element(&elem));
 

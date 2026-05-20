@@ -38,7 +38,7 @@ async fn iq_set_to(client: &mut WsXmppClient, id: &str, to: &str, body: &str) ->
         .await
         .expect("send iq set");
     client
-        .recv_matching(|frame| frame.contains(&format!(r#"id="{id}""#)) && frame.contains("<iq"))
+        .recv_matching(|frame| frame.contains(&format!(r#"id='{id}'"#)) && frame.contains("<iq"))
         .await
         .expect("iq set response")
 }
@@ -52,7 +52,7 @@ async fn iq_get_to(client: &mut WsXmppClient, id: &str, to: &str, body: &str) ->
         .await
         .expect("send iq get");
     client
-        .recv_matching(|frame| frame.contains(&format!(r#"id="{id}""#)) && frame.contains("<iq"))
+        .recv_matching(|frame| frame.contains(&format!(r#"id='{id}'"#)) && frame.contains("<iq"))
         .await
         .expect("iq get response")
 }
@@ -100,11 +100,11 @@ async fn pep_owner_can_publish_to_self_node_without_explicit_create() {
     .await;
 
     assert!(
-        resp.contains(r#"type="result""#),
+        resp.contains(r#"type='result'"#),
         "auto-create+publish to own PEP node must succeed (XEP-0163 §3): {resp}"
     );
     assert!(
-        !resp.contains(r#"type="error""#),
+        !resp.contains(r#"type='error'"#),
         "must not return an error: {resp}"
     );
 }
@@ -135,7 +135,7 @@ async fn pep_other_user_cannot_publish_to_alice_pep_node() {
     )
     .await;
     assert!(
-        r1.contains(r#"type="result""#),
+        r1.contains(r#"type='result'"#),
         "admin must be able to publish to own node: {r1}"
     );
 
@@ -157,12 +157,12 @@ async fn pep_other_user_cannot_publish_to_alice_pep_node() {
     .expect("send bob publish");
 
     let bob_resp = bob
-        .recv_matching(|frame| frame.contains(r#"id="bob-pub-1""#) && frame.contains("<iq"))
+        .recv_matching(|frame| frame.contains(r#"id='bob-pub-1'"#) && frame.contains("<iq"))
         .await
         .expect("bob publish response");
 
     assert!(
-        bob_resp.contains(r#"type="error""#),
+        bob_resp.contains(r#"type='error'"#),
         "non-owner publish to PEP node must be forbidden (XEP-0163 §4): {bob_resp}"
     );
     assert!(
@@ -170,7 +170,7 @@ async fn pep_other_user_cannot_publish_to_alice_pep_node() {
         "expected <error> element in response: {bob_resp}"
     );
     assert!(
-        !bob_resp.contains(r#"type="result""#),
+        !bob_resp.contains(r#"type='result'"#),
         "must not return success: {bob_resp}"
     );
 
@@ -204,7 +204,7 @@ async fn pep_max_items_is_one_by_default() {
         ),
     )
     .await;
-    assert!(r1.contains(r#"type="result""#), "publish i1: {r1}");
+    assert!(r1.contains(r#"type='result'"#), "publish i1: {r1}");
 
     // Publish second item — i1 must be evicted (max_items=1).
     let r2 = iq_set_to(
@@ -216,7 +216,7 @@ async fn pep_max_items_is_one_by_default() {
         ),
     )
     .await;
-    assert!(r2.contains(r#"type="result""#), "publish i2: {r2}");
+    assert!(r2.contains(r#"type='result'"#), "publish i2: {r2}");
 
     // Retrieve items — only i2 should remain.
     let items_resp = iq_get_to(
@@ -229,15 +229,15 @@ async fn pep_max_items_is_one_by_default() {
     )
     .await;
     assert!(
-        items_resp.contains(r#"type="result""#),
+        items_resp.contains(r#"type='result'"#),
         "items get: {items_resp}"
     );
     assert!(
-        !items_resp.contains(r#"id="i1""#),
+        !items_resp.contains(r#"id='i1'"#),
         "i1 must have been evicted by max_items=1 PEP default: {items_resp}"
     );
     assert!(
-        items_resp.contains(r#"id="i2""#),
+        items_resp.contains(r#"id='i2'"#),
         "i2 must be present: {items_resp}"
     );
     assert_eq!(
@@ -273,7 +273,7 @@ async fn pep_owner_can_purge_self_node() {
     )
     .await;
     assert!(
-        r1.contains(r#"type="result""#),
+        r1.contains(r#"type='result'"#),
         "create node via publish: {r1}"
     );
 
@@ -288,7 +288,7 @@ async fn pep_owner_can_purge_self_node() {
     )
     .await;
     assert!(
-        cfg.contains(r#"type="result""#),
+        cfg.contains(r#"type='result'"#),
         "configure max_items=10: {cfg}"
     );
 
@@ -302,7 +302,7 @@ async fn pep_owner_can_purge_self_node() {
         ),
     )
     .await;
-    assert!(r2.contains(r#"type="result""#), "publish p2: {r2}");
+    assert!(r2.contains(r#"type='result'"#), "publish p2: {r2}");
 
     let r3 = iq_set_to(
         &mut admin,
@@ -313,7 +313,7 @@ async fn pep_owner_can_purge_self_node() {
         ),
     )
     .await;
-    assert!(r3.contains(r#"type="result""#), "publish p3: {r3}");
+    assert!(r3.contains(r#"type='result'"#), "publish p3: {r3}");
 
     // Confirm 3 items are present before purge.
     let before = iq_get_to(
@@ -340,7 +340,7 @@ async fn pep_owner_can_purge_self_node() {
     )
     .await;
     assert!(
-        purge_resp.contains(r#"type="result""#),
+        purge_resp.contains(r#"type='result'"#),
         "PEP owner purge must succeed (XEP-0060 §8.5): {purge_resp}"
     );
 
@@ -353,7 +353,7 @@ async fn pep_owner_can_purge_self_node() {
     )
     .await;
     assert!(
-        after.contains(r#"type="result""#),
+        after.contains(r#"type='result'"#),
         "items get after purge: {after}"
     );
     assert_eq!(
@@ -373,7 +373,7 @@ async fn pep_owner_can_purge_self_node() {
     )
     .await;
     assert!(
-        post_purge.contains(r#"type="result""#),
+        post_purge.contains(r#"type='result'"#),
         "publish after purge must succeed (node still exists): {post_purge}"
     );
 }
@@ -397,7 +397,7 @@ async fn wait_for_event_message(
             Ok(frame) => {
                 if frame.contains("<message")
                     && frame.contains(NS_PUBSUB_EVENT)
-                    && (frame.contains(&format!(r#"node="{node}""#))
+                    && (frame.contains(&format!(r#"node='{node}'"#))
                         || frame.contains(&format!(r#"node='{node}'"#)))
                 {
                     return Some(frame);
@@ -430,7 +430,7 @@ async fn pep_publish_fans_event_with_owner_jid_as_from() {
         ),
     )
     .await;
-    assert!(r1.contains(r#"type="result""#), "create: {r1}");
+    assert!(r1.contains(r#"type='result'"#), "create: {r1}");
 
     let cfg = iq_set_to(
         &mut admin,
@@ -441,7 +441,7 @@ async fn pep_publish_fans_event_with_owner_jid_as_from() {
         ),
     )
     .await;
-    assert!(cfg.contains(r#"type="result""#), "configure open: {cfg}");
+    assert!(cfg.contains(r#"type='result'"#), "configure open: {cfg}");
 
     let mut bob = WsXmppClient::connect_and_auth(
         &server.ws_url(),
@@ -462,7 +462,7 @@ async fn pep_publish_fans_event_with_owner_jid_as_from() {
         ),
     )
     .await;
-    assert!(sub.contains(r#"type="result""#), "subscribe: {sub}");
+    assert!(sub.contains(r#"type='result'"#), "subscribe: {sub}");
 
     let pub_resp = iq_set_to(
         &mut admin,
@@ -473,7 +473,7 @@ async fn pep_publish_fans_event_with_owner_jid_as_from() {
         ),
     )
     .await;
-    assert!(pub_resp.contains(r#"type="result""#), "publish: {pub_resp}");
+    assert!(pub_resp.contains(r#"type='result'"#), "publish: {pub_resp}");
 
     let event = wait_for_event_message(&mut bob, node, Duration::from_secs(2))
         .await
@@ -481,17 +481,17 @@ async fn pep_publish_fans_event_with_owner_jid_as_from() {
 
     // XEP-0163 §4.3: PEP `from` is the bare account JID.
     assert!(
-        event.contains(&format!(r#"from="{admin_bare}""#))
+        event.contains(&format!(r#"from='{admin_bare}'"#))
             || event.contains(&format!(r#"from='{admin_bare}'"#)),
         "from must be the PEP account bare JID: {event}"
     );
     // XEP-0163 §4.3 + XEP-0060 §12.18: PEP MUST be headline.
     assert!(
-        event.contains(r#"type="headline""#) || event.contains(r#"type='headline'"#),
+        event.contains(r#"type='headline'"#) || event.contains(r#"type='headline'"#),
         "PEP event must be type=headline: {event}"
     );
     assert!(
-        event.contains(r#"id="mood-1""#),
+        event.contains(r#"id='mood-1'"#),
         "item id must round-trip: {event}"
     );
     // §7.1.5: publisher == owner here (admin published to own PEP), so
@@ -555,7 +555,7 @@ async fn ping_anchor(client: &mut WsXmppClient, id: &str) {
         .await
         .expect("send ping");
     let _ = client
-        .recv_matching(|frame| frame.contains(&format!(r#"id="{id}""#)) && frame.contains("<iq"))
+        .recv_matching(|frame| frame.contains(&format!(r#"id='{id}'"#)) && frame.contains("<iq"))
         .await
         .expect("ping result");
 }
@@ -594,7 +594,7 @@ async fn establish_bob_subscribes_to_alice(
     .await
     .expect("bob subscribes");
     let _subscribe = alice
-        .recv_matching(|f| f.contains(r#"type="subscribe""#))
+        .recv_matching(|f| f.contains(r#"type='subscribe'"#))
         .await
         .expect("alice receives subscribe");
     alice
@@ -604,7 +604,7 @@ async fn establish_bob_subscribes_to_alice(
         .await
         .expect("alice approves");
     let _subscribed = bob
-        .recv_matching(|f| f.contains(r#"type="subscribed""#))
+        .recv_matching(|f| f.contains(r#"type='subscribed'"#))
         .await
         .expect("bob receives approval");
 }
@@ -651,7 +651,7 @@ async fn pep_publish_fans_to_roster_contacts_with_matching_caps_notify() {
     let disco_query = bob
         .recv_matching(|frame| {
             frame.contains("<iq")
-                && frame.contains(r#"type="get""#)
+                && frame.contains(r#"type='get'"#)
                 && frame.contains(NS_DISCO_INFO)
         })
         .await
@@ -682,7 +682,7 @@ async fn pep_publish_fans_to_roster_contacts_with_matching_caps_notify() {
         ),
     )
     .await;
-    assert!(pub_resp.contains(r#"type="result""#), "publish: {pub_resp}");
+    assert!(pub_resp.contains(r#"type='result'"#), "publish: {pub_resp}");
 
     let event = wait_for_event_message(&mut bob, node, Duration::from_secs(2))
         .await
@@ -690,12 +690,12 @@ async fn pep_publish_fans_to_roster_contacts_with_matching_caps_notify() {
             "bob in alice's roster (subscription=from) and advertising +notify MUST receive the PEP event without explicit pubsub <subscribe/> per XEP-0163 §3",
         );
     assert!(
-        event.contains(&format!(r#"from="{alice_bare}""#))
+        event.contains(&format!(r#"from='{alice_bare}'"#))
             || event.contains(&format!(r#"from='{alice_bare}'"#)),
         "fan-out from MUST be alice's bare JID per XEP-0163 §4.3: {event}"
     );
     assert!(
-        event.contains(r#"id="mood-roster-1""#),
+        event.contains(r#"id='mood-roster-1'"#),
         "item id must round-trip: {event}"
     );
 
@@ -750,7 +750,7 @@ async fn pep_bookmark_publish_skips_roster_contacts_even_with_matching_caps_noti
     let disco_query = bob
         .recv_matching(|frame| {
             frame.contains("<iq")
-                && frame.contains(r#"type="get""#)
+                && frame.contains(r#"type='get'"#)
                 && frame.contains(NS_DISCO_INFO)
         })
         .await
@@ -781,7 +781,7 @@ async fn pep_bookmark_publish_skips_roster_contacts_even_with_matching_caps_noti
         ),
     )
     .await;
-    assert!(pub_resp.contains(r#"type="result""#), "publish: {pub_resp}");
+    assert!(pub_resp.contains(r#"type='result'"#), "publish: {pub_resp}");
 
     let event = wait_for_event_message(&mut bob, node, Duration::from_millis(700)).await;
     assert!(
@@ -834,7 +834,7 @@ async fn pep_bookmark_open_config_does_not_grant_non_owner_access() {
     )
     .await;
     assert!(
-        create.contains(r#"type="result""#),
+        create.contains(r#"type='result'"#),
         "create bookmark node: {create}"
     );
     let cfg = iq_set_to(
@@ -846,7 +846,7 @@ async fn pep_bookmark_open_config_does_not_grant_non_owner_access() {
         ),
     )
     .await;
-    assert!(cfg.contains(r#"type="result""#), "configure: {cfg}");
+    assert!(cfg.contains(r#"type='result'"#), "configure: {cfg}");
 
     let sub = iq_set_to(
         &mut bob,
@@ -858,7 +858,7 @@ async fn pep_bookmark_open_config_does_not_grant_non_owner_access() {
     )
     .await;
     assert!(
-        sub.contains(r#"type="error""#),
+        sub.contains(r#"type='error'"#),
         "bookmark node must stay private even after open config request: {sub}"
     );
     assert!(
@@ -874,7 +874,7 @@ async fn pep_bookmark_open_config_does_not_grant_non_owner_access() {
     )
     .await;
     assert!(
-        read.contains(r#"type="error""#),
+        read.contains(r#"type='error'"#),
         "bookmark items must stay private even after open config request: {read}"
     );
     assert!(
@@ -930,7 +930,7 @@ async fn pep_bookmark_items_reject_non_owner_reads() {
         ),
     )
     .await;
-    assert!(publish.contains(r#"type="result""#), "publish: {publish}");
+    assert!(publish.contains(r#"type='result'"#), "publish: {publish}");
 
     let read = iq_get_to(
         &mut bob,
@@ -940,7 +940,7 @@ async fn pep_bookmark_items_reject_non_owner_reads() {
     )
     .await;
     assert!(
-        read.contains(r#"type="error""#),
+        read.contains(r#"type='error'"#),
         "non-owner bookmark read must be rejected: {read}"
     );
     assert!(
@@ -1019,7 +1019,7 @@ async fn pep_publish_skips_roster_contact_without_caps_notify_filter() {
     let disco_query = bob
         .recv_matching(|frame| {
             frame.contains("<iq")
-                && frame.contains(r#"type="get""#)
+                && frame.contains(r#"type='get'"#)
                 && frame.contains(NS_DISCO_INFO)
         })
         .await
@@ -1050,7 +1050,7 @@ async fn pep_publish_skips_roster_contact_without_caps_notify_filter() {
         ),
     )
     .await;
-    assert!(pub_resp.contains(r#"type="result""#), "publish: {pub_resp}");
+    assert!(pub_resp.contains(r#"type='result'"#), "publish: {pub_resp}");
 
     let event = wait_for_event_message(&mut bob, publish_node, Duration::from_millis(700)).await;
     assert!(
@@ -1138,7 +1138,7 @@ async fn pep_publish_targets_only_resources_advertising_notify_filter() {
         .expect("bob-A presence with caps");
     let a_query = bob_a
         .recv_matching(|f| {
-            f.contains("<iq") && f.contains(r#"type="get""#) && f.contains(NS_DISCO_INFO)
+            f.contains("<iq") && f.contains(r#"type='get'"#) && f.contains(NS_DISCO_INFO)
         })
         .await
         .expect("disco#info to bob-A");
@@ -1166,7 +1166,7 @@ async fn pep_publish_targets_only_resources_advertising_notify_filter() {
         .expect("bob-B presence with caps");
     let b_query = bob_b
         .recv_matching(|f| {
-            f.contains("<iq") && f.contains(r#"type="get""#) && f.contains(NS_DISCO_INFO)
+            f.contains("<iq") && f.contains(r#"type='get'"#) && f.contains(NS_DISCO_INFO)
         })
         .await
         .expect("disco#info to bob-B");
@@ -1202,13 +1202,13 @@ async fn pep_publish_targets_only_resources_advertising_notify_filter() {
         ),
     )
     .await;
-    assert!(pub_resp.contains(r#"type="result""#), "publish: {pub_resp}");
+    assert!(pub_resp.contains(r#"type='result'"#), "publish: {pub_resp}");
 
     let a_event = wait_for_event_message(&mut bob_a, publish_node, Duration::from_secs(2))
         .await
         .expect("resource A advertising +notify MUST receive the event");
     assert!(
-        a_event.contains(r#"id="multi-1""#),
+        a_event.contains(r#"id='multi-1'"#),
         "item id must round-trip on A: {a_event}"
     );
 
@@ -1275,7 +1275,7 @@ async fn pep_publish_delivers_exactly_once_when_subscriber_also_in_roster() {
         ),
     )
     .await;
-    assert!(r1.contains(r#"type="result""#), "create: {r1}");
+    assert!(r1.contains(r#"type='result'"#), "create: {r1}");
     let cfg = iq_set_to(
         &mut alice,
         "pep-dedup-cfg",
@@ -1285,7 +1285,7 @@ async fn pep_publish_delivers_exactly_once_when_subscriber_also_in_roster() {
         ),
     )
     .await;
-    assert!(cfg.contains(r#"type="result""#), "configure: {cfg}");
+    assert!(cfg.contains(r#"type='result'"#), "configure: {cfg}");
 
     establish_bob_subscribes_to_alice(&mut alice, &mut bob, &alice_bare, &bob_bare).await;
 
@@ -1299,7 +1299,7 @@ async fn pep_publish_delivers_exactly_once_when_subscriber_also_in_roster() {
         ),
     )
     .await;
-    assert!(sub.contains(r#"type="result""#), "subscribe: {sub}");
+    assert!(sub.contains(r#"type='result'"#), "subscribe: {sub}");
 
     // Bob also advertises +notify in CAPS.
     let notify_var = format!("{publish_node}+notify");
@@ -1313,7 +1313,7 @@ async fn pep_publish_delivers_exactly_once_when_subscriber_also_in_roster() {
     .expect("bob caps presence");
     let disco_query = bob
         .recv_matching(|f| {
-            f.contains("<iq") && f.contains(r#"type="get""#) && f.contains(NS_DISCO_INFO)
+            f.contains("<iq") && f.contains(r#"type='get'"#) && f.contains(NS_DISCO_INFO)
         })
         .await
         .expect("disco#info to bob");
@@ -1343,13 +1343,13 @@ async fn pep_publish_delivers_exactly_once_when_subscriber_also_in_roster() {
         ),
     )
     .await;
-    assert!(pub_resp.contains(r#"type="result""#), "publish: {pub_resp}");
+    assert!(pub_resp.contains(r#"type='result'"#), "publish: {pub_resp}");
 
     let first = wait_for_event_message(&mut bob, publish_node, Duration::from_secs(2))
         .await
         .expect("bob (subscriber+roster+notify) MUST receive at least one event");
     assert!(
-        first.contains(r#"id="dedup-1""#),
+        first.contains(r#"id='dedup-1'"#),
         "expected dedup-1: {first}"
     );
 
@@ -1422,7 +1422,7 @@ async fn pep_publish_fans_to_owner_other_resources_with_caps_notify() {
         .expect("alice-B presence with caps");
     let disco_query = alice_b
         .recv_matching(|f| {
-            f.contains("<iq") && f.contains(r#"type="get""#) && f.contains(NS_DISCO_INFO)
+            f.contains("<iq") && f.contains(r#"type='get'"#) && f.contains(NS_DISCO_INFO)
         })
         .await
         .expect("disco#info to alice-B");
@@ -1453,7 +1453,7 @@ async fn pep_publish_fans_to_owner_other_resources_with_caps_notify() {
         ),
     )
     .await;
-    assert!(pub_resp.contains(r#"type="result""#), "publish: {pub_resp}");
+    assert!(pub_resp.contains(r#"type='result'"#), "publish: {pub_resp}");
 
     let event = wait_for_event_message(&mut alice_b, publish_node, Duration::from_secs(2))
         .await
@@ -1461,7 +1461,7 @@ async fn pep_publish_fans_to_owner_other_resources_with_caps_notify() {
             "alice-B advertising +notify MUST receive PEP event from alice-A's publish per §3.4",
         );
     assert!(
-        event.contains(r#"id="self-1@muc.example.com""#),
+        event.contains(r#"id='self-1@muc.example.com'"#),
         "item id: {event}"
     );
 
@@ -1491,7 +1491,7 @@ async fn xep0191_block(client: &mut WsXmppClient, target_bare: &str, id: &str) {
         .await
         .expect("send block IQ");
     let _ = client
-        .recv_matching(|frame| frame.contains(&format!(r#"id="{id}""#)) && frame.contains("<iq"))
+        .recv_matching(|frame| frame.contains(&format!(r#"id='{id}'"#)) && frame.contains("<iq"))
         .await
         .expect("block IQ result");
 }
@@ -1546,7 +1546,7 @@ async fn pep_publish_skips_blocked_roster_contact() {
     .expect("bob caps");
     let q = bob
         .recv_matching(|f| {
-            f.contains("<iq") && f.contains(r#"type="get""#) && f.contains(NS_DISCO_INFO)
+            f.contains("<iq") && f.contains(r#"type='get'"#) && f.contains(NS_DISCO_INFO)
         })
         .await
         .expect("server queries bob");
@@ -1574,7 +1574,7 @@ async fn pep_publish_skips_blocked_roster_contact() {
         ),
     )
     .await;
-    assert!(pub_resp.contains(r#"type="result""#), "publish: {pub_resp}");
+    assert!(pub_resp.contains(r#"type='result'"#), "publish: {pub_resp}");
 
     // Use bob's own ping reply as the FIFO anchor: by the time the
     // ping result arrives, the fan-out for the publish has already
@@ -1639,7 +1639,7 @@ async fn pep_publish_skips_when_contact_blocked_publisher() {
     .expect("bob caps");
     let q = bob
         .recv_matching(|f| {
-            f.contains("<iq") && f.contains(r#"type="get""#) && f.contains(NS_DISCO_INFO)
+            f.contains("<iq") && f.contains(r#"type='get'"#) && f.contains(NS_DISCO_INFO)
         })
         .await
         .expect("server queries bob");
@@ -1667,7 +1667,7 @@ async fn pep_publish_skips_when_contact_blocked_publisher() {
         ),
     )
     .await;
-    assert!(pub_resp.contains(r#"type="result""#), "publish: {pub_resp}");
+    assert!(pub_resp.contains(r#"type='result'"#), "publish: {pub_resp}");
 
     ping_anchor(&mut bob, "pep-block2-anchor-pub").await;
     let event = wait_for_event_message(&mut bob, publish_node, Duration::from_millis(200)).await;
@@ -1719,7 +1719,7 @@ async fn pep_publish_does_not_echo_to_publishing_resource() {
         .expect("alice caps presence");
     let q = alice
         .recv_matching(|f| {
-            f.contains("<iq") && f.contains(r#"type="get""#) && f.contains(NS_DISCO_INFO)
+            f.contains("<iq") && f.contains(r#"type='get'"#) && f.contains(NS_DISCO_INFO)
         })
         .await
         .expect("server queries alice");
@@ -1745,7 +1745,7 @@ async fn pep_publish_does_not_echo_to_publishing_resource() {
         ),
     )
     .await;
-    assert!(pub_resp.contains(r#"type="result""#), "publish: {pub_resp}");
+    assert!(pub_resp.contains(r#"type='result'"#), "publish: {pub_resp}");
 
     ping_anchor(&mut alice, "pep-noecho-anchor-2").await;
     let event = wait_for_event_message(&mut alice, publish_node, Duration::from_millis(200)).await;

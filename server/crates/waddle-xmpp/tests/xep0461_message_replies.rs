@@ -80,7 +80,7 @@ fn xep0461_feature_constructor_pins_namespace_string() {
 #[test]
 fn xep0461_classifier_accepts_spec_shape_only() {
     let canonical = Element::builder("reply", NS_REPLY)
-        .attr("id", "msg-1")
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), "msg-1")
         .build();
     assert!(is_reply_element(&canonical));
 

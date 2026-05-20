@@ -1,7 +1,7 @@
 use super::*;
 use crate::xep::xep0004::{DataForm, Field, FormType, FromElement, IntoElement};
 use minidom::Element;
-use xmpp_parsers::iq::{Iq, IqType};
+use xmpp_parsers::iq::Iq;
 
 // --- Action ---
 
@@ -214,14 +214,14 @@ fn test_command_wrong_element_error() {
 #[test]
 fn test_is_command_request() {
     let cmd_elem = Element::builder("command", NS_COMMANDS)
-        .attr("node", "test-cmd")
-        .attr("action", "execute")
+        .attr(minidom::rxml::xml_ncname!("node").to_owned(), "test-cmd")
+        .attr(minidom::rxml::xml_ncname!("action").to_owned(), "execute")
         .build();
-    let iq = Iq {
+    let iq = Iq::Set {
         from: Some("alice@example.com".parse().unwrap()),
         to: Some("example.com".parse().unwrap()),
         id: "cmd-1".to_string(),
-        payload: IqType::Set(cmd_elem),
+        payload: cmd_elem,
     };
 
     assert!(is_command_request(&iq));
@@ -230,13 +230,13 @@ fn test_is_command_request() {
 #[test]
 fn test_is_command_request_false_for_get() {
     let cmd_elem = Element::builder("command", NS_COMMANDS)
-        .attr("node", "test-cmd")
+        .attr(minidom::rxml::xml_ncname!("node").to_owned(), "test-cmd")
         .build();
-    let iq = Iq {
+    let iq = Iq::Get {
         from: None,
         to: None,
         id: "cmd-2".to_string(),
-        payload: IqType::Get(cmd_elem),
+        payload: cmd_elem,
     };
 
     assert!(!is_command_request(&iq));
@@ -245,13 +245,13 @@ fn test_is_command_request_false_for_get() {
 #[test]
 fn test_is_command_request_false_for_wrong_ns() {
     let elem = Element::builder("command", "wrong:ns")
-        .attr("node", "test")
+        .attr(minidom::rxml::xml_ncname!("node").to_owned(), "test")
         .build();
-    let iq = Iq {
+    let iq = Iq::Set {
         from: None,
         to: None,
         id: "cmd-3".to_string(),
-        payload: IqType::Set(elem),
+        payload: elem,
     };
 
     assert!(!is_command_request(&iq));
@@ -260,14 +260,14 @@ fn test_is_command_request_false_for_wrong_ns() {
 #[test]
 fn test_parse_command_from_iq() {
     let cmd_elem = Element::builder("command", NS_COMMANDS)
-        .attr("node", "my-node")
-        .attr("action", "execute")
+        .attr(minidom::rxml::xml_ncname!("node").to_owned(), "my-node")
+        .attr(minidom::rxml::xml_ncname!("action").to_owned(), "execute")
         .build();
-    let iq = Iq {
+    let iq = Iq::Set {
         from: Some("alice@example.com".parse().unwrap()),
         to: Some("example.com".parse().unwrap()),
         id: "parse-1".to_string(),
-        payload: IqType::Set(cmd_elem),
+        payload: cmd_elem,
     };
 
     let cmd = parse_command_from_iq(&iq).expect("parse command from IQ");
@@ -278,13 +278,13 @@ fn test_parse_command_from_iq() {
 #[test]
 fn test_parse_command_from_iq_error_on_get() {
     let elem = Element::builder("command", NS_COMMANDS)
-        .attr("node", "x")
+        .attr(minidom::rxml::xml_ncname!("node").to_owned(), "x")
         .build();
-    let iq = Iq {
+    let iq = Iq::Get {
         from: None,
         to: None,
         id: "parse-2".to_string(),
-        payload: IqType::Get(elem),
+        payload: elem,
     };
 
     assert!(parse_command_from_iq(&iq).is_err());
@@ -293,14 +293,14 @@ fn test_parse_command_from_iq_error_on_get() {
 #[test]
 fn test_build_command_result() {
     let cmd_elem = Element::builder("command", NS_COMMANDS)
-        .attr("node", "test")
-        .attr("action", "execute")
+        .attr(minidom::rxml::xml_ncname!("node").to_owned(), "test")
+        .attr(minidom::rxml::xml_ncname!("action").to_owned(), "execute")
         .build();
-    let iq = Iq {
+    let iq = Iq::Set {
         from: Some("alice@example.com".parse().unwrap()),
         to: Some("example.com".parse().unwrap()),
         id: "res-1".to_string(),
-        payload: IqType::Set(cmd_elem),
+        payload: cmd_elem,
     };
 
     let response_cmd = Command::new("test")
@@ -310,11 +310,14 @@ fn test_build_command_result() {
 
     let result = build_command_result(&iq, &response_cmd);
 
-    assert_eq!(result.id, "res-1");
-    assert_eq!(result.from, iq.to);
-    assert_eq!(result.to, iq.from);
-    match &result.payload {
-        IqType::Result(Some(elem)) => {
+    assert_eq!(result.id(), "res-1");
+    assert_eq!(result.from(), iq.to());
+    assert_eq!(result.to(), iq.from());
+    match result {
+        Iq::Result {
+            payload: Some(elem),
+            ..
+        } => {
             assert_eq!(elem.name(), "command");
             assert_eq!(elem.ns(), NS_COMMANDS);
             assert_eq!(elem.attr("status"), Some("completed"));
@@ -331,18 +334,18 @@ fn test_build_bad_request() {
     use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType};
 
     let cmd_elem = Element::builder("command", NS_COMMANDS)
-        .attr("node", "test")
+        .attr(minidom::rxml::xml_ncname!("node").to_owned(), "test")
         .build();
-    let iq = Iq {
+    let iq = Iq::Set {
         from: Some("alice@example.com".parse().unwrap()),
         to: Some("example.com".parse().unwrap()),
         id: "err-1".to_string(),
-        payload: IqType::Set(cmd_elem),
+        payload: cmd_elem,
     };
 
     let err = build_bad_request(&iq, Some("bad-payload"));
-    match &err.payload {
-        IqType::Error(se) => {
+    match err {
+        Iq::Error { error: se, .. } => {
             assert_eq!(se.type_, ErrorType::Modify);
             assert_eq!(se.defined_condition, DefinedCondition::BadRequest);
             let ext = se.other.as_ref().expect("command extension");
@@ -358,18 +361,18 @@ fn test_build_bad_session_id() {
     use xmpp_parsers::stanza_error::DefinedCondition;
 
     let cmd_elem = Element::builder("command", NS_COMMANDS)
-        .attr("node", "test")
+        .attr(minidom::rxml::xml_ncname!("node").to_owned(), "test")
         .build();
-    let iq = Iq {
+    let iq = Iq::Set {
         from: None,
         to: None,
         id: "err-2".to_string(),
-        payload: IqType::Set(cmd_elem),
+        payload: cmd_elem,
     };
 
     let err = build_bad_session_id(&iq);
-    match &err.payload {
-        IqType::Error(se) => {
+    match err {
+        Iq::Error { error: se, .. } => {
             assert_eq!(se.defined_condition, DefinedCondition::BadRequest);
             let ext = se.other.as_ref().expect("command extension");
             assert_eq!(ext.name(), "bad-sessionid");
@@ -384,18 +387,18 @@ fn test_build_item_not_found() {
     use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType};
 
     let cmd_elem = Element::builder("command", NS_COMMANDS)
-        .attr("node", "nonexistent")
+        .attr(minidom::rxml::xml_ncname!("node").to_owned(), "nonexistent")
         .build();
-    let iq = Iq {
+    let iq = Iq::Set {
         from: None,
         to: None,
         id: "err-3".to_string(),
-        payload: IqType::Set(cmd_elem),
+        payload: cmd_elem,
     };
 
     let err = build_item_not_found(&iq);
-    match &err.payload {
-        IqType::Error(se) => {
+    match err {
+        Iq::Error { error: se, .. } => {
             assert_eq!(se.type_, ErrorType::Cancel);
             assert_eq!(se.defined_condition, DefinedCondition::ItemNotFound);
             assert!(se.other.is_none());
@@ -409,18 +412,18 @@ fn test_build_not_allowed() {
     use xmpp_parsers::stanza_error::ErrorType;
 
     let cmd_elem = Element::builder("command", NS_COMMANDS)
-        .attr("node", "x")
+        .attr(minidom::rxml::xml_ncname!("node").to_owned(), "x")
         .build();
-    let iq = Iq {
+    let iq = Iq::Set {
         from: None,
         to: None,
         id: "err-4".to_string(),
-        payload: IqType::Set(cmd_elem),
+        payload: cmd_elem,
     };
 
     let err = build_not_allowed(&iq);
-    match &err.payload {
-        IqType::Error(se) => {
+    match err {
+        Iq::Error { error: se, .. } => {
             assert_eq!(se.type_, ErrorType::Cancel);
         }
         _ => panic!("Expected Error payload"),
@@ -432,18 +435,18 @@ fn test_build_forbidden() {
     use xmpp_parsers::stanza_error::ErrorType;
 
     let cmd_elem = Element::builder("command", NS_COMMANDS)
-        .attr("node", "x")
+        .attr(minidom::rxml::xml_ncname!("node").to_owned(), "x")
         .build();
-    let iq = Iq {
+    let iq = Iq::Set {
         from: None,
         to: None,
         id: "err-5".to_string(),
-        payload: IqType::Set(cmd_elem),
+        payload: cmd_elem,
     };
 
     let err = build_forbidden(&iq);
-    match &err.payload {
-        IqType::Error(se) => {
+    match err {
+        Iq::Error { error: se, .. } => {
             assert_eq!(se.type_, ErrorType::Auth);
         }
         _ => panic!("Expected Error payload"),
@@ -453,18 +456,18 @@ fn test_build_forbidden() {
 #[test]
 fn test_build_session_expired() {
     let cmd_elem = Element::builder("command", NS_COMMANDS)
-        .attr("node", "x")
+        .attr(minidom::rxml::xml_ncname!("node").to_owned(), "x")
         .build();
-    let iq = Iq {
+    let iq = Iq::Set {
         from: None,
         to: None,
         id: "err-6".to_string(),
-        payload: IqType::Set(cmd_elem),
+        payload: cmd_elem,
     };
 
     let err = build_session_expired(&iq);
-    match &err.payload {
-        IqType::Error(se) => {
+    match err {
+        Iq::Error { error: se, .. } => {
             let ext = se.other.as_ref().expect("command extension");
             assert_eq!(ext.name(), "session-expired");
             assert_eq!(ext.ns(), NS_COMMANDS);
@@ -480,13 +483,13 @@ fn test_is_commands_disco_items() {
     use crate::disco::items::DISCO_ITEMS_NS;
 
     let query = Element::builder("query", DISCO_ITEMS_NS)
-        .attr("node", NODE_COMMANDS)
+        .attr(minidom::rxml::xml_ncname!("node").to_owned(), NODE_COMMANDS)
         .build();
-    let iq = Iq {
+    let iq = Iq::Get {
         from: Some("alice@example.com".parse().unwrap()),
         to: Some("example.com".parse().unwrap()),
         id: "disco-items-1".to_string(),
-        payload: IqType::Get(query),
+        payload: query,
     };
 
     assert!(is_commands_disco_items(&iq));
@@ -497,13 +500,16 @@ fn test_is_commands_disco_items_false_for_other_node() {
     use crate::disco::items::DISCO_ITEMS_NS;
 
     let query = Element::builder("query", DISCO_ITEMS_NS)
-        .attr("node", "some-other-node")
+        .attr(
+            minidom::rxml::xml_ncname!("node").to_owned(),
+            "some-other-node",
+        )
         .build();
-    let iq = Iq {
+    let iq = Iq::Get {
         from: None,
         to: None,
         id: "disco-items-2".to_string(),
-        payload: IqType::Get(query),
+        payload: query,
     };
 
     assert!(!is_commands_disco_items(&iq));
@@ -514,13 +520,13 @@ fn test_is_commands_disco_info() {
     use crate::disco::info::DISCO_INFO_NS;
 
     let query = Element::builder("query", DISCO_INFO_NS)
-        .attr("node", NODE_COMMANDS)
+        .attr(minidom::rxml::xml_ncname!("node").to_owned(), NODE_COMMANDS)
         .build();
-    let iq = Iq {
+    let iq = Iq::Get {
         from: None,
         to: None,
         id: "disco-info-1".to_string(),
-        payload: IqType::Get(query),
+        payload: query,
     };
 
     assert!(is_commands_disco_info(&iq));
@@ -531,13 +537,16 @@ fn test_is_command_node_disco_info() {
     use crate::disco::info::DISCO_INFO_NS;
 
     let query = Element::builder("query", DISCO_INFO_NS)
-        .attr("node", "my-command-node")
+        .attr(
+            minidom::rxml::xml_ncname!("node").to_owned(),
+            "my-command-node",
+        )
         .build();
-    let iq = Iq {
+    let iq = Iq::Get {
         from: None,
         to: None,
         id: "disco-info-2".to_string(),
-        payload: IqType::Get(query),
+        payload: query,
     };
 
     assert!(is_command_node_disco_info(&iq, "my-command-node"));
@@ -547,20 +556,23 @@ fn test_is_command_node_disco_info() {
 #[test]
 fn test_build_command_items() {
     let query = Element::builder("query", "http://jabber.org/protocol/disco#items")
-        .attr("node", NODE_COMMANDS)
+        .attr(minidom::rxml::xml_ncname!("node").to_owned(), NODE_COMMANDS)
         .build();
-    let iq = Iq {
+    let iq = Iq::Get {
         from: Some("alice@example.com".parse().unwrap()),
         to: Some("example.com".parse().unwrap()),
         id: "items-1".to_string(),
-        payload: IqType::Get(query),
+        payload: query,
     };
 
     let commands = vec![("cmd-1", "First Command"), ("cmd-2", "Second Command")];
 
     let result = build_command_items(&iq, &commands, "example.com");
-    match &result.payload {
-        IqType::Result(Some(elem)) => {
+    match result {
+        Iq::Result {
+            payload: Some(elem),
+            ..
+        } => {
             assert_eq!(elem.name(), "query");
             assert_eq!(elem.attr("node"), Some(NODE_COMMANDS));
             let items: Vec<_> = elem.children().collect();

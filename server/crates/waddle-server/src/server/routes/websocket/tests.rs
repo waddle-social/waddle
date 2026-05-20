@@ -11,7 +11,8 @@ use crate::db::{DatabaseConfig, DatabasePool, MigrationRunner, PoolConfig};
 use crate::permissions::{Object, ObjectType, Permission, Relation, Subject, Tuple, WriteTuple};
 use crate::server::bootstrap_membership::DEPLOYMENT_SERVER_ID;
 use crate::server::AppState;
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
+use kameo::actor::Spawn;
 use pbkdf2::pbkdf2_hmac;
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
@@ -29,7 +30,7 @@ use waddle_xmpp::muc::room_actor::{
 };
 use waddle_xmpp::registry::BroadcastOutcome;
 use waddle_xmpp::Affiliation;
-use xmpp_parsers::iq::{Iq, IqType};
+use xmpp_parsers::iq::{Iq, IqPayload};
 use xmpp_parsers::message::MessageType as XmppMessageType;
 
 mod broadcast;
@@ -149,7 +150,7 @@ async fn create_test_websocket_state_with_extension_manager(
                 },
                 protocol: ProtocolServices {
                     connection_registry: Arc::new(ConnectionRegistry::new()),
-                    room_registry: kameo::spawn(RoomRegistryActor::new(
+                    room_registry: RoomRegistryActor::spawn(RoomRegistryActor::new(
                         "muc.example.com".to_string(),
                         OccupantIdSecret::new(b"test-occupant-id-secret-32-bytes-long".to_vec())
                             .expect("test secret meets length floor"),
@@ -339,7 +340,7 @@ fn parse_message_for_test(xml: &str) -> xmpp_parsers::message::Message {
 
 fn message_frame_xml_with_id(id: String) -> String {
     let mut message = xmpp_parsers::message::Message::new(None::<jid::Jid>);
-    message.id = Some(id);
+    message.id = Some(xmpp_parsers::message::Id(id));
     stanza_to_xml(&Stanza::Message(message))
 }
 
@@ -360,7 +361,7 @@ fn assert_sample_payload(xml: &str, element_name: &str, url: &str, owner: &str, 
 fn parse_iq_for_test(xml: &str) -> xmpp_parsers::iq::Iq {
     match parse_frame(xml).expect("iq parses") {
         InboundFrame::Stanza(stanza) => match *stanza {
-            Stanza::Iq(iq) => iq,
+            Stanza::Iq(iq) => *iq,
             _ => panic!("expected iq stanza"),
         },
         _ => panic!("expected iq stanza"),
@@ -371,37 +372,37 @@ fn disco_items_iq_frame(id: &str, to: &str, node: Option<&str>) -> String {
     let mut query =
         xmpp_parsers::minidom::Element::builder("query", waddle_xmpp::disco::DISCO_ITEMS_NS);
     if let Some(node) = node {
-        query = query.attr("node", node);
+        query = query.attr(minidom::rxml::xml_ncname!("node").to_owned(), node);
     }
-    stanza_to_xml(&Stanza::Iq(Iq {
+    stanza_to_xml(&Stanza::Iq(Box::new(Iq::Get {
         from: None,
         to: Some(to.parse().expect("valid iq destination")),
         id: id.to_string(),
-        payload: IqType::Get(query.build()),
-    }))
+        payload: query.build(),
+    })))
 }
 
 fn disco_info_iq_frame(id: &str, to: &str, node: Option<&str>) -> String {
     let mut query =
         xmpp_parsers::minidom::Element::builder("query", waddle_xmpp::disco::DISCO_INFO_NS);
     if let Some(node) = node {
-        query = query.attr("node", node);
+        query = query.attr(minidom::rxml::xml_ncname!("node").to_owned(), node);
     }
-    stanza_to_xml(&Stanza::Iq(Iq {
+    stanza_to_xml(&Stanza::Iq(Box::new(Iq::Get {
         from: None,
         to: Some(to.parse().expect("valid iq destination")),
         id: id.to_string(),
-        payload: IqType::Get(query.build()),
-    }))
+        payload: query.build(),
+    })))
 }
 
 fn iq_set_frame(id: &str, to: &str, payload: xmpp_parsers::minidom::Element) -> String {
-    stanza_to_xml(&Stanza::Iq(Iq {
+    stanza_to_xml(&Stanza::Iq(Box::new(Iq::Set {
         from: None,
         to: Some(to.parse().expect("valid iq destination")),
         id: id.to_string(),
-        payload: IqType::Set(payload),
-    }))
+        payload,
+    })))
 }
 
 fn ready_phase(jid: &FullJid) -> ConnectionPhase {

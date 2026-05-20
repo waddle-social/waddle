@@ -32,7 +32,7 @@ async fn iq_set_to(client: &mut WsXmppClient, id: &str, to: &str, body: &str) ->
         .await
         .expect("send iq set");
     client
-        .recv_matching(|frame| frame.contains(&format!(r#"id="{id}""#)) && frame.contains("<iq"))
+        .recv_matching(|frame| frame.contains(&format!(r#"id='{id}'"#)) && frame.contains("<iq"))
         .await
         .expect("iq set response")
 }
@@ -46,7 +46,7 @@ async fn iq_get_to(client: &mut WsXmppClient, id: &str, to: &str, body: &str) ->
         .await
         .expect("send iq get");
     client
-        .recv_matching(|frame| frame.contains(&format!(r#"id="{id}""#)) && frame.contains("<iq"))
+        .recv_matching(|frame| frame.contains(&format!(r#"id='{id}'"#)) && frame.contains("<iq"))
         .await
         .expect("iq get response")
 }
@@ -84,7 +84,7 @@ async fn wait_for_event_message(
             Ok(frame) => {
                 let is_event_msg = frame.contains("<message")
                     && frame.contains(NS_PUBSUB_EVENT)
-                    && (frame.contains(&format!(r#"node="{node}""#))
+                    && (frame.contains(&format!(r#"node='{node}'"#))
                         || frame.contains(&format!(r#"node='{node}'"#)));
                 if is_event_msg {
                     return Some(frame);
@@ -124,7 +124,7 @@ async fn subscribe_returns_subid() {
     )
     .await;
     assert!(
-        resp.contains(r#"type="result""#),
+        resp.contains(r#"type='result'"#),
         "auto-create+publish should succeed: {resp}"
     );
 
@@ -140,7 +140,7 @@ async fn subscribe_returns_subid() {
     .await;
 
     assert!(
-        resp.contains(r#"type="result""#),
+        resp.contains(r#"type='result'"#),
         "subscribe should succeed: {resp}"
     );
     let subid = extract_attr_after(&resp, "subscription", "subid");
@@ -172,7 +172,7 @@ async fn unsubscribe_with_subid_succeeds() {
     )
     .await;
     assert!(
-        resp.contains(r#"type="result""#),
+        resp.contains(r#"type='result'"#),
         "auto-create+publish: {resp}"
     );
 
@@ -187,7 +187,7 @@ async fn unsubscribe_with_subid_succeeds() {
     )
     .await;
     assert!(
-        sub_resp.contains(r#"type="result""#),
+        sub_resp.contains(r#"type='result'"#),
         "subscribe: {sub_resp}"
     );
     let subid = extract_attr_after(&sub_resp, "subscription", "subid")
@@ -204,7 +204,7 @@ async fn unsubscribe_with_subid_succeeds() {
     )
     .await;
     assert!(
-        unsub_resp.contains(r#"type="result""#),
+        unsub_resp.contains(r#"type='result'"#),
         "first unsubscribe should succeed: {unsub_resp}"
     );
 
@@ -219,7 +219,7 @@ async fn unsubscribe_with_subid_succeeds() {
     )
     .await;
     assert!(
-        unsub2_resp.contains(r#"type="error""#),
+        unsub2_resp.contains(r#"type='error'"#),
         "second unsubscribe with stale subid should error: {unsub2_resp}"
     );
     assert!(
@@ -249,7 +249,7 @@ async fn publish_then_get_returns_oldest_first() {
         ),
     )
     .await;
-    assert!(r1.contains(r#"type="result""#), "publish first: {r1}");
+    assert!(r1.contains(r#"type='result'"#), "publish first: {r1}");
 
     // Because `order-test` is a PEP node with max_items=1, the first item
     // would be evicted when the second is published. Raise max_items before
@@ -264,7 +264,7 @@ async fn publish_then_get_returns_oldest_first() {
     )
     .await;
     assert!(
-        cfg.contains(r#"type="result""#),
+        cfg.contains(r#"type='result'"#),
         "configure max_items: {cfg}"
     );
 
@@ -277,7 +277,7 @@ async fn publish_then_get_returns_oldest_first() {
         ),
     )
     .await;
-    assert!(r2.contains(r#"type="result""#), "publish second: {r2}");
+    assert!(r2.contains(r#"type='result'"#), "publish second: {r2}");
 
     // Retrieve items and verify "first" appears before "second".
     let items_resp = iq_get_to(
@@ -288,12 +288,12 @@ async fn publish_then_get_returns_oldest_first() {
     )
     .await;
     assert!(
-        items_resp.contains(r#"type="result""#),
+        items_resp.contains(r#"type='result'"#),
         "items get: {items_resp}"
     );
 
-    let first_pos = items_resp.find(r#"id="first""#);
-    let second_pos = items_resp.find(r#"id="second""#);
+    let first_pos = items_resp.find(r#"id='first'"#);
+    let second_pos = items_resp.find(r#"id='second'"#);
     assert!(
         first_pos.is_some() && second_pos.is_some(),
         "both items expected in response: {items_resp}"
@@ -326,7 +326,7 @@ async fn pep_default_max_items_one() {
         ),
     )
     .await;
-    assert!(r1.contains(r#"type="result""#), "publish item-one: {r1}");
+    assert!(r1.contains(r#"type='result'"#), "publish item-one: {r1}");
 
     // Publish second item — should evict the first (max_items=1).
     let r2 = iq_set_to(
@@ -338,7 +338,7 @@ async fn pep_default_max_items_one() {
         ),
     )
     .await;
-    assert!(r2.contains(r#"type="result""#), "publish item-two: {r2}");
+    assert!(r2.contains(r#"type='result'"#), "publish item-two: {r2}");
 
     // Retrieve items — only item-two should be present.
     let items_resp = iq_get_to(
@@ -349,15 +349,15 @@ async fn pep_default_max_items_one() {
     )
     .await;
     assert!(
-        items_resp.contains(r#"type="result""#),
+        items_resp.contains(r#"type='result'"#),
         "items get: {items_resp}"
     );
     assert!(
-        !items_resp.contains(r#"id="item-one""#),
+        !items_resp.contains(r#"id='item-one'"#),
         "item-one should have been evicted (max_items=1): {items_resp}"
     );
     assert!(
-        items_resp.contains(r#"id="item-two""#),
+        items_resp.contains(r#"id='item-two'"#),
         "item-two should be present: {items_resp}"
     );
     // Exactly one <item …> element in the response (not counting <items>).
@@ -389,7 +389,7 @@ async fn purge_clears_items_keeps_node() {
         ),
     )
     .await;
-    assert!(r1.contains(r#"type="result""#), "create node: {r1}");
+    assert!(r1.contains(r#"type='result'"#), "create node: {r1}");
 
     let cfg = iq_set_to(
         &mut admin,
@@ -400,7 +400,7 @@ async fn purge_clears_items_keeps_node() {
         ),
     )
     .await;
-    assert!(cfg.contains(r#"type="result""#), "configure: {cfg}");
+    assert!(cfg.contains(r#"type='result'"#), "configure: {cfg}");
 
     let r2 = iq_set_to(
         &mut admin,
@@ -411,7 +411,7 @@ async fn purge_clears_items_keeps_node() {
         ),
     )
     .await;
-    assert!(r2.contains(r#"type="result""#), "publish pb: {r2}");
+    assert!(r2.contains(r#"type='result'"#), "publish pb: {r2}");
 
     // Confirm two items exist before purge.
     let before = iq_get_to(
@@ -436,7 +436,7 @@ async fn purge_clears_items_keeps_node() {
     )
     .await;
     assert!(
-        purge_resp.contains(r#"type="result""#),
+        purge_resp.contains(r#"type='result'"#),
         "purge should succeed: {purge_resp}"
     );
 
@@ -449,7 +449,7 @@ async fn purge_clears_items_keeps_node() {
     )
     .await;
     assert!(
-        after.contains(r#"type="result""#),
+        after.contains(r#"type='result'"#),
         "items get after purge: {after}"
     );
     assert_eq!(
@@ -469,7 +469,7 @@ async fn purge_clears_items_keeps_node() {
     )
     .await;
     assert!(
-        post_purge_pub.contains(r#"type="result""#),
+        post_purge_pub.contains(r#"type='result'"#),
         "publish after purge should succeed (node still exists): {post_purge_pub}"
     );
 }
@@ -496,7 +496,7 @@ async fn outcast_subscriber_cannot_subscribe() {
         ),
     )
     .await;
-    assert!(r1.contains(r#"type="result""#), "create node: {r1}");
+    assert!(r1.contains(r#"type='result'"#), "create node: {r1}");
 
     // Configure node as open so any subscriber would normally be allowed.
     let cfg = iq_set_to(
@@ -508,7 +508,7 @@ async fn outcast_subscriber_cannot_subscribe() {
         ),
     )
     .await;
-    assert!(cfg.contains(r#"type="result""#), "configure open: {cfg}");
+    assert!(cfg.contains(r#"type='result'"#), "configure open: {cfg}");
 
     // Set bob as outcast on the node via the owner namespace (XEP-0060 §8.9).
     let aff_resp = iq_set_to(
@@ -521,7 +521,7 @@ async fn outcast_subscriber_cannot_subscribe() {
     )
     .await;
     assert!(
-        aff_resp.contains(r#"type="result""#),
+        aff_resp.contains(r#"type='result'"#),
         "set outcast affiliation: {aff_resp}"
     );
 
@@ -544,12 +544,12 @@ async fn outcast_subscriber_cannot_subscribe() {
     .expect("send bob subscribe");
 
     let bob_resp = bob
-        .recv_matching(|frame| frame.contains(r#"id="bob-sub-1""#) && frame.contains("<iq"))
+        .recv_matching(|frame| frame.contains(r#"id='bob-sub-1'"#) && frame.contains("<iq"))
         .await
         .expect("bob subscribe response");
 
     assert!(
-        bob_resp.contains(r#"type="error""#),
+        bob_resp.contains(r#"type='error'"#),
         "outcast subscribe should be denied: {bob_resp}"
     );
     assert!(
@@ -557,7 +557,7 @@ async fn outcast_subscriber_cannot_subscribe() {
         "expected <error> element: {bob_resp}"
     );
     assert!(
-        !bob_resp.contains(r#"type="result""#),
+        !bob_resp.contains(r#"type='result'"#),
         "should not return result: {bob_resp}"
     );
 
@@ -585,7 +585,7 @@ async fn configure_open_access(client: &mut WsXmppClient, owner: &str, node: &st
     )
     .await;
     assert!(
-        resp.contains(r#"type="result""#),
+        resp.contains(r#"type='result'"#),
         "configure access_model=open: {resp}"
     );
 }
@@ -601,7 +601,7 @@ async fn auto_create_node(client: &mut WsXmppClient, owner: &str, node: &str, id
     )
     .await;
     assert!(
-        resp.contains(r#"type="result""#),
+        resp.contains(r#"type='result'"#),
         "auto-create publish: {resp}"
     );
 }
@@ -622,7 +622,7 @@ async fn subscribe_with_jid(
         ),
     )
     .await;
-    assert!(resp.contains(r#"type="result""#), "subscribe: {resp}");
+    assert!(resp.contains(r#"type='result'"#), "subscribe: {resp}");
 }
 
 #[tokio::test]
@@ -659,23 +659,23 @@ async fn publish_fans_event_with_payload_to_subscriber() {
         ),
     )
     .await;
-    assert!(pub_resp.contains(r#"type="result""#), "publish: {pub_resp}");
+    assert!(pub_resp.contains(r#"type='result'"#), "publish: {pub_resp}");
 
     let event = wait_for_event_message(&mut bob, "fanout-payload", Duration::from_secs(2))
         .await
         .expect("bob should receive an event message");
 
     assert!(
-        event.contains(r#"type="headline""#) || event.contains(r#"type='headline'"#),
+        event.contains(r#"type='headline'"#) || event.contains(r#"type='headline'"#),
         "event must be type=headline (XEP-0060 §12.18 / XEP-0163 §4.3): {event}"
     );
     assert!(
-        event.contains(&format!(r#"from="{admin_bare}""#))
+        event.contains(&format!(r#"from='{admin_bare}'"#))
             || event.contains(&format!(r#"from='{admin_bare}'"#)),
         "from must be the node owner (XEP-0060 §7.1.2.1): {event}"
     );
     assert!(
-        event.contains(r#"id="event-1""#) || event.contains(r#"id='event-1'"#),
+        event.contains(r#"id='event-1'"#) || event.contains(r#"id='event-1'"#),
         "event item id must round-trip: {event}"
     );
     assert!(
@@ -712,7 +712,7 @@ async fn publish_strips_payload_when_deliver_payloads_is_false() {
     )
     .await;
     assert!(
-        cfg_resp.contains(r#"type="result""#),
+        cfg_resp.contains(r#"type='result'"#),
         "configure open + deliver_payloads=0: {cfg_resp}"
     );
 
@@ -744,14 +744,14 @@ async fn publish_strips_payload_when_deliver_payloads_is_false() {
         ),
     )
     .await;
-    assert!(pub_resp.contains(r#"type="result""#), "publish: {pub_resp}");
+    assert!(pub_resp.contains(r#"type='result'"#), "publish: {pub_resp}");
 
     let event = wait_for_event_message(&mut bob, "fanout-nopayload", Duration::from_secs(2))
         .await
         .expect("bob should receive event");
 
     assert!(
-        event.contains(r#"id="event-2""#) || event.contains(r#"id='event-2'"#),
+        event.contains(r#"id='event-2'"#) || event.contains(r#"id='event-2'"#),
         "event item id must be present: {event}"
     );
     assert!(
@@ -823,17 +823,17 @@ async fn bare_jid_subscription_targets_all_resources() {
         ),
     )
     .await;
-    assert!(pub_resp.contains(r#"type="result""#), "publish: {pub_resp}");
+    assert!(pub_resp.contains(r#"type='result'"#), "publish: {pub_resp}");
 
     let r1 = wait_for_event_message(&mut bob_r1, "fanout-bare", Duration::from_secs(2))
         .await
         .expect("r1 must receive event from bare-JID subscription");
-    assert!(r1.contains(r#"id="event-4""#), "{r1}");
+    assert!(r1.contains(r#"id='event-4'"#), "{r1}");
 
     let r2 = wait_for_event_message(&mut bob_r2, "fanout-bare", Duration::from_secs(2))
         .await
         .expect("r2 must also receive event from bare-JID subscription");
-    assert!(r2.contains(r#"id="event-4""#), "{r2}");
+    assert!(r2.contains(r#"id='event-4'"#), "{r2}");
 
     let _ = bob_r1.close().await;
     let _ = bob_r2.close().await;
@@ -874,7 +874,7 @@ async fn event_omits_publisher_attribute_when_publisher_equals_owner() {
         ),
     )
     .await;
-    assert!(pub_resp.contains(r#"type="result""#), "publish: {pub_resp}");
+    assert!(pub_resp.contains(r#"type='result'"#), "publish: {pub_resp}");
 
     let event = wait_for_event_message(&mut bob, "fanout-pub-eq", Duration::from_secs(2))
         .await
@@ -918,7 +918,7 @@ async fn event_includes_publisher_attribute_when_publisher_differs_from_owner() 
     )
     .await;
     assert!(
-        aff_resp.contains(r#"type="result""#),
+        aff_resp.contains(r#"type='result'"#),
         "grant publisher affiliation: {aff_resp}"
     );
 
@@ -953,7 +953,7 @@ async fn event_includes_publisher_attribute_when_publisher_differs_from_owner() 
     )
     .await;
     assert!(
-        pub_resp.contains(r#"type="result""#),
+        pub_resp.contains(r#"type='result'"#),
         "charlie publish to admin node: {pub_resp}"
     );
 
@@ -962,7 +962,7 @@ async fn event_includes_publisher_attribute_when_publisher_differs_from_owner() 
         .expect("bob must receive event");
 
     assert!(
-        event.contains(&format!(r#"publisher="{charlie_bare}""#))
+        event.contains(&format!(r#"publisher='{charlie_bare}'"#))
             || event.contains(&format!(r#"publisher='{charlie_bare}'"#)),
         "publisher attribute must carry charlie's bare JID (§7.1.5): {event}"
     );
@@ -994,7 +994,7 @@ async fn publish_with_no_subscribers_returns_result_and_emits_no_event() {
     )
     .await;
     assert!(
-        pub_resp.contains(r#"type="result""#),
+        pub_resp.contains(r#"type='result'"#),
         "publish without subscribers must still succeed: {pub_resp}"
     );
     assert_no_event_message(&mut admin, "fanout-empty", Duration::from_millis(500)).await;

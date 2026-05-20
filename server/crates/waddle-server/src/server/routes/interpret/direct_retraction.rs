@@ -33,8 +33,8 @@ pub(super) async fn apply_retraction_tombstone(
     };
     let Some(retraction_id) = retraction_message
         .id
-        .clone()
-        .and_then(waddle_xmpp::mam::RichMessageId::new)
+        .as_ref()
+        .and_then(|id| waddle_xmpp::mam::RichMessageId::new(id.0.clone()))
     else {
         warn!(
             archive = %archive,

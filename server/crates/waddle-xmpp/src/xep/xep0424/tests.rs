@@ -5,7 +5,7 @@ use xmpp_parsers::message::{Message, MessageType};
 #[test]
 fn test_is_retract_element() {
     let retract = Element::builder("retract", NS_MESSAGE_RETRACT)
-        .attr("id", "orig-1")
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), "orig-1")
         .build();
     assert!(is_retract_element(&retract));
 
@@ -19,8 +19,11 @@ fn test_is_retract_element() {
 #[test]
 fn test_is_retracted_element() {
     let retracted = Element::builder("retracted", NS_MESSAGE_RETRACT)
-        .attr("id", "retract-1")
-        .attr("stamp", "2024-01-15T12:00:00Z")
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), "retract-1")
+        .attr(
+            minidom::rxml::xml_ncname!("stamp").to_owned(),
+            "2024-01-15T12:00:00Z",
+        )
         .build();
     assert!(is_retracted_element(&retracted));
 
@@ -164,7 +167,7 @@ fn test_build_tombstone_message() {
         Some("2024-01-15T12:00:00Z"),
     );
 
-    assert_eq!(msg.id.as_deref(), Some("orig-1"));
+    assert_eq!(msg.id.as_ref().map(|id| id.0.as_str()), Some("orig-1"));
     assert!(is_tombstone_message(&msg));
     match extract_retraction_from_message(&msg) {
         Some(RetractionKind::Tombstone(t)) => {

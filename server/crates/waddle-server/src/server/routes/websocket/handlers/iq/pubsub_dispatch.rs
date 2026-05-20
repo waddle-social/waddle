@@ -39,7 +39,7 @@ pub(super) async fn handle_pubsub_iq(
             )];
         };
 
-        let target_jid = match &iq.to {
+        let target_jid = match iq.to() {
             Some(to_jid) => to_jid.to_bare(),
             None => user_jid.clone(),
         };
@@ -57,7 +57,7 @@ pub(super) async fn handle_pubsub_iq(
 
         match request {
             PubSubRequest::Publish { node, item, .. } => {
-                if !matches!(&iq.payload, xmpp_parsers::iq::IqType::Set(_)) {
+                if !matches!(iq, xmpp_parsers::iq::Iq::Set { .. }) {
                     return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::BadRequest))];
                 }
 

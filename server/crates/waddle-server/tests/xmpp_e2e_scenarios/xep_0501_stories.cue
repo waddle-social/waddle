@@ -32,7 +32,7 @@ scenario: #Scenario & {
 			id:     "cue-stories-disco"
 			type:   "result"
 			contains: [
-				"var=\"urn:xmpp:stories:0\"",
+				"var='urn:xmpp:stories:0'",
 			]
 		},
 		// 2. Publish a story to the bootstrapped community stories
@@ -117,7 +117,7 @@ scenario: #Scenario & {
 			id:     "cue-story-items"
 			type:   "result"
 			contains: [
-				"id=\"cue-story-1\"",
+				"id='cue-story-1'",
 				"urn:xmpp:stories:0",
 				"Look at this!",
 				"https://example.com/photo.jpg",

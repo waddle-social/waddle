@@ -459,7 +459,13 @@ fn origin_dedup_fingerprint(message: &ArchivedMessage, rich_payload: Option<&str
         .map(|jid| jid.to_string());
     update_hash_part(&mut hasher, "reply_to_jid", reply_to_jid.as_deref());
     update_hash_part(&mut hasher, "rich_payload", rich_payload);
-    format!("{:x}", hasher.finalize())
+    let digest = hasher.finalize();
+    let mut hex = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        use std::fmt::Write as _;
+        write!(&mut hex, "{byte:02x}").expect("writing to String never fails");
+    }
+    hex
 }
 
 fn update_hash_part(hasher: &mut Sha256, label: &str, value: Option<&str>) {

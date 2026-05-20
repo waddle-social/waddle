@@ -256,11 +256,11 @@ impl<'a> MamIqBuilder<'a> {
         }
 
         let mut form = Element::builder("x", DATA_FORMS_NS)
-            .attr("type", "submit")
+            .attr(minidom::rxml::xml_ncname!("type").to_owned(), "submit")
             .append(
                 Element::builder("field", DATA_FORMS_NS)
-                    .attr("var", "FORM_TYPE")
-                    .attr("type", "hidden")
+                    .attr(minidom::rxml::xml_ncname!("var").to_owned(), "FORM_TYPE")
+                    .attr(minidom::rxml::xml_ncname!("type").to_owned(), "hidden")
                     .append(
                         Element::builder("value", DATA_FORMS_NS)
                             .append(MAM_NS)
@@ -286,8 +286,11 @@ impl<'a> MamIqBuilder<'a> {
         if let Some(stanza_ids) = self.stanza_ids {
             if !stanza_ids.is_empty() {
                 let mut field = Element::builder("field", DATA_FORMS_NS)
-                    .attr("var", STANZA_ID_FILTER_FIELD)
-                    .attr("type", "text-multi");
+                    .attr(
+                        minidom::rxml::xml_ncname!("var").to_owned(),
+                        STANZA_ID_FILTER_FIELD,
+                    )
+                    .attr(minidom::rxml::xml_ncname!("type").to_owned(), "text-multi");
                 for id in stanza_ids {
                     field =
                         field.append(Element::builder("value", DATA_FORMS_NS).append(*id).build());
@@ -297,17 +300,20 @@ impl<'a> MamIqBuilder<'a> {
         }
 
         let query = Element::builder("query", MAM_NS)
-            .attr("queryid", self.query_id)
+            .attr(
+                minidom::rxml::xml_ncname!("queryid").to_owned(),
+                self.query_id,
+            )
             .append(form.build())
             .append(rsm.build())
             .build();
 
         let mut iq = Element::builder("iq", CLIENT_NS)
-            .attr("type", "set")
-            .attr("id", self.iq_id)
+            .attr(minidom::rxml::xml_ncname!("type").to_owned(), "set")
+            .attr(minidom::rxml::xml_ncname!("id").to_owned(), self.iq_id)
             .append(query);
         if let Some(to_jid) = self.to_jid {
-            iq = iq.attr("to", to_jid);
+            iq = iq.attr(minidom::rxml::xml_ncname!("to").to_owned(), to_jid);
         }
         iq.build()
     }
@@ -337,7 +343,7 @@ pub fn build_mam_iq(
 
 fn build_form_field(var: &str, value: &str) -> Element {
     Element::builder("field", DATA_FORMS_NS)
-        .attr("var", var)
+        .attr(minidom::rxml::xml_ncname!("var").to_owned(), var)
         .append(
             Element::builder("value", DATA_FORMS_NS)
                 .append(value)
@@ -389,7 +395,7 @@ async fn run_mam_query(
                     Ok(ClientEvent::MamResult(archived))
                         if archived.query_id.as_deref() == Some(&query_id_owned) =>
                     {
-                        messages.push(archived);
+                        messages.push(*archived);
                     }
                     Ok(_) => {}
                     Err(broadcast::error::RecvError::Closed) => {
@@ -409,7 +415,7 @@ async fn run_mam_query(
                 Ok(ClientEvent::MamResult(archived))
                     if archived.query_id.as_deref() == Some(&query_id_owned) =>
                 {
-                    messages.push(archived);
+                    messages.push(*archived);
                 }
                 Ok(_) => continue,
                 Err(broadcast::error::TryRecvError::Empty)

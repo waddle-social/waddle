@@ -25,13 +25,13 @@ pub(super) fn handle_caps_disco_info_result(
     state: &WebSocketState,
 ) {
     let resolver = &state.deps.protocol.caps_resolver;
-    let Some(pending) = resolver.take_pending(&iq.id) else {
+    let Some(pending) = resolver.take_pending(iq.id()) else {
         return;
     };
 
     if pending.full_jid != *sender {
         debug!(
-            id = %iq.id,
+            id = %iq.id(),
             expected = %pending.full_jid,
             got = %sender,
             "caps disco#info reply arrived from a different resource than the one queried — dropping"
@@ -39,28 +39,31 @@ pub(super) fn handle_caps_disco_info_result(
         return;
     }
 
-    let query = match &iq.payload {
-        xmpp_parsers::iq::IqType::Result(Some(elem)) => elem,
-        xmpp_parsers::iq::IqType::Result(None) => {
-            debug!(id = %iq.id, "caps disco#info reply has empty result body");
+    let query = match iq {
+        xmpp_parsers::iq::Iq::Result {
+            payload: Some(elem),
+            ..
+        } => elem,
+        xmpp_parsers::iq::Iq::Result { payload: None, .. } => {
+            debug!(id = %iq.id(), "caps disco#info reply has empty result body");
             return;
         }
-        xmpp_parsers::iq::IqType::Error(_) => {
-            debug!(id = %iq.id, "caps disco#info reply was an IQ error — not caching");
+        xmpp_parsers::iq::Iq::Error { .. } => {
+            debug!(id = %iq.id(), "caps disco#info reply was an IQ error — not caching");
             return;
         }
         _ => return,
     };
 
     if query.name() != "query" || query.ns() != DISCO_INFO_NS {
-        debug!(id = %iq.id, "caps disco#info reply payload is not a disco#info query element");
+        debug!(id = %iq.id(), "caps disco#info reply payload is not a disco#info query element");
         return;
     }
 
     let parsed = match parse_disco_info_response(query) {
         Ok(parsed) => parsed,
         Err(error) => {
-            warn!(error = %error, id = %iq.id, "Failed to parse caps disco#info reply");
+            warn!(error = %error, id = %iq.id(), "Failed to parse caps disco#info reply");
             return;
         }
     };
@@ -73,18 +76,18 @@ pub(super) fn handle_caps_disco_info_result(
         parsed.ill_formed,
     ) {
         CapsVerification::Match => {
-            debug!(id = %iq.id, jid = %sender, "Cached XEP-0115 caps after hash verification");
+            debug!(id = %iq.id(), jid = %sender, "Cached XEP-0115 caps after hash verification");
         }
         CapsVerification::Mismatch => {
             warn!(
-                id = %iq.id,
+                id = %iq.id(),
                 jid = %sender,
                 "XEP-0115 §5.4: recomputed hash did not match advertised ver (or unsupported algo) — discarding"
             );
         }
         CapsVerification::IllFormed => {
             warn!(
-                id = %iq.id,
+                id = %iq.id(),
                 jid = %sender,
                 "XEP-0115 §5.4 step 2.4: ill-formed disco#info response — discarding entire reply"
             );

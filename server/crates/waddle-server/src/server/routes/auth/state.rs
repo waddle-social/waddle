@@ -161,6 +161,7 @@ impl AuthState {
     }
 
     fn create_pkce_verifier() -> String {
+        use rand::RngExt;
         let bytes: [u8; 32] = rand::rng().random();
         URL_SAFE_NO_PAD.encode(bytes)
     }
@@ -171,6 +172,7 @@ impl AuthState {
     }
 
     fn random_state() -> String {
+        use rand::RngExt;
         let bytes: [u8; 24] = rand::rng().random();
         URL_SAFE_NO_PAD.encode(bytes)
     }

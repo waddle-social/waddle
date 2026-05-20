@@ -32,8 +32,14 @@ pub struct FallbackRange {
 /// typed marker.
 pub fn build_reply_element(marker: &ReplyMarker) -> Element {
     Element::builder("reply", NS_REPLY)
-        .attr("to", marker.to.to_string())
-        .attr("id", marker.id.as_str())
+        .attr(
+            minidom::rxml::xml_ncname!("to").to_owned(),
+            marker.to.to_string(),
+        )
+        .attr(
+            minidom::rxml::xml_ncname!("id").to_owned(),
+            marker.id.as_str(),
+        )
         .build()
 }
 
@@ -41,11 +47,17 @@ pub fn build_reply_element(marker: &ReplyMarker) -> Element {
 /// `<body start='…' end='…'/>` range.
 pub fn build_fallback_element(range: &FallbackRange) -> Element {
     Element::builder("fallback", NS_FALLBACK)
-        .attr("for", NS_REPLY)
+        .attr(minidom::rxml::xml_ncname!("for").to_owned(), NS_REPLY)
         .append(
             Element::builder("body", NS_FALLBACK)
-                .attr("start", range.start.to_string())
-                .attr("end", range.end.to_string())
+                .attr(
+                    minidom::rxml::xml_ncname!("start").to_owned(),
+                    range.start.to_string(),
+                )
+                .attr(
+                    minidom::rxml::xml_ncname!("end").to_owned(),
+                    range.end.to_string(),
+                )
                 .build(),
         )
         .build()
@@ -209,7 +221,7 @@ mod tests {
         let range = FallbackRange { start: 5, end: 100 };
 
         let message = Element::builder("message", "jabber:client")
-            .attr("type", "groupchat")
+            .attr(minidom::rxml::xml_ncname!("type").to_owned(), "groupchat")
             .append(build_reply_element(&marker))
             .append(build_fallback_element(&range))
             .build();

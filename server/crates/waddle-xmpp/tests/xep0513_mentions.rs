@@ -235,8 +235,8 @@ fn xep0513_parse_drops_mention_with_no_identifying_attribute() {
     // claim to mention someone (downstream notification logic
     // would then page the wrong person, or noone).
     let stub = Element::builder("mention", NS_EXPLICIT_MENTIONS)
-        .attr("begin", "5")
-        .attr("end", "11")
+        .attr(minidom::rxml::xml_ncname!("begin").to_owned(), "5")
+        .attr(minidom::rxml::xml_ncname!("end").to_owned(), "11")
         .build();
     assert!(parse_mention_element(&stub).is_none());
 }
@@ -250,8 +250,11 @@ fn xep0513_parse_drops_invalid_jid_attribute_silently() {
     // — RFC 7622 / PRECIS reject multiple `@`s in a bare JID, so
     // the parse MUST fail.
     let elem = Element::builder("mention", NS_EXPLICIT_MENTIONS)
-        .attr("jid", "@@@")
-        .attr("mentions", CHANNEL_MENTION)
+        .attr(minidom::rxml::xml_ncname!("jid").to_owned(), "@@@")
+        .attr(
+            minidom::rxml::xml_ncname!("mentions").to_owned(),
+            CHANNEL_MENTION,
+        )
         .build();
     let parsed = parse_mention_element(&elem).expect("channel-mentions identity survives");
     assert!(parsed.jid.is_none(), "malformed jid dropped to None");
@@ -265,9 +268,12 @@ fn xep0513_parse_drops_malformed_numeric_offsets() {
     // wrong character range — silent corruption of the rendered
     // span).
     let elem = Element::builder("mention", NS_EXPLICIT_MENTIONS)
-        .attr("begin", "three")
-        .attr("end", "")
-        .attr("jid", "alice@example.com")
+        .attr(minidom::rxml::xml_ncname!("begin").to_owned(), "three")
+        .attr(minidom::rxml::xml_ncname!("end").to_owned(), "")
+        .attr(
+            minidom::rxml::xml_ncname!("jid").to_owned(),
+            "alice@example.com",
+        )
         .build();
     let parsed = parse_mention_element(&elem).expect("identifies via jid");
     assert_eq!(parsed.begin, None);

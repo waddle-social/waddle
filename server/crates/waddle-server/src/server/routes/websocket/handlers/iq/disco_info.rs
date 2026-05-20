@@ -1,6 +1,7 @@
 use super::*;
 
 mod account;
+mod calls_mixer;
 mod community;
 mod extensions;
 mod muc;
@@ -110,6 +111,10 @@ pub(super) async fn handle_disco_info_iq(
     };
 
     if let Some(response) = muc::handle_muc_disco_info(&request, state).await {
+        return disco_info_xml(response);
+    }
+
+    if let Some(response) = calls_mixer::handle_calls_mixer_disco_info(&request) {
         return disco_info_xml(response);
     }
 

@@ -154,7 +154,10 @@ pub fn build_story_element(story: &Story) -> Element {
     let mut builder = Element::builder("story", NS_STORIES);
 
     if let Some(expires) = story.expires {
-        builder = builder.attr("expires", expires.to_rfc3339());
+        builder = builder.attr(
+            minidom::rxml::xml_ncname!("expires").to_owned(),
+            expires.to_rfc3339(),
+        );
     }
 
     let mut elem = builder.build();

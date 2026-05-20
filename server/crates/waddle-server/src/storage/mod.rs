@@ -13,7 +13,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use object_store::aws::AmazonS3Builder;
-use object_store::ObjectStore;
+use object_store::{ObjectStore, ObjectStoreExt};
 use tracing::{debug, info};
 
 /// Errors returned by blob storage operations.

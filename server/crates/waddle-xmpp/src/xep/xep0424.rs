@@ -187,15 +187,16 @@ pub fn extract_retracts_id(msg: &Message) -> Option<String> {
 /// Build a `<retract id='...' xmlns='urn:xmpp:message-retract:1'/>` element.
 pub fn build_retract_element(original_id: &str) -> Element {
     Element::builder("retract", NS_MESSAGE_RETRACT)
-        .attr("id", original_id)
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), original_id)
         .build()
 }
 
 /// Build a `<retracted id='...' xmlns='urn:xmpp:message-retract:1'/>` tombstone element.
 pub fn build_retracted_element(retraction_id: &str, stamp: Option<&str>) -> Element {
-    let mut builder = Element::builder("retracted", NS_MESSAGE_RETRACT).attr("id", retraction_id);
+    let mut builder = Element::builder("retracted", NS_MESSAGE_RETRACT)
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), retraction_id);
     if let Some(stamp) = stamp {
-        builder = builder.attr("stamp", stamp);
+        builder = builder.attr(minidom::rxml::xml_ncname!("stamp").to_owned(), stamp);
     }
     builder.build()
 }
@@ -208,15 +209,13 @@ pub fn build_retraction_message(
     from: impl Into<Option<jid::Jid>>,
     original_id: &str,
 ) -> Message {
-    use xmpp_parsers::message::Body;
-
     let mut msg = Message::new(to.into());
     msg.from = from.into();
     msg.type_ = xmpp_parsers::message::MessageType::Groupchat;
-    msg.id = Some(uuid::Uuid::new_v4().to_string());
+    msg.id = Some(xmpp_parsers::message::Id(uuid::Uuid::new_v4().to_string()));
     msg.bodies.insert(
-        String::new(),
-        Body("This person attempted to retract a previous message.".to_owned()),
+        xmpp_parsers::message::Lang::new(),
+        "This person attempted to retract a previous message.".to_owned(),
     );
     msg.payloads.push(build_retract_element(original_id));
     msg
@@ -233,7 +232,7 @@ pub fn build_tombstone_message(
     let mut msg = Message::new(to.into());
     msg.from = from.into();
     msg.type_ = xmpp_parsers::message::MessageType::Groupchat;
-    msg.id = Some(original_id.to_owned());
+    msg.id = Some(xmpp_parsers::message::Id(original_id.to_owned()));
     msg.payloads
         .push(build_retracted_element(retraction_id, stamp));
     msg

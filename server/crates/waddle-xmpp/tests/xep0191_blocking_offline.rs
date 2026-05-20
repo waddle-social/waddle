@@ -26,7 +26,7 @@ use waddle_xmpp::protocol::dm_routing::{
 };
 use waddle_xmpp::protocol::session_state::Blocklist;
 use waddle_xmpp::xep::xep0191::{BlockingStorage, InMemoryBlockingStorage};
-use xmpp_parsers::message::{Body, Message, MessageType};
+use xmpp_parsers::message::{Message, MessageType};
 
 fn bare(s: &str) -> BareJid {
     s.parse().expect("bare jid")
@@ -36,7 +36,8 @@ fn dm(from: &str, to: &str, body: &str) -> Message {
     let mut m = Message::new(Some(to.parse::<Jid>().expect("jid")));
     m.from = Some(from.parse::<Jid>().expect("jid"));
     m.type_ = MessageType::Chat;
-    m.bodies.insert(String::new(), Body(body.to_string()));
+    m.bodies
+        .insert(xmpp_parsers::message::Lang::new(), body.to_string());
     m
 }
 

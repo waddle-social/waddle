@@ -354,7 +354,7 @@ fn test_missing_type_attribute() {
 #[test]
 fn test_invalid_type_attribute() {
     let elem = Element::builder("x", NS_DATA_FORMS)
-        .attr("type", "bogus")
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "bogus")
         .build();
     assert!(matches!(
         DataForm::from_element(&elem),
@@ -367,7 +367,7 @@ fn test_invalid_type_attribute() {
 #[test]
 fn test_is_data_form() {
     let good = Element::builder("x", NS_DATA_FORMS)
-        .attr("type", "form")
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "form")
         .build();
     assert!(is_data_form(&good));
 
@@ -383,7 +383,7 @@ fn test_find_data_form() {
     let parent = Element::builder("query", "urn:example")
         .append(
             Element::builder("x", NS_DATA_FORMS)
-                .attr("type", "submit")
+                .attr(minidom::rxml::xml_ncname!("type").to_owned(), "submit")
                 .append(Field::text_single("name", "test").into_element())
                 .build(),
         )
@@ -409,11 +409,11 @@ fn test_find_data_form_none() {
 fn test_parse_hand_built_server_info_form() {
     // Simulate the kind of form built in disco/info.rs
     let elem = Element::builder("x", NS_DATA_FORMS)
-        .attr("type", "result")
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "result")
         .append(
             Element::builder("field", NS_DATA_FORMS)
-                .attr("var", "FORM_TYPE")
-                .attr("type", "hidden")
+                .attr(minidom::rxml::xml_ncname!("var").to_owned(), "FORM_TYPE")
+                .attr(minidom::rxml::xml_ncname!("type").to_owned(), "hidden")
                 .append(
                     Element::builder("value", NS_DATA_FORMS)
                         .append("urn:xmpp:serverinfo:0")
@@ -423,7 +423,10 @@ fn test_parse_hand_built_server_info_form() {
         )
         .append(
             Element::builder("field", NS_DATA_FORMS)
-                .attr("var", "abuse-addresses")
+                .attr(
+                    minidom::rxml::xml_ncname!("var").to_owned(),
+                    "abuse-addresses",
+                )
                 .append(
                     Element::builder("value", NS_DATA_FORMS)
                         .append("mailto:abuse@example.com")
@@ -446,11 +449,11 @@ fn test_parse_hand_built_server_info_form() {
 fn test_parse_muc_config_form() {
     // Simulate the kind of form used in muc/owner.rs
     let elem = Element::builder("x", NS_DATA_FORMS)
-        .attr("type", "submit")
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "submit")
         .append(
             Element::builder("field", NS_DATA_FORMS)
-                .attr("var", "FORM_TYPE")
-                .attr("type", "hidden")
+                .attr(minidom::rxml::xml_ncname!("var").to_owned(), "FORM_TYPE")
+                .attr(minidom::rxml::xml_ncname!("type").to_owned(), "hidden")
                 .append(
                     Element::builder("value", NS_DATA_FORMS)
                         .append("http://jabber.org/protocol/muc#roomconfig")
@@ -460,7 +463,10 @@ fn test_parse_muc_config_form() {
         )
         .append(
             Element::builder("field", NS_DATA_FORMS)
-                .attr("var", "muc#roomconfig_roomname")
+                .attr(
+                    minidom::rxml::xml_ncname!("var").to_owned(),
+                    "muc#roomconfig_roomname",
+                )
                 .append(
                     Element::builder("value", NS_DATA_FORMS)
                         .append("Test Room")
@@ -470,7 +476,10 @@ fn test_parse_muc_config_form() {
         )
         .append(
             Element::builder("field", NS_DATA_FORMS)
-                .attr("var", "muc#roomconfig_persistentroom")
+                .attr(
+                    minidom::rxml::xml_ncname!("var").to_owned(),
+                    "muc#roomconfig_persistentroom",
+                )
                 .append(Element::builder("value", NS_DATA_FORMS).append("1").build())
                 .build(),
         )

@@ -468,16 +468,16 @@ fn caller_domain(inner: &Rc<RefCell<WaddleClientInner>>) -> String {
 
 fn text_single_field(var: &str, value: &str) -> Element {
     Element::builder("field", NS_XDATA)
-        .attr("var", var)
-        .attr("type", "text-single")
+        .attr(minidom::rxml::xml_ncname!("var").to_owned(), var)
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "text-single")
         .append(Element::builder("value", NS_XDATA).append(value).build())
         .build()
 }
 
 fn boolean_field(var: &str, value: bool) -> Element {
     Element::builder("field", NS_XDATA)
-        .attr("var", var)
-        .attr("type", "boolean")
+        .attr(minidom::rxml::xml_ncname!("var").to_owned(), var)
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "boolean")
         .append(
             Element::builder("value", NS_XDATA)
                 .append(if value { "1" } else { "0" })
@@ -488,19 +488,19 @@ fn boolean_field(var: &str, value: bool) -> Element {
 
 fn jid_field(var: &str, value: &str) -> Element {
     Element::builder("field", NS_XDATA)
-        .attr("var", var)
-        .attr("type", "jid-single")
+        .attr(minidom::rxml::xml_ncname!("var").to_owned(), var)
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "jid-single")
         .append(Element::builder("value", NS_XDATA).append(value).build())
         .build()
 }
 
 fn submit_form_with_type(form_type: &str) -> minidom::element::ElementBuilder {
     Element::builder("x", NS_XDATA)
-        .attr("type", "submit")
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "submit")
         .append(
             Element::builder("field", NS_XDATA)
-                .attr("var", "FORM_TYPE")
-                .attr("type", "hidden")
+                .attr(minidom::rxml::xml_ncname!("var").to_owned(), "FORM_TYPE")
+                .attr(minidom::rxml::xml_ncname!("type").to_owned(), "hidden")
                 .append(
                     Element::builder("value", NS_XDATA)
                         .append(form_type)
@@ -512,14 +512,17 @@ fn submit_form_with_type(form_type: &str) -> minidom::element::ElementBuilder {
 
 fn wrap_command_iq(server_domain: &str, node: &str, form: Element) -> Element {
     let command = Element::builder("command", NS_ADHOC_COMMANDS)
-        .attr("node", node)
-        .attr("action", "execute")
+        .attr(minidom::rxml::xml_ncname!("node").to_owned(), node)
+        .attr(minidom::rxml::xml_ncname!("action").to_owned(), "execute")
         .append(form)
         .build();
     Element::builder("iq", NS_CLIENT)
-        .attr("type", "set")
-        .attr("id", uuid::Uuid::new_v4().to_string())
-        .attr("to", server_domain)
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "set")
+        .attr(
+            minidom::rxml::xml_ncname!("id").to_owned(),
+            uuid::Uuid::new_v4().to_string(),
+        )
+        .attr(minidom::rxml::xml_ncname!("to").to_owned(), server_domain)
         .append(command)
         .build()
 }

@@ -230,10 +230,13 @@ impl SmState {
     pub fn build_enable_with_max(resume: bool, max: Option<u32>) -> Element {
         let mut b = Element::builder("enable", NS_SM);
         if resume {
-            b = b.attr("resume", "true");
+            b = b.attr(minidom::rxml::xml_ncname!("resume").to_owned(), "true");
         }
         if let Some(max) = max {
-            b = b.attr("max", max.to_string());
+            b = b.attr(
+                minidom::rxml::xml_ncname!("max").to_owned(),
+                max.to_string(),
+            );
         }
         b.build()
     }
@@ -241,8 +244,8 @@ impl SmState {
     /// Build `<resume xmlns='urn:xmpp:sm:3' previd='ID' h='N'/>`.
     pub fn build_resume(previd: &str, h: u32) -> Element {
         Element::builder("resume", NS_SM)
-            .attr("previd", previd)
-            .attr("h", h.to_string())
+            .attr(minidom::rxml::xml_ncname!("previd").to_owned(), previd)
+            .attr(minidom::rxml::xml_ncname!("h").to_owned(), h.to_string())
             .build()
     }
 
@@ -254,7 +257,7 @@ impl SmState {
     /// Build `<a xmlns='urn:xmpp:sm:3' h='N'/>` to acknowledge `h` stanzas.
     pub fn build_ack(h: u32) -> Element {
         Element::builder("a", NS_SM)
-            .attr("h", h.to_string())
+            .attr(minidom::rxml::xml_ncname!("h").to_owned(), h.to_string())
             .build()
     }
 
@@ -298,7 +301,7 @@ impl QueuedOutboundStanza {
         let mut element = self.element.clone();
         element.append_child(
             Element::builder("delay", NS_DELAY)
-                .attr("stamp", stamp)
+                .attr(minidom::rxml::xml_ncname!("stamp").to_owned(), stamp)
                 .build(),
         );
         element
@@ -338,7 +341,7 @@ mod tests {
         assert_eq!(el.ns(), NS_SM);
         assert_eq!(el.attr("resume"), Some("true"));
         let xml = serialize(&el);
-        assert!(xml.contains("resume=\"true\""), "xml: {xml}");
+        assert!(xml.contains("resume='true'"), "xml: {xml}");
     }
 
     #[test]
@@ -356,7 +359,7 @@ mod tests {
         assert_eq!(el.ns(), NS_SM);
         assert_eq!(el.attr("h"), Some("42"));
         let xml = serialize(&el);
-        assert!(xml.contains("h=\"42\""), "xml: {xml}");
+        assert!(xml.contains("h='42'"), "xml: {xml}");
     }
 
     #[test]
@@ -369,8 +372,8 @@ mod tests {
     #[test]
     fn parse_enabled_extracts_previd() {
         let el = Element::builder("enabled", NS_SM)
-            .attr("id", "abc123")
-            .attr("resume", "true")
+            .attr(minidom::rxml::xml_ncname!("id").to_owned(), "abc123")
+            .attr(minidom::rxml::xml_ncname!("resume").to_owned(), "true")
             .build();
         assert_eq!(SmState::parse_enabled(&el), Some("abc123".to_string()));
     }
@@ -378,13 +381,13 @@ mod tests {
     #[test]
     fn parse_enabled_requires_resumable_response() {
         let el = Element::builder("enabled", NS_SM)
-            .attr("id", "abc123")
+            .attr(minidom::rxml::xml_ncname!("id").to_owned(), "abc123")
             .build();
         assert_eq!(SmState::parse_enabled(&el), None);
 
         let el = Element::builder("enabled", NS_SM)
-            .attr("id", "abc123")
-            .attr("resume", "false")
+            .attr(minidom::rxml::xml_ncname!("id").to_owned(), "abc123")
+            .attr(minidom::rxml::xml_ncname!("resume").to_owned(), "false")
             .build();
         assert_eq!(SmState::parse_enabled(&el), None);
     }
@@ -397,35 +400,43 @@ mod tests {
 
     #[test]
     fn parse_enabled_returns_none_for_wrong_element() {
-        let el = Element::builder("enable", NS_SM).attr("id", "abc").build();
+        let el = Element::builder("enable", NS_SM)
+            .attr(minidom::rxml::xml_ncname!("id").to_owned(), "abc")
+            .build();
         assert_eq!(SmState::parse_enabled(&el), None);
 
         let el2 = Element::builder("enabled", "urn:ietf:params:xml:ns:xmpp-bind")
-            .attr("id", "abc")
+            .attr(minidom::rxml::xml_ncname!("id").to_owned(), "abc")
             .build();
         assert_eq!(SmState::parse_enabled(&el2), None);
     }
 
     #[test]
     fn parse_ack_h_extracts_value() {
-        let el = Element::builder("a", NS_SM).attr("h", "7").build();
+        let el = Element::builder("a", NS_SM)
+            .attr(minidom::rxml::xml_ncname!("h").to_owned(), "7")
+            .build();
         assert_eq!(SmState::parse_ack_h(&el), Some(7));
     }
 
     #[test]
     fn parse_ack_h_returns_none_for_wrong_element() {
-        let el = Element::builder("b", NS_SM).attr("h", "7").build();
+        let el = Element::builder("b", NS_SM)
+            .attr(minidom::rxml::xml_ncname!("h").to_owned(), "7")
+            .build();
         assert_eq!(SmState::parse_ack_h(&el), None);
 
         let el2 = Element::builder("a", "jabber:client")
-            .attr("h", "7")
+            .attr(minidom::rxml::xml_ncname!("h").to_owned(), "7")
             .build();
         assert_eq!(SmState::parse_ack_h(&el2), None);
     }
 
     #[test]
     fn parse_ack_h_returns_none_for_bad_parse() {
-        let el = Element::builder("a", NS_SM).attr("h", "notanumber").build();
+        let el = Element::builder("a", NS_SM)
+            .attr(minidom::rxml::xml_ncname!("h").to_owned(), "notanumber")
+            .build();
         assert_eq!(SmState::parse_ack_h(&el), None);
     }
 
@@ -487,12 +498,18 @@ mod tests {
 
         state.record_sent_stanza(
             &Element::builder("message", "jabber:client")
-                .attr("id", "last-before-wrap")
+                .attr(
+                    minidom::rxml::xml_ncname!("id").to_owned(),
+                    "last-before-wrap",
+                )
                 .build(),
         );
         state.record_sent_stanza(
             &Element::builder("message", "jabber:client")
-                .attr("id", "first-after-wrap")
+                .attr(
+                    minidom::rxml::xml_ncname!("id").to_owned(),
+                    "first-after-wrap",
+                )
                 .build(),
         );
 
@@ -517,7 +534,10 @@ mod tests {
         for id in 1..=10 {
             state.record_sent_stanza(
                 &Element::builder("message", "jabber:client")
-                    .attr("id", format!("msg-{id}"))
+                    .attr(
+                        minidom::rxml::xml_ncname!("id").to_owned(),
+                        format!("msg-{id}"),
+                    )
                     .build(),
             );
         }
@@ -554,10 +574,16 @@ mod tests {
         let mut state = SmState::new();
         state.outbound_enabled = true;
         let message = Element::builder("message", "jabber:client")
-            .attr("id", "already-delayed")
+            .attr(
+                minidom::rxml::xml_ncname!("id").to_owned(),
+                "already-delayed",
+            )
             .append(
                 Element::builder("delay", NS_DELAY)
-                    .attr("stamp", "2024-01-15T10:00:00Z")
+                    .attr(
+                        minidom::rxml::xml_ncname!("stamp").to_owned(),
+                        "2024-01-15T10:00:00Z",
+                    )
                     .build(),
             )
             .build();

@@ -15,8 +15,8 @@ use waddle_xmpp::xep::xep0334::{self, Hint};
 use waddle_xmpp::xep::xep0444;
 use waddle_xmpp::Stanza;
 use ws_common::{TestServer, WsXmppClient};
-use xmpp_parsers::iq::{Iq, IqType};
-use xmpp_parsers::message::{Body, Message, MessageType};
+use xmpp_parsers::iq::{Iq, IqPayload};
+use xmpp_parsers::message::{Message, MessageType};
 use xmpp_parsers::minidom::Element;
 use xmpp_parsers::presence::{Presence, Show as PresenceShow, Type as PresenceType};
 
@@ -1020,19 +1020,19 @@ async fn execute_step(ctx: &mut ScenarioContext, step: &Step) -> Result<()> {
         Step::EnableCarbons { actor } => {
             let id = format!("cue-enable-carbons-{}", uuid::Uuid::new_v4());
             let enable = Element::builder("enable", "urn:xmpp:carbons:2").build();
-            let iq = Iq {
+            let iq = Iq::Set {
                 from: None,
                 to: None,
                 id: id.clone(),
-                payload: IqType::Set(enable),
+                payload: enable,
             };
             let client = client_mut(ctx, actor)?;
             client
-                .send(&stanza_xml(Stanza::Iq(iq))?)
+                .send(&stanza_xml(Stanza::Iq(Box::new(iq)))?)
                 .await
                 .map_err(|error| anyhow!(error))?;
             let response = recv_matching(ctx, actor, |frame| frame.contains(&id)).await?;
-            assert_contains_all(&response, ["type=\"result\""], "enable carbons response")?;
+            assert_contains_all(&response, ["type='result'"], "enable carbons response")?;
         }
         Step::StreamManagement {
             actor,
@@ -1046,11 +1046,14 @@ async fn execute_step(ctx: &mut ScenarioContext, step: &Step) -> Result<()> {
                 StreamManagementAction::Enable => {
                     let mut builder = Element::builder("enable", "urn:xmpp:sm:3");
                     if let Some(resume) = resume {
-                        builder = builder.attr("resume", if *resume { "true" } else { "false" });
+                        builder = builder.attr(
+                            minidom::rxml::xml_ncname!("resume").to_owned(),
+                            if *resume { "true" } else { "false" },
+                        );
                     }
                     let max_value = max.map(|value| value.to_string());
                     if let Some(max) = max_value.as_deref() {
-                        builder = builder.attr("max", max);
+                        builder = builder.attr(minidom::rxml::xml_ncname!("max").to_owned(), max);
                     }
                     builder.build()
                 }
@@ -1067,8 +1070,11 @@ async fn execute_step(ctx: &mut ScenarioContext, step: &Step) -> Result<()> {
                         .ok_or_else(|| anyhow!("unknown captured stream id {capture:?}"))?;
                     let h = h.ok_or_else(|| anyhow!("streamManagement resume requires h"))?;
                     Element::builder("resume", "urn:xmpp:sm:3")
-                        .attr("previd", previd.as_str())
-                        .attr("h", h.to_string())
+                        .attr(
+                            minidom::rxml::xml_ncname!("previd").to_owned(),
+                            previd.as_str(),
+                        )
+                        .attr(minidom::rxml::xml_ncname!("h").to_owned(), h.to_string())
                         .build()
                 }
             };
@@ -1120,22 +1126,21 @@ async fn execute_step(ctx: &mut ScenarioContext, step: &Step) -> Result<()> {
                 .as_ref()
                 .map(|payload| xml_element(payload, Some(ctx)))
                 .transpose()?;
-            let iq_type = match (type_, payload) {
-                (IqKindSpec::Get, Some(payload)) => IqType::Get(payload),
-                (IqKindSpec::Set, Some(payload)) => IqType::Set(payload),
-                (IqKindSpec::Result, payload) => IqType::Result(payload),
+            let iq_payload = match (type_, payload) {
+                (IqKindSpec::Get, Some(payload)) => IqPayload::Get(payload),
+                (IqKindSpec::Set, Some(payload)) => IqPayload::Set(payload),
+                (IqKindSpec::Result, payload) => IqPayload::Result(payload),
                 (IqKindSpec::Get | IqKindSpec::Set, None) => {
                     return Err(anyhow!("sendIq get/set requires a payload"))
                 }
             };
-            let iq = Iq {
+            let iq = iq_payload.assemble(xmpp_parsers::iq::IqHeader {
                 from: None,
                 to: to.as_deref().map(str::parse).transpose()?,
                 id,
-                payload: iq_type,
-            };
+            });
             client_mut(ctx, actor)?
-                .send(&stanza_xml(Stanza::Iq(iq))?)
+                .send(&stanza_xml(Stanza::Iq(Box::new(iq)))?)
                 .await
                 .map_err(|error| anyhow!(error))?;
         }
@@ -1151,19 +1156,19 @@ async fn execute_step(ctx: &mut ScenarioContext, step: &Step) -> Result<()> {
         } => {
             let mut expected = contains.clone();
             if let Some(id) = id {
-                expected.push(format!("id=\"{id}\""));
+                expected.push(format!("id='{id}'"));
             }
             if let Some(type_) = type_ {
-                expected.push(format!("type=\"{}\"", iq_response_kind_name(type_)));
+                expected.push(format!("type='{}'", iq_response_kind_name(type_)));
             }
             let captures_snapshot = ctx.captures.clone();
             let frame = recv_matching(ctx, target, |frame| {
                 frame.contains("<iq")
                     && id
                         .as_ref()
-                        .is_none_or(|id| frame.contains(&format!("id=\"{id}\"")))
+                        .is_none_or(|id| frame.contains(&format!("id='{id}'")))
                     && type_.as_ref().is_none_or(|type_| {
-                        frame.contains(&format!("type=\"{}\"", iq_response_kind_name(type_)))
+                        frame.contains(&format!("type='{}'", iq_response_kind_name(type_)))
                     })
                     && contains.iter().all(|part| frame.contains(part))
                     && elements
@@ -1205,13 +1210,15 @@ async fn execute_step(ctx: &mut ScenarioContext, step: &Step) -> Result<()> {
             });
             presence.to = to.as_deref().map(str::parse).transpose()?;
             if let Some(show) = show {
-                presence.show = Some(show.parse::<PresenceShow>()?);
+                presence.show = Some(parse_presence_show(show)?);
             }
             if let Some(status) = status {
-                presence.statuses.insert(String::new(), status.clone());
+                presence
+                    .statuses
+                    .insert(xmpp_parsers::message::Lang::new(), status.clone());
             }
             if let Some(priority) = priority {
-                presence.priority = *priority;
+                presence = presence.with_priority(*priority);
             }
             for payload in payloads {
                 presence.payloads.push(xml_element(payload, Some(ctx))?);
@@ -1235,9 +1242,11 @@ async fn execute_step(ctx: &mut ScenarioContext, step: &Step) -> Result<()> {
                 .or_else(|| to.as_ref().map(|actor| actor.jid.clone()))
                 .ok_or_else(|| anyhow!("sendMessage requires to or toJid"))?;
             let mut message = Message::new_with_type(message_type(type_), Some(to.parse::<Jid>()?));
-            message.id = id.clone();
+            message.id = id.clone().map(xmpp_parsers::message::Id);
             if let Some(body) = body {
-                message.bodies.insert(String::new(), Body(body.clone()));
+                message
+                    .bodies
+                    .insert(xmpp_parsers::message::Lang(String::new()), body.clone());
             }
             for payload in payloads {
                 message.payloads.push(payload_element(payload, ctx)?);
@@ -1272,10 +1281,11 @@ async fn execute_step(ctx: &mut ScenarioContext, step: &Step) -> Result<()> {
             for index in 0..*count {
                 let mut message =
                     Message::new_with_type(message_type(type_), Some(to.parse::<Jid>()?));
-                message.id = Some(format!("{id_prefix}-{index}"));
-                message
-                    .bodies
-                    .insert(String::new(), Body(format!("{body_prefix}-{index}")));
+                message.id = Some(xmpp_parsers::message::Id(format!("{id_prefix}-{index}")));
+                message.bodies.insert(
+                    xmpp_parsers::message::Lang::new(),
+                    format!("{body_prefix}-{index}"),
+                );
                 let xml = stanza_xml(Stanza::Message(message))?;
                 client_mut(ctx, from)?
                     .send(&xml)
@@ -1304,7 +1314,9 @@ async fn execute_step(ctx: &mut ScenarioContext, step: &Step) -> Result<()> {
             let payload_element_expectations = payload_element_expectations(payloads);
             expected.extend(payload_expectations.clone());
             if let Some(from) = from {
-                expected.push(format!("from=\"{}", from.bare_jid));
+                // xmpp-parsers 0.22 serializes attribute values with single
+                // quotes; accept either quote style at runtime.
+                expected.push(format!("from='{}", from.bare_jid));
             }
             let captures_snapshot = ctx.captures.clone();
             let frame = recv_matching(ctx, target, |frame| {
@@ -1313,9 +1325,10 @@ async fn execute_step(ctx: &mut ScenarioContext, step: &Step) -> Result<()> {
                         .as_ref()
                         .is_none_or(|body| frame_root_message_has_body(frame, Some(body)))
                     && (!*body_absent || !frame_root_message_has_body(frame, None))
-                    && from
-                        .as_ref()
-                        .is_none_or(|from| frame.contains(&format!("from=\"{}", from.bare_jid)))
+                    && from.as_ref().is_none_or(|from| {
+                        frame.contains(&format!("from=\"{}", from.bare_jid))
+                            || frame.contains(&format!("from='{}", from.bare_jid))
+                    })
                     && payload_expectations.iter().all(|part| frame.contains(part))
                     && payload_element_expectations
                         .iter()
@@ -1422,7 +1435,7 @@ async fn execute_step(ctx: &mut ScenarioContext, step: &Step) -> Result<()> {
                 Element::builder("x", "http://jabber.org/protocol/muc")
                     .append(
                         Element::builder("history", "http://jabber.org/protocol/muc")
-                            .attr("maxstanzas", "0")
+                            .attr(minidom::rxml::xml_ncname!("maxstanzas").to_owned(), "0")
                             .build(),
                     )
                     .build(),
@@ -1447,7 +1460,7 @@ async fn execute_step(ctx: &mut ScenarioContext, step: &Step) -> Result<()> {
                 .unwrap_or_else(|| format!("cue-muc-admin-set-{}", uuid::Uuid::new_v4()));
             send_muc_admin_iq(ctx, actor, room, jid, affiliation, &id, IqKind::Set).await?;
             let response = recv_matching(ctx, actor, |frame| frame.contains(&id)).await?;
-            assert_contains_all(&response, ["type=\"result\""], "MUC admin set response")?;
+            assert_contains_all(&response, ["type='result'"], "MUC admin set response")?;
         }
         Step::ExpectMucAffiliation {
             actor,
@@ -1464,7 +1477,7 @@ async fn execute_step(ctx: &mut ScenarioContext, step: &Step) -> Result<()> {
             assert_contains_all(
                 &response,
                 [
-                    "type=\"result\"",
+                    "type='result'",
                     "http://jabber.org/protocol/muc#admin",
                     jid.as_str(),
                     affiliation.as_str(),
@@ -1484,11 +1497,7 @@ async fn execute_step(ctx: &mut ScenarioContext, step: &Step) -> Result<()> {
                 .unwrap_or_else(|| format!("cue-muc-admin-denied-{}", uuid::Uuid::new_v4()));
             send_muc_admin_iq(ctx, actor, room, jid, affiliation, &id, IqKind::Set).await?;
             let response = recv_matching(ctx, actor, |frame| frame.contains(&id)).await?;
-            assert_contains_all(
-                &response,
-                ["type=\"error\"", "forbidden"],
-                "MUC admin denial",
-            )?;
+            assert_contains_all(&response, ["type='error'", "forbidden"], "MUC admin denial")?;
         }
         Step::ExpectPresence {
             target,
@@ -1583,14 +1592,14 @@ async fn execute_step(ctx: &mut ScenarioContext, step: &Step) -> Result<()> {
                 fulltext.as_deref(),
                 &query_ids,
             );
-            let iq = Iq {
+            let iq = Iq::Set {
                 from: None,
                 to: Some(archive.parse()?),
                 id: id.clone(),
-                payload: IqType::Set(query),
+                payload: query,
             };
             client_mut(ctx, actor)?
-                .send(&stanza_xml(Stanza::Iq(iq))?)
+                .send(&stanza_xml(Stanza::Iq(Box::new(iq)))?)
                 .await
                 .map_err(|error| anyhow!(error))?;
             let mut mam_frames = Vec::new();
@@ -1926,7 +1935,10 @@ async fn recv_timeout(
                 let state = ctx.sm_state.entry(key.clone()).or_default();
                 if state.enabled {
                     let ack = Element::builder("a", "urn:xmpp:sm:3")
-                        .attr("h", state.inbound_count.to_string())
+                        .attr(
+                            minidom::rxml::xml_ncname!("h").to_owned(),
+                            state.inbound_count.to_string(),
+                        )
                         .build();
                     let ack_xml = element_xml(&ack)?;
                     client_mut(ctx, actor)?
@@ -2048,11 +2060,11 @@ fn mam_query_element(
 
     let has_form = with_jid.is_some() || fulltext.is_some() || !ids.is_empty();
     let mut query = Element::builder("query", MAM_NS)
-        .attr("queryid", query_id)
+        .attr(minidom::rxml::xml_ncname!("queryid").to_owned(), query_id)
         .append(rsm.build());
     if has_form {
         let mut form = Element::builder("x", DATA_FORMS_NS)
-            .attr("type", "submit")
+            .attr(minidom::rxml::xml_ncname!("type").to_owned(), "submit")
             .append(data_form_field("FORM_TYPE", &[MAM_NS]));
         if let Some(with_jid) = with_jid {
             form = form.append(data_form_field("with", &[with_jid]));
@@ -2070,7 +2082,8 @@ fn mam_query_element(
 }
 
 fn data_form_field(var: &str, values: &[&str]) -> Element {
-    let mut field = Element::builder("field", "jabber:x:data").attr("var", var);
+    let mut field = Element::builder("field", "jabber:x:data")
+        .attr(minidom::rxml::xml_ncname!("var").to_owned(), var);
     for value in values {
         field = field.append(
             Element::builder("value", "jabber:x:data")
@@ -2092,28 +2105,33 @@ async fn send_muc_admin_iq(
 ) -> Result<()> {
     let item = match kind {
         IqKind::Get => Element::builder("item", "http://jabber.org/protocol/muc#admin")
-            .attr("affiliation", affiliation)
+            .attr(
+                minidom::rxml::xml_ncname!("affiliation").to_owned(),
+                affiliation,
+            )
             .build(),
         IqKind::Set => Element::builder("item", "http://jabber.org/protocol/muc#admin")
-            .attr("jid", jid)
-            .attr("affiliation", affiliation)
+            .attr(minidom::rxml::xml_ncname!("jid").to_owned(), jid)
+            .attr(
+                minidom::rxml::xml_ncname!("affiliation").to_owned(),
+                affiliation,
+            )
             .build(),
     };
     let query = Element::builder("query", "http://jabber.org/protocol/muc#admin")
         .append(item)
         .build();
     let payload = match kind {
-        IqKind::Get => IqType::Get(query),
-        IqKind::Set => IqType::Set(query),
+        IqKind::Get => IqPayload::Get(query),
+        IqKind::Set => IqPayload::Set(query),
     };
-    let iq = Iq {
+    let iq = payload.assemble(xmpp_parsers::iq::IqHeader {
         from: None,
         to: Some(room.parse()?),
         id: id.to_string(),
-        payload,
-    };
+    });
     client_mut(ctx, actor)?
-        .send(&stanza_xml(Stanza::Iq(iq))?)
+        .send(&stanza_xml(Stanza::Iq(Box::new(iq)))?)
         .await
         .map_err(|error| anyhow!(error))?;
     Ok(())
@@ -2122,13 +2140,17 @@ async fn send_muc_admin_iq(
 fn xml_element(spec: &XmlElementSpec, ctx: Option<&ScenarioContext>) -> Result<Element> {
     let mut builder = Element::builder(spec.name.as_str(), spec.ns.as_str());
     for (name, value) in &spec.attrs {
-        builder = builder.attr(name.as_str(), value.as_str());
+        let ncname = <minidom::rxml::NcName as TryFrom<&str>>::try_from(name.as_str())
+            .map_err(|error| anyhow!("invalid attribute name {name:?}: {error}"))?;
+        builder = builder.attr(ncname, value.as_str());
     }
     for (name, capture) in &spec.attrs_from {
         let value = ctx
             .and_then(|ctx| ctx.captures.get(capture))
             .ok_or_else(|| anyhow!("unknown captured attribute value {capture:?}"))?;
-        builder = builder.attr(name.as_str(), value.as_str());
+        let ncname = <minidom::rxml::NcName as TryFrom<&str>>::try_from(name.as_str())
+            .map_err(|error| anyhow!("invalid attribute name {name:?}: {error}"))?;
+        builder = builder.attr(ncname, value.as_str());
     }
     if let Some(text) = &spec.text {
         builder = builder.append(text.as_str());
@@ -2154,7 +2176,10 @@ fn payload_element(payload: &Payload, ctx: &ScenarioContext) -> Result<Element> 
             size,
             url,
         } => Ok(Element::builder("file-sharing", "urn:xmpp:sfs:0")
-            .attr("disposition", disposition.as_str())
+            .attr(
+                minidom::rxml::xml_ncname!("disposition").to_owned(),
+                disposition.as_str(),
+            )
             .append(
                 Element::builder("file", "urn:xmpp:file:metadata:0")
                     .append(
@@ -2178,7 +2203,10 @@ fn payload_element(payload: &Payload, ctx: &ScenarioContext) -> Result<Element> 
                 Element::builder("sources", "urn:xmpp:sfs:0")
                     .append(
                         Element::builder("url-data", "http://jabber.org/protocol/url-data")
-                            .attr("target", url.as_str())
+                            .attr(
+                                minidom::rxml::xml_ncname!("target").to_owned(),
+                                url.as_str(),
+                            )
                             .build(),
                     )
                     .build(),
@@ -2196,7 +2224,11 @@ fn payload_element(payload: &Payload, ctx: &ScenarioContext) -> Result<Element> 
                     "http://www.w3.org/1999/02/22-rdf-syntax-ns#",
                 )
                 .expect("static RDF prefix is unique")
-                .attr("rdf:about", about.as_str())
+                .attr_ns(
+                    minidom::rxml::Namespace::from("http://www.w3.org/1999/02/22-rdf-syntax-ns#"),
+                    minidom::rxml::xml_ncname!("about").to_owned(),
+                    about.as_str(),
+                )
                 .append(
                     Element::builder("title", "https://ogp.me/ns#")
                         .append(title.as_str())
@@ -2216,7 +2248,7 @@ fn payload_element(payload: &Payload, ctx: &ScenarioContext) -> Result<Element> 
         ),
         Payload::MessageCorrection { id } => {
             Ok(Element::builder("replace", "urn:xmpp:message-correct:0")
-                .attr("id", id.as_str())
+                .attr(minidom::rxml::xml_ncname!("id").to_owned(), id.as_str())
                 .build())
         }
         Payload::Reactions {
@@ -2285,11 +2317,15 @@ fn payload_expectations(payloads: &[Payload], ctx: &ScenarioContext) -> Result<V
                 description,
                 url,
             } => {
+                // minidom 0.18 serializes attribute prefixes based on the
+                // generated namespace map; it may emit `rdf:about=` or
+                // `tns0:about=` depending on how the writer assigns
+                // prefixes. Look for `:about='…'` (any prefix) to stay
+                // tolerant of either form.
                 expected.extend([
                     "http://www.w3.org/1999/02/22-rdf-syntax-ns#".to_string(),
                     "https://ogp.me/ns#".to_string(),
-                    "rdf:about=".to_string(),
-                    about.clone(),
+                    format!(":about='{about}'"),
                     text_node_marker(title),
                     text_node_marker(description),
                     text_node_marker(url),
@@ -2306,7 +2342,7 @@ fn payload_expectations(payloads: &[Payload], ctx: &ScenarioContext) -> Result<V
                 let target_id = resolve_payload_id(ctx, id.as_deref(), id_from.as_deref())?;
                 expected.extend([
                     "urn:xmpp:reactions:0".to_string(),
-                    format!("id=\"{target_id}\""),
+                    format!("id='{target_id}'"),
                 ]);
                 expected.extend(normalized_reaction_text_markers(&target_id, emojis));
             }
@@ -2330,7 +2366,7 @@ fn payload_expectations(payloads: &[Payload], ctx: &ScenarioContext) -> Result<V
                 expected.extend([
                     "urn:waddle:pin:0".to_string(),
                     marker.to_string(),
-                    format!("target=\"{target_id}\""),
+                    format!("target='{target_id}'"),
                 ]);
             }
             Payload::PinEvent {
@@ -2340,14 +2376,14 @@ fn payload_expectations(payloads: &[Payload], ctx: &ScenarioContext) -> Result<V
             } => {
                 let target_id = resolve_payload_id(ctx, id.as_deref(), id_from.as_deref())?;
                 let action_attr = match action {
-                    PinAction::Pinned => "action=\"pinned\"",
-                    PinAction::Unpinned => "action=\"unpinned\"",
+                    PinAction::Pinned => "action='pinned'",
+                    PinAction::Unpinned => "action='unpinned'",
                 };
                 expected.extend([
                     "urn:waddle:pin:0".to_string(),
                     "<pin-event".to_string(),
                     action_attr.to_string(),
-                    format!("target=\"{target_id}\""),
+                    format!("target='{target_id}'"),
                 ]);
             }
             Payload::Xml { .. } => {}
@@ -2424,7 +2460,10 @@ fn validate_file_share_fallback_body(body: Option<&str>, payloads: &[Payload]) -
 
 fn file_share_fallback_element() -> Element {
     Element::builder("fallback", "urn:xmpp:fallback:0")
-        .attr("for", "urn:xmpp:sfs:0")
+        .attr(
+            minidom::rxml::xml_ncname!("for").to_owned(),
+            "urn:xmpp:sfs:0",
+        )
         .append(Element::builder("body", "urn:xmpp:fallback:0").build())
         .build()
 }
@@ -2747,6 +2786,16 @@ where
         }
     }
     Ok(())
+}
+
+fn parse_presence_show(value: &str) -> Result<PresenceShow> {
+    match value {
+        "away" => Ok(PresenceShow::Away),
+        "chat" => Ok(PresenceShow::Chat),
+        "dnd" => Ok(PresenceShow::Dnd),
+        "xa" => Ok(PresenceShow::Xa),
+        other => Err(anyhow!("unknown <show/> value: {other}")),
+    }
 }
 
 fn assert_absent_all<I, S>(frame: &str, absent: I, context: &str) -> Result<()>

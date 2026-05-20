@@ -154,14 +154,23 @@ fn parse_invite_element(x_elem: &Element) -> Option<DirectInvite> {
 ///
 /// The resulting element can be added to a message stanza.
 pub fn build_direct_invite(invite: &DirectInvite) -> Element {
-    let mut builder = Element::builder("x", NS_CONFERENCE).attr("jid", invite.jid.to_string());
+    let mut builder = Element::builder("x", NS_CONFERENCE).attr(
+        minidom::rxml::xml_ncname!("jid").to_owned(),
+        invite.jid.to_string(),
+    );
 
     if let Some(ref reason) = invite.reason {
-        builder = builder.attr("reason", reason.as_str());
+        builder = builder.attr(
+            minidom::rxml::xml_ncname!("reason").to_owned(),
+            reason.as_str(),
+        );
     }
 
     if let Some(ref password) = invite.password {
-        builder = builder.attr("password", password.as_str());
+        builder = builder.attr(
+            minidom::rxml::xml_ncname!("password").to_owned(),
+            password.as_str(),
+        );
     }
 
     builder.build()

@@ -230,19 +230,25 @@ impl RosterItem {
     /// Convert this roster item to an XML element.
     pub fn to_element(&self) -> Element {
         let mut builder = Element::builder("item", ROSTER_NS)
-            .attr("jid", self.jid.to_string())
-            .attr("subscription", self.subscription.as_str());
+            .attr(
+                minidom::rxml::xml_ncname!("jid").to_owned(),
+                self.jid.to_string(),
+            )
+            .attr(
+                minidom::rxml::xml_ncname!("subscription").to_owned(),
+                self.subscription.as_str(),
+            );
 
         if let Some(ref name) = self.name {
-            builder = builder.attr("name", name);
+            builder = builder.attr(minidom::rxml::xml_ncname!("name").to_owned(), name);
         }
 
         if let Some(ref ask) = self.ask {
-            builder = builder.attr("ask", ask.as_str());
+            builder = builder.attr(minidom::rxml::xml_ncname!("ask").to_owned(), ask.as_str());
         }
 
         if self.approved {
-            builder = builder.attr("approved", "true");
+            builder = builder.attr(minidom::rxml::xml_ncname!("approved").to_owned(), "true");
         }
 
         for group in &self.groups {
@@ -369,8 +375,8 @@ impl FromStr for AskType {
 pub fn build_roster_get_iq(id: &str) -> Element {
     let query = Element::builder("query", ROSTER_NS).build();
     Element::builder("iq", "jabber:client")
-        .attr("type", "get")
-        .attr("id", id)
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "get")
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), id)
         .append(query)
         .build()
 }
@@ -389,8 +395,8 @@ pub fn build_roster_set_iq(id: &str, item: &RosterItem) -> Element {
         .append(item.to_element())
         .build();
     Element::builder("iq", "jabber:client")
-        .attr("type", "set")
-        .attr("id", id)
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "set")
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), id)
         .append(query)
         .build()
 }

@@ -20,8 +20,7 @@
 //! typed [`Service`] enum.
 
 pub use xmpp_parsers::extdisco::{
-    Action, Credentials, Restricted, Service, ServicesQuery, ServicesResult, Transport,
-    Type as ServiceType,
+    Action, Credentials, Service, ServicesQuery, ServicesResult, Transport, Type as ServiceType,
 };
 
 use minidom::Element;
@@ -63,47 +62,61 @@ pub fn build_turn_service(
     cred: &TurnCredential,
 ) -> Element {
     Element::builder("service", NS_EXT_DISCO)
-        .attr("action", "add")
-        .attr("type", TYPE_TURNS)
-        .attr("transport", "tcp")
-        .attr("host", turn_host.as_str())
-        .attr("port", turn_tls_port.to_string())
-        .attr("username", cred.username.as_str())
-        .attr("password", cred.password.as_str())
+        .attr(minidom::rxml::xml_ncname!("action").to_owned(), "add")
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), TYPE_TURNS)
+        .attr(minidom::rxml::xml_ncname!("transport").to_owned(), "tcp")
+        .attr(
+            minidom::rxml::xml_ncname!("host").to_owned(),
+            turn_host.as_str(),
+        )
+        .attr(
+            minidom::rxml::xml_ncname!("port").to_owned(),
+            turn_tls_port.to_string(),
+        )
+        .attr(
+            minidom::rxml::xml_ncname!("username").to_owned(),
+            cred.username.as_str(),
+        )
+        .attr(
+            minidom::rxml::xml_ncname!("password").to_owned(),
+            cred.password.as_str(),
+        )
         // XEP-0082 / XEP-0215 §3.6.5: `expires` is a RFC 3339
         // timestamp. Render via chrono directly — same wire shape
         // `xmpp_parsers::date::DateTime` would emit via its
         // `IntoAttributeValue` impl.
-        .attr("expires", cred.expires_at.fixed_offset().to_rfc3339())
-        .attr("restricted", "1")
+        .attr(
+            minidom::rxml::xml_ncname!("expires").to_owned(),
+            cred.expires_at.fixed_offset().to_rfc3339(),
+        )
+        .attr(minidom::rxml::xml_ncname!("restricted").to_owned(), "1")
         .build()
 }
 
 /// XEP-0215 STUN entry. No credentials, so it's cheap to build and
 /// safe to serve to anyone who can already authenticate to the XMPP
-/// stream. Returned via the typed [`Service`] surface because the
-/// xmpp-parsers `Type::Stun` variant is the conformant wire value.
-pub fn build_stun_service(turn_host: &TurnHost, stun_udp_port: u16) -> Service {
-    Service {
-        action: Action::Add,
-        type_: ServiceType::Stun,
-        transport: Some(Transport::Udp),
-        host: turn_host.as_str().to_string(),
-        port: Some(stun_udp_port),
-        username: None,
-        password: None,
-        expires: None,
-        name: None,
-        restricted: Restricted::False,
-        ext_info: Vec::new(),
-    }
-}
-
-/// Serialised form of [`build_stun_service`]. Provided so callers
-/// that mix STUN and the manually-built `turns` entry can assemble
-/// a single `Vec<Element>` for the `<services/>` wrapper.
+/// stream.
+///
+/// Emitted as a [`minidom::Element`] directly because the typed
+/// [`Service`] struct's fields are private in xmpp-parsers 0.22 and
+/// the crate exposes no constructor; building the wire shape with
+/// [`Element::builder`] is the only conformant path. (The TURN entry
+/// already uses the same builder for the same reason — there is no
+/// `Type::Turns` variant to construct.)
 pub fn build_stun_service_element(turn_host: &TurnHost, stun_udp_port: u16) -> Element {
-    build_stun_service(turn_host, stun_udp_port).into()
+    Element::builder("service", NS_EXT_DISCO)
+        .attr(minidom::rxml::xml_ncname!("action").to_owned(), "add")
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "stun")
+        .attr(minidom::rxml::xml_ncname!("transport").to_owned(), "udp")
+        .attr(
+            minidom::rxml::xml_ncname!("host").to_owned(),
+            turn_host.as_str(),
+        )
+        .attr(
+            minidom::rxml::xml_ncname!("port").to_owned(),
+            stun_udp_port.to_string(),
+        )
+        .build()
 }
 
 /// Build the `<services xmlns='urn:xmpp:extdisco:2'/>` wrapper
@@ -116,7 +129,7 @@ pub fn build_stun_service_element(turn_host: &TurnHost, stun_udp_port: u16) -> E
 pub fn build_services_result_element(type_filter: Option<&str>, services: Vec<Element>) -> Element {
     let mut builder = Element::builder("services", NS_EXT_DISCO);
     if let Some(t) = type_filter {
-        builder = builder.attr("type", t);
+        builder = builder.attr(minidom::rxml::xml_ncname!("type").to_owned(), t);
     }
     for service in services {
         builder = builder.append(service);

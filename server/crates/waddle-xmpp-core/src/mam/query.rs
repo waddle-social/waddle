@@ -3,7 +3,7 @@ use jid::Jid;
 use minidom::Element;
 use tracing::debug;
 use uuid::Uuid;
-use xmpp_parsers::iq::{Iq, IqType};
+use xmpp_parsers::iq::Iq;
 
 use super::stanza_id_filter::MamFilterStanzaId;
 use super::types::{MamQuery, RichText, ThreadId};
@@ -15,9 +15,9 @@ use crate::{CoreError, CoreResult};
 
 /// Parse a MAM query from an IQ stanza.
 pub fn parse_mam_query(iq: &Iq) -> CoreResult<(String, MamQuery)> {
-    let query_elem = match &iq.payload {
-        IqType::Set(elem) if elem.name() == "query" && elem.ns() == MAM_NS => elem,
-        IqType::Set(_) | IqType::Get(_) => {
+    let query_elem = match iq {
+        Iq::Set { payload, .. } if payload.name() == "query" && payload.ns() == MAM_NS => payload,
+        Iq::Set { .. } | Iq::Get { .. } => {
             return Err(CoreError::bad_request(Some(
                 "Missing MAM query element".to_string(),
             )));
@@ -63,28 +63,28 @@ pub fn parse_mam_query(iq: &Iq) -> CoreResult<(String, MamQuery)> {
 /// Check if an IQ asks for the XEP-0313 supported query fields form.
 pub fn is_mam_query_form_request(iq: &Iq) -> bool {
     matches!(
-        &iq.payload,
-        IqType::Get(elem) if elem.name() == "query" && elem.ns() == MAM_NS
+        iq,
+        Iq::Get { payload, .. } if payload.name() == "query" && payload.ns() == MAM_NS
     )
 }
 
 /// Check if an IQ is a MAM query.
 pub fn is_mam_query(iq: &Iq) -> bool {
     matches!(
-        &iq.payload,
-        IqType::Set(elem) | IqType::Get(elem)
-            if elem.name() == "query" && elem.ns() == MAM_NS
+        iq,
+        Iq::Set { payload, .. } | Iq::Get { payload, .. }
+            if payload.name() == "query" && payload.ns() == MAM_NS
     )
 }
 
 /// Build the XEP-0313 supported query fields response.
 pub fn build_query_form_iq(original_iq: &Iq) -> Iq {
     let form = Element::builder("x", DATA_FORMS_NS)
-        .attr("type", "form")
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "form")
         .append(
             Element::builder("field", DATA_FORMS_NS)
-                .attr("var", "FORM_TYPE")
-                .attr("type", "hidden")
+                .attr(minidom::rxml::xml_ncname!("var").to_owned(), "FORM_TYPE")
+                .attr(minidom::rxml::xml_ncname!("type").to_owned(), "hidden")
                 .append(
                     Element::builder("value", DATA_FORMS_NS)
                         .append(MAM_NS)
@@ -94,41 +94,44 @@ pub fn build_query_form_iq(original_iq: &Iq) -> Iq {
         )
         .append(
             Element::builder("field", DATA_FORMS_NS)
-                .attr("var", "with")
-                .attr("type", "jid-single")
+                .attr(minidom::rxml::xml_ncname!("var").to_owned(), "with")
+                .attr(minidom::rxml::xml_ncname!("type").to_owned(), "jid-single")
                 .build(),
         )
         .append(
             Element::builder("field", DATA_FORMS_NS)
-                .attr("var", "start")
-                .attr("type", "text-single")
+                .attr(minidom::rxml::xml_ncname!("var").to_owned(), "start")
+                .attr(minidom::rxml::xml_ncname!("type").to_owned(), "text-single")
                 .build(),
         )
         .append(
             Element::builder("field", DATA_FORMS_NS)
-                .attr("var", "end")
-                .attr("type", "text-single")
+                .attr(minidom::rxml::xml_ncname!("var").to_owned(), "end")
+                .attr(minidom::rxml::xml_ncname!("type").to_owned(), "text-single")
                 .build(),
         )
         .append(
             Element::builder("field", DATA_FORMS_NS)
-                .attr("var", "before-id")
-                .attr("type", "text-single")
+                .attr(minidom::rxml::xml_ncname!("var").to_owned(), "before-id")
+                .attr(minidom::rxml::xml_ncname!("type").to_owned(), "text-single")
                 .build(),
         )
         .append(
             Element::builder("field", DATA_FORMS_NS)
-                .attr("var", "after-id")
-                .attr("type", "text-single")
+                .attr(minidom::rxml::xml_ncname!("var").to_owned(), "after-id")
+                .attr(minidom::rxml::xml_ncname!("type").to_owned(), "text-single")
                 .build(),
         )
         .append(
             Element::builder("field", DATA_FORMS_NS)
-                .attr("var", "ids")
-                .attr("type", "list-multi")
+                .attr(minidom::rxml::xml_ncname!("var").to_owned(), "ids")
+                .attr(minidom::rxml::xml_ncname!("type").to_owned(), "list-multi")
                 .append(
                     Element::builder("validate", XDATA_VALIDATE_NS)
-                        .attr("datatype", "xs:string")
+                        .attr(
+                            minidom::rxml::xml_ncname!("datatype").to_owned(),
+                            "xs:string",
+                        )
                         .append(Element::builder("open", XDATA_VALIDATE_NS).build())
                         .build(),
                 )
@@ -136,29 +139,38 @@ pub fn build_query_form_iq(original_iq: &Iq) -> Iq {
         )
         .append(
             Element::builder("field", DATA_FORMS_NS)
-                .attr("var", STANZA_ID_FILTER_FIELD)
-                .attr("type", "text-multi")
+                .attr(
+                    minidom::rxml::xml_ncname!("var").to_owned(),
+                    STANZA_ID_FILTER_FIELD,
+                )
+                .attr(minidom::rxml::xml_ncname!("type").to_owned(), "text-multi")
                 .build(),
         )
         .append(
             Element::builder("field", DATA_FORMS_NS)
-                .attr("var", WADDLE_MAM_THREAD_FIELD)
-                .attr("type", "text-single")
+                .attr(
+                    minidom::rxml::xml_ncname!("var").to_owned(),
+                    WADDLE_MAM_THREAD_FIELD,
+                )
+                .attr(minidom::rxml::xml_ncname!("type").to_owned(), "text-single")
                 .build(),
         )
         .append(
             Element::builder("field", DATA_FORMS_NS)
-                .attr("var", FULLTEXT_MAM_FIELD)
-                .attr("type", "text-single")
+                .attr(
+                    minidom::rxml::xml_ncname!("var").to_owned(),
+                    FULLTEXT_MAM_FIELD,
+                )
+                .attr(minidom::rxml::xml_ncname!("type").to_owned(), "text-single")
                 .build(),
         )
         .build();
     let query = Element::builder("query", MAM_NS).append(form).build();
-    Iq {
-        from: original_iq.to.clone(),
-        to: original_iq.from.clone(),
-        id: original_iq.id.clone(),
-        payload: IqType::Result(Some(query)),
+    Iq::Result {
+        from: original_iq.to().cloned(),
+        to: original_iq.from().cloned(),
+        id: original_iq.id().to_string(),
+        payload: Some(query),
     }
 }
 

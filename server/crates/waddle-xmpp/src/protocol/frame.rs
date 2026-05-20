@@ -221,12 +221,12 @@ fn parse_stanza(frame: &str, kind: &str) -> Result<InboundFrame, ParseError> {
         Element::from_str(&patched).map_err(|err| ParseError::InvalidXml(err.to_string()))?;
 
     let stanza = match kind {
-        "iq" => Stanza::Iq(xmpp_parsers::iq::Iq::try_from(element).map_err(|err| {
-            ParseError::InvalidStanza {
+        "iq" => Stanza::Iq(Box::new(xmpp_parsers::iq::Iq::try_from(element).map_err(
+            |err| ParseError::InvalidStanza {
                 kind: "iq",
                 err: format!("{err:?}"),
-            }
-        })?),
+            },
+        )?)),
         "message" => {
             // XEP-0201: capture the optional `<thread parent='X'>` attribute
             // before `Message::try_from` discards it. xmpp_parsers 0.21 types

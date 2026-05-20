@@ -33,7 +33,7 @@ pub(super) async fn apply_muc_owner_config(
         .room
         .config;
 
-    if let xmpp_parsers::iq::IqType::Set(query) = &iq.payload {
+    if let xmpp_parsers::iq::Iq::Set { payload: query, .. } = iq {
         if let Some(form) = query.get_child("x", DATA_FORMS_NS) {
             if let Some(name) =
                 data_form_value(form, "muc#roomconfig_roomname").filter(|value| !value.is_empty())

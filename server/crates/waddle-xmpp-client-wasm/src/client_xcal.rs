@@ -207,19 +207,25 @@ impl JsVEvent {
 
 fn build_events_items_iq(community_jid: &str, max_items: Option<u32>) -> Element {
     let id = format!("xcal-items-{}", Uuid::new_v4());
-    let mut items_builder = Element::builder("items", NS_PUBSUB).attr("node", PUBSUB_NODE_EVENTS);
+    let mut items_builder = Element::builder("items", NS_PUBSUB).attr(
+        minidom::rxml::xml_ncname!("node").to_owned(),
+        PUBSUB_NODE_EVENTS,
+    );
     let max_items_value;
     if let Some(max) = max_items {
         max_items_value = max.to_string();
-        items_builder = items_builder.attr("max_items", max_items_value.as_str());
+        items_builder = items_builder.attr(
+            minidom::rxml::xml_ncname!("max_items").to_owned(),
+            max_items_value.as_str(),
+        );
     }
     let pubsub = Element::builder("pubsub", NS_PUBSUB)
         .append(items_builder.build())
         .build();
     Element::builder("iq", NS_CLIENT)
-        .attr("type", "get")
-        .attr("id", id)
-        .attr("to", community_jid)
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "get")
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), id)
+        .attr(minidom::rxml::xml_ncname!("to").to_owned(), community_jid)
         .append(pubsub)
         .build()
 }
@@ -252,20 +258,26 @@ fn build_rsvp_publish_iq(
         exdates: Vec::new(),
     };
     let item = Element::builder("item", NS_PUBSUB)
-        .attr("id", item_id.as_str())
+        .attr(
+            minidom::rxml::xml_ncname!("id").to_owned(),
+            item_id.as_str(),
+        )
         .append(build_vcalendar_with_event(&rsvp_event))
         .build();
     let publish = Element::builder("publish", NS_PUBSUB)
-        .attr("node", PUBSUB_NODE_EVENTS)
+        .attr(
+            minidom::rxml::xml_ncname!("node").to_owned(),
+            PUBSUB_NODE_EVENTS,
+        )
         .append(item)
         .build();
     let pubsub = Element::builder("pubsub", NS_PUBSUB)
         .append(publish)
         .build();
     Element::builder("iq", NS_CLIENT)
-        .attr("type", "set")
-        .attr("id", id)
-        .attr("to", community_jid)
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "set")
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), id)
+        .attr(minidom::rxml::xml_ncname!("to").to_owned(), community_jid)
         .append(pubsub)
         .build()
 }
@@ -276,20 +288,23 @@ fn build_rsvp_publish_iq(
 fn build_item_publish_iq(community_jid: &str, item_id: &str, item: &CalendarItem) -> Element {
     let id = format!("xcal-publish-{}", Uuid::new_v4());
     let pubsub_item = Element::builder("item", NS_PUBSUB)
-        .attr("id", item_id)
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), item_id)
         .append(build_vcalendar_with_item(item))
         .build();
     let publish = Element::builder("publish", NS_PUBSUB)
-        .attr("node", PUBSUB_NODE_EVENTS)
+        .attr(
+            minidom::rxml::xml_ncname!("node").to_owned(),
+            PUBSUB_NODE_EVENTS,
+        )
         .append(pubsub_item)
         .build();
     let pubsub = Element::builder("pubsub", NS_PUBSUB)
         .append(publish)
         .build();
     Element::builder("iq", NS_CLIENT)
-        .attr("type", "set")
-        .attr("id", id)
-        .attr("to", community_jid)
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "set")
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), id)
+        .attr(minidom::rxml::xml_ncname!("to").to_owned(), community_jid)
         .append(pubsub)
         .build()
 }
@@ -355,20 +370,23 @@ fn override_from_input(uid: &str, input: JsOverrideInput) -> Result<VEvent, JsVa
 fn build_event_publish_iq(community_jid: &str, item_id: &str, event: &VEvent) -> Element {
     let id = format!("xcal-publish-{}", Uuid::new_v4());
     let item = Element::builder("item", NS_PUBSUB)
-        .attr("id", item_id)
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), item_id)
         .append(build_vcalendar_with_event(event))
         .build();
     let publish = Element::builder("publish", NS_PUBSUB)
-        .attr("node", PUBSUB_NODE_EVENTS)
+        .attr(
+            minidom::rxml::xml_ncname!("node").to_owned(),
+            PUBSUB_NODE_EVENTS,
+        )
         .append(item)
         .build();
     let pubsub = Element::builder("pubsub", NS_PUBSUB)
         .append(publish)
         .build();
     Element::builder("iq", NS_CLIENT)
-        .attr("type", "set")
-        .attr("id", id)
-        .attr("to", community_jid)
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "set")
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), id)
+        .attr(minidom::rxml::xml_ncname!("to").to_owned(), community_jid)
         .append(pubsub)
         .build()
 }
@@ -520,20 +538,26 @@ impl WaddleClient {
             }
             let id = format!("xcal-retract-{}", Uuid::new_v4());
             let item = Element::builder("item", NS_PUBSUB)
-                .attr("id", item_id.as_str())
+                .attr(
+                    minidom::rxml::xml_ncname!("id").to_owned(),
+                    item_id.as_str(),
+                )
                 .build();
             let retract = Element::builder("retract", NS_PUBSUB)
-                .attr("node", PUBSUB_NODE_EVENTS)
-                .attr("notify", "true")
+                .attr(
+                    minidom::rxml::xml_ncname!("node").to_owned(),
+                    PUBSUB_NODE_EVENTS,
+                )
+                .attr(minidom::rxml::xml_ncname!("notify").to_owned(), "true")
                 .append(item)
                 .build();
             let pubsub = Element::builder("pubsub", NS_PUBSUB)
                 .append(retract)
                 .build();
             let iq = Element::builder("iq", NS_CLIENT)
-                .attr("type", "set")
-                .attr("id", id)
-                .attr("to", community_jid)
+                .attr(minidom::rxml::xml_ncname!("type").to_owned(), "set")
+                .attr(minidom::rxml::xml_ncname!("id").to_owned(), id)
+                .attr(minidom::rxml::xml_ncname!("to").to_owned(), community_jid)
                 .append(pubsub)
                 .build();
             send_iq_command(inner, iq).await?;

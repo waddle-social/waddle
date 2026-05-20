@@ -77,10 +77,10 @@ mod disco_info;
 mod disco_items;
 pub(crate) mod errors;
 mod extension_forms;
+mod jingle_muji_gate;
 mod last_activity;
 mod misc;
 mod muc_admin;
-mod muc_call_gate;
 mod muc_owner_config;
 mod muc_owner_moderation;
 mod permissions;
@@ -233,15 +233,15 @@ pub async fn handle_iq_with_conn_state(
     let extensions_domain = state.deps.service_domains.extensions.clone();
     let push_domain = state.deps.service_domains.push.clone();
 
-    let id = iq.id.clone();
-    let to = iq.to.as_ref().map(|jid| jid.to_string());
-    let from = iq.from.as_ref().map(|jid| jid.to_string());
+    let id = iq.id().to_string();
+    let to = iq.to().map(|jid| jid.to_string());
+    let from = iq.from().map(|jid| jid.to_string());
     let response_from = to.as_deref();
     let response_to = from.as_deref();
 
     if matches!(
-        &iq.payload,
-        xmpp_parsers::iq::IqType::Result(_) | xmpp_parsers::iq::IqType::Error(_)
+        &iq,
+        xmpp_parsers::iq::Iq::Result { .. } | xmpp_parsers::iq::Iq::Error { .. }
     ) {
         if let Some(full) = phase.bound_jid() {
             handle_caps_disco_info_result(&iq, full, state);
@@ -250,22 +250,20 @@ pub async fn handle_iq_with_conn_state(
         return vec![];
     }
 
-    let payload_ns = match &iq.payload {
-        xmpp_parsers::iq::IqType::Get(e) | xmpp_parsers::iq::IqType::Set(e) => e.ns(),
+    let payload_ns = match &iq {
+        xmpp_parsers::iq::Iq::Get { payload: e, .. }
+        | xmpp_parsers::iq::Iq::Set { payload: e, .. } => e.ns(),
         _ => String::new(),
     };
-    let has_destroy = match &iq.payload {
-        xmpp_parsers::iq::IqType::Set(e) => e
+    let has_destroy = match &iq {
+        xmpp_parsers::iq::Iq::Set { payload: e, .. } => e
             .get_child("destroy", "http://jabber.org/protocol/muc#owner")
             .is_some(),
         _ => false,
     };
 
     if waddle_xmpp::xep::xep0410::is_self_ping(&iq)
-        && iq
-            .to
-            .as_ref()
-            .is_some_and(|to| to.domain().as_str() == muc_domain)
+        && iq.to().is_some_and(|to| to.domain().as_str() == muc_domain)
     {
         return handle_muc_self_ping_iq(&iq, state, phase.bound_jid(), response_from, response_to)
             .await;
@@ -303,11 +301,7 @@ pub async fn handle_iq_with_conn_state(
             || s == waddle_xmpp::xep::xep0215::NS_EXT_DISCO
     );
     if !payload_mediates_peer_routing {
-        if let Some(target) = iq
-            .to
-            .as_ref()
-            .and_then(|jid| jid.clone().try_into_full().ok())
-        {
+        if let Some(target) = iq.to().and_then(|jid| jid.clone().try_into_full().ok()) {
             if target.domain().as_str() == domain {
                 return route_full_jid_iq(iq, state, phase.bound_jid(), target, response_from)
                     .await;

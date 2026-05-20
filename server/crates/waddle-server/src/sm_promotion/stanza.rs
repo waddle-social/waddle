@@ -15,7 +15,9 @@ pub(super) fn parse_stanza(xml: &str) -> Option<Stanza> {
         "message" => xmpp_parsers::message::Message::try_from(element)
             .ok()
             .map(Stanza::Message),
-        "iq" => xmpp_parsers::iq::Iq::try_from(element).ok().map(Stanza::Iq),
+        "iq" => xmpp_parsers::iq::Iq::try_from(element)
+            .ok()
+            .map(|iq| Stanza::Iq(Box::new(iq))),
         "presence" => xmpp_parsers::presence::Presence::try_from(element)
             .ok()
             .map(Stanza::Presence),
@@ -33,13 +35,12 @@ pub(super) async fn promote_iq(
     registry: &ConnectionRegistry,
 ) -> PromotedOutcome {
     let target = iq
-        .to
-        .as_ref()
+        .to()
         .and_then(|jid| jid.clone().try_into_full().ok())
         .filter(|full| registry.get_entry(full).is_some());
     if let Some(target) = target {
         if matches!(
-            registry.send_to(&target, Stanza::Iq(iq)).await,
+            registry.send_to(&target, Stanza::Iq(Box::new(iq))).await,
             SendResult::Sent
         ) {
             return PromotedOutcome::Redelivered { to: target };

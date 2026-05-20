@@ -197,7 +197,7 @@ pub fn should_skip_storage(msg: &Message) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use xmpp_parsers::message::{Body, Message, MessageType};
+    use xmpp_parsers::message::{Message, MessageType};
 
     #[test]
     fn test_hint_element_name_roundtrip() {
@@ -418,7 +418,8 @@ mod tests {
     #[test]
     fn test_hint_carrier_store_overrides() {
         let mut msg = Message::new(None::<jid::Jid>);
-        msg.bodies.insert(String::new(), Body("test".to_string()));
+        msg.bodies
+            .insert(xmpp_parsers::message::Lang::new(), "test".to_string());
         add_hint(&mut msg, Hint::NoStore);
         add_hint(&mut msg, Hint::Store);
 
@@ -432,8 +433,10 @@ mod tests {
     fn test_plain_message_no_hints() {
         let mut msg = Message::new(None::<jid::Jid>);
         msg.type_ = MessageType::Chat;
-        msg.bodies
-            .insert(String::new(), Body("Normal message".to_string()));
+        msg.bodies.insert(
+            xmpp_parsers::message::Lang::new(),
+            "Normal message".to_string(),
+        );
 
         assert!(!msg.has_no_copy());
         assert!(!msg.has_no_store());

@@ -200,8 +200,8 @@ fn runtime_establishes_session_from_successful_sm_resume_without_binding() {
     let events = runtime
         .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
             Element::builder("resumed", crate::stream_management::NS_SM)
-                .attr("previd", "old-sm-id")
-                .attr("h", "12")
+                .attr(minidom::rxml::xml_ncname!("previd").to_owned(), "old-sm-id")
+                .attr(minidom::rxml::xml_ncname!("h").to_owned(), "12")
                 .build(),
         )))
         .unwrap();
@@ -244,7 +244,7 @@ fn runtime_rejects_resumed_without_required_h() {
     let events = runtime
         .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
             Element::builder("resumed", crate::stream_management::NS_SM)
-                .attr("previd", "old-sm-id")
+                .attr(minidom::rxml::xml_ncname!("previd").to_owned(), "old-sm-id")
                 .build(),
         )))
         .unwrap();
@@ -283,8 +283,11 @@ fn runtime_rejects_resumed_with_mismatched_previd() {
     let events = runtime
         .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
             Element::builder("resumed", crate::stream_management::NS_SM)
-                .attr("previd", "different-sm-id")
-                .attr("h", "12")
+                .attr(
+                    minidom::rxml::xml_ncname!("previd").to_owned(),
+                    "different-sm-id",
+                )
+                .attr(minidom::rxml::xml_ncname!("h").to_owned(), "12")
                 .build(),
         )))
         .unwrap();
@@ -323,7 +326,7 @@ fn runtime_falls_back_to_resource_binding_when_sm_resume_fails() {
     let events = runtime
         .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
             Element::builder("failed", crate::stream_management::NS_SM)
-                .attr("h", "12")
+                .attr(minidom::rxml::xml_ncname!("h").to_owned(), "12")
                 .build(),
         )))
         .unwrap();
@@ -446,8 +449,8 @@ fn runtime_replays_unhandled_stanzas_after_resume_without_recounting_them() {
     let resume_events = runtime
         .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
             Element::builder("resumed", crate::stream_management::NS_SM)
-                .attr("previd", "old-sm-id")
-                .attr("h", "1")
+                .attr(minidom::rxml::xml_ncname!("previd").to_owned(), "old-sm-id")
+                .attr(minidom::rxml::xml_ncname!("h").to_owned(), "1")
                 .build(),
         )))
         .unwrap();
@@ -463,8 +466,8 @@ fn runtime_replays_unhandled_stanzas_after_resume_without_recounting_them() {
     runtime
         .apply_transport_event(TransportEvent::MessageSent(TransportMessage::Element(
             Element::builder("message", crate::NS_CLIENT)
-                .attr("id", "unhandled")
-                .attr("type", "chat")
+                .attr(minidom::rxml::xml_ncname!("id").to_owned(), "unhandled")
+                .attr(minidom::rxml::xml_ncname!("type").to_owned(), "chat")
                 .build(),
         )))
         .unwrap();
@@ -472,7 +475,7 @@ fn runtime_replays_unhandled_stanzas_after_resume_without_recounting_them() {
     let too_high_ack_events = runtime
         .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
             Element::builder("a", crate::stream_management::NS_SM)
-                .attr("h", "3")
+                .attr(minidom::rxml::xml_ncname!("h").to_owned(), "3")
                 .build(),
         )))
         .unwrap();
@@ -499,16 +502,19 @@ fn runtime_resume_state_carries_unhandled_stanzas_into_next_runtime() {
     first_runtime
         .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
             Element::builder("enabled", crate::stream_management::NS_SM)
-                .attr("resume", "true")
-                .attr("id", "old-sm-id")
+                .attr(minidom::rxml::xml_ncname!("resume").to_owned(), "true")
+                .attr(minidom::rxml::xml_ncname!("id").to_owned(), "old-sm-id")
                 .build(),
         )))
         .unwrap();
     first_runtime
         .apply_transport_event(TransportEvent::MessageSent(TransportMessage::Element(
             Element::builder("message", crate::NS_CLIENT)
-                .attr("id", "carried-unhandled")
-                .attr("type", "chat")
+                .attr(
+                    minidom::rxml::xml_ncname!("id").to_owned(),
+                    "carried-unhandled",
+                )
+                .attr(minidom::rxml::xml_ncname!("type").to_owned(), "chat")
                 .build(),
         )))
         .unwrap();
@@ -530,8 +536,8 @@ fn runtime_resume_state_carries_unhandled_stanzas_into_next_runtime() {
     let resumed_events = next_runtime
         .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
             Element::builder("resumed", crate::stream_management::NS_SM)
-                .attr("previd", "old-sm-id")
-                .attr("h", "0")
+                .attr(minidom::rxml::xml_ncname!("previd").to_owned(), "old-sm-id")
+                .attr(minidom::rxml::xml_ncname!("h").to_owned(), "0")
                 .build(),
         )))
         .unwrap();
@@ -561,7 +567,7 @@ fn runtime_retries_only_unhandled_stanzas_after_failed_resume_fresh_enable() {
     let failed_events = runtime
         .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
             Element::builder("failed", crate::stream_management::NS_SM)
-                .attr("h", "1")
+                .attr(minidom::rxml::xml_ncname!("h").to_owned(), "1")
                 .build(),
         )))
         .unwrap();
@@ -610,8 +616,8 @@ fn runtime_retries_only_unhandled_stanzas_after_failed_resume_fresh_enable() {
     let enabled_events = runtime
         .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
             Element::builder("enabled", crate::stream_management::NS_SM)
-                .attr("resume", "true")
-                .attr("id", "fresh-sm-id")
+                .attr(minidom::rxml::xml_ncname!("resume").to_owned(), "true")
+                .attr(minidom::rxml::xml_ncname!("id").to_owned(), "fresh-sm-id")
                 .build(),
         )))
         .unwrap();
@@ -654,7 +660,7 @@ fn runtime_preserves_failed_resume_snapshot_until_fallback_retry_is_sent() {
     let failed_events = runtime
         .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
             Element::builder("failed", crate::stream_management::NS_SM)
-                .attr("h", "0")
+                .attr(minidom::rxml::xml_ncname!("h").to_owned(), "0")
                 .build(),
         )))
         .unwrap();
@@ -713,7 +719,7 @@ fn runtime_retries_unhandled_stanzas_when_fresh_sm_enable_fails() {
     let failed_events = runtime
         .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
             Element::builder("failed", crate::stream_management::NS_SM)
-                .attr("h", "1")
+                .attr(minidom::rxml::xml_ncname!("h").to_owned(), "1")
                 .build(),
         )))
         .unwrap();
@@ -786,8 +792,8 @@ fn runtime_emits_message_delivery_ack_from_core_sm_queue() {
     runtime
         .apply_transport_event(TransportEvent::MessageSent(TransportMessage::Element(
             Element::builder("message", crate::NS_CLIENT)
-                .attr("id", "core-tracked")
-                .attr("type", "chat")
+                .attr(minidom::rxml::xml_ncname!("id").to_owned(), "core-tracked")
+                .attr(minidom::rxml::xml_ncname!("type").to_owned(), "chat")
                 .build(),
         )))
         .unwrap();
@@ -795,7 +801,7 @@ fn runtime_emits_message_delivery_ack_from_core_sm_queue() {
     let events = runtime
         .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
             Element::builder("a", crate::stream_management::NS_SM)
-                .attr("h", "1")
+                .attr(minidom::rxml::xml_ncname!("h").to_owned(), "1")
                 .build(),
         )))
         .unwrap();
@@ -818,7 +824,7 @@ fn runtime_counts_outbound_stanzas_after_enable_is_sent() {
         .unwrap();
 
     let message = Element::builder("message", crate::NS_CLIENT)
-        .attr("id", "out-1")
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), "out-1")
         .build();
     runtime
         .apply_transport_event(TransportEvent::MessageSent(TransportMessage::Element(
@@ -840,7 +846,7 @@ fn runtime_rejects_sm_ack_above_sent_count() {
         .unwrap();
 
     let ack = Element::builder("a", crate::stream_management::NS_SM)
-        .attr("h", "1")
+        .attr(minidom::rxml::xml_ncname!("h").to_owned(), "1")
         .build();
     let events = runtime
         .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
@@ -987,8 +993,11 @@ fn drive_to_authenticated_stream(runtime: &mut XmppRuntime) {
 
 fn bind_result(stanza_id: &StanzaId) -> Element {
     Element::builder("iq", crate::NS_CLIENT)
-        .attr("id", stanza_id.as_str())
-        .attr("type", "result")
+        .attr(
+            minidom::rxml::xml_ncname!("id").to_owned(),
+            stanza_id.as_str(),
+        )
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "result")
         .append(
             Element::builder("bind", NS_BIND)
                 .append(
@@ -1011,8 +1020,8 @@ fn resume_state_with_sent_messages<const N: usize>(ids: [&str; N]) -> SmResumeSt
     runtime
         .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
             Element::builder("enabled", crate::stream_management::NS_SM)
-                .attr("resume", "true")
-                .attr("id", "old-sm-id")
+                .attr(minidom::rxml::xml_ncname!("resume").to_owned(), "true")
+                .attr(minidom::rxml::xml_ncname!("id").to_owned(), "old-sm-id")
                 .build(),
         )))
         .unwrap();
@@ -1020,8 +1029,8 @@ fn resume_state_with_sent_messages<const N: usize>(ids: [&str; N]) -> SmResumeSt
         runtime
             .apply_transport_event(TransportEvent::MessageSent(TransportMessage::Element(
                 Element::builder("message", crate::NS_CLIENT)
-                    .attr("id", id)
-                    .attr("type", "chat")
+                    .attr(minidom::rxml::xml_ncname!("id").to_owned(), id)
+                    .attr(minidom::rxml::xml_ncname!("type").to_owned(), "chat")
                     .build(),
             )))
             .unwrap();
@@ -1043,8 +1052,8 @@ fn assert_resume_state_replays_id(resume_state: SmResumeState, expected_id: &str
     let events = runtime
         .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
             Element::builder("resumed", crate::stream_management::NS_SM)
-                .attr("previd", "old-sm-id")
-                .attr("h", "0")
+                .attr(minidom::rxml::xml_ncname!("previd").to_owned(), "old-sm-id")
+                .attr(minidom::rxml::xml_ncname!("h").to_owned(), "0")
                 .build(),
         )))
         .unwrap();

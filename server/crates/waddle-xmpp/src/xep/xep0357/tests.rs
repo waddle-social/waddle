@@ -1,10 +1,11 @@
 use super::*;
 
 fn make_enable_iq(jid_attr: &str, node_attr: Option<&str>, with_form: bool) -> Iq {
-    let mut enable = Element::builder("enable", NS_PUSH).attr("jid", jid_attr);
+    let mut enable = Element::builder("enable", NS_PUSH)
+        .attr(minidom::rxml::xml_ncname!("jid").to_owned(), jid_attr);
 
     if let Some(node) = node_attr {
-        enable = enable.attr("node", node);
+        enable = enable.attr(minidom::rxml::xml_ncname!("node").to_owned(), node);
     }
 
     let mut enable_elem = enable.build();
@@ -14,7 +15,7 @@ fn make_enable_iq(jid_attr: &str, node_attr: Option<&str>, with_form: bool) -> I
             .append(NS_PUBSUB_PUBLISH_OPTIONS)
             .build();
         let form_type_field = Element::builder("field", NS_DATA_FORMS)
-            .attr("var", "FORM_TYPE")
+            .attr(minidom::rxml::xml_ncname!("var").to_owned(), "FORM_TYPE")
             .append(form_type_value)
             .build();
 
@@ -22,12 +23,12 @@ fn make_enable_iq(jid_attr: &str, node_attr: Option<&str>, with_form: bool) -> I
             .append("opaque-secret")
             .build();
         let secret_field = Element::builder("field", NS_DATA_FORMS)
-            .attr("var", "secret")
+            .attr(minidom::rxml::xml_ncname!("var").to_owned(), "secret")
             .append(secret_value)
             .build();
 
         let form = Element::builder("x", NS_DATA_FORMS)
-            .attr("type", "submit")
+            .attr(minidom::rxml::xml_ncname!("type").to_owned(), "submit")
             .append(form_type_field)
             .append(secret_field)
             .build();
@@ -35,26 +36,27 @@ fn make_enable_iq(jid_attr: &str, node_attr: Option<&str>, with_form: bool) -> I
         enable_elem.append_child(form);
     }
 
-    Iq {
+    Iq::Set {
         from: Some("alice@example.com".parse().expect("valid jid")),
         to: Some("example.com".parse().expect("valid jid")),
         id: "push1".to_string(),
-        payload: IqType::Set(enable_elem),
+        payload: enable_elem,
     }
 }
 
 fn make_disable_iq(jid_attr: &str, node_attr: Option<&str>) -> Iq {
-    let mut disable = Element::builder("disable", NS_PUSH).attr("jid", jid_attr);
+    let mut disable = Element::builder("disable", NS_PUSH)
+        .attr(minidom::rxml::xml_ncname!("jid").to_owned(), jid_attr);
 
     if let Some(node) = node_attr {
-        disable = disable.attr("node", node);
+        disable = disable.attr(minidom::rxml::xml_ncname!("node").to_owned(), node);
     }
 
-    Iq {
+    Iq::Set {
         from: Some("alice@example.com".parse().expect("valid jid")),
         to: Some("example.com".parse().expect("valid jid")),
         id: "push2".to_string(),
-        payload: IqType::Set(disable.build()),
+        payload: disable.build(),
     }
 }
 
@@ -77,13 +79,16 @@ fn test_is_push_enable() {
 #[test]
 fn test_is_push_enable_false_for_get() {
     let elem = Element::builder("enable", NS_PUSH)
-        .attr("jid", "push.example.com")
+        .attr(
+            minidom::rxml::xml_ncname!("jid").to_owned(),
+            "push.example.com",
+        )
         .build();
-    let iq = Iq {
+    let iq = Iq::Get {
         from: None,
         to: None,
         id: "test".to_string(),
-        payload: IqType::Get(elem),
+        payload: elem,
     };
     assert!(!is_push_enable(&iq));
 }
@@ -91,24 +96,27 @@ fn test_is_push_enable_false_for_get() {
 #[test]
 fn test_is_push_enable_false_for_wrong_ns() {
     let elem = Element::builder("enable", "wrong:ns")
-        .attr("jid", "push.example.com")
+        .attr(
+            minidom::rxml::xml_ncname!("jid").to_owned(),
+            "push.example.com",
+        )
         .build();
-    let iq = Iq {
+    let iq = Iq::Set {
         from: None,
         to: None,
         id: "test".to_string(),
-        payload: IqType::Set(elem),
+        payload: elem,
     };
     assert!(!is_push_enable(&iq));
 }
 
 #[test]
 fn test_is_push_enable_false_for_result() {
-    let iq = Iq {
+    let iq = Iq::Result {
         from: None,
         to: None,
         id: "test".to_string(),
-        payload: IqType::Result(None),
+        payload: None,
     };
     assert!(!is_push_enable(&iq));
 }
@@ -123,13 +131,16 @@ fn test_is_push_disable() {
 #[test]
 fn test_is_push_disable_false_for_get() {
     let elem = Element::builder("disable", NS_PUSH)
-        .attr("jid", "push.example.com")
+        .attr(
+            minidom::rxml::xml_ncname!("jid").to_owned(),
+            "push.example.com",
+        )
         .build();
-    let iq = Iq {
+    let iq = Iq::Get {
         from: None,
         to: None,
         id: "test".to_string(),
-        payload: IqType::Get(elem),
+        payload: elem,
     };
     assert!(!is_push_disable(&iq));
 }
@@ -137,13 +148,16 @@ fn test_is_push_disable_false_for_get() {
 #[test]
 fn test_is_push_disable_false_for_wrong_element() {
     let elem = Element::builder("enable", NS_PUSH)
-        .attr("jid", "push.example.com")
+        .attr(
+            minidom::rxml::xml_ncname!("jid").to_owned(),
+            "push.example.com",
+        )
         .build();
-    let iq = Iq {
+    let iq = Iq::Set {
         from: None,
         to: None,
         id: "test".to_string(),
-        payload: IqType::Set(elem),
+        payload: elem,
     };
     assert!(!is_push_disable(&iq));
 }
@@ -182,17 +196,23 @@ fn test_parse_push_enable_without_options() {
 #[test]
 fn test_parse_push_enable_ignores_provider_attribute_options() {
     let elem = Element::builder("enable", NS_PUSH)
-        .attr("jid", "push-service.example.com")
-        .attr("node", "web-push")
-        .attr("endpoint", "https://push.example.com/abc")
-        .attr("p256dh", "BASE64KEY")
-        .attr("auth", "BASE64AUTH")
+        .attr(
+            minidom::rxml::xml_ncname!("jid").to_owned(),
+            "push-service.example.com",
+        )
+        .attr(minidom::rxml::xml_ncname!("node").to_owned(), "web-push")
+        .attr(
+            minidom::rxml::xml_ncname!("endpoint").to_owned(),
+            "https://push.example.com/abc",
+        )
+        .attr(minidom::rxml::xml_ncname!("p256dh").to_owned(), "BASE64KEY")
+        .attr(minidom::rxml::xml_ncname!("auth").to_owned(), "BASE64AUTH")
         .build();
-    let iq = Iq {
+    let iq = Iq::Set {
         from: Some("alice@example.com".parse().expect("valid jid")),
         to: Some("example.com".parse().expect("valid jid")),
         id: "push1".to_string(),
-        payload: IqType::Set(elem),
+        payload: elem,
     };
     let enable = parse_push_enable(&iq).expect("should parse");
 
@@ -215,23 +235,25 @@ fn test_parse_push_enable_without_node() {
 #[test]
 fn test_parse_push_enable_missing_jid() {
     let elem = Element::builder("enable", NS_PUSH).build();
-    let iq = Iq {
+    let iq = Iq::Set {
         from: None,
         to: None,
         id: "test".to_string(),
-        payload: IqType::Set(elem),
+        payload: elem,
     };
     assert!(parse_push_enable(&iq).is_none());
 }
 
 #[test]
 fn test_parse_push_enable_empty_jid() {
-    let elem = Element::builder("enable", NS_PUSH).attr("jid", "").build();
-    let iq = Iq {
+    let elem = Element::builder("enable", NS_PUSH)
+        .attr(minidom::rxml::xml_ncname!("jid").to_owned(), "")
+        .build();
+    let iq = Iq::Set {
         from: None,
         to: None,
         id: "test".to_string(),
-        payload: IqType::Set(elem),
+        payload: elem,
     };
     assert!(parse_push_enable(&iq).is_none());
 }
@@ -239,13 +261,13 @@ fn test_parse_push_enable_empty_jid() {
 #[test]
 fn test_parse_push_enable_invalid_jid() {
     let elem = Element::builder("enable", NS_PUSH)
-        .attr("jid", "not a jid")
+        .attr(minidom::rxml::xml_ncname!("jid").to_owned(), "not a jid")
         .build();
-    let iq = Iq {
+    let iq = Iq::Set {
         from: None,
         to: None,
         id: "test".to_string(),
-        payload: IqType::Set(elem),
+        payload: elem,
     };
     assert!(parse_push_enable(&iq).is_none());
 }
@@ -253,13 +275,16 @@ fn test_parse_push_enable_invalid_jid() {
 #[test]
 fn test_parse_push_enable_rejects_full_jid() {
     let elem = Element::builder("enable", NS_PUSH)
-        .attr("jid", "push.example.com/device")
+        .attr(
+            minidom::rxml::xml_ncname!("jid").to_owned(),
+            "push.example.com/device",
+        )
         .build();
-    let iq = Iq {
+    let iq = Iq::Set {
         from: None,
         to: None,
         id: "test".to_string(),
-        payload: IqType::Set(elem),
+        payload: elem,
     };
     assert!(parse_push_enable(&iq).is_none());
 }
@@ -267,13 +292,16 @@ fn test_parse_push_enable_rejects_full_jid() {
 #[test]
 fn test_parse_push_enable_wrong_payload_type() {
     let elem = Element::builder("enable", NS_PUSH)
-        .attr("jid", "push.example.com")
+        .attr(
+            minidom::rxml::xml_ncname!("jid").to_owned(),
+            "push.example.com",
+        )
         .build();
-    let iq = Iq {
+    let iq = Iq::Get {
         from: None,
         to: None,
         id: "test".to_string(),
-        payload: IqType::Get(elem),
+        payload: elem,
     };
     assert!(parse_push_enable(&iq).is_none());
 }
@@ -299,11 +327,11 @@ fn test_parse_push_disable_without_node() {
 #[test]
 fn test_parse_push_disable_missing_jid() {
     let elem = Element::builder("disable", NS_PUSH).build();
-    let iq = Iq {
+    let iq = Iq::Set {
         from: None,
         to: None,
         id: "test".to_string(),
-        payload: IqType::Set(elem),
+        payload: elem,
     };
     assert!(parse_push_disable(&iq).is_none());
 }
@@ -311,13 +339,13 @@ fn test_parse_push_disable_missing_jid() {
 #[test]
 fn test_parse_push_disable_invalid_jid() {
     let elem = Element::builder("disable", NS_PUSH)
-        .attr("jid", "not a jid")
+        .attr(minidom::rxml::xml_ncname!("jid").to_owned(), "not a jid")
         .build();
-    let iq = Iq {
+    let iq = Iq::Set {
         from: None,
         to: None,
         id: "test".to_string(),
-        payload: IqType::Set(elem),
+        payload: elem,
     };
     assert!(parse_push_disable(&iq).is_none());
 }
@@ -325,13 +353,16 @@ fn test_parse_push_disable_invalid_jid() {
 #[test]
 fn test_parse_push_disable_rejects_full_jid() {
     let elem = Element::builder("disable", NS_PUSH)
-        .attr("jid", "push.example.com/device")
+        .attr(
+            minidom::rxml::xml_ncname!("jid").to_owned(),
+            "push.example.com/device",
+        )
         .build();
-    let iq = Iq {
+    let iq = Iq::Set {
         from: None,
         to: None,
         id: "test".to_string(),
-        payload: IqType::Set(elem),
+        payload: elem,
     };
     assert!(parse_push_disable(&iq).is_none());
 }
@@ -339,13 +370,16 @@ fn test_parse_push_disable_rejects_full_jid() {
 #[test]
 fn test_parse_push_disable_wrong_payload_type() {
     let elem = Element::builder("disable", NS_PUSH)
-        .attr("jid", "push.example.com")
+        .attr(
+            minidom::rxml::xml_ncname!("jid").to_owned(),
+            "push.example.com",
+        )
         .build();
-    let iq = Iq {
+    let iq = Iq::Get {
         from: None,
         to: None,
         id: "test".to_string(),
-        payload: IqType::Get(elem),
+        payload: elem,
     };
     assert!(parse_push_disable(&iq).is_none());
 }
@@ -355,10 +389,10 @@ fn test_build_push_enable_result() {
     let iq = make_enable_iq("push-service.example.com", Some("web-push"), true);
     let result = build_push_enable_result(&iq);
 
-    assert_eq!(result.id, "push1");
-    assert_eq!(result.from, iq.to);
-    assert_eq!(result.to, iq.from);
-    assert!(matches!(result.payload, IqType::Result(None)));
+    assert_eq!(result.id(), "push1");
+    assert_eq!(result.from(), iq.to());
+    assert_eq!(result.to(), iq.from());
+    assert!(matches!(result, Iq::Result { payload: None, .. }));
 }
 
 #[test]
@@ -366,42 +400,48 @@ fn test_build_push_disable_result() {
     let iq = make_disable_iq("push-service.example.com", Some("web-push"));
     let result = build_push_disable_result(&iq);
 
-    assert_eq!(result.id, "push2");
-    assert_eq!(result.from, iq.to);
-    assert_eq!(result.to, iq.from);
-    assert!(matches!(result.payload, IqType::Result(None)));
+    assert_eq!(result.id(), "push2");
+    assert_eq!(result.from(), iq.to());
+    assert_eq!(result.to(), iq.from());
+    assert!(matches!(result, Iq::Result { payload: None, .. }));
 }
 
 #[test]
 fn test_build_result_with_none_addresses() {
     let elem = Element::builder("enable", NS_PUSH)
-        .attr("jid", "push.example.com")
+        .attr(
+            minidom::rxml::xml_ncname!("jid").to_owned(),
+            "push.example.com",
+        )
         .build();
-    let iq = Iq {
+    let iq = Iq::Set {
         from: None,
         to: None,
         id: "test-none".to_string(),
-        payload: IqType::Set(elem),
+        payload: elem,
     };
     let result = build_push_enable_result(&iq);
-    assert!(result.from.is_none());
-    assert!(result.to.is_none());
-    assert_eq!(result.id, "test-none");
+    assert!(result.from().is_none());
+    assert!(result.to().is_none());
+    assert_eq!(result.id(), "test-none");
 }
 
 #[test]
 fn test_parse_data_form_with_empty_value() {
     let empty_value = Element::builder("value", NS_DATA_FORMS).build();
     let field = Element::builder("field", NS_DATA_FORMS)
-        .attr("var", "endpoint")
+        .attr(minidom::rxml::xml_ncname!("var").to_owned(), "endpoint")
         .append(empty_value)
         .build();
     let form = Element::builder("x", NS_DATA_FORMS)
-        .attr("type", "submit")
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "submit")
         .append(field)
         .build();
     let mut enable_elem = Element::builder("enable", NS_PUSH)
-        .attr("jid", "push.example.com")
+        .attr(
+            minidom::rxml::xml_ncname!("jid").to_owned(),
+            "push.example.com",
+        )
         .build();
     enable_elem.append_child(form);
 
@@ -422,11 +462,14 @@ fn test_parse_data_form_with_missing_var() {
         .append(value)
         .build();
     let form = Element::builder("x", NS_DATA_FORMS)
-        .attr("type", "submit")
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "submit")
         .append(field)
         .build();
     let mut enable_elem = Element::builder("enable", NS_PUSH)
-        .attr("jid", "push.example.com")
+        .attr(
+            minidom::rxml::xml_ncname!("jid").to_owned(),
+            "push.example.com",
+        )
         .build();
     enable_elem.append_child(form);
 
@@ -444,22 +487,25 @@ fn test_non_publish_options_form_is_not_registration_publish_options() {
         .append("not-publish-options")
         .build();
     let field = Element::builder("field", NS_DATA_FORMS)
-        .attr("var", "FORM_TYPE")
+        .attr(minidom::rxml::xml_ncname!("var").to_owned(), "FORM_TYPE")
         .append(value)
         .build();
     let form = Element::builder("x", NS_DATA_FORMS)
-        .attr("type", "submit")
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "submit")
         .append(field)
         .build();
     let mut enable_elem = Element::builder("enable", NS_PUSH)
-        .attr("jid", "push.example.com")
+        .attr(
+            minidom::rxml::xml_ncname!("jid").to_owned(),
+            "push.example.com",
+        )
         .build();
     enable_elem.append_child(form);
-    let iq = Iq {
+    let iq = Iq::Set {
         from: None,
         to: None,
         id: "test".to_string(),
-        payload: IqType::Set(enable_elem),
+        payload: enable_elem,
     };
 
     let enable = parse_push_enable(&iq).expect("enable");

@@ -32,7 +32,7 @@ use waddle_xmpp::disco::info::{Feature, Identity, DISCO_INFO_NS};
 use waddle_xmpp::xep::xep0115::{
     compute_caps_hash_with_extensions, CachedDiscoInfo, Caps, CapsCache, CapsCacheKey,
 };
-use xmpp_parsers::iq::{Iq, IqType};
+use xmpp_parsers::iq::Iq;
 use xmpp_parsers::minidom::Element;
 
 /// XEP-0115 §8.1: SHA-1 is mandatory-to-implement and is the only
@@ -233,13 +233,16 @@ pub fn build_caps_disco_info_query(
     iq_id: &str,
 ) -> Iq {
     let query = Element::builder("query", DISCO_INFO_NS)
-        .attr("node", caps.node_ver())
+        .attr(
+            minidom::rxml::xml_ncname!("node").to_owned(),
+            caps.node_ver(),
+        )
         .build();
-    Iq {
+    Iq::Get {
         from: Some(server_domain.as_jid().clone()),
         to: Some(Jid::from(target.clone())),
         id: iq_id.to_string(),
-        payload: IqType::Get(query),
+        payload: query,
     }
 }
 
@@ -271,11 +274,11 @@ mod tests {
     /// exercise the extension path through `compute_caps_hash_with_extensions`.
     fn sample_extension_form(form_type: &str, software: &str) -> Element {
         Element::builder("x", "jabber:x:data")
-            .attr("type", "result")
+            .attr(minidom::rxml::xml_ncname!("type").to_owned(), "result")
             .append(
                 Element::builder("field", "jabber:x:data")
-                    .attr("var", "FORM_TYPE")
-                    .attr("type", "hidden")
+                    .attr(minidom::rxml::xml_ncname!("var").to_owned(), "FORM_TYPE")
+                    .attr(minidom::rxml::xml_ncname!("type").to_owned(), "hidden")
                     .append(
                         Element::builder("value", "jabber:x:data")
                             .append(form_type)
@@ -285,7 +288,7 @@ mod tests {
             )
             .append(
                 Element::builder("field", "jabber:x:data")
-                    .attr("var", "software")
+                    .attr(minidom::rxml::xml_ncname!("var").to_owned(), "software")
                     .append(
                         Element::builder("value", "jabber:x:data")
                             .append(software)

@@ -215,7 +215,10 @@ pub fn sha1_hex(data: &[u8]) -> String {
 /// Build a `<hash xmlns='urn:xmpp:hashes:2' algo='...'/>` element.
 pub fn build_hash_element(hash: &HashValue) -> Element {
     let mut elem = Element::builder("hash", NS_HASHES)
-        .attr("algo", hash.algo.as_str())
+        .attr(
+            minidom::rxml::xml_ncname!("algo").to_owned(),
+            hash.algo.as_str(),
+        )
         .build();
     elem.append_text_node(hash.to_base64());
     elem

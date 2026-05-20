@@ -543,9 +543,9 @@ pub(crate) fn presence_to_js(presence: InboundPresence) -> WaddlePresence {
         muc_role: presence.muc_role.map(muc_role_to_string),
         muc_jid: presence.muc_jid,
         vcard_avatar: presence.vcard_avatar,
-        muc_call: presence.muc_call.map(|c| WaddleMucCallPresence {
-            state: c.state.as_attr(),
-            call_id: c.call_id,
+        muji: presence.muji.map(|m| WaddleMujiPresence {
+            preparing: m.preparing,
+            active: m.active,
         }),
     }
 }

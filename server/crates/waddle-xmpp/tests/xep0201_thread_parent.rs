@@ -149,10 +149,19 @@ fn xep_0201_groupchat_stanza_xml_replay_preserves_thread_metadata() {
     // remove only the per-recipient `to` and keep/reinstall the
     // XEP-0201 `<thread/>` element.
     let archived_stanza = Element::builder("message", "jabber:client")
-        .attr("from", "team@conference.example.com/alice")
-        .attr("to", "bob@example.com/web")
-        .attr("type", "groupchat")
-        .attr("id", "wire-archive-xml")
+        .attr(
+            minidom::rxml::xml_ncname!("from").to_owned(),
+            "team@conference.example.com/alice",
+        )
+        .attr(
+            minidom::rxml::xml_ncname!("to").to_owned(),
+            "bob@example.com/web",
+        )
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "groupchat")
+        .attr(
+            minidom::rxml::xml_ncname!("id").to_owned(),
+            "wire-archive-xml",
+        )
         .append(
             Element::builder("body", "jabber:client")
                 .append("threaded reply")
@@ -164,12 +173,12 @@ fn xep_0201_groupchat_stanza_xml_replay_preserves_thread_metadata() {
         ))
         .append(
             Element::builder("reply", "urn:xmpp:reply:0")
-                .attr("id", "root-thread")
+                .attr(minidom::rxml::xml_ncname!("id").to_owned(), "root-thread")
                 .build(),
         )
         .append(
             Element::builder("thread", "urn:example:other:0")
-                .attr("kind", "extension")
+                .attr(minidom::rxml::xml_ncname!("kind").to_owned(), "extension")
                 .append("not-xep-0201")
                 .build(),
         )
@@ -285,7 +294,7 @@ fn xep_0201_parent_only_input_is_rejected_at_parser() {
     let mut msg = Message::new(None::<jid::Jid>);
     msg.payloads.push(
         Element::builder("thread", "jabber:client")
-            .attr("parent", "root-1")
+            .attr(minidom::rxml::xml_ncname!("parent").to_owned(), "root-1")
             .build(),
     );
     assert_eq!(thread_info_from_message(&msg), None);

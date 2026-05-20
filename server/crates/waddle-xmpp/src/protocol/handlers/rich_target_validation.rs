@@ -216,7 +216,7 @@ pub fn detect(message: &Message, ctx: &MessageContext<'_>) -> Option<DetectedRic
         return Some(DetectedRichTarget {
             kind: RichTargetKind::Reply,
             reference: MessageRef::StanzaId {
-                stanza_id: StanzaId::new(reply.id, archive_jid),
+                stanza_id: StanzaId::new(reply.id.as_str(), archive_jid),
             },
             author,
         });

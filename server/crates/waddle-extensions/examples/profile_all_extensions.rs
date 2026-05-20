@@ -22,7 +22,7 @@ use waddle_extensions::{
     ProviderFieldText, ProviderFieldValue, ProviderPayload, ProviderWebhook,
 };
 use xmpp_parsers::jid::Jid;
-use xmpp_parsers::message::{Body, Message, MessageType};
+use xmpp_parsers::message::{Id, Lang, Message, MessageType};
 
 #[global_allocator]
 static ALLOC: dhat::Alloc = dhat::Alloc;
@@ -181,8 +181,8 @@ fn build_message(idx: usize) -> Message {
     let mut msg = Message::new(Some(to));
     msg.from = Some(from);
     msg.type_ = MessageType::Groupchat;
-    msg.bodies.insert(String::new(), Body(body));
-    msg.id = Some(format!("origin-{idx}"));
+    msg.bodies.insert(Lang(String::new()), body);
+    msg.id = Some(Id(format!("origin-{idx}")));
     msg
 }
 

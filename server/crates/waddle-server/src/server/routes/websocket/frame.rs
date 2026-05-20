@@ -142,8 +142,9 @@ pub(super) async fn handle_xmpp_frame(
 
             match *stanza {
                 Stanza::Iq(iq) => {
-                    let is_bind = match &iq.payload {
-                        xmpp_parsers::iq::IqType::Set(e) | xmpp_parsers::iq::IqType::Get(e) => {
+                    let is_bind = match &*iq {
+                        xmpp_parsers::iq::Iq::Set { payload: e, .. }
+                        | xmpp_parsers::iq::Iq::Get { payload: e, .. } => {
                             e.ns() == waddle_xmpp::ns::BIND
                         }
                         _ => false,
@@ -157,7 +158,7 @@ pub(super) async fn handle_xmpp_frame(
                         state_machine: state_machine.as_mut(),
                     };
                     handlers::iq::handle_iq_with_conn_state(
-                        iq,
+                        *iq,
                         domain,
                         &muc_domain,
                         state,

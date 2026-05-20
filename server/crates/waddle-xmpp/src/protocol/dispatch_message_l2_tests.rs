@@ -29,7 +29,7 @@ use jid::{BareJid, FullJid, Jid};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use waddle_xmpp_core::xep0359::extract_stanza_id_by;
-use xmpp_parsers::message::{Body, Message, MessageType};
+use xmpp_parsers::message::{Message, MessageType};
 
 // ---------------------------------------------------------------------
 // Probe handlers used by the L2 invariants.
@@ -104,7 +104,8 @@ fn chat_msg(from: &str, to: &str) -> Message {
     let mut m = Message::new(Some(to.parse().expect("jid")));
     m.from = Some(from.parse().expect("jid"));
     m.type_ = MessageType::Chat;
-    m.bodies.insert(String::new(), Body("hi".to_string()));
+    m.bodies
+        .insert(xmpp_parsers::message::Lang::new(), "hi".to_string());
     m
 }
 
