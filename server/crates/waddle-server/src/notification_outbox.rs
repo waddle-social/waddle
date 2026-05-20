@@ -3979,6 +3979,20 @@ mod tests {
     use super::*;
     use crate::db::Database;
 
+    /// Process-global mutex used to serialize tests that mutate
+    /// environment variables. Mirrors the `env_lock` pattern in
+    /// `crate::server::tests`. `std::env::set_var` is process-global
+    /// and `cargo test` runs tests on multiple threads by default, so
+    /// any test that reads or writes an env var MUST hold this guard
+    /// to avoid races with parallel tests.
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        static ENV_MUTEX: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        ENV_MUTEX
+            .get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     fn bare(raw: &str) -> BareJid {
         raw.parse().expect("bare jid")
     }
@@ -10272,37 +10286,39 @@ mod tests {
     /// [`MIN_ACTIVE_MENTION_TTL_SECONDS`,
     /// `MAX_ACTIVE_MENTION_TTL_SECONDS`] window and falls back to
     /// the default on unparseable input. Tests via direct env
-    /// manipulation; since `std::env::set_var` is process-global,
-    /// each assertion clears the var after running.
-    ///
-    /// This is `#[ignore]`'d by default and excluded from regular
-    /// `cargo test` runs because env mutation races with parallel
-    /// tests in the same process — run with `--include-ignored` to
-    /// exercise it locally.
+    /// manipulation; serialized against other env-mutating tests in
+    /// this module via [`env_lock`] (Codex review on PR #731).
     #[test]
-    #[ignore = "mutates a process-global env var; race-prone in parallel test runs"]
     fn active_mention_ttl_env_var_clamps_to_window() {
-        // SAFETY: tests are single-threaded by default in nextest;
-        // see the doc-comment above for why this is gated behind
-        // `#[ignore]`.
-        unsafe { std::env::remove_var("WADDLE_PUSH_ACTIVE_MENTION_TTL_SECONDS") };
+        // SAFETY: `env_lock` serializes against every other
+        // env-mutating test in this module; `std::env::set_var` is
+        // process-global but no other thread will read this var while
+        // the guard is held.
+        let _guard = env_lock();
+        // Save and restore the operator-set value (if any) so the
+        // test is a no-op for the parent environment.
+        let previous = std::env::var(WADDLE_PUSH_ACTIVE_MENTION_TTL_ENV).ok();
+        unsafe { std::env::remove_var(WADDLE_PUSH_ACTIVE_MENTION_TTL_ENV) };
         assert_eq!(
             active_mention_ttl_ms_from_env(),
             (DEFAULT_ACTIVE_MENTION_TTL_SECONDS as i64) * 1_000,
         );
 
-        unsafe { std::env::set_var("WADDLE_PUSH_ACTIVE_MENTION_TTL_SECONDS", "0") };
+        unsafe { std::env::set_var(WADDLE_PUSH_ACTIVE_MENTION_TTL_ENV, "0") };
         assert_eq!(
             active_mention_ttl_ms_from_env(),
             (MIN_ACTIVE_MENTION_TTL_SECONDS as i64) * 1_000,
         );
 
-        unsafe { std::env::set_var("WADDLE_PUSH_ACTIVE_MENTION_TTL_SECONDS", "999999999") };
+        unsafe { std::env::set_var(WADDLE_PUSH_ACTIVE_MENTION_TTL_ENV, "999999999") };
         assert_eq!(
             active_mention_ttl_ms_from_env(),
             (MAX_ACTIVE_MENTION_TTL_SECONDS as i64) * 1_000,
         );
 
-        unsafe { std::env::remove_var("WADDLE_PUSH_ACTIVE_MENTION_TTL_SECONDS") };
+        match previous {
+            Some(value) => unsafe { std::env::set_var(WADDLE_PUSH_ACTIVE_MENTION_TTL_ENV, value) },
+            None => unsafe { std::env::remove_var(WADDLE_PUSH_ACTIVE_MENTION_TTL_ENV) },
+        }
     }
 }

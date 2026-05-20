@@ -347,7 +347,15 @@ async fn insert_groupchat_notification_candidate(
         room_policy: &room_policy,
         dnd_reader: &dnd_reader,
         activity_reader: &activity_reader,
-        active_mention_ttl_ms: crate::notification_outbox::active_mention_ttl_ms_from_env(),
+        // T0 emission deliberately skips the XEP-0513 `<active/>`
+        // filter (current activity is a T1 read), so the TTL is never
+        // consulted here. Avoid the per-call env-var read by passing
+        // the default-in-ms as a typed placeholder; T1 (which DOES
+        // consult the TTL) reads the env-driven value at the drain
+        // site (Copilot review on PR #731).
+        active_mention_ttl_ms: (crate::notification_outbox::DEFAULT_ACTIVE_MENTION_TTL_SECONDS
+            as i64)
+            * 1_000,
     };
     let mut eval_caches = crate::notification_outbox::PushEvalCaches {
         room_policy: &mut room_policy_cache,
