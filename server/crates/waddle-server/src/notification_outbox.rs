@@ -1969,6 +1969,7 @@ impl NotificationOutboxStore {
             // for the duration of this drain pass so a 100-member
             // groupchat does not produce 100 actor round-trips.
             let outcome = match evaluate_xep0492_at_dispatch(
+                PushEvalStage::T1Drain,
                 settings_projection,
                 room_policy,
                 dnd_reader,
@@ -2930,7 +2931,40 @@ pub(crate) enum UnknownRoomPolicySource {
 ///   [`T1PushDispatchOutcome::DeferUnknownRoomPolicy`] — slice 1 has
 ///   no durable T1 projection of MUC config yet, so an unknown
 ///   policy must defer rather than default-to-public.
+/// Which leg of the push pipeline is invoking the evaluator.
+///
+/// The single typed function runs at two moments per #506 Q3 — T0
+/// emission gate (compliance: no row for XEP-0492 suppressed) and T1
+/// drain (race-window guard + durable audit). The two legs DO NOT
+/// share the full suppressor set: message-frozen suppressors (XEP-0513
+/// `<noping/>`, XEP-0334 `<no-store/>` / `<no-permanent-store/>`) and
+/// Waddle DnD are deliberately skipped at T0 so the candidate row
+/// persists with its hint bits and the typed `suppressed_reason`
+/// audit fires at T1 — without this split, hinted candidates would
+/// be silently filtered at T0 with no audit trail, contradicting the
+/// [`NotificationMessageHints`] contract.
+///
+/// T0 still applies recipient-state suppressors that compliance
+/// requires to leave no row at all (XEP-0492 `<never/>`/`<on-mention/>`
+/// miss). Those persist their suppression intent via metric counters
+/// at the T0 emission site; the row itself is the audit surface for
+/// everything else.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PushEvalStage {
+    /// Called synchronously from `enqueue_xep0357_notification_candidate_*`
+    /// before `insert_candidate`. A `Suppressed` outcome here means
+    /// the row will NOT be persisted — reserve this stage for
+    /// compliance-required suppressors only.
+    T0Emit,
+    /// Called from `drain_pending_candidates_into_outbox` against an
+    /// already-persisted candidate. `Suppressed` outcomes here are
+    /// recorded as `suppressed_reason` on the row and counted via
+    /// `increment_push_suppressed` — full audit + observability.
+    T1Drain,
+}
+
 pub(crate) async fn evaluate_xep0492_at_dispatch(
+    stage: PushEvalStage,
     settings_projection: &crate::notification_settings_projection::NotificationSettingsProjectionStore,
     room_policy: &dyn RoomPolicyStore,
     dnd_reader: &dyn DndReader,
@@ -2938,25 +2972,30 @@ pub(crate) async fn evaluate_xep0492_at_dispatch(
     room_policy_cache: &mut std::collections::BTreeMap<BareJid, RoomPolicyCacheEntry>,
     dnd_cache: &mut std::collections::BTreeMap<BareJid, DndState>,
 ) -> Result<T1PushDispatchOutcome, NotificationOutboxError> {
-    // Message-frozen suppressors take precedence over recipient-state
-    // reads: a sender's `<noping/>` mention or XEP-0334 storage hint
-    // is a final decision by the sender and cannot be overridden by
-    // recipient settings. Evaluate these before issuing storage reads
-    // so the typed outcome captures the most-specific signal first.
-    if candidate.noping() {
-        return Ok(T1PushDispatchOutcome::Suppressed {
-            reason: SuppressedReason::Xep0513Noping,
-        });
-    }
-    if candidate.no_store() {
-        return Ok(T1PushDispatchOutcome::Suppressed {
-            reason: SuppressedReason::Xep0334NoStore,
-        });
-    }
-    if candidate.no_permanent_store() {
-        return Ok(T1PushDispatchOutcome::Suppressed {
-            reason: SuppressedReason::Xep0334NoPermanentStore,
-        });
+    // Message-frozen suppressors (`<noping/>`, XEP-0334 storage hints)
+    // run ONLY at T1Drain so the candidate row is persisted with its
+    // hint bits and the typed `suppressed_reason` audit can fire. At
+    // T0Emit the row doesn't exist yet — suppressing here would leave
+    // no audit trail, defeating the whole purpose of snapshotting the
+    // hint bits onto `NotificationCandidate` in the first place. The
+    // sender-precedence ordering (hints before recipient-state reads)
+    // is preserved within T1Drain.
+    if stage == PushEvalStage::T1Drain {
+        if candidate.noping() {
+            return Ok(T1PushDispatchOutcome::Suppressed {
+                reason: SuppressedReason::Xep0513Noping,
+            });
+        }
+        if candidate.no_store() {
+            return Ok(T1PushDispatchOutcome::Suppressed {
+                reason: SuppressedReason::Xep0334NoStore,
+            });
+        }
+        if candidate.no_permanent_store() {
+            return Ok(T1PushDispatchOutcome::Suppressed {
+                reason: SuppressedReason::Xep0334NoPermanentStore,
+            });
+        }
     }
 
     let (conversation_kind, is_mention) = match candidate.class() {
@@ -3017,12 +3056,19 @@ pub(crate) async fn evaluate_xep0492_at_dispatch(
     // XEP-0492. The per-batch cache keys on (user → state) so a
     // recipient with many candidates in the same drain pass only
     // reads DnD once.
-    let dnd_state =
-        resolve_cached_dnd_state(dnd_reader, candidate.recipient_bare_jid(), dnd_cache).await?;
-    if matches!(dnd_state, DndState::Active) {
-        return Ok(T1PushDispatchOutcome::Suppressed {
-            reason: SuppressedReason::WaddleDnd,
-        });
+    //
+    // Skipped at T0Emit so a hinted candidate from a DnD'd recipient
+    // still persists (T1 then records DnD or hint reason as
+    // appropriate). DnD also moves with the recipient between T0
+    // and T1; the T1 re-evaluation is the authoritative read.
+    if stage == PushEvalStage::T1Drain {
+        let dnd_state =
+            resolve_cached_dnd_state(dnd_reader, candidate.recipient_bare_jid(), dnd_cache).await?;
+        if matches!(dnd_state, DndState::Active) {
+            return Ok(T1PushDispatchOutcome::Suppressed {
+                reason: SuppressedReason::WaddleDnd,
+            });
+        }
     }
     let level = settings_projection
         .effective_setting(
@@ -7801,6 +7847,111 @@ mod tests {
         assert_eq!(reason.as_deref(), Some("xep0191_blocked"));
         let rendered = waddle_xmpp::prometheus::render_metrics();
         assert!(rendered.contains("waddle_push_suppressed_total{reason=\"xep0191_blocked\"} 1"),);
+    }
+
+    /// Stage-split contract: the same hinted candidate MUST yield
+    /// `Deliver` when evaluated at [`PushEvalStage::T0Emit`] (so the
+    /// row gets persisted with its hint bits) and `Suppressed` at
+    /// [`PushEvalStage::T1Drain`] (where the typed `suppressed_reason`
+    /// audit fires). Without this split, hinted candidates would
+    /// disappear at T0 with no audit trail.
+    #[tokio::test]
+    async fn evaluator_stage_split_defers_hint_suppressors_to_t1() {
+        let projection = settings_projection().await;
+        let room_policy = StubRoomPolicy::new();
+        let dnd_reader = NoopDndReader;
+        let recipient = bare("alice@example.com");
+        let sender_jid: Jid = "bob@example.com/web".parse().expect("full sender");
+        let noping_candidate = NotificationCandidate::direct_message_with_hints(
+            recipient.clone(),
+            sender_jid.clone(),
+            StanzaId::new("stage-split-noping", Jid::from(recipient.clone())),
+            false,
+            NotificationMessageHints::none().with_noping(true),
+        )
+        .expect("candidate");
+        let mut room_policy_cache =
+            std::collections::BTreeMap::<BareJid, RoomPolicyCacheEntry>::new();
+        let mut dnd_cache = std::collections::BTreeMap::<BareJid, DndState>::new();
+
+        // T0Emit MUST NOT suppress on noping — the row must persist
+        // so T1 records the audit.
+        let t0 = evaluate_xep0492_at_dispatch(
+            PushEvalStage::T0Emit,
+            &projection,
+            &room_policy,
+            &dnd_reader,
+            &noping_candidate,
+            &mut room_policy_cache,
+            &mut dnd_cache,
+        )
+        .await
+        .expect("t0 eval");
+        assert!(
+            matches!(t0, T1PushDispatchOutcome::Deliver),
+            "T0Emit must NOT suppress on message-frozen `<noping/>` so the candidate persists; got {t0:?}"
+        );
+
+        // T1Drain MUST suppress with the typed Xep0513Noping reason.
+        let t1 = evaluate_xep0492_at_dispatch(
+            PushEvalStage::T1Drain,
+            &projection,
+            &room_policy,
+            &dnd_reader,
+            &noping_candidate,
+            &mut room_policy_cache,
+            &mut dnd_cache,
+        )
+        .await
+        .expect("t1 eval");
+        assert!(
+            matches!(
+                t1,
+                T1PushDispatchOutcome::Suppressed {
+                    reason: SuppressedReason::Xep0513Noping
+                }
+            ),
+            "T1Drain must suppress noping with the typed Xep0513Noping reason; got {t1:?}"
+        );
+
+        // Sanity: the same split applies to XEP-0334 hint bits.
+        let no_store_candidate = NotificationCandidate::direct_message_with_hints(
+            recipient.clone(),
+            sender_jid,
+            StanzaId::new("stage-split-no-store", Jid::from(recipient.clone())),
+            false,
+            NotificationMessageHints::none().with_xep0334(true, false),
+        )
+        .expect("candidate");
+        let t0_no_store = evaluate_xep0492_at_dispatch(
+            PushEvalStage::T0Emit,
+            &projection,
+            &room_policy,
+            &dnd_reader,
+            &no_store_candidate,
+            &mut room_policy_cache,
+            &mut dnd_cache,
+        )
+        .await
+        .expect("t0 eval");
+        assert!(matches!(t0_no_store, T1PushDispatchOutcome::Deliver));
+        let t1_no_store = evaluate_xep0492_at_dispatch(
+            PushEvalStage::T1Drain,
+            &projection,
+            &room_policy,
+            &dnd_reader,
+            &no_store_candidate,
+            &mut room_policy_cache,
+            &mut dnd_cache,
+        )
+        .await
+        .expect("t1 eval");
+        assert!(matches!(
+            t1_no_store,
+            T1PushDispatchOutcome::Suppressed {
+                reason: SuppressedReason::Xep0334NoStore
+            }
+        ));
     }
 
     /// XEP-0513 `<noping/>` carried on the candidate row MUST suppress

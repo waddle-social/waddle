@@ -314,6 +314,7 @@ async fn insert_groupchat_notification_candidate(
     let mut dnd_cache =
         std::collections::BTreeMap::<BareJid, crate::notification_outbox::DndState>::new();
     let outcome = match crate::notification_outbox::evaluate_xep0492_at_dispatch(
+        crate::notification_outbox::PushEvalStage::T0Emit,
         state
             .deps
             .protocol
