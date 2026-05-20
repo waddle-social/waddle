@@ -19,7 +19,7 @@ import PinnedPanel from "@/components/chat/PinnedPanel.vue";
 import UserSettingsPage from "@/components/chat/UserSettingsPage.vue";
 import WaddlesSidebar from "@/components/chat/WaddlesSidebar.vue";
 import AdminView from "@/components/admin/AdminView.vue";
-import { matchLocation, type AdminPanel } from "@/router";
+import { matchLocation, navigate, type AdminPanel } from "@/router";
 import { buildHomeDashboardProps } from "@/home/dashboard-props";
 import type { ChatAppController } from "@/shell/chat-app-controller";
 import type { DiscoveredExtensionRoute } from "@/lib/xmpp/extension-commands";
@@ -193,12 +193,10 @@ function setPinnedPanelOpen(isOpen: boolean) {
 }
 
 function onSelectCommunitySurface(surface: "feed" | "stories" | "events") {
-  // Selecting a community pseudo-channel pushes the user into the
-  // chat page (out of dashboard / settings) and clears any active
-  // real-channel selection so the content area renders the
-  // surface's dedicated pane instead of a channel timeline.
-  ui.activePage.value = "chat";
-  ui.activeCommunitySurface.value = surface;
+  // Community surfaces are first-class routes (`/feed`, `/stories`,
+  // `/events`) — navigate and let the controller's popstate handler
+  // mirror the route into ui state.
+  navigate({ id: surface });
 }
 
 function onSelectChannelFromSidebar(id: string) {

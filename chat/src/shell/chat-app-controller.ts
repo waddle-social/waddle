@@ -1122,6 +1122,14 @@ export function useChatAppController(giphyApiKey: string) {
 
   function updateUrl() {
     if (isApplyingRoute.value) return;
+    // Community-surface routes win over the page-switch ladder: a
+    // watcher firing while activeCommunitySurface is set must not
+    // bounce the URL back to channel/home before the surface clears.
+    const surface = ui.activeCommunitySurface.value;
+    if (surface === "feed" || surface === "stories" || surface === "events") {
+      navigate({ id: surface });
+      return;
+    }
     if (ui.activePage.value === "settings") {
       navigate({ id: "settings", origin: "app" });
       return;
@@ -1359,16 +1367,40 @@ export function useChatAppController(giphyApiKey: string) {
       case "home": return "dashboard";
       case "channel":
       case "channelExtension":
-      case "dm": return "chat";
+      case "dm":
+      case "feed":
+      case "stories":
+      case "events": return "chat";
       case "settings": return "settings";
       case "admin": return "admin";
       case "threads": return "threads";
     }
   }
 
+  function communitySurfaceFromMatch(match: RouteMatch): "feed" | "stories" | "events" | null {
+    return match.id === "feed" || match.id === "stories" || match.id === "events"
+      ? match.id
+      : null;
+  }
+
   function onPopState() {
     const match = matchLocation(window.location.pathname, window.location.search);
     ui.activePage.value = activePageFromMatch(match);
+    // Community-surface routes drive the same in-page panel that the
+    // sidebar toggle used to mutate directly. Routes that aren't a
+    // community surface must clear it, otherwise a back-navigation from
+    // /feed → /r/foo would leave the feed pane covering the channel.
+    ui.activeCommunitySurface.value = communitySurfaceFromMatch(match);
+    if (match.id === "feed" || match.id === "stories" || match.id === "events") {
+      ui.sidebarMode.value = "channels";
+      dmConversations.closeDm();
+      waddles.activeChannelId.value = null;
+      activeExtensionRouteKey.value = null;
+      activeRightPanel.value = null;
+      activeThreadTargetMessageId.value = null;
+      activeThreadStack.value = [];
+      return;
+    }
     if (match.id === "admin") {
       // Admin view owns the entire workspace; clear DM/thread state so
       // a popstate back to /admin doesn't leave a stale right panel
@@ -1405,10 +1437,21 @@ export function useChatAppController(giphyApiKey: string) {
 
   async function applyRouteTarget(match: RouteMatch, requestId: number) {
     ui.activePage.value = activePageFromMatch(match);
+    ui.activeCommunitySurface.value = communitySurfaceFromMatch(match);
     // #414: sync the pin panel toggle with `?pinned=1`. Only channel
     // routes (incl. extension panels) carry it; DM/home/settings always clear.
     ui.showPinnedPanel.value =
       match.id === "channel" || match.id === "channelExtension" ? match.search.pinned : false;
+    if (match.id === "feed" || match.id === "stories" || match.id === "events") {
+      ui.sidebarMode.value = "channels";
+      dmConversations.closeDm();
+      waddles.activeChannelId.value = null;
+      activeExtensionRouteKey.value = null;
+      activeRightPanel.value = null;
+      activeThreadTargetMessageId.value = null;
+      activeThreadStack.value = [];
+      return;
+    }
     if (match.id === "admin") {
       activeThreadTargetMessageId.value = null;
       activeThreadStack.value = [];

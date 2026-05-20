@@ -20,6 +20,12 @@ describe("matchLocation", () => {
     expect(matchLocation("/threads", "")).toEqual({ id: "threads" });
   });
 
+  test("parses /feed, /stories, /events as community-surface routes", () => {
+    expect(matchLocation("/feed", "")).toEqual({ id: "feed" });
+    expect(matchLocation("/stories", "")).toEqual({ id: "stories" });
+    expect(matchLocation("/events", "")).toEqual({ id: "events" });
+  });
+
   test("parses channel with no search", () => {
     const m = matchLocation("/r/room-id-1", "");
     expect(m).toEqual({
@@ -113,6 +119,12 @@ describe("buildHref", () => {
 
   test("threads", () => {
     expect(buildHref({ id: "threads" })).toBe("/threads");
+  });
+
+  test("feed / stories / events", () => {
+    expect(buildHref({ id: "feed" })).toBe("/feed");
+    expect(buildHref({ id: "stories" })).toBe("/stories");
+    expect(buildHref({ id: "events" })).toBe("/events");
   });
 
   test("settings (with and without origin)", () => {

@@ -2,8 +2,11 @@ import { adminRoute } from "./routes/admin";
 import { channelExtensionRoute } from "./routes/channel-extension";
 import { channelRoute } from "./routes/channel";
 import { dmRoute } from "./routes/dm";
+import { eventsRoute } from "./routes/events";
+import { feedRoute } from "./routes/feed";
 import { homeRoute } from "./routes/home";
 import { settingsRoute } from "./routes/settings";
+import { storiesRoute } from "./routes/stories";
 import { threadsRoute } from "./routes/threads";
 import type { RouteMatch } from "./registry";
 
@@ -15,6 +18,9 @@ const ORDER = [
   channelExtensionRoute,
   channelRoute,
   dmRoute,
+  feedRoute,
+  storiesRoute,
+  eventsRoute,
   threadsRoute,
   settingsRoute,
   adminRoute,

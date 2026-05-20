@@ -1,0 +1,11 @@
+---
+import AppLayout from "@/layouts/AppLayout.astro";
+import FeedPage from "@/components/pages/FeedPage.vue";
+import { routes } from "@/router";
+
+const initialMatch = routes.feed.match();
+---
+
+<AppLayout>
+  <FeedPage client:only="vue" initialMatch={initialMatch} />
+</AppLayout>

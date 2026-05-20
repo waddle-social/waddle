@@ -2,8 +2,11 @@ import { adminRoute } from "./routes/admin";
 import { channelExtensionRoute } from "./routes/channel-extension";
 import { channelRoute } from "./routes/channel";
 import { dmRoute } from "./routes/dm";
+import { eventsRoute } from "./routes/events";
+import { feedRoute } from "./routes/feed";
 import { homeRoute } from "./routes/home";
 import { settingsRoute } from "./routes/settings";
+import { storiesRoute } from "./routes/stories";
 import { threadsRoute } from "./routes/threads";
 import type { RouteMatch } from "./registry";
 
@@ -17,6 +20,12 @@ export function buildHref(match: RouteMatch): string {
       return channelExtensionRoute.href({ params: match.params, search: match.search });
     case "dm":
       return dmRoute.href({ params: match.params, search: match.search });
+    case "feed":
+      return feedRoute.href();
+    case "stories":
+      return storiesRoute.href();
+    case "events":
+      return eventsRoute.href();
     case "threads":
       return threadsRoute.href();
     case "settings":
