@@ -3,7 +3,7 @@ use jid::Jid;
 use waddle_xmpp_client::{
     messaging::{
         self, parse_call_event, CallEventKind, CallMedia, InboundCallEvent, JingleReason,
-        LiveKitJoin, MdsDisplayedEntry, MucCallPresence, MucCallPresenceState, SendMessageOptions,
+        LiveKitJoin, MdsDisplayedEntry, MujiPresence, SendMessageOptions,
     },
     request::StanzaId,
     xep::{
@@ -17,9 +17,8 @@ use crate::{
     WaddleArchivedMessage, WaddleCallEvent, WaddleCallEventKind, WaddleCallMedia, WaddleChannel,
     WaddleEncryptedFile, WaddleEncryptedFileHash, WaddleEventListener, WaddleJingleReason,
     WaddleLiveKitJoin, WaddleMamPage, WaddleMdsDisplayedEntry, WaddleMessage, WaddleMucAffiliation,
-    WaddleMucCallPresence, WaddleMucCallPresenceState, WaddleMucRole, WaddlePresence,
-    WaddlePresenceHat, WaddleSendOptions, WaddleSharedFile, WaddleSpace, WaddleTopology,
-    WaddleUploadHeader, WaddleUploadSlot,
+    WaddleMucRole, WaddleMujiPresence, WaddlePresence, WaddlePresenceHat, WaddleSendOptions,
+    WaddleSharedFile, WaddleSpace, WaddleTopology, WaddleUploadHeader, WaddleUploadSlot,
 };
 
 // ── Event dispatch ───────────────────────────────────────────────────────────
@@ -43,7 +42,7 @@ pub(super) fn dispatch_event(event: ClientEvent, listener: &dyn WaddleEventListe
                 hats: pres.hats.into_iter().map(presence_hat_to_ffi).collect(),
                 muc_affiliation: pres.muc_affiliation.map(muc_affiliation_to_ffi),
                 muc_role: pres.muc_role.map(muc_role_to_ffi),
-                muc_call: pres.muc_call.map(muc_call_presence_to_ffi),
+                muji: pres.muji.map(muji_presence_to_ffi),
             });
         }
         ClientEvent::MamResult(archived) => {
@@ -236,17 +235,10 @@ fn muc_role_to_ffi(role: waddle_xmpp_client::messaging::MucRole) -> WaddleMucRol
     }
 }
 
-fn muc_call_presence_state_to_ffi(state: MucCallPresenceState) -> WaddleMucCallPresenceState {
-    match state {
-        MucCallPresenceState::Active => WaddleMucCallPresenceState::Active,
-        MucCallPresenceState::Inactive => WaddleMucCallPresenceState::Inactive,
-    }
-}
-
-fn muc_call_presence_to_ffi(call: MucCallPresence) -> WaddleMucCallPresence {
-    WaddleMucCallPresence {
-        state: muc_call_presence_state_to_ffi(call.state),
-        call_id: call.call_id,
+fn muji_presence_to_ffi(muji: MujiPresence) -> WaddleMujiPresence {
+    WaddleMujiPresence {
+        preparing: muji.preparing,
+        active: muji.active,
     }
 }
 
@@ -787,21 +779,19 @@ mod tests {
     }
 
     #[test]
-    fn muc_call_presence_state_maps_both_variants() {
-        let active = muc_call_presence_to_ffi(MucCallPresence {
-            state: MucCallPresenceState::Active,
-            call_id: "room@conf.waddle.test".to_string(),
+    fn muji_presence_maps_active_and_preparing_flags() {
+        let active = muji_presence_to_ffi(MujiPresence {
+            preparing: false,
+            active: true,
         });
-        assert!(matches!(active.state, WaddleMucCallPresenceState::Active));
-        assert_eq!(active.call_id, "room@conf.waddle.test");
+        assert!(active.active);
+        assert!(!active.preparing);
 
-        let inactive = muc_call_presence_to_ffi(MucCallPresence {
-            state: MucCallPresenceState::Inactive,
-            call_id: "room@conf.waddle.test".to_string(),
+        let preparing = muji_presence_to_ffi(MujiPresence {
+            preparing: true,
+            active: false,
         });
-        assert!(matches!(
-            inactive.state,
-            WaddleMucCallPresenceState::Inactive
-        ));
+        assert!(preparing.preparing);
+        assert!(!preparing.active);
     }
 }

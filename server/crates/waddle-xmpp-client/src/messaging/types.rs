@@ -516,44 +516,30 @@ pub struct InboundPresence {
     pub muc_role: Option<MucRole>,
     pub muc_jid: Option<String>,
     pub vcard_avatar: Option<String>,
-    /// XEP-style Waddle extension — `<call xmlns='urn:waddle:muc-call:0' state='active|inactive' call-id='ROOM_JID'/>`
-    /// — carried on a MUC occupant's presence to advertise that
-    /// they have joined / left the room's group call. Drives the
-    /// chat-side "N in call" indicator.
-    pub muc_call: Option<MucCallPresence>,
+    /// XEP-0272 (Muji) presence advertisement —
+    /// `<muji xmlns='urn:xmpp:jingle:muji:0'>…</muji>` — carried on
+    /// a MUC occupant's presence to advertise that they have joined
+    /// or left the room's group call. `None` when the presence
+    /// carries no Muji element, which per XEP-0272 §Leaving means
+    /// the occupant is NOT in the call. Drives the chat-side "N in
+    /// call" indicator.
+    pub muji: Option<MujiPresence>,
 }
 
-/// Parsed `<call xmlns='urn:waddle:muc-call:0'/>` extension on a
-/// MUC presence. Wire-typed because chat-side consumers want the
-/// strong "active vs inactive" distinction without re-parsing
-/// strings.
+/// Parsed `<muji xmlns='urn:xmpp:jingle:muji:0'>` extension on a MUC
+/// presence. Wire-typed because chat-side consumers want the
+/// preparing-vs-active distinction without re-parsing the element
+/// shape.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MucCallPresence {
-    pub state: MucCallPresenceState,
-    pub call_id: String,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MucCallPresenceState {
-    Active,
-    Inactive,
-}
-
-impl MucCallPresenceState {
-    pub fn as_attr(self) -> &'static str {
-        match self {
-            Self::Active => "active",
-            Self::Inactive => "inactive",
-        }
-    }
-
-    pub fn parse(value: &str) -> Option<Self> {
-        match value {
-            "active" => Some(Self::Active),
-            "inactive" => Some(Self::Inactive),
-            _ => None,
-        }
-    }
+pub struct MujiPresence {
+    /// True when the presence carried a `<preparing/>` child (XEP-0272
+    /// §Joining two-phase flow). Indicator UIs typically don't pulse
+    /// until contents are advertised — preparing alone is "about to
+    /// join" rather than "in the call."
+    pub preparing: bool,
+    /// True when the presence advertised at least one `<content/>`
+    /// child — the occupant is actively participating in the call.
+    pub active: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]

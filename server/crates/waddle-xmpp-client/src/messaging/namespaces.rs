@@ -29,24 +29,60 @@ pub(crate) const NS_MUC_USER: &str = "http://jabber.org/protocol/muc#user";
 pub(crate) const NS_STICKERS: &str = "urn:xmpp:stickers:0";
 pub(crate) const NS_VCARD_UPDATE: &str = "vcard-temp:x:update";
 pub const NS_WADDLE_PIN_V0: &str = "urn:waddle:pin:0";
-/// `urn:waddle:muc-call:0` — Waddle MUC presence extension that
-/// signals an occupant has joined a group call in the room. Mirrors
-/// `waddle_xmpp::xep::xep_waddle_muc_call::NS_WADDLE_MUC_CALL` —
-/// the client crate cannot depend on the server crate, so the
-/// constant is duplicated and kept in sync via a test.
-pub const NS_WADDLE_MUC_CALL: &str = "urn:waddle:muc-call:0";
 
-/// Build a `<call xmlns='urn:waddle:muc-call:0' state='active|inactive'
-/// call-id='…'/>` element from typed inputs. Keeps the wire shape
-/// locked to a single definition site even from the wasm crate
-/// (which cannot depend on waddle-xmpp where the canonical
-/// `MucCallExtension` lives). CLAUDE.md XML hard rule: callers never
-/// hand-roll the element via raw `Element::builder` strings.
-pub fn build_muc_call_extension_element(active: bool, call_id: &str) -> minidom::Element {
-    let state = if active { "active" } else { "inactive" };
-    minidom::Element::builder("call", NS_WADDLE_MUC_CALL)
-        .attr(minidom::rxml::xml_ncname!("state").to_owned(), state)
-        .attr(minidom::rxml::xml_ncname!("call-id").to_owned(), call_id)
+/// `urn:xmpp:jingle:muji:0` — XEP-0272 Multiparty Jingle (Muji)
+/// namespace. Used in MUC presence to advertise call participation
+/// (`<muji><preparing/></muji>` while joining; `<muji><content/></muji>`
+/// once contents are declared; absent when leaving).
+///
+/// Mirrors `waddle_xmpp::xep::xep0272::NS_MUJI` — the client crate
+/// cannot depend on the server crate, so the constant is duplicated
+/// and kept in sync via a test.
+pub const NS_MUJI: &str = "urn:xmpp:jingle:muji:0";
+
+/// `urn:xmpp:jingle:apps:rtp:1` — XEP-0167 RTP description namespace,
+/// used inside Muji content declarations.
+pub const NS_JINGLE_RTP: &str = "urn:xmpp:jingle:apps:rtp:1";
+
+/// Build a `<muji xmlns='urn:xmpp:jingle:muji:0'>` element from typed
+/// inputs. When `audio` or `video` is true, a corresponding
+/// `<content creator='initiator' name='audio|video'>
+///   <description xmlns='urn:xmpp:jingle:apps:rtp:1' media='…'/>
+/// </content>` child is emitted (XEP-0272 §Joining content shape;
+/// XEP-0167 §3.2 minimal `<description>`).
+///
+/// When `preparing` is true, a `<preparing/>` sentinel child is
+/// emitted (XEP-0272 §Joining two-phase flow). An "empty"
+/// `<muji/>` (no preparing, no contents) is XEP-0272 §Leaving — the
+/// caller should typically omit the element entirely instead.
+///
+/// CLAUDE.md XML hard rule: callers never hand-roll the element via
+/// raw `Element::builder` strings.
+pub fn build_muji_element(preparing: bool, audio: bool, video: bool) -> minidom::Element {
+    let mut builder = minidom::Element::builder("muji", NS_MUJI);
+    if preparing {
+        builder = builder.append(minidom::Element::builder("preparing", NS_MUJI).build());
+    }
+    if audio {
+        builder = builder.append(build_muji_content("audio"));
+    }
+    if video {
+        builder = builder.append(build_muji_content("video"));
+    }
+    builder.build()
+}
+
+fn build_muji_content(media: &str) -> minidom::Element {
+    let description = minidom::Element::builder("description", NS_JINGLE_RTP)
+        .attr(minidom::rxml::xml_ncname!("media").to_owned(), media)
+        .build();
+    minidom::Element::builder("content", NS_MUJI)
+        .attr(
+            minidom::rxml::xml_ncname!("creator").to_owned(),
+            "initiator",
+        )
+        .attr(minidom::rxml::xml_ncname!("name").to_owned(), media)
+        .append(description)
         .build()
 }
 
@@ -55,29 +91,45 @@ mod tests {
     use super::*;
 
     #[test]
-    fn builds_active_extension_matching_xep_shape() {
-        let elem = build_muc_call_extension_element(true, "room@muc.example.com");
-        assert_eq!(elem.name(), "call");
-        assert_eq!(elem.ns(), NS_WADDLE_MUC_CALL);
-        assert_eq!(elem.attr("state"), Some("active"));
-        assert_eq!(elem.attr("call-id"), Some("room@muc.example.com"));
+    fn builds_preparing_muji() {
+        let elem = build_muji_element(true, false, false);
+        assert_eq!(elem.name(), "muji");
+        assert_eq!(elem.ns(), NS_MUJI);
+        assert!(
+            elem.children().any(|c| c.name() == "preparing"),
+            "preparing child must be present"
+        );
+        assert!(
+            !elem.children().any(|c| c.name() == "content"),
+            "no content children in preparing-only Muji"
+        );
     }
 
     #[test]
-    fn builds_inactive_extension_matching_xep_shape() {
-        let elem = build_muc_call_extension_element(false, "room@muc.example.com");
-        assert_eq!(elem.attr("state"), Some("inactive"));
+    fn builds_audio_video_muji_with_rtp_descriptions() {
+        let elem = build_muji_element(false, true, true);
+        let contents: Vec<_> = elem.children().filter(|c| c.name() == "content").collect();
+        assert_eq!(contents.len(), 2, "audio + video content children");
+        assert!(contents.iter().any(|c| c.attr("name") == Some("audio")));
+        assert!(contents.iter().any(|c| c.attr("name") == Some("video")));
+        // XEP-0167 minimal description (no payload-types — LiveKit
+        // dictates codecs).
+        for content in contents {
+            let desc = content
+                .children()
+                .find(|c| c.name() == "description")
+                .expect("description present");
+            assert_eq!(desc.ns(), NS_JINGLE_RTP);
+            assert!(matches!(desc.attr("media"), Some("audio") | Some("video")));
+        }
     }
 
-    /// The canonical `MucCallExtension::to_element()` in
-    /// `waddle_xmpp::xep::xep_waddle_muc_call` is the source of
-    /// truth for this wire shape. The client crate cannot depend on
-    /// the server crate, so we pin the duplicate constant + builder
-    /// here via byte-for-byte comparison in the server crate's
-    /// integration test suite (see waddle-xmpp's xep_waddle_muc_call
-    /// tests for round-trip parsing of the produced element).
+    /// Pin the duplicate constants against the canonical XEP namespaces.
+    /// The server crate's `xep0272` module has a matching test against
+    /// `xmpp_parsers` and the XEP-0272 wire shape.
     #[test]
-    fn ns_constant_matches_canonical_xep_namespace() {
-        assert_eq!(NS_WADDLE_MUC_CALL, "urn:waddle:muc-call:0");
+    fn ns_constants_match_xep_namespaces() {
+        assert_eq!(NS_MUJI, "urn:xmpp:jingle:muji:0");
+        assert_eq!(NS_JINGLE_RTP, "urn:xmpp:jingle:apps:rtp:1");
     }
 }
