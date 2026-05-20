@@ -14,6 +14,9 @@ use waddle_xmpp::xep::{NS_DATA_FORMS, NS_PUBSUB_PUBLISH_OPTIONS};
 use waddle_xmpp_core::xep0359::StanzaId;
 
 use crate::db::{Database, DatabaseError, IntoParams, Row};
+use crate::notification_activity::{
+    NotificationActivity, NotificationActivityError, NotificationActivityReader,
+};
 
 pub const WADDLE_PUSH_CONTEXT_NS: &str = "urn:waddle:push:context:0";
 pub const XEP0357_SUMMARY_FORM_TYPE: &str = "urn:xmpp:push:summary";
@@ -760,6 +763,8 @@ pub enum NotificationOutboxError {
     NotificationSettings(
         #[from] crate::notification_settings_projection::NotificationSettingsProjectionError,
     ),
+    #[error("notification activity projection error: {0}")]
+    NotificationActivity(#[from] NotificationActivityError),
     #[error("invalid outbox status: {0}")]
     InvalidStatus(String),
     #[error("invalid recipient bare JID in notification outbox: {0}")]
@@ -898,15 +903,60 @@ impl DndReader for NoopDndReader {
 pub struct NotificationDrainDeps<'a> {
     pub room_policy: &'a dyn RoomPolicyStore,
     pub dnd_reader: &'a dyn DndReader,
+    pub activity_reader: &'a dyn NotificationActivityReader,
 }
 
 impl<'a> NotificationDrainDeps<'a> {
-    pub fn new(room_policy: &'a dyn RoomPolicyStore, dnd_reader: &'a dyn DndReader) -> Self {
+    pub fn new(
+        room_policy: &'a dyn RoomPolicyStore,
+        dnd_reader: &'a dyn DndReader,
+        activity_reader: &'a dyn NotificationActivityReader,
+    ) -> Self {
         Self {
             room_policy,
             dnd_reader,
+            activity_reader,
         }
     }
+}
+
+/// Default TTL window for the XEP-0513 `<active/>` push filter (5
+/// minutes). A recipient whose
+/// [`crate::notification_activity::NotificationActivity::last_active_at_ms`]
+/// is older than `now - ACTIVE_MENTION_TTL_MS` is treated as
+/// "currently not active" and the T1 evaluator suppresses
+/// [`NotificationClass::ActiveChannelMention`] candidates with
+/// [`SuppressedReason::Xep0513ActiveMiss`].
+pub const DEFAULT_ACTIVE_MENTION_TTL_SECONDS: u64 = 300;
+
+/// Lower bound for the operator-tunable TTL (1 second). A value of 0
+/// would suppress *every* `ActiveChannelMention` regardless of
+/// activity — almost certainly an operator misconfiguration — so we
+/// clamp to a minimum of one second.
+pub const MIN_ACTIVE_MENTION_TTL_SECONDS: u64 = 1;
+
+/// Upper bound for the operator-tunable TTL (24 hours). Anything
+/// beyond this is effectively "disable the filter"; deployments that
+/// want that should remove the `ActiveChannelMention` candidate at the
+/// emission boundary rather than turning the gate into a no-op.
+pub const MAX_ACTIVE_MENTION_TTL_SECONDS: u64 = 86_400;
+
+const WADDLE_PUSH_ACTIVE_MENTION_TTL_ENV: &str = "WADDLE_PUSH_ACTIVE_MENTION_TTL_SECONDS";
+
+/// Reads `WADDLE_PUSH_ACTIVE_MENTION_TTL_SECONDS` and clamps to the
+/// [`MIN_ACTIVE_MENTION_TTL_SECONDS`, `MAX_ACTIVE_MENTION_TTL_SECONDS`]
+/// window. Unparseable or unset values fall back to
+/// [`DEFAULT_ACTIVE_MENTION_TTL_SECONDS`].
+pub fn active_mention_ttl_ms_from_env() -> i64 {
+    let seconds = std::env::var(WADDLE_PUSH_ACTIVE_MENTION_TTL_ENV)
+        .ok()
+        .and_then(|raw| raw.parse::<u64>().ok())
+        .unwrap_or(DEFAULT_ACTIVE_MENTION_TTL_SECONDS)
+        .clamp(
+            MIN_ACTIVE_MENTION_TTL_SECONDS,
+            MAX_ACTIVE_MENTION_TTL_SECONDS,
+        );
+    i64::try_from(seconds.saturating_mul(1_000)).unwrap_or(i64::MAX)
 }
 
 fn require_full_sender_jid(sender_jid: &Jid) -> Result<(), NotificationOutboxError> {
@@ -1893,6 +1943,7 @@ impl NotificationOutboxStore {
         let NotificationDrainDeps {
             room_policy,
             dnd_reader,
+            activity_reader,
         } = deps;
         let candidates = self.pending_candidates(batch_size).await?;
         let mut target_cache =
@@ -1900,6 +1951,9 @@ impl NotificationOutboxStore {
         let mut room_policy_cache =
             std::collections::BTreeMap::<BareJid, RoomPolicyCacheEntry>::new();
         let mut dnd_cache = std::collections::BTreeMap::<BareJid, DndState>::new();
+        let mut activity_cache =
+            std::collections::BTreeMap::<(BareJid, BareJid), Option<NotificationActivity>>::new();
+        let active_mention_ttl_ms = active_mention_ttl_ms_from_env();
         let mut processed = 0usize;
         for candidate in candidates {
             // Self-DM filtering happens at the `NotificationCandidate`
@@ -1969,14 +2023,23 @@ impl NotificationOutboxStore {
             // publish-or-suppress. The room-policy lookup is cached
             // for the duration of this drain pass so a 100-member
             // groupchat does not produce 100 actor round-trips.
-            let outcome = match evaluate_push_gate_at_dispatch(
-                PushEvalStage::T1Drain,
+            let eval_deps = PushEvalDeps {
                 settings_projection,
                 room_policy,
                 dnd_reader,
+                activity_reader,
+                active_mention_ttl_ms,
+            };
+            let mut eval_caches = PushEvalCaches {
+                room_policy: &mut room_policy_cache,
+                dnd: &mut dnd_cache,
+                activity: &mut activity_cache,
+            };
+            let outcome = match evaluate_push_gate_at_dispatch(
+                PushEvalStage::T1Drain,
+                eval_deps,
                 &candidate,
-                &mut room_policy_cache,
-                &mut dnd_cache,
+                &mut eval_caches,
             )
             .await
             {
@@ -2974,15 +3037,56 @@ pub(crate) enum PushEvalStage {
     T1Drain,
 }
 
+/// Typed bundle of recipient-state readers consulted by
+/// [`evaluate_push_gate_at_dispatch`].
+///
+/// Both T0 emission sites and the T1 drain loop construct this once
+/// per dispatch call. Bundling keeps the evaluator argument count
+/// below the clippy `too_many_arguments` floor without resorting to
+/// `#[allow]` — every field stays a typed trait object so the caller
+/// supplies the production impl or a typed test double.
+#[derive(Copy, Clone)]
+pub(crate) struct PushEvalDeps<'a> {
+    pub settings_projection:
+        &'a crate::notification_settings_projection::NotificationSettingsProjectionStore,
+    pub room_policy: &'a dyn RoomPolicyStore,
+    pub dnd_reader: &'a dyn DndReader,
+    pub activity_reader: &'a dyn NotificationActivityReader,
+    /// Active-mention TTL window in milliseconds. The T1 evaluator
+    /// suppresses [`NotificationClass::ActiveChannelMention`]
+    /// candidates whose recipient's
+    /// [`crate::notification_activity::NotificationActivity::last_active_at_ms`]
+    /// is older than `now - active_mention_ttl_ms`.
+    pub active_mention_ttl_ms: i64,
+}
+
+/// Mutable per-drain-pass caches threaded through
+/// [`evaluate_push_gate_at_dispatch`]. Bundling keeps the argument
+/// count down and gives callers a single allocation site for the
+/// three caches.
+pub(crate) struct PushEvalCaches<'a> {
+    pub room_policy: &'a mut std::collections::BTreeMap<BareJid, RoomPolicyCacheEntry>,
+    pub dnd: &'a mut std::collections::BTreeMap<BareJid, DndState>,
+    pub activity:
+        &'a mut std::collections::BTreeMap<(BareJid, BareJid), Option<NotificationActivity>>,
+}
+
 pub(crate) async fn evaluate_push_gate_at_dispatch(
     stage: PushEvalStage,
-    settings_projection: &crate::notification_settings_projection::NotificationSettingsProjectionStore,
-    room_policy: &dyn RoomPolicyStore,
-    dnd_reader: &dyn DndReader,
+    deps: PushEvalDeps<'_>,
     candidate: &NotificationCandidate,
-    room_policy_cache: &mut std::collections::BTreeMap<BareJid, RoomPolicyCacheEntry>,
-    dnd_cache: &mut std::collections::BTreeMap<BareJid, DndState>,
+    caches: &mut PushEvalCaches<'_>,
 ) -> Result<T1PushDispatchOutcome, NotificationOutboxError> {
+    let PushEvalDeps {
+        settings_projection,
+        room_policy,
+        dnd_reader,
+        activity_reader,
+        active_mention_ttl_ms,
+    } = deps;
+    let room_policy_cache = &mut *caches.room_policy;
+    let dnd_cache = &mut *caches.dnd;
+    let activity_cache = &mut *caches.activity;
     // Message-frozen suppressors (`<noping/>`, XEP-0334 storage hints)
     // run ONLY at T1Drain so the candidate row is persisted with its
     // hint bits and the typed `suppressed_reason` audit can fire. At
@@ -3081,6 +3185,42 @@ pub(crate) async fn evaluate_push_gate_at_dispatch(
             });
         }
     }
+    // XEP-0513 `<active/>` filter — only `ActiveChannelMention`
+    // class candidates consult the per-(recipient, conversation)
+    // activity projection. Other classes (DM, personal/channel
+    // mention, notify-all) are unaffected: the `<active/>` filter is
+    // a class-specific gate.
+    //
+    // Skipped at T0Emit per the recipient-state / fresh-read T1
+    // contract: current activity is a T1 read, and consulting it at
+    // T0 would conflate "active now" with "active at message-frozen
+    // time". The candidate row persists through T0 and the T1 drain
+    // either delivers or records the typed `Xep0513ActiveMiss`
+    // suppression — same audit trail shape as the other T1-only
+    // suppressors.
+    if stage == PushEvalStage::T1Drain
+        && matches!(candidate.class(), NotificationClass::ActiveChannelMention)
+    {
+        let activity = resolve_cached_activity(
+            activity_reader,
+            candidate.recipient_bare_jid(),
+            candidate.conversation_jid(),
+            activity_cache,
+        )
+        .await?;
+        let now_ms = crate::time::now_ms();
+        let is_active = match activity {
+            None => false,
+            Some(activity) => {
+                now_ms.saturating_sub(activity.last_active_at_ms) <= active_mention_ttl_ms
+            }
+        };
+        if !is_active {
+            return Ok(T1PushDispatchOutcome::Suppressed {
+                reason: SuppressedReason::Xep0513ActiveMiss,
+            });
+        }
+    }
     let level = settings_projection
         .effective_setting(
             candidate.recipient_bare_jid(),
@@ -3124,6 +3264,26 @@ fn suppressed_reason_for_level(level: waddle_xmpp::xep::NotificationLevel) -> Su
              the XEP-0492 reducer never yields Suppressed for <always/>"
         ),
     }
+}
+
+/// Looks up `(owner, conversation)` in the per-batch activity cache,
+/// populating on miss. The cached `Option` distinguishes "no row in
+/// the projection" (`None`) from "row present" (`Some(activity)`) so
+/// the XEP-0513 evaluator can branch on the typed shape without
+/// re-querying the database for repeats within the same drain pass.
+async fn resolve_cached_activity(
+    activity_reader: &dyn NotificationActivityReader,
+    owner: &BareJid,
+    conversation: &BareJid,
+    cache: &mut std::collections::BTreeMap<(BareJid, BareJid), Option<NotificationActivity>>,
+) -> Result<Option<NotificationActivity>, NotificationOutboxError> {
+    let key = (owner.clone(), conversation.clone());
+    if let Some(entry) = cache.get(&key) {
+        return Ok(entry.clone());
+    }
+    let activity = activity_reader.read_activity(owner, conversation).await?;
+    cache.insert(key, activity.clone());
+    Ok(activity)
 }
 
 async fn resolve_cached_dnd_state(
@@ -3991,6 +4151,72 @@ mod tests {
         NotificationOutboxStore::new(Database::in_memory("notification-outbox").await.unwrap())
             .await
             .expect("store")
+    }
+
+    /// Default activity-reader for tests that do not exercise the
+    /// XEP-0513 `<active/>` filter. Returns `Ok(None)` for every
+    /// lookup so the T1 evaluator treats every recipient as inactive
+    /// — but the XEP-0513 gate is only consulted for the
+    /// `ActiveChannelMention` class, so other class tests are
+    /// unaffected.
+    ///
+    /// Static so a `&NoopActivityReader` borrow stays valid for the
+    /// duration of every call site without needing a `let binding =`
+    /// dance at each invocation.
+    static NOOP_ACTIVITY_READER: crate::notification_activity::NoopActivityReader =
+        crate::notification_activity::NoopActivityReader;
+    fn noop_activity_reader() -> &'static crate::notification_activity::NoopActivityReader {
+        &NOOP_ACTIVITY_READER
+    }
+
+    /// Convenience constructor for [`NotificationDrainDeps`] that
+    /// wires the default no-op activity reader. Used by every slice
+    /// 2a test whose recipient class is not
+    /// `ActiveChannelMention` — those tests do not exercise the
+    /// XEP-0513 `<active/>` filter, so a noop reader is the correct
+    /// dependency.
+    fn drain_deps_with_noop_activity<'a>(
+        room_policy: &'a dyn RoomPolicyStore,
+        dnd_reader: &'a dyn DndReader,
+        activity_reader: &'a crate::notification_activity::NoopActivityReader,
+    ) -> NotificationDrainDeps<'a> {
+        NotificationDrainDeps::new(room_policy, dnd_reader, activity_reader)
+    }
+
+    /// Cache triple held by every direct-evaluator test call site.
+    /// Extracted as a `type` alias to keep clippy's `type_complexity`
+    /// lint quiet without leaking `#[allow]` into the codebase.
+    type FreshEvalCaches = (
+        std::collections::BTreeMap<BareJid, RoomPolicyCacheEntry>,
+        std::collections::BTreeMap<BareJid, DndState>,
+        std::collections::BTreeMap<(BareJid, BareJid), Option<NotificationActivity>>,
+    );
+
+    /// Build a fresh [`PushEvalDeps`] / [`PushEvalCaches`] pair for
+    /// unit-testing the typed evaluator function directly. Returns
+    /// owned caches so each call site can hold them and pass `&mut`.
+    fn fresh_eval_caches() -> FreshEvalCaches {
+        (
+            std::collections::BTreeMap::new(),
+            std::collections::BTreeMap::new(),
+            std::collections::BTreeMap::new(),
+        )
+    }
+
+    fn eval_deps_for_test<'a>(
+        settings_projection:
+            &'a crate::notification_settings_projection::NotificationSettingsProjectionStore,
+        room_policy: &'a dyn RoomPolicyStore,
+        dnd_reader: &'a dyn DndReader,
+        activity_reader: &'a dyn NotificationActivityReader,
+    ) -> PushEvalDeps<'a> {
+        PushEvalDeps {
+            settings_projection,
+            room_policy,
+            dnd_reader,
+            activity_reader,
+            active_mention_ttl_ms: 5 * 60 * 1_000,
+        }
     }
 
     /// Test double for [`RoomPolicyStore`] that pretends every room is
@@ -5115,7 +5341,11 @@ mod tests {
                     &push_store,
                     &blocking,
                     &projection,
-                    NotificationDrainDeps::new(&room_policy, &NoopDndReader),
+                    drain_deps_with_noop_activity(
+                        &room_policy,
+                        &NoopDndReader,
+                        noop_activity_reader()
+                    ),
                     &bare("push.example.com"),
                     16,
                 )
@@ -5202,7 +5432,11 @@ mod tests {
                     &push_store,
                     &blocking,
                     &projection,
-                    NotificationDrainDeps::new(&room_policy, &NoopDndReader),
+                    drain_deps_with_noop_activity(
+                        &room_policy,
+                        &NoopDndReader,
+                        noop_activity_reader()
+                    ),
                     &bare("push.example.com"),
                     16,
                 )
@@ -5276,7 +5510,11 @@ mod tests {
                     &push_store,
                     &blocking,
                     &projection,
-                    NotificationDrainDeps::new(&room_policy, &NoopDndReader),
+                    drain_deps_with_noop_activity(
+                        &room_policy,
+                        &NoopDndReader,
+                        noop_activity_reader()
+                    ),
                     &bare("push.example.com"),
                     16,
                 )
@@ -5347,7 +5585,11 @@ mod tests {
                     &push_store,
                     &blocking,
                     &projection,
-                    NotificationDrainDeps::new(&room_policy, &NoopDndReader),
+                    drain_deps_with_noop_activity(
+                        &room_policy,
+                        &NoopDndReader,
+                        noop_activity_reader()
+                    ),
                     &bare("push.example.com"),
                     16,
                 )
@@ -5417,7 +5659,11 @@ mod tests {
                     &push_store,
                     &blocking,
                     &projection,
-                    NotificationDrainDeps::new(&room_policy, &NoopDndReader),
+                    drain_deps_with_noop_activity(
+                        &room_policy,
+                        &NoopDndReader,
+                        noop_activity_reader()
+                    ),
                     &bare("push.example.com"),
                     16,
                 )
@@ -5482,7 +5728,11 @@ mod tests {
                     &push_store,
                     &blocking,
                     &projection,
-                    NotificationDrainDeps::new(&room_policy, &NoopDndReader),
+                    drain_deps_with_noop_activity(
+                        &room_policy,
+                        &NoopDndReader,
+                        noop_activity_reader()
+                    ),
                     &bare("push.example.com"),
                     16,
                 )
@@ -5540,7 +5790,11 @@ mod tests {
                     &push_store,
                     &blocking,
                     &projection,
-                    NotificationDrainDeps::new(&room_policy, &NoopDndReader),
+                    drain_deps_with_noop_activity(
+                        &room_policy,
+                        &NoopDndReader,
+                        noop_activity_reader()
+                    ),
                     &bare("push.example.com"),
                     16,
                 )
@@ -5591,7 +5845,11 @@ mod tests {
                     &push_store,
                     &blocking,
                     &projection,
-                    NotificationDrainDeps::new(&room_policy, &NoopDndReader),
+                    drain_deps_with_noop_activity(
+                        &room_policy,
+                        &NoopDndReader,
+                        noop_activity_reader()
+                    ),
                     &bare("push.example.com"),
                     16,
                 )
@@ -5623,7 +5881,11 @@ mod tests {
                     &push_store,
                     &blocking,
                     &projection,
-                    NotificationDrainDeps::new(&room_policy, &NoopDndReader),
+                    drain_deps_with_noop_activity(
+                        &room_policy,
+                        &NoopDndReader,
+                        noop_activity_reader()
+                    ),
                     &bare("push.example.com"),
                     16,
                 )
@@ -5667,7 +5929,11 @@ mod tests {
                     &push_store,
                     &blocking,
                     &projection,
-                    NotificationDrainDeps::new(&room_policy, &NoopDndReader),
+                    drain_deps_with_noop_activity(
+                        &room_policy,
+                        &NoopDndReader,
+                        noop_activity_reader()
+                    ),
                     &bare("push.example.com"),
                     16,
                 )
@@ -5698,7 +5964,11 @@ mod tests {
                     &push_store,
                     &blocking,
                     &projection,
-                    NotificationDrainDeps::new(&room_policy, &NoopDndReader),
+                    drain_deps_with_noop_activity(
+                        &room_policy,
+                        &NoopDndReader,
+                        noop_activity_reader()
+                    ),
                     &bare("push.example.com"),
                     16,
                 )
@@ -5742,7 +6012,11 @@ mod tests {
                     &push_store,
                     &blocking,
                     &projection,
-                    NotificationDrainDeps::new(&room_policy, &NoopDndReader),
+                    drain_deps_with_noop_activity(
+                        &room_policy,
+                        &NoopDndReader,
+                        noop_activity_reader()
+                    ),
                     &bare("push.example.com"),
                     16,
                 )
@@ -5773,7 +6047,11 @@ mod tests {
                     &push_store,
                     &blocking,
                     &projection,
-                    NotificationDrainDeps::new(&room_policy, &NoopDndReader),
+                    drain_deps_with_noop_activity(
+                        &room_policy,
+                        &NoopDndReader,
+                        noop_activity_reader()
+                    ),
                     &bare("push.example.com"),
                     16,
                 )
@@ -5818,7 +6096,11 @@ mod tests {
                     &push_store,
                     &blocking,
                     &projection,
-                    NotificationDrainDeps::new(&room_policy, &NoopDndReader),
+                    drain_deps_with_noop_activity(
+                        &room_policy,
+                        &NoopDndReader,
+                        noop_activity_reader()
+                    ),
                     &bare("push.example.com"),
                     16,
                 )
@@ -5849,7 +6131,11 @@ mod tests {
                     &push_store,
                     &blocking,
                     &projection,
-                    NotificationDrainDeps::new(&room_policy, &NoopDndReader),
+                    drain_deps_with_noop_activity(
+                        &room_policy,
+                        &NoopDndReader,
+                        noop_activity_reader()
+                    ),
                     &bare("push.example.com"),
                     16,
                 )
@@ -5893,7 +6179,11 @@ mod tests {
                     &push_store,
                     &blocking,
                     &projection,
-                    NotificationDrainDeps::new(&room_policy, &NoopDndReader),
+                    drain_deps_with_noop_activity(
+                        &room_policy,
+                        &NoopDndReader,
+                        noop_activity_reader()
+                    ),
                     &bare("push.example.com"),
                     16,
                 )
@@ -5924,7 +6214,11 @@ mod tests {
                     &push_store,
                     &blocking,
                     &projection,
-                    NotificationDrainDeps::new(&room_policy, &NoopDndReader),
+                    drain_deps_with_noop_activity(
+                        &room_policy,
+                        &NoopDndReader,
+                        noop_activity_reader()
+                    ),
                     &bare("push.example.com"),
                     16,
                 )
@@ -5985,7 +6279,11 @@ mod tests {
                     &push_store,
                     &blocking,
                     &projection,
-                    NotificationDrainDeps::new(&room_policy, &NoopDndReader),
+                    drain_deps_with_noop_activity(
+                        &room_policy,
+                        &NoopDndReader,
+                        noop_activity_reader()
+                    ),
                     &bare("push.example.com"),
                     16,
                 )
@@ -6032,7 +6330,11 @@ mod tests {
                     &push_store,
                     &blocking,
                     &projection,
-                    NotificationDrainDeps::new(&room_policy, &NoopDndReader),
+                    drain_deps_with_noop_activity(
+                        &room_policy,
+                        &NoopDndReader,
+                        noop_activity_reader()
+                    ),
                     &bare("push.example.com"),
                     16,
                 )
@@ -6153,7 +6455,11 @@ mod tests {
                     &push_store,
                     &blocking,
                     &projection,
-                    NotificationDrainDeps::new(&room_policy, &NoopDndReader),
+                    drain_deps_with_noop_activity(
+                        &room_policy,
+                        &NoopDndReader,
+                        noop_activity_reader()
+                    ),
                     &bare("push.example.com"),
                     16,
                 )
@@ -6258,7 +6564,11 @@ mod tests {
                     &push_store,
                     &blocking,
                     &projection,
-                    NotificationDrainDeps::new(&room_policy, &NoopDndReader),
+                    drain_deps_with_noop_activity(
+                        &room_policy,
+                        &NoopDndReader,
+                        noop_activity_reader()
+                    ),
                     &bare("push.example.com"),
                     16,
                 )
@@ -6305,7 +6615,11 @@ mod tests {
                     &push_store,
                     &FailingBlockingStorage,
                     &projection,
-                    NotificationDrainDeps::new(&room_policy, &NoopDndReader),
+                    drain_deps_with_noop_activity(
+                        &room_policy,
+                        &NoopDndReader,
+                        noop_activity_reader()
+                    ),
                     &bare("push.example.com"),
                     16,
                 )
@@ -6352,7 +6666,11 @@ mod tests {
                     &push_store,
                     &blocking,
                     &projection,
-                    NotificationDrainDeps::new(&room_policy, &NoopDndReader),
+                    drain_deps_with_noop_activity(
+                        &room_policy,
+                        &NoopDndReader,
+                        noop_activity_reader()
+                    ),
                     &bare("push.example.com"),
                     16,
                 )
@@ -7454,7 +7772,11 @@ mod tests {
                     &push_store,
                     &blocking,
                     &projection,
-                    NotificationDrainDeps::new(&room_policy, &NoopDndReader),
+                    drain_deps_with_noop_activity(
+                        &room_policy,
+                        &NoopDndReader,
+                        noop_activity_reader()
+                    ),
                     &bare("push.example.com"),
                     16,
                 )
@@ -7539,7 +7861,7 @@ mod tests {
                 &push_store,
                 &blocking,
                 &projection,
-                NotificationDrainDeps::new(&room_policy, &NoopDndReader),
+                drain_deps_with_noop_activity(&room_policy, &NoopDndReader, noop_activity_reader()),
                 &bare("push.example.com"),
                 16,
             )
@@ -7588,7 +7910,7 @@ mod tests {
                 &push_store,
                 &blocking,
                 &projection,
-                NotificationDrainDeps::new(&room_policy, &NoopDndReader),
+                drain_deps_with_noop_activity(&room_policy, &NoopDndReader, noop_activity_reader()),
                 &bare("push.example.com"),
                 16,
             )
@@ -7864,7 +8186,7 @@ mod tests {
             .await
             .expect("insert candidate");
 
-        let deps = NotificationDrainDeps::new(&room_policy, &dnd_reader);
+        let deps = drain_deps_with_noop_activity(&room_policy, &dnd_reader, noop_activity_reader());
         store
             .drain_pending_candidates_into_outbox(
                 &push_store,
@@ -7942,7 +8264,7 @@ mod tests {
             .await
             .expect("insert candidate");
 
-        let deps = NotificationDrainDeps::new(&room_policy, &dnd_reader);
+        let deps = drain_deps_with_noop_activity(&room_policy, &dnd_reader, noop_activity_reader());
         store
             .drain_pending_candidates_into_outbox(
                 &push_store,
@@ -7996,7 +8318,7 @@ mod tests {
             .await
             .expect("insert candidate");
 
-        let deps = NotificationDrainDeps::new(&room_policy, &dnd_reader);
+        let deps = drain_deps_with_noop_activity(&room_policy, &dnd_reader, noop_activity_reader());
         store
             .drain_pending_candidates_into_outbox(
                 &push_store,
@@ -8044,20 +8366,22 @@ mod tests {
             NotificationMessageHints::none().with_noping(true),
         )
         .expect("candidate");
-        let mut room_policy_cache =
-            std::collections::BTreeMap::<BareJid, RoomPolicyCacheEntry>::new();
-        let mut dnd_cache = std::collections::BTreeMap::<BareJid, DndState>::new();
+        let activity_reader = noop_activity_reader();
+        let eval_deps = eval_deps_for_test(&projection, &room_policy, &dnd_reader, activity_reader);
+        let (mut room_policy_cache, mut dnd_cache, mut activity_cache) = fresh_eval_caches();
+        let mut eval_caches = PushEvalCaches {
+            room_policy: &mut room_policy_cache,
+            dnd: &mut dnd_cache,
+            activity: &mut activity_cache,
+        };
 
         // T0Emit MUST NOT suppress on noping — the row must persist
         // so T1 records the audit.
         let t0 = evaluate_push_gate_at_dispatch(
             PushEvalStage::T0Emit,
-            &projection,
-            &room_policy,
-            &dnd_reader,
+            eval_deps,
             &noping_candidate,
-            &mut room_policy_cache,
-            &mut dnd_cache,
+            &mut eval_caches,
         )
         .await
         .expect("t0 eval");
@@ -8069,12 +8393,9 @@ mod tests {
         // T1Drain MUST suppress with the typed Xep0513Noping reason.
         let t1 = evaluate_push_gate_at_dispatch(
             PushEvalStage::T1Drain,
-            &projection,
-            &room_policy,
-            &dnd_reader,
+            eval_deps,
             &noping_candidate,
-            &mut room_policy_cache,
-            &mut dnd_cache,
+            &mut eval_caches,
         )
         .await
         .expect("t1 eval");
@@ -8099,24 +8420,18 @@ mod tests {
         .expect("candidate");
         let t0_no_store = evaluate_push_gate_at_dispatch(
             PushEvalStage::T0Emit,
-            &projection,
-            &room_policy,
-            &dnd_reader,
+            eval_deps,
             &no_store_candidate,
-            &mut room_policy_cache,
-            &mut dnd_cache,
+            &mut eval_caches,
         )
         .await
         .expect("t0 eval");
         assert!(matches!(t0_no_store, T1PushDispatchOutcome::Deliver));
         let t1_no_store = evaluate_push_gate_at_dispatch(
             PushEvalStage::T1Drain,
-            &projection,
-            &room_policy,
-            &dnd_reader,
+            eval_deps,
             &no_store_candidate,
-            &mut room_policy_cache,
-            &mut dnd_cache,
+            &mut eval_caches,
         )
         .await
         .expect("t1 eval");
@@ -8158,7 +8473,7 @@ mod tests {
             .await
             .expect("insert candidate");
 
-        let deps = NotificationDrainDeps::new(&room_policy, &dnd_reader);
+        let deps = drain_deps_with_noop_activity(&room_policy, &dnd_reader, noop_activity_reader());
         store
             .drain_pending_candidates_into_outbox(
                 &push_store,
@@ -8217,7 +8532,7 @@ mod tests {
             .await
             .expect("insert candidate");
 
-        let deps = NotificationDrainDeps::new(&room_policy, &dnd_reader);
+        let deps = drain_deps_with_noop_activity(&room_policy, &dnd_reader, noop_activity_reader());
         store
             .drain_pending_candidates_into_outbox(
                 &push_store,
@@ -8277,7 +8592,7 @@ mod tests {
             .await
             .expect("insert candidate");
 
-        let deps = NotificationDrainDeps::new(&room_policy, &dnd_reader);
+        let deps = drain_deps_with_noop_activity(&room_policy, &dnd_reader, noop_activity_reader());
         store
             .drain_pending_candidates_into_outbox(
                 &push_store,
@@ -8354,7 +8669,7 @@ mod tests {
             .await
             .expect("insert candidate");
 
-        let deps = NotificationDrainDeps::new(&room_policy, &dnd_reader);
+        let deps = drain_deps_with_noop_activity(&room_policy, &dnd_reader, noop_activity_reader());
         store
             .drain_pending_candidates_into_outbox(
                 &push_store,
@@ -8598,17 +8913,19 @@ mod tests {
             false,
         )
         .expect("candidate");
-        let mut room_policy_cache =
-            std::collections::BTreeMap::<BareJid, RoomPolicyCacheEntry>::new();
-        let mut dnd_cache = std::collections::BTreeMap::<BareJid, DndState>::new();
+        let activity_reader = noop_activity_reader();
+        let eval_deps = eval_deps_for_test(&projection, &room_policy, &dnd_reader, activity_reader);
+        let (mut room_policy_cache, mut dnd_cache, mut activity_cache) = fresh_eval_caches();
+        let mut eval_caches = PushEvalCaches {
+            room_policy: &mut room_policy_cache,
+            dnd: &mut dnd_cache,
+            activity: &mut activity_cache,
+        };
         let outcome = evaluate_push_gate_at_dispatch(
             PushEvalStage::T0Emit,
-            &projection,
-            &room_policy,
-            &dnd_reader,
+            eval_deps,
             &candidate,
-            &mut room_policy_cache,
-            &mut dnd_cache,
+            &mut eval_caches,
         )
         .await
         .expect("t0 eval");
@@ -8691,17 +9008,19 @@ mod tests {
             false,
         )
         .expect("candidate");
-        let mut room_policy_cache =
-            std::collections::BTreeMap::<BareJid, RoomPolicyCacheEntry>::new();
-        let mut dnd_cache = std::collections::BTreeMap::<BareJid, DndState>::new();
+        let activity_reader = noop_activity_reader();
+        let eval_deps = eval_deps_for_test(&projection, &room_policy, &dnd_reader, activity_reader);
+        let (mut room_policy_cache, mut dnd_cache, mut activity_cache) = fresh_eval_caches();
+        let mut eval_caches = PushEvalCaches {
+            room_policy: &mut room_policy_cache,
+            dnd: &mut dnd_cache,
+            activity: &mut activity_cache,
+        };
         let outcome = evaluate_push_gate_at_dispatch(
             PushEvalStage::T0Emit,
-            &projection,
-            &room_policy,
-            &dnd_reader,
+            eval_deps,
             &candidate,
-            &mut room_policy_cache,
-            &mut dnd_cache,
+            &mut eval_caches,
         )
         .await
         .expect("t0 eval");
@@ -8764,7 +9083,7 @@ mod tests {
             .await
             .expect("insert candidate");
 
-        let deps = NotificationDrainDeps::new(&room_policy, &dnd_reader);
+        let deps = drain_deps_with_noop_activity(&room_policy, &dnd_reader, noop_activity_reader());
         store
             .drain_pending_candidates_into_outbox(
                 &push_store,
@@ -8841,7 +9160,7 @@ mod tests {
             .await
             .expect("insert candidate");
 
-        let deps = NotificationDrainDeps::new(&room_policy, &dnd_reader);
+        let deps = drain_deps_with_noop_activity(&room_policy, &dnd_reader, noop_activity_reader());
         store
             .drain_pending_candidates_into_outbox(
                 &push_store,
@@ -8922,7 +9241,7 @@ mod tests {
             .await
             .expect("insert candidate");
 
-        let deps = NotificationDrainDeps::new(&room_policy, &dnd_reader);
+        let deps = drain_deps_with_noop_activity(&room_policy, &dnd_reader, noop_activity_reader());
         store
             .drain_pending_candidates_into_outbox(
                 &push_store,
@@ -8993,7 +9312,7 @@ mod tests {
             .await
             .expect("insert candidate");
 
-        let deps = NotificationDrainDeps::new(&room_policy, &dnd_reader);
+        let deps = drain_deps_with_noop_activity(&room_policy, &dnd_reader, noop_activity_reader());
         store
             .drain_pending_candidates_into_outbox(
                 &push_store,
@@ -9059,7 +9378,7 @@ mod tests {
             .await
             .expect("insert candidate");
 
-        let deps = NotificationDrainDeps::new(&room_policy, &dnd_reader);
+        let deps = drain_deps_with_noop_activity(&room_policy, &dnd_reader, noop_activity_reader());
         store
             .drain_pending_candidates_into_outbox(
                 &push_store,
@@ -9161,7 +9480,7 @@ mod tests {
             .await
             .expect("insert bob candidate");
 
-        let deps = NotificationDrainDeps::new(&room_policy, &dnd_reader);
+        let deps = drain_deps_with_noop_activity(&room_policy, &dnd_reader, noop_activity_reader());
         store
             .drain_pending_candidates_into_outbox(
                 &push_store,
@@ -9240,5 +9559,628 @@ mod tests {
             rendered.contains("waddle_push_suppressed_total{reason=\"waddle_dnd\"} 1"),
             "metric for waddle_dnd must increment by exactly 1 (Alice only); rendered={rendered}",
         );
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // Slice 2b — `notification_activity` projection + XEP-0513
+    // `<active/>` push filter (#526).
+    // ─────────────────────────────────────────────────────────────
+
+    /// Builds an [`ActiveChannelMention`] candidate for the given
+    /// (recipient, room, sender) triple — slice 2b's gate operates
+    /// exclusively on this class.
+    fn active_channel_mention_candidate_for(
+        recipient: &BareJid,
+        room: &BareJid,
+        sender: &BareJid,
+        id: &str,
+    ) -> NotificationCandidate {
+        groupchat_candidate_for(
+            recipient,
+            room,
+            format!("{room}/{}", sender.node().expect("sender node"))
+                .parse()
+                .expect("sender occupant jid"),
+            id,
+            NotificationClass::ActiveChannelMention,
+        )
+    }
+
+    async fn activity_store() -> crate::notification_activity::NotificationActivityStore {
+        crate::notification_activity::NotificationActivityStore::new(
+            Database::in_memory("notification-activity-eval")
+                .await
+                .expect("activity db"),
+        )
+        .await
+        .expect("activity store")
+    }
+
+    /// A [`NotificationActivityReader`] test double that counts
+    /// per-`(owner, conversation)` read calls so the slice 2b T0/T1
+    /// stage-split and per-batch cache can be asserted.
+    struct CountingActivityReader {
+        inner: crate::notification_activity::NotificationActivityStore,
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    impl CountingActivityReader {
+        async fn new() -> Self {
+            Self {
+                inner: activity_store().await,
+                calls: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+
+        fn call_count(&self) -> usize {
+            self.calls.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl NotificationActivityReader for CountingActivityReader {
+        async fn read_activity(
+            &self,
+            owner: &BareJid,
+            conversation: &BareJid,
+        ) -> Result<Option<NotificationActivity>, NotificationActivityError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.inner.read_activity(owner, conversation).await
+        }
+    }
+
+    /// XEP-0513 hit: recipient was active within the TTL window →
+    /// `ActiveChannelMention` candidate MUST deliver. Seeds the
+    /// activity projection with a `last_active_at_ms = now()` row
+    /// and asserts the T1 drain enqueues the push job.
+    #[tokio::test]
+    async fn t1_active_channel_mention_with_recent_activity_delivers() {
+        let _guard = waddle_xmpp::prometheus::metrics_test_lock().lock().await;
+        waddle_xmpp::prometheus::reset_metrics_for_test();
+        let store = store().await;
+        let target = target();
+        let push_store = waddle_xmpp::push::InMemoryPushStore::new();
+        let blocking = waddle_xmpp::xep::xep0191::InMemoryBlockingStorage::new();
+        let projection = settings_projection().await;
+        let room_policy = StubRoomPolicy::new();
+        let dnd_reader = NoopDndReader;
+        let activity_reader = activity_store().await;
+
+        let recipient = bare("alice@example.com");
+        let room = bare("room@muc.example.com");
+        let sender = bare("bob@example.com");
+        register_push_target(&push_store, &recipient, &target).await;
+
+        // Record recent activity for the recipient on this room —
+        // the chat-state ingest mirrors a fresh XEP-0085 update.
+        activity_reader
+            .record_chat_state(
+                &recipient,
+                &room,
+                crate::notification_activity::NotificationChatState::Active,
+                crate::time::now_ms(),
+            )
+            .await
+            .expect("seed activity");
+
+        let candidate =
+            active_channel_mention_candidate_for(&recipient, &room, &sender, "active-hit");
+        store
+            .insert_candidate(&candidate)
+            .await
+            .expect("insert candidate");
+
+        let deps = NotificationDrainDeps::new(&room_policy, &dnd_reader, &activity_reader);
+        store
+            .drain_pending_candidates_into_outbox(
+                &push_store,
+                &blocking,
+                &projection,
+                deps,
+                &bare("push.example.com"),
+                16,
+            )
+            .await
+            .expect("drain candidates");
+
+        let jobs = store.pending_outbox_jobs().await.expect("jobs");
+        assert_eq!(
+            jobs.len(),
+            1,
+            "active recipient within TTL MUST receive the push",
+        );
+        assert_eq!(jobs[0].class(), NotificationClass::ActiveChannelMention,);
+    }
+
+    /// XEP-0513 miss (stale): recipient's last activity is older than
+    /// the configured TTL → suppress with `Xep0513ActiveMiss`. Also
+    /// asserts the audit column persists and the metric ticks.
+    #[tokio::test]
+    async fn t1_active_channel_mention_with_stale_activity_suppresses_with_xep0513_active_miss() {
+        let _guard = waddle_xmpp::prometheus::metrics_test_lock().lock().await;
+        waddle_xmpp::prometheus::reset_metrics_for_test();
+        let store = store().await;
+        let push_store = waddle_xmpp::push::InMemoryPushStore::new();
+        let blocking = waddle_xmpp::xep::xep0191::InMemoryBlockingStorage::new();
+        let projection = settings_projection().await;
+        let room_policy = StubRoomPolicy::new();
+        let dnd_reader = NoopDndReader;
+        let activity_reader = activity_store().await;
+
+        let recipient = bare("alice@example.com");
+        let room = bare("room-stale@muc.example.com");
+        let sender = bare("bob@example.com");
+
+        // Stale activity: 1 hour ago, well outside the default 5min
+        // TTL window the evaluator clamps to.
+        let now_ms = crate::time::now_ms();
+        let stale_ms = now_ms.saturating_sub(60 * 60 * 1_000);
+        activity_reader
+            .record_outbound_message(&recipient, &room, stale_ms)
+            .await
+            .expect("seed stale");
+
+        let candidate =
+            active_channel_mention_candidate_for(&recipient, &room, &sender, "active-stale");
+        store
+            .insert_candidate(&candidate)
+            .await
+            .expect("insert candidate");
+
+        let deps = NotificationDrainDeps::new(&room_policy, &dnd_reader, &activity_reader);
+        store
+            .drain_pending_candidates_into_outbox(
+                &push_store,
+                &blocking,
+                &projection,
+                deps,
+                &bare("push.example.com"),
+                16,
+            )
+            .await
+            .expect("drain candidates");
+
+        let mut rows = store
+            .query(
+                "SELECT suppressed_reason FROM notification_candidates WHERE stanza_id = ?",
+                crate::db_params!["active-stale"],
+            )
+            .await
+            .expect("query");
+        let row = rows.next().await.expect("row").expect("row exists");
+        assert_eq!(
+            row.get::<Option<String>>(0).expect("reason").as_deref(),
+            Some("xep0513_active_miss"),
+        );
+        assert!(
+            store.pending_outbox_jobs().await.expect("jobs").is_empty(),
+            "T1 XEP-0513 miss MUST NOT enqueue a job",
+        );
+        let rendered = waddle_xmpp::prometheus::render_metrics();
+        assert!(
+            rendered.contains("waddle_push_suppressed_total{reason=\"xep0513_active_miss\"} 1"),
+            "metric for xep0513_active_miss must increment; rendered={rendered}",
+        );
+    }
+
+    /// XEP-0513 miss (no row): recipient has never recorded any
+    /// activity on the conversation → suppress with
+    /// `Xep0513ActiveMiss` (no row in the projection is treated the
+    /// same as "stale activity").
+    #[tokio::test]
+    async fn t1_active_channel_mention_with_no_activity_record_suppresses() {
+        let _guard = waddle_xmpp::prometheus::metrics_test_lock().lock().await;
+        waddle_xmpp::prometheus::reset_metrics_for_test();
+        let store = store().await;
+        let push_store = waddle_xmpp::push::InMemoryPushStore::new();
+        let blocking = waddle_xmpp::xep::xep0191::InMemoryBlockingStorage::new();
+        let projection = settings_projection().await;
+        let room_policy = StubRoomPolicy::new();
+        let dnd_reader = NoopDndReader;
+        let activity_reader = activity_store().await;
+
+        let recipient = bare("alice@example.com");
+        let room = bare("room-never@muc.example.com");
+        let sender = bare("bob@example.com");
+
+        let candidate =
+            active_channel_mention_candidate_for(&recipient, &room, &sender, "active-never");
+        store
+            .insert_candidate(&candidate)
+            .await
+            .expect("insert candidate");
+
+        let deps = NotificationDrainDeps::new(&room_policy, &dnd_reader, &activity_reader);
+        store
+            .drain_pending_candidates_into_outbox(
+                &push_store,
+                &blocking,
+                &projection,
+                deps,
+                &bare("push.example.com"),
+                16,
+            )
+            .await
+            .expect("drain candidates");
+
+        let mut rows = store
+            .query(
+                "SELECT suppressed_reason FROM notification_candidates WHERE stanza_id = ?",
+                crate::db_params!["active-never"],
+            )
+            .await
+            .expect("query");
+        let row = rows.next().await.expect("row").expect("row exists");
+        assert_eq!(
+            row.get::<Option<String>>(0).expect("reason").as_deref(),
+            Some("xep0513_active_miss"),
+        );
+    }
+
+    /// Stage-split contract: at `PushEvalStage::T0Emit` the XEP-0513
+    /// `<active/>` filter MUST NOT consult the activity reader.
+    /// Exercises the stage split with a counting reader fixture.
+    #[tokio::test]
+    async fn t0_active_channel_mention_does_not_consult_activity_reader() {
+        let projection = settings_projection().await;
+        let room_policy = StubRoomPolicy::new();
+        let dnd_reader = NoopDndReader;
+        let counting = CountingActivityReader::new().await;
+
+        let recipient = bare("alice@example.com");
+        let room = bare("room@muc.example.com");
+        let sender = bare("bob@example.com");
+        let candidate =
+            active_channel_mention_candidate_for(&recipient, &room, &sender, "t0-no-touch");
+
+        let eval_deps = eval_deps_for_test(&projection, &room_policy, &dnd_reader, &counting);
+        let (mut room_policy_cache, mut dnd_cache, mut activity_cache) = fresh_eval_caches();
+        let mut eval_caches = PushEvalCaches {
+            room_policy: &mut room_policy_cache,
+            dnd: &mut dnd_cache,
+            activity: &mut activity_cache,
+        };
+
+        let outcome = evaluate_push_gate_at_dispatch(
+            PushEvalStage::T0Emit,
+            eval_deps,
+            &candidate,
+            &mut eval_caches,
+        )
+        .await
+        .expect("t0 eval");
+        // T0Emit must NOT suppress on the XEP-0513 filter (skipped at
+        // T0). Class falls through to the XEP-0492 evaluator with the
+        // public-group `OnMention` default → mention bit on
+        // `ActiveChannelMention` is `true`, so the gate Delivers.
+        assert!(
+            matches!(outcome, T1PushDispatchOutcome::Deliver),
+            "T0Emit MUST NOT suppress with Xep0513ActiveMiss; got {outcome:?}"
+        );
+        assert_eq!(
+            counting.call_count(),
+            0,
+            "T0Emit MUST NOT consult the activity reader",
+        );
+
+        // Same candidate at T1Drain DOES consult the reader.
+        let outcome_t1 = evaluate_push_gate_at_dispatch(
+            PushEvalStage::T1Drain,
+            eval_deps,
+            &candidate,
+            &mut eval_caches,
+        )
+        .await
+        .expect("t1 eval");
+        assert!(
+            matches!(
+                outcome_t1,
+                T1PushDispatchOutcome::Suppressed {
+                    reason: SuppressedReason::Xep0513ActiveMiss
+                }
+            ),
+            "T1Drain MUST suppress when activity is missing; got {outcome_t1:?}"
+        );
+        assert_eq!(
+            counting.call_count(),
+            1,
+            "T1Drain MUST consult the activity reader exactly once",
+        );
+    }
+
+    /// Storage-preservation regression mirroring slice 2a: a T1
+    /// XEP-0513 `<active/>` miss MUST persist the typed audit reason
+    /// onto the candidate row and MUST NOT touch upstream storage
+    /// (inbox, MAM, pending delivery).
+    #[tokio::test]
+    async fn xep0513_active_miss_t1_suppression_persists_audit_and_keeps_storage() {
+        let _guard = waddle_xmpp::prometheus::metrics_test_lock().lock().await;
+        waddle_xmpp::prometheus::reset_metrics_for_test();
+        let store = store().await;
+        let push_store = waddle_xmpp::push::InMemoryPushStore::new();
+        let blocking = waddle_xmpp::xep::xep0191::InMemoryBlockingStorage::new();
+        let projection = settings_projection().await;
+        let room_policy = StubRoomPolicy::new();
+        let dnd_reader = NoopDndReader;
+        let activity_reader = activity_store().await;
+
+        let recipient = bare("alice@example.com");
+        let partner = bare("bob@example.com");
+        let room = bare("room-storage@muc.example.com");
+        // Seed an inbox row so we can witness it's untouched after
+        // the T1 suppression. The recipient/partner pairing on the
+        // inbox witness is intentionally independent of the
+        // ActiveChannelMention candidate's room — both must survive
+        // identically since push suppression touches neither.
+        let (inbox_storage, inbox_witness) =
+            seed_inbox_witness(&recipient, &partner, "witness-stanza", 7_000, 3).await;
+
+        let sender = bare("bob@example.com");
+        let candidate =
+            active_channel_mention_candidate_for(&recipient, &room, &sender, "active-storage");
+        store
+            .insert_candidate(&candidate)
+            .await
+            .expect("insert candidate");
+
+        let deps = NotificationDrainDeps::new(&room_policy, &dnd_reader, &activity_reader);
+        store
+            .drain_pending_candidates_into_outbox(
+                &push_store,
+                &blocking,
+                &projection,
+                deps,
+                &bare("push.example.com"),
+                16,
+            )
+            .await
+            .expect("drain candidates");
+
+        // Audit column written.
+        let mut rows = store
+            .query(
+                "SELECT suppressed_reason, outboxed_at_ms FROM notification_candidates WHERE stanza_id = ?",
+                crate::db_params!["active-storage"],
+            )
+            .await
+            .expect("query");
+        let row = rows.next().await.expect("row").expect("row exists");
+        assert_eq!(
+            row.get::<Option<String>>(0).expect("reason").as_deref(),
+            Some("xep0513_active_miss"),
+        );
+        assert!(
+            row.get::<Option<i64>>(1).expect("outboxed_at_ms").is_some(),
+            "suppressed candidate MUST be marked outboxed",
+        );
+        assert!(
+            store.pending_outbox_jobs().await.expect("jobs").is_empty(),
+            "no push job MUST be enqueued",
+        );
+
+        // Inbox witness untouched.
+        use waddle_xmpp::inbox::storage::InboxStorage;
+        let after = inbox_storage
+            .list(&recipient)
+            .await
+            .expect("list inbox after T1 suppression");
+        assert_eq!(after.len(), 1, "inbox row count MUST be unchanged");
+        assert_eq!(
+            after[0].last_stanza_id, inbox_witness.last_stanza_id,
+            "inbox last_stanza_id MUST be unchanged by push suppression",
+        );
+        assert_eq!(
+            after[0].unread, inbox_witness.unread,
+            "inbox unread MUST be unchanged by push suppression",
+        );
+    }
+
+    /// Per-batch cache: multiple ActiveChannelMention candidates for
+    /// the same (recipient, conversation) MUST trigger exactly one
+    /// activity-reader call. Exercises the cache-population path in
+    /// `resolve_cached_activity`.
+    #[tokio::test]
+    async fn t1_active_channel_mention_cache_collapses_same_recipient_lookups() {
+        let _guard = waddle_xmpp::prometheus::metrics_test_lock().lock().await;
+        waddle_xmpp::prometheus::reset_metrics_for_test();
+        let store = store().await;
+        let push_store = waddle_xmpp::push::InMemoryPushStore::new();
+        let blocking = waddle_xmpp::xep::xep0191::InMemoryBlockingStorage::new();
+        let projection = settings_projection().await;
+        let room_policy = StubRoomPolicy::new();
+        let dnd_reader = NoopDndReader;
+        let counting = CountingActivityReader::new().await;
+
+        let recipient = bare("alice@example.com");
+        let room = bare("room-cache@muc.example.com");
+        let _sender = bare("bob@example.com");
+
+        // Seed activity so the candidates all pass the gate — the
+        // assertion is purely about call-count economy, so the
+        // outcome doesn't matter as long as the reader gets consulted.
+        counting
+            .inner
+            .record_outbound_message(&recipient, &room, crate::time::now_ms())
+            .await
+            .expect("seed activity");
+
+        for (idx, stanza_id) in ["cache-1", "cache-2", "cache-3"].iter().enumerate() {
+            // Sender must be `<room>/<nick>` per
+            // `NotificationCandidate::groupchat`'s `SenderConversationMismatch`
+            // guard — groupchat candidates carry the occupant JID, not
+            // the raw user JID.
+            let candidate = NotificationCandidate::groupchat(
+                recipient.clone(),
+                room.clone(),
+                format!("{room}/bob-conn-{idx}")
+                    .parse()
+                    .expect("occupant jid"),
+                NotificationThreadId::root(),
+                StanzaId::new(stanza_id.to_string(), Jid::from(room.clone())),
+                NotificationClass::ActiveChannelMention,
+            )
+            .expect("candidate");
+            store.insert_candidate(&candidate).await.expect("insert");
+        }
+
+        let deps = NotificationDrainDeps::new(&room_policy, &dnd_reader, &counting);
+        store
+            .drain_pending_candidates_into_outbox(
+                &push_store,
+                &blocking,
+                &projection,
+                deps,
+                &bare("push.example.com"),
+                16,
+            )
+            .await
+            .expect("drain candidates");
+
+        assert_eq!(
+            counting.call_count(),
+            1,
+            "per-batch activity cache MUST collapse repeats for the same (owner, conversation)",
+        );
+    }
+
+    /// XEP-0085 ingestion: a writer call persists the typed chat
+    /// state and is readable via the projection store's reader trait.
+    /// Per CLAUDE.md per-XEP test discipline.
+    #[tokio::test]
+    async fn xep0085_chat_state_writer_persists_typed_token() {
+        let store = activity_store().await;
+        let owner = bare("alice@example.com");
+        let conversation = bare("room@muc.example.com");
+        store
+            .record_chat_state(
+                &owner,
+                &conversation,
+                crate::notification_activity::NotificationChatState::Composing,
+                42,
+            )
+            .await
+            .expect("record chat-state");
+        let activity = store
+            .read_activity(&owner, &conversation)
+            .await
+            .expect("read")
+            .expect("row");
+        assert_eq!(activity.last_active_at_ms, 42);
+        assert_eq!(
+            activity.last_chat_state,
+            Some(crate::notification_activity::NotificationChatState::Composing),
+        );
+    }
+
+    /// XEP-0490 ingestion: a read-marker writer persists the typed
+    /// last_read_at_ms timestamp and updates `last_active_at_ms`.
+    /// Per CLAUDE.md per-XEP test discipline.
+    #[tokio::test]
+    async fn xep0490_read_marker_writer_persists_typed_timestamp() {
+        let store = activity_store().await;
+        let owner = bare("alice@example.com");
+        let conversation = bare("room@muc.example.com");
+        store
+            .record_read_marker(&owner, &conversation, 11_000)
+            .await
+            .expect("record marker");
+        let activity = store
+            .read_activity(&owner, &conversation)
+            .await
+            .expect("read")
+            .expect("row");
+        assert_eq!(activity.last_active_at_ms, 11_000);
+        assert_eq!(activity.last_read_at_ms, Some(11_000));
+    }
+
+    /// Outbound message commit: writer call updates the sender's
+    /// activity row for the conversation. Per CLAUDE.md per-XEP test
+    /// discipline.
+    #[tokio::test]
+    async fn outbound_message_writer_persists_activity_for_sender() {
+        let store = activity_store().await;
+        let owner = bare("alice@example.com");
+        let conversation = bare("bob@example.com");
+        store
+            .record_outbound_message(&owner, &conversation, 9_999)
+            .await
+            .expect("record outbound");
+        let activity = store
+            .read_activity(&owner, &conversation)
+            .await
+            .expect("read")
+            .expect("row");
+        assert_eq!(activity.last_active_at_ms, 9_999);
+    }
+
+    /// XEP-0045 ingestion: presence available + unavailable both bump
+    /// `last_active_at_ms`; the show is preserved on available and
+    /// cleared on unavailable. Per CLAUDE.md per-XEP test discipline.
+    #[tokio::test]
+    async fn xep0045_presence_writer_persists_show_and_clears_on_unavailable() {
+        let store = activity_store().await;
+        let owner = bare("alice@example.com");
+        let room = bare("room@muc.example.com");
+        store
+            .record_presence_available(&owner, &room, Some("dnd"), 1_000)
+            .await
+            .expect("available");
+        let after_available = store
+            .read_activity(&owner, &room)
+            .await
+            .expect("read")
+            .expect("row");
+        assert_eq!(after_available.last_active_at_ms, 1_000);
+        assert_eq!(after_available.presence_show.as_deref(), Some("dnd"));
+
+        store
+            .record_presence_unavailable(&owner, &room, 2_000)
+            .await
+            .expect("unavailable");
+        let after_unavailable = store
+            .read_activity(&owner, &room)
+            .await
+            .expect("read")
+            .expect("row");
+        assert_eq!(after_unavailable.last_active_at_ms, 2_000);
+        assert!(after_unavailable.presence_show.is_none());
+    }
+
+    /// Operator-tunable TTL: env-driven helper clamps to the
+    /// [`MIN_ACTIVE_MENTION_TTL_SECONDS`,
+    /// `MAX_ACTIVE_MENTION_TTL_SECONDS`] window and falls back to
+    /// the default on unparseable input. Tests via direct env
+    /// manipulation; since `std::env::set_var` is process-global,
+    /// each assertion clears the var after running.
+    ///
+    /// This is `#[ignore]`'d by default and excluded from regular
+    /// `cargo test` runs because env mutation races with parallel
+    /// tests in the same process — run with `--include-ignored` to
+    /// exercise it locally.
+    #[test]
+    #[ignore = "mutates a process-global env var; race-prone in parallel test runs"]
+    fn active_mention_ttl_env_var_clamps_to_window() {
+        // SAFETY: tests are single-threaded by default in nextest;
+        // see the doc-comment above for why this is gated behind
+        // `#[ignore]`.
+        unsafe { std::env::remove_var("WADDLE_PUSH_ACTIVE_MENTION_TTL_SECONDS") };
+        assert_eq!(
+            active_mention_ttl_ms_from_env(),
+            (DEFAULT_ACTIVE_MENTION_TTL_SECONDS as i64) * 1_000,
+        );
+
+        unsafe { std::env::set_var("WADDLE_PUSH_ACTIVE_MENTION_TTL_SECONDS", "0") };
+        assert_eq!(
+            active_mention_ttl_ms_from_env(),
+            (MIN_ACTIVE_MENTION_TTL_SECONDS as i64) * 1_000,
+        );
+
+        unsafe { std::env::set_var("WADDLE_PUSH_ACTIVE_MENTION_TTL_SECONDS", "999999999") };
+        assert_eq!(
+            active_mention_ttl_ms_from_env(),
+            (MAX_ACTIVE_MENTION_TTL_SECONDS as i64) * 1_000,
+        );
+
+        unsafe { std::env::remove_var("WADDLE_PUSH_ACTIVE_MENTION_TTL_SECONDS") };
     }
 }

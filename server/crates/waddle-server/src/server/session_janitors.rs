@@ -542,8 +542,12 @@ pub(crate) fn spawn_notification_outbox_janitor(websocket_state: &Arc<WebSocketS
             let room_policy =
                 RoomRegistryActorPolicy::new(state.deps.protocol.room_registry.clone());
             let dnd_reader = crate::notification_outbox::NoopDndReader;
-            let deps =
-                crate::notification_outbox::NotificationDrainDeps::new(&room_policy, &dnd_reader);
+            let activity_reader = state.deps.protocol.notification_activity.as_ref();
+            let deps = crate::notification_outbox::NotificationDrainDeps::new(
+                &room_policy,
+                &dnd_reader,
+                activity_reader,
+            );
             match state
                 .deps
                 .protocol

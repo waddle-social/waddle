@@ -100,6 +100,12 @@ pub struct ProtocolServices {
     /// canonical XMPP state.
     pub notification_settings_projection:
         Arc<crate::notification_settings_projection::NotificationSettingsProjectionStore>,
+    /// Durable per-(user, conversation) activity projection backing
+    /// the XEP-0513 `<active/>` push filter. Ingested from typed
+    /// XEP-0085 chat-state changes, XEP-0490 read-marker advances,
+    /// outbound message commits, and XEP-0045 presence events; read
+    /// by the T1 push-gate evaluator (`notification_outbox`).
+    pub notification_activity: Arc<crate::notification_activity::NotificationActivityStore>,
     /// XEP-0397 Instant Stream Resumption token store.
     pub isr_token_store: waddle_xmpp::isr::SharedIsrTokenStore,
     /// XEP-0198 detached-session registry — holds state for clients whose

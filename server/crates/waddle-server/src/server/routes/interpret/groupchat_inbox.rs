@@ -329,18 +329,36 @@ async fn insert_groupchat_notification_candidate(
     let dnd_reader = crate::notification_outbox::NoopDndReader;
     let mut dnd_cache =
         std::collections::BTreeMap::<BareJid, crate::notification_outbox::DndState>::new();
-    let outcome = match crate::notification_outbox::evaluate_push_gate_at_dispatch(
-        crate::notification_outbox::PushEvalStage::T0Emit,
-        state
+    // T0 emission deliberately skips the XEP-0513 `<active/>` filter
+    // — current activity is a T1 read per the recipient-state
+    // contract. `NoopActivityReader` satisfies the typed signature
+    // without persisting a row at T0; T1 then runs the real read.
+    let activity_reader = crate::notification_activity::NoopActivityReader;
+    let mut activity_cache = std::collections::BTreeMap::<
+        (BareJid, BareJid),
+        Option<crate::notification_activity::NotificationActivity>,
+    >::new();
+    let eval_deps = crate::notification_outbox::PushEvalDeps {
+        settings_projection: state
             .deps
             .protocol
             .notification_settings_projection
             .as_ref(),
-        &room_policy,
-        &dnd_reader,
+        room_policy: &room_policy,
+        dnd_reader: &dnd_reader,
+        activity_reader: &activity_reader,
+        active_mention_ttl_ms: crate::notification_outbox::active_mention_ttl_ms_from_env(),
+    };
+    let mut eval_caches = crate::notification_outbox::PushEvalCaches {
+        room_policy: &mut room_policy_cache,
+        dnd: &mut dnd_cache,
+        activity: &mut activity_cache,
+    };
+    let outcome = match crate::notification_outbox::evaluate_push_gate_at_dispatch(
+        crate::notification_outbox::PushEvalStage::T0Emit,
+        eval_deps,
         &candidate,
-        &mut room_policy_cache,
-        &mut dnd_cache,
+        &mut eval_caches,
     )
     .await
     {

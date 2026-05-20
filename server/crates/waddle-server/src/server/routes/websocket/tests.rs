@@ -107,6 +107,13 @@ async fn create_test_websocket_state_with_extension_manager(
             pubsub_storage.database(),
         ),
     );
+    let notification_activity = Arc::new(
+        crate::notification_activity::NotificationActivityStore::new(
+            app_state.db_pool.global().clone(),
+        )
+        .await
+        .expect("notification activity store"),
+    );
     let push_service = Arc::new(
         crate::push_service::DatabasePushServiceStore::new_with_secret_key_and_pubsub(
             app_state.db_pool.global().clone(),
@@ -174,6 +181,7 @@ async fn create_test_websocket_state_with_extension_manager(
                     push_service,
                     notification_outbox,
                     notification_settings_projection,
+                    notification_activity,
                     isr_token_store: waddle_xmpp::isr::create_shared_store(),
                     sm_session_registry: Arc::new(InMemorySmSessionRegistry::new()),
                     resumable_sessions: Arc::new(dashmap::DashMap::new()),
