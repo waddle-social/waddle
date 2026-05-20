@@ -201,7 +201,11 @@ describe("offline outbound queue hydration", () => {
     enqueueQueuedMessage("alice@example.com", {
       kind: "room",
       id: "queued-room-1",
-      createdAt: "2024-01-01T00:00:00Z",
+      // Recent stamp — the queue store now prunes entries older
+      // than 7 days on read (PR4), so a fixed 2024 date would be
+      // dropped by the time these tests run on a wall clock past
+      // that window.
+      createdAt: new Date().toISOString(),
       roomJid,
       body: "hello from storage",
     });
@@ -235,7 +239,9 @@ describe("offline outbound queue hydration", () => {
     enqueueQueuedMessage("alice@example.com", {
       kind: "dm",
       id: "queued-dm-1",
-      createdAt: "2024-01-01T00:00:00Z",
+      // See `room timelines restore queued messages from localStorage` —
+      // the queue store now prunes entries older than 7 days.
+      createdAt: new Date().toISOString(),
       peerJid: "bob@example.com",
       body: "hello from storage",
     });

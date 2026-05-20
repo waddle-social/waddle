@@ -163,7 +163,9 @@ describe("client send readiness", () => {
     enqueueQueuedMessage("alice@example.com", {
       kind: "dm",
       id: "queued-dm-1",
-      createdAt: "2026-05-07T00:00:00Z",
+      // Recent stamp — the queue store now prunes entries older
+      // than 7 days on read (PR4).
+      createdAt: new Date().toISOString(),
       peerJid: "bob@example.com",
       body: "queued while offline",
     });
