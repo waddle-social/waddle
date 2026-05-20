@@ -791,23 +791,27 @@ export class BrowserXmppClient {
     throw new Error("XMPP session is not ready");
   }
 
-  private async compatSendChatState(xmpp: XmppClientInstance, to: string, type: "chat" | "groupchat", state: ChatStateType) {
-    if (xmpp.send_chat_state) return xmpp.send_chat_state(to, type, state);
+  // XEP-0201 §3: chat-states, displayed markers, reactions, retractions, and
+  // corrections that relate to a threaded message SHOULD repeat the original
+  // `<thread/>`. The wasm bindings accept thread id + optional parent so the
+  // related stanzas route to the same conversation context on receivers.
+  private async compatSendChatState(xmpp: XmppClientInstance, to: string, type: "chat" | "groupchat", state: ChatStateType, thread?: { id: string; parent?: string }) {
+    if (xmpp.send_chat_state) return xmpp.send_chat_state(to, type, state, thread?.id, thread?.parent);
     throw new Error("XMPP session is not ready");
   }
 
-  private async compatSendDisplayed(xmpp: XmppClientInstance, to: string, type: "chat" | "groupchat", id: string) {
-    if (xmpp.send_displayed) return xmpp.send_displayed(to, type, id);
+  private async compatSendDisplayed(xmpp: XmppClientInstance, to: string, type: "chat" | "groupchat", id: string, thread?: { id: string; parent?: string }) {
+    if (xmpp.send_displayed) return xmpp.send_displayed(to, type, id, thread?.id, thread?.parent);
     throw new Error("XMPP session is not ready");
   }
 
-  private async compatSendReaction(xmpp: XmppClientInstance, to: string, type: "chat" | "groupchat", id: string, emojis: string[]) {
-    if (xmpp.send_reaction) return xmpp.send_reaction(to, type, id, emojis);
+  private async compatSendReaction(xmpp: XmppClientInstance, to: string, type: "chat" | "groupchat", id: string, emojis: string[], thread?: { id: string; parent?: string }) {
+    if (xmpp.send_reaction) return xmpp.send_reaction(to, type, id, emojis, thread?.id, thread?.parent);
     throw new Error("XMPP session is not ready");
   }
 
-  private async compatSendRetraction(xmpp: XmppClientInstance, to: string, type: "chat" | "groupchat", id: string) {
-    if (xmpp.send_retraction) return xmpp.send_retraction(to, type, id);
+  private async compatSendRetraction(xmpp: XmppClientInstance, to: string, type: "chat" | "groupchat", id: string, thread?: { id: string; parent?: string }) {
+    if (xmpp.send_retraction) return xmpp.send_retraction(to, type, id, thread?.id, thread?.parent);
     throw new Error("XMPP session is not ready");
   }
 
@@ -898,9 +902,9 @@ export class BrowserXmppClient {
     return this.queueDirectMessage(normalizedPeerJid, body, opts);
   }
 
-  async sendChatState(spaceId: string, channelId: string, state: ChatStateType) { const { xmpp, roomJid } = await this.requireJoinedRoom(spaceId, channelId); await this.compatSendChatState(xmpp, roomJid, "groupchat", state); }
-  async sendDisplayed(spaceId: string, channelId: string, messageId: string) { const { xmpp, roomJid } = await this.requireJoinedRoom(spaceId, channelId); await this.compatSendDisplayed(xmpp, roomJid, "groupchat", messageId); }
-  async sendReaction(spaceId: string, channelId: string, messageId: string, emojis: string[]) { const { xmpp, roomJid } = await this.requireJoinedRoom(spaceId, channelId); await this.compatSendReaction(xmpp, roomJid, "groupchat", messageId, emojis); }
+  async sendChatState(spaceId: string, channelId: string, state: ChatStateType, thread?: { id: string; parent?: string }) { const { xmpp, roomJid } = await this.requireJoinedRoom(spaceId, channelId); await this.compatSendChatState(xmpp, roomJid, "groupchat", state, thread); }
+  async sendDisplayed(spaceId: string, channelId: string, messageId: string, thread?: { id: string; parent?: string }) { const { xmpp, roomJid } = await this.requireJoinedRoom(spaceId, channelId); await this.compatSendDisplayed(xmpp, roomJid, "groupchat", messageId, thread); }
+  async sendReaction(spaceId: string, channelId: string, messageId: string, emojis: string[], thread?: { id: string; parent?: string }) { const { xmpp, roomJid } = await this.requireJoinedRoom(spaceId, channelId); await this.compatSendReaction(xmpp, roomJid, "groupchat", messageId, emojis, thread); }
   /** #414: pin a message in the room. Server gates on Owner/Admin
    * affiliation; non-admins receive a `<forbidden/>` error which
    * surfaces as a rejected Promise. */
@@ -936,9 +940,19 @@ export class BrowserXmppClient {
     const page = (await xmpp.fetch_room_messages_by_stanza_ids(roomJid, stanzaIds)) as import("./wasm-types").WasmMamPage | null;
     return Array.isArray(page?.messages) ? page.messages : [];
   }
-  async sendRetraction(spaceId: string, channelId: string, retractsId: string) { const { xmpp, roomJid } = await this.requireJoinedRoom(spaceId, channelId); await this.compatSendRetraction(xmpp, roomJid, "groupchat", retractsId); }
+  async sendRetraction(spaceId: string, channelId: string, retractsId: string, thread?: { id: string; parent?: string }) { const { xmpp, roomJid } = await this.requireJoinedRoom(spaceId, channelId); await this.compatSendRetraction(xmpp, roomJid, "groupchat", retractsId, thread); }
   async sendModeration(spaceId: string, channelId: string, targetId: string, reason?: string) { const { xmpp, roomJid } = await this.requireJoinedRoom(spaceId, channelId); await this.compatSendModeration(xmpp, roomJid, targetId, reason); }
-  async sendCorrection(spaceId: string, channelId: string, body: string, replacesId: string, markup?: SendGroupMessageOptions["markup"], references?: SendGroupMessageOptions["references"]): Promise<string | null> { const { xmpp, roomJid } = await this.requireJoinedRoom(spaceId, channelId); return await this.compatSendCorrection(xmpp, roomJid, "groupchat", body, replacesId, { markup, references }); }
+  // Corrections (XEP-0308) flow through compatSendCorrection's options dict,
+  // which already serializes thread/parent into the wasm send options used by
+  // build_outbound_message — so passing { threadId, parentThreadId } here is
+  // all the wire-level conformance needs.
+  async sendCorrection(spaceId: string, channelId: string, body: string, replacesId: string, markup?: SendGroupMessageOptions["markup"], references?: SendGroupMessageOptions["references"], thread?: { id: string; parent?: string }): Promise<string | null> {
+    const { xmpp, roomJid } = await this.requireJoinedRoom(spaceId, channelId);
+    const opts: SendGroupMessageOptions = { markup, references };
+    if (thread?.id) opts.threadId = thread.id;
+    if (thread?.parent) opts.parentThreadId = thread.parent;
+    return await this.compatSendCorrection(xmpp, roomJid, "groupchat", body, replacesId, opts);
+  }
   async sendDmChatState(peerJid: string, state: ChatStateType): Promise<void> { const xmpp = await this.requireConnectedXmpp(); await this.compatSendChatState(xmpp, barePeerJid(peerJid), "chat", state); }
   async sendDmDisplayed(peerJid: string, messageId: string): Promise<void> { const xmpp = await this.requireConnectedXmpp(); await this.compatSendDisplayed(xmpp, barePeerJid(peerJid), "chat", messageId); }
   async sendDmRetraction(peerJid: string, messageId: string): Promise<void> { const xmpp = await this.requireConnectedXmpp(); await this.compatSendRetraction(xmpp, barePeerJid(peerJid), "chat", messageId); }

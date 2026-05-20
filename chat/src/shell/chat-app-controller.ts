@@ -856,7 +856,14 @@ export function useChatAppController(giphyApiKey: string) {
     await messaging.sendMessage(body, markup, references, files, replyTo, threadOverride);
   }
 
-  function sendGif(url: string) {
+  function sendGif(
+    url: string,
+    threadOverride?: { threadId: string; parentThreadId?: string },
+  ) {
+    if (threadOverride) {
+      void sendThreadMessage(url, [], [], undefined, undefined, threadOverride);
+      return;
+    }
     void sendActiveMessage(url, [], []);
   }
 
@@ -925,8 +932,18 @@ export function useChatAppController(giphyApiKey: string) {
     normalizeActiveRightPanel("thread");
   }
 
-  function notifyActiveComposing() {
-    activeTarget.value.notifyComposing();
+  function notifyActiveComposing(
+    threadOverride?: { threadId: string; parentThreadId?: string },
+  ) {
+    // XEP-0201 §3: when typing originates in a thread composer, the
+    // outbound XEP-0085 stanza echoes the active thread so peers can
+    // scope the indicator instead of treating it as channel-wide.
+    const thread = threadOverride
+      ? threadOverride.parentThreadId
+        ? { id: threadOverride.threadId, parent: threadOverride.parentThreadId }
+        : { id: threadOverride.threadId }
+      : undefined;
+    activeTarget.value.notifyComposing(thread);
   }
 
   function editActiveMessage(messageId: string, newBody: string, markup?: MarkupSpan[], references?: MessageReference[]) {

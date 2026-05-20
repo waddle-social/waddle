@@ -81,8 +81,15 @@ export function useChannelChatStates(deps: UseChannelChatStatesDeps) {
    * the first time the user types in a window of activity, then arms a
    * 3-second timer to send "paused" once typing stops. Re-arms on every
    * call.
+   *
+   * XEP-0201 §3: when typing happens inside a thread, the composing /
+   * paused notifications SHOULD carry the same `<thread/>` so peers can
+   * scope the indicator to the active thread instead of treating it as
+   * channel-wide. The debounce machine itself stays channel-shared —
+   * users only type in one place at a time, so a single composing window
+   * is fine; the wire stanza carries whatever thread is active right now.
    */
-  function notifyComposing() {
+  function notifyComposing(thread?: { id: string; parent?: string }) {
     const client = xmppClient.value;
     const spaceId = activeSpaceId.value ?? "";
     const channelId = activeChannelId.value;
@@ -90,7 +97,7 @@ export function useChannelChatStates(deps: UseChannelChatStatesDeps) {
 
     if (lastChatState !== "composing") {
       lastChatState = "composing";
-      void client.sendChatState(spaceId, channelId, "composing").catch(() => undefined);
+      void client.sendChatState(spaceId, channelId, "composing", thread).catch(() => undefined);
     }
 
     if (composingTimeout) clearTimeout(composingTimeout);
@@ -102,7 +109,7 @@ export function useChannelChatStates(deps: UseChannelChatStatesDeps) {
       )
         return;
       lastChatState = "paused";
-      void client.sendChatState(spaceId, channelId, "paused").catch(() => undefined);
+      void client.sendChatState(spaceId, channelId, "paused", thread).catch(() => undefined);
     }, COMPOSING_PAUSE_MS);
   }
 

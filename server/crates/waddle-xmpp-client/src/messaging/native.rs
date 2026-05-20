@@ -10,6 +10,7 @@ use super::builders::{
 };
 use super::namespaces::*;
 use super::types::SendMessageOptions;
+use crate::xep::thread::ThreadRef;
 
 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 pub trait MessagingExt {
@@ -45,18 +46,21 @@ pub trait MessagingExt {
         jid: &'a str,
         state: &'a str,
         message_type: &'a str,
+        thread: Option<&'a ThreadRef>,
     ) -> impl std::future::Future<Output = ClientResult<()>> + Send + 'a;
     fn send_displayed_marker<'a>(
         &'a self,
         jid: &'a str,
         message_id: &'a str,
         message_type: &'a str,
+        thread: Option<&'a ThreadRef>,
     ) -> impl std::future::Future<Output = ClientResult<()>> + Send + 'a;
     fn retract_message<'a>(
         &'a self,
         jid: &'a str,
         message_id: &'a str,
         message_type: &'a str,
+        thread: Option<&'a ThreadRef>,
     ) -> impl std::future::Future<Output = ClientResult<()>> + Send + 'a;
 }
 
@@ -118,8 +122,9 @@ impl MessagingExt for ClientHandle {
         jid: &str,
         state: &str,
         message_type: &str,
+        thread: Option<&ThreadRef>,
     ) -> ClientResult<()> {
-        let stanza = build_chat_state_message(jid, state, message_type)?;
+        let stanza = build_chat_state_message(jid, state, message_type, thread)?;
         self.send_stanza(stanza).await
     }
 
@@ -128,8 +133,9 @@ impl MessagingExt for ClientHandle {
         jid: &str,
         message_id: &str,
         message_type: &str,
+        thread: Option<&ThreadRef>,
     ) -> ClientResult<()> {
-        let stanza = build_displayed_message(jid, message_id, message_type);
+        let stanza = build_displayed_message(jid, message_id, message_type, thread);
         self.send_stanza(stanza).await
     }
 
@@ -138,8 +144,9 @@ impl MessagingExt for ClientHandle {
         jid: &str,
         message_id: &str,
         message_type: &str,
+        thread: Option<&ThreadRef>,
     ) -> ClientResult<()> {
-        let stanza = build_retraction_message(jid, message_type, message_id);
+        let stanza = build_retraction_message(jid, message_type, message_id, thread);
         self.send_stanza(stanza).await
     }
 }

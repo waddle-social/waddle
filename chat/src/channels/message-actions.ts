@@ -5,6 +5,18 @@ import type { ExtensionAnnotationAction, TimelineMessage } from "@/lib/chat-ui";
 import type { ExtensionCommandResult } from "@/lib/xmpp/extension-commands";
 import { findMessageById } from "@/lib/message-ids";
 
+// Derive an XEP-0201 thread reference from a timeline message, if it belongs
+// to one. Returns undefined for top-level (non-threaded) messages so callers
+// pass plain channel-level stanzas in that case.
+function threadRefFromMessage(
+  message: TimelineMessage | undefined,
+): { id: string; parent?: string } | undefined {
+  const id = message?.threadId;
+  if (!id) return undefined;
+  const parent = message.parentThreadId;
+  return parent ? { id, parent } : { id };
+}
+
 // Outbound message-action handlers for the channel side: reactions
 // (XEP-0444), retractions (XEP-0424), moderator retractions (XEP-0425), and
 // extension-annotation actions. Each action targets an already-rendered
@@ -78,11 +90,16 @@ export function useChannelMessageActions(deps: UseChannelMessageActionsDeps) {
     applyReaction(targetId, myNick, nextEmojis, senderId);
 
     try {
+      // XEP-0201 §3 + XEP-0444: reactions targeting a threaded message echo
+      // that message's <thread/>. Receivers without thread-aware UIs ignore it;
+      // thread-aware peers attribute the reaction to the right conversation.
+      const thread = threadRefFromMessage(msg);
       await xmppClient.value.sendReaction(
         activeSpaceId.value ?? "",
         activeChannelId.value,
         targetId,
         nextEmojis,
+        thread,
       );
     } catch (e) {
       // Roll back the optimistic update so the chip stops claiming a
@@ -111,10 +128,15 @@ export function useChannelMessageActions(deps: UseChannelMessageActionsDeps) {
     }
 
     try {
+      // XEP-0201 §3 + XEP-0424: tombstone targeting a threaded message echoes
+      // that message's <thread/> so the retraction routes into the same
+      // thread on receiving clients instead of the parent channel.
+      const thread = threadRefFromMessage(target);
       await xmppClient.value.sendRetraction(
         activeSpaceId.value ?? "",
         activeChannelId.value,
         targetId,
+        thread,
       );
     } catch (e) {
       actionError.value = normalizeError(e);

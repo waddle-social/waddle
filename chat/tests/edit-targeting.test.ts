@@ -66,6 +66,8 @@ describe("edit targeting", () => {
       "original-message-id",
       undefined,
       undefined,
+      // XEP-0201 thread arg — absent for a non-threaded target message.
+      undefined,
     );
   });
 

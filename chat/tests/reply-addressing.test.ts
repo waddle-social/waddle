@@ -337,7 +337,8 @@ describe("room stanza-id targeting", () => {
     await messaging.retractMessage("client-id-1");
     await messaging.moderateMessage("client-id-1", "spam");
 
-    expect(sendRetraction).toHaveBeenCalledWith("w1", "c1", "room-stanza-1");
+    // XEP-0201 thread arg — absent for a non-threaded target message.
+    expect(sendRetraction).toHaveBeenCalledWith("w1", "c1", "room-stanza-1", undefined);
     expect(sendModeration).toHaveBeenCalledWith("w1", "c1", "room-stanza-1", "spam");
   });
 

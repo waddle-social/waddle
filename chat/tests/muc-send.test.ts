@@ -191,6 +191,52 @@ describe("useMucSend.sendMessage — failure paths", () => {
   });
 });
 
+describe("useMucSend.sendMessage — thread routing (GIF picks)", () => {
+  // Regression: GIFs picked from inside a thread used to land in the parent
+  // channel because sendGif never forwarded a threadOverride. The composer's
+  // text path always built one in ThreadPanel.onSend; the GIF emit chain now
+  // mirrors it, so sendMessage gets threadOverride.threadId in arg 6.
+  test("threadOverride.threadId is forwarded to client.sendGroupMessage as opts.threadId", async () => {
+    const sendGroupMessage = mock(async () => ({ id: "sid-gif", state: "sending" }));
+    const client = makeClient({ sendGroupMessage } as Partial<BrowserXmppClient>);
+    const h = harness({ client });
+
+    await h.send.sendMessage(
+      "https://giphy.example/animated.gif",
+      [],
+      [],
+      undefined,
+      undefined,
+      { threadId: "thread-42" },
+    );
+
+    expect(sendGroupMessage).toHaveBeenCalledTimes(1);
+    const call = (sendGroupMessage as unknown as ReturnType<typeof mock>).mock.calls[0]!;
+    // sendGroupMessage(spaceId, channelId, body, opts) — threadId on opts (arg 4)
+    expect(call[3].threadId).toBe("thread-42");
+    expect(call[2]).toBe("https://giphy.example/animated.gif");
+  });
+
+  test("threadOverride.parentThreadId is forwarded for nested sub-threads", async () => {
+    const sendGroupMessage = mock(async () => ({ id: "sid-gif", state: "sending" }));
+    const client = makeClient({ sendGroupMessage } as Partial<BrowserXmppClient>);
+    const h = harness({ client });
+
+    await h.send.sendMessage(
+      "https://giphy.example/nested.gif",
+      [],
+      [],
+      undefined,
+      undefined,
+      { threadId: "thread-child", parentThreadId: "thread-parent" },
+    );
+
+    const call = (sendGroupMessage as unknown as ReturnType<typeof mock>).mock.calls[0]!;
+    expect(call[3].threadId).toBe("thread-child");
+    expect(call[3].parentThreadId).toBe("thread-parent");
+  });
+});
+
 describe("useMucSend.editMessage", () => {
   test("delegates to client.sendCorrection with the message's correctionTargetId", async () => {
     const sendCorrection = mock(async () => undefined);
