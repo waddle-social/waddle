@@ -44,6 +44,18 @@ export function useChatAppController(giphyApiKey: string) {
   const ui = useChatShellState();
   const { mode: scrollDirectionMode } = useScrollDirectionPreference();
 
+  // Seed page-level UI state from the URL synchronously so the first
+  // render lands on the right page. Without this, every cold load
+  // flashes the default home dashboard for one tick before
+  // `onConnectionReady` runs `applyRouteTarget` and snaps to the real
+  // page. `activePageFromMatch` / `communitySurfaceFromMatch` are
+  // hoisted function declarations defined further down in this scope.
+  if (typeof window !== "undefined") {
+    const initialMatch = matchLocation(window.location.pathname, window.location.search);
+    ui.activePage.value = activePageFromMatch(initialMatch);
+    ui.activeCommunitySurface.value = communitySurfaceFromMatch(initialMatch);
+  }
+
   const xmppClient = computed(() => connectionStore.client);
   const session = computed(() => connectionStore.session);
   const api = computed(() => connectionStore.api);
