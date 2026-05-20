@@ -19,7 +19,7 @@ import PinnedPanel from "@/components/chat/PinnedPanel.vue";
 import UserSettingsPage from "@/components/chat/UserSettingsPage.vue";
 import WaddlesSidebar from "@/components/chat/WaddlesSidebar.vue";
 import AdminView from "@/components/admin/AdminView.vue";
-import { parseChatLocation, type AdminPanel } from "@/shell/navigation";
+import { matchLocation, type AdminPanel } from "@/router";
 import { buildHomeDashboardProps } from "@/home/dashboard-props";
 import type { ChatAppController } from "@/shell/chat-app-controller";
 import type { DiscoveredExtensionRoute } from "@/lib/xmpp/extension-commands";
@@ -207,14 +207,14 @@ function onSelectChannelFromSidebar(id: string) {
 }
 
 // ── Admin route plumbing (V1) ───────────────────────────────────────
-// `parseChatLocation` already understands `/admin/<panel>`, but the
-// admin view is rendered straight out of `ChatReadyShell` rather than
-// the chat workspace, so we hold the panel slug separately and react
-// to history-driven changes.
+// `matchLocation` already understands `/admin/<panel>`, but the admin
+// view is rendered straight out of `ChatReadyShell` rather than the
+// chat workspace, so we hold the panel slug separately and react to
+// history-driven changes.
 function parseAdminPanelFromLocation(): AdminPanel {
   if (typeof window === "undefined") return "users";
-  const parsed = parseChatLocation(window.location.pathname, window.location.search);
-  return parsed.adminPanel ?? "users";
+  const match = matchLocation(window.location.pathname, window.location.search);
+  return match.id === "admin" ? match.params.panel : "users";
 }
 const adminPanelRef = ref<AdminPanel>(parseAdminPanelFromLocation());
 const adminPanelFromUrl = computed<AdminPanel>(() => adminPanelRef.value);
@@ -224,17 +224,17 @@ function refreshAdminPanelFromUrl() {
 function onAdminNavigate(path: string) {
   if (typeof window === "undefined") return;
   if (window.location.pathname + window.location.search !== path) {
-    window.history.pushState({ waddlePage: "admin" }, "", path);
+    window.history.pushState({ waddleRouteId: "admin" }, "", path);
     refreshAdminPanelFromUrl();
   }
 }
 function onAdminBack() {
   if (typeof window === "undefined") return;
-  const state = window.history.state as { waddlePage?: string } | null;
-  if (state?.waddlePage === "admin") {
+  const state = window.history.state as { waddleRouteId?: string } | null;
+  if (state?.waddleRouteId === "admin") {
     window.history.back();
   } else {
-    window.history.pushState({ waddlePage: "dashboard" }, "", "/");
+    window.history.pushState({ waddleRouteId: "home" }, "", "/");
     window.dispatchEvent(new PopStateEvent("popstate"));
   }
 }

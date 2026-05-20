@@ -15,7 +15,7 @@ import {
   Users,
   X,
 } from "lucide-vue-next";
-import { buildAdminPath, type AdminPanel } from "@/shell/navigation";
+import { routes, type AdminPanel } from "@/router";
 
 interface PanelDef {
   slug: AdminPanel;
@@ -52,7 +52,7 @@ function isActive(panel: PanelDef): boolean {
 function onPanelClick(panel: PanelDef): void {
   if (!panel.enabled) return;
   sidebarOpen.value = false;
-  emit("navigate", buildAdminPath(panel.slug));
+  emit("navigate", routes.admin.href({ params: { panel: panel.slug } }));
 }
 
 const activeLabel = computed(() => {

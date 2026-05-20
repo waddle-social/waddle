@@ -6,7 +6,7 @@ import UsersPanel from "@/components/admin/UsersPanel.vue";
 import SpacesPanel from "@/components/admin/SpacesPanel.vue";
 import ChannelsPanel from "@/components/admin/ChannelsPanel.vue";
 import type { BrowserXmppClient } from "@/lib/xmpp-client";
-import type { AdminPanel } from "@/shell/navigation";
+import type { AdminPanel } from "@/router";
 
 type RoleCheckState = "loading" | "owner" | "denied" | "error";
 

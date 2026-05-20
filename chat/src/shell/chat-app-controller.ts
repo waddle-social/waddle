@@ -16,7 +16,8 @@ import { useCommunityEvents } from "@/services/community-events";
 import { useChatReadActivity } from "@/shell/read-activity";
 import { useDeploymentVersionInfo } from "@/shell/version";
 import { useXmppRosterContacts } from "@/contacts/roster";
-import { buildDirectMessagePath, buildChannelExtensionPath, buildChannelPath, buildChatSettingsPath, parseChatLocation, pushDirectMessageRoute, pushChannelExtensionRoute, pushChannelRoute, pushChatSettingsRoute, pushThreadsRoute, resolveChannelBySlug, shouldLoadWaddleStructureForRoute } from "@/shell/navigation";
+import { matchLocation, navigate, routes, type RouteMatch } from "@/router";
+import { resolveChannelBySlug, shouldLoadStructureForMatch } from "@/shell/route-helpers";
 import { barePeerJid, jidDomain, parseManagedRoomBareJid } from "@/lib/xmpp-client";
 import { mdsChatKey, setLastSeen } from "@/lib/last-seen-store";
 import { roomJidForChannelId as resolveRoomJidForChannelId } from "@/lib/channel-room";
@@ -714,25 +715,37 @@ export function useChatAppController(giphyApiKey: string) {
     });
   }, { immediate: true });
 
-  const settingsPath = buildChatSettingsPath();
+  function hrefForCurrent(): string {
+    const channel = waddles.currentChannel.value;
+    if (
+      ui.activePage.value === "chat"
+      && activeRightPanel.value === "extension"
+      && activeExtensionRouteKey.value
+      && channel
+    ) {
+      return routes.channelExtension.href({
+        params: {
+          channelId: channel.id,
+          pluginId: activeExtensionRouteKey.value.pluginId,
+          routeId: activeExtensionRouteKey.value.routeId,
+        },
+        search: { thread: activeThreadStack.value, pinned: ui.showPinnedPanel.value },
+      });
+    }
+    if (ui.sidebarMode.value === "dms" && activeDmPeer.value) {
+      return routes.dm.href({
+        params: { username: activeDmPeer.value.peerUsername },
+        search: { thread: [] },
+      });
+    }
+    if (!channel) return "/";
+    return routes.channel.href({
+      params: { channelId: channel.id },
+      search: { thread: activeThreadStack.value, pinned: ui.showPinnedPanel.value },
+    });
+  }
 
-  const currentChatPath = computed(() =>
-    ui.activePage.value === "chat" && activeRightPanel.value === "extension" && activeExtensionRouteKey.value
-      ? buildChannelExtensionPath(
-          waddles.currentChannel.value,
-          activeExtensionRouteKey.value.pluginId,
-          activeExtensionRouteKey.value.routeId,
-          activeThreadStack.value,
-          ui.showPinnedPanel.value,
-        )
-      : ui.sidebarMode.value === "dms" && activeDmPeer.value
-      ? buildDirectMessagePath(activeDmPeer.value.peerUsername)
-      : buildChannelPath(
-          waddles.currentChannel.value,
-          activeThreadStack.value,
-          ui.showPinnedPanel.value,
-        ),
-  );
+  const currentChatPath = computed(() => hrefForCurrent());
 
   async function setupPushSubscription() {
     if (!xmppClient.value || !connectionStore.session) return;
@@ -1110,16 +1123,16 @@ export function useChatAppController(giphyApiKey: string) {
   function updateUrl() {
     if (isApplyingRoute.value) return;
     if (ui.activePage.value === "settings") {
-      pushChatSettingsRoute("app");
+      navigate({ id: "settings", origin: "app" });
       return;
     }
     if (ui.activePage.value === "threads") {
-      // Without this branch the fall-through below would push
-      // `pushChannelRoute(null)` ("/") every time a watcher fires
-      // after `openThreads()` — bouncing the URL off /threads
-      // immediately, and reverting /threads back to / on initial
-      // load when `onConnectionReady`'s `finally` calls updateUrl.
-      pushThreadsRoute();
+      // Without this branch the fall-through below would push the
+      // home route ("/") every time a watcher fires after
+      // `openThreads()` — bouncing the URL off /threads immediately,
+      // and reverting /threads back to / on initial load when
+      // `onConnectionReady`'s `finally` calls updateUrl.
+      navigate({ id: "threads" });
       return;
     }
     if (ui.activePage.value === "admin") {
@@ -1130,27 +1143,37 @@ export function useChatAppController(giphyApiKey: string) {
       return;
     }
     if (ui.activePage.value === "dashboard") {
-      pushChannelRoute(null);
+      navigate({ id: "home" });
       return;
     }
+    const channel = waddles.currentChannel.value;
     if (ui.activePage.value === "chat" && activeRightPanel.value === "extension") {
-      pushChannelExtensionRoute(
-        waddles.currentChannel.value,
-        activeExtensionRouteKey.value?.pluginId,
-        activeExtensionRouteKey.value?.routeId,
-        activeThreadStack.value,
-        ui.showPinnedPanel.value,
-      );
+      const ext = activeExtensionRouteKey.value;
+      if (channel && ext) {
+        navigate({
+          id: "channelExtension",
+          params: { channelId: channel.id, pluginId: ext.pluginId, routeId: ext.routeId },
+          search: { thread: activeThreadStack.value, pinned: ui.showPinnedPanel.value },
+        });
+      } else {
+        navigate({ id: "home" });
+      }
       return;
     }
     if (ui.sidebarMode.value === "dms" && activeDmPeer.value) {
-      pushDirectMessageRoute(activeDmPeer.value.peerUsername);
+      navigate({
+        id: "dm",
+        params: { username: activeDmPeer.value.peerUsername },
+        search: { thread: [] },
+      });
+    } else if (channel) {
+      navigate({
+        id: "channel",
+        params: { channelId: channel.id },
+        search: { thread: activeThreadStack.value, pinned: ui.showPinnedPanel.value },
+      });
     } else {
-      pushChannelRoute(
-        waddles.currentChannel.value,
-        activeThreadStack.value,
-        ui.showPinnedPanel.value,
-      );
+      navigate({ id: "home" });
     }
   }
 
@@ -1267,7 +1290,7 @@ export function useChatAppController(giphyApiKey: string) {
     activeRightPanel.value = null;
     activeThreadStack.value = [];
     activeExtensionRouteKey.value = null;
-    pushThreadsRoute();
+    navigate({ id: "threads" });
   }
 
   /**
@@ -1285,14 +1308,14 @@ export function useChatAppController(giphyApiKey: string) {
     activeRightPanel.value = null;
     activeThreadStack.value = [];
     activeExtensionRouteKey.value = null;
-    pushChannelRoute(null);
+    navigate({ id: "home" });
   }
 
   function closeUserSettings() {
-    const state = window.history.state as { waddlePage?: string; origin?: string } | null;
+    const state = window.history.state as { waddleRouteId?: string; origin?: string } | null;
     if (
-      window.location.pathname === settingsPath
-      && state?.waddlePage === "settings"
+      window.location.pathname === "/settings"
+      && state?.waddleRouteId === "settings"
       && state.origin === "app"
     ) {
       window.history.back();
@@ -1302,26 +1325,51 @@ export function useChatAppController(giphyApiKey: string) {
         ? "chat"
         : "dashboard";
     if (window.location.pathname + window.location.search !== currentChatPath.value) {
-      if (activeRightPanel.value === "extension") {
-        pushChannelExtensionRoute(
-          waddles.currentChannel.value,
-          activeExtensionRouteKey.value?.pluginId,
-          activeExtensionRouteKey.value?.routeId,
-          activeThreadStack.value,
-          ui.showPinnedPanel.value,
-        );
+      const channel = waddles.currentChannel.value;
+      if (activeRightPanel.value === "extension" && channel && activeExtensionRouteKey.value) {
+        navigate({
+          id: "channelExtension",
+          params: {
+            channelId: channel.id,
+            pluginId: activeExtensionRouteKey.value.pluginId,
+            routeId: activeExtensionRouteKey.value.routeId,
+          },
+          search: { thread: activeThreadStack.value, pinned: ui.showPinnedPanel.value },
+        });
       } else if (ui.sidebarMode.value === "dms" && activeDmPeer.value) {
-        pushDirectMessageRoute(activeDmPeer.value.peerUsername);
+        navigate({
+          id: "dm",
+          params: { username: activeDmPeer.value.peerUsername },
+          search: { thread: [] },
+        });
+      } else if (channel) {
+        navigate({
+          id: "channel",
+          params: { channelId: channel.id },
+          search: { thread: activeThreadStack.value, pinned: false },
+        });
       } else {
-        pushChannelRoute(waddles.currentChannel.value, activeThreadStack.value);
+        navigate({ id: "home" });
       }
     }
   }
 
+  function activePageFromMatch(match: RouteMatch): "dashboard" | "chat" | "settings" | "admin" | "threads" {
+    switch (match.id) {
+      case "home": return "dashboard";
+      case "channel":
+      case "channelExtension":
+      case "dm": return "chat";
+      case "settings": return "settings";
+      case "admin": return "admin";
+      case "threads": return "threads";
+    }
+  }
+
   function onPopState() {
-    const route = parseChatLocation(window.location.pathname, window.location.search);
-    ui.activePage.value = route.page === "extension" ? "chat" : route.page;
-    if (route.page === "admin") {
+    const match = matchLocation(window.location.pathname, window.location.search);
+    ui.activePage.value = activePageFromMatch(match);
+    if (match.id === "admin") {
       // Admin view owns the entire workspace; clear DM/thread state so
       // a popstate back to /admin doesn't leave a stale right panel
       // mounted underneath.
@@ -1330,12 +1378,12 @@ export function useChatAppController(giphyApiKey: string) {
       activeExtensionRouteKey.value = null;
       return;
     }
-    if (route.page === "settings" || route.page === "threads") {
+    if (match.id === "settings" || match.id === "threads") {
       activeThreadTargetMessageId.value = null;
       activeThreadStack.value = [];
       return;
     }
-    if (route.page === "dashboard") {
+    if (match.id === "home") {
       ui.sidebarMode.value = "channels";
       dmConversations.closeDm();
       waddles.activeChannelId.value = null;
@@ -1345,34 +1393,34 @@ export function useChatAppController(giphyApiKey: string) {
       activeThreadStack.value = [];
       return;
     }
-    if (!route.channelSlug && !route.dmUsername) return;
 
     const requestId = ++routeRequestId;
     isApplyingRoute.value = true;
-    void applyRouteTarget(route, requestId).finally(() => {
+    void applyRouteTarget(match, requestId).finally(() => {
       if (requestId === routeRequestId) {
         isApplyingRoute.value = false;
       }
     });
   }
 
-  async function applyRouteTarget(route: ReturnType<typeof parseChatLocation>, requestId: number) {
-    ui.activePage.value = route.page === "extension" ? "chat" : route.page;
-    // #414: sync the pin panel toggle with `?pinned=1`. Channel routes,
-    // including extension panels, can keep pinned collapsed beside another panel.
-    ui.showPinnedPanel.value = route.pinnedPanelOpen && (route.page === "chat" || route.page === "extension") && !route.dmUsername;
-    if (route.page === "admin") {
+  async function applyRouteTarget(match: RouteMatch, requestId: number) {
+    ui.activePage.value = activePageFromMatch(match);
+    // #414: sync the pin panel toggle with `?pinned=1`. Only channel
+    // routes (incl. extension panels) carry it; DM/home/settings always clear.
+    ui.showPinnedPanel.value =
+      match.id === "channel" || match.id === "channelExtension" ? match.search.pinned : false;
+    if (match.id === "admin") {
       activeThreadTargetMessageId.value = null;
       activeThreadStack.value = [];
       activeExtensionRouteKey.value = null;
       return;
     }
-    if (route.page === "settings" || route.page === "threads") {
+    if (match.id === "settings" || match.id === "threads") {
       activeThreadTargetMessageId.value = null;
       activeThreadStack.value = [];
       return;
     }
-    if (route.page === "dashboard") {
+    if (match.id === "home") {
       ui.sidebarMode.value = "channels";
       dmConversations.closeDm();
       waddles.activeChannelId.value = null;
@@ -1380,14 +1428,14 @@ export function useChatAppController(giphyApiKey: string) {
       messaging.clearMessages();
       activeThreadTargetMessageId.value = null;
       activeThreadStack.value = [];
-      if (shouldLoadWaddleStructureForRoute(route, waddles.channels.value.length)) {
+      if (shouldLoadStructureForMatch(match, waddles.channels.value.length)) {
         await waddles.loadStructure(null, { noChannelSelect: true });
       }
       return;
     }
-    if (route.dmUsername) {
+    if (match.id === "dm") {
       activeExtensionRouteKey.value = null;
-      const username = route.dmUsername.replace(/^@/, "").trim();
+      const username = match.params.username.replace(/^@/, "").trim();
       if (username) {
         const domain = session.value ? jidDomain(session.value.jid) : "";
         if (!domain) return;
@@ -1396,74 +1444,70 @@ export function useChatAppController(giphyApiKey: string) {
       return;
     }
 
-    if (shouldLoadWaddleStructureForRoute(route, waddles.channels.value.length)) {
+    if (shouldLoadStructureForMatch(match, waddles.channels.value.length)) {
       await waddles.loadStructure();
       if (requestId !== routeRequestId) return;
     }
 
-    if (route.page === "extension") {
+    if (match.id === "channelExtension") {
       ui.sidebarMode.value = "channels";
       dmConversations.closeDm();
       activeThreadTargetMessageId.value = null;
-      activeThreadStack.value = route.threadStack;
-      if (route.channelSlug) {
-        const ch = resolveChannelBySlug(route.channelSlug, waddles.channels.value);
-        if (!ch) {
-          waddles.activeChannelId.value = null;
-          activeExtensionRouteKey.value = null;
-          return;
-        }
-        waddles.activeChannelId.value = ch.id;
-        void waddles.reloadChannelMembers(ch.id);
-        const nextExtensionRouteKey = route.extensionPluginId && route.extensionRouteId
-          ? { channelId: ch.id, pluginId: route.extensionPluginId, routeId: route.extensionRouteId }
-          : null;
-        messaging.clearMessages();
-        await messaging.loadMessages(ch.spaceId ?? "", ch.id);
-        if (requestId !== routeRequestId) return;
-        activeThreadTargetMessageId.value = null;
-        activeThreadStack.value = route.threadStack;
-        ui.showPinnedPanel.value = route.pinnedPanelOpen;
-        for (const threadId of route.threadStack) {
-          void messaging.backfillThread(threadId);
-        }
-        activeExtensionRouteKey.value = nextExtensionRouteKey;
-        activeRightPanel.value = activeExtensionRouteKey.value ? "extension" : null;
-      }
-      return;
-    }
-
-    if (route.channelSlug) {
-      activeExtensionRouteKey.value = null;
-      const ch = resolveChannelBySlug(route.channelSlug, waddles.channels.value);
+      activeThreadStack.value = match.search.thread;
+      const ch = resolveChannelBySlug(match.params.channelId, waddles.channels.value);
       if (!ch) {
         waddles.activeChannelId.value = null;
-        messaging.clearMessages();
+        activeExtensionRouteKey.value = null;
         return;
       }
       waddles.activeChannelId.value = ch.id;
       void waddles.reloadChannelMembers(ch.id);
+      const nextExtensionRouteKey = {
+        channelId: ch.id,
+        pluginId: match.params.pluginId,
+        routeId: match.params.routeId,
+      };
       messaging.clearMessages();
       await messaging.loadMessages(ch.spaceId ?? "", ch.id);
-    } else if (waddles.activeChannelId.value) {
-      messaging.clearMessages();
-      await messaging.loadMessages(waddles.currentChannel.value?.spaceId ?? "", waddles.activeChannelId.value);
+      if (requestId !== routeRequestId) return;
+      activeThreadTargetMessageId.value = null;
+      activeThreadStack.value = match.search.thread;
+      ui.showPinnedPanel.value = match.search.pinned;
+      for (const threadId of match.search.thread) {
+        void messaging.backfillThread(threadId);
+      }
+      activeExtensionRouteKey.value = nextExtensionRouteKey;
+      activeRightPanel.value = "extension";
+      return;
     }
+
+    // match.id === "channel"
+    activeExtensionRouteKey.value = null;
+    const ch = resolveChannelBySlug(match.params.channelId, waddles.channels.value);
+    if (!ch) {
+      waddles.activeChannelId.value = null;
+      messaging.clearMessages();
+      return;
+    }
+    waddles.activeChannelId.value = ch.id;
+    void waddles.reloadChannelMembers(ch.id);
+    messaging.clearMessages();
+    await messaging.loadMessages(ch.spaceId ?? "", ch.id);
 
     // Restore the thread panel from the URL and initialize paging for every
     // visible thread pane. Dedupe in the messaging composable keeps already
     // loaded roots/replies stable.
-    ui.showPinnedPanel.value = route.pinnedPanelOpen;
+    ui.showPinnedPanel.value = match.search.pinned;
     activeThreadTargetMessageId.value = null;
-    activeThreadStack.value = route.threadStack;
-    if (route.pinnedPanelOpen) {
+    activeThreadStack.value = match.search.thread;
+    if (match.search.pinned) {
       activeRightPanel.value = "pinned";
-    } else if (route.threadStack.length > 0) {
+    } else if (match.search.thread.length > 0) {
       activeRightPanel.value = "thread";
     } else {
       activeRightPanel.value = null;
     }
-    for (const threadId of route.threadStack) {
+    for (const threadId of match.search.thread) {
       void messaging.backfillThread(threadId);
     }
   }
@@ -1471,19 +1515,19 @@ export function useChatAppController(giphyApiKey: string) {
   // --- Bootstrap (watches connection store) ---
 
   async function onConnectionReady() {
-    const route = parseChatLocation(window.location.pathname, window.location.search);
+    const match = matchLocation(window.location.pathname, window.location.search);
     const requestId = ++routeRequestId;
     isApplyingRoute.value = true;
 
     try {
-      if (route.page === "dashboard") {
+      if (match.id === "home") {
         await waddles.loadStructure(null, { noChannelSelect: true });
       } else {
-        await waddles.loadSpace({ loadStructure: !shouldLoadWaddleStructureForRoute(route, waddles.channels.value.length) });
+        await waddles.loadSpace({ loadStructure: !shouldLoadStructureForMatch(match, waddles.channels.value.length) });
       }
       await refreshExtensionRoutes();
       if (requestId === routeRequestId) {
-        await applyRouteTarget(route, requestId);
+        await applyRouteTarget(match, requestId);
       }
       showFirstRunSetupIfNeeded();
     } finally {
@@ -1525,7 +1569,7 @@ export function useChatAppController(giphyApiKey: string) {
     // events buffered from the prior session don't leak forward.
     resetPinnedRooms();
     ui.showPinnedPanel.value = false;
-    pushChannelRoute(null);
+    navigate({ id: "home" });
     await connectionStore.logout();
   }
 
