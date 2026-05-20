@@ -191,14 +191,20 @@ pub fn extract_forum_action(msg: &Message) -> Option<ForumAction> {
 /// Build a `<thread-create/>` element.
 pub fn build_thread_create_element(thread: &ThreadCreate) -> Element {
     Element::builder("thread-create", NS_FORUMS)
-        .attr("title", thread.title.as_str())
+        .attr(
+            minidom::rxml::xml_ncname!("title").to_owned(),
+            thread.title.as_str(),
+        )
         .build()
 }
 
 /// Build a `<thread-reply/>` element.
 pub fn build_thread_reply_element(reply: &ThreadReply) -> Element {
     Element::builder("thread-reply", NS_FORUMS)
-        .attr("thread-id", reply.thread_id.as_str())
+        .attr(
+            minidom::rxml::xml_ncname!("thread-id").to_owned(),
+            reply.thread_id.as_str(),
+        )
         .build()
 }
 

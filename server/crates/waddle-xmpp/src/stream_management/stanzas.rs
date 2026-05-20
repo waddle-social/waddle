@@ -116,15 +116,21 @@ impl SmEnabled {
 
     /// Serialize to an `<enabled/>` XML string.
     pub fn to_xml(&self) -> String {
-        let mut builder = Element::builder("enabled", SM_NS).attr("id", self.id.as_str());
+        let mut builder = Element::builder("enabled", SM_NS).attr(
+            minidom::rxml::xml_ncname!("id").to_owned(),
+            self.id.as_str(),
+        );
         if self.resume {
-            builder = builder.attr("resume", "true");
+            builder = builder.attr(minidom::rxml::xml_ncname!("resume").to_owned(), "true");
         }
         if let Some(max) = self.max {
-            builder = builder.attr("max", max.to_string());
+            builder = builder.attr(
+                minidom::rxml::xml_ncname!("max").to_owned(),
+                max.to_string(),
+            );
         }
         if let Some(location) = self.location.as_deref() {
-            builder = builder.attr("location", location);
+            builder = builder.attr(minidom::rxml::xml_ncname!("location").to_owned(), location);
         }
         element_to_xml(builder.build())
     }
@@ -177,8 +183,14 @@ impl SmResumed {
     pub fn to_xml(&self) -> String {
         element_to_xml(
             Element::builder("resumed", SM_NS)
-                .attr("previd", self.previd.as_str())
-                .attr("h", self.h.to_string())
+                .attr(
+                    minidom::rxml::xml_ncname!("previd").to_owned(),
+                    self.previd.as_str(),
+                )
+                .attr(
+                    minidom::rxml::xml_ncname!("h").to_owned(),
+                    self.h.to_string(),
+                )
                 .build(),
         )
     }
@@ -222,7 +234,7 @@ impl SmFailed {
     pub fn to_xml(&self) -> String {
         let mut builder = Element::builder("failed", SM_NS);
         if let Some(h) = self.h {
-            builder = builder.attr("h", h.to_string());
+            builder = builder.attr(minidom::rxml::xml_ncname!("h").to_owned(), h.to_string());
         }
         if let Some(condition) = self.condition.as_deref() {
             builder = builder.append(Element::builder(condition, STANZA_ERROR_NS).build());
@@ -290,7 +302,10 @@ impl SmAck {
     pub fn to_xml(&self) -> String {
         element_to_xml(
             Element::builder("a", SM_NS)
-                .attr("h", self.h.to_string())
+                .attr(
+                    minidom::rxml::xml_ncname!("h").to_owned(),
+                    self.h.to_string(),
+                )
                 .build(),
         )
     }

@@ -4,15 +4,15 @@ use crate::protocol::handlers::ping::PingHandler;
 use crate::protocol::handlers::rich_target_validation::RICH_TARGET_LOOKUP_CALLBACK_SENTINEL;
 use minidom::Element;
 use std::sync::Arc;
-use xmpp_parsers::iq::{Iq, IqType};
+use xmpp_parsers::iq::Iq;
 
 fn make_ping_iq(id: &str) -> Iq {
     let ping_elem = Element::builder("ping", crate::xep::xep0199::NS_PING).build();
-    Iq {
+    Iq::Get {
         from: None,
         to: None,
         id: id.to_string(),
-        payload: IqType::Get(ping_elem),
+        payload: ping_elem,
     }
 }
 
@@ -29,15 +29,15 @@ fn ping_iq_in_ready_phase_emits_send_stanza() {
     let mut sm = test_support::ready_machine("waddle.social", test_jid(), dispatcher);
 
     let events = sm.handle(InboundEvent::FrameReceived(InboundFrame::Stanza(Box::new(
-        Stanza::Iq(make_ping_iq("ping-42")),
+        Stanza::Iq(Box::new(make_ping_iq("ping-42"))),
     ))));
 
     assert_eq!(events.len(), 1, "expected one SendStanza event");
     match &events[0] {
         OutboundEvent::SendStanza(stanza) => match stanza.as_ref() {
             Stanza::Iq(reply) => {
-                assert_eq!(reply.id, "ping-42");
-                assert!(matches!(reply.payload, IqType::Result(_)));
+                assert_eq!(reply.id(), "ping-42");
+                assert!(matches!(reply.as_ref(), Iq::Result { .. }));
             }
             _ => panic!("expected IQ reply stanza"),
         },
@@ -52,7 +52,7 @@ fn ping_iq_before_auth_is_logged_and_dropped() {
     let mut sm = XmppStateMachine::new("waddle.social", dispatcher);
 
     let events = sm.handle(InboundEvent::FrameReceived(InboundFrame::Stanza(Box::new(
-        Stanza::Iq(make_ping_iq("ping-early")),
+        Stanza::Iq(Box::new(make_ping_iq("ping-early"))),
     ))));
 
     assert!(
@@ -75,7 +75,7 @@ fn unknown_iq_namespace_emits_log_warning() {
     let mut sm = test_support::ready_machine("waddle.social", test_jid(), dispatcher);
 
     let events = sm.handle(InboundEvent::FrameReceived(InboundFrame::Stanza(Box::new(
-        Stanza::Iq(make_ping_iq("ping-unhandled")),
+        Stanza::Iq(Box::new(make_ping_iq("ping-unhandled"))),
     ))));
 
     assert!(
@@ -173,7 +173,7 @@ use crate::protocol::message_context::MessageContext;
 use crate::protocol::traits::{HandlerOutcome, MessageHandler};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use waddle_xmpp_core::xep0359::StanzaId;
-use xmpp_parsers::message::{Body, Message, MessageType};
+use xmpp_parsers::message::{Message, MessageType};
 
 fn ready_machine_with_dispatcher(
     dispatcher: StanzaDispatcher,
@@ -191,7 +191,8 @@ fn chat_with_body(from: &str, to: &str, body: &str) -> Message {
     let mut m = Message::new(Some(to.parse().expect("jid")));
     m.from = Some(from.parse().expect("jid"));
     m.type_ = MessageType::Chat;
-    m.bodies.insert(String::new(), Body(body.to_string()));
+    m.bodies
+        .insert(xmpp_parsers::message::Lang::new(), body.to_string());
     m
 }
 
@@ -308,7 +309,7 @@ fn xep_0308_await_then_loaded_with_valid_correction_target_resumes_pipeline() {
     // Loaded with a valid same-author archived message → resume.
     let mut archived_msg =
         chat_with_body("alice@example.com/web", "bob@example.com", "original text");
-    archived_msg.id = Some("orig-msg-1".to_string());
+    archived_msg.id = Some(xmpp_parsers::message::Id("orig-msg-1".to_string()));
     let archived = ArchivedMessage {
         stanza_id: StanzaId::new(
             "archive-A1",
@@ -412,7 +413,7 @@ fn xep_0308_correction_by_wrong_author_emits_not_acceptable() {
 
     // Loaded with an archived message whose author differs.
     let mut archived_msg = chat_with_body("mallory@example.com/web", "bob@example.com", "imposter");
-    archived_msg.id = Some("orig-msg-1".to_string());
+    archived_msg.id = Some(xmpp_parsers::message::Id("orig-msg-1".to_string()));
     let archived = ArchivedMessage {
         stanza_id: StanzaId::new(
             "archive-X",
@@ -506,7 +507,7 @@ fn snapshot_is_frozen_across_re_park_does_not_leak_mutated_state() {
     // Provide rich-target completion → pipeline resumes → hits
     // EnrichmentDispatchHandler → parks again.
     let mut archived_msg = chat_with_body("alice@example.com/web", "bob@example.com", "orig");
-    archived_msg.id = Some("orig-msg-1".to_string());
+    archived_msg.id = Some(xmpp_parsers::message::Id("orig-msg-1".to_string()));
     let archived = ArchivedMessage {
         stanza_id: StanzaId::new("A1", "alice@example.com".parse::<jid::Jid>().expect("jid")),
         message: Box::new(archived_msg),

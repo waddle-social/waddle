@@ -303,7 +303,7 @@ async fn personal_archive_mam_form_includes_extended_fields() {
 
     for field in ["before-id", "after-id", "ids"] {
         assert!(
-            response.contains(&format!("var=\"{field}\""))
+            response.contains(&format!("var='{field}'"))
                 || response.contains(&format!("var='{field}'")),
             "mam form missing {field}: {response}"
         );
@@ -313,7 +313,7 @@ async fn personal_archive_mam_form_includes_extended_fields() {
         "mam form missing XEP-0122 validation namespace: {response}"
     );
     assert!(
-        response.contains("datatype=\"xs:string\"") || response.contains("datatype='xs:string'"),
+        response.contains("datatype='xs:string'") || response.contains("datatype='xs:string'"),
         "mam form missing ids datatype: {response}"
     );
     assert!(response.contains("<open") || response.contains("<open/>"));

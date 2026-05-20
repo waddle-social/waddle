@@ -45,7 +45,7 @@ async fn community_disco_info_advertises_social_feed_namespace() {
         .await
         .expect("disco#info response");
     assert!(
-        frame.contains(&format!("var=\"{NS_SOCIAL_FEED}\""))
+        frame.contains(&format!("var='{NS_SOCIAL_FEED}'"))
             || frame.contains(&format!("var='{NS_SOCIAL_FEED}'")),
         "spaces disco#info missing social-feed namespace: {frame}"
     );
@@ -88,7 +88,7 @@ async fn social_feed_publish_and_items_round_trip() {
         .await
         .expect("publish result");
     assert!(
-        publish_result.contains("type=\"result\""),
+        publish_result.contains("type='result'"),
         "publish must succeed against the bootstrapped feed node: {publish_result}"
     );
 

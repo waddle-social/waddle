@@ -91,7 +91,10 @@ pub fn build_encrypted_element(enc: &EncryptedFile) -> Option<Element> {
     if enc.sources.is_empty() {
         return None;
     }
-    let mut builder = Element::builder("encrypted", NS_ESFS).attr("cipher", enc.cipher.as_uri());
+    let mut builder = Element::builder("encrypted", NS_ESFS).attr(
+        minidom::rxml::xml_ncname!("cipher").to_owned(),
+        enc.cipher.as_uri(),
+    );
     builder = builder.append(
         Element::builder("key", NS_ESFS)
             .append(enc.key_b64.as_str())
@@ -105,7 +108,10 @@ pub fn build_encrypted_element(enc: &EncryptedFile) -> Option<Element> {
     for hash in &enc.hashes {
         builder = builder.append(
             Element::builder("hash", NS_HASHES)
-                .attr("algo", hash.algo.as_str())
+                .attr(
+                    minidom::rxml::xml_ncname!("algo").to_owned(),
+                    hash.algo.as_str(),
+                )
                 .append(hash.value_b64.as_str())
                 .build(),
         );
@@ -114,7 +120,10 @@ pub fn build_encrypted_element(enc: &EncryptedFile) -> Option<Element> {
     for url in &enc.sources {
         sources = sources.append(
             Element::builder("url-data", NS_URL_DATA)
-                .attr("target", url.as_str())
+                .attr(
+                    minidom::rxml::xml_ncname!("target").to_owned(),
+                    url.as_str(),
+                )
                 .build(),
         );
     }

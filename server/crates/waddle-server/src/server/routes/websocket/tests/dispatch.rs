@@ -47,10 +47,8 @@ async fn drive_interpret_loop_resolves_send_stanza_into_wire_frames() {
         xmpp_parsers::message::Message::new(Some("alice@example.com".parse().expect("to jid")));
     msg.from = Some("bob@example.com/desk".parse().expect("from jid"));
     msg.type_ = xmpp_parsers::message::MessageType::Chat;
-    msg.bodies.insert(
-        String::new(),
-        xmpp_parsers::message::Body("hello".to_string()),
-    );
+    msg.bodies
+        .insert(xmpp_parsers::message::Lang::new(), "hello".to_string());
 
     let initial_events = vec![OutboundEvent::SendStanza(Box::new(Stanza::Message(msg)))];
     let deps = build_interpret_deps(state.as_ref(), None);
@@ -89,11 +87,10 @@ async fn drive_interpret_loop_runs_recipient_pass_for_peer_message() {
         xmpp_parsers::message::Message::new(Some("bob@example.com".parse().expect("to jid")));
     peer_msg.from = Some("alice@example.com/web".parse().expect("from jid"));
     peer_msg.type_ = xmpp_parsers::message::MessageType::Chat;
-    peer_msg.id = Some("alice-wire-id".to_string());
-    peer_msg.bodies.insert(
-        String::new(),
-        xmpp_parsers::message::Body("hi bob".to_string()),
-    );
+    peer_msg.id = Some(xmpp_parsers::message::Id("alice-wire-id".to_string()));
+    peer_msg
+        .bodies
+        .insert(xmpp_parsers::message::Lang::new(), "hi bob".to_string());
     // Pre-stamp alice's sender-side stanza-id so we can verify
     // the recipient pass *adds* bob's stamp rather than replacing
     // alice's (XEP-0359 §5 cross-archive preservation).
@@ -118,7 +115,7 @@ async fn drive_interpret_loop_runs_recipient_pass_for_peer_message() {
     );
     let combined = frames.join("\n");
     assert!(
-        combined.contains("by=\"bob@example.com\""),
+        combined.contains("by='bob@example.com'"),
         "recipient-pass wire frame must carry bob's stanza-id stamp; got: {combined}"
     );
     assert!(
@@ -156,10 +153,8 @@ async fn drain_outbound_dispatches_direct_frame_into_unacked_unchanged() {
         xmpp_parsers::message::Message::new(Some("alice@example.com".parse().expect("to jid")));
     msg.from = Some("bob@example.com/desk".parse().expect("from jid"));
     msg.type_ = xmpp_parsers::message::MessageType::Chat;
-    msg.bodies.insert(
-        String::new(),
-        xmpp_parsers::message::Body("plain".to_string()),
-    );
+    msg.bodies
+        .insert(xmpp_parsers::message::Lang::new(), "plain".to_string());
     let expected_xml = stanza_to_xml(&Stanza::Message(msg.clone()));
 
     let (tx, mut rx) = mpsc::channel::<OutboundStanza>(4);
@@ -210,10 +205,10 @@ async fn drain_outbound_dispatches_peer_stanza_through_recipient_pass() {
         xmpp_parsers::message::Message::new(Some("bob@example.com".parse().expect("to jid")));
     peer_msg.from = Some("alice@example.com/web".parse().expect("from jid"));
     peer_msg.type_ = xmpp_parsers::message::MessageType::Chat;
-    peer_msg.id = Some("alice-wire-id".to_string());
+    peer_msg.id = Some(xmpp_parsers::message::Id("alice-wire-id".to_string()));
     peer_msg.bodies.insert(
-        String::new(),
-        xmpp_parsers::message::Body("hi from drain".to_string()),
+        xmpp_parsers::message::Lang::new(),
+        "hi from drain".to_string(),
     );
     peer_msg
         .payloads
@@ -245,7 +240,7 @@ async fn drain_outbound_dispatches_peer_stanza_through_recipient_pass() {
     );
     let combined: String = queue.join("\n");
     assert!(
-        combined.contains("by=\"bob@example.com\""),
+        combined.contains("by='bob@example.com'"),
         "drained PeerStanza replay must carry bob's recipient-side stanza-id; got: {combined}"
     );
     assert!(

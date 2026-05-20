@@ -14,7 +14,7 @@ use std::sync::Arc;
 
 use jid::{BareJid, Jid};
 use minidom::Element;
-use xmpp_parsers::iq::{Iq, IqType};
+use xmpp_parsers::iq::Iq;
 use xmpp_parsers::jingle::{Action, Content, Jingle, Transport};
 use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
 
@@ -87,7 +87,7 @@ impl IqHandler for JingleHandler {
             }
         };
 
-        let Some(peer) = iq.to.clone() else {
+        let Some(peer) = iq.to().cloned() else {
             return error_reply(
                 iq,
                 DefinedCondition::BadRequest,
@@ -210,19 +210,19 @@ impl JingleHandler {
         // Stamp the forwarded stanza's `from` with the authenticated
         // JID — never trust the client-supplied `iq.from`.
         let forwarded_elem: Element = jingle.into();
-        let forwarded_iq = Iq {
+        let forwarded_iq = Iq::Set {
             from: Some(ctx.full_jid.clone().into()),
             to: Some(peer),
-            id: iq.id.clone(),
-            payload: IqType::Set(forwarded_elem),
+            id: iq.id().to_string(),
+            payload: forwarded_elem,
         };
 
         vec![OutboundEvent::RouteToConnection {
             jid: forwarded_iq
-                .to
-                .clone()
+                .to()
+                .cloned()
                 .unwrap_or_else(|| ctx.full_jid.clone().into()),
-            stanza: Box::new(Stanza::Iq(forwarded_iq)),
+            stanza: Box::new(Stanza::Iq(Box::new(forwarded_iq))),
         }]
     }
 
@@ -250,12 +250,18 @@ impl JingleHandler {
     /// sender. Used for transport-info, session-info, content-* and
     /// the like that don't need server mediation.
     fn route_unchanged(&self, iq: &Iq, peer: Jid, ctx: &StanzaContext<'_>) -> Vec<OutboundEvent> {
-        let mut forwarded = iq.clone();
-        forwarded.from = Some(ctx.full_jid.clone().into());
-        forwarded.to = Some(peer.clone());
+        let (header, payload) = iq.clone().split();
+        let forwarded = xmpp_parsers::iq::Iq::assemble(
+            xmpp_parsers::iq::IqHeader {
+                from: Some(ctx.full_jid.clone().into()),
+                to: Some(peer.clone()),
+                id: header.id,
+            },
+            payload,
+        );
         vec![OutboundEvent::RouteToConnection {
             jid: peer,
-            stanza: Box::new(Stanza::Iq(forwarded)),
+            stanza: Box::new(Stanza::Iq(Box::new(forwarded))),
         }]
     }
 }
@@ -393,20 +399,25 @@ fn rewrite_content_transport(
 }
 
 fn iq_set_jingle(iq: &Iq) -> Option<&Element> {
-    match &iq.payload {
-        IqType::Set(elem) if elem.name() == "jingle" && elem.ns() == NS_JINGLE => Some(elem),
+    match iq {
+        Iq::Set { payload, .. } if payload.name() == "jingle" && payload.ns() == NS_JINGLE => {
+            Some(payload)
+        }
         _ => None,
     }
 }
 
 fn error_reply(original: &Iq, cond: DefinedCondition, text: &str) -> Vec<OutboundEvent> {
-    let err = Iq {
-        from: original.to.clone(),
-        to: original.from.clone(),
-        id: original.id.clone(),
-        payload: IqType::Error(StanzaError::new(ErrorType::Cancel, cond, "en", text)),
+    let err = Iq::Error {
+        from: original.to().cloned(),
+        to: original.from().cloned(),
+        id: original.id().to_string(),
+        error: StanzaError::new(ErrorType::Cancel, cond, "en", text),
+        payload: None,
     };
-    vec![OutboundEvent::SendStanza(Box::new(Stanza::Iq(err)))]
+    vec![OutboundEvent::SendStanza(Box::new(Stanza::Iq(Box::new(
+        err,
+    ))))]
 }
 
 #[cfg(test)]
@@ -459,11 +470,11 @@ mod tests {
         let mut jingle = Jingle::new(Action::SessionInitiate, SessionId(sid.into()));
         jingle.initiator = Some(initiator.parse().unwrap());
         jingle.contents.push(content);
-        Iq {
+        Iq::Set {
             from: Some(initiator.parse().unwrap()),
             to: Some(responder.parse().unwrap()),
             id: "i1".into(),
-            payload: IqType::Set(jingle.into()),
+            payload: jingle.into(),
         }
     }
 
@@ -495,10 +506,10 @@ mod tests {
         };
         // Forwarded stanza's `from` must be the authenticated session.
         assert_eq!(
-            fwd.from.as_ref().map(|j| j.to_string()),
+            fwd.from().map(|j| j.to_string()),
             Some("alice@waddle.test/desktop".to_string())
         );
-        let IqType::Set(elem) = fwd.payload else {
+        let Iq::Set { payload: elem, .. } = *fwd else {
             panic!("expected Iq set, got error or result")
         };
         let forwarded = Jingle::try_from(elem).expect("forwarded jingle reparses");
@@ -532,11 +543,11 @@ mod tests {
         let mut jingle = Jingle::new(Action::SessionInitiate, SessionId("c1".into()));
         jingle.initiator = Some("charlie@waddle.test/desktop".parse().unwrap());
         jingle.contents.push(content);
-        let iq = Iq {
+        let iq = Iq::Set {
             from: Some("alice@waddle.test/desktop".parse().unwrap()),
             to: Some("bob@waddle.test/desktop".parse().unwrap()),
             id: "spoof".into(),
-            payload: IqType::Set(jingle.into()),
+            payload: jingle.into(),
         };
 
         let jid = test_ctx_jid();
@@ -546,7 +557,7 @@ mod tests {
         match &events[0] {
             OutboundEvent::SendStanza(stanza) => match stanza.as_ref() {
                 Stanza::Iq(reply) => {
-                    let IqType::Error(err) = &reply.payload else {
+                    let Iq::Error { error: err, .. } = &**reply else {
                         panic!("expected error");
                     };
                     assert_eq!(err.defined_condition, DefinedCondition::Forbidden);
@@ -570,11 +581,11 @@ mod tests {
         let mut jingle = Jingle::new(Action::SessionInitiate, SessionId("c1".into()));
         jingle.initiator = Some("alice@waddle.test/desktop".parse().unwrap());
         jingle.contents.push(content);
-        let iq = Iq {
+        let iq = Iq::Set {
             from: Some("alice@waddle.test/desktop".parse().unwrap()),
             to: Some("bob@waddle.test/desktop".parse().unwrap()),
             id: "i1".into(),
-            payload: IqType::Set(jingle.into()),
+            payload: jingle.into(),
         };
 
         let jid = test_ctx_jid();
@@ -584,7 +595,7 @@ mod tests {
         match &events[0] {
             OutboundEvent::SendStanza(stanza) => match stanza.as_ref() {
                 Stanza::Iq(reply) => {
-                    let IqType::Error(err) = &reply.payload else {
+                    let Iq::Error { error: err, .. } = &**reply else {
                         panic!("expected error reply")
                     };
                     assert_eq!(
@@ -606,11 +617,11 @@ mod tests {
         // Non-initiate actions require `initiator` so the server can
         // re-derive the scoped call-id.
         jingle.initiator = Some("alice@waddle.test/desktop".parse().unwrap());
-        let iq = Iq {
+        let iq = Iq::Set {
             from: Some("alice@waddle.test/desktop".parse().unwrap()),
             to: Some("bob@waddle.test/desktop".parse().unwrap()),
             id: "t1".into(),
-            payload: IqType::Set(jingle.into()),
+            payload: jingle.into(),
         };
 
         let sfu = fixture_sfu();
@@ -640,11 +651,11 @@ mod tests {
     fn malformed_jingle_payload_returns_bad_request() {
         // Right namespace, wrong element name — Jingle::try_from rejects.
         let bogus = Element::builder("garbage", NS_JINGLE).build();
-        let iq = Iq {
+        let iq = Iq::Set {
             from: Some("alice@waddle.test/desktop".parse().unwrap()),
             to: Some("bob@waddle.test/desktop".parse().unwrap()),
             id: "m1".into(),
-            payload: IqType::Set(bogus),
+            payload: bogus,
         };
         let jid = test_ctx_jid();
         let handler = JingleHandler::new(fixture_sfu());
@@ -653,7 +664,7 @@ mod tests {
             panic!()
         };
         let Stanza::Iq(reply) = *stanza else { panic!() };
-        let IqType::Error(err) = reply.payload else {
+        let Iq::Error { error: err, .. } = *reply else {
             panic!("expected error")
         };
         assert_eq!(err.defined_condition, DefinedCondition::BadRequest);
@@ -671,12 +682,12 @@ mod tests {
         let mut jingle = Jingle::new(Action::SessionInitiate, SessionId("c1".into()));
         jingle.initiator = Some("alice@waddle.test/desktop".parse().unwrap());
         jingle.contents.push(content);
-        let iq = Iq {
-            from: Some("alice@waddle.test/desktop".parse().unwrap()),
+        let iq = Iq::Set {
+            from: Some("alice@waddle.test/desktop".parse().expect("valid full jid")),
             // Bare JID — no resource.
-            to: Some("bob@waddle.test".parse().unwrap()),
+            to: Some("bob@waddle.test".parse().expect("valid jid")),
             id: "b1".into(),
-            payload: IqType::Set(jingle.into()),
+            payload: jingle.into(),
         };
         let jid = test_ctx_jid();
         let handler = JingleHandler::new(fixture_sfu());
@@ -685,7 +696,7 @@ mod tests {
             panic!()
         };
         let Stanza::Iq(reply) = *stanza else { panic!() };
-        let IqType::Error(err) = reply.payload else {
+        let Iq::Error { error: err, .. } = *reply else {
             panic!("expected error")
         };
         assert_eq!(err.defined_condition, DefinedCondition::BadRequest);
@@ -695,12 +706,16 @@ mod tests {
     fn transport_info_forwards_unchanged_with_sanitised_from() {
         let mut jingle = Jingle::new(Action::TransportInfo, SessionId("c1".into()));
         jingle.initiator = Some("alice@waddle.test/desktop".parse().unwrap());
-        let iq = Iq {
+        let iq = Iq::Set {
             // Spoofed: client claims `iq.from` is charlie's.
-            from: Some("charlie@waddle.test/desktop".parse().unwrap()),
-            to: Some("bob@waddle.test/desktop".parse().unwrap()),
+            from: Some(
+                "charlie@waddle.test/desktop"
+                    .parse()
+                    .expect("valid full jid"),
+            ),
+            to: Some("bob@waddle.test/desktop".parse().expect("valid full jid")),
             id: "ti1".into(),
-            payload: IqType::Set(jingle.into()),
+            payload: jingle.into(),
         };
         let jid = test_ctx_jid();
         let handler = JingleHandler::new(fixture_sfu());
@@ -715,7 +730,7 @@ mod tests {
         let Stanza::Iq(fwd) = *stanza else { panic!() };
         // route_unchanged must overwrite the spoofed `from`.
         assert_eq!(
-            fwd.from.as_ref().map(|j| j.to_string()),
+            fwd.from().map(|j| j.to_string()),
             Some("alice@waddle.test/desktop".to_string())
         );
     }
@@ -729,7 +744,7 @@ mod tests {
         match &events[0] {
             OutboundEvent::SendStanza(stanza) => match stanza.as_ref() {
                 Stanza::Iq(reply) => {
-                    let IqType::Error(err) = &reply.payload else {
+                    let Iq::Error { error: err, .. } = reply.as_ref() else {
                         panic!("expected error")
                     };
                     assert_eq!(
@@ -774,7 +789,7 @@ mod tests {
         match &second[0] {
             OutboundEvent::SendStanza(stanza) => match stanza.as_ref() {
                 Stanza::Iq(reply) => {
-                    let IqType::Error(err) = &reply.payload else {
+                    let Iq::Error { error: err, .. } = &**reply else {
                         panic!("expected error reply, got {reply:?}");
                     };
                     assert_eq!(err.defined_condition, DefinedCondition::PolicyViolation);
@@ -791,11 +806,11 @@ mod tests {
         jingle
             .contents
             .push(Content::new(Creator::Initiator, ContentId("audio".into())));
-        let iq = Iq {
+        let iq = Iq::Set {
             from: Some("alice@waddle.test/desktop".parse().unwrap()),
             to: None,
             id: "i1".into(),
-            payload: IqType::Set(jingle.into()),
+            payload: jingle.into(),
         };
         let jid = test_ctx_jid();
         let handler = JingleHandler::new(fixture_sfu());
@@ -803,7 +818,7 @@ mod tests {
         match &events[0] {
             OutboundEvent::SendStanza(stanza) => match stanza.as_ref() {
                 Stanza::Iq(reply) => {
-                    let IqType::Error(err) = &reply.payload else {
+                    let Iq::Error { error: err, .. } = &**reply else {
                         panic!("expected error");
                     };
                     assert_eq!(err.defined_condition, DefinedCondition::BadRequest);

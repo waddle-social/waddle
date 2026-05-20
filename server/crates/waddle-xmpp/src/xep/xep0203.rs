@@ -163,10 +163,11 @@ pub fn extract_delay_stamp(msg: &Message) -> Option<DateTime<Utc>> {
 /// the canonical XEP-0082 stamp).
 pub fn build_delay_element(info: &DelayInfo) -> Element {
     let stamp = info.stamp.to_rfc3339_opts(SecondsFormat::Secs, true);
-    let mut builder = Element::builder("delay", NS_DELAY).attr("stamp", stamp);
+    let mut builder = Element::builder("delay", NS_DELAY)
+        .attr(minidom::rxml::xml_ncname!("stamp").to_owned(), stamp);
 
     if let Some(ref from) = info.from {
-        builder = builder.attr("from", from.as_str());
+        builder = builder.attr(minidom::rxml::xml_ncname!("from").to_owned(), from.as_str());
     }
 
     let mut elem = builder.build();
@@ -181,8 +182,11 @@ pub fn build_delay_element(info: &DelayInfo) -> Element {
 /// Build a simple delay element with just a timestamp and from.
 pub fn build_delay_element_simple(stamp: DateTime<Utc>, from: &str) -> Element {
     Element::builder("delay", NS_DELAY)
-        .attr("stamp", stamp.to_rfc3339_opts(SecondsFormat::Secs, true))
-        .attr("from", from)
+        .attr(
+            minidom::rxml::xml_ncname!("stamp").to_owned(),
+            stamp.to_rfc3339_opts(SecondsFormat::Secs, true),
+        )
+        .attr(minidom::rxml::xml_ncname!("from").to_owned(), from)
         .build()
 }
 
@@ -217,7 +221,10 @@ mod tests {
     #[test]
     fn test_is_delay_element() {
         let elem = Element::builder("delay", NS_DELAY)
-            .attr("stamp", "2024-01-15T12:00:00Z")
+            .attr(
+                minidom::rxml::xml_ncname!("stamp").to_owned(),
+                "2024-01-15T12:00:00Z",
+            )
             .build();
         assert!(is_delay_element(&elem));
 
@@ -274,7 +281,7 @@ mod tests {
     #[test]
     fn test_parse_delay_element_invalid_stamp() {
         let elem = Element::builder("delay", NS_DELAY)
-            .attr("stamp", "not-a-date")
+            .attr(minidom::rxml::xml_ncname!("stamp").to_owned(), "not-a-date")
             .build();
         let err = parse_delay_element(&elem).expect_err("should fail");
         assert!(err.to_string().contains("invalid"));

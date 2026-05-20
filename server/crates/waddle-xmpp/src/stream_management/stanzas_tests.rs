@@ -37,7 +37,7 @@ fn test_sm_enable_parses_xs_boolean_canonical_forms() {
     let enable = SmEnable::parse(r#"<enable xmlns="urn:xmpp:sm:3" resume="1"/>"#).unwrap();
     assert!(
         enable.resume,
-        "resume=\"1\" is xs:boolean true — must parse as resume request"
+        "resume='1' is xs:boolean true — must parse as resume request"
     );
 
     // Single-quoted variant:

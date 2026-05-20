@@ -7,7 +7,7 @@ use waddle_xmpp::muc::{build_destroy_notification, DestroyRequest, NS_MUC_OWNER}
 /// element yields `DestroyRequest::default()` and the destroy still
 /// proceeds.
 fn parse_destroy_request(iq: &xmpp_parsers::iq::Iq) -> Option<DestroyRequest> {
-    let xmpp_parsers::iq::IqType::Set(query) = &iq.payload else {
+    let xmpp_parsers::iq::Iq::Set { payload: query, .. } = iq else {
         return None;
     };
     let destroy = query.get_child("destroy", NS_MUC_OWNER)?;
@@ -182,7 +182,7 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
             )];
         }
 
-        if matches!(&iq.payload, xmpp_parsers::iq::IqType::Get(_)) {
+        if matches!(iq, xmpp_parsers::iq::Iq::Get { .. }) {
             match build_muc_owner_config_response(state, &room_jid, id, response_to).await {
                 Ok(response) => return vec![response],
                 Err(error) => {
@@ -236,7 +236,7 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
                 not_authorized_iq_error("Authentication required."),
             )];
         };
-        let Some(room_jid) = iq.to.as_ref().map(|jid| jid.to_bare()) else {
+        let Some(room_jid) = iq.to().map(|jid| jid.to_bare()) else {
             return vec![build_iq_error_xml_typed(
                 id,
                 response_from,
@@ -363,8 +363,8 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
                 body: None,
                 stanza_id: moderation
                     .id
-                    .clone()
-                    .map(|id| Xep0359StanzaId::new(id, room_jid_full.clone())),
+                    .as_ref()
+                    .map(|id| Xep0359StanzaId::new(id.0.clone(), room_jid_full.clone())),
                 // XEP-0425 moderation tombstone: leak-prone fields are
                 // already cleared by construction (this row is a fresh
                 // tombstone, not a scrub of an existing message).

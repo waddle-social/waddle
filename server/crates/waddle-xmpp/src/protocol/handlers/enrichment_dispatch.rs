@@ -35,7 +35,7 @@
 use crate::protocol::event::{CallbackId, OutboundEvent};
 use crate::protocol::message_context::MessageContext;
 use crate::protocol::traits::{HandlerOutcome, MessageHandler};
-use xmpp_parsers::message::{Body, Message, MessageType};
+use xmpp_parsers::message::{Message, MessageType};
 
 /// Sentinel callback id meaning "state machine fills this in." The
 /// dispatcher cannot allocate ids (it's pure); the state machine swaps
@@ -113,7 +113,7 @@ fn body_with_url(message: &Message) -> bool {
     message
         .bodies
         .values()
-        .any(|Body(text)| text.contains("http://") || text.contains("https://"))
+        .any(|text| text.contains("http://") || text.contains("https://"))
 }
 
 /// XEP-0372 references namespace — used by the enricher to attach
@@ -136,7 +136,7 @@ mod tests {
     use crate::protocol::session_state::{Blocklist, CarbonsState, MucOccupancy};
     use jid::FullJid;
     use minidom;
-    use xmpp_parsers::message::{Body, Message, MessageType};
+    use xmpp_parsers::message::{Message, MessageType};
 
     fn full(s: &str) -> FullJid {
         s.parse().expect("valid full jid")
@@ -146,7 +146,8 @@ mod tests {
         let mut m = Message::new(Some(to.parse().expect("jid")));
         m.from = Some(from.parse().expect("jid"));
         m.type_ = MessageType::Chat;
-        m.bodies.insert(String::new(), Body(body.to_string()));
+        m.bodies
+            .insert(xmpp_parsers::message::Lang::new(), body.to_string());
         m
     }
 
@@ -183,7 +184,7 @@ mod tests {
                     OutboundEvent::RequestEnrichment { id, message } => {
                         assert_eq!(*id, ENRICHMENT_CALLBACK_SENTINEL);
                         assert_eq!(
-                            message.bodies.get("").map(|Body(s)| s.as_str()),
+                            message.bodies.get("").map(|s| s.as_str()),
                             Some("https://example.com/page"),
                         );
                     }

@@ -109,7 +109,7 @@ scenario: #Scenario & {
 				"jabber:x:data",
 				"FORM_TYPE",
 				"urn:xmpp:mam:2",
-				"var=\"ids\"",
+				"var='ids'",
 				"http://jabber.org/protocol/xdata-validate",
 			]
 		},

@@ -4,8 +4,11 @@ use xmpp_parsers::message::Message;
 #[test]
 fn test_is_stanza_id_element() {
     let elem = Element::builder("stanza-id", NS_SID)
-        .attr("id", "abc")
-        .attr("by", "room@muc.example.com")
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), "abc")
+        .attr(
+            minidom::rxml::xml_ncname!("by").to_owned(),
+            "room@muc.example.com",
+        )
         .build();
     assert!(is_stanza_id_element(&elem));
 
@@ -16,7 +19,7 @@ fn test_is_stanza_id_element() {
 #[test]
 fn test_is_origin_id_element() {
     let elem = Element::builder("origin-id", NS_SID)
-        .attr("id", "abc")
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), "abc")
         .build();
     assert!(is_origin_id_element(&elem));
 

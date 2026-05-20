@@ -111,12 +111,13 @@ async fn jmi_propose_is_forwarded_to_peer() {
         .await
         .expect("bob receives propose");
     assert!(
-        received.contains(r#"from="alice@localhost"#),
-        "from missing"
+        received.contains(r#"from='alice@localhost"#)
+            || received.contains(r#"from="alice@localhost"#),
+        "from missing: {received}"
     );
     assert!(received.contains("urn:xmpp:jingle-message:0"));
-    assert!(received.contains(r#"media="audio""#));
-    assert!(received.contains(r#"media="video""#));
+    assert!(received.contains(r#"media='audio'"#));
+    assert!(received.contains(r#"media='video'"#));
 }
 
 #[tokio::test]
@@ -154,7 +155,10 @@ async fn jmi_proceed_round_trips_back_to_caller() {
         .recv_matching(|frame| frame.contains("<proceed") && frame.contains(sid))
         .await
         .expect("alice receives proceed");
-    assert!(proceed.contains(r#"from="bob@localhost"#), "from missing");
+    assert!(
+        proceed.contains(r#"from='bob@localhost"#) || proceed.contains(r#"from="bob@localhost"#),
+        "from missing: {proceed}"
+    );
     assert!(proceed.contains("urn:xmpp:jingle-message:0"));
 }
 
@@ -182,7 +186,7 @@ async fn session_initiate_from_blocked_peer_is_dropped() {
     )
     .await
     .expect("bob blocks alice");
-    bob.recv_matching(|f| f.contains(r#"id="block-1""#))
+    bob.recv_matching(|f| f.contains(r#"id='block-1'"#))
         .await
         .expect("block ack");
 
@@ -206,7 +210,7 @@ async fn session_initiate_from_blocked_peer_is_dropped() {
 
     let dropped = bob
         .recv_matching(|frame| {
-            frame.contains("session-initiate") && frame.contains(&format!(r#"sid="{sid}""#))
+            frame.contains("session-initiate") && frame.contains(&format!(r#"sid='{sid}'"#))
                 || frame.contains(&format!(r#"sid='{sid}'"#))
         })
         .await;
@@ -250,7 +254,7 @@ async fn session_initiate_rewrites_empty_waddle_transport() {
     // present after the JingleHandler stamps it.
     let forwarded = bob
         .recv_matching(|frame| {
-            (frame.contains(&format!(r#"sid="{sid}""#))
+            (frame.contains(&format!(r#"sid='{sid}'"#))
                 || frame.contains(&format!(r#"sid='{sid}'"#)))
                 && frame.contains("session-initiate")
                 && frame.contains("url=")
@@ -270,12 +274,12 @@ async fn session_initiate_rewrites_empty_waddle_transport() {
         "url mismatch; got: {forwarded}"
     );
     assert!(
-        forwarded.contains(&format!(r#"room="alice@localhost::{sid}""#)),
+        forwarded.contains(&format!(r#"room='alice@localhost::{sid}'"#)),
         "room must be scoped by initiator bare jid; got: {forwarded}"
     );
     assert!(
         forwarded.contains(&format!(r#"identity='{bob_full}'"#))
-            || forwarded.contains(&format!(r#"identity="{bob_full}""#)),
+            || forwarded.contains(&format!(r#"identity='{bob_full}'"#)),
         "identity mismatch; got: {forwarded}"
     );
     // <token> is a child element, not an attribute — look for an

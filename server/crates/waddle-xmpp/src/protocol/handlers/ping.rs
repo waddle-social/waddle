@@ -25,7 +25,9 @@ impl IqHandler for PingHandler {
         } else {
             xep0199::build_ping_bad_request(iq, ctx.domain, &session_bare)
         };
-        vec![OutboundEvent::SendStanza(Box::new(Stanza::Iq(reply)))]
+        vec![OutboundEvent::SendStanza(Box::new(Stanza::Iq(Box::new(
+            reply,
+        ))))]
     }
 }
 
@@ -33,7 +35,7 @@ impl IqHandler for PingHandler {
 mod tests {
     use super::*;
     use minidom::Element;
-    use xmpp_parsers::iq::{Iq, IqType};
+    use xmpp_parsers::iq::Iq;
     use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType};
 
     fn test_ctx_jid() -> jid::FullJid {
@@ -48,11 +50,11 @@ mod tests {
     #[test]
     fn ping_get_produces_result_stanza() {
         let ping_elem = Element::builder("ping", xep0199::NS_PING).build();
-        let iq = Iq {
+        let iq = Iq::Get {
             from: Some("alice@waddle.social/web".parse().expect("valid jid")),
             to: Some("waddle.social".parse().expect("valid jid")),
             id: "p1".to_string(),
-            payload: IqType::Get(ping_elem),
+            payload: ping_elem,
         };
         let jid = test_ctx_jid();
         let ctx = StanzaContext {
@@ -66,14 +68,14 @@ mod tests {
         match &events[0] {
             OutboundEvent::SendStanza(stanza) => match stanza.as_ref() {
                 Stanza::Iq(reply) => {
-                    assert_eq!(reply.id, "p1");
-                    assert!(matches!(reply.payload, IqType::Result(_)));
+                    assert_eq!(reply.id(), "p1");
+                    assert!(matches!(reply.as_ref(), Iq::Result { .. }));
                     assert_eq!(
-                        reply.from.as_ref().map(|j| j.to_string()),
+                        reply.from().map(|j| j.to_string()),
                         Some("waddle.social".to_string())
                     );
                     assert_eq!(
-                        reply.to.as_ref().map(|j| j.to_string()),
+                        reply.to().map(|j| j.to_string()),
                         Some("alice@waddle.social/web".to_string())
                     );
                 }
@@ -86,11 +88,11 @@ mod tests {
     #[test]
     fn ping_without_to_uses_server_domain_in_result() {
         let ping_elem = Element::builder("ping", xep0199::NS_PING).build();
-        let iq = Iq {
+        let iq = Iq::Get {
             from: Some("alice@waddle.social/web".parse().expect("valid jid")),
             to: None,
             id: "p2".to_string(),
-            payload: IqType::Get(ping_elem),
+            payload: ping_elem,
         };
         let jid = test_ctx_jid();
         let ctx = StanzaContext {
@@ -104,14 +106,14 @@ mod tests {
             OutboundEvent::SendStanza(stanza) => match stanza.as_ref() {
                 Stanza::Iq(reply) => {
                     assert_eq!(
-                        reply.from.as_ref().map(|j| j.to_string()),
+                        reply.from().map(|j| j.to_string()),
                         Some("waddle.social".into())
                     );
                     assert_eq!(
-                        reply.to.as_ref().map(|j| j.to_string()),
+                        reply.to().map(|j| j.to_string()),
                         Some("alice@waddle.social/web".into())
                     );
-                    assert!(matches!(reply.payload, IqType::Result(_)));
+                    assert!(matches!(reply.as_ref(), Iq::Result { .. }));
                 }
                 other => panic!("expected Iq stanza, got {other:?}"),
             },
@@ -124,11 +126,11 @@ mod tests {
         let ping_elem = Element::builder("ping", xep0199::NS_PING)
             .append(Element::builder("extra", xep0199::NS_PING).build())
             .build();
-        let iq = Iq {
+        let iq = Iq::Get {
             from: Some("alice@waddle.social/web".parse().expect("valid jid")),
             to: None,
             id: "p3".to_string(),
-            payload: IqType::Get(ping_elem),
+            payload: ping_elem,
         };
         let jid = test_ctx_jid();
         let ctx = StanzaContext {
@@ -142,14 +144,14 @@ mod tests {
             OutboundEvent::SendStanza(stanza) => match stanza.as_ref() {
                 Stanza::Iq(reply) => {
                     assert_eq!(
-                        reply.from.as_ref().map(|j| j.to_string()),
+                        reply.from().map(|j| j.to_string()),
                         Some("waddle.social".into())
                     );
                     assert_eq!(
-                        reply.to.as_ref().map(|j| j.to_string()),
+                        reply.to().map(|j| j.to_string()),
                         Some("alice@waddle.social/web".into())
                     );
-                    let IqType::Error(error) = &reply.payload else {
+                    let Iq::Error { error, .. } = reply.as_ref() else {
                         panic!("expected error reply")
                     };
                     assert_eq!(error.type_, ErrorType::Modify);

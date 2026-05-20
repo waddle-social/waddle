@@ -8,5 +8,5 @@ publish = false
 crate-type = ["cdylib"]
 
 [dependencies]
-sha2 = "0.10"
+sha2 = "0.11"
 wit-bindgen = "0.57.1"

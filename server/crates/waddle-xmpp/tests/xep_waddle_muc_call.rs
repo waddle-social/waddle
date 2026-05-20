@@ -119,8 +119,11 @@ fn waddle_muc_call_rejects_unknown_state_value() {
     // extensions) MUST be rejected at the parser boundary so
     // unknown semantics can't leak into the room actor.
     let elem = Element::builder("call", NS_WADDLE_MUC_CALL)
-        .attr("state", "ringing")
-        .attr("call-id", "room@muc.test")
+        .attr(minidom::rxml::xml_ncname!("state").to_owned(), "ringing")
+        .attr(
+            minidom::rxml::xml_ncname!("call-id").to_owned(),
+            "room@muc.test",
+        )
         .build();
     let err = MucCallExtension::try_from(&elem).expect_err("unknown state");
     assert!(
@@ -135,7 +138,7 @@ fn waddle_muc_call_rejects_missing_call_id() {
     // extension can't be tied to a specific SFU call. Parse failure
     // returns the missing attribute name verbatim.
     let elem = Element::builder("call", NS_WADDLE_MUC_CALL)
-        .attr("state", "active")
+        .attr(minidom::rxml::xml_ncname!("state").to_owned(), "active")
         .build();
     let err = MucCallExtension::try_from(&elem).expect_err("missing call-id");
     match err {
@@ -147,7 +150,10 @@ fn waddle_muc_call_rejects_missing_call_id() {
 #[test]
 fn waddle_muc_call_rejects_missing_state() {
     let elem = Element::builder("call", NS_WADDLE_MUC_CALL)
-        .attr("call-id", "room@muc.test")
+        .attr(
+            minidom::rxml::xml_ncname!("call-id").to_owned(),
+            "room@muc.test",
+        )
         .build();
     let err = MucCallExtension::try_from(&elem).expect_err("missing state");
     match err {
@@ -164,8 +170,11 @@ fn waddle_muc_call_rejects_versioned_namespace_drift() {
     // old room actor encountering a future `:1` payload sees
     // WrongElement and ignores it instead of mis-interpreting.
     let elem = Element::builder("call", "urn:waddle:muc-call:1")
-        .attr("state", "active")
-        .attr("call-id", "room@muc.test")
+        .attr(minidom::rxml::xml_ncname!("state").to_owned(), "active")
+        .attr(
+            minidom::rxml::xml_ncname!("call-id").to_owned(),
+            "room@muc.test",
+        )
         .build();
     let err = MucCallExtension::try_from(&elem).expect_err("wrong namespace");
     assert!(matches!(err, MucCallParseError::WrongElement));

@@ -56,7 +56,7 @@ impl From<&StoryReads> for JsStoryReads {
 /// with different defaults and silently leak read-state notifications.
 pub(crate) fn build_publish_options_form() -> Element {
     let form = Element::builder("x", NS_XDATA)
-        .attr("type", "submit")
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "submit")
         .append(hidden_field("FORM_TYPE", NS_PUBSUB_PUBLISH_OPTIONS))
         .append(text_single_field("pubsub#persist_items", "true"))
         .append(text_single_field("pubsub#access_model", "whitelist"))
@@ -73,15 +73,15 @@ pub(crate) fn build_publish_options_form() -> Element {
 
 fn hidden_field(var: &str, value: &str) -> Element {
     Element::builder("field", NS_XDATA)
-        .attr("var", var)
-        .attr("type", "hidden")
+        .attr(minidom::rxml::xml_ncname!("var").to_owned(), var)
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "hidden")
         .append(Element::builder("value", NS_XDATA).append(value).build())
         .build()
 }
 
 fn text_single_field(var: &str, value: &str) -> Element {
     Element::builder("field", NS_XDATA)
-        .attr("var", var)
+        .attr(minidom::rxml::xml_ncname!("var").to_owned(), var)
         .append(Element::builder("value", NS_XDATA).append(value).build())
         .build()
 }
@@ -89,11 +89,17 @@ fn text_single_field(var: &str, value: &str) -> Element {
 pub(crate) fn build_story_reads_publish_iq(reads: &StoryReads) -> Element {
     let id = format!("story-reads-publish-{}", Uuid::new_v4());
     let item = Element::builder("item", NS_PUBSUB)
-        .attr("id", PEP_ITEM_WADDLE_STORY_READS)
+        .attr(
+            minidom::rxml::xml_ncname!("id").to_owned(),
+            PEP_ITEM_WADDLE_STORY_READS,
+        )
         .append(reads.build_element())
         .build();
     let publish = Element::builder("publish", NS_PUBSUB)
-        .attr("node", PEP_NODE_WADDLE_STORY_READS)
+        .attr(
+            minidom::rxml::xml_ncname!("node").to_owned(),
+            PEP_NODE_WADDLE_STORY_READS,
+        )
         .append(item)
         .build();
     let pubsub = Element::builder("pubsub", NS_PUBSUB)
@@ -101,8 +107,8 @@ pub(crate) fn build_story_reads_publish_iq(reads: &StoryReads) -> Element {
         .append(build_publish_options_form())
         .build();
     Element::builder("iq", NS_CLIENT)
-        .attr("type", "set")
-        .attr("id", id)
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "set")
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), id)
         .append(pubsub)
         .build()
 }
@@ -110,13 +116,16 @@ pub(crate) fn build_story_reads_publish_iq(reads: &StoryReads) -> Element {
 pub(crate) fn build_story_reads_fetch_iq() -> Element {
     let id = format!("story-reads-fetch-{}", Uuid::new_v4());
     let items = Element::builder("items", NS_PUBSUB)
-        .attr("node", PEP_NODE_WADDLE_STORY_READS)
-        .attr("max_items", "1")
+        .attr(
+            minidom::rxml::xml_ncname!("node").to_owned(),
+            PEP_NODE_WADDLE_STORY_READS,
+        )
+        .attr(minidom::rxml::xml_ncname!("max_items").to_owned(), "1")
         .build();
     let pubsub = Element::builder("pubsub", NS_PUBSUB).append(items).build();
     Element::builder("iq", NS_CLIENT)
-        .attr("type", "get")
-        .attr("id", id)
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "get")
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), id)
         .append(pubsub)
         .build()
 }

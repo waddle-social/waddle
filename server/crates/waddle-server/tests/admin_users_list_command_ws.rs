@@ -64,7 +64,7 @@ async fn send_command(client: &mut WsXmppClient, id: &str, form_xml: &str) -> St
     client
         .recv_matching(|frame| {
             frame.contains("<iq")
-                && (frame.contains(&format!(r#"id="{id}""#))
+                && (frame.contains(&format!(r#"id='{id}'"#))
                     || frame.contains(&format!(r#"id='{id}'"#)))
         })
         .await
@@ -78,11 +78,11 @@ fn submit_form(extra: &str) -> String {
 }
 
 fn is_result(frame: &str) -> bool {
-    frame.contains(r#"type="result""#) || frame.contains(r#"type='result'"#)
+    frame.contains(r#"type='result'"#) || frame.contains(r#"type='result'"#)
 }
 
 fn is_error(frame: &str) -> bool {
-    frame.contains(r#"type="error""#) || frame.contains(r#"type='error'"#)
+    frame.contains(r#"type='error'"#) || frame.contains(r#"type='error'"#)
 }
 
 #[tokio::test]
@@ -101,11 +101,11 @@ async fn owner_can_list_users() {
     // substring matches are sufficient: a regression that drops a
     // reported column would also drop the string.
     assert!(
-        resp.contains(r#"var="jid""#) || resp.contains(r#"var='jid'"#),
+        resp.contains(r#"var='jid'"#) || resp.contains(r#"var='jid'"#),
         "result form must list jid column, got: {resp}"
     );
     assert!(
-        resp.contains(r#"var="display_name""#) || resp.contains(r#"var='display_name'"#),
+        resp.contains(r#"var='display_name'"#) || resp.contains(r#"var='display_name'"#),
         "result form must list display_name column, got: {resp}"
     );
     // The admin / alice / bob accounts must all appear as items in
@@ -257,8 +257,8 @@ async fn pagination_cursor_round_trips() {
 /// enough for the test surface; if the response shape ever changes
 /// this will break loudly.
 fn extract_cursor(frame: &str) -> Option<String> {
-    let needle = if let Some(idx) = frame.find(r#"var="next_cursor""#) {
-        idx + r#"var="next_cursor""#.len()
+    let needle = if let Some(idx) = frame.find(r#"var='next_cursor'"#) {
+        idx + r#"var='next_cursor'"#.len()
     } else if let Some(idx) = frame.find(r#"var='next_cursor'"#) {
         idx + r#"var='next_cursor'"#.len()
     } else {

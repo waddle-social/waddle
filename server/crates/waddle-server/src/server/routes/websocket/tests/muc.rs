@@ -247,14 +247,20 @@ async fn xep_0045_section_7_2_15_join_replay_serializes_full_subject_envelope() 
         2,
         "every persisted xml:lang variant round-trips into the join replay"
     );
+    // minidom 0.18 keys attributes by `(Namespace, NcName)` — `xml:lang`
+    // lives in the XML namespace, not the default. Use `attr_ns` to read it.
+    let lang_of = |c: &Element| {
+        c.attr_ns(&minidom::rxml::Namespace::XML, "lang")
+            .map(str::to_string)
+    };
     let default_subject = subject_children
         .iter()
-        .find(|c| c.attr("xml:lang").is_none() || c.attr("xml:lang") == Some(""))
+        .find(|c| lang_of(c).as_deref().map(|v| v.is_empty()).unwrap_or(true))
         .expect("default-language subject present");
     assert_eq!(default_subject.text(), "Default subject");
     let en_subject = subject_children
         .iter()
-        .find(|c| c.attr("xml:lang") == Some("en"))
+        .find(|c| lang_of(c).as_deref() == Some("en"))
         .expect("xml:lang=en subject present");
     assert_eq!(en_subject.text(), "English subject");
 
@@ -323,10 +329,13 @@ async fn standard_muc_owner_config_persists_room_and_enforces_nonanonymous_defau
     .await;
 
     let submit_form = Element::builder("x", waddle_xmpp::muc::DATA_FORMS_NS)
-        .attr("type", "submit")
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "submit")
         .append(
             Element::builder("field", waddle_xmpp::muc::DATA_FORMS_NS)
-                .attr("var", "muc#roomconfig_roomname")
+                .attr(
+                    minidom::rxml::xml_ncname!("var").to_owned(),
+                    "muc#roomconfig_roomname",
+                )
                 .append(
                     Element::builder("value", waddle_xmpp::muc::DATA_FORMS_NS)
                         .append("Project Room")
@@ -336,7 +345,10 @@ async fn standard_muc_owner_config_persists_room_and_enforces_nonanonymous_defau
         )
         .append(
             Element::builder("field", waddle_xmpp::muc::DATA_FORMS_NS)
-                .attr("var", "muc#roomconfig_persistentroom")
+                .attr(
+                    minidom::rxml::xml_ncname!("var").to_owned(),
+                    "muc#roomconfig_persistentroom",
+                )
                 .append(
                     Element::builder("value", waddle_xmpp::muc::DATA_FORMS_NS)
                         .append("0")
@@ -346,7 +358,10 @@ async fn standard_muc_owner_config_persists_room_and_enforces_nonanonymous_defau
         )
         .append(
             Element::builder("field", waddle_xmpp::muc::DATA_FORMS_NS)
-                .attr("var", "muc#roomconfig_whois")
+                .attr(
+                    minidom::rxml::xml_ncname!("var").to_owned(),
+                    "muc#roomconfig_whois",
+                )
                 .append(
                     Element::builder("value", waddle_xmpp::muc::DATA_FORMS_NS)
                         .append("moderators")
@@ -357,9 +372,12 @@ async fn standard_muc_owner_config_persists_room_and_enforces_nonanonymous_defau
         .build();
     let owner_iq = element_to_xml(
         Element::builder("iq", waddle_xmpp::ns::JABBER_CLIENT)
-            .attr("id", "owner-submit")
-            .attr("type", "set")
-            .attr("to", room_jid.to_string())
+            .attr(minidom::rxml::xml_ncname!("id").to_owned(), "owner-submit")
+            .attr(minidom::rxml::xml_ncname!("type").to_owned(), "set")
+            .attr(
+                minidom::rxml::xml_ncname!("to").to_owned(),
+                room_jid.to_string(),
+            )
             .append(
                 Element::builder("query", waddle_xmpp::muc::NS_MUC_OWNER)
                     .append(submit_form)
@@ -378,7 +396,7 @@ async fn standard_muc_owner_config_persists_room_and_enforces_nonanonymous_defau
     )
     .await;
     assert_eq!(responses.len(), 1, "owner config response: {responses:?}");
-    assert!(responses[0].contains("type=\"result\""));
+    assert!(responses[0].contains("type='result'"));
 
     let actor = state.deps.app_state.db_pool.global_actor().clone();
     let channel = crate::server::xmpp_state::get_xmpp_channel(actor, "project")
@@ -432,9 +450,12 @@ async fn standard_muc_owner_get_returns_config_without_persisting_room() {
 
     let owner_iq = element_to_xml(
         Element::builder("iq", waddle_xmpp::ns::JABBER_CLIENT)
-            .attr("id", "owner-get")
-            .attr("type", "get")
-            .attr("to", room_jid.to_string())
+            .attr(minidom::rxml::xml_ncname!("id").to_owned(), "owner-get")
+            .attr(minidom::rxml::xml_ncname!("type").to_owned(), "get")
+            .attr(
+                minidom::rxml::xml_ncname!("to").to_owned(),
+                room_jid.to_string(),
+            )
             .append(Element::builder("query", waddle_xmpp::muc::NS_MUC_OWNER).build())
             .build(),
     );
@@ -449,7 +470,7 @@ async fn standard_muc_owner_get_returns_config_without_persisting_room() {
     )
     .await;
     assert_eq!(responses.len(), 1, "owner get response: {responses:?}");
-    assert!(responses[0].contains("type=\"result\""));
+    assert!(responses[0].contains("type='result'"));
     assert!(responses[0].contains("muc#roomconfig_roomname"));
 
     let actor = state.deps.app_state.db_pool.global_actor().clone();
@@ -485,10 +506,13 @@ async fn standard_muc_owner_config_rejects_non_owner() {
     .await;
 
     let submit_form = Element::builder("x", waddle_xmpp::muc::DATA_FORMS_NS)
-        .attr("type", "submit")
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "submit")
         .append(
             Element::builder("field", waddle_xmpp::muc::DATA_FORMS_NS)
-                .attr("var", "muc#roomconfig_roomname")
+                .attr(
+                    minidom::rxml::xml_ncname!("var").to_owned(),
+                    "muc#roomconfig_roomname",
+                )
                 .append(
                     Element::builder("value", waddle_xmpp::muc::DATA_FORMS_NS)
                         .append("Hacked")
@@ -499,9 +523,12 @@ async fn standard_muc_owner_config_rejects_non_owner() {
         .build();
     let owner_iq = element_to_xml(
         Element::builder("iq", waddle_xmpp::ns::JABBER_CLIENT)
-            .attr("id", "owner-submit")
-            .attr("type", "set")
-            .attr("to", room_jid.to_string())
+            .attr(minidom::rxml::xml_ncname!("id").to_owned(), "owner-submit")
+            .attr(minidom::rxml::xml_ncname!("type").to_owned(), "set")
+            .attr(
+                minidom::rxml::xml_ncname!("to").to_owned(),
+                room_jid.to_string(),
+            )
             .append(
                 Element::builder("query", waddle_xmpp::muc::NS_MUC_OWNER)
                     .append(submit_form)
@@ -520,7 +547,7 @@ async fn standard_muc_owner_config_rejects_non_owner() {
     )
     .await;
     assert_eq!(responses.len(), 1, "owner config response: {responses:?}");
-    assert!(responses[0].contains("type=\"error\""));
+    assert!(responses[0].contains("type='error'"));
     assert!(responses[0].contains("forbidden"));
 
     let snapshot = get_room_actor(state.as_ref(), &room_jid)
@@ -557,7 +584,7 @@ async fn standard_muc_owner_config_rejects_non_owner() {
         1,
         "admin owner config response: {responses:?}"
     );
-    assert!(responses[0].contains("type=\"error\""));
+    assert!(responses[0].contains("type='error'"));
     assert!(responses[0].contains("forbidden"));
 }
 
@@ -609,7 +636,7 @@ async fn room_disco_info_advertises_parent_space_metadata_for_linked_channel() {
     let response = responses.first().expect("room disco response");
     assert!(response.contains("muc_nonanonymous"));
     assert!(response.contains("urn:xmpp:spaces:0"));
-    assert!(response.contains("var=\"parent\""));
+    assert!(response.contains("var='parent'"));
     assert!(response.contains("xmpp:spaces.example.com?;node=team"));
     assert!(response.contains("http://jabber.org/protocol/muc#roominfo"));
     assert!(response.contains("muc#roomconfig_pubsub"));

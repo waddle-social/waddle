@@ -353,7 +353,7 @@ impl XmppStateMachine {
                 // added bob@domain to their blocklist must not receive
                 // bob's session-initiate, otherwise the call surfaces
                 // and the block is effectively meaningless.
-                if let Some(sender_bare) = iq.from.as_ref().map(|j| j.to_bare()) {
+                if let Some(sender_bare) = iq.from().map(|j| j.to_bare()) {
                     if self.blocklist.contains(&sender_bare) {
                         return vec![OutboundEvent::Log {
                             level: Level::DEBUG,

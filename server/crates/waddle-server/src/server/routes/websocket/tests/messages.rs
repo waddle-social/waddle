@@ -15,7 +15,7 @@ async fn store_committed_dm_archive_for_notification(
         .bodies
         .get("")
         .or_else(|| message.bodies.values().next())
-        .map(|body| body.0.clone());
+        .cloned();
     let archived = waddle_xmpp::mam::ArchivedMessage {
         id: archive_stanza_id.id.clone(),
         body,
@@ -170,10 +170,10 @@ async fn queue_offline_delivery_publishes_first_party_xep0357_notification_witho
             node: Some("external-web-node".to_string()),
             publish_options: Some(
                 Element::builder("x", waddle_xmpp::xep::NS_DATA_FORMS)
-                    .attr("type", "submit")
+                    .attr(minidom::rxml::xml_ncname!("type").to_owned(), "submit")
                     .append(
                         Element::builder("field", waddle_xmpp::xep::NS_DATA_FORMS)
-                            .attr("var", "FORM_TYPE")
+                            .attr(minidom::rxml::xml_ncname!("var").to_owned(), "FORM_TYPE")
                             .append(
                                 Element::builder("value", waddle_xmpp::xep::NS_DATA_FORMS)
                                     .append(waddle_xmpp::xep::NS_PUBSUB_PUBLISH_OPTIONS)
@@ -183,7 +183,7 @@ async fn queue_offline_delivery_publishes_first_party_xep0357_notification_witho
                     )
                     .append(
                         Element::builder("field", waddle_xmpp::xep::NS_DATA_FORMS)
-                            .attr("var", "secret")
+                            .attr(minidom::rxml::xml_ncname!("var").to_owned(), "secret")
                             .append(
                                 Element::builder("value", waddle_xmpp::xep::NS_DATA_FORMS)
                                     .append("external-provider-secret")
@@ -203,12 +203,11 @@ async fn queue_offline_delivery_publishes_first_party_xep0357_notification_witho
     let mut message =
         xmpp_parsers::message::Message::new(Some("bob@example.com".parse().expect("to jid")));
     message.from = Some("alice@example.com/web".parse().expect("from jid"));
-    message.id = Some("offline-push-1".to_string());
+    message.id = Some(xmpp_parsers::message::Id("offline-push-1".to_string()));
     message.type_ = XmppMessageType::Chat;
-    message.bodies.insert(
-        String::new(),
-        xmpp_parsers::message::Body("push me".to_string()),
-    );
+    message
+        .bodies
+        .insert(xmpp_parsers::message::Lang::new(), "push me".to_string());
     let archive_stanza_id = waddle_xmpp_core::xep0359::StanzaId::new(
         "archive-offline-push-1",
         jid::Jid::from(recipient.clone()),
@@ -413,11 +412,13 @@ async fn queue_offline_delivery_persists_candidate_before_xep0357_registration_e
     let mut message =
         xmpp_parsers::message::Message::new(Some("bob@example.com".parse().expect("to jid")));
     message.from = Some("alice@example.com/web".parse().expect("from jid"));
-    message.id = Some("offline-push-registration-late".to_string());
+    message.id = Some(xmpp_parsers::message::Id(
+        "offline-push-registration-late".to_string(),
+    ));
     message.type_ = XmppMessageType::Chat;
     message.bodies.insert(
-        String::new(),
-        xmpp_parsers::message::Body("candidate first".to_string()),
+        xmpp_parsers::message::Lang::new(),
+        "candidate first".to_string(),
     );
     let archive_stanza_id = waddle_xmpp_core::xep0359::StanzaId::new(
         "archive-offline-push-registration-late",
@@ -505,11 +506,11 @@ async fn queue_offline_delivery_skips_xep0357_when_committed_mam_row_is_missing(
     let mut message =
         xmpp_parsers::message::Message::new(Some("bob@example.com".parse().expect("to jid")));
     message.from = Some("alice@example.com/web".parse().expect("from jid"));
-    message.id = Some("offline-push-no-mam".to_string());
+    message.id = Some(xmpp_parsers::message::Id("offline-push-no-mam".to_string()));
     message.type_ = XmppMessageType::Chat;
     message.bodies.insert(
-        String::new(),
-        xmpp_parsers::message::Body("do not push without committed archive".to_string()),
+        xmpp_parsers::message::Lang::new(),
+        "do not push without committed archive".to_string(),
     );
     let archive_stanza_id = waddle_xmpp_core::xep0359::StanzaId::new(
         "archive-offline-no-mam",
@@ -611,12 +612,11 @@ async fn drive_xep0492_direct_chat_push_gate(
     let mut message =
         xmpp_parsers::message::Message::new(Some("bob@example.com".parse().expect("to jid")));
     message.from = Some("alice@example.com/web".parse().expect("from jid"));
-    message.id = Some(message_id.to_string());
+    message.id = Some(xmpp_parsers::message::Id(message_id.to_string()));
     message.type_ = XmppMessageType::Chat;
-    message.bodies.insert(
-        String::new(),
-        xmpp_parsers::message::Body("hello bob".to_string()),
-    );
+    message
+        .bodies
+        .insert(xmpp_parsers::message::Lang::new(), "hello bob".to_string());
     if is_mention {
         // XEP-0513 explicit mention naming the recipient. This is the
         // sole signal the gate consults — the `<body/>` text itself is
@@ -795,11 +795,11 @@ async fn drive_xep0492_direct_chat_emission_shape(
     let mut message =
         xmpp_parsers::message::Message::new(Some("bob@example.com".parse().expect("to jid")));
     message.from = Some("alice@example.com/web".parse().expect("from jid"));
-    message.id = Some(message_id.to_string());
+    message.id = Some(xmpp_parsers::message::Id(message_id.to_string()));
     message.type_ = XmppMessageType::Chat;
     message.bodies.insert(
-        String::new(),
-        xmpp_parsers::message::Body("hello bob".to_string()),
+        xmpp_parsers::message::Lang(String::new()),
+        "hello bob".to_string(),
     );
     if is_mention {
         let mention = waddle_xmpp::xep::build_mention_element(
@@ -979,11 +979,13 @@ async fn groupchat_personal_mention_pushes_affiliated_non_live_member() {
         .expect("join alice");
 
     let mut message = xmpp_parsers::message::Message::new(Some(jid::Jid::from(room_jid.clone())));
-    message.id = Some("groupchat-personal-mention-push".to_string());
+    message.id = Some(xmpp_parsers::message::Id(
+        "groupchat-personal-mention-push".to_string(),
+    ));
     message.type_ = XmppMessageType::Groupchat;
     message.bodies.insert(
-        String::new(),
-        xmpp_parsers::message::Body("charlie, take a look".to_string()),
+        xmpp_parsers::message::Lang::new(),
+        "charlie, take a look".to_string(),
     );
     message
         .payloads
@@ -1068,11 +1070,13 @@ async fn groupchat_xep0513_occupant_id_mention_pushes_affiliated_member() {
         &state.deps.occupant_id_secret,
     );
     let mut message = xmpp_parsers::message::Message::new(Some(jid::Jid::from(room_jid.clone())));
-    message.id = Some("groupchat-occupant-id-mention-push".to_string());
+    message.id = Some(xmpp_parsers::message::Id(
+        "groupchat-occupant-id-mention-push".to_string(),
+    ));
     message.type_ = XmppMessageType::Groupchat;
     message.bodies.insert(
-        String::new(),
-        xmpp_parsers::message::Body("@charlie, take a look".to_string()),
+        xmpp_parsers::message::Lang::new(),
+        "@charlie, take a look".to_string(),
     );
     message
         .payloads
@@ -1167,11 +1171,11 @@ async fn groupchat_xep0492_never_suppresses_personal_mentions_and_plain_messages
 
         let mut message =
             xmpp_parsers::message::Message::new(Some(jid::Jid::from(room_jid.clone())));
-        message.id = Some(message_id.to_string());
+        message.id = Some(xmpp_parsers::message::Id(message_id.to_string()));
         message.type_ = XmppMessageType::Groupchat;
         message.bodies.insert(
-            String::new(),
-            xmpp_parsers::message::Body("never means never".to_string()),
+            xmpp_parsers::message::Lang::new(),
+            "never means never".to_string(),
         );
         if mention {
             message
@@ -1246,11 +1250,13 @@ async fn groupchat_notification_recovery_retries_committed_inbox_projection() {
         .expect("sender jid");
     let mut message = xmpp_parsers::message::Message::new(Some(jid::Jid::from(room_jid.clone())));
     message.from = Some(sender_jid.clone());
-    message.id = Some("groupchat-recovery-wire".to_string());
+    message.id = Some(xmpp_parsers::message::Id(
+        "groupchat-recovery-wire".to_string(),
+    ));
     message.type_ = XmppMessageType::Groupchat;
     message.bodies.insert(
-        String::new(),
-        xmpp_parsers::message::Body("charlie, this should recover".to_string()),
+        xmpp_parsers::message::Lang::new(),
+        "charlie, this should recover".to_string(),
     );
     message
         .payloads
@@ -1388,11 +1394,11 @@ async fn groupchat_public_default_suppresses_plain_push_until_always() {
 
         let mut message =
             xmpp_parsers::message::Message::new(Some(jid::Jid::from(room_jid.clone())));
-        message.id = Some(message_id.to_string());
+        message.id = Some(xmpp_parsers::message::Id(message_id.to_string()));
         message.type_ = XmppMessageType::Groupchat;
         message.bodies.insert(
-            String::new(),
-            xmpp_parsers::message::Body("plain public-room message".to_string()),
+            xmpp_parsers::message::Lang::new(),
+            "plain public-room message".to_string(),
         );
         let responses =
             handle_message_for_test(state.as_ref(), &alice_jid, Some(&alice_session), message)
@@ -1474,11 +1480,13 @@ async fn groupchat_channel_mention_for_foreign_room_does_not_ping_current_room()
     let mut mention = waddle_xmpp::xep::ExplicitMention::channel();
     mention.uri = Some("xmpp:other-channel@muc.example.com".to_string());
     let mut message = xmpp_parsers::message::Message::new(Some(jid::Jid::from(room_jid)));
-    message.id = Some("foreign-channel-mention".to_string());
+    message.id = Some(xmpp_parsers::message::Id(
+        "foreign-channel-mention".to_string(),
+    ));
     message.type_ = XmppMessageType::Groupchat;
     message.bodies.insert(
-        String::new(),
-        xmpp_parsers::message::Body("not this room".to_string()),
+        xmpp_parsers::message::Lang::new(),
+        "not this room".to_string(),
     );
     message
         .payloads
@@ -1567,12 +1575,11 @@ async fn groupchat_active_channel_mention_pushes_live_occupants_only() {
         .expect("join bob");
 
     let mut message = xmpp_parsers::message::Message::new(Some(jid::Jid::from(room_jid.clone())));
-    message.id = Some("active-channel-push".to_string());
+    message.id = Some(xmpp_parsers::message::Id("active-channel-push".to_string()));
     message.type_ = XmppMessageType::Groupchat;
-    message.bodies.insert(
-        String::new(),
-        xmpp_parsers::message::Body("heads up".to_string()),
-    );
+    message
+        .bodies
+        .insert(xmpp_parsers::message::Lang::new(), "heads up".to_string());
     message
         .payloads
         .push(waddle_xmpp::xep::build_mention_element(
@@ -1651,12 +1658,13 @@ async fn groupchat_active_channel_mention_does_not_expand_to_live_unaffiliated_o
         .expect("join bob without durable affiliation");
 
     let mut message = xmpp_parsers::message::Message::new(Some(jid::Jid::from(room_jid)));
-    message.id = Some("active-channel-live-not-durable-push".to_string());
+    message.id = Some(xmpp_parsers::message::Id(
+        "active-channel-live-not-durable-push".to_string(),
+    ));
     message.type_ = XmppMessageType::Groupchat;
-    message.bodies.insert(
-        String::new(),
-        xmpp_parsers::message::Body("heads up".to_string()),
-    );
+    message
+        .bodies
+        .insert(xmpp_parsers::message::Lang::new(), "heads up".to_string());
     message
         .payloads
         .push(waddle_xmpp::xep::build_mention_element(
@@ -1745,12 +1753,13 @@ async fn groupchat_active_channel_mention_preserves_notify_all_for_non_live_alwa
         .expect("join bob");
 
     let mut message = xmpp_parsers::message::Message::new(Some(jid::Jid::from(room_jid.clone())));
-    message.id = Some("active-channel-always-push".to_string());
+    message.id = Some(xmpp_parsers::message::Id(
+        "active-channel-always-push".to_string(),
+    ));
     message.type_ = XmppMessageType::Groupchat;
-    message.bodies.insert(
-        String::new(),
-        xmpp_parsers::message::Body("heads up".to_string()),
-    );
+    message
+        .bodies
+        .insert(xmpp_parsers::message::Lang::new(), "heads up".to_string());
     message
         .payloads
         .push(waddle_xmpp::xep::build_mention_element(
@@ -1847,11 +1856,13 @@ async fn queue_offline_delivery_suppresses_xep0357_when_xep0492_direct_chat_is_n
     let mut message =
         xmpp_parsers::message::Message::new(Some("bob@example.com".parse().expect("to jid")));
     message.from = Some("alice@example.com/web".parse().expect("from jid"));
-    message.id = Some("offline-push-muted-1".to_string());
+    message.id = Some(xmpp_parsers::message::Id(
+        "offline-push-muted-1".to_string(),
+    ));
     message.type_ = XmppMessageType::Chat;
     message.bodies.insert(
-        String::new(),
-        xmpp_parsers::message::Body("do not push".to_string()),
+        xmpp_parsers::message::Lang::new(),
+        "do not push".to_string(),
     );
     let archive_stanza_id = waddle_xmpp_core::xep0359::StanzaId::new(
         "archive-offline-muted-1",
@@ -1948,11 +1959,11 @@ async fn xep0357_suppression_preserves_mam_inbox_pending_delivery_and_audit() {
     let mut message =
         xmpp_parsers::message::Message::new(Some("bob@example.com".parse().expect("to jid")));
     message.from = Some("alice@example.com/web".parse().expect("from jid"));
-    message.id = Some("storage-preserve-1".to_string());
+    message.id = Some(xmpp_parsers::message::Id("storage-preserve-1".to_string()));
     message.type_ = XmppMessageType::Chat;
     message.bodies.insert(
-        String::new(),
-        xmpp_parsers::message::Body("must-not-rollback".to_string()),
+        xmpp_parsers::message::Lang(String::new()),
+        "must-not-rollback".to_string(),
     );
     let archive_stanza_id = waddle_xmpp_core::xep0359::StanzaId::new(
         "archive-storage-preserve-1",
@@ -2154,11 +2165,13 @@ async fn queue_offline_delivery_suppresses_xep0357_for_transient_no_permanent_st
     let mut message =
         xmpp_parsers::message::Message::new(Some("bob@example.com".parse().expect("to jid")));
     message.from = Some("alice@example.com/web".parse().expect("from jid"));
-    message.id = Some("offline-push-transient-1".to_string());
+    message.id = Some(xmpp_parsers::message::Id(
+        "offline-push-transient-1".to_string(),
+    ));
     message.type_ = XmppMessageType::Chat;
     message.bodies.insert(
-        String::new(),
-        xmpp_parsers::message::Body("do not push transient".to_string()),
+        xmpp_parsers::message::Lang::new(),
+        "do not push transient".to_string(),
     );
     let deps = build_interpret_deps(state.as_ref(), None);
     crate::server::routes::interpret::interpret(
@@ -2343,12 +2356,13 @@ async fn notification_candidate_recovery_preserves_sender_resource_from_archived
     );
     let mut message = xmpp_parsers::message::Message::new(Some(jid::Jid::from(recipient.clone())));
     message.from = Some(sender_full.clone());
-    message.id = Some("wire-recovery-resource-1".to_string());
+    message.id = Some(xmpp_parsers::message::Id(
+        "wire-recovery-resource-1".to_string(),
+    ));
     message.type_ = XmppMessageType::Chat;
-    message.bodies.insert(
-        String::new(),
-        xmpp_parsers::message::Body("recover me".to_string()),
-    );
+    message
+        .bodies
+        .insert(xmpp_parsers::message::Lang::new(), "recover me".to_string());
     message
         .payloads
         .push(waddle_xmpp_core::xep0359::build_stanza_id_element(
@@ -2446,11 +2460,13 @@ async fn notification_candidate_recovery_skips_full_mam_sender_when_stanza_sende
     let mut stanza_message =
         xmpp_parsers::message::Message::new(Some(jid::Jid::from(recipient.clone())));
     stanza_message.from = Some("alice@example.com/phone".parse().expect("stanza sender"));
-    stanza_message.id = Some("wire-recovery-full-row-mismatched-stanza-1".to_string());
+    stanza_message.id = Some(xmpp_parsers::message::Id(
+        "wire-recovery-full-row-mismatched-stanza-1".to_string(),
+    ));
     stanza_message.type_ = XmppMessageType::Chat;
     stanza_message.bodies.insert(
-        String::new(),
-        xmpp_parsers::message::Body("recover from full MAM row".to_string()),
+        xmpp_parsers::message::Lang::new(),
+        "recover from full MAM row".to_string(),
     );
     let archived = waddle_xmpp_core::mam::ArchivedMessage {
         id: archive_stanza_id.id.clone(),
@@ -2562,11 +2578,13 @@ async fn notification_candidate_recovery_skips_bare_stanza_sender_even_with_full
     let mut stanza_message =
         xmpp_parsers::message::Message::new(Some(jid::Jid::from(recipient.clone())));
     stanza_message.from = Some(jid::Jid::from(sender_bare));
-    stanza_message.id = Some("wire-recovery-full-row-bare-stanza-1".to_string());
+    stanza_message.id = Some(xmpp_parsers::message::Id(
+        "wire-recovery-full-row-bare-stanza-1".to_string(),
+    ));
     stanza_message.type_ = XmppMessageType::Chat;
     stanza_message.bodies.insert(
-        String::new(),
-        xmpp_parsers::message::Body("do not recover bare stanza sender".to_string()),
+        xmpp_parsers::message::Lang::new(),
+        "do not recover bare stanza sender".to_string(),
     );
     let archived = waddle_xmpp_core::mam::ArchivedMessage {
         id: archive_stanza_id.id.clone(),
@@ -2720,11 +2738,13 @@ async fn notification_candidate_recovery_skips_mismatched_stanza_sender_terminal
     let mut stanza_message =
         xmpp_parsers::message::Message::new(Some(jid::Jid::from(recipient.clone())));
     stanza_message.from = Some("mallory@example.com/web".parse().expect("stanza sender"));
-    stanza_message.id = Some("wire-recovery-mismatched-sender-1".to_string());
+    stanza_message.id = Some(xmpp_parsers::message::Id(
+        "wire-recovery-mismatched-sender-1".to_string(),
+    ));
     stanza_message.type_ = XmppMessageType::Chat;
     stanza_message.bodies.insert(
-        String::new(),
-        xmpp_parsers::message::Body("do not recover mismatched sender".to_string()),
+        xmpp_parsers::message::Lang::new(),
+        "do not recover mismatched sender".to_string(),
     );
     let archived = waddle_xmpp_core::mam::ArchivedMessage {
         id: archive_stanza_id.id.clone(),
@@ -2801,11 +2821,13 @@ async fn handle_message_direct_rejects_client_authored_extension_envelope() {
 
     let mut message =
         xmpp_parsers::message::Message::new(Some(jid::Jid::from(recipient_jid.clone())));
-    message.id = Some("dm-extension-spoof-1".to_string());
+    message.id = Some(xmpp_parsers::message::Id(
+        "dm-extension-spoof-1".to_string(),
+    ));
     message.type_ = XmppMessageType::Chat;
     message.bodies.insert(
-        String::new(),
-        xmpp_parsers::message::Body("spoofed extension".to_string()),
+        xmpp_parsers::message::Lang::new(),
+        "spoofed extension".to_string(),
     );
     message
         .payloads
@@ -2833,12 +2855,12 @@ async fn handle_message_direct_rejects_client_authored_extension_envelope() {
         responses[0]
     );
     assert!(
-        responses[0].contains("from=\"bob@example.com/mobile\""),
+        responses[0].contains("from='bob@example.com/mobile'"),
         "response was {}",
         responses[0]
     );
     assert!(
-        responses[0].contains("to=\"alice@example.com/web\""),
+        responses[0].contains("to='alice@example.com/web'"),
         "response was {}",
         responses[0]
     );
@@ -2852,7 +2874,9 @@ async fn handle_message_error_with_extension_envelope_does_not_emit_error_loop()
 
     let mut message =
         xmpp_parsers::message::Message::new(Some(jid::Jid::from(recipient_jid.clone())));
-    message.id = Some("dm-extension-error-1".to_string());
+    message.id = Some(xmpp_parsers::message::Id(
+        "dm-extension-error-1".to_string(),
+    ));
     message.type_ = XmppMessageType::Error;
     message
         .payloads
@@ -2894,11 +2918,13 @@ async fn handle_message_groupchat_rejects_client_authored_extension_envelope() {
         .expect("join alice");
 
     let mut message = xmpp_parsers::message::Message::new(Some(jid::Jid::from(room_jid.clone())));
-    message.id = Some("muc-extension-spoof-1".to_string());
+    message.id = Some(xmpp_parsers::message::Id(
+        "muc-extension-spoof-1".to_string(),
+    ));
     message.type_ = XmppMessageType::Groupchat;
     message.bodies.insert(
-        String::new(),
-        xmpp_parsers::message::Body("spoofed extension".to_string()),
+        xmpp_parsers::message::Lang::new(),
+        "spoofed extension".to_string(),
     );
     message
         .payloads
@@ -2927,12 +2953,12 @@ async fn handle_message_groupchat_rejects_client_authored_extension_envelope() {
         responses[0]
     );
     assert!(
-        responses[0].contains("from=\"general@muc.example.com\""),
+        responses[0].contains("from='general@muc.example.com'"),
         "response was {}",
         responses[0]
     );
     assert!(
-        responses[0].contains("to=\"alice@example.com/web\""),
+        responses[0].contains("to='alice@example.com/web'"),
         "response was {}",
         responses[0]
     );
@@ -2967,11 +2993,13 @@ async fn handle_message_groupchat_extension_envelope_preserves_non_occupant_erro
         .expect("join bob");
 
     let mut message = xmpp_parsers::message::Message::new(Some(jid::Jid::from(room_jid.clone())));
-    message.id = Some("muc-extension-non-occupant-1".to_string());
+    message.id = Some(xmpp_parsers::message::Id(
+        "muc-extension-non-occupant-1".to_string(),
+    ));
     message.type_ = XmppMessageType::Groupchat;
     message.bodies.insert(
-        String::new(),
-        xmpp_parsers::message::Body("spoofed extension".to_string()),
+        xmpp_parsers::message::Lang::new(),
+        "spoofed extension".to_string(),
     );
     message
         .payloads
@@ -3005,12 +3033,12 @@ async fn handle_message_groupchat_extension_envelope_preserves_non_occupant_erro
         responses[0]
     );
     assert!(
-        responses[0].contains("from=\"general@muc.example.com\""),
+        responses[0].contains("from='general@muc.example.com'"),
         "response was {}",
         responses[0]
     );
     assert!(
-        responses[0].contains("to=\"alice@example.com/web\""),
+        responses[0].contains("to='alice@example.com/web'"),
         "response was {}",
         responses[0]
     );
@@ -3031,17 +3059,22 @@ async fn handle_message_direct_with_sample_extension_payload_preserves_payload_f
 
     let mut message =
         xmpp_parsers::message::Message::new(Some(jid::Jid::from(recipient_jid.clone())));
-    message.id = Some("dm-extension-payload-1".to_string());
+    message.id = Some(xmpp_parsers::message::Id(
+        "dm-extension-payload-1".to_string(),
+    ));
     message.type_ = XmppMessageType::Chat;
     message.bodies.insert(
-        String::new(),
-        xmpp_parsers::message::Body("Repo payload already attached".to_string()),
+        xmpp_parsers::message::Lang::new(),
+        "Repo payload already attached".to_string(),
     );
     message.payloads.push(
         Element::builder("repo", "urn:waddle:test-extension:1")
-            .attr("owner", "rust-lang")
-            .attr("name", "rust")
-            .attr("url", "xmpp:example.com?extension=test")
+            .attr(minidom::rxml::xml_ncname!("owner").to_owned(), "rust-lang")
+            .attr(minidom::rxml::xml_ncname!("name").to_owned(), "rust")
+            .attr(
+                minidom::rxml::xml_ncname!("url").to_owned(),
+                "xmpp:example.com?extension=test",
+            )
             .build(),
     );
 
@@ -3057,9 +3090,9 @@ async fn handle_message_direct_with_sample_extension_payload_preserves_payload_f
     let mut found_chat = false;
     while let Ok(routed) = recipient_rx.try_recv() {
         let routed_xml = stanza_to_xml(&routed.stanza);
-        if routed_xml.contains("type=\"chat\"") || routed_xml.contains("type='chat'") {
+        if routed_xml.contains("type='chat'") || routed_xml.contains("type='chat'") {
             assert!(
-                routed_xml.contains("to=\"bob@example.com/mobile\"")
+                routed_xml.contains("to='bob@example.com/mobile'")
                     || routed_xml.contains("to='bob@example.com/mobile'"),
                 "routed stanza should target recipient resource: {routed_xml}"
             );
@@ -3342,11 +3375,11 @@ async fn direct_messages_round_trip_through_inbox_query_and_mark_read() {
         .find(|frame| frame.contains("<entry "))
         .expect("at least one streamed inbox entry");
     assert!(
-        entry_xml.contains("jid=\"alice@example.com\""),
+        entry_xml.contains("jid='alice@example.com'"),
         "streamed inbox entry should reference Alice: {entry_xml}"
     );
     assert!(
-        entry_xml.contains("unread=\"1\""),
+        entry_xml.contains("unread='1'"),
         "streamed inbox entry should report one unread DM: {entry_xml}"
     );
     let fin_xml = inbox_responses
@@ -3357,7 +3390,7 @@ async fn direct_messages_round_trip_through_inbox_query_and_mark_read() {
         "last frame is the XEP-0430 fin IQ: {fin_xml}"
     );
     assert!(
-        fin_xml.contains("total=\"1\""),
+        fin_xml.contains("total='1'"),
         "fin reports a single matched conversation: {fin_xml}"
     );
 
@@ -3378,7 +3411,7 @@ async fn direct_messages_round_trip_through_inbox_query_and_mark_read() {
     .await;
     let mark_read_xml = mark_read_responses.first().expect("mark-read result");
     assert!(
-        mark_read_xml.contains("type=\"result\""),
+        mark_read_xml.contains("type='result'"),
         "mark-read should succeed: {mark_read_xml}"
     );
 
@@ -3401,7 +3434,7 @@ async fn direct_messages_round_trip_through_inbox_query_and_mark_read() {
         .last()
         .expect("unread-only response ends with fin IQ");
     assert!(
-        unread_only_fin.contains("total=\"0\""),
+        unread_only_fin.contains("total='0'"),
         "mark-read clears unread, fin should report no matches: {unread_only_fin}"
     );
     assert!(
@@ -3500,11 +3533,11 @@ async fn encrypted_sfs_messages_without_bodies_still_project_into_inbox() {
         .find(|frame| frame.contains("<entry "))
         .expect("streamed inbox entry for the bodyless file-sharing DM");
     assert!(
-        entry_xml.contains("jid=\"alice@example.com\""),
+        entry_xml.contains("jid='alice@example.com'"),
         "encrypted file-sharing inbox entry should target Alice: {entry_xml}"
     );
     assert!(
-        entry_xml.contains("unread=\"1\""),
+        entry_xml.contains("unread='1'"),
         "encrypted file-sharing inbox entry should increment unread: {entry_xml}"
     );
     assert!(
@@ -3681,7 +3714,7 @@ async fn personal_mam_query_uses_ready_phase_when_sidecar_session_is_missing() {
     assert!(
         mam_responses
             .iter()
-            .any(|stanza| stanza.contains(&format!("to=\"{}\"", bob_jid))
+            .any(|stanza| stanza.contains(&format!("to='{}'", bob_jid))
                 || stanza.contains(&format!("to='{}'", bob_jid))),
         "expected MAM results addressed to the resumed bound resource, got: {:?}",
         mam_responses
@@ -3703,14 +3736,14 @@ fn stanza_to_xml_includes_payloads() {
     msg.from = Some(jid::Jid::from(
         "alice@example.com".parse::<jid::BareJid>().unwrap(),
     ));
-    msg.id = Some("test-1".into());
+    msg.id = Some(xmpp_parsers::message::Id("test-1".into()));
     msg.type_ = xmpp_parsers::message::MessageType::Chat;
     msg.bodies
-        .insert(String::new(), xmpp_parsers::message::Body("Hello".into()));
+        .insert(xmpp_parsers::message::Lang::new(), "Hello".into());
 
     let embed = xmpp_parsers::minidom::Element::builder("repo", "urn:waddle:test-extension:1")
-        .attr("owner", "cuenv")
-        .attr("name", "cuenv")
+        .attr(minidom::rxml::xml_ncname!("owner").to_owned(), "cuenv")
+        .attr(minidom::rxml::xml_ncname!("name").to_owned(), "cuenv")
         .build();
     msg.payloads.push(embed);
 
@@ -3749,12 +3782,10 @@ fn stanza_to_xml_no_payloads_still_works() {
     msg.from = Some(jid::Jid::from(
         "alice@example.com".parse::<jid::BareJid>().unwrap(),
     ));
-    msg.id = Some("test-2".into());
+    msg.id = Some(xmpp_parsers::message::Id("test-2".into()));
     msg.type_ = xmpp_parsers::message::MessageType::Chat;
-    msg.bodies.insert(
-        String::new(),
-        xmpp_parsers::message::Body("No embeds".into()),
-    );
+    msg.bodies
+        .insert(xmpp_parsers::message::Lang::new(), "No embeds".into());
 
     let xml = stanza_to_xml(&Stanza::Message(msg));
     assert!(xml.contains("<body>No embeds</body>"));
@@ -3770,9 +3801,9 @@ fn parse_message_stanza_preserves_thread_and_reply() {
         </message>"#;
 
     let parsed = parse_message_for_test(xml);
-    assert_eq!(parsed.id.as_deref(), Some("msg-1"));
+    assert_eq!(parsed.id.as_ref().map(|id| id.0.as_str()), Some("msg-1"));
     assert_eq!(
-        parsed.thread.as_ref().map(|t| t.0.as_str()),
+        parsed.thread.as_ref().map(|t| t.id.as_str()),
         Some("thread-root")
     );
     assert!(parsed
@@ -3793,7 +3824,7 @@ fn stanza_to_xml_preserves_thread_and_reply() {
     let rendered = stanza_to_xml(&Stanza::Message(parsed));
     let reparsed = parse_message_for_test(&rendered);
     assert_eq!(
-        reparsed.thread.as_ref().map(|thread| thread.0.as_str()),
+        reparsed.thread.as_ref().map(|thread| thread.id.as_str()),
         Some("thread-root"),
         "rendered stanza: {rendered}"
     );
@@ -3814,7 +3845,7 @@ fn xep_0201_thread_reattach_ignores_unrelated_namespaced_thread_payload() {
     // serializing the typed `message.thread` field — that would
     // drop the actual conversation thread on the wire (Copilot
     // review on PR #305).
-    use xmpp_parsers::message::{Body, Message, MessageType, Thread};
+    use xmpp_parsers::message::{Message, MessageType, Thread};
     use xmpp_parsers::minidom::Element;
 
     let mut msg = Message::new(Some(jid::Jid::from(
@@ -3825,22 +3856,26 @@ fn xep_0201_thread_reattach_ignores_unrelated_namespaced_thread_payload() {
             .parse::<jid::FullJid>()
             .expect("jid"),
     ));
-    msg.id = Some("msg-ns".to_string());
+    msg.id = Some(xmpp_parsers::message::Id("msg-ns".to_string()));
     msg.type_ = MessageType::Chat;
-    msg.bodies.insert(String::new(), Body("hi".to_string()));
-    msg.thread = Some(Thread("conversation-thread".to_string()));
+    msg.bodies
+        .insert(xmpp_parsers::message::Lang(String::new()), "hi".to_string());
+    msg.thread = Some(Thread {
+        id: "conversation-thread".to_string(),
+        parent: None,
+    });
     // Unrelated extension element happening to be named "thread"
     // in a different namespace — must not suppress reattachment.
     msg.payloads.push(
         Element::builder("thread", "urn:example:other:0")
-            .attr("kind", "unrelated")
+            .attr(minidom::rxml::xml_ncname!("kind").to_owned(), "unrelated")
             .build(),
     );
 
     let rendered = stanza_to_xml(&Stanza::Message(msg));
     let reparsed = parse_message_for_test(&rendered);
     assert_eq!(
-        reparsed.thread.as_ref().map(|t| t.0.as_str()),
+        reparsed.thread.as_ref().map(|t| t.id.as_str()),
         Some("conversation-thread"),
         "RFC 6121 thread must survive serialization despite unrelated <thread> in another ns; rendered: {rendered}"
     );

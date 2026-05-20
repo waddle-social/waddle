@@ -100,16 +100,16 @@ fn element_to_xml(element: Element) -> String {
 
 fn push_enable_iq(id: &str, jid: &str, node: &str, publish_options: Option<Element>) -> String {
     let mut enable = Element::builder("enable", NS_PUSH)
-        .attr("jid", jid)
-        .attr("node", node);
+        .attr(minidom::rxml::xml_ncname!("jid").to_owned(), jid)
+        .attr(minidom::rxml::xml_ncname!("node").to_owned(), node);
     if let Some(publish_options) = publish_options {
         enable = enable.append(publish_options);
     }
 
     element_to_xml(
         Element::builder("iq", CLIENT_NS)
-            .attr("type", "set")
-            .attr("id", id)
+            .attr(minidom::rxml::xml_ncname!("type").to_owned(), "set")
+            .attr(minidom::rxml::xml_ncname!("id").to_owned(), id)
             .append(enable.build())
             .build(),
     )
@@ -117,14 +117,14 @@ fn push_enable_iq(id: &str, jid: &str, node: &str, publish_options: Option<Eleme
 
 fn xdata_field(var: &str, value: &str) -> Element {
     Element::builder("field", NS_XDATA)
-        .attr("var", var)
+        .attr(minidom::rxml::xml_ncname!("var").to_owned(), var)
         .append(Element::builder("value", NS_XDATA).append(value).build())
         .build()
 }
 
 fn publish_options_form(fields: impl IntoIterator<Item = Element>) -> Element {
     let mut form = Element::builder("x", NS_XDATA)
-        .attr("type", "submit")
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "submit")
         .append(xdata_field("FORM_TYPE", NS_PUBSUB_PUBLISH_OPTIONS));
     for field in fields {
         form = form.append(field);
@@ -145,12 +145,12 @@ async fn establish_subscription_to_alice(alice: &mut WsXmppClient, bob: &mut WsX
         .expect("bob subscribes to alice");
     let subscribe = alice
         .recv_matching(|frame| {
-            frame.contains("type=\"subscribe\"") || frame.contains("type='subscribe'")
+            frame.contains("type='subscribe'") || frame.contains("type='subscribe'")
         })
         .await
         .expect("alice receives subscribe");
     assert!(
-        subscribe.contains("from=\"bob@localhost\"") || subscribe.contains("from='bob@localhost'"),
+        subscribe.contains("from='bob@localhost'") || subscribe.contains("from='bob@localhost'"),
         "expected bob subscribe request, got: {subscribe}"
     );
 
@@ -160,12 +160,12 @@ async fn establish_subscription_to_alice(alice: &mut WsXmppClient, bob: &mut WsX
         .expect("alice approves bob");
     let subscribed = bob
         .recv_matching(|frame| {
-            frame.contains("type=\"subscribed\"") || frame.contains("type='subscribed'")
+            frame.contains("type='subscribed'") || frame.contains("type='subscribed'")
         })
         .await
         .expect("bob receives approval");
     assert!(
-        subscribed.contains("from=\"alice@localhost\"")
+        subscribed.contains("from='alice@localhost'")
             || subscribed.contains("from='alice@localhost'"),
         "expected alice approval, got: {subscribed}"
     );
@@ -190,7 +190,7 @@ async fn websocket_vcard_set_then_get_roundtrips() {
         .await
         .expect("vcard set response");
     assert!(
-        set_response.contains("type=\"result\"") || set_response.contains("type='result'"),
+        set_response.contains("type='result'") || set_response.contains("type='result'"),
         "expected vCard set result, got: {set_response}"
     );
 
@@ -227,7 +227,7 @@ async fn websocket_private_xml_set_then_get_roundtrips() {
         .await
         .expect("private set response");
     assert!(
-        set_response.contains("type=\"result\"") || set_response.contains("type='result'"),
+        set_response.contains("type='result'") || set_response.contains("type='result'"),
         "expected private XML set result, got: {set_response}"
     );
 
@@ -264,7 +264,7 @@ async fn websocket_blocking_set_then_get_returns_blocklist() {
         .await
         .expect("blocking set response");
     assert!(
-        set_response.contains("type=\"result\"") || set_response.contains("type='result'"),
+        set_response.contains("type='result'") || set_response.contains("type='result'"),
         "expected blocking set result, got: {set_response}"
     );
 
@@ -326,7 +326,7 @@ async fn websocket_blocking_updates_presence_visibility_for_subscribed_contact()
         .await
         .expect("bob receives initial presence");
     assert!(
-        initial_presence.contains("from=\"alice@localhost/")
+        initial_presence.contains("from='alice@localhost/")
             || initial_presence.contains("from='alice@localhost/"),
         "expected alice presence before blocking, got: {initial_presence}"
     );
@@ -342,19 +342,19 @@ async fn websocket_blocking_updates_presence_visibility_for_subscribed_contact()
         .await
         .expect("blocking response");
     assert!(
-        block_response.contains("type=\"result\"") || block_response.contains("type='result'"),
+        block_response.contains("type='result'") || block_response.contains("type='result'"),
         "expected blocking result, got: {block_response}"
     );
     let unavailable = bob
         .recv_matching(|frame| {
-            (frame.contains("type=\"unavailable\"") || frame.contains("type='unavailable'"))
-                && (frame.contains("from=\"alice@localhost/")
+            (frame.contains("type='unavailable'") || frame.contains("type='unavailable'"))
+                && (frame.contains("from='alice@localhost/")
                     || frame.contains("from='alice@localhost/"))
         })
         .await
         .expect("bob receives unavailable presence after block");
     assert!(
-        unavailable.contains("to=\"bob@localhost\"") || unavailable.contains("to='bob@localhost'"),
+        unavailable.contains("to='bob@localhost'") || unavailable.contains("to='bob@localhost'"),
         "expected unavailable presence addressed to bob, got: {unavailable}"
     );
 
@@ -369,7 +369,7 @@ async fn websocket_blocking_updates_presence_visibility_for_subscribed_contact()
         .await
         .expect("unblocking response");
     assert!(
-        unblock_response.contains("type=\"result\"") || unblock_response.contains("type='result'"),
+        unblock_response.contains("type='result'") || unblock_response.contains("type='result'"),
         "expected unblocking result, got: {unblock_response}"
     );
     let restored_presence = bob
@@ -377,7 +377,7 @@ async fn websocket_blocking_updates_presence_visibility_for_subscribed_contact()
         .await
         .expect("bob receives current presence after unblock");
     assert!(
-        restored_presence.contains("from=\"alice@localhost/")
+        restored_presence.contains("from='alice@localhost/")
             || restored_presence.contains("from='alice@localhost/"),
         "expected alice current presence after unblock, got: {restored_presence}"
     );
@@ -385,7 +385,7 @@ async fn websocket_blocking_updates_presence_visibility_for_subscribed_contact()
     assert_no_frame_matching(
         &mut bob,
         Duration::from_millis(250),
-        |frame| frame.contains("type=\"unavailable\"") || frame.contains("type='unavailable'"),
+        |frame| frame.contains("type='unavailable'") || frame.contains("type='unavailable'"),
         "bob should not receive extra unavailable presence after unblock",
     )
     .await;
@@ -413,7 +413,7 @@ async fn websocket_push_enable_rejects_external_service_until_publish_is_wired()
         .await
         .expect("push enable response");
     assert!(
-        enable_response.contains("type=\"error\"") || enable_response.contains("type='error'"),
+        enable_response.contains("type='error'") || enable_response.contains("type='error'"),
         "expected push enable error, got: {enable_response}"
     );
     assert!(
@@ -441,7 +441,7 @@ async fn websocket_push_enable_rejects_external_service_without_provider_credent
         .expect("push enable response");
 
     assert!(
-        response.contains("type=\"error\"") || response.contains("type='error'"),
+        response.contains("type='error'") || response.contains("type='error'"),
         "expected push enable error for unsupported external push service, got: {response}"
     );
     assert!(
@@ -476,7 +476,7 @@ async fn websocket_push_enable_rejects_provider_credentials_in_publish_options()
         .expect("push enable response");
 
     assert!(
-        response.contains("type=\"error\"") || response.contains("type='error'"),
+        response.contains("type='error'") || response.contains("type='error'"),
         "expected push enable error for provider credentials, got: {response}"
     );
     assert!(
@@ -502,7 +502,7 @@ async fn websocket_push_enable_rejects_invalid_service_jid() {
         .expect("push enable response");
 
     assert!(
-        response.contains("type=\"error\"") || response.contains("type='error'"),
+        response.contains("type='error'") || response.contains("type='error'"),
         "expected push enable error for invalid service jid, got: {response}"
     );
     assert!(
@@ -528,7 +528,7 @@ async fn websocket_isr_token_request_returns_token() {
         .await
         .expect("ISR token response");
     assert!(
-        response.contains("type=\"result\"") || response.contains("type='result'"),
+        response.contains("type='result'") || response.contains("type='result'"),
         "expected ISR token result, got: {response}"
     );
     assert!(
@@ -592,7 +592,7 @@ async fn websocket_user_and_channel_search_return_results() {
         .await
         .expect("empty user search response");
     assert!(
-        empty_search.contains("type=\"error\"") || empty_search.contains("type='error'"),
+        empty_search.contains("type='error'") || empty_search.contains("type='error'"),
         "expected empty user search to fail, got: {empty_search}"
     );
     assert!(
@@ -611,7 +611,7 @@ async fn websocket_user_and_channel_search_return_results() {
         .await
         .expect("wildcard user search response");
     assert!(
-        wildcard_search.contains("type=\"result\"") || wildcard_search.contains("type='result'"),
+        wildcard_search.contains("type='result'") || wildcard_search.contains("type='result'"),
         "expected wildcard user search to return an empty result, got: {wildcard_search}"
     );
     assert!(
@@ -630,7 +630,7 @@ async fn websocket_user_and_channel_search_return_results() {
         .await
         .expect("wrong-namespace user search response");
     assert!(
-        wrong_ns_search.contains("type=\"error\"") || wrong_ns_search.contains("type='error'"),
+        wrong_ns_search.contains("type='error'") || wrong_ns_search.contains("type='error'"),
         "expected wrong-namespace user search to fail, got: {wrong_ns_search}"
     );
     assert!(
@@ -649,7 +649,7 @@ async fn websocket_user_and_channel_search_return_results() {
         .await
         .expect("channel search response");
     assert!(
-        (channels.contains("type=\"result\"") || channels.contains("type='result'"))
+        (channels.contains("type='result'") || channels.contains("type='result'"))
             && channels.contains("urn:xmpp:channel-search:0"),
         "expected channel search result, got: {channels}"
     );
@@ -696,7 +696,7 @@ async fn websocket_full_jid_iq_routes_to_bound_resource() {
         .await
         .expect("recipient routed IQ");
     assert!(
-        routed.contains("from=\"admin@localhost/") || routed.contains("from='admin@localhost/"),
+        routed.contains("from='admin@localhost/") || routed.contains("from='admin@localhost/"),
         "expected routed IQ from sender resource, got: {routed}"
     );
     assert!(
@@ -751,7 +751,7 @@ async fn websocket_blocking_prevents_full_jid_iq_routing() {
         .await
         .expect("blocking set response");
     assert!(
-        block_response.contains("type=\"result\"") || block_response.contains("type='result'"),
+        block_response.contains("type='result'") || block_response.contains("type='result'"),
         "expected blocking set result, got: {block_response}"
     );
 
@@ -820,7 +820,7 @@ async fn websocket_direct_muc_invite_routes_normal_message() {
         .await
         .expect("recipient invite");
     assert!(
-        invite.contains("jabber:x:conference") && !invite.contains("type=\"chat\""),
+        invite.contains("jabber:x:conference") && !invite.contains("type='chat'"),
         "expected non-chat direct MUC invite, got: {invite}"
     );
 
@@ -871,7 +871,7 @@ async fn websocket_blocking_prevents_direct_message_delivery() {
         .await
         .expect("blocking set response");
     assert!(
-        block_response.contains("type=\"result\"") || block_response.contains("type='result'"),
+        block_response.contains("type='result'") || block_response.contains("type='result'"),
         "expected blocking set result, got: {block_response}"
     );
 
@@ -931,13 +931,13 @@ async fn websocket_normal_message_routes_as_direct_message() {
         .recv_matching(|frame| {
             frame.contains("ws-normal-message")
                 && (frame.contains("<body>hello normal</body>")
-                    || frame.contains("type=\"normal\"")
+                    || frame.contains("type='normal'")
                     || frame.contains("type='normal'"))
         })
         .await
         .expect("recipient normal message");
     assert!(
-        delivered.contains("hello normal") && delivered.contains("from=\"bob@localhost/"),
+        delivered.contains("hello normal") && delivered.contains("from='bob@localhost/"),
         "expected routed normal direct message, got: {delivered}"
     );
 
@@ -961,7 +961,7 @@ async fn websocket_pubsub_subscribe_and_unsubscribe_acknowledge_spaces_node() {
         .await
         .expect("pubsub create node response");
     assert!(
-        created.contains("type=\"result\"") || created.contains("type='result'"),
+        created.contains("type='result'") || created.contains("type='result'"),
         "expected pubsub create-node result, got: {created}"
     );
 
@@ -976,7 +976,7 @@ async fn websocket_pubsub_subscribe_and_unsubscribe_acknowledge_spaces_node() {
         .await
         .expect("pubsub subscribe response");
     assert!(
-        sub.contains("type=\"result\"") || sub.contains("type='result'"),
+        sub.contains("type='result'") || sub.contains("type='result'"),
         "expected pubsub subscribe result, got: {sub}"
     );
 
@@ -991,7 +991,7 @@ async fn websocket_pubsub_subscribe_and_unsubscribe_acknowledge_spaces_node() {
         .await
         .expect("pubsub unsubscribe response");
     assert!(
-        unsub.contains("type=\"result\"") || unsub.contains("type='result'"),
+        unsub.contains("type='result'") || unsub.contains("type='result'"),
         "expected pubsub unsubscribe result, got: {unsub}"
     );
 
@@ -1025,7 +1025,7 @@ async fn websocket_muc_self_ping_succeeds_for_joined_occupant() {
         .await
         .expect("self-ping response");
     assert!(
-        response.contains("type=\"result\"") || response.contains("type='result'"),
+        response.contains("type='result'") || response.contains("type='result'"),
         "expected MUC self-ping result, got: {response}"
     );
 

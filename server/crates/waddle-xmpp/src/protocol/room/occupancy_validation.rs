@@ -82,7 +82,7 @@ mod tests {
     use crate::xep::xep0421::OccupantIdSecret;
     use crate::Stanza;
     use jid::{BareJid, FullJid, Jid};
-    use xmpp_parsers::message::{Body, MessageType};
+    use xmpp_parsers::message::MessageType;
     use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
 
     fn full(s: &str) -> FullJid {
@@ -96,7 +96,8 @@ mod tests {
         let mut m = Message::new(Some(Jid::from(room.clone())));
         m.from = Some(Jid::from(sender.clone()));
         m.type_ = MessageType::Groupchat;
-        m.bodies.insert(String::new(), Body(body.to_string()));
+        m.bodies
+            .insert(xmpp_parsers::message::Lang::new(), body.to_string());
         m
     }
 

@@ -34,7 +34,7 @@ pub(crate) fn stanza_to_xml(stanza: &Stanza) -> String {
                 // empty: the wire shape requires a non-empty body
                 // (`<thread></thread>` is malformed per RFC 6121
                 // §5.2.5 / XEP-0201). `ThreadId::new` is the gate.
-                if let Some(id) = waddle_xmpp::mam::ThreadId::new(thread.0.clone()) {
+                if let Some(id) = waddle_xmpp::mam::ThreadId::new(thread.id.clone()) {
                     let info = waddle_xmpp::xep0201::ThreadInfo::root(id);
                     element.append_child(waddle_xmpp::xep0201::build_thread_element(
                         &info, &stanza_ns,
@@ -56,7 +56,7 @@ pub(crate) fn element_to_xml(element: xmpp_parsers::minidom::Element) -> String 
 }
 
 pub(crate) fn iq_to_xml(iq: xmpp_parsers::iq::Iq) -> String {
-    stanza_to_xml(&Stanza::Iq(iq))
+    stanza_to_xml(&Stanza::Iq(Box::new(iq)))
 }
 
 pub(crate) fn build_iq_result_xml(
@@ -66,13 +66,13 @@ pub(crate) fn build_iq_result_xml(
     payload: Option<xmpp_parsers::minidom::Element>,
 ) -> String {
     let mut iq = Element::builder("iq", waddle_xmpp::ns::JABBER_CLIENT)
-        .attr("id", id)
-        .attr("type", "result");
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), id)
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "result");
     if let Some(from) = from {
-        iq = iq.attr("from", from);
+        iq = iq.attr(minidom::rxml::xml_ncname!("from").to_owned(), from);
     }
     if let Some(to) = to {
-        iq = iq.attr("to", to);
+        iq = iq.attr(minidom::rxml::xml_ncname!("to").to_owned(), to);
     }
 
     let iq = if let Some(payload) = payload {
@@ -100,13 +100,13 @@ pub(crate) fn build_iq_error_xml_typed(
     error: xmpp_parsers::stanza_error::StanzaError,
 ) -> String {
     let mut iq = xmpp_parsers::minidom::Element::builder("iq", "jabber:client")
-        .attr("id", id)
-        .attr("type", "error");
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), id)
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "error");
     if let Some(from) = from {
-        iq = iq.attr("from", from);
+        iq = iq.attr(minidom::rxml::xml_ncname!("from").to_owned(), from);
     }
     if let Some(to) = to {
-        iq = iq.attr("to", to);
+        iq = iq.attr(minidom::rxml::xml_ncname!("to").to_owned(), to);
     }
 
     let iq = iq

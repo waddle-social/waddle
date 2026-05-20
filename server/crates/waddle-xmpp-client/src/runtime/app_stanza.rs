@@ -35,7 +35,7 @@ impl XmppRuntime {
             }
 
             if let Some(archived) = mam::parse_mam_result(element) {
-                return vec![ClientEvent::MamResult(archived)];
+                return vec![ClientEvent::MamResult(Box::new(archived))];
             }
 
             if let Some(pep_item) = pep::parse(element) {

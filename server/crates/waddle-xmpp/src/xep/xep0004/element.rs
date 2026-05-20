@@ -37,7 +37,10 @@ impl IntoElement for FieldOption {
         let mut builder = Element::builder("option", NS_DATA_FORMS);
 
         if let Some(ref label) = self.label {
-            builder = builder.attr("label", label.as_str());
+            builder = builder.attr(
+                minidom::rxml::xml_ncname!("label").to_owned(),
+                label.as_str(),
+            );
         }
 
         builder
@@ -96,15 +99,20 @@ impl FromElement for Field {
 
 impl IntoElement for Field {
     fn into_element(&self) -> Element {
-        let mut builder =
-            Element::builder("field", NS_DATA_FORMS).attr("type", self.field_type.as_str());
+        let mut builder = Element::builder("field", NS_DATA_FORMS).attr(
+            minidom::rxml::xml_ncname!("type").to_owned(),
+            self.field_type.as_str(),
+        );
 
         if let Some(ref var) = self.var {
-            builder = builder.attr("var", var.as_str());
+            builder = builder.attr(minidom::rxml::xml_ncname!("var").to_owned(), var.as_str());
         }
 
         if let Some(ref label) = self.label {
-            builder = builder.attr("label", label.as_str());
+            builder = builder.attr(
+                minidom::rxml::xml_ncname!("label").to_owned(),
+                label.as_str(),
+            );
         }
 
         if let Some(ref desc) = self.desc {
@@ -199,8 +207,10 @@ impl FromElement for DataForm {
 
 impl IntoElement for DataForm {
     fn into_element(&self) -> Element {
-        let mut builder =
-            Element::builder("x", NS_DATA_FORMS).attr("type", self.form_type.as_str());
+        let mut builder = Element::builder("x", NS_DATA_FORMS).attr(
+            minidom::rxml::xml_ncname!("type").to_owned(),
+            self.form_type.as_str(),
+        );
 
         if let Some(ref title) = self.title {
             builder = builder.append(

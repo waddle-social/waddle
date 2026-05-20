@@ -165,10 +165,11 @@ fn parse_extension_launch_context(element: &Element) -> Option<ExtensionLaunchCo
 fn parse_extension_payload_element(element: &Element) -> Option<ExtensionPayloadElementData> {
     let attributes = element
         .attrs()
-        .filter_map(|(name, value)| {
+        .iter()
+        .filter_map(|((_ns, name), value)| {
             Some(ExtensionPayloadAttributeData {
-                name: ExtensionXmlName::new(name)?,
-                value: value.to_string(),
+                name: ExtensionXmlName::new(name.as_str())?,
+                value: value.clone(),
             })
         })
         .collect::<Vec<_>>();

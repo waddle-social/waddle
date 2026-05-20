@@ -35,7 +35,7 @@ async fn iq_set_to(client: &mut WsXmppClient, id: &str, to: &str, body: &str) ->
         .await
         .expect("send iq set");
     client
-        .recv_matching(|frame| frame.contains(&format!(r#"id="{id}""#)) && frame.contains("<iq"))
+        .recv_matching(|frame| frame.contains(&format!(r#"id='{id}'"#)) && frame.contains("<iq"))
         .await
         .expect("iq set response")
 }
@@ -48,17 +48,17 @@ async fn iq_get_to(client: &mut WsXmppClient, id: &str, to: &str, body: &str) ->
         .await
         .expect("send iq get");
     client
-        .recv_matching(|frame| frame.contains(&format!(r#"id="{id}""#)) && frame.contains("<iq"))
+        .recv_matching(|frame| frame.contains(&format!(r#"id='{id}'"#)) && frame.contains("<iq"))
         .await
         .expect("iq get response")
 }
 
 fn is_result(frame: &str) -> bool {
-    frame.contains(r#"type="result""#) || frame.contains(r#"type='result'"#)
+    frame.contains(r#"type='result'"#) || frame.contains(r#"type='result'"#)
 }
 
 fn is_error(frame: &str) -> bool {
-    frame.contains(r#"type="error""#) || frame.contains(r#"type='error'"#)
+    frame.contains(r#"type='error'"#) || frame.contains(r#"type='error'"#)
 }
 
 #[tokio::test]
@@ -80,7 +80,7 @@ async fn server_owner_can_configure_get_general_space() {
         "expected configure-get result, got: {resp}"
     );
     assert!(
-        resp.contains(r#"xmlns="jabber:x:data""#) || resp.contains(r#"xmlns='jabber:x:data'"#),
+        resp.contains(r#"xmlns='jabber:x:data'"#) || resp.contains(r#"xmlns='jabber:x:data'"#),
         "expected data form in configure-get response, got: {resp}"
     );
     let _ = admin.close().await;
@@ -263,7 +263,7 @@ async fn wait_for_event_message(
             Ok(frame) => {
                 if frame.contains("<message")
                     && frame.contains(NS_PUBSUB_EVENT)
-                    && (frame.contains(&format!(r#"node="{node}""#))
+                    && (frame.contains(&format!(r#"node='{node}'"#))
                         || frame.contains(&format!(r#"node='{node}'"#)))
                 {
                     return Some(frame);
@@ -317,16 +317,16 @@ async fn spaces_publish_fans_event_to_subscriber() {
         .expect("Spaces subscriber must receive §7.1 event (acceptance criterion of #238)");
 
     assert!(
-        event.contains(r#"type="headline""#) || event.contains(r#"type='headline'"#),
+        event.contains(r#"type='headline'"#) || event.contains(r#"type='headline'"#),
         "Spaces event must be headline (XEP-0060 §12.18): {event}"
     );
     assert!(
-        event.contains(&format!(r#"from="{SPACES_JID}""#))
+        event.contains(&format!(r#"from='{SPACES_JID}'"#))
             || event.contains(&format!(r#"from='{SPACES_JID}'"#)),
         "from must be the spaces service JID: {event}"
     );
     assert!(
-        event.contains(&format!(r#"id="{chat_room}""#))
+        event.contains(&format!(r#"id='{chat_room}'"#))
             || event.contains(&format!(r#"id='{chat_room}'"#)),
         "event must carry the published bookmark item id: {event}"
     );

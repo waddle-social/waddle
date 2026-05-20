@@ -64,12 +64,12 @@ scenario: #Scenario & {
 		#ExpectPresence & {
 			target: adminPhone
 			contains: [
-				"status code=\"110\"",
+				"status code='110'",
 				// XEP-0045 affiliation/role carry authority. XEP-0317
 				// hats are descriptive metadata only and MUST NOT be
 				// synthesised from owner/admin/moderator.
-				"affiliation=\"owner\"",
-				"role=\"moderator\"",
+				"affiliation='owner'",
+				"role='moderator'",
 			]
 		},
 		#SendPresence & {
@@ -91,7 +91,7 @@ scenario: #Scenario & {
 		},
 		#ExpectPresence & {
 			target:   bobPhone
-			contains: ["status code=\"110\""]
+			contains: ["status code='110'"]
 		},
 		#ExpectPresence & {
 			target:   adminPhone
@@ -444,7 +444,7 @@ scenario: #Scenario & {
 		},
 		#DrainFrames & {
 			target:   adminPhone
-			contains: ["from=\"\(roomJid)\"", "<subject></subject>"]
+			contains: ["from='\(roomJid)'", "<subject></subject>"]
 		},
 		#DrainFrames & {
 			target:   adminPhone
@@ -460,11 +460,11 @@ scenario: #Scenario & {
 		},
 		#DrainFrames & {
 			target:   bobPhone
-			contains: ["<presence", "from=\"\(roomJid)/admin\""]
+			contains: ["<presence", "from='\(roomJid)/admin'"]
 		},
 		#DrainFrames & {
 			target:   bobPhone
-			contains: ["from=\"\(roomJid)\"", "<subject></subject>"]
+			contains: ["from='\(roomJid)'", "<subject></subject>"]
 		},
 		#DrainFrames & {
 			target:   bobPhone
@@ -486,7 +486,7 @@ scenario: #Scenario & {
 		},
 		#DrainFrames & {
 			target:   bobPhone
-			contains: ["id=\"cue-retract\"", "urn:xmpp:message-retract:1"]
+			contains: ["id='cue-retract'", "urn:xmpp:message-retract:1"]
 		},
 		#DrainFrames & {
 			target:   bobPhone
@@ -494,7 +494,7 @@ scenario: #Scenario & {
 		},
 		#DrainFrames & {
 			target:   bobPhone
-			contains: ["id=\"cue-moderate-original\"", moderateBody]
+			contains: ["id='cue-moderate-original'", moderateBody]
 		},
 		#DrainFrames & {
 			target:   bobPhone

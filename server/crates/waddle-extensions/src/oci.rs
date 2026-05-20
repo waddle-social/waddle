@@ -221,7 +221,7 @@ fn validate_cached_wasm_digest(module_name: &str, path: &Path, bytes: &[u8]) -> 
             digest_path.display()
         )
     })?;
-    let actual = format!("sha256:{:x}", Sha256::digest(bytes));
+    let actual = format!("sha256:{}", hex::encode(Sha256::digest(bytes)));
     if actual != expected.trim() {
         bail!("extension {module_name} wasm digest mismatch: expected {expected}, got {actual}");
     }
@@ -230,7 +230,7 @@ fn validate_cached_wasm_digest(module_name: &str, path: &Path, bytes: &[u8]) -> 
 
 fn write_cached_wasm_digest(path: &Path, bytes: &[u8]) -> Result<()> {
     let digest_path = cached_wasm_digest_path(path);
-    let digest = format!("sha256:{:x}\n", Sha256::digest(bytes));
+    let digest = format!("sha256:{}\n", hex::encode(Sha256::digest(bytes)));
     std::fs::write(&digest_path, digest).with_context(|| {
         format!(
             "failed to write cached extension digest {}",

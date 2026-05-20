@@ -39,7 +39,7 @@ use crate::protocol::message_context::MessageContext;
 use crate::protocol::session_state::Locality;
 use crate::protocol::traits::{HandlerOutcome, MessageHandler};
 use crate::xep::xep0334::HintCarrier;
-use xmpp_parsers::message::{Body, Message, MessageType};
+use xmpp_parsers::message::{Message, MessageType};
 
 /// XEP-0313 archive handler for the user-side message pipeline.
 #[derive(Debug, Default, Clone, Copy)]
@@ -164,10 +164,7 @@ pub fn has_archivable_content(message: &Message) -> bool {
 }
 
 fn has_substantive_body(message: &Message) -> bool {
-    message
-        .bodies
-        .values()
-        .any(|Body(text)| !text.trim().is_empty())
+    message.bodies.values().any(|text| !text.trim().is_empty())
 }
 
 fn has_archivable_payload(message: &Message) -> bool {
@@ -189,7 +186,7 @@ mod tests {
     use crate::xep::xep0334::Hint;
     use jid::{BareJid, FullJid};
     use minidom::Element;
-    use xmpp_parsers::message::{Body, Message, MessageType, Subject};
+    use xmpp_parsers::message::{Message, MessageType};
 
     fn full(s: &str) -> FullJid {
         s.parse().expect("valid full jid")
@@ -203,7 +200,8 @@ mod tests {
         let mut m = Message::new(Some(to.parse().expect("jid")));
         m.from = Some(from.parse().expect("jid"));
         m.type_ = MessageType::Chat;
-        m.bodies.insert(String::new(), Body(body.to_string()));
+        m.bodies
+            .insert(xmpp_parsers::message::Lang::new(), body.to_string());
         m
     }
 
@@ -306,8 +304,11 @@ mod tests {
         msg.type_ = MessageType::Chat;
         msg.payloads.push(
             Element::builder("retracted", crate::xep::xep0424::NS_MESSAGE_RETRACT)
-                .attr("id", "retract-1")
-                .attr("stamp", "2024-06-01T09:00:00Z")
+                .attr(minidom::rxml::xml_ncname!("id").to_owned(), "retract-1")
+                .attr(
+                    minidom::rxml::xml_ncname!("stamp").to_owned(),
+                    "2024-06-01T09:00:00Z",
+                )
                 .build(),
         );
 
@@ -404,7 +405,7 @@ mod tests {
         msg.from = Some("alice@example.com/web".parse().expect("jid"));
         msg.type_ = MessageType::Chat;
         msg.subjects
-            .insert(String::new(), Subject("New Topic".to_string()));
+            .insert(xmpp_parsers::message::Lang::new(), "New Topic".to_string());
         let outcome = run(&local, &mut msg);
         assert!(matches!(outcome, HandlerOutcome::Continue(ref e) if e.is_empty()));
     }
@@ -497,8 +498,10 @@ mod tests {
         let mut msg = Message::new(Some("alice@example.com".parse().expect("jid")));
         msg.from = Some("system@example.com/notify".parse().expect("jid"));
         msg.type_ = MessageType::Headline;
-        msg.bodies
-            .insert(String::new(), Body("breaking news".to_string()));
+        msg.bodies.insert(
+            xmpp_parsers::message::Lang::new(),
+            "breaking news".to_string(),
+        );
         msg.payloads.push(
             Element::builder(Hint::Store.element_name(), crate::xep::xep0334::NS_HINTS).build(),
         );
@@ -513,8 +516,10 @@ mod tests {
         let mut msg = Message::new(Some("alice@example.com".parse().expect("jid")));
         msg.from = Some("system@example.com/notify".parse().expect("jid"));
         msg.type_ = MessageType::Headline;
-        msg.bodies
-            .insert(String::new(), Body("breaking news".to_string()));
+        msg.bodies.insert(
+            xmpp_parsers::message::Lang::new(),
+            "breaking news".to_string(),
+        );
         assert!(!is_archivable(&msg));
         let outcome = run(&local, &mut msg);
         assert!(extract_archive_events(&outcome).is_empty());
@@ -534,7 +539,7 @@ mod tests {
         msg.from = Some("alice@example.com/web".parse().expect("jid"));
         msg.type_ = MessageType::Chat;
         msg.subjects
-            .insert(String::new(), Subject("New Topic".to_string()));
+            .insert(xmpp_parsers::message::Lang::new(), "New Topic".to_string());
         msg.payloads
             .push(crate::xep::xep0424::build_retract_element("stanza-X"));
 

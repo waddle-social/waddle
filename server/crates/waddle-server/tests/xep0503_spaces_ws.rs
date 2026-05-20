@@ -5,10 +5,7 @@ mod ws_common;
 use tokio::sync::Mutex;
 use waddle_xmpp::Stanza;
 use ws_common::{TestServer, WsXmppClient};
-use xmpp_parsers::{
-    iq::{Iq, IqType},
-    minidom::Element,
-};
+use xmpp_parsers::{iq::Iq, minidom::Element};
 
 const DOMAIN: &str = "localhost";
 const USERNAME: &str = "admin";
@@ -31,18 +28,18 @@ fn stanza_to_xml(stanza: &Stanza) -> String {
 }
 
 async fn iq_get_to(client: &mut WsXmppClient, id: &str, to: &str, payload: Element) -> String {
-    let iq = Iq {
+    let iq = Iq::Get {
         from: None,
         to: Some(to.parse().expect("valid iq destination")),
         id: id.to_string(),
-        payload: IqType::Get(payload),
+        payload,
     };
     client
-        .send(&stanza_to_xml(&Stanza::Iq(iq)))
+        .send(&stanza_to_xml(&Stanza::Iq(Box::new(iq))))
         .await
         .expect("send iq get");
     client
-        .recv_matching(|frame| frame.contains(&format!(r#"id="{id}""#)) && frame.contains("<iq"))
+        .recv_matching(|frame| frame.contains(&format!(r#"id='{id}'"#)) && frame.contains("<iq"))
         .await
         .expect("iq get response")
 }
@@ -61,7 +58,7 @@ async fn seeded_general_space_lists_bookmarked_rooms() {
     )
     .await;
     assert!(
-        spaces.contains("node=\"general\""),
+        spaces.contains("node='general'"),
         "expected seeded general space node: {spaces}"
     );
 
@@ -72,7 +69,7 @@ async fn seeded_general_space_lists_bookmarked_rooms() {
         Element::builder("pubsub", "http://jabber.org/protocol/pubsub")
             .append(
                 Element::builder("items", "http://jabber.org/protocol/pubsub")
-                    .attr("node", "general")
+                    .attr(minidom::rxml::xml_ncname!("node").to_owned(), "general")
                     .build(),
             )
             .build(),
@@ -104,12 +101,12 @@ async fn room_disco_advertises_parent_space_metadata() {
     .await;
 
     assert!(
-        info.contains("var=\"urn:xmpp:spaces:0\""),
+        info.contains("var='urn:xmpp:spaces:0'"),
         "expected XEP-0503 feature: {info}"
     );
     assert!(
         info.contains("<value>urn:xmpp:spaces:0</value>")
-            && info.contains("var=\"parent\"")
+            && info.contains("var='parent'")
             && info.contains("xmpp:spaces.localhost?;node=general"),
         "expected XEP-0503 parent data form: {info}"
     );

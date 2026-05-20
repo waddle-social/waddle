@@ -102,18 +102,18 @@ impl Identity {
 
 /// Check if an IQ is a disco#info query.
 pub fn is_disco_info_query(iq: &Iq) -> bool {
-    match &iq.payload {
-        xmpp_parsers::iq::IqType::Get(elem) => elem.name() == "query" && elem.ns() == DISCO_INFO_NS,
+    match iq {
+        Iq::Get { payload, .. } => payload.name() == "query" && payload.ns() == DISCO_INFO_NS,
         _ => false,
     }
 }
 
 /// Parse a disco#info query from an IQ stanza.
 pub fn parse_disco_info_query(iq: &Iq) -> Result<DiscoInfoQuery, CoreError> {
-    let query_elem = match &iq.payload {
-        xmpp_parsers::iq::IqType::Get(elem) => {
-            if elem.name() == "query" && elem.ns() == DISCO_INFO_NS {
-                elem
+    let query_elem = match iq {
+        Iq::Get { payload, .. } => {
+            if payload.name() == "query" && payload.ns() == DISCO_INFO_NS {
+                payload
             } else {
                 return Err(CoreError::bad_request(Some(
                     "Missing disco#info query element".to_string(),
@@ -128,7 +128,7 @@ pub fn parse_disco_info_query(iq: &Iq) -> Result<DiscoInfoQuery, CoreError> {
     };
 
     let node = query_elem.attr("node").map(str::to_string);
-    let target = iq.to.as_ref().map(|j| j.to_string());
+    let target = iq.to().map(|j| j.to_string());
 
     debug!(target = ?target, node = ?node, "Parsed disco#info query");
 
@@ -296,20 +296,30 @@ pub fn build_disco_info_response_with_extensions(
     let mut query_builder = Element::builder("query", DISCO_INFO_NS);
 
     if let Some(n) = node {
-        query_builder = query_builder.attr("node", n);
+        query_builder = query_builder.attr(minidom::rxml::xml_ncname!("node").to_owned(), n);
     }
 
     for identity in identities {
         let mut id_builder = Element::builder("identity", DISCO_INFO_NS)
-            .attr("category", &identity.category)
-            .attr("type", &identity.type_);
+            .attr(
+                minidom::rxml::xml_ncname!("category").to_owned(),
+                &identity.category,
+            )
+            .attr(
+                minidom::rxml::xml_ncname!("type").to_owned(),
+                &identity.type_,
+            );
 
         if let Some(ref lang) = identity.lang {
-            id_builder = id_builder.attr("xml:lang", lang);
+            id_builder = id_builder.attr_ns(
+                minidom::rxml::Namespace::XML,
+                minidom::rxml::xml_ncname!("lang").to_owned(),
+                lang,
+            );
         }
 
         if let Some(ref name) = identity.name {
-            id_builder = id_builder.attr("name", name);
+            id_builder = id_builder.attr(minidom::rxml::xml_ncname!("name").to_owned(), name);
         }
 
         query_builder = query_builder.append(id_builder.build());
@@ -318,7 +328,7 @@ pub fn build_disco_info_response_with_extensions(
     for feature in features {
         query_builder = query_builder.append(
             Element::builder("feature", DISCO_INFO_NS)
-                .attr("var", &feature.0)
+                .attr(minidom::rxml::xml_ncname!("var").to_owned(), &feature.0)
                 .build(),
         );
     }
@@ -329,11 +339,11 @@ pub fn build_disco_info_response_with_extensions(
 
     let query = query_builder.build();
 
-    Iq {
-        from: original_iq.to.clone(),
-        to: original_iq.from.clone(),
-        id: original_iq.id.clone(),
-        payload: xmpp_parsers::iq::IqType::Result(Some(query)),
+    Iq::Result {
+        from: original_iq.to().cloned(),
+        to: original_iq.from().cloned(),
+        id: original_iq.id().to_string(),
+        payload: Some(query),
     }
 }
 

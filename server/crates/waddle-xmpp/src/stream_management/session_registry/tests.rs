@@ -13,7 +13,7 @@ fn make_test_jid() -> FullJid {
 
 fn message_stanza_xml_with_id(id: String) -> String {
     let mut message = xmpp_parsers::message::Message::new(None::<jid::Jid>);
-    message.id = Some(id);
+    message.id = Some(xmpp_parsers::message::Id(id));
     let element = Stanza::Message(message).to_element();
     let mut buffer = Vec::new();
     element.write_to(&mut buffer).expect("serialize message");
@@ -197,7 +197,7 @@ async fn xep_0198_scrub_for_tombstone_removes_matching_1on1_message() {
 
 #[tokio::test]
 async fn xep_0198_detached_replay_preserves_xep_0201_thread_metadata() {
-    use xmpp_parsers::message::{Body, Message, MessageType, Thread};
+    use xmpp_parsers::message::{Message, MessageType, Thread};
 
     let registry = InMemorySmSessionRegistry::new();
     let jid = make_test_jid();
@@ -208,14 +208,23 @@ async fn xep_0198_detached_replay_preserves_xep_0201_thread_metadata() {
     msg.from = Some(jid::Jid::from(
         "sender@example.com/web".parse::<FullJid>().expect("jid"),
     ));
-    msg.id = Some("detached-threaded-message".to_string());
+    msg.id = Some(xmpp_parsers::message::Id(
+        "detached-threaded-message".to_string(),
+    ));
     msg.type_ = MessageType::Chat;
     msg.bodies
-        .insert(String::new(), Body("threaded".to_string()));
-    msg.thread = Some(Thread("conversation-thread".to_string()));
+        .insert(xmpp_parsers::message::Lang::new(), "threaded".to_string());
+    msg.thread = Some(Thread {
+        id: "conversation-thread".to_string(),
+        parent: None,
+    });
     msg.payloads.push(
         minidom::Element::builder("thread", "urn:example:other:0")
-            .attr("kind", "extension")
+            .attr(
+                <minidom::rxml::NcName as std::convert::TryFrom<&str>>::try_from("kind")
+                    .expect("validated NcName"),
+                "extension",
+            )
             .append("not-xep-0201")
             .build(),
     );
@@ -467,9 +476,10 @@ async fn test_claimed_session_remains_writable_for_handoff_fanout() {
                 &{
                     let mut presence =
                         xmpp_parsers::presence::Presence::new(xmpp_parsers::presence::Type::None);
-                    presence
-                        .statuses
-                        .insert(String::new(), "during-claim".to_string());
+                    presence.statuses.insert(
+                        xmpp_parsers::message::Lang(String::new()),
+                        "during-claim".to_string(),
+                    );
                     Stanza::Presence(presence)
                 },
                 Utc::now(),
@@ -672,7 +682,7 @@ fn realistic_message_stanza(body: &str) -> String {
     // serializer emits when rebuilt via Element::from(message).
     let mut m = xmpp_parsers::message::Message::new(None::<jid::Jid>);
     m.bodies
-        .insert(String::new(), xmpp_parsers::message::Body(body.to_string()));
+        .insert(xmpp_parsers::message::Lang::new(), body.to_string());
     let element: xmpp_parsers::minidom::Element = m.into();
     let mut buf = Vec::new();
     element.write_to(&mut buf).expect("serialize message");

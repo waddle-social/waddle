@@ -66,9 +66,12 @@ pub fn parse_reply_from_message(msg: &Message) -> Option<ReplyReference> {
 
 /// Build an XEP-0461 `<reply/>` payload element.
 pub fn build_reply_element(reply: &ReplyReference) -> Element {
-    let mut builder = Element::builder("reply", NS_REPLY).attr("id", reply.id.as_str());
+    let mut builder = Element::builder("reply", NS_REPLY).attr(
+        minidom::rxml::xml_ncname!("id").to_owned(),
+        reply.id.as_str(),
+    );
     if let Some(to) = reply.to.as_ref() {
-        builder = builder.attr("to", to.to_string());
+        builder = builder.attr(minidom::rxml::xml_ncname!("to").to_owned(), to.to_string());
     }
     builder.build()
 }
@@ -89,7 +92,7 @@ mod tests {
         let xml = "<message xmlns='jabber:client'><reply xmlns='urn:xmpp:reply:0' id='parent-1' to='alice@example.com'/></message>";
         let msg = Message::try_from(xml.parse::<Element>().expect("valid xml")).expect("message");
         let reply = parse_reply_from_message(&msg).expect("reply present");
-        assert_eq!(reply.id, "parent-1");
+        assert_eq!(reply.id.as_str(), "parent-1");
         assert_eq!(
             reply.to.as_ref().map(ToString::to_string).as_deref(),
             Some("alice@example.com")
@@ -109,7 +112,7 @@ mod tests {
         let xml = "<message xmlns='jabber:client'><reply xmlns='urn:xmpp:reply:0' id='parent-1' to=' '/></message>";
         let msg = Message::try_from(xml.parse::<Element>().expect("valid xml")).expect("message");
         let reply = parse_reply_from_message(&msg).expect("reply present");
-        assert_eq!(reply.id, "parent-1");
+        assert_eq!(reply.id.as_str(), "parent-1");
         assert_eq!(reply.to, None);
     }
 
@@ -127,7 +130,7 @@ mod tests {
         );
 
         let reply = parse_reply_from_message(&msg).expect("reply present");
-        assert_eq!(reply.id, "new-id");
+        assert_eq!(reply.id.as_str(), "new-id");
         assert_eq!(
             reply.to.as_ref().map(ToString::to_string).as_deref(),
             Some("bob@example.com")

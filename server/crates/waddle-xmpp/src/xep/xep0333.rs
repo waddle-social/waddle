@@ -115,7 +115,10 @@ impl MarkerCarrier for Message {
 }
 
 fn message_has_id(msg: &Message) -> bool {
-    msg.id.as_deref().is_some_and(|id| !id.is_empty())
+    msg.id
+        .as_ref()
+        .map(|id| id.0.as_str())
+        .is_some_and(|id| !id.is_empty())
 }
 
 // ── Detection ────────────────────────────────────────────────────────
@@ -185,7 +188,7 @@ pub fn build_markable_element() -> Element {
 /// Build a `<displayed xmlns='urn:xmpp:chat-markers:0' id='...'>` element.
 pub fn build_displayed_element(id: &str) -> Element {
     Element::builder("displayed", NS_CHAT_MARKERS)
-        .attr("id", id)
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), id)
         .build()
 }
 
@@ -368,7 +371,7 @@ mod tests {
         assert!(!has_markable(&msg));
         assert!(msg.payloads.is_empty());
 
-        msg.id = Some("msg-1".to_string());
+        msg.id = Some(xmpp_parsers::message::Id("msg-1".to_string()));
         add_markable(&mut msg);
         assert!(has_markable(&msg));
 

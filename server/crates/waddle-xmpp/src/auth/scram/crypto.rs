@@ -1,7 +1,7 @@
 use base64::prelude::*;
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use pbkdf2::pbkdf2_hmac;
-use rand::Rng;
+use rand::RngExt;
 use sha2::{Digest, Sha256};
 
 /// Length of generated nonce in bytes (will be base64 encoded).

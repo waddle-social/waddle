@@ -68,13 +68,14 @@ impl AppState {
     /// dependency is explicit.
     #[cfg(test)]
     pub fn new(db_pool: Arc<crate::db::DatabasePool>) -> Self {
+        use kameo::actor::Spawn;
         use std::str::FromStr;
         use waddle_xmpp::pubsub::InMemoryPubSubStorage;
         use waddle_xmpp::xep::xep0421::OccupantIdSecret;
 
         let blob_storage = crate::storage::build_blob_storage()
             .unwrap_or_else(|e| panic!("failed to initialize blob storage: {e}"));
-        let permission_actor = kameo::spawn(PermissionActor::new_for_tests(Arc::new(
+        let permission_actor = PermissionActor::spawn(PermissionActor::new_for_tests(Arc::new(
             db_pool.global().clone(),
         )));
         let muc_domain = DomainPart::from_str("muc.localhost")
@@ -82,7 +83,7 @@ impl AppState {
         let occupant_id_secret =
             OccupantIdSecret::new(b"test-occupant-id-secret-32-bytes-long".to_vec())
                 .expect("test occupant-id secret meets length floor");
-        let room_registry = kameo::spawn(RoomRegistryActor::new(
+        let room_registry = RoomRegistryActor::spawn(RoomRegistryActor::new(
             muc_domain.to_string(),
             occupant_id_secret,
         ));

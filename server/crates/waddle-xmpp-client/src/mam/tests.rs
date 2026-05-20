@@ -11,13 +11,13 @@ fn make_mam_result_message(
     body: &str,
 ) -> Element {
     let inner_message = Element::builder("message", CLIENT_NS)
-        .attr("from", from)
-        .attr("type", msg_type)
+        .attr(minidom::rxml::xml_ncname!("from").to_owned(), from)
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), msg_type)
         .append(Element::builder("body", CLIENT_NS).append(body).build())
         .build();
 
     let delay = Element::builder("delay", DELAY_NS)
-        .attr("stamp", stamp)
+        .attr(minidom::rxml::xml_ncname!("stamp").to_owned(), stamp)
         .build();
 
     let forwarded = Element::builder("forwarded", FORWARD_NS)
@@ -26,8 +26,8 @@ fn make_mam_result_message(
         .build();
 
     let result = Element::builder("result", MAM_NS)
-        .attr("id", mam_id)
-        .attr("queryid", query_id)
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), mam_id)
+        .attr(minidom::rxml::xml_ncname!("queryid").to_owned(), query_id)
         .append(forwarded)
         .build();
 
@@ -60,7 +60,7 @@ fn make_mam_fin(
 
     let mut fin_builder = Element::builder("fin", MAM_NS);
     if complete {
-        fin_builder = fin_builder.attr("complete", "true");
+        fin_builder = fin_builder.attr(minidom::rxml::xml_ncname!("complete").to_owned(), "true");
     }
     fin_builder.append(set_builder.build()).build()
 }
@@ -93,25 +93,34 @@ fn parse_mam_result_happy_path() {
 #[test]
 fn parse_mam_result_preserves_multiple_typed_stanza_ids() {
     let inner_message = Element::builder("message", CLIENT_NS)
-        .attr("from", "room@conf.example/alice")
-        .attr("type", "groupchat")
+        .attr(
+            minidom::rxml::xml_ncname!("from").to_owned(),
+            "room@conf.example/alice",
+        )
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "groupchat")
         .append(Element::builder("body", CLIENT_NS).append("Hello").build())
         .append(
             Element::builder("stanza-id", XEP0359_NS)
-                .attr("id", "foreign-sid")
-                .attr("by", "archive.example")
+                .attr(minidom::rxml::xml_ncname!("id").to_owned(), "foreign-sid")
+                .attr(
+                    minidom::rxml::xml_ncname!("by").to_owned(),
+                    "archive.example",
+                )
                 .build(),
         )
         .append(
             Element::builder("stanza-id", XEP0359_NS)
-                .attr("id", "room-sid")
-                .attr("by", "room@conf.example")
+                .attr(minidom::rxml::xml_ncname!("id").to_owned(), "room-sid")
+                .attr(
+                    minidom::rxml::xml_ncname!("by").to_owned(),
+                    "room@conf.example",
+                )
                 .build(),
         )
         .append(
             Element::builder("stanza-id", XEP0359_NS)
-                .attr("id", "bad-sid")
-                .attr("by", "")
+                .attr(minidom::rxml::xml_ncname!("id").to_owned(), "bad-sid")
+                .attr(minidom::rxml::xml_ncname!("by").to_owned(), "")
                 .build(),
         )
         .build();
@@ -119,7 +128,7 @@ fn parse_mam_result_preserves_multiple_typed_stanza_ids() {
         .append(inner_message)
         .build();
     let result = Element::builder("result", MAM_NS)
-        .attr("id", "mam-id-1")
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), "mam-id-1")
         .append(forwarded)
         .build();
     let el = Element::builder("message", CLIENT_NS)
@@ -149,13 +158,25 @@ fn parse_mam_result_preserves_multiple_typed_stanza_ids() {
 #[test]
 fn parse_mam_result_preserves_inner_message_and_origin_ids() {
     let inner = Element::builder("message", CLIENT_NS)
-        .attr("from", "alice@example.com/desktop")
-        .attr("to", "bob@example.com")
-        .attr("type", "chat")
-        .attr("id", "direct-message-id")
+        .attr(
+            minidom::rxml::xml_ncname!("from").to_owned(),
+            "alice@example.com/desktop",
+        )
+        .attr(
+            minidom::rxml::xml_ncname!("to").to_owned(),
+            "bob@example.com",
+        )
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "chat")
+        .attr(
+            minidom::rxml::xml_ncname!("id").to_owned(),
+            "direct-message-id",
+        )
         .append(
             Element::builder("origin-id", XEP0359_NS)
-                .attr("id", "direct-origin-id")
+                .attr(
+                    minidom::rxml::xml_ncname!("id").to_owned(),
+                    "direct-origin-id",
+                )
                 .build(),
         )
         .append(Element::builder("body", CLIENT_NS).append("hi").build())
@@ -163,14 +184,23 @@ fn parse_mam_result_preserves_inner_message_and_origin_ids() {
     let forwarded = Element::builder("forwarded", FORWARD_NS)
         .append(
             Element::builder("delay", DELAY_NS)
-                .attr("stamp", "2024-01-01T12:00:00Z")
+                .attr(
+                    minidom::rxml::xml_ncname!("stamp").to_owned(),
+                    "2024-01-01T12:00:00Z",
+                )
                 .build(),
         )
         .append(inner)
         .build();
     let result = Element::builder("result", MAM_NS)
-        .attr("id", "mam-id-with-business-id")
-        .attr("queryid", "qid-business")
+        .attr(
+            minidom::rxml::xml_ncname!("id").to_owned(),
+            "mam-id-with-business-id",
+        )
+        .attr(
+            minidom::rxml::xml_ncname!("queryid").to_owned(),
+            "qid-business",
+        )
         .append(forwarded)
         .build();
     let el = Element::builder("message", CLIENT_NS)
@@ -192,8 +222,11 @@ fn parse_mam_result_preserves_inner_message_and_origin_ids() {
 #[test]
 fn parse_mam_result_extracts_archived_author_real_jid() {
     let inner = Element::builder("message", CLIENT_NS)
-        .attr("from", "room@muc.example.com/alice")
-        .attr("type", "groupchat")
+        .attr(
+            minidom::rxml::xml_ncname!("from").to_owned(),
+            "room@muc.example.com/alice",
+        )
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "groupchat")
         .append(
             Element::builder("body", CLIENT_NS)
                 .append("Hello world")
@@ -203,22 +236,28 @@ fn parse_mam_result_extracts_archived_author_real_jid() {
             Element::builder("x", NS_MUC_USER)
                 .append(
                     Element::builder("item", NS_MUC_USER)
-                        .attr("jid", "alice@example.com/phone")
+                        .attr(
+                            minidom::rxml::xml_ncname!("jid").to_owned(),
+                            "alice@example.com/phone",
+                        )
                         .build(),
                 )
                 .build(),
         )
         .build();
     let delay = Element::builder("delay", DELAY_NS)
-        .attr("stamp", "2024-01-01T12:00:00Z")
+        .attr(
+            minidom::rxml::xml_ncname!("stamp").to_owned(),
+            "2024-01-01T12:00:00Z",
+        )
         .build();
     let forwarded = Element::builder("forwarded", FORWARD_NS)
         .append(delay)
         .append(inner)
         .build();
     let result = Element::builder("result", MAM_NS)
-        .attr("id", "mam-id-2")
-        .attr("queryid", "qid-43")
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), "mam-id-2")
+        .attr(minidom::rxml::xml_ncname!("queryid").to_owned(), "qid-43")
         .append(forwarded)
         .build();
     let el = Element::builder("message", CLIENT_NS)
@@ -241,12 +280,18 @@ fn xep_0201_parses_archived_message_with_thread_parent() {
     // FFI consumers (Swift/Kotlin) read `archived.parent_thread_id`
     // directly via `archived_to_ffi`.
     let inner = Element::builder("message", CLIENT_NS)
-        .attr("from", "alice@example.com/web")
-        .attr("type", "chat")
+        .attr(
+            minidom::rxml::xml_ncname!("from").to_owned(),
+            "alice@example.com/web",
+        )
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "chat")
         .append(Element::builder("body", CLIENT_NS).append("hi").build())
         .append(
             Element::builder("thread", CLIENT_NS)
-                .attr("parent", "root-thread")
+                .attr(
+                    minidom::rxml::xml_ncname!("parent").to_owned(),
+                    "root-thread",
+                )
                 .append("child-thread")
                 .build(),
         )
@@ -254,17 +299,20 @@ fn xep_0201_parses_archived_message_with_thread_parent() {
     let forwarded = Element::builder("forwarded", "urn:xmpp:forward:0")
         .append(
             Element::builder("delay", "urn:xmpp:delay")
-                .attr("stamp", "2024-01-01T12:00:00Z")
+                .attr(
+                    minidom::rxml::xml_ncname!("stamp").to_owned(),
+                    "2024-01-01T12:00:00Z",
+                )
                 .build(),
         )
         .append(inner)
         .build();
     let result = Element::builder("message", CLIENT_NS)
-        .attr("type", "normal")
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "normal")
         .append(
             Element::builder("result", MAM_NS)
-                .attr("queryid", "q1")
-                .attr("id", "mam-1")
+                .attr(minidom::rxml::xml_ncname!("queryid").to_owned(), "q1")
+                .attr(minidom::rxml::xml_ncname!("id").to_owned(), "mam-1")
                 .append(forwarded)
                 .build(),
         )
@@ -279,8 +327,11 @@ fn xep_0201_parses_archived_message_with_thread_parent() {
 fn xep_0201_parses_archived_message_without_thread_parent() {
     // Root-only thread: parent_thread_id stays None.
     let inner = Element::builder("message", CLIENT_NS)
-        .attr("from", "alice@example.com/web")
-        .attr("type", "chat")
+        .attr(
+            minidom::rxml::xml_ncname!("from").to_owned(),
+            "alice@example.com/web",
+        )
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "chat")
         .append(Element::builder("body", CLIENT_NS).append("hi").build())
         .append(
             Element::builder("thread", CLIENT_NS)
@@ -291,17 +342,20 @@ fn xep_0201_parses_archived_message_without_thread_parent() {
     let forwarded = Element::builder("forwarded", "urn:xmpp:forward:0")
         .append(
             Element::builder("delay", "urn:xmpp:delay")
-                .attr("stamp", "2024-01-01T12:00:00Z")
+                .attr(
+                    minidom::rxml::xml_ncname!("stamp").to_owned(),
+                    "2024-01-01T12:00:00Z",
+                )
                 .build(),
         )
         .append(inner)
         .build();
     let result = Element::builder("message", CLIENT_NS)
-        .attr("type", "normal")
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "normal")
         .append(
             Element::builder("result", MAM_NS)
-                .attr("queryid", "q1")
-                .attr("id", "mam-1")
+                .attr(minidom::rxml::xml_ncname!("queryid").to_owned(), "q1")
+                .attr(minidom::rxml::xml_ncname!("id").to_owned(), "mam-1")
                 .append(forwarded)
                 .build(),
         )
@@ -315,7 +369,7 @@ fn xep_0201_parses_archived_message_without_thread_parent() {
 #[test]
 fn parse_mam_result_ignores_non_mam_message() {
     let plain = Element::builder("message", CLIENT_NS)
-        .attr("type", "chat")
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "chat")
         .append(Element::builder("body", CLIENT_NS).append("plain").build())
         .build();
 
@@ -651,13 +705,13 @@ mod query {
             .build();
 
         let fin = Element::builder("fin", MAM_NS)
-            .attr("complete", "true")
+            .attr(minidom::rxml::xml_ncname!("complete").to_owned(), "true")
             .append(set)
             .build();
 
         Element::builder("iq", CLIENT_NS)
-            .attr("type", "result")
-            .attr("id", iq_id)
+            .attr(minidom::rxml::xml_ncname!("type").to_owned(), "result")
+            .attr(minidom::rxml::xml_ncname!("id").to_owned(), iq_id)
             .append(fin)
             .build()
     }
@@ -684,20 +738,20 @@ mod query {
             // result with a foreign queryid that must be filtered out.
             for i in 0..5u32 {
                 evt_tx
-                    .send(ClientEvent::MamResult(build_archived(
+                    .send(ClientEvent::MamResult(Box::new(build_archived(
                         &format!("mam-{i}"),
                         &query_id,
                         &format!("hello {i}"),
-                    )))
+                    ))))
                     .expect("broadcast MAM result");
             }
 
             evt_tx
-                .send(ClientEvent::MamResult(build_archived(
+                .send(ClientEvent::MamResult(Box::new(build_archived(
                     "mam-other",
                     "some-other-query",
                     "noise",
-                )))
+                ))))
                 .expect("broadcast foreign MAM result");
 
             // Resolve send_iq with the <fin/> IQ — must be after the

@@ -204,7 +204,7 @@ async fn xep_0045_kick_broadcasts_status_307_to_all_occupants() {
         .await
         .expect("admin iq result");
     assert!(
-        admin_result.contains(r#"type="result""#) || admin_result.contains(r#"type='result'"#),
+        admin_result.contains(r#"type='result'"#) || admin_result.contains(r#"type='result'"#),
         "kick IQ must succeed: {admin_result}"
     );
 
@@ -214,7 +214,7 @@ async fn xep_0045_kick_broadcasts_status_307_to_all_occupants() {
     // and code 110 (self), from his own room-nick.
     let bob_kick = bob
         .recv_matching(|frame| {
-            frame.contains("<presence") && frame.contains("type=\"unavailable\"")
+            frame.contains("<presence") && frame.contains("type='unavailable'")
                 || frame.contains("type='unavailable'")
         })
         .await
@@ -226,7 +226,7 @@ async fn xep_0045_kick_broadcasts_status_307_to_all_occupants() {
     let alice_kick = alice
         .recv_matching(|frame| {
             frame.contains("<presence")
-                && (frame.contains("type=\"unavailable\"") || frame.contains("type='unavailable'"))
+                && (frame.contains("type='unavailable'") || frame.contains("type='unavailable'"))
                 && frame.contains(&format!("/{BOB}"))
         })
         .await
@@ -239,7 +239,7 @@ async fn xep_0045_kick_broadcasts_status_307_to_all_occupants() {
     let _admin_kick = admin
         .recv_matching(|frame| {
             frame.contains("<presence")
-                && (frame.contains("type=\"unavailable\"") || frame.contains("type='unavailable'"))
+                && (frame.contains("type='unavailable'") || frame.contains("type='unavailable'"))
                 && frame.contains(&format!("/{BOB}"))
         })
         .await

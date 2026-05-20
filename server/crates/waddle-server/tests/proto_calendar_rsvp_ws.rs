@@ -83,7 +83,7 @@ async fn non_owner_can_publish_rsvp_for_master_event() {
         .await
         .expect("master publish result");
     assert!(
-        publish_result.contains("type=\"result\""),
+        publish_result.contains("type='result'"),
         "master publish must succeed: {publish_result}"
     );
 
@@ -113,7 +113,7 @@ async fn non_owner_can_publish_rsvp_for_master_event() {
         .await
         .expect("rsvp publish result");
     assert!(
-        rsvp_result.contains("type=\"result\""),
+        rsvp_result.contains("type='result'"),
         "rsvp publish must succeed for non-owner: {rsvp_result}"
     );
 
@@ -145,7 +145,7 @@ async fn non_owner_can_publish_rsvp_for_master_event() {
         "items missing attendee URI: {items_response}"
     );
     assert!(
-        items_response.contains("partstat=\"ACCEPTED\"")
+        items_response.contains("partstat='ACCEPTED'")
             || items_response.contains("partstat='ACCEPTED'"),
         "items missing ACCEPTED partstat: {items_response}"
     );
@@ -214,7 +214,7 @@ async fn malformed_rsvp_for_other_user_is_rejected() {
         .await
         .expect("spoof result");
     assert!(
-        spoof_result.contains("type=\"error\"") || spoof_result.contains("<error"),
+        spoof_result.contains("type='error'") || spoof_result.contains("<error"),
         "spoofed RSVP must be rejected: {spoof_result}"
     );
 
@@ -246,7 +246,7 @@ async fn malformed_rsvp_for_other_user_is_rejected() {
         .await
         .expect("rich result");
     assert!(
-        rich_result.contains("type=\"error\"") || rich_result.contains("<error"),
+        rich_result.contains("type='error'") || rich_result.contains("<error"),
         "RSVP item with master-event fields must be rejected: {rich_result}"
     );
 
@@ -313,7 +313,7 @@ async fn rsvp_publish_bridges_to_social_feed() {
         .await
         .expect("rsvp publish result");
     assert!(
-        rsvp_result.contains("type=\"result\""),
+        rsvp_result.contains("type='result'"),
         "rsvp publish must succeed: {rsvp_result}"
     );
 
@@ -344,7 +344,7 @@ async fn rsvp_publish_bridges_to_social_feed() {
         "feed entry must carry the RSVP summary: {feed_response}"
     );
     assert!(
-        feed_response.contains("kind=\"rsvp\"") || feed_response.contains("kind='rsvp'"),
+        feed_response.contains("kind='rsvp'") || feed_response.contains("kind='rsvp'"),
         "feed entry must tag the RSVP source kind: {feed_response}"
     );
 

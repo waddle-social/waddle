@@ -244,8 +244,14 @@ fn append_region(parent: &mut Element, region: &FallbackRegion, name: &str) {
             for range in ranges {
                 parent.append_child(
                     Element::builder(name, NS_FALLBACK)
-                        .attr("start", range.start.to_string())
-                        .attr("end", range.end.to_string())
+                        .attr(
+                            minidom::rxml::xml_ncname!("start").to_owned(),
+                            range.start.to_string(),
+                        )
+                        .attr(
+                            minidom::rxml::xml_ncname!("end").to_owned(),
+                            range.end.to_string(),
+                        )
                         .build(),
                 );
             }
@@ -257,7 +263,7 @@ fn append_region(parent: &mut Element, region: &FallbackRegion, name: &str) {
 pub fn build_fallback_element(fallback: &FallbackIndication) -> Element {
     let mut builder = Element::builder("fallback", NS_FALLBACK);
     if let Some(for_ns) = fallback.for_ns.as_deref() {
-        builder = builder.attr("for", for_ns);
+        builder = builder.attr(minidom::rxml::xml_ncname!("for").to_owned(), for_ns);
     }
     let mut elem = builder.build();
     if let Some(subject) = &fallback.subject {

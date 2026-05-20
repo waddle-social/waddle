@@ -49,7 +49,7 @@ async fn websocket_version_query_returns_name_and_version_without_os() {
         .expect("version response");
 
     assert!(
-        response.contains("type=\"result\"") || response.contains("type='result'"),
+        response.contains("type='result'") || response.contains("type='result'"),
         "expected result IQ, got: {response}"
     );
     assert_eq!(
@@ -88,7 +88,7 @@ async fn websocket_version_rejects_non_get_iq() {
         .expect("version error response");
 
     assert!(
-        response.contains("type=\"error\"") || response.contains("type='error'"),
+        response.contains("type='error'") || response.contains("type='error'"),
         "expected error IQ, got: {response}"
     );
     assert!(
@@ -115,7 +115,7 @@ async fn websocket_version_rejects_non_server_target() {
         .expect("version error response");
 
     assert!(
-        response.contains("type=\"error\"") || response.contains("type='error'"),
+        response.contains("type='error'") || response.contains("type='error'"),
         "expected error IQ, got: {response}"
     );
     assert!(

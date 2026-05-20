@@ -69,7 +69,7 @@ async fn send_command(client: &mut WsXmppClient, node: &str, id: &str, form_xml:
     client
         .recv_matching(|frame| {
             frame.contains("<iq")
-                && (frame.contains(&format!(r#"id="{id}""#))
+                && (frame.contains(&format!(r#"id='{id}'"#))
                     || frame.contains(&format!(r#"id='{id}'"#)))
         })
         .await
@@ -87,7 +87,7 @@ fn text_field(var: &str, value: &str) -> String {
 }
 
 fn extract_field(frame: &str, var: &str) -> Option<String> {
-    let marker_dq = format!(r#"var="{var}""#);
+    let marker_dq = format!(r#"var='{var}'"#);
     let marker_sq = format!(r#"var='{var}'"#);
     let idx = frame.find(&marker_dq).or_else(|| frame.find(&marker_sq))?;
     let after = &frame[idx..];
@@ -221,7 +221,7 @@ async fn dynamic_pubsub_owner_promotes_server_affiliation_to_owner() {
     )
     .await;
     assert!(
-        set_resp.contains(r#"type="result""#) || set_resp.contains(r#"type='result'"#),
+        set_resp.contains(r#"type='result'"#) || set_resp.contains(r#"type='result'"#),
         "expected set-role result, got: {set_resp}"
     );
     let _ = admin.close().await;

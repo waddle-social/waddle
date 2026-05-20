@@ -71,7 +71,7 @@ async fn send_roster_set(client: &mut WsXmppClient, id: &str, item: &str) -> (St
         .await
         .expect("send roster set");
     let push = client
-        .recv_matching(|frame| frame.contains("jabber:iq:roster") && frame.contains("type=\"set\""))
+        .recv_matching(|frame| frame.contains("jabber:iq:roster") && frame.contains("type='set'"))
         .await
         .expect("roster push");
     let result = client
@@ -82,13 +82,18 @@ async fn send_roster_set(client: &mut WsXmppClient, id: &str, item: &str) -> (St
 }
 
 fn roster_version(frame: &str) -> String {
-    let marker = "ver=\"";
-    let start = frame
-        .find(marker)
-        .unwrap_or_else(|| panic!("missing roster version: {frame}"))
-        + marker.len();
+    // xmpp-parsers 0.22 serializes attribute values with single quotes,
+    // but earlier minidom used double — accept either at parse time.
+    let (marker, terminator) = if frame.contains("ver=\"") {
+        ("ver=\"", '"')
+    } else if frame.contains("ver='") {
+        ("ver='", '\'')
+    } else {
+        panic!("missing roster version: {frame}");
+    };
+    let start = frame.find(marker).expect("marker present") + marker.len();
     let end = frame[start..]
-        .find('"')
+        .find(terminator)
         .unwrap_or_else(|| panic!("unterminated roster version: {frame}"));
     frame[start..start + end].to_string()
 }
@@ -98,10 +103,7 @@ async fn roster_get_add_update_remove_uses_durable_state() {
     let (_server, mut alice, bob) = connect_alice_bob().await;
 
     let empty = send_roster_get(&mut alice, "roster-get-empty").await;
-    assert!(
-        empty.contains("type=\"result\""),
-        "expected result: {empty}"
-    );
+    assert!(empty.contains("type='result'"), "expected result: {empty}");
     assert!(
         empty.contains("jabber:iq:roster"),
         "expected roster query: {empty}"
@@ -118,17 +120,14 @@ async fn roster_get_add_update_remove_uses_durable_state() {
         r#"<item jid="bob@localhost" name="Bob"><group>Friends</group></item>"#,
     )
     .await;
+    assert!(add_push.contains("jid='bob@localhost'"), "push: {add_push}");
     assert!(
-        add_push.contains("jid=\"bob@localhost\""),
-        "push: {add_push}"
-    );
-    assert!(
-        add_push.contains("subscription=\"none\""),
+        add_push.contains("subscription='none'"),
         "server controls subscription state: {add_push}"
     );
     let add_version = roster_version(&add_push);
     assert!(
-        add_result.contains("type=\"result\""),
+        add_result.contains("type='result'"),
         "expected set result: {add_result}"
     );
 
@@ -141,7 +140,7 @@ async fn roster_get_add_update_remove_uses_durable_state() {
     let unchanged =
         send_roster_get_with_ver(&mut alice, "roster-get-unchanged", &add_version).await;
     assert!(
-        unchanged.contains("type=\"result\"") && !unchanged.contains("jabber:iq:roster"),
+        unchanged.contains("type='result'") && !unchanged.contains("jabber:iq:roster"),
         "matching roster ver should return an empty unchanged result: {unchanged}"
     );
     let stale = send_roster_get_with_ver(&mut alice, "roster-get-stale", "stale-version").await;
@@ -150,11 +149,11 @@ async fn roster_get_add_update_remove_uses_durable_state() {
         "stale roster ver should return full roster state: {stale}"
     );
     assert!(
-        after_add.contains("jid=\"bob@localhost\"") && after_add.contains("name=\"Bob\""),
+        after_add.contains("jid='bob@localhost'") && after_add.contains("name='Bob'"),
         "added item should be durable: {after_add}"
     );
     assert!(
-        after_add.contains("<group xmlns=\"jabber:iq:roster\">Friends</group>")
+        after_add.contains("<group xmlns='jabber:iq:roster'>Friends</group>")
             || after_add.contains("<group>Friends</group>"),
         "group should be durable: {after_add}"
     );
@@ -166,7 +165,7 @@ async fn roster_get_add_update_remove_uses_durable_state() {
     )
     .await;
     assert!(
-        update_push.contains("name=\"Robert\"") && update_push.contains("subscription=\"none\""),
+        update_push.contains("name='Robert'") && update_push.contains("subscription='none'"),
         "update must ignore client subscription attribute: {update_push}"
     );
     let update_version = roster_version(&update_push);
@@ -182,8 +181,8 @@ async fn roster_get_add_update_remove_uses_durable_state() {
         "roster get after update should return current version"
     );
     assert!(
-        after_update.contains("name=\"Robert\"")
-            && after_update.contains("subscription=\"none\"")
+        after_update.contains("name='Robert'")
+            && after_update.contains("subscription='none'")
             && after_update.contains("Work"),
         "updated item should preserve server-owned subscription state: {after_update}"
     );
@@ -195,8 +194,8 @@ async fn roster_get_add_update_remove_uses_durable_state() {
     )
     .await;
     assert!(
-        remove_push.contains("jid=\"bob@localhost\"")
-            && remove_push.contains("subscription=\"remove\""),
+        remove_push.contains("jid='bob@localhost'")
+            && remove_push.contains("subscription='remove'"),
         "remove push should carry subscription=remove: {remove_push}"
     );
     let remove_version = roster_version(&remove_push);
@@ -212,7 +211,7 @@ async fn roster_get_add_update_remove_uses_durable_state() {
         "roster get after remove should return current version"
     );
     assert!(
-        !after_remove.contains("jid=\"bob@localhost\""),
+        !after_remove.contains("jid='bob@localhost'"),
         "removed item should not be returned: {after_remove}"
     );
 
@@ -295,14 +294,14 @@ async fn roster_set_pushes_only_to_interested_connected_user_resources() {
         .expect("phone roster push");
 
     assert!(
-        desktop_push.contains("type=\"set\""),
+        desktop_push.contains("type='set'"),
         "desktop push: {desktop_push}"
     );
     assert!(
-        phone_push.contains("type=\"set\""),
+        phone_push.contains("type='set'"),
         "phone push: {phone_push}"
     );
-    assert!(result.contains("type=\"result\""), "set result: {result}");
+    assert!(result.contains("type='result'"), "set result: {result}");
     let tablet_frame = tablet.recv_timeout(Duration::from_millis(250)).await;
     assert!(
         tablet_frame.is_err(),
@@ -321,7 +320,7 @@ async fn roster_set_pushes_only_to_interested_connected_user_resources() {
         .expect("uninterested source set result");
     assert!(
         tablet_result.contains("roster-uninterested-source")
-            && tablet_result.contains("type=\"result\""),
+            && tablet_result.contains("type='result'"),
         "uninterested source should receive only the IQ result first: {tablet_result}"
     );
     let tablet_after_set = tablet.recv_timeout(Duration::from_millis(250)).await;
@@ -342,7 +341,7 @@ async fn roster_set_pushes_only_to_interested_connected_user_resources() {
         .await
         .expect("phone carol roster push");
     assert!(
-        desktop_carol_push.contains("type=\"set\"") && phone_carol_push.contains("type=\"set\""),
+        desktop_carol_push.contains("type='set'") && phone_carol_push.contains("type='set'"),
         "interested siblings should receive uninterested-source pushes: {desktop_carol_push}; {phone_carol_push}"
     );
     assert_eq!(
@@ -364,7 +363,7 @@ async fn roster_set_pushes_only_to_interested_connected_user_resources() {
     let tablet_unchanged =
         send_roster_get_with_ver(&mut tablet, "tablet-roster-current-ver", &current_version).await;
     assert!(
-        tablet_unchanged.contains("type=\"result\"")
+        tablet_unchanged.contains("type='result'")
             && !tablet_unchanged.contains("jabber:iq:roster"),
         "matching-ver roster get should return empty result: {tablet_unchanged}"
     );
@@ -385,7 +384,7 @@ async fn roster_set_pushes_only_to_interested_connected_user_resources() {
         .await
         .expect("matching-version roster get should mark tablet interested");
     assert!(
-        tablet_dave_push.contains("type=\"set\""),
+        tablet_dave_push.contains("type='set'"),
         "tablet should receive later roster push after unchanged get: {tablet_dave_push}"
     );
 
@@ -415,23 +414,23 @@ async fn presence_subscription_state_is_reflected_in_roster_queries() {
         .recv_matching(|frame| {
             frame.contains("jabber:iq:roster")
                 && frame.contains("alice@localhost")
-                && frame.contains("ask=\"subscribe\"")
+                && frame.contains("ask='subscribe'")
         })
         .await
         .expect("bob outbound subscribe roster push");
     assert!(
-        bob_outbound_push.contains("subscription=\"none\""),
+        bob_outbound_push.contains("subscription='none'"),
         "outbound subscribe starts as pending none: {bob_outbound_push}"
     );
     let _alice_subscribe = alice
         .recv_matching(|frame| {
-            frame.contains("type=\"subscribe\"") || frame.contains("type='subscribe'")
+            frame.contains("type='subscribe'") || frame.contains("type='subscribe'")
         })
         .await
         .expect("alice receives subscribe presence");
     let alice_pending_roster = send_roster_get(&mut alice, "alice-roster-before-approval").await;
     assert!(
-        !alice_pending_roster.contains("jid=\"bob@localhost\""),
+        !alice_pending_roster.contains("jid='bob@localhost'"),
         "inbound subscribe must not create a recipient roster item before approval: {alice_pending_roster}"
     );
 
@@ -443,7 +442,7 @@ async fn presence_subscription_state_is_reflected_in_roster_queries() {
         .recv_matching(|frame| {
             frame.contains("jabber:iq:roster")
                 && frame.contains("bob@localhost")
-                && frame.contains("subscription=\"from\"")
+                && frame.contains("subscription='from'")
         })
         .await
         .expect("alice subscribed roster push");
@@ -451,29 +450,29 @@ async fn presence_subscription_state_is_reflected_in_roster_queries() {
         .recv_matching(|frame| {
             frame.contains("jabber:iq:roster")
                 && frame.contains("alice@localhost")
-                && frame.contains("subscription=\"to\"")
+                && frame.contains("subscription='to'")
         })
         .await
         .expect("bob subscribed roster push");
     assert!(
-        !bob_push.contains("ask=\"subscribe\""),
+        !bob_push.contains("ask='subscribe'"),
         "subscribed should clear pending ask: {bob_push}"
     );
     let bob_subscribed = bob
         .recv_matching(|frame| {
-            frame.contains("type=\"subscribed\"") || frame.contains("type='subscribed'")
+            frame.contains("type='subscribed'") || frame.contains("type='subscribed'")
         })
         .await
         .expect("bob receives subscribed presence after roster push");
     assert!(
-        bob_subscribed.contains("from=\"alice@localhost\"")
+        bob_subscribed.contains("from='alice@localhost'")
             || bob_subscribed.contains("from='alice@localhost'"),
         "subscribed presence should follow roster push: {bob_subscribed}"
     );
     let bob_alice_available = bob
         .recv_matching(|frame| {
-            frame.contains("from=\"alice@localhost/")
-                && frame.contains("to=\"bob@localhost")
+            (frame.contains("from='alice@localhost/") || frame.contains("from='alice@localhost/"))
+                && (frame.contains("to='bob@localhost") || frame.contains("to='bob@localhost"))
                 && frame.contains("<show>chat</show>")
                 && frame.contains("ready to approve")
                 && frame.contains("<priority>7</priority>")
@@ -481,7 +480,7 @@ async fn presence_subscription_state_is_reflected_in_roster_queries() {
         .await
         .expect("bob receives alice current presence after roster push");
     assert!(
-        !bob_alice_available.contains("type=\"unavailable\""),
+        !bob_alice_available.contains("type='unavailable'"),
         "approval should send current available presence: {bob_alice_available}"
     );
 
@@ -498,13 +497,12 @@ async fn presence_subscription_state_is_reflected_in_roster_queries() {
         "bob roster get after subscription should return pushed version"
     );
     assert!(
-        alice_roster.contains("jid=\"bob@localhost\"")
-            && alice_roster.contains("subscription=\"from\""),
+        alice_roster.contains("jid='bob@localhost'")
+            && alice_roster.contains("subscription='from'"),
         "alice roster should reflect subscription state: {alice_roster}; push was {alice_push}"
     );
     assert!(
-        bob_roster.contains("jid=\"alice@localhost\"")
-            && bob_roster.contains("subscription=\"to\""),
+        bob_roster.contains("jid='alice@localhost'") && bob_roster.contains("subscription='to'"),
         "bob roster should reflect subscription state: {bob_roster}"
     );
 
@@ -512,18 +510,18 @@ async fn presence_subscription_state_is_reflected_in_roster_queries() {
         .await
         .expect("send duplicate subscribe");
     let duplicate_ack = bob
-        .recv_matching(|frame| frame.contains("type=\"subscribed\""))
+        .recv_matching(|frame| frame.contains("type='subscribed'"))
         .await
         .expect("duplicate subscribe is auto-acknowledged");
     assert!(
-        duplicate_ack.contains("from=\"alice@localhost\""),
+        duplicate_ack.contains("from='alice@localhost'"),
         "duplicate subscribe should be acknowledged by existing contact: {duplicate_ack}"
     );
     let bob_after_duplicate = send_roster_get(&mut bob, "bob-after-duplicate-subscribe").await;
     assert!(
-        bob_after_duplicate.contains("jid=\"alice@localhost\"")
-            && bob_after_duplicate.contains("subscription=\"to\"")
-            && !bob_after_duplicate.contains("ask=\"subscribe\""),
+        bob_after_duplicate.contains("jid='alice@localhost'")
+            && bob_after_duplicate.contains("subscription='to'")
+            && !bob_after_duplicate.contains("ask='subscribe'"),
         "duplicate subscribe must not recreate pending ask: {bob_after_duplicate}"
     );
 
@@ -535,12 +533,12 @@ async fn presence_subscription_state_is_reflected_in_roster_queries() {
         .recv_matching(|frame| {
             frame.contains("jabber:iq:roster")
                 && frame.contains("bob@localhost")
-                && frame.contains("ask=\"subscribe\"")
+                && frame.contains("ask='subscribe'")
         })
         .await
         .expect("alice reciprocal pending push");
     let _bob_reciprocal_subscribe = bob
-        .recv_matching(|frame| frame.contains("type=\"subscribe\""))
+        .recv_matching(|frame| frame.contains("type='subscribe'"))
         .await
         .expect("bob receives reciprocal subscribe");
     bob.send(r#"<presence xmlns="jabber:client" type="subscribed" to="alice@localhost"/>"#)
@@ -550,7 +548,7 @@ async fn presence_subscription_state_is_reflected_in_roster_queries() {
         .recv_matching(|frame| {
             frame.contains("jabber:iq:roster")
                 && frame.contains("bob@localhost")
-                && frame.contains("subscription=\"both\"")
+                && frame.contains("subscription='both'")
         })
         .await
         .expect("alice both roster push");
@@ -558,29 +556,28 @@ async fn presence_subscription_state_is_reflected_in_roster_queries() {
         .recv_matching(|frame| {
             frame.contains("jabber:iq:roster")
                 && frame.contains("alice@localhost")
-                && frame.contains("subscription=\"both\"")
+                && frame.contains("subscription='both'")
         })
         .await
         .expect("bob both roster push");
     let _alice_reciprocal_subscribed = alice
-        .recv_matching(|frame| frame.contains("type=\"subscribed\""))
+        .recv_matching(|frame| frame.contains("type='subscribed'"))
         .await
         .expect("alice receives reciprocal subscribed after roster push");
     assert!(
-        !alice_both_push.contains("ask=\"subscribe\"")
-            && !bob_both_push.contains("ask=\"subscribe\""),
+        !alice_both_push.contains("ask='subscribe'") && !bob_both_push.contains("ask='subscribe'"),
         "reciprocal approval should clear pending asks: {alice_both_push}; {bob_both_push}"
     );
     let alice_after_both = send_roster_get(&mut alice, "alice-roster-after-both").await;
     let bob_after_both = send_roster_get(&mut bob, "bob-roster-after-both").await;
     assert!(
-        alice_after_both.contains("jid=\"bob@localhost\"")
-            && alice_after_both.contains("subscription=\"both\""),
+        alice_after_both.contains("jid='bob@localhost'")
+            && alice_after_both.contains("subscription='both'"),
         "alice roster should reach both: {alice_after_both}"
     );
     assert!(
-        bob_after_both.contains("jid=\"alice@localhost\"")
-            && bob_after_both.contains("subscription=\"both\""),
+        bob_after_both.contains("jid='alice@localhost'")
+            && bob_after_both.contains("subscription='both'"),
         "bob roster should reach both: {bob_after_both}"
     );
 
@@ -591,7 +588,7 @@ async fn presence_subscription_state_is_reflected_in_roster_queries() {
         .recv_matching(|frame| {
             frame.contains("jabber:iq:roster")
                 && frame.contains("alice@localhost")
-                && frame.contains("subscription=\"from\"")
+                && frame.contains("subscription='from'")
         })
         .await
         .expect("bob unsubscribe roster push");
@@ -599,24 +596,24 @@ async fn presence_subscription_state_is_reflected_in_roster_queries() {
         .recv_matching(|frame| {
             frame.contains("jabber:iq:roster")
                 && frame.contains("bob@localhost")
-                && frame.contains("subscription=\"to\"")
+                && frame.contains("subscription='to'")
         })
         .await
         .expect("alice unsubscribe roster push");
     let alice_unsubscribe = alice
         .recv_matching(|frame| {
-            frame.contains("type=\"unsubscribe\"") || frame.contains("type='unsubscribe'")
+            frame.contains("type='unsubscribe'") || frame.contains("type='unsubscribe'")
         })
         .await
         .expect("alice receives unsubscribe presence after roster push");
     let bob_alice_unavailable = bob
         .recv_matching(|frame| {
-            frame.contains("type=\"unavailable\"") && frame.contains("from=\"alice@localhost/")
+            frame.contains("type='unavailable'") && frame.contains("from='alice@localhost/")
         })
         .await
         .expect("bob receives alice unavailable after unsubscribe");
     assert!(
-        bob_alice_unavailable.contains("to=\"bob@localhost"),
+        bob_alice_unavailable.contains("to='bob@localhost"),
         "unsubscribe should send unavailable presence from contact to user: {bob_alice_unavailable}"
     );
     assert!(
@@ -641,13 +638,13 @@ async fn presence_subscription_state_is_reflected_in_roster_queries() {
         "bob roster get after unsubscribe should return pushed version"
     );
     assert!(
-        alice_after_unsubscribe.contains("jid=\"bob@localhost\"")
-            && alice_after_unsubscribe.contains("subscription=\"to\""),
+        alice_after_unsubscribe.contains("jid='bob@localhost'")
+            && alice_after_unsubscribe.contains("subscription='to'"),
         "alice roster should reflect unsubscribe state after {alice_unsubscribe}: {alice_after_unsubscribe}"
     );
     assert!(
-        bob_after_unsubscribe.contains("jid=\"alice@localhost\"")
-            && bob_after_unsubscribe.contains("subscription=\"from\""),
+        bob_after_unsubscribe.contains("jid='alice@localhost'")
+            && bob_after_unsubscribe.contains("subscription='from'"),
         "bob roster should reflect unsubscribe state: {bob_after_unsubscribe}"
     );
 
@@ -673,15 +670,15 @@ async fn subscription_denial_clears_pending_without_creating_recipient_item() {
         .await
         .expect("send subscribe");
     let bob_pending_push = bob
-        .recv_matching(|frame| frame.contains("ask=\"subscribe\""))
+        .recv_matching(|frame| frame.contains("ask='subscribe'"))
         .await
         .expect("bob pending subscribe push");
     assert!(
-        bob_pending_push.contains("subscription=\"none\""),
+        bob_pending_push.contains("subscription='none'"),
         "pending subscribe should be none+ask: {bob_pending_push}"
     );
     let _alice_subscribe = alice
-        .recv_matching(|frame| frame.contains("type=\"subscribe\""))
+        .recv_matching(|frame| frame.contains("type='subscribe'"))
         .await
         .expect("alice receives subscribe");
 
@@ -693,12 +690,12 @@ async fn subscription_denial_clears_pending_without_creating_recipient_item() {
         .recv_matching(|frame| {
             frame.contains("jabber:iq:roster")
                 && frame.contains("alice@localhost")
-                && frame.contains("subscription=\"none\"")
+                && frame.contains("subscription='none'")
         })
         .await
         .expect("bob denial roster push");
     assert!(
-        !bob_denial_push.contains("ask=\"subscribe\""),
+        !bob_denial_push.contains("ask='subscribe'"),
         "denial should clear pending ask: {bob_denial_push}"
     );
     let bob_denial = bob
@@ -706,26 +703,26 @@ async fn subscription_denial_clears_pending_without_creating_recipient_item() {
         .await
         .expect("bob receives denial after roster push");
     assert!(
-        bob_denial.contains("type=\"unsubscribed\""),
+        bob_denial.contains("type='unsubscribed'"),
         "pure denial must send roster push before unsubscribed: {bob_denial}"
     );
     let alice_roster = send_roster_get(&mut alice, "alice-after-denial").await;
     let bob_roster = send_roster_get(&mut bob, "bob-after-denial").await;
     assert!(
-        !alice_roster.contains("jid=\"bob@localhost\""),
+        !alice_roster.contains("jid='bob@localhost'"),
         "denial must not create recipient roster item: {alice_roster}"
     );
     assert!(
-        bob_roster.contains("jid=\"alice@localhost\"")
-            && bob_roster.contains("subscription=\"none\"")
-            && !bob_roster.contains("ask=\"subscribe\""),
+        bob_roster.contains("jid='alice@localhost'")
+            && bob_roster.contains("subscription='none'")
+            && !bob_roster.contains("ask='subscribe'"),
         "denial should leave requester item without pending ask: {bob_roster}"
     );
     let after_denial_frame = bob.recv_timeout(Duration::from_millis(250)).await;
     assert!(
         after_denial_frame
             .as_ref()
-            .map(|frame| !frame.contains("type=\"unavailable\""))
+            .map(|frame| !frame.contains("type='unavailable'"))
             .unwrap_or(true),
         "pure denial must not send unavailable after the denial push: {after_denial_frame:?}"
     );
@@ -753,13 +750,13 @@ async fn unsolicited_subscription_responses_do_not_create_roster_items() {
     let alice_roster = send_roster_get(&mut alice, "alice-after-preapproval").await;
     let bob_roster = send_roster_get(&mut bob, "bob-after-preapproval").await;
     assert!(
-        alice_roster.contains("jid=\"bob@localhost\"")
-            && alice_roster.contains("subscription=\"none\"")
-            && alice_roster.contains("approved=\"true\""),
+        alice_roster.contains("jid='bob@localhost'")
+            && alice_roster.contains("subscription='none'")
+            && alice_roster.contains("approved='true'"),
         "pre-approval must record sender roster item: {alice_roster}"
     );
     assert!(
-        !bob_roster.contains("jid=\"alice@localhost\""),
+        !bob_roster.contains("jid='alice@localhost'"),
         "pre-approval alone must not create recipient roster item: {bob_roster}"
     );
     while bob.recv_timeout(Duration::from_millis(50)).await.is_ok() {}
@@ -767,25 +764,25 @@ async fn unsolicited_subscription_responses_do_not_create_roster_items() {
         .await
         .expect("send subscribe after preapproval");
     let auto_ack = bob
-        .recv_matching(|frame| frame.contains("type=\"subscribed\""))
+        .recv_matching(|frame| frame.contains("type='subscribed'"))
         .await
         .expect("pre-approved subscribe is auto-acknowledged");
     assert!(
-        auto_ack.contains("from=\"alice@localhost\""),
+        auto_ack.contains("from='alice@localhost'"),
         "pre-approved subscribe should be acknowledged by contact: {auto_ack}"
     );
     let bob_roster = send_roster_get(&mut bob, "bob-after-preapproved-subscribe").await;
     let alice_roster = send_roster_get(&mut alice, "alice-after-preapproved-subscribe").await;
     assert!(
-        bob_roster.contains("jid=\"alice@localhost\"")
-            && bob_roster.contains("subscription=\"to\"")
-            && !bob_roster.contains("ask=\"subscribe\""),
+        bob_roster.contains("jid='alice@localhost'")
+            && bob_roster.contains("subscription='to'")
+            && !bob_roster.contains("ask='subscribe'"),
         "pre-approved subscribe must complete without pending ask: {bob_roster}"
     );
     assert!(
-        alice_roster.contains("jid=\"bob@localhost\"")
-            && alice_roster.contains("subscription=\"from\"")
-            && !alice_roster.contains("approved=\"true\""),
+        alice_roster.contains("jid='bob@localhost'")
+            && alice_roster.contains("subscription='from'")
+            && !alice_roster.contains("approved='true'"),
         "pre-approved subscribe must consume the pre-approval: {alice_roster}"
     );
     while alice.recv_timeout(Duration::from_millis(50)).await.is_ok() {}
@@ -806,11 +803,11 @@ async fn unsolicited_subscription_responses_do_not_create_roster_items() {
     let alice_roster = send_roster_get(&mut alice, "alice-after-unsolicited-unsubscribe").await;
     let bob_roster = send_roster_get(&mut bob, "bob-after-unsolicited-unsubscribe").await;
     assert!(
-        !alice_roster.contains("jid=\"bob@localhost\""),
+        !alice_roster.contains("jid='bob@localhost'"),
         "unsolicited unsubscribe must not create recipient roster item: {alice_roster}"
     );
     assert!(
-        !bob_roster.contains("jid=\"alice@localhost\""),
+        !bob_roster.contains("jid='alice@localhost'"),
         "unsolicited unsubscribe must not create sender roster item: {bob_roster}"
     );
 
@@ -838,13 +835,12 @@ async fn unsolicited_subscription_responses_do_not_create_roster_items() {
     let alice_roster = send_roster_get(&mut alice, "alice-after-unsolicited-unsubscribed").await;
     let bob_roster = send_roster_get(&mut bob, "bob-after-unsolicited-unsubscribed").await;
     assert!(
-        alice_roster.contains("jid=\"bob@localhost\"")
-            && alice_roster.contains("subscription=\"none\""),
+        alice_roster.contains("jid='bob@localhost'")
+            && alice_roster.contains("subscription='none'"),
         "invalid unsubscribed must not mutate sender roster item: {alice_roster}"
     );
     assert!(
-        bob_roster.contains("jid=\"alice@localhost\"")
-            && bob_roster.contains("subscription=\"none\""),
+        bob_roster.contains("jid='alice@localhost'") && bob_roster.contains("subscription='none'"),
         "invalid unsubscribed must not mutate recipient roster item: {bob_roster}"
     );
 
@@ -866,7 +862,7 @@ async fn preapproval_preserves_existing_to_state_and_can_be_cancelled() {
         .send(r#"<presence xmlns="jabber:client" type="subscribe" to="bob@localhost"/>"#)
         .await
         .expect("alice subscribes to bob");
-    bob.recv_matching(|frame| frame.contains("type=\"subscribe\""))
+    bob.recv_matching(|frame| frame.contains("type='subscribe'"))
         .await
         .expect("bob receives subscribe");
     bob.send(r#"<presence xmlns="jabber:client" type="subscribed" to="alice@localhost"/>"#)
@@ -876,12 +872,12 @@ async fn preapproval_preserves_existing_to_state_and_can_be_cancelled() {
         .recv_matching(|frame| {
             frame.contains("jabber:iq:roster")
                 && frame.contains("bob@localhost")
-                && frame.contains("subscription=\"to\"")
+                && frame.contains("subscription='to'")
         })
         .await
         .expect("alice receives approval roster push");
     alice
-        .recv_matching(|frame| frame.contains("type=\"subscribed\""))
+        .recv_matching(|frame| frame.contains("type='subscribed'"))
         .await
         .expect("alice receives subscribed after roster push");
 
@@ -891,9 +887,9 @@ async fn preapproval_preserves_existing_to_state_and_can_be_cancelled() {
         .expect("alice preapproves bob");
     let alice_roster = send_roster_get(&mut alice, "alice-preapproval-preserves-to").await;
     assert!(
-        alice_roster.contains("jid=\"bob@localhost\"")
-            && alice_roster.contains("subscription=\"to\"")
-            && alice_roster.contains("approved=\"true\""),
+        alice_roster.contains("jid='bob@localhost'")
+            && alice_roster.contains("subscription='to'")
+            && alice_roster.contains("approved='true'"),
         "pre-approval must preserve existing to subscription: {alice_roster}"
     );
 
@@ -903,9 +899,9 @@ async fn preapproval_preserves_existing_to_state_and_can_be_cancelled() {
         .expect("alice cancels preapproval");
     let alice_roster = send_roster_get(&mut alice, "alice-preapproval-cancelled").await;
     assert!(
-        alice_roster.contains("jid=\"bob@localhost\"")
-            && alice_roster.contains("subscription=\"to\"")
-            && !alice_roster.contains("approved=\"true\""),
+        alice_roster.contains("jid='bob@localhost'")
+            && alice_roster.contains("subscription='to'")
+            && !alice_roster.contains("approved='true'"),
         "unsubscribed must cancel pre-approval without changing to subscription: {alice_roster}"
     );
 
@@ -940,7 +936,7 @@ async fn offline_subscribe_is_removed_when_requester_unsubscribes_before_deliver
         .recv_matching(|frame| {
             frame.contains("jabber:iq:roster")
                 && frame.contains("alice@localhost")
-                && frame.contains("ask=\"subscribe\"")
+                && frame.contains("ask='subscribe'")
         })
         .await
         .expect("bob pending subscribe push");
@@ -951,8 +947,8 @@ async fn offline_subscribe_is_removed_when_requester_unsubscribes_before_deliver
         .recv_matching(|frame| {
             frame.contains("jabber:iq:roster")
                 && frame.contains("alice@localhost")
-                && frame.contains("subscription=\"none\"")
-                && !frame.contains("ask=\"subscribe\"")
+                && frame.contains("subscription='none'")
+                && !frame.contains("ask='subscribe'")
         })
         .await
         .expect("bob unsubscribe roster push");
@@ -977,7 +973,7 @@ async fn offline_subscribe_is_removed_when_requester_unsubscribes_before_deliver
     );
     let alice_roster = send_roster_get(&mut alice, "alice-after-cancelled-offline-subscribe").await;
     assert!(
-        !alice_roster.contains("jid=\"bob@localhost\""),
+        !alice_roster.contains("jid='bob@localhost'"),
         "cancelled offline subscribe must not create Alice roster item: {alice_roster}"
     );
 
@@ -1012,7 +1008,7 @@ async fn offline_subscribe_is_redelivered_until_answered() {
         .recv_matching(|frame| {
             frame.contains("jabber:iq:roster")
                 && frame.contains("alice@localhost")
-                && frame.contains("ask=\"subscribe\"")
+                && frame.contains("ask='subscribe'")
         })
         .await
         .expect("bob pending subscribe push");
@@ -1031,11 +1027,11 @@ async fn offline_subscribe_is_redelivered_until_answered() {
         .await
         .expect("alice available");
     let first = alice
-        .recv_matching(|frame| frame.contains("type=\"subscribe\""))
+        .recv_matching(|frame| frame.contains("type='subscribe'"))
         .await
         .expect("alice receives pending subscribe");
     assert!(
-        first.contains("from=\"bob@localhost\""),
+        first.contains("from='bob@localhost'"),
         "pending subscribe should identify requester: {first}"
     );
 
@@ -1048,11 +1044,11 @@ async fn offline_subscribe_is_redelivered_until_answered() {
         .await
         .expect("alice available again");
     let second = alice
-        .recv_matching(|frame| frame.contains("type=\"subscribe\""))
+        .recv_matching(|frame| frame.contains("type='subscribe'"))
         .await
         .expect("unanswered pending subscribe is redelivered");
     assert!(
-        second.contains("from=\"bob@localhost\""),
+        second.contains("from='bob@localhost'"),
         "redelivered subscribe should preserve requester: {second}"
     );
 
@@ -1062,12 +1058,12 @@ async fn offline_subscribe_is_redelivered_until_answered() {
         .expect("deny subscription");
     let _bob_denial_push = bob
         .recv_matching(|frame| {
-            frame.contains("alice@localhost") && !frame.contains("ask=\"subscribe\"")
+            frame.contains("alice@localhost") && !frame.contains("ask='subscribe'")
         })
         .await
         .expect("bob denial roster push");
     let _bob_denial = bob
-        .recv_matching(|frame| frame.contains("type=\"unsubscribed\""))
+        .recv_matching(|frame| frame.contains("type='unsubscribed'"))
         .await
         .expect("bob receives denial after roster push");
     alice
@@ -1126,11 +1122,11 @@ async fn live_subscribe_is_redelivered_until_answered() {
         .await
         .expect("send live subscribe");
     let first = alice
-        .recv_matching(|frame| frame.contains("type=\"subscribe\""))
+        .recv_matching(|frame| frame.contains("type='subscribe'"))
         .await
         .expect("alice receives live subscribe");
     assert!(
-        first.contains("from=\"bob@localhost\""),
+        first.contains("from='bob@localhost'"),
         "live subscribe should identify requester: {first}"
     );
 
@@ -1143,11 +1139,11 @@ async fn live_subscribe_is_redelivered_until_answered() {
         .await
         .expect("alice available again");
     let second = alice
-        .recv_matching(|frame| frame.contains("type=\"subscribe\""))
+        .recv_matching(|frame| frame.contains("type='subscribe'"))
         .await
         .expect("unanswered live subscribe is redelivered");
     assert!(
-        second.contains("from=\"bob@localhost\""),
+        second.contains("from='bob@localhost'"),
         "redelivered live subscribe should preserve requester: {second}"
     );
 
@@ -1156,7 +1152,7 @@ async fn live_subscribe_is_redelivered_until_answered() {
         .await
         .expect("deny live subscription");
     let _bob_denial = bob
-        .recv_matching(|frame| frame.contains("type=\"unsubscribed\""))
+        .recv_matching(|frame| frame.contains("type='unsubscribed'"))
         .await
         .expect("bob receives live denial");
 

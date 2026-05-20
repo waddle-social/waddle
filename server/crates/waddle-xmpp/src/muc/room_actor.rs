@@ -148,7 +148,6 @@ impl OccupantInfo {
 /// Because Kameo processes messages one at a time, the actor holds a
 /// `MucRoom` directly with no external synchronisation required.
 #[derive(Actor)]
-#[actor(mailbox = bounded(2048))]
 pub struct RoomActor {
     room: MucRoom,
     occupant_id_secret: crate::xep::xep0421::OccupantIdSecret,

@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use kameo::actor::Spawn;
 use uuid::Uuid;
 
 use super::*;
@@ -82,7 +83,7 @@ async fn test_tuple_store_write_and_exists() {
     let runner = crate::db::MigrationRunner::global();
     runner.run(&db).await.unwrap();
 
-    let actor = kameo::spawn(crate::db::actor::DbActor::new((*db).clone()));
+    let actor = crate::db::actor::DbActor::spawn(crate::db::actor::DbActor::new((*db).clone()));
     let store = TupleStore::new(actor);
 
     let object = Object::new(ObjectType::Space, "test-space");
@@ -106,7 +107,7 @@ async fn test_tuple_store_delete() {
     let runner = crate::db::MigrationRunner::global();
     runner.run(&db).await.unwrap();
 
-    let actor = kameo::spawn(crate::db::actor::DbActor::new((*db).clone()));
+    let actor = crate::db::actor::DbActor::spawn(crate::db::actor::DbActor::new((*db).clone()));
     let store = TupleStore::new(actor);
 
     let object = Object::new(ObjectType::Space, "test-space");
@@ -130,7 +131,7 @@ async fn test_tuple_store_list_subjects() {
     let runner = crate::db::MigrationRunner::global();
     runner.run(&db).await.unwrap();
 
-    let actor = kameo::spawn(crate::db::actor::DbActor::new((*db).clone()));
+    let actor = crate::db::actor::DbActor::spawn(crate::db::actor::DbActor::new((*db).clone()));
     let store = TupleStore::new(actor);
 
     let object = Object::new(ObjectType::Space, "test-space");
@@ -173,7 +174,7 @@ async fn test_tuple_store_write_and_exists_file_backed() {
     let runner = crate::db::MigrationRunner::global();
     runner.run(&db).await.unwrap();
 
-    let actor = kameo::spawn(crate::db::actor::DbActor::new((*db).clone()));
+    let actor = crate::db::actor::DbActor::spawn(crate::db::actor::DbActor::new((*db).clone()));
     let store = TupleStore::new(actor);
     let object = Object::new(ObjectType::Space, "test-space");
     let subject = Subject::user("user-alice");

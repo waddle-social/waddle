@@ -128,11 +128,11 @@ scenario: #Scenario & {
 
 		#DrainFrames & {
 			target:   alicePhone
-			contains: ["from=\"\(roomJid)\"", "<subject></subject>"]
+			contains: ["from='\(roomJid)'", "<subject></subject>"]
 		},
 		#DrainFrames & {
 			target:   alicePhone
-			contains: ["<presence", "from=\"\(roomJid)/bob\""]
+			contains: ["<presence", "from='\(roomJid)/bob'"]
 		},
 		#DrainFrames & {
 			target:   alicePhone
@@ -140,15 +140,15 @@ scenario: #Scenario & {
 		},
 		#DrainFrames & {
 			target:   bobPhone
-			contains: ["<presence", "from=\"\(roomJid)/alice\""]
+			contains: ["<presence", "from='\(roomJid)/alice'"]
 		},
 		#DrainFrames & {
 			target:   bobPhone
-			contains: ["from=\"\(roomJid)\"", "<subject></subject>"]
+			contains: ["from='\(roomJid)'", "<subject></subject>"]
 		},
 		#DrainFrames & {
 			target:   bobPhone
-			contains: ["id=\"cue-pin-target\"", "important message that will be pinned"]
+			contains: ["id='cue-pin-target'", "important message that will be pinned"]
 		},
 	]
 }

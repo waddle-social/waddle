@@ -240,16 +240,16 @@ pub fn build_tune_clear_element() -> Element {
 
 pub fn build_pep_publish_iq(id: &str, node: &str, payload: Element) -> Element {
     Element::builder("iq", NS_CLIENT)
-        .attr("type", "set")
-        .attr("id", id)
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "set")
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), id)
         .append(
             Element::builder("pubsub", NS_PUBSUB)
                 .append(
                     Element::builder("publish", NS_PUBSUB)
-                        .attr("node", node)
+                        .attr(minidom::rxml::xml_ncname!("node").to_owned(), node)
                         .append(
                             Element::builder("item", NS_PUBSUB)
-                                .attr("id", "current")
+                                .attr(minidom::rxml::xml_ncname!("id").to_owned(), "current")
                                 .append(payload)
                                 .build(),
                         )
@@ -324,14 +324,14 @@ pub fn build_retract_tune_iq() -> Element {
 
 pub fn build_pep_items_iq(target_jid: &str, node: &str) -> Element {
     Element::builder("iq", NS_CLIENT)
-        .attr("type", "get")
-        .attr("to", target_jid)
-        .attr("id", "pep-items")
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "get")
+        .attr(minidom::rxml::xml_ncname!("to").to_owned(), target_jid)
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), "pep-items")
         .append(
             Element::builder("pubsub", NS_PUBSUB)
                 .append(
                     Element::builder("items", NS_PUBSUB)
-                        .attr("node", node)
+                        .attr(minidom::rxml::xml_ncname!("node").to_owned(), node)
                         .build(),
                 )
                 .build(),

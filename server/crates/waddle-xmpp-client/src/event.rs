@@ -23,7 +23,11 @@ pub enum ClientEvent {
     /// Typed inbound message or presence event.
     Messaging(MessagingEvent),
     /// Typed MAM archived message from an active history query.
-    MamResult(ArchivedMessage),
+    ///
+    /// Boxed: `ArchivedMessage` ballooned to ~480 bytes after the
+    /// xmpp-parsers 0.22 `Iq`/payload restructuring, which would
+    /// otherwise drag the whole `ClientEvent` enum size up.
+    MamResult(Box<ArchivedMessage>),
     /// Typed streamed XEP-0430 inbox `<entry/>` from an active inbox
     /// query. Correlated to the pending inbox request via
     /// [`InboxStreamEntry::query_id`].

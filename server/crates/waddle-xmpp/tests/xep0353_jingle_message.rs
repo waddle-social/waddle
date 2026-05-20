@@ -237,7 +237,7 @@ fn assert_jmi_envelope_conformant(name: &str, body_builder: impl Fn() -> Element
         "{name}: <store/> hint is empty"
     );
     assert!(
-        store.attrs().next().is_none(),
+        store.attrs().iter().next().is_none(),
         "{name}: <store/> hint carries no attributes"
     );
 
@@ -286,7 +286,7 @@ fn xep_0353_jingle_mi_rejects_unknown_envelope_element() {
     // canonical {propose, proceed, reject, retract, finish} MUST
     // NOT parse as `JingleMI`.
     let elem = Element::builder("bogus", NS_JINGLE_MESSAGE)
-        .attr("id", "c1")
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), "c1")
         .build();
     assert!(JingleMI::try_from(elem).is_err());
 }
@@ -296,7 +296,7 @@ fn xep_0353_jingle_mi_rejects_wrong_namespace() {
     // A `<proceed/>` element in some other namespace MUST NOT parse
     // as a JMI proceed.
     let elem = Element::builder("proceed", "urn:waddle:not-jmi")
-        .attr("id", "c1")
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), "c1")
         .build();
     assert!(JingleMI::try_from(elem).is_err());
 }

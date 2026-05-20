@@ -33,10 +33,9 @@ fn fixture_session(stream_id: &str) -> PersistedSession {
 
 fn fixture_unacked(stream_id: &str, sequence: u32) -> PersistedUnackedStanza {
     let mut message = xmpp_parsers::message::Message::new(None::<jid::Jid>);
-    message.bodies.insert(
-        String::new(),
-        xmpp_parsers::message::Body(format!("m{sequence}")),
-    );
+    message
+        .bodies
+        .insert(xmpp_parsers::message::Lang::new(), format!("m{sequence}"));
     PersistedUnackedStanza {
         stream_id: SmSessionId::new(stream_id),
         sequence,
@@ -249,7 +248,7 @@ async fn round_trip_unacked_preserves_typed_stanza() {
         Stanza::Message(m) => m.bodies.values().next().cloned(),
         _ => panic!("expected Message"),
     };
-    assert_eq!(body.map(|b| b.0), Some("m1".to_string()));
+    assert_eq!(body, Some("m1".to_string()));
 }
 
 /// Issue #209 PR #405: the libSQL backend overrides
@@ -306,7 +305,7 @@ async fn list_all_sessions_with_unacked_uses_single_join_query() {
         Stanza::Message(m) => m.bodies.values().next().cloned(),
         _ => panic!("expected Message"),
     };
-    assert_eq!(body.map(|b| b.0), Some("m1".to_string()));
+    assert_eq!(body, Some("m1".to_string()));
 
     // The JOIN result MUST equal the N+1 trait default applied
     // to the same data — pin the JOIN's correctness by spot-

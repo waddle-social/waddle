@@ -56,7 +56,7 @@ async fn pep_mood_publish_emits_typed_feed_entry() {
         .await
         .expect("PEP publish result");
     assert!(
-        publish_result.contains("type=\"result\""),
+        publish_result.contains("type='result'"),
         "PEP publish must succeed: {publish_result}"
     );
 
@@ -90,7 +90,7 @@ async fn pep_mood_publish_emits_typed_feed_entry() {
         "bridged entry must declare the source namespace: {items_response}"
     );
     assert!(
-        items_response.contains("kind=\"mood\"") || items_response.contains("kind='mood'"),
+        items_response.contains("kind='mood'") || items_response.contains("kind='mood'"),
         "bridged entry must tag the source kind: {items_response}"
     );
 
@@ -160,8 +160,8 @@ async fn pep_mood_publish_is_throttled_on_identical_repeat() {
         .expect("items response");
 
     // Count the bridged entries (items with our source-kind tag).
-    let kind_hits = items_response.matches("kind=\"mood\"").count()
-        + items_response.matches("kind='mood'").count();
+    let kind_hits = items_response.matches("kind='mood'").count()
+        + items_response.matches("kind=\"mood\"").count();
     assert_eq!(
         kind_hits, 1,
         "exactly one bridged entry expected — throttle must suppress identical repeats: {items_response}"

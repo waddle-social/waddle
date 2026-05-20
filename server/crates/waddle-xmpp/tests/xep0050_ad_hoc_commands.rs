@@ -24,7 +24,7 @@ use waddle_xmpp::xep::xep0050::{
     AllowedActions as CommandAllowedActions, Command, Note as CommandNote,
     NoteType as CommandNoteType, Status as CommandStatus, NODE_COMMANDS, NS_COMMANDS,
 };
-use xmpp_parsers::iq::{Iq, IqType};
+use xmpp_parsers::iq::Iq;
 
 // ── §"Protocol Namespace" + §2 node identifier ──────────────────────
 
@@ -58,8 +58,8 @@ fn xep0050_server_features_advertise_commands() {
 
 fn command_element(node: &str) -> Element {
     Element::builder("command", NS_COMMANDS)
-        .attr("node", node)
-        .attr("action", "execute")
+        .attr(minidom::rxml::xml_ncname!("node").to_owned(), node)
+        .attr(minidom::rxml::xml_ncname!("action").to_owned(), "execute")
         .build()
 }
 
@@ -67,11 +67,11 @@ fn command_element(node: &str) -> Element {
 fn xep0050_classifier_accepts_set_with_namespaced_command() {
     // §3: client → server command request is an IQ-set with
     // `<command xmlns='http://jabber.org/protocol/commands' node='…' action='…'/>`.
-    let iq = Iq {
+    let iq = Iq::Set {
         from: None,
         to: None,
         id: "c-1".into(),
-        payload: IqType::Set(command_element("admin:wipe-room")),
+        payload: command_element("admin:wipe-room"),
     };
     assert!(is_command_request(&iq));
 }
@@ -82,11 +82,11 @@ fn xep0050_classifier_rejects_get_iq_type() {
     // misclassifying it would let an attacker probe command
     // semantics via a request the spec doesn't define a response
     // for.
-    let iq = Iq {
+    let iq = Iq::Get {
         from: None,
         to: None,
         id: "c-2".into(),
-        payload: IqType::Get(command_element("anything")),
+        payload: command_element("anything"),
     };
     assert!(!is_command_request(&iq));
 }
@@ -97,13 +97,13 @@ fn xep0050_classifier_rejects_wrong_namespace_payload() {
     // request. Accepting it would let foreign-ns payloads reach
     // the command dispatcher.
     let wrong_ns = Element::builder("command", "wrong:ns")
-        .attr("node", "anything")
+        .attr(minidom::rxml::xml_ncname!("node").to_owned(), "anything")
         .build();
-    let iq = Iq {
+    let iq = Iq::Set {
         from: None,
         to: None,
         id: "c-3".into(),
-        payload: IqType::Set(wrong_ns),
+        payload: wrong_ns,
     };
     assert!(!is_command_request(&iq));
 }
@@ -115,24 +115,24 @@ fn xep0050_parse_command_rejects_missing_node_attribute() {
     // surface this as an error rather than route an empty-node
     // request.
     let no_node = Element::builder("command", NS_COMMANDS)
-        .attr("action", "execute")
+        .attr(minidom::rxml::xml_ncname!("action").to_owned(), "execute")
         .build();
-    let iq = Iq {
+    let iq = Iq::Set {
         from: None,
         to: None,
         id: "c-4".into(),
-        payload: IqType::Set(no_node),
+        payload: no_node,
     };
     assert!(parse_command_from_iq(&iq).is_err());
 }
 
 #[test]
 fn xep0050_parse_command_round_trips_node_and_action() {
-    let iq = Iq {
+    let iq = Iq::Set {
         from: None,
         to: None,
         id: "c-5".into(),
-        payload: IqType::Set(command_element("space:create")),
+        payload: command_element("space:create"),
     };
     let parsed = parse_command_from_iq(&iq).expect("valid command request");
     assert_eq!(parsed.node, "space:create");

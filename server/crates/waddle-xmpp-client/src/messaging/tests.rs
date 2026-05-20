@@ -214,12 +214,15 @@ fn parse_message_preserves_multiple_typed_stanza_ids() {
 #[test]
 fn parse_message_with_origin_id() {
     let e = Element::builder("message", NS_CLIENT)
-        .attr("type", "chat")
-        .attr("id", "m4")
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "chat")
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), "m4")
         .append(Element::builder("body", NS_CLIENT).append("hi").build())
         .append(
             Element::builder("origin-id", NS_ORIGIN_ID)
-                .attr("id", "client-origin-42")
+                .attr(
+                    minidom::rxml::xml_ncname!("id").to_owned(),
+                    "client-origin-42",
+                )
                 .build(),
         )
         .build();

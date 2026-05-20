@@ -36,7 +36,7 @@ async fn iq_get_to(client: &mut WsXmppClient, id: &str, to: &str, body: &str) ->
         .await
         .expect("send iq get");
     client
-        .recv_matching(|frame| frame.contains(&format!(r#"id="{id}""#)) && frame.contains("<iq"))
+        .recv_matching(|frame| frame.contains(&format!(r#"id='{id}'"#)) && frame.contains("<iq"))
         .await
         .expect("iq get response")
 }
@@ -49,7 +49,7 @@ async fn iq_set_to(client: &mut WsXmppClient, id: &str, to: &str, body: &str) ->
         .await
         .expect("send iq set");
     client
-        .recv_matching(|frame| frame.contains(&format!(r#"id="{id}""#)) && frame.contains("<iq"))
+        .recv_matching(|frame| frame.contains(&format!(r#"id='{id}'"#)) && frame.contains("<iq"))
         .await
         .expect("iq set response")
 }
@@ -290,10 +290,10 @@ async fn avatar_url_publishes_data_and_metadata_with_real_sha1() {
     )
     .await;
     assert!(
-        metadata.contains(NS_AVATAR_METADATA) && metadata.contains(&format!(r#"id="{sha1}""#)),
+        metadata.contains(NS_AVATAR_METADATA) && metadata.contains(&format!(r#"id='{sha1}'"#)),
         "metadata item MUST be keyed on the SHA-1 of the bytes per XEP-0084 §4.1.1: {metadata}"
     );
-    assert!(metadata.contains(r#"type="image/png""#));
+    assert!(metadata.contains(r#"type='image/png'"#));
     assert!(!metadata.contains(r#"url="#));
 
     let data = iq_get_to(
@@ -306,7 +306,7 @@ async fn avatar_url_publishes_data_and_metadata_with_real_sha1() {
     )
     .await;
     assert!(
-        data.contains(NS_AVATAR_DATA) && data.contains(&format!(r#"id="{sha1}""#)),
+        data.contains(NS_AVATAR_DATA) && data.contains(&format!(r#"id='{sha1}'"#)),
         "data item MUST be retrievable by the SHA-1 id: {data}"
     );
 
@@ -372,14 +372,14 @@ async fn avatar_url_jpeg_is_transcoded_to_png_per_xep_0084_3_2() {
     )
     .await;
     assert!(
-        metadata.contains(NS_AVATAR_METADATA) && metadata.contains(&format!(r#"id="{sha1}""#)),
+        metadata.contains(NS_AVATAR_METADATA) && metadata.contains(&format!(r#"id='{sha1}'"#)),
         "metadata item MUST be keyed on the SHA-1 of the PNG bytes per XEP-0084 §4.1.1: {metadata}"
     );
     assert!(
-        metadata.contains(r#"type="image/png""#),
+        metadata.contains(r#"type='image/png'"#),
         "metadata <info type> MUST be image/png after transcoding (XEP-0084 §3.2 / §4.2): {metadata}"
     );
-    assert!(!metadata.contains(r#"type="image/jpeg""#));
+    assert!(!metadata.contains(r#"type='image/jpeg'"#));
     assert!(!metadata.contains(r#"url="#));
 
     // Strongest proof the bytes were transcoded: fetch the published
@@ -623,7 +623,7 @@ async fn same_avatar_published_twice_is_idempotent() {
         &format!(r#"<pubsub xmlns="{NS_PUBSUB}"><items node="{NS_AVATAR_METADATA}"/></pubsub>"#),
     )
     .await;
-    assert!(metadata.contains(&format!(r#"id="{sha1}""#)));
+    assert!(metadata.contains(&format!(r#"id='{sha1}'"#)));
     let _ = admin.close().await;
 }
 
@@ -800,7 +800,7 @@ async fn avatar_removal_publishes_empty_metadata_and_strips_vcards() {
     )
     .await;
     assert!(
-        metadata.contains(r#"id="current""#)
+        metadata.contains(r#"id='current'"#)
             && (metadata.contains(r#"<metadata xmlns="urn:xmpp:avatar:metadata"/>"#)
                 || metadata.contains(r#"<metadata xmlns='urn:xmpp:avatar:metadata'/>"#)),
         "removal metadata MUST be empty `<metadata xmlns='urn:xmpp:avatar:metadata'/>` at id='current' per XEP-0084 §4.3: {metadata}"
@@ -1081,7 +1081,7 @@ async fn avatar_removal_fans_out_empty_metadata_event_to_subscriber() {
     )
     .await;
     assert!(
-        sub_resp.contains(r#"type="result""#),
+        sub_resp.contains(r#"type='result'"#),
         "subscribe must succeed (Open access): {sub_resp}"
     );
 
@@ -1097,7 +1097,7 @@ async fn avatar_removal_fans_out_empty_metadata_event_to_subscriber() {
         .await
         .expect("bob MUST receive the empty-metadata fan-out event");
     assert!(
-        event.contains(r#"id="current""#) || event.contains(r#"id='current'"#),
+        event.contains(r#"id='current'"#) || event.contains(r#"id='current'"#),
         "fan-out item id must be `current` per §4.3: {event}"
     );
     assert!(
@@ -1125,7 +1125,7 @@ async fn wait_for_event_message(
             Ok(frame) => {
                 if frame.contains("<message")
                     && frame.contains(NS_PUBSUB_EVENT)
-                    && (frame.contains(&format!(r#"node="{node}""#))
+                    && (frame.contains(&format!(r#"node='{node}'"#))
                         || frame.contains(&format!(r#"node='{node}'"#)))
                 {
                     return Some(frame);
@@ -1168,7 +1168,7 @@ async fn user_self_published_avatar_is_protected_from_oidc_removal() {
     )
     .await;
     assert!(
-        user_set.contains(r#"type="result""#),
+        user_set.contains(r#"type='result'"#),
         "user self-publish must succeed: {user_set}"
     );
 
@@ -1185,7 +1185,7 @@ async fn user_self_published_avatar_is_protected_from_oidc_removal() {
         ),
     )
     .await;
-    assert!(user_meta.contains(r#"type="result""#));
+    assert!(user_meta.contains(r#"type='result'"#));
 
     // Step 2: OIDC reconcile asks to remove the avatar. Guard should
     // fire — `published_avatar_removal=false`,
@@ -1210,7 +1210,7 @@ async fn user_self_published_avatar_is_protected_from_oidc_removal() {
     )
     .await;
     assert!(
-        metadata.contains(r#"id="user-self-1""#),
+        metadata.contains(r#"id='user-self-1'"#),
         "user-published metadata item MUST survive the suppressed removal: {metadata}"
     );
 

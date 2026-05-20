@@ -9,7 +9,7 @@ use axum::{
     routing::post,
     Json, Router,
 };
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use tracing::{error, warn};
@@ -29,7 +29,7 @@ type HmacSha256 = Hmac<Sha256>;
 pub fn router(websocket_state: Arc<WebSocketState>) -> Router {
     Router::new()
         .route(
-            "/webhooks/providers/:provider_id/:plugin_id",
+            "/webhooks/providers/{provider_id}/{plugin_id}",
             post(provider_webhook_handler),
         )
         .layer(Extension(websocket_state))

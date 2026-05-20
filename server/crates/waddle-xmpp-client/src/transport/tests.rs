@@ -122,20 +122,19 @@ async fn concrete_transport_connects_and_emits_typed_frames() {
             .send(
                 Message::Text(
                     r#"<open xmlns="urn:ietf:params:xml:ns:xmpp-framing" from="waddle.example" id="stream-1" version="1.0"/>"#
-                        .to_string(),
-                ),
+                        .into(),                ),
             )
             .await
             .unwrap();
         websocket
             .send(Message::Text(
-                r#"<iq type="result" id="ping-1"><ping xmlns="urn:xmpp:ping"/></iq>"#.to_string(),
+                r#"<iq type="result" id="ping-1"><ping xmlns="urn:xmpp:ping"/></iq>"#.into(),
             ))
             .await
             .unwrap();
         websocket
             .send(Message::Text(
-                r#"<close xmlns="urn:ietf:params:xml:ns:xmpp-framing"/>"#.to_string(),
+                r#"<close xmlns="urn:ietf:params:xml:ns:xmpp-framing"/>"#.into(),
             ))
             .await
             .unwrap();

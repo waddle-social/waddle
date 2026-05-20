@@ -10,21 +10,22 @@ pub(super) async fn handle_muc_admin_iq(
 ) -> Vec<String> {
     let Some(sender_jid) = sender_jid else {
         return vec![build_iq_error_xml_typed(
-            &iq.id,
+            iq.id(),
             response_from,
             response_to,
             not_authorized_iq_error("Authentication required."),
         )];
     };
-    let mut iq_with_from = iq.clone();
-    iq_with_from.from = Some(Jid::from(sender_jid.clone()));
+    let (mut header, payload) = iq.clone().split();
+    header.from = Some(Jid::from(sender_jid.clone()));
+    let iq_with_from = payload.assemble(header);
     let query = match parse_admin_query(&iq_with_from, muc_domain) {
         Ok(query) => query,
         Err(error) => return vec![build_xmpp_error_response(&iq_with_from, error)],
     };
     let Some(room_actor) = get_room_actor(state, &query.room_jid).await else {
         return vec![build_iq_error_xml_typed(
-            &iq.id,
+            iq.id(),
             response_from,
             response_to,
             item_not_found_iq_error("Requested item not found."),
@@ -39,7 +40,7 @@ pub(super) async fn handle_muc_admin_iq(
         Ok(context) => context,
         Err(_) => {
             return vec![build_iq_error_xml_typed(
-                &iq.id,
+                iq.id(),
                 response_from,
                 response_to,
                 internal_server_error_iq_error("Internal server error."),
@@ -50,7 +51,7 @@ pub(super) async fn handle_muc_admin_iq(
         || matches!(context.role, waddle_xmpp::Role::Moderator);
     if !is_admin {
         return vec![build_iq_error_xml_typed(
-            &iq.id,
+            iq.id(),
             response_from,
             response_to,
             forbidden_iq_error("Operation not permitted."),
@@ -61,7 +62,7 @@ pub(super) async fn handle_muc_admin_iq(
             Ok(snapshot) => snapshot.room,
             Err(_) => {
                 return vec![build_iq_error_xml_typed(
-                    &iq.id,
+                    iq.id(),
                     response_from,
                     response_to,
                     internal_server_error_iq_error("Internal server error."),
@@ -84,7 +85,7 @@ pub(super) async fn handle_muc_admin_iq(
                 })
                 .collect();
             return vec![iq_to_xml(build_role_result(
-                &iq.id,
+                iq.id(),
                 &query.room_jid,
                 &to_jid,
                 &items,
@@ -105,7 +106,7 @@ pub(super) async fn handle_muc_admin_iq(
                 .collect()
         };
         return vec![iq_to_xml(build_admin_result(
-            &iq.id,
+            iq.id(),
             &query.room_jid,
             &to_jid,
             &items,
@@ -125,7 +126,7 @@ pub(super) async fn handle_muc_admin_iq(
         Err(kameo::error::SendError::HandlerError(error)) => {
             warn!(room = %room_jid, error = %error, "MUC admin set rejected");
             return vec![build_iq_error_xml_typed(
-                &iq.id,
+                iq.id(),
                 response_from,
                 response_to,
                 forbidden_iq_error("Operation not permitted."),
@@ -134,7 +135,7 @@ pub(super) async fn handle_muc_admin_iq(
         Err(error) => {
             warn!(room = %room_jid, error = ?error, "Failed to apply MUC admin IQ");
             return vec![build_iq_error_xml_typed(
-                &iq.id,
+                iq.id(),
                 response_from,
                 response_to,
                 internal_server_error_iq_error("Internal server error."),
@@ -150,7 +151,7 @@ pub(super) async fn handle_muc_admin_iq(
             .await;
     }
     vec![iq_to_xml(build_admin_set_result(
-        &iq.id,
+        iq.id(),
         &room_jid,
         &Jid::from(sender_jid.clone()),
     ))]

@@ -42,7 +42,7 @@ async fn roster_get(client: &mut WsXmppClient, id: &str, ver: Option<&str>) -> S
         ))
         .await
         .expect("send roster get");
-    let id_attr = format!(r#"id="{id}""#);
+    let id_attr = format!(r#"id='{id}'"#);
     client
         .recv_matching(|frame| frame.contains(&id_attr))
         .await
@@ -65,9 +65,9 @@ async fn roster_set_add(
         ))
         .await
         .expect("send roster set");
-    let id_attr = format!(r#"id="{id}""#);
+    let id_attr = format!(r#"id='{id}'"#);
     let mut frames = client
-        .recv_until(|f| f.contains(&id_attr) && f.contains("type=\"result\""))
+        .recv_until(|f| f.contains(&id_attr) && f.contains("type='result'"))
         .await
         .expect("roster set result");
     let result = frames.pop().expect("at least the result frame");
@@ -75,13 +75,16 @@ async fn roster_set_add(
 }
 
 fn roster_version(frame: &str) -> String {
-    let marker = "ver=\"";
-    let start = frame
-        .find(marker)
-        .unwrap_or_else(|| panic!("missing roster version: {frame}"))
-        + marker.len();
+    let (marker, terminator) = if frame.contains("ver=\"") {
+        ("ver=\"", '"')
+    } else if frame.contains("ver='") {
+        ("ver='", '\'')
+    } else {
+        panic!("missing roster version: {frame}");
+    };
+    let start = frame.find(marker).expect("marker present") + marker.len();
     let end = frame[start..]
-        .find('"')
+        .find(terminator)
         .unwrap_or_else(|| panic!("unterminated roster version: {frame}"));
     frame[start..start + end].to_string()
 }
@@ -102,7 +105,7 @@ async fn xep0237_first_sync_returns_full_roster_with_ver() {
 
     let first_sync = roster_get(&mut alice, "xep237-t1-first", None).await;
     assert!(
-        first_sync.contains("type=\"result\""),
+        first_sync.contains("type='result'"),
         "first sync response must be type=result: {first_sync}"
     );
     assert!(
@@ -114,7 +117,7 @@ async fn xep0237_first_sync_returns_full_roster_with_ver() {
         "first sync must include the seeded item: {first_sync}"
     );
     assert!(
-        first_sync.contains("ver=\""),
+        first_sync.contains("ver='"),
         "first sync result must carry a `ver` attribute: {first_sync}"
     );
 
@@ -130,7 +133,7 @@ async fn xep0237_matching_version_returns_empty_roster_result() {
 
     let unchanged = roster_get(&mut alice, "xep237-unchanged", Some(&version)).await;
     assert!(
-        unchanged.contains("type=\"result\""),
+        unchanged.contains("type='result'"),
         "expected empty roster result: {unchanged}"
     );
     assert!(
@@ -196,12 +199,12 @@ async fn xep0237_mutation_advances_version_and_push_carries_new_ver() {
     );
     let r1_push = r1_pushes
         .into_iter()
-        .find(|f| f.contains("type=\"set\"") && f.contains("jabber:iq:roster"))
+        .find(|f| f.contains("type='set'") && f.contains("jabber:iq:roster"))
         .expect("r1 must receive its own roster push");
 
     // r2 only ever sees the push (no IQ result is addressed to it).
     let r2_push = r2
-        .recv_matching(|f| f.contains("type=\"set\"") && f.contains("jabber:iq:roster"))
+        .recv_matching(|f| f.contains("type='set'") && f.contains("jabber:iq:roster"))
         .await
         .expect("r2 push");
 
@@ -260,7 +263,7 @@ async fn xep0237_version_persists_across_server_restart() {
 
     let frame = roster_get(&mut alice2, "xep237-t5-after-restart", Some(&v1)).await;
     assert!(
-        frame.contains("type=\"result\""),
+        frame.contains("type='result'"),
         "restarted server must accept the persisted ver: {frame}"
     );
     assert!(

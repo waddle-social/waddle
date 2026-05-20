@@ -82,7 +82,7 @@ pub fn extract_preauth(query_elem: &Element) -> Option<PreauthToken> {
 /// Build a `<preauth xmlns='urn:xmpp:pars:0' token='...'/>` element.
 pub fn build_preauth_element(token: &str) -> Element {
     Element::builder("preauth", NS_PARS)
-        .attr("token", token)
+        .attr(minidom::rxml::xml_ncname!("token").to_owned(), token)
         .build()
 }
 
@@ -126,7 +126,7 @@ mod tests {
     #[test]
     fn test_is_preauth_element() {
         let elem = Element::builder("preauth", NS_PARS)
-            .attr("token", "abc")
+            .attr(minidom::rxml::xml_ncname!("token").to_owned(), "abc")
             .build();
         assert!(is_preauth_element(&elem));
 

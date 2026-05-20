@@ -34,7 +34,7 @@ pub async fn handle_iq(
         state_machine: None,
     };
     handle_iq_with_conn_state(
-        iq,
+        *iq,
         domain,
         muc_domain,
         state,

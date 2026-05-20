@@ -29,7 +29,7 @@ use waddle_xmpp::disco::{
     upload_service_features, DiscoItem, Feature, Identity, DISCO_INFO_NS, DISCO_ITEMS_NS,
 };
 use waddle_xmpp_core::disco::info::parse_disco_info_response;
-use xmpp_parsers::iq::{Iq, IqType};
+use xmpp_parsers::iq::Iq;
 
 const NS_DATA_FORMS: &str = "jabber:x:data";
 
@@ -48,11 +48,11 @@ fn xep0030_namespace_constants_match_spec() {
 
 #[test]
 fn xep0030_info_classifier_accepts_iq_get_with_namespaced_query() {
-    let iq = Iq {
+    let iq = Iq::Get {
         from: None,
         to: None,
         id: "i-1".into(),
-        payload: IqType::Get(Element::builder("query", DISCO_INFO_NS).build()),
+        payload: Element::builder("query", DISCO_INFO_NS).build(),
     };
     assert!(is_disco_info_query(&iq));
 }
@@ -61,19 +61,19 @@ fn xep0030_info_classifier_accepts_iq_get_with_namespaced_query() {
 fn xep0030_info_classifier_rejects_iq_set_or_wrong_namespace() {
     // §3 fixes the verb as `get`. A `set` carrying the same
     // payload is malformed.
-    let set_iq = Iq {
+    let set_iq = Iq::Set {
         from: None,
         to: None,
         id: "i-2".into(),
-        payload: IqType::Set(Element::builder("query", DISCO_INFO_NS).build()),
+        payload: Element::builder("query", DISCO_INFO_NS).build(),
     };
     assert!(!is_disco_info_query(&set_iq));
 
-    let wrong_ns = Iq {
+    let wrong_ns = Iq::Get {
         from: None,
         to: None,
         id: "i-3".into(),
-        payload: IqType::Get(Element::builder("query", "wrong:ns").build()),
+        payload: Element::builder("query", "wrong:ns").build(),
     };
     assert!(!is_disco_info_query(&wrong_ns));
 }
@@ -84,15 +84,16 @@ fn xep0030_info_parser_captures_optional_node_attribute() {
     // parser surfaces `node=` so the handler can dispatch
     // node-scoped disco lookups (e.g. XEP-0115 caps, XEP-0050
     // command nodes, XEP-0503 space metadata).
-    let iq_with_node = Iq {
+    let iq_with_node = Iq::Get {
         from: None,
         to: None,
         id: "i-4".into(),
-        payload: IqType::Get(
-            Element::builder("query", DISCO_INFO_NS)
-                .attr("node", "https://waddle.social/caps#hash")
-                .build(),
-        ),
+        payload: Element::builder("query", DISCO_INFO_NS)
+            .attr(
+                minidom::rxml::xml_ncname!("node").to_owned(),
+                "https://waddle.social/caps#hash",
+            )
+            .build(),
     };
     let parsed = parse_disco_info_query(&iq_with_node).expect("parses");
     assert_eq!(
@@ -100,11 +101,11 @@ fn xep0030_info_parser_captures_optional_node_attribute() {
         Some("https://waddle.social/caps#hash")
     );
 
-    let iq_no_node = Iq {
+    let iq_no_node = Iq::Get {
         from: None,
         to: None,
         id: "i-5".into(),
-        payload: IqType::Get(Element::builder("query", DISCO_INFO_NS).build()),
+        payload: Element::builder("query", DISCO_INFO_NS).build(),
     };
     let parsed = parse_disco_info_query(&iq_no_node).expect("parses");
     assert!(parsed.node.is_none());
@@ -122,11 +123,11 @@ fn xep0030_build_info_response_emits_spec_shape() {
     //       …
     //     </query>
     //   </iq>
-    let original = Iq {
+    let original = Iq::Get {
         from: Some("user@example.com/web".parse().expect("jid")),
         to: Some("waddle.example.com".parse().expect("jid")),
         id: "disco-1".into(),
-        payload: IqType::Get(Element::builder("query", DISCO_INFO_NS).build()),
+        payload: Element::builder("query", DISCO_INFO_NS).build(),
     };
 
     let identities = [Identity::server(Some("Waddle Server"))];
@@ -140,16 +141,20 @@ fn xep0030_build_info_response_emits_spec_shape() {
 
     // Origin-flip: response from = request to, response to = request from.
     assert_eq!(
-        response.from.as_ref().map(ToString::to_string).as_deref(),
+        response.from().map(ToString::to_string).as_deref(),
         Some("waddle.example.com")
     );
     assert_eq!(
-        response.to.as_ref().map(ToString::to_string).as_deref(),
+        response.to().map(ToString::to_string).as_deref(),
         Some("user@example.com/web")
     );
-    assert_eq!(response.id, "disco-1");
+    assert_eq!(response.id(), "disco-1");
 
-    let IqType::Result(Some(query)) = response.payload else {
+    let Iq::Result {
+        payload: Some(query),
+        ..
+    } = response
+    else {
         panic!("response must be iq type='result' with query payload");
     };
     assert_eq!(query.name(), "query");
@@ -204,21 +209,30 @@ fn xep0030_identity_optional_xml_lang_round_trips() {
     // must round-trip the attribute or multilingual deployments
     // lose their localisations.
     let identity = Identity::new("server", "im", Some("Le serveur")).with_lang(Some("fr"));
-    let original = Iq {
+    let original = Iq::Get {
         from: None,
         to: None,
         id: "i-6".into(),
-        payload: IqType::Get(Element::builder("query", DISCO_INFO_NS).build()),
+        payload: Element::builder("query", DISCO_INFO_NS).build(),
     };
     let response = build_disco_info_response(&original, &[identity], &[], None);
-    let IqType::Result(Some(query)) = response.payload else {
+    let Iq::Result {
+        payload: Some(query),
+        ..
+    } = response
+    else {
         panic!();
     };
     let id_elem = query
         .children()
         .find(|c| c.name() == "identity")
         .expect("present");
-    assert_eq!(id_elem.attr("xml:lang"), Some("fr"));
+    // minidom 0.18 keys attrs by (Namespace, NcName); xml:lang lives in
+    // the XML namespace, not the default one. Read it via attr_ns.
+    assert_eq!(
+        id_elem.attr_ns(&minidom::rxml::Namespace::XML, "lang"),
+        Some("fr")
+    );
     assert_eq!(id_elem.attr("name"), Some("Le serveur"));
 }
 
@@ -226,22 +240,22 @@ fn xep0030_identity_optional_xml_lang_round_trips() {
 
 #[test]
 fn xep0030_items_classifier_accepts_iq_get_with_namespaced_query() {
-    let iq = Iq {
+    let iq = Iq::Get {
         from: None,
         to: None,
         id: "n-1".into(),
-        payload: IqType::Get(Element::builder("query", DISCO_ITEMS_NS).build()),
+        payload: Element::builder("query", DISCO_ITEMS_NS).build(),
     };
     assert!(is_disco_items_query(&iq));
 }
 
 #[test]
 fn xep0030_items_classifier_rejects_wrong_ns() {
-    let iq = Iq {
+    let iq = Iq::Get {
         from: None,
         to: None,
         id: "n-2".into(),
-        payload: IqType::Get(Element::builder("query", DISCO_INFO_NS).build()),
+        payload: Element::builder("query", DISCO_INFO_NS).build(),
     };
     assert!(!is_disco_items_query(&iq));
 }
@@ -251,15 +265,13 @@ fn xep0030_items_parser_captures_optional_node_attribute() {
     // §4: items can be scoped to a node, e.g. a XEP-0503 Space's
     // member bookmark listing or a XEP-0050 ad-hoc command's
     // sub-commands.
-    let iq = Iq {
+    let iq = Iq::Get {
         from: None,
         to: None,
         id: "n-3".into(),
-        payload: IqType::Get(
-            Element::builder("query", DISCO_ITEMS_NS)
-                .attr("node", "general")
-                .build(),
-        ),
+        payload: Element::builder("query", DISCO_ITEMS_NS)
+            .attr(minidom::rxml::xml_ncname!("node").to_owned(), "general")
+            .build(),
     };
     let parsed = parse_disco_items_query(&iq).expect("parses");
     assert_eq!(parsed.node.as_deref(), Some("general"));
@@ -271,11 +283,11 @@ fn xep0030_items_parser_captures_optional_node_attribute() {
 fn xep0030_build_items_response_emits_spec_shape() {
     // §4.1 example: `<query xmlns='http://jabber.org/protocol/disco#items'>
     //                  <item jid='…' name='…' node='…'/>…</query>`.
-    let original = Iq {
+    let original = Iq::Get {
         from: Some("user@example.com/web".parse().expect("jid")),
         to: Some("waddle.example.com".parse().expect("jid")),
         id: "disco-items-1".into(),
-        payload: IqType::Get(Element::builder("query", DISCO_ITEMS_NS).build()),
+        payload: Element::builder("query", DISCO_ITEMS_NS).build(),
     };
     let items = vec![
         DiscoItem::muc_service("muc.example.com", Some("Chat")),
@@ -284,7 +296,11 @@ fn xep0030_build_items_response_emits_spec_shape() {
     ];
     let response = build_disco_items_response(&original, &items, None);
 
-    let IqType::Result(Some(query)) = response.payload else {
+    let Iq::Result {
+        payload: Some(query),
+        ..
+    } = response
+    else {
         panic!();
     };
     assert_eq!(query.name(), "query");
@@ -363,13 +379,13 @@ fn build_response_query(extensions: &[Element]) -> Element {
     q = q
         .append(
             Element::builder("identity", DISCO_INFO_NS)
-                .attr("category", "server")
-                .attr("type", "im")
+                .attr(minidom::rxml::xml_ncname!("category").to_owned(), "server")
+                .attr(minidom::rxml::xml_ncname!("type").to_owned(), "im")
                 .build(),
         )
         .append(
             Element::builder("feature", DISCO_INFO_NS)
-                .attr("var", DISCO_INFO_NS)
+                .attr(minidom::rxml::xml_ncname!("var").to_owned(), DISCO_INFO_NS)
                 .build(),
         );
     for ext in extensions {
@@ -401,21 +417,21 @@ fn xep0030_parse_response_flags_duplicate_identity_tuples() {
     let mut q = Element::builder("query", DISCO_INFO_NS)
         .append(
             Element::builder("identity", DISCO_INFO_NS)
-                .attr("category", "server")
-                .attr("type", "im")
-                .attr("name", "Waddle")
+                .attr(minidom::rxml::xml_ncname!("category").to_owned(), "server")
+                .attr(minidom::rxml::xml_ncname!("type").to_owned(), "im")
+                .attr(minidom::rxml::xml_ncname!("name").to_owned(), "Waddle")
                 .build(),
         )
         .append(
             Element::builder("identity", DISCO_INFO_NS)
-                .attr("category", "server")
-                .attr("type", "im")
-                .attr("name", "Waddle")
+                .attr(minidom::rxml::xml_ncname!("category").to_owned(), "server")
+                .attr(minidom::rxml::xml_ncname!("type").to_owned(), "im")
+                .attr(minidom::rxml::xml_ncname!("name").to_owned(), "Waddle")
                 .build(),
         );
     q = q.append(
         Element::builder("feature", DISCO_INFO_NS)
-            .attr("var", DISCO_INFO_NS)
+            .attr(minidom::rxml::xml_ncname!("var").to_owned(), DISCO_INFO_NS)
             .build(),
     );
     let response = parse_disco_info_response(&q.build()).expect("parses");
@@ -432,18 +448,18 @@ fn xep0030_parse_response_flags_duplicate_features() {
     let q = Element::builder("query", DISCO_INFO_NS)
         .append(
             Element::builder("identity", DISCO_INFO_NS)
-                .attr("category", "server")
-                .attr("type", "im")
+                .attr(minidom::rxml::xml_ncname!("category").to_owned(), "server")
+                .attr(minidom::rxml::xml_ncname!("type").to_owned(), "im")
                 .build(),
         )
         .append(
             Element::builder("feature", DISCO_INFO_NS)
-                .attr("var", DISCO_INFO_NS)
+                .attr(minidom::rxml::xml_ncname!("var").to_owned(), DISCO_INFO_NS)
                 .build(),
         )
         .append(
             Element::builder("feature", DISCO_INFO_NS)
-                .attr("var", DISCO_INFO_NS)
+                .attr(minidom::rxml::xml_ncname!("var").to_owned(), DISCO_INFO_NS)
                 .build(),
         )
         .build();
@@ -462,11 +478,11 @@ fn xep0030_parse_response_preserves_xep0128_extension_forms_verbatim() {
     // recomputation can run against the exact input that produced
     // the advertised `ver`.
     let form = Element::builder("x", NS_DATA_FORMS)
-        .attr("type", "result")
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "result")
         .append(
             Element::builder("field", NS_DATA_FORMS)
-                .attr("var", "FORM_TYPE")
-                .attr("type", "hidden")
+                .attr(minidom::rxml::xml_ncname!("var").to_owned(), "FORM_TYPE")
+                .attr(minidom::rxml::xml_ncname!("type").to_owned(), "hidden")
                 .append(
                     Element::builder("value", NS_DATA_FORMS)
                         .append("urn:xmpp:dataforms:softwareinfo")
@@ -486,13 +502,13 @@ fn xep0030_build_info_response_with_extensions_preserves_data_forms() {
     // The builder MUST emit XEP-0128 extension forms inside the
     // `<query>` element so peers receive the full hash input.
     let form = Element::builder("x", NS_DATA_FORMS)
-        .attr("type", "result")
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "result")
         .build();
-    let original = Iq {
+    let original = Iq::Get {
         from: None,
         to: None,
         id: "i-7".into(),
-        payload: IqType::Get(Element::builder("query", DISCO_INFO_NS).build()),
+        payload: Element::builder("query", DISCO_INFO_NS).build(),
     };
     let response = build_disco_info_response_with_extensions(
         &original,
@@ -501,7 +517,11 @@ fn xep0030_build_info_response_with_extensions_preserves_data_forms() {
         None,
         std::slice::from_ref(&form),
     );
-    let IqType::Result(Some(query)) = response.payload else {
+    let Iq::Result {
+        payload: Some(query),
+        ..
+    } = response
+    else {
         panic!();
     };
     let extensions: Vec<_> = query
@@ -520,15 +540,16 @@ fn xep0030_build_info_response_with_node_echoes_node_on_response() {
     // client can match the response to the right query. Otherwise
     // a multiplexed disco probe (caps + commands + spaces) would
     // de-mux incorrectly.
-    let original = Iq {
+    let original = Iq::Get {
         from: None,
         to: None,
         id: "i-8".into(),
-        payload: IqType::Get(
-            Element::builder("query", DISCO_INFO_NS)
-                .attr("node", "https://waddle/caps#abc")
-                .build(),
-        ),
+        payload: Element::builder("query", DISCO_INFO_NS)
+            .attr(
+                minidom::rxml::xml_ncname!("node").to_owned(),
+                "https://waddle/caps#abc",
+            )
+            .build(),
     };
     let response = build_disco_info_response(
         &original,
@@ -536,7 +557,11 @@ fn xep0030_build_info_response_with_node_echoes_node_on_response() {
         &[],
         Some("https://waddle/caps#abc"),
     );
-    let IqType::Result(Some(query)) = response.payload else {
+    let Iq::Result {
+        payload: Some(query),
+        ..
+    } = response
+    else {
         panic!();
     };
     assert_eq!(query.attr("node"), Some("https://waddle/caps#abc"));

@@ -133,14 +133,20 @@ fn parse_target_attr(elem: &Element) -> Option<String> {
 /// client.
 pub fn build_pinned_element(target: &StanzaId) -> Element {
     Element::builder(PINNED_ELEMENT, NS_WADDLE_PIN_V0)
-        .attr(TARGET_ATTR, target.id.as_str())
+        .attr(
+            minidom::rxml::xml_ncname!("target").to_owned(),
+            target.id.as_str(),
+        )
         .build()
 }
 
 /// Build the inbound `<unpinned target="…"/>` element.
 pub fn build_unpinned_element(target: &StanzaId) -> Element {
     Element::builder(UNPINNED_ELEMENT, NS_WADDLE_PIN_V0)
-        .attr(TARGET_ATTR, target.id.as_str())
+        .attr(
+            minidom::rxml::xml_ncname!("target").to_owned(),
+            target.id.as_str(),
+        )
         .build()
 }
 
@@ -148,6 +154,7 @@ pub fn build_unpinned_element(target: &StanzaId) -> Element {
 mod tests {
     use super::*;
     use jid::{BareJid, Jid};
+    use minidom::rxml::xml_ncname;
     use std::str::FromStr;
     use xmpp_parsers::message::MessageType;
 
@@ -221,7 +228,7 @@ mod tests {
         msg.type_ = MessageType::Groupchat;
         msg.payloads.push(
             Element::builder(PINNED_ELEMENT, NS_WADDLE_PIN_V0)
-                .attr(TARGET_ATTR, "")
+                .attr(xml_ncname!("target").to_owned(), "")
                 .build(),
         );
         assert!(extract_pin_intent_from_message(&msg).is_none());
@@ -247,7 +254,7 @@ mod tests {
         msg.type_ = MessageType::Groupchat;
         msg.payloads.push(
             Element::builder(PINNED_ELEMENT, NS_WADDLE_PIN_V0)
-                .attr(TARGET_ATTR, oversized.as_str())
+                .attr(xml_ncname!("target").to_owned(), oversized.as_str())
                 .build(),
         );
         assert!(extract_pin_intent_from_message(&msg).is_none());
@@ -283,7 +290,7 @@ mod tests {
         msg.type_ = MessageType::Groupchat;
         msg.payloads.push(
             Element::builder(PINNED_ELEMENT, "wrong:ns")
-                .attr(TARGET_ATTR, "stanza-1")
+                .attr(xml_ncname!("target").to_owned(), "stanza-1")
                 .build(),
         );
         assert!(extract_pin_intent_from_message(&msg).is_none());

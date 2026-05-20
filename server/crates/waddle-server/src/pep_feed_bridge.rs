@@ -494,7 +494,7 @@ fn build_bridge_entry(item_id: &str, kind: PepKind, author: &BareJid, body: &str
     entry.append_child(published_el);
 
     let source = Element::builder("source", NS_FEED_SOURCE)
-        .attr("kind", kind.as_str())
+        .attr(minidom::rxml::xml_ncname!("kind").to_owned(), kind.as_str())
         .build();
     entry.append_child(source);
 
@@ -809,7 +809,7 @@ mod tests {
             "body missing: {xml}"
         );
         assert!(
-            xml.contains("kind=\"mood\"") || xml.contains("kind='mood'"),
+            xml.contains("kind='mood'") || xml.contains("kind='mood'"),
             "source kind missing: {xml}"
         );
     }

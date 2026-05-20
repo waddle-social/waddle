@@ -91,20 +91,32 @@ pub fn parse_avatar_metadata(element: &Element) -> Option<AvatarInfo> {
 /// Build avatar metadata element.
 pub fn build_avatar_metadata(info: &AvatarInfo) -> Element {
     let mut info_builder = Element::builder("info", NS_AVATAR_METADATA)
-        .attr("id", &info.id)
-        .attr("type", &info.mime_type);
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), &info.id)
+        .attr(
+            minidom::rxml::xml_ncname!("type").to_owned(),
+            &info.mime_type,
+        );
 
     if let Some(width) = info.width {
-        info_builder = info_builder.attr("width", width.to_string());
+        info_builder = info_builder.attr(
+            minidom::rxml::xml_ncname!("width").to_owned(),
+            width.to_string(),
+        );
     }
     if let Some(height) = info.height {
-        info_builder = info_builder.attr("height", height.to_string());
+        info_builder = info_builder.attr(
+            minidom::rxml::xml_ncname!("height").to_owned(),
+            height.to_string(),
+        );
     }
     if let Some(bytes) = info.bytes {
-        info_builder = info_builder.attr("bytes", bytes.to_string());
+        info_builder = info_builder.attr(
+            minidom::rxml::xml_ncname!("bytes").to_owned(),
+            bytes.to_string(),
+        );
     }
     if let Some(ref url) = info.url {
-        info_builder = info_builder.attr("url", url);
+        info_builder = info_builder.attr(minidom::rxml::xml_ncname!("url").to_owned(), url);
     }
 
     Element::builder("metadata", NS_AVATAR_METADATA)

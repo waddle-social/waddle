@@ -66,7 +66,7 @@ async fn room_replaces_spoofed_room_stanza_id_and_preserves_origin_id() {
         !echo.contains("spoofed"),
         "spoofed room stanza-id leaked: {echo}"
     );
-    assert!(echo.contains(&format!("by=\"{room}\"")) || echo.contains(&format!("by='{room}'")));
+    assert!(echo.contains(&format!("by='{room}'")) || echo.contains(&format!("by='{room}'")));
 
     let _ = client.close().await;
 }

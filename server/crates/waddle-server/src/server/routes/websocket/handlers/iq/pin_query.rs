@@ -18,21 +18,19 @@ use std::str::FromStr;
 use waddle_xmpp::muc::room_actor::{GetPinList, GetRoomSnapshot};
 use waddle_xmpp::muc::room_registry_actor::GetRoom;
 use waddle_xmpp::xep::xep_waddle_pin::NS_WADDLE_PIN_V0;
-use xmpp_parsers::iq::{Iq, IqType};
+use xmpp_parsers::iq::Iq;
 use xmpp_parsers::minidom::Element;
 
 /// Detects `<iq type='get'><query xmlns='urn:waddle:pin:0'/></iq>`
 /// targeting a MUC room JID.
 pub(super) fn is_pin_query_iq(iq: &Iq, muc_domain: &str) -> bool {
-    let IqType::Get(ref payload) = iq.payload else {
+    let Iq::Get { payload, .. } = iq else {
         return false;
     };
     if payload.name() != "query" || payload.ns() != NS_WADDLE_PIN_V0 {
         return false;
     }
-    iq.to
-        .as_ref()
-        .is_some_and(|to| to.domain().as_str() == muc_domain)
+    iq.to().is_some_and(|to| to.domain().as_str() == muc_domain)
 }
 
 pub(super) async fn handle_pin_query_iq(
@@ -44,15 +42,15 @@ pub(super) async fn handle_pin_query_iq(
 ) -> Vec<String> {
     let Some(sender) = sender_jid else {
         return vec![build_iq_error_xml_typed(
-            &iq.id,
+            iq.id(),
             response_from,
             response_to,
             not_authorized_iq_error("Authentication required."),
         )];
     };
-    let Some(target) = iq.to.as_ref() else {
+    let Some(target) = iq.to() else {
         return vec![build_iq_error_xml_typed(
-            &iq.id,
+            iq.id(),
             response_from,
             response_to,
             bad_request_iq_error("Pin query requires a room JID in 'to'."),
@@ -60,7 +58,7 @@ pub(super) async fn handle_pin_query_iq(
     };
     if target.resource().is_some() {
         return vec![build_iq_error_xml_typed(
-            &iq.id,
+            iq.id(),
             response_from,
             response_to,
             bad_request_iq_error("Pin query 'to' must be a bare room JID."),
@@ -80,7 +78,7 @@ pub(super) async fn handle_pin_query_iq(
         Ok(Some(actor)) => actor,
         Ok(None) => {
             return vec![build_iq_error_xml_typed(
-                &iq.id,
+                iq.id(),
                 response_from,
                 response_to,
                 item_not_found_iq_error("Room not found."),
@@ -93,7 +91,7 @@ pub(super) async fn handle_pin_query_iq(
                 "Pin query: room registry lookup failed"
             );
             return vec![build_iq_error_xml_typed(
-                &iq.id,
+                iq.id(),
                 response_from,
                 response_to,
                 internal_server_error_iq_error("Internal server error."),
@@ -121,7 +119,7 @@ pub(super) async fn handle_pin_query_iq(
                 "Pin query: GetRoomSnapshot failed"
             );
             return vec![build_iq_error_xml_typed(
-                &iq.id,
+                iq.id(),
                 response_from,
                 response_to,
                 internal_server_error_iq_error("Internal server error."),
@@ -135,7 +133,7 @@ pub(super) async fn handle_pin_query_iq(
         .any(|occ| occ.full_jid.to_bare() == sender_bare);
     if !is_occupant {
         return vec![build_iq_error_xml_typed(
-            &iq.id,
+            iq.id(),
             response_from,
             response_to,
             forbidden_iq_error("Pin list is visible only to current room occupants."),
@@ -151,7 +149,7 @@ pub(super) async fn handle_pin_query_iq(
                 "Pin query: GetPinList ask failed"
             );
             return vec![build_iq_error_xml_typed(
-                &iq.id,
+                iq.id(),
                 response_from,
                 response_to,
                 internal_server_error_iq_error("Internal server error."),
@@ -162,16 +160,32 @@ pub(super) async fn handle_pin_query_iq(
     let mut query = Element::builder("query", NS_WADDLE_PIN_V0).build();
     for entry in entries {
         let mut pin_elem = Element::builder("pin", NS_WADDLE_PIN_V0)
-            .attr("id", entry.target_stanza_id.id.as_str())
-            .attr("by", entry.pinner_jid.to_string().as_str())
-            .attr("at", entry.pinned_at.to_rfc3339().as_str())
+            .attr(
+                minidom::rxml::xml_ncname!("id").to_owned(),
+                entry.target_stanza_id.id.as_str(),
+            )
+            .attr(
+                minidom::rxml::xml_ncname!("by").to_owned(),
+                entry.pinner_jid.to_string().as_str(),
+            )
+            .attr(
+                minidom::rxml::xml_ncname!("at").to_owned(),
+                entry.pinned_at.to_rfc3339().as_str(),
+            )
             .build();
         let mut preview = Element::builder("preview", NS_WADDLE_PIN_V0).build();
         let mut author = Element::builder("author", NS_WADDLE_PIN_V0)
-            .attr("jid", entry.preview.author_jid.to_string().as_str())
+            .attr(
+                minidom::rxml::xml_ncname!("jid").to_owned(),
+                entry.preview.author_jid.to_string().as_str(),
+            )
             .build();
         if let Some(ref nick) = entry.preview.author_nick {
-            author.set_attr("nick", nick);
+            author.set_attr(
+                minidom::rxml::Namespace::NONE,
+                minidom::rxml::xml_ncname!("nick").to_owned(),
+                nick,
+            );
         }
         preview.append_child(author);
         let mut text = Element::builder("text", NS_WADDLE_PIN_V0).build();
@@ -184,11 +198,11 @@ pub(super) async fn handle_pin_query_iq(
         query.append_child(pin_elem);
     }
 
-    let response = Iq {
+    let response = Iq::Result {
         from: response_from.and_then(|s| jid::Jid::from_str(s).ok()),
         to: response_to.and_then(|s| jid::Jid::from_str(s).ok()),
-        id: iq.id.clone(),
-        payload: IqType::Result(Some(query)),
+        id: iq.id().to_string(),
+        payload: Some(query),
     };
     vec![iq_to_xml(response)]
 }
@@ -198,11 +212,11 @@ mod tests {
     use super::*;
 
     fn iq_get_with_payload(payload: Element, to: Option<&str>) -> Iq {
-        Iq {
+        Iq::Get {
             from: None,
             to: to.and_then(|s| jid::Jid::from_str(s).ok()),
             id: "test-iq".into(),
-            payload: IqType::Get(payload),
+            payload,
         }
     }
 
@@ -230,11 +244,11 @@ mod tests {
     #[test]
     fn is_pin_query_iq_rejects_set() {
         let payload = Element::builder("query", NS_WADDLE_PIN_V0).build();
-        let iq = Iq {
+        let iq = Iq::Set {
             from: None,
             to: Some(jid::Jid::from_str("room@conf.example").expect("valid jid")),
             id: "test-iq".into(),
-            payload: IqType::Set(payload),
+            payload,
         };
         assert!(!is_pin_query_iq(&iq, "conf.example"));
     }

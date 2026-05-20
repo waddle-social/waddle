@@ -28,7 +28,7 @@ use waddle_xmpp::protocol::session_state::Blocklist;
 use waddle_xmpp::xep::xep0334::{add_hint, Hint};
 use waddle_xmpp::xep::NS_DELAY;
 use waddle_xmpp_core::xep0359::{build_stanza_id_element, NS_SID};
-use xmpp_parsers::message::{Body, Message, MessageType};
+use xmpp_parsers::message::{Message, MessageType};
 
 // -----------------------------------------------------------------------------
 // Helpers
@@ -45,7 +45,8 @@ fn dm(from: &str, to: &str, kind: MessageType, body: Option<&str>) -> Message {
     m.from = Some(from.parse::<Jid>().expect("jid"));
     m.type_ = kind;
     if let Some(b) = body {
-        m.bodies.insert(String::new(), Body(b.to_string()));
+        m.bodies
+            .insert(xmpp_parsers::message::Lang::new(), b.to_string());
     }
     m
 }
@@ -235,7 +236,7 @@ fn fixed_receipt() -> chrono::DateTime<chrono::Utc> {
 
 fn transient_row(recipient: &str, body: &str) -> PendingRow {
     let mut m = dm("bob@elsewhere/x", recipient, MessageType::Chat, Some(body));
-    m.id = Some("origin-id-1".to_string());
+    m.id = Some(xmpp_parsers::message::Id("origin-id-1".to_string()));
     PendingRow {
         id: PendingRowId::fresh(),
         recipient: bare(recipient),

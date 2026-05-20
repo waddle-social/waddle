@@ -80,7 +80,7 @@ fn xep0444_feature_constructor_pins_namespace_string() {
 #[test]
 fn xep0444_classifier_accepts_spec_shape_only() {
     let canonical = Element::builder("reactions", NS_REACTIONS)
-        .attr("id", "msg-1")
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), "msg-1")
         .build();
     assert!(is_reactions_element(&canonical));
 
@@ -243,7 +243,7 @@ fn xep0444_extract_rejects_payload_with_empty_id() {
     let mut msg = Message::new(None::<jid::Jid>);
     msg.payloads.push(
         Element::builder("reactions", NS_REACTIONS)
-            .attr("id", "")
+            .attr(minidom::rxml::xml_ncname!("id").to_owned(), "")
             .append(build_reaction_element("👍"))
             .build(),
     );
@@ -273,7 +273,7 @@ fn xep0444_extract_ignores_reaction_children_in_wrong_namespace() {
     let mut msg = Message::new(None::<jid::Jid>);
     msg.payloads.push(
         Element::builder("reactions", NS_REACTIONS)
-            .attr("id", "t-1")
+            .attr(minidom::rxml::xml_ncname!("id").to_owned(), "t-1")
             .append(
                 Element::builder("reaction", "attacker:ns")
                     .append("☠️")

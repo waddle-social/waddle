@@ -90,8 +90,12 @@ where
                     }
                 }
             }
-            let sent =
-                send_ws_message(sender, Message::Text(xml), "Failed to send outbound stanza").await;
+            let sent = send_ws_message(
+                sender,
+                Message::Text(xml.into()),
+                "Failed to send outbound stanza",
+            )
+            .await;
             // SM cadence: when `record_outbound` flagged the threshold,
             // follow the just-written stanza with an `<r/>` so the
             // client knows to send `<a h='N'/>`. The wasm client never
@@ -101,7 +105,7 @@ where
                 && request_ack_after
                 && !send_ws_message(
                     sender,
-                    Message::Text(SmRequest::to_xml()),
+                    Message::Text(SmRequest::to_xml().into()),
                     "Failed to send SM <r/> request",
                 )
                 .await
@@ -138,7 +142,7 @@ where
                 }
                 if !send_ws_message(
                     sender,
-                    Message::Text(xml),
+                    Message::Text(xml.into()),
                     "Failed to send recipient-pass frame",
                 )
                 .await
@@ -154,7 +158,7 @@ where
             if request_ack_after
                 && !send_ws_message(
                     sender,
-                    Message::Text(SmRequest::to_xml()),
+                    Message::Text(SmRequest::to_xml().into()),
                     "Failed to send SM <r/> request",
                 )
                 .await

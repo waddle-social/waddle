@@ -203,14 +203,16 @@ pub fn extract_origin_id_str(msg: &Message) -> Option<String> {
 /// Build a `<stanza-id xmlns='urn:xmpp:sid:0' id='...' by='...'/>` element.
 pub fn build_stanza_id_element(id: &str, by: &jid::Jid) -> Element {
     Element::builder("stanza-id", NS_SID)
-        .attr("id", id)
-        .attr("by", by.to_string())
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), id)
+        .attr(minidom::rxml::xml_ncname!("by").to_owned(), by.to_string())
         .build()
 }
 
 /// Build an `<origin-id xmlns='urn:xmpp:sid:0' id='...'/>` element.
 pub fn build_origin_id_element(id: &str) -> Element {
-    Element::builder("origin-id", NS_SID).attr("id", id).build()
+    Element::builder("origin-id", NS_SID)
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), id)
+        .build()
 }
 
 // ── Mutation ─────────────────────────────────────────────────────────

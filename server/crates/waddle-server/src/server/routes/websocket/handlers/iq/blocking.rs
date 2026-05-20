@@ -11,7 +11,7 @@ pub(super) async fn handle_blocking_iq(
 ) -> Vec<String> {
     let Some(sender_jid) = sender_jid else {
         return vec![build_iq_error_xml_typed(
-            &iq.id,
+            iq.id(),
             response_from,
             response_to,
             not_authorized_iq_error("Authentication required."),
@@ -23,7 +23,7 @@ pub(super) async fn handle_blocking_iq(
         Err(error) => {
             warn!(error = %error, "Failed to access database for blocking IQ");
             return vec![build_iq_error_xml_typed(
-                &iq.id,
+                iq.id(),
                 response_from,
                 response_to,
                 internal_server_error_iq_error("Internal server error."),
@@ -36,7 +36,7 @@ pub(super) async fn handle_blocking_iq(
         Err(error) => {
             warn!(error = %error, "Invalid blocking IQ");
             return vec![build_iq_error_xml_typed(
-                &iq.id,
+                iq.id(),
                 response_from,
                 response_to,
                 bad_request_iq_error("Malformed IQ payload."),
@@ -53,7 +53,7 @@ pub(super) async fn handle_blocking_iq(
                 Err(error) => {
                     warn!(jid = %user_bare, error = %error, "Failed to load blocklist");
                     vec![build_iq_error_xml_typed(
-                        &iq.id,
+                        iq.id(),
                         response_from,
                         response_to,
                         internal_server_error_iq_error("Internal server error."),
@@ -65,7 +65,7 @@ pub(super) async fn handle_blocking_iq(
             if let Err(error) = storage.add_blocks(&user_bare, &jids).await {
                 warn!(jid = %user_bare, error = %error, "Failed to add blocks");
                 return vec![build_iq_error_xml_typed(
-                    &iq.id,
+                    iq.id(),
                     response_from,
                     response_to,
                     internal_server_error_iq_error("Internal server error."),
@@ -84,7 +84,7 @@ pub(super) async fn handle_blocking_iq(
                     Err(error) => {
                         warn!(jid = %user_bare, error = %error, "Failed to load blocklist before unblock-all");
                         return vec![build_iq_error_xml_typed(
-                            &iq.id,
+                            iq.id(),
                             response_from,
                             response_to,
                             internal_server_error_iq_error("Internal server error."),
@@ -94,7 +94,7 @@ pub(super) async fn handle_blocking_iq(
                 if let Err(error) = storage.remove_all_blocks(&user_bare).await {
                     warn!(jid = %user_bare, error = %error, "Failed to remove all blocks");
                     return vec![build_iq_error_xml_typed(
-                        &iq.id,
+                        iq.id(),
                         response_from,
                         response_to,
                         internal_server_error_iq_error("Internal server error."),
@@ -105,7 +105,7 @@ pub(super) async fn handle_blocking_iq(
                 if let Err(error) = storage.remove_blocks(&user_bare, &jids).await {
                     warn!(jid = %user_bare, error = %error, "Failed to remove blocks");
                     return vec![build_iq_error_xml_typed(
-                        &iq.id,
+                        iq.id(),
                         response_from,
                         response_to,
                         internal_server_error_iq_error("Internal server error."),
@@ -220,7 +220,7 @@ async fn send_blocking_pushes(
             .deps
             .protocol
             .connection_registry
-            .send_to(&resource_jid, Stanza::Iq(push))
+            .send_to(&resource_jid, Stanza::Iq(Box::new(push)))
             .await;
     }
 }

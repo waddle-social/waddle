@@ -17,7 +17,7 @@ base64 = { workspace = true }
 chrono = { workspace = true }
 uuid = { workspace = true }
 futures = { workspace = true, optional = true }
-getrandom = { version = "0.2", features = ["js"], optional = true }
+getrandom = { version = "0.4", features = ["wasm_js"], optional = true }
 jid = { workspace = true }
 js-sys = { version = "0.3", optional = true }
 minidom = { workspace = true }

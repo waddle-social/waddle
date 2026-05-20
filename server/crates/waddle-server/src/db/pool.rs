@@ -4,7 +4,7 @@
 
 use super::actor::{DbActor, DbHealthCheck};
 use super::{Database, DatabaseConfig, DatabaseError};
-use kameo::actor::ActorRef;
+use kameo::actor::{ActorRef, Spawn};
 use tracing::{info, instrument};
 
 /// Configuration for the database pool.
@@ -26,7 +26,7 @@ impl DatabasePool {
         info!(driver = ?config.driver, "Initializing database pool");
 
         let global_db = Database::from_config("global", &config).await?;
-        let global_actor = kameo::spawn(DbActor::new(global_db.clone()));
+        let global_actor = DbActor::spawn(DbActor::new(global_db.clone()));
 
         Ok(Self {
             global_actor,

@@ -25,7 +25,10 @@ async fn handle_xmpp_frame_auth_dispatches_via_typed_ingress() {
     let payload = BASE64_STANDARD.encode(format!("n,,\x01auth=Bearer {}\x01\x01", session.id));
     let frame = element_to_xml(
         Element::builder("auth", waddle_xmpp::ns::SASL)
-            .attr("mechanism", "OAUTHBEARER")
+            .attr(
+                minidom::rxml::xml_ncname!("mechanism").to_owned(),
+                "OAUTHBEARER",
+            )
             .append(payload)
             .build(),
     );
@@ -206,7 +209,7 @@ async fn websocket_rejects_plain_auth() {
     let state = create_test_websocket_state().await;
     let frame = element_to_xml(
         Element::builder("auth", waddle_xmpp::ns::SASL)
-            .attr("mechanism", "PLAIN")
+            .attr(minidom::rxml::xml_ncname!("mechanism").to_owned(), "PLAIN")
             .append(BASE64_STANDARD.encode("\0alice\0session-token"))
             .build(),
     );
@@ -227,7 +230,10 @@ async fn websocket_oauthbearer_authenticates_session_token() {
     let payload = BASE64_STANDARD.encode(format!("n,,\x01auth=Bearer {}\x01\x01", session.id));
     let frame = element_to_xml(
         Element::builder("auth", waddle_xmpp::ns::SASL)
-            .attr("mechanism", "OAUTHBEARER")
+            .attr(
+                minidom::rxml::xml_ncname!("mechanism").to_owned(),
+                "OAUTHBEARER",
+            )
             .append(payload)
             .build(),
     );
@@ -261,7 +267,10 @@ async fn websocket_rejects_reauthentication_after_successful_sasl() {
     let payload = BASE64_STANDARD.encode(format!("n,,\x01auth=Bearer {}\x01\x01", session.id));
     let frame = element_to_xml(
         Element::builder("auth", waddle_xmpp::ns::SASL)
-            .attr("mechanism", "OAUTHBEARER")
+            .attr(
+                minidom::rxml::xml_ncname!("mechanism").to_owned(),
+                "OAUTHBEARER",
+            )
             .append(payload)
             .build(),
     );
@@ -298,7 +307,10 @@ async fn websocket_failed_scram_response_resets_phase_to_unauthenticated() {
     let client_first = BASE64_STANDARD.encode("n,,n=alice,r=fyko+d2lbbFgONRv9qkxdawL");
     let auth_frame = element_to_xml(
         Element::builder("auth", waddle_xmpp::ns::SASL)
-            .attr("mechanism", "SCRAM-SHA-256")
+            .attr(
+                minidom::rxml::xml_ncname!("mechanism").to_owned(),
+                "SCRAM-SHA-256",
+            )
             .append(client_first)
             .build(),
     );
@@ -332,7 +344,10 @@ async fn websocket_malformed_scram_response_resets_phase_and_allows_retry() {
     let client_first = BASE64_STANDARD.encode("n,,n=alice,r=fyko+d2lbbFgONRv9qkxdawL");
     let auth_frame = element_to_xml(
         Element::builder("auth", waddle_xmpp::ns::SASL)
-            .attr("mechanism", "SCRAM-SHA-256")
+            .attr(
+                minidom::rxml::xml_ncname!("mechanism").to_owned(),
+                "SCRAM-SHA-256",
+            )
             .append(client_first)
             .build(),
     );
@@ -364,7 +379,10 @@ async fn websocket_failed_reauth_during_scram_resets_phase_and_allows_retry() {
     let client_first = BASE64_STANDARD.encode("n,,n=alice,r=fyko+d2lbbFgONRv9qkxdawL");
     let auth_frame = element_to_xml(
         Element::builder("auth", waddle_xmpp::ns::SASL)
-            .attr("mechanism", "SCRAM-SHA-256")
+            .attr(
+                minidom::rxml::xml_ncname!("mechanism").to_owned(),
+                "SCRAM-SHA-256",
+            )
             .append(client_first)
             .build(),
     );
@@ -392,14 +410,17 @@ async fn websocket_resource_bind_returns_client_iq() {
     let payload = BASE64_STANDARD.encode(format!("n,,\x01auth=Bearer {}\x01\x01", session.id));
     let auth_frame = element_to_xml(
         Element::builder("auth", waddle_xmpp::ns::SASL)
-            .attr("mechanism", "OAUTHBEARER")
+            .attr(
+                minidom::rxml::xml_ncname!("mechanism").to_owned(),
+                "OAUTHBEARER",
+            )
             .append(payload)
             .build(),
     );
     let bind_frame = element_to_xml(
         Element::builder("iq", waddle_xmpp::ns::JABBER_CLIENT)
-            .attr("id", "bind-1")
-            .attr("type", "set")
+            .attr(minidom::rxml::xml_ncname!("id").to_owned(), "bind-1")
+            .attr(minidom::rxml::xml_ncname!("type").to_owned(), "set")
             .append(
                 Element::builder("bind", waddle_xmpp::ns::BIND)
                     .append(
@@ -465,14 +486,17 @@ async fn websocket_resource_bind_without_resource_uses_unique_server_resource() 
     let payload = BASE64_STANDARD.encode(format!("n,,\x01auth=Bearer {}\x01\x01", session.id));
     let auth_frame = element_to_xml(
         Element::builder("auth", waddle_xmpp::ns::SASL)
-            .attr("mechanism", "OAUTHBEARER")
+            .attr(
+                minidom::rxml::xml_ncname!("mechanism").to_owned(),
+                "OAUTHBEARER",
+            )
             .append(payload)
             .build(),
     );
     let bind_frame = element_to_xml(
         Element::builder("iq", waddle_xmpp::ns::JABBER_CLIENT)
-            .attr("id", "bind-2")
-            .attr("type", "set")
+            .attr(minidom::rxml::xml_ncname!("id").to_owned(), "bind-2")
+            .attr(minidom::rxml::xml_ncname!("type").to_owned(), "set")
             .append(Element::builder("bind", waddle_xmpp::ns::BIND).build())
             .build(),
     );
@@ -522,14 +546,17 @@ async fn websocket_rejects_second_resource_bind_after_ready() {
     let payload = BASE64_STANDARD.encode(format!("n,,\x01auth=Bearer {}\x01\x01", session.id));
     let auth_frame = element_to_xml(
         Element::builder("auth", waddle_xmpp::ns::SASL)
-            .attr("mechanism", "OAUTHBEARER")
+            .attr(
+                minidom::rxml::xml_ncname!("mechanism").to_owned(),
+                "OAUTHBEARER",
+            )
             .append(payload)
             .build(),
     );
     let bind_one = element_to_xml(
         Element::builder("iq", waddle_xmpp::ns::JABBER_CLIENT)
-            .attr("id", "bind-1")
-            .attr("type", "set")
+            .attr(minidom::rxml::xml_ncname!("id").to_owned(), "bind-1")
+            .attr(minidom::rxml::xml_ncname!("type").to_owned(), "set")
             .append(
                 Element::builder("bind", waddle_xmpp::ns::BIND)
                     .append(
@@ -543,8 +570,8 @@ async fn websocket_rejects_second_resource_bind_after_ready() {
     );
     let bind_two = element_to_xml(
         Element::builder("iq", waddle_xmpp::ns::JABBER_CLIENT)
-            .attr("id", "bind-2")
-            .attr("type", "set")
+            .attr(minidom::rxml::xml_ncname!("id").to_owned(), "bind-2")
+            .attr(minidom::rxml::xml_ncname!("type").to_owned(), "set")
             .append(
                 Element::builder("bind", waddle_xmpp::ns::BIND)
                     .append(
@@ -587,7 +614,7 @@ async fn handle_xmpp_frame_drops_oversized_input() {
     let state = create_test_websocket_state().await;
     let mut conn = WsConnState::new();
     let huge = format!(
-        "<iq id=\"big\">{}</iq>",
+        "<iq id='big'>{}</iq>",
         "a".repeat(waddle_xmpp::protocol::frame::MAX_FRAME_SIZE)
     );
     let responses = handle_xmpp_frame(&huge, "example.com", state.as_ref(), &mut conn).await;
@@ -599,7 +626,7 @@ async fn handle_xmpp_frame_drops_whitespace_padded_oversized_input() {
     let state = create_test_websocket_state().await;
     let mut conn = WsConnState::new();
     let huge = format!(
-        "{}<iq id=\"big\"/>",
+        "{}<iq id='big'/>",
         " ".repeat(waddle_xmpp::protocol::frame::MAX_FRAME_SIZE)
     );
     let responses = handle_xmpp_frame(&huge, "example.com", state.as_ref(), &mut conn).await;
@@ -620,8 +647,8 @@ async fn handle_xmpp_frame_invalid_iq_returns_feature_not_implemented() {
     .await;
 
     assert_eq!(responses.len(), 1, "expected one response: {responses:?}");
-    assert!(responses[0].contains("type=\"error\""));
-    assert!(responses[0].contains("id=\"bad-iq\""));
+    assert!(responses[0].contains("type='error'"));
+    assert!(responses[0].contains("id='bad-iq'"));
     assert!(responses[0].contains("feature-not-implemented"));
 }
 
@@ -655,8 +682,8 @@ async fn handle_xmpp_frame_malformed_xml_iq_request_preserves_legacy_error() {
     .await;
 
     assert_eq!(responses.len(), 1, "expected one response: {responses:?}");
-    assert!(responses[0].contains("type=\"error\""));
-    assert!(responses[0].contains("id=\"broken-iq\""));
+    assert!(responses[0].contains("type='error'"));
+    assert!(responses[0].contains("id='broken-iq'"));
     assert!(responses[0].contains("feature-not-implemented"));
 }
 
@@ -674,8 +701,8 @@ async fn handle_xmpp_frame_malformed_iq_ignores_type_suffix_attributes() {
     .await;
 
     assert_eq!(responses.len(), 1, "expected one response: {responses:?}");
-    assert!(responses[0].contains("type=\"error\""));
-    assert!(responses[0].contains("id=\"req-1\""));
+    assert!(responses[0].contains("type='error'"));
+    assert!(responses[0].contains("id='req-1'"));
     assert!(responses[0].contains("feature-not-implemented"));
 }
 
@@ -693,8 +720,8 @@ async fn handle_xmpp_frame_malformed_iq_recovers_attrs_with_spaces_and_gt() {
     .await;
 
     assert_eq!(responses.len(), 1, "expected one response: {responses:?}");
-    assert!(responses[0].contains("type=\"error\""));
-    assert!(responses[0].contains("id=\"req-2\""));
+    assert!(responses[0].contains("type='error'"));
+    assert!(responses[0].contains("id='req-2'"));
     assert!(responses[0].contains("feature-not-implemented"));
 }
 
@@ -712,8 +739,8 @@ async fn handle_xmpp_frame_malformed_iq_skips_unquoted_attr_and_keeps_scanning()
     .await;
 
     assert_eq!(responses.len(), 1, "expected one response: {responses:?}");
-    assert!(responses[0].contains("type=\"error\""));
-    assert!(responses[0].contains("id=\"req-3\""));
+    assert!(responses[0].contains("type='error'"));
+    assert!(responses[0].contains("id='req-3'"));
     assert!(responses[0].contains("feature-not-implemented"));
 }
 
@@ -731,8 +758,8 @@ async fn handle_xmpp_frame_malformed_iq_skips_unquoted_attr_with_slashes() {
     .await;
 
     assert_eq!(responses.len(), 1, "expected one response: {responses:?}");
-    assert!(responses[0].contains("type=\"error\""));
-    assert!(responses[0].contains("id=\"req-4\""));
+    assert!(responses[0].contains("type='error'"));
+    assert!(responses[0].contains("id='req-4'"));
     assert!(responses[0].contains("feature-not-implemented"));
 }
 
@@ -750,8 +777,8 @@ async fn handle_xmpp_frame_malformed_iq_keeps_id_after_empty_attr_value() {
     .await;
 
     assert_eq!(responses.len(), 1, "expected one response: {responses:?}");
-    assert!(responses[0].contains("type=\"error\""));
-    assert!(responses[0].contains("id=\"req-5\""));
+    assert!(responses[0].contains("type='error'"));
+    assert!(responses[0].contains("id='req-5'"));
     assert!(responses[0].contains("feature-not-implemented"));
 }
 
@@ -769,8 +796,8 @@ async fn handle_xmpp_frame_malformed_iq_recovers_unquoted_type_value() {
     .await;
 
     assert_eq!(responses.len(), 1, "expected one response: {responses:?}");
-    assert!(responses[0].contains("type=\"error\""));
-    assert!(responses[0].contains("id=\"req-6\""));
+    assert!(responses[0].contains("type='error'"));
+    assert!(responses[0].contains("id='req-6'"));
     assert!(responses[0].contains("feature-not-implemented"));
 }
 
@@ -820,8 +847,8 @@ async fn handle_xmpp_frame_malformed_iq_skips_url_like_attr_with_equals() {
     .await;
 
     assert_eq!(responses.len(), 1, "expected one response: {responses:?}");
-    assert!(responses[0].contains("type=\"error\""));
-    assert!(responses[0].contains("id=\"req-7\""));
+    assert!(responses[0].contains("type='error'"));
+    assert!(responses[0].contains("id='req-7'"));
     assert!(responses[0].contains("feature-not-implemented"));
 }
 
@@ -839,8 +866,8 @@ async fn handle_xmpp_frame_malformed_iq_does_not_shadow_real_type_attr() {
     .await;
 
     assert_eq!(responses.len(), 1, "expected one response: {responses:?}");
-    assert!(responses[0].contains("type=\"error\""));
-    assert!(responses[0].contains("id=\"req-8\""));
+    assert!(responses[0].contains("type='error'"));
+    assert!(responses[0].contains("id='req-8'"));
     assert!(responses[0].contains("feature-not-implemented"));
 }
 
@@ -858,8 +885,8 @@ async fn handle_xmpp_frame_malformed_iq_ignores_embedded_quoted_type_in_broken_v
     .await;
 
     assert_eq!(responses.len(), 1, "expected one response: {responses:?}");
-    assert!(responses[0].contains("type=\"error\""));
-    assert!(responses[0].contains("id=\"req-9\""));
+    assert!(responses[0].contains("type='error'"));
+    assert!(responses[0].contains("id='req-9'"));
     assert!(responses[0].contains("feature-not-implemented"));
 }
 
@@ -877,8 +904,8 @@ async fn handle_xmpp_frame_malformed_iq_prefers_later_quoted_type_attr() {
     .await;
 
     assert_eq!(responses.len(), 1, "expected one response: {responses:?}");
-    assert!(responses[0].contains("type=\"error\""));
-    assert!(responses[0].contains("id=\"req-10\""));
+    assert!(responses[0].contains("type='error'"));
+    assert!(responses[0].contains("id='req-10'"));
     assert!(responses[0].contains("feature-not-implemented"));
 }
 
@@ -896,8 +923,8 @@ async fn handle_xmpp_frame_malformed_iq_prefers_later_unquoted_type_attr() {
     .await;
 
     assert_eq!(responses.len(), 1, "expected one response: {responses:?}");
-    assert!(responses[0].contains("type=\"error\""));
-    assert!(responses[0].contains("id=\"req-10b\""));
+    assert!(responses[0].contains("type='error'"));
+    assert!(responses[0].contains("id='req-10b'"));
     assert!(responses[0].contains("feature-not-implemented"));
 }
 
@@ -915,8 +942,8 @@ async fn handle_xmpp_frame_malformed_iq_keeps_type_when_later_attr_is_truncated(
     .await;
 
     assert_eq!(responses.len(), 1, "expected one response: {responses:?}");
-    assert!(responses[0].contains("type=\"error\""));
-    assert!(responses[0].contains("id=\"req-11\""));
+    assert!(responses[0].contains("type='error'"));
+    assert!(responses[0].contains("id='req-11'"));
     assert!(responses[0].contains("feature-not-implemented"));
 }
 
@@ -934,8 +961,8 @@ async fn handle_xmpp_frame_malformed_iq_keeps_unquoted_type_when_later_quote_is_
     .await;
 
     assert_eq!(responses.len(), 1, "expected one response: {responses:?}");
-    assert!(responses[0].contains("type=\"error\""));
-    assert!(responses[0].contains("id=\"req-12\""));
+    assert!(responses[0].contains("type='error'"));
+    assert!(responses[0].contains("id='req-12'"));
     assert!(responses[0].contains("feature-not-implemented"));
 }
 
@@ -953,8 +980,8 @@ async fn handle_xmpp_frame_malformed_iq_unescapes_recovered_id() {
     .await;
 
     assert_eq!(responses.len(), 1, "expected one response: {responses:?}");
-    assert!(responses[0].contains(r#"id="a&amp;b""#));
-    assert!(!responses[0].contains(r#"id="a&amp;amp;b""#));
+    assert!(responses[0].contains(r#"id='a&amp;b'"#));
+    assert!(!responses[0].contains(r#"id='a&amp;amp;b'"#));
     assert!(responses[0].contains("feature-not-implemented"));
 }
 
@@ -972,7 +999,7 @@ async fn handle_xmpp_frame_malformed_iq_recovers_later_unquoted_type_attr() {
     .await;
 
     assert_eq!(responses.len(), 1, "expected one response: {responses:?}");
-    assert!(responses[0].contains(r#"id="req-13""#));
+    assert!(responses[0].contains(r#"id='req-13'"#));
     assert!(responses[0].contains("feature-not-implemented"));
 }
 
@@ -990,7 +1017,7 @@ async fn handle_xmpp_frame_malformed_iq_recovers_later_spaced_quoted_type_attr()
     .await;
 
     assert_eq!(responses.len(), 1, "expected one response: {responses:?}");
-    assert!(responses[0].contains(r#"id="req-13b""#));
+    assert!(responses[0].contains(r#"id='req-13b'"#));
     assert!(responses[0].contains("feature-not-implemented"));
 }
 
@@ -1024,7 +1051,7 @@ async fn handle_xmpp_frame_malformed_iq_does_not_treat_next_type_attr_as_id_valu
     .await;
 
     assert_eq!(responses.len(), 1, "expected one response: {responses:?}");
-    assert!(!responses[0].contains(r#"id="type=&quot;get&quot;""#));
+    assert!(!responses[0].contains(r#"id='type=&quot;get&quot;'"#));
     assert!(responses[0].contains("feature-not-implemented"));
 }
 
@@ -1042,7 +1069,7 @@ async fn handle_xmpp_frame_malformed_iq_keeps_invalid_numeric_entity_escaped() {
     .await;
 
     assert_eq!(responses.len(), 1, "expected one response: {responses:?}");
-    assert!(responses[0].contains(r#"id="&amp;#1;""#));
+    assert!(responses[0].contains(r#"id='&amp;#1;'"#));
     assert!(responses[0].contains("feature-not-implemented"));
 }
 
@@ -1064,6 +1091,9 @@ async fn handle_xmpp_frame_ping_roundtrips_through_sans_io_path() {
     assert_eq!(responses.len(), 1);
     let element = Element::from_str(&responses[0]).expect("valid IQ XML");
     let iq = xmpp_parsers::iq::Iq::try_from(element).expect("parseable IQ");
-    assert_eq!(iq.id, "ping-roundtrip");
-    assert!(matches!(iq.payload, xmpp_parsers::iq::IqType::Result(None)));
+    assert_eq!(iq.id(), "ping-roundtrip");
+    assert!(matches!(
+        iq.split().1,
+        xmpp_parsers::iq::IqPayload::Result(None)
+    ));
 }

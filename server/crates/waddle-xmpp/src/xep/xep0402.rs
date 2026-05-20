@@ -209,11 +209,11 @@ pub fn build_bookmark_element(bookmark: &Bookmark) -> Element {
     let mut builder = Element::builder("conference", NS_BOOKMARKS2);
 
     if let Some(ref name) = bookmark.name {
-        builder = builder.attr("name", name);
+        builder = builder.attr(minidom::rxml::xml_ncname!("name").to_owned(), name);
     }
 
     if bookmark.autojoin {
-        builder = builder.attr("autojoin", "true");
+        builder = builder.attr(minidom::rxml::xml_ncname!("autojoin").to_owned(), "true");
     }
 
     if let Some(ref nick) = bookmark.nick {

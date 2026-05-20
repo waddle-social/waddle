@@ -2,7 +2,7 @@ use super::*;
 
 use crate::muc::admin::AdminItem;
 use crate::xep::xep0421::OccupantIdSecret;
-use kameo::actor::ActorRef;
+use kameo::actor::{ActorRef, Spawn};
 use kameo::error::SendError;
 
 fn test_secret() -> OccupantIdSecret {
@@ -26,13 +26,13 @@ fn test_full_jid(user: &str) -> FullJid {
 }
 
 async fn spawn_room_actor() -> ActorRef<RoomActor> {
-    kameo::spawn(RoomActor::new(test_room(), test_secret()))
+    RoomActor::spawn(RoomActor::new(test_room(), test_secret()))
 }
 
 async fn spawn_room_actor_with_config(mut config: RoomConfig) -> ActorRef<RoomActor> {
     let room_jid: BareJid = "testroom@muc.example.com".parse().expect("valid jid");
     config.name = "Test Room".to_string();
-    kameo::spawn(RoomActor::new(
+    RoomActor::spawn(RoomActor::new(
         MucRoom::new(
             room_jid,
             "waddle-1".to_string(),

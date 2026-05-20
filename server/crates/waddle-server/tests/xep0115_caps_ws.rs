@@ -92,11 +92,11 @@ fn caps_verification_string_with_softwareinfo_form(
     )];
     let features: Vec<Feature> = features.iter().map(|f| Feature::new(f)).collect();
     let form = Element::builder("x", "jabber:x:data")
-        .attr("type", "result")
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "result")
         .append(
             Element::builder("field", "jabber:x:data")
-                .attr("var", "FORM_TYPE")
-                .attr("type", "hidden")
+                .attr(minidom::rxml::xml_ncname!("var").to_owned(), "FORM_TYPE")
+                .attr(minidom::rxml::xml_ncname!("type").to_owned(), "hidden")
                 .append(
                     Element::builder("value", "jabber:x:data")
                         .append(form_type)
@@ -106,7 +106,7 @@ fn caps_verification_string_with_softwareinfo_form(
         )
         .append(
             Element::builder("field", "jabber:x:data")
-                .attr("var", "software")
+                .attr(minidom::rxml::xml_ncname!("var").to_owned(), "software")
                 .append(
                     Element::builder("value", "jabber:x:data")
                         .append(software)
@@ -130,7 +130,7 @@ async fn ping_anchor(client: &mut WsXmppClient, id: &str) {
         .await
         .expect("send ping");
     let _ = client
-        .recv_matching(|frame| frame.contains(&format!(r#"id="{id}""#)) && frame.contains("<iq"))
+        .recv_matching(|frame| frame.contains(&format!(r#"id='{id}'"#)) && frame.contains("<iq"))
         .await
         .expect("ping result");
 }
@@ -167,19 +167,19 @@ async fn caps_unknown_ver_triggers_disco_info_to_full_jid() {
     let disco_query = admin
         .recv_matching(|frame| {
             frame.contains("<iq")
-                && frame.contains(r#"type="get""#)
+                && frame.contains(r#"type='get'"#)
                 && frame.contains(NS_DISCO_INFO)
         })
         .await
         .expect("server sends disco#info IQ to resource on cache miss");
 
-    let expected_node_attr = format!(r#"node="{node}#{ver}""#);
+    let expected_node_attr = format!(r#"node='{node}#{ver}'"#);
     assert!(
         disco_query.contains(&expected_node_attr),
-        "disco#info query MUST carry node=\"<NODE>#<VER>\" per XEP-0115 §6.2: {disco_query}"
+        "disco#info query MUST carry node='<NODE>#<VER>' per XEP-0115 §6.2: {disco_query}"
     );
     assert!(
-        disco_query.contains(&format!(r#"to="{admin_full_jid}""#)),
+        disco_query.contains(&format!(r#"to='{admin_full_jid}'"#)),
         "disco#info query MUST be addressed to the resource that advertised caps: {disco_query}"
     );
 
@@ -220,7 +220,7 @@ async fn caps_verified_reply_populates_cache_and_subsequent_advert_is_hit() {
     let disco_query = admin
         .recv_matching(|frame| {
             frame.contains("<iq")
-                && frame.contains(r#"type="get""#)
+                && frame.contains(r#"type='get'"#)
                 && frame.contains(NS_DISCO_INFO)
         })
         .await
@@ -258,7 +258,7 @@ async fn caps_verified_reply_populates_cache_and_subsequent_advert_is_hit() {
         Duration::from_millis(500),
         bob.recv_matching(|frame| {
             frame.contains("<iq")
-                && frame.contains(r#"type="get""#)
+                && frame.contains(r#"type='get'"#)
                 && frame.contains(NS_DISCO_INFO)
         }),
     )
@@ -308,7 +308,7 @@ async fn caps_mismatched_hash_reply_is_rejected_and_not_cached() {
     let disco_query = admin
         .recv_matching(|frame| {
             frame.contains("<iq")
-                && frame.contains(r#"type="get""#)
+                && frame.contains(r#"type='get'"#)
                 && frame.contains(NS_DISCO_INFO)
         })
         .await
@@ -343,7 +343,7 @@ async fn caps_mismatched_hash_reply_is_rejected_and_not_cached() {
     let _re_query = admin2
         .recv_matching(|frame| {
             frame.contains("<iq")
-                && frame.contains(r#"type="get""#)
+                && frame.contains(r#"type='get'"#)
                 && frame.contains(NS_DISCO_INFO)
         })
         .await
@@ -384,7 +384,7 @@ async fn caps_iq_error_reply_is_not_cached_and_re_resolves() {
     let disco_query = admin
         .recv_matching(|frame| {
             frame.contains("<iq")
-                && frame.contains(r#"type="get""#)
+                && frame.contains(r#"type='get'"#)
                 && frame.contains(NS_DISCO_INFO)
         })
         .await
@@ -412,7 +412,7 @@ async fn caps_iq_error_reply_is_not_cached_and_re_resolves() {
     let _re_query = admin2
         .recv_matching(|frame| {
             frame.contains("<iq")
-                && frame.contains(r#"type="get""#)
+                && frame.contains(r#"type='get'"#)
                 && frame.contains(NS_DISCO_INFO)
         })
         .await
@@ -458,7 +458,7 @@ async fn caps_cache_survives_publisher_disconnect_for_cross_session_reuse() {
     let disco_query = admin
         .recv_matching(|frame| {
             frame.contains("<iq")
-                && frame.contains(r#"type="get""#)
+                && frame.contains(r#"type='get'"#)
                 && frame.contains(NS_DISCO_INFO)
         })
         .await
@@ -495,7 +495,7 @@ async fn caps_cache_survives_publisher_disconnect_for_cross_session_reuse() {
         Duration::from_millis(500),
         admin2.recv_matching(|frame| {
             frame.contains("<iq")
-                && frame.contains(r#"type="get""#)
+                && frame.contains(r#"type='get'"#)
                 && frame.contains(NS_DISCO_INFO)
         }),
     )
@@ -549,7 +549,7 @@ async fn caps_reply_with_xep0128_form_verifies_and_caches() {
     let disco_query = admin
         .recv_matching(|frame| {
             frame.contains("<iq")
-                && frame.contains(r#"type="get""#)
+                && frame.contains(r#"type='get'"#)
                 && frame.contains(NS_DISCO_INFO)
         })
         .await
@@ -588,7 +588,7 @@ async fn caps_reply_with_xep0128_form_verifies_and_caches() {
         Duration::from_millis(50),
         admin2.recv_matching(|frame| {
             frame.contains("<iq")
-                && frame.contains(r#"type="get""#)
+                && frame.contains(r#"type='get'"#)
                 && frame.contains(NS_DISCO_INFO)
         }),
     )
@@ -630,7 +630,7 @@ async fn caps_unsupported_hash_algorithm_skips_resolution() {
         Duration::from_millis(50),
         admin.recv_matching(|frame| {
             frame.contains("<iq")
-                && frame.contains(r#"type="get""#)
+                && frame.contains(r#"type='get'"#)
                 && frame.contains(NS_DISCO_INFO)
         }),
     )
@@ -672,7 +672,7 @@ async fn caps_cache_is_not_poisoned_after_mismatched_reply() {
         .expect("send presence");
     let q = admin
         .recv_matching(|f| {
-            f.contains("<iq") && f.contains(r#"type="get""#) && f.contains(NS_DISCO_INFO)
+            f.contains("<iq") && f.contains(r#"type='get'"#) && f.contains(NS_DISCO_INFO)
         })
         .await
         .expect("disco");
@@ -697,7 +697,7 @@ async fn caps_cache_is_not_poisoned_after_mismatched_reply() {
         .expect("send presence");
     let q2 = admin2
         .recv_matching(|f| {
-            f.contains("<iq") && f.contains(r#"type="get""#) && f.contains(NS_DISCO_INFO)
+            f.contains("<iq") && f.contains(r#"type='get'"#) && f.contains(NS_DISCO_INFO)
         })
         .await
         .expect("re-resolve fired");
@@ -730,7 +730,7 @@ async fn caps_cache_is_not_poisoned_after_mismatched_reply() {
     let timed = tokio::time::timeout(
         Duration::from_millis(50),
         admin3.recv_matching(|f| {
-            f.contains("<iq") && f.contains(r#"type="get""#) && f.contains(NS_DISCO_INFO)
+            f.contains("<iq") && f.contains(r#"type='get'"#) && f.contains(NS_DISCO_INFO)
         }),
     )
     .await;
@@ -794,9 +794,9 @@ async fn caps_multi_resource_independent_tracking() {
     let admin_query = admin
         .recv_matching(|f| {
             f.contains("<iq")
-                && f.contains(r#"type="get""#)
+                && f.contains(r#"type='get'"#)
                 && f.contains(NS_DISCO_INFO)
-                && f.contains(&format!(r#"node="{admin_node}#{admin_ver}""#))
+                && f.contains(&format!(r#"node='{admin_node}#{admin_ver}'"#))
         })
         .await
         .expect("admin disco");
@@ -804,9 +804,9 @@ async fn caps_multi_resource_independent_tracking() {
     let bob_query = bob
         .recv_matching(|f| {
             f.contains("<iq")
-                && f.contains(r#"type="get""#)
+                && f.contains(r#"type='get'"#)
                 && f.contains(NS_DISCO_INFO)
-                && f.contains(&format!(r#"node="{bob_node}#{bob_ver}""#))
+                && f.contains(&format!(r#"node='{bob_node}#{bob_ver}'"#))
         })
         .await
         .expect("bob disco");
@@ -849,7 +849,7 @@ async fn caps_multi_resource_independent_tracking() {
     let admin2_timed = tokio::time::timeout(
         Duration::from_millis(50),
         admin2.recv_matching(|f| {
-            f.contains("<iq") && f.contains(r#"type="get""#) && f.contains(NS_DISCO_INFO)
+            f.contains("<iq") && f.contains(r#"type='get'"#) && f.contains(NS_DISCO_INFO)
         }),
     )
     .await;
@@ -868,7 +868,7 @@ async fn caps_multi_resource_independent_tracking() {
     let bob2_timed = tokio::time::timeout(
         Duration::from_millis(50),
         bob2.recv_matching(|f| {
-            f.contains("<iq") && f.contains(r#"type="get""#) && f.contains(NS_DISCO_INFO)
+            f.contains("<iq") && f.contains(r#"type='get'"#) && f.contains(NS_DISCO_INFO)
         }),
     )
     .await;

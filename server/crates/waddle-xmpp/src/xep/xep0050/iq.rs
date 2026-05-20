@@ -1,5 +1,5 @@
 use minidom::Element;
-use xmpp_parsers::iq::{Iq, IqType};
+use xmpp_parsers::iq::Iq;
 
 use crate::xep::xep0004::{FromElement, IntoElement};
 
@@ -11,14 +11,14 @@ use super::{Command, CommandError, NODE_COMMANDS, NS_COMMANDS};
 
 /// Check if an IQ stanza is an ad-hoc command request (IQ set with command element).
 pub fn is_command_request(iq: &Iq) -> bool {
-    matches!(&iq.payload, IqType::Set(elem) if elem.name() == "command" && elem.ns() == NS_COMMANDS)
+    matches!(iq, Iq::Set { payload, .. } if payload.name() == "command" && payload.ns() == NS_COMMANDS)
 }
 
 /// Parse an ad-hoc command from an IQ set stanza.
 pub fn parse_command_from_iq(iq: &Iq) -> Result<Command, CommandError> {
-    match &iq.payload {
-        IqType::Set(elem) if elem.name() == "command" && elem.ns() == NS_COMMANDS => {
-            Command::from_element(elem)
+    match iq {
+        Iq::Set { payload, .. } if payload.name() == "command" && payload.ns() == NS_COMMANDS => {
+            Command::from_element(payload)
         }
         _ => Err(CommandError::NotACommandIq),
     }
@@ -26,11 +26,11 @@ pub fn parse_command_from_iq(iq: &Iq) -> Result<Command, CommandError> {
 
 /// Build an IQ result containing a command response.
 pub fn build_command_result(original_iq: &Iq, command: &Command) -> Iq {
-    Iq {
-        from: original_iq.to.clone(),
-        to: original_iq.from.clone(),
-        id: original_iq.id.clone(),
-        payload: IqType::Result(Some(command.into_element())),
+    Iq::Result {
+        from: original_iq.to().cloned(),
+        to: original_iq.from().cloned(),
+        id: original_iq.id().to_string(),
+        payload: Some(command.into_element()),
     }
 }
 
@@ -72,11 +72,12 @@ pub fn build_command_error(
         stanza_error.other = Some(Element::builder(cc, NS_COMMANDS).build());
     }
 
-    Iq {
-        from: original_iq.to.clone(),
-        to: original_iq.from.clone(),
-        id: original_iq.id.clone(),
-        payload: IqType::Error(stanza_error),
+    Iq::Error {
+        from: original_iq.to().cloned(),
+        to: original_iq.from().cloned(),
+        id: original_iq.id().to_string(),
+        error: stanza_error,
+        payload: None,
     }
 }
 
@@ -125,22 +126,23 @@ pub fn build_session_expired(original_iq: &Iq) -> Iq {
 pub fn build_command_items(original_iq: &Iq, commands: &[(&str, &str)], responder_jid: &str) -> Iq {
     use crate::disco::items::DISCO_ITEMS_NS;
 
-    let mut query = Element::builder("query", DISCO_ITEMS_NS).attr("node", NODE_COMMANDS);
+    let mut query = Element::builder("query", DISCO_ITEMS_NS)
+        .attr(minidom::rxml::xml_ncname!("node").to_owned(), NODE_COMMANDS);
 
     for (node, name) in commands {
         let item = Element::builder("item", DISCO_ITEMS_NS)
-            .attr("jid", responder_jid)
-            .attr("node", *node)
-            .attr("name", *name)
+            .attr(minidom::rxml::xml_ncname!("jid").to_owned(), responder_jid)
+            .attr(minidom::rxml::xml_ncname!("node").to_owned(), *node)
+            .attr(minidom::rxml::xml_ncname!("name").to_owned(), *name)
             .build();
         query = query.append(item);
     }
 
-    Iq {
-        from: original_iq.to.clone(),
-        to: original_iq.from.clone(),
-        id: original_iq.id.clone(),
-        payload: IqType::Result(Some(query.build())),
+    Iq::Result {
+        from: original_iq.to().cloned(),
+        to: original_iq.from().cloned(),
+        id: original_iq.id().to_string(),
+        payload: Some(query.build()),
     }
 }
 
@@ -148,11 +150,11 @@ pub fn build_command_items(original_iq: &Iq, commands: &[(&str, &str)], responde
 pub fn is_commands_disco_items(iq: &Iq) -> bool {
     use crate::disco::items::DISCO_ITEMS_NS;
 
-    match &iq.payload {
-        IqType::Get(elem) => {
-            elem.name() == "query"
-                && elem.ns() == DISCO_ITEMS_NS
-                && elem.attr("node") == Some(NODE_COMMANDS)
+    match iq {
+        Iq::Get { payload, .. } => {
+            payload.name() == "query"
+                && payload.ns() == DISCO_ITEMS_NS
+                && payload.attr("node") == Some(NODE_COMMANDS)
         }
         _ => false,
     }
@@ -162,11 +164,11 @@ pub fn is_commands_disco_items(iq: &Iq) -> bool {
 pub fn is_commands_disco_info(iq: &Iq) -> bool {
     use crate::disco::info::DISCO_INFO_NS;
 
-    match &iq.payload {
-        IqType::Get(elem) => {
-            elem.name() == "query"
-                && elem.ns() == DISCO_INFO_NS
-                && elem.attr("node") == Some(NODE_COMMANDS)
+    match iq {
+        Iq::Get { payload, .. } => {
+            payload.name() == "query"
+                && payload.ns() == DISCO_INFO_NS
+                && payload.attr("node") == Some(NODE_COMMANDS)
         }
         _ => false,
     }
@@ -176,9 +178,11 @@ pub fn is_commands_disco_info(iq: &Iq) -> bool {
 pub fn is_command_node_disco_info(iq: &Iq, node: &str) -> bool {
     use crate::disco::info::DISCO_INFO_NS;
 
-    match &iq.payload {
-        IqType::Get(elem) => {
-            elem.name() == "query" && elem.ns() == DISCO_INFO_NS && elem.attr("node") == Some(node)
+    match iq {
+        Iq::Get { payload, .. } => {
+            payload.name() == "query"
+                && payload.ns() == DISCO_INFO_NS
+                && payload.attr("node") == Some(node)
         }
         _ => false,
     }

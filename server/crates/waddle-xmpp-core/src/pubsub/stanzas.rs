@@ -2,7 +2,7 @@
 
 use jid::{BareJid, Jid};
 use minidom::Element;
-use xmpp_parsers::iq::{Iq, IqType};
+use xmpp_parsers::iq::Iq;
 use xmpp_parsers::message::Message;
 
 use crate::pubsub::{Affiliation, NodeConfig};
@@ -72,11 +72,14 @@ impl PubSubItem {
         let mut builder = Element::builder("item", ns);
 
         if let Some(ref id) = self.id {
-            builder = builder.attr("id", id);
+            builder = builder.attr(minidom::rxml::xml_ncname!("id").to_owned(), id);
         }
 
         if let Some(ref publisher) = self.publisher {
-            builder = builder.attr("publisher", publisher.to_string());
+            builder = builder.attr(
+                minidom::rxml::xml_ncname!("publisher").to_owned(),
+                publisher.to_string(),
+            );
         }
 
         if let Some(ref payload) = self.payload {
@@ -195,9 +198,10 @@ pub enum PubSubError {
 
 /// Check if an IQ is a PubSub request.
 pub fn is_pubsub_iq(iq: &Iq) -> bool {
-    match &iq.payload {
-        IqType::Get(elem) | IqType::Set(elem) => {
-            elem.name() == "pubsub" && (elem.ns() == NS_PUBSUB || elem.ns() == NS_PUBSUB_OWNER)
+    match iq {
+        Iq::Get { payload, .. } | Iq::Set { payload, .. } => {
+            payload.name() == "pubsub"
+                && (payload.ns() == NS_PUBSUB || payload.ns() == NS_PUBSUB_OWNER)
         }
         _ => false,
     }
@@ -239,14 +243,14 @@ pub fn parse_pubsub_event(message: &Message) -> CoreResult<PubSubEvent> {
 
 /// Parse a PubSub IQ stanza into a structured request.
 pub fn parse_pubsub_iq(iq: &Iq) -> CoreResult<PubSubRequest> {
-    let pubsub_elem = match &iq.payload {
-        IqType::Get(elem) | IqType::Set(elem)
-            if elem.name() == "pubsub"
-                && (elem.ns() == NS_PUBSUB || elem.ns() == NS_PUBSUB_OWNER) =>
+    let pubsub_elem = match iq {
+        Iq::Get { payload, .. } | Iq::Set { payload, .. }
+            if payload.name() == "pubsub"
+                && (payload.ns() == NS_PUBSUB || payload.ns() == NS_PUBSUB_OWNER) =>
         {
-            elem
+            payload
         }
-        IqType::Get(_) | IqType::Set(_) => {
+        Iq::Get { .. } | Iq::Set { .. } => {
             return Err(CoreError::bad_request(Some(
                 "Expected pubsub element".to_string(),
             )));

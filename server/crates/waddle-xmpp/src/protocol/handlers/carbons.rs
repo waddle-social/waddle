@@ -30,9 +30,9 @@ impl IqHandler for CarbonsHandler {
     }
 
     fn handle(&self, iq: &Iq, _ctx: &StanzaContext<'_>) -> Vec<OutboundEvent> {
-        vec![OutboundEvent::SendStanza(Box::new(Stanza::Iq(
+        vec![OutboundEvent::SendStanza(Box::new(Stanza::Iq(Box::new(
             empty_iq_result(iq),
-        )))]
+        ))))]
     }
 }
 
@@ -40,7 +40,7 @@ impl IqHandler for CarbonsHandler {
 mod tests {
     use super::*;
     use minidom::Element;
-    use xmpp_parsers::iq::{Iq, IqType};
+    use xmpp_parsers::iq::Iq;
 
     fn test_jid() -> jid::FullJid {
         "alice@waddle.social/web".parse().expect("valid test JID")
@@ -54,11 +54,11 @@ mod tests {
     #[test]
     fn enable_produces_empty_result() {
         let enable = Element::builder("enable", CARBONS_NS).build();
-        let iq = Iq {
+        let iq = Iq::Set {
             from: Some("alice@waddle.social/web".parse().expect("jid")),
             to: None,
             id: "c1".to_string(),
-            payload: IqType::Set(enable),
+            payload: enable,
         };
         let jid = test_jid();
         let ctx = StanzaContext {
@@ -70,8 +70,8 @@ mod tests {
         match &events[0] {
             OutboundEvent::SendStanza(stanza) => match stanza.as_ref() {
                 Stanza::Iq(reply) => {
-                    assert_eq!(reply.id, "c1");
-                    assert!(matches!(reply.payload, IqType::Result(None)));
+                    assert_eq!(reply.id(), "c1");
+                    assert!(matches!(reply.as_ref(), Iq::Result { payload: None, .. }));
                 }
                 other => panic!("expected Iq, got {other:?}"),
             },

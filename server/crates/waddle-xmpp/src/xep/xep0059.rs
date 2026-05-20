@@ -391,7 +391,10 @@ pub fn build_rsm_response_element(response: &RsmResponse) -> Element {
     if let Some(ref first) = response.first {
         let mut first_builder = Element::builder("first", NS_RSM);
         if let Some(index) = response.first_index {
-            first_builder = first_builder.attr("index", index.to_string());
+            first_builder = first_builder.attr(
+                minidom::rxml::xml_ncname!("index").to_owned(),
+                index.to_string(),
+            );
         }
         first_builder = first_builder.append(first.clone());
         builder = builder.append(first_builder.build());

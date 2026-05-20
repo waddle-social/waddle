@@ -29,7 +29,7 @@ fn rejects_open_frame_with_payload() {
 
 #[test]
 fn rejects_open_frame_with_whitespace_payload() {
-    let xml = "<open xmlns=\"urn:ietf:params:xml:ns:xmpp-framing\">\n</open>";
+    let xml = "<open xmlns='urn:ietf:params:xml:ns:xmpp-framing'>\n</open>";
     assert!(matches!(parse_frame(xml), Err(ParseError::InvalidXml(_))));
 }
 
@@ -47,7 +47,7 @@ fn rejects_close_frame_with_payload() {
 
 #[test]
 fn rejects_close_frame_with_whitespace_payload() {
-    let xml = "<close xmlns=\"urn:ietf:params:xml:ns:xmpp-framing\"> </close>";
+    let xml = "<close xmlns='urn:ietf:params:xml:ns:xmpp-framing'> </close>";
     assert!(matches!(parse_frame(xml), Err(ParseError::InvalidXml(_))));
 }
 
@@ -109,7 +109,7 @@ fn parses_iq_without_xmlns() {
         panic!("expected Stanza, got {frame:?}");
     };
     match *stanza {
-        Stanza::Iq(iq) => assert_eq!(iq.id, "ping-1"),
+        Stanza::Iq(iq) => assert_eq!(iq.id(), "ping-1"),
         other => panic!("expected Iq, got {other:?}"),
     }
 }
@@ -192,7 +192,7 @@ fn parses_presence_stanza() {
 
 #[test]
 fn leading_and_trailing_whitespace_is_trimmed() {
-    let xml = "\n   <close xmlns=\"urn:ietf:params:xml:ns:xmpp-framing\"/>\n  ";
+    let xml = "\n   <close xmlns='urn:ietf:params:xml:ns:xmpp-framing'/>\n  ";
     assert!(matches!(parse_frame(xml), Ok(InboundFrame::Close)));
 }
 
@@ -221,7 +221,7 @@ fn rejects_auth_without_mechanism_attribute() {
 
 #[test]
 fn rejects_malformed_xml() {
-    match parse_frame("<iq type=\"get\" id=\"broken\"") {
+    match parse_frame("<iq type='get' id='broken'") {
         Err(ParseError::InvalidXml(_)) => {}
         other => panic!("expected InvalidXml, got {other:?}"),
     }
@@ -241,7 +241,7 @@ fn rejects_iq_with_garbage_payload() {
 fn peek_root_name_rejects_xml_declaration() {
     // We never expect a `<?xml ?>` header in a WebSocket frame; guard
     // against peek_root_name confusing it for a tag name.
-    assert!(peek_root_name("<?xml version=\"1.0\"?>").is_none());
+    assert!(peek_root_name("<?xml version='1.0'?>").is_none());
 }
 
 #[test]
@@ -308,12 +308,12 @@ fn inject_default_ns_handles_gt_inside_attribute_value() {
 
 #[test]
 fn rejects_oversized_frame() {
-    let huge = format!("<iq id=\"x\">{}</iq>", "a".repeat(MAX_FRAME_SIZE));
+    let huge = format!("<iq id='x'>{}</iq>", "a".repeat(MAX_FRAME_SIZE));
     assert!(matches!(parse_frame(&huge), Err(ParseError::TooLarge)));
 }
 
 #[test]
 fn rejects_oversized_frame_with_whitespace_padding() {
-    let huge = format!("{}<iq id=\"x\"/>", " ".repeat(MAX_FRAME_SIZE));
+    let huge = format!("{}<iq id='x'/>", " ".repeat(MAX_FRAME_SIZE));
     assert!(matches!(parse_frame(&huge), Err(ParseError::TooLarge)));
 }

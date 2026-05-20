@@ -35,12 +35,12 @@ pub fn preview_text(msg: &Message) -> Option<String> {
     msg.bodies
         .get("")
         .or_else(|| msg.bodies.values().next())
-        .map(|body| body.0.clone())
+        .cloned()
         .or_else(|| {
             msg.subjects
                 .get("")
                 .or_else(|| msg.subjects.values().next())
-                .map(|subject| subject.0.clone())
+                .cloned()
         })
         .map(|text| text.trim().to_string())
         .filter(|text| !text.is_empty())
@@ -48,7 +48,8 @@ pub fn preview_text(msg: &Message) -> Option<String> {
 
 pub fn projection_stanza_id(msg: &Message) -> String {
     msg.id
-        .clone()
+        .as_ref()
+        .map(|id| id.0.clone())
         .or_else(|| {
             msg.payloads
                 .iter()
@@ -172,8 +173,11 @@ mod tests {
         let mut msg = Message::new(Some(jid::Jid::from(jid("bob@example.com"))));
         msg.payloads.push(
             minidom::Element::builder("retracted", crate::xep::xep0424::NS_MESSAGE_RETRACT)
-                .attr("id", "retract-1")
-                .attr("stamp", "2024-06-01T09:00:00Z")
+                .attr(minidom::rxml::xml_ncname!("id").to_owned(), "retract-1")
+                .attr(
+                    minidom::rxml::xml_ncname!("stamp").to_owned(),
+                    "2024-06-01T09:00:00Z",
+                )
                 .build(),
         );
 

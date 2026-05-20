@@ -31,8 +31,8 @@ fn spaces_jid() -> jid::BareJid {
 
 fn room_bookmark_item(room_jid: &str) -> PubSubItem {
     let payload = Element::builder("conference", "urn:xmpp:bookmarks:1")
-        .attr("name", "Test Room")
-        .attr("autojoin", "true")
+        .attr(minidom::rxml::xml_ncname!("name").to_owned(), "Test Room")
+        .attr(minidom::rxml::xml_ncname!("autojoin").to_owned(), "true")
         .build();
     PubSubItem {
         id: Some(room_jid.to_string()),

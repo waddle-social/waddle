@@ -65,10 +65,18 @@ fn inbox_query_iq(
 ) -> String {
     let mut inbox = Element::builder("inbox", NS_INBOX).build();
     if let Some(value) = unread_only {
-        inbox.set_attr("unread-only", if value { "true" } else { "false" });
+        inbox.set_attr(
+            minidom::rxml::Namespace::NONE,
+            minidom::rxml::xml_ncname!("unread-only").to_owned(),
+            if value { "true" } else { "false" },
+        );
     }
     if let Some(value) = messages {
-        inbox.set_attr("messages", if value { "true" } else { "false" });
+        inbox.set_attr(
+            minidom::rxml::Namespace::NONE,
+            minidom::rxml::xml_ncname!("messages").to_owned(),
+            if value { "true" } else { "false" },
+        );
     }
     if let Some(max) = rsm_max {
         let mut set = Element::builder("set", NS_RSM).build();
@@ -78,8 +86,8 @@ fn inbox_query_iq(
         inbox.append_child(set);
     }
     let iq = Element::builder("iq", CLIENT_NS)
-        .attr("type", "get")
-        .attr("id", id)
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "get")
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), id)
         .append(inbox)
         .build();
     element_to_xml(iq)
@@ -92,7 +100,7 @@ fn inbox_query_iq(
 /// emitted by parallel mark-read fan-out can't bleed into the
 /// collection.
 async fn collect_inbox_response(client: &mut WsXmppClient, id: &str) -> Vec<String> {
-    let queryid_marker = format!("queryid=\"{id}\"");
+    let queryid_marker = format!("queryid='{id}'");
     let mut frames = Vec::new();
     loop {
         let frame = client

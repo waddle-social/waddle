@@ -147,7 +147,7 @@ mod tests {
     use jid::FullJid;
     use waddle_xmpp_core::xep0201::thread_info_from_message;
     use waddle_xmpp_core::xep0359::{build_stanza_id_element, extract_stanza_ids};
-    use xmpp_parsers::message::{Body, Message, MessageType};
+    use xmpp_parsers::message::{Message, MessageType};
 
     fn jid(s: &str) -> Jid {
         s.parse().expect("valid jid")
@@ -167,7 +167,8 @@ mod tests {
         let mut m = Message::new(Some(Jid::from(room.clone())));
         m.from = Some(Jid::from(sender.clone()));
         m.type_ = MessageType::Groupchat;
-        m.bodies.insert(String::new(), Body(body.to_string()));
+        m.bodies
+            .insert(xmpp_parsers::message::Lang::new(), body.to_string());
         m
     }
 
@@ -242,14 +243,14 @@ mod tests {
         let room = bare("team@conf.example.com");
         let sender = full("alice@example.com/web");
         let mut msg = groupchat(&room, &sender, "new topic");
-        msg.id = Some("client-id".to_string());
+        msg.id = Some(xmpp_parsers::message::Id("client-id".to_string()));
         set_thread_id(&mut msg, "spoofed-thread");
         set_thread_create(&mut msg, &ThreadCreate::new("Topic"));
 
         run(&room, &sender, "alice-nick", &mut msg, "room-stanza-id");
 
         assert_eq!(
-            msg.thread.as_ref().map(|thread| thread.0.as_str()),
+            msg.thread.as_ref().map(|thread| thread.id.as_str()),
             Some("room-stanza-id")
         );
     }
@@ -267,7 +268,7 @@ mod tests {
         run(&room, &sender, "alice-nick", &mut msg, "reply-stanza-id");
 
         assert_eq!(
-            msg.thread.as_ref().map(|thread| thread.0.as_str()),
+            msg.thread.as_ref().map(|thread| thread.id.as_str()),
             Some("topic-root")
         );
     }
@@ -286,7 +287,7 @@ mod tests {
         run(&room, &sender, "alice-nick", &mut msg, "reply-stanza-id");
 
         assert_eq!(
-            msg.thread.as_ref().map(|thread| thread.0.as_str()),
+            msg.thread.as_ref().map(|thread| thread.id.as_str()),
             Some("topic-root")
         );
     }

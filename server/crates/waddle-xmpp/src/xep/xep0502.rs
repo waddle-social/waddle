@@ -176,10 +176,17 @@ pub fn build_activity_notification(activities: &[&RoomActivity]) -> Element {
 
     for ra in activities {
         let mut active = Element::builder("active", NS_MUC_ACTIVITY)
-            .attr("jid", ra.room_jid.as_str())
+            .attr(
+                minidom::rxml::xml_ncname!("jid").to_owned(),
+                ra.room_jid.as_str(),
+            )
             .build();
         if let Some(ts) = ra.last_activity {
-            active.set_attr("last-activity", ts.to_rfc3339());
+            active.set_attr(
+                minidom::rxml::Namespace::NONE,
+                minidom::rxml::xml_ncname!("last-activity").to_owned(),
+                ts.to_rfc3339(),
+            );
         }
         activity.append_child(active);
     }
@@ -192,7 +199,7 @@ pub fn build_subscribe_element(room_jids: &[&str]) -> Element {
     let mut activity = Element::builder("activity", NS_MUC_ACTIVITY).build();
     for jid in room_jids {
         let sub = Element::builder("subscribe", NS_MUC_ACTIVITY)
-            .attr("jid", *jid)
+            .attr(minidom::rxml::xml_ncname!("jid").to_owned(), *jid)
             .build();
         activity.append_child(sub);
     }

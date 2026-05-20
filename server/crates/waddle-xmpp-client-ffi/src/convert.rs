@@ -47,7 +47,7 @@ pub(super) fn dispatch_event(event: ClientEvent, listener: &dyn WaddleEventListe
             });
         }
         ClientEvent::MamResult(archived) => {
-            listener.on_mam_result(archived_to_ffi(archived));
+            listener.on_mam_result(archived_to_ffi(*archived));
         }
         ClientEvent::MessageDelivery(MessageDeliveryEvent::Acked { stanza_id }) => {
             listener.on_message_delivery_acked(stanza_id.to_string());
@@ -276,7 +276,7 @@ fn livekit_join_to_ffi(join: LiveKitJoin) -> WaddleLiveKitJoin {
 
 pub(super) fn jingle_reason_to_ffi(reason: JingleReason) -> WaddleJingleReason {
     match reason {
-        JingleReason::AlternativeSession => WaddleJingleReason::AlternativeSession,
+        JingleReason::AlternativeSession { .. } => WaddleJingleReason::AlternativeSession,
         JingleReason::Busy => WaddleJingleReason::Busy,
         JingleReason::Cancel => WaddleJingleReason::Cancel,
         JingleReason::ConnectivityError => WaddleJingleReason::ConnectivityError,
@@ -298,7 +298,7 @@ pub(super) fn jingle_reason_to_ffi(reason: JingleReason) -> WaddleJingleReason {
 
 pub(super) fn jingle_reason_from_ffi(reason: WaddleJingleReason) -> JingleReason {
     match reason {
-        WaddleJingleReason::AlternativeSession => JingleReason::AlternativeSession,
+        WaddleJingleReason::AlternativeSession => JingleReason::AlternativeSession { sid: None },
         WaddleJingleReason::Busy => JingleReason::Busy,
         WaddleJingleReason::Cancel => JingleReason::Cancel,
         WaddleJingleReason::ConnectivityError => JingleReason::ConnectivityError,

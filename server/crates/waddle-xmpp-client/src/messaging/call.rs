@@ -17,8 +17,6 @@
 //! raw [`minidom::Element`] so the client UI layer doesn't have to
 //! know XML.
 
-use std::str::FromStr;
-
 use jid::{FullJid, Jid};
 use minidom::Element;
 use xmpp_parsers::jingle::{Reason as JingleReason, SessionId};
@@ -257,7 +255,7 @@ fn extract_livekit_join(jingle: &Element) -> Option<LiveKitJoin> {
 fn extract_terminate_reason(jingle: &Element) -> Option<JingleReason> {
     let reason = jingle.children().find(|c| c.name() == "reason")?;
     let condition = reason.children().next()?;
-    JingleReason::from_str(condition.name()).ok()
+    jingle_reason_from_wire_name(condition.name())
 }
 
 /// Canonical XEP-0166 §7.4 wire name for a typed `JingleReason`.
@@ -267,7 +265,7 @@ fn extract_terminate_reason(jingle: &Element) -> Option<JingleReason> {
 /// enum and never needs this).
 pub fn jingle_reason_wire_name(reason: JingleReason) -> &'static str {
     match reason {
-        JingleReason::AlternativeSession => "alternative-session",
+        JingleReason::AlternativeSession { .. } => "alternative-session",
         JingleReason::Busy => "busy",
         JingleReason::Cancel => "cancel",
         JingleReason::ConnectivityError => "connectivity-error",
@@ -285,6 +283,34 @@ pub fn jingle_reason_wire_name(reason: JingleReason) -> &'static str {
         JingleReason::UnsupportedApplications => "unsupported-applications",
         JingleReason::UnsupportedTransports => "unsupported-transports",
     }
+}
+
+/// Parse a XEP-0166 §7.4 wire condition name back into a typed
+/// `JingleReason`. xmpp-parsers 0.22 dropped the `FromStr` impl on
+/// `Reason`, so we own the table here. Unknown names resolve to
+/// `None` per the typed-payloads hard rule (no opaque-string
+/// fallback into typed code).
+pub fn jingle_reason_from_wire_name(name: &str) -> Option<JingleReason> {
+    Some(match name {
+        "alternative-session" => JingleReason::AlternativeSession { sid: None },
+        "busy" => JingleReason::Busy,
+        "cancel" => JingleReason::Cancel,
+        "connectivity-error" => JingleReason::ConnectivityError,
+        "decline" => JingleReason::Decline,
+        "expired" => JingleReason::Expired,
+        "failed-application" => JingleReason::FailedApplication,
+        "failed-transport" => JingleReason::FailedTransport,
+        "general-error" => JingleReason::GeneralError,
+        "gone" => JingleReason::Gone,
+        "incompatible-parameters" => JingleReason::IncompatibleParameters,
+        "media-error" => JingleReason::MediaError,
+        "security-error" => JingleReason::SecurityError,
+        "success" => JingleReason::Success,
+        "timeout" => JingleReason::Timeout,
+        "unsupported-applications" => JingleReason::UnsupportedApplications,
+        "unsupported-transports" => JingleReason::UnsupportedTransports,
+        _ => return None,
+    })
 }
 
 // ---------------------------------------------------------------------
@@ -306,7 +332,8 @@ pub fn jingle_reason_wire_name(reason: JingleReason) -> &'static str {
 /// can show "audio call" vs. "video call" without waiting for the
 /// session-initiate.
 pub fn build_propose(sid: &SessionId, media: CallMedia) -> Element {
-    let mut builder = Element::builder("propose", NS_JINGLE_MESSAGE).attr("id", sid.0.as_str());
+    let mut builder = Element::builder("propose", NS_JINGLE_MESSAGE)
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), sid.0.as_str());
     if media.audio {
         builder = builder.append(rtp_description_element("audio"));
     }
@@ -318,25 +345,25 @@ pub fn build_propose(sid: &SessionId, media: CallMedia) -> Element {
 
 pub fn build_proceed(sid: &SessionId) -> Element {
     Element::builder("proceed", NS_JINGLE_MESSAGE)
-        .attr("id", sid.0.as_str())
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), sid.0.as_str())
         .build()
 }
 
 pub fn build_reject(sid: &SessionId) -> Element {
     Element::builder("reject", NS_JINGLE_MESSAGE)
-        .attr("id", sid.0.as_str())
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), sid.0.as_str())
         .build()
 }
 
 pub fn build_retract(sid: &SessionId) -> Element {
     Element::builder("retract", NS_JINGLE_MESSAGE)
-        .attr("id", sid.0.as_str())
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), sid.0.as_str())
         .build()
 }
 
 pub fn build_finish(sid: &SessionId) -> Element {
     Element::builder("finish", NS_JINGLE_MESSAGE)
-        .attr("id", sid.0.as_str())
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), sid.0.as_str())
         .build()
 }
 
@@ -371,9 +398,15 @@ fn store_hint_element() -> Element {
 /// populate.
 pub fn build_session_initiate(sid: &SessionId, initiator: &FullJid, media: CallMedia) -> Element {
     let mut builder = Element::builder("jingle", NS_JINGLE)
-        .attr("action", "session-initiate")
-        .attr("initiator", initiator.to_string())
-        .attr("sid", sid.0.as_str());
+        .attr(
+            minidom::rxml::xml_ncname!("action").to_owned(),
+            "session-initiate",
+        )
+        .attr(
+            minidom::rxml::xml_ncname!("initiator").to_owned(),
+            initiator.to_string(),
+        )
+        .attr(minidom::rxml::xml_ncname!("sid").to_owned(), sid.0.as_str());
     if media.audio {
         builder = builder.append(content_element("audio"));
     }
@@ -394,10 +427,19 @@ pub fn build_session_accept(
     media: CallMedia,
 ) -> Element {
     let mut builder = Element::builder("jingle", NS_JINGLE)
-        .attr("action", "session-accept")
-        .attr("initiator", initiator.to_string())
-        .attr("responder", responder.to_string())
-        .attr("sid", sid.0.as_str());
+        .attr(
+            minidom::rxml::xml_ncname!("action").to_owned(),
+            "session-accept",
+        )
+        .attr(
+            minidom::rxml::xml_ncname!("initiator").to_owned(),
+            initiator.to_string(),
+        )
+        .attr(
+            minidom::rxml::xml_ncname!("responder").to_owned(),
+            responder.to_string(),
+        )
+        .attr(minidom::rxml::xml_ncname!("sid").to_owned(), sid.0.as_str());
     if media.audio {
         builder = builder.append(content_element("audio"));
     }
@@ -417,8 +459,11 @@ pub fn build_session_terminate(
     reason: Option<xmpp_parsers::jingle::Reason>,
 ) -> Element {
     let mut builder = Element::builder("jingle", NS_JINGLE)
-        .attr("action", "session-terminate")
-        .attr("sid", sid.0.as_str());
+        .attr(
+            minidom::rxml::xml_ncname!("action").to_owned(),
+            "session-terminate",
+        )
+        .attr(minidom::rxml::xml_ncname!("sid").to_owned(), sid.0.as_str());
     if let Some(condition) = reason {
         let reason_elem = Element::builder("reason", NS_JINGLE)
             .append(Element::from(condition))
@@ -434,15 +479,18 @@ fn rtp_description_element(media: &str) -> Element {
     // separate RTCP, so omitting this is a protocol downgrade against
     // every modern WebRTC peer.
     Element::builder("description", NS_JINGLE_RTP)
-        .attr("media", media)
+        .attr(minidom::rxml::xml_ncname!("media").to_owned(), media)
         .append(Element::builder("rtcp-mux", NS_JINGLE_RTP).build())
         .build()
 }
 
 fn content_element(media: &str) -> Element {
     Element::builder("content", NS_JINGLE)
-        .attr("creator", "initiator")
-        .attr("name", media)
+        .attr(
+            minidom::rxml::xml_ncname!("creator").to_owned(),
+            "initiator",
+        )
+        .attr(minidom::rxml::xml_ncname!("name").to_owned(), media)
         .append(rtp_description_element(media))
         .append(Element::builder("transport", NS_WADDLE_LIVEKIT_TRANSPORT).build())
         .build()
@@ -554,7 +602,10 @@ mod tests {
         // stanza — this table-driven test makes the failure
         // catchable at PR time instead.
         let cases: &[(JingleReason, &str)] = &[
-            (JingleReason::AlternativeSession, "alternative-session"),
+            (
+                JingleReason::AlternativeSession { sid: None },
+                "alternative-session",
+            ),
             (JingleReason::Busy, "busy"),
             (JingleReason::Cancel, "cancel"),
             (JingleReason::ConnectivityError, "connectivity-error"),
@@ -587,7 +638,7 @@ mod tests {
                 *expected,
                 "wire name for {variant:?} must match XEP-0166 §7.4"
             );
-            let round_tripped = JingleReason::from_str(expected)
+            let round_tripped = jingle_reason_from_wire_name(expected)
                 .expect("XEP wire name parses back to JingleReason");
             assert_eq!(
                 &round_tripped, variant,
@@ -723,28 +774,40 @@ mod tests {
         // proceed: wrapping in a <message/> with a `from` makes the
         // inbound parser pick it up.
         let stanza = Element::builder("message", "jabber:client")
-            .attr("from", "bob@waddle.test/desktop")
+            .attr(
+                minidom::rxml::xml_ncname!("from").to_owned(),
+                "bob@waddle.test/desktop",
+            )
             .append(build_proceed(&sid("c1")))
             .build();
         let ev = parse_call_event(&stanza).expect("proceed parses");
         assert!(matches!(ev.kind, CallEventKind::Proceed));
 
         let stanza = Element::builder("message", "jabber:client")
-            .attr("from", "bob@waddle.test/desktop")
+            .attr(
+                minidom::rxml::xml_ncname!("from").to_owned(),
+                "bob@waddle.test/desktop",
+            )
             .append(build_reject(&sid("c1")))
             .build();
         let ev = parse_call_event(&stanza).expect("reject parses");
         assert!(matches!(ev.kind, CallEventKind::Reject));
 
         let stanza = Element::builder("message", "jabber:client")
-            .attr("from", "alice@waddle.test/desktop")
+            .attr(
+                minidom::rxml::xml_ncname!("from").to_owned(),
+                "alice@waddle.test/desktop",
+            )
             .append(build_retract(&sid("c1")))
             .build();
         let ev = parse_call_event(&stanza).expect("retract parses");
         assert!(matches!(ev.kind, CallEventKind::Retract));
 
         let stanza = Element::builder("message", "jabber:client")
-            .attr("from", "alice@waddle.test/desktop")
+            .attr(
+                minidom::rxml::xml_ncname!("from").to_owned(),
+                "alice@waddle.test/desktop",
+            )
             .append(build_finish(&sid("c1")))
             .build();
         let ev = parse_call_event(&stanza).expect("finish parses");
@@ -841,8 +904,14 @@ mod tests {
         // still surfaces it via parse_jmi_message → CallEventKind.
         let ev = parse_call_event(
             &Element::builder("message", "jabber:client")
-                .attr("from", "alice@waddle.test/desktop")
-                .attr("type", stanza.attr("type").unwrap_or_default())
+                .attr(
+                    minidom::rxml::xml_ncname!("from").to_owned(),
+                    "alice@waddle.test/desktop",
+                )
+                .attr(
+                    minidom::rxml::xml_ncname!("type").to_owned(),
+                    stanza.attr("type").unwrap_or_default(),
+                )
                 .append_all(stanza.children().cloned())
                 .build(),
         )

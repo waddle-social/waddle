@@ -105,7 +105,7 @@ async fn handle_xmpp_websocket(socket: WebSocket, state: Arc<WebSocketState>) {
                                 );
                                 let _ = send_ws_message(
                                     &mut ws_sender,
-                                    Message::Text(stream_error),
+                                    Message::Text(stream_error.into()),
                                     "Failed to send blocklist-load stream error",
                                 )
                                 .await;
@@ -174,7 +174,7 @@ async fn handle_xmpp_websocket(socket: WebSocket, state: Arc<WebSocketState>) {
                         if request_ack_after
                             && !send_ws_message(
                                 &mut ws_sender,
-                                Message::Text(SmRequest::to_xml()),
+                                Message::Text(SmRequest::to_xml().into()),
                                 "Failed to send SM <r/> request",
                             )
                             .await

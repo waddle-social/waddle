@@ -23,7 +23,7 @@ use crate::xep::xep0421::{
 use crate::Stanza;
 use jid::{BareJid, FullJid, Jid};
 use waddle_xmpp_core::xep0359::{extract_stanza_ids, NS_SID};
-use xmpp_parsers::message::{Body, Message, MessageType};
+use xmpp_parsers::message::{Message, MessageType};
 use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
 
 fn test_occupant_id_secret() -> OccupantIdSecret {
@@ -53,8 +53,9 @@ fn groupchat(room: &BareJid, sender: &FullJid, body: &str) -> Message {
     let mut m = Message::new(Some(Jid::from(room.clone())));
     m.from = Some(Jid::from(sender.clone()));
     m.type_ = MessageType::Groupchat;
-    m.id = Some("client-msg-id".to_string());
-    m.bodies.insert(String::new(), Body(body.to_string()));
+    m.id = Some(xmpp_parsers::message::Id("client-msg-id".to_string()));
+    m.bodies
+        .insert(xmpp_parsers::message::Lang::new(), body.to_string());
     m
 }
 
@@ -315,12 +316,17 @@ fn xep_0424_groupchat_retraction_emits_archive_and_tombstone_events() {
     let mut msg = Message::new(Some(Jid::from(room.clone())));
     msg.from = Some(Jid::from(alice.clone()));
     msg.type_ = MessageType::Groupchat;
-    msg.id = Some("retract-1".to_string());
-    msg.bodies
-        .insert(String::new(), Body("/me retracted".to_string()));
+    msg.id = Some(xmpp_parsers::message::Id("retract-1".to_string()));
+    msg.bodies.insert(
+        xmpp_parsers::message::Lang::new(),
+        "/me retracted".to_string(),
+    );
     msg.payloads.push(
         xmpp_parsers::minidom::Element::builder("retract", "urn:xmpp:message-retract:1")
-            .attr("id", "target-stanza-id")
+            .attr(
+                minidom::rxml::xml_ncname!("id").to_owned(),
+                "target-stanza-id",
+            )
             .build(),
     );
     let outcome = default_room_dispatcher().dispatch(&mut msg, &ctx);
@@ -419,13 +425,12 @@ fn xep_0430_groupchat_message_emits_durable_recipient_inbox_projection() {
 
 // ── XEP-0045 §8.1 subject change capture ─────────────────────────────────
 
-use xmpp_parsers::message::Subject;
-
 fn subject_change(room: &BareJid, sender: &FullJid, text: &str) -> Message {
     let mut m = Message::new(Some(Jid::from(room.clone())));
     m.from = Some(Jid::from(sender.clone()));
     m.type_ = MessageType::Groupchat;
-    m.subjects.insert(String::new(), Subject(text.to_string()));
+    m.subjects
+        .insert(xmpp_parsers::message::Lang::new(), text.to_string());
     m
 }
 
@@ -525,7 +530,7 @@ fn xep_0045_section_8_1_live_subject_change_chain_stamps_occupant_id() {
             "<subject/> preserved on every reflected copy"
         );
         assert_eq!(
-            route.subjects.iter().next().map(|s| s.1 .0.as_str()),
+            route.subjects.iter().next().map(|s| s.1.as_str()),
             Some("New topic")
         );
         assert!(route.bodies.is_empty(), "subject change has no <body/>");
@@ -689,7 +694,8 @@ fn xep_0045_section_8_1_subject_with_body_is_not_a_subject_change() {
         dispatch_timestamp: 0,
     };
     let mut msg = subject_change(&room, &eve, "topic-ish");
-    msg.bodies.insert(String::new(), Body("hi".to_string()));
+    msg.bodies
+        .insert(xmpp_parsers::message::Lang::new(), "hi".to_string());
 
     let outcome = default_room_dispatcher().dispatch(&mut msg, &ctx);
     assert!(!outcome.halted);

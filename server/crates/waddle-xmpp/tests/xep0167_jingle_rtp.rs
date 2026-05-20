@@ -210,7 +210,7 @@ fn xep_0167_rejects_description_in_wrong_namespace() {
     // description. Waddle's Jingle handler relies on this typed
     // discriminator to refuse non-RTP descriptions.
     let elem = Element::builder("description", "urn:xmpp:jingle:apps:file-transfer:5")
-        .attr("media", "audio")
+        .attr(minidom::rxml::xml_ncname!("media").to_owned(), "audio")
         .build();
     let parsed: Result<xmpp_parsers::jingle_rtp::Description, _> = elem.try_into();
     assert!(

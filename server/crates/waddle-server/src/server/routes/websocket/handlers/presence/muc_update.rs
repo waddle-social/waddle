@@ -218,8 +218,8 @@ mod tests {
             "call",
             waddle_xmpp::xep::xep_waddle_muc_call::NS_WADDLE_MUC_CALL,
         )
-        .attr("state", state_attr)
-        .attr("call-id", call_id)
+        .attr(minidom::rxml::xml_ncname!("state").to_owned(), state_attr)
+        .attr(minidom::rxml::xml_ncname!("call-id").to_owned(), call_id)
         .build();
         presence.payloads.push(call);
         presence
@@ -275,8 +275,11 @@ mod tests {
         // the waddle muc-call extension — must be ignored.
         let mut presence = ParsedPresence::new(PresenceType::None);
         let call = Element::builder("call", "urn:example:other:0")
-            .attr("state", "active")
-            .attr("call-id", "room@muc.example.com")
+            .attr(minidom::rxml::xml_ncname!("state").to_owned(), "active")
+            .attr(
+                minidom::rxml::xml_ncname!("call-id").to_owned(),
+                "room@muc.example.com",
+            )
             .build();
         presence.payloads.push(call);
         assert!(extract_call_extension(&presence).is_none());

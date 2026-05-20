@@ -16,7 +16,7 @@
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use minidom::Element;
-use xmpp_parsers::iq::{Iq, IqType};
+use xmpp_parsers::iq::Iq;
 
 use crate::XmppError;
 
@@ -139,17 +139,17 @@ pub struct IbbClose {
 
 /// Check if an IQ stanza is an IBB `<open/>` request (IQ-set).
 pub fn is_ibb_open(iq: &Iq) -> bool {
-    matches!(&iq.payload, IqType::Set(elem) if elem.name() == "open" && elem.ns() == NS_IBB)
+    matches!(iq, Iq::Set { payload: elem, .. } if elem.name() == "open" && elem.ns() == NS_IBB)
 }
 
 /// Check if an IQ stanza is an IBB `<data/>` stanza (IQ-set).
 pub fn is_ibb_data(iq: &Iq) -> bool {
-    matches!(&iq.payload, IqType::Set(elem) if elem.name() == "data" && elem.ns() == NS_IBB)
+    matches!(iq, Iq::Set { payload: elem, .. } if elem.name() == "data" && elem.ns() == NS_IBB)
 }
 
 /// Check if an IQ stanza is an IBB `<close/>` request (IQ-set).
 pub fn is_ibb_close(iq: &Iq) -> bool {
-    matches!(&iq.payload, IqType::Set(elem) if elem.name() == "close" && elem.ns() == NS_IBB)
+    matches!(iq, Iq::Set { payload: elem, .. } if elem.name() == "close" && elem.ns() == NS_IBB)
 }
 
 /// Check if a message stanza contains an IBB `<data/>` element.
@@ -165,8 +165,8 @@ pub fn message_has_ibb_data(message: &Element) -> bool {
 
 /// Parse an IBB `<open/>` from an IQ stanza.
 pub fn parse_ibb_open(iq: &Iq) -> Result<IbbOpen, IbbError> {
-    let elem = match &iq.payload {
-        IqType::Set(elem) if elem.name() == "open" && elem.ns() == NS_IBB => elem,
+    let elem = match iq {
+        Iq::Set { payload: elem, .. } if elem.name() == "open" && elem.ns() == NS_IBB => elem,
         _ => return Err(IbbError::NotIbb),
     };
 
@@ -197,8 +197,8 @@ pub fn parse_ibb_open(iq: &Iq) -> Result<IbbOpen, IbbError> {
 
 /// Parse an IBB `<data/>` from an IQ stanza.
 pub fn parse_ibb_data_from_iq(iq: &Iq) -> Result<IbbData, IbbError> {
-    let elem = match &iq.payload {
-        IqType::Set(elem) if elem.name() == "data" && elem.ns() == NS_IBB => elem,
+    let elem = match iq {
+        Iq::Set { payload: elem, .. } if elem.name() == "data" && elem.ns() == NS_IBB => elem,
         _ => return Err(IbbError::NotIbb),
     };
 
@@ -244,8 +244,8 @@ fn parse_ibb_data_element(elem: &Element) -> Result<IbbData, IbbError> {
 
 /// Parse an IBB `<close/>` from an IQ stanza.
 pub fn parse_ibb_close(iq: &Iq) -> Result<IbbClose, IbbError> {
-    let elem = match &iq.payload {
-        IqType::Set(elem) if elem.name() == "close" && elem.ns() == NS_IBB => elem,
+    let elem = match iq {
+        Iq::Set { payload: elem, .. } if elem.name() == "close" && elem.ns() == NS_IBB => elem,
         _ => return Err(IbbError::NotIbb),
     };
 
@@ -264,11 +264,11 @@ pub fn parse_ibb_close(iq: &Iq) -> Result<IbbClose, IbbError> {
 
 /// Build an IQ-result acknowledging an IBB open, data, or close.
 pub fn build_ibb_result(original_iq: &Iq) -> Iq {
-    Iq {
-        from: original_iq.to.clone(),
-        to: original_iq.from.clone(),
-        id: original_iq.id.clone(),
-        payload: IqType::Result(None),
+    Iq::Result {
+        from: original_iq.to().cloned(),
+        to: original_iq.from().cloned(),
+        id: original_iq.id().to_string(),
+        payload: None,
     }
 }
 
@@ -282,16 +282,22 @@ pub fn build_ibb_open(
     stanza: StanzaType,
 ) -> Iq {
     let open = Element::builder("open", NS_IBB)
-        .attr("sid", sid)
-        .attr("block-size", block_size.to_string())
-        .attr("stanza", stanza.as_str())
+        .attr(minidom::rxml::xml_ncname!("sid").to_owned(), sid)
+        .attr(
+            minidom::rxml::xml_ncname!("block-size").to_owned(),
+            block_size.to_string(),
+        )
+        .attr(
+            minidom::rxml::xml_ncname!("stanza").to_owned(),
+            stanza.as_str(),
+        )
         .build();
 
-    Iq {
+    Iq::Set {
         from,
         to,
         id: id.to_string(),
-        payload: IqType::Set(open),
+        payload: open,
     }
 }
 
@@ -309,16 +315,19 @@ pub fn build_ibb_data_iq(
     let encoded = BASE64.encode(data);
 
     let mut data_elem = Element::builder("data", NS_IBB)
-        .attr("sid", sid)
-        .attr("seq", seq.to_string())
+        .attr(minidom::rxml::xml_ncname!("sid").to_owned(), sid)
+        .attr(
+            minidom::rxml::xml_ncname!("seq").to_owned(),
+            seq.to_string(),
+        )
         .build();
     data_elem.append_text_node(encoded);
 
-    Iq {
+    Iq::Set {
         from,
         to,
         id: id.to_string(),
-        payload: IqType::Set(data_elem),
+        payload: data_elem,
     }
 }
 
@@ -327,8 +336,11 @@ pub fn build_ibb_data_element(sid: &str, seq: u16, data: &[u8]) -> Element {
     let encoded = BASE64.encode(data);
 
     let mut data_elem = Element::builder("data", NS_IBB)
-        .attr("sid", sid)
-        .attr("seq", seq.to_string())
+        .attr(minidom::rxml::xml_ncname!("sid").to_owned(), sid)
+        .attr(
+            minidom::rxml::xml_ncname!("seq").to_owned(),
+            seq.to_string(),
+        )
         .build();
     data_elem.append_text_node(encoded);
 
@@ -337,13 +349,15 @@ pub fn build_ibb_data_element(sid: &str, seq: u16, data: &[u8]) -> Element {
 
 /// Build an IBB `<close/>` IQ-set stanza.
 pub fn build_ibb_close(from: Option<jid::Jid>, to: Option<jid::Jid>, id: &str, sid: &str) -> Iq {
-    let close = Element::builder("close", NS_IBB).attr("sid", sid).build();
+    let close = Element::builder("close", NS_IBB)
+        .attr(minidom::rxml::xml_ncname!("sid").to_owned(), sid)
+        .build();
 
-    Iq {
+    Iq::Set {
         from,
         to,
         id: id.to_string(),
-        payload: IqType::Set(close),
+        payload: close,
     }
 }
 
@@ -396,11 +410,12 @@ fn build_ibb_error(original_iq: &Iq, error_type: &str, condition: &str) -> Iq {
 
     let stanza_error = StanzaError::new(et, dc, "en", "");
 
-    Iq {
-        from: original_iq.to.clone(),
-        to: original_iq.from.clone(),
-        id: original_iq.id.clone(),
-        payload: IqType::Error(stanza_error),
+    Iq::Error {
+        from: original_iq.to().cloned(),
+        to: original_iq.from().cloned(),
+        id: original_iq.id().to_string(),
+        error: stanza_error,
+        payload: None,
     }
 }
 

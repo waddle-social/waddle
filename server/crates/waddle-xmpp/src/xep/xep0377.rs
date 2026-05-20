@@ -213,7 +213,10 @@ pub fn parse_report(elem: &Element) -> Option<Report> {
 /// Build a `<report xmlns='urn:xmpp:reporting:1' reason='...'/>` element.
 pub fn build_report_element(report: &Report) -> Element {
     let mut elem = Element::builder("report", NS_REPORTING)
-        .attr("reason", report.reason.as_str())
+        .attr(
+            minidom::rxml::xml_ncname!("reason").to_owned(),
+            report.reason.as_str(),
+        )
         .build();
 
     if let Some(ref text) = report.text {
@@ -247,7 +250,7 @@ mod tests {
     #[test]
     fn test_is_report_element() {
         let elem = Element::builder("report", NS_REPORTING)
-            .attr("reason", "spam")
+            .attr(minidom::rxml::xml_ncname!("reason").to_owned(), "spam")
             .build();
         assert!(is_report_element(&elem));
 

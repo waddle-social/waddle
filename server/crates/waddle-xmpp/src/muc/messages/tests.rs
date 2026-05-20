@@ -1,12 +1,12 @@
 use super::*;
-use xmpp_parsers::message::Body;
 
 fn make_groupchat_message(to: &str, body: &str) -> Message {
     let bare_jid: BareJid = to.parse().unwrap();
     let mut msg = Message::new(Some(Jid::from(bare_jid)));
     msg.type_ = MessageType::Groupchat;
-    msg.id = Some("msg-1".to_string());
-    msg.bodies.insert(String::new(), Body(body.to_string()));
+    msg.id = Some(xmpp_parsers::message::Id("msg-1".to_string()));
+    msg.bodies
+        .insert(xmpp_parsers::message::Lang::new(), body.to_string());
     msg
 }
 
@@ -78,7 +78,10 @@ fn test_create_broadcast_message() {
     assert_eq!(broadcast.type_, MessageType::Groupchat);
     assert_eq!(broadcast.from, Some(Jid::from(from)));
     assert_eq!(broadcast.to, Some(Jid::from(to)));
-    assert_eq!(broadcast.id, Some("msg-1".to_string()));
+    assert_eq!(
+        broadcast.id,
+        Some(xmpp_parsers::message::Id("msg-1".to_string()))
+    );
 }
 
 #[test]
@@ -134,7 +137,7 @@ fn build_subject_message_set_state_produces_section_7_2_15_shape() {
     assert_eq!(msg.to.as_ref().map(|j| j.to_string()), Some(to.to_string()));
     assert_eq!(msg.subjects.len(), 1, "exactly one <subject/> element");
     assert_eq!(
-        msg.subjects.iter().next().map(|s| s.1 .0.as_str()),
+        msg.subjects.iter().next().map(|s| s.1.as_str()),
         Some("Fire Burn and Cauldron Bubble!")
     );
     assert!(msg.bodies.is_empty(), "subject message has no <body/>");
@@ -155,7 +158,7 @@ fn build_subject_message_cleared_state_emits_empty_subject_with_delay() {
     let msg = build_subject_message(&room, &to, Some(&state), &secret);
 
     assert_eq!(
-        msg.subjects.iter().next().map(|s| s.1 .0.as_str()),
+        msg.subjects.iter().next().map(|s| s.1.as_str()),
         Some(""),
         "explicitly cleared subject is empty <subject/>"
     );
@@ -184,7 +187,7 @@ fn build_subject_message_never_set_emits_empty_subject_without_delay() {
         "never-set rooms emit bare-from (§7.2.15 allows this; no setter exists)"
     );
     assert_eq!(
-        msg.subjects.iter().next().map(|s| s.1 .0.as_str()),
+        msg.subjects.iter().next().map(|s| s.1.as_str()),
         Some(""),
         "MUST return an empty <subject/> (§7.2.15)"
     );
@@ -267,15 +270,15 @@ fn build_subject_message_preserves_every_persisted_language_variant() {
         "every persisted language variant must round-trip into the join-time replay"
     );
     assert_eq!(
-        msg.subjects.get("").map(|s| s.0.as_str()),
+        msg.subjects.get("").map(|s| s.as_str()),
         Some("Default subject")
     );
     assert_eq!(
-        msg.subjects.get("en").map(|s| s.0.as_str()),
+        msg.subjects.get("en").map(|s| s.as_str()),
         Some("English subject")
     );
     assert_eq!(
-        msg.subjects.get("fr").map(|s| s.0.as_str()),
+        msg.subjects.get("fr").map(|s| s.as_str()),
         Some("Sujet français")
     );
 }

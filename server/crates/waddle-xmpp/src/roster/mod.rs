@@ -93,8 +93,10 @@ impl RosterQuery {
 /// </iq>
 /// ```
 pub fn is_roster_get(iq: &Iq) -> bool {
-    match &iq.payload {
-        xmpp_parsers::iq::IqType::Get(elem) => elem.name() == "query" && elem.ns() == ROSTER_NS,
+    match iq {
+        xmpp_parsers::iq::Iq::Get { payload: elem, .. } => {
+            elem.name() == "query" && elem.ns() == ROSTER_NS
+        }
         _ => false,
     }
 }
@@ -110,16 +112,18 @@ pub fn is_roster_get(iq: &Iq) -> bool {
 /// </iq>
 /// ```
 pub fn is_roster_set(iq: &Iq) -> bool {
-    match &iq.payload {
-        xmpp_parsers::iq::IqType::Set(elem) => elem.name() == "query" && elem.ns() == ROSTER_NS,
+    match iq {
+        xmpp_parsers::iq::Iq::Set { payload: elem, .. } => {
+            elem.name() == "query" && elem.ns() == ROSTER_NS
+        }
         _ => false,
     }
 }
 
 /// Parse a roster get query from an IQ stanza.
 pub fn parse_roster_get(iq: &Iq) -> Result<RosterQuery, XmppError> {
-    let query_elem = match &iq.payload {
-        xmpp_parsers::iq::IqType::Get(elem) => {
+    let query_elem = match iq {
+        xmpp_parsers::iq::Iq::Get { payload: elem, .. } => {
             if elem.name() == "query" && elem.ns() == ROSTER_NS {
                 elem
             } else {
@@ -150,8 +154,8 @@ pub fn parse_roster_get(iq: &Iq) -> Result<RosterQuery, XmppError> {
 /// Extracts the roster item(s) from the query. Per RFC 6121,
 /// a roster set should contain exactly one item element.
 pub fn parse_roster_set(iq: &Iq) -> Result<RosterQuery, XmppError> {
-    let query_elem = match &iq.payload {
-        xmpp_parsers::iq::IqType::Set(elem) => {
+    let query_elem = match iq {
+        xmpp_parsers::iq::Iq::Set { payload: elem, .. } => {
             if elem.name() == "query" && elem.ns() == ROSTER_NS {
                 elem
             } else {
@@ -272,7 +276,8 @@ pub fn build_roster_result(
 
     // Add version if roster versioning is supported
     if let Some(v) = ver {
-        query_builder = query_builder.attr("ver", v.as_str());
+        query_builder =
+            query_builder.attr(minidom::rxml::xml_ncname!("ver").to_owned(), v.as_str());
     }
 
     // Add all roster items
@@ -282,11 +287,11 @@ pub fn build_roster_result(
 
     let query = query_builder.build();
 
-    Iq {
-        from: original_iq.to.clone(),
-        to: original_iq.from.clone(),
-        id: original_iq.id.clone(),
-        payload: xmpp_parsers::iq::IqType::Result(Some(query)),
+    Iq::Result {
+        from: original_iq.to().cloned(),
+        to: original_iq.from().cloned(),
+        id: original_iq.id().to_string(),
+        payload: Some(query),
     }
 }
 
@@ -297,11 +302,11 @@ pub fn build_roster_result(
 /// <iq type='result' id='...'/>
 /// ```
 pub fn build_roster_result_empty(original_iq: &Iq) -> Iq {
-    Iq {
-        from: original_iq.to.clone(),
-        to: original_iq.from.clone(),
-        id: original_iq.id.clone(),
-        payload: xmpp_parsers::iq::IqType::Result(None),
+    Iq::Result {
+        from: original_iq.to().cloned(),
+        to: original_iq.from().cloned(),
+        id: original_iq.id().to_string(),
+        payload: None,
     }
 }
 
@@ -326,18 +331,19 @@ pub fn build_roster_push(
     let mut query_builder = Element::builder("query", ROSTER_NS);
 
     if let Some(v) = ver {
-        query_builder = query_builder.attr("ver", v.as_str());
+        query_builder =
+            query_builder.attr(minidom::rxml::xml_ncname!("ver").to_owned(), v.as_str());
     }
 
     query_builder = query_builder.append(item.to_element());
 
     let query = query_builder.build();
 
-    Iq {
+    Iq::Set {
         from: Some(Jid::from(from_jid.clone())),
         to: Some(Jid::from(to_jid.clone())),
         id: push_id.to_string(),
-        payload: xmpp_parsers::iq::IqType::Set(query),
+        payload: query,
     }
 }
 

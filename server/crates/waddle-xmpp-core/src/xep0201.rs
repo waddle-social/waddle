@@ -132,7 +132,7 @@ pub fn thread_info_from_message_in_stanza_ns(
     }
     msg.thread
         .as_ref()
-        .and_then(|thread| ThreadId::new(thread.0.clone()))
+        .and_then(|thread| ThreadId::new(thread.id.clone()))
         .map(ThreadInfo::root)
 }
 
@@ -150,7 +150,7 @@ pub fn thread_info_from_message(msg: &Message) -> Option<ThreadInfo> {
 pub fn build_thread_element(info: &ThreadInfo, ns: impl AsRef<str>) -> Element {
     let mut builder = Element::builder(THREAD_ELEMENT, ns.as_ref());
     if let Some(parent) = info.parent.as_ref().map(ThreadId::as_str) {
-        builder = builder.attr("parent", parent);
+        builder = builder.attr(minidom::rxml::xml_ncname!("parent").to_owned(), parent);
     }
     builder.append(info.id.as_str()).build()
 }
@@ -186,7 +186,7 @@ pub fn thread_id_from_message_in_stanza_ns(
     stanza_ns: impl AsRef<str>,
 ) -> Option<String> {
     if let Some(thread) = msg.thread.as_ref() {
-        return Some(thread.0.clone());
+        return Some(thread.id.clone());
     }
     let stanza_ns = stanza_ns.as_ref();
     msg.payloads
@@ -199,7 +199,10 @@ pub fn thread_id_from_message_in_stanza_ns(
 
 /// Set RFC 6121 `<thread/>` identifier on a message.
 pub fn set_thread_id(msg: &mut Message, thread_id: impl Into<String>) {
-    msg.thread = Some(Thread(thread_id.into()));
+    msg.thread = Some(Thread {
+        id: thread_id.into(),
+        parent: None,
+    });
 }
 
 #[cfg(test)]

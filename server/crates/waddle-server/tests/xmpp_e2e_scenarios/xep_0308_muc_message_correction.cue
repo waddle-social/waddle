@@ -28,20 +28,20 @@ scenario: #Scenario & {
 		#JoinMuc & {actor: alicePhone, room: roomJid, nick: "alice-phone"},
 		#ExpectFrame & {
 			target:   alicePhone
-			contains: ["from=\"\(roomJid)\"", "<subject></subject>"]
+			contains: ["from='\(roomJid)'", "<subject></subject>"]
 		},
 		#JoinMuc & {actor: bobPhone, room: roomJid, nick: "bob-phone"},
 		#ExpectPresence & {
 			target:   bobPhone
-			contains: ["from=\"\(roomJid)/alice-phone\""]
+			contains: ["from='\(roomJid)/alice-phone'"]
 		},
 		#ExpectFrame & {
 			target:   bobPhone
-			contains: ["from=\"\(roomJid)\"", "<subject></subject>"]
+			contains: ["from='\(roomJid)'", "<subject></subject>"]
 		},
 		#ExpectPresence & {
 			target:   alicePhone
-			contains: ["from=\"\(roomJid)/bob-phone\""]
+			contains: ["from='\(roomJid)/bob-phone'"]
 		},
 		#SendMessage & {
 			from: alicePhone

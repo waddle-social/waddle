@@ -9,7 +9,7 @@ use waddle_xmpp::protocol::{
 };
 use waddle_xmpp::xep::{build_receipt_request_element, extract_received_id, has_receipt_request};
 use waddle_xmpp::Stanza;
-use xmpp_parsers::message::{Body, Message, MessageType};
+use xmpp_parsers::message::{Message, MessageType};
 
 fn full(s: &str) -> FullJid {
     s.parse().expect("valid full jid")
@@ -44,10 +44,10 @@ fn direct_message(
     let mut message = Message::new(Some(Jid::from(to.clone())));
     message.from = Some(Jid::from(from.clone()));
     message.type_ = message_type;
-    message.id = id.map(str::to_string);
+    message.id = id.map(|s| xmpp_parsers::message::Id(s.to_string()));
     message
         .bodies
-        .insert(String::new(), Body("hello".to_string()));
+        .insert(xmpp_parsers::message::Lang::new(), "hello".to_string());
     message.payloads.push(build_receipt_request_element());
     message
 }

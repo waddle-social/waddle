@@ -44,8 +44,7 @@ async fn community_disco_info_advertises_xcal_namespace() {
         .await
         .expect("disco#info response");
     assert!(
-        frame.contains(&format!("var=\"{NS_XCAL}\""))
-            || frame.contains(&format!("var='{NS_XCAL}'")),
+        frame.contains(&format!("var='{NS_XCAL}'")) || frame.contains(&format!("var='{NS_XCAL}'")),
         "community disco#info missing xCal namespace: {frame}"
     );
 
@@ -95,7 +94,7 @@ async fn xcal_recurring_event_publish_and_items_round_trip() {
         .await
         .expect("publish result");
     assert!(
-        publish_result.contains("type=\"result\""),
+        publish_result.contains("type='result'"),
         "publish must succeed against the bootstrapped events node: {publish_result}"
     );
 

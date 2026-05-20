@@ -9,7 +9,7 @@
 
 use std::sync::Arc;
 
-use xmpp_parsers::iq::{Iq, IqType};
+use xmpp_parsers::iq::Iq;
 use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
 
 use waddle_sfu::{Identity, SfuService};
@@ -54,7 +54,7 @@ impl IqHandler for ExtDiscoHandler {
     }
 
     fn handle(&self, iq: &Iq, ctx: &StanzaContext<'_>) -> Vec<OutboundEvent> {
-        let IqType::Get(query) = &iq.payload else {
+        let Iq::Get { payload: query, .. } = iq else {
             return error_reply(
                 iq,
                 DefinedCondition::BadRequest,
@@ -127,13 +127,15 @@ impl IqHandler for ExtDiscoHandler {
         // §3.6.5).
         let type_filter_str = type_filter.map(service_type_wire_str);
         let result = build_services_result_element(type_filter_str, services);
-        let reply = Iq {
-            from: iq.to.clone(),
-            to: iq.from.clone(),
-            id: iq.id.clone(),
-            payload: IqType::Result(Some(result)),
+        let reply = Iq::Result {
+            from: iq.to().cloned(),
+            to: iq.from().cloned(),
+            id: iq.id().to_string(),
+            payload: Some(result),
         };
-        vec![OutboundEvent::SendStanza(Box::new(Stanza::Iq(reply)))]
+        vec![OutboundEvent::SendStanza(Box::new(Stanza::Iq(Box::new(
+            reply,
+        ))))]
     }
 }
 
@@ -149,13 +151,16 @@ fn service_type_wire_str(t: ServiceType) -> &'static str {
 }
 
 fn error_reply(original: &Iq, cond: DefinedCondition, text: &str) -> Vec<OutboundEvent> {
-    let err = Iq {
-        from: original.to.clone(),
-        to: original.from.clone(),
-        id: original.id.clone(),
-        payload: IqType::Error(StanzaError::new(ErrorType::Cancel, cond, "en", text)),
+    let err = Iq::Error {
+        from: original.to().cloned(),
+        to: original.from().cloned(),
+        id: original.id().to_string(),
+        error: StanzaError::new(ErrorType::Cancel, cond, "en", text),
+        payload: None,
     };
-    vec![OutboundEvent::SendStanza(Box::new(Stanza::Iq(err)))]
+    vec![OutboundEvent::SendStanza(Box::new(Stanza::Iq(Box::new(
+        err,
+    ))))]
 }
 
 #[cfg(test)]
@@ -190,11 +195,11 @@ mod tests {
     }
 
     fn services_get_iq() -> Iq {
-        Iq {
+        Iq::Get {
             from: Some("alice@waddle.test/desktop".parse().unwrap()),
             to: Some("waddle.test".parse().unwrap()),
             id: "e1".into(),
-            payload: IqType::Get(Element::builder("services", NS_EXT_DISCO).build()),
+            payload: Element::builder("services", NS_EXT_DISCO).build(),
         }
     }
 
@@ -227,7 +232,11 @@ mod tests {
         let Stanza::Iq(reply) = *stanza else {
             panic!("expected Iq")
         };
-        let IqType::Result(Some(elem)) = reply.payload else {
+        let Iq::Result {
+            payload: Some(elem),
+            ..
+        } = *reply
+        else {
             panic!("expected Iq result with payload")
         };
         assert_eq!(elem.name(), "services");
@@ -256,12 +265,11 @@ mod tests {
 
     #[test]
     fn wrong_child_element_returns_bad_request() {
-        let iq = Iq {
+        let iq = Iq::Get {
             from: Some("alice@waddle.test/desktop".parse().unwrap()),
             to: Some("waddle.test".parse().unwrap()),
             id: "e3".into(),
-            // Right namespace, wrong element name.
-            payload: IqType::Get(Element::builder("credentials", NS_EXT_DISCO).build()),
+            payload: Element::builder("credentials", NS_EXT_DISCO).build(),
         };
         let jid = test_jid();
         let handler = ExtDiscoHandler::new(fixture_sfu(), 443, 3478);
@@ -270,7 +278,7 @@ mod tests {
             panic!()
         };
         let Stanza::Iq(reply) = *stanza else { panic!() };
-        let IqType::Error(err) = reply.payload else {
+        let Iq::Error { error: err, .. } = *reply else {
             panic!("expected error")
         };
         assert_eq!(err.defined_condition, DefinedCondition::BadRequest);
@@ -278,11 +286,11 @@ mod tests {
 
     #[test]
     fn wrong_namespace_returns_bad_request() {
-        let iq = Iq {
+        let iq = Iq::Get {
             from: Some("alice@waddle.test/desktop".parse().unwrap()),
             to: Some("waddle.test".parse().unwrap()),
             id: "e4".into(),
-            payload: IqType::Get(Element::builder("services", "urn:xmpp:other:1").build()),
+            payload: Element::builder("services", "urn:xmpp:other:1").build(),
         };
         let jid = test_jid();
         let handler = ExtDiscoHandler::new(fixture_sfu(), 443, 3478);
@@ -291,7 +299,7 @@ mod tests {
             panic!()
         };
         let Stanza::Iq(reply) = *stanza else { panic!() };
-        let IqType::Error(err) = reply.payload else {
+        let Iq::Error { error: err, .. } = *reply else {
             panic!("expected error")
         };
         assert_eq!(err.defined_condition, DefinedCondition::BadRequest);
@@ -299,15 +307,13 @@ mod tests {
 
     #[test]
     fn services_query_with_type_turn_returns_only_turns_entry() {
-        let iq = Iq {
+        let iq = Iq::Get {
             from: Some("alice@waddle.test/desktop".parse().unwrap()),
             to: Some("waddle.test".parse().unwrap()),
             id: "f1".into(),
-            payload: IqType::Get(
-                Element::builder("services", NS_EXT_DISCO)
-                    .attr("type", "turn")
-                    .build(),
-            ),
+            payload: Element::builder("services", NS_EXT_DISCO)
+                .attr(minidom::rxml::xml_ncname!("type").to_owned(), "turn")
+                .build(),
         };
         let jid = test_jid();
         let handler = ExtDiscoHandler::new(fixture_sfu(), 443, 3478);
@@ -316,7 +322,11 @@ mod tests {
             panic!()
         };
         let Stanza::Iq(reply) = *stanza else { panic!() };
-        let IqType::Result(Some(elem)) = reply.payload else {
+        let Iq::Result {
+            payload: Some(elem),
+            ..
+        } = *reply
+        else {
             panic!("expected result")
         };
         assert_eq!(elem.attr("type"), Some("turn"));
@@ -329,15 +339,13 @@ mod tests {
 
     #[test]
     fn services_query_with_type_stun_skips_turn_mint() {
-        let iq = Iq {
+        let iq = Iq::Get {
             from: Some("alice@waddle.test/desktop".parse().unwrap()),
             to: Some("waddle.test".parse().unwrap()),
             id: "f2".into(),
-            payload: IqType::Get(
-                Element::builder("services", NS_EXT_DISCO)
-                    .attr("type", "stun")
-                    .build(),
-            ),
+            payload: Element::builder("services", NS_EXT_DISCO)
+                .attr(minidom::rxml::xml_ncname!("type").to_owned(), "stun")
+                .build(),
         };
         let jid = test_jid();
         let handler = ExtDiscoHandler::new(fixture_sfu(), 443, 3478);
@@ -346,7 +354,11 @@ mod tests {
             panic!()
         };
         let Stanza::Iq(reply) = *stanza else { panic!() };
-        let IqType::Result(Some(elem)) = reply.payload else {
+        let Iq::Result {
+            payload: Some(elem),
+            ..
+        } = *reply
+        else {
             panic!("expected result")
         };
         assert_eq!(elem.attr("type"), Some("stun"));
@@ -358,15 +370,13 @@ mod tests {
 
     #[test]
     fn services_query_with_unsupported_type_returns_bad_request() {
-        let iq = Iq {
+        let iq = Iq::Get {
             from: Some("alice@waddle.test/desktop".parse().unwrap()),
             to: Some("waddle.test".parse().unwrap()),
             id: "f3".into(),
-            payload: IqType::Get(
-                Element::builder("services", NS_EXT_DISCO)
-                    .attr("type", "ftp")
-                    .build(),
-            ),
+            payload: Element::builder("services", NS_EXT_DISCO)
+                .attr(minidom::rxml::xml_ncname!("type").to_owned(), "ftp")
+                .build(),
         };
         let jid = test_jid();
         let handler = ExtDiscoHandler::new(fixture_sfu(), 443, 3478);
@@ -375,7 +385,7 @@ mod tests {
             panic!()
         };
         let Stanza::Iq(reply) = *stanza else { panic!() };
-        let IqType::Error(err) = reply.payload else {
+        let Iq::Error { error: err, .. } = *reply else {
             panic!("expected error")
         };
         assert_eq!(err.defined_condition, DefinedCondition::BadRequest);
@@ -383,11 +393,11 @@ mod tests {
 
     #[test]
     fn iq_set_rejected_as_bad_request() {
-        let iq = Iq {
+        let iq = Iq::Set {
             from: Some("alice@waddle.test/desktop".parse().unwrap()),
             to: Some("waddle.test".parse().unwrap()),
             id: "e2".into(),
-            payload: IqType::Set(Element::builder("services", NS_EXT_DISCO).build()),
+            payload: Element::builder("services", NS_EXT_DISCO).build(),
         };
         let jid = test_jid();
         let handler = ExtDiscoHandler::new(fixture_sfu(), 443, 3478);
@@ -396,7 +406,7 @@ mod tests {
             panic!()
         };
         let Stanza::Iq(reply) = *stanza else { panic!() };
-        let IqType::Error(err) = reply.payload else {
+        let Iq::Error { error: err, .. } = *reply else {
             panic!("expected error")
         };
         assert_eq!(err.defined_condition, DefinedCondition::BadRequest);

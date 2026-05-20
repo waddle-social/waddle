@@ -163,7 +163,7 @@ pub fn build_receipt_request_element() -> Element {
 /// Build a `<received xmlns='urn:xmpp:receipts' id='...'/>` element.
 pub fn build_receipt_received_element(id: &str) -> Element {
     Element::builder("received", NS_RECEIPTS)
-        .attr("id", id)
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), id)
         .build()
 }
 
@@ -230,7 +230,7 @@ impl From<xmpp_parsers::receipts::Received> for ReceiptKind {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use xmpp_parsers::message::{Body, Message, MessageType};
+    use xmpp_parsers::message::{Message, MessageType};
 
     #[test]
     fn test_is_receipt_request_element() {
@@ -247,7 +247,7 @@ mod tests {
     #[test]
     fn test_is_receipt_received_element() {
         let received = Element::builder("received", NS_RECEIPTS)
-            .attr("id", "msg-1")
+            .attr(minidom::rxml::xml_ncname!("id").to_owned(), "msg-1")
             .build();
         assert!(is_receipt_received_element(&received));
 
@@ -412,7 +412,7 @@ mod tests {
         let mut msg_with_body = Message::new(None::<jid::Jid>);
         msg_with_body
             .bodies
-            .insert(String::new(), Body("Hello".to_string()));
+            .insert(xmpp_parsers::message::Lang::new(), "Hello".to_string());
         msg_with_body
             .payloads
             .push(build_receipt_received_element("msg-1"));

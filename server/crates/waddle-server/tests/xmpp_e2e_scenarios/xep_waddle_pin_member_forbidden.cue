@@ -74,7 +74,7 @@ scenario: #Scenario & {
 		#ExpectMessage & {
 			target:     bobPhone
 			bodyAbsent: true
-			contains:   ["forbidden", "type=\"error\""]
+			contains:   ["forbidden", "type='error'"]
 		},
 
 		// Alice does NOT receive a pin-event broadcast — the handler
@@ -87,23 +87,23 @@ scenario: #Scenario & {
 
 		#DrainFrames & {
 			target:   alicePhone
-			contains: ["from=\"\(roomJid)\"", "<subject></subject>"]
+			contains: ["from='\(roomJid)'", "<subject></subject>"]
 		},
 		#DrainFrames & {
 			target:   alicePhone
-			contains: ["<presence", "from=\"\(roomJid)/bob\""]
+			contains: ["<presence", "from='\(roomJid)/bob'"]
 		},
 		#DrainFrames & {
 			target:   alicePhone
-			contains: ["id=\"cue-pin-fb-target\"", "message bob will try to pin"]
+			contains: ["id='cue-pin-fb-target'", "message bob will try to pin"]
 		},
 		#DrainFrames & {
 			target:   bobPhone
-			contains: ["<presence", "from=\"\(roomJid)/alice\""]
+			contains: ["<presence", "from='\(roomJid)/alice'"]
 		},
 		#DrainFrames & {
 			target:   bobPhone
-			contains: ["from=\"\(roomJid)\"", "<subject></subject>"]
+			contains: ["from='\(roomJid)'", "<subject></subject>"]
 		},
 		#DrainFrames & {
 			target:   bobPhone

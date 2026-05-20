@@ -42,18 +42,28 @@ fn serialize_element(element: &Element) -> ClientResult<String> {
 }
 
 fn stream_open_element(open: &StreamOpen) -> Element {
-    let mut builder = Element::builder("open", NS_XMPP_FRAMING).attr("version", open.version);
+    let mut builder = Element::builder("open", NS_XMPP_FRAMING).attr(
+        minidom::rxml::xml_ncname!("version").to_owned(),
+        open.version,
+    );
     if let Some(to) = &open.to {
-        builder = builder.attr("to", to.to_string());
+        builder = builder.attr(minidom::rxml::xml_ncname!("to").to_owned(), to.to_string());
     }
     if let Some(from) = &open.from {
-        builder = builder.attr("from", from.to_string());
+        builder = builder.attr(
+            minidom::rxml::xml_ncname!("from").to_owned(),
+            from.to_string(),
+        );
     }
     if let Some(id) = &open.id {
-        builder = builder.attr("id", id.as_str());
+        builder = builder.attr(minidom::rxml::xml_ncname!("id").to_owned(), id.as_str());
     }
     if let Some(language) = &open.language {
-        builder = builder.attr("xml:lang", language);
+        builder = builder.attr_ns(
+            minidom::rxml::Namespace::XML,
+            minidom::rxml::xml_ncname!("lang").to_owned(),
+            language,
+        );
     }
     builder.build()
 }
@@ -112,7 +122,11 @@ fn parse_stream_open(frame: &str) -> ClientResult<TransportMessage> {
         to,
         from,
         id: element.attr("id").map(StreamId::new),
-        language: element.attr("xml:lang").map(str::to_string),
+        // minidom 0.18 keys attrs by (Namespace, NcName); xml:lang lives
+        // in the XML namespace, not the default one.
+        language: element
+            .attr_ns(&minidom::rxml::Namespace::XML, "lang")
+            .map(str::to_string),
         version: StreamOpen::VERSION,
     }))
 }

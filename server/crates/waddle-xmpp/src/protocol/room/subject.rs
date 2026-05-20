@@ -73,7 +73,7 @@ impl RoomHandler for MucSubjectHandler {
         // strict §8.1 reading is "no body element at all"; we tighten
         // to "no body content" because empty bodies have no legitimate
         // groupchat-message use and are the natural exfiltration path.
-        if message.subjects.is_empty() || message.bodies.values().any(|b| !b.0.trim().is_empty()) {
+        if message.subjects.is_empty() || message.bodies.values().any(|b| !b.trim().is_empty()) {
             return RoomHandlerOutcome::Continue(Vec::new());
         }
 
@@ -82,7 +82,7 @@ impl RoomHandler for MucSubjectHandler {
         // shape-detection — downstream archive and reflector will
         // serialize whatever remains in `bodies`, and a §8.1 broadcast
         // MUST be subject-only on the wire (no `<body/>`).
-        message.bodies.retain(|_, body| !body.0.trim().is_empty());
+        message.bodies.retain(|_, body| !body.trim().is_empty());
 
         // Sender snapshot — `OccupancyValidationHandler` runs first and
         // halts when this is missing; defensive Continue if somehow not.
@@ -170,7 +170,7 @@ mod tests {
     use crate::types::{Affiliation, Role};
     use crate::xep::xep0421::OccupantIdSecret;
     use jid::{BareJid, FullJid};
-    use xmpp_parsers::message::{Body, Message, MessageType, Subject};
+    use xmpp_parsers::message::{Message, MessageType};
 
     fn full(s: &str) -> FullJid {
         s.parse().expect("valid full jid")
@@ -183,7 +183,8 @@ mod tests {
         let mut m = Message::new(Some(Jid::from(room.clone())));
         m.from = Some(Jid::from(sender.clone()));
         m.type_ = MessageType::Groupchat;
-        m.subjects.insert(String::new(), Subject(text.to_string()));
+        m.subjects
+            .insert(xmpp_parsers::message::Lang::new(), text.to_string());
         m
     }
 
@@ -330,7 +331,8 @@ mod tests {
         let mut msg = Message::new(Some(Jid::from(room.clone())));
         msg.from = Some(Jid::from(sender.clone()));
         msg.type_ = MessageType::Groupchat;
-        msg.bodies.insert(String::new(), Body("hi".to_string()));
+        msg.bodies
+            .insert(xmpp_parsers::message::Lang::new(), "hi".to_string());
         let outcome = run(
             &mut msg,
             &room,
@@ -354,10 +356,14 @@ mod tests {
         let room = bare("team@muc.example.com");
         let sender = full("alice@example.com/web");
         let mut msg = subject_change(&room, &sender, "Default subject");
-        msg.subjects
-            .insert("en".to_string(), Subject("English subject".to_string()));
-        msg.subjects
-            .insert("fr".to_string(), Subject("Sujet français".to_string()));
+        msg.subjects.insert(
+            xmpp_parsers::message::Lang("en".to_string()),
+            "English subject".to_string(),
+        );
+        msg.subjects.insert(
+            xmpp_parsers::message::Lang("fr".to_string()),
+            "Sujet français".to_string(),
+        );
         let outcome = run(
             &mut msg,
             &room,
@@ -390,7 +396,8 @@ mod tests {
         let room = bare("team@muc.example.com");
         let sender = full("eve@example.com/web");
         let mut msg = subject_change(&room, &sender, "Topic via empty-body trick");
-        msg.bodies.insert(String::new(), Body(String::new()));
+        msg.bodies
+            .insert(xmpp_parsers::message::Lang::new(), String::new());
         let outcome = run(&mut msg, &room, &sender, "eve-nick", Role::Visitor, false);
         let RoomHandlerOutcome::Halt(events) = outcome else {
             panic!(
@@ -408,7 +415,7 @@ mod tests {
         let sender = full("eve@example.com/web");
         let mut msg = subject_change(&room, &sender, "Whitespace bypass attempt");
         msg.bodies
-            .insert(String::new(), Body("   \t\n  ".to_string()));
+            .insert(xmpp_parsers::message::Lang::new(), "   \t\n  ".to_string());
         let outcome = run(&mut msg, &room, &sender, "eve-nick", Role::Visitor, false);
         let RoomHandlerOutcome::Halt(events) = outcome else {
             panic!("whitespace-only body must not bypass §8.1 authz, got {outcome:?}");
@@ -425,7 +432,7 @@ mod tests {
         let sender = full("alice@example.com/web");
         let mut msg = subject_change(&room, &sender, "Topic-ish");
         msg.bodies
-            .insert(String::new(), Body("plus body".to_string()));
+            .insert(xmpp_parsers::message::Lang::new(), "plus body".to_string());
         let outcome = run(&mut msg, &room, &sender, "alice-nick", Role::Visitor, false);
         // Visitor would be denied if this were a subject change, but
         // because <body/> is present it isn't — handler must Continue.

@@ -48,7 +48,7 @@ pub mod version;
 
 use super::dispatch::StanzaDispatcher;
 use std::sync::Arc;
-use xmpp_parsers::iq::{Iq, IqType};
+use xmpp_parsers::iq::Iq;
 
 /// Register every sync IQ handler that has been migrated so far.
 ///
@@ -138,10 +138,10 @@ pub fn register_default_message_handlers(dispatcher: &mut StanzaDispatcher) {
 /// Used by handlers that need to acknowledge an IQ-set with no payload
 /// (XEP-0199 ping, RFC 3921 session establishment, and several others).
 pub(crate) fn empty_iq_result(original: &Iq) -> Iq {
-    Iq {
-        from: original.to.clone(),
-        to: original.from.clone(),
-        id: original.id.clone(),
-        payload: IqType::Result(None),
+    Iq::Result {
+        from: original.to().cloned(),
+        to: original.from().cloned(),
+        id: original.id().to_string(),
+        payload: None,
     }
 }

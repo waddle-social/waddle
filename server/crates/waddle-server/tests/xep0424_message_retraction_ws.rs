@@ -81,7 +81,7 @@ async fn xep_0424_groupchat_retraction_round_trip_succeeds() {
         .await
         .expect("retraction echo");
     assert!(
-        echo.contains(&format!("id=\"{original_id}\"")),
+        echo.contains(&format!("id='{original_id}'")),
         "retraction echo must cite the original wire id: {echo}"
     );
     assert!(
@@ -107,7 +107,7 @@ async fn xep_0424_groupchat_retraction_round_trip_succeeds() {
         frames
             .iter()
             .any(|frame| frame.contains("<retract ")
-                && frame.contains(&format!("id=\"{original_id}\""))),
+                && frame.contains(&format!("id='{original_id}'"))),
         "MAM did not replay retraction event citing the original wire id: {frames:?}"
     );
 
@@ -124,7 +124,7 @@ async fn xep_0424_groupchat_retraction_round_trip_succeeds() {
         "tombstone leaked original body: {tombstone}"
     );
     assert!(
-        tombstone.contains("<retracted") && tombstone.contains("id=\"retract-1\""),
+        tombstone.contains("<retracted") && tombstone.contains("id='retract-1'"),
         "tombstone must cite the retraction stanza id: {tombstone}"
     );
     assert!(
@@ -215,7 +215,7 @@ async fn dm_retraction_tombstones_both_archives() {
             panic!("recipient archive missing tombstone for retracted DM: {bob_frames:?}")
         });
     assert!(
-        bob_tombstone.contains("id=\"dm-retract-1\""),
+        bob_tombstone.contains("id='dm-retract-1'"),
         "recipient tombstone must cite the retraction stanza id: {bob_tombstone}"
     );
 
@@ -243,7 +243,7 @@ async fn dm_retraction_tombstones_both_archives() {
             panic!("sender archive missing tombstone for retracted DM: {admin_frames:?}")
         });
     assert!(
-        admin_tombstone.contains("id=\"dm-retract-1\""),
+        admin_tombstone.contains("id='dm-retract-1'"),
         "sender tombstone must cite the retraction stanza id: {admin_tombstone}"
     );
 

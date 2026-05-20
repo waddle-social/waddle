@@ -100,7 +100,7 @@ async fn data_reference_with_anchor_routes_and_replays_from_mam() {
         .expect("send data reference");
     let echo = client
         .recv_matching(|frame| {
-            frame.contains("urn:xmpp:reference:0") && frame.contains("type=\"data\"")
+            frame.contains("urn:xmpp:reference:0") && frame.contains("type='data'")
         })
         .await
         .expect("data reference echo");
@@ -109,7 +109,7 @@ async fn data_reference_with_anchor_routes_and_replays_from_mam() {
         "missing data reference uri: {echo}"
     );
     assert!(
-        echo.contains("anchor=\"https://example.com\""),
+        echo.contains("anchor='https://example.com'"),
         "missing anchor attribute: {echo}"
     );
 
@@ -124,9 +124,9 @@ async fn data_reference_with_anchor_routes_and_replays_from_mam() {
         .await
         .expect("MAM frames");
     assert!(
-        frames.iter().any(|frame| frame.contains("type=\"data\"")
+        frames.iter().any(|frame| frame.contains("type='data'")
             && frame.contains("https://example.com")
-            && frame.contains("anchor=\"https://example.com\"")),
+            && frame.contains("anchor='https://example.com'")),
         "MAM did not replay data reference with anchor: {frames:?}"
     );
 
@@ -157,7 +157,7 @@ async fn reference_without_required_attributes_returns_bad_request() {
         .await
         .expect("bad-request error");
     assert!(
-        error.contains("type=\"error\""),
+        error.contains("type='error'"),
         "not an error stanza: {error}"
     );
 

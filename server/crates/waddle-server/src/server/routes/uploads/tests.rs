@@ -5,6 +5,7 @@ use crate::server::AppStateDeps;
 use axum::body::Body;
 use axum::http::Request;
 use http_body_util::BodyExt;
+use kameo::actor::Spawn;
 use std::str::FromStr;
 use tower::ServiceExt;
 use waddle_xmpp::muc::room_registry_actor::RoomRegistryActor;
@@ -28,14 +29,14 @@ async fn create_test_upload_state() -> (Arc<UploadState>, std::path::PathBuf) {
         Arc::new(crate::storage::LocalStorage::new(upload_dir.clone()));
 
     let db_pool = Arc::new(db_pool);
-    let permission_actor = kameo::spawn(PermissionActor::new_for_tests(Arc::new(
+    let permission_actor = PermissionActor::spawn(PermissionActor::new_for_tests(Arc::new(
         db_pool.global().clone(),
     )));
     let muc_domain = jid::DomainPart::from_str("muc.example.com").expect("muc domain parses");
     let occupant_id_secret =
         OccupantIdSecret::new(b"test-occupant-id-secret-32-bytes-long".to_vec())
             .expect("test occupant-id secret meets length floor");
-    let room_registry = kameo::spawn(RoomRegistryActor::new(
+    let room_registry = RoomRegistryActor::spawn(RoomRegistryActor::new(
         muc_domain.to_string(),
         occupant_id_secret,
     ));

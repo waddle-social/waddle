@@ -59,7 +59,7 @@
 
 use jid::BareJid;
 use minidom::Element;
-use xmpp_parsers::iq::{Iq, IqType};
+use xmpp_parsers::iq::Iq;
 use xmpp_parsers::message::{Message, MessageType};
 
 use crate::inbox::{ConversationKind, InboxEntry};
@@ -151,9 +151,9 @@ pub struct InboxMarkRead {
 }
 
 fn iq_payload(iq: &Iq, want_set: bool) -> Result<&Element, InboxError> {
-    match &iq.payload {
-        IqType::Get(e) if !want_set => Ok(e),
-        IqType::Set(e) if want_set => Ok(e),
+    match iq {
+        Iq::Get { payload: e, .. } if !want_set => Ok(e),
+        Iq::Set { payload: e, .. } if want_set => Ok(e),
         _ => Err(InboxError::WrongIqType),
     }
 }
@@ -238,25 +238,55 @@ fn parse_kind_str(raw: &str) -> Result<ConversationKind, InboxError> {
 /// is explicitly extensible).
 pub fn build_inbox_entry_element(entry: &InboxEntry) -> Element {
     let mut builder = Element::builder("entry", NS_INBOX)
-        .attr("unread", entry.unread.to_string())
-        .attr("jid", entry.partner.to_string())
-        .attr("id", entry.last_stanza_id.as_str())
-        .attr("kind", kind_str(entry.kind))
-        .attr("last-updated", entry.last_updated.to_string());
+        .attr(
+            minidom::rxml::xml_ncname!("unread").to_owned(),
+            entry.unread.to_string(),
+        )
+        .attr(
+            minidom::rxml::xml_ncname!("jid").to_owned(),
+            entry.partner.to_string(),
+        )
+        .attr(
+            minidom::rxml::xml_ncname!("id").to_owned(),
+            entry.last_stanza_id.as_str(),
+        )
+        .attr(
+            minidom::rxml::xml_ncname!("kind").to_owned(),
+            kind_str(entry.kind),
+        )
+        .attr(
+            minidom::rxml::xml_ncname!("last-updated").to_owned(),
+            entry.last_updated.to_string(),
+        );
     if let Some(thread_id) = &entry.thread_id {
-        builder = builder.attr("thread", thread_id.as_str());
+        builder = builder.attr(
+            minidom::rxml::xml_ncname!("thread").to_owned(),
+            thread_id.as_str(),
+        );
     }
     if let Some(title) = &entry.thread_title {
-        builder = builder.attr("thread-title", title.as_str());
+        builder = builder.attr(
+            minidom::rxml::xml_ncname!("thread-title").to_owned(),
+            title.as_str(),
+        );
     }
     if entry.reply_count > 0 {
-        builder = builder.attr("reply-count", entry.reply_count.to_string());
+        builder = builder.attr(
+            minidom::rxml::xml_ncname!("reply-count").to_owned(),
+            entry.reply_count.to_string(),
+        );
     }
     if let Some(author) = &entry.author {
-        builder = builder.attr("author", author.as_str());
+        builder = builder.attr(
+            minidom::rxml::xml_ncname!("author").to_owned(),
+            author.as_str(),
+        );
     }
     if let Some(preview) = &entry.preview {
-        builder = builder.attr("preview", preview.as_str());
+        builder = builder.attr(
+            minidom::rxml::xml_ncname!("preview").to_owned(),
+            preview.as_str(),
+        );
     }
     builder.build()
 }
@@ -363,21 +393,25 @@ pub fn build_inbox_entry_message(
     let mut msg = Message::new(Some(to));
     msg.type_ = MessageType::Normal;
     let mut entry_elem = build_inbox_entry_element(entry);
-    entry_elem.set_attr("queryid", query_id);
+    entry_elem.set_attr(
+        minidom::rxml::Namespace::NONE,
+        minidom::rxml::xml_ncname!("queryid").to_owned(),
+        query_id,
+    );
     msg.payloads.push(entry_elem);
     if let Some(last) = last_message {
         let mut forwarded = Element::builder("forwarded", NS_FORWARD);
         if let Some(stamp) = last.delay_stamp {
             forwarded = forwarded.append(
                 Element::builder("delay", "urn:xmpp:delay")
-                    .attr("stamp", stamp)
+                    .attr(minidom::rxml::xml_ncname!("stamp").to_owned(), stamp)
                     .build(),
             );
         }
         forwarded = forwarded.append(last.forwarded_inner);
         let result = Element::builder("result", NS_MAM)
-            .attr("queryid", query_id)
-            .attr("id", last.mam_id)
+            .attr(minidom::rxml::xml_ncname!("queryid").to_owned(), query_id)
+            .attr(minidom::rxml::xml_ncname!("id").to_owned(), last.mam_id)
             .append(forwarded.build())
             .build();
         msg.payloads.push(result);
@@ -400,17 +434,26 @@ pub struct InboxFinCounts {
 /// closing the streamed inbox response.
 pub fn build_inbox_fin_iq(original: &Iq, counts: InboxFinCounts, rsm: Option<RsmResponse>) -> Iq {
     let mut fin = Element::builder("fin", NS_INBOX)
-        .attr("total", counts.total.to_string())
-        .attr("unread", counts.unread.to_string())
-        .attr("all-unread", counts.all_unread.to_string());
+        .attr(
+            minidom::rxml::xml_ncname!("total").to_owned(),
+            counts.total.to_string(),
+        )
+        .attr(
+            minidom::rxml::xml_ncname!("unread").to_owned(),
+            counts.unread.to_string(),
+        )
+        .attr(
+            minidom::rxml::xml_ncname!("all-unread").to_owned(),
+            counts.all_unread.to_string(),
+        );
     if let Some(rsm) = rsm {
         fin = fin.append(build_rsm_response_element(&rsm));
     }
-    Iq {
-        from: original.to.clone(),
-        to: original.from.clone(),
-        id: original.id.clone(),
-        payload: IqType::Result(Some(fin.build())),
+    Iq::Result {
+        from: original.to().cloned(),
+        to: original.from().cloned(),
+        id: original.id().to_string(),
+        payload: Some(fin.build()),
     }
 }
 
@@ -422,8 +465,10 @@ pub struct InboxFin {
 }
 
 pub fn parse_inbox_fin(iq: &Iq) -> Result<InboxFin, InboxError> {
-    let elem = match &iq.payload {
-        IqType::Result(Some(e)) => e,
+    let elem = match iq {
+        Iq::Result {
+            payload: Some(e), ..
+        } => e,
         _ => return Err(InboxError::WrongIqType),
     };
     if !elem.is("fin", NS_INBOX) {
@@ -448,11 +493,11 @@ pub fn parse_inbox_fin(iq: &Iq) -> Result<InboxFin, InboxError> {
 
 /// Build the response to a Waddle-private `<mark-read/>` IQ-set.
 pub fn build_mark_read_result(original: &Iq) -> Iq {
-    Iq {
-        from: original.to.clone(),
-        to: original.from.clone(),
-        id: original.id.clone(),
-        payload: IqType::Result(None),
+    Iq::Result {
+        from: original.to().cloned(),
+        to: original.from().cloned(),
+        id: original.id().to_string(),
+        payload: None,
     }
 }
 
@@ -469,8 +514,8 @@ pub fn build_inbox_push(to: jid::Jid, entry: &InboxEntry) -> Message {
 
 /// Whether the given IQ targets the conformant XEP-0430 inbox surface.
 pub fn is_inbox_iq(iq: &Iq) -> bool {
-    let elem = match &iq.payload {
-        IqType::Get(e) | IqType::Set(e) => e,
+    let elem = match iq {
+        Iq::Get { payload: e, .. } | Iq::Set { payload: e, .. } => e,
         _ => return false,
     };
     elem.ns() == NS_INBOX && elem.name() == "inbox"
@@ -478,8 +523,8 @@ pub fn is_inbox_iq(iq: &Iq) -> bool {
 
 /// Whether the given IQ targets the Waddle-private mark-read action.
 pub fn is_mark_read_iq(iq: &Iq) -> bool {
-    let elem = match &iq.payload {
-        IqType::Get(e) | IqType::Set(e) => e,
+    let elem = match iq {
+        Iq::Get { payload: e, .. } | Iq::Set { payload: e, .. } => e,
         _ => return false,
     };
     elem.ns() == NS_INBOX_MARK_READ && elem.name() == "mark-read"
@@ -489,18 +534,21 @@ pub fn is_mark_read_iq(iq: &Iq) -> bool {
 pub fn build_inbox_query_iq(query: &InboxQuery, id: impl Into<String>) -> Iq {
     let mut inbox = Element::builder("inbox", NS_INBOX)
         .attr(
-            "unread-only",
+            minidom::rxml::xml_ncname!("unread-only").to_owned(),
             if query.unread_only { "true" } else { "false" },
         )
-        .attr("messages", if query.messages { "true" } else { "false" });
+        .attr(
+            minidom::rxml::xml_ncname!("messages").to_owned(),
+            if query.messages { "true" } else { "false" },
+        );
     if let Some(rsm) = query.rsm.as_ref() {
         inbox = inbox.append(build_rsm_request_element(rsm));
     }
-    Iq {
+    Iq::Get {
         from: None,
         to: None,
         id: id.into(),
-        payload: IqType::Get(inbox.build()),
+        payload: inbox.build(),
     }
 }
 
@@ -509,20 +557,20 @@ mod tests {
     use super::*;
 
     fn get_iq(child: Element) -> Iq {
-        Iq {
+        Iq::Get {
             from: Some("me@example.com/res".parse().unwrap()),
             to: Some("me@example.com".parse().unwrap()),
             id: "ib-1".into(),
-            payload: IqType::Get(child),
+            payload: child,
         }
     }
 
     fn set_iq(child: Element) -> Iq {
-        Iq {
+        Iq::Set {
             from: Some("me@example.com/res".parse().unwrap()),
             to: Some("me@example.com".parse().unwrap()),
             id: "ib-2".into(),
-            payload: IqType::Set(child),
+            payload: child,
         }
     }
 
@@ -539,8 +587,8 @@ mod tests {
     fn parse_inbox_query_unread_only_and_no_messages() {
         let iq = get_iq(
             Element::builder("inbox", NS_INBOX)
-                .attr("unread-only", "true")
-                .attr("messages", "false")
+                .attr(minidom::rxml::xml_ncname!("unread-only").to_owned(), "true")
+                .attr(minidom::rxml::xml_ncname!("messages").to_owned(), "false")
                 .build(),
         );
         let parsed = parse_inbox_query(&iq).expect("query parses");
@@ -581,7 +629,10 @@ mod tests {
     fn parse_mark_read_namespace_unchanged() {
         let iq = set_iq(
             Element::builder("mark-read", NS_INBOX_MARK_READ)
-                .attr("partner", "alice@example.com")
+                .attr(
+                    minidom::rxml::xml_ncname!("partner").to_owned(),
+                    "alice@example.com",
+                )
                 .build(),
         );
         let parsed = parse_mark_read(&iq).expect("mark-read parses");
@@ -593,8 +644,11 @@ mod tests {
     fn parse_mark_read_with_thread() {
         let iq = set_iq(
             Element::builder("mark-read", NS_INBOX_MARK_READ)
-                .attr("partner", "room@muc.example.com")
-                .attr("thread", "t-42")
+                .attr(
+                    minidom::rxml::xml_ncname!("partner").to_owned(),
+                    "room@muc.example.com",
+                )
+                .attr(minidom::rxml::xml_ncname!("thread").to_owned(), "t-42")
                 .build(),
         );
         let parsed = parse_mark_read(&iq).expect("mark-read parses");
@@ -666,9 +720,15 @@ mod tests {
         )
         .with_unread(1);
         let inner = Element::builder("message", NS_CLIENT)
-            .attr("from", "alice@example.com")
-            .attr("to", "me@example.com")
-            .attr("type", "chat")
+            .attr(
+                minidom::rxml::xml_ncname!("from").to_owned(),
+                "alice@example.com",
+            )
+            .attr(
+                minidom::rxml::xml_ncname!("to").to_owned(),
+                "me@example.com",
+            )
+            .attr(minidom::rxml::xml_ncname!("type").to_owned(), "chat")
             .append(Element::builder("body", NS_CLIENT).append("Hello").build())
             .build();
         let msg = build_inbox_entry_message(
@@ -729,7 +789,10 @@ mod tests {
         // mark-read goes through `is_mark_read_iq`, not `is_inbox_iq`.
         assert!(!is_inbox_iq(&set_iq(
             Element::builder("mark-read", NS_INBOX_MARK_READ)
-                .attr("partner", "x@example.com")
+                .attr(
+                    minidom::rxml::xml_ncname!("partner").to_owned(),
+                    "x@example.com"
+                )
                 .build(),
         )));
     }
@@ -738,12 +801,18 @@ mod tests {
     fn is_mark_read_iq_recognises_legacy_namespace() {
         assert!(is_mark_read_iq(&set_iq(
             Element::builder("mark-read", NS_INBOX_MARK_READ)
-                .attr("partner", "x@example.com")
+                .attr(
+                    minidom::rxml::xml_ncname!("partner").to_owned(),
+                    "x@example.com"
+                )
                 .build(),
         )));
         assert!(!is_mark_read_iq(&set_iq(
             Element::builder("mark-read", NS_INBOX)
-                .attr("partner", "x@example.com")
+                .attr(
+                    minidom::rxml::xml_ncname!("partner").to_owned(),
+                    "x@example.com"
+                )
                 .build(),
         )));
     }
@@ -751,8 +820,8 @@ mod tests {
     #[test]
     fn build_inbox_query_iq_default_attrs() {
         let iq = build_inbox_query_iq(&InboxQuery::default(), "id-1");
-        match iq.payload {
-            IqType::Get(elem) => {
+        match iq {
+            Iq::Get { payload: elem, .. } => {
                 assert!(elem.is("inbox", NS_INBOX));
                 assert_eq!(elem.attr("unread-only"), Some("false"));
                 assert_eq!(elem.attr("messages"), Some("true"));

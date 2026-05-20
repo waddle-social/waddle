@@ -229,7 +229,7 @@ impl From<ChatState> for xmpp_parsers::chatstates::ChatState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use xmpp_parsers::message::{Body, Message, MessageType};
+    use xmpp_parsers::message::{Message, MessageType};
 
     #[test]
     fn test_parse_all_states() {
@@ -366,7 +366,7 @@ mod tests {
         let mut msg_with_body = Message::new(None::<jid::Jid>);
         msg_with_body
             .bodies
-            .insert(String::new(), Body("Hello".to_string()));
+            .insert(xmpp_parsers::message::Lang::new(), "Hello".to_string());
         msg_with_body
             .payloads
             .push(build_chat_state_element(ChatState::Active));

@@ -15,8 +15,10 @@ impl ExtensionEnvelope {
     }
 
     pub fn to_minidom(&self) -> Element {
-        let mut builder = Element::builder("extensions", FRAMEWORK_NAMESPACE)
-            .attr("version", self.version.to_string());
+        let mut builder = Element::builder("extensions", FRAMEWORK_NAMESPACE).attr(
+            minidom::rxml::xml_ncname!("version").to_owned(),
+            self.version.to_string(),
+        );
         for enrichment in &self.enrichments {
             builder = builder.append(enrichment.to_minidom());
         }
@@ -47,11 +49,26 @@ impl MessageEnrichment {
 
     pub fn to_minidom(&self) -> Element {
         let mut builder = Element::builder("enrichment", FRAMEWORK_NAMESPACE)
-            .attr("id", self.id.as_str())
-            .attr("plugin", self.plugin.as_str())
-            .attr("capability", self.capability.as_str())
-            .attr("payload-ns", self.payload_namespace.as_str())
-            .attr("created", self.created_at.as_str());
+            .attr(
+                minidom::rxml::xml_ncname!("id").to_owned(),
+                self.id.as_str(),
+            )
+            .attr(
+                minidom::rxml::xml_ncname!("plugin").to_owned(),
+                self.plugin.as_str(),
+            )
+            .attr(
+                minidom::rxml::xml_ncname!("capability").to_owned(),
+                self.capability.as_str(),
+            )
+            .attr(
+                minidom::rxml::xml_ncname!("payload-ns").to_owned(),
+                self.payload_namespace.as_str(),
+            )
+            .attr(
+                minidom::rxml::xml_ncname!("created").to_owned(),
+                self.created_at.as_str(),
+            );
         if let Some(source) = &self.source {
             builder = builder.append(source.to_minidom());
         }
@@ -86,12 +103,20 @@ pub struct MessageSource {
 
 impl MessageSource {
     pub fn to_minidom(&self) -> Element {
-        let mut builder = Element::builder("source", FRAMEWORK_NAMESPACE)
-            .attr("stanza-id", self.stanza_id.as_str());
+        let mut builder = Element::builder("source", FRAMEWORK_NAMESPACE).attr(
+            minidom::rxml::xml_ncname!("stanza-id").to_owned(),
+            self.stanza_id.as_str(),
+        );
         if let Some(range) = &self.body_range {
             builder = builder
-                .attr("body-start", range.start.to_string())
-                .attr("body-end", range.end.to_string());
+                .attr(
+                    minidom::rxml::xml_ncname!("body-start").to_owned(),
+                    range.start.to_string(),
+                )
+                .attr(
+                    minidom::rxml::xml_ncname!("body-end").to_owned(),
+                    range.end.to_string(),
+                );
         }
         builder.build()
     }
@@ -106,13 +131,18 @@ pub struct LaunchContext {
 
 impl LaunchContext {
     fn to_minidom(&self) -> Element {
-        let mut builder = Element::builder("context", FRAMEWORK_NAMESPACE)
-            .attr("waddle-id", self.waddle_id.as_str());
+        let mut builder = Element::builder("context", FRAMEWORK_NAMESPACE).attr(
+            minidom::rxml::xml_ncname!("waddle-id").to_owned(),
+            self.waddle_id.as_str(),
+        );
         if let Some(room) = &self.room {
-            builder = builder.attr("room", room.as_str());
+            builder = builder.attr(minidom::rxml::xml_ncname!("room").to_owned(), room.as_str());
         }
         if let Some(stanza_id) = &self.source_stanza_id {
-            builder = builder.attr("stanza-id", stanza_id.as_str());
+            builder = builder.attr(
+                minidom::rxml::xml_ncname!("stanza-id").to_owned(),
+                stanza_id.as_str(),
+            );
         }
         builder.build()
     }
@@ -135,11 +165,26 @@ pub struct LaunchDescriptor {
 impl LaunchDescriptor {
     pub fn to_minidom(&self) -> Element {
         let mut builder = Element::builder("launch", FRAMEWORK_NAMESPACE)
-            .attr("id", self.id.as_str())
-            .attr("plugin", self.plugin.as_str())
-            .attr("action", self.action.as_str())
-            .attr("command-node", self.command_node.as_str())
-            .attr("label", self.label.as_str())
+            .attr(
+                minidom::rxml::xml_ncname!("id").to_owned(),
+                self.id.as_str(),
+            )
+            .attr(
+                minidom::rxml::xml_ncname!("plugin").to_owned(),
+                self.plugin.as_str(),
+            )
+            .attr(
+                minidom::rxml::xml_ncname!("action").to_owned(),
+                self.action.as_str(),
+            )
+            .attr(
+                minidom::rxml::xml_ncname!("command-node").to_owned(),
+                self.command_node.as_str(),
+            )
+            .attr(
+                minidom::rxml::xml_ncname!("label").to_owned(),
+                self.label.as_str(),
+            )
             .append(self.context.to_minidom());
         if !self.payloads.is_empty() {
             let payloads = self.payloads.iter().fold(
@@ -149,10 +194,16 @@ impl LaunchDescriptor {
             builder = builder.append(payloads.build());
         }
         if let Some(expires_at) = &self.expires_at {
-            builder = builder.attr("expires-at", expires_at.as_str());
+            builder = builder.attr(
+                minidom::rxml::xml_ncname!("expires-at").to_owned(),
+                expires_at.as_str(),
+            );
         }
         if let Some(token) = &self.token {
-            builder = builder.attr("token", token.as_str());
+            builder = builder.attr(
+                minidom::rxml::xml_ncname!("token").to_owned(),
+                token.as_str(),
+            );
         }
         if let Some(fallback) = &self.fallback {
             builder = builder.append(

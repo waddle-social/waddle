@@ -81,7 +81,7 @@ impl ExtensionManager {
             .bodies
             .get("")
             .or_else(|| msg.bodies.values().next())
-            .map(|body| body.0.clone())
+            .cloned()
         else {
             return MessageExtensionOutcome::default();
         };
@@ -106,7 +106,11 @@ impl ExtensionManager {
             let source_stanza_id = room
                 .as_ref()
                 .and_then(|room| room_stanza_id_from_payloads(msg, room.as_str()))
-                .or_else(|| msg.id.clone().and_then(|id| StanzaId::new(id).ok()));
+                .or_else(|| {
+                    msg.id
+                        .as_ref()
+                        .and_then(|id| StanzaId::new(id.0.clone()).ok())
+                });
             let sender = msg
                 .from
                 .as_ref()

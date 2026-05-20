@@ -93,8 +93,8 @@ pub(super) async fn finish_archive_groupchat_message(
     let room_jid_full = jid::Jid::from(room.clone());
     let stanza_id = archive_clone
         .id
-        .clone()
-        .map(|id| waddle_xmpp_core::xep0359::StanzaId::new(id, room_jid_full.clone()));
+        .as_ref()
+        .map(|id| waddle_xmpp_core::xep0359::StanzaId::new(id.0.clone(), room_jid_full.clone()));
     let archived = MamArchivedMessage {
         id: archive_id.clone(),
         timestamp: chrono::Utc::now(),
@@ -174,7 +174,12 @@ pub(super) async fn apply_groupchat_retraction_tombstone(
             return;
         }
     };
-    let Some(retraction_id) = retraction_message.id.clone().and_then(RichMessageId::new) else {
+    let Some(retraction_id) = retraction_message
+        .id
+        .as_ref()
+        .map(|id| id.0.clone())
+        .and_then(RichMessageId::new)
+    else {
         warn!(
             archive = %room,
             target = target_message_id,
@@ -415,7 +420,7 @@ pub(super) fn prototype_body(message: &Message) -> Option<String> {
         .bodies
         .get("")
         .or_else(|| message.bodies.values().next())
-        .map(|body| body.0.clone())
+        .cloned()
 }
 
 pub(super) fn serialize_groupchat_stanza_xml(message: &Message) -> Option<String> {
@@ -443,22 +448,30 @@ pub(super) fn rich_archive_payload(message: &Message) -> Option<ArchivedRichMess
                         ArchivedRichPayload::Retraction(ArchivedRetraction {
                             target_id,
                             stamp: None,
-                            retraction_id: message.id.clone().and_then(RichMessageId::new),
+                            retraction_id: message
+                                .id
+                                .as_ref()
+                                .map(|id| id.0.clone())
+                                .and_then(RichMessageId::new),
                         })
                     }),
-                RetractionKind::Tombstone(retracted) => message.id.clone().and_then(|id| {
-                    RichMessageId::new(id).map(|target_id| {
-                        ArchivedRichPayload::Retraction(ArchivedRetraction {
-                            target_id,
-                            stamp: retracted
-                                .stamp
-                                .as_deref()
-                                .and_then(|stamp| chrono::DateTime::parse_from_rfc3339(stamp).ok())
-                                .map(|stamp| stamp.with_timezone(&chrono::Utc)),
-                            retraction_id: RichMessageId::new(retracted.retraction_id),
+                RetractionKind::Tombstone(retracted) => {
+                    message.id.as_ref().map(|id| id.0.clone()).and_then(|id| {
+                        RichMessageId::new(id).map(|target_id| {
+                            ArchivedRichPayload::Retraction(ArchivedRetraction {
+                                target_id,
+                                stamp: retracted
+                                    .stamp
+                                    .as_deref()
+                                    .and_then(|stamp| {
+                                        chrono::DateTime::parse_from_rfc3339(stamp).ok()
+                                    })
+                                    .map(|stamp| stamp.with_timezone(&chrono::Utc)),
+                                retraction_id: RichMessageId::new(retracted.retraction_id),
+                            })
                         })
                     })
-                }),
+                }
             })
         })
         .or_else(|| {

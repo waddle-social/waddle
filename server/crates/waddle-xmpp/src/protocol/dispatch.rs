@@ -17,7 +17,7 @@ use super::traits::{HandlerId, HandlerOutcome, IqHandler, MessageHandler, Presen
 use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::Level;
-use xmpp_parsers::iq::{Iq, IqType};
+use xmpp_parsers::iq::Iq;
 use xmpp_parsers::message::Message;
 use xmpp_parsers::presence::Presence;
 
@@ -106,9 +106,9 @@ impl StanzaDispatcher {
     /// as client acknowledgements and silently consumed — they are not
     /// routed to a handler.
     pub fn dispatch_iq(&self, iq: &Iq, ctx: &StanzaContext<'_>) -> Vec<OutboundEvent> {
-        let element = match &iq.payload {
-            IqType::Get(e) | IqType::Set(e) => e,
-            IqType::Result(_) | IqType::Error(_) => return Vec::new(),
+        let element = match iq {
+            Iq::Get { payload: e, .. } | Iq::Set { payload: e, .. } => e,
+            Iq::Result { .. } | Iq::Error { .. } => return Vec::new(),
         };
 
         let ns = element.ns();
@@ -118,7 +118,8 @@ impl StanzaDispatcher {
                 level: Level::WARN,
                 message: format!(
                     "No handler registered for IQ namespace '{}' (id='{}')",
-                    ns, iq.id
+                    ns,
+                    iq.id()
                 ),
             }],
         }

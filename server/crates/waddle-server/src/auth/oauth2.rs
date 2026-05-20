@@ -44,7 +44,14 @@ pub async fn exchange_code(
         params.push(("client_secret", provider.client_secret.as_str()));
     }
 
-    let mut request = client.post(token_endpoint).form(&params);
+    let body = encode_form(&params);
+    let mut request = client
+        .post(token_endpoint)
+        .header(
+            reqwest::header::CONTENT_TYPE,
+            "application/x-www-form-urlencoded",
+        )
+        .body(body);
     if require_dpop {
         let dpop_proof = create_dpop_proof("POST", token_endpoint)?;
         request = request.header("DPoP", dpop_proof);
@@ -70,6 +77,19 @@ pub async fn exchange_code(
         .map_err(|e| AuthError::TokenExchangeFailed(format!("Invalid token response: {}", e)))?;
 
     Ok(token)
+}
+
+fn encode_form(params: &[(&str, &str)]) -> String {
+    let mut out = String::new();
+    for (i, (k, v)) in params.iter().enumerate() {
+        if i > 0 {
+            out.push('&');
+        }
+        out.push_str(&urlencoding::encode(k));
+        out.push('=');
+        out.push_str(&urlencoding::encode(v));
+    }
+    out
 }
 
 fn create_dpop_proof(method: &str, htu: &str) -> Result<String, AuthError> {

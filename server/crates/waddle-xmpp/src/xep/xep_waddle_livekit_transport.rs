@@ -88,9 +88,15 @@ impl WaddleLiveKitTransport {
         match self {
             Self::Request => Element::builder(TRANSPORT_NAME, NS_WADDLE_LIVEKIT_TRANSPORT).build(),
             Self::Issued(t) => Element::builder(TRANSPORT_NAME, NS_WADDLE_LIVEKIT_TRANSPORT)
-                .attr(ATTR_URL, t.url.as_str())
-                .attr(ATTR_ROOM, t.room.as_str())
-                .attr(ATTR_IDENTITY, t.identity.as_livekit_identity())
+                .attr(minidom::rxml::xml_ncname!("url").to_owned(), t.url.as_str())
+                .attr(
+                    minidom::rxml::xml_ncname!("room").to_owned(),
+                    t.room.as_str(),
+                )
+                .attr(
+                    minidom::rxml::xml_ncname!("identity").to_owned(),
+                    t.identity.as_livekit_identity(),
+                )
                 .append(
                     Element::builder(TOKEN_NAME, NS_WADDLE_LIVEKIT_TRANSPORT)
                         .append(t.token.as_str())
@@ -174,7 +180,7 @@ mod tests {
         let rebuilt = parsed.to_element();
         assert_eq!(rebuilt.name(), TRANSPORT_NAME);
         assert_eq!(rebuilt.ns(), NS_WADDLE_LIVEKIT_TRANSPORT);
-        assert!(rebuilt.attrs().next().is_none());
+        assert!(rebuilt.attrs().iter().next().is_none());
         assert!(rebuilt.children().next().is_none());
     }
 

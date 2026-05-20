@@ -10,7 +10,7 @@ pub(super) async fn handle_push_iq(
 ) -> Vec<String> {
     let Some(sender_jid) = sender_jid else {
         return vec![build_iq_error_xml_typed(
-            &iq.id,
+            iq.id(),
             response_from,
             response_to,
             not_authorized_iq_error("Authentication required."),
@@ -22,7 +22,7 @@ pub(super) async fn handle_push_iq(
     if is_push_enable(iq) {
         let Some(enable) = parse_push_enable(iq) else {
             return vec![build_iq_error_xml_typed(
-                &iq.id,
+                iq.id(),
                 response_from,
                 response_to,
                 bad_request_iq_error("Malformed IQ payload."),
@@ -32,7 +32,7 @@ pub(super) async fn handle_push_iq(
         if service_jid == push_domain {
             let Some(node) = enable.node.as_deref() else {
                 return vec![build_iq_error_xml_typed(
-                    &iq.id,
+                    iq.id(),
                     response_from,
                     response_to,
                     bad_request_iq_error("First-party Push Service enable requires a node."),
@@ -51,7 +51,7 @@ pub(super) async fn handle_push_iq(
                 .await
             {
                 return vec![build_iq_error_xml_typed(
-                    &iq.id,
+                    iq.id(),
                     response_from,
                     response_to,
                     push_service_stanza_error(error),
@@ -60,7 +60,7 @@ pub(super) async fn handle_push_iq(
             return vec![iq_to_xml(build_push_enable_result(iq))];
         }
         return vec![build_iq_error_xml_typed(
-            &iq.id,
+            iq.id(),
             response_from,
             response_to,
             service_unavailable_iq_error(
@@ -71,7 +71,7 @@ pub(super) async fn handle_push_iq(
 
     let Some(disable) = parse_push_disable(iq) else {
         return vec![build_iq_error_xml_typed(
-            &iq.id,
+            iq.id(),
             response_from,
             response_to,
             bad_request_iq_error("Malformed IQ payload."),
@@ -88,7 +88,7 @@ pub(super) async fn handle_push_iq(
         {
             warn!(user = %bare_jid_s, error = %error, "Failed to atomically disable first-party push subscription");
             return vec![build_iq_error_xml_typed(
-                &iq.id,
+                iq.id(),
                 response_from,
                 response_to,
                 internal_server_error_iq_error("Internal server error."),
@@ -106,7 +106,7 @@ pub(super) async fn handle_push_iq(
     {
         warn!(user = %bare_jid_s, error = %error, "Failed to remove push subscription");
         return vec![build_iq_error_xml_typed(
-            &iq.id,
+            iq.id(),
             response_from,
             response_to,
             internal_server_error_iq_error("Internal server error."),

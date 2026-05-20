@@ -4,16 +4,19 @@ fn make_admin_get_iq(room_jid: &str, affiliation: &str) -> Iq {
     let query = Element::builder("query", NS_MUC_ADMIN)
         .append(
             Element::builder("item", NS_MUC_ADMIN)
-                .attr("affiliation", affiliation)
+                .attr(
+                    minidom::rxml::xml_ncname!("affiliation").to_owned(),
+                    affiliation,
+                )
                 .build(),
         )
         .build();
 
-    Iq {
+    Iq::Get {
         from: Some("user@example.com/res".parse().unwrap()),
         to: Some(room_jid.parse().unwrap()),
         id: "test-1".to_string(),
-        payload: IqType::Get(query),
+        payload: query,
     }
 }
 
@@ -21,17 +24,20 @@ fn make_admin_set_iq(room_jid: &str, target_jid: &str, affiliation: &str) -> Iq 
     let query = Element::builder("query", NS_MUC_ADMIN)
         .append(
             Element::builder("item", NS_MUC_ADMIN)
-                .attr("jid", target_jid)
-                .attr("affiliation", affiliation)
+                .attr(minidom::rxml::xml_ncname!("jid").to_owned(), target_jid)
+                .attr(
+                    minidom::rxml::xml_ncname!("affiliation").to_owned(),
+                    affiliation,
+                )
                 .build(),
         )
         .build();
 
-    Iq {
+    Iq::Set {
         from: Some("owner@example.com/res".parse().unwrap()),
         to: Some(room_jid.parse().unwrap()),
         id: "test-2".to_string(),
-        payload: IqType::Set(query),
+        payload: query,
     }
 }
 
@@ -119,8 +125,14 @@ fn test_build_admin_result() {
 
     let result = build_admin_result("test-1", &room_jid, &to_jid, &items);
 
-    assert_eq!(result.id, "test-1");
-    assert!(matches!(result.payload, IqType::Result(Some(_))));
+    assert_eq!(result.id(), "test-1");
+    assert!(matches!(
+        result,
+        Iq::Result {
+            payload: Some(_),
+            ..
+        }
+    ));
 }
 
 #[test]
@@ -130,8 +142,8 @@ fn test_build_admin_set_result() {
 
     let result = build_admin_set_result("test-2", &room_jid, &to_jid);
 
-    assert_eq!(result.id, "test-2");
-    assert!(matches!(result.payload, IqType::Result(None)));
+    assert_eq!(result.id(), "test-2");
+    assert!(matches!(result, Iq::Result { payload: None, .. }));
 }
 
 #[test]
@@ -139,8 +151,14 @@ fn test_parse_admin_query_with_reason() {
     let query = Element::builder("query", NS_MUC_ADMIN)
         .append(
             Element::builder("item", NS_MUC_ADMIN)
-                .attr("jid", "banned@example.com")
-                .attr("affiliation", "outcast")
+                .attr(
+                    minidom::rxml::xml_ncname!("jid").to_owned(),
+                    "banned@example.com",
+                )
+                .attr(
+                    minidom::rxml::xml_ncname!("affiliation").to_owned(),
+                    "outcast",
+                )
                 .append(
                     Element::builder("reason", NS_MUC_ADMIN)
                         .append("Spamming")
@@ -150,11 +168,11 @@ fn test_parse_admin_query_with_reason() {
         )
         .build();
 
-    let iq = Iq {
+    let iq = Iq::Set {
         from: Some("owner@example.com/res".parse().unwrap()),
         to: Some("room@muc.example.com".parse().unwrap()),
         id: "ban-1".to_string(),
-        payload: IqType::Set(query),
+        payload: query,
     };
 
     let parsed = parse_admin_query(&iq, "muc.example.com").unwrap();
@@ -169,8 +187,11 @@ fn test_parse_kick_query_with_nick() {
     let query = Element::builder("query", NS_MUC_ADMIN)
         .append(
             Element::builder("item", NS_MUC_ADMIN)
-                .attr("nick", "troublemaker")
-                .attr("role", "none")
+                .attr(
+                    minidom::rxml::xml_ncname!("nick").to_owned(),
+                    "troublemaker",
+                )
+                .attr(minidom::rxml::xml_ncname!("role").to_owned(), "none")
                 .append(
                     Element::builder("reason", NS_MUC_ADMIN)
                         .append("Kicked for bad behavior")
@@ -180,11 +201,11 @@ fn test_parse_kick_query_with_nick() {
         )
         .build();
 
-    let iq = Iq {
+    let iq = Iq::Set {
         from: Some("moderator@example.com/res".parse().unwrap()),
         to: Some("room@muc.example.com".parse().unwrap()),
         id: "kick-1".to_string(),
-        payload: IqType::Set(query),
+        payload: query,
     };
 
     let parsed = parse_admin_query(&iq, "muc.example.com").unwrap();

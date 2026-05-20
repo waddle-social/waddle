@@ -19,7 +19,7 @@ use waddle_xmpp::pending_delivery::flush::{
 };
 use waddle_xmpp::pending_delivery::{PendingPayload, PendingRow, PendingRowId};
 use waddle_xmpp_core::xep0359::{build_stanza_id_element, StanzaId, NS_SID};
-use xmpp_parsers::message::{Body, Message, MessageType};
+use xmpp_parsers::message::{Message, MessageType};
 
 fn bare(s: &str) -> BareJid {
     s.parse().expect("bare jid")
@@ -29,7 +29,8 @@ fn dm(from: &str, to: &str, body: &str) -> Message {
     let mut m = Message::new(Some(to.parse::<Jid>().expect("jid")));
     m.from = Some(from.parse::<Jid>().expect("jid"));
     m.type_ = MessageType::Chat;
-    m.bodies.insert(String::new(), Body(body.to_string()));
+    m.bodies
+        .insert(xmpp_parsers::message::Lang::new(), body.to_string());
     m
 }
 

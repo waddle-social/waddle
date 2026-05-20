@@ -99,9 +99,15 @@ pub(super) fn build_muc_presence_error_xml(
 
     element_to_xml(
         Element::builder("presence", waddle_xmpp::ns::JABBER_CLIENT)
-            .attr("from", from_jid.to_string())
-            .attr("to", to_jid.to_string())
-            .attr("type", "error")
+            .attr(
+                minidom::rxml::xml_ncname!("from").to_owned(),
+                from_jid.to_string(),
+            )
+            .attr(
+                minidom::rxml::xml_ncname!("to").to_owned(),
+                to_jid.to_string(),
+            )
+            .attr(minidom::rxml::xml_ncname!("type").to_owned(), "error")
             .append(Element::from(error))
             .build(),
     )

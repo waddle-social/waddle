@@ -28,7 +28,7 @@
 
 use chrono::{DateTime, FixedOffset, Local, Offset, SecondsFormat, Utc};
 use minidom::Element;
-use xmpp_parsers::iq::{Iq, IqType};
+use xmpp_parsers::iq::Iq;
 
 /// Namespace for XEP-0202 Entity Time.
 pub const NS_TIME: &str = "urn:xmpp:time";
@@ -53,7 +53,7 @@ impl EntityTime {
 
 /// Check if an IQ stanza is an entity time query.
 pub fn is_time_query(iq: &Iq) -> bool {
-    matches!(&iq.payload, IqType::Get(elem) if elem.name() == "time" && elem.ns() == NS_TIME)
+    matches!(iq, Iq::Get { payload: elem, .. } if elem.name() == "time" && elem.ns() == NS_TIME)
 }
 
 fn format_time_zone_offset(offset: FixedOffset) -> String {
@@ -101,11 +101,11 @@ pub fn build_time_response(original_iq: &Iq, entity_time: &EntityTime) -> Iq {
         )
         .build();
 
-    Iq {
-        from: original_iq.to.clone(),
-        to: original_iq.from.clone(),
-        id: original_iq.id.clone(),
-        payload: IqType::Result(Some(time_elem)),
+    Iq::Result {
+        from: original_iq.to().cloned(),
+        to: original_iq.from().cloned(),
+        id: original_iq.id().to_string(),
+        payload: Some(time_elem),
     }
 }
 
@@ -116,8 +116,11 @@ pub fn build_current_time_response(original_iq: &Iq) -> Iq {
 
 /// Parse a time response into typed UTC and timezone offset values.
 pub fn parse_time_response(iq: &Iq) -> Option<EntityTime> {
-    let elem = match &iq.payload {
-        IqType::Result(Some(elem)) if elem.name() == "time" && elem.ns() == NS_TIME => elem,
+    let elem = match iq {
+        Iq::Result {
+            payload: Some(elem),
+            ..
+        } if elem.name() == "time" && elem.ns() == NS_TIME => elem,
         _ => return None,
     };
 
@@ -149,11 +152,11 @@ mod tests {
 
     fn make_time_query() -> Iq {
         let time_elem = Element::builder("time", NS_TIME).build();
-        Iq {
+        Iq::Get {
             from: Some("alice@example.com".parse().expect("valid jid")),
             to: Some("example.com".parse().expect("valid jid")),
             id: "time-1".to_string(),
-            payload: IqType::Get(time_elem),
+            payload: time_elem,
         }
     }
 
@@ -176,11 +179,11 @@ mod tests {
     #[test]
     fn test_is_time_query_false_for_other_ns() {
         let other = Element::builder("time", "jabber:client").build();
-        let iq = Iq {
+        let iq = Iq::Get {
             from: None,
             to: None,
             id: "t-1".to_string(),
-            payload: IqType::Get(other),
+            payload: other,
         };
         assert!(!is_time_query(&iq));
     }
@@ -188,11 +191,11 @@ mod tests {
     #[test]
     fn test_is_time_query_false_for_set() {
         let time_elem = Element::builder("time", NS_TIME).build();
-        let iq = Iq {
+        let iq = Iq::Set {
             from: None,
             to: None,
             id: "t-2".to_string(),
-            payload: IqType::Set(time_elem),
+            payload: time_elem,
         };
         assert!(!is_time_query(&iq));
     }
@@ -202,11 +205,15 @@ mod tests {
         let query = make_time_query();
         let result = build_time_response(&query, &sample_time(0));
 
-        assert_eq!(result.id, "time-1");
-        assert_eq!(result.from, query.to);
-        assert_eq!(result.to, query.from);
+        assert_eq!(result.id(), "time-1");
+        assert_eq!(result.from(), query.to());
+        assert_eq!(result.to(), query.from());
 
-        if let IqType::Result(Some(elem)) = &result.payload {
+        if let Iq::Result {
+            payload: Some(elem),
+            ..
+        } = &result
+        {
             assert_eq!(elem.name(), "time");
             assert_eq!(elem.ns(), NS_TIME);
 
@@ -231,7 +238,11 @@ mod tests {
         let query = make_time_query();
         let result = build_time_response(&query, &sample_time(-6 * 3600));
 
-        if let IqType::Result(Some(elem)) = &result.payload {
+        if let Iq::Result {
+            payload: Some(elem),
+            ..
+        } = &result
+        {
             let tzo = elem
                 .children()
                 .find(|c| c.is("tzo", NS_TIME))
@@ -247,7 +258,7 @@ mod tests {
         let query = make_time_query();
         let result = build_current_time_response(&query);
 
-        assert_eq!(result.id, "time-1");
+        assert_eq!(result.id(), "time-1");
         let parsed = parse_time_response(&result).expect("parseable current entity time");
         assert_eq!(parsed.tzo, EntityTime::now().tzo);
     }
@@ -269,11 +280,11 @@ mod tests {
 
     #[test]
     fn test_parse_time_response_rejects_invalid_tzo() {
-        let iq = Iq {
+        let iq = Iq::Result {
             from: None,
             to: None,
             id: "tzo-invalid".to_string(),
-            payload: IqType::Result(Some(
+            payload: Some(
                 Element::builder("time", NS_TIME)
                     .append(Element::builder("tzo", NS_TIME).append("+16:00").build())
                     .append(
@@ -282,7 +293,7 @@ mod tests {
                             .build(),
                     )
                     .build(),
-            )),
+            ),
         };
 
         assert!(parse_time_response(&iq).is_none());
@@ -290,11 +301,11 @@ mod tests {
 
     #[test]
     fn test_parse_time_response_rejects_non_utc_timestamp() {
-        let iq = Iq {
+        let iq = Iq::Result {
             from: None,
             to: None,
             id: "utc-invalid".to_string(),
-            payload: IqType::Result(Some(
+            payload: Some(
                 Element::builder("time", NS_TIME)
                     .append(Element::builder("tzo", NS_TIME).append("-05:00").build())
                     .append(
@@ -303,7 +314,7 @@ mod tests {
                             .build(),
                     )
                     .build(),
-            )),
+            ),
         };
 
         assert!(parse_time_response(&iq).is_none());
@@ -314,7 +325,7 @@ mod tests {
         let query = make_time_query();
         let result = build_time_response(&query, &EntityTime::now());
 
-        assert_eq!(result.from, query.to);
-        assert_eq!(result.to, query.from);
+        assert_eq!(result.from(), query.to());
+        assert_eq!(result.to(), query.from());
     }
 }

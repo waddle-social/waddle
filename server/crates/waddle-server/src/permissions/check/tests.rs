@@ -2,6 +2,7 @@ use super::*;
 use crate::db::actor::DbActor;
 use crate::db::{Database, MigrationRunner};
 use crate::permissions::tuple::{Relation, Tuple};
+use kameo::actor::Spawn;
 
 async fn setup_test_db() -> (kameo::actor::ActorRef<DbActor>, TupleStore) {
     let db = Database::in_memory("test-check").await.unwrap();
@@ -9,7 +10,7 @@ async fn setup_test_db() -> (kameo::actor::ActorRef<DbActor>, TupleStore) {
     let runner = MigrationRunner::global();
     runner.run(&db).await.unwrap();
 
-    let actor = kameo::spawn(DbActor::new(db));
+    let actor = DbActor::spawn(DbActor::new(db));
     let store = TupleStore::new(actor.clone());
     (actor, store)
 }
