@@ -336,7 +336,7 @@ async fn enqueue_xep0357_notification_candidate_for_message(
             return NotificationCandidateQueueOutcome::Completed;
         }
     };
-    // T0 XEP-0492 push-dispatch gate — compliance: suppressed
+    // T0 push-gate evaluation — compliance: suppressed
     // outcomes leave no row in `notification_candidates`. The same
     // typed evaluator runs again at T1 inside
     // `drain_pending_candidates_into_outbox` as a race-window guard.
@@ -351,7 +351,7 @@ async fn enqueue_xep0357_notification_candidate_for_message(
     let dnd_reader = crate::notification_outbox::NoopDndReader;
     let mut dnd_cache =
         std::collections::BTreeMap::<BareJid, crate::notification_outbox::DndState>::new();
-    let outcome = match crate::notification_outbox::evaluate_xep0492_at_dispatch(
+    let outcome = match crate::notification_outbox::evaluate_push_gate_at_dispatch(
         crate::notification_outbox::PushEvalStage::T0Emit,
         state
             .deps
@@ -371,8 +371,8 @@ async fn enqueue_xep0357_notification_candidate_for_message(
             warn!(
                 recipient = %recipient,
                 sender = %sender,
-                error = %error,
-                "XEP-0492 notification setting lookup failed at T0; deferring DM candidate"
+                error = ?error,
+                "push gate evaluation failed at T0; deferring offline-delivery DM candidate"
             );
             return NotificationCandidateQueueOutcome::RetryLater;
         }

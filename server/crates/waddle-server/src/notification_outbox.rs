@@ -824,7 +824,7 @@ pub trait RoomPolicyStore: Send + Sync {
 /// Zero-state [`RoomPolicyStore`] for DM emission paths.
 ///
 /// The T0 emission gate for direct messages calls
-/// [`evaluate_xep0492_at_dispatch`] on a candidate whose class is
+/// [`evaluate_push_gate_at_dispatch`] on a candidate whose class is
 /// [`NotificationClass::DirectMessage`] or
 /// [`NotificationClass::DirectMessageMention`]. Those arms never
 /// dispatch into `room_policy`, so the trait object is held only to
@@ -1941,8 +1941,9 @@ impl NotificationOutboxStore {
                     continue;
                 }
             }
-            // T1 XEP-0492 push-dispatch re-evaluation — race-window
-            // guard, defense-in-depth.
+            // T1 push-gate re-evaluation — race-window guard,
+            // defense-in-depth (XEP-0492 + XEP-0191 + XEP-0513 + XEP-0334 +
+            // Waddle DnD).
             //
             // The same typed evaluator already ran at T0 (DM emission
             // in `offline_delivery.rs`, groupchat emission in
@@ -1968,7 +1969,7 @@ impl NotificationOutboxStore {
             // publish-or-suppress. The room-policy lookup is cached
             // for the duration of this drain pass so a 100-member
             // groupchat does not produce 100 actor round-trips.
-            let outcome = match evaluate_xep0492_at_dispatch(
+            let outcome = match evaluate_push_gate_at_dispatch(
                 PushEvalStage::T1Drain,
                 settings_projection,
                 room_policy,
@@ -1984,8 +1985,8 @@ impl NotificationOutboxStore {
                     tracing::warn!(
                         recipient = %candidate.recipient_bare_jid(),
                         conversation = %candidate.conversation_jid(),
-                        %error,
-                        "XEP-0492 notification setting lookup failed at T1; deferring candidate"
+                        error = ?error,
+                        "push gate evaluation failed at T1; deferring candidate"
                     );
                     self.defer_candidate_policy_error(&candidate).await?;
                     continue;
@@ -2823,7 +2824,7 @@ impl NotificationOutboxStore {
     }
 }
 
-/// Typed outcome of `evaluate_xep0492_at_dispatch`.
+/// Typed outcome of `evaluate_push_gate_at_dispatch`.
 ///
 /// Extends [`crate::notification_settings_projection::PushDispatchDecision`]
 /// with a third state — `DeferUnknownRoomPolicy` — that surfaces the
@@ -2838,7 +2839,7 @@ impl NotificationOutboxStore {
 /// 2 will replace the live actor lookup with a durable projection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum T1PushDispatchOutcome {
-    /// XEP-0492 gate decided to fan out; enqueue the push job.
+    /// Push gate decided to fan out; enqueue the push job.
     Deliver,
     /// Push gate decided to suppress; mark candidate outboxed without
     /// enqueueing a job. `reason` is the typed audit reason that
@@ -2889,7 +2890,16 @@ pub(crate) enum UnknownRoomPolicySource {
     LookupError,
 }
 
-/// T1 XEP-0492 push-dispatch evaluator.
+/// Push-dispatch gate evaluator.
+///
+/// Single typed entry point that decides publish/suppress/defer for a
+/// [`NotificationCandidate`]. The function name was previously
+/// `evaluate_xep0492_at_dispatch`; the responsibility has since grown
+/// to cover the full XEP/Waddle suppressor matrix consulted at push
+/// dispatch — XEP-0492 (`<never/>` / `<on-mention/>`), XEP-0191
+/// (blocklist), XEP-0513 (`<noping/>`), XEP-0334 (`<no-store/>` /
+/// `<no-permanent-store/>`), and Waddle DnD — so the name now
+/// reflects the actual gate, not just one of its inputs.
 ///
 /// **Same typed evaluator called at two invocation moments**:
 ///
@@ -2964,7 +2974,7 @@ pub(crate) enum PushEvalStage {
     T1Drain,
 }
 
-pub(crate) async fn evaluate_xep0492_at_dispatch(
+pub(crate) async fn evaluate_push_gate_at_dispatch(
     stage: PushEvalStage,
     settings_projection: &crate::notification_settings_projection::NotificationSettingsProjectionStore,
     room_policy: &dyn RoomPolicyStore,
@@ -8040,7 +8050,7 @@ mod tests {
 
         // T0Emit MUST NOT suppress on noping — the row must persist
         // so T1 records the audit.
-        let t0 = evaluate_xep0492_at_dispatch(
+        let t0 = evaluate_push_gate_at_dispatch(
             PushEvalStage::T0Emit,
             &projection,
             &room_policy,
@@ -8057,7 +8067,7 @@ mod tests {
         );
 
         // T1Drain MUST suppress with the typed Xep0513Noping reason.
-        let t1 = evaluate_xep0492_at_dispatch(
+        let t1 = evaluate_push_gate_at_dispatch(
             PushEvalStage::T1Drain,
             &projection,
             &room_policy,
@@ -8087,7 +8097,7 @@ mod tests {
             NotificationMessageHints::none().with_xep0334(true, false),
         )
         .expect("candidate");
-        let t0_no_store = evaluate_xep0492_at_dispatch(
+        let t0_no_store = evaluate_push_gate_at_dispatch(
             PushEvalStage::T0Emit,
             &projection,
             &room_policy,
@@ -8099,7 +8109,7 @@ mod tests {
         .await
         .expect("t0 eval");
         assert!(matches!(t0_no_store, T1PushDispatchOutcome::Deliver));
-        let t1_no_store = evaluate_xep0492_at_dispatch(
+        let t1_no_store = evaluate_push_gate_at_dispatch(
             PushEvalStage::T1Drain,
             &projection,
             &room_policy,
@@ -8591,7 +8601,7 @@ mod tests {
         let mut room_policy_cache =
             std::collections::BTreeMap::<BareJid, RoomPolicyCacheEntry>::new();
         let mut dnd_cache = std::collections::BTreeMap::<BareJid, DndState>::new();
-        let outcome = evaluate_xep0492_at_dispatch(
+        let outcome = evaluate_push_gate_at_dispatch(
             PushEvalStage::T0Emit,
             &projection,
             &room_policy,
@@ -8684,7 +8694,7 @@ mod tests {
         let mut room_policy_cache =
             std::collections::BTreeMap::<BareJid, RoomPolicyCacheEntry>::new();
         let mut dnd_cache = std::collections::BTreeMap::<BareJid, DndState>::new();
-        let outcome = evaluate_xep0492_at_dispatch(
+        let outcome = evaluate_push_gate_at_dispatch(
             PushEvalStage::T0Emit,
             &projection,
             &room_policy,

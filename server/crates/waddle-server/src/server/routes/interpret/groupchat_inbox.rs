@@ -284,7 +284,7 @@ async fn insert_groupchat_notification_candidate(
             return GroupchatNotificationCandidateQueueOutcome::Completed;
         }
     };
-    // T0 XEP-0492 push-dispatch gate — compliance: suppressed
+    // T0 push-gate evaluation — compliance: suppressed
     // outcomes leave no row in `notification_candidates`. The same
     // typed evaluator runs again at T1 inside
     // `drain_pending_candidates_into_outbox` as a race-window guard.
@@ -313,7 +313,7 @@ async fn insert_groupchat_notification_candidate(
     let dnd_reader = crate::notification_outbox::NoopDndReader;
     let mut dnd_cache =
         std::collections::BTreeMap::<BareJid, crate::notification_outbox::DndState>::new();
-    let outcome = match crate::notification_outbox::evaluate_xep0492_at_dispatch(
+    let outcome = match crate::notification_outbox::evaluate_push_gate_at_dispatch(
         crate::notification_outbox::PushEvalStage::T0Emit,
         state
             .deps
@@ -333,8 +333,8 @@ async fn insert_groupchat_notification_candidate(
             warn!(
                 recipient = %owner,
                 room = %room,
-                error = %error,
-                "ProjectGroupchatInbox: XEP-0492 notification setting lookup failed at T0; deferring candidate"
+                error = ?error,
+                "ProjectGroupchatInbox: push gate evaluation failed at T0; deferring groupchat candidate"
             );
             return GroupchatNotificationCandidateQueueOutcome::RetryLater;
         }
