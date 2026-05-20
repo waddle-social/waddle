@@ -19,7 +19,7 @@ import PinnedPanel from "@/components/chat/PinnedPanel.vue";
 import UserSettingsPage from "@/components/chat/UserSettingsPage.vue";
 import WaddlesSidebar from "@/components/chat/WaddlesSidebar.vue";
 import AdminView from "@/components/admin/AdminView.vue";
-import { matchLocation, navigate, type AdminPanel } from "@/router";
+import { matchLocation, type AdminPanel } from "@/router";
 import { buildHomeDashboardProps } from "@/home/dashboard-props";
 import type { ChatAppController } from "@/shell/chat-app-controller";
 import type { DiscoveredExtensionRoute } from "@/lib/xmpp/extension-commands";
@@ -89,6 +89,7 @@ const {
   openUserSettings,
   openHome,
   openThreads,
+  openCommunitySurface,
   closeUserSettings,
   handleLogout,
   selectChannel,
@@ -193,10 +194,7 @@ function setPinnedPanelOpen(isOpen: boolean) {
 }
 
 function onSelectCommunitySurface(surface: "feed" | "stories" | "events") {
-  // Community surfaces are first-class routes (`/feed`, `/stories`,
-  // `/events`) — navigate and let the controller's popstate handler
-  // mirror the route into ui state.
-  navigate({ id: surface });
+  openCommunitySurface(surface);
 }
 
 function onSelectChannelFromSidebar(id: string) {

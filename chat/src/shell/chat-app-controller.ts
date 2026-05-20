@@ -1302,6 +1302,29 @@ export function useChatAppController(giphyApiKey: string) {
   }
 
   /**
+   * Navigate to a community surface — Feed / Stories / Events. These
+   * are first-class routes (`/feed`, `/stories`, `/events`) but they
+   * also need the in-page state set immediately so the v-else-if
+   * branches in ChatReadyShell re-render this tick. `pushState` (via
+   * `navigate()`) doesn't fire `popstate`, so the controller's
+   * popstate-driven state sync only covers back/forward; in-app
+   * clicks need to mirror what `applyRouteTarget` would do.
+   */
+  function openCommunitySurface(surface: "feed" | "stories" | "events") {
+    ui.showMobileNav.value = false;
+    ui.showMobileDetails.value = false;
+    ui.activePage.value = "chat";
+    ui.activeCommunitySurface.value = surface;
+    ui.sidebarMode.value = "channels";
+    dmConversations.closeDm();
+    waddles.activeChannelId.value = null;
+    activeRightPanel.value = null;
+    activeThreadStack.value = [];
+    activeExtensionRouteKey.value = null;
+    navigate({ id: surface });
+  }
+
+  /**
    * Navigate back to the Home dashboard from anywhere. Clears any
    * channel/DM selection, drops thread state, closes the mobile nav
    * drawer, and resyncs the URL so a refresh returns the user to home
@@ -1870,6 +1893,7 @@ export function useChatAppController(giphyApiKey: string) {
       openUserSettings,
       openHome,
       openThreads,
+      openCommunitySurface,
       closeUserSettings,
       handleLogout,
       selectChannel,
