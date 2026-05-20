@@ -1523,7 +1523,9 @@ export function useChatAppController(giphyApiKey: string, initialMatch?: RouteMa
     }
 
     if (shouldLoadStructureForMatch(match, waddles.channels.value.length)) {
-      await waddles.loadStructure();
+      // applyRouteTarget sets activeChannelId from match.params.channelId
+      // a few lines down — auto-selecting here would race that.
+      await waddles.loadStructure(null, { noChannelSelect: true });
       if (requestId !== routeRequestId) return;
     }
 
@@ -1598,10 +1600,15 @@ export function useChatAppController(giphyApiKey: string, initialMatch?: RouteMa
     isApplyingRoute.value = true;
 
     try {
-      if (match.id === "home") {
+      // Always pass noChannelSelect — channel-targeting routes
+      // (`channel` / `channelExtension`) get their active channel set
+      // by applyRouteTarget from match.params.channelId, and every
+      // other route doesn't want a channel active at all. Auto-select
+      // would briefly highlight an arbitrary channel before
+      // applyRouteTarget cleared it (visible flicker on /events, /feed,
+      // /stories, /threads, …).
+      if (waddles.channels.value.length === 0) {
         await waddles.loadStructure(null, { noChannelSelect: true });
-      } else {
-        await waddles.loadSpace({ loadStructure: !shouldLoadStructureForMatch(match, waddles.channels.value.length) });
       }
       await refreshExtensionRoutes();
       if (requestId === routeRequestId) {
