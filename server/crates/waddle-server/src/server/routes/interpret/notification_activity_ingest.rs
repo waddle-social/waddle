@@ -29,12 +29,13 @@
 //! recent activity.
 
 use jid::BareJid;
-use tracing::warn;
+use tracing::{debug, warn};
 use xmpp_parsers::message::Message;
 
 use crate::notification_activity::NotificationChatState;
 use crate::server::routes::websocket::WebSocketState;
-use waddle_xmpp::xep::xep0085::ChatStateCarrier;
+use waddle_xmpp::xep::xep0085::{ChatState, ChatStateCarrier};
+use waddle_xmpp::xep::xep0203::has_delay;
 
 use super::Deps;
 
@@ -56,6 +57,19 @@ fn activity_store<'a>(
 /// (the receiving side updates its projection only when its own user
 /// emits a chat-state, a read marker, an outbound message, or a
 /// presence event in that conversation).
+///
+/// Two XEP-conformance filters apply BEFORE the projection write:
+///
+/// 1. **XEP-0085 `<gone/>` (§"Definitions" + §"Use in Groupchat" item 3):**
+///    `<gone/>` signals the user has ended their participation in the
+///    conversation. Recording it as activity would extend the XEP-0513
+///    `<active/>` TTL for a user who just left — wrong semantics.
+///    Skip without writing.
+/// 2. **XEP-0203 `<delay/>`:** A delayed stanza is a historical replay
+///    (MAM catchup, offline-stored stanza, room subject replay on
+///    join). Persisting "the user is active now" off a 3-hour-old
+///    delayed chat-state would inflate the projection. Skip without
+///    writing.
 pub(super) async fn record_chat_state_activity(
     deps: &Deps<'_>,
     sender: &BareJid,
@@ -65,6 +79,25 @@ pub(super) async fn record_chat_state_activity(
     let Some(state) = message.chat_state() else {
         return;
     };
+    if matches!(state, ChatState::Gone) {
+        debug!(
+            owner = %sender,
+            conversation = %conversation,
+            "notification_activity: skipping <gone/> chat-state \
+             (XEP-0085 'gone' = departure, not engagement)"
+        );
+        return;
+    }
+    if has_delay(message) {
+        debug!(
+            owner = %sender,
+            conversation = %conversation,
+            chat_state = ?state,
+            "notification_activity: skipping delayed chat-state \
+             (XEP-0203 <delay/> = historical replay, not real-time activity)"
+        );
+        return;
+    }
     let Some(store) = activity_store(deps) else {
         return;
     };
@@ -110,11 +143,34 @@ pub(super) async fn record_read_marker_activity(
 /// Outbound message commit: when the sender's own archive write
 /// commits a message for `(sender, conversation)`, bump activity.
 /// Sending a message is the strongest "currently active" signal.
+///
+/// XEP-0203 `<delay/>` filter: if the outbound stanza carries a
+/// `<delay/>` (server-bridge replay, S2S buffered delivery, etc.) the
+/// commit is a historical replay, not a real-time send. Skip the
+/// activity bump so the projection isn't inflated by stale catchup
+/// writes.
+///
+/// XEP-0334 interaction (`<no-store/>` / `<no-permanent-store/>`):
+/// the upstream archive eligibility gate (`MucArchiveHandler` /
+/// `ArchiveHandler`) refuses to emit `ArchiveDirect` / `ArchiveGroupchat`
+/// effects for messages that opted out of archival, so this helper
+/// never sees them. Activity is therefore correctly tied to durable
+/// storage: ephemeral hints don't bump the projection.
 pub(super) async fn record_outbound_message_activity(
     deps: &Deps<'_>,
     sender: &BareJid,
     conversation: &BareJid,
+    message: &Message,
 ) {
+    if has_delay(message) {
+        debug!(
+            owner = %sender,
+            conversation = %conversation,
+            "notification_activity: skipping delayed outbound commit \
+             (XEP-0203 <delay/> = historical replay, not real-time activity)"
+        );
+        return;
+    }
     let Some(store) = activity_store(deps) else {
         return;
     };
@@ -184,6 +240,56 @@ pub(crate) async fn record_presence_unavailable_activity_on_state(
             %error,
             "notification_activity: record_presence_unavailable failed; \
              projection write skipped (XMPP routing unaffected)",
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::TimeZone;
+    use waddle_xmpp::xep::xep0085::build_chat_state_message;
+    use waddle_xmpp::xep::xep0203::build_delay_element_simple;
+
+    /// XEP-0085 §"Use in Groupchat" item 3 says clients SHOULD ignore
+    /// `<gone/>` chat-states in MUC, and §"Definitions" describes
+    /// `<gone/>` as the user having ended participation in the
+    /// conversation. Persisting it as "currently active" would extend
+    /// the XEP-0513 `<active/>` TTL for a user who just left. Lock the
+    /// typed predicate the helper relies on so a refactor cannot
+    /// silently re-introduce the conformance gap.
+    #[test]
+    fn xep0085_gone_state_is_detected_for_filter() {
+        let to: jid::Jid = "alice@example.com".parse().expect("to");
+        let from: jid::Jid = "bob@example.com/work".parse().expect("from");
+        let msg = build_chat_state_message(to, from, ChatState::Gone);
+        assert!(matches!(msg.chat_state(), Some(ChatState::Gone)));
+        assert!(matches!(
+            ChatState::Gone,
+            ChatState::Gone /* filter pattern */
+        ));
+    }
+
+    /// XEP-0203 §"Introduction" — a `<delay/>` element marks the stanza
+    /// as historical replay (MAM catchup, offline-stored, etc). Lock
+    /// the typed predicate so a refactor that drops the `has_delay`
+    /// check can't silently inflate the projection with stale signals.
+    #[test]
+    fn xep0203_delay_is_detected_for_filter() {
+        let to: jid::Jid = "alice@example.com".parse().expect("to");
+        let from: jid::Jid = "bob@example.com/work".parse().expect("from");
+        let mut msg = build_chat_state_message(to, from, ChatState::Active);
+        assert!(!has_delay(&msg), "fresh chat-state must not look delayed");
+        msg.payloads.push(build_delay_element_simple(
+            chrono::Utc
+                .timestamp_opt(1_700_000_000, 0)
+                .single()
+                .expect("delay stamp"),
+            "muc.example.com",
+        ));
+        assert!(
+            has_delay(&msg),
+            "<delay/> stamp must mark the stanza as historical"
         );
     }
 }

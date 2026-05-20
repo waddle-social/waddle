@@ -47,6 +47,7 @@ pub(super) async fn archive_groupchat_event(
         deps,
         &sender.to_bare(),
         &room,
+        &message,
     )
     .await;
     archive_id.rewrite

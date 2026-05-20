@@ -46,7 +46,7 @@ pub(super) async fn archive_direct(
             // archive does NOT indicate the recipient is active.
             if archive_jid == from {
                 super::notification_activity_ingest::record_outbound_message_activity(
-                    deps, &from, &to,
+                    deps, &from, &to, &message,
                 )
                 .await;
             }
