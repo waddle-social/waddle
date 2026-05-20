@@ -19,62 +19,12 @@ fn calls_mixer_jid(server_domain: &str) -> String {
     format!("calls.{server_domain}")
 }
 
-/// Walk an `<iq type='result'>` payload from the server's Muji
-/// `session-accept` IQ and pull out the typed `WaddleLiveKitJoin`.
-///
-/// The wire shape (XEP-0166 session-accept + XEP-0272 §Joining +
-/// XEP-0298 focus marker; see
-/// `waddle-xmpp/src/protocol/handlers/jingle.rs::handle_muji_session_initiate`)
-/// is:
-///
-/// ```xml
-/// <iq type='result' from='calls.<domain>'>
-///   <jingle xmlns='urn:xmpp:jingle:1' action='session-accept'
-///           responder='calls.<domain>' sid='ROOM_JID'>
-///     <content creator='initiator' name='audio' senders='both'>
-///       <description xmlns='urn:xmpp:jingle:apps:rtp:1' media='audio'/>
-///       <transport xmlns='urn:waddle:transports:livekit:0'
-///                  url='...' room='...' identity='...'>
-///         <token>JWT</token>
-///       </transport>
-///     </content>
-///     <muji xmlns='urn:xmpp:jingle:muji:0' room='ROOM_JID'/>
-///     <conference-info xmlns='urn:xmpp:coin:1' isfocus='true'/>
-///   </jingle>
-/// </iq>
-/// ```
-///
-/// We grab the first content's transport (every content carries
-/// the same token; LiveKit's identity model is "one identity per
-/// participant").
-fn parse_muji_session_accept(result: &Element) -> Result<crate::types::WaddleLiveKitJoin, String> {
-    let jingle = result
-        .get_child("jingle", NS_JINGLE)
-        .ok_or_else(|| "muji session-accept: response missing <jingle/>".to_string())?;
-    let content = jingle
-        .children()
-        .find(|c| c.name() == "content")
-        .ok_or_else(|| "muji session-accept: <jingle/> missing <content/>".to_string())?;
-    let transport = content
-        .get_child("transport", NS_WADDLE_LIVEKIT_TRANSPORT)
-        .ok_or_else(|| "muji session-accept: <content/> missing LiveKit transport".to_string())?;
-    let attr = |name: &str| -> Result<String, String> {
-        transport
-            .attr(name)
-            .map(str::to_owned)
-            .ok_or_else(|| format!("muji session-accept: transport missing @{name}"))
-    };
-    let token = transport
-        .get_child("token", NS_WADDLE_LIVEKIT_TRANSPORT)
-        .map(|c| c.text())
-        .ok_or_else(|| "muji session-accept: transport missing <token/>".to_string())?;
-    Ok(crate::types::WaddleLiveKitJoin {
-        url: attr("url")?,
-        room: attr("room")?,
-        identity: attr("identity")?,
-        token,
-    })
-}
+// Inbound Muji session-accept stanzas (XEP-0166 §6.3 separate
+// IQ-set) are parsed by `waddle_xmpp_client::messaging::parse_jingle_iq`
+// via the `events.rs::UnhandledStanza` → `on_call` dispatcher and
+// surfaced to the chat-side as a typed `CallEventKind::SessionAccept`.
+// There is no per-wasm Muji-specific accept parser; the LiveKit join
+// extraction is centralised in `waddle-xmpp-client/src/messaging/call.rs`.
 
 /// Build the typed Muji `<content>` advertised inside both the MUC
 /// presence and the Jingle session-initiate. Minimal XEP-0167
@@ -82,9 +32,34 @@ fn parse_muji_session_accept(result: &Element) -> Result<crate::types::WaddleLiv
 /// plus an empty `<transport xmlns='urn:waddle:transports:livekit:0'/>`
 /// placeholder that the server rewrites with the issued credentials.
 fn build_muji_jingle_content(media: &str) -> Element {
-    let description = Element::builder("description", NS_JINGLE_RTP)
-        .attr(minidom::rxml::xml_ncname!("media").to_owned(), media)
-        .build();
+    // XEP-0167 §3.1 example convention + XEP-0272's own examples
+    // include `<payload-type/>` children. Emit canonical
+    // LiveKit-supported codecs (Opus / VP8) so a strict Muji peer
+    // parsing our session-initiate sees a valid codec offer.
+    let mut description_builder = Element::builder("description", NS_JINGLE_RTP)
+        .attr(minidom::rxml::xml_ncname!("media").to_owned(), media);
+    match media {
+        "audio" => {
+            description_builder = description_builder.append(
+                Element::builder("payload-type", NS_JINGLE_RTP)
+                    .attr(minidom::rxml::xml_ncname!("id").to_owned(), "111")
+                    .attr(minidom::rxml::xml_ncname!("name").to_owned(), "opus")
+                    .attr(minidom::rxml::xml_ncname!("clockrate").to_owned(), "48000")
+                    .attr(minidom::rxml::xml_ncname!("channels").to_owned(), "2")
+                    .build(),
+            );
+        }
+        "video" => {
+            description_builder = description_builder.append(
+                Element::builder("payload-type", NS_JINGLE_RTP)
+                    .attr(minidom::rxml::xml_ncname!("id").to_owned(), "96")
+                    .attr(minidom::rxml::xml_ncname!("name").to_owned(), "VP8")
+                    .attr(minidom::rxml::xml_ncname!("clockrate").to_owned(), "90000")
+                    .build(),
+            );
+        }
+        _ => {}
+    }
     let transport = Element::builder("transport", NS_WADDLE_LIVEKIT_TRANSPORT).build();
     Element::builder("content", NS_JINGLE)
         .attr(
@@ -93,7 +68,7 @@ fn build_muji_jingle_content(media: &str) -> Element {
         )
         .attr(minidom::rxml::xml_ncname!("name").to_owned(), media)
         .attr(minidom::rxml::xml_ncname!("senders").to_owned(), "both")
-        .append(description)
+        .append(description_builder.build())
         .append(transport)
         .build()
 }
@@ -343,9 +318,17 @@ impl WaddleClient {
                 .attr(minidom::rxml::xml_ncname!("to").to_owned(), mixer.as_str())
                 .append(jingle.build())
                 .build();
-            let result = send_iq_command(inner, stanza).await?;
-            let join = parse_muji_session_accept(&result).map_err(js_error)?;
-            to_js_value(&join)
+            // XEP-0166 §6.3 conformance: the server replies with an
+            // EMPTY IQ-result ack. The actual session-accept
+            // arrives as a SEPARATE server-initiated
+            // `<iq type='set'>` and surfaces to the chat-side via
+            // the `on_call` callback as a typed
+            // `CallEventKind::SessionAccept`. The chat layer
+            // matches it to the pending session-initiate by `sid`
+            // (which equals the room JID per the Waddle
+            // convention) and resolves its own join Promise.
+            send_iq_command(inner, stanza).await?;
+            Ok(JsValue::UNDEFINED)
         })
     }
 
@@ -450,102 +433,11 @@ mod tests {
     use jid::FullJid;
     use std::str::FromStr;
 
-    fn canonical_muji_accept_iq() -> Element {
-        // Mirrors the exact byte layout emitted by
-        // `JingleHandler::handle_muji_session_initiate` (see
-        // `waddle-xmpp/src/protocol/handlers/jingle.rs`) — keeps
-        // this parser locked to the real wire shape rather than a
-        // hand-typed approximation.
-        let xml = "<iq xmlns='jabber:client' type='result' id='abc'>\
-                <jingle xmlns='urn:xmpp:jingle:1' action='session-accept' \
-                        responder='calls.waddle.test' sid='chat@muc.waddle.test'>\
-                    <content creator='initiator' name='audio' senders='both'>\
-                        <description xmlns='urn:xmpp:jingle:apps:rtp:1' media='audio'/>\
-                        <transport xmlns='urn:waddle:transports:livekit:0' \
-                                   url='wss://livekit.waddle.test/' \
-                                   room='chat@muc.waddle.test' \
-                                   identity='alice@waddle.test/web-1'>\
-                            <token>eyJhbGciOiJIUzI1NiJ9.payload.sig</token>\
-                        </transport>\
-                    </content>\
-                    <muji xmlns='urn:xmpp:jingle:muji:0' room='chat@muc.waddle.test'/>\
-                    <conference-info xmlns='urn:xmpp:coin:1' isfocus='true'/>\
-                </jingle>\
-            </iq>";
-        xml.parse().expect("test fixture parses")
-    }
-
-    #[test]
-    fn parse_muji_session_accept_reads_canonical_response() {
-        let iq = canonical_muji_accept_iq();
-        let join = parse_muji_session_accept(&iq).expect("canonical response parses");
-        assert_eq!(join.url, "wss://livekit.waddle.test/");
-        assert_eq!(join.room, "chat@muc.waddle.test");
-        assert_eq!(join.identity, "alice@waddle.test/web-1");
-        assert_eq!(join.token, "eyJhbGciOiJIUzI1NiJ9.payload.sig");
-    }
-
-    #[test]
-    fn parse_muji_session_accept_rejects_missing_jingle() {
-        let iq: Element = "<iq xmlns='jabber:client' type='result' id='abc'/>"
-            .parse()
-            .unwrap();
-        let err = parse_muji_session_accept(&iq).unwrap_err();
-        assert!(err.contains("missing <jingle/>"), "got: {err}");
-    }
-
-    #[test]
-    fn parse_muji_session_accept_rejects_missing_content() {
-        let iq: Element = "<iq xmlns='jabber:client' type='result' id='abc'>\
-                <jingle xmlns='urn:xmpp:jingle:1' action='session-accept' \
-                        responder='calls.waddle.test' sid='chat@muc.waddle.test'/>\
-            </iq>"
-            .parse()
-            .unwrap();
-        let err = parse_muji_session_accept(&iq).unwrap_err();
-        assert!(err.contains("missing <content/>"), "got: {err}");
-    }
-
-    #[test]
-    fn parse_muji_session_accept_rejects_missing_transport_attribute() {
-        let iq: Element = "<iq xmlns='jabber:client' type='result' id='abc'>\
-                <jingle xmlns='urn:xmpp:jingle:1' action='session-accept' \
-                        responder='calls.waddle.test' sid='chat@muc.waddle.test'>\
-                    <content creator='initiator' name='audio' senders='both'>\
-                        <description xmlns='urn:xmpp:jingle:apps:rtp:1' media='audio'/>\
-                        <transport xmlns='urn:waddle:transports:livekit:0' \
-                                   room='chat@muc.waddle.test' \
-                                   identity='alice@waddle.test/web-1'>\
-                            <token>jwt</token>\
-                        </transport>\
-                    </content>\
-                </jingle>\
-            </iq>"
-            .parse()
-            .unwrap();
-        let err = parse_muji_session_accept(&iq).unwrap_err();
-        assert!(err.contains("@url"), "got: {err}");
-    }
-
-    #[test]
-    fn parse_muji_session_accept_rejects_missing_token() {
-        let iq: Element = "<iq xmlns='jabber:client' type='result' id='abc'>\
-                <jingle xmlns='urn:xmpp:jingle:1' action='session-accept' \
-                        responder='calls.waddle.test' sid='chat@muc.waddle.test'>\
-                    <content creator='initiator' name='audio' senders='both'>\
-                        <description xmlns='urn:xmpp:jingle:apps:rtp:1' media='audio'/>\
-                        <transport xmlns='urn:waddle:transports:livekit:0' \
-                                   url='wss://livekit.waddle.test/' \
-                                   room='chat@muc.waddle.test' \
-                                   identity='alice@waddle.test/web-1'/>\
-                    </content>\
-                </jingle>\
-            </iq>"
-            .parse()
-            .unwrap();
-        let err = parse_muji_session_accept(&iq).unwrap_err();
-        assert!(err.contains("missing <token/>"), "got: {err}");
-    }
+    // Muji session-accept parsing is exercised by the
+    // `waddle-xmpp-client` crate's `messaging::call::parse_jingle_iq`
+    // tests — the canonical parser the events.rs dispatcher uses.
+    // The wasm-side per-Muji parser was removed once the wire
+    // shape moved to the XEP-0166 §6.3 separate-IQ pattern.
 
     #[test]
     fn calls_mixer_jid_appends_localpart_to_domain() {

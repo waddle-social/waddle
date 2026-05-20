@@ -104,9 +104,26 @@ impl MujiContent {
     }
 
     fn to_element(&self) -> Element {
-        let description = Element::builder(DESCRIPTION_NAME, crate::xep::xep0167::NS_JINGLE_RTP)
-            .attr(attr_media(), self.media.as_str())
-            .build();
+        // XEP-0167 §3.1 / XEP-0272 §Joining examples include
+        // `<payload-type/>` children inside `<description/>`. Waddle
+        // emits the canonical LiveKit codecs (Opus for audio, VP8
+        // for video) so a strict Muji peer reading our presence
+        // sees a valid codec advertisement. LiveKit still dictates
+        // the actual encoding negotiation below the signaling
+        // layer; the payload-types here are documentation of what
+        // the participant offers.
+        let mut description_builder =
+            Element::builder(DESCRIPTION_NAME, crate::xep::xep0167::NS_JINGLE_RTP)
+                .attr(attr_media(), self.media.as_str());
+        match self.media {
+            MediaKind::Audio => {
+                description_builder = description_builder.append(opus_payload_type_element());
+            }
+            MediaKind::Video => {
+                description_builder = description_builder.append(vp8_payload_type_element());
+            }
+        }
+        let description = description_builder.build();
         Element::builder(CONTENT_NAME, NS_MUJI)
             .attr(attr_creator(), creator_as_attr(self.creator))
             .attr(attr_name(), self.name.0.as_str())
@@ -281,6 +298,29 @@ fn creator_as_attr(creator: Creator) -> &'static str {
         Creator::Initiator => "initiator",
         Creator::Responder => "responder",
     }
+}
+
+/// Canonical Opus payload-type used in Muji audio descriptions.
+/// Matches WebRTC default (PT 111, 48 kHz, 2 channels) and
+/// `xep0167::opus_audio_description`.
+fn opus_payload_type_element() -> Element {
+    Element::builder("payload-type", crate::xep::xep0167::NS_JINGLE_RTP)
+        .attr(xml_ncname!("id").to_owned(), "111")
+        .attr(xml_ncname!("name").to_owned(), "opus")
+        .attr(xml_ncname!("clockrate").to_owned(), "48000")
+        .attr(xml_ncname!("channels").to_owned(), "2")
+        .build()
+}
+
+/// Canonical VP8 payload-type used in Muji video descriptions.
+/// Matches the WebRTC default (PT 96, 90 kHz) and
+/// `xep0167::vp8_video_description`.
+fn vp8_payload_type_element() -> Element {
+    Element::builder("payload-type", crate::xep::xep0167::NS_JINGLE_RTP)
+        .attr(xml_ncname!("id").to_owned(), "96")
+        .attr(xml_ncname!("name").to_owned(), "VP8")
+        .attr(xml_ncname!("clockrate").to_owned(), "90000")
+        .build()
 }
 
 fn parse_creator(raw: &str) -> Option<Creator> {

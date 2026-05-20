@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import {
   $mucCallParticipants,
   applyMucCallPresence,
+  awaitPreparingEcho,
   clearMucCallParticipants,
   mucCallParticipantCount,
 } from "../src/lib/calls/muc-call-presence";
@@ -156,5 +157,77 @@ describe("applyMucCallPresence", () => {
     });
     clearMucCallParticipants();
     expect($mucCallParticipants.get()).toEqual({});
+  });
+});
+
+describe("awaitPreparingEcho (XEP-0272 §Joining MUST)", () => {
+  test("resolves when a matching preparing-only presence echo arrives", async () => {
+    // The pre-call flow registers an echo waiter then fires the
+    // preparing presence; the MUC echoes it back; the waiter
+    // resolves so beginMucCall can proceed.
+    const wait = awaitPreparingEcho("room@muc.test", "alice", 5000);
+    applyMucCallPresence({
+      from: "room@muc.test/alice",
+      presence_type: "available",
+      muji: preparingMuji,
+    });
+    await wait;
+    // No assertion needed — the await itself is the test. If the
+    // echo never fires the listener, the test times out.
+  });
+
+  test("does NOT resolve on a different nick's preparing echo", async () => {
+    // Two participants prepare at the same time; alice's waiter
+    // must NOT resolve on bob's echo.
+    const aliceWait = awaitPreparingEcho("room@muc.test", "alice", 200);
+    let aliceResolved = false;
+    aliceWait.then(() => {
+      aliceResolved = true;
+    });
+    applyMucCallPresence({
+      from: "room@muc.test/bob",
+      presence_type: "available",
+      muji: preparingMuji,
+    });
+    // Give the microtask queue a chance to run before checking.
+    await new Promise((r) => setTimeout(r, 10));
+    expect(aliceResolved).toBe(false);
+    // Now alice's echo arrives:
+    applyMucCallPresence({
+      from: "room@muc.test/alice",
+      presence_type: "available",
+      muji: preparingMuji,
+    });
+    await aliceWait;
+    expect(aliceResolved).toBe(true);
+  });
+
+  test("does NOT resolve on a content (active) presence — preparing-only is the trigger", async () => {
+    // A content presence is NOT a preparing echo; the waiter must
+    // continue to block until the MUC echoes preparing.
+    const wait = awaitPreparingEcho("room@muc.test", "alice", 200);
+    let resolved = false;
+    wait.then(() => {
+      resolved = true;
+    });
+    applyMucCallPresence({
+      from: "room@muc.test/alice",
+      presence_type: "available",
+      muji: activeMuji, // active, not preparing
+    });
+    await new Promise((r) => setTimeout(r, 10));
+    expect(resolved).toBe(false);
+    // Eventually the 200ms timeout will resolve it; await to clean up.
+    await wait;
+  });
+
+  test("falls back to timeout when no echo arrives", async () => {
+    // The MUC may have dropped the presence; we don't want to
+    // hang the call setup forever. 50ms timeout for the test.
+    const start = Date.now();
+    await awaitPreparingEcho("room@muc.test/nobody", "alice", 50);
+    const elapsed = Date.now() - start;
+    expect(elapsed).toBeGreaterThanOrEqual(40); // some scheduling slack
+    expect(elapsed).toBeLessThan(500);
   });
 });

@@ -1,6 +1,70 @@
 import { atom } from "nanostores";
 import { outboundCalls, type CallWireSender } from "./outbound";
 import type { CallEvent, CallMedia, CallState, LiveKitJoin } from "./types";
+import { awaitPreparingEcho } from "./muc-call-presence";
+
+/**
+ * XEP-0272 §Joining MUST: a client emitting a preparing presence
+ * MUST wait for the MUC to rebroadcast it before proceeding. The
+ * MUC echo arrives over the same WebSocket session, so the wait
+ * is bounded by the network round-trip. A 2s timeout covers
+ * pathologically slow networks while preventing the call setup
+ * from hanging indefinitely on a missed echo.
+ */
+const PREPARING_ECHO_TIMEOUT_MS = 2000;
+
+/**
+ * XEP-0166 §6.3 + XEP-0272 separate-IQ accept: the server's
+ * session-accept arrives as an inbound `<iq type='set'>` after
+ * the empty IQ-result ack of our session-initiate. We register
+ * a resolver keyed by sid (= room JID per Waddle convention)
+ * BEFORE sending the initiate, then await it after the initiate's
+ * empty ack returns. 10s timeout covers slow SFU token mints.
+ */
+const MUJI_ACCEPT_TIMEOUT_MS = 10_000;
+
+/**
+ * Pending Muji session-accept resolvers keyed by sid (= room JID).
+ * The `on_call` dispatcher routes an inbound
+ * `CallEventKind::SessionAccept` whose sid matches a registered
+ * entry to the resolver instead of running the 1:1 reducer — Muji
+ * accepts are owned by `beginMucCall`'s Promise chain, not the
+ * `$callState` reducer.
+ */
+const pendingMujiAccepts = new Map<
+  string,
+  { resolve: (join: LiveKitJoin) => void; reject: (err: Error) => void; timer: ReturnType<typeof setTimeout> }
+>();
+
+function registerPendingMujiAccept(sid: string): Promise<LiveKitJoin> {
+  return new Promise<LiveKitJoin>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      pendingMujiAccepts.delete(sid);
+      reject(
+        new Error(
+          `Muji session-accept did not arrive within ${MUJI_ACCEPT_TIMEOUT_MS}ms`,
+        ),
+      );
+    }, MUJI_ACCEPT_TIMEOUT_MS);
+    pendingMujiAccepts.set(sid, { resolve, reject, timer });
+  });
+}
+
+/**
+ * Try to dispatch an inbound `session-accept` event to the pending
+ * Muji-accept resolver, if any. Returns `true` when the event was
+ * consumed (caller short-circuits the 1:1 reducer); `false` when
+ * the event should fall through to normal handling.
+ */
+function tryFulfillMujiAccept(event: CallEvent): boolean {
+  if (event.kind !== "session-accept") return false;
+  const pending = pendingMujiAccepts.get(event.sid);
+  if (!pending) return false;
+  pendingMujiAccepts.delete(event.sid);
+  clearTimeout(pending.timer);
+  pending.resolve(event.join);
+  return true;
+}
 
 /**
  * Single-slot call lifecycle store. Updated by `applyCallEvent`
@@ -127,6 +191,15 @@ export function reduceCallState(current: CallState, event: CallEvent): CallState
  *    `setTimeout`/`clearTimeout` are global-state side-effects.
  */
 export function applyCallEvent(event: CallEvent): void {
+  // Route inbound Muji session-accept stanzas to the pending
+  // `beginMucCall` Promise BEFORE the 1:1 reducer sees them. A
+  // Muji accept has its sid equal to the room JID and arrives
+  // from the SFU mixer (`calls.<domain>`); the 1:1 reducer would
+  // mis-interpret it as a peer accepting a JMI ring. Consuming
+  // here keeps the two flows cleanly separated.
+  if (tryFulfillMujiAccept(event)) {
+    return;
+  }
   const before = $callState.get();
   const next = reduceCallState(before, event);
   if (next !== before) {
@@ -339,10 +412,20 @@ export async function tearDownActiveCall(
  * — the wire shape every other conformant client expects.
  */
 export type RawIqSender = {
+  /**
+   * Send the XEP-0272 Muji-bearing Jingle `session-initiate` IQ
+   * to the SFU mixer (`calls.<server-domain>`). Resolves when the
+   * server's EMPTY IQ-result ack arrives — the actual
+   * session-accept (and its LiveKit credentials) is delivered as
+   * a SEPARATE server-initiated `<iq type='set'>` per XEP-0166
+   * §6.3 and surfaced through the `on_call` callback. The caller
+   * (see `sendMujiSessionInitiate` below) registers a pending
+   * resolver before invoking this method.
+   */
   send_muji_session_initiate?: (
     room_jid: string,
     video: boolean,
-  ) => Promise<LiveKitJoin>;
+  ) => Promise<void>;
   send_muji_session_terminate?: (room_jid: string) => Promise<void>;
   update_muji_presence?: (
     room_jid: string,
@@ -354,12 +437,16 @@ export type RawIqSender = {
 };
 
 /**
- * Send a XEP-0272 Muji-bearing Jingle `session-initiate` to the
- * SFU mixer (`calls.<server-domain>`) and return the typed
- * `WaddleLiveKitJoin` credentials from the server's
- * `session-accept`. The wasm side builds the IQ via
- * `minidom::Element` and parses the response, so no XML touches
- * the chat-side wire layer.
+ * XEP-0166 §6.3 + XEP-0272 separate-IQ accept flow:
+ *
+ *   1. Register a pending Muji-accept resolver keyed by `roomJid`
+ *      BEFORE sending so an inbound session-accept can't beat us
+ *      to the table.
+ *   2. Send the session-initiate IQ via the wasm bridge. The
+ *      Promise it returns resolves on the empty IQ-result ack.
+ *   3. Await the pending resolver — fulfilled when `applyCallEvent`
+ *      routes the inbound `session-accept` to us via
+ *      `tryFulfillMujiAccept`.
  */
 async function sendMujiSessionInitiate(
   sender: RawIqSender,
@@ -371,7 +458,20 @@ async function sendMujiSessionInitiate(
       "wasm client does not expose send_muji_session_initiate; rebuild the wasm bundle",
     );
   }
-  return await sender.send_muji_session_initiate(roomJid, video);
+  const acceptWait = registerPendingMujiAccept(roomJid);
+  try {
+    await sender.send_muji_session_initiate(roomJid, video);
+  } catch (err) {
+    // Roll back the pending registration so a future call attempt
+    // doesn't resolve against this aborted one.
+    const pending = pendingMujiAccepts.get(roomJid);
+    if (pending) {
+      pendingMujiAccepts.delete(roomJid);
+      clearTimeout(pending.timer);
+    }
+    throw err;
+  }
+  return await acceptWait;
 }
 
 /**
@@ -420,9 +520,18 @@ export async function beginMucCall(
   selfNick?: string,
 ): Promise<void> {
   // Step 1 — preparing presence (XEP-0272 §Joining two-phase flow).
-  // Best-effort: a stale wasm bundle without the method just skips
-  // the two-phase shape but the call still works.
+  // Register the echo waiter BEFORE emitting so a fast MUC echo
+  // can't fire before our listener is ready. The await below
+  // blocks until the MUC rebroadcasts our preparing presence (or
+  // the 2s safety timeout fires). Best-effort: a stale wasm
+  // bundle without `update_muji_presence` skips the two-phase
+  // shape entirely; the call still works but isn't strict-XEP.
   if (selfNick && sender.update_muji_presence) {
+    const echoWait = awaitPreparingEcho(
+      roomJid,
+      selfNick,
+      PREPARING_ECHO_TIMEOUT_MS,
+    );
     try {
       await sender.update_muji_presence(
         roomJid,
@@ -434,10 +543,15 @@ export async function beginMucCall(
     } catch (err) {
       reportCallError(err);
     }
+    // XEP-0272 §Joining: "The client MUST then wait until the MUC
+    // rebroadcasts its presence message". We satisfy the literal
+    // MUST by holding here for the echo.
+    await echoWait;
   }
 
-  // Step 2 — session-initiate. The IQ round-trip provides the
-  // implicit wait for the MUC's preparing-presence echo.
+  // Step 2 — session-initiate. By now the MUC has acknowledged
+  // our preparing presence (per XEP-0272 §Joining MUST), so the
+  // SFU mixer's session-accept arrives in a deterministic order.
   const join = await sendMujiSessionInitiate(sender, roomJid, media.video);
   $callState.set({
     phase: "active",

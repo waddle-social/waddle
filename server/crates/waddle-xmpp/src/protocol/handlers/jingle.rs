@@ -384,6 +384,19 @@ impl JingleHandler {
         }
         self.sfu.register_call_participant(&call_id, &identity);
 
+        // XEP-0166 §6.3 ack: respond to the session-initiate IQ
+        // with an EMPTY IQ result IMMEDIATELY. The session-accept
+        // is then delivered as a SEPARATE server-initiated
+        // `<iq type='set'>` stanza per the same section. Bundling
+        // accept and ack in one stanza is non-conformant to §6.3
+        // and breaks interop with strict Muji peers.
+        let ack = Iq::Result {
+            from: iq.to().cloned(),
+            to: iq.from().cloned(),
+            id: iq.id().to_string(),
+            payload: None,
+        };
+
         // Build the session-accept `<jingle/>` Element explicitly
         // to control child ordering: XEP-0272 §Joining shows
         // `<muji>` as the FIRST child of `<jingle/>`, BEFORE any
@@ -431,15 +444,24 @@ impl JingleHandler {
         }
         let accept_elem = jingle_builder.build();
 
-        let reply = Iq::Result {
+        // Server-initiated session-accept as a SEPARATE IQ-set per
+        // XEP-0166 §6.3. The client ACKs it with an empty IQ
+        // result of its own; that ack is silently discarded by
+        // the server's IQ dispatcher (no state machine needed —
+        // the SFU registration already happened atomically with
+        // the session-initiate above).
+        let session_accept_id = format!("muji-accept-{}", uuid::Uuid::new_v4());
+        let session_accept = Iq::Set {
             from: Some(responder),
             to: Some(ctx.full_jid.clone().into()),
-            id: iq.id().to_string(),
-            payload: Some(accept_elem),
+            id: session_accept_id,
+            payload: accept_elem,
         };
-        vec![OutboundEvent::SendStanza(Box::new(Stanza::Iq(Box::new(
-            reply,
-        ))))]
+
+        vec![
+            OutboundEvent::SendStanza(Box::new(Stanza::Iq(Box::new(ack)))),
+            OutboundEvent::SendStanza(Box::new(Stanza::Iq(Box::new(session_accept)))),
+        ]
     }
 
     fn handle_muji_session_terminate(

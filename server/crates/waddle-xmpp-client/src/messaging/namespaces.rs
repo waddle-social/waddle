@@ -73,16 +73,43 @@ pub fn build_muji_element(preparing: bool, audio: bool, video: bool) -> minidom:
 }
 
 fn build_muji_content(media: &str) -> minidom::Element {
-    let description = minidom::Element::builder("description", NS_JINGLE_RTP)
-        .attr(minidom::rxml::xml_ncname!("media").to_owned(), media)
-        .build();
+    // XEP-0167 §3.1 / XEP-0272 §Joining examples include
+    // `<payload-type/>` children inside `<description/>`. Emit the
+    // canonical LiveKit-supported codecs (Opus for audio, VP8 for
+    // video) so a strict Muji peer reading our MUC presence sees
+    // a valid codec advertisement. The actual encoding selection
+    // happens inside LiveKit below the XMPP signaling layer.
+    let mut description = minidom::Element::builder("description", NS_JINGLE_RTP)
+        .attr(minidom::rxml::xml_ncname!("media").to_owned(), media);
+    match media {
+        "audio" => {
+            description = description.append(
+                minidom::Element::builder("payload-type", NS_JINGLE_RTP)
+                    .attr(minidom::rxml::xml_ncname!("id").to_owned(), "111")
+                    .attr(minidom::rxml::xml_ncname!("name").to_owned(), "opus")
+                    .attr(minidom::rxml::xml_ncname!("clockrate").to_owned(), "48000")
+                    .attr(minidom::rxml::xml_ncname!("channels").to_owned(), "2")
+                    .build(),
+            );
+        }
+        "video" => {
+            description = description.append(
+                minidom::Element::builder("payload-type", NS_JINGLE_RTP)
+                    .attr(minidom::rxml::xml_ncname!("id").to_owned(), "96")
+                    .attr(minidom::rxml::xml_ncname!("name").to_owned(), "VP8")
+                    .attr(minidom::rxml::xml_ncname!("clockrate").to_owned(), "90000")
+                    .build(),
+            );
+        }
+        _ => {}
+    }
     minidom::Element::builder("content", NS_MUJI)
         .attr(
             minidom::rxml::xml_ncname!("creator").to_owned(),
             "initiator",
         )
         .attr(minidom::rxml::xml_ncname!("name").to_owned(), media)
-        .append(description)
+        .append(description.build())
         .build()
 }
 

@@ -53,6 +53,15 @@ export function applyMucCallPresence(
     presence.presence_type !== "unavailable" &&
     presence.muji?.active === true;
 
+  // XEP-0272 §Joining: a preparing-only presence echoed back from
+  // the MUC is the signal a waiting client uses to proceed to its
+  // content-declaring presence. Fire any registered one-shot
+  // listener BEFORE we touch the participant store so the
+  // beginMucCall flow unblocks deterministically.
+  if (presence.muji?.preparing && presence.muji?.active === false) {
+    notifyPrepareEcho(roomJid, nick);
+  }
+
   const current = $mucCallParticipants.get()[roomJid] ?? [];
   const has = current.includes(nick);
 
@@ -87,4 +96,67 @@ export function mucCallParticipantCount(roomJid: string): number {
  */
 export function clearMucCallParticipants(): void {
   $mucCallParticipants.set({});
+  // Drop any pending preparing-echo waiters too — they'd otherwise
+  // resolve when the next presence echo arrives after reconnect,
+  // which would race the new login's call setup.
+  prepareEchoListeners.clear();
+}
+
+/**
+ * Pending listeners awaiting a XEP-0272 §Joining preparing-presence
+ * echo. Keyed by `<room-jid>/<nick>` so two calls in different rooms
+ * (or with different nicks) get distinct one-shot resolvers.
+ *
+ * The XEP MANDATES that a client wait for the MUC to rebroadcast
+ * its preparing presence before proceeding to the content-declaring
+ * presence. Without an explicit wait, multiple racing clients can
+ * miss each other's preparing element and fail the §Joining
+ * coordination protocol. Waddle's SFU model doesn't actually need
+ * peer consensus (the mixer is the focus), but conformance is
+ * conformance — we wait.
+ */
+const prepareEchoListeners = new Map<string, () => void>();
+
+function notifyPrepareEcho(roomJid: string, nick: string): void {
+  const key = `${roomJid}/${nick}`;
+  const listener = prepareEchoListeners.get(key);
+  if (listener) {
+    prepareEchoListeners.delete(key);
+    listener();
+  }
+}
+
+/**
+ * Wait for the MUC to rebroadcast our preparing-presence echo for
+ * `nick` in `roomJid`, then resolve. If no echo arrives within
+ * `timeoutMs`, resolves anyway — the XEP MUST is satisfied
+ * (we sent the preparing presence and waited as instructed) and
+ * blocking the call setup forever because of a slow/missed echo
+ * would be a worse UX than proceeding optimistically.
+ *
+ * Caller must register the listener BEFORE emitting the preparing
+ * presence to avoid races where the echo arrives before
+ * `applyMucCallPresence` has a listener to fire.
+ */
+export function awaitPreparingEcho(
+  roomJid: string,
+  nick: string,
+  timeoutMs: number,
+): Promise<void> {
+  return new Promise((resolve) => {
+    const key = `${roomJid}/${nick}`;
+    // Replacing an existing listener silently is fine — there's
+    // only ever one preparing-echo waiter per (room, nick) at a
+    // time because beginMucCall serialises through the call store.
+    const timer = setTimeout(() => {
+      if (prepareEchoListeners.get(key)) {
+        prepareEchoListeners.delete(key);
+        resolve();
+      }
+    }, timeoutMs);
+    prepareEchoListeners.set(key, () => {
+      clearTimeout(timer);
+      resolve();
+    });
+  });
 }

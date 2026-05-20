@@ -141,10 +141,13 @@ fn ignores_non_muji_children() {
 }
 
 #[test]
-fn rtp_description_uses_minimal_xep0167_shape() {
-    // XEP-0167 §3.2 only mandates `media` on `<description/>`; the
-    // payload-type list is OPTIONAL. Waddle exploits this because
-    // LiveKit dictates codecs below the XMPP signaling layer.
+fn rtp_description_emits_canonical_opus_payload_type_for_audio() {
+    // XEP-0167 §3.1 / XEP-0272 §Joining examples include
+    // `<payload-type/>` children. Waddle emits the canonical
+    // LiveKit-supported Opus codec (PT 111, 48 kHz, 2 channels)
+    // so a strict Muji peer reading the presence sees a valid
+    // codec offer. LiveKit still dictates the actual encoding
+    // negotiation below the XMPP signaling layer.
     let muji = audio_muji();
     let elem = muji.to_element();
     let content = elem
@@ -157,10 +160,39 @@ fn rtp_description_uses_minimal_xep0167_shape() {
         .expect("description present");
     assert_eq!(desc.ns(), "urn:xmpp:jingle:apps:rtp:1");
     assert_eq!(desc.attr("media"), Some("audio"));
-    assert!(
-        desc.children().count() == 0,
-        "Waddle's Muji description must be minimal — no payload-types"
-    );
+    let payload = desc
+        .children()
+        .find(|c| c.name() == "payload-type")
+        .expect("description must advertise at least one payload-type per XEP-0167 §3.1 examples");
+    assert_eq!(payload.attr("name"), Some("opus"));
+    assert_eq!(payload.attr("id"), Some("111"));
+    assert_eq!(payload.attr("clockrate"), Some("48000"));
+    assert_eq!(payload.attr("channels"), Some("2"));
+}
+
+#[test]
+fn rtp_description_emits_canonical_vp8_payload_type_for_video() {
+    let muji = Muji::with_contents(vec![MujiContent::new(
+        "video",
+        Creator::Initiator,
+        MediaKind::Video,
+    )]);
+    let elem = muji.to_element();
+    let content = elem
+        .children()
+        .find(|c| c.name() == "content")
+        .expect("content present");
+    let desc = content
+        .children()
+        .find(|c| c.name() == "description")
+        .expect("description present");
+    let payload = desc
+        .children()
+        .find(|c| c.name() == "payload-type")
+        .expect("video description must advertise VP8 payload-type");
+    assert_eq!(payload.attr("name"), Some("VP8"));
+    assert_eq!(payload.attr("id"), Some("96"));
+    assert_eq!(payload.attr("clockrate"), Some("90000"));
 }
 
 // ── §Joining (Jingle session-initiate embedding) ──────────────────────────

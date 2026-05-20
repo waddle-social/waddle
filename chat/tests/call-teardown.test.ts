@@ -1,13 +1,76 @@
 import { afterEach, describe, expect, mock, test } from "bun:test";
 import {
   $callState,
+  applyCallEvent,
   beginOutgoingCall,
   clearCallState,
   scheduleOutgoingTimeout,
   tearDownActiveCall,
 } from "../src/lib/calls/call-store";
+import { applyMucCallPresence } from "../src/lib/calls/muc-call-presence";
 import type { CallWireSender } from "../src/lib/calls/outbound";
 import type { CallMedia, LiveKitJoin } from "../src/lib/calls/types";
+
+/**
+ * Mock the wasm `update_muji_presence` such that the preparing
+ * branch simulates the MUC echoing the preparing presence back
+ * — the XEP-0272 §Joining echo that `awaitPreparingEcho` blocks
+ * on inside `beginMucCall`. Without this the tests would all
+ * pay the 2s echo-timeout penalty on every call to `beginMucCall`
+ * that passes a `selfNick`.
+ */
+function mockUpdateMujiPresenceWithEcho() {
+  return mock(
+    async (
+      roomJid: string,
+      nick: string,
+      active: boolean,
+      preparing: boolean,
+      _video: boolean,
+    ) => {
+      if (preparing) {
+        applyMucCallPresence({
+          from: `${roomJid}/${nick}`,
+          presence_type: "available",
+          muji: { preparing: true, active: false },
+        });
+      }
+      if (active) {
+        applyMucCallPresence({
+          from: `${roomJid}/${nick}`,
+          presence_type: "available",
+          muji: { preparing: false, active: true },
+        });
+      }
+    },
+  );
+}
+
+/**
+ * Mock the wasm `send_muji_session_initiate` for the XEP-0166
+ * §6.3 separate-IQ accept flow. After resolving the empty IQ-result
+ * ack, fires `applyCallEvent` with the typed `session-accept` event
+ * the chat-side's `tryFulfillMujiAccept` is waiting on. The real
+ * wasm bridge would parse this from an inbound `<iq type='set'>`
+ * stanza routed through `on_call`; tests skip the wire dance.
+ */
+function mockSendMujiSessionInitiateWithAccept(join: LiveKitJoin) {
+  return mock(async (roomJid: string, _video: boolean) => {
+    // Empty IQ-result ack is the function's resolution; fire the
+    // inbound session-accept on the next microtask so the await
+    // chain in beginMucCall sees the resolver populated before the
+    // event lands.
+    queueMicrotask(() => {
+      applyCallEvent({
+        kind: "session-accept",
+        from: "calls.waddle.test",
+        sid: roomJid,
+        media: { audio: true, video: true },
+        join,
+      });
+    });
+  });
+}
 
 const audioVideo: CallMedia = { audio: true, video: true };
 const join: LiveKitJoin = {
@@ -167,14 +230,16 @@ describe("tearDownActiveCall", () => {
 });
 
 describe("MUC group call", () => {
-  test("beginMucCall sets active(kind: 'muc') after parsing the issued transport", async () => {
+  test("beginMucCall sets active(kind: 'muc') after awaiting the separate session-accept (XEP-0166 §6.3)", async () => {
+    const expectedJoin: LiveKitJoin = {
+      url: "wss://livekit.test",
+      room: "chan@muc.test",
+      identity: "alice@waddle.test/web",
+      token: "jwt.payload.sig",
+    };
     const sender = {
-      send_muji_session_initiate: mock(async () => ({
-        url: "wss://livekit.test",
-        room: "chan@muc.test",
-        identity: "alice@waddle.test/web",
-        token: "jwt.payload.sig",
-      })),
+      send_muji_session_initiate:
+        mockSendMujiSessionInitiateWithAccept(expectedJoin),
     };
     const { beginMucCall } = await import("../src/lib/calls/call-store");
     await beginMucCall(sender, "chan@muc.test", audioVideo);
@@ -184,12 +249,7 @@ describe("MUC group call", () => {
       peer: "chan@muc.test",
       sid: "chan@muc.test",
       media: audioVideo,
-      join: {
-        url: "wss://livekit.test",
-        room: "chan@muc.test",
-        identity: "alice@waddle.test/web",
-        token: "jwt.payload.sig",
-      },
+      join: expectedJoin,
       kind: "muc",
       selfNick: undefined,
     });
@@ -200,13 +260,13 @@ describe("MUC group call", () => {
   });
 
   test("beginMucCall with a nick implements the XEP-0272 §Joining two-phase preparing→content flow", async () => {
-    const send_muji_session_initiate = mock(async () => ({
+    const send_muji_session_initiate = mockSendMujiSessionInitiateWithAccept({
       url: "wss://livekit.test",
       room: "chan@muc.test",
       identity: "alice@waddle.test/web",
       token: "jwt.payload.sig",
-    }));
-    const update_muji_presence = mock(async () => undefined);
+    });
+    const update_muji_presence = mockUpdateMujiPresenceWithEcho();
     const { beginMucCall } = await import("../src/lib/calls/call-store");
     await beginMucCall(
       {
@@ -250,7 +310,7 @@ describe("MUC group call", () => {
     // presence cleanup MUST still run — otherwise the user's
     // `<muji/>` advertisement lingers until the XMPP session
     // disconnects, exactly the bug this teardown path exists to fix.
-    const update_muji_presence = mock(async () => undefined);
+    const update_muji_presence = mockUpdateMujiPresenceWithEcho();
     $callState.set({
       phase: "active",
       peer: "chan@muc.test",
@@ -279,7 +339,7 @@ describe("MUC group call", () => {
 
   test("tearDownActiveCall on a MUC call dispatches Muji session-terminate AND clears the presence", async () => {
     const send_muji_session_terminate = mock(async () => undefined);
-    const update_muji_presence = mock(async () => undefined);
+    const update_muji_presence = mockUpdateMujiPresenceWithEcho();
     $callState.set({
       phase: "active",
       peer: "chan@muc.test",
