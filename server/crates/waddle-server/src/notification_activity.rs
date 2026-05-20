@@ -747,17 +747,17 @@ impl NotificationActivityStore {
             ) VALUES (?, ?, ?, ?, NULL, NULL, ?, ?)
             ON CONFLICT (owner_bare_jid, conversation_jid) DO UPDATE SET
                 last_active_at_ms = CASE
-                    WHEN excluded.last_active_at_ms > notification_activity.last_active_at_ms
+                    WHEN excluded.last_active_at_ms >= notification_activity.last_active_at_ms
                     THEN excluded.last_active_at_ms
                     ELSE notification_activity.last_active_at_ms
                 END,
                 last_chat_state = CASE
-                    WHEN excluded.last_active_at_ms > notification_activity.last_active_at_ms
+                    WHEN excluded.last_active_at_ms >= notification_activity.last_active_at_ms
                     THEN excluded.last_chat_state
                     ELSE notification_activity.last_chat_state
                 END,
                 updated_at_ms = CASE
-                    WHEN excluded.updated_at_ms > notification_activity.updated_at_ms
+                    WHEN excluded.updated_at_ms >= notification_activity.updated_at_ms
                     THEN excluded.updated_at_ms
                     ELSE notification_activity.updated_at_ms
                 END
@@ -848,18 +848,18 @@ impl NotificationActivityStore {
             ) VALUES (?, ?, ?, NULL, ?, NULL, ?, ?)
             ON CONFLICT (owner_bare_jid, conversation_jid) DO UPDATE SET
                 last_active_at_ms = CASE
-                    WHEN excluded.last_active_at_ms > notification_activity.last_active_at_ms
+                    WHEN excluded.last_active_at_ms >= notification_activity.last_active_at_ms
                     THEN excluded.last_active_at_ms
                     ELSE notification_activity.last_active_at_ms
                 END,
                 last_read_at_ms = CASE
                     WHEN notification_activity.last_read_at_ms IS NULL THEN excluded.last_read_at_ms
-                    WHEN excluded.last_read_at_ms > notification_activity.last_read_at_ms
+                    WHEN excluded.last_read_at_ms >= notification_activity.last_read_at_ms
                     THEN excluded.last_read_at_ms
                     ELSE notification_activity.last_read_at_ms
                 END,
                 updated_at_ms = CASE
-                    WHEN excluded.updated_at_ms > notification_activity.updated_at_ms
+                    WHEN excluded.updated_at_ms >= notification_activity.updated_at_ms
                     THEN excluded.updated_at_ms
                     ELSE notification_activity.updated_at_ms
                 END
@@ -900,12 +900,12 @@ impl NotificationActivityStore {
             ) VALUES (?, ?, ?, NULL, NULL, NULL, ?, ?)
             ON CONFLICT (owner_bare_jid, conversation_jid) DO UPDATE SET
                 last_active_at_ms = CASE
-                    WHEN excluded.last_active_at_ms > notification_activity.last_active_at_ms
+                    WHEN excluded.last_active_at_ms >= notification_activity.last_active_at_ms
                     THEN excluded.last_active_at_ms
                     ELSE notification_activity.last_active_at_ms
                 END,
                 updated_at_ms = CASE
-                    WHEN excluded.updated_at_ms > notification_activity.updated_at_ms
+                    WHEN excluded.updated_at_ms >= notification_activity.updated_at_ms
                     THEN excluded.updated_at_ms
                     ELSE notification_activity.updated_at_ms
                 END
@@ -953,17 +953,17 @@ impl NotificationActivityStore {
             ) VALUES (?, ?, ?, NULL, NULL, ?, ?, ?)
             ON CONFLICT (owner_bare_jid, conversation_jid) DO UPDATE SET
                 last_active_at_ms = CASE
-                    WHEN excluded.last_active_at_ms > notification_activity.last_active_at_ms
+                    WHEN excluded.last_active_at_ms >= notification_activity.last_active_at_ms
                     THEN excluded.last_active_at_ms
                     ELSE notification_activity.last_active_at_ms
                 END,
                 presence_show = CASE
-                    WHEN excluded.last_active_at_ms > notification_activity.last_active_at_ms
+                    WHEN excluded.last_active_at_ms >= notification_activity.last_active_at_ms
                     THEN excluded.presence_show
                     ELSE notification_activity.presence_show
                 END,
                 updated_at_ms = CASE
-                    WHEN excluded.updated_at_ms > notification_activity.updated_at_ms
+                    WHEN excluded.updated_at_ms >= notification_activity.updated_at_ms
                     THEN excluded.updated_at_ms
                     ELSE notification_activity.updated_at_ms
                 END
@@ -1005,17 +1005,17 @@ impl NotificationActivityStore {
             ) VALUES (?, ?, ?, NULL, NULL, NULL, ?, ?)
             ON CONFLICT (owner_bare_jid, conversation_jid) DO UPDATE SET
                 last_active_at_ms = CASE
-                    WHEN excluded.last_active_at_ms > notification_activity.last_active_at_ms
+                    WHEN excluded.last_active_at_ms >= notification_activity.last_active_at_ms
                     THEN excluded.last_active_at_ms
                     ELSE notification_activity.last_active_at_ms
                 END,
                 presence_show = CASE
-                    WHEN excluded.last_active_at_ms > notification_activity.last_active_at_ms
+                    WHEN excluded.last_active_at_ms >= notification_activity.last_active_at_ms
                     THEN NULL
                     ELSE notification_activity.presence_show
                 END,
                 updated_at_ms = CASE
-                    WHEN excluded.updated_at_ms > notification_activity.updated_at_ms
+                    WHEN excluded.updated_at_ms >= notification_activity.updated_at_ms
                     THEN excluded.updated_at_ms
                     ELSE notification_activity.updated_at_ms
                 END
@@ -1318,6 +1318,66 @@ mod tests {
             .expect("row");
         assert_eq!(after.last_active_at_ms, 0);
         assert_eq!(after.last_chat_state, Some(NotificationChatState::Gone));
+    }
+
+    /// Tie-handling invariant: two writes that land in the same
+    /// millisecond MUST both apply (the later writer wins on its
+    /// paired columns). The strict-`>` comparison previously dropped
+    /// the second write silently — e.g. a join+leave pair in the same
+    /// ms left the join's `<show/>` token persisted even though the
+    /// leave should have cleared it (Codex/Copilot review on PR #731).
+    #[tokio::test]
+    async fn record_presence_tie_writes_apply_latest_writer() {
+        let store = store().await;
+        let owner = bare("alice@example.com");
+        let room = bare("room@muc.example.com");
+        store
+            .record_presence_available(&owner, &room, Some(NotificationPresenceShow::Chat), 1_000)
+            .await
+            .expect("available");
+        store
+            .record_presence_unavailable(&owner, &room, 1_000)
+            .await
+            .expect("unavailable at same ms");
+        let after = store.read(&owner, &room).await.expect("read").expect("row");
+        assert_eq!(after.last_active_at_ms, 1_000);
+        assert!(
+            after.presence_show.is_none(),
+            "same-ms unavailable MUST clear `<show/>` (tie goes to latest writer)",
+        );
+    }
+
+    /// Tie-handling invariant for `record_chat_state`: a second
+    /// chat-state at the same ms MUST overwrite the prior token.
+    #[tokio::test]
+    async fn record_chat_state_tie_writes_apply_latest_writer() {
+        let store = store().await;
+        let owner = bare("alice@example.com");
+        let conversation = bare("room@muc.example.com");
+        store
+            .record_chat_state(&owner, &conversation, NotificationChatState::Active, 1_000)
+            .await
+            .expect("first");
+        store
+            .record_chat_state(
+                &owner,
+                &conversation,
+                NotificationChatState::Composing,
+                1_000,
+            )
+            .await
+            .expect("tie write");
+        let after = store
+            .read(&owner, &conversation)
+            .await
+            .expect("read")
+            .expect("row");
+        assert_eq!(after.last_active_at_ms, 1_000);
+        assert_eq!(
+            after.last_chat_state,
+            Some(NotificationChatState::Composing),
+            "tie goes to the latest writer",
+        );
     }
 
     /// XEP-0490 read-marker writes persist `last_read_at_ms` alongside

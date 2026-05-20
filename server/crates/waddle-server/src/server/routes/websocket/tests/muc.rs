@@ -1076,14 +1076,14 @@ async fn handle_muc_leave_records_notification_activity_and_clears_show() {
         Some(crate::notification_activity::NotificationPresenceShow::Chat)
     );
 
-    // Ensure `now_ms()` strictly advances between the join and leave
-    // writes — the monotonic UPSERT clause keeps the `<show/>` column
-    // when `excluded.last_active_at_ms == stored.last_active_at_ms`,
-    // so we MUST observe a fresh tick before recording the leave. In
-    // production this is satisfied automatically (join/leave are
-    // separated by at least one RTT); we sleep here so the test
-    // doesn't share a millisecond with the join write.
-    tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+    // No sleep needed: the monotonic UPSERTs in
+    // `NotificationActivityStore` now use `>=` so tie-millis writes
+    // (rapid join/leave landing in the same millisecond) still apply
+    // the latest writer's columns — the leave's `last_active_at_ms`
+    // and cleared `<show/>` are persisted even when `now_ms` matches
+    // the join's. The previous 2ms sleep was a workaround for the
+    // strict-`>` race (Codex/Copilot review on PR #731). The assertion
+    // below uses `>=` to allow same-millisecond ties without flaking.
     let _ = handle_muc_leave(state.as_ref(), &room_jid, &alice, "alice").await;
     let after_leave = state
         .deps
@@ -1094,8 +1094,8 @@ async fn handle_muc_leave_records_notification_activity_and_clears_show() {
         .expect("read post-leave")
         .expect("activity post-leave");
     assert!(
-        after_leave.last_active_at_ms > after_join.last_active_at_ms,
-        "leave MUST advance last_active_at_ms beyond join (got join={} leave={})",
+        after_leave.last_active_at_ms >= after_join.last_active_at_ms,
+        "leave MUST NOT regress last_active_at_ms below join (got join={} leave={})",
         after_join.last_active_at_ms,
         after_leave.last_active_at_ms,
     );
