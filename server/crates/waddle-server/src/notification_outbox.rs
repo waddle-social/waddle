@@ -546,6 +546,8 @@ pub enum NotificationOutboxError {
     ArchiveStanzaIdOwnerMismatch { expected: Jid, actual: Jid },
     #[error("notification candidate sender bare JID equals recipient bare JID: {0}")]
     SelfDirectedNotificationCandidate(BareJid),
+    #[error("room policy lookup failed for {room}: {message}")]
+    RoomPolicyLookup { room: BareJid, message: String },
     #[error("message count is out of range: {0}")]
     InvalidMessageCount(i64),
     #[error("notification outbox coalesce contention persisted after retry")]
@@ -3352,6 +3354,41 @@ mod tests {
         ) -> Result<Option<bool>, NotificationOutboxError> {
             self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Ok(Some(false))
+        }
+    }
+
+    /// Test stub that always returns a typed `RoomPolicyLookup` error
+    /// — models actor mailbox / transport failures. Counts the calls
+    /// so we can assert the per-batch cache short-circuits subsequent
+    /// lookups (one error → one cache entry → one warn → many silent
+    /// reuses, never re-asking the failing dependency).
+    struct ErroringRoomPolicy {
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    impl ErroringRoomPolicy {
+        fn new() -> Self {
+            Self {
+                calls: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+
+        fn call_count(&self) -> usize {
+            self.calls.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl RoomPolicyStore for ErroringRoomPolicy {
+        async fn room_members_only(
+            &self,
+            room: &BareJid,
+        ) -> Result<Option<bool>, NotificationOutboxError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err(NotificationOutboxError::RoomPolicyLookup {
+                room: room.clone(),
+                message: "test-fixture: simulated actor mailbox failure".to_string(),
+            })
         }
     }
 
@@ -6720,6 +6757,60 @@ mod tests {
             room_policy.call_count(),
             1,
             "deferral outcomes must be cached per-batch — failing actor must NOT be re-queried per candidate",
+        );
+    }
+
+    /// A `RoomPolicyStore::room_members_only` returning a typed
+    /// `RoomPolicyLookup` error MUST classify the cache entry as
+    /// `LookupError`, not `NotLive`. The dispatch outcome remains
+    /// `DeferUnknownRoomPolicy` either way, but the source split is
+    /// what gives operators an actionable signal vs routine dormancy.
+    /// Caching still applies: a single failing lookup populates one
+    /// `Unknown(LookupError)` entry and every subsequent candidate
+    /// for that room reuses it.
+    #[tokio::test]
+    async fn room_policy_lookup_error_classifies_as_lookup_error_and_caches() {
+        let room_policy = ErroringRoomPolicy::new();
+        let room = bare("team@muc.example.com");
+        let mut cache = std::collections::BTreeMap::<BareJid, RoomPolicyCacheEntry>::new();
+
+        let first = resolve_cached_room_policy(&room_policy, &room, &mut cache).await;
+        assert_eq!(
+            first,
+            RoomPolicyCacheEntry::Unknown(UnknownRoomPolicySource::LookupError),
+            "typed RoomPolicyLookup error must classify as LookupError, not NotLive"
+        );
+
+        let second = resolve_cached_room_policy(&room_policy, &room, &mut cache).await;
+        assert_eq!(
+            second, first,
+            "second lookup MUST hit the cache and return the same typed entry"
+        );
+
+        assert_eq!(
+            room_policy.call_count(),
+            1,
+            "cache MUST short-circuit subsequent lookups — failing actor is never re-asked in the same batch",
+        );
+    }
+
+    /// A `RoomPolicyStore::room_members_only` returning `Ok(None)`
+    /// MUST classify the cache entry as `NotLive`, not `LookupError`.
+    /// Distinguishing these is the whole point of the typed source —
+    /// `NotLive` is routine dormancy and stays at `debug!` level in
+    /// the drain loop, whereas `LookupError` triggers the once-per-
+    /// batch `warn!` for operators to triage.
+    #[tokio::test]
+    async fn room_policy_ok_none_classifies_as_not_live() {
+        let room_policy = UnknownRoomPolicy::new();
+        let room = bare("team@muc.example.com");
+        let mut cache = std::collections::BTreeMap::<BareJid, RoomPolicyCacheEntry>::new();
+
+        let entry = resolve_cached_room_policy(&room_policy, &room, &mut cache).await;
+        assert_eq!(
+            entry,
+            RoomPolicyCacheEntry::Unknown(UnknownRoomPolicySource::NotLive),
+            "Ok(None) must classify as NotLive, distinct from LookupError"
         );
     }
 }
