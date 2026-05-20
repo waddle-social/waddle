@@ -1,15 +1,19 @@
 import { map } from "nanostores";
 
 /**
- * Per-room map of nicks who have advertised the
- * `urn:waddle:muc-call:0` presence extension with `state='active'`.
- * Drives the channel-header "N in call" indicator and any future
- * presence-driven join affordances.
+ * Per-room map of nicks advertising XEP-0272 Muji presence with
+ * active `<content/>` children — i.e. occupants currently in the
+ * room's group call.
+ *
+ * Drives the channel-header "N in call" indicator AND the per-row
+ * sidebar badge in `TopicsPanel.vue`.
  *
  * Updated by `applyMucCallPresence`, called from the chat-side
  * `set_on_presence` wrapper whenever an occupant's presence carries
- * the extension. Switching to `state='inactive'` or sending an
- * `unavailable` presence removes the nick from the room's set.
+ * a Muji extension. Per XEP-0272 §Leaving, the absence of the
+ * `<muji/>` element is the leave marker — we drop the nick when an
+ * available presence arrives without one. `<preparing/>`-only
+ * Muji (the two-phase join sentinel) is NOT treated as active.
  *
  * Shape: `{ "room@muc.host": ["alice", "bob"] }`. Arrays kept
  * sorted by insertion order so the UI doesn't reshuffle on every
@@ -19,12 +23,12 @@ export const $mucCallParticipants = map<Record<string, string[]>>({});
 
 /**
  * Apply an inbound presence update to the participants store. The
- * cases:
- * - Available presence + `muc_call.state === "active"` → add nick.
- * - Available presence + `muc_call.state === "inactive"` → remove nick.
- * - Available presence without `muc_call` → remove nick (treat as
- *   "no longer advertising", since the user may have left the call
- *   without sending an explicit `inactive` if their client crashed).
+ * cases (XEP-0272 §Joining and §Leaving):
+ * - Available presence + `muji.active === true` → add nick.
+ * - Available presence + `muji.preparing === true` (but not active)
+ *   → no-op; preparing alone does not count as in-call.
+ * - Available presence WITHOUT `muji` → remove nick (XEP-0272
+ *   §Leaving: absence of the element is the leave marker).
  * - Unavailable presence → remove nick (occupant left the room).
  *
  * Robust against duplicate / replayed presences: re-adding an
@@ -35,7 +39,7 @@ export function applyMucCallPresence(
   presence: {
     from?: string;
     presence_type?: string;
-    muc_call?: { state: "active" | "inactive"; call_id: string };
+    muji?: { preparing: boolean; active: boolean };
   },
 ): void {
   if (!presence.from) return;
@@ -47,7 +51,7 @@ export function applyMucCallPresence(
 
   const wantsActive =
     presence.presence_type !== "unavailable" &&
-    presence.muc_call?.state === "active";
+    presence.muji?.active === true;
 
   const current = $mucCallParticipants.get()[roomJid] ?? [];
   const has = current.includes(nick);

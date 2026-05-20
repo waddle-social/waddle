@@ -10,12 +10,19 @@ afterEach(() => {
   clearMucCallParticipants();
 });
 
+// XEP-0272 Muji presence — the namespace + element shape that the
+// chat-side store consumes. The previous custom `urn:waddle:muc-call:0`
+// extension has been retired; these tests exercise the active/preparing
+// boolean pair that the WASM parser surfaces in `WasmMujiPresence`.
+const activeMuji = { preparing: false, active: true } as const;
+const preparingMuji = { preparing: true, active: false } as const;
+
 describe("applyMucCallPresence", () => {
-  test("available presence with active extension registers the nick", () => {
+  test("available presence with active Muji registers the nick", () => {
     applyMucCallPresence({
       from: "room@muc.test/alice",
       presence_type: "available",
-      muc_call: { state: "active", call_id: "room@muc.test" },
+      muji: activeMuji,
     });
     expect($mucCallParticipants.get()).toEqual({
       "room@muc.test": ["alice"],
@@ -27,12 +34,12 @@ describe("applyMucCallPresence", () => {
     applyMucCallPresence({
       from: "room@muc.test/alice",
       presence_type: "available",
-      muc_call: { state: "active", call_id: "room@muc.test" },
+      muji: activeMuji,
     });
     applyMucCallPresence({
       from: "room@muc.test/bob",
       presence_type: "available",
-      muc_call: { state: "active", call_id: "room@muc.test" },
+      muji: activeMuji,
     });
     expect($mucCallParticipants.get()["room@muc.test"]).toEqual([
       "alice",
@@ -40,29 +47,34 @@ describe("applyMucCallPresence", () => {
     ]);
   });
 
-  test("inactive extension removes the nick", () => {
+  test("preparing-only Muji does NOT count as active (XEP-0272 §Joining two-phase flow)", () => {
     applyMucCallPresence({
       from: "room@muc.test/alice",
       presence_type: "available",
-      muc_call: { state: "active", call_id: "room@muc.test" },
-    });
-    applyMucCallPresence({
-      from: "room@muc.test/alice",
-      presence_type: "available",
-      muc_call: { state: "inactive", call_id: "room@muc.test" },
+      muji: preparingMuji,
     });
     expect($mucCallParticipants.get()["room@muc.test"]).toBeUndefined();
   });
 
-  test("available presence WITHOUT the extension removes a previously-registered nick", () => {
-    // A user who joins the call then sends a fresh presence (e.g.
-    // updating their show/status) without the extension means they
-    // are no longer advertising the call. Treating this as "left
-    // the call" matches the documented permissive parsing.
+  test("transitioning from active → preparing-only clears the nick", () => {
     applyMucCallPresence({
       from: "room@muc.test/alice",
       presence_type: "available",
-      muc_call: { state: "active", call_id: "room@muc.test" },
+      muji: activeMuji,
+    });
+    applyMucCallPresence({
+      from: "room@muc.test/alice",
+      presence_type: "available",
+      muji: preparingMuji,
+    });
+    expect($mucCallParticipants.get()["room@muc.test"]).toBeUndefined();
+  });
+
+  test("available presence WITHOUT the Muji extension removes a previously-registered nick (XEP-0272 §Leaving)", () => {
+    applyMucCallPresence({
+      from: "room@muc.test/alice",
+      presence_type: "available",
+      muji: activeMuji,
     });
     applyMucCallPresence({
       from: "room@muc.test/alice",
@@ -75,7 +87,7 @@ describe("applyMucCallPresence", () => {
     applyMucCallPresence({
       from: "room@muc.test/alice",
       presence_type: "available",
-      muc_call: { state: "active", call_id: "room@muc.test" },
+      muji: activeMuji,
     });
     applyMucCallPresence({
       from: "room@muc.test/alice",
@@ -88,12 +100,12 @@ describe("applyMucCallPresence", () => {
     applyMucCallPresence({
       from: "room-a@muc.test/alice",
       presence_type: "available",
-      muc_call: { state: "active", call_id: "room-a@muc.test" },
+      muji: activeMuji,
     });
     applyMucCallPresence({
       from: "room-b@muc.test/carol",
       presence_type: "available",
-      muc_call: { state: "active", call_id: "room-b@muc.test" },
+      muji: activeMuji,
     });
     expect($mucCallParticipants.get()).toEqual({
       "room-a@muc.test": ["alice"],
@@ -105,12 +117,12 @@ describe("applyMucCallPresence", () => {
     applyMucCallPresence({
       from: "room@muc.test/alice",
       presence_type: "available",
-      muc_call: { state: "active", call_id: "room@muc.test" },
+      muji: activeMuji,
     });
     applyMucCallPresence({
       from: "room@muc.test/alice",
       presence_type: "available",
-      muc_call: { state: "active", call_id: "room@muc.test" },
+      muji: activeMuji,
     });
     expect($mucCallParticipants.get()["room@muc.test"]).toEqual(["alice"]);
   });
@@ -126,12 +138,12 @@ describe("applyMucCallPresence", () => {
   test("ignores presences missing a `from` or nick", () => {
     applyMucCallPresence({
       presence_type: "available",
-      muc_call: { state: "active", call_id: "room@muc.test" },
+      muji: activeMuji,
     });
     applyMucCallPresence({
       from: "room@muc.test",
       presence_type: "available",
-      muc_call: { state: "active", call_id: "room@muc.test" },
+      muji: activeMuji,
     });
     expect($mucCallParticipants.get()).toEqual({});
   });
@@ -140,7 +152,7 @@ describe("applyMucCallPresence", () => {
     applyMucCallPresence({
       from: "room@muc.test/alice",
       presence_type: "available",
-      muc_call: { state: "active", call_id: "room@muc.test" },
+      muji: activeMuji,
     });
     clearMucCallParticipants();
     expect($mucCallParticipants.get()).toEqual({});

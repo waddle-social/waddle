@@ -202,22 +202,23 @@ describe("MUC group call", () => {
       identity: "alice@waddle.test/web",
       token: "jwt.payload.sig",
     }));
-    const update_muc_call_presence = mock(async () => undefined);
+    const update_muji_presence = mock(async () => undefined);
     const { beginMucCall } = await import("../src/lib/calls/call-store");
     await beginMucCall(
-      { send_muc_call_join, update_muc_call_presence } as unknown as Parameters<
+      { send_muc_call_join, update_muji_presence } as unknown as Parameters<
         typeof beginMucCall
       >[0],
       "chan@muc.test",
       audioVideo,
       "alice",
     );
-    expect(update_muc_call_presence).toHaveBeenCalledTimes(1);
-    expect(update_muc_call_presence).toHaveBeenCalledWith(
+    expect(update_muji_presence).toHaveBeenCalledTimes(1);
+    expect(update_muji_presence).toHaveBeenCalledWith(
       "chan@muc.test",
       "alice",
-      true,
-      "chan@muc.test",
+      true, // active
+      false, // preparing
+      true, // video (audioVideo media fixture has video=true)
     );
   });
 
@@ -228,7 +229,7 @@ describe("MUC group call", () => {
     // `<call state='active'/>` advertisement lingers until the XMPP
     // session disconnects, exactly the bug this teardown path exists
     // to fix.
-    const update_muc_call_presence = mock(async () => undefined);
+    const update_muji_presence = mock(async () => undefined);
     $callState.set({
       phase: "active",
       peer: "chan@muc.test",
@@ -239,24 +240,25 @@ describe("MUC group call", () => {
       selfNick: "alice",
     });
     await tearDownActiveCall(
-      { update_muc_call_presence } as unknown as Parameters<
+      { update_muji_presence } as unknown as Parameters<
         typeof tearDownActiveCall
       >[0],
       "success",
     );
-    expect(update_muc_call_presence).toHaveBeenCalledTimes(1);
-    expect(update_muc_call_presence).toHaveBeenCalledWith(
+    expect(update_muji_presence).toHaveBeenCalledTimes(1);
+    expect(update_muji_presence).toHaveBeenCalledWith(
       "chan@muc.test",
       "alice",
-      false,
-      "chan@muc.test",
+      false, // active
+      false, // preparing
+      false, // video
     );
     expect($callState.get()).toEqual({ phase: "idle" });
   });
 
   test("tearDownActiveCall on a MUC call dispatches request-leave and clears the call presence", async () => {
     const send_muc_call_leave = mock(async () => undefined);
-    const update_muc_call_presence = mock(async () => undefined);
+    const update_muji_presence = mock(async () => undefined);
     $callState.set({
       phase: "active",
       peer: "chan@muc.test",
@@ -267,19 +269,20 @@ describe("MUC group call", () => {
       selfNick: "alice",
     });
     await tearDownActiveCall(
-      { send_muc_call_leave, update_muc_call_presence } as unknown as Parameters<
+      { send_muc_call_leave, update_muji_presence } as unknown as Parameters<
         typeof tearDownActiveCall
       >[0],
       "gone",
     );
     expect(send_muc_call_leave).toHaveBeenCalledTimes(1);
     expect(send_muc_call_leave).toHaveBeenCalledWith("chan@muc.test");
-    expect(update_muc_call_presence).toHaveBeenCalledTimes(1);
-    expect(update_muc_call_presence).toHaveBeenCalledWith(
+    expect(update_muji_presence).toHaveBeenCalledTimes(1);
+    expect(update_muji_presence).toHaveBeenCalledWith(
       "chan@muc.test",
       "alice",
-      false,
-      "chan@muc.test",
+      false, // active
+      false, // preparing
+      false, // video
     );
     expect($callState.get()).toEqual({ phase: "idle" });
   });

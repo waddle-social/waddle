@@ -277,22 +277,25 @@ export async function tearDownActiveCall(
               reportCallError(err);
             }
           } else {
-            // MUC group call: clear our presence extension AND leave
-            // via the muc-call:0 IQ surface. Presence-first ordering
-            // is deliberate — other occupants drive the "N in call"
-            // indicator off our `<call/>` extension, so dropping the
-            // advertisement is what makes the call visibly stop. Each
-            // side gets its own try/catch so a single failure (e.g. a
-            // stale wasm bundle without `send_muc_call_leave`) can't
-            // swallow the other and leave us advertising as in-call.
+            // MUC group call: clear our Muji presence AND leave via
+            // the IQ surface. Presence-first ordering (XEP-0272
+            // §Leaving: "Updating the presence first reduces the
+            // likelihood of situations where new participants
+            // initiate sessions with participants who are leaving").
+            // Other occupants drive the "N in call" indicator off
+            // our `<muji/>` advertisement, so dropping it is what
+            // makes the call visibly stop. Each side gets its own
+            // try/catch so a single failure (e.g. a stale wasm
+            // bundle) can't swallow the other.
             const raw = sender as RawIqSender;
-            if (s.selfNick && raw.update_muc_call_presence) {
+            if (s.selfNick && raw.update_muji_presence) {
               try {
-                await raw.update_muc_call_presence(
+                await raw.update_muji_presence(
                   s.peer,
                   s.selfNick,
-                  false,
-                  s.peer,
+                  false, // active
+                  false, // preparing
+                  false, // video
                 );
               } catch (err) {
                 reportCallError(err);
@@ -326,15 +329,23 @@ export async function tearDownActiveCall(
  * surface. Typed methods only — no `send_raw_iq` string-concat
  * escape hatch (CLAUDE.md XML-generation rule). Optional fields so
  * unit tests can stub a partial client.
+ *
+ * Note: `send_muc_call_join` / `send_muc_call_leave` still target
+ * the legacy `urn:waddle:muc-call:0` IQ surface for now. The
+ * follow-up commit on this branch migrates them to Jingle
+ * session-initiate / session-terminate to the mixer JID. The Muji
+ * presence side is already XEP-0272 conformant via
+ * `update_muji_presence`.
  */
 export type RawIqSender = {
   send_muc_call_join?: (room_jid: string) => Promise<LiveKitJoin>;
   send_muc_call_leave?: (room_jid: string) => Promise<void>;
-  update_muc_call_presence?: (
+  update_muji_presence?: (
     room_jid: string,
     nick: string,
     active: boolean,
-    call_id: string,
+    preparing: boolean,
+    video: boolean,
   ) => Promise<void>;
 };
 
@@ -398,13 +409,21 @@ export async function beginMucCall(
     selfNick,
   });
   $lastCallError.set(null);
-  // Advertise our in-call status via MUC presence so other
-  // occupants can show a "you have a live call in this channel"
-  // indicator. Best-effort: if the wasm method is missing (stale
-  // bundle), the call still works — just no in-band discovery.
-  if (selfNick && sender.update_muc_call_presence) {
+  // Advertise our in-call status via XEP-0272 Muji presence so
+  // other occupants can show a "you have a live call in this
+  // channel" indicator. Audio is implied; we don't advertise video
+  // until the user enables it. Best-effort: if the wasm method is
+  // missing (stale bundle), the call still works — just no in-band
+  // discovery.
+  if (selfNick && sender.update_muji_presence) {
     try {
-      await sender.update_muc_call_presence(roomJid, selfNick, true, roomJid);
+      await sender.update_muji_presence(
+        roomJid,
+        selfNick,
+        true, // active
+        false, // preparing
+        media.video, // video
+      );
     } catch (err) {
       reportCallError(err);
     }

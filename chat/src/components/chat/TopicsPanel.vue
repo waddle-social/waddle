@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, watch } from "vue";
-import { CalendarDays, Camera, Hash, ListTree, MessageSquareText, MessagesSquare, Plus, Settings, Users, ChevronDown, ChevronRight, MessageCircle } from "lucide-vue-next";
+import { CalendarDays, Camera, Hash, ListTree, MessageSquareText, MessagesSquare, Phone, Plus, Settings, Users, ChevronDown, ChevronRight, MessageCircle } from "lucide-vue-next";
 import { isForumChannel as detectForumChannel } from "@/lib/channel-types";
 import type { ChannelSummary, SpaceSummary } from "@/lib/chat-types";
 import type { ChannelThreadInboxEntry } from "@/channels/inbox";
@@ -35,7 +35,36 @@ const props = defineProps<{
   isThreadsActive?: boolean;
   /** Unread-thread count for the global Threads view badge. */
   threadsUnreadCount?: number;
+  /**
+   * Per-room count of occupants currently advertising an active
+   * XEP-0272 Muji presence (i.e. in the room's group call). Keyed
+   * by the room's full JID (e.g. `room@conference.example.com`).
+   * Drives a pulsing Phone+count chip next to channel rows so
+   * users see "this channel has an ongoing call" without opening
+   * the channel — matches Slack-Huddle / Discord-voice patterns.
+   */
+  callParticipantCounts?: Record<string, number>;
 }>();
+
+/**
+ * Resolve the channel's MUC room JID and look up the live-call
+ * count for it. Channel rows in the sidebar may store the JID
+ * directly (`channel.jid`) or only the channel id; in the latter
+ * case we fall back to searching `activeChannelJids` for a match —
+ * same heuristic `hasActivity()` uses for the green dot.
+ */
+function callParticipantCount(channel: ChannelSummary): number {
+  if (!props.callParticipantCounts) return 0;
+  if (channel.jid) {
+    return props.callParticipantCounts[channel.jid] ?? 0;
+  }
+  for (const jid of props.activeChannelJids) {
+    if (jid.startsWith(channel.id + "@") || jid.includes(channel.id)) {
+      return props.callParticipantCounts[jid] ?? 0;
+    }
+  }
+  return 0;
+}
 
 function hasActivity(channelId: string): boolean {
   for (const jid of props.activeChannelJids) {
@@ -76,8 +105,11 @@ function groupToggleLabel(group: (typeof channelGroups.value)[number]) {
   return `${group.name}, ${state}, ${channelCount}, ${activity}`;
 }
 
-function activityLabel(summary: { unread: number; mentions: number; hasActivity: boolean }) {
+function activityLabel(summary: { unread: number; mentions: number; hasActivity: boolean; callCount?: number }) {
   const parts: string[] = [];
+  if (summary.callCount && summary.callCount > 0) {
+    parts.push(`call ongoing with ${summary.callCount} ${summary.callCount === 1 ? "participant" : "participants"}`);
+  }
   if (summary.mentions > 0) {
     parts.push(`${summary.mentions} ${summary.mentions === 1 ? "mention" : "mentions"}`);
   }
@@ -106,6 +138,7 @@ function channelRowLabel(
     unread: unread.unread,
     mentions: unread.mentions,
     hasActivity: hasActivity(channel.id),
+    callCount: callParticipantCount(channel),
   })}`;
 }
 
@@ -425,6 +458,26 @@ watch(
                   class="type-badge rounded-full border border-primary/12 px-1.5 py-0.5 text-primary/70"
                 >
                   Forum
+                </span>
+                <!--
+                  XEP-0272 Muji "call ongoing in this channel" indicator.
+                  Sits before the unread/mention badges so it claims the
+                  spot closest to the channel name — Slack-Huddle and
+                  Discord-voice both place the call affordance there.
+                  Suppressed on the active channel (`!isActiveChannelPage`)
+                  since the room header's MucCallButton already shows
+                  participant count when you're inside the room. Visual
+                  language (pulsing primary ring + Phone icon + count)
+                  matches MucCallButton.vue:97-107 so the two reads as
+                  the same affordance.
+                -->
+                <span
+                  v-if="callParticipantCount(channel) > 0 && !isActiveChannelPage(channel)"
+                  class="chat-badge-glow--primary type-count-badge inline-flex items-center gap-0.5 h-[18px] px-1.5 rounded-full bg-primary/15 text-primary ring-1 ring-primary/30 motion-safe:animate-pulse"
+                  aria-hidden="true"
+                >
+                  <Phone class="w-3 h-3" />
+                  <span class="type-numeric leading-none">{{ callParticipantCount(channel) }}</span>
                 </span>
                 <span
                   v-if="unread.mentions > 0 && !isActiveChannelPage(channel)"
