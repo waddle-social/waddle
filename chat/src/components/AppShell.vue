@@ -4,14 +4,12 @@ import LandingState from "@/components/chat/LandingState.vue";
 import LoginScreen from "@/components/chat/LoginScreen.vue";
 import { useChatAppController } from "@/shell/chat-app-controller";
 import { appController } from "@/stores/app-controller";
-import type { RouteMatch } from "@/router";
 
 const props = defineProps<{
   giphyApiKey?: string;
-  initialMatch?: RouteMatch;
 }>();
 
-const controller = useChatAppController(props.giphyApiKey ?? "", props.initialMatch);
+const controller = useChatAppController(props.giphyApiKey ?? "");
 const { connectionStore } = controller;
 
 // Publish the controller into a module-level ref so per-route Vue

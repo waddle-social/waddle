@@ -3,14 +3,11 @@ import { ClientRouter } from "astro:transitions";
 import { env } from "cloudflare:workers";
 import AppShell from "@/components/AppShell.vue";
 import XmppProvider from "@/components/XmppProvider.vue";
-import type { RouteMatch } from "@/router";
 import "@/styles/global.css";
 
-interface Props {
-  initialMatch?: RouteMatch;
-}
-
-const { initialMatch } = Astro.props as Props;
+// AppShell reads the active route from `window.location` at hydration
+// time via the router's module-level `currentMatch`; no need for the
+// page to thread an SSR-computed initial match through.
 const serverBaseUrl = env.SERVER_BASE_URL;
 const giphyApiKey = env.GIPHY_API_KEY ?? "";
 ---
@@ -72,7 +69,7 @@ const giphyApiKey = env.GIPHY_API_KEY ?? "";
   </head>
   <body class="bg-background text-foreground font-sans antialiased">
     <XmppProvider client:only="vue" transition:persist serverBaseUrl={serverBaseUrl ?? ""} />
-    <AppShell client:only="vue" transition:persist giphyApiKey={giphyApiKey} initialMatch={initialMatch}>
+    <AppShell client:only="vue" transition:persist giphyApiKey={giphyApiKey}>
       <slot />
       <div slot="fallback" class="chat-app-shell chat-startup-shell" role="status" aria-live="polite">
         <div class="chat-desktop-shell">

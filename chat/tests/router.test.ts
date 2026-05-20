@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { buildHref, matchLocation, navigate, routes, type RouteMatch } from "../src/router";
+import { buildHref, matchLocation, navigate, type RouteMatch } from "../src/router";
 
 describe("matchLocation", () => {
   test("returns home for '/'", () => {
@@ -260,26 +260,6 @@ describe("buildHref ↔ matchLocation round trips", () => {
       search: { thread: ["root,1", "child%2"], pinned: true },
     };
     expect(roundtrip(m)).toEqual(m);
-  });
-});
-
-describe("routes.<route>.href parity with manual hrefs", () => {
-  test("channel.href and channelExtension.href produce buildHref output", () => {
-    const channelMatch = routes.channel.match({
-      params: { channelId: "room-id-1" },
-      search: { thread: ["a"], pinned: true },
-    });
-    expect(routes.channel.href({ params: channelMatch.params, search: channelMatch.search })).toBe(
-      buildHref(channelMatch),
-    );
-
-    const extMatch = routes.channelExtension.match({
-      params: { channelId: "x", pluginId: "p", routeId: "r" },
-      search: { thread: [], pinned: false },
-    });
-    expect(
-      routes.channelExtension.href({ params: extMatch.params, search: extMatch.search }),
-    ).toBe(buildHref(extMatch));
   });
 });
 

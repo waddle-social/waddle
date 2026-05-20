@@ -12,10 +12,9 @@ import { appController } from "@/stores/app-controller";
 // pages alongside this fallback without changing the routing layer.
 const props = defineProps<{
   routeId: RouteMatch["id"];
-  initialMatch?: RouteMatch;
 }>();
 
-useTypedMatch(props.routeId, props.initialMatch);
+useTypedMatch(props.routeId);
 
 const controller = computed(() => appController.value);
 </script>

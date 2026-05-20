@@ -1,14 +1,8 @@
 ---
 import AppLayout from "@/layouts/AppLayout.astro";
 import RoutePageShell from "@/components/pages/RoutePageShell.vue";
-import { routes } from "@/router";
-
-const { username } = Astro.params;
-const initialMatch = routes.dm.match({
-  params: { username: username ?? "" },
-});
 ---
 
-<AppLayout initialMatch={initialMatch}>
-  <RoutePageShell client:only="vue" routeId="dm" initialMatch={initialMatch} />
+<AppLayout>
+  <RoutePageShell client:only="vue" routeId="dm" />
 </AppLayout>

@@ -40,22 +40,18 @@ import {
   type ReactionModeScope,
 } from "@/lib/reaction-mode";
 
-export function useChatAppController(giphyApiKey: string, initialMatch?: RouteMatch) {
+export function useChatAppController(giphyApiKey: string) {
   const ui = useChatShellState();
   const { mode: scrollDirectionMode } = useScrollDirectionPreference();
 
-  // Seed page-level UI state from the SSR-known match (handed in by the
-  // Astro page via AppLayout → AppShell) so the first render lands on
-  // the right page. Without this, every cold load flashes the default
-  // home dashboard / channels-sidebar for one tick before
+  // Seed page-level UI state from the current URL so the first render
+  // lands on the right page. Without this, every cold load flashes the
+  // default home dashboard / channels-sidebar for one tick before
   // `onConnectionReady` runs `applyRouteTarget` and snaps to the real
-  // page. `activePageFromMatch`, `communitySurfaceFromMatch`, and
-  // `sidebarModeFromMatch` are hoisted function declarations defined
-  // further down in this scope.
-  if (initialMatch) {
-    ui.activePage.value = activePageFromMatch(initialMatch);
-    ui.activeCommunitySurface.value = communitySurfaceFromMatch(initialMatch);
-    ui.sidebarMode.value = sidebarModeFromMatch(initialMatch);
+  // page. `applyMatchToShellState` is a hoisted function declaration
+  // defined further down in this scope.
+  if (typeof window !== "undefined") {
+    applyMatchToShellState(matchLocation(window.location.pathname, window.location.search));
   }
 
   const xmppClient = computed(() => connectionStore.client);
@@ -1369,30 +1365,47 @@ export function useChatAppController(giphyApiKey: string, initialMatch?: RouteMa
     updateUrl();
   }
 
-  function activePageFromMatch(match: RouteMatch): "dashboard" | "chat" | "settings" | "admin" | "threads" {
+  // Single mapping from the typed route match to the page-level shell
+  // state (activePage, activeCommunitySurface, sidebarMode,
+  // showPinnedPanel). Used by the SSR seed at controller construction
+  // and at the top of `applyRouteTarget` — keeping the derivation in
+  // one place avoids the seed and the popstate path drifting apart.
+  function applyMatchToShellState(match: RouteMatch): void {
     switch (match.id) {
-      case "home": return "dashboard";
+      case "home":
+        ui.activePage.value = "dashboard";
+        break;
       case "channel":
       case "channelExtension":
       case "dm":
       case "dmList":
       case "feed":
       case "stories":
-      case "events": return "chat";
-      case "settings": return "settings";
-      case "admin": return "admin";
-      case "threads": return "threads";
+      case "events":
+        ui.activePage.value = "chat";
+        break;
+      case "settings":
+        ui.activePage.value = "settings";
+        break;
+      case "admin":
+        ui.activePage.value = "admin";
+        break;
+      case "threads":
+        ui.activePage.value = "threads";
+        break;
     }
-  }
-
-  function communitySurfaceFromMatch(match: RouteMatch): "feed" | "stories" | "events" | null {
-    return match.id === "feed" || match.id === "stories" || match.id === "events"
-      ? match.id
-      : null;
-  }
-
-  function sidebarModeFromMatch(match: RouteMatch): "channels" | "dms" {
-    return match.id === "dm" || match.id === "dmList" ? "dms" : "channels";
+    ui.activeCommunitySurface.value =
+      match.id === "feed" || match.id === "stories" || match.id === "events"
+        ? match.id
+        : null;
+    ui.sidebarMode.value =
+      match.id === "dm" || match.id === "dmList" ? "dms" : "channels";
+    // #414: only channel-context routes carry the pinned-panel flag;
+    // DM/home/settings/threads/admin/community always clear it.
+    ui.showPinnedPanel.value =
+      match.id === "channel" || match.id === "channelExtension"
+        ? match.search.pinned
+        : false;
   }
 
   function onPopState() {
@@ -1412,54 +1425,30 @@ export function useChatAppController(giphyApiKey: string, initialMatch?: RouteMa
   }
 
   async function applyRouteTarget(match: RouteMatch, requestId: number) {
-    ui.activePage.value = activePageFromMatch(match);
-    ui.activeCommunitySurface.value = communitySurfaceFromMatch(match);
-    // #414: sync the pin panel toggle with `?pinned=1`. Only channel
-    // routes (incl. extension panels) carry it; DM/home/settings always clear.
-    ui.showPinnedPanel.value =
-      match.id === "channel" || match.id === "channelExtension" ? match.search.pinned : false;
-    if (match.id === "feed" || match.id === "stories" || match.id === "events") {
-      ui.sidebarMode.value = "channels";
+    applyMatchToShellState(match);
+    // Routes that don't reference a specific channel/DM target also
+    // drop the chat-context state. (Channel/extension/dm routes set
+    // their own context further down.)
+    if (
+      match.id === "home"
+      || match.id === "feed"
+      || match.id === "stories"
+      || match.id === "events"
+      || match.id === "dmList"
+    ) {
       dmConversations.closeDm();
       waddles.activeChannelId.value = null;
       activeExtensionRouteKey.value = null;
       activeRightPanel.value = null;
       activeThreadTargetMessageId.value = null;
       activeThreadStack.value = [];
+      if (match.id === "home") messaging.clearMessages();
       return;
     }
-    if (match.id === "admin") {
+    if (match.id === "admin" || match.id === "settings" || match.id === "threads") {
       activeThreadTargetMessageId.value = null;
       activeThreadStack.value = [];
       activeExtensionRouteKey.value = null;
-      return;
-    }
-    if (match.id === "settings" || match.id === "threads") {
-      activeThreadTargetMessageId.value = null;
-      activeThreadStack.value = [];
-      return;
-    }
-    if (match.id === "home") {
-      ui.sidebarMode.value = "channels";
-      dmConversations.closeDm();
-      waddles.activeChannelId.value = null;
-      activeExtensionRouteKey.value = null;
-      messaging.clearMessages();
-      activeThreadTargetMessageId.value = null;
-      activeThreadStack.value = [];
-      return;
-    }
-    if (match.id === "dmList") {
-      // DM list view: sidebar in DM mode, no peer selected. The DM
-      // pane in the sidebar shows the conversation list; the main
-      // content area renders the "select a conversation" empty state.
-      ui.sidebarMode.value = "dms";
-      dmConversations.closeDm();
-      waddles.activeChannelId.value = null;
-      activeExtensionRouteKey.value = null;
-      activeRightPanel.value = null;
-      activeThreadTargetMessageId.value = null;
-      activeThreadStack.value = [];
       return;
     }
     if (match.id === "dm") {

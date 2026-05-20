@@ -83,7 +83,7 @@ describe("extension route rail UI contract", () => {
     expect(routeView).toContain('tabindex="-1"');
     expect(routeView).not.toContain("<main");
     expect(routeView).toContain("type-caption inline-flex min-h-8");
-    expect(controller).toContain("activePageFromMatch(match)");
+    expect(controller).toContain("applyMatchToShellState(match)");
     const extensionStart = controller.indexOf('if (match.id === "channelExtension") {');
     const loadIndex = controller.indexOf("await messaging.loadMessages(ch.spaceId ?? \"\", ch.id);", extensionStart);
     const guardIndex = controller.indexOf("if (requestId !== routeRequestId) return;", loadIndex);

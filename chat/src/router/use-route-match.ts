@@ -29,13 +29,10 @@ if (typeof window !== "undefined") {
 }
 
 // Reactive view of the active route match. Returns the shared
-// module-level ref, optionally pre-syncing from an SSR-known initial
-// match (handed in by the Astro page via AppLayout → AppShell) on the
-// first hydration tick.
-export function useRouteMatch(initial?: RouteMatch): Readonly<Ref<RouteMatch>> {
-  if (initial && currentMatch.value.id !== initial.id) {
-    currentMatch.value = initial;
-  }
+// module-level ref — it's already kept in sync with `window.location`
+// (initialized at module load, updated on popstate, written by
+// `navigate()`), so callers don't need to pass an SSR initial value.
+export function useRouteMatch(): Readonly<Ref<RouteMatch>> {
   return currentMatch;
 }
 
@@ -46,9 +43,8 @@ export function useRouteMatch(initial?: RouteMatch): Readonly<Ref<RouteMatch>> {
 // stale per-route page can't outlive its match.)
 export function useTypedMatch<Id extends RouteMatch["id"]>(
   id: Id,
-  initial?: RouteMatch,
 ): ComputedRef<Extract<RouteMatch, { id: Id }>> {
-  const match = useRouteMatch(initial);
+  const match = useRouteMatch();
   if (match.value.id !== id) {
     throw new Error(
       `useTypedMatch(${JSON.stringify(id)}) called on a "${match.value.id}" match`,
