@@ -14,12 +14,43 @@
 //! (the reserved variant from slice 2a) to the evaluator and lands the
 //! projection store + reader trait + writer surface used by the
 //! ingestion sites (XEP-0085 / XEP-0490 / outbound commit / XEP-0045).
+//!
+//! Cold-start expectation: on first deploy the projection table is
+//! empty. Every [`crate::notification_outbox::NotificationClass::ActiveChannelMention`]
+//! candidate that reaches the T1 drain will suppress with
+//! [`crate::notification_outbox::SuppressedReason::Xep0513ActiveMiss`]
+//! until users start sending chat-states, advancing read markers,
+//! committing outbound messages, or emitting MUC presence. The metric
+//! `waddle_push_suppressed_total{reason="xep0513_active_miss"}` will
+//! therefore ramp up from zero to a baseline as the projection fills.
+//! That is expected behavior, not a regression.
 
 use async_trait::async_trait;
 use jid::BareJid;
 use thiserror::Error;
 
 use crate::db::{Database, DatabaseError, IntoParams};
+
+/// Upper bound on the `presence_show` column value, enforced at the
+/// writer to defend against adversarial or upstream-malformed input.
+/// Per RFC 6121 §4.7.2.1 the valid `<show/>` tokens are `away`,
+/// `chat`, `dnd`, `xa` (4 chars max), so this cap is two orders of
+/// magnitude over any spec-conformant value while still cheap to
+/// persist.
+pub const PRESENCE_SHOW_MAX_LEN: usize = 64;
+
+/// Truncate `s` to at most `max_len` bytes, never splitting a UTF-8
+/// scalar. Walks back from `max_len` to the previous char boundary.
+fn truncate_to_char_boundary(s: &str, max_len: usize) -> &str {
+    if s.len() <= max_len {
+        return s;
+    }
+    let mut cut = max_len;
+    while cut > 0 && !s.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    &s[..cut]
+}
 
 /// CHECK constraint name on `notification_activity.last_chat_state`.
 pub(crate) const NOTIFICATION_ACTIVITY_LAST_CHAT_STATE_CHECK_NAME: &str =
@@ -626,6 +657,13 @@ impl NotificationActivityStore {
     /// A `None` `show` is the canonical default-`available` token (no
     /// `<show/>` child); the column accepts it and the read path
     /// preserves the distinction.
+    ///
+    /// Oversize defense: per RFC 6121 §4.7.2.1 the valid `<show/>`
+    /// values are `away`, `chat`, `dnd`, `xa` (4 chars max), so a
+    /// caller passing more than [`PRESENCE_SHOW_MAX_LEN`] bytes is
+    /// either smuggling adversarial input or has a malformed parser
+    /// upstream. We truncate to a UTF-8 safe prefix and emit a warn
+    /// rather than persist the raw blob into the column.
     pub async fn record_presence_available(
         &self,
         owner: &BareJid,
@@ -633,6 +671,21 @@ impl NotificationActivityStore {
         show: Option<&str>,
         now_ms: i64,
     ) -> Result<(), NotificationActivityError> {
+        let bounded_show: Option<String> = show.map(|raw| {
+            if raw.len() <= PRESENCE_SHOW_MAX_LEN {
+                raw.to_owned()
+            } else {
+                tracing::warn!(
+                    owner = %owner,
+                    conversation = %conversation,
+                    raw_len = raw.len(),
+                    max_len = PRESENCE_SHOW_MAX_LEN,
+                    "record_presence_available: oversize <show/> value; truncating before persist",
+                );
+                truncate_to_char_boundary(raw, PRESENCE_SHOW_MAX_LEN).to_owned()
+            }
+        });
+        let bounded_show_ref: Option<&str> = bounded_show.as_deref();
         self.execute(
             r#"
             INSERT INTO notification_activity (
@@ -666,7 +719,7 @@ impl NotificationActivityStore {
                 owner.to_string(),
                 conversation.to_string(),
                 now_ms,
-                show,
+                bounded_show_ref,
                 now_ms,
                 now_ms,
             ],
@@ -1085,6 +1138,62 @@ mod tests {
             .expect("reader")
             .expect("row");
         assert_eq!(activity.last_active_at_ms, 7_000);
+    }
+
+    /// Oversize `<show/>` defense: a malicious or upstream-malformed
+    /// caller passing a value larger than [`PRESENCE_SHOW_MAX_LEN`]
+    /// MUST be truncated at the writer rather than persisted as an
+    /// unbounded blob. The truncated prefix is preserved (we never
+    /// drop the field silently — operators can still see the
+    /// adversarial token's beginning in the column).
+    #[tokio::test]
+    async fn record_presence_available_bounds_oversize_show() {
+        let store = store().await;
+        let owner = bare("alice@example.com");
+        let room = bare("room@muc.example.com");
+        let oversize = "x".repeat(PRESENCE_SHOW_MAX_LEN + 1024);
+        store
+            .record_presence_available(&owner, &room, Some(&oversize), 1_000)
+            .await
+            .expect("record oversize show");
+        let activity = store.read(&owner, &room).await.expect("read").expect("row");
+        let stored = activity.presence_show.expect("show persisted");
+        assert!(
+            stored.len() <= PRESENCE_SHOW_MAX_LEN,
+            "stored show MUST be bounded; got len {}",
+            stored.len(),
+        );
+        assert!(
+            stored.chars().all(|c| c == 'x'),
+            "truncated prefix MUST preserve the original characters; got {stored:?}",
+        );
+    }
+
+    /// UTF-8 boundary safety: the truncation MUST NOT split a
+    /// multi-byte scalar. A 4-byte emoji repeated past the cap must
+    /// produce a prefix whose byte length is a clean multiple of 4.
+    #[tokio::test]
+    async fn record_presence_available_truncates_on_utf8_boundary() {
+        let store = store().await;
+        let owner = bare("alice@example.com");
+        let room = bare("room@muc.example.com");
+        // "👋" is 4 bytes in UTF-8; repeat enough to exceed the cap.
+        let emoji = "\u{1F44B}";
+        let oversize = emoji.repeat(PRESENCE_SHOW_MAX_LEN);
+        assert!(oversize.len() > PRESENCE_SHOW_MAX_LEN);
+        store
+            .record_presence_available(&owner, &room, Some(&oversize), 1_000)
+            .await
+            .expect("record oversize emoji show");
+        let activity = store.read(&owner, &room).await.expect("read").expect("row");
+        let stored = activity.presence_show.expect("show persisted");
+        assert!(stored.len() <= PRESENCE_SHOW_MAX_LEN);
+        assert!(
+            stored.is_char_boundary(stored.len()),
+            "truncated prefix MUST end on a UTF-8 char boundary; got bytes {:?}",
+            stored.as_bytes(),
+        );
+        assert!(stored.chars().all(|c| c.to_string() == emoji));
     }
 
     /// `NoopActivityReader` returns `None` for every (owner,

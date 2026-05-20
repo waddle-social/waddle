@@ -497,6 +497,20 @@ pub(crate) fn spawn_notification_outbox_janitor(websocket_state: &Arc<WebSocketS
         "Notification outbox janitor: DND suppression is wired through NoopDndReader \
          (waddle_push_suppressed_total{{reason=\"waddle_dnd\"}} will remain 0 until #367 lands)"
     );
+    // Slice 2b operability: log the effective XEP-0513 `<active/>`
+    // TTL once at startup so operators can read the clamped value
+    // without grepping the codebase or re-deriving the env var
+    // resolution chain.
+    let active_mention_ttl_ms = crate::notification_outbox::active_mention_ttl_ms_from_env();
+    let active_mention_ttl_secs = active_mention_ttl_ms / 1_000;
+    info!(
+        "Push active-mention TTL: {active_mention_ttl_secs}s \
+         (default {}s, env WADDLE_PUSH_ACTIVE_MENTION_TTL_SECONDS, \
+         clamp [{}s, {}s])",
+        crate::notification_outbox::DEFAULT_ACTIVE_MENTION_TTL_SECONDS,
+        crate::notification_outbox::MIN_ACTIVE_MENTION_TTL_SECONDS,
+        crate::notification_outbox::MAX_ACTIVE_MENTION_TTL_SECONDS,
+    );
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
         ticker.tick().await;
