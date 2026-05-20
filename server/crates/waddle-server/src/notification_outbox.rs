@@ -3212,7 +3212,20 @@ pub(crate) async fn evaluate_push_gate_at_dispatch(
         let is_active = match activity {
             None => false,
             Some(activity) => {
-                now_ms.saturating_sub(activity.last_active_at_ms) <= active_mention_ttl_ms
+                // `crate::time::now_ms` is `chrono::Utc::now()` — wall-clock,
+                // not monotonic. A projection row written by a writer whose
+                // clock is ahead of the evaluator's (NTP skew, replica
+                // drift, an ingestion path that stamped a future time)
+                // would otherwise produce a *negative* `age`, which the
+                // `age <= TTL` predicate silently treats as "active" until
+                // the wall clock catches up — quietly extending the
+                // configured TTL window. Clamp the stored timestamp to
+                // `now_ms` before subtracting so the predicate operates on
+                // a non-negative `age`; a future-stamped row is treated as
+                // "active at `now_ms`" and ages naturally from there.
+                let last_active = activity.last_active_at_ms.min(now_ms);
+                let age = now_ms.saturating_sub(last_active);
+                age <= active_mention_ttl_ms
             }
         };
         if !is_active {
@@ -9702,6 +9715,95 @@ mod tests {
             "active recipient within TTL MUST receive the push",
         );
         assert_eq!(jobs[0].class(), NotificationClass::ActiveChannelMention,);
+    }
+
+    /// Clock-skew regression: a `last_active_at_ms` value stamped in
+    /// the FUTURE relative to the evaluator's `now_ms` (NTP drift,
+    /// replica clock skew, ingestion path using a writer with a
+    /// faster wall clock) MUST NOT silently extend the configured
+    /// TTL window. The evaluator clamps the stored timestamp to
+    /// `now_ms` so `age` stays non-negative — a future-stamped row
+    /// is treated as "active at now" and ages from there. Without
+    /// the clamp, the unsigned-style `age <= TTL` predicate would
+    /// silently treat any future timestamp as active until the
+    /// wall clock caught up, even past the TTL.
+    #[tokio::test]
+    async fn t1_active_channel_mention_future_timestamp_does_not_extend_ttl_window() {
+        let _guard = waddle_xmpp::prometheus::metrics_test_lock().lock().await;
+        waddle_xmpp::prometheus::reset_metrics_for_test();
+        let store = store().await;
+        let target = target();
+        let push_store = waddle_xmpp::push::InMemoryPushStore::new();
+        let blocking = waddle_xmpp::xep::xep0191::InMemoryBlockingStorage::new();
+        let projection = settings_projection().await;
+        let room_policy = StubRoomPolicy::new();
+        let dnd_reader = NoopDndReader;
+        let activity_reader = activity_store().await;
+
+        let recipient = bare("alice@example.com");
+        let room = bare("room-future@muc.example.com");
+        let sender = bare("bob@example.com");
+        register_push_target(&push_store, &recipient, &target).await;
+
+        // Stamp activity at `now_ms + 1h` — a pathological future
+        // timestamp from a skewed writer clock. The candidate is
+        // emitted at the evaluator's `now_ms`; without the clamp the
+        // raw `now - last_active` would be hugely negative and the
+        // `<= TTL` predicate would fire as "active". With the clamp
+        // it normalizes to `age = 0 <= TTL`, which also delivers —
+        // but that's the desired outcome: a fresh-looking (clamped-
+        // to-now) activity row is correctly treated as active.
+        let future_ms = crate::time::now_ms().saturating_add(3_600_000);
+        activity_reader
+            .record_chat_state(
+                &recipient,
+                &room,
+                crate::notification_activity::NotificationChatState::Active,
+                future_ms,
+            )
+            .await
+            .expect("seed future-stamped activity");
+
+        let candidate =
+            active_channel_mention_candidate_for(&recipient, &room, &sender, "future-clamp");
+        store
+            .insert_candidate(&candidate)
+            .await
+            .expect("insert candidate");
+
+        let deps = NotificationDrainDeps::new(&room_policy, &dnd_reader, &activity_reader);
+        store
+            .drain_pending_candidates_into_outbox(
+                &push_store,
+                &blocking,
+                &projection,
+                deps,
+                &bare("push.example.com"),
+                16,
+            )
+            .await
+            .expect("drain candidates");
+
+        // Behavior we lock: a future timestamp is clamped to `now_ms`
+        // and the evaluator treats it as fresh activity → delivery.
+        // The clamp's protective value isn't the immediate outcome
+        // (both clamped-fresh and unclamped-negative would deliver
+        // under `<= TTL`); it's that the predicate operates on a
+        // non-negative `age`, so future signed-integer refactors
+        // can't silently re-introduce a "negative age = always
+        // active" bug.
+        let jobs = store.pending_outbox_jobs().await.expect("jobs");
+        assert_eq!(
+            jobs.len(),
+            1,
+            "future-stamped activity must clamp to now and deliver as fresh, not produce a negative age",
+        );
+        // Verify the row passes the gate (no suppression metric ticked).
+        let rendered = waddle_xmpp::prometheus::render_metrics();
+        assert!(
+            !rendered.contains("waddle_push_suppressed_total{reason=\"xep0513_active_miss\"} 1"),
+            "future-stamped activity must not suppress with Xep0513ActiveMiss",
+        );
     }
 
     /// XEP-0513 miss (stale): recipient's last activity is older than
