@@ -16,7 +16,7 @@ import {
   applyForumContext,
   mapLiveRoomMessageToTimeline,
 } from "@/channels/timeline";
-import { compareTimelineMessages } from "@/lib/timeline-timestamps";
+import { compareTimelineMessages, pickAuthoritativeTimestamp } from "@/lib/timeline-timestamps";
 
 function mergeReplyToMetadata(
   existing: TimelineMessage["replyTo"],
@@ -93,7 +93,26 @@ function mergeRetractionTombstone(
   existing: TimelineMessage,
   incoming: TimelineMessage,
 ): TimelineMessage {
-  return incoming.isRetracted ? retractChannelTimelineMessage(existing, incoming.retractionId) : existing;
+  let result = incoming.isRetracted
+    ? retractChannelTimelineMessage(existing, incoming.retractionId)
+    : existing;
+  // Upgrade the timestamp if the MAM hit carries a higher-authority
+  // stamp than the row we already had — see `dms/message-timeline-state.ts`.
+  const authoritativeTimestamp = pickAuthoritativeTimestamp(
+    { createdAt: result.createdAt, createdAtSource: result.createdAtSource },
+    { createdAt: incoming.createdAt, createdAtSource: incoming.createdAtSource },
+  );
+  if (
+    authoritativeTimestamp.createdAt !== result.createdAt
+    || authoritativeTimestamp.createdAtSource !== result.createdAtSource
+  ) {
+    result = {
+      ...result,
+      createdAt: authoritativeTimestamp.createdAt,
+      createdAtSource: authoritativeTimestamp.createdAtSource,
+    };
+  }
+  return result;
 }
 
 export interface TimelineBuildOptions {
@@ -112,6 +131,7 @@ export function queuedRoomMessageToTimeline(
     authorJid: `${roomJid}/${session.username}`,
     body: queued.body || (queued.files?.[0]?.url ?? ""),
     createdAt: queued.createdAt,
+    createdAtSource: "queued",
     isSelf: true,
     deliveryStatus: "queued",
   };

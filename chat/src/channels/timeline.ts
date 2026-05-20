@@ -15,6 +15,7 @@ export function mapLiveRoomMessageToTimeline(
     authorOccupantJid,
     body: msg.body,
     createdAt: msg.createdAt,
+    createdAtSource: msg.createdAtSource,
     isSelf: msg.nick === session.username,
   };
   if (msg.correctionTargetId) tm.correctionTargetId = msg.correctionTargetId;

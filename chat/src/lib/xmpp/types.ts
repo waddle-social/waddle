@@ -1,6 +1,7 @@
 import type { WaddleChannelType } from "@/lib/channel-types";
 import type { PinPermission } from "@/lib/chat-types";
 import type { ExtensionAnnotation } from "@/lib/chat-ui";
+import type { TimestampSource } from "@/lib/timeline-timestamps";
 import type { WaddleEncryptedFile } from "./extensions/encrypted-file";
 
 /** Shared types for the XMPP client layer. */
@@ -102,6 +103,8 @@ export interface LiveRoomMessage {
   nick: string;
   body: string;
   createdAt: string;
+  /** Provenance of `createdAt` (see `TimestampSource`). */
+  createdAtSource: TimestampSource;
   type: "message" | "subject" | "pin-event";
   /** #414: pin/unpin action carried by a `<pin-event/>` system
    * message. Set when `type === "pin-event"`. */
@@ -174,6 +177,8 @@ export interface LiveDmMessage {
   nick: string;
   body: string;
   createdAt: string;
+  /** Provenance of `createdAt` (see `TimestampSource`). */
+  createdAtSource: TimestampSource;
   type: "message";
   replacesId?: string;
   retractsId?: string;

@@ -11,7 +11,7 @@ import {
   isSameDmCorrectionSender,
   retractDmTimelineMessage,
 } from "@/dms/message-timeline-state";
-import { compareTimelineMessages } from "@/lib/timeline-timestamps";
+import { compareTimelineMessages, pickAuthoritativeTimestamp } from "@/lib/timeline-timestamps";
 import {
   canUseSelfEchoBodyFallback,
 } from "@/lib/self-echo-fallback";
@@ -174,10 +174,21 @@ export function useDmLiveMerge(deps: UseDmLiveMergeDeps) {
       messages.value = messages.value.map((m) => {
         if (m.id !== existing.id) return m;
         const mergedIds = mergeMessageIds(m, msg.id, msg.wireIds);
+        // Pick the more authoritative `createdAt` so a redelivered
+        // live stanza (`fallback`) can't overwrite a true server
+        // stamp (`archive`/`delay`) that landed via MAM first. This
+        // is the path that produced the "old message lands at the
+        // bottom on tab restore" symptom (PR1 root cause).
+        const authoritativeTimestamp = pickAuthoritativeTimestamp(
+          { createdAt: m.createdAt, createdAtSource: m.createdAtSource },
+          { createdAt: msg.createdAt, createdAtSource: msg.createdAtSource },
+        );
         const updated: TimelineMessage = {
           ...m,
           ...msg,
           id: mergedIds.id,
+          createdAt: authoritativeTimestamp.createdAt,
+          createdAtSource: authoritativeTimestamp.createdAtSource,
         };
         if (mergedIds.wireIds?.length) updated.wireIds = mergedIds.wireIds;
         else delete updated.wireIds;

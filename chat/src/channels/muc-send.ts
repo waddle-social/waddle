@@ -187,6 +187,7 @@ export function useMucSend(deps: UseMucSendDeps) {
           authorJid: `${currentRoomJid.value}/${session.value.username}`,
           body: bodyText || (attachments?.[0]?.url ?? ""),
           createdAt: new Date().toISOString(),
+          createdAtSource: "queued",
           isSelf: true,
           deliveryStatus: (result?.state ?? "sending") as DeliveryStatus,
           ...(markup && markup.length > 0 ? { markup } : {}),
