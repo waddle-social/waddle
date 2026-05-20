@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import {
   $mucCallParticipants,
   applyMucCallPresence,
+  awaitPreparingEcho,
   clearMucCallParticipants,
   mucCallParticipantCount,
 } from "../src/lib/calls/muc-call-presence";
@@ -10,12 +11,19 @@ afterEach(() => {
   clearMucCallParticipants();
 });
 
+// XEP-0272 Muji presence — the namespace + element shape that the
+// chat-side store consumes. The previous custom `urn:waddle:muc-call:0`
+// extension has been retired; these tests exercise the active/preparing
+// boolean pair that the WASM parser surfaces in `WasmMujiPresence`.
+const activeMuji = { preparing: false, active: true } as const;
+const preparingMuji = { preparing: true, active: false } as const;
+
 describe("applyMucCallPresence", () => {
-  test("available presence with active extension registers the nick", () => {
+  test("available presence with active Muji registers the nick", () => {
     applyMucCallPresence({
       from: "room@muc.test/alice",
       presence_type: "available",
-      muc_call: { state: "active", call_id: "room@muc.test" },
+      muji: activeMuji,
     });
     expect($mucCallParticipants.get()).toEqual({
       "room@muc.test": ["alice"],
@@ -27,12 +35,12 @@ describe("applyMucCallPresence", () => {
     applyMucCallPresence({
       from: "room@muc.test/alice",
       presence_type: "available",
-      muc_call: { state: "active", call_id: "room@muc.test" },
+      muji: activeMuji,
     });
     applyMucCallPresence({
       from: "room@muc.test/bob",
       presence_type: "available",
-      muc_call: { state: "active", call_id: "room@muc.test" },
+      muji: activeMuji,
     });
     expect($mucCallParticipants.get()["room@muc.test"]).toEqual([
       "alice",
@@ -40,29 +48,34 @@ describe("applyMucCallPresence", () => {
     ]);
   });
 
-  test("inactive extension removes the nick", () => {
+  test("preparing-only Muji does NOT count as active (XEP-0272 §Joining two-phase flow)", () => {
     applyMucCallPresence({
       from: "room@muc.test/alice",
       presence_type: "available",
-      muc_call: { state: "active", call_id: "room@muc.test" },
-    });
-    applyMucCallPresence({
-      from: "room@muc.test/alice",
-      presence_type: "available",
-      muc_call: { state: "inactive", call_id: "room@muc.test" },
+      muji: preparingMuji,
     });
     expect($mucCallParticipants.get()["room@muc.test"]).toBeUndefined();
   });
 
-  test("available presence WITHOUT the extension removes a previously-registered nick", () => {
-    // A user who joins the call then sends a fresh presence (e.g.
-    // updating their show/status) without the extension means they
-    // are no longer advertising the call. Treating this as "left
-    // the call" matches the documented permissive parsing.
+  test("transitioning from active → preparing-only clears the nick", () => {
     applyMucCallPresence({
       from: "room@muc.test/alice",
       presence_type: "available",
-      muc_call: { state: "active", call_id: "room@muc.test" },
+      muji: activeMuji,
+    });
+    applyMucCallPresence({
+      from: "room@muc.test/alice",
+      presence_type: "available",
+      muji: preparingMuji,
+    });
+    expect($mucCallParticipants.get()["room@muc.test"]).toBeUndefined();
+  });
+
+  test("available presence WITHOUT the Muji extension removes a previously-registered nick (XEP-0272 §Leaving)", () => {
+    applyMucCallPresence({
+      from: "room@muc.test/alice",
+      presence_type: "available",
+      muji: activeMuji,
     });
     applyMucCallPresence({
       from: "room@muc.test/alice",
@@ -75,7 +88,7 @@ describe("applyMucCallPresence", () => {
     applyMucCallPresence({
       from: "room@muc.test/alice",
       presence_type: "available",
-      muc_call: { state: "active", call_id: "room@muc.test" },
+      muji: activeMuji,
     });
     applyMucCallPresence({
       from: "room@muc.test/alice",
@@ -88,12 +101,12 @@ describe("applyMucCallPresence", () => {
     applyMucCallPresence({
       from: "room-a@muc.test/alice",
       presence_type: "available",
-      muc_call: { state: "active", call_id: "room-a@muc.test" },
+      muji: activeMuji,
     });
     applyMucCallPresence({
       from: "room-b@muc.test/carol",
       presence_type: "available",
-      muc_call: { state: "active", call_id: "room-b@muc.test" },
+      muji: activeMuji,
     });
     expect($mucCallParticipants.get()).toEqual({
       "room-a@muc.test": ["alice"],
@@ -105,12 +118,12 @@ describe("applyMucCallPresence", () => {
     applyMucCallPresence({
       from: "room@muc.test/alice",
       presence_type: "available",
-      muc_call: { state: "active", call_id: "room@muc.test" },
+      muji: activeMuji,
     });
     applyMucCallPresence({
       from: "room@muc.test/alice",
       presence_type: "available",
-      muc_call: { state: "active", call_id: "room@muc.test" },
+      muji: activeMuji,
     });
     expect($mucCallParticipants.get()["room@muc.test"]).toEqual(["alice"]);
   });
@@ -126,12 +139,12 @@ describe("applyMucCallPresence", () => {
   test("ignores presences missing a `from` or nick", () => {
     applyMucCallPresence({
       presence_type: "available",
-      muc_call: { state: "active", call_id: "room@muc.test" },
+      muji: activeMuji,
     });
     applyMucCallPresence({
       from: "room@muc.test",
       presence_type: "available",
-      muc_call: { state: "active", call_id: "room@muc.test" },
+      muji: activeMuji,
     });
     expect($mucCallParticipants.get()).toEqual({});
   });
@@ -140,9 +153,81 @@ describe("applyMucCallPresence", () => {
     applyMucCallPresence({
       from: "room@muc.test/alice",
       presence_type: "available",
-      muc_call: { state: "active", call_id: "room@muc.test" },
+      muji: activeMuji,
     });
     clearMucCallParticipants();
     expect($mucCallParticipants.get()).toEqual({});
+  });
+});
+
+describe("awaitPreparingEcho (XEP-0272 §Joining MUST)", () => {
+  test("resolves when a matching preparing-only presence echo arrives", async () => {
+    // The pre-call flow registers an echo waiter then fires the
+    // preparing presence; the MUC echoes it back; the waiter
+    // resolves so beginMucCall can proceed.
+    const wait = awaitPreparingEcho("room@muc.test", "alice", 5000);
+    applyMucCallPresence({
+      from: "room@muc.test/alice",
+      presence_type: "available",
+      muji: preparingMuji,
+    });
+    await wait;
+    // No assertion needed — the await itself is the test. If the
+    // echo never fires the listener, the test times out.
+  });
+
+  test("does NOT resolve on a different nick's preparing echo", async () => {
+    // Two participants prepare at the same time; alice's waiter
+    // must NOT resolve on bob's echo.
+    const aliceWait = awaitPreparingEcho("room@muc.test", "alice", 200);
+    let aliceResolved = false;
+    aliceWait.then(() => {
+      aliceResolved = true;
+    });
+    applyMucCallPresence({
+      from: "room@muc.test/bob",
+      presence_type: "available",
+      muji: preparingMuji,
+    });
+    // Give the microtask queue a chance to run before checking.
+    await new Promise((r) => setTimeout(r, 10));
+    expect(aliceResolved).toBe(false);
+    // Now alice's echo arrives:
+    applyMucCallPresence({
+      from: "room@muc.test/alice",
+      presence_type: "available",
+      muji: preparingMuji,
+    });
+    await aliceWait;
+    expect(aliceResolved).toBe(true);
+  });
+
+  test("does NOT resolve on a content (active) presence — preparing-only is the trigger", async () => {
+    // A content presence is NOT a preparing echo; the waiter must
+    // continue to block until the MUC echoes preparing.
+    const wait = awaitPreparingEcho("room@muc.test", "alice", 200);
+    let resolved = false;
+    wait.then(() => {
+      resolved = true;
+    });
+    applyMucCallPresence({
+      from: "room@muc.test/alice",
+      presence_type: "available",
+      muji: activeMuji, // active, not preparing
+    });
+    await new Promise((r) => setTimeout(r, 10));
+    expect(resolved).toBe(false);
+    // Eventually the 200ms timeout will resolve it; await to clean up.
+    await wait;
+  });
+
+  test("falls back to timeout when no echo arrives", async () => {
+    // The MUC may have dropped the presence; we don't want to
+    // hang the call setup forever. 50ms timeout for the test.
+    const start = Date.now();
+    await awaitPreparingEcho("room@muc.test/nobody", "alice", 50);
+    const elapsed = Date.now() - start;
+    expect(elapsed).toBeGreaterThanOrEqual(40); // some scheduling slack
+    expect(elapsed).toBeLessThan(500);
   });
 });

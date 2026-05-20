@@ -377,13 +377,19 @@ impl Feature {
         Self::new("urn:xmpp:extdisco:2")
     }
 
-    /// Custom: Waddle's LiveKit-backed Jingle transport.
+    /// Custom: Waddle's LiveKit-backed Jingle transport. XEP-0166
+    /// explicitly allows new Jingle transport types, so this stays
+    /// conformant — Waddle keeps a custom transport namespace
+    /// because no XEP defines a LiveKit-style URL+JWT credential
+    /// delivery shape.
     pub fn waddle_livekit_transport() -> Self {
         Self::new("urn:waddle:transports:livekit:0")
     }
 
-    /// Custom: Waddle's MUC group-call presence extension.
-    pub fn waddle_muc_call() -> Self {
-        Self::new("urn:waddle:muc-call:0")
+    /// XEP-0272: Multiparty Jingle (Muji). MUC group-call presence
+    /// advertisement and Jingle session-initiate to the mixer JID
+    /// embed `<muji xmlns='urn:xmpp:jingle:muji:0'/>`.
+    pub fn muji() -> Self {
+        Self::new("urn:xmpp:jingle:muji:0")
     }
 }

@@ -27,8 +27,8 @@ pub use call::{
     wrap_jmi_message, CallEventKind, CallMedia, InboundCallEvent, LiveKitJoin,
 };
 pub use namespaces::{
-    build_muc_call_extension_element, NS_CHAT_MARKERS, NS_CHAT_STATES, NS_CLIENT,
-    NS_MESSAGE_CORRECT, NS_MESSAGE_MODERATE, NS_MESSAGE_RETRACT, NS_REACTIONS, NS_WADDLE_MUC_CALL,
+    build_muji_element, NS_CHAT_MARKERS, NS_CHAT_STATES, NS_CLIENT, NS_JINGLE_RTP,
+    NS_MESSAGE_CORRECT, NS_MESSAGE_MODERATE, NS_MESSAGE_RETRACT, NS_MUJI, NS_REACTIONS,
     NS_WADDLE_PIN_V0,
 };
 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
@@ -44,9 +44,9 @@ pub use types::{
     ExtensionPayloadAttributeData, ExtensionPayloadElementData, ExtensionPluginId,
     ExtensionRoomJid, ExtensionSourceData, ExtensionTextId, ExtensionTimestamp, ExtensionXmlName,
     InboundMessage, InboundPresence, MarkupSpan, MarkupSpanData, MarkupSpanType, MdsDisplayedEntry,
-    MessagingEvent, ModerationPayload, MucAffiliation, MucCallPresence, MucCallPresenceState,
-    MucRole, PresenceHat, ReactionPayload, ReferenceData, RetractionPayload, SendMessageOptions,
-    SharedFile, SharedFileDisposition,
+    MessagingEvent, ModerationPayload, MucAffiliation, MucRole, MujiPresence, PresenceHat,
+    ReactionPayload, ReferenceData, RetractionPayload, SendMessageOptions, SharedFile,
+    SharedFileDisposition,
 };
 /// Re-export the xmpp-parsers Jingle types Waddle's call surface
 /// owns so downstream crates (notably the wasm bindings, which

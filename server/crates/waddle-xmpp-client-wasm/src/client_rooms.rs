@@ -68,42 +68,45 @@ impl WaddleClient {
         })
     }
 
-    /// Update our MUC presence in `room_jid/nick` with (or without)
-    /// the `<call xmlns='urn:waddle:muc-call:0'/>` extension. Sent as
-    /// a fresh available-presence so other occupants discover that
-    /// we've joined or left the room's group call without polling.
+    /// Update the occupant's MUC Muji presence (XEP-0272).
     ///
-    /// `active=true` advertises us as a current participant; `false`
-    /// emits the extension with `state='inactive'` so legacy
-    /// presence-replay buffers eventually drop the prior `active`.
-    pub fn update_muc_call_presence(
+    /// - `active=false` (and no preparing): emits a bare `<presence/>`
+    ///   without any `<muji/>` child — XEP-0272 §Leaving says the
+    ///   absence of the element IS the leave marker.
+    /// - `active=true`: emits a Muji presence advertising `<content>`
+    ///   children for audio (always) and video (when `video=true`).
+    /// - `preparing=true`: emits a `<preparing/>` sentinel per XEP-0272
+    ///   §Joining two-phase flow. Typically the client sends this
+    ///   first, awaits the room's echo, then re-emits with contents
+    ///   declared.
+    pub fn update_muji_presence(
         &self,
         room_jid: String,
         nick: String,
         active: bool,
-        call_id: String,
+        preparing: bool,
+        video: bool,
     ) -> Promise {
         let inner = self.inner.clone();
         future_to_promise(async move {
             let to = format!("{room_jid}/{nick}");
-            // CLAUDE.md typed-payloads + XML-hard-rule: build the
-            // extension element via the canonical helper in
-            // waddle-xmpp-client::messaging so the wire shape stays
-            // locked to a single definition site rather than
-            // re-spelling element/attr names + state tokens at the
-            // wasm boundary. The wasm crate cannot pull the
-            // server-only `MucCallExtension` type in, so the
-            // builder helper is the seam — it lives in the client
-            // crate and is exposed both crates can reach.
-            let call = waddle_xmpp_client::messaging::build_muc_call_extension_element(
-                active,
-                call_id.as_str(),
-            );
-            let stanza = Element::builder("presence", NS_CLIENT)
-                .attr(minidom::rxml::xml_ncname!("to").to_owned(), to.as_str())
-                .append(call)
-                .build();
-            send_stanza_command(inner, stanza).await?;
+            let mut builder = Element::builder("presence", NS_CLIENT)
+                .attr(minidom::rxml::xml_ncname!("to").to_owned(), to.as_str());
+            if preparing || active {
+                // CLAUDE.md typed-payloads + XML-hard-rule: build the
+                // `<muji/>` element via the canonical helper in
+                // waddle-xmpp-client::messaging so the wire shape stays
+                // locked to a single definition site rather than
+                // re-spelling element/attr names + media tokens at the
+                // wasm boundary.
+                let muji = waddle_xmpp_client::messaging::build_muji_element(
+                    preparing,
+                    active, // audio is implied by "active in a call"
+                    active && video,
+                );
+                builder = builder.append(muji);
+            }
+            send_stanza_command(inner, builder.build()).await?;
             Ok(JsValue::UNDEFINED)
         })
     }

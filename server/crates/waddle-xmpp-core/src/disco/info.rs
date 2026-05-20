@@ -63,6 +63,15 @@ impl Identity {
         Self::new("conference", "text", name)
     }
 
+    /// XEP-0272 / av-conferences ProtoXEP convention: the SFU mixer
+    /// JID advertises a `<identity category='conference'
+    /// type='audio-video'/>` so a strict client can disco#info the
+    /// mixer and discover Muji support before sending a
+    /// session-initiate.
+    pub fn audio_video_conference(name: Option<&str>) -> Self {
+        Self::new("conference", "audio-video", name)
+    }
+
     pub fn upload_service(name: Option<&str>) -> Self {
         Self::new("store", "file", name)
     }

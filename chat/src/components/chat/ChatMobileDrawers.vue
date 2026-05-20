@@ -1,5 +1,7 @@
 <script setup lang="ts">
 import { computed } from "vue";
+import { useStore } from "@nanostores/vue";
+import { $mucCallParticipants } from "@/lib/calls/muc-call-presence";
 import WaddlesSidebar from "@/components/chat/WaddlesSidebar.vue";
 import TopicsPanel from "@/components/chat/TopicsPanel.vue";
 import DmPanel from "@/components/chat/DmPanel.vue";
@@ -51,6 +53,18 @@ function selectCommunitySurface(surface: "feed" | "stories" | "events") {
   ui.activeCommunitySurface.value = surface;
   ui.showMobileNav.value = false;
 }
+
+// XEP-0272 Muji participant counts keyed by room JID — same derived
+// reactive state as ChatReadyShell uses, so the mobile sidebar shows
+// the same "call ongoing" chip.
+const mucCallParticipantsStore = useStore($mucCallParticipants);
+const callParticipantCounts = computed<Record<string, number>>(() => {
+  const counts: Record<string, number> = {};
+  for (const [jid, nicks] of Object.entries(mucCallParticipantsStore.value)) {
+    counts[jid] = nicks.length;
+  }
+  return counts;
+});
 
 const drawerExtensionRoutes = computed(() =>
   extensionRouteRailItems(
@@ -109,6 +123,7 @@ function openExtensionRoute(route: DiscoveredExtensionRoute) {
           :active-channel-jids="messaging.activeChannels.value"
           :collapsed-group-ids="ui.collapsedSpaceGroupIds.value"
           :channel-unread-map="computedChannelUnreadMap"
+          :call-participant-counts="callParticipantCounts"
           :thread-entries-fn="(roomJid: string) => channelUnread.threadEntries(roomJid)"
           :active-community-surface="ui.activeCommunitySurface.value"
           :stories-active-count="stories.activeStories.value.length"

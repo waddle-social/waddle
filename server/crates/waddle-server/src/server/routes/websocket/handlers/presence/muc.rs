@@ -235,7 +235,7 @@ pub async fn handle_muc_join(
             role: existing.role,
             real_jid: &existing.jid,
             include_self_status: false,
-            call_extension: existing.call_extension.as_ref(),
+            muji: existing.muji.as_ref(),
         }));
     }
 
@@ -277,7 +277,7 @@ pub async fn handle_muc_join(
         include_self_status: true,
         // Fresh join has no active call advertisement of its own —
         // the joiner has not yet asserted one.
-        call_extension: None,
+        muji: None,
     }));
 
     // XEP-0045 §7.2.15 historical room subject. The typed builder

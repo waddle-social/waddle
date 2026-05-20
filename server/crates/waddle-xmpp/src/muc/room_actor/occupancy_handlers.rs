@@ -57,15 +57,15 @@ impl kameo::message::Message<JoinWithAffiliation> for RoomActor {
             .occupants
             .values()
             .flat_map(|o| {
-                let call_extension = self.room.call_state_for_nick(&o.nick).cloned();
+                let muji = self.room.muji_for_nick(&o.nick).cloned();
                 self.room.get_occupant_sessions(&o.nick).into_iter().map({
-                    let call_extension = call_extension.clone();
+                    let muji = muji.clone();
                     move |jid| JoinExistingOccupant {
                         jid,
                         nick: o.nick.clone(),
                         affiliation: o.affiliation,
                         role: o.role,
-                        call_extension: call_extension.clone(),
+                        muji: muji.clone(),
                     }
                 })
             })
@@ -186,10 +186,10 @@ impl kameo::message::Message<PresenceUpdateData> for RoomActor {
     }
 }
 
-/// Upsert the `<call xmlns='urn:waddle:muc-call:0'/>` advertised
-/// state for the calling session's nick. Returns a presence-update
-/// outcome (occupant identity + room recipients) and the
-/// post-update extension state to embed in the broadcast.
+/// Upsert the `<muji xmlns='urn:xmpp:jingle:muji:0'/>` advertised
+/// state (XEP-0272) for the calling session's nick. Returns a
+/// presence-update outcome (occupant identity + room recipients) and
+/// the post-update Muji state to embed in the broadcast.
 ///
 /// XEP-0045 §5.1.3 / §7.1: the room is responsible for reflecting
 /// in-room presence to every occupant. Sender authentication —
@@ -197,27 +197,27 @@ impl kameo::message::Message<PresenceUpdateData> for RoomActor {
 /// here via `find_occupant_by_real_jid`; if the sender isn't an
 /// occupant, the actor returns `Ok(None)` and the caller falls
 /// back to the regular join path.
-pub struct UpsertCallPresence {
+pub struct UpsertMujiPresence {
     pub sender_jid: FullJid,
-    pub extension: crate::xep::xep_waddle_muc_call::MucCallExtension,
+    pub muji: crate::xep::xep0272::Muji,
 }
 
 #[derive(Debug, Clone)]
-pub struct CallPresenceUpdateOutcome {
+pub struct MujiPresenceUpdateOutcome {
     pub update: PresenceUpdateOutcome,
-    /// `Some(ext)` if the call indicator should be broadcast as
-    /// active; `None` if the extension transitioned to inactive
-    /// (the broadcast omits the `<call/>` child entirely, signalling
-    /// that the occupant is no longer in a live call).
-    pub active_extension: Option<crate::xep::xep_waddle_muc_call::MucCallExtension>,
+    /// `Some(muji)` if the call indicator should be broadcast (the
+    /// session is preparing OR has active contents); `None` if the
+    /// participant left the call — the broadcast omits the `<muji/>`
+    /// child entirely per XEP-0272 §Leaving.
+    pub active_muji: Option<crate::xep::xep0272::Muji>,
 }
 
-impl kameo::message::Message<UpsertCallPresence> for RoomActor {
-    type Reply = Result<Option<CallPresenceUpdateOutcome>, Infallible>;
+impl kameo::message::Message<UpsertMujiPresence> for RoomActor {
+    type Reply = Result<Option<MujiPresenceUpdateOutcome>, Infallible>;
 
     async fn handle(
         &mut self,
-        msg: UpsertCallPresence,
+        msg: UpsertMujiPresence,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         let Some(sender_occupant) = self.room.find_occupant_by_real_jid(&msg.sender_jid) else {
@@ -238,10 +238,10 @@ impl kameo::message::Message<UpsertCallPresence> for RoomActor {
         // emitted it so a partial-session leave (one resource of a
         // multi-resource occupant) clears the chip even when the
         // user's other sessions remain in the room.
-        let active_extension =
+        let active_muji =
             self.room
-                .upsert_call_state(&sender_nick, msg.sender_jid.clone(), msg.extension);
-        Ok(Some(CallPresenceUpdateOutcome {
+                .upsert_muji_presence(&sender_nick, msg.sender_jid.clone(), msg.muji);
+        Ok(Some(MujiPresenceUpdateOutcome {
             update: PresenceUpdateOutcome {
                 sender_nick,
                 sender_real_jid,
@@ -250,7 +250,7 @@ impl kameo::message::Message<UpsertCallPresence> for RoomActor {
                 room_jid,
                 recipients,
             },
-            active_extension,
+            active_muji,
         }))
     }
 }

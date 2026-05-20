@@ -221,6 +221,7 @@ pub(super) async fn handle_disco_items_iq(
         }
 
         debug!("Disco items query on server");
+        let calls_mixer_domain = format!("calls.{domain}");
         let items = vec![
             DiscoItem::muc_service(muc_domain, Some("Chatrooms")),
             DiscoItem::upload_service(upload_domain, Some("HTTP File Upload")),
@@ -228,6 +229,7 @@ pub(super) async fn handle_disco_items_iq(
             DiscoItem::community_service(community_domain, Some("Community")),
             DiscoItem::pubsub_service(extensions_domain, Some("Extensions")),
             DiscoItem::pubsub_service(push_domain, Some("Push Service")),
+            DiscoItem::calls_mixer(&calls_mixer_domain, Some("Group Call Mixer")),
         ];
         let response = build_disco_items_response(request_iq, &items, None);
         return vec![iq_to_xml(response)];
