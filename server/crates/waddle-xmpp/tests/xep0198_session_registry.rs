@@ -17,7 +17,7 @@ use waddle_xmpp::stream_management::{
     DetachedSession, InMemorySmSessionRegistry, SmClaimCompletion, SmSessionRegistry,
 };
 use waddle_xmpp::Stanza;
-use xmpp_parsers::message::{Body, Message};
+use xmpp_parsers::message::Message;
 
 fn detached_session(stream_id: &str, jid: &str) -> DetachedSession {
     DetachedSession {
@@ -48,8 +48,10 @@ fn expiring_detached_session(stream_id: &str, jid: &str) -> DetachedSession {
 
 fn chat_stanza(to: &FullJid, body: &str) -> Stanza {
     let mut message = Message::new(Some(Jid::from(to.clone())));
-    message.id = Some(format!("msg-{}", body.len()));
-    message.bodies.insert(String::new(), Body(body.to_string()));
+    message.id = Some(xmpp_parsers::message::Id(format!("msg-{}", body.len())));
+    message
+        .bodies
+        .insert(xmpp_parsers::message::Lang::new(), body.to_string());
     Stanza::Message(message)
 }
 
@@ -773,8 +775,10 @@ async fn xep0198_drain_all_for_shutdown_skips_claimed_sessions() {
 /// exercises the same wire shape.
 fn late_drain_message_xml(id: &str, body: &str) -> String {
     let mut message = Message::new(None);
-    message.id = Some(id.to_string());
-    message.bodies.insert(String::new(), Body(body.to_string()));
+    message.id = Some(xmpp_parsers::message::Id(id.to_string()));
+    message
+        .bodies
+        .insert(xmpp_parsers::message::Lang::new(), body.to_string());
     waddle_xmpp::parser::message_to_string(&message).expect("serialize <message/>")
 }
 
@@ -848,9 +852,10 @@ async fn xep0198_record_available_resource_presence_persists_durably() {
         .expect("store");
 
     let mut presence = xmpp_parsers::presence::Presence::new(xmpp_parsers::presence::Type::None);
-    presence
-        .statuses
-        .insert(String::new(), "still-online".to_string());
+    presence.statuses.insert(
+        xmpp_parsers::message::Lang(String::new()),
+        "still-online".to_string(),
+    );
     let t1 = chrono::Utc::now();
 
     let recorded = registry

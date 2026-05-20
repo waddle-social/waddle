@@ -37,7 +37,7 @@ scenario: #Scenario & {
 			id:     "cue-calendar-disco"
 			type:   "result"
 			contains: [
-				"var=\"urn:ietf:params:xml:ns:xcal\"",
+				"var='urn:ietf:params:xml:ns:xcal'",
 			]
 		},
 		// 2. Publish a recurring event in xCal form. The VCALENDAR
@@ -174,7 +174,7 @@ scenario: #Scenario & {
 			id:     "cue-event-items"
 			type:   "result"
 			contains: [
-				"id=\"cue-event-weekly\"",
+				"id='cue-event-weekly'",
 				"urn:ietf:params:xml:ns:xcal",
 				"<vevent",
 				"Friday Game Night",

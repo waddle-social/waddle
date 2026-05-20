@@ -91,15 +91,16 @@ fn build_users_list_iq(
     page_size: Option<u32>,
     after_cursor: Option<String>,
 ) -> Element {
-    let mut form_builder = Element::builder("x", "jabber:x:data").attr("type", "submit");
+    let mut form_builder = Element::builder("x", "jabber:x:data")
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "submit");
 
     // FORM_TYPE hidden field — XEP-0004 §3.2 mandates it for any
     // typed data form. We mirror the command node so the form id
     // and the command node never drift apart.
     form_builder = form_builder.append(
         Element::builder("field", "jabber:x:data")
-            .attr("var", "FORM_TYPE")
-            .attr("type", "hidden")
+            .attr(minidom::rxml::xml_ncname!("var").to_owned(), "FORM_TYPE")
+            .attr(minidom::rxml::xml_ncname!("type").to_owned(), "hidden")
             .append(
                 Element::builder("value", "jabber:x:data")
                     .append(NS_ADMIN_USERS_LIST)
@@ -119,23 +120,29 @@ fn build_users_list_iq(
     }
 
     let command = Element::builder("command", NS_ADHOC_COMMANDS)
-        .attr("node", NS_ADMIN_USERS_LIST)
-        .attr("action", "execute")
+        .attr(
+            minidom::rxml::xml_ncname!("node").to_owned(),
+            NS_ADMIN_USERS_LIST,
+        )
+        .attr(minidom::rxml::xml_ncname!("action").to_owned(), "execute")
         .append(form_builder.build())
         .build();
 
     Element::builder("iq", NS_CLIENT)
-        .attr("type", "set")
-        .attr("id", uuid::Uuid::new_v4().to_string())
-        .attr("to", server_domain)
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "set")
+        .attr(
+            minidom::rxml::xml_ncname!("id").to_owned(),
+            uuid::Uuid::new_v4().to_string(),
+        )
+        .attr(minidom::rxml::xml_ncname!("to").to_owned(), server_domain)
         .append(command)
         .build()
 }
 
 fn text_single_field(var: &str, value: &str) -> Element {
     Element::builder("field", "jabber:x:data")
-        .attr("var", var)
-        .attr("type", "text-single")
+        .attr(minidom::rxml::xml_ncname!("var").to_owned(), var)
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "text-single")
         .append(
             Element::builder("value", "jabber:x:data")
                 .append(value)

@@ -44,10 +44,16 @@ fn build_muc_user_item(
     actor: Option<&BareJid>,
 ) -> Element {
     let mut item = Element::builder("item", NS_MUC_USER)
-        .attr("affiliation", affiliation_token(affiliation))
-        .attr("role", role_token);
+        .attr(
+            minidom::rxml::xml_ncname!("affiliation").to_owned(),
+            affiliation_token(affiliation),
+        )
+        .attr(minidom::rxml::xml_ncname!("role").to_owned(), role_token);
     if let Some(jid) = occupant_real_jid {
-        item = item.attr("jid", jid.to_string());
+        item = item.attr(
+            minidom::rxml::xml_ncname!("jid").to_owned(),
+            jid.to_string(),
+        );
     }
     if let Some(actor_bare) = actor {
         // XEP-0045 §9.1.2 / §10.2 example: `<actor jid='admin'/>`. The
@@ -56,7 +62,10 @@ fn build_muc_user_item(
         // via the IQ `from`.
         item = item.append(
             Element::builder("actor", NS_MUC_USER)
-                .attr("jid", actor_bare.to_string())
+                .attr(
+                    minidom::rxml::xml_ncname!("jid").to_owned(),
+                    actor_bare.to_string(),
+                )
                 .build(),
         );
     }
@@ -79,7 +88,7 @@ fn build_muc_user_x_element(item: Element, status_codes: &[&str]) -> Element {
     for code in status_codes {
         x = x.append(
             Element::builder("status", NS_MUC_USER)
-                .attr("code", *code)
+                .attr(minidom::rxml::xml_ncname!("code").to_owned(), *code)
                 .build(),
         );
     }
@@ -176,6 +185,8 @@ fn add_muc_user_payload(
     let muc_user = MucUser {
         status: statuses,
         items: vec![item],
+        invite: None,
+        decline: None,
     };
 
     // Convert MucUser to Element and add to payloads
@@ -435,6 +446,8 @@ pub fn build_affiliation_change_presence(
     let muc_user = MucUser {
         status: statuses,
         items: vec![item],
+        invite: None,
+        decline: None,
     };
 
     let muc_element: Element = muc_user.into();
@@ -489,6 +502,8 @@ pub fn build_role_change_presence(
     let muc_user = MucUser {
         status: statuses,
         items: vec![item],
+        invite: None,
+        decline: None,
     };
 
     let muc_element: Element = muc_user.into();
@@ -551,15 +566,18 @@ pub fn build_destroy_notification(
     // matches the XEP example precisely.
     let mut x_elem = Element::builder("x", NS_MUC_USER).append(
         Element::builder("item", NS_MUC_USER)
-            .attr("affiliation", "none")
-            .attr("role", "none")
+            .attr(minidom::rxml::xml_ncname!("affiliation").to_owned(), "none")
+            .attr(minidom::rxml::xml_ncname!("role").to_owned(), "none")
             .build(),
     );
 
     // <destroy jid='alternate'><reason>…</reason><password>…</password></destroy>
     let mut destroy = Element::builder("destroy", NS_MUC_USER);
     if let Some(ref venue) = destroy_request.alternate_venue {
-        destroy = destroy.attr("jid", venue.to_string());
+        destroy = destroy.attr(
+            minidom::rxml::xml_ncname!("jid").to_owned(),
+            venue.to_string(),
+        );
     }
     if let Some(ref reason) = destroy_request.reason {
         destroy = destroy.append(
@@ -580,7 +598,7 @@ pub fn build_destroy_notification(
     if is_self {
         x_elem = x_elem.append(
             Element::builder("status", NS_MUC_USER)
-                .attr("code", "110")
+                .attr(minidom::rxml::xml_ncname!("code").to_owned(), "110")
                 .build(),
         );
     }

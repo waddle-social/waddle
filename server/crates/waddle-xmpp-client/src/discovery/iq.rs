@@ -20,12 +20,12 @@ pub fn build_disco_info_iq(to: &str, node: Option<&str>) -> Element {
     let id = format!("disco-info-{}", next_id());
     let mut query_builder = Element::builder("query", DISCO_INFO_NS);
     if let Some(n) = node {
-        query_builder = query_builder.attr("node", n);
+        query_builder = query_builder.attr(minidom::rxml::xml_ncname!("node").to_owned(), n);
     }
     Element::builder("iq", CLIENT_NS)
-        .attr("type", "get")
-        .attr("to", to)
-        .attr("id", id)
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "get")
+        .attr(minidom::rxml::xml_ncname!("to").to_owned(), to)
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), id)
         .append(query_builder.build())
         .build()
 }
@@ -34,12 +34,12 @@ pub fn build_disco_items_iq(to: &str, node: Option<&str>) -> Element {
     let id = format!("disco-items-{}", next_id());
     let mut query_builder = Element::builder("query", DISCO_ITEMS_NS);
     if let Some(n) = node {
-        query_builder = query_builder.attr("node", n);
+        query_builder = query_builder.attr(minidom::rxml::xml_ncname!("node").to_owned(), n);
     }
     Element::builder("iq", CLIENT_NS)
-        .attr("type", "get")
-        .attr("to", to)
-        .attr("id", id)
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "get")
+        .attr(minidom::rxml::xml_ncname!("to").to_owned(), to)
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), id)
         .append(query_builder.build())
         .build()
 }
@@ -47,14 +47,14 @@ pub fn build_disco_items_iq(to: &str, node: Option<&str>) -> Element {
 pub fn build_pubsub_items_iq(to: &BareJid, node: &SpaceNode) -> Element {
     let id = format!("pubsub-items-{}", next_id());
     Element::builder("iq", CLIENT_NS)
-        .attr("type", "get")
-        .attr("to", to.to_string())
-        .attr("id", id)
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "get")
+        .attr(minidom::rxml::xml_ncname!("to").to_owned(), to.to_string())
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), id)
         .append(
             Element::builder("pubsub", PUBSUB_NS)
                 .append(
                     Element::builder("items", PUBSUB_NS)
-                        .attr("node", node.as_str())
+                        .attr(minidom::rxml::xml_ncname!("node").to_owned(), node.as_str())
                         .build(),
                 )
                 .build(),
@@ -70,14 +70,20 @@ pub fn build_upload_slot_iq(
 ) -> Element {
     let id = format!("upload-{}", next_id());
     Element::builder("iq", CLIENT_NS)
-        .attr("type", "get")
-        .attr("to", service_jid)
-        .attr("id", id)
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "get")
+        .attr(minidom::rxml::xml_ncname!("to").to_owned(), service_jid)
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), id)
         .append(
             Element::builder("request", UPLOAD_NS)
-                .attr("filename", filename)
-                .attr("size", size.to_string())
-                .attr("content-type", content_type)
+                .attr(minidom::rxml::xml_ncname!("filename").to_owned(), filename)
+                .attr(
+                    minidom::rxml::xml_ncname!("size").to_owned(),
+                    size.to_string(),
+                )
+                .attr(
+                    minidom::rxml::xml_ncname!("content-type").to_owned(),
+                    content_type,
+                )
                 .build(),
         )
         .build()
@@ -86,14 +92,17 @@ pub fn build_upload_slot_iq(
 pub fn build_enable_push_iq(push_service_jid: &str, node: &str, token: &str) -> Element {
     let id = format!("push-enable-{}", next_id());
     let mut enable = Element::builder("enable", PUSH_NS)
-        .attr("jid", push_service_jid)
-        .attr("node", node);
+        .attr(
+            minidom::rxml::xml_ncname!("jid").to_owned(),
+            push_service_jid,
+        )
+        .attr(minidom::rxml::xml_ncname!("node").to_owned(), node);
     if !token.is_empty() {
         let form = Element::builder("x", DATA_FORMS_NS)
-            .attr("type", "submit")
+            .attr(minidom::rxml::xml_ncname!("type").to_owned(), "submit")
             .append(
                 Element::builder("field", DATA_FORMS_NS)
-                    .attr("var", "FORM_TYPE")
+                    .attr(minidom::rxml::xml_ncname!("var").to_owned(), "FORM_TYPE")
                     .append(
                         Element::builder("value", DATA_FORMS_NS)
                             .append("http://jabber.org/protocol/pubsub#publish-options")
@@ -103,7 +112,7 @@ pub fn build_enable_push_iq(push_service_jid: &str, node: &str, token: &str) -> 
             )
             .append(
                 Element::builder("field", DATA_FORMS_NS)
-                    .attr("var", "secret")
+                    .attr(minidom::rxml::xml_ncname!("var").to_owned(), "secret")
                     .append(
                         Element::builder("value", DATA_FORMS_NS)
                             .append(token)
@@ -115,8 +124,8 @@ pub fn build_enable_push_iq(push_service_jid: &str, node: &str, token: &str) -> 
         enable = enable.append(form);
     }
     Element::builder("iq", CLIENT_NS)
-        .attr("type", "set")
-        .attr("id", id)
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "set")
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), id)
         .append(enable.build())
         .build()
 }
@@ -124,12 +133,15 @@ pub fn build_enable_push_iq(push_service_jid: &str, node: &str, token: &str) -> 
 pub fn build_disable_push_iq(push_service_jid: &str, node: &str) -> Element {
     let id = format!("push-disable-{}", next_id());
     Element::builder("iq", CLIENT_NS)
-        .attr("type", "set")
-        .attr("id", id)
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "set")
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), id)
         .append(
             Element::builder("disable", PUSH_NS)
-                .attr("jid", push_service_jid)
-                .attr("node", node)
+                .attr(
+                    minidom::rxml::xml_ncname!("jid").to_owned(),
+                    push_service_jid,
+                )
+                .attr(minidom::rxml::xml_ncname!("node").to_owned(), node)
                 .build(),
         )
         .build()
@@ -137,15 +149,17 @@ pub fn build_disable_push_iq(push_service_jid: &str, node: &str) -> Element {
 
 pub fn build_waddle_inbox_mark_read_iq(to: &str, mark_read: &WaddleInboxMarkRead) -> Element {
     let id = format!("waddle-mark-read-{}", next_id());
-    let mut builder =
-        Element::builder("mark-read", WADDLE_INBOX_NS).attr("partner", mark_read.partner.as_str());
+    let mut builder = Element::builder("mark-read", WADDLE_INBOX_NS).attr(
+        minidom::rxml::xml_ncname!("partner").to_owned(),
+        mark_read.partner.as_str(),
+    );
     if let Some(thread) = mark_read.thread.as_deref() {
-        builder = builder.attr("thread", thread);
+        builder = builder.attr(minidom::rxml::xml_ncname!("thread").to_owned(), thread);
     }
     Element::builder("iq", CLIENT_NS)
-        .attr("type", "set")
-        .attr("to", to)
-        .attr("id", id)
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "set")
+        .attr(minidom::rxml::xml_ncname!("to").to_owned(), to)
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), id)
         .append(builder.build())
         .build()
 }
@@ -154,14 +168,14 @@ pub fn build_roster_get_iq(to: Option<&str>, ver: Option<&str>) -> Element {
     let id = format!("roster-{}", next_id());
     let mut query = Element::builder("query", ROSTER_NS);
     if let Some(ver) = ver {
-        query = query.attr("ver", ver);
+        query = query.attr(minidom::rxml::xml_ncname!("ver").to_owned(), ver);
     }
     let mut iq = Element::builder("iq", CLIENT_NS)
-        .attr("type", "get")
-        .attr("id", id)
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "get")
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), id)
         .append(query.build());
     if let Some(to) = to {
-        iq = iq.attr("to", to);
+        iq = iq.attr(minidom::rxml::xml_ncname!("to").to_owned(), to);
     }
     iq.build()
 }
@@ -183,9 +197,9 @@ pub fn parse_roster_result(iq: &Element) -> Option<RosterResult> {
 pub fn build_user_search_form_iq(to: &str) -> Element {
     let id = format!("user-search-form-{}", next_id());
     Element::builder("iq", CLIENT_NS)
-        .attr("type", "get")
-        .attr("to", to)
-        .attr("id", id)
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "get")
+        .attr(minidom::rxml::xml_ncname!("to").to_owned(), to)
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), id)
         .append(Element::builder("query", USER_SEARCH_NS).build())
         .build()
 }
@@ -204,9 +218,9 @@ pub fn build_user_search_iq(to: &str, query: &UserSearchQuery) -> Element {
         }
     }
     Element::builder("iq", CLIENT_NS)
-        .attr("type", "set")
-        .attr("to", to)
-        .attr("id", id)
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "set")
+        .attr(minidom::rxml::xml_ncname!("to").to_owned(), to)
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), id)
         .append(search.build())
         .build()
 }
@@ -257,14 +271,17 @@ pub fn parse_user_search_result(iq: &Element) -> Option<UserSearchResult> {
 pub fn build_muc_admin_affiliation_list_iq(room_jid: &str, affiliation: MucAffiliation) -> Element {
     let id = format!("muc-admin-list-{}", next_id());
     Element::builder("iq", CLIENT_NS)
-        .attr("type", "get")
-        .attr("to", room_jid)
-        .attr("id", id)
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "get")
+        .attr(minidom::rxml::xml_ncname!("to").to_owned(), room_jid)
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), id)
         .append(
             Element::builder("query", MUC_ADMIN_NS)
                 .append(
                     Element::builder("item", MUC_ADMIN_NS)
-                        .attr("affiliation", affiliation.as_str())
+                        .attr(
+                            minidom::rxml::xml_ncname!("affiliation").to_owned(),
+                            affiliation.as_str(),
+                        )
                         .build(),
                 )
                 .build(),
@@ -281,13 +298,16 @@ pub fn build_muc_admin_affiliation_set_iq(
     for item in items {
         let mut item_builder = Element::builder("item", MUC_ADMIN_NS);
         if let Some(jid) = item.jid.as_deref() {
-            item_builder = item_builder.attr("jid", jid);
+            item_builder = item_builder.attr(minidom::rxml::xml_ncname!("jid").to_owned(), jid);
         }
         if let Some(nick) = item.nick.as_deref() {
-            item_builder = item_builder.attr("nick", nick);
+            item_builder = item_builder.attr(minidom::rxml::xml_ncname!("nick").to_owned(), nick);
         }
         if let Some(affiliation) = item.affiliation {
-            item_builder = item_builder.attr("affiliation", affiliation.as_str());
+            item_builder = item_builder.attr(
+                minidom::rxml::xml_ncname!("affiliation").to_owned(),
+                affiliation.as_str(),
+            );
         }
         if let Some(reason) = item.reason.as_deref() {
             item_builder = item_builder.append(
@@ -299,9 +319,9 @@ pub fn build_muc_admin_affiliation_set_iq(
         query = query.append(item_builder.build());
     }
     Element::builder("iq", CLIENT_NS)
-        .attr("type", "set")
-        .attr("to", room_jid)
-        .attr("id", id)
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "set")
+        .attr(minidom::rxml::xml_ncname!("to").to_owned(), room_jid)
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), id)
         .append(query.build())
         .build()
 }

@@ -74,7 +74,7 @@ mod tests {
     use crate::Stanza;
     use jid::FullJid;
     use minidom::Element;
-    use xmpp_parsers::message::{Body, Message, MessageType};
+    use xmpp_parsers::message::{Message, MessageType};
     use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
 
     fn full(s: &str) -> FullJid {
@@ -85,7 +85,9 @@ mod tests {
         let mut message = Message::new(Some(to.parse().expect("jid")));
         message.from = Some(from.parse().expect("jid"));
         message.type_ = MessageType::Chat;
-        message.bodies.insert(String::new(), Body(body.to_string()));
+        message
+            .bodies
+            .insert(xmpp_parsers::message::Lang::new(), body.to_string());
         message
     }
 
@@ -165,7 +167,7 @@ mod tests {
         assert!(matches!(outcome, HandlerOutcome::Continue(ref events) if events.is_empty()));
         assert!(!message_has_framework_envelope(&message));
         assert_eq!(
-            message.bodies.get("").map(|body| body.0.as_str()),
+            message.bodies.get("").map(|body| body.as_str()),
             Some("spoof")
         );
     }

@@ -4,13 +4,14 @@ use jid::Jid;
 use minidom::Element;
 use waddle_xmpp::carbons::should_copy_message;
 use waddle_xmpp::xep::{should_skip_carbons, Hint, NS_HINTS};
-use xmpp_parsers::message::{Body, Message, MessageType};
+use xmpp_parsers::message::{Message, MessageType};
 
 fn chat_message(to: &str) -> Message {
     let to: Jid = to.parse().expect("valid jid");
     let mut msg = Message::new(Some(to));
     msg.type_ = MessageType::Chat;
-    msg.bodies.insert(String::new(), Body("secret".to_string()));
+    msg.bodies
+        .insert(xmpp_parsers::message::Lang::new(), "secret".to_string());
     msg.payloads
         .push(Element::builder(Hint::NoCopy.element_name(), NS_HINTS).build());
     msg

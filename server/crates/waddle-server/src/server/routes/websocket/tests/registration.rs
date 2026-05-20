@@ -181,8 +181,11 @@ async fn register_bound_connection_after_frame_completes_pending_resume_claim() 
     conn.authenticated_session = Some(session.clone());
     let resume_frame = element_to_xml(
         Element::builder("resume", SM_NS)
-            .attr("previd", stream_id.as_str())
-            .attr("h", "9")
+            .attr(
+                minidom::rxml::xml_ncname!("previd").to_owned(),
+                stream_id.as_str(),
+            )
+            .attr(minidom::rxml::xml_ncname!("h").to_owned(), "9")
             .build(),
     );
     let resume_responses =
@@ -347,10 +350,8 @@ async fn ensure_state_machine_seeds_blocklist_from_database_at_bind() {
         xmpp_parsers::message::Message::new(Some("bob@example.com".parse().expect("to jid")));
     msg.from = Some(jid::Jid::from(alice_full.clone()));
     msg.type_ = XmppMessageType::Chat;
-    msg.bodies.insert(
-        String::new(),
-        xmpp_parsers::message::Body("hello".to_string()),
-    );
+    msg.bodies
+        .insert(xmpp_parsers::message::Lang::new(), "hello".to_string());
     let sm = conn.state_machine.as_mut().expect("SM");
     sm.handle(InboundEvent::FrameReceived(InboundFrame::Stanza(Box::new(
         Stanza::Message(msg),

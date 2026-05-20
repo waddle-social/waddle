@@ -178,7 +178,7 @@ fn xep0300_hash_element_round_trips() {
 #[test]
 fn xep0300_parse_rejects_wrong_namespace() {
     let elem = Element::builder("hash", "attacker:ns")
-        .attr("algo", "sha-256")
+        .attr(minidom::rxml::xml_ncname!("algo").to_owned(), "sha-256")
         .build();
     assert!(matches!(
         parse_hash_element(&elem),
@@ -189,7 +189,7 @@ fn xep0300_parse_rejects_wrong_namespace() {
 #[test]
 fn xep0300_parse_rejects_wrong_element_name() {
     let elem = Element::builder("digest", NS_HASHES)
-        .attr("algo", "sha-256")
+        .attr(minidom::rxml::xml_ncname!("algo").to_owned(), "sha-256")
         .build();
     assert!(matches!(
         parse_hash_element(&elem),
@@ -211,7 +211,7 @@ fn xep0300_parse_rejects_missing_algo_attribute() {
 #[test]
 fn xep0300_parse_rejects_unknown_algo_attribute() {
     let elem = Element::builder("hash", NS_HASHES)
-        .attr("algo", "md5") // §"Recommended Hash Functions" excludes MD5
+        .attr(minidom::rxml::xml_ncname!("algo").to_owned(), "md5") // §"Recommended Hash Functions" excludes MD5
         .build();
     assert!(matches!(
         parse_hash_element(&elem),
@@ -225,7 +225,7 @@ fn xep0300_parse_rejects_invalid_base64_text() {
     // (e.g. `!!!`) MUST NOT panic; surface as InvalidBase64 so
     // the caller can fall through to a "treat as no hash" path.
     let elem = Element::builder("hash", NS_HASHES)
-        .attr("algo", "sha-256")
+        .attr(minidom::rxml::xml_ncname!("algo").to_owned(), "sha-256")
         .append("!!!not-base64!!!")
         .build();
     assert!(matches!(

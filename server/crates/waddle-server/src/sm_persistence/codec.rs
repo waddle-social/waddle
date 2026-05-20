@@ -168,7 +168,7 @@ fn parse_show(raw: &str) -> Result<Show, SmPersistenceError> {
 pub(super) fn serialize_stanza(stanza: &Stanza) -> Result<String, SmPersistenceError> {
     let element: xmpp_parsers::minidom::Element = match stanza {
         Stanza::Message(m) => m.clone().into(),
-        Stanza::Iq(iq) => iq.clone().into(),
+        Stanza::Iq(iq) => (*iq.clone()).into(),
         Stanza::Presence(p) => p.clone().into(),
     };
     let mut buf = Vec::new();
@@ -184,7 +184,7 @@ fn parse_stanza(element: xmpp_parsers::minidom::Element) -> Result<Stanza, SmPer
             .map(Stanza::Message)
             .map_err(|e| SmPersistenceError::Other(e.to_string())),
         "iq" => xmpp_parsers::iq::Iq::try_from(element)
-            .map(Stanza::Iq)
+            .map(|iq| Stanza::Iq(Box::new(iq)))
             .map_err(|e| SmPersistenceError::Other(e.to_string())),
         "presence" => xmpp_parsers::presence::Presence::try_from(element)
             .map(Stanza::Presence)

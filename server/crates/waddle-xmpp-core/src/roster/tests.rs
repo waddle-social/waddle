@@ -3,10 +3,16 @@ use super::*;
 #[test]
 fn test_roster_item_from_element_happy_path() {
     let elem = Element::builder("item", ROSTER_NS)
-        .attr("jid", "contact@example.com")
-        .attr("name", "Alice")
-        .attr("subscription", "both")
-        .attr("ask", "subscribe")
+        .attr(
+            minidom::rxml::xml_ncname!("jid").to_owned(),
+            "contact@example.com",
+        )
+        .attr(minidom::rxml::xml_ncname!("name").to_owned(), "Alice")
+        .attr(
+            minidom::rxml::xml_ncname!("subscription").to_owned(),
+            "both",
+        )
+        .attr(minidom::rxml::xml_ncname!("ask").to_owned(), "subscribe")
         .append(
             Element::builder("group", ROSTER_NS)
                 .append("Friends")
@@ -26,7 +32,7 @@ fn test_roster_item_from_element_happy_path() {
 #[test]
 fn test_roster_item_from_element_missing_jid() {
     let elem = Element::builder("item", ROSTER_NS)
-        .attr("name", "Alice")
+        .attr(minidom::rxml::xml_ncname!("name").to_owned(), "Alice")
         .build();
 
     let result = RosterItem::from_element(&elem);
@@ -40,8 +46,14 @@ fn test_roster_item_from_element_missing_jid() {
 #[test]
 fn test_roster_item_from_element_invalid_subscription() {
     let elem = Element::builder("item", ROSTER_NS)
-        .attr("jid", "contact@example.com")
-        .attr("subscription", "bogus")
+        .attr(
+            minidom::rxml::xml_ncname!("jid").to_owned(),
+            "contact@example.com",
+        )
+        .attr(
+            minidom::rxml::xml_ncname!("subscription").to_owned(),
+            "bogus",
+        )
         .build();
 
     let result = RosterItem::from_element(&elem);
@@ -51,8 +63,11 @@ fn test_roster_item_from_element_invalid_subscription() {
 #[test]
 fn test_roster_item_from_element_invalid_ask() {
     let elem = Element::builder("item", ROSTER_NS)
-        .attr("jid", "contact@example.com")
-        .attr("ask", "bogus")
+        .attr(
+            minidom::rxml::xml_ncname!("jid").to_owned(),
+            "contact@example.com",
+        )
+        .attr(minidom::rxml::xml_ncname!("ask").to_owned(), "bogus")
         .build();
 
     let result = RosterItem::from_element(&elem);

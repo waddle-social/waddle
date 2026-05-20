@@ -1,3 +1,4 @@
+use kameo::actor::Spawn;
 use kameo::message::Context;
 use kameo::Actor;
 
@@ -106,7 +107,7 @@ impl PermissionActor {
     }
 
     pub fn new_for_tests(db: Arc<Database>) -> Self {
-        let actor = kameo::spawn(DbActor::new((*db).clone()));
+        let actor = DbActor::spawn(DbActor::new((*db).clone()));
         let tuple_store = TupleStore::new(actor.clone());
         let schema = PermissionSchema::default();
         let checker = PermissionChecker::new(actor, schema);

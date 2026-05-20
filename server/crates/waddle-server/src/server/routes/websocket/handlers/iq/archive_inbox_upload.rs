@@ -11,7 +11,7 @@ pub(super) async fn handle_archive_inbox_upload_iq(
     // MAM (Message Archive Management) query
     if is_mam_query(iq) {
         let request_iq = &iq;
-        let Some(target) = request_iq.to.as_ref().map(|jid| jid.to_string()) else {
+        let Some(target) = request_iq.to().map(|jid| jid.to_string()) else {
             return vec![build_iq_error_xml_typed(
                 id,
                 None,
@@ -119,8 +119,8 @@ pub(super) async fn handle_archive_inbox_upload_iq(
         // unbound edge cases. Reject the request here instead — a MAM
         // query without an addressable recipient is ill-formed.
         let Some(recipient_jid) = request_iq
-            .from
-            .clone()
+            .from()
+            .cloned()
             .or_else(|| phase.bound_jid().cloned().map(jid::Jid::from))
         else {
             return vec![build_iq_error_xml_typed(
@@ -171,11 +171,11 @@ pub(super) async fn handle_archive_inbox_upload_iq(
 
         return match outcome {
             ThreadsIqOutcome::Result(payload) => {
-                let response = xmpp_parsers::iq::Iq {
-                    from: request_iq.to.clone(),
-                    to: request_iq.from.clone(),
-                    id: request_iq.id.clone(),
-                    payload: xmpp_parsers::iq::IqType::Result(Some(payload)),
+                let response = xmpp_parsers::iq::Iq::Result {
+                    from: request_iq.to().cloned(),
+                    to: request_iq.from().cloned(),
+                    id: request_iq.id().to_string(),
+                    payload: Some(payload),
                 };
                 vec![iq_to_xml(response)]
             }
@@ -329,7 +329,7 @@ async fn handle_inbox_query_iq(
         )];
     };
 
-    if !matches!(iq.payload, xmpp_parsers::iq::IqType::Get(_)) {
+    if !matches!(iq, xmpp_parsers::iq::Iq::Get { .. }) {
         return vec![build_iq_error_xml_typed(
             id,
             None,
@@ -405,8 +405,8 @@ async fn handle_inbox_query_iq(
     // requesting client's full JID when available; fall back to the
     // bound JID.
     let Some(recipient_jid) = iq
-        .from
-        .clone()
+        .from()
+        .cloned()
         .or_else(|| phase.bound_jid().cloned().map(jid::Jid::from))
     else {
         return vec![build_iq_error_xml_typed(
@@ -442,12 +442,8 @@ async fn handle_inbox_query_iq(
             }
             None => None,
         };
-        let message = build_inbox_entry_message(
-            recipient_jid.clone(),
-            iq.id.as_str(),
-            entry,
-            last_message_borrowed,
-        );
+        let message =
+            build_inbox_entry_message(recipient_jid.clone(), iq.id(), entry, last_message_borrowed);
         responses.push(stanza_to_xml(&Stanza::Message(message)));
     }
 

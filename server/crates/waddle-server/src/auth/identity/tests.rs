@@ -1,6 +1,7 @@
 use super::*;
 use crate::auth::{AuthProviderKind, AuthProviderTokenEndpointAuthMethod};
 use crate::db::{Database, MigrationRunner};
+use kameo::actor::Spawn;
 use serde_json::json;
 use std::sync::Arc;
 
@@ -128,7 +129,7 @@ fn issuer_is_normalized_for_identity_mapping() {
 #[tokio::test]
 async fn existing_identity_updates_username_and_claims_on_login() {
     let db = create_test_db().await;
-    let actor = kameo::spawn(crate::db::actor::DbActor::new((*db).clone()));
+    let actor = crate::db::actor::DbActor::spawn(crate::db::actor::DbActor::new((*db).clone()));
     let service = IdentityService::new(actor);
     let provider = provider_with_username_claim(Some("preferred_username"));
 
@@ -228,7 +229,7 @@ async fn existing_identity_updates_username_and_claims_on_login() {
 #[tokio::test]
 async fn existing_identity_uses_suffix_when_username_conflicts() {
     let db = create_test_db().await;
-    let actor = kameo::spawn(crate::db::actor::DbActor::new((*db).clone()));
+    let actor = crate::db::actor::DbActor::spawn(crate::db::actor::DbActor::new((*db).clone()));
     let service = IdentityService::new(actor);
     let provider = provider_with_username_claim(Some("preferred_username"));
 

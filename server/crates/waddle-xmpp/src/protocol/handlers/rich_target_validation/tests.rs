@@ -7,7 +7,7 @@ use crate::xep::xep0424::build_retract_element;
 use crate::xep::xep0461::{build_reply_element, ReplyReference};
 use crate::Stanza;
 use jid::FullJid;
-use xmpp_parsers::message::{Body, Message, MessageType};
+use xmpp_parsers::message::{Message, MessageType};
 use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
 
 fn full(s: &str) -> FullJid {
@@ -22,7 +22,8 @@ fn chat_with_body(from: &str, to: &str, body: &str) -> Message {
     let mut m = Message::new(Some(to.parse().expect("jid")));
     m.from = Some(from.parse().expect("jid"));
     m.type_ = MessageType::Chat;
-    m.bodies.insert(String::new(), Body(body.to_string()));
+    m.bodies
+        .insert(xmpp_parsers::message::Lang::new(), body.to_string());
     m
 }
 
@@ -57,7 +58,8 @@ fn archived_message_from(from: &str, body: &str) -> ArchivedMessage {
     let mut m = Message::new(Some("bob@example.com".parse().expect("jid")));
     m.from = Some(from.parse().expect("jid"));
     m.type_ = MessageType::Chat;
-    m.bodies.insert(String::new(), Body(body.to_string()));
+    m.bodies
+        .insert(xmpp_parsers::message::Lang::new(), body.to_string());
     let archive_jid: jid::Jid = bare("alice@example.com").into();
     ArchivedMessage {
         stanza_id: StanzaId::new("archive-A1", archive_jid),
@@ -129,8 +131,12 @@ fn xep_0308_correction_emits_lookup_with_origin_id() {
 fn xep_0308_malformed_correction_emits_bad_request() {
     let local = full("alice@example.com/web");
     let mut msg = chat_with_body("alice@example.com/web", "bob@example.com", "fixed text");
-    msg.payloads
-        .push(xmpp_parsers::message_correct::Replace { id: String::new() }.into());
+    msg.payloads.push(
+        xmpp_parsers::message_correct::Replace {
+            id: xmpp_parsers::message::Id(String::new()),
+        }
+        .into(),
+    );
 
     let outcome = run(&local, &mut msg);
     let parsed = extract_error_payload(&outcome);
@@ -147,8 +153,12 @@ fn xep_0308_malformed_groupchat_correction_is_skipped_user_side() {
         "fixed text",
     );
     msg.type_ = MessageType::Groupchat;
-    msg.payloads
-        .push(xmpp_parsers::message_correct::Replace { id: String::new() }.into());
+    msg.payloads.push(
+        xmpp_parsers::message_correct::Replace {
+            id: xmpp_parsers::message::Id(String::new()),
+        }
+        .into(),
+    );
 
     let outcome = run(&local, &mut msg);
     assert!(matches!(outcome, HandlerOutcome::Continue(ref e) if e.is_empty()));

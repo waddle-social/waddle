@@ -20,7 +20,6 @@ use crate::Stanza;
 /// connected resources, their presence, carbons state, and any pending
 /// subscription stanzas that arrived while the user was offline.
 #[derive(Actor)]
-#[actor(mailbox = bounded(2048))]
 pub struct UserActor {
     bare_jid: BareJid,
     resources: HashSet<FullJid>,

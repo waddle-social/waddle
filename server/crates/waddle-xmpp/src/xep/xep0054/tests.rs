@@ -3,11 +3,11 @@ use super::*;
 #[test]
 fn test_is_vcard_get_classifies_only_get_with_correct_payload() {
     let vcard_elem = Element::builder("vCard", NS_VCARD).build();
-    let iq = Iq {
+    let iq = Iq::Get {
         from: None,
         to: None,
         id: "vcard-1".to_string(),
-        payload: xmpp_parsers::iq::IqType::Get(vcard_elem),
+        payload: vcard_elem,
     };
 
     assert!(is_vcard_get(&iq));
@@ -19,11 +19,11 @@ fn test_is_vcard_set_classifies_only_set_with_correct_payload() {
     let vcard_elem = Element::builder("vCard", NS_VCARD)
         .append(Element::builder("FN", NS_VCARD).append("John Doe").build())
         .build();
-    let iq = Iq {
+    let iq = Iq::Set {
         from: None,
         to: None,
         id: "vcard-2".to_string(),
-        payload: xmpp_parsers::iq::IqType::Set(vcard_elem),
+        payload: vcard_elem,
     };
 
     assert!(!is_vcard_get(&iq));
@@ -33,11 +33,11 @@ fn test_is_vcard_set_classifies_only_set_with_correct_payload() {
 #[test]
 fn test_is_not_vcard_query_wrong_ns() {
     let elem = Element::builder("vCard", "wrong:namespace").build();
-    let iq = Iq {
+    let iq = Iq::Get {
         from: None,
         to: None,
         id: "test-1".to_string(),
-        payload: xmpp_parsers::iq::IqType::Get(elem),
+        payload: elem,
     };
 
     assert!(!is_vcard_get(&iq));
@@ -46,11 +46,11 @@ fn test_is_not_vcard_query_wrong_ns() {
 #[test]
 fn test_is_not_vcard_query_wrong_name() {
     let elem = Element::builder("query", NS_VCARD).build();
-    let iq = Iq {
+    let iq = Iq::Get {
         from: None,
         to: None,
         id: "test-2".to_string(),
-        payload: xmpp_parsers::iq::IqType::Get(elem),
+        payload: elem,
     };
 
     assert!(!is_vcard_get(&iq));
@@ -178,11 +178,11 @@ fn test_build_vcard_element() {
 #[test]
 fn test_build_vcard_response() {
     let vcard_elem = Element::builder("vCard", NS_VCARD).build();
-    let original_iq = Iq {
+    let original_iq = Iq::Get {
         from: Some("user@example.com".parse().unwrap()),
         to: Some("server.example.com".parse().unwrap()),
         id: "vcard-get-1".to_string(),
-        payload: xmpp_parsers::iq::IqType::Get(vcard_elem),
+        payload: vcard_elem,
     };
 
     let vcard = VCard {
@@ -192,27 +192,34 @@ fn test_build_vcard_response() {
 
     let response = build_vcard_response(&original_iq, &vcard);
 
-    assert_eq!(response.id, "vcard-get-1");
+    assert_eq!(response.id(), "vcard-get-1");
     assert!(matches!(
-        response.payload,
-        xmpp_parsers::iq::IqType::Result(Some(_))
+        response,
+        xmpp_parsers::iq::Iq::Result {
+            payload: Some(_),
+            ..
+        }
     ));
 }
 
 #[test]
 fn test_build_empty_vcard_response() {
     let vcard_elem = Element::builder("vCard", NS_VCARD).build();
-    let original_iq = Iq {
+    let original_iq = Iq::Get {
         from: Some("user@example.com".parse().unwrap()),
         to: None,
         id: "vcard-get-2".to_string(),
-        payload: xmpp_parsers::iq::IqType::Get(vcard_elem),
+        payload: vcard_elem,
     };
 
     let response = build_empty_vcard_response(&original_iq);
 
-    assert_eq!(response.id, "vcard-get-2");
-    if let xmpp_parsers::iq::IqType::Result(Some(elem)) = &response.payload {
+    assert_eq!(response.id(), "vcard-get-2");
+    if let xmpp_parsers::iq::Iq::Result {
+        payload: Some(elem),
+        ..
+    } = &response
+    {
         assert_eq!(elem.name(), "vCard");
         assert_eq!(elem.ns(), NS_VCARD);
         // Empty vCard should have no children
@@ -225,19 +232,19 @@ fn test_build_empty_vcard_response() {
 #[test]
 fn test_build_vcard_success() {
     let vcard_elem = Element::builder("vCard", NS_VCARD).build();
-    let original_iq = Iq {
+    let original_iq = Iq::Set {
         from: Some("user@example.com".parse().unwrap()),
         to: None,
         id: "vcard-set-1".to_string(),
-        payload: xmpp_parsers::iq::IqType::Set(vcard_elem),
+        payload: vcard_elem,
     };
 
     let response = build_vcard_success(&original_iq);
 
-    assert_eq!(response.id, "vcard-set-1");
+    assert_eq!(response.id(), "vcard-set-1");
     assert!(matches!(
-        response.payload,
-        xmpp_parsers::iq::IqType::Result(None)
+        response,
+        xmpp_parsers::iq::Iq::Result { payload: None, .. }
     ));
 }
 

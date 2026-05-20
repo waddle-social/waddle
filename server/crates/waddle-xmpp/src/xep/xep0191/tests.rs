@@ -3,11 +3,11 @@ use super::*;
 #[test]
 fn test_is_blocking_query_get_blocklist() {
     let blocklist_elem = Element::builder("blocklist", NS_BLOCKING).build();
-    let iq = Iq {
+    let iq = Iq::Get {
         from: None,
         to: None,
         id: "blocklist-1".to_string(),
-        payload: xmpp_parsers::iq::IqType::Get(blocklist_elem),
+        payload: blocklist_elem,
     };
 
     assert!(is_blocking_query(&iq));
@@ -21,15 +21,18 @@ fn test_is_blocking_query_block() {
     let block_elem = Element::builder("block", NS_BLOCKING)
         .append(
             Element::builder("item", NS_BLOCKING)
-                .attr("jid", "romeo@montague.net")
+                .attr(
+                    minidom::rxml::xml_ncname!("jid").to_owned(),
+                    "romeo@montague.net",
+                )
                 .build(),
         )
         .build();
-    let iq = Iq {
+    let iq = Iq::Set {
         from: None,
         to: None,
         id: "block-1".to_string(),
-        payload: xmpp_parsers::iq::IqType::Set(block_elem),
+        payload: block_elem,
     };
 
     assert!(is_blocking_query(&iq));
@@ -43,15 +46,18 @@ fn test_is_blocking_query_unblock() {
     let unblock_elem = Element::builder("unblock", NS_BLOCKING)
         .append(
             Element::builder("item", NS_BLOCKING)
-                .attr("jid", "romeo@montague.net")
+                .attr(
+                    minidom::rxml::xml_ncname!("jid").to_owned(),
+                    "romeo@montague.net",
+                )
                 .build(),
         )
         .build();
-    let iq = Iq {
+    let iq = Iq::Set {
         from: None,
         to: None,
         id: "unblock-1".to_string(),
-        payload: xmpp_parsers::iq::IqType::Set(unblock_elem),
+        payload: unblock_elem,
     };
 
     assert!(is_blocking_query(&iq));
@@ -63,11 +69,11 @@ fn test_is_blocking_query_unblock() {
 #[test]
 fn test_is_not_blocking_query_wrong_ns() {
     let elem = Element::builder("blocklist", "wrong:namespace").build();
-    let iq = Iq {
+    let iq = Iq::Get {
         from: None,
         to: None,
         id: "test-1".to_string(),
-        payload: xmpp_parsers::iq::IqType::Get(elem),
+        payload: elem,
     };
 
     assert!(!is_blocking_query(&iq));
@@ -76,11 +82,11 @@ fn test_is_not_blocking_query_wrong_ns() {
 #[test]
 fn test_parse_blocklist_get() {
     let blocklist_elem = Element::builder("blocklist", NS_BLOCKING).build();
-    let iq = Iq {
+    let iq = Iq::Get {
         from: None,
         to: None,
         id: "blocklist-1".to_string(),
-        payload: xmpp_parsers::iq::IqType::Get(blocklist_elem),
+        payload: blocklist_elem,
     };
 
     let request = parse_blocking_request(&iq).unwrap();
@@ -92,20 +98,26 @@ fn test_parse_block_request() {
     let block_elem = Element::builder("block", NS_BLOCKING)
         .append(
             Element::builder("item", NS_BLOCKING)
-                .attr("jid", "romeo@montague.net")
+                .attr(
+                    minidom::rxml::xml_ncname!("jid").to_owned(),
+                    "romeo@montague.net",
+                )
                 .build(),
         )
         .append(
             Element::builder("item", NS_BLOCKING)
-                .attr("jid", "iago@shakespeare.lit")
+                .attr(
+                    minidom::rxml::xml_ncname!("jid").to_owned(),
+                    "iago@shakespeare.lit",
+                )
                 .build(),
         )
         .build();
-    let iq = Iq {
+    let iq = Iq::Set {
         from: None,
         to: None,
         id: "block-1".to_string(),
-        payload: xmpp_parsers::iq::IqType::Set(block_elem),
+        payload: block_elem,
     };
 
     let request = parse_blocking_request(&iq).unwrap();
@@ -124,15 +136,18 @@ fn test_parse_unblock_request() {
     let unblock_elem = Element::builder("unblock", NS_BLOCKING)
         .append(
             Element::builder("item", NS_BLOCKING)
-                .attr("jid", "romeo@montague.net")
+                .attr(
+                    minidom::rxml::xml_ncname!("jid").to_owned(),
+                    "romeo@montague.net",
+                )
                 .build(),
         )
         .build();
-    let iq = Iq {
+    let iq = Iq::Set {
         from: None,
         to: None,
         id: "unblock-1".to_string(),
-        payload: xmpp_parsers::iq::IqType::Set(unblock_elem),
+        payload: unblock_elem,
     };
 
     let request = parse_blocking_request(&iq).unwrap();
@@ -148,11 +163,11 @@ fn test_parse_unblock_request() {
 #[test]
 fn test_parse_unblock_all_request() {
     let unblock_elem = Element::builder("unblock", NS_BLOCKING).build();
-    let iq = Iq {
+    let iq = Iq::Set {
         from: None,
         to: None,
         id: "unblock-all-1".to_string(),
-        payload: xmpp_parsers::iq::IqType::Set(unblock_elem),
+        payload: unblock_elem,
     };
 
     let request = parse_blocking_request(&iq).unwrap();
@@ -167,11 +182,11 @@ fn test_parse_unblock_all_request() {
 #[test]
 fn test_parse_empty_block_request_error() {
     let block_elem = Element::builder("block", NS_BLOCKING).build();
-    let iq = Iq {
+    let iq = Iq::Set {
         from: None,
         to: None,
         id: "block-empty-1".to_string(),
-        payload: xmpp_parsers::iq::IqType::Set(block_elem),
+        payload: block_elem,
     };
 
     let result = parse_blocking_request(&iq);
@@ -187,11 +202,11 @@ fn test_parse_empty_block_request_error() {
 #[test]
 fn test_build_blocklist_response() {
     let blocklist_elem = Element::builder("blocklist", NS_BLOCKING).build();
-    let original_iq = Iq {
+    let original_iq = Iq::Get {
         from: Some("user@example.com".parse().unwrap()),
         to: Some("server.example.com".parse().unwrap()),
         id: "blocklist-get-1".to_string(),
-        payload: xmpp_parsers::iq::IqType::Get(blocklist_elem),
+        payload: blocklist_elem,
     };
 
     let blocked_jids = vec![
@@ -201,13 +216,20 @@ fn test_build_blocklist_response() {
 
     let response = build_blocklist_response(&original_iq, &blocked_jids);
 
-    assert_eq!(response.id, "blocklist-get-1");
+    assert_eq!(response.id(), "blocklist-get-1");
     assert!(matches!(
-        response.payload,
-        xmpp_parsers::iq::IqType::Result(Some(_))
+        response,
+        xmpp_parsers::iq::Iq::Result {
+            payload: Some(_),
+            ..
+        }
     ));
 
-    if let xmpp_parsers::iq::IqType::Result(Some(elem)) = &response.payload {
+    if let xmpp_parsers::iq::Iq::Result {
+        payload: Some(elem),
+        ..
+    } = &response
+    {
         assert_eq!(elem.name(), "blocklist");
         assert_eq!(elem.ns(), NS_BLOCKING);
 
@@ -250,17 +272,21 @@ async fn in_memory_blocking_storage_preserves_stored_jid_forms() {
 #[test]
 fn test_build_empty_blocklist_response() {
     let blocklist_elem = Element::builder("blocklist", NS_BLOCKING).build();
-    let original_iq = Iq {
+    let original_iq = Iq::Get {
         from: Some("user@example.com".parse().unwrap()),
         to: None,
         id: "blocklist-get-2".to_string(),
-        payload: xmpp_parsers::iq::IqType::Get(blocklist_elem),
+        payload: blocklist_elem,
     };
 
     let response = build_blocklist_response(&original_iq, &[]);
 
-    assert_eq!(response.id, "blocklist-get-2");
-    if let xmpp_parsers::iq::IqType::Result(Some(elem)) = &response.payload {
+    assert_eq!(response.id(), "blocklist-get-2");
+    if let xmpp_parsers::iq::Iq::Result {
+        payload: Some(elem),
+        ..
+    } = &response
+    {
         assert_eq!(elem.name(), "blocklist");
         assert!(elem.children().next().is_none());
     } else {
@@ -271,19 +297,19 @@ fn test_build_empty_blocklist_response() {
 #[test]
 fn test_build_blocking_success() {
     let block_elem = Element::builder("block", NS_BLOCKING).build();
-    let original_iq = Iq {
+    let original_iq = Iq::Set {
         from: Some("user@example.com".parse().unwrap()),
         to: None,
         id: "block-set-1".to_string(),
-        payload: xmpp_parsers::iq::IqType::Set(block_elem),
+        payload: block_elem,
     };
 
     let response = build_blocking_success(&original_iq);
 
-    assert_eq!(response.id, "block-set-1");
+    assert_eq!(response.id(), "block-set-1");
     assert!(matches!(
-        response.payload,
-        xmpp_parsers::iq::IqType::Result(None)
+        response,
+        xmpp_parsers::iq::Iq::Result { payload: None, .. }
     ));
 }
 
@@ -293,8 +319,8 @@ fn test_build_block_push() {
     let to: jid::Jid = "user@example.com/resource".parse().expect("valid jid");
     let push = build_block_push(&to, &blocked_jids);
 
-    assert!(push.id.starts_with("push-block-"));
-    if let xmpp_parsers::iq::IqType::Set(elem) = &push.payload {
+    assert!(push.id().starts_with("push-block-"));
+    if let Iq::Set { payload: elem, .. } = &push {
         assert_eq!(elem.name(), "block");
         assert_eq!(elem.ns(), NS_BLOCKING);
         let items: Vec<_> = elem.children().collect();
@@ -311,8 +337,8 @@ fn test_build_unblock_push() {
     let to: jid::Jid = "user@example.com/resource".parse().expect("valid jid");
     let push = build_unblock_push(&to, &unblocked_jids);
 
-    assert!(push.id.starts_with("push-unblock-"));
-    if let xmpp_parsers::iq::IqType::Set(elem) = &push.payload {
+    assert!(push.id().starts_with("push-unblock-"));
+    if let Iq::Set { payload: elem, .. } = &push {
         assert_eq!(elem.name(), "unblock");
         assert_eq!(elem.ns(), NS_BLOCKING);
         let items: Vec<_> = elem.children().collect();

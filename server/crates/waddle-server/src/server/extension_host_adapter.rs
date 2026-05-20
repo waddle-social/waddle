@@ -21,7 +21,7 @@ use waddle_xmpp::{
     roster::{RosterItem, Subscription},
     Stanza,
 };
-use xmpp_parsers::message::{Body, Message, MessageType as XmppMessageType};
+use xmpp_parsers::message::{Message, MessageType as XmppMessageType};
 
 use crate::{
     auth::Session,
@@ -154,9 +154,11 @@ impl ExtensionHostAdapter {
         reply_to: Option<ReplyTarget>,
     ) -> Result<(), ExtensionHostAdapterError> {
         let mut message = Message::new(Some(target));
-        message.id = Some(stanza_id.as_str().to_string());
+        message.id = Some(xmpp_parsers::message::Id(stanza_id.as_str().to_string()));
         message.type_ = XmppMessageType::Chat;
-        message.bodies.insert(String::new(), Body(body));
+        message
+            .bodies
+            .insert(xmpp_parsers::message::Lang(String::new()), body);
         if let Some(thread_id) = thread_id.as_ref() {
             waddle_xmpp::xep0201::set_thread_id(&mut message, thread_id.as_str());
         }

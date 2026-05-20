@@ -245,7 +245,7 @@ mod push;
 use push::{send_roster_push_to_sibling_resources, send_roster_remove_subscription_side_effects};
 
 fn roster_target_allowed(iq: &xmpp_parsers::iq::Iq, domain: &str, user_jid: &BareJid) -> bool {
-    match iq.to.as_ref() {
+    match iq.to() {
         None => true,
         Some(to) if to.to_bare() == *user_jid => true,
         Some(to) if to.resource().is_none() && to.to_bare().as_str() == domain => true,

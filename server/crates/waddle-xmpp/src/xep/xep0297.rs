@@ -99,10 +99,13 @@ pub fn build_forwarded_element(fwd: &ForwardedMessage) -> Element {
     let mut builder = Element::builder("forwarded", NS_FORWARD);
 
     if let Some(stamp) = fwd.stamp {
-        let mut delay_builder =
-            Element::builder("delay", NS_DELAY).attr("stamp", stamp.to_rfc3339());
+        let mut delay_builder = Element::builder("delay", NS_DELAY).attr(
+            minidom::rxml::xml_ncname!("stamp").to_owned(),
+            stamp.to_rfc3339(),
+        );
         if let Some(ref from) = fwd.delay_from {
-            delay_builder = delay_builder.attr("from", from.as_str());
+            delay_builder =
+                delay_builder.attr(minidom::rxml::xml_ncname!("from").to_owned(), from.as_str());
         }
         builder = builder.append(delay_builder.build());
     }
@@ -174,7 +177,7 @@ pub fn extract_forwarded_from_message(msg: &Message) -> Option<ForwardedMessage>
 mod tests {
     use super::*;
     use chrono::TimeZone;
-    use xmpp_parsers::message::{Body, MessageType};
+    use xmpp_parsers::message::MessageType;
 
     fn test_stamp() -> DateTime<Utc> {
         Utc.with_ymd_and_hms(2024, 6, 1, 12, 0, 0)
@@ -188,7 +191,8 @@ mod tests {
         ));
         msg.from = Some("romeo@example.com".parse::<jid::Jid>().expect("valid jid"));
         msg.type_ = MessageType::Chat;
-        msg.bodies.insert(String::new(), Body("Hello!".to_string()));
+        msg.bodies
+            .insert(xmpp_parsers::message::Lang::new(), "Hello!".to_string());
         msg
     }
 
@@ -258,7 +262,7 @@ mod tests {
         assert_eq!(parsed.stamp, Some(test_stamp()));
         assert_eq!(parsed.delay_from.as_deref(), Some("example.com"));
         assert_eq!(
-            parsed.message.bodies.get("").map(|b| b.0.as_str()),
+            parsed.message.bodies.get("").map(|b| b.as_str()),
             Some("Hello!")
         );
     }
@@ -287,7 +291,10 @@ mod tests {
         let elem = Element::builder("forwarded", NS_FORWARD)
             .append(
                 Element::builder("delay", NS_DELAY)
-                    .attr("stamp", "2024-01-01T00:00:00Z")
+                    .attr(
+                        minidom::rxml::xml_ncname!("stamp").to_owned(),
+                        "2024-01-01T00:00:00Z",
+                    )
                     .build(),
             )
             .build();
@@ -317,7 +324,7 @@ mod tests {
         assert_eq!(parsed.stamp, original.stamp);
         assert_eq!(parsed.delay_from, original.delay_from);
         assert_eq!(
-            parsed.message.bodies.get("").map(|b| b.0.as_str()),
+            parsed.message.bodies.get("").map(|b| b.as_str()),
             Some("Hello!")
         );
     }

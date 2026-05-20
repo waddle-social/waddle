@@ -78,20 +78,18 @@ impl DiscoItem {
 
 /// Check if an IQ is a disco#items query.
 pub fn is_disco_items_query(iq: &Iq) -> bool {
-    match &iq.payload {
-        xmpp_parsers::iq::IqType::Get(elem) => {
-            elem.name() == "query" && elem.ns() == DISCO_ITEMS_NS
-        }
+    match iq {
+        Iq::Get { payload, .. } => payload.name() == "query" && payload.ns() == DISCO_ITEMS_NS,
         _ => false,
     }
 }
 
 /// Parse a disco#items query from an IQ stanza.
 pub fn parse_disco_items_query(iq: &Iq) -> Result<DiscoItemsQuery, CoreError> {
-    let query_elem = match &iq.payload {
-        xmpp_parsers::iq::IqType::Get(elem) => {
-            if elem.name() == "query" && elem.ns() == DISCO_ITEMS_NS {
-                elem
+    let query_elem = match iq {
+        Iq::Get { payload, .. } => {
+            if payload.name() == "query" && payload.ns() == DISCO_ITEMS_NS {
+                payload
             } else {
                 return Err(CoreError::bad_request(Some(
                     "Missing disco#items query element".to_string(),
@@ -106,7 +104,7 @@ pub fn parse_disco_items_query(iq: &Iq) -> Result<DiscoItemsQuery, CoreError> {
     };
 
     let node = query_elem.attr("node").map(str::to_string);
-    let target = iq.to.as_ref().map(|j| j.to_string());
+    let target = iq.to().map(|j| j.to_string());
 
     debug!(target = ?target, node = ?node, "Parsed disco#items query");
 
@@ -118,18 +116,19 @@ pub fn build_disco_items_response(original_iq: &Iq, items: &[DiscoItem], node: O
     let mut query_builder = Element::builder("query", DISCO_ITEMS_NS);
 
     if let Some(n) = node {
-        query_builder = query_builder.attr("node", n);
+        query_builder = query_builder.attr(minidom::rxml::xml_ncname!("node").to_owned(), n);
     }
 
     for item in items {
-        let mut item_builder = Element::builder("item", DISCO_ITEMS_NS).attr("jid", &item.jid);
+        let mut item_builder = Element::builder("item", DISCO_ITEMS_NS)
+            .attr(minidom::rxml::xml_ncname!("jid").to_owned(), &item.jid);
 
         if let Some(ref name) = item.name {
-            item_builder = item_builder.attr("name", name);
+            item_builder = item_builder.attr(minidom::rxml::xml_ncname!("name").to_owned(), name);
         }
 
         if let Some(ref node) = item.node {
-            item_builder = item_builder.attr("node", node);
+            item_builder = item_builder.attr(minidom::rxml::xml_ncname!("node").to_owned(), node);
         }
 
         query_builder = query_builder.append(item_builder.build());
@@ -137,11 +136,11 @@ pub fn build_disco_items_response(original_iq: &Iq, items: &[DiscoItem], node: O
 
     let query = query_builder.build();
 
-    Iq {
-        from: original_iq.to.clone(),
-        to: original_iq.from.clone(),
-        id: original_iq.id.clone(),
-        payload: xmpp_parsers::iq::IqType::Result(Some(query)),
+    Iq::Result {
+        from: original_iq.to().cloned(),
+        to: original_iq.from().cloned(),
+        id: original_iq.id().to_string(),
+        payload: Some(query),
     }
 }
 
@@ -152,11 +151,11 @@ mod tests {
     #[test]
     fn test_is_disco_items_query() {
         let query_elem = Element::builder("query", DISCO_ITEMS_NS).build();
-        let iq = Iq {
+        let iq = Iq::Get {
             from: None,
             to: None,
             id: "test-1".to_string(),
-            payload: xmpp_parsers::iq::IqType::Get(query_elem),
+            payload: query_elem,
         };
 
         assert!(is_disco_items_query(&iq));
@@ -165,11 +164,11 @@ mod tests {
     #[test]
     fn test_is_not_disco_items_query_wrong_ns() {
         let query_elem = Element::builder("query", "some:other:ns").build();
-        let iq = Iq {
+        let iq = Iq::Get {
             from: None,
             to: None,
             id: "test-2".to_string(),
-            payload: xmpp_parsers::iq::IqType::Get(query_elem),
+            payload: query_elem,
         };
 
         assert!(!is_disco_items_query(&iq));
@@ -178,11 +177,11 @@ mod tests {
     #[test]
     fn test_build_disco_items_response() {
         let query_elem = Element::builder("query", DISCO_ITEMS_NS).build();
-        let iq = Iq {
+        let iq = Iq::Get {
             from: Some("user@example.com".parse().unwrap()),
             to: Some("server.example.com".parse().unwrap()),
             id: "disco-1".to_string(),
-            payload: xmpp_parsers::iq::IqType::Get(query_elem),
+            payload: query_elem,
         };
 
         let items = vec![DiscoItem::muc_service(
@@ -192,10 +191,13 @@ mod tests {
 
         let response = build_disco_items_response(&iq, &items, None);
 
-        assert_eq!(response.id, "disco-1");
+        assert_eq!(response.id(), "disco-1");
         assert!(matches!(
-            response.payload,
-            xmpp_parsers::iq::IqType::Result(Some(_))
+            response,
+            Iq::Result {
+                payload: Some(_),
+                ..
+            }
         ));
     }
 
@@ -214,20 +216,24 @@ mod tests {
     #[test]
     fn test_build_disco_items_with_node() {
         let query_elem = Element::builder("query", DISCO_ITEMS_NS)
-            .attr("node", "test-node")
+            .attr(minidom::rxml::xml_ncname!("node").to_owned(), "test-node")
             .build();
-        let iq = Iq {
+        let iq = Iq::Get {
             from: Some("user@example.com".parse().unwrap()),
             to: Some("muc.example.com".parse().unwrap()),
             id: "disco-2".to_string(),
-            payload: xmpp_parsers::iq::IqType::Get(query_elem),
+            payload: query_elem,
         };
 
         let items = vec![DiscoItem::muc_room("room@muc.example.com", "Room 1")];
 
         let response = build_disco_items_response(&iq, &items, Some("test-node"));
 
-        if let xmpp_parsers::iq::IqType::Result(Some(elem)) = response.payload {
+        if let Iq::Result {
+            payload: Some(elem),
+            ..
+        } = response
+        {
             assert_eq!(elem.attr("node"), Some("test-node"));
         } else {
             panic!("Expected Result with element");

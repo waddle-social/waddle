@@ -16,7 +16,7 @@ futures = { workspace = true }
 hmac = { workspace = true }
 hex = { workspace = true }
 minidom = { workspace = true }
-oci-client = { version = "0.15", default-features = false, features = ["rustls-tls"] }
+oci-client = { version = "0.17", default-features = false, features = ["rustls-tls"] }
 regex = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }

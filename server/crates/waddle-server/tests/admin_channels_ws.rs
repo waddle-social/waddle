@@ -67,7 +67,7 @@ async fn send_command(client: &mut WsXmppClient, node: &str, id: &str, form_xml:
     client
         .recv_matching(|frame| {
             frame.contains("<iq")
-                && (frame.contains(&format!(r#"id="{id}""#))
+                && (frame.contains(&format!(r#"id='{id}'"#))
                     || frame.contains(&format!(r#"id='{id}'"#)))
         })
         .await
@@ -85,15 +85,15 @@ fn text_field(var: &str, value: &str) -> String {
 }
 
 fn is_result(frame: &str) -> bool {
-    frame.contains(r#"type="result""#) || frame.contains(r#"type='result'"#)
+    frame.contains(r#"type='result'"#) || frame.contains(r#"type='result'"#)
 }
 
 fn is_error(frame: &str) -> bool {
-    frame.contains(r#"type="error""#) || frame.contains(r#"type='error'"#)
+    frame.contains(r#"type='error'"#) || frame.contains(r#"type='error'"#)
 }
 
 fn extract_field(frame: &str, var: &str) -> Option<String> {
-    let marker_dq = format!(r#"var="{var}""#);
+    let marker_dq = format!(r#"var='{var}'"#);
     let marker_sq = format!(r#"var='{var}'"#);
     let idx = frame.find(&marker_dq).or_else(|| frame.find(&marker_sq))?;
     let after = &frame[idx..];

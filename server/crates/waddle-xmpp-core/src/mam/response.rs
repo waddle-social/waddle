@@ -2,7 +2,7 @@ use jid::Jid;
 use minidom::Element;
 use tracing::warn;
 use uuid::Uuid;
-use xmpp_parsers::iq::{Iq, IqType};
+use xmpp_parsers::iq::Iq;
 use xmpp_parsers::message::{Message, MessageType};
 
 use super::types::{ArchivedMessage, ArchivedRichMessage, ArchivedRichPayload, MamResult};
@@ -32,35 +32,41 @@ pub fn build_result_messages(
 /// Build the MAM fin (completion) IQ response.
 pub fn build_fin_iq(original_iq: &Iq, result: &MamResult) -> Iq {
     let fin = Element::builder("fin", MAM_NS)
-        .attr("complete", if result.complete { "true" } else { "false" })
+        .attr(
+            minidom::rxml::xml_ncname!("complete").to_owned(),
+            if result.complete { "true" } else { "false" },
+        )
         .append(build_rsm_response_element(result))
         .build();
 
-    Iq {
-        from: original_iq.to.clone(),
-        to: original_iq.from.clone(),
-        id: original_iq.id.clone(),
-        payload: IqType::Result(Some(fin)),
+    Iq::Result {
+        from: original_iq.to().cloned(),
+        to: original_iq.from().cloned(),
+        id: original_iq.id().to_string(),
+        payload: Some(fin),
     }
 }
 
 fn build_result_message(query_id: &str, to_jid: &Jid, archived: &ArchivedMessage) -> Message {
     let inner_msg = archived_inner_message(archived);
     let delay = Element::builder("delay", DELAY_NS)
-        .attr("stamp", archived.timestamp.to_rfc3339())
+        .attr(
+            minidom::rxml::xml_ncname!("stamp").to_owned(),
+            archived.timestamp.to_rfc3339(),
+        )
         .build();
     let forwarded = Element::builder("forwarded", FORWARD_NS)
         .append(delay)
         .append(inner_msg)
         .build();
     let result = Element::builder("result", MAM_NS)
-        .attr("queryid", query_id)
-        .attr("id", &archived.id)
+        .attr(minidom::rxml::xml_ncname!("queryid").to_owned(), query_id)
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), &archived.id)
         .append(forwarded)
         .build();
 
     let mut msg = Message::new(Some(to_jid.clone()));
-    msg.id = Some(Uuid::now_v7().to_string());
+    msg.id = Some(xmpp_parsers::message::Id(Uuid::now_v7().to_string()));
     msg.type_ = MessageType::Normal;
     msg.payloads.push(result);
     msg
@@ -132,9 +138,9 @@ fn normalize_archived_inner_message(element: Element, archived: &ArchivedMessage
         let ns = element.ns().to_string();
         let name = element.name().to_string();
         let mut builder = Element::builder(name, &ns);
-        for (key, value) in element.attrs() {
-            if key != "to" {
-                builder = builder.attr(key, value);
+        for ((attr_ns, attr_name), value) in element.attrs() {
+            if attr_name.as_str() != "to" {
+                builder = builder.attr_ns(attr_ns.clone(), attr_name.clone(), value.clone());
             }
         }
         for child in element.children().cloned() {
@@ -154,14 +160,23 @@ fn build_typed_inner_message(archived: &ArchivedMessage, rich: &ArchivedRichMess
     let msg_type = archived.message_type.clone();
 
     let mut builder = Element::builder("message", CLIENT_NS)
-        .attr("from", archived.from.to_string())
-        .attr("type", message_type_wire_str(&msg_type));
+        .attr(
+            minidom::rxml::xml_ncname!("from").to_owned(),
+            archived.from.to_string(),
+        )
+        .attr(
+            minidom::rxml::xml_ncname!("type").to_owned(),
+            message_type_wire_str(&msg_type),
+        );
     if msg_type != MessageType::Groupchat {
-        builder = builder.attr("to", archived.to.to_string());
+        builder = builder.attr(
+            minidom::rxml::xml_ncname!("to").to_owned(),
+            archived.to.to_string(),
+        );
     }
 
     if let Some(sid) = archived.stanza_id.as_ref() {
-        builder = builder.attr("id", sid.id.as_str());
+        builder = builder.attr(minidom::rxml::xml_ncname!("id").to_owned(), sid.id.as_str());
     }
     // RFC 6121 §5.2.3 / XEP-0313 §3: emit `<body/>` exactly when the
     // archived row recorded one on the wire. `Some("")` is a real
@@ -190,61 +205,104 @@ fn build_typed_inner_message(archived: &ArchivedMessage, rich: &ArchivedRichMess
     if let Some(oid) = archived.origin_id.as_ref() {
         builder = builder.append(
             Element::builder("origin-id", STANZA_ID_NS)
-                .attr("id", oid.id.as_str())
+                .attr(minidom::rxml::xml_ncname!("id").to_owned(), oid.id.as_str())
                 .build(),
         );
     }
     if msg_type == MessageType::Groupchat && !archived.id.is_empty() {
         builder = builder.append(
             Element::builder("stanza-id", STANZA_ID_NS)
-                .attr("id", &archived.id)
-                .attr("by", archived.to.to_string())
+                .attr(minidom::rxml::xml_ncname!("id").to_owned(), &archived.id)
+                .attr(
+                    minidom::rxml::xml_ncname!("by").to_owned(),
+                    archived.to.to_string(),
+                )
                 .build(),
         );
     }
     if let Some(reply) = rich.reply.as_ref() {
-        let mut reply_builder = Element::builder("reply", REPLY_NS).attr("id", reply.id.as_str());
+        let mut reply_builder = Element::builder("reply", REPLY_NS).attr(
+            minidom::rxml::xml_ncname!("id").to_owned(),
+            reply.id.as_str(),
+        );
         if let Some(to) = reply.to.as_ref() {
-            reply_builder = reply_builder.attr("to", to.to_string());
+            reply_builder =
+                reply_builder.attr(minidom::rxml::xml_ncname!("to").to_owned(), to.to_string());
         }
         builder = builder.append(reply_builder.build());
     }
     for reference in &rich.references {
-        let mut reference_builder =
-            Element::builder("reference", REFERENCE_NS).attr("type", reference.ref_type.as_str());
+        let mut reference_builder = Element::builder("reference", REFERENCE_NS).attr(
+            minidom::rxml::xml_ncname!("type").to_owned(),
+            reference.ref_type.as_str(),
+        );
         if let Some(begin) = reference.begin {
-            reference_builder = reference_builder.attr("begin", begin.to_string());
+            reference_builder = reference_builder.attr(
+                minidom::rxml::xml_ncname!("begin").to_owned(),
+                begin.to_string(),
+            );
         }
         if let Some(end) = reference.end {
-            reference_builder = reference_builder.attr("end", end.to_string());
+            reference_builder = reference_builder.attr(
+                minidom::rxml::xml_ncname!("end").to_owned(),
+                end.to_string(),
+            );
         }
         if let Some(uri) = reference.uri.as_ref() {
-            reference_builder = reference_builder.attr("uri", uri.as_str());
+            reference_builder =
+                reference_builder.attr(minidom::rxml::xml_ncname!("uri").to_owned(), uri.as_str());
         }
         if let Some(anchor) = reference.anchor.as_ref() {
-            reference_builder = reference_builder.attr("anchor", anchor.as_str());
+            reference_builder = reference_builder.attr(
+                minidom::rxml::xml_ncname!("anchor").to_owned(),
+                anchor.as_str(),
+            );
         }
         builder = builder.append(reference_builder.build());
     }
     for mention in &rich.mentions {
         let mut mention_elem = Element::builder("mention", MENTIONS_NS).build();
         if let Some(begin) = mention.begin {
-            mention_elem.set_attr("begin", begin.to_string());
+            mention_elem.set_attr(
+                minidom::rxml::Namespace::NONE,
+                minidom::rxml::xml_ncname!("begin").to_owned(),
+                begin.to_string(),
+            );
         }
         if let Some(end) = mention.end {
-            mention_elem.set_attr("end", end.to_string());
+            mention_elem.set_attr(
+                minidom::rxml::Namespace::NONE,
+                minidom::rxml::xml_ncname!("end").to_owned(),
+                end.to_string(),
+            );
         }
         if let Some(jid) = mention.jid.as_ref() {
-            mention_elem.set_attr("jid", jid.to_string());
+            mention_elem.set_attr(
+                minidom::rxml::Namespace::NONE,
+                minidom::rxml::xml_ncname!("jid").to_owned(),
+                jid.to_string(),
+            );
         }
         if let Some(occupant_id) = mention.occupant_id.as_ref() {
-            mention_elem.set_attr("occupantid", occupant_id.as_str());
+            mention_elem.set_attr(
+                minidom::rxml::Namespace::NONE,
+                minidom::rxml::xml_ncname!("occupantid").to_owned(),
+                occupant_id.as_str(),
+            );
         }
         if let Some(mentions) = mention.mentions.as_ref() {
-            mention_elem.set_attr("mentions", mentions.as_str());
+            mention_elem.set_attr(
+                minidom::rxml::Namespace::NONE,
+                minidom::rxml::xml_ncname!("mentions").to_owned(),
+                mentions.as_str(),
+            );
         }
         if let Some(uri) = mention.uri.as_ref() {
-            mention_elem.set_attr("uri", uri.as_str());
+            mention_elem.set_attr(
+                minidom::rxml::Namespace::NONE,
+                minidom::rxml::xml_ncname!("uri").to_owned(),
+                uri.as_str(),
+            );
         }
         if mention.active {
             mention_elem.append_child(Element::builder("active", MENTIONS_NS).build());
@@ -259,21 +317,32 @@ fn build_typed_inner_message(archived: &ArchivedMessage, rich: &ArchivedRichMess
         Some(ArchivedRichPayload::Correction { replaces_id }) => {
             builder = builder.append(
                 Element::builder("replace", MESSAGE_CORRECT_NS)
-                    .attr("id", replaces_id.as_str())
+                    .attr(
+                        minidom::rxml::xml_ncname!("id").to_owned(),
+                        replaces_id.as_str(),
+                    )
                     .build(),
             );
         }
         Some(ArchivedRichPayload::Retraction(retraction)) => {
-            let retract_builder = Element::builder("retract", MESSAGE_RETRACT_NS)
-                .attr("id", retraction.target_id.as_str());
+            let retract_builder = Element::builder("retract", MESSAGE_RETRACT_NS).attr(
+                minidom::rxml::xml_ncname!("id").to_owned(),
+                retraction.target_id.as_str(),
+            );
             builder = builder.append(retract_builder.build());
         }
         Some(ArchivedRichPayload::Moderation(moderation)) => {
             let moderated = Element::builder("moderated", MESSAGE_MODERATE_NS)
-                .attr("by", moderation.moderated_by.to_string())
+                .attr(
+                    minidom::rxml::xml_ncname!("by").to_owned(),
+                    moderation.moderated_by.to_string(),
+                )
                 .build();
             let mut retract = Element::builder("retract", MESSAGE_RETRACT_NS)
-                .attr("id", moderation.target_id.as_str())
+                .attr(
+                    minidom::rxml::xml_ncname!("id").to_owned(),
+                    moderation.target_id.as_str(),
+                )
                 .append(moderated);
             if let Some(reason) = moderation.reason.as_ref() {
                 retract = retract.append(
@@ -286,7 +355,10 @@ fn build_typed_inner_message(archived: &ArchivedMessage, rich: &ArchivedRichMess
         }
         Some(ArchivedRichPayload::Reactions(reactions)) => {
             let mut reactions_elem = Element::builder("reactions", REACTIONS_NS)
-                .attr("id", reactions.target_id.as_str())
+                .attr(
+                    minidom::rxml::xml_ncname!("id").to_owned(),
+                    reactions.target_id.as_str(),
+                )
                 .build();
             for emoji in &reactions.emojis {
                 reactions_elem.append_child(
@@ -298,14 +370,22 @@ fn build_typed_inner_message(archived: &ArchivedMessage, rich: &ArchivedRichMess
             builder = builder.append(reactions_elem);
         }
         Some(ArchivedRichPayload::Tombstone(tombstone)) => {
-            let mut retracted = Element::builder("retracted", MESSAGE_RETRACT_NS)
-                .attr("stamp", tombstone.stamp.to_rfc3339());
+            let mut retracted = Element::builder("retracted", MESSAGE_RETRACT_NS).attr(
+                minidom::rxml::xml_ncname!("stamp").to_owned(),
+                tombstone.stamp.to_rfc3339(),
+            );
             if let Some(retraction_id) = tombstone.retraction_id.as_ref() {
-                retracted = retracted.attr("id", retraction_id.as_str());
+                retracted = retracted.attr(
+                    minidom::rxml::xml_ncname!("id").to_owned(),
+                    retraction_id.as_str(),
+                );
             }
             if let Some(moderation) = tombstone.moderation.as_ref() {
                 let moderated = Element::builder("moderated", MESSAGE_MODERATE_NS)
-                    .attr("by", moderation.moderated_by.to_string())
+                    .attr(
+                        minidom::rxml::xml_ncname!("by").to_owned(),
+                        moderation.moderated_by.to_string(),
+                    )
                     .build();
                 retracted = retracted.append(moderated);
                 if let Some(reason) = moderation.reason.as_ref() {
@@ -328,14 +408,23 @@ fn build_legacy_inner_message(archived: &ArchivedMessage) -> Element {
     let msg_type = archived.message_type.clone();
 
     let mut builder = Element::builder("message", CLIENT_NS)
-        .attr("from", archived.from.to_string())
-        .attr("type", message_type_wire_str(&msg_type));
+        .attr(
+            minidom::rxml::xml_ncname!("from").to_owned(),
+            archived.from.to_string(),
+        )
+        .attr(
+            minidom::rxml::xml_ncname!("type").to_owned(),
+            message_type_wire_str(&msg_type),
+        );
     if msg_type != MessageType::Groupchat {
-        builder = builder.attr("to", archived.to.to_string());
+        builder = builder.attr(
+            minidom::rxml::xml_ncname!("to").to_owned(),
+            archived.to.to_string(),
+        );
     }
 
     if let Some(sid) = archived.stanza_id.as_ref() {
-        builder = builder.attr("id", sid.id.as_str());
+        builder = builder.attr(minidom::rxml::xml_ncname!("id").to_owned(), sid.id.as_str());
     }
     // RFC 6121 §5.2.3 / XEP-0313 §3: see `build_typed_inner_message`
     // — `Some("")` round-trips as `<body></body>`, `None` omits the
@@ -356,24 +445,31 @@ fn build_legacy_inner_message(archived: &ArchivedMessage) -> Element {
         builder = builder.append(crate::xep0201::build_thread_element(info, CLIENT_NS));
     }
     if let Some(reply) = archived.reply.as_ref() {
-        let mut reply_builder = Element::builder("reply", REPLY_NS).attr("id", reply.id.as_str());
+        let mut reply_builder = Element::builder("reply", REPLY_NS).attr(
+            minidom::rxml::xml_ncname!("id").to_owned(),
+            reply.id.as_str(),
+        );
         if let Some(to) = reply.to.as_ref() {
-            reply_builder = reply_builder.attr("to", to.to_string());
+            reply_builder =
+                reply_builder.attr(minidom::rxml::xml_ncname!("to").to_owned(), to.to_string());
         }
         builder = builder.append(reply_builder.build());
     }
     if let Some(oid) = archived.origin_id.as_ref() {
         builder = builder.append(
             Element::builder("origin-id", STANZA_ID_NS)
-                .attr("id", oid.id.as_str())
+                .attr(minidom::rxml::xml_ncname!("id").to_owned(), oid.id.as_str())
                 .build(),
         );
     }
     if msg_type == MessageType::Groupchat && !archived.id.is_empty() {
         builder = builder.append(
             Element::builder("stanza-id", STANZA_ID_NS)
-                .attr("id", &archived.id)
-                .attr("by", archived.to.to_string())
+                .attr(minidom::rxml::xml_ncname!("id").to_owned(), &archived.id)
+                .attr(
+                    minidom::rxml::xml_ncname!("by").to_owned(),
+                    archived.to.to_string(),
+                )
                 .build(),
         );
     }

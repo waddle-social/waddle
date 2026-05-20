@@ -78,8 +78,14 @@ impl MucCallExtension {
 
     pub fn to_element(&self) -> Element {
         Element::builder(CALL_NAME, NS_WADDLE_MUC_CALL)
-            .attr(ATTR_STATE, self.state.as_attr())
-            .attr(ATTR_CALL_ID, self.call_id.as_str())
+            .attr(
+                minidom::rxml::xml_ncname!("state").to_owned(),
+                self.state.as_attr(),
+            )
+            .attr(
+                minidom::rxml::xml_ncname!("call-id").to_owned(),
+                self.call_id.as_str(),
+            )
             .build()
     }
 }

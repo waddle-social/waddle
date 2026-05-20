@@ -92,11 +92,15 @@ impl CallOffer {
 /// [`MediaKind`] enum — no `format!`, no string concatenation
 /// (CLAUDE.md XML hard rule).
 pub fn build_propose(sid: SessionId, offer: CallOffer) -> minidom::Element {
-    let mut builder = minidom::Element::builder("propose", NS_JINGLE_MESSAGE).attr("id", sid.0);
+    let mut builder = minidom::Element::builder("propose", NS_JINGLE_MESSAGE)
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), sid.0);
     for kind in offer.media_kinds() {
         builder = builder.append(
             minidom::Element::builder("description", NS_JINGLE_RTP)
-                .attr("media", kind.as_str())
+                .attr(
+                    minidom::rxml::xml_ncname!("media").to_owned(),
+                    kind.as_str(),
+                )
                 .build(),
         );
     }
@@ -127,7 +131,8 @@ pub fn build_retract(sid: SessionId) -> JingleMI {
 /// condition over the wire; `None` omits the `<reason/>` child (still
 /// valid — the SHOULD is informational).
 pub fn build_finish(sid: SessionId, reason: Option<JingleReason>) -> minidom::Element {
-    let mut builder = minidom::Element::builder("finish", NS_JINGLE_MESSAGE).attr("id", sid.0);
+    let mut builder = minidom::Element::builder("finish", NS_JINGLE_MESSAGE)
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), sid.0);
     if let Some(condition) = reason {
         let reason_elem = minidom::Element::builder("reason", NS_JINGLE)
             .append(minidom::Element::from(condition))

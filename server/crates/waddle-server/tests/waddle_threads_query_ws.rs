@@ -55,8 +55,8 @@ fn threads_query_iq(id: &str, page_size: Option<u32>, after: Option<&str>) -> St
         query.append_child(set);
     }
     let iq = Element::builder("iq", CLIENT_NS)
-        .attr("type", "get")
-        .attr("id", id)
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "get")
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), id)
         .append(query)
         .build();
     element_to_xml(iq)
@@ -65,9 +65,9 @@ fn threads_query_iq(id: &str, page_size: Option<u32>, after: Option<&str>) -> St
 fn threads_query_iq_to(id: &str, to: &str) -> String {
     let query = Element::builder("query", NS_THREADS).build();
     let iq = Element::builder("iq", CLIENT_NS)
-        .attr("type", "get")
-        .attr("id", id)
-        .attr("to", to)
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "get")
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), id)
+        .attr(minidom::rxml::xml_ncname!("to").to_owned(), to)
         .append(query)
         .build();
     element_to_xml(iq)
@@ -369,9 +369,9 @@ async fn disco_info_on_self_advertises_threads_query_feature() {
 
     let disco_payload = Element::builder("query", "http://jabber.org/protocol/disco#info").build();
     let iq = Element::builder("iq", CLIENT_NS)
-        .attr("type", "get")
-        .attr("id", "th-disco-1")
-        .attr("to", &self_bare)
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "get")
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), "th-disco-1")
+        .attr(minidom::rxml::xml_ncname!("to").to_owned(), &self_bare)
         .append(disco_payload)
         .build();
     let resp = send_iq(&mut client, element_to_xml(iq), "th-disco-1").await;

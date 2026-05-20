@@ -118,7 +118,7 @@ pub(super) fn reply_target_from_payloads(payloads: &[minidom::Element]) -> Optio
 pub(super) fn thread_id_from_message(msg: &Message) -> Option<ThreadId> {
     msg.thread
         .as_ref()
-        .and_then(|thread| ThreadId::new(thread.0.clone()).ok())
+        .and_then(|thread| ThreadId::new(thread.id.clone()).ok())
         .or_else(|| {
             msg.payloads
                 .iter()

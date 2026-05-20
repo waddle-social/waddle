@@ -198,7 +198,10 @@ fn test_parse_subscription_presence() {
 
     let mut pres = Presence::new(PresenceType::Subscribe);
     pres.to = Some(Jid::from(target.clone()));
-    pres.statuses.insert(String::new(), "Hello".to_string());
+    pres.statuses.insert(
+        xmpp_parsers::message::Lang(String::new()),
+        "Hello".to_string(),
+    );
 
     let action = parse_subscription_presence(&pres, &sender).unwrap();
 

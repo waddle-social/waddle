@@ -9,10 +9,15 @@ pub struct UiView {
 
 impl UiView {
     pub(super) fn to_minidom(&self) -> Element {
-        let mut builder =
-            Element::builder("view", FRAMEWORK_NAMESPACE).attr("id", self.id.as_str());
+        let mut builder = Element::builder("view", FRAMEWORK_NAMESPACE).attr(
+            minidom::rxml::xml_ncname!("id").to_owned(),
+            self.id.as_str(),
+        );
         if let Some(title) = &self.title {
-            builder = builder.attr("title", title.as_str());
+            builder = builder.attr(
+                minidom::rxml::xml_ncname!("title").to_owned(),
+                title.as_str(),
+            );
         }
         for block in &self.blocks {
             builder = builder.append(block.to_minidom());
@@ -71,7 +76,10 @@ pub struct TextBlock {
 impl TextBlock {
     fn to_minidom(&self) -> Element {
         Element::builder("text", FRAMEWORK_NAMESPACE)
-            .attr("style", self.style.as_str())
+            .attr(
+                minidom::rxml::xml_ncname!("style").to_owned(),
+                self.style.as_str(),
+            )
             .append(self.text.as_str().to_string())
             .build()
     }
@@ -86,9 +94,10 @@ pub struct ImageBlock {
 impl ImageBlock {
     fn to_minidom(&self) -> Element {
         self.artifact
-            .add_attrs(
-                Element::builder("image", FRAMEWORK_NAMESPACE).attr("alt", self.alt.as_str()),
-            )
+            .add_attrs(Element::builder("image", FRAMEWORK_NAMESPACE).attr(
+                minidom::rxml::xml_ncname!("alt").to_owned(),
+                self.alt.as_str(),
+            ))
             .build()
     }
 }
@@ -102,8 +111,14 @@ pub struct ActionBlock {
 impl ActionBlock {
     fn to_minidom(&self) -> Element {
         Element::builder("action", FRAMEWORK_NAMESPACE)
-            .attr("launch-id", self.launch_id.as_str())
-            .attr("label", self.label.as_str())
+            .attr(
+                minidom::rxml::xml_ncname!("launch-id").to_owned(),
+                self.launch_id.as_str(),
+            )
+            .attr(
+                minidom::rxml::xml_ncname!("label").to_owned(),
+                self.label.as_str(),
+            )
             .build()
     }
 }
@@ -203,10 +218,15 @@ pub struct DataForm {
 
 impl DataForm {
     fn to_minidom(&self) -> Element {
-        let mut builder =
-            Element::builder("form", FRAMEWORK_NAMESPACE).attr("type", self.form_type.as_str());
+        let mut builder = Element::builder("form", FRAMEWORK_NAMESPACE).attr(
+            minidom::rxml::xml_ncname!("type").to_owned(),
+            self.form_type.as_str(),
+        );
         if let Some(title) = &self.title {
-            builder = builder.attr("title", title.as_str());
+            builder = builder.attr(
+                minidom::rxml::xml_ncname!("title").to_owned(),
+                title.as_str(),
+            );
         }
         for instruction in &self.instructions {
             builder = builder.append(
@@ -217,10 +237,19 @@ impl DataForm {
         }
         for field in &self.fields {
             let mut field_builder = Element::builder("field", FRAMEWORK_NAMESPACE)
-                .attr("var", field.name.as_str())
-                .attr("type", field.field_type.as_str());
+                .attr(
+                    minidom::rxml::xml_ncname!("var").to_owned(),
+                    field.name.as_str(),
+                )
+                .attr(
+                    minidom::rxml::xml_ncname!("type").to_owned(),
+                    field.field_type.as_str(),
+                );
             if let Some(label) = &field.label {
-                field_builder = field_builder.attr("label", label.as_str());
+                field_builder = field_builder.attr(
+                    minidom::rxml::xml_ncname!("label").to_owned(),
+                    label.as_str(),
+                );
             }
             if field.required {
                 field_builder =
@@ -236,7 +265,10 @@ impl DataForm {
             for option in &field.options {
                 let mut option_builder = Element::builder("option", FRAMEWORK_NAMESPACE);
                 if let Some(label) = &option.label {
-                    option_builder = option_builder.attr("label", label.as_str());
+                    option_builder = option_builder.attr(
+                        minidom::rxml::xml_ncname!("label").to_owned(),
+                        label.as_str(),
+                    );
                 }
                 field_builder = field_builder.append(
                     option_builder
@@ -263,10 +295,15 @@ pub struct ListView {
 
 impl ListView {
     fn to_minidom(&self) -> Element {
-        let mut builder =
-            Element::builder("list", FRAMEWORK_NAMESPACE).attr("id", self.id.as_str());
+        let mut builder = Element::builder("list", FRAMEWORK_NAMESPACE).attr(
+            minidom::rxml::xml_ncname!("id").to_owned(),
+            self.id.as_str(),
+        );
         if let Some(title) = &self.title {
-            builder = builder.attr("title", title.as_str());
+            builder = builder.attr(
+                minidom::rxml::xml_ncname!("title").to_owned(),
+                title.as_str(),
+            );
         }
         for item in &self.items {
             builder = builder.append(item.to_minidom());
@@ -287,13 +324,25 @@ pub struct ListItem {
 impl ListItem {
     fn to_minidom(&self) -> Element {
         let mut builder = Element::builder("item", FRAMEWORK_NAMESPACE)
-            .attr("id", self.id.as_str())
-            .attr("label", self.label.as_str());
+            .attr(
+                minidom::rxml::xml_ncname!("id").to_owned(),
+                self.id.as_str(),
+            )
+            .attr(
+                minidom::rxml::xml_ncname!("label").to_owned(),
+                self.label.as_str(),
+            );
         if let Some(description) = &self.description {
-            builder = builder.attr("description", description.as_str());
+            builder = builder.attr(
+                minidom::rxml::xml_ncname!("description").to_owned(),
+                description.as_str(),
+            );
         }
         if let Some(launch_id) = &self.launch_id {
-            builder = builder.attr("launch-id", launch_id.as_str());
+            builder = builder.attr(
+                minidom::rxml::xml_ncname!("launch-id").to_owned(),
+                launch_id.as_str(),
+            );
         }
         if let Some(image) = &self.image {
             builder = image.add_attrs(builder);

@@ -46,7 +46,7 @@
 //!   tombstone (XEP-0424 path) preserving the stanza-id position.
 
 use minidom::Element;
-use xmpp_parsers::iq::{Iq, IqType};
+use xmpp_parsers::iq::Iq;
 use xmpp_parsers::message::Message;
 
 /// Namespace for XEP-0425 Message Moderation v1.
@@ -70,8 +70,12 @@ pub struct ModerationRequest {
 /// Parse a current XEP-0425 IQ moderation request:
 /// `<iq type='set'><moderate id='stanza-id'><retract/><reason/></moderate></iq>`.
 pub fn parse_moderation_iq(iq: &Iq) -> Option<ModerationRequest> {
-    let moderate = match &iq.payload {
-        IqType::Set(elem) if elem.name() == "moderate" && elem.ns() == NS_MESSAGE_MODERATE => elem,
+    let moderate = match iq {
+        Iq::Set { payload: elem, .. }
+            if elem.name() == "moderate" && elem.ns() == NS_MESSAGE_MODERATE =>
+        {
+            elem
+        }
         _ => return None,
     };
     let target_id = moderate.attr("id").filter(|value| !value.is_empty())?;
@@ -202,7 +206,7 @@ pub fn build_moderation_result_message(
     let mut msg = Message::new(None::<jid::Jid>);
     msg.from = from_room.into();
     msg.type_ = xmpp_parsers::message::MessageType::Groupchat;
-    msg.id = Some(uuid::Uuid::new_v4().to_string());
+    msg.id = Some(xmpp_parsers::message::Id(uuid::Uuid::new_v4().to_string()));
     msg.payloads.push(build_moderated_retract_element(
         target_id,
         moderated_by,
@@ -234,16 +238,17 @@ pub fn build_moderated_retract_element(
     moderator_occupant_id: Option<&str>,
     reason: Option<&str>,
 ) -> Element {
-    let mut moderated = Element::builder("moderated", NS_MESSAGE_MODERATE).attr("by", moderated_by);
+    let mut moderated = Element::builder("moderated", NS_MESSAGE_MODERATE)
+        .attr(minidom::rxml::xml_ncname!("by").to_owned(), moderated_by);
     if let Some(occupant_id) = moderator_occupant_id.filter(|s| !s.is_empty()) {
         moderated = moderated.append(
             Element::builder("occupant-id", NS_OCCUPANT_ID)
-                .attr("id", occupant_id)
+                .attr(minidom::rxml::xml_ncname!("id").to_owned(), occupant_id)
                 .build(),
         );
     }
     let mut retract = Element::builder("retract", NS_RETRACT)
-        .attr("id", target_id)
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), target_id)
         .append(moderated.build());
     if let Some(reason_text) = reason {
         retract = retract.append(

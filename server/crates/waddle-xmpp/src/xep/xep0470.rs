@@ -128,22 +128,32 @@ pub fn parse_attachment_target(elem: &Element) -> Option<AttachmentTarget> {
 /// Build an `<attachments/>` element.
 pub fn build_attachments_element(attachment: &Attachment) -> Element {
     let mut elem = Element::builder("attachments", NS_PUBSUB_ATTACHMENTS)
-        .attr("for", attachment.target.node.as_str())
-        .attr("item", attachment.target.item_id.as_str())
+        .attr(
+            minidom::rxml::xml_ncname!("for").to_owned(),
+            attachment.target.node.as_str(),
+        )
+        .attr(
+            minidom::rxml::xml_ncname!("item").to_owned(),
+            attachment.target.item_id.as_str(),
+        )
         .build();
 
     match &attachment.payload {
         AttachmentPayload::Comment(text) => {
             let mut comment = Element::builder("comment", NS_PUBSUB_ATTACHMENTS).build();
-            comment.append_text_node(text);
+            comment.append_text_node(text.clone());
             if let Some(ref author) = attachment.author {
-                comment.set_attr("author", author);
+                comment.set_attr(
+                    minidom::rxml::Namespace::NONE,
+                    minidom::rxml::xml_ncname!("author").to_owned(),
+                    author,
+                );
             }
             elem.append_child(comment);
         }
         AttachmentPayload::Reaction(emoji) => {
             let mut reaction = Element::builder("reaction", NS_PUBSUB_ATTACHMENTS).build();
-            reaction.append_text_node(emoji);
+            reaction.append_text_node(emoji.clone());
             elem.append_child(reaction);
         }
         AttachmentPayload::Custom(child) => {
@@ -170,8 +180,11 @@ mod tests {
     #[test]
     fn test_parse_target() {
         let elem = Element::builder("attachments", NS_PUBSUB_ATTACHMENTS)
-            .attr("for", "urn:xmpp:pubsub-social-feed:0")
-            .attr("item", "post-123")
+            .attr(
+                minidom::rxml::xml_ncname!("for").to_owned(),
+                "urn:xmpp:pubsub-social-feed:0",
+            )
+            .attr(minidom::rxml::xml_ncname!("item").to_owned(), "post-123")
             .build();
 
         let target = parse_attachment_target(&elem).expect("parseable");

@@ -67,9 +67,9 @@ impl Caps {
     /// Build the `<c>` element for inclusion in presence stanzas.
     pub fn build_element(&self) -> Element {
         Element::builder("c", NS_CAPS)
-            .attr("hash", &self.hash)
-            .attr("node", &self.node)
-            .attr("ver", &self.ver)
+            .attr(minidom::rxml::xml_ncname!("hash").to_owned(), &self.hash)
+            .attr(minidom::rxml::xml_ncname!("node").to_owned(), &self.node)
+            .attr(minidom::rxml::xml_ncname!("ver").to_owned(), &self.ver)
             .build()
     }
 

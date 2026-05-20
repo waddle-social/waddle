@@ -175,8 +175,8 @@ impl StoryReads {
         let mut root = Element::builder("reads", NS_WADDLE_STORY_READS).build();
         for (id, at) in &self.entries {
             let read = Element::builder("read", NS_WADDLE_STORY_READS)
-                .attr("id", id.as_str())
-                .attr("at", at.to_rfc3339())
+                .attr(minidom::rxml::xml_ncname!("id").to_owned(), id.as_str())
+                .attr(minidom::rxml::xml_ncname!("at").to_owned(), at.to_rfc3339())
                 .build();
             root.append_child(read);
         }

@@ -162,7 +162,7 @@ async fn send_roster_push_to_all_resources(
             .deps
             .protocol
             .connection_registry
-            .try_send_to(resource, Stanza::Iq(push))
+            .try_send_to(resource, Stanza::Iq(Box::new(push)))
             == BroadcastOutcome::Delivered
         {
             delivered_resources.push(resource.clone());
@@ -193,7 +193,7 @@ async fn send_roster_push_to_all_resources(
             item,
             Some(version),
         );
-        let stanza = Stanza::Iq(push);
+        let stanza = Stanza::Iq(Box::new(push));
         match state
             .deps
             .protocol
@@ -237,7 +237,7 @@ async fn send_roster_push_to_all_resources(
             .deps
             .protocol
             .connection_registry
-            .try_send_to(&resource, Stanza::Iq(push));
+            .try_send_to(&resource, Stanza::Iq(Box::new(push)));
     }
 }
 
@@ -269,7 +269,7 @@ pub(super) async fn send_roster_push_to_sibling_resources(
             .deps
             .protocol
             .connection_registry
-            .try_send_to(resource, Stanza::Iq(push))
+            .try_send_to(resource, Stanza::Iq(Box::new(push)))
             == BroadcastOutcome::Delivered
         {
             delivered_resources.push(resource.clone());
@@ -301,7 +301,7 @@ pub(super) async fn send_roster_push_to_sibling_resources(
             item,
             Some(version),
         );
-        let stanza = Stanza::Iq(push.clone());
+        let stanza = Stanza::Iq(Box::new(push.clone()));
         match state
             .deps
             .protocol
@@ -352,6 +352,6 @@ pub(super) async fn send_roster_push_to_sibling_resources(
             .deps
             .protocol
             .connection_registry
-            .try_send_to(&resource, Stanza::Iq(push));
+            .try_send_to(&resource, Stanza::Iq(Box::new(push)));
     }
 }

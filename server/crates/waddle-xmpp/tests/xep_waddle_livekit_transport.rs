@@ -71,7 +71,7 @@ fn waddle_livekit_transport_request_form_serialises_to_empty_element() {
     assert_eq!(elem.name(), "transport");
     assert_eq!(elem.ns(), NS_WADDLE_LIVEKIT_TRANSPORT);
     assert!(
-        elem.attrs().next().is_none(),
+        elem.attrs().iter().next().is_none(),
         "request form carries no attributes"
     );
     assert!(
@@ -163,8 +163,14 @@ fn waddle_livekit_transport_rejects_missing_url_attribute() {
     // (typed parse fails) — the server's Jingle handler hides the
     // inner message and replies with a generic <bad-request/>.
     let elem = Element::builder("transport", NS_WADDLE_LIVEKIT_TRANSPORT)
-        .attr("room", "alice@waddle.test::c1")
-        .attr("identity", "bob@waddle.test/desktop")
+        .attr(
+            minidom::rxml::xml_ncname!("room").to_owned(),
+            "alice@waddle.test::c1",
+        )
+        .attr(
+            minidom::rxml::xml_ncname!("identity").to_owned(),
+            "bob@waddle.test/desktop",
+        )
         .append(
             Element::builder("token", NS_WADDLE_LIVEKIT_TRANSPORT)
                 .append("jwt")
@@ -181,8 +187,14 @@ fn waddle_livekit_transport_rejects_missing_url_attribute() {
 #[test]
 fn waddle_livekit_transport_rejects_missing_room_attribute() {
     let elem = Element::builder("transport", NS_WADDLE_LIVEKIT_TRANSPORT)
-        .attr("url", "wss://livekit.waddle.test/")
-        .attr("identity", "bob@waddle.test/desktop")
+        .attr(
+            minidom::rxml::xml_ncname!("url").to_owned(),
+            "wss://livekit.waddle.test/",
+        )
+        .attr(
+            minidom::rxml::xml_ncname!("identity").to_owned(),
+            "bob@waddle.test/desktop",
+        )
         .append(
             Element::builder("token", NS_WADDLE_LIVEKIT_TRANSPORT)
                 .append("jwt")
@@ -196,8 +208,14 @@ fn waddle_livekit_transport_rejects_missing_room_attribute() {
 #[test]
 fn waddle_livekit_transport_rejects_missing_identity_attribute() {
     let elem = Element::builder("transport", NS_WADDLE_LIVEKIT_TRANSPORT)
-        .attr("url", "wss://livekit.waddle.test/")
-        .attr("room", "alice@waddle.test::c1")
+        .attr(
+            minidom::rxml::xml_ncname!("url").to_owned(),
+            "wss://livekit.waddle.test/",
+        )
+        .attr(
+            minidom::rxml::xml_ncname!("room").to_owned(),
+            "alice@waddle.test::c1",
+        )
         .append(
             Element::builder("token", NS_WADDLE_LIVEKIT_TRANSPORT)
                 .append("jwt")
@@ -214,9 +232,18 @@ fn waddle_livekit_transport_rejects_missing_identity_attribute() {
 #[test]
 fn waddle_livekit_transport_rejects_missing_token_child() {
     let elem = Element::builder("transport", NS_WADDLE_LIVEKIT_TRANSPORT)
-        .attr("url", "wss://livekit.waddle.test/")
-        .attr("room", "alice@waddle.test::c1")
-        .attr("identity", "bob@waddle.test/desktop")
+        .attr(
+            minidom::rxml::xml_ncname!("url").to_owned(),
+            "wss://livekit.waddle.test/",
+        )
+        .attr(
+            minidom::rxml::xml_ncname!("room").to_owned(),
+            "alice@waddle.test::c1",
+        )
+        .attr(
+            minidom::rxml::xml_ncname!("identity").to_owned(),
+            "bob@waddle.test/desktop",
+        )
         .build();
     let err = WaddleLiveKitTransport::try_from(&elem).expect_err("missing token");
     assert!(matches!(err, TransportParseError::MissingToken));
@@ -228,9 +255,18 @@ fn waddle_livekit_transport_rejects_invalid_url_scheme() {
     // `ws://` and `wss://`. An `http://` URL is rejected at the
     // typed-construction boundary.
     let elem = Element::builder("transport", NS_WADDLE_LIVEKIT_TRANSPORT)
-        .attr("url", "http://livekit.waddle.test/")
-        .attr("room", "alice@waddle.test::c1")
-        .attr("identity", "bob@waddle.test/desktop")
+        .attr(
+            minidom::rxml::xml_ncname!("url").to_owned(),
+            "http://livekit.waddle.test/",
+        )
+        .attr(
+            minidom::rxml::xml_ncname!("room").to_owned(),
+            "alice@waddle.test::c1",
+        )
+        .attr(
+            minidom::rxml::xml_ncname!("identity").to_owned(),
+            "bob@waddle.test/desktop",
+        )
         .append(
             Element::builder("token", NS_WADDLE_LIVEKIT_TRANSPORT)
                 .append("jwt")
@@ -250,9 +286,18 @@ fn waddle_livekit_transport_rejects_invalid_identity_jid() {
     // resource and MUST be rejected — the LiveKit identity needs
     // a specific session-resource.
     let elem = Element::builder("transport", NS_WADDLE_LIVEKIT_TRANSPORT)
-        .attr("url", "wss://livekit.waddle.test/")
-        .attr("room", "alice@waddle.test::c1")
-        .attr("identity", "bob@waddle.test")
+        .attr(
+            minidom::rxml::xml_ncname!("url").to_owned(),
+            "wss://livekit.waddle.test/",
+        )
+        .attr(
+            minidom::rxml::xml_ncname!("room").to_owned(),
+            "alice@waddle.test::c1",
+        )
+        .attr(
+            minidom::rxml::xml_ncname!("identity").to_owned(),
+            "bob@waddle.test",
+        )
         .append(
             Element::builder("token", NS_WADDLE_LIVEKIT_TRANSPORT)
                 .append("jwt")

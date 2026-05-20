@@ -34,7 +34,7 @@
 
 use jid::BareJid;
 use minidom::Element;
-use xmpp_parsers::iq::{Iq, IqType};
+use xmpp_parsers::iq::Iq;
 
 use super::xep0004::NS_DATA_FORMS;
 
@@ -70,16 +70,16 @@ pub struct PushDisable {
 
 /// Check if an IQ stanza is a push enable request.
 pub fn is_push_enable(iq: &Iq) -> bool {
-    match &iq.payload {
-        IqType::Set(elem) => elem.name() == "enable" && elem.ns() == NS_PUSH,
+    match iq {
+        Iq::Set { payload: elem, .. } => elem.name() == "enable" && elem.ns() == NS_PUSH,
         _ => false,
     }
 }
 
 /// Check if an IQ stanza is a push disable request.
 pub fn is_push_disable(iq: &Iq) -> bool {
-    match &iq.payload {
-        IqType::Set(elem) => elem.name() == "disable" && elem.ns() == NS_PUSH,
+    match iq {
+        Iq::Set { payload: elem, .. } => elem.name() == "disable" && elem.ns() == NS_PUSH,
         _ => false,
     }
 }
@@ -90,8 +90,8 @@ pub fn is_push_disable(iq: &Iq) -> bool {
 ///
 /// Returns `None` if the IQ is not a valid push enable request.
 pub fn parse_push_enable(iq: &Iq) -> Option<PushEnable> {
-    let elem = match &iq.payload {
-        IqType::Set(elem) if elem.name() == "enable" && elem.ns() == NS_PUSH => elem,
+    let elem = match iq {
+        Iq::Set { payload: elem, .. } if elem.name() == "enable" && elem.ns() == NS_PUSH => elem,
         _ => return None,
     };
 
@@ -119,8 +119,8 @@ pub fn parse_push_enable(iq: &Iq) -> Option<PushEnable> {
 ///
 /// Returns `None` if the IQ is not a valid push disable request.
 pub fn parse_push_disable(iq: &Iq) -> Option<PushDisable> {
-    let elem = match &iq.payload {
-        IqType::Set(elem) if elem.name() == "disable" && elem.ns() == NS_PUSH => elem,
+    let elem = match iq {
+        Iq::Set { payload: elem, .. } if elem.name() == "disable" && elem.ns() == NS_PUSH => elem,
         _ => return None,
     };
 
@@ -180,21 +180,21 @@ fn data_form_type(form: &Element) -> Option<String> {
 
 /// Build an IQ result for a push enable request.
 pub fn build_push_enable_result(iq: &Iq) -> Iq {
-    Iq {
-        from: iq.to.clone(),
-        to: iq.from.clone(),
-        id: iq.id.clone(),
-        payload: IqType::Result(None),
+    Iq::Result {
+        from: iq.to().cloned(),
+        to: iq.from().cloned(),
+        id: iq.id().to_string(),
+        payload: None,
     }
 }
 
 /// Build an IQ result for a push disable request.
 pub fn build_push_disable_result(iq: &Iq) -> Iq {
-    Iq {
-        from: iq.to.clone(),
-        to: iq.from.clone(),
-        id: iq.id.clone(),
-        payload: IqType::Result(None),
+    Iq::Result {
+        from: iq.to().cloned(),
+        to: iq.from().cloned(),
+        id: iq.id().to_string(),
+        payload: None,
     }
 }
 

@@ -7,7 +7,7 @@ impl WaddleClient {
         future_to_promise(async move {
             let to = format!("{room_jid}/{nick}");
             let stanza = Element::builder("presence", NS_CLIENT)
-                .attr("to", to.as_str())
+                .attr(minidom::rxml::xml_ncname!("to").to_owned(), to.as_str())
                 .append(Element::builder("x", NS_MUC).build())
                 .build();
             send_stanza_command(inner, stanza).await?;
@@ -20,12 +20,12 @@ impl WaddleClient {
         future_to_promise(async move {
             let to = format!("{room_jid}/{nick}");
             let stanza = Element::builder("presence", NS_CLIENT)
-                .attr("to", to.as_str())
+                .attr(minidom::rxml::xml_ncname!("to").to_owned(), to.as_str())
                 .append(
                     Element::builder("x", NS_MUC)
                         .append(
                             Element::builder("history", NS_MUC)
-                                .attr("maxstanzas", "0")
+                                .attr(minidom::rxml::xml_ncname!("maxstanzas").to_owned(), "0")
                                 .build(),
                         )
                         .build(),
@@ -60,8 +60,8 @@ impl WaddleClient {
         future_to_promise(async move {
             let to = format!("{room_jid}/{nick}");
             let stanza = Element::builder("presence", NS_CLIENT)
-                .attr("to", to.as_str())
-                .attr("type", "unavailable")
+                .attr(minidom::rxml::xml_ncname!("to").to_owned(), to.as_str())
+                .attr(minidom::rxml::xml_ncname!("type").to_owned(), "unavailable")
                 .build();
             send_stanza_command(inner, stanza).await?;
             Ok(JsValue::UNDEFINED)
@@ -100,7 +100,7 @@ impl WaddleClient {
                 call_id.as_str(),
             );
             let stanza = Element::builder("presence", NS_CLIENT)
-                .attr("to", to.as_str())
+                .attr(minidom::rxml::xml_ncname!("to").to_owned(), to.as_str())
                 .append(call)
                 .build();
             send_stanza_command(inner, stanza).await?;

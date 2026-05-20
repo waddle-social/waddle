@@ -3,8 +3,8 @@ use super::*;
 fn build_bind_result_xml(id: &str, full_jid: &FullJid) -> String {
     element_to_xml(
         Element::builder("iq", waddle_xmpp::ns::JABBER_CLIENT)
-            .attr("id", id)
-            .attr("type", "result")
+            .attr(minidom::rxml::xml_ncname!("id").to_owned(), id)
+            .attr(minidom::rxml::xml_ncname!("type").to_owned(), "result")
             .append(
                 Element::builder("bind", waddle_xmpp::ns::BIND)
                     .append(
@@ -24,7 +24,7 @@ pub(super) fn handle_resource_binding(
     _domain: &str,
     phase: &mut ConnectionPhase,
 ) -> Vec<String> {
-    let id = iq.id.clone();
+    let id = iq.id().to_string();
 
     if !phase.allows_resource_binding() {
         warn!(phase = ?phase, id = %id, "Resource binding received in invalid phase");
@@ -46,8 +46,9 @@ pub(super) fn handle_resource_binding(
         )];
     };
     let bare_jid = bare_jid.clone();
-    let resource = match &iq.payload {
-        xmpp_parsers::iq::IqType::Set(e) | xmpp_parsers::iq::IqType::Get(e) => e
+    let resource = match iq {
+        xmpp_parsers::iq::Iq::Set { payload: e, .. }
+        | xmpp_parsers::iq::Iq::Get { payload: e, .. } => e
             .get_child("resource", waddle_xmpp::ns::BIND)
             .map(|r| r.text().trim().to_string())
             .filter(|v| !v.is_empty()),

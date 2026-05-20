@@ -2,7 +2,7 @@ use super::*;
 use crate::db::MigrationRunner;
 use crate::db::{actor::DbActor, Database};
 use crate::permissions::{ObjectType, PermissionActor};
-use kameo::actor::ActorRef;
+use kameo::actor::{ActorRef, Spawn};
 use std::sync::Arc;
 use waddle_xmpp::AppState;
 
@@ -15,7 +15,7 @@ async fn create_test_db() -> (Arc<Database>, ActorRef<DbActor>) {
     let runner = MigrationRunner::global();
     runner.run(&db).await.expect("Failed to run migrations");
 
-    let actor = kameo::spawn(DbActor::new((*db).clone()));
+    let actor = DbActor::spawn(DbActor::new((*db).clone()));
     (db, actor)
 }
 
@@ -26,7 +26,7 @@ async fn test_xmpp_state_creation() {
         "waddle.social".to_string(),
         Arc::clone(&db),
         actor,
-        kameo::spawn(PermissionActor::new_for_tests(db)),
+        PermissionActor::spawn(PermissionActor::new_for_tests(db)),
         None,
     );
 
@@ -70,7 +70,7 @@ async fn test_private_xml_roundtrip_uses_actor_boundary() {
         "waddle.social".to_string(),
         Arc::clone(&db),
         actor,
-        kameo::spawn(PermissionActor::new_for_tests(db)),
+        PermissionActor::spawn(PermissionActor::new_for_tests(db)),
         None,
     );
     let jid: jid::BareJid = "alice@waddle.social".parse().expect("valid bare jid");

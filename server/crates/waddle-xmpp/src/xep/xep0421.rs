@@ -29,7 +29,7 @@
 //! - Strip any `<occupant-id/>` received from clients (prevent spoofing)
 //! - Use a consistent generation algorithm
 
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use minidom::Element;
 use sha2::Sha256;
 use std::sync::Arc;
@@ -246,7 +246,7 @@ pub fn extract_occupant_id_from_presence(presence: &Presence) -> Option<Occupant
 /// Build an `<occupant-id xmlns='urn:xmpp:occupant-id:0' id='...'/>` element.
 pub fn build_occupant_id_element(id: &OccupantId) -> Element {
     Element::builder("occupant-id", NS_OCCUPANT_ID)
-        .attr("id", id.as_str())
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), id.as_str())
         .build()
 }
 

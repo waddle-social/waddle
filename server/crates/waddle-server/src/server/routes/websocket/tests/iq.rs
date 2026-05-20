@@ -43,13 +43,13 @@ async fn handle_iq_roster_query_returns_parseable_result() {
     let element = Element::from_str(iq_xml).expect("valid IQ XML");
     let iq = xmpp_parsers::iq::Iq::try_from(element).expect("parseable IQ");
 
-    assert_eq!(iq.id, "roster-1");
-    match iq.payload {
-        xmpp_parsers::iq::IqType::Result(Some(payload)) => {
+    assert_eq!(iq.id(), "roster-1");
+    match iq.split().1 {
+        xmpp_parsers::iq::IqPayload::Result(Some(payload)) => {
             assert_eq!(payload.name(), "query");
             assert_eq!(payload.ns(), "jabber:iq:roster");
         }
-        other => panic!("expected roster IQ result payload, got {other:?}"),
+        _ => panic!("expected roster IQ result payload, got non-result"),
     }
 }
 
@@ -72,6 +72,12 @@ async fn handle_xmpp_frame_roster_get_marks_connection_interested_for_detach() {
 
 #[tokio::test]
 async fn handle_iq_roster_query_without_xmlns_survives_xmlns_like_attribute_value() {
+    // xmpp-parsers 0.22 tightened `Iq` to reject unknown attributes
+    // (the derive uses `exhaustive`). An `<iq>` with a stray `data=…`
+    // attribute is now rejected at the parse boundary, so the frame
+    // never reaches the roster handler. RFC 6120 §8.2.3 allows
+    // receivers to drop stanzas with undefined attributes — the
+    // pre-0.22 lenient behaviour was opt-in, not mandated.
     let state = create_test_websocket_state().await;
     let jid: FullJid = "alice@example.com/web".parse().expect("valid jid");
     let frame = r#"<iq id="roster-attr" type="get" data="xmlns=bogus"><query xmlns="jabber:iq:roster"/></iq>"#;
@@ -84,16 +90,10 @@ async fn handle_iq_roster_query_without_xmlns_survives_xmlns_like_attribute_valu
         &ready_phase(&jid),
     )
     .await;
-    assert_eq!(responses.len(), 1);
-
-    let iq_xml = responses.first().expect("roster response");
-    let element = Element::from_str(iq_xml).expect("valid IQ XML");
-    let iq = xmpp_parsers::iq::Iq::try_from(element).expect("parseable IQ");
-    assert_eq!(iq.id, "roster-attr");
-    assert!(matches!(
-        iq.payload,
-        xmpp_parsers::iq::IqType::Result(Some(_))
-    ));
+    assert!(
+        responses.is_empty(),
+        "iq with unknown attribute is rejected by xmpp-parsers 0.22, no response is emitted: {responses:?}"
+    );
 }
 
 #[tokio::test]
@@ -143,10 +143,10 @@ async fn handle_iq_carbons_enable_returns_parseable_result() {
     let element = Element::from_str(iq_xml).expect("valid IQ XML");
     let iq = xmpp_parsers::iq::Iq::try_from(element).expect("parseable IQ");
 
-    assert_eq!(iq.id, "carbons-1");
-    match iq.payload {
-        xmpp_parsers::iq::IqType::Result(None) => {}
-        other => panic!("expected empty IQ result, got {other:?}"),
+    assert_eq!(iq.id(), "carbons-1");
+    match iq.split().1 {
+        xmpp_parsers::iq::IqPayload::Result(None) => {}
+        _ => panic!("expected empty IQ result, got non-result"),
     }
 }
 
@@ -220,18 +220,18 @@ async fn handle_iq_unknown_includes_routing_addresses_in_error() {
     let element = Element::from_str(iq_xml).expect("valid IQ XML");
     let iq = xmpp_parsers::iq::Iq::try_from(element).expect("parseable IQ");
 
-    assert_eq!(iq.id, "unknown-1");
+    assert_eq!(iq.id(), "unknown-1");
     assert_eq!(
-        iq.from.as_ref().map(ToString::to_string).as_deref(),
+        iq.from().map(ToString::to_string).as_deref(),
         Some("example.com")
     );
     assert_eq!(
-        iq.to.as_ref().map(ToString::to_string).as_deref(),
+        iq.to().map(ToString::to_string).as_deref(),
         Some("alice@example.com/web")
     );
-    match iq.payload {
-        xmpp_parsers::iq::IqType::Error(_) => {}
-        other => panic!("expected IQ error payload, got {other:?}"),
+    match iq.split().1 {
+        xmpp_parsers::iq::IqPayload::Error(_) => {}
+        _ => panic!("expected IQ error payload, got non-result"),
     }
 }
 
@@ -334,11 +334,11 @@ async fn handle_iq_command_request_routes_to_registry() {
     assert_eq!(responses.len(), 1);
     let response = responses.first().expect("command response");
     assert!(
-        response.contains("status=\"executing\"") || response.contains("status='executing'"),
+        response.contains("status='executing'") || response.contains("status='executing'"),
         "expected executing command response, got: {response}"
     );
     assert!(
-        response.contains("sessionid=\"") || response.contains("sessionid='"),
+        response.contains("sessionid='") || response.contains("sessionid='"),
         "expected command session ID in response, got: {response}"
     );
     assert!(
@@ -396,7 +396,7 @@ async fn handle_iq_command_request_requires_ready_phase() {
         "pre-bind command IQ should be rejected: {response}"
     );
     assert!(
-        !response.contains("status=\"executing\"") && !response.contains("status='executing'"),
+        !response.contains("status='executing'") && !response.contains("status='executing'"),
         "pre-bind command IQ must not reach the registry: {response}"
     );
 }
@@ -491,7 +491,7 @@ async fn handle_iq_cross_user_pep_disco_resolves_session_backed_accounts() {
     let response = responses.first().expect("session-backed PEP disco");
 
     assert!(
-        response.contains("type=\"result\"") || response.contains("type='result'"),
+        response.contains("type='result'") || response.contains("type='result'"),
         "session-backed user should expose PEP disco: {response}"
     );
     assert!(
@@ -573,9 +573,9 @@ async fn handle_iq_disco_info_push_service_reports_xep0357_pubsub_identity() {
     let response = responses.first().expect("push service disco response");
 
     let iq = parse_iq_for_test(response);
-    let query = match iq.payload {
-        IqType::Result(Some(payload)) => payload,
-        other => panic!("expected push service disco#info result, got {other:?}"),
+    let query = match iq.split().1 {
+        IqPayload::Result(Some(payload)) => payload,
+        _ => panic!("expected push service disco#info result, got non-result"),
     };
     assert_eq!(query.name(), "query");
     assert_eq!(query.ns(), waddle_xmpp::disco::DISCO_INFO_NS);
@@ -641,9 +641,9 @@ async fn handle_iq_disco_items_push_service_is_owner_scoped() {
     .await;
     let unauth_response = unauth_responses.first().expect("unauth items");
     let unauth_iq = parse_iq_for_test(unauth_response);
-    let unauth_query = match unauth_iq.payload {
-        IqType::Result(Some(payload)) => payload,
-        other => panic!("expected unauth disco#items result, got {other:?}"),
+    let unauth_query = match unauth_iq.split().1 {
+        IqPayload::Result(Some(payload)) => payload,
+        _ => panic!("expected unauth disco#items result, got non-result"),
     };
     assert!(disco_items_for_test(&unauth_query).is_empty());
 
@@ -658,9 +658,9 @@ async fn handle_iq_disco_items_push_service_is_owner_scoped() {
     .await;
     let alice_response = alice_responses.first().expect("alice items");
     let alice_iq = parse_iq_for_test(alice_response);
-    let alice_query = match alice_iq.payload {
-        IqType::Result(Some(payload)) => payload,
-        other => panic!("expected alice disco#items result, got {other:?}"),
+    let alice_query = match alice_iq.split().1 {
+        IqPayload::Result(Some(payload)) => payload,
+        _ => panic!("expected alice disco#items result, got non-result"),
     };
     let alice_items = disco_items_for_test(&alice_query);
     assert_eq!(
@@ -682,9 +682,9 @@ async fn handle_iq_disco_items_push_service_is_owner_scoped() {
     .await;
     let bob_response = bob_responses.first().expect("bob items");
     let bob_iq = parse_iq_for_test(bob_response);
-    let bob_query = match bob_iq.payload {
-        IqType::Result(Some(payload)) => payload,
-        other => panic!("expected bob disco#items result, got {other:?}"),
+    let bob_query = match bob_iq.split().1 {
+        IqPayload::Result(Some(payload)) => payload,
+        _ => panic!("expected bob disco#items result, got non-result"),
     };
     let bob_items = disco_items_for_test(&bob_query);
     assert_eq!(
@@ -737,9 +737,9 @@ async fn handle_iq_disco_info_push_node_is_owner_scoped() {
     .await;
     let alice_response = alice_responses.first().expect("alice node info");
     let alice_iq = parse_iq_for_test(alice_response);
-    let query = match alice_iq.payload {
-        IqType::Result(Some(payload)) => payload,
-        other => panic!("expected owner push node disco#info result, got {other:?}"),
+    let query = match alice_iq.split().1 {
+        IqPayload::Result(Some(payload)) => payload,
+        _ => panic!("expected owner push node disco#info result, got non-result"),
     };
     assert_eq!(query.name(), "query");
     assert_eq!(query.ns(), waddle_xmpp::disco::DISCO_INFO_NS);
@@ -777,7 +777,7 @@ async fn handle_iq_push_service_custom_registration_keeps_provider_tokens_inside
     let state = create_test_websocket_state().await;
     let jid: FullJid = "alice@example.com/web".parse().expect("valid jid");
     let ensure = Element::builder("ensure-node", crate::push_service::WADDLE_PUSH_SERVICE_NS)
-        .attr("app-id", "web")
+        .attr(minidom::rxml::xml_ncname!("app-id").to_owned(), "web")
         .build();
     let responses = handle_iq(
         &iq_set_frame("push-node-1", "push.example.com", ensure),
@@ -789,19 +789,22 @@ async fn handle_iq_push_service_custom_registration_keeps_provider_tokens_inside
     )
     .await;
     let node_iq = parse_iq_for_test(responses.first().expect("node response"));
-    let node_id = match node_iq.payload {
-        IqType::Result(Some(payload)) => payload.attr("id").expect("node id").to_string(),
-        other => panic!("expected node result, got {other:?}"),
+    let node_id = match node_iq.split().1 {
+        IqPayload::Result(Some(payload)) => payload.attr("id").expect("node id").to_string(),
+        _ => panic!("expected node result, got non-result"),
     };
 
     let register = Element::builder(
         "register-device",
         crate::push_service::WADDLE_PUSH_SERVICE_NS,
     )
-    .attr("node", node_id.as_str())
-    .attr("device-id", "web-1")
-    .attr("platform", "web")
-    .attr("environment", "test")
+    .attr(
+        minidom::rxml::xml_ncname!("node").to_owned(),
+        node_id.as_str(),
+    )
+    .attr(minidom::rxml::xml_ncname!("device-id").to_owned(), "web-1")
+    .attr(minidom::rxml::xml_ncname!("platform").to_owned(), "web")
+    .attr(minidom::rxml::xml_ncname!("environment").to_owned(), "test")
     .append(
         Element::builder(
             "provider-endpoint",
@@ -837,12 +840,12 @@ async fn handle_iq_push_service_custom_registration_keeps_provider_tokens_inside
     )
     .await;
     let device_iq = parse_iq_for_test(responses.first().expect("device response"));
-    match device_iq.payload {
-        IqType::Result(Some(payload)) => {
+    match device_iq.split().1 {
+        IqPayload::Result(Some(payload)) => {
             assert_eq!(payload.name(), "device");
             assert_eq!(payload.attr("status"), Some("active"));
         }
-        other => panic!("expected device result, got {other:?}"),
+        _ => panic!("expected device result, got non-result"),
     }
 
     let device = state
@@ -902,8 +905,14 @@ async fn handle_iq_push_service_disable_device_is_node_scoped() {
         "disable-device",
         crate::push_service::WADDLE_PUSH_SERVICE_NS,
     )
-    .attr("node", first_node.node())
-    .attr("device-id", "shared-device")
+    .attr(
+        minidom::rxml::xml_ncname!("node").to_owned(),
+        first_node.node(),
+    )
+    .attr(
+        minidom::rxml::xml_ncname!("device-id").to_owned(),
+        "shared-device",
+    )
     .build();
     let responses = handle_iq(
         &iq_set_frame("push-disable-1", "push.example.com", disable),
@@ -915,13 +924,13 @@ async fn handle_iq_push_service_disable_device_is_node_scoped() {
     )
     .await;
     let response_iq = parse_iq_for_test(responses.first().expect("disable response"));
-    match response_iq.payload {
-        IqType::Result(Some(payload)) => {
+    match response_iq.split().1 {
+        IqPayload::Result(Some(payload)) => {
             assert_eq!(payload.name(), "device");
             assert_eq!(payload.attr("node"), Some(first_node.node()));
             assert_eq!(payload.attr("status"), Some("disabled"));
         }
-        other => panic!("expected disable-device result, got {other:?}"),
+        _ => panic!("expected disable-device result, got non-result"),
     }
 
     let first_publish = state
@@ -1002,8 +1011,11 @@ async fn handle_iq_xep0357_disable_removes_registration_without_retiring_push_se
         .expect("push registration");
 
     let disable = Element::builder("disable", waddle_xmpp::xep::xep0357::NS_PUSH)
-        .attr("jid", "push.example.com")
-        .attr("node", node.node())
+        .attr(
+            minidom::rxml::xml_ncname!("jid").to_owned(),
+            "push.example.com",
+        )
+        .attr(minidom::rxml::xml_ncname!("node").to_owned(), node.node())
         .build();
     let responses = handle_iq(
         &iq_set_frame("xep0357-disable-first-party", "example.com", disable),
@@ -1015,7 +1027,7 @@ async fn handle_iq_xep0357_disable_removes_registration_without_retiring_push_se
     )
     .await;
     let response_iq = parse_iq_for_test(responses.first().expect("disable response"));
-    assert!(matches!(response_iq.payload, IqType::Result(None)));
+    assert!(matches!(response_iq.split().1, IqPayload::Result(None)));
 
     let registrations = state
         .deps
@@ -1129,7 +1141,10 @@ async fn handle_iq_xep0357_disable_without_node_removes_registrations_only() {
     }
 
     let disable = Element::builder("disable", waddle_xmpp::xep::xep0357::NS_PUSH)
-        .attr("jid", "push.example.com")
+        .attr(
+            minidom::rxml::xml_ncname!("jid").to_owned(),
+            "push.example.com",
+        )
         .build();
     let responses = handle_iq(
         &iq_set_frame("xep0357-disable-all-first-party", "example.com", disable),
@@ -1141,7 +1156,7 @@ async fn handle_iq_xep0357_disable_without_node_removes_registrations_only() {
     )
     .await;
     let response_iq = parse_iq_for_test(responses.first().expect("disable response"));
-    assert!(matches!(response_iq.payload, IqType::Result(None)));
+    assert!(matches!(response_iq.split().1, IqPayload::Result(None)));
 
     let items_response = handle_iq(
         &disco_items_iq_frame("push-items-after-disable", "push.example.com", None),
@@ -1182,8 +1197,11 @@ async fn handle_iq_xep0357_disable_without_matching_registration_does_not_retire
         .expect("node");
 
     let disable = Element::builder("disable", waddle_xmpp::xep::xep0357::NS_PUSH)
-        .attr("jid", "push.example.com")
-        .attr("node", node.node())
+        .attr(
+            minidom::rxml::xml_ncname!("jid").to_owned(),
+            "push.example.com",
+        )
+        .attr(minidom::rxml::xml_ncname!("node").to_owned(), node.node())
         .build();
     let responses = handle_iq(
         &iq_set_frame("xep0357-disable-unregistered", "example.com", disable),
@@ -1195,7 +1213,7 @@ async fn handle_iq_xep0357_disable_without_matching_registration_does_not_retire
     )
     .await;
     let response_iq = parse_iq_for_test(responses.first().expect("disable response"));
-    assert!(matches!(response_iq.payload, IqType::Result(None)));
+    assert!(matches!(response_iq.split().1, IqPayload::Result(None)));
 
     assert!(state
         .deps
@@ -1237,11 +1255,11 @@ async fn handle_iq_pubsub_publish_to_push_service_rejects_client_origin_publish(
 
     let notification = Element::builder("notification", waddle_xmpp::xep::xep0357::NS_PUSH).build();
     let item = Element::builder("item", waddle_xmpp::pubsub::NS_PUBSUB)
-        .attr("id", "push-1")
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), "push-1")
         .append(notification)
         .build();
     let publish = Element::builder("publish", waddle_xmpp::pubsub::NS_PUBSUB)
-        .attr("node", node.node())
+        .attr(minidom::rxml::xml_ncname!("node").to_owned(), node.node())
         .append(item)
         .build();
     let pubsub = Element::builder("pubsub", waddle_xmpp::pubsub::NS_PUBSUB)
@@ -1258,10 +1276,10 @@ async fn handle_iq_pubsub_publish_to_push_service_rejects_client_origin_publish(
     )
     .await;
     let response_iq = parse_iq_for_test(responses.first().expect("publish response"));
-    assert_eq!(response_iq.id, "push-publish-1");
-    match response_iq.payload {
-        IqType::Error(_) => {}
-        other => panic!("expected PubSub publish error, got {other:?}"),
+    assert_eq!(response_iq.id(), "push-publish-1");
+    match response_iq {
+        Iq::Error { .. } => {}
+        _ => panic!("expected PubSub publish error, got non-result"),
     }
 
     let attempts = state
@@ -1280,22 +1298,25 @@ async fn handle_iq_pubsub_publish_rejects_iq_get() {
     let jid: FullJid = "alice@example.com/web".parse().expect("valid jid");
     let notification = Element::builder("notification", waddle_xmpp::xep::xep0357::NS_PUSH).build();
     let item = Element::builder("item", waddle_xmpp::pubsub::NS_PUBSUB)
-        .attr("id", "push-get")
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), "push-get")
         .append(notification)
         .build();
     let publish = Element::builder("publish", waddle_xmpp::pubsub::NS_PUBSUB)
-        .attr("node", "urn:xmpp:test")
+        .attr(
+            minidom::rxml::xml_ncname!("node").to_owned(),
+            "urn:xmpp:test",
+        )
         .append(item)
         .build();
     let pubsub = Element::builder("pubsub", waddle_xmpp::pubsub::NS_PUBSUB)
         .append(publish)
         .build();
-    let frame = stanza_to_xml(&Stanza::Iq(Iq {
+    let frame = stanza_to_xml(&Stanza::Iq(Box::new(Iq::Get {
         from: None,
         to: Some("alice@example.com".parse().expect("valid iq destination")),
         id: "pub-get".to_string(),
-        payload: IqType::Get(pubsub),
-    }));
+        payload: pubsub,
+    })));
 
     let responses = handle_iq(
         &frame,
@@ -1309,7 +1330,7 @@ async fn handle_iq_pubsub_publish_rejects_iq_get() {
     let response = responses.first().expect("publish get response");
 
     assert!(
-        response.contains("type=\"error\"") && response.contains("bad-request"),
+        response.contains("type='error'") && response.contains("bad-request"),
         "XEP-0060 publish must be IQ set: {response}"
     );
 }
@@ -1444,7 +1465,7 @@ async fn handle_iq_disco_info_spaces_node_reports_open_for_public_space() {
     let response = responses.first().expect("spaces node disco info response");
 
     assert!(
-        response.contains("type=\"result\"") || response.contains("type='result'"),
+        response.contains("type='result'") || response.contains("type='result'"),
         "expected successful node disco#info response: {response}"
     );
     assert!(
@@ -1529,12 +1550,12 @@ async fn handle_iq_pubsub_publish_returns_result() {
     assert_eq!(responses.len(), 1, "expected one response: {responses:?}");
     let element = Element::from_str(&responses[0]).expect("valid XML");
     let iq = xmpp_parsers::iq::Iq::try_from(element).expect("parseable IQ");
-    assert_eq!(iq.id, "pub-1");
-    match iq.payload {
-        xmpp_parsers::iq::IqType::Result(Some(payload)) => {
+    assert_eq!(iq.id(), "pub-1");
+    match iq.split().1 {
+        xmpp_parsers::iq::IqPayload::Result(Some(payload)) => {
             assert_eq!(payload.ns(), "http://jabber.org/protocol/pubsub");
         }
-        other => panic!("expected pubsub result, got {other:?}"),
+        _ => panic!("expected pubsub result, got non-result"),
     }
 }
 
@@ -1827,7 +1848,7 @@ async fn xep0402_bookmark_publish_without_notify_deletes_xep0492_projection() {
 
     assert_eq!(responses.len(), 1, "expected one response: {responses:?}");
     assert!(
-        responses[0].contains(r#"type="result""#),
+        responses[0].contains(r#"type='result'"#),
         "bookmark publish without notify should succeed before projection cleanup assertion: {}",
         responses[0]
     );
@@ -1907,7 +1928,7 @@ async fn xep0402_bookmark_publish_with_malformed_notify_is_rejected() {
 
     assert_eq!(responses.len(), 1, "expected one response: {responses:?}");
     assert!(
-        responses[0].contains(r#"type="error""#) && responses[0].contains("bad-request"),
+        responses[0].contains(r#"type='error'"#) && responses[0].contains("bad-request"),
         "malformed XEP-0492 notify payload must be rejected: {}",
         responses[0]
     );
@@ -1956,7 +1977,7 @@ async fn xep0402_bookmark_publish_with_duplicate_identity_notify_is_rejected() {
 
     assert_eq!(responses.len(), 1, "expected one response: {responses:?}");
     assert!(
-        responses[0].contains(r#"type="error""#) && responses[0].contains("bad-request"),
+        responses[0].contains(r#"type='error'"#) && responses[0].contains("bad-request"),
         "duplicate XEP-0492 identity settings must be rejected: {}",
         responses[0]
     );
@@ -1998,7 +2019,7 @@ async fn xep0402_bookmark_publish_with_malformed_conference_is_rejected() {
 
     assert_eq!(responses.len(), 1, "expected one response: {responses:?}");
     assert!(
-        responses[0].contains(r#"type="error""#) && responses[0].contains("bad-request"),
+        responses[0].contains(r#"type='error'"#) && responses[0].contains("bad-request"),
         "malformed XEP-0402 bookmark payload must be rejected: {}",
         responses[0]
     );
@@ -2061,7 +2082,7 @@ async fn xep0402_bookmark_retract_deletes_xep0492_projection() {
 
     assert_eq!(responses.len(), 1, "expected one response: {responses:?}");
     assert!(
-        responses[0].contains(r#"type="result""#),
+        responses[0].contains(r#"type='result'"#),
         "bookmark retract should succeed before projection cleanup assertion: {}",
         responses[0]
     );
@@ -2130,7 +2151,7 @@ async fn xep0402_bookmark_node_purge_deletes_xep0492_projection() {
 
     assert_eq!(responses.len(), 1, "expected one response: {responses:?}");
     assert!(
-        responses[0].contains(r#"type="result""#),
+        responses[0].contains(r#"type='result'"#),
         "bookmark purge should succeed before projection cleanup assertion: {}",
         responses[0]
     );
@@ -2199,7 +2220,7 @@ async fn xep0402_bookmark_node_delete_deletes_xep0492_projection() {
 
     assert_eq!(responses.len(), 1, "expected one response: {responses:?}");
     assert!(
-        responses[0].contains(r#"type="result""#),
+        responses[0].contains(r#"type='result'"#),
         "bookmark delete should succeed before projection cleanup assertion: {}",
         responses[0]
     );
@@ -2243,7 +2264,7 @@ async fn xep0402_bookmark_publish_and_retract_require_jid_item_ids() {
         "expected one response: {publish_responses:?}"
     );
     assert!(
-        publish_responses[0].contains(r#"type="error""#)
+        publish_responses[0].contains(r#"type='error'"#)
             && publish_responses[0].contains("bad-request"),
         "invalid bookmark item id must be rejected: {}",
         publish_responses[0]
@@ -2273,7 +2294,7 @@ async fn xep0402_bookmark_publish_and_retract_require_jid_item_ids() {
         "expected one response: {retract_responses:?}"
     );
     assert!(
-        retract_responses[0].contains(r#"type="error""#)
+        retract_responses[0].contains(r#"type='error'"#)
             && retract_responses[0].contains("bad-request"),
         "invalid bookmark retract item id must be rejected: {}",
         retract_responses[0]
@@ -2298,5 +2319,5 @@ async fn handle_iq_pubsub_items_empty_node_returns_result() {
     assert_eq!(responses.len(), 1, "expected one response: {responses:?}");
     let element = Element::from_str(&responses[0]).expect("valid XML");
     let iq = xmpp_parsers::iq::Iq::try_from(element).expect("parseable IQ");
-    assert_eq!(iq.id, "items-1");
+    assert_eq!(iq.id(), "items-1");
 }

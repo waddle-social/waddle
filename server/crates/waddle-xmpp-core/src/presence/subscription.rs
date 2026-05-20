@@ -159,7 +159,8 @@ pub fn build_subscription_presence(
     pres.to = Some(Jid::from(to.clone()));
 
     if let Some(status_text) = status {
-        pres.statuses.insert(String::new(), status_text.to_string());
+        pres.statuses
+            .insert(xmpp_parsers::message::Lang::new(), status_text.to_string());
     }
 
     pres.payloads.extend(payloads.iter().cloned());
@@ -182,10 +183,9 @@ pub fn build_available_presence(
     status: Option<&str>,
     priority: i8,
 ) -> Presence {
-    let mut pres = Presence::new(PresenceType::None);
+    let mut pres = Presence::new(PresenceType::None).with_priority(priority);
     pres.from = Some(Jid::from(from.clone()));
     pres.to = Some(Jid::from(to.clone()));
-    pres.priority = priority;
 
     if let Some(show_str) = show {
         pres.show = match show_str {
@@ -198,7 +198,8 @@ pub fn build_available_presence(
     }
 
     if let Some(status_text) = status {
-        pres.statuses.insert(String::new(), status_text.to_string());
+        pres.statuses
+            .insert(xmpp_parsers::message::Lang::new(), status_text.to_string());
     }
 
     pres
@@ -290,7 +291,12 @@ mod tests {
         assert_eq!(pres.from, Some(Jid::from(from)));
         assert_eq!(pres.to, Some(Jid::from(to)));
         assert_eq!(pres.show, Some(XmppShow::Chat));
-        assert_eq!(pres.priority, 5);
+        assert_eq!(
+            pres.priority,
+            xmpp_parsers::presence::Presence::new(xmpp_parsers::presence::Type::None)
+                .with_priority(5)
+                .priority
+        );
         assert_eq!(pres.statuses.values().next(), Some(&"Ready".to_string()));
     }
 
@@ -301,7 +307,8 @@ mod tests {
 
         let mut pres = Presence::new(PresenceType::Subscribe);
         pres.to = Some(Jid::from(target.clone()));
-        pres.statuses.insert(String::new(), "Hello".to_string());
+        pres.statuses
+            .insert(xmpp_parsers::message::Lang::new(), "Hello".to_string());
 
         let action = parse_subscription_presence(&pres, &sender).unwrap();
 

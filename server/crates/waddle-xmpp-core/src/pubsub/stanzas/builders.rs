@@ -1,6 +1,6 @@
 use jid::Jid;
 use minidom::Element;
-use xmpp_parsers::iq::{Iq, IqType};
+use xmpp_parsers::iq::Iq;
 use xmpp_parsers::message::{Message, MessageType};
 
 use crate::pubsub::{Affiliation, NodeConfig, SubId};
@@ -17,7 +17,8 @@ use super::{
 /// Headline messages are not stored offline (RFC 6121 §8.5.2.1.4), which
 /// matches PubSub's catch-up-via-`<items/>` recovery model.
 pub fn build_pubsub_event(from: &Jid, to: &Jid, event: &PubSubEvent) -> Message {
-    let mut items_elem = Element::builder("items", NS_PUBSUB_EVENT).attr("node", &event.node);
+    let mut items_elem = Element::builder("items", NS_PUBSUB_EVENT)
+        .attr(minidom::rxml::xml_ncname!("node").to_owned(), &event.node);
 
     for item in &event.items {
         items_elem = items_elem.append(item.to_element(NS_PUBSUB_EVENT));
@@ -35,7 +36,8 @@ pub fn build_pubsub_event(from: &Jid, to: &Jid, event: &PubSubEvent) -> Message 
 
 /// Build a PubSub items result IQ.
 pub fn build_pubsub_items_result(original_iq: &Iq, node: &str, items: &[PubSubItem]) -> Iq {
-    let mut items_elem = Element::builder("items", NS_PUBSUB).attr("node", node);
+    let mut items_elem = Element::builder("items", NS_PUBSUB)
+        .attr(minidom::rxml::xml_ncname!("node").to_owned(), node);
 
     for item in items {
         items_elem = items_elem.append(item.to_element(NS_PUBSUB));
@@ -45,22 +47,22 @@ pub fn build_pubsub_items_result(original_iq: &Iq, node: &str, items: &[PubSubIt
         .append(items_elem.build())
         .build();
 
-    Iq {
-        from: original_iq.to.clone(),
-        to: original_iq.from.clone(),
-        id: original_iq.id.clone(),
-        payload: IqType::Result(Some(pubsub)),
+    Iq::Result {
+        from: original_iq.to().cloned(),
+        to: original_iq.from().cloned(),
+        id: original_iq.id().to_string(),
+        payload: Some(pubsub),
     }
 }
 
 /// Build a PubSub publish result IQ.
 pub fn build_pubsub_publish_result(original_iq: &Iq, node: &str, item_id: &str) -> Iq {
     let item_elem = Element::builder("item", NS_PUBSUB)
-        .attr("id", item_id)
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), item_id)
         .build();
 
     let publish_elem = Element::builder("publish", NS_PUBSUB)
-        .attr("node", node)
+        .attr(minidom::rxml::xml_ncname!("node").to_owned(), node)
         .append(item_elem)
         .build();
 
@@ -68,11 +70,11 @@ pub fn build_pubsub_publish_result(original_iq: &Iq, node: &str, item_id: &str) 
         .append(publish_elem)
         .build();
 
-    Iq {
-        from: original_iq.to.clone(),
-        to: original_iq.from.clone(),
-        id: original_iq.id.clone(),
-        payload: IqType::Result(Some(pubsub)),
+    Iq::Result {
+        from: original_iq.to().cloned(),
+        to: original_iq.from().cloned(),
+        id: original_iq.id().to_string(),
+        payload: Some(pubsub),
     }
 }
 
@@ -104,26 +106,30 @@ pub fn build_pubsub_error(original_iq: &Iq, error: PubSubError) -> Iq {
     if let PubSubError::UnsupportedFeature(feature) = error {
         stanza_error.other = Some(
             Element::builder("unsupported", NS_PUBSUB_ERRORS)
-                .attr("feature", feature.as_str())
+                .attr(
+                    minidom::rxml::xml_ncname!("feature").to_owned(),
+                    feature.as_str(),
+                )
                 .build(),
         );
     }
 
-    Iq {
-        from: original_iq.to.clone(),
-        to: original_iq.from.clone(),
-        id: original_iq.id.clone(),
-        payload: IqType::Error(stanza_error),
+    Iq::Error {
+        from: original_iq.to().cloned(),
+        to: original_iq.from().cloned(),
+        id: original_iq.id().to_string(),
+        error: stanza_error,
+        payload: None,
     }
 }
 
 /// Build an empty result IQ for successful requests without a payload.
 pub fn build_pubsub_success(original_iq: &Iq) -> Iq {
-    Iq {
-        from: original_iq.to.clone(),
-        to: original_iq.from.clone(),
-        id: original_iq.id.clone(),
-        payload: IqType::Result(None),
+    Iq::Result {
+        from: original_iq.to().cloned(),
+        to: original_iq.from().cloned(),
+        id: original_iq.id().to_string(),
+        payload: None,
     }
 }
 
@@ -135,19 +141,28 @@ pub fn build_pubsub_subscribe_result(
     subid: &SubId,
 ) -> Iq {
     let subscription = Element::builder("subscription", NS_PUBSUB)
-        .attr("node", node)
-        .attr("jid", subscriber.to_string())
-        .attr("subid", subid.to_string())
-        .attr("subscription", "subscribed")
+        .attr(minidom::rxml::xml_ncname!("node").to_owned(), node)
+        .attr(
+            minidom::rxml::xml_ncname!("jid").to_owned(),
+            subscriber.to_string(),
+        )
+        .attr(
+            minidom::rxml::xml_ncname!("subid").to_owned(),
+            subid.to_string(),
+        )
+        .attr(
+            minidom::rxml::xml_ncname!("subscription").to_owned(),
+            "subscribed",
+        )
         .build();
     let pubsub = Element::builder("pubsub", NS_PUBSUB)
         .append(subscription)
         .build();
-    Iq {
-        from: original_iq.to.clone(),
-        to: original_iq.from.clone(),
-        id: original_iq.id.clone(),
-        payload: IqType::Result(Some(pubsub)),
+    Iq::Result {
+        from: original_iq.to().cloned(),
+        to: original_iq.from().cloned(),
+        id: original_iq.id().to_string(),
+        payload: Some(pubsub),
     }
 }
 
@@ -157,23 +172,30 @@ pub fn build_pubsub_affiliations_result(
     node: &str,
     rows: &[(jid::BareJid, Affiliation)],
 ) -> Iq {
-    let mut affs = Element::builder("affiliations", NS_PUBSUB_OWNER).attr("node", node);
+    let mut affs = Element::builder("affiliations", NS_PUBSUB_OWNER)
+        .attr(minidom::rxml::xml_ncname!("node").to_owned(), node);
     for (entity, aff) in rows {
         affs = affs.append(
             Element::builder("affiliation", NS_PUBSUB_OWNER)
-                .attr("jid", entity.to_string())
-                .attr("affiliation", aff.to_string())
+                .attr(
+                    minidom::rxml::xml_ncname!("jid").to_owned(),
+                    entity.to_string(),
+                )
+                .attr(
+                    minidom::rxml::xml_ncname!("affiliation").to_owned(),
+                    aff.to_string(),
+                )
                 .build(),
         );
     }
     let pubsub = Element::builder("pubsub", NS_PUBSUB_OWNER)
         .append(affs.build())
         .build();
-    Iq {
-        from: original_iq.to.clone(),
-        to: original_iq.from.clone(),
-        id: original_iq.id.clone(),
-        payload: IqType::Result(Some(pubsub)),
+    Iq::Result {
+        from: original_iq.to().cloned(),
+        to: original_iq.from().cloned(),
+        id: original_iq.id().to_string(),
+        payload: Some(pubsub),
     }
 }
 
@@ -182,7 +204,7 @@ pub fn build_pubsub_affiliations_result(
 pub fn build_pubsub_configure_form_result(original_iq: &Iq, node: &str, config: &NodeConfig) -> Iq {
     fn field(var: &str, value: &str) -> Element {
         Element::builder("field", "jabber:x:data")
-            .attr("var", var)
+            .attr(minidom::rxml::xml_ncname!("var").to_owned(), var)
             .append(
                 Element::builder("value", "jabber:x:data")
                     .append(value)
@@ -193,8 +215,8 @@ pub fn build_pubsub_configure_form_result(original_iq: &Iq, node: &str, config: 
     /// Build a `type='hidden'` field per XEP-0004 §3.2.
     fn hidden_field(var: &str, value: &str) -> Element {
         Element::builder("field", "jabber:x:data")
-            .attr("var", var)
-            .attr("type", "hidden")
+            .attr(minidom::rxml::xml_ncname!("var").to_owned(), var)
+            .attr(minidom::rxml::xml_ncname!("type").to_owned(), "hidden")
             .append(
                 Element::builder("value", "jabber:x:data")
                     .append(value)
@@ -203,7 +225,7 @@ pub fn build_pubsub_configure_form_result(original_iq: &Iq, node: &str, config: 
             .build()
     }
     let form = Element::builder("x", "jabber:x:data")
-        .attr("type", "form")
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "form")
         .append(hidden_field(
             "FORM_TYPE",
             "http://jabber.org/protocol/pubsub#node_config",
@@ -239,16 +261,16 @@ pub fn build_pubsub_configure_form_result(original_iq: &Iq, node: &str, config: 
         ))
         .build();
     let configure = Element::builder("configure", NS_PUBSUB_OWNER)
-        .attr("node", node)
+        .attr(minidom::rxml::xml_ncname!("node").to_owned(), node)
         .append(form)
         .build();
     let pubsub = Element::builder("pubsub", NS_PUBSUB_OWNER)
         .append(configure)
         .build();
-    Iq {
-        from: original_iq.to.clone(),
-        to: original_iq.from.clone(),
-        id: original_iq.id.clone(),
-        payload: IqType::Result(Some(pubsub)),
+    Iq::Result {
+        from: original_iq.to().cloned(),
+        to: original_iq.from().cloned(),
+        id: original_iq.id().to_string(),
+        payload: Some(pubsub),
     }
 }

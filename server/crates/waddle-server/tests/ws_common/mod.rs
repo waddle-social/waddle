@@ -6,7 +6,7 @@
 
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine};
 use futures::{SinkExt, StreamExt};
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use sha2::{Digest, Sha256};
 use std::net::TcpStream;
 use std::process::{Child, Command, Stdio};
@@ -418,7 +418,7 @@ impl WsXmppClient {
 
     pub async fn send(&mut self, xml: &str) -> Result<(), String> {
         self.ws
-            .send(tungstenite::Message::Text(xml.to_string()))
+            .send(tungstenite::Message::Text(xml.to_string().into()))
             .await
             .map_err(|e| format!("Send failed: {e}"))
     }
@@ -429,7 +429,7 @@ impl WsXmppClient {
 
     pub async fn recv_timeout(&mut self, dur: Duration) -> Result<String, String> {
         match timeout(dur, self.ws.next()).await {
-            Ok(Some(Ok(tungstenite::Message::Text(text)))) => Ok(text),
+            Ok(Some(Ok(tungstenite::Message::Text(text)))) => Ok(text.to_string()),
             Ok(Some(Ok(other))) => Err(format!("Unexpected message type: {other:?}")),
             Ok(Some(Err(e))) => Err(format!("WebSocket error: {e}")),
             Ok(None) => Err("WebSocket stream ended".to_string()),

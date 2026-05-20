@@ -1,7 +1,7 @@
 //! Message Carbons (XEP-0280) helpers shared by server and client crates.
 
 use chrono::Utc;
-use minidom::Element;
+use minidom::{rxml::xml_ncname, Element};
 use tracing::debug;
 use xmpp_parsers::iq::Iq;
 use xmpp_parsers::message::Message;
@@ -46,27 +46,27 @@ fn no_copy_suppresses_carbons(msg: &Message) -> bool {
 
 /// Check if an IQ is a carbons enable request.
 pub fn is_carbons_enable(iq: &Iq) -> bool {
-    match &iq.payload {
-        xmpp_parsers::iq::IqType::Set(elem) => elem.name() == "enable" && elem.ns() == CARBONS_NS,
+    match iq {
+        Iq::Set { payload, .. } => payload.name() == "enable" && payload.ns() == CARBONS_NS,
         _ => false,
     }
 }
 
 /// Check if an IQ is a carbons disable request.
 pub fn is_carbons_disable(iq: &Iq) -> bool {
-    match &iq.payload {
-        xmpp_parsers::iq::IqType::Set(elem) => elem.name() == "disable" && elem.ns() == CARBONS_NS,
+    match iq {
+        Iq::Set { payload, .. } => payload.name() == "disable" && payload.ns() == CARBONS_NS,
         _ => false,
     }
 }
 
 /// Build a success response for carbons enable/disable.
 pub fn build_carbons_result(original_iq: &Iq) -> Iq {
-    Iq {
-        from: original_iq.to.clone(),
-        to: original_iq.from.clone(),
-        id: original_iq.id.clone(),
-        payload: xmpp_parsers::iq::IqType::Result(None),
+    Iq::Result {
+        from: original_iq.to().cloned(),
+        to: original_iq.from().cloned(),
+        id: original_iq.id().to_string(),
+        payload: None,
     }
 }
 
@@ -150,7 +150,7 @@ pub fn build_received_carbon(
 fn build_forwarded_element(original_msg: &Message) -> Element {
     let timestamp = Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
     let delay = Element::builder("delay", DELAY_NS)
-        .attr("stamp", timestamp)
+        .attr(xml_ncname!("stamp").to_owned(), timestamp)
         .build();
     let msg_element: Element = original_msg.clone().into();
 
@@ -168,11 +168,11 @@ mod tests {
     #[test]
     fn test_is_carbons_enable() {
         let enable_elem = Element::builder("enable", CARBONS_NS).build();
-        let iq = Iq {
+        let iq = Iq::Set {
             from: None,
             to: None,
             id: "enable-1".to_string(),
-            payload: xmpp_parsers::iq::IqType::Set(enable_elem),
+            payload: enable_elem,
         };
 
         assert!(is_carbons_enable(&iq));
@@ -181,11 +181,11 @@ mod tests {
     #[test]
     fn test_is_not_carbons_enable_wrong_ns() {
         let enable_elem = Element::builder("enable", "wrong:ns").build();
-        let iq = Iq {
+        let iq = Iq::Set {
             from: None,
             to: None,
             id: "enable-1".to_string(),
-            payload: xmpp_parsers::iq::IqType::Set(enable_elem),
+            payload: enable_elem,
         };
 
         assert!(!is_carbons_enable(&iq));
@@ -194,11 +194,11 @@ mod tests {
     #[test]
     fn test_is_not_carbons_enable_get() {
         let enable_elem = Element::builder("enable", CARBONS_NS).build();
-        let iq = Iq {
+        let iq = Iq::Get {
             from: None,
             to: None,
             id: "enable-1".to_string(),
-            payload: xmpp_parsers::iq::IqType::Get(enable_elem),
+            payload: enable_elem,
         };
 
         assert!(!is_carbons_enable(&iq));
@@ -207,11 +207,11 @@ mod tests {
     #[test]
     fn test_is_carbons_disable() {
         let disable_elem = Element::builder("disable", CARBONS_NS).build();
-        let iq = Iq {
+        let iq = Iq::Set {
             from: None,
             to: None,
             id: "disable-1".to_string(),
-            payload: xmpp_parsers::iq::IqType::Set(disable_elem),
+            payload: disable_elem,
         };
 
         assert!(is_carbons_disable(&iq));
@@ -221,10 +221,8 @@ mod tests {
     fn test_should_copy_message_normal_chat() {
         let mut msg = Message::new(Some("recipient@example.com".parse().unwrap()));
         msg.type_ = MessageType::Chat;
-        msg.bodies.insert(
-            String::new(),
-            xmpp_parsers::message::Body("Hello".to_string()),
-        );
+        msg.bodies
+            .insert(xmpp_parsers::message::Lang::new(), "Hello".to_string());
 
         assert!(should_copy_message(&msg));
     }
@@ -233,10 +231,8 @@ mod tests {
     fn test_should_not_copy_groupchat() {
         let mut msg = Message::new(Some("room@muc.example.com".parse().unwrap()));
         msg.type_ = MessageType::Groupchat;
-        msg.bodies.insert(
-            String::new(),
-            xmpp_parsers::message::Body("Hello".to_string()),
-        );
+        msg.bodies
+            .insert(xmpp_parsers::message::Lang::new(), "Hello".to_string());
 
         assert!(!should_copy_message(&msg));
     }
@@ -279,7 +275,7 @@ mod tests {
         msg.type_ = MessageType::Normal;
         msg.payloads.push(
             Element::builder("displayed", CHAT_MARKERS_NS)
-                .attr("id", "msg-1")
+                .attr(xml_ncname!("id").to_owned(), "msg-1")
                 .build(),
         );
         assert!(should_copy_message(&msg));
@@ -289,10 +285,8 @@ mod tests {
     fn test_should_not_copy_with_private_element() {
         let mut msg = Message::new(Some("recipient@example.com".parse().unwrap()));
         msg.type_ = MessageType::Chat;
-        msg.bodies.insert(
-            String::new(),
-            xmpp_parsers::message::Body("Hello".to_string()),
-        );
+        msg.bodies
+            .insert(xmpp_parsers::message::Lang::new(), "Hello".to_string());
         msg.payloads
             .push(Element::builder("private", CARBONS_NS).build());
 
@@ -303,10 +297,8 @@ mod tests {
     fn test_should_not_copy_with_no_copy_hint_to_full_jid() {
         let mut msg = Message::new(Some("recipient@example.com/phone".parse().unwrap()));
         msg.type_ = MessageType::Chat;
-        msg.bodies.insert(
-            String::new(),
-            xmpp_parsers::message::Body("Hello".to_string()),
-        );
+        msg.bodies
+            .insert(xmpp_parsers::message::Lang::new(), "Hello".to_string());
         msg.payloads
             .push(Element::builder("no-copy", HINTS_NS).build());
 
@@ -317,10 +309,8 @@ mod tests {
     fn test_should_copy_with_no_copy_hint_to_bare_jid() {
         let mut msg = Message::new(Some("recipient@example.com".parse().unwrap()));
         msg.type_ = MessageType::Chat;
-        msg.bodies.insert(
-            String::new(),
-            xmpp_parsers::message::Body("Hello".to_string()),
-        );
+        msg.bodies
+            .insert(xmpp_parsers::message::Lang::new(), "Hello".to_string());
         msg.payloads
             .push(Element::builder("no-copy", HINTS_NS).build());
 
@@ -330,20 +320,17 @@ mod tests {
     #[test]
     fn test_build_carbons_result() {
         let enable_elem = Element::builder("enable", CARBONS_NS).build();
-        let iq = Iq {
+        let iq = Iq::Set {
             from: Some("user@example.com/resource".parse().unwrap()),
             to: Some("example.com".parse().unwrap()),
             id: "enable-1".to_string(),
-            payload: xmpp_parsers::iq::IqType::Set(enable_elem),
+            payload: enable_elem,
         };
 
         let result = build_carbons_result(&iq);
 
-        assert_eq!(result.id, "enable-1");
-        assert!(matches!(
-            result.payload,
-            xmpp_parsers::iq::IqType::Result(None)
-        ));
+        assert_eq!(result.id(), "enable-1");
+        assert!(matches!(result, Iq::Result { payload: None, .. }));
     }
 
     #[test]
@@ -351,10 +338,9 @@ mod tests {
         let mut original = Message::new(Some("recipient@example.com".parse().unwrap()));
         original.from = Some("sender@example.com/resource1".parse().unwrap());
         original.type_ = MessageType::Chat;
-        original.bodies.insert(
-            String::new(),
-            xmpp_parsers::message::Body("Hello".to_string()),
-        );
+        original
+            .bodies
+            .insert(xmpp_parsers::message::Lang::new(), "Hello".to_string());
 
         let carbon = build_sent_carbon(
             &original,
@@ -390,10 +376,9 @@ mod tests {
         let mut original = Message::new(Some("user@example.com/resource1".parse().unwrap()));
         original.from = Some("sender@example.com".parse().unwrap());
         original.type_ = MessageType::Chat;
-        original.bodies.insert(
-            String::new(),
-            xmpp_parsers::message::Body("Hello".to_string()),
-        );
+        original
+            .bodies
+            .insert(xmpp_parsers::message::Lang::new(), "Hello".to_string());
 
         let carbon =
             build_received_carbon(&original, "user@example.com", "user@example.com/resource2")

@@ -27,8 +27,10 @@ impl FromElement for Note {
 
 impl IntoElement for Note {
     fn into_element(&self) -> Element {
-        let mut builder =
-            Element::builder("note", NS_COMMANDS).attr("type", self.note_type.as_str());
+        let mut builder = Element::builder("note", NS_COMMANDS).attr(
+            minidom::rxml::xml_ncname!("type").to_owned(),
+            self.note_type.as_str(),
+        );
         builder = builder.append(minidom::Node::Text(self.text.clone()));
         builder.build()
     }
@@ -59,8 +61,10 @@ impl FromElement for AllowedActions {
 
 impl IntoElement for AllowedActions {
     fn into_element(&self) -> Element {
-        let mut builder =
-            Element::builder("actions", NS_COMMANDS).attr("execute", self.execute_default.as_str());
+        let mut builder = Element::builder("actions", NS_COMMANDS).attr(
+            minidom::rxml::xml_ncname!("execute").to_owned(),
+            self.execute_default.as_str(),
+        );
 
         if self.prev {
             builder = builder.append(Element::builder("prev", NS_COMMANDS).build());
@@ -133,18 +137,25 @@ impl FromElement for Command {
 
 impl IntoElement for Command {
     fn into_element(&self) -> Element {
-        let mut builder = Element::builder("command", NS_COMMANDS).attr("node", &self.node);
+        let mut builder = Element::builder("command", NS_COMMANDS)
+            .attr(minidom::rxml::xml_ncname!("node").to_owned(), &self.node);
 
         if let Some(ref sid) = self.session_id {
-            builder = builder.attr("sessionid", sid);
+            builder = builder.attr(minidom::rxml::xml_ncname!("sessionid").to_owned(), sid);
         }
 
         if let Some(action) = self.action {
-            builder = builder.attr("action", action.as_str());
+            builder = builder.attr(
+                minidom::rxml::xml_ncname!("action").to_owned(),
+                action.as_str(),
+            );
         }
 
         if let Some(status) = self.status {
-            builder = builder.attr("status", status.as_str());
+            builder = builder.attr(
+                minidom::rxml::xml_ncname!("status").to_owned(),
+                status.as_str(),
+            );
         }
 
         if let Some(ref actions) = self.actions {

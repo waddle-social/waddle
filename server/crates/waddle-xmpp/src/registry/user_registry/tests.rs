@@ -1,4 +1,5 @@
 use super::*;
+use kameo::actor::Spawn;
 use kameo::error::SendError;
 
 fn bare(user: &str) -> BareJid {
@@ -12,7 +13,7 @@ fn full(user: &str, resource: &str) -> FullJid {
 }
 
 async fn spawn_registry() -> ActorRef<UserRegistryActor> {
-    kameo::spawn(UserRegistryActor::new())
+    UserRegistryActor::spawn(UserRegistryActor::new())
 }
 
 #[tokio::test]

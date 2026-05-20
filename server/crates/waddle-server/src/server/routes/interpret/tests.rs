@@ -2,9 +2,10 @@ use super::bot::{dispatch_bot_groupchat_response, BotGroupchatDispatch};
 use super::groupchat_archive::room_scoped_reply_to_attr;
 use super::groupchat_validation::lookup_groupchat_retraction_target;
 use super::*;
+use kameo::actor::Spawn;
 use waddle_xmpp::xep::{set_thread_create, ThreadCreate};
 use waddle_xmpp::Stanza;
-use xmpp_parsers::iq::{Iq, IqType};
+use xmpp_parsers::iq::Iq;
 use xmpp_parsers::minidom::Element;
 
 fn test_registry() -> ConnectionRegistry {
@@ -12,23 +13,23 @@ fn test_registry() -> ConnectionRegistry {
 }
 
 fn result_iq(id: &str) -> Iq {
-    Iq {
+    Iq::Result {
         from: None,
         to: None,
         id: id.to_string(),
-        payload: IqType::Result(Some(Element::builder("query", "jabber:iq:roster").build())),
+        payload: Some(Element::builder("query", "jabber:iq:roster").build()),
     }
 }
 
 #[tokio::test]
 async fn interprets_send_stanza() {
-    let events = vec![OutboundEvent::SendStanza(Box::new(Stanza::Iq(result_iq(
-        "x",
+    let events = vec![OutboundEvent::SendStanza(Box::new(Stanza::Iq(Box::new(
+        result_iq("x"),
     ))))];
     let outcome = interpret(events, &Deps::registry_only(&test_registry())).await;
     assert_eq!(outcome.frames.len(), 1);
-    assert!(outcome.frames[0].contains("type=\"result\""));
-    assert!(outcome.frames[0].contains("id=\"x\""));
+    assert!(outcome.frames[0].contains("type='result'"));
+    assert!(outcome.frames[0].contains("id='x'"));
     assert!(!outcome.close);
 }
 
@@ -60,7 +61,7 @@ fn chat_msg(from: &str, to: &str, body: &str) -> xmpp_parsers::message::Message 
     m.from = Some(from.parse().expect("jid"));
     m.type_ = xmpp_parsers::message::MessageType::Chat;
     m.bodies
-        .insert(String::new(), xmpp_parsers::message::Body(body.to_string()));
+        .insert(xmpp_parsers::message::Lang::new(), body.to_string());
     m
 }
 
@@ -296,7 +297,7 @@ async fn xep_0313_archive_direct_persists_to_mam_storage() {
     let from: jid::BareJid = "alice@example.com".parse().expect("bare");
     let to: jid::BareJid = "bob@example.com".parse().expect("bare");
     let mut msg = chat_msg("alice@example.com/web", "bob@example.com", "hello");
-    msg.id = Some("orig-1".to_string());
+    msg.id = Some(xmpp_parsers::message::Id("orig-1".to_string()));
 
     let events = vec![OutboundEvent::ArchiveDirect {
         archive_jid: archive_jid.clone(),
@@ -348,7 +349,7 @@ async fn xep_0359_archive_ref_pivots_inbox_row_to_mam_row_via_archive_or_stanza_
     let alice: jid::BareJid = "alice@example.com".parse().expect("bare");
     let bob: jid::BareJid = "bob@example.com".parse().expect("bare");
     let mut msg = chat_msg("alice@example.com/web", "bob@example.com", "pivot test");
-    msg.id = Some("wire-id".to_string());
+    msg.id = Some(xmpp_parsers::message::Id("wire-id".to_string()));
     // Simulate CanonicalizeHandler stamping the canonical id
     // under alice's archive — the same id InboxHandler will
     // emit as `archive_ref`.
@@ -730,7 +731,7 @@ async fn inbox_project_writes_owner_peer_keyed_row_with_typed_archive_ref() {
     let owner: jid::BareJid = "alice@example.com".parse().expect("bare");
     let peer: jid::BareJid = "bob@example.com".parse().expect("bare");
     let mut msg = chat_msg("alice@example.com/web", "bob@example.com", "hi there");
-    msg.id = Some("origin-X".to_string());
+    msg.id = Some(xmpp_parsers::message::Id("origin-X".to_string()));
 
     let events = vec![OutboundEvent::ProjectInbox {
         owner: owner.clone(),
@@ -843,7 +844,7 @@ async fn xep_0424_lookup_archived_message_by_stanza_id_feeds_archived_loaded_bac
             assert_eq!(archived.stanza_id.by, jid::Jid::from(archive_jid.clone()));
             assert!(!archived.tombstoned);
             assert_eq!(
-                archived.message.bodies.get("").map(|b| b.0.clone()),
+                archived.message.bodies.get("").cloned(),
                 Some("hello".to_string()),
                 "stanza_xml is parsed back into a typed Message"
             );
@@ -967,12 +968,7 @@ async fn xep_0359_lookup_archived_message_by_origin_id_feeds_archived_loaded_bac
             id: CallbackId(21),
             result: Some(archived),
         } => {
-            let body = archived
-                .message
-                .bodies
-                .get("")
-                .map(|b| b.0.clone())
-                .unwrap_or_default();
+            let body = archived.message.bodies.get("").cloned().unwrap_or_default();
             assert_eq!(
                 body, "from alice",
                 "OriginId lookup must scope to sender; bob's row was a collision decoy"
@@ -1194,7 +1190,7 @@ async fn enrichment_request_without_extension_manager_fails_open_with_original_m
     let deps = Deps::registry_only(&registry);
 
     let mut original = chat_msg("alice@example.com/web", "bob@example.com", "look https://x");
-    original.id = Some("orig-id".to_string());
+    original.id = Some(xmpp_parsers::message::Id("orig-id".to_string()));
 
     let events = vec![OutboundEvent::RequestEnrichment {
         id: CallbackId(42),
@@ -1209,7 +1205,7 @@ async fn enrichment_request_without_extension_manager_fails_open_with_original_m
         } => {
             assert_eq!(message.id, original.id);
             assert_eq!(
-                message.bodies.get("").map(|b| b.0.clone()),
+                message.bodies.get("").cloned(),
                 Some("look https://x".to_string()),
             );
         }
@@ -1247,7 +1243,7 @@ async fn enrichment_failure_fail_open_feeds_original_message_back() {
         "bob@example.com",
         "check https://example.com",
     );
-    original.id = Some("fail-open-id".to_string());
+    original.id = Some(xmpp_parsers::message::Id("fail-open-id".to_string()));
     let original_payload_count = original.payloads.len();
 
     let events = vec![OutboundEvent::RequestEnrichment {
@@ -1262,13 +1258,13 @@ async fn enrichment_failure_fail_open_feeds_original_message_back() {
             message,
         } => {
             assert_eq!(
-                message.id.as_deref(),
+                message.id.as_ref().map(|id| id.0.as_str()),
                 Some("fail-open-id"),
                 "fail-open path returns the original message id"
             );
             assert_eq!(
-                message.bodies.get("").map(|b| b.0.clone()),
-                original.bodies.get("").map(|b| b.0.clone()),
+                message.bodies.get("").cloned(),
+                original.bodies.get("").cloned(),
                 "fail-open path returns the original body unchanged"
             );
             assert_eq!(
@@ -1304,7 +1300,7 @@ async fn enrichment_request_calls_extension_manager_and_feeds_complete_back() {
     let deps = Deps::test_with_extension_manager(&registry, &em);
 
     let mut original = chat_msg("alice@example.com/web", "bob@example.com", "ping");
-    original.id = Some("e-id".to_string());
+    original.id = Some(xmpp_parsers::message::Id("e-id".to_string()));
 
     let events = vec![OutboundEvent::RequestEnrichment {
         id: CallbackId(99),
@@ -1317,7 +1313,7 @@ async fn enrichment_request_calls_extension_manager_and_feeds_complete_back() {
             id: CallbackId(99),
             message,
         } => {
-            assert_eq!(message.id.as_deref(), Some("e-id"));
+            assert_eq!(message.id.as_ref().map(|id| id.0.as_str()), Some("e-id"));
         }
         other => panic!("expected EnrichmentComplete, got {other:?}"),
     }
@@ -1447,23 +1443,26 @@ async fn route_to_connection_bare_jid_falls_back_to_connected_resources_without_
 #[tokio::test]
 async fn preserves_frame_order_across_multiple_events() {
     let events = vec![
-        OutboundEvent::SendStanza(Box::new(Stanza::Iq(result_iq("a")))),
+        OutboundEvent::SendStanza(Box::new(Stanza::Iq(Box::new(result_iq("a"))))),
         OutboundEvent::Log {
             level: tracing::Level::DEBUG,
             message: "between".to_string(),
         },
-        OutboundEvent::SendStanza(Box::new(Stanza::Iq(result_iq("b")))),
+        OutboundEvent::SendStanza(Box::new(Stanza::Iq(Box::new(result_iq("b"))))),
     ];
     let outcome = interpret(events, &Deps::registry_only(&test_registry())).await;
     assert_eq!(outcome.frames.len(), 2);
-    assert!(outcome.frames[0].contains("id=\"a\""));
-    assert!(outcome.frames[1].contains("id=\"b\""));
+    assert!(outcome.frames[0].contains("id='a'"));
+    assert!(outcome.frames[1].contains("id='b'"));
 }
 
 #[tokio::test]
 async fn send_stanza_preserves_xep_0201_thread_on_wire() {
     let mut msg = chat_msg("alice@example.com/web", "bob@example.com", "threaded hi");
-    msg.thread = Some(xmpp_parsers::message::Thread("root-thread".to_string()));
+    msg.thread = Some(xmpp_parsers::message::Thread {
+        id: "root-thread".to_string(),
+        parent: None,
+    });
 
     let events = vec![OutboundEvent::SendStanza(Box::new(Stanza::Message(msg)))];
     let outcome = interpret(events, &Deps::registry_only(&test_registry())).await;
@@ -1600,11 +1599,11 @@ async fn extension_room_message_dispatches_threaded_muc_message() {
         Some(format!("{room_jid}/waddle"))
     );
     assert_eq!(
-        message.thread.as_ref().map(|thread| thread.0.as_str()),
+        message.thread.as_ref().map(|thread| thread.id.as_str()),
         Some("root-msg")
     );
     assert_eq!(
-        message.bodies.get("").map(|body| body.0.as_str()),
+        message.bodies.get("").map(|body| body.as_str()),
         Some("bot answer")
     );
     let reply = parse_reply_from_message(message).expect("reply payload");
@@ -1655,7 +1654,7 @@ fn thread_create_source_is_normalized_for_inbox_projection() {
             .parse::<jid::BareJid>()
             .expect("room jid"),
     )));
-    message.id = Some("live-forum-root".to_string());
+    message.id = Some(xmpp_parsers::message::Id("live-forum-root".to_string()));
     message.type_ = xmpp_parsers::message::MessageType::Groupchat;
     set_thread_create(&mut message, &ThreadCreate::new("Live forum root"));
 
@@ -1663,7 +1662,7 @@ fn thread_create_source_is_normalized_for_inbox_projection() {
 
     assert_eq!(thread_id.as_deref(), Some("live-forum-root"));
     assert_eq!(
-        message.thread.as_ref().map(|thread| thread.0.as_str()),
+        message.thread.as_ref().map(|thread| thread.id.as_str()),
         Some("live-forum-root")
     );
     assert!(matches!(
@@ -2049,10 +2048,10 @@ async fn xep_0359_offline_recipient_pass_emits_recipient_archive_with_recipient_
     let mut wire_msg = xmpp_parsers::message::Message::new(Some(jid::Jid::from(bob.clone())));
     wire_msg.from = Some(jid::Jid::from(alice_web.clone()));
     wire_msg.type_ = xmpp_parsers::message::MessageType::Chat;
-    wire_msg.id = Some("wire-id".to_string());
+    wire_msg.id = Some(xmpp_parsers::message::Id("wire-id".to_string()));
     wire_msg.bodies.insert(
-        String::new(),
-        xmpp_parsers::message::Body("wire-trace body".to_string()),
+        xmpp_parsers::message::Lang::new(),
+        "wire-trace body".to_string(),
     );
 
     let alice_events = alice_sm.handle(InboundEvent::FrameReceived(InboundFrame::Stanza(
@@ -2099,7 +2098,7 @@ async fn xep_0359_offline_recipient_pass_emits_recipient_archive_with_recipient_
         alice_archive.messages[0]
             .stanza_xml
             .as_deref()
-            .map(|xml| xml.contains("by=\"alice@example.com\""))
+            .map(|xml| xml.contains("by='alice@example.com'"))
             .unwrap_or(false),
         "alice archive entry carries XEP-0359 <stanza-id by='alice@example.com'/>: \
          {:?}",
@@ -2121,7 +2120,7 @@ async fn xep_0359_offline_recipient_pass_emits_recipient_archive_with_recipient_
         bob_archive.messages[0]
             .stanza_xml
             .as_deref()
-            .map(|xml| xml.contains("by=\"bob@example.com\""))
+            .map(|xml| xml.contains("by='bob@example.com'"))
             .unwrap_or(false),
         "bob archive entry carries XEP-0359 <stanza-id by='bob@example.com'/>: \
          {:?}",
@@ -2144,7 +2143,7 @@ async fn xep_0359_offline_recipient_pass_emits_recipient_archive_with_recipient_
     // negative: no frame addressed 'to=bob' leaks out.
     for frame in &outcome.frames {
         assert!(
-            !frame.contains("to=\"bob@example.com\""),
+            !frame.contains("to='bob@example.com'"),
             "headless pass must not produce wire frames for offline bob; got: {frame}"
         );
     }
@@ -2210,7 +2209,7 @@ async fn xep_0045_persist_room_subject_writes_state_via_room_actor() {
     use waddle_xmpp::xep::xep0421::OccupantIdSecret;
 
     let registry = ConnectionRegistry::new();
-    let room_registry = kameo::spawn(RoomRegistryActor::new(
+    let room_registry = RoomRegistryActor::spawn(RoomRegistryActor::new(
         "muc.example.com".to_string(),
         OccupantIdSecret::new(b"persist-subject-arm-test-secret-32b".to_vec())
             .expect("test secret meets length floor"),
@@ -2438,7 +2437,7 @@ async fn xep_0424_apply_groupchat_retraction_tombstone_keys_off_wire_id() {
 
     // Build the retraction message the chain would emit.
     let mut retraction = xmpp_parsers::message::Message::new(Some(jid::Jid::from(room.clone())));
-    retraction.id = Some("retract-stanza-1".to_string());
+    retraction.id = Some(xmpp_parsers::message::Id("retract-stanza-1".to_string()));
     retraction.from = Some(format!("{room}/alice").parse().expect("room/nick"));
     retraction.type_ = XmppMessageType::Groupchat;
     retraction

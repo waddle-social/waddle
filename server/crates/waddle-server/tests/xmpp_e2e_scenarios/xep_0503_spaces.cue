@@ -28,7 +28,7 @@ scenario: #Scenario & {
 			target:   adminPhone
 			id:       "cue-spaces-items"
 			type:     "result"
-			contains: ["node=\"general\""]
+			contains: ["node='general'"]
 		},
 		#SendIq & {
 			actor: adminPhone
@@ -74,7 +74,7 @@ scenario: #Scenario & {
 			type:   "result"
 			contains: [
 				"urn:xmpp:spaces:0",
-				"var=\"parent\"",
+				"var='parent'",
 				"xmpp:spaces.localhost?;node=general",
 				"http://jabber.org/protocol/muc#roominfo",
 				"muc#roomconfig_pubsub",

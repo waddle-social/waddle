@@ -4,14 +4,14 @@ use chrono::{FixedOffset, TimeZone, Utc};
 use minidom::Element;
 use waddle_xmpp::disco::{server_features, Feature};
 use waddle_xmpp::xep::{build_time_response, parse_time_response, EntityTime, NS_TIME};
-use xmpp_parsers::iq::{Iq, IqType};
+use xmpp_parsers::iq::Iq;
 
 fn make_time_query() -> Iq {
-    Iq {
+    Iq::Get {
         from: Some("alice@localhost/web".parse().expect("valid jid")),
         to: Some("localhost".parse().expect("valid jid")),
         id: "xep0202-1".to_string(),
-        payload: IqType::Get(Element::builder("time", NS_TIME).build()),
+        payload: Element::builder("time", NS_TIME).build(),
     }
 }
 
@@ -39,11 +39,11 @@ fn xep0202_roundtrips_typed_utc_and_tzo_values() {
 
 #[test]
 fn xep0202_rejects_non_utc_utc_children() {
-    let iq = Iq {
+    let iq = Iq::Result {
         from: None,
         to: None,
         id: "xep0202-invalid-utc".to_string(),
-        payload: IqType::Result(Some(
+        payload: Some(
             Element::builder("time", NS_TIME)
                 .append(Element::builder("tzo", NS_TIME).append("+01:00").build())
                 .append(
@@ -52,7 +52,7 @@ fn xep0202_rejects_non_utc_utc_children() {
                         .build(),
                 )
                 .build(),
-        )),
+        ),
     };
 
     assert!(parse_time_response(&iq).is_none());

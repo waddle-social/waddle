@@ -20,7 +20,7 @@ use waddle_xmpp::xep::xep0363::{
     parse_upload_request, sanitize_filename, UploadError, UploadRequest, UploadSlot,
     DEFAULT_MAX_FILE_SIZE, NS_HTTP_UPLOAD,
 };
-use xmpp_parsers::iq::{Iq, IqType};
+use xmpp_parsers::iq::Iq;
 
 // ── §3 namespace ─────────────────────────────────────────────────────
 
@@ -59,16 +59,19 @@ fn xep0363_upload_service_features_include_http_upload() {
 
 fn upload_request_iq(filename: &str, size: u64, content_type: Option<&str>) -> Iq {
     let mut req = Element::builder("request", NS_HTTP_UPLOAD)
-        .attr("filename", filename)
-        .attr("size", size.to_string());
+        .attr(minidom::rxml::xml_ncname!("filename").to_owned(), filename)
+        .attr(
+            minidom::rxml::xml_ncname!("size").to_owned(),
+            size.to_string(),
+        );
     if let Some(ct) = content_type {
-        req = req.attr("content-type", ct);
+        req = req.attr(minidom::rxml::xml_ncname!("content-type").to_owned(), ct);
     }
-    Iq {
+    Iq::Get {
         from: None,
         to: None,
         id: "u-1".into(),
-        payload: IqType::Get(req.build()),
+        payload: req.build(),
     }
 }
 
@@ -86,14 +89,14 @@ fn xep0363_classifier_rejects_iq_set_with_request_payload() {
     // payload is malformed and MUST NOT be classified as a
     // request — otherwise an attacker could probe the upload
     // grant path with a request shape the spec doesn't define.
-    let iq = Iq {
-        payload: IqType::Set(
-            Element::builder("request", NS_HTTP_UPLOAD)
-                .attr("filename", "x")
-                .attr("size", "1")
-                .build(),
-        ),
-        ..upload_request_iq("ignored", 1, None)
+    let iq = Iq::Set {
+        from: None,
+        to: None,
+        id: "u-1".into(),
+        payload: Element::builder("request", NS_HTTP_UPLOAD)
+            .attr(minidom::rxml::xml_ncname!("filename").to_owned(), "x")
+            .attr(minidom::rxml::xml_ncname!("size").to_owned(), "1")
+            .build(),
     };
     assert!(!is_upload_request(&iq));
 }
@@ -109,13 +112,13 @@ fn xep0363_parse_request_round_trips_filename_size_content_type() {
 
 #[test]
 fn xep0363_parse_request_rejects_missing_filename() {
-    let iq = Iq {
-        payload: IqType::Get(
-            Element::builder("request", NS_HTTP_UPLOAD)
-                .attr("size", "10")
-                .build(),
-        ),
-        ..upload_request_iq("ignored", 1, None)
+    let iq = Iq::Get {
+        from: None,
+        to: None,
+        id: "u-1".into(),
+        payload: Element::builder("request", NS_HTTP_UPLOAD)
+            .attr(minidom::rxml::xml_ncname!("size").to_owned(), "10")
+            .build(),
     };
     let err = parse_upload_request(&iq).expect_err("missing filename");
     assert!(matches!(err, UploadError::BadRequest(_)));
@@ -123,13 +126,13 @@ fn xep0363_parse_request_rejects_missing_filename() {
 
 #[test]
 fn xep0363_parse_request_rejects_missing_size() {
-    let iq = Iq {
-        payload: IqType::Get(
-            Element::builder("request", NS_HTTP_UPLOAD)
-                .attr("filename", "x")
-                .build(),
-        ),
-        ..upload_request_iq("ignored", 1, None)
+    let iq = Iq::Get {
+        from: None,
+        to: None,
+        id: "u-1".into(),
+        payload: Element::builder("request", NS_HTTP_UPLOAD)
+            .attr(minidom::rxml::xml_ncname!("filename").to_owned(), "x")
+            .build(),
     };
     let err = parse_upload_request(&iq).expect_err("missing size");
     assert!(matches!(err, UploadError::BadRequest(_)));
@@ -137,28 +140,28 @@ fn xep0363_parse_request_rejects_missing_size() {
 
 #[test]
 fn xep0363_parse_request_rejects_zero_size_and_non_numeric_size() {
-    let zero = Iq {
-        payload: IqType::Get(
-            Element::builder("request", NS_HTTP_UPLOAD)
-                .attr("filename", "x")
-                .attr("size", "0")
-                .build(),
-        ),
-        ..upload_request_iq("ignored", 1, None)
+    let zero = Iq::Get {
+        from: None,
+        to: None,
+        id: "u-1".into(),
+        payload: Element::builder("request", NS_HTTP_UPLOAD)
+            .attr(minidom::rxml::xml_ncname!("filename").to_owned(), "x")
+            .attr(minidom::rxml::xml_ncname!("size").to_owned(), "0")
+            .build(),
     };
     assert!(matches!(
         parse_upload_request(&zero),
         Err(UploadError::BadRequest(_))
     ));
 
-    let bogus = Iq {
-        payload: IqType::Get(
-            Element::builder("request", NS_HTTP_UPLOAD)
-                .attr("filename", "x")
-                .attr("size", "huge")
-                .build(),
-        ),
-        ..upload_request_iq("ignored", 1, None)
+    let bogus = Iq::Get {
+        from: None,
+        to: None,
+        id: "u-1".into(),
+        payload: Element::builder("request", NS_HTTP_UPLOAD)
+            .attr(minidom::rxml::xml_ncname!("filename").to_owned(), "x")
+            .attr(minidom::rxml::xml_ncname!("size").to_owned(), "huge")
+            .build(),
     };
     assert!(matches!(
         parse_upload_request(&bogus),
@@ -182,7 +185,11 @@ fn xep0363_slot_response_emits_put_get_and_optional_headers() {
         get_url: "https://cdn.example/abc/file.bin".into(),
     };
     let response = build_upload_slot_response(&original, &slot);
-    let IqType::Result(Some(slot_elem)) = response.payload else {
+    let Iq::Result {
+        payload: Some(slot_elem),
+        ..
+    } = response
+    else {
         panic!("response must be iq type='result' with payload");
     };
 
@@ -231,7 +238,7 @@ fn xep0363_file_too_large_error_carries_max_file_size_child() {
     assert!(xml.contains("<file-too-large"));
     assert!(xml.contains(NS_HTTP_UPLOAD));
     assert!(xml.contains("<max-file-size>10485760</max-file-size>"));
-    assert!(xml.contains("id=\"err-too-big\""));
+    assert!(xml.contains("id='err-too-big'"));
 }
 
 #[test]

@@ -45,8 +45,8 @@ pub const NS_WADDLE_MUC_CALL: &str = "urn:waddle:muc-call:0";
 pub fn build_muc_call_extension_element(active: bool, call_id: &str) -> minidom::Element {
     let state = if active { "active" } else { "inactive" };
     minidom::Element::builder("call", NS_WADDLE_MUC_CALL)
-        .attr("state", state)
-        .attr("call-id", call_id)
+        .attr(minidom::rxml::xml_ncname!("state").to_owned(), state)
+        .attr(minidom::rxml::xml_ncname!("call-id").to_owned(), call_id)
         .build()
 }
 

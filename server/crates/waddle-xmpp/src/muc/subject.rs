@@ -27,26 +27,25 @@ impl RoomSubjectTexts {
     }
 
     /// Capture a `Message`'s typed `subjects` field by cloning every
-    /// `xmpp_parsers::message::Subject`'s text and pairing it with
-    /// its `xml:lang` key.
+    /// language-tagged subject text and pairing it with its
+    /// `xml:lang` key.
     pub fn from_message_subjects(
-        subjects: &std::collections::BTreeMap<String, xmpp_parsers::message::Subject>,
+        subjects: &std::collections::BTreeMap<xmpp_parsers::message::Lang, String>,
     ) -> Self {
         Self(
             subjects
                 .iter()
-                .map(|(lang, subject)| (lang.clone(), subject.0.clone()))
+                .map(|(lang, text)| (lang.0.clone(), text.clone()))
                 .collect(),
         )
     }
 
     /// Insert one `<subject xml:lang='...'>` per persisted entry into
-    /// `msg.subjects`, wrapped in xmpp_parsers' typed `Subject`. Used
-    /// by the join-time replay builder.
+    /// `msg.subjects`. Used by the join-time replay builder.
     pub fn apply_to_message(&self, msg: &mut xmpp_parsers::message::Message) {
         for (lang, text) in &self.0 {
             msg.subjects
-                .insert(lang.clone(), xmpp_parsers::message::Subject(text.clone()));
+                .insert(xmpp_parsers::message::Lang(lang.clone()), text.clone());
         }
     }
 

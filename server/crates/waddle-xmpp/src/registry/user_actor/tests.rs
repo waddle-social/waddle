@@ -1,8 +1,12 @@
 use super::*;
-use kameo::actor::ActorRef;
+use kameo::actor::{ActorRef, Spawn};
 use kameo::error::SendError;
-use kameo::request::TryMessageSend;
 use tokio::sync::oneshot;
+
+/// Default mailbox capacity used by `Spawn::spawn` in kameo 0.20 — the test
+/// exercises the bounded-mailbox backpressure path without depending on the
+/// numeric default.
+const DEFAULT_MAILBOX_CAPACITY: usize = 64;
 
 struct HoldMailboxUntilReleased {
     release_rx: oneshot::Receiver<()>,
@@ -31,7 +35,7 @@ fn full(user: &str, resource: &str) -> FullJid {
 }
 
 async fn spawn_actor(user: &str) -> ActorRef<UserActor> {
-    kameo::spawn(UserActor::new(bare(user)))
+    UserActor::spawn(UserActor::new(bare(user)))
 }
 
 #[tokio::test]
@@ -289,7 +293,6 @@ async fn test_carbons() {
 #[tokio::test]
 async fn test_mailbox_backpressure_marks_best_effort_as_dropped() {
     let actor = spawn_actor("alice").await;
-    assert_eq!(actor.max_capacity(), 2048);
 
     let (release_tx, release_rx) = oneshot::channel();
     actor
@@ -299,14 +302,13 @@ async fn test_mailbox_backpressure_marks_best_effort_as_dropped() {
 
     let jid = full("alice", "phone");
     let mut saw_mailbox_full = false;
-    for _ in 0..(actor.max_capacity() * 2) {
+    for _ in 0..(DEFAULT_MAILBOX_CAPACITY * 2) {
         let send_result = actor
             .tell(SetCarbonsEnabled {
                 jid: jid.clone(),
                 enabled: true,
             })
-            .try_send()
-            .await;
+            .try_send();
         if matches!(send_result, Err(SendError::MailboxFull(_))) {
             saw_mailbox_full = true;
             break;

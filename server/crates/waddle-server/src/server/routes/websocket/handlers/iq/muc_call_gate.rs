@@ -25,7 +25,7 @@
 
 use jid::{BareJid, FullJid};
 use waddle_xmpp::muc::room_actor::GetOccupantByJid;
-use xmpp_parsers::iq::{Iq, IqType};
+use xmpp_parsers::iq::Iq;
 use xmpp_parsers::stanza_error::StanzaError;
 
 use super::super::super::cleanup::get_room_actor;
@@ -64,7 +64,7 @@ pub(super) async fn verify_muc_call_request(
     // Only `request-join` mints tokens; other muc-call operations
     // (request-leave, future variants) either don't need the gate or
     // are handled inside the dispatcher's payload validation.
-    let IqType::Set(payload) = &iq.payload else {
+    let Iq::Set { payload, .. } = iq else {
         return GateOutcome::Allow;
     };
     if payload.ns() != NS_WADDLE_MUC_CALL || payload.name() != REQUEST_JOIN {
@@ -126,7 +126,6 @@ mod tests {
     use waddle_xmpp::muc::room_actor::Join;
     use waddle_xmpp::muc::room_registry_actor::CreateInstantRoom;
     use waddle_xmpp_core::{Affiliation, Role};
-    use xmpp_parsers::iq::IqType;
     use xmpp_parsers::minidom::Element;
     use xmpp_parsers::stanza_error::DefinedCondition;
 
@@ -134,27 +133,31 @@ mod tests {
         s.parse().expect("valid full jid")
     }
 
+    fn room_attr_name() -> minidom::rxml::NcName {
+        minidom::rxml::xml_ncname!("room").to_owned()
+    }
+
     fn request_join_iq(room: &str) -> Iq {
         let payload = Element::builder("request-join", NS_WADDLE_MUC_CALL)
-            .attr(ATTR_ROOM, room)
+            .attr(room_attr_name(), room)
             .build();
-        Iq {
-            from: Some("alice@example.com/web".parse().unwrap()),
-            to: Some(room.parse().unwrap()),
+        Iq::Set {
+            from: Some("alice@example.com/web".parse().expect("valid full jid")),
+            to: Some(room.parse().expect("valid bare jid")),
             id: "j1".into(),
-            payload: IqType::Set(payload),
+            payload,
         }
     }
 
     fn request_leave_iq(room: &str) -> Iq {
         let payload = Element::builder("request-leave", NS_WADDLE_MUC_CALL)
-            .attr(ATTR_ROOM, room)
+            .attr(room_attr_name(), room)
             .build();
-        Iq {
-            from: Some("alice@example.com/web".parse().unwrap()),
-            to: Some(room.parse().unwrap()),
+        Iq::Set {
+            from: Some("alice@example.com/web".parse().expect("valid full jid")),
+            to: Some(room.parse().expect("valid bare jid")),
             id: "l1".into(),
-            payload: IqType::Set(payload),
+            payload,
         }
     }
 
@@ -313,13 +316,13 @@ mod tests {
         let alice = full("alice@example.com/web");
 
         let payload = Element::builder("request-join", NS_WADDLE_MUC_CALL)
-            .attr(ATTR_ROOM, "general@muc.example.com")
+            .attr(room_attr_name(), "general@muc.example.com")
             .build();
-        let iq = Iq {
-            from: Some("alice@example.com/web".parse().unwrap()),
-            to: Some("general@muc.example.com".parse().unwrap()),
+        let iq = Iq::Get {
+            from: Some("alice@example.com/web".parse().expect("valid full jid")),
+            to: Some("general@muc.example.com".parse().expect("valid bare jid")),
             id: "g1".into(),
-            payload: IqType::Get(payload),
+            payload,
         };
         let outcome = verify_muc_call_request(&state, &alice, &iq).await;
         assert!(matches!(outcome, GateOutcome::Allow));
@@ -331,11 +334,11 @@ mod tests {
         let alice = full("alice@example.com/web");
 
         let payload = Element::builder("request-join", NS_WADDLE_MUC_CALL).build();
-        let iq = Iq {
-            from: Some("alice@example.com/web".parse().unwrap()),
-            to: Some("muc.example.com".parse().unwrap()),
+        let iq = Iq::Set {
+            from: Some("alice@example.com/web".parse().expect("valid full jid")),
+            to: Some("muc.example.com".parse().expect("valid domain jid")),
             id: "j2".into(),
-            payload: IqType::Set(payload),
+            payload,
         };
         let outcome = verify_muc_call_request(&state, &alice, &iq).await;
         let GateOutcome::Deny(err) = outcome else {
@@ -366,11 +369,11 @@ mod tests {
         let alice = full("alice@example.com/web");
 
         let payload = Element::builder("request-join", "urn:xmpp:ping").build();
-        let iq = Iq {
-            from: Some("alice@example.com/web".parse().unwrap()),
-            to: Some("muc.example.com".parse().unwrap()),
+        let iq = Iq::Set {
+            from: Some("alice@example.com/web".parse().expect("valid full jid")),
+            to: Some("muc.example.com".parse().expect("valid domain jid")),
             id: "j4".into(),
-            payload: IqType::Set(payload),
+            payload,
         };
         let outcome = verify_muc_call_request(&state, &alice, &iq).await;
         assert!(matches!(outcome, GateOutcome::Allow));

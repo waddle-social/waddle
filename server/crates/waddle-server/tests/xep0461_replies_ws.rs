@@ -157,7 +157,7 @@ async fn reply_with_empty_to_jid_returns_bad_request() {
         .await
         .expect("bad-request error");
     assert!(
-        error.contains("type=\"error\""),
+        error.contains("type='error'"),
         "not an error stanza: {error}"
     );
 
@@ -228,7 +228,7 @@ async fn reply_with_fallback_replays_from_mam() {
         "MAM replay should preserve fallback element: {reply_mam_frame}"
     );
     assert!(
-        reply_mam_frame.contains("for=\"urn:xmpp:reply:0\""),
+        reply_mam_frame.contains("for='urn:xmpp:reply:0'"),
         "MAM replay should preserve fallback 'for' attribute: {reply_mam_frame}"
     );
 

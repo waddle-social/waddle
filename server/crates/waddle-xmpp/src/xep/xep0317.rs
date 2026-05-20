@@ -196,8 +196,14 @@ pub fn build_hats_element(hat_set: &HatSet) -> Element {
     let mut hats = Element::builder("hats", NS_HATS).build();
     for hat in &hat_set.hats {
         let hat_elem = Element::builder("hat", NS_HATS)
-            .attr("title", hat.title.as_str())
-            .attr("uri", hat.uri.as_str())
+            .attr(
+                minidom::rxml::xml_ncname!("title").to_owned(),
+                hat.title.as_str(),
+            )
+            .attr(
+                minidom::rxml::xml_ncname!("uri").to_owned(),
+                hat.uri.as_str(),
+            )
             .build();
         hats.append_child(hat_elem);
     }

@@ -22,8 +22,8 @@ pub(super) async fn handle_sans_io_iq(
     // and any other namespaces not yet registered with the dispatcher)
     // continue to fall through to the legacy string-matching branches
     // below until the two-phase async callback machinery lands.
-    let carbons_toggle = match &iq.payload {
-        xmpp_parsers::iq::IqType::Set(e)
+    let carbons_toggle = match iq {
+        xmpp_parsers::iq::Iq::Set { payload: e, .. }
             if e.ns() == CARBONS_NS && (e.name() == "enable" || e.name() == "disable") =>
         {
             Some(e.name() == "enable")
@@ -41,8 +41,7 @@ pub(super) async fn handle_sans_io_iq(
         }
         if payload_ns == waddle_xmpp::xep::NS_VERSION
             && iq
-                .to
-                .as_ref()
+                .to()
                 .is_some_and(|target| target.to_bare().as_str() != domain)
         {
             return vec![build_iq_error_xml_typed(
@@ -62,8 +61,7 @@ pub(super) async fn handle_sans_io_iq(
                 )];
             }
             if iq
-                .to
-                .as_ref()
+                .to()
                 .is_some_and(|target| target.to_bare().as_str() != domain)
             {
                 return vec![build_iq_error_xml_typed(

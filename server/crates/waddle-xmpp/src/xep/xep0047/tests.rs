@@ -1,20 +1,20 @@
 use super::*;
 
 fn make_iq_set(child: Element) -> Iq {
-    Iq {
+    Iq::Set {
         from: Some("romeo@montague.net/orchard".parse().expect("valid JID")),
         to: Some("juliet@capulet.com/balcony".parse().expect("valid JID")),
         id: "test-1".to_string(),
-        payload: IqType::Set(child),
+        payload: child,
     }
 }
 
 fn make_iq_get(child: Element) -> Iq {
-    Iq {
+    Iq::Get {
         from: Some("romeo@montague.net/orchard".parse().expect("valid JID")),
         to: Some("juliet@capulet.com/balcony".parse().expect("valid JID")),
         id: "test-1".to_string(),
-        payload: IqType::Get(child),
+        payload: child,
     }
 }
 
@@ -25,8 +25,8 @@ fn make_iq_get(child: Element) -> Iq {
 #[test]
 fn test_is_ibb_open() {
     let elem = Element::builder("open", NS_IBB)
-        .attr("sid", "test-sid")
-        .attr("block-size", "4096")
+        .attr(minidom::rxml::xml_ncname!("sid").to_owned(), "test-sid")
+        .attr(minidom::rxml::xml_ncname!("block-size").to_owned(), "4096")
         .build();
     let iq = make_iq_set(elem);
     assert!(is_ibb_open(&iq));
@@ -35,8 +35,8 @@ fn test_is_ibb_open() {
 #[test]
 fn test_is_ibb_open_false_for_get() {
     let elem = Element::builder("open", NS_IBB)
-        .attr("sid", "test-sid")
-        .attr("block-size", "4096")
+        .attr(minidom::rxml::xml_ncname!("sid").to_owned(), "test-sid")
+        .attr(minidom::rxml::xml_ncname!("block-size").to_owned(), "4096")
         .build();
     let iq = make_iq_get(elem);
     assert!(!is_ibb_open(&iq));
@@ -45,7 +45,7 @@ fn test_is_ibb_open_false_for_get() {
 #[test]
 fn test_is_ibb_open_false_for_wrong_ns() {
     let elem = Element::builder("open", "some:other:ns")
-        .attr("sid", "test-sid")
+        .attr(minidom::rxml::xml_ncname!("sid").to_owned(), "test-sid")
         .build();
     let iq = make_iq_set(elem);
     assert!(!is_ibb_open(&iq));
@@ -54,8 +54,8 @@ fn test_is_ibb_open_false_for_wrong_ns() {
 #[test]
 fn test_is_ibb_data() {
     let elem = Element::builder("data", NS_IBB)
-        .attr("sid", "test-sid")
-        .attr("seq", "0")
+        .attr(minidom::rxml::xml_ncname!("sid").to_owned(), "test-sid")
+        .attr(minidom::rxml::xml_ncname!("seq").to_owned(), "0")
         .build();
     let iq = make_iq_set(elem);
     assert!(is_ibb_data(&iq));
@@ -64,7 +64,7 @@ fn test_is_ibb_data() {
 #[test]
 fn test_is_ibb_close() {
     let elem = Element::builder("close", NS_IBB)
-        .attr("sid", "test-sid")
+        .attr(minidom::rxml::xml_ncname!("sid").to_owned(), "test-sid")
         .build();
     let iq = make_iq_set(elem);
     assert!(is_ibb_close(&iq));
@@ -73,8 +73,8 @@ fn test_is_ibb_close() {
 #[test]
 fn test_message_has_ibb_data() {
     let data_elem = Element::builder("data", NS_IBB)
-        .attr("sid", "test-sid")
-        .attr("seq", "0")
+        .attr(minidom::rxml::xml_ncname!("sid").to_owned(), "test-sid")
+        .attr(minidom::rxml::xml_ncname!("seq").to_owned(), "0")
         .build();
     let msg = Element::builder("message", "jabber:client")
         .append(data_elem)
@@ -97,8 +97,8 @@ fn test_message_has_no_ibb_data() {
 #[test]
 fn test_parse_ibb_open_default_stanza() {
     let elem = Element::builder("open", NS_IBB)
-        .attr("sid", "i781hf64")
-        .attr("block-size", "4096")
+        .attr(minidom::rxml::xml_ncname!("sid").to_owned(), "i781hf64")
+        .attr(minidom::rxml::xml_ncname!("block-size").to_owned(), "4096")
         .build();
     let iq = make_iq_set(elem);
 
@@ -111,9 +111,9 @@ fn test_parse_ibb_open_default_stanza() {
 #[test]
 fn test_parse_ibb_open_message_stanza() {
     let elem = Element::builder("open", NS_IBB)
-        .attr("sid", "sess1")
-        .attr("block-size", "1024")
-        .attr("stanza", "message")
+        .attr(minidom::rxml::xml_ncname!("sid").to_owned(), "sess1")
+        .attr(minidom::rxml::xml_ncname!("block-size").to_owned(), "1024")
+        .attr(minidom::rxml::xml_ncname!("stanza").to_owned(), "message")
         .build();
     let iq = make_iq_set(elem);
 
@@ -124,8 +124,8 @@ fn test_parse_ibb_open_message_stanza() {
 #[test]
 fn test_parse_ibb_open_max_block_size() {
     let elem = Element::builder("open", NS_IBB)
-        .attr("sid", "max-test")
-        .attr("block-size", "65535")
+        .attr(minidom::rxml::xml_ncname!("sid").to_owned(), "max-test")
+        .attr(minidom::rxml::xml_ncname!("block-size").to_owned(), "65535")
         .build();
     let iq = make_iq_set(elem);
 
@@ -136,8 +136,8 @@ fn test_parse_ibb_open_max_block_size() {
 #[test]
 fn test_parse_ibb_open_block_size_too_large() {
     let elem = Element::builder("open", NS_IBB)
-        .attr("sid", "big")
-        .attr("block-size", "65536")
+        .attr(minidom::rxml::xml_ncname!("sid").to_owned(), "big")
+        .attr(minidom::rxml::xml_ncname!("block-size").to_owned(), "65536")
         .build();
     let iq = make_iq_set(elem);
 
@@ -148,8 +148,8 @@ fn test_parse_ibb_open_block_size_too_large() {
 #[test]
 fn test_parse_ibb_open_zero_block_size() {
     let elem = Element::builder("open", NS_IBB)
-        .attr("sid", "zero")
-        .attr("block-size", "0")
+        .attr(minidom::rxml::xml_ncname!("sid").to_owned(), "zero")
+        .attr(minidom::rxml::xml_ncname!("block-size").to_owned(), "0")
         .build();
     let iq = make_iq_set(elem);
 
@@ -160,7 +160,7 @@ fn test_parse_ibb_open_zero_block_size() {
 #[test]
 fn test_parse_ibb_open_missing_sid() {
     let elem = Element::builder("open", NS_IBB)
-        .attr("block-size", "4096")
+        .attr(minidom::rxml::xml_ncname!("block-size").to_owned(), "4096")
         .build();
     let iq = make_iq_set(elem);
 
@@ -171,7 +171,7 @@ fn test_parse_ibb_open_missing_sid() {
 #[test]
 fn test_parse_ibb_open_missing_block_size() {
     let elem = Element::builder("open", NS_IBB)
-        .attr("sid", "no-bs")
+        .attr(minidom::rxml::xml_ncname!("sid").to_owned(), "no-bs")
         .build();
     let iq = make_iq_set(elem);
 
@@ -182,9 +182,9 @@ fn test_parse_ibb_open_missing_block_size() {
 #[test]
 fn test_parse_ibb_open_invalid_stanza_type() {
     let elem = Element::builder("open", NS_IBB)
-        .attr("sid", "bad-stanza")
-        .attr("block-size", "4096")
-        .attr("stanza", "presence")
+        .attr(minidom::rxml::xml_ncname!("sid").to_owned(), "bad-stanza")
+        .attr(minidom::rxml::xml_ncname!("block-size").to_owned(), "4096")
+        .attr(minidom::rxml::xml_ncname!("stanza").to_owned(), "presence")
         .build();
     let iq = make_iq_set(elem);
 
@@ -198,8 +198,8 @@ fn test_parse_ibb_data() {
     let encoded = BASE64.encode(raw_data);
 
     let mut data_elem = Element::builder("data", NS_IBB)
-        .attr("sid", "i781hf64")
-        .attr("seq", "0")
+        .attr(minidom::rxml::xml_ncname!("sid").to_owned(), "i781hf64")
+        .attr(minidom::rxml::xml_ncname!("seq").to_owned(), "0")
         .build();
     data_elem.append_text_node(encoded);
 
@@ -214,8 +214,8 @@ fn test_parse_ibb_data() {
 #[test]
 fn test_parse_ibb_data_empty() {
     let data_elem = Element::builder("data", NS_IBB)
-        .attr("sid", "empty-test")
-        .attr("seq", "5")
+        .attr(minidom::rxml::xml_ncname!("sid").to_owned(), "empty-test")
+        .attr(minidom::rxml::xml_ncname!("seq").to_owned(), "5")
         .build();
     let iq = make_iq_set(data_elem);
 
@@ -228,8 +228,8 @@ fn test_parse_ibb_data_empty() {
 #[test]
 fn test_parse_ibb_data_max_seq() {
     let data_elem = Element::builder("data", NS_IBB)
-        .attr("sid", "seq-test")
-        .attr("seq", "65535")
+        .attr(minidom::rxml::xml_ncname!("sid").to_owned(), "seq-test")
+        .attr(minidom::rxml::xml_ncname!("seq").to_owned(), "65535")
         .build();
     let iq = make_iq_set(data_elem);
 
@@ -239,7 +239,9 @@ fn test_parse_ibb_data_max_seq() {
 
 #[test]
 fn test_parse_ibb_data_missing_sid() {
-    let data_elem = Element::builder("data", NS_IBB).attr("seq", "0").build();
+    let data_elem = Element::builder("data", NS_IBB)
+        .attr(minidom::rxml::xml_ncname!("seq").to_owned(), "0")
+        .build();
     let iq = make_iq_set(data_elem);
 
     let err = parse_ibb_data_from_iq(&iq).expect_err("should fail");
@@ -249,7 +251,7 @@ fn test_parse_ibb_data_missing_sid() {
 #[test]
 fn test_parse_ibb_data_missing_seq() {
     let data_elem = Element::builder("data", NS_IBB)
-        .attr("sid", "no-seq")
+        .attr(minidom::rxml::xml_ncname!("sid").to_owned(), "no-seq")
         .build();
     let iq = make_iq_set(data_elem);
 
@@ -260,8 +262,8 @@ fn test_parse_ibb_data_missing_seq() {
 #[test]
 fn test_parse_ibb_data_invalid_base64() {
     let mut data_elem = Element::builder("data", NS_IBB)
-        .attr("sid", "bad-b64")
-        .attr("seq", "0")
+        .attr(minidom::rxml::xml_ncname!("sid").to_owned(), "bad-b64")
+        .attr(minidom::rxml::xml_ncname!("seq").to_owned(), "0")
         .build();
     data_elem.append_text_node("not-valid-base64!!!");
 
@@ -276,8 +278,8 @@ fn test_parse_ibb_data_from_message() {
     let encoded = BASE64.encode(raw_data);
 
     let mut data_elem = Element::builder("data", NS_IBB)
-        .attr("sid", "msg-test")
-        .attr("seq", "3")
+        .attr(minidom::rxml::xml_ncname!("sid").to_owned(), "msg-test")
+        .attr(minidom::rxml::xml_ncname!("seq").to_owned(), "3")
         .build();
     data_elem.append_text_node(encoded);
 
@@ -294,7 +296,7 @@ fn test_parse_ibb_data_from_message() {
 #[test]
 fn test_parse_ibb_close() {
     let close_elem = Element::builder("close", NS_IBB)
-        .attr("sid", "i781hf64")
+        .attr(minidom::rxml::xml_ncname!("sid").to_owned(), "i781hf64")
         .build();
     let iq = make_iq_set(close_elem);
 
@@ -318,16 +320,16 @@ fn test_parse_ibb_close_missing_sid() {
 #[test]
 fn test_build_ibb_result() {
     let open_elem = Element::builder("open", NS_IBB)
-        .attr("sid", "test")
-        .attr("block-size", "4096")
+        .attr(minidom::rxml::xml_ncname!("sid").to_owned(), "test")
+        .attr(minidom::rxml::xml_ncname!("block-size").to_owned(), "4096")
         .build();
     let iq = make_iq_set(open_elem);
 
     let result = build_ibb_result(&iq);
-    assert_eq!(result.id, "test-1");
-    assert_eq!(result.from, iq.to);
-    assert_eq!(result.to, iq.from);
-    assert!(matches!(result.payload, IqType::Result(None)));
+    assert_eq!(result.id(), "test-1");
+    assert_eq!(result.from(), iq.to());
+    assert_eq!(result.to(), iq.from());
+    assert!(matches!(result, Iq::Result { payload: None, .. }));
 }
 
 #[test]
@@ -341,8 +343,8 @@ fn test_build_ibb_open() {
         StanzaType::Iq,
     );
 
-    assert_eq!(iq.id, "open-1");
-    if let IqType::Set(elem) = &iq.payload {
+    assert_eq!(iq.id(), "open-1");
+    if let Iq::Set { payload: elem, .. } = &iq {
         assert_eq!(elem.name(), "open");
         assert_eq!(elem.ns(), NS_IBB);
         assert_eq!(elem.attr("sid"), Some("session-abc"));
@@ -365,7 +367,7 @@ fn test_build_ibb_data_iq() {
         raw,
     );
 
-    if let IqType::Set(elem) = &iq.payload {
+    if let Iq::Set { payload: elem, .. } = &iq {
         assert_eq!(elem.name(), "data");
         assert_eq!(elem.ns(), NS_IBB);
         assert_eq!(elem.attr("sid"), Some("session-abc"));
@@ -401,7 +403,7 @@ fn test_build_ibb_close() {
         "session-abc",
     );
 
-    if let IqType::Set(elem) = &iq.payload {
+    if let Iq::Set { payload: elem, .. } = &iq {
         assert_eq!(elem.name(), "close");
         assert_eq!(elem.ns(), NS_IBB);
         assert_eq!(elem.attr("sid"), Some("session-abc"));
@@ -417,37 +419,37 @@ fn test_build_ibb_close() {
 #[test]
 fn test_build_ibb_not_acceptable() {
     let open_elem = Element::builder("open", NS_IBB)
-        .attr("sid", "rejected")
-        .attr("block-size", "4096")
+        .attr(minidom::rxml::xml_ncname!("sid").to_owned(), "rejected")
+        .attr(minidom::rxml::xml_ncname!("block-size").to_owned(), "4096")
         .build();
     let iq = make_iq_set(open_elem);
 
     let err_iq = build_ibb_not_acceptable(&iq);
-    assert_eq!(err_iq.id, "test-1");
-    assert!(matches!(err_iq.payload, IqType::Error(_)));
+    assert_eq!(err_iq.id(), "test-1");
+    assert!(matches!(err_iq, Iq::Error { .. }));
 }
 
 #[test]
 fn test_build_ibb_resource_constraint() {
     let open_elem = Element::builder("open", NS_IBB)
-        .attr("sid", "too-big")
-        .attr("block-size", "65535")
+        .attr(minidom::rxml::xml_ncname!("sid").to_owned(), "too-big")
+        .attr(minidom::rxml::xml_ncname!("block-size").to_owned(), "65535")
         .build();
     let iq = make_iq_set(open_elem);
 
     let err_iq = build_ibb_resource_constraint(&iq);
-    assert!(matches!(err_iq.payload, IqType::Error(_)));
+    assert!(matches!(err_iq, Iq::Error { .. }));
 }
 
 #[test]
 fn test_build_ibb_item_not_found() {
     let close_elem = Element::builder("close", NS_IBB)
-        .attr("sid", "unknown")
+        .attr(minidom::rxml::xml_ncname!("sid").to_owned(), "unknown")
         .build();
     let iq = make_iq_set(close_elem);
 
     let err_iq = build_ibb_item_not_found(&iq);
-    assert!(matches!(err_iq.payload, IqType::Error(_)));
+    assert!(matches!(err_iq, Iq::Error { .. }));
 }
 
 // =========================================================================

@@ -25,97 +25,97 @@ repository = "https://github.com/waddle-social/waddle"
 
 [workspace.dependencies]
 # Core Runtime & Async
-tokio = { version = "1.43", features = ["full"] }
+tokio = { version = "1.52", features = ["full"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 tower = "0.5"
 futures = "0.3"
 
 # Web Framework (Server)
-axum = { version = "0.7", features = ["ws"] }
-axum-extra = { version = "0.9", features = ["typed-header"] }
+axum = { version = "0.8", features = ["ws"] }
+axum-extra = { version = "0.12", features = ["typed-header"] }
 tower-http = { version = "0.6", features = ["cors", "compression-gzip", "trace"] }
 
 # CLI TUI (Client)
-ratatui = "0.29"
-crossterm = "0.28"
+ratatui = "0.30"
+crossterm = "0.29"
 tui-textarea = "0.7"
 
 # Database
 sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "sqlite", "postgres", "macros", "chrono", "uuid"] }
 
 # Actor Framework
-kameo = "0.15"
+kameo = "0.20"
 
-jid = { version = "0.11", features = ["serde"] }
-xmpp-parsers = "0.21"
-minidom = "0.16"
-rxml = "0.12"
-quick-xml = "0.37.5"
-dashmap = "6.0"
+jid = { version = "0.12", features = ["serde"] }
+xmpp-parsers = "0.22"
+minidom = "0.18"
+rxml = "0.14"
+quick-xml = "0.40.1"
+dashmap = "6.2"
 
-tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
+tokio-tungstenite = { version = "0.29", features = ["native-tls"] }
 
 # Object Storage
 bytes = "1"
-object_store = { version = "0.11", features = ["aws"] }
+object_store = { version = "0.13", features = ["aws"] }
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-toml = "0.8"
+toml = "1.1"
 
 # Error Handling
 thiserror = "2.0"
 anyhow = "1.0"
 
 # HTTP Client
-reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+reqwest = { version = "0.13", features = ["json", "rustls"], default-features = false }
 
 # CLI Arguments & Config
-clap = { version = "4.5", features = ["derive"] }
-config = "0.14"
-dirs = "5.0"
+clap = { version = "4.6", features = ["derive"] }
+config = "0.15"
+dirs = "6.0"
 
 # Observability
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
-opentelemetry = { version = "0.28", features = ["logs"] }
-opentelemetry_sdk = { version = "0.28", features = ["rt-tokio", "logs"] }
-opentelemetry-otlp = { version = "0.28", features = ["grpc-tonic", "metrics", "logs"] }
-opentelemetry-appender-tracing = "0.28"
-opentelemetry-http = "0.28"
-tracing-opentelemetry = "0.29"
+opentelemetry = { version = "0.32", features = ["logs"] }
+opentelemetry_sdk = { version = "0.32", features = ["rt-tokio", "logs"] }
+opentelemetry-otlp = { version = "0.32", features = ["grpc-tonic", "metrics", "logs"] }
+opentelemetry-appender-tracing = "0.32"
+opentelemetry-http = "0.32"
+tracing-opentelemetry = "0.33"
 
 # Security/Crypto
 rustls = "0.23"
-rustls-acme = { version = "0.15.1", default-features = false, features = ["ring", "tokio", "tower", "webpki-roots", "tls12"] }
-hmac = "0.12"
-sha1 = "0.10"
-sha2 = "0.10"
+rustls-acme = { version = "0.15.2", default-features = false, features = ["ring", "tokio", "tower", "webpki-roots", "tls12"] }
+hmac = "0.13"
+sha1 = "0.11"
+sha2 = "0.11"
 p256 = { version = "0.13", features = ["ecdsa", "jwk"] }
 elliptic-curve = { version = "0.13", features = ["jwk"] }
 argon2 = "0.5"
 zeroize = { version = "1", features = ["derive"] }
 
 # Utilities
-uuid = { version = "1.11", features = ["v4", "v7", "serde", "js"] }
+uuid = { version = "1.23", features = ["v4", "v7", "serde", "js"] }
 chrono = { version = "0.4", features = ["serde"] }
 url = "2.5"
 base64 = "0.22"
-rand = "0.9"
+rand = "0.10"
 hex = "0.4"
-lru = "0.12"
-regex = "1.10"
-jsonwebtoken = "9.3"
+lru = "0.18"
+regex = "1.12"
+jsonwebtoken = "10.4"
 
 # Markdown/Syntax (CLI)
-pulldown-cmark = "0.12"
-syntect = "5.2"
+pulldown-cmark = "0.13"
+syntect = "5.3"
 
 # WebAssembly Extension Runtime
-wasmtime = { version = "43", features = ["component-model", "async"] }
-wasmtime-wasi = "43"
-wasmtime-wasi-http = "43"
+wasmtime = { version = "44", features = ["component-model", "async"] }
+wasmtime-wasi = "44"
+wasmtime-wasi-http = "44"
 
 
 [profile.release]

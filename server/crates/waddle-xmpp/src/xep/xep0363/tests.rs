@@ -3,14 +3,17 @@ use super::*;
 #[test]
 fn test_is_upload_request() {
     let request_elem = Element::builder("request", NS_HTTP_UPLOAD)
-        .attr("filename", "test.jpg")
-        .attr("size", "12345")
+        .attr(
+            minidom::rxml::xml_ncname!("filename").to_owned(),
+            "test.jpg",
+        )
+        .attr(minidom::rxml::xml_ncname!("size").to_owned(), "12345")
         .build();
-    let iq = Iq {
+    let iq = Iq::Get {
         from: None,
         to: None,
         id: "upload-1".to_string(),
-        payload: xmpp_parsers::iq::IqType::Get(request_elem),
+        payload: request_elem,
     };
 
     assert!(is_upload_request(&iq));
@@ -19,14 +22,17 @@ fn test_is_upload_request() {
 #[test]
 fn test_is_not_upload_request_wrong_ns() {
     let elem = Element::builder("request", "wrong:namespace")
-        .attr("filename", "test.jpg")
-        .attr("size", "12345")
+        .attr(
+            minidom::rxml::xml_ncname!("filename").to_owned(),
+            "test.jpg",
+        )
+        .attr(minidom::rxml::xml_ncname!("size").to_owned(), "12345")
         .build();
-    let iq = Iq {
+    let iq = Iq::Get {
         from: None,
         to: None,
         id: "test-1".to_string(),
-        payload: xmpp_parsers::iq::IqType::Get(elem),
+        payload: elem,
     };
 
     assert!(!is_upload_request(&iq));
@@ -35,14 +41,17 @@ fn test_is_not_upload_request_wrong_ns() {
 #[test]
 fn test_is_not_upload_request_wrong_type() {
     let elem = Element::builder("request", NS_HTTP_UPLOAD)
-        .attr("filename", "test.jpg")
-        .attr("size", "12345")
+        .attr(
+            minidom::rxml::xml_ncname!("filename").to_owned(),
+            "test.jpg",
+        )
+        .attr(minidom::rxml::xml_ncname!("size").to_owned(), "12345")
         .build();
-    let iq = Iq {
+    let iq = Iq::Set {
         from: None,
         to: None,
         id: "test-2".to_string(),
-        payload: xmpp_parsers::iq::IqType::Set(elem),
+        payload: elem,
     };
 
     assert!(!is_upload_request(&iq));
@@ -51,15 +60,21 @@ fn test_is_not_upload_request_wrong_type() {
 #[test]
 fn test_parse_upload_request_full() {
     let request_elem = Element::builder("request", NS_HTTP_UPLOAD)
-        .attr("filename", "vacation.jpg")
-        .attr("size", "23456")
-        .attr("content-type", "image/jpeg")
+        .attr(
+            minidom::rxml::xml_ncname!("filename").to_owned(),
+            "vacation.jpg",
+        )
+        .attr(minidom::rxml::xml_ncname!("size").to_owned(), "23456")
+        .attr(
+            minidom::rxml::xml_ncname!("content-type").to_owned(),
+            "image/jpeg",
+        )
         .build();
-    let iq = Iq {
+    let iq = Iq::Get {
         from: Some("user@example.com".parse().unwrap()),
         to: Some("upload.example.com".parse().unwrap()),
         id: "upload-1".to_string(),
-        payload: xmpp_parsers::iq::IqType::Get(request_elem),
+        payload: request_elem,
     };
 
     let request = parse_upload_request(&iq).unwrap();
@@ -72,14 +87,17 @@ fn test_parse_upload_request_full() {
 #[test]
 fn test_parse_upload_request_minimal() {
     let request_elem = Element::builder("request", NS_HTTP_UPLOAD)
-        .attr("filename", "file.bin")
-        .attr("size", "100")
+        .attr(
+            minidom::rxml::xml_ncname!("filename").to_owned(),
+            "file.bin",
+        )
+        .attr(minidom::rxml::xml_ncname!("size").to_owned(), "100")
         .build();
-    let iq = Iq {
+    let iq = Iq::Get {
         from: None,
         to: None,
         id: "upload-2".to_string(),
-        payload: xmpp_parsers::iq::IqType::Get(request_elem),
+        payload: request_elem,
     };
 
     let request = parse_upload_request(&iq).unwrap();
@@ -92,13 +110,13 @@ fn test_parse_upload_request_minimal() {
 #[test]
 fn test_parse_upload_request_missing_filename() {
     let request_elem = Element::builder("request", NS_HTTP_UPLOAD)
-        .attr("size", "100")
+        .attr(minidom::rxml::xml_ncname!("size").to_owned(), "100")
         .build();
-    let iq = Iq {
+    let iq = Iq::Get {
         from: None,
         to: None,
         id: "upload-3".to_string(),
-        payload: xmpp_parsers::iq::IqType::Get(request_elem),
+        payload: request_elem,
     };
 
     let result = parse_upload_request(&iq);
@@ -108,13 +126,16 @@ fn test_parse_upload_request_missing_filename() {
 #[test]
 fn test_parse_upload_request_missing_size() {
     let request_elem = Element::builder("request", NS_HTTP_UPLOAD)
-        .attr("filename", "test.txt")
+        .attr(
+            minidom::rxml::xml_ncname!("filename").to_owned(),
+            "test.txt",
+        )
         .build();
-    let iq = Iq {
+    let iq = Iq::Get {
         from: None,
         to: None,
         id: "upload-4".to_string(),
-        payload: xmpp_parsers::iq::IqType::Get(request_elem),
+        payload: request_elem,
     };
 
     let result = parse_upload_request(&iq);
@@ -124,14 +145,20 @@ fn test_parse_upload_request_missing_size() {
 #[test]
 fn test_parse_upload_request_invalid_size() {
     let request_elem = Element::builder("request", NS_HTTP_UPLOAD)
-        .attr("filename", "test.txt")
-        .attr("size", "not-a-number")
+        .attr(
+            minidom::rxml::xml_ncname!("filename").to_owned(),
+            "test.txt",
+        )
+        .attr(
+            minidom::rxml::xml_ncname!("size").to_owned(),
+            "not-a-number",
+        )
         .build();
-    let iq = Iq {
+    let iq = Iq::Get {
         from: None,
         to: None,
         id: "upload-5".to_string(),
-        payload: xmpp_parsers::iq::IqType::Get(request_elem),
+        payload: request_elem,
     };
 
     let result = parse_upload_request(&iq);
@@ -141,14 +168,17 @@ fn test_parse_upload_request_invalid_size() {
 #[test]
 fn test_parse_upload_request_zero_size() {
     let request_elem = Element::builder("request", NS_HTTP_UPLOAD)
-        .attr("filename", "test.txt")
-        .attr("size", "0")
+        .attr(
+            minidom::rxml::xml_ncname!("filename").to_owned(),
+            "test.txt",
+        )
+        .attr(minidom::rxml::xml_ncname!("size").to_owned(), "0")
         .build();
-    let iq = Iq {
+    let iq = Iq::Get {
         from: None,
         to: None,
         id: "upload-6".to_string(),
-        payload: xmpp_parsers::iq::IqType::Get(request_elem),
+        payload: request_elem,
     };
 
     let result = parse_upload_request(&iq);
@@ -158,14 +188,17 @@ fn test_parse_upload_request_zero_size() {
 #[test]
 fn test_build_upload_slot_response() {
     let request_elem = Element::builder("request", NS_HTTP_UPLOAD)
-        .attr("filename", "test.jpg")
-        .attr("size", "1000")
+        .attr(
+            minidom::rxml::xml_ncname!("filename").to_owned(),
+            "test.jpg",
+        )
+        .attr(minidom::rxml::xml_ncname!("size").to_owned(), "1000")
         .build();
-    let original_iq = Iq {
+    let original_iq = Iq::Get {
         from: Some("user@example.com".parse().unwrap()),
         to: Some("upload.example.com".parse().unwrap()),
         id: "slot-1".to_string(),
-        payload: xmpp_parsers::iq::IqType::Get(request_elem),
+        payload: request_elem,
     };
 
     let slot = UploadSlot {
@@ -179,13 +212,20 @@ fn test_build_upload_slot_response() {
 
     let response = build_upload_slot_response(&original_iq, &slot);
 
-    assert_eq!(response.id, "slot-1");
+    assert_eq!(response.id(), "slot-1");
     assert!(matches!(
-        response.payload,
-        xmpp_parsers::iq::IqType::Result(Some(_))
+        response,
+        xmpp_parsers::iq::Iq::Result {
+            payload: Some(_),
+            ..
+        }
     ));
 
-    if let xmpp_parsers::iq::IqType::Result(Some(elem)) = &response.payload {
+    if let xmpp_parsers::iq::Iq::Result {
+        payload: Some(elem),
+        ..
+    } = &response
+    {
         assert_eq!(elem.name(), "slot");
         assert_eq!(elem.ns(), NS_HTTP_UPLOAD);
 
@@ -214,14 +254,17 @@ fn test_build_upload_slot_response() {
 #[test]
 fn test_build_upload_slot_response_no_headers() {
     let request_elem = Element::builder("request", NS_HTTP_UPLOAD)
-        .attr("filename", "test.txt")
-        .attr("size", "100")
+        .attr(
+            minidom::rxml::xml_ncname!("filename").to_owned(),
+            "test.txt",
+        )
+        .attr(minidom::rxml::xml_ncname!("size").to_owned(), "100")
         .build();
-    let original_iq = Iq {
+    let original_iq = Iq::Get {
         from: None,
         to: None,
         id: "slot-2".to_string(),
-        payload: xmpp_parsers::iq::IqType::Get(request_elem),
+        payload: request_elem,
     };
 
     let slot = UploadSlot {
@@ -232,7 +275,11 @@ fn test_build_upload_slot_response_no_headers() {
 
     let response = build_upload_slot_response(&original_iq, &slot);
 
-    if let xmpp_parsers::iq::IqType::Result(Some(elem)) = &response.payload {
+    if let xmpp_parsers::iq::Iq::Result {
+        payload: Some(elem),
+        ..
+    } = &response
+    {
         let put_elem = elem.get_child("put", NS_HTTP_UPLOAD).unwrap();
         assert!(put_elem.children().next().is_none());
     } else {
@@ -248,8 +295,8 @@ fn test_build_upload_error_file_too_large() {
     let error_response =
         build_upload_error("error-1", &UploadError::FileTooLarge { max_size: 10485760 });
 
-    assert!(error_response.contains("type=\"error\""));
-    assert!(error_response.contains("id=\"error-1\""));
+    assert!(error_response.contains("type='error'"));
+    assert!(error_response.contains("id='error-1'"));
     assert!(error_response.contains("<not-acceptable"));
     assert!(error_response.contains("<file-too-large"));
     assert!(error_response.contains("<max-file-size>10485760</max-file-size>"));
@@ -259,8 +306,8 @@ fn test_build_upload_error_file_too_large() {
 fn test_build_upload_error_not_allowed() {
     let error_response = build_upload_error("error-2", &UploadError::NotAllowed);
 
-    assert!(error_response.contains("type=\"error\""));
-    assert!(error_response.contains("id=\"error-2\""));
+    assert!(error_response.contains("type='error'"));
+    assert!(error_response.contains("id='error-2'"));
     assert!(error_response.contains("<forbidden"));
 }
 
@@ -268,7 +315,7 @@ fn test_build_upload_error_not_allowed() {
 fn test_build_upload_error_quota_reached() {
     let error_response = build_upload_error("error-3", &UploadError::QuotaReached);
 
-    assert!(error_response.contains("type=\"error\""));
+    assert!(error_response.contains("type='error'"));
     assert!(error_response.contains("<resource-constraint"));
     assert!(error_response.contains("<retry"));
 }

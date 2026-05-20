@@ -5,7 +5,7 @@
 
 use super::AuthError;
 use chrono::{DateTime, Duration, NaiveDateTime, Utc};
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use kameo::actor::ActorRef;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -261,6 +261,7 @@ impl SessionManager {
 mod tests {
     use super::{Session, SessionManager};
     use crate::db::{actor::DbActor, Database, MigrationRunner};
+    use kameo::actor::Spawn;
 
     #[tokio::test]
     async fn create_session_creates_missing_user_and_allows_existing_user() {
@@ -271,7 +272,7 @@ mod tests {
             .run(&db)
             .await
             .expect("migrations");
-        let actor = kameo::spawn(DbActor::new(db.clone()));
+        let actor = DbActor::spawn(DbActor::new(db.clone()));
         let manager = SessionManager::new(actor, Some(b"test-session-key"));
 
         let first = Session::new("user-1", "alice", "alice");

@@ -84,11 +84,11 @@ async fn establish_subscription_to_alice(alice: &mut WsXmppClient, bob: &mut WsX
         .await
         .expect("bob subscribes to alice");
     let subscribe = alice
-        .recv_matching(|frame| frame.contains("type=\"subscribe\""))
+        .recv_matching(|frame| frame.contains("type='subscribe'"))
         .await
         .expect("alice receives subscribe");
     assert!(
-        subscribe.contains("from=\"bob@localhost\""),
+        subscribe.contains("from='bob@localhost'"),
         "expected bob subscribe: {subscribe}"
     );
     alice
@@ -96,11 +96,11 @@ async fn establish_subscription_to_alice(alice: &mut WsXmppClient, bob: &mut WsX
         .await
         .expect("alice approves bob");
     let subscribed = bob
-        .recv_matching(|frame| frame.contains("type=\"subscribed\""))
+        .recv_matching(|frame| frame.contains("type='subscribed'"))
         .await
         .expect("bob receives approval");
     assert!(
-        subscribed.contains("from=\"alice@localhost\""),
+        subscribed.contains("from='alice@localhost'"),
         "expected alice approval: {subscribed}"
     );
     bob.send(r#"<presence xmlns="jabber:client"/>"#)
@@ -123,8 +123,12 @@ async fn websocket_directed_presence_routes_to_target_resource() {
         .recv_matching(|frame| frame.contains("directed hello"))
         .await
         .expect("directed presence delivery");
+    let has_from =
+        delivered.contains("from='bob@localhost/") || delivered.contains("from='bob@localhost/");
+    let has_to =
+        delivered.contains("to='alice@localhost/") || delivered.contains("to='alice@localhost/");
     assert!(
-        delivered.contains("from=\"bob@localhost/") && delivered.contains("to=\"alice@localhost/"),
+        has_from && has_to,
         "expected directed presence routed with full JIDs, got: {delivered}"
     );
 
@@ -154,7 +158,9 @@ async fn websocket_full_jid_probe_returns_rich_resource_presence() {
     .await
     .expect("bob probes alice full jid");
     let probe = bob
-        .recv_matching(|frame| frame.contains("from=\"alice@localhost/"))
+        .recv_matching(|frame| {
+            frame.contains("from='alice@localhost/") || frame.contains("from='alice@localhost/")
+        })
         .await
         .expect("probe response");
     assert!(
@@ -183,7 +189,7 @@ async fn websocket_blocking_prevents_presence_probe_response() {
         .await
         .expect("blocking set response");
     assert!(
-        block_response.contains("type=\"result\"") || block_response.contains("type='result'"),
+        block_response.contains("type='result'") || block_response.contains("type='result'"),
         "expected blocking result, got: {block_response}"
     );
 
@@ -193,7 +199,7 @@ async fn websocket_blocking_prevents_presence_probe_response() {
     assert_no_frame_matching(
         &mut bob,
         Duration::from_millis(250),
-        |frame| frame.contains("from=\"alice@localhost") || frame.contains("from='alice@localhost"),
+        |frame| frame.contains("from='alice@localhost") || frame.contains("from='alice@localhost"),
         "bob should not receive alice presence after being blocked",
     )
     .await;
@@ -217,12 +223,12 @@ async fn websocket_blocking_filters_presence_broadcast_to_subscriber() {
         .expect("send subscribe");
     let subscribe = alice
         .recv_matching(|frame| {
-            frame.contains("type=\"subscribe\"") || frame.contains("type='subscribe'")
+            frame.contains("type='subscribe'") || frame.contains("type='subscribe'")
         })
         .await
         .expect("alice subscribe request");
     assert!(
-        subscribe.contains("from=\"bob@localhost") || subscribe.contains("from='bob@localhost"),
+        subscribe.contains("from='bob@localhost") || subscribe.contains("from='bob@localhost"),
         "expected bob subscribe request, got: {subscribe}"
     );
 
@@ -232,12 +238,12 @@ async fn websocket_blocking_filters_presence_broadcast_to_subscriber() {
         .expect("send subscribed");
     let subscribed = bob
         .recv_matching(|frame| {
-            frame.contains("type=\"subscribed\"") || frame.contains("type='subscribed'")
+            frame.contains("type='subscribed'") || frame.contains("type='subscribed'")
         })
         .await
         .expect("bob subscribed response");
     assert!(
-        subscribed.contains("from=\"alice@localhost")
+        subscribed.contains("from='alice@localhost")
             || subscribed.contains("from='alice@localhost"),
         "expected alice subscribed response, got: {subscribed}"
     );
@@ -253,7 +259,7 @@ async fn websocket_blocking_filters_presence_broadcast_to_subscriber() {
         .await
         .expect("blocking set response");
     assert!(
-        block_response.contains("type=\"result\"") || block_response.contains("type='result'"),
+        block_response.contains("type='result'") || block_response.contains("type='result'"),
         "expected blocking result, got: {block_response}"
     );
 
@@ -290,12 +296,12 @@ async fn websocket_blocking_filters_presence_broadcast_when_subscriber_blocks_se
         .expect("send subscribe");
     let subscribe = alice
         .recv_matching(|frame| {
-            frame.contains("type=\"subscribe\"") || frame.contains("type='subscribe'")
+            frame.contains("type='subscribe'") || frame.contains("type='subscribe'")
         })
         .await
         .expect("alice subscribe request");
     assert!(
-        subscribe.contains("from=\"bob@localhost") || subscribe.contains("from='bob@localhost"),
+        subscribe.contains("from='bob@localhost") || subscribe.contains("from='bob@localhost"),
         "expected bob subscribe request, got: {subscribe}"
     );
 
@@ -305,12 +311,12 @@ async fn websocket_blocking_filters_presence_broadcast_when_subscriber_blocks_se
         .expect("send subscribed");
     let subscribed = bob
         .recv_matching(|frame| {
-            frame.contains("type=\"subscribed\"") || frame.contains("type='subscribed'")
+            frame.contains("type='subscribed'") || frame.contains("type='subscribed'")
         })
         .await
         .expect("bob subscribed response");
     assert!(
-        subscribed.contains("from=\"alice@localhost")
+        subscribed.contains("from='alice@localhost")
             || subscribed.contains("from='alice@localhost"),
         "expected alice subscribed response, got: {subscribed}"
     );
@@ -325,7 +331,7 @@ async fn websocket_blocking_filters_presence_broadcast_when_subscriber_blocks_se
         .await
         .expect("blocking set response");
     assert!(
-        block_response.contains("type=\"result\"") || block_response.contains("type='result'"),
+        block_response.contains("type='result'") || block_response.contains("type='result'"),
         "expected blocking result, got: {block_response}"
     );
 

@@ -156,7 +156,7 @@ mod tests {
         msg.from = Some(Jid::from(alice.clone()));
         msg.type_ = MessageType::Groupchat;
         msg.bodies
-            .insert(String::new(), xmpp_parsers::message::Body("hi".into()));
+            .insert(xmpp_parsers::message::Lang::new(), "hi".into());
 
         let events = run(&room, &alice, &occupants, &mut msg);
 
@@ -171,9 +171,9 @@ mod tests {
         let mut msg = Message::new(None::<Jid>);
         msg.from = Some(Jid::from(alice.clone()));
         msg.type_ = MessageType::Groupchat;
-        msg.id = Some("anchor".into());
+        msg.id = Some(xmpp_parsers::message::Id("anchor".into()));
         msg.bodies
-            .insert(String::new(), xmpp_parsers::message::Body("hi".into()));
+            .insert(xmpp_parsers::message::Lang::new(), "hi".into());
         msg.payloads
             .push(crate::xep::xep0333::build_markable_element());
 

@@ -9,17 +9,20 @@ use super::*;
 #[test]
 fn parse_disco_info_result_extracts_features() {
     let iq = Element::builder("iq", CLIENT_NS)
-        .attr("type", "result")
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "result")
         .append(
             Element::builder("query", DISCO_INFO_NS)
                 .append(
                     Element::builder("feature", DISCO_INFO_NS)
-                        .attr("var", UPLOAD_NS)
+                        .attr(minidom::rxml::xml_ncname!("var").to_owned(), UPLOAD_NS)
                         .build(),
                 )
                 .append(
                     Element::builder("feature", DISCO_INFO_NS)
-                        .attr("var", "jabber:iq:version")
+                        .attr(
+                            minidom::rxml::xml_ncname!("var").to_owned(),
+                            "jabber:iq:version",
+                        )
                         .build(),
                 )
                 .build(),
@@ -36,15 +39,15 @@ fn parse_disco_info_result_extracts_features() {
 #[test]
 fn parse_disco_info_result_extracts_data_form_metadata() {
     let iq = Element::builder("iq", CLIENT_NS)
-        .attr("type", "result")
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "result")
         .append(
             Element::builder("query", DISCO_INFO_NS)
                 .append(
                     Element::builder("x", DATA_FORMS_NS)
-                        .attr("type", "result")
+                        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "result")
                         .append(
                             Element::builder("field", DATA_FORMS_NS)
-                                .attr("var", "FORM_TYPE")
+                                .attr(minidom::rxml::xml_ncname!("var").to_owned(), "FORM_TYPE")
                                 .append(
                                     Element::builder("value", DATA_FORMS_NS)
                                         .append(PUBSUB_METADATA_FORM_TYPE)
@@ -54,7 +57,7 @@ fn parse_disco_info_result_extracts_data_form_metadata() {
                         )
                         .append(
                             Element::builder("field", DATA_FORMS_NS)
-                                .attr("var", "pubsub#type")
+                                .attr(minidom::rxml::xml_ncname!("var").to_owned(), "pubsub#type")
                                 .append(
                                     Element::builder("value", DATA_FORMS_NS)
                                         .append(SPACES_NS)
@@ -64,7 +67,7 @@ fn parse_disco_info_result_extracts_data_form_metadata() {
                         )
                         .append(
                             Element::builder("field", DATA_FORMS_NS)
-                                .attr("var", "pubsub#title")
+                                .attr(minidom::rxml::xml_ncname!("var").to_owned(), "pubsub#title")
                                 .append(
                                     Element::builder("value", DATA_FORMS_NS)
                                         .append("Engineering")
@@ -76,10 +79,10 @@ fn parse_disco_info_result_extracts_data_form_metadata() {
                 )
                 .append(
                     Element::builder("x", DATA_FORMS_NS)
-                        .attr("type", "result")
+                        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "result")
                         .append(
                             Element::builder("field", DATA_FORMS_NS)
-                                .attr("var", "FORM_TYPE")
+                                .attr(minidom::rxml::xml_ncname!("var").to_owned(), "FORM_TYPE")
                                 .append(
                                     Element::builder("value", DATA_FORMS_NS)
                                         .append("http://jabber.org/protocol/muc#roominfo")
@@ -89,7 +92,10 @@ fn parse_disco_info_result_extracts_data_form_metadata() {
                         )
                         .append(
                             Element::builder("field", DATA_FORMS_NS)
-                                .attr("var", "muc#roominfo_description")
+                                .attr(
+                                    minidom::rxml::xml_ncname!("var").to_owned(),
+                                    "muc#roominfo_description",
+                                )
                                 .append(
                                     Element::builder("value", DATA_FORMS_NS)
                                         .append("Project discussion")
@@ -122,14 +128,17 @@ fn parse_disco_info_result_extracts_data_form_metadata() {
 #[test]
 fn parse_disco_info_result_extracts_identities() {
     let iq = Element::builder("iq", CLIENT_NS)
-        .attr("type", "result")
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "result")
         .append(
             Element::builder("query", DISCO_INFO_NS)
                 .append(
                     Element::builder("identity", DISCO_INFO_NS)
-                        .attr("category", "store")
-                        .attr("type", "file")
-                        .attr("name", "HTTP File Upload")
+                        .attr(minidom::rxml::xml_ncname!("category").to_owned(), "store")
+                        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "file")
+                        .attr(
+                            minidom::rxml::xml_ncname!("name").to_owned(),
+                            "HTTP File Upload",
+                        )
                         .build(),
                 )
                 .build(),
@@ -147,18 +156,27 @@ fn parse_disco_info_result_extracts_identities() {
 #[test]
 fn parse_disco_items_result_extracts_items() {
     let iq = Element::builder("iq", CLIENT_NS)
-        .attr("type", "result")
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "result")
         .append(
             Element::builder("query", DISCO_ITEMS_NS)
                 .append(
                     Element::builder("item", DISCO_ITEMS_NS)
-                        .attr("jid", "upload.example.com")
-                        .attr("name", "Upload Service")
+                        .attr(
+                            minidom::rxml::xml_ncname!("jid").to_owned(),
+                            "upload.example.com",
+                        )
+                        .attr(
+                            minidom::rxml::xml_ncname!("name").to_owned(),
+                            "Upload Service",
+                        )
                         .build(),
                 )
                 .append(
                     Element::builder("item", DISCO_ITEMS_NS)
-                        .attr("jid", "muc.example.com")
+                        .attr(
+                            minidom::rxml::xml_ncname!("jid").to_owned(),
+                            "muc.example.com",
+                        )
                         .build(),
                 )
                 .build(),
@@ -266,15 +284,18 @@ fn space_from_disco_item_requires_spaces_metadata_type() {
 fn pubsub_items_parse_bookmark_channels_and_ignore_non_conference_payloads() {
     let space_id = SpaceNode::new("general").expect("space node");
     let iq = Element::builder("iq", CLIENT_NS)
-        .attr("type", "result")
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "result")
         .append(
             Element::builder("pubsub", PUBSUB_NS)
                 .append(
                     Element::builder("items", PUBSUB_NS)
-                        .attr("node", "general")
+                        .attr(minidom::rxml::xml_ncname!("node").to_owned(), "general")
                         .append(
                             Element::builder("item", PUBSUB_NS)
-                                .attr("id", "urn:xmpp:spaces:avatar:metadata:0")
+                                .attr(
+                                    minidom::rxml::xml_ncname!("id").to_owned(),
+                                    "urn:xmpp:spaces:avatar:metadata:0",
+                                )
                                 .append(
                                     Element::builder("metadata", "urn:xmpp:avatar:metadata")
                                         .build(),
@@ -283,18 +304,24 @@ fn pubsub_items_parse_bookmark_channels_and_ignore_non_conference_payloads() {
                         )
                         .append(
                             Element::builder("item", PUBSUB_NS)
-                                .attr("id", "chat@muc.example.com")
+                                .attr(
+                                    minidom::rxml::xml_ncname!("id").to_owned(),
+                                    "chat@muc.example.com",
+                                )
                                 .append(
                                     Element::builder("conference", BOOKMARKS_NS)
-                                        .attr("name", "Chat")
-                                        .attr("autojoin", "true")
+                                        .attr(minidom::rxml::xml_ncname!("name").to_owned(), "Chat")
+                                        .attr(
+                                            minidom::rxml::xml_ncname!("autojoin").to_owned(),
+                                            "true",
+                                        )
                                         .build(),
                                 )
                                 .build(),
                         )
                         .append(
                             Element::builder("item", PUBSUB_NS)
-                                .attr("id", "not-a-room")
+                                .attr(minidom::rxml::xml_ncname!("id").to_owned(), "not-a-room")
                                 .append(
                                     Element::builder("note", "urn:example:note")
                                         .append("ignore me")
@@ -342,21 +369,27 @@ fn discovered_channel_type_parses_waddle_metadata_values() {
 #[test]
 fn parse_upload_slot_extracts_urls_and_headers() {
     let iq = Element::builder("iq", CLIENT_NS)
-        .attr("type", "result")
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "result")
         .append(
             Element::builder("slot", UPLOAD_NS)
                 .append(
                     Element::builder("put", UPLOAD_NS)
-                        .attr("url", "https://example.com/upload/file.jpg")
+                        .attr(
+                            minidom::rxml::xml_ncname!("url").to_owned(),
+                            "https://example.com/upload/file.jpg",
+                        )
                         .append(
                             Element::builder("header", UPLOAD_NS)
-                                .attr("name", "Authorization")
+                                .attr(
+                                    minidom::rxml::xml_ncname!("name").to_owned(),
+                                    "Authorization",
+                                )
                                 .append("Bearer token123")
                                 .build(),
                         )
                         .append(
                             Element::builder("header", UPLOAD_NS)
-                                .attr("name", "Cookie")
+                                .attr(minidom::rxml::xml_ncname!("name").to_owned(), "Cookie")
                                 .append("session=abc")
                                 .build(),
                         )
@@ -364,7 +397,10 @@ fn parse_upload_slot_extracts_urls_and_headers() {
                 )
                 .append(
                     Element::builder("get", UPLOAD_NS)
-                        .attr("url", "https://cdn.example.com/file.jpg")
+                        .attr(
+                            minidom::rxml::xml_ncname!("url").to_owned(),
+                            "https://cdn.example.com/file.jpg",
+                        )
                         .build(),
                 )
                 .build(),
@@ -388,17 +424,23 @@ fn parse_upload_slot_extracts_urls_and_headers() {
 #[test]
 fn parse_upload_slot_no_headers_ok() {
     let iq = Element::builder("iq", CLIENT_NS)
-        .attr("type", "result")
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "result")
         .append(
             Element::builder("slot", UPLOAD_NS)
                 .append(
                     Element::builder("put", UPLOAD_NS)
-                        .attr("url", "https://example.com/upload/file.jpg")
+                        .attr(
+                            minidom::rxml::xml_ncname!("url").to_owned(),
+                            "https://example.com/upload/file.jpg",
+                        )
                         .build(),
                 )
                 .append(
                     Element::builder("get", UPLOAD_NS)
-                        .attr("url", "https://cdn.example.com/file.jpg")
+                        .attr(
+                            minidom::rxml::xml_ncname!("url").to_owned(),
+                            "https://cdn.example.com/file.jpg",
+                        )
                         .build(),
                 )
                 .build(),
@@ -484,15 +526,21 @@ fn build_and_parse_roster_result() {
     assert_eq!(query.attr("ver"), Some("ver-1"));
 
     let result = Element::builder("iq", CLIENT_NS)
-        .attr("type", "result")
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "result")
         .append(
             Element::builder("query", ROSTER_NS)
-                .attr("ver", "ver-2")
+                .attr(minidom::rxml::xml_ncname!("ver").to_owned(), "ver-2")
                 .append(
                     Element::builder("item", ROSTER_NS)
-                        .attr("jid", "alice@example.com")
-                        .attr("name", "Alice")
-                        .attr("subscription", "both")
+                        .attr(
+                            minidom::rxml::xml_ncname!("jid").to_owned(),
+                            "alice@example.com",
+                        )
+                        .attr(minidom::rxml::xml_ncname!("name").to_owned(), "Alice")
+                        .attr(
+                            minidom::rxml::xml_ncname!("subscription").to_owned(),
+                            "both",
+                        )
                         .append(
                             Element::builder("group", ROSTER_NS)
                                 .append("Friends")
@@ -533,7 +581,7 @@ fn build_and_parse_user_search_queries() {
     );
 
     let form_result = Element::builder("iq", CLIENT_NS)
-        .attr("type", "result")
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "result")
         .append(
             Element::builder("query", USER_SEARCH_NS)
                 .append(
@@ -551,12 +599,15 @@ fn build_and_parse_user_search_queries() {
     assert_eq!(parsed_form.fields, vec!["nick", "email"]);
 
     let result = Element::builder("iq", CLIENT_NS)
-        .attr("type", "result")
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "result")
         .append(
             Element::builder("query", USER_SEARCH_NS)
                 .append(
                     Element::builder("item", USER_SEARCH_NS)
-                        .attr("jid", "admin@localhost")
+                        .attr(
+                            minidom::rxml::xml_ncname!("jid").to_owned(),
+                            "admin@localhost",
+                        )
                         .append(
                             Element::builder("nick", USER_SEARCH_NS)
                                 .append("admin")

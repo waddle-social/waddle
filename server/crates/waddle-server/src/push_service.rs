@@ -8,7 +8,7 @@
 use std::{fmt, sync::Arc};
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use jid::BareJid;
 use minidom::Element;
 use sha2::Sha256;
@@ -16,7 +16,7 @@ use waddle_xmpp::pubsub::{Affiliation, NodeConfig, PubSubItem, PubSubRequest, Pu
 use waddle_xmpp::push::{PushError, PushSubscription};
 use waddle_xmpp::xep::xep0357::NS_PUSH;
 use waddle_xmpp::XmppError;
-use xmpp_parsers::iq::{Iq, IqType};
+use xmpp_parsers::iq::Iq;
 
 use crate::db::{Database, IntoParams};
 
@@ -1446,25 +1446,17 @@ impl DatabasePushServiceStore {
         iq: &Iq,
         publisher: &BareJid,
     ) -> Result<PushFanoutResult, XmppError> {
-        if !matches!(iq.payload, IqType::Set(_)) {
+        if !matches!(iq, Iq::Set { .. }) {
             return Err(XmppError::bad_request(Some(
                 "XEP-0357 Push Service publish requires an IQ set".to_string(),
             )));
         }
-        if iq
-            .from
-            .as_ref()
-            .is_some_and(|from| from.to_bare() != *publisher)
-        {
+        if iq.from().is_some_and(|from| from.to_bare() != *publisher) {
             return Err(XmppError::forbidden(Some(
                 "XEP-0357 Push Service publish sender does not match publisher".to_string(),
             )));
         }
-        if iq
-            .to
-            .as_ref()
-            .is_some_and(|to| to.to_string() != push_service_jid)
-        {
+        if iq.to().is_some_and(|to| to.to_string() != push_service_jid) {
             return Err(XmppError::bad_request(Some(
                 "XEP-0357 Push Service publish target does not match service".to_string(),
             )));
@@ -3106,10 +3098,10 @@ mod tests {
 
     fn publish_options_with_field(var: &str, value: &str) -> Element {
         Element::builder("x", waddle_xmpp::xep::NS_DATA_FORMS)
-            .attr("type", "submit")
+            .attr(minidom::rxml::xml_ncname!("type").to_owned(), "submit")
             .append(
                 Element::builder("field", waddle_xmpp::xep::NS_DATA_FORMS)
-                    .attr("var", "FORM_TYPE")
+                    .attr(minidom::rxml::xml_ncname!("var").to_owned(), "FORM_TYPE")
                     .append(
                         Element::builder("value", waddle_xmpp::xep::NS_DATA_FORMS)
                             .append(waddle_xmpp::xep::NS_PUBSUB_PUBLISH_OPTIONS)
@@ -3119,7 +3111,7 @@ mod tests {
             )
             .append(
                 Element::builder("field", waddle_xmpp::xep::NS_DATA_FORMS)
-                    .attr("var", var)
+                    .attr(minidom::rxml::xml_ncname!("var").to_owned(), var)
                     .append(
                         Element::builder("value", waddle_xmpp::xep::NS_DATA_FORMS)
                             .append(value)
@@ -3138,7 +3130,7 @@ mod tests {
         publish_options: Option<&Element>,
     ) -> Iq {
         let publish = Element::builder("publish", waddle_xmpp::pubsub::NS_PUBSUB)
-            .attr("node", node)
+            .attr(minidom::rxml::xml_ncname!("node").to_owned(), node)
             .append(item.to_element(waddle_xmpp::pubsub::NS_PUBSUB))
             .build();
         let mut pubsub = Element::builder("pubsub", waddle_xmpp::pubsub::NS_PUBSUB).append(publish);
@@ -3149,11 +3141,11 @@ mod tests {
                     .build(),
             );
         }
-        Iq {
+        Iq::Set {
             from: Some(publisher.clone().into()),
             to: Some(push_service_jid.parse().expect("push service jid")),
             id: "push-publish-test".to_string(),
-            payload: IqType::Set(pubsub.build()),
+            payload: pubsub.build(),
         }
     }
 

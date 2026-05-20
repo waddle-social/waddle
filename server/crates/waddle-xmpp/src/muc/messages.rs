@@ -4,7 +4,7 @@
 
 use jid::{BareJid, FullJid, Jid};
 use tracing::debug;
-use xmpp_parsers::message::{Message, MessageType, Subject};
+use xmpp_parsers::message::{Message, MessageType};
 
 use super::SubjectState;
 use crate::xep::xep0085::{self, ChatStateCarrier};
@@ -70,12 +70,12 @@ impl MucMessage {
 
     /// Get the message body text (first body if multiple languages).
     pub fn body_text(&self) -> Option<&str> {
-        self.message.bodies.iter().next().map(|b| b.1 .0.as_str())
+        self.message.bodies.iter().next().map(|b| b.1.as_str())
     }
 
     /// Get the message ID.
     pub fn id(&self) -> Option<&str> {
-        self.message.id.as_deref()
+        self.message.id.as_ref().map(|id| id.0.as_str())
     }
 
     /// Check if this message has a subject element.
@@ -90,7 +90,7 @@ impl MucMessage {
     ///
     /// Returns the subject text, or None if no subject is present.
     pub fn subject_text(&self) -> Option<&str> {
-        self.message.subjects.iter().next().map(|s| s.1 .0.as_str())
+        self.message.subjects.iter().next().map(|s| s.1.as_str())
     }
 
     /// Check if this message is a subject-only message (no body, has subject).
@@ -235,7 +235,8 @@ pub fn build_subject_message(
     match state {
         None => {
             msg.from = Some(Jid::from(room_jid.clone()));
-            msg.subjects.insert(String::new(), Subject(String::new()));
+            msg.subjects
+                .insert(xmpp_parsers::message::Lang::new(), String::new());
         }
         Some(state) => {
             let from = room_jid
@@ -253,7 +254,8 @@ pub fn build_subject_message(
             // still satisfy §7.2.15's "MUST return an empty
             // <subject/>" rule.
             if state.texts.is_empty() {
-                msg.subjects.insert(String::new(), Subject(String::new()));
+                msg.subjects
+                    .insert(xmpp_parsers::message::Lang::new(), String::new());
             } else {
                 state.texts.apply_to_message(&mut msg);
             }

@@ -34,8 +34,8 @@ pub struct MdsCatchupEntry {
 fn build_publish_options_form() -> Element {
     // XEP-0490 §3 mandates these exact publish-options values.
     let form_type = Element::builder("field", NS_DATA_FORMS)
-        .attr("var", "FORM_TYPE")
-        .attr("type", "hidden")
+        .attr(minidom::rxml::xml_ncname!("var").to_owned(), "FORM_TYPE")
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "hidden")
         .append(
             Element::builder("value", NS_DATA_FORMS)
                 .append(PUBSUB_PUBLISH_OPTIONS_FORM_TYPE)
@@ -49,7 +49,7 @@ fn build_publish_options_form() -> Element {
     Element::builder("publish-options", NS_PUBSUB)
         .append(
             Element::builder("x", NS_DATA_FORMS)
-                .attr("type", "submit")
+                .attr(minidom::rxml::xml_ncname!("type").to_owned(), "submit")
                 .append(form_type)
                 .append(persist)
                 .append(max_items)
@@ -62,7 +62,7 @@ fn build_publish_options_form() -> Element {
 
 fn field(var: &str, value: &str) -> Element {
     Element::builder("field", NS_DATA_FORMS)
-        .attr("var", var)
+        .attr(minidom::rxml::xml_ncname!("var").to_owned(), var)
         .append(
             Element::builder("value", NS_DATA_FORMS)
                 .append(value)
@@ -75,8 +75,8 @@ fn build_displayed_payload(stanza_id: &str, stanza_id_by: &str) -> Element {
     Element::builder("displayed", NS_MDS)
         .append(
             Element::builder("stanza-id", NS_STANZA_ID)
-                .attr("by", stanza_id_by)
-                .attr("id", stanza_id)
+                .attr(minidom::rxml::xml_ncname!("by").to_owned(), stanza_id_by)
+                .attr(minidom::rxml::xml_ncname!("id").to_owned(), stanza_id)
                 .build(),
         )
         .build()
@@ -92,11 +92,11 @@ pub fn build_mds_publish_iq(
     stanza_id_by: &str,
 ) -> Element {
     let item = Element::builder("item", NS_PUBSUB)
-        .attr("id", chat_id)
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), chat_id)
         .append(build_displayed_payload(stanza_id, stanza_id_by))
         .build();
     let publish = Element::builder("publish", NS_PUBSUB)
-        .attr("node", MDS_NODE)
+        .attr(minidom::rxml::xml_ncname!("node").to_owned(), MDS_NODE)
         .append(item)
         .build();
     let pubsub = Element::builder("pubsub", NS_PUBSUB)
@@ -104,8 +104,8 @@ pub fn build_mds_publish_iq(
         .append(build_publish_options_form())
         .build();
     Element::builder("iq", NS_CLIENT)
-        .attr("type", "set")
-        .attr("id", iq_id)
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "set")
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), iq_id)
         .append(pubsub)
         .build()
 }
@@ -114,12 +114,12 @@ pub fn build_mds_publish_iq(
 /// MDS node.
 pub fn build_mds_catchup_iq(iq_id: &str) -> Element {
     let items = Element::builder("items", NS_PUBSUB)
-        .attr("node", MDS_NODE)
+        .attr(minidom::rxml::xml_ncname!("node").to_owned(), MDS_NODE)
         .build();
     let pubsub = Element::builder("pubsub", NS_PUBSUB).append(items).build();
     Element::builder("iq", NS_CLIENT)
-        .attr("type", "get")
-        .attr("id", iq_id)
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "get")
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), iq_id)
         .append(pubsub)
         .build()
 }
@@ -129,15 +129,18 @@ pub fn build_mds_catchup_iq(iq_id: &str) -> Element {
 /// does not advertise XEP-0115 caps in its presence.
 pub fn build_mds_subscribe_iq(iq_id: &str, subscriber_bare_jid: &str) -> Element {
     let subscribe = Element::builder("subscribe", NS_PUBSUB)
-        .attr("node", MDS_NODE)
-        .attr("jid", subscriber_bare_jid)
+        .attr(minidom::rxml::xml_ncname!("node").to_owned(), MDS_NODE)
+        .attr(
+            minidom::rxml::xml_ncname!("jid").to_owned(),
+            subscriber_bare_jid,
+        )
         .build();
     let pubsub = Element::builder("pubsub", NS_PUBSUB)
         .append(subscribe)
         .build();
     Element::builder("iq", NS_CLIENT)
-        .attr("type", "set")
-        .attr("id", iq_id)
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "set")
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), iq_id)
         .append(pubsub)
         .build()
 }
@@ -226,11 +229,11 @@ mod tests {
         // quotes and other attributes with double quotes; the test
         // checks the substrings without pinning the quote style for
         // namespace-bearing attributes.
-        assert!(xml.contains(r#"node="urn:xmpp:mds:displayed:0""#), "{xml}");
-        assert!(xml.contains(r#"id="romeo@montague.lit""#), "{xml}");
+        assert!(xml.contains(r#"node='urn:xmpp:mds:displayed:0'"#), "{xml}");
+        assert!(xml.contains(r#"id='romeo@montague.lit'"#), "{xml}");
         assert!(xml.contains("urn:xmpp:mds:displayed:0"), "{xml}");
-        assert!(xml.contains(r#"by="juliet@capulet.lit""#), "{xml}");
-        assert!(xml.contains(r#"id="stanza-id-1""#), "{xml}");
+        assert!(xml.contains(r#"by='juliet@capulet.lit'"#), "{xml}");
+        assert!(xml.contains(r#"id='stanza-id-1'"#), "{xml}");
         // Publish-options form fields per XEP-0490 §3.
         assert!(xml.contains("pubsub#persist_items"), "{xml}");
         assert!(xml.contains("pubsub#max_items"), "{xml}");
@@ -254,8 +257,8 @@ mod tests {
     fn catchup_iq_targets_mds_node() {
         let iq = build_mds_catchup_iq("iq-cu-1");
         let xml = xml_of(&iq);
-        assert!(xml.contains(r#"type="get""#), "{xml}");
-        assert!(xml.contains(r#"node="urn:xmpp:mds:displayed:0""#), "{xml}");
+        assert!(xml.contains(r#"type='get'"#), "{xml}");
+        assert!(xml.contains(r#"node='urn:xmpp:mds:displayed:0'"#), "{xml}");
         assert!(xml.contains("<items"), "{xml}");
     }
 
@@ -263,8 +266,8 @@ mod tests {
     fn subscribe_iq_includes_jid_attribute() {
         let iq = build_mds_subscribe_iq("iq-sub-1", "alice@example.com");
         let xml = xml_of(&iq);
-        assert!(xml.contains(r#"node="urn:xmpp:mds:displayed:0""#), "{xml}");
-        assert!(xml.contains(r#"jid="alice@example.com""#), "{xml}");
+        assert!(xml.contains(r#"node='urn:xmpp:mds:displayed:0'"#), "{xml}");
+        assert!(xml.contains(r#"jid='alice@example.com'"#), "{xml}");
         assert!(xml.contains("<subscribe"), "{xml}");
     }
 

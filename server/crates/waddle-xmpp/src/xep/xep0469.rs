@@ -154,8 +154,8 @@ mod tests {
 
     fn make_conference(pinned: bool) -> Element {
         let mut elem = Element::builder("conference", "urn:xmpp:bookmarks:1")
-            .attr("name", "General")
-            .attr("autojoin", "true")
+            .attr(minidom::rxml::xml_ncname!("name").to_owned(), "General")
+            .attr(minidom::rxml::xml_ncname!("autojoin").to_owned(), "true")
             .build();
         if pinned {
             pin_bookmark(&mut elem);

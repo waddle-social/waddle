@@ -76,12 +76,12 @@ fn xep0308_classifier_accepts_spec_shape_only() {
     assert!(is_replace_element(&canonical));
 
     let wrong_ns = Element::builder("replace", "wrong:ns")
-        .attr("id", "msg-1")
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), "msg-1")
         .build();
     assert!(!is_replace_element(&wrong_ns));
 
     let wrong_name = Element::builder("correct", NS_MESSAGE_CORRECT)
-        .attr("id", "msg-1")
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), "msg-1")
         .build();
     assert!(!is_replace_element(&wrong_name));
 }
@@ -116,8 +116,16 @@ fn xep0308_build_correction_message_assigns_new_unique_id() {
     let first = build_correction_message(Some(to.clone()), Some(from.clone()), "fixed", "orig-1");
     let second = build_correction_message(Some(to), Some(from), "fixed again", "orig-1");
 
-    let first_id = first.id.as_deref().expect("correction has its own id");
-    let second_id = second.id.as_deref().expect("correction has its own id");
+    let first_id = first
+        .id
+        .as_ref()
+        .map(|id| id.0.as_str())
+        .expect("correction has its own id");
+    let second_id = second
+        .id
+        .as_ref()
+        .map(|id| id.0.as_str())
+        .expect("correction has its own id");
     assert_ne!(
         first_id, second_id,
         "consecutive corrections MUST get distinct ids (§3 \"new unique id\")"
@@ -148,7 +156,7 @@ fn xep0308_build_correction_message_carries_body_and_replace_reference() {
     let body = msg
         .bodies
         .get("")
-        .map(|b| b.0.as_str())
+        .map(|b| b.as_str())
         .expect("body present");
     assert_eq!(body, "I corrected this text");
 
@@ -226,7 +234,7 @@ fn xep0308_parse_returns_err_when_replace_id_empty() {
     let mut msg = Message::new(None::<jid::Jid>);
     msg.payloads.push(
         Element::builder("replace", NS_MESSAGE_CORRECT)
-            .attr("id", "")
+            .attr(minidom::rxml::xml_ncname!("id").to_owned(), "")
             .build(),
     );
     let err = parse_correction_from_message(&msg).expect_err("MissingId");

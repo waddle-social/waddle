@@ -32,7 +32,7 @@ scenario: #Scenario & {
 			id:     "cue-feed-disco"
 			type:   "result"
 			contains: [
-				"var=\"urn:xmpp:pubsub-social-feed:0\"",
+				"var='urn:xmpp:pubsub-social-feed:0'",
 			]
 		},
 		// 2. Publish a feed entry to the bootstrapped community feed
@@ -115,7 +115,7 @@ scenario: #Scenario & {
 			id:     "cue-feed-items"
 			type:   "result"
 			contains: [
-				"id=\"cue-post-1\"",
+				"id='cue-post-1'",
 				"urn:xmpp:pubsub-social-feed:0",
 				"First post",
 				"Hello community feed!",

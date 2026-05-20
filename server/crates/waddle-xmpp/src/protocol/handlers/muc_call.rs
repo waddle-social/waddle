@@ -35,7 +35,7 @@
 use std::sync::Arc;
 
 use minidom::Element;
-use xmpp_parsers::iq::{Iq, IqType};
+use xmpp_parsers::iq::Iq;
 use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
 
 use waddle_sfu::{CallId, Identity, MediaCapabilities, SfuService};
@@ -74,7 +74,7 @@ impl IqHandler for MucCallHandler {
     }
 
     fn handle(&self, iq: &Iq, ctx: &StanzaContext<'_>) -> Vec<OutboundEvent> {
-        let IqType::Set(payload) = &iq.payload else {
+        let Iq::Set { payload, .. } = iq else {
             return error_reply(
                 iq,
                 DefinedCondition::BadRequest,
@@ -165,13 +165,15 @@ impl MucCallHandler {
         let joined = Element::builder(JOINED, NS_WADDLE_MUC_CALL)
             .append(issued.to_element())
             .build();
-        let reply = Iq {
-            from: iq.to.clone(),
-            to: iq.from.clone(),
-            id: iq.id.clone(),
-            payload: IqType::Result(Some(joined)),
+        let reply = Iq::Result {
+            from: iq.to().cloned(),
+            to: iq.from().cloned(),
+            id: iq.id().to_string(),
+            payload: Some(joined),
         };
-        vec![OutboundEvent::SendStanza(Box::new(Stanza::Iq(reply)))]
+        vec![OutboundEvent::SendStanza(Box::new(Stanza::Iq(Box::new(
+            reply,
+        ))))]
     }
 
     fn handle_leave(
@@ -186,24 +188,29 @@ impl MucCallHandler {
         };
         let identity = Identity::from_jid(ctx.full_jid.clone());
         let _ = self.sfu.unregister_call_participant(&call_id, &identity);
-        let reply = Iq {
-            from: iq.to.clone(),
-            to: iq.from.clone(),
-            id: iq.id.clone(),
-            payload: IqType::Result(None),
+        let reply = Iq::Result {
+            from: iq.to().cloned(),
+            to: iq.from().cloned(),
+            id: iq.id().to_string(),
+            payload: None,
         };
-        vec![OutboundEvent::SendStanza(Box::new(Stanza::Iq(reply)))]
+        vec![OutboundEvent::SendStanza(Box::new(Stanza::Iq(Box::new(
+            reply,
+        ))))]
     }
 }
 
 fn error_reply(original: &Iq, cond: DefinedCondition, text: &str) -> Vec<OutboundEvent> {
-    let err = Iq {
-        from: original.to.clone(),
-        to: original.from.clone(),
-        id: original.id.clone(),
-        payload: IqType::Error(StanzaError::new(ErrorType::Cancel, cond, "en", text)),
+    let err = Iq::Error {
+        from: original.to().cloned(),
+        to: original.from().cloned(),
+        id: original.id().to_string(),
+        error: StanzaError::new(ErrorType::Cancel, cond, "en", text),
+        payload: None,
     };
-    vec![OutboundEvent::SendStanza(Box::new(Stanza::Iq(err)))]
+    vec![OutboundEvent::SendStanza(Box::new(Stanza::Iq(Box::new(
+        err,
+    ))))]
 }
 
 #[cfg(test)]
@@ -211,6 +218,7 @@ mod tests {
     use super::*;
     use chrono::Duration;
     use jid::FullJid;
+    use minidom::rxml::xml_ncname;
     use waddle_sfu::{
         ApiKey, ApiSecret, LiveKitSfu, SfuConfig, TurnHost, TurnSharedSecret, WebsocketUrl,
     };
@@ -244,13 +252,13 @@ mod tests {
 
     fn request_join_iq(room: &str) -> Iq {
         let payload = Element::builder(REQUEST_JOIN, NS_WADDLE_MUC_CALL)
-            .attr(ATTR_ROOM, room)
+            .attr(xml_ncname!("room").to_owned(), room)
             .build();
-        Iq {
-            from: Some("alice@waddle.test/desktop".parse().unwrap()),
-            to: Some(room.parse().unwrap()),
+        Iq::Set {
+            from: Some("alice@waddle.test/desktop".parse().expect("valid full jid")),
+            to: Some(room.parse().expect("valid jid")),
             id: "j1".into(),
-            payload: IqType::Set(payload),
+            payload,
         }
     }
 
@@ -273,8 +281,12 @@ mod tests {
         let Stanza::Iq(reply) = *stanza else {
             panic!("expected Iq")
         };
-        let IqType::Result(Some(elem)) = reply.payload else {
-            panic!("expected result with body, got {:?}", reply.payload);
+        let Iq::Result {
+            payload: Some(elem),
+            ..
+        } = *reply
+        else {
+            panic!("expected result with body");
         };
         assert_eq!(elem.name(), JOINED);
         assert_eq!(elem.ns(), NS_WADDLE_MUC_CALL);
@@ -309,20 +321,20 @@ mod tests {
         );
 
         let leave_payload = Element::builder(REQUEST_LEAVE, NS_WADDLE_MUC_CALL)
-            .attr(ATTR_ROOM, "room@muc.test")
+            .attr(xml_ncname!("room").to_owned(), "room@muc.test")
             .build();
-        let leave_iq = Iq {
+        let leave_iq = Iq::Set {
             from: Some("alice@waddle.test/desktop".parse().unwrap()),
             to: Some("room@muc.test".parse().unwrap()),
             id: "l1".into(),
-            payload: IqType::Set(leave_payload),
+            payload: leave_payload,
         };
         let events = handler.handle(&leave_iq, &ctx(&jid));
         let OutboundEvent::SendStanza(stanza) = events.into_iter().next().unwrap() else {
             panic!();
         };
         let Stanza::Iq(reply) = *stanza else { panic!() };
-        assert!(matches!(reply.payload, IqType::Result(None)));
+        assert!(matches!(*reply, Iq::Result { payload: None, .. }));
         assert_eq!(
             sfu.participant_count(&CallId::new("room@muc.test").unwrap()),
             0
@@ -334,11 +346,11 @@ mod tests {
         let sfu = fixture_sfu();
         let handler = MucCallHandler::new(sfu);
         let payload = Element::builder(REQUEST_JOIN, NS_WADDLE_MUC_CALL).build();
-        let iq = Iq {
-            from: Some("alice@waddle.test/desktop".parse().unwrap()),
-            to: Some("muc.test".parse().unwrap()),
+        let iq = Iq::Set {
+            from: Some("alice@waddle.test/desktop".parse().expect("valid full jid")),
+            to: Some("muc.test".parse().expect("valid jid")),
             id: "j2".into(),
-            payload: IqType::Set(payload),
+            payload,
         };
         let jid = test_jid();
         let events = handler.handle(&iq, &ctx(&jid));
@@ -346,7 +358,7 @@ mod tests {
             panic!();
         };
         let Stanza::Iq(reply) = *stanza else { panic!() };
-        let IqType::Error(err) = reply.payload else {
+        let Iq::Error { error: err, .. } = *reply else {
             panic!()
         };
         assert_eq!(err.defined_condition, DefinedCondition::BadRequest);
@@ -357,13 +369,13 @@ mod tests {
         let sfu = fixture_sfu();
         let handler = MucCallHandler::new(sfu);
         let payload = Element::builder(REQUEST_JOIN, NS_WADDLE_MUC_CALL)
-            .attr(ATTR_ROOM, "room@muc.test")
+            .attr(xml_ncname!("room").to_owned(), "room@muc.test")
             .build();
-        let iq = Iq {
-            from: Some("alice@waddle.test/desktop".parse().unwrap()),
-            to: Some("room@muc.test".parse().unwrap()),
+        let iq = Iq::Get {
+            from: Some("alice@waddle.test/desktop".parse().expect("valid full jid")),
+            to: Some("room@muc.test".parse().expect("valid jid")),
             id: "j3".into(),
-            payload: IqType::Get(payload),
+            payload,
         };
         let jid = test_jid();
         let events = handler.handle(&iq, &ctx(&jid));
@@ -371,7 +383,7 @@ mod tests {
             panic!();
         };
         let Stanza::Iq(reply) = *stanza else { panic!() };
-        let IqType::Error(err) = reply.payload else {
+        let Iq::Error { error: err, .. } = *reply else {
             panic!()
         };
         assert_eq!(err.defined_condition, DefinedCondition::BadRequest);
@@ -393,13 +405,13 @@ mod tests {
 
         let mixed_case_join = |from: &FullJid, room: &str| -> Iq {
             let payload = Element::builder(REQUEST_JOIN, NS_WADDLE_MUC_CALL)
-                .attr(ATTR_ROOM, room)
+                .attr(xml_ncname!("room").to_owned(), room)
                 .build();
-            Iq {
+            Iq::Set {
                 from: Some(jid::Jid::from(from.clone())),
-                to: Some(room.parse().unwrap()),
+                to: Some(room.parse().expect("valid jid")),
                 id: "case".into(),
-                payload: IqType::Set(payload),
+                payload,
             }
         };
 

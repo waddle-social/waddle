@@ -10,14 +10,14 @@ pub(super) async fn handle_last_activity_iq(
 ) -> Vec<String> {
     let Some(sender_jid) = sender_jid else {
         return vec![build_iq_error_xml_typed(
-            &iq.id,
+            iq.id(),
             response_from,
             response_to,
             not_authorized_iq_error("Authentication required."),
         )];
     };
 
-    let Some(target) = &iq.to else {
+    let Some(target) = iq.to() else {
         let response = build_last_activity_response(
             iq,
             state
@@ -59,7 +59,7 @@ pub(super) async fn handle_last_activity_iq(
             Err(error) => {
                 warn!(error = %error, "Failed to access database for last-activity block check");
                 return vec![build_iq_error_xml_typed(
-                    &iq.id,
+                    iq.id(),
                     response_from,
                     response_to,
                     internal_server_error_iq_error("Internal server error."),
@@ -73,7 +73,7 @@ pub(super) async fn handle_last_activity_iq(
         {
             Ok(true) => {
                 return vec![build_iq_error_xml_typed(
-                    &iq.id,
+                    iq.id(),
                     response_from,
                     response_to,
                     service_unavailable_iq_error("Service unavailable at this address."),
@@ -83,7 +83,7 @@ pub(super) async fn handle_last_activity_iq(
             Err(error) => {
                 warn!(error = %error, target = %target_bare, "Failed to check last-activity block state");
                 return vec![build_iq_error_xml_typed(
-                    &iq.id,
+                    iq.id(),
                     response_from,
                     response_to,
                     internal_server_error_iq_error("Internal server error."),
@@ -118,7 +118,7 @@ pub(super) async fn handle_last_activity_iq(
 
         let Some(node) = target_bare.node() else {
             return vec![build_iq_error_xml_typed(
-                &iq.id,
+                iq.id(),
                 response_from,
                 response_to,
                 service_unavailable_iq_error("Service unavailable at this address."),
@@ -129,7 +129,7 @@ pub(super) async fn handle_last_activity_iq(
         match native_user_store.user_exists(node.as_str(), domain).await {
             Ok(false) => {
                 return vec![build_iq_error_xml_typed(
-                    &iq.id,
+                    iq.id(),
                     response_from,
                     response_to,
                     service_unavailable_iq_error("Service unavailable at this address."),
@@ -137,7 +137,7 @@ pub(super) async fn handle_last_activity_iq(
             }
             Ok(true) => {
                 return vec![build_iq_error_xml_typed(
-                    &iq.id,
+                    iq.id(),
                     response_from,
                     response_to,
                     forbidden_iq_error("Operation not permitted."),
@@ -146,7 +146,7 @@ pub(super) async fn handle_last_activity_iq(
             Err(error) => {
                 warn!(error = %error, target = %target_bare, "Failed to check local user for last-activity query");
                 return vec![build_iq_error_xml_typed(
-                    &iq.id,
+                    iq.id(),
                     response_from,
                     response_to,
                     internal_server_error_iq_error("Internal server error."),
@@ -156,7 +156,7 @@ pub(super) async fn handle_last_activity_iq(
     }
 
     vec![build_iq_error_xml_typed(
-        &iq.id,
+        iq.id(),
         response_from,
         response_to,
         service_unavailable_iq_error("Service unavailable at this address."),

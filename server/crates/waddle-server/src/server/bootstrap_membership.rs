@@ -227,6 +227,7 @@ mod tests {
     use super::*;
     use crate::db::{Database, MigrationRunner};
     use crate::permissions::{CheckPermission, Permission};
+    use kameo::actor::Spawn;
     use std::sync::Arc;
 
     #[test]
@@ -248,7 +249,7 @@ mod tests {
             .run(&db)
             .await
             .expect("migrations");
-        let actor = kameo::spawn(PermissionActor::new_for_tests(db));
+        let actor = PermissionActor::spawn(PermissionActor::new_for_tests(db));
         let config = BootstrapMembershipConfig::new(vec!["rawkode".to_string()]);
 
         provision_user_membership(&actor, &config, "user-owner", "rawkode")
@@ -289,7 +290,7 @@ mod tests {
             .run(&db)
             .await
             .expect("migrations");
-        let actor = kameo::spawn(PermissionActor::new_for_tests(db));
+        let actor = PermissionActor::spawn(PermissionActor::new_for_tests(db));
         let config = BootstrapMembershipConfig::new(vec!["rawkode".to_string()]);
 
         actor

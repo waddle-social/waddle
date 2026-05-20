@@ -9,7 +9,7 @@ use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use jid::{BareJid, FullJid};
-use kameo::actor::ActorRef;
+use kameo::actor::{ActorRef, Spawn};
 use kameo::error::SendError;
 use kameo::message::Context;
 use kameo::Actor;
@@ -28,7 +28,6 @@ const CHILD_ACTOR_TIMEOUT: Duration = Duration::from_secs(2);
 /// All mutations are serialised through the actor mailbox, so no
 /// external synchronisation is required.
 #[derive(Actor)]
-#[actor(mailbox = bounded(1024))]
 pub struct UserRegistryActor {
     users: HashMap<BareJid, ActorRef<UserActor>>,
     poisoned_users: HashSet<BareJid>,
@@ -46,7 +45,7 @@ impl UserRegistryActor {
 
     fn spawn_user_actor(&mut self, bare_jid: BareJid) -> ActorRef<UserActor> {
         let actor = UserActor::new(bare_jid.clone());
-        let actor_ref = kameo::spawn(actor);
+        let actor_ref = UserActor::spawn(actor);
         self.users.insert(bare_jid, actor_ref.clone());
         actor_ref
     }

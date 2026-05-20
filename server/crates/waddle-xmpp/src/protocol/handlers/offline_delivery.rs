@@ -142,7 +142,7 @@ mod tests {
     use crate::xep::xep0334::{add_hint, Hint};
     use jid::{BareJid, FullJid};
     use waddle_xmpp_core::xep0359::build_stanza_id_element;
-    use xmpp_parsers::message::{Body, MessageType};
+    use xmpp_parsers::message::MessageType;
 
     fn full(s: &str) -> FullJid {
         s.parse().expect("valid full jid")
@@ -156,7 +156,8 @@ mod tests {
         let mut m = Message::new(Some(to.parse::<Jid>().expect("jid")));
         m.from = Some(from.parse::<Jid>().expect("jid"));
         m.type_ = MessageType::Chat;
-        m.bodies.insert(String::new(), Body(body.to_string()));
+        m.bodies
+            .insert(xmpp_parsers::message::Lang::new(), body.to_string());
         m
     }
 

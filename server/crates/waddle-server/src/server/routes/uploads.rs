@@ -1,8 +1,8 @@
 //! HTTP File Upload API Routes (XEP-0363)
 //!
 //! Provides HTTP endpoints for file upload and download:
-//! - PUT /api/upload/:slot_id - Upload a file to a pre-allocated slot
-//! - GET /api/files/:slot_id/:filename - Download an uploaded file
+//! - PUT /api/upload/{slot_id} - Upload a file to a pre-allocated slot
+//! - GET /api/files/{slot_id}/{filename} - Download an uploaded file
 //!
 //! Upload slots are created via the XMPP upload request flow (XEP-0363).
 //! This module handles the HTTP portion of the upload/download process.
@@ -82,18 +82,18 @@ fn upload_body_limit() -> DefaultBodyLimit {
 /// Create the uploads router
 pub fn router(upload_state: Arc<UploadState>) -> Router {
     Router::new()
-        // Upload endpoint (PUT /api/upload/:slot_id)
+        // Upload endpoint (PUT /api/upload/{slot_id})
         .route(
-            "/api/upload/:slot_id",
+            "/api/upload/{slot_id}",
             put(upload_handler).options(upload_options_handler),
         )
-        // Download endpoint (GET /api/files/:slot_id/:filename)
-        .route("/api/files/:slot_id/:filename", get(download_handler))
+        // Download endpoint (GET /api/files/{slot_id}/{filename})
+        .route("/api/files/{slot_id}/{filename}", get(download_handler))
         .layer(upload_body_limit())
         .with_state(upload_state)
 }
 
-/// OPTIONS /api/upload/:slot_id
+/// OPTIONS /api/upload/{slot_id}
 ///
 /// Explicit preflight response for XEP-0363 CORS checks.
 async fn upload_options_handler() -> impl IntoResponse {
@@ -296,7 +296,7 @@ fn is_slot_expired(expires_at: &str) -> bool {
 
 // === Handlers ===
 
-/// PUT /api/upload/:slot_id
+/// PUT /api/upload/{slot_id}
 ///
 /// Upload a file to a pre-allocated slot. The slot must:
 /// - Exist in the database

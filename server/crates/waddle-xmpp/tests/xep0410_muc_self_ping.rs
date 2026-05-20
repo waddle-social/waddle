@@ -19,7 +19,7 @@ use waddle_xmpp::xep::xep0410::{
     FEATURE_MUC_SELFPING, PING_TIMEOUT_SECS, RECOMMENDED_INTERVAL_SECS,
 };
 use xmpp_parsers::{
-    iq::{Iq, IqType},
+    iq::Iq,
     stanza_error::{DefinedCondition, ErrorType, StanzaError},
 };
 
@@ -32,11 +32,12 @@ fn occupant_jid() -> jid::Jid {
 }
 
 fn error_iq(condition: DefinedCondition) -> Iq {
-    Iq {
+    Iq::Error {
         from: Some("room@muc.example.com/mynick".parse().expect("valid")),
         to: Some("juliet@example.com/client".parse().expect("valid")),
         id: "sp-err".to_owned(),
-        payload: IqType::Error(StanzaError::new(ErrorType::Cancel, condition, "en", "")),
+        error: StanzaError::new(ErrorType::Cancel, condition, "en", ""),
+        payload: None,
     }
 }
 
@@ -71,11 +72,11 @@ fn xep_0410_recommended_constants_match_spec_intent() {
 #[test]
 fn xep_0410_build_self_ping_emits_canonical_iq_get_shape() {
     let iq = build_self_ping(None::<jid::Jid>, occupant_jid(), "sp-1");
-    assert_eq!(iq.id, "sp-1");
-    assert_eq!(iq.to, Some(occupant_jid()));
+    assert_eq!(iq.id(), "sp-1");
+    assert_eq!(iq.to().cloned(), Some(occupant_jid()));
     // Payload is `<ping xmlns='urn:xmpp:ping'/>` inside an `iq type='get'`,
     // matching the §2.2 canonical example.
-    let IqType::Get(elem) = &iq.payload else {
+    let Iq::Get { payload: elem, .. } = &iq else {
         panic!("self-ping must be type='get'");
     };
     assert_eq!(elem.name(), "ping");
@@ -90,7 +91,7 @@ fn xep_0410_build_self_ping_emits_canonical_iq_get_shape() {
 fn xep_0410_build_self_ping_round_trips_explicit_from_jid() {
     let from: jid::Jid = "juliet@example.com/laptop".parse().unwrap();
     let iq = build_self_ping(Some(from.clone()), occupant_jid(), "sp-2");
-    assert_eq!(iq.from, Some(from));
+    assert_eq!(iq.from().cloned(), Some(from));
 }
 
 // ── §2.2 receive-side classifier (`is_self_ping`) ─────────────────────
@@ -110,11 +111,11 @@ fn xep_0410_is_self_ping_rejects_bare_jid_destination() {
     // not a self-ping. Spec scope is occupant-JID destinations only.
     let bare: jid::Jid = "room@muc.example.com".parse().expect("valid bare jid");
     let ping_elem = Element::builder("ping", NS_PING).build();
-    let iq = Iq {
+    let iq = Iq::Get {
         from: None,
         to: Some(bare),
         id: "sp-bare".to_owned(),
-        payload: IqType::Get(ping_elem),
+        payload: ping_elem,
     };
     assert!(!is_self_ping(&iq));
 }
@@ -123,11 +124,11 @@ fn xep_0410_is_self_ping_rejects_bare_jid_destination() {
 fn xep_0410_is_self_ping_rejects_non_ping_payloads() {
     // A roster-query IQ to a full JID is NOT a self-ping.
     let other_elem = Element::builder("query", "jabber:iq:roster").build();
-    let iq = Iq {
+    let iq = Iq::Get {
         from: None,
         to: Some(occupant_jid()),
         id: "rq-1".to_owned(),
-        payload: IqType::Get(other_elem),
+        payload: other_elem,
     };
     assert!(!is_self_ping(&iq));
 }
@@ -135,11 +136,11 @@ fn xep_0410_is_self_ping_rejects_non_ping_payloads() {
 #[test]
 fn xep_0410_is_self_ping_rejects_ping_in_wrong_namespace() {
     let elem = Element::builder("ping", "urn:example:not-ping").build();
-    let iq = Iq {
+    let iq = Iq::Get {
         from: None,
         to: Some(occupant_jid()),
         id: "wrongns".to_owned(),
-        payload: IqType::Get(elem),
+        payload: elem,
     };
     assert!(!is_self_ping(&iq));
 }
@@ -161,11 +162,11 @@ fn xep_0410_is_self_ping_rejects_ping_in_wrong_namespace() {
 
 #[test]
 fn xep_0410_iq_result_interpreted_as_connected() {
-    let iq = Iq {
+    let iq = Iq::Result {
         from: Some(occupant_jid()),
         to: None,
         id: "sp-1".to_owned(),
-        payload: IqType::Result(None),
+        payload: None,
     };
     assert_eq!(interpret_self_ping_response(&iq), SelfPingResult::Connected);
 }

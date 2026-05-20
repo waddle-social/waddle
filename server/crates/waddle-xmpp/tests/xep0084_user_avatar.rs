@@ -220,8 +220,8 @@ fn xep0084_parse_metadata_rejects_wrong_wrapper_namespace() {
     let wrong = Element::builder("metadata", "attacker:ns")
         .append(
             Element::builder("info", "attacker:ns")
-                .attr("id", "fake")
-                .attr("type", "image/png")
+                .attr(minidom::rxml::xml_ncname!("id").to_owned(), "fake")
+                .attr(minidom::rxml::xml_ncname!("type").to_owned(), "image/png")
                 .build(),
         )
         .build();
@@ -246,7 +246,7 @@ fn xep0084_parse_metadata_rejects_info_without_id() {
     let no_id = Element::builder("metadata", NS_AVATAR_METADATA)
         .append(
             Element::builder("info", NS_AVATAR_METADATA)
-                .attr("type", "image/png")
+                .attr(minidom::rxml::xml_ncname!("type").to_owned(), "image/png")
                 .build(),
         )
         .build();
@@ -264,7 +264,7 @@ fn xep0084_parse_metadata_defaults_unspecified_type_to_image_png() {
     let no_type = Element::builder("metadata", NS_AVATAR_METADATA)
         .append(
             Element::builder("info", NS_AVATAR_METADATA)
-                .attr("id", "abc")
+                .attr(minidom::rxml::xml_ncname!("id").to_owned(), "abc")
                 .build(),
         )
         .build();
@@ -281,11 +281,11 @@ fn xep0084_parse_metadata_drops_malformed_numeric_attrs() {
     let elem = Element::builder("metadata", NS_AVATAR_METADATA)
         .append(
             Element::builder("info", NS_AVATAR_METADATA)
-                .attr("id", "abc")
-                .attr("type", "image/png")
-                .attr("width", "wide")
-                .attr("height", "")
-                .attr("bytes", "lots")
+                .attr(minidom::rxml::xml_ncname!("id").to_owned(), "abc")
+                .attr(minidom::rxml::xml_ncname!("type").to_owned(), "image/png")
+                .attr(minidom::rxml::xml_ncname!("width").to_owned(), "wide")
+                .attr(minidom::rxml::xml_ncname!("height").to_owned(), "")
+                .attr(minidom::rxml::xml_ncname!("bytes").to_owned(), "lots")
                 .build(),
         )
         .build();

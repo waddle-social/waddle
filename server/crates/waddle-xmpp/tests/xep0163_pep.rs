@@ -23,7 +23,7 @@ use waddle_xmpp::pubsub::{
 };
 use waddle_xmpp_core::disco::Feature;
 use waddle_xmpp_core::pubsub::node::AccessModel;
-use xmpp_parsers::iq::{Iq, IqType};
+use xmpp_parsers::iq::Iq;
 
 const NS_PUBSUB: &str = "http://jabber.org/protocol/pubsub";
 
@@ -81,15 +81,18 @@ fn make_pubsub_iq(to: Option<&str>) -> Iq {
     let pubsub = Element::builder("pubsub", NS_PUBSUB)
         .append(
             Element::builder("items", NS_PUBSUB)
-                .attr("node", "urn:xmpp:avatar:metadata")
+                .attr(
+                    minidom::rxml::xml_ncname!("node").to_owned(),
+                    "urn:xmpp:avatar:metadata",
+                )
                 .build(),
         )
         .build();
-    Iq {
+    Iq::Get {
         from: Some("alice@example.com/web".parse().expect("valid jid")),
         to: to.map(|s| s.parse().expect("valid jid")),
         id: "p-1".to_owned(),
-        payload: IqType::Get(pubsub),
+        payload: pubsub,
     }
 }
 
@@ -149,11 +152,11 @@ fn xep0163_non_pubsub_iq_is_never_a_pep_request() {
     // The classifier gates on `is_pubsub_iq` first — a roster IQ
     // (even one addressed to the user's bare JID) MUST NOT
     // classify as PEP.
-    let roster = Iq {
+    let roster = Iq::Get {
         from: Some("alice@example.com/web".parse().expect("valid jid")),
         to: Some("alice@example.com".parse().expect("valid jid")),
         id: "r-1".into(),
-        payload: IqType::Get(Element::builder("query", "jabber:iq:roster").build()),
+        payload: Element::builder("query", "jabber:iq:roster").build(),
     };
     let alice: jid::BareJid = "alice@example.com".parse().expect("valid jid");
     assert!(!is_pep_request(&roster, &alice));

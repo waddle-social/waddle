@@ -125,7 +125,10 @@ pub fn build_encrypted_element(enc: &EncryptedFile) -> Result<Element, Encrypted
     if enc.sources.is_empty() {
         return Err(EncryptedFileError::NoSources);
     }
-    let mut builder = Element::builder("encrypted", NS_ESFS).attr("cipher", enc.cipher.as_uri());
+    let mut builder = Element::builder("encrypted", NS_ESFS).attr(
+        minidom::rxml::xml_ncname!("cipher").to_owned(),
+        enc.cipher.as_uri(),
+    );
     builder = builder.append(
         Element::builder("key", NS_ESFS)
             .append(enc.key_b64.as_str())
@@ -139,7 +142,10 @@ pub fn build_encrypted_element(enc: &EncryptedFile) -> Result<Element, Encrypted
     for hash in &enc.hashes {
         builder = builder.append(
             Element::builder("hash", NS_HASHES)
-                .attr("algo", hash.algo.as_str())
+                .attr(
+                    minidom::rxml::xml_ncname!("algo").to_owned(),
+                    hash.algo.as_str(),
+                )
                 .append(hash.value_b64.as_str())
                 .build(),
         );
@@ -148,7 +154,10 @@ pub fn build_encrypted_element(enc: &EncryptedFile) -> Result<Element, Encrypted
     for url in &enc.sources {
         sources = sources.append(
             Element::builder("url-data", NS_URL_DATA)
-                .attr("target", url.as_str())
+                .attr(
+                    minidom::rxml::xml_ncname!("target").to_owned(),
+                    url.as_str(),
+                )
                 .build(),
         );
     }
@@ -256,7 +265,10 @@ mod tests {
     #[test]
     fn test_parse_requires_sources() {
         let elem = Element::builder("encrypted", NS_ESFS)
-            .attr("cipher", Cipher::Aes256GcmNoPadding.as_uri())
+            .attr(
+                minidom::rxml::xml_ncname!("cipher").to_owned(),
+                Cipher::Aes256GcmNoPadding.as_uri(),
+            )
             .append(Element::builder("key", NS_ESFS).append("k").build())
             .append(Element::builder("iv", NS_ESFS).append("v").build())
             .append(Element::builder("sources", NS_SFS).build())
@@ -270,7 +282,10 @@ mod tests {
     #[test]
     fn test_parse_rejects_unknown_cipher() {
         let elem = Element::builder("encrypted", NS_ESFS)
-            .attr("cipher", "urn:xmpp:ciphers:rot13:0")
+            .attr(
+                minidom::rxml::xml_ncname!("cipher").to_owned(),
+                "urn:xmpp:ciphers:rot13:0",
+            )
             .build();
         assert!(matches!(
             parse_encrypted_element(&elem),

@@ -186,7 +186,7 @@ async fn correction_without_target_id_returns_bad_request() {
         .await
         .expect("bad request error");
     assert!(
-        error.contains("type=\"error\""),
+        error.contains("type='error'"),
         "not an error stanza: {error}"
     );
 
@@ -223,7 +223,7 @@ async fn correction_after_leave_and_rejoin_under_same_nickname_is_forbidden() {
         .await
         .expect("send leave");
     client
-        .recv_matching(|frame| frame.contains("type=\"unavailable\""))
+        .recv_matching(|frame| frame.contains("type='unavailable'"))
         .await
         .expect("self-unavailable echo");
 
@@ -243,7 +243,7 @@ async fn correction_after_leave_and_rejoin_under_same_nickname_is_forbidden() {
         .await
         .expect("forbidden error after rejoin");
     assert!(
-        error.contains("type=\"error\""),
+        error.contains("type='error'"),
         "not an error stanza: {error}"
     );
 
@@ -283,7 +283,7 @@ async fn correction_from_different_occupant_returns_forbidden() {
         .await
         .expect("forbidden error");
     assert!(
-        error.contains("type=\"error\""),
+        error.contains("type='error'"),
         "not an error stanza: {error}"
     );
 

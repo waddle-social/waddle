@@ -184,15 +184,15 @@ fn test_update_sm_state() {
 #[test]
 fn test_is_isr_token_request() {
     use minidom::Element;
-    use xmpp_parsers::iq::{Iq, IqType};
+    use xmpp_parsers::iq::Iq;
 
     // Valid token-request IQ
     let token_request_elem = Element::builder("token-request", ISR_NS).build();
-    let iq = Iq {
+    let iq = Iq::Get {
         from: Some("user@example.com/resource".parse().unwrap()),
         to: Some("example.com".parse().unwrap()),
         id: "token-1".to_string(),
-        payload: IqType::Get(token_request_elem),
+        payload: token_request_elem,
     };
 
     assert!(is_isr_token_request(&iq));
@@ -201,15 +201,15 @@ fn test_is_isr_token_request() {
 #[test]
 fn test_is_not_isr_token_request_wrong_ns() {
     use minidom::Element;
-    use xmpp_parsers::iq::{Iq, IqType};
+    use xmpp_parsers::iq::Iq;
 
     // Wrong namespace
     let token_request_elem = Element::builder("token-request", "wrong:ns").build();
-    let iq = Iq {
+    let iq = Iq::Get {
         from: None,
         to: None,
         id: "token-1".to_string(),
-        payload: IqType::Get(token_request_elem),
+        payload: token_request_elem,
     };
 
     assert!(!is_isr_token_request(&iq));
@@ -218,15 +218,15 @@ fn test_is_not_isr_token_request_wrong_ns() {
 #[test]
 fn test_is_not_isr_token_request_wrong_element() {
     use minidom::Element;
-    use xmpp_parsers::iq::{Iq, IqType};
+    use xmpp_parsers::iq::Iq;
 
     // Wrong element name
     let other_elem = Element::builder("other", ISR_NS).build();
-    let iq = Iq {
+    let iq = Iq::Get {
         from: None,
         to: None,
         id: "token-1".to_string(),
-        payload: IqType::Get(other_elem),
+        payload: other_elem,
     };
 
     assert!(!is_isr_token_request(&iq));
@@ -235,15 +235,15 @@ fn test_is_not_isr_token_request_wrong_element() {
 #[test]
 fn test_is_not_isr_token_request_set_type() {
     use minidom::Element;
-    use xmpp_parsers::iq::{Iq, IqType};
+    use xmpp_parsers::iq::Iq;
 
     // Set type instead of Get
     let token_request_elem = Element::builder("token-request", ISR_NS).build();
-    let iq = Iq {
+    let iq = Iq::Set {
         from: None,
         to: None,
         id: "token-1".to_string(),
-        payload: IqType::Set(token_request_elem),
+        payload: token_request_elem,
     };
 
     assert!(!is_isr_token_request(&iq));
@@ -252,14 +252,14 @@ fn test_is_not_isr_token_request_set_type() {
 #[test]
 fn test_build_isr_token_result() {
     use minidom::Element;
-    use xmpp_parsers::iq::{Iq, IqType};
+    use xmpp_parsers::iq::Iq;
 
     let token_request_elem = Element::builder("token-request", ISR_NS).build();
-    let original_iq = Iq {
+    let original_iq = Iq::Get {
         from: Some("user@example.com/resource".parse().unwrap()),
         to: Some("example.com".parse().unwrap()),
         id: "token-1".to_string(),
-        payload: IqType::Get(token_request_elem),
+        payload: token_request_elem,
     };
 
     let isr_token = IsrToken::new(
@@ -270,18 +270,22 @@ fn test_build_isr_token_result() {
 
     let result = build_isr_token_result(&original_iq, &isr_token);
 
-    assert_eq!(result.id, "token-1");
+    assert_eq!(result.id(), "token-1");
     assert_eq!(
-        result.from.as_ref().map(|j| j.to_string()),
+        result.from().map(|j| j.to_string()),
         Some("example.com".to_string())
     );
     assert_eq!(
-        result.to.as_ref().map(|j| j.to_string()),
+        result.to().map(|j| j.to_string()),
         Some("user@example.com/resource".to_string())
     );
 
     // Check the payload is a Result with a token element
-    if let IqType::Result(Some(elem)) = &result.payload {
+    if let Iq::Result {
+        payload: Some(elem),
+        ..
+    } = &result
+    {
         assert_eq!(elem.name(), "token");
         assert_eq!(elem.ns(), ISR_NS);
         assert!(elem.attr("expiry").is_some());
@@ -294,27 +298,31 @@ fn test_build_isr_token_result() {
 #[test]
 fn test_build_isr_token_error() {
     use minidom::Element;
-    use xmpp_parsers::iq::{Iq, IqType};
+    use xmpp_parsers::iq::Iq;
     use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType};
 
     let token_request_elem = Element::builder("token-request", ISR_NS).build();
-    let original_iq = Iq {
+    let original_iq = Iq::Get {
         from: Some("user@example.com/resource".parse().unwrap()),
         to: Some("example.com".parse().unwrap()),
         id: "token-1".to_string(),
-        payload: IqType::Get(token_request_elem),
+        payload: token_request_elem,
     };
 
     let error = build_isr_token_error(&original_iq, "not-authorized");
 
-    assert_eq!(error.id, "token-1");
+    assert_eq!(error.id(), "token-1");
     assert_eq!(
-        error.from.as_ref().map(|j| j.to_string()),
+        error.from().map(|j| j.to_string()),
         Some("example.com".to_string())
     );
 
     // Check the payload is an Error with the correct condition
-    if let IqType::Error(stanza_error) = &error.payload {
+    if let Iq::Error {
+        error: stanza_error,
+        ..
+    } = &error
+    {
         assert_eq!(stanza_error.type_, ErrorType::Auth);
         assert_eq!(
             stanza_error.defined_condition,
@@ -328,21 +336,25 @@ fn test_build_isr_token_error() {
 #[test]
 fn test_build_isr_token_error_service_unavailable() {
     use minidom::Element;
-    use xmpp_parsers::iq::{Iq, IqType};
+    use xmpp_parsers::iq::Iq;
     use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType};
 
     let token_request_elem = Element::builder("token-request", ISR_NS).build();
-    let original_iq = Iq {
+    let original_iq = Iq::Get {
         from: Some("user@example.com/resource".parse().unwrap()),
         to: Some("example.com".parse().unwrap()),
         id: "token-2".to_string(),
-        payload: IqType::Get(token_request_elem),
+        payload: token_request_elem,
     };
 
     let error = build_isr_token_error(&original_iq, "service-unavailable");
 
     // Check the payload is an Error with service-unavailable condition
-    if let IqType::Error(stanza_error) = &error.payload {
+    if let Iq::Error {
+        error: stanza_error,
+        ..
+    } = &error
+    {
         assert_eq!(stanza_error.type_, ErrorType::Cancel);
         assert_eq!(
             stanza_error.defined_condition,

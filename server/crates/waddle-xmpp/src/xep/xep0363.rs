@@ -120,8 +120,8 @@ impl std::error::Error for UploadError {}
 
 /// Check if an IQ stanza is an HTTP upload slot request (XEP-0363).
 pub fn is_upload_request(iq: &Iq) -> bool {
-    match &iq.payload {
-        xmpp_parsers::iq::IqType::Get(elem) => {
+    match iq {
+        xmpp_parsers::iq::Iq::Get { payload: elem, .. } => {
             elem.name() == "request" && elem.ns() == NS_HTTP_UPLOAD
         }
         _ => false,
@@ -132,8 +132,8 @@ pub fn is_upload_request(iq: &Iq) -> bool {
 ///
 /// Returns the parsed request with filename, size, and optional content-type.
 pub fn parse_upload_request(iq: &Iq) -> Result<UploadRequest, UploadError> {
-    let elem = match &iq.payload {
-        xmpp_parsers::iq::IqType::Get(elem) => {
+    let elem = match iq {
+        xmpp_parsers::iq::Iq::Get { payload: elem, .. } => {
             if elem.name() == "request" && elem.ns() == NS_HTTP_UPLOAD {
                 elem
             } else {
@@ -198,11 +198,12 @@ pub fn parse_upload_request(iq: &Iq) -> Result<UploadRequest, UploadError> {
 /// Returns an IQ result containing the PUT and GET URLs for the file.
 pub fn build_upload_slot_response(original_iq: &Iq, slot: &UploadSlot) -> Iq {
     // Build PUT element with URL and optional headers
-    let mut put_builder = Element::builder("put", NS_HTTP_UPLOAD).attr("url", &slot.put_url);
+    let mut put_builder = Element::builder("put", NS_HTTP_UPLOAD)
+        .attr(minidom::rxml::xml_ncname!("url").to_owned(), &slot.put_url);
 
     for (name, value) in &slot.put_headers {
         let header_elem = Element::builder("header", NS_HTTP_UPLOAD)
-            .attr("name", name)
+            .attr(minidom::rxml::xml_ncname!("name").to_owned(), name)
             .append(value.as_str())
             .build();
         put_builder = put_builder.append(header_elem);
@@ -210,7 +211,7 @@ pub fn build_upload_slot_response(original_iq: &Iq, slot: &UploadSlot) -> Iq {
 
     // Build GET element with URL
     let get_elem = Element::builder("get", NS_HTTP_UPLOAD)
-        .attr("url", &slot.get_url)
+        .attr(minidom::rxml::xml_ncname!("url").to_owned(), &slot.get_url)
         .build();
 
     // Build slot element containing PUT and GET
@@ -219,11 +220,11 @@ pub fn build_upload_slot_response(original_iq: &Iq, slot: &UploadSlot) -> Iq {
         .append(get_elem)
         .build();
 
-    Iq {
-        from: original_iq.to.clone(),
-        to: original_iq.from.clone(),
-        id: original_iq.id.clone(),
-        payload: xmpp_parsers::iq::IqType::Result(Some(slot_elem)),
+    Iq::Result {
+        from: original_iq.to().cloned(),
+        to: original_iq.from().cloned(),
+        id: original_iq.id().to_string(),
+        payload: Some(slot_elem),
     }
 }
 
@@ -250,7 +251,7 @@ pub fn build_upload_error(request_id: &str, error: &UploadError) -> String {
     };
 
     let mut err_builder = Element::builder("error", "jabber:client")
-        .attr("type", error_type)
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), error_type)
         .append(Element::builder(condition, NS_XMPP_STANZAS).build())
         .append(
             Element::builder("text", NS_XMPP_STANZAS)
@@ -281,8 +282,8 @@ pub fn build_upload_error(request_id: &str, error: &UploadError) -> String {
     }
 
     let iq = Element::builder("iq", "jabber:client")
-        .attr("type", "error")
-        .attr("id", request_id)
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "error")
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), request_id)
         .append(Element::builder("request", NS_HTTP_UPLOAD).build())
         .append(err_builder.build())
         .build();

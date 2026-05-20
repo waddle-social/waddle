@@ -31,7 +31,7 @@ fn audio_content_with_waddle_transport() -> Content {
     // Empty description in the RTP namespace — codec list rides
     // session-initiate proper; this is the per-content media tag.
     let description = Element::builder("description", NS_JINGLE_RTP)
-        .attr("media", "audio")
+        .attr(minidom::rxml::xml_ncname!("media").to_owned(), "audio")
         .build();
     content.description = Some(xmpp_parsers::jingle::Description::Rtp(
         xmpp_parsers::jingle_rtp::Description::try_from(description).expect("rtp desc"),
@@ -245,8 +245,11 @@ fn xep_0166_non_jingle_namespace_is_rejected() {
     // as `Jingle`. Waddle's handler relies on this to reject
     // hand-rolled lookalikes that try to bypass the typed contract.
     let elem = Element::builder("jingle", "urn:waddle:not-jingle")
-        .attr("action", "session-initiate")
-        .attr("sid", "c1")
+        .attr(
+            minidom::rxml::xml_ncname!("action").to_owned(),
+            "session-initiate",
+        )
+        .attr(minidom::rxml::xml_ncname!("sid").to_owned(), "c1")
         .build();
     assert!(Jingle::try_from(elem).is_err());
 }
@@ -257,8 +260,11 @@ fn xep_0166_unknown_action_is_rejected() {
     // enumerated in the spec. xmpp-parsers' typed `Action` enum will
     // refuse to parse anything else.
     let elem = Element::builder("jingle", NS_JINGLE)
-        .attr("action", "session-warp")
-        .attr("sid", "c1")
+        .attr(
+            minidom::rxml::xml_ncname!("action").to_owned(),
+            "session-warp",
+        )
+        .attr(minidom::rxml::xml_ncname!("sid").to_owned(), "c1")
         .build();
     assert!(Jingle::try_from(elem).is_err());
 }

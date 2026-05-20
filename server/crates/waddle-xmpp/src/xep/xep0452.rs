@@ -125,11 +125,13 @@ pub fn extract_mention_notification(msg: &Message) -> Option<MentionNotification
 
 /// Build a `<mention/>` notification element.
 pub fn build_mention_notification_element(notification: &MentionNotification) -> Element {
-    let mut builder = Element::builder("mention", NS_MENTION_NOTIFICATION)
-        .attr("id", notification.message_id.as_str());
+    let mut builder = Element::builder("mention", NS_MENTION_NOTIFICATION).attr(
+        minidom::rxml::xml_ncname!("id").to_owned(),
+        notification.message_id.as_str(),
+    );
 
     if let Some(ref by) = notification.mentioned_by {
-        builder = builder.attr("by", by.as_str());
+        builder = builder.attr(minidom::rxml::xml_ncname!("by").to_owned(), by.as_str());
     }
 
     builder.build()
@@ -144,8 +146,6 @@ pub fn build_mention_notification_message(
     notification: &MentionNotification,
     body_preview: Option<&str>,
 ) -> Message {
-    use xmpp_parsers::message::Body;
-
     let mut msg = Message::new(Some(to));
     msg.from = Some(from_room);
     msg.type_ = xmpp_parsers::message::MessageType::Groupchat;
@@ -153,7 +153,8 @@ pub fn build_mention_notification_message(
         .push(build_mention_notification_element(notification));
 
     if let Some(preview) = body_preview {
-        msg.bodies.insert(String::new(), Body(preview.to_owned()));
+        msg.bodies
+            .insert(xmpp_parsers::message::Lang::new(), preview.to_owned());
     }
 
     msg
@@ -231,7 +232,7 @@ mod tests {
     #[test]
     fn test_is_mention_notification_element() {
         let elem = Element::builder("mention", NS_MENTION_NOTIFICATION)
-            .attr("id", "msg-1")
+            .attr(minidom::rxml::xml_ncname!("id").to_owned(), "msg-1")
             .build();
         assert!(is_mention_notification_element(&elem));
 

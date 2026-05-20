@@ -48,7 +48,7 @@ async fn iq_set_to(client: &mut WsXmppClient, id: &str, to: &str, body: &str) ->
         .await
         .expect("send iq set");
     client
-        .recv_matching(|frame| frame.contains(&format!(r#"id="{id}""#)) && frame.contains("<iq"))
+        .recv_matching(|frame| frame.contains(&format!(r#"id='{id}'"#)) && frame.contains("<iq"))
         .await
         .expect("iq set response")
 }
@@ -61,7 +61,7 @@ async fn iq_get_to(client: &mut WsXmppClient, id: &str, to: &str, body: &str) ->
         .await
         .expect("send iq get");
     client
-        .recv_matching(|frame| frame.contains(&format!(r#"id="{id}""#)) && frame.contains("<iq"))
+        .recv_matching(|frame| frame.contains(&format!(r#"id='{id}'"#)) && frame.contains("<iq"))
         .await
         .expect("iq get response")
 }
@@ -101,7 +101,7 @@ async fn xep0292_first_publish_auto_creates_open_access_node() {
     )
     .await;
     assert!(
-        pub_resp.contains(r#"type="result""#),
+        pub_resp.contains(r#"type='result'"#),
         "auto-create + publish to vcard4 should succeed: {pub_resp}"
     );
 
@@ -117,7 +117,7 @@ async fn xep0292_first_publish_auto_creates_open_access_node() {
     )
     .await;
     assert!(
-        cfg_resp.contains(r#"var="pubsub#access_model""#)
+        cfg_resp.contains(r#"var='pubsub#access_model'"#)
             || cfg_resp.contains(r#"var='pubsub#access_model'"#),
         "configure response must surface access_model field: {cfg_resp}"
     );
@@ -150,7 +150,7 @@ async fn xep0292_non_roster_peer_can_fetch_published_vcard4() {
     )
     .await;
     assert!(
-        pub_resp.contains(r#"type="result""#),
+        pub_resp.contains(r#"type='result'"#),
         "admin vcard4 publish: {pub_resp}"
     );
 
@@ -174,7 +174,7 @@ async fn xep0292_non_roster_peer_can_fetch_published_vcard4() {
     )
     .await;
     assert!(
-        items_resp.contains(r#"type="result""#),
+        items_resp.contains(r#"type='result'"#),
         "cross-user vcard4 fetch MUST succeed on an open node (XEP-0292 §6.1): {items_resp}"
     );
     assert!(
@@ -217,7 +217,7 @@ async fn xep0292_publish_reconciles_legacy_presence_access_node() {
     )
     .await;
     assert!(
-        pub_resp.contains(r#"type="result""#),
+        pub_resp.contains(r#"type='result'"#),
         "seed publish: {pub_resp}"
     );
 
@@ -231,7 +231,7 @@ async fn xep0292_publish_reconciles_legacy_presence_access_node() {
     )
     .await;
     assert!(
-        downgrade.contains(r#"type="result""#),
+        downgrade.contains(r#"type='result'"#),
         "downgrade to presence: {downgrade}"
     );
 
@@ -249,7 +249,7 @@ async fn xep0292_publish_reconciles_legacy_presence_access_node() {
 
     let denied_resp = iq_get_to(&mut bob, "vc-mig-denied", &admin_bare, &vcard4_items_body()).await;
     assert!(
-        denied_resp.contains(r#"type="error""#),
+        denied_resp.contains(r#"type='error'"#),
         "pre-migration fetch from non-roster peer MUST be denied on presence access: {denied_resp}"
     );
 
@@ -265,7 +265,7 @@ async fn xep0292_publish_reconciles_legacy_presence_access_node() {
     )
     .await;
     assert!(
-        republish.contains(r#"type="result""#),
+        republish.contains(r#"type='result'"#),
         "republish should succeed and trigger reconcile: {republish}"
     );
 
@@ -276,7 +276,7 @@ async fn xep0292_publish_reconciles_legacy_presence_access_node() {
     // payload — the reconcile flipped the node to open.
     let ok_resp = iq_get_to(&mut bob, "vc-mig-ok", &admin_bare, &vcard4_items_body()).await;
     assert!(
-        ok_resp.contains(r#"type="result""#),
+        ok_resp.contains(r#"type='result'"#),
         "post-reconcile fetch MUST succeed (open access per §6.1): {ok_resp}"
     );
     assert!(

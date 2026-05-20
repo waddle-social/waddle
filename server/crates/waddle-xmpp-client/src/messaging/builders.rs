@@ -19,15 +19,18 @@ pub fn build_chat_state_message(
     let state = validate_chat_state(state)?;
     let stanza_id = Uuid::new_v4().to_string();
     let mut builder = Element::builder("message", NS_CLIENT)
-        .attr("to", to)
-        .attr("type", message_type)
+        .attr(minidom::rxml::xml_ncname!("to").to_owned(), to)
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), message_type)
         .append(Element::builder(state, NS_CHAT_STATES).build());
     if let Some(thread) = thread {
         builder = builder.append(xep_thread::build_thread_element(thread));
     }
     if should_stamp_origin_id(message_type) {
         builder = builder
-            .attr("id", stanza_id.as_str())
+            .attr(
+                minidom::rxml::xml_ncname!("id").to_owned(),
+                stanza_id.as_str(),
+            )
             .append(build_origin_id(&stanza_id));
     }
     Ok(builder.build())
@@ -41,11 +44,11 @@ pub fn build_displayed_message(
 ) -> Element {
     let stanza_id = Uuid::new_v4().to_string();
     let mut builder = Element::builder("message", NS_CLIENT)
-        .attr("to", to)
-        .attr("type", message_type)
+        .attr(minidom::rxml::xml_ncname!("to").to_owned(), to)
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), message_type)
         .append(
             Element::builder("displayed", NS_CHAT_MARKERS)
-                .attr("id", message_id)
+                .attr(minidom::rxml::xml_ncname!("id").to_owned(), message_id)
                 .build(),
         );
     if let Some(thread) = thread {
@@ -53,7 +56,10 @@ pub fn build_displayed_message(
     }
     if should_stamp_origin_id(message_type) {
         builder = builder
-            .attr("id", stanza_id.as_str())
+            .attr(
+                minidom::rxml::xml_ncname!("id").to_owned(),
+                stanza_id.as_str(),
+            )
             .append(build_origin_id(&stanza_id));
     }
     builder.build()
@@ -68,7 +74,7 @@ pub fn build_reaction_message(
 ) -> Element {
     let stanza_id = Uuid::new_v4().to_string();
     let mut reactions = Element::builder("reactions", NS_REACTIONS)
-        .attr("id", target_id)
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), target_id)
         .build();
     for emoji in emojis {
         reactions.append_child(
@@ -79,9 +85,12 @@ pub fn build_reaction_message(
     }
 
     let mut builder = Element::builder("message", NS_CLIENT)
-        .attr("to", to)
-        .attr("type", message_type)
-        .attr("id", stanza_id.as_str())
+        .attr(minidom::rxml::xml_ncname!("to").to_owned(), to)
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), message_type)
+        .attr(
+            minidom::rxml::xml_ncname!("id").to_owned(),
+            stanza_id.as_str(),
+        )
         .append(build_origin_id(&stanza_id))
         .append(reactions);
     if let Some(thread) = thread {
@@ -98,13 +107,19 @@ pub fn build_reaction_message(
 pub fn build_pinned_message(to: &str, target_stanza_id: &str) -> Element {
     let stanza_id = Uuid::new_v4().to_string();
     Element::builder("message", NS_CLIENT)
-        .attr("to", to)
-        .attr("type", "groupchat")
-        .attr("id", stanza_id.as_str())
+        .attr(minidom::rxml::xml_ncname!("to").to_owned(), to)
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "groupchat")
+        .attr(
+            minidom::rxml::xml_ncname!("id").to_owned(),
+            stanza_id.as_str(),
+        )
         .append(build_origin_id(&stanza_id))
         .append(
             Element::builder("pinned", NS_WADDLE_PIN_V0)
-                .attr("target", target_stanza_id)
+                .attr(
+                    minidom::rxml::xml_ncname!("target").to_owned(),
+                    target_stanza_id,
+                )
                 .build(),
         )
         .build()
@@ -114,13 +129,19 @@ pub fn build_pinned_message(to: &str, target_stanza_id: &str) -> Element {
 pub fn build_unpinned_message(to: &str, target_stanza_id: &str) -> Element {
     let stanza_id = Uuid::new_v4().to_string();
     Element::builder("message", NS_CLIENT)
-        .attr("to", to)
-        .attr("type", "groupchat")
-        .attr("id", stanza_id.as_str())
+        .attr(minidom::rxml::xml_ncname!("to").to_owned(), to)
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "groupchat")
+        .attr(
+            minidom::rxml::xml_ncname!("id").to_owned(),
+            stanza_id.as_str(),
+        )
         .append(build_origin_id(&stanza_id))
         .append(
             Element::builder("unpinned", NS_WADDLE_PIN_V0)
-                .attr("target", target_stanza_id)
+                .attr(
+                    minidom::rxml::xml_ncname!("target").to_owned(),
+                    target_stanza_id,
+                )
                 .build(),
         )
         .build()
@@ -134,13 +155,16 @@ pub fn build_retraction_message(
 ) -> Element {
     let stanza_id = Uuid::new_v4().to_string();
     let mut builder = Element::builder("message", NS_CLIENT)
-        .attr("to", to)
-        .attr("type", message_type)
-        .attr("id", stanza_id.as_str())
+        .attr(minidom::rxml::xml_ncname!("to").to_owned(), to)
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), message_type)
+        .attr(
+            minidom::rxml::xml_ncname!("id").to_owned(),
+            stanza_id.as_str(),
+        )
         .append(build_origin_id(&stanza_id))
         .append(
             Element::builder("retract", NS_MESSAGE_RETRACT)
-                .attr("id", retracts_id)
+                .attr(minidom::rxml::xml_ncname!("id").to_owned(), retracts_id)
                 .build(),
         )
         .append(
@@ -163,7 +187,7 @@ pub fn build_moderation_message(
     reason: Option<&str>,
 ) -> Element {
     let mut moderate = Element::builder("moderate", NS_MESSAGE_MODERATE)
-        .attr("id", target_id)
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), target_id)
         .append(Element::builder("retract", NS_MESSAGE_RETRACT).build());
     if let Some(reason) = reason {
         moderate = moderate.append(
@@ -174,9 +198,12 @@ pub fn build_moderation_message(
     }
 
     Element::builder("iq", NS_CLIENT)
-        .attr("to", to)
-        .attr("type", "set")
-        .attr("id", Uuid::new_v4().to_string())
+        .attr(minidom::rxml::xml_ncname!("to").to_owned(), to)
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "set")
+        .attr(
+            minidom::rxml::xml_ncname!("id").to_owned(),
+            Uuid::new_v4().to_string(),
+        )
         .append(moderate.build())
         .build()
 }
@@ -191,7 +218,7 @@ pub fn build_correction_message(
     let (stanza_id, mut stanza) = build_outbound_message(to, message_type, body, options)?;
     stanza.append_child(
         Element::builder("replace", NS_MESSAGE_CORRECT)
-            .attr("id", replaces_id)
+            .attr(minidom::rxml::xml_ncname!("id").to_owned(), replaces_id)
             .build(),
     );
     Ok((stanza_id, stanza))
@@ -211,9 +238,12 @@ pub fn build_outbound_message(
         None => StanzaId::new(Uuid::new_v4().to_string())?,
     };
     let mut builder = Element::builder("message", NS_CLIENT)
-        .attr("to", to)
-        .attr("type", message_type)
-        .attr("id", stanza_id.as_str())
+        .attr(minidom::rxml::xml_ncname!("to").to_owned(), to)
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), message_type)
+        .attr(
+            minidom::rxml::xml_ncname!("id").to_owned(),
+            stanza_id.as_str(),
+        )
         .append(Element::builder("body", NS_CLIENT).append(body).build());
 
     if matches!(message_type, "chat" | "groupchat") {
@@ -245,55 +275,97 @@ pub fn build_outbound_message(
             let el = match span.span_type.as_str() {
                 "bold" => {
                     let mut el = Element::builder("span", NS_MARKUP)
-                        .attr("start", span.start.to_string())
-                        .attr("end", span.end.to_string())
+                        .attr(
+                            minidom::rxml::xml_ncname!("start").to_owned(),
+                            span.start.to_string(),
+                        )
+                        .attr(
+                            minidom::rxml::xml_ncname!("end").to_owned(),
+                            span.end.to_string(),
+                        )
                         .build();
                     el.append_child(Element::builder("strong", NS_MARKUP).build());
                     el
                 }
                 "italic" => {
                     let mut el = Element::builder("span", NS_MARKUP)
-                        .attr("start", span.start.to_string())
-                        .attr("end", span.end.to_string())
+                        .attr(
+                            minidom::rxml::xml_ncname!("start").to_owned(),
+                            span.start.to_string(),
+                        )
+                        .attr(
+                            minidom::rxml::xml_ncname!("end").to_owned(),
+                            span.end.to_string(),
+                        )
                         .build();
                     el.append_child(Element::builder("emphasis", NS_MARKUP).build());
                     el
                 }
                 "strikethrough" => {
                     let mut el = Element::builder("span", NS_MARKUP)
-                        .attr("start", span.start.to_string())
-                        .attr("end", span.end.to_string())
+                        .attr(
+                            minidom::rxml::xml_ncname!("start").to_owned(),
+                            span.start.to_string(),
+                        )
+                        .attr(
+                            minidom::rxml::xml_ncname!("end").to_owned(),
+                            span.end.to_string(),
+                        )
                         .build();
                     el.append_child(Element::builder("deleted", NS_MARKUP).build());
                     el
                 }
                 "code" => {
                     let mut el = Element::builder("span", NS_MARKUP)
-                        .attr("start", span.start.to_string())
-                        .attr("end", span.end.to_string())
+                        .attr(
+                            minidom::rxml::xml_ncname!("start").to_owned(),
+                            span.start.to_string(),
+                        )
+                        .attr(
+                            minidom::rxml::xml_ncname!("end").to_owned(),
+                            span.end.to_string(),
+                        )
                         .build();
                     el.append_child(Element::builder("code", NS_MARKUP).build());
                     el
                 }
                 // Block-level: <bcode start="..." end="..."/> — sibling of <span>, never wrapped
                 "code_block" => Element::builder("bcode", NS_MARKUP)
-                    .attr("start", span.start.to_string())
-                    .attr("end", span.end.to_string())
+                    .attr(
+                        minidom::rxml::xml_ncname!("start").to_owned(),
+                        span.start.to_string(),
+                    )
+                    .attr(
+                        minidom::rxml::xml_ncname!("end").to_owned(),
+                        span.end.to_string(),
+                    )
                     .build(),
                 // Block-level: <bquote start="..." end="..."/> — sibling of <span>, never wrapped
                 "blockquote" => Element::builder("bquote", NS_MARKUP)
-                    .attr("start", span.start.to_string())
-                    .attr("end", span.end.to_string())
+                    .attr(
+                        minidom::rxml::xml_ncname!("start").to_owned(),
+                        span.start.to_string(),
+                    )
+                    .attr(
+                        minidom::rxml::xml_ncname!("end").to_owned(),
+                        span.end.to_string(),
+                    )
                     .build(),
                 // Link: <span start="..." end="..." uri="..."/> in urn:waddle:markup:0 —
                 // XEP-0394 does not define a link span; use custom namespace to avoid
                 // polluting the official markup namespace.
                 "link" => {
                     let mut b = Element::builder("span", NS_WADDLE_MARKUP)
-                        .attr("start", span.start.to_string())
-                        .attr("end", span.end.to_string());
+                        .attr(
+                            minidom::rxml::xml_ncname!("start").to_owned(),
+                            span.start.to_string(),
+                        )
+                        .attr(
+                            minidom::rxml::xml_ncname!("end").to_owned(),
+                            span.end.to_string(),
+                        );
                     if let Some(uri) = &span.uri {
-                        b = b.attr("uri", uri);
+                        b = b.attr(minidom::rxml::xml_ncname!("uri").to_owned(), uri);
                     }
                     b.build()
                 }
@@ -312,15 +384,27 @@ pub fn build_outbound_message(
         // without emitting `begin="0" end="0"` (which a conformant receiver
         // would interpret as a 0-length annotation at body offset 0).
         let mut ref_builder = Element::builder("reference", NS_REFERENCES)
-            .attr("type", reference.ref_type.as_str())
-            .attr("uri", reference.uri.as_str());
+            .attr(
+                minidom::rxml::xml_ncname!("type").to_owned(),
+                reference.ref_type.as_str(),
+            )
+            .attr(
+                minidom::rxml::xml_ncname!("uri").to_owned(),
+                reference.uri.as_str(),
+            );
         if reference.begin != 0 || reference.end != 0 {
             ref_builder = ref_builder
-                .attr("begin", reference.begin.to_string())
-                .attr("end", reference.end.to_string());
+                .attr(
+                    minidom::rxml::xml_ncname!("begin").to_owned(),
+                    reference.begin.to_string(),
+                )
+                .attr(
+                    minidom::rxml::xml_ncname!("end").to_owned(),
+                    reference.end.to_string(),
+                );
         }
         if let Some(anchor) = reference.anchor.as_deref() {
-            ref_builder = ref_builder.attr("anchor", anchor);
+            ref_builder = ref_builder.attr(minidom::rxml::xml_ncname!("anchor").to_owned(), anchor);
         }
         builder = builder.append(ref_builder.build());
     }
@@ -347,13 +431,16 @@ fn should_stamp_origin_id(message_type: &str) -> bool {
 
 fn build_origin_id(stanza_id: &str) -> Element {
     Element::builder("origin-id", NS_ORIGIN_ID)
-        .attr("id", stanza_id)
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), stanza_id)
         .build()
 }
 
 pub fn build_file_sharing_element(file: &SharedFile) -> Element {
     let mut file_sharing = Element::builder("file-sharing", NS_SFS)
-        .attr("disposition", file.disposition.as_str())
+        .attr(
+            minidom::rxml::xml_ncname!("disposition").to_owned(),
+            file.disposition.as_str(),
+        )
         .build();
 
     let mut metadata = Element::builder("file", NS_FILE_METADATA).build();
@@ -397,7 +484,10 @@ pub fn build_file_sharing_element(file: &SharedFile) -> Element {
     let mut sources = Element::builder("sources", NS_SFS).build();
     sources.append_child(
         Element::builder("url-data", NS_URL_DATA)
-            .attr("target", file.url.as_str())
+            .attr(
+                minidom::rxml::xml_ncname!("target").to_owned(),
+                file.url.as_str(),
+            )
             .build(),
     );
     file_sharing.append_child(sources);

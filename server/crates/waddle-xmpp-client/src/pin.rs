@@ -13,9 +13,12 @@ use crate::messaging::namespaces::{NS_CLIENT, NS_WADDLE_PIN_V0};
 /// Build `<iq type='get' to='room@conf'><query xmlns='urn:waddle:pin:0'/></iq>`.
 pub fn build_pin_list_iq(room_jid: &str) -> Element {
     Element::builder("iq", NS_CLIENT)
-        .attr("type", "get")
-        .attr("to", room_jid)
-        .attr("id", Uuid::new_v4().to_string())
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "get")
+        .attr(minidom::rxml::xml_ncname!("to").to_owned(), room_jid)
+        .attr(
+            minidom::rxml::xml_ncname!("id").to_owned(),
+            Uuid::new_v4().to_string(),
+        )
         .append(Element::builder("query", NS_WADDLE_PIN_V0).build())
         .build()
 }
@@ -242,8 +245,11 @@ mod tests {
 
     fn build_pin_event_message(action: &str) -> Element {
         let author = Element::builder("author", NS_WADDLE_PIN_V0)
-            .attr("jid", "alice@example.com")
-            .attr("nick", "alice")
+            .attr(
+                minidom::rxml::xml_ncname!("jid").to_owned(),
+                "alice@example.com",
+            )
+            .attr(minidom::rxml::xml_ncname!("nick").to_owned(), "alice")
             .build();
         let mut text = Element::builder("text", NS_WADDLE_PIN_V0).build();
         text.append_text_node("important");
@@ -255,16 +261,22 @@ mod tests {
             .append(ts)
             .build();
         let pin_event = Element::builder("pin-event", NS_WADDLE_PIN_V0)
-            .attr("action", action)
-            .attr("target", "stanza-1")
-            .attr("by", "admin@example.com")
+            .attr(minidom::rxml::xml_ncname!("action").to_owned(), action)
+            .attr(minidom::rxml::xml_ncname!("target").to_owned(), "stanza-1")
+            .attr(
+                minidom::rxml::xml_ncname!("by").to_owned(),
+                "admin@example.com",
+            )
             .append(preview)
             .build();
         let mut body = Element::builder("body", "jabber:client").build();
         body.append_text_node(format!("alice {action} a message"));
         Element::builder("message", "jabber:client")
-            .attr("type", "groupchat")
-            .attr("from", "room@conf.example")
+            .attr(minidom::rxml::xml_ncname!("type").to_owned(), "groupchat")
+            .attr(
+                minidom::rxml::xml_ncname!("from").to_owned(),
+                "room@conf.example",
+            )
             .append(body)
             .append(pin_event)
             .build()

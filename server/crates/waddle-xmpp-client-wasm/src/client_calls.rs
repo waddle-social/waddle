@@ -1,9 +1,8 @@
 use super::*;
-use std::str::FromStr;
 use waddle_xmpp_client::messaging::{
     build_finish, build_proceed, build_propose, build_reject, build_retract, build_session_accept,
-    build_session_initiate, build_session_terminate, wrap_jmi_message, CallMedia, JingleReason,
-    SessionId,
+    build_session_initiate, build_session_terminate, jingle_reason_from_wire_name,
+    wrap_jmi_message, CallMedia, SessionId,
 };
 
 const NS_WADDLE_MUC_CALL: &str = "urn:waddle:muc-call:0";
@@ -76,9 +75,12 @@ fn message_with_jmi(to: &str, jmi: Element) -> Result<Element, JsValue> {
 
 fn iq_set(to: &str, payload: Element) -> Element {
     Element::builder("iq", NS_JABBER_CLIENT)
-        .attr("type", "set")
-        .attr("id", uuid::Uuid::new_v4().to_string())
-        .attr("to", to)
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "set")
+        .attr(
+            minidom::rxml::xml_ncname!("id").to_owned(),
+            uuid::Uuid::new_v4().to_string(),
+        )
+        .attr(minidom::rxml::xml_ncname!("to").to_owned(), to)
         .append(payload)
         .build()
 }
@@ -237,12 +239,21 @@ impl WaddleClient {
         future_to_promise(async move {
             // Build the request-join IQ via the typed Element builder.
             let payload = Element::builder("request-join", NS_WADDLE_MUC_CALL)
-                .attr("room", room_jid.as_str())
+                .attr(
+                    minidom::rxml::xml_ncname!("room").to_owned(),
+                    room_jid.as_str(),
+                )
                 .build();
             let stanza = Element::builder("iq", NS_JABBER_CLIENT)
-                .attr("type", "set")
-                .attr("id", uuid::Uuid::new_v4().to_string())
-                .attr("to", room_jid.as_str())
+                .attr(minidom::rxml::xml_ncname!("type").to_owned(), "set")
+                .attr(
+                    minidom::rxml::xml_ncname!("id").to_owned(),
+                    uuid::Uuid::new_v4().to_string(),
+                )
+                .attr(
+                    minidom::rxml::xml_ncname!("to").to_owned(),
+                    room_jid.as_str(),
+                )
                 .append(payload)
                 .build();
             let result = send_iq_command(inner, stanza).await?;
@@ -259,12 +270,21 @@ impl WaddleClient {
         let inner = self.inner.clone();
         future_to_promise(async move {
             let payload = Element::builder("request-leave", NS_WADDLE_MUC_CALL)
-                .attr("room", room_jid.as_str())
+                .attr(
+                    minidom::rxml::xml_ncname!("room").to_owned(),
+                    room_jid.as_str(),
+                )
                 .build();
             let stanza = Element::builder("iq", NS_JABBER_CLIENT)
-                .attr("type", "set")
-                .attr("id", uuid::Uuid::new_v4().to_string())
-                .attr("to", room_jid.as_str())
+                .attr(minidom::rxml::xml_ncname!("type").to_owned(), "set")
+                .attr(
+                    minidom::rxml::xml_ncname!("id").to_owned(),
+                    uuid::Uuid::new_v4().to_string(),
+                )
+                .attr(
+                    minidom::rxml::xml_ncname!("to").to_owned(),
+                    room_jid.as_str(),
+                )
                 .append(payload)
                 .build();
             send_iq_command(inner, stanza).await?;
@@ -282,8 +302,8 @@ impl WaddleClient {
         future_to_promise(async move {
             let typed_reason = match reason {
                 Some(name) => Some(
-                    JingleReason::from_str(&name)
-                        .map_err(|_| js_error(format!("unknown jingle reason: {name}")))?,
+                    jingle_reason_from_wire_name(&name)
+                        .ok_or_else(|| js_error(format!("unknown jingle reason: {name}")))?,
                 ),
                 None => None,
             };

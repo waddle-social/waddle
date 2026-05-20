@@ -80,16 +80,19 @@ pub enum AvatarRequestFailure<E> {
 pub fn build_metadata_request_iq(to: &BareJid) -> Element {
     let id = format!("avatar-meta-{}", Uuid::new_v4());
     let items = Element::builder("items", NS_PUBSUB)
-        .attr("node", NS_AVATAR_METADATA)
-        .attr("max_items", "1")
+        .attr(
+            minidom::rxml::xml_ncname!("node").to_owned(),
+            NS_AVATAR_METADATA,
+        )
+        .attr(minidom::rxml::xml_ncname!("max_items").to_owned(), "1")
         .build();
 
     let pubsub = Element::builder("pubsub", NS_PUBSUB).append(items).build();
 
     Element::builder("iq", NS_CLIENT)
-        .attr("type", "get")
-        .attr("to", to.to_string())
-        .attr("id", id)
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "get")
+        .attr(minidom::rxml::xml_ncname!("to").to_owned(), to.to_string())
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), id)
         .append(pubsub)
         .build()
 }
@@ -98,19 +101,22 @@ pub fn build_metadata_request_iq(to: &BareJid) -> Element {
 pub fn build_data_request_iq(to: &BareJid, item_id: &str) -> Element {
     let id = format!("avatar-data-{}", Uuid::new_v4());
     let item = Element::builder("item", NS_PUBSUB)
-        .attr("id", item_id)
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), item_id)
         .build();
     let items = Element::builder("items", NS_PUBSUB)
-        .attr("node", NS_AVATAR_DATA)
+        .attr(
+            minidom::rxml::xml_ncname!("node").to_owned(),
+            NS_AVATAR_DATA,
+        )
         .append(item)
         .build();
 
     let pubsub = Element::builder("pubsub", NS_PUBSUB).append(items).build();
 
     Element::builder("iq", NS_CLIENT)
-        .attr("type", "get")
-        .attr("to", to.to_string())
-        .attr("id", id)
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "get")
+        .attr(minidom::rxml::xml_ncname!("to").to_owned(), to.to_string())
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), id)
         .append(pubsub)
         .build()
 }
@@ -121,9 +127,9 @@ pub fn build_vcard_request_iq(to: &BareJid) -> Element {
     let vcard = Element::builder("vCard", NS_VCARD_TEMP).build();
 
     Element::builder("iq", NS_CLIENT)
-        .attr("type", "get")
-        .attr("to", to.to_string())
-        .attr("id", id)
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "get")
+        .attr(minidom::rxml::xml_ncname!("to").to_owned(), to.to_string())
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), id)
         .append(vcard)
         .build()
 }

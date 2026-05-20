@@ -215,7 +215,10 @@ pub fn parse_file_sharing_element(elem: &Element) -> Option<FileSharing> {
 /// Build a `<file-sharing/>` element.
 pub fn build_file_sharing_element(sharing: &FileSharing) -> Element {
     let mut fs = Element::builder("file-sharing", NS_SFS)
-        .attr("disposition", sharing.disposition.as_str())
+        .attr(
+            minidom::rxml::xml_ncname!("disposition").to_owned(),
+            sharing.disposition.as_str(),
+        )
         .build();
 
     fs.append_child(xep0446::build_file_metadata_element(&sharing.metadata));
@@ -226,7 +229,10 @@ pub fn build_file_sharing_element(sharing: &FileSharing) -> Element {
             match source {
                 Source::Url(url) => {
                     let url_data = Element::builder("url-data", NS_URL_DATA)
-                        .attr("target", url.as_str())
+                        .attr(
+                            minidom::rxml::xml_ncname!("target").to_owned(),
+                            url.as_str(),
+                        )
                         .build();
                     sources.append_child(url_data);
                 }

@@ -177,22 +177,46 @@ pub fn build_mention_element(mention: &ExplicitMention) -> Element {
     let mut elem = Element::builder("mention", NS_EXPLICIT_MENTIONS).build();
 
     if let Some(begin) = mention.begin {
-        elem.set_attr("begin", begin.to_string());
+        elem.set_attr(
+            minidom::rxml::Namespace::NONE,
+            minidom::rxml::xml_ncname!("begin").to_owned(),
+            begin.to_string(),
+        );
     }
     if let Some(end) = mention.end {
-        elem.set_attr("end", end.to_string());
+        elem.set_attr(
+            minidom::rxml::Namespace::NONE,
+            minidom::rxml::xml_ncname!("end").to_owned(),
+            end.to_string(),
+        );
     }
     if let Some(jid) = &mention.jid {
-        elem.set_attr("jid", jid.to_string());
+        elem.set_attr(
+            minidom::rxml::Namespace::NONE,
+            minidom::rxml::xml_ncname!("jid").to_owned(),
+            jid.to_string(),
+        );
     }
     if let Some(occupant_id) = &mention.occupant_id {
-        elem.set_attr("occupantid", occupant_id);
+        elem.set_attr(
+            minidom::rxml::Namespace::NONE,
+            minidom::rxml::xml_ncname!("occupantid").to_owned(),
+            occupant_id,
+        );
     }
     if let Some(mentions) = &mention.mentions {
-        elem.set_attr("mentions", mentions);
+        elem.set_attr(
+            minidom::rxml::Namespace::NONE,
+            minidom::rxml::xml_ncname!("mentions").to_owned(),
+            mentions,
+        );
     }
     if let Some(uri) = &mention.uri {
-        elem.set_attr("uri", uri);
+        elem.set_attr(
+            minidom::rxml::Namespace::NONE,
+            minidom::rxml::xml_ncname!("uri").to_owned(),
+            uri,
+        );
     }
     if mention.active {
         elem.append_child(Element::builder("active", NS_EXPLICIT_MENTIONS).build());

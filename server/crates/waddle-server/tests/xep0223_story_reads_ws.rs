@@ -110,11 +110,11 @@ async fn publish_then_fetch_returns_entries() {
         .await
         .expect("send publish");
     let publish_result = client
-        .recv_matching(|frame| frame.contains(r#"id="pub-1""#))
+        .recv_matching(|frame| frame.contains(r#"id='pub-1'"#))
         .await
         .expect("publish result");
     assert!(
-        publish_result.contains(r#"type="result""#),
+        publish_result.contains(r#"type='result'"#),
         "publish failed: {publish_result}"
     );
 
@@ -131,7 +131,7 @@ async fn publish_then_fetch_returns_entries() {
         .await
         .expect("send fetch");
     let fetch_result = client
-        .recv_matching(|frame| frame.contains(r#"id="fetch-1""#))
+        .recv_matching(|frame| frame.contains(r#"id='fetch-1'"#))
         .await
         .expect("fetch result");
     assert!(
@@ -157,7 +157,7 @@ async fn republish_overwrites_item() {
         .await
         .expect("send first publish");
     let _ = client
-        .recv_matching(|frame| frame.contains(r#"id="pub-old""#))
+        .recv_matching(|frame| frame.contains(r#"id='pub-old'"#))
         .await
         .expect("first publish result");
 
@@ -167,7 +167,7 @@ async fn republish_overwrites_item() {
         .await
         .expect("send second publish");
     let _ = client
-        .recv_matching(|frame| frame.contains(r#"id="pub-new""#))
+        .recv_matching(|frame| frame.contains(r#"id='pub-new'"#))
         .await
         .expect("second publish result");
 
@@ -182,7 +182,7 @@ async fn republish_overwrites_item() {
         .await
         .expect("send fetch");
     let fetch_result = client
-        .recv_matching(|frame| frame.contains(r#"id="fetch-after""#))
+        .recv_matching(|frame| frame.contains(r#"id='fetch-after'"#))
         .await
         .expect("fetch result");
     assert!(
@@ -208,7 +208,7 @@ async fn node_is_private_to_owner() {
         .await
         .expect("alice publish");
     let _ = alice
-        .recv_matching(|frame| frame.contains(r#"id="alice-pub""#))
+        .recv_matching(|frame| frame.contains(r#"id='alice-pub'"#))
         .await
         .expect("alice publish result");
 
@@ -224,11 +224,11 @@ async fn node_is_private_to_owner() {
     .await
     .expect("bob fetch");
     let bob_result = bob
-        .recv_matching(|frame| frame.contains(r#"id="bob-snoop""#))
+        .recv_matching(|frame| frame.contains(r#"id='bob-snoop'"#))
         .await
         .expect("bob fetch result");
     assert!(
-        bob_result.contains(r#"type="error""#),
+        bob_result.contains(r#"type='error'"#),
         "non-owner fetch must error on a whitelist PEP node: {bob_result}"
     );
     // Either `forbidden` or `item-not-found` is acceptable depending on
@@ -272,7 +272,7 @@ async fn private_pep_does_not_fan_out_to_roster() {
     .await
     .expect("bob subscribe");
     let _ = bob
-        .recv_matching(|f| f.contains(r#"id="bob-sub""#))
+        .recv_matching(|f| f.contains(r#"id='bob-sub'"#))
         .await
         .expect("bob subscribe response");
 
@@ -284,7 +284,7 @@ async fn private_pep_does_not_fan_out_to_roster() {
         .await
         .expect("alice publish");
     let _ = alice
-        .recv_matching(|f| f.contains(r#"id="alice-pub""#))
+        .recv_matching(|f| f.contains(r#"id='alice-pub'"#))
         .await
         .expect("alice publish result");
 

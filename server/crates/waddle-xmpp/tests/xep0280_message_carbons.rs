@@ -4,7 +4,7 @@ use jid::Jid;
 use minidom::Element;
 use waddle_xmpp::carbons::should_copy_message;
 use waddle_xmpp::xep::{NS_CHATSTATES, NS_CHAT_MARKERS, NS_RECEIPTS};
-use xmpp_parsers::message::{Body, Message, MessageType};
+use xmpp_parsers::message::{Message, MessageType};
 
 fn message_of_type(message_type: MessageType) -> Message {
     let to: Jid = "peer@localhost".parse().expect("valid jid");
@@ -22,7 +22,8 @@ fn xep0280_bodyless_chat_message_is_eligible_for_carbons() {
 #[test]
 fn xep0280_normal_message_with_body_is_eligible_for_carbons() {
     let mut msg = message_of_type(MessageType::Normal);
-    msg.bodies.insert(String::new(), Body("hello".to_string()));
+    msg.bodies
+        .insert(xmpp_parsers::message::Lang::new(), "hello".to_string());
     assert!(should_copy_message(&msg));
 }
 
@@ -53,7 +54,7 @@ fn xep0280_bodyless_chat_marker_is_eligible_for_carbons() {
     let mut msg = message_of_type(MessageType::Normal);
     msg.payloads.push(
         Element::builder("displayed", NS_CHAT_MARKERS)
-            .attr("id", "msg-1")
+            .attr(minidom::rxml::xml_ncname!("id").to_owned(), "msg-1")
             .build(),
     );
     assert!(should_copy_message(&msg));

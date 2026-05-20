@@ -139,14 +139,17 @@ pub fn build_vcard4_element(vcard: &VCard4) -> Element {
 /// `urn:xmpp:vcard4` PEP node (XEP-0163).
 pub fn build_fetch_vcard4_iq(target_jid: &str, request_id: &str) -> Element {
     Element::builder("iq", NS_CLIENT)
-        .attr("type", "get")
-        .attr("to", target_jid)
-        .attr("id", request_id)
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "get")
+        .attr(minidom::rxml::xml_ncname!("to").to_owned(), target_jid)
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), request_id)
         .append(
             Element::builder("pubsub", NS_PUBSUB)
                 .append(
                     Element::builder("items", NS_PUBSUB)
-                        .attr("node", PEP_NODE_VCARD4)
+                        .attr(
+                            minidom::rxml::xml_ncname!("node").to_owned(),
+                            PEP_NODE_VCARD4,
+                        )
                         .build(),
                 )
                 .build(),
@@ -158,16 +161,19 @@ pub fn build_fetch_vcard4_iq(target_jid: &str, request_id: &str) -> Element {
 /// `urn:xmpp:vcard4` PEP node, using the canonical item id `current`.
 pub fn build_publish_vcard4_iq(vcard: &VCard4, request_id: &str) -> Element {
     Element::builder("iq", NS_CLIENT)
-        .attr("type", "set")
-        .attr("id", request_id)
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "set")
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), request_id)
         .append(
             Element::builder("pubsub", NS_PUBSUB)
                 .append(
                     Element::builder("publish", NS_PUBSUB)
-                        .attr("node", PEP_NODE_VCARD4)
+                        .attr(
+                            minidom::rxml::xml_ncname!("node").to_owned(),
+                            PEP_NODE_VCARD4,
+                        )
                         .append(
                             Element::builder("item", NS_PUBSUB)
-                                .attr("id", "current")
+                                .attr(minidom::rxml::xml_ncname!("id").to_owned(), "current")
                                 .append(build_vcard4_element(vcard))
                                 .build(),
                         )

@@ -53,6 +53,7 @@ use acme::start_acme_runtime;
 use anyhow::Result;
 use fixed_account::{ensure_fixed_test_account, fixed_test_account_enabled};
 use http::{create_websocket_mam_storage, start_http_server, HttpServerDeps};
+use kameo::actor::Spawn;
 use std::{net::SocketAddr, sync::Arc};
 use tracing::info;
 
@@ -121,7 +122,7 @@ pub async fn start_with_config(
         backend = permission_actor_impl.backend_name(),
         "Permission backend configured"
     );
-    let permission_actor = kameo::spawn(permission_actor_impl);
+    let permission_actor = crate::permissions::PermissionActor::spawn(permission_actor_impl);
     permission_actor
         .ask(crate::permissions::EnsureSchema)
         .await
@@ -161,7 +162,7 @@ pub async fn start_with_config(
             .map_err(|error| anyhow::anyhow!("Failed to initialize PubSub storage: {}", error))?;
     let pubsub_storage: Arc<dyn waddle_xmpp::pubsub::PubSubStorage> =
         pubsub_database_storage.clone();
-    let room_registry = kameo::spawn(
+    let room_registry = waddle_xmpp::muc::room_registry_actor::RoomRegistryActor::spawn(
         waddle_xmpp::muc::room_registry_actor::RoomRegistryActor::new(
             xmpp_config.muc_domain.to_string(),
             server_config.occupant_id_secret.clone(),

@@ -288,10 +288,10 @@ impl StanzaRouter {
     }
 
     /// Route an IQ stanza to its destination.
-    #[instrument(skip(self, iq), fields(to = ?iq.to))]
+    #[instrument(skip(self, iq), fields(to = ?iq.to()))]
     pub async fn route_iq(&self, iq: Iq, sender_jid: &FullJid) -> Result<RoutingResult, XmppError> {
-        let to_jid = match &iq.to {
-            Some(jid) => jid,
+        let to_jid = match iq.to() {
+            Some(jid) => jid.clone(),
             None => {
                 // IQ without 'to' is directed at the server
                 debug!("IQ has no destination JID (server query)");
@@ -299,7 +299,7 @@ impl StanzaRouter {
             }
         };
 
-        match self.get_destination(to_jid) {
+        match self.get_destination(&to_jid) {
             RoutingDestination::Local => self.route_iq_local(iq).await,
             RoutingDestination::LocalMuc => self.route_iq_local_muc(iq, Some(sender_jid)).await,
             RoutingDestination::LocalSpaces => {
@@ -319,8 +319,8 @@ impl StanzaRouter {
     pub async fn route_iq_local(&self, iq: Iq) -> Result<RoutingResult, XmppError> {
         // Clone the destination JID before moving iq into the stanza
         let to_jid = iq
-            .to
-            .clone()
+            .to()
+            .cloned()
             .ok_or_else(|| XmppError::bad_request(Some("IQ has no destination".to_string())))?;
 
         self.route_iq_local_unchecked(iq, to_jid).await
@@ -331,7 +331,7 @@ impl StanzaRouter {
         iq: Iq,
         to_jid: Jid,
     ) -> Result<RoutingResult, XmppError> {
-        let stanza = Stanza::Iq(iq);
+        let stanza = Stanza::Iq(Box::new(iq));
 
         match to_jid.try_into_full() {
             Ok(full_jid) => match self.connection_registry.send_to(&full_jid, stanza).await {
@@ -376,8 +376,8 @@ impl StanzaRouter {
         _sender_jid: Option<&FullJid>,
     ) -> Result<RoutingResult, XmppError> {
         let to_jid = iq
-            .to
-            .clone()
+            .to()
+            .cloned()
             .ok_or_else(|| XmppError::bad_request(Some("IQ has no destination".to_string())))?;
         self.route_iq_local_unchecked(iq, to_jid).await
     }

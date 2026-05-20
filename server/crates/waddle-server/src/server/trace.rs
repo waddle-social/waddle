@@ -25,7 +25,7 @@ pub(crate) fn make_request_span(request: &axum::http::Request<axum::body::Body>)
         propagator.extract(&HeaderExtractor(request.headers()))
     });
     if parent_cx.span().span_context().is_valid() {
-        span.set_parent(parent_cx);
+        let _ = span.set_parent(parent_cx);
     }
     span
 }

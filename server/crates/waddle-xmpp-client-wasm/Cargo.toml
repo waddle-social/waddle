@@ -19,7 +19,7 @@ wasm-bindgen-futures = "=0.4.70"
 js-sys = "=0.3.97"
 web-sys = { version = "=0.3.97", features = ["Response", "Window", "console"] }
 futures = "0.3"
-minidom = "0.16"
+minidom = "0.18"
 jid = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
@@ -27,7 +27,7 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde-wasm-bindgen = "0.6"
-getrandom = { version = "0.2", features = ["js"] }
+getrandom = { version = "0.4", features = ["wasm_js"] }
 
 [dev-dependencies]
 serde_json = { workspace = true }

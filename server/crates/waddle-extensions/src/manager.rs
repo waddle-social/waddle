@@ -5,7 +5,7 @@ use std::time::Duration;
 use anyhow::{bail, Result};
 use chrono::{DateTime, Utc};
 use futures::future::join_all;
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use regex::Regex;
 use serde_json::Value;
 use sha2::{Digest, Sha256};

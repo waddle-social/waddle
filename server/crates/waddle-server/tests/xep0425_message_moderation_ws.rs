@@ -132,7 +132,7 @@ async fn moderation_broadcasts_and_replays_from_mam() {
         .await
         .expect("send moderation");
     let frames = client
-        .recv_until(|frame| frame.contains("moderate-1") && frame.contains("type=\"result\""))
+        .recv_until(|frame| frame.contains("moderate-1") && frame.contains("type='result'"))
         .await
         .expect("moderation frames");
     let broadcast = frames
@@ -272,7 +272,7 @@ async fn moderation_from_non_moderator_returns_forbidden() {
         .await
         .expect("forbidden error");
     assert!(
-        error.contains("type=\"error\""),
+        error.contains("type='error'"),
         "not an error stanza: {error}"
     );
 

@@ -74,6 +74,7 @@ mod tests {
     use super::*;
     use crate::db::actor::DbActor;
     use crate::db::{Database, MigrationRunner};
+    use kameo::actor::Spawn;
     use std::sync::Arc;
 
     /// Helper function to create a test channel in the database
@@ -99,7 +100,7 @@ mod tests {
         // Create the test channel first (required by foreign key constraint)
         create_test_channel(&db, "channel-123").await;
 
-        let actor = kameo::spawn(DbActor::new((*db).clone()));
+        let actor = DbActor::spawn(DbActor::new((*db).clone()));
         let repo = MessageRepository::new(actor);
 
         // Create a message
@@ -136,7 +137,7 @@ mod tests {
         // Create the test channel first (required by foreign key constraint)
         create_test_channel(&db, "channel-test").await;
 
-        let actor = kameo::spawn(DbActor::new((*db).clone()));
+        let actor = DbActor::spawn(DbActor::new((*db).clone()));
         let repo = MessageRepository::new(actor);
 
         // Create multiple messages
@@ -172,7 +173,7 @@ mod tests {
         runner.run(&db).await.unwrap();
         create_test_channel(&db, "channel-123").await;
 
-        let actor = kameo::spawn(DbActor::new((*db).clone()));
+        let actor = DbActor::spawn(DbActor::new((*db).clone()));
         let repo = MessageRepository::new(actor);
 
         let create = MessageCreate::new(
@@ -200,7 +201,7 @@ mod tests {
         runner.run(&db).await.unwrap();
         create_test_channel(&db, "channel-123").await;
 
-        let actor = kameo::spawn(DbActor::new((*db).clone()));
+        let actor = DbActor::spawn(DbActor::new((*db).clone()));
         let repo = MessageRepository::new(actor);
 
         let create = MessageCreate::new(
@@ -225,7 +226,7 @@ mod tests {
         runner.run(&db).await.unwrap();
         create_test_channel(&db, "channel-123").await;
 
-        let actor = kameo::spawn(DbActor::new((*db).clone()));
+        let actor = DbActor::spawn(DbActor::new((*db).clone()));
         let repo = MessageRepository::new(actor);
 
         let parent_create = MessageCreate::new(

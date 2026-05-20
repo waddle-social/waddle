@@ -48,9 +48,9 @@ fn element_to_xml(element: Element) -> String {
 fn iq_frame(iq_type: &str, id: &str, to: &str, payload: Element) -> String {
     element_to_xml(
         Element::builder("iq", CLIENT_NS)
-            .attr("type", iq_type)
-            .attr("id", id)
-            .attr("to", to)
+            .attr(minidom::rxml::xml_ncname!("type").to_owned(), iq_type)
+            .attr(minidom::rxml::xml_ncname!("id").to_owned(), id)
+            .attr(minidom::rxml::xml_ncname!("to").to_owned(), to)
             .append(payload)
             .build(),
     )
@@ -219,7 +219,7 @@ async fn xep0357_push_service_rejects_client_origin_pubsub_notification_publish(
     let (_server, mut client) = setup().await;
 
     let ensure_node = Element::builder("ensure-node", NS_WADDLE_PUSH_SERVICE)
-        .attr("app-id", "web")
+        .attr(minidom::rxml::xml_ncname!("app-id").to_owned(), "web")
         .build();
     let node_response = send_iq(
         &mut client,
@@ -251,10 +251,10 @@ async fn xep0357_push_service_rejects_client_origin_pubsub_notification_publish(
     assert_eq!(items[0].attr("node"), Some(node.as_str()));
 
     let register_device = Element::builder("register-device", NS_WADDLE_PUSH_SERVICE)
-        .attr("node", node.as_str())
-        .attr("device-id", "web-1")
-        .attr("platform", "web")
-        .attr("environment", "test")
+        .attr(minidom::rxml::xml_ncname!("node").to_owned(), node.as_str())
+        .attr(minidom::rxml::xml_ncname!("device-id").to_owned(), "web-1")
+        .attr(minidom::rxml::xml_ncname!("platform").to_owned(), "web")
+        .attr(minidom::rxml::xml_ncname!("environment").to_owned(), "test")
         .append(
             Element::builder("provider-endpoint", NS_WADDLE_PUSH_SERVICE)
                 .append("https://push.example.com/endpoint")
@@ -283,11 +283,11 @@ async fn xep0357_push_service_rejects_client_origin_pubsub_notification_publish(
 
     let notification = Element::builder("notification", NS_PUSH).build();
     let item = Element::builder("item", NS_PUBSUB)
-        .attr("id", "push-1")
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), "push-1")
         .append(notification)
         .build();
     let publish = Element::builder("publish", NS_PUBSUB)
-        .attr("node", node.as_str())
+        .attr(minidom::rxml::xml_ncname!("node").to_owned(), node.as_str())
         .append(item)
         .build();
     let pubsub = Element::builder("pubsub", NS_PUBSUB)
@@ -330,7 +330,7 @@ async fn xep0357_offline_dm_emits_durable_summary_pubsub_publish_job() {
             "bob-offline-push-ensure-node",
             PUSH_SERVICE_JID,
             Element::builder("ensure-node", NS_WADDLE_PUSH_SERVICE)
-                .attr("app-id", "web")
+                .attr(minidom::rxml::xml_ncname!("app-id").to_owned(), "web")
                 .build(),
         ),
         "bob-offline-push-ensure-node",
@@ -338,10 +338,13 @@ async fn xep0357_offline_dm_emits_durable_summary_pubsub_publish_job() {
     .await;
     let node = child_attr(&node_response, "node", "id").expect("node id");
     let register_device = Element::builder("register-device", NS_WADDLE_PUSH_SERVICE)
-        .attr("node", node.as_str())
-        .attr("device-id", "bob-web-1")
-        .attr("platform", "web")
-        .attr("environment", "test")
+        .attr(minidom::rxml::xml_ncname!("node").to_owned(), node.as_str())
+        .attr(
+            minidom::rxml::xml_ncname!("device-id").to_owned(),
+            "bob-web-1",
+        )
+        .attr(minidom::rxml::xml_ncname!("platform").to_owned(), "web")
+        .attr(minidom::rxml::xml_ncname!("environment").to_owned(), "test")
         .append(
             Element::builder("provider-token", NS_WADDLE_PUSH_SERVICE)
                 .append("bob-provider-secret")
@@ -360,8 +363,11 @@ async fn xep0357_offline_dm_emits_durable_summary_pubsub_publish_job() {
     )
     .await;
     let enable = Element::builder("enable", NS_PUSH)
-        .attr("jid", PUSH_SERVICE_JID)
-        .attr("node", node.as_str())
+        .attr(
+            minidom::rxml::xml_ncname!("jid").to_owned(),
+            PUSH_SERVICE_JID,
+        )
+        .attr(minidom::rxml::xml_ncname!("node").to_owned(), node.as_str())
         .build();
     let enable_response = send_iq(
         &mut bob,
@@ -384,9 +390,12 @@ async fn xep0357_offline_dm_emits_durable_summary_pubsub_publish_job() {
     .expect("admin connection");
     let offline_message = element_to_xml(
         Element::builder("message", CLIENT_NS)
-            .attr("type", "chat")
-            .attr("to", "bob@localhost")
-            .attr("id", "offline-push-dm-1")
+            .attr(minidom::rxml::xml_ncname!("type").to_owned(), "chat")
+            .attr(minidom::rxml::xml_ncname!("to").to_owned(), "bob@localhost")
+            .attr(
+                minidom::rxml::xml_ncname!("id").to_owned(),
+                "offline-push-dm-1",
+            )
             .append(
                 Element::builder("body", CLIENT_NS)
                     .append("durable notification body must stay private")
@@ -440,8 +449,14 @@ async fn xep0357_first_party_enable_requires_owned_active_node_with_device() {
     let (_server, mut client) = setup().await;
 
     let enable_unknown_node = Element::builder("enable", NS_PUSH)
-        .attr("jid", PUSH_SERVICE_JID)
-        .attr("node", "missing-web-node")
+        .attr(
+            minidom::rxml::xml_ncname!("jid").to_owned(),
+            PUSH_SERVICE_JID,
+        )
+        .attr(
+            minidom::rxml::xml_ncname!("node").to_owned(),
+            "missing-web-node",
+        )
         .build();
     let unknown_node_response = send_iq(
         &mut client,
@@ -461,7 +476,7 @@ async fn xep0357_first_party_enable_requires_owned_active_node_with_device() {
     );
 
     let ensure_node = Element::builder("ensure-node", NS_WADDLE_PUSH_SERVICE)
-        .attr("app-id", "web")
+        .attr(minidom::rxml::xml_ncname!("app-id").to_owned(), "web")
         .build();
     let node_response = send_iq(
         &mut client,
@@ -477,8 +492,11 @@ async fn xep0357_first_party_enable_requires_owned_active_node_with_device() {
     let node = child_attr(&node_response, "node", "id").expect("node id");
 
     let enable_without_device = Element::builder("enable", NS_PUSH)
-        .attr("jid", PUSH_SERVICE_JID)
-        .attr("node", node.as_str())
+        .attr(
+            minidom::rxml::xml_ncname!("jid").to_owned(),
+            PUSH_SERVICE_JID,
+        )
+        .attr(minidom::rxml::xml_ncname!("node").to_owned(), node.as_str())
         .build();
     let missing_device_response = send_iq(
         &mut client,
@@ -498,10 +516,10 @@ async fn xep0357_first_party_enable_requires_owned_active_node_with_device() {
     );
 
     let register_device = Element::builder("register-device", NS_WADDLE_PUSH_SERVICE)
-        .attr("node", node.as_str())
-        .attr("device-id", "web-1")
-        .attr("platform", "web")
-        .attr("environment", "test")
+        .attr(minidom::rxml::xml_ncname!("node").to_owned(), node.as_str())
+        .attr(minidom::rxml::xml_ncname!("device-id").to_owned(), "web-1")
+        .attr(minidom::rxml::xml_ncname!("platform").to_owned(), "web")
+        .attr(minidom::rxml::xml_ncname!("environment").to_owned(), "test")
         .append(
             Element::builder("provider-token", NS_WADDLE_PUSH_SERVICE)
                 .append("provider-secret")
@@ -522,8 +540,11 @@ async fn xep0357_first_party_enable_requires_owned_active_node_with_device() {
     let _ = parse_iq_element(&register_response, "push-enable-register-device", "result");
 
     let enable = Element::builder("enable", NS_PUSH)
-        .attr("jid", PUSH_SERVICE_JID)
-        .attr("node", node.as_str())
+        .attr(
+            minidom::rxml::xml_ncname!("jid").to_owned(),
+            PUSH_SERVICE_JID,
+        )
+        .attr(minidom::rxml::xml_ncname!("node").to_owned(), node.as_str())
         .build();
     let enable_response = send_iq(
         &mut client,
@@ -535,8 +556,11 @@ async fn xep0357_first_party_enable_requires_owned_active_node_with_device() {
     assert!(enable_iq.children().next().is_none());
 
     let disable = Element::builder("disable", NS_PUSH)
-        .attr("jid", PUSH_SERVICE_JID)
-        .attr("node", node.as_str())
+        .attr(
+            minidom::rxml::xml_ncname!("jid").to_owned(),
+            PUSH_SERVICE_JID,
+        )
+        .attr(minidom::rxml::xml_ncname!("node").to_owned(), node.as_str())
         .build();
     let disable_response = send_iq(
         &mut client,
@@ -548,14 +572,17 @@ async fn xep0357_first_party_enable_requires_owned_active_node_with_device() {
     assert!(disable_iq.children().next().is_none());
 
     let enable_with_publish_options = Element::builder("enable", NS_PUSH)
-        .attr("jid", PUSH_SERVICE_JID)
-        .attr("node", node.as_str())
+        .attr(
+            minidom::rxml::xml_ncname!("jid").to_owned(),
+            PUSH_SERVICE_JID,
+        )
+        .attr(minidom::rxml::xml_ncname!("node").to_owned(), node.as_str())
         .append(
             Element::builder("x", waddle_xmpp::xep::NS_DATA_FORMS)
-                .attr("type", "submit")
+                .attr(minidom::rxml::xml_ncname!("type").to_owned(), "submit")
                 .append(
                     Element::builder("field", waddle_xmpp::xep::NS_DATA_FORMS)
-                        .attr("var", "FORM_TYPE")
+                        .attr(minidom::rxml::xml_ncname!("var").to_owned(), "FORM_TYPE")
                         .append(
                             Element::builder("value", waddle_xmpp::xep::NS_DATA_FORMS)
                                 .append(waddle_xmpp::xep::NS_PUBSUB_PUBLISH_OPTIONS)
@@ -565,7 +592,10 @@ async fn xep0357_first_party_enable_requires_owned_active_node_with_device() {
                 )
                 .append(
                     Element::builder("field", waddle_xmpp::xep::NS_DATA_FORMS)
-                        .attr("var", "unlisted-secret-like-field")
+                        .attr(
+                            minidom::rxml::xml_ncname!("var").to_owned(),
+                            "unlisted-secret-like-field",
+                        )
                         .append(
                             Element::builder("value", waddle_xmpp::xep::NS_DATA_FORMS)
                                 .append("opaque-provider-secret")
@@ -628,7 +658,7 @@ async fn xep0357_first_party_enable_rejects_foreign_push_service_node() {
             "bob-push-ensure-node",
             PUSH_SERVICE_JID,
             Element::builder("ensure-node", NS_WADDLE_PUSH_SERVICE)
-                .attr("app-id", "web")
+                .attr(minidom::rxml::xml_ncname!("app-id").to_owned(), "web")
                 .build(),
         ),
         "bob-push-ensure-node",
@@ -636,10 +666,16 @@ async fn xep0357_first_party_enable_rejects_foreign_push_service_node() {
     .await;
     let bob_node = child_attr(&bob_node_response, "node", "id").expect("bob node id");
     let bob_device = Element::builder("register-device", NS_WADDLE_PUSH_SERVICE)
-        .attr("node", bob_node.as_str())
-        .attr("device-id", "bob-web-1")
-        .attr("platform", "web")
-        .attr("environment", "test")
+        .attr(
+            minidom::rxml::xml_ncname!("node").to_owned(),
+            bob_node.as_str(),
+        )
+        .attr(
+            minidom::rxml::xml_ncname!("device-id").to_owned(),
+            "bob-web-1",
+        )
+        .attr(minidom::rxml::xml_ncname!("platform").to_owned(), "web")
+        .attr(minidom::rxml::xml_ncname!("environment").to_owned(), "test")
         .append(
             Element::builder("provider-token", NS_WADDLE_PUSH_SERVICE)
                 .append("bob-provider-secret")
@@ -659,8 +695,14 @@ async fn xep0357_first_party_enable_rejects_foreign_push_service_node() {
     .await;
 
     let admin_enable = Element::builder("enable", NS_PUSH)
-        .attr("jid", PUSH_SERVICE_JID)
-        .attr("node", bob_node.as_str())
+        .attr(
+            minidom::rxml::xml_ncname!("jid").to_owned(),
+            PUSH_SERVICE_JID,
+        )
+        .attr(
+            minidom::rxml::xml_ncname!("node").to_owned(),
+            bob_node.as_str(),
+        )
         .build();
     let admin_response = send_iq(
         &mut admin,
@@ -678,7 +720,10 @@ async fn xep0357_first_party_enable_rejects_foreign_push_service_node() {
 async fn xep0357_push_service_rejects_oversized_custom_node_request() {
     let (_server, mut client) = setup().await;
     let ensure_node = Element::builder("ensure-node", NS_WADDLE_PUSH_SERVICE)
-        .attr("app-id", "x".repeat(129))
+        .attr(
+            minidom::rxml::xml_ncname!("app-id").to_owned(),
+            "x".repeat(129),
+        )
         .build();
 
     let response = send_iq(

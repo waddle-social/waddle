@@ -9,19 +9,15 @@ pub(super) async fn handle_muc_self_ping_iq(
 ) -> Vec<String> {
     let Some(sender_jid) = sender_jid else {
         return vec![build_iq_error_xml_typed(
-            &iq.id,
+            iq.id(),
             response_from,
             response_to,
             not_authorized_iq_error("Authentication required."),
         )];
     };
-    let Some(target) = iq
-        .to
-        .as_ref()
-        .and_then(|jid| jid.clone().try_into_full().ok())
-    else {
+    let Some(target) = iq.to().and_then(|jid| jid.clone().try_into_full().ok()) else {
         return vec![build_iq_error_xml_typed(
-            &iq.id,
+            iq.id(),
             response_from,
             response_to,
             bad_request_iq_error("Malformed IQ payload."),
@@ -31,7 +27,7 @@ pub(super) async fn handle_muc_self_ping_iq(
     let nick = target.resource().to_string();
     let Some(room_actor) = get_room_actor(state, &room_jid).await else {
         return vec![build_iq_error_xml_typed(
-            &iq.id,
+            iq.id(),
             response_from,
             response_to,
             item_not_found_iq_error("Requested item not found."),
@@ -45,13 +41,13 @@ pub(super) async fn handle_muc_self_ping_iq(
         .await
     {
         Ok(()) => vec![build_iq_result_xml(
-            &iq.id,
+            iq.id(),
             response_from,
             response_to,
             None,
         )],
         Err(kameo::error::SendError::HandlerError(_)) => vec![build_iq_error_xml_typed(
-            &iq.id,
+            iq.id(),
             response_from,
             response_to,
             not_acceptable_iq_error("IQ rejected by server policy."),
@@ -59,7 +55,7 @@ pub(super) async fn handle_muc_self_ping_iq(
         Err(error) => {
             warn!(room = %room_jid, error = ?error, "Failed to process MUC self-ping");
             vec![build_iq_error_xml_typed(
-                &iq.id,
+                iq.id(),
                 response_from,
                 response_to,
                 internal_server_error_iq_error("Internal server error."),
@@ -94,7 +90,7 @@ pub(super) async fn route_full_jid_iq(
 ) -> Vec<String> {
     let Some(sender_jid) = sender_jid else {
         return vec![build_iq_error_xml_typed(
-            &iq.id,
+            iq.id(),
             response_from,
             None,
             not_authorized_iq_error("Authentication required."),
@@ -107,7 +103,7 @@ pub(super) async fn route_full_jid_iq(
     {
         Ok(true) => {
             return vec![build_iq_error_xml_typed(
-                &iq.id,
+                iq.id(),
                 response_from,
                 Some(sender_jid.as_str()),
                 service_unavailable_iq_error("Service unavailable at this address."),
@@ -117,20 +113,20 @@ pub(super) async fn route_full_jid_iq(
         Err(error) => {
             warn!(error = %error, target = %target, sender = %sender_jid, "Failed to check blocklist before routing IQ");
             return vec![build_iq_error_xml_typed(
-                &iq.id,
+                iq.id(),
                 response_from,
                 Some(sender_jid.as_str()),
                 internal_server_error_iq_error("Internal server error."),
             )];
         }
     }
-    iq.from = Some(Jid::from(sender_jid.clone()));
-    iq.to = Some(Jid::from(target.clone()));
+    *iq.from_mut() = Some(Jid::from(sender_jid.clone()));
+    *iq.to_mut() = Some(Jid::from(target.clone()));
     match state
         .deps
         .protocol
         .connection_registry
-        .send_to(&target, Stanza::Iq(iq.clone()))
+        .send_to(&target, Stanza::Iq(Box::new(iq.clone())))
         .await
     {
         waddle_xmpp::registry::SendResult::Sent => Vec::new(),
@@ -138,7 +134,7 @@ pub(super) async fn route_full_jid_iq(
         | waddle_xmpp::registry::SendResult::ChannelClosed => {
             let sender = sender_jid.to_string();
             vec![build_iq_error_xml_typed(
-                &iq.id,
+                iq.id(),
                 response_from,
                 Some(sender.as_str()),
                 service_unavailable_iq_error("Service unavailable at this address."),

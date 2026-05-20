@@ -5,7 +5,7 @@
 
 use jid::BareJid;
 use minidom::Element;
-use xmpp_parsers::iq::{Iq, IqType};
+use xmpp_parsers::iq::Iq;
 
 use super::query::{ThreadsError, DEFAULT_PAGE_SIZE, NS_THREADS};
 use super::storage::ThreadsStorage;
@@ -13,8 +13,8 @@ use super::wire::{build_threads_response, parse_threads_query};
 
 /// Discriminator: does this IQ carry the `urn:waddle:threads:0` query?
 pub fn is_threads_iq(iq: &Iq) -> bool {
-    let elem = match &iq.payload {
-        IqType::Get(e) | IqType::Set(e) => e,
+    let elem = match iq {
+        Iq::Get { payload: e, .. } | Iq::Set { payload: e, .. } => e,
         _ => return false,
     };
     elem.is("query", NS_THREADS)
@@ -47,7 +47,7 @@ pub async fn handle_threads_iq(
 
     // ACL: when the IQ is addressed (`to`), it MUST be the requester's
     // bare JID. Cross-user threads queries are refused with <forbidden/>.
-    if let Some(ref to) = iq.to {
+    if let Some(to) = iq.to() {
         if to.to_bare() != *requester {
             return ThreadsIqOutcome::Forbidden;
         }
@@ -84,11 +84,11 @@ mod tests {
     }
 
     fn empty_query_iq() -> Iq {
-        Iq {
+        Iq::Get {
             from: None,
             to: None,
             id: "th-1".into(),
-            payload: IqType::Get(Element::builder("query", NS_THREADS).build()),
+            payload: Element::builder("query", NS_THREADS).build(),
         }
     }
 
@@ -112,7 +112,7 @@ mod tests {
         let inbox: Arc<dyn InboxStorage> = Arc::new(InMemoryInboxStorage::new());
         let storage = InboxBackedThreadsStorage::new(inbox);
         let mut iq = empty_query_iq();
-        iq.to = Some(jid::Jid::from(jid("bob@example.com")));
+        *iq.to_mut() = Some(jid::Jid::from(jid("bob@example.com")));
         let outcome = handle_threads_iq(&storage, &iq, Some(&jid("alice@example.com"))).await;
         assert!(matches!(outcome, ThreadsIqOutcome::Forbidden));
     }
@@ -175,11 +175,11 @@ mod tests {
 
     #[test]
     fn is_threads_iq_rejects_other_namespaces() {
-        let iq = Iq {
+        let iq = Iq::Get {
             from: None,
             to: None,
             id: "x".into(),
-            payload: IqType::Get(Element::builder("query", "urn:xmpp:inbox:0").build()),
+            payload: Element::builder("query", "urn:xmpp:inbox:0").build(),
         };
         assert!(!is_threads_iq(&iq));
     }

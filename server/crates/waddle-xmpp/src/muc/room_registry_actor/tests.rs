@@ -1,4 +1,5 @@
 use super::*;
+use kameo::actor::Spawn;
 use kameo::error::SendError;
 
 fn test_room_jid(name: &str) -> BareJid {
@@ -8,7 +9,7 @@ fn test_room_jid(name: &str) -> BareJid {
 }
 
 async fn spawn_registry() -> ActorRef<RoomRegistryActor> {
-    kameo::spawn(RoomRegistryActor::new(
+    RoomRegistryActor::spawn(RoomRegistryActor::new(
         "muc.example.com".to_string(),
         OccupantIdSecret::for_testing(b"test-secret".to_vec()),
     ))

@@ -167,7 +167,7 @@ async fn send_roster_push_to_resources(
             .deps
             .protocol
             .connection_registry
-            .try_send_to(resource, Stanza::Iq(push))
+            .try_send_to(resource, Stanza::Iq(Box::new(push)))
             == BroadcastOutcome::Delivered
         {
             delivered_resources.push(resource.clone());
@@ -198,7 +198,7 @@ async fn send_roster_push_to_resources(
             item,
             Some(version),
         );
-        let stanza = Stanza::Iq(push);
+        let stanza = Stanza::Iq(Box::new(push));
         match state
             .deps
             .protocol
@@ -248,7 +248,7 @@ async fn send_roster_push_to_resources(
             .deps
             .protocol
             .connection_registry
-            .try_send_to(&resource, Stanza::Iq(push));
+            .try_send_to(&resource, Stanza::Iq(Box::new(push)));
     }
 }
 

@@ -371,12 +371,13 @@ fn test_build_occupant_presence_update_replaces_spoofable_identity_payloads() {
         .push(Element::builder("x", NS_MUC_USER).build());
     incoming.payloads.push(
         Element::builder("occupant-id", crate::xep::xep0421::NS_OCCUPANT_ID)
-            .attr("id", "spoofed")
+            .attr(minidom::rxml::xml_ncname!("id").to_owned(), "spoofed")
             .build(),
     );
-    incoming
-        .statuses
-        .insert(String::new(), "coding".to_string());
+    incoming.statuses.insert(
+        xmpp_parsers::message::Lang(String::new()),
+        "coding".to_string(),
+    );
 
     let secret = test_secret();
     let occupant_bare = occupant_jid.to_bare();
@@ -430,8 +431,8 @@ fn test_parse_muc_join_with_history() {
     presence.to = Some(to_jid);
 
     let history = Element::builder("history", NS_MUC)
-        .attr("maxstanzas", "50")
-        .attr("seconds", "3600")
+        .attr(minidom::rxml::xml_ncname!("maxstanzas").to_owned(), "50")
+        .attr(minidom::rxml::xml_ncname!("seconds").to_owned(), "3600")
         .build();
     let muc_element = Element::builder("x", NS_MUC).append(history).build();
     presence.payloads.push(muc_element);
@@ -459,7 +460,7 @@ fn test_parse_muc_join_with_history_disabled() {
     presence.to = Some(to_jid);
 
     let history = Element::builder("history", NS_MUC)
-        .attr("maxchars", "0")
+        .attr(minidom::rxml::xml_ncname!("maxchars").to_owned(), "0")
         .build();
     let muc_element = Element::builder("x", NS_MUC).append(history).build();
     presence.payloads.push(muc_element);

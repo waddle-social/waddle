@@ -9,7 +9,7 @@ pub(super) async fn handle_vcard_iq(
 ) -> Vec<String> {
     let Some(sender_jid) = sender_jid else {
         return vec![build_iq_error_xml_typed(
-            &iq.id,
+            iq.id(),
             response_from,
             response_to,
             not_authorized_iq_error("Authentication required."),
@@ -21,7 +21,7 @@ pub(super) async fn handle_vcard_iq(
         Err(error) => {
             warn!(error = %error, "Failed to access database for vCard IQ");
             return vec![build_iq_error_xml_typed(
-                &iq.id,
+                iq.id(),
                 response_from,
                 response_to,
                 internal_server_error_iq_error("Internal server error."),
@@ -32,20 +32,19 @@ pub(super) async fn handle_vcard_iq(
 
     if waddle_xmpp::xep::xep0054::is_vcard_get(iq) {
         let target_jid = iq
-            .to
-            .as_ref()
+            .to()
             .map(|jid| jid.to_bare())
             .unwrap_or_else(|| sender_jid.to_bare());
         let response = match store.get(&target_jid).await {
-            Ok(Some(vcard)) => xmpp_parsers::iq::Iq {
-                from: iq.to.clone(),
-                to: iq.from.clone(),
-                id: iq.id.clone(),
-                payload: xmpp_parsers::iq::IqType::Result(Some(vcard)),
+            Ok(Some(vcard)) => xmpp_parsers::iq::Iq::Result {
+                from: iq.to().cloned(),
+                to: iq.from().cloned(),
+                id: iq.id().to_string(),
+                payload: Some(vcard),
             },
             Ok(None) => {
                 return vec![build_iq_error_xml_typed(
-                    &iq.id,
+                    iq.id(),
                     response_from,
                     response_to,
                     item_not_found_iq_error("Requested item not found."),
@@ -54,7 +53,7 @@ pub(super) async fn handle_vcard_iq(
             Err(error) => {
                 warn!(target = %target_jid, error = %error, "Failed to load vCard");
                 return vec![build_iq_error_xml_typed(
-                    &iq.id,
+                    iq.id(),
                     response_from,
                     response_to,
                     internal_server_error_iq_error("Internal server error."),
@@ -64,10 +63,10 @@ pub(super) async fn handle_vcard_iq(
         return vec![iq_to_xml(response)];
     }
 
-    if let Some(to) = &iq.to {
+    if let Some(to) = iq.to() {
         if to.to_bare() != sender_jid.to_bare() {
             return vec![build_iq_error_xml_typed(
-                &iq.id,
+                iq.id(),
                 response_from,
                 response_to,
                 forbidden_iq_error("Operation not permitted."),
@@ -75,9 +74,9 @@ pub(super) async fn handle_vcard_iq(
         }
     }
 
-    let xmpp_parsers::iq::IqType::Set(vcard) = &iq.payload else {
+    let xmpp_parsers::iq::Iq::Set { payload: vcard, .. } = iq else {
         return vec![build_iq_error_xml_typed(
-            &iq.id,
+            iq.id(),
             response_from,
             response_to,
             bad_request_iq_error("Malformed IQ payload."),
@@ -87,7 +86,7 @@ pub(super) async fn handle_vcard_iq(
     if let Err(error) = store.set(&sender_jid.to_bare(), vcard).await {
         warn!(jid = %sender_jid, error = %error, "Failed to store vCard");
         return vec![build_iq_error_xml_typed(
-            &iq.id,
+            iq.id(),
             response_from,
             response_to,
             internal_server_error_iq_error("Internal server error."),
@@ -108,7 +107,7 @@ pub(super) async fn handle_private_storage_iq(
 ) -> Vec<String> {
     let Some(sender_jid) = sender_jid else {
         return vec![build_iq_error_xml_typed(
-            &iq.id,
+            iq.id(),
             response_from,
             response_to,
             not_authorized_iq_error("Authentication required."),
@@ -166,7 +165,7 @@ pub(super) async fn handle_private_storage_iq(
             Err(error) => {
                 warn!(jid = %bare_jid, namespace = %key.namespace, error = %error, "Failed to load private XML");
                 return vec![build_iq_error_xml_typed(
-                    &iq.id,
+                    iq.id(),
                     response_from,
                     response_to,
                     internal_server_error_iq_error("Internal server error."),
@@ -179,7 +178,7 @@ pub(super) async fn handle_private_storage_iq(
                 Err(error) => {
                     warn!(jid = %bare_jid, namespace = %key.namespace, error = %error, "Failed to decode private XML row");
                     return vec![build_iq_error_xml_typed(
-                        &iq.id,
+                        iq.id(),
                         response_from,
                         response_to,
                         internal_server_error_iq_error("Internal server error."),
@@ -240,7 +239,7 @@ pub(super) async fn handle_private_storage_iq(
         {
             warn!(jid = %bare_jid, error = %error, "Failed to store private XML");
             return vec![build_iq_error_xml_typed(
-                            &iq.id,
+                            iq.id(),
                             response_from,
                             response_to,
                             internal_server_error_iq_error("Internal server error."),
@@ -252,7 +251,7 @@ pub(super) async fn handle_private_storage_iq(
     }
 
     vec![build_iq_error_xml_typed(
-        &iq.id,
+        iq.id(),
         response_from,
         response_to,
         bad_request_iq_error("Malformed IQ payload."),

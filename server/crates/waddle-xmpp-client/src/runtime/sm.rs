@@ -125,8 +125,11 @@ impl XmppRuntime {
             .append(Element::builder("undefined-condition", NS_STREAM_ERRORS).build())
             .append(
                 Element::builder("handled-count-too-high", crate::stream_management::NS_SM)
-                    .attr("h", h.to_string())
-                    .attr("send-count", self.sm_state.outbound_count.to_string())
+                    .attr(minidom::rxml::xml_ncname!("h").to_owned(), h.to_string())
+                    .attr(
+                        minidom::rxml::xml_ncname!("send-count").to_owned(),
+                        self.sm_state.outbound_count.to_string(),
+                    )
                     .build(),
             )
             .build();

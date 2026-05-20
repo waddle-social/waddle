@@ -69,7 +69,7 @@ impl MessagingExt for ClientHandle {
     async fn join_room(&self, room_jid: &str, nick: &str) -> ClientResult<()> {
         let to = format!("{}/{}", room_jid, nick);
         let stanza = Element::builder("presence", NS_CLIENT)
-            .attr("to", to.as_str())
+            .attr(minidom::rxml::xml_ncname!("to").to_owned(), to.as_str())
             .append(Element::builder("x", NS_MUC).build())
             .build();
         self.send_stanza(stanza).await
@@ -78,8 +78,8 @@ impl MessagingExt for ClientHandle {
     async fn leave_room(&self, room_jid: &str, nick: &str) -> ClientResult<()> {
         let to = format!("{}/{}", room_jid, nick);
         let stanza = Element::builder("presence", NS_CLIENT)
-            .attr("to", to.as_str())
-            .attr("type", "unavailable")
+            .attr(minidom::rxml::xml_ncname!("to").to_owned(), to.as_str())
+            .attr(minidom::rxml::xml_ncname!("type").to_owned(), "unavailable")
             .build();
         self.send_stanza(stanza).await
     }

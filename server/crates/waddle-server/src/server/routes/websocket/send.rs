@@ -12,7 +12,7 @@ where
 {
     for frame in frames {
         debug!(len = frame.len(), "Sending XMPP WebSocket response");
-        if !send_ws_message(sender, Message::Text(frame), failure_message).await {
+        if !send_ws_message(sender, Message::Text(frame.into()), failure_message).await {
             return false;
         }
     }

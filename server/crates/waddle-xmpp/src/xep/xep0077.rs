@@ -78,7 +78,7 @@ pub fn is_registration_query_element(element: &Element) -> bool {
 /// - `Err(RegistrationError)` for invalid requests
 pub fn parse_registration_iq(iq: &Iq) -> Result<Option<RegistrationRequest>, RegistrationError> {
     let element: Element = iq.clone().into();
-    parse_registration_element(&element, iq.id.as_str())
+    parse_registration_element(&element, iq.id())
 }
 
 /// Parse a registration element (for pre-auth parsing where we have raw Element).

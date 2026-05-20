@@ -103,7 +103,7 @@ fn xep0421_classifier_accepts_spec_shape_only() {
     // a crafted client payload to either slip through or DoS the
     // stamping logic by polluting the namespace bucket.
     let canonical = Element::builder("occupant-id", NS_OCCUPANT_ID)
-        .attr("id", "abc")
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), "abc")
         .build();
     assert!(is_occupant_id_element(&canonical));
 

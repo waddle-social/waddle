@@ -137,7 +137,10 @@ pub fn parse_idle_element(elem: &Element) -> Result<IdleInfo, IdleError> {
 /// Build an `<idle xmlns='urn:xmpp:idle:1' since='...'/>` element.
 pub fn build_idle_element(since: DateTime<Utc>) -> Element {
     Element::builder("idle", NS_IDLE)
-        .attr("since", since.to_rfc3339())
+        .attr(
+            minidom::rxml::xml_ncname!("since").to_owned(),
+            since.to_rfc3339(),
+        )
         .build()
 }
 
@@ -168,7 +171,10 @@ mod tests {
     #[test]
     fn test_is_idle_element() {
         let elem = Element::builder("idle", NS_IDLE)
-            .attr("since", "2024-06-01T12:00:00Z")
+            .attr(
+                minidom::rxml::xml_ncname!("since").to_owned(),
+                "2024-06-01T12:00:00Z",
+            )
             .build();
         assert!(is_idle_element(&elem));
 
@@ -200,7 +206,7 @@ mod tests {
     #[test]
     fn test_parse_idle_invalid_since() {
         let elem = Element::builder("idle", NS_IDLE)
-            .attr("since", "not-a-date")
+            .attr(minidom::rxml::xml_ncname!("since").to_owned(), "not-a-date")
             .build();
         let err = parse_idle_element(&elem).expect_err("should fail");
         assert!(err.to_string().contains("invalid"));

@@ -29,7 +29,7 @@
 use crate::Stanza;
 use jid::{BareJid, FullJid, Jid};
 use std::sync::Arc;
-use xmpp_parsers::message::{Body, Message, MessageType};
+use xmpp_parsers::message::{Message, MessageType};
 
 use super::dispatch::StanzaDispatcher;
 use super::event::OutboundEvent;
@@ -50,8 +50,9 @@ fn chat_with_body(from: &FullJid, to: &BareJid, body: &str) -> Message {
     let mut m = Message::new(Some(Jid::from(to.clone())));
     m.from = Some(Jid::from(from.clone()));
     m.type_ = MessageType::Chat;
-    m.id = Some("wire-id".to_string());
-    m.bodies.insert(String::new(), Body(body.to_string()));
+    m.id = Some(xmpp_parsers::message::Id("wire-id".to_string()));
+    m.bodies
+        .insert(xmpp_parsers::message::Lang::new(), body.to_string());
     m
 }
 

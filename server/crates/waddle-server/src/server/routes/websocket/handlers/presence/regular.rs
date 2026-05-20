@@ -12,7 +12,7 @@ pub(super) async fn handle_regular_presence_update(
     presence: xmpp_parsers::presence::Presence,
 ) {
     let available = presence.type_ != xmpp_parsers::presence::Type::Unavailable;
-    let priority = presence.priority;
+    let priority: i8 = priority_to_i8(&presence.priority);
     if available {
         state
             .deps
@@ -150,6 +150,7 @@ async fn broadcast_presence_to_subscribers(
     let Some(storage) = roster_storage(state).await else {
         return;
     };
+    let priority = priority_to_i8(&presence.priority);
     let subscribers = match storage
         .get_presence_subscribers(&sender_jid.to_bare())
         .await
@@ -174,7 +175,7 @@ async fn broadcast_presence_to_subscribers(
                 &subscriber_bare,
                 show,
                 presence.statuses.values().next().map(String::as_str),
-                presence.priority,
+                priority,
             ))
         } else {
             let mut unavailable = presence.clone();
@@ -276,7 +277,7 @@ async fn resolve_caps_for_presence(
         .deps
         .protocol
         .connection_registry
-        .send_to(sender_jid, Stanza::Iq(iq))
+        .send_to(sender_jid, Stanza::Iq(Box::new(iq)))
         .await;
     if !send_outcome.is_sent() {
         // PR #438 review issue #5: if the recipient already
@@ -300,6 +301,13 @@ pub(super) fn show_name(show: &xmpp_parsers::presence::Show) -> &'static str {
         xmpp_parsers::presence::Show::Dnd => "dnd",
         xmpp_parsers::presence::Show::Xa => "xa",
     }
+}
+
+fn priority_to_i8(priority: &xmpp_parsers::presence::Priority) -> i8 {
+    // `Priority` wraps an `i8` whose inner field is crate-private; round-trip
+    // through the XML element to read the value back as an integer.
+    let element: minidom::Element = priority.into();
+    element.text().trim().parse::<i8>().unwrap_or(0)
 }
 
 pub(super) fn show_from_name(value: &str) -> Option<xmpp_parsers::presence::Show> {

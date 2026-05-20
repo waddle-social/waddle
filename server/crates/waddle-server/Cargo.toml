@@ -113,10 +113,10 @@ wiremock = "0.6"
 # `image` is already a regular dependency; integration tests reach
 # it via the same crate without a separate dev-dep declaration.
 http-body-util = "0.1"
-tokio-tungstenite = "0.24"
-pbkdf2 = { version = "0.12", features = ["hmac"] }
+tokio-tungstenite = "0.29"
+pbkdf2 = { version = "0.13", features = ["hmac"] }
 cuengine = "0.40.6"
-tempfile = "3.14"
+tempfile = "3.27"
 
 # Re-declare the workspace XMPP crates with `test-utils` enabled so
 # cross-crate integration tests in this package can call the

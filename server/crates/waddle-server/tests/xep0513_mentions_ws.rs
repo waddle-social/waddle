@@ -76,7 +76,7 @@ async fn explicit_mentions_route_and_replay_from_mam() {
         "missing mentioned occupant id: {echo}"
     );
     assert!(
-        !echo.contains("jid=\"admin@localhost") && !echo.contains("jid='admin@localhost"),
+        !echo.contains("jid='admin@localhost") && !echo.contains("jid='admin@localhost"),
         "MUC mention payload leaked a JID despite occupant-id support: {echo}"
     );
 
@@ -95,7 +95,7 @@ async fn explicit_mentions_route_and_replay_from_mam() {
             .iter()
             .any(|frame| frame.contains("urn:xmpp:mentions:0")
                 && frame.contains(&occupant_id)
-                && !frame.contains("jid=\"admin@localhost")
+                && !frame.contains("jid='admin@localhost")
                 && !frame.contains("jid='admin@localhost")),
         "MAM did not replay mention: {frames:?}"
     );
@@ -128,7 +128,7 @@ async fn mention_without_target_attribute_returns_bad_request() {
         .await
         .expect("bad-request error");
     assert!(
-        error.contains("type=\"error\""),
+        error.contains("type='error'"),
         "not an error stanza: {error}"
     );
 
@@ -156,7 +156,7 @@ async fn muc_jid_mention_returns_bad_request_when_occupant_ids_supported() {
         .await
         .expect("bad-request error");
     assert!(
-        error.contains("type=\"error\""),
+        error.contains("type='error'"),
         "not an error stanza: {error}"
     );
 

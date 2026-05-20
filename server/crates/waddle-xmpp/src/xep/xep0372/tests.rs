@@ -5,7 +5,7 @@ use xmpp_parsers::message::Message;
 #[test]
 fn test_is_reference_element() {
     let elem = Element::builder("reference", NS_REFERENCE)
-        .attr("type", "mention")
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "mention")
         .build();
     assert!(is_reference_element(&elem));
 
@@ -64,7 +64,7 @@ fn test_reference_missing_type_skipped() {
 #[test]
 fn test_parse_reference_requires_uri() {
     let elem = Element::builder("reference", NS_REFERENCE)
-        .attr("type", "mention")
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "mention")
         .build();
 
     assert!(matches!(

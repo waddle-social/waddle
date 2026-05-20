@@ -7,7 +7,7 @@
 use std::collections::{HashMap, HashSet};
 
 use jid::BareJid;
-use kameo::actor::ActorRef;
+use kameo::actor::{ActorRef, Spawn};
 use kameo::message::Context;
 use kameo::Actor;
 use thiserror::Error;
@@ -23,7 +23,6 @@ use crate::xep::xep0421::OccupantIdSecret;
 /// All room creation, lookup, and destruction flows through this actor,
 /// so no external synchronisation is needed.
 #[derive(Actor)]
-#[actor(mailbox = bounded(1024))]
 pub struct RoomRegistryActor {
     rooms: HashMap<BareJid, ActorRef<RoomActor>>,
     poisoned_rooms: HashSet<BareJid>,
@@ -65,7 +64,7 @@ impl RoomRegistryActor {
         config: RoomConfig,
     ) -> ActorRef<RoomActor> {
         let room = MucRoom::new(room_jid.clone(), waddle_id, channel_id, config);
-        let actor_ref = kameo::spawn(RoomActor::new(room, self.occupant_id_secret.clone()));
+        let actor_ref = RoomActor::spawn(RoomActor::new(room, self.occupant_id_secret.clone()));
         self.rooms.insert(room_jid, actor_ref.clone());
         actor_ref
     }

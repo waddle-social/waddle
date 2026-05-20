@@ -10,7 +10,6 @@ use axum::{
     Router,
 };
 use chrono::{Duration, Utc};
-use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tracing::{info, instrument, warn};
@@ -116,21 +115,23 @@ button {{ margin-top:12px; background:#2563eb; border-color:#1d4ed8; cursor:poin
 }
 
 fn generate_device_code() -> String {
+    use rand::RngExt;
     let bytes: [u8; 32] = rand::rng().random();
     hex::encode(bytes)
 }
 
 fn generate_user_code() -> String {
+    use rand::RngExt;
     let mut rng = rand::rng();
     let letters: String = (0..4)
         .map(|_| {
-            let idx = rng.random_range(0..26);
+            let idx: u8 = rng.random_range(0..26);
             (b'A' + idx) as char
         })
         .collect();
     let numbers: String = (0..4)
         .map(|_| {
-            let idx = rng.random_range(0..10);
+            let idx: u8 = rng.random_range(0..10);
             (b'0' + idx) as char
         })
         .collect();

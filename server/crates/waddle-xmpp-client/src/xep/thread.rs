@@ -25,7 +25,7 @@ pub struct ThreadRef {
 pub fn build_thread_element(thread: &ThreadRef) -> Element {
     let mut builder = Element::builder("thread", NS_CLIENT);
     if let Some(parent) = thread.parent.as_deref() {
-        builder = builder.attr("parent", parent);
+        builder = builder.attr(minidom::rxml::xml_ncname!("parent").to_owned(), parent);
     }
     builder.append(thread.id.as_str()).build()
 }

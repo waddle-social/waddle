@@ -108,18 +108,22 @@ pub(crate) fn build_extension_route_items_iq(
     max_items: Option<u32>,
 ) -> Element {
     let id = format!("pubsub-items-{}", uuid::Uuid::new_v4());
-    let mut items_builder = Element::builder("items", NS_PUBSUB).attr("node", node);
+    let mut items_builder = Element::builder("items", NS_PUBSUB)
+        .attr(minidom::rxml::xml_ncname!("node").to_owned(), node);
     let max_items_value;
     if let Some(max_items) = max_items {
         max_items_value = max_items.to_string();
-        items_builder = items_builder.attr("max_items", max_items_value.as_str());
+        items_builder = items_builder.attr(
+            minidom::rxml::xml_ncname!("max_items").to_owned(),
+            max_items_value.as_str(),
+        );
     }
     let items = items_builder.build();
     let pubsub = Element::builder("pubsub", NS_PUBSUB).append(items).build();
     Element::builder("iq", NS_CLIENT)
-        .attr("type", "get")
-        .attr("id", id)
-        .attr("to", to)
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "get")
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), id)
+        .attr(minidom::rxml::xml_ncname!("to").to_owned(), to)
         .append(pubsub)
         .build()
 }
@@ -362,15 +366,18 @@ mod extension_route_tests {
     #[test]
     fn parses_extension_item_envelopes_from_pubsub_items() {
         let iq = Element::builder("iq", NS_CLIENT)
-            .attr("type", "result")
+            .attr(minidom::rxml::xml_ncname!("type").to_owned(), "result")
             .append(
                 Element::builder("pubsub", NS_PUBSUB)
                     .append(
                         Element::builder("items", NS_PUBSUB)
-                            .attr("node", "urn:waddle:decision-polls:1:channel:general:polls")
+                            .attr(
+                                minidom::rxml::xml_ncname!("node").to_owned(),
+                                "urn:waddle:decision-polls:1:channel:general:polls",
+                            )
                             .append(
                                 Element::builder("item", NS_PUBSUB)
-                                    .attr("id", "poll-42")
+                                    .attr(minidom::rxml::xml_ncname!("id").to_owned(), "poll-42")
                                     .append(
                                         Element::builder("extension-item", NS_WADDLE_EXTENSION_1)
                                             .append(
@@ -385,35 +392,83 @@ mod extension_route_tests {
                                             )
                                             .append(
                                                 Element::builder("link", NS_WADDLE_EXTENSION_1)
-                                                    .attr("href", "https://example.org/poll")
+                                                    .attr(
+                                                        minidom::rxml::xml_ncname!("href")
+                                                            .to_owned(),
+                                                        "https://example.org/poll",
+                                                    )
                                                     .build(),
                                             )
                                             .append(
                                                 Element::builder("field", NS_WADDLE_EXTENSION_1)
-                                                    .attr("name", "saved-at")
-                                                    .attr("label", "Saved")
+                                                    .attr(
+                                                        minidom::rxml::xml_ncname!("name")
+                                                            .to_owned(),
+                                                        "saved-at",
+                                                    )
+                                                    .attr(
+                                                        minidom::rxml::xml_ncname!("label")
+                                                            .to_owned(),
+                                                        "Saved",
+                                                    )
                                                     .append("2026-04-27T00:00:00Z")
                                                     .build(),
                                             )
                                             .append(
                                                 Element::builder("option", NS_WADDLE_EXTENSION_1)
-                                                    .attr("id", "a")
-                                                    .attr("label", "Pizza")
+                                                    .attr(
+                                                        minidom::rxml::xml_ncname!("id").to_owned(),
+                                                        "a",
+                                                    )
+                                                    .attr(
+                                                        minidom::rxml::xml_ncname!("label")
+                                                            .to_owned(),
+                                                        "Pizza",
+                                                    )
                                                     .build(),
                                             )
                                             .append(
                                                 Element::builder("action", NS_WADDLE_EXTENSION_1)
-                                                    .attr("launch-id", "vote-42")
-                                                    .attr("label", "Vote")
-                                                    .attr("plugin", "decision-polls")
-                                                    .attr("action", "vote")
                                                     .attr(
-                                                        "command-node",
+                                                        minidom::rxml::xml_ncname!("launch-id")
+                                                            .to_owned(),
+                                                        "vote-42",
+                                                    )
+                                                    .attr(
+                                                        minidom::rxml::xml_ncname!("label")
+                                                            .to_owned(),
+                                                        "Vote",
+                                                    )
+                                                    .attr(
+                                                        minidom::rxml::xml_ncname!("plugin")
+                                                            .to_owned(),
+                                                        "decision-polls",
+                                                    )
+                                                    .attr(
+                                                        minidom::rxml::xml_ncname!("action")
+                                                            .to_owned(),
+                                                        "vote",
+                                                    )
+                                                    .attr(
+                                                        minidom::rxml::xml_ncname!("command-node")
+                                                            .to_owned(),
                                                         "urn:waddle:extensions:invoke",
                                                     )
-                                                    .attr("token", "signed-token")
-                                                    .attr("expires-at", "2026-04-27T00:00:00Z")
-                                                    .attr("waddle-id", "alice@example.com")
+                                                    .attr(
+                                                        minidom::rxml::xml_ncname!("token")
+                                                            .to_owned(),
+                                                        "signed-token",
+                                                    )
+                                                    .attr(
+                                                        minidom::rxml::xml_ncname!("expires-at")
+                                                            .to_owned(),
+                                                        "2026-04-27T00:00:00Z",
+                                                    )
+                                                    .attr(
+                                                        minidom::rxml::xml_ncname!("waddle-id")
+                                                            .to_owned(),
+                                                        "alice@example.com",
+                                                    )
                                                     .build(),
                                             )
                                             .build(),
@@ -422,7 +477,7 @@ mod extension_route_tests {
                             )
                             .append(
                                 Element::builder("item", NS_PUBSUB)
-                                    .attr("id", "raw")
+                                    .attr(minidom::rxml::xml_ncname!("id").to_owned(), "raw")
                                     .append(
                                         Element::builder("saved-item", "urn:waddle:unknown:1")
                                             .build(),

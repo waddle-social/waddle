@@ -167,18 +167,18 @@ mod tests {
         const NS_CLIENT: &str = "jabber:client";
 
         let mut error_children = Element::builder("error", NS_CLIENT)
-            .attr("type", error_type)
+            .attr(minidom::rxml::xml_ncname!("type").to_owned(), error_type)
             .append(Element::builder(condition, NS_STANZAS).build());
         if let Some(t) = text {
             error_children = Element::builder("error", NS_CLIENT)
-                .attr("type", error_type)
+                .attr(minidom::rxml::xml_ncname!("type").to_owned(), error_type)
                 .append(Element::builder(condition, NS_STANZAS).build())
                 .append(Element::builder("text", NS_STANZAS).append(t).build());
         }
 
         Element::builder("iq", NS_CLIENT)
-            .attr("type", "error")
-            .attr("id", "req-1")
+            .attr(minidom::rxml::xml_ncname!("type").to_owned(), "error")
+            .attr(minidom::rxml::xml_ncname!("id").to_owned(), "req-1")
             .append(error_children.build())
             .build()
     }
@@ -212,8 +212,8 @@ mod tests {
     #[test]
     fn parse_stanza_error_no_error_child_gives_unknown() {
         let iq = Element::builder("iq", "jabber:client")
-            .attr("type", "error")
-            .attr("id", "req-1")
+            .attr(minidom::rxml::xml_ncname!("type").to_owned(), "error")
+            .attr(minidom::rxml::xml_ncname!("id").to_owned(), "req-1")
             .build();
         let err = parse_stanza_error(&iq);
         assert_eq!(err.error_type, StanzaErrorType::Unknown);

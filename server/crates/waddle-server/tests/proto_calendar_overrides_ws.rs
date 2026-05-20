@@ -76,7 +76,7 @@ async fn vcalendar_item_with_master_overrides_and_exdate_round_trips() {
         .await
         .expect("publish result");
     assert!(
-        publish_result.contains("type=\"result\""),
+        publish_result.contains("type='result'"),
         "publish must succeed: {publish_result}"
     );
 

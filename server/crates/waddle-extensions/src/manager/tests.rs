@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::json;
-use xmpp_parsers::message::{Body, Message};
+use xmpp_parsers::message::{Lang, Message};
 
 use super::{
     detect_links, effective_module_config_json, effective_module_config_with_reader,
@@ -436,8 +436,8 @@ async fn enrich_message_does_not_fallback_without_loaded_actor() {
 
     let mut msg = Message::new(None);
     msg.bodies.insert(
-        String::new(),
-        Body("https://github.com/waddle-social/waddle".to_string()),
+        Lang(String::new()),
+        "https://github.com/waddle-social/waddle".to_string(),
     );
 
     assert_eq!(manager.enrich_message(&mut msg).await, 0);

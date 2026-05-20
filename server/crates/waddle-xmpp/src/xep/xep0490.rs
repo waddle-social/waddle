@@ -123,8 +123,14 @@ pub fn build_displayed_element(displayed: &MdsDisplayed) -> Element {
     Element::builder("displayed", NS_MDS_DISPLAYED)
         .append(
             Element::builder("stanza-id", NS_STANZA_ID)
-                .attr("id", displayed.stanza_id.as_str())
-                .attr("by", displayed.stanza_id_by.to_string())
+                .attr(
+                    minidom::rxml::xml_ncname!("id").to_owned(),
+                    displayed.stanza_id.as_str(),
+                )
+                .attr(
+                    minidom::rxml::xml_ncname!("by").to_owned(),
+                    displayed.stanza_id_by.to_string(),
+                )
                 .build(),
         )
         .build()
@@ -211,7 +217,10 @@ mod tests {
         let elem = Element::builder("displayed", NS_MDS_DISPLAYED)
             .append(
                 Element::builder("stanza-id", NS_STANZA_ID)
-                    .attr("by", "juliet@capulet.lit")
+                    .attr(
+                        minidom::rxml::xml_ncname!("by").to_owned(),
+                        "juliet@capulet.lit",
+                    )
                     .build(),
             )
             .build();
@@ -226,7 +235,7 @@ mod tests {
         let elem = Element::builder("displayed", NS_MDS_DISPLAYED)
             .append(
                 Element::builder("stanza-id", NS_STANZA_ID)
-                    .attr("id", "abc")
+                    .attr(minidom::rxml::xml_ncname!("id").to_owned(), "abc")
                     .build(),
             )
             .build();
@@ -241,8 +250,11 @@ mod tests {
         let elem = Element::builder("displayed", NS_MDS_DISPLAYED)
             .append(
                 Element::builder("stanza-id", NS_STANZA_ID)
-                    .attr("id", "abc")
-                    .attr("by", "not a jid /resource/extra")
+                    .attr(minidom::rxml::xml_ncname!("id").to_owned(), "abc")
+                    .attr(
+                        minidom::rxml::xml_ncname!("by").to_owned(),
+                        "not a jid /resource/extra",
+                    )
                     .build(),
             )
             .build();
