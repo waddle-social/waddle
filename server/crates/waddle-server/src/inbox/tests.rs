@@ -179,6 +179,7 @@ async fn sqlx_inbox_storage_tracks_groupchat_notification_recovery() {
         sender_jid: "room@muc.example.com/alice".parse().expect("sender jid"),
         is_live_occupant: true,
         room_members_only: false,
+        sender_can_broadcast_channel_mention: true,
         created_at_ms: 42,
     };
     let second_recovery = GroupchatNotificationRecovery {
@@ -196,6 +197,7 @@ async fn sqlx_inbox_storage_tracks_groupchat_notification_recovery() {
             .expect("second sender jid"),
         is_live_occupant: false,
         room_members_only: true,
+        sender_can_broadcast_channel_mention: false,
         created_at_ms: 43,
     };
 

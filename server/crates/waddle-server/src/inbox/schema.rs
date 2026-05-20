@@ -86,6 +86,16 @@ pub(super) async fn initialize(storage: &DatabaseInboxStorage) -> Result<(), Inb
                 sender_jid TEXT NOT NULL,
                 is_live_occupant INTEGER NOT NULL,
                 room_members_only INTEGER NOT NULL,
+                -- XEP-0513 §"Multi-User Chats Permissions" §304: persist
+                -- the sender's frozen channel-mention permission so a
+                -- recovery replay re-creates the same notification class
+                -- the original T0 emission did. Without this column the
+                -- recovery path would silently downgrade every channel
+                -- mention to `NotifyAll`, which is then suppressed at T1
+                -- by the public-group `OnMention` XEP-0492 default — a
+                -- silent moderator-push outage after every server
+                -- restart.
+                sender_can_broadcast_channel_mention INTEGER NOT NULL,
                 created_at_ms {i64_type} NOT NULL,
                 completed_at_ms {i64_type},
                 PRIMARY KEY (recipient_bare_jid, room_jid, thread_id, stanza_id_by, stanza_id)

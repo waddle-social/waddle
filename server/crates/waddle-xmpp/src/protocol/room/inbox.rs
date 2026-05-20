@@ -21,7 +21,7 @@ use super::super::event::{GroupchatThreadProjection, OutboundEvent};
 use super::context::RoomContext;
 use super::traits::{RoomHandler, RoomHandlerOutcome};
 use crate::inbox::runtime::{preview_text, should_project_message};
-use crate::types::Role;
+use crate::types::{Affiliation, Role};
 use crate::xep::xep0508::{extract_forum_action, ForumAction};
 use jid::BareJid;
 use std::collections::HashSet;
@@ -29,16 +29,36 @@ use waddle_xmpp_core::xep0201::thread_info_from_message;
 use xmpp_parsers::message::Message;
 
 /// XEP-0513 §"Multi-User Chats Permissions": server-internal default
-/// for `mentions#channel` is `moderators` — only senders with role
-/// `Role::Moderator` may broadcast `urn:xmpp:mentions:0#channel` for
-/// push purposes. Returning `false` when the sender has no occupancy
-/// snapshot is the strict reading of XEP-0045 §7.4 (only joined
-/// occupants may message the room) combined with XEP-0513 §"Multi-User
-/// Chats Permissions" (receiving entities SHOULD ignore mentions from
-/// senders below the minimum role).
+/// for `mentions#channel` is `moderators` — senders may broadcast
+/// `urn:xmpp:mentions:0#channel` for push purposes if either:
+///
+/// - their XEP-0045 role is `Role::Moderator` (the canonical "may use
+///   moderator powers" axis), OR
+/// - their durable affiliation is `Affiliation::Admin` /
+///   `Affiliation::Owner` — affiliation is the persistence-of-trust
+///   axis; an Owner/Admin who hasn't yet completed a presence cycle
+///   (`room_affiliations` derives Moderator role from those
+///   affiliations at join time, but the snapshot may briefly trail)
+///   must not be silently denied (adversarial review P2 on PR #738).
+///
+/// Server-authored synthetic sends (`!ctx.project_sender_inbox`) bypass
+/// the gate entirely: those are extension bots / system messages whose
+/// trust is upstream of the MUC role lattice. Denying them would
+/// silently neuter announcements-room broadcasts and forum-action
+/// notifications.
+///
+/// Returning `false` when the sender has no occupancy snapshot is the
+/// strict reading of XEP-0045 §7.4 (only joined occupants may message
+/// the room) combined with XEP-0513 §"Multi-User Chats Permissions"
+/// (receiving entities SHOULD ignore mentions from senders below the
+/// minimum role).
 fn sender_may_broadcast_channel_mention(ctx: &RoomContext<'_>) -> bool {
-    ctx.sender_snapshot()
-        .is_some_and(|sender| sender.role >= Role::Moderator)
+    if !ctx.project_sender_inbox {
+        return true;
+    }
+    ctx.sender_snapshot().is_some_and(|sender| {
+        sender.role >= Role::Moderator || sender.affiliation >= Affiliation::Admin
+    })
 }
 
 /// Per-occupant inbox projection handler for the room handler chain.
@@ -379,13 +399,38 @@ mod tests {
         let room = bare("team@conf.example.com");
         let moderator = full("alice@example.com/web");
         let participant = full("bob@example.com/desk");
+        let visitor = full("carol@example.com/phone");
+        let none_role = full("dave@example.com/web");
+        let admin_no_role = full("erin@example.com/web");
+        let owner_no_role = full("frank@example.com/web");
         let outsider = full("eve@example.com/cli");
 
         let mut moderator_occ = occ(moderator.clone(), "alice");
         moderator_occ.role = Role::Moderator;
         let mut participant_occ = occ(participant.clone(), "bob");
         participant_occ.role = Role::Participant;
-        let occupants = vec![moderator_occ, participant_occ];
+        let mut visitor_occ = occ(visitor.clone(), "carol");
+        visitor_occ.role = Role::Visitor;
+        let mut none_role_occ = occ(none_role.clone(), "dave");
+        none_role_occ.role = Role::None;
+        // Owner/Admin affiliation but Participant role: simulates a
+        // privileged user whose presence cycle hasn't promoted the role
+        // yet. Server-internal trust MUST follow the durable affiliation
+        // (adversarial review P2 on PR #738).
+        let mut admin_no_role_occ = occ(admin_no_role.clone(), "erin");
+        admin_no_role_occ.role = Role::Participant;
+        admin_no_role_occ.affiliation = Affiliation::Admin;
+        let mut owner_no_role_occ = occ(owner_no_role.clone(), "frank");
+        owner_no_role_occ.role = Role::Participant;
+        owner_no_role_occ.affiliation = Affiliation::Owner;
+        let occupants = vec![
+            moderator_occ,
+            participant_occ,
+            visitor_occ,
+            none_role_occ,
+            admin_no_role_occ,
+            owner_no_role_occ,
+        ];
 
         let id_gen = FixedIdGenerator("ignored".to_string());
         let secret = OccupantIdSecret::for_testing(b"test-secret".to_vec());
@@ -393,10 +438,28 @@ mod tests {
         for (sender, expected, label) in [
             (&moderator, true, "Role::Moderator MUST be permitted"),
             (
+                &admin_no_role,
+                true,
+                "Affiliation::Admin MUST be permitted regardless of role — \
+                 durable affiliation is the source of trust",
+            ),
+            (
+                &owner_no_role,
+                true,
+                "Affiliation::Owner MUST be permitted regardless of role",
+            ),
+            (
                 &participant,
                 false,
-                "Role::Participant MUST NOT be permitted — XEP-0513 §304 \
-                 default policy is `mentions#channel = moderators`",
+                "Role::Participant + Affiliation::Member MUST NOT be \
+                 permitted — XEP-0513 §304 default `mentions#channel = moderators`",
+            ),
+            (&visitor, false, "Role::Visitor MUST NOT be permitted"),
+            (
+                &none_role,
+                false,
+                "Role::None MUST NOT be permitted (defensive: not-in-room \
+                 role projection)",
             ),
             // Sender outside the occupancy snapshot (XEP-0045 §7.4
             // gate would already reject this before the inbox handler
@@ -428,6 +491,49 @@ mod tests {
                 "{label}"
             );
         }
+    }
+
+    /// Server-authored synthetic sends bypass the XEP-0513 channel-
+    /// broadcast gate entirely: announcements bots, forum-action system
+    /// messages, etc. The trust on those sends is upstream of the MUC
+    /// role lattice — denying them would silently neuter legitimate
+    /// broadcasts (adversarial review P2 on PR #738).
+    #[test]
+    fn xep0513_synthetic_sender_bypasses_channel_broadcast_gate() {
+        let room = bare("team@conf.example.com");
+        let bot = full("team@conf.example.com/announcements-bot");
+        let bot_occ = {
+            // Synthetic bots typically aren't in the occupancy snapshot
+            // at all — `project_sender_inbox: false` indicates the
+            // sender is server-authored and not a real occupant.
+            let mut occ = occ(bot.clone(), "announcements-bot");
+            occ.role = Role::Participant;
+            occ
+        };
+        let occupants = vec![bot_occ];
+
+        let id_gen = FixedIdGenerator("ignored".to_string());
+        let secret = OccupantIdSecret::for_testing(b"test-secret".to_vec());
+        let ctx = RoomContext {
+            room: &room,
+            sender_full: &bot,
+            occupants: &occupants,
+            durable_recipient_bare_jids: &[],
+            managed_room_forbidden: false,
+            room_moderated: false,
+            room_members_only: false,
+            pin_permission: crate::muc::PinPermission::default(),
+            id_gen: &id_gen,
+            occupant_id_secret: &secret,
+            sender_nickname_generation: 0,
+            project_sender_inbox: false,
+            dispatch_timestamp: 0,
+        };
+        assert!(
+            sender_may_broadcast_channel_mention(&ctx),
+            "synthetic server-authored sends (project_sender_inbox=false) \
+             MUST bypass the channel-broadcast gate regardless of role"
+        );
     }
 
     /// Lock-in: the typed `sender_can_broadcast_channel_mention` field

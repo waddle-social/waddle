@@ -1307,6 +1307,7 @@ async fn groupchat_notification_recovery_retries_committed_inbox_projection() {
                 sender_jid,
                 is_live_occupant: false,
                 room_members_only: false,
+                sender_can_broadcast_channel_mention: false,
                 created_at_ms: crate::time::now_ms(),
             },
         )
@@ -1680,7 +1681,14 @@ async fn groupchat_active_channel_mention_does_not_expand_to_live_unaffiliated_o
         .ask(JoinWithAffiliation {
             sender_jid: alice_jid.clone(),
             nick: "alice".to_string(),
-            effective_affiliation: Affiliation::Member,
+            // XEP-0513 §"Multi-User Chats Permissions" §304: this test
+            // asserts that live-only-not-affiliated occupants don't get
+            // pushed for `<active/>` channel mentions. The sender's
+            // role MUST be Moderator-equivalent so the channel mention
+            // actually classifies as `ActiveChannelMention` — otherwise
+            // the assertion passes for the wrong reason (downgrade to
+            // `NotifyAll` + no durable recipient = empty jobs).
+            effective_affiliation: Affiliation::Admin,
             local_domain: "example.com".to_string(),
         })
         .await

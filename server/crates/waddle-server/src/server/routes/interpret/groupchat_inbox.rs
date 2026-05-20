@@ -48,6 +48,7 @@ pub(super) async fn project_groupchat_inbox_event(input: ProjectGroupchatInboxEv
         is_durable_recipient,
         is_live_occupant,
         room_members_only,
+        sender_can_broadcast_channel_mention,
         &thread,
         dispatch_timestamp,
     );
@@ -109,6 +110,7 @@ fn groupchat_notification_recovery_item(
     is_durable_recipient: bool,
     is_live_occupant: bool,
     room_members_only: bool,
+    sender_can_broadcast_channel_mention: bool,
     thread: &Option<GroupchatThreadProjection>,
     dispatch_timestamp: i64,
 ) -> Option<waddle_xmpp::inbox::storage::GroupchatNotificationRecovery> {
@@ -127,6 +129,7 @@ fn groupchat_notification_recovery_item(
         sender_jid,
         is_live_occupant,
         room_members_only,
+        sender_can_broadcast_channel_mention,
         created_at_ms: dispatch_timestamp.saturating_mul(1_000),
     })
 }
@@ -561,15 +564,15 @@ pub(crate) async fn reconcile_groupchat_notification_candidates(
             recovery.key.archive_stanza_id.clone(),
             recovery.is_live_occupant,
             recovery.room_members_only,
-            // XEP-0513 §"Multi-User Chats Permissions": the recovery
-            // row does not persist the sender's role (would require
-            // a schema migration). Default to `false` (deny channel
-            // boost) on recovery — XEP-conformant conservative bias:
-            // §304 says receiving entities SHOULD ignore mentions
-            // when the sender's role is unknown / below threshold.
-            // The candidate still publishes; only the class is
-            // downgraded from `ChannelMention` → `NotifyAll`.
-            false,
+            // XEP-0513 §"Multi-User Chats Permissions" frozen at the
+            // original T0 dispatch — persisted on the recovery row so
+            // replay re-creates the same notification class. Defaulting
+            // to `false` here would silently downgrade every channel
+            // mention to `NotifyAll` and let the public-group `OnMention`
+            // XEP-0492 default suppress it at T1: a silent moderator-
+            // push outage after every server restart (adversarial review
+            // P1 on PR #738).
+            recovery.sender_can_broadcast_channel_mention,
         )
         .await;
         if outcome == GroupchatNotificationCandidateQueueOutcome::Completed
