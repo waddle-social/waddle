@@ -169,6 +169,18 @@ function nextMonth() {
   selectedDay.value = null;
 }
 
+function goToToday() {
+  const now = new Date();
+  calYear.value = now.getFullYear();
+  calMonth.value = now.getMonth();
+  selectedDay.value = now.getDate();
+}
+
+const isViewingCurrentMonth = computed(() => {
+  const now = new Date();
+  return calYear.value === now.getFullYear() && calMonth.value === now.getMonth();
+});
+
 interface CalCell {
   day: number | null;
   isToday: boolean;
@@ -657,7 +669,20 @@ const DOW_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
           >
             <ChevronLeft class="h-4 w-4" aria-hidden="true" />
           </button>
-          <span class="type-control font-semibold text-foreground">{{ calTitle }}</span>
+          <div class="flex items-center gap-2">
+            <span class="type-control font-semibold text-foreground">{{ calTitle }}</span>
+            <button
+              type="button"
+              class="inline-flex items-center rounded-md border px-2 py-1 text-xs font-medium transition-colors"
+              :class="isViewingCurrentMonth
+                ? 'border-primary bg-primary/10 text-primary'
+                : 'border-border bg-background text-muted-foreground hover:bg-muted/50 hover:text-foreground'"
+              aria-label="Jump to today"
+              @click="goToToday"
+            >
+              Today
+            </button>
+          </div>
           <button
             type="button"
             class="inline-flex h-8 w-8 items-center justify-center rounded-md border border-border text-muted-foreground hover:bg-muted/50 hover:text-foreground"
