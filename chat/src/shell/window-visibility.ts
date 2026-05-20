@@ -21,11 +21,16 @@ export function useChatWindowVisibility(): { isWindowFocused: Readonly<Ref<boole
   document.addEventListener("visibilitychange", update);
   window.addEventListener("focus", update);
   window.addEventListener("blur", update);
+  // iOS Safari bfcache restoration surfaces as `pageshow` (often with
+  // `persisted=true`) and may not fire `visibilitychange` in time. Matches
+  // the listener set used by `virtual-timeline-measurement.ts`.
+  window.addEventListener("pageshow", update);
 
   onScopeDispose(() => {
     document.removeEventListener("visibilitychange", update);
     window.removeEventListener("focus", update);
     window.removeEventListener("blur", update);
+    window.removeEventListener("pageshow", update);
   });
 
   return { isWindowFocused };
