@@ -456,6 +456,15 @@ async fn create_websocket_state(
             pubsub_database_storage.database(),
         ),
     );
+    let notification_activity = Arc::new(
+        crate::notification_activity::NotificationActivityStore::new(
+            state.db_pool.global().clone(),
+        )
+        .await
+        .map_err(|error| {
+            anyhow::anyhow!("failed to initialize notification activity projection: {error}")
+        })?,
+    );
 
     let sm_session_registry = create_sm_session_registry(xmpp_config).await;
     let resumable_sessions: Arc<dashmap::DashMap<String, crate::auth::Session>> =
@@ -496,6 +505,7 @@ async fn create_websocket_state(
                 push_service,
                 notification_outbox,
                 notification_settings_projection,
+                notification_activity,
                 isr_token_store: waddle_xmpp::isr::create_shared_store(),
                 sm_session_registry,
                 resumable_sessions,

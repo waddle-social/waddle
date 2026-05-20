@@ -69,7 +69,12 @@ async fn drain_notification_candidates_for_test(state: &WebSocketState) -> usize
     let room_policy =
         crate::room_policy::RoomRegistryActorPolicy::new(state.deps.protocol.room_registry.clone());
     let dnd_reader = crate::notification_outbox::NoopDndReader;
-    let deps = crate::notification_outbox::NotificationDrainDeps::new(&room_policy, &dnd_reader);
+    let activity_reader = state.deps.protocol.notification_activity.as_ref();
+    let deps = crate::notification_outbox::NotificationDrainDeps::new(
+        &room_policy,
+        &dnd_reader,
+        activity_reader,
+    );
     state
         .deps
         .protocol
@@ -88,6 +93,26 @@ async fn drain_notification_candidates_for_test(state: &WebSocketState) -> usize
         )
         .await
         .expect("drain notification candidates")
+}
+
+/// Seed a recent `notification_activity` row for a recipient against
+/// a conversation so the slice 2b XEP-0513 `<active/>` filter passes
+/// at T1. Mirrors the shape of a fresh XEP-0085 chat-state ingest:
+/// `last_active_at_ms = now`, no chat-state / read-marker / presence
+/// columns. Tests that exercise the XEP-0513 *miss* path call the
+/// drain WITHOUT calling this helper.
+async fn seed_notification_activity_for_test(
+    state: &WebSocketState,
+    owner: &BareJid,
+    conversation: &BareJid,
+) {
+    state
+        .deps
+        .protocol
+        .notification_activity
+        .record_outbound_message(owner, conversation, crate::time::now_ms())
+        .await
+        .expect("seed notification_activity row");
 }
 
 async fn register_first_party_push_for_test(
@@ -1592,6 +1617,12 @@ async fn groupchat_active_channel_mention_pushes_live_occupants_only() {
         responses.is_empty(),
         "valid active channel mention should not return an error: {responses:?}"
     );
+    // Slice 2b: XEP-0513 `<active/>` filter consults the
+    // `notification_activity` projection at T1. Bob is "live"
+    // (joined the room) but the test's join doesn't currently
+    // wire into the projection's ingestion path — seed bob's
+    // activity for the room directly so the filter passes.
+    seed_notification_activity_for_test(state.as_ref(), &bob_bare, &room_jid).await;
     // Post-#526 slice 1: T0 emits one candidate per affiliated recipient
     // (bob = live, charlie = non-live), and T1 suppresses charlie's
     // candidate via the XEP-0492 public-group `OnMention` default once
@@ -1772,6 +1803,10 @@ async fn groupchat_active_channel_mention_preserves_notify_all_for_non_live_alwa
         responses.is_empty(),
         "valid active channel mention should not return an error: {responses:?}"
     );
+    // Slice 2b: seed bob's activity for the room so the XEP-0513
+    // `<active/>` filter passes. The members-only `Always` default
+    // then preserves the `NotifyAll` job for charlie regardless.
+    seed_notification_activity_for_test(state.as_ref(), &bob_bare, &room_jid).await;
     assert_eq!(
         drain_notification_candidates_for_test(state.as_ref()).await,
         2

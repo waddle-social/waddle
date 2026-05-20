@@ -36,6 +36,13 @@ pub(super) async fn mark_inbox_read_from_displayed(
     room: BareJid,
     displayed_message_id: String,
 ) {
+    // Notification activity ingest (slice 2b): a XEP-0490 displayed
+    // marker advance is a strong "currently engaged" signal for the
+    // owner in the named room. Record activity BEFORE the inbox
+    // mark-read so an inbox-storage outage cannot mask the typed
+    // activity signal — the read marker still happened on the wire.
+    super::notification_activity_ingest::record_read_marker_activity(deps, &owner, &room).await;
+
     let Some(inbox_storage) = deps.inbox_storage else {
         debug!(
             %owner,

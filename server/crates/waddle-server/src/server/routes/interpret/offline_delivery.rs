@@ -356,18 +356,46 @@ async fn enqueue_xep0357_notification_candidate_for_message(
     let dnd_reader = crate::notification_outbox::NoopDndReader;
     let mut dnd_cache =
         std::collections::BTreeMap::<BareJid, crate::notification_outbox::DndState>::new();
-    let outcome = match crate::notification_outbox::evaluate_push_gate_at_dispatch(
-        crate::notification_outbox::PushEvalStage::T0Emit,
-        state
+    // T0 emission does NOT consult the activity reader — XEP-0513
+    // `<active/>` is a T1-only gate (current activity is a T1 read
+    // per the recipient-state contract). The `NoopActivityReader` is
+    // wired only to satisfy the typed signature; it would never be
+    // dispatched into at T0Emit even if the candidate class were
+    // `ActiveChannelMention`.
+    let activity_reader = crate::notification_activity::NoopActivityReader;
+    let mut activity_cache = std::collections::BTreeMap::<
+        (BareJid, BareJid),
+        Option<crate::notification_activity::NotificationActivity>,
+    >::new();
+    let eval_deps = crate::notification_outbox::PushEvalDeps {
+        settings_projection: state
             .deps
             .protocol
             .notification_settings_projection
             .as_ref(),
-        &room_policy,
-        &dnd_reader,
+        room_policy: &room_policy,
+        dnd_reader: &dnd_reader,
+        activity_reader: &activity_reader,
+        // T0 emission deliberately skips the XEP-0513 `<active/>`
+        // filter (current activity is a T1 read), so the TTL is never
+        // consulted here. Avoid the per-call env-var read by passing
+        // the default-in-ms as a typed placeholder; T1 (which DOES
+        // consult the TTL) reads the env-driven value at the drain
+        // site (Copilot review on PR #731).
+        active_mention_ttl_ms: (crate::notification_outbox::DEFAULT_ACTIVE_MENTION_TTL_SECONDS
+            as i64)
+            * 1_000,
+    };
+    let mut eval_caches = crate::notification_outbox::PushEvalCaches {
+        room_policy: &mut room_policy_cache,
+        dnd: &mut dnd_cache,
+        activity: &mut activity_cache,
+    };
+    let outcome = match crate::notification_outbox::evaluate_push_gate_at_dispatch(
+        crate::notification_outbox::PushEvalStage::T0Emit,
+        eval_deps,
         &candidate,
-        &mut room_policy_cache,
-        &mut dnd_cache,
+        &mut eval_caches,
     )
     .await
     {

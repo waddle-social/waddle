@@ -49,6 +49,54 @@ pub(super) async fn route_to_connection(
              delivery / persistence"
         );
     } else {
+        // Notification activity ingest (slice 2b): when the routed
+        // stanza is a typed XEP-0085 chat-state on a DM Message (type
+        // chat/normal), record the sender's `(sender_bare,
+        // recipient_bare)` activity. The sender is the acting party;
+        // we DO NOT bump the recipient's projection here — the
+        // recipient's activity column is updated only when the
+        // recipient herself emits typed activity (chat-state, read
+        // marker, outbound commit, presence). The recipient bare JID
+        // is derived from the routing target `jid` (full or bare),
+        // not from `message.to`, because the routing arm is invoked
+        // for each resolved resource and the typed conversation key
+        // MUST always be the bare form.
+        //
+        // MUC reflection also uses `RouteToConnection` (per-occupant
+        // delivery from the room reflector), so we must scope to DM
+        // message types — for groupchat the activity is already
+        // recorded at the sender-pass `DispatchToRoom` entry, and
+        // recording the per-occupant reflection here would store
+        // `(room_bare, occupant_bare)` rows which is the wrong key
+        // shape.
+        //
+        // The ingest call is gated by the recursion-depth check
+        // above: nested `RouteToConnection` events that hit the
+        // headless-pass guard are intentionally dropped, so they
+        // MUST NOT mutate the activity projection either (Codex
+        // review on PR #731).
+        // Borrow the boxed Stanza via `as_ref()` so the inner Message
+        // is matched by reference — `stanza` MUST remain owned for the
+        // delivery branches below. Match ergonomics binds `message`
+        // as `&Message` automatically.
+        if let Stanza::Message(message) = stanza.as_ref() {
+            if matches!(
+                message.type_,
+                xmpp_parsers::message::MessageType::Chat
+                    | xmpp_parsers::message::MessageType::Normal,
+            ) {
+                if let Some(sender) = message.from.as_ref().map(|jid| jid.to_bare()) {
+                    super::notification_activity_ingest::record_chat_state_activity(
+                        deps,
+                        &sender,
+                        &jid.to_bare(),
+                        message,
+                    )
+                    .await;
+                }
+            }
+        }
+
         match jid.clone().try_into_full() {
             Ok(full) => {
                 deliver_peer_to_full(registry, deps.sm_session_registry, &full, &stanza).await

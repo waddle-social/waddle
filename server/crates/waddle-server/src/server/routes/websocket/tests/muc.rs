@@ -14,6 +14,7 @@ async fn muc_stale_leave_does_not_remove_current_resource() {
         &room_jid,
         &current_jid,
         "alice",
+        None,
         &Some(owner_session),
     )
     .await;
@@ -44,6 +45,7 @@ async fn muc_join_responses_use_client_namespace() {
         &room_jid,
         &sender_jid,
         "alice",
+        None,
         &Some(owner_session),
     )
     .await;
@@ -106,6 +108,7 @@ async fn xep_0045_join_replay_exposes_existing_occupant_real_jids() {
             &room_jid,
             &sender_jid,
             nick,
+            None,
             &session,
         )
         .await;
@@ -118,6 +121,7 @@ async fn xep_0045_join_replay_exposes_existing_occupant_real_jids() {
         &room_jid,
         &joiner,
         "witness",
+        None,
         &None,
     )
     .await;
@@ -190,6 +194,7 @@ async fn xep_0045_section_7_2_15_join_replay_serializes_full_subject_envelope() 
         &room_jid,
         &setter_jid,
         "setter-nick",
+        None,
         &Some(setter_session),
     )
     .await;
@@ -217,6 +222,7 @@ async fn xep_0045_section_7_2_15_join_replay_serializes_full_subject_envelope() 
         &room_jid,
         &joiner_jid,
         "alice",
+        None,
         &Some(owner_session),
     )
     .await;
@@ -324,6 +330,7 @@ async fn standard_muc_owner_config_persists_room_and_enforces_nonanonymous_defau
         &room_jid,
         &alice_jid,
         "alice",
+        None,
         &Some(session.clone()),
     )
     .await;
@@ -444,6 +451,7 @@ async fn standard_muc_owner_get_returns_config_without_persisting_room() {
         &room_jid,
         &alice_jid,
         "alice",
+        None,
         &Some(session.clone()),
     )
     .await;
@@ -501,6 +509,7 @@ async fn standard_muc_owner_config_rejects_non_owner() {
         &room_jid,
         &alice_jid,
         "alice",
+        None,
         &Some(alice_session),
     )
     .await;
@@ -674,6 +683,7 @@ async fn active_room_disco_preserves_managed_announcement_channel_type() {
         &room_jid,
         &alice_jid,
         "alice",
+        None,
         &Some(session.clone()),
     )
     .await;
@@ -719,6 +729,7 @@ async fn muc_self_rejoin_does_not_emit_ghost_presence() {
         &room_jid,
         &first,
         "alice",
+        None,
         &Some(owner_session),
     )
     .await;
@@ -728,6 +739,7 @@ async fn muc_self_rejoin_does_not_emit_ghost_presence() {
         &room_jid,
         &second,
         "alice",
+        None,
         &None,
     )
     .await;
@@ -788,10 +800,20 @@ async fn muc_join_broadcast_includes_real_occupant_jid() {
         &room_jid,
         &alice,
         "alice",
+        None,
         &Some(owner_session),
     )
     .await;
-    let _ = handle_muc_join(state.as_ref(), "example.com", &room_jid, &bob, "bob", &None).await;
+    let _ = handle_muc_join(
+        state.as_ref(),
+        "example.com",
+        &room_jid,
+        &bob,
+        "bob",
+        None,
+        &None,
+    )
+    .await;
 
     let broadcast = alice_rx.try_recv().expect("bob join broadcast to alice");
     let broadcast_xml = stanza_to_xml(&broadcast.stanza);
@@ -835,6 +857,7 @@ async fn muc_nick_collision_returns_conflict_presence() {
         &room_jid,
         &alice,
         "dino",
+        None,
         &Some(owner_session),
     )
     .await;
@@ -844,6 +867,7 @@ async fn muc_nick_collision_returns_conflict_presence() {
         &room_jid,
         &bob,
         "dino",
+        None,
         &None,
     )
     .await;
@@ -908,10 +932,20 @@ async fn cleanup_muc_presence_broadcasts_unavailable_to_remaining_occupants() {
         &room_jid,
         &alice,
         "alice",
+        None,
         &Some(owner_session),
     )
     .await;
-    let _ = handle_muc_join(state.as_ref(), "example.com", &room_jid, &bob, "bob", &None).await;
+    let _ = handle_muc_join(
+        state.as_ref(),
+        "example.com",
+        &room_jid,
+        &bob,
+        "bob",
+        None,
+        &None,
+    )
+    .await;
 
     // Drain the join broadcast (Alice's room → Bob's mailbox is the
     // self-presence on join; Bob's room → Alice's mailbox would be
@@ -945,4 +979,129 @@ async fn cleanup_muc_presence_broadcasts_unavailable_to_remaining_occupants() {
     let expected_to = bob.to_string();
     assert_eq!(presence.attr("from"), Some(expected_from.as_str()));
     assert_eq!(presence.attr("to"), Some(expected_to.as_str()));
+}
+
+/// XEP-0045 slice-2b ingest: a successful `handle_muc_join` MUST
+/// record `(sender_bare, room)` activity in the
+/// `notification_activity` projection so the T1 XEP-0513 `<active/>`
+/// evaluator can admit ActiveChannelMention pushes for the joiner.
+/// Pass-2 review caught this as a regression — the writer existed but
+/// nothing in production called it. The test guards the wire-in.
+#[tokio::test]
+async fn handle_muc_join_records_notification_activity_for_sender() {
+    use crate::notification_activity::NotificationActivityReader;
+
+    let state = create_test_websocket_state().await;
+    let owner_session = create_test_server_owner_session(state.as_ref(), "alice").await;
+    let room_jid: BareJid = "channel@muc.example.com".parse().expect("room jid");
+    let alice: FullJid = "alice@example.com/web".parse().expect("alice");
+
+    // Pre-condition: no activity row yet for (alice, room).
+    let before = state
+        .deps
+        .protocol
+        .notification_activity
+        .read_activity(&alice.to_bare(), &room_jid)
+        .await
+        .expect("read pre-join");
+    assert!(
+        before.is_none(),
+        "projection MUST start empty for fresh user/room pair; got {before:?}",
+    );
+
+    let _ = handle_muc_join(
+        state.as_ref(),
+        "example.com",
+        &room_jid,
+        &alice,
+        "alice",
+        Some(crate::notification_activity::NotificationPresenceShow::Away),
+        &Some(owner_session),
+    )
+    .await;
+
+    let after = state
+        .deps
+        .protocol
+        .notification_activity
+        .read_activity(&alice.to_bare(), &room_jid)
+        .await
+        .expect("read post-join")
+        .expect("activity row MUST exist after MUC join");
+    assert!(
+        after.last_active_at_ms > 0,
+        "MUC join MUST bump last_active_at_ms; got {}",
+        after.last_active_at_ms,
+    );
+    assert_eq!(
+        after.presence_show,
+        Some(crate::notification_activity::NotificationPresenceShow::Away),
+        "join MUST persist the typed `<show/>` token; got {:?}",
+        after.presence_show,
+    );
+}
+
+/// XEP-0045 slice-2b ingest: a `handle_muc_leave` MUST bump
+/// `(sender_bare, room)` activity AND clear the persisted
+/// `<show/>` (an explicit unavailable has no available presence).
+#[tokio::test]
+async fn handle_muc_leave_records_notification_activity_and_clears_show() {
+    use crate::notification_activity::NotificationActivityReader;
+
+    let state = create_test_websocket_state().await;
+    let owner_session = create_test_server_owner_session(state.as_ref(), "alice").await;
+    let room_jid: BareJid = "channel@muc.example.com".parse().expect("room jid");
+    let alice: FullJid = "alice@example.com/web".parse().expect("alice");
+
+    let _ = handle_muc_join(
+        state.as_ref(),
+        "example.com",
+        &room_jid,
+        &alice,
+        "alice",
+        Some(crate::notification_activity::NotificationPresenceShow::Chat),
+        &Some(owner_session),
+    )
+    .await;
+    let after_join = state
+        .deps
+        .protocol
+        .notification_activity
+        .read_activity(&alice.to_bare(), &room_jid)
+        .await
+        .expect("read post-join")
+        .expect("activity post-join");
+    assert_eq!(
+        after_join.presence_show,
+        Some(crate::notification_activity::NotificationPresenceShow::Chat)
+    );
+
+    // No sleep needed: the monotonic UPSERTs in
+    // `NotificationActivityStore` now use `>=` so tie-millis writes
+    // (rapid join/leave landing in the same millisecond) still apply
+    // the latest writer's columns — the leave's `last_active_at_ms`
+    // and cleared `<show/>` are persisted even when `now_ms` matches
+    // the join's. The previous 2ms sleep was a workaround for the
+    // strict-`>` race (Codex/Copilot review on PR #731). The assertion
+    // below uses `>=` to allow same-millisecond ties without flaking.
+    let _ = handle_muc_leave(state.as_ref(), &room_jid, &alice, "alice").await;
+    let after_leave = state
+        .deps
+        .protocol
+        .notification_activity
+        .read_activity(&alice.to_bare(), &room_jid)
+        .await
+        .expect("read post-leave")
+        .expect("activity post-leave");
+    assert!(
+        after_leave.last_active_at_ms >= after_join.last_active_at_ms,
+        "leave MUST NOT regress last_active_at_ms below join (got join={} leave={})",
+        after_join.last_active_at_ms,
+        after_leave.last_active_at_ms,
+    );
+    assert!(
+        after_leave.presence_show.is_none(),
+        "leave MUST clear persisted `<show/>`; got {:?}",
+        after_leave.presence_show,
+    );
 }

@@ -36,6 +36,20 @@ pub(super) async fn archive_direct(
                 archive_id,
                 "ArchiveDirect: persisted"
             );
+            // Notification activity ingest (slice 2b): the sender's
+            // own archive commit is the strongest "currently active"
+            // signal in a DM. `ArchiveDirect` runs twice per DM —
+            // once for the sender's archive (XEP-0313 §5.1.3) and
+            // once for the recipient's. Only the sender path bumps
+            // `(sender, peer)` activity, gated by `archive_jid ==
+            // from`: persisting the message into the recipient's
+            // archive does NOT indicate the recipient is active.
+            if archive_jid == from {
+                super::notification_activity_ingest::record_outbound_message_activity(
+                    deps, &from, &to, &message,
+                )
+                .await;
+            }
             let rewrite = ArchiveIdRewrite::from_store_result(
                 jid::Jid::from(archive_jid.clone()),
                 requested_archive_id,

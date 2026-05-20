@@ -18,6 +18,7 @@ pub async fn handle_muc_join(
     room_jid: &BareJid,
     sender_jid: &FullJid,
     nick: &str,
+    presence_show: Option<crate::notification_activity::NotificationPresenceShow>,
     authenticated_session: &Option<Session>,
 ) -> Vec<String> {
     info!(room = %room_jid, nick = %nick, sender = %sender_jid, "MUC join request");
@@ -208,6 +209,22 @@ pub async fn handle_muc_join(
 
     info!(room = %room_jid, nick = %nick, occupants = occupant_count, "User joined MUC room");
 
+    // Notification activity ingest (slice 2b): a successful MUC join
+    // bumps `(sender_bare, room)` activity. The XEP-0513 `<active/>`
+    // filter consults this projection to admit ActiveChannelMention
+    // pushes for users who are present in the room. `presence_show` is
+    // passed in by the caller (`handle_presence`) when the incoming
+    // presence carried a typed `<show/>` token; on first join (or
+    // when no `<show/>` is present) we record `None` so the column
+    // stays NULL until the user actually broadcasts a state.
+    crate::server::routes::interpret::record_presence_available_activity_on_state(
+        state,
+        &sender_jid.to_bare(),
+        room_jid,
+        presence_show,
+    )
+    .await;
+
     let mut responses = Vec::new();
 
     // Replay one occupant presence per nick to the joiner. Same-bare multi-session
@@ -304,6 +321,20 @@ pub async fn handle_muc_leave(
     nick: &str,
 ) -> Vec<String> {
     info!(room = %room_jid, nick = %nick, sender = %sender_jid, "MUC leave request");
+
+    // Notification activity ingest (slice 2b): a XEP-0045 leave
+    // (explicit `<presence type='unavailable'/>`) is still an
+    // engagement signal — the user just acted on the room — so we
+    // bump `(sender_bare, room)` activity and clear the persisted
+    // `<show/>`. We record before the room-actor teardown so a
+    // missing room actor doesn't suppress the activity write; the
+    // typed signal happened on the wire regardless.
+    crate::server::routes::interpret::record_presence_unavailable_activity_on_state(
+        state,
+        &sender_jid.to_bare(),
+        room_jid,
+    )
+    .await;
 
     let Some(room_actor) = get_room_actor(state, room_jid).await else {
         debug!(room = %room_jid, "Room not found for leave");

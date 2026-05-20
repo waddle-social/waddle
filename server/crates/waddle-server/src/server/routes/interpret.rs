@@ -140,6 +140,7 @@ mod displayed_marker;
 mod groupchat_archive;
 mod groupchat_inbox;
 mod groupchat_validation;
+mod notification_activity_ingest;
 mod offline_delivery;
 mod room_dispatch;
 mod room_helpers;
@@ -186,6 +187,9 @@ use routing::{deliver_peer_to_full, run_headless_recipient_pass};
 
 pub use deps::{Deps, InterpretOutcome};
 pub(crate) use groupchat_archive::push_inbox_update;
+pub(crate) use notification_activity_ingest::{
+    record_presence_available_activity_on_state, record_presence_unavailable_activity_on_state,
+};
 
 /// Execute the side effects described by `events`.
 ///

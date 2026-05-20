@@ -2023,6 +2023,7 @@ async fn cleanup_shutdown_detaches_resumable_session_on_transport_drop() {
         &room_jid,
         &jid,
         "alice",
+        None,
         &Some(owner_session),
     )
     .await;
@@ -2118,6 +2119,7 @@ async fn cleanup_shutdown_does_not_detach_explicit_close() {
         &room_jid,
         &jid,
         "alice",
+        None,
         &Some(owner_session),
     )
     .await;
@@ -2212,6 +2214,7 @@ async fn sm_janitor_helper_drains_expired_and_cleans_muc() {
         &room_jid,
         &jid,
         "alice",
+        None,
         &Some(owner_session),
     )
     .await;
