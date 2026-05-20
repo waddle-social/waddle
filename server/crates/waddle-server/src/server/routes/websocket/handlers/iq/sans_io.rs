@@ -88,15 +88,18 @@ pub(super) async fn handle_sans_io_iq(
                 .connection_registry
                 .set_carbons_enabled(full_jid, enabled);
         }
-        // XMPP-native MUC-call membership gate: a session may only
-        // mint a LiveKit JWT for a room it has actually joined
-        // through the XEP-0045 path. The pure dispatcher in
-        // `waddle-xmpp` has no handle to the room registry, so the
-        // check has to happen here before dispatch.
-        if payload_ns == "urn:waddle:muc-call:0" {
-            match super::muc_call_gate::verify_muc_call_request(state, full_jid, iq).await {
-                super::muc_call_gate::GateOutcome::Allow => {}
-                super::muc_call_gate::GateOutcome::Deny(stanza_error) => {
+        // XMPP-native MUC-call membership gate (XEP-0272 Muji): a
+        // session may only mint a LiveKit JWT for a room it has
+        // actually joined through the XEP-0045 path. The pure
+        // dispatcher in `waddle-xmpp` has no handle to the room
+        // registry, so the check has to happen here before
+        // dispatch. The gate triggers on the Jingle namespace and
+        // only when the embedded `<jingle/>` carries a `<muji/>`
+        // child — 1:1 Jingle traffic passes through untouched.
+        if payload_ns == waddle_xmpp::xep::xep0166::NS_JINGLE {
+            match super::jingle_muji_gate::verify_muji_jingle_request(state, full_jid, iq).await {
+                super::jingle_muji_gate::GateOutcome::Allow => {}
+                super::jingle_muji_gate::GateOutcome::Deny(stanza_error) => {
                     return vec![build_iq_error_xml_typed(
                         id,
                         response_from,

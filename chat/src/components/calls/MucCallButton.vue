@@ -45,13 +45,14 @@ async function startCall(media: CallMedia): Promise<void> {
   if (!sender) return;
   // Our MUC nick is the session username — that's also what
   // `joinRoom` registered when this user entered the channel, so
-  // it's the resource we'll use on the `<call/>` presence extension.
+  // it's the resource we'll use on the XEP-0272 `<muji/>` presence.
   const selfNick = connectionStore.session?.username ?? undefined;
   try {
-    // Group call: the SFU mints the room-scoped token via
-    // `<request-join/>`, the store flips to `active`, and the
-    // overlay's LiveKit connect kicks in. `beginMucCall` then
-    // updates our MUC presence with the `<call/>` extension so
+    // Group call: the SFU mixer (`calls.<server-domain>`) mints
+    // the room-scoped LiveKit token via a XEP-0272 Muji-bearing
+    // Jingle session-initiate, the store flips to `active`, and
+    // the overlay's LiveKit connect kicks in. `beginMucCall` then
+    // updates our MUC presence with the `<muji/>` extension so
     // other occupants see the "N in call" indicator.
     await beginMucCall(sender, props.roomJid, media, selfNick);
   } catch (err) {

@@ -76,10 +76,12 @@ async fn server_disco_advertises_call_features_when_livekit_enabled() {
         "urn:xmpp:jingle-message:0",
         "urn:xmpp:extdisco:2",
         "urn:waddle:transports:livekit:0",
-        // `urn:waddle:muc-call:0` is now backed by `MucCallHandler`
-        // (request-join / request-leave IQ surface) so the gating
-        // rule is satisfied — see `register_call_handlers`.
-        "urn:waddle:muc-call:0",
+        // XEP-0272 (Muji) — MUC group call presence advertisement +
+        // Jingle session-initiate join surface to the SFU mixer.
+        // Backed by the Muji branch in `JingleHandler`; the legacy
+        // `urn:waddle:muc-call:0` IQ surface and `MucCallHandler`
+        // have been removed.
+        "urn:xmpp:jingle:muji:0",
     ] {
         assert!(
             resp.contains(ns),

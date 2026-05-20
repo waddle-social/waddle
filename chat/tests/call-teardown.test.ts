@@ -169,7 +169,7 @@ describe("tearDownActiveCall", () => {
 describe("MUC group call", () => {
   test("beginMucCall sets active(kind: 'muc') after parsing the issued transport", async () => {
     const sender = {
-      send_muc_call_join: mock(async () => ({
+      send_muji_session_initiate: mock(async () => ({
         url: "wss://livekit.test",
         room: "chan@muc.test",
         identity: "alice@waddle.test/web",
@@ -193,10 +193,14 @@ describe("MUC group call", () => {
       kind: "muc",
       selfNick: undefined,
     });
+    expect(sender.send_muji_session_initiate).toHaveBeenCalledWith(
+      "chan@muc.test",
+      true, // audioVideo.video
+    );
   });
 
-  test("beginMucCall with a nick also pushes a MUC presence update", async () => {
-    const send_muc_call_join = mock(async () => ({
+  test("beginMucCall with a nick also pushes a MUC Muji presence update", async () => {
+    const send_muji_session_initiate = mock(async () => ({
       url: "wss://livekit.test",
       room: "chan@muc.test",
       identity: "alice@waddle.test/web",
@@ -205,9 +209,10 @@ describe("MUC group call", () => {
     const update_muji_presence = mock(async () => undefined);
     const { beginMucCall } = await import("../src/lib/calls/call-store");
     await beginMucCall(
-      { send_muc_call_join, update_muji_presence } as unknown as Parameters<
-        typeof beginMucCall
-      >[0],
+      {
+        send_muji_session_initiate,
+        update_muji_presence,
+      } as unknown as Parameters<typeof beginMucCall>[0],
       "chan@muc.test",
       audioVideo,
       "alice",
@@ -222,13 +227,12 @@ describe("MUC group call", () => {
     );
   });
 
-  test("tearDownActiveCall still clears the call presence when sendMucCallLeave throws", async () => {
+  test("tearDownActiveCall still clears the Muji presence when sendMujiSessionTerminate throws", async () => {
     // Regression guard: a stale wasm bundle without
-    // `send_muc_call_leave` makes `sendMucCallLeave` throw. The
+    // `send_muji_session_terminate` makes the call throw. The
     // presence cleanup MUST still run — otherwise the user's
-    // `<call state='active'/>` advertisement lingers until the XMPP
-    // session disconnects, exactly the bug this teardown path exists
-    // to fix.
+    // `<muji/>` advertisement lingers until the XMPP session
+    // disconnects, exactly the bug this teardown path exists to fix.
     const update_muji_presence = mock(async () => undefined);
     $callState.set({
       phase: "active",
@@ -256,8 +260,8 @@ describe("MUC group call", () => {
     expect($callState.get()).toEqual({ phase: "idle" });
   });
 
-  test("tearDownActiveCall on a MUC call dispatches request-leave and clears the call presence", async () => {
-    const send_muc_call_leave = mock(async () => undefined);
+  test("tearDownActiveCall on a MUC call dispatches Muji session-terminate AND clears the presence", async () => {
+    const send_muji_session_terminate = mock(async () => undefined);
     const update_muji_presence = mock(async () => undefined);
     $callState.set({
       phase: "active",
@@ -269,13 +273,14 @@ describe("MUC group call", () => {
       selfNick: "alice",
     });
     await tearDownActiveCall(
-      { send_muc_call_leave, update_muji_presence } as unknown as Parameters<
-        typeof tearDownActiveCall
-      >[0],
+      {
+        send_muji_session_terminate,
+        update_muji_presence,
+      } as unknown as Parameters<typeof tearDownActiveCall>[0],
       "gone",
     );
-    expect(send_muc_call_leave).toHaveBeenCalledTimes(1);
-    expect(send_muc_call_leave).toHaveBeenCalledWith("chan@muc.test");
+    expect(send_muji_session_terminate).toHaveBeenCalledTimes(1);
+    expect(send_muji_session_terminate).toHaveBeenCalledWith("chan@muc.test");
     expect(update_muji_presence).toHaveBeenCalledTimes(1);
     expect(update_muji_presence).toHaveBeenCalledWith(
       "chan@muc.test",

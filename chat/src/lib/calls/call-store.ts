@@ -302,7 +302,7 @@ export async function tearDownActiveCall(
               }
             }
             try {
-              await sendMucCallLeave(raw, s.peer);
+              await sendMujiSessionTerminate(raw, s.peer);
             } catch (err) {
               reportCallError(err);
             }
@@ -330,16 +330,20 @@ export async function tearDownActiveCall(
  * escape hatch (CLAUDE.md XML-generation rule). Optional fields so
  * unit tests can stub a partial client.
  *
- * Note: `send_muc_call_join` / `send_muc_call_leave` still target
- * the legacy `urn:waddle:muc-call:0` IQ surface for now. The
- * follow-up commit on this branch migrates them to Jingle
- * session-initiate / session-terminate to the mixer JID. The Muji
- * presence side is already XEP-0272 conformant via
- * `update_muji_presence`.
+ * Fully XEP-conformant: the Muji presence advertisement
+ * (`update_muji_presence`) carries XEP-0272 `<muji/>` in MUC
+ * presence, and `send_muji_session_initiate` /
+ * `send_muji_session_terminate` issue XEP-0166 Jingle
+ * session-initiate / session-terminate stanzas to the SFU mixer
+ * JID (`calls.<server-domain>`) with a `<muji room='…'/>` payload
+ * — the wire shape every other conformant client expects.
  */
 export type RawIqSender = {
-  send_muc_call_join?: (room_jid: string) => Promise<LiveKitJoin>;
-  send_muc_call_leave?: (room_jid: string) => Promise<void>;
+  send_muji_session_initiate?: (
+    room_jid: string,
+    video: boolean,
+  ) => Promise<LiveKitJoin>;
+  send_muji_session_terminate?: (room_jid: string) => Promise<void>;
   update_muji_presence?: (
     room_jid: string,
     nick: string,
@@ -350,47 +354,50 @@ export type RawIqSender = {
 };
 
 /**
- * Send `<request-join xmlns='urn:waddle:muc-call:0' room='...'/>`
- * via the typed wasm method and return the issued LiveKit join
- * credentials. The wasm side builds the IQ via `minidom::Element`
- * and parses the response into a typed `WaddleLiveKitJoin`, so no
- * XML touches the chat-side wire layer.
+ * Send a XEP-0272 Muji-bearing Jingle `session-initiate` to the
+ * SFU mixer (`calls.<server-domain>`) and return the typed
+ * `WaddleLiveKitJoin` credentials from the server's
+ * `session-accept`. The wasm side builds the IQ via
+ * `minidom::Element` and parses the response, so no XML touches
+ * the chat-side wire layer.
  */
-async function sendMucCallJoin(
+async function sendMujiSessionInitiate(
   sender: RawIqSender,
   roomJid: string,
+  video: boolean,
 ): Promise<LiveKitJoin> {
-  if (!sender.send_muc_call_join) {
+  if (!sender.send_muji_session_initiate) {
     throw new Error(
-      "wasm client does not expose send_muc_call_join; rebuild the wasm bundle",
+      "wasm client does not expose send_muji_session_initiate; rebuild the wasm bundle",
     );
   }
-  return await sender.send_muc_call_join(roomJid);
+  return await sender.send_muji_session_initiate(roomJid, video);
 }
 
 /**
- * Send `<request-leave/>` so the SFU unregisters us and revokes
- * any tokens it minted for this `(room, identity)` pair.
+ * Send a XEP-0272 Muji-bearing Jingle `session-terminate` so the
+ * SFU unregisters us and revokes any tokens it minted for this
+ * `(room, identity)` pair.
  */
-async function sendMucCallLeave(
+async function sendMujiSessionTerminate(
   sender: RawIqSender | CallWireSender,
   roomJid: string,
 ): Promise<void> {
   const rawSender = sender as RawIqSender;
-  if (!rawSender.send_muc_call_leave) {
+  if (!rawSender.send_muji_session_terminate) {
     throw new Error(
-      "wasm client does not expose send_muc_call_leave; rebuild the wasm bundle",
+      "wasm client does not expose send_muji_session_terminate; rebuild the wasm bundle",
     );
   }
-  await rawSender.send_muc_call_leave(roomJid);
+  await rawSender.send_muji_session_terminate(roomJid);
 }
 
 /**
- * Originator action for MUC group calls: send `<request-join/>`,
- * pull the issued LiveKit join out of the IQ result, transition
- * `$callState` straight to `active` (no propose/proceed round-trip
- * — MUC calls are presence-discovered, so there's no responder to
- * ring).
+ * Originator action for MUC group calls: send a Jingle Muji
+ * session-initiate to the SFU mixer, pull the issued LiveKit join
+ * out of the resulting session-accept, transition `$callState`
+ * straight to `active` (no propose/proceed round-trip — MUC calls
+ * are presence-discovered, so there's no responder to ring).
  */
 export async function beginMucCall(
   sender: RawIqSender,
@@ -398,7 +405,7 @@ export async function beginMucCall(
   media: CallMedia,
   selfNick?: string,
 ): Promise<void> {
-  const join = await sendMucCallJoin(sender, roomJid);
+  const join = await sendMujiSessionInitiate(sender, roomJid, media.video);
   $callState.set({
     phase: "active",
     peer: roomJid,

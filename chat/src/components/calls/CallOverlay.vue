@@ -136,14 +136,14 @@ async function toggleCam(): Promise<void> {
 }
 
 async function hangup(): Promise<void> {
-  // `tearDownActiveCall` emits the appropriate XEP-0166 /
-  // urn:waddle:muc-call:0 stanza for the current phase AND, for MUC
-  // calls, clears the `<call state="active"/>` presence advertisement
-  // so neither the user's own client nor other occupants keep
-  // rendering the room as "in call" after we leave. Previously the
-  // hangup path sent `<request-leave/>` but skipped the presence
-  // cleanup, leaving the "N in call" indicator visible until the XMPP
-  // session disconnected — which read as "the call won't stop".
+  // `tearDownActiveCall` emits the appropriate XEP-0166 Jingle
+  // stanza for the current phase (JMI retract / Muji
+  // session-terminate) AND, for MUC calls, clears the XEP-0272
+  // `<muji/>` presence advertisement so neither the user's own
+  // client nor other occupants keep rendering the room as "in
+  // call" after we leave (XEP-0272 §Leaving: presence cleanup
+  // happens FIRST so new participants don't try to initiate
+  // sessions with us mid-departure).
   await tearDownActiveCall(getSender(), "success");
   await engine.disconnect();
 }

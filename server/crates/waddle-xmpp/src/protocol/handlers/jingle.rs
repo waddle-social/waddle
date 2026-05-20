@@ -24,10 +24,35 @@ use crate::protocol::event::{OutboundEvent, StanzaContext};
 use crate::protocol::handlers::session_initiate_rate_limit::SessionInitiateRateLimit;
 use crate::protocol::traits::IqHandler;
 use crate::xep::xep0166::NS_JINGLE;
+use crate::xep::xep0272::{find_muji, Muji};
 use crate::xep::xep_waddle_livekit_transport::{
     IssuedTransport, TransportParseError, WaddleLiveKitTransport, NS_WADDLE_LIVEKIT_TRANSPORT,
 };
 use crate::Stanza;
+
+/// XEP-0298 conference-info namespace. We use only the `isfocus`
+/// attribute on a single element to signal that the Jingle peer
+/// (the SFU mixer) is a conference focus rather than a P2P peer —
+/// matching av-conferences ProtoXEP usage and the XEP-0298 §3.1
+/// "Indicating a Focus" shape. The full COIN spec (participant
+/// rosters, media descriptions per participant, etc.) is NOT
+/// implemented; only this single discriminator is on the wire.
+pub const NS_COIN: &str = "urn:xmpp:coin:1";
+
+/// Mixer-JID prefix. A Muji-bearing Jingle session-initiate MUST
+/// be addressed to `calls.<server-domain>` so the server can
+/// distinguish it from a peer-to-peer Jingle on its own dispatcher.
+/// Single seam to swap for an externalised XEP-0114 component
+/// later if scaling demands.
+pub const MIXER_LOCALPART: &str = "calls";
+
+/// Build the mixer JID for a given server domain, e.g.
+/// `calls.waddle.social` for domain `waddle.social`.
+pub fn calls_mixer_jid(server_domain: &str) -> BareJid {
+    let raw = format!("{MIXER_LOCALPART}.{server_domain}");
+    raw.parse()
+        .unwrap_or_else(|_| panic!("server domain produced an invalid mixer JID: {raw}"))
+}
 
 #[derive(Clone)]
 pub struct JingleHandler {
@@ -107,6 +132,29 @@ impl IqHandler for JingleHandler {
                 DefinedCondition::FeatureNotImplemented,
                 "Jingle calling is currently single-domain only; federation is not yet supported",
             );
+        }
+
+        // XEP-0272 §Joining: a Jingle session-initiate may embed a
+        // `<muji room='…'/>` element to signal "this Jingle is for
+        // joining the SFU-mediated group call in that MUC room."
+        // When present, we branch out of the P2P forwarding path and
+        // act as the conference focus ourselves — minting a LiveKit
+        // token, registering the participant, and replying with a
+        // session-accept that carries the credentials + XEP-0298
+        // `<conference-info isfocus='true'/>` marker.
+        if let Some(muji_elem) = find_muji(jingle_elem) {
+            let muji = match Muji::try_from(muji_elem) {
+                Ok(m) => m,
+                Err(err) => {
+                    tracing::warn!(error = %err, "rejecting Muji-bearing Jingle with malformed <muji/>");
+                    return error_reply(
+                        iq,
+                        DefinedCondition::BadRequest,
+                        "malformed <muji/> element inside <jingle/>",
+                    );
+                }
+            };
+            return self.handle_muji_jingle(iq, jingle, muji, peer, ctx);
         }
 
         match jingle.action {
@@ -224,6 +272,169 @@ impl JingleHandler {
                 .unwrap_or_else(|| ctx.full_jid.clone().into()),
             stanza: Box::new(Stanza::Iq(Box::new(forwarded_iq))),
         }]
+    }
+
+    /// Handle a Muji-bearing Jingle stanza (XEP-0272 §Joining + a
+    /// custom SFU-focus interpretation). Routes by `jingle.action`:
+    ///
+    /// - `session-initiate`: mint a LiveKit token for the calling
+    ///   identity, register them with the SFU under the room JID
+    ///   (`<muji room='…'/>` is authoritative — NOT `iq.to`, which
+    ///   could theoretically be a different mixer alias), and reply
+    ///   with a `session-accept` carrying the credentials and a
+    ///   `<conference-info xmlns='urn:xmpp:coin:1' isfocus='true'/>`
+    ///   marker per XEP-0298.
+    /// - `session-terminate`: unregister the participant. Reply
+    ///   `<iq type='result'/>` per XEP-0166 §6.7.
+    /// - Anything else: reject with `<bad-request/>` — Muji peer
+    ///   exchanges (transport-info etc.) aren't meaningful when the
+    ///   peer is a focus that brokers tokens.
+    fn handle_muji_jingle(
+        &self,
+        iq: &Iq,
+        jingle: Jingle,
+        muji: Muji,
+        peer: Jid,
+        ctx: &StanzaContext<'_>,
+    ) -> Vec<OutboundEvent> {
+        // The mixer JID is `calls.<server-domain>`. Reject Muji
+        // sessions addressed elsewhere so a malicious client can't
+        // route a Muji session-initiate through a different
+        // server-side component and pick up tokens.
+        let expected_mixer = calls_mixer_jid(ctx.domain);
+        if peer.to_bare() != expected_mixer {
+            return error_reply(
+                iq,
+                DefinedCondition::BadRequest,
+                "Muji Jingle sessions must be addressed to the calls mixer JID",
+            );
+        }
+
+        let Some(room_jid) = muji.room.clone() else {
+            return error_reply(
+                iq,
+                DefinedCondition::BadRequest,
+                "Muji <muji/> child inside <jingle/> requires the 'room' attribute",
+            );
+        };
+
+        match jingle.action {
+            Action::SessionInitiate => self.handle_muji_session_initiate(iq, jingle, room_jid, ctx),
+            Action::SessionTerminate => {
+                self.handle_muji_session_terminate(iq, jingle, room_jid, ctx)
+            }
+            _ => error_reply(
+                iq,
+                DefinedCondition::BadRequest,
+                "Muji Jingle supports only session-initiate and session-terminate",
+            ),
+        }
+    }
+
+    /// Build the session-accept that replies to a Muji
+    /// `session-initiate`. The CallId is the room JID itself (one
+    /// SFU room per MUC room — every occupant who joins the call
+    /// lands in the same LiveKit room), NOT `scoped_call_id`. That's
+    /// the deliberate semantic difference from the 1:1 path.
+    fn handle_muji_session_initiate(
+        &self,
+        iq: &Iq,
+        mut jingle: Jingle,
+        room_jid: BareJid,
+        ctx: &StanzaContext<'_>,
+    ) -> Vec<OutboundEvent> {
+        let call_id = match CallId::new(room_jid.to_string()) {
+            Ok(c) => c,
+            Err(_) => {
+                return error_reply(
+                    iq,
+                    DefinedCondition::BadRequest,
+                    "Muji room JID could not be normalised into a SFU call id",
+                );
+            }
+        };
+
+        // Identity is the authenticated full JID. A Muji
+        // session-initiate from alice@waddle.test/desktop mints a
+        // token for THAT resource specifically, so alice/mobile
+        // joining the same call gets her own token under her own
+        // identity — multi-resource correct.
+        let identity = Identity::from_jid(ctx.full_jid.clone());
+
+        // Rewrite each `<content>`'s transport with an issued token.
+        // Every content shares the same token because LiveKit's
+        // identity model is "one identity per participant"; the
+        // audio/video split lives below the LiveKit layer.
+        for content in &mut jingle.contents {
+            match rewrite_content_transport(content, &call_id, &identity, &*self.sfu) {
+                Ok(()) => {}
+                Err(reason) => return reason.into_error_reply(iq),
+            }
+        }
+        self.sfu.register_call_participant(&call_id, &identity);
+
+        // Rebuild the Jingle as a session-accept: same sid + contents
+        // but flipped action and `responder` set to the mixer.
+        let responder: Jid = calls_mixer_jid(ctx.domain).into();
+        let mixer_full = responder.clone();
+        let mut accept = Jingle::new(Action::SessionAccept, jingle.sid.clone());
+        accept.responder = Some(responder);
+        accept.initiator = jingle.initiator.clone();
+        accept.contents = jingle.contents;
+
+        // Serialise + re-attach the typed `<muji room='…'/>`
+        // pass-through (echoed so the client knows which conference
+        // this accept corresponds to in a multi-call scenario).
+        let mut accept_elem: Element = accept.into();
+        // XEP-0272 §Joining example: `<muji>` is a direct child of
+        // `<jingle>`. Same shape on accept.
+        accept_elem.append_child(Muji::for_room(room_jid).to_element());
+        // XEP-0298 §3.1 focus marker — also a direct child of
+        // `<jingle/>`. Stamped on the accept so the client can
+        // distinguish this from a P2P session-accept (a normal
+        // peer would never set `isfocus='true'`).
+        accept_elem.append_child(
+            Element::builder("conference-info", NS_COIN)
+                .attr(minidom::rxml::xml_ncname!("isfocus").to_owned(), "true")
+                .build(),
+        );
+
+        let reply = Iq::Result {
+            from: Some(mixer_full),
+            to: Some(ctx.full_jid.clone().into()),
+            id: iq.id().to_string(),
+            payload: Some(accept_elem),
+        };
+        vec![OutboundEvent::SendStanza(Box::new(Stanza::Iq(Box::new(
+            reply,
+        ))))]
+    }
+
+    fn handle_muji_session_terminate(
+        &self,
+        iq: &Iq,
+        _jingle: Jingle,
+        room_jid: BareJid,
+        ctx: &StanzaContext<'_>,
+    ) -> Vec<OutboundEvent> {
+        // Same CallId derivation as session-initiate so the
+        // unregister matches the original registration.
+        if let Ok(call_id) = CallId::new(room_jid.to_string()) {
+            let _ = self
+                .sfu
+                .unregister_call_participant(&call_id, &Identity::from_jid(ctx.full_jid.clone()));
+        }
+        // Empty IQ result per XEP-0166 §6.7.
+        let mixer: Jid = calls_mixer_jid(ctx.domain).into();
+        let reply = Iq::Result {
+            from: Some(mixer),
+            to: Some(ctx.full_jid.clone().into()),
+            id: iq.id().to_string(),
+            payload: None,
+        };
+        vec![OutboundEvent::SendStanza(Box::new(Stanza::Iq(Box::new(
+            reply,
+        ))))]
     }
 
     fn handle_session_terminate(

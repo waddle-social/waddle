@@ -183,21 +183,57 @@ export class WaddleClient {
      * `xmpp_parsers::jingle::Reason`; unknown values are rejected
      * at the wasm boundary so a typo can't ship a malformed
      * condition over the wire.
-     * Send `<request-join xmlns='urn:waddle:muc-call:0' room='ROOM_JID'/>`
-     * to the MUC room and return the issued LiveKit join credentials
-     * as a typed `{ url, room, identity, token }` object. The XML
-     * is built via `minidom::Element::builder` (XML hard rule
-     * from CLAUDE.md — no string concatenation at the wire
-     * boundary).
+     * Send a XEP-0272 Muji-bearing Jingle `session-initiate` IQ to
+     * the SFU mixer (`calls.<server-domain>`) to join the room's
+     * group call, and return the issued LiveKit credentials as a
+     * typed `{ url, room, identity, token }` object.
+     *
+     * Wire shape (XEP-0166 + XEP-0272 §Joining):
+     *
+     * ```xml
+     * <iq type='set' to='calls.<domain>' id='…'>
+     *   <jingle xmlns='urn:xmpp:jingle:1' action='session-initiate'
+     *           sid='ROOM_JID'>
+     *     <muji xmlns='urn:xmpp:jingle:muji:0' room='ROOM_JID'/>
+     *     <content creator='initiator' name='audio' senders='both'>
+     *       <description xmlns='urn:xmpp:jingle:apps:rtp:1' media='audio'/>
+     *       <transport xmlns='urn:waddle:transports:livekit:0'/>
+     *     </content>
+     *     [<content creator='initiator' name='video'>…</content>]
+     *   </jingle>
+     * </iq>
+     * ```
+     *
+     * Convention: `sid` is set to the room JID so that the
+     * corresponding `session-terminate` is unambiguous without
+     * requiring the client to track its own SIDs across reloads.
+     *
+     * `video` opt-in mirrors the call store's `media.video`
+     * flag — audio is always advertised (the call wouldn't be
+     * useful otherwise); video is included only when the user
+     * asked for it. LiveKit handles the actual codec selection
+     * once connected, so the descriptions are minimal.
      */
-    send_muc_call_join(room_jid: string): Promise<any>;
+    send_muji_session_initiate(room_jid: string, video: boolean): Promise<any>;
     /**
-     * Send `<request-leave xmlns='urn:waddle:muc-call:0' room='ROOM_JID'/>`
-     * to the MUC room. Server unregisters the participant + revokes
-     * every jti it minted for `(room, identity)`. Resolves with no
-     * payload.
+     * Send a XEP-0272 Muji-bearing Jingle `session-terminate` IQ
+     * to the SFU mixer (`calls.<server-domain>`). Server
+     * unregisters the participant + revokes every jti it minted
+     * for `(room, identity)`. Resolves with no payload.
+     *
+     * Wire shape (XEP-0166 §6.7):
+     *
+     * ```xml
+     * <iq type='set' to='calls.<domain>' id='…'>
+     *   <jingle xmlns='urn:xmpp:jingle:1' action='session-terminate'
+     *           sid='ROOM_JID' initiator='alice@…'>
+     *     <muji xmlns='urn:xmpp:jingle:muji:0' room='ROOM_JID'/>
+     *     <reason><success/></reason>
+     *   </jingle>
+     * </iq>
+     * ```
      */
-    send_muc_call_leave(room_jid: string): Promise<any>;
+    send_muji_session_terminate(room_jid: string): Promise<any>;
     send_presence(status?: string | null, show?: string | null): Promise<any>;
     send_raw_iq(xml: string): Promise<any>;
     send_reaction(to: string, msg_type: string, target_id: string, emojis: string[], thread_id?: string | null, thread_parent?: string | null): Promise<any>;
@@ -268,16 +304,19 @@ export class WaddleClient {
      */
     unpin_message(room_jid: string, target_stanza_id: string): Promise<any>;
     /**
-     * Update our MUC presence in `room_jid/nick` with (or without)
-     * the `<call xmlns='urn:waddle:muc-call:0'/>` extension. Sent as
-     * a fresh available-presence so other occupants discover that
-     * we've joined or left the room's group call without polling.
+     * Update the occupant's MUC Muji presence (XEP-0272).
      *
-     * `active=true` advertises us as a current participant; `false`
-     * emits the extension with `state='inactive'` so legacy
-     * presence-replay buffers eventually drop the prior `active`.
+     * - `active=false` (and no preparing): emits a bare `<presence/>`
+     *   without any `<muji/>` child — XEP-0272 §Leaving says the
+     *   absence of the element IS the leave marker.
+     * - `active=true`: emits a Muji presence advertising `<content>`
+     *   children for audio (always) and video (when `video=true`).
+     * - `preparing=true`: emits a `<preparing/>` sentinel per XEP-0272
+     *   §Joining two-phase flow. Typically the client sends this
+     *   first, awaits the room's echo, then re-emits with contents
+     *   declared.
      */
-    update_muc_call_presence(room_jid: string, nick: string, active: boolean, call_id: string): Promise<any>;
+    update_muji_presence(room_jid: string, nick: string, active: boolean, preparing: boolean, video: boolean): Promise<any>;
     /**
      * Fetch the latest calendar events from the community events
      * node. Returns ALL items including past events; chat-side

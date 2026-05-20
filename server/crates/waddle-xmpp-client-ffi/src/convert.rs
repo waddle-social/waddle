@@ -528,8 +528,9 @@ mod tests {
     //!    XEP-0353 JMI + XEP-0166 Jingle session control map to
     //!    `WaddleCallEvent` variants, and XEP-0490 MDS payloads
     //!    survive the `InboundMessage` → `WaddleMessage` hop.
-    //! 2. The MUC `<call xmlns='urn:waddle:muc-call:0' …/>` presence
-    //!    extension carries `state` and `call-id` through unchanged.
+    //! 2. The XEP-0272 `<muji xmlns='urn:xmpp:jingle:muji:0'/>`
+    //!    presence extension carries the `preparing` / `active`
+    //!    flags through unchanged.
     use super::*;
     use minidom::Element;
 

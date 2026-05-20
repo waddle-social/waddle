@@ -200,7 +200,6 @@ pub mod xep0503;
 pub mod xep0508;
 pub mod xep0513;
 pub mod xep_waddle_livekit_transport;
-pub mod xep_waddle_muc_call;
 pub mod xep_waddle_pin;
 
 mod exports;
