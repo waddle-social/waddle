@@ -1,8 +1,10 @@
 <script setup lang="ts">
+import { onBeforeUnmount } from "vue";
 import LandingState from "@/components/chat/LandingState.vue";
 import LoginScreen from "@/components/chat/LoginScreen.vue";
 import ChatReadyShell from "@/components/chat/ChatReadyShell.vue";
 import { useChatAppController } from "@/shell/chat-app-controller";
+import { appController } from "@/stores/app-controller";
 
 const props = defineProps<{
   giphyApiKey?: string;
@@ -10,6 +12,18 @@ const props = defineProps<{
 
 const controller = useChatAppController(props.giphyApiKey ?? "");
 const { connectionStore } = controller;
+
+// Publish the controller into a module-level ref so per-route Vue
+// islands mounted as siblings (Phase 3) can read shared state without
+// prop drilling. AppShell is the only writer.
+appController.value = controller;
+
+onBeforeUnmount(() => {
+  // Defensive: if AppShell ever unmounts (it's `transition:persist` in
+  // AppLayout, so this should be rare), drop the global handle so a
+  // stale controller can't accidentally outlive its setup scope.
+  appController.value = null;
+});
 </script>
 
 <template>

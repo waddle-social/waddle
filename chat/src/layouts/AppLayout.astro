@@ -1,7 +1,7 @@
 ---
 import { ClientRouter } from "astro:transitions";
 import { env } from "cloudflare:workers";
-import ChatApp from "@/components/ChatApp.vue";
+import AppShell from "@/components/AppShell.vue";
 import XmppProvider from "@/components/XmppProvider.vue";
 import "@/styles/global.css";
 
@@ -66,7 +66,7 @@ const giphyApiKey = env.GIPHY_API_KEY ?? "";
   </head>
   <body class="bg-background text-foreground font-sans antialiased">
     <XmppProvider client:only="vue" transition:persist serverBaseUrl={serverBaseUrl ?? ""} />
-    <ChatApp client:only="vue" giphyApiKey={giphyApiKey}>
+    <AppShell client:only="vue" transition:persist giphyApiKey={giphyApiKey}>
       <div slot="fallback" class="chat-app-shell chat-startup-shell" role="status" aria-live="polite">
         <div class="chat-desktop-shell">
           <div class="chat-desktop-rail-slot">
@@ -115,6 +115,6 @@ const giphyApiKey = env.GIPHY_API_KEY ?? "";
           </main>
         </div>
       </div>
-    </ChatApp>
+    </AppShell>
   </body>
 </html>

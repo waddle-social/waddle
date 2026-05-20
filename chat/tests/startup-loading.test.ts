@@ -9,7 +9,7 @@ function builtAppLayoutChunk(): string {
 }
 
 describe("startup loading fallback", () => {
-  test("build output includes the static shell before ChatApp hydrates", () => {
+  test("build output includes the static shell before AppShell hydrates", () => {
     const html = builtAppLayoutChunk();
 
     expect(html).toContain("chat-app-shell chat-startup-shell");
