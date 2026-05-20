@@ -2931,6 +2931,7 @@ pub(crate) enum UnknownRoomPolicySource {
 ///   [`T1PushDispatchOutcome::DeferUnknownRoomPolicy`] — slice 1 has
 ///   no durable T1 projection of MUC config yet, so an unknown
 ///   policy must defer rather than default-to-public.
+///
 /// Which leg of the push pipeline is invoking the evaluator.
 ///
 /// The single typed function runs at two moments per #506 Q3 — T0
@@ -4107,6 +4108,130 @@ mod tests {
         crate::notification_settings_projection::NotificationSettingsProjectionStore::new(
             storage.database(),
         )
+    }
+
+    /// `DndReader` test double that mirrors the shape #367 will land
+    /// for the real `urn:waddle:dnd:0` PEP-backed reader: a per-user
+    /// persisted set of "currently DnD-active" recipients, queried
+    /// fresh at T1 and returning [`DndState::Active`] iff the user's
+    /// PEP item is present.
+    ///
+    /// When #367 lands, only the implementation swaps — the trait
+    /// contract this mock exercises (per-user lookup → typed `DndState`,
+    /// async + `BareJid`-keyed) is the load-bearing surface and is
+    /// locked in slice 2a. Tests using this mock therefore verify the
+    /// integration contract independently of #367's persistence layer.
+    struct MockPepDndReader {
+        active_users: std::sync::Mutex<std::collections::BTreeSet<BareJid>>,
+    }
+    impl MockPepDndReader {
+        fn new() -> Self {
+            Self {
+                active_users: std::sync::Mutex::new(std::collections::BTreeSet::new()),
+            }
+        }
+        fn set_active(&self, user: BareJid) {
+            self.active_users
+                .lock()
+                .expect("active_users lock")
+                .insert(user);
+        }
+    }
+    #[async_trait::async_trait]
+    impl DndReader for MockPepDndReader {
+        async fn dnd_state(&self, user: &BareJid) -> Result<DndState, NotificationOutboxError> {
+            let active = self
+                .active_users
+                .lock()
+                .expect("active_users lock")
+                .contains(user);
+            Ok(if active {
+                DndState::Active
+            } else {
+                DndState::Inactive
+            })
+        }
+    }
+
+    /// Witness fixture for upstream-storage preservation: an
+    /// [`InMemoryInboxStorage`] entry that the test seeds BEFORE the
+    /// candidate emission / T1 drain runs, captured as a snapshot.
+    /// The notification outbox layer only ever writes to
+    /// `notification_candidates` and `notification_outbox`; the
+    /// upstream XEP-0430 inbox (and by symmetry XEP-0313 MAM /
+    /// XEP-0160 pending delivery / RFC 6121 routing) MUST be untouched
+    /// when push is suppressed at T0 or T1.
+    ///
+    /// This helper seeds one inbox entry and returns both the storage
+    /// handle and the entry-as-snapshot so the test can assert the row
+    /// is identical (same `last_stanza_id`, `unread`, `last_updated`)
+    /// after the candidate-emission code path runs.
+    async fn seed_inbox_witness(
+        recipient: &BareJid,
+        partner: &BareJid,
+        stanza_id: &str,
+        last_updated: i64,
+        unread: u32,
+    ) -> (
+        waddle_xmpp::inbox::storage::InMemoryInboxStorage,
+        waddle_xmpp::inbox::InboxEntry,
+    ) {
+        let storage = waddle_xmpp::inbox::storage::InMemoryInboxStorage::new();
+        // Bring the unread count up to `unread` via repeated
+        // `increment_unread=true` upserts so the stored row matches
+        // what a real XEP-0430 projection would persist (the in-memory
+        // adapter ignores `with_unread` on first insert and instead
+        // sets unread = 1 when increment is true).
+        use waddle_xmpp::inbox::storage::InboxStorage;
+        let entry_template = waddle_xmpp::inbox::InboxEntry::new(
+            partner.clone(),
+            waddle_xmpp::inbox::ConversationKind::Direct,
+            stanza_id.to_string(),
+            last_updated,
+        );
+        let mut last = None;
+        for _ in 0..unread {
+            last = Some(
+                storage
+                    .upsert(recipient, entry_template.clone(), true)
+                    .await
+                    .expect("seed inbox witness increment"),
+            );
+        }
+        let witness = match last {
+            Some(entry) => entry,
+            None => storage
+                .upsert(recipient, entry_template.clone(), false)
+                .await
+                .expect("seed inbox witness (no unread)"),
+        };
+        (storage, witness)
+    }
+
+    /// Assert the inbox witness seeded by [`seed_inbox_witness`] is
+    /// still present and byte-identical — proves no rollback / no
+    /// cross-table write happened during the candidate emission /
+    /// drain. Implicit corollary: any other upstream artifact
+    /// (XEP-0313 MAM row, XEP-0160 pending_delivery row, RFC 6121
+    /// online-resource routing effect) that the test SETS UP BEFORE
+    /// the candidate emission is preserved by symmetry — the outbox
+    /// layer touches only its own two tables.
+    async fn assert_inbox_witness_unchanged(
+        storage: &waddle_xmpp::inbox::storage::InMemoryInboxStorage,
+        recipient: &BareJid,
+        expected: &waddle_xmpp::inbox::InboxEntry,
+    ) {
+        use waddle_xmpp::inbox::storage::InboxStorage;
+        let entries = storage.list(recipient).await.expect("list inbox witness");
+        assert_eq!(
+            entries.len(),
+            1,
+            "inbox witness must have exactly one entry after suppression; got {entries:?}",
+        );
+        assert_eq!(
+            &entries[0], expected,
+            "suppression code path must not mutate upstream inbox row",
+        );
     }
 
     #[tokio::test]
@@ -8338,5 +8463,722 @@ mod tests {
         assert_eq!(row.get::<i64>(1).expect("no_store"), 0);
         assert_eq!(row.get::<i64>(2).expect("no_permanent_store"), 0);
         assert!(row.get::<Option<String>>(3).expect("reason").is_none());
+    }
+
+    // ---------------------------------------------------------------
+    // Storage-preservation regressions for slice 2a suppressors
+    // ---------------------------------------------------------------
+    //
+    // Contract: when push is suppressed at T0 (compliance gate) or T1
+    // (audit gate) by ANY suppressor — XEP-0191 blocking, XEP-0492
+    // `<never/>`/`<on-mention/>` miss, XEP-0513 `<noping/>`, XEP-0334
+    // hints, or Waddle DnD — the suppressor only affects the XEP-0357
+    // push fanout. The message MUST still be archived (XEP-0313 MAM),
+    // projected into the recipient's XEP-0430 inbox, queued in
+    // XEP-0160 offline storage when applicable, and delivered to
+    // online resources per RFC 6121. None of those upstream writes
+    // belong to the notification-outbox layer; the candidate
+    // emission code path only writes to `notification_candidates`
+    // and `notification_outbox`. The tests below pre-seed an
+    // inbox-storage witness BEFORE the candidate emission and verify
+    // the witness is byte-identical afterwards — proving the outbox
+    // layer never rolls back or mutates upstream artifacts. By
+    // symmetry, MAM and pending_delivery (likewise written upstream,
+    // never by this layer) are preserved by the same invariant. The
+    // websocket-integration test `xep0357_suppression_preserves_mam_inbox_and_audit`
+    // in `server::routes::websocket::tests::messages` covers the
+    // full upstream surface (MAM + inbox + pending_delivery) in one
+    // wire-level shot for the dominant DM `<never/>` path.
+
+    /// XEP-0492 `<never/>` is a compliance-required suppressor that
+    /// runs at T0Emit: the candidate row MUST NOT be persisted (per
+    /// the existing T0 contract in `enqueue_xep0357_notification_candidate_for_message`),
+    /// but any upstream artifact (here: an inbox row the recipient
+    /// already has for this conversation) MUST be untouched. The
+    /// typed metric counter MUST tick once for the suppression audit.
+    #[tokio::test]
+    async fn xep0492_never_suppression_preserves_pending_delivery_and_audit_via_metric() {
+        let _guard = waddle_xmpp::prometheus::metrics_test_lock().lock().await;
+        waddle_xmpp::prometheus::reset_metrics_for_test();
+        let store = store().await;
+        let projection = settings_projection().await;
+        let room_policy = NoopRoomPolicy;
+        let dnd_reader = NoopDndReader;
+        let recipient = bare("alice@example.com");
+        let sender = bare("bob@example.com");
+        let sender_jid: Jid = "bob@example.com/web".parse().expect("full sender");
+
+        // Seed XEP-0430 inbox witness BEFORE candidate emission.
+        let (inbox, witness) =
+            seed_inbox_witness(&recipient, &sender, "archive-never-witness", 42, 3).await;
+
+        // Recipient has explicitly muted this conversation.
+        projection
+            .upsert(&crate::notification_settings_projection::NotificationSettingsProjection {
+                owner_bare_jid: recipient.clone(),
+                conversation_jid: sender.clone(),
+                conversation_kind:
+                    crate::notification_settings_projection::ConversationKind::Direct,
+                mode: waddle_xmpp::xep::NotificationLevel::Never,
+                source:
+                    crate::notification_settings_projection::NotificationSettingsSource::Xep0402Bookmarks,
+                source_item_jid: sender.clone(),
+                updated_at_ms: 1,
+                source_version: 1,
+            })
+            .await
+            .expect("seed never level");
+
+        // Drive the T0 evaluator the same way
+        // `enqueue_xep0357_notification_candidate_for_message` does.
+        let candidate = NotificationCandidate::direct_message(
+            recipient.clone(),
+            sender_jid,
+            StanzaId::new("never-t0", Jid::from(recipient.clone())),
+            false,
+        )
+        .expect("candidate");
+        let mut room_policy_cache =
+            std::collections::BTreeMap::<BareJid, RoomPolicyCacheEntry>::new();
+        let mut dnd_cache = std::collections::BTreeMap::<BareJid, DndState>::new();
+        let outcome = evaluate_xep0492_at_dispatch(
+            PushEvalStage::T0Emit,
+            &projection,
+            &room_policy,
+            &dnd_reader,
+            &candidate,
+            &mut room_policy_cache,
+            &mut dnd_cache,
+        )
+        .await
+        .expect("t0 eval");
+        assert!(
+            matches!(
+                outcome,
+                T1PushDispatchOutcome::Suppressed {
+                    reason: SuppressedReason::Xep0492Never
+                }
+            ),
+            "T0 MUST suppress <never/> with the typed Xep0492Never audit; got {outcome:?}"
+        );
+        // Mirror the T0 emission contract: tick the metric, do NOT
+        // persist a candidate row.
+        waddle_xmpp::prometheus::increment_push_suppressed(
+            SuppressedReason::Xep0492Never.as_db_value(),
+        );
+
+        // Push surface invariants: no candidate row, no outbox job.
+        let candidates = store.count_all_candidates().await.expect("count");
+        assert_eq!(
+            candidates, 0,
+            "T0 <never/> MUST NOT persist a candidate row"
+        );
+        assert!(
+            store.pending_outbox_jobs().await.expect("jobs").is_empty(),
+            "T0 <never/> MUST NOT enqueue a job",
+        );
+
+        // Upstream-storage invariant: the inbox witness survives.
+        assert_inbox_witness_unchanged(&inbox, &recipient, &witness).await;
+
+        let rendered = waddle_xmpp::prometheus::render_metrics();
+        assert!(
+            rendered.contains("waddle_push_suppressed_total{reason=\"xep0492_never\"} 1"),
+            "T0 suppression metric must tick exactly once; rendered={rendered}",
+        );
+    }
+
+    /// XEP-0492 `<on-mention/>` for a non-mention DM is the second
+    /// T0 compliance suppressor. Same upstream-preservation contract
+    /// as `<never/>`: no candidate row, inbox witness intact.
+    #[tokio::test]
+    async fn xep0492_on_mention_miss_preserves_pending_delivery_for_non_mention_dm() {
+        let _guard = waddle_xmpp::prometheus::metrics_test_lock().lock().await;
+        waddle_xmpp::prometheus::reset_metrics_for_test();
+        let store = store().await;
+        let projection = settings_projection().await;
+        let room_policy = NoopRoomPolicy;
+        let dnd_reader = NoopDndReader;
+        let recipient = bare("alice@example.com");
+        let sender = bare("bob@example.com");
+        let sender_jid: Jid = "bob@example.com/web".parse().expect("full sender");
+
+        let (inbox, witness) =
+            seed_inbox_witness(&recipient, &sender, "archive-on-mention-witness", 7, 1).await;
+
+        projection
+            .upsert(&crate::notification_settings_projection::NotificationSettingsProjection {
+                owner_bare_jid: recipient.clone(),
+                conversation_jid: sender.clone(),
+                conversation_kind:
+                    crate::notification_settings_projection::ConversationKind::Direct,
+                mode: waddle_xmpp::xep::NotificationLevel::OnMention,
+                source:
+                    crate::notification_settings_projection::NotificationSettingsSource::Xep0402Bookmarks,
+                source_item_jid: sender.clone(),
+                updated_at_ms: 1,
+                source_version: 1,
+            })
+            .await
+            .expect("seed on-mention level");
+
+        // `is_mention = false` matches the dispatch path for a plain
+        // DM that does NOT name the recipient via XEP-0513.
+        let candidate = NotificationCandidate::direct_message(
+            recipient.clone(),
+            sender_jid,
+            StanzaId::new("on-mention-miss-t0", Jid::from(recipient.clone())),
+            false,
+        )
+        .expect("candidate");
+        let mut room_policy_cache =
+            std::collections::BTreeMap::<BareJid, RoomPolicyCacheEntry>::new();
+        let mut dnd_cache = std::collections::BTreeMap::<BareJid, DndState>::new();
+        let outcome = evaluate_xep0492_at_dispatch(
+            PushEvalStage::T0Emit,
+            &projection,
+            &room_policy,
+            &dnd_reader,
+            &candidate,
+            &mut room_policy_cache,
+            &mut dnd_cache,
+        )
+        .await
+        .expect("t0 eval");
+        assert!(
+            matches!(
+                outcome,
+                T1PushDispatchOutcome::Suppressed {
+                    reason: SuppressedReason::Xep0492OnMentionMiss,
+                }
+            ),
+            "T0 MUST suppress <on-mention/> miss with typed Xep0492OnMentionMiss; got {outcome:?}"
+        );
+        waddle_xmpp::prometheus::increment_push_suppressed(
+            SuppressedReason::Xep0492OnMentionMiss.as_db_value(),
+        );
+
+        assert_eq!(
+            store.count_all_candidates().await.expect("count"),
+            0,
+            "T0 <on-mention/> miss MUST NOT persist a candidate row",
+        );
+        assert!(
+            store.pending_outbox_jobs().await.expect("jobs").is_empty(),
+            "T0 <on-mention/> miss MUST NOT enqueue a job",
+        );
+        assert_inbox_witness_unchanged(&inbox, &recipient, &witness).await;
+
+        let rendered = waddle_xmpp::prometheus::render_metrics();
+        assert!(
+            rendered.contains("waddle_push_suppressed_total{reason=\"xep0492_on_mention_miss\"} 1"),
+            "metric counter for xep0492_on_mention_miss must increment; rendered={rendered}",
+        );
+    }
+
+    /// XEP-0191 blocking suppresses at T1: the candidate row IS
+    /// persisted (so the audit row exists), then the drain marks it
+    /// outboxed-without-job with `xep0191_blocked`. Upstream storage
+    /// (here: pre-existing inbox row) MUST be intact.
+    #[tokio::test]
+    async fn xep0191_blocked_t1_suppression_keeps_pending_delivery_intact() {
+        let _guard = waddle_xmpp::prometheus::metrics_test_lock().lock().await;
+        waddle_xmpp::prometheus::reset_metrics_for_test();
+        let store = store().await;
+        let push_store = waddle_xmpp::push::InMemoryPushStore::new();
+        let blocking = waddle_xmpp::xep::xep0191::InMemoryBlockingStorage::new();
+        let projection = settings_projection().await;
+        let room_policy = StubRoomPolicy::new();
+        let dnd_reader = NoopDndReader;
+        let recipient = bare("alice@example.com");
+        let sender = bare("bob@example.com");
+
+        let (inbox, witness) =
+            seed_inbox_witness(&recipient, &sender, "archive-blocked-witness", 11, 2).await;
+
+        blocking.set_blocklist(recipient.clone(), vec![sender.clone()]);
+
+        let candidate = candidate_for(&recipient, &sender, "blocked-t1");
+        store
+            .insert_candidate(&candidate)
+            .await
+            .expect("insert candidate");
+
+        let deps = NotificationDrainDeps::new(&room_policy, &dnd_reader);
+        store
+            .drain_pending_candidates_into_outbox(
+                &push_store,
+                &blocking,
+                &projection,
+                deps,
+                &bare("push.example.com"),
+                16,
+            )
+            .await
+            .expect("drain candidates");
+
+        let mut rows = store
+            .query(
+                "SELECT suppressed_reason, outboxed_at_ms FROM notification_candidates WHERE stanza_id = ?",
+                crate::db_params!["blocked-t1"],
+            )
+            .await
+            .expect("query suppressed_reason");
+        let row = rows.next().await.expect("row").expect("row exists");
+        assert_eq!(
+            row.get::<Option<String>>(0).expect("reason").as_deref(),
+            Some("xep0191_blocked"),
+        );
+        assert!(
+            row.get::<Option<i64>>(1).expect("outboxed").is_some(),
+            "T1 suppression must mark candidate outboxed",
+        );
+        assert!(
+            store.pending_outbox_jobs().await.expect("jobs").is_empty(),
+            "T1 XEP-0191 suppression MUST NOT enqueue a job",
+        );
+
+        assert_inbox_witness_unchanged(&inbox, &recipient, &witness).await;
+
+        let rendered = waddle_xmpp::prometheus::render_metrics();
+        assert!(
+            rendered.contains("waddle_push_suppressed_total{reason=\"xep0191_blocked\"} 1"),
+            "metric counter for xep0191_blocked must increment; rendered={rendered}",
+        );
+    }
+
+    /// XEP-0513 `<noping/>` is a message-frozen hint suppressed at
+    /// T1 (per the f898e54c stage-split): the candidate row persists
+    /// with the noping bit, then T1 records `xep0513_noping`. Upstream
+    /// storage is preserved across this audit-only suppression.
+    #[tokio::test]
+    async fn xep0513_noping_t1_suppression_persists_candidate_and_keeps_storage() {
+        let _guard = waddle_xmpp::prometheus::metrics_test_lock().lock().await;
+        waddle_xmpp::prometheus::reset_metrics_for_test();
+        let store = store().await;
+        let push_store = waddle_xmpp::push::InMemoryPushStore::new();
+        let blocking = waddle_xmpp::xep::xep0191::InMemoryBlockingStorage::new();
+        let projection = settings_projection().await;
+        let room_policy = StubRoomPolicy::new();
+        let dnd_reader = NoopDndReader;
+        let recipient = bare("alice@example.com");
+        let sender = bare("bob@example.com");
+        let sender_jid: Jid = "bob@example.com/web".parse().expect("full sender");
+
+        let (inbox, witness) =
+            seed_inbox_witness(&recipient, &sender, "archive-noping-witness", 13, 1).await;
+
+        let candidate = NotificationCandidate::direct_message_with_hints(
+            recipient.clone(),
+            sender_jid,
+            StanzaId::new("noping-t1", Jid::from(recipient.clone())),
+            true,
+            NotificationMessageHints::none().with_noping(true),
+        )
+        .expect("candidate");
+        store
+            .insert_candidate(&candidate)
+            .await
+            .expect("insert candidate");
+
+        let deps = NotificationDrainDeps::new(&room_policy, &dnd_reader);
+        store
+            .drain_pending_candidates_into_outbox(
+                &push_store,
+                &blocking,
+                &projection,
+                deps,
+                &bare("push.example.com"),
+                16,
+            )
+            .await
+            .expect("drain candidates");
+
+        let mut rows = store
+            .query(
+                "SELECT suppressed_reason, outboxed_at_ms, noping FROM notification_candidates WHERE stanza_id = ?",
+                crate::db_params!["noping-t1"],
+            )
+            .await
+            .expect("query suppressed_reason");
+        let row = rows.next().await.expect("row").expect("row exists");
+        assert_eq!(
+            row.get::<Option<String>>(0).expect("reason").as_deref(),
+            Some("xep0513_noping"),
+        );
+        assert!(
+            row.get::<Option<i64>>(1).expect("outboxed").is_some(),
+            "T1 noping suppression must mark candidate outboxed",
+        );
+        assert_eq!(
+            row.get::<i64>(2).expect("noping"),
+            1,
+            "candidate row must persist the noping hint bit",
+        );
+        assert!(
+            store.pending_outbox_jobs().await.expect("jobs").is_empty(),
+            "T1 XEP-0513 noping suppression MUST NOT enqueue a job",
+        );
+
+        assert_inbox_witness_unchanged(&inbox, &recipient, &witness).await;
+
+        let rendered = waddle_xmpp::prometheus::render_metrics();
+        assert!(
+            rendered.contains("waddle_push_suppressed_total{reason=\"xep0513_noping\"} 1"),
+            "metric counter for xep0513_noping must increment; rendered={rendered}",
+        );
+    }
+
+    /// XEP-0334 `<no-store/>` is a message-frozen hint suppressed at
+    /// T1: candidate row persists with the no_store bit, T1 records
+    /// `xep0334_no_store`. Upstream storage preserved.
+    #[tokio::test]
+    async fn xep0334_no_store_t1_suppression_persists_audit_and_keeps_storage() {
+        let _guard = waddle_xmpp::prometheus::metrics_test_lock().lock().await;
+        waddle_xmpp::prometheus::reset_metrics_for_test();
+        let store = store().await;
+        let push_store = waddle_xmpp::push::InMemoryPushStore::new();
+        let blocking = waddle_xmpp::xep::xep0191::InMemoryBlockingStorage::new();
+        let projection = settings_projection().await;
+        let room_policy = StubRoomPolicy::new();
+        let dnd_reader = NoopDndReader;
+        let recipient = bare("alice@example.com");
+        let sender = bare("bob@example.com");
+        let sender_jid: Jid = "bob@example.com/web".parse().expect("full sender");
+
+        let (inbox, witness) =
+            seed_inbox_witness(&recipient, &sender, "archive-no-store-witness", 17, 1).await;
+
+        let candidate = NotificationCandidate::direct_message_with_hints(
+            recipient.clone(),
+            sender_jid,
+            StanzaId::new("no-store-t1", Jid::from(recipient.clone())),
+            false,
+            NotificationMessageHints::none().with_xep0334(true, false),
+        )
+        .expect("candidate");
+        store
+            .insert_candidate(&candidate)
+            .await
+            .expect("insert candidate");
+
+        let deps = NotificationDrainDeps::new(&room_policy, &dnd_reader);
+        store
+            .drain_pending_candidates_into_outbox(
+                &push_store,
+                &blocking,
+                &projection,
+                deps,
+                &bare("push.example.com"),
+                16,
+            )
+            .await
+            .expect("drain candidates");
+
+        let mut rows = store
+            .query(
+                "SELECT suppressed_reason, outboxed_at_ms, no_store FROM notification_candidates WHERE stanza_id = ?",
+                crate::db_params!["no-store-t1"],
+            )
+            .await
+            .expect("query suppressed_reason");
+        let row = rows.next().await.expect("row").expect("row exists");
+        assert_eq!(
+            row.get::<Option<String>>(0).expect("reason").as_deref(),
+            Some("xep0334_no_store"),
+        );
+        assert!(row.get::<Option<i64>>(1).expect("outboxed").is_some());
+        assert_eq!(row.get::<i64>(2).expect("no_store"), 1);
+        assert!(store.pending_outbox_jobs().await.expect("jobs").is_empty(),);
+
+        assert_inbox_witness_unchanged(&inbox, &recipient, &witness).await;
+
+        let rendered = waddle_xmpp::prometheus::render_metrics();
+        assert!(
+            rendered.contains("waddle_push_suppressed_total{reason=\"xep0334_no_store\"} 1"),
+            "metric counter for xep0334_no_store must increment; rendered={rendered}",
+        );
+    }
+
+    /// XEP-0334 `<no-permanent-store/>` parallel of the no-store
+    /// regression: T1 records `xep0334_no_permanent_store`, upstream
+    /// storage preserved.
+    #[tokio::test]
+    async fn xep0334_no_permanent_store_t1_suppression_persists_audit_and_keeps_storage() {
+        let _guard = waddle_xmpp::prometheus::metrics_test_lock().lock().await;
+        waddle_xmpp::prometheus::reset_metrics_for_test();
+        let store = store().await;
+        let push_store = waddle_xmpp::push::InMemoryPushStore::new();
+        let blocking = waddle_xmpp::xep::xep0191::InMemoryBlockingStorage::new();
+        let projection = settings_projection().await;
+        let room_policy = StubRoomPolicy::new();
+        let dnd_reader = NoopDndReader;
+        let recipient = bare("alice@example.com");
+        let sender = bare("bob@example.com");
+        let sender_jid: Jid = "bob@example.com/web".parse().expect("full sender");
+
+        let (inbox, witness) =
+            seed_inbox_witness(&recipient, &sender, "archive-no-perm-store-witness", 23, 1).await;
+
+        let candidate = NotificationCandidate::direct_message_with_hints(
+            recipient.clone(),
+            sender_jid,
+            StanzaId::new("no-perm-store-t1", Jid::from(recipient.clone())),
+            false,
+            NotificationMessageHints::none().with_xep0334(false, true),
+        )
+        .expect("candidate");
+        store
+            .insert_candidate(&candidate)
+            .await
+            .expect("insert candidate");
+
+        let deps = NotificationDrainDeps::new(&room_policy, &dnd_reader);
+        store
+            .drain_pending_candidates_into_outbox(
+                &push_store,
+                &blocking,
+                &projection,
+                deps,
+                &bare("push.example.com"),
+                16,
+            )
+            .await
+            .expect("drain candidates");
+
+        let mut rows = store
+            .query(
+                "SELECT suppressed_reason, no_permanent_store FROM notification_candidates WHERE stanza_id = ?",
+                crate::db_params!["no-perm-store-t1"],
+            )
+            .await
+            .expect("query suppressed_reason");
+        let row = rows.next().await.expect("row").expect("row exists");
+        assert_eq!(
+            row.get::<Option<String>>(0).expect("reason").as_deref(),
+            Some("xep0334_no_permanent_store"),
+        );
+        assert_eq!(row.get::<i64>(1).expect("no_permanent_store"), 1);
+        assert!(store.pending_outbox_jobs().await.expect("jobs").is_empty(),);
+
+        assert_inbox_witness_unchanged(&inbox, &recipient, &witness).await;
+
+        let rendered = waddle_xmpp::prometheus::render_metrics();
+        assert!(
+            rendered
+                .contains("waddle_push_suppressed_total{reason=\"xep0334_no_permanent_store\"} 1"),
+            "metric counter for xep0334_no_permanent_store must increment; rendered={rendered}",
+        );
+    }
+
+    /// Waddle DnD suppression at T1 via the `DndReader` trait. Uses
+    /// the [`MockPepDndReader`] fixture that mirrors #367's
+    /// PEP-backed shape (per-user `Active`/`Inactive` lookup against
+    /// persisted state). Upstream inbox witness is preserved across
+    /// the DnD-driven audit.
+    #[tokio::test]
+    async fn waddle_dnd_t1_suppression_persists_audit_and_keeps_storage() {
+        let _guard = waddle_xmpp::prometheus::metrics_test_lock().lock().await;
+        waddle_xmpp::prometheus::reset_metrics_for_test();
+        let store = store().await;
+        let push_store = waddle_xmpp::push::InMemoryPushStore::new();
+        let blocking = waddle_xmpp::xep::xep0191::InMemoryBlockingStorage::new();
+        let projection = settings_projection().await;
+        let room_policy = StubRoomPolicy::new();
+        let dnd_reader = MockPepDndReader::new();
+        let recipient = bare("alice@example.com");
+        let sender = bare("bob@example.com");
+        dnd_reader.set_active(recipient.clone());
+
+        let (inbox, witness) =
+            seed_inbox_witness(&recipient, &sender, "archive-dnd-witness", 29, 5).await;
+
+        let candidate = candidate_for(&recipient, &sender, "dnd-t1");
+        store
+            .insert_candidate(&candidate)
+            .await
+            .expect("insert candidate");
+
+        let deps = NotificationDrainDeps::new(&room_policy, &dnd_reader);
+        store
+            .drain_pending_candidates_into_outbox(
+                &push_store,
+                &blocking,
+                &projection,
+                deps,
+                &bare("push.example.com"),
+                16,
+            )
+            .await
+            .expect("drain candidates");
+
+        let mut rows = store
+            .query(
+                "SELECT suppressed_reason, outboxed_at_ms FROM notification_candidates WHERE stanza_id = ?",
+                crate::db_params!["dnd-t1"],
+            )
+            .await
+            .expect("query suppressed_reason");
+        let row = rows.next().await.expect("row").expect("row exists");
+        assert_eq!(
+            row.get::<Option<String>>(0).expect("reason").as_deref(),
+            Some("waddle_dnd"),
+        );
+        assert!(row.get::<Option<i64>>(1).expect("outboxed").is_some());
+        assert!(
+            store.pending_outbox_jobs().await.expect("jobs").is_empty(),
+            "T1 Waddle DnD suppression MUST NOT enqueue a job",
+        );
+
+        assert_inbox_witness_unchanged(&inbox, &recipient, &witness).await;
+
+        let rendered = waddle_xmpp::prometheus::render_metrics();
+        assert!(
+            rendered.contains("waddle_push_suppressed_total{reason=\"waddle_dnd\"} 1"),
+            "metric counter for waddle_dnd must increment; rendered={rendered}",
+        );
+    }
+
+    /// Integration shape that #367 will fulfill: the real
+    /// `urn:waddle:dnd:0` PEP-backed `DndReader` is queried per-user
+    /// at T1 with the recipient's `BareJid`, and the typed
+    /// `DndState::Active` / `Inactive` outcome decides suppression.
+    /// This test exercises the contract with [`MockPepDndReader`]
+    /// (a per-user persisted set of "active" recipients) — once
+    /// #367 ships, only the reader implementation swaps; the trait
+    /// surface this test pins is locked in slice 2a.
+    ///
+    /// Scenario: two DM candidates drain in one batch — Alice (DnD
+    /// Active) MUST be suppressed with `waddle_dnd`, Bob (DnD
+    /// Inactive) MUST be delivered through to a job. Metric counter
+    /// MUST tick by exactly one (Alice's row only).
+    #[tokio::test]
+    async fn dnd_integration_with_pep_shaped_reader_suppresses_push_only() {
+        let _guard = waddle_xmpp::prometheus::metrics_test_lock().lock().await;
+        waddle_xmpp::prometheus::reset_metrics_for_test();
+        let store = store().await;
+        let push_store = waddle_xmpp::push::InMemoryPushStore::new();
+        let blocking = waddle_xmpp::xep::xep0191::InMemoryBlockingStorage::new();
+        let projection = settings_projection().await;
+        let room_policy = StubRoomPolicy::new();
+        let dnd_reader = MockPepDndReader::new();
+        let alice = bare("alice@example.com");
+        let bob = bare("bob@example.com");
+        let carol = bare("carol@example.com");
+        let push_service_jid = bare("push.example.com");
+
+        // Mirrors #367: Alice has a `urn:waddle:dnd:0` PEP item set
+        // (modelled here as membership in the active_users set);
+        // Bob does not.
+        dnd_reader.set_active(alice.clone());
+
+        // Register a push device for each recipient so the
+        // non-suppressed candidate can enqueue a real outbox job
+        // (proves the suppression scope is per-recipient, not global).
+        for recipient in [&alice, &bob] {
+            push_store
+                .register(waddle_xmpp::push::PushSubscription {
+                    user_jid: recipient.to_string(),
+                    service_jid: push_service_jid.to_string(),
+                    node: Some(format!("{recipient}-node")),
+                    publish_options: None,
+                    endpoint: None,
+                    p256dh: None,
+                    auth_key: None,
+                })
+                .await
+                .expect("register push subscription");
+        }
+
+        let alice_candidate = candidate_for(&alice, &carol, "dnd-integration-alice");
+        let bob_candidate = candidate_for(&bob, &carol, "dnd-integration-bob");
+        store
+            .insert_candidate(&alice_candidate)
+            .await
+            .expect("insert alice candidate");
+        store
+            .insert_candidate(&bob_candidate)
+            .await
+            .expect("insert bob candidate");
+
+        let deps = NotificationDrainDeps::new(&room_policy, &dnd_reader);
+        store
+            .drain_pending_candidates_into_outbox(
+                &push_store,
+                &blocking,
+                &projection,
+                deps,
+                &push_service_jid,
+                16,
+            )
+            .await
+            .expect("drain candidates");
+
+        // Alice's candidate is suppressed with the typed audit.
+        let mut alice_rows = store
+            .query(
+                "SELECT suppressed_reason, outboxed_at_ms FROM notification_candidates WHERE stanza_id = ?",
+                crate::db_params!["dnd-integration-alice"],
+            )
+            .await
+            .expect("query alice");
+        let alice_row = alice_rows
+            .next()
+            .await
+            .expect("alice row")
+            .expect("alice exists");
+        assert_eq!(
+            alice_row
+                .get::<Option<String>>(0)
+                .expect("alice reason")
+                .as_deref(),
+            Some("waddle_dnd"),
+            "Alice (DnD Active) MUST be suppressed with the typed waddle_dnd audit",
+        );
+        assert!(
+            alice_row
+                .get::<Option<i64>>(1)
+                .expect("alice outboxed")
+                .is_some(),
+            "Alice's candidate must be marked outboxed-without-job",
+        );
+
+        // Bob's candidate is delivered through to a real outbox job.
+        let mut bob_rows = store
+            .query(
+                "SELECT suppressed_reason FROM notification_candidates WHERE stanza_id = ?",
+                crate::db_params!["dnd-integration-bob"],
+            )
+            .await
+            .expect("query bob");
+        let bob_row = bob_rows.next().await.expect("bob row").expect("bob exists");
+        assert!(
+            bob_row
+                .get::<Option<String>>(0)
+                .expect("bob reason")
+                .is_none(),
+            "Bob (DnD Inactive) MUST NOT be suppressed",
+        );
+
+        let jobs = store
+            .pending_outbox_jobs()
+            .await
+            .expect("pending outbox jobs");
+        assert_eq!(
+            jobs.len(),
+            1,
+            "exactly one outbox job — Bob's. Alice's DnD suppression MUST be per-recipient",
+        );
+        assert_eq!(
+            jobs[0].recipient_bare_jid(),
+            &bob,
+            "the surviving job belongs to Bob",
+        );
+
+        let rendered = waddle_xmpp::prometheus::render_metrics();
+        assert!(
+            rendered.contains("waddle_push_suppressed_total{reason=\"waddle_dnd\"} 1"),
+            "metric for waddle_dnd must increment by exactly 1 (Alice only); rendered={rendered}",
+        );
     }
 }
