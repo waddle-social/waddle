@@ -6,6 +6,6 @@ import { routes } from "@/router";
 const initialMatch = routes.home.match();
 ---
 
-<AppLayout>
+<AppLayout initialMatch={initialMatch}>
   <HomePage client:only="vue" initialMatch={initialMatch} />
 </AppLayout>

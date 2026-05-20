@@ -40,18 +40,18 @@ import {
   type ReactionModeScope,
 } from "@/lib/reaction-mode";
 
-export function useChatAppController(giphyApiKey: string) {
+export function useChatAppController(giphyApiKey: string, initialMatch?: RouteMatch) {
   const ui = useChatShellState();
   const { mode: scrollDirectionMode } = useScrollDirectionPreference();
 
-  // Seed page-level UI state from the URL synchronously so the first
-  // render lands on the right page. Without this, every cold load
-  // flashes the default home dashboard for one tick before
-  // `onConnectionReady` runs `applyRouteTarget` and snaps to the real
-  // page. `activePageFromMatch` / `communitySurfaceFromMatch` are
-  // hoisted function declarations defined further down in this scope.
-  if (typeof window !== "undefined") {
-    const initialMatch = matchLocation(window.location.pathname, window.location.search);
+  // Seed page-level UI state from the SSR-known match (handed in by the
+  // Astro page via AppLayout → AppShell) so the first render lands on
+  // the right page. Without this, every cold load flashes the default
+  // home dashboard for one tick before `onConnectionReady` runs
+  // `applyRouteTarget` and snaps to the real page. `activePageFromMatch`
+  // and `communitySurfaceFromMatch` are hoisted function declarations
+  // defined further down in this scope.
+  if (initialMatch) {
     ui.activePage.value = activePageFromMatch(initialMatch);
     ui.activeCommunitySurface.value = communitySurfaceFromMatch(initialMatch);
   }

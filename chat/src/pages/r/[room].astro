@@ -9,6 +9,6 @@ const initialMatch = routes.channel.match({
 });
 ---
 
-<AppLayout>
+<AppLayout initialMatch={initialMatch}>
   <ChannelPage client:only="vue" initialMatch={initialMatch} />
 </AppLayout>

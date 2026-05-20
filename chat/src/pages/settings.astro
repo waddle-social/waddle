@@ -6,6 +6,6 @@ import { routes } from "@/router";
 const initialMatch = routes.settings.match();
 ---
 
-<AppLayout>
+<AppLayout initialMatch={initialMatch}>
   <SettingsPage client:only="vue" initialMatch={initialMatch} />
 </AppLayout>

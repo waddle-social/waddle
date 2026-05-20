@@ -6,6 +6,6 @@ import { routes } from "@/router";
 const initialMatch = routes.events.match();
 ---
 
-<AppLayout>
+<AppLayout initialMatch={initialMatch}>
   <EventsPage client:only="vue" initialMatch={initialMatch} />
 </AppLayout>

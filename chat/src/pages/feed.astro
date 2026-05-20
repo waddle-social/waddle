@@ -6,6 +6,6 @@ import { routes } from "@/router";
 const initialMatch = routes.feed.match();
 ---
 
-<AppLayout>
+<AppLayout initialMatch={initialMatch}>
   <FeedPage client:only="vue" initialMatch={initialMatch} />
 </AppLayout>

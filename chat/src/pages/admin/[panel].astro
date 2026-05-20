@@ -12,6 +12,6 @@ const panel: AdminPanel = (ADMIN_PANELS as readonly string[]).includes(rawPanel 
 const initialMatch = routes.admin.match({ params: { panel } });
 ---
 
-<AppLayout>
+<AppLayout initialMatch={initialMatch}>
   <AdminPage client:only="vue" initialMatch={initialMatch} />
 </AppLayout>

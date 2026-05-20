@@ -9,6 +9,6 @@ const initialMatch = routes.dm.match({
 });
 ---
 
-<AppLayout>
+<AppLayout initialMatch={initialMatch}>
   <DmPage client:only="vue" initialMatch={initialMatch} />
 </AppLayout>

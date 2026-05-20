@@ -6,6 +6,6 @@ import { routes } from "@/router";
 const initialMatch = routes.threads.match();
 ---
 
-<AppLayout>
+<AppLayout initialMatch={initialMatch}>
   <ThreadsPage client:only="vue" initialMatch={initialMatch} />
 </AppLayout>
