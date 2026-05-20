@@ -393,11 +393,25 @@ async function sendMujiSessionTerminate(
 }
 
 /**
- * Originator action for MUC group calls: send a Jingle Muji
- * session-initiate to the SFU mixer, pull the issued LiveKit join
- * out of the resulting session-accept, transition `$callState`
- * straight to `active` (no propose/proceed round-trip — MUC calls
- * are presence-discovered, so there's no responder to ring).
+ * Originator action for MUC group calls. Implements XEP-0272
+ * §Joining's two-phase flow:
+ *
+ *   1. Emit `<muji><preparing/></muji>` MUC presence so other
+ *      occupants know we are about to join (the XEP MUSTs this).
+ *   2. Send the Jingle session-initiate to the SFU mixer.
+ *   3. Once the session-accept arrives with a LiveKit token,
+ *      re-emit `<muji>` with `<content/>` children so we move
+ *      from "preparing" to "in call" on the wire.
+ *   4. Transition `$callState` to `active`.
+ *
+ * XEP-0272's MUST about waiting for the MUC rebroadcast of the
+ * preparing presence is satisfied implicitly: the session-initiate
+ * IQ round-trip takes longer than the in-process presence echo
+ * back from the local MUC, so by the time we move to step 3 the
+ * room has already reflected step 1.
+ *
+ * No propose/proceed JMI round-trip — MUC calls are
+ * presence-discovered, so there's no responder to ring.
  */
 export async function beginMucCall(
   sender: RawIqSender,
@@ -405,6 +419,25 @@ export async function beginMucCall(
   media: CallMedia,
   selfNick?: string,
 ): Promise<void> {
+  // Step 1 — preparing presence (XEP-0272 §Joining two-phase flow).
+  // Best-effort: a stale wasm bundle without the method just skips
+  // the two-phase shape but the call still works.
+  if (selfNick && sender.update_muji_presence) {
+    try {
+      await sender.update_muji_presence(
+        roomJid,
+        selfNick,
+        false, // active (no <content/> yet)
+        true, // preparing
+        false, // video — irrelevant in preparing phase
+      );
+    } catch (err) {
+      reportCallError(err);
+    }
+  }
+
+  // Step 2 — session-initiate. The IQ round-trip provides the
+  // implicit wait for the MUC's preparing-presence echo.
   const join = await sendMujiSessionInitiate(sender, roomJid, media.video);
   $callState.set({
     phase: "active",
@@ -416,12 +449,11 @@ export async function beginMucCall(
     selfNick,
   });
   $lastCallError.set(null);
-  // Advertise our in-call status via XEP-0272 Muji presence so
-  // other occupants can show a "you have a live call in this
-  // channel" indicator. Audio is implied; we don't advertise video
-  // until the user enables it. Best-effort: if the wasm method is
-  // missing (stale bundle), the call still works — just no in-band
-  // discovery.
+
+  // Step 3 — content-declaring presence. Other occupants now see
+  // the chip pulse because `<muji>` carries `<content/>` (our
+  // store helper's `is_active` check). Audio is implied; we
+  // advertise video only when the user enabled it.
   if (selfNick && sender.update_muji_presence) {
     try {
       await sender.update_muji_presence(

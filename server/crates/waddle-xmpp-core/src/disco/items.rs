@@ -37,6 +37,14 @@ impl DiscoItem {
         Self::new(domain, name, None)
     }
 
+    /// XEP-0272 SFU mixer JID (`calls.<server-domain>`).
+    /// disco#items on the server returns this so a strict client
+    /// can subsequently disco#info the mixer and discover Muji
+    /// support before sending a session-initiate.
+    pub fn calls_mixer(domain: &str, name: Option<&str>) -> Self {
+        Self::new(domain, name, None)
+    }
+
     pub fn muc_room(jid: &str, name: &str) -> Self {
         Self::new(jid, Some(name), None)
     }

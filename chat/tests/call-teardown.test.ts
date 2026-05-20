@@ -199,7 +199,7 @@ describe("MUC group call", () => {
     );
   });
 
-  test("beginMucCall with a nick also pushes a MUC Muji presence update", async () => {
+  test("beginMucCall with a nick implements the XEP-0272 §Joining two-phase preparing→content flow", async () => {
     const send_muji_session_initiate = mock(async () => ({
       url: "wss://livekit.test",
       room: "chan@muc.test",
@@ -217,13 +217,30 @@ describe("MUC group call", () => {
       audioVideo,
       "alice",
     );
-    expect(update_muji_presence).toHaveBeenCalledTimes(1);
-    expect(update_muji_presence).toHaveBeenCalledWith(
+    // Two-phase flow:
+    //   1. preparing  → `<muji><preparing/></muji>`
+    //   2. (session-initiate IQ round-trip — implicit wait for MUC echo)
+    //   3. active content → `<muji><content .../></muji>`
+    expect(update_muji_presence).toHaveBeenCalledTimes(2);
+    expect(update_muji_presence).toHaveBeenNthCalledWith(
+      1,
+      "chan@muc.test",
+      "alice",
+      false, // active
+      true, // preparing
+      false, // video — irrelevant in preparing phase
+    );
+    // The session-initiate must run BETWEEN the preparing and the
+    // content presences. mock() records call order globally
+    // across the mock pair, so we assert relative ordering.
+    expect(send_muji_session_initiate).toHaveBeenCalledTimes(1);
+    expect(update_muji_presence).toHaveBeenNthCalledWith(
+      2,
       "chan@muc.test",
       "alice",
       true, // active
       false, // preparing
-      true, // video (audioVideo media fixture has video=true)
+      true, // video (audioVideo fixture has video=true)
     );
   });
 

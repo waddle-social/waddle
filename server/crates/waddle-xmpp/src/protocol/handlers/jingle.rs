@@ -310,6 +310,17 @@ impl JingleHandler {
             );
         }
 
+        // XEP-0166 §7.1 spoofing defense (same as the 1:1 path):
+        // the `initiator` attribute on `<jingle/>` must match the
+        // authenticated session. Otherwise charlie's session could
+        // mint a token claiming to be alice. Server-side we use
+        // `ctx.full_jid` for the LiveKit identity, but a wrong
+        // initiator attribute is still non-conformant and we reject
+        // rather than silently accept.
+        if let Err(e) = resolve_initiator(&jingle, &jingle.action, ctx) {
+            return e.into_reply(iq);
+        }
+
         let Some(room_jid) = muji.room.clone() else {
             return error_reply(
                 iq,
@@ -373,34 +384,55 @@ impl JingleHandler {
         }
         self.sfu.register_call_participant(&call_id, &identity);
 
-        // Rebuild the Jingle as a session-accept: same sid + contents
-        // but flipped action and `responder` set to the mixer.
+        // Build the session-accept `<jingle/>` Element explicitly
+        // to control child ordering: XEP-0272 §Joining shows
+        // `<muji>` as the FIRST child of `<jingle/>`, BEFORE any
+        // `<content/>`. Going through `Jingle::into()` would
+        // serialise contents first and force us to append the
+        // `<muji/>` / `<conference-info/>` at the tail —
+        // non-conformant with the XEP example. Constructing the
+        // element directly here keeps the wire shape strictly
+        // matching the spec.
         let responder: Jid = calls_mixer_jid(ctx.domain).into();
-        let mixer_full = responder.clone();
-        let mut accept = Jingle::new(Action::SessionAccept, jingle.sid.clone());
-        accept.responder = Some(responder);
-        accept.initiator = jingle.initiator.clone();
-        accept.contents = jingle.contents;
-
-        // Serialise + re-attach the typed `<muji room='…'/>`
-        // pass-through (echoed so the client knows which conference
-        // this accept corresponds to in a multi-call scenario).
-        let mut accept_elem: Element = accept.into();
-        // XEP-0272 §Joining example: `<muji>` is a direct child of
-        // `<jingle>`. Same shape on accept.
-        accept_elem.append_child(Muji::for_room(room_jid).to_element());
-        // XEP-0298 §3.1 focus marker — also a direct child of
-        // `<jingle/>`. Stamped on the accept so the client can
-        // distinguish this from a P2P session-accept (a normal
-        // peer would never set `isfocus='true'`).
-        accept_elem.append_child(
+        let mut jingle_builder = Element::builder("jingle", NS_JINGLE)
+            .attr(
+                minidom::rxml::xml_ncname!("action").to_owned(),
+                "session-accept",
+            )
+            .attr(
+                minidom::rxml::xml_ncname!("sid").to_owned(),
+                jingle.sid.0.as_str(),
+            )
+            .attr(
+                minidom::rxml::xml_ncname!("responder").to_owned(),
+                responder.to_string(),
+            );
+        if let Some(initiator) = &jingle.initiator {
+            jingle_builder = jingle_builder.attr(
+                minidom::rxml::xml_ncname!("initiator").to_owned(),
+                initiator.to_string(),
+            );
+        }
+        // 1. `<muji room='…'/>` first per XEP-0272 §Joining example.
+        jingle_builder = jingle_builder.append(Muji::for_room(room_jid).to_element());
+        // 2. XEP-0298 §3.1 focus marker — also a direct child of
+        //    `<jingle/>`. Stamped on the accept so the client can
+        //    distinguish this from a P2P session-accept (a normal
+        //    peer would never set `isfocus='true'`).
+        jingle_builder = jingle_builder.append(
             Element::builder("conference-info", NS_COIN)
                 .attr(minidom::rxml::xml_ncname!("isfocus").to_owned(), "true")
                 .build(),
         );
+        // 3. Then the rewritten `<content/>` children carrying the
+        //    issued LiveKit transport.
+        for content in jingle.contents {
+            jingle_builder = jingle_builder.append(Element::from(content));
+        }
+        let accept_elem = jingle_builder.build();
 
         let reply = Iq::Result {
-            from: Some(mixer_full),
+            from: Some(responder),
             to: Some(ctx.full_jid.clone().into()),
             id: iq.id().to_string(),
             payload: Some(accept_elem),

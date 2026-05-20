@@ -91,6 +91,47 @@ async fn server_disco_advertises_call_features_when_livekit_enabled() {
 }
 
 #[tokio::test]
+async fn mixer_jid_disco_info_advertises_muji_and_focus_identity() {
+    // XEP-0030 / XEP-0272 §Discovery: a strict client SHOULD be
+    // able to disco#info the `calls.<domain>` mixer and find a
+    // `<identity category='conference' type='audio-video'/>` plus
+    // the `urn:xmpp:jingle:muji:0` feature BEFORE sending a
+    // session-initiate. Without this round-trip, a Muji-compliant
+    // peer can't safely discover the mixer.
+    let server = TestServer::start_with_extra_envs(&[], &livekit_test_envs());
+    let mut admin = WsXmppClient::connect_and_auth(
+        &server.ws_url(),
+        DOMAIN,
+        "admin",
+        server.fixed_account_password(),
+        "ax",
+    )
+    .await
+    .expect("admin connect");
+
+    let resp = disco_info_query(&mut admin, &format!("calls.{DOMAIN}"), "mixer-disco-1")
+        .await
+        .expect("mixer disco#info");
+
+    assert!(
+        resp.contains("category='conference'") && resp.contains("type='audio-video'"),
+        "mixer must advertise the XEP-0272 / av-conferences identity; got: {resp}"
+    );
+    assert!(
+        resp.contains("urn:xmpp:jingle:muji:0"),
+        "mixer must advertise the Muji feature; got: {resp}"
+    );
+    assert!(
+        resp.contains("urn:xmpp:jingle:1"),
+        "mixer must advertise base Jingle feature; got: {resp}"
+    );
+    assert!(
+        resp.contains("urn:waddle:transports:livekit:0"),
+        "mixer must advertise the LiveKit transport feature; got: {resp}"
+    );
+}
+
+#[tokio::test]
 async fn jmi_propose_is_forwarded_to_peer() {
     let (_server, mut alice, mut bob) = start_pair().await;
 
