@@ -12,9 +12,16 @@
 //! - `<no-store/>` (XEP-0334 §3) suppresses; `<store/>` overrides.
 //! - Body / subject-bearing groupchat messages are archived.
 //! - Body-less *protocol* messages (reactions, retractions, moderation,
-//!   file shares, stickers) are archived so MAM replay reproduces the
-//!   timeline. Mirrors the legacy `should_archive_groupchat_message`
-//!   heuristic from `message.rs`.
+//!   file shares, stickers, forum actions) are archived so MAM replay
+//!   reproduces the timeline.
+//! - XEP-0201 `<thread/>` is **scope metadata, not content**. Stanzas
+//!   that carry only a thread reference — e.g. XEP-0085 chat-states or
+//!   XEP-0333 chat markers echoed inside a thread per XEP-0201 §3 —
+//!   are NOT archive-eligible on their own. Real thread content
+//!   (replies with bodies, file shares, forum thread-create/reply
+//!   payloads) is archived through the body / file / forum-action
+//!   branches above; the `<thread/>` element rides along but does not
+//!   itself promote a stanza to archivable.
 
 use super::super::event::OutboundEvent;
 use super::context::RoomContext;
@@ -24,7 +31,6 @@ use crate::xep::{
     extract_forum_action, has_file_sharing, is_moderation_result_message, is_reaction_message,
     is_sticker_message, should_skip_storage,
 };
-use waddle_xmpp_core::xep0201::{thread_info_from_message_in_stanza_ns, CLIENT_STANZA_NS};
 use xmpp_parsers::message::{Message, MessageType};
 
 /// XEP-0313 archive handler for the room handler chain.
@@ -67,8 +73,12 @@ impl RoomHandler for MucArchiveHandler {
     }
 }
 
-/// XEP-0313 §5.1.3 archive-eligibility for groupchat. Mirrors the
-/// legacy `should_archive_groupchat_message` heuristic.
+/// XEP-0313 §5.1.3 archive-eligibility for groupchat.
+///
+/// Archive iff the stanza carries durable conversational content. Note
+/// that an XEP-0201 `<thread/>` element is scope metadata, not content,
+/// and does NOT on its own promote a stanza to archivable — see the
+/// module docstring.
 pub fn is_archivable(message: &Message) -> bool {
     if matches!(message.type_, MessageType::Error) || should_skip_storage(message) {
         return false;
@@ -82,7 +92,6 @@ pub fn is_archivable(message: &Message) -> bool {
             Some(RetractionKind::Request(_))
         )
         || is_moderation_result_message(message)
-        || thread_info_from_message_in_stanza_ns(message, CLIENT_STANZA_NS).is_some()
         || extract_forum_action(message).is_some()
         || has_file_sharing(message)
         || is_sticker_message(message)
@@ -98,6 +107,7 @@ mod tests {
     use crate::xep::xep0421::OccupantIdSecret;
     use jid::{BareJid, FullJid, Jid};
     use minidom::Element;
+    use waddle_xmpp_core::xep0201::CLIENT_STANZA_NS;
     use xmpp_parsers::message::{Body, Message, MessageType};
 
     fn full(s: &str) -> FullJid {
@@ -237,7 +247,15 @@ mod tests {
     }
 
     #[test]
-    fn xep_0313_archives_bodyless_standard_muc_thread_metadata() {
+    fn xep_0313_skips_bodyless_standard_muc_thread_only_stanza() {
+        // XEP-0201 §3: chat-states / displayed markers / etc. SHOULD echo
+        // a target message's `<thread/>` so receivers can scope them to
+        // the same conversation. That makes `<thread/>` scope metadata,
+        // not content — a stanza that carries only a thread reference
+        // (no body, no subject, no XEP-0444/0424/0425/0508/file/sticker
+        // payload) MUST NOT be archived; otherwise the next MAM replay
+        // would surface the bodyless metadata stanza as an empty row
+        // inside the thread.
         let room = bare("team@conf.example.com");
         let sender = full("alice@example.com/web");
         let mut msg = groupchat(&room, &sender, "");
@@ -246,10 +264,64 @@ mod tests {
         let events = run(&room, &sender, &mut msg);
 
         assert!(
-            events
+            !events
                 .iter()
                 .any(|e| matches!(e, OutboundEvent::ArchiveGroupchat { .. })),
-            "XEP-0201 thread metadata is durable MUC UI state and must be archived"
+            "XEP-0201 `<thread/>` alone is scope metadata, not content — \
+             a thread-only stanza without a body or other archivable \
+             payload must not be archived"
+        );
+    }
+
+    #[test]
+    fn xep_0085_chat_state_with_thread_is_not_archived() {
+        // Regression test for the bug where post-PR #724 in-thread
+        // chat-states echo `<thread/>` (XEP-0201 §3) and slipped past
+        // `is_archivable` via the now-removed lone thread-info clause.
+        // XEP-0085 §5.4 chat-states are by definition transient; the
+        // surrounding `<thread/>` echo MUST NOT change that.
+        let room = bare("team@conf.example.com");
+        let sender = full("alice@example.com/web");
+        let mut msg = groupchat(&room, &sender, "");
+        msg.payloads
+            .push(Element::builder("composing", "http://jabber.org/protocol/chatstates").build());
+        waddle_xmpp_core::xep0201::set_thread_id(&mut msg, "topic-root");
+
+        let events = run(&room, &sender, &mut msg);
+
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, OutboundEvent::ArchiveGroupchat { .. })),
+            "XEP-0085 chat-states must not be archived even when scoped \
+             to a thread per XEP-0201 §3"
+        );
+    }
+
+    #[test]
+    fn xep_0333_displayed_marker_with_thread_is_not_archived() {
+        // Same regression class as the chat-state case above: in-thread
+        // XEP-0333 chat markers echo `<thread/>` after PR #724. Markers
+        // are transient receipts (XEP-0333 §5); the thread echo doesn't
+        // promote them to durable content.
+        let room = bare("team@conf.example.com");
+        let sender = full("alice@example.com/web");
+        let mut msg = groupchat(&room, &sender, "");
+        msg.payloads.push(
+            Element::builder("displayed", "urn:xmpp:chat-markers:0")
+                .attr("id", "target-sid")
+                .build(),
+        );
+        waddle_xmpp_core::xep0201::set_thread_id(&mut msg, "topic-root");
+
+        let events = run(&room, &sender, &mut msg);
+
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, OutboundEvent::ArchiveGroupchat { .. })),
+            "XEP-0333 chat markers must not be archived even when \
+             scoped to a thread per XEP-0201 §3"
         );
     }
 
