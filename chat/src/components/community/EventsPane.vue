@@ -132,10 +132,12 @@ const weekEventsByDay = computed<Map<string, CommunityEvent[]>>(() => {
   const now = Date.now();
   const horizon = now + SEVEN_DAYS_MS;
   const groups = new Map<string, CommunityEvent[]>();
-  for (const e of filteredEvents.value) {
-    const ms = e.dtstartMs;
-    if (typeof ms !== "number" || ms < now || ms > horizon) continue;
-    const key = new Date(ms).toLocaleDateString(undefined, {
+  const sorted = [...filteredEvents.value]
+    .filter((e): e is CommunityEvent & { dtstartMs: number } => typeof e.dtstartMs === "number")
+    .sort((a, b) => a.dtstartMs - b.dtstartMs);
+  for (const e of sorted) {
+    if (e.dtstartMs < now || e.dtstartMs > horizon) continue;
+    const key = new Date(e.dtstartMs).toLocaleDateString(undefined, {
       weekday: "long",
       month: "short",
       day: "numeric",
@@ -149,7 +151,7 @@ const weekEventsByDay = computed<Map<string, CommunityEvent[]>>(() => {
 
 const calYear = ref(new Date().getFullYear());
 const calMonth = ref(new Date().getMonth()); // 0-indexed
-const selectedDay = ref<number | null>(null); // day-of-month
+const selectedDay = ref<number | null>(new Date().getDate()); // day-of-month — preselect today
 
 const calTitle = computed(() =>
   new Date(calYear.value, calMonth.value).toLocaleDateString(undefined, {
@@ -167,6 +169,13 @@ function nextMonth() {
   if (calMonth.value === 11) { calMonth.value = 0; calYear.value++; }
   else calMonth.value++;
   selectedDay.value = null;
+}
+
+function goToToday() {
+  const now = new Date();
+  calYear.value = now.getFullYear();
+  calMonth.value = now.getMonth();
+  selectedDay.value = now.getDate();
 }
 
 interface CalCell {
@@ -657,7 +666,17 @@ const DOW_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
           >
             <ChevronLeft class="h-4 w-4" aria-hidden="true" />
           </button>
-          <span class="type-control font-semibold text-foreground">{{ calTitle }}</span>
+          <div class="flex items-center gap-2">
+            <span class="type-control font-semibold text-foreground">{{ calTitle }}</span>
+            <button
+              type="button"
+              class="inline-flex items-center rounded-md border border-border bg-background px-2 py-1 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted/50 hover:text-foreground"
+              aria-label="Jump to today"
+              @click="goToToday"
+            >
+              Today
+            </button>
+          </div>
           <button
             type="button"
             class="inline-flex h-8 w-8 items-center justify-center rounded-md border border-border text-muted-foreground hover:bg-muted/50 hover:text-foreground"
@@ -696,10 +715,10 @@ const DOW_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
                 class="min-h-[4rem] p-1.5 text-left align-top transition-colors"
                 :class="[
                   cell.day === null ? 'bg-muted/20 cursor-default' : 'hover:bg-muted/30 cursor-pointer',
-                  cell.day === selectedDay ? 'bg-primary/10' : '',
+                  cell.day !== null && cell.day === selectedDay ? 'bg-primary/10' : '',
                 ]"
                 :disabled="cell.day === null"
-                @click="cell.day !== null && (selectedDay = selectedDay === cell.day ? null : cell.day)"
+                @click="cell.day !== null && (selectedDay = cell.day)"
               >
                 <span
                   v-if="cell.day !== null"
