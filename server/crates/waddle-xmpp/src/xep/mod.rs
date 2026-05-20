@@ -109,6 +109,10 @@
 //! - **XEP-0223**: Persistent Storage Best Practices - Profile of PubSub.
 //! - **XEP-0249**: Direct MUC Invitations - Simple message-based invitations
 //!   for inviting users directly to MUC rooms.
+//! - **XEP-0272**: Multiparty Jingle (Muji) - MUC group call presence
+//!   advertisement (`<muji>` with `<preparing/>` and `<content>` children).
+//!   Joining the SFU is a Jingle session-initiate embedding the same
+//!   element with a `room` attribute (XEP-0272 §Joining).
 //! - **XEP-0363**: HTTP File Upload - Server-side support for HTTP-based
 //!   file uploads, returning PUT and GET URLs for file transfer.
 //! - **XEP-0402**: PEP Native Bookmarks - MUC room bookmarks stored via PEP.
@@ -150,6 +154,7 @@ pub mod xep0203;
 pub mod xep0215;
 pub mod xep0223;
 pub mod xep0249;
+pub mod xep0272;
 pub mod xep0292;
 pub mod xep0297;
 pub mod xep0300;
