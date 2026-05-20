@@ -393,14 +393,37 @@ export class BrowserXmppClient {
   readonly catchup = new ReconnectCatchup();
   // Per-resume gate: non-zero while `handleSessionReady` is draining
   // MAM catch-up. Live body messages received during that window are
-  // buffered in `pendingLiveDuringResume` and replayed after catch-up
+  // buffered in `pendingDuringResume` and replayed after catch-up
   // finishes, so a live arrival can never advance the catch-up cursor
   // mid-pagination (see XEP-0313 §3.3 "Querying the archive" — server
   // pagination is relative to the cursor we send, and shifting it while
   // a `before=` page is in flight can skip or duplicate messages near
   // the page boundary).
-  private resumeInFlight = 0;
-  private pendingLiveDuringResume: Array<WasmMessage & { carbon?: { sent?: boolean; received?: boolean }; inboxPush?: InboxEntry; _fromCarbon?: boolean }> = [];
+  //
+  // `resumeBarrier` coalesces redundant resume triggers. Three event
+  // sources can fire `handleSessionReady` for the same xmpp handle:
+  // `set_on_session_lifecycle`, `on("session:started")`, and
+  // `on("stream:management:resumed")`. Without coalescing, the second
+  // trigger reset the live buffer mid-flight and the first's drain
+  // silently skipped — losing every message that arrived during the
+  // first catch-up. Now: the first trigger owns the barrier, the
+  // others bail out at the gate.
+  //
+  // The barrier is keyed to the xmpp handle that owns it. A full
+  // reconnect produces a new handle, and the new handle must be
+  // allowed to start its own catch-up even if the old handle's
+  // barrier is still pending — otherwise `connect()` for the new
+  // handle hangs until its 15s timeout fires (the Wi-Fi-to-cellular
+  // mobile case the adversarial reviewer flagged).
+  //
+  // `pendingDuringResume` is a typed sentinel — null means "not
+  // buffering, dispatch live messages immediately"; an array means
+  // "buffering, push live arrivals here for replay when the barrier
+  // resolves." Both fields are written atomically together so a
+  // re-entrant `handleSessionReady` (synchronous WASM callback re-
+  // entry) cannot observe one set without the other.
+  private resumeBarrier: { xmpp: XmppClientInstance; promise: Promise<void> } | null = null;
+  private pendingDuringResume: Array<WasmMessage & { carbon?: { sent?: boolean; received?: boolean }; inboxPush?: InboxEntry; _fromCarbon?: boolean }> | null = null;
 
   constructor(session: WaddleSession) { this.session = session; }
 
@@ -1608,7 +1631,18 @@ export class BrowserXmppClient {
     if (this.xmpp !== xmpp) return;
     this.connected = true; this.reconnectAttempt = 0;
     this.emitStatus({ state: "online", detail: countQueuedMessages(this.queueScope) > 0 ? lifecycle.type === "fresh" ? "Reconnected — replaying queued messages" : "Connection resumed — replaying queued messages" : lifecycle.type === "fresh" ? "Connection ready" : "Connection resumed" });
-    const catchupEntries = this.catchup.onSessionStarted();
+    // Coalesce duplicate triggers. Three event hooks call
+    // `handleSessionReady` on the same xmpp handle; only the first
+    // gets past this gate to run the per-session setup, lifecycle
+    // emit, and catch-up. Subsequent triggers for the *same* xmpp
+    // bail out silently.
+    //
+    // A barrier owned by a *different* xmpp handle (e.g. the old
+    // handle from a Wi-Fi → cellular reconnect) does not block the
+    // new handle — the new handle gets its own session-setup +
+    // catch-up. The old barrier's `.finally` guards against writing
+    // back into shared state when `this.xmpp` has moved on.
+    if (this.resumeBarrier && this.resumeBarrier.xmpp === xmpp) return;
     if (lifecycle.type === "fresh") {
       this.inflightQueuedIds.clear();
       void this.enableCarbons(xmpp);
@@ -1620,28 +1654,76 @@ export class BrowserXmppClient {
       void this.bootstrapMdsDisplayed(xmpp);
     }
     this.emitSessionLifecycle(lifecycle);
-    if (catchupEntries.length > 0) {
-      const resumeId = ++this.resumeInFlight;
-      this.pendingLiveDuringResume = [];
-      try {
-        await this.runReconnectCatchup(xmpp, catchupEntries);
-      } finally {
-        if (this.xmpp === xmpp && this.resumeInFlight === resumeId) {
-          const buffered = this.pendingLiveDuringResume;
-          this.pendingLiveDuringResume = [];
-          this.resumeInFlight = 0;
-          // Drain in arrival order. Each replay flows through the same
-          // `dispatchLiveBodyMessage` path that a fresh socket arrival
-          // would, so cursor advance + downstream `messageHandler` /
-          // `directMessageHandler` dedup behave identically.
-          for (const buffered_message of buffered) this.dispatchLiveBodyMessage(buffered_message);
-        }
-      }
-      if (this.xmpp !== xmpp) return;
+    const catchupEntries = this.catchup.onSessionStarted();
+    if (catchupEntries.length === 0) {
+      this.flushAfterSessionReady(xmpp);
+      this.fulfillOnceConnected();
+      return;
     }
+    // Build the barrier promise and the buffer *atomically* — set
+    // both fields together before any `await` so a re-entrant
+    // `handleSessionReady` (synchronous WASM callback) can never
+    // observe `pendingDuringResume` set without `resumeBarrier`
+    // also set.
+    const catchupPromise = this.runReconnectCatchup(xmpp, catchupEntries);
+    const barrierPromise = catchupPromise.finally(() => this.completeResumeBarrier(xmpp));
+    this.pendingDuringResume = [];
+    this.resumeBarrier = { xmpp, promise: barrierPromise };
+    await barrierPromise;
+    if (this.xmpp !== xmpp) return;
+    this.fulfillOnceConnected();
+  }
+
+  /**
+   * Resume-barrier completion: snapshot the buffer, atomically reset
+   * `pendingDuringResume` + `resumeBarrier`, then flush the queue and
+   * drain the buffer (in that order — see Bug 4 in PR2 plan).
+   *
+   * Extracted as a named private method so it can be unit-tested in
+   * isolation; the in-line `.finally` callback was a source-text
+   * grep target which made test brittle to formatting changes.
+   *
+   * Guards against `this.xmpp` having changed under us (mobile
+   * disconnect mid-catchup) — in that case we still clean up our
+   * own state but don't fire queue flush / buffer drain for the
+   * stale handle.
+   */
+  private completeResumeBarrier(xmpp: XmppClientInstance) {
+    const buffered = this.pendingDuringResume ?? [];
+    // Only clear the barrier if it is still ours — a newer handle
+    // may have replaced it after a full reconnect.
+    if (this.resumeBarrier?.xmpp === xmpp) {
+      this.resumeBarrier = null;
+      this.pendingDuringResume = null;
+    }
+    if (this.xmpp !== xmpp) return;
+    // Flush the locally-queued outbound *before* draining the live
+    // buffer. Queued messages carry the user's send wall-clock from
+    // before the pause; live arrivals from during the pause carry
+    // later stamps. Flushing first means the cursor advances in
+    // chronological order and `mergeLiveMessage` sees outbound
+    // echoes alongside (or before) the inbound arrivals they belong
+    // next to, instead of mis-ordering the tail (Bug 4).
+    this.flushAfterSessionReady(xmpp);
+    // Drain in arrival order. Each replay flows through the same
+    // `dispatchLiveBodyMessage` path that a fresh socket arrival
+    // would, so cursor advance + downstream `messageHandler` /
+    // `directMessageHandler` dedup behave identically.
+    for (const m of buffered) this.dispatchLiveBodyMessage(m);
+  }
+
+  private flushAfterSessionReady(xmpp: XmppClientInstance) {
+    if (this.xmpp !== xmpp) return;
     void this.flushQueuedDirectMessages();
     if (this.currentRoom) void this.flushQueuedRoomMessages(this.currentRoom);
-    if (this.onceConnected) { const done = this.onceConnected; this.onceConnected = null; this.onceConnectFailed = null; done(); }
+  }
+
+  private fulfillOnceConnected() {
+    if (!this.onceConnected) return;
+    const done = this.onceConnected;
+    this.onceConnected = null;
+    this.onceConnectFailed = null;
+    done();
   }
 
   private async bootstrapMdsDisplayed(xmpp: XmppClientInstance) {
@@ -1752,8 +1834,8 @@ export class BrowserXmppClient {
       // the user sees "alice pinned a message" inline (#414). The
       // pin store update has already happened above.
     }
-    if (this.resumeInFlight > 0) {
-      this.pendingLiveDuringResume.push(message);
+    if (this.pendingDuringResume !== null) {
+      this.pendingDuringResume.push(message);
       return;
     }
     this.dispatchLiveBodyMessage(message);
