@@ -4216,6 +4216,119 @@ mod tests {
         assert_eq!(jobs[0].class(), NotificationClass::DirectMessage);
     }
 
+    /// T1 race-window regression: a candidate inserted while the
+    /// recipient's XEP-0492 setting said "deliver" must still be
+    /// suppressed at drain time if the setting flipped to `<never/>`
+    /// between T0 emission and T1 dispatch.
+    ///
+    /// The T0 emission gate (in `offline_delivery.rs` /
+    /// `groupchat_inbox.rs`) catches the common case where the
+    /// setting was already `<never/>` at message-arrival time and
+    /// short-circuits the insert — that case is covered by
+    /// `xep0492_direct_chat_*_persists_no_candidate_row*` over in
+    /// `tests/messages.rs`. This test exercises the *other*
+    /// invocation moment of the same shared evaluator function: a
+    /// row already exists, and the recipient's effective level has
+    /// since changed.
+    ///
+    /// Expected behaviour: `drain_pending_candidates_into_outbox`
+    /// re-evaluates against the fresh projection, marks the row
+    /// outboxed without enqueuing a job, and returns `processed = 1`.
+    /// The row exists only briefly during the race window — push
+    /// output is preserved per the locked Q2 design.
+    #[tokio::test]
+    async fn t1_drain_reevaluates_xep0492_when_projection_changes_after_insert() {
+        let store = store().await;
+        let target = target();
+        let push_store = waddle_xmpp::push::InMemoryPushStore::new();
+        let blocking = waddle_xmpp::xep::xep0191::InMemoryBlockingStorage::new();
+        let projection = settings_projection().await;
+        let room_policy = StubRoomPolicy::new();
+        let candidate = candidate("archive-t1-race-window");
+        register_push_target(&push_store, candidate.recipient_bare_jid(), &target).await;
+        // Insert with no projection — defaults to `<always/>`, so a
+        // T0 evaluator at this moment would say "deliver". The
+        // candidate row gets persisted.
+        store
+            .insert_candidate(&candidate)
+            .await
+            .expect("candidate insert");
+        assert_eq!(
+            store
+                .count_all_candidates()
+                .await
+                .expect("post-insert row count"),
+            1,
+            "T0 must have persisted the candidate row when projection said deliver"
+        );
+
+        // Race window: between T0 emission and T1 drain, the
+        // recipient's XEP-0492 setting flips to `<never/>`.
+        projection
+            .upsert(&crate::notification_settings_projection::NotificationSettingsProjection {
+                owner_bare_jid: candidate.recipient_bare_jid().clone(),
+                conversation_jid: candidate.conversation_jid().clone(),
+                conversation_kind:
+                    crate::notification_settings_projection::ConversationKind::Direct,
+                mode: waddle_xmpp::xep::NotificationLevel::Never,
+                source_version: 1,
+                updated_at_ms: crate::time::now_ms(),
+                source:
+                    crate::notification_settings_projection::NotificationSettingsSource::Xep0402Bookmarks,
+                source_item_jid: candidate.conversation_jid().clone(),
+            })
+            .await
+            .expect("flip xep-0492 setting to <never/>");
+
+        // T1 drain re-evaluates against the now-`<never/>`
+        // projection and suppresses the candidate.
+        assert_eq!(
+            store
+                .drain_pending_candidates_into_outbox(
+                    &push_store,
+                    &blocking,
+                    &projection,
+                    &room_policy,
+                    &bare("push.example.com"),
+                    16,
+                )
+                .await
+                .expect("drain candidates"),
+            1,
+            "T1 race-window guard MUST count the candidate as processed via suppression"
+        );
+
+        // No outbox job — the suppression path goes
+        // `mark_candidate_outboxed_tx` WITHOUT `enqueue_outbox_job_tx`.
+        assert!(store
+            .pending_outbox_jobs()
+            .await
+            .expect("pending jobs")
+            .is_empty());
+        // The candidate row still exists, now marked outboxed —
+        // this is the documented race-window exception. The
+        // compliance rule is "no row for the common case"; the
+        // race-window row is acceptable per locked Q2.
+        let mut rows = store
+            .query(
+                "SELECT outboxed_at_ms FROM notification_candidates WHERE stanza_id = ?",
+                crate::db_params!["archive-t1-race-window"],
+            )
+            .await
+            .expect("candidate marker query");
+        let row = rows
+            .next()
+            .await
+            .expect("candidate marker row")
+            .expect("candidate marker row");
+        assert!(
+            row.get::<Option<i64>>(0)
+                .expect("outboxed marker")
+                .is_some(),
+            "T1 race-window suppression MUST mark the candidate outboxed"
+        );
+    }
+
     #[tokio::test]
     async fn candidate_worker_marks_malformed_bare_sender_candidate_terminal() {
         let store = store().await;
