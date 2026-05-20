@@ -4,6 +4,18 @@ import { reportError } from "@/lib/telemetry";
 
 const PREFIX = "waddle.chat.outbound-queue";
 
+/**
+ * Drop persisted queued messages older than this window. A user
+ * who types a message, closes the tab before it sends, and then
+ * comes back days later does not want yesterday's draft replayed
+ * with its stale `createdAt` — it would insert ahead of every
+ * message received since, mis-positioning the row in the timeline
+ * and surprising the user with a send they don't remember
+ * intending. 7 days bounds the per-account storage footprint
+ * without losing same-session retries.
+ */
+const QUEUE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+
 interface PersistedQueuedMessageBase {
   id: string;
   createdAt: string;
@@ -83,7 +95,8 @@ function readQueue(accountKey: string): PersistedQueuedMessage[] {
     if (!raw) return [];
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];
-    return sortQueue(parsed.filter(isPersistedQueuedMessage));
+    const all = sortQueue(parsed.filter(isPersistedQueuedMessage));
+    return pruneStaleEntries(s, accountKey, all);
   } catch (err) {
     // Storage read failure usually means corrupt JSON or privacy-mode
     // localStorage. Surface to Faro but keep the app working — we just
@@ -95,6 +108,69 @@ function readQueue(accountKey: string): PersistedQueuedMessage[] {
     });
     return [];
   }
+}
+
+/**
+ * Filter out queue entries past the TTL and rewrite the snapshot if
+ * any were dropped. This keeps the persisted footprint bounded over
+ * the lifetime of the account without needing a separate cleanup
+ * pass — the next read naturally trims stale rows.
+ *
+ * Pruning is silent to the UI: the row never enters `messages.value`
+ * (the prune fires inside the read that builds the timeline), so
+ * there is no "stuck queued" row left dangling. The trade-off is
+ * that a user who reloads a long-suspended tab will not see a
+ * failure notification for the drop — by design, because 7-day-old
+ * drafts are almost always abandoned. Pruning IS logged via
+ * `reportError` so a sudden spike in pruned-counts surfaces in
+ * telemetry.
+ */
+function pruneStaleEntries(
+  s: Storage,
+  accountKey: string,
+  all: PersistedQueuedMessage[],
+): PersistedQueuedMessage[] {
+  const cutoff = Date.now() - QUEUE_TTL_MS;
+  const fresh = all.filter((entry) => parseCreatedAt(entry.createdAt) >= cutoff);
+  if (fresh.length === all.length) return all;
+  const dropped = all.length - fresh.length;
+  try {
+    if (fresh.length === 0) {
+      s.removeItem(queueKey(accountKey));
+    } else {
+      s.setItem(queueKey(accountKey), JSON.stringify(fresh));
+    }
+  } catch (err) {
+    // Best-effort prune; surface to Faro but still hand back the
+    // pruned list to the caller so the stale entries are not used
+    // in this session even if persistence couldn't be updated.
+    reportError("storage.write", err, {
+      recoverable: true,
+      detail: "outbound-queue prune failed",
+      accountKey,
+      dropped,
+    });
+    return fresh;
+  }
+  // Successful prune — surface to telemetry so a spike in pruned
+  // counts is visible to operators. `storage.write` is the closest
+  // existing `ErrorKind` (we wrote the pruned snapshot back), and
+  // `recoverable: true` keeps this in the informational tier rather
+  // than alerting on it.
+  reportError("storage.write", new Error("queue ttl prune"), {
+    recoverable: true,
+    detail: `pruned ${dropped} stale queued message(s)`,
+    accountKey,
+    dropped,
+  });
+  return fresh;
+}
+
+function parseCreatedAt(value: string): number {
+  const ms = Date.parse(value);
+  // If the timestamp is unparseable, treat the entry as fresh —
+  // refusing to prune is safer than dropping a legitimate send.
+  return Number.isFinite(ms) ? ms : Date.now();
 }
 
 function writeQueue(accountKey: string, messages: PersistedQueuedMessage[]): void {
