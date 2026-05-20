@@ -3039,7 +3039,7 @@ pub(crate) async fn evaluate_xep0492_at_dispatch(
         }
         crate::notification_settings_projection::PushDispatchDecision::Suppressed { reason } => {
             T1PushDispatchOutcome::Suppressed {
-                reason: suppressed_reason_for_level(reason, is_mention),
+                reason: suppressed_reason_for_level(reason),
             }
         }
     })
@@ -3052,23 +3052,20 @@ pub(crate) async fn evaluate_xep0492_at_dispatch(
 /// `<never/>` always maps to `Xep0492Never`. `<on-mention/>` maps to
 /// `Xep0492OnMentionMiss` because the XEP-0492 evaluator only emits
 /// the `Suppressed` outcome when `should_notify(is_mention)` is false
-/// — and for `OnMention` that means `is_mention == false`.
-/// `<always/>` never produces a `Suppressed` outcome.
-fn suppressed_reason_for_level(
-    level: waddle_xmpp::xep::NotificationLevel,
-    _is_mention: bool,
-) -> SuppressedReason {
+/// — and for `OnMention` that means `is_mention == false`. Called
+/// only from the `Suppressed` arm of the upstream XEP-0492 reducer
+/// (`PushDispatchDecision::evaluate`), which never yields
+/// `Suppressed` for `<always/>` — so `Always` is unreachable here
+/// and the typed contract makes the missing arm a compile-time
+/// error if the reducer ever drifts.
+fn suppressed_reason_for_level(level: waddle_xmpp::xep::NotificationLevel) -> SuppressedReason {
     match level {
         waddle_xmpp::xep::NotificationLevel::Never => SuppressedReason::Xep0492Never,
         waddle_xmpp::xep::NotificationLevel::OnMention => SuppressedReason::Xep0492OnMentionMiss,
-        waddle_xmpp::xep::NotificationLevel::Always => {
-            // Unreachable in practice — `Always.should_notify(_) ==
-            // true` so the evaluator never produces `Suppressed` for
-            // it. Default to OnMention-miss to keep the closed-set
-            // invariant if the upstream reducer ever drifts; the
-            // dedicated XEP-0492 unit tests cover the live mapping.
-            SuppressedReason::Xep0492OnMentionMiss
-        }
+        waddle_xmpp::xep::NotificationLevel::Always => unreachable!(
+            "suppressed_reason_for_level called with NotificationLevel::Always; \
+             the XEP-0492 reducer never yields Suppressed for <always/>"
+        ),
     }
 }
 
@@ -7489,30 +7486,16 @@ mod tests {
     /// + the labeled prometheus counter in lockstep.
     #[test]
     fn suppressed_reason_round_trip_covers_every_variant() {
-        let variants = [
-            SuppressedReason::Xep0357Self,
-            SuppressedReason::Xep0357NoRegistration,
-            SuppressedReason::Xep0357RegistrationDisabled,
-            SuppressedReason::Xep0492Never,
-            SuppressedReason::Xep0492OnMentionMiss,
-            SuppressedReason::Xep0191Blocked,
-            SuppressedReason::Xep0513Noping,
-            SuppressedReason::Xep0513ActiveMiss,
-            SuppressedReason::Xep0334NoStore,
-            SuppressedReason::Xep0334NoPermanentStore,
-            SuppressedReason::WaddleDnd,
-            SuppressedReason::ProviderRejected,
-            SuppressedReason::ProviderTokenExpired,
-        ];
-        // The closed-set CHECK constraint values MUST stay in lockstep
-        // with the enum — every db value the enum knows about MUST be
-        // accepted by the constraint, and vice versa.
+        // Iterate `SuppressedReason::ALL` (the same closed-set array the
+        // startup invariant traverses) so any future variant addition
+        // joins this test automatically — no parallel hand-maintained
+        // list to drift.
         assert_eq!(
-            variants.len(),
+            SuppressedReason::ALL.len(),
             NOTIFICATION_CANDIDATES_SUPPRESSED_REASON_VALUES.len(),
             "variant count must match CHECK constraint value list",
         );
-        for variant in variants {
+        for variant in SuppressedReason::ALL.iter().copied() {
             let db = variant.as_db_value();
             assert!(
                 NOTIFICATION_CANDIDATES_SUPPRESSED_REASON_VALUES.contains(&db),
@@ -7562,24 +7545,10 @@ mod tests {
         let store = store().await;
         let recipient = bare("alice@example.com");
         let sender_jid: Jid = "bob@example.com/web".parse().expect("full sender");
-        for (idx, reason) in [
-            SuppressedReason::Xep0357Self,
-            SuppressedReason::Xep0357NoRegistration,
-            SuppressedReason::Xep0357RegistrationDisabled,
-            SuppressedReason::Xep0492Never,
-            SuppressedReason::Xep0492OnMentionMiss,
-            SuppressedReason::Xep0191Blocked,
-            SuppressedReason::Xep0513Noping,
-            SuppressedReason::Xep0513ActiveMiss,
-            SuppressedReason::Xep0334NoStore,
-            SuppressedReason::Xep0334NoPermanentStore,
-            SuppressedReason::WaddleDnd,
-            SuppressedReason::ProviderRejected,
-            SuppressedReason::ProviderTokenExpired,
-        ]
-        .iter()
-        .enumerate()
-        {
+        // Iterate the closed-set `ALL` array so a future enum extension
+        // joins this audit automatically — no hand-maintained parallel
+        // list to drift.
+        for (idx, reason) in SuppressedReason::ALL.iter().enumerate() {
             let stanza_id = format!("audit-{idx}");
             let candidate = NotificationCandidate::direct_message(
                 recipient.clone(),

@@ -25,7 +25,24 @@
       "Bash(cargo build:*)",
       "Bash(gh issue *)",
       "Bash(git fetch *)",
-      "Bash(git push *)"
+      "Bash(git push *)",
+      "Skill(superpowers:systematic-debugging)",
+      "Bash(git *)",
+      "Bash(kubectl get *)",
+      "Bash(kubectl logs *)",
+      "Bash(kubectl exec *)",
+      "Bash(awk 'NR>=64 && NR<=200' /Users/oyr/.claude/projects/-Users-oyr-projects-waddle/76e27f42-f40a-4ffb-b714-1fc8f44459d5/tool-results/toolu_013NS8b1dHwZoFDfUo6yPzGB.txt)",
+      "Bash(echo' restartCount')",
+      "Bash(awk -F'\"timestamp\":\"' '{print substr\\($2,1,16\\)}')",
+      "Bash(tee /tmp/state-before.json)",
+      "Bash(kubectl port-forward *)",
+      "Bash(cargo fmt *)",
+      "Bash(awk -F'passed; ' '{print $0}')",
+      "Bash(awk '{ for \\(i=1;i<=NF;i++\\) if \\($i==\"passed;\"\\) p+=$\\(i-1\\); for \\(i=1;i<=NF;i++\\) if \\($i==\"failed;\"\\) f+=$\\(i-1\\) } END { print \"passed:\",p,\"failed:\",f }')",
+      "Bash(awk *)",
+      "Bash(Value::Null)",
+      "Bash(auth_identities.email_verified)",
+      "Bash(Option::)"
     ]
   }
 }
