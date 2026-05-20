@@ -316,18 +316,72 @@ pub(crate) fn notification_activity_last_chat_state_constraint_matches_expected(
             .all(|value| constraint_definition_quotes_value(&normalized, value))
 }
 
+/// Extract every single-quoted literal token from a CHECK constraint
+/// definition. Both Postgres' `pg_get_constraintdef` and SQLite's
+/// `sqlite_master.sql` render IN-list values as single-quoted
+/// literals; this helper returns the **set** of those literals so a
+/// caller can verify the constraint's value set is **exactly** the
+/// closed enum — neither missing values (substring-safety) nor
+/// permitting extras (exclusivity).
+///
+/// The XEP-conformance contract here is one-way: a hand-modified or
+/// older CHECK that admits `'online'` alongside the canonical four
+/// XEP-0045 tokens would round-trip a stored `'online'` row, and the
+/// typed [`NotificationPresenceShow::from_db_value`] decode in
+/// [`NotificationActivityStore::read`] would then surface
+/// [`NotificationActivityError::InvalidPresenceShow`] into the T1
+/// push-gate evaluator. Catching the over-permissive CHECK at the
+/// matcher tier keeps that decode path tight by construction — the
+/// migration will rewrite the constraint to the canonical closed
+/// set before any stale row can be observed.
+fn extract_single_quoted_literals(definition: &str) -> std::collections::BTreeSet<String> {
+    let mut out = std::collections::BTreeSet::new();
+    let bytes = definition.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'\'' {
+            let start = i + 1;
+            let mut end = start;
+            while end < bytes.len() && bytes[end] != b'\'' {
+                end += 1;
+            }
+            if end < bytes.len() && start < end {
+                // ASCII-only by the closed-set construction; the
+                // definition has already been lowercased by callers
+                // when they need case-insensitive comparison.
+                out.insert(String::from_utf8_lossy(&bytes[start..end]).into_owned());
+            }
+            i = end + 1;
+        } else {
+            i += 1;
+        }
+    }
+    out
+}
+
 /// Matcher used by the Postgres and SQLite migration paths to detect a
-/// stale `presence_show` CHECK. Same substring-safety guarantees as
-/// [`notification_activity_last_chat_state_constraint_matches_expected`]:
-/// every typed db-value MUST appear as a quoted SQL literal.
+/// stale `presence_show` CHECK. Stricter than the original
+/// substring-safety guarantee: the matcher now verifies **exclusivity**
+/// — the constraint's quoted-literal set MUST equal the typed closed
+/// set [`NOTIFICATION_ACTIVITY_PRESENCE_SHOW_VALUES`]. A CHECK that
+/// allows extra values (e.g. a hand-modified definition with
+/// `'online'`) is flagged stale and the migration rewrites it.
+/// Without exclusivity, an over-permissive CHECK would silently
+/// round-trip out-of-enum values which then fail
+/// [`NotificationPresenceShow::from_db_value`] at read time.
 pub(crate) fn notification_activity_presence_show_constraint_matches_expected(
     definition: &str,
 ) -> bool {
     let normalized = definition.to_ascii_lowercase();
-    normalized.contains("presence_show")
-        && NOTIFICATION_ACTIVITY_PRESENCE_SHOW_VALUES
-            .iter()
-            .all(|value| constraint_definition_quotes_value(&normalized, value))
+    if !normalized.contains("presence_show") {
+        return false;
+    }
+    let extracted = extract_single_quoted_literals(&normalized);
+    let expected: std::collections::BTreeSet<String> = NOTIFICATION_ACTIVITY_PRESENCE_SHOW_VALUES
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    extracted == expected
 }
 
 fn notification_activity_table_sql(i64_type: &str, if_not_exists: bool) -> String {
@@ -1589,6 +1643,55 @@ mod tests {
         let full = "CHECK (presence_show IS NULL OR presence_show IN \
                     ('away', 'chat', 'dnd', 'xa'))";
         assert!(notification_activity_presence_show_constraint_matches_expected(full));
+    }
+
+    /// Exclusivity guarantee: a CHECK definition that allows the full
+    /// XEP-0045 closed set PLUS an extra value (e.g. `'online'` from a
+    /// hand-modified deployment or an older schema variant) MUST be
+    /// flagged stale so the migration rewrites it. Without this, an
+    /// over-permissive CHECK would round-trip out-of-enum rows that
+    /// then fail [`NotificationPresenceShow::from_db_value`] at read
+    /// time, surfacing
+    /// [`NotificationActivityError::InvalidPresenceShow`] into the T1
+    /// push-gate evaluator. Locks the contract from day one so a
+    /// matcher refactor cannot silently re-introduce the gap.
+    #[test]
+    fn notification_activity_presence_show_constraint_match_rejects_over_permissive_definition() {
+        // Postgres-shape: the four canonical tokens plus an extra
+        // `'online'` token a hand-modified deployment might add.
+        let pg_extra = "CHECK (((presence_show IS NULL) OR \
+            ((presence_show)::text = ANY ((ARRAY['away'::character varying, \
+            'chat'::character varying, 'dnd'::character varying, \
+            'xa'::character varying, 'online'::character varying])::text[]))))";
+        assert!(
+            !notification_activity_presence_show_constraint_matches_expected(pg_extra),
+            "Postgres-shape over-permissive CHECK must be flagged stale",
+        );
+
+        // SQLite-shape variant of the same defect.
+        let sqlite_extra =
+            "CHECK (presence_show IS NULL OR presence_show IN ('away','chat','dnd','xa','online'))";
+        assert!(
+            !notification_activity_presence_show_constraint_matches_expected(sqlite_extra),
+            "SQLite-shape over-permissive CHECK must be flagged stale",
+        );
+
+        // Sanity: the canonical closed set still passes both shapes
+        // (regression guard against accidentally over-tightening).
+        let pg_canonical = "CHECK (((presence_show IS NULL) OR \
+            ((presence_show)::text = ANY ((ARRAY['away'::character varying, \
+            'chat'::character varying, 'dnd'::character varying, \
+            'xa'::character varying])::text[]))))";
+        assert!(
+            notification_activity_presence_show_constraint_matches_expected(pg_canonical),
+            "canonical Postgres definition must still match",
+        );
+        let sqlite_canonical =
+            "CHECK (presence_show IS NULL OR presence_show IN ('away', 'chat', 'dnd', 'xa'))";
+        assert!(
+            notification_activity_presence_show_constraint_matches_expected(sqlite_canonical),
+            "canonical SQLite definition must still match",
+        );
     }
 
     /// `NoopActivityReader` returns `None` for every (owner,
