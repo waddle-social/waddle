@@ -9,13 +9,14 @@ pub(crate) struct MucJoinPresence<'a> {
     pub(crate) role: Role,
     pub(crate) real_jid: &'a FullJid,
     pub(crate) include_self_status: bool,
-    /// Optional `<call xmlns='urn:waddle:muc-call:0'/>` payload to
-    /// append to the resulting presence stanza. Used by the join-
-    /// replay path to surface "in call" indicators for occupants
-    /// who were already participating in the room's group call
-    /// before the joiner arrived. `None` for joiners' own
-    /// self-presence and for occupants without an active call.
-    pub(crate) call_extension: Option<&'a waddle_xmpp::xep::xep_waddle_muc_call::MucCallExtension>,
+    /// Optional XEP-0272 `<muji xmlns='urn:xmpp:jingle:muji:0'/>`
+    /// payload to append to the resulting presence stanza. Used by
+    /// the join-replay path to surface "in call" indicators for
+    /// occupants who were already participating in the room's group
+    /// call before the joiner arrived. `None` for joiners' own
+    /// self-presence and for occupants without an active Muji
+    /// advertisement.
+    pub(crate) muji: Option<&'a waddle_xmpp::xep::xep0272::Muji>,
 }
 
 pub(crate) fn build_muc_join_presence_xml(params: MucJoinPresence<'_>) -> String {
@@ -44,15 +45,16 @@ pub(super) fn build_muc_join_presence_stanza(
             secret: params.occupant_id_secret,
         },
     );
-    if let Some(ext) = params.call_extension {
+    if let Some(muji) = params.muji {
         // The presence stanza already carries the server-authoritative
         // `<x xmlns='muc#user'>` + XEP-0421 occupant-id payloads from
-        // `build_occupant_presence`; the `<call/>` extension is an
+        // `build_occupant_presence`; the `<muji/>` extension is an
         // additional namespaced child per XEP-0045 §5.1.3 ("any other
-        // extension element may be attached"). Built via the typed
-        // `MucCallExtension::to_element` helper — never with
-        // `format!`-style XML concat (CLAUDE.md XML hard rule).
-        presence.payloads.push(ext.to_element());
+        // extension element may be attached") and XEP-0272 §Joining
+        // (Muji presence shape). Built via the typed `Muji::to_element`
+        // helper — never with `format!`-style XML concat (CLAUDE.md
+        // XML hard rule).
+        presence.payloads.push(muji.to_element());
     }
     presence
 }
@@ -141,7 +143,7 @@ pub(super) fn build_muc_self_unavailable_xml(
 
 /// Create a presence stanza for MUC. Used by the join-broadcast
 /// path to announce a new occupant to existing occupants — that
-/// new occupant has no `<call/>` advertisement yet, so the
+/// new occupant has no `<muji/>` advertisement yet, so the
 /// extension slot is always `None` here.
 pub(super) fn create_presence_stanza(
     state: &WebSocketState,
@@ -161,6 +163,6 @@ pub(super) fn create_presence_stanza(
         role,
         real_jid,
         include_self_status: false,
-        call_extension: None,
+        muji: None,
     })
 }

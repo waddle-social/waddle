@@ -836,35 +836,49 @@ async fn list_affiliations_filter_none_tier_returns_empty() {
 }
 
 // ---------------------------------------------------------------------------
-// `<call xmlns='urn:waddle:muc-call:0'/>` presence-update tests.
-// XEP-0045 §5.1.3 + waddle MUC-call presence extension behavior.
+// XEP-0272 `<muji xmlns='urn:xmpp:jingle:muji:0'/>` presence-update tests.
+// XEP-0045 §5.1.3 + XEP-0272 §Joining / §Leaving.
 // ---------------------------------------------------------------------------
 
+fn audio_muji() -> crate::xep::xep0272::Muji {
+    use crate::xep::xep0167::MediaKind;
+    use crate::xep::xep0272::{Creator, Muji, MujiContent};
+    Muji::with_contents(vec![MujiContent::new(
+        "audio",
+        Creator::Initiator,
+        MediaKind::Audio,
+    )])
+}
+
+fn empty_muji() -> crate::xep::xep0272::Muji {
+    // No `<preparing/>`, no `<content/>` → XEP-0272 §Leaving "absence
+    // marker": the participant has exited the call.
+    crate::xep::xep0272::Muji::default()
+}
+
 #[tokio::test]
-async fn upsert_call_presence_returns_none_for_non_occupant() {
+async fn upsert_muji_presence_returns_none_for_non_occupant() {
     // A WebSocket session that isn't yet in the room MUST NOT be
-    // able to push a call-presence advertisement — the server falls
+    // able to push a Muji presence advertisement — the server falls
     // back to `handle_muc_join` for that case.
     let actor = spawn_room_actor().await;
     let stranger = test_full_jid("stranger");
 
     let outcome = actor
-        .ask(crate::muc::room_actor::UpsertCallPresence {
+        .ask(crate::muc::room_actor::UpsertMujiPresence {
             sender_jid: stranger,
-            extension: crate::xep::xep_waddle_muc_call::MucCallExtension::active(
-                waddle_sfu::CallId::new("testroom@muc.example.com").unwrap(),
-            ),
+            muji: audio_muji(),
         })
         .await
         .expect("ask");
     assert!(
         outcome.is_none(),
-        "non-occupant must not be allowed to advertise a call"
+        "non-occupant must not be allowed to advertise a Muji presence"
     );
 }
 
 #[tokio::test]
-async fn upsert_call_presence_active_stores_and_returns_extension() {
+async fn upsert_muji_presence_active_stores_and_returns_muji() {
     let actor = spawn_room_actor().await;
     let alice = test_full_jid("alice");
     actor
@@ -877,25 +891,22 @@ async fn upsert_call_presence_active_stores_and_returns_extension() {
         .await
         .expect("join");
 
-    let call_id = waddle_sfu::CallId::new("testroom@muc.example.com").unwrap();
     let outcome = actor
-        .ask(crate::muc::room_actor::UpsertCallPresence {
+        .ask(crate::muc::room_actor::UpsertMujiPresence {
             sender_jid: alice.clone(),
-            extension: crate::xep::xep_waddle_muc_call::MucCallExtension::active(call_id.clone()),
+            muji: audio_muji(),
         })
         .await
         .expect("ask")
         .expect("alice is an occupant");
 
     assert_eq!(outcome.update.sender_nick, "alice");
-    assert!(
-        outcome.active_extension.is_some(),
-        "active advertisement returns the stored extension"
-    );
-    assert_eq!(
-        outcome.active_extension.unwrap().call_id.as_str(),
-        call_id.as_str()
-    );
+    let active = outcome
+        .active_muji
+        .as_ref()
+        .expect("active Muji advertisement is stored");
+    assert!(active.is_active());
+    assert_eq!(active.contents.len(), 1);
     // Recipient list always includes the sender so the WebSocket
     // session that emitted the presence sees the reflection back
     // (XEP-0045 §5.1.3 "presence MUST be reflected to all
@@ -907,7 +918,7 @@ async fn upsert_call_presence_active_stores_and_returns_extension() {
 }
 
 #[tokio::test]
-async fn upsert_call_presence_inactive_clears_state_and_returns_none() {
+async fn upsert_muji_presence_empty_clears_state_and_returns_none() {
     let actor = spawn_room_actor().await;
     let alice = test_full_jid("alice");
     actor
@@ -919,43 +930,40 @@ async fn upsert_call_presence_inactive_clears_state_and_returns_none() {
         })
         .await
         .expect("join");
-    let call_id = waddle_sfu::CallId::new("testroom@muc.example.com").unwrap();
     // First, advertise active.
     actor
-        .ask(crate::muc::room_actor::UpsertCallPresence {
+        .ask(crate::muc::room_actor::UpsertMujiPresence {
             sender_jid: alice.clone(),
-            extension: crate::xep::xep_waddle_muc_call::MucCallExtension::active(call_id.clone()),
+            muji: audio_muji(),
         })
         .await
         .expect("ask")
         .expect("alice is an occupant");
 
-    // Transition to inactive — the actor should clear stored state
-    // AND signal no active extension. The presence broadcaster uses
-    // `None` here to strip the `<call/>` payload from the reflected
-    // stanza, telling other occupants the call ended.
+    // Transition to empty (XEP-0272 §Leaving "absence" marker) — the
+    // actor should clear stored state AND signal no active Muji.
+    // The presence broadcaster uses `None` here to strip the
+    // `<muji/>` payload from the reflected stanza, telling other
+    // occupants the call ended.
     let outcome = actor
-        .ask(crate::muc::room_actor::UpsertCallPresence {
+        .ask(crate::muc::room_actor::UpsertMujiPresence {
             sender_jid: alice.clone(),
-            extension: crate::xep::xep_waddle_muc_call::MucCallExtension::inactive(call_id),
+            muji: empty_muji(),
         })
         .await
         .expect("ask")
         .expect("alice is an occupant");
     assert!(
-        outcome.active_extension.is_none(),
-        "inactive presence clears the stored extension"
+        outcome.active_muji.is_none(),
+        "empty Muji clears the stored extension"
     );
 }
 
 #[tokio::test]
-async fn join_replay_includes_active_call_extension_from_existing_occupant() {
+async fn join_replay_includes_active_muji_from_existing_occupant() {
     // Late joiners see the chip light up immediately via the join
     // replay, not just after the next presence update from the call
-    // participant. This is the second half of the
-    // others-don't-see-the-call fix: real-time forwarding handles
-    // the broadcast, and the join replay handles the late-joiner
-    // case.
+    // participant.
     let actor = spawn_room_actor().await;
     let alice = test_full_jid("alice");
     let bob = test_full_jid("bob");
@@ -969,11 +977,10 @@ async fn join_replay_includes_active_call_extension_from_existing_occupant() {
         })
         .await
         .expect("alice join");
-    let call_id = waddle_sfu::CallId::new("testroom@muc.example.com").unwrap();
     actor
-        .ask(crate::muc::room_actor::UpsertCallPresence {
+        .ask(crate::muc::room_actor::UpsertMujiPresence {
             sender_jid: alice.clone(),
-            extension: crate::xep::xep_waddle_muc_call::MucCallExtension::active(call_id.clone()),
+            muji: audio_muji(),
         })
         .await
         .expect("ask")
@@ -994,19 +1001,17 @@ async fn join_replay_includes_active_call_extension_from_existing_occupant() {
         .iter()
         .find(|o| o.nick == "alice")
         .expect("alice in existing occupants");
-    let ext = alice_replay
-        .call_extension
+    let muji = alice_replay
+        .muji
         .as_ref()
-        .expect("alice's call advertisement is replayed to bob");
-    assert_eq!(ext.call_id.as_str(), call_id.as_str());
+        .expect("alice's Muji advertisement is replayed to bob");
+    assert!(muji.is_active());
 }
 
 #[tokio::test]
-async fn leaving_occupant_clears_call_state() {
+async fn leaving_occupant_clears_muji_state() {
     // A tab close mid-call MUST NOT leave the chip lit forever for
-    // remaining occupants. The room actor clears stored call state
-    // when the last session for a nick leaves; verifying via the
-    // join-replay of a third user (call ext is gone).
+    // remaining occupants.
     let actor = spawn_room_actor().await;
     let alice = test_full_jid("alice");
     let carol = test_full_jid("carol");
@@ -1019,11 +1024,10 @@ async fn leaving_occupant_clears_call_state() {
         })
         .await
         .expect("alice join");
-    let call_id = waddle_sfu::CallId::new("testroom@muc.example.com").unwrap();
     actor
-        .ask(crate::muc::room_actor::UpsertCallPresence {
+        .ask(crate::muc::room_actor::UpsertMujiPresence {
             sender_jid: alice.clone(),
-            extension: crate::xep::xep_waddle_muc_call::MucCallExtension::active(call_id),
+            muji: audio_muji(),
         })
         .await
         .expect("ask")
@@ -1051,21 +1055,14 @@ async fn leaving_occupant_clears_call_state() {
             .any(|o| o.nick == "alice"),
         "alice is gone, so no replay entry for her"
     );
-    // The room should also be call-state-free (no other occupants
-    // had an active advertisement). Inspecting the actor's room
-    // snapshot would require a snapshot accessor; instead we
-    // verify indirectly via the `is_dormant` predicate once carol
-    // also leaves — the room MUST be dormant.
 }
 
 #[tokio::test]
-async fn leaving_originator_session_clears_call_state_even_with_peer_sessions_remaining() {
+async fn leaving_originator_session_clears_muji_state_even_with_peer_sessions_remaining() {
     // Multi-resource ghost regression. alice has two sessions on the
     // same nick — desktop on the call, mobile in the room but not on
-    // the call. When desktop disconnects, the call advertisement
-    // bound to that specific session must clear; previously the
-    // chip stayed lit because `call_state` was keyed only by nick
-    // and only cleared when the LAST session for that nick left.
+    // the call. When desktop disconnects, the Muji advertisement
+    // bound to that specific session must clear.
     let actor = spawn_room_actor().await;
     let desktop: FullJid = "alice@example.com/desktop".parse().expect("desktop");
     let mobile: FullJid = "alice@example.com/mobile".parse().expect("mobile");
@@ -1089,18 +1086,17 @@ async fn leaving_originator_session_clears_call_state_even_with_peer_sessions_re
         .await
         .expect("mobile join recognized as same-bare multi-session");
 
-    let call_id = waddle_sfu::CallId::new("testroom@muc.example.com").unwrap();
-    // Desktop is the session that advertised the active call.
+    // Desktop is the session that advertised the active Muji.
     let active_outcome = actor
-        .ask(crate::muc::room_actor::UpsertCallPresence {
+        .ask(crate::muc::room_actor::UpsertMujiPresence {
             sender_jid: desktop.clone(),
-            extension: crate::xep::xep_waddle_muc_call::MucCallExtension::active(call_id.clone()),
+            muji: audio_muji(),
         })
         .await
         .expect("ask")
         .expect("alice is an occupant");
     assert!(
-        active_outcome.active_extension.is_some(),
+        active_outcome.active_muji.is_some(),
         "desktop's active advertisement is stored",
     );
 
@@ -1117,9 +1113,7 @@ async fn leaving_originator_session_clears_call_state_even_with_peer_sessions_re
         "mobile is still in the room, so alice's nick is not vacated"
     );
 
-    // A late joiner (carol) must NOT see alice's stale call ad —
-    // even though alice's mobile is still in the room, no session
-    // is actually on the call.
+    // A late joiner (carol) must NOT see alice's stale Muji ad.
     let carol = test_full_jid("carol");
     let join_outcome = actor
         .ask(JoinWithAffiliation {
@@ -1136,15 +1130,15 @@ async fn leaving_originator_session_clears_call_state_even_with_peer_sessions_re
         .find(|o| o.nick == "alice")
         .expect("alice (via mobile) still in occupant list");
     assert!(
-        alice_replay.call_extension.is_none(),
-        "call extension cleared when originating session left, even with peer sessions remaining",
+        alice_replay.muji.is_none(),
+        "Muji cleared when originating session left, even with peer sessions remaining",
     );
 }
 
 #[tokio::test]
-async fn leaving_non_originator_session_preserves_call_state() {
+async fn leaving_non_originator_session_preserves_muji_state() {
     // The mirror of the multi-session ghost test: if alice has two
-    // sessions and only the NON-call session leaves, the call
+    // sessions and only the NON-call session leaves, the Muji
     // advertisement bound to the still-present originator must
     // survive. This pins that the per-session keying isn't
     // over-eager.
@@ -1171,12 +1165,11 @@ async fn leaving_non_originator_session_preserves_call_state() {
         .await
         .expect("mobile join");
 
-    let call_id = waddle_sfu::CallId::new("testroom@muc.example.com").unwrap();
-    // Desktop owns the call advertisement.
+    // Desktop owns the Muji advertisement.
     actor
-        .ask(crate::muc::room_actor::UpsertCallPresence {
+        .ask(crate::muc::room_actor::UpsertMujiPresence {
             sender_jid: desktop.clone(),
-            extension: crate::xep::xep_waddle_muc_call::MucCallExtension::active(call_id.clone()),
+            muji: audio_muji(),
         })
         .await
         .expect("ask")
@@ -1205,9 +1198,9 @@ async fn leaving_non_originator_session_preserves_call_state() {
         .iter()
         .find(|o| o.nick == "alice")
         .expect("alice still in room via desktop");
-    let ext = alice_replay
-        .call_extension
+    let muji = alice_replay
+        .muji
         .as_ref()
-        .expect("call advertisement preserved when non-originator session leaves");
-    assert_eq!(ext.call_id.as_str(), call_id.as_str());
+        .expect("Muji preserved when non-originator session leaves");
+    assert!(muji.is_active());
 }

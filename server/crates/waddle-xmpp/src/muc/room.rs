@@ -7,7 +7,7 @@ use super::affiliation::{AffiliationList, FederatedAffiliationConfig, FederatedP
 use super::pin::{PinPermission, PinnedEntry};
 use super::subject::SubjectState;
 use crate::types::{Affiliation, Role};
-use crate::xep::xep_waddle_muc_call::{CallPresenceState, MucCallExtension};
+use crate::xep::xep0272::Muji;
 
 /// Check if a JID is from a remote server.
 ///
@@ -121,13 +121,13 @@ pub struct MucRoom {
     /// room-actor shutdown by design (#414); persistence is a follow-up
     /// concern. Bounded by [`super::pin::MAX_PINNED_ENTRIES`].
     pub(super) pinned_entries: Vec<PinnedEntry>,
-    /// Per-occupant `<call xmlns='urn:waddle:muc-call:0'/>` advertised
-    /// state, keyed by nick. Mirrors the client-emitted presence
-    /// extension so:
+    /// Per-occupant `<muji xmlns='urn:xmpp:jingle:muji:0'/>` advertised
+    /// state (XEP-0272), keyed by nick. Mirrors the client-emitted
+    /// presence extension so:
     ///
     /// 1. Joining occupants see existing call indicators when their
     ///    initial occupant-list replay runs (the join handler reads
-    ///    from this map and appends the `<call/>` payload to the
+    ///    from this map and appends the `<muji/>` payload to the
     ///    replayed presence for any nick that has one).
     /// 2. Presence-update broadcasts can use the persisted state as
     ///    the source of truth rather than echoing a possibly-stale
@@ -137,25 +137,25 @@ pub struct MucRoom {
     /// user has multiple sessions sharing the same nick (web + mobile),
     /// the call advertisement is tied to the specific session that
     /// joined the call. When that session leaves — clean hangup OR
-    /// unclean disconnect — its `<call/>` advertisement is cleared
+    /// unclean disconnect — its `<muji/>` advertisement is cleared
     /// even if the user's other sessions are still in the room. Without
     /// this per-session keying, alice's mobile staying in the channel
     /// after her desktop (which was on the call) drops would keep the
     /// chip lit forever for late joiners.
-    pub(super) call_state: HashMap<String, CallStateEntry>,
+    pub(super) muji_state: HashMap<String, MujiStateEntry>,
 }
 
-/// One advertised `<call/>` entry plus the session that owns it.
+/// One advertised `<muji/>` entry plus the session that owns it.
 ///
 /// The `originator` field is the `FullJid` of the session that emitted
-/// the `state='active'` presence update. When that exact session leaves
-/// the room (or its WebSocket drops), the entry is removed regardless
-/// of whether other sessions for the same nick remain — preventing
-/// ghost call advertisements on multi-resource occupants.
+/// the Muji presence update. When that exact session leaves the room
+/// (or its WebSocket drops), the entry is removed regardless of whether
+/// other sessions for the same nick remain — preventing ghost call
+/// advertisements on multi-resource occupants.
 #[derive(Debug, Clone)]
-pub(super) struct CallStateEntry {
+pub(super) struct MujiStateEntry {
     pub originator: FullJid,
-    pub extension: MucCallExtension,
+    pub muji: Muji,
 }
 
 impl MucRoom {
@@ -178,53 +178,51 @@ impl MucRoom {
             nickname_generation: HashMap::new(),
             generation_floor: u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or(0),
             pinned_entries: Vec::new(),
-            call_state: HashMap::new(),
+            muji_state: HashMap::new(),
         }
     }
 
-    /// Apply a `<call xmlns='urn:waddle:muc-call:0'/>` presence-extension
-    /// update from `nick`, identified by the specific session
-    /// (`originator`) that emitted it. `state='active'` stores the
-    /// extension; `state='inactive'` clears it (we DO NOT preserve an
-    /// "inactive" entry — the room-actor's perspective is binary:
-    /// this nick is currently advertising a live call, or they
-    /// aren't).
+    /// Apply a `<muji xmlns='urn:xmpp:jingle:muji:0'/>` presence update
+    /// (XEP-0272) from `nick`, identified by the specific session
+    /// (`originator`) that emitted it.
     ///
-    /// Returns the post-update extension state for `nick`:
-    /// `Some(ext)` if a live `active` advertisement is now present,
-    /// `None` if the nick has no active call state. The presence
-    /// broadcaster uses the return value to decide what to put on the
-    /// wire — `None` means "rebroadcast a presence WITHOUT the
-    /// `<call/>` child" so other occupants stop seeing the indicator.
-    pub fn upsert_call_state(
+    /// Per XEP-0272 §Leaving, the absence of `<muji/>` (or an empty
+    /// element with neither `<preparing/>` nor `<content>` children)
+    /// means the participant has left the call; we mirror that by
+    /// clearing the entry when [`Muji::is_empty`] is true.
+    ///
+    /// Returns the post-update state for `nick`: `Some(muji)` if a
+    /// live advertisement (preparing OR active contents) is now
+    /// present, `None` if cleared. The presence broadcaster uses the
+    /// return value to decide what to put on the wire — `None` means
+    /// "rebroadcast a presence WITHOUT the `<muji/>` child" so other
+    /// occupants stop seeing the indicator.
+    pub fn upsert_muji_presence(
         &mut self,
         nick: &str,
         originator: FullJid,
-        ext: MucCallExtension,
-    ) -> Option<MucCallExtension> {
-        match ext.state {
-            CallPresenceState::Active => {
-                self.call_state.insert(
-                    nick.to_owned(),
-                    CallStateEntry {
-                        originator,
-                        extension: ext.clone(),
-                    },
-                );
-                Some(ext)
-            }
-            CallPresenceState::Inactive => {
-                self.call_state.remove(nick);
-                None
-            }
+        muji: Muji,
+    ) -> Option<Muji> {
+        if muji.is_empty() {
+            self.muji_state.remove(nick);
+            None
+        } else {
+            self.muji_state.insert(
+                nick.to_owned(),
+                MujiStateEntry {
+                    originator,
+                    muji: muji.clone(),
+                },
+            );
+            Some(muji)
         }
     }
 
-    /// Currently-advertised `<call/>` extension for `nick`, if any.
+    /// Currently-advertised `<muji/>` element for `nick`, if any.
     /// Used by the join handler to enrich the replayed occupant
     /// presence list with active-call indicators for late joiners.
-    pub fn call_state_for_nick(&self, nick: &str) -> Option<&MucCallExtension> {
-        self.call_state.get(nick).map(|entry| &entry.extension)
+    pub fn muji_for_nick(&self, nick: &str) -> Option<&Muji> {
+        self.muji_state.get(nick).map(|entry| &entry.muji)
     }
 
     /// Add an occupant to the room.
@@ -255,7 +253,7 @@ impl MucRoom {
     /// Remove an occupant from the room.
     pub fn remove_occupant(&mut self, nick: &str) -> Option<Occupant> {
         self.occupant_sessions.remove(nick);
-        self.call_state.remove(nick);
+        self.muji_state.remove(nick);
         self.occupants.remove(nick)
     }
 
@@ -279,7 +277,7 @@ impl MucRoom {
     /// the occupant was removed, `Some(false)` if the nick still has active
     /// sessions, and `None` if the nickname doesn't exist in the room.
     ///
-    /// If `call_state[nick]` was originated by the leaving session,
+    /// If `muji_state[nick]` was originated by the leaving session,
     /// the entry is cleared even when other sessions for the same
     /// nick remain. This avoids ghost call advertisements when one
     /// resource of a multi-resource occupant disconnects mid-call:
@@ -309,16 +307,16 @@ impl MucRoom {
         // clause the chip would stay lit (and replay to late joiners)
         // until the user's LAST session for this nick departs.
         if self
-            .call_state
+            .muji_state
             .get(nick)
             .is_some_and(|entry| entry.originator == *jid)
         {
-            self.call_state.remove(nick);
+            self.muji_state.remove(nick);
         }
 
         if sessions.is_empty() {
             self.occupant_sessions.remove(nick);
-            self.call_state.remove(nick);
+            self.muji_state.remove(nick);
             self.occupants.remove(nick);
             return Some(true);
         }
@@ -360,10 +358,10 @@ impl MucRoom {
     /// NOT dormant — those caches are in-memory only today and
     /// dropping them would lose user-visible state.
     pub fn is_dormant(&self) -> bool {
-        // call_state is included in the predicate so a panic-shed
+        // muji_state is included in the predicate so a panic-shed
         // session leaving stale call advertisements in the actor
         // can't trigger eviction while a chip is still lit. The
-        // happy path keeps call_state in lock-step with occupants
+        // happy path keeps muji_state in lock-step with occupants
         // (removing the last session clears the entry), so the new
         // check fires only on bug paths — but the alternative is a
         // silent "in-call indicator for nobody" UX.
@@ -371,7 +369,7 @@ impl MucRoom {
             && self.subject.is_none()
             && self.pinned_entries.is_empty()
             && self.affiliation_list.is_empty()
-            && self.call_state.is_empty()
+            && self.muji_state.is_empty()
     }
 
     /// Whether `bare_jid` is currently joined to this room as an
