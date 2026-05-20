@@ -4,8 +4,8 @@
 //! operational health dashboards and exposes them in Prometheus text format.
 
 use std::sync::atomic::{AtomicU64, Ordering};
-#[cfg(test)]
-use std::sync::{Mutex, OnceLock};
+#[cfg(any(test, feature = "test-utils"))]
+use std::sync::OnceLock;
 
 static CONNECTED_USERS: AtomicU64 = AtomicU64::new(0);
 static ROOM_COUNT: AtomicU64 = AtomicU64::new(0);
@@ -79,11 +79,105 @@ static SM_DRAIN_TIMEOUT: AtomicU64 = AtomicU64::new(0);
 // tight for the client population.
 static SM_RESUME_WINDOW_CLAMPED: AtomicU64 = AtomicU64::new(0);
 
+// `waddle_push_suppressed_total{reason="..."}` — incremented every
+// time a XEP-0357 push candidate is suppressed at either T0 emission
+// or the T1 drain. Labeled by the typed `SuppressedReason` enum.
+//
+// **Wire contract**: [`PUSH_SUPPRESSED_REASONS`] is the source-of-truth
+// parallel constant of every label string the caller is allowed to
+// pass. It MUST stay in lockstep with `SuppressedReason::as_db_value`
+// in `waddle_server::notification_outbox` (i.e. every entry in
+// `SuppressedReason::ALL.iter().map(as_db_value)` MUST appear here,
+// in declaration order). The `waddle-server` test suite enforces this
+// invariant — `waddle-xmpp` is upstream and cannot import the enum.
+//
+// Storage is a fixed `[AtomicU64; N]` array indexed by the position
+// of the reason string in `PUSH_SUPPRESSED_REASONS`. No mutex, no
+// allocations, no cardinality growth at runtime. An unknown label
+// (contract drift) increments `PUSH_SUPPRESSED_UNKNOWN_REASON` and
+// emits a `warn!` so the failure is observable.
+pub(crate) const PUSH_SUPPRESSED_REASONS: &[&str] = &[
+    "xep0357_self",
+    "xep0357_no_registration",
+    "xep0357_registration_disabled",
+    "xep0492_never",
+    "xep0492_on_mention_miss",
+    "xep0191_blocked",
+    "xep0513_noping",
+    "xep0513_active_miss",
+    "xep0334_no_store",
+    "xep0334_no_permanent_store",
+    "waddle_dnd",
+    "provider_rejected",
+    "provider_token_expired",
+];
+
+const PUSH_SUPPRESSED_COUNTERS_LEN: usize = PUSH_SUPPRESSED_REASONS.len();
+
+static PUSH_SUPPRESSED_COUNTERS: [AtomicU64; PUSH_SUPPRESSED_COUNTERS_LEN] = {
+    // `AtomicU64` is not `Copy`, so the array initializer must spell
+    // every slot. The length is locked at compile time to
+    // `PUSH_SUPPRESSED_REASONS.len()` via a `const _: () = assert!`
+    // below, so a future reason addition that forgets a slot fails to
+    // compile.
+    [
+        AtomicU64::new(0),
+        AtomicU64::new(0),
+        AtomicU64::new(0),
+        AtomicU64::new(0),
+        AtomicU64::new(0),
+        AtomicU64::new(0),
+        AtomicU64::new(0),
+        AtomicU64::new(0),
+        AtomicU64::new(0),
+        AtomicU64::new(0),
+        AtomicU64::new(0),
+        AtomicU64::new(0),
+        AtomicU64::new(0),
+    ]
+};
+
+// Compile-time guard: a future reason addition that grows
+// `PUSH_SUPPRESSED_REASONS` MUST also grow the counter array, or
+// this assertion will fail at build time.
+const _: () = assert!(
+    PUSH_SUPPRESSED_REASONS.len() == PUSH_SUPPRESSED_COUNTERS_LEN,
+    "PUSH_SUPPRESSED_REASONS and PUSH_SUPPRESSED_COUNTERS must stay the same length"
+);
+
+// Catch-all gauge for caller/contract drift: any
+// `increment_push_suppressed` call site passing a value that is NOT
+// in `PUSH_SUPPRESSED_REASONS` increments this and emits a `warn!`.
+// A non-zero sample at scrape time means the parallel constant has
+// drifted from `SuppressedReason::as_db_value` and needs a same-PR
+// fix.
+static PUSH_SUPPRESSED_UNKNOWN_REASON: AtomicU64 = AtomicU64::new(0);
+
+/// Public read-only view of the parallel reason list. The
+/// `waddle-server` test suite uses this to assert that every
+/// `SuppressedReason::as_db_value()` appears in the wire contract.
+pub fn push_suppressed_reasons() -> &'static [&'static str] {
+    PUSH_SUPPRESSED_REASONS
+}
+
+/// Returns the index of `reason` in `PUSH_SUPPRESSED_REASONS`, or
+/// `None` if the reason is not a recognized wire-contract value.
+fn push_suppressed_index(reason: &str) -> Option<usize> {
+    PUSH_SUPPRESSED_REASONS.iter().position(|r| *r == reason)
+}
+
 /// Serializes unit tests that mutate process-global metrics.
-#[cfg(test)]
-pub(crate) fn metrics_test_lock() -> &'static Mutex<()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
+///
+/// Re-exported under `cfg(any(test, feature = "test-utils"))` so the
+/// `waddle-server` test suite (which exercises the labeled
+/// push-suppressed counter) can serialize against the same lock the
+/// in-crate tests use. Backed by an async-aware mutex so async tests
+/// can hold the lock across `.await` without tripping clippy's
+/// `await_holding_lock`.
+#[cfg(any(test, feature = "test-utils"))]
+pub fn metrics_test_lock() -> &'static tokio::sync::Mutex<()> {
+    static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
 }
 
 fn unix_timestamp_secs() -> u64 {
@@ -195,6 +289,57 @@ pub fn increment_sm_resume_window_clamped() {
     SM_RESUME_WINDOW_CLAMPED.fetch_add(1, Ordering::Relaxed);
 }
 
+/// Increment the `waddle_push_suppressed_total{reason}` counter.
+///
+/// `reason` is a wire-contract value drawn from
+/// [`PUSH_SUPPRESSED_REASONS`], populated in lockstep with
+/// `SuppressedReason::as_db_value` over in
+/// `waddle_server::notification_outbox` (the `waddle-server` test
+/// suite enforces the bijection; `waddle-xmpp` is upstream of the
+/// enum). The bound is `&'static str` so no dynamic labels exist at
+/// runtime; cardinality is bounded by the parallel constant.
+///
+/// Lookup is a linear scan over `PUSH_SUPPRESSED_REASONS` (small N,
+/// closed set) followed by an `AtomicU64::fetch_add` on a fixed slot
+/// — no mutex, no allocation, no async-hot-path stalls. A value not
+/// present in the parallel constant is a contract-drift bug: the
+/// catch-all [`PUSH_SUPPRESSED_UNKNOWN_REASON`] counter is bumped and
+/// a `warn!` fires so the drift is observable both in metrics and in
+/// logs.
+pub fn increment_push_suppressed(reason: &'static str) {
+    if let Some(idx) = push_suppressed_index(reason) {
+        PUSH_SUPPRESSED_COUNTERS[idx].fetch_add(1, Ordering::Relaxed);
+        return;
+    }
+    PUSH_SUPPRESSED_UNKNOWN_REASON.fetch_add(1, Ordering::Relaxed);
+    tracing::warn!(
+        reason,
+        "push suppressed counter received an unknown reason; \
+         waddle_xmpp::prometheus::PUSH_SUPPRESSED_REASONS has drifted \
+         from waddle_server::notification_outbox::SuppressedReason"
+    );
+}
+
+/// Snapshot of every push-suppressed counter for rendering.
+fn render_push_suppressed_lines(out: &mut String) {
+    out.push_str("# HELP waddle_push_suppressed_total XEP-0357 push notification candidates suppressed by a XEP/Waddle rule. Labeled by the typed `SuppressedReason` enum.\n");
+    out.push_str("# TYPE waddle_push_suppressed_total counter\n");
+    for (idx, reason) in PUSH_SUPPRESSED_REASONS.iter().enumerate() {
+        let value = PUSH_SUPPRESSED_COUNTERS[idx].load(Ordering::Relaxed);
+        out.push_str("waddle_push_suppressed_total{reason=\"");
+        out.push_str(reason);
+        out.push_str("\"} ");
+        out.push_str(&value.to_string());
+        out.push('\n');
+    }
+    let unknown = PUSH_SUPPRESSED_UNKNOWN_REASON.load(Ordering::Relaxed);
+    out.push_str("# HELP waddle_push_suppressed_unknown_reason_total Push suppression events that arrived with a reason string not present in the parallel `PUSH_SUPPRESSED_REASONS` wire-contract constant. A non-zero sample indicates the constant has drifted from `SuppressedReason::as_db_value`.\n");
+    out.push_str("# TYPE waddle_push_suppressed_unknown_reason_total counter\n");
+    out.push_str("waddle_push_suppressed_unknown_reason_total ");
+    out.push_str(&unknown.to_string());
+    out.push('\n');
+}
+
 #[cfg(any(test, feature = "test-utils"))]
 pub fn reset_metrics_for_test() {
     CONNECTED_USERS.store(0, Ordering::Release);
@@ -218,6 +363,10 @@ pub fn reset_metrics_for_test() {
     SM_PROMOTION_DEAD_LETTERED.store(0, Ordering::Release);
     SM_DRAIN_TIMEOUT.store(0, Ordering::Release);
     SM_RESUME_WINDOW_CLAMPED.store(0, Ordering::Release);
+    for counter in PUSH_SUPPRESSED_COUNTERS.iter() {
+        counter.store(0, Ordering::Release);
+    }
+    PUSH_SUPPRESSED_UNKNOWN_REASON.store(0, Ordering::Release);
 }
 
 pub fn render_metrics() -> String {
@@ -303,6 +452,7 @@ pub fn render_metrics() -> String {
             "# HELP waddle_sm_resume_window_clamped_total Client-requested XEP-0198 resume window exceeded WADDLE_SM_MAX_RESUME_SECS and was silently lowered.\n",
             "# TYPE waddle_sm_resume_window_clamped_total counter\n",
             "waddle_sm_resume_window_clamped_total {sm_resume_window_clamped}\n",
+            "{push_suppressed_lines}",
         ),
         connected_users = connected_users,
         room_count = room_count,
@@ -323,6 +473,11 @@ pub fn render_metrics() -> String {
         sm_promotion_dead_lettered = sm_promotion_dead_lettered,
         sm_drain_timeout = sm_drain_timeout,
         sm_resume_window_clamped = sm_resume_window_clamped,
+        push_suppressed_lines = {
+            let mut buf = String::new();
+            render_push_suppressed_lines(&mut buf);
+            buf
+        },
     )
 }
 
@@ -330,9 +485,9 @@ pub fn render_metrics() -> String {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_decrement_saturates_at_zero() {
-        let _guard = metrics_test_lock().lock().unwrap();
+    #[tokio::test]
+    async fn test_decrement_saturates_at_zero() {
+        let _guard = metrics_test_lock().lock().await;
         reset_metrics_for_test();
 
         decrement_connected_users();
@@ -342,9 +497,9 @@ mod tests {
         assert_eq!(ROOM_COUNT.load(Ordering::Acquire), 0);
     }
 
-    #[test]
-    fn test_increment_and_decrement_round_trip() {
-        let _guard = metrics_test_lock().lock().unwrap();
+    #[tokio::test]
+    async fn test_increment_and_decrement_round_trip() {
+        let _guard = metrics_test_lock().lock().await;
         reset_metrics_for_test();
 
         increment_connected_users();
@@ -358,9 +513,9 @@ mod tests {
         assert_eq!(ROOM_COUNT.load(Ordering::Acquire), 0);
     }
 
-    #[test]
-    fn test_rotate_second_bucket_moves_current_to_last() {
-        let _guard = metrics_test_lock().lock().unwrap();
+    #[tokio::test]
+    async fn test_rotate_second_bucket_moves_current_to_last() {
+        let _guard = metrics_test_lock().lock().await;
         reset_metrics_for_test();
 
         CURRENT_SECOND.store(100, Ordering::Release);
@@ -373,9 +528,9 @@ mod tests {
         assert_eq!(LAST_SECOND_MESSAGES.load(Ordering::Acquire), 7);
     }
 
-    #[test]
-    fn test_render_metrics_contains_expected_families() {
-        let _guard = metrics_test_lock().lock().unwrap();
+    #[tokio::test]
+    async fn test_render_metrics_contains_expected_families() {
+        let _guard = metrics_test_lock().lock().await;
         reset_metrics_for_test();
 
         increment_connected_users();
@@ -397,9 +552,9 @@ mod tests {
         assert!(rendered.contains("waddle_messages_total 1"));
     }
 
-    #[test]
-    fn test_broadcast_counters_increment_and_render() {
-        let _guard = metrics_test_lock().lock().unwrap();
+    #[tokio::test]
+    async fn test_broadcast_counters_increment_and_render() {
+        let _guard = metrics_test_lock().lock().await;
         reset_metrics_for_test();
 
         increment_broadcast_delivered();
@@ -423,9 +578,9 @@ mod tests {
     /// offline-DM / SM-expiry surface MUST appear in the rendered
     /// output with HELP+TYPE headers. Without these headers, a
     /// scraper accepts the line but dashboards lose the metric type.
-    #[test]
-    fn test_issue_209_finding_11_metric_families_render() {
-        let _guard = metrics_test_lock().lock().unwrap();
+    #[tokio::test]
+    async fn test_issue_209_finding_11_metric_families_render() {
+        let _guard = metrics_test_lock().lock().await;
         reset_metrics_for_test();
 
         increment_pending_delivery_quota_exceeded();
@@ -470,9 +625,9 @@ mod tests {
         assert!(rendered.contains("waddle_sm_resume_window_clamped_total 1"));
     }
 
-    #[test]
-    fn test_reset_metrics_for_test_clears_sm_promotion_not_promotable() {
-        let _guard = metrics_test_lock().lock().unwrap();
+    #[tokio::test]
+    async fn test_reset_metrics_for_test_clears_sm_promotion_not_promotable() {
+        let _guard = metrics_test_lock().lock().await;
         reset_metrics_for_test();
 
         increment_sm_promotion_not_promotable();
@@ -482,9 +637,9 @@ mod tests {
         assert!(rendered.contains("waddle_sm_promotion_not_promotable_total 0"));
     }
 
-    #[test]
-    fn test_sm_unacked_evicted_counter_increments_and_renders() {
-        let _guard = metrics_test_lock().lock().unwrap();
+    #[tokio::test]
+    async fn test_sm_unacked_evicted_counter_increments_and_renders() {
+        let _guard = metrics_test_lock().lock().await;
         reset_metrics_for_test();
 
         increment_sm_unacked_evicted();

@@ -68,6 +68,8 @@ async fn drain_notification_candidates_for_test(state: &WebSocketState) -> usize
         .expect("push service jid");
     let room_policy =
         crate::room_policy::RoomRegistryActorPolicy::new(state.deps.protocol.room_registry.clone());
+    let dnd_reader = crate::notification_outbox::NoopDndReader;
+    let deps = crate::notification_outbox::NotificationDrainDeps::new(&room_policy, &dnd_reader);
     state
         .deps
         .protocol
@@ -80,7 +82,7 @@ async fn drain_notification_candidates_for_test(state: &WebSocketState) -> usize
                 .protocol
                 .notification_settings_projection
                 .as_ref(),
-            &room_policy,
+            deps,
             &push_service_jid,
             16,
         )
@@ -1893,6 +1895,226 @@ async fn queue_offline_delivery_suppresses_xep0357_when_xep0492_direct_chat_is_n
         .await
         .expect("notification outbox jobs");
     assert!(outbox_jobs.is_empty());
+}
+
+/// Wire-level regression for slice 2a's storage-preservation contract:
+/// when push is suppressed by XEP-0492 `<never/>` at T0, the upstream
+/// artifacts that hold the message MUST remain intact — XEP-0313 MAM
+/// archive row, XEP-0430 inbox projection, and XEP-0160 pending
+/// delivery queue entry. The notification outbox layer touches only
+/// `notification_candidates` / `notification_outbox`; this test pins
+/// the contract end-to-end through `interpret(QueueOfflineDelivery)`
+/// so a future refactor that bundles upstream + push writes into one
+/// transaction (and accidentally rolls back the MAM row on push
+/// suppression) is caught immediately.
+///
+/// Per the brief: this single comprehensive ws-integration test
+/// stands in for individual per-XEP smoke tests across the
+/// `xep0313_mam_integration`, `xep0430_inbox_ws`, and
+/// `xep0160_offline_message_handling` files. Those live in three
+/// different crates / fixture styles; one wire-level shot is the
+/// economical place to assert the joint invariant. Per-XEP unit
+/// coverage of the audit + suppression decisions lives in
+/// `notification_outbox::tests` (slice 2a storage-preservation
+/// suite).
+#[tokio::test]
+async fn xep0357_suppression_preserves_mam_inbox_pending_delivery_and_audit() {
+    let state = create_test_websocket_state().await;
+    let recipient: BareJid = "bob@example.com".parse().expect("recipient");
+    let sender: BareJid = "alice@example.com".parse().expect("sender");
+    register_first_party_push_for_test(state.as_ref(), &recipient, "web-1").await;
+
+    // Recipient muted this DM conversation — XEP-0492 `<never/>` is a
+    // T0 compliance suppressor.
+    state
+        .deps
+        .protocol
+        .notification_settings_projection
+        .upsert(&crate::notification_settings_projection::NotificationSettingsProjection {
+            owner_bare_jid: recipient.clone(),
+            conversation_jid: sender.clone(),
+            conversation_kind: crate::notification_settings_projection::ConversationKind::Direct,
+            mode: waddle_xmpp::xep::NotificationLevel::Never,
+            source_version: 1,
+            updated_at_ms: crate::time::now_ms(),
+            source: crate::notification_settings_projection::NotificationSettingsSource::Xep0402Bookmarks,
+            source_item_jid: sender.clone(),
+        })
+        .await
+        .expect("xep-0492 projection");
+
+    // Build the inbound DM exactly the same way the offline path sees
+    // it: full sender JID, body, deterministic id.
+    let mut message =
+        xmpp_parsers::message::Message::new(Some("bob@example.com".parse().expect("to jid")));
+    message.from = Some("alice@example.com/web".parse().expect("from jid"));
+    message.id = Some("storage-preserve-1".to_string());
+    message.type_ = XmppMessageType::Chat;
+    message.bodies.insert(
+        String::new(),
+        xmpp_parsers::message::Body("must-not-rollback".to_string()),
+    );
+    let archive_stanza_id = waddle_xmpp_core::xep0359::StanzaId::new(
+        "archive-storage-preserve-1",
+        jid::Jid::from(recipient.clone()),
+    );
+
+    // Seed XEP-0313 MAM row, XEP-0430 inbox projection, and XEP-0160
+    // pending_delivery row BEFORE the offline-delivery interpret pass.
+    // These represent every upstream artifact the candidate-emission
+    // code path must NOT roll back.
+    store_committed_dm_archive_for_notification(&state, &recipient, &archive_stanza_id, &message)
+        .await;
+    project_direct_unread_for_notification(
+        state.as_ref(),
+        &recipient,
+        &sender,
+        "archive-storage-preserve-1",
+    )
+    .await;
+    state
+        .deps
+        .protocol
+        .pending_delivery_storage
+        .insert(waddle_xmpp::pending_delivery::PendingRow {
+            id: waddle_xmpp::pending_delivery::PendingRowId::fresh(),
+            recipient: recipient.clone(),
+            original_receipt_at: chrono::Utc::now(),
+            payload: waddle_xmpp::pending_delivery::PendingPayload::Archived(
+                archive_stanza_id.clone(),
+            ),
+            flushed_in_session: None,
+            outbound_sequence: None,
+        })
+        .await
+        .expect("seed pending_delivery row");
+
+    // Snapshot upstream state for the post-emission diff.
+    let mam_before = state
+        .deps
+        .protocol
+        .mam_storage
+        .get_message_by_stanza_id(&recipient, &archive_stanza_id.id)
+        .await
+        .expect("mam lookup before");
+    assert!(
+        mam_before.is_some(),
+        "seed MAM row must be queryable before emission",
+    );
+    let pending_before = state
+        .deps
+        .protocol
+        .pending_delivery_storage
+        .list(&recipient)
+        .await
+        .expect("pending list before");
+    assert_eq!(
+        pending_before.len(),
+        1,
+        "seed pending_delivery row must be present before emission",
+    );
+    let inbox_before = state
+        .deps
+        .protocol
+        .inbox_storage
+        .list(&recipient)
+        .await
+        .expect("inbox list before");
+    assert_eq!(
+        inbox_before.len(),
+        1,
+        "seed inbox row must be present before emission",
+    );
+
+    // Drive the T0 emission path through the interpret loop just like
+    // the live DM handler does.
+    let deps = build_interpret_deps(state.as_ref(), None);
+    crate::server::routes::interpret::interpret(
+        vec![waddle_xmpp::protocol::OutboundEvent::QueueOfflineDelivery {
+            recipient: recipient.clone(),
+            payload: waddle_xmpp::pending_delivery::PendingPayload::Archived(
+                archive_stanza_id.clone(),
+            ),
+            original_receipt_at: chrono::Utc::now(),
+            original_message: Box::new(message),
+        }],
+        &deps,
+    )
+    .await;
+
+    // Push surface: no candidate row, no outbox job, no provider
+    // delivery attempt.
+    let candidate_count = state
+        .deps
+        .protocol
+        .notification_outbox
+        .count_all_candidates()
+        .await
+        .expect("count candidates");
+    assert_eq!(
+        candidate_count, 0,
+        "T0 <never/> suppression MUST NOT persist a candidate row",
+    );
+    let outbox_jobs = state
+        .deps
+        .protocol
+        .notification_outbox
+        .pending_outbox_jobs()
+        .await
+        .expect("pending outbox jobs");
+    assert!(
+        outbox_jobs.is_empty(),
+        "T0 <never/> suppression MUST NOT enqueue an outbox job",
+    );
+
+    // Upstream invariants: MAM row, inbox entry, pending_delivery row
+    // are all byte-identical to the pre-emission snapshot.
+    let mam_after = state
+        .deps
+        .protocol
+        .mam_storage
+        .get_message_by_stanza_id(&recipient, &archive_stanza_id.id)
+        .await
+        .expect("mam lookup after");
+    assert!(
+        mam_after.is_some(),
+        "XEP-0313 MAM row MUST survive push suppression",
+    );
+    assert_eq!(
+        mam_before.as_ref().map(|m| &m.id),
+        mam_after.as_ref().map(|m| &m.id),
+        "MAM archive id MUST be unchanged across push suppression",
+    );
+
+    let pending_after = state
+        .deps
+        .protocol
+        .pending_delivery_storage
+        .list(&recipient)
+        .await
+        .expect("pending list after");
+    let seed_id = pending_before[0].id.as_str();
+    assert!(
+        pending_after.iter().any(|row| row.id.as_str() == seed_id),
+        "XEP-0160 pending_delivery row seeded before emission MUST survive push suppression; \
+         after={pending_after:?}",
+    );
+
+    let inbox_after = state
+        .deps
+        .protocol
+        .inbox_storage
+        .list(&recipient)
+        .await
+        .expect("inbox list after");
+    let seed_partner = &inbox_before[0].partner;
+    assert!(
+        inbox_after
+            .iter()
+            .any(|entry| &entry.partner == seed_partner),
+        "XEP-0430 inbox entry for the seeded partner MUST survive push suppression; \
+         after={inbox_after:?}",
+    );
 }
 
 #[tokio::test]

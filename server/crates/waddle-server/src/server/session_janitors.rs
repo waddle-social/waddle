@@ -488,6 +488,15 @@ pub(crate) fn spawn_notification_outbox_janitor(websocket_state: &Arc<WebSocketS
         .unwrap_or(128);
     let retention_days = notification_outbox_retention_days_from_env();
     let prune_batch_size = notification_outbox_prune_batch_from_env();
+    // Operability: slice 2a ships with `NoopDndReader` wired everywhere.
+    // The `waddle_push_suppressed_total{reason="waddle_dnd"}` counter
+    // will therefore stay at 0 until #367 lands the real
+    // `urn:waddle:dnd:0` adapter. Surface this loudly at janitor start
+    // so operators don't mistake a flat metric for "no users in DND".
+    warn!(
+        "Notification outbox janitor: DND suppression is wired through NoopDndReader \
+         (waddle_push_suppressed_total{{reason=\"waddle_dnd\"}} will remain 0 until #367 lands)"
+    );
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
         ticker.tick().await;
@@ -532,6 +541,9 @@ pub(crate) fn spawn_notification_outbox_janitor(websocket_state: &Arc<WebSocketS
             }
             let room_policy =
                 RoomRegistryActorPolicy::new(state.deps.protocol.room_registry.clone());
+            let dnd_reader = crate::notification_outbox::NoopDndReader;
+            let deps =
+                crate::notification_outbox::NotificationDrainDeps::new(&room_policy, &dnd_reader);
             match state
                 .deps
                 .protocol
@@ -544,7 +556,7 @@ pub(crate) fn spawn_notification_outbox_janitor(websocket_state: &Arc<WebSocketS
                         .protocol
                         .notification_settings_projection
                         .as_ref(),
-                    &room_policy,
+                    deps,
                     &first_party_service_jid,
                     batch_size,
                 )

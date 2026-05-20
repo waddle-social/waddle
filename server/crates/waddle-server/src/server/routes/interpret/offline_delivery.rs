@@ -290,12 +290,33 @@ async fn enqueue_xep0357_notification_candidate_for_message(
     // input validation, not recipient-state suppression, so it lives
     // at the typed constructor boundary alongside the existing
     // full-sender-JID and archive-id owner checks.
-    let is_mention = message_is_mention_for_recipient(original_message, recipient);
-    let candidate = match crate::notification_outbox::NotificationCandidate::direct_message(
+    // Parse explicit mentions ONCE per message and derive both the
+    // mention bit and the `<noping/>` bit from the same parsed
+    // structure. The previous shape re-ran `extract_explicit_mentions`
+    // twice per recipient (one for `is_mention`, one for noping); for
+    // DM the recipient count is 1, but the same pattern is fanned out
+    // N× in groupchat so the unified helper keeps both surfaces
+    // consistent and avoids redundant XML traversals on the hot path.
+    let RecipientMentionBits { is_mention, noping } =
+        mention_bits_for_recipient(original_message, recipient);
+    let hints = crate::notification_outbox::NotificationMessageHints::none()
+        .with_noping(noping)
+        .with_xep0334(
+            waddle_xmpp::xep::xep0334::has_hint(
+                original_message,
+                waddle_xmpp::xep::xep0334::Hint::NoStore,
+            ),
+            waddle_xmpp::xep::xep0334::has_hint(
+                original_message,
+                waddle_xmpp::xep::xep0334::Hint::NoPermanentStore,
+            ),
+        );
+    let candidate = match crate::notification_outbox::NotificationCandidate::direct_message_with_hints(
         recipient.clone(),
         sender_jid.clone(),
         archive_stanza_id.clone(),
         is_mention,
+        hints,
     ) {
         Ok(candidate) => candidate,
         Err(
@@ -320,7 +341,7 @@ async fn enqueue_xep0357_notification_candidate_for_message(
             return NotificationCandidateQueueOutcome::Completed;
         }
     };
-    // T0 XEP-0492 push-dispatch gate — compliance: suppressed
+    // T0 push-gate evaluation — compliance: suppressed
     // outcomes leave no row in `notification_candidates`. The same
     // typed evaluator runs again at T1 inside
     // `drain_pending_candidates_into_outbox` as a race-window guard.
@@ -332,15 +353,21 @@ async fn enqueue_xep0357_notification_candidate_for_message(
         BareJid,
         crate::notification_outbox::RoomPolicyCacheEntry,
     >::new();
-    let outcome = match crate::notification_outbox::evaluate_xep0492_at_dispatch(
+    let dnd_reader = crate::notification_outbox::NoopDndReader;
+    let mut dnd_cache =
+        std::collections::BTreeMap::<BareJid, crate::notification_outbox::DndState>::new();
+    let outcome = match crate::notification_outbox::evaluate_push_gate_at_dispatch(
+        crate::notification_outbox::PushEvalStage::T0Emit,
         state
             .deps
             .protocol
             .notification_settings_projection
             .as_ref(),
         &room_policy,
+        &dnd_reader,
         &candidate,
         &mut room_policy_cache,
+        &mut dnd_cache,
     )
     .await
     {
@@ -349,8 +376,8 @@ async fn enqueue_xep0357_notification_candidate_for_message(
             warn!(
                 recipient = %recipient,
                 sender = %sender,
-                error = %error,
-                "XEP-0492 notification setting lookup failed at T0; deferring DM candidate"
+                error = ?error,
+                "push gate evaluation failed at T0; deferring offline-delivery DM candidate"
             );
             return NotificationCandidateQueueOutcome::RetryLater;
         }
@@ -363,8 +390,9 @@ async fn enqueue_xep0357_notification_candidate_for_message(
                 sender = %sender,
                 is_mention,
                 %reason,
-                "XEP-0492 push gate suppressed XEP-0357 DM candidate at T0; no candidate row persisted"
+                "T0 push gate suppressed XEP-0357 DM candidate; no candidate row persisted"
             );
+            waddle_xmpp::prometheus::increment_push_suppressed(reason.as_db_value());
             return NotificationCandidateQueueOutcome::Completed;
         }
         crate::notification_outbox::T1PushDispatchOutcome::DeferUnknownRoomPolicy => {
@@ -415,19 +443,54 @@ async fn enqueue_xep0357_notification_candidate_for_message(
     }
 }
 
-/// Returns `true` when the inbound XEP-0513 explicit-mention payloads
-/// name `recipient` as a mentioned `<mention jid='…'/>`.
+/// Typed pair of message-frozen XEP-0513 mention signals for a single
+/// recipient, derived from one `extract_explicit_mentions` parse.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct RecipientMentionBits {
+    /// `true` when any `<mention jid='…'/>` names `recipient`,
+    /// regardless of `<noping/>`. Matches the pre-dedup
+    /// `ExplicitMentions::mentions_jid` predicate exactly — a `<noping/>`
+    /// mention still counts as a mention for class derivation; the T1
+    /// evaluator handles the `<noping/>` suppression independently via
+    /// the [`Self::noping`] bit.
+    is_mention: bool,
+    /// `true` when any `<mention jid='…'/>` naming `recipient` also
+    /// carries `<noping/>`. Message-frozen at T0 onto the candidate row;
+    /// the T1 evaluator reads it back and suppresses with
+    /// `SuppressedReason::Xep0513Noping`.
+    noping: bool,
+}
+
+/// Single-pass derivation of `(is_mention, noping)` for a DM
+/// recipient.
 ///
 /// The recipient JID is the bare JID that owns the offline queue; that
 /// is the canonical identity referenced by `<mention jid='…'/>` per
-/// XEP-0513 §3. Channel-wide `<mention mentions='urn:xmpp:mentions:0#channel'/>`
-/// is intentionally NOT treated as an individual mention here — the
-/// XEP-0492 `<on-mention/>` semantics target explicit user mentions; the
-/// channel-mention surface is for MUC reflector announcements, which do
-/// not flow through the DM `QueueOfflineDelivery` arm.
-fn message_is_mention_for_recipient(message: &Message, recipient: &BareJid) -> bool {
-    waddle_xmpp::xep::extract_explicit_mentions(message)
-        .is_some_and(|mentions| mentions.mentions_jid(recipient))
+/// XEP-0513 §3. Channel-wide
+/// `<mention mentions='urn:xmpp:mentions:0#channel'/>` is intentionally
+/// NOT treated as an individual mention here — the XEP-0492
+/// `<on-mention/>` semantics target explicit user mentions; the
+/// channel-mention surface is for MUC reflector announcements, which
+/// do not flow through the DM `QueueOfflineDelivery` arm.
+fn mention_bits_for_recipient(message: &Message, recipient: &BareJid) -> RecipientMentionBits {
+    let Some(mentions) = waddle_xmpp::xep::extract_explicit_mentions(message) else {
+        return RecipientMentionBits::default();
+    };
+    let mut bits = RecipientMentionBits::default();
+    for mention in &mentions.mentions {
+        let names_recipient = mention
+            .jid
+            .as_ref()
+            .is_some_and(|mentioned| mentioned == recipient);
+        if !names_recipient {
+            continue;
+        }
+        bits.is_mention = true;
+        if mention.noping {
+            bits.noping = true;
+        }
+    }
+    bits
 }
 
 async fn mark_pending_notification_outboxed(
@@ -480,4 +543,71 @@ pub(crate) async fn reconcile_xep0357_notification_candidates(
         }
     }
     completed
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn bare(value: &str) -> BareJid {
+        value.parse().expect("valid bare JID")
+    }
+
+    fn message_with_mention(mention: waddle_xmpp::xep::ExplicitMention) -> Message {
+        let mut message = Message::new(None::<Jid>);
+        message
+            .payloads
+            .push(waddle_xmpp::xep::build_mention_element(&mention));
+        message
+    }
+
+    /// Dedup regression: `mention_bits_for_recipient` MUST derive
+    /// both `is_mention` and `noping` from a single
+    /// `extract_explicit_mentions` parse, and behavior MUST match the
+    /// pre-dedup two-helper shape (mention bit set whenever a JID
+    /// matches, noping bit set independently when `<noping/>` is
+    /// present on the matching mention).
+    #[test]
+    fn dm_mention_bits_single_parse_matches_pre_dedup_behavior() {
+        let recipient = bare("alice@example.com");
+
+        // No mentions → both bits unset.
+        let no_mention = Message::new(None::<Jid>);
+        assert_eq!(
+            mention_bits_for_recipient(&no_mention, &recipient),
+            RecipientMentionBits::default(),
+        );
+
+        // Plain mention naming the recipient → mention set, noping unset.
+        let plain = message_with_mention(waddle_xmpp::xep::ExplicitMention::jid(recipient.clone()));
+        assert_eq!(
+            mention_bits_for_recipient(&plain, &recipient),
+            RecipientMentionBits {
+                is_mention: true,
+                noping: false,
+            },
+        );
+
+        // `<noping/>` mention naming the recipient → BOTH bits set;
+        // matches the original `ExplicitMentions::mentions_jid`
+        // semantics (which ignored `<noping/>` when deriving `is_mention`).
+        let mut noping = waddle_xmpp::xep::ExplicitMention::jid(recipient.clone());
+        noping.noping = true;
+        let msg_noping = message_with_mention(noping);
+        assert_eq!(
+            mention_bits_for_recipient(&msg_noping, &recipient),
+            RecipientMentionBits {
+                is_mention: true,
+                noping: true,
+            },
+        );
+
+        // Mention naming someone else → both bits unset.
+        let other = bare("bob@example.com");
+        let foreign = message_with_mention(waddle_xmpp::xep::ExplicitMention::jid(other));
+        assert_eq!(
+            mention_bits_for_recipient(&foreign, &recipient),
+            RecipientMentionBits::default(),
+        );
+    }
 }
