@@ -7,6 +7,29 @@ pub(super) async fn route_to_connection(
     stanza: Box<Stanza>,
     recursion_depth: u8,
 ) {
+    // Notification activity ingest (slice 2b): when the routed stanza
+    // is a typed XEP-0085 chat-state on a DM Message, record the
+    // sender's `(sender_bare, recipient_bare)` activity. The sender is
+    // the acting party; we DO NOT bump the recipient's projection
+    // here — the recipient's activity column is updated only when the
+    // recipient herself emits typed activity (chat-state, read marker,
+    // outbound commit, presence). The recipient bare JID is derived
+    // from the routing target `jid` (full or bare), not from
+    // `message.to`, because the routing arm is invoked for each
+    // resolved resource and the typed conversation key MUST always be
+    // the bare form.
+    if let Stanza::Message(ref message) = *stanza {
+        if let Some(sender) = message.from.as_ref().map(|jid| jid.to_bare()) {
+            super::notification_activity_ingest::record_chat_state_activity(
+                deps,
+                &sender,
+                &jid.to_bare(),
+                message,
+            )
+            .await;
+        }
+    }
+
     // #229 PR12 cutover: the destination's main loop is
     // now wired (PR11) to dispatch on `DeliveryKind` and
     // run the recipient-pass pipeline for `PeerStanza`

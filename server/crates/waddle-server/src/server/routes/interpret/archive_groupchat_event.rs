@@ -37,5 +37,17 @@ pub(super) async fn archive_groupchat_event(
         archive_id = %archive_id.stored_id,
         "ArchiveGroupchat: persisted"
     );
+    // Notification activity ingest (slice 2b): committing the sender's
+    // groupchat message into the room archive is the strongest
+    // "currently active" signal we have for `(sender, room)`. Unlike
+    // `ArchiveDirect`, the groupchat arm runs once per message (the
+    // room owns the canonical archive), so no symmetric gate is
+    // required.
+    super::notification_activity_ingest::record_outbound_message_activity(
+        deps,
+        &sender.to_bare(),
+        &room,
+    )
+    .await;
     archive_id.rewrite
 }
