@@ -239,11 +239,13 @@ async fn insert_groupchat_notification_candidate(
     thread_id: crate::notification_outbox::NotificationThreadId,
     archive_stanza_id: Xep0359StanzaId,
     is_live_occupant: bool,
-    // room_members_only is no longer used at T0 — the T1 evaluator
-    // re-reads room policy fresh at dispatch time. The recovery
-    // snapshot still carries the bit for backwards compatibility with
-    // older queued rows during slice 1.
-    _room_members_only: bool,
+    // `room_members_only` is known message-locally on this T0 path
+    // (the projection event carries it) and is consumed below to
+    // pre-populate the policy cache so the synchronous T0 evaluator
+    // never asks the live `RoomRegistryActor`. Each recipient in a
+    // groupchat fan-out would otherwise produce an actor round-trip,
+    // even though the same bit is already in hand.
+    room_members_only: bool,
 ) -> GroupchatNotificationCandidateQueueOutcome {
     let GroupchatNotificationClassDecision::Deliver(class) =
         groupchat_notification_class(state, owner, room, message, is_live_occupant);
@@ -270,12 +272,28 @@ async fn insert_groupchat_notification_candidate(
     // outcomes leave no row in `notification_candidates`. The same
     // typed evaluator runs again at T1 inside
     // `drain_pending_candidates_into_outbox` as a race-window guard.
-    let room_policy =
-        crate::room_policy::RoomRegistryActorPolicy::new(state.deps.protocol.room_registry.clone());
+    //
+    // Pre-populate the policy cache with the known `room_members_only`
+    // bit so the typed evaluator hits the cache on its first lookup
+    // and never reaches the (unused) `RoomPolicyStore`. This avoids
+    // N actor round-trips for an N-member fan-out — every recipient's
+    // T0 emission already carries the same bit. The `NoopRoomPolicy`
+    // is held only to satisfy the trait-object signature; if the
+    // cache ever misses (it won't, given the pre-insert) it would
+    // surface as `DeferUnknownRoomPolicy` rather than a silent default.
+    let room_policy = crate::notification_outbox::NoopRoomPolicy;
     let mut room_policy_cache = std::collections::BTreeMap::<
         BareJid,
         crate::notification_outbox::RoomPolicyCacheEntry,
     >::new();
+    room_policy_cache.insert(
+        room.clone(),
+        if room_members_only {
+            crate::notification_outbox::RoomPolicyCacheEntry::Private
+        } else {
+            crate::notification_outbox::RoomPolicyCacheEntry::Public
+        },
+    );
     let outcome = match crate::notification_outbox::evaluate_xep0492_at_dispatch(
         state
             .deps

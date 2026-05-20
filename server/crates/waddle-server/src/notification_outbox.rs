@@ -3273,12 +3273,10 @@ mod tests {
             .expect("store")
     }
 
-    /// Test stub for [`RoomPolicyStore`] — defaults rooms to public
-    /// (`members_only = false`) unless explicitly mapped to private.
     /// Test double for [`RoomPolicyStore`] that pretends every room is
-    /// public. Slice 1's tests do not exercise private-room dispatch
-    /// policy; when slice 2 adds those paths it will grow this stub
-    /// (or replace it with a richer fixture).
+    /// public (`members_only = false`). Slice 1's tests do not exercise
+    /// private-room dispatch policy; when slice 2 adds those paths it
+    /// will grow this stub (or replace it with a richer fixture).
     struct StubRoomPolicy;
 
     impl StubRoomPolicy {
