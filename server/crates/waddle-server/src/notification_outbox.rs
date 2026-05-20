@@ -10134,7 +10134,12 @@ mod tests {
         let owner = bare("alice@example.com");
         let room = bare("room@muc.example.com");
         store
-            .record_presence_available(&owner, &room, Some("dnd"), 1_000)
+            .record_presence_available(
+                &owner,
+                &room,
+                Some(crate::notification_activity::NotificationPresenceShow::Dnd),
+                1_000,
+            )
             .await
             .expect("available");
         let after_available = store
@@ -10143,7 +10148,10 @@ mod tests {
             .expect("read")
             .expect("row");
         assert_eq!(after_available.last_active_at_ms, 1_000);
-        assert_eq!(after_available.presence_show.as_deref(), Some("dnd"));
+        assert_eq!(
+            after_available.presence_show,
+            Some(crate::notification_activity::NotificationPresenceShow::Dnd)
+        );
 
         store
             .record_presence_unavailable(&owner, &room, 2_000)

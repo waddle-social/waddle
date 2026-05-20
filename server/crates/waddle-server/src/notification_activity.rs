@@ -31,27 +31,6 @@ use thiserror::Error;
 
 use crate::db::{Database, DatabaseError, IntoParams};
 
-/// Upper bound on the `presence_show` column value, enforced at the
-/// writer to defend against adversarial or upstream-malformed input.
-/// Per RFC 6121 §4.7.2.1 the valid `<show/>` tokens are `away`,
-/// `chat`, `dnd`, `xa` (4 chars max), so this cap is two orders of
-/// magnitude over any spec-conformant value while still cheap to
-/// persist.
-pub const PRESENCE_SHOW_MAX_LEN: usize = 64;
-
-/// Truncate `s` to at most `max_len` bytes, never splitting a UTF-8
-/// scalar. Walks back from `max_len` to the previous char boundary.
-fn truncate_to_char_boundary(s: &str, max_len: usize) -> &str {
-    if s.len() <= max_len {
-        return s;
-    }
-    let mut cut = max_len;
-    while cut > 0 && !s.is_char_boundary(cut) {
-        cut -= 1;
-    }
-    &s[..cut]
-}
-
 /// CHECK constraint name on `notification_activity.last_chat_state`.
 pub(crate) const NOTIFICATION_ACTIVITY_LAST_CHAT_STATE_CHECK_NAME: &str =
     "notification_activity_last_chat_state_check";
@@ -72,6 +51,27 @@ pub(crate) const NOTIFICATION_ACTIVITY_LAST_CHAT_STATE_VALUES: [&str; 5] =
 /// matcher enforces that.
 pub(crate) const NOTIFICATION_ACTIVITY_LAST_CHAT_STATE_CHECK_SQL: &str =
     "last_chat_state IS NULL OR last_chat_state IN ('active', 'composing', 'paused', 'inactive', 'gone')";
+
+/// CHECK constraint name on `notification_activity.presence_show`.
+pub(crate) const NOTIFICATION_ACTIVITY_PRESENCE_SHOW_CHECK_NAME: &str =
+    "notification_activity_presence_show_check";
+
+/// Closed-set XEP-0045/RFC 6121 §4.7.2.1 `<show/>` db-values accepted
+/// by the `notification_activity.presence_show` column. Parallel to
+/// the [`NotificationPresenceShow`] enum so the schema CHECK, the
+/// typed enum, and the migration matcher stay in lockstep without
+/// three independently-edited lists.
+pub(crate) const NOTIFICATION_ACTIVITY_PRESENCE_SHOW_VALUES: [&str; 4] =
+    ["away", "chat", "dnd", "xa"];
+
+/// SQL fragment matching [`NOTIFICATION_ACTIVITY_PRESENCE_SHOW_VALUES`].
+/// Inlined into the table DDL and the migration's `ADD CONSTRAINT`
+/// statement; both sides MUST stay in lockstep with the parallel
+/// `_VALUES` array — the
+/// [`notification_activity_presence_show_constraint_matches_expected`]
+/// matcher enforces that.
+pub(crate) const NOTIFICATION_ACTIVITY_PRESENCE_SHOW_CHECK_SQL: &str =
+    "presence_show IS NULL OR presence_show IN ('away', 'chat', 'dnd', 'xa')";
 
 /// XEP-0085 chat-state token persisted on
 /// `notification_activity.last_chat_state`.
@@ -146,6 +146,70 @@ impl NotificationChatState {
     }
 }
 
+/// XEP-0045 / RFC 6121 §4.7.2.1 `<show/>` token persisted on
+/// `notification_activity.presence_show`.
+///
+/// Closed set — one variant per RFC 6121 `<show/>` value. Mirrors
+/// [`xmpp_parsers::presence::Show`] but is owned by the server crate
+/// so the audit shape doesn't depend on upstream parser changes;
+/// conversion is provided in both directions via
+/// [`NotificationPresenceShow::from_xep0045`] and
+/// [`NotificationPresenceShow::to_xep0045`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum NotificationPresenceShow {
+    Away,
+    Chat,
+    Dnd,
+    Xa,
+}
+
+impl NotificationPresenceShow {
+    /// Every variant of the closed set, in declaration order. Exposed
+    /// so the startup invariant traversal and the round-trip test can
+    /// iterate the typed values without re-declaring them.
+    pub const ALL: &'static [NotificationPresenceShow] =
+        &[Self::Away, Self::Chat, Self::Dnd, Self::Xa];
+
+    pub(crate) fn as_db_value(self) -> &'static str {
+        match self {
+            Self::Away => "away",
+            Self::Chat => "chat",
+            Self::Dnd => "dnd",
+            Self::Xa => "xa",
+        }
+    }
+
+    pub(crate) fn from_db_value(value: &str) -> Result<Self, NotificationActivityError> {
+        Self::ALL
+            .iter()
+            .copied()
+            .find(|variant| variant.as_db_value() == value)
+            .ok_or_else(|| NotificationActivityError::InvalidPresenceShow(value.to_string()))
+    }
+
+    /// Convert from the canonical XEP-0045 / RFC 6121 typed shape.
+    pub fn from_xep0045(show: xmpp_parsers::presence::Show) -> Self {
+        use xmpp_parsers::presence::Show;
+        match show {
+            Show::Away => Self::Away,
+            Show::Chat => Self::Chat,
+            Show::Dnd => Self::Dnd,
+            Show::Xa => Self::Xa,
+        }
+    }
+
+    /// Convert into the canonical XEP-0045 / RFC 6121 typed shape.
+    pub fn to_xep0045(self) -> xmpp_parsers::presence::Show {
+        use xmpp_parsers::presence::Show;
+        match self {
+            Self::Away => Show::Away,
+            Self::Chat => Show::Chat,
+            Self::Dnd => Show::Dnd,
+            Self::Xa => Show::Xa,
+        }
+    }
+}
+
 /// Aggregated activity snapshot for a single (owner, conversation)
 /// row in `notification_activity`.
 ///
@@ -161,10 +225,11 @@ pub struct NotificationActivity {
     pub last_active_at_ms: i64,
     pub last_chat_state: Option<NotificationChatState>,
     pub last_read_at_ms: Option<i64>,
-    /// XEP-0045 `<show/>` token — free-form per the spec (e.g. `away`,
-    /// `dnd`, `chat`, `xa`); kept as `String` because XEP-0045 §5
-    /// allows extension values.
-    pub presence_show: Option<String>,
+    /// XEP-0045 / RFC 6121 §4.7.2.1 `<show/>` token. Closed set:
+    /// `Away`, `Chat`, `Dnd`, `Xa`. The DB layer enforces the closed
+    /// set via a CHECK constraint, and the typed enum guarantees
+    /// bounds-by-construction on the writer path.
+    pub presence_show: Option<NotificationPresenceShow>,
 }
 
 #[derive(Debug, Error)]
@@ -173,6 +238,8 @@ pub enum NotificationActivityError {
     Database(#[from] DatabaseError),
     #[error("invalid chat-state token: {0}")]
     InvalidChatState(String),
+    #[error("invalid presence <show/> token: {0}")]
+    InvalidPresenceShow(String),
     #[error("invalid owner bare JID in notification_activity: {0}")]
     InvalidOwnerBareJid(String),
     #[error("invalid conversation JID in notification_activity: {0}")]
@@ -249,6 +316,20 @@ pub(crate) fn notification_activity_last_chat_state_constraint_matches_expected(
             .all(|value| constraint_definition_quotes_value(&normalized, value))
 }
 
+/// Matcher used by the Postgres and SQLite migration paths to detect a
+/// stale `presence_show` CHECK. Same substring-safety guarantees as
+/// [`notification_activity_last_chat_state_constraint_matches_expected`]:
+/// every typed db-value MUST appear as a quoted SQL literal.
+pub(crate) fn notification_activity_presence_show_constraint_matches_expected(
+    definition: &str,
+) -> bool {
+    let normalized = definition.to_ascii_lowercase();
+    normalized.contains("presence_show")
+        && NOTIFICATION_ACTIVITY_PRESENCE_SHOW_VALUES
+            .iter()
+            .all(|value| constraint_definition_quotes_value(&normalized, value))
+}
+
 fn notification_activity_table_sql(i64_type: &str, if_not_exists: bool) -> String {
     let if_not_exists = if if_not_exists { "IF NOT EXISTS " } else { "" };
     format!(
@@ -259,7 +340,7 @@ fn notification_activity_table_sql(i64_type: &str, if_not_exists: bool) -> Strin
             last_active_at_ms {i64_type} NOT NULL,
             last_chat_state TEXT NULL CONSTRAINT {NOTIFICATION_ACTIVITY_LAST_CHAT_STATE_CHECK_NAME} CHECK ({NOTIFICATION_ACTIVITY_LAST_CHAT_STATE_CHECK_SQL}),
             last_read_at_ms {i64_type} NULL,
-            presence_show TEXT NULL,
+            presence_show TEXT NULL CONSTRAINT {NOTIFICATION_ACTIVITY_PRESENCE_SHOW_CHECK_NAME} CHECK ({NOTIFICATION_ACTIVITY_PRESENCE_SHOW_CHECK_SQL}),
             created_at_ms {i64_type} NOT NULL,
             updated_at_ms {i64_type} NOT NULL,
             PRIMARY KEY (owner_bare_jid, conversation_jid)
@@ -294,6 +375,17 @@ impl NotificationActivityStore {
                 )));
             }
         }
+        // Same invariant for the closed-set typed `NotificationPresenceShow`
+        // db-values — mismatched builds fail fast at process start.
+        for show in NotificationPresenceShow::ALL.iter().copied() {
+            let db = show.as_db_value();
+            let decoded = NotificationPresenceShow::from_db_value(db)?;
+            if decoded != show {
+                return Err(NotificationActivityError::InvalidPresenceShow(format!(
+                    "round-trip mismatch for {db}: decoded {decoded:?}",
+                )));
+            }
+        }
         let i64_type = crate::db::i64_sql_type(self.db.driver());
         self.execute(&notification_activity_table_sql(i64_type, true), ())
             .await?;
@@ -302,6 +394,12 @@ impl NotificationActivityStore {
         // write time and has no `pg_constraint`-equivalent walker, so
         // we instead rebuild the table on a stale-schema detection.
         self.migrate_last_chat_state_constraint(i64_type).await?;
+        // Same migration shape for the closed-set `presence_show` CHECK
+        // introduced by the typed `NotificationPresenceShow` enum: any
+        // legacy build whose `presence_show` column lacked a CHECK (or
+        // shipped a stale variant set) gets repaired here before the
+        // first write attempts to honour the closed set.
+        self.migrate_presence_show_constraint(i64_type).await?;
         // Per-conversation active-recipient lookup index. Slice 2b only
         // reads per-(user, conversation), but the trailing
         // `last_active_at_ms` lets future slices range-scan all
@@ -474,6 +572,133 @@ impl NotificationActivityStore {
         };
         let create_sql: String = row.get(0)?;
         Ok(!notification_activity_last_chat_state_constraint_matches_expected(&create_sql))
+    }
+
+    async fn migrate_presence_show_constraint(
+        &self,
+        i64_type: &str,
+    ) -> Result<(), NotificationActivityError> {
+        match self.db.driver() {
+            crate::db::DatabaseDriver::Postgres => self.migrate_postgres_presence_show().await,
+            crate::db::DatabaseDriver::Sqlite => self.migrate_sqlite_presence_show(i64_type).await,
+        }
+    }
+
+    /// Postgres path: same shape as [`Self::migrate_postgres_last_chat_state`].
+    /// Walk `pg_constraint` for every CHECK on the `presence_show`
+    /// column, drop any whose definition does NOT match the typed
+    /// closed set, then ensure the named CHECK is in place.
+    async fn migrate_postgres_presence_show(&self) -> Result<(), NotificationActivityError> {
+        let existing = self
+            .postgres_check_constraints_on_column("notification_activity", "presence_show")
+            .await?;
+        let mut current_named_present = false;
+        let mut to_drop: Vec<String> = Vec::new();
+        for (conname, definition) in &existing {
+            if conname == NOTIFICATION_ACTIVITY_PRESENCE_SHOW_CHECK_NAME
+                && notification_activity_presence_show_constraint_matches_expected(definition)
+            {
+                current_named_present = true;
+            } else {
+                to_drop.push(conname.clone());
+            }
+        }
+        if current_named_present && to_drop.is_empty() {
+            return Ok(());
+        }
+        for conname in &to_drop {
+            self.execute(
+                &format!(
+                    "ALTER TABLE notification_activity DROP CONSTRAINT IF EXISTS \"{conname}\""
+                ),
+                (),
+            )
+            .await?;
+        }
+        if !current_named_present {
+            self.execute(
+                &format!(
+                    "ALTER TABLE notification_activity \
+                     ADD CONSTRAINT {NOTIFICATION_ACTIVITY_PRESENCE_SHOW_CHECK_NAME} \
+                     CHECK ({NOTIFICATION_ACTIVITY_PRESENCE_SHOW_CHECK_SQL})"
+                ),
+                (),
+            )
+            .await?;
+        }
+        Ok(())
+    }
+
+    async fn migrate_sqlite_presence_show(
+        &self,
+        i64_type: &str,
+    ) -> Result<(), NotificationActivityError> {
+        if !self.sqlite_presence_show_constraint_is_stale().await? {
+            return Ok(());
+        }
+
+        let mut tx = self.db.begin().await?;
+        tx.execute(
+            "DROP INDEX IF EXISTS idx_notification_activity_conversation_active",
+            (),
+        )
+        .await?;
+        tx.execute(
+            "ALTER TABLE notification_activity RENAME TO notification_activity_old_presence_show_check",
+            (),
+        )
+        .await?;
+        tx.execute(&notification_activity_table_sql(i64_type, false), ())
+            .await?;
+        tx.execute(
+            r#"
+            INSERT INTO notification_activity (
+                owner_bare_jid,
+                conversation_jid,
+                last_active_at_ms,
+                last_chat_state,
+                last_read_at_ms,
+                presence_show,
+                created_at_ms,
+                updated_at_ms
+            )
+            SELECT
+                owner_bare_jid,
+                conversation_jid,
+                last_active_at_ms,
+                last_chat_state,
+                last_read_at_ms,
+                presence_show,
+                created_at_ms,
+                updated_at_ms
+            FROM notification_activity_old_presence_show_check
+            "#,
+            (),
+        )
+        .await?;
+        tx.execute(
+            "DROP TABLE notification_activity_old_presence_show_check",
+            (),
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    async fn sqlite_presence_show_constraint_is_stale(
+        &self,
+    ) -> Result<bool, NotificationActivityError> {
+        let mut rows = self
+            .query(
+                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'notification_activity'",
+                (),
+            )
+            .await?;
+        let Some(row) = rows.next().await? else {
+            return Ok(false);
+        };
+        let create_sql: String = row.get(0)?;
+        Ok(!notification_activity_presence_show_constraint_matches_expected(&create_sql))
     }
 
     async fn execute(
@@ -656,36 +881,18 @@ impl NotificationActivityStore {
     ///
     /// A `None` `show` is the canonical default-`available` token (no
     /// `<show/>` child); the column accepts it and the read path
-    /// preserves the distinction.
-    ///
-    /// Oversize defense: per RFC 6121 §4.7.2.1 the valid `<show/>`
-    /// values are `away`, `chat`, `dnd`, `xa` (4 chars max), so a
-    /// caller passing more than [`PRESENCE_SHOW_MAX_LEN`] bytes is
-    /// either smuggling adversarial input or has a malformed parser
-    /// upstream. We truncate to a UTF-8 safe prefix and emit a warn
-    /// rather than persist the raw blob into the column.
+    /// preserves the distinction. The typed
+    /// [`NotificationPresenceShow`] enum guarantees the persisted
+    /// value is one of the four RFC 6121 §4.7.2.1 tokens — no
+    /// truncation or sanitisation needed at the writer.
     pub async fn record_presence_available(
         &self,
         owner: &BareJid,
         conversation: &BareJid,
-        show: Option<&str>,
+        show: Option<NotificationPresenceShow>,
         now_ms: i64,
     ) -> Result<(), NotificationActivityError> {
-        let bounded_show: Option<String> = show.map(|raw| {
-            if raw.len() <= PRESENCE_SHOW_MAX_LEN {
-                raw.to_owned()
-            } else {
-                tracing::warn!(
-                    owner = %owner,
-                    conversation = %conversation,
-                    raw_len = raw.len(),
-                    max_len = PRESENCE_SHOW_MAX_LEN,
-                    "record_presence_available: oversize <show/> value; truncating before persist",
-                );
-                truncate_to_char_boundary(raw, PRESENCE_SHOW_MAX_LEN).to_owned()
-            }
-        });
-        let bounded_show_ref: Option<&str> = bounded_show.as_deref();
+        let show_db_value: Option<&'static str> = show.map(NotificationPresenceShow::as_db_value);
         self.execute(
             r#"
             INSERT INTO notification_activity (
@@ -719,7 +926,7 @@ impl NotificationActivityStore {
                 owner.to_string(),
                 conversation.to_string(),
                 now_ms,
-                bounded_show_ref,
+                show_db_value,
                 now_ms,
                 now_ms,
             ],
@@ -804,9 +1011,12 @@ impl NotificationActivityStore {
         let last_active_at_ms: i64 = row.get(0)?;
         let last_chat_state_raw: Option<String> = row.get(1)?;
         let last_read_at_ms: Option<i64> = row.get(2)?;
-        let presence_show: Option<String> = row.get(3)?;
+        let presence_show_raw: Option<String> = row.get(3)?;
         let last_chat_state = last_chat_state_raw
             .map(|raw| NotificationChatState::from_db_value(&raw))
+            .transpose()?;
+        let presence_show = presence_show_raw
+            .map(|raw| NotificationPresenceShow::from_db_value(&raw))
             .transpose()?;
         Ok(Some(NotificationActivity {
             last_active_at_ms,
@@ -1101,12 +1311,12 @@ mod tests {
         let owner = bare("alice@example.com");
         let room = bare("room@muc.example.com");
         store
-            .record_presence_available(&owner, &room, Some("away"), 4_000)
+            .record_presence_available(&owner, &room, Some(NotificationPresenceShow::Away), 4_000)
             .await
             .expect("available");
         let activity = store.read(&owner, &room).await.expect("read").expect("row");
         assert_eq!(activity.last_active_at_ms, 4_000);
-        assert_eq!(activity.presence_show.as_deref(), Some("away"));
+        assert_eq!(activity.presence_show, Some(NotificationPresenceShow::Away));
 
         // Unavailable bumps activity but clears the show.
         store
@@ -1140,60 +1350,72 @@ mod tests {
         assert_eq!(activity.last_active_at_ms, 7_000);
     }
 
-    /// Oversize `<show/>` defense: a malicious or upstream-malformed
-    /// caller passing a value larger than [`PRESENCE_SHOW_MAX_LEN`]
-    /// MUST be truncated at the writer rather than persisted as an
-    /// unbounded blob. The truncated prefix is preserved (we never
-    /// drop the field silently — operators can still see the
-    /// adversarial token's beginning in the column).
-    #[tokio::test]
-    async fn record_presence_available_bounds_oversize_show() {
-        let store = store().await;
-        let owner = bare("alice@example.com");
-        let room = bare("room@muc.example.com");
-        let oversize = "x".repeat(PRESENCE_SHOW_MAX_LEN + 1024);
-        store
-            .record_presence_available(&owner, &room, Some(&oversize), 1_000)
-            .await
-            .expect("record oversize show");
-        let activity = store.read(&owner, &room).await.expect("read").expect("row");
-        let stored = activity.presence_show.expect("show persisted");
-        assert!(
-            stored.len() <= PRESENCE_SHOW_MAX_LEN,
-            "stored show MUST be bounded; got len {}",
-            stored.len(),
+    /// Closed-set audit: every [`NotificationPresenceShow`] variant
+    /// MUST round-trip through `as_db_value` / `from_db_value`.
+    /// Iterates `ALL` so future enum extensions join this test
+    /// automatically.
+    #[test]
+    fn notification_presence_show_round_trip_covers_every_variant() {
+        assert_eq!(
+            NotificationPresenceShow::ALL.len(),
+            NOTIFICATION_ACTIVITY_PRESENCE_SHOW_VALUES.len(),
+            "variant count must match CHECK constraint value list",
         );
-        assert!(
-            stored.chars().all(|c| c == 'x'),
-            "truncated prefix MUST preserve the original characters; got {stored:?}",
-        );
+        for variant in NotificationPresenceShow::ALL.iter().copied() {
+            let db = variant.as_db_value();
+            assert!(
+                NOTIFICATION_ACTIVITY_PRESENCE_SHOW_VALUES.contains(&db),
+                "variant {variant:?} db value {db} missing from CHECK list",
+            );
+            let decoded = NotificationPresenceShow::from_db_value(db).expect("decode");
+            assert_eq!(
+                decoded, variant,
+                "round-trip failed for {variant:?} (db value {db})"
+            );
+        }
+        assert!(matches!(
+            NotificationPresenceShow::from_db_value("not-a-show"),
+            Err(NotificationActivityError::InvalidPresenceShow(_))
+        ));
     }
 
-    /// UTF-8 boundary safety: the truncation MUST NOT split a
-    /// multi-byte scalar. A 4-byte emoji repeated past the cap must
-    /// produce a prefix whose byte length is a clean multiple of 4.
-    #[tokio::test]
-    async fn record_presence_available_truncates_on_utf8_boundary() {
-        let store = store().await;
-        let owner = bare("alice@example.com");
-        let room = bare("room@muc.example.com");
-        // "👋" is 4 bytes in UTF-8; repeat enough to exceed the cap.
-        let emoji = "\u{1F44B}";
-        let oversize = emoji.repeat(PRESENCE_SHOW_MAX_LEN);
-        assert!(oversize.len() > PRESENCE_SHOW_MAX_LEN);
-        store
-            .record_presence_available(&owner, &room, Some(&oversize), 1_000)
-            .await
-            .expect("record oversize emoji show");
-        let activity = store.read(&owner, &room).await.expect("read").expect("row");
-        let stored = activity.presence_show.expect("show persisted");
-        assert!(stored.len() <= PRESENCE_SHOW_MAX_LEN);
+    /// XEP-0045 / RFC 6121 bidirectional conversion stays in lockstep
+    /// with the typed db-values. Locks the
+    /// `xmpp_parsers::presence::Show` <-> `NotificationPresenceShow`
+    /// shape so a parser-side enum reshuffle is detected immediately.
+    #[test]
+    fn notification_presence_show_xep0045_conversion_round_trip() {
+        for variant in NotificationPresenceShow::ALL.iter().copied() {
+            let xep = variant.to_xep0045();
+            let back = NotificationPresenceShow::from_xep0045(xep.clone());
+            assert_eq!(
+                back, variant,
+                "xep0045 round-trip failed for {variant:?} (xep variant {xep:?})",
+            );
+        }
+    }
+
+    /// Regression: the `presence_show` constraint matcher MUST reject
+    /// a definition that contains a typed value only as a substring of
+    /// another value — same substring-safety guarantee as the
+    /// `last_chat_state` matcher (slice 2a). Lock from day one so a
+    /// matcher refactor can't silently re-introduce the gap.
+    ///
+    /// We exercise `xa` as a substring of the longer `Xavier`-style
+    /// token — a definition advertising only `xavier` MUST NOT be
+    /// accepted as containing the standalone `'xa'` literal.
+    #[test]
+    fn notification_activity_presence_show_constraint_match_rejects_substring_only_definition() {
+        let substring_only = "CHECK (presence_show IS NULL OR presence_show IN ('xavier'))";
         assert!(
-            stored.is_char_boundary(stored.len()),
-            "truncated prefix MUST end on a UTF-8 char boundary; got bytes {:?}",
-            stored.as_bytes(),
+            !notification_activity_presence_show_constraint_matches_expected(substring_only),
+            "matcher MUST require every variant as a quoted literal, not as a substring",
         );
-        assert!(stored.chars().all(|c| c.to_string() == emoji));
+
+        // Sanity: the full closed-set definition is accepted.
+        let full = "CHECK (presence_show IS NULL OR presence_show IN \
+                    ('away', 'chat', 'dnd', 'xa'))";
+        assert!(notification_activity_presence_show_constraint_matches_expected(full));
     }
 
     /// `NoopActivityReader` returns `None` for every (owner,
