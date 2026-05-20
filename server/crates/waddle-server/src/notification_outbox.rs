@@ -3861,6 +3861,44 @@ mod tests {
         );
     }
 
+    /// Regression for the substring-only defect class extended to the
+    /// slice 2a `suppressed_reason` matcher. The `SuppressedReason`
+    /// enum has overlapping value families — `provider_rejected` is a
+    /// substring of `provider_token_expired`, and `xep0492_never` /
+    /// `xep0492_on_mention_miss` share the `xep0492_` prefix. A naïve
+    /// `definition.contains(value)` matcher would false-positively
+    /// accept a CHECK definition that only allows the longer variant
+    /// while claiming to cover the shorter, skipping the migration
+    /// and leaving inserts of the missing variant to fail at runtime.
+    /// The quoted-literal matcher introduced in slice 1
+    /// (commit 3f2b2dcd) must catch this for `suppressed_reason` too.
+    #[test]
+    fn postgres_suppressed_reason_constraint_match_rejects_substring_only_definition() {
+        // Stale Postgres-shape definition that lists ONLY the longer
+        // overlapping variants (`provider_token_expired`,
+        // `xep0492_on_mention_miss`, `xep0357_no_registration`,
+        // `xep0357_registration_disabled`) — every shorter prefix
+        // (`provider_rejected`, `xep0492_never`, `xep0357_self`, ...)
+        // would substring-match falsely under a naïve `contains`.
+        let postgres_definition = "CHECK ((((suppressed_reason)::text = ANY ((ARRAY['xep0492_on_mention_miss'::character varying, 'xep0357_no_registration'::character varying, 'xep0357_registration_disabled'::character varying, 'provider_token_expired'::character varying])::text[]))))";
+        assert!(
+            !notification_candidates_suppressed_reason_constraint_matches_expected(postgres_definition),
+            "stale Postgres suppressed_reason constraint missing shorter overlapping values must NOT be treated as current",
+        );
+    }
+
+    /// SQLite-shape parallel of the substring-only regression. A
+    /// `CREATE TABLE` body that only quotes the longer overlapping
+    /// `SuppressedReason` variants must be flagged stale.
+    #[test]
+    fn sqlite_suppressed_reason_constraint_match_rejects_substring_only_definition() {
+        let sqlite_create_sql = "CREATE TABLE notification_candidates (suppressed_reason TEXT CHECK (suppressed_reason IS NULL OR suppressed_reason IN ('xep0492_on_mention_miss', 'xep0357_no_registration', 'xep0357_registration_disabled', 'provider_token_expired')))";
+        assert!(
+            !notification_candidates_suppressed_reason_constraint_matches_expected(sqlite_create_sql),
+            "stale SQLite suppressed_reason constraint missing shorter overlapping values must NOT be treated as current",
+        );
+    }
+
     async fn failed_outbox_jobs_count(store: &NotificationOutboxStore) -> i64 {
         let mut rows = store
             .query(
