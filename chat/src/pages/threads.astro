@@ -1,5 +1,11 @@
 ---
 import AppLayout from "@/layouts/AppLayout.astro";
+import ThreadsPage from "@/components/pages/ThreadsPage.vue";
+import { routes } from "@/router";
+
+const initialMatch = routes.threads.match();
 ---
 
-<AppLayout />
+<AppLayout>
+  <ThreadsPage client:only="vue" initialMatch={initialMatch} />
+</AppLayout>

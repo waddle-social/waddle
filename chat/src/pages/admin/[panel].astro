@@ -1,0 +1,17 @@
+---
+import AppLayout from "@/layouts/AppLayout.astro";
+import AdminPage from "@/components/pages/AdminPage.vue";
+import { routes, ADMIN_PANELS, DEFAULT_ADMIN_PANEL, type AdminPanel } from "@/router";
+
+// chat/ runs as SSR (`output: "server"`); Astro derives the dynamic
+// route table at request time, so no `getStaticPaths` is needed.
+const rawPanel = Astro.params.panel;
+const panel: AdminPanel = (ADMIN_PANELS as readonly string[]).includes(rawPanel ?? "")
+  ? (rawPanel as AdminPanel)
+  : DEFAULT_ADMIN_PANEL;
+const initialMatch = routes.admin.match({ params: { panel } });
+---
+
+<AppLayout>
+  <AdminPage client:only="vue" initialMatch={initialMatch} />
+</AppLayout>

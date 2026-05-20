@@ -1,5 +1,11 @@
 ---
 import AppLayout from "@/layouts/AppLayout.astro";
+import HomePage from "@/components/pages/HomePage.vue";
+import { routes } from "@/router";
+
+const initialMatch = routes.home.match();
 ---
 
-<AppLayout />
+<AppLayout>
+  <HomePage client:only="vue" initialMatch={initialMatch} />
+</AppLayout>

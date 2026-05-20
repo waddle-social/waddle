@@ -1,5 +1,11 @@
 ---
 import AppLayout from "@/layouts/AppLayout.astro";
+import SettingsPage from "@/components/pages/SettingsPage.vue";
+import { routes } from "@/router";
+
+const initialMatch = routes.settings.match();
 ---
 
-<AppLayout />
+<AppLayout>
+  <SettingsPage client:only="vue" initialMatch={initialMatch} />
+</AppLayout>

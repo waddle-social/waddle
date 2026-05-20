@@ -2,7 +2,6 @@
 import { onBeforeUnmount } from "vue";
 import LandingState from "@/components/chat/LandingState.vue";
 import LoginScreen from "@/components/chat/LoginScreen.vue";
-import ChatReadyShell from "@/components/chat/ChatReadyShell.vue";
 import { useChatAppController } from "@/shell/chat-app-controller";
 import { appController } from "@/stores/app-controller";
 
@@ -50,8 +49,11 @@ onBeforeUnmount(() => {
     @action="connectionStore.bootstrap"
   />
 
-  <ChatReadyShell
-    v-else
-    :controller="controller"
-  />
+  <!--
+    Ready: render the per-route Vue page mounted by the Astro page into
+    AppLayout's slot. Each per-route page reads `appController` from the
+    module-level store to access shared connection / channel / unread
+    state without prop drilling across separate Astro islands.
+  -->
+  <slot v-else />
 </template>

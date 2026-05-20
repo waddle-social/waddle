@@ -67,6 +67,7 @@ const giphyApiKey = env.GIPHY_API_KEY ?? "";
   <body class="bg-background text-foreground font-sans antialiased">
     <XmppProvider client:only="vue" transition:persist serverBaseUrl={serverBaseUrl ?? ""} />
     <AppShell client:only="vue" transition:persist giphyApiKey={giphyApiKey}>
+      <slot />
       <div slot="fallback" class="chat-app-shell chat-startup-shell" role="status" aria-live="polite">
         <div class="chat-desktop-shell">
           <div class="chat-desktop-rail-slot">

@@ -1,5 +1,14 @@
 ---
 import AppLayout from "@/layouts/AppLayout.astro";
+import DmPage from "@/components/pages/DmPage.vue";
+import { routes } from "@/router";
+
+const { username } = Astro.params;
+const initialMatch = routes.dm.match({
+  params: { username: username ?? "" },
+});
 ---
 
-<AppLayout />
+<AppLayout>
+  <DmPage client:only="vue" initialMatch={initialMatch} />
+</AppLayout>

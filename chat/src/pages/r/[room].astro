@@ -1,5 +1,14 @@
 ---
 import AppLayout from "@/layouts/AppLayout.astro";
+import ChannelPage from "@/components/pages/ChannelPage.vue";
+import { routes } from "@/router";
+
+const { room } = Astro.params;
+const initialMatch = routes.channel.match({
+  params: { channelId: room ?? "" },
+});
 ---
 
-<AppLayout />
+<AppLayout>
+  <ChannelPage client:only="vue" initialMatch={initialMatch} />
+</AppLayout>

@@ -9,7 +9,7 @@ export const ADMIN_PANELS = [
 
 export type AdminPanel = (typeof ADMIN_PANELS)[number];
 
-const DEFAULT_ADMIN_PANEL: AdminPanel = "users";
+export const DEFAULT_ADMIN_PANEL: AdminPanel = "users";
 
 function decodeAdminPanel(raw: string | undefined): AdminPanel {
   if (!raw) return DEFAULT_ADMIN_PANEL;
