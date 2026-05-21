@@ -401,12 +401,17 @@ onBeforeUnmount(() => {
   min-height: 0;
 }
 
-/* Equal-grid tiles fill the grid cell completely — the JS layout has
- * already chosen cell dimensions that respect the target aspect ratio,
- * so we don't redo that constraint here. */
+/* Equal-grid tiles keep a 16:9 frame inside their cell. The JS-picked
+ * (cols, rows) already maximize aspect-correct tile area; centering a
+ * 16:9 tile inside each 1fr × 1fr cell lets the video render at its
+ * native aspect without stretching or clipping faces when the cell
+ * itself isn't 16:9 (common during a splitter drag — cells become
+ * taller than wide or vice versa, but the tile stays a 16:9 frame). */
 .call-tile--equal {
-  width: 100%;
-  height: 100%;
+  aspect-ratio: 16 / 9;
+  max-width: 100%;
+  max-height: 100%;
+  margin: auto;
 }
 
 .call-tile:hover {
@@ -436,7 +441,12 @@ onBeforeUnmount(() => {
 .call-tile__video {
   height: 100%;
   width: 100%;
-  object-fit: cover;
+  /* `contain` so the video never gets cropped (your face is never
+   * clipped) — at the cost of optional letterbox bars when the
+   * camera's native aspect ratio doesn't match the 16:9 tile. The
+   * tile background fills any letterbox area with the muted token. */
+  object-fit: contain;
+  background: var(--muted);
 }
 
 .call-tile__video--mirrored {
