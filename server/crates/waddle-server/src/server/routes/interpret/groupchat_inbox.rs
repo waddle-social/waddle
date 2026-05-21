@@ -265,8 +265,9 @@ async fn insert_groupchat_notification_candidate(
     // XEP-0513 §"Multi-User Chats Permissions": frozen permission
     // snapshot for `urn:xmpp:mentions:0#channel`. `false` downgrades
     // channel mentions to `NotifyAll` (still delivered, but not pushed
-    // as a forced channel mention). The recovery path passes `false`
-    // — see [`reconcile_groupchat_notification_candidates`].
+    // as a forced channel mention). The recovery path passes the
+    // bool persisted on the recovery row at original T0 dispatch —
+    // see [`reconcile_groupchat_notification_candidates`].
     sender_can_broadcast_channel_mention: bool,
 ) -> GroupchatNotificationCandidateQueueOutcome {
     // Parse explicit mentions ONCE per message and derive every

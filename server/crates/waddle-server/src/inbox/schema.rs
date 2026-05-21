@@ -73,6 +73,12 @@ pub(super) async fn initialize(storage: &DatabaseInboxStorage) -> Result<(), Inb
         (),
     )
     .await?;
+    // Per CLAUDE.md "Assume no production servers/users/data for this
+    // project; prioritize clean design over compatibility" — schema
+    // changes modify `CREATE TABLE IF NOT EXISTS` in place. Local
+    // SQLite files built against an earlier branch must be discarded
+    // (or the table dropped) before pulling a schema change; CI runs
+    // against ephemeral databases so this is invisible there.
     storage
         .execute(
             &format!(
