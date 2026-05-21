@@ -18,7 +18,7 @@
 //! durable recipients get `is_recipient = true`.
 
 use super::super::event::{GroupchatThreadProjection, OutboundEvent};
-use super::context::RoomContext;
+use super::context::{RoomContext, SyntheticSenderAuthority};
 use super::traits::{RoomHandler, RoomHandlerOutcome};
 use crate::inbox::runtime::{preview_text, should_project_message};
 use crate::types::{Affiliation, Role};
@@ -41,19 +41,27 @@ use xmpp_parsers::message::Message;
 ///   affiliations at join time, but the snapshot may briefly trail)
 ///   must not be silently denied (adversarial review P2 on PR #738).
 ///
-/// Server-authored synthetic sends (`!ctx.project_sender_inbox`) bypass
-/// the gate entirely: those are extension bots / system messages whose
-/// trust is upstream of the MUC role lattice. Denying them would
-/// silently neuter announcements-room broadcasts and forum-action
-/// notifications.
+/// Synthetic server-authored sends are permitted via the explicit
+/// typed [`SyntheticSenderAuthority::ServerAuthored`] marker on the
+/// `RoomContext` (set only by the bot-dispatch entry point and
+/// similar pre-trust-validated paths). Prior versions of this gate
+/// coupled the bypass to `project_sender_inbox` — that conflated
+/// "skip the sender's own inbox row" (a projection concern) with
+/// "permitted to broadcast" (a policy decision). The typed marker
+/// keeps the two concerns separate so a future caller can't bypass
+/// the gate by accidentally setting the projection flag (adversarial
+/// review on PR #738).
 ///
-/// Returning `false` when the sender has no occupancy snapshot is the
-/// strict reading of XEP-0045 §7.4 (only joined occupants may message
-/// the room) combined with XEP-0513 §"Multi-User Chats Permissions"
-/// (receiving entities SHOULD ignore mentions from senders below the
-/// minimum role).
+/// Returning `false` when the sender has no occupancy snapshot and
+/// no synthetic authority is the strict reading of XEP-0045 §7.4
+/// (only joined occupants may message the room) combined with
+/// XEP-0513 §"Multi-User Chats Permissions" (receiving entities
+/// SHOULD ignore mentions from senders below the minimum role).
 fn sender_may_broadcast_channel_mention(ctx: &RoomContext<'_>) -> bool {
-    if !ctx.project_sender_inbox {
+    if matches!(
+        ctx.synthetic_sender_authority,
+        Some(SyntheticSenderAuthority::ServerAuthored)
+    ) {
         return true;
     }
     ctx.sender_snapshot().is_some_and(|sender| {
@@ -232,6 +240,7 @@ mod tests {
             occupant_id_secret: &secret,
             sender_nickname_generation: 0,
             project_sender_inbox: true,
+            synthetic_sender_authority: None,
             dispatch_timestamp: 0,
         };
         match MucInboxHandler.handle(msg, &ctx) {
@@ -483,6 +492,7 @@ mod tests {
                 occupant_id_secret: &secret,
                 sender_nickname_generation: 0,
                 project_sender_inbox: true,
+                synthetic_sender_authority: None,
                 dispatch_timestamp: 0,
             };
             assert_eq!(
@@ -494,23 +504,23 @@ mod tests {
     }
 
     /// Server-authored synthetic sends bypass the XEP-0513 channel-
-    /// broadcast gate entirely: announcements bots, forum-action system
-    /// messages, etc. The trust on those sends is upstream of the MUC
-    /// role lattice — denying them would silently neuter legitimate
-    /// broadcasts (adversarial review P2 on PR #738).
+    /// broadcast gate via the EXPLICIT typed
+    /// [`SyntheticSenderAuthority::ServerAuthored`] marker —
+    /// announcements bots, forum-action system messages, etc. The
+    /// trust on those sends is upstream of the MUC role lattice.
+    /// Prior versions of this gate keyed the bypass off
+    /// `!project_sender_inbox`, which coupled "skip the sender's
+    /// inbox row" to "permitted to broadcast" — a future caller
+    /// could have accidentally bypassed the gate by setting the
+    /// projection flag (adversarial review on PR #738).
     #[test]
-    fn xep0513_synthetic_sender_bypasses_channel_broadcast_gate() {
+    fn xep0513_synthetic_sender_authority_bypasses_channel_broadcast_gate() {
         let room = bare("team@conf.example.com");
         let bot = full("team@conf.example.com/announcements-bot");
-        let bot_occ = {
-            // Synthetic bots typically aren't in the occupancy snapshot
-            // at all — `project_sender_inbox: false` indicates the
-            // sender is server-authored and not a real occupant.
-            let mut occ = occ(bot.clone(), "announcements-bot");
-            occ.role = Role::Participant;
-            occ
-        };
-        let occupants = vec![bot_occ];
+        // Synthetic bots typically aren't in the occupancy snapshot —
+        // `SyntheticSenderAuthority::ServerAuthored` indicates the
+        // sender is server-authored and trust is established upstream.
+        let occupants: Vec<OccupantSnapshot> = vec![];
 
         let id_gen = FixedIdGenerator("ignored".to_string());
         let secret = OccupantIdSecret::for_testing(b"test-secret".to_vec());
@@ -527,12 +537,60 @@ mod tests {
             occupant_id_secret: &secret,
             sender_nickname_generation: 0,
             project_sender_inbox: false,
+            synthetic_sender_authority: Some(SyntheticSenderAuthority::ServerAuthored),
             dispatch_timestamp: 0,
         };
         assert!(
             sender_may_broadcast_channel_mention(&ctx),
-            "synthetic server-authored sends (project_sender_inbox=false) \
-             MUST bypass the channel-broadcast gate regardless of role"
+            "an explicit `Some(SyntheticSenderAuthority::ServerAuthored)` \
+             MUST bypass the channel-broadcast gate — the bot dispatcher's \
+             upstream trust validation is the source of authority"
+        );
+    }
+
+    /// Regression test for the bypass-via-projection-flag vector (issue
+    /// raised by reviewer on PR #738): a caller that sets
+    /// `project_sender_inbox: false` WITHOUT the explicit synthetic
+    /// authority marker MUST be subject to the standard role/affiliation
+    /// gate. If the gate ever silently keyed off `project_sender_inbox`
+    /// again, this test fails.
+    #[test]
+    fn xep0513_project_sender_inbox_false_does_not_bypass_channel_broadcast_gate() {
+        let room = bare("team@conf.example.com");
+        let participant = full("eve@example.com/cli");
+        let mut participant_occ = occ(participant.clone(), "eve");
+        participant_occ.role = Role::Participant;
+        let occupants = vec![participant_occ];
+
+        let id_gen = FixedIdGenerator("ignored".to_string());
+        let secret = OccupantIdSecret::for_testing(b"test-secret".to_vec());
+        let ctx = RoomContext {
+            room: &room,
+            sender_full: &participant,
+            occupants: &occupants,
+            durable_recipient_bare_jids: &[],
+            managed_room_forbidden: false,
+            room_moderated: false,
+            room_members_only: false,
+            pin_permission: crate::muc::PinPermission::default(),
+            id_gen: &id_gen,
+            occupant_id_secret: &secret,
+            sender_nickname_generation: 0,
+            // The projection-flag is `false` here to simulate the
+            // historical confusion: a caller wanting to "not project
+            // the sender's inbox row" must NOT thereby get a free
+            // channel-broadcast bypass.
+            project_sender_inbox: false,
+            synthetic_sender_authority: None,
+            dispatch_timestamp: 0,
+        };
+        assert!(
+            !sender_may_broadcast_channel_mention(&ctx),
+            "`project_sender_inbox: false` MUST NOT bypass the channel-\
+             broadcast gate — only the explicit \
+             `Some(SyntheticSenderAuthority::ServerAuthored)` marker does. \
+             Coupling the bypass to the projection flag was the original \
+             abuse vector identified by the reviewer."
         );
     }
 

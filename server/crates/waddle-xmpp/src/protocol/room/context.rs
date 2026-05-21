@@ -125,6 +125,18 @@ pub struct RoomContext<'a> {
     /// sends can disable this while still using the sender snapshot
     /// for MUC canonicalization.
     pub project_sender_inbox: bool,
+    /// XEP-0513 §"Multi-User Chats Permissions" §304 + adversarial
+    /// review on PR #738: typed authorization for a synthetic sender
+    /// whose trust is upstream of the MUC role lattice (extension
+    /// bots, forum-action system messages, server-authored
+    /// announcements). Carrying the authority as a dedicated typed
+    /// field — separate from `project_sender_inbox` — means a
+    /// future caller cannot accidentally bypass the channel-mention
+    /// permission gate by setting the inbox-projection flag.
+    /// `None` means "subject to the standard role/affiliation gate";
+    /// `Some(SyntheticSenderAuthority::ServerAuthored)` is the
+    /// explicit, audited bypass.
+    pub synthetic_sender_authority: Option<SyntheticSenderAuthority>,
     /// Single dispatch timestamp (Unix epoch seconds) shared across
     /// every groupchat inbox
     /// [`super::super::event::OutboundEvent::ProjectGroupchatInbox`]
@@ -133,6 +145,24 @@ pub struct RoomContext<'a> {
     /// don't drift across a second-boundary (Copilot review on
     /// PR #279).
     pub dispatch_timestamp: i64,
+}
+
+/// Typed authority for a synthetic (server-authored) sender that
+/// participates in a [`RoomContext`] without being a real MUC occupant.
+///
+/// Used by push-decision gates that would otherwise deny a sender with
+/// no [`OccupantSnapshot`]. Each variant documents the specific
+/// upstream trust source that justified the authority.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SyntheticSenderAuthority {
+    /// Extension bot or other server-side dispatcher whose payloads
+    /// are wholly server-authored and pre-validated upstream. Treated
+    /// as having owner-equivalent broadcast authority for XEP-0513
+    /// channel mentions and similar role-gated push decisions. Must
+    /// only be set by the bot dispatch entry point or another path
+    /// that has already established upstream trust — never by user-
+    /// controlled flows.
+    ServerAuthored,
 }
 
 impl<'a> RoomContext<'a> {

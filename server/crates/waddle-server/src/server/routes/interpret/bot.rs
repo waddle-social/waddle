@@ -104,6 +104,18 @@ pub(super) async fn dispatch_bot_groupchat_response(
         occupant_id_secret: bot_ctx.occupant_id_secret,
         sender_nickname_generation: 0,
         project_sender_inbox: false,
+        // XEP-0513 §"Multi-User Chats Permissions" §304 +
+        // adversarial review on PR #738: the extension-bot dispatcher
+        // is the only production caller that needs to broadcast as a
+        // synthetic sender. Trust is established upstream by the
+        // bot-registration path (`bot_ctx` is built only after the
+        // sender's bot identity has been validated). Carrying the
+        // authority as an explicit typed marker — separate from
+        // `project_sender_inbox` — keeps the inbox-projection flag
+        // from doubling as an implicit permission bypass.
+        synthetic_sender_authority: Some(
+            waddle_xmpp::protocol::room::SyntheticSenderAuthority::ServerAuthored,
+        ),
         dispatch_timestamp: bot_ctx.dispatch_timestamp,
     };
 
