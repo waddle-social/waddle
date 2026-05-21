@@ -4,11 +4,55 @@ use jid::BareJid;
 use minidom::Element;
 use xmpp_parsers::message::Message;
 
+use super::xep0372::extract_references_from_message;
+
 /// Namespace for XEP-0513 Explicit Mentions.
 pub const NS_EXPLICIT_MENTIONS: &str = "urn:xmpp:mentions:0";
 
 /// XEP-0513 channel-wide mention URI.
 pub const CHANNEL_MENTION: &str = "urn:xmpp:mentions:0#channel";
+
+/// XEP-0513 §301 example value for the `mentions#count` form field.
+///
+/// XEP-0513 §304: "Receiving entities SHOULD ignore all mentions if
+/// the message contains more mentions than the threshold specified by
+/// `mentions#count`." Used as the server-internal default until the
+/// per-room override IQ (XEP-0513 §295) lands in a follow-up slice.
+pub const DEFAULT_MENTIONS_COUNT: u32 = 5;
+
+/// Counts the mention TARGETS on `message`. Includes:
+///
+/// - every parsed XEP-0513 `<mention/>` payload (the slice already
+///   filters out structurally-empty elements that target nothing
+///   per `parse_mention_element`);
+/// - every XEP-0372 `<reference type='mention'/>` element — XEP-0513
+///   §304's "more mentions than the threshold" cap defensively
+///   extends to the XEP-0372 fallback path, otherwise an attacker
+///   bypasses the cap by encoding the spam via XEP-0372 references
+///   instead of XEP-0513 mentions (XEP-0513 §526 authorises
+///   server-internal filtering "according to their own rules").
+///
+/// The result is clamped to `u32::MAX`; in practice a single message
+/// would never legitimately approach that count.
+pub fn mention_target_count(explicit_mentions: &[ExplicitMention], message: &Message) -> u32 {
+    let xep0513 = explicit_mentions.len();
+    let xep0372 = extract_references_from_message(message)
+        .into_iter()
+        .filter(|reference| reference.is_mention())
+        .count();
+    u32::try_from(xep0513.saturating_add(xep0372)).unwrap_or(u32::MAX)
+}
+
+/// Returns `true` when the mention payloads on `message` exceed the
+/// configured `threshold` (XEP-0513 §304). Callers handle the
+/// SHOULD-ignore-all-mentions consequence themselves.
+pub fn mentions_exceed_threshold(
+    explicit_mentions: &[ExplicitMention],
+    message: &Message,
+    threshold: u32,
+) -> bool {
+    mention_target_count(explicit_mentions, message) > threshold
+}
 
 /// A single top-level `<mention/>` payload.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]

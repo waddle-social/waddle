@@ -514,6 +514,21 @@ fn mention_bits_for_recipient(message: &Message, recipient: &BareJid) -> Recipie
     let Some(mentions) = waddle_xmpp::xep::extract_explicit_mentions(message) else {
         return RecipientMentionBits::default();
     };
+    // XEP-0513 §304: "Receiving entities SHOULD ignore all mentions
+    // if the message contains more mentions than the threshold." A
+    // sender spamming N per-JID mentions on a DM (the same abuse
+    // vector blocked on the groupchat candidate path) would otherwise
+    // promote every recipient's class to `dm_mention` and ALSO be
+    // able to attach `<noping/>` to suppress the very push they
+    // forced. Treating count-exceeded as "no mentions present"
+    // collapses both surfaces back to the regular DM push.
+    if waddle_xmpp::xep::mentions_exceed_threshold(
+        &mentions.mentions,
+        message,
+        waddle_xmpp::xep::DEFAULT_MENTIONS_COUNT,
+    ) {
+        return RecipientMentionBits::default();
+    }
     let mut bits = RecipientMentionBits::default();
     for mention in &mentions.mentions {
         let names_recipient = mention
