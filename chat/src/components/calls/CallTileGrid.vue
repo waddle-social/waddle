@@ -1,9 +1,10 @@
 <script setup lang="ts">
-import { computed, ref } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { MicOff } from "lucide-vue-next";
 import AppAvatar from "@/components/ui/AppAvatar.vue";
 import type { LocalMediaTrack, RemoteMediaTrack } from "@/lib/calls/engine";
 import { TileAttachments, type TileAttachable } from "@/lib/calls/tile-attach";
+import { bestGridLayout, DEFAULT_TILE_ASPECT } from "@/lib/calls/grid-layout";
 
 /**
  * One tile = one (identity, role) slot in the grid. Each
@@ -135,6 +136,81 @@ function attachTrack(
 ): void {
   attachments.sync(key, el, track);
 }
+
+/**
+ * "Brady Bunch"-style adaptive grid (the same approach LiveKit's
+ * `GridLayout` reference component uses). A `ResizeObserver` on the
+ * equal-grid container feeds (width, height) plus the participant
+ * count into `bestGridLayout`, which sweeps every column count from
+ * 1 to N and picks the one that yields the largest aspect-correct
+ * tile area. Re-runs on:
+ *   - container resize (split-drag, app-shell width changes),
+ *   - participant join/leave (tile count change).
+ *
+ * The fallback before the first measurement is `cols = ceil(sqrt(n))`
+ * so the first paint isn't 1×N (a tall single column) — that briefly
+ * shrinks every tile to a sliver before the observer settles.
+ */
+const equalGridRef = ref<HTMLElement | null>(null);
+const containerSize = ref<{ width: number; height: number }>({ width: 0, height: 0 });
+let resizeObserver: ResizeObserver | null = null;
+
+const gridShape = computed(() => {
+  const n = tiles.value.length;
+  if (n === 0) return { cols: 1, rows: 1 };
+  const { width, height } = containerSize.value;
+  if (width === 0 || height === 0) {
+    const cols = Math.max(1, Math.ceil(Math.sqrt(n)));
+    return { cols, rows: Math.ceil(n / cols) };
+  }
+  const layout = bestGridLayout(n, width, height, DEFAULT_TILE_ASPECT);
+  return { cols: layout.cols, rows: layout.rows };
+});
+
+const gridTemplateColumns = computed(() => `repeat(${gridShape.value.cols}, 1fr)`);
+const gridTemplateRows = computed(() => `repeat(${gridShape.value.rows}, 1fr)`);
+
+function attachGridContainer(el: Element | null): void {
+  if (!(el instanceof HTMLElement)) {
+    equalGridRef.value = null;
+    return;
+  }
+  equalGridRef.value = el;
+}
+
+watch(equalGridRef, (el, _prev, onCleanup) => {
+  if (!el || typeof ResizeObserver === "undefined") return;
+  const ro = new ResizeObserver((entries) => {
+    for (const entry of entries) {
+      const cr = entry.contentRect;
+      containerSize.value = { width: cr.width, height: cr.height };
+    }
+  });
+  ro.observe(el);
+  resizeObserver = ro;
+  // Seed an initial measurement so the first paint after mount has
+  // a real size instead of leaning on the ceil(sqrt(n)) fallback.
+  const rect = el.getBoundingClientRect();
+  containerSize.value = { width: rect.width, height: rect.height };
+  onCleanup(() => {
+    ro.disconnect();
+    if (resizeObserver === ro) resizeObserver = null;
+  });
+});
+
+onMounted(() => {
+  // No-op — the watch on equalGridRef wires the observer when the
+  // template `:ref` callback fires. Lifecycle hook present so the
+  // file's intent ("this component owns a DOM observer") reads
+  // clearly on a scan.
+});
+
+onBeforeUnmount(() => {
+  if (resizeObserver) {
+    resizeObserver.disconnect();
+    resizeObserver = null;
+  }
+});
 </script>
 
 <template>
@@ -220,15 +296,23 @@ function attachTrack(
       </div>
     </template>
 
-    <!-- Equal-weight grid layout (default). `auto-fit` minmax keeps
-         each tile at a comfortable minimum width on wide screens
-         while letting single-tile calls fill the available area. -->
+    <!-- Equal-weight adaptive grid (default). `gridShape` is recomputed
+         from container size + participant count via a ResizeObserver,
+         so dragging the splitter or growing the participant list
+         reflows tiles into the best aspect-correct layout. -->
     <template v-else>
-      <div class="call-tile-grid__equal">
+      <div
+        :ref="attachGridContainer"
+        class="call-tile-grid__equal"
+        :style="{
+          gridTemplateColumns,
+          gridTemplateRows,
+        }"
+      >
         <div
           v-for="tile in tiles"
           :key="tile.key"
-          class="call-tile"
+          class="call-tile call-tile--equal"
           role="button"
           tabindex="0"
           @click="toggleFocus(tile)"
@@ -279,11 +363,14 @@ function attachTrack(
 .call-tile-grid__equal {
   display: grid;
   height: 100%;
+  width: 100%;
   gap: var(--space-xs);
-  grid-template-columns: repeat(auto-fit, minmax(min(180px, 100%), 1fr));
-  grid-auto-rows: 1fr;
-  overflow-y: auto;
+  /* `grid-template-columns` and `grid-template-rows` are set inline
+   * by the script based on the best-fit (cols, rows) computation —
+   * we don't fall back to auto-fit here because aspect-ratio-aware
+   * row sizing is exactly what the JS picks. */
   padding: var(--space-xs);
+  overflow: hidden;
 }
 
 .call-tile-grid__focus {
@@ -308,9 +395,18 @@ function attachTrack(
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
   background: var(--muted);
-  aspect-ratio: 16 / 9;
   cursor: pointer;
   transition: box-shadow 0.18s ease, transform 0.18s ease;
+  min-width: 0;
+  min-height: 0;
+}
+
+/* Equal-grid tiles fill the grid cell completely — the JS layout has
+ * already chosen cell dimensions that respect the target aspect ratio,
+ * so we don't redo that constraint here. */
+.call-tile--equal {
+  width: 100%;
+  height: 100%;
 }
 
 .call-tile:hover {
@@ -324,13 +420,17 @@ function attachTrack(
 
 .call-tile--focused {
   flex: 1 1 auto;
-  aspect-ratio: unset;
   width: 100%;
+  height: 100%;
 }
 
 .call-tile--thumb {
   flex: 0 0 auto;
   width: 9rem;
+  /* Thumbnails in speaker-focus mode keep a 16:9 frame so they read
+   * as a recognizable preview tile. The equal grid (`.call-tile--equal`)
+   * sets its own dimensions from the JS layout instead. */
+  aspect-ratio: 16 / 9;
 }
 
 .call-tile__video {
