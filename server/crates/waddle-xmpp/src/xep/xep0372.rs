@@ -144,17 +144,28 @@ impl Reference {
 
     /// Extract the bare JID referenced by this `<reference/>` URI.
     ///
-    /// Per RFC 5122 XMPP URIs of the form `xmpp:<jid>` may carry an
-    /// authority resource (`xmpp:alice@example.com/web`) and/or a
-    /// query (`?join`) or fragment (`;subject=foo`) component. The
-    /// XEP-0372 §"Reference type 'mention'" semantics target the
-    /// user's bare JID, so strip resource + query + fragment before
-    /// returning. Returns `None` for unparseable URIs.
+    /// Per RFC 5122 / RFC 3986 an XMPP URI of the form `xmpp:<jid>`
+    /// may carry:
+    ///
+    /// - an authority resource (`xmpp:alice@example.com/web`);
+    /// - a query component introduced by `?` whose key/value pairs
+    ///   are separated by `;` (RFC 5122 §2.7.1, e.g.
+    ///   `xmpp:room@muc?join` or `xmpp:room@muc?message;subject=foo`);
+    /// - a fragment component introduced by `#` (RFC 3986 §3.5).
+    ///
+    /// The XEP-0372 §"Reference type 'mention'" semantics target the
+    /// user's bare JID, so strip the resource component and any
+    /// trailing query (`?`) or fragment (`#`) before returning.
+    /// `;` does NOT delimit the start of the query — it separates
+    /// keys WITHIN the query — but the per-key parser doesn't run
+    /// here; we only need the JID prefix, so splitting on `?` and
+    /// `#` is sufficient and correct (Copilot review on PR #738).
+    /// Returns `None` for unparseable URIs.
     pub fn bare_jid(&self) -> Option<jid::BareJid> {
         let jid_part = self
             .uri
             .strip_prefix("xmpp:")?
-            .split(['?', ';'])
+            .split(['?', '#'])
             .next()?
             .trim();
         if jid_part.is_empty() {

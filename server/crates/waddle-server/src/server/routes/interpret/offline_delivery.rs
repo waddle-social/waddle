@@ -278,21 +278,16 @@ async fn enqueue_xep0357_notification_candidate_for_message(
     archive_stanza_id: &waddle_xmpp_core::xep0359::StanzaId,
     original_message: &Message,
 ) -> NotificationCandidateQueueOutcome {
-    // XEP-0203 `<delay/>` filter (adversarial review on PR #738):
-    // an offline DM tagged with `<delay xmlns='urn:xmpp:delay'/>`
-    // is a historical replay (S2S buffered delivery, server-bridge
-    // replay) and MUST NOT produce a real-time push candidate.
-    // Mirrors the same filter on the groupchat candidate path.
-    if waddle_xmpp::xep::xep0203::has_delay(original_message) {
-        debug!(
-            recipient = %recipient,
-            sender = %sender,
-            "XEP-0357 DM notification candidate skipped: \
-             stanza carries XEP-0203 `<delay/>` (historical replay, \
-             not real-time)"
-        );
-        return NotificationCandidateQueueOutcome::Completed;
-    }
+    // XEP-0203 `<delay/>` filter NOT applied here (Copilot review on
+    // PR #738): see the matching comment in `groupchat_inbox.rs`'s
+    // `enqueue_groupchat_notification_candidate`. An earlier shape
+    // suppressed pushes for messages carrying any `<delay/>`, but
+    // that check is trivially spoofable — a sender can inject
+    // `<delay/>` into their own stanza to suppress the recipient's
+    // push. Until inbound `<delay/>` stripping lands at the C2S
+    // session boundary, the safer behavior is to push as live and
+    // accept the (currently theoretical) case where an S2S-buffered
+    // delivery generates a real-time push (Waddle has no S2S yet).
     // XEP-0513 mention bit is message-intrinsic and frozen at T0; T1
     // reads it back from the candidate row when running the XEP-0492
     // dispatch gate.

@@ -54,25 +54,39 @@ fn test_extract_mentioned_jids() {
 }
 
 /// RFC 5122 + XEP-0372 §"Reference type 'mention'": a mention URI
-/// MAY carry a resource (`xmpp:alice@example.com/web`), a query
-/// (`?join`), or a fragment (`;subject=foo`). The bare-JID accessor
-/// MUST strip all of these before returning so the consumer can
-/// compare against a typed `BareJid` without silently mismatching
-/// (adversarial review on PR #738).
+/// MAY carry:
+///
+/// - a resource (`xmpp:alice@example.com/web`);
+/// - a query introduced by `?` (RFC 5122 §2.7.1 — keys are then
+///   separated by `;` WITHIN the query, e.g. `?join` or
+///   `?message;subject=foo`);
+/// - a fragment introduced by `#` (RFC 3986 §3.5).
+///
+/// The bare-JID accessor MUST strip all of these before returning so
+/// the consumer can compare against a typed `BareJid` without
+/// silently mismatching (adversarial review on PR #738).
 #[test]
-fn xep0372_bare_jid_strips_resource_and_query_components() {
+fn xep0372_bare_jid_strips_resource_query_and_fragment_components() {
     use jid::BareJid;
     let with_resource = Reference::mention("xmpp:alice@example.com/web");
     assert_eq!(
         with_resource.bare_jid(),
         Some("alice@example.com".parse::<BareJid>().expect("alice bare"))
     );
+    // RFC 5122 §2.7.1 query: `?` introduces the query; multi-key
+    // queries use `;` between keys.
     let with_query = Reference::mention("xmpp:bob@example.com?join");
     assert_eq!(
         with_query.bare_jid(),
         Some("bob@example.com".parse::<BareJid>().expect("bob bare"))
     );
-    let with_fragment = Reference::mention("xmpp:carol@example.com;subject=foo");
+    let with_multi_key_query = Reference::mention("xmpp:bob@example.com?message;subject=foo");
+    assert_eq!(
+        with_multi_key_query.bare_jid(),
+        Some("bob@example.com".parse::<BareJid>().expect("bob bare"))
+    );
+    // RFC 3986 §3.5 fragment: `#` introduces the fragment.
+    let with_fragment = Reference::mention("xmpp:carol@example.com#anchor");
     assert_eq!(
         with_fragment.bare_jid(),
         Some("carol@example.com".parse::<BareJid>().expect("carol bare"))

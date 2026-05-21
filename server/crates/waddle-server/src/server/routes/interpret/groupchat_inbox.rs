@@ -199,29 +199,25 @@ async fn enqueue_groupchat_notification_candidate(
     if !is_recipient || !is_durable_recipient {
         return GroupchatNotificationCandidateQueueOutcome::Completed;
     }
-    // XEP-0203 `<delay/>` filter (adversarial review on PR #738):
-    // a groupchat message tagged with `<delay xmlns='urn:xmpp:delay'/>`
-    // is a historical replay (S2S buffered delivery, server-bridge
-    // replay, MUC subject replay, etc.) and MUST NOT produce a real-
-    // time push candidate — pushing on a 3-hour-old message is the
-    // classic delayed-replay-as-push abuse vector. The
-    // `notification_activity` ingest path already applies this filter
-    // to chat-states (see `record_chat_state_activity`); the
-    // candidate-emission path needs the same protection. Recovery
-    // replay through `reconcile_groupchat_notification_candidates`
-    // bypasses this gate intentionally — those replayed MAM messages
-    // carry the recovery row's frozen T0 intent, which was real-time
-    // at original dispatch.
-    if waddle_xmpp::xep::xep0203::has_delay(message) {
-        debug!(
-            recipient = %owner,
-            room = %room,
-            "ProjectGroupchatInbox: skipping XEP-0357 candidate; \
-             stanza carries XEP-0203 `<delay/>` (historical replay, \
-             not real-time)"
-        );
-        return GroupchatNotificationCandidateQueueOutcome::Completed;
-    }
+    // XEP-0203 `<delay/>` filter NOT applied here (Copilot review
+    // on PR #738): an earlier shape of this path called
+    // `xep0203::has_delay(message)` to suppress push for historical
+    // replays. That check is trivially spoofable — a sender can
+    // inject `<delay xmlns='urn:xmpp:delay' from='whatever'
+    // stamp='2020-01-01T00:00:00Z'/>` into their own outbound
+    // stanza, the server forwards it unchanged, and every recipient's
+    // push gets suppressed. XEP-0203 §4.1 RECOMMENDS the `from`
+    // attribute but does not mandate it, and the server's room
+    // dispatcher does not add `<delay/>` for live messages — so any
+    // `<delay/>` on this path is by definition user-supplied today
+    // (Waddle has no S2S yet). The proper defense is inbound
+    // `<delay/>` stripping at the C2S session boundary (deferred to
+    // a follow-up slice); until that lands, blindly trusting
+    // `<delay/>` here would create an unprivileged push-suppression
+    // primitive. MAM-replay through
+    // `reconcile_groupchat_notification_candidates` calls
+    // `insert_groupchat_notification_candidate` directly, bypassing
+    // this function, so MAM replays do not produce duplicate pushes.
     let projection_committed = thread
         .as_ref()
         .map_or(outcome.channel_committed, |_| outcome.thread_committed);
@@ -831,7 +827,12 @@ fn current_room_channel_mention(
 }
 
 fn xmpp_uri_bare_jid(uri: &str) -> Option<BareJid> {
-    let jid_part = uri.strip_prefix("xmpp:")?.split(['?', ';']).next()?.trim();
+    // RFC 5122 / RFC 3986: query is introduced by `?`, fragment by
+    // `#`. `;` separates key/value pairs WITHIN the query — it does
+    // not delimit the start of the query. Stripping on `?` and `#`
+    // is sufficient for extracting the JID prefix (Copilot review
+    // on PR #738).
+    let jid_part = uri.strip_prefix("xmpp:")?.split(['?', '#']).next()?.trim();
     if jid_part.is_empty() {
         return None;
     }

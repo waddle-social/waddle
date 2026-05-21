@@ -21,25 +21,29 @@ use super::super::event::{GroupchatThreadProjection, OutboundEvent};
 use super::context::{RoomContext, SyntheticSenderAuthority};
 use super::traits::{RoomHandler, RoomHandlerOutcome};
 use crate::inbox::runtime::{preview_text, should_project_message};
-use crate::types::{Affiliation, Role};
+use crate::types::Role;
 use crate::xep::xep0508::{extract_forum_action, ForumAction};
 use jid::BareJid;
 use std::collections::HashSet;
 use waddle_xmpp_core::xep0201::thread_info_from_message;
 use xmpp_parsers::message::Message;
 
-/// XEP-0513 §"Multi-User Chats Permissions": server-internal default
-/// for `mentions#channel` is `moderators` — senders may broadcast
-/// `urn:xmpp:mentions:0#channel` for push purposes if either:
+/// XEP-0513 §"Multi-User Chats Permissions" §304: server-internal
+/// default for `mentions#channel` is `moderators` — senders may
+/// broadcast `urn:xmpp:mentions:0#channel` for push purposes only
+/// when their XEP-0045 role is `Role::Moderator`.
 ///
-/// - their XEP-0045 role is `Role::Moderator` (the canonical "may use
-///   moderator powers" axis), OR
-/// - their durable affiliation is `Affiliation::Admin` /
-///   `Affiliation::Owner` — affiliation is the persistence-of-trust
-///   axis; an Owner/Admin who hasn't yet completed a presence cycle
-///   (`room_affiliations` derives Moderator role from those
-///   affiliations at join time, but the snapshot may briefly trail)
-///   must not be silently denied (adversarial review P2 on PR #738).
+/// §304 defines the gate purely in terms of XEP-0045 *role* ("the
+/// minimum role required by the room"). An earlier shape of this
+/// gate also accepted `affiliation >= Affiliation::Admin` as a
+/// fallback for an Owner/Admin whose presence cycle hadn't yet
+/// promoted the role — but `MucRoom::set_affiliation` now re-derives
+/// the occupant's role on every affiliation change (Owner/Admin →
+/// Moderator), so the trail window the fallback covered is closed.
+/// The strict role-only reading is therefore both spec-conformant
+/// and behaviorally equivalent to the disjunction. Removing the
+/// affiliation arm avoids the §304 over-permissiveness called out
+/// in the greptile P2 review on PR #738.
 ///
 /// Synthetic server-authored sends are permitted via the explicit
 /// typed [`SyntheticSenderAuthority::ServerAuthored`] marker on the
@@ -49,8 +53,7 @@ use xmpp_parsers::message::Message;
 /// "skip the sender's own inbox row" (a projection concern) with
 /// "permitted to broadcast" (a policy decision). The typed marker
 /// keeps the two concerns separate so a future caller can't bypass
-/// the gate by accidentally setting the projection flag (adversarial
-/// review on PR #738).
+/// the gate by accidentally setting the projection flag.
 ///
 /// Returning `false` when the sender has no occupancy snapshot and
 /// no synthetic authority is the strict reading of XEP-0045 §7.4
@@ -64,9 +67,8 @@ fn sender_may_broadcast_channel_mention(ctx: &RoomContext<'_>) -> bool {
     ) {
         return true;
     }
-    ctx.sender_snapshot().is_some_and(|sender| {
-        sender.role >= Role::Moderator || sender.affiliation >= Affiliation::Admin
-    })
+    ctx.sender_snapshot()
+        .is_some_and(|sender| sender.role >= Role::Moderator)
 }
 
 /// Per-occupant inbox projection handler for the room handler chain.
@@ -396,13 +398,20 @@ mod tests {
         );
     }
 
-    /// XEP-0513 §"Multi-User Chats Permissions" §304: the typed
-    /// frozen permission snapshot is taken at room-dispatch time, NOT
-    /// later. This test pins the helper: only senders whose frozen
-    /// occupancy role is `Role::Moderator` may broadcast a channel
-    /// mention; participants and visitors get `false`. The class
-    /// downgrade itself is exercised in the `groupchat_inbox.rs`
-    /// classifier tests — this test only locks the snapshot helper.
+    /// XEP-0513 §"Multi-User Chats Permissions" §304: the gate is
+    /// purely role-based — only senders whose frozen XEP-0045 role
+    /// is `Role::Moderator` may broadcast a channel mention. The
+    /// class downgrade itself is exercised in the `groupchat_inbox.rs`
+    /// classifier tests; this test locks the snapshot helper across
+    /// the full role lattice.
+    ///
+    /// Affiliation is NOT a fallback axis: `MucRoom::set_affiliation`
+    /// re-derives the occupant's role on every affiliation change, so
+    /// an `Affiliation::Admin/Owner` with `Role::Participant` is an
+    /// impossible state in well-behaved code. The "impossible state"
+    /// row is included anyway to lock the strict §304 reading — if
+    /// a future bug ever produces that state, the gate denies it
+    /// (greptile P2 review on PR #738).
     #[test]
     fn xep0513_sender_may_broadcast_channel_mention_requires_moderator() {
         let room = bare("team@conf.example.com");
@@ -410,8 +419,7 @@ mod tests {
         let participant = full("bob@example.com/desk");
         let visitor = full("carol@example.com/phone");
         let none_role = full("dave@example.com/web");
-        let admin_no_role = full("erin@example.com/web");
-        let owner_no_role = full("frank@example.com/web");
+        let admin_stale_role = full("erin@example.com/web");
         let outsider = full("eve@example.com/cli");
 
         let mut moderator_occ = occ(moderator.clone(), "alice");
@@ -422,23 +430,21 @@ mod tests {
         visitor_occ.role = Role::Visitor;
         let mut none_role_occ = occ(none_role.clone(), "dave");
         none_role_occ.role = Role::None;
-        // Owner/Admin affiliation but Participant role: simulates a
-        // privileged user whose presence cycle hasn't promoted the role
-        // yet. Server-internal trust MUST follow the durable affiliation
-        // (adversarial review P2 on PR #738).
-        let mut admin_no_role_occ = occ(admin_no_role.clone(), "erin");
-        admin_no_role_occ.role = Role::Participant;
-        admin_no_role_occ.affiliation = Affiliation::Admin;
-        let mut owner_no_role_occ = occ(owner_no_role.clone(), "frank");
-        owner_no_role_occ.role = Role::Participant;
-        owner_no_role_occ.affiliation = Affiliation::Owner;
+        // "Impossible state" defensive fixture: Affiliation::Admin
+        // with Role::Participant. `MucRoom::set_affiliation` now
+        // re-derives the role on every affiliation change, so this
+        // pairing should never reach the gate in practice. The §304
+        // strict reading still denies it — affiliation is not a
+        // fallback authorization axis (greptile P2 on PR #738).
+        let mut admin_stale_role_occ = occ(admin_stale_role.clone(), "erin");
+        admin_stale_role_occ.role = Role::Participant;
+        admin_stale_role_occ.affiliation = crate::types::Affiliation::Admin;
         let occupants = vec![
             moderator_occ,
             participant_occ,
             visitor_occ,
             none_role_occ,
-            admin_no_role_occ,
-            owner_no_role_occ,
+            admin_stale_role_occ,
         ];
 
         let id_gen = FixedIdGenerator("ignored".to_string());
@@ -447,21 +453,10 @@ mod tests {
         for (sender, expected, label) in [
             (&moderator, true, "Role::Moderator MUST be permitted"),
             (
-                &admin_no_role,
-                true,
-                "Affiliation::Admin MUST be permitted regardless of role — \
-                 durable affiliation is the source of trust",
-            ),
-            (
-                &owner_no_role,
-                true,
-                "Affiliation::Owner MUST be permitted regardless of role",
-            ),
-            (
                 &participant,
                 false,
-                "Role::Participant + Affiliation::Member MUST NOT be \
-                 permitted — XEP-0513 §304 default `mentions#channel = moderators`",
+                "Role::Participant MUST NOT be permitted — XEP-0513 §304 \
+                 default `mentions#channel = moderators`",
             ),
             (&visitor, false, "Role::Visitor MUST NOT be permitted"),
             (
@@ -469,6 +464,15 @@ mod tests {
                 false,
                 "Role::None MUST NOT be permitted (defensive: not-in-room \
                  role projection)",
+            ),
+            (
+                &admin_stale_role,
+                false,
+                "Affiliation::Admin with stale Role::Participant MUST be \
+                 denied — XEP-0513 §304 is role-based, not affiliation-based. \
+                 In well-behaved code this state is unreachable because \
+                 `set_affiliation` re-derives role; the deny is defensive \
+                 lock-in against regression",
             ),
             // Sender outside the occupancy snapshot (XEP-0045 §7.4
             // gate would already reject this before the inbox handler
