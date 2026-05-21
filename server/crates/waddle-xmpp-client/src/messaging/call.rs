@@ -75,9 +75,18 @@ pub enum CallEventKind {
         media: CallMedia,
     },
     Proceed,
-    Reject,
-    Retract,
-    Finish,
+    Reject {
+        reason: Option<JingleReason>,
+        tie_break: bool,
+    },
+    Retract {
+        reason: Option<JingleReason>,
+        tie_break: bool,
+    },
+    Finish {
+        reason: Option<JingleReason>,
+        migrated_to: Option<SessionId>,
+    },
     SessionInitiate {
         join: LiveKitJoin,
         media: CallMedia,
@@ -138,9 +147,18 @@ pub fn parse_jmi_message(stanza: &Element) -> Option<InboundCallEvent> {
                 media: media_from_descriptions(child),
             },
             "proceed" => CallEventKind::Proceed,
-            "reject" => CallEventKind::Reject,
-            "retract" => CallEventKind::Retract,
-            "finish" => CallEventKind::Finish,
+            "reject" => CallEventKind::Reject {
+                reason: extract_jmi_reason(child),
+                tie_break: has_tie_break(child),
+            },
+            "retract" => CallEventKind::Retract {
+                reason: extract_jmi_reason(child),
+                tie_break: has_tie_break(child),
+            },
+            "finish" => CallEventKind::Finish {
+                reason: extract_jmi_reason(child),
+                migrated_to: extract_migrated_to(child),
+            },
             _ => continue,
         };
         return Some(InboundCallEvent { from, sid, kind });
@@ -258,6 +276,28 @@ fn extract_terminate_reason(jingle: &Element) -> Option<JingleReason> {
     jingle_reason_from_wire_name(condition.name())
 }
 
+fn extract_jmi_reason(envelope: &Element) -> Option<JingleReason> {
+    let reason = envelope
+        .children()
+        .find(|c| c.name() == "reason" && c.ns() == NS_JINGLE)?;
+    let condition = reason.children().next()?;
+    jingle_reason_from_wire_name(condition.name())
+}
+
+fn has_tie_break(envelope: &Element) -> bool {
+    envelope
+        .children()
+        .any(|c| c.name() == "tie-break" && c.ns() == NS_JINGLE_MESSAGE)
+}
+
+fn extract_migrated_to(envelope: &Element) -> Option<SessionId> {
+    envelope
+        .children()
+        .find(|c| c.name() == "migrated" && c.ns() == NS_JINGLE_MESSAGE)
+        .and_then(|c| c.attr("to"))
+        .map(|to| SessionId(to.to_string()))
+}
+
 /// Canonical XEP-0166 §7.4 wire name for a typed `JingleReason`.
 /// Public so wasm/FFI consumers can emit the typed value as the
 /// stable XEP-defined string when crossing into untyped languages
@@ -350,20 +390,78 @@ pub fn build_proceed(sid: &SessionId) -> Element {
 }
 
 pub fn build_reject(sid: &SessionId) -> Element {
-    Element::builder("reject", NS_JINGLE_MESSAGE)
+    build_reject_with_options(sid, None, false)
+}
+
+pub fn build_reject_with_options(
+    sid: &SessionId,
+    reason: Option<JingleReason>,
+    tie_break: bool,
+) -> Element {
+    let mut builder = Element::builder("reject", NS_JINGLE_MESSAGE)
         .attr(minidom::rxml::xml_ncname!("id").to_owned(), sid.0.as_str())
-        .build()
+        .append_all(reason.map(reason_element));
+    if tie_break {
+        builder = builder.append(Element::builder("tie-break", NS_JINGLE_MESSAGE).build());
+    }
+    builder.build()
 }
 
 pub fn build_retract(sid: &SessionId) -> Element {
-    Element::builder("retract", NS_JINGLE_MESSAGE)
+    build_retract_with_options(sid, None, false)
+}
+
+pub fn build_retract_with_options(
+    sid: &SessionId,
+    reason: Option<JingleReason>,
+    tie_break: bool,
+) -> Element {
+    let mut builder = Element::builder("retract", NS_JINGLE_MESSAGE)
         .attr(minidom::rxml::xml_ncname!("id").to_owned(), sid.0.as_str())
-        .build()
+        .append_all(reason.map(reason_element));
+    if tie_break {
+        builder = builder.append(Element::builder("tie-break", NS_JINGLE_MESSAGE).build());
+    }
+    builder.build()
 }
 
 pub fn build_finish(sid: &SessionId) -> Element {
-    Element::builder("finish", NS_JINGLE_MESSAGE)
+    build_finish_with_reason(sid, None)
+}
+
+pub fn build_finish_with_reason(sid: &SessionId, reason: Option<JingleReason>) -> Element {
+    build_finish_with_options(sid, reason, None)
+}
+
+pub fn build_finish_with_options(
+    sid: &SessionId,
+    reason: Option<JingleReason>,
+    migrated_to: Option<&SessionId>,
+) -> Element {
+    let mut builder = Element::builder("finish", NS_JINGLE_MESSAGE)
         .attr(minidom::rxml::xml_ncname!("id").to_owned(), sid.0.as_str())
+        .append_all(reason.map(reason_element));
+    if let Some(to) = migrated_to {
+        builder = builder.append(
+            Element::builder("migrated", NS_JINGLE_MESSAGE)
+                .attr(minidom::rxml::xml_ncname!("to").to_owned(), to.0.as_str())
+                .build(),
+        );
+    }
+    builder.build()
+}
+
+pub fn build_finish_migrated(
+    sid: &SessionId,
+    reason: JingleReason,
+    migrated_to: &SessionId,
+) -> Element {
+    build_finish_with_options(sid, Some(reason), Some(migrated_to))
+}
+
+fn reason_element(reason: JingleReason) -> Element {
+    Element::builder("reason", NS_JINGLE)
+        .append(Element::builder(jingle_reason_wire_name(reason), NS_JINGLE).build())
         .build()
 }
 
@@ -418,22 +516,14 @@ pub fn build_session_initiate(sid: &SessionId, initiator: &FullJid, media: CallM
 
 /// Build the `<jingle/>` body of a session-accept IQ. Per
 /// XEP-0166 §7.1 the `responder` attribute names the accepting
-/// party; the initiator attribute mirrors the originator so the
-/// server can re-derive the call scope.
-pub fn build_session_accept(
-    sid: &SessionId,
-    initiator: &FullJid,
-    responder: &FullJid,
-    media: CallMedia,
-) -> Element {
+/// party. The `initiator` attribute is intentionally omitted
+/// because XEP-0166 recommends it only for `session-initiate` and
+/// says recipients should ignore it on other actions.
+pub fn build_session_accept(sid: &SessionId, responder: &FullJid, media: CallMedia) -> Element {
     let mut builder = Element::builder("jingle", NS_JINGLE)
         .attr(
             minidom::rxml::xml_ncname!("action").to_owned(),
             "session-accept",
-        )
-        .attr(
-            minidom::rxml::xml_ncname!("initiator").to_owned(),
-            initiator.to_string(),
         )
         .attr(
             minidom::rxml::xml_ncname!("responder").to_owned(),
@@ -538,7 +628,48 @@ mod tests {
         </message>";
         let elem: Element = xml.parse().unwrap();
         let ev = parse_call_event(&elem).expect("finish parses");
-        assert!(matches!(ev.kind, CallEventKind::Finish));
+        assert!(matches!(
+            ev.kind,
+            CallEventKind::Finish {
+                reason: None,
+                migrated_to: None
+            }
+        ));
+    }
+
+    #[test]
+    fn parses_tie_break_reject_and_retract_metadata() {
+        let xml = r#"<message xmlns='jabber:client' from='alice@waddle.test/desktop'>
+            <reject xmlns='urn:xmpp:jingle-message:0' id='c1'>
+              <reason xmlns='urn:xmpp:jingle:1'><expired/></reason>
+              <tie-break xmlns='urn:xmpp:jingle-message:0'/>
+            </reject>
+        </message>"#;
+        let elem: Element = xml.parse().unwrap();
+        let ev = parse_call_event(&elem).expect("reject parses");
+        match ev.kind {
+            CallEventKind::Reject { reason, tie_break } => {
+                assert_eq!(reason, Some(JingleReason::Expired));
+                assert!(tie_break);
+            }
+            other => panic!("expected Reject, got {other:?}"),
+        }
+
+        let xml = r#"<message xmlns='jabber:client' from='alice@waddle.test/desktop'>
+            <retract xmlns='urn:xmpp:jingle-message:0' id='c1'>
+              <reason xmlns='urn:xmpp:jingle:1'><expired/></reason>
+              <tie-break xmlns='urn:xmpp:jingle-message:0'/>
+            </retract>
+        </message>"#;
+        let elem: Element = xml.parse().unwrap();
+        let ev = parse_call_event(&elem).expect("retract parses");
+        match ev.kind {
+            CallEventKind::Retract { reason, tie_break } => {
+                assert_eq!(reason, Some(JingleReason::Expired));
+                assert!(tie_break);
+            }
+            other => panic!("expected Retract, got {other:?}"),
+        }
     }
 
     #[test]
@@ -752,10 +883,8 @@ mod tests {
 
     #[test]
     fn build_session_accept_descriptions_include_rtcp_mux() {
-        let initiator: FullJid = "alice@waddle.test/desktop".parse().unwrap();
         let responder: FullJid = "bob@waddle.test/desktop".parse().unwrap();
-        let elem =
-            build_session_accept(&sid("c1"), &initiator, &responder, CallMedia::audio_video());
+        let elem = build_session_accept(&sid("c1"), &responder, CallMedia::audio_video());
         for content in elem.children().filter(|c| c.name() == "content") {
             let desc = content
                 .children()
@@ -791,7 +920,13 @@ mod tests {
             .append(build_reject(&sid("c1")))
             .build();
         let ev = parse_call_event(&stanza).expect("reject parses");
-        assert!(matches!(ev.kind, CallEventKind::Reject));
+        assert!(matches!(
+            ev.kind,
+            CallEventKind::Reject {
+                reason: None,
+                tie_break: false
+            }
+        ));
 
         let stanza = Element::builder("message", "jabber:client")
             .attr(
@@ -801,7 +936,13 @@ mod tests {
             .append(build_retract(&sid("c1")))
             .build();
         let ev = parse_call_event(&stanza).expect("retract parses");
-        assert!(matches!(ev.kind, CallEventKind::Retract));
+        assert!(matches!(
+            ev.kind,
+            CallEventKind::Retract {
+                reason: None,
+                tie_break: false
+            }
+        ));
 
         let stanza = Element::builder("message", "jabber:client")
             .attr(
@@ -811,7 +952,68 @@ mod tests {
             .append(build_finish(&sid("c1")))
             .build();
         let ev = parse_call_event(&stanza).expect("finish parses");
-        assert!(matches!(ev.kind, CallEventKind::Finish));
+        assert!(matches!(
+            ev.kind,
+            CallEventKind::Finish {
+                reason: None,
+                migrated_to: None
+            }
+        ));
+    }
+
+    #[test]
+    fn build_tie_break_jmi_helpers_emit_expired_reason_and_tie_break() {
+        let reject = build_reject_with_options(&sid("c1"), Some(JingleReason::Expired), true);
+        assert!(
+            reject.get_child("tie-break", NS_JINGLE_MESSAGE).is_some(),
+            "XEP-0353 tie-break reject carries <tie-break/>"
+        );
+        assert!(
+            reject
+                .get_child("reason", NS_JINGLE)
+                .and_then(|reason| reason.get_child("expired", NS_JINGLE))
+                .is_some(),
+            "XEP-0353 tie-break reject carries <reason><expired/></reason>"
+        );
+
+        let retract = build_retract_with_options(&sid("c1"), Some(JingleReason::Expired), true);
+        assert!(retract.get_child("tie-break", NS_JINGLE_MESSAGE).is_some());
+        assert!(retract
+            .get_child("reason", NS_JINGLE)
+            .and_then(|reason| reason.get_child("expired", NS_JINGLE))
+            .is_some());
+    }
+
+    #[test]
+    fn build_finish_migrated_emits_expired_reason_and_migrated_target() {
+        let finish = build_finish_migrated(&sid("old"), JingleReason::Expired, &sid("new"));
+        assert!(finish
+            .get_child("reason", NS_JINGLE)
+            .and_then(|reason| reason.get_child("expired", NS_JINGLE))
+            .is_some());
+        let migrated = finish
+            .get_child("migrated", NS_JINGLE_MESSAGE)
+            .expect("finish carries migrated child");
+        assert_eq!(migrated.attr("to"), Some("new"));
+
+        let stanza = Element::builder("message", "jabber:client")
+            .attr(
+                minidom::rxml::xml_ncname!("from").to_owned(),
+                "alice@waddle.test/desktop",
+            )
+            .append(finish)
+            .build();
+        let ev = parse_call_event(&stanza).expect("finish parses");
+        match ev.kind {
+            CallEventKind::Finish {
+                reason,
+                migrated_to,
+            } => {
+                assert_eq!(reason, Some(JingleReason::Expired));
+                assert_eq!(migrated_to.map(|sid| sid.0).as_deref(), Some("new"));
+            }
+            other => panic!("expected Finish, got {other:?}"),
+        }
     }
 
     #[test]
@@ -855,12 +1057,11 @@ mod tests {
     fn build_session_accept_carries_responder_attr_and_empty_transport() {
         let jingle = build_session_accept(
             &sid("c1"),
-            &full("alice@waddle.test/desktop"),
             &full("bob@waddle.test/desktop"),
             CallMedia::audio_only(),
         );
         assert_eq!(jingle.attr("action"), Some("session-accept"));
-        assert_eq!(jingle.attr("initiator"), Some("alice@waddle.test/desktop"));
+        assert_eq!(jingle.attr("initiator"), None);
         assert_eq!(jingle.attr("responder"), Some("bob@waddle.test/desktop"));
         let contents: Vec<_> = jingle
             .children()
@@ -873,6 +1074,7 @@ mod tests {
     fn build_session_terminate_includes_reason_when_supplied() {
         let with_reason =
             build_session_terminate(&sid("c1"), Some(xmpp_parsers::jingle::Reason::Success));
+        assert_eq!(with_reason.attr("initiator"), None);
         let reason_elem = with_reason
             .children()
             .find(|c| c.name() == "reason")

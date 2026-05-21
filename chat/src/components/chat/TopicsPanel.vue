@@ -5,6 +5,10 @@ import { isForumChannel as detectForumChannel } from "@/lib/channel-types";
 import type { ChannelSummary, SpaceSummary } from "@/lib/chat-types";
 import type { ChannelThreadInboxEntry } from "@/channels/inbox";
 import { groupChannelsBySpace } from "@/lib/channel-grouping";
+import {
+  callParticipantCountForChannel,
+  collapsedGroupBadgeModel,
+} from "@/lib/calls/muc-call-indicators";
 import type { MemberLoadState } from "@/waddles/directory";
 import Skeleton from "@/components/ui/Skeleton.vue";
 
@@ -54,16 +58,11 @@ const props = defineProps<{
  * same heuristic `hasActivity()` uses for the green dot.
  */
 function callParticipantCount(channel: ChannelSummary): number {
-  if (!props.callParticipantCounts) return 0;
-  if (channel.jid) {
-    return props.callParticipantCounts[channel.jid] ?? 0;
-  }
-  for (const jid of props.activeChannelJids) {
-    if (jid.startsWith(channel.id + "@") || jid.includes(channel.id)) {
-      return props.callParticipantCounts[jid] ?? 0;
-    }
-  }
-  return 0;
+  return callParticipantCountForChannel(
+    channel,
+    props.callParticipantCounts,
+    props.activeChannelJids,
+  );
 }
 
 function hasActivity(channelId: string): boolean {
@@ -91,9 +90,14 @@ function groupUnreadSummary(group: (typeof channelGroups.value)[number]) {
       unread: summary.unread + unread.unread,
       mentions: summary.mentions + unread.mentions,
       hasActivity: summary.hasActivity || hasActivity(channel.id),
+      callCount: summary.callCount + callParticipantCount(channel),
     }),
-    { unread: 0, mentions: 0, hasActivity: false },
+    { unread: 0, mentions: 0, hasActivity: false, callCount: 0 },
   );
+}
+
+function groupBadgeModel(group: (typeof channelGroups.value)[number]) {
+  return collapsedGroupBadgeModel(groupUnreadSummary(group));
 }
 
 function groupToggleLabel(group: (typeof channelGroups.value)[number]) {
@@ -371,17 +375,25 @@ watch(
                      get one too. -->
                 <template v-if="isGroupCollapsed(group.id)">
                   <span
-                    v-if="groupUnreadSummary(group).mentions > 0"
+                    v-if="groupBadgeModel(group).callCount > 0"
+                    class="chat-badge-glow--primary type-count-badge inline-flex min-w-[18px] h-[18px] px-1 items-center justify-center gap-0.5 rounded-full bg-primary/15 text-primary ring-1 ring-primary/30"
+                    aria-hidden="true"
+                  >
+                    <Phone class="w-3 h-3" />
+                    <span class="type-numeric leading-none">{{ groupBadgeModel(group).callCount }}</span>
+                  </span>
+                  <span
+                    v-if="groupBadgeModel(group).notification?.kind === 'mentions'"
                     class="chat-badge-glow--mention type-count-badge inline-flex min-w-[18px] h-[18px] px-1 items-center justify-center rounded-full bg-destructive text-destructive-foreground"
                     aria-hidden="true"
-                  >{{ groupUnreadSummary(group).mentions }}</span>
+                  >{{ groupBadgeModel(group).notification?.count }}</span>
                   <span
-                    v-else-if="groupUnreadSummary(group).unread > 0"
+                    v-else-if="groupBadgeModel(group).notification?.kind === 'unread'"
                     class="chat-badge-glow--primary type-count-badge inline-flex min-w-[18px] h-[18px] px-1 items-center justify-center rounded-full bg-primary text-primary-foreground"
                     aria-hidden="true"
-                  >{{ groupUnreadSummary(group).unread }}</span>
+                  >{{ groupBadgeModel(group).notification?.count }}</span>
                   <span
-                    v-else-if="groupUnreadSummary(group).hasActivity"
+                    v-else-if="groupBadgeModel(group).notification?.kind === 'activity'"
                     class="w-2 h-2 rounded-full bg-primary shadow-[0_0_6px_var(--glow-strong)]"
                     aria-hidden="true"
                   />

@@ -146,6 +146,7 @@ export class WaddleClient {
     search_room_history(room_jid: string, query: string, max: number): Promise<any>;
     search_users(query: string): Promise<any>;
     send_call_finish(peer_full_jid: string, sid_str: string): Promise<any>;
+    send_call_finish_migrated(peer_full_jid: string, old_sid_str: string, new_sid_str: string): Promise<any>;
     send_call_proceed(peer_full_jid: string, sid_str: string): Promise<any>;
     /**
      * Send a JMI `<propose/>` to the peer's bare JID (XEP-0353
@@ -154,14 +155,16 @@ export class WaddleClient {
      */
     send_call_propose(peer_bare_jid: string, sid_str: string, audio: boolean, video: boolean): Promise<any>;
     send_call_reject(peer_full_jid: string, sid_str: string): Promise<any>;
-    send_call_retract(peer_full_jid: string, sid_str: string): Promise<any>;
+    send_call_reject_tie_break(peer_full_jid: string, sid_str: string): Promise<any>;
+    send_call_retract(peer_jid: string, sid_str: string): Promise<any>;
+    send_call_retract_tie_break(peer_full_jid: string, sid_str: string): Promise<any>;
     /**
      * Send a Jingle `session-accept` IQ in response to a received
-     * session-initiate. `initiator` and `responder` are validated
-     * as full JIDs at the wasm boundary so a malformed JID surfaces
+     * session-initiate. `responder` is validated as a full JID at
+     * the wasm boundary so a malformed JID surfaces
      * as a clear `JsError` rather than a wire-rejected stanza.
      */
-    send_call_session_accept(peer_full_jid: string, initiator_full_jid: string, responder_full_jid: string, sid_str: string, audio: boolean, video: boolean): Promise<any>;
+    send_call_session_accept(peer_full_jid: string, responder_full_jid: string, sid_str: string, audio: boolean, video: boolean): Promise<any>;
     /**
      * Send a Jingle `session-initiate` IQ to the peer's full JID
      * (XEP-0166 §6.4). The `initiator` attribute names the call
@@ -193,7 +196,7 @@ export class WaddleClient {
      * ```xml
      * <iq type='set' to='calls.<domain>' id='…'>
      *   <jingle xmlns='urn:xmpp:jingle:1' action='session-initiate'
-     *           sid='ROOM_JID'>
+     *           sid='ATTEMPT_ID'>
      *     <muji xmlns='urn:xmpp:jingle:muji:0' room='ROOM_JID'/>
      *     <content creator='initiator' name='audio' senders='both'>
      *       <description xmlns='urn:xmpp:jingle:apps:rtp:1' media='audio'/>
@@ -204,9 +207,10 @@ export class WaddleClient {
      * </iq>
      * ```
      *
-     * Convention: `sid` is set to the room JID so that the
-     * corresponding `session-terminate` is unambiguous without
-     * requiring the client to track its own SIDs across reloads.
+     * Convention: `sid` is a per-attempt correlation id while
+     * `<muji room='…'/>` remains the stable SFU room identity.
+     * This lets the chat UI ignore a stale accept from a cancelled
+     * same-room retry without changing XEP-0272 room semantics.
      *
      * `video` opt-in mirrors the call store's `media.video`
      * flag — audio is always advertised (the call wouldn't be
@@ -214,7 +218,7 @@ export class WaddleClient {
      * asked for it. LiveKit handles the actual codec selection
      * once connected, so the descriptions are minimal.
      */
-    send_muji_session_initiate(room_jid: string, video: boolean): Promise<any>;
+    send_muji_session_initiate(room_jid: string, sid_str: string, video: boolean): Promise<any>;
     /**
      * Send a XEP-0272 Muji-bearing Jingle `session-terminate` IQ
      * to the SFU mixer (`calls.<server-domain>`). Server
@@ -226,14 +230,14 @@ export class WaddleClient {
      * ```xml
      * <iq type='set' to='calls.<domain>' id='…'>
      *   <jingle xmlns='urn:xmpp:jingle:1' action='session-terminate'
-     *           sid='ROOM_JID' initiator='alice@…'>
+     *           sid='PER_ATTEMPT_SID'>
      *     <muji xmlns='urn:xmpp:jingle:muji:0' room='ROOM_JID'/>
      *     <reason><success/></reason>
      *   </jingle>
      * </iq>
      * ```
      */
-    send_muji_session_terminate(room_jid: string): Promise<any>;
+    send_muji_session_terminate(room_jid: string, sid_str: string): Promise<any>;
     send_presence(status?: string | null, show?: string | null): Promise<any>;
     send_raw_iq(xml: string): Promise<any>;
     send_reaction(to: string, msg_type: string, target_id: string, emojis: string[], thread_id?: string | null, thread_parent?: string | null): Promise<any>;

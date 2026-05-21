@@ -258,6 +258,10 @@ pub struct WaddleCallEvent {
     pub join: Option<WaddleLiveKitJoin>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    #[serde(rename = "tieBreak", skip_serializing_if = "Option::is_none")]
+    pub tie_break: Option<bool>,
+    #[serde(rename = "migratedTo", skip_serializing_if = "Option::is_none")]
+    pub migrated_to: Option<String>,
 }
 
 #[derive(Debug, Serialize)]

@@ -150,6 +150,12 @@ impl SfuService for LiveKitSfu {
             .insert(identity.clone());
     }
 
+    fn has_call_participant(&self, call_id: &CallId, identity: &Identity) -> bool {
+        self.calls
+            .get(call_id)
+            .is_some_and(|entry| entry.contains(identity))
+    }
+
     fn unregister_call_participant(&self, call_id: &CallId, identity: &Identity) -> CallState {
         let remaining = match self.calls.get_mut(call_id) {
             Some(mut entry) => {

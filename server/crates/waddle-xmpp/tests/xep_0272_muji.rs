@@ -420,19 +420,27 @@ fn first_error_condition(events: &[OutboundEvent]) -> Option<DefinedCondition> {
 }
 
 fn has_session_accept_to(events: &[OutboundEvent], expected_to: &str) -> bool {
-    events.iter().any(|ev| {
+    session_accept_payload_to(events, expected_to).is_some()
+}
+
+fn session_accept_payload_to<'a>(
+    events: &'a [OutboundEvent],
+    expected_to: &str,
+) -> Option<&'a Element> {
+    events.iter().find_map(|ev| {
         let OutboundEvent::SendStanza(stanza) = ev else {
-            return false;
+            return None;
         };
         let Stanza::Iq(boxed) = stanza.as_ref() else {
-            return false;
+            return None;
         };
         let Iq::Set { payload, to, .. } = boxed.as_ref() else {
-            return false;
+            return None;
         };
-        to.as_ref().is_some_and(|j| j.to_string() == expected_to)
+        (to.as_ref().is_some_and(|j| j.to_string() == expected_to)
             && payload.name() == "jingle"
-            && payload.attr("action") == Some("session-accept")
+            && payload.attr("action") == Some("session-accept"))
+        .then_some(payload)
     })
 }
 
@@ -463,6 +471,36 @@ fn local_muji_mixer_jid_passes_federation_guard() {
     assert!(
         has_session_accept_to(&events, TEST_INITIATOR),
         "expected Muji session-accept addressed to initiator: {events:?}",
+    );
+}
+
+#[test]
+fn local_muji_session_accept_uses_focus_responder_without_initiator_attr() {
+    // XEP-0166 only recommends echoing `initiator` on actions sent
+    // by the responder. The Muji focus is the authenticated sender
+    // of the server-initiated session-accept, so the conformant and
+    // least ambiguous identity signal is `responder='calls.<domain>'`.
+    let iq = muji_session_initiate_iq(
+        TEST_INITIATOR,
+        &calls_mixer_jid(TEST_DOMAIN).to_string(),
+        "room@muc.waddle.test",
+        "muji-focus-responder",
+    );
+    let jid = test_full_jid();
+    let handler = JingleHandler::new(fixture_sfu());
+    let events = handler.handle(&iq, &ctx(&jid));
+    let accept = session_accept_payload_to(&events, TEST_INITIATOR)
+        .unwrap_or_else(|| panic!("expected Muji session-accept: {events:?}"));
+
+    assert_eq!(
+        accept.attr("responder"),
+        Some("calls.waddle.test"),
+        "Muji session-accept must identify the conference focus as responder",
+    );
+    assert_eq!(
+        accept.attr("initiator"),
+        None,
+        "Muji session-accept should not copy the client's initiator attr",
     );
 }
 

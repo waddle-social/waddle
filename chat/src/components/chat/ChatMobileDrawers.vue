@@ -1,7 +1,10 @@
 <script setup lang="ts">
 import { computed } from "vue";
 import { useStore } from "@nanostores/vue";
-import { $mucCallParticipants } from "@/lib/calls/muc-call-presence";
+import {
+  $mucCallParticipants,
+  mucCallParticipantCounts,
+} from "@/lib/calls/muc-call-presence";
 import WaddlesSidebar from "@/components/chat/WaddlesSidebar.vue";
 import TopicsPanel from "@/components/chat/TopicsPanel.vue";
 import DmPanel from "@/components/chat/DmPanel.vue";
@@ -59,11 +62,7 @@ function selectCommunitySurface(surface: "feed" | "stories" | "events") {
 // the same "call ongoing" chip.
 const mucCallParticipantsStore = useStore($mucCallParticipants);
 const callParticipantCounts = computed<Record<string, number>>(() => {
-  const counts: Record<string, number> = {};
-  for (const [jid, nicks] of Object.entries(mucCallParticipantsStore.value)) {
-    counts[jid] = nicks.length;
-  }
-  return counts;
+  return mucCallParticipantCounts(mucCallParticipantsStore.value);
 });
 
 const drawerExtensionRoutes = computed(() =>

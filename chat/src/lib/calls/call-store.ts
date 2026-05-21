@@ -1,7 +1,14 @@
 import { atom } from "nanostores";
 import { outboundCalls, type CallWireSender } from "./outbound";
 import type { CallEvent, CallMedia, CallState, LiveKitJoin } from "./types";
-import { awaitPreparingEcho } from "./muc-call-presence";
+import {
+  awaitPreparingEcho,
+  awaitNoOtherPreparing,
+  cancelMucCallPreparationWaiters,
+  clearMucCallParticipant,
+  normalizeMucCallRoomJid,
+} from "./muc-call-presence";
+import { barePeerJid } from "../xmpp/jid";
 
 /**
  * XEP-0272 §Joining MUST: a client emitting a preparing presence
@@ -12,42 +19,110 @@ import { awaitPreparingEcho } from "./muc-call-presence";
  * from hanging indefinitely on a missed echo.
  */
 const PREPARING_ECHO_TIMEOUT_MS = 2000;
+const PREPARING_PEERS_TIMEOUT_MS = 2000;
 
 /**
  * XEP-0166 §6.3 + XEP-0272 separate-IQ accept: the server's
  * session-accept arrives as an inbound `<iq type='set'>` after
  * the empty IQ-result ack of our session-initiate. We register
- * a resolver keyed by sid (= room JID per Waddle convention)
+ * a resolver keyed by the per-attempt Jingle sid before sending,
  * BEFORE sending the initiate, then await it after the initiate's
  * empty ack returns. 10s timeout covers slow SFU token mints.
  */
 const MUJI_ACCEPT_TIMEOUT_MS = 10_000;
 
 /**
- * Pending Muji session-accept resolvers keyed by sid (= room JID).
+ * Pending Muji session-accept resolvers keyed by per-attempt Jingle sid.
  * The `on_call` dispatcher routes an inbound
  * `CallEventKind::SessionAccept` whose sid matches a registered
  * entry to the resolver instead of running the 1:1 reducer — Muji
  * accepts are owned by `beginMucCall`'s Promise chain, not the
  * `$callState` reducer.
  */
-const pendingMujiAccepts = new Map<
-  string,
-  { resolve: (join: LiveKitJoin) => void; reject: (err: Error) => void; timer: ReturnType<typeof setTimeout> }
->();
+type PendingMujiAccept = {
+  roomJid: string;
+  attemptId: string;
+  expectedFrom?: string;
+  resolve: (join: LiveKitJoin) => void;
+  reject: (err: Error) => void;
+  timer: ReturnType<typeof setTimeout>;
+};
 
-function registerPendingMujiAccept(sid: string): Promise<LiveKitJoin> {
+const pendingMujiAccepts = new Map<string, PendingMujiAccept>();
+
+function rejectPendingMujiAccept(
+  sid: string,
+  err: Error,
+  attemptId?: string,
+): void {
+  const pending = pendingMujiAccepts.get(sid);
+  if (!pending) return;
+  if (attemptId && pending.attemptId !== attemptId) return;
+  pendingMujiAccepts.delete(sid);
+  clearTimeout(pending.timer);
+  pending.reject(err);
+}
+
+function rejectAllPendingMujiAccepts(err: Error): void {
+  for (const [sid, pending] of pendingMujiAccepts) {
+    pendingMujiAccepts.delete(sid);
+    clearTimeout(pending.timer);
+    pending.reject(err);
+  }
+}
+
+function normalizeExpectedMujiAcceptFrom(jid?: string | null): string | undefined {
+  const bare = barePeerJid(jid ?? "").toLowerCase();
+  return bare || undefined;
+}
+
+function registerPendingMujiAccept(
+  sid: string,
+  roomJid: string,
+  attemptId: string,
+  expectedFrom?: string | null,
+): Promise<LiveKitJoin> {
   return new Promise<LiveKitJoin>((resolve, reject) => {
-    const timer = setTimeout(() => {
+    const previous = pendingMujiAccepts.get(sid);
+    if (previous) {
       pendingMujiAccepts.delete(sid);
+      clearTimeout(previous.timer);
+      previous.reject(
+        new Error("Muji session-accept wait replaced by a new call attempt"),
+      );
+    }
+    let entry: PendingMujiAccept;
+    const timer = setTimeout(() => {
+      if (pendingMujiAccepts.get(sid) === entry) {
+        pendingMujiAccepts.delete(sid);
+      }
       reject(
         new Error(
           `Muji session-accept did not arrive within ${MUJI_ACCEPT_TIMEOUT_MS}ms`,
         ),
       );
     }, MUJI_ACCEPT_TIMEOUT_MS);
-    pendingMujiAccepts.set(sid, { resolve, reject, timer });
+    entry = {
+      roomJid,
+      attemptId,
+      expectedFrom: normalizeExpectedMujiAcceptFrom(expectedFrom),
+      resolve,
+      reject,
+      timer,
+    };
+    pendingMujiAccepts.set(sid, entry);
   });
+}
+
+function isExpectedMujiAccept(event: CallEvent, pending: {
+  roomJid: string;
+  expectedFrom?: string;
+}): boolean {
+  if (event.kind !== "session-accept") return false;
+  const eventRoom = normalizeMucCallRoomJid(event.join.room);
+  if (eventRoom !== pending.roomJid) return false;
+  if (!pending.expectedFrom) return true;
+  return barePeerJid(event.from).toLowerCase() === pending.expectedFrom;
 }
 
 /**
@@ -60,6 +135,7 @@ function tryFulfillMujiAccept(event: CallEvent): boolean {
   if (event.kind !== "session-accept") return false;
   const pending = pendingMujiAccepts.get(event.sid);
   if (!pending) return false;
+  if (!isExpectedMujiAccept(event, pending)) return true;
   pendingMujiAccepts.delete(event.sid);
   clearTimeout(pending.timer);
   pending.resolve(event.join);
@@ -125,7 +201,13 @@ export function reduceCallState(current: CallState, event: CallEvent): CallState
         "sid" in current &&
         current.sid === event.sid
       ) {
-        return { phase: "ended", sid: event.sid, reason: event.kind };
+        return {
+          phase: "ended",
+          sid: event.sid,
+          reason: event.tieBreak && event.reason === "expired"
+            ? "expired"
+            : event.kind,
+        };
       }
       return current;
     case "session-initiate":
@@ -142,6 +224,7 @@ export function reduceCallState(current: CallState, event: CallEvent): CallState
         media: event.media,
         join: event.join,
         kind: "dm",
+        initiator: event.from,
       };
     case "session-accept":
       // Initiator receives the Jingle session-accept after the
@@ -151,7 +234,15 @@ export function reduceCallState(current: CallState, event: CallEvent): CallState
       if (current.phase !== "outgoing" || current.sid !== event.sid) {
         return current;
       }
-      return {
+      return current.initiator ? {
+        phase: "active",
+        peer: event.from,
+        sid: event.sid,
+        media: event.media,
+        join: event.join,
+        kind: "dm",
+        initiator: current.initiator,
+      } : {
         phase: "active",
         peer: event.from,
         sid: event.sid,
@@ -171,7 +262,7 @@ export function reduceCallState(current: CallState, event: CallEvent): CallState
         return {
           phase: "ended",
           sid: event.sid,
-          reason: event.kind === "session-terminate" ? event.reason : null,
+          reason: event.kind === "session-terminate" ? event.reason : event.reason ?? null,
         };
       }
       return current;
@@ -186,17 +277,18 @@ export function reduceCallState(current: CallState, event: CallEvent): CallState
  *
  * 1. Clear `$lastCallError` on any non-trivial transition so an
  *    error from a prior call doesn't linger over a fresh one.
- * 2. Cancel the outgoing-ring auto-retract timer when leaving the
- *    `outgoing` phase. Done here, not in the reducer, because
+ * 2. Cancel the outgoing-ring auto-retract timer when the peer
+ *    proceeds or when leaving the `outgoing` phase. Done here, not
+ *    in the reducer, because
  *    `setTimeout`/`clearTimeout` are global-state side-effects.
  */
 export function applyCallEvent(event: CallEvent): void {
   // Route inbound Muji session-accept stanzas to the pending
   // `beginMucCall` Promise BEFORE the 1:1 reducer sees them. A
-  // Muji accept has its sid equal to the room JID and arrives
-  // from the SFU mixer (`calls.<domain>`); the 1:1 reducer would
-  // mis-interpret it as a peer accepting a JMI ring. Consuming
-  // here keeps the two flows cleanly separated.
+  // Muji accept carries a per-attempt sid and arrives from the SFU
+  // mixer (`calls.<domain>`). The 1:1 reducer would mis-interpret
+  // it as a peer accepting a JMI ring. Consuming here keeps the two
+  // flows cleanly separated.
   if (tryFulfillMujiAccept(event)) {
     return;
   }
@@ -204,13 +296,17 @@ export function applyCallEvent(event: CallEvent): void {
   const next = reduceCallState(before, event);
   if (next !== before) {
     $lastCallError.set(null);
-    // Any transition out of outgoing cancels the auto-retract timer:
-    // proceed→outgoing stays outgoing (timer keeps running), but the
-    // moment session-accept lands or the call is rejected/retracted
-    // the slot moves and the timer is moot.
+    // Any transition out of outgoing cancels the auto-retract timer.
     if (before.phase === "outgoing" && next.phase !== "outgoing") {
-      cancelOutgoingTimeout();
+      cancelCallTimers();
     }
+  }
+  if (
+    before.phase === "outgoing" &&
+    event.kind === "proceed" &&
+    event.sid === before.sid
+  ) {
+    cancelOutgoingTimeout();
   }
   $callState.set(next);
 }
@@ -220,8 +316,38 @@ export function applyCallEvent(event: CallEvent): void {
  * the `ended` state (the toast closes, the user clicks dismiss).
  */
 export function clearCallState(): void {
-  cancelOutgoingTimeout();
+  cancelCallTimers();
+  rejectAllPendingMujiAccepts(
+    new Error("Muji session-accept wait cancelled while clearing call state"),
+  );
+  const current = $callState.get();
+  if (current.phase === "muc-pending") {
+    cancelMucCallPreparationWaiters(
+      current.peer,
+      current.selfNick,
+      new Error("Muji preparing wait cancelled while clearing call state"),
+    );
+  }
   $callState.set({ phase: "idle" });
+  $lastCallError.set(null);
+}
+
+export function failCallState(err: unknown, sid: string): void {
+  cancelCallTimers();
+  $callState.set({ phase: "ended", sid, reason: "error" });
+  reportCallError(err);
+}
+
+export function acceptIncomingTieBreakPropose(
+  event: Extract<CallEvent, { kind: "propose" }>,
+): void {
+  cancelCallTimers();
+  $callState.set({
+    phase: "incoming",
+    from: event.from,
+    sid: event.sid,
+    media: event.media,
+  });
   $lastCallError.set(null);
 }
 
@@ -231,8 +357,18 @@ export function clearCallState(): void {
  * overlay. The wire send is the caller's responsibility — keep
  * the store side-effect free for clean unit testing.
  */
-export function beginOutgoingCall(to: string, sid: string, media: CallMedia): void {
-  $callState.set({ phase: "outgoing", to, sid, media });
+export function beginOutgoingCall(
+  to: string,
+  sid: string,
+  media: CallMedia,
+  initiator?: string,
+): void {
+  cancelCallTimers();
+  $callState.set(
+    initiator
+      ? { phase: "outgoing", to, sid, media, initiator }
+      : { phase: "outgoing", to, sid, media },
+  );
   $lastCallError.set(null);
 }
 
@@ -243,8 +379,11 @@ export function beginOutgoingCall(to: string, sid: string, media: CallMedia): vo
  * when the responder is offline / has notifications muted.
  */
 const OUTGOING_TIMEOUT_MS = 45_000;
+const SESSION_ACCEPT_TIMEOUT_MS = 45_000;
 
 let outgoingTimer: ReturnType<typeof setTimeout> | null = null;
+let sessionAcceptTimer: ReturnType<typeof setTimeout> | null = null;
+let sessionAcceptTimeoutMs = SESSION_ACCEPT_TIMEOUT_MS;
 
 /**
  * Schedule the auto-retract for the most recent `beginOutgoingCall`.
@@ -279,11 +418,61 @@ export function scheduleOutgoingTimeout(
   }, timeoutMs);
 }
 
+/**
+ * After a responder sends XEP-0353 `<proceed/>`, the initiator's
+ * ringing timeout is cancelled because the peer did answer. The
+ * call is still not active, though, until XEP-0166
+ * `<session-accept/>` arrives. This second timeout covers the gap
+ * where session-initiate was sent and acked, but the accept never
+ * comes back.
+ */
+export function scheduleSessionAcceptTimeout(
+  sender: CallWireSender,
+  peerFullJid: string,
+  sid: string,
+  timeoutMs: number = sessionAcceptTimeoutMs,
+): void {
+  cancelSessionAcceptTimeout();
+  sessionAcceptTimer = setTimeout(() => {
+    sessionAcceptTimer = null;
+    const s = $callState.get();
+    if (s.phase !== "outgoing" || s.sid !== sid) return;
+    void outboundCalls
+      .sessionTerminate(sender, peerFullJid, sid, "timeout")
+      .catch((err) => reportCallError(err));
+    $callState.set({
+      phase: "ended",
+      sid,
+      reason: "timeout",
+    });
+  }, timeoutMs);
+}
+
+export function setSessionAcceptTimeoutMsForTests(timeoutMs: number): () => void {
+  const previous = sessionAcceptTimeoutMs;
+  sessionAcceptTimeoutMs = timeoutMs;
+  return () => {
+    sessionAcceptTimeoutMs = previous;
+  };
+}
+
 function cancelOutgoingTimeout(): void {
   if (outgoingTimer) {
     clearTimeout(outgoingTimer);
     outgoingTimer = null;
   }
+}
+
+function cancelSessionAcceptTimeout(): void {
+  if (sessionAcceptTimer) {
+    clearTimeout(sessionAcceptTimer);
+    sessionAcceptTimer = null;
+  }
+}
+
+function cancelCallTimers(): void {
+  cancelOutgoingTimeout();
+  cancelSessionAcceptTimeout();
 }
 
 /**
@@ -330,7 +519,7 @@ export async function tearDownActiveCall(
   sender: CallWireSender | null,
   reason: "success" | "gone",
 ): Promise<void> {
-  cancelOutgoingTimeout();
+  cancelCallTimers();
   const s = $callState.get();
   if (sender) {
     try {
@@ -372,10 +561,12 @@ export async function tearDownActiveCall(
                 );
               } catch (err) {
                 reportCallError(err);
+              } finally {
+                clearMucCallParticipant(s.peer, s.selfNick);
               }
             }
             try {
-              await sendMujiSessionTerminate(raw, s.peer);
+              await sendMujiSessionTerminate(raw, s.peer, s.sid);
             } catch (err) {
               reportCallError(err);
             }
@@ -386,6 +577,44 @@ export async function tearDownActiveCall(
           break;
         case "incoming":
           await outboundCalls.reject(sender, s.from, s.sid);
+          break;
+        case "muc-pending":
+          rejectPendingMujiAccept(
+            s.sid,
+            new Error("Muji session-accept wait cancelled while clearing call state"),
+            s.attemptId,
+          );
+          cancelMucCallPreparationWaiters(
+            s.peer,
+            s.selfNick,
+            new Error("Muji preparing wait cancelled while clearing call state"),
+          );
+          $callState.set({ phase: "idle" });
+          {
+            const raw = sender as RawIqSender;
+            if (s.selfNick && raw.update_muji_presence) {
+              try {
+                await raw.update_muji_presence(
+                  s.peer,
+                  s.selfNick,
+                  false,
+                  false,
+                  false,
+                );
+              } catch (err) {
+                reportCallError(err);
+              } finally {
+                clearMucCallParticipant(s.peer, s.selfNick);
+              }
+            }
+            if (s.activePresencePublished) {
+              try {
+                await sendMujiSessionTerminate(raw, s.peer, s.sid);
+              } catch (err) {
+                reportCallError(err);
+              }
+            }
+          }
           break;
         default:
           break;
@@ -421,12 +650,13 @@ export type RawIqSender = {
    * §6.3 and surfaced through the `on_call` callback. The caller
    * (see `sendMujiSessionInitiate` below) registers a pending
    * resolver before invoking this method.
-   */
+  */
   send_muji_session_initiate?: (
     room_jid: string,
+    sid: string,
     video: boolean,
   ) => Promise<void>;
-  send_muji_session_terminate?: (room_jid: string) => Promise<void>;
+  send_muji_session_terminate?: (room_jid: string, sid: string) => Promise<void>;
   update_muji_presence?: (
     room_jid: string,
     nick: string,
@@ -439,7 +669,7 @@ export type RawIqSender = {
 /**
  * XEP-0166 §6.3 + XEP-0272 separate-IQ accept flow:
  *
- *   1. Register a pending Muji-accept resolver keyed by `roomJid`
+ *   1. Register a pending Muji-accept resolver keyed by `attemptId`
  *      BEFORE sending so an inbound session-accept can't beat us
  *      to the table.
  *   2. Send the session-initiate IQ via the wasm bridge. The
@@ -451,27 +681,69 @@ export type RawIqSender = {
 async function sendMujiSessionInitiate(
   sender: RawIqSender,
   roomJid: string,
+  attemptId: string,
   video: boolean,
+  expectedMixerJid?: string | null,
 ): Promise<LiveKitJoin> {
   if (!sender.send_muji_session_initiate) {
     throw new Error(
       "wasm client does not expose send_muji_session_initiate; rebuild the wasm bundle",
     );
   }
-  const acceptWait = registerPendingMujiAccept(roomJid);
+  const acceptWait = registerPendingMujiAccept(
+    attemptId,
+    roomJid,
+    attemptId,
+    expectedMixerJid,
+  );
+  acceptWait.catch(() => undefined);
   try {
-    await sender.send_muji_session_initiate(roomJid, video);
+    await sender.send_muji_session_initiate(roomJid, attemptId, video);
   } catch (err) {
     // Roll back the pending registration so a future call attempt
     // doesn't resolve against this aborted one.
-    const pending = pendingMujiAccepts.get(roomJid);
-    if (pending) {
-      pendingMujiAccepts.delete(roomJid);
-      clearTimeout(pending.timer);
-    }
+    rejectPendingMujiAccept(
+      attemptId,
+      err instanceof Error ? err : new Error(String(err)),
+      attemptId,
+    );
     throw err;
   }
   return await acceptWait;
+}
+
+async function rollbackMucCallSetup(
+  sender: RawIqSender,
+  roomJid: string,
+  selfNick: string,
+  terminateSfu: boolean,
+  sid?: string,
+): Promise<void> {
+  if (sender.update_muji_presence) {
+    try {
+      await sender.update_muji_presence(
+        roomJid,
+        selfNick,
+        false,
+        false,
+        false,
+      );
+    } catch (err) {
+      reportCallError(err);
+    } finally {
+      clearMucCallParticipant(roomJid, selfNick);
+    }
+  }
+  if (terminateSfu) {
+    try {
+      if (!sid) {
+        throw new Error("Cannot terminate Muji session without the active Jingle sid");
+      }
+      await sendMujiSessionTerminate(sender, roomJid, sid);
+    } catch (err) {
+      reportCallError(err);
+    }
+  }
 }
 
 /**
@@ -482,6 +754,7 @@ async function sendMujiSessionInitiate(
 async function sendMujiSessionTerminate(
   sender: RawIqSender | CallWireSender,
   roomJid: string,
+  sid: string,
 ): Promise<void> {
   const rawSender = sender as RawIqSender;
   if (!rawSender.send_muji_session_terminate) {
@@ -489,7 +762,32 @@ async function sendMujiSessionTerminate(
       "wasm client does not expose send_muji_session_terminate; rebuild the wasm bundle",
     );
   }
-  await rawSender.send_muji_session_terminate(roomJid);
+  await rawSender.send_muji_session_terminate(roomJid, sid);
+}
+
+function mucSetupStillPending(
+  roomJid: string,
+  selfNick: string,
+  attemptId: string,
+): boolean {
+  const state = $callState.get();
+  return (
+    state.phase === "muc-pending" &&
+    state.peer === roomJid &&
+    state.sid === attemptId &&
+    state.selfNick === selfNick &&
+    state.attemptId === attemptId
+  );
+}
+
+function assertMucSetupStillPending(
+  roomJid: string,
+  selfNick: string,
+  attemptId: string,
+): void {
+  if (!mucSetupStillPending(roomJid, selfNick, attemptId)) {
+    throw new Error(`Muji call setup for ${roomJid} was cancelled`);
+  }
 }
 
 /**
@@ -498,17 +796,16 @@ async function sendMujiSessionTerminate(
  *
  *   1. Emit `<muji><preparing/></muji>` MUC presence so other
  *      occupants know we are about to join (the XEP MUSTs this).
- *   2. Send the Jingle session-initiate to the SFU mixer.
- *   3. Once the session-accept arrives with a LiveKit token,
- *      re-emit `<muji>` with `<content/>` children so we move
- *      from "preparing" to "in call" on the wire.
+ *   2. Wait for our preparing echo and for any other preparing
+ *      occupants to finish, then publish active content presence.
+ *   3. Send the Jingle session-initiate to the SFU mixer and wait
+ *      for the separate session-accept carrying LiveKit credentials.
  *   4. Transition `$callState` to `active`.
  *
  * XEP-0272's MUST about waiting for the MUC rebroadcast of the
- * preparing presence is satisfied implicitly: the session-initiate
- * IQ round-trip takes longer than the in-process presence echo
- * back from the local MUC, so by the time we move to step 3 the
- * room has already reflected step 1.
+ * preparing presence is a setup precondition: if the echo or active
+ * Muji publication fails, setup rolls back and the local call never
+ * becomes active.
  *
  * No propose/proceed JMI round-trip — MUC calls are
  * presence-discovered, so there's no responder to ring.
@@ -518,67 +815,136 @@ export async function beginMucCall(
   roomJid: string,
   media: CallMedia,
   selfNick?: string,
+  expectedMixerJid?: string | null,
 ): Promise<void> {
-  // Step 1 — preparing presence (XEP-0272 §Joining two-phase flow).
-  // Register the echo waiter BEFORE emitting so a fast MUC echo
-  // can't fire before our listener is ready. The await below
-  // blocks until the MUC rebroadcasts our preparing presence (or
-  // the 2s safety timeout fires). Best-effort: a stale wasm
-  // bundle without `update_muji_presence` skips the two-phase
-  // shape entirely; the call still works but isn't strict-XEP.
-  if (selfNick && sender.update_muji_presence) {
-    const echoWait = awaitPreparingEcho(
-      roomJid,
-      selfNick,
-      PREPARING_ECHO_TIMEOUT_MS,
-    );
-    try {
-      await sender.update_muji_presence(
-        roomJid,
-        selfNick,
-        false, // active (no <content/> yet)
-        true, // preparing
-        false, // video — irrelevant in preparing phase
-      );
-    } catch (err) {
-      reportCallError(err);
-    }
-    // XEP-0272 §Joining: "The client MUST then wait until the MUC
-    // rebroadcasts its presence message". We satisfy the literal
-    // MUST by holding here for the echo.
-    await echoWait;
+  const normalizedRoomJid = normalizeMucCallRoomJid(roomJid);
+  if (!normalizedRoomJid) {
+    throw new Error("Cannot start a group call without a room JID");
   }
+  if (!selfNick) {
+    throw new Error("Cannot start a group call before MUC presence has a nick");
+  }
+  if (!sender.update_muji_presence) {
+    throw new Error(
+      "wasm client does not expose update_muji_presence; rebuild the wasm bundle",
+    );
+  }
+  const current = $callState.get();
+  if (current.phase !== "idle" && current.phase !== "ended") {
+    throw new Error("Cannot start a group call while another call is active or starting");
+  }
+  const attemptId = crypto.randomUUID();
 
-  // Step 2 — session-initiate. By now the MUC has acknowledged
-  // our preparing presence (per XEP-0272 §Joining MUST), so the
-  // SFU mixer's session-accept arrives in a deterministic order.
-  const join = await sendMujiSessionInitiate(sender, roomJid, media.video);
   $callState.set({
-    phase: "active",
-    peer: roomJid,
-    sid: roomJid,
+    phase: "muc-pending",
+    peer: normalizedRoomJid,
+    sid: attemptId,
     media,
-    join,
     kind: "muc",
     selfNick,
+    attemptId,
   });
   $lastCallError.set(null);
 
-  // Step 3 — content-declaring presence. Other occupants now see
-  // the chip pulse because `<muji>` carries `<content/>` (our
-  // store helper's `is_active` check). Audio is implied; we
-  // advertise video only when the user enabled it.
-  if (selfNick && sender.update_muji_presence) {
-    try {
-      await sender.update_muji_presence(
-        roomJid,
-        selfNick,
-        true, // active
-        false, // preparing
-        media.video, // video
-      );
-    } catch (err) {
-      reportCallError(err);
+  // Step 1 — preparing presence (XEP-0272 §Joining two-phase flow).
+  // Register the echo waiter BEFORE emitting so a fast MUC echo
+  // can't fire before our listener is ready. The await below
+  // blocks until the MUC rebroadcasts our preparing presence; the
+  // timeout rejects and rolls setup back.
+  let echoWait: Promise<void> | null = null;
+  let activePresencePublished = false;
+  try {
+    echoWait = awaitPreparingEcho(
+      normalizedRoomJid,
+      selfNick,
+      PREPARING_ECHO_TIMEOUT_MS,
+    );
+    await sender.update_muji_presence(
+      normalizedRoomJid,
+      selfNick,
+      false, // active (no <content/> yet)
+      true, // preparing
+      false, // video — irrelevant in preparing phase
+    );
+    assertMucSetupStillPending(normalizedRoomJid, selfNick, attemptId);
+    // XEP-0272 §Joining: "The client MUST then wait until the MUC
+    // rebroadcasts its presence message", then wait for other
+    // occupants that had `<preparing/>` in their presence to finish
+    // preparation before we publish contents.
+    await echoWait;
+    assertMucSetupStillPending(normalizedRoomJid, selfNick, attemptId);
+    await awaitNoOtherPreparing(
+      normalizedRoomJid,
+      selfNick,
+      PREPARING_PEERS_TIMEOUT_MS,
+    );
+    assertMucSetupStillPending(normalizedRoomJid, selfNick, attemptId);
+
+    // Step 2 — content-declaring presence. XEP-0272 §Joining says a
+    // client advertises contents in MUC presence before initiating
+    // the corresponding Jingle sessions.
+    await sender.update_muji_presence(
+      normalizedRoomJid,
+      selfNick,
+      true, // active
+      false, // preparing
+      media.video, // video
+    );
+    if (!mucSetupStillPending(normalizedRoomJid, selfNick, attemptId)) {
+      await rollbackMucCallSetup(sender, normalizedRoomJid, selfNick, false, attemptId);
+      throw new Error(`Muji call setup for ${normalizedRoomJid} was cancelled`);
     }
+    activePresencePublished = true;
+    $callState.set({
+      phase: "muc-pending",
+      peer: normalizedRoomJid,
+      sid: attemptId,
+      media,
+      kind: "muc",
+      selfNick,
+      attemptId,
+      activePresencePublished: true,
+    });
+
+    // Step 3 — session-initiate. The SFU mixer's session-accept
+    // arrives after the active Muji presence is already room-visible.
+    const join = await sendMujiSessionInitiate(
+      sender,
+      normalizedRoomJid,
+      attemptId,
+      media.video,
+      expectedMixerJid,
+    );
+    assertMucSetupStillPending(normalizedRoomJid, selfNick, attemptId);
+
+    $callState.set({
+      phase: "active",
+      peer: normalizedRoomJid,
+      sid: attemptId,
+      media,
+      join,
+      kind: "muc",
+      selfNick,
+    });
+    $lastCallError.set(null);
+  } catch (err) {
+    echoWait?.catch(() => undefined);
+    const pending = $callState.get();
+    if (
+      pending.phase === "muc-pending" &&
+      pending.peer === normalizedRoomJid &&
+      pending.sid === attemptId &&
+      pending.attemptId === attemptId
+    ) {
+      await rollbackMucCallSetup(
+        sender,
+        normalizedRoomJid,
+        selfNick,
+        activePresencePublished,
+        attemptId,
+      );
+      $callState.set({ phase: "idle" });
+    }
+    throw err;
   }
 }

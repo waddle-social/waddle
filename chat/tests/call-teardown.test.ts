@@ -1,18 +1,99 @@
 import { afterEach, describe, expect, mock, test } from "bun:test";
 import {
   $callState,
-  applyCallEvent,
+  $lastCallError,
   beginOutgoingCall,
   clearCallState,
   scheduleOutgoingTimeout,
+  setSessionAcceptTimeoutMsForTests,
   tearDownActiveCall,
 } from "../src/lib/calls/call-store";
 import {
-  applyMucCallPresence,
+  $mucCallParticipants,
   clearMucCallParticipants,
 } from "../src/lib/calls/muc-call-presence";
+import { startMucCallAction } from "../src/lib/calls/muc-call-actions";
 import type { CallWireSender } from "../src/lib/calls/outbound";
-import type { CallMedia, LiveKitJoin } from "../src/lib/calls/types";
+import type { CallEvent, CallMedia, LiveKitJoin } from "../src/lib/calls/types";
+import { BrowserXmppClient } from "../src/lib/xmpp-client";
+import type { WaddleSession } from "../src/lib/server-auth";
+
+function session(partial: Partial<WaddleSession> = {}): WaddleSession {
+  return {
+    username: "alice",
+    jid: "alice@waddle.test/web",
+    session_id: "tok",
+    xmpp_websocket_url: "wss://waddle.test/ws",
+    ...partial,
+  } as WaddleSession;
+}
+
+function wireClientEvents(sender: Partial<CallWireSender> = {}) {
+  let onPresence: ((presence: {
+    from?: string;
+    presence_type?: string;
+    muji?: { preparing: boolean; active: boolean };
+  }) => void) | null = null;
+  let onCall: ((event: CallEvent) => void) | null = null;
+  let onDisconnected: (() => void) | null = null;
+  const client = new BrowserXmppClient(session());
+  const xmpp = {
+    set_on_presence: (cb: NonNullable<typeof onPresence>) => {
+      onPresence = cb;
+    },
+    set_on_call: (cb: NonNullable<typeof onCall>) => {
+      onCall = cb;
+    },
+    set_on_disconnected: (cb: NonNullable<typeof onDisconnected>) => {
+      onDisconnected = cb;
+    },
+    ...sender,
+  };
+  (client as unknown as { wireEvents: (xmpp: typeof xmpp) => void }).wireEvents(xmpp);
+  return {
+    client,
+    xmpp,
+    emitPresence(presence: Parameters<NonNullable<typeof onPresence>>[0]) {
+      onPresence?.(presence);
+    },
+    emitCall(event: CallEvent) {
+      onCall?.(event);
+    },
+    emitDisconnected() {
+      onDisconnected?.();
+    },
+  };
+}
+
+async function flushCallSideEffects(): Promise<void> {
+  for (let i = 0; i < 8; i += 1) {
+    await Promise.resolve();
+  }
+}
+
+function firstMockCallArg(fn: unknown, index: number): unknown {
+  return (fn as { mock: { calls: unknown[][] } }).mock.calls[0]?.[index];
+}
+
+function wireEmitterPresenceEvents() {
+  let onPresence: ((presence: {
+    from?: string;
+    presence_type?: string;
+    muji?: { preparing: boolean; active: boolean };
+  }) => void) | null = null;
+  const client = new BrowserXmppClient(session());
+  const xmpp = {
+    on: (event: string, cb: typeof onPresence) => {
+      if (event === "presence") onPresence = cb;
+    },
+  };
+  (client as unknown as { wireEvents: (xmpp: typeof xmpp) => void }).wireEvents(xmpp);
+  return {
+    emitPresence(presence: Parameters<NonNullable<typeof onPresence>>[0]) {
+      onPresence?.(presence);
+    },
+  };
+}
 
 /**
  * Mock the wasm `update_muji_presence` such that the preparing
@@ -22,7 +103,9 @@ import type { CallMedia, LiveKitJoin } from "../src/lib/calls/types";
  * pay the 2s echo-timeout penalty on every call to `beginMucCall`
  * that passes a `selfNick`.
  */
-function mockUpdateMujiPresenceWithEcho() {
+function mockUpdateMujiPresenceWithEcho(
+  emitPresence: ReturnType<typeof wireClientEvents>["emitPresence"],
+) {
   return mock(
     async (
       roomJid: string,
@@ -32,14 +115,14 @@ function mockUpdateMujiPresenceWithEcho() {
       _video: boolean,
     ) => {
       if (preparing) {
-        applyMucCallPresence({
+        emitPresence({
           from: `${roomJid}/${nick}`,
           presence_type: "available",
           muji: { preparing: true, active: false },
         });
       }
       if (active) {
-        applyMucCallPresence({
+        emitPresence({
           from: `${roomJid}/${nick}`,
           presence_type: "available",
           muji: { preparing: false, active: true },
@@ -57,17 +140,20 @@ function mockUpdateMujiPresenceWithEcho() {
  * wasm bridge would parse this from an inbound `<iq type='set'>`
  * stanza routed through `on_call`; tests skip the wire dance.
  */
-function mockSendMujiSessionInitiateWithAccept(join: LiveKitJoin) {
-  return mock(async (roomJid: string, _video: boolean) => {
+function mockSendMujiSessionInitiateWithAccept(
+  join: LiveKitJoin,
+  emitCall: ReturnType<typeof wireClientEvents>["emitCall"],
+) {
+  return mock(async (_roomJid: string, sid: string, _video: boolean) => {
     // Empty IQ-result ack is the function's resolution; fire the
     // inbound session-accept on the next microtask so the await
     // chain in beginMucCall sees the resolver populated before the
     // event lands.
     queueMicrotask(() => {
-      applyCallEvent({
+      emitCall({
         kind: "session-accept",
         from: "calls.waddle.test",
-        sid: roomJid,
+        sid,
         media: { audio: true, video: true },
         join,
       });
@@ -90,6 +176,7 @@ function mockSender(): CallWireSender {
     send_call_reject: mock(async () => undefined),
     send_call_retract: mock(async () => undefined),
     send_call_finish: mock(async () => undefined),
+    send_call_finish_migrated: mock(async () => undefined),
     send_call_session_initiate: mock(async () => undefined),
     send_call_session_accept: mock(async () => undefined),
     send_call_session_terminate: mock(async () => undefined),
@@ -98,6 +185,7 @@ function mockSender(): CallWireSender {
 
 afterEach(() => {
   clearCallState();
+  $lastCallError.set(null);
   // The Muji mocks above fire `applyMucCallPresence` to simulate
   // MUC echoes; clearing the participants store between tests
   // keeps that state from leaking into other test files (e.g.
@@ -115,6 +203,7 @@ describe("tearDownActiveCall", () => {
       media: audioVideo,
       join,
       kind: "dm",
+      initiator: "alice@waddle.test/web",
     });
     await tearDownActiveCall(sender, "gone");
     expect(sender.send_call_session_terminate).toHaveBeenCalledTimes(1);
@@ -140,6 +229,7 @@ describe("tearDownActiveCall", () => {
       media: audioVideo,
       join,
       kind: "dm",
+      initiator: "alice@waddle.test/web",
     });
     await tearDownActiveCall(sender, "success");
     expect(sender.send_call_session_terminate).toHaveBeenCalledTimes(1);
@@ -168,6 +258,7 @@ describe("tearDownActiveCall", () => {
       media: audioVideo,
       join,
       kind: "dm",
+      initiator: "alice@waddle.test/web",
     });
     await tearDownActiveCall(sender, "success");
     expect(sender.send_call_session_terminate).toHaveBeenCalledTimes(1);
@@ -183,6 +274,7 @@ describe("tearDownActiveCall", () => {
       media: audioVideo,
       join,
       kind: "dm",
+      initiator: "alice@waddle.test/web",
     });
     await tearDownActiveCall(sender, "success");
     expect(sender.send_call_session_terminate).toHaveBeenCalledWith(
@@ -205,13 +297,13 @@ describe("tearDownActiveCall", () => {
     const sender = mockSender();
     $callState.set({
       phase: "incoming",
-      from: "alice@waddle.test",
+      from: "alice@waddle.test/desktop",
       sid: "c3",
       media: audioVideo,
     });
     await tearDownActiveCall(sender, "gone");
     expect(sender.send_call_reject).toHaveBeenCalledTimes(1);
-    expect(sender.send_call_reject).toHaveBeenCalledWith("alice@waddle.test", "c3");
+    expect(sender.send_call_reject).toHaveBeenCalledWith("alice@waddle.test/desktop", "c3");
     expect($callState.get()).toEqual({ phase: "idle" });
   });
 
@@ -231,50 +323,975 @@ describe("tearDownActiveCall", () => {
       media: audioVideo,
       join,
       kind: "dm",
+      initiator: "alice@waddle.test/web",
     });
     await tearDownActiveCall(null, "gone");
     expect($callState.get()).toEqual({ phase: "idle" });
   });
 });
 
+describe("1:1 call event wiring", () => {
+  test("real on_call propose event applies lower-sid tie-break and surfaces incoming UI", async () => {
+    const send_call_retract_tie_break = mock(async () => undefined);
+    const events = wireClientEvents({ send_call_retract_tie_break });
+
+    beginOutgoingCall("bob@waddle.test", "z-outgoing", audioVideo);
+    events.emitCall({
+      kind: "propose",
+      from: "bob@waddle.test/phone",
+      sid: "a-incoming",
+      media: audioVideo,
+    });
+    await flushCallSideEffects();
+
+    expect(send_call_retract_tie_break).toHaveBeenCalledTimes(1);
+    expect(send_call_retract_tie_break).toHaveBeenCalledWith(
+      "bob@waddle.test/phone",
+      "z-outgoing",
+    );
+    expect($callState.get()).toEqual({
+      phase: "incoming",
+      from: "bob@waddle.test/phone",
+      sid: "a-incoming",
+      media: audioVideo,
+    });
+  });
+
+  test("real on_call propose event applies higher-sid tie-break without changing outgoing UI", async () => {
+    const send_call_reject_tie_break = mock(async () => undefined);
+    const events = wireClientEvents({ send_call_reject_tie_break });
+
+    beginOutgoingCall("bob@waddle.test", "a-outgoing", audioVideo);
+    events.emitCall({
+      kind: "propose",
+      from: "bob@waddle.test/phone",
+      sid: "z-incoming",
+      media: audioVideo,
+    });
+    await flushCallSideEffects();
+
+    expect(send_call_reject_tie_break).toHaveBeenCalledTimes(1);
+    expect(send_call_reject_tie_break).toHaveBeenCalledWith(
+      "bob@waddle.test/phone",
+      "z-incoming",
+    );
+    expect($callState.get()).toEqual({
+      phase: "outgoing",
+      to: "bob@waddle.test",
+      sid: "a-outgoing",
+      media: audioVideo,
+    });
+  });
+
+  test("real on_call proceed event cancels outgoing ring timeout", async () => {
+    const sender = mockSender();
+    const events = wireClientEvents(sender);
+
+    beginOutgoingCall("bob@waddle.test", "c-accepted", audioVideo);
+    scheduleOutgoingTimeout(sender, "c-accepted", 10);
+    events.emitCall({
+      kind: "proceed",
+      from: "bob@waddle.test/phone",
+      sid: "c-accepted",
+    });
+    await new Promise((resolve) => setTimeout(resolve, 25));
+
+    expect(sender.send_call_retract).not.toHaveBeenCalled();
+    expect($callState.get()).toEqual({
+      phase: "outgoing",
+      to: "bob@waddle.test",
+      sid: "c-accepted",
+      media: audioVideo,
+    });
+  });
+
+  test("real on_call proceed event times out if no session-accept follows", async () => {
+    const restoreTimeout = setSessionAcceptTimeoutMsForTests(10);
+    try {
+      const sender = mockSender();
+      const events = wireClientEvents(sender);
+
+      beginOutgoingCall(
+        "bob@waddle.test",
+        "c-no-accept",
+        audioVideo,
+        "alice@waddle.test/web",
+      );
+      scheduleOutgoingTimeout(sender, "c-no-accept", 100);
+      events.emitCall({
+        kind: "proceed",
+        from: "bob@waddle.test/phone",
+        sid: "c-no-accept",
+      });
+      await flushCallSideEffects();
+      await new Promise((resolve) => setTimeout(resolve, 25));
+
+      expect(sender.send_call_retract).not.toHaveBeenCalled();
+      expect(sender.send_call_session_initiate).toHaveBeenCalledTimes(1);
+      const initiateCalls = (
+        sender.send_call_session_initiate as unknown as {
+          mock: { calls: unknown[][] };
+        }
+      ).mock.calls;
+      const initiatorFullJid = String(initiateCalls[0]?.[1] ?? "");
+      expect(initiateCalls[0]?.[0]).toBe("bob@waddle.test/phone");
+      expect(initiatorFullJid.startsWith("alice@waddle.test/web")).toBe(true);
+      expect(initiateCalls[0]?.[2]).toBe("c-no-accept");
+      expect(initiateCalls[0]?.[3]).toBe(true);
+      expect(initiateCalls[0]?.[4]).toBe(true);
+      expect(sender.send_call_session_terminate).toHaveBeenCalledWith(
+        "bob@waddle.test/phone",
+        "c-no-accept",
+        "timeout",
+      );
+      expect($callState.get()).toEqual({
+        phase: "ended",
+        sid: "c-no-accept",
+        reason: "timeout",
+      });
+    } finally {
+      restoreTimeout();
+    }
+  });
+
+  test("real on_call session-accept cancels the post-proceed timeout", async () => {
+    const restoreTimeout = setSessionAcceptTimeoutMsForTests(10);
+    try {
+      const sender = mockSender();
+      const events = wireClientEvents(sender);
+
+      beginOutgoingCall(
+        "bob@waddle.test",
+        "c-accepts",
+        audioVideo,
+        "alice@waddle.test/web",
+      );
+      events.emitCall({
+        kind: "proceed",
+        from: "bob@waddle.test/phone",
+        sid: "c-accepts",
+      });
+      await flushCallSideEffects();
+      events.emitCall({
+        kind: "session-accept",
+        from: "bob@waddle.test/phone",
+        sid: "c-accepts",
+        media: audioVideo,
+        join,
+      });
+      await new Promise((resolve) => setTimeout(resolve, 25));
+
+      expect(sender.send_call_session_terminate).not.toHaveBeenCalled();
+      expect($callState.get()).toEqual({
+        phase: "active",
+        peer: "bob@waddle.test/phone",
+        sid: "c-accepts",
+        media: audioVideo,
+        join,
+        kind: "dm",
+        initiator: "alice@waddle.test/web",
+      });
+    } finally {
+      restoreTimeout();
+    }
+  });
+
+  test("real on_call active same-bare propose migrates the existing session", async () => {
+    const sender = mockSender();
+    const events = wireClientEvents(sender);
+
+    $callState.set({
+      phase: "active",
+      peer: "bob@waddle.test/phone",
+      sid: "old-call",
+      media: audioVideo,
+      join,
+      kind: "dm",
+      initiator: "alice@waddle.test/web",
+    });
+    events.emitCall({
+      kind: "propose",
+      from: "bob@waddle.test/tablet",
+      sid: "new-call",
+      media: audioVideo,
+    });
+    await flushCallSideEffects();
+    await flushCallSideEffects();
+
+    expect(sender.send_call_session_terminate).toHaveBeenCalledWith(
+      "bob@waddle.test/phone",
+      "old-call",
+      "expired",
+    );
+    expect(sender.send_call_finish_migrated).toHaveBeenCalledWith(
+      "bob@waddle.test/tablet",
+      "old-call",
+      "new-call",
+    );
+    expect(sender.send_call_proceed).toHaveBeenCalledWith(
+      "bob@waddle.test/tablet",
+      "new-call",
+    );
+    await flushCallSideEffects();
+    expect($callState.get()).toEqual({
+      phase: "incoming",
+      from: "bob@waddle.test/tablet",
+      sid: "new-call",
+      media: audioVideo,
+    });
+  });
+
+  test("real on_call active migration sends markers before old cleanup completes", async () => {
+    const sender = mockSender();
+    sender.send_call_session_terminate = mock(async () => {
+      await new Promise(() => undefined);
+    });
+    const events = wireClientEvents(sender);
+
+    $callState.set({
+      phase: "active",
+      peer: "bob@waddle.test/phone",
+      sid: "old-call",
+      media: audioVideo,
+      join,
+      kind: "dm",
+      initiator: "alice@waddle.test/web",
+    });
+    events.emitCall({
+      kind: "propose",
+      from: "bob@waddle.test/tablet",
+      sid: "new-call",
+      media: audioVideo,
+    });
+    await flushCallSideEffects();
+
+    expect(sender.send_call_finish_migrated).toHaveBeenCalledWith(
+      "bob@waddle.test/tablet",
+      "old-call",
+      "new-call",
+    );
+    expect(sender.send_call_proceed).toHaveBeenCalledWith(
+      "bob@waddle.test/tablet",
+      "new-call",
+    );
+    expect(sender.send_call_session_terminate).toHaveBeenCalledWith(
+      "bob@waddle.test/phone",
+      "old-call",
+      "expired",
+    );
+    expect($callState.get()).toEqual({
+      phase: "incoming",
+      from: "bob@waddle.test/tablet",
+      sid: "new-call",
+      media: audioVideo,
+    });
+  });
+
+  test("real on_call active migration proceeds even when old cleanup fails", async () => {
+    const sender = mockSender();
+    sender.send_call_session_terminate = mock(async () => {
+      throw new Error("terminate failed");
+    });
+    const events = wireClientEvents(sender);
+
+    $callState.set({
+      phase: "active",
+      peer: "bob@waddle.test/phone",
+      sid: "old-call",
+      media: audioVideo,
+      join,
+      kind: "dm",
+      initiator: "alice@waddle.test/web",
+    });
+    events.emitCall({
+      kind: "propose",
+      from: "bob@waddle.test/tablet",
+      sid: "new-call",
+      media: audioVideo,
+    });
+    await flushCallSideEffects();
+
+    expect(sender.send_call_finish_migrated).toHaveBeenCalledWith(
+      "bob@waddle.test/tablet",
+      "old-call",
+      "new-call",
+    );
+    expect(sender.send_call_proceed).toHaveBeenCalledWith(
+      "bob@waddle.test/tablet",
+      "new-call",
+    );
+    expect($callState.get()).toEqual({
+      phase: "incoming",
+      from: "bob@waddle.test/tablet",
+      sid: "new-call",
+      media: audioVideo,
+    });
+    expect($lastCallError.get()).toBe("terminate failed");
+  });
+
+  test("real on_call active migration does not leave old active UI when proceed fails", async () => {
+    const sender = mockSender();
+    sender.send_call_proceed = mock(async () => {
+      throw new Error("proceed failed");
+    });
+    const events = wireClientEvents(sender);
+
+    $callState.set({
+      phase: "active",
+      peer: "bob@waddle.test/phone",
+      sid: "old-call",
+      media: audioVideo,
+      join,
+      kind: "dm",
+      initiator: "alice@waddle.test/web",
+    });
+    events.emitCall({
+      kind: "propose",
+      from: "bob@waddle.test/tablet",
+      sid: "new-call",
+      media: audioVideo,
+    });
+    await flushCallSideEffects();
+
+    expect(sender.send_call_finish_migrated).toHaveBeenCalledWith(
+      "bob@waddle.test/tablet",
+      "old-call",
+      "new-call",
+    );
+    expect(sender.send_call_session_terminate).not.toHaveBeenCalled();
+    expect($callState.get()).toEqual({
+      phase: "ended",
+      sid: "old-call",
+      reason: "error",
+    });
+    expect($lastCallError.get()).toBe("proceed failed");
+  });
+
+  test("real on_call tie-break reject event surfaces expired rather than normal declined", () => {
+    const events = wireClientEvents();
+
+    beginOutgoingCall("bob@waddle.test", "c-lost", audioVideo);
+    events.emitCall({
+      kind: "reject",
+      from: "bob@waddle.test/phone",
+      sid: "c-lost",
+      reason: "expired",
+      tieBreak: true,
+    });
+
+    expect($callState.get()).toEqual({
+      phase: "ended",
+      sid: "c-lost",
+      reason: "expired",
+    });
+  });
+});
+
 describe("MUC group call", () => {
+  test("legacy presence event path updates the room call indicator from real presence events", () => {
+    const events = wireEmitterPresenceEvents();
+
+    events.emitPresence({
+      from: "Chan@MUC.Test/alice",
+      presence_type: "available",
+      muji: { preparing: false, active: true },
+    });
+
+    expect($mucCallParticipants.get()).toEqual({
+      "chan@muc.test": ["alice"],
+    });
+
+    events.emitPresence({
+      from: "Chan@MUC.Test/alice",
+      presence_type: "available",
+    });
+
+    expect($mucCallParticipants.get()).toEqual({});
+  });
+
+  test("BrowserXmppClient.disconnect clears group-call indicators seeded by presence events", async () => {
+    const disconnect = mock(async () => undefined);
+    const events = wireClientEvents({ disconnect } as unknown as Partial<CallWireSender>);
+    const client = events.client as unknown as {
+      disconnect: () => Promise<void>;
+    };
+
+    events.emitPresence({
+      from: "chan@muc.test/alice",
+      presence_type: "available",
+      muji: { preparing: false, active: true },
+    });
+    expect($mucCallParticipants.get()).toEqual({
+      "chan@muc.test": ["alice"],
+    });
+
+    await client.disconnect();
+
+    expect(disconnect).toHaveBeenCalledTimes(1);
+    expect($mucCallParticipants.get()).toEqual({});
+  });
+
+  test("BrowserXmppClient ignores stale call and presence events after disconnect", async () => {
+    const disconnect = mock(async () => undefined);
+    const events = wireClientEvents({ disconnect } as unknown as Partial<CallWireSender>);
+    const client = events.client as unknown as {
+      disconnect: () => Promise<void>;
+    };
+
+    await client.disconnect();
+
+    events.emitPresence({
+      from: "chan@muc.test/alice",
+      presence_type: "available",
+      muji: { preparing: false, active: true },
+    });
+    events.emitCall({
+      kind: "propose",
+      from: "bob@waddle.test/phone",
+      sid: "late-propose",
+      media: audioVideo,
+    });
+
+    expect($mucCallParticipants.get()).toEqual({});
+    expect($callState.get()).toEqual({ phase: "idle" });
+  });
+
   test("beginMucCall sets active(kind: 'muc') after awaiting the separate session-accept (XEP-0166 §6.3)", async () => {
+    const events = wireClientEvents();
     const expectedJoin: LiveKitJoin = {
       url: "wss://livekit.test",
       room: "chan@muc.test",
       identity: "alice@waddle.test/web",
       token: "jwt.payload.sig",
     };
+    const update_muji_presence = mockUpdateMujiPresenceWithEcho(events.emitPresence);
     const sender = {
       send_muji_session_initiate:
-        mockSendMujiSessionInitiateWithAccept(expectedJoin),
+        mockSendMujiSessionInitiateWithAccept(expectedJoin, events.emitCall),
+      update_muji_presence,
     };
     const { beginMucCall } = await import("../src/lib/calls/call-store");
-    await beginMucCall(sender, "chan@muc.test", audioVideo);
+    await beginMucCall(sender, "chan@muc.test", audioVideo, "alice");
     const state = $callState.get();
-    expect(state).toEqual({
+    expect(state).toMatchObject({
       phase: "active",
       peer: "chan@muc.test",
-      sid: "chan@muc.test",
       media: audioVideo,
       join: expectedJoin,
       kind: "muc",
-      selfNick: undefined,
+      selfNick: "alice",
     });
+    expect(typeof (state as { sid?: unknown }).sid).toBe("string");
+    expect((state as { sid: string }).sid).not.toBe("chan@muc.test");
     expect(sender.send_muji_session_initiate).toHaveBeenCalledWith(
       "chan@muc.test",
+      expect.any(String),
       true, // audioVideo.video
     );
   });
 
+  test("beginMucCall only resolves from the expected mixer and room event", async () => {
+    const events = wireClientEvents();
+    const forgedJoin: LiveKitJoin = {
+      url: "wss://evil-livekit.test",
+      room: "chan@muc.test",
+      identity: "mallory@waddle.test/desktop",
+      token: "evil.jwt",
+    };
+    const wrongRoomJoin: LiveKitJoin = {
+      url: "wss://livekit.test",
+      room: "other@muc.test",
+      identity: "alice@waddle.test/web",
+      token: "wrong.room.jwt",
+    };
+    const expectedJoin: LiveKitJoin = {
+      url: "wss://livekit.test",
+      room: "chan@muc.test",
+      identity: "alice@waddle.test/web",
+      token: "real.jwt",
+    };
+    const update_muji_presence = mockUpdateMujiPresenceWithEcho(events.emitPresence);
+    const send_muji_session_initiate = mock(async (_roomJid: string, sid: string) => {
+      queueMicrotask(() => {
+        events.emitCall({
+          kind: "session-accept",
+          from: "mallory@waddle.test/desktop",
+          sid,
+          media: audioVideo,
+          join: forgedJoin,
+        });
+        events.emitCall({
+          kind: "session-accept",
+          from: "calls.waddle.test",
+          sid,
+          media: audioVideo,
+          join: wrongRoomJoin,
+        });
+        events.emitCall({
+          kind: "session-accept",
+          from: "calls.waddle.test",
+          sid,
+          media: audioVideo,
+          join: expectedJoin,
+        });
+      });
+    });
+    const { beginMucCall } = await import("../src/lib/calls/call-store");
+
+    await beginMucCall(
+      { send_muji_session_initiate, update_muji_presence },
+      "chan@muc.test",
+      audioVideo,
+      "alice",
+      "calls.waddle.test",
+    );
+
+    expect($callState.get()).toMatchObject({
+      phase: "active",
+      peer: "chan@muc.test",
+      media: audioVideo,
+      join: expectedJoin,
+      kind: "muc",
+      selfNick: "alice",
+    });
+  });
+
+  test("beginMucCall rejects a second start while preparing/accept events are pending", async () => {
+    const events = wireClientEvents();
+    const expectedJoin: LiveKitJoin = {
+      url: "wss://livekit.test",
+      room: "chan@muc.test",
+      identity: "alice@waddle.test/web",
+      token: "jwt.payload.sig",
+    };
+    let emitPreparingEcho: (() => void) | null = null;
+    let emitAccept: (() => void) | null = null;
+    const update_muji_presence = mock(
+      async (
+        roomJid: string,
+        nick: string,
+        active: boolean,
+        preparing: boolean,
+        _video: boolean,
+      ) => {
+        if (preparing) {
+          emitPreparingEcho = () => events.emitPresence({
+            from: `${roomJid}/${nick}`,
+            presence_type: "available",
+            muji: { preparing: true, active: false },
+          });
+        }
+        if (active) {
+          events.emitPresence({
+            from: `${roomJid}/${nick}`,
+            presence_type: "available",
+            muji: { preparing: false, active: true },
+          });
+        }
+      },
+    );
+    const send_muji_session_initiate = mock(async (_roomJid: string, sid: string) => {
+      emitAccept = () => events.emitCall({
+        kind: "session-accept",
+        from: "calls.waddle.test",
+        sid,
+        media: audioVideo,
+        join: expectedJoin,
+      });
+    });
+    const { beginMucCall } = await import("../src/lib/calls/call-store");
+    const sender = {
+      send_muji_session_initiate,
+      update_muji_presence,
+    };
+
+    const first = beginMucCall(sender, "chan@muc.test", audioVideo, "alice");
+    const secondError = await beginMucCall(
+      sender,
+      "chan@muc.test",
+      audioVideo,
+      "alice",
+    ).then(
+      () => null,
+      (err) => err,
+    );
+
+    expect(secondError).toBeInstanceOf(Error);
+    expect(update_muji_presence).toHaveBeenCalledTimes(1);
+    const pendingState = $callState.get();
+    expect(pendingState).toMatchObject({
+      phase: "muc-pending",
+      peer: "chan@muc.test",
+      media: audioVideo,
+      kind: "muc",
+      selfNick: "alice",
+    });
+    expect(typeof (pendingState as { attemptId?: unknown }).attemptId).toBe("string");
+
+    emitPreparingEcho?.();
+    await flushCallSideEffects();
+    expect(update_muji_presence).toHaveBeenCalledTimes(2);
+    expect(send_muji_session_initiate).toHaveBeenCalledTimes(1);
+    emitAccept?.();
+    await first;
+
+    expect($callState.get()).toMatchObject({
+      phase: "active",
+      peer: "chan@muc.test",
+      media: audioVideo,
+      join: expectedJoin,
+      kind: "muc",
+      selfNick: "alice",
+    });
+  });
+
+  test("beginMucCall waits for other preparing participants before content presence", async () => {
+    const events = wireClientEvents();
+    const expectedJoin: LiveKitJoin = {
+      url: "wss://livekit.test",
+      room: "chan@muc.test",
+      identity: "alice@waddle.test/web",
+      token: "jwt.payload.sig",
+    };
+    events.emitPresence({
+      from: "chan@muc.test/bob",
+      presence_type: "available",
+      muji: { preparing: true, active: false },
+    });
+    const update_muji_presence = mockUpdateMujiPresenceWithEcho(events.emitPresence);
+    const send_muji_session_initiate =
+      mockSendMujiSessionInitiateWithAccept(expectedJoin, events.emitCall);
+    const { beginMucCall } = await import("../src/lib/calls/call-store");
+    const pending = beginMucCall(
+      { send_muji_session_initiate, update_muji_presence },
+      "chan@muc.test",
+      audioVideo,
+      "alice",
+    );
+
+    await flushCallSideEffects();
+    expect(update_muji_presence).toHaveBeenCalledTimes(1);
+    expect(send_muji_session_initiate).not.toHaveBeenCalled();
+
+    events.emitPresence({
+      from: "chan@muc.test/bob",
+      presence_type: "available",
+    });
+    await pending;
+
+    expect(update_muji_presence).toHaveBeenNthCalledWith(
+      2,
+      "chan@muc.test",
+      "alice",
+      true,
+      false,
+      true,
+    );
+    expect(send_muji_session_initiate).toHaveBeenCalledTimes(1);
+    expect($callState.get()).toMatchObject({
+      phase: "active",
+      peer: "chan@muc.test",
+      media: audioVideo,
+      join: expectedJoin,
+      kind: "muc",
+      selfNick: "alice",
+    });
+  });
+
+  test("group-call button action ignores a second click while start is pending", async () => {
+    const events = wireClientEvents();
+    const expectedJoin: LiveKitJoin = {
+      url: "wss://livekit.test",
+      room: "chan@muc.test",
+      identity: "alice@waddle.test/web",
+      token: "jwt.payload.sig",
+    };
+    let starting = false;
+    let emitPreparingEcho: (() => void) | null = null;
+    let emitAccept: (() => void) | null = null;
+    const update_muji_presence = mock(
+      async (
+        roomJid: string,
+        nick: string,
+        active: boolean,
+        preparing: boolean,
+        _video: boolean,
+      ) => {
+        if (preparing) {
+          emitPreparingEcho = () => events.emitPresence({
+            from: `${roomJid}/${nick}`,
+            presence_type: "available",
+            muji: { preparing: true, active: false },
+          });
+        }
+        if (active) {
+          events.emitPresence({
+            from: `${roomJid}/${nick}`,
+            presence_type: "available",
+            muji: { preparing: false, active: true },
+          });
+        }
+      },
+    );
+    const send_muji_session_initiate = mock(async (_roomJid: string, sid: string) => {
+      emitAccept = () => events.emitCall({
+        kind: "session-accept",
+        from: "calls.waddle.test",
+        sid,
+        media: audioVideo,
+        join: expectedJoin,
+      });
+    });
+    const sender = {
+      send_muji_session_initiate,
+      update_muji_presence,
+    };
+    const run = () => startMucCallAction({
+      roomJid: "chan@muc.test",
+      media: audioVideo,
+      isBusy: () => starting || !["idle", "ended"].includes($callState.get().phase),
+      setStarting: (next) => {
+        starting = next;
+      },
+      getSender: () => sender,
+      getSelfNick: () => "alice",
+    });
+
+    const first = run();
+    await flushCallSideEffects();
+    expect(starting).toBe(true);
+    expect($callState.get().phase).toBe("muc-pending");
+    expect(await run()).toBe(false);
+    expect(update_muji_presence).toHaveBeenCalledTimes(1);
+
+    emitPreparingEcho?.();
+    await flushCallSideEffects();
+    expect(send_muji_session_initiate).toHaveBeenCalledTimes(1);
+    emitAccept?.();
+    expect(await first).toBe(true);
+    expect(starting).toBe(false);
+    expect($callState.get()).toMatchObject({
+      phase: "active",
+      peer: "chan@muc.test",
+      media: audioVideo,
+      join: expectedJoin,
+      kind: "muc",
+      selfNick: "alice",
+    });
+  });
+
+  test("BrowserXmppClient.disconnect rejects a pending MUC preparing wait", async () => {
+    const events = wireClientEvents();
+    const update_muji_presence = mock(async () => undefined);
+    const send_muji_session_terminate = mock(async () => undefined);
+    const disconnect = mock(async () => undefined);
+    const client = events.client as unknown as {
+      xmpp: {
+        update_muji_presence: typeof update_muji_presence;
+        send_muji_session_terminate: typeof send_muji_session_terminate;
+        disconnect: typeof disconnect;
+      };
+      disconnect: () => Promise<void>;
+    };
+    client.xmpp = {
+      update_muji_presence,
+      send_muji_session_terminate,
+      disconnect,
+    };
+    const { beginMucCall } = await import("../src/lib/calls/call-store");
+    const pending = beginMucCall(
+      client.xmpp,
+      "chan@muc.test",
+      audioVideo,
+      "alice",
+    );
+    await flushCallSideEffects();
+    expect($callState.get().phase).toBe("muc-pending");
+
+    await client.disconnect();
+
+    await expect(pending).rejects.toThrow("cancelled");
+    expect(disconnect).toHaveBeenCalledTimes(1);
+    expect(send_muji_session_terminate).not.toHaveBeenCalled();
+    expect($callState.get()).toEqual({ phase: "idle" });
+  });
+
+  test("BrowserXmppClient.disconnect rejects a pending MUC session-accept wait", async () => {
+    const events = wireClientEvents();
+    const update_muji_presence = mockUpdateMujiPresenceWithEcho(events.emitPresence);
+    const send_muji_session_initiate = mock(async () => undefined);
+    const send_muji_session_terminate = mock(async () => undefined);
+    const disconnect = mock(async () => undefined);
+    const client = events.client as unknown as {
+      xmpp: {
+        update_muji_presence: typeof update_muji_presence;
+        send_muji_session_initiate: typeof send_muji_session_initiate;
+        send_muji_session_terminate: typeof send_muji_session_terminate;
+        disconnect: typeof disconnect;
+      };
+      disconnect: () => Promise<void>;
+    };
+    Object.assign(client.xmpp, {
+      update_muji_presence,
+      send_muji_session_initiate,
+      send_muji_session_terminate,
+      disconnect,
+    });
+    const { beginMucCall } = await import("../src/lib/calls/call-store");
+    const pending = beginMucCall(
+      client.xmpp,
+      "chan@muc.test",
+      audioVideo,
+      "alice",
+    );
+    await flushCallSideEffects();
+    await flushCallSideEffects();
+    expect($callState.get().phase).toBe("muc-pending");
+    expect(send_muji_session_initiate).toHaveBeenCalledTimes(1);
+
+    await client.disconnect();
+
+    await expect(pending).rejects.toThrow("cancelled");
+    expect(disconnect).toHaveBeenCalledTimes(1);
+    const attemptSid = firstMockCallArg(send_muji_session_initiate, 1);
+    expect(attemptSid).not.toBe("chan@muc.test");
+    expect(send_muji_session_terminate).toHaveBeenCalledWith(
+      "chan@muc.test",
+      attemptSid,
+    );
+    expect(update_muji_presence).toHaveBeenLastCalledWith(
+      "chan@muc.test",
+      "alice",
+      false,
+      false,
+      false,
+    );
+    expect($callState.get()).toEqual({ phase: "idle" });
+  });
+
+  test("real disconnected event rejects pending MUC session-accept wait without SFU teardown", async () => {
+    const events = wireClientEvents();
+    const update_muji_presence = mockUpdateMujiPresenceWithEcho(events.emitPresence);
+    const send_muji_session_initiate = mock(async () => undefined);
+    const send_muji_session_terminate = mock(async () => undefined);
+    const client = events.client as unknown as {
+      xmpp: {
+        update_muji_presence: typeof update_muji_presence;
+        send_muji_session_initiate: typeof send_muji_session_initiate;
+        send_muji_session_terminate: typeof send_muji_session_terminate;
+      };
+      disconnect: () => Promise<void>;
+    };
+    Object.assign(client.xmpp, {
+      update_muji_presence,
+      send_muji_session_initiate,
+      send_muji_session_terminate,
+    });
+    const { beginMucCall } = await import("../src/lib/calls/call-store");
+    const pending = beginMucCall(
+      client.xmpp,
+      "chan@muc.test",
+      audioVideo,
+      "alice",
+    );
+    await flushCallSideEffects();
+    await flushCallSideEffects();
+    expect(send_muji_session_initiate).toHaveBeenCalledTimes(1);
+
+    events.emitDisconnected();
+
+    await expect(pending).rejects.toThrow("cancelled");
+    expect(send_muji_session_terminate).not.toHaveBeenCalled();
+    expect($callState.get()).toEqual({ phase: "idle" });
+    await client.disconnect();
+  });
+
+  test("replacement MUC start is not rolled back by a stale disconnected attempt", async () => {
+    const firstEvents = wireClientEvents();
+    const secondEvents = wireClientEvents();
+    const expectedJoin: LiveKitJoin = {
+      url: "wss://livekit.test",
+      room: "chan@muc.test",
+      identity: "alice@waddle.test/web",
+      token: "replacement.jwt",
+    };
+    const staleJoin: LiveKitJoin = {
+      url: "wss://old-livekit.test",
+      room: "chan@muc.test",
+      identity: "alice@waddle.test/web",
+      token: "stale.jwt",
+    };
+    let staleSid = "";
+    const firstSender = {
+      send_muji_session_initiate: mock(async (_roomJid: string, sid: string) => {
+        staleSid = sid;
+      }),
+      update_muji_presence: mockUpdateMujiPresenceWithEcho(firstEvents.emitPresence),
+    };
+    const secondSender = {
+      send_muji_session_initiate: mock(async (_roomJid: string, sid: string) => {
+        queueMicrotask(() => {
+          secondEvents.emitCall({
+            kind: "session-accept",
+            from: "calls.waddle.test",
+            sid: staleSid,
+            media: audioVideo,
+            join: staleJoin,
+          });
+          secondEvents.emitCall({
+            kind: "session-accept",
+            from: "calls.waddle.test",
+            sid,
+            media: audioVideo,
+            join: expectedJoin,
+          });
+        });
+      }),
+      update_muji_presence: mockUpdateMujiPresenceWithEcho(secondEvents.emitPresence),
+    };
+    const { beginMucCall } = await import("../src/lib/calls/call-store");
+
+    const first = beginMucCall(
+      firstSender,
+      "chan@muc.test",
+      audioVideo,
+      "alice",
+      "calls.waddle.test",
+    );
+    await flushCallSideEffects();
+    await flushCallSideEffects();
+    expect(firstSender.send_muji_session_initiate).toHaveBeenCalledTimes(1);
+
+    firstEvents.emitDisconnected();
+    const second = beginMucCall(
+      secondSender,
+      "chan@muc.test",
+      audioVideo,
+      "alice",
+      "calls.waddle.test",
+    );
+
+    await expect(first).rejects.toThrow("cancelled");
+    await second;
+    expect($callState.get()).toMatchObject({
+      phase: "active",
+      peer: "chan@muc.test",
+      media: audioVideo,
+      join: expectedJoin,
+      kind: "muc",
+      selfNick: "alice",
+    });
+  });
+
   test("beginMucCall with a nick implements the XEP-0272 §Joining two-phase preparing→content flow", async () => {
+    const events = wireClientEvents();
     const send_muji_session_initiate = mockSendMujiSessionInitiateWithAccept({
       url: "wss://livekit.test",
       room: "chan@muc.test",
       identity: "alice@waddle.test/web",
       token: "jwt.payload.sig",
-    });
-    const update_muji_presence = mockUpdateMujiPresenceWithEcho();
+    }, events.emitCall);
+    const update_muji_presence = mockUpdateMujiPresenceWithEcho(events.emitPresence);
     const { beginMucCall } = await import("../src/lib/calls/call-store");
     await beginMucCall(
       {
@@ -287,8 +1304,8 @@ describe("MUC group call", () => {
     );
     // Two-phase flow:
     //   1. preparing  → `<muji><preparing/></muji>`
-    //   2. (session-initiate IQ round-trip — implicit wait for MUC echo)
-    //   3. active content → `<muji><content .../></muji>`
+    //   2. active content → `<muji><content .../></muji>`
+    //   3. session-initiate IQ round-trip after content presence
     expect(update_muji_presence).toHaveBeenCalledTimes(2);
     expect(update_muji_presence).toHaveBeenNthCalledWith(
       1,
@@ -298,10 +1315,6 @@ describe("MUC group call", () => {
       true, // preparing
       false, // video — irrelevant in preparing phase
     );
-    // The session-initiate must run BETWEEN the preparing and the
-    // content presences. mock() records call order globally
-    // across the mock pair, so we assert relative ordering.
-    expect(send_muji_session_initiate).toHaveBeenCalledTimes(1);
     expect(update_muji_presence).toHaveBeenNthCalledWith(
       2,
       "chan@muc.test",
@@ -310,6 +1323,7 @@ describe("MUC group call", () => {
       false, // preparing
       true, // video (audioVideo fixture has video=true)
     );
+    expect(send_muji_session_initiate).toHaveBeenCalledTimes(1);
   });
 
   test("tearDownActiveCall still clears the Muji presence when sendMujiSessionTerminate throws", async () => {
@@ -318,11 +1332,12 @@ describe("MUC group call", () => {
     // presence cleanup MUST still run — otherwise the user's
     // `<muji/>` advertisement lingers until the XMPP session
     // disconnects, exactly the bug this teardown path exists to fix.
-    const update_muji_presence = mockUpdateMujiPresenceWithEcho();
+    const events = wireClientEvents();
+    const update_muji_presence = mockUpdateMujiPresenceWithEcho(events.emitPresence);
     $callState.set({
       phase: "active",
       peer: "chan@muc.test",
-      sid: "chan@muc.test",
+      sid: "muc-attempt",
       media: audioVideo,
       join,
       kind: "muc",
@@ -347,11 +1362,12 @@ describe("MUC group call", () => {
 
   test("tearDownActiveCall on a MUC call dispatches Muji session-terminate AND clears the presence", async () => {
     const send_muji_session_terminate = mock(async () => undefined);
-    const update_muji_presence = mockUpdateMujiPresenceWithEcho();
+    const events = wireClientEvents();
+    const update_muji_presence = mockUpdateMujiPresenceWithEcho(events.emitPresence);
     $callState.set({
       phase: "active",
       peer: "chan@muc.test",
-      sid: "chan@muc.test",
+      sid: "muc-attempt",
       media: audioVideo,
       join,
       kind: "muc",
@@ -365,7 +1381,10 @@ describe("MUC group call", () => {
       "gone",
     );
     expect(send_muji_session_terminate).toHaveBeenCalledTimes(1);
-    expect(send_muji_session_terminate).toHaveBeenCalledWith("chan@muc.test");
+    expect(send_muji_session_terminate).toHaveBeenCalledWith(
+      "chan@muc.test",
+      "muc-attempt",
+    );
     expect(update_muji_presence).toHaveBeenCalledTimes(1);
     expect(update_muji_presence).toHaveBeenCalledWith(
       "chan@muc.test",
@@ -374,6 +1393,283 @@ describe("MUC group call", () => {
       false, // preparing
       false, // video
     );
+    expect($callState.get()).toEqual({ phase: "idle" });
+  });
+
+  test("beginMucCall treats active Muji presence failure as fatal and rolls back SFU/session work", async () => {
+    const events = wireClientEvents();
+    const send_muji_session_terminate = mock(async () => undefined);
+    const send_muji_session_initiate = mockSendMujiSessionInitiateWithAccept({
+      url: "wss://livekit.test",
+      room: "chan@muc.test",
+      identity: "alice@waddle.test/web",
+      token: "jwt.payload.sig",
+    }, events.emitCall);
+    const update_muji_presence = mock(
+      async (
+        roomJid: string,
+        nick: string,
+        active: boolean,
+        preparing: boolean,
+        _video: boolean,
+      ) => {
+        if (preparing) {
+          events.emitPresence({
+            from: `${roomJid}/${nick}`,
+            presence_type: "available",
+            muji: { preparing: true, active: false },
+          });
+          return;
+        }
+        if (active) throw new Error("presence publish failed");
+        events.emitPresence({
+          from: `${roomJid}/${nick}`,
+          presence_type: "available",
+        });
+      },
+    );
+    const { beginMucCall } = await import("../src/lib/calls/call-store");
+    await expect(beginMucCall(
+      {
+        send_muji_session_initiate,
+        send_muji_session_terminate,
+        update_muji_presence,
+      },
+      "Chan@MUC.Test/ignored",
+      audioVideo,
+      "alice",
+    )).rejects.toThrow("presence publish failed");
+    expect(send_muji_session_initiate).not.toHaveBeenCalled();
+    expect(send_muji_session_terminate).not.toHaveBeenCalled();
+    expect($callState.get()).toEqual({ phase: "idle" });
+    expect($mucCallParticipants.get()["chan@muc.test"]).toBeUndefined();
+  });
+
+  test("room switch tears down the old room's active MUC call before leaving", async () => {
+    const events = wireClientEvents();
+    const send_muji_session_terminate = mock(async () => undefined);
+    const update_muji_presence = mockUpdateMujiPresenceWithEcho(events.emitPresence);
+    const leave_room = mock(async () => undefined);
+    const operationOrder: string[] = [];
+    const xmpp = {
+      send_muji_session_terminate: mock(async (roomJid: string, sid: string) => {
+        operationOrder.push(`terminate:${roomJid}:${sid}`);
+        await send_muji_session_terminate(roomJid, sid);
+      }),
+      update_muji_presence: mock(async (
+        roomJid: string,
+        nick: string,
+        active: boolean,
+        preparing: boolean,
+        video: boolean,
+      ) => {
+        operationOrder.push(`presence:${active}:${preparing}`);
+        await update_muji_presence(roomJid, nick, active, preparing, video);
+      }),
+      leave_room: mock(async (roomJid: string, nick: string) => {
+        operationOrder.push(`leave:${roomJid}/${nick}`);
+        await leave_room(roomJid, nick);
+      }),
+    };
+    const client = events.client as unknown as {
+      xmpp: typeof xmpp;
+      currentRoom: string | null;
+      roomHats: Record<string, unknown>;
+      roomAuthority: Record<string, unknown>;
+      roomPresence: Record<string, unknown>;
+      roomMemberJids: Record<string, string>;
+      performRoomSwitch: (roomJid: string) => Promise<void>;
+    };
+    Object.assign(client.xmpp, xmpp);
+    client.currentRoom = "old@muc.test";
+    $callState.set({
+      phase: "active",
+      peer: "old@muc.test",
+      sid: "old-muc-attempt",
+      media: audioVideo,
+      join,
+      kind: "muc",
+      selfNick: "alice",
+    });
+
+    await client.performRoomSwitch("new@muc.test");
+
+    expect(operationOrder).toEqual([
+      "presence:false:false",
+      "terminate:old@muc.test:old-muc-attempt",
+      "leave:old@muc.test/alice",
+    ]);
+    expect($callState.get()).toEqual({ phase: "idle" });
+  });
+
+  test("room switch does not join the new room after a concurrent disconnect", async () => {
+    const events = wireClientEvents();
+    let releaseLeave: (() => void) | null = null;
+    let leaveStarted: (() => void) | null = null;
+    const leaveGate = new Promise<void>((resolve) => {
+      releaseLeave = resolve;
+    });
+    const leaveStartedWait = new Promise<void>((resolve) => {
+      leaveStarted = resolve;
+    });
+    let leaveCalls = 0;
+    const leave_room = mock(async () => {
+      leaveCalls += 1;
+      if (leaveCalls === 1) {
+        leaveStarted?.();
+        await leaveGate;
+      }
+    });
+    const join_room = mock(async () => undefined);
+    const disconnect = mock(async () => undefined);
+    const xmpp = { leave_room, join_room, disconnect };
+    const client = events.client as unknown as {
+      xmpp: typeof xmpp;
+      currentRoom: string | null;
+      performRoomSwitch: (roomJid: string) => Promise<void>;
+      disconnect: () => Promise<void>;
+    };
+    Object.assign(client.xmpp, xmpp);
+    client.currentRoom = "old@muc.test";
+
+    const switched = client.performRoomSwitch("new@muc.test");
+    await leaveStartedWait;
+    const disconnected = client.disconnect();
+    releaseLeave?.();
+    await switched;
+    await disconnected;
+
+    expect(join_room).not.toHaveBeenCalled();
+    expect(client.currentRoom).toBe(null);
+  });
+
+  test("room switch cancels the old room's pending MUC call before leaving", async () => {
+    const events = wireClientEvents();
+    const send_muji_session_initiate = mock(async () => undefined);
+    const send_muji_session_terminate = mock(async () => undefined);
+    const update_muji_presence = mockUpdateMujiPresenceWithEcho(events.emitPresence);
+    const leave_room = mock(async () => undefined);
+    const operationOrder: string[] = [];
+    const xmpp = {
+      send_muji_session_initiate: mock(async (roomJid: string, _sid: string, video: boolean) => {
+        operationOrder.push(`initiate:${roomJid}:${video}`);
+        await send_muji_session_initiate(roomJid, _sid, video);
+      }),
+      send_muji_session_terminate: mock(async (roomJid: string, sid: string) => {
+        operationOrder.push(`terminate:${roomJid}:${sid}`);
+        await send_muji_session_terminate(roomJid, sid);
+      }),
+      update_muji_presence: mock(async (
+        roomJid: string,
+        nick: string,
+        active: boolean,
+        preparing: boolean,
+        video: boolean,
+      ) => {
+        operationOrder.push(`presence:${active}:${preparing}:${video}`);
+        await update_muji_presence(roomJid, nick, active, preparing, video);
+      }),
+      leave_room: mock(async (roomJid: string, nick: string) => {
+        operationOrder.push(`leave:${roomJid}/${nick}`);
+        await leave_room(roomJid, nick);
+      }),
+    };
+    const client = events.client as unknown as {
+      xmpp: typeof xmpp;
+      currentRoom: string | null;
+      roomHats: Record<string, unknown>;
+      roomAuthority: Record<string, unknown>;
+      roomPresence: Record<string, unknown>;
+      roomMemberJids: Record<string, string>;
+      performRoomSwitch: (roomJid: string) => Promise<void>;
+    };
+    Object.assign(client.xmpp, xmpp);
+    const wiredXmpp = client.xmpp;
+    client.currentRoom = "old@muc.test";
+    const { beginMucCall } = await import("../src/lib/calls/call-store");
+    const pending = beginMucCall(wiredXmpp, "old@muc.test", audioVideo, "alice");
+    await flushCallSideEffects();
+    await flushCallSideEffects();
+    expect($callState.get().phase).toBe("muc-pending");
+    expect(send_muji_session_initiate).toHaveBeenCalledTimes(1);
+    const attemptSid = firstMockCallArg(send_muji_session_initiate, 1);
+    expect(attemptSid).not.toBe("old@muc.test");
+
+    await client.performRoomSwitch("new@muc.test");
+
+    await expect(pending).rejects.toThrow("cancelled");
+    expect(operationOrder).toEqual([
+      "presence:false:true:false",
+      "presence:true:false:true",
+      "initiate:old@muc.test:true",
+      "presence:false:false:false",
+      `terminate:old@muc.test:${attemptSid}`,
+      "leave:old@muc.test/alice",
+    ]);
+    expect($callState.get()).toEqual({ phase: "idle" });
+  });
+
+  test("room switch cancels a MUC start waiting for the old room's preparing echo", async () => {
+    const events = wireClientEvents();
+    const send_muji_session_initiate = mock(async () => undefined);
+    const update_muji_presence = mock(async () => undefined);
+    const leave_room = mock(async () => undefined);
+    const operationOrder: string[] = [];
+    const xmpp = {
+      send_muji_session_initiate: mock(async (roomJid: string, _sid: string, video: boolean) => {
+        operationOrder.push(`initiate:${roomJid}:${video}`);
+        await send_muji_session_initiate(roomJid, _sid, video);
+      }),
+      update_muji_presence: mock(async (
+        roomJid: string,
+        nick: string,
+        active: boolean,
+        preparing: boolean,
+        video: boolean,
+      ) => {
+        operationOrder.push(`presence:${roomJid}/${nick}:${active}:${preparing}:${video}`);
+        await update_muji_presence(roomJid, nick, active, preparing, video);
+      }),
+      leave_room: mock(async (roomJid: string, nick: string) => {
+        operationOrder.push(`leave:${roomJid}/${nick}`);
+        await leave_room(roomJid, nick);
+      }),
+    };
+    const client = events.client as unknown as {
+      xmpp: typeof xmpp;
+      currentRoom: string | null;
+      roomHats: Record<string, unknown>;
+      roomAuthority: Record<string, unknown>;
+      roomPresence: Record<string, unknown>;
+      roomMemberJids: Record<string, string>;
+      performRoomSwitch: (roomJid: string) => Promise<void>;
+    };
+    Object.assign(client.xmpp, xmpp);
+    const wiredXmpp = client.xmpp;
+    client.currentRoom = "old@muc.test";
+    const { beginMucCall } = await import("../src/lib/calls/call-store");
+    const pending = beginMucCall(wiredXmpp, "old@muc.test", audioVideo, "alice");
+    await flushCallSideEffects();
+    await flushCallSideEffects();
+    expect($callState.get().phase).toBe("muc-pending");
+    expect(send_muji_session_initiate).toHaveBeenCalledTimes(0);
+
+    await client.performRoomSwitch("new@muc.test");
+    await expect(pending).rejects.toThrow("cancelled");
+
+    events.emitPresence({
+      from: "old@muc.test/alice",
+      presence_type: "available",
+      muji: { preparing: true, active: false },
+    });
+    await flushCallSideEffects();
+
+    expect(send_muji_session_initiate).toHaveBeenCalledTimes(0);
+    expect(operationOrder).toEqual([
+      "presence:old@muc.test/alice:false:true:false",
+      "presence:old@muc.test/alice:false:false:false",
+      "leave:old@muc.test/alice",
+    ]);
     expect($callState.get()).toEqual({ phase: "idle" });
   });
 });

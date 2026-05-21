@@ -453,6 +453,17 @@ export class BrowserXmppClient {
   /** Bare JID for this session. */
   get bareJid(): string { return this.session.jid; }
 
+  private isCurrentXmpp(xmpp: XmppClientInstance): boolean {
+    return this.xmpp === xmpp && !this.destroying;
+  }
+
+  private rejectRoomJoinWaiters(error: Error): void {
+    for (const waiter of this.roomJoinWaiters.values()) {
+      waiter.reject(error);
+    }
+    this.roomJoinWaiters.clear();
+  }
+
   setMessageHandler(h: (message: LiveRoomMessage) => void) { this.messageHandler = h; }
   /** #414: receive `<pin-event/>` system messages from a room. */
   setPinEventHandler(h: (event: { roomJid: string; event: import("./wasm-types").WasmPinEvent }) => void) { this.pinEventHandler = h; }
@@ -658,11 +669,13 @@ export class BrowserXmppClient {
     this.currentRoom = null;
     this.roomSwitchPromise = null;
     this.roomSwitchTarget = null;
+    this.rejectRoomJoinWaiters(new Error("XMPP disconnected while joining a room"));
     this.uploadServiceJid = null;
     this.roomHats = {};
     this.roomAuthority = {};
     this.roomPresence = {};
     this.roomMemberJids = {};
+    clearMucCallParticipants();
     // Best-effort hangup: if we're in a call when the user logs out
     // we want the peer to see session-terminate before the stream
     // closes. `tearDownActiveCall` handles every phase and clears
@@ -727,11 +740,27 @@ export class BrowserXmppClient {
     }
   }
 
+  private async tearDownMucCallForRoom(roomJid: string, xmpp: XmppClientInstance | null): Promise<void> {
+    const current = $callState.get();
+    if (
+      (current.phase === "active" || current.phase === "muc-pending") &&
+      current.kind === "muc" &&
+      barePeerJid(current.peer) === barePeerJid(roomJid)
+    ) {
+      await tearDownActiveCall(xmpp as unknown as CallWireSender | null, "success");
+    }
+  }
+
   private async performRoomSwitch(nextRoom: string) {
     const xmpp = this.xmpp;
     if (!xmpp) return;
+    if (this.currentRoom) {
+      await this.tearDownMucCallForRoom(this.currentRoom, xmpp);
+      if (!this.isCurrentXmpp(xmpp)) return;
+    }
     if (this.currentRoom && xmpp.leave_room) {
       try { await xmpp.leave_room(this.currentRoom, this.session.username); } catch {}
+      if (!this.isCurrentXmpp(xmpp)) return;
     }
     this.currentRoom = nextRoom;
     this.roomHats = {};
@@ -744,9 +773,20 @@ export class BrowserXmppClient {
     if (xmpp.join_room) {
       const ready = this.waitForRoomSelfPresence(nextRoom, this.session.username);
       await Promise.allSettled([xmpp.join_room(nextRoom, this.session.username)]);
-      await ready;
+      if (!this.isCurrentXmpp(xmpp)) {
+        await ready.catch(() => undefined);
+        return;
+      }
+      try {
+        await ready;
+      } catch (err) {
+        if (!this.isCurrentXmpp(xmpp)) return;
+        throw err;
+      }
+      if (!this.isCurrentXmpp(xmpp)) return;
     } else if (xmpp.joinRoom) {
       await xmpp.joinRoom(nextRoom, this.session.username);
+      if (!this.isCurrentXmpp(xmpp)) return;
     }
     this.startSelfPing();
     await this.flushQueuedRoomMessages(nextRoom);
@@ -2021,12 +2061,23 @@ export class BrowserXmppClient {
     return lastArchiveId;
   }
   private wireEvents(xmpp: XmppClientInstance & { enableKeepAlive?: (opts: { interval: number; timeout: number }) => void; disableKeepAlive?: () => void }) {
-    xmpp.set_on_connected?.(() => { if (this.xmpp !== xmpp) return; void this.enableCarbons(xmpp); });
-    xmpp.set_on_session_lifecycle?.((event: string) => { if (event === "resumed") this.handleSessionReady(xmpp, { type: "resumed" }); else this.handleSessionReady(xmpp, { type: "fresh" }); });
+    if (!this.xmpp && !this.destroying) this.xmpp = xmpp;
+    xmpp.set_on_connected?.(() => { if (!this.isCurrentXmpp(xmpp)) return; void this.enableCarbons(xmpp); });
+    xmpp.set_on_session_lifecycle?.((event: string) => {
+      if (!this.isCurrentXmpp(xmpp)) return;
+      if (event === "resumed") this.handleSessionReady(xmpp, { type: "resumed" }); else this.handleSessionReady(xmpp, { type: "fresh" });
+    });
     xmpp.set_on_disconnected?.(() => this.handleDisconnected(xmpp));
-    xmpp.set_on_error?.((detail: string) => this.emitError({ kind: "stream", recoverable: !this.destroying, detail }));
-    xmpp.set_on_message?.((message: WasmMessage) => this.handleMessage(message));
+    xmpp.set_on_error?.((detail: string) => {
+      if (this.xmpp !== xmpp) return;
+      this.emitError({ kind: "stream", recoverable: !this.destroying, detail });
+    });
+    xmpp.set_on_message?.((message: WasmMessage) => {
+      if (!this.isCurrentXmpp(xmpp)) return;
+      this.handleMessage(message);
+    });
     xmpp.set_on_presence?.((presence: WasmPresence) => {
+      if (!this.isCurrentXmpp(xmpp)) return;
       this.handlePresence(presence);
       // Side-effect track: MUC presence carrying the call extension
       // populates the per-room participants store so any consumer
@@ -2034,24 +2085,53 @@ export class BrowserXmppClient {
       // without subscribing to the raw presence stream.
       applyMucCallPresence(presence);
     });
-    xmpp.set_on_message_delivery_acked?.((id: string) => this.handleMessageAck(id));
-    xmpp.set_on_message_delivery_failed?.((id: string) => this.handleMessageFailed(id));
+    xmpp.set_on_message_delivery_acked?.((id: string) => {
+      if (!this.isCurrentXmpp(xmpp)) return;
+      this.handleMessageAck(id);
+    });
+    xmpp.set_on_message_delivery_failed?.((id: string) => {
+      if (!this.isCurrentXmpp(xmpp)) return;
+      this.handleMessageFailed(id);
+    });
     xmpp.set_on_mds_displayed?.((entry: WasmMdsDisplayedEntry) => {
+      if (!this.isCurrentXmpp(xmpp)) return;
       this.mdsDisplayedHandler?.({ chatId: entry.chat_id, stanzaId: entry.stanza_id, stanzaIdBy: entry.stanza_id_by });
     });
     xmpp.set_on_call?.((event: CallEvent) => {
+      if (!this.isCurrentXmpp(xmpp)) return;
       const prev = $callState.get();
       applyCallEvent(event);
       void handleCallEventSideEffect(event, prev, xmpp as unknown as CallWireSender, this.fullJid);
     });
-    xmpp.on?.("session:started", () => { xmpp.disableKeepAlive?.(); xmpp.enableKeepAlive?.({ interval: 30, timeout: 15 }); this.handleSessionReady(xmpp, { type: "fresh" }); });
-    xmpp.on?.("stream:management:resumed", () => this.handleSessionReady(xmpp, { type: "resumed" }));
+    xmpp.on?.("session:started", () => {
+      if (!this.isCurrentXmpp(xmpp)) return;
+      xmpp.disableKeepAlive?.();
+      xmpp.enableKeepAlive?.({ interval: 30, timeout: 15 });
+      this.handleSessionReady(xmpp, { type: "fresh" });
+    });
+    xmpp.on?.("stream:management:resumed", () => {
+      if (!this.isCurrentXmpp(xmpp)) return;
+      this.handleSessionReady(xmpp, { type: "resumed" });
+    });
     xmpp.on?.("disconnected", (error?: Error) => { xmpp.disableKeepAlive?.(); this.handleDisconnected(xmpp, error); });
-    xmpp.on?.("message:acked", (msg: { id?: string }) => { if (msg?.id) this.handleMessageAck(msg.id); });
-    xmpp.on?.("message:failed", (msg: { id?: string }) => { if (msg?.id) this.handleMessageFailed(msg.id); });
-    xmpp.on?.("message", (message: WasmMessage) => this.handleMessage(message));
-    xmpp.on?.("carbon:sent", (event: { carbon?: { forward?: { message?: WasmMessage } } }) => { const forwarded = event.carbon?.forward?.message; if (forwarded?.id) this.carbonDedupIds.add(forwarded.id); if (forwarded) this.handleMessage({ ...forwarded, _fromCarbon: true }); });
-    xmpp.on?.("carbon:received", (event: { carbon?: { forward?: { message?: WasmMessage } } }) => { const forwarded = event.carbon?.forward?.message; if (forwarded?.id) this.carbonDedupIds.add(forwarded.id); if (forwarded) this.handleMessage({ ...forwarded, _fromCarbon: true }); });
-    xmpp.on?.("presence", (presence: WasmPresence) => this.handlePresence(presence));
+    xmpp.on?.("message:acked", (msg: { id?: string }) => { if (!this.isCurrentXmpp(xmpp)) return; if (msg?.id) this.handleMessageAck(msg.id); });
+    xmpp.on?.("message:failed", (msg: { id?: string }) => { if (!this.isCurrentXmpp(xmpp)) return; if (msg?.id) this.handleMessageFailed(msg.id); });
+    xmpp.on?.("message", (message: WasmMessage) => {
+      if (!this.isCurrentXmpp(xmpp)) return;
+      this.handleMessage(message);
+    });
+    xmpp.on?.("carbon:sent", (event: { carbon?: { forward?: { message?: WasmMessage } } }) => {
+      if (!this.isCurrentXmpp(xmpp)) return;
+      const forwarded = event.carbon?.forward?.message; if (forwarded?.id) this.carbonDedupIds.add(forwarded.id); if (forwarded) this.handleMessage({ ...forwarded, _fromCarbon: true });
+    });
+    xmpp.on?.("carbon:received", (event: { carbon?: { forward?: { message?: WasmMessage } } }) => {
+      if (!this.isCurrentXmpp(xmpp)) return;
+      const forwarded = event.carbon?.forward?.message; if (forwarded?.id) this.carbonDedupIds.add(forwarded.id); if (forwarded) this.handleMessage({ ...forwarded, _fromCarbon: true });
+    });
+    xmpp.on?.("presence", (presence: WasmPresence) => {
+      if (!this.isCurrentXmpp(xmpp)) return;
+      this.handlePresence(presence);
+      applyMucCallPresence(presence);
+    });
   }
 }

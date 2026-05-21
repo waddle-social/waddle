@@ -17,11 +17,13 @@ export type LiveKitJoin = {
 };
 
 export type CallEvent =
+  // `from` is the sender's full JID for every inbound event. The
+  // only bare-addressed send path is outbound `<propose/>`.
   | { kind: "propose"; from: string; sid: string; media: CallMedia }
   | { kind: "proceed"; from: string; sid: string }
-  | { kind: "reject"; from: string; sid: string }
-  | { kind: "retract"; from: string; sid: string }
-  | { kind: "finish"; from: string; sid: string }
+  | { kind: "reject"; from: string; sid: string; reason?: string | null; tieBreak?: boolean }
+  | { kind: "retract"; from: string; sid: string; reason?: string | null; tieBreak?: boolean }
+  | { kind: "finish"; from: string; sid: string; reason?: string | null; migratedTo?: string | null }
   | {
       kind: "session-initiate";
       from: string;
@@ -47,7 +49,17 @@ export type CallEvent =
 export type CallState =
   | { phase: "idle" }
   | { phase: "incoming"; from: string; sid: string; media: CallMedia }
-  | { phase: "outgoing"; to: string; sid: string; media: CallMedia }
+  | { phase: "outgoing"; to: string; sid: string; media: CallMedia; initiator?: string }
+  | {
+      phase: "muc-pending";
+      peer: string;
+      sid: string;
+      media: CallMedia;
+      kind: "muc";
+      selfNick: string;
+      attemptId: string;
+      activePresencePublished?: boolean;
+    }
   | {
       phase: "active";
       /** 1:1 calls track the peer's full JID here; group calls
@@ -57,10 +69,10 @@ export type CallState =
       media: CallMedia;
       join: LiveKitJoin;
       kind: "dm" | "muc";
+      initiator?: string;
       /** MUC group calls only: the nick we used to join the room.
        *  Stored so `tearDownActiveCall` can emit the matching
-       *  `<presence to='room@muc/nick'><call state='inactive'/></presence>`
-       *  to clear our in-call indicator across other occupants. */
+       *  Muji-clearing presence update for XEP-0272 §Leaving. */
       selfNick?: string;
     }
   | { phase: "ended"; sid: string; reason: string | null };

@@ -2,8 +2,8 @@ use jid::Jid;
 
 use waddle_xmpp_client::{
     messaging::{
-        self, parse_call_event, CallEventKind, CallMedia, InboundCallEvent, JingleReason,
-        LiveKitJoin, MdsDisplayedEntry, MujiPresence, SendMessageOptions,
+        self, CallEventKind, CallMedia, InboundCallEvent, JingleReason, LiveKitJoin,
+        MdsDisplayedEntry, MujiPresence, SendMessageOptions,
     },
     request::StanzaId,
     xep::{
@@ -54,21 +54,8 @@ pub(super) fn dispatch_event(event: ClientEvent, listener: &dyn WaddleEventListe
         ClientEvent::MessageDelivery(MessageDeliveryEvent::Failed { stanza_id }) => {
             listener.on_message_delivery_failed(stanza_id.to_string());
         }
-        // XEP-0353 JMI envelopes and XEP-0166 Jingle session control
-        // stanzas are not claimed by the built-in messaging parser,
-        // so they surface here as UnhandledStanza. Run them through
-        // the call parser; if it matches, deliver a typed
-        // `WaddleCallEvent` to the Swift listener — mirroring how the
-        // wasm chat client surfaces calls (see
-        // `waddle-xmpp-client-wasm/src/events.rs`). Stanzas the call
-        // parser doesn't recognise are intentionally dropped: the
-        // Swift app has no general-purpose XML escape hatch and a
-        // stanza nobody routes is a bug somewhere else, not data the
-        // app should be expected to render.
-        ClientEvent::UnhandledStanza(element) => {
-            if let Some(call) = parse_call_event(&element) {
-                listener.on_call(call_event_to_ffi(call));
-            }
+        ClientEvent::Call(call) => {
+            listener.on_call(call_event_to_ffi(*call));
         }
         _ => {}
     }
@@ -321,9 +308,21 @@ pub(super) fn call_event_to_ffi(event: InboundCallEvent) -> WaddleCallEvent {
             media: call_media_to_ffi(media),
         },
         CallEventKind::Proceed => WaddleCallEventKind::Proceed,
-        CallEventKind::Reject => WaddleCallEventKind::Reject,
-        CallEventKind::Retract => WaddleCallEventKind::Retract,
-        CallEventKind::Finish => WaddleCallEventKind::Finish,
+        CallEventKind::Reject { reason, tie_break } => WaddleCallEventKind::Reject {
+            reason: reason.map(jingle_reason_to_ffi),
+            tie_break,
+        },
+        CallEventKind::Retract { reason, tie_break } => WaddleCallEventKind::Retract {
+            reason: reason.map(jingle_reason_to_ffi),
+            tie_break,
+        },
+        CallEventKind::Finish {
+            reason,
+            migrated_to,
+        } => WaddleCallEventKind::Finish {
+            reason: reason.map(jingle_reason_to_ffi),
+            migrated_to: migrated_to.map(|sid| sid.0),
+        },
         CallEventKind::SessionInitiate { join, media } => WaddleCallEventKind::SessionInitiate {
             join: livekit_join_to_ffi(join),
             media: call_media_to_ffi(media),
@@ -553,7 +552,7 @@ mod tests {
             </propose>
         </message>"#;
         let stanza: Element = xml.parse().expect("fixture parses");
-        let parsed = parse_call_event(&stanza).expect("propose parses");
+        let parsed = messaging::parse_call_event(&stanza).expect("propose parses");
         let ffi = call_event_to_ffi(parsed);
         assert_eq!(ffi.from, "alice@waddle.test/desktop");
         assert_eq!(ffi.sid, "c1");
@@ -584,7 +583,7 @@ mod tests {
             </jingle>
         </iq>"#;
         let stanza: Element = xml.parse().expect("fixture parses");
-        let parsed = parse_call_event(&stanza).expect("session-initiate parses");
+        let parsed = messaging::parse_call_event(&stanza).expect("session-initiate parses");
         let ffi = call_event_to_ffi(parsed);
         match ffi.kind {
             WaddleCallEventKind::SessionInitiate { join, media } => {
@@ -607,7 +606,7 @@ mod tests {
             </jingle>
         </iq>"#;
         let stanza: Element = xml.parse().expect("fixture parses");
-        let parsed = parse_call_event(&stanza).expect("session-terminate parses");
+        let parsed = messaging::parse_call_event(&stanza).expect("session-terminate parses");
         let ffi = call_event_to_ffi(parsed);
         match ffi.kind {
             WaddleCallEventKind::SessionTerminate { reason } => {
@@ -631,11 +630,74 @@ mod tests {
             </jingle>
         </iq>"#;
         let stanza: Element = xml.parse().expect("fixture parses");
-        let parsed = parse_call_event(&stanza).expect("session-terminate parses");
+        let parsed = messaging::parse_call_event(&stanza).expect("session-terminate parses");
         let ffi = call_event_to_ffi(parsed);
         match ffi.kind {
             WaddleCallEventKind::SessionTerminate { reason } => assert_eq!(reason, None),
             other => panic!("expected SessionTerminate, got {other:?}"),
+        }
+    }
+
+    fn sid(value: &str) -> messaging::SessionId {
+        messaging::SessionId(value.to_string())
+    }
+
+    fn parse_jmi(jmi: Element) -> InboundCallEvent {
+        let stanza = Element::builder("message", "jabber:client")
+            .attr(
+                minidom::rxml::xml_ncname!("from").to_owned(),
+                "alice@waddle.test/desktop",
+            )
+            .append(jmi)
+            .build();
+        messaging::parse_call_event(&stanza).expect("JMI event parses")
+    }
+
+    #[test]
+    fn jmi_tie_break_metadata_survives_call_event_to_ffi() {
+        let reject = call_event_to_ffi(parse_jmi(messaging::build_reject_with_options(
+            &sid("c1"),
+            Some(JingleReason::Expired),
+            true,
+        )));
+        match reject.kind {
+            WaddleCallEventKind::Reject { reason, tie_break } => {
+                assert_eq!(reason, Some(WaddleJingleReason::Expired));
+                assert!(tie_break);
+            }
+            other => panic!("expected Reject, got {other:?}"),
+        }
+
+        let retract = call_event_to_ffi(parse_jmi(messaging::build_retract_with_options(
+            &sid("c2"),
+            Some(JingleReason::Expired),
+            true,
+        )));
+        match retract.kind {
+            WaddleCallEventKind::Retract { reason, tie_break } => {
+                assert_eq!(reason, Some(WaddleJingleReason::Expired));
+                assert!(tie_break);
+            }
+            other => panic!("expected Retract, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn finish_migration_metadata_survives_call_event_to_ffi() {
+        let finish = call_event_to_ffi(parse_jmi(messaging::build_finish_migrated(
+            &sid("old"),
+            JingleReason::Expired,
+            &sid("new"),
+        )));
+        match finish.kind {
+            WaddleCallEventKind::Finish {
+                reason,
+                migrated_to,
+            } => {
+                assert_eq!(reason, Some(WaddleJingleReason::Expired));
+                assert_eq!(migrated_to.as_deref(), Some("new"));
+            }
+            other => panic!("expected Finish, got {other:?}"),
         }
     }
 
@@ -742,16 +804,14 @@ mod tests {
     }
 
     #[test]
-    fn unhandled_stanza_routes_to_on_call_when_recognisable() {
-        // The FFI's `_ => {}` swallow was the bug pre-PR: JMI
-        // envelopes flowed through `ClientEvent::UnhandledStanza`
-        // and never reached Swift. This test pins down the fix.
+    fn typed_call_event_routes_to_on_call() {
         let xml = "<message xmlns='jabber:client' from='bob@waddle.test/desktop'>\
             <proceed xmlns='urn:xmpp:jingle-message:0' id='c1'/>\
         </message>";
         let stanza: Element = xml.parse().expect("fixture parses");
+        let call = messaging::parse_call_event(&stanza).expect("fixture is a call");
         let listener = CapturingListener::default();
-        dispatch_event(ClientEvent::UnhandledStanza(stanza), &listener);
+        dispatch_event(ClientEvent::Call(Box::new(call)), &listener);
         assert_eq!(
             &*listener.events.lock().expect("test capture mutex poisoned"),
             &["call"]

@@ -225,6 +225,24 @@ impl MucRoom {
         self.muji_state.get(nick).map(|entry| &entry.muji)
     }
 
+    /// Clear a nickname's stored Muji advertisement if `originator`
+    /// owns it.
+    ///
+    /// XEP-0272 §Leaving says the Muji information is removed from
+    /// the participant's MUC presence when leaving the conference.
+    /// A regular available presence without `<muji/>` is therefore a
+    /// canonical clear signal for an occupant that previously
+    /// advertised Muji state.
+    pub fn clear_muji_presence(&mut self, nick: &str, originator: &FullJid) -> bool {
+        let Some(entry) = self.muji_state.get(nick) else {
+            return false;
+        };
+        if &entry.originator != originator {
+            return false;
+        }
+        self.muji_state.remove(nick).is_some()
+    }
+
     /// Add an occupant to the room.
     ///
     /// When this is a fresh join (nickname not currently present), the

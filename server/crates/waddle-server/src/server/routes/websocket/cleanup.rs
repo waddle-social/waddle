@@ -57,6 +57,48 @@ pub(crate) fn broadcast_muc_leave_to_remaining(
     }
 }
 
+/// Broadcast a canonical available room/nick presence without
+/// `<muji/>` after the resource that owned the Muji state leaves
+/// while another same-nick session remains.
+pub(crate) fn broadcast_muc_muji_clear_to_remaining(
+    state: &WebSocketState,
+    room_jid: &BareJid,
+    outcome: &LeaveOutcome,
+) {
+    if outcome.removed_last_session || !outcome.cleared_muji_state {
+        return;
+    }
+    let Some(real_jid) = outcome.remaining_nick_real_jid.as_ref() else {
+        return;
+    };
+    let from_jid = room_jid
+        .clone()
+        .with_resource_str(&outcome.nick)
+        .unwrap_or_else(|_| real_jid.clone());
+    let real_bare = real_jid.to_bare();
+    let identity = OccupantIdentity {
+        bare_jid: &real_bare,
+        real_jid: Some(real_jid),
+        secret: &state.deps.occupant_id_secret,
+    };
+    for occupant_jid in &outcome.remaining_occupants {
+        let is_self = occupant_jid.to_bare() == real_bare;
+        let presence = waddle_xmpp::muc::build_occupant_presence(
+            &from_jid,
+            occupant_jid,
+            outcome.affiliation,
+            outcome.role,
+            is_self,
+            &identity,
+        );
+        let _ = state
+            .deps
+            .protocol
+            .connection_registry
+            .try_send_to(occupant_jid, Stanza::Presence(presence));
+    }
+}
+
 /// Clean up MUC room presence when a connection disconnects
 /// Public alias for the MUC-presence cleanup used by the SM expired-session
 /// janitor in `server::mod`. Thin passthrough so the janitor doesn't need
@@ -346,6 +388,7 @@ async fn cleanup_muc_presence(state: &WebSocketState, jid: &FullJid) {
                 // wire shape is identical regardless of how the
                 // session ended.
                 broadcast_muc_leave_to_remaining(state, &room_jid, jid, &outcome);
+                broadcast_muc_muji_clear_to_remaining(state, &room_jid, &outcome);
                 maybe_evict_empty_room(state, &room_jid, &outcome).await;
             }
             Ok(None) => {}

@@ -92,6 +92,10 @@ mod tests {
 
         fn register_call_participant(&self, _: &CallId, _: &Identity) {}
 
+        fn has_call_participant(&self, _: &CallId, _: &Identity) -> bool {
+            false
+        }
+
         fn unregister_call_participant(&self, call_id: &CallId, identity: &Identity) -> CallState {
             self.calls
                 .lock()

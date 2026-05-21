@@ -52,6 +52,59 @@ fn runtime_emits_initial_open_when_transport_opens() {
 }
 
 #[test]
+fn app_stanza_routes_jmi_message_to_typed_call_event() {
+    let mut runtime = XmppRuntime::new(config()).unwrap();
+    let stanza: Element =
+        r#"<message xmlns='jabber:client' from='alice@waddle.test/desktop' to='bob@waddle.test'>
+        <propose xmlns='urn:xmpp:jingle-message:0' id='call-1'>
+          <description xmlns='urn:xmpp:jingle:apps:rtp:1' media='audio'/>
+        </propose>
+    </message>"#
+            .parse()
+            .unwrap();
+
+    let events = runtime.handle_app_stanza(&stanza);
+
+    assert_eq!(events.len(), 1);
+    assert!(matches!(
+        &events[0],
+        ClientEvent::Call(call) if call.sid.0 == "call-1"
+    ));
+}
+
+#[test]
+fn app_stanza_acknowledges_jingle_iq_set_and_surfaces_call_event() {
+    let mut runtime = XmppRuntime::new(config()).unwrap();
+    let stanza: Element = r#"<iq xmlns='jabber:client' type='set' id='j1' from='alice@waddle.test/desktop' to='bob@waddle.test/phone'>
+        <jingle xmlns='urn:xmpp:jingle:1' action='session-terminate' sid='call-1'>
+          <reason><success/></reason>
+        </jingle>
+    </iq>"#
+        .parse()
+        .unwrap();
+
+    let events = runtime.handle_app_stanza(&stanza);
+
+    assert_eq!(events.len(), 2);
+    match &events[0] {
+        ClientEvent::Connection(ConnectionEvent::OutboundMessage(TransportMessage::Element(
+            ack,
+        ))) => {
+            assert_eq!(ack.name(), "iq");
+            assert_eq!(ack.attr("type"), Some("result"));
+            assert_eq!(ack.attr("id"), Some("j1"));
+            assert_eq!(ack.attr("to"), Some("alice@waddle.test/desktop"));
+            assert_eq!(ack.attr("from"), Some("bob@waddle.test/phone"));
+        }
+        other => panic!("expected outbound IQ ack, got {other:?}"),
+    }
+    assert!(matches!(
+        &events[1],
+        ClientEvent::Call(call) if call.sid.0 == "call-1"
+    ));
+}
+
+#[test]
 fn runtime_bootstraps_auth_bind_and_ready_state() {
     let mut runtime = XmppRuntime::new(config()).unwrap();
     runtime.queue_request(ClientRequest::Connect).unwrap();

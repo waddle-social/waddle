@@ -64,6 +64,11 @@ pub trait SfuService: Send + Sync + 'static {
     /// repeat join is a no-op (the registry is a set).
     fn register_call_participant(&self, call_id: &CallId, identity: &Identity);
 
+    /// Return whether `identity` is currently registered in
+    /// `call_id`. Call teardown uses this as the authorization check
+    /// before revoking any other participant's token state.
+    fn has_call_participant(&self, call_id: &CallId, identity: &Identity) -> bool;
+
     /// Record that `identity` has left `call_id` and report whether
     /// the call is still active. When the last participant leaves,
     /// the call entry is removed and [`CallState::Ended`] is

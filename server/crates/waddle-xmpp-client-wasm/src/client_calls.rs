@@ -1,11 +1,14 @@
 use super::*;
 use waddle_xmpp_client::messaging::{
-    build_finish, build_proceed, build_propose, build_reject, build_retract, build_session_accept,
+    build_finish, build_finish_migrated, build_proceed, build_propose, build_reject,
+    build_reject_with_options, build_retract, build_retract_with_options, build_session_accept,
     build_session_initiate, build_session_terminate, jingle_reason_from_wire_name,
-    wrap_jmi_message, CallMedia, SessionId,
+    wrap_jmi_message, CallMedia, JingleReason, SessionId,
 };
 
 const NS_JINGLE: &str = "urn:xmpp:jingle:1";
+#[cfg(test)]
+const NS_JINGLE_MESSAGE: &str = "urn:xmpp:jingle-message:0";
 const NS_MUJI: &str = "urn:xmpp:jingle:muji:0";
 const NS_JINGLE_RTP: &str = "urn:xmpp:jingle:apps:rtp:1";
 const NS_WADDLE_LIVEKIT_TRANSPORT: &str = "urn:waddle:transports:livekit:0";
@@ -73,17 +76,51 @@ fn build_muji_jingle_content(media: &str) -> Element {
         .build()
 }
 
+fn build_muji_session_terminate_jingle(room_jid: &str, sid_str: &str) -> Element {
+    let muji = Element::builder("muji", NS_MUJI)
+        .attr(minidom::rxml::xml_ncname!("room").to_owned(), room_jid)
+        .build();
+    let reason = Element::builder("reason", NS_JINGLE)
+        .append(Element::builder("success", NS_JINGLE).build())
+        .build();
+    Element::builder("jingle", NS_JINGLE)
+        .attr(
+            minidom::rxml::xml_ncname!("action").to_owned(),
+            "session-terminate",
+        )
+        .attr(minidom::rxml::xml_ncname!("sid").to_owned(), sid_str)
+        .append(muji)
+        .append(reason)
+        .build()
+}
+
 /// Wrap a JMI body in the XEP-0353 §3-conformant `<message type='chat'>`
 /// envelope with a XEP-0334 `<store/>` hint. Routes through
 /// [`waddle_xmpp_client::messaging::wrap_jmi_message`] so the wasm and
 /// native clients ship byte-identical envelopes; the only wasm-local
 /// concern is parsing the JS `String` `to` into a typed
-/// [`jid::Jid`] at the boundary.
-fn message_with_jmi(to: &str, jmi: Element) -> Result<Element, JsValue> {
-    let to_jid: jid::Jid = to
+/// [`jid::BareJid`] / [`jid::FullJid`] at the boundary.
+fn message_with_jmi(to: jid::Jid, jmi: Element) -> Element {
+    wrap_jmi_message(&to, jmi)
+}
+
+fn message_with_jmi_to_bare(to: &str, jmi: Element) -> Result<Element, JsValue> {
+    let bare: jid::BareJid = to
+        .parse()
+        .map_err(|_| js_error(format!("invalid bare JID for JMI envelope: {to}")))?;
+    Ok(message_with_jmi(bare.into(), jmi))
+}
+
+fn message_with_jmi_to_full(to: &str, jmi: Element) -> Result<Element, JsValue> {
+    let full = parse_full_jid(to)?;
+    Ok(message_with_jmi(full.into(), jmi))
+}
+
+fn message_with_jmi_to_any(to: &str, jmi: Element) -> Result<Element, JsValue> {
+    let jid: jid::Jid = to
         .parse()
         .map_err(|_| js_error(format!("invalid JID for JMI envelope: {to}")))?;
-    Ok(wrap_jmi_message(&to_jid, jmi))
+    Ok(message_with_jmi(jid, jmi))
 }
 
 fn iq_set(to: &str, payload: Element) -> Element {
@@ -115,6 +152,15 @@ fn sid(value: String) -> SessionId {
     SessionId(value)
 }
 
+fn stored_full_jid(
+    inner: &std::rc::Rc<std::cell::RefCell<WaddleClientInner>>,
+) -> Result<jid::FullJid, JsValue> {
+    let stored = inner.borrow().config.clone();
+    format!("{}/{}", stored.jid, stored.resource)
+        .parse()
+        .map_err(|_| js_error("authenticated JID/resource do not form a full JID"))
+}
+
 #[wasm_bindgen]
 impl WaddleClient {
     /// Send a JMI `<propose/>` to the peer's bare JID (XEP-0353
@@ -129,7 +175,7 @@ impl WaddleClient {
     ) -> Promise {
         let inner = self.inner.clone();
         future_to_promise(async move {
-            let stanza = message_with_jmi(
+            let stanza = message_with_jmi_to_bare(
                 &peer_bare_jid,
                 build_propose(&sid(sid_str), media_from_flags(audio, video)),
             )?;
@@ -141,7 +187,7 @@ impl WaddleClient {
     pub fn send_call_proceed(&self, peer_full_jid: String, sid_str: String) -> Promise {
         let inner = self.inner.clone();
         future_to_promise(async move {
-            let stanza = message_with_jmi(&peer_full_jid, build_proceed(&sid(sid_str)))?;
+            let stanza = message_with_jmi_to_full(&peer_full_jid, build_proceed(&sid(sid_str)))?;
             send_stanza_command(inner, stanza).await?;
             Ok(JsValue::UNDEFINED)
         })
@@ -150,16 +196,40 @@ impl WaddleClient {
     pub fn send_call_reject(&self, peer_full_jid: String, sid_str: String) -> Promise {
         let inner = self.inner.clone();
         future_to_promise(async move {
-            let stanza = message_with_jmi(&peer_full_jid, build_reject(&sid(sid_str)))?;
+            let stanza = message_with_jmi_to_full(&peer_full_jid, build_reject(&sid(sid_str)))?;
             send_stanza_command(inner, stanza).await?;
             Ok(JsValue::UNDEFINED)
         })
     }
 
-    pub fn send_call_retract(&self, peer_full_jid: String, sid_str: String) -> Promise {
+    pub fn send_call_reject_tie_break(&self, peer_full_jid: String, sid_str: String) -> Promise {
         let inner = self.inner.clone();
         future_to_promise(async move {
-            let stanza = message_with_jmi(&peer_full_jid, build_retract(&sid(sid_str)))?;
+            let stanza = message_with_jmi_to_full(
+                &peer_full_jid,
+                build_reject_with_options(&sid(sid_str), Some(JingleReason::Expired), true),
+            )?;
+            send_stanza_command(inner, stanza).await?;
+            Ok(JsValue::UNDEFINED)
+        })
+    }
+
+    pub fn send_call_retract(&self, peer_jid: String, sid_str: String) -> Promise {
+        let inner = self.inner.clone();
+        future_to_promise(async move {
+            let stanza = message_with_jmi_to_any(&peer_jid, build_retract(&sid(sid_str)))?;
+            send_stanza_command(inner, stanza).await?;
+            Ok(JsValue::UNDEFINED)
+        })
+    }
+
+    pub fn send_call_retract_tie_break(&self, peer_full_jid: String, sid_str: String) -> Promise {
+        let inner = self.inner.clone();
+        future_to_promise(async move {
+            let stanza = message_with_jmi_to_full(
+                &peer_full_jid,
+                build_retract_with_options(&sid(sid_str), Some(JingleReason::Expired), true),
+            )?;
             send_stanza_command(inner, stanza).await?;
             Ok(JsValue::UNDEFINED)
         })
@@ -168,7 +238,25 @@ impl WaddleClient {
     pub fn send_call_finish(&self, peer_full_jid: String, sid_str: String) -> Promise {
         let inner = self.inner.clone();
         future_to_promise(async move {
-            let stanza = message_with_jmi(&peer_full_jid, build_finish(&sid(sid_str)))?;
+            let stanza = message_with_jmi_to_full(&peer_full_jid, build_finish(&sid(sid_str)))?;
+            send_stanza_command(inner, stanza).await?;
+            Ok(JsValue::UNDEFINED)
+        })
+    }
+
+    pub fn send_call_finish_migrated(
+        &self,
+        peer_full_jid: String,
+        old_sid_str: String,
+        new_sid_str: String,
+    ) -> Promise {
+        let inner = self.inner.clone();
+        future_to_promise(async move {
+            let new_sid = sid(new_sid_str);
+            let stanza = message_with_jmi_to_full(
+                &peer_full_jid,
+                build_finish_migrated(&sid(old_sid_str), JingleReason::Expired, &new_sid),
+            )?;
             send_stanza_command(inner, stanza).await?;
             Ok(JsValue::UNDEFINED)
         })
@@ -204,13 +292,12 @@ impl WaddleClient {
     }
 
     /// Send a Jingle `session-accept` IQ in response to a received
-    /// session-initiate. `initiator` and `responder` are validated
-    /// as full JIDs at the wasm boundary so a malformed JID surfaces
+    /// session-initiate. `responder` is validated as a full JID at
+    /// the wasm boundary so a malformed JID surfaces
     /// as a clear `JsError` rather than a wire-rejected stanza.
     pub fn send_call_session_accept(
         &self,
         peer_full_jid: String,
-        initiator_full_jid: String,
         responder_full_jid: String,
         sid_str: String,
         audio: bool,
@@ -218,17 +305,11 @@ impl WaddleClient {
     ) -> Promise {
         let inner = self.inner.clone();
         future_to_promise(async move {
-            let initiator = parse_full_jid(&initiator_full_jid)?;
             let responder = parse_full_jid(&responder_full_jid)?;
             let _ = parse_full_jid(&peer_full_jid)?;
             let stanza = iq_set(
                 &peer_full_jid,
-                build_session_accept(
-                    &sid(sid_str),
-                    &initiator,
-                    &responder,
-                    media_from_flags(audio, video),
-                ),
+                build_session_accept(&sid(sid_str), &responder, media_from_flags(audio, video)),
             );
             send_iq_command(inner, stanza).await?;
             Ok(JsValue::UNDEFINED)
@@ -251,7 +332,7 @@ impl WaddleClient {
     /// ```xml
     /// <iq type='set' to='calls.<domain>' id='…'>
     ///   <jingle xmlns='urn:xmpp:jingle:1' action='session-initiate'
-    ///           sid='ROOM_JID'>
+    ///           sid='ATTEMPT_ID'>
     ///     <muji xmlns='urn:xmpp:jingle:muji:0' room='ROOM_JID'/>
     ///     <content creator='initiator' name='audio' senders='both'>
     ///       <description xmlns='urn:xmpp:jingle:apps:rtp:1' media='audio'/>
@@ -262,22 +343,26 @@ impl WaddleClient {
     /// </iq>
     /// ```
     ///
-    /// Convention: `sid` is set to the room JID so that the
-    /// corresponding `session-terminate` is unambiguous without
-    /// requiring the client to track its own SIDs across reloads.
+    /// Convention: `sid` is a per-attempt correlation id while
+    /// `<muji room='…'/>` remains the stable SFU room identity.
+    /// This lets the chat UI ignore a stale accept from a cancelled
+    /// same-room retry without changing XEP-0272 room semantics.
     ///
     /// `video` opt-in mirrors the call store's `media.video`
     /// flag — audio is always advertised (the call wouldn't be
     /// useful otherwise); video is included only when the user
     /// asked for it. LiveKit handles the actual codec selection
     /// once connected, so the descriptions are minimal.
-    pub fn send_muji_session_initiate(&self, room_jid: String, video: bool) -> Promise {
+    pub fn send_muji_session_initiate(
+        &self,
+        room_jid: String,
+        sid_str: String,
+        video: bool,
+    ) -> Promise {
         let inner = self.inner.clone();
         future_to_promise(async move {
-            let initiator_bare = {
-                let stored = inner.borrow().config.clone();
-                stored.jid.split('/').next().unwrap_or("").to_string()
-            };
+            let initiator = stored_full_jid(&inner)?;
+            let initiator_bare = initiator.to_bare().to_string();
             let server_domain = initiator_bare
                 .split('@')
                 .next_back()
@@ -298,11 +383,11 @@ impl WaddleClient {
                 )
                 .attr(
                     minidom::rxml::xml_ncname!("sid").to_owned(),
-                    room_jid.as_str(),
+                    sid_str.as_str(),
                 )
                 .attr(
                     minidom::rxml::xml_ncname!("initiator").to_owned(),
-                    initiator_bare.as_str(),
+                    initiator.to_string(),
                 )
                 .append(muji)
                 .append(build_muji_jingle_content("audio"));
@@ -324,9 +409,8 @@ impl WaddleClient {
             // `<iq type='set'>` and surfaces to the chat-side via
             // the `on_call` callback as a typed
             // `CallEventKind::SessionAccept`. The chat layer
-            // matches it to the pending session-initiate by `sid`
-            // (which equals the room JID per the Waddle
-            // convention) and resolves its own join Promise.
+            // matches it to the pending session-initiate by the
+            // per-attempt `sid` and resolves its own join Promise.
             send_iq_command(inner, stanza).await?;
             Ok(JsValue::UNDEFINED)
         })
@@ -342,51 +426,25 @@ impl WaddleClient {
     /// ```xml
     /// <iq type='set' to='calls.<domain>' id='…'>
     ///   <jingle xmlns='urn:xmpp:jingle:1' action='session-terminate'
-    ///           sid='ROOM_JID' initiator='alice@…'>
+    ///           sid='PER_ATTEMPT_SID'>
     ///     <muji xmlns='urn:xmpp:jingle:muji:0' room='ROOM_JID'/>
     ///     <reason><success/></reason>
     ///   </jingle>
     /// </iq>
     /// ```
-    pub fn send_muji_session_terminate(&self, room_jid: String) -> Promise {
+    pub fn send_muji_session_terminate(&self, room_jid: String, sid_str: String) -> Promise {
         let inner = self.inner.clone();
         future_to_promise(async move {
-            let initiator_bare = {
-                let stored = inner.borrow().config.clone();
-                stored.jid.split('/').next().unwrap_or("").to_string()
-            };
-            let server_domain = initiator_bare
+            let full_jid = stored_full_jid(&inner)?;
+            let bare_jid = full_jid.to_bare().to_string();
+            let server_domain = bare_jid
                 .split('@')
                 .next_back()
                 .map(str::to_owned)
                 .ok_or_else(|| js_error("authenticated JID has no domain"))?;
             let mixer = calls_mixer_jid(&server_domain);
 
-            let muji = Element::builder("muji", NS_MUJI)
-                .attr(
-                    minidom::rxml::xml_ncname!("room").to_owned(),
-                    room_jid.as_str(),
-                )
-                .build();
-            let reason = Element::builder("reason", NS_JINGLE)
-                .append(Element::builder("success", NS_JINGLE).build())
-                .build();
-            let jingle = Element::builder("jingle", NS_JINGLE)
-                .attr(
-                    minidom::rxml::xml_ncname!("action").to_owned(),
-                    "session-terminate",
-                )
-                .attr(
-                    minidom::rxml::xml_ncname!("sid").to_owned(),
-                    room_jid.as_str(),
-                )
-                .attr(
-                    minidom::rxml::xml_ncname!("initiator").to_owned(),
-                    initiator_bare.as_str(),
-                )
-                .append(muji)
-                .append(reason)
-                .build();
+            let jingle = build_muji_session_terminate_jingle(&room_jid, &sid_str);
             let stanza = Element::builder("iq", NS_JABBER_CLIENT)
                 .attr(minidom::rxml::xml_ncname!("type").to_owned(), "set")
                 .attr(
@@ -483,7 +541,8 @@ mod tests {
             &waddle_xmpp_client::messaging::SessionId("c1".into()),
             waddle_xmpp_client::messaging::CallMedia::audio_only(),
         );
-        let stanza = super::message_with_jmi("bob@waddle.test", body).expect("valid JID accepted");
+        let stanza =
+            super::message_with_jmi_to_bare("bob@waddle.test", body).expect("valid JID accepted");
         assert_eq!(stanza.name(), "message");
         assert_eq!(stanza.attr("type"), Some("chat"));
         assert_eq!(stanza.attr("to"), Some("bob@waddle.test"));
@@ -499,6 +558,64 @@ mod tests {
                 .any(|c| c.name() == "propose" && c.ns() == "urn:xmpp:jingle-message:0"),
             "JMI body preserved"
         );
+    }
+
+    #[test]
+    fn jmi_response_envelope_requires_full_jid() {
+        use waddle_xmpp_client::messaging::build_proceed;
+        let body = build_proceed(&waddle_xmpp_client::messaging::SessionId("c1".into()));
+        let stanza = super::message_with_jmi_to_full("bob@waddle.test/phone", body)
+            .expect("full JID accepted");
+        assert_eq!(stanza.attr("to"), Some("bob@waddle.test/phone"));
+        assert!(FullJid::from_str("bob@waddle.test").is_err());
+    }
+
+    #[test]
+    fn jmi_tie_break_response_targets_full_jid_and_carries_expired_reason() {
+        use waddle_xmpp_client::messaging::{build_retract_with_options, JingleReason, SessionId};
+
+        let body =
+            build_retract_with_options(&SessionId("c1".into()), Some(JingleReason::Expired), true);
+        let stanza = super::message_with_jmi_to_full("bob@waddle.test/phone", body)
+            .expect("full JID accepted");
+        let retract = stanza
+            .children()
+            .find(|child| child.name() == "retract" && child.ns() == NS_JINGLE_MESSAGE)
+            .expect("JMI retract child is present");
+        assert_eq!(stanza.attr("to"), Some("bob@waddle.test/phone"));
+        assert!(retract
+            .children()
+            .any(|child| child.name() == "tie-break" && child.ns() == NS_JINGLE_MESSAGE));
+        assert!(retract.children().any(|child| {
+            child.name() == "reason"
+                && child.ns() == NS_JINGLE
+                && child
+                    .children()
+                    .any(|condition| condition.name() == "expired" && condition.ns() == NS_JINGLE)
+        }));
+    }
+
+    #[test]
+    fn muji_session_terminate_uses_session_sid_and_keeps_room_metadata() {
+        let jingle =
+            super::build_muji_session_terminate_jingle("chan@muc.waddle.test", "attempt-123");
+
+        assert_eq!(jingle.name(), "jingle");
+        assert_eq!(jingle.ns(), NS_JINGLE);
+        assert_eq!(jingle.attr("action"), Some("session-terminate"));
+        assert_eq!(jingle.attr("sid"), Some("attempt-123"));
+        assert!(jingle.children().any(|child| {
+            child.name() == "muji"
+                && child.ns() == NS_MUJI
+                && child.attr("room") == Some("chan@muc.waddle.test")
+        }));
+        assert!(jingle.children().any(|child| {
+            child.name() == "reason"
+                && child.ns() == NS_JINGLE
+                && child
+                    .children()
+                    .any(|condition| condition.name() == "success" && condition.ns() == NS_JINGLE)
+        }));
     }
 
     /// `message_with_jmi` returns `Result<_, JsValue>` on the error

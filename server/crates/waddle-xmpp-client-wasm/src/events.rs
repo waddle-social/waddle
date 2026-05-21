@@ -104,70 +104,16 @@ pub(crate) fn dispatch_client_event(inner: &Rc<RefCell<WaddleClientInner>>, even
                 let _ = callback.call1(&JsValue::NULL, &JsValue::from_str(stanza_id.as_str()));
             }
         }
-        ClientEvent::UnhandledStanza(element) => {
-            // Try to recognise an A/V call event (XEP-0353 JMI
-            // envelope or XEP-0166 Jingle session control with a
-            // urn:waddle:transports:livekit:0 transport). If matched,
-            // surface as a typed `on_call` callback so the chat side
-            // doesn't have to parse XML.
-            if let Some(call_event) = parse_call_event(&element) {
-                // XEP-0166 §6.3 conformance: a Muji session-accept
-                // arriving as a server-initiated `<iq type='set'>`
-                // MUST be acknowledged with an empty IQ-result. The
-                // server's IQ tracking layer warns on un-ACK'd
-                // IQ-sets; without this the wire is non-conformant
-                // even when the chat-side flow works.
-                if matches!(
-                    call_event.kind,
-                    waddle_xmpp_client::messaging::CallEventKind::SessionAccept { .. }
-                ) && element.name() == "iq"
-                    && element.attr("type") == Some("set")
-                {
-                    let ack = build_iq_ack(&element);
-                    if let Some(ack) = ack {
-                        if let Some(cmd_tx) = inner.borrow().cmd_tx.clone() {
-                            wasm_bindgen_futures::spawn_local(async move {
-                                let mut tx = cmd_tx;
-                                let (responder, _rx) = futures::channel::oneshot::channel();
-                                let _ = tx
-                                    .send(crate::state::WasmCommand::SendStanza {
-                                        stanza: ack,
-                                        responder,
-                                    })
-                                    .await;
-                            });
-                        }
-                    }
-                }
-                let callback = inner.borrow().on_call.clone();
-                if let Some(callback) = callback {
-                    if let Ok(value) = to_js_value(&call_event_to_js(call_event)) {
-                        let _ = callback.call1(&JsValue::NULL, &value);
-                    }
+        ClientEvent::Call(call_event) => {
+            let callback = inner.borrow().on_call.clone();
+            if let Some(callback) = callback {
+                if let Ok(value) = to_js_value(&call_event_to_js(*call_event)) {
+                    let _ = callback.call1(&JsValue::NULL, &value);
                 }
             }
         }
         _ => {}
     }
-}
-
-/// Build a XEP-0166 §6.3 empty IQ-result acknowledging a
-/// server-initiated `<iq type='set'>` stanza. Used to ACK Muji
-/// session-accept stanzas that arrive from the SFU mixer.
-/// Returns `None` if the input element is missing the `id` or
-/// `from` attributes required for the response.
-fn build_iq_ack(inbound: &Element) -> Option<Element> {
-    let id = inbound.attr("id")?;
-    let from = inbound.attr("from")?;
-    let to = inbound.attr("to");
-    let mut builder = Element::builder("iq", "jabber:client")
-        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "result")
-        .attr(minidom::rxml::xml_ncname!("id").to_owned(), id)
-        .attr(minidom::rxml::xml_ncname!("to").to_owned(), from);
-    if let Some(to) = to {
-        builder = builder.attr(minidom::rxml::xml_ncname!("from").to_owned(), to);
-    }
-    Some(builder.build())
 }
 
 pub(crate) fn emit_error_callback(inner: &Rc<RefCell<WaddleClientInner>>, description: &str) {

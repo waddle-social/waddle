@@ -23,9 +23,10 @@ use waddle_xmpp_client::{
     discovery::DiscoveryExt,
     mam::MamExt,
     messaging::{
-        build_finish, build_proceed, build_propose, build_reject, build_retract,
-        build_session_accept, build_session_initiate, build_session_terminate, CallMedia,
-        MessagingExt, SessionId, NS_CLIENT,
+        build_finish, build_finish_migrated, build_proceed, build_propose, build_reject,
+        build_reject_with_options, build_retract, build_retract_with_options, build_session_accept,
+        build_session_initiate, build_session_terminate, CallMedia, JingleReason, MessagingExt,
+        SessionId, NS_CLIENT,
     },
     AccessToken, ClientConfig, ClientHandle, ConnectionConfig, OAuthBearerConfig, WebSocketConfig,
 };
@@ -510,6 +511,23 @@ impl WaddleClient {
         self.send_stanza_or_error(stanza, "send_call_reject").await
     }
 
+    /// Send a XEP-0353 tie-break `<reject/>` carrying
+    /// `<reason><expired/></reason>` plus `<tie-break/>`.
+    pub async fn send_call_reject_tie_break(&self, peer_full_jid: String, sid: String) -> bool {
+        let Some(peer) = self.parse_full_jid(&peer_full_jid, "send_call_reject_tie_break") else {
+            return false;
+        };
+        let Some(sid) = self.parse_session_id(sid, "send_call_reject_tie_break") else {
+            return false;
+        };
+        let stanza = message_with_jmi(
+            &peer.into(),
+            build_reject_with_options(&sid, Some(JingleReason::Expired), true),
+        );
+        self.send_stanza_or_error(stanza, "send_call_reject_tie_break")
+            .await
+    }
+
     /// Send a XEP-0353 §5.1.4 `<retract/>` to cancel a ringing call
     /// before the peer answers. Addressed to the responder's *bare*
     /// JID so every resource that may have been ringing receives the
@@ -526,6 +544,23 @@ impl WaddleClient {
         self.send_stanza_or_error(stanza, "send_call_retract").await
     }
 
+    /// Send a XEP-0353 tie-break `<retract/>` carrying
+    /// `<reason><expired/></reason>` plus `<tie-break/>`.
+    pub async fn send_call_retract_tie_break(&self, peer_full_jid: String, sid: String) -> bool {
+        let Some(peer) = self.parse_full_jid(&peer_full_jid, "send_call_retract_tie_break") else {
+            return false;
+        };
+        let Some(sid) = self.parse_session_id(sid, "send_call_retract_tie_break") else {
+            return false;
+        };
+        let stanza = message_with_jmi(
+            &peer.into(),
+            build_retract_with_options(&sid, Some(JingleReason::Expired), true),
+        );
+        self.send_stanza_or_error(stanza, "send_call_retract_tie_break")
+            .await
+    }
+
     /// Send a `<finish/>` Waddle JMI extension signaling clean
     /// teardown after a call ended. Addressed to the peer's full JID
     /// so the originating resource sees the finish notice.
@@ -538,6 +573,32 @@ impl WaddleClient {
         };
         let stanza = message_with_jmi(&peer.into(), build_finish(&sid));
         self.send_stanza_or_error(stanza, "send_call_finish").await
+    }
+
+    /// Send Waddle's XEP-0353-compatible migration marker:
+    /// `<finish/>` with `<reason><expired/></reason>` and
+    /// `<migrated to='new-sid'/>`.
+    pub async fn send_call_finish_migrated(
+        &self,
+        peer_full_jid: String,
+        old_sid: String,
+        new_sid: String,
+    ) -> bool {
+        let Some(peer) = self.parse_full_jid(&peer_full_jid, "send_call_finish_migrated") else {
+            return false;
+        };
+        let Some(old_sid) = self.parse_session_id(old_sid, "send_call_finish_migrated") else {
+            return false;
+        };
+        let Some(new_sid) = self.parse_session_id(new_sid, "send_call_finish_migrated") else {
+            return false;
+        };
+        let stanza = message_with_jmi(
+            &peer.into(),
+            build_finish_migrated(&old_sid, JingleReason::Expired, &new_sid),
+        );
+        self.send_stanza_or_error(stanza, "send_call_finish_migrated")
+            .await
     }
 
     /// Send a XEP-0166 §6.4 `session-initiate` IQ to the peer's full
@@ -571,24 +632,19 @@ impl WaddleClient {
             .await
     }
 
-    /// Send a XEP-0166 §7.2 `session-accept` IQ. `initiator` and
-    /// `responder` are both validated as full JIDs at the FFI
+    /// Send a XEP-0166 §7.2 `session-accept` IQ. `responder` is
+    /// validated as a full JID at the FFI
     /// boundary so a malformed JID surfaces as an error before the
     /// stanza hits the wire.
     pub async fn send_call_session_accept(
         &self,
         peer_full_jid: String,
-        initiator_full_jid: String,
         responder_full_jid: String,
         sid: String,
         audio: bool,
         video: bool,
     ) -> bool {
         let Some(peer) = self.parse_full_jid(&peer_full_jid, "send_call_session_accept") else {
-            return false;
-        };
-        let Some(initiator) = self.parse_full_jid(&initiator_full_jid, "send_call_session_accept")
-        else {
             return false;
         };
         let Some(responder) = self.parse_full_jid(&responder_full_jid, "send_call_session_accept")
@@ -598,8 +654,7 @@ impl WaddleClient {
         let Some(sid) = self.parse_session_id(sid, "send_call_session_accept") else {
             return false;
         };
-        let payload =
-            build_session_accept(&sid, &initiator, &responder, CallMedia { audio, video });
+        let payload = build_session_accept(&sid, &responder, CallMedia { audio, video });
         let iq = iq_set(&peer.into(), payload);
         self.send_iq_or_error(iq, "send_call_session_accept").await
     }

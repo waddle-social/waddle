@@ -60,7 +60,7 @@ async function accept(): Promise<void> {
   if (!sender) return;
   accepting.value = true;
   try {
-    // Send <proceed/> back to the caller's bare JID; they respond
+    // Send <proceed/> back to the caller's full JID; they respond
     // with a Jingle session-initiate which transitions us to active.
     await outboundCalls.proceed(sender, from, sid);
   } catch (err) {

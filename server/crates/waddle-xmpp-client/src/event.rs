@@ -5,7 +5,7 @@ use crate::bootstrap::{
 };
 use crate::inbox::InboxStreamEntry;
 use crate::mam::ArchivedMessage;
-use crate::messaging::MessagingEvent;
+use crate::messaging::{InboundCallEvent, MessagingEvent};
 use crate::pep::PepItem;
 use crate::request::StanzaId;
 use crate::request::{PendingRequest, RequestCorrelation};
@@ -22,6 +22,8 @@ pub enum ClientEvent {
     Transport(TransportEvent),
     /// Typed inbound message or presence event.
     Messaging(MessagingEvent),
+    /// Typed inbound A/V call control event.
+    Call(Box<InboundCallEvent>),
     /// Typed MAM archived message from an active history query.
     ///
     /// Boxed: `ArchivedMessage` ballooned to ~480 bytes after the

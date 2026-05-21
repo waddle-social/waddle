@@ -4,6 +4,7 @@ import {
   applyMucCallPresence,
   awaitPreparingEcho,
   clearMucCallParticipants,
+  mucCallParticipantCounts,
   mucCallParticipantCount,
 } from "../src/lib/calls/muc-call-presence";
 
@@ -21,7 +22,7 @@ const preparingMuji = { preparing: true, active: false } as const;
 describe("applyMucCallPresence", () => {
   test("available presence with active Muji registers the nick", () => {
     applyMucCallPresence({
-      from: "room@muc.test/alice",
+      from: "Room@MUC.Test/alice",
       presence_type: "available",
       muji: activeMuji,
     });
@@ -29,6 +30,7 @@ describe("applyMucCallPresence", () => {
       "room@muc.test": ["alice"],
     });
     expect(mucCallParticipantCount("room@muc.test")).toBe(1);
+    expect(mucCallParticipantCount("ROOM@MUC.TEST/resource")).toBe(1);
   });
 
   test("multiple occupants accumulate per room", () => {
@@ -159,6 +161,27 @@ describe("applyMucCallPresence", () => {
     expect($mucCallParticipants.get()).toEqual({});
   });
 
+  test("clearMucCallParticipants rejects pending preparing echo waiters", async () => {
+    const result = awaitPreparingEcho("room@muc.test", "alice", 5000)
+      .then(() => "resolved" as const)
+      .catch((err) => err);
+    clearMucCallParticipants();
+    const err = await result;
+    expect(err).toBeInstanceOf(Error);
+    expect(String(err.message)).toContain("cancelled");
+  });
+
+  test("mucCallParticipantCounts normalizes room keys for sidebar/header indicators", () => {
+    expect(mucCallParticipantCounts({
+      "Room@MUC.Test/web": ["alice"],
+      "room@muc.test": ["bob"],
+      "other@muc.test": ["carol"],
+    })).toEqual({
+      "room@muc.test": 2,
+      "other@muc.test": 1,
+    });
+  });
+
   test("registers the local user's own nick when their sibling resource starts a call (regression: cross-instance indicator)", () => {
     // Scenario: alice is signed in on two browser instances (web +
     // mobile). Both have joined `room@muc.test` with the same nick
@@ -247,9 +270,9 @@ describe("awaitPreparingEcho (XEP-0272 §Joining MUST)", () => {
     // continue to block until the MUC echoes preparing.
     const wait = awaitPreparingEcho("room@muc.test", "alice", 200);
     let resolved = false;
-    wait.then(() => {
+    void wait.then(() => {
       resolved = true;
-    });
+    }).catch(() => undefined);
     applyMucCallPresence({
       from: "room@muc.test/alice",
       presence_type: "available",
@@ -257,17 +280,14 @@ describe("awaitPreparingEcho (XEP-0272 §Joining MUST)", () => {
     });
     await new Promise((r) => setTimeout(r, 10));
     expect(resolved).toBe(false);
-    // Eventually the 200ms timeout will resolve it; await to clean up.
-    await wait;
+    await expect(wait).rejects.toThrow("Timed out waiting for Muji preparing presence echo");
   });
 
-  test("falls back to timeout when no echo arrives", async () => {
-    // The MUC may have dropped the presence; we don't want to
-    // hang the call setup forever. 50ms timeout for the test.
-    const start = Date.now();
-    await awaitPreparingEcho("room@muc.test/nobody", "alice", 50);
-    const elapsed = Date.now() - start;
-    expect(elapsed).toBeGreaterThanOrEqual(40); // some scheduling slack
-    expect(elapsed).toBeLessThan(500);
+  test("rejects on timeout when no echo arrives", async () => {
+    // Missing preparing echo is fatal for strict XEP-0272 setup:
+    // beginMucCall must roll back instead of proceeding with room
+    // state the MUC never reflected.
+    await expect(awaitPreparingEcho("room@muc.test/nobody", "alice", 50))
+      .rejects.toThrow("Timed out waiting for Muji preparing presence echo");
   });
 });
