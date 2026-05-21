@@ -8,6 +8,7 @@ import {
   clearMucCallParticipant,
   normalizeMucCallRoomJid,
 } from "./muc-call-presence";
+import { clearPersistedCallStub, persistCallStub } from "./call-persistence";
 import { barePeerJid } from "../xmpp/jid";
 
 /**
@@ -159,6 +160,45 @@ export const $callState = atom<CallState>({ phase: "idle" });
  * successful state transition.
  */
 export const $lastCallError = atom<string | null>(null);
+
+/**
+ * Wall-clock timestamp (ms) of when the local user's active call
+ * began, or `null` when no call is active. Tracked per `sid` so a
+ * call-to-call handoff (rare, but valid) resets the clock instead
+ * of carrying the previous call's duration forward.
+ *
+ * Single source of truth for the "you're in a call" return pill and
+ * any future surface that needs to render a running duration for
+ * the local-user-joined call. Surfaces that show duration for a
+ * call the user has NOT joined yet (e.g. `CallActivePill`) need a
+ * different signal — the room's call onset, not the local user's
+ * join — and stay on their own first-seen-active tracking.
+ */
+export const $activeCallStartedAt = atom<number | null>(null);
+
+let activeCallTrackedSid: string | null = null;
+$callState.listen((state) => {
+  if (state.phase === "active") {
+    if (state.sid !== activeCallTrackedSid) {
+      activeCallTrackedSid = state.sid;
+      $activeCallStartedAt.set(Date.now());
+      if (state.kind === "muc") {
+        // The peer field on an active MUC call is the room's bare
+        // JID by construction (see `phase: "active"` definition in
+        // `./types`). Normalising again is harmless and keeps the
+        // persisted stub aligned with what `useActiveMucCall`
+        // compares against.
+        persistCallStub(normalizeMucCallRoomJid(state.peer) || state.peer);
+      }
+    }
+    return;
+  }
+  if (activeCallTrackedSid !== null) {
+    activeCallTrackedSid = null;
+    $activeCallStartedAt.set(null);
+    clearPersistedCallStub();
+  }
+});
 
 /**
  * Pure reducer over the current call state. Exposed for unit

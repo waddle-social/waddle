@@ -12,6 +12,7 @@ import StoriesPane from "@/components/community/StoriesPane.vue";
 import EventsPane from "@/components/community/EventsPane.vue";
 import ChatAppModals from "@/components/chat/ChatAppModals.vue";
 import ChatMobileDrawers from "@/components/chat/ChatMobileDrawers.vue";
+import CallReturnPill from "@/components/calls/CallReturnPill.vue";
 import ContentArea from "@/components/chat/ContentArea.vue";
 import DmPanel from "@/components/chat/DmPanel.vue";
 import ExtensionRouteRail from "@/components/chat/ExtensionRouteRail.vue";
@@ -155,6 +156,20 @@ const callParticipantCounts = computed<Record<string, number>>(() => {
   return mucCallParticipantCounts(mucCallParticipantsStore.value);
 });
 
+/**
+ * Bare room JID of whatever channel the user is currently looking
+ * at, or `null` when the active surface isn't a channel chat
+ * (dashboard, settings, threads, DMs, community feeds, admin).
+ * Used by `CallReturnPill` to decide whether the local user is
+ * already inside the room that owns their active call.
+ */
+const currentlyViewedRoomJid = computed<string | null>(() => {
+  if (ui.activePage.value !== "chat") return null;
+  if (ui.sidebarMode.value !== "channels") return null;
+  if (ui.activeCommunitySurface.value !== null) return null;
+  return activeChannelRoomJid.value ?? null;
+});
+
 const contentPaneClass = computed(() => {
   if (ui.sidebarMode.value !== "channels") return "";
   if (activeRightPanel.value === "thread") {
@@ -231,6 +246,18 @@ onUnmounted(() => {
 </script>
 
 <template>
+  <!--
+    Cross-surface "you're in a call" return pill. Mounted at the
+    template root so it floats above whatever page is active —
+    admin, dashboard, threads, settings, DMs, and channels that
+    don't own the call all surface it. The pill is `position:
+    fixed` so it has no layout impact on the underlying surfaces.
+  -->
+  <CallReturnPill
+    :viewed-room-jid="currentlyViewedRoomJid"
+    :channels="waddles.sortedChannels.value"
+    :on-navigate="(channelId) => { void selectChannel(channelId); }"
+  />
   <AdminView
     v-if="ui.activePage.value === 'admin'"
     :xmpp-client="xmppClient"
