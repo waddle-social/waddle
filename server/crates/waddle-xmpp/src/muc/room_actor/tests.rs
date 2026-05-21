@@ -918,6 +918,60 @@ async fn upsert_muji_presence_active_stores_and_returns_muji() {
 }
 
 #[tokio::test]
+async fn upsert_muji_presence_recipients_include_every_sibling_session_of_sender() {
+    // Multi-resource regression — pins the contract that the
+    // `presence/muc_update.rs` WebSocket handler relies on. When
+    // alice has TWO sessions in the room under the same nick
+    // (e.g. desktop + mobile, XEP-0045 §7.2 same-bare multi-session)
+    // and one session advertises a Muji presence, the recipients list
+    // MUST contain BOTH session full JIDs. The router uses this list
+    // to dispatch the reflection per session — without the sibling
+    // full JID, the second client never receives the live indicator.
+    let actor = spawn_room_actor().await;
+    let desktop: FullJid = "alice@example.com/desktop".parse().expect("desktop");
+    let mobile: FullJid = "alice@example.com/mobile".parse().expect("mobile");
+
+    actor
+        .ask(JoinWithAffiliation {
+            sender_jid: desktop.clone(),
+            nick: "alice".to_string(),
+            effective_affiliation: Affiliation::Member,
+            local_domain: "example.com".to_string(),
+        })
+        .await
+        .expect("desktop join");
+    actor
+        .ask(JoinWithAffiliation {
+            sender_jid: mobile.clone(),
+            nick: "alice".to_string(),
+            effective_affiliation: Affiliation::Member,
+            local_domain: "example.com".to_string(),
+        })
+        .await
+        .expect("mobile join recognized as same-bare multi-session");
+
+    let outcome = actor
+        .ask(crate::muc::room_actor::UpsertMujiPresence {
+            sender_jid: desktop.clone(),
+            muji: audio_muji(),
+        })
+        .await
+        .expect("ask")
+        .expect("alice is an occupant");
+
+    assert!(
+        outcome.update.recipients.iter().any(|jid| jid == &desktop),
+        "sender's own session must be in the recipient set: {:?}",
+        outcome.update.recipients
+    );
+    assert!(
+        outcome.update.recipients.iter().any(|jid| jid == &mobile),
+        "sibling session of the same bare JID must also be in the recipient set: {:?}",
+        outcome.update.recipients
+    );
+}
+
+#[tokio::test]
 async fn upsert_muji_presence_empty_clears_state_and_returns_none() {
     let actor = spawn_room_actor().await;
     let alice = test_full_jid("alice");

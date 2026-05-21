@@ -421,7 +421,10 @@ async fn muji_presence_reflects_to_senders_sibling_resource() {
     .await
     .expect("admin/mobile connects");
 
-    let room = format!("muji-sibling-{}@muc.{DOMAIN}", uuid::Uuid::new_v4());
+    // Use a UUID prefix that does NOT contain the substring "muji" —
+    // recv_matching's predicate filters by `<muji` literally below,
+    // and a room-JID-embedded "muji" substring would collide with it.
+    let room = format!("sibling-call-{}@muc.{DOMAIN}", uuid::Uuid::new_v4());
     let nick = "admin";
 
     // Web joins first (instant room creation, admin is owner). Then
@@ -453,8 +456,13 @@ async fn muji_presence_reflects_to_senders_sibling_resource() {
     // XEP-0045 §7.1 `<status code='110'/>` because mobile shares the
     // sender's bare JID and is therefore a "self" session for the
     // status-code stamping purpose.
+    // Match on the `<muji` element start tag, NOT the substring "muji"
+    // which could collide with the room JID. Both open-tag forms
+    // (with attributes / namespace) are accepted.
     let mobile_active = mobile
-        .recv_matching(|frame| frame.contains("<presence") && frame.contains("muji"))
+        .recv_matching(|frame| {
+            frame.contains("<presence") && (frame.contains("<muji ") || frame.contains("<muji>"))
+        })
         .await
         .expect("mobile receives reflected muji presence on its own WebSocket");
     let element = parse_presence(&mobile_active);
@@ -498,13 +506,18 @@ async fn muji_presence_reflects_to_senders_sibling_resource() {
     // the `<muji/>` child. The match predicate is narrow on purpose:
     // there may be unrelated frames buffered (caps, etc.); we want
     // the next presence FROM room/nick that has no `<muji/>` element.
+    let from_attr_single = format!("from='{room}/{nick}'");
+    let from_attr_double = format!("from=\"{room}/{nick}\"");
     let mobile_leave = mobile
         .recv_matching(|frame| {
             // Skip the active-muji frame we already consumed and the
             // initial join echoes; we only want a presence whose XML
-            // body has no `<muji` substring.
+            // body has no `<muji` element. Accept both attribute
+            // quoting styles to stay robust against a future
+            // minidom/rxml serializer swap (other tests in this file
+            // already guard both forms).
             frame.contains("<presence")
-                && frame.contains(&format!("from='{room}/{nick}'"))
+                && (frame.contains(&from_attr_single) || frame.contains(&from_attr_double))
                 && !frame.contains("<muji")
         })
         .await
