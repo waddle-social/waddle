@@ -301,7 +301,10 @@ async fn insert_groupchat_notification_candidate(
     let mentions_slice: &[waddle_xmpp::xep::ExplicitMention] = explicit_mentions
         .as_ref()
         .map_or(&[], |mentions| mentions.mentions.as_slice());
-    let GroupchatNotificationClassDecision::Deliver(class) = groupchat_notification_class(
+    let GroupchatNotificationClassOutcome {
+        decision: GroupchatNotificationClassDecision::Deliver(class),
+        mentions_overflowed,
+    } = groupchat_notification_class(
         mentions_slice,
         message,
         owner,
@@ -317,16 +320,11 @@ async fn insert_groupchat_notification_candidate(
     // exceed the threshold AND attach `<noping/>` for the recipient,
     // and the `Xep0513Noping` T1 suppressor would still fire — turning
     // the count gate into a push-suppression primitive instead of a
-    // spam mitigation (Codex-style adversarial follow-up to slice 3b).
-    let recipient_noping = !waddle_xmpp::xep::mentions_exceed_threshold(
-        mentions_slice,
-        message,
-        waddle_xmpp::xep::DEFAULT_MENTIONS_COUNT,
-    ) && groupchat_mentions_carry_owner_noping(
-        mentions_slice,
-        owner,
-        owner_occupant_id.as_str(),
-    );
+    // spam mitigation. The `mentions_overflowed` bit is reused from
+    // the classifier's outcome so the XEP-0372 reference walk runs
+    // exactly once per recipient (adversarial review on PR #741).
+    let recipient_noping = !mentions_overflowed
+        && groupchat_mentions_carry_owner_noping(mentions_slice, owner, owner_occupant_id.as_str());
     let hints = crate::notification_outbox::NotificationMessageHints::none()
         .with_noping(recipient_noping)
         .with_xep0334(
@@ -647,6 +645,22 @@ enum GroupchatNotificationClassDecision {
     Deliver(crate::notification_outbox::NotificationClass),
 }
 
+/// Outcome of `groupchat_notification_class`. Carries both the typed
+/// class decision and the XEP-0513 §304 "mention count exceeded" bit
+/// so the candidate-emission caller can reuse the bit when gating
+/// the recipient's `<noping/>` derivation — without re-running the
+/// XEP-0372 reference walk a second time per recipient.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct GroupchatNotificationClassOutcome {
+    decision: GroupchatNotificationClassDecision,
+    /// `true` when the per-message mention count exceeded the
+    /// `mentions#count` threshold and the classifier collapsed every
+    /// mention to `NotifyAll`. The candidate-emission noping
+    /// derivation reads this so `<noping/>` is also ignored — see
+    /// the §304 "ignore ALL mentions" SHOULD.
+    mentions_overflowed: bool,
+}
+
 /// Classify a groupchat candidate from a pre-parsed mention slice.
 ///
 /// Callers MUST pass the result of a single
@@ -686,7 +700,7 @@ fn groupchat_notification_class(
     // — server default policy is `mentions#channel = moderators`
     // (XEP-0513 example value).
     sender_can_broadcast_channel_mention: bool,
-) -> GroupchatNotificationClassDecision {
+) -> GroupchatNotificationClassOutcome {
     // XEP-0513 §304: "Receiving entities SHOULD ignore all mentions if
     // the message contains more mentions than the threshold specified
     // by `mentions#count`." When the per-message count exceeds the
@@ -695,19 +709,36 @@ fn groupchat_notification_class(
     // The wire payload is preserved (delivery + MAM unchanged per
     // XEP-0513 §526); only the push class is affected. Per-room
     // override of the threshold is deferred to slice 3c.
-    if waddle_xmpp::xep::mentions_exceed_threshold(
+    //
+    // The overflow bit is also propagated to the candidate-emission
+    // caller via `GroupchatNotificationClassOutcome` so the noping
+    // derivation can reuse it without re-walking the XEP-0372
+    // references a second time per recipient (adversarial review on
+    // PR #741).
+    let mentions_overflowed = waddle_xmpp::xep::mentions_exceed_threshold(
         mentions,
         message,
         waddle_xmpp::xep::DEFAULT_MENTIONS_COUNT,
-    ) {
-        return GroupchatNotificationClassDecision::Deliver(
-            crate::notification_outbox::NotificationClass::NotifyAll,
-        );
+    );
+    if mentions_overflowed {
+        return GroupchatNotificationClassOutcome {
+            decision: GroupchatNotificationClassDecision::Deliver(
+                crate::notification_outbox::NotificationClass::NotifyAll,
+            ),
+            mentions_overflowed,
+        };
     }
     let personal_mention = groupchat_mentions_owner(mentions, message, owner, owner_occupant_id);
     let channel_mention = groupchat_channel_mention_scope(mentions, room)
         .filter(|_| sender_can_broadcast_channel_mention);
-    groupchat_notification_class_from_message(personal_mention, channel_mention, is_live_occupant)
+    GroupchatNotificationClassOutcome {
+        decision: groupchat_notification_class_from_message(
+            personal_mention,
+            channel_mention,
+            is_live_occupant,
+        ),
+        mentions_overflowed,
+    }
 }
 
 /// Message-derived classification of a groupchat notification candidate.
@@ -1111,7 +1142,10 @@ mod tests {
         let mentions = parsed_mentions(&msg);
 
         // Permitted sender (moderator) → ChannelMention.
-        let GroupchatNotificationClassDecision::Deliver(permitted) = groupchat_notification_class(
+        let GroupchatNotificationClassOutcome {
+            decision: GroupchatNotificationClassDecision::Deliver(permitted),
+            mentions_overflowed: _,
+        } = groupchat_notification_class(
             &mentions,
             &msg,
             &owner,
@@ -1127,7 +1161,10 @@ mod tests {
         );
 
         // Non-permitted sender (participant) → NotifyAll (downgrade).
-        let GroupchatNotificationClassDecision::Deliver(downgraded) = groupchat_notification_class(
+        let GroupchatNotificationClassOutcome {
+            decision: GroupchatNotificationClassDecision::Deliver(downgraded),
+            mentions_overflowed: _,
+        } = groupchat_notification_class(
             &mentions,
             &msg,
             &owner,
@@ -1163,7 +1200,10 @@ mod tests {
         let mentions = parsed_mentions(&msg);
 
         // Permitted sender + live occupant → ActiveChannelMention.
-        let GroupchatNotificationClassDecision::Deliver(permitted) = groupchat_notification_class(
+        let GroupchatNotificationClassOutcome {
+            decision: GroupchatNotificationClassDecision::Deliver(permitted),
+            mentions_overflowed: _,
+        } = groupchat_notification_class(
             &mentions,
             &msg,
             &owner,
@@ -1180,7 +1220,10 @@ mod tests {
         );
 
         // Non-permitted sender + live occupant → NotifyAll.
-        let GroupchatNotificationClassDecision::Deliver(downgraded) = groupchat_notification_class(
+        let GroupchatNotificationClassOutcome {
+            decision: GroupchatNotificationClassDecision::Deliver(downgraded),
+            mentions_overflowed: _,
+        } = groupchat_notification_class(
             &mentions,
             &msg,
             &owner,
@@ -1231,7 +1274,7 @@ mod tests {
         // downgrades the class). The classifier returns the class
         // only — it MUST NOT mutate the message payloads.
         let mentions = parsed_mentions(&msg);
-        let _ = groupchat_notification_class(
+        let _classifier_outcome = groupchat_notification_class(
             &mentions,
             &msg,
             &owner,
@@ -1275,7 +1318,10 @@ mod tests {
         let msg = message_with_mention(waddle_xmpp::xep::ExplicitMention::jid(owner.clone()));
         let mentions = parsed_mentions(&msg);
 
-        let GroupchatNotificationClassDecision::Deliver(class) = groupchat_notification_class(
+        let GroupchatNotificationClassOutcome {
+            decision: GroupchatNotificationClassDecision::Deliver(class),
+            mentions_overflowed: _,
+        } = groupchat_notification_class(
             &mentions,
             &msg,
             &owner,
@@ -1320,7 +1366,10 @@ mod tests {
 
         // Non-permitted sender (participant). With the fix, the
         // channel-scope wins and the gate downgrades to NotifyAll.
-        let GroupchatNotificationClassDecision::Deliver(class) = groupchat_notification_class(
+        let GroupchatNotificationClassOutcome {
+            decision: GroupchatNotificationClassDecision::Deliver(class),
+            mentions_overflowed: _,
+        } = groupchat_notification_class(
             &mentions,
             &msg,
             &owner,
@@ -1341,7 +1390,10 @@ mod tests {
         // Permitted sender (moderator). Channel-scope still wins, and
         // the gate now classifies as ChannelMention — NOT
         // PersonalMention.
-        let GroupchatNotificationClassDecision::Deliver(class) = groupchat_notification_class(
+        let GroupchatNotificationClassOutcome {
+            decision: GroupchatNotificationClassDecision::Deliver(class),
+            mentions_overflowed: _,
+        } = groupchat_notification_class(
             &mentions,
             &msg,
             &owner,
@@ -1397,7 +1449,10 @@ mod tests {
             "fixture must produce more than threshold mentions"
         );
 
-        let GroupchatNotificationClassDecision::Deliver(class) = groupchat_notification_class(
+        let GroupchatNotificationClassOutcome {
+            decision: GroupchatNotificationClassDecision::Deliver(class),
+            mentions_overflowed: _,
+        } = groupchat_notification_class(
             &mentions,
             &msg,
             &owner,
@@ -1441,7 +1496,10 @@ mod tests {
         let mentions = parsed_mentions(&msg);
         assert_eq!(mentions.len() as u32, threshold);
 
-        let GroupchatNotificationClassDecision::Deliver(class) = groupchat_notification_class(
+        let GroupchatNotificationClassOutcome {
+            decision: GroupchatNotificationClassDecision::Deliver(class),
+            mentions_overflowed: _,
+        } = groupchat_notification_class(
             &mentions,
             &msg,
             &owner,
@@ -1498,7 +1556,10 @@ mod tests {
             "fixture must produce more than {threshold} combined mention targets (got {total})"
         );
 
-        let GroupchatNotificationClassDecision::Deliver(class) = groupchat_notification_class(
+        let GroupchatNotificationClassOutcome {
+            decision: GroupchatNotificationClassDecision::Deliver(class),
+            mentions_overflowed: _,
+        } = groupchat_notification_class(
             &mentions,
             &msg,
             &owner,

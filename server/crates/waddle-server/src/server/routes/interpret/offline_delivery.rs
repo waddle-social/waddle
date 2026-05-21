@@ -663,4 +663,71 @@ mod tests {
             RecipientMentionBits::default(),
         );
     }
+
+    /// XEP-0513 §304 SHOULD: when the per-message count exceeds the
+    /// threshold, the recipient ignores ALL mentions. For DM that
+    /// means the candidate falls through from `dm_mention` to plain
+    /// `dm` — even if one of the mentions legitimately names this
+    /// recipient. Lock the strict-§304 behavior (adversarial review
+    /// on PR #741).
+    #[test]
+    fn xep0513_dm_mention_count_exceeded_returns_default_bits() {
+        let recipient = bare("alice@example.com");
+        let threshold = waddle_xmpp::xep::DEFAULT_MENTIONS_COUNT;
+
+        let mut msg = xmpp_parsers::message::Message::new(None::<jid::Jid>);
+        // One mention naming the recipient (would normally trigger
+        // is_mention=true), plus enough others to push count >
+        // threshold.
+        msg.payloads.push(waddle_xmpp::xep::build_mention_element(
+            &waddle_xmpp::xep::ExplicitMention::jid(recipient.clone()),
+        ));
+        for i in 0..threshold {
+            msg.payloads.push(waddle_xmpp::xep::build_mention_element(
+                &waddle_xmpp::xep::ExplicitMention::jid(
+                    format!("user{i}@example.com").parse().expect("user bare"),
+                ),
+            ));
+        }
+        assert_eq!(
+            mention_bits_for_recipient(&msg, &recipient),
+            RecipientMentionBits::default(),
+            "DM with > DEFAULT_MENTIONS_COUNT mentions MUST collapse \
+             to default bits even when the recipient is named — \
+             §304 ignores ALL mentions"
+        );
+    }
+
+    /// At-threshold (exactly `DEFAULT_MENTIONS_COUNT` mentions) MUST
+    /// preserve the recipient's `<noping/>` suppression. The §304
+    /// threshold is exclusive ("more than"), so equal-count is still
+    /// honored.
+    #[test]
+    fn xep0513_dm_mention_count_at_threshold_preserves_noping() {
+        let recipient = bare("alice@example.com");
+        let threshold = waddle_xmpp::xep::DEFAULT_MENTIONS_COUNT;
+
+        let mut msg = xmpp_parsers::message::Message::new(None::<jid::Jid>);
+        let mut recipient_noping = waddle_xmpp::xep::ExplicitMention::jid(recipient.clone());
+        recipient_noping.noping = true;
+        msg.payloads
+            .push(waddle_xmpp::xep::build_mention_element(&recipient_noping));
+        // Fill to exactly threshold mentions total.
+        for i in 0..(threshold - 1) {
+            msg.payloads.push(waddle_xmpp::xep::build_mention_element(
+                &waddle_xmpp::xep::ExplicitMention::jid(
+                    format!("user{i}@example.com").parse().expect("user bare"),
+                ),
+            ));
+        }
+        let bits = mention_bits_for_recipient(&msg, &recipient);
+        assert!(
+            bits.is_mention,
+            "at-threshold count is still honored — is_mention MUST be set"
+        );
+        assert!(
+            bits.noping,
+            "at-threshold count is still honored — noping MUST be set"
+        );
+    }
 }

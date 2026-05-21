@@ -289,3 +289,108 @@ pub fn strip_explicit_mentions(msg: &mut Message) {
     msg.payloads
         .retain(|elem| elem.ns() != NS_EXPLICIT_MENTIONS);
 }
+
+#[cfg(test)]
+mod count_tests {
+    use super::*;
+    use crate::xep::xep0372::{add_reference, Reference};
+    use xmpp_parsers::message::Message;
+
+    fn empty_message() -> Message {
+        Message::new(None::<jid::Jid>)
+    }
+
+    fn with_xep0513_mention(msg: &mut Message, mention: ExplicitMention) {
+        msg.payloads.push(build_mention_element(&mention));
+    }
+
+    /// XEP-0513 `<mention/>` payloads contribute one mention TARGET
+    /// per parsed element. The parser already drops structurally-empty
+    /// elements that target nothing (see `parse_mention_element`), so
+    /// every element in the slice is a real mention.
+    #[test]
+    fn mention_target_count_counts_xep0513_mentions() {
+        let mut msg = empty_message();
+        with_xep0513_mention(
+            &mut msg,
+            ExplicitMention::jid("alice@example.com".parse().expect("alice bare")),
+        );
+        with_xep0513_mention(&mut msg, ExplicitMention::occupant_id("room-stable-bob"));
+        with_xep0513_mention(&mut msg, ExplicitMention::channel());
+        let mentions = extract_explicit_mentions(&msg)
+            .map(|m| m.mentions)
+            .unwrap_or_default();
+        assert_eq!(mention_target_count(&mentions, &msg), 3);
+    }
+
+    /// XEP-0372 `<reference type='mention'/>` elements ALSO contribute
+    /// to the per-message mention count — without this an attacker
+    /// bypasses the XEP-0513 §304 cap by encoding spam as XEP-0372
+    /// references instead.
+    #[test]
+    fn mention_target_count_counts_xep0372_mention_references() {
+        let mut msg = empty_message();
+        add_reference(&mut msg, &Reference::mention("xmpp:alice@example.com"));
+        add_reference(&mut msg, &Reference::mention("xmpp:bob@example.com"));
+        // XEP-0372 references with type='data' MUST NOT be counted —
+        // they're file attachments, not mentions.
+        add_reference(
+            &mut msg,
+            &Reference::data("https://files.example.com/cat.jpg"),
+        );
+        assert_eq!(mention_target_count(&[], &msg), 2);
+    }
+
+    /// Sum of both XEPs is reported.
+    #[test]
+    fn mention_target_count_sums_xep0513_and_xep0372() {
+        let mut msg = empty_message();
+        with_xep0513_mention(
+            &mut msg,
+            ExplicitMention::jid("alice@example.com".parse().expect("alice bare")),
+        );
+        add_reference(&mut msg, &Reference::mention("xmpp:bob@example.com"));
+        let mentions = extract_explicit_mentions(&msg)
+            .map(|m| m.mentions)
+            .unwrap_or_default();
+        assert_eq!(mention_target_count(&mentions, &msg), 2);
+    }
+
+    /// Zero mentions → zero count. The threshold check via
+    /// `mentions_exceed_threshold` is `false` regardless of threshold.
+    #[test]
+    fn mention_target_count_is_zero_for_unmentioned_message() {
+        let msg = empty_message();
+        assert_eq!(mention_target_count(&[], &msg), 0);
+        assert!(!mentions_exceed_threshold(&[], &msg, 0));
+    }
+
+    /// XEP-0513 §304 boundary: "more than the threshold" is strict.
+    /// Equal count does NOT exceed.
+    #[test]
+    fn mentions_exceed_threshold_is_strict_inequality() {
+        let mut msg = empty_message();
+        for i in 0..5 {
+            with_xep0513_mention(
+                &mut msg,
+                ExplicitMention::jid(
+                    format!("user{i}@example.com")
+                        .parse()
+                        .expect("target bare jid"),
+                ),
+            );
+        }
+        let mentions = extract_explicit_mentions(&msg)
+            .map(|m| m.mentions)
+            .unwrap_or_default();
+        assert_eq!(mention_target_count(&mentions, &msg), 5);
+        assert!(
+            !mentions_exceed_threshold(&mentions, &msg, 5),
+            "count == threshold MUST NOT exceed; §304 says \"more than\""
+        );
+        assert!(
+            mentions_exceed_threshold(&mentions, &msg, 4),
+            "count > threshold MUST exceed"
+        );
+    }
+}
