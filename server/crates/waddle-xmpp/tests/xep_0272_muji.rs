@@ -22,9 +22,25 @@
 //! can't be reused from an integration test crate. This file
 //! covers everything else conformantly.
 
-use waddle_sfu::CallId;
-use waddle_xmpp::xep::xep0167::MediaKind;
+use chrono::Duration;
+use minidom::Element;
+use std::sync::Arc;
+use waddle_sfu::{
+    ApiKey, ApiSecret, CallId, LiveKitSfu, SfuConfig, SfuService, TurnHost, TurnSharedSecret,
+    WebsocketUrl,
+};
+use waddle_xmpp::protocol::event::{OutboundEvent, StanzaContext};
+use waddle_xmpp::protocol::handlers::jingle::{calls_mixer_jid, JingleHandler};
+use waddle_xmpp::protocol::traits::IqHandler;
+use waddle_xmpp::xep::xep0167::{opus_audio_description, MediaKind};
 use waddle_xmpp::xep::xep0272::{find_muji, Creator, Muji, MujiContent, MujiParseError, NS_MUJI};
+use waddle_xmpp::xep::xep_waddle_livekit_transport::WaddleLiveKitTransport;
+use waddle_xmpp::Stanza;
+use xmpp_parsers::iq::Iq;
+use xmpp_parsers::jingle::{
+    Action, Content, ContentId, Creator as JingleCreator, Jingle, SessionId, Transport,
+};
+use xmpp_parsers::stanza_error::DefinedCondition;
 
 fn audio_muji() -> Muji {
     Muji::with_contents(vec![MujiContent::new(
@@ -282,4 +298,283 @@ fn default_muji_is_empty() {
     let muji = Muji::default();
     assert!(muji.is_empty());
     assert!(!muji.is_active());
+}
+
+// ── JingleHandler integration: Muji entry path through the federation guard ─
+
+fn fixture_sfu() -> Arc<dyn SfuService> {
+    let cfg = SfuConfig {
+        api_key: ApiKey::new("APIxxxxxxxx"),
+        api_secret: ApiSecret::from_text("super-secret-secret-32-bytes-min")
+            .expect("test secret meets min length"),
+        ws_url: WebsocketUrl::new("wss://livekit.test/".parse().unwrap()).unwrap(),
+        turn_host: TurnHost::new("turn.test"),
+        turn_tls_port: 443,
+        turn_udp_port: 3478,
+        turn_shared_secret: TurnSharedSecret::from_text("turn-secret"),
+        token_ttl: Duration::seconds(3600),
+        turn_ttl: Duration::seconds(3600),
+    };
+    Arc::new(LiveKitSfu::new(cfg))
+}
+
+const TEST_DOMAIN: &str = "waddle.test";
+const TEST_INITIATOR: &str = "alice@waddle.test/desktop";
+
+fn test_full_jid() -> jid::FullJid {
+    TEST_INITIATOR.parse().unwrap()
+}
+
+fn ctx<'a>(jid: &'a jid::FullJid) -> StanzaContext<'a> {
+    StanzaContext {
+        domain: TEST_DOMAIN,
+        full_jid: jid,
+    }
+}
+
+/// Build a Muji-bearing Jingle session-initiate IQ. The wire shape
+/// matches XEP-0272 §Joining: a standard `<jingle action='session-
+/// initiate'>` carrying a `<content/>` plus a `<muji room='…'/>`
+/// sibling that pins it to a specific MUC room.
+fn muji_session_initiate_iq(initiator: &str, responder: &str, room: &str, sid: &str) -> Iq {
+    let mut content = Content::new(JingleCreator::Initiator, ContentId("audio".into()));
+    content.description = Some(xmpp_parsers::jingle::Description::Rtp(
+        opus_audio_description(),
+    ));
+    content.transport = Some(Transport::Unknown(
+        WaddleLiveKitTransport::Request.to_element(),
+    ));
+    let mut jingle = Jingle::new(Action::SessionInitiate, SessionId(sid.into()));
+    jingle.initiator = Some(initiator.parse().unwrap());
+    jingle.contents.push(content);
+    let muji = Muji {
+        room: Some(room.parse().expect("test room is a valid bare JID")),
+        preparing: false,
+        contents: vec![MujiContent::new(
+            "audio",
+            Creator::Initiator,
+            MediaKind::Audio,
+        )],
+    };
+    // xmpp_parsers' Jingle struct exposes no API for arbitrary child
+    // elements, so we serialise to a minidom Element and graft the
+    // <muji/> child in. This produces the exact wire shape the chat
+    // client emits via the wasm bridge.
+    let mut jingle_elem: Element = jingle.into();
+    jingle_elem.append_child(muji.to_element());
+    Iq::Set {
+        from: Some(initiator.parse().unwrap()),
+        to: Some(responder.parse().unwrap()),
+        id: format!("muji-{sid}"),
+        payload: jingle_elem,
+    }
+}
+
+fn muji_session_terminate_iq(initiator: &str, responder: &str, room: &str, sid: &str) -> Iq {
+    let mut jingle = Jingle::new(Action::SessionTerminate, SessionId(sid.into()));
+    jingle.initiator = Some(initiator.parse().unwrap());
+    // XEP-0272 only mandates the `<muji room='…'/>` marker; no
+    // contents required for terminate.
+    let muji = Muji {
+        room: Some(room.parse().expect("test room is a valid bare JID")),
+        preparing: false,
+        contents: vec![],
+    };
+    let mut jingle_elem: Element = jingle.into();
+    jingle_elem.append_child(muji.to_element());
+    Iq::Set {
+        from: Some(initiator.parse().unwrap()),
+        to: Some(responder.parse().unwrap()),
+        id: format!("muji-term-{sid}"),
+        payload: jingle_elem,
+    }
+}
+
+fn has_feature_not_implemented(events: &[OutboundEvent]) -> bool {
+    events.iter().any(|ev| match ev {
+        OutboundEvent::SendStanza(stanza) => match stanza.as_ref() {
+            Stanza::Iq(reply) => matches!(
+                reply.as_ref(),
+                Iq::Error { error, .. }
+                    if error.defined_condition == DefinedCondition::FeatureNotImplemented
+            ),
+            _ => false,
+        },
+        _ => false,
+    })
+}
+
+fn first_error_condition(events: &[OutboundEvent]) -> Option<DefinedCondition> {
+    events.iter().find_map(|ev| {
+        let OutboundEvent::SendStanza(stanza) = ev else {
+            return None;
+        };
+        let Stanza::Iq(reply) = stanza.as_ref() else {
+            return None;
+        };
+        let Iq::Error { error, .. } = reply.as_ref() else {
+            return None;
+        };
+        Some(error.defined_condition.clone())
+    })
+}
+
+fn has_session_accept_to(events: &[OutboundEvent], expected_to: &str) -> bool {
+    events.iter().any(|ev| {
+        let OutboundEvent::SendStanza(stanza) = ev else {
+            return false;
+        };
+        let Stanza::Iq(boxed) = stanza.as_ref() else {
+            return false;
+        };
+        let Iq::Set { payload, to, .. } = boxed.as_ref() else {
+            return false;
+        };
+        to.as_ref().is_some_and(|j| j.to_string() == expected_to)
+            && payload.name() == "jingle"
+            && payload.attr("action") == Some("session-accept")
+    })
+}
+
+#[test]
+fn local_muji_mixer_jid_passes_federation_guard() {
+    // XEP-0272 §Joining: a Jingle session-initiate addressed to the
+    // local SFU mixer (`calls.<server-domain>`, Waddle's synthetic
+    // component JID for disambiguating Muji from P2P on the
+    // dispatcher) must reach `handle_muji_session_initiate`. The
+    // server is the conference focus and replies with a
+    // server-initiated session-accept per XEP-0166 §6.3 (IQ-result
+    // ack on the initiate IQ, separate `<iq type='set'>` carrying
+    // the session-accept).
+    let iq = muji_session_initiate_iq(
+        TEST_INITIATOR,
+        &calls_mixer_jid(TEST_DOMAIN).to_string(),
+        "room@muc.waddle.test",
+        "muji-1",
+    );
+    let jid = test_full_jid();
+    let handler = JingleHandler::new(fixture_sfu());
+    let events = handler.handle(&iq, &ctx(&jid));
+
+    assert!(
+        !has_feature_not_implemented(&events),
+        "local mixer must not be misclassified as federation: {events:?}",
+    );
+    assert!(
+        has_session_accept_to(&events, TEST_INITIATOR),
+        "expected Muji session-accept addressed to initiator: {events:?}",
+    );
+}
+
+#[test]
+fn local_muji_mixer_jid_with_resource_passes_federation_guard() {
+    // The mixer JID's bare form is the policy gate. A `to=` with a
+    // resource (`calls.<domain>/anything`) must still be accepted —
+    // both `is_local_jingle_peer` and the downstream Muji-handler
+    // mixer check use `.to_bare()` to compare, so the resource is
+    // semantically irrelevant.
+    let iq = muji_session_initiate_iq(
+        TEST_INITIATOR,
+        "calls.waddle.test/focus",
+        "room@muc.waddle.test",
+        "muji-resourced",
+    );
+    let jid = test_full_jid();
+    let handler = JingleHandler::new(fixture_sfu());
+    let events = handler.handle(&iq, &ctx(&jid));
+
+    assert!(
+        !has_feature_not_implemented(&events),
+        "mixer JID with resource must be treated as the bare mixer: {events:?}",
+    );
+    assert!(
+        has_session_accept_to(&events, TEST_INITIATOR),
+        "expected Muji session-accept: {events:?}",
+    );
+}
+
+#[test]
+fn foreign_mixer_jid_is_rejected_as_federation() {
+    // The local-mixer carve-out is scoped to `ctx.domain`. A
+    // `calls.<other-host>` JID is a remote-server mixer and must
+    // still be rejected by the federation guard — otherwise a local
+    // user could mint LiveKit tokens scoped to an attacker-supplied
+    // SFU room id by addressing a foreign-looking mixer.
+    let iq = muji_session_initiate_iq(
+        TEST_INITIATOR,
+        "calls.other.test",
+        "room@muc.other.test",
+        "muji-foreign",
+    );
+    let jid = test_full_jid();
+    let handler = JingleHandler::new(fixture_sfu());
+    let events = handler.handle(&iq, &ctx(&jid));
+
+    assert_eq!(
+        first_error_condition(&events),
+        Some(DefinedCondition::FeatureNotImplemented),
+        "foreign-domain mixer JID must remain rejected: {events:?}",
+    );
+}
+
+#[test]
+fn muji_with_foreign_room_jid_is_rejected_as_bad_request() {
+    // Payload gate (distinct from the peer-JID federation guard):
+    // even when the IQ is correctly addressed to the LOCAL mixer,
+    // the `<muji room='…'/>` JID must reference a room on this
+    // server's MUC service (`muc.<ctx.domain>`). Otherwise a local
+    // user could pollute our LiveKit namespace with arbitrary
+    // attacker-supplied call ids and register themselves into a
+    // participant registry keyed by a foreign room JID.
+    let iq = muji_session_initiate_iq(
+        TEST_INITIATOR,
+        &calls_mixer_jid(TEST_DOMAIN).to_string(),
+        "room@muc.other.test",
+        "muji-foreign-room",
+    );
+    let jid = test_full_jid();
+    let handler = JingleHandler::new(fixture_sfu());
+    let events = handler.handle(&iq, &ctx(&jid));
+
+    assert_eq!(
+        first_error_condition(&events),
+        Some(DefinedCondition::BadRequest),
+        "Muji with non-local room must be rejected with bad-request: {events:?}",
+    );
+}
+
+#[test]
+fn muji_session_terminate_to_local_mixer_passes_federation_guard() {
+    // Session-terminate on the Muji branch must traverse the same
+    // relaxed federation guard. The handler responds with an
+    // IQ-result per XEP-0166 §6.7 — not an error.
+    let iq = muji_session_terminate_iq(
+        TEST_INITIATOR,
+        &calls_mixer_jid(TEST_DOMAIN).to_string(),
+        "room@muc.waddle.test",
+        "muji-1",
+    );
+    let jid = test_full_jid();
+    let handler = JingleHandler::new(fixture_sfu());
+    let events = handler.handle(&iq, &ctx(&jid));
+
+    assert!(
+        !has_feature_not_implemented(&events),
+        "session-terminate to local mixer must not trip federation guard: {events:?}",
+    );
+    // The terminate path emits an IQ-result ack; assert at least one
+    // SendStanza that is NOT an error reply.
+    let saw_non_error_reply = events.iter().any(|ev| {
+        let OutboundEvent::SendStanza(stanza) = ev else {
+            return false;
+        };
+        let Stanza::Iq(reply) = stanza.as_ref() else {
+            return false;
+        };
+        !matches!(reply.as_ref(), Iq::Error { .. })
+    });
+    assert!(
+        saw_non_error_reply,
+        "expected non-error reply to session-terminate: {events:?}",
+    );
 }
