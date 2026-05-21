@@ -1,15 +1,22 @@
 //! XEP-0353 + XEP-0166 + waddle-livekit-transport wire-conformance
 //! tests against a live waddle-server with `LIVEKIT_*` envs set.
 //!
-//! Scope: the JMI ring layer (alice → bob propose/proceed/reject)
-//! and the Jingle session-initiate transport-rewrite path. The full
-//! engine-level connect-to-LiveKit step is exercised by manual smoke
-//! tests in the browser; this suite covers everything the server is
-//! responsible for.
+//! Scope: the JMI ring layer (alice → bob propose/proceed/reject),
+//! the Jingle session-initiate transport-rewrite path, and the
+//! XEP-0272 Muji MUC-presence reflection path that drives the
+//! per-room "call ongoing" indicator. The full engine-level
+//! connect-to-LiveKit step is exercised by manual smoke tests in
+//! the browser; this suite covers everything the server is
+//! responsible for on the wire.
 
 mod ws_common;
 
 use ws_common::{disco_info_query, TestServer, WsXmppClient};
+use xmpp_parsers::minidom::Element;
+
+const NS_MUC: &str = "http://jabber.org/protocol/muc";
+const NS_MUC_USER: &str = "http://jabber.org/protocol/muc#user";
+const NS_MUJI: &str = "urn:xmpp:jingle:muji:0";
 
 const DOMAIN: &str = "localhost";
 const ALICE: &str = "alice";
@@ -332,5 +339,196 @@ async fn session_initiate_rewrites_empty_waddle_transport() {
     assert!(
         forwarded.contains("<token") && forwarded.matches('.').count() > 2,
         "token child must be a populated JWT; got: {forwarded}"
+    );
+}
+
+// ── XEP-0272 §Joining: sibling-resource Muji reflection ───────────────────
+
+/// Send a XEP-0045 join presence to `room/nick` and drain frames until
+/// the room's historical-subject ack arrives (the last frame in the
+/// join sequence). Mirrors the helper in `xep0045_kick_presence_broadcast_ws.rs`
+/// but local to this test file so we don't have to share mutable state
+/// across integration test binaries.
+async fn muji_join_room(client: &mut WsXmppClient, room: &str, nick: &str) {
+    client
+        .send(&format!(
+            r#"<presence to="{room}/{nick}"><x xmlns="{NS_MUC}"/></presence>"#
+        ))
+        .await
+        .expect("send join");
+    client
+        .recv_until(|frame| frame.contains("<subject"))
+        .await
+        .expect("join responses including subject ack");
+}
+
+fn parse_presence(frame: &str) -> Element {
+    frame
+        .parse::<Element>()
+        .unwrap_or_else(|err| panic!("frame must parse as XML: {err}; frame={frame}"))
+}
+
+fn muc_user_has_status_110(presence: &Element) -> bool {
+    let Some(x) = presence
+        .children()
+        .find(|c| c.name() == "x" && c.ns() == NS_MUC_USER)
+    else {
+        return false;
+    };
+    x.children()
+        .filter(|c| c.name() == "status" && c.ns() == NS_MUC_USER)
+        .any(|s| s.attr("code") == Some("110"))
+}
+
+fn muji_child(presence: &Element) -> Option<&Element> {
+    presence
+        .children()
+        .find(|c| c.name() == "muji" && c.ns() == NS_MUJI)
+}
+
+/// XEP-0272 §Joining + XEP-0045 §7.1: when a multi-session occupant
+/// (the user's own bare JID joined twice with two resources) updates
+/// presence with a `<muji/>` content advertisement, the reflection
+/// MUST reach the *sibling* WebSocket session, not just the sending
+/// one. This is what powers the cross-instance "call ongoing"
+/// indicator: a user starting a call on their desktop client should
+/// see the chip light up in their phone client without any extra
+/// round-trip.
+///
+/// Regression test for the bug where bare-JID `is_self` equality was
+/// used to pick the delivery channel — pushing reflections to *every*
+/// same-bare recipient onto the sender's `responses` vec and never
+/// dispatching them to the sibling's WebSocket via the connection
+/// registry.
+#[tokio::test]
+async fn muji_presence_reflects_to_senders_sibling_resource() {
+    let server = TestServer::start_with_extra_envs(&[], &livekit_test_envs());
+    let admin_pass = server.fixed_account_password().to_string();
+
+    // Two WebSocket sessions for the SAME bare JID — "admin" with the
+    // server-owner localpart so the instant-room join below succeeds.
+    let mut web =
+        WsXmppClient::connect_and_auth(&server.ws_url(), DOMAIN, "admin", &admin_pass, "muji-web")
+            .await
+            .expect("admin/web connects");
+    let mut mobile = WsXmppClient::connect_and_auth(
+        &server.ws_url(),
+        DOMAIN,
+        "admin",
+        &admin_pass,
+        "muji-mobile",
+    )
+    .await
+    .expect("admin/mobile connects");
+
+    // Use a UUID prefix that does NOT contain the substring "muji" —
+    // recv_matching's predicate filters by `<muji` literally below,
+    // and a room-JID-embedded "muji" substring would collide with it.
+    let room = format!("sibling-call-{}@muc.{DOMAIN}", uuid::Uuid::new_v4());
+    let nick = "admin";
+
+    // Web joins first (instant room creation, admin is owner). Then
+    // mobile joins the same room with the same nick — XEP-0045 §7.2
+    // multi-session join: shared occupant entry, two underlying full
+    // JIDs in `occupant_sessions`.
+    muji_join_room(&mut web, &room, nick).await;
+    muji_join_room(&mut mobile, &room, nick).await;
+
+    // Web emits a XEP-0272 §Joining content presence (active call).
+    // Use a minimal `<muji>` body that the typed extractor accepts:
+    // one `<content>` with an RTP `<description media='audio'/>`.
+    let muji_active = format!(
+        r#"<presence to="{room}/{nick}">
+             <x xmlns="{NS_MUC}"/>
+             <muji xmlns="{NS_MUJI}">
+               <content creator="initiator" name="audio">
+                 <description xmlns="urn:xmpp:jingle:apps:rtp:1" media="audio"/>
+               </content>
+             </muji>
+           </presence>"#
+    );
+    web.send(&muji_active)
+        .await
+        .expect("web sends active muji presence");
+
+    // Mobile MUST receive a reflected presence — from the room/nick,
+    // carrying the `<muji>` child with `<content>` intact, plus
+    // XEP-0045 §7.1 `<status code='110'/>` because mobile shares the
+    // sender's bare JID and is therefore a "self" session for the
+    // status-code stamping purpose.
+    // Match on the `<muji` element start tag, NOT the substring "muji"
+    // which could collide with the room JID. Both open-tag forms
+    // (with attributes / namespace) are accepted.
+    let mobile_active = mobile
+        .recv_matching(|frame| {
+            frame.contains("<presence") && (frame.contains("<muji ") || frame.contains("<muji>"))
+        })
+        .await
+        .expect("mobile receives reflected muji presence on its own WebSocket");
+    let element = parse_presence(&mobile_active);
+    assert_eq!(
+        element.name(),
+        "presence",
+        "expected <presence>: {mobile_active}"
+    );
+    assert_eq!(
+        element.attr("from"),
+        Some(format!("{room}/{nick}").as_str()),
+        "reflection must be from room/nick: {mobile_active}"
+    );
+    let muji = muji_child(&element)
+        .unwrap_or_else(|| panic!("mobile reflection must carry <muji/>: {mobile_active}"));
+    assert!(
+        muji.children().any(|c| c.name() == "content"),
+        "mobile reflection must preserve the <content/> child (active call shape): {mobile_active}"
+    );
+    assert!(
+        muc_user_has_status_110(&element),
+        "XEP-0045 §7.1: sibling session of the sender must receive <status code='110'/>: {mobile_active}"
+    );
+
+    // Web emits the XEP-0272 §Leaving marker — an empty `<muji/>`
+    // element. The room actor clears the call state; the reflection
+    // strips the `<muji/>` child, so the mobile sibling sees a plain
+    // available presence (which the chat-side store reads as "no
+    // active muji" and clears the indicator).
+    let muji_leave = format!(
+        r#"<presence to="{room}/{nick}">
+             <x xmlns="{NS_MUC}"/>
+             <muji xmlns="{NS_MUJI}"/>
+           </presence>"#
+    );
+    web.send(&muji_leave)
+        .await
+        .expect("web sends empty muji leave marker");
+
+    // Mobile MUST receive a follow-up presence from room/nick WITHOUT
+    // the `<muji/>` child. The match predicate is narrow on purpose:
+    // there may be unrelated frames buffered (caps, etc.); we want
+    // the next presence FROM room/nick that has no `<muji/>` element.
+    let from_attr_single = format!("from='{room}/{nick}'");
+    let from_attr_double = format!("from=\"{room}/{nick}\"");
+    let mobile_leave = mobile
+        .recv_matching(|frame| {
+            // Skip the active-muji frame we already consumed and the
+            // initial join echoes; we only want a presence whose XML
+            // body has no `<muji` element. Accept both attribute
+            // quoting styles to stay robust against a future
+            // minidom/rxml serializer swap (other tests in this file
+            // already guard both forms).
+            frame.contains("<presence")
+                && (frame.contains(&from_attr_single) || frame.contains(&from_attr_double))
+                && !frame.contains("<muji")
+        })
+        .await
+        .expect("mobile receives leave reflection without <muji/>");
+    let leave_element = parse_presence(&mobile_leave);
+    assert!(
+        muji_child(&leave_element).is_none(),
+        "XEP-0272 §Leaving wire shape: muji child must be stripped: {mobile_leave}"
+    );
+    assert!(
+        muc_user_has_status_110(&leave_element),
+        "XEP-0045 §7.1: sibling session still gets <status code='110'/> on a self-driven update: {mobile_leave}"
     );
 }

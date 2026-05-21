@@ -54,6 +54,35 @@ pub fn calls_mixer_jid(server_domain: &str) -> BareJid {
         .unwrap_or_else(|_| panic!("server domain produced an invalid mixer JID: {raw}"))
 }
 
+/// Predicate for the Jingle federation guard: returns `true` iff
+/// `peer` is reachable without crossing a server boundary.
+///
+/// Two shapes count as local:
+/// - the apex domain (regular P2P Jingle to another local account), or
+/// - the local SFU mixer component JID (`calls.<ctx.domain>`, the
+///   XEP-0272 Muji path).
+fn is_local_jingle_peer(peer: &Jid, ctx: &StanzaContext<'_>) -> bool {
+    if peer.domain() == ctx.full_jid.domain() {
+        return true;
+    }
+    peer.to_bare() == calls_mixer_jid(ctx.domain)
+}
+
+/// Predicate for the Muji payload gate: returns `true` iff `room` is
+/// a MUC room on this server's MUC service (`muc.<ctx.domain>`).
+///
+/// XEP-0272 §Joining lets the room JID range over any conference,
+/// but accepting foreign rooms here would mint local LiveKit tokens
+/// scoped to attacker-supplied call ids and pollute the participant
+/// registry. Other servers should run their own SFU; this gate stops
+/// us proxying as theirs.
+fn is_local_muji_room(room: &BareJid, ctx: &StanzaContext<'_>) -> bool {
+    // Single MUC service per server, derived from the apex like the
+    // rest of the routing layer (`waddle-xmpp/src/routing.rs:80`).
+    let expected = format!("muc.{}", ctx.domain);
+    room.domain().as_str() == expected
+}
+
 #[derive(Clone)]
 pub struct JingleHandler {
     sfu: Arc<dyn SfuService>,
@@ -126,7 +155,15 @@ impl IqHandler for JingleHandler {
         // boundary with a clear `feature-not-implemented` so the
         // initiator sees an actionable error instead of a token
         // their peer's server can't make use of.
-        if peer.domain() != ctx.full_jid.domain() {
+        //
+        // "Local" means either the apex domain (P2P) or the local
+        // SFU mixer's component JID (`calls.<ctx.domain>`, Muji path).
+        // The mixer JID is a synthetic XMPP component identifier and
+        // intentionally lives on its own subdomain to disambiguate it
+        // from P2P Jingle on the dispatcher — it does NOT correspond
+        // to a deployed host, so a strict `peer.domain() == ctx.full_jid.domain()`
+        // would misclassify the local mixer as a remote server.
+        if !is_local_jingle_peer(&peer, ctx) {
             return error_reply(
                 iq,
                 DefinedCondition::FeatureNotImplemented,
@@ -339,6 +376,23 @@ impl JingleHandler {
                 "Muji <muji/> child inside <jingle/> requires the 'room' attribute",
             );
         };
+
+        // The `<muji room='…'/>` JID must point at a MUC room on
+        // THIS server's MUC service (`muc.<ctx.domain>`). Without
+        // this check a local user could mint a LiveKit token whose
+        // SFU room id is `victim@muc.other.example`, polluting our
+        // LiveKit namespace with arbitrary attacker-supplied call
+        // ids and (worse) registering themselves into a participant
+        // registry keyed by a foreign room jid that local presence
+        // pumps may join later. The federation guard above is a
+        // peer-JID gate; this is a payload gate.
+        if !is_local_muji_room(&room_jid, ctx) {
+            return error_reply(
+                iq,
+                DefinedCondition::BadRequest,
+                "Muji room JID must reference a MUC room on this server",
+            );
+        }
 
         match jingle.action {
             Action::SessionInitiate => self.handle_muji_session_initiate(iq, jingle, room_jid, ctx),
@@ -1115,6 +1169,47 @@ mod tests {
             },
             _ => panic!("expected SendStanza"),
         }
+    }
+
+    #[test]
+    fn same_domain_p2p_jingle_still_passes_federation_guard() {
+        // Regression for the relaxed federation guard: a P2P
+        // session-initiate between two same-apex-domain accounts
+        // must continue to forward to the peer connection without
+        // tripping `feature-not-implemented`. Muji equivalents live
+        // in the XEP-0272 dedicated test suite at
+        // `crates/waddle-xmpp/tests/xep_0272_muji.rs` per the
+        // CLAUDE.md "XEP custom test-suite hard rule."
+        let iq = session_initiate_iq(
+            "alice@waddle.test/desktop",
+            "bob@waddle.test/desktop",
+            "p2p-1",
+        );
+        let jid = test_ctx_jid();
+        let handler = JingleHandler::new(fixture_sfu());
+        let events = handler.handle(&iq, &ctx(&jid));
+
+        let no_feature_not_implemented = !events.iter().any(|ev| match ev {
+            OutboundEvent::SendStanza(stanza) => match stanza.as_ref() {
+                Stanza::Iq(reply) => matches!(
+                    reply.as_ref(),
+                    Iq::Error { error, .. }
+                        if error.defined_condition == DefinedCondition::FeatureNotImplemented
+                ),
+                _ => false,
+            },
+            _ => false,
+        });
+        assert!(
+            no_feature_not_implemented,
+            "same-apex P2P must not trip the federation guard: {events:?}",
+        );
+        assert!(
+            events
+                .iter()
+                .any(|ev| matches!(ev, OutboundEvent::RouteToConnection { .. })),
+            "expected forward to peer, got: {events:?}",
+        );
     }
 
     #[test]
