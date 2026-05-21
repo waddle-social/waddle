@@ -141,21 +141,38 @@ function refAudio(el: Element | null): void {
 
 <style scoped>
 .call-tile {
+  /* The tile FILLS its grid cell (no aspect-ratio cap, no margin
+   * auto). The video inside uses `object-fit: contain` so faces are
+   * never cropped no matter how off-aspect the cell is during a
+   * splitter drag; letterbox bands show the gradient placeholder
+   * underneath, which keeps the tile visually substantial instead
+   * of revealing the muted background.
+   *
+   * Container queries on the tile scale the placeholder initial
+   * with the tile's actual rendered size. */
   position: relative;
   overflow: hidden;
   border-radius: var(--radius-md);
   border: 1px solid var(--border);
   background: var(--muted);
   cursor: pointer;
+  width: 100%;
+  height: 100%;
   min-width: 0;
   min-height: 0;
-  /* Container queries scale the placeholder initial with the tile's
-   * actual rendered size — no JS measurement required. `cqmin` picks
-   * the smaller of the inline/block axes so a wide-cell or tall-cell
-   * shape both yield a sensible avatar disc. */
   container-type: size;
   isolation: isolate;
   transition: box-shadow 160ms ease;
+}
+
+/* Thumbnail variant — fixed-width 16:9 strip preview in the
+ * speaker-focus filmstrip; height derives from width via
+ * aspect-ratio. */
+.call-tile.call-tile--thumb {
+  width: 9rem;
+  height: auto;
+  aspect-ratio: 16 / 9;
+  flex: 0 0 auto;
 }
 
 .call-tile:hover {
@@ -167,6 +184,11 @@ function refAudio(el: Element | null): void {
   outline-offset: 2px;
 }
 
+/* The placeholder layer is ALWAYS painted underneath the video.
+ * When the video lands, only the avatar disc fades out — the
+ * gradient bg stays so it shows through the video's letterbox
+ * bands (object-fit: contain on the video). This keeps the tile
+ * visually substantial regardless of cell aspect. */
 .call-tile__placeholder {
   position: absolute;
   inset: 0;
@@ -175,10 +197,13 @@ function refAudio(el: Element | null): void {
   justify-content: center;
   color: white;
   box-shadow: inset 0 0 120px color-mix(in oklab, black 28%, transparent);
+}
+
+.call-tile__avatar-disc {
   transition: opacity 180ms ease-out;
 }
 
-.call-tile--has-video .call-tile__placeholder {
+.call-tile--has-video .call-tile__avatar-disc {
   opacity: 0;
 }
 
@@ -204,13 +229,17 @@ function refAudio(el: Element | null): void {
   inset: 0;
   width: 100%;
   height: 100%;
-  /* `cover` so the camera fills the tile fully. The placeholder
-   * underneath stays in place but is occluded by the video; if the
-   * cell aspect is very different from the camera, `cover` crops
-   * rather than letterboxing — preferred for video chat. */
-  object-fit: cover;
+  /* `contain` so the camera's full frame is always visible — faces
+   * are never cropped, no matter the cell aspect. When the cell is
+   * off-aspect (e.g. a wide-short splitter drag), the resulting
+   * letterbox bands reveal the gradient placeholder painted in the
+   * layer below, so the tile reads as a unified frame instead of
+   * a video stranded on a muted background. */
+  object-fit: contain;
   object-position: center;
-  background: var(--muted);
+  /* Transparent so the placeholder gradient is visible in any
+   * letterbox region the contain-fit produces. */
+  background: transparent;
 }
 
 .call-tile__video--mirrored {

@@ -291,17 +291,8 @@ const gridStyle = computed(() => ({
   max-height: 6.5rem;
 }
 
-/* Focused tile fills the focus area. */
-.call-tile--focused {
-  flex: 1 1 auto;
-  width: 100%;
-  height: 100%;
-}
-
-/* Thumbnail in speaker-focus mode: fixed-width 16:9 strip preview. */
-.call-tile--thumb {
-  flex: 0 0 auto;
-  width: 9rem;
-  height: 5.0625rem; /* 9rem * 9/16 = 5.0625rem — locked aspect */
-}
+/* The `.call-tile--focused` and `.call-tile--thumb` variants are
+ * styled inside CallTile.vue (where they override the default 16:9
+ * cap). The grid is only responsible for placing the right CallTile
+ * variants inside the right wrapper. */
 </style>
