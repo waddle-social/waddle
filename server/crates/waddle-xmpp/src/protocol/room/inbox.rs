@@ -550,7 +550,20 @@ mod tests {
         mod_occ.role = Role::Moderator;
         let participant_occ = occ(participant.clone(), "bob");
         let occupants = vec![mod_occ, participant_occ];
-        let durable_recipients = vec![bob_bare(), bare("dave@example.com")];
+        // Durable recipients exclude both senders so the per-dispatch
+        // event count is symmetric: every dispatch emits one sender
+        // row + every durable recipient row. If either sender were in
+        // `durable_recipients`, the inbox handler would collapse them
+        // into a single row via `seen.insert`, breaking the
+        // count-equals-expected assertion below.
+        let durable_recipients = vec![bare("dave@example.com"), bare("eve@example.com")];
+
+        // One sender row + every durable recipient row = three
+        // projections. Asserting the count guards against a future
+        // bug that silently drops a recipient row while leaving the
+        // survivors uniform — that would pass an `.all()` check
+        // vacuously.
+        let expected_count = 1 + durable_recipients.len();
 
         let mut msg = groupchat(&room, &moderator, "hello everyone");
         let events = run_with_durable(
@@ -572,6 +585,12 @@ mod tests {
                 _ => None,
             })
             .collect();
+        assert_eq!(
+            permissions.len(),
+            expected_count,
+            "expected one sender row + every durable recipient row to emit \
+             a ProjectGroupchatInbox event"
+        );
         assert!(
             permissions.iter().all(|granted| *granted),
             "moderator sender must produce a permission bool of `true` on \
@@ -599,15 +618,17 @@ mod tests {
                 _ => None,
             })
             .collect();
+        assert_eq!(
+            permissions.len(),
+            expected_count,
+            "participant sender's dispatch must emit the same shape: one \
+             sender row + every durable recipient row"
+        );
         assert!(
             permissions.iter().all(|granted| !*granted),
             "participant sender must produce a permission bool of `false` \
              on every emitted ProjectGroupchatInbox event"
         );
-    }
-
-    fn bob_bare() -> BareJid {
-        bare("bob@example.com")
     }
 
     #[test]

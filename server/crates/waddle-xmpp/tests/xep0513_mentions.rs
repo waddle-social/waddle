@@ -37,7 +37,7 @@ fn xep0513_namespace_constants_match_spec() {
 // ── §"Discovering support" advertisement ────────────────────────────
 
 #[test]
-fn xep0513_muc_rooms_advertise_both_mention_features() {
+fn xep0513_muc_rooms_do_not_advertise_mentions_until_iq_form_is_wired() {
     let mentions = Feature::explicit_mentions();
     let channel = Feature::channel_mentions();
 
@@ -46,30 +46,36 @@ fn xep0513_muc_rooms_advertise_both_mention_features() {
     assert_eq!(mentions.0, "urn:xmpp:mentions:0");
     assert_eq!(channel.0, "urn:xmpp:mentions:0#channel");
 
-    // The spec carves channel-mention support out as its own URI:
-    // a server that supports per-occupant mentions but rejects
-    // `@channel`-style pings advertises only the base feature.
-    // Waddle accepts both — pin both adverts on the room surface
-    // across every (persistent × members_only × moderated × forum)
-    // configuration. XEP-0513 is MUC-focused, so the dedicated
-    // advert lives on the room disco surface; server-wide disco
-    // doesn't currently surface it (DMs / 1:1 chats don't broadcast
-    // `@channel`, and per-recipient mentions are inferred from
-    // body without disco gating).
+    // XEP-0513 §292 + §303: advertising `urn:xmpp:mentions:0` and
+    // `urn:xmpp:mentions:0#channel` is binding — once advertised, the
+    // room's `<query xmlns='urn:xmpp:mentions:0'/>` IQ MUST return a
+    // form with `mentions#count` + `mentions#individual` (always
+    // required) and `mentions#channel` (if and only if `#channel` is
+    // advertised). PR #738 (slice 3a of #525) enforces a hardcoded
+    // `mentions#channel = moderators` policy at T0 candidate
+    // classification but does NOT yet expose the §295 IQ surface — so
+    // the advert is withdrawn until slice 3c wires the IQ form.
+    // §292 permits non-advertisement + server-internal filtering:
+    // "Mentions MAY be sent in rooms which do not have permissions
+    // set, and/or do not advertise support for them; it is up to
+    // receiving entities to determine how to handle mentions in
+    // rooms without configured permissions."
     for persistent in [false, true] {
         for members_only in [false, true] {
             for moderated in [false, true] {
                 for forum in [false, true] {
                     let feats = muc_room_features(persistent, members_only, moderated, forum);
                     assert!(
-                        feats.iter().any(|f| f == &mentions),
+                        !feats.iter().any(|f| f == &mentions),
                         "muc_room_features({persistent}, {members_only}, {moderated}, {forum}) \
-                         MUST advertise `urn:xmpp:mentions:0`"
+                         MUST NOT advertise `urn:xmpp:mentions:0` until the XEP-0513 §295 \
+                         IQ form is wired (slice 3c)"
                     );
                     assert!(
-                        feats.iter().any(|f| f == &channel),
+                        !feats.iter().any(|f| f == &channel),
                         "muc_room_features({persistent}, {members_only}, {moderated}, {forum}) \
-                         MUST advertise `urn:xmpp:mentions:0#channel`"
+                         MUST NOT advertise `urn:xmpp:mentions:0#channel` until §303 \
+                         `mentions#channel` form field is exposed (slice 3c)"
                     );
                 }
             }

@@ -13,7 +13,18 @@ impl MucRoom {
     /// Set the affiliation for a JID.
     ///
     /// Returns the change if the affiliation actually changed.
-    /// Also updates any occupant with this JID.
+    /// Also updates any occupant with this JID, re-deriving their
+    /// XEP-0045 role from the new affiliation. The role MUST track
+    /// the affiliation here — XEP-0045 §5.1.3 says a server "will
+    /// change the user's role in any room they are currently in"
+    /// on an affiliation change, and several push-decision sites
+    /// (XEP-0513 §"Multi-User Chats Permissions" §304 channel-
+    /// broadcast gate, XEP-0045 §7.5 visitor-can-send gate) read
+    /// `Occupant.role` as the source of truth — without re-deriving
+    /// here, a demoted Owner / Admin would briefly retain
+    /// `Role::Moderator` until they cycle presence, silently
+    /// preserving their broadcast capabilities (adversarial review
+    /// P2 on PR #738).
     pub fn set_affiliation(
         &mut self,
         jid: BareJid,
@@ -22,9 +33,11 @@ impl MucRoom {
         let change = self.affiliation_list.set(jid.clone(), affiliation);
 
         if change.is_some() {
+            let role = self.derive_role_from_affiliation(affiliation);
             for occupant in self.occupants.values_mut() {
                 if occupant.real_jid.to_bare() == jid {
                     occupant.affiliation = affiliation;
+                    occupant.role = role;
                 }
             }
         }
@@ -174,5 +187,95 @@ impl MucRoom {
     /// Check if the room has at least one owner.
     pub fn has_owner(&self) -> bool {
         self.affiliation_list.has_owner()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::muc::room::RoomConfig;
+
+    fn bare(value: &str) -> BareJid {
+        value.parse().expect("valid bare JID")
+    }
+
+    fn full(value: &str) -> FullJid {
+        value.parse().expect("valid full JID")
+    }
+
+    /// XEP-0045 §5.1.3: changing a user's affiliation MUST also update
+    /// their per-session role in any room they are currently in.
+    /// Without this sync, push-decision gates that read `Occupant.role`
+    /// (XEP-0513 §"Multi-User Chats Permissions" §304 channel-broadcast
+    /// gate, XEP-0045 §7.5 visitor-can-send gate) would honor a stale
+    /// role from before the demotion — silently preserving the demoted
+    /// user's broadcast capability until they next rejoin (adversarial
+    /// review P2 on PR #738).
+    #[test]
+    fn set_affiliation_resyncs_occupant_role_on_demotion() {
+        let mut room = MucRoom::new(
+            bare("team@conf.example.com"),
+            "waddle-id".to_string(),
+            "channel-id".to_string(),
+            RoomConfig::default(),
+        );
+        let owner_bare = bare("alice@example.com");
+        room.affiliation_list
+            .set(owner_bare.clone(), Affiliation::Owner);
+        room.add_occupant_with_affiliation(
+            full("alice@example.com/web"),
+            "alice".to_string(),
+            None,
+        );
+
+        let alice = room.occupants.get("alice").expect("alice joined");
+        assert_eq!(alice.affiliation, Affiliation::Owner);
+        assert_eq!(alice.role, Role::Moderator);
+
+        // Demote to Member — role MUST track affiliation.
+        room.set_affiliation(owner_bare.clone(), Affiliation::Member);
+        let alice = room.occupants.get("alice").expect("still in room");
+        assert_eq!(alice.affiliation, Affiliation::Member);
+        assert_eq!(
+            alice.role,
+            Role::Participant,
+            "Role::Moderator MUST be re-derived to Role::Participant on \
+             Owner→Member demotion; a stale role would silently preserve \
+             channel-broadcast permission for a demoted user"
+        );
+
+        // Re-promote to Admin — role tracks back up.
+        room.set_affiliation(owner_bare, Affiliation::Admin);
+        let alice = room.occupants.get("alice").expect("still in room");
+        assert_eq!(alice.affiliation, Affiliation::Admin);
+        assert_eq!(alice.role, Role::Moderator);
+    }
+
+    /// Banning (Outcast) MUST drop `Role::None` per
+    /// `derive_role_from_affiliation`. The occupant entry remains in
+    /// the room map until the kick handler removes it; the role
+    /// downgrade here is the in-place demotion that gates further
+    /// sends — particularly the XEP-0513 channel-broadcast gate.
+    #[test]
+    fn set_affiliation_to_outcast_zeroes_role() {
+        let mut room = MucRoom::new(
+            bare("team@conf.example.com"),
+            "waddle-id".to_string(),
+            "channel-id".to_string(),
+            RoomConfig::default(),
+        );
+        let bob_bare = bare("bob@example.com");
+        room.affiliation_list
+            .set(bob_bare.clone(), Affiliation::Member);
+        room.add_occupant_with_affiliation(full("bob@example.com/desk"), "bob".to_string(), None);
+        assert_eq!(
+            room.occupants.get("bob").expect("bob joined").role,
+            Role::Participant
+        );
+
+        room.set_affiliation(bob_bare, Affiliation::Outcast);
+        let bob = room.occupants.get("bob").expect("still in occupant map");
+        assert_eq!(bob.affiliation, Affiliation::Outcast);
+        assert_eq!(bob.role, Role::None);
     }
 }

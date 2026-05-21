@@ -1123,6 +1123,66 @@ mod tests {
         );
     }
 
+    /// XEP-0513 §526 "Security Considerations" allows the server to
+    /// filter mentions per its own rules; this PR downgrades the push
+    /// CLASS, but the on-wire `<mention/>` payload MUST be delivered +
+    /// archived UNCHANGED. The class downgrade is a server-internal
+    /// push-decision detail; clients consuming MAM / live delivery /
+    /// inbox MUST still see the original `urn:xmpp:mentions:0#channel`
+    /// element so their own UI rendering can show "Alice tried to
+    /// channel-mention you" even though no push fired.
+    #[test]
+    fn xep0513_channel_mention_payload_is_preserved_when_class_is_downgraded() {
+        use waddle_xmpp::xep::{extract_explicit_mentions, has_explicit_mentions, CHANNEL_MENTION};
+
+        let owner = bare("charlie@example.com");
+        let room = bare("team@muc.example.com");
+        let occupant_id = "room-stable-charlie";
+
+        let mut channel_uri = waddle_xmpp::xep::ExplicitMention::channel();
+        channel_uri.uri = Some("xmpp:team@muc.example.com".to_string());
+        let msg = message_with_mention(channel_uri);
+
+        // Sanity: the message starts with the channel mention payload.
+        assert!(has_explicit_mentions(&msg));
+        let original_mentions = extract_explicit_mentions(&msg)
+            .expect("starts with mentions")
+            .mentions;
+        assert!(original_mentions
+            .iter()
+            .any(|mention| mention.mentions.as_deref() == Some(CHANNEL_MENTION)));
+
+        // Run the classifier with a non-permitted sender (the gate
+        // downgrades the class). The classifier returns the class
+        // only — it MUST NOT mutate the message payloads.
+        let mentions = parsed_mentions(&msg);
+        let _ = groupchat_notification_class(
+            &mentions,
+            &msg,
+            &owner,
+            &room,
+            occupant_id,
+            /* is_live_occupant */ false,
+            /* sender_can_broadcast_channel_mention */ false,
+        );
+
+        // Wire shape MUST be unchanged after classification.
+        assert!(
+            has_explicit_mentions(&msg),
+            "classifier MUST NOT strip the channel-mention payload on downgrade"
+        );
+        let after_mentions = extract_explicit_mentions(&msg)
+            .expect("mentions still present")
+            .mentions;
+        assert_eq!(
+            after_mentions, original_mentions,
+            "the `<mention mentions='urn:xmpp:mentions:0#channel'/>` payload \
+             MUST be delivered + archived unchanged when the push class is \
+             downgraded — XEP-0513 §526 allows filtering the push decision, \
+             not rewriting the stanza"
+        );
+    }
+
     /// Personal mentions are unaffected by the channel-broadcast
     /// permission. XEP-0513 §"Multi-User Chats Permissions" carries a
     /// separate `mentions#individual` field for individual-mention
