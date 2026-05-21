@@ -1,0 +1,258 @@
+<script setup lang="ts">
+import { computed } from "vue";
+import { MicOff } from "lucide-vue-next";
+import { consistentColor } from "@/lib/chat-ui";
+import type { TileAttachable } from "@/lib/calls/tile-attach";
+
+/**
+ * One participant tile inside the call grid.
+ *
+ * Structure mirrors LiveKit's `ParticipantTile`: two stacked
+ * absolute layers — the placeholder paints the gradient + initial
+ * underneath, the `<video>` paints over it when a track is
+ * attached. When the video drops (camera off mid-call), the video
+ * element unmounts and the placeholder fades back in.
+ *
+ * The tile itself is a `position: relative` container with
+ * `container-type: size`; the initial scales via `cqmin` so it grows
+ * with the tile regardless of grid shape (wide cell vs tall cell).
+ *
+ * Track attachment is delegated back to the parent through
+ * callbacks: the parent owns the single `TileAttachments` instance
+ * so LiveKit's `attachedElements` array stays consistent.
+ */
+const props = defineProps<{
+  /** Human label rendered in the nameplate and derived into initials. */
+  label: string;
+  /** Stable identity-derived key namespace for `TileAttachments.sync`.
+   *  The tile builds `${attachKey}:video` / `${attachKey}:audio` so
+   *  one attachments map can host video and audio for the same
+   *  participant without collision. */
+  attachKey: string;
+  /** Whether this tile represents the local participant. Drives the
+   *  `transform: scaleX(-1)` mirror for the self-preview camera. */
+  isSelf: boolean;
+  /** Whether the local mic is currently un-muted. Drives the
+   *  destructive `MicOff` badge on the self-tile. Ignored on remotes. */
+  micEnabled: boolean;
+  /** Optional video track to render. When `null`, the placeholder
+   *  layer shows through unchanged. */
+  videoTrack: TileAttachable | null;
+  /** Optional remote audio track. Self-tiles never play audio (echo). */
+  audioTrack: TileAttachable | null;
+  /** Parent's attach reconciler — see `tile-attach.ts`. The tile
+   *  invokes this from its `<video>` / `<audio>` ref callbacks. */
+  attach: (key: string, el: HTMLMediaElement | null, track: TileAttachable | null) => void;
+}>();
+
+defineEmits<{
+  /** Click on the tile. Used by the parent to enter / exit speaker focus. */
+  activate: [];
+}>();
+
+const initials = computed<string>(() => {
+  return props.label
+    .split(/\s+/)
+    .map((part) => part[0])
+    .filter(Boolean)
+    .join("")
+    .toUpperCase()
+    .slice(0, 2);
+});
+
+const placeholderBackground = computed<string>(() => {
+  const base = consistentColor(props.label, 55, 45);
+  return `radial-gradient(circle at 32% 26%, ` +
+    `color-mix(in oklab, ${base}, white 22%), ` +
+    `${base} 58%, ` +
+    `color-mix(in oklab, ${base}, black 14%))`;
+});
+
+function refVideo(el: Element | null): void {
+  props.attach(
+    `${props.attachKey}:video`,
+    el instanceof HTMLVideoElement ? el : null,
+    props.videoTrack,
+  );
+}
+
+function refAudio(el: Element | null): void {
+  props.attach(
+    `${props.attachKey}:audio`,
+    el instanceof HTMLAudioElement ? el : null,
+    props.audioTrack,
+  );
+}
+</script>
+
+<template>
+  <div
+    class="call-tile"
+    :class="{ 'call-tile--has-video': videoTrack !== null }"
+    role="button"
+    tabindex="0"
+    :aria-label="`${label}'s tile`"
+    @click="$emit('activate')"
+    @keydown.enter="$emit('activate')"
+  >
+    <!-- Placeholder layer — always mounted so the tile never shows a
+         bare cell while LiveKit is still subscribing to the track.
+         Fades out under the video when the track lands. -->
+    <div
+      class="call-tile__placeholder"
+      :style="{ background: placeholderBackground }"
+    >
+      <span class="call-tile__avatar-disc" aria-hidden="true">
+        {{ initials }}
+      </span>
+    </div>
+
+    <video
+      v-if="videoTrack"
+      :ref="refVideo"
+      class="call-tile__video"
+      :class="{ 'call-tile__video--mirrored': isSelf }"
+      autoplay
+      playsinline
+      :muted="isSelf"
+    />
+
+    <audio
+      v-if="audioTrack && !isSelf"
+      :ref="refAudio"
+      autoplay
+    />
+
+    <!-- Persistent nameplate — same look whether a video is playing
+         or the placeholder is showing, so the tile reads identically
+         across states. -->
+    <div class="call-tile__nameplate">
+      <span class="call-tile__name">{{ label }}</span>
+      <span
+        v-if="isSelf && !micEnabled"
+        class="call-tile__mic-off"
+        aria-label="Your mic is muted"
+      >
+        <MicOff class="w-3.5 h-3.5" />
+      </span>
+    </div>
+  </div>
+</template>
+
+<style scoped>
+.call-tile {
+  position: relative;
+  overflow: hidden;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border);
+  background: var(--muted);
+  cursor: pointer;
+  min-width: 0;
+  min-height: 0;
+  /* Container queries scale the placeholder initial with the tile's
+   * actual rendered size — no JS measurement required. `cqmin` picks
+   * the smaller of the inline/block axes so a wide-cell or tall-cell
+   * shape both yield a sensible avatar disc. */
+  container-type: size;
+  isolation: isolate;
+  transition: box-shadow 160ms ease;
+}
+
+.call-tile:hover {
+  box-shadow: 0 0 18px var(--glow);
+}
+
+.call-tile:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+
+.call-tile__placeholder {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: white;
+  box-shadow: inset 0 0 120px color-mix(in oklab, black 28%, transparent);
+  transition: opacity 180ms ease-out;
+}
+
+.call-tile--has-video .call-tile__placeholder {
+  opacity: 0;
+}
+
+.call-tile__avatar-disc {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: min(36cqmin, 9rem);
+  height: min(36cqmin, 9rem);
+  border-radius: 9999px;
+  background: color-mix(in oklab, white 15%, transparent);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  font-size: clamp(1.25rem, 14cqmin, 4rem);
+  text-shadow: 0 1px 2px color-mix(in oklab, black 40%, transparent);
+  user-select: none;
+}
+
+.call-tile__video {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  /* `cover` so the camera fills the tile fully. The placeholder
+   * underneath stays in place but is occluded by the video; if the
+   * cell aspect is very different from the camera, `cover` crops
+   * rather than letterboxing — preferred for video chat. */
+  object-fit: cover;
+  object-position: center;
+  background: var(--muted);
+}
+
+.call-tile__video--mirrored {
+  /* Local front-facing camera is always mirrored for natural feel.
+   * (We don't ship back-camera or screen-share through this tile yet,
+   * so no need for a flag.) */
+  transform: scaleX(-1);
+}
+
+.call-tile__nameplate {
+  position: absolute;
+  inset-inline: 0;
+  bottom: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-xs);
+  padding: 0.375rem 0.5rem;
+  background: linear-gradient(to top, rgba(0, 0, 0, 0.55), transparent);
+  color: white;
+  pointer-events: none;
+}
+
+.call-tile__name {
+  font-size: 0.8125rem;
+  line-height: 1;
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-shadow: 0 1px 2px color-mix(in oklab, black 60%, transparent);
+}
+
+.call-tile__mic-off {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.25rem;
+  height: 1.25rem;
+  border-radius: 9999px;
+  background: var(--destructive);
+  color: var(--destructive-foreground);
+  flex-shrink: 0;
+}
+</style>
