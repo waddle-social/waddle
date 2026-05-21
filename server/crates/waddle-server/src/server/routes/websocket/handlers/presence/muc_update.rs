@@ -154,6 +154,17 @@ pub(super) async fn try_handle_muc_presence_update(
         // session join (Alice on web AND mobile) needs `is_self` for
         // BOTH recipients when Alice updates her presence from web.
         let is_self = recipient.to_bare() == sender_jid.to_bare();
+        // `is_self` covers stanza SHAPE (status-110 stamping). The
+        // delivery CHANNEL is a separate question: only the exact
+        // full JID that emitted this presence shares the inbound
+        // WebSocket, so only that recipient can be returned via the
+        // `responses` vec. Every other recipient — including a
+        // sibling resource of the same bare JID, which is on a
+        // different WebSocket — must be dispatched through the
+        // cross-session connection registry, otherwise the sibling
+        // never receives the Muji reflection and its "call ongoing"
+        // indicator never lights up.
+        let is_sender_session = recipient == sender_jid;
         let mut presence = build_occupant_presence_update(
             incoming,
             &from_room_jid,
@@ -176,11 +187,7 @@ pub(super) async fn try_handle_muc_presence_update(
                 .retain(|payload| !(payload.name() == "muji" && payload.ns() == NS_MUJI));
         }
 
-        if is_self {
-            // Self-presence goes back over the WebSocket session
-            // that sent it (via the `responses` vec); other
-            // recipients are dispatched through the cross-session
-            // connection registry below.
+        if is_sender_session {
             responses.push(stanza_to_xml(&Stanza::Presence(presence)));
         } else {
             let stanza = Stanza::Presence(presence);
