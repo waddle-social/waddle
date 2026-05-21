@@ -127,6 +127,14 @@ pub fn parse_spaces_from_disco_items(
 ///
 /// The first matching service wins for each component; subsequent
 /// matches are ignored.
+///
+/// Gated to the native non-wasm build (where `discovery::ext` is
+/// compiled) plus the test build (which exercises this helper
+/// directly). The wasm browser client performs the equivalent
+/// disco walk in TypeScript (`chat/src/lib/xmpp/discovery.ts`),
+/// so the function would otherwise be dead in the wasm crate's
+/// dependency closure and trip the rustc `dead_code` warning.
+#[cfg(any(all(feature = "native", not(target_arch = "wasm32")), test,))]
 pub fn resolve_component_services(
     items: &[(jid::BareJid, Option<DiscoInfoResult>)],
     fallback_muc: jid::BareJid,

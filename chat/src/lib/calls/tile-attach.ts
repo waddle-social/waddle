@@ -1,5 +1,3 @@
-import type { CallVideoRegistry } from "./video-registry";
-
 /**
  * One bookkeeping record per `(tile, role)` slot. Tracks which
  * (`<video>` | `<audio>`, LiveKit track) pair is currently mounted so
@@ -41,17 +39,11 @@ export class TileAttachments {
    * the previous track is always `.detach()`-ed before the next is
    * attached so LiveKit's internal `attachedElements` never accumulates
    * stale entries.
-   *
-   * `identity` is the LiveKit participant identity. When supplied and
-   * the element is an `HTMLVideoElement`, the optional `registry` is
-   * updated so the overlay's PIP toggle can look the element up.
    */
   sync(
     key: TileAttachKey,
     el: HTMLMediaElement | null,
     track: TileAttachable | null,
-    identity: string | null,
-    registry: CallVideoRegistry | null,
   ): void {
     const prev = this.records.get(key);
     // Unmount path: free the previous attachment and clear the
@@ -67,7 +59,6 @@ export class TileAttachments {
         prev.el.srcObject = null;
         this.records.delete(key);
       }
-      if (identity && !el) registry?.register(identity, null);
       return;
     }
     // No-op: same (el, track) reattached. LiveKit tolerates this but
@@ -84,9 +75,6 @@ export class TileAttachments {
     }
     track.attach(el);
     this.records.set(key, { el, track });
-    if (identity && el instanceof HTMLVideoElement) {
-      registry?.register(identity, el);
-    }
   }
 
   /** Test helper: peek at the live records. */
