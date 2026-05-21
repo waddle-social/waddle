@@ -310,7 +310,10 @@ async fn insert_groupchat_notification_candidate(
     let references_slice: &[waddle_xmpp::xep::Reference] = references_vec.as_slice();
     let GroupchatNotificationClassOutcome {
         decision: GroupchatNotificationClassDecision::Deliver(class),
-        mentions_overflowed,
+        // The overflow bit is consumed by the classifier — the
+        // class downgrade reflects it. We deliberately do NOT use
+        // it to gate `<noping/>` (see below).
+        mentions_overflowed: _,
     } = groupchat_notification_class(
         mentions_slice,
         references_slice,
@@ -320,18 +323,23 @@ async fn insert_groupchat_notification_candidate(
         is_live_occupant,
         sender_can_broadcast_channel_mention,
     );
-    // XEP-0513 §304: when the per-message mention count exceeds the
-    // threshold, the recipient SHOULD ignore *all* mentions on the
-    // message — including any `<noping/>` attribute targeting this
-    // recipient. Without this guard a sender could spam mentions to
-    // exceed the threshold AND attach `<noping/>` for the recipient,
-    // and the `Xep0513Noping` T1 suppressor would still fire — turning
-    // the count gate into a push-suppression primitive instead of a
-    // spam mitigation. The `mentions_overflowed` bit is reused from
-    // the classifier's outcome so the XEP-0372 reference walk runs
-    // exactly once per recipient (adversarial review on PR #741).
-    let recipient_noping = !mentions_overflowed
-        && groupchat_mentions_carry_owner_noping(mentions_slice, owner, owner_occupant_id.as_str());
+    // XEP-0513 §"No Ping": "if the sender includes a `<noping/>`
+    // child element in a mention, the receiving entity SHOULD NOT
+    // generate a notification (ping) for that mention." That SHOULD
+    // is INDEPENDENT of §304's "ignore all mentions" cap — the
+    // existing slice-2a T1 suppressor (`SuppressedReason::Xep0513Noping`)
+    // honors `<noping/>` unconditionally for every class. A prior
+    // shape of this code canceled the noping bit on count-overflow
+    // (to prevent a spammer silencing push via `<noping/>` + mention
+    // spam), but that contradicts both the §"No Ping" SHOULD and
+    // the existing T1 behavior — push candidate creation MUST be
+    // suppressed for `<noping/>` recipients even when the message
+    // overflows the §304 count cap, while normal delivery + MAM +
+    // inbox projection are unaffected (compliance review on
+    // PR #741). The class downgrade caused by overflow remains; only
+    // the per-recipient `<noping/>` suppression survives the cap.
+    let recipient_noping =
+        groupchat_mentions_carry_owner_noping(mentions_slice, owner, owner_occupant_id.as_str());
     let hints = crate::notification_outbox::NotificationMessageHints::none()
         .with_noping(recipient_noping)
         .with_xep0334(
@@ -1606,25 +1614,27 @@ mod tests {
         );
     }
 
-    /// XEP-0513 §304 + Codex-style hardening: when the threshold is
-    /// exceeded, EVERY mention is ignored — including any
-    /// `<noping/>` attribute targeting the recipient. Otherwise an
-    /// attacker spams mentions to exceed the threshold AND attaches
-    /// `<noping/>` for the recipient, and the `Xep0513Noping` T1
-    /// suppressor still fires — turning the count gate into a push-
-    /// suppression primitive instead of a spam mitigation.
+    /// XEP-0513 §"No Ping" is INDEPENDENT of §304's "ignore all
+    /// mentions" cap (compliance review on PR #741). When the
+    /// threshold is exceeded:
+    ///
+    ///   - the CLASS is downgraded to `NotifyAll` per §304;
+    ///   - per-recipient `<noping/>` is PRESERVED — the existing
+    ///     T0/T1 `Xep0513Noping` suppressor fires for the recipient
+    ///     even on overflowed messages, suppressing push candidate
+    ///     creation without affecting delivery / MAM / inbox.
+    ///
+    /// This lock-in test asserts the predicate that
+    /// `insert_groupchat_notification_candidate` reads:
+    /// `groupchat_mentions_carry_owner_noping` MUST return true
+    /// regardless of overflow, because the production code no
+    /// longer combines it with `!mentions_overflowed`.
     #[test]
-    fn xep0513_mention_count_exceeded_also_ignores_noping_suppression() {
+    fn xep0513_noping_survives_mention_count_overflow() {
         let owner = bare("charlie@example.com");
         let occupant_id = "room-stable-charlie";
         let threshold = waddle_xmpp::xep::DEFAULT_MENTIONS_COUNT;
 
-        // Build threshold+1 mentions; one of them names owner with
-        // `<noping/>`. The classifier-side gate handles class
-        // downgrade; the candidate-emission site separately gates
-        // the noping bit via `mentions_exceed_threshold` (see
-        // `enqueue_groupchat_notification_candidate`). This test
-        // locks the predicate that the noping derivation reads.
         let mut msg = Message::new(None::<Jid>);
         let mut owner_noping = waddle_xmpp::xep::ExplicitMention::jid(owner.clone());
         owner_noping.noping = true;
@@ -1639,22 +1649,22 @@ mod tests {
         }
         let mentions = parsed_mentions(&msg);
 
-        // Sanity: the threshold IS exceeded — the predicate the
-        // emission site reads MUST return true.
+        // Sanity: the threshold IS exceeded.
         assert!(
             waddle_xmpp::xep::mentions_exceed_threshold(&mentions, &msg, threshold),
             "fixture must trip the threshold predicate"
         );
-        // And the per-recipient noping helper still reports true
-        // by itself — the count gate is the OUTER cancel, not an
-        // inner one. The emission site combines the two via:
-        //   `!mentions_exceed_threshold && groupchat_mentions_carry_owner_noping`
-        // so the final bit on the candidate is `false`.
+        // The per-recipient noping helper reports true regardless of
+        // overflow. Production code at
+        // `enqueue_groupchat_notification_candidate` uses this
+        // predicate unconditionally — the overflow bit no longer
+        // gates the noping suppression. Compliance with XEP-0513
+        // §"No Ping" PR Compliance ID 7.
         assert!(
             groupchat_mentions_carry_owner_noping(&mentions, &owner, occupant_id),
-            "the per-recipient noping helper must still see the mention; \
-             only the outer count gate cancels the suppression so the \
-             two helpers remain individually composable"
+            "owner's `<noping/>` mention MUST be honored even when the \
+             message overflows the §304 count cap — the §\"No Ping\" \
+             SHOULD operates independently of §304's class downgrade"
         );
     }
 
