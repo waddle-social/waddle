@@ -158,6 +158,46 @@ describe("applyMucCallPresence", () => {
     clearMucCallParticipants();
     expect($mucCallParticipants.get()).toEqual({});
   });
+
+  test("registers the local user's own nick when their sibling resource starts a call (regression: cross-instance indicator)", () => {
+    // Scenario: alice is signed in on two browser instances (web +
+    // mobile). Both have joined `room@muc.test` with the same nick
+    // "alice" — XEP-0045 §7.2 same-bare multi-session join. Web
+    // starts a call; the server reflects the Muji presence to BOTH
+    // sessions per XEP-0045 §7.1. Mobile's wasm bridge surfaces the
+    // reflection here.
+    //
+    // The store MUST register "alice" as an in-call nick on mobile
+    // too — otherwise mobile's sidebar chip never lights up and the
+    // user has to manually re-discover the call. This was the
+    // user-visible symptom of the server-side delivery bug
+    // (`muc_update.rs` routing self-bare recipients onto the
+    // sender's WebSocket via `responses` instead of the sibling's
+    // via the connection registry).
+    //
+    // Pin the contract: a presence whose `from` reflects our own
+    // identity is NOT filtered out. The store has no concept of
+    // "self" — and intentionally so. A future refactor that adds an
+    // implicit self-filter would silently re-break the multi-
+    // instance indicator without any other test catching it.
+    applyMucCallPresence({
+      from: "room@muc.test/alice",
+      presence_type: "available",
+      muji: activeMuji,
+    });
+    expect($mucCallParticipants.get()["room@muc.test"]).toEqual(["alice"]);
+    expect(mucCallParticipantCount("room@muc.test")).toBe(1);
+
+    // The matching XEP-0272 §Leaving reflection (empty `<muji/>`
+    // gets stripped by the server, so the chat side sees an
+    // available presence with no muji field) must clear the entry
+    // even though it reflects our own identity.
+    applyMucCallPresence({
+      from: "room@muc.test/alice",
+      presence_type: "available",
+    });
+    expect($mucCallParticipants.get()["room@muc.test"]).toBeUndefined();
+  });
 });
 
 describe("awaitPreparingEcho (XEP-0272 §Joining MUST)", () => {
