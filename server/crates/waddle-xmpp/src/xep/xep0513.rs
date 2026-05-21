@@ -22,18 +22,35 @@ pub const DEFAULT_MENTIONS_COUNT: u32 = 5;
 
 /// Returns `true` when `mention` carries an actual XEP-0513 §3
 /// mention TARGET — i.e. it identifies someone or something to
-/// notify. The parser at [`parse_mention_element`] accepts elements
-/// whose only payload is an `<active/>` or `<noping/>` child or a
-/// `begin`/`end` anchor; those are structurally-empty for §304's
-/// "more mentions than the threshold" cap because they target
-/// nobody. Counting them would let an attacker pad the §304 count
-/// from a message that doesn't mention anyone (XEP-0513 review on
-/// PR #741).
+/// notify. Per XEP-0513 §3 the targeting axes are exactly:
 ///
-/// Empty-string `occupantid=''` and `mentions=''` are also excluded:
-/// the parser preserves them as `Some("".to_string())` but an empty
-/// occupant-id targets no XEP-0421 occupant and an empty `mentions=`
-/// URI identifies no group per XEP-0513 §3.
+///   - `jid` (the bare JID of the mentioned entity),
+///   - `occupantid` (the XEP-0421 stable occupant identifier),
+///   - `mentions` (a URI identifying a special group, e.g.
+///     `urn:xmpp:mentions:0#channel`).
+///
+/// [`parse_mention_element`] is deliberately MORE permissive: it
+/// also accepts `<mention/>` elements whose only payload is a
+/// `uri='…'` attribute or a `<active/>` / `<noping/>` child. Per
+/// §3, `uri` is documented as a SCOPE qualifier for channel
+/// mentions (or a hint for clients to dereference), NOT as a
+/// targeting axis; `<active/>` and `<noping/>` are §"Active
+/// Mentions" / §"No Ping" qualifiers that modify a target but
+/// don't introduce one. The parser/counter asymmetry is
+/// intentional: the parser preserves round-trip wire shape, while
+/// §304's count gate operates on logical TARGETS only. Counting
+/// non-targeting `<mention/>` elements would let an attacker pad
+/// the §304 cap from a message that names nobody (wire-shape
+/// review on PR #741).
+///
+/// Anchor-only (`begin`/`end`-only) `<mention/>` elements are
+/// rejected by [`parse_mention_element`] outright — those don't
+/// reach this predicate.
+///
+/// Empty-string `occupantid=''` and `mentions=''` are also
+/// excluded: the parser preserves them as `Some("".to_string())`
+/// but an empty occupant-id targets no XEP-0421 occupant and an
+/// empty `mentions=` URI identifies no group per §3.
 fn is_mention_target(mention: &ExplicitMention) -> bool {
     mention.jid.is_some()
         || mention
@@ -381,10 +398,14 @@ mod count_tests {
         msg.payloads.push(build_mention_element(&mention));
     }
 
-    /// XEP-0513 `<mention/>` payloads contribute one mention TARGET
-    /// per parsed element. The parser already drops structurally-empty
-    /// elements that target nothing (see `parse_mention_element`), so
-    /// every element in the slice is a real mention.
+    /// XEP-0513 `<mention/>` payloads with a real targeting axis
+    /// (jid, occupantid, mentions URI) contribute one mention
+    /// TARGET each. The parser is more permissive — it also
+    /// accepts `uri`-only or modifier-only mentions per the §3
+    /// round-trip contract — but the counter filters those out
+    /// via [`is_mention_target`]; the cases that DO contribute are
+    /// exactly the ones exercised by this test. Other tests pin
+    /// the exclusion path (`*_ignores_*`).
     #[test]
     fn mention_target_count_counts_xep0513_mentions() {
         let mut msg = empty_message();
