@@ -47,7 +47,7 @@ pub mod traits;
 
 use std::sync::Arc;
 
-pub use context::{OccupantSnapshot, RoomContext};
+pub use context::{OccupantSnapshot, RoomContext, SyntheticSenderAuthority};
 pub use dispatch::{RoomDispatchOutcome, RoomDispatcher};
 pub use traits::{RoomHandler, RoomHandlerOutcome};
 

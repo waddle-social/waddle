@@ -142,9 +142,39 @@ impl Reference {
         self.ref_type == ReferenceType::Mention
     }
 
-    /// Extract the bare JID from the URI (strips `xmpp:` prefix).
-    pub fn bare_jid(&self) -> Option<&str> {
-        self.uri.strip_prefix("xmpp:")
+    /// Extract the bare JID referenced by this `<reference/>` URI.
+    ///
+    /// Per RFC 5122 / RFC 3986 an XMPP URI of the form `xmpp:<jid>`
+    /// may carry:
+    ///
+    /// - an authority resource (`xmpp:alice@example.com/web`);
+    /// - a query component introduced by `?` whose key/value pairs
+    ///   are separated by `;` (RFC 5122 §2.7.1, e.g.
+    ///   `xmpp:room@muc?join` or `xmpp:room@muc?message;subject=foo`);
+    /// - a fragment component introduced by `#` (RFC 3986 §3.5).
+    ///
+    /// The XEP-0372 §"Reference type 'mention'" semantics target the
+    /// user's bare JID, so strip the resource component and any
+    /// trailing query (`?`) or fragment (`#`) before returning.
+    /// `;` does NOT delimit the start of the query — it separates
+    /// keys WITHIN the query — but the per-key parser doesn't run
+    /// here; we only need the JID prefix, so splitting on `?` and
+    /// `#` is sufficient and correct (Copilot review on PR #738).
+    /// Returns `None` for unparseable URIs.
+    pub fn bare_jid(&self) -> Option<jid::BareJid> {
+        let jid_part = self
+            .uri
+            .strip_prefix("xmpp:")?
+            .split(['?', '#'])
+            .next()?
+            .trim();
+        if jid_part.is_empty() {
+            return None;
+        }
+        jid_part
+            .parse::<jid::Jid>()
+            .ok()
+            .map(|parsed| parsed.to_bare())
     }
 }
 
@@ -258,12 +288,14 @@ pub fn extract_mention_uris(msg: &Message) -> Vec<String> {
         .collect()
 }
 
-/// Extract mentioned bare JIDs from a message (strips `xmpp:` prefix).
-pub fn extract_mentioned_jids(msg: &Message) -> Vec<String> {
+/// Extract mentioned bare JIDs from a message. Returns typed
+/// `BareJid` values stripped of resource / query / fragment per
+/// RFC 5122 — see [`Reference::bare_jid`].
+pub fn extract_mentioned_jids(msg: &Message) -> Vec<jid::BareJid> {
     extract_references_from_message(msg)
         .into_iter()
         .filter(|r| r.is_mention())
-        .filter_map(|r| r.bare_jid().map(|s| s.to_owned()))
+        .filter_map(|r| r.bare_jid())
         .collect()
 }
 

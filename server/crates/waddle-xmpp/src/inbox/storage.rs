@@ -29,6 +29,14 @@ pub struct GroupchatNotificationRecovery {
     pub sender_jid: Jid,
     pub is_live_occupant: bool,
     pub room_members_only: bool,
+    /// XEP-0513 §"Multi-User Chats Permissions" §304: the frozen
+    /// permission snapshot taken at the original T0 dispatch. Persisted
+    /// so a recovery replay re-creates the same notification class the
+    /// original emission would have. Without it, recovery would
+    /// silently downgrade every channel mention to `NotifyAll`, which
+    /// the public-group XEP-0492 default then suppresses at T1 — a
+    /// silent moderator-push outage after every server restart.
+    pub sender_can_broadcast_channel_mention: bool,
     pub created_at_ms: i64,
 }
 
@@ -512,6 +520,7 @@ mod tests {
             sender_jid: "room@muc.example.com/alice".parse().unwrap(),
             is_live_occupant: true,
             room_members_only: false,
+            sender_can_broadcast_channel_mention: true,
             created_at_ms: 42,
         };
 

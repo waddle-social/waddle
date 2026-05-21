@@ -278,6 +278,16 @@ async fn enqueue_xep0357_notification_candidate_for_message(
     archive_stanza_id: &waddle_xmpp_core::xep0359::StanzaId,
     original_message: &Message,
 ) -> NotificationCandidateQueueOutcome {
+    // XEP-0203 `<delay/>` filter NOT applied here (Copilot review on
+    // PR #738): see the matching comment in `groupchat_inbox.rs`'s
+    // `enqueue_groupchat_notification_candidate`. An earlier shape
+    // suppressed pushes for messages carrying any `<delay/>`, but
+    // that check is trivially spoofable — a sender can inject
+    // `<delay/>` into their own stanza to suppress the recipient's
+    // push. Until inbound `<delay/>` stripping lands at the C2S
+    // session boundary, the safer behavior is to push as live and
+    // accept the (currently theoretical) case where an S2S-buffered
+    // delivery generates a real-time push (Waddle has no S2S yet).
     // XEP-0513 mention bit is message-intrinsic and frozen at T0; T1
     // reads it back from the candidate row when running the XEP-0492
     // dispatch gate.

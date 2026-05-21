@@ -10,6 +10,10 @@ pub(super) struct ProjectGroupchatInboxEvent<'a, 'deps> {
     pub is_durable_recipient: bool,
     pub is_live_occupant: bool,
     pub room_members_only: bool,
+    /// XEP-0513 §"Multi-User Chats Permissions": frozen at dispatch
+    /// time. See [`waddle_xmpp::protocol::event::OutboundEvent::ProjectGroupchatInbox`]
+    /// for full semantics.
+    pub sender_can_broadcast_channel_mention: bool,
     pub thread: Option<GroupchatThreadProjection>,
     pub dispatch_timestamp: i64,
 }
@@ -24,6 +28,7 @@ pub(super) async fn project_groupchat_inbox_event(input: ProjectGroupchatInboxEv
         is_durable_recipient,
         is_live_occupant,
         room_members_only,
+        sender_can_broadcast_channel_mention,
         thread,
         dispatch_timestamp,
     } = input;
@@ -43,6 +48,7 @@ pub(super) async fn project_groupchat_inbox_event(input: ProjectGroupchatInboxEv
         is_durable_recipient,
         is_live_occupant,
         room_members_only,
+        sender_can_broadcast_channel_mention,
         &thread,
         dispatch_timestamp,
     );
@@ -70,6 +76,7 @@ pub(super) async fn project_groupchat_inbox_event(input: ProjectGroupchatInboxEv
         is_durable_recipient,
         is_live_occupant,
         room_members_only,
+        sender_can_broadcast_channel_mention,
         thread: &thread,
         outcome,
         recovery_key: notification_recovery_key.as_ref(),
@@ -86,6 +93,9 @@ struct GroupchatNotificationProjection<'a, 'deps> {
     is_durable_recipient: bool,
     is_live_occupant: bool,
     room_members_only: bool,
+    /// XEP-0513 frozen permission snapshot; see
+    /// [`ProjectGroupchatInboxEvent::sender_can_broadcast_channel_mention`].
+    sender_can_broadcast_channel_mention: bool,
     thread: &'a Option<GroupchatThreadProjection>,
     outcome: GroupchatInboxProjectionOutcome,
     recovery_key: Option<&'a waddle_xmpp::inbox::storage::GroupchatNotificationRecoveryKey>,
@@ -100,6 +110,7 @@ fn groupchat_notification_recovery_item(
     is_durable_recipient: bool,
     is_live_occupant: bool,
     room_members_only: bool,
+    sender_can_broadcast_channel_mention: bool,
     thread: &Option<GroupchatThreadProjection>,
     dispatch_timestamp: i64,
 ) -> Option<waddle_xmpp::inbox::storage::GroupchatNotificationRecovery> {
@@ -118,6 +129,7 @@ fn groupchat_notification_recovery_item(
         sender_jid,
         is_live_occupant,
         room_members_only,
+        sender_can_broadcast_channel_mention,
         created_at_ms: dispatch_timestamp.saturating_mul(1_000),
     })
 }
@@ -140,6 +152,7 @@ async fn maybe_enqueue_groupchat_notification_candidate(
         is_durable_recipient,
         is_live_occupant,
         room_members_only,
+        sender_can_broadcast_channel_mention,
         thread,
         outcome,
         recovery_key,
@@ -153,6 +166,7 @@ async fn maybe_enqueue_groupchat_notification_candidate(
         is_durable_recipient,
         is_live_occupant,
         room_members_only,
+        sender_can_broadcast_channel_mention,
         thread,
         outcome,
         recovery_key,
@@ -177,6 +191,7 @@ async fn enqueue_groupchat_notification_candidate(
         is_durable_recipient,
         is_live_occupant,
         room_members_only,
+        sender_can_broadcast_channel_mention,
         thread,
         outcome,
         recovery_key: _,
@@ -184,6 +199,25 @@ async fn enqueue_groupchat_notification_candidate(
     if !is_recipient || !is_durable_recipient {
         return GroupchatNotificationCandidateQueueOutcome::Completed;
     }
+    // XEP-0203 `<delay/>` filter NOT applied here (Copilot review
+    // on PR #738): an earlier shape of this path called
+    // `xep0203::has_delay(message)` to suppress push for historical
+    // replays. That check is trivially spoofable — a sender can
+    // inject `<delay xmlns='urn:xmpp:delay' from='whatever'
+    // stamp='2020-01-01T00:00:00Z'/>` into their own outbound
+    // stanza, the server forwards it unchanged, and every recipient's
+    // push gets suppressed. XEP-0203 §4.1 RECOMMENDS the `from`
+    // attribute but does not mandate it, and the server's room
+    // dispatcher does not add `<delay/>` for live messages — so any
+    // `<delay/>` on this path is by definition user-supplied today
+    // (Waddle has no S2S yet). The proper defense is inbound
+    // `<delay/>` stripping at the C2S session boundary (deferred to
+    // a follow-up slice); until that lands, blindly trusting
+    // `<delay/>` here would create an unprivileged push-suppression
+    // primitive. MAM-replay through
+    // `reconcile_groupchat_notification_candidates` calls
+    // `insert_groupchat_notification_candidate` directly, bypassing
+    // this function, so MAM replays do not produce duplicate pushes.
     let projection_committed = thread
         .as_ref()
         .map_or(outcome.channel_committed, |_| outcome.thread_committed);
@@ -225,6 +259,7 @@ async fn enqueue_groupchat_notification_candidate(
         Xep0359StanzaId::new(archive_id, Jid::from(room.clone())),
         is_live_occupant,
         room_members_only,
+        sender_can_broadcast_channel_mention,
     )
     .await
 }
@@ -246,6 +281,13 @@ async fn insert_groupchat_notification_candidate(
     // groupchat fan-out would otherwise produce an actor round-trip,
     // even though the same bit is already in hand.
     room_members_only: bool,
+    // XEP-0513 §"Multi-User Chats Permissions": frozen permission
+    // snapshot for `urn:xmpp:mentions:0#channel`. `false` downgrades
+    // channel mentions to `NotifyAll` (still delivered, but not pushed
+    // as a forced channel mention). The recovery path passes the
+    // bool persisted on the recovery row at original T0 dispatch —
+    // see [`reconcile_groupchat_notification_candidates`].
+    sender_can_broadcast_channel_mention: bool,
 ) -> GroupchatNotificationCandidateQueueOutcome {
     // Parse explicit mentions ONCE per message and derive every
     // XEP-0513 signal (personal-mention bit, channel-mention scope,
@@ -266,6 +308,7 @@ async fn insert_groupchat_notification_candidate(
         room,
         owner_occupant_id.as_str(),
         is_live_occupant,
+        sender_can_broadcast_channel_mention,
     );
     let hints = crate::notification_outbox::NotificationMessageHints::none()
         .with_noping(groupchat_mentions_carry_owner_noping(
@@ -541,6 +584,15 @@ pub(crate) async fn reconcile_groupchat_notification_candidates(
             recovery.key.archive_stanza_id.clone(),
             recovery.is_live_occupant,
             recovery.room_members_only,
+            // XEP-0513 §"Multi-User Chats Permissions" frozen at the
+            // original T0 dispatch — persisted on the recovery row so
+            // replay re-creates the same notification class. Defaulting
+            // to `false` here would silently downgrade every channel
+            // mention to `NotifyAll` and let the public-group `OnMention`
+            // XEP-0492 default suppress it at T1: a silent moderator-
+            // push outage after every server restart (adversarial review
+            // P1 on PR #738).
+            recovery.sender_can_broadcast_channel_mention,
         )
         .await;
         if outcome == GroupchatNotificationCandidateQueueOutcome::Completed
@@ -613,9 +665,18 @@ fn groupchat_notification_class(
     // (XEP-0513 §"active mention" §"the receiving server may filter")
     // — that augments this T0 snapshot, it does not relocate it.
     is_live_occupant: bool,
+    // XEP-0513 §"Multi-User Chats Permissions" §304: receiving entities
+    // SHOULD ignore a channel mention if the sender does not have at
+    // least the minimum role required by the room. This is the typed
+    // frozen permission snapshot taken at dispatch time in
+    // `waddle_xmpp::protocol::room::inbox::sender_may_broadcast_channel_mention`
+    // — server default policy is `mentions#channel = moderators`
+    // (XEP-0513 example value).
+    sender_can_broadcast_channel_mention: bool,
 ) -> GroupchatNotificationClassDecision {
     let personal_mention = groupchat_mentions_owner(mentions, message, owner, owner_occupant_id);
-    let channel_mention = groupchat_channel_mention_scope(mentions, room);
+    let channel_mention = groupchat_channel_mention_scope(mentions, room)
+        .filter(|_| sender_can_broadcast_channel_mention);
     groupchat_notification_class_from_message(personal_mention, channel_mention, is_live_occupant)
 }
 
@@ -627,6 +688,11 @@ fn groupchat_notification_class(
 /// dispatch time consults the projection store and decides
 /// publish-or-suppress based on the recorded class + recipient's
 /// effective notification level.
+///
+/// `channel_mention` carries `None` either when no channel mention is
+/// present OR when the sender lacks the XEP-0513 §"Multi-User Chats
+/// Permissions" minimum role — see [`groupchat_notification_class`]
+/// where the role-filter is applied before this function is called.
 fn groupchat_notification_class_from_message(
     personal_mention: bool,
     channel_mention: Option<GroupchatChannelMentionScope>,
@@ -666,7 +732,14 @@ fn groupchat_mentions_carry_owner_noping(
     owner_occupant_id: &str,
 ) -> bool {
     mentions.iter().any(|mention| {
+        // Mirror the mixed-attribute guard in `groupchat_mentions_owner`:
+        // a `<mention/>` that also carries `mentions='#channel'` is
+        // channel-scope, not a personal mention naming `owner` — the
+        // `<noping/>` on it suppresses CHANNEL pushes (handled by
+        // `current_room_channel_mention`), not the owner's personal
+        // notification.
         mention.noping
+            && !mention.is_channel()
             && (mention
                 .jid
                 .as_ref()
@@ -685,7 +758,19 @@ fn groupchat_mentions_owner(
     owner_occupant_id: &str,
 ) -> bool {
     let xep0513 = mentions.iter().any(|mention| {
+        // XEP-0513 §"Multi-User Chats Permissions" §304 hardening
+        // (adversarial review on PR #738): a `<mention/>` that ALSO
+        // carries `mentions='urn:xmpp:mentions:0#channel'` is a
+        // channel-scope payload, not a personal mention — even when
+        // it also carries `jid=`/`occupantid=` attributes. Without
+        // the `!mention.is_channel()` guard, a non-permitted sender
+        // could bypass the channel-broadcast gate by adding a
+        // matching `occupantid=`/`jid=` to a channel mention: the
+        // classifier would pick `PersonalMention` first (per-recipient
+        // match) and never run the channel-scope downgrade. Treat
+        // mixed-attribute mentions as channel-scope only.
         !mention.noping
+            && !mention.is_channel()
             && (mention
                 .jid
                 .as_ref()
@@ -695,11 +780,13 @@ fn groupchat_mentions_owner(
                     .as_deref()
                     .is_some_and(|mentioned| mentioned == owner_occupant_id))
     });
-    let owner_raw = owner.to_string();
     let xep0372 = extract_references_from_message(message)
         .into_iter()
         .any(|reference| {
-            reference.is_mention() && reference.bare_jid() == Some(owner_raw.as_str())
+            reference.is_mention()
+                && reference
+                    .bare_jid()
+                    .is_some_and(|mentioned| &mentioned == owner)
         });
     xep0513 || xep0372
 }
@@ -740,7 +827,12 @@ fn current_room_channel_mention(
 }
 
 fn xmpp_uri_bare_jid(uri: &str) -> Option<BareJid> {
-    let jid_part = uri.strip_prefix("xmpp:")?.split(['?', ';']).next()?.trim();
+    // RFC 5122 / RFC 3986: query is introduced by `?`, fragment by
+    // `#`. `;` separates key/value pairs WITHIN the query — it does
+    // not delimit the start of the query. Stripping on `?` and `#`
+    // is sufficient for extracting the JID prefix (Copilot review
+    // on PR #738).
+    let jid_part = uri.strip_prefix("xmpp:")?.split(['?', '#']).next()?.trim();
     if jid_part.is_empty() {
         return None;
     }
@@ -965,6 +1057,276 @@ mod tests {
         assert_eq!(
             groupchat_channel_mention_scope(&parsed_mentions(&msg_noping), &room),
             None
+        );
+    }
+
+    /// XEP-0513 §"Multi-User Chats Permissions" §304: receiving entities
+    /// SHOULD ignore a channel mention if the sender does not have at
+    /// least the minimum role required by the room. The classifier
+    /// MUST downgrade a channel mention to `NotifyAll` when the frozen
+    /// `sender_can_broadcast_channel_mention` snapshot is `false`. The
+    /// mention itself is delivered + archived unchanged; only the push
+    /// class changes — that is the entire scope of the permission gate.
+    #[test]
+    fn xep0513_channel_mention_downgrades_to_notify_all_for_unpermitted_sender() {
+        use crate::notification_outbox::NotificationClass;
+
+        let owner = bare("charlie@example.com");
+        let room = bare("team@muc.example.com");
+        let occupant_id = "room-stable-charlie";
+
+        let mut channel_uri = waddle_xmpp::xep::ExplicitMention::channel();
+        channel_uri.uri = Some("xmpp:team@muc.example.com".to_string());
+        let msg = message_with_mention(channel_uri);
+        let mentions = parsed_mentions(&msg);
+
+        // Permitted sender (moderator) → ChannelMention.
+        let GroupchatNotificationClassDecision::Deliver(permitted) = groupchat_notification_class(
+            &mentions,
+            &msg,
+            &owner,
+            &room,
+            occupant_id,
+            /* is_live_occupant */ false,
+            /* sender_can_broadcast_channel_mention */ true,
+        );
+        assert_eq!(
+            permitted,
+            NotificationClass::ChannelMention,
+            "moderator's channel mention must boost the push class to ChannelMention"
+        );
+
+        // Non-permitted sender (participant) → NotifyAll (downgrade).
+        let GroupchatNotificationClassDecision::Deliver(downgraded) = groupchat_notification_class(
+            &mentions,
+            &msg,
+            &owner,
+            &room,
+            occupant_id,
+            /* is_live_occupant */ false,
+            /* sender_can_broadcast_channel_mention */ false,
+        );
+        assert_eq!(
+            downgraded,
+            NotificationClass::NotifyAll,
+            "non-permitted sender's channel mention must downgrade to NotifyAll, \
+             not stay as ChannelMention — XEP-0513 §304"
+        );
+    }
+
+    /// Same XEP-0513 §"Multi-User Chats Permissions" gate, applied to
+    /// the `<active/>` variant: an active channel mention from a non-
+    /// permitted sender MUST also downgrade. The `<active/>` qualifier
+    /// is a recipient-state filter (XEP-0513 §"active mention"); it
+    /// does NOT confer permission to broadcast.
+    #[test]
+    fn xep0513_active_channel_mention_downgrades_for_unpermitted_sender() {
+        use crate::notification_outbox::NotificationClass;
+
+        let owner = bare("charlie@example.com");
+        let room = bare("team@muc.example.com");
+        let occupant_id = "room-stable-charlie";
+
+        let mut active_channel = waddle_xmpp::xep::ExplicitMention::active_channel();
+        active_channel.uri = Some("xmpp:team@muc.example.com".to_string());
+        let msg = message_with_mention(active_channel);
+        let mentions = parsed_mentions(&msg);
+
+        // Permitted sender + live occupant → ActiveChannelMention.
+        let GroupchatNotificationClassDecision::Deliver(permitted) = groupchat_notification_class(
+            &mentions,
+            &msg,
+            &owner,
+            &room,
+            occupant_id,
+            /* is_live_occupant */ true,
+            /* sender_can_broadcast_channel_mention */ true,
+        );
+        assert_eq!(
+            permitted,
+            NotificationClass::ActiveChannelMention,
+            "moderator's <active/> channel mention to a live occupant \
+             must classify as ActiveChannelMention"
+        );
+
+        // Non-permitted sender + live occupant → NotifyAll.
+        let GroupchatNotificationClassDecision::Deliver(downgraded) = groupchat_notification_class(
+            &mentions,
+            &msg,
+            &owner,
+            &room,
+            occupant_id,
+            /* is_live_occupant */ true,
+            /* sender_can_broadcast_channel_mention */ false,
+        );
+        assert_eq!(
+            downgraded,
+            NotificationClass::NotifyAll,
+            "non-permitted sender's <active/> channel mention must downgrade \
+             to NotifyAll — the active qualifier is a recipient filter, not \
+             a permission grant"
+        );
+    }
+
+    /// XEP-0513 §526 "Security Considerations" allows the server to
+    /// filter mentions per its own rules; this PR downgrades the push
+    /// CLASS, but the on-wire `<mention/>` payload MUST be delivered +
+    /// archived UNCHANGED. The class downgrade is a server-internal
+    /// push-decision detail; clients consuming MAM / live delivery /
+    /// inbox MUST still see the original `urn:xmpp:mentions:0#channel`
+    /// element so their own UI rendering can show "Alice tried to
+    /// channel-mention you" even though no push fired.
+    #[test]
+    fn xep0513_channel_mention_payload_is_preserved_when_class_is_downgraded() {
+        use waddle_xmpp::xep::{extract_explicit_mentions, has_explicit_mentions, CHANNEL_MENTION};
+
+        let owner = bare("charlie@example.com");
+        let room = bare("team@muc.example.com");
+        let occupant_id = "room-stable-charlie";
+
+        let mut channel_uri = waddle_xmpp::xep::ExplicitMention::channel();
+        channel_uri.uri = Some("xmpp:team@muc.example.com".to_string());
+        let msg = message_with_mention(channel_uri);
+
+        // Sanity: the message starts with the channel mention payload.
+        assert!(has_explicit_mentions(&msg));
+        let original_mentions = extract_explicit_mentions(&msg)
+            .expect("starts with mentions")
+            .mentions;
+        assert!(original_mentions
+            .iter()
+            .any(|mention| mention.mentions.as_deref() == Some(CHANNEL_MENTION)));
+
+        // Run the classifier with a non-permitted sender (the gate
+        // downgrades the class). The classifier returns the class
+        // only — it MUST NOT mutate the message payloads.
+        let mentions = parsed_mentions(&msg);
+        let _ = groupchat_notification_class(
+            &mentions,
+            &msg,
+            &owner,
+            &room,
+            occupant_id,
+            /* is_live_occupant */ false,
+            /* sender_can_broadcast_channel_mention */ false,
+        );
+
+        // Wire shape MUST be unchanged after classification.
+        assert!(
+            has_explicit_mentions(&msg),
+            "classifier MUST NOT strip the channel-mention payload on downgrade"
+        );
+        let after_mentions = extract_explicit_mentions(&msg)
+            .expect("mentions still present")
+            .mentions;
+        assert_eq!(
+            after_mentions, original_mentions,
+            "the `<mention mentions='urn:xmpp:mentions:0#channel'/>` payload \
+             MUST be delivered + archived unchanged when the push class is \
+             downgraded — XEP-0513 §526 allows filtering the push decision, \
+             not rewriting the stanza"
+        );
+    }
+
+    /// Personal mentions are unaffected by the channel-broadcast
+    /// permission. XEP-0513 §"Multi-User Chats Permissions" carries a
+    /// separate `mentions#individual` field for individual-mention
+    /// permission — outside the scope of this slice. A personal mention
+    /// from a non-permitted-broadcast sender MUST still classify as
+    /// PersonalMention; only `urn:xmpp:mentions:0#channel` is gated.
+    #[test]
+    fn xep0513_personal_mention_unaffected_by_channel_broadcast_permission() {
+        use crate::notification_outbox::NotificationClass;
+
+        let owner = bare("charlie@example.com");
+        let room = bare("team@muc.example.com");
+        let occupant_id = "room-stable-charlie";
+
+        let msg = message_with_mention(waddle_xmpp::xep::ExplicitMention::jid(owner.clone()));
+        let mentions = parsed_mentions(&msg);
+
+        let GroupchatNotificationClassDecision::Deliver(class) = groupchat_notification_class(
+            &mentions,
+            &msg,
+            &owner,
+            &room,
+            occupant_id,
+            /* is_live_occupant */ false,
+            /* sender_can_broadcast_channel_mention */ false,
+        );
+        assert_eq!(
+            class,
+            NotificationClass::PersonalMention,
+            "personal mention class must NOT be affected by the channel \
+             broadcast gate — the gate covers `urn:xmpp:mentions:0#channel` only"
+        );
+    }
+
+    /// Adversarial review on PR #738: a non-permitted sender crafted
+    /// `<mention occupantid='target-occ' mentions='urn:xmpp:mentions:0#channel'/>`
+    /// would historically bypass the channel-broadcast gate by being
+    /// classified as `PersonalMention` (because the personal matcher
+    /// found the occupant-id match and didn't check the channel-scope
+    /// attribute). The fix in `groupchat_mentions_owner` filters out
+    /// mixed-attribute mentions so they ONLY flow through the channel
+    /// pipeline (and are subject to the permission gate). Lock the
+    /// behavior here.
+    #[test]
+    fn xep0513_mixed_attribute_mention_does_not_bypass_channel_gate() {
+        use crate::notification_outbox::NotificationClass;
+
+        let owner = bare("charlie@example.com");
+        let room = bare("team@muc.example.com");
+        let occupant_id = "room-stable-charlie";
+
+        // Craft a `<mention/>` that simultaneously carries
+        // `occupantid='charlie-occ'` AND `mentions='#channel'`. The
+        // attacker's intent: have charlie classify it as personal
+        // (bypassing the gate) while the room sees it as channel.
+        let mut mixed = waddle_xmpp::xep::ExplicitMention::occupant_id(occupant_id);
+        mixed.mentions = Some(waddle_xmpp::xep::CHANNEL_MENTION.to_string());
+        let msg = message_with_mention(mixed);
+        let mentions = parsed_mentions(&msg);
+
+        // Non-permitted sender (participant). With the fix, the
+        // channel-scope wins and the gate downgrades to NotifyAll.
+        let GroupchatNotificationClassDecision::Deliver(class) = groupchat_notification_class(
+            &mentions,
+            &msg,
+            &owner,
+            &room,
+            occupant_id,
+            /* is_live_occupant */ false,
+            /* sender_can_broadcast_channel_mention */ false,
+        );
+        assert_eq!(
+            class,
+            NotificationClass::NotifyAll,
+            "a `<mention occupantid='X' mentions='#channel'/>` from a non-\
+             permitted sender MUST NOT classify as PersonalMention — the \
+             channel-scope attribute overrides the personal targeting and \
+             the gate applies"
+        );
+
+        // Permitted sender (moderator). Channel-scope still wins, and
+        // the gate now classifies as ChannelMention — NOT
+        // PersonalMention.
+        let GroupchatNotificationClassDecision::Deliver(class) = groupchat_notification_class(
+            &mentions,
+            &msg,
+            &owner,
+            &room,
+            occupant_id,
+            /* is_live_occupant */ false,
+            /* sender_can_broadcast_channel_mention */ true,
+        );
+        assert_eq!(
+            class,
+            NotificationClass::ChannelMention,
+            "a `<mention occupantid='X' mentions='#channel'/>` from a \
+             permitted sender MUST classify as ChannelMention — the \
+             channel-scope attribute is authoritative regardless of any \
+             per-recipient targeting attributes"
         );
     }
 }

@@ -209,6 +209,7 @@ mod tests {
             occupant_id_secret: secret,
             sender_nickname_generation: 0,
             project_sender_inbox: true,
+            synthetic_sender_authority: None,
             dispatch_timestamp: 1_700_000_000,
         }
     }

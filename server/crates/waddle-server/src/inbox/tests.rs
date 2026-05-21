@@ -179,6 +179,7 @@ async fn sqlx_inbox_storage_tracks_groupchat_notification_recovery() {
         sender_jid: "room@muc.example.com/alice".parse().expect("sender jid"),
         is_live_occupant: true,
         room_members_only: false,
+        sender_can_broadcast_channel_mention: true,
         created_at_ms: 42,
     };
     let second_recovery = GroupchatNotificationRecovery {
@@ -196,6 +197,7 @@ async fn sqlx_inbox_storage_tracks_groupchat_notification_recovery() {
             .expect("second sender jid"),
         is_live_occupant: false,
         room_members_only: true,
+        sender_can_broadcast_channel_mention: false,
         created_at_ms: 43,
     };
 
@@ -360,4 +362,117 @@ async fn sqlx_inbox_postgres_handles_i32_overflow_last_updated() {
         .await
         .expect("cleanup inbox postgres row");
     assert_eq!(deleted, 1);
+}
+
+/// Regression for the reviewer feedback on PR #738: an existing
+/// `groupchat_notification_recovery` table created BEFORE the
+/// `sender_can_broadcast_channel_mention` column landed must be
+/// migrated forward — without the targeted ALTER, every recovery
+/// SELECT errors with "no such column". This test simulates that
+/// state by:
+///
+///   1. opening a fresh DB (CREATE TABLE includes the column),
+///   2. DROPping it,
+///   3. recreating it WITHOUT the column (the pre-PR shape),
+///   4. re-opening / re-initialising the storage,
+///   5. asserting the column is present after init.
+#[tokio::test(flavor = "multi_thread")]
+async fn migration_adds_sender_can_broadcast_channel_mention_to_legacy_recovery_table() {
+    let artifacts = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/test-artifacts");
+    std::fs::create_dir_all(&artifacts).expect("artifacts dir");
+    let path = artifacts.join(format!("inbox-migration-{}.db", uuid::Uuid::new_v4()));
+    let url = format!("sqlite://{}", path.display());
+
+    // Step 1-3: build a DB whose recovery table predates the new
+    // column. Open fresh, drop, recreate without the column.
+    {
+        let storage = DatabaseInboxStorage::open(Some(&url))
+            .await
+            .expect("open fresh storage");
+        storage
+            .execute("DROP TABLE groupchat_notification_recovery", ())
+            .await
+            .expect("drop fresh recovery table");
+        storage
+            .execute(
+                r#"
+                CREATE TABLE groupchat_notification_recovery (
+                    recipient_bare_jid TEXT NOT NULL,
+                    room_jid TEXT NOT NULL,
+                    thread_id TEXT NOT NULL DEFAULT '',
+                    stanza_id_by TEXT NOT NULL,
+                    stanza_id TEXT NOT NULL,
+                    sender_jid TEXT NOT NULL,
+                    is_live_occupant INTEGER NOT NULL,
+                    room_members_only INTEGER NOT NULL,
+                    created_at_ms INTEGER NOT NULL,
+                    completed_at_ms INTEGER,
+                    PRIMARY KEY (recipient_bare_jid, room_jid, thread_id, stanza_id_by, stanza_id)
+                )
+                "#,
+                (),
+            )
+            .await
+            .expect("create legacy recovery table");
+    }
+
+    // Step 4-5: re-open. The init path should detect the missing
+    // column and run the ALTER. Confirm by:
+    //   (a) the column is reported by PRAGMA, and
+    //   (b) a recovery write succeeds (it would fail with "no such
+    //       column" if the migration didn't run).
+    let storage = DatabaseInboxStorage::open(Some(&url))
+        .await
+        .expect("re-open storage triggers migration");
+
+    let mut cols = storage
+        .query("PRAGMA table_info(groupchat_notification_recovery)", ())
+        .await
+        .expect("PRAGMA table_info");
+    let mut has_column = false;
+    while let Some(row) = cols.next().await.expect("advance pragma row") {
+        let name: String = row.get(1).expect("col name");
+        if name == "sender_can_broadcast_channel_mention" {
+            has_column = true;
+            break;
+        }
+    }
+    assert!(
+        has_column,
+        "migration must add `sender_can_broadcast_channel_mention` to \
+         pre-existing groupchat_notification_recovery tables"
+    );
+
+    let recovery = waddle_xmpp::inbox::storage::GroupchatNotificationRecovery {
+        key: waddle_xmpp::inbox::storage::GroupchatNotificationRecoveryKey {
+            recipient: jid("recipient@example.com"),
+            room: jid("room@muc.example.com"),
+            thread_id: None,
+            archive_stanza_id: waddle_xmpp_core::xep0359::StanzaId::new(
+                "migration-test",
+                "room@muc.example.com".parse().expect("stanza-id by"),
+            ),
+        },
+        sender_jid: "room@muc.example.com/alice".parse().expect("sender jid"),
+        is_live_occupant: true,
+        room_members_only: false,
+        sender_can_broadcast_channel_mention: true,
+        created_at_ms: 42,
+    };
+    storage
+        .insert_groupchat_notification_recovery(recovery.clone())
+        .await
+        .expect("insert after migration must succeed");
+    let pending = storage
+        .list_pending_groupchat_notification_recoveries(16)
+        .await
+        .expect("list after migration must succeed");
+    assert_eq!(pending.len(), 1);
+    assert!(
+        pending[0].sender_can_broadcast_channel_mention,
+        "the persisted bool must round-trip through the migrated column"
+    );
+
+    // Cleanup
+    std::fs::remove_file(&path).ok();
 }

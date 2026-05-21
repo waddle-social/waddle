@@ -23,7 +23,7 @@ mod schema;
 use codec::{decode_row, encode_kind, SELECT_COLS};
 pub use open::build_inbox_storage;
 
-const GROUPCHAT_NOTIFICATION_RECOVERY_SELECT_COLS: &str = "recipient_bare_jid, room_jid, thread_id, stanza_id_by, stanza_id, sender_jid, is_live_occupant, room_members_only, created_at_ms";
+const GROUPCHAT_NOTIFICATION_RECOVERY_SELECT_COLS: &str = "recipient_bare_jid, room_jid, thread_id, stanza_id_by, stanza_id, sender_jid, is_live_occupant, room_members_only, sender_can_broadcast_channel_mention, created_at_ms";
 
 #[derive(Clone)]
 pub struct DatabaseInboxStorage {
@@ -94,13 +94,15 @@ fn insert_groupchat_notification_recovery_sql() -> &'static str {
         sender_jid,
         is_live_occupant,
         room_members_only,
+        sender_can_broadcast_channel_mention,
         created_at_ms,
         completed_at_ms
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
     ON CONFLICT(recipient_bare_jid, room_jid, thread_id, stanza_id_by, stanza_id) DO UPDATE SET
         sender_jid = excluded.sender_jid,
         is_live_occupant = excluded.is_live_occupant,
         room_members_only = excluded.room_members_only,
+        sender_can_broadcast_channel_mention = excluded.sender_can_broadcast_channel_mention,
         created_at_ms = excluded.created_at_ms,
         completed_at_ms = NULL
     "#
@@ -118,6 +120,7 @@ fn groupchat_notification_recovery_params(
         recovery.sender_jid.to_string(),
         recovery.is_live_occupant,
         recovery.room_members_only,
+        recovery.sender_can_broadcast_channel_mention,
         recovery.created_at_ms,
     ]
 }
@@ -149,8 +152,11 @@ fn decode_groupchat_notification_recovery(
     let room_members_only: i64 = row
         .get(7)
         .map_err(|error| InboxStorageError::Other(error.to_string()))?;
-    let created_at_ms: i64 = row
+    let sender_can_broadcast_channel_mention: i64 = row
         .get(8)
+        .map_err(|error| InboxStorageError::Other(error.to_string()))?;
+    let created_at_ms: i64 = row
+        .get(9)
         .map_err(|error| InboxStorageError::Other(error.to_string()))?;
     Ok(GroupchatNotificationRecovery {
         key: GroupchatNotificationRecoveryKey {
@@ -173,6 +179,7 @@ fn decode_groupchat_notification_recovery(
             .map_err(|error| InboxStorageError::Other(format!("invalid sender JID: {error}")))?,
         is_live_occupant: is_live_occupant != 0,
         room_members_only: room_members_only != 0,
+        sender_can_broadcast_channel_mention: sender_can_broadcast_channel_mention != 0,
         created_at_ms,
     })
 }

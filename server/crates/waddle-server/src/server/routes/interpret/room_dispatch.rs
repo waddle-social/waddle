@@ -138,6 +138,7 @@ pub(super) async fn dispatch_to_room(
         occupant_id_secret: &state.deps.occupant_id_secret,
         sender_nickname_generation: snapshot.sender_nickname_generation.unwrap_or(0),
         project_sender_inbox: true,
+        synthetic_sender_authority: None,
         dispatch_timestamp,
     };
     let mut gate_working = prototype.clone();
@@ -279,6 +280,7 @@ pub(super) async fn dispatch_to_room(
         // archive write (Copilot review on PR #279).
         sender_nickname_generation: snapshot.sender_nickname_generation.unwrap_or(0),
         project_sender_inbox: true,
+        synthetic_sender_authority: None,
         dispatch_timestamp,
     };
     let mut working = prototype;

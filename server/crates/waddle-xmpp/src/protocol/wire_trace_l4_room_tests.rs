@@ -97,6 +97,7 @@ fn xep_0045_groupchat_dispatches_through_handler_chain_with_canonical_stamps() {
         occupant_id_secret: &secret,
         sender_nickname_generation: 0,
         project_sender_inbox: true,
+        synthetic_sender_authority: None,
         dispatch_timestamp: 0,
     };
 
@@ -183,6 +184,7 @@ fn xep_0045_non_occupant_halts_chain_with_typed_not_acceptable() {
         occupant_id_secret: &secret,
         sender_nickname_generation: 0,
         project_sender_inbox: true,
+        synthetic_sender_authority: None,
         dispatch_timestamp: 0,
     };
 
@@ -249,6 +251,7 @@ fn xep_0359_room_chain_strips_client_spoofed_room_stanza_id() {
         occupant_id_secret: &secret,
         sender_nickname_generation: 0,
         project_sender_inbox: true,
+        synthetic_sender_authority: None,
         dispatch_timestamp: 0,
     };
 
@@ -310,6 +313,7 @@ fn xep_0424_groupchat_retraction_emits_archive_and_tombstone_events() {
         occupant_id_secret: &secret,
         sender_nickname_generation: 0,
         project_sender_inbox: true,
+        synthetic_sender_authority: None,
         dispatch_timestamp: 0,
     };
 
@@ -388,6 +392,7 @@ fn xep_0430_groupchat_message_emits_durable_recipient_inbox_projection() {
         occupant_id_secret: &secret,
         sender_nickname_generation: 0,
         project_sender_inbox: true,
+        synthetic_sender_authority: None,
         dispatch_timestamp: 0,
     };
     let mut msg = groupchat(&room, &alice, "hello inbox");
@@ -473,6 +478,7 @@ fn xep_0045_section_8_1_live_subject_change_chain_stamps_occupant_id() {
         occupant_id_secret: &secret,
         sender_nickname_generation: 0,
         project_sender_inbox: true,
+        synthetic_sender_authority: None,
         dispatch_timestamp: 1_700_000_000,
     };
 
@@ -567,6 +573,7 @@ fn xep_0045_section_8_1_visitor_subject_change_halts_with_forbidden_no_broadcast
         occupant_id_secret: &secret,
         sender_nickname_generation: 0,
         project_sender_inbox: true,
+        synthetic_sender_authority: None,
         dispatch_timestamp: 0,
     };
 
@@ -648,6 +655,7 @@ fn xep_0045_section_8_1_participant_in_unmoderated_room_subject_change_allowed()
         occupant_id_secret: &secret,
         sender_nickname_generation: 0,
         project_sender_inbox: true,
+        synthetic_sender_authority: None,
         dispatch_timestamp: 1_700_000_000,
     };
     let mut msg = subject_change(&room, &bob, "Bob's topic");
@@ -691,6 +699,7 @@ fn xep_0045_section_8_1_subject_with_body_is_not_a_subject_change() {
         occupant_id_secret: &secret,
         sender_nickname_generation: 0,
         project_sender_inbox: true,
+        synthetic_sender_authority: None,
         dispatch_timestamp: 0,
     };
     let mut msg = subject_change(&room, &eve, "topic-ish");

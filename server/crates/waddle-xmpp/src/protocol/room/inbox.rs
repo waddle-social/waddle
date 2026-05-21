@@ -18,14 +18,58 @@
 //! durable recipients get `is_recipient = true`.
 
 use super::super::event::{GroupchatThreadProjection, OutboundEvent};
-use super::context::RoomContext;
+use super::context::{RoomContext, SyntheticSenderAuthority};
 use super::traits::{RoomHandler, RoomHandlerOutcome};
 use crate::inbox::runtime::{preview_text, should_project_message};
+use crate::types::Role;
 use crate::xep::xep0508::{extract_forum_action, ForumAction};
 use jid::BareJid;
 use std::collections::HashSet;
 use waddle_xmpp_core::xep0201::thread_info_from_message;
 use xmpp_parsers::message::Message;
+
+/// XEP-0513 §"Multi-User Chats Permissions" §304: server-internal
+/// default for `mentions#channel` is `moderators` — senders may
+/// broadcast `urn:xmpp:mentions:0#channel` for push purposes only
+/// when their XEP-0045 role is `Role::Moderator`.
+///
+/// §304 defines the gate purely in terms of XEP-0045 *role* ("the
+/// minimum role required by the room"). An earlier shape of this
+/// gate also accepted `affiliation >= Affiliation::Admin` as a
+/// fallback for an Owner/Admin whose presence cycle hadn't yet
+/// promoted the role — but `MucRoom::set_affiliation` now re-derives
+/// the occupant's role on every affiliation change (Owner/Admin →
+/// Moderator), so the trail window the fallback covered is closed.
+/// The strict role-only reading is therefore both spec-conformant
+/// and behaviorally equivalent to the disjunction. Removing the
+/// affiliation arm avoids the §304 over-permissiveness called out
+/// in the greptile P2 review on PR #738.
+///
+/// Synthetic server-authored sends are permitted via the explicit
+/// typed [`SyntheticSenderAuthority::ServerAuthored`] marker on the
+/// `RoomContext` (set only by the bot-dispatch entry point and
+/// similar pre-trust-validated paths). Prior versions of this gate
+/// coupled the bypass to `project_sender_inbox` — that conflated
+/// "skip the sender's own inbox row" (a projection concern) with
+/// "permitted to broadcast" (a policy decision). The typed marker
+/// keeps the two concerns separate so a future caller can't bypass
+/// the gate by accidentally setting the projection flag.
+///
+/// Returning `false` when the sender has no occupancy snapshot and
+/// no synthetic authority is the strict reading of XEP-0045 §7.4
+/// (only joined occupants may message the room) combined with
+/// XEP-0513 §"Multi-User Chats Permissions" (receiving entities
+/// SHOULD ignore mentions from senders below the minimum role).
+fn sender_may_broadcast_channel_mention(ctx: &RoomContext<'_>) -> bool {
+    if matches!(
+        ctx.synthetic_sender_authority,
+        Some(SyntheticSenderAuthority::ServerAuthored)
+    ) {
+        return true;
+    }
+    ctx.sender_snapshot()
+        .is_some_and(|sender| sender.role >= Role::Moderator)
+}
 
 /// Per-occupant inbox projection handler for the room handler chain.
 #[derive(Debug, Default, Clone, Copy)]
@@ -48,6 +92,13 @@ impl RoomHandler for MucInboxHandler {
             .collect();
         let mut events = Vec::with_capacity(1 + ctx.durable_recipient_bare_jids.len());
         let sender_bare = ctx.sender_full.to_bare();
+        // XEP-0513 §"Multi-User Chats Permissions": freeze the sender's
+        // permission to broadcast `urn:xmpp:mentions:0#channel` for push
+        // purposes at dispatch time, before the per-recipient fan-out.
+        // Same shape as `room_members_only`: one typed bool snapshotted
+        // here, read by the T0 candidate classifier; never re-derived
+        // per recipient.
+        let sender_can_broadcast_channel_mention = sender_may_broadcast_channel_mention(ctx);
         // Always project the sender's own row (no unread bump). The
         // legacy code did this independent of whether the sender was
         // also enumerated as an occupant, and this matches RFC
@@ -65,6 +116,7 @@ impl RoomHandler for MucInboxHandler {
                 is_durable_recipient: false,
                 is_live_occupant: true,
                 room_members_only: ctx.room_members_only,
+                sender_can_broadcast_channel_mention,
                 thread: thread.clone(),
                 dispatch_timestamp: ctx.dispatch_timestamp,
             });
@@ -81,6 +133,7 @@ impl RoomHandler for MucInboxHandler {
                 is_durable_recipient: true,
                 is_live_occupant: live_recipient_bares.contains(bare),
                 room_members_only: ctx.room_members_only,
+                sender_can_broadcast_channel_mention,
                 thread: thread.clone(),
                 dispatch_timestamp: ctx.dispatch_timestamp,
             });
@@ -189,6 +242,7 @@ mod tests {
             occupant_id_secret: &secret,
             sender_nickname_generation: 0,
             project_sender_inbox: true,
+            synthetic_sender_authority: None,
             dispatch_timestamp: 0,
         };
         match MucInboxHandler.handle(msg, &ctx) {
@@ -341,6 +395,301 @@ mod tests {
                 .iter()
                 .any(|(owner, _, _, _, _)| owner == "dave@example.com"),
             "live occupants outside the durable affiliation set must not get inbox/push projection"
+        );
+    }
+
+    /// XEP-0513 §"Multi-User Chats Permissions" §304: the gate is
+    /// purely role-based — only senders whose frozen XEP-0045 role
+    /// is `Role::Moderator` may broadcast a channel mention. The
+    /// class downgrade itself is exercised in the `groupchat_inbox.rs`
+    /// classifier tests; this test locks the snapshot helper across
+    /// the full role lattice.
+    ///
+    /// Affiliation is NOT a fallback axis: `MucRoom::set_affiliation`
+    /// re-derives the occupant's role on every affiliation change, so
+    /// an `Affiliation::Admin/Owner` with `Role::Participant` is an
+    /// impossible state in well-behaved code. The "impossible state"
+    /// row is included anyway to lock the strict §304 reading — if
+    /// a future bug ever produces that state, the gate denies it
+    /// (greptile P2 review on PR #738).
+    #[test]
+    fn xep0513_sender_may_broadcast_channel_mention_requires_moderator() {
+        let room = bare("team@conf.example.com");
+        let moderator = full("alice@example.com/web");
+        let participant = full("bob@example.com/desk");
+        let visitor = full("carol@example.com/phone");
+        let none_role = full("dave@example.com/web");
+        let admin_stale_role = full("erin@example.com/web");
+        let outsider = full("eve@example.com/cli");
+
+        let mut moderator_occ = occ(moderator.clone(), "alice");
+        moderator_occ.role = Role::Moderator;
+        let mut participant_occ = occ(participant.clone(), "bob");
+        participant_occ.role = Role::Participant;
+        let mut visitor_occ = occ(visitor.clone(), "carol");
+        visitor_occ.role = Role::Visitor;
+        let mut none_role_occ = occ(none_role.clone(), "dave");
+        none_role_occ.role = Role::None;
+        // "Impossible state" defensive fixture: Affiliation::Admin
+        // with Role::Participant. `MucRoom::set_affiliation` now
+        // re-derives the role on every affiliation change, so this
+        // pairing should never reach the gate in practice. The §304
+        // strict reading still denies it — affiliation is not a
+        // fallback authorization axis (greptile P2 on PR #738).
+        let mut admin_stale_role_occ = occ(admin_stale_role.clone(), "erin");
+        admin_stale_role_occ.role = Role::Participant;
+        admin_stale_role_occ.affiliation = crate::types::Affiliation::Admin;
+        let occupants = vec![
+            moderator_occ,
+            participant_occ,
+            visitor_occ,
+            none_role_occ,
+            admin_stale_role_occ,
+        ];
+
+        let id_gen = FixedIdGenerator("ignored".to_string());
+        let secret = OccupantIdSecret::for_testing(b"test-secret".to_vec());
+
+        for (sender, expected, label) in [
+            (&moderator, true, "Role::Moderator MUST be permitted"),
+            (
+                &participant,
+                false,
+                "Role::Participant MUST NOT be permitted — XEP-0513 §304 \
+                 default `mentions#channel = moderators`",
+            ),
+            (&visitor, false, "Role::Visitor MUST NOT be permitted"),
+            (
+                &none_role,
+                false,
+                "Role::None MUST NOT be permitted (defensive: not-in-room \
+                 role projection)",
+            ),
+            (
+                &admin_stale_role,
+                false,
+                "Affiliation::Admin with stale Role::Participant MUST be \
+                 denied — XEP-0513 §304 is role-based, not affiliation-based. \
+                 In well-behaved code this state is unreachable because \
+                 `set_affiliation` re-derives role; the deny is defensive \
+                 lock-in against regression",
+            ),
+            // Sender outside the occupancy snapshot (XEP-0045 §7.4
+            // gate would already reject this before the inbox handler
+            // runs, but the helper MUST still deny defensively).
+            (
+                &outsider,
+                false,
+                "absent occupancy snapshot MUST deny channel broadcast",
+            ),
+        ] {
+            let ctx = RoomContext {
+                room: &room,
+                sender_full: sender,
+                occupants: &occupants,
+                durable_recipient_bare_jids: &[],
+                managed_room_forbidden: false,
+                room_moderated: false,
+                room_members_only: false,
+                pin_permission: crate::muc::PinPermission::default(),
+                id_gen: &id_gen,
+                occupant_id_secret: &secret,
+                sender_nickname_generation: 0,
+                project_sender_inbox: true,
+                synthetic_sender_authority: None,
+                dispatch_timestamp: 0,
+            };
+            assert_eq!(
+                sender_may_broadcast_channel_mention(&ctx),
+                expected,
+                "{label}"
+            );
+        }
+    }
+
+    /// Server-authored synthetic sends bypass the XEP-0513 channel-
+    /// broadcast gate via the EXPLICIT typed
+    /// [`SyntheticSenderAuthority::ServerAuthored`] marker —
+    /// announcements bots, forum-action system messages, etc. The
+    /// trust on those sends is upstream of the MUC role lattice.
+    /// Prior versions of this gate keyed the bypass off
+    /// `!project_sender_inbox`, which coupled "skip the sender's
+    /// inbox row" to "permitted to broadcast" — a future caller
+    /// could have accidentally bypassed the gate by setting the
+    /// projection flag (adversarial review on PR #738).
+    #[test]
+    fn xep0513_synthetic_sender_authority_bypasses_channel_broadcast_gate() {
+        let room = bare("team@conf.example.com");
+        let bot = full("team@conf.example.com/announcements-bot");
+        // Synthetic bots typically aren't in the occupancy snapshot —
+        // `SyntheticSenderAuthority::ServerAuthored` indicates the
+        // sender is server-authored and trust is established upstream.
+        let occupants: Vec<OccupantSnapshot> = vec![];
+
+        let id_gen = FixedIdGenerator("ignored".to_string());
+        let secret = OccupantIdSecret::for_testing(b"test-secret".to_vec());
+        let ctx = RoomContext {
+            room: &room,
+            sender_full: &bot,
+            occupants: &occupants,
+            durable_recipient_bare_jids: &[],
+            managed_room_forbidden: false,
+            room_moderated: false,
+            room_members_only: false,
+            pin_permission: crate::muc::PinPermission::default(),
+            id_gen: &id_gen,
+            occupant_id_secret: &secret,
+            sender_nickname_generation: 0,
+            project_sender_inbox: false,
+            synthetic_sender_authority: Some(SyntheticSenderAuthority::ServerAuthored),
+            dispatch_timestamp: 0,
+        };
+        assert!(
+            sender_may_broadcast_channel_mention(&ctx),
+            "an explicit `Some(SyntheticSenderAuthority::ServerAuthored)` \
+             MUST bypass the channel-broadcast gate — the bot dispatcher's \
+             upstream trust validation is the source of authority"
+        );
+    }
+
+    /// Regression test for the bypass-via-projection-flag vector (issue
+    /// raised by reviewer on PR #738): a caller that sets
+    /// `project_sender_inbox: false` WITHOUT the explicit synthetic
+    /// authority marker MUST be subject to the standard role/affiliation
+    /// gate. If the gate ever silently keyed off `project_sender_inbox`
+    /// again, this test fails.
+    #[test]
+    fn xep0513_project_sender_inbox_false_does_not_bypass_channel_broadcast_gate() {
+        let room = bare("team@conf.example.com");
+        let participant = full("eve@example.com/cli");
+        let mut participant_occ = occ(participant.clone(), "eve");
+        participant_occ.role = Role::Participant;
+        let occupants = vec![participant_occ];
+
+        let id_gen = FixedIdGenerator("ignored".to_string());
+        let secret = OccupantIdSecret::for_testing(b"test-secret".to_vec());
+        let ctx = RoomContext {
+            room: &room,
+            sender_full: &participant,
+            occupants: &occupants,
+            durable_recipient_bare_jids: &[],
+            managed_room_forbidden: false,
+            room_moderated: false,
+            room_members_only: false,
+            pin_permission: crate::muc::PinPermission::default(),
+            id_gen: &id_gen,
+            occupant_id_secret: &secret,
+            sender_nickname_generation: 0,
+            // The projection-flag is `false` here to simulate the
+            // historical confusion: a caller wanting to "not project
+            // the sender's inbox row" must NOT thereby get a free
+            // channel-broadcast bypass.
+            project_sender_inbox: false,
+            synthetic_sender_authority: None,
+            dispatch_timestamp: 0,
+        };
+        assert!(
+            !sender_may_broadcast_channel_mention(&ctx),
+            "`project_sender_inbox: false` MUST NOT bypass the channel-\
+             broadcast gate — only the explicit \
+             `Some(SyntheticSenderAuthority::ServerAuthored)` marker does. \
+             Coupling the bypass to the projection flag was the original \
+             abuse vector identified by the reviewer."
+        );
+    }
+
+    /// Lock-in: the typed `sender_can_broadcast_channel_mention` field
+    /// flows from the frozen sender role to EVERY emitted
+    /// `ProjectGroupchatInbox` event in a single dispatch (sender row
+    /// plus every durable recipient row). This is the same snapshot
+    /// invariant as `room_members_only` (Q5 frozen-snapshot semantic).
+    #[test]
+    fn xep0513_channel_permission_is_frozen_per_dispatch_across_all_recipients() {
+        let room = bare("team@conf.example.com");
+        let moderator = full("alice@example.com/web");
+        let participant = full("bob@example.com/desk");
+        let mut mod_occ = occ(moderator.clone(), "alice");
+        mod_occ.role = Role::Moderator;
+        let participant_occ = occ(participant.clone(), "bob");
+        let occupants = vec![mod_occ, participant_occ];
+        // Durable recipients exclude both senders so the per-dispatch
+        // event count is symmetric: every dispatch emits one sender
+        // row + every durable recipient row. If either sender were in
+        // `durable_recipients`, the inbox handler would collapse them
+        // into a single row via `seen.insert`, breaking the
+        // count-equals-expected assertion below.
+        let durable_recipients = vec![bare("dave@example.com"), bare("eve@example.com")];
+
+        // One sender row + every durable recipient row = three
+        // projections. Asserting the count guards against a future
+        // bug that silently drops a recipient row while leaving the
+        // survivors uniform — that would pass an `.all()` check
+        // vacuously.
+        let expected_count = 1 + durable_recipients.len();
+
+        let mut msg = groupchat(&room, &moderator, "hello everyone");
+        let events = run_with_durable(
+            &room,
+            &moderator,
+            &occupants,
+            &durable_recipients,
+            false,
+            &mut msg,
+        );
+
+        let permissions: Vec<bool> = events
+            .iter()
+            .filter_map(|event| match event {
+                OutboundEvent::ProjectGroupchatInbox {
+                    sender_can_broadcast_channel_mention,
+                    ..
+                } => Some(*sender_can_broadcast_channel_mention),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            permissions.len(),
+            expected_count,
+            "expected one sender row + every durable recipient row to emit \
+             a ProjectGroupchatInbox event"
+        );
+        assert!(
+            permissions.iter().all(|granted| *granted),
+            "moderator sender must produce a permission bool of `true` on \
+             every emitted ProjectGroupchatInbox event — frozen snapshot \
+             must not vary per recipient"
+        );
+
+        // Same dispatch with a participant sender → `false` everywhere.
+        let mut msg = groupchat(&room, &participant, "another message");
+        let events = run_with_durable(
+            &room,
+            &participant,
+            &occupants,
+            &durable_recipients,
+            false,
+            &mut msg,
+        );
+        let permissions: Vec<bool> = events
+            .iter()
+            .filter_map(|event| match event {
+                OutboundEvent::ProjectGroupchatInbox {
+                    sender_can_broadcast_channel_mention,
+                    ..
+                } => Some(*sender_can_broadcast_channel_mention),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            permissions.len(),
+            expected_count,
+            "participant sender's dispatch must emit the same shape: one \
+             sender row + every durable recipient row"
+        );
+        assert!(
+            permissions.iter().all(|granted| !*granted),
+            "participant sender must produce a permission bool of `false` \
+             on every emitted ProjectGroupchatInbox event"
         );
     }
 

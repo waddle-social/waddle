@@ -516,8 +516,24 @@ pub fn muc_room_features(
         Feature::vcard(),
         Feature::occupant_id(),
         Feature::hats(),
-        Feature::explicit_mentions(),
-        Feature::channel_mentions(),
+        // XEP-0513 §292 + §303: advertising `urn:xmpp:mentions:0` and
+        // `urn:xmpp:mentions:0#channel` is binding — once advertised,
+        // the room's `<query xmlns='urn:xmpp:mentions:0'/>` IQ MUST
+        // return a form with `mentions#count` + `mentions#individual`
+        // (always required) and the `mentions#channel` field (if and
+        // only if `#channel` is advertised). PR #738 (slice 3a)
+        // enforces a hardcoded `mentions#channel = moderators` policy
+        // at T0 candidate classification but does NOT yet expose the
+        // §295 IQ surface. To preserve XEP conformance — and per
+        // CLAUDE.md "if Waddle advertises an official XEP feature...
+        // the wire shape and behavior MUST conform to that XEP
+        // exactly" — the advert is withdrawn until slice 3c lands
+        // the IQ get/set + per-room form. §292 allows
+        // non-advertisement while still applying server-internal
+        // filtering ("Mentions MAY be sent in rooms which do not
+        // have permissions set, and/or do not advertise support for
+        // them; it is up to receiving entities to determine how to
+        // handle mentions in rooms without configured permissions").
         Feature::muc_nonanonymous(),
     ];
 

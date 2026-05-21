@@ -279,6 +279,19 @@ pub enum OutboundEvent {
         /// (`private_group` vs `public_group`) without re-querying room
         /// config after the dispatch snapshot.
         room_members_only: bool,
+        /// XEP-0513 §"Multi-User Chats Permissions": typed permission
+        /// snapshot of whether the sender's frozen XEP-0045 role permits
+        /// broadcasting an `urn:xmpp:mentions:0#channel` mention for push
+        /// purposes. Frozen at room-dispatch time from the sender's
+        /// `OccupantSnapshot.role` so the T0 candidate classifier can
+        /// downgrade a non-permitted channel mention to `NotifyAll`
+        /// without re-querying room/occupant state. The mention is still
+        /// delivered + archived unchanged; only the push class changes.
+        ///
+        /// Default server policy is `moderators` (XEP-0513 example value)
+        /// — `role >= Role::Moderator`. The per-room override IQ surface
+        /// is a follow-up slice.
+        sender_can_broadcast_channel_mention: bool,
         /// Optional thread metadata for the thread-level row.
         thread: Option<GroupchatThreadProjection>,
         /// Single dispatch timestamp (Unix epoch seconds) shared
