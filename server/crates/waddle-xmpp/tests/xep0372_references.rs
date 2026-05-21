@@ -239,7 +239,12 @@ fn xep0372_extract_mentioned_jids_strips_xmpp_scheme() {
     add_reference(&mut msg, &Reference::mention("https://not-a-jid.example/"));
 
     let jids = extract_mentioned_jids(&msg);
-    assert_eq!(jids, vec!["alice@example.com".to_owned()]);
+    assert_eq!(
+        jids,
+        vec!["alice@example.com"
+            .parse::<jid::BareJid>()
+            .expect("typed bare JID")]
+    );
 }
 
 #[test]

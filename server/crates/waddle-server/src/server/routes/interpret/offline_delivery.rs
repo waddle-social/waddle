@@ -278,6 +278,21 @@ async fn enqueue_xep0357_notification_candidate_for_message(
     archive_stanza_id: &waddle_xmpp_core::xep0359::StanzaId,
     original_message: &Message,
 ) -> NotificationCandidateQueueOutcome {
+    // XEP-0203 `<delay/>` filter (adversarial review on PR #738):
+    // an offline DM tagged with `<delay xmlns='urn:xmpp:delay'/>`
+    // is a historical replay (S2S buffered delivery, server-bridge
+    // replay) and MUST NOT produce a real-time push candidate.
+    // Mirrors the same filter on the groupchat candidate path.
+    if waddle_xmpp::xep::xep0203::has_delay(original_message) {
+        debug!(
+            recipient = %recipient,
+            sender = %sender,
+            "XEP-0357 DM notification candidate skipped: \
+             stanza carries XEP-0203 `<delay/>` (historical replay, \
+             not real-time)"
+        );
+        return NotificationCandidateQueueOutcome::Completed;
+    }
     // XEP-0513 mention bit is message-intrinsic and frozen at T0; T1
     // reads it back from the candidate row when running the XEP-0492
     // dispatch gate.

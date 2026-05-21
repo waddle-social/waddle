@@ -28,7 +28,10 @@ fn test_extract_mentions() {
     assert_eq!(refs[0].begin, Some(6));
     assert_eq!(refs[0].end, Some(12));
     assert_eq!(refs[0].uri, "xmpp:alice@example.com");
-    assert_eq!(refs[0].bare_jid(), Some("alice@example.com"));
+    assert_eq!(
+        refs[0].bare_jid(),
+        Some("alice@example.com".parse().expect("typed bare JID"))
+    );
 }
 
 #[test]
@@ -41,7 +44,41 @@ fn test_extract_mentioned_jids() {
     let msg = Message::try_from(xml.parse::<Element>().expect("valid xml")).expect("valid message");
 
     let jids = extract_mentioned_jids(&msg);
-    assert_eq!(jids, vec!["alice@example.com", "bob@example.com"]);
+    assert_eq!(
+        jids,
+        vec![
+            "alice@example.com".parse::<jid::BareJid>().expect("alice"),
+            "bob@example.com".parse::<jid::BareJid>().expect("bob"),
+        ]
+    );
+}
+
+/// RFC 5122 + XEP-0372 §"Reference type 'mention'": a mention URI
+/// MAY carry a resource (`xmpp:alice@example.com/web`), a query
+/// (`?join`), or a fragment (`;subject=foo`). The bare-JID accessor
+/// MUST strip all of these before returning so the consumer can
+/// compare against a typed `BareJid` without silently mismatching
+/// (adversarial review on PR #738).
+#[test]
+fn xep0372_bare_jid_strips_resource_and_query_components() {
+    use jid::BareJid;
+    let with_resource = Reference::mention("xmpp:alice@example.com/web");
+    assert_eq!(
+        with_resource.bare_jid(),
+        Some("alice@example.com".parse::<BareJid>().expect("alice bare"))
+    );
+    let with_query = Reference::mention("xmpp:bob@example.com?join");
+    assert_eq!(
+        with_query.bare_jid(),
+        Some("bob@example.com".parse::<BareJid>().expect("bob bare"))
+    );
+    let with_fragment = Reference::mention("xmpp:carol@example.com;subject=foo");
+    assert_eq!(
+        with_fragment.bare_jid(),
+        Some("carol@example.com".parse::<BareJid>().expect("carol bare"))
+    );
+    let unparseable = Reference::mention("not-an-xmpp-uri");
+    assert_eq!(unparseable.bare_jid(), None);
 }
 
 #[test]
@@ -195,7 +232,10 @@ fn test_reference_type_display() {
 fn test_reference_new_helpers() {
     let m = Reference::mention("xmpp:a@b.com");
     assert!(m.is_mention());
-    assert_eq!(m.bare_jid(), Some("a@b.com"));
+    assert_eq!(
+        m.bare_jid(),
+        Some("a@b.com".parse().expect("typed bare JID"))
+    );
 
     let d = Reference::data("https://example.com/file.png");
     assert!(!d.is_mention());

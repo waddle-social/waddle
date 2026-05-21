@@ -199,6 +199,29 @@ async fn enqueue_groupchat_notification_candidate(
     if !is_recipient || !is_durable_recipient {
         return GroupchatNotificationCandidateQueueOutcome::Completed;
     }
+    // XEP-0203 `<delay/>` filter (adversarial review on PR #738):
+    // a groupchat message tagged with `<delay xmlns='urn:xmpp:delay'/>`
+    // is a historical replay (S2S buffered delivery, server-bridge
+    // replay, MUC subject replay, etc.) and MUST NOT produce a real-
+    // time push candidate — pushing on a 3-hour-old message is the
+    // classic delayed-replay-as-push abuse vector. The
+    // `notification_activity` ingest path already applies this filter
+    // to chat-states (see `record_chat_state_activity`); the
+    // candidate-emission path needs the same protection. Recovery
+    // replay through `reconcile_groupchat_notification_candidates`
+    // bypasses this gate intentionally — those replayed MAM messages
+    // carry the recovery row's frozen T0 intent, which was real-time
+    // at original dispatch.
+    if waddle_xmpp::xep::xep0203::has_delay(message) {
+        debug!(
+            recipient = %owner,
+            room = %room,
+            "ProjectGroupchatInbox: skipping XEP-0357 candidate; \
+             stanza carries XEP-0203 `<delay/>` (historical replay, \
+             not real-time)"
+        );
+        return GroupchatNotificationCandidateQueueOutcome::Completed;
+    }
     let projection_committed = thread
         .as_ref()
         .map_or(outcome.channel_committed, |_| outcome.thread_committed);
@@ -713,7 +736,14 @@ fn groupchat_mentions_carry_owner_noping(
     owner_occupant_id: &str,
 ) -> bool {
     mentions.iter().any(|mention| {
+        // Mirror the mixed-attribute guard in `groupchat_mentions_owner`:
+        // a `<mention/>` that also carries `mentions='#channel'` is
+        // channel-scope, not a personal mention naming `owner` — the
+        // `<noping/>` on it suppresses CHANNEL pushes (handled by
+        // `current_room_channel_mention`), not the owner's personal
+        // notification.
         mention.noping
+            && !mention.is_channel()
             && (mention
                 .jid
                 .as_ref()
@@ -732,7 +762,19 @@ fn groupchat_mentions_owner(
     owner_occupant_id: &str,
 ) -> bool {
     let xep0513 = mentions.iter().any(|mention| {
+        // XEP-0513 §"Multi-User Chats Permissions" §304 hardening
+        // (adversarial review on PR #738): a `<mention/>` that ALSO
+        // carries `mentions='urn:xmpp:mentions:0#channel'` is a
+        // channel-scope payload, not a personal mention — even when
+        // it also carries `jid=`/`occupantid=` attributes. Without
+        // the `!mention.is_channel()` guard, a non-permitted sender
+        // could bypass the channel-broadcast gate by adding a
+        // matching `occupantid=`/`jid=` to a channel mention: the
+        // classifier would pick `PersonalMention` first (per-recipient
+        // match) and never run the channel-scope downgrade. Treat
+        // mixed-attribute mentions as channel-scope only.
         !mention.noping
+            && !mention.is_channel()
             && (mention
                 .jid
                 .as_ref()
@@ -742,11 +784,13 @@ fn groupchat_mentions_owner(
                     .as_deref()
                     .is_some_and(|mentioned| mentioned == owner_occupant_id))
     });
-    let owner_raw = owner.to_string();
     let xep0372 = extract_references_from_message(message)
         .into_iter()
         .any(|reference| {
-            reference.is_mention() && reference.bare_jid() == Some(owner_raw.as_str())
+            reference.is_mention()
+                && reference
+                    .bare_jid()
+                    .is_some_and(|mentioned| &mentioned == owner)
         });
     xep0513 || xep0372
 }
@@ -1214,6 +1258,74 @@ mod tests {
             NotificationClass::PersonalMention,
             "personal mention class must NOT be affected by the channel \
              broadcast gate — the gate covers `urn:xmpp:mentions:0#channel` only"
+        );
+    }
+
+    /// Adversarial review on PR #738: a non-permitted sender crafted
+    /// `<mention occupantid='target-occ' mentions='urn:xmpp:mentions:0#channel'/>`
+    /// would historically bypass the channel-broadcast gate by being
+    /// classified as `PersonalMention` (because the personal matcher
+    /// found the occupant-id match and didn't check the channel-scope
+    /// attribute). The fix in `groupchat_mentions_owner` filters out
+    /// mixed-attribute mentions so they ONLY flow through the channel
+    /// pipeline (and are subject to the permission gate). Lock the
+    /// behavior here.
+    #[test]
+    fn xep0513_mixed_attribute_mention_does_not_bypass_channel_gate() {
+        use crate::notification_outbox::NotificationClass;
+
+        let owner = bare("charlie@example.com");
+        let room = bare("team@muc.example.com");
+        let occupant_id = "room-stable-charlie";
+
+        // Craft a `<mention/>` that simultaneously carries
+        // `occupantid='charlie-occ'` AND `mentions='#channel'`. The
+        // attacker's intent: have charlie classify it as personal
+        // (bypassing the gate) while the room sees it as channel.
+        let mut mixed = waddle_xmpp::xep::ExplicitMention::occupant_id(occupant_id);
+        mixed.mentions = Some(waddle_xmpp::xep::CHANNEL_MENTION.to_string());
+        let msg = message_with_mention(mixed);
+        let mentions = parsed_mentions(&msg);
+
+        // Non-permitted sender (participant). With the fix, the
+        // channel-scope wins and the gate downgrades to NotifyAll.
+        let GroupchatNotificationClassDecision::Deliver(class) = groupchat_notification_class(
+            &mentions,
+            &msg,
+            &owner,
+            &room,
+            occupant_id,
+            /* is_live_occupant */ false,
+            /* sender_can_broadcast_channel_mention */ false,
+        );
+        assert_eq!(
+            class,
+            NotificationClass::NotifyAll,
+            "a `<mention occupantid='X' mentions='#channel'/>` from a non-\
+             permitted sender MUST NOT classify as PersonalMention — the \
+             channel-scope attribute overrides the personal targeting and \
+             the gate applies"
+        );
+
+        // Permitted sender (moderator). Channel-scope still wins, and
+        // the gate now classifies as ChannelMention — NOT
+        // PersonalMention.
+        let GroupchatNotificationClassDecision::Deliver(class) = groupchat_notification_class(
+            &mentions,
+            &msg,
+            &owner,
+            &room,
+            occupant_id,
+            /* is_live_occupant */ false,
+            /* sender_can_broadcast_channel_mention */ true,
+        );
+        assert_eq!(
+            class,
+            NotificationClass::ChannelMention,
+            "a `<mention occupantid='X' mentions='#channel'/>` from a \
+             permitted sender MUST classify as ChannelMention — the \
+             channel-scope attribute is authoritative regardless of any \
+             per-recipient targeting attributes"
         );
     }
 }

@@ -142,9 +142,28 @@ impl Reference {
         self.ref_type == ReferenceType::Mention
     }
 
-    /// Extract the bare JID from the URI (strips `xmpp:` prefix).
-    pub fn bare_jid(&self) -> Option<&str> {
-        self.uri.strip_prefix("xmpp:")
+    /// Extract the bare JID referenced by this `<reference/>` URI.
+    ///
+    /// Per RFC 5122 XMPP URIs of the form `xmpp:<jid>` may carry an
+    /// authority resource (`xmpp:alice@example.com/web`) and/or a
+    /// query (`?join`) or fragment (`;subject=foo`) component. The
+    /// XEP-0372 §"Reference type 'mention'" semantics target the
+    /// user's bare JID, so strip resource + query + fragment before
+    /// returning. Returns `None` for unparseable URIs.
+    pub fn bare_jid(&self) -> Option<jid::BareJid> {
+        let jid_part = self
+            .uri
+            .strip_prefix("xmpp:")?
+            .split(['?', ';'])
+            .next()?
+            .trim();
+        if jid_part.is_empty() {
+            return None;
+        }
+        jid_part
+            .parse::<jid::Jid>()
+            .ok()
+            .map(|parsed| parsed.to_bare())
     }
 }
 
@@ -258,12 +277,14 @@ pub fn extract_mention_uris(msg: &Message) -> Vec<String> {
         .collect()
 }
 
-/// Extract mentioned bare JIDs from a message (strips `xmpp:` prefix).
-pub fn extract_mentioned_jids(msg: &Message) -> Vec<String> {
+/// Extract mentioned bare JIDs from a message. Returns typed
+/// `BareJid` values stripped of resource / query / fragment per
+/// RFC 5122 — see [`Reference::bare_jid`].
+pub fn extract_mentioned_jids(msg: &Message) -> Vec<jid::BareJid> {
     extract_references_from_message(msg)
         .into_iter()
         .filter(|r| r.is_mention())
-        .filter_map(|r| r.bare_jid().map(|s| s.to_owned()))
+        .filter_map(|r| r.bare_jid())
         .collect()
 }
 
