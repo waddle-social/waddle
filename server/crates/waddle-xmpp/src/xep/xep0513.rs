@@ -29,8 +29,34 @@ pub const DEFAULT_MENTIONS_COUNT: u32 = 5;
 /// nobody. Counting them would let an attacker pad the §304 count
 /// from a message that doesn't mention anyone (XEP-0513 review on
 /// PR #741).
+///
+/// Empty-string `occupantid=''` and `mentions=''` are also excluded:
+/// the parser preserves them as `Some("".to_string())` but an empty
+/// occupant-id targets no XEP-0421 occupant and an empty `mentions=`
+/// URI identifies no group per XEP-0513 §3.
 fn is_mention_target(mention: &ExplicitMention) -> bool {
-    mention.jid.is_some() || mention.occupant_id.is_some() || mention.mentions.is_some()
+    mention.jid.is_some()
+        || mention
+            .occupant_id
+            .as_deref()
+            .is_some_and(|id| !id.is_empty())
+        || mention
+            .mentions
+            .as_deref()
+            .is_some_and(|uri| !uri.is_empty())
+}
+
+/// Returns `true` when an XEP-0372 `<reference/>` carries a real
+/// mention TARGET — `type='mention'` AND a parseable XMPP bare JID
+/// in the `uri`. Per XEP-0372 §"Reference type 'mention'" the URI
+/// MUST be the XMPP URI of the mentioned entity; counting
+/// `<reference type='mention' uri=''/>` or
+/// `<reference type='mention' uri='https://attacker.example/'/>`
+/// would let an attacker pad the §304 count from a message that
+/// targets nobody — the same padding vector closed for XEP-0513
+/// by [`is_mention_target`] (PR #741 wire-shape review).
+fn is_reference_mention_target(reference: &Reference) -> bool {
+    reference.is_mention() && reference.bare_jid().is_some()
 }
 
 /// Counts the mention TARGETS on `message`. Includes:
@@ -80,7 +106,7 @@ pub fn mention_target_count_from_parts(
         .count();
     let xep0372 = references
         .iter()
-        .filter(|reference| reference.is_mention())
+        .filter(|reference| is_reference_mention_target(reference))
         .count();
     u32::try_from(xep0513.saturating_add(xep0372)).unwrap_or(u32::MAX)
 }
@@ -414,6 +440,64 @@ mod count_tests {
         let msg = empty_message();
         assert_eq!(mention_target_count(&[], &msg), 0);
         assert!(!mentions_exceed_threshold(&[], &msg, 0));
+    }
+
+    /// XEP-0513 §3 + XEP-0372 §"Reference type 'mention'": a mention
+    /// reference whose `uri` doesn't resolve to an XMPP bare JID
+    /// targets nobody and MUST NOT contribute to the §304 count.
+    /// Closes the symmetric padding attack on the XEP-0372 fallback
+    /// path (an attacker injecting 6× `<reference type='mention'
+    /// uri=''/>` or `<reference type='mention' uri='https://x/'/>`
+    /// would otherwise pad the cap from a no-target message —
+    /// wire-shape review on PR #741).
+    #[test]
+    fn mention_target_count_ignores_xep0372_references_with_unparseable_uris() {
+        let mut msg = empty_message();
+        // 6 mention references whose URIs cannot resolve to an XMPP
+        // bare JID. The first five fail the `xmpp:` scheme check;
+        // the sixth fails JID parsing because spaces are invalid in
+        // a JID localpart / domain.
+        add_reference(&mut msg, &Reference::mention("xmpp:"));
+        add_reference(&mut msg, &Reference::mention(""));
+        add_reference(&mut msg, &Reference::mention("https://attacker.example/"));
+        add_reference(&mut msg, &Reference::mention("mailto:foo@example.com"));
+        add_reference(&mut msg, &Reference::mention("not-an-xmpp-uri"));
+        add_reference(&mut msg, &Reference::mention("xmpp:bad jid with spaces"));
+        assert_eq!(
+            mention_target_count(&[], &msg),
+            0,
+            "XEP-0372 mention references whose URI doesn't parse to an \
+             XMPP bare JID MUST NOT contribute to the §304 count"
+        );
+    }
+
+    /// XEP-0513 §3 + parser tolerance: empty-string `occupantid=''`
+    /// and `mentions=''` parse as `Some("".to_string())` but target
+    /// nobody. They MUST NOT contribute to the §304 count.
+    #[test]
+    fn mention_target_count_ignores_empty_string_targets() {
+        let mut msg = empty_message();
+        let empty_occupant = ExplicitMention {
+            occupant_id: Some(String::new()),
+            ..ExplicitMention::default()
+        };
+        let empty_mentions = ExplicitMention {
+            mentions: Some(String::new()),
+            ..ExplicitMention::default()
+        };
+        with_xep0513_mention(&mut msg, empty_occupant);
+        with_xep0513_mention(&mut msg, empty_mentions);
+        let mentions = extract_explicit_mentions(&msg)
+            .map(|m| m.mentions)
+            .unwrap_or_default();
+        // Both elements parsed (the parser accepts `Some("")`).
+        assert_eq!(mentions.len(), 2);
+        assert_eq!(
+            mention_target_count(&mentions, &msg),
+            0,
+            "empty-string `occupantid=''` and `mentions=''` MUST NOT \
+             contribute to the §304 count — they identify no target"
+        );
     }
 
     /// XEP-0513 §3 defines a mention TARGET as a payload that

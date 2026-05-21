@@ -511,9 +511,14 @@ struct RecipientMentionBits {
 /// channel-mention surface is for MUC reflector announcements, which
 /// do not flow through the DM `QueueOfflineDelivery` arm.
 fn mention_bits_for_recipient(message: &Message, recipient: &BareJid) -> RecipientMentionBits {
-    let Some(mentions) = waddle_xmpp::xep::extract_explicit_mentions(message) else {
-        return RecipientMentionBits::default();
-    };
+    // Pre-parse XEP-0513 mentions AND XEP-0372 references once so
+    // the §304 count gate and the per-recipient is_mention/noping
+    // derivation share the same pre-parsed slices.
+    let mentions_slice: Vec<_> = waddle_xmpp::xep::extract_explicit_mentions(message)
+        .map(|m| m.mentions)
+        .unwrap_or_default();
+    let references = waddle_xmpp::xep::extract_references_from_message(message);
+
     // XEP-0513 §304: "Receiving entities SHOULD ignore all mentions
     // if the message contains more mentions than the threshold." A
     // sender spamming N per-JID mentions on a DM (the same abuse
@@ -522,15 +527,15 @@ fn mention_bits_for_recipient(message: &Message, recipient: &BareJid) -> Recipie
     // able to attach `<noping/>` to suppress the very push they
     // forced. Treating count-exceeded as "no mentions present"
     // collapses both surfaces back to the regular DM push.
-    if waddle_xmpp::xep::mentions_exceed_threshold(
-        &mentions.mentions,
-        message,
+    if waddle_xmpp::xep::mentions_exceed_threshold_from_parts(
+        &mentions_slice,
+        &references,
         waddle_xmpp::xep::DEFAULT_MENTIONS_COUNT,
     ) {
         return RecipientMentionBits::default();
     }
     let mut bits = RecipientMentionBits::default();
-    for mention in &mentions.mentions {
+    for mention in &mentions_slice {
         let names_recipient = mention
             .jid
             .as_ref()
@@ -542,6 +547,25 @@ fn mention_bits_for_recipient(message: &Message, recipient: &BareJid) -> Recipie
         if mention.noping {
             bits.noping = true;
         }
+    }
+    // XEP-0372 mention-reference fallback for the `is_mention` bit:
+    // a DM sender naming the recipient via
+    // `<reference type='mention' uri='xmpp:recipient@host'/>`
+    // (instead of, or alongside, an XEP-0513 `<mention jid='…'/>`)
+    // MUST still promote the recipient to `dm_mention` — otherwise
+    // the count gate counts XEP-0372 references TOWARD the threshold
+    // (promoting spam) but the classifier doesn't count them
+    // FOR promotion (demoting legitimate XEP-0372 mentions to plain
+    // dm). The groupchat path already does this in
+    // `groupchat_mentions_owner`; mirror it here for DM consistency
+    // (cross-XEP review on PR #741).
+    if !bits.is_mention {
+        bits.is_mention = references.iter().any(|reference| {
+            reference.is_mention()
+                && reference
+                    .bare_jid()
+                    .is_some_and(|mentioned| &mentioned == recipient)
+        });
     }
     bits
 }
@@ -728,6 +752,64 @@ mod tests {
         assert!(
             bits.noping,
             "at-threshold count is still honored — noping MUST be set"
+        );
+    }
+
+    /// Cross-XEP review on PR #741: a DM sender naming the recipient
+    /// solely via an XEP-0372 `<reference type='mention'/>` (no
+    /// XEP-0513 `<mention/>`) MUST still set the recipient's
+    /// `is_mention` bit. Without this the §304 count gate counts
+    /// XEP-0372 toward the threshold (penalising spam) while the
+    /// classifier ignores XEP-0372 for promotion (demoting
+    /// legitimate XEP-0372-only DMs to plain `dm`).
+    #[test]
+    fn xep0372_only_dm_mention_promotes_recipient_to_dm_mention() {
+        let recipient = bare("alice@example.com");
+        let mut msg = xmpp_parsers::message::Message::new(None::<jid::Jid>);
+        waddle_xmpp::xep::add_reference(
+            &mut msg,
+            &waddle_xmpp::xep::Reference::mention("xmpp:alice@example.com"),
+        );
+        let bits = mention_bits_for_recipient(&msg, &recipient);
+        assert!(
+            bits.is_mention,
+            "a DM with only an XEP-0372 `<reference type='mention'/>` \
+             naming the recipient MUST still set is_mention — the \
+             groupchat path already does this via groupchat_mentions_owner"
+        );
+        assert!(
+            !bits.noping,
+            "XEP-0372 has no `<noping/>` concept; noping stays false"
+        );
+    }
+
+    /// Composition with the §304 count gate: an XEP-0372-only mention
+    /// still respects the threshold cap. Six references targeting
+    /// six different users (including the recipient) trip the gate
+    /// → recipient's bits collapse to default.
+    #[test]
+    fn xep0372_dm_mention_count_exceeded_collapses_to_default_even_with_recipient_reference() {
+        let recipient = bare("alice@example.com");
+        let mut msg = xmpp_parsers::message::Message::new(None::<jid::Jid>);
+        let threshold = waddle_xmpp::xep::DEFAULT_MENTIONS_COUNT;
+        // One reference naming the recipient + threshold others = exceed.
+        waddle_xmpp::xep::add_reference(
+            &mut msg,
+            &waddle_xmpp::xep::Reference::mention("xmpp:alice@example.com"),
+        );
+        for i in 0..threshold {
+            waddle_xmpp::xep::add_reference(
+                &mut msg,
+                &waddle_xmpp::xep::Reference::mention(format!("xmpp:user{i}@example.com")),
+            );
+        }
+        let bits = mention_bits_for_recipient(&msg, &recipient);
+        assert_eq!(
+            bits,
+            RecipientMentionBits::default(),
+            "DM with > DEFAULT_MENTIONS_COUNT XEP-0372 references MUST \
+             collapse — count gate fires identically on the XEP-0372 \
+             surface"
         );
     }
 }
