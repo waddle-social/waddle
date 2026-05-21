@@ -30,6 +30,8 @@ import { useJumpToLiveEdge } from "@/ui/use-jump-to-live-edge";
 import { ArrowDown, ArrowUp } from "lucide-vue-next";
 import AppAvatar from "@/components/ui/AppAvatar.vue";
 import ChatHeader, { type ChannelHeaderMember } from "@/components/chat/ChatHeader.vue";
+import CallExpandedSurface from "@/components/calls/CallExpandedSurface.vue";
+import CallSplitContainer from "@/components/calls/CallSplitContainer.vue";
 import ExtensionPalette from "@/components/chat/ExtensionPalette.vue";
 import MessageCard from "@/components/chat/MessageCard.vue";
 import MessageComposer from "@/components/chat/MessageComposer.vue";
@@ -1062,6 +1064,19 @@ function dayDividerLabel(createdAt: string): string {
       </div>
     </div>
 
+    <!-- Inline split-view for an active group call in this channel.
+         Renders ONLY when (a) a MUC call is active, (b) the call's
+         room matches this channel, (c) the local user is a
+         participant, and (d) the call UI mode is "split" (not
+         "fullscreen"). All of that gating is inside the component;
+         we mount it unconditionally and let it decide. The handle is
+         emitted as a sibling so it sits between the call region and
+         the timeline in the parent flex column. -->
+    <CallSplitContainer
+      v-if="channel?.jid"
+      :room-jid="channel.jid"
+    />
+
     <!-- Composer (social / top-pinned mode) -->
     <!-- Note: the composer and typing indicator appear in two spots in the DOM
          so they can be rendered above or below the messages container depending
@@ -1444,6 +1459,15 @@ function dayDividerLabel(createdAt: string): string {
       :is-self="popoverAuthor?.username === currentUser"
       :xmpp-client="xmppClient"
       @message="openPopoverDm"
+    />
+    <!-- Expanded call surface: absolutely positioned over the chat
+         content pane (this root has `position: relative`) so the
+         surrounding app shell — waddles rail, channel list, thread
+         panel — stays visible. Decides its own visibility based on
+         call state + ui mode. -->
+    <CallExpandedSurface
+      v-if="channel?.jid"
+      :room-jid="channel.jid"
     />
   </div>
 </template>

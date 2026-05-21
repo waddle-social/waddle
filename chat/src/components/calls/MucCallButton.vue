@@ -7,13 +7,11 @@ import {
   type RawIqSender,
 } from "@/lib/calls/call-store";
 import { startMucCallAction } from "@/lib/calls/muc-call-actions";
-import {
-  $mucCallParticipants,
-  normalizeMucCallRoomJid,
-} from "@/lib/calls/muc-call-presence";
+import { normalizeMucCallRoomJid } from "@/lib/calls/muc-call-presence";
 import { connectionStore } from "@/lib/connection-store";
 import type { CallMedia } from "@/lib/calls/types";
 import { jidDomain } from "@/lib/xmpp/jid";
+import CallActivePill from "./CallActivePill.vue";
 
 const props = defineProps<{
   /** MUC room bare JID (`channel@muc.host`). The server uses this
@@ -26,7 +24,6 @@ const state = useStore($callState);
 const starting = ref(false);
 const inCall = computed(() => state.value.phase !== "idle" && state.value.phase !== "ended");
 const callBusy = computed(() => inCall.value || starting.value);
-const participants = useStore($mucCallParticipants);
 const normalizedRoomJid = computed(() => normalizeMucCallRoomJid(props.roomJid));
 const callInThisRoom = computed(() => {
   const current = state.value;
@@ -35,13 +32,8 @@ const callInThisRoom = computed(() => {
     normalizeMucCallRoomJid(current.peer) === normalizedRoomJid.value;
 });
 const busyWithOtherCall = computed(() => inCall.value && !callInThisRoom.value);
-/** Occupants currently in the call, including our own nick when
- *  the MUC reflects our active Muji presence. The header count must
- *  match the sidebar count so the same room doesn't appear to have
- *  different call state depending on where the user looks. */
-const participantCount = computed(() => {
-  return (participants.value[normalizedRoomJid.value] ?? []).length;
-});
+
+const pillDisabled = computed(() => callBusy.value || busyWithOtherCall.value || callInThisRoom.value);
 
 function getSender(): RawIqSender | null {
   // BrowserXmppClient stores the wasm client as `xmpp`; we cast
@@ -75,6 +67,10 @@ async function startCall(media: CallMedia): Promise<void> {
     getExpectedMixerJid,
   });
 }
+
+function joinExistingAudio(): void {
+  void startCall({ audio: true, video: false });
+}
 </script>
 
 <template>
@@ -105,23 +101,15 @@ async function startCall(media: CallMedia): Promise<void> {
     >
       <Video class="w-3.5 h-3.5" />
     </button>
-    <!-- "N in call" indicator: rendered when at least one occupant
-         has advertised the call extension on their MUC presence. The
-         indicator is a button-shaped chip that joins the existing
-         call when clicked, so a late participant has a one-click
-         affordance without us having to design a separate "join
-         existing call" surface. -->
-    <button
-      v-if="participantCount > 0"
-      class="chat-icon-button chat-icon-button--md text-primary hover:bg-primary/10 ring-1 ring-primary/30 motion-safe:animate-pulse"
-      type="button"
-      :title="`${participantCount} ${participantCount === 1 ? 'person is' : 'people are'} in this channel's call`"
-      :aria-label="`Join the live call (${participantCount} in call)`"
-      :disabled="callBusy || busyWithOtherCall || callInThisRoom"
-      @click="startCall({ audio: true, video: false })"
-    >
-      <Phone class="w-3.5 h-3.5" />
-      <span class="type-control ml-1">{{ participantCount }}</span>
-    </button>
+    <!-- Live-call pill: green dot + count + running duration, click to
+         join. The pill component decides its own visibility (only
+         when this room owns the call AND the local user isn't in it),
+         which is why we can mount it unconditionally and still keep
+         the row spacing tight when no call is in flight. -->
+    <CallActivePill
+      :room-jid="roomJid"
+      :on-join="joinExistingAudio"
+      :disabled="pillDisabled"
+    />
   </div>
 </template>
