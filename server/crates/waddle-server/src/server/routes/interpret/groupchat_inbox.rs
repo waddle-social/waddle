@@ -669,10 +669,14 @@ enum GroupchatNotificationClassDecision {
 struct GroupchatNotificationClassOutcome {
     decision: GroupchatNotificationClassDecision,
     /// `true` when the per-message mention count exceeded the
-    /// `mentions#count` threshold and the classifier collapsed every
-    /// mention to `NotifyAll`. The candidate-emission noping
-    /// derivation reads this so `<noping/>` is also ignored — see
-    /// the §304 "ignore ALL mentions" SHOULD.
+    /// XEP-0513 §304 `mentions#count` threshold and the classifier
+    /// collapsed every mention TARGET to `NotifyAll`. The candidate-
+    /// emission path discards this bit today (the noping derivation
+    /// is independent of overflow per the XEP-0513 §"No Ping"
+    /// SHOULD — see the comment near `recipient_noping`) but the
+    /// field is kept on the outcome for direct test assertions and
+    /// for any future T0 hint that genuinely depends on the
+    /// "overflowed at classification time" provenance.
     mentions_overflowed: bool,
 }
 
@@ -1715,9 +1719,13 @@ mod tests {
             groupchat_mentions_carry_owner_noping(&mentions, &owner, occupant_id),
             "owner's `<noping/>` mention is present and counted"
         );
-        // Production emission combines the two via:
-        //   `!mentions_overflowed && groupchat_mentions_carry_owner_noping(...)`
-        // so the recipient_noping derivation produces `true` here.
+        // Production emission reads `groupchat_mentions_carry_owner_noping(...)`
+        // unconditionally (the overflow bit no longer gates the
+        // noping derivation per the XEP-0513 §"No Ping" SHOULD —
+        // see commit d17004c3 / `xep0513_noping_survives_mention_count_overflow`).
+        // At-threshold + `<noping/>` therefore produces
+        // `recipient_noping = true` and the T0/T1 `Xep0513Noping`
+        // suppressor fires for this recipient.
     }
 
     /// Composition test: a non-permitted sender combines a channel
