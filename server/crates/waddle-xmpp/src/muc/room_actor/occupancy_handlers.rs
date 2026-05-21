@@ -118,6 +118,7 @@ impl kameo::message::Message<LeaveByRealJid> for RoomActor {
             return Ok(None);
         };
         let affiliation = occupant.affiliation;
+        let role = occupant.role;
         let leaving_room_jid = self
             .room
             .room_jid
@@ -131,18 +132,33 @@ impl kameo::message::Message<LeaveByRealJid> for RoomActor {
             .flat_map(|o| self.room.get_occupant_sessions(&o.nick))
             .filter(|jid| *jid != msg.sender_jid)
             .collect();
+        let cleared_muji_state = self
+            .room
+            .muji_state
+            .get(&nick)
+            .is_some_and(|entry| entry.originator == msg.sender_jid);
         let removed_last_session = self
             .room
             .remove_occupant_session(&nick, &msg.sender_jid)
             .unwrap_or(false);
+        let remaining_nick_real_jid = if removed_last_session {
+            None
+        } else {
+            self.room
+                .get_occupant(&nick)
+                .map(|occupant| occupant.real_jid.clone())
+        };
         let occupant_count = self.room.occupant_count();
         let is_persistent = self.room.config.persistent;
         Ok(Some(LeaveOutcome {
             nick,
             affiliation,
+            role,
             leaving_room_jid,
             remaining_occupants,
             removed_last_session,
+            cleared_muji_state,
+            remaining_nick_real_jid,
             occupant_count,
             is_persistent,
         }))
@@ -202,6 +218,10 @@ pub struct UpsertMujiPresence {
     pub muji: crate::xep::xep0272::Muji,
 }
 
+pub struct ClearMujiPresence {
+    pub sender_jid: FullJid,
+}
+
 #[derive(Debug, Clone)]
 pub struct MujiPresenceUpdateOutcome {
     pub update: PresenceUpdateOutcome,
@@ -251,6 +271,45 @@ impl kameo::message::Message<UpsertMujiPresence> for RoomActor {
                 recipients,
             },
             active_muji,
+        }))
+    }
+}
+
+impl kameo::message::Message<ClearMujiPresence> for RoomActor {
+    type Reply = Result<Option<MujiPresenceUpdateOutcome>, Infallible>;
+
+    async fn handle(
+        &mut self,
+        msg: ClearMujiPresence,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        let Some(sender_occupant) = self.room.find_occupant_by_real_jid(&msg.sender_jid) else {
+            return Ok(None);
+        };
+        let sender_nick = sender_occupant.nick.clone();
+        let sender_real_jid = sender_occupant.real_jid.clone();
+        let sender_role = sender_occupant.role;
+        let sender_affiliation = sender_occupant.affiliation;
+        if !self.room.clear_muji_presence(&sender_nick, &msg.sender_jid) {
+            return Ok(None);
+        }
+        let room_jid = self.room.room_jid.clone();
+        let recipients = self
+            .room
+            .occupants
+            .values()
+            .flat_map(|o| self.room.get_occupant_sessions(&o.nick))
+            .collect();
+        Ok(Some(MujiPresenceUpdateOutcome {
+            update: PresenceUpdateOutcome {
+                sender_nick,
+                sender_real_jid,
+                sender_role,
+                sender_affiliation,
+                room_jid,
+                recipients,
+            },
+            active_muji: None,
         }))
     }
 }

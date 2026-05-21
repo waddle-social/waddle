@@ -6,12 +6,40 @@ import { fileURLToPath } from "node:url";
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(scriptDir, "..", "..");
 const crateDir = resolve(repoRoot, "server/crates/waddle-xmpp-client-wasm");
+const clientCrateDir = resolve(repoRoot, "server/crates/waddle-xmpp-client");
+const coreCrateDir = resolve(repoRoot, "server/crates/waddle-xmpp-core");
 const outDir = resolve(repoRoot, "server/wasm-pkg/waddle-xmpp-client-wasm");
 const nodeModulesDir = resolve(scriptDir, "..", "node_modules/@waddle/xmpp-client-wasm");
 
+function newestSourceMtime(paths) {
+  let newest = 0;
+  function visit(path) {
+    const stat = statSync(path);
+    if (stat.isDirectory()) {
+      for (const entry of readdirSync(path)) {
+        if (entry === "target" || entry === ".git") continue;
+        visit(resolve(path, entry));
+      }
+      return;
+    }
+    if (
+      path.endsWith(".rs") ||
+      path.endsWith(".toml") ||
+      path.endsWith(".lock") ||
+      path.endsWith("build.rs")
+    ) {
+      newest = Math.max(newest, stat.mtimeMs);
+    }
+  }
+  for (const path of paths) visit(path);
+  return newest;
+}
+
 if (process.env.REBUILD_WASM !== "1") {
   // If _bg.js doesn't exist in node_modules, the package is incomplete (fresh checkout or
-  // bun install after the artifact was removed). Auto-rebuild to avoid a broken dev server.
+  // bun install after the artifact was removed). Also rebuild when the Rust sources are
+  // newer than the installed artifact; otherwise an existing node_modules can keep exposing
+  // stale wasm-bindgen methods after a branch checkout.
   const bgJsPath = resolve(nodeModulesDir, "waddle_xmpp_client_wasm_bg.js");
   const realBgJsPath = existsSync(nodeModulesDir)
     ? resolve(realpathSync(nodeModulesDir), "waddle_xmpp_client_wasm_bg.js")
@@ -20,6 +48,11 @@ if (process.env.REBUILD_WASM !== "1") {
     console.log("[wasm] WASM artifacts missing — auto-rebuilding from Rust source...");
     console.log("[wasm] (Set REBUILD_WASM=1 explicitly to force a rebuild when artifacts exist.)");
     // Fall through to the rebuild path below.
+  } else if (
+    newestSourceMtime([crateDir, clientCrateDir, coreCrateDir]) >
+    statSync(realBgJsPath).mtimeMs
+  ) {
+    console.log("[wasm] Rust wasm sources changed — rebuilding @waddle/xmpp-client-wasm...");
   } else {
     // Artifacts present; rely on the local build or published registry version.
     console.log("[wasm] WASM artifacts found — skipping rebuild. Set REBUILD_WASM=1 to force recompile.");
@@ -146,4 +179,3 @@ if (existsSync(viteCacheDir)) {
 
 console.log("[wasm] Done. Local build installed.");
 console.log("[wasm] ⚠️  Next `bun install` will revert to the published registry version.");
-

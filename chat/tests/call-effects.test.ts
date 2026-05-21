@@ -1,4 +1,9 @@
 import { describe, expect, mock, test } from "bun:test";
+import {
+  $callState,
+  $lastCallError,
+  clearCallState,
+} from "../src/lib/calls/call-store";
 import { handleCallEventSideEffect } from "../src/lib/calls/call-effects";
 import type { CallWireSender } from "../src/lib/calls/outbound";
 import type { CallEvent, CallMedia, CallState, LiveKitJoin } from "../src/lib/calls/types";
@@ -17,8 +22,11 @@ function mockSender(): CallWireSender {
     send_call_propose: mock(async () => undefined),
     send_call_proceed: mock(async () => undefined),
     send_call_reject: mock(async () => undefined),
+    send_call_reject_tie_break: mock(async () => undefined),
     send_call_retract: mock(async () => undefined),
+    send_call_retract_tie_break: mock(async () => undefined),
     send_call_finish: mock(async () => undefined),
+    send_call_finish_migrated: mock(async () => undefined),
     send_call_session_initiate: mock(async () => undefined),
     send_call_session_accept: mock(async () => undefined),
     send_call_session_terminate: mock(async () => undefined),
@@ -26,6 +34,69 @@ function mockSender(): CallWireSender {
 }
 
 describe("handleCallEventSideEffect", () => {
+  test("proceed side-effect failure ends outgoing UI and preserves a visible error", async () => {
+    clearCallState();
+    const sender = mockSender();
+    sender.send_call_session_initiate = mock(async () => {
+      throw new Error("session-initiate failed");
+    });
+    const prev: CallState = {
+      phase: "outgoing",
+      to: "bob@waddle.test",
+      sid: "c9",
+      media: audioVideo,
+    };
+    $callState.set(prev);
+    await handleCallEventSideEffect({
+      kind: "proceed",
+      from: "bob@waddle.test/desktop",
+      sid: "c9",
+    }, prev, sender, "alice@waddle.test/web-1");
+    expect($callState.get()).toEqual({
+      phase: "ended",
+      sid: "c9",
+      reason: "error",
+    });
+    expect($lastCallError.get()).toBe("session-initiate failed");
+    clearCallState();
+  });
+
+  test("session-initiate side-effect failure ends accepted incoming UI and preserves a visible error", async () => {
+    clearCallState();
+    const sender = mockSender();
+    sender.send_call_session_accept = mock(async () => {
+      throw new Error("session-accept failed");
+    });
+    const prev: CallState = {
+      phase: "incoming",
+      from: "alice@waddle.test/desktop",
+      sid: "c9",
+      media: audioVideo,
+    };
+    $callState.set({
+      phase: "active",
+      peer: "alice@waddle.test/desktop",
+      sid: "c9",
+      media: audioVideo,
+      join,
+      kind: "dm",
+    });
+    await handleCallEventSideEffect({
+      kind: "session-initiate",
+      from: "alice@waddle.test/desktop",
+      sid: "c9",
+      media: audioVideo,
+      join,
+    }, prev, sender, "bob@waddle.test/web-1");
+    expect($callState.get()).toEqual({
+      phase: "ended",
+      sid: "c9",
+      reason: "error",
+    });
+    expect($lastCallError.get()).toBe("session-accept failed");
+    clearCallState();
+  });
+
   test("fires session-initiate when proceed lands on a matching outgoing call", async () => {
     const sender = mockSender();
     const prev: CallState = {
@@ -89,7 +160,7 @@ describe("handleCallEventSideEffect", () => {
     };
     const event: CallEvent = {
       kind: "reject",
-      from: "bob@waddle.test",
+      from: "bob@waddle.test/desktop",
       sid: "c9",
     };
     await handleCallEventSideEffect(event, prev, sender, "alice@waddle.test/web-1");
@@ -100,7 +171,7 @@ describe("handleCallEventSideEffect", () => {
     const sender = mockSender();
     const prev: CallState = {
       phase: "incoming",
-      from: "alice@waddle.test",
+      from: "alice@waddle.test/desktop",
       sid: "c9",
       media: audioVideo,
     };
@@ -115,7 +186,6 @@ describe("handleCallEventSideEffect", () => {
     expect(sender.send_call_session_accept).toHaveBeenCalledTimes(1);
     expect(sender.send_call_session_accept).toHaveBeenCalledWith(
       "alice@waddle.test/desktop", // peer_full_jid
-      "alice@waddle.test/desktop", // initiator_full_jid
       "bob@waddle.test/web-1",     // responder_full_jid
       "c9",
       true,
@@ -127,7 +197,7 @@ describe("handleCallEventSideEffect", () => {
     const sender = mockSender();
     const prev: CallState = {
       phase: "incoming",
-      from: "alice@waddle.test",
+      from: "alice@waddle.test/desktop",
       sid: "c9",
       media: audioOnly,
     };
@@ -140,7 +210,6 @@ describe("handleCallEventSideEffect", () => {
     };
     await handleCallEventSideEffect(event, prev, sender, "bob@waddle.test/web-1");
     expect(sender.send_call_session_accept).toHaveBeenCalledWith(
-      "alice@waddle.test/desktop",
       "alice@waddle.test/desktop",
       "bob@waddle.test/web-1",
       "c9",
@@ -167,7 +236,7 @@ describe("handleCallEventSideEffect", () => {
     const sender = mockSender();
     const prev: CallState = {
       phase: "incoming",
-      from: "alice@waddle.test",
+      from: "alice@waddle.test/desktop",
       sid: "c9",
       media: audioVideo,
     };
@@ -190,19 +259,114 @@ describe("handleCallEventSideEffect", () => {
       sid: "c-existing",
       media: audioVideo,
       join,
+      kind: "dm",
     };
     const event: CallEvent = {
       kind: "propose",
-      from: "dave@waddle.test",
+      from: "dave@waddle.test/phone",
       sid: "c-new",
       media: audioVideo,
     };
     await handleCallEventSideEffect(event, prev, sender, "alice@waddle.test/web-1");
     expect(sender.send_call_reject).toHaveBeenCalledTimes(1);
-    expect(sender.send_call_reject).toHaveBeenCalledWith("dave@waddle.test", "c-new");
+    expect(sender.send_call_reject).toHaveBeenCalledWith("dave@waddle.test/phone", "c-new");
   });
 
-  test("busy-reject: propose while outgoing fires reject", async () => {
+  test("existing-session tie-break: same-peer active propose finishes old sid and proceeds new sid", async () => {
+    const sender = mockSender();
+    const prev: CallState = {
+      phase: "active",
+      peer: "dave@waddle.test/desktop",
+      sid: "old-session",
+      media: audioVideo,
+      join,
+      kind: "dm",
+      initiator: "dave@waddle.test/desktop",
+    };
+    const event: CallEvent = {
+      kind: "propose",
+      from: "dave@waddle.test/tablet",
+      sid: "new-session",
+      media: audioVideo,
+    };
+    $callState.set(prev);
+    await handleCallEventSideEffect(event, prev, sender, "alice@waddle.test/web-1");
+    expect(sender.send_call_finish_migrated).toHaveBeenCalledWith(
+      "dave@waddle.test/tablet",
+      "old-session",
+      "new-session",
+    );
+    expect(sender.send_call_proceed).toHaveBeenCalledWith(
+      "dave@waddle.test/tablet",
+      "new-session",
+    );
+    expect($callState.get()).toEqual({
+      phase: "incoming",
+      from: "dave@waddle.test/tablet",
+      sid: "new-session",
+      media: audioVideo,
+    });
+    clearCallState();
+  });
+
+  test("tie-break: lower inbound propose retracts our outgoing session and becomes incoming", async () => {
+    const sender = mockSender();
+    const prev: CallState = {
+      phase: "outgoing",
+      to: "dave@waddle.test",
+      sid: "z-outgoing",
+      media: audioVideo,
+    };
+    const event: CallEvent = {
+      kind: "propose",
+      from: "dave@waddle.test/phone",
+      sid: "a-incoming",
+      media: audioVideo,
+    };
+    $callState.set(prev);
+    await handleCallEventSideEffect(event, prev, sender, "alice@waddle.test/web-1");
+    expect(sender.send_call_retract_tie_break).toHaveBeenCalledTimes(1);
+    expect(sender.send_call_retract_tie_break).toHaveBeenCalledWith(
+      "dave@waddle.test/phone",
+      "z-outgoing",
+    );
+    expect(sender.send_call_reject_tie_break).not.toHaveBeenCalled();
+    expect($callState.get()).toEqual({
+      phase: "incoming",
+      from: "dave@waddle.test/phone",
+      sid: "a-incoming",
+      media: audioVideo,
+    });
+    clearCallState();
+  });
+
+  test("tie-break: higher inbound propose is rejected and outgoing state stays intact", async () => {
+    const sender = mockSender();
+    const prev: CallState = {
+      phase: "outgoing",
+      to: "dave@waddle.test",
+      sid: "a-outgoing",
+      media: audioVideo,
+    };
+    const event: CallEvent = {
+      kind: "propose",
+      from: "dave@waddle.test/phone",
+      sid: "z-incoming",
+      media: audioVideo,
+    };
+    $callState.set(prev);
+    await handleCallEventSideEffect(event, prev, sender, "alice@waddle.test/web-1");
+    expect(sender.send_call_reject_tie_break).toHaveBeenCalledTimes(1);
+    expect(sender.send_call_reject_tie_break).toHaveBeenCalledWith(
+      "dave@waddle.test/phone",
+      "z-incoming",
+    );
+    expect(sender.send_call_retract_tie_break).not.toHaveBeenCalled();
+    expect($callState.get()).toBe(prev);
+    clearCallState();
+  });
+
+  test("busy-reject: propose while outgoing against a different bare JID fires plain reject", async () => {
     const sender = mockSender();
     const prev: CallState = {
       phase: "outgoing",
@@ -212,12 +376,13 @@ describe("handleCallEventSideEffect", () => {
     };
     const event: CallEvent = {
       kind: "propose",
-      from: "dave@waddle.test",
+      from: "dave@waddle.test/phone",
       sid: "c-new",
       media: audioVideo,
     };
     await handleCallEventSideEffect(event, prev, sender, "alice@waddle.test/web-1");
     expect(sender.send_call_reject).toHaveBeenCalledTimes(1);
+    expect(sender.send_call_reject_tie_break).not.toHaveBeenCalled();
   });
 
   test("busy-reject: propose while idle does NOT fire reject", async () => {
@@ -225,7 +390,7 @@ describe("handleCallEventSideEffect", () => {
     const prev: CallState = { phase: "idle" };
     const event: CallEvent = {
       kind: "propose",
-      from: "dave@waddle.test",
+      from: "dave@waddle.test/phone",
       sid: "c-new",
       media: audioVideo,
     };
@@ -238,7 +403,7 @@ describe("handleCallEventSideEffect", () => {
     const prev: CallState = { phase: "ended", sid: "c-old", reason: "success" };
     const event: CallEvent = {
       kind: "propose",
-      from: "dave@waddle.test",
+      from: "dave@waddle.test/phone",
       sid: "c-new",
       media: audioVideo,
     };

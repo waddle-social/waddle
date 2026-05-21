@@ -32,8 +32,9 @@ async function startCall(media: CallMedia): Promise<void> {
   if (inCall.value) return;
   const sender = getSender();
   if (!sender) return;
+  const initiator = (connectionStore.client as unknown as { fullJid?: string } | null)?.fullJid;
   const sid = newCallSid();
-  beginOutgoingCall(props.peerBareJid, sid, media);
+  beginOutgoingCall(props.peerBareJid, sid, media, initiator);
   try {
     await outboundCalls.propose(sender, props.peerBareJid, sid, media);
     // Arm the auto-retract once the propose is on the wire — if we

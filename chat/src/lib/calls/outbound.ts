@@ -8,10 +8,13 @@ import type { CallMedia } from "./types";
  */
 export type CallWireSender = {
   send_call_propose?: (peer_bare_jid: string, sid: string, audio: boolean, video: boolean) => Promise<unknown>;
-  send_call_proceed?: (peer_bare_jid: string, sid: string) => Promise<unknown>;
-  send_call_reject?: (peer_bare_jid: string, sid: string) => Promise<unknown>;
-  send_call_retract?: (peer_bare_jid: string, sid: string) => Promise<unknown>;
-  send_call_finish?: (peer_bare_jid: string, sid: string) => Promise<unknown>;
+  send_call_proceed?: (peer_full_jid: string, sid: string) => Promise<unknown>;
+  send_call_reject?: (peer_full_jid: string, sid: string) => Promise<unknown>;
+  send_call_reject_tie_break?: (peer_full_jid: string, sid: string) => Promise<unknown>;
+  send_call_retract?: (peer_jid: string, sid: string) => Promise<unknown>;
+  send_call_retract_tie_break?: (peer_full_jid: string, sid: string) => Promise<unknown>;
+  send_call_finish?: (peer_full_jid: string, sid: string) => Promise<unknown>;
+  send_call_finish_migrated?: (peer_full_jid: string, old_sid: string, new_sid: string) => Promise<unknown>;
   send_call_session_initiate?: (
     peer_full_jid: string,
     initiator_full_jid: string,
@@ -21,7 +24,6 @@ export type CallWireSender = {
   ) => Promise<unknown>;
   send_call_session_accept?: (
     peer_full_jid: string,
-    initiator_full_jid: string,
     responder_full_jid: string,
     sid: string,
     audio: boolean,
@@ -68,24 +70,47 @@ export const outboundCalls = {
     await client.send_call_propose(peerBareJid, sid, media.audio, media.video);
   },
 
-  async proceed(client: CallWireSender, peerBareJid: string, sid: string): Promise<void> {
+  async proceed(client: CallWireSender, peerFullJid: string, sid: string): Promise<void> {
     if (!client.send_call_proceed) throw new WasmCallApiUnavailable("send_call_proceed");
-    await client.send_call_proceed(peerBareJid, sid);
+    await client.send_call_proceed(peerFullJid, sid);
   },
 
-  async reject(client: CallWireSender, peerBareJid: string, sid: string): Promise<void> {
+  async reject(client: CallWireSender, peerFullJid: string, sid: string): Promise<void> {
     if (!client.send_call_reject) throw new WasmCallApiUnavailable("send_call_reject");
-    await client.send_call_reject(peerBareJid, sid);
+    await client.send_call_reject(peerFullJid, sid);
   },
 
-  async retract(client: CallWireSender, peerBareJid: string, sid: string): Promise<void> {
+  async rejectTieBreak(client: CallWireSender, peerFullJid: string, sid: string): Promise<void> {
+    if (!client.send_call_reject_tie_break)
+      throw new WasmCallApiUnavailable("send_call_reject_tie_break");
+    await client.send_call_reject_tie_break(peerFullJid, sid);
+  },
+
+  async retract(client: CallWireSender, peerJid: string, sid: string): Promise<void> {
     if (!client.send_call_retract) throw new WasmCallApiUnavailable("send_call_retract");
-    await client.send_call_retract(peerBareJid, sid);
+    await client.send_call_retract(peerJid, sid);
   },
 
-  async finish(client: CallWireSender, peerBareJid: string, sid: string): Promise<void> {
+  async retractTieBreak(client: CallWireSender, peerFullJid: string, sid: string): Promise<void> {
+    if (!client.send_call_retract_tie_break)
+      throw new WasmCallApiUnavailable("send_call_retract_tie_break");
+    await client.send_call_retract_tie_break(peerFullJid, sid);
+  },
+
+  async finish(client: CallWireSender, peerFullJid: string, sid: string): Promise<void> {
     if (!client.send_call_finish) throw new WasmCallApiUnavailable("send_call_finish");
-    await client.send_call_finish(peerBareJid, sid);
+    await client.send_call_finish(peerFullJid, sid);
+  },
+
+  async finishMigrated(
+    client: CallWireSender,
+    peerFullJid: string,
+    oldSid: string,
+    newSid: string,
+  ): Promise<void> {
+    if (!client.send_call_finish_migrated)
+      throw new WasmCallApiUnavailable("send_call_finish_migrated");
+    await client.send_call_finish_migrated(peerFullJid, oldSid, newSid);
   },
 
   async sessionInitiate(
@@ -103,7 +128,6 @@ export const outboundCalls = {
   async sessionAccept(
     client: CallWireSender,
     peerFullJid: string,
-    initiatorFullJid: string,
     responderFullJid: string,
     sid: string,
     media: CallMedia,
@@ -112,7 +136,6 @@ export const outboundCalls = {
       throw new WasmCallApiUnavailable("send_call_session_accept");
     await client.send_call_session_accept(
       peerFullJid,
-      initiatorFullJid,
       responderFullJid,
       sid,
       media.audio,

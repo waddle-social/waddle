@@ -440,6 +440,8 @@ pub(crate) fn call_event_to_js(event: InboundCallEvent) -> WaddleCallEvent {
             }),
             join: None,
             reason: None,
+            tie_break: None,
+            migrated_to: None,
         },
         CallEventKind::Proceed => WaddleCallEvent {
             from,
@@ -448,30 +450,44 @@ pub(crate) fn call_event_to_js(event: InboundCallEvent) -> WaddleCallEvent {
             media: None,
             join: None,
             reason: None,
+            tie_break: None,
+            migrated_to: None,
         },
-        CallEventKind::Reject => WaddleCallEvent {
+        CallEventKind::Reject { reason, tie_break } => WaddleCallEvent {
             from,
             sid,
             kind: "reject",
             media: None,
             join: None,
-            reason: None,
+            reason: reason
+                .map(|r| waddle_xmpp_client::messaging::jingle_reason_wire_name(r).to_string()),
+            tie_break: Some(tie_break),
+            migrated_to: None,
         },
-        CallEventKind::Retract => WaddleCallEvent {
+        CallEventKind::Retract { reason, tie_break } => WaddleCallEvent {
             from,
             sid,
             kind: "retract",
             media: None,
             join: None,
-            reason: None,
+            reason: reason
+                .map(|r| waddle_xmpp_client::messaging::jingle_reason_wire_name(r).to_string()),
+            tie_break: Some(tie_break),
+            migrated_to: None,
         },
-        CallEventKind::Finish => WaddleCallEvent {
+        CallEventKind::Finish {
+            reason,
+            migrated_to,
+        } => WaddleCallEvent {
             from,
             sid,
             kind: "finish",
             media: None,
             join: None,
-            reason: None,
+            reason: reason
+                .map(|r| waddle_xmpp_client::messaging::jingle_reason_wire_name(r).to_string()),
+            tie_break: None,
+            migrated_to: migrated_to.map(|sid| sid.0),
         },
         CallEventKind::SessionInitiate { join, media } => WaddleCallEvent {
             from,
@@ -488,6 +504,8 @@ pub(crate) fn call_event_to_js(event: InboundCallEvent) -> WaddleCallEvent {
                 token: join.token,
             }),
             reason: None,
+            tie_break: None,
+            migrated_to: None,
         },
         CallEventKind::SessionAccept { join, media } => WaddleCallEvent {
             from,
@@ -504,6 +522,8 @@ pub(crate) fn call_event_to_js(event: InboundCallEvent) -> WaddleCallEvent {
                 token: join.token,
             }),
             reason: None,
+            tie_break: None,
+            migrated_to: None,
         },
         CallEventKind::SessionTerminate { reason } => WaddleCallEvent {
             from,
@@ -518,6 +538,8 @@ pub(crate) fn call_event_to_js(event: InboundCallEvent) -> WaddleCallEvent {
             // not a free-form passthrough.
             reason: reason
                 .map(|r| waddle_xmpp_client::messaging::jingle_reason_wire_name(r).to_string()),
+            tie_break: None,
+            migrated_to: None,
         },
     }
 }
@@ -584,6 +606,21 @@ mod inbound_to_js_tests {
     use super::*;
     use minidom::Element;
 
+    fn sid(value: &str) -> messaging::SessionId {
+        messaging::SessionId(value.to_string())
+    }
+
+    fn parse_jmi(jmi: Element) -> messaging::InboundCallEvent {
+        let stanza = Element::builder("message", "jabber:client")
+            .attr(
+                minidom::rxml::xml_ncname!("from").to_owned(),
+                "alice@waddle.test/desktop",
+            )
+            .append(jmi)
+            .build();
+        messaging::parse_call_event(&stanza).expect("JMI event parses")
+    }
+
     fn parse_message_element(xml: &str) -> InboundMessage {
         let el: Element = xml.parse().expect("invalid XML");
         match messaging::parse(&el).expect("expected message") {
@@ -595,6 +632,42 @@ mod inbound_to_js_tests {
     fn parse_mam_archived(xml: &str) -> waddle_xmpp_client::ArchivedMessage {
         let el: Element = xml.parse().expect("invalid XML");
         waddle_xmpp_client::mam::parse_mam_result(&el).expect("expected MAM result")
+    }
+
+    #[test]
+    fn call_event_to_js_preserves_jmi_tie_break_metadata() {
+        let reject = call_event_to_js(parse_jmi(messaging::build_reject_with_options(
+            &sid("c1"),
+            Some(messaging::JingleReason::Expired),
+            true,
+        )));
+        assert_eq!(reject.kind, "reject");
+        assert_eq!(reject.reason.as_deref(), Some("expired"));
+        assert_eq!(reject.tie_break, Some(true));
+        assert_eq!(reject.migrated_to, None);
+
+        let retract = call_event_to_js(parse_jmi(messaging::build_retract_with_options(
+            &sid("c2"),
+            Some(messaging::JingleReason::Expired),
+            true,
+        )));
+        assert_eq!(retract.kind, "retract");
+        assert_eq!(retract.reason.as_deref(), Some("expired"));
+        assert_eq!(retract.tie_break, Some(true));
+        assert_eq!(retract.migrated_to, None);
+    }
+
+    #[test]
+    fn call_event_to_js_preserves_finish_migration_metadata() {
+        let finish = call_event_to_js(parse_jmi(messaging::build_finish_migrated(
+            &sid("old"),
+            messaging::JingleReason::Expired,
+            &sid("new"),
+        )));
+        assert_eq!(finish.kind, "finish");
+        assert_eq!(finish.reason.as_deref(), Some("expired"));
+        assert_eq!(finish.tie_break, None);
+        assert_eq!(finish.migrated_to.as_deref(), Some("new"));
     }
 
     #[test]

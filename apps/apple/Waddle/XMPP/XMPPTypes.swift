@@ -317,9 +317,9 @@ enum XMPPJingleReason: Sendable, Equatable {
 enum XMPPCallEventKind: Sendable, Equatable {
     case propose(media: XMPPCallMedia)
     case proceed
-    case reject
-    case retract
-    case finish
+    case reject(reason: XMPPJingleReason?, tieBreak: Bool)
+    case retract(reason: XMPPJingleReason?, tieBreak: Bool)
+    case finish(reason: XMPPJingleReason?, migratedTo: String?)
     case sessionInitiate(join: XMPPLiveKitJoin, media: XMPPCallMedia)
     case sessionAccept(join: XMPPLiveKitJoin, media: XMPPCallMedia)
     case sessionTerminate(reason: XMPPJingleReason?)

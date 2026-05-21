@@ -25,8 +25,8 @@ mod tests;
 
 pub use admin_handlers::{ApplyAdminItems, GetAdminContext, IsOwner};
 pub use occupancy_handlers::{
-    JoinWithAffiliation, LeaveByRealJid, MujiPresenceUpdateOutcome, PingSelfCheck,
-    PresenceUpdateData, ReconcileChannelBackedRoom, UpsertMujiPresence,
+    ClearMujiPresence, JoinWithAffiliation, LeaveByRealJid, MujiPresenceUpdateOutcome,
+    PingSelfCheck, PresenceUpdateData, ReconcileChannelBackedRoom, UpsertMujiPresence,
 };
 pub use snapshot_handlers::{
     BuildGroupchatBroadcast, GetNicknameGeneration, GetRoomSnapshot, GroupchatBroadcastResult,
@@ -87,9 +87,12 @@ pub struct JoinOutcome {
 pub struct LeaveOutcome {
     pub nick: String,
     pub affiliation: Affiliation,
+    pub role: Role,
     pub leaving_room_jid: FullJid,
     pub remaining_occupants: Vec<FullJid>,
     pub removed_last_session: bool,
+    pub cleared_muji_state: bool,
+    pub remaining_nick_real_jid: Option<FullJid>,
     pub occupant_count: usize,
     /// Mirrors `MucRoom.config.persistent`. Surfaced so the leave
     /// caller can decide whether to evict the room's `RoomActor` +

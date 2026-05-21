@@ -34,7 +34,10 @@
 
 use jid::{BareJid, FullJid};
 use tracing::{debug, warn};
-use waddle_xmpp::muc::{build_occupant_presence_update, room_actor::UpsertMujiPresence};
+use waddle_xmpp::muc::{
+    build_occupant_presence_update,
+    room_actor::{ClearMujiPresence, UpsertMujiPresence},
+};
 use waddle_xmpp::xep::xep0272::{find_muji, Muji, NS_MUJI};
 use waddle_xmpp::xep::xep0421::OccupantIdentity;
 use waddle_xmpp::Stanza;
@@ -73,32 +76,46 @@ pub(super) async fn try_handle_muc_presence_update(
     let actor = get_room_actor(state, room_jid).await?;
     let muji = extract_muji(incoming);
 
-    // No `<muji/>` extension AND the client isn't otherwise updating
-    // a payload we propagate — fall through to the join path. Today
-    // the only payload we explicitly forward is the Muji extension;
-    // generic `<show/>` / `<status/>` updates still re-run join,
-    // which is wasteful but pre-existing behavior. Scoped fix.
-    let muji = muji?;
-
-    let outcome = match actor
-        .ask(UpsertMujiPresence {
-            sender_jid: sender_jid.clone(),
-            muji,
-        })
-        .await
-    {
-        Ok(Some(outcome)) => outcome,
-        Ok(None) => return None,
-        Err(error) => {
-            warn!(
-                room = %room_jid,
-                nick = %nick,
-                sender = %sender_jid,
-                error = ?error,
-                "Failed to upsert MUC Muji presence; falling back to join path"
-            );
-            return None;
-        }
+    let outcome = match muji {
+        Some(muji) => match actor
+            .ask(UpsertMujiPresence {
+                sender_jid: sender_jid.clone(),
+                muji,
+            })
+            .await
+        {
+            Ok(Some(outcome)) => outcome,
+            Ok(None) => return None,
+            Err(error) => {
+                warn!(
+                    room = %room_jid,
+                    nick = %nick,
+                    sender = %sender_jid,
+                    error = ?error,
+                    "Failed to upsert MUC Muji presence; falling back to join path"
+                );
+                return None;
+            }
+        },
+        None => match actor
+            .ask(ClearMujiPresence {
+                sender_jid: sender_jid.clone(),
+            })
+            .await
+        {
+            Ok(Some(outcome)) => outcome,
+            Ok(None) => return None,
+            Err(error) => {
+                warn!(
+                    room = %room_jid,
+                    nick = %nick,
+                    sender = %sender_jid,
+                    error = ?error,
+                    "Failed to clear MUC Muji presence; falling back to join path"
+                );
+                return None;
+            }
+        },
     };
 
     // XEP-0045 §7.7: a user may change their *own* in-room presence

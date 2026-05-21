@@ -981,6 +981,248 @@ async fn cleanup_muc_presence_broadcasts_unavailable_to_remaining_occupants() {
     assert_eq!(presence.attr("to"), Some(expected_to.as_str()));
 }
 
+fn active_muji() -> waddle_xmpp::xep::xep0272::Muji {
+    use waddle_xmpp::xep::xep0167::MediaKind;
+    use waddle_xmpp::xep::xep0272::{Creator, Muji, MujiContent};
+    Muji::with_contents(vec![MujiContent::new(
+        "audio",
+        Creator::Initiator,
+        MediaKind::Audio,
+    )])
+}
+
+fn muc_presence_to(room_jid: &BareJid, nick: &str) -> xmpp_parsers::presence::Presence {
+    let mut presence = xmpp_parsers::presence::Presence::new(xmpp_parsers::presence::Type::None);
+    presence.to = Some(
+        room_jid
+            .clone()
+            .with_resource_str(nick)
+            .expect("valid room nick")
+            .into(),
+    );
+    presence
+}
+
+#[tokio::test]
+async fn available_presence_without_muji_clears_existing_muji_state() {
+    let state = create_test_websocket_state().await;
+    let owner_session = create_test_server_owner_session(state.as_ref(), "alice").await;
+    let room_jid: BareJid = "muji-clear-channel@muc.example.com"
+        .parse()
+        .expect("room jid");
+    let alice: FullJid = "alice@example.com/web".parse().expect("alice jid");
+    let bob: FullJid = "bob@example.com/desktop".parse().expect("bob jid");
+
+    let (bob_tx, mut bob_rx) = mpsc::channel::<OutboundStanza>(8);
+    state
+        .deps
+        .protocol
+        .connection_registry
+        .register(bob.clone(), bob_tx);
+
+    let _ = handle_muc_join(
+        state.as_ref(),
+        "example.com",
+        &room_jid,
+        &alice,
+        "alice",
+        None,
+        &Some(owner_session.clone()),
+    )
+    .await;
+    let _ = handle_muc_join(
+        state.as_ref(),
+        "example.com",
+        &room_jid,
+        &bob,
+        "bob",
+        None,
+        &None,
+    )
+    .await;
+    while bob_rx.try_recv().is_ok() {}
+
+    let alice_phase = waddle_xmpp::protocol::ConnectionPhase::ready(alice.clone(), false);
+    let mut active = muc_presence_to(&room_jid, "alice");
+    active.payloads.push(active_muji().to_element());
+    let _ = handlers::presence::handle_presence(
+        active,
+        "example.com",
+        "muc.example.com",
+        state.as_ref(),
+        &alice_phase,
+        &Some(owner_session),
+    )
+    .await;
+    while bob_rx.try_recv().is_ok() {}
+
+    let plain_available = muc_presence_to(&room_jid, "alice");
+    let responses = handlers::presence::handle_presence(
+        plain_available,
+        "example.com",
+        "muc.example.com",
+        state.as_ref(),
+        &alice_phase,
+        &None,
+    )
+    .await;
+    assert_eq!(responses.len(), 1, "sender receives reflected clear");
+    let self_clear = Element::from_str(&responses[0]).expect("self clear XML");
+    assert_eq!(
+        self_clear.attr("from"),
+        Some(format!("{room_jid}/alice").as_str())
+    );
+    assert!(
+        self_clear
+            .get_child("muji", waddle_xmpp::xep::xep0272::NS_MUJI)
+            .is_none(),
+        "self reflection must omit <muji/> after clear"
+    );
+
+    let broadcast = bob_rx
+        .try_recv()
+        .expect("Bob must receive canonical non-Muji presence");
+    let xml = stanza_to_xml(&broadcast.stanza);
+    let presence = Element::from_str(&xml).expect("broadcast presence XML");
+    assert_eq!(presence.name(), "presence");
+    assert_eq!(presence.attr("type"), None);
+    assert_eq!(
+        presence.attr("from"),
+        Some(format!("{room_jid}/alice").as_str())
+    );
+    assert_eq!(presence.attr("to"), Some(bob.to_string().as_str()));
+    assert!(
+        presence
+            .get_child("muji", waddle_xmpp::xep::xep0272::NS_MUJI)
+            .is_none(),
+        "clear broadcast must not carry <muji/>"
+    );
+
+    let carol: FullJid = "carol@example.com/web".parse().expect("carol jid");
+    let replay = handle_muc_join(
+        state.as_ref(),
+        "example.com",
+        &room_jid,
+        &carol,
+        "carol",
+        None,
+        &None,
+    )
+    .await;
+    let alice_replay = replay
+        .iter()
+        .filter_map(|xml| Element::from_str(xml).ok())
+        .find(|element| element.attr("from") == Some(format!("{room_jid}/alice").as_str()))
+        .expect("carol receives alice replay");
+    assert!(
+        alice_replay
+            .get_child("muji", waddle_xmpp::xep::xep0272::NS_MUJI)
+            .is_none(),
+        "late join replay must not include stale Muji"
+    );
+}
+
+#[tokio::test]
+async fn same_nick_originator_leave_broadcasts_muji_clear() {
+    let state = create_test_websocket_state().await;
+    let owner_session = create_test_server_owner_session(state.as_ref(), "alice").await;
+    let room_jid: BareJid = "same-nick-muji-clear@muc.example.com"
+        .parse()
+        .expect("room jid");
+    let desktop: FullJid = "alice@example.com/desktop".parse().expect("desktop jid");
+    let mobile: FullJid = "alice@example.com/mobile".parse().expect("mobile jid");
+    let bob: FullJid = "bob@example.com/desktop".parse().expect("bob jid");
+
+    let (mobile_tx, mut mobile_rx) = mpsc::channel::<OutboundStanza>(8);
+    state
+        .deps
+        .protocol
+        .connection_registry
+        .register(mobile.clone(), mobile_tx);
+    let (bob_tx, mut bob_rx) = mpsc::channel::<OutboundStanza>(8);
+    state
+        .deps
+        .protocol
+        .connection_registry
+        .register(bob.clone(), bob_tx);
+
+    let _ = handle_muc_join(
+        state.as_ref(),
+        "example.com",
+        &room_jid,
+        &desktop,
+        "alice",
+        None,
+        &Some(owner_session.clone()),
+    )
+    .await;
+    let _ = handle_muc_join(
+        state.as_ref(),
+        "example.com",
+        &room_jid,
+        &mobile,
+        "alice",
+        None,
+        &None,
+    )
+    .await;
+    let _ = handle_muc_join(
+        state.as_ref(),
+        "example.com",
+        &room_jid,
+        &bob,
+        "bob",
+        None,
+        &None,
+    )
+    .await;
+    while mobile_rx.try_recv().is_ok() {}
+    while bob_rx.try_recv().is_ok() {}
+
+    let desktop_phase = waddle_xmpp::protocol::ConnectionPhase::ready(desktop.clone(), false);
+    let mut active = muc_presence_to(&room_jid, "alice");
+    active.payloads.push(active_muji().to_element());
+    let _ = handlers::presence::handle_presence(
+        active,
+        "example.com",
+        "muc.example.com",
+        state.as_ref(),
+        &desktop_phase,
+        &Some(owner_session),
+    )
+    .await;
+    while mobile_rx.try_recv().is_ok() {}
+    while bob_rx.try_recv().is_ok() {}
+
+    let _ = handle_muc_leave(state.as_ref(), &room_jid, &desktop, "alice").await;
+
+    for (recipient, rx) in [(&mobile, &mut mobile_rx), (&bob, &mut bob_rx)] {
+        let broadcast = rx
+            .try_recv()
+            .unwrap_or_else(|_| panic!("{recipient} must receive Muji clear"));
+        let xml = stanza_to_xml(&broadcast.stanza);
+        let presence = Element::from_str(&xml).expect("clear presence XML");
+        assert_eq!(presence.name(), "presence");
+        assert_eq!(presence.attr("type"), None);
+        assert_eq!(
+            presence.attr("from"),
+            Some(format!("{room_jid}/alice").as_str())
+        );
+        assert_eq!(presence.attr("to"), Some(recipient.to_string().as_str()));
+        assert!(
+            presence
+                .get_child("muji", waddle_xmpp::xep::xep0272::NS_MUJI)
+                .is_none(),
+            "partial-resource clear broadcast must not carry <muji/>"
+        );
+    }
+
+    let room = snapshot_room(state.as_ref(), &room_jid).await.room;
+    assert_eq!(room.find_nick_by_real_jid(&mobile), Some("alice"));
+    assert!(room.find_nick_by_real_jid(&desktop).is_none());
+    assert!(room.muji_for_nick("alice").is_none());
+}
+
 /// XEP-0045 slice-2b ingest: a successful `handle_muc_join` MUST
 /// record `(sender_bare, room)` activity in the
 /// `notification_activity` projection so the T1 XEP-0513 `<active/>`

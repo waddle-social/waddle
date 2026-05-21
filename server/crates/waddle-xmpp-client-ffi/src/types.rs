@@ -310,11 +310,21 @@ pub enum WaddleCallEventKind {
     /// XEP-0353 §5.1.2 `<proceed/>` — peer is accepting the call.
     Proceed,
     /// XEP-0353 §5.1.3 `<reject/>` — peer declined the call.
-    Reject,
+    Reject {
+        reason: Option<WaddleJingleReason>,
+        tie_break: bool,
+    },
     /// XEP-0353 §5.1.4 `<retract/>` — caller cancelled before answer.
-    Retract,
-    /// `<finish/>` Waddle extension — call ended cleanly.
-    Finish,
+    Retract {
+        reason: Option<WaddleJingleReason>,
+        tie_break: bool,
+    },
+    /// XEP-0353 `<finish/>` — call ended cleanly, or migrated to a
+    /// replacement session in the existing-session tie-break case.
+    Finish {
+        reason: Option<WaddleJingleReason>,
+        migrated_to: Option<String>,
+    },
     /// XEP-0166 §6.4 `session-initiate` with a populated LiveKit
     /// transport. The Swift app uses `join` to connect to the room.
     SessionInitiate {

@@ -452,12 +452,12 @@ private func makeCallEvent(_ event: WaddleCallEvent) -> XMPPCallEvent {
             return .propose(media: makeCallMedia(media))
         case .proceed:
             return .proceed
-        case .reject:
-            return .reject
-        case .retract:
-            return .retract
-        case .finish:
-            return .finish
+        case let .reject(reason, tieBreak):
+            return .reject(reason: reason.map(makeJingleReason), tieBreak: tieBreak)
+        case let .retract(reason, tieBreak):
+            return .retract(reason: reason.map(makeJingleReason), tieBreak: tieBreak)
+        case let .finish(reason, migratedTo):
+            return .finish(reason: reason.map(makeJingleReason), migratedTo: migratedTo)
         case let .sessionInitiate(join, media):
             return .sessionInitiate(join: makeLiveKitJoin(join), media: makeCallMedia(media))
         case let .sessionAccept(join, media):

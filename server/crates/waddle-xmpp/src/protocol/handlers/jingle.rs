@@ -254,16 +254,21 @@ impl JingleHandler {
         };
         let peer_identity = Identity::from_jid(peer_full);
 
-        // Resolve the call's initiator JID. On session-initiate the
-        // initiator MUST be the authenticated session (else a peer
-        // could spoof a call as someone else, leaking tokens scoped
-        // to a victim's identity). On session-accept the initiator
-        // attribute names the original caller and the authenticated
-        // session is the responder.
-        let initiator_bare = match resolve_initiator(&jingle, &jingle.action, ctx) {
-            Ok(bare) => bare,
-            Err(e) => return e.into_reply(iq),
+        // Resolve the call initiator. `session-initiate` is scoped
+        // to the authenticated sender. `session-accept` is addressed
+        // back to the initiator, and XEP-0166 says non-initiate
+        // actions SHOULD NOT carry `initiator`, so derive from `to`.
+        let initiator_bare = match jingle.action {
+            Action::SessionInitiate => match resolve_initiator(&jingle, ctx) {
+                Ok(bare) => bare,
+                Err(e) => return e.into_reply(iq),
+            },
+            Action::SessionAccept => peer.to_bare(),
+            _ => ctx.full_jid.to_bare(),
         };
+        if let Err(e) = validate_responder(&jingle, &jingle.action, ctx) {
+            return e.into_reply(iq);
+        }
 
         // Namespace the LiveKit room by the initiator's bare JID so
         // an attacker can't pick a sid that collides with a victim's
@@ -284,16 +289,11 @@ impl JingleHandler {
             match rewrite_content_transport(content, &call_id, &peer_identity, &*self.sfu) {
                 Ok(()) => {}
                 Err(reason) => {
-                    // 1:1 P2P path — the "responder" perspective of
-                    // the session-terminate is the authenticated
-                    // session (we're the server, but for the
-                    // requester the rejection comes from where the
-                    // call was addressed). XEP-0166 §10.2 doesn't
-                    // strictly mandate the `from` JID; using the
-                    // authenticated full JID keeps the wire
-                    // self-consistent with the rest of the 1:1
-                    // forwarding flow.
-                    return reason.into_error_reply(iq, &jingle.sid, &ctx.full_jid.clone().into());
+                    // 1:1 P2P path: the requester addressed the
+                    // session-initiate to `peer`, so the Jingle-level
+                    // rejection must appear from that peer resource,
+                    // not from the requester back to itself.
+                    return reason.into_error_reply(iq, &jingle.sid, &peer);
                 }
             }
         }
@@ -358,15 +358,14 @@ impl JingleHandler {
             );
         }
 
-        // XEP-0166 §7.1 spoofing defense (same as the 1:1 path):
-        // the `initiator` attribute on `<jingle/>` must match the
-        // authenticated session. Otherwise charlie's session could
-        // mint a token claiming to be alice. Server-side we use
-        // `ctx.full_jid` for the LiveKit identity, but a wrong
-        // initiator attribute is still non-conformant and we reject
-        // rather than silently accept.
-        if let Err(e) = resolve_initiator(&jingle, &jingle.action, ctx) {
-            return e.into_reply(iq);
+        if jingle.action == Action::SessionInitiate {
+            // XEP-0166 §7.1 spoofing defense: when present on
+            // session-initiate, `initiator` must match the
+            // authenticated session. Non-initiate actions should not
+            // carry it, so we ignore it there per the XEP.
+            if let Err(e) = resolve_muji_initiator(&jingle, ctx) {
+                return e.into_reply(iq);
+            }
         }
 
         let Some(room_jid) = muji.room.clone() else {
@@ -489,12 +488,6 @@ impl JingleHandler {
                 minidom::rxml::xml_ncname!("responder").to_owned(),
                 responder.to_string(),
             );
-        if let Some(initiator) = &jingle.initiator {
-            jingle_builder = jingle_builder.attr(
-                minidom::rxml::xml_ncname!("initiator").to_owned(),
-                initiator.to_string(),
-            );
-        }
         // 1. `<muji room='…'/>` first per XEP-0272 §Joining example.
         jingle_builder = jingle_builder.append(Muji::for_room(room_jid).to_element());
         // 2. XEP-0298 §3.1 focus marker — also a direct child of
@@ -567,14 +560,30 @@ impl JingleHandler {
         peer: Jid,
         ctx: &StanzaContext<'_>,
     ) -> Vec<OutboundEvent> {
-        let initiator_bare = match resolve_initiator(&jingle, &jingle.action, ctx) {
-            Ok(bare) => bare,
-            Err(e) => return e.into_reply(iq),
+        let Ok(peer_full) = peer.clone().try_into_full() else {
+            return error_reply(
+                iq,
+                DefinedCondition::BadRequest,
+                "Jingle 'to' must be a full JID (resource required)",
+            );
         };
-        if let Ok(call_id) = scoped_call_id(&initiator_bare, &jingle.sid.0) {
+        let ctx_bare = ctx.full_jid.to_bare();
+        let peer_bare = peer.to_bare();
+        let sender_identity = Identity::from_jid(ctx.full_jid.clone());
+        let peer_identity = Identity::from_jid(peer_full);
+        for initiator_bare in [ctx_bare, peer_bare] {
+            let Ok(call_id) = scoped_call_id(&initiator_bare, &jingle.sid.0) else {
+                continue;
+            };
+            if !self.sfu.has_call_participant(&call_id, &sender_identity) {
+                continue;
+            }
             let _ = self
                 .sfu
-                .unregister_call_participant(&call_id, &Identity::from_jid(ctx.full_jid.clone()));
+                .unregister_call_participant(&call_id, &sender_identity);
+            let _ = self
+                .sfu
+                .unregister_call_participant(&call_id, &peer_identity);
         }
         self.route_unchanged(iq, peer, ctx)
     }
@@ -600,9 +609,10 @@ impl JingleHandler {
     }
 }
 
+#[derive(Debug)]
 enum InitiatorError {
     InitiatorMismatch,
-    InitiatorMissing,
+    ResponderMismatch,
 }
 
 impl InitiatorError {
@@ -613,10 +623,10 @@ impl InitiatorError {
                 DefinedCondition::Forbidden,
                 "Jingle initiator must match the authenticated session",
             ),
-            Self::InitiatorMissing => error_reply(
+            Self::ResponderMismatch => error_reply(
                 iq,
-                DefinedCondition::BadRequest,
-                "Jingle action requires the 'initiator' attribute",
+                DefinedCondition::Forbidden,
+                "Jingle responder must match the authenticated session",
             ),
         }
     }
@@ -625,31 +635,48 @@ impl InitiatorError {
 /// Verify the Jingle stanza's `initiator` attribute is consistent
 /// with the authenticated session and return the initiator's bare
 /// JID used to derive the SFU call-id.
-fn resolve_initiator(
+fn resolve_initiator(jingle: &Jingle, ctx: &StanzaContext<'_>) -> Result<BareJid, InitiatorError> {
+    let ctx_bare = ctx.full_jid.to_bare();
+    // The initiator attribute MAY be present (XEP-0166 §7.1); if so
+    // it must name the authenticated full JID. A same-bare but
+    // different-resource initiator would let alice/mobile mint or
+    // forward a call as alice/desktop.
+    let authenticated = Jid::from(ctx.full_jid.clone());
+    match jingle.initiator.as_ref() {
+        Some(declared) if declared != &authenticated => Err(InitiatorError::InitiatorMismatch),
+        _ => Ok(ctx_bare),
+    }
+}
+
+fn validate_responder(
     jingle: &Jingle,
     action: &Action,
     ctx: &StanzaContext<'_>,
+) -> Result<(), InitiatorError> {
+    if *action != Action::SessionAccept {
+        return Ok(());
+    }
+    let authenticated = Jid::from(ctx.full_jid.clone());
+    match jingle.responder.as_ref() {
+        Some(declared) if declared == &authenticated => Ok(()),
+        Some(_) => Err(InitiatorError::ResponderMismatch),
+        None => Ok(()),
+    }
+}
+
+/// Muji uses the same XEP-0166 initiator rule as 1:1 Jingle when
+/// the attribute is present: it must name the authenticated full
+/// JID. The attribute is still optional on session-initiate, so an
+/// omitted value resolves to the authenticated session.
+fn resolve_muji_initiator(
+    jingle: &Jingle,
+    ctx: &StanzaContext<'_>,
 ) -> Result<BareJid, InitiatorError> {
-    let ctx_bare = ctx.full_jid.to_bare();
-    match action {
-        Action::SessionInitiate => {
-            // The initiator attribute MAY be present (XEP-0166 §7.1);
-            // if so it must name the authenticated session.
-            match jingle.initiator.as_ref().map(|j| j.to_bare()) {
-                Some(declared) if declared != ctx_bare => Err(InitiatorError::InitiatorMismatch),
-                _ => Ok(ctx_bare),
-            }
-        }
-        _ => {
-            // Non-initiate actions MUST identify the initiator so
-            // the server can derive the same scoped call-id used on
-            // the original session-initiate.
-            jingle
-                .initiator
-                .as_ref()
-                .map(|j| j.to_bare())
-                .ok_or(InitiatorError::InitiatorMissing)
-        }
+    let ctx_full = Jid::from(ctx.full_jid.clone());
+    match jingle.initiator.as_ref() {
+        Some(declared) if declared == &ctx_full => Ok(ctx.full_jid.to_bare()),
+        Some(_) => Err(InitiatorError::InitiatorMismatch),
+        None => Ok(ctx.full_jid.to_bare()),
     }
 }
 
@@ -807,7 +834,7 @@ mod tests {
     };
     use xmpp_parsers::jingle::{Content, ContentId, Creator, SessionId};
 
-    fn fixture_sfu() -> Arc<dyn SfuService> {
+    fn fixture_livekit_sfu() -> Arc<LiveKitSfu> {
         let cfg = SfuConfig {
             api_key: ApiKey::new("APIxxxxxxxx"),
             api_secret: ApiSecret::from_text("super-secret-secret-32-bytes-min")
@@ -821,6 +848,10 @@ mod tests {
             turn_ttl: Duration::seconds(3600),
         };
         Arc::new(LiveKitSfu::new(cfg))
+    }
+
+    fn fixture_sfu() -> Arc<dyn SfuService> {
+        fixture_livekit_sfu()
     }
 
     fn test_ctx_jid() -> FullJid {
@@ -850,6 +881,40 @@ mod tests {
             to: Some(responder.parse().unwrap()),
             id: "i1".into(),
             payload: jingle.into(),
+        }
+    }
+
+    fn session_accept_iq(responder: &str, to: &str, sid: &str) -> Iq {
+        let mut content = Content::new(Creator::Initiator, ContentId("audio".into()));
+        content.description = Some(xmpp_parsers::jingle::Description::Rtp(
+            opus_audio_description(),
+        ));
+        content.transport = Some(Transport::Unknown(
+            WaddleLiveKitTransport::Request.to_element(),
+        ));
+        let mut jingle = Jingle::new(Action::SessionAccept, SessionId(sid.into()));
+        jingle.responder = Some(responder.parse().unwrap());
+        jingle.contents.push(content);
+        Iq::Set {
+            from: Some(responder.parse().unwrap()),
+            to: Some(to.parse().unwrap()),
+            id: "a1".into(),
+            payload: jingle.into(),
+        }
+    }
+
+    fn assert_error_condition(events: &[OutboundEvent], condition: DefinedCondition) {
+        match &events[0] {
+            OutboundEvent::SendStanza(stanza) => match stanza.as_ref() {
+                Stanza::Iq(reply) => {
+                    let Iq::Error { error: err, .. } = &**reply else {
+                        panic!("expected error");
+                    };
+                    assert_eq!(err.defined_condition, condition);
+                }
+                _ => panic!("expected Iq"),
+            },
+            _ => panic!("expected SendStanza"),
         }
     }
 
@@ -944,6 +1009,101 @@ mod tests {
     }
 
     #[test]
+    fn session_initiate_with_same_bare_different_resource_is_rejected() {
+        let iq = session_initiate_iq(
+            "alice@waddle.test/mobile",
+            "bob@waddle.test/desktop",
+            "same-bare-spoof",
+        );
+        let jid = test_ctx_jid();
+        let handler = JingleHandler::new(fixture_sfu());
+        let events = handler.handle(&iq, &ctx(&jid));
+
+        match &events[0] {
+            OutboundEvent::SendStanza(stanza) => match stanza.as_ref() {
+                Stanza::Iq(reply) => {
+                    let Iq::Error { error: err, .. } = &**reply else {
+                        panic!("expected error");
+                    };
+                    assert_eq!(err.defined_condition, DefinedCondition::Forbidden);
+                }
+                _ => panic!("expected Iq"),
+            },
+            _ => panic!("expected SendStanza"),
+        }
+    }
+
+    #[test]
+    fn session_initiate_with_bare_initiator_is_rejected_on_p2p_path() {
+        let iq = session_initiate_iq(
+            "alice@waddle.test",
+            "bob@waddle.test/desktop",
+            "bare-initiator",
+        );
+        let jid = test_ctx_jid();
+        let handler = JingleHandler::new(fixture_sfu());
+        let events = handler.handle(&iq, &ctx(&jid));
+
+        match &events[0] {
+            OutboundEvent::SendStanza(stanza) => match stanza.as_ref() {
+                Stanza::Iq(reply) => {
+                    let Iq::Error { error: err, .. } = &**reply else {
+                        panic!("expected error");
+                    };
+                    assert_eq!(err.defined_condition, DefinedCondition::Forbidden);
+                }
+                _ => panic!("expected Iq"),
+            },
+            _ => panic!("expected SendStanza"),
+        }
+    }
+
+    #[test]
+    fn session_accept_with_spoofed_responder_is_rejected() {
+        let iq = session_accept_iq(
+            "charlie@waddle.test/mobile",
+            "alice@waddle.test/desktop",
+            "c1",
+        );
+        let jid: FullJid = "bob@waddle.test/phone".parse().unwrap();
+        let handler = JingleHandler::new(fixture_sfu());
+        let events = handler.handle(&iq, &ctx(&jid));
+
+        assert_error_condition(&events, DefinedCondition::Forbidden);
+    }
+
+    #[test]
+    fn session_accept_without_responder_uses_authenticated_sender() {
+        let mut iq = session_accept_iq("bob@waddle.test/phone", "alice@waddle.test/desktop", "c1");
+        let Iq::Set { payload, .. } = &mut iq else {
+            panic!("expected set");
+        };
+        let mut jingle = Jingle::try_from(payload.clone()).expect("fixture reparses");
+        jingle.responder = None;
+        *payload = jingle.into();
+        let jid: FullJid = "bob@waddle.test/phone".parse().unwrap();
+        let handler = JingleHandler::new(fixture_sfu());
+        let events = handler.handle(&iq, &ctx(&jid));
+
+        assert!(
+            events
+                .iter()
+                .any(|ev| matches!(ev, OutboundEvent::RouteToConnection { .. })),
+            "missing responder should resolve to authenticated sender and route"
+        );
+    }
+
+    #[test]
+    fn muji_session_initiate_rejects_bare_initiator() {
+        let mut jingle = Jingle::new(Action::SessionInitiate, SessionId("muji-bare".into()));
+        jingle.initiator = Some("alice@waddle.test".parse().unwrap());
+        let jid = test_ctx_jid();
+        let err = resolve_muji_initiator(&jingle, &ctx(&jid))
+            .expect_err("Muji path requires full initiator when present");
+        assert!(matches!(err, InitiatorError::InitiatorMismatch));
+    }
+
+    #[test]
     fn unsupported_transport_emits_xep_0166_section_10_2_termination() {
         // XEP-0166 §10.2: a session-initiate with an unacceptable
         // transport MUST be rejected with an IQ-result ack followed
@@ -999,9 +1159,22 @@ mod tests {
         let Stanza::Iq(term_iq) = term_stanza.as_ref() else {
             panic!("expected Iq for terminate");
         };
-        let Iq::Set { payload, .. } = &**term_iq else {
+        let Iq::Set {
+            from, to, payload, ..
+        } = &**term_iq
+        else {
             panic!("expected IQ-set for the session-terminate");
         };
+        assert_eq!(
+            from.as_ref().map(ToString::to_string),
+            Some("bob@waddle.test/desktop".to_string()),
+            "unsupported-transport terminate must come from the addressed peer"
+        );
+        assert_eq!(
+            to.as_ref().map(ToString::to_string),
+            Some("alice@waddle.test/desktop".to_string()),
+            "unsupported-transport terminate must be addressed back to requester"
+        );
         let term_jingle =
             Jingle::try_from(payload.clone()).expect("session-terminate Jingle reparses");
         assert_eq!(
@@ -1023,12 +1196,9 @@ mod tests {
 
     #[test]
     fn session_terminate_routes_to_peer_and_unregisters() {
-        let mut jingle = Jingle::new(Action::SessionTerminate, SessionId("c1".into())).set_reason(
+        let jingle = Jingle::new(Action::SessionTerminate, SessionId("c1".into())).set_reason(
             xep0166::reason_element(xmpp_parsers::jingle::Reason::Success),
         );
-        // Non-initiate actions require `initiator` so the server can
-        // re-derive the scoped call-id.
-        jingle.initiator = Some("alice@waddle.test/desktop".parse().unwrap());
         let iq = Iq::Set {
             from: Some("alice@waddle.test/desktop".parse().unwrap()),
             to: Some("bob@waddle.test/desktop".parse().unwrap()),
@@ -1036,16 +1206,20 @@ mod tests {
             payload: jingle.into(),
         };
 
-        let sfu = fixture_sfu();
+        let sfu = fixture_livekit_sfu();
         // Pre-register under the scoped id so the unregister path
         // has something to remove.
         let call = waddle_sfu::CallId::new("alice@waddle.test::c1").unwrap();
         let alice = Identity::from_jid("alice@waddle.test/desktop".parse().unwrap());
+        let bob = Identity::from_jid("bob@waddle.test/desktop".parse().unwrap());
         sfu.register_call_participant(&call, &alice);
+        sfu.register_call_participant(&call, &bob);
+        assert_eq!(sfu.participant_count(&call), 2);
 
         let jid = test_ctx_jid();
-        let handler = JingleHandler::new(sfu);
+        let handler = JingleHandler::new(sfu.clone());
         let events = handler.handle(&iq, &ctx(&jid));
+        assert_eq!(sfu.participant_count(&call), 0);
 
         // No server-forged ACK — just the forwarded terminate.
         assert_eq!(events.len(), 1);
@@ -1057,6 +1231,57 @@ mod tests {
             }
         }
         assert!(routed);
+    }
+
+    #[test]
+    fn session_terminate_does_not_unregister_peer_when_sender_is_not_participant() {
+        let jingle = Jingle::new(Action::SessionTerminate, SessionId("c1".into())).set_reason(
+            xep0166::reason_element(xmpp_parsers::jingle::Reason::Success),
+        );
+        let iq = Iq::Set {
+            from: Some("eve@waddle.test/laptop".parse().unwrap()),
+            to: Some("bob@waddle.test/desktop".parse().unwrap()),
+            id: "t-third-party".into(),
+            payload: jingle.into(),
+        };
+
+        let sfu = fixture_livekit_sfu();
+        let call = waddle_sfu::CallId::new("bob@waddle.test::c1").unwrap();
+        let alice = Identity::from_jid("alice@waddle.test/desktop".parse().unwrap());
+        let bob = Identity::from_jid("bob@waddle.test/desktop".parse().unwrap());
+        sfu.register_call_participant(&call, &alice);
+        sfu.register_call_participant(&call, &bob);
+        assert_eq!(sfu.participant_count(&call), 2);
+
+        let eve: FullJid = "eve@waddle.test/laptop".parse().unwrap();
+        let handler = JingleHandler::new(sfu.clone());
+        let events = handler.handle(&iq, &ctx(&eve));
+
+        assert_eq!(sfu.participant_count(&call), 2);
+        assert_eq!(events.len(), 1);
+        assert!(
+            matches!(events[0], OutboundEvent::RouteToConnection { .. }),
+            "the stanza still routes to the addressed peer; only SFU cleanup is gated"
+        );
+    }
+
+    #[test]
+    fn session_terminate_to_bare_peer_is_rejected() {
+        let jingle = Jingle::new(Action::SessionTerminate, SessionId("c1".into())).set_reason(
+            xep0166::reason_element(xmpp_parsers::jingle::Reason::Success),
+        );
+        let iq = Iq::Set {
+            from: Some("alice@waddle.test/desktop".parse().unwrap()),
+            to: Some("bob@waddle.test".parse().unwrap()),
+            id: "t-bare".into(),
+            payload: jingle.into(),
+        };
+
+        let jid = test_ctx_jid();
+        let handler = JingleHandler::new(fixture_sfu());
+        let events = handler.handle(&iq, &ctx(&jid));
+
+        assert_error_condition(&events, DefinedCondition::BadRequest);
     }
 
     #[test]

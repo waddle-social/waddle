@@ -1014,6 +1014,102 @@ async fn upsert_muji_presence_empty_clears_state_and_returns_none() {
 }
 
 #[tokio::test]
+async fn clear_muji_presence_clears_existing_state_without_muji_payload() {
+    let actor = spawn_room_actor().await;
+    let alice = test_full_jid("alice");
+    let bob = test_full_jid("bob");
+    actor
+        .ask(Join {
+            nick: "alice".to_string(),
+            real_jid: alice.clone(),
+            role: Role::Participant,
+            affiliation: Affiliation::Member,
+        })
+        .await
+        .expect("alice join");
+    actor
+        .ask(Join {
+            nick: "bob".to_string(),
+            real_jid: bob.clone(),
+            role: Role::Participant,
+            affiliation: Affiliation::Member,
+        })
+        .await
+        .expect("bob join");
+    actor
+        .ask(crate::muc::room_actor::UpsertMujiPresence {
+            sender_jid: alice.clone(),
+            muji: audio_muji(),
+        })
+        .await
+        .expect("ask")
+        .expect("alice is an occupant");
+
+    let outcome = actor
+        .ask(crate::muc::room_actor::ClearMujiPresence {
+            sender_jid: alice.clone(),
+        })
+        .await
+        .expect("ask")
+        .expect("alice had Muji state to clear");
+
+    assert_eq!(outcome.update.sender_nick, "alice");
+    assert!(
+        outcome.active_muji.is_none(),
+        "available presence without <muji/> clears the stored Muji advertisement"
+    );
+    assert!(
+        outcome.update.recipients.iter().any(|jid| jid == &bob),
+        "remaining occupants must be notified of the clear"
+    );
+
+    let carol = test_full_jid("carol");
+    let join_outcome = actor
+        .ask(JoinWithAffiliation {
+            sender_jid: carol,
+            nick: "carol".to_string(),
+            effective_affiliation: Affiliation::Member,
+            local_domain: "example.com".to_string(),
+        })
+        .await
+        .expect("carol join");
+    let alice_replay = join_outcome
+        .existing_occupants
+        .iter()
+        .find(|o| o.nick == "alice")
+        .expect("alice still present");
+    assert!(
+        alice_replay.muji.is_none(),
+        "late join replay must not include stale Muji after a no-payload clear"
+    );
+}
+
+#[tokio::test]
+async fn clear_muji_presence_returns_none_when_no_state_exists() {
+    let actor = spawn_room_actor().await;
+    let alice = test_full_jid("alice");
+    actor
+        .ask(Join {
+            nick: "alice".to_string(),
+            real_jid: alice.clone(),
+            role: Role::Participant,
+            affiliation: Affiliation::Member,
+        })
+        .await
+        .expect("alice join");
+
+    let outcome = actor
+        .ask(crate::muc::room_actor::ClearMujiPresence { sender_jid: alice })
+        .await
+        .expect("ask");
+
+    assert!(
+        outcome.is_none(),
+        "plain available presence without prior Muji state stays on the existing join/update path"
+    );
+}
+
+#[tokio::test]
 async fn join_replay_includes_active_muji_from_existing_occupant() {
     // Late joiners see the chip light up immediately via the join
     // replay, not just after the next presence update from the call
@@ -1165,6 +1261,15 @@ async fn leaving_originator_session_clears_muji_state_even_with_peer_sessions_re
     assert!(
         !leave_outcome.removed_last_session,
         "mobile is still in the room, so alice's nick is not vacated"
+    );
+    assert!(
+        leave_outcome.cleared_muji_state,
+        "leaving originator resource must report that Muji state was cleared"
+    );
+    assert_eq!(
+        leave_outcome.remaining_nick_real_jid.as_ref(),
+        Some(&mobile),
+        "remaining same-nick resource is the canonical identity for the clear broadcast"
     );
 
     // A late joiner (carol) must NOT see alice's stale Muji ad.

@@ -394,6 +394,7 @@ pub async fn handle_muc_leave(
     super::super::super::cleanup::broadcast_muc_leave_to_remaining(
         state, room_jid, sender_jid, &outcome,
     );
+    super::super::super::cleanup::broadcast_muc_muji_clear_to_remaining(state, room_jid, &outcome);
 
     let response = vec![build_muc_self_unavailable_xml(
         state,

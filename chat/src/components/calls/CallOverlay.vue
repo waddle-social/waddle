@@ -4,7 +4,6 @@ import { useStore } from "@nanostores/vue";
 import {
   $callState,
   $lastCallError,
-  clearCallState,
   reportCallError,
   tearDownActiveCall,
 } from "@/lib/calls/call-store";
@@ -94,12 +93,15 @@ watch(
       await engine.connect(active.join, active.media);
       micEnabled.value = active.media.audio;
       camEnabled.value = active.media.video;
-    } catch {
+    } catch (err) {
       // The server already verified the JWT before forwarding the
       // transport, so the most common failure here is the browser
-      // denying mic/cam permissions. Hang up locally; the peer will
-      // see session-terminate via the hangup path below.
-      clearCallState();
+      // denying mic/cam permissions. Run the full hangup path so
+      // SFU/session/Muji presence state rolls back before the local
+      // slot disappears.
+      await tearDownActiveCall(getSender(), "gone");
+      await engine.disconnect();
+      reportCallError(err);
     } finally {
       connecting.value = false;
     }

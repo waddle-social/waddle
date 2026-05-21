@@ -15,8 +15,11 @@ function recorder() {
     send_call_propose: track("send_call_propose") as CallWireSender["send_call_propose"],
     send_call_proceed: track("send_call_proceed") as CallWireSender["send_call_proceed"],
     send_call_reject: track("send_call_reject") as CallWireSender["send_call_reject"],
+    send_call_reject_tie_break: track("send_call_reject_tie_break") as CallWireSender["send_call_reject_tie_break"],
     send_call_retract: track("send_call_retract") as CallWireSender["send_call_retract"],
+    send_call_retract_tie_break: track("send_call_retract_tie_break") as CallWireSender["send_call_retract_tie_break"],
     send_call_finish: track("send_call_finish") as CallWireSender["send_call_finish"],
+    send_call_finish_migrated: track("send_call_finish_migrated") as CallWireSender["send_call_finish_migrated"],
     send_call_session_initiate: track("send_call_session_initiate") as CallWireSender["send_call_session_initiate"],
     send_call_session_accept: track("send_call_session_accept") as CallWireSender["send_call_session_accept"],
     send_call_session_terminate: track("send_call_session_terminate") as CallWireSender["send_call_session_terminate"],
@@ -33,21 +36,39 @@ describe("outboundCalls", () => {
     ]);
   });
 
-  test("proceed / reject / retract / finish forward bare jid + sid", async () => {
+  test("proceed / reject / finish forward full jid; retract accepts generic jid", async () => {
     const { client, calls } = recorder();
-    await outboundCalls.proceed(client, "bob@waddle.test", "c1");
-    await outboundCalls.reject(client, "bob@waddle.test", "c1");
+    await outboundCalls.proceed(client, "bob@waddle.test/desktop", "c1");
+    await outboundCalls.reject(client, "bob@waddle.test/desktop", "c1");
     await outboundCalls.retract(client, "bob@waddle.test", "c1");
-    await outboundCalls.finish(client, "bob@waddle.test", "c1");
-    expect(calls.map((c) => c.method)).toEqual([
-      "send_call_proceed",
-      "send_call_reject",
-      "send_call_retract",
-      "send_call_finish",
+    await outboundCalls.finish(client, "bob@waddle.test/desktop", "c1");
+    expect(calls).toEqual([
+      { method: "send_call_proceed", args: ["bob@waddle.test/desktop", "c1"] },
+      { method: "send_call_reject", args: ["bob@waddle.test/desktop", "c1"] },
+      { method: "send_call_retract", args: ["bob@waddle.test", "c1"] },
+      { method: "send_call_finish", args: ["bob@waddle.test/desktop", "c1"] },
     ]);
-    for (const call of calls) {
-      expect(call.args).toEqual(["bob@waddle.test", "c1"]);
-    }
+  });
+
+  test("tie-break helpers forward full jid and sid", async () => {
+    const { client, calls } = recorder();
+    await outboundCalls.rejectTieBreak(client, "bob@waddle.test/desktop", "c-loser");
+    await outboundCalls.retractTieBreak(client, "bob@waddle.test/desktop", "c-loser");
+    await outboundCalls.finishMigrated(client, "bob@waddle.test/desktop", "c-old", "c-new");
+    expect(calls).toEqual([
+      {
+        method: "send_call_reject_tie_break",
+        args: ["bob@waddle.test/desktop", "c-loser"],
+      },
+      {
+        method: "send_call_retract_tie_break",
+        args: ["bob@waddle.test/desktop", "c-loser"],
+      },
+      {
+        method: "send_call_finish_migrated",
+        args: ["bob@waddle.test/desktop", "c-old", "c-new"],
+      },
+    ]);
   });
 
   test("sessionInitiate splits media into audio/video booleans", async () => {
@@ -67,11 +88,10 @@ describe("outboundCalls", () => {
     ]);
   });
 
-  test("sessionAccept passes initiator + responder + media", async () => {
+  test("sessionAccept passes responder + media", async () => {
     const { client, calls } = recorder();
     await outboundCalls.sessionAccept(
       client,
-      "alice@waddle.test/desktop",
       "alice@waddle.test/desktop",
       "bob@waddle.test/desktop",
       "c1",
@@ -81,7 +101,6 @@ describe("outboundCalls", () => {
       {
         method: "send_call_session_accept",
         args: [
-          "alice@waddle.test/desktop",
           "alice@waddle.test/desktop",
           "bob@waddle.test/desktop",
           "c1",
@@ -94,11 +113,27 @@ describe("outboundCalls", () => {
 
   test("sessionTerminate passes reason through (including null)", async () => {
     const { client, calls } = recorder();
-    await outboundCalls.sessionTerminate(client, "bob@waddle.test/desktop", "c1", "success");
-    await outboundCalls.sessionTerminate(client, "bob@waddle.test/desktop", "c1", null);
+    await outboundCalls.sessionTerminate(
+      client,
+      "bob@waddle.test/desktop",
+      "c1",
+      "success",
+    );
+    await outboundCalls.sessionTerminate(
+      client,
+      "bob@waddle.test/desktop",
+      "c1",
+      null,
+    );
     expect(calls).toEqual([
-      { method: "send_call_session_terminate", args: ["bob@waddle.test/desktop", "c1", "success"] },
-      { method: "send_call_session_terminate", args: ["bob@waddle.test/desktop", "c1", null] },
+      {
+        method: "send_call_session_terminate",
+        args: ["bob@waddle.test/desktop", "c1", "success"],
+      },
+      {
+        method: "send_call_session_terminate",
+        args: ["bob@waddle.test/desktop", "c1", null],
+      },
     ]);
   });
 

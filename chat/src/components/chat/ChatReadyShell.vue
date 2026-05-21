@@ -1,7 +1,10 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from "vue";
 import { useStore } from "@nanostores/vue";
-import { $mucCallParticipants } from "@/lib/calls/muc-call-presence";
+import {
+  $mucCallParticipants,
+  mucCallParticipantCounts,
+} from "@/lib/calls/muc-call-presence";
 import HomeDashboard from "@/components/chat/HomeDashboard.vue";
 import ThreadsView from "@/components/chat/ThreadsView.vue";
 import FeedPane from "@/components/community/FeedPane.vue";
@@ -149,11 +152,7 @@ const homeDashboardProps = computed(() => buildHomeDashboardProps({
  */
 const mucCallParticipantsStore = useStore($mucCallParticipants);
 const callParticipantCounts = computed<Record<string, number>>(() => {
-  const counts: Record<string, number> = {};
-  for (const [jid, nicks] of Object.entries(mucCallParticipantsStore.value)) {
-    counts[jid] = nicks.length;
-  }
-  return counts;
+  return mucCallParticipantCounts(mucCallParticipantsStore.value);
 });
 
 const contentPaneClass = computed(() => {

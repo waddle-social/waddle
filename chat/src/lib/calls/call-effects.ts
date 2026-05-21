@@ -1,5 +1,14 @@
 import { outboundCalls, type CallWireSender } from "./outbound";
-import { reportCallError } from "./call-store";
+import {
+  acceptIncomingTieBreakPropose,
+  failCallState,
+  reportCallError,
+  scheduleSessionAcceptTimeout,
+} from "./call-store";
+import {
+  incomingProposeWinsTieBreak,
+  isSameCallBareJid,
+} from "./tie-break";
 import type { CallEvent, CallState } from "./types";
 
 /**
@@ -35,12 +44,64 @@ export async function handleCallEventSideEffect(
   sender: CallWireSender,
   ourFullJid: string,
 ): Promise<void> {
-  // Busy-reject: a propose arriving while we're mid-call (outgoing,
-  // incoming, or active) is silently dropped by the reducer. Without
-  // an explicit reject the proposer sees no response and rings until
-  // their timeout, so respond with reject addressed to their full
-  // JID (the `from` on inbound propose is the proposer's full JID
-  // because the server stamps it).
+  // Simultaneous propose tie-break (XEP-0353 §Tie Breaking). This
+  // is specific to both resources proposing a call to the same bare
+  // peer at the same time; unrelated callers still take the normal
+  // busy-reject path below.
+  if (
+    event.kind === "propose" &&
+    prev.phase === "outgoing" &&
+    isSameCallBareJid(event.from, prev.to)
+  ) {
+    try {
+      if (
+        incomingProposeWinsTieBreak(
+          event.sid,
+          prev.sid,
+          event.from,
+          ourFullJid,
+        )
+      ) {
+        await outboundCalls.retractTieBreak(sender, event.from, prev.sid);
+        acceptIncomingTieBreakPropose(event);
+      } else {
+        await outboundCalls.rejectTieBreak(sender, event.from, event.sid);
+      }
+    } catch (err) {
+      reportCallError(err);
+    }
+    return;
+  }
+
+  if (
+    event.kind === "propose" &&
+    prev.phase === "active" &&
+    prev.kind === "dm" &&
+    isSameCallBareJid(event.from, prev.peer)
+  ) {
+    try {
+      await outboundCalls.finishMigrated(sender, event.from, prev.sid, event.sid);
+      await outboundCalls.proceed(sender, event.from, event.sid);
+      acceptIncomingTieBreakPropose(event);
+      // The old Jingle session may already be orphaned on another
+      // resource, so do not let its IQ round-trip block the XEP-0353
+      // migration markers that keep both users' devices in sync.
+      void outboundCalls
+        .sessionTerminate(sender, prev.peer, prev.sid, "expired")
+        .catch((err) => reportCallError(err));
+    } catch (err) {
+      failCallState(err, prev.sid);
+    }
+    return;
+  }
+
+  // Busy-reject: a propose arriving while we're mid-call (incoming
+  // or active, plus outgoing calls against a different peer) is
+  // silently dropped by the reducer. Without an explicit reject the
+  // proposer sees no response and rings until their timeout, so
+  // respond with reject addressed to their full JID (the `from` on
+  // inbound propose is the proposer's full JID because the server
+  // stamps it).
   if (
     event.kind === "propose" &&
     prev.phase !== "idle" &&
@@ -66,8 +127,9 @@ export async function handleCallEventSideEffect(
         event.sid,
         prev.media,
       );
+      scheduleSessionAcceptTimeout(sender, event.from, event.sid);
     } catch (err) {
-      reportCallError(err);
+      failCallState(err, event.sid);
     }
     return;
   }
@@ -86,13 +148,12 @@ export async function handleCallEventSideEffect(
       await outboundCalls.sessionAccept(
         sender,
         event.from,
-        event.from,
         ourFullJid,
         event.sid,
         event.media,
       );
     } catch (err) {
-      reportCallError(err);
+      failCallState(err, event.sid);
     }
     return;
   }

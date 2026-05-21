@@ -1,4 +1,7 @@
-use crate::event::ClientEvent;
+use minidom::Element;
+
+use crate::event::{ClientEvent, ConnectionEvent};
+use crate::transport::TransportMessage;
 
 use super::XmppRuntime;
 
@@ -8,8 +11,9 @@ impl XmppRuntime {
     /// IQ result and error stanzas are returned as [`ClientEvent::IqResult`] so the
     /// driver can route them to its IQ correlation map without broadcasting them on
     /// the public event bus.  Message stanzas are dispatched to the typed protocol
-    /// handlers in priority order: MAM results, PEP events, then general messaging.
-    /// Unrecognised stanzas fall through to [`ClientEvent::UnhandledStanza`].
+    /// handlers in priority order: MAM results, PEP events, calls, then general
+    /// messaging. Unrecognised stanzas fall through to
+    /// [`ClientEvent::UnhandledStanza`].
     pub fn handle_app_stanza(&mut self, element: &minidom::Element) -> Vec<ClientEvent> {
         use crate::{inbox, mam, messaging, pep};
 
@@ -43,10 +47,39 @@ impl XmppRuntime {
             }
         }
 
+        if let Some(call_event) = messaging::parse_call_event(element) {
+            let mut events = Vec::new();
+            if let Some(ack) = jingle_iq_set_ack(element) {
+                events.push(ClientEvent::Connection(ConnectionEvent::OutboundMessage(
+                    TransportMessage::Element(ack),
+                )));
+            }
+            events.push(ClientEvent::Call(Box::new(call_event)));
+            return events;
+        }
+
         if let Some(ev) = messaging::parse(element) {
             return vec![ClientEvent::Messaging(ev)];
         }
 
         vec![ClientEvent::UnhandledStanza(element.clone())]
     }
+}
+
+fn jingle_iq_set_ack(inbound: &Element) -> Option<Element> {
+    if inbound.name() != "iq" || inbound.attr("type") != Some("set") {
+        return None;
+    }
+    let id = inbound.attr("id")?;
+    let from = inbound.attr("from")?;
+    let to = inbound.attr("to");
+
+    let mut builder = Element::builder("iq", "jabber:client")
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "result")
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), id)
+        .attr(minidom::rxml::xml_ncname!("to").to_owned(), from);
+    if let Some(to) = to {
+        builder = builder.attr(minidom::rxml::xml_ncname!("from").to_owned(), to);
+    }
+    Some(builder.build())
 }

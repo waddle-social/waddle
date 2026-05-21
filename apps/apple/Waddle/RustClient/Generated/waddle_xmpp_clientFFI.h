@@ -50,9 +50,9 @@ typedef void (*UniffiRustFutureContinuationCallback)(uint64_t, int8_t
     );
 
 #endif
-#ifndef UNIFFI_FFIDEF_FOREIGN_FUTURE_FREE
-#define UNIFFI_FFIDEF_FOREIGN_FUTURE_FREE
-typedef void (*UniffiForeignFutureFree)(uint64_t
+#ifndef UNIFFI_FFIDEF_FOREIGN_FUTURE_DROPPED_CALLBACK
+#define UNIFFI_FFIDEF_FOREIGN_FUTURE_DROPPED_CALLBACK
+typedef void (*UniffiForeignFutureDroppedCallback)(uint64_t
     );
 
 #endif
@@ -62,254 +62,246 @@ typedef void (*UniffiCallbackInterfaceFree)(uint64_t
     );
 
 #endif
-#ifndef UNIFFI_FFIDEF_FOREIGN_FUTURE
-#define UNIFFI_FFIDEF_FOREIGN_FUTURE
-typedef struct UniffiForeignFuture {
-    uint64_t handle;
-    UniffiForeignFutureFree _Nonnull free;
-} UniffiForeignFuture;
+#ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_CLONE
+#define UNIFFI_FFIDEF_CALLBACK_INTERFACE_CLONE
+typedef uint64_t (*UniffiCallbackInterfaceClone)(uint64_t
+    );
 
 #endif
-#ifndef UNIFFI_FFIDEF_FOREIGN_FUTURE_STRUCT_U8
-#define UNIFFI_FFIDEF_FOREIGN_FUTURE_STRUCT_U8
-typedef struct UniffiForeignFutureStructU8 {
+#ifndef UNIFFI_FFIDEF_FOREIGN_FUTURE_DROPPED_CALLBACK_STRUCT
+#define UNIFFI_FFIDEF_FOREIGN_FUTURE_DROPPED_CALLBACK_STRUCT
+typedef struct UniffiForeignFutureDroppedCallbackStruct {
+    uint64_t handle;
+    UniffiForeignFutureDroppedCallback _Nonnull free;
+} UniffiForeignFutureDroppedCallbackStruct;
+
+#endif
+#ifndef UNIFFI_FFIDEF_FOREIGN_FUTURE_RESULT_U8
+#define UNIFFI_FFIDEF_FOREIGN_FUTURE_RESULT_U8
+typedef struct UniffiForeignFutureResultU8 {
     uint8_t returnValue;
     RustCallStatus callStatus;
-} UniffiForeignFutureStructU8;
+} UniffiForeignFutureResultU8;
 
 #endif
 #ifndef UNIFFI_FFIDEF_FOREIGN_FUTURE_COMPLETE_U8
 #define UNIFFI_FFIDEF_FOREIGN_FUTURE_COMPLETE_U8
-typedef void (*UniffiForeignFutureCompleteU8)(uint64_t, UniffiForeignFutureStructU8
+typedef void (*UniffiForeignFutureCompleteU8)(uint64_t, UniffiForeignFutureResultU8
     );
 
 #endif
-#ifndef UNIFFI_FFIDEF_FOREIGN_FUTURE_STRUCT_I8
-#define UNIFFI_FFIDEF_FOREIGN_FUTURE_STRUCT_I8
-typedef struct UniffiForeignFutureStructI8 {
+#ifndef UNIFFI_FFIDEF_FOREIGN_FUTURE_RESULT_I8
+#define UNIFFI_FFIDEF_FOREIGN_FUTURE_RESULT_I8
+typedef struct UniffiForeignFutureResultI8 {
     int8_t returnValue;
     RustCallStatus callStatus;
-} UniffiForeignFutureStructI8;
+} UniffiForeignFutureResultI8;
 
 #endif
 #ifndef UNIFFI_FFIDEF_FOREIGN_FUTURE_COMPLETE_I8
 #define UNIFFI_FFIDEF_FOREIGN_FUTURE_COMPLETE_I8
-typedef void (*UniffiForeignFutureCompleteI8)(uint64_t, UniffiForeignFutureStructI8
+typedef void (*UniffiForeignFutureCompleteI8)(uint64_t, UniffiForeignFutureResultI8
     );
 
 #endif
-#ifndef UNIFFI_FFIDEF_FOREIGN_FUTURE_STRUCT_U16
-#define UNIFFI_FFIDEF_FOREIGN_FUTURE_STRUCT_U16
-typedef struct UniffiForeignFutureStructU16 {
+#ifndef UNIFFI_FFIDEF_FOREIGN_FUTURE_RESULT_U16
+#define UNIFFI_FFIDEF_FOREIGN_FUTURE_RESULT_U16
+typedef struct UniffiForeignFutureResultU16 {
     uint16_t returnValue;
     RustCallStatus callStatus;
-} UniffiForeignFutureStructU16;
+} UniffiForeignFutureResultU16;
 
 #endif
 #ifndef UNIFFI_FFIDEF_FOREIGN_FUTURE_COMPLETE_U16
 #define UNIFFI_FFIDEF_FOREIGN_FUTURE_COMPLETE_U16
-typedef void (*UniffiForeignFutureCompleteU16)(uint64_t, UniffiForeignFutureStructU16
+typedef void (*UniffiForeignFutureCompleteU16)(uint64_t, UniffiForeignFutureResultU16
     );
 
 #endif
-#ifndef UNIFFI_FFIDEF_FOREIGN_FUTURE_STRUCT_I16
-#define UNIFFI_FFIDEF_FOREIGN_FUTURE_STRUCT_I16
-typedef struct UniffiForeignFutureStructI16 {
+#ifndef UNIFFI_FFIDEF_FOREIGN_FUTURE_RESULT_I16
+#define UNIFFI_FFIDEF_FOREIGN_FUTURE_RESULT_I16
+typedef struct UniffiForeignFutureResultI16 {
     int16_t returnValue;
     RustCallStatus callStatus;
-} UniffiForeignFutureStructI16;
+} UniffiForeignFutureResultI16;
 
 #endif
 #ifndef UNIFFI_FFIDEF_FOREIGN_FUTURE_COMPLETE_I16
 #define UNIFFI_FFIDEF_FOREIGN_FUTURE_COMPLETE_I16
-typedef void (*UniffiForeignFutureCompleteI16)(uint64_t, UniffiForeignFutureStructI16
+typedef void (*UniffiForeignFutureCompleteI16)(uint64_t, UniffiForeignFutureResultI16
     );
 
 #endif
-#ifndef UNIFFI_FFIDEF_FOREIGN_FUTURE_STRUCT_U32
-#define UNIFFI_FFIDEF_FOREIGN_FUTURE_STRUCT_U32
-typedef struct UniffiForeignFutureStructU32 {
+#ifndef UNIFFI_FFIDEF_FOREIGN_FUTURE_RESULT_U32
+#define UNIFFI_FFIDEF_FOREIGN_FUTURE_RESULT_U32
+typedef struct UniffiForeignFutureResultU32 {
     uint32_t returnValue;
     RustCallStatus callStatus;
-} UniffiForeignFutureStructU32;
+} UniffiForeignFutureResultU32;
 
 #endif
 #ifndef UNIFFI_FFIDEF_FOREIGN_FUTURE_COMPLETE_U32
 #define UNIFFI_FFIDEF_FOREIGN_FUTURE_COMPLETE_U32
-typedef void (*UniffiForeignFutureCompleteU32)(uint64_t, UniffiForeignFutureStructU32
+typedef void (*UniffiForeignFutureCompleteU32)(uint64_t, UniffiForeignFutureResultU32
     );
 
 #endif
-#ifndef UNIFFI_FFIDEF_FOREIGN_FUTURE_STRUCT_I32
-#define UNIFFI_FFIDEF_FOREIGN_FUTURE_STRUCT_I32
-typedef struct UniffiForeignFutureStructI32 {
+#ifndef UNIFFI_FFIDEF_FOREIGN_FUTURE_RESULT_I32
+#define UNIFFI_FFIDEF_FOREIGN_FUTURE_RESULT_I32
+typedef struct UniffiForeignFutureResultI32 {
     int32_t returnValue;
     RustCallStatus callStatus;
-} UniffiForeignFutureStructI32;
+} UniffiForeignFutureResultI32;
 
 #endif
 #ifndef UNIFFI_FFIDEF_FOREIGN_FUTURE_COMPLETE_I32
 #define UNIFFI_FFIDEF_FOREIGN_FUTURE_COMPLETE_I32
-typedef void (*UniffiForeignFutureCompleteI32)(uint64_t, UniffiForeignFutureStructI32
+typedef void (*UniffiForeignFutureCompleteI32)(uint64_t, UniffiForeignFutureResultI32
     );
 
 #endif
-#ifndef UNIFFI_FFIDEF_FOREIGN_FUTURE_STRUCT_U64
-#define UNIFFI_FFIDEF_FOREIGN_FUTURE_STRUCT_U64
-typedef struct UniffiForeignFutureStructU64 {
+#ifndef UNIFFI_FFIDEF_FOREIGN_FUTURE_RESULT_U64
+#define UNIFFI_FFIDEF_FOREIGN_FUTURE_RESULT_U64
+typedef struct UniffiForeignFutureResultU64 {
     uint64_t returnValue;
     RustCallStatus callStatus;
-} UniffiForeignFutureStructU64;
+} UniffiForeignFutureResultU64;
 
 #endif
 #ifndef UNIFFI_FFIDEF_FOREIGN_FUTURE_COMPLETE_U64
 #define UNIFFI_FFIDEF_FOREIGN_FUTURE_COMPLETE_U64
-typedef void (*UniffiForeignFutureCompleteU64)(uint64_t, UniffiForeignFutureStructU64
+typedef void (*UniffiForeignFutureCompleteU64)(uint64_t, UniffiForeignFutureResultU64
     );
 
 #endif
-#ifndef UNIFFI_FFIDEF_FOREIGN_FUTURE_STRUCT_I64
-#define UNIFFI_FFIDEF_FOREIGN_FUTURE_STRUCT_I64
-typedef struct UniffiForeignFutureStructI64 {
+#ifndef UNIFFI_FFIDEF_FOREIGN_FUTURE_RESULT_I64
+#define UNIFFI_FFIDEF_FOREIGN_FUTURE_RESULT_I64
+typedef struct UniffiForeignFutureResultI64 {
     int64_t returnValue;
     RustCallStatus callStatus;
-} UniffiForeignFutureStructI64;
+} UniffiForeignFutureResultI64;
 
 #endif
 #ifndef UNIFFI_FFIDEF_FOREIGN_FUTURE_COMPLETE_I64
 #define UNIFFI_FFIDEF_FOREIGN_FUTURE_COMPLETE_I64
-typedef void (*UniffiForeignFutureCompleteI64)(uint64_t, UniffiForeignFutureStructI64
+typedef void (*UniffiForeignFutureCompleteI64)(uint64_t, UniffiForeignFutureResultI64
     );
 
 #endif
-#ifndef UNIFFI_FFIDEF_FOREIGN_FUTURE_STRUCT_F32
-#define UNIFFI_FFIDEF_FOREIGN_FUTURE_STRUCT_F32
-typedef struct UniffiForeignFutureStructF32 {
+#ifndef UNIFFI_FFIDEF_FOREIGN_FUTURE_RESULT_F32
+#define UNIFFI_FFIDEF_FOREIGN_FUTURE_RESULT_F32
+typedef struct UniffiForeignFutureResultF32 {
     float returnValue;
     RustCallStatus callStatus;
-} UniffiForeignFutureStructF32;
+} UniffiForeignFutureResultF32;
 
 #endif
 #ifndef UNIFFI_FFIDEF_FOREIGN_FUTURE_COMPLETE_F32
 #define UNIFFI_FFIDEF_FOREIGN_FUTURE_COMPLETE_F32
-typedef void (*UniffiForeignFutureCompleteF32)(uint64_t, UniffiForeignFutureStructF32
+typedef void (*UniffiForeignFutureCompleteF32)(uint64_t, UniffiForeignFutureResultF32
     );
 
 #endif
-#ifndef UNIFFI_FFIDEF_FOREIGN_FUTURE_STRUCT_F64
-#define UNIFFI_FFIDEF_FOREIGN_FUTURE_STRUCT_F64
-typedef struct UniffiForeignFutureStructF64 {
+#ifndef UNIFFI_FFIDEF_FOREIGN_FUTURE_RESULT_F64
+#define UNIFFI_FFIDEF_FOREIGN_FUTURE_RESULT_F64
+typedef struct UniffiForeignFutureResultF64 {
     double returnValue;
     RustCallStatus callStatus;
-} UniffiForeignFutureStructF64;
+} UniffiForeignFutureResultF64;
 
 #endif
 #ifndef UNIFFI_FFIDEF_FOREIGN_FUTURE_COMPLETE_F64
 #define UNIFFI_FFIDEF_FOREIGN_FUTURE_COMPLETE_F64
-typedef void (*UniffiForeignFutureCompleteF64)(uint64_t, UniffiForeignFutureStructF64
+typedef void (*UniffiForeignFutureCompleteF64)(uint64_t, UniffiForeignFutureResultF64
     );
 
 #endif
-#ifndef UNIFFI_FFIDEF_FOREIGN_FUTURE_STRUCT_POINTER
-#define UNIFFI_FFIDEF_FOREIGN_FUTURE_STRUCT_POINTER
-typedef struct UniffiForeignFutureStructPointer {
-    void*_Nonnull returnValue;
-    RustCallStatus callStatus;
-} UniffiForeignFutureStructPointer;
-
-#endif
-#ifndef UNIFFI_FFIDEF_FOREIGN_FUTURE_COMPLETE_POINTER
-#define UNIFFI_FFIDEF_FOREIGN_FUTURE_COMPLETE_POINTER
-typedef void (*UniffiForeignFutureCompletePointer)(uint64_t, UniffiForeignFutureStructPointer
-    );
-
-#endif
-#ifndef UNIFFI_FFIDEF_FOREIGN_FUTURE_STRUCT_RUST_BUFFER
-#define UNIFFI_FFIDEF_FOREIGN_FUTURE_STRUCT_RUST_BUFFER
-typedef struct UniffiForeignFutureStructRustBuffer {
+#ifndef UNIFFI_FFIDEF_FOREIGN_FUTURE_RESULT_RUST_BUFFER
+#define UNIFFI_FFIDEF_FOREIGN_FUTURE_RESULT_RUST_BUFFER
+typedef struct UniffiForeignFutureResultRustBuffer {
     RustBuffer returnValue;
     RustCallStatus callStatus;
-} UniffiForeignFutureStructRustBuffer;
+} UniffiForeignFutureResultRustBuffer;
 
 #endif
 #ifndef UNIFFI_FFIDEF_FOREIGN_FUTURE_COMPLETE_RUST_BUFFER
 #define UNIFFI_FFIDEF_FOREIGN_FUTURE_COMPLETE_RUST_BUFFER
-typedef void (*UniffiForeignFutureCompleteRustBuffer)(uint64_t, UniffiForeignFutureStructRustBuffer
+typedef void (*UniffiForeignFutureCompleteRustBuffer)(uint64_t, UniffiForeignFutureResultRustBuffer
     );
 
 #endif
-#ifndef UNIFFI_FFIDEF_FOREIGN_FUTURE_STRUCT_VOID
-#define UNIFFI_FFIDEF_FOREIGN_FUTURE_STRUCT_VOID
-typedef struct UniffiForeignFutureStructVoid {
+#ifndef UNIFFI_FFIDEF_FOREIGN_FUTURE_RESULT_VOID
+#define UNIFFI_FFIDEF_FOREIGN_FUTURE_RESULT_VOID
+typedef struct UniffiForeignFutureResultVoid {
     RustCallStatus callStatus;
-} UniffiForeignFutureStructVoid;
+} UniffiForeignFutureResultVoid;
 
 #endif
 #ifndef UNIFFI_FFIDEF_FOREIGN_FUTURE_COMPLETE_VOID
 #define UNIFFI_FFIDEF_FOREIGN_FUTURE_COMPLETE_VOID
-typedef void (*UniffiForeignFutureCompleteVoid)(uint64_t, UniffiForeignFutureStructVoid
+typedef void (*UniffiForeignFutureCompleteVoid)(uint64_t, UniffiForeignFutureResultVoid
     );
 
 #endif
 #ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_WADDLE_EVENT_LISTENER_METHOD0
 #define UNIFFI_FFIDEF_CALLBACK_INTERFACE_WADDLE_EVENT_LISTENER_METHOD0
-typedef void (*UniffiCallbackInterfaceWaddleEventListenerMethod0)(uint64_t, RustBuffer, void* _Nonnull, 
+typedef void (*UniffiCallbackInterfaceWaddleEventListenerMethod0)(uint64_t, RustBuffer, void* _Nonnull,
         RustCallStatus *_Nonnull uniffiCallStatus
     );
 
 #endif
 #ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_WADDLE_EVENT_LISTENER_METHOD1
 #define UNIFFI_FFIDEF_CALLBACK_INTERFACE_WADDLE_EVENT_LISTENER_METHOD1
-typedef void (*UniffiCallbackInterfaceWaddleEventListenerMethod1)(uint64_t, RustBuffer, void* _Nonnull, 
+typedef void (*UniffiCallbackInterfaceWaddleEventListenerMethod1)(uint64_t, RustBuffer, void* _Nonnull,
         RustCallStatus *_Nonnull uniffiCallStatus
     );
 
 #endif
 #ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_WADDLE_EVENT_LISTENER_METHOD2
 #define UNIFFI_FFIDEF_CALLBACK_INTERFACE_WADDLE_EVENT_LISTENER_METHOD2
-typedef void (*UniffiCallbackInterfaceWaddleEventListenerMethod2)(uint64_t, RustBuffer, void* _Nonnull, 
+typedef void (*UniffiCallbackInterfaceWaddleEventListenerMethod2)(uint64_t, RustBuffer, void* _Nonnull,
         RustCallStatus *_Nonnull uniffiCallStatus
     );
 
 #endif
 #ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_WADDLE_EVENT_LISTENER_METHOD3
 #define UNIFFI_FFIDEF_CALLBACK_INTERFACE_WADDLE_EVENT_LISTENER_METHOD3
-typedef void (*UniffiCallbackInterfaceWaddleEventListenerMethod3)(uint64_t, RustBuffer, void* _Nonnull, 
+typedef void (*UniffiCallbackInterfaceWaddleEventListenerMethod3)(uint64_t, RustBuffer, void* _Nonnull,
         RustCallStatus *_Nonnull uniffiCallStatus
     );
 
 #endif
 #ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_WADDLE_EVENT_LISTENER_METHOD4
 #define UNIFFI_FFIDEF_CALLBACK_INTERFACE_WADDLE_EVENT_LISTENER_METHOD4
-typedef void (*UniffiCallbackInterfaceWaddleEventListenerMethod4)(uint64_t, RustBuffer, void* _Nonnull, 
+typedef void (*UniffiCallbackInterfaceWaddleEventListenerMethod4)(uint64_t, RustBuffer, void* _Nonnull,
         RustCallStatus *_Nonnull uniffiCallStatus
     );
 
 #endif
 #ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_WADDLE_EVENT_LISTENER_METHOD5
 #define UNIFFI_FFIDEF_CALLBACK_INTERFACE_WADDLE_EVENT_LISTENER_METHOD5
-typedef void (*UniffiCallbackInterfaceWaddleEventListenerMethod5)(uint64_t, void* _Nonnull, 
+typedef void (*UniffiCallbackInterfaceWaddleEventListenerMethod5)(uint64_t, void* _Nonnull,
         RustCallStatus *_Nonnull uniffiCallStatus
     );
 
 #endif
 #ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_WADDLE_EVENT_LISTENER_METHOD6
 #define UNIFFI_FFIDEF_CALLBACK_INTERFACE_WADDLE_EVENT_LISTENER_METHOD6
-typedef void (*UniffiCallbackInterfaceWaddleEventListenerMethod6)(uint64_t, void* _Nonnull, 
+typedef void (*UniffiCallbackInterfaceWaddleEventListenerMethod6)(uint64_t, void* _Nonnull,
         RustCallStatus *_Nonnull uniffiCallStatus
     );
 
 #endif
 #ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_WADDLE_EVENT_LISTENER_METHOD7
 #define UNIFFI_FFIDEF_CALLBACK_INTERFACE_WADDLE_EVENT_LISTENER_METHOD7
-typedef void (*UniffiCallbackInterfaceWaddleEventListenerMethod7)(uint64_t, RustBuffer, void* _Nonnull, 
+typedef void (*UniffiCallbackInterfaceWaddleEventListenerMethod7)(uint64_t, RustBuffer, void* _Nonnull,
         RustCallStatus *_Nonnull uniffiCallStatus
     );
 
 #endif
 #ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_WADDLE_EVENT_LISTENER_METHOD8
 #define UNIFFI_FFIDEF_CALLBACK_INTERFACE_WADDLE_EVENT_LISTENER_METHOD8
-typedef void (*UniffiCallbackInterfaceWaddleEventListenerMethod8)(uint64_t, RustBuffer, void* _Nonnull, 
+typedef void (*UniffiCallbackInterfaceWaddleEventListenerMethod8)(uint64_t, RustBuffer, void* _Nonnull,
         RustCallStatus *_Nonnull uniffiCallStatus
     );
 
@@ -317,6 +309,8 @@ typedef void (*UniffiCallbackInterfaceWaddleEventListenerMethod8)(uint64_t, Rust
 #ifndef UNIFFI_FFIDEF_V_TABLE_CALLBACK_INTERFACE_WADDLE_EVENT_LISTENER
 #define UNIFFI_FFIDEF_V_TABLE_CALLBACK_INTERFACE_WADDLE_EVENT_LISTENER
 typedef struct UniffiVTableCallbackInterfaceWaddleEventListener {
+    UniffiCallbackInterfaceFree _Nonnull uniffiFree;
+    UniffiCallbackInterfaceClone _Nonnull uniffiClone;
     UniffiCallbackInterfaceWaddleEventListenerMethod0 _Nonnull onMessage;
     UniffiCallbackInterfaceWaddleEventListenerMethod1 _Nonnull onPresence;
     UniffiCallbackInterfaceWaddleEventListenerMethod2 _Nonnull onMamResult;
@@ -326,128 +320,142 @@ typedef struct UniffiVTableCallbackInterfaceWaddleEventListener {
     UniffiCallbackInterfaceWaddleEventListenerMethod6 _Nonnull onDisconnected;
     UniffiCallbackInterfaceWaddleEventListenerMethod7 _Nonnull onError;
     UniffiCallbackInterfaceWaddleEventListenerMethod8 _Nonnull onCall;
-    UniffiCallbackInterfaceFree _Nonnull uniffiFree;
 } UniffiVTableCallbackInterfaceWaddleEventListener;
 
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_FN_CLONE_WADDLECLIENT
 #define UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_FN_CLONE_WADDLECLIENT
-void*_Nonnull uniffi_waddle_xmpp_client_ffi_fn_clone_waddleclient(void*_Nonnull ptr, RustCallStatus *_Nonnull out_status
+uint64_t uniffi_waddle_xmpp_client_ffi_fn_clone_waddleclient(uint64_t handle, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_FN_FREE_WADDLECLIENT
 #define UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_FN_FREE_WADDLECLIENT
-void uniffi_waddle_xmpp_client_ffi_fn_free_waddleclient(void*_Nonnull ptr, RustCallStatus *_Nonnull out_status
+void uniffi_waddle_xmpp_client_ffi_fn_free_waddleclient(uint64_t handle, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_FN_CONSTRUCTOR_WADDLECLIENT_NEW
 #define UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_FN_CONSTRUCTOR_WADDLECLIENT_NEW
-void*_Nonnull uniffi_waddle_xmpp_client_ffi_fn_constructor_waddleclient_new(RustBuffer config, uint64_t listener, RustCallStatus *_Nonnull out_status
+uint64_t uniffi_waddle_xmpp_client_ffi_fn_constructor_waddleclient_new(RustBuffer config, uint64_t listener, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_FN_METHOD_WADDLECLIENT_CONNECT
 #define UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_FN_METHOD_WADDLECLIENT_CONNECT
-uint64_t uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_connect(void*_Nonnull ptr
+uint64_t uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_connect(uint64_t ptr
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_FN_METHOD_WADDLECLIENT_DISCONNECT
 #define UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_FN_METHOD_WADDLECLIENT_DISCONNECT
-uint64_t uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_disconnect(void*_Nonnull ptr
+uint64_t uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_disconnect(uint64_t ptr
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_FN_METHOD_WADDLECLIENT_DISCOVER_TOPOLOGY
 #define UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_FN_METHOD_WADDLECLIENT_DISCOVER_TOPOLOGY
-uint64_t uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_discover_topology(void*_Nonnull ptr
+uint64_t uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_discover_topology(uint64_t ptr
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_FN_METHOD_WADDLECLIENT_DISCOVER_UPLOAD_SERVICE
 #define UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_FN_METHOD_WADDLECLIENT_DISCOVER_UPLOAD_SERVICE
-uint64_t uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_discover_upload_service(void*_Nonnull ptr
+uint64_t uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_discover_upload_service(uint64_t ptr
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_FN_METHOD_WADDLECLIENT_FETCH_DM_HISTORY
 #define UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_FN_METHOD_WADDLECLIENT_FETCH_DM_HISTORY
-uint64_t uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_fetch_dm_history(void*_Nonnull ptr, RustBuffer peer_jid, uint32_t max_messages, RustBuffer before_id
+uint64_t uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_fetch_dm_history(uint64_t ptr, RustBuffer peer_jid, uint32_t max_messages, RustBuffer before_id
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_FN_METHOD_WADDLECLIENT_FETCH_ROOM_HISTORY
 #define UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_FN_METHOD_WADDLECLIENT_FETCH_ROOM_HISTORY
-uint64_t uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_fetch_room_history(void*_Nonnull ptr, RustBuffer room_jid, uint32_t max_messages, RustBuffer before_id
+uint64_t uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_fetch_room_history(uint64_t ptr, RustBuffer room_jid, uint32_t max_messages, RustBuffer before_id
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_FN_METHOD_WADDLECLIENT_JOIN_ROOM
 #define UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_FN_METHOD_WADDLECLIENT_JOIN_ROOM
-uint64_t uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_join_room(void*_Nonnull ptr, RustBuffer room_jid, RustBuffer nick
+uint64_t uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_join_room(uint64_t ptr, RustBuffer room_jid, RustBuffer nick
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_FN_METHOD_WADDLECLIENT_LEAVE_ROOM
 #define UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_FN_METHOD_WADDLECLIENT_LEAVE_ROOM
-uint64_t uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_leave_room(void*_Nonnull ptr, RustBuffer room_jid, RustBuffer nick
+uint64_t uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_leave_room(uint64_t ptr, RustBuffer room_jid, RustBuffer nick
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_FN_METHOD_WADDLECLIENT_REQUEST_AVATAR
 #define UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_FN_METHOD_WADDLECLIENT_REQUEST_AVATAR
-uint64_t uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_request_avatar(void*_Nonnull ptr, RustBuffer jid
+uint64_t uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_request_avatar(uint64_t ptr, RustBuffer jid
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_FN_METHOD_WADDLECLIENT_REQUEST_UPLOAD_SLOT
 #define UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_FN_METHOD_WADDLECLIENT_REQUEST_UPLOAD_SLOT
-uint64_t uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_request_upload_slot(void*_Nonnull ptr, RustBuffer service_jid, RustBuffer filename, uint64_t size, RustBuffer content_type
+uint64_t uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_request_upload_slot(uint64_t ptr, RustBuffer service_jid, RustBuffer filename, uint64_t size, RustBuffer content_type
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_FN_METHOD_WADDLECLIENT_SEND_CALL_FINISH
 #define UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_FN_METHOD_WADDLECLIENT_SEND_CALL_FINISH
-uint64_t uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_send_call_finish(void*_Nonnull ptr, RustBuffer peer_full_jid, RustBuffer sid
+uint64_t uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_send_call_finish(uint64_t ptr, RustBuffer peer_full_jid, RustBuffer sid
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_FN_METHOD_WADDLECLIENT_SEND_CALL_FINISH_MIGRATED
+#define UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_FN_METHOD_WADDLECLIENT_SEND_CALL_FINISH_MIGRATED
+uint64_t uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_send_call_finish_migrated(uint64_t ptr, RustBuffer peer_full_jid, RustBuffer old_sid, RustBuffer new_sid
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_FN_METHOD_WADDLECLIENT_SEND_CALL_PROCEED
 #define UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_FN_METHOD_WADDLECLIENT_SEND_CALL_PROCEED
-uint64_t uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_send_call_proceed(void*_Nonnull ptr, RustBuffer peer_full_jid, RustBuffer sid
+uint64_t uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_send_call_proceed(uint64_t ptr, RustBuffer peer_full_jid, RustBuffer sid
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_FN_METHOD_WADDLECLIENT_SEND_CALL_PROPOSE
 #define UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_FN_METHOD_WADDLECLIENT_SEND_CALL_PROPOSE
-uint64_t uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_send_call_propose(void*_Nonnull ptr, RustBuffer peer_bare_jid, RustBuffer sid, int8_t audio, int8_t video
+uint64_t uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_send_call_propose(uint64_t ptr, RustBuffer peer_bare_jid, RustBuffer sid, int8_t audio, int8_t video
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_FN_METHOD_WADDLECLIENT_SEND_CALL_REJECT
 #define UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_FN_METHOD_WADDLECLIENT_SEND_CALL_REJECT
-uint64_t uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_send_call_reject(void*_Nonnull ptr, RustBuffer peer_full_jid, RustBuffer sid
+uint64_t uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_send_call_reject(uint64_t ptr, RustBuffer peer_full_jid, RustBuffer sid
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_FN_METHOD_WADDLECLIENT_SEND_CALL_REJECT_TIE_BREAK
+#define UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_FN_METHOD_WADDLECLIENT_SEND_CALL_REJECT_TIE_BREAK
+uint64_t uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_send_call_reject_tie_break(uint64_t ptr, RustBuffer peer_full_jid, RustBuffer sid
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_FN_METHOD_WADDLECLIENT_SEND_CALL_RETRACT
 #define UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_FN_METHOD_WADDLECLIENT_SEND_CALL_RETRACT
-uint64_t uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_send_call_retract(void*_Nonnull ptr, RustBuffer peer_bare_jid, RustBuffer sid
+uint64_t uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_send_call_retract(uint64_t ptr, RustBuffer peer_bare_jid, RustBuffer sid
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_FN_METHOD_WADDLECLIENT_SEND_CALL_RETRACT_TIE_BREAK
+#define UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_FN_METHOD_WADDLECLIENT_SEND_CALL_RETRACT_TIE_BREAK
+uint64_t uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_send_call_retract_tie_break(uint64_t ptr, RustBuffer peer_full_jid, RustBuffer sid
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_FN_METHOD_WADDLECLIENT_SEND_CALL_SESSION_ACCEPT
 #define UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_FN_METHOD_WADDLECLIENT_SEND_CALL_SESSION_ACCEPT
-uint64_t uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_send_call_session_accept(void*_Nonnull ptr, RustBuffer peer_full_jid, RustBuffer initiator_full_jid, RustBuffer responder_full_jid, RustBuffer sid, int8_t audio, int8_t video
+uint64_t uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_send_call_session_accept(uint64_t ptr, RustBuffer peer_full_jid, RustBuffer responder_full_jid, RustBuffer sid, int8_t audio, int8_t video
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_FN_METHOD_WADDLECLIENT_SEND_CALL_SESSION_INITIATE
 #define UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_FN_METHOD_WADDLECLIENT_SEND_CALL_SESSION_INITIATE
-uint64_t uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_send_call_session_initiate(void*_Nonnull ptr, RustBuffer peer_full_jid, RustBuffer initiator_full_jid, RustBuffer sid, int8_t audio, int8_t video
+uint64_t uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_send_call_session_initiate(uint64_t ptr, RustBuffer peer_full_jid, RustBuffer initiator_full_jid, RustBuffer sid, int8_t audio, int8_t video
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_FN_METHOD_WADDLECLIENT_SEND_CALL_SESSION_TERMINATE
 #define UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_FN_METHOD_WADDLECLIENT_SEND_CALL_SESSION_TERMINATE
-uint64_t uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_send_call_session_terminate(void*_Nonnull ptr, RustBuffer peer_full_jid, RustBuffer sid, RustBuffer reason
+uint64_t uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_send_call_session_terminate(uint64_t ptr, RustBuffer peer_full_jid, RustBuffer sid, RustBuffer reason
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_FN_METHOD_WADDLECLIENT_SEND_CHAT_MESSAGE
 #define UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_FN_METHOD_WADDLECLIENT_SEND_CHAT_MESSAGE
-uint64_t uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_send_chat_message(void*_Nonnull ptr, RustBuffer peer_jid, RustBuffer body, RustBuffer options
+uint64_t uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_send_chat_message(uint64_t ptr, RustBuffer peer_jid, RustBuffer body, RustBuffer options
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_FN_METHOD_WADDLECLIENT_SEND_GROUPCHAT_MESSAGE
 #define UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_FN_METHOD_WADDLECLIENT_SEND_GROUPCHAT_MESSAGE
-uint64_t uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_send_groupchat_message(void*_Nonnull ptr, RustBuffer room_jid, RustBuffer body, RustBuffer options
+uint64_t uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_send_groupchat_message(uint64_t ptr, RustBuffer room_jid, RustBuffer body, RustBuffer options
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_FN_METHOD_WADDLECLIENT_SEND_PRESENCE
 #define UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_FN_METHOD_WADDLECLIENT_SEND_PRESENCE
-uint64_t uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_send_presence(void*_Nonnull ptr, RustBuffer status, RustBuffer show
+uint64_t uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_send_presence(uint64_t ptr, RustBuffer status, RustBuffer show
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_FN_INIT_CALLBACK_VTABLE_WADDLEEVENTLISTENER
@@ -675,26 +683,6 @@ void ffi_waddle_xmpp_client_ffi_rust_future_free_f64(uint64_t handle
 double ffi_waddle_xmpp_client_ffi_rust_future_complete_f64(uint64_t handle, RustCallStatus *_Nonnull out_status
 );
 #endif
-#ifndef UNIFFI_FFIDEF_FFI_WADDLE_XMPP_CLIENT_FFI_RUST_FUTURE_POLL_POINTER
-#define UNIFFI_FFIDEF_FFI_WADDLE_XMPP_CLIENT_FFI_RUST_FUTURE_POLL_POINTER
-void ffi_waddle_xmpp_client_ffi_rust_future_poll_pointer(uint64_t handle, UniffiRustFutureContinuationCallback _Nonnull callback, uint64_t callback_data
-);
-#endif
-#ifndef UNIFFI_FFIDEF_FFI_WADDLE_XMPP_CLIENT_FFI_RUST_FUTURE_CANCEL_POINTER
-#define UNIFFI_FFIDEF_FFI_WADDLE_XMPP_CLIENT_FFI_RUST_FUTURE_CANCEL_POINTER
-void ffi_waddle_xmpp_client_ffi_rust_future_cancel_pointer(uint64_t handle
-);
-#endif
-#ifndef UNIFFI_FFIDEF_FFI_WADDLE_XMPP_CLIENT_FFI_RUST_FUTURE_FREE_POINTER
-#define UNIFFI_FFIDEF_FFI_WADDLE_XMPP_CLIENT_FFI_RUST_FUTURE_FREE_POINTER
-void ffi_waddle_xmpp_client_ffi_rust_future_free_pointer(uint64_t handle
-);
-#endif
-#ifndef UNIFFI_FFIDEF_FFI_WADDLE_XMPP_CLIENT_FFI_RUST_FUTURE_COMPLETE_POINTER
-#define UNIFFI_FFIDEF_FFI_WADDLE_XMPP_CLIENT_FFI_RUST_FUTURE_COMPLETE_POINTER
-void*_Nonnull ffi_waddle_xmpp_client_ffi_rust_future_complete_pointer(uint64_t handle, RustCallStatus *_Nonnull out_status
-);
-#endif
 #ifndef UNIFFI_FFIDEF_FFI_WADDLE_XMPP_CLIENT_FFI_RUST_FUTURE_POLL_RUST_BUFFER
 #define UNIFFI_FFIDEF_FFI_WADDLE_XMPP_CLIENT_FFI_RUST_FUTURE_POLL_RUST_BUFFER
 void ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer(uint64_t handle, UniffiRustFutureContinuationCallback _Nonnull callback, uint64_t callback_data
@@ -738,193 +726,211 @@ void ffi_waddle_xmpp_client_ffi_rust_future_complete_void(uint64_t handle, RustC
 #ifndef UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_CHECKSUM_METHOD_WADDLECLIENT_CONNECT
 #define UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_CHECKSUM_METHOD_WADDLECLIENT_CONNECT
 uint16_t uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_connect(void
-    
+
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_CHECKSUM_METHOD_WADDLECLIENT_DISCONNECT
 #define UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_CHECKSUM_METHOD_WADDLECLIENT_DISCONNECT
 uint16_t uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_disconnect(void
-    
+
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_CHECKSUM_METHOD_WADDLECLIENT_DISCOVER_TOPOLOGY
 #define UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_CHECKSUM_METHOD_WADDLECLIENT_DISCOVER_TOPOLOGY
 uint16_t uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_discover_topology(void
-    
+
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_CHECKSUM_METHOD_WADDLECLIENT_DISCOVER_UPLOAD_SERVICE
 #define UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_CHECKSUM_METHOD_WADDLECLIENT_DISCOVER_UPLOAD_SERVICE
 uint16_t uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_discover_upload_service(void
-    
+
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_CHECKSUM_METHOD_WADDLECLIENT_FETCH_DM_HISTORY
 #define UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_CHECKSUM_METHOD_WADDLECLIENT_FETCH_DM_HISTORY
 uint16_t uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_dm_history(void
-    
+
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_CHECKSUM_METHOD_WADDLECLIENT_FETCH_ROOM_HISTORY
 #define UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_CHECKSUM_METHOD_WADDLECLIENT_FETCH_ROOM_HISTORY
 uint16_t uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_room_history(void
-    
+
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_CHECKSUM_METHOD_WADDLECLIENT_JOIN_ROOM
 #define UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_CHECKSUM_METHOD_WADDLECLIENT_JOIN_ROOM
 uint16_t uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_join_room(void
-    
+
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_CHECKSUM_METHOD_WADDLECLIENT_LEAVE_ROOM
 #define UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_CHECKSUM_METHOD_WADDLECLIENT_LEAVE_ROOM
 uint16_t uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_leave_room(void
-    
+
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_CHECKSUM_METHOD_WADDLECLIENT_REQUEST_AVATAR
 #define UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_CHECKSUM_METHOD_WADDLECLIENT_REQUEST_AVATAR
 uint16_t uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_request_avatar(void
-    
+
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_CHECKSUM_METHOD_WADDLECLIENT_REQUEST_UPLOAD_SLOT
 #define UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_CHECKSUM_METHOD_WADDLECLIENT_REQUEST_UPLOAD_SLOT
 uint16_t uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_request_upload_slot(void
-    
+
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_CHECKSUM_METHOD_WADDLECLIENT_SEND_CALL_FINISH
 #define UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_CHECKSUM_METHOD_WADDLECLIENT_SEND_CALL_FINISH
 uint16_t uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_finish(void
-    
+
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_CHECKSUM_METHOD_WADDLECLIENT_SEND_CALL_FINISH_MIGRATED
+#define UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_CHECKSUM_METHOD_WADDLECLIENT_SEND_CALL_FINISH_MIGRATED
+uint16_t uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_finish_migrated(void
+
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_CHECKSUM_METHOD_WADDLECLIENT_SEND_CALL_PROCEED
 #define UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_CHECKSUM_METHOD_WADDLECLIENT_SEND_CALL_PROCEED
 uint16_t uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_proceed(void
-    
+
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_CHECKSUM_METHOD_WADDLECLIENT_SEND_CALL_PROPOSE
 #define UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_CHECKSUM_METHOD_WADDLECLIENT_SEND_CALL_PROPOSE
 uint16_t uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_propose(void
-    
+
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_CHECKSUM_METHOD_WADDLECLIENT_SEND_CALL_REJECT
 #define UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_CHECKSUM_METHOD_WADDLECLIENT_SEND_CALL_REJECT
 uint16_t uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_reject(void
-    
+
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_CHECKSUM_METHOD_WADDLECLIENT_SEND_CALL_REJECT_TIE_BREAK
+#define UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_CHECKSUM_METHOD_WADDLECLIENT_SEND_CALL_REJECT_TIE_BREAK
+uint16_t uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_reject_tie_break(void
+
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_CHECKSUM_METHOD_WADDLECLIENT_SEND_CALL_RETRACT
 #define UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_CHECKSUM_METHOD_WADDLECLIENT_SEND_CALL_RETRACT
 uint16_t uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_retract(void
-    
+
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_CHECKSUM_METHOD_WADDLECLIENT_SEND_CALL_RETRACT_TIE_BREAK
+#define UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_CHECKSUM_METHOD_WADDLECLIENT_SEND_CALL_RETRACT_TIE_BREAK
+uint16_t uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_retract_tie_break(void
+
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_CHECKSUM_METHOD_WADDLECLIENT_SEND_CALL_SESSION_ACCEPT
 #define UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_CHECKSUM_METHOD_WADDLECLIENT_SEND_CALL_SESSION_ACCEPT
 uint16_t uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_session_accept(void
-    
+
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_CHECKSUM_METHOD_WADDLECLIENT_SEND_CALL_SESSION_INITIATE
 #define UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_CHECKSUM_METHOD_WADDLECLIENT_SEND_CALL_SESSION_INITIATE
 uint16_t uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_session_initiate(void
-    
+
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_CHECKSUM_METHOD_WADDLECLIENT_SEND_CALL_SESSION_TERMINATE
 #define UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_CHECKSUM_METHOD_WADDLECLIENT_SEND_CALL_SESSION_TERMINATE
 uint16_t uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_session_terminate(void
-    
+
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_CHECKSUM_METHOD_WADDLECLIENT_SEND_CHAT_MESSAGE
 #define UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_CHECKSUM_METHOD_WADDLECLIENT_SEND_CHAT_MESSAGE
 uint16_t uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_chat_message(void
-    
+
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_CHECKSUM_METHOD_WADDLECLIENT_SEND_GROUPCHAT_MESSAGE
 #define UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_CHECKSUM_METHOD_WADDLECLIENT_SEND_GROUPCHAT_MESSAGE
 uint16_t uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_groupchat_message(void
-    
+
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_CHECKSUM_METHOD_WADDLECLIENT_SEND_PRESENCE
 #define UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_CHECKSUM_METHOD_WADDLECLIENT_SEND_PRESENCE
 uint16_t uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_presence(void
-    
+
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_CHECKSUM_CONSTRUCTOR_WADDLECLIENT_NEW
 #define UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_CHECKSUM_CONSTRUCTOR_WADDLECLIENT_NEW
 uint16_t uniffi_waddle_xmpp_client_ffi_checksum_constructor_waddleclient_new(void
-    
+
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_CHECKSUM_METHOD_WADDLEEVENTLISTENER_ON_MESSAGE
 #define UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_CHECKSUM_METHOD_WADDLEEVENTLISTENER_ON_MESSAGE
 uint16_t uniffi_waddle_xmpp_client_ffi_checksum_method_waddleeventlistener_on_message(void
-    
+
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_CHECKSUM_METHOD_WADDLEEVENTLISTENER_ON_PRESENCE
 #define UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_CHECKSUM_METHOD_WADDLEEVENTLISTENER_ON_PRESENCE
 uint16_t uniffi_waddle_xmpp_client_ffi_checksum_method_waddleeventlistener_on_presence(void
-    
+
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_CHECKSUM_METHOD_WADDLEEVENTLISTENER_ON_MAM_RESULT
 #define UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_CHECKSUM_METHOD_WADDLEEVENTLISTENER_ON_MAM_RESULT
 uint16_t uniffi_waddle_xmpp_client_ffi_checksum_method_waddleeventlistener_on_mam_result(void
-    
+
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_CHECKSUM_METHOD_WADDLEEVENTLISTENER_ON_MESSAGE_DELIVERY_ACKED
 #define UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_CHECKSUM_METHOD_WADDLEEVENTLISTENER_ON_MESSAGE_DELIVERY_ACKED
 uint16_t uniffi_waddle_xmpp_client_ffi_checksum_method_waddleeventlistener_on_message_delivery_acked(void
-    
+
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_CHECKSUM_METHOD_WADDLEEVENTLISTENER_ON_MESSAGE_DELIVERY_FAILED
 #define UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_CHECKSUM_METHOD_WADDLEEVENTLISTENER_ON_MESSAGE_DELIVERY_FAILED
 uint16_t uniffi_waddle_xmpp_client_ffi_checksum_method_waddleeventlistener_on_message_delivery_failed(void
-    
+
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_CHECKSUM_METHOD_WADDLEEVENTLISTENER_ON_CONNECTED
 #define UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_CHECKSUM_METHOD_WADDLEEVENTLISTENER_ON_CONNECTED
 uint16_t uniffi_waddle_xmpp_client_ffi_checksum_method_waddleeventlistener_on_connected(void
-    
+
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_CHECKSUM_METHOD_WADDLEEVENTLISTENER_ON_DISCONNECTED
 #define UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_CHECKSUM_METHOD_WADDLEEVENTLISTENER_ON_DISCONNECTED
 uint16_t uniffi_waddle_xmpp_client_ffi_checksum_method_waddleeventlistener_on_disconnected(void
-    
+
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_CHECKSUM_METHOD_WADDLEEVENTLISTENER_ON_ERROR
 #define UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_CHECKSUM_METHOD_WADDLEEVENTLISTENER_ON_ERROR
 uint16_t uniffi_waddle_xmpp_client_ffi_checksum_method_waddleeventlistener_on_error(void
-    
+
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_CHECKSUM_METHOD_WADDLEEVENTLISTENER_ON_CALL
 #define UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_CHECKSUM_METHOD_WADDLEEVENTLISTENER_ON_CALL
 uint16_t uniffi_waddle_xmpp_client_ffi_checksum_method_waddleeventlistener_on_call(void
-    
+
 );
 #endif
 #ifndef UNIFFI_FFIDEF_FFI_WADDLE_XMPP_CLIENT_FFI_UNIFFI_CONTRACT_VERSION
 #define UNIFFI_FFIDEF_FFI_WADDLE_XMPP_CLIENT_FFI_UNIFFI_CONTRACT_VERSION
 uint32_t ffi_waddle_xmpp_client_ffi_uniffi_contract_version(void
-    
+
 );
 #endif
 

@@ -23,13 +23,13 @@ describe("call-store reducer", () => {
   test("propose transitions idle → incoming", () => {
     const next = reduceCallState({ phase: "idle" }, {
       kind: "propose",
-      from: "alice@waddle.test",
+      from: "alice@waddle.test/desktop",
       sid: "c1",
       media: audioVideo,
     });
     expect(next).toEqual({
       phase: "incoming",
-      from: "alice@waddle.test",
+      from: "alice@waddle.test/desktop",
       sid: "c1",
       media: audioVideo,
     });
@@ -38,14 +38,15 @@ describe("call-store reducer", () => {
   test("propose is ignored when already in an active call", () => {
     const current = {
       phase: "active" as const,
-      peer: "carol@waddle.test",
+      peer: "carol@waddle.test/desktop",
       sid: "c0",
       media: audioVideo,
       join,
+      kind: "dm",
     };
     const next = reduceCallState(current, {
       kind: "propose",
-      from: "dave@waddle.test",
+      from: "dave@waddle.test/phone",
       sid: "c2",
       media: audioVideo,
     });
@@ -61,7 +62,7 @@ describe("call-store reducer", () => {
     const next = reduceCallState(
       {
         phase: "incoming",
-        from: "alice@waddle.test",
+        from: "alice@waddle.test/desktop",
         sid: "c1",
         media: audioVideo,
       },
@@ -80,6 +81,7 @@ describe("call-store reducer", () => {
       media: audioVideo,
       join,
       kind: "dm",
+      initiator: "alice@waddle.test/desktop",
     });
   });
 
@@ -87,12 +89,13 @@ describe("call-store reducer", () => {
     const next = reduceCallState(
       {
         phase: "active",
-        peer: "alice@waddle.test",
+        peer: "alice@waddle.test/desktop",
         sid: "c1",
         media: audioVideo,
         join,
+      kind: "dm",
       },
-      { kind: "session-terminate", from: "alice@waddle.test", sid: "c1", reason: "success" },
+      { kind: "session-terminate", from: "alice@waddle.test/desktop", sid: "c1", reason: "success" },
     );
     expect(next).toEqual({ phase: "ended", sid: "c1", reason: "success" });
   });
@@ -101,11 +104,11 @@ describe("call-store reducer", () => {
     const next = reduceCallState(
       {
         phase: "incoming",
-        from: "alice@waddle.test",
+        from: "alice@waddle.test/desktop",
         sid: "c1",
         media: audioVideo,
       },
-      { kind: "finish", from: "alice@waddle.test", sid: "c1" },
+      { kind: "finish", from: "alice@waddle.test/desktop", sid: "c1" },
     );
     expect(next).toEqual({ phase: "ended", sid: "c1", reason: null });
   });
@@ -113,7 +116,7 @@ describe("call-store reducer", () => {
   test("reject from idle is a no-op", () => {
     const next = reduceCallState({ phase: "idle" }, {
       kind: "reject",
-      from: "alice@waddle.test",
+      from: "alice@waddle.test/desktop",
       sid: "c1",
     });
     expect(next).toEqual({ phase: "idle" });
@@ -123,11 +126,11 @@ describe("call-store reducer", () => {
     const next = reduceCallState(
       {
         phase: "incoming",
-        from: "alice@waddle.test",
+        from: "alice@waddle.test/desktop",
         sid: "c1",
         media: audioVideo,
       },
-      { kind: "retract", from: "alice@waddle.test", sid: "c1" },
+      { kind: "retract", from: "alice@waddle.test/desktop", sid: "c1" },
     );
     expect(next).toEqual({ phase: "ended", sid: "c1", reason: "retract" });
   });
@@ -137,13 +140,13 @@ describe("call-store reducer", () => {
     expect($callState.get()).toEqual({ phase: "idle" });
     applyCallEvent({
       kind: "propose",
-      from: "alice@waddle.test",
+      from: "alice@waddle.test/desktop",
       sid: "c1",
       media: audioVideo,
     });
     expect($callState.get()).toEqual({
       phase: "incoming",
-      from: "alice@waddle.test",
+      from: "alice@waddle.test/desktop",
       sid: "c1",
       media: audioVideo,
     });
@@ -212,7 +215,7 @@ describe("call-store reducer", () => {
         sid: "c9",
         media: audioVideo,
       },
-      { kind: "reject", from: "bob@waddle.test", sid: "c9" },
+      { kind: "reject", from: "bob@waddle.test/desktop", sid: "c9" },
     );
     expect(next).toEqual({ phase: "ended", sid: "c9", reason: "reject" });
   });
@@ -225,7 +228,7 @@ describe("call-store reducer", () => {
         sid: "c9",
         media: audioVideo,
       },
-      { kind: "retract", from: "alice@waddle.test", sid: "c9" },
+      { kind: "retract", from: "alice@waddle.test/desktop", sid: "c9" },
     );
     expect(next).toEqual({ phase: "ended", sid: "c9", reason: "retract" });
   });
@@ -247,7 +250,7 @@ describe("call-store reducer", () => {
   test("session-initiate is dropped when sid does not match incoming", () => {
     const current = {
       phase: "incoming" as const,
-      from: "alice@waddle.test",
+      from: "alice@waddle.test/desktop",
       sid: "c-live",
       media: audioVideo,
     };
@@ -297,6 +300,7 @@ describe("call-store reducer", () => {
       sid: "c-live",
       media: audioVideo,
       join,
+      kind: "dm",
     };
     const next = reduceCallState(current, {
       kind: "session-terminate",
@@ -314,6 +318,7 @@ describe("call-store reducer", () => {
       sid: "c-live",
       media: audioVideo,
       join,
+      kind: "dm",
     };
     const next = reduceCallState(current, {
       kind: "finish",
@@ -332,7 +337,7 @@ describe("call-store reducer", () => {
     };
     const next = reduceCallState(current, {
       kind: "reject",
-      from: "bob@waddle.test",
+      from: "bob@waddle.test/desktop",
       sid: "c-stale",
     });
     expect(next).toBe(current);
@@ -345,10 +350,11 @@ describe("call-store reducer", () => {
       sid: "c-live",
       media: audioVideo,
       join,
+      kind: "dm",
     };
     const next = reduceCallState(current, {
       kind: "propose",
-      from: "dave@waddle.test",
+      from: "dave@waddle.test/phone",
       sid: "c-new",
       media: audioVideo,
     });
