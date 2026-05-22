@@ -103,11 +103,14 @@ static PUSH_CANDIDATE_COALESCED: AtomicU64 = AtomicU64::new(0);
 
 // `waddle_push_outbox_published_total`: every successful
 // `publish_claimed_job` outcome (the typed
-// `NotificationOutboxPublishOutcome::Published` arm). This is the
-// "got a XEP-0357 publish past the Push Service boundary" counter
-// — separate from provider delivery (which #528/#529/#530 will
-// observe). Difference between this and candidates_created over a
-// window equals coalesced + in-flight + suppressed-at-T1.
+// `NotificationOutboxPublishOutcome::Published` arm). The
+// XEP-0060 §7.1 `<publish>` IQ to the user-server's Push Service
+// node was accepted — i.e. the `push_publish_jobs` row was
+// created. Provider-side fanout (Web/APNs/FCM) happens
+// asynchronously and is observed by separate counters landing
+// alongside #528/#529/#530; this counter stops at the XMPP layer.
+// Difference between this and candidates_created over a window
+// equals coalesced + in-flight + suppressed-at-T1.
 static PUSH_OUTBOX_PUBLISHED: AtomicU64 = AtomicU64::new(0);
 
 // `waddle_push_outbox_retry_scheduled_total{reason}`: every
@@ -563,7 +566,7 @@ pub fn render_metrics() -> String {
             "# HELP waddle_push_candidate_coalesced_total XEP-0357 notification candidate insertions that hit the existing PRIMARY KEY (the `Duplicate` arm of `insert_candidate`). A sustained non-zero is normal retry/replay traffic; a spike often signals an upstream retry loop.\n",
             "# TYPE waddle_push_candidate_coalesced_total counter\n",
             "waddle_push_candidate_coalesced_total {push_candidate_coalesced}\n",
-            "# HELP waddle_push_outbox_published_total XEP-0357 outbox jobs that successfully published past the Push Service boundary. Provider-side delivery is observed separately by the per-provider counters in #528/#529/#530.\n",
+            "# HELP waddle_push_outbox_published_total XEP-0357 outbox jobs whose `<iq type='set'><pubsub><publish/></pubsub></iq>` to the Push Service node was accepted (the corresponding `push_publish_jobs` row is created — XEP-0060 §7.1 publish success at the XMPP boundary). Per-provider fanout (Web/APNs/FCM) and provider acknowledgement are observed separately by the counters landing alongside #528/#529/#530; this counter stops at the XMPP layer.\n",
             "# TYPE waddle_push_outbox_published_total counter\n",
             "waddle_push_outbox_published_total {push_outbox_published}\n",
             "# HELP waddle_push_outbox_retry_scheduled_total XEP-0357 outbox jobs that failed transiently and were requeued with a backoff. Sustained non-zero with flat published_total indicates the Push Service boundary is wedged. Labeled by the typed transient-failure reason; the closed-set values land alongside the provider slices in #528/#529/#530 (`5xx`, `timeout`, `auth`, `unknown`) — today the bucket is single `reason=\"unknown\"` so PromQL alerts written now match all future variants.\n",

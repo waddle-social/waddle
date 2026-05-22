@@ -1,28 +1,49 @@
 //! Restart-durability integration test for the XEP-0357 push pipeline
 //! (#531 partial slice).
 //!
-//! Proves that the durable rows in the notification pipeline —
+//! Proves that the **push-pipeline** durable rows —
 //! XEP-0357 registrations (`push_registrations`, `push_nodes`,
 //! `push_devices`), T0 candidates (`notification_candidates`), and T1
-//! outbox jobs (`notification_outbox`) — survive a server restart and
-//! that the freshly-started server picks up the surviving state and
-//! drains it to a Push Service publish without re-emitting duplicate
-//! candidates.
+//! outbox jobs (`notification_outbox`) — survive a server restart
+//! pointed at the same SQLite file, AND that the second server does
+//! not insert duplicate rows when resuming the pipeline.
 //!
-//! The harness pattern is:
+//! ## Scope
+//!
+//! `ws_common::TestServer::start_persistent_with_extra_accounts`
+//! only points `WADDLE_DATABASE_URL` (the user-server / push-pipeline
+//! database) at the on-disk file. The harness leaves MAM
+//! (`WADDLE_XMPP_MAM_DATABASE_URL`), inbox, stream-management,
+//! pending-delivery, and pubsub-event databases at `sqlite::memory:`
+//! per `ws_common/mod.rs`. Those XMPP surfaces therefore reset on
+//! restart in this test — separate restart-durability tests would
+//! be required to assert their persistence. This test scope is
+//! deliberately narrow to the **push-pipeline** durable rows
+//! enumerated above; the test passes iff those rows survive AND no
+//! duplicate row appears post-restart.
+//!
+//! ## Harness pattern
 //!
 //! 1. Spawn a `waddle-server` against a persistent SQLite file.
 //! 2. Bob registers a device + enables XEP-0357 push.
-//! 3. Admin sends an offline DM — this commits the durable rows
-//!    (pending delivery, MAM, inbox) before T0 candidate insertion.
+//! 3. Admin sends an offline DM. The push-pipeline T0 emission path
+//!    writes the durable `notification_candidates` row regardless
+//!    of whether the in-memory MAM/inbox/offline-storage surfaces
+//!    also persisted (those are out of scope for THIS test).
 //! 4. Poll the SQLite file directly until a `notification_candidates`
 //!    row exists for Bob, confirming T0 wrote the durable row.
 //! 5. Kill the first server (via `Drop`).
 //! 6. Spawn a second `waddle-server` against the SAME SQLite file.
-//! 7. Assert via SQL: registration row, candidate row, and (if it
-//!    already ran) outbox job row all survive AND the new server
-//!    continues the pipeline to a Push Service publish without
-//!    inserting a duplicate candidate.
+//! 7. Assert via SQL: registration row, candidate-or-outbox row, and
+//!    push_devices row all survive AND no duplicate candidate row was
+//!    inserted by the second server (the PRIMARY KEY contract on
+//!    `notification_candidates` forces an idempotent re-emission to
+//!    collapse via the `Duplicate` arm of `insert_candidate`).
+//!
+//! The publish-completing-after-restart path is exercised by
+//! `xep0357_offline_dm_emits_durable_summary_pubsub_publish_job` on a
+//! single server; this test deliberately stays focused on durability
+//! so the assertion is insensitive to second-server warmup timing.
 
 mod ws_common;
 
