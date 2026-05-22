@@ -262,6 +262,46 @@ fn xep0513_permissions_form_omits_channel_when_not_advertised() {
     );
 }
 
+#[test]
+fn xep0513_permissions_form_omits_unadvertised_fields() {
+    // §303: "All other fields are OPTIONAL, but they MUST be present
+    // if and only if the corresponding feature is advertised in
+    // service discovery." Waddle deliberately doesn't advertise
+    // `mentions#space`, `mentions#server`, `mentions#associations`,
+    // or `mentions#hats` (see scope discipline on #525); the form
+    // builder MUST therefore NEVER emit those `var` attributes,
+    // regardless of `MentionsPermissions` field values. This pin
+    // closes the form-builder side of slice 3d's classifier-side
+    // unsupported-groups pin (adversarial §303-alignment review on
+    // PR #756).
+    let policy = MentionsPermissions::server_default();
+    let query = build_mentions_permissions_query(&policy);
+    let form = query
+        .get_child("x", NS_DATA_FORMS)
+        .expect("§303 form payload");
+
+    let advertised_vars: std::collections::BTreeSet<&str> = form
+        .children()
+        .filter(|c| c.is("field", NS_DATA_FORMS))
+        .filter_map(|c| c.attr("var"))
+        .collect();
+
+    let unadvertised_vars = [
+        "mentions#space",
+        "mentions#server",
+        "mentions#associations",
+        "mentions#hats",
+    ];
+    for unadvertised in unadvertised_vars {
+        assert!(
+            !advertised_vars.contains(unadvertised),
+            "§303 form MUST NOT emit `var='{unadvertised}'` — Waddle \
+             does not advertise the corresponding feature. Found: \
+             {advertised_vars:?}"
+        );
+    }
+}
+
 // ── §3 wire shape ────────────────────────────────────────────────────
 
 #[test]
