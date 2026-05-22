@@ -1,6 +1,14 @@
 # Push Notification Pipeline — XEP Coverage Table
 
-This document maps every #531 acceptance-criteria scenario to the XEPs it covers and the specific test name(s) that verify each scenario. It satisfies the #531 AC item *"Final test suite documents which XEPs each scenario covers"*.
+## Overview
+
+This document satisfies the #531 acceptance-criteria item *"Final test suite documents which XEPs each scenario covers"*. It maps every push-pipeline scenario (offline DM, MUC mention, channel/everyone, `<active/>` filter, XEP-0492 levels, DND, blocking, `<no-store/>`, restart-durability, payload privacy, sender self-suppression) to:
+
+- the XEPs the scenario exercises,
+- the specific test function name(s) that pin the scenario,
+- the file each test lives in.
+
+A separate table at the end maps each `waddle_push_*_total` Prometheus counter to its pipeline boundary and HELP-text location, so a future maintainer can audit metric ownership at a glance.
 
 Line offsets are deliberately omitted — they drift on every edit. Each test is identified by **function name + the module/file it lives in** so `grep -rn "fn <name>"` resolves it.
 
