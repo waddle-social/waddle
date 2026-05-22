@@ -270,6 +270,98 @@ async fn mentions_permissions_iq_set_returns_feature_not_implemented() {
         frame.contains("<feature-not-implemented"),
         "expected feature-not-implemented condition, got: {frame}"
     );
+    // §295 error example echoes the `<query xmlns='urn:xmpp:mentions:0'/>`
+    // alongside `<error/>` — verify the response contract matches.
+    assert!(
+        frame.contains("urn:xmpp:mentions:0"),
+        "error envelope must echo §295 <query/>, got: {frame}"
+    );
 
     let _ = client.close().await;
+}
+
+/// XEP-0513 §295: bare-room-JID is mandatory in `to`. A full-JID
+/// target (`room@muc.…/nick`) is room-meaningless because permissions
+/// are room-scoped; the handler returns `<bad-request/>` with the
+/// `<query xmlns='urn:xmpp:mentions:0'/>` echoed alongside `<error/>`
+/// per the §295 error example.
+#[tokio::test]
+async fn mentions_permissions_iq_full_jid_target_returns_bad_request_with_query_echo() {
+    let _guard = TEST_SERIAL.lock().await;
+    let (_server, mut client) = setup().await;
+    let room = format!("perms-fjid-{}@muc.{DOMAIN}", uuid::Uuid::new_v4());
+    let occupant_nick = USERNAME;
+    let _occupant_id = join_room(&mut client, &room).await;
+
+    let iq_id = "perm-fjid-1";
+    client
+        .send(&format!(
+            r#"<iq type="get" to="{room}/{occupant_nick}" id="{iq_id}"><query xmlns="urn:xmpp:mentions:0"/></iq>"#
+        ))
+        .await
+        .expect("send §295 query to full JID");
+
+    let frame = client
+        .recv_matching(|frame| {
+            frame.contains(&format!("id='{iq_id}'")) || frame.contains(&format!("id=\"{iq_id}\""))
+        })
+        .await
+        .expect("§295 bad-request response");
+
+    assert!(
+        frame.contains("type='error'") || frame.contains("type=\"error\""),
+        "expected iq error, got: {frame}"
+    );
+    assert!(
+        frame.contains("<bad-request"),
+        "expected bad-request, got: {frame}"
+    );
+    // §295 error example echoes the `<query xmlns='urn:xmpp:mentions:0'/>`.
+    assert!(
+        frame.contains("urn:xmpp:mentions:0"),
+        "error envelope must echo the §295 <query/>, got: {frame}"
+    );
+}
+
+/// XEP-0513 §295: the service JID itself (`to='muc.example'`, no
+/// node) is not a room and has no §303 permissions form. Returns
+/// `<bad-request/>` with the same `<query/>` echo as the full-JID
+/// rejection above.
+#[tokio::test]
+async fn mentions_permissions_iq_service_jid_target_returns_bad_request_with_query_echo() {
+    let _guard = TEST_SERIAL.lock().await;
+    let (_server, mut client) = setup().await;
+    let _ = join_room(
+        &mut client,
+        &format!("perms-svc-warmup-{}@muc.{DOMAIN}", uuid::Uuid::new_v4()),
+    )
+    .await;
+
+    let iq_id = "perm-svc-1";
+    client
+        .send(&format!(
+            r#"<iq type="get" to="muc.{DOMAIN}" id="{iq_id}"><query xmlns="urn:xmpp:mentions:0"/></iq>"#
+        ))
+        .await
+        .expect("send §295 query to service JID");
+
+    let frame = client
+        .recv_matching(|frame| {
+            frame.contains(&format!("id='{iq_id}'")) || frame.contains(&format!("id=\"{iq_id}\""))
+        })
+        .await
+        .expect("§295 service-JID response");
+
+    assert!(
+        frame.contains("type='error'") || frame.contains("type=\"error\""),
+        "expected iq error, got: {frame}"
+    );
+    assert!(
+        frame.contains("<bad-request"),
+        "expected bad-request, got: {frame}"
+    );
+    assert!(
+        frame.contains("urn:xmpp:mentions:0"),
+        "error envelope must echo the §295 <query/>, got: {frame}"
+    );
 }

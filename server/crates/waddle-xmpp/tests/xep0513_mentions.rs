@@ -109,6 +109,23 @@ fn xep0513_mentions_permissions_query_recogniser_pins_name_and_ns() {
 }
 
 #[test]
+fn xep0513_mention_permission_wire_values_and_labels_match_spec() {
+    // §303 form definition: option values are `participants`,
+    // `moderators`, `none`; the matching labels are `Participants`,
+    // `Moderators Only`, `Nobody`. Pin both — a single-character
+    // drift on the wire would silently desync the form's `<value/>`
+    // from the option `<value/>` and clients would reject the
+    // submission.
+    assert_eq!(MentionsPermission::Participants.as_wire(), "participants");
+    assert_eq!(MentionsPermission::Moderators.as_wire(), "moderators");
+    assert_eq!(MentionsPermission::Nobody.as_wire(), "none");
+
+    assert_eq!(MentionsPermission::Participants.label(), "Participants");
+    assert_eq!(MentionsPermission::Moderators.label(), "Moderators Only");
+    assert_eq!(MentionsPermission::Nobody.label(), "Nobody");
+}
+
+#[test]
 fn xep0513_default_permissions_match_server_policy() {
     let policy = MentionsPermissions::server_default();
     // §301 example value for the count threshold; mirrored in the

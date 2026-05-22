@@ -38,16 +38,19 @@ use jid::FullJid;
 use std::str::FromStr;
 use waddle_xmpp::xep::{
     build_mentions_permissions_query, is_mentions_permissions_query, MentionsPermissions,
+    NS_EXPLICIT_MENTIONS,
 };
 use xmpp_parsers::iq::Iq;
 
 /// Detects an XEP-0513 §295 query (`<iq type='get'><query
-/// xmlns='urn:xmpp:mentions:0'/></iq>` targeting a MUC room JID) or a
-/// matching `type='set'` (so the dispatcher routes both to this
-/// handler — the set arm returns `<feature-not-implemented/>` rather
-/// than falling through to the generic "Unhandled IQ" path which
-/// would also return feature-not-implemented but without the typed
-/// `<query/>` echo §295 implies).
+/// xmlns='urn:xmpp:mentions:0'/></iq>` targeting the MUC service
+/// domain) or a matching `type='set'` — the dispatcher routes both
+/// arms to this handler so the set path produces a §295-shaped error
+/// rather than fall through to the generic "Unhandled IQ" path. The
+/// handler then enforces the §295 addressing contract (bare room
+/// JID) and emits typed `<bad-request/>` for service-JID or
+/// full-JID targets, so the client gets a precise diagnostic
+/// instead of a vague feature-not-implemented.
 pub(super) fn is_mentions_permissions_iq(iq: &Iq, muc_domain: &str) -> bool {
     let payload = match iq {
         Iq::Get { payload, .. } | Iq::Set { payload, .. } => payload,
@@ -67,16 +70,30 @@ pub(super) async fn handle_mentions_permissions_iq(
     response_to: Option<&str>,
 ) -> Vec<String> {
     let Some(target) = iq.to() else {
-        return vec![build_iq_error_xml_typed(
-            iq.id(),
+        return vec![mentions_permissions_error(
+            iq,
             response_from,
             response_to,
             bad_request_iq_error("Mentions-permissions query requires a room JID in 'to'."),
         )];
     };
+    if target.node().is_none() {
+        // `to='muc.example'` — service-JID target. §295 is per-room;
+        // there is no service-wide permissions form.
+        return vec![mentions_permissions_error(
+            iq,
+            response_from,
+            response_to,
+            bad_request_iq_error(
+                "Mentions-permissions query 'to' must be a bare room JID, not the MUC service.",
+            ),
+        )];
+    }
     if target.resource().is_some() {
-        return vec![build_iq_error_xml_typed(
-            iq.id(),
+        // `to='room@muc.example/nick'` — full-JID target. Permissions
+        // are room-scoped, not occupant-scoped.
+        return vec![mentions_permissions_error(
+            iq,
             response_from,
             response_to,
             bad_request_iq_error("Mentions-permissions query 'to' must be a bare room JID."),
@@ -95,8 +112,8 @@ pub(super) async fn handle_mentions_permissions_iq(
             };
             vec![iq_to_xml(response)]
         }
-        Iq::Set { .. } => vec![build_iq_error_xml_typed(
-            iq.id(),
+        Iq::Set { .. } => vec![mentions_permissions_error(
+            iq,
             response_from,
             response_to,
             feature_not_implemented_iq_error(
@@ -107,10 +124,47 @@ pub(super) async fn handle_mentions_permissions_iq(
     }
 }
 
+/// Build a `<iq type='error'/>` for a §295 query that ECHOES the
+/// original `<query xmlns='urn:xmpp:mentions:0'/>` payload, per the
+/// XEP-0513 §295 error example (xeps/xep-0513.xml §"permissions"):
+///
+/// ```xml
+/// <iq from='room@…' to='user@…' type='error' id='…'>
+///   <query xmlns='urn:xmpp:mentions:0'/>
+///   <error type='auth'>
+///     <forbidden xmlns='urn:ietf:params:xml:ns:xmpp-stanzas'/>
+///   </error>
+/// </iq>
+/// ```
+///
+/// RFC 6120 §8.3.1 makes the original-payload echo a MAY for stanza
+/// errors in general; XEP-0513 §295 elevates it for this IQ by
+/// showing it in the canonical example. Echoing the empty
+/// `<query xmlns='urn:xmpp:mentions:0'/>` (not the full request
+/// payload — RFC says "the original XML which caused the error" but
+/// the §295 example uses the empty-query shape) makes the response
+/// recognisable as the §295 error contract.
+fn mentions_permissions_error(
+    iq: &Iq,
+    response_from: Option<&str>,
+    response_to: Option<&str>,
+    error: xmpp_parsers::stanza_error::StanzaError,
+) -> String {
+    let response = Iq::Error {
+        from: response_from.and_then(|s| jid::Jid::from_str(s).ok()),
+        to: response_to.and_then(|s| jid::Jid::from_str(s).ok()),
+        id: iq.id().to_string(),
+        error,
+        payload: Some(
+            xmpp_parsers::minidom::Element::builder("query", NS_EXPLICIT_MENTIONS).build(),
+        ),
+    };
+    iq_to_xml(response)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use waddle_xmpp::xep::NS_EXPLICIT_MENTIONS;
     use xmpp_parsers::minidom::Element;
 
     fn iq_get(payload: Element, to: Option<&str>) -> Iq {
@@ -202,4 +256,75 @@ mod tests {
         };
         assert!(!is_mentions_permissions_iq(&error, "muc.example"));
     }
+
+    /// The routing predicate is intentionally permissive on `to`
+    /// (domain + namespace), so the service-JID case
+    /// (`to='muc.example'`) reaches the handler and gets a typed
+    /// `<bad-request/>` rather than falling through. Pinning the
+    /// predicate keeps that contract explicit.
+    #[test]
+    fn is_mentions_permissions_iq_routes_service_jid_for_typed_error() {
+        let iq = iq_get(mentions_payload(), Some("muc.example"));
+        assert!(is_mentions_permissions_iq(&iq, "muc.example"));
+    }
+
+    /// Same rationale for the full-JID case: the predicate routes,
+    /// the handler validates and returns `<bad-request/>`.
+    #[test]
+    fn is_mentions_permissions_iq_routes_full_jid_for_typed_error() {
+        let iq = iq_get(mentions_payload(), Some("team@muc.example/nick"));
+        assert!(is_mentions_permissions_iq(&iq, "muc.example"));
+    }
+
+    fn build_error(stanza_error: xmpp_parsers::stanza_error::StanzaError) -> String {
+        let iq = iq_get(mentions_payload(), Some("team@muc.example"));
+        mentions_permissions_error(
+            &iq,
+            Some("team@muc.example"),
+            Some("user@example.com/resource"),
+            stanza_error,
+        )
+    }
+
+    /// XEP-0513 §295 error example (xep-0513.xml §"permissions"):
+    /// the response carries an empty `<query
+    /// xmlns='urn:xmpp:mentions:0'/>` echoed alongside `<error/>`.
+    /// RFC 6120 §8.3.1 makes payload-echo on errors a MAY; the XEP
+    /// elevates it for this IQ by showing it in the canonical
+    /// example, so the handler MUST emit it.
+    #[test]
+    fn mentions_permissions_error_envelope_echoes_empty_query() {
+        let xml = build_error(feature_not_implemented_iq_error("read-only"));
+        let parsed = Element::from_str(&xml).expect("error iq parses");
+        assert_eq!(parsed.name(), "iq");
+        assert_eq!(parsed.attr("type"), Some("error"));
+        // §295 echo: the `<query xmlns='urn:xmpp:mentions:0'/>` child
+        // appears as a sibling of `<error/>`.
+        let query = parsed
+            .get_child("query", NS_EXPLICIT_MENTIONS)
+            .expect("§295 error envelope echoes <query/>");
+        assert_eq!(
+            query.children().count(),
+            0,
+            "echoed query MUST be empty per the §295 error example"
+        );
+        // `<error/>` carries the typed condition.
+        let error = parsed
+            .children()
+            .find(|c| c.name() == "error")
+            .expect("error element present");
+        assert!(error.has_child(
+            "feature-not-implemented",
+            "urn:ietf:params:xml:ns:xmpp-stanzas",
+        ));
+    }
+
+    // The full happy GET → §303 form path is exercised end-to-end by
+    // the WebSocket integration test
+    // `mentions_permissions_iq_get_returns_303_form` in
+    // `tests/xep0513_mentions_ws.rs`; that test stands up a real
+    // `WebSocketState`, which a unit test cannot do without
+    // duplicating the entire bootstrap. The unit tests above pin the
+    // routing predicate and the error-envelope shape, which is the
+    // logic actually under the handler's local control.
 }

@@ -496,24 +496,7 @@ pub fn is_mentions_permissions_query(elem: &Element) -> bool {
 /// - `mentions#channel` list-single, required, value =
 ///   `permissions.channel` (only when `permissions.channel.is_some()`).
 pub fn build_mentions_permissions_query(permissions: &MentionsPermissions) -> Element {
-    use crate::xep::xep0004::{DataForm, Field, FieldOption, FieldType, FormType, IntoElement};
-
-    let policy_options = || {
-        vec![
-            FieldOption::with_label(
-                MentionsPermission::Participants.label(),
-                MentionsPermission::Participants.as_wire(),
-            ),
-            FieldOption::with_label(
-                MentionsPermission::Moderators.label(),
-                MentionsPermission::Moderators.as_wire(),
-            ),
-            FieldOption::with_label(
-                MentionsPermission::Nobody.label(),
-                MentionsPermission::Nobody.as_wire(),
-            ),
-        ]
-    };
+    use crate::xep::xep0004::{DataForm, Field, FormType, IntoElement};
 
     let mut form = DataForm::new(FormType::Form)
         .with_title("Permissions for Explicit Mentions")
@@ -530,29 +513,51 @@ pub fn build_mentions_permissions_query(permissions: &MentionsPermissions) -> El
                 .with_required(),
         );
 
-    let mut individual = Field::new(FIELD_MENTIONS_INDIVIDUAL, FieldType::ListSingle)
-        .with_label("Who can mention individual users?")
-        .with_required()
-        .with_value(permissions.individual.as_wire());
-    for option in policy_options() {
-        individual = individual.add_option(option);
-    }
-    form = form.add_field(individual);
+    form = form.add_field(policy_field(
+        FIELD_MENTIONS_INDIVIDUAL,
+        "Who can mention individual users?",
+        permissions.individual,
+    ));
 
     if let Some(channel) = permissions.channel {
-        let mut channel_field = Field::new(FIELD_MENTIONS_CHANNEL, FieldType::ListSingle)
-            .with_label("Who can mention rooms?")
-            .with_required()
-            .with_value(channel.as_wire());
-        for option in policy_options() {
-            channel_field = channel_field.add_option(option);
-        }
-        form = form.add_field(channel_field);
+        form = form.add_field(policy_field(
+            FIELD_MENTIONS_CHANNEL,
+            "Who can mention rooms?",
+            channel,
+        ));
     }
 
     let mut query = Element::builder("query", NS_EXPLICIT_MENTIONS).build();
     query.append_child(form.into_element());
     query
+}
+
+/// Build a §303 `list-single` permissions field — the same shape
+/// reused for `mentions#individual` / `mentions#channel` / (future)
+/// `mentions#space` / `#server` / `#associations` / `#hats`. Single
+/// helper keeps the option set and ordering in lockstep across every
+/// permissions field; if a future XEP-0513 revision adds a fourth
+/// policy value, only one constructor changes.
+fn policy_field(
+    var: &'static str,
+    label: &'static str,
+    value: MentionsPermission,
+) -> crate::xep::xep0004::Field {
+    use crate::xep::xep0004::{Field, FieldOption, FieldType};
+
+    [
+        MentionsPermission::Participants,
+        MentionsPermission::Moderators,
+        MentionsPermission::Nobody,
+    ]
+    .into_iter()
+    .fold(
+        Field::new(var, FieldType::ListSingle)
+            .with_label(label)
+            .with_required()
+            .with_value(value.as_wire()),
+        |field, option| field.add_option(FieldOption::with_label(option.label(), option.as_wire())),
+    )
 }
 
 #[cfg(test)]
