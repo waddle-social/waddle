@@ -100,10 +100,29 @@ fn child_attr(xml: &str, child_name: &str, attr: &str) -> Option<String> {
         .and_then(|c| c.attr(attr).map(str::to_string))
 }
 
-async fn wait_for_candidate_row(database_url: &str, recipient: &str) {
-    let pool = sqlx::SqlitePool::connect(database_url)
+/// Opens a `SqlitePool` against the persistent test database with a
+/// `busy_timeout` set so concurrent writes from the server side
+/// don't return `SQLITE_BUSY` to the test's polling SELECT. The
+/// production server uses WAL mode (configured at runtime), so
+/// readers don't normally block writers; the explicit
+/// `busy_timeout` is defence-in-depth against any future shift in
+/// journal mode or any race where the test pool opens before the
+/// server has set WAL pragmas (review on PR #758).
+async fn open_test_pool(database_url: &str) -> sqlx::SqlitePool {
+    use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+    use std::str::FromStr;
+    let options = SqliteConnectOptions::from_str(database_url)
+        .expect("parse sqlite url")
+        .busy_timeout(Duration::from_secs(5));
+    SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(options)
         .await
-        .expect("open sqlite db");
+        .expect("open sqlite db with busy_timeout")
+}
+
+async fn wait_for_candidate_row(database_url: &str, recipient: &str) {
+    let pool = open_test_pool(database_url).await;
     let deadline = Instant::now() + Duration::from_secs(20);
     loop {
         let row = sqlx::query(
@@ -128,9 +147,7 @@ async fn wait_for_candidate_row(database_url: &str, recipient: &str) {
 }
 
 async fn count(database_url: &str, sql: &str, bind: &str) -> i64 {
-    let pool = sqlx::SqlitePool::connect(database_url)
-        .await
-        .expect("open sqlite db");
+    let pool = open_test_pool(database_url).await;
     let row = sqlx::query(sql)
         .bind(bind)
         .fetch_one(&pool)
@@ -283,6 +300,12 @@ async fn push_pipeline_durable_rows_survive_server_restart() {
         node.as_str(),
     )
     .await;
+    let nodes_before_restart = count(
+        &database_url,
+        "SELECT COUNT(*) FROM push_nodes WHERE node = ?",
+        node.as_str(),
+    )
+    .await;
     assert!(
         candidates_before_restart >= 1,
         "expected at least one notification_candidates row before restart"
@@ -294,6 +317,10 @@ async fn push_pipeline_durable_rows_survive_server_restart() {
     assert!(
         devices_before_restart >= 1,
         "expected at least one push_devices row before restart"
+    );
+    assert!(
+        nodes_before_restart >= 1,
+        "expected at least one push_nodes row before restart"
     );
 
     let _ = admin.close().await;
@@ -364,6 +391,16 @@ async fn push_pipeline_durable_rows_survive_server_restart() {
     assert_eq!(
         devices_after_restart, devices_before_restart,
         "push_devices rows MUST NOT disappear on restart"
+    );
+    let nodes_after_restart = count(
+        &database_url,
+        "SELECT COUNT(*) FROM push_nodes WHERE node = ?",
+        node.as_str(),
+    )
+    .await;
+    assert_eq!(
+        nodes_after_restart, nodes_before_restart,
+        "push_nodes rows MUST NOT disappear on restart"
     );
 
     // Connect a client to the SECOND server so we know it's serving

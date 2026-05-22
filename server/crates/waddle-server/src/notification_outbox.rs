@@ -1906,7 +1906,7 @@ impl NotificationOutboxStore {
                     no_store,
                     no_permanent_store
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, ?, ?, ?)
-                ON CONFLICT DO NOTHING
+                ON CONFLICT (recipient_bare_jid, conversation_jid, thread_id, stanza_id_by, stanza_id, class) DO NOTHING
                 "#,
                 crate::db_params![
                     candidate.recipient_bare_jid.to_string(),
