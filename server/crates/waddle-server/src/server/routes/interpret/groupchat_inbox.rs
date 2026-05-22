@@ -1853,4 +1853,144 @@ mod tests {
              live ones"
         );
     }
+
+    /// XEP-0513 §"Active mention" + #525 explicit XEP test:
+    /// `<active/>` on a channel mention is a recipient-state filter
+    /// that narrows the candidate population to currently-active
+    /// occupants. The classifier MUST distinguish the two channel
+    /// shapes at T0 so the T1 active-filter has a class to match on:
+    ///
+    /// - `<mention mentions='#channel'/>` (no qualifier) →
+    ///   `NotificationClass::ChannelMention` (push to all members)
+    /// - `<mention mentions='#channel'><active/></mention>` →
+    ///   `NotificationClass::ActiveChannelMention` (T1 filters by
+    ///   `last_active_at_ms <= active_mention_ttl_ms`)
+    ///
+    /// Existing tests cover the permission-downgrade direction; this
+    /// one pins the active-vs-non-active boundary itself with the
+    /// permission gate held constant (slice 3d of #525).
+    #[test]
+    fn xep0513_active_qualifier_distinguishes_channel_mention_classification() {
+        use crate::notification_outbox::NotificationClass;
+
+        let owner = bare("charlie@example.com");
+        let room = bare("team@muc.example.com");
+        let occupant_id = "room-stable-charlie";
+
+        // Bare channel mention (no `<active/>`).
+        let mut plain_channel = waddle_xmpp::xep::ExplicitMention::channel();
+        plain_channel.uri = Some("xmpp:team@muc.example.com".to_string());
+        let msg_plain = message_with_mention(plain_channel);
+        let GroupchatNotificationClassOutcome {
+            decision: GroupchatNotificationClassDecision::Deliver(class_plain),
+            mentions_overflowed: _,
+        } = groupchat_notification_class(
+            &parsed_mentions(&msg_plain),
+            &extract_references(&msg_plain),
+            &owner,
+            &room,
+            occupant_id,
+            /* is_live_occupant */ true,
+            /* sender_can_broadcast_channel_mention */ true,
+        );
+        assert_eq!(
+            class_plain,
+            NotificationClass::ChannelMention,
+            "a channel mention WITHOUT `<active/>` must classify as \
+             ChannelMention so every member receives a push candidate"
+        );
+
+        // Same shape, but with `<active/>` added — only the
+        // recipient-state filter changes; the permission gate is
+        // unchanged.
+        let mut active_channel = waddle_xmpp::xep::ExplicitMention::active_channel();
+        active_channel.uri = Some("xmpp:team@muc.example.com".to_string());
+        let msg_active = message_with_mention(active_channel);
+        let GroupchatNotificationClassOutcome {
+            decision: GroupchatNotificationClassDecision::Deliver(class_active),
+            mentions_overflowed: _,
+        } = groupchat_notification_class(
+            &parsed_mentions(&msg_active),
+            &extract_references(&msg_active),
+            &owner,
+            &room,
+            occupant_id,
+            /* is_live_occupant */ true,
+            /* sender_can_broadcast_channel_mention */ true,
+        );
+        assert_eq!(
+            class_active,
+            NotificationClass::ActiveChannelMention,
+            "the same channel mention WITH `<active/>` must classify \
+             as ActiveChannelMention so the T1 active-filter narrows \
+             the candidate population to currently-active occupants"
+        );
+    }
+
+    /// XEP-0513 + #525 explicit XEP test: a `<mention/>` carrying an
+    /// **unadvertised** group URI (`urn:xmpp:mentions:0#space`,
+    /// `#server`, `#associations`, `#hats`) MUST NOT elevate the
+    /// notification class. Waddle deliberately advertises only the
+    /// individual + `#channel` subset (#525 scope: "Do not advertise
+    /// `#space`, `#server`, `#associations`, or `#hats` until
+    /// recipient resolution and permissions are implemented for
+    /// them"), and the classifier MUST stay forward-compatible: a
+    /// future code change that loosens `is_channel()` to accept any
+    /// `urn:xmpp:mentions:0#*` value would silently elevate
+    /// unsupported groups to push, which is exactly what this
+    /// regression guards against.
+    ///
+    /// The mention itself is still delivered + archived unchanged
+    /// (covered by [`xep0513_channel_mention_payload_is_preserved_when_class_is_downgraded`]);
+    /// this test pins ONLY the push-class boundary.
+    #[test]
+    fn xep0513_unsupported_group_uris_do_not_elevate_notification_class() {
+        use crate::notification_outbox::NotificationClass;
+
+        let owner = bare("charlie@example.com");
+        let room = bare("team@muc.example.com");
+        let occupant_id = "room-stable-charlie";
+
+        // Every unadvertised group URI from XEP-0513 §"Multi-User
+        // Chats Permissions" — the four §303 form fields Waddle
+        // chooses not to expose yet. A future relaxation of
+        // `is_channel()` would trip this assertion.
+        let unsupported_uris = [
+            "urn:xmpp:mentions:0#space",
+            "urn:xmpp:mentions:0#server",
+            "urn:xmpp:mentions:0#associations",
+            "urn:xmpp:mentions:0#hats",
+        ];
+
+        for group_uri in unsupported_uris {
+            let msg = message_with_mention(waddle_xmpp::xep::ExplicitMention {
+                mentions: Some(group_uri.to_string()),
+                ..waddle_xmpp::xep::ExplicitMention::default()
+            });
+            let GroupchatNotificationClassOutcome {
+                decision: GroupchatNotificationClassDecision::Deliver(class),
+                mentions_overflowed: _,
+            } = groupchat_notification_class(
+                &parsed_mentions(&msg),
+                &extract_references(&msg),
+                &owner,
+                &room,
+                occupant_id,
+                /* is_live_occupant */ true,
+                // Permitted sender — even an authorised broadcaster
+                // must NOT elevate an unadvertised group; the gate
+                // covers `#channel` only.
+                /* sender_can_broadcast_channel_mention */
+                true,
+            );
+            assert_eq!(
+                class,
+                NotificationClass::NotifyAll,
+                "`<mention mentions='{group_uri}'/>` from a permitted \
+                 sender MUST NOT elevate the push class — Waddle does \
+                 not advertise `{group_uri}` and unsupported groups \
+                 fall through to NotifyAll"
+            );
+        }
+    }
 }
