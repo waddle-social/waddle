@@ -311,6 +311,11 @@ struct WaddleChatSpaceView: View {
         ZStack(alignment: .leading) {
             VStack(spacing: 0) {
                 compactChatHeader
+                if store.bannerState.isVisible {
+                    ChatConnectionBannerView(state: store.bannerState, usesOperationalChrome: true)
+                        .padding(.horizontal, 12)
+                        .padding(.bottom, 8)
+                }
                 conversationPane(compactStyle: true)
             }
             .background(WaddleTheme.chatBackground)

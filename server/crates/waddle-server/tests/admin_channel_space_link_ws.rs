@@ -30,6 +30,7 @@ const NODE_SPACES_DELETE: &str = "urn:waddle:admin:spaces:delete:0";
 
 const NODE_CHANNELS_LIST: &str = "urn:waddle:admin:channels:list:0";
 const NODE_CHANNELS_CREATE: &str = "urn:waddle:admin:channels:create:0";
+const NODE_CHANNELS_UPDATE: &str = "urn:waddle:admin:channels:update:0";
 const NODE_CHANNELS_DELETE: &str = "urn:waddle:admin:channels:delete:0";
 
 static TEST_SERIAL: Mutex<()> = Mutex::const_new(());
@@ -126,6 +127,25 @@ async fn create_channel_in_space(
     extract_field(&resp, "channel_jid").expect("channel_jid in channels:create response")
 }
 
+async fn update_channel_name(admin: &mut WsXmppClient, channel_jid: &str, name: &str, id: &str) {
+    let extra = format!(
+        "{}{}",
+        text_field("channel_jid", channel_jid),
+        text_field("name", name)
+    );
+    let resp = send_command(
+        admin,
+        NODE_CHANNELS_UPDATE,
+        id,
+        &submit_form(NODE_CHANNELS_UPDATE, &extra),
+    )
+    .await;
+    assert!(
+        is_result(&resp),
+        "expected channels:update result, got: {resp}"
+    );
+}
+
 async fn list_channels(admin: &mut WsXmppClient, space_jid: Option<&str>, id: &str) -> String {
     let extra = match space_jid {
         Some(jid) => text_field("space_jid", jid),
@@ -145,6 +165,31 @@ async fn list_channels(admin: &mut WsXmppClient, space_jid: Option<&str>, id: &s
     resp
 }
 
+async fn space_pubsub_items(admin: &mut WsXmppClient, space_jid: &str, id: &str) -> String {
+    let node = space_jid
+        .split('@')
+        .next()
+        .expect("space JID has localpart");
+    client_send_pubsub_items(admin, node, id).await
+}
+
+async fn client_send_pubsub_items(admin: &mut WsXmppClient, node: &str, id: &str) -> String {
+    admin
+        .send(&format!(
+            r#"<iq type="get" id="{id}" to="spaces.localhost"><pubsub xmlns="http://jabber.org/protocol/pubsub"><items node="{node}"/></pubsub></iq>"#
+        ))
+        .await
+        .expect("send pubsub items iq");
+    admin
+        .recv_matching(|frame| {
+            frame.contains("<iq")
+                && (frame.contains(&format!(r#"id='{id}'"#))
+                    || frame.contains(&format!(r#"id="{id}""#)))
+        })
+        .await
+        .expect("pubsub items response")
+}
+
 #[tokio::test]
 async fn channels_list_space_jid_filter_narrows_results_and_survives_lifecycle() {
     let _serial = TEST_SERIAL.lock().await;
@@ -157,14 +202,51 @@ async fn channels_list_space_jid_filter_narrows_results_and_survives_lifecycle()
 
     let channel_a =
         create_channel_in_space(&mut admin, "alpha-room", &space_a, "csl-mk-chan-a").await;
+    let channel_a_second =
+        create_channel_in_space(&mut admin, "alpha-second", &space_a, "csl-mk-chan-a-second").await;
     let channel_b =
         create_channel_in_space(&mut admin, "beta-room", &space_b, "csl-mk-chan-b").await;
+
+    let space_a_items = space_pubsub_items(&mut admin, &space_a, "csl-space-a-items").await;
+    assert!(
+        space_a_items.contains(&channel_a),
+        "space A PubSub items should include its XEP-0503 channel bookmark '{channel_a}', got: {space_a_items}"
+    );
+    assert!(
+        space_a_items.contains(&channel_a_second),
+        "admin-created space A should retain multiple XEP-0503 channel bookmarks; missing second channel '{channel_a_second}', got: {space_a_items}"
+    );
+    assert!(
+        space_a_items.contains("conference") && space_a_items.contains("urn:xmpp:bookmarks:1"),
+        "space A channel bookmark should use XEP-0402 conference payload, got: {space_a_items}"
+    );
+    assert!(
+        !space_a_items.contains(&channel_b),
+        "space A PubSub items should not include channel B '{channel_b}', got: {space_a_items}"
+    );
+    update_channel_name(
+        &mut admin,
+        &channel_a,
+        "alpha-room-renamed",
+        "csl-rename-chan-a",
+    )
+    .await;
+    let space_a_items_after_rename =
+        space_pubsub_items(&mut admin, &space_a, "csl-space-a-items-after-rename").await;
+    assert!(
+        space_a_items_after_rename.contains("alpha-room-renamed"),
+        "space A PubSub bookmark should be republished with the renamed channel, got: {space_a_items_after_rename}"
+    );
 
     // (2) `channels:list space_jid=A` returns only channel A.
     let only_a = list_channels(&mut admin, Some(&space_a), "csl-list-only-a").await;
     assert!(
         only_a.contains(&channel_a),
         "filter by space A should include channel A '{channel_a}', got: {only_a}"
+    );
+    assert!(
+        only_a.contains(&channel_a_second),
+        "filter by space A should include second channel A '{channel_a_second}', got: {only_a}"
     );
     assert!(
         !only_a.contains(&channel_b),
@@ -176,6 +258,10 @@ async fn channels_list_space_jid_filter_narrows_results_and_survives_lifecycle()
     assert!(
         unfiltered.contains(&channel_a),
         "unfiltered list missing channel A '{channel_a}', got: {unfiltered}"
+    );
+    assert!(
+        unfiltered.contains(&channel_a_second),
+        "unfiltered list missing second channel A '{channel_a_second}', got: {unfiltered}"
     );
     assert!(
         unfiltered.contains(&channel_b),
@@ -208,8 +294,22 @@ async fn channels_list_space_jid_filter_narrows_results_and_survives_lifecycle()
         "deleted channel A '{channel_a}' should not appear in space-A filter, got: {after_delete}"
     );
     assert!(
+        after_delete.contains(&channel_a_second),
+        "space-A filter should retain second channel A '{channel_a_second}' after deleting channel A, got: {after_delete}"
+    );
+    assert!(
         !after_delete.contains(&channel_b),
         "channel B '{channel_b}' is in space B; space-A filter should still exclude it, got: {after_delete}"
+    );
+    let space_a_items_after_delete =
+        space_pubsub_items(&mut admin, &space_a, "csl-space-a-items-after-delete").await;
+    assert!(
+        !space_a_items_after_delete.contains(&channel_a),
+        "deleted channel A '{channel_a}' should be retracted from XEP-0503 PubSub items, got: {space_a_items_after_delete}"
+    );
+    assert!(
+        space_a_items_after_delete.contains(&channel_a_second),
+        "deleting channel A should not evict second channel A '{channel_a_second}' from XEP-0503 PubSub items, got: {space_a_items_after_delete}"
     );
 
     // (5) Delete space B and confirm the cascade tore down channel B
@@ -245,6 +345,10 @@ async fn channels_list_space_jid_filter_narrows_results_and_survives_lifecycle()
     assert!(
         !final_unfiltered.contains(&channel_a),
         "deleted channel A '{channel_a}' should be absent from unfiltered list, got: {final_unfiltered}"
+    );
+    assert!(
+        final_unfiltered.contains(&channel_a_second),
+        "second channel A '{channel_a_second}' should remain after deleting channel A and space B, got: {final_unfiltered}"
     );
     assert!(
         !final_unfiltered.contains(&channel_b),

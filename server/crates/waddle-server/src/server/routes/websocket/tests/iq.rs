@@ -1,4 +1,5 @@
 use super::*;
+use crate::permissions::{CheckPermission, SubjectType};
 
 fn disco_feature_vars_for_test(query: &Element) -> std::collections::BTreeSet<String> {
     query
@@ -21,6 +22,54 @@ fn disco_items_for_test(query: &Element) -> Vec<(Option<String>, Option<String>)
             )
         })
         .collect()
+}
+
+async fn grant_space_member_for_test(state: &WebSocketState, space_node: &str, user_id: &str) {
+    state
+        .deps
+        .app_state
+        .permission_actor
+        .ask(WriteTuple {
+            tuple: Tuple::new(
+                Object::new(ObjectType::Space, space_node),
+                Relation::new("member"),
+                Subject::user(user_id),
+            ),
+        })
+        .await
+        .expect("space member tuple");
+}
+
+async fn channel_view_allowed_for_test(
+    state: &WebSocketState,
+    channel_id: &str,
+    user_id: &str,
+) -> bool {
+    state
+        .deps
+        .app_state
+        .permission_actor
+        .ask(CheckPermission {
+            subject: Subject::user(user_id),
+            permission: Permission::View,
+            object: Object::new(ObjectType::Channel, channel_id),
+        })
+        .await
+        .expect("permission actor")
+        .allowed
+}
+
+fn data_form_value_for_test(frame: &str, var: &str) -> Option<String> {
+    let marker_single = format!("var='{var}'");
+    let marker_double = format!("var=\"{var}\"");
+    let idx = frame
+        .find(&marker_single)
+        .or_else(|| frame.find(&marker_double))?;
+    let after = &frame[idx..];
+    let open = after.find("<value>")?;
+    let value = &after[open + "<value>".len()..];
+    let close = value.find("</value>")?;
+    Some(value[..close].to_string())
 }
 
 #[tokio::test]
@@ -1484,6 +1533,17 @@ async fn handle_iq_pubsub_items_spaces_node_lists_published_bookmarks() {
         .get_or_create_node(&spaces_jid, "team")
         .await
         .expect("space node");
+    state
+        .deps
+        .protocol
+        .pubsub_storage
+        .update_node_config(
+            &spaces_jid,
+            "team",
+            &waddle_xmpp::pubsub::NodeConfig::spaces_public(),
+        )
+        .await
+        .expect("space node config");
     let channel = waddle_xmpp::ChannelInfo {
         id: "general".to_string(),
         name: "General".to_string(),
@@ -1540,6 +1600,1132 @@ async fn handle_iq_pubsub_items_spaces_node_lists_published_bookmarks() {
 }
 
 #[tokio::test]
+async fn handle_iq_pubsub_items_spaces_node_backfills_linked_channel_bookmarks() {
+    let state = create_test_websocket_state().await;
+    let session = create_test_session(state.as_ref(), "alice").await;
+
+    let spaces_jid: BareJid = "spaces.example.com".parse().expect("spaces jid");
+    state
+        .deps
+        .protocol
+        .pubsub_storage
+        .get_or_create_node(&spaces_jid, "team")
+        .await
+        .expect("space node");
+    state
+        .deps
+        .protocol
+        .pubsub_storage
+        .update_node_config(
+            &spaces_jid,
+            "team",
+            &waddle_xmpp::pubsub::NodeConfig::spaces_public(),
+        )
+        .await
+        .expect("space node config");
+
+    let channel_jid: BareJid = "legacy@muc.example.com".parse().expect("channel jid");
+    let mut config = waddle_xmpp::muc::RoomConfig {
+        name: "Legacy".to_string(),
+        description: None,
+        persistent: true,
+        members_only: false,
+        ..waddle_xmpp::muc::RoomConfig::default()
+    };
+    config.enable_logging = true;
+    state
+        .deps
+        .protocol
+        .room_registry
+        .ask(waddle_xmpp::muc::room_registry_actor::CreateRoom {
+            room_jid: channel_jid.clone(),
+            waddle_id: "test".to_string(),
+            channel_id: "legacy".to_string(),
+            config,
+        })
+        .await
+        .expect("create room");
+    state
+        .deps
+        .app_state
+        .channel_space_link_store
+        .set(&crate::channel_space_links::ChannelSpaceLink {
+            channel_jid: channel_jid.clone(),
+            space_jid: "team@spaces.example.com".parse().expect("space jid"),
+            created_at: 0,
+        })
+        .await
+        .expect("link channel to space");
+
+    let authenticated_session = Some(session);
+    let authenticated_jid: FullJid = format!(
+        "{}@example.com/web",
+        authenticated_session
+            .as_ref()
+            .expect("session")
+            .xmpp_localpart
+    )
+    .parse()
+    .expect("authenticated jid");
+    let authenticated_phase = ready_phase(&authenticated_jid);
+    let query = r#"<iq xmlns="jabber:client" id="space-node-items-backfill" type="get" to="spaces.example.com"><pubsub xmlns="http://jabber.org/protocol/pubsub"><items node="team"/></pubsub></iq>"#;
+
+    let responses = handle_iq(
+        query,
+        "example.com",
+        "muc.example.com",
+        state.as_ref(),
+        &authenticated_session,
+        &authenticated_phase,
+    )
+    .await;
+    let response = responses
+        .first()
+        .expect("spaces node pubsub items response");
+
+    assert!(
+        response.contains("legacy@muc.example.com"),
+        "expected linked channel to be backfilled as XEP-0503 bookmark: {response}"
+    );
+    assert!(
+        response.contains("Legacy"),
+        "expected backfilled bookmark to use room config name: {response}"
+    );
+    let stored = state
+        .deps
+        .protocol
+        .pubsub_storage
+        .get_items(&spaces_jid, "team", None, &[])
+        .await
+        .expect("stored backfilled bookmark");
+    assert!(
+        stored.iter().any(|item| item.id == channel_jid.to_string()),
+        "backfill should persist the bookmark item"
+    );
+}
+
+#[tokio::test]
+async fn handle_iq_pubsub_items_spaces_node_requires_authorization_before_backfill() {
+    let state = create_test_websocket_state().await;
+    let session = create_test_session(state.as_ref(), "bob").await;
+
+    let spaces_jid: BareJid = "spaces.example.com".parse().expect("spaces jid");
+    state
+        .deps
+        .protocol
+        .pubsub_storage
+        .get_or_create_node(&spaces_jid, "private-team")
+        .await
+        .expect("space node");
+    state
+        .deps
+        .protocol
+        .pubsub_storage
+        .update_node_config(
+            &spaces_jid,
+            "private-team",
+            &waddle_xmpp::pubsub::NodeConfig::spaces_private(),
+        )
+        .await
+        .expect("private space node config");
+
+    let channel_jid: BareJid = "private-legacy@muc.example.com"
+        .parse()
+        .expect("channel jid");
+    state
+        .deps
+        .protocol
+        .room_registry
+        .ask(waddle_xmpp::muc::room_registry_actor::CreateRoom {
+            room_jid: channel_jid.clone(),
+            waddle_id: "test".to_string(),
+            channel_id: "private-legacy".to_string(),
+            config: waddle_xmpp::muc::RoomConfig {
+                name: "Private Legacy".to_string(),
+                persistent: true,
+                members_only: true,
+                enable_logging: true,
+                ..waddle_xmpp::muc::RoomConfig::default()
+            },
+        })
+        .await
+        .expect("create room");
+    state
+        .deps
+        .app_state
+        .channel_space_link_store
+        .set(&crate::channel_space_links::ChannelSpaceLink {
+            channel_jid: channel_jid.clone(),
+            space_jid: "private-team@spaces.example.com"
+                .parse()
+                .expect("space jid"),
+            created_at: 0,
+        })
+        .await
+        .expect("link channel to space");
+
+    let authenticated_session = Some(session);
+    let authenticated_jid: FullJid = format!(
+        "{}@example.com/web",
+        authenticated_session
+            .as_ref()
+            .expect("session")
+            .xmpp_localpart
+    )
+    .parse()
+    .expect("authenticated jid");
+    let query = r#"<iq xmlns="jabber:client" id="space-node-items-private" type="get" to="spaces.example.com"><pubsub xmlns="http://jabber.org/protocol/pubsub"><items node="private-team"/></pubsub></iq>"#;
+
+    let responses = handle_iq(
+        query,
+        "example.com",
+        "muc.example.com",
+        state.as_ref(),
+        &authenticated_session,
+        &ready_phase(&authenticated_jid),
+    )
+    .await;
+    let response = responses
+        .first()
+        .expect("spaces node pubsub items response");
+    assert!(
+        response.contains("type='error'")
+            && response.contains("not-allowed")
+            && response.contains("closed-node"),
+        "unauthorized Spaces items read should be closed-node before backfill: {response}"
+    );
+
+    let stored = state
+        .deps
+        .protocol
+        .pubsub_storage
+        .get_items(&spaces_jid, "private-team", None, &[])
+        .await
+        .expect("stored private space bookmarks");
+    assert!(
+        stored.is_empty(),
+        "unauthorized Spaces items read must not backfill bookmarks"
+    );
+}
+
+#[tokio::test]
+async fn handle_iq_pubsub_configure_spaces_node_rejects_unsupported_access_models() {
+    let state = create_test_websocket_state().await;
+    let session = create_test_session(state.as_ref(), "owner").await;
+    let owner_jid: BareJid = "owner@example.com".parse().expect("owner jid");
+    let bound_jid: FullJid = "owner@example.com/web".parse().expect("bound jid");
+    let spaces_jid: BareJid = "spaces.example.com".parse().expect("spaces jid");
+
+    state
+        .deps
+        .protocol
+        .pubsub_storage
+        .get_or_create_node(&spaces_jid, "team")
+        .await
+        .expect("space node");
+    state
+        .deps
+        .protocol
+        .pubsub_storage
+        .update_node_config(
+            &spaces_jid,
+            "team",
+            &waddle_xmpp::pubsub::NodeConfig::spaces_public(),
+        )
+        .await
+        .expect("space node config");
+    state
+        .deps
+        .protocol
+        .pubsub_storage
+        .set_affiliation(
+            &spaces_jid,
+            "team",
+            &owner_jid,
+            waddle_xmpp::pubsub::Affiliation::Owner,
+        )
+        .await
+        .expect("owner affiliation");
+
+    for access_model in ["presence", "roster", "authorize"] {
+        let frame = format!(
+            r#"<iq xmlns="jabber:client" id="spaces-config-{access_model}" type="set" to="spaces.example.com">
+                <pubsub xmlns="http://jabber.org/protocol/pubsub#owner">
+                    <configure node="team">
+                        <x xmlns="jabber:x:data" type="submit">
+                            <field var="FORM_TYPE" type="hidden"><value>http://jabber.org/protocol/pubsub#node_config</value></field>
+                            <field var="pubsub#access_model"><value>{access_model}</value></field>
+                        </x>
+                    </configure>
+                </pubsub>
+            </iq>"#
+        );
+
+        let responses = handle_iq(
+            &frame,
+            "example.com",
+            "muc.example.com",
+            state.as_ref(),
+            &Some(session.clone()),
+            &ready_phase(&bound_jid),
+        )
+        .await;
+        let response = responses.first().expect("configure response");
+        assert!(
+            response.contains("type='error'") && response.contains("bad-request"),
+            "Spaces configure should reject unsupported access_model={access_model}: {response}"
+        );
+        let stored = state
+            .deps
+            .protocol
+            .pubsub_storage
+            .get_node(&spaces_jid, "team")
+            .await
+            .expect("node lookup")
+            .expect("space node");
+        assert_eq!(
+            stored.config.access_model,
+            waddle_xmpp::pubsub::AccessModel::Open,
+            "rejected Spaces configure must not mutate the stored node config"
+        );
+    }
+}
+
+#[tokio::test]
+async fn handle_iq_pubsub_configure_spaces_node_keeps_spaces_defaults() {
+    let state = create_test_websocket_state().await;
+    let session = create_test_session(state.as_ref(), "owner").await;
+    let owner_jid: BareJid = "owner@example.com".parse().expect("owner jid");
+    let bound_jid: FullJid = "owner@example.com/web".parse().expect("bound jid");
+    let spaces_jid: BareJid = "spaces.example.com".parse().expect("spaces jid");
+
+    state
+        .deps
+        .protocol
+        .pubsub_storage
+        .get_or_create_node(&spaces_jid, "team")
+        .await
+        .expect("space node");
+    state
+        .deps
+        .protocol
+        .pubsub_storage
+        .set_affiliation(
+            &spaces_jid,
+            "team",
+            &owner_jid,
+            waddle_xmpp::pubsub::Affiliation::Owner,
+        )
+        .await
+        .expect("owner affiliation");
+
+    for (access_model, expected_config) in [
+        (
+            "whitelist",
+            waddle_xmpp::pubsub::NodeConfig::spaces_private(),
+        ),
+        ("open", waddle_xmpp::pubsub::NodeConfig::spaces_public()),
+    ] {
+        let frame = format!(
+            r#"<iq xmlns="jabber:client" id="spaces-config-ok-{access_model}" type="set" to="spaces.example.com">
+                <pubsub xmlns="http://jabber.org/protocol/pubsub#owner">
+                    <configure node="team">
+                        <x xmlns="jabber:x:data" type="submit">
+                            <field var="FORM_TYPE" type="hidden"><value>http://jabber.org/protocol/pubsub#node_config</value></field>
+                            <field var="pubsub#access_model"><value>{access_model}</value></field>
+                        </x>
+                    </configure>
+                </pubsub>
+            </iq>"#
+        );
+
+        let responses = handle_iq(
+            &frame,
+            "example.com",
+            "muc.example.com",
+            state.as_ref(),
+            &Some(session.clone()),
+            &ready_phase(&bound_jid),
+        )
+        .await;
+        let response = responses.first().expect("configure response");
+        assert!(
+            response.contains("type='result'") || response.contains("type=\"result\""),
+            "Spaces configure should accept supported access_model={access_model}: {response}"
+        );
+        let stored = state
+            .deps
+            .protocol
+            .pubsub_storage
+            .get_node(&spaces_jid, "team")
+            .await
+            .expect("node lookup")
+            .expect("space node");
+        assert_eq!(
+            stored.config, expected_config,
+            "supported Spaces configure should use the canonical Spaces defaults"
+        );
+    }
+}
+
+#[tokio::test]
+async fn handle_iq_pubsub_configure_spaces_node_merges_partial_form_with_existing_config() {
+    let state = create_test_websocket_state().await;
+    let session = create_test_session(state.as_ref(), "owner").await;
+    let owner_jid: BareJid = "owner@example.com".parse().expect("owner jid");
+    let bound_jid: FullJid = "owner@example.com/web".parse().expect("bound jid");
+    let spaces_jid: BareJid = "spaces.example.com".parse().expect("spaces jid");
+
+    state
+        .deps
+        .protocol
+        .pubsub_storage
+        .get_or_create_node(&spaces_jid, "team")
+        .await
+        .expect("space node");
+    state
+        .deps
+        .protocol
+        .pubsub_storage
+        .update_node_config(
+            &spaces_jid,
+            "team",
+            &waddle_xmpp::pubsub::NodeConfig::spaces_public(),
+        )
+        .await
+        .expect("space node config");
+    state
+        .deps
+        .protocol
+        .pubsub_storage
+        .set_affiliation(
+            &spaces_jid,
+            "team",
+            &owner_jid,
+            waddle_xmpp::pubsub::Affiliation::Owner,
+        )
+        .await
+        .expect("owner affiliation");
+
+    let frame = r#"<iq xmlns="jabber:client" id="spaces-config-partial" type="set" to="spaces.example.com">
+        <pubsub xmlns="http://jabber.org/protocol/pubsub#owner">
+            <configure node="team">
+                <x xmlns="jabber:x:data" type="submit">
+                    <field var="FORM_TYPE" type="hidden"><value>http://jabber.org/protocol/pubsub#node_config</value></field>
+                    <field var="pubsub#max_items"><value>200</value></field>
+                </x>
+            </configure>
+        </pubsub>
+    </iq>"#;
+
+    let responses = handle_iq(
+        frame,
+        "example.com",
+        "muc.example.com",
+        state.as_ref(),
+        &Some(session),
+        &ready_phase(&bound_jid),
+    )
+    .await;
+    let response = responses.first().expect("configure response");
+    assert!(
+        response.contains("type='result'") || response.contains("type=\"result\""),
+        "Spaces configure should accept partial max_items-only form: {response}"
+    );
+    let stored = state
+        .deps
+        .protocol
+        .pubsub_storage
+        .get_node(&spaces_jid, "team")
+        .await
+        .expect("node lookup")
+        .expect("space node");
+    assert_eq!(
+        stored.config.access_model,
+        waddle_xmpp::pubsub::AccessModel::Open,
+        "partial Spaces configure must not synthesize access_model=presence"
+    );
+    assert_eq!(stored.config.max_items, 200);
+    assert_eq!(
+        stored.config.publish_model,
+        waddle_xmpp::pubsub::PublishModel::Publishers,
+        "partial Spaces configure must preserve publisher-gated writes"
+    );
+}
+
+#[tokio::test]
+async fn admin_channels_delete_retracts_duplicate_space_bookmarks() {
+    let state = create_test_websocket_state().await;
+    crate::admin::channels::register(
+        &state.deps.protocol.command_registry,
+        std::sync::Arc::clone(&state.deps.app_state),
+        std::sync::Arc::clone(&state.deps.protocol.connection_registry),
+    )
+    .await;
+
+    let owner_jid: BareJid = "owner@example.com".parse().expect("owner jid");
+    state
+        .deps
+        .app_state
+        .pubsub_storage
+        .get_or_create_node(&state.deps.app_state.spaces_jid, "alpha")
+        .await
+        .expect("alpha space node");
+    state
+        .deps
+        .app_state
+        .pubsub_storage
+        .get_or_create_node(&state.deps.app_state.spaces_jid, "beta")
+        .await
+        .expect("beta space node");
+    state
+        .deps
+        .app_state
+        .pubsub_storage
+        .set_affiliation(
+            &state.deps.app_state.spaces_jid,
+            "alpha",
+            &owner_jid,
+            waddle_xmpp::pubsub::Affiliation::Owner,
+        )
+        .await
+        .expect("owner affiliation");
+
+    let room_jid: BareJid = format!("duplicate@{}", state.deps.app_state.muc_domain)
+        .parse()
+        .expect("room jid");
+    state
+        .deps
+        .app_state
+        .room_registry
+        .ask(waddle_xmpp::muc::room_registry_actor::CreateRoom {
+            room_jid: room_jid.clone(),
+            waddle_id: "test".to_string(),
+            channel_id: "duplicate".to_string(),
+            config: waddle_xmpp::muc::RoomConfig {
+                name: "Duplicated".to_string(),
+                persistent: true,
+                members_only: false,
+                ..waddle_xmpp::muc::RoomConfig::default()
+            },
+        })
+        .await
+        .expect("create room");
+    state
+        .deps
+        .app_state
+        .channel_space_link_store
+        .set(&crate::channel_space_links::ChannelSpaceLink {
+            channel_jid: room_jid.clone(),
+            space_jid: format!("alpha@{}", state.deps.app_state.spaces_jid.domain())
+                .parse()
+                .expect("space jid"),
+            created_at: 0,
+        })
+        .await
+        .expect("link channel");
+
+    let item = waddle_xmpp::xep::build_channel_item(
+        &waddle_xmpp::ChannelInfo {
+            id: "duplicate".to_string(),
+            name: "Duplicated".to_string(),
+            channel_type: "text".to_string(),
+        },
+        &state.deps.app_state.muc_domain.to_string(),
+    )
+    .expect("bookmark item");
+    for node in ["alpha", "beta"] {
+        state
+            .deps
+            .app_state
+            .pubsub_storage
+            .publish_item(&state.deps.app_state.spaces_jid, node, &item, None, false)
+            .await
+            .expect("publish duplicate bookmark");
+    }
+
+    let session = create_test_session(state.as_ref(), "owner").await;
+    let bound_jid: FullJid = "owner@example.com/web".parse().expect("bound jid");
+    let frame = format!(
+        r#"<iq xmlns="jabber:client" id="admin-delete-duplicate" type="set" to="example.com"><command xmlns="http://jabber.org/protocol/commands" node="{}" action="execute"><x xmlns="jabber:x:data" type="submit"><field var="FORM_TYPE" type="hidden"><value>{}</value></field><field var="channel_jid" type="text-single"><value>{}</value></field><field var="confirm" type="text-single"><value>yes</value></field></x></command></iq>"#,
+        crate::admin::channels::NODE_DELETE,
+        crate::admin::channels::NODE_DELETE,
+        room_jid
+    );
+    let responses = handle_iq(
+        &frame,
+        "example.com",
+        "muc.example.com",
+        state.as_ref(),
+        &Some(session),
+        &ready_phase(&bound_jid),
+    )
+    .await;
+    let response = responses.first().expect("delete command response");
+    assert!(
+        response.contains("status='completed'") || response.contains("status=\"completed\""),
+        "expected completed delete command response: {response}"
+    );
+
+    let remaining_nodes = state
+        .deps
+        .app_state
+        .pubsub_storage
+        .list_node_names_for_item(&state.deps.app_state.spaces_jid, &room_jid.to_string())
+        .await
+        .expect("remaining bookmark nodes");
+    assert!(
+        remaining_nodes.is_empty(),
+        "channels:delete should retract duplicate bookmarks from every space node, got: {remaining_nodes:?}"
+    );
+}
+
+#[tokio::test]
+async fn admin_channels_update_retracts_duplicate_space_bookmarks() {
+    let state = create_test_websocket_state().await;
+    crate::admin::channels::register(
+        &state.deps.protocol.command_registry,
+        std::sync::Arc::clone(&state.deps.app_state),
+        std::sync::Arc::clone(&state.deps.protocol.connection_registry),
+    )
+    .await;
+
+    let owner_jid: BareJid = "owner@example.com".parse().expect("owner jid");
+    for node in ["alpha", "beta"] {
+        state
+            .deps
+            .app_state
+            .pubsub_storage
+            .get_or_create_node(&state.deps.app_state.spaces_jid, node)
+            .await
+            .expect("space node");
+    }
+    state
+        .deps
+        .app_state
+        .pubsub_storage
+        .set_affiliation(
+            &state.deps.app_state.spaces_jid,
+            "alpha",
+            &owner_jid,
+            waddle_xmpp::pubsub::Affiliation::Owner,
+        )
+        .await
+        .expect("owner affiliation");
+
+    let room_jid: BareJid = format!("rename-duplicate@{}", state.deps.app_state.muc_domain)
+        .parse()
+        .expect("room jid");
+    state
+        .deps
+        .app_state
+        .room_registry
+        .ask(waddle_xmpp::muc::room_registry_actor::CreateRoom {
+            room_jid: room_jid.clone(),
+            waddle_id: "test".to_string(),
+            channel_id: "rename-duplicate".to_string(),
+            config: waddle_xmpp::muc::RoomConfig {
+                name: "Old Name".to_string(),
+                persistent: true,
+                members_only: false,
+                ..waddle_xmpp::muc::RoomConfig::default()
+            },
+        })
+        .await
+        .expect("create room");
+    state
+        .deps
+        .app_state
+        .channel_space_link_store
+        .set(&crate::channel_space_links::ChannelSpaceLink {
+            channel_jid: room_jid.clone(),
+            space_jid: format!("alpha@{}", state.deps.app_state.spaces_jid.domain())
+                .parse()
+                .expect("space jid"),
+            created_at: 0,
+        })
+        .await
+        .expect("link channel");
+    let old_item = waddle_xmpp::xep::build_channel_item(
+        &waddle_xmpp::ChannelInfo {
+            id: "rename-duplicate".to_string(),
+            name: "Old Name".to_string(),
+            channel_type: "text".to_string(),
+        },
+        &state.deps.app_state.muc_domain.to_string(),
+    )
+    .expect("old bookmark item");
+    for node in ["alpha", "beta"] {
+        state
+            .deps
+            .app_state
+            .pubsub_storage
+            .publish_item(
+                &state.deps.app_state.spaces_jid,
+                node,
+                &old_item,
+                None,
+                false,
+            )
+            .await
+            .expect("publish duplicate bookmark");
+    }
+
+    let session = create_test_session(state.as_ref(), "owner").await;
+    let bound_jid: FullJid = "owner@example.com/web".parse().expect("bound jid");
+    let frame = format!(
+        r#"<iq xmlns="jabber:client" id="admin-update-duplicate" type="set" to="example.com"><command xmlns="http://jabber.org/protocol/commands" node="{}" action="execute"><x xmlns="jabber:x:data" type="submit"><field var="FORM_TYPE" type="hidden"><value>{}</value></field><field var="channel_jid" type="text-single"><value>{}</value></field><field var="name" type="text-single"><value>New Name</value></field></x></command></iq>"#,
+        crate::admin::channels::NODE_UPDATE,
+        crate::admin::channels::NODE_UPDATE,
+        room_jid
+    );
+    let responses = handle_iq(
+        &frame,
+        "example.com",
+        "muc.example.com",
+        state.as_ref(),
+        &Some(session),
+        &ready_phase(&bound_jid),
+    )
+    .await;
+    let response = responses.first().expect("update command response");
+    assert!(
+        response.contains("status='completed'") || response.contains("status=\"completed\""),
+        "expected completed update command response: {response}"
+    );
+
+    let alpha_items = state
+        .deps
+        .app_state
+        .pubsub_storage
+        .get_items(&state.deps.app_state.spaces_jid, "alpha", None, &[])
+        .await
+        .expect("alpha items");
+    assert!(
+        alpha_items
+            .iter()
+            .any(|item| item.id == room_jid.to_string()
+                && item
+                    .payload_xml
+                    .as_ref()
+                    .is_some_and(|payload| payload.contains("New Name"))),
+        "linked space should retain updated bookmark with new name"
+    );
+    let bookmark_nodes: std::collections::BTreeSet<_> = state
+        .deps
+        .app_state
+        .pubsub_storage
+        .list_node_names_for_item(&state.deps.app_state.spaces_jid, &room_jid.to_string())
+        .await
+        .expect("bookmark nodes after update")
+        .into_iter()
+        .collect();
+    assert_eq!(
+        bookmark_nodes,
+        std::collections::BTreeSet::from(["alpha".to_string()]),
+        "admin update should retract duplicate bookmarks from stale nodes"
+    );
+}
+
+#[tokio::test]
+async fn admin_channels_create_space_bookmark_grants_space_members_channel_view() {
+    let state = create_test_websocket_state().await;
+    crate::admin::channels::register(
+        &state.deps.protocol.command_registry,
+        std::sync::Arc::clone(&state.deps.app_state),
+        std::sync::Arc::clone(&state.deps.protocol.connection_registry),
+    )
+    .await;
+
+    let spaces_jid = state.deps.app_state.spaces_jid.clone();
+    state
+        .deps
+        .app_state
+        .pubsub_storage
+        .get_or_create_node(&spaces_jid, "alpha")
+        .await
+        .expect("space node");
+    let owner_jid: BareJid = "owner@example.com".parse().expect("owner jid");
+    state
+        .deps
+        .app_state
+        .pubsub_storage
+        .set_affiliation(
+            &spaces_jid,
+            "alpha",
+            &owner_jid,
+            waddle_xmpp::pubsub::Affiliation::Owner,
+        )
+        .await
+        .expect("owner affiliation");
+
+    let viewer = create_test_session(state.as_ref(), "viewer").await;
+    grant_space_member_for_test(state.as_ref(), "alpha", &viewer.user_id).await;
+
+    let session = create_test_server_owner_session(state.as_ref(), "owner").await;
+    let bound_jid: FullJid = "owner@example.com/web".parse().expect("bound jid");
+    let space_jid = format!("alpha@{}", spaces_jid.domain());
+    let frame = format!(
+        r#"<iq xmlns="jabber:client" id="admin-create-parent" type="set" to="example.com"><command xmlns="http://jabber.org/protocol/commands" node="{}" action="execute"><x xmlns="jabber:x:data" type="submit"><field var="FORM_TYPE" type="hidden"><value>{}</value></field><field var="name" type="text-single"><value>Alpha Parent</value></field><field var="space_jid" type="text-single"><value>{}</value></field></x></command></iq>"#,
+        crate::admin::channels::NODE_CREATE,
+        crate::admin::channels::NODE_CREATE,
+        space_jid
+    );
+    let responses = handle_iq(
+        &frame,
+        "example.com",
+        "muc.example.com",
+        state.as_ref(),
+        &Some(session),
+        &ready_phase(&bound_jid),
+    )
+    .await;
+    let response = responses.first().expect("create command response");
+    assert!(
+        response.contains("status='completed'") || response.contains("status=\"completed\""),
+        "expected completed create command response: {response}"
+    );
+    let channel_jid = data_form_value_for_test(response, "channel_jid").expect("channel_jid value");
+    let channel_jid: BareJid = channel_jid.parse().expect("channel jid");
+    let channel_id = waddle_xmpp::parse_managed_room_jid(&channel_jid).expect("managed channel");
+
+    assert!(
+        channel_view_allowed_for_test(state.as_ref(), &channel_id, &viewer.user_id).await,
+        "admin-created XEP-0503 bookmark should write the channel parent tuple"
+    );
+}
+
+#[tokio::test]
+async fn admin_spaces_delete_clears_channel_parent_tuple() {
+    let state = create_test_websocket_state().await;
+    crate::admin::spaces::register(
+        &state.deps.protocol.command_registry,
+        std::sync::Arc::clone(&state.deps.app_state),
+    )
+    .await;
+
+    let spaces_jid = state.deps.app_state.spaces_jid.clone();
+    state
+        .deps
+        .app_state
+        .pubsub_storage
+        .get_or_create_node(&spaces_jid, "alpha")
+        .await
+        .expect("space node");
+    let owner_jid: BareJid = "owner@example.com".parse().expect("owner jid");
+    state
+        .deps
+        .app_state
+        .pubsub_storage
+        .set_affiliation(
+            &spaces_jid,
+            "alpha",
+            &owner_jid,
+            waddle_xmpp::pubsub::Affiliation::Owner,
+        )
+        .await
+        .expect("owner affiliation");
+
+    let room_jid: BareJid = format!("delete-parent@{}", state.deps.app_state.muc_domain)
+        .parse()
+        .expect("room jid");
+    state
+        .deps
+        .app_state
+        .room_registry
+        .ask(waddle_xmpp::muc::room_registry_actor::CreateRoom {
+            room_jid: room_jid.clone(),
+            waddle_id: "test".to_string(),
+            channel_id: "delete-parent".to_string(),
+            config: waddle_xmpp::muc::RoomConfig {
+                name: "Delete Parent".to_string(),
+                persistent: true,
+                members_only: false,
+                ..waddle_xmpp::muc::RoomConfig::default()
+            },
+        })
+        .await
+        .expect("create room");
+    state
+        .deps
+        .app_state
+        .channel_space_link_store
+        .set(&crate::channel_space_links::ChannelSpaceLink {
+            channel_jid: room_jid.clone(),
+            space_jid: format!("alpha@{}", spaces_jid.domain())
+                .parse()
+                .expect("space jid"),
+            created_at: 0,
+        })
+        .await
+        .expect("link channel");
+    let item = waddle_xmpp::xep::build_channel_item(
+        &waddle_xmpp::ChannelInfo {
+            id: "delete-parent".to_string(),
+            name: "Delete Parent".to_string(),
+            channel_type: "text".to_string(),
+        },
+        &state.deps.app_state.muc_domain.to_string(),
+    )
+    .expect("bookmark item");
+    state
+        .deps
+        .app_state
+        .pubsub_storage
+        .publish_item(&spaces_jid, "alpha", &item, None, false)
+        .await
+        .expect("publish bookmark");
+
+    let viewer = create_test_session(state.as_ref(), "viewer").await;
+    grant_space_member_for_test(state.as_ref(), "alpha", &viewer.user_id).await;
+    state
+        .deps
+        .app_state
+        .permission_actor
+        .ask(WriteTuple {
+            tuple: Tuple::new(
+                Object::new(ObjectType::Channel, "delete-parent"),
+                Relation::new("parent"),
+                Subject::userset(SubjectType::Space, "alpha", ""),
+            ),
+        })
+        .await
+        .expect("channel parent tuple");
+    assert!(
+        channel_view_allowed_for_test(state.as_ref(), "delete-parent", &viewer.user_id).await,
+        "test setup should grant channel view through the space parent tuple"
+    );
+
+    let session = create_test_server_owner_session(state.as_ref(), "owner").await;
+    let bound_jid: FullJid = "owner@example.com/web".parse().expect("bound jid");
+    let space_jid = format!("alpha@{}", spaces_jid.domain());
+    let frame = format!(
+        r#"<iq xmlns="jabber:client" id="admin-delete-space-parent" type="set" to="example.com"><command xmlns="http://jabber.org/protocol/commands" node="{}" action="execute"><x xmlns="jabber:x:data" type="submit"><field var="FORM_TYPE" type="hidden"><value>{}</value></field><field var="space_jid" type="text-single"><value>{}</value></field><field var="confirm" type="text-single"><value>yes</value></field></x></command></iq>"#,
+        crate::admin::spaces::NODE_DELETE,
+        crate::admin::spaces::NODE_DELETE,
+        space_jid
+    );
+    let responses = handle_iq(
+        &frame,
+        "example.com",
+        "muc.example.com",
+        state.as_ref(),
+        &Some(session),
+        &ready_phase(&bound_jid),
+    )
+    .await;
+    let response = responses.first().expect("delete command response");
+    assert!(
+        response.contains("status='completed'") || response.contains("status=\"completed\""),
+        "expected completed space delete command response: {response}"
+    );
+    assert!(
+        !channel_view_allowed_for_test(state.as_ref(), "delete-parent", &viewer.user_id).await,
+        "spaces:delete should remove the channel parent tuple"
+    );
+}
+
+#[tokio::test]
+async fn spaces_publish_and_retract_sync_channel_space_link_projection() {
+    let state = create_test_websocket_state().await;
+    let conn = state
+        .deps
+        .app_state
+        .db_pool
+        .global()
+        .guard()
+        .await
+        .expect("db connection");
+    conn.execute(
+        "INSERT INTO channels (id, name, description, channel_type, position, is_default) VALUES (?, ?, ?, 'text', 0, 0)",
+        crate::db_params!["linked", "Linked", "Linked channel description"],
+    )
+    .await
+    .expect("insert channel");
+    drop(conn);
+
+    let spaces_jid: BareJid = "spaces.example.com".parse().expect("spaces jid");
+    state
+        .deps
+        .protocol
+        .pubsub_storage
+        .get_or_create_node(&spaces_jid, "team")
+        .await
+        .expect("space node");
+
+    let session = create_test_server_owner_session(state.as_ref(), "owner").await;
+    let bound_jid: FullJid = "owner@example.com/web".parse().expect("bound jid");
+    let room_jid: BareJid = "linked@muc.example.com".parse().expect("room jid");
+
+    let publish = r#"<iq xmlns="jabber:client" id="spaces-link-publish" type="set" to="spaces.example.com">
+        <pubsub xmlns="http://jabber.org/protocol/pubsub">
+            <publish node="team">
+                <item id="linked@muc.example.com">
+                    <conference xmlns="urn:xmpp:bookmarks:1" name="Linked" />
+                </item>
+            </publish>
+        </pubsub>
+    </iq>"#;
+    let publish_responses = handle_iq(
+        publish,
+        "example.com",
+        "muc.example.com",
+        state.as_ref(),
+        &Some(session.clone()),
+        &ready_phase(&bound_jid),
+    )
+    .await;
+    let publish_response = publish_responses.first().expect("publish response");
+    assert!(
+        publish_response.contains("type='result'") || publish_response.contains("type=\"result\""),
+        "spaces publish should succeed: {publish_response}"
+    );
+    let link = state
+        .deps
+        .app_state
+        .channel_space_link_store
+        .get(&room_jid)
+        .await
+        .expect("channel-space link")
+        .expect("link after spaces publish");
+    assert_eq!(link.space_jid.to_string(), "team@spaces.example.com");
+
+    let retract = r#"<iq xmlns="jabber:client" id="spaces-link-retract" type="set" to="spaces.example.com">
+        <pubsub xmlns="http://jabber.org/protocol/pubsub">
+            <retract node="team">
+                <item id="linked@muc.example.com" />
+            </retract>
+        </pubsub>
+    </iq>"#;
+    let retract_responses = handle_iq(
+        retract,
+        "example.com",
+        "muc.example.com",
+        state.as_ref(),
+        &Some(session),
+        &ready_phase(&bound_jid),
+    )
+    .await;
+    let retract_response = retract_responses.first().expect("retract response");
+    assert!(
+        retract_response.contains("type='result'") || retract_response.contains("type=\"result\""),
+        "spaces retract should succeed: {retract_response}"
+    );
+    assert!(
+        state
+            .deps
+            .app_state
+            .channel_space_link_store
+            .get(&room_jid)
+            .await
+            .expect("channel-space link after retract")
+            .is_none(),
+        "spaces retract should clear matching channel-space link projection"
+    );
+}
+
+#[tokio::test]
+async fn spaces_publish_accepts_non_jid_node_and_syncs_parent_tuple() {
+    let state = create_test_websocket_state().await;
+    let conn = state
+        .deps
+        .app_state
+        .db_pool
+        .global()
+        .guard()
+        .await
+        .expect("db connection");
+    conn.execute(
+        "INSERT INTO channels (id, name, description, channel_type, position, is_default) VALUES (?, ?, ?, 'text', 0, 0)",
+        crate::db_params!["hierarchical", "Hierarchical", "Hierarchical channel description"],
+    )
+    .await
+    .expect("insert channel");
+    drop(conn);
+
+    let spaces_jid: BareJid = "spaces.example.com".parse().expect("spaces jid");
+    state
+        .deps
+        .protocol
+        .pubsub_storage
+        .get_or_create_node(&spaces_jid, "music/A")
+        .await
+        .expect("space node");
+
+    let viewer = create_test_session(state.as_ref(), "viewer").await;
+    grant_space_member_for_test(state.as_ref(), "music/A", &viewer.user_id).await;
+
+    let session = create_test_server_owner_session(state.as_ref(), "owner").await;
+    let bound_jid: FullJid = "owner@example.com/web".parse().expect("bound jid");
+    let room_jid: BareJid = "hierarchical@muc.example.com".parse().expect("room jid");
+
+    let publish = r#"<iq xmlns="jabber:client" id="spaces-hier-publish" type="set" to="spaces.example.com">
+        <pubsub xmlns="http://jabber.org/protocol/pubsub">
+            <publish node="music/A">
+                <item id="hierarchical@muc.example.com">
+                    <conference xmlns="urn:xmpp:bookmarks:1" name="Hierarchical" />
+                </item>
+            </publish>
+        </pubsub>
+    </iq>"#;
+    let publish_responses = handle_iq(
+        publish,
+        "example.com",
+        "muc.example.com",
+        state.as_ref(),
+        &Some(session.clone()),
+        &ready_phase(&bound_jid),
+    )
+    .await;
+    let publish_response = publish_responses.first().expect("publish response");
+    assert!(
+        publish_response.contains("type='result'") || publish_response.contains("type=\"result\""),
+        "spaces publish should accept non-JID node ids: {publish_response}"
+    );
+    assert!(
+        state
+            .deps
+            .app_state
+            .channel_space_link_store
+            .get(&room_jid)
+            .await
+            .expect("channel-space link")
+            .is_none(),
+        "non-JID Space nodes should not be forced into the BareJid link projection"
+    );
+    assert!(
+        channel_view_allowed_for_test(state.as_ref(), "hierarchical", &viewer.user_id).await,
+        "publish should still write the channel parent tuple for non-JID Space nodes"
+    );
+
+    let retract = r#"<iq xmlns="jabber:client" id="spaces-hier-retract" type="set" to="spaces.example.com">
+        <pubsub xmlns="http://jabber.org/protocol/pubsub">
+            <retract node="music/A">
+                <item id="hierarchical@muc.example.com" />
+            </retract>
+        </pubsub>
+    </iq>"#;
+    let retract_responses = handle_iq(
+        retract,
+        "example.com",
+        "muc.example.com",
+        state.as_ref(),
+        &Some(session),
+        &ready_phase(&bound_jid),
+    )
+    .await;
+    let retract_response = retract_responses.first().expect("retract response");
+    assert!(
+        retract_response.contains("type='result'") || retract_response.contains("type=\"result\""),
+        "spaces retract should accept non-JID node ids: {retract_response}"
+    );
+    assert!(
+        !channel_view_allowed_for_test(state.as_ref(), "hierarchical", &viewer.user_id).await,
+        "retract should clear the channel parent tuple for non-JID Space nodes"
+    );
+}
+
+#[tokio::test]
 async fn handle_iq_disco_info_spaces_node_reports_open_for_public_space() {
     let state = create_test_websocket_state().await;
     let viewer = create_test_session(state.as_ref(), "viewer").await;
@@ -1551,6 +2737,17 @@ async fn handle_iq_disco_info_spaces_node_reports_open_for_public_space() {
         .get_or_create_node(&spaces_jid, "team")
         .await
         .expect("space node");
+    state
+        .deps
+        .protocol
+        .pubsub_storage
+        .update_node_config(
+            &spaces_jid,
+            "team",
+            &waddle_xmpp::pubsub::NodeConfig::spaces_public(),
+        )
+        .await
+        .expect("space node config");
 
     let viewer_phase = authenticated_phase_for_session(&viewer, "example.com");
     let query = disco_info_iq_frame("space-node-info", "spaces.example.com", Some("team"));
@@ -1576,6 +2773,61 @@ async fn handle_iq_disco_info_spaces_node_reports_open_for_public_space() {
     assert!(
         response.contains(">open<"),
         "expected public access model=open in metadata: {response}"
+    );
+}
+
+#[tokio::test]
+async fn handle_iq_disco_info_spaces_node_reports_whitelist_for_private_space() {
+    let state = create_test_websocket_state().await;
+    let viewer = create_test_session(state.as_ref(), "viewer").await;
+    let spaces_jid: BareJid = "spaces.example.com".parse().expect("spaces jid");
+    state
+        .deps
+        .protocol
+        .pubsub_storage
+        .get_or_create_node(&spaces_jid, "private-team")
+        .await
+        .expect("space node");
+    state
+        .deps
+        .protocol
+        .pubsub_storage
+        .update_node_config(
+            &spaces_jid,
+            "private-team",
+            &waddle_xmpp::pubsub::NodeConfig::spaces_private(),
+        )
+        .await
+        .expect("private space node config");
+
+    let viewer_phase = authenticated_phase_for_session(&viewer, "example.com");
+    let query = disco_info_iq_frame(
+        "space-node-info-private",
+        "spaces.example.com",
+        Some("private-team"),
+    );
+    let responses = handle_iq(
+        &query,
+        "example.com",
+        "muc.example.com",
+        state.as_ref(),
+        &Some(viewer),
+        &viewer_phase,
+    )
+    .await;
+    let response = responses.first().expect("spaces node disco info response");
+
+    assert!(
+        response.contains("type='result'") || response.contains("type=\"result\""),
+        "expected successful private node disco#info response: {response}"
+    );
+    assert!(
+        response.contains("pubsub#access_model"),
+        "expected access model metadata in private node disco#info: {response}"
+    );
+    assert!(
+        response.contains(">whitelist<"),
+        "expected private access model=whitelist in metadata: {response}"
     );
 }
 

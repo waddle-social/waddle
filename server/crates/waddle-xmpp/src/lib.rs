@@ -51,7 +51,9 @@ mod app_state;
 mod error;
 mod types;
 
-pub use app_state::{AppState, ScramCredentials, Session, SpaceDetails, UserDirectoryEntry};
+pub use app_state::{
+    AppState, ScramCredentials, Session, SpaceAccessModel, SpaceDetails, UserDirectoryEntry,
+};
 
 pub use error::{
     generate_iq_error, generate_stream_error, stream_errors, StanzaErrorCondition, StanzaErrorType,

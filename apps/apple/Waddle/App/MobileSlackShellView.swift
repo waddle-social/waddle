@@ -226,8 +226,8 @@ private struct MobileConversationTab: View {
                 WaddleChatSpaceView(model: model, store: model.chatStore, space: space)
             } else {
                 MobileEmptyCard(
-                    title: "Set up the space first",
-                    message: "Open Space to create or load the server space, then chat will appear here."
+                    title: emptyTitle,
+                    message: emptyMessage
                 )
                 .padding(.horizontal, 20)
                 .padding(.top, 24)
@@ -236,6 +236,30 @@ private struct MobileConversationTab: View {
             }
         }
         .background(MobileShellBackground())
+    }
+
+    private var emptyTitle: String {
+        switch model.chatStore.surfaceState {
+        case .loading:
+            return "Loading space"
+        case .empty(let title, _), .error(let title, _):
+            return title
+        case .idle:
+            return model.session == nil ? "Sign in" : "Loading space"
+        }
+    }
+
+    private var emptyMessage: String {
+        switch model.chatStore.surfaceState {
+        case .loading:
+            return "Fetching spaces and channels from the XMPP server."
+        case .empty(_, let message), .error(_, let message):
+            return message
+        case .idle:
+            return model.session == nil
+                ? "Sign in to load the server space and connect to live rooms."
+                : "Fetching spaces and channels from the XMPP server."
+        }
     }
 }
 

@@ -1,4 +1,7 @@
-use super::permissions::{permission_allowed, write_channel_parent_tuple};
+use super::permissions::{
+    delete_channel_parent_tuple, permission_allowed, write_channel_parent_tuple,
+    write_channel_parent_tuple_if_absent,
+};
 use super::*;
 use crate::server::routes::websocket::handlers::pubsub_fanout;
 
@@ -75,21 +78,32 @@ pub(super) fn spaces_service_bare_jid(spaces_domain: &str) -> Result<BareJid, St
         .map_err(|error| format!("invalid spaces service JID: {error}"))
 }
 
-pub(super) fn space_details_from_node(node: &waddle_xmpp::pubsub::PubSubNode) -> SpaceDetails {
+fn space_jid_for_node(spaces_jid: &BareJid, node: &str) -> Option<BareJid> {
+    format!("{}@{}", node, spaces_jid.domain()).parse().ok()
+}
+
+pub(super) fn space_details_from_node(
+    node: &waddle_xmpp::pubsub::PubSubNode,
+) -> Option<SpaceDetails> {
+    let access_model = waddle_xmpp::SpaceAccessModel::from_pubsub(node.config.access_model)?;
     let name = if node.node_name == "general" {
         "General".to_string()
     } else {
         node.node_name.clone()
     };
-    SpaceDetails {
+    Some(SpaceDetails {
         id: node.node_name.clone(),
         name,
         description: None,
         owner_id: node.owner.to_string(),
         icon_url: None,
-        is_public: true,
+        is_public: matches!(
+            node.config.access_model,
+            waddle_xmpp::pubsub::AccessModel::Open
+        ),
+        access_model,
         created_at: node.created_at.to_rfc3339(),
-    }
+    })
 }
 
 fn channels_to_disco_items(channels: Vec<XmppChannelRecord>, muc_domain: &str) -> Vec<DiscoItem> {
@@ -167,6 +181,7 @@ pub(super) async fn handle_spaces_items(
     iq: &xmpp_parsers::iq::Iq,
     state: &WebSocketState,
     spaces_domain: &str,
+    requester_jid: &BareJid,
     node: &str,
     max_items: Option<u32>,
     item_ids: &[String],
@@ -174,20 +189,61 @@ pub(super) async fn handle_spaces_items(
     let Ok(spaces_jid) = spaces_service_bare_jid(spaces_domain) else {
         return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::InvalidJid))];
     };
-    match state
-        .deps
-        .protocol
-        .pubsub_storage
-        .get_node(&spaces_jid, node)
-        .await
+    match crate::pubsub_authz::can_subscribe(
+        &state.deps.protocol.pubsub_storage,
+        &spaces_jid,
+        node,
+        requester_jid,
+        false,
+    )
+    .await
     {
-        Ok(Some(_)) => {}
-        Ok(None) => return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::NodeNotFound))],
+        Ok(true) => {}
+        Ok(false) => {
+            let node_meta = state
+                .deps
+                .protocol
+                .pubsub_storage
+                .get_node(&spaces_jid, node)
+                .await
+                .ok()
+                .flatten();
+            let is_outcast = crate::pubsub_authz::effective_affiliation(
+                &state.deps.protocol.pubsub_storage,
+                &spaces_jid,
+                node,
+                requester_jid,
+                false,
+            )
+            .await
+            .is_ok_and(|affiliation| affiliation.is_outcast());
+            let error = if let Some(node_meta) = node_meta {
+                if is_outcast {
+                    PubSubError::Forbidden
+                } else if matches!(
+                    node_meta.config.access_model,
+                    waddle_xmpp::pubsub::AccessModel::Whitelist
+                ) {
+                    PubSubError::ClosedNode
+                } else {
+                    PubSubError::Forbidden
+                }
+            } else {
+                PubSubError::NodeNotFound
+            };
+            return vec![iq_to_xml(build_pubsub_error(iq, error))];
+        }
         Err(error) => {
-            warn!(node, error = %error, "Failed to retrieve Spaces node");
-            return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::NodeNotFound))];
+            warn!(
+                node,
+                requester = %requester_jid,
+                error = %error,
+                "Failed to authorize Spaces items access"
+            );
+            return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::Forbidden))];
         }
     }
+    backfill_missing_space_bookmarks(state, &spaces_jid, node, item_ids).await;
     match state
         .deps
         .protocol
@@ -205,6 +261,204 @@ pub(super) async fn handle_spaces_items(
         Err(error) => {
             warn!(node, error = %error, "Failed to retrieve Spaces items");
             vec![iq_to_xml(build_pubsub_error(iq, PubSubError::NodeNotFound))]
+        }
+    }
+}
+
+async fn backfill_missing_space_bookmarks(
+    state: &WebSocketState,
+    spaces_jid: &BareJid,
+    node: &str,
+    item_ids: &[String],
+) {
+    let Some(space_jid) = space_jid_for_node(spaces_jid, node) else {
+        warn!(
+            node,
+            spaces = %spaces_jid,
+            "Skipping channel-space link bookmark backfill for non-JID Space node"
+        );
+        return;
+    };
+    let links = match state
+        .deps
+        .app_state
+        .channel_space_link_store
+        .list_channels_in_space(&space_jid)
+        .await
+    {
+        Ok(links) => links,
+        Err(error) => {
+            warn!(node, error = %error, "Failed to list channel-space links for Spaces bookmark backfill");
+            return;
+        }
+    };
+    if links.is_empty() {
+        return;
+    }
+
+    let existing_ids = match state
+        .deps
+        .protocol
+        .pubsub_storage
+        .get_items(spaces_jid, node, None, &[])
+        .await
+    {
+        Ok(items) => items
+            .into_iter()
+            .map(|item| item.id)
+            .collect::<std::collections::HashSet<_>>(),
+        Err(error) => {
+            warn!(node, error = %error, "Failed to inspect Spaces items before bookmark backfill");
+            return;
+        }
+    };
+
+    for channel_jid in links {
+        let item_id = channel_jid.to_string();
+        if existing_ids.contains(&item_id)
+            || (!item_ids.is_empty() && !item_ids.iter().any(|id| id == &item_id))
+        {
+            continue;
+        }
+        let Some(channel_id) = waddle_xmpp::parse_managed_room_jid(&channel_jid) else {
+            warn!(channel = %channel_jid, "Skipping Spaces bookmark backfill for non-managed room JID");
+            continue;
+        };
+        let room = match state
+            .deps
+            .protocol
+            .room_registry
+            .ask(waddle_xmpp::muc::room_registry_actor::GetRoom {
+                room_jid: channel_jid.clone(),
+            })
+            .await
+        {
+            Ok(Some(room)) => room,
+            Ok(None) => {
+                warn!(channel = %channel_jid, "Skipping Spaces bookmark backfill for missing MUC room");
+                continue;
+            }
+            Err(error) => {
+                warn!(channel = %channel_jid, error = %error, "Failed to load MUC room for Spaces bookmark backfill");
+                continue;
+            }
+        };
+        let config = match room.ask(waddle_xmpp::muc::room_actor::GetConfig).await {
+            Ok(config) => config,
+            Err(error) => {
+                warn!(channel = %channel_jid, error = %error, "Failed to load room config for Spaces bookmark backfill");
+                continue;
+            }
+        };
+        let channel_type = if config.forum { "forum" } else { "text" };
+        let item = match waddle_xmpp::xep::build_channel_item(
+            &waddle_xmpp::ChannelInfo {
+                id: channel_id.clone(),
+                name: config.name,
+                channel_type: channel_type.to_string(),
+            },
+            &state.deps.service_domains.muc,
+        ) {
+            Ok(item) => item,
+            Err(error) => {
+                warn!(channel = %channel_jid, error = %error, "Failed to build Spaces bookmark backfill item");
+                continue;
+            }
+        };
+        let stale_nodes = match state
+            .deps
+            .protocol
+            .pubsub_storage
+            .list_node_names_for_item(spaces_jid, &item_id)
+            .await
+        {
+            Ok(stale_nodes) => stale_nodes,
+            Err(error) => {
+                warn!(channel = %channel_jid, node, error = %error, "Failed to enumerate stale Spaces bookmarks before backfill");
+                continue;
+            }
+        };
+        let publish_result = match state
+            .deps
+            .protocol
+            .pubsub_storage
+            .publish_item(spaces_jid, node, &item, None, false)
+            .await
+        {
+            Ok(result) => result,
+            Err(error) => {
+                warn!(channel = %channel_jid, node, error = %error, "Failed to backfill Spaces bookmark item");
+                continue;
+            }
+        };
+        let parent_tuple_created = match write_channel_parent_tuple_if_absent(
+            state,
+            &channel_id,
+            node,
+        )
+        .await
+        {
+            Ok(created) => created,
+            Err(error) => {
+                let _ = state
+                    .deps
+                    .protocol
+                    .pubsub_storage
+                    .retract_item(spaces_jid, node, &publish_result.item_id)
+                    .await;
+                warn!(channel = %channel_jid, node, error = %error, "Backfilled Spaces bookmark but failed to repair channel parent tuple; retracted backfill item");
+                continue;
+            }
+        };
+        if let Err(error) = cleanup_stale_space_bookmarks(
+            state,
+            spaces_jid,
+            &channel_id,
+            node,
+            &item_id,
+            &stale_nodes,
+        )
+        .await
+        {
+            let tuple_ready_for_retract = if parent_tuple_created {
+                match delete_channel_parent_tuple(state, &channel_id, node).await {
+                    Ok(_) => true,
+                    Err(delete_error) => {
+                        warn!(
+                            channel = %channel_jid,
+                            node,
+                            error = %delete_error,
+                            "Failed to delete operation-created parent tuple after stale cleanup failure; preserving backfilled Spaces bookmark"
+                        );
+                        false
+                    }
+                }
+            } else {
+                true
+            };
+            if tuple_ready_for_retract {
+                match state
+                    .deps
+                    .protocol
+                    .pubsub_storage
+                    .retract_item(spaces_jid, node, &publish_result.item_id)
+                    .await
+                {
+                    Ok(_) => {}
+                    Err(retract_error) => {
+                        if parent_tuple_created {
+                            let _ = write_channel_parent_tuple(state, &channel_id, node).await;
+                        }
+                        warn!(
+                            channel = %channel_jid,
+                            node,
+                            error = %retract_error,
+                            "Failed to retract backfilled Spaces bookmark after stale cleanup failure; preserving repaired parent tuple"
+                        );
+                    }
+                }
+            }
+            warn!(channel = %channel_jid, node, error = %error, "Backfilled Spaces bookmark but failed to clean stale bookmarks");
         }
     }
 }
@@ -395,57 +649,64 @@ pub(super) async fn handle_spaces_publish(
         }
     }
 
-    // XEP-0503 single-space-membership: a channel has exactly one
-    // parent space. If the same bookmark item lives in any other
-    // space node, retract it there first — otherwise we'd ship the
-    // item in two `<items>` listings and `find_node_for_item` would
-    // alphabetically pin the room under whichever space sorted first
-    // (the original "rooms always show up under General" bug).
-    //
-    // Retract failures here are non-fatal: they're logged and the
-    // publish proceeds, since `find_node_for_item` now also tiebreaks
-    // by most-recent `seq` and will route lookups to the new node.
-    // The retract is still attempted so legacy clients listing each
-    // space don't see the room twice.
-    match state
+    let stale_nodes = match state
         .deps
         .protocol
         .pubsub_storage
         .list_node_names_for_item(&spaces_jid, item_id)
         .await
     {
-        Ok(stale_nodes) => {
-            for stale in stale_nodes.iter().filter(|name| name.as_str() != node) {
-                if let Err(error) = state
-                    .deps
-                    .protocol
-                    .pubsub_storage
-                    .retract_item(&spaces_jid, stale, item_id)
-                    .await
-                {
-                    warn!(
-                        channel_id = %channel_id,
-                        from_node = %stale,
-                        to_node = node,
-                        item_id,
-                        error = %error,
-                        "Failed to retract room bookmark from prior Space node before re-publish; \
-                         room may briefly appear in multiple Spaces"
-                    );
-                }
-            }
-        }
+        Ok(stale_nodes) => stale_nodes,
         Err(error) => {
             warn!(
                 channel_id = %channel_id,
                 node,
                 item_id,
                 error = %error,
-                "Failed to enumerate prior Space nodes for room bookmark; \
-                 single-membership invariant may be violated"
+                "Failed to enumerate prior Space nodes for room bookmark"
             );
+            return vec![iq_to_xml(build_pubsub_error(
+                iq,
+                PubSubError::InternalServerError,
+            ))];
         }
-    }
+    };
+    let previous_link = match state
+        .deps
+        .app_state
+        .channel_space_link_store
+        .get(&bookmark.jid)
+        .await
+    {
+        Ok(link) => link,
+        Err(error) => {
+            warn!(item_id, node, error = %error, "Failed to read channel-space link before Spaces publish");
+            return vec![iq_to_xml(build_pubsub_error(
+                iq,
+                PubSubError::InternalServerError,
+            ))];
+        }
+    };
+    let current_item_filter = [item_id.to_string()];
+    let previous_item = match state
+        .deps
+        .protocol
+        .pubsub_storage
+        .get_items(&spaces_jid, node, Some(1), &current_item_filter)
+        .await
+    {
+        Ok(items) => items
+            .into_iter()
+            .next()
+            .map(|stored| stored.to_pubsub_item()),
+        Err(error) => {
+            warn!(item_id, node, error = %error, "Failed to read existing Spaces item before publish");
+            return vec![iq_to_xml(build_pubsub_error(
+                iq,
+                PubSubError::InternalServerError,
+            ))];
+        }
+    };
 
     match state
         .deps
@@ -455,31 +716,178 @@ pub(super) async fn handle_spaces_publish(
         .await
     {
         Ok(result) => {
-            if let Err(error) = write_channel_parent_tuple(state, &channel_id, node).await {
-                warn!(
-                    channel_id = %channel_id,
-                    node,
-                    error = %error,
-                    "Published Spaces item but failed to sync channel parent tuple; \
-                     retracting to keep PubSub and permission graph consistent"
-                );
-                // Compensating retract: remove the just-published bookmark so
-                // the server does not end up in a state where the item is
-                // advertised in PubSub but the channel is not accessible via
-                // Space membership (XEP-0503 §4).
-                if let Err(retract_err) = state
+            let projected_space_jid = space_jid_for_node(&spaces_jid, node);
+            if let Some(space_jid) = projected_space_jid.as_ref() {
+                if let Err(error) = state
                     .deps
-                    .protocol
-                    .pubsub_storage
-                    .retract_item(&spaces_jid, node, &result.item_id)
+                    .app_state
+                    .channel_space_link_store
+                    .set(&crate::channel_space_links::ChannelSpaceLink {
+                        channel_jid: bookmark.jid.clone(),
+                        space_jid: space_jid.clone(),
+                        created_at: chrono::Utc::now().timestamp(),
+                    })
                     .await
                 {
                     warn!(
                         channel_id = %channel_id,
                         node,
-                        item_id = %result.item_id,
-                        error = %retract_err,
-                        "Compensating retract also failed; manual cleanup may be required"
+                        error = %error,
+                        "Published Spaces item but failed to sync channel-space link projection; \
+                         rolling back to keep PubSub and durable discovery state consistent"
+                    );
+                    if let Err(rollback_error) = rollback_spaces_publish(
+                        state,
+                        SpacesPublishRollback {
+                            spaces_jid: &spaces_jid,
+                            node,
+                            item_id: &result.item_id,
+                            previous_item: previous_item.as_ref(),
+                            channel_id: &channel_id,
+                            channel_jid: &bookmark.jid,
+                            previous_link: previous_link.as_ref(),
+                            parent_tuple_created: false,
+                        },
+                    )
+                    .await
+                    {
+                        warn!(
+                            channel_id = %channel_id,
+                            node,
+                            error = %rollback_error,
+                            "Failed to roll back Spaces publish after link projection failure"
+                        );
+                    }
+                    return vec![iq_to_xml(build_pubsub_error(
+                        iq,
+                        PubSubError::InternalServerError,
+                    ))];
+                }
+            } else {
+                warn!(
+                    node,
+                    spaces = %spaces_jid,
+                    "Clearing channel-space link projection for non-JID Space node"
+                );
+                if let Err(error) = state
+                    .deps
+                    .app_state
+                    .channel_space_link_store
+                    .clear(&bookmark.jid)
+                    .await
+                {
+                    warn!(
+                        channel_id = %channel_id,
+                        node,
+                        error = %error,
+                        "Published Spaces item but failed to clear stale channel-space link projection; \
+                         rolling back to keep PubSub and durable discovery state consistent"
+                    );
+                    if let Err(rollback_error) = rollback_spaces_publish(
+                        state,
+                        SpacesPublishRollback {
+                            spaces_jid: &spaces_jid,
+                            node,
+                            item_id: &result.item_id,
+                            previous_item: previous_item.as_ref(),
+                            channel_id: &channel_id,
+                            channel_jid: &bookmark.jid,
+                            previous_link: previous_link.as_ref(),
+                            parent_tuple_created: false,
+                        },
+                    )
+                    .await
+                    {
+                        warn!(
+                            channel_id = %channel_id,
+                            node,
+                            error = %rollback_error,
+                            "Failed to roll back Spaces publish after link projection clear failure"
+                        );
+                    }
+                    return vec![iq_to_xml(build_pubsub_error(
+                        iq,
+                        PubSubError::InternalServerError,
+                    ))];
+                }
+            }
+            let parent_tuple_created =
+                match write_channel_parent_tuple_if_absent(state, &channel_id, node).await {
+                    Ok(created) => created,
+                    Err(error) => {
+                        warn!(
+                            channel_id = %channel_id,
+                            node,
+                            error = %error,
+                            "Published Spaces item but failed to sync channel parent tuple; \
+                             rolling back to keep PubSub and permission graph consistent"
+                        );
+                        if let Err(rollback_error) = rollback_spaces_publish(
+                            state,
+                            SpacesPublishRollback {
+                                spaces_jid: &spaces_jid,
+                                node,
+                                item_id: &result.item_id,
+                                previous_item: previous_item.as_ref(),
+                                channel_id: &channel_id,
+                                channel_jid: &bookmark.jid,
+                                previous_link: previous_link.as_ref(),
+                                parent_tuple_created: false,
+                            },
+                        )
+                        .await
+                        {
+                            warn!(
+                                channel_id = %channel_id,
+                                node,
+                                error = %rollback_error,
+                                "Failed to roll back Spaces publish after parent tuple failure"
+                            );
+                        }
+                        return vec![iq_to_xml(build_pubsub_error(
+                            iq,
+                            PubSubError::InternalServerError,
+                        ))];
+                    }
+                };
+            if let Err(error) = cleanup_stale_space_bookmarks(
+                state,
+                &spaces_jid,
+                &channel_id,
+                node,
+                item_id,
+                &stale_nodes,
+            )
+            .await
+            {
+                warn!(
+                    channel_id = %channel_id,
+                    node,
+                    item_id,
+                    error = %error,
+                    "Published Spaces item but failed to clean stale prior Space bookmarks"
+                );
+                if let Err(rollback_error) = rollback_spaces_publish(
+                    state,
+                    SpacesPublishRollback {
+                        spaces_jid: &spaces_jid,
+                        node,
+                        item_id: &result.item_id,
+                        previous_item: previous_item.as_ref(),
+                        channel_id: &channel_id,
+                        channel_jid: &bookmark.jid,
+                        previous_link: previous_link.as_ref(),
+                        parent_tuple_created,
+                    },
+                )
+                .await
+                {
+                    warn!(
+                        channel_id = %channel_id,
+                        node,
+                        item_id,
+                        error = %rollback_error,
+                        "Failed to roll back Spaces publish after stale cleanup failure"
                     );
                 }
                 return vec![iq_to_xml(build_pubsub_error(
@@ -936,6 +1344,187 @@ async fn handle_community_non_bookmark_publish(
     }
 }
 
+async fn restore_channel_space_link_projection(
+    state: &WebSocketState,
+    channel_jid: &BareJid,
+    previous_link: Option<&crate::channel_space_links::ChannelSpaceLink>,
+) -> Result<(), String> {
+    if let Some(link) = previous_link {
+        state
+            .deps
+            .app_state
+            .channel_space_link_store
+            .set(link)
+            .await
+            .map_err(|error| format!("channel-space link restore failed: {error}"))?;
+    } else {
+        state
+            .deps
+            .app_state
+            .channel_space_link_store
+            .clear(channel_jid)
+            .await
+            .map_err(|error| format!("channel-space link clear failed: {error}"))?;
+    }
+    Ok(())
+}
+
+struct SpacesPublishRollback<'a> {
+    spaces_jid: &'a BareJid,
+    node: &'a str,
+    item_id: &'a str,
+    previous_item: Option<&'a PubSubItem>,
+    channel_id: &'a str,
+    channel_jid: &'a BareJid,
+    previous_link: Option<&'a crate::channel_space_links::ChannelSpaceLink>,
+    parent_tuple_created: bool,
+}
+
+async fn rollback_spaces_publish(
+    state: &WebSocketState,
+    rollback: SpacesPublishRollback<'_>,
+) -> Result<(), String> {
+    if rollback.parent_tuple_created {
+        delete_channel_parent_tuple(state, rollback.channel_id, rollback.node)
+            .await
+            .map_err(|error| format!("parent tuple rollback failed: {error}"))?;
+    }
+    if let Some(item) = rollback.previous_item {
+        if let Err(error) = state
+            .deps
+            .protocol
+            .pubsub_storage
+            .publish_item(rollback.spaces_jid, rollback.node, item, None, false)
+            .await
+        {
+            if rollback.parent_tuple_created {
+                let _ = write_channel_parent_tuple(state, rollback.channel_id, rollback.node).await;
+            }
+            return Err(format!("pubsub restore Spaces item failed: {error}"));
+        }
+    } else {
+        if let Err(error) = state
+            .deps
+            .protocol
+            .pubsub_storage
+            .retract_item(rollback.spaces_jid, rollback.node, rollback.item_id)
+            .await
+        {
+            if rollback.parent_tuple_created {
+                let _ = write_channel_parent_tuple(state, rollback.channel_id, rollback.node).await;
+            }
+            return Err(format!("pubsub rollback Spaces item failed: {error}"));
+        }
+    }
+    restore_channel_space_link_projection(state, rollback.channel_jid, rollback.previous_link)
+        .await?;
+    Ok(())
+}
+
+async fn cleanup_stale_space_bookmarks(
+    state: &WebSocketState,
+    spaces_jid: &BareJid,
+    channel_id: &str,
+    keep_node: &str,
+    item_id: &str,
+    stale_nodes: &[String],
+) -> Result<(), String> {
+    let mut removed_stale: Vec<RemovedStaleSpaceBookmark> = Vec::new();
+    for stale in stale_nodes.iter().filter(|name| name.as_str() != keep_node) {
+        let item_filter = [item_id.to_string()];
+        let previous_item = match state
+            .deps
+            .protocol
+            .pubsub_storage
+            .get_items(spaces_jid, stale, Some(1), &item_filter)
+            .await
+        {
+            Ok(items) => items
+                .into_iter()
+                .next()
+                .map(|stored| stored.to_pubsub_item()),
+            Err(error) => {
+                restore_stale_space_bookmarks(state, spaces_jid, channel_id, &removed_stale).await;
+                return Err(format!(
+                    "pubsub read stale channel bookmark from {stale} failed: {error}"
+                ));
+            }
+        };
+        let parent_tuple_deleted = match delete_channel_parent_tuple(state, channel_id, stale).await
+        {
+            Ok(deleted) => deleted,
+            Err(error) => {
+                restore_stale_space_bookmarks(state, spaces_jid, channel_id, &removed_stale).await;
+                return Err(error);
+            }
+        };
+        match state
+            .deps
+            .protocol
+            .pubsub_storage
+            .retract_item(spaces_jid, stale, item_id)
+            .await
+        {
+            Ok(_) => {
+                removed_stale.push(RemovedStaleSpaceBookmark {
+                    node: stale.clone(),
+                    item: previous_item,
+                    parent_tuple_deleted,
+                });
+            }
+            Err(error) => {
+                if parent_tuple_deleted {
+                    let _ = write_channel_parent_tuple(state, channel_id, stale).await;
+                }
+                restore_stale_space_bookmarks(state, spaces_jid, channel_id, &removed_stale).await;
+                return Err(format!(
+                    "pubsub retract stale channel bookmark from {stale} failed: {error}"
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+struct RemovedStaleSpaceBookmark {
+    node: String,
+    item: Option<PubSubItem>,
+    parent_tuple_deleted: bool,
+}
+
+async fn restore_stale_space_bookmarks(
+    state: &WebSocketState,
+    spaces_jid: &BareJid,
+    channel_id: &str,
+    removed_stale: &[RemovedStaleSpaceBookmark],
+) {
+    for removed in removed_stale.iter().rev() {
+        if let Some(item) = removed.item.as_ref() {
+            match state
+                .deps
+                .protocol
+                .pubsub_storage
+                .publish_item(spaces_jid, &removed.node, item, None, false)
+                .await
+            {
+                Ok(_) => {
+                    if removed.parent_tuple_deleted {
+                        let _ = write_channel_parent_tuple(state, channel_id, &removed.node).await;
+                    }
+                }
+                Err(error) => {
+                    warn!(
+                        channel_id = %channel_id,
+                        node = %removed.node,
+                        error = %error,
+                        "Failed to restore stale Space bookmark after cleanup rollback"
+                    );
+                }
+            }
+        }
+    }
+}
+
 pub(super) async fn handle_spaces_retract(
     iq: &xmpp_parsers::iq::Iq,
     state: &WebSocketState,
@@ -960,9 +1549,78 @@ pub(super) async fn handle_spaces_retract(
     if room_jid.domain().as_str() != muc_domain {
         return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::InvalidJid))];
     }
+    let Some(channel_id) = waddle_xmpp::parse_managed_room_jid(&room_jid) else {
+        return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::InvalidJid))];
+    };
     let Ok(spaces_jid) = spaces_service_bare_jid(spaces_domain) else {
         return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::InvalidJid))];
     };
+    let target_space_jid = space_jid_for_node(&spaces_jid, node);
+    let item_filter = [item_id.to_string()];
+    match state
+        .deps
+        .protocol
+        .pubsub_storage
+        .get_items(&spaces_jid, node, Some(1), &item_filter)
+        .await
+    {
+        Ok(items) if items.is_empty() => {
+            return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::ItemNotFound))];
+        }
+        Ok(_) => {}
+        Err(error) => {
+            warn!(item_id, node, error = %error, "Failed to preflight Spaces item before retract");
+            return vec![iq_to_xml(build_pubsub_error(
+                iq,
+                PubSubError::InternalServerError,
+            ))];
+        }
+    }
+    let link_to_restore = match state
+        .deps
+        .app_state
+        .channel_space_link_store
+        .get(&room_jid)
+        .await
+    {
+        Ok(Some(link)) if target_space_jid.as_ref() == Some(&link.space_jid) => Some(link),
+        Ok(_) => None,
+        Err(error) => {
+            warn!(item_id, node, error = %error, "Failed to read channel-space link before Spaces retract");
+            return vec![iq_to_xml(build_pubsub_error(
+                iq,
+                PubSubError::InternalServerError,
+            ))];
+        }
+    };
+    let parent_tuple_deleted = match delete_channel_parent_tuple(state, &channel_id, node).await {
+        Ok(deleted) => deleted,
+        Err(error) => {
+            warn!(item_id, node, error = %error, "Failed to clear channel parent tuple before Spaces retract");
+            return vec![iq_to_xml(build_pubsub_error(
+                iq,
+                PubSubError::InternalServerError,
+            ))];
+        }
+    };
+    if link_to_restore.is_some() {
+        if let Err(error) = state
+            .deps
+            .app_state
+            .channel_space_link_store
+            .clear(&room_jid)
+            .await
+        {
+            if parent_tuple_deleted {
+                let _ = write_channel_parent_tuple(state, &channel_id, node).await;
+            }
+            warn!(item_id, node, error = %error, "Failed to clear channel-space link before Spaces retract");
+            return vec![iq_to_xml(build_pubsub_error(
+                iq,
+                PubSubError::InternalServerError,
+            ))];
+        }
+    }
     match state
         .deps
         .protocol
@@ -971,8 +1629,66 @@ pub(super) async fn handle_spaces_retract(
         .await
     {
         Ok(true) => vec![iq_to_xml(build_pubsub_success(iq))],
-        Ok(false) => vec![iq_to_xml(build_pubsub_error(iq, PubSubError::ItemNotFound))],
+        Ok(false) => {
+            if parent_tuple_deleted {
+                if let Err(restore_error) =
+                    write_channel_parent_tuple(state, &channel_id, node).await
+                {
+                    warn!(
+                        item_id,
+                        node,
+                        error = %restore_error,
+                        "Failed to restore channel parent tuple after Spaces retract returned item-not-found"
+                    );
+                }
+            }
+            if let Some(link) = link_to_restore.as_ref() {
+                if let Err(restore_error) = state
+                    .deps
+                    .app_state
+                    .channel_space_link_store
+                    .set(link)
+                    .await
+                {
+                    warn!(
+                        item_id,
+                        node,
+                        error = %restore_error,
+                        "Failed to restore channel-space link after Spaces retract returned item-not-found"
+                    );
+                }
+            }
+            vec![iq_to_xml(build_pubsub_error(iq, PubSubError::ItemNotFound))]
+        }
         Err(error) => {
+            if parent_tuple_deleted {
+                if let Err(restore_error) =
+                    write_channel_parent_tuple(state, &channel_id, node).await
+                {
+                    warn!(
+                        item_id,
+                        node,
+                        error = %restore_error,
+                        "Failed to restore channel parent tuple after Spaces retract failure"
+                    );
+                }
+            }
+            if let Some(link) = link_to_restore.as_ref() {
+                if let Err(restore_error) = state
+                    .deps
+                    .app_state
+                    .channel_space_link_store
+                    .set(link)
+                    .await
+                {
+                    warn!(
+                        item_id,
+                        node,
+                        error = %restore_error,
+                        "Failed to restore channel-space link after Spaces retract failure"
+                    );
+                }
+            }
             warn!(item_id, node, error = %error, "Failed to retract Spaces item");
             vec![iq_to_xml(build_pubsub_error(
                 iq,

@@ -18,7 +18,7 @@ pub use iq::{
 };
 pub use parsing::{
     parse_disco_info_result, parse_disco_items_result, parse_space_channels_result,
-    parse_spaces_from_disco_items, parse_upload_slot, space_from_disco_item,
+    parse_upload_slot, space_from_disco_item,
 };
 pub use types::{
     DiscoDataField, DiscoDataForm, DiscoFeature, DiscoIdentity, DiscoInfoResult, DiscoItem,

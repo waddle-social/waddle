@@ -1,6 +1,6 @@
 use kameo::actor::ActorRef;
 use tracing::{debug, warn};
-use waddle_xmpp::{ChannelInfo, ChannelRoomInfo, SpaceDetails, XmppError};
+use waddle_xmpp::{ChannelInfo, ChannelRoomInfo, SpaceAccessModel, SpaceDetails, XmppError};
 
 use crate::db::actor::{DbActor, DbQuery, DbQueryOne};
 use crate::db::{row_value, Value, ValueExt};
@@ -130,6 +130,7 @@ pub(crate) fn get_space_details(domain: &str) -> SpaceDetails {
         owner_id: "server".to_string(),
         icon_url: None,
         is_public: true,
+        access_model: SpaceAccessModel::Open,
         created_at: "1970-01-01T00:00:00Z".to_string(),
     }
 }
