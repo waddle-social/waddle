@@ -4,7 +4,10 @@ mod ws_common;
 
 use std::str::FromStr;
 use tokio::sync::Mutex;
-use waddle_xmpp::xep::{DataForm, Field, FieldType, FormType, IntoElement, NS_EXPLICIT_MENTIONS};
+use waddle_xmpp::xep::{
+    DataForm, Field, FieldType, FormType, IntoElement, MentionsPermission, FIELD_MENTIONS_CHANNEL,
+    FIELD_MENTIONS_COUNT, FIELD_MENTIONS_INDIVIDUAL, NS_EXPLICIT_MENTIONS,
+};
 use waddle_xmpp::Stanza;
 use ws_common::{TestServer, WsXmppClient};
 use xmpp_parsers::iq::Iq;
@@ -296,11 +299,15 @@ async fn mentions_permissions_iq_set_returns_forbidden() {
     // `mentions#channel` list-single) to stay forward-compatible.
     let submit_form = DataForm::new(FormType::Submit)
         .add_field(Field::form_type(NS_EXPLICIT_MENTIONS))
-        .add_field(Field::text_single("mentions#count", "1"))
+        .add_field(Field::text_single(FIELD_MENTIONS_COUNT, "1"))
         .add_field(
-            Field::new("mentions#individual", FieldType::ListSingle).with_value("participants"),
+            Field::new(FIELD_MENTIONS_INDIVIDUAL, FieldType::ListSingle)
+                .with_value(MentionsPermission::Participants.as_wire()),
         )
-        .add_field(Field::new("mentions#channel", FieldType::ListSingle).with_value("moderators"))
+        .add_field(
+            Field::new(FIELD_MENTIONS_CHANNEL, FieldType::ListSingle)
+                .with_value(MentionsPermission::Moderators.as_wire()),
+        )
         .into_element();
     let mut submit_query = Element::builder("query", NS_EXPLICIT_MENTIONS).build();
     submit_query.append_child(submit_form);
