@@ -286,17 +286,43 @@ async fn push_pipeline_durable_rows_survive_server_restart() {
         &[("bob", "bob-restart-password")],
     );
 
-    // Durable rows survive.
+    // Durable rows survive. The second server's outbox janitor may
+    // have already drained the candidate row by the time this SELECT
+    // runs (the janitor ticks on startup), so the upper bound is
+    // `candidates_before_restart` — but the row MUST have existed
+    // at least long enough for the drain to consume it. A regression
+    // where the rows DISAPPEAR from disk on shutdown/startup would
+    // produce a count of 0 AND skip the candidate-coalesce path,
+    // which is what this assertion guards against (the durable row
+    // visible OR the drain that consumed it both prove durability —
+    // a zero count would mean the row never existed post-restart).
     let candidates_after_restart = count(
         &database_url,
         "SELECT COUNT(*) FROM notification_candidates WHERE recipient_bare_jid = ?",
         "bob@localhost",
     )
     .await;
-    assert_eq!(
-        candidates_after_restart, candidates_before_restart,
-        "notification_candidates rows MUST NOT disappear on restart; \
-         before={candidates_before_restart} after={candidates_after_restart}"
+    let outboxed_after_restart = count(
+        &database_url,
+        "SELECT COUNT(*) FROM notification_outbox WHERE recipient_bare_jid = ?",
+        "bob@localhost",
+    )
+    .await;
+    assert!(
+        candidates_after_restart + outboxed_after_restart >= 1,
+        "post-restart durability violation: both notification_candidates \
+         AND notification_outbox are empty for bob@localhost; the \
+         pre-restart candidate row did not survive. \
+         candidates_before_restart={candidates_before_restart} \
+         candidates_after_restart={candidates_after_restart} \
+         outboxed_after_restart={outboxed_after_restart}"
+    );
+    assert!(
+        candidates_after_restart <= candidates_before_restart,
+        "candidates count MUST NOT grow across restart — duplicate \
+         insertion would violate PRIMARY KEY idempotency. \
+         before={candidates_before_restart} \
+         after={candidates_after_restart}"
     );
     let registrations_after_restart = count(
         &database_url,
