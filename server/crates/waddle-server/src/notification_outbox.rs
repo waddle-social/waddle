@@ -1926,8 +1926,30 @@ impl NotificationOutboxStore {
             )
             .await?;
         if inserted == 0 {
+            // UNIQUE-constraint collision. `notification_candidates`
+            // carries TWO intentional unique constraints, both of
+            // which the `ON CONFLICT DO NOTHING` (no target)
+            // suppresses:
+            //
+            // 1. The PRIMARY KEY on `(recipient_bare_jid,
+            //    conversation_jid, thread_id, stanza_id_by,
+            //    stanza_id, class)` — exact-identity dedup.
+            // 2. The `idx_notification_candidates_identity` UNIQUE
+            //    index on `(recipient_bare_jid, conversation_jid,
+            //    thread_id, stanza_id, class)` — cross-archive
+            //    dedup for the same logical stanza minted under
+            //    different `by=` JIDs (XEP-0359).
+            //
+            // Both are intended Duplicate triggers, so the
+            // counter increments on either path. If a third
+            // unique constraint is ever added with different
+            // dedup semantics, the SQL needs an explicit chained
+            // `ON CONFLICT (cols) DO NOTHING` for each path
+            // (Greptile review on PR #758).
+            waddle_xmpp::prometheus::increment_push_candidate_coalesced();
             return Ok(NotificationCandidateInsertOutcome::Duplicate);
         }
+        waddle_xmpp::prometheus::increment_push_candidate_created();
         Ok(NotificationCandidateInsertOutcome::Inserted)
     }
 
@@ -2467,7 +2489,7 @@ impl NotificationOutboxStore {
         let jobs = self.claim_due_outbox_jobs(batch_size).await?;
         let mut outcomes = Vec::with_capacity(jobs.len());
         for job in jobs {
-            match self
+            let outcome = match self
                 .publish_claimed_job(
                     &job,
                     push_service,
@@ -2478,14 +2500,31 @@ impl NotificationOutboxStore {
                 )
                 .await
             {
-                Ok(outcome) => outcomes.push(outcome),
+                Ok(outcome) => outcome,
                 Err(error) => {
-                    outcomes.push(
-                        self.retry_or_fail_outcome_for_claimed_job(&job, error.to_string())
-                            .await?,
-                    );
+                    self.retry_or_fail_outcome_for_claimed_job(&job, error.to_string())
+                        .await?
+                }
+            };
+            // #531 push-pipeline observability: bucket the typed
+            // outcome into the parallel counter so a single drain
+            // pass produces a histogram-like cardinality on the
+            // metrics endpoint without per-job label explosion. The
+            // Published / RetryScheduled / Failed arms are the
+            // closed-set typed contract on
+            // [`NotificationOutboxPublishOutcome`].
+            match &outcome {
+                NotificationOutboxPublishOutcome::Published { .. } => {
+                    waddle_xmpp::prometheus::increment_push_outbox_published();
+                }
+                NotificationOutboxPublishOutcome::RetryScheduled { .. } => {
+                    waddle_xmpp::prometheus::increment_push_outbox_retry_scheduled();
+                }
+                NotificationOutboxPublishOutcome::Failed { .. } => {
+                    waddle_xmpp::prometheus::increment_push_outbox_dead_lettered();
                 }
             }
+            outcomes.push(outcome);
         }
         Ok(outcomes)
     }

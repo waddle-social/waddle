@@ -79,6 +79,92 @@ static SM_DRAIN_TIMEOUT: AtomicU64 = AtomicU64::new(0);
 // tight for the client population.
 static SM_RESUME_WINDOW_CLAMPED: AtomicU64 = AtomicU64::new(0);
 
+// XEP-0357 push pipeline pass-through counters (#531). Provider-side
+// metrics (`provider_sent`, `provider_rejected`, `expired_token`)
+// land alongside #528/#529/#530; this slice covers the durable-
+// pipeline side that is observable today.
+//
+// `waddle_push_candidate_created_total`: every `Inserted` outcome
+// from `notification_outbox::insert_candidate`. A sustained
+// upward slope tracks the post-T0 notification-eligible message
+// volume — T0-suppressed candidates never call insert_candidate
+// (they bump only `waddle_push_suppressed_total{reason}`).
+// However, T1 re-evaluation (the race-window guard inside
+// `drain_pending_candidates_into_outbox`) can also fire
+// suppression on rows this counter already counted at T0; for
+// those, both this counter AND
+// `waddle_push_suppressed_total{reason}` increment. Reconcile
+// against published + suppressed over a window, not against
+// strict equality at a point in time.
+static PUSH_CANDIDATE_CREATED: AtomicU64 = AtomicU64::new(0);
+
+// `waddle_push_candidate_coalesced_total`: every `Duplicate`
+// outcome from `notification_outbox::insert_candidate`. The
+// `notification_candidates` table carries TWO intentional
+// unique constraints; both bucket here:
+//
+// - PRIMARY KEY on the six-column tuple
+//   `(recipient_bare_jid, conversation_jid, thread_id,
+//    stanza_id_by, stanza_id, class)` — exact-identity dedup.
+// - `idx_notification_candidates_identity` UNIQUE index on
+//   `(recipient_bare_jid, conversation_jid, thread_id,
+//    stanza_id, class)` — cross-archive dedup for the same
+//   logical stanza minted under different `by=` JIDs (XEP-0359).
+//
+// Either constraint firing returns Duplicate. Burst replays,
+// retried T0 emission, cross-archive duplicates, or genuine
+// duplicate stanzas coalesce here. A sudden spike often signals
+// a retry loop upstream rather than a real burst.
+static PUSH_CANDIDATE_COALESCED: AtomicU64 = AtomicU64::new(0);
+
+// `waddle_push_outbox_published_total`: every successful
+// `publish_claimed_job` outcome (the typed
+// `NotificationOutboxPublishOutcome::Published` arm). The
+// XEP-0060 §7.1 `<publish>` IQ to the user-server's Push Service
+// node was accepted — i.e. the `push_publish_jobs` row was
+// created. Provider-side fanout (Web/APNs/FCM) happens
+// asynchronously and is observed by separate counters landing
+// alongside #528/#529/#530; this counter stops at the XMPP layer.
+// Difference between this and candidates_created over a window
+// equals coalesced + in-flight + suppressed-at-T1.
+static PUSH_OUTBOX_PUBLISHED: AtomicU64 = AtomicU64::new(0);
+
+// `waddle_push_outbox_retry_scheduled_total{reason}`: every
+// transient-failure outcome from
+// `retry_or_fail_outcome_for_claimed_job` that schedules a future
+// retry (the typed `RetryScheduled` arm). Sustained non-zero with
+// flat `published_total` indicates the Push Service boundary is
+// wedged.
+//
+// Labeled by the typed transient-failure reason. Today the counter
+// is a single bucket rendered as `reason="unknown"` — the closed-
+// set values (`5xx`, `timeout`, `auth`, `unknown`) land alongside
+// the provider slices in #528/#529/#530. The labeling decision is
+// taken NOW so PromQL alerts written today match all future
+// variants without breaking on label introduction.
+static PUSH_OUTBOX_RETRY_SCHEDULED: AtomicU64 = AtomicU64::new(0);
+
+// `waddle_push_outbox_dead_lettered_total`: every terminal-`failed`
+// outcome from `drain_due_outbox_jobs` — i.e. any path that
+// produces `NotificationOutboxPublishOutcome::Failed`. The arm
+// covers BOTH (a) `retry_or_fail_outcome_for_claimed_job` after
+// the `MAX_OUTBOX_ATTEMPTS` retry budget is exhausted, AND
+// (b) immediate hard-failure branches inside `publish_claimed_job`
+// that bypass the retry budget — non-first-party Push Service
+// target, XEP-0191 blocked sender at publish time, missing
+// XEP-0357 registration row, etc. Operators cannot distinguish
+// "retry exhaustion" from "policy hard-fail" purely from this
+// counter today; correlate against the recent outbox row's
+// `last_error` column or wait for the typed
+// `Permanent`-vs-`Transient` mapping landing alongside the
+// provider PRs (#528/#529/#530).
+//
+// Sustained non-zero rate is alert-worthy, but isolated dead-
+// letters are expected during normal provider-side device
+// revocation (APNs `Unregistered` / FCM `UNREGISTERED` flows
+// produce a terminal failure per job).
+static PUSH_OUTBOX_DEAD_LETTERED: AtomicU64 = AtomicU64::new(0);
+
 // `waddle_push_suppressed_total{reason="..."}` — incremented every
 // time a XEP-0357 push candidate is suppressed at either T0 emission
 // or the T1 drain. Labeled by the typed `SuppressedReason` enum.
@@ -289,6 +375,44 @@ pub fn increment_sm_resume_window_clamped() {
     SM_RESUME_WINDOW_CLAMPED.fetch_add(1, Ordering::Relaxed);
 }
 
+/// Increment the `waddle_push_candidate_created_total` counter. Call
+/// from the `Inserted` arm of `notification_outbox::insert_candidate`.
+pub fn increment_push_candidate_created() {
+    PUSH_CANDIDATE_CREATED.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Increment the `waddle_push_candidate_coalesced_total` counter.
+/// Call from the `Duplicate` arm of
+/// `notification_outbox::insert_candidate` — a candidate row already
+/// existed for this `(recipient, conversation, thread, stanza_id,
+/// class)` tuple.
+pub fn increment_push_candidate_coalesced() {
+    PUSH_CANDIDATE_COALESCED.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Increment the `waddle_push_outbox_published_total` counter. Call
+/// from the `Published` outcome of `publish_claimed_job` — the
+/// XEP-0357 publish made it past the Push Service boundary.
+pub fn increment_push_outbox_published() {
+    PUSH_OUTBOX_PUBLISHED.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Increment the `waddle_push_outbox_retry_scheduled_total` counter.
+/// Call from the `RetryScheduled` outcome of
+/// `retry_or_fail_outcome_for_claimed_job` — the job failed
+/// transiently and a future retry is queued.
+pub fn increment_push_outbox_retry_scheduled() {
+    PUSH_OUTBOX_RETRY_SCHEDULED.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Increment the `waddle_push_outbox_dead_lettered_total` counter.
+/// Call from the `Failed` outcome of
+/// `retry_or_fail_outcome_for_claimed_job` — the job hit the
+/// permanent-failure threshold and was flipped to `failed` status.
+pub fn increment_push_outbox_dead_lettered() {
+    PUSH_OUTBOX_DEAD_LETTERED.fetch_add(1, Ordering::Relaxed);
+}
+
 /// Increment the `waddle_push_suppressed_total{reason}` counter.
 ///
 /// `reason` is a wire-contract value drawn from
@@ -367,6 +491,11 @@ pub fn reset_metrics_for_test() {
         counter.store(0, Ordering::Release);
     }
     PUSH_SUPPRESSED_UNKNOWN_REASON.store(0, Ordering::Release);
+    PUSH_CANDIDATE_CREATED.store(0, Ordering::Release);
+    PUSH_CANDIDATE_COALESCED.store(0, Ordering::Release);
+    PUSH_OUTBOX_PUBLISHED.store(0, Ordering::Release);
+    PUSH_OUTBOX_RETRY_SCHEDULED.store(0, Ordering::Release);
+    PUSH_OUTBOX_DEAD_LETTERED.store(0, Ordering::Release);
 }
 
 pub fn render_metrics() -> String {
@@ -392,6 +521,11 @@ pub fn render_metrics() -> String {
     let sm_promotion_dead_lettered = SM_PROMOTION_DEAD_LETTERED.load(Ordering::Relaxed);
     let sm_drain_timeout = SM_DRAIN_TIMEOUT.load(Ordering::Relaxed);
     let sm_resume_window_clamped = SM_RESUME_WINDOW_CLAMPED.load(Ordering::Relaxed);
+    let push_candidate_created = PUSH_CANDIDATE_CREATED.load(Ordering::Relaxed);
+    let push_candidate_coalesced = PUSH_CANDIDATE_COALESCED.load(Ordering::Relaxed);
+    let push_outbox_published = PUSH_OUTBOX_PUBLISHED.load(Ordering::Relaxed);
+    let push_outbox_retry_scheduled = PUSH_OUTBOX_RETRY_SCHEDULED.load(Ordering::Relaxed);
+    let push_outbox_dead_lettered = PUSH_OUTBOX_DEAD_LETTERED.load(Ordering::Relaxed);
 
     format!(
         concat!(
@@ -452,6 +586,21 @@ pub fn render_metrics() -> String {
             "# HELP waddle_sm_resume_window_clamped_total Client-requested XEP-0198 resume window exceeded WADDLE_SM_MAX_RESUME_SECS and was silently lowered.\n",
             "# TYPE waddle_sm_resume_window_clamped_total counter\n",
             "waddle_sm_resume_window_clamped_total {sm_resume_window_clamped}\n",
+            "# HELP waddle_push_candidate_created_total XEP-0357 notification candidate rows inserted into `notification_candidates` (the `Inserted` arm of `insert_candidate`). T0-suppressed candidates never reach insert_candidate, so they do NOT bump this counter — only `waddle_push_suppressed_total{{reason}}`. T1-suppressed candidates (the race-window guard re-evaluation in `drain_pending_candidates_into_outbox`) DO bump this counter at T0 AND `waddle_push_suppressed_total` at T1. Reconcile against published_total + suppressed_total over a window.\n",
+            "# TYPE waddle_push_candidate_created_total counter\n",
+            "waddle_push_candidate_created_total {push_candidate_created}\n",
+            "# HELP waddle_push_candidate_coalesced_total XEP-0357 notification candidate insertions that hit the existing PRIMARY KEY (the `Duplicate` arm of `insert_candidate`). A sustained non-zero is normal retry/replay traffic; a spike often signals an upstream retry loop.\n",
+            "# TYPE waddle_push_candidate_coalesced_total counter\n",
+            "waddle_push_candidate_coalesced_total {push_candidate_coalesced}\n",
+            "# HELP waddle_push_outbox_published_total XEP-0357 outbox jobs whose `<iq type='set'><pubsub><publish/></pubsub></iq>` to the Push Service node was accepted (the corresponding `push_publish_jobs` row is created — XEP-0060 §7.1 publish success at the XMPP boundary). Per-provider fanout (Web/APNs/FCM) and provider acknowledgement are observed separately by the counters landing alongside #528/#529/#530; this counter stops at the XMPP layer.\n",
+            "# TYPE waddle_push_outbox_published_total counter\n",
+            "waddle_push_outbox_published_total {push_outbox_published}\n",
+            "# HELP waddle_push_outbox_retry_scheduled_total XEP-0357 outbox jobs that failed transiently and were requeued with a backoff. Sustained non-zero with flat published_total indicates the Push Service boundary is wedged. Labeled by the typed transient-failure reason; the closed-set values land alongside the provider slices in #528/#529/#530 (`5xx`, `timeout`, `auth`, `unknown`) — today the bucket is single `reason=\"unknown\"` so PromQL alerts written now match all future variants.\n",
+            "# TYPE waddle_push_outbox_retry_scheduled_total counter\n",
+            "waddle_push_outbox_retry_scheduled_total{{reason=\"unknown\"}} {push_outbox_retry_scheduled}\n",
+            "# HELP waddle_push_outbox_dead_lettered_total XEP-0357 outbox jobs that transitioned to the terminal `failed` status — `NotificationOutboxPublishOutcome::Failed`. Covers both retry-budget exhaustion AND immediate hard-failure branches (non-first-party Push Service target, XEP-0191 blocked sender, missing XEP-0357 registration). Investigate sustained non-zero rate; isolated dead-letters are expected during provider-side device revocation (APNs `Unregistered` / FCM `UNREGISTERED` device flows). The outbox row stays for post-mortem and no further retry will run.\n",
+            "# TYPE waddle_push_outbox_dead_lettered_total counter\n",
+            "waddle_push_outbox_dead_lettered_total {push_outbox_dead_lettered}\n",
             "{push_suppressed_lines}",
         ),
         connected_users = connected_users,
@@ -473,6 +622,11 @@ pub fn render_metrics() -> String {
         sm_promotion_dead_lettered = sm_promotion_dead_lettered,
         sm_drain_timeout = sm_drain_timeout,
         sm_resume_window_clamped = sm_resume_window_clamped,
+        push_candidate_created = push_candidate_created,
+        push_candidate_coalesced = push_candidate_coalesced,
+        push_outbox_published = push_outbox_published,
+        push_outbox_retry_scheduled = push_outbox_retry_scheduled,
+        push_outbox_dead_lettered = push_outbox_dead_lettered,
         push_suppressed_lines = {
             let mut buf = String::new();
             render_push_suppressed_lines(&mut buf);
@@ -648,5 +802,67 @@ mod tests {
         let rendered = render_metrics();
         assert!(rendered.contains("# TYPE waddle_sm_unacked_evicted_total counter"));
         assert!(rendered.contains("waddle_sm_unacked_evicted_total 2"));
+    }
+
+    /// #531 push-pipeline observability: each of the five non-
+    /// provider counters MUST surface a HELP+TYPE header and the
+    /// running total in the metrics render. The constants in
+    /// `notification_outbox.rs` increment these at the exact
+    /// pipeline boundary names the HELP text claims (`insert_candidate`
+    /// Inserted/Duplicate arms, `drain_due_outbox_jobs` outcome
+    /// arms); this test pins the render side.
+    #[tokio::test]
+    async fn test_push_pipeline_counters_increment_and_render() {
+        let _guard = metrics_test_lock().lock().await;
+        reset_metrics_for_test();
+
+        increment_push_candidate_created();
+        increment_push_candidate_created();
+        increment_push_candidate_created();
+        increment_push_candidate_coalesced();
+        increment_push_outbox_published();
+        increment_push_outbox_published();
+        increment_push_outbox_retry_scheduled();
+        increment_push_outbox_dead_lettered();
+
+        let rendered = render_metrics();
+
+        // HELP + TYPE headers — without these a Prometheus scraper
+        // accepts the lines but dashboards drop the metric type.
+        for header in [
+            "# HELP waddle_push_candidate_created_total",
+            "# TYPE waddle_push_candidate_created_total counter",
+            "# HELP waddle_push_candidate_coalesced_total",
+            "# TYPE waddle_push_candidate_coalesced_total counter",
+            "# HELP waddle_push_outbox_published_total",
+            "# TYPE waddle_push_outbox_published_total counter",
+            "# HELP waddle_push_outbox_retry_scheduled_total",
+            "# TYPE waddle_push_outbox_retry_scheduled_total counter",
+            "# HELP waddle_push_outbox_dead_lettered_total",
+            "# TYPE waddle_push_outbox_dead_lettered_total counter",
+        ] {
+            assert!(
+                rendered.contains(header),
+                "metrics render missing `{header}`: {rendered}"
+            );
+        }
+
+        // Running totals — three created, one coalesced, two
+        // published, one retry-scheduled (labeled today as
+        // `reason="unknown"` to forward-compat the closed-set
+        // labeling planned alongside #528/#529/#530), one
+        // dead-lettered.
+        for line in [
+            "waddle_push_candidate_created_total 3",
+            "waddle_push_candidate_coalesced_total 1",
+            "waddle_push_outbox_published_total 2",
+            "waddle_push_outbox_retry_scheduled_total{reason=\"unknown\"} 1",
+            "waddle_push_outbox_dead_lettered_total 1",
+        ] {
+            assert!(
+                rendered.contains(line),
+                "metrics render missing line `{line}`: {rendered}"
+            );
+        }
     }
 }
