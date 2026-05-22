@@ -1926,8 +1926,13 @@ impl NotificationOutboxStore {
             )
             .await?;
         if inserted == 0 {
+            // PRIMARY KEY collision: same (recipient, conversation,
+            // thread, stanza_id_by, stanza_id, class) tuple already
+            // exists. Coalesce-by-key counter — see #531.
+            waddle_xmpp::prometheus::increment_push_candidate_coalesced();
             return Ok(NotificationCandidateInsertOutcome::Duplicate);
         }
+        waddle_xmpp::prometheus::increment_push_candidate_created();
         Ok(NotificationCandidateInsertOutcome::Inserted)
     }
 
@@ -2467,7 +2472,7 @@ impl NotificationOutboxStore {
         let jobs = self.claim_due_outbox_jobs(batch_size).await?;
         let mut outcomes = Vec::with_capacity(jobs.len());
         for job in jobs {
-            match self
+            let outcome = match self
                 .publish_claimed_job(
                     &job,
                     push_service,
@@ -2478,14 +2483,31 @@ impl NotificationOutboxStore {
                 )
                 .await
             {
-                Ok(outcome) => outcomes.push(outcome),
+                Ok(outcome) => outcome,
                 Err(error) => {
-                    outcomes.push(
-                        self.retry_or_fail_outcome_for_claimed_job(&job, error.to_string())
-                            .await?,
-                    );
+                    self.retry_or_fail_outcome_for_claimed_job(&job, error.to_string())
+                        .await?
+                }
+            };
+            // #531 push-pipeline observability: bucket the typed
+            // outcome into the parallel counter so a single drain
+            // pass produces a histogram-like cardinality on the
+            // metrics endpoint without per-job label explosion. The
+            // Published / RetryScheduled / Failed arms are the
+            // closed-set typed contract on
+            // [`NotificationOutboxPublishOutcome`].
+            match &outcome {
+                NotificationOutboxPublishOutcome::Published { .. } => {
+                    waddle_xmpp::prometheus::increment_push_outbox_published();
+                }
+                NotificationOutboxPublishOutcome::RetryScheduled { .. } => {
+                    waddle_xmpp::prometheus::increment_push_outbox_retry_scheduled();
+                }
+                NotificationOutboxPublishOutcome::Failed { .. } => {
+                    waddle_xmpp::prometheus::increment_push_outbox_dead_lettered();
                 }
             }
+            outcomes.push(outcome);
         }
         Ok(outcomes)
     }
