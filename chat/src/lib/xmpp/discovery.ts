@@ -25,6 +25,36 @@ export type DiscoInfoData = {
   fields: Map<string, string>;
 };
 
+// RFC 6120 §8.2.3 requires IQ stanzas to be answered, but the requirement
+// cannot be enforced on the wire — every modern XMPP client (Conversations,
+// Gajim, Dino) defends against silently-dropped IQ responses with a bounded
+// per-IQ timeout. 15s is short enough that a wedged component cannot stall
+// topology discovery longer than one user heartbeat, long enough to survive
+// realistic mobile/satellite RTTs.
+const DISCO_IQ_TIMEOUT_MS = 15_000;
+
+export class DiscoTimeoutError extends Error {
+  constructor(public readonly to: string, public readonly node: string | undefined) {
+    super(`disco IQ to ${to}${node ? ` (node=${node})` : ""} timed out after ${DISCO_IQ_TIMEOUT_MS}ms`);
+    this.name = "DiscoTimeoutError";
+  }
+}
+
+export function withIqTimeout<T>(
+  raw: Promise<T>,
+  to: string,
+  node: string | undefined,
+  timeoutMs: number = DISCO_IQ_TIMEOUT_MS,
+): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new DiscoTimeoutError(to, node)), timeoutMs);
+  });
+  return Promise.race([raw, timeout]).finally(() => {
+    if (timer !== undefined) clearTimeout(timer);
+  });
+}
+
 function parseXml(xml: string): Document {
   return new DOMParser().parseFromString(xml, "text/xml");
 }
@@ -87,7 +117,11 @@ async function sendDiscoInfo(xmpp: HybridClient, to: string, node?: string): Pro
   if (!xmpp.send_raw_iq) return null;
   const id = crypto.randomUUID();
   const nodeAttr = node ? ` node="${node}"` : "";
-  const responseXml = await xmpp.send_raw_iq(`<iq type="get" id="${id}" to="${to}"><query xmlns="${DISCO_INFO_NS}"${nodeAttr}/></iq>`);
+  const responseXml = await withIqTimeout(
+    xmpp.send_raw_iq(`<iq type="get" id="${id}" to="${to}"><query xmlns="${DISCO_INFO_NS}"${nodeAttr}/></iq>`),
+    to,
+    node,
+  );
   const query = parseXml(responseXml).getElementsByTagNameNS(DISCO_INFO_NS, "query")[0];
   if (!query) return null;
   const fields = new Map<string, string>();
@@ -113,7 +147,7 @@ async function sendDiscoItems(xmpp: HybridClient, to: string, node?: string): Pr
   const xml = `<iq type="get" id="${id}" to="${to}"><query xmlns="${DISCO_ITEMS_NS}"${nodeAttr}/></iq>`;
   let responseXml: string;
   try {
-    responseXml = await xmpp.send_raw_iq(xml);
+    responseXml = await withIqTimeout(xmpp.send_raw_iq(xml), to, node);
   } catch (err) {
     console.error("[disco] send_raw_iq items FAILED", { to, err });
     throw err;
@@ -129,7 +163,11 @@ async function sendDiscoItems(xmpp: HybridClient, to: string, node?: string): Pr
 async function sendPubsubItems(xmpp: HybridClient, to: string, node: string): Promise<Array<{ jid?: string; name?: string }>> {
   if (!xmpp.send_raw_iq) return [];
   const id = crypto.randomUUID();
-  const responseXml = await xmpp.send_raw_iq(`<iq type="get" id="${id}" to="${to}"><pubsub xmlns="${NS_PUBSUB}"><items node="${node}"/></pubsub></iq>`);
+  const responseXml = await withIqTimeout(
+    xmpp.send_raw_iq(`<iq type="get" id="${id}" to="${to}"><pubsub xmlns="${NS_PUBSUB}"><items node="${node}"/></pubsub></iq>`),
+    to,
+    node,
+  );
   const doc = parseXml(responseXml);
   const items = doc.getElementsByTagNameNS(NS_PUBSUB, "items")[0];
   if (!items) return [];
@@ -152,13 +190,20 @@ async function discoverComponentServices(xmpp: HybridClient, domain: string, jid
   try {
     const items = await sendDiscoItems(xmpp, domain);
     const candidates = items.map((item) => item.jid).filter((value): value is string => !!value);
-    const serviceInfo = await Promise.all(candidates.map(async (serviceJid) => {
-      try {
-        return { serviceJid, info: await sendDiscoInfo(xmpp, serviceJid) };
-      } catch {
-        return { serviceJid, info: null };
-      }
-    }));
+    // `allSettled` (not `all`): a single hung component must not wedge the
+    // whole topology fan-out. A rejected entry (timeout, stanza error, parse
+    // failure) maps to `info: null`, which is the same shape the existing
+    // try/catch produced — every downstream consumer already treats `null` as
+    // "service absent" and falls back to the conventional domain.
+    const settled = await Promise.allSettled(candidates.map(async (serviceJid) => ({
+      serviceJid,
+      info: await sendDiscoInfo(xmpp, serviceJid),
+    })));
+    const serviceInfo = settled.map((entry, index) =>
+      entry.status === "fulfilled"
+        ? entry.value
+        : { serviceJid: candidates[index]!, info: null },
+    );
     const muc = serviceInfo.find(({ info }) =>
       hasDiscoFeature(info, NS_MUC)
       || info?.identities.some((identity) => identity.category === "conference")
@@ -220,7 +265,16 @@ export async function discoverChannels(xmpp: HybridClient, jid: string): Promise
   const spaceNode = spaces[0]?.node;
   if (!spaceNode) return [];
   const items = await sendPubsubItems(xmpp, spacesServiceDomain(jid), spaceNode);
-  const hydrated = await Promise.all(items.map((item, position) => hydrateRoomInfo(xmpp, channelFromRoom({ jid: item.jid ?? "", name: item.name }, position))));
+  const settled = await Promise.allSettled(
+    items.map((item, position) =>
+      hydrateRoomInfo(xmpp, channelFromRoom({ jid: item.jid ?? "", name: item.name }, position)),
+    ),
+  );
+  const hydrated = settled.map((entry, index) =>
+    entry.status === "fulfilled"
+      ? entry.value
+      : channelFromRoom({ jid: items[index]!.jid ?? "", name: items[index]!.name }, index),
+  );
   return hydrated.map((room, position) => ({ id: room.id, name: room.name, channelType: room.channelType, position }));
 }
 
@@ -257,9 +311,27 @@ export async function discoverTopology(xmpp: HybridClient, jid: string): Promise
     }
   } catch {}
 
-  const mucRooms = await sendDiscoItems(xmpp, services.muc);
-  const hydrated = await Promise.all(mucRooms.map((room, position) => hydrateRoomInfo(xmpp, channelFromRoom({ jid: room.jid ?? "", name: room.name }, position))));
-  rooms = hydrated.map((room, position) => ({ ...room, position, ...(room.jid && bookmarkedSpaceIds.get(barePeerJid(room.jid)) ? { spaceId: bookmarkedSpaceIds.get(barePeerJid(room.jid)), standalone: false } : {}) }));
+  // Surround the MUC-rooms fan-out in try/catch + allSettled so a single
+  // unresponsive room (or a hung muc service disco#items) degrades the
+  // sidebar to "no rooms" instead of failing the whole topology load.
+  // `hydrateRoomInfo` already swallows its own errors, but `sendDiscoItems`
+  // on the MUC service can now time out (see `withIqTimeout`) — without
+  // this guard a timeout there would bubble up and abandon the
+  // already-resolved spaces work.
+  try {
+    const mucRooms = await sendDiscoItems(xmpp, services.muc);
+    const hydratedSettled = await Promise.allSettled(
+      mucRooms.map((room, position) =>
+        hydrateRoomInfo(xmpp, channelFromRoom({ jid: room.jid ?? "", name: room.name }, position)),
+      ),
+    );
+    const hydrated = hydratedSettled.map((entry, index) =>
+      entry.status === "fulfilled"
+        ? entry.value
+        : channelFromRoom({ jid: mucRooms[index]!.jid ?? "", name: mucRooms[index]!.name }, index),
+    );
+    rooms = hydrated.map((room, position) => ({ ...room, position, ...(room.jid && bookmarkedSpaceIds.get(barePeerJid(room.jid)) ? { spaceId: bookmarkedSpaceIds.get(barePeerJid(room.jid)), standalone: false } : {}) }));
+  } catch {}
 
   const roomSpaceIds = new Map(rooms.flatMap((room) => room.jid ? [[barePeerJid(room.jid), room.spaceId]] as const : []));
   return {
