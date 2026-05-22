@@ -162,3 +162,114 @@ async fn muc_jid_mention_returns_bad_request_when_occupant_ids_supported() {
 
     let _ = client.close().await;
 }
+
+/// XEP-0513 §295: `<iq type='get' to='room@muc.…'><query
+/// xmlns='urn:xmpp:mentions:0'/></iq>` returns a §303 result form
+/// carrying the server-internal policy (`mentions#count = 5`,
+/// `mentions#individual = participants`, `mentions#channel =
+/// moderators`).
+#[tokio::test]
+async fn mentions_permissions_iq_get_returns_303_form() {
+    let _guard = TEST_SERIAL.lock().await;
+    let (_server, mut client) = setup().await;
+    let room = format!("perms-{}@muc.{DOMAIN}", uuid::Uuid::new_v4());
+    let _occupant_id = join_room(&mut client, &room).await;
+
+    let iq_id = "perm-get-1";
+    client
+        .send(&format!(
+            r#"<iq type="get" to="{room}" id="{iq_id}"><query xmlns="urn:xmpp:mentions:0"/></iq>"#
+        ))
+        .await
+        .expect("send §295 query");
+
+    let frame = client
+        .recv_matching(|frame| {
+            frame.contains(&format!("id='{iq_id}'")) || frame.contains(&format!("id=\"{iq_id}\""))
+        })
+        .await
+        .expect("§295 result");
+
+    assert!(
+        frame.contains("type='result'") || frame.contains("type=\"result\""),
+        "expected iq result, got: {frame}"
+    );
+    assert!(
+        frame.contains("urn:xmpp:mentions:0"),
+        "result must echo the namespace, got: {frame}"
+    );
+    assert!(
+        frame.contains("jabber:x:data"),
+        "result must carry a data form, got: {frame}"
+    );
+    assert!(
+        frame.contains("FORM_TYPE"),
+        "form must include FORM_TYPE, got: {frame}"
+    );
+    assert!(
+        frame.contains("mentions#count"),
+        "form must include mentions#count, got: {frame}"
+    );
+    assert!(
+        frame.contains("mentions#individual"),
+        "form must include mentions#individual, got: {frame}"
+    );
+    assert!(
+        frame.contains("mentions#channel"),
+        "form must include mentions#channel (channel mentions advertised), got: {frame}"
+    );
+    assert!(
+        frame.contains("moderators"),
+        "channel field value must default to `moderators`, got: {frame}"
+    );
+
+    let _ = client.close().await;
+}
+
+/// XEP-0513 §295: `<iq type='set'/>` to the room with the same query
+/// payload returns `<feature-not-implemented/>` — Waddle uses a
+/// hardcoded server policy and exposes no owner-config write path for
+/// the §303 form. (XEP §295 reserves `<forbidden/>` for "not an
+/// owner"; returning that here would misrepresent the cause.)
+#[tokio::test]
+async fn mentions_permissions_iq_set_returns_feature_not_implemented() {
+    let _guard = TEST_SERIAL.lock().await;
+    let (_server, mut client) = setup().await;
+    let room = format!("perms-set-{}@muc.{DOMAIN}", uuid::Uuid::new_v4());
+    let _occupant_id = join_room(&mut client, &room).await;
+
+    let iq_id = "perm-set-1";
+    client
+        .send(&format!(
+            r#"<iq type="set" to="{room}" id="{iq_id}">
+                <query xmlns="urn:xmpp:mentions:0">
+                    <x xmlns="jabber:x:data" type="submit">
+                        <field var="FORM_TYPE"><value>urn:xmpp:mentions:0</value></field>
+                        <field var="mentions#count"><value>1</value></field>
+                        <field var="mentions#individual"><value>participants</value></field>
+                        <field var="mentions#channel"><value>moderators</value></field>
+                    </x>
+                </query>
+            </iq>"#
+        ))
+        .await
+        .expect("send §295 set");
+
+    let frame = client
+        .recv_matching(|frame| {
+            frame.contains(&format!("id='{iq_id}'")) || frame.contains(&format!("id=\"{iq_id}\""))
+        })
+        .await
+        .expect("§295 set response");
+
+    assert!(
+        frame.contains("type='error'") || frame.contains("type=\"error\""),
+        "expected iq error, got: {frame}"
+    );
+    assert!(
+        frame.contains("<feature-not-implemented"),
+        "expected feature-not-implemented condition, got: {frame}"
+    );
+
+    let _ = client.close().await;
+}

@@ -79,6 +79,7 @@ pub(crate) mod errors;
 mod extension_forms;
 mod jingle_muji_gate;
 mod last_activity;
+mod mentions_permissions;
 mod misc;
 mod muc_admin;
 mod muc_owner_config;
@@ -111,6 +112,7 @@ use extension_forms::{
     EXTENSION_COMMAND_FORM_TYPE, EXTENSION_ROUTE_FORM_TYPE,
 };
 use last_activity::handle_last_activity_iq;
+use mentions_permissions::{handle_mentions_permissions_iq, is_mentions_permissions_iq};
 use muc_owner_config::apply_muc_owner_config;
 use muc_owner_moderation::handle_muc_owner_and_moderation_iq;
 pub(crate) use permissions::managed_channel_permission_allowed;
@@ -380,6 +382,17 @@ pub async fn handle_iq_with_conn_state(
     if is_pin_query_iq(&iq, muc_domain) {
         return handle_pin_query_iq(&iq, state, phase.bound_jid(), response_from, response_to)
             .await;
+    }
+
+    if is_mentions_permissions_iq(&iq, muc_domain) {
+        return handle_mentions_permissions_iq(
+            &iq,
+            state,
+            phase.bound_jid(),
+            response_from,
+            response_to,
+        )
+        .await;
     }
 
     let muc_owner_or_moderation =

@@ -19,10 +19,14 @@
 use jid::BareJid;
 use minidom::Element;
 use waddle_xmpp::disco::{muc_room_features, Feature};
+use waddle_xmpp::xep::xep0004::NS_DATA_FORMS;
 use waddle_xmpp::xep::xep0513::{
-    build_mention_element, extract_explicit_mentions, has_explicit_mentions, is_mention_element,
+    build_mention_element, build_mentions_permissions_query, extract_explicit_mentions,
+    has_explicit_mentions, is_mention_element, is_mentions_permissions_query,
     parse_mention_element, set_explicit_mentions, strip_explicit_mentions, ExplicitMention,
-    ExplicitMentionCarrier, ExplicitMentions, CHANNEL_MENTION, NS_EXPLICIT_MENTIONS,
+    ExplicitMentionCarrier, ExplicitMentions, MentionsPermission, MentionsPermissions,
+    CHANNEL_MENTION, DEFAULT_MENTIONS_COUNT, FIELD_MENTIONS_CHANNEL, FIELD_MENTIONS_COUNT,
+    FIELD_MENTIONS_INDIVIDUAL, NS_EXPLICIT_MENTIONS,
 };
 use xmpp_parsers::message::Message;
 
@@ -37,7 +41,7 @@ fn xep0513_namespace_constants_match_spec() {
 // ── §"Discovering support" advertisement ────────────────────────────
 
 #[test]
-fn xep0513_muc_rooms_do_not_advertise_mentions_until_iq_form_is_wired() {
+fn xep0513_muc_rooms_advertise_mentions_and_channel_mentions() {
     let mentions = Feature::explicit_mentions();
     let channel = Feature::channel_mentions();
 
@@ -51,36 +55,192 @@ fn xep0513_muc_rooms_do_not_advertise_mentions_until_iq_form_is_wired() {
     // room's `<query xmlns='urn:xmpp:mentions:0'/>` IQ MUST return a
     // form with `mentions#count` + `mentions#individual` (always
     // required) and `mentions#channel` (if and only if `#channel` is
-    // advertised). PR #738 (slice 3a of #525) enforces a hardcoded
-    // `mentions#channel = moderators` policy at T0 candidate
-    // classification but does NOT yet expose the §295 IQ surface — so
-    // the advert is withdrawn until slice 3c wires the IQ form.
-    // §292 permits non-advertisement + server-internal filtering:
-    // "Mentions MAY be sent in rooms which do not have permissions
-    // set, and/or do not advertise support for them; it is up to
-    // receiving entities to determine how to handle mentions in
-    // rooms without configured permissions."
+    // advertised). Slices 3a/3b enforce a hardcoded server policy at
+    // T0 candidate classification; slice 3c (#525) wires the §295 IQ
+    // surface and re-advertises both namespaces — both arrive
+    // together to satisfy CLAUDE.md's XEP conformance hard rule.
+    // The advertisement-set is independent of the muc#roomconfig
+    // axes (persistent / members_only / moderated / forum), so we
+    // pin every combination.
     for persistent in [false, true] {
         for members_only in [false, true] {
             for moderated in [false, true] {
                 for forum in [false, true] {
                     let feats = muc_room_features(persistent, members_only, moderated, forum);
                     assert!(
-                        !feats.iter().any(|f| f == &mentions),
+                        feats.iter().any(|f| f == &mentions),
                         "muc_room_features({persistent}, {members_only}, {moderated}, {forum}) \
-                         MUST NOT advertise `urn:xmpp:mentions:0` until the XEP-0513 §295 \
-                         IQ form is wired (slice 3c)"
+                         MUST advertise `urn:xmpp:mentions:0` — slice 3c wires §295 IQ"
                     );
                     assert!(
-                        !feats.iter().any(|f| f == &channel),
+                        feats.iter().any(|f| f == &channel),
                         "muc_room_features({persistent}, {members_only}, {moderated}, {forum}) \
-                         MUST NOT advertise `urn:xmpp:mentions:0#channel` until §303 \
-                         `mentions#channel` form field is exposed (slice 3c)"
+                         MUST advertise `urn:xmpp:mentions:0#channel` — slice 3c exposes \
+                         §303 `mentions#channel`"
                     );
                 }
             }
         }
     }
+}
+
+// ── §295 / §303: Permissions IQ form ────────────────────────────────
+
+#[test]
+fn xep0513_mentions_permissions_query_recogniser_pins_name_and_ns() {
+    let canonical = Element::builder("query", NS_EXPLICIT_MENTIONS).build();
+    assert!(is_mentions_permissions_query(&canonical));
+
+    // §295 IQ payload uses element name `query` (not `permissions`,
+    // not `mentions`) — pin both axes so a constructor or namespace
+    // typo can't silently mis-route.
+    let wrong_ns = Element::builder("query", "urn:xmpp:mentions:1").build();
+    assert!(!is_mentions_permissions_query(&wrong_ns));
+
+    let wrong_name = Element::builder("permissions", NS_EXPLICIT_MENTIONS).build();
+    assert!(!is_mentions_permissions_query(&wrong_name));
+
+    // The `<mention>` payload from §3 lives in the same namespace —
+    // make sure the §295 recogniser does NOT match a `<mention>` so
+    // an IQ carrying a stray `<mention/>` can't be answered as a
+    // permissions query.
+    let mention = Element::builder("mention", NS_EXPLICIT_MENTIONS).build();
+    assert!(!is_mentions_permissions_query(&mention));
+}
+
+#[test]
+fn xep0513_default_permissions_match_server_policy() {
+    let policy = MentionsPermissions::server_default();
+    // §301 example value for the count threshold; mirrored in the
+    // T0 classification gate from slice 3b (PR #741).
+    assert_eq!(policy.count, DEFAULT_MENTIONS_COUNT);
+    assert_eq!(policy.count, 5);
+    // Slice 3a (PR #738) hardcodes `mentions#channel = moderators`.
+    assert_eq!(policy.channel, Some(MentionsPermission::Moderators));
+    // Individual mentions are open to participants — there is no
+    // per-recipient sender gate at T0 today.
+    assert_eq!(policy.individual, MentionsPermission::Participants);
+}
+
+#[test]
+fn xep0513_permissions_form_matches_spec_shape() {
+    let policy = MentionsPermissions::server_default();
+    let query = build_mentions_permissions_query(&policy);
+
+    // §303: payload is `<query xmlns='urn:xmpp:mentions:0'>` wrapping
+    // a `<x xmlns='jabber:x:data' type='form'/>`.
+    assert_eq!(query.name(), "query");
+    assert_eq!(query.ns(), NS_EXPLICIT_MENTIONS);
+    let form = query
+        .get_child("x", NS_DATA_FORMS)
+        .expect("§303 form is a jabber:x:data child of <query/>");
+    assert_eq!(
+        form.attr("type"),
+        Some("form"),
+        "§303 form `type` MUST be `form` (server publishing config to client)"
+    );
+
+    // FORM_TYPE hidden field with NS value — required by XEP-0068 /
+    // §303 form pinning so submit payloads round-trip the type.
+    let form_type_field = form
+        .children()
+        .filter(|c| c.is("field", NS_DATA_FORMS))
+        .find(|c| c.attr("var") == Some("FORM_TYPE"))
+        .expect("FORM_TYPE field is present");
+    assert_eq!(form_type_field.attr("type"), Some("hidden"));
+    let form_type_value = form_type_field
+        .get_child("value", NS_DATA_FORMS)
+        .expect("FORM_TYPE has a value child")
+        .text();
+    assert_eq!(form_type_value, NS_EXPLICIT_MENTIONS);
+
+    // Required fields — §303: "the `mentions#count` and
+    // `mentions#individual` fields MUST be present at minimum."
+    for var in [FIELD_MENTIONS_COUNT, FIELD_MENTIONS_INDIVIDUAL] {
+        let field = form
+            .children()
+            .filter(|c| c.is("field", NS_DATA_FORMS))
+            .find(|c| c.attr("var") == Some(var))
+            .unwrap_or_else(|| panic!("§303: required field `{var}` is present"));
+        assert!(
+            field.has_child("required", NS_DATA_FORMS),
+            "§303: required field `{var}` carries `<required/>`"
+        );
+    }
+
+    // count field value = DEFAULT_MENTIONS_COUNT (5) — must be the
+    // text-single representation of the §301 example, otherwise
+    // a recipient that lies dormant in the room with no per-room
+    // override would compute a different threshold than the server.
+    let count_value = form
+        .children()
+        .filter(|c| c.is("field", NS_DATA_FORMS))
+        .find(|c| c.attr("var") == Some(FIELD_MENTIONS_COUNT))
+        .and_then(|f| f.get_child("value", NS_DATA_FORMS))
+        .map(Element::text)
+        .expect("mentions#count carries a <value/>");
+    assert_eq!(count_value, DEFAULT_MENTIONS_COUNT.to_string());
+
+    // channel field — present iff policy.channel.is_some(); shape is
+    // list-single with exactly the three §303 options
+    // (participants/moderators/none) and its `<value/>` matches the
+    // policy.
+    let channel_field = form
+        .children()
+        .filter(|c| c.is("field", NS_DATA_FORMS))
+        .find(|c| c.attr("var") == Some(FIELD_MENTIONS_CHANNEL))
+        .expect("§303: `mentions#channel` MUST be present when `#channel` is advertised");
+    assert_eq!(channel_field.attr("type"), Some("list-single"));
+    assert!(channel_field.has_child("required", NS_DATA_FORMS));
+    let channel_value = channel_field
+        .get_child("value", NS_DATA_FORMS)
+        .map(Element::text)
+        .expect("mentions#channel carries a <value/>");
+    assert_eq!(channel_value, MentionsPermission::Moderators.as_wire());
+    let option_values: Vec<String> = channel_field
+        .children()
+        .filter(|c| c.is("option", NS_DATA_FORMS))
+        .filter_map(|o| o.get_child("value", NS_DATA_FORMS).map(Element::text))
+        .collect();
+    assert_eq!(
+        option_values,
+        vec![
+            MentionsPermission::Participants.as_wire(),
+            MentionsPermission::Moderators.as_wire(),
+            MentionsPermission::Nobody.as_wire(),
+        ],
+        "§303: `mentions#channel` option set must be exactly \
+         {{participants, moderators, none}} in spec order"
+    );
+}
+
+#[test]
+fn xep0513_permissions_form_omits_channel_when_not_advertised() {
+    // §303: "All other fields are OPTIONAL, but they MUST be present
+    // if and only if the corresponding feature is advertised in
+    // service discovery." A hypothetical room that advertised
+    // `urn:xmpp:mentions:0` only (no `#channel`) MUST omit the
+    // `mentions#channel` field. Slice 3c always advertises both, but
+    // the builder MUST honour the typed `None` so the contract holds
+    // for future rooms or test fixtures that disable channel mentions.
+    let policy = MentionsPermissions {
+        count: DEFAULT_MENTIONS_COUNT,
+        individual: MentionsPermission::Participants,
+        channel: None,
+    };
+    let query = build_mentions_permissions_query(&policy);
+    let form = query
+        .get_child("x", NS_DATA_FORMS)
+        .expect("form child present");
+    let channel_present = form
+        .children()
+        .filter(|c| c.is("field", NS_DATA_FORMS))
+        .any(|c| c.attr("var") == Some(FIELD_MENTIONS_CHANNEL));
+    assert!(
+        !channel_present,
+        "§303: `mentions#channel` MUST NOT appear when `urn:xmpp:mentions:0#channel` \
+         is not advertised"
+    );
 }
 
 // ── §3 wire shape ────────────────────────────────────────────────────
