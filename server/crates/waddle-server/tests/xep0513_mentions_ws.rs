@@ -226,13 +226,12 @@ async fn mentions_permissions_iq_get_returns_303_form() {
     let _ = client.close().await;
 }
 
-/// XEP-0513 §295: `<iq type='set'/>` to the room with the same query
-/// payload returns `<feature-not-implemented/>` — Waddle uses a
-/// hardcoded server policy and exposes no owner-config write path for
-/// the §303 form. (XEP §295 reserves `<forbidden/>` for "not an
-/// owner"; returning that here would misrepresent the cause.)
+/// XEP-0513 §295: `<iq type='set'/>` to the room MUST return
+/// `<forbidden type='auth'/>` for non-owners (xep-0513.xml:475).
+/// Waddle's hardcoded server policy means no caller can be an owner
+/// of the §303 form, so the MUST applies uniformly.
 #[tokio::test]
-async fn mentions_permissions_iq_set_returns_feature_not_implemented() {
+async fn mentions_permissions_iq_set_returns_forbidden() {
     let _guard = TEST_SERIAL.lock().await;
     let (_server, mut client) = setup().await;
     let room = format!("perms-set-{}@muc.{DOMAIN}", uuid::Uuid::new_v4());
@@ -267,8 +266,13 @@ async fn mentions_permissions_iq_set_returns_feature_not_implemented() {
         "expected iq error, got: {frame}"
     );
     assert!(
-        frame.contains("<feature-not-implemented"),
-        "expected feature-not-implemented condition, got: {frame}"
+        frame.contains("<forbidden"),
+        "expected <forbidden/> condition per §295 MUST, got: {frame}"
+    );
+    // §295 line 482: `<error type='auth'>`.
+    assert!(
+        frame.contains("type='auth'") || frame.contains("type=\"auth\""),
+        "<forbidden/> must travel with type='auth' per §295, got: {frame}"
     );
     // §295 error example echoes the `<query xmlns='urn:xmpp:mentions:0'/>`
     // alongside `<error/>` — verify the response contract matches.

@@ -530,6 +530,13 @@ pub fn muc_room_features(
         // the namespaces only becomes safe once the IQ form is
         // implemented — see `iq/mentions_permissions.rs` for the
         // handler that backs these advertised features.
+        //
+        // TODO(#525-followup): §303 also SHOULDs that the
+        // `mentions#*` form fields be mirrored into the room's
+        // `muc#roominfo` extension form (xeps/xep-0513.xml line 303).
+        // Deferred — adding fields to muc#roominfo is a separate
+        // slice; the dedicated §295 IQ form is the primary discovery
+        // path and is conformant on its own.
         Feature::explicit_mentions(),
         Feature::channel_mentions(),
         Feature::muc_nonanonymous(),

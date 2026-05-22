@@ -27,11 +27,15 @@
 //! still require the target to be a bare room JID — full-JID
 //! addressing here is non-sensical and likely a client bug.
 //!
-//! SET is unconditionally `<feature-not-implemented/>`. XEP §295
-//! reserves `<forbidden/>` for "the user is not an owner", but Waddle
-//! exposes no owner-driven config mutation for the §303 form; the
-//! policy is a server-internal hardcoded default. Returning forbidden
-//! would lie about *why* the set failed.
+//! SET is unconditionally `<forbidden type='auth'/>` per XEP-0513
+//! §295's MUST text: *"If the user is not an owner, a `<forbidden/>`
+//! error MUST be returned."* Waddle's §303 policy is a server-wide
+//! hardcoded default — no user has the "owner of the §295 form"
+//! privilege, so every caller is a non-owner and the MUST applies
+//! uniformly. Returning `<feature-not-implemented/>` would be more
+//! honest about the *cause* (the SET surface is not implemented),
+//! but would diverge from the XEP's literal wire-shape requirement;
+//! conformance with the spec text wins.
 //!
 //! ## No room-existence gate
 //!
@@ -138,8 +142,14 @@ pub(super) async fn handle_mentions_permissions_iq(
             iq,
             response_from,
             response_to,
-            feature_not_implemented_iq_error(
-                "Mentions permissions are server-hardcoded; the §303 form is read-only.",
+            // XEP-0513 §295: "If the user is not an owner, a
+            // `<forbidden/>` error MUST be returned." Waddle's
+            // server-wide hardcoded policy means no caller can be
+            // an owner of the §303 form; every set is from a
+            // non-owner and MUST receive `<forbidden type='auth'/>`.
+            forbidden_iq_error(
+                "Mentions permissions are server-managed; only owners may submit \
+                 the §303 form, and no caller is an owner of this form.",
             ),
         )],
         _ => unreachable!("is_mentions_permissions_iq filters to Get/Set"),
@@ -325,7 +335,7 @@ mod tests {
     /// example will accept the response either way.
     #[test]
     fn mentions_permissions_error_envelope_echoes_empty_query() {
-        let xml = build_error(feature_not_implemented_iq_error("read-only"));
+        let xml = build_error(forbidden_iq_error("non-owner"));
         let parsed = Element::from_str(&xml).expect("error iq parses");
         assert_eq!(parsed.name(), "iq");
         assert_eq!(parsed.attr("type"), Some("error"));
@@ -344,10 +354,10 @@ mod tests {
             .children()
             .find(|c| c.name() == "error")
             .expect("error element present");
-        assert!(error.has_child(
-            "feature-not-implemented",
-            "urn:ietf:params:xml:ns:xmpp-stanzas",
-        ));
+        assert!(error.has_child("forbidden", "urn:ietf:params:xml:ns:xmpp-stanzas",));
+        // §295 MUSTs `type='auth'` for the `<forbidden/>` condition
+        // (xeps/xep-0513.xml line 482).
+        assert_eq!(error.attr("type"), Some("auth"));
 
         // Positional pin: §295 example shows `<query/>` BEFORE
         // `<error/>`. The xmpp_parsers `Iq::Error` serializer emits
