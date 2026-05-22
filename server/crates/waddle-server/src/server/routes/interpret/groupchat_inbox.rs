@@ -1925,6 +1925,40 @@ mod tests {
              as ActiveChannelMention so the T1 active-filter narrows \
              the candidate population to currently-active occupants"
         );
+
+        // T0 collapses `Active` → `NotifyAll` when the recipient is
+        // NOT a live occupant. This is documented design in
+        // `groupchat_notification_class_from_message` (line 797): the
+        // `Active` arm requires `is_live_occupant=true`, otherwise it
+        // falls through to `NotifyAll`. Pin the collapse so a future
+        // refactor that lifts the live-occupant check out of T0
+        // doesn't silently start emitting `ActiveChannelMention` rows
+        // for offline recipients (which would then leak the
+        // "ActiveChannelMention exists for X" signal to the T1
+        // observability surface even for offline recipients).
+        let mut active_for_offline = waddle_xmpp::xep::ExplicitMention::active_channel();
+        active_for_offline.uri = Some("xmpp:team@muc.example.com".to_string());
+        let msg_active_offline = message_with_mention(active_for_offline);
+        let GroupchatNotificationClassOutcome {
+            decision: GroupchatNotificationClassDecision::Deliver(class_offline),
+            mentions_overflowed: _,
+        } = groupchat_notification_class(
+            &parsed_mentions(&msg_active_offline),
+            &extract_references(&msg_active_offline),
+            &owner,
+            &room,
+            occupant_id,
+            /* is_live_occupant */ false,
+            /* sender_can_broadcast_channel_mention */ true,
+        );
+        assert_eq!(
+            class_offline,
+            NotificationClass::NotifyAll,
+            "offline recipient + `<active/>` channel mention MUST \
+             collapse to NotifyAll at T0 — the `Active` scope only \
+             produces `ActiveChannelMention` for live occupants \
+             (groupchat_notification_class_from_message line 797)"
+        );
     }
 
     /// XEP-0513 + #525 explicit XEP test: a `<mention/>` carrying an
@@ -1953,13 +1987,18 @@ mod tests {
 
         // Every unadvertised group URI from XEP-0513 §"Multi-User
         // Chats Permissions" — the four §303 form fields Waddle
-        // chooses not to expose yet. A future relaxation of
-        // `is_channel()` would trip this assertion.
+        // chooses not to expose yet — plus one sub-namespace from
+        // §"Mentions via Roles and Affiliations" so we also pin that
+        // sub-URIs under `#associations` (e.g. `#moderators`) are
+        // treated identically. A future relaxation of `is_channel()`
+        // to accept any `urn:xmpp:mentions:0#…` prefix would trip
+        // every case.
         let unsupported_uris = [
             "urn:xmpp:mentions:0#space",
             "urn:xmpp:mentions:0#server",
             "urn:xmpp:mentions:0#associations",
             "urn:xmpp:mentions:0#hats",
+            "urn:xmpp:mentions:0#moderators",
         ];
 
         for group_uri in unsupported_uris {
