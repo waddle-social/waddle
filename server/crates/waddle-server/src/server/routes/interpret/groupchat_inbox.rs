@@ -1883,7 +1883,7 @@ mod tests {
         let msg_plain = message_with_mention(plain_channel);
         let GroupchatNotificationClassOutcome {
             decision: GroupchatNotificationClassDecision::Deliver(class_plain),
-            mentions_overflowed: _,
+            mentions_overflowed: overflowed_plain,
         } = groupchat_notification_class(
             &parsed_mentions(&msg_plain),
             &extract_references(&msg_plain),
@@ -1899,6 +1899,14 @@ mod tests {
             "a channel mention WITHOUT `<active/>` must classify as \
              ChannelMention so every member receives a push candidate"
         );
+        // Single-mention message MUST NOT trip the §304 overflow bit;
+        // catches a count-miscalculation regression that wrongly
+        // counts `<active/>`-tagged or unsupported-group mentions
+        // (adversarial review on PR #756).
+        assert!(
+            !overflowed_plain,
+            "single channel mention MUST NOT trip the §304 overflow bit"
+        );
 
         // Same shape, but with `<active/>` added — only the
         // recipient-state filter changes; the permission gate is
@@ -1908,7 +1916,7 @@ mod tests {
         let msg_active = message_with_mention(active_channel);
         let GroupchatNotificationClassOutcome {
             decision: GroupchatNotificationClassDecision::Deliver(class_active),
-            mentions_overflowed: _,
+            mentions_overflowed: overflowed_active,
         } = groupchat_notification_class(
             &parsed_mentions(&msg_active),
             &extract_references(&msg_active),
@@ -1925,15 +1933,20 @@ mod tests {
              as ActiveChannelMention so the T1 active-filter narrows \
              the candidate population to currently-active occupants"
         );
+        assert!(
+            !overflowed_active,
+            "single `<active/>` channel mention MUST NOT trip the §304 \
+             overflow bit"
+        );
 
         // T0 collapses `Active` → `NotifyAll` when the recipient is
-        // NOT a live occupant. This is documented design in
-        // `groupchat_notification_class_from_message` (line 797): the
-        // `Active` arm requires `is_live_occupant=true`, otherwise it
-        // falls through to `NotifyAll`. Pin the collapse so a future
-        // refactor that lifts the live-occupant check out of T0
-        // doesn't silently start emitting `ActiveChannelMention` rows
-        // for offline recipients (which would then leak the
+        // NOT a live occupant. The `Active` arm of
+        // `groupchat_notification_class_from_message` requires
+        // `is_live_occupant=true`, otherwise it falls through to
+        // `NotifyAll`. Pin the collapse so a future refactor that
+        // lifts the live-occupant check out of T0 doesn't silently
+        // start emitting `ActiveChannelMention` rows for offline
+        // recipients (which would then leak the
         // "ActiveChannelMention exists for X" signal to the T1
         // observability surface even for offline recipients).
         let mut active_for_offline = waddle_xmpp::xep::ExplicitMention::active_channel();
@@ -1941,7 +1954,7 @@ mod tests {
         let msg_active_offline = message_with_mention(active_for_offline);
         let GroupchatNotificationClassOutcome {
             decision: GroupchatNotificationClassDecision::Deliver(class_offline),
-            mentions_overflowed: _,
+            mentions_overflowed: overflowed_offline,
         } = groupchat_notification_class(
             &parsed_mentions(&msg_active_offline),
             &extract_references(&msg_active_offline),
@@ -1957,7 +1970,12 @@ mod tests {
             "offline recipient + `<active/>` channel mention MUST \
              collapse to NotifyAll at T0 — the `Active` scope only \
              produces `ActiveChannelMention` for live occupants \
-             (groupchat_notification_class_from_message line 797)"
+             (see the `Active` arm of \
+             `groupchat_notification_class_from_message`)"
+        );
+        assert!(
+            !overflowed_offline,
+            "overflow bit MUST be independent of `is_live_occupant`"
         );
     }
 
@@ -2004,13 +2022,25 @@ mod tests {
         ];
 
         for group_uri in unsupported_uris {
+            // Minimal `<mention/>` fixture: only the `mentions=`
+            // attribute. The XEP requires `uri=` for several of these
+            // sub-types (`#server` MUST carry the server JID per
+            // xep-0513.xml:132; `#hats` MUST carry the hat URI per
+            // :188), but Waddle's classifier rejects unsupported
+            // groups by namespace via `is_channel()` BEFORE inspecting
+            // any other attribute. The test is intentionally
+            // shape-minimal to prove the rejection survives malformed
+            // inputs (defence-in-depth review on PR #756). Wire-shape
+            // correctness for properly-formed mentions is pinned by
+            // the dedicated XEP custom tests in
+            // `crates/waddle-xmpp/tests/xep0513_mentions.rs`.
             let msg = message_with_mention(waddle_xmpp::xep::ExplicitMention {
                 mentions: Some(group_uri.to_string()),
                 ..waddle_xmpp::xep::ExplicitMention::default()
             });
             let GroupchatNotificationClassOutcome {
                 decision: GroupchatNotificationClassDecision::Deliver(class),
-                mentions_overflowed: _,
+                mentions_overflowed,
             } = groupchat_notification_class(
                 &parsed_mentions(&msg),
                 &extract_references(&msg),
@@ -2031,6 +2061,17 @@ mod tests {
                  sender MUST NOT elevate the push class — Waddle does \
                  not advertise `{group_uri}` and unsupported groups \
                  fall through to NotifyAll"
+            );
+            // §304 overflow: a single unsupported-group mention IS
+            // one mention TARGET (per `is_mention_target` at
+            // xep0513.rs:54-64), but a single target is well below
+            // the default threshold of 5. A future
+            // count-miscalculation regression that wrongly elevates
+            // unsupported groups' weight would trip here.
+            assert!(
+                !mentions_overflowed,
+                "single `<mention mentions='{group_uri}'/>` MUST NOT \
+                 trip the §304 overflow bit"
             );
         }
     }
