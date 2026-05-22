@@ -110,11 +110,19 @@ static PUSH_CANDIDATE_COALESCED: AtomicU64 = AtomicU64::new(0);
 // window equals coalesced + in-flight + suppressed-at-T1.
 static PUSH_OUTBOX_PUBLISHED: AtomicU64 = AtomicU64::new(0);
 
-// `waddle_push_outbox_retry_scheduled_total`: every transient-
-// failure outcome from `retry_or_fail_outcome_for_claimed_job` that
-// schedules a future retry (the typed `RetryScheduled` arm).
-// Sustained non-zero with flat `published_total` indicates the
-// Push Service boundary is wedged.
+// `waddle_push_outbox_retry_scheduled_total{reason}`: every
+// transient-failure outcome from
+// `retry_or_fail_outcome_for_claimed_job` that schedules a future
+// retry (the typed `RetryScheduled` arm). Sustained non-zero with
+// flat `published_total` indicates the Push Service boundary is
+// wedged.
+//
+// Labeled by the typed transient-failure reason. Today the counter
+// is a single bucket rendered as `reason="unknown"` — the closed-
+// set values (`5xx`, `timeout`, `auth`, `unknown`) land alongside
+// the provider slices in #528/#529/#530. The labeling decision is
+// taken NOW so PromQL alerts written today match all future
+// variants without breaking on label introduction.
 static PUSH_OUTBOX_RETRY_SCHEDULED: AtomicU64 = AtomicU64::new(0);
 
 // `waddle_push_outbox_dead_lettered_total`: every permanent-
@@ -558,9 +566,9 @@ pub fn render_metrics() -> String {
             "# HELP waddle_push_outbox_published_total XEP-0357 outbox jobs that successfully published past the Push Service boundary. Provider-side delivery is observed separately by the per-provider counters in #528/#529/#530.\n",
             "# TYPE waddle_push_outbox_published_total counter\n",
             "waddle_push_outbox_published_total {push_outbox_published}\n",
-            "# HELP waddle_push_outbox_retry_scheduled_total XEP-0357 outbox jobs that failed transiently and were requeued with a backoff. Sustained non-zero with flat published_total indicates the Push Service boundary is wedged.\n",
+            "# HELP waddle_push_outbox_retry_scheduled_total XEP-0357 outbox jobs that failed transiently and were requeued with a backoff. Sustained non-zero with flat published_total indicates the Push Service boundary is wedged. Labeled by the typed transient-failure reason; the closed-set values land alongside the provider slices in #528/#529/#530 (`5xx`, `timeout`, `auth`, `unknown`) — today the bucket is single `reason=\"unknown\"` so PromQL alerts written now match all future variants.\n",
             "# TYPE waddle_push_outbox_retry_scheduled_total counter\n",
-            "waddle_push_outbox_retry_scheduled_total {push_outbox_retry_scheduled}\n",
+            "waddle_push_outbox_retry_scheduled_total{{reason=\"unknown\"}} {push_outbox_retry_scheduled}\n",
             "# HELP waddle_push_outbox_dead_lettered_total XEP-0357 outbox jobs that exhausted retry attempts and were flipped to the terminal `failed` status. Investigate sustained non-zero rate; isolated dead-letters are expected during provider-side device revocation (APNs `Unregistered` / FCM `UNREGISTERED` device flows). The outbox row stays for post-mortem and no further retry will run.\n",
             "# TYPE waddle_push_outbox_dead_lettered_total counter\n",
             "waddle_push_outbox_dead_lettered_total {push_outbox_dead_lettered}\n",
@@ -811,12 +819,15 @@ mod tests {
         }
 
         // Running totals — three created, one coalesced, two
-        // published, one retry-scheduled, one dead-lettered.
+        // published, one retry-scheduled (labeled today as
+        // `reason="unknown"` to forward-compat the closed-set
+        // labeling planned alongside #528/#529/#530), one
+        // dead-lettered.
         for line in [
             "waddle_push_candidate_created_total 3",
             "waddle_push_candidate_coalesced_total 1",
             "waddle_push_outbox_published_total 2",
-            "waddle_push_outbox_retry_scheduled_total 1",
+            "waddle_push_outbox_retry_scheduled_total{reason=\"unknown\"} 1",
             "waddle_push_outbox_dead_lettered_total 1",
         ] {
             assert!(

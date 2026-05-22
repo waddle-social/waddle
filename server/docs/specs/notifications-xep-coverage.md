@@ -90,6 +90,20 @@ The counters live in process-local `AtomicU64` statics, so values reset to zero 
 
 ## Deferred to follow-up
 
-- **Fake Web/APNS/FCM provider fanout tests** — block on #528/#529/#530 landing the provider boundary code with hooks for fake providers.
-- **Provider-side metrics** — bumped at the per-provider dispatch boundary; same blockers.
+### Provider integration (per-blocker mapping)
+
+| Provider | Issue | AC items this PR cannot close until it lands |
+|---|---|---|
+| Web Push | #528 | `Web fake provider fanout` AC; `waddle_push_provider_sent_total{provider="web"}` counter; `waddle_push_provider_rejected_total{provider="web",reason}` counter |
+| APNs | #529 | `APNS fake provider fanout` AC; `waddle_push_provider_sent_total{provider="apns"}`; `waddle_push_provider_rejected_total{provider="apns",reason}`; `waddle_push_provider_expired_token_total{provider="apns"}` (APNs `Unregistered` device flow) |
+| FCM | #530 | `FCM fake provider fanout` AC; `waddle_push_provider_sent_total{provider="fcm"}`; `waddle_push_provider_rejected_total{provider="fcm",reason}`; `waddle_push_provider_expired_token_total{provider="fcm"}` (FCM `UNREGISTERED` device flow) |
+
+When a provider PR lands, the counter rename / label expansion in this document MUST land in the same PR — the labels and counter shape are part of the wire contract with operators. See the "Counter values reset on server restart" section above for the PromQL implications.
+
+### Note on `SuppressedReason::ProviderRejected` / `ProviderTokenExpired`
+
+`crates/waddle-server/src/notification_outbox.rs` reserves these two `SuppressedReason` variants for use "by provider slices". Today they are not emitted — but readers should be aware they are **NOT** routed through the T0/T1 evaluator (`evaluate_push_gate_at_dispatch`); the evaluator runs BEFORE publish. Provider rejections arrive AFTER the XEP-0357 publish has succeeded on the XMPP boundary, so they will be wired through the post-publish callback path in #528/#529/#530 — likely as a new `NotificationOutboxPublishOutcome` variant rather than a re-routed `Suppressed` outcome. Without this clarification, a future maintainer might wire them via the suppression path and double-count (Failed + Suppressed for the same logical job).
+
+### Other deferred items
+
 - **`muc#roominfo` extension form mirror of §303 fields** — XEP-0513 §303 SHOULD; tracked as the TODO marker in `crates/waddle-xmpp-core/src/disco/info.rs` (see #525 closure).
