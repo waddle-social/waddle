@@ -1,13 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
-import { useStore } from "@nanostores/vue";
 import { Phone } from "lucide-vue-next";
-import { $callState } from "@/lib/calls/call-store";
-import {
-  $mucCallParticipants,
-  normalizeMucCallRoomJid,
-} from "@/lib/calls/muc-call-presence";
-import { useActiveMucCall } from "@/lib/calls/use-active-muc-call";
+import { useRoomHasActiveCall } from "@/lib/calls/use-active-muc-call";
 
 /**
  * Live-call indicator shown in the channel header when the room owns
@@ -34,31 +28,26 @@ const props = defineProps<{
   disabled?: boolean;
 }>();
 
-const state = useStore($callState);
-const participants = useStore($mucCallParticipants);
-const { selfInCall, activeRoomJid } = useActiveMucCall();
+// Detection is keyed to the **room's** Muji participants store
+// (XEP-0272 §Joining / §Leaving), NOT the local user's `$callState`.
+// The local call phase is only set when this client is actively in a
+// call; relying on it left the pill dark after every page refresh
+// because the rejoined client's `$callState` starts at `idle` even
+// while every other occupant still advertises Muji presence in the
+// room. `useRoomHasActiveCall` reads `$mucCallParticipants[roomJid]`
+// directly, which is populated by the auto-joined MUC's roster
+// replay within ~200 ms of session ready.
+const { hasActiveCall, selfInCall, participantCount } = useRoomHasActiveCall(() => props.roomJid);
 
-const normalizedRoomJid = computed(() => normalizeMucCallRoomJid(props.roomJid));
-
-const callInThisRoom = computed(() => {
-  return (
-    activeRoomJid.value !== null &&
-    activeRoomJid.value === normalizedRoomJid.value
-  );
-});
+const callInThisRoom = hasActiveCall;
 
 /**
  * The pill is visible only when:
- *   - There is an active MUC call in THIS room.
+ *   - There is an active MUC call in THIS room (per Muji presence).
  *   - The local user is not currently joined to it (otherwise the
  *     split surface is already painting the state for them).
  */
 const isVisible = computed(() => callInThisRoom.value && !selfInCall.value);
-
-const participantCount = computed<number>(() => {
-  if (!callInThisRoom.value) return 0;
-  return (participants.value[normalizedRoomJid.value] ?? []).length;
-});
 
 /**
  * Running call duration. Pegged to a single shared 1Hz tick so we

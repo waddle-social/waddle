@@ -349,7 +349,14 @@ export class BrowserXmppClient {
   private dmReactionHandler: ((event: DmReactionEvent) => void) | null = null;
   private dmDisplayedHandler: ((event: DmDisplayedEvent) => void) | null = null;
   private presenceUpdateHandler: ((event: PresenceUpdateEvent) => void) | null = null;
-  private roomMemberJids: Record<string, string> = {};
+  /**
+   * Per-room caches. Populated by the presence handler for **every**
+   * joined MUC, not just the focused one — switching channels no longer
+   * leaves the previous room, so the data must accumulate across all
+   * joined rooms. Handlers fire only for the focused room's slice
+   * (see `dispatchFocusedRoomHandlers`). Keyed by bare MUC JID.
+   */
+  private roomMemberJidsByRoom: Map<string, Record<string, string>> = new Map();
   private memberJidHandler: ((nick: string, bareJid: string) => void) | null = null;
   private hatsHandler: ((hats: RoomHats) => void) | null = null;
   private authorityHandler: ((authority: RoomAuthority) => void) | null = null;
@@ -371,9 +378,18 @@ export class BrowserXmppClient {
   private roomSwitchPromise: Promise<void> | null = null;
   private roomSwitchTarget: string | null = null;
   private selfPingTimer: ReturnType<typeof setInterval> | null = null;
-  private roomHats: RoomHats = {};
-  private roomAuthority: RoomAuthority = {};
-  private roomPresence: RoomPresence = {};
+  private roomHatsByRoom: Map<string, RoomHats> = new Map();
+  private roomAuthorityByRoom: Map<string, RoomAuthority> = new Map();
+  private roomPresenceByRoom: Map<string, RoomPresence> = new Map();
+  /**
+   * Idempotent join tracker. Key = bare MUC JID, value = the in-flight
+   * (or resolved) Promise for that room's `<presence/>` join. A second
+   * `ensureJoined` call for the same room awaits the same Promise, so
+   * concurrent UI navigation and the auto-join fan-out don't both fire
+   * a join stanza. Failed joins drop their entry so the next call
+   * retries from scratch.
+   */
+  private readonly joinedMucs = new Map<string, Promise<void>>();
   private uploadServiceJid: string | null = null;
   private discoveredRoomJids = new Map<string, string>();
   private reconnectStartedAt: number | null = null;
@@ -671,10 +687,11 @@ export class BrowserXmppClient {
     this.roomSwitchTarget = null;
     this.rejectRoomJoinWaiters(new Error("XMPP disconnected while joining a room"));
     this.uploadServiceJid = null;
-    this.roomHats = {};
-    this.roomAuthority = {};
-    this.roomPresence = {};
-    this.roomMemberJids = {};
+    this.roomHatsByRoom.clear();
+    this.roomAuthorityByRoom.clear();
+    this.roomPresenceByRoom.clear();
+    this.roomMemberJidsByRoom.clear();
+    this.joinedMucs.clear();
     clearMucCallParticipants();
     // Best-effort hangup: if we're in a call when the user logs out
     // we want the peer to see session-terminate before the stream
@@ -682,11 +699,12 @@ export class BrowserXmppClient {
     // `$callState`.
     await tearDownActiveCall(xmpp as unknown as CallWireSender | null, "success");
     this.xmpp = null;
-    try {
-      if (xmpp && roomBefore && xmpp.leave_room) {
-        await xmpp.leave_room(roomBefore, this.session.username);
-      }
-    } catch {}
+    // The auto-join model keeps the user joined to every channel in
+    // their spaces, so emitting unavailable for any single room here
+    // would be misleading. Rely on the server's WebSocket-close
+    // cleanup (cleanup_muc_presence) to broadcast unavailable for
+    // every joined MUC — authoritative for the multi-room case.
+    void roomBefore;
     await xmpp?.disconnect?.();
     this.emitStatus({ state: "offline", detail: "Disconnected" });
   }
@@ -751,43 +769,106 @@ export class BrowserXmppClient {
     }
   }
 
+  /**
+   * Send a MUC `<presence/>` join for `roomJid` once. Subsequent calls
+   * for the same room return the in-flight (or resolved) Promise so
+   * the auto-join fan-out and ad-hoc `switchRoom` clicks don't double-
+   * join. A failed join clears its entry so the next call retries.
+   *
+   * The room is kept joined for the lifetime of the XMPP session —
+   * channel switches change focus only, not MUC membership. This is
+   * what makes XEP-0272 Muji presence (and the call indicator) visible
+   * across the whole sidebar, not just the focused channel.
+   */
+  async ensureJoined(roomJid: string): Promise<void> {
+    const existing = this.joinedMucs.get(roomJid);
+    if (existing) return existing;
+    const promise = this.performMucJoin(roomJid);
+    this.joinedMucs.set(roomJid, promise);
+    try {
+      await promise;
+    } catch (err) {
+      if (this.joinedMucs.get(roomJid) === promise) {
+        this.joinedMucs.delete(roomJid);
+      }
+      throw err;
+    }
+  }
+
+  private async performMucJoin(roomJid: string): Promise<void> {
+    const xmpp = this.xmpp;
+    if (!xmpp) throw new Error("XMPP session is not ready");
+    const nick = this.session.username;
+    const ready = this.waitForRoomSelfPresence(roomJid, nick);
+    if (xmpp.join_room) {
+      await Promise.allSettled([xmpp.join_room(roomJid, nick)]);
+    } else if (xmpp.joinRoom) {
+      await xmpp.joinRoom(roomJid, nick);
+    } else {
+      throw new Error("XMPP client missing join_room binding");
+    }
+    if (!this.isCurrentXmpp(xmpp)) {
+      await ready.catch(() => undefined);
+      return;
+    }
+    await ready;
+  }
+
+  /**
+   * Eagerly join every channel the user is a member of so their XEP-
+   * 0272 Muji presences populate `$mucCallParticipants` and the call
+   * indicator can fire for any sidebar channel — including after a
+   * full page refresh. Bounded concurrency keeps the initial stanza
+   * burst manageable on large topologies.
+   */
+  async fanOutAutoJoin(roomJids: ReadonlyArray<string>, concurrency = 6): Promise<void> {
+    await this.connect();
+    if (!this.xmpp) return;
+    const queue = [...roomJids];
+    const seen = new Set<string>();
+    const workers: Promise<void>[] = [];
+    const worker = async (): Promise<void> => {
+      while (queue.length > 0) {
+        const next = queue.shift();
+        if (!next || seen.has(next)) continue;
+        seen.add(next);
+        try { await this.ensureJoined(next); } catch { /* failed joins drop their entry; retried on next pass */ }
+      }
+    };
+    for (let i = 0; i < Math.max(1, concurrency); i++) workers.push(worker());
+    await Promise.allSettled(workers);
+  }
+
   private async performRoomSwitch(nextRoom: string) {
     const xmpp = this.xmpp;
     if (!xmpp) return;
     if (this.currentRoom) {
+      // Channel switch ends any active call in the room being left
+      // behind: there is no in-app surface to keep showing the local
+      // call from the new channel today, so preserving session-
+      // terminate / SFU disconnect ordering is more important than
+      // leaving an orphan media session running.
       await this.tearDownMucCallForRoom(this.currentRoom, xmpp);
       if (!this.isCurrentXmpp(xmpp)) return;
     }
-    if (this.currentRoom && xmpp.leave_room) {
-      try { await xmpp.leave_room(this.currentRoom, this.session.username); } catch {}
-      if (!this.isCurrentXmpp(xmpp)) return;
-    }
+    // No `leave_room` — auto-join keeps the user joined to every
+    // channel in their spaces so Muji presence flows for the whole
+    // sidebar. Per-room state caches accumulate across rooms, so the
+    // focused-room handler snapshot is reconstructed from cache below.
     this.currentRoom = nextRoom;
-    this.roomHats = {};
-    this.roomAuthority = {};
-    this.roomPresence = {};
-    this.roomMemberJids = {};
-    this.hatsHandler?.({});
-    this.authorityHandler?.({});
-    this.presenceHandler?.({});
-    if (xmpp.join_room) {
-      const ready = this.waitForRoomSelfPresence(nextRoom, this.session.username);
-      await Promise.allSettled([xmpp.join_room(nextRoom, this.session.username)]);
-      if (!this.isCurrentXmpp(xmpp)) {
-        await ready.catch(() => undefined);
-        return;
-      }
-      try {
-        await ready;
-      } catch (err) {
-        if (!this.isCurrentXmpp(xmpp)) return;
-        throw err;
-      }
+    this.dispatchFocusedRoomHandlers();
+    try {
+      await this.ensureJoined(nextRoom);
+    } catch (err) {
       if (!this.isCurrentXmpp(xmpp)) return;
-    } else if (xmpp.joinRoom) {
-      await xmpp.joinRoom(nextRoom, this.session.username);
-      if (!this.isCurrentXmpp(xmpp)) return;
+      throw err;
     }
+    if (!this.isCurrentXmpp(xmpp)) return;
+    // Replay the focused-room snapshot now that the initial roster has
+    // landed in the per-room cache. The first dispatch above only had
+    // whatever was already cached (empty on cold focus); this second
+    // dispatch ships the freshly-arrived presence to the UI.
+    this.dispatchFocusedRoomHandlers();
     this.startSelfPing();
     await this.flushQueuedRoomMessages(nextRoom);
   }
@@ -957,7 +1038,7 @@ export class BrowserXmppClient {
         if (!this.roomIsReady(roomJid) || !this.xmpp) break;
         if (this.inflightQueuedIds.has(entry.id)) continue;
         this.queuedMessageStatusHandler?.(entry.id, "sending");
-        const messageId = await this.compatSendGroupMessage(this.xmpp, roomJid, entry.body, { ...(entry.markup?.length ? { markup: entry.markup } : {}), ...(entry.references?.length ? { references: entry.references } : {}), mentionJidsByNick: { ...(entry.mentionJidsByNick ?? {}), ...this.roomMemberJids }, ...(entry.files?.length ? { files: entry.files } : {}), ...(entry.replyTo ? { replyTo: entry.replyTo } : {}), ...(entry.threadId ? { threadId: entry.threadId } : {}), ...(entry.parentThreadId ? { parentThreadId: entry.parentThreadId } : {}), ...(entry.threadCreate ? { threadCreate: entry.threadCreate } : {}), ...(entry.threadReply ? { threadReply: entry.threadReply } : {}), id: entry.id });
+        const messageId = await this.compatSendGroupMessage(this.xmpp, roomJid, entry.body, { ...(entry.markup?.length ? { markup: entry.markup } : {}), ...(entry.references?.length ? { references: entry.references } : {}), mentionJidsByNick: { ...(entry.mentionJidsByNick ?? {}), ...this.memberJidsFor(roomJid) }, ...(entry.files?.length ? { files: entry.files } : {}), ...(entry.replyTo ? { replyTo: entry.replyTo } : {}), ...(entry.threadId ? { threadId: entry.threadId } : {}), ...(entry.parentThreadId ? { parentThreadId: entry.parentThreadId } : {}), ...(entry.threadCreate ? { threadCreate: entry.threadCreate } : {}), ...(entry.threadReply ? { threadReply: entry.threadReply } : {}), id: entry.id });
         if (messageId) { this.inflightQueuedIds.add(entry.id); this.recordPendingSend(entry.id, "room"); }
       }
     })();
@@ -972,7 +1053,7 @@ export class BrowserXmppClient {
     if (!body.trim() && !hasFiles && !hasThreadMetadata && !hasForumMetadata) return null;
     const roomJid = this.roomJidForChannel(channelId);
     if (this.roomIsReady(roomJid) && this.xmpp) {
-      const id = await this.compatSendGroupMessage(this.xmpp, roomJid, body, { ...opts, mentionJidsByNick: { ...(opts.mentionJidsByNick ?? {}), ...this.roomMemberJids } });
+      const id = await this.compatSendGroupMessage(this.xmpp, roomJid, body, { ...opts, mentionJidsByNick: { ...(opts.mentionJidsByNick ?? {}), ...this.memberJidsFor(roomJid) } });
       this.recordPendingSend(id, "room");
       return { id, state: "sending" };
     }
@@ -1496,7 +1577,23 @@ export class BrowserXmppClient {
   async listRosterContacts(): Promise<RosterContact[]> { const xmpp = await this.requireConnectedXmpp(); const roster = await xmpp.list_roster_contacts?.() as WasmRosterContact[]; return (roster ?? []).map((item) => { const jid = barePeerJid(item.jid); return { jid, name: item.name, username: item.name?.trim() || jid.split("@")[0] || jid, subscription: (item.subscription ?? "none") as RosterContact["subscription"], groups: item.groups ?? [] }; }); }
   async getServerVersion(): Promise<WasmServerVersion | null> { const xmpp = await this.requireConnectedXmpp(); return await xmpp.get_server_version?.() as WasmServerVersion | null; }
   async discoverSpaceChannels(): Promise<any[]> { const xmpp = await this.requireConnectedXmpp(); return discoverChannels(xmpp as WasmClient, this.session.jid); }
-  async discoverTopology(): Promise<DiscoveredTopology> { const xmpp = await this.requireConnectedXmpp(); const topology = await discoverTopology(xmpp as WasmClient, this.session.jid); this.discoveredRoomJids = new Map(topology.rooms.flatMap((room) => room.jid ? [[room.id, room.jid] as const] : [])); return topology; }
+  async discoverTopology(): Promise<DiscoveredTopology> {
+    const xmpp = await this.requireConnectedXmpp();
+    const topology = await discoverTopology(xmpp as WasmClient, this.session.jid);
+    this.discoveredRoomJids = new Map(topology.rooms.flatMap((room) => room.jid ? [[room.id, room.jid] as const] : []));
+    // XEP-0402 / XEP-0045 auto-join: fan out MUC presence for every
+    // channel the user is a member of so the per-room call indicator
+    // (XEP-0272 Muji presence) fires across the entire sidebar — not
+    // just the focused channel. Fire-and-forget so topology discovery
+    // does not block on N parallel MUC roster replays; ensureJoined
+    // is idempotent so the focused-channel `switchRoom` later joins
+    // through the same Promise.
+    const autoJoinRoomJids: string[] = topology.rooms
+      .filter((room) => room.autojoin !== false && !!room.jid)
+      .map((room) => room.jid!);
+    if (autoJoinRoomJids.length > 0) void this.fanOutAutoJoin(autoJoinRoomJids);
+    return topology;
+  }
   async listRoomMembers(channelId: string, options?: ListRoomMembersOptions): Promise<MemberSummary[]> {
     const xmpp = await this.requireConnectedXmpp(); const roomJid = options?.roomJid ?? this.roomJidForChannel(channelId);
     const listMembers = xmpp.list_room_members
@@ -1832,6 +1929,16 @@ export class BrowserXmppClient {
     clearCallState();
     clearMucCallParticipants();
     void useCallEngine().engine.disconnect();
+    // The transport went down — every join in-flight is dead and the
+    // server's `cleanup_muc_presence` will broadcast unavailable for
+    // each room. Clear the tracker so the post-reconnect auto-join
+    // fan-out re-issues every join (each call is idempotent once the
+    // new session is up).
+    this.joinedMucs.clear();
+    this.roomHatsByRoom.clear();
+    this.roomAuthorityByRoom.clear();
+    this.roomPresenceByRoom.clear();
+    this.roomMemberJidsByRoom.clear();
     if (this.destroying) { this.clearResumeState(); this.emitStatus({ state: "offline", detail: error?.message ?? "Disconnected" }); return; }
     this.setResumeStateHandle(xmpp.get_resume_state_handle?.() ?? null);
     this.resumeState = xmpp.get_resume_state?.() ?? null;
@@ -1845,19 +1952,67 @@ export class BrowserXmppClient {
     if (this.onceConnectFailed) { const fail = this.onceConnectFailed; this.onceConnected = null; this.onceConnectFailed = null; fail(error ?? new Error("XMPP connection failed")); }
     this.scheduleReconnect();
   }
+  private hatsFor(room: string): RoomHats {
+    let cached = this.roomHatsByRoom.get(room);
+    if (!cached) { cached = {}; this.roomHatsByRoom.set(room, cached); }
+    return cached;
+  }
+  private authorityFor(room: string): RoomAuthority {
+    let cached = this.roomAuthorityByRoom.get(room);
+    if (!cached) { cached = {}; this.roomAuthorityByRoom.set(room, cached); }
+    return cached;
+  }
+  private presenceFor(room: string): RoomPresence {
+    let cached = this.roomPresenceByRoom.get(room);
+    if (!cached) { cached = {}; this.roomPresenceByRoom.set(room, cached); }
+    return cached;
+  }
+  private memberJidsFor(room: string): Record<string, string> {
+    let cached = this.roomMemberJidsByRoom.get(room);
+    if (!cached) { cached = {}; this.roomMemberJidsByRoom.set(room, cached); }
+    return cached;
+  }
+  /** Push every focused-room handler with a fresh snapshot. Called on
+   *  channel switch (where the focused room changes, so the active view
+   *  must update from cache) and on full disconnect (where caches are
+   *  cleared to empty). */
+  private dispatchFocusedRoomHandlers(): void {
+    const room = this.currentRoom;
+    if (!room) {
+      this.hatsHandler?.({});
+      this.authorityHandler?.({});
+      this.presenceHandler?.({});
+      return;
+    }
+    this.hatsHandler?.({ ...this.hatsFor(room) });
+    this.authorityHandler?.({ ...this.authorityFor(room) });
+    this.presenceHandler?.({ ...this.presenceFor(room) });
+  }
   private handlePresence(presence: WasmPresence) {
     const from = presence.from ?? "";
     if ((presence as any).muc_jid !== undefined) {
-      const [room, nick = ""] = from.split("/"); const waiter = this.roomJoinWaiters.get(from); if (waiter && (presence as any).muc_jid) waiter.resolve(); if (!room) return; if (!nick && presence.vcard_avatar) this.roomAvatarHandler?.(room, presence.vcard_avatar); if (room !== this.currentRoom || !nick) return;
+      const [room, nick = ""] = from.split("/");
+      const waiter = this.roomJoinWaiters.get(from);
+      if (waiter && (presence as any).muc_jid) waiter.resolve();
+      if (!room) return;
+      if (!nick && presence.vcard_avatar) this.roomAvatarHandler?.(room, presence.vcard_avatar);
+      // Filter dropped after the auto-join refactor: presence from any
+      // joined MUC (not just the focused one) must update its per-room
+      // cache so the focused-room handler can replay correct state on
+      // channel switch. Handlers themselves only fire for the focused
+      // room — the focused-room snapshot is reconstructed below.
+      if (!nick) return;
       if (presence.presence_type === "unavailable") {
-        delete this.roomHats[nick];
-        this.hatsHandler?.({ ...this.roomHats });
-        delete this.roomAuthority[nick];
-        this.authorityHandler?.({ ...this.roomAuthority });
-        this.roomPresence[nick] = "offline";
-        this.presenceHandler?.({ ...this.roomPresence });
-        delete this.roomMemberJids[nick];
-        this.lastSeenHandler?.(nick, Date.now());
+        delete this.hatsFor(room)[nick];
+        delete this.authorityFor(room)[nick];
+        this.presenceFor(room)[nick] = "offline";
+        delete this.memberJidsFor(room)[nick];
+        if (room === this.currentRoom) {
+          this.hatsHandler?.({ ...this.hatsFor(room) });
+          this.authorityHandler?.({ ...this.authorityFor(room) });
+          this.presenceHandler?.({ ...this.presenceFor(room) });
+          this.lastSeenHandler?.(nick, Date.now());
+        }
         return;
       }
       // XEP-0317 hats are server-emitted descriptive metadata only.
@@ -1865,22 +2020,25 @@ export class BrowserXmppClient {
       // those flow as `roomAuthority` and drive authority chips
       // independently (see `parseMucAffiliation` / `parseMucRole`
       // below).
-      this.roomHats[nick] = ((presence as any).hats ?? []).map((hat: any) => ({
+      this.hatsFor(room)[nick] = ((presence as any).hats ?? []).map((hat: any) => ({
         uri: hat.uri,
         title: hat.title,
       }));
-      this.hatsHandler?.({ ...this.roomHats });
-      this.roomAuthority[nick] = {
+      this.authorityFor(room)[nick] = {
         affiliation: parseMucAffiliation((presence as any).muc_affiliation),
         role: parseMucRole((presence as any).muc_role),
       };
-      this.authorityHandler?.({ ...this.roomAuthority });
-      this.roomPresence[nick] = parsePresenceShow(presence.show);
-      this.presenceHandler?.({ ...this.roomPresence });
+      this.presenceFor(room)[nick] = parsePresenceShow(presence.show);
+      let memberBare: string | null = null;
       if ((presence as any).muc_jid) {
-        const bare = barePeerJid((presence as any).muc_jid);
-        this.roomMemberJids[nick] = bare;
-        this.memberJidHandler?.(nick, bare);
+        memberBare = barePeerJid((presence as any).muc_jid);
+        this.memberJidsFor(room)[nick] = memberBare;
+      }
+      if (room === this.currentRoom) {
+        this.hatsHandler?.({ ...this.hatsFor(room) });
+        this.authorityHandler?.({ ...this.authorityFor(room) });
+        this.presenceHandler?.({ ...this.presenceFor(room) });
+        if (memberBare) this.memberJidHandler?.(nick, memberBare);
       }
       return;
     }

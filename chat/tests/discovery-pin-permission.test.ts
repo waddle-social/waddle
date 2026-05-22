@@ -225,10 +225,16 @@ function discoInfoXml(info: { features?: string[]; identities?: Array<{ category
   }</query></iq>`;
 }
 
-function pubsubItemsXml(items: Array<{ id?: string; jid?: string; name?: string }>): string {
-  return `<iq type="result"><pubsub xmlns="http://jabber.org/protocol/pubsub"><items>${items.map((item) =>
-    `<item${item.id ? ` id="${item.id}"` : ""}>${item.jid || item.name ? `<conference${item.jid ? ` jid="${item.jid}"` : ""}${item.name ? ` name="${item.name}"` : ""}/>` : ""}</item>`
-  ).join("")}</items></pubsub></iq>`;
+function pubsubItemsXml(items: Array<{ id?: string; jid?: string; name?: string; autojoin?: boolean; nick?: string }>): string {
+  return `<iq type="result"><pubsub xmlns="http://jabber.org/protocol/pubsub"><items>${items.map((item) => {
+    if (!(item.jid || item.name)) {
+      return `<item${item.id ? ` id="${item.id}"` : ""}/>`;
+    }
+    const autojoinAttr = item.autojoin === undefined ? "" : ` autojoin="${item.autojoin ? "true" : "false"}"`;
+    const conferenceChildren = item.nick ? `<nick xmlns="urn:xmpp:bookmarks:1">${item.nick}</nick>` : "";
+    const conferenceTag = `<conference xmlns="urn:xmpp:bookmarks:1"${item.jid ? ` jid="${item.jid}"` : ""}${item.name ? ` name="${item.name}"` : ""}${autojoinAttr}${conferenceChildren ? `>${conferenceChildren}</conference>` : "/>"}`;
+    return `<item${item.id ? ` id="${item.id}"` : ""}>${conferenceTag}</item>`;
+  }).join("")}</items></pubsub></iq>`;
 }
 
 async function withFakeDomParser(run: () => Promise<void>): Promise<void> {

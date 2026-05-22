@@ -5,7 +5,7 @@ import {
   clearMucCallParticipants,
 } from "../src/lib/calls/muc-call-presence";
 import { connectionStore } from "../src/lib/connection-store";
-import { readActiveMucCall } from "../src/lib/calls/use-active-muc-call";
+import { readActiveMucCall, readRoomHasActiveCall } from "../src/lib/calls/use-active-muc-call";
 import type { CallMedia, LiveKitJoin } from "../src/lib/calls/types";
 import type { WaddleSession } from "../src/lib/server-auth";
 
@@ -141,5 +141,86 @@ describe("readActiveMucCall selector", () => {
     });
     $mucCallParticipants.set({ [ROOM]: ["alice"] });
     expect(readActiveMucCall().selfInCall).toBe(false);
+  });
+});
+
+describe("readRoomHasActiveCall selector — populated from Muji presence alone", () => {
+  beforeEach(() => {
+    $callState.set({ phase: "idle" });
+    clearMucCallParticipants();
+    setSession(null);
+  });
+
+  afterEach(() => {
+    $callState.set({ phase: "idle" });
+    clearMucCallParticipants();
+    setSession(null);
+  });
+
+  test("post-refresh discovery: room has a call even though local `$callState` is idle", () => {
+    // This is the exact scenario the user reported: a page refresh
+    // clears `$callState` but the rejoined client receives roster
+    // replay with XEP-0272 Muji extensions from existing occupants.
+    // The pill MUST light up on the strength of that store alone.
+    setSession("carol");
+    $callState.set({ phase: "idle" });
+    $mucCallParticipants.set({ [ROOM]: ["alice", "bob"] });
+
+    expect(readRoomHasActiveCall(ROOM)).toEqual({
+      hasActiveCall: true,
+      selfInCall: false,
+      participantCount: 2,
+    });
+  });
+
+  test("self is in call when the local nick appears in the participants list", () => {
+    setSession("alice");
+    $mucCallParticipants.set({ [ROOM]: ["alice", "bob"] });
+
+    expect(readRoomHasActiveCall(ROOM)).toEqual({
+      hasActiveCall: true,
+      selfInCall: true,
+      participantCount: 2,
+    });
+  });
+
+  test("no call when the room is absent from the store", () => {
+    setSession("alice");
+    $mucCallParticipants.set({});
+
+    expect(readRoomHasActiveCall(ROOM)).toEqual({
+      hasActiveCall: false,
+      selfInCall: false,
+      participantCount: 0,
+    });
+  });
+
+  test("no call when the room's participants list is empty (XEP-0272 §Leaving cleared it)", () => {
+    setSession("alice");
+    $mucCallParticipants.set({ [ROOM]: [] });
+
+    expect(readRoomHasActiveCall(ROOM)).toEqual({
+      hasActiveCall: false,
+      selfInCall: false,
+      participantCount: 0,
+    });
+  });
+
+  test("resource-suffixed roomJid still matches the canonical bare key", () => {
+    setSession("alice");
+    $mucCallParticipants.set({ [ROOM]: ["bob"] });
+
+    expect(readRoomHasActiveCall(`${ROOM}/alice`).hasActiveCall).toBe(true);
+  });
+
+  test("empty roomJid is a no-op", () => {
+    setSession("alice");
+    $mucCallParticipants.set({ [ROOM]: ["alice"] });
+
+    expect(readRoomHasActiveCall("")).toEqual({
+      hasActiveCall: false,
+      selfInCall: false,
+      participantCount: 0,
+    });
   });
 });

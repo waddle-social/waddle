@@ -362,6 +362,20 @@ export interface DiscoveredChannel {
    * can render the Pin action correctly under the `anyone`
    * policy without needing owner-config access. */
   pinPermission?: PinPermission;
+  /** XEP-0402 §3 `autojoin` attribute on the channel's
+   * `<conference xmlns='urn:xmpp:bookmarks:1'>` bookmark item.
+   * `true` means the client should send MUC presence for this room
+   * on session ready so the user receives roster + XEP-0272 Muji
+   * presence and the per-room call indicator can fire even when the
+   * channel is not the active focus. Defaults to `true` for channels
+   * surfaced via the MUC service items but absent from any Space
+   * PubSub bookmark — waddle's de-facto behavior treats them as
+   * joined. */
+  autojoin?: boolean;
+  /** XEP-0402 §3 `<nick/>` child of the bookmark, if the user
+   * configured a custom MUC nick. `null`/absent → use the user's
+   * default (their session username). */
+  bookmarkNick?: string;
 }
 
 export interface DiscoveredSpace {

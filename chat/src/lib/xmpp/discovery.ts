@@ -126,7 +126,28 @@ async function sendDiscoItems(xmpp: HybridClient, to: string, node?: string): Pr
     .map((item) => ({ jid: item.getAttribute("jid") ?? undefined, name: item.getAttribute("name") ?? undefined, node: item.getAttribute("node") ?? undefined }));
 }
 
-async function sendPubsubItems(xmpp: HybridClient, to: string, node: string): Promise<Array<{ jid?: string; name?: string }>> {
+const NS_BOOKMARKS_1 = "urn:xmpp:bookmarks:1";
+
+/** XEP-0402 §3: `<conference xmlns='urn:xmpp:bookmarks:1' autojoin='true|false'>`.
+ * Returns `undefined` when the attribute is absent so callers can apply
+ * waddle's "channel surfaced via MUC service items but never bookmarked"
+ * default downstream. */
+function parseAutojoinAttr(value: string | null | undefined): boolean | undefined {
+  if (value == null) return undefined;
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "true" || normalized === "1") return true;
+  if (normalized === "false" || normalized === "0") return false;
+  return undefined;
+}
+
+interface BookmarkItem {
+  jid?: string;
+  name?: string;
+  autojoin?: boolean;
+  nick?: string;
+}
+
+async function sendPubsubItems(xmpp: HybridClient, to: string, node: string): Promise<BookmarkItem[]> {
   if (!xmpp.send_raw_iq) return [];
   const id = crypto.randomUUID();
   const responseXml = await xmpp.send_raw_iq(`<iq type="get" id="${id}" to="${to}"><pubsub xmlns="${NS_PUBSUB}"><items node="${node}"/></pubsub></iq>`);
@@ -135,11 +156,24 @@ async function sendPubsubItems(xmpp: HybridClient, to: string, node: string): Pr
   if (!items) return [];
   return Array.from(items.getElementsByTagNameNS(NS_PUBSUB, "item"))
     .filter((item) => item.parentNode === items)
-    .map((item) => {
-      const conference = item.getElementsByTagName("conference")[0];
+    .map<BookmarkItem>((item) => {
+      // XEP-0402 §3: the conference element lives in NS_BOOKMARKS_1, but
+      // some implementations forget to set the namespace explicitly on the
+      // child. Tolerate both — the local-name match covers stray namespacing
+      // while the explicit NS_BOOKMARKS_1 lookup wins when both are present.
+      const conference =
+        item.getElementsByTagNameNS(NS_BOOKMARKS_1, "conference")[0]
+        ?? item.getElementsByTagName("conference")[0];
+      const nickEl = conference
+        ? (conference.getElementsByTagNameNS(NS_BOOKMARKS_1, "nick")[0]
+          ?? conference.getElementsByTagName("nick")[0])
+        : null;
+      const nick = nickEl?.textContent?.trim();
       return {
         jid: item.getAttribute("id") ?? conference?.getAttribute("jid") ?? undefined,
         name: conference?.getAttribute("name") ?? undefined,
+        autojoin: parseAutojoinAttr(conference?.getAttribute("autojoin")),
+        ...(nick ? { nick } : {}),
       };
     });
 }
@@ -224,11 +258,22 @@ export async function discoverChannels(xmpp: HybridClient, jid: string): Promise
   return hydrated.map((room, position) => ({ id: room.id, name: room.name, channelType: room.channelType, position }));
 }
 
+/** Bookmark attributes lifted from the Space's PubSub items, keyed by
+ * channel bare JID. Each room can appear in at most one Space (XEP-0503
+ * single-membership) so this is a flat map. Absent entries mean the
+ * room was not bookmarked anywhere; callers default `autojoin` to
+ * `true` in that case (waddle de-facto: visible channel ⇒ joined). */
+interface RoomBookmarkInfo {
+  spaceId: string;
+  autojoin?: boolean;
+  nick?: string;
+}
+
 export async function discoverTopology(xmpp: HybridClient, jid: string): Promise<DiscoveredTopology> {
   const domain = jidDomain(jid);
   const services = await discoverComponentServices(xmpp, domain, jid);
   let rooms: DiscoveredChannel[] = [];
-  const bookmarkedSpaceIds = new Map<string, string>();
+  const roomBookmarkInfo = new Map<string, RoomBookmarkInfo>();
   const spaces: DiscoveredSpace[] = [];
   let serverRole: DiscoveryRole = null;
 
@@ -250,7 +295,12 @@ export async function discoverTopology(xmpp: HybridClient, jid: string): Promise
       try {
         const bookmarks = await sendPubsubItems(xmpp, services.spaces, item.node);
         for (const bookmark of bookmarks) {
-          if (bookmark.jid) bookmarkedSpaceIds.set(barePeerJid(bookmark.jid), spaceId);
+          if (!bookmark.jid) continue;
+          roomBookmarkInfo.set(barePeerJid(bookmark.jid), {
+            spaceId,
+            ...(bookmark.autojoin !== undefined ? { autojoin: bookmark.autojoin } : {}),
+            ...(bookmark.nick ? { nick: bookmark.nick } : {}),
+          });
         }
       } catch {}
       spaces.push({ id: spaceId, name: item.name ?? spaceId, role });
@@ -259,7 +309,23 @@ export async function discoverTopology(xmpp: HybridClient, jid: string): Promise
 
   const mucRooms = await sendDiscoItems(xmpp, services.muc);
   const hydrated = await Promise.all(mucRooms.map((room, position) => hydrateRoomInfo(xmpp, channelFromRoom({ jid: room.jid ?? "", name: room.name }, position))));
-  rooms = hydrated.map((room, position) => ({ ...room, position, ...(room.jid && bookmarkedSpaceIds.get(barePeerJid(room.jid)) ? { spaceId: bookmarkedSpaceIds.get(barePeerJid(room.jid)), standalone: false } : {}) }));
+  rooms = hydrated.map((room, position) => {
+    const bookmark = room.jid ? roomBookmarkInfo.get(barePeerJid(room.jid)) : undefined;
+    return {
+      ...room,
+      position,
+      ...(bookmark ? { spaceId: bookmark.spaceId, standalone: false } : {}),
+      // XEP-0402 §3 omitted `autojoin` defaults to false per spec, but
+      // waddle's bookmark publisher always sets it explicitly, AND the
+      // server may surface a channel via MUC service items even when no
+      // Space bookmark exists yet (orphan rooms before a Space publish).
+      // For waddle's UX — "every channel in your sidebar should show its
+      // call indicator after refresh" — we default to true here. Set the
+      // bookmark's `autojoin='false'` to override.
+      autojoin: bookmark?.autojoin ?? true,
+      ...(bookmark?.nick ? { bookmarkNick: bookmark.nick } : {}),
+    };
+  });
 
   const roomSpaceIds = new Map(rooms.flatMap((room) => room.jid ? [[barePeerJid(room.jid), room.spaceId]] as const : []));
   return {

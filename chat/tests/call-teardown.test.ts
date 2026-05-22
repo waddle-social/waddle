@@ -1445,7 +1445,7 @@ describe("MUC group call", () => {
     expect($mucCallParticipants.get()["chan@muc.test"]).toBeUndefined();
   });
 
-  test("room switch tears down the old room's active MUC call before leaving", async () => {
+  test("room switch tears down the old room's active MUC call but keeps the user joined to the old room", async () => {
     const events = wireClientEvents();
     const send_muji_session_terminate = mock(async () => undefined);
     const update_muji_presence = mockUpdateMujiPresenceWithEcho(events.emitPresence);
@@ -1466,22 +1466,29 @@ describe("MUC group call", () => {
         operationOrder.push(`presence:${active}:${preparing}`);
         await update_muji_presence(roomJid, nick, active, preparing, video);
       }),
+      // The new focus-only switch must NOT send a leave for the
+      // previous MUC — the user stays joined to every channel in
+      // their spaces so the call indicator (XEP-0272 Muji presence)
+      // keeps flowing while the focus moves. The mock is kept so we
+      // can assert leave_room was never called.
       leave_room: mock(async (roomJid: string, nick: string) => {
         operationOrder.push(`leave:${roomJid}/${nick}`);
         await leave_room(roomJid, nick);
       }),
+      join_room: mock(async () => undefined),
     };
     const client = events.client as unknown as {
       xmpp: typeof xmpp;
       currentRoom: string | null;
-      roomHats: Record<string, unknown>;
-      roomAuthority: Record<string, unknown>;
-      roomPresence: Record<string, unknown>;
-      roomMemberJids: Record<string, string>;
       performRoomSwitch: (roomJid: string) => Promise<void>;
+      session: { username: string };
+      joinedMucs: Map<string, Promise<void>>;
     };
     Object.assign(client.xmpp, xmpp);
     client.currentRoom = "old@muc.test";
+    // Pretend the auto-join already landed the old room — switching
+    // away should leave that entry intact (focus-only refactor).
+    client.joinedMucs.set("old@muc.test", Promise.resolve());
     $callState.set({
       phase: "active",
       peer: "old@muc.test",
@@ -1492,35 +1499,41 @@ describe("MUC group call", () => {
       selfNick: "alice",
     });
 
+    // Pre-seed the new room as already joined so performRoomSwitch's
+    // ensureJoined returns immediately and the test exercises just
+    // the teardown ordering.
+    client.joinedMucs.set("new@muc.test", Promise.resolve());
+
     await client.performRoomSwitch("new@muc.test");
 
     expect(operationOrder).toEqual([
       "presence:false:false",
       "terminate:old@muc.test:old-muc-attempt",
-      "leave:old@muc.test/alice",
     ]);
+    expect(xmpp.leave_room).not.toHaveBeenCalled();
+    expect(client.joinedMucs.has("old@muc.test")).toBe(true);
     expect($callState.get()).toEqual({ phase: "idle" });
   });
 
-  test("room switch does not join the new room after a concurrent disconnect", async () => {
+  test("room switch bails out cleanly when a concurrent disconnect races the join", async () => {
     const events = wireClientEvents();
-    let releaseLeave: (() => void) | null = null;
-    let leaveStarted: (() => void) | null = null;
-    const leaveGate = new Promise<void>((resolve) => {
-      releaseLeave = resolve;
+    let releaseJoin: (() => void) | null = null;
+    let joinStarted: (() => void) | null = null;
+    const joinGate = new Promise<void>((resolve) => {
+      releaseJoin = resolve;
     });
-    const leaveStartedWait = new Promise<void>((resolve) => {
-      leaveStarted = resolve;
+    const joinStartedWait = new Promise<void>((resolve) => {
+      joinStarted = resolve;
     });
-    let leaveCalls = 0;
-    const leave_room = mock(async () => {
-      leaveCalls += 1;
-      if (leaveCalls === 1) {
-        leaveStarted?.();
-        await leaveGate;
+    let joinCalls = 0;
+    const join_room = mock(async () => {
+      joinCalls += 1;
+      if (joinCalls === 1) {
+        joinStarted?.();
+        await joinGate;
       }
     });
-    const join_room = mock(async () => undefined);
+    const leave_room = mock(async () => undefined);
     const disconnect = mock(async () => undefined);
     const xmpp = { leave_room, join_room, disconnect };
     const client = events.client as unknown as {
@@ -1532,14 +1545,18 @@ describe("MUC group call", () => {
     Object.assign(client.xmpp, xmpp);
     client.currentRoom = "old@muc.test";
 
+    // The focus-only switch goes straight into ensureJoined for the
+    // new room — no `leave_room` for the old one. Hang the join so a
+    // concurrent disconnect can land in the middle of the switch, and
+    // verify the post-disconnect handler clears the focused room.
     const switched = client.performRoomSwitch("new@muc.test");
-    await leaveStartedWait;
+    await joinStartedWait;
     const disconnected = client.disconnect();
-    releaseLeave?.();
-    await switched;
+    releaseJoin?.();
+    await switched.catch(() => undefined);
     await disconnected;
 
-    expect(join_room).not.toHaveBeenCalled();
+    expect(leave_room).not.toHaveBeenCalled();
     expect(client.currentRoom).toBe(null);
   });
 
@@ -1595,6 +1612,14 @@ describe("MUC group call", () => {
     const attemptSid = firstMockCallArg(send_muji_session_initiate, 1);
     expect(attemptSid).not.toBe("old@muc.test");
 
+    // Pre-seed the new room as already joined so the switch's
+    // ensureJoined returns immediately and the assertion focuses on
+    // the call-teardown ordering only.
+    (client as unknown as { joinedMucs: Map<string, Promise<void>> }).joinedMucs.set(
+      "new@muc.test",
+      Promise.resolve(),
+    );
+
     await client.performRoomSwitch("new@muc.test");
 
     await expect(pending).rejects.toThrow("cancelled");
@@ -1604,8 +1629,8 @@ describe("MUC group call", () => {
       "initiate:old@muc.test:true",
       "presence:false:false:false",
       `terminate:old@muc.test:${attemptSid}`,
-      "leave:old@muc.test/alice",
     ]);
+    expect(xmpp.leave_room).not.toHaveBeenCalled();
     expect($callState.get()).toEqual({ phase: "idle" });
   });
 
@@ -1654,6 +1679,14 @@ describe("MUC group call", () => {
     expect($callState.get().phase).toBe("muc-pending");
     expect(send_muji_session_initiate).toHaveBeenCalledTimes(0);
 
+    // Pre-seed the new room so the switch's ensureJoined is an
+    // immediate no-op — the assertion below focuses on the
+    // call-cancellation ordering only.
+    (client as unknown as { joinedMucs: Map<string, Promise<void>> }).joinedMucs.set(
+      "new@muc.test",
+      Promise.resolve(),
+    );
+
     await client.performRoomSwitch("new@muc.test");
     await expect(pending).rejects.toThrow("cancelled");
 
@@ -1668,8 +1701,8 @@ describe("MUC group call", () => {
     expect(operationOrder).toEqual([
       "presence:old@muc.test/alice:false:true:false",
       "presence:old@muc.test/alice:false:false:false",
-      "leave:old@muc.test/alice",
     ]);
+    expect(xmpp.leave_room).not.toHaveBeenCalled();
     expect($callState.get()).toEqual({ phase: "idle" });
   });
 });

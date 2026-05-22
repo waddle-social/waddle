@@ -62,6 +62,77 @@ export function useActiveMucCall(): {
 }
 
 /**
+ * Per-room view of "is there an XEP-0272 Muji call happening in this
+ * specific room, regardless of whether the local user is in it?"
+ *
+ * Sourced **directly** from `$mucCallParticipants[roomJid]` so the
+ * answer survives a page refresh: as long as we have joined the MUC
+ * (which happens eagerly on session ready — see `fanOutAutoJoin`),
+ * the server's roster-replay populates the store with every existing
+ * occupant's Muji extension and this selector lights up within ~200 ms
+ * of reconnect.
+ *
+ * `useActiveMucCall()` is a different question — "which room am *I*
+ * currently calling in?" — and stays anchored to `$callState`. The
+ * `CallActivePill` previously read from there and inherited its
+ * local-call-phase keyed semantics by accident, leaving the "click to
+ * join an ongoing call" pill dark after every refresh.
+ */
+export function useRoomHasActiveCall(
+  roomJid: () => string,
+): {
+  hasActiveCall: ComputedRef<boolean>;
+  selfInCall: ComputedRef<boolean>;
+  participantCount: ComputedRef<number>;
+} {
+  const participants = useStore($mucCallParticipants);
+
+  const normalized = computed<string | null>(() => {
+    const value = normalizeMucCallRoomJid(roomJid());
+    return value || null;
+  });
+
+  const participantList = computed<ReadonlyArray<string>>(() => {
+    const key = normalized.value;
+    if (!key) return [];
+    return participants.value[key] ?? [];
+  });
+
+  const hasActiveCall = computed<boolean>(() => participantList.value.length > 0);
+
+  const selfInCall = computed<boolean>(() => {
+    const nick = connectionStore.session?.username;
+    if (!nick) return false;
+    return participantList.value.includes(nick);
+  });
+
+  const participantCount = computed<number>(() => participantList.value.length);
+
+  return { hasActiveCall, selfInCall, participantCount };
+}
+
+/**
+ * Imperative twin of `useRoomHasActiveCall` for non-component code
+ * paths. The composable wraps these reads with Vue refs; this form
+ * is what tests exercise.
+ */
+export function readRoomHasActiveCall(roomJid: string): {
+  hasActiveCall: boolean;
+  selfInCall: boolean;
+  participantCount: number;
+} {
+  const normalized = normalizeMucCallRoomJid(roomJid);
+  if (!normalized) return { hasActiveCall: false, selfInCall: false, participantCount: 0 };
+  const list = $mucCallParticipants.get()[normalized] ?? [];
+  const nick = connectionStore.session?.username ?? null;
+  return {
+    hasActiveCall: list.length > 0,
+    selfInCall: nick !== null && list.includes(nick),
+    participantCount: list.length,
+  };
+}
+
+/**
  * Imperative variant for non-component code paths (e.g. unit tests or
  * effect runners that don't have a Vue setup context). Reads the
  * underlying stores once; callers needing reactivity should use the
