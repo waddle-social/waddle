@@ -140,6 +140,49 @@ pub struct NodeConfig {
     pub send_last_published_item: SendLastPublishedItem,
 }
 
+/// Partial node configuration submitted by an XEP-0060 configure form.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct NodeConfigPatch {
+    pub access_model: Option<AccessModel>,
+    pub publish_model: Option<PublishModel>,
+    pub max_items: Option<u32>,
+    pub persist_items: Option<bool>,
+    pub deliver_payloads: Option<bool>,
+    pub notify_retract: Option<bool>,
+    pub notify_delete: Option<bool>,
+    pub send_last_published_item: Option<SendLastPublishedItem>,
+}
+
+impl NodeConfigPatch {
+    pub fn apply_to(&self, mut config: NodeConfig) -> NodeConfig {
+        if let Some(access_model) = self.access_model {
+            config.access_model = access_model;
+        }
+        if let Some(publish_model) = self.publish_model {
+            config.publish_model = publish_model;
+        }
+        if let Some(max_items) = self.max_items {
+            config.max_items = max_items;
+        }
+        if let Some(persist_items) = self.persist_items {
+            config.persist_items = persist_items;
+        }
+        if let Some(deliver_payloads) = self.deliver_payloads {
+            config.deliver_payloads = deliver_payloads;
+        }
+        if let Some(notify_retract) = self.notify_retract {
+            config.notify_retract = notify_retract;
+        }
+        if let Some(notify_delete) = self.notify_delete {
+            config.notify_delete = notify_delete;
+        }
+        if let Some(send_last_published_item) = self.send_last_published_item {
+            config.send_last_published_item = send_last_published_item;
+        }
+        config
+    }
+}
+
 impl Default for NodeConfig {
     fn default() -> Self {
         Self::pep_default()

@@ -192,52 +192,11 @@ fn parse_disco_items_result_extracts_items() {
 }
 
 #[test]
-fn root_service_items_are_not_spaces() {
-    let spaces_jid: BareJid = "spaces.example.com".parse().expect("spaces jid");
-    let items = vec![
-        DiscoItem {
-            jid: "muc.example.com".to_string(),
-            name: Some("Chatrooms".to_string()),
-            node: None,
-        },
-        DiscoItem {
-            jid: "spaces.example.com".to_string(),
-            name: Some("Spaces".to_string()),
-            node: None,
-        },
-        DiscoItem {
-            jid: "extensions.example.com".to_string(),
-            name: Some("Extensions".to_string()),
-            node: None,
-        },
-    ];
-
-    assert!(parse_spaces_from_disco_items(&spaces_jid, items).is_empty());
-}
-
-#[test]
-fn spaces_service_items_parse_node_backed_spaces() {
-    let spaces_jid: BareJid = "spaces.example.com".parse().expect("spaces jid");
-    let items = vec![DiscoItem {
-        jid: "spaces.example.com".to_string(),
-        name: Some("General".to_string()),
-        node: Some("general".to_string()),
-    }];
-
-    let spaces = parse_spaces_from_disco_items(&spaces_jid, items);
-
-    assert_eq!(spaces.len(), 1);
-    assert_eq!(spaces[0].id.as_str(), "general");
-    assert_eq!(spaces[0].service_jid, spaces_jid);
-    assert_eq!(spaces[0].name, "General");
-}
-
-#[test]
-fn space_from_disco_item_requires_spaces_metadata_type() {
+fn space_from_disco_item_requires_spaces_metadata() {
     let spaces_jid: BareJid = "spaces.example.com".parse().expect("spaces jid");
     let item = DiscoItem {
         jid: "spaces.example.com".to_string(),
-        name: Some("Ignored Node Name".to_string()),
+        name: Some("Node Name".to_string()),
         node: Some("engineering".to_string()),
     };
     let space_info = DiscoInfoResult {
@@ -271,13 +230,19 @@ fn space_from_disco_item_requires_spaces_metadata_type() {
         forms: vec![],
         ..space_info.clone()
     };
+    let missing_node_info = DiscoInfoResult {
+        node: None,
+        ..space_info.clone()
+    };
 
     let space = space_from_disco_item(&spaces_jid, item.clone(), &space_info).unwrap();
 
     assert_eq!(space.id.as_str(), "engineering");
     assert_eq!(space.name, "Engineering");
     assert_eq!(space.description.as_deref(), Some("Build systems"));
-    assert!(space_from_disco_item(&spaces_jid, item, &other_info).is_none());
+
+    assert!(space_from_disco_item(&spaces_jid, item.clone(), &other_info).is_none());
+    assert!(space_from_disco_item(&spaces_jid, item, &missing_node_info).is_none());
 }
 
 #[test]

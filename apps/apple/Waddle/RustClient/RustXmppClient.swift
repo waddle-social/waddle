@@ -3,6 +3,42 @@ import os
 
 private let logger = Logger(subsystem: "social.waddle.ios", category: "RustXmppClient")
 
+struct XMPPTopologyDiscoveryResult: Sendable, Equatable {
+    let topology: XMPPDiscoveredTopology
+    let errorDescription: String?
+
+    var failed: Bool {
+        errorDescription != nil
+    }
+}
+
+private final class DiscoveryErrorTracker: @unchecked Sendable {
+    private let lock = NSLock()
+    private var latestTopologyError: String?
+
+    func clear() {
+        lock.lock()
+        defer { lock.unlock() }
+        latestTopologyError = nil
+    }
+
+    func record(_ description: String) -> Bool {
+        guard description.hasPrefix("discover_topology failed:") else { return false }
+        lock.lock()
+        defer { lock.unlock() }
+        latestTopologyError = description
+        return true
+    }
+
+    func take() -> String? {
+        lock.lock()
+        defer { lock.unlock() }
+        let value = latestTopologyError
+        latestTopologyError = nil
+        return value
+    }
+}
+
 // MARK: - RustXmppClient
 
 /// Thin adapter that bridges `WaddleClient` (generated UniFFI binding) to a Swift-friendly API.
@@ -17,13 +53,14 @@ final class RustXmppClient: ObservableObject {
     private let continuation: AsyncStream<XMPPEvent>.Continuation
     private let waddleClient: WaddleClient
     private let eventListener: _EventListener
+    private let discoveryErrors = DiscoveryErrorTracker()
 
     init(config: WaddleConfig) {
         var continuation: AsyncStream<XMPPEvent>.Continuation!
         self.events = AsyncStream { continuation = $0 }
         self.continuation = continuation
 
-        let listener = _EventListener(continuation: continuation)
+        let listener = _EventListener(continuation: continuation, discoveryErrors: discoveryErrors)
         self.eventListener = listener
         self.waddleClient = WaddleClient(config: config, listener: listener)
         listener.owner = self
@@ -133,28 +170,32 @@ final class RustXmppClient: ObservableObject {
 
     // MARK: - Spaces topology
 
-    func discoverTopology() async -> XMPPDiscoveredTopology {
+    func discoverTopology() async -> XMPPTopologyDiscoveryResult {
+        discoveryErrors.clear()
         let topology = await waddleClient.discoverTopology()
-        return XMPPDiscoveredTopology(
-            spaces: topology.spaces.map {
-                XMPPDiscoveredSpace(
-                    id: $0.id,
-                    serviceJID: $0.serviceJid,
-                    name: $0.name,
-                    description: $0.description
-                )
-            },
-            channels: topology.channels.map {
-                XMPPDiscoveredChannel(
-                    id: $0.id,
-                    roomJID: $0.roomJid,
-                    name: $0.name,
-                    description: $0.description,
-                    channelType: $0.channelType,
-                    position: Int($0.position),
-                    spaceID: $0.spaceId
-                )
-            }
+        return XMPPTopologyDiscoveryResult(
+            topology: XMPPDiscoveredTopology(
+                spaces: topology.spaces.map {
+                    XMPPDiscoveredSpace(
+                        id: $0.id,
+                        serviceJID: $0.serviceJid,
+                        name: $0.name,
+                        description: $0.description
+                    )
+                },
+                channels: topology.channels.map {
+                    XMPPDiscoveredChannel(
+                        id: $0.id,
+                        roomJID: $0.roomJid,
+                        name: $0.name,
+                        description: $0.description,
+                        channelType: $0.channelType,
+                        position: Int($0.position),
+                        spaceID: $0.spaceId
+                    )
+                }
+            ),
+            errorDescription: discoveryErrors.take()
         )
     }
 
@@ -252,14 +293,16 @@ enum RustClientError: LocalizedError {
 /// Must be a class (reference type) to satisfy UniFFI's AnyObject requirement.
 private final class _EventListener: WaddleEventListener {
     private let continuation: AsyncStream<XMPPEvent>.Continuation
+    private let discoveryErrors: DiscoveryErrorTracker
     // Set by `RustXmppClient.init` after the listener is constructed so the
     // listener can drive the owning client's `connectionState` without a
     // retain cycle. Reads on non-main threads are safe — Swift weak references
     // are atomic; the property is only mutated on the MainActor hop below.
     weak var owner: RustXmppClient?
 
-    init(continuation: AsyncStream<XMPPEvent>.Continuation) {
+    init(continuation: AsyncStream<XMPPEvent>.Continuation, discoveryErrors: DiscoveryErrorTracker) {
         self.continuation = continuation
+        self.discoveryErrors = discoveryErrors
     }
 
     func onConnected() {
@@ -281,6 +324,9 @@ private final class _EventListener: WaddleEventListener {
 
     func onError(description: String) {
         print("[RustXmppClient] Rust FFI onError: \(description)")
+        if discoveryErrors.record(description) {
+            return
+        }
         continuation.yield(.error(description))
     }
 

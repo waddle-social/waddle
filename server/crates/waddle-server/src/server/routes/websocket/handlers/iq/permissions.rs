@@ -1,4 +1,5 @@
 use super::*;
+use crate::permissions::DeleteTuple;
 
 pub(super) fn build_xmpp_error_response(
     request_iq: &xmpp_parsers::iq::Iq,
@@ -216,10 +217,10 @@ pub(super) async fn space_affiliation_for_requester(
     None
 }
 
-pub(super) async fn write_tuple_if_absent(
+async fn write_tuple_if_absent_status(
     state: &WebSocketState,
     tuple: Tuple,
-) -> Result<(), String> {
+) -> Result<bool, String> {
     match state
         .deps
         .app_state
@@ -227,10 +228,19 @@ pub(super) async fn write_tuple_if_absent(
         .ask(WriteTuple { tuple })
         .await
     {
-        Ok(()) => Ok(()),
-        Err(kameo::error::SendError::HandlerError(PermissionError::TupleAlreadyExists)) => Ok(()),
+        Ok(()) => Ok(true),
+        Err(kameo::error::SendError::HandlerError(PermissionError::TupleAlreadyExists)) => {
+            Ok(false)
+        }
         Err(error) => Err(format!("permission actor failed writing tuple: {error}")),
     }
+}
+
+pub(super) async fn write_tuple_if_absent(
+    state: &WebSocketState,
+    tuple: Tuple,
+) -> Result<(), String> {
+    write_tuple_if_absent_status(state, tuple).await.map(|_| ())
 }
 
 pub(super) async fn spaces_node_mutation_allowed(
@@ -305,7 +315,17 @@ pub(super) async fn write_channel_parent_tuple(
     channel_id: &str,
     space_node: &str,
 ) -> Result<(), String> {
-    write_tuple_if_absent(
+    write_channel_parent_tuple_if_absent(state, channel_id, space_node)
+        .await
+        .map(|_| ())
+}
+
+pub(super) async fn write_channel_parent_tuple_if_absent(
+    state: &WebSocketState,
+    channel_id: &str,
+    space_node: &str,
+) -> Result<bool, String> {
+    write_tuple_if_absent_status(
         state,
         Tuple::new(
             Object::new(ObjectType::Channel, channel_id),
@@ -314,6 +334,31 @@ pub(super) async fn write_channel_parent_tuple(
         ),
     )
     .await
+}
+
+pub(super) async fn delete_channel_parent_tuple(
+    state: &WebSocketState,
+    channel_id: &str,
+    space_node: &str,
+) -> Result<bool, String> {
+    let tuple = Tuple::new(
+        Object::new(ObjectType::Channel, channel_id),
+        Relation::new("parent"),
+        Subject::userset(SubjectType::Space, space_node, ""),
+    );
+    match state
+        .deps
+        .app_state
+        .permission_actor
+        .ask(DeleteTuple { tuple })
+        .await
+    {
+        Ok(()) => Ok(true),
+        Err(kameo::error::SendError::HandlerError(
+            crate::permissions::PermissionError::TupleNotFound,
+        )) => Ok(false),
+        Err(error) => Err(format!("permission actor failed deleting tuple: {error}")),
+    }
 }
 
 pub(super) async fn muc_owner_authorized(

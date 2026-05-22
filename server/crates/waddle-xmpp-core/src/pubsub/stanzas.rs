@@ -5,7 +5,7 @@ use minidom::Element;
 use xmpp_parsers::iq::Iq;
 use xmpp_parsers::message::Message;
 
-use crate::pubsub::{Affiliation, NodeConfig};
+use crate::pubsub::{Affiliation, NodeConfigPatch};
 use crate::{CoreError, CoreResult};
 
 mod builders;
@@ -149,7 +149,7 @@ pub enum PubSubRequest {
     /// XEP-0060 §6.4 `<configure node='...'><x.../>` (owner-only, set form).
     ConfigureNodeSet {
         node: String,
-        config: NodeConfig,
+        config: NodeConfigPatch,
     },
     /// XEP-0060 §8.9 `<affiliations node='...'/>` get on owner namespace.
     AffiliationsGet {
@@ -185,6 +185,7 @@ pub enum PubSubError {
     NodeNotFound,
     ItemNotFound,
     Forbidden,
+    ClosedNode,
     NodeExists,
     BadRequest,
     InvalidJid,
@@ -409,8 +410,8 @@ fn required_attr(element: &Element, attr: &str) -> CoreResult<String> {
         .ok_or_else(|| CoreError::bad_request(Some(format!("Missing {attr} attribute"))))
 }
 
-fn parse_configure_form(form: &Element) -> CoreResult<NodeConfig> {
-    let mut config = NodeConfig::default();
+fn parse_configure_form(form: &Element) -> CoreResult<NodeConfigPatch> {
+    let mut config = NodeConfigPatch::default();
     for field in form.children().filter(|c| c.is("field", "jabber:x:data")) {
         let var = field.attr("var").unwrap_or("");
         let value = field
@@ -419,30 +420,30 @@ fn parse_configure_form(form: &Element) -> CoreResult<NodeConfig> {
             .unwrap_or_default();
         match var {
             "pubsub#access_model" => {
-                config.access_model = value.parse().map_err(|_| {
+                config.access_model = Some(value.parse().map_err(|_| {
                     CoreError::bad_request(Some(format!("invalid pubsub#access_model: {value}")))
-                })?;
+                })?);
             }
             "pubsub#publish_model" => {
-                config.publish_model = value.parse().map_err(|_| {
+                config.publish_model = Some(value.parse().map_err(|_| {
                     CoreError::bad_request(Some(format!("invalid pubsub#publish_model: {value}")))
-                })?;
+                })?);
             }
             "pubsub#max_items" => {
                 // XEP-0060 §16.4.3 + XEP-0490 §3 publish-options use the
                 // literal token "max" to mean "no upper bound". Accept it
                 // alongside the numeric form so MDS-style publish-options
                 // round-trip without a precondition-not-met error.
-                config.max_items = if value.eq_ignore_ascii_case("max") {
+                config.max_items = Some(if value.eq_ignore_ascii_case("max") {
                     u32::MAX
                 } else {
                     value.parse::<u32>().map_err(|_| {
                         CoreError::bad_request(Some(format!("invalid pubsub#max_items: {value}")))
                     })?
-                };
+                });
             }
             "pubsub#persist_items" => {
-                config.persist_items = match value.as_str() {
+                config.persist_items = Some(match value.as_str() {
                     "0" | "false" => false,
                     "1" | "true" => true,
                     _ => {
@@ -450,10 +451,10 @@ fn parse_configure_form(form: &Element) -> CoreResult<NodeConfig> {
                             "invalid pubsub#persist_items: {value}"
                         ))))
                     }
-                };
+                });
             }
             "pubsub#deliver_payloads" => {
-                config.deliver_payloads = match value.as_str() {
+                config.deliver_payloads = Some(match value.as_str() {
                     "0" | "false" => false,
                     "1" | "true" => true,
                     _ => {
@@ -461,10 +462,10 @@ fn parse_configure_form(form: &Element) -> CoreResult<NodeConfig> {
                             "invalid pubsub#deliver_payloads: {value}"
                         ))))
                     }
-                };
+                });
             }
             "pubsub#notify_retract" => {
-                config.notify_retract = match value.as_str() {
+                config.notify_retract = Some(match value.as_str() {
                     "0" | "false" => false,
                     "1" | "true" => true,
                     _ => {
@@ -472,10 +473,10 @@ fn parse_configure_form(form: &Element) -> CoreResult<NodeConfig> {
                             "invalid pubsub#notify_retract: {value}"
                         ))))
                     }
-                };
+                });
             }
             "pubsub#notify_delete" => {
-                config.notify_delete = match value.as_str() {
+                config.notify_delete = Some(match value.as_str() {
                     "0" | "false" => false,
                     "1" | "true" => true,
                     _ => {
@@ -483,14 +484,14 @@ fn parse_configure_form(form: &Element) -> CoreResult<NodeConfig> {
                             "invalid pubsub#notify_delete: {value}"
                         ))))
                     }
-                };
+                });
             }
             "pubsub#send_last_published_item" => {
-                config.send_last_published_item = value.parse().map_err(|_| {
+                config.send_last_published_item = Some(value.parse().map_err(|_| {
                     CoreError::bad_request(Some(format!(
                         "invalid pubsub#send_last_published_item: {value}"
                     )))
-                })?;
+                })?);
             }
             _ => {} // Unknown fields ignored per XEP-0060.
         }

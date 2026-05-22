@@ -87,6 +87,7 @@ pub fn build_pubsub_error(original_iq: &Iq, error: PubSubError) -> Iq {
             (ErrorType::Cancel, DefinedCondition::ItemNotFound)
         }
         PubSubError::Forbidden => (ErrorType::Auth, DefinedCondition::Forbidden),
+        PubSubError::ClosedNode => (ErrorType::Cancel, DefinedCondition::NotAllowed),
         PubSubError::NodeExists | PubSubError::PreconditionNotMet => {
             (ErrorType::Cancel, DefinedCondition::Conflict)
         }
@@ -112,6 +113,8 @@ pub fn build_pubsub_error(original_iq: &Iq, error: PubSubError) -> Iq {
                 )
                 .build(),
         );
+    } else if let PubSubError::ClosedNode = error {
+        stanza_error.other = Some(Element::builder("closed-node", NS_PUBSUB_ERRORS).build());
     }
 
     Iq::Error {

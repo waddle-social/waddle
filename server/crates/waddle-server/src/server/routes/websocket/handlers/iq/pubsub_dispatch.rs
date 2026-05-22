@@ -266,6 +266,7 @@ pub(super) async fn handle_pubsub_iq(
                         iq,
                         state,
                         spaces_domain,
+                        &user_jid,
                         &node,
                         max_items,
                         &item_ids,
@@ -315,17 +316,36 @@ pub(super) async fn handle_pubsub_iq(
                 {
                     Ok(true) => {}
                     Ok(false) => {
-                        let node_exists = state
+                        let node_meta = state
                             .deps
                             .protocol
                             .pubsub_storage
                             .get_node(&target_jid, &node)
                             .await
                             .ok()
-                            .flatten()
-                            .is_some();
-                        let error = if node_exists {
-                            build_pubsub_error(iq, PubSubError::Forbidden)
+                            .flatten();
+                        let is_outcast = crate::pubsub_authz::effective_affiliation(
+                            &state.deps.protocol.pubsub_storage,
+                            &target_jid,
+                            &node,
+                            &user_jid,
+                            is_pep,
+                        )
+                        .await
+                        .is_ok_and(|affiliation| affiliation.is_outcast());
+                        let error = if let Some(node_meta) = node_meta {
+                            if is_outcast {
+                                build_pubsub_error(iq, PubSubError::Forbidden)
+                            } else if !is_pep
+                                && matches!(
+                                    node_meta.config.access_model,
+                                    waddle_xmpp::pubsub::AccessModel::Whitelist
+                                )
+                            {
+                                build_pubsub_error(iq, PubSubError::ClosedNode)
+                            } else {
+                                build_pubsub_error(iq, PubSubError::Forbidden)
+                            }
                         } else {
                             build_pubsub_error(iq, PubSubError::NodeNotFound)
                         };

@@ -92,25 +92,6 @@ pub fn parse_disco_items_result(iq: &Element) -> Option<Vec<DiscoItem>> {
     Some(items)
 }
 
-pub fn parse_spaces_from_disco_items(
-    spaces_jid: &BareJid,
-    items: Vec<DiscoItem>,
-) -> Vec<DiscoveredSpace> {
-    items
-        .into_iter()
-        .filter(|item| item.jid == spaces_jid.to_string())
-        .filter_map(|item| {
-            let id = SpaceNode::new(item.node?)?;
-            Some(DiscoveredSpace {
-                name: item.name.unwrap_or_else(|| id.as_str().to_string()),
-                id,
-                service_jid: spaces_jid.clone(),
-                description: None,
-            })
-        })
-        .collect()
-}
-
 /// Resolve the MUC and Spaces service JIDs from a server's
 /// `disco#items` items list, hydrated with each item's `disco#info`
 /// where available. The result preserves the supplied fallbacks for
@@ -172,12 +153,16 @@ pub fn space_from_disco_item(
     item: DiscoItem,
     info: &DiscoInfoResult,
 ) -> Option<DiscoveredSpace> {
-    if item.jid != spaces_jid.to_string()
-        || !info.has_form_value(PUBSUB_METADATA_FORM_TYPE, "pubsub#type", SPACES_NS)
-    {
+    if item.jid != spaces_jid.to_string() {
         return None;
     }
     let id = SpaceNode::new(item.node?)?;
+    if info.node.as_deref() != Some(id.as_str()) {
+        return None;
+    }
+    if !info.has_form_value(PUBSUB_METADATA_FORM_TYPE, "pubsub#type", SPACES_NS) {
+        return None;
+    }
     let name = info
         .form_value(PUBSUB_METADATA_FORM_TYPE, "pubsub#title")
         .filter(|name| !name.trim().is_empty())

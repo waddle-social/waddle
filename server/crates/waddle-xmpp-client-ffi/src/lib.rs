@@ -343,11 +343,13 @@ impl WaddleClient {
         // space. So a fresh waddle deployment with no XEP-0503 space
         // bookmarks still produces a usable channel list.
         let server_domain = jid_domain(&self.config.jid);
+
         match handle.discover_topology(server_domain).await {
             Ok(topology) => topology_to_ffi(topology),
             Err(e) => {
-                self.listener
-                    .on_error(format!("discover_topology failed: {e}"));
+                self.listener.on_error(format!(
+                    "discover_topology failed: server_domain={server_domain} error={e}"
+                ));
                 empty_topology()
             }
         }

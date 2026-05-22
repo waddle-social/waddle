@@ -317,7 +317,10 @@ pub(super) async fn handle_pubsub_admin_request(
             }
         }
 
-        PubSubRequest::ConfigureNodeSet { node, config } => {
+        PubSubRequest::ConfigureNodeSet {
+            node,
+            config: config_patch,
+        } => {
             let is_pep = is_pep_self_or_to(iq, target_jid, user_jid);
             if !crate::pubsub_authz::can_administer(
                 &state.deps.protocol.pubsub_storage,
@@ -331,6 +334,46 @@ pub(super) async fn handle_pubsub_admin_request(
             {
                 return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::Forbidden))];
             }
+            let is_spaces_service = matches!(
+                spaces_service_bare_jid(spaces_domain),
+                Ok(spaces_jid) if target_jid == &spaces_jid
+            );
+            let existing_node = match state
+                .deps
+                .protocol
+                .pubsub_storage
+                .get_node(target_jid, &node)
+                .await
+            {
+                Ok(Some(node)) => node,
+                Ok(None) => {
+                    return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::NodeNotFound))];
+                }
+                Err(error) => {
+                    warn!(node = %node, error = %error, "Failed to load PubSub node before configure");
+                    return vec![iq_to_xml(build_pubsub_error(
+                        iq,
+                        PubSubError::InternalServerError,
+                    ))];
+                }
+            };
+            let config = config_patch.apply_to(existing_node.config);
+            let config = if is_spaces_service {
+                let access_model = config.access_model;
+                match normalize_spaces_node_config(config, config_patch.max_items.is_some()) {
+                    Some(config) => config,
+                    None => {
+                        warn!(
+                            node = %node,
+                            access_model = %access_model,
+                            "Rejected Spaces node configuration with unsupported access model"
+                        );
+                        return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::BadRequest))];
+                    }
+                }
+            } else {
+                config
+            };
             match state
                 .deps
                 .protocol
@@ -409,4 +452,31 @@ pub(super) async fn handle_pubsub_admin_request(
         | PubSubRequest::Items { .. }
         | PubSubRequest::Retract { .. } => Vec::new(),
     }
+}
+
+fn normalize_spaces_node_config(
+    mut config: waddle_xmpp::pubsub::NodeConfig,
+    preserve_submitted_max_items: bool,
+) -> Option<waddle_xmpp::pubsub::NodeConfig> {
+    // Waddle currently supports XEP-0503 public Spaces as `open` and private
+    // Spaces as `whitelist`. Reject `authorize` until the XEP-0060
+    // owner-approval subscription flow exists, and keep the required Spaces
+    // durability/notification invariants regardless of generic PubSub form
+    // fields submitted by a client.
+    match config.access_model {
+        waddle_xmpp::pubsub::AccessModel::Open | waddle_xmpp::pubsub::AccessModel::Whitelist => {}
+        waddle_xmpp::pubsub::AccessModel::Presence
+        | waddle_xmpp::pubsub::AccessModel::Roster
+        | waddle_xmpp::pubsub::AccessModel::Authorize => return None,
+    }
+    if !preserve_submitted_max_items {
+        config.max_items = u32::MAX;
+    }
+    config.publish_model = waddle_xmpp::pubsub::PublishModel::Publishers;
+    config.persist_items = true;
+    config.deliver_payloads = true;
+    config.notify_retract = true;
+    config.notify_delete = true;
+    config.send_last_published_item = waddle_xmpp::pubsub::SendLastPublishedItem::OnSub;
+    Some(config)
 }

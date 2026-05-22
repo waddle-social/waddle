@@ -163,6 +163,10 @@ impl DiscoveryExt for ClientHandle {
     }
 
     async fn discover_spaces(&self, spaces_jid: &BareJid) -> ClientResult<Vec<DiscoveredSpace>> {
+        // XEP-0503 lists spaces as node-backed disco#items on the Spaces
+        // service, with per-node PubSub metadata declaring
+        // `pubsub#type=urn:xmpp:spaces:0`. Skip entries whose node metadata
+        // cannot be verified as an XEP-0503 Space.
         let items = self.discover_items(&spaces_jid.to_string(), None).await?;
         let mut spaces = Vec::new();
         for item in items {
