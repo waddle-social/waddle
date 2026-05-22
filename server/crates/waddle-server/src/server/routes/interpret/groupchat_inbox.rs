@@ -1987,18 +1987,20 @@ mod tests {
 
         // Every unadvertised group URI from XEP-0513 §"Multi-User
         // Chats Permissions" — the four §303 form fields Waddle
-        // chooses not to expose yet — plus one sub-namespace from
-        // §"Mentions via Roles and Affiliations" so we also pin that
-        // sub-URIs under `#associations` (e.g. `#moderators`) are
-        // treated identically. A future relaxation of `is_channel()`
-        // to accept any `urn:xmpp:mentions:0#…` prefix would trip
-        // every case.
+        // chooses not to expose yet — plus one role sub-namespace
+        // (`#moderators`) and one affiliation sub-namespace
+        // (`#owner`) from §"Mentions via Roles and Affiliations"
+        // (xep-0513.xml:142-178) so we cover both sub-categories
+        // under the `#associations` umbrella. A future relaxation
+        // of `is_channel()` to accept any `urn:xmpp:mentions:0#…`
+        // prefix would trip every case.
         let unsupported_uris = [
             "urn:xmpp:mentions:0#space",
             "urn:xmpp:mentions:0#server",
             "urn:xmpp:mentions:0#associations",
             "urn:xmpp:mentions:0#hats",
             "urn:xmpp:mentions:0#moderators",
+            "urn:xmpp:mentions:0#owner",
         ];
 
         for group_uri in unsupported_uris {
