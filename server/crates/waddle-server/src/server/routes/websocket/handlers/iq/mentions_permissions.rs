@@ -239,6 +239,7 @@ fn mentions_permissions_error(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use waddle_xmpp::ns::STANZAS;
 
     fn iq_get(payload: Element, to: Option<&str>) -> Iq {
         Iq::Get {
@@ -395,7 +396,7 @@ mod tests {
             .children()
             .find(|c| c.name() == "error")
             .expect("error element present");
-        assert!(error.has_child("forbidden", "urn:ietf:params:xml:ns:xmpp-stanzas",));
+        assert!(error.has_child("forbidden", STANZAS));
         // §295 MUSTs `type='auth'` for the `<forbidden/>` condition
         // (xeps/xep-0513.xml line 482).
         assert_eq!(error.attr("type"), Some("auth"));
@@ -430,7 +431,7 @@ mod tests {
             .children()
             .find(|c| c.name() == "error")
             .expect("error element present");
-        assert!(error.has_child("not-authorized", "urn:ietf:params:xml:ns:xmpp-stanzas"));
+        assert!(error.has_child("not-authorized", STANZAS));
         // RFC 6120 §8.3.3.13: not-authorized travels with type='auth'.
         assert_eq!(error.attr("type"), Some("auth"));
     }
