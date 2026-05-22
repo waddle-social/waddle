@@ -823,13 +823,18 @@ fn groupchat_mentions_carry_owner_noping(
 ) -> bool {
     mentions.iter().any(|mention| {
         // Mirror the mixed-attribute guard in `groupchat_mentions_owner`:
-        // a `<mention/>` that also carries `mentions='#channel'` is
-        // channel-scope, not a personal mention naming `owner` — the
-        // `<noping/>` on it suppresses CHANNEL pushes (handled by
-        // `current_room_channel_mention`), not the owner's personal
-        // notification.
+        // ANY `<mention/>` carrying `mentions='…'` is group-scope (the
+        // presence of `mentions=` declares group intent), not a
+        // personal mention naming `owner`. The `<noping/>` on a
+        // group-scope mention suppresses GROUP pushes (handled by
+        // `current_room_channel_mention` for `#channel`, or by
+        // falling through to NotifyAll for unsupported groups), not
+        // the owner's personal notification. Generalised from the
+        // slice 3a precedent (`!is_channel()` was too narrow —
+        // unsupported groups like `#space` slipped through; review
+        // on PR #756).
         mention.noping
-            && !mention.is_channel()
+            && mention.mentions.is_none()
             && (mention
                 .jid
                 .as_ref()
@@ -848,19 +853,21 @@ fn groupchat_mentions_owner(
     owner_occupant_id: &str,
 ) -> bool {
     let xep0513 = mentions.iter().any(|mention| {
-        // XEP-0513 §"Multi-User Chats Permissions" §304 hardening
-        // (adversarial review on PR #738): a `<mention/>` that ALSO
-        // carries `mentions='urn:xmpp:mentions:0#channel'` is a
-        // channel-scope payload, not a personal mention — even when
-        // it also carries `jid=`/`occupantid=` attributes. Without
-        // the `!mention.is_channel()` guard, a non-permitted sender
-        // could bypass the channel-broadcast gate by adding a
-        // matching `occupantid=`/`jid=` to a channel mention: the
-        // classifier would pick `PersonalMention` first (per-recipient
-        // match) and never run the channel-scope downgrade. Treat
-        // mixed-attribute mentions as channel-scope only.
+        // XEP-0513 §"Multi-User Chats Permissions" hardening
+        // (adversarial review on PR #738 + extension on PR #756):
+        // ANY `<mention/>` carrying `mentions='…'` is group-scope —
+        // the presence of `mentions=` declares group intent — and
+        // MUST NOT be classified as a personal mention even when it
+        // also carries `jid=`/`occupantid=` attributes. The original
+        // slice 3a guard `!is_channel()` plugged the `#channel`
+        // permission-bypass attack but missed unsupported groups
+        // (`#space`, `#server`, etc.): a `<mention occupantid='X'
+        // mentions='#space'/>` would slip through as PersonalMention
+        // and piggyback on the personal pipeline. Tightening to
+        // `mention.mentions.is_none()` covers EVERY group URI by
+        // the wire-shape attribute, not by a hardcoded URI value.
         !mention.noping
-            && !mention.is_channel()
+            && mention.mentions.is_none()
             && (mention
                 .jid
                 .as_ref()
@@ -2072,6 +2079,69 @@ mod tests {
                 !mentions_overflowed,
                 "single `<mention mentions='{group_uri}'/>` MUST NOT \
                  trip the §304 overflow bit"
+            );
+        }
+    }
+
+    /// Mirror of slice 3a's
+    /// `xep0513_mixed_attribute_mention_does_not_bypass_channel_gate`
+    /// (line 1384) on the **unsupported-group axis**. Slice 3a closed
+    /// the attack where `<mention occupantid='X' mentions='#channel'/>`
+    /// would bypass the channel-permission gate by being classified as
+    /// `PersonalMention`. The same shape with an unsupported group
+    /// URI (e.g. `#space`) MUST also be group-scope, not personal:
+    /// a `<mention mentions='X'/>` with ANY group URI declares
+    /// group-scope intent, and the `occupantid=`/`jid=` attributes
+    /// are decoration. Treating them as personal lets clients dodge
+    /// Waddle's "unsupported groups don't elevate" policy by
+    /// piggybacking on the personal-mention pipeline (cross-XEP +
+    /// §303-alignment review on PR #756).
+    #[test]
+    fn xep0513_mixed_attribute_unsupported_group_does_not_elevate_to_personal() {
+        use crate::notification_outbox::NotificationClass;
+
+        let owner = bare("charlie@example.com");
+        let room = bare("team@muc.example.com");
+        let occupant_id = "room-stable-charlie";
+
+        // Every unadvertised group URI from the previous test —
+        // crafted with a matching `occupantid=` to attempt the
+        // personal-mention bypass.
+        let unsupported_uris = [
+            "urn:xmpp:mentions:0#space",
+            "urn:xmpp:mentions:0#server",
+            "urn:xmpp:mentions:0#associations",
+            "urn:xmpp:mentions:0#hats",
+            "urn:xmpp:mentions:0#moderators",
+            "urn:xmpp:mentions:0#owner",
+        ];
+
+        for group_uri in unsupported_uris {
+            let mut mixed = waddle_xmpp::xep::ExplicitMention::occupant_id(occupant_id);
+            mixed.mentions = Some(group_uri.to_string());
+            let msg = message_with_mention(mixed);
+            let GroupchatNotificationClassOutcome {
+                decision: GroupchatNotificationClassDecision::Deliver(class),
+                mentions_overflowed: _,
+            } = groupchat_notification_class(
+                &parsed_mentions(&msg),
+                &extract_references(&msg),
+                &owner,
+                &room,
+                occupant_id,
+                /* is_live_occupant */ true,
+                /* sender_can_broadcast_channel_mention */ true,
+            );
+            assert_eq!(
+                class,
+                NotificationClass::NotifyAll,
+                "`<mention occupantid='{occupant_id}' \
+                 mentions='{group_uri}'/>` MUST NOT classify as \
+                 PersonalMention — the presence of `mentions=` \
+                 declares group-scope (per slice 3a precedent for \
+                 `#channel`); unsupported groups fall through to \
+                 NotifyAll instead of piggybacking on the personal \
+                 pipeline"
             );
         }
     }
