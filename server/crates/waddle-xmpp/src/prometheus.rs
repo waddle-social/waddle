@@ -100,16 +100,21 @@ static PUSH_CANDIDATE_CREATED: AtomicU64 = AtomicU64::new(0);
 
 // `waddle_push_candidate_coalesced_total`: every `Duplicate`
 // outcome from `notification_outbox::insert_candidate`. The
-// PRIMARY KEY on the six-column tuple
-// `(recipient_bare_jid, conversation_jid, thread_id,
-// stanza_id_by, stanza_id, class)` returns Duplicate when the
-// same candidate row already exists — burst replays, retried T0
-// emission, or genuine duplicate stanzas coalesce here. The
-// `stanza_id_by` column is the XEP-0359 `by=` (the JID of the
-// archive that minted the id), included so a stanza-id from
-// archive A doesn't collide with a same-string id from archive B.
-// A sudden spike often signals a retry loop upstream rather than
-// a real burst.
+// `notification_candidates` table carries TWO intentional
+// unique constraints; both bucket here:
+//
+// - PRIMARY KEY on the six-column tuple
+//   `(recipient_bare_jid, conversation_jid, thread_id,
+//    stanza_id_by, stanza_id, class)` — exact-identity dedup.
+// - `idx_notification_candidates_identity` UNIQUE index on
+//   `(recipient_bare_jid, conversation_jid, thread_id,
+//    stanza_id, class)` — cross-archive dedup for the same
+//   logical stanza minted under different `by=` JIDs (XEP-0359).
+//
+// Either constraint firing returns Duplicate. Burst replays,
+// retried T0 emission, cross-archive duplicates, or genuine
+// duplicate stanzas coalesce here. A sudden spike often signals
+// a retry loop upstream rather than a real burst.
 static PUSH_CANDIDATE_COALESCED: AtomicU64 = AtomicU64::new(0);
 
 // `waddle_push_outbox_published_total`: every successful

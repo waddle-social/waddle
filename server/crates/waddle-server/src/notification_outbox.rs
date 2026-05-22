@@ -1906,7 +1906,7 @@ impl NotificationOutboxStore {
                     no_store,
                     no_permanent_store
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, ?, ?, ?)
-                ON CONFLICT (recipient_bare_jid, conversation_jid, thread_id, stanza_id_by, stanza_id, class) DO NOTHING
+                ON CONFLICT DO NOTHING
                 "#,
                 crate::db_params![
                     candidate.recipient_bare_jid.to_string(),
@@ -1926,9 +1926,26 @@ impl NotificationOutboxStore {
             )
             .await?;
         if inserted == 0 {
-            // PRIMARY KEY collision: same (recipient, conversation,
-            // thread, stanza_id_by, stanza_id, class) tuple already
-            // exists. Coalesce-by-key counter — see #531.
+            // UNIQUE-constraint collision. `notification_candidates`
+            // carries TWO intentional unique constraints, both of
+            // which the `ON CONFLICT DO NOTHING` (no target)
+            // suppresses:
+            //
+            // 1. The PRIMARY KEY on `(recipient_bare_jid,
+            //    conversation_jid, thread_id, stanza_id_by,
+            //    stanza_id, class)` — exact-identity dedup.
+            // 2. The `idx_notification_candidates_identity` UNIQUE
+            //    index on `(recipient_bare_jid, conversation_jid,
+            //    thread_id, stanza_id, class)` — cross-archive
+            //    dedup for the same logical stanza minted under
+            //    different `by=` JIDs (XEP-0359).
+            //
+            // Both are intended Duplicate triggers, so the
+            // counter increments on either path. If a third
+            // unique constraint is ever added with different
+            // dedup semantics, the SQL needs an explicit chained
+            // `ON CONFLICT (cols) DO NOTHING` for each path
+            // (Greptile review on PR #758).
             waddle_xmpp::prometheus::increment_push_candidate_coalesced();
             return Ok(NotificationCandidateInsertOutcome::Duplicate);
         }
