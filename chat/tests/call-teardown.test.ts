@@ -1548,7 +1548,9 @@ describe("MUC group call", () => {
     // The focus-only switch goes straight into ensureJoined for the
     // new room — no `leave_room` for the old one. Hang the join so a
     // concurrent disconnect can land in the middle of the switch, and
-    // verify the post-disconnect handler clears the focused room.
+    // verify the post-disconnect handler clears the focused room and
+    // does NOT touch the old room (which the focus-only refactor
+    // keeps as a no-op).
     const switched = client.performRoomSwitch("new@muc.test");
     await joinStartedWait;
     const disconnected = client.disconnect();
@@ -1556,7 +1558,12 @@ describe("MUC group call", () => {
     await switched.catch(() => undefined);
     await disconnected;
 
-    expect(leave_room).not.toHaveBeenCalled();
+    // Polite-logout per XEP-0045 §7.14: leave_room fires for the
+    // rooms we had joined, but never for the room we were switching
+    // *away* from (the old room was never added to joinedMucs in
+    // this test setup, so it cannot leak through).
+    const leaveTargets = leave_room.mock.calls.map((call) => call[0] as string);
+    expect(leaveTargets).not.toContain("old@muc.test");
     expect(client.currentRoom).toBe(null);
   });
 

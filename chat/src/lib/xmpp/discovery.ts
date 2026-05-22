@@ -144,7 +144,6 @@ interface BookmarkItem {
   jid?: string;
   name?: string;
   autojoin?: boolean;
-  nick?: string;
 }
 
 async function sendPubsubItems(xmpp: HybridClient, to: string, node: string): Promise<BookmarkItem[]> {
@@ -164,16 +163,10 @@ async function sendPubsubItems(xmpp: HybridClient, to: string, node: string): Pr
       const conference =
         item.getElementsByTagNameNS(NS_BOOKMARKS_1, "conference")[0]
         ?? item.getElementsByTagName("conference")[0];
-      const nickEl = conference
-        ? (conference.getElementsByTagNameNS(NS_BOOKMARKS_1, "nick")[0]
-          ?? conference.getElementsByTagName("nick")[0])
-        : null;
-      const nick = nickEl?.textContent?.trim();
       return {
         jid: item.getAttribute("id") ?? conference?.getAttribute("jid") ?? undefined,
         name: conference?.getAttribute("name") ?? undefined,
         autojoin: parseAutojoinAttr(conference?.getAttribute("autojoin")),
-        ...(nick ? { nick } : {}),
       };
     });
 }
@@ -266,7 +259,6 @@ export async function discoverChannels(xmpp: HybridClient, jid: string): Promise
 interface RoomBookmarkInfo {
   spaceId: string;
   autojoin?: boolean;
-  nick?: string;
 }
 
 export async function discoverTopology(xmpp: HybridClient, jid: string): Promise<DiscoveredTopology> {
@@ -299,7 +291,6 @@ export async function discoverTopology(xmpp: HybridClient, jid: string): Promise
           roomBookmarkInfo.set(barePeerJid(bookmark.jid), {
             spaceId,
             ...(bookmark.autojoin !== undefined ? { autojoin: bookmark.autojoin } : {}),
-            ...(bookmark.nick ? { nick: bookmark.nick } : {}),
           });
         }
       } catch {}
@@ -311,19 +302,28 @@ export async function discoverTopology(xmpp: HybridClient, jid: string): Promise
   const hydrated = await Promise.all(mucRooms.map((room, position) => hydrateRoomInfo(xmpp, channelFromRoom({ jid: room.jid ?? "", name: room.name }, position))));
   rooms = hydrated.map((room, position) => {
     const bookmark = room.jid ? roomBookmarkInfo.get(barePeerJid(room.jid)) : undefined;
+    // Two distinct sources of the auto-join bit, kept honest separately:
+    //
+    //   - A Space-bookmarked room: surface its `<conference autojoin='…'>`
+    //     verbatim. XEP-0402 §3 says omitting `autojoin` means `false`;
+    //     we honor that strictly. Waddle's own publisher in
+    //     `protocol-helpers.ts:publishMucToSpace` always sets the
+    //     attribute explicitly, so the spec default rarely fires in
+    //     practice, but third-party clients that publish without it
+    //     get the standard interpretation.
+    //
+    //   - An orphan room surfaced via MUC service items but absent
+    //     from every Space PubSub node: waddle's UX convention is
+    //     "channels visible in the sidebar are joined". We default
+    //     `autojoin: true` here, which is a *waddle* policy, not a
+    //     reinterpretation of XEP-0402 (the bit isn't sourced from
+    //     `urn:xmpp:bookmarks:1` at all in this branch).
+    const autojoin = bookmark ? (bookmark.autojoin ?? false) : true;
     return {
       ...room,
       position,
       ...(bookmark ? { spaceId: bookmark.spaceId, standalone: false } : {}),
-      // XEP-0402 §3 omitted `autojoin` defaults to false per spec, but
-      // waddle's bookmark publisher always sets it explicitly, AND the
-      // server may surface a channel via MUC service items even when no
-      // Space bookmark exists yet (orphan rooms before a Space publish).
-      // For waddle's UX — "every channel in your sidebar should show its
-      // call indicator after refresh" — we default to true here. Set the
-      // bookmark's `autojoin='false'` to override.
-      autojoin: bookmark?.autojoin ?? true,
-      ...(bookmark?.nick ? { bookmarkNick: bookmark.nick } : {}),
+      autojoin,
     };
   });
 

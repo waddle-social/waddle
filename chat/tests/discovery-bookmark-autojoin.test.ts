@@ -2,21 +2,20 @@ import { describe, expect, test } from "bun:test";
 import { discoverTopology } from "../src/lib/xmpp/discovery";
 
 /**
- * Discovery extracts the XEP-0402 `autojoin` attribute (and optional
- * `<nick/>`) from `<conference xmlns='urn:xmpp:bookmarks:1'>` items
- * published into a Space's PubSub node. The auto-join fan-out keyed
- * off the resulting topology is what makes XEP-0272 Muji presence —
- * and therefore the per-room call indicator — visible across the
- * whole sidebar after a refresh.
+ * Discovery extracts the XEP-0402 `autojoin` attribute from
+ * `<conference xmlns='urn:xmpp:bookmarks:1'>` items published into a
+ * Space's PubSub node. The auto-join fan-out keyed off the resulting
+ * topology is what makes XEP-0272 Muji presence — and therefore the
+ * per-room call indicator — visible across the whole sidebar after a
+ * refresh.
  *
  * Coverage:
- * - `autojoin='true'` → `room.autojoin === true`
- * - `autojoin='false'` → `room.autojoin === false`
- * - Attribute absent → defaults to `true` (waddle's de-facto: a room
- *   surfaced via MUC service items should be auto-joined unless the
- *   bookmark explicitly opts out).
- * - A room with no Space bookmark at all → defaults to `true`.
- * - `<nick/>` child → surfaced as `room.bookmarkNick`.
+ * - `autojoin='true'` → `room.autojoin === true`.
+ * - `autojoin='false'` → `room.autojoin === false`.
+ * - Bookmarked room with the attribute omitted → defaults to `false`
+ *   per XEP-0402 §3 (canonical spec default).
+ * - Orphan room not bookmarked in any Space → defaults to `true`
+ *   (waddle UX convention: channels visible in the sidebar are joined).
  */
 describe("discoverTopology autojoin parsing", () => {
   test("autojoin=true bookmark surfaces room.autojoin=true", async () => {
@@ -49,21 +48,7 @@ describe("discoverTopology autojoin parsing", () => {
     });
   });
 
-  test("autojoin attribute absent defaults to true", async () => {
-    await withFakeDomParser(async () => {
-      const topology = await discoverTopology(
-        topologyClient({
-          spaceBookmarks: { "space-engineering": [{ jid: "shared@muc.example.test", name: "Shared" }] },
-          mucRooms: [{ jid: "shared@muc.example.test", name: "Shared" }],
-        }),
-        "alice@example.test",
-      );
-
-      expect(topology.rooms.find((r) => r.jid === "shared@muc.example.test")?.autojoin).toBe(true);
-    });
-  });
-
-  test("room with no Space bookmark at all still defaults to autojoin=true", async () => {
+  test("orphan room (not bookmarked anywhere) defaults to autojoin=true — waddle convention", async () => {
     await withFakeDomParser(async () => {
       const topology = await discoverTopology(
         topologyClient({
@@ -79,22 +64,28 @@ describe("discoverTopology autojoin parsing", () => {
     });
   });
 
-  test("bookmark <nick/> child propagates as room.bookmarkNick", async () => {
+  test("XEP-0402 §3 conformance: bookmarked room with omitted autojoin defaults to false (spec)", async () => {
+    // Spec: "If this attribute is omitted from a bookmark, it MUST
+    // be interpreted as 'false'." Waddle's own publisher always sets
+    // it, but the read path must honor the canonical default for
+    // foreign clients that publish without it. The "default true"
+    // policy applies ONLY to orphan rooms not bookmarked in any
+    // Space — exercised in the next test.
     await withFakeDomParser(async () => {
       const topology = await discoverTopology(
         topologyClient({
-          spaceBookmarks: { "space-engineering": [{ jid: "nicked@muc.example.test", name: "Nicked", autojoin: true, nick: "alias42" }] },
-          mucRooms: [{ jid: "nicked@muc.example.test", name: "Nicked" }],
+          spaceBookmarks: { "space-engineering": [{ jid: "shared-spec@muc.example.test", name: "Shared" }] },
+          mucRooms: [{ jid: "shared-spec@muc.example.test", name: "Shared" }],
         }),
         "alice@example.test",
       );
 
-      expect(topology.rooms.find((r) => r.jid === "nicked@muc.example.test")?.bookmarkNick).toBe("alias42");
+      expect(topology.rooms.find((r) => r.jid === "shared-spec@muc.example.test")?.autojoin).toBe(false);
     });
   });
 });
 
-type BookmarkItem = { jid?: string; name?: string; autojoin?: boolean; nick?: string };
+type BookmarkItem = { jid?: string; name?: string; autojoin?: boolean };
 
 type TopologyClientOptions = {
   spaceBookmarks: Record<string, BookmarkItem[]>;
@@ -172,12 +163,11 @@ function discoInfoXml(info: { features?: string[]; identities?: Array<{ category
   }</query></iq>`;
 }
 
-function pubsubItemsXml(items: Array<{ id?: string; jid?: string; name?: string; autojoin?: boolean; nick?: string }>): string {
+function pubsubItemsXml(items: Array<{ id?: string; jid?: string; name?: string; autojoin?: boolean }>): string {
   return `<iq type="result"><pubsub xmlns="http://jabber.org/protocol/pubsub"><items>${items.map((item) => {
     if (!(item.jid || item.name)) return `<item${item.id ? ` id="${item.id}"` : ""}/>`;
     const autojoinAttr = item.autojoin === undefined ? "" : ` autojoin="${item.autojoin ? "true" : "false"}"`;
-    const conferenceChildren = item.nick ? `<nick xmlns="urn:xmpp:bookmarks:1">${item.nick}</nick>` : "";
-    const conferenceTag = `<conference xmlns="urn:xmpp:bookmarks:1"${item.jid ? ` jid="${item.jid}"` : ""}${item.name ? ` name="${item.name}"` : ""}${autojoinAttr}${conferenceChildren ? `>${conferenceChildren}</conference>` : "/>"}`;
+    const conferenceTag = `<conference xmlns="urn:xmpp:bookmarks:1"${item.jid ? ` jid="${item.jid}"` : ""}${item.name ? ` name="${item.name}"` : ""}${autojoinAttr}/>`;
     return `<item${item.id ? ` id="${item.id}"` : ""}>${conferenceTag}</item>`;
   }).join("")}</items></pubsub></iq>`;
 }

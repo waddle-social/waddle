@@ -390,6 +390,17 @@ export class BrowserXmppClient {
    * retries from scratch.
    */
   private readonly joinedMucs = new Map<string, Promise<void>>();
+  /**
+   * Snapshot of the room JIDs we want auto-joined on every session
+   * start. Populated from the topology by `discoverTopology` and
+   * replayed by `handleSessionReady` after a fresh reconnect — without
+   * the replay, only the focused channel comes back joined and the
+   * sibling-channel call indicators stay dark after every drop.
+   * SM resumes don't need this (the server-side MUC occupancy is
+   * preserved across the resume window), but the same idempotent
+   * `ensureJoined` makes the extra fan-out cheap.
+   */
+  private autoJoinRoomJids: ReadonlyArray<string> = [];
   private uploadServiceJid: string | null = null;
   private discoveredRoomJids = new Map<string, string>();
   private reconnectStartedAt: number | null = null;
@@ -678,7 +689,7 @@ export class BrowserXmppClient {
     this.clearReconnectTimer();
     this.clearResumeState();
     const xmpp = this.xmpp;
-    const roomBefore = this.currentRoom;
+    const previouslyJoinedRooms = [...this.joinedMucs.keys()];
     this.stopSelfPing();
     this.connected = false;
     this.connectPromise = null;
@@ -699,12 +710,18 @@ export class BrowserXmppClient {
     // `$callState`.
     await tearDownActiveCall(xmpp as unknown as CallWireSender | null, "success");
     this.xmpp = null;
-    // The auto-join model keeps the user joined to every channel in
-    // their spaces, so emitting unavailable for any single room here
-    // would be misleading. Rely on the server's WebSocket-close
-    // cleanup (cleanup_muc_presence) to broadcast unavailable for
-    // every joined MUC — authoritative for the multi-room case.
-    void roomBefore;
+    // Polite logout per XEP-0045 §7.14: emit unavailable for every
+    // joined MUC so peers see "alice signed out" via the explicit
+    // presence rather than "alice's session dropped" via the
+    // server's WebSocket-close cleanup (which the server stamps with
+    // XEP-0045 §17.3 status code 333 — technical disconnect).
+    // Best-effort and serial: a stuck leave on one room must not
+    // strand the others.
+    if (xmpp?.leave_room) {
+      for (const roomJid of previouslyJoinedRooms) {
+        try { await xmpp.leave_room(roomJid, this.session.username); } catch {}
+      }
+    }
     await xmpp?.disconnect?.();
     this.emitStatus({ state: "offline", detail: "Disconnected" });
   }
@@ -1591,6 +1608,11 @@ export class BrowserXmppClient {
     const autoJoinRoomJids: string[] = topology.rooms
       .filter((room) => room.autojoin !== false && !!room.jid)
       .map((room) => room.jid!);
+    // Cache for the post-reconnect replay path — `handleSessionReady`
+    // calls `fanOutAutoJoin(this.autoJoinRoomJids)` whenever a fresh
+    // session is established so the user doesn't have to refresh to
+    // see call indicators for sibling channels after a reconnect.
+    this.autoJoinRoomJids = autoJoinRoomJids;
     if (autoJoinRoomJids.length > 0) void this.fanOutAutoJoin(autoJoinRoomJids);
     return topology;
   }
@@ -1816,6 +1838,16 @@ export class BrowserXmppClient {
       // xmpp reference so the bootstrap aborts cleanly if the client
       // disconnects before the catch-up IQ resolves.
       void this.bootstrapMdsDisplayed(xmpp);
+      // Re-fan-out the auto-join list cached by the last successful
+      // `discoverTopology()`. `handleDisconnected` cleared `joinedMucs`
+      // and every per-room cache, so a fresh reconnect lands with the
+      // user joined only to the focused channel; the rest of the
+      // sidebar's call indicators would stay dark without this. The
+      // controller will also call `discoverTopology` on its own
+      // bootstrap path, which would refresh the cache, but that path
+      // is one-shot for the lifetime of the controller — we cannot
+      // rely on it for the Nth reconnect.
+      if (this.autoJoinRoomJids.length > 0) void this.fanOutAutoJoin(this.autoJoinRoomJids);
     }
     this.emitSessionLifecycle(lifecycle);
     const catchupEntries = this.catchup.onSessionStarted();
@@ -1975,7 +2007,12 @@ export class BrowserXmppClient {
   /** Push every focused-room handler with a fresh snapshot. Called on
    *  channel switch (where the focused room changes, so the active view
    *  must update from cache) and on full disconnect (where caches are
-   *  cleared to empty). */
+   *  cleared to empty). `memberJidHandler` is replayed nick-by-nick
+   *  from the per-room cache so the consumer's `memberJidByNick` map
+   *  (cleared on every `selectChannel` per chat-app-controller.ts)
+   *  refills without having to wait for fresh presence — auto-join
+   *  drains the roster once and subsequent focus switches must
+   *  reconstruct from cache. */
   private dispatchFocusedRoomHandlers(): void {
     const room = this.currentRoom;
     if (!room) {
@@ -1987,6 +2024,14 @@ export class BrowserXmppClient {
     this.hatsHandler?.({ ...this.hatsFor(room) });
     this.authorityHandler?.({ ...this.authorityFor(room) });
     this.presenceHandler?.({ ...this.presenceFor(room) });
+    const memberJids = this.memberJidsFor(room);
+    const handler = this.memberJidHandler;
+    if (handler) {
+      for (const nick of Object.keys(memberJids)) {
+        const bare = memberJids[nick];
+        if (bare) handler(nick, bare);
+      }
+    }
   }
   private handlePresence(presence: WasmPresence) {
     const from = presence.from ?? "";
