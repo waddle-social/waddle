@@ -660,23 +660,30 @@ enum GroupchatNotificationClassDecision {
     Deliver(crate::notification_outbox::NotificationClass),
 }
 
-/// Outcome of `groupchat_notification_class`. Carries both the typed
-/// class decision and the XEP-0513 §304 "mention count exceeded" bit
-/// so the candidate-emission caller can reuse the bit when gating
-/// the recipient's `<noping/>` derivation — without re-running the
-/// XEP-0372 reference walk a second time per recipient.
+/// Outcome of `groupchat_notification_class`. Carries the typed
+/// class decision plus the XEP-0513 §304 "mention count exceeded"
+/// provenance bit. The class decision already reflects the overflow
+/// (it collapses to `NotifyAll` when the cap is exceeded); the
+/// separate `mentions_overflowed` field exposes the provenance so
+/// tests can assert it directly and so a future T0 hint that
+/// genuinely depends on the "overflowed at classification time"
+/// signal can read it without re-running the §304 count helpers.
+///
+/// The candidate-emission caller deliberately does NOT gate the
+/// recipient's `<noping/>` derivation on this bit — XEP-0513
+/// §"No Ping" is independent of §304's "ignore all mentions" cap.
+/// See the comment near `recipient_noping` in
+/// [`enqueue_groupchat_notification_candidate`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct GroupchatNotificationClassOutcome {
     decision: GroupchatNotificationClassDecision,
     /// `true` when the per-message mention count exceeded the
     /// XEP-0513 §304 `mentions#count` threshold and the classifier
-    /// collapsed every mention TARGET to `NotifyAll`. The candidate-
-    /// emission path discards this bit today (the noping derivation
-    /// is independent of overflow per the XEP-0513 §"No Ping"
-    /// SHOULD — see the comment near `recipient_noping`) but the
-    /// field is kept on the outcome for direct test assertions and
-    /// for any future T0 hint that genuinely depends on the
-    /// "overflowed at classification time" provenance.
+    /// collapsed every mention TARGET to `NotifyAll`. Production
+    /// emission discards this bit (see struct doc above); the
+    /// field is consumed in the count-gate tests
+    /// (`xep0513_mention_count_*`) and is available to any future
+    /// T0 hint that needs the overflow provenance.
     mentions_overflowed: bool,
 }
 
