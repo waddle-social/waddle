@@ -46,8 +46,16 @@ export function __setDiscoIqTimeoutForTest(ms: number | null): void {
 }
 
 export class DiscoTimeoutError extends Error {
-  constructor(public readonly to: string, public readonly node: string | undefined) {
-    super(`disco IQ to ${to}${node ? ` (node=${node})` : ""} timed out after ${DISCO_IQ_TIMEOUT_MS}ms`);
+  constructor(
+    public readonly to: string,
+    public readonly node: string | undefined,
+    public readonly timeoutMs: number,
+  ) {
+    // Report the actual budget the timer fired against — NOT the
+    // module-level `DISCO_IQ_TIMEOUT_MS`, which may have been overridden
+    // for this call via the optional `timeoutMs` argument to
+    // `withIqTimeout` (e.g. from `__setDiscoIqTimeoutForTest` in tests).
+    super(`disco IQ to ${to}${node ? ` (node=${node})` : ""} timed out after ${timeoutMs}ms`);
     this.name = "DiscoTimeoutError";
   }
 }
@@ -76,7 +84,7 @@ export function withIqTimeout<T>(
   const effectiveTimeout = timeoutMs ?? DISCO_IQ_TIMEOUT_MS;
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => reject(new DiscoTimeoutError(to, node)), effectiveTimeout);
+    timer = setTimeout(() => reject(new DiscoTimeoutError(to, node, effectiveTimeout)), effectiveTimeout);
   });
   return Promise.race([raw, timeout]).finally(() => {
     if (timer !== undefined) clearTimeout(timer);
@@ -307,13 +315,14 @@ export function applyDiscoInfoToChannel(room: DiscoveredChannel, info: DiscoInfo
 
 async function hydrateRoomInfo(xmpp: HybridClient, room: DiscoveredChannel): Promise<DiscoveredChannel> {
   if (!room.jid) return room;
-  try {
-    const info = await sendDiscoInfo(xmpp, room.jid);
-    if (!info) return room;
-    return applyDiscoInfoToChannel(room, info);
-  } catch {
-    return room;
-  }
+  // No internal try/catch: callers wrap this in `Promise.allSettled` and
+  // map rejected entries to the unhydrated `channelFromRoom` record, so a
+  // local catch here would make the outer rejection branch unreachable
+  // dead code. Single resilience layer (one site to reason about), not
+  // two redundant ones.
+  const info = await sendDiscoInfo(xmpp, room.jid);
+  if (!info) return room;
+  return applyDiscoInfoToChannel(room, info);
 }
 
 export async function discoverChannels(xmpp: HybridClient, jid: string): Promise<DiscoveredChannel[]> {
