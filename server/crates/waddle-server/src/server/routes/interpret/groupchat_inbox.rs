@@ -301,21 +301,47 @@ async fn insert_groupchat_notification_candidate(
     let mentions_slice: &[waddle_xmpp::xep::ExplicitMention] = explicit_mentions
         .as_ref()
         .map_or(&[], |mentions| mentions.mentions.as_slice());
-    let GroupchatNotificationClassDecision::Deliver(class) = groupchat_notification_class(
+    // Parse XEP-0372 references ONCE per recipient so the §304
+    // count gate AND the personal-mention fallback consult the same
+    // pre-parsed slice. Previously each helper re-walked
+    // `message.payloads` independently (2× per recipient × N
+    // recipients = 2N walks per message) — perf review on PR #741.
+    let references_vec = waddle_xmpp::xep::extract_references_from_message(message);
+    let references_slice: &[waddle_xmpp::xep::Reference] = references_vec.as_slice();
+    let GroupchatNotificationClassOutcome {
+        decision: GroupchatNotificationClassDecision::Deliver(class),
+        // The overflow bit is consumed by the classifier — the
+        // class downgrade reflects it. We deliberately do NOT use
+        // it to gate `<noping/>` (see below).
+        mentions_overflowed: _,
+    } = groupchat_notification_class(
         mentions_slice,
-        message,
+        references_slice,
         owner,
         room,
         owner_occupant_id.as_str(),
         is_live_occupant,
         sender_can_broadcast_channel_mention,
     );
+    // XEP-0513 §"No Ping": "if the sender includes a `<noping/>`
+    // child element in a mention, the receiving entity SHOULD NOT
+    // generate a notification (ping) for that mention." That SHOULD
+    // is INDEPENDENT of §304's "ignore all mentions" cap — the
+    // existing slice-2a T1 suppressor (`SuppressedReason::Xep0513Noping`)
+    // honors `<noping/>` unconditionally for every class. A prior
+    // shape of this code canceled the noping bit on count-overflow
+    // (to prevent a spammer silencing push via `<noping/>` + mention
+    // spam), but that contradicts both the §"No Ping" SHOULD and
+    // the existing T1 behavior — push candidate creation MUST be
+    // suppressed for `<noping/>` recipients even when the message
+    // overflows the §304 count cap, while normal delivery + MAM +
+    // inbox projection are unaffected (compliance review on
+    // PR #741). The class downgrade caused by overflow remains; only
+    // the per-recipient `<noping/>` suppression survives the cap.
+    let recipient_noping =
+        groupchat_mentions_carry_owner_noping(mentions_slice, owner, owner_occupant_id.as_str());
     let hints = crate::notification_outbox::NotificationMessageHints::none()
-        .with_noping(groupchat_mentions_carry_owner_noping(
-            mentions_slice,
-            owner,
-            owner_occupant_id.as_str(),
-        ))
+        .with_noping(recipient_noping)
         .with_xep0334(
             waddle_xmpp::xep::xep0334::has_hint(message, waddle_xmpp::xep::xep0334::Hint::NoStore),
             waddle_xmpp::xep::xep0334::has_hint(
@@ -634,17 +660,47 @@ enum GroupchatNotificationClassDecision {
     Deliver(crate::notification_outbox::NotificationClass),
 }
 
+/// Outcome of `groupchat_notification_class`. Carries the typed
+/// class decision plus the XEP-0513 §304 "mention count exceeded"
+/// provenance bit. The class decision already reflects the overflow
+/// (it collapses to `NotifyAll` when the cap is exceeded); the
+/// separate `mentions_overflowed` field exposes the provenance so
+/// tests can assert it directly and so a future T0 hint that
+/// genuinely depends on the "overflowed at classification time"
+/// signal can read it without re-running the §304 count helpers.
+///
+/// The candidate-emission caller deliberately does NOT gate the
+/// recipient's `<noping/>` derivation on this bit — XEP-0513
+/// §"No Ping" is independent of §304's "ignore all mentions" cap.
+/// See the comment near `recipient_noping` in
+/// [`enqueue_groupchat_notification_candidate`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct GroupchatNotificationClassOutcome {
+    decision: GroupchatNotificationClassDecision,
+    /// `true` when the per-message mention count exceeded the
+    /// XEP-0513 §304 `mentions#count` threshold and the classifier
+    /// collapsed every mention TARGET to `NotifyAll`. Production
+    /// emission discards this bit (see struct doc above); the
+    /// field is consumed in the count-gate tests
+    /// (`xep0513_mention_count_*`) and is available to any future
+    /// T0 hint that needs the overflow provenance.
+    mentions_overflowed: bool,
+}
+
 /// Classify a groupchat candidate from a pre-parsed mention slice.
 ///
 /// Callers MUST pass the result of a single
-/// `extract_explicit_mentions(message)` parse so the
-/// XEP-0513 traversal is not repeated per derivation. The `message`
-/// argument is held only for the XEP-0372 references fallback in
-/// `groupchat_mentions_owner` — that XEP carries data outside the
-/// explicit-mentions tree and is parsed independently.
+/// `extract_explicit_mentions(message)` parse AND a single
+/// `extract_references_from_message(message)` parse so that neither
+/// XEP-0513 mentions nor XEP-0372 references are re-walked per
+/// derivation. The previous shape took `&Message` and re-walked the
+/// XEP-0372 payloads twice per recipient (once in the §304 count
+/// gate and once in `groupchat_mentions_owner`) — for an
+/// N-occupant room that was 2N payload sweeps per message when 1
+/// suffices (perf review on PR #741).
 fn groupchat_notification_class(
     mentions: &[waddle_xmpp::xep::ExplicitMention],
-    message: &Message,
+    references: &[waddle_xmpp::xep::Reference],
     owner: &BareJid,
     room: &BareJid,
     owner_occupant_id: &str,
@@ -673,11 +729,45 @@ fn groupchat_notification_class(
     // — server default policy is `mentions#channel = moderators`
     // (XEP-0513 example value).
     sender_can_broadcast_channel_mention: bool,
-) -> GroupchatNotificationClassDecision {
-    let personal_mention = groupchat_mentions_owner(mentions, message, owner, owner_occupant_id);
+) -> GroupchatNotificationClassOutcome {
+    // XEP-0513 §304: "Receiving entities SHOULD ignore all mentions if
+    // the message contains more mentions than the threshold specified
+    // by `mentions#count`." When the per-message count exceeds the
+    // server-internal default, fall through to `NotifyAll` — neither
+    // personal-mention nor channel-mention classification applies.
+    // The wire payload is preserved (delivery + MAM unchanged per
+    // XEP-0513 §526); only the push class is affected. Per-room
+    // override of the threshold is deferred to slice 3c.
+    //
+    // The overflow bit is also propagated to the candidate-emission
+    // caller via `GroupchatNotificationClassOutcome` so the noping
+    // derivation can reuse it without re-walking the XEP-0372
+    // references a second time per recipient (adversarial review on
+    // PR #741).
+    let mentions_overflowed = waddle_xmpp::xep::mentions_exceed_threshold_from_parts(
+        mentions,
+        references,
+        waddle_xmpp::xep::DEFAULT_MENTIONS_COUNT,
+    );
+    if mentions_overflowed {
+        return GroupchatNotificationClassOutcome {
+            decision: GroupchatNotificationClassDecision::Deliver(
+                crate::notification_outbox::NotificationClass::NotifyAll,
+            ),
+            mentions_overflowed,
+        };
+    }
+    let personal_mention = groupchat_mentions_owner(mentions, references, owner, owner_occupant_id);
     let channel_mention = groupchat_channel_mention_scope(mentions, room)
         .filter(|_| sender_can_broadcast_channel_mention);
-    groupchat_notification_class_from_message(personal_mention, channel_mention, is_live_occupant)
+    GroupchatNotificationClassOutcome {
+        decision: groupchat_notification_class_from_message(
+            personal_mention,
+            channel_mention,
+            is_live_occupant,
+        ),
+        mentions_overflowed,
+    }
 }
 
 /// Message-derived classification of a groupchat notification candidate.
@@ -753,7 +843,7 @@ fn groupchat_mentions_carry_owner_noping(
 
 fn groupchat_mentions_owner(
     mentions: &[waddle_xmpp::xep::ExplicitMention],
-    message: &Message,
+    references: &[waddle_xmpp::xep::Reference],
     owner: &BareJid,
     owner_occupant_id: &str,
 ) -> bool {
@@ -780,14 +870,12 @@ fn groupchat_mentions_owner(
                     .as_deref()
                     .is_some_and(|mentioned| mentioned == owner_occupant_id))
     });
-    let xep0372 = extract_references_from_message(message)
-        .into_iter()
-        .any(|reference| {
-            reference.is_mention()
-                && reference
-                    .bare_jid()
-                    .is_some_and(|mentioned| &mentioned == owner)
-        });
+    let xep0372 = references.iter().any(|reference| {
+        reference.is_mention()
+            && reference
+                .bare_jid()
+                .is_some_and(|mentioned| &mentioned == owner)
+    });
     xep0513 || xep0372
 }
 
@@ -861,6 +949,13 @@ mod tests {
         waddle_xmpp::xep::extract_explicit_mentions(message)
             .map(|m| m.mentions)
             .unwrap_or_default()
+    }
+
+    /// Test helper: mirror of the production pre-parse for XEP-0372
+    /// references. Production hot path parses these once per
+    /// recipient in `insert_groupchat_notification_candidate`.
+    fn extract_references(message: &Message) -> Vec<waddle_xmpp::xep::Reference> {
+        waddle_xmpp::xep::extract_references_from_message(message)
     }
 
     /// Dedup regression: `groupchat_mentions_carry_owner_noping`
@@ -991,7 +1086,7 @@ mod tests {
             message_with_mention(waddle_xmpp::xep::ExplicitMention::jid(owner.clone()));
         assert!(groupchat_mentions_owner(
             &parsed_mentions(&msg_by_jid),
-            &msg_by_jid,
+            &extract_references(&msg_by_jid),
             &owner,
             occupant_id,
         ));
@@ -999,7 +1094,7 @@ mod tests {
             message_with_mention(waddle_xmpp::xep::ExplicitMention::occupant_id(occupant_id));
         assert!(groupchat_mentions_owner(
             &parsed_mentions(&msg_by_occ),
-            &msg_by_occ,
+            &extract_references(&msg_by_occ),
             &owner,
             occupant_id,
         ));
@@ -1009,7 +1104,7 @@ mod tests {
         let msg_noping = message_with_mention(noping);
         assert!(!groupchat_mentions_owner(
             &parsed_mentions(&msg_noping),
-            &msg_noping,
+            &extract_references(&msg_noping),
             &owner,
             occupant_id,
         ));
@@ -1019,7 +1114,7 @@ mod tests {
         ));
         assert!(!groupchat_mentions_owner(
             &parsed_mentions(&msg_other),
-            &msg_other,
+            &extract_references(&msg_other),
             &owner,
             occupant_id,
         ));
@@ -1081,9 +1176,12 @@ mod tests {
         let mentions = parsed_mentions(&msg);
 
         // Permitted sender (moderator) → ChannelMention.
-        let GroupchatNotificationClassDecision::Deliver(permitted) = groupchat_notification_class(
+        let GroupchatNotificationClassOutcome {
+            decision: GroupchatNotificationClassDecision::Deliver(permitted),
+            mentions_overflowed: _,
+        } = groupchat_notification_class(
             &mentions,
-            &msg,
+            &extract_references(&msg),
             &owner,
             &room,
             occupant_id,
@@ -1097,9 +1195,12 @@ mod tests {
         );
 
         // Non-permitted sender (participant) → NotifyAll (downgrade).
-        let GroupchatNotificationClassDecision::Deliver(downgraded) = groupchat_notification_class(
+        let GroupchatNotificationClassOutcome {
+            decision: GroupchatNotificationClassDecision::Deliver(downgraded),
+            mentions_overflowed: _,
+        } = groupchat_notification_class(
             &mentions,
-            &msg,
+            &extract_references(&msg),
             &owner,
             &room,
             occupant_id,
@@ -1133,9 +1234,12 @@ mod tests {
         let mentions = parsed_mentions(&msg);
 
         // Permitted sender + live occupant → ActiveChannelMention.
-        let GroupchatNotificationClassDecision::Deliver(permitted) = groupchat_notification_class(
+        let GroupchatNotificationClassOutcome {
+            decision: GroupchatNotificationClassDecision::Deliver(permitted),
+            mentions_overflowed: _,
+        } = groupchat_notification_class(
             &mentions,
-            &msg,
+            &extract_references(&msg),
             &owner,
             &room,
             occupant_id,
@@ -1150,9 +1254,12 @@ mod tests {
         );
 
         // Non-permitted sender + live occupant → NotifyAll.
-        let GroupchatNotificationClassDecision::Deliver(downgraded) = groupchat_notification_class(
+        let GroupchatNotificationClassOutcome {
+            decision: GroupchatNotificationClassDecision::Deliver(downgraded),
+            mentions_overflowed: _,
+        } = groupchat_notification_class(
             &mentions,
-            &msg,
+            &extract_references(&msg),
             &owner,
             &room,
             occupant_id,
@@ -1201,9 +1308,9 @@ mod tests {
         // downgrades the class). The classifier returns the class
         // only — it MUST NOT mutate the message payloads.
         let mentions = parsed_mentions(&msg);
-        let _ = groupchat_notification_class(
+        let _classifier_outcome = groupchat_notification_class(
             &mentions,
-            &msg,
+            &extract_references(&msg),
             &owner,
             &room,
             occupant_id,
@@ -1245,9 +1352,12 @@ mod tests {
         let msg = message_with_mention(waddle_xmpp::xep::ExplicitMention::jid(owner.clone()));
         let mentions = parsed_mentions(&msg);
 
-        let GroupchatNotificationClassDecision::Deliver(class) = groupchat_notification_class(
+        let GroupchatNotificationClassOutcome {
+            decision: GroupchatNotificationClassDecision::Deliver(class),
+            mentions_overflowed: _,
+        } = groupchat_notification_class(
             &mentions,
-            &msg,
+            &extract_references(&msg),
             &owner,
             &room,
             occupant_id,
@@ -1290,9 +1400,12 @@ mod tests {
 
         // Non-permitted sender (participant). With the fix, the
         // channel-scope wins and the gate downgrades to NotifyAll.
-        let GroupchatNotificationClassDecision::Deliver(class) = groupchat_notification_class(
+        let GroupchatNotificationClassOutcome {
+            decision: GroupchatNotificationClassDecision::Deliver(class),
+            mentions_overflowed: _,
+        } = groupchat_notification_class(
             &mentions,
-            &msg,
+            &extract_references(&msg),
             &owner,
             &room,
             occupant_id,
@@ -1311,9 +1424,12 @@ mod tests {
         // Permitted sender (moderator). Channel-scope still wins, and
         // the gate now classifies as ChannelMention — NOT
         // PersonalMention.
-        let GroupchatNotificationClassDecision::Deliver(class) = groupchat_notification_class(
+        let GroupchatNotificationClassOutcome {
+            decision: GroupchatNotificationClassDecision::Deliver(class),
+            mentions_overflowed: _,
+        } = groupchat_notification_class(
             &mentions,
-            &msg,
+            &extract_references(&msg),
             &owner,
             &room,
             occupant_id,
@@ -1327,6 +1443,414 @@ mod tests {
              permitted sender MUST classify as ChannelMention — the \
              channel-scope attribute is authoritative regardless of any \
              per-recipient targeting attributes"
+        );
+    }
+
+    /// XEP-0513 §304 SHOULD: "Receiving entities SHOULD ignore all
+    /// mentions if the message contains more mentions than the
+    /// threshold specified by `mentions#count`." This locks the
+    /// server-internal default (`DEFAULT_MENTIONS_COUNT = 5`).
+    /// Exceeding the threshold MUST collapse classification to
+    /// `NotifyAll` — not just discard the excess, but ignore EVERY
+    /// mention on the message including the ones below the threshold
+    /// boundary (slice 3b of #525).
+    #[test]
+    fn xep0513_mention_count_exceeded_ignores_all_mentions() {
+        use crate::notification_outbox::NotificationClass;
+
+        let owner = bare("charlie@example.com");
+        let room = bare("team@muc.example.com");
+        let occupant_id = "room-stable-charlie";
+
+        // Build a message with EXACTLY threshold+1 personal mentions,
+        // one of which targets `owner`. Without the count gate, owner
+        // would classify as `PersonalMention`.
+        let threshold = waddle_xmpp::xep::DEFAULT_MENTIONS_COUNT;
+        let mut msg = Message::new(None::<Jid>);
+        for i in 0..=threshold {
+            let target = if i == 0 {
+                owner.clone()
+            } else {
+                format!("user{i}@example.com").parse().expect("target jid")
+            };
+            msg.payloads.push(waddle_xmpp::xep::build_mention_element(
+                &waddle_xmpp::xep::ExplicitMention::jid(target),
+            ));
+        }
+        let mentions = parsed_mentions(&msg);
+        assert!(
+            mentions.len() as u32 > threshold,
+            "fixture must produce more than threshold mentions"
+        );
+
+        let GroupchatNotificationClassOutcome {
+            decision: GroupchatNotificationClassDecision::Deliver(class),
+            mentions_overflowed,
+        } = groupchat_notification_class(
+            &mentions,
+            &extract_references(&msg),
+            &owner,
+            &room,
+            occupant_id,
+            /* is_live_occupant */ false,
+            /* sender_can_broadcast_channel_mention */ true,
+        );
+        assert_eq!(
+            class,
+            NotificationClass::NotifyAll,
+            "a message with > DEFAULT_MENTIONS_COUNT mention targets MUST \
+             classify as NotifyAll — every mention is ignored per \
+             XEP-0513 §304, including the one naming the owner"
+        );
+        assert!(
+            mentions_overflowed,
+            "the overflow bit MUST be propagated to the caller so the \
+             noping derivation can short-circuit without re-walking the \
+             XEP-0372 references"
+        );
+    }
+
+    /// At-threshold (exactly `DEFAULT_MENTIONS_COUNT` targets) MUST
+    /// still be honored — §304 says "more than the threshold", so
+    /// the boundary value is inclusive.
+    #[test]
+    fn xep0513_mention_count_at_threshold_is_honored() {
+        use crate::notification_outbox::NotificationClass;
+
+        let owner = bare("charlie@example.com");
+        let room = bare("team@muc.example.com");
+        let occupant_id = "room-stable-charlie";
+
+        let threshold = waddle_xmpp::xep::DEFAULT_MENTIONS_COUNT;
+        let mut msg = Message::new(None::<Jid>);
+        for i in 0..threshold {
+            let target = if i == 0 {
+                owner.clone()
+            } else {
+                format!("user{i}@example.com").parse().expect("target jid")
+            };
+            msg.payloads.push(waddle_xmpp::xep::build_mention_element(
+                &waddle_xmpp::xep::ExplicitMention::jid(target),
+            ));
+        }
+        let mentions = parsed_mentions(&msg);
+        assert_eq!(mentions.len() as u32, threshold);
+
+        let GroupchatNotificationClassOutcome {
+            decision: GroupchatNotificationClassDecision::Deliver(class),
+            mentions_overflowed,
+        } = groupchat_notification_class(
+            &mentions,
+            &extract_references(&msg),
+            &owner,
+            &room,
+            occupant_id,
+            /* is_live_occupant */ false,
+            /* sender_can_broadcast_channel_mention */ true,
+        );
+        assert_eq!(
+            class,
+            NotificationClass::PersonalMention,
+            "exactly DEFAULT_MENTIONS_COUNT mention targets MUST be \
+             honored — §304 threshold is exclusive (\"more than\")"
+        );
+        assert!(
+            !mentions_overflowed,
+            "at-threshold count MUST NOT set the overflow bit — without \
+             this lock-in, a regression flipping `>` to `>=` in \
+             `mentions_exceed_threshold` would silently un-suppress the \
+             noping bit at the boundary"
+        );
+    }
+
+    /// XEP-0372 references are also counted toward the §304
+    /// threshold. Without this, an attacker bypasses the gate by
+    /// using `<reference type='mention' uri='xmpp:X'/>` instead of
+    /// XEP-0513 `<mention/>` — same mention semantics, different
+    /// wire shape.
+    #[test]
+    fn xep0513_mention_count_includes_xep0372_references() {
+        use crate::notification_outbox::NotificationClass;
+
+        let owner = bare("charlie@example.com");
+        let room = bare("team@muc.example.com");
+        let occupant_id = "room-stable-charlie";
+        let threshold = waddle_xmpp::xep::DEFAULT_MENTIONS_COUNT;
+
+        // Half XEP-0513, half XEP-0372 — together exceed threshold.
+        let half = threshold / 2 + 1;
+        let mut msg = Message::new(None::<Jid>);
+        msg.payloads.push(waddle_xmpp::xep::build_mention_element(
+            &waddle_xmpp::xep::ExplicitMention::jid(owner.clone()),
+        ));
+        for i in 1..half {
+            msg.payloads.push(waddle_xmpp::xep::build_mention_element(
+                &waddle_xmpp::xep::ExplicitMention::jid(
+                    format!("user{i}@example.com").parse().expect("target"),
+                ),
+            ));
+        }
+        for i in 0..(threshold - half + 2) {
+            msg.payloads.push(waddle_xmpp::xep::build_reference_element(
+                &waddle_xmpp::xep::Reference::mention(format!("xmpp:ref{i}@example.com")),
+            ));
+        }
+        let mentions = parsed_mentions(&msg);
+
+        let total = waddle_xmpp::xep::mention_target_count(&mentions, &msg);
+        assert!(
+            total > threshold,
+            "fixture must produce more than {threshold} combined mention targets (got {total})"
+        );
+
+        let GroupchatNotificationClassOutcome {
+            decision: GroupchatNotificationClassDecision::Deliver(class),
+            mentions_overflowed: _,
+        } = groupchat_notification_class(
+            &mentions,
+            &extract_references(&msg),
+            &owner,
+            &room,
+            occupant_id,
+            /* is_live_occupant */ false,
+            /* sender_can_broadcast_channel_mention */ true,
+        );
+        assert_eq!(
+            class,
+            NotificationClass::NotifyAll,
+            "XEP-0372 reference count + XEP-0513 mention count combined \
+             MUST trigger the §304 threshold — using references to \
+             bypass the cap is exactly the abuse vector this gate \
+             closes"
+        );
+    }
+
+    /// XEP-0513 §"No Ping" is INDEPENDENT of §304's "ignore all
+    /// mentions" cap (compliance review on PR #741). When the
+    /// threshold is exceeded:
+    ///
+    ///   - the CLASS is downgraded to `NotifyAll` per §304;
+    ///   - per-recipient `<noping/>` is PRESERVED — the existing
+    ///     T0/T1 `Xep0513Noping` suppressor fires for the recipient
+    ///     even on overflowed messages, suppressing push candidate
+    ///     creation without affecting delivery / MAM / inbox.
+    ///
+    /// This lock-in test asserts the predicate that
+    /// `insert_groupchat_notification_candidate` reads:
+    /// `groupchat_mentions_carry_owner_noping` MUST return true
+    /// regardless of overflow, because the production code no
+    /// longer combines it with `!mentions_overflowed`.
+    #[test]
+    fn xep0513_noping_survives_mention_count_overflow() {
+        let owner = bare("charlie@example.com");
+        let occupant_id = "room-stable-charlie";
+        let threshold = waddle_xmpp::xep::DEFAULT_MENTIONS_COUNT;
+
+        let mut msg = Message::new(None::<Jid>);
+        let mut owner_noping = waddle_xmpp::xep::ExplicitMention::jid(owner.clone());
+        owner_noping.noping = true;
+        msg.payloads
+            .push(waddle_xmpp::xep::build_mention_element(&owner_noping));
+        for i in 0..threshold {
+            msg.payloads.push(waddle_xmpp::xep::build_mention_element(
+                &waddle_xmpp::xep::ExplicitMention::jid(
+                    format!("user{i}@example.com").parse().expect("target"),
+                ),
+            ));
+        }
+        let mentions = parsed_mentions(&msg);
+
+        // Sanity: the threshold IS exceeded.
+        assert!(
+            waddle_xmpp::xep::mentions_exceed_threshold(&mentions, &msg, threshold),
+            "fixture must trip the threshold predicate"
+        );
+        // The per-recipient noping helper reports true regardless of
+        // overflow. Production code at
+        // `enqueue_groupchat_notification_candidate` uses this
+        // predicate unconditionally — the overflow bit no longer
+        // gates the noping suppression. Compliance with XEP-0513
+        // §"No Ping" PR Compliance ID 7.
+        assert!(
+            groupchat_mentions_carry_owner_noping(&mentions, &owner, occupant_id),
+            "owner's `<noping/>` mention MUST be honored even when the \
+             message overflows the §304 count cap — the §\"No Ping\" \
+             SHOULD operates independently of §304's class downgrade"
+        );
+    }
+
+    /// Groupchat mirror of the DM `at_threshold_preserves_noping`
+    /// test: at exactly `DEFAULT_MENTIONS_COUNT` total mentions, one
+    /// of them with `<noping/>` naming the owner, the gate MUST NOT
+    /// fire — `mentions_overflowed` stays `false` and the noping
+    /// suppressor at the emission site fires normally.
+    #[test]
+    fn xep0513_groupchat_mention_count_at_threshold_preserves_owner_noping() {
+        let owner = bare("charlie@example.com");
+        let room = bare("team@muc.example.com");
+        let occupant_id = "room-stable-charlie";
+        let threshold = waddle_xmpp::xep::DEFAULT_MENTIONS_COUNT;
+
+        let mut msg = Message::new(None::<Jid>);
+        let mut owner_noping = waddle_xmpp::xep::ExplicitMention::jid(owner.clone());
+        owner_noping.noping = true;
+        msg.payloads
+            .push(waddle_xmpp::xep::build_mention_element(&owner_noping));
+        for i in 0..(threshold - 1) {
+            msg.payloads.push(waddle_xmpp::xep::build_mention_element(
+                &waddle_xmpp::xep::ExplicitMention::jid(
+                    format!("user{i}@example.com").parse().expect("target"),
+                ),
+            ));
+        }
+        let mentions = parsed_mentions(&msg);
+        assert_eq!(mentions.len() as u32, threshold);
+
+        let GroupchatNotificationClassOutcome {
+            mentions_overflowed,
+            ..
+        } = groupchat_notification_class(
+            &mentions,
+            &extract_references(&msg),
+            &owner,
+            &room,
+            occupant_id,
+            /* is_live_occupant */ false,
+            /* sender_can_broadcast_channel_mention */ true,
+        );
+        assert!(
+            !mentions_overflowed,
+            "at-threshold MUST NOT overflow — boundary regression target"
+        );
+        assert!(
+            groupchat_mentions_carry_owner_noping(&mentions, &owner, occupant_id),
+            "owner's `<noping/>` mention is present and counted"
+        );
+        // Production emission reads `groupchat_mentions_carry_owner_noping(...)`
+        // unconditionally (the overflow bit no longer gates the
+        // noping derivation per the XEP-0513 §"No Ping" SHOULD —
+        // see commit d17004c3 / `xep0513_noping_survives_mention_count_overflow`).
+        // At-threshold + `<noping/>` therefore produces
+        // `recipient_noping = true` and the T0/T1 `Xep0513Noping`
+        // suppressor fires for this recipient.
+    }
+
+    /// Composition test: a non-permitted sender combines a channel
+    /// mention with enough per-user mentions to trip the §304 count
+    /// gate. Both gates converge on `NotifyAll`, but the count gate
+    /// runs FIRST so `mentions_overflowed` MUST be `true`. A future
+    /// refactor that reorders the gates (e.g. moves the channel
+    /// permission check above the count check) would change the
+    /// observable `mentions_overflowed` field — locked in here.
+    #[test]
+    fn xep0513_channel_mention_with_count_exceeded_composes_to_notify_all_with_overflow_bit() {
+        use crate::notification_outbox::NotificationClass;
+
+        let owner = bare("charlie@example.com");
+        let room = bare("team@muc.example.com");
+        let occupant_id = "room-stable-charlie";
+        let threshold = waddle_xmpp::xep::DEFAULT_MENTIONS_COUNT;
+
+        let mut msg = Message::new(None::<Jid>);
+        // One channel mention + threshold per-user mentions = threshold+1.
+        let mut channel = waddle_xmpp::xep::ExplicitMention::channel();
+        channel.uri = Some("xmpp:team@muc.example.com".to_string());
+        msg.payloads
+            .push(waddle_xmpp::xep::build_mention_element(&channel));
+        for i in 0..threshold {
+            msg.payloads.push(waddle_xmpp::xep::build_mention_element(
+                &waddle_xmpp::xep::ExplicitMention::jid(
+                    format!("user{i}@example.com").parse().expect("target"),
+                ),
+            ));
+        }
+        let mentions = parsed_mentions(&msg);
+
+        let GroupchatNotificationClassOutcome {
+            decision: GroupchatNotificationClassDecision::Deliver(class),
+            mentions_overflowed,
+        } = groupchat_notification_class(
+            &mentions,
+            &extract_references(&msg),
+            &owner,
+            &room,
+            occupant_id,
+            /* is_live_occupant */ false,
+            /* sender_can_broadcast_channel_mention */ false,
+        );
+        assert_eq!(
+            class,
+            NotificationClass::NotifyAll,
+            "non-permitted sender's channel mention + over-threshold \
+             personal mentions MUST collapse to NotifyAll"
+        );
+        assert!(
+            mentions_overflowed,
+            "the count gate runs first; the overflow bit MUST be set \
+             regardless of the channel-broadcast gate's outcome"
+        );
+    }
+
+    /// XEP-0203 §"Use in delayed delivery" composition: a delayed
+    /// (`<delay xmlns='urn:xmpp:delay'/>`) message with count
+    /// exceeded still flows through the §304 gate. The delay element
+    /// is not honored on the candidate-emission path (spoofable per
+    /// the slice 3a reverted filter), so the count gate is what
+    /// downgrades a spammy historical replay to NotifyAll. Locks the
+    /// §304 × XEP-0203 composition.
+    #[test]
+    fn xep0513_delayed_message_with_count_exceeded_still_downgrades_to_notify_all() {
+        use crate::notification_outbox::NotificationClass;
+
+        let owner = bare("charlie@example.com");
+        let room = bare("team@muc.example.com");
+        let occupant_id = "room-stable-charlie";
+        let threshold = waddle_xmpp::xep::DEFAULT_MENTIONS_COUNT;
+
+        let mut msg = Message::new(None::<Jid>);
+        for i in 0..=threshold {
+            msg.payloads.push(waddle_xmpp::xep::build_mention_element(
+                &waddle_xmpp::xep::ExplicitMention::jid(if i == 0 {
+                    owner.clone()
+                } else {
+                    format!("user{i}@example.com").parse().expect("target")
+                }),
+            ));
+        }
+        // Attach a `<delay/>` from a server-shaped JID. The candidate
+        // path doesn't honor `<delay/>` (per slice 3a's revert), so
+        // the count gate is what matters here.
+        msg.payloads
+            .push(waddle_xmpp::xep::xep0203::build_delay_element_simple(
+                chrono::TimeZone::timestamp_opt(&chrono::Utc, 1_700_000_000, 0)
+                    .single()
+                    .expect("delay stamp"),
+                "muc.example.com",
+            ));
+        let mentions = parsed_mentions(&msg);
+
+        let GroupchatNotificationClassOutcome {
+            decision: GroupchatNotificationClassDecision::Deliver(class),
+            mentions_overflowed,
+        } = groupchat_notification_class(
+            &mentions,
+            &extract_references(&msg),
+            &owner,
+            &room,
+            occupant_id,
+            /* is_live_occupant */ false,
+            /* sender_can_broadcast_channel_mention */ true,
+        );
+        assert_eq!(
+            class,
+            NotificationClass::NotifyAll,
+            "delayed message with count exceeded MUST still downgrade \
+             — §304 fires regardless of XEP-0203 presence"
+        );
+        assert!(
+            mentions_overflowed,
+            "the count gate fires for delayed messages identically to \
+             live ones"
         );
     }
 }
