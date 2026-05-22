@@ -384,6 +384,182 @@ pub fn strip_explicit_mentions(msg: &mut Message) {
         .retain(|elem| elem.ns() != NS_EXPLICIT_MENTIONS);
 }
 
+// ── §295 / §303: Permissions Query ──────────────────────────────────
+
+/// XEP-0513 §303 form field `var` for the per-message mention-count
+/// threshold. Always required when permissions are advertised.
+pub const FIELD_MENTIONS_COUNT: &str = "mentions#count";
+
+/// XEP-0513 §303 form field `var` for the individual-mention policy.
+/// Always required when permissions are advertised.
+pub const FIELD_MENTIONS_INDIVIDUAL: &str = "mentions#individual";
+
+/// XEP-0513 §303 form field `var` for the channel-mention policy.
+/// Present iff the room advertises `urn:xmpp:mentions:0#channel`.
+pub const FIELD_MENTIONS_CHANNEL: &str = "mentions#channel";
+
+/// XEP-0513 §303 policy enum for a `list-single` permissions field.
+///
+/// Three exhaustive values map directly to the spec's option labels.
+/// Modelled as an enum (not a string) so call sites and callers across
+/// the typed-payload boundary can match exhaustively rather than
+/// shuffling `&str` literals (typed-payloads hard rule, CLAUDE.md).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MentionsPermission {
+    /// Any room participant may use this mention type.
+    Participants,
+    /// Only moderators may use this mention type.
+    Moderators,
+    /// No participant may use this mention type.
+    Nobody,
+}
+
+impl MentionsPermission {
+    /// Wire value emitted in the data-form `<value/>` child and in
+    /// `<option>` values.
+    pub fn as_wire(self) -> &'static str {
+        match self {
+            Self::Participants => "participants",
+            Self::Moderators => "moderators",
+            Self::Nobody => "none",
+        }
+    }
+
+    /// Human-readable label emitted in `<option label='…'/>`.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Participants => "Participants",
+            Self::Moderators => "Moderators Only",
+            Self::Nobody => "Nobody",
+        }
+    }
+}
+
+/// Typed view of a XEP-0513 §303 permissions form. Only the fields
+/// Waddle currently advertises (`mentions#count`, `mentions#individual`,
+/// `mentions#channel`) are modelled; the optional `#space` / `#server`
+/// / `#associations` / `#hats` fields are deliberately omitted until
+/// the matching disco feature is advertised (#525 — "Do not advertise
+/// `#space`, `#server`, `#associations`, or `#hats` until recipient
+/// resolution and permissions are implemented for them").
+///
+/// The `channel` field is `Option<…>` because §303 ties its presence
+/// to the `…#channel` feature advert: "All other fields are OPTIONAL,
+/// but they MUST be present if and only if the corresponding feature
+/// is advertised in service discovery." A future room that doesn't
+/// advertise channel mentions would carry `channel: None` and we'd
+/// omit the field on the wire.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MentionsPermissions {
+    /// `mentions#count` — XEP-0513 §304 threshold.
+    pub count: u32,
+    /// `mentions#individual` — gate for per-recipient mentions.
+    pub individual: MentionsPermission,
+    /// `mentions#channel` — gate for `urn:xmpp:mentions:0#channel`.
+    /// `None` when the room does not advertise channel mentions; the
+    /// form field is then omitted entirely.
+    pub channel: Option<MentionsPermission>,
+}
+
+impl MentionsPermissions {
+    /// Waddle's server-internal default policy. Mirrors the hardcoded
+    /// gates enforced at T0 candidate classification (PR #738 slice 3a
+    /// and #741 slice 3b): the threshold is the XEP-0513 §301 example
+    /// value (`5`), individual mentions are open to all participants,
+    /// and channel mentions are restricted to moderators.
+    pub fn server_default() -> Self {
+        Self {
+            count: DEFAULT_MENTIONS_COUNT,
+            individual: MentionsPermission::Participants,
+            channel: Some(MentionsPermission::Moderators),
+        }
+    }
+}
+
+/// Returns `true` when `elem` is the root of a XEP-0513 §295
+/// permissions query — a `<query xmlns='urn:xmpp:mentions:0'/>`.
+pub fn is_mentions_permissions_query(elem: &Element) -> bool {
+    elem.name() == "query" && elem.ns() == NS_EXPLICIT_MENTIONS
+}
+
+/// Build the §303 result payload — `<query xmlns='urn:xmpp:mentions:0'>`
+/// wrapping a `<x xmlns='jabber:x:data' type='form'>` with the typed
+/// `permissions`. The room's IQ handler wraps this in an `<iq
+/// type='result'/>` envelope.
+///
+/// Field shape per §303:
+///
+/// - `FORM_TYPE` hidden = `urn:xmpp:mentions:0`,
+/// - `mentions#count` text-single, required, value = `permissions.count`,
+/// - `mentions#individual` list-single, required, value =
+///   `permissions.individual`, options = participants/moderators/none,
+/// - `mentions#channel` list-single, required, value =
+///   `permissions.channel` (only when `permissions.channel.is_some()`).
+pub fn build_mentions_permissions_query(permissions: &MentionsPermissions) -> Element {
+    use crate::xep::xep0004::{DataForm, Field, FormType, IntoElement};
+
+    let mut form = DataForm::new(FormType::Form)
+        .with_title("Permissions for Explicit Mentions")
+        .add_instructions(concat!(
+            "Complete this form to inform entities about who can mention whom. ",
+            "The count is the maximum number of mentions allowed per message. ",
+            "For each mention type supported, the users allowed to use the type ",
+            "may be set to all participants, moderators only, or nobody."
+        ))
+        .add_field(Field::form_type(NS_EXPLICIT_MENTIONS))
+        .add_field(
+            Field::text_single(FIELD_MENTIONS_COUNT, permissions.count.to_string())
+                .with_label("How many mentions are allowed in a message?")
+                .with_required(),
+        );
+
+    form = form.add_field(policy_field(
+        FIELD_MENTIONS_INDIVIDUAL,
+        "Who can mention individual users?",
+        permissions.individual,
+    ));
+
+    if let Some(channel) = permissions.channel {
+        form = form.add_field(policy_field(
+            FIELD_MENTIONS_CHANNEL,
+            "Who can mention rooms?",
+            channel,
+        ));
+    }
+
+    let mut query = Element::builder("query", NS_EXPLICIT_MENTIONS).build();
+    query.append_child(form.into_element());
+    query
+}
+
+/// Build a §303 `list-single` permissions field — the same shape
+/// reused for `mentions#individual` / `mentions#channel` / (future)
+/// `mentions#space` / `#server` / `#associations` / `#hats`. Single
+/// helper keeps the option set and ordering in lockstep across every
+/// permissions field; if a future XEP-0513 revision adds a fourth
+/// policy value, only one constructor changes.
+fn policy_field(
+    var: &'static str,
+    label: &'static str,
+    value: MentionsPermission,
+) -> crate::xep::xep0004::Field {
+    use crate::xep::xep0004::{Field, FieldOption, FieldType};
+
+    [
+        MentionsPermission::Participants,
+        MentionsPermission::Moderators,
+        MentionsPermission::Nobody,
+    ]
+    .into_iter()
+    .fold(
+        Field::new(var, FieldType::ListSingle)
+            .with_label(label)
+            .with_required()
+            .with_value(value.as_wire()),
+        |field, option| field.add_option(FieldOption::with_label(option.label(), option.as_wire())),
+    )
+}
+
 #[cfg(test)]
 mod count_tests {
     use super::*;

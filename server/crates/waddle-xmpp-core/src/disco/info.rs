@@ -520,20 +520,27 @@ pub fn muc_room_features(
         // `urn:xmpp:mentions:0#channel` is binding — once advertised,
         // the room's `<query xmlns='urn:xmpp:mentions:0'/>` IQ MUST
         // return a form with `mentions#count` + `mentions#individual`
-        // (always required) and the `mentions#channel` field (if and
-        // only if `#channel` is advertised). PR #738 (slice 3a)
-        // enforces a hardcoded `mentions#channel = moderators` policy
-        // at T0 candidate classification but does NOT yet expose the
-        // §295 IQ surface. To preserve XEP conformance — and per
-        // CLAUDE.md "if Waddle advertises an official XEP feature...
-        // the wire shape and behavior MUST conform to that XEP
-        // exactly" — the advert is withdrawn until slice 3c lands
-        // the IQ get/set + per-room form. §292 allows
-        // non-advertisement while still applying server-internal
-        // filtering ("Mentions MAY be sent in rooms which do not
-        // have permissions set, and/or do not advertise support for
-        // them; it is up to receiving entities to determine how to
-        // handle mentions in rooms without configured permissions").
+        // (always required) and `mentions#channel` (if and only if
+        // `#channel` is advertised). Slices 3a/3b enforce a hardcoded
+        // server policy (`mentions#count = 5`, `mentions#individual
+        // = participants`, `mentions#channel = moderators`) at T0
+        // candidate classification; slice 3c wires the §295 IQ
+        // surface so the form on the wire matches the policy in
+        // effect. Per CLAUDE.md XEP conformance hard rule, advertising
+        // the namespaces only becomes safe once the IQ form is
+        // implemented — see
+        // `server/crates/waddle-server/src/server/routes/websocket/handlers/iq/mentions_permissions.rs`
+        // (the §295 IQ handler in the `waddle-server` crate) for the
+        // handler that backs these advertised features.
+        //
+        // TODO(#525-followup): §303 also SHOULDs that the
+        // `mentions#*` form fields be mirrored into the room's
+        // `muc#roominfo` extension form (xeps/xep-0513.xml line 303).
+        // Deferred — adding fields to muc#roominfo is a separate
+        // slice; the dedicated §295 IQ form is the primary discovery
+        // path and is conformant on its own.
+        Feature::explicit_mentions(),
+        Feature::channel_mentions(),
         Feature::muc_nonanonymous(),
     ];
 
