@@ -31,7 +31,19 @@ export type DiscoInfoData = {
 // per-IQ timeout. 15s is short enough that a wedged component cannot stall
 // topology discovery longer than one user heartbeat, long enough to survive
 // realistic mobile/satellite RTTs.
-const DISCO_IQ_TIMEOUT_MS = 15_000;
+const DISCO_IQ_TIMEOUT_MS_DEFAULT = 15_000;
+let DISCO_IQ_TIMEOUT_MS = DISCO_IQ_TIMEOUT_MS_DEFAULT;
+
+/**
+ * Override the disco IQ timeout used by `sendDiscoInfo` / `sendDiscoItems`
+ * / `sendPubsubItems`. Test-only backdoor — call with `null` to restore
+ * the default. Lets integration tests verify the actual timeout wiring
+ * without waiting 15s of real time per case. Production callers should
+ * NEVER call this.
+ */
+export function __setDiscoIqTimeoutForTest(ms: number | null): void {
+  DISCO_IQ_TIMEOUT_MS = ms ?? DISCO_IQ_TIMEOUT_MS_DEFAULT;
+}
 
 export class DiscoTimeoutError extends Error {
   constructor(public readonly to: string, public readonly node: string | undefined) {
@@ -40,15 +52,31 @@ export class DiscoTimeoutError extends Error {
   }
 }
 
+/**
+ * Wrap an in-flight IQ Promise with a bounded timeout.
+ *
+ * Known limitation — driver-side pending_iqs retention: rejecting the JS
+ * Promise here does NOT remove the entry from the wasm driver's pending_iqs
+ * HashMap (server/crates/waddle-xmpp-client-wasm/src/driver.rs:222). The
+ * entry stays until either a (possibly never-arriving) response or stream
+ * disconnect, at which point `pending_iqs.drain()` clears it. Per-stream
+ * leak is bounded (~100 B × ~7 IQs per topology rebuild) and fully reclaimed
+ * on reconnect. The proper fix is a `cancel_iq(id)` driver command — tracked
+ * as a follow-up; not blocking the channel-rendering bug this PR closes.
+ */
 export function withIqTimeout<T>(
   raw: Promise<T>,
   to: string,
   node: string | undefined,
-  timeoutMs: number = DISCO_IQ_TIMEOUT_MS,
+  timeoutMs?: number,
 ): Promise<T> {
+  // Read `DISCO_IQ_TIMEOUT_MS` at call time, not at function-definition
+  // time, so `__setDiscoIqTimeoutForTest` correctly overrides for the
+  // duration of a test case.
+  const effectiveTimeout = timeoutMs ?? DISCO_IQ_TIMEOUT_MS;
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => reject(new DiscoTimeoutError(to, node)), timeoutMs);
+    timer = setTimeout(() => reject(new DiscoTimeoutError(to, node)), effectiveTimeout);
   });
   return Promise.race([raw, timeout]).finally(() => {
     if (timer !== undefined) clearTimeout(timer);
@@ -113,15 +141,32 @@ function roomParentSpaceId(info: DiscoInfoData): string | null {
     ?? parseSpaceNodeIri(info.fields.get("muc#roominfo_pubsub") ?? null);
 }
 
+function logDiscoFailure(kind: "info" | "items" | "pubsub", to: string, node: string | undefined, err: unknown): void {
+  if (err instanceof DiscoTimeoutError) {
+    // Timeouts are the diagnostic signal we actually care about when
+    // channels fail to render — keep them structured so consumers can
+    // grep / aggregate by `to`.
+    console.warn(`[disco] ${kind} timeout`, { to: err.to, node: err.node });
+    return;
+  }
+  console.error(`[disco] ${kind} FAILED`, { to, node, err });
+}
+
 async function sendDiscoInfo(xmpp: HybridClient, to: string, node?: string): Promise<DiscoInfoData | null> {
   if (!xmpp.send_raw_iq) return null;
   const id = crypto.randomUUID();
   const nodeAttr = node ? ` node="${node}"` : "";
-  const responseXml = await withIqTimeout(
-    xmpp.send_raw_iq(`<iq type="get" id="${id}" to="${to}"><query xmlns="${DISCO_INFO_NS}"${nodeAttr}/></iq>`),
-    to,
-    node,
-  );
+  let responseXml: string;
+  try {
+    responseXml = await withIqTimeout(
+      xmpp.send_raw_iq(`<iq type="get" id="${id}" to="${to}"><query xmlns="${DISCO_INFO_NS}"${nodeAttr}/></iq>`),
+      to,
+      node,
+    );
+  } catch (err) {
+    logDiscoFailure("info", to, node, err);
+    throw err;
+  }
   const query = parseXml(responseXml).getElementsByTagNameNS(DISCO_INFO_NS, "query")[0];
   if (!query) return null;
   const fields = new Map<string, string>();
@@ -149,7 +194,7 @@ async function sendDiscoItems(xmpp: HybridClient, to: string, node?: string): Pr
   try {
     responseXml = await withIqTimeout(xmpp.send_raw_iq(xml), to, node);
   } catch (err) {
-    console.error("[disco] send_raw_iq items FAILED", { to, err });
+    logDiscoFailure("items", to, node, err);
     throw err;
   }
   const doc = parseXml(responseXml);
@@ -163,11 +208,17 @@ async function sendDiscoItems(xmpp: HybridClient, to: string, node?: string): Pr
 async function sendPubsubItems(xmpp: HybridClient, to: string, node: string): Promise<Array<{ jid?: string; name?: string }>> {
   if (!xmpp.send_raw_iq) return [];
   const id = crypto.randomUUID();
-  const responseXml = await withIqTimeout(
-    xmpp.send_raw_iq(`<iq type="get" id="${id}" to="${to}"><pubsub xmlns="${NS_PUBSUB}"><items node="${node}"/></pubsub></iq>`),
-    to,
-    node,
-  );
+  let responseXml: string;
+  try {
+    responseXml = await withIqTimeout(
+      xmpp.send_raw_iq(`<iq type="get" id="${id}" to="${to}"><pubsub xmlns="${NS_PUBSUB}"><items node="${node}"/></pubsub></iq>`),
+      to,
+      node,
+    );
+  } catch (err) {
+    logDiscoFailure("pubsub", to, node, err);
+    throw err;
+  }
   const doc = parseXml(responseXml);
   const items = doc.getElementsByTagNameNS(NS_PUBSUB, "items")[0];
   if (!items) return [];
@@ -195,6 +246,11 @@ async function discoverComponentServices(xmpp: HybridClient, domain: string, jid
     // failure) maps to `info: null`, which is the same shape the existing
     // try/catch produced — every downstream consumer already treats `null` as
     // "service absent" and falls back to the conventional domain.
+    //
+    // Caps cache safety (XEP-0115): an `info: null` here represents IQ
+    // failure, NOT "this entity has zero features". A future consumer that
+    // caches disco-info by ver hash MUST NOT persist this fallback shape —
+    // doing so would poison the cache against a recovering component.
     const settled = await Promise.allSettled(candidates.map(async (serviceJid) => ({
       serviceJid,
       info: await sendDiscoInfo(xmpp, serviceJid),
@@ -311,27 +367,36 @@ export async function discoverTopology(xmpp: HybridClient, jid: string): Promise
     }
   } catch {}
 
-  // Surround the MUC-rooms fan-out in try/catch + allSettled so a single
-  // unresponsive room (or a hung muc service disco#items) degrades the
-  // sidebar to "no rooms" instead of failing the whole topology load.
-  // `hydrateRoomInfo` already swallows its own errors, but `sendDiscoItems`
-  // on the MUC service can now time out (see `withIqTimeout`) — without
-  // this guard a timeout there would bubble up and abandon the
-  // already-resolved spaces work.
+  // Narrow try/catch JUST around `sendDiscoItems`: a wedged muc service
+  // (which now times out via `withIqTimeout` instead of hanging forever)
+  // degrades the sidebar to "no rooms" rather than failing the whole
+  // topology load and abandoning already-resolved spaces work. Subsequent
+  // hydration uses `Promise.allSettled` so a single broken room cannot
+  // poison the others; `hydrateRoomInfo` already self-catches, so the
+  // `allSettled` is belt-and-braces against a future regression there.
+  // Errors in barePeerJid, channelFromRoom, or the final rooms.map are
+  // intentionally left to propagate — those are programmer errors, not
+  // wire-state errors, and silently swallowing them would mask bugs.
+  let mucRooms: Array<{ jid?: string; name?: string }> = [];
   try {
-    const mucRooms = await sendDiscoItems(xmpp, services.muc);
-    const hydratedSettled = await Promise.allSettled(
-      mucRooms.map((room, position) =>
-        hydrateRoomInfo(xmpp, channelFromRoom({ jid: room.jid ?? "", name: room.name }, position)),
-      ),
-    );
-    const hydrated = hydratedSettled.map((entry, index) =>
-      entry.status === "fulfilled"
-        ? entry.value
-        : channelFromRoom({ jid: mucRooms[index]!.jid ?? "", name: mucRooms[index]!.name }, index),
-    );
-    rooms = hydrated.map((room, position) => ({ ...room, position, ...(room.jid && bookmarkedSpaceIds.get(barePeerJid(room.jid)) ? { spaceId: bookmarkedSpaceIds.get(barePeerJid(room.jid)), standalone: false } : {}) }));
-  } catch {}
+    mucRooms = await sendDiscoItems(xmpp, services.muc);
+  } catch (err) {
+    // sendDiscoItems already logged via logDiscoFailure; here we just
+    // continue with an empty room list. The cause is observable in the
+    // console for diagnostics.
+    void err;
+  }
+  const hydratedSettled = await Promise.allSettled(
+    mucRooms.map((room, position) =>
+      hydrateRoomInfo(xmpp, channelFromRoom({ jid: room.jid ?? "", name: room.name }, position)),
+    ),
+  );
+  const hydrated = hydratedSettled.map((entry, index) =>
+    entry.status === "fulfilled"
+      ? entry.value
+      : channelFromRoom({ jid: mucRooms[index]!.jid ?? "", name: mucRooms[index]!.name }, index),
+  );
+  rooms = hydrated.map((room, position) => ({ ...room, position, ...(room.jid && bookmarkedSpaceIds.get(barePeerJid(room.jid)) ? { spaceId: bookmarkedSpaceIds.get(barePeerJid(room.jid)), standalone: false } : {}) }));
 
   const roomSpaceIds = new Map(rooms.flatMap((room) => room.jid ? [[barePeerJid(room.jid), room.spaceId]] as const : []));
   return {

@@ -1,9 +1,17 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 import {
+  __setDiscoIqTimeoutForTest,
   DiscoTimeoutError,
   discoverTopology,
   withIqTimeout,
 } from "../src/lib/xmpp/discovery";
+
+afterEach(() => {
+  // Belt-and-braces: every test that mutates the disco timeout restores it
+  // in its own finally, but if a future test forgets we want the next file
+  // to start from production defaults.
+  __setDiscoIqTimeoutForTest(null);
+});
 
 /**
  * Resilience contract for XEP-0030 topology discovery:
@@ -66,6 +74,45 @@ describe("discoverTopology partial-failure resilience", () => {
     });
   });
 
+  test("integration: real withIqTimeout fires end-to-end when a component disco#info never resolves", async () => {
+    // Verifies the wiring: sendDiscoInfo MUST call withIqTimeout against
+    // the underlying raw IQ promise. If a future refactor drops the
+    // wrapper, this test fails because the never-resolving fixture below
+    // would hang the test runner instead of timing out.
+    __setDiscoIqTimeoutForTest(30);
+    try {
+      await withFakeDomParser(async () => {
+        const topology = await discoverTopology(neverResolvesForComponent("extensions.example.test"), "alice@example.test");
+
+        // muc.example.test still answered → service identity preserved.
+        expect(topology.services.muc).toBe("muc.example.test");
+        // extensions.example.test never resolved → timeout fired and the
+        // conventional spaces.<domain> fallback kicked in.
+        expect(topology.services.spaces).toBe("spaces.example.test");
+      });
+    } finally {
+      __setDiscoIqTimeoutForTest(null);
+    }
+  });
+
+  test("allSettled in discoverComponentServices honors a SURVIVING explicit-identity component when another rejects", async () => {
+    // Distinct-from-fallback coverage: if we regressed to `Promise.all` +
+    // outer `catch { return fallback }`, this assertion would FAIL because
+    // the muc identity would come from the conventional `muc.<domain>`
+    // fallback, NOT from the surviving custom-named component below.
+    await withFakeDomParser(async () => {
+      const topology = await discoverTopology(
+        customMucWithBrokenSibling(),
+        "alice@example.test",
+      );
+
+      // Custom muc JID survived even though the other component threw —
+      // proves allSettled kept the per-entry result instead of collapsing
+      // to the outer catch's fallback.
+      expect(topology.services.muc).toBe("custom-muc.example.test");
+    });
+  });
+
   test("returns spaces topology even when the MUC service is wedged", async () => {
     await withFakeDomParser(async () => {
       const topology = await discoverTopology(resilientClient({ hangMucItems: true }), "alice@example.test");
@@ -98,6 +145,78 @@ type ResilientClientOptions = {
   hangMucItems?: boolean;
   rejectRoomInfo?: string;
 };
+
+function neverResolvesForComponent(jid: string) {
+  return {
+    async send_raw_iq(xml: string): Promise<string> {
+      if (xml.includes('xmlns="http://jabber.org/protocol/disco#items"')) {
+        if (xml.includes('to="example.test"')) {
+          return discoItemsXml([
+            { jid: "muc.example.test", name: "Chatrooms" },
+            { jid: jid, name: "Hung" },
+          ]);
+        }
+        if (xml.includes('to="muc.example.test"')) {
+          return discoItemsXml([]);
+        }
+        return discoItemsXml([]);
+      }
+      if (xml.includes('xmlns="http://jabber.org/protocol/disco#info"')) {
+        if (xml.includes(`to="${jid}"`)) {
+          // Production stall reproduction: never resolves. The wrapping
+          // withIqTimeout in sendDiscoInfo MUST reject this with
+          // DiscoTimeoutError before the test's wall-clock budget; if the
+          // wrapper is missing, bun test will hang past the per-test
+          // timeout instead.
+          return new Promise<string>(() => {});
+        }
+        if (xml.includes('to="muc.example.test"')) {
+          return discoInfoXml({
+            identities: [{ category: "conference", type: "text", name: "Chatrooms" }],
+            features: ["http://jabber.org/protocol/muc"],
+          });
+        }
+        return discoInfoXml();
+      }
+      return discoItemsXml([]);
+    },
+  };
+}
+
+function customMucWithBrokenSibling() {
+  // Two components advertised: one custom-named MUC service and one that
+  // rejects disco#info synchronously. allSettled MUST surface the custom
+  // muc identity even though the sibling threw.
+  return {
+    async send_raw_iq(xml: string): Promise<string> {
+      if (xml.includes('xmlns="http://jabber.org/protocol/disco#items"')) {
+        if (xml.includes('to="example.test"')) {
+          return discoItemsXml([
+            { jid: "custom-muc.example.test", name: "ChatPalace" },
+            { jid: "broken.example.test", name: "Broken" },
+          ]);
+        }
+        if (xml.includes('to="custom-muc.example.test"')) {
+          return discoItemsXml([]);
+        }
+        return discoItemsXml([]);
+      }
+      if (xml.includes('xmlns="http://jabber.org/protocol/disco#info"')) {
+        if (xml.includes('to="broken.example.test"')) {
+          throw new Error("simulated sibling disco#info failure");
+        }
+        if (xml.includes('to="custom-muc.example.test"')) {
+          return discoInfoXml({
+            identities: [{ category: "conference", type: "text", name: "ChatPalace" }],
+            features: ["http://jabber.org/protocol/muc"],
+          });
+        }
+        return discoInfoXml();
+      }
+      return discoItemsXml([]);
+    },
+  };
+}
 
 function resilientClient(options: ResilientClientOptions = {}) {
   return {
