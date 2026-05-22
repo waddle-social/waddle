@@ -1861,16 +1861,17 @@ mod tests {
         );
     }
 
-    /// XEP-0513 §"Active mention" + #525 explicit XEP test:
-    /// `<active/>` on a channel mention is a recipient-state filter
-    /// that narrows the candidate population to currently-active
-    /// occupants. The classifier MUST distinguish the two channel
-    /// shapes at T0 so the T1 active-filter has a class to match on:
+    /// XEP-0513 §"Active" + #525 explicit XEP test: `<active/>` on
+    /// a channel mention is a recipient-state filter that narrows
+    /// the candidate population to currently-active occupants. The
+    /// classifier MUST distinguish the two channel shapes at T0 so
+    /// the T1 active-filter has a class to match on:
     ///
-    /// - `<mention mentions='#channel'/>` (no qualifier) →
-    ///   `NotificationClass::ChannelMention` (push to all members)
-    /// - `<mention mentions='#channel'><active/></mention>` →
-    ///   `NotificationClass::ActiveChannelMention` (T1 filters by
+    /// - `<mention mentions='urn:xmpp:mentions:0#channel'/>` (no
+    ///   qualifier) → `NotificationClass::ChannelMention`
+    ///   (push to all members)
+    /// - `<mention mentions='urn:xmpp:mentions:0#channel'><active/></mention>`
+    ///   → `NotificationClass::ActiveChannelMention` (T1 filters by
     ///   `last_active_at_ms <= active_mention_ttl_ms`)
     ///
     /// Existing tests cover the permission-downgrade direction; this
@@ -1988,14 +1989,15 @@ mod tests {
 
     /// XEP-0513 + #525 explicit XEP test: a `<mention/>` carrying an
     /// **unadvertised** group URI (`urn:xmpp:mentions:0#space`,
-    /// `#server`, `#associations`, `#hats`) MUST NOT elevate the
-    /// notification class. Waddle deliberately advertises only the
-    /// individual + `#channel` subset (#525 scope: "Do not advertise
-    /// `#space`, `#server`, `#associations`, or `#hats` until
-    /// recipient resolution and permissions are implemented for
-    /// them"), and the classifier MUST stay forward-compatible: a
-    /// future code change that loosens `is_channel()` to accept any
-    /// `urn:xmpp:mentions:0#*` value would silently elevate
+    /// `urn:xmpp:mentions:0#server`, `urn:xmpp:mentions:0#associations`,
+    /// `urn:xmpp:mentions:0#hats`) MUST NOT elevate the notification
+    /// class. Waddle deliberately advertises only the individual +
+    /// `urn:xmpp:mentions:0#channel` subset (#525 scope: "Do not
+    /// advertise `#space`, `#server`, `#associations`, or `#hats`
+    /// until recipient resolution and permissions are implemented
+    /// for them"), and the classifier MUST stay forward-compatible:
+    /// a future code change that loosens `is_channel()` to accept
+    /// any `urn:xmpp:mentions:0#*` value would silently elevate
     /// unsupported groups to push, which is exactly what this
     /// regression guards against.
     ///
@@ -2012,13 +2014,17 @@ mod tests {
 
         // Every unadvertised group URI from XEP-0513 §"Multi-User
         // Chats Permissions" — the four §303 form fields Waddle
-        // chooses not to expose yet — plus one role sub-namespace
-        // (`#moderators`) and one affiliation sub-namespace
-        // (`#owner`) from §"Mentions via Roles and Affiliations"
-        // (xep-0513.xml:142-178) so we cover both sub-categories
-        // under the `#associations` umbrella. A future relaxation
-        // of `is_channel()` to accept any `urn:xmpp:mentions:0#…`
-        // prefix would trip every case.
+        // chooses not to expose yet. Also includes two
+        // forward-compatibility probe URIs (`#moderators` and
+        // `#owner`) that are NOT spec-defined group identifiers;
+        // they are crafted strings that share the
+        // `urn:xmpp:mentions:0#…` prefix to trip a future code
+        // change that relaxes `is_channel()` from strict
+        // equality to a prefix match. (Note: `moderators` /
+        // `owner` appear in XEP-0513 only as `mentions#channel`
+        // *form values*, not as group URIs; their use here is
+        // purely as wire-shape probes, not as references to any
+        // spec-defined `#moderators`/`#owner` group.)
         let unsupported_uris = [
             "urn:xmpp:mentions:0#space",
             "urn:xmpp:mentions:0#server",
