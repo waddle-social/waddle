@@ -75,14 +75,21 @@ use xmpp_parsers::iq::Iq;
 use xmpp_parsers::minidom::Element;
 
 /// Detects an XEP-0513 §295 query (`<iq type='get'><query
-/// xmlns='urn:xmpp:mentions:0'/></iq>` targeting the MUC service
-/// domain) or a matching `type='set'` — the dispatcher routes both
-/// arms to this handler so the set path produces a §295-shaped error
-/// rather than fall through to the generic "Unhandled IQ" path. The
-/// handler then enforces the §295 addressing contract (bare room
-/// JID) and emits typed `<bad-request/>` for service-JID or
-/// full-JID targets, so the client gets a precise diagnostic
-/// instead of a vague feature-not-implemented.
+/// xmlns='urn:xmpp:mentions:0'/></iq>`) destined for this server's
+/// MUC service. Routing covers:
+///
+/// - `to` present and `to.domain() == muc_domain` → the canonical
+///   addressing (bare room JID, service JID, or full room JID — the
+///   handler validates the bare-room-JID shape and returns
+///   `<bad-request/>` for service-JID or full-JID).
+/// - `to` absent → an addressing-error case the handler answers with
+///   a precise `<bad-request/>` instead of the dispatcher's generic
+///   feature-not-implemented (Copilot review on PR #747).
+///
+/// IQs with `to` pointing at *another* MUC domain are NOT routed
+/// here — they belong to the inter-server forwarder, not this
+/// handler. Both Get and Set arms route here so the SET path can
+/// emit a §295-shaped error envelope.
 pub(super) fn is_mentions_permissions_iq(iq: &Iq, muc_domain: &str) -> bool {
     let payload = match iq {
         Iq::Get { payload, .. } | Iq::Set { payload, .. } => payload,
@@ -91,7 +98,10 @@ pub(super) fn is_mentions_permissions_iq(iq: &Iq, muc_domain: &str) -> bool {
     if !is_mentions_permissions_query(payload) {
         return false;
     }
-    iq.to().is_some_and(|to| to.domain().as_str() == muc_domain)
+    match iq.to() {
+        None => true,
+        Some(to) => to.domain().as_str() == muc_domain,
+    }
 }
 
 pub(super) async fn handle_mentions_permissions_iq(
@@ -115,6 +125,11 @@ pub(super) async fn handle_mentions_permissions_iq(
             not_authorized_iq_error("Authentication required."),
         )];
     }
+    // `is_mentions_permissions_iq` accepts both "to present and on
+    // muc_domain" and "to absent". The missing-`to` case is a
+    // §295 addressing error — answer it precisely with bad-request
+    // rather than letting it fall through to the dispatcher's
+    // feature-not-implemented (Copilot review on PR #747).
     let Some(target) = iq.to() else {
         return vec![mentions_permissions_error(
             iq,
@@ -279,9 +294,14 @@ mod tests {
     }
 
     #[test]
-    fn is_mentions_permissions_iq_rejects_missing_to() {
+    fn is_mentions_permissions_iq_routes_missing_to_for_typed_error() {
+        // Missing-`to` is a §295 addressing error; the routing
+        // predicate accepts it so the handler can return a precise
+        // `<bad-request/>` rather than letting the IQ fall through
+        // to the dispatcher's generic feature-not-implemented
+        // (Copilot review on PR #747).
         let iq = iq_get(mentions_payload(), None);
-        assert!(!is_mentions_permissions_iq(&iq, "muc.example"));
+        assert!(is_mentions_permissions_iq(&iq, "muc.example"));
     }
 
     #[test]

@@ -4,7 +4,7 @@ mod ws_common;
 
 use std::str::FromStr;
 use tokio::sync::Mutex;
-use waddle_xmpp::xep::{DataForm, Field, FormType, IntoElement, NS_EXPLICIT_MENTIONS};
+use waddle_xmpp::xep::{DataForm, Field, FieldType, FormType, IntoElement, NS_EXPLICIT_MENTIONS};
 use waddle_xmpp::Stanza;
 use ws_common::{TestServer, WsXmppClient};
 use xmpp_parsers::iq::Iq;
@@ -285,15 +285,22 @@ async fn mentions_permissions_iq_set_returns_forbidden() {
     let _occupant_id = join_room(&mut client, &room).await;
 
     let iq_id = "perm-set-1";
-    // Build the §295 owner-submit payload via the typed
-    // `DataForm` builder so the wire shape is whatever a
-    // conformant XEP-0004 serializer would emit — and the test
-    // exercises the *real* form-validation path on the server.
+    // Build a §295 owner-submit payload via the typed `DataForm`
+    // builder so the wire shape comes from a conformant XEP-0004
+    // serializer rather than hand-rolled `format!` XML. The handler
+    // currently returns `<forbidden/>` per §295 MUST without parsing
+    // the body, so this test only exercises the routing + error
+    // envelope shape — but a future owner-write-path slice would
+    // parse this same payload, so the field types are §303-shaped
+    // (`mentions#count` text-single, `mentions#individual` and
+    // `mentions#channel` list-single) to stay forward-compatible.
     let submit_form = DataForm::new(FormType::Submit)
         .add_field(Field::form_type(NS_EXPLICIT_MENTIONS))
         .add_field(Field::text_single("mentions#count", "1"))
-        .add_field(Field::text_single("mentions#individual", "participants"))
-        .add_field(Field::text_single("mentions#channel", "moderators"))
+        .add_field(
+            Field::new("mentions#individual", FieldType::ListSingle).with_value("participants"),
+        )
+        .add_field(Field::new("mentions#channel", FieldType::ListSingle).with_value("moderators"))
         .into_element();
     let mut submit_query = Element::builder("query", NS_EXPLICIT_MENTIONS).build();
     submit_query.append_child(submit_form);
