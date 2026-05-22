@@ -41,6 +41,7 @@ use waddle_xmpp::xep::{
     NS_EXPLICIT_MENTIONS,
 };
 use xmpp_parsers::iq::Iq;
+use xmpp_parsers::minidom::Element;
 
 /// Detects an XEP-0513 §295 query (`<iq type='get'><query
 /// xmlns='urn:xmpp:mentions:0'/></iq>` targeting the MUC service
@@ -124,9 +125,9 @@ pub(super) async fn handle_mentions_permissions_iq(
     }
 }
 
-/// Build a `<iq type='error'/>` for a §295 query that ECHOES the
-/// original `<query xmlns='urn:xmpp:mentions:0'/>` payload, per the
-/// XEP-0513 §295 error example (xeps/xep-0513.xml §"permissions"):
+/// Build a `<iq type='error'/>` for a §295 query that echoes the
+/// `<query xmlns='urn:xmpp:mentions:0'/>` payload. The canonical
+/// §295 example (xeps/xep-0513.xml §"permissions") shows:
 ///
 /// ```xml
 /// <iq from='room@…' to='user@…' type='error' id='…'>
@@ -137,35 +138,41 @@ pub(super) async fn handle_mentions_permissions_iq(
 /// </iq>
 /// ```
 ///
-/// RFC 6120 §8.3.1 makes the original-payload echo a MAY for stanza
-/// errors in general; XEP-0513 §295 elevates it for this IQ by
-/// showing it in the canonical example. Echoing the empty
-/// `<query xmlns='urn:xmpp:mentions:0'/>` (not the full request
-/// payload — RFC says "the original XML which caused the error" but
-/// the §295 example uses the empty-query shape) makes the response
-/// recognisable as the §295 error contract.
+/// The XEP is Experimental and the example is illustrative — RFC 6120
+/// §8.3.1 leaves the original-payload echo as a MAY and does not
+/// constrain `<query/>` vs `<error/>` element order. We follow the
+/// canonical example as defence-in-depth shape conformance: clients
+/// that match the response by name+ns work either way, but emitting
+/// the query-before-error order mirrors what an XEP author would
+/// reasonably expect to see on the wire.
+///
+/// Built directly with `Element::builder` (rather than via
+/// `Iq::Error` + the xso-derived serializer) because the latter
+/// emits `<error/>` before `<payload/>` based on struct field order.
 fn mentions_permissions_error(
     iq: &Iq,
     response_from: Option<&str>,
     response_to: Option<&str>,
     error: xmpp_parsers::stanza_error::StanzaError,
 ) -> String {
-    let response = Iq::Error {
-        from: response_from.and_then(|s| jid::Jid::from_str(s).ok()),
-        to: response_to.and_then(|s| jid::Jid::from_str(s).ok()),
-        id: iq.id().to_string(),
-        error,
-        payload: Some(
-            xmpp_parsers::minidom::Element::builder("query", NS_EXPLICIT_MENTIONS).build(),
-        ),
-    };
-    iq_to_xml(response)
+    let mut envelope = Element::builder("iq", waddle_xmpp::ns::JABBER_CLIENT)
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), iq.id())
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "error");
+    if let Some(from) = response_from {
+        envelope = envelope.attr(minidom::rxml::xml_ncname!("from").to_owned(), from);
+    }
+    if let Some(to) = response_to {
+        envelope = envelope.attr(minidom::rxml::xml_ncname!("to").to_owned(), to);
+    }
+    let mut envelope = envelope.build();
+    envelope.append_child(Element::builder("query", NS_EXPLICIT_MENTIONS).build());
+    envelope.append_child(Element::from(error));
+    element_to_xml(envelope)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use xmpp_parsers::minidom::Element;
 
     fn iq_get(payload: Element, to: Option<&str>) -> Iq {
         Iq::Get {
@@ -289,9 +296,12 @@ mod tests {
     /// XEP-0513 §295 error example (xep-0513.xml §"permissions"):
     /// the response carries an empty `<query
     /// xmlns='urn:xmpp:mentions:0'/>` echoed alongside `<error/>`.
-    /// RFC 6120 §8.3.1 makes payload-echo on errors a MAY; the XEP
-    /// elevates it for this IQ by showing it in the canonical
-    /// example, so the handler MUST emit it.
+    /// RFC 6120 §8.3.1 leaves payload-echo as a MAY and does not
+    /// constrain element order; XEP §295 is Experimental and the
+    /// example is illustrative. The handler still emits the echo in
+    /// query-before-error order as defence-in-depth shape conformance
+    /// — a client that pattern-matches positionally against the XEP
+    /// example will accept the response either way.
     #[test]
     fn mentions_permissions_error_envelope_echoes_empty_query() {
         let xml = build_error(feature_not_implemented_iq_error("read-only"));
@@ -317,6 +327,20 @@ mod tests {
             "feature-not-implemented",
             "urn:ietf:params:xml:ns:xmpp-stanzas",
         ));
+
+        // Positional pin: §295 example shows `<query/>` BEFORE
+        // `<error/>`. The xmpp_parsers `Iq::Error` serializer emits
+        // the struct fields in declaration order (error first), so
+        // building the envelope directly via `Element::builder` +
+        // `append_child` (as `mentions_permissions_error` does) is
+        // load-bearing for matching the canonical example.
+        let names: Vec<&str> = parsed.children().map(Element::name).collect();
+        assert_eq!(
+            names,
+            vec!["query", "error"],
+            "§295 example shows <query/> before <error/>; \
+             child order must match the canonical wire shape"
+        );
     }
 
     // The full happy GET → §303 form path is exercised end-to-end by

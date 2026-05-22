@@ -175,8 +175,8 @@ use vcard_private::{handle_private_storage_iq, handle_vcard_iq};
 pub(super) use super::super::build_iq_error_xml_typed;
 
 use super::super::{
-    build_iq_result_xml, destroy_room_actor, get_room_actor, iq_to_xml, is_muc_room_jid,
-    stanza_to_xml, WebSocketState,
+    build_iq_result_xml, destroy_room_actor, element_to_xml, get_room_actor, iq_to_xml,
+    is_muc_room_jid, stanza_to_xml, WebSocketState,
 };
 use super::presence::{
     get_managed_channel_for_room, send_current_presence_from_user_to_user,

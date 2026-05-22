@@ -331,12 +331,10 @@ async fn mentions_permissions_iq_full_jid_target_returns_bad_request_with_query_
 async fn mentions_permissions_iq_service_jid_target_returns_bad_request_with_query_echo() {
     let _guard = TEST_SERIAL.lock().await;
     let (_server, mut client) = setup().await;
-    let _ = join_room(
-        &mut client,
-        &format!("perms-svc-warmup-{}@muc.{DOMAIN}", uuid::Uuid::new_v4()),
-    )
-    .await;
 
+    // No warmup-room join here: §295 to the service JID is a
+    // service-domain stanza and does not require room membership;
+    // the handler rejects it on addressing alone.
     let iq_id = "perm-svc-1";
     client
         .send(&format!(
