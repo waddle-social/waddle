@@ -178,7 +178,9 @@ fn xep0513_permissions_form_matches_spec_shape() {
             .children()
             .filter(|c| c.is("field", NS_DATA_FORMS))
             .find(|c| c.attr("var") == Some(var))
-            .unwrap_or_else(|| panic!("§303: required field `{var}` is present"));
+            .unwrap_or_else(|| {
+                panic!("§303: required field `{var}` is missing from the permissions form")
+            });
         assert!(
             field.has_child("required", NS_DATA_FORMS),
             "§303: required field `{var}` carries `<required/>`"

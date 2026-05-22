@@ -372,6 +372,8 @@ async fn mentions_permissions_iq_full_jid_target_returns_bad_request_with_query_
         frame.contains("urn:xmpp:mentions:0"),
         "error envelope must echo the §295 <query/>, got: {frame}"
     );
+
+    let _ = client.close().await;
 }
 
 /// XEP-0513 §292 explicitly permits queries to "rooms which do not
@@ -456,4 +458,6 @@ async fn mentions_permissions_iq_service_jid_target_returns_bad_request_with_que
         frame.contains("urn:xmpp:mentions:0"),
         "error envelope must echo the §295 <query/>, got: {frame}"
     );
+
+    let _ = client.close().await;
 }

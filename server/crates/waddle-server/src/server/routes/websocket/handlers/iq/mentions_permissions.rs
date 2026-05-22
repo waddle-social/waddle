@@ -20,12 +20,18 @@
 //!
 //! ## Authorization
 //!
-//! GET is open to any participant: §303 says the form is what
+//! GET is open to any **authenticated** requester (including
+//! non-occupants of the target room): §303 says the form is what
 //! "receiving entities SHOULD refer to when deciding whether to notify
 //! the user", so non-occupants legitimately need to read it (e.g. a
 //! client deciding whether to render `@channel` autocompletion). We
-//! still require the target to be a bare room JID — full-JID
-//! addressing here is non-sensical and likely a client bug.
+//! do gate on session-binding — an unauthenticated WebSocket
+//! connection that has not completed SASL bind receives
+//! `<not-authorized/>` so the §303 policy isn't readable pre-auth
+//! (mirrors the auth posture of sibling room-targeted handlers like
+//! `pin_query`). We still require the target to be a bare room JID
+//! — full-JID and service-JID addressing here are non-sensical and
+//! likely client bugs.
 //!
 //! SET is unconditionally `<forbidden type='auth'/>` per XEP-0513
 //! §295's MUST text: *"If the user is not an owner, a `<forbidden/>`
@@ -91,10 +97,24 @@ pub(super) fn is_mentions_permissions_iq(iq: &Iq, muc_domain: &str) -> bool {
 pub(super) async fn handle_mentions_permissions_iq(
     iq: &Iq,
     _state: &WebSocketState,
-    _sender_jid: Option<&FullJid>,
+    sender_jid: Option<&FullJid>,
     response_from: Option<&str>,
     response_to: Option<&str>,
 ) -> Vec<String> {
+    if sender_jid.is_none() {
+        // Pre-auth WebSocket connection (no resource bound yet). The
+        // §303 form is server-default and stateless, but the
+        // auth-posture across sibling room-targeted handlers
+        // (e.g. `pin_query`) is "no bound JID → not-authorized"; we
+        // mirror that so §295 doesn't become a pre-auth probe
+        // surface.
+        return vec![mentions_permissions_error(
+            iq,
+            response_from,
+            response_to,
+            not_authorized_iq_error("Authentication required."),
+        )];
+    }
     let Some(target) = iq.to() else {
         return vec![mentions_permissions_error(
             iq,
@@ -235,10 +255,11 @@ mod tests {
 
     #[test]
     fn is_mentions_permissions_iq_accepts_set_for_routing() {
-        // §295 owner-submitted form. Even though we'll answer with
-        // feature-not-implemented, the dispatcher MUST route the IQ
-        // here so we own the wire shape (echoed `<query/>` in the
-        // error response is consistent with §295's error example).
+        // §295 owner-submitted form. We answer with
+        // `<forbidden type='auth'/>` per §295's MUST text — the
+        // dispatcher MUST route the IQ here so we own the wire
+        // shape (the echoed `<query/>` in the error response
+        // matches §295's canonical error example, xep-0513.xml:476).
         let iq = iq_set(mentions_payload(), Some("team@muc.example"));
         assert!(is_mentions_permissions_iq(&iq, "muc.example"));
     }
@@ -372,6 +393,26 @@ mod tests {
             "§295 example shows <query/> before <error/>; \
              child order must match the canonical wire shape"
         );
+    }
+
+    /// Pre-auth path: when the WebSocket connection has not yet
+    /// completed SASL bind, `sender_jid` is `None`. The handler MUST
+    /// respond with `<not-authorized type='auth'/>` rather than
+    /// expose the §303 policy form to an unbound session — mirrors
+    /// the auth posture of sibling room-targeted handlers
+    /// (`pin_query` does the same). This test pins the shape of the
+    /// error envelope produced on that path.
+    #[test]
+    fn mentions_permissions_unauthenticated_error_envelope_is_not_authorized() {
+        let xml = build_error(not_authorized_iq_error("Authentication required."));
+        let parsed = Element::from_str(&xml).expect("error iq parses");
+        let error = parsed
+            .children()
+            .find(|c| c.name() == "error")
+            .expect("error element present");
+        assert!(error.has_child("not-authorized", "urn:ietf:params:xml:ns:xmpp-stanzas"));
+        // RFC 6120 §8.3.3.13: not-authorized travels with type='auth'.
+        assert_eq!(error.attr("type"), Some("auth"));
     }
 
     // The full happy GET → §303 form path is exercised end-to-end by
