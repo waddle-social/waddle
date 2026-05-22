@@ -528,7 +528,9 @@ pub fn muc_room_features(
         // surface so the form on the wire matches the policy in
         // effect. Per CLAUDE.md XEP conformance hard rule, advertising
         // the namespaces only becomes safe once the IQ form is
-        // implemented — see `iq/mentions_permissions.rs` for the
+        // implemented — see
+        // `server/crates/waddle-server/src/server/routes/websocket/handlers/iq/mentions_permissions.rs`
+        // (the §295 IQ handler in the `waddle-server` crate) for the
         // handler that backs these advertised features.
         //
         // TODO(#525-followup): §303 also SHOULDs that the
