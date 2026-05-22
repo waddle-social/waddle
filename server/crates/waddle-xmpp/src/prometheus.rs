@@ -120,9 +120,12 @@ static PUSH_OUTBOX_RETRY_SCHEDULED: AtomicU64 = AtomicU64::new(0);
 // `waddle_push_outbox_dead_lettered_total`: every permanent-
 // failure outcome from `retry_or_fail_outcome_for_claimed_job`
 // that flips the job to its terminal `failed` status (the typed
-// `DeadLettered` arm). Non-zero is always an alert condition:
-// the outbox row stays around for post-mortem but no further
-// retry will run.
+// `DeadLettered` arm). Sustained non-zero rate is alert-worthy,
+// but isolated dead-letters are expected during normal provider-
+// side device revocation (APNs `Unregistered` / FCM
+// `UNREGISTERED` flows produce a terminal failure per job). The
+// outbox row stays around for post-mortem; no further retry
+// runs for that job.
 static PUSH_OUTBOX_DEAD_LETTERED: AtomicU64 = AtomicU64::new(0);
 
 // `waddle_push_suppressed_total{reason="..."}` — incremented every
@@ -558,7 +561,7 @@ pub fn render_metrics() -> String {
             "# HELP waddle_push_outbox_retry_scheduled_total XEP-0357 outbox jobs that failed transiently and were requeued with a backoff. Sustained non-zero with flat published_total indicates the Push Service boundary is wedged.\n",
             "# TYPE waddle_push_outbox_retry_scheduled_total counter\n",
             "waddle_push_outbox_retry_scheduled_total {push_outbox_retry_scheduled}\n",
-            "# HELP waddle_push_outbox_dead_lettered_total XEP-0357 outbox jobs that exhausted retry attempts and were flipped to the terminal `failed` status. Always alert-worthy: the outbox row stays for post-mortem but no further retry will run.\n",
+            "# HELP waddle_push_outbox_dead_lettered_total XEP-0357 outbox jobs that exhausted retry attempts and were flipped to the terminal `failed` status. Investigate sustained non-zero rate; isolated dead-letters are expected during provider-side device revocation (APNs `Unregistered` / FCM `UNREGISTERED` device flows). The outbox row stays for post-mortem and no further retry will run.\n",
             "# TYPE waddle_push_outbox_dead_lettered_total counter\n",
             "waddle_push_outbox_dead_lettered_total {push_outbox_dead_lettered}\n",
             "{push_suppressed_lines}",
