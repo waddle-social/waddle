@@ -469,11 +469,23 @@ async fn handle_iq_disco_info_advertises_replies() {
     assert!(user_response.contains("urn:xmpp:fulltext:0"));
 }
 
-/// Regression test for #750: every component JID advertised by
-/// `XmppServiceDomains` MUST answer disco#info with a non-empty
-/// IQ-result, identifying its category/type, in BOTH the
+/// Regression test for #750: every component JID this deployment
+/// advertises in disco#items MUST answer disco#info with a non-empty
+/// IQ-result, identifying both its `category` AND `type`, in BOTH the
 /// `Unauthenticated` and `ready` connection phases (the bound
 /// resource shape the chat client uses after SASL+bind).
+///
+/// The component JIDs are derived from `state.deps.service_domains`
+/// (the six XEP-0030 sub-domains) plus the XEP-0272 calls mixer
+/// derived as `calls.<server-domain>` — same shape used by
+/// `disco_items.rs:224` and `calls_mixer.rs:19`. Reading from the
+/// shared config keeps this test in lock-step with the advertised
+/// disco#items list; adding a service to `XmppServiceDomains` will
+/// fail to compile here (the tuple list is exhaustive in spirit, not
+/// in field destructuring, but the reviewer reading this is the
+/// safety net) and the (category, type) expectation locks the
+/// advertised identity shape so a swap of e.g. push from
+/// `pubsub/push` to `pubsub/service` is caught here.
 ///
 /// HAR captures against `waddle.chat` showed all 7 of these IQs
 /// going unanswered in production. PR #749 added client-side
@@ -486,17 +498,20 @@ async fn handle_iq_disco_info_answers_every_component_domain() {
     let state = create_test_websocket_state().await;
     let alice: FullJid = "alice@example.com/web".parse().expect("alice jid");
 
-    let components: &[(&str, &str)] = &[
-        ("muc.example.com", "conference"),
-        ("upload.example.com", "store"),
-        ("spaces.example.com", "pubsub"),
-        ("community.example.com", "pubsub"),
-        ("extensions.example.com", "pubsub"),
-        ("push.example.com", "pubsub"),
-        ("calls.example.com", "conference"),
+    let domains = &state.deps.service_domains;
+    let calls_mixer = format!("calls.{server_domain}");
+    let components: Vec<(&str, &str, &str)> = vec![
+        // (jid, expected disco#info identity category, expected type)
+        (domains.muc.as_str(), "conference", "text"),
+        (domains.upload.as_str(), "store", "file"),
+        (domains.spaces.as_str(), "pubsub", "service"),
+        (domains.community.as_str(), "pubsub", "service"),
+        (domains.extensions.as_str(), "pubsub", "service"),
+        (domains.push.as_str(), "pubsub", "push"),
+        (calls_mixer.as_str(), "conference", "audio-video"),
     ];
 
-    for (target, expected_category) in components {
+    for (target, expected_category, expected_type) in &components {
         for phase in [ConnectionPhase::Unauthenticated, ready_phase(&alice)] {
             let phase_label = match &phase {
                 ConnectionPhase::Unauthenticated => "Unauthenticated",
@@ -539,12 +554,12 @@ async fn handle_iq_disco_info_answers_every_component_domain() {
                 "disco#info to {target} response must use the disco#info namespace: {xml}",
             );
             assert!(
-                query
-                    .children()
-                    .any(|child| child.name() == "identity"
-                        && child.ns() == waddle_xmpp::disco::DISCO_INFO_NS
-                        && child.attr("category") == Some(*expected_category)),
-                "disco#info to {target} ({phase_label}) must advertise category='{expected_category}': {xml}",
+                query.children().any(|child| child.name() == "identity"
+                    && child.ns() == waddle_xmpp::disco::DISCO_INFO_NS
+                    && child.attr("category") == Some(*expected_category)
+                    && child.attr("type") == Some(*expected_type)),
+                "disco#info to {target} ({phase_label}) must advertise identity \
+                 category='{expected_category}' type='{expected_type}': {xml}",
             );
             assert!(
                 query.children().any(|child| child.name() == "feature"
