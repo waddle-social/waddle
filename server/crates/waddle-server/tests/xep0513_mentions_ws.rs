@@ -323,6 +323,52 @@ async fn mentions_permissions_iq_full_jid_target_returns_bad_request_with_query_
     );
 }
 
+/// XEP-0513 §292 explicitly permits queries to "rooms which do not
+/// have permissions set, and/or do not advertise support for them".
+/// Waddle's §295 form is a server-wide hardcoded policy, so the
+/// handler returns the §303 form for a never-instantiated room JID
+/// — useful so clients can render mention UI before joining. This
+/// test pins that intentional divergence from sibling handlers like
+/// pin_query (which return item-not-found for unknown room JIDs);
+/// a regression to "lookup room first" would make joinless mention
+/// UI rendering impossible.
+#[tokio::test]
+async fn mentions_permissions_iq_get_returns_form_for_never_instantiated_room() {
+    let _guard = TEST_SERIAL.lock().await;
+    let (_server, mut client) = setup().await;
+    // Unique room JID that was never joined → not in the room
+    // registry. Real production room actors are created on first
+    // join; this name has never been touched.
+    let room = format!("perms-virgin-{}@muc.{DOMAIN}", uuid::Uuid::new_v4());
+
+    let iq_id = "perm-virgin-1";
+    client
+        .send(&format!(
+            r#"<iq type="get" to="{room}" id="{iq_id}"><query xmlns="urn:xmpp:mentions:0"/></iq>"#
+        ))
+        .await
+        .expect("send §295 query to never-joined room");
+
+    let frame = client
+        .recv_matching(|frame| {
+            frame.contains(&format!("id='{iq_id}'")) || frame.contains(&format!("id=\"{iq_id}\""))
+        })
+        .await
+        .expect("§295 response for never-joined room");
+
+    assert!(
+        frame.contains("type='result'") || frame.contains("type=\"result\""),
+        "expected iq result for never-instantiated room — §292 contemplates \
+         queries to rooms without permissions set, got: {frame}"
+    );
+    assert!(
+        frame.contains("mentions#count"),
+        "form must include mentions#count for any room JID, got: {frame}"
+    );
+
+    let _ = client.close().await;
+}
+
 /// XEP-0513 §295: the service JID itself (`to='muc.example'`, no
 /// node) is not a room and has no §303 permissions form. Returns
 /// `<bad-request/>` with the same `<query/>` echo as the full-JID

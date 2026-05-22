@@ -524,11 +524,12 @@ pub fn muc_room_features(
         // `#channel` is advertised). Slices 3a/3b enforce a hardcoded
         // server policy (`mentions#count = 5`, `mentions#individual
         // = participants`, `mentions#channel = moderators`) at T0
-        // candidate classification; slice 3c (PR #747) wires the §295
-        // IQ surface so the form on the wire matches the policy in
+        // candidate classification; slice 3c wires the §295 IQ
+        // surface so the form on the wire matches the policy in
         // effect. Per CLAUDE.md XEP conformance hard rule, advertising
         // the namespaces only becomes safe once the IQ form is
-        // implemented — both arrive together in this commit.
+        // implemented — see `iq/mentions_permissions.rs` for the
+        // handler that backs these advertised features.
         Feature::explicit_mentions(),
         Feature::channel_mentions(),
         Feature::muc_nonanonymous(),

@@ -32,6 +32,27 @@
 //! exposes no owner-driven config mutation for the §303 form; the
 //! policy is a server-internal hardcoded default. Returning forbidden
 //! would lie about *why* the set failed.
+//!
+//! ## No room-existence gate
+//!
+//! Sibling room-targeted IQ handlers (`pin_query`, the MUC disco-info
+//! path) look up the room in the registry and return
+//! `<item-not-found/>` for unknown room JIDs. The §295 handler
+//! deliberately does NOT: the §303 form is a **server-wide**
+//! hardcoded policy (`mentions#count = 5`, `mentions#individual =
+//! participants`, `mentions#channel = moderators`) that is identical
+//! for every room and does not read any per-room state. XEP-0513
+//! §292 explicitly contemplates this: "Mentions MAY be sent in rooms
+//! which do not have permissions set, and/or do not advertise support
+//! for them." Answering a §295 query for a never-instantiated room
+//! is therefore both spec-conformant and useful — clients
+//! legitimately need the form to know how to render mention UI
+//! *before* joining a room.
+//!
+//! Because every bare-JID query under `muc_domain` yields the same
+//! form, the handler is not an existence oracle: it cannot
+//! distinguish "exists" from "does not exist" any better than a
+//! client sending the same query twice with different JIDs.
 
 use super::*;
 use jid::FullJid;
