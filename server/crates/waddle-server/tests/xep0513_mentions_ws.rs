@@ -4,7 +4,10 @@ mod ws_common;
 
 use std::str::FromStr;
 use tokio::sync::Mutex;
+use waddle_xmpp::xep::{DataForm, Field, FormType, IntoElement, NS_EXPLICIT_MENTIONS};
+use waddle_xmpp::Stanza;
 use ws_common::{TestServer, WsXmppClient};
+use xmpp_parsers::iq::Iq;
 use xmpp_parsers::minidom::Element;
 
 const DOMAIN: &str = "localhost";
@@ -49,6 +52,52 @@ fn find_occupant_id(element: &Element) -> Option<String> {
         return element.attr("id").map(str::to_string);
     }
     element.children().find_map(find_occupant_id)
+}
+
+/// Serialize a typed `Stanza` to its wire-form XML string. Mirrors
+/// the helper in xep0503_spaces_ws.rs so XEP wire-shape tests follow
+/// the same "typed builder + serializer" pattern (CLAUDE.md XML
+/// generation hard rule — never construct XML with `format!`).
+fn stanza_to_xml(stanza: &Stanza) -> String {
+    let mut buf = Vec::new();
+    stanza
+        .to_element()
+        .write_to(&mut buf)
+        .expect("serializing stanza to Vec<u8> should not fail");
+    String::from_utf8(buf).expect("xmpp_parsers serializes valid UTF-8")
+}
+
+/// Build a typed `<iq type='get'>` envelope addressed at `to` with
+/// the given `payload` and return its wire-form XML string. Used by
+/// the §295 GET / bad-request tests so the test author doesn't have
+/// to hand-roll attribute quoting or namespace declarations.
+fn iq_get_xml(id: &str, to: &str, payload: Element) -> String {
+    let iq = Iq::Get {
+        from: None,
+        to: Some(to.parse().expect("valid iq destination JID")),
+        id: id.to_string(),
+        payload,
+    };
+    stanza_to_xml(&Stanza::Iq(Box::new(iq)))
+}
+
+/// Build a typed `<iq type='set'>` envelope addressed at `to` with
+/// the given `payload` and return its wire-form XML string. Used by
+/// the §295 owner-submit test.
+fn iq_set_xml(id: &str, to: &str, payload: Element) -> String {
+    let iq = Iq::Set {
+        from: None,
+        to: Some(to.parse().expect("valid iq destination JID")),
+        id: id.to_string(),
+        payload,
+    };
+    stanza_to_xml(&Stanza::Iq(Box::new(iq)))
+}
+
+/// Build the §295 `<query xmlns='urn:xmpp:mentions:0'/>` empty
+/// payload via the typed `Element::builder`.
+fn mentions_query_empty() -> Element {
+    Element::builder("query", NS_EXPLICIT_MENTIONS).build()
 }
 
 #[tokio::test]
@@ -177,9 +226,7 @@ async fn mentions_permissions_iq_get_returns_303_form() {
 
     let iq_id = "perm-get-1";
     client
-        .send(&format!(
-            r#"<iq type="get" to="{room}" id="{iq_id}"><query xmlns="urn:xmpp:mentions:0"/></iq>"#
-        ))
+        .send(&iq_get_xml(iq_id, &room, mentions_query_empty()))
         .await
         .expect("send §295 query");
 
@@ -238,19 +285,20 @@ async fn mentions_permissions_iq_set_returns_forbidden() {
     let _occupant_id = join_room(&mut client, &room).await;
 
     let iq_id = "perm-set-1";
+    // Build the §295 owner-submit payload via the typed
+    // `DataForm` builder so the wire shape is whatever a
+    // conformant XEP-0004 serializer would emit — and the test
+    // exercises the *real* form-validation path on the server.
+    let submit_form = DataForm::new(FormType::Submit)
+        .add_field(Field::form_type(NS_EXPLICIT_MENTIONS))
+        .add_field(Field::text_single("mentions#count", "1"))
+        .add_field(Field::text_single("mentions#individual", "participants"))
+        .add_field(Field::text_single("mentions#channel", "moderators"))
+        .into_element();
+    let mut submit_query = Element::builder("query", NS_EXPLICIT_MENTIONS).build();
+    submit_query.append_child(submit_form);
     client
-        .send(&format!(
-            r#"<iq type="set" to="{room}" id="{iq_id}">
-                <query xmlns="urn:xmpp:mentions:0">
-                    <x xmlns="jabber:x:data" type="submit">
-                        <field var="FORM_TYPE"><value>urn:xmpp:mentions:0</value></field>
-                        <field var="mentions#count"><value>1</value></field>
-                        <field var="mentions#individual"><value>participants</value></field>
-                        <field var="mentions#channel"><value>moderators</value></field>
-                    </x>
-                </query>
-            </iq>"#
-        ))
+        .send(&iq_set_xml(iq_id, &room, submit_query))
         .await
         .expect("send §295 set");
 
@@ -298,10 +346,9 @@ async fn mentions_permissions_iq_full_jid_target_returns_bad_request_with_query_
     let _occupant_id = join_room(&mut client, &room).await;
 
     let iq_id = "perm-fjid-1";
+    let full_jid = format!("{room}/{occupant_nick}");
     client
-        .send(&format!(
-            r#"<iq type="get" to="{room}/{occupant_nick}" id="{iq_id}"><query xmlns="urn:xmpp:mentions:0"/></iq>"#
-        ))
+        .send(&iq_get_xml(iq_id, &full_jid, mentions_query_empty()))
         .await
         .expect("send §295 query to full JID");
 
@@ -347,9 +394,7 @@ async fn mentions_permissions_iq_get_returns_form_for_never_instantiated_room() 
 
     let iq_id = "perm-virgin-1";
     client
-        .send(&format!(
-            r#"<iq type="get" to="{room}" id="{iq_id}"><query xmlns="urn:xmpp:mentions:0"/></iq>"#
-        ))
+        .send(&iq_get_xml(iq_id, &room, mentions_query_empty()))
         .await
         .expect("send §295 query to never-joined room");
 
@@ -386,10 +431,9 @@ async fn mentions_permissions_iq_service_jid_target_returns_bad_request_with_que
     // service-domain stanza and does not require room membership;
     // the handler rejects it on addressing alone.
     let iq_id = "perm-svc-1";
+    let service_jid = format!("muc.{DOMAIN}");
     client
-        .send(&format!(
-            r#"<iq type="get" to="muc.{DOMAIN}" id="{iq_id}"><query xmlns="urn:xmpp:mentions:0"/></iq>"#
-        ))
+        .send(&iq_get_xml(iq_id, &service_jid, mentions_query_empty()))
         .await
         .expect("send §295 query to service JID");
 
