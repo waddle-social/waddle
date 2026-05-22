@@ -826,13 +826,16 @@ fn groupchat_mentions_carry_owner_noping(
         // ANY `<mention/>` carrying `mentions='…'` is group-scope (the
         // presence of `mentions=` declares group intent), not a
         // personal mention naming `owner`. The `<noping/>` on a
-        // group-scope mention suppresses GROUP pushes (handled by
-        // `current_room_channel_mention` for `#channel`, or by
-        // falling through to NotifyAll for unsupported groups), not
-        // the owner's personal notification. Generalised from the
-        // slice 3a precedent (`!is_channel()` was too narrow —
-        // unsupported groups like `#space` slipped through; review
-        // on PR #756).
+        // group-scope `#channel` mention causes
+        // `current_room_channel_mention` to return `false` (its first
+        // guard short-circuits on `mention.noping`), which collapses
+        // the channel scope to `None` and the message classifies as
+        // `NotifyAll` — i.e. the channel push is suppressed via the
+        // scope path, NOT projected onto the owner's personal
+        // notification. For unsupported groups the same fall-through
+        // applies. Generalised from the slice 3a precedent
+        // (`!is_channel()` was too narrow — unsupported groups like
+        // `#space` slipped through; review on PR #756).
         mention.noping
             && mention.mentions.is_none()
             && (mention
@@ -2040,9 +2043,11 @@ mod tests {
             // sub-types (`#server` MUST carry the server JID per
             // xep-0513.xml:132; `#hats` MUST carry the hat URI per
             // :188), but Waddle's classifier rejects unsupported
-            // groups by namespace via `is_channel()` BEFORE inspecting
-            // any other attribute. The test is intentionally
-            // shape-minimal to prove the rejection survives malformed
+            // groups via the strict-equality check in `is_channel()`
+            // (the `mentions=` value must equal exactly
+            // `urn:xmpp:mentions:0#channel`) BEFORE inspecting any
+            // other attribute. The test is intentionally shape-
+            // minimal to prove the rejection survives malformed
             // inputs (defence-in-depth review on PR #756). Wire-shape
             // correctness for properly-formed mentions is pinned by
             // the dedicated XEP custom tests in
