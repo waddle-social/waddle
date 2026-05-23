@@ -1253,15 +1253,14 @@ export class BrowserXmppClient {
    * server is a separate concern — chat should call both when the
    * user opts out.
    */
-  async disablePushDevice(opts: { serviceJid: string; node: string; deviceId: string }): Promise<boolean> {
+  async disablePushDevice(opts: { serviceJid: string; node: string; deviceId: string }): Promise<{ id: string; node: string; status: string } | null> {
     const xmpp = await this.requireConnectedXmpp();
-    if (!xmpp.disable_push_device) return false;
+    if (!xmpp.disable_push_device) return null;
     try {
-      await xmpp.disable_push_device(opts.serviceJid, opts.node, opts.deviceId);
-      return true;
+      return await xmpp.disable_push_device(opts.serviceJid, opts.node, opts.deviceId);
     } catch (error) {
       console.warn("[xmpp] disable-device IQ rejected:", error);
-      return false;
+      return null;
     }
   }
 

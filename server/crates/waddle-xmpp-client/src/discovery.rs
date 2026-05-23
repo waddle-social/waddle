@@ -15,7 +15,7 @@ pub use iq::{
     build_muc_admin_affiliation_set_iq, build_pubsub_items_iq, build_register_push_device_iq,
     build_roster_get_iq, build_upload_slot_iq, build_user_search_form_iq, build_user_search_iq,
     build_waddle_inbox_mark_read_iq, parse_muc_admin_affiliation_query, parse_roster_result,
-    parse_user_search_form, parse_user_search_result, WebPushDeviceRegistration,
+    parse_user_search_form, parse_user_search_result, PushDeviceRegistration,
 };
 pub use parsing::{
     parse_disco_info_result, parse_disco_items_result, parse_space_channels_result,

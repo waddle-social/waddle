@@ -79,7 +79,7 @@ impl WaddleClient {
         future_to_promise(async move {
             let opts: RegisterWebPushDeviceOptions = serde_wasm_bindgen::from_value(options)
                 .map_err(|err| JsValue::from_str(&err.to_string()))?;
-            let registration = WebPushDeviceRegistration {
+            let registration = PushDeviceRegistration {
                 node: &opts.node,
                 device_id: &opts.device_id,
                 environment: &opts.environment,
@@ -103,6 +103,10 @@ impl WaddleClient {
 
     /// `<disable-device node='…' device-id='…'/>` on the Push Service.
     /// Idempotent — operates on the (node, device-id) row only.
+    /// Resolves to the typed `PushServiceDevice` shape so the chat
+    /// caller can observe the post-disable status (round-5 Copilot
+    /// review on PR #760 — match `register_web_push_device`'s
+    /// contract instead of resolving void).
     pub fn disable_push_device(
         &self,
         service_jid: String,
@@ -112,8 +116,16 @@ impl WaddleClient {
         let inner = self.inner.clone();
         future_to_promise(async move {
             let iq = build_disable_push_device_iq(&service_jid, &node, &device_id);
-            let _ = send_iq_command(inner, iq).await?;
-            Ok(JsValue::UNDEFINED)
+            let result = send_iq_command(inner, iq).await?;
+            let device = result
+                .get_child("device", WADDLE_PUSH_SERVICE_NS)
+                .ok_or_else(|| JsValue::from_str("disable-device response missing <device/>"))?;
+            let response = PushServiceDevice {
+                id: require_non_empty_attr(device, "id", "disable-device")?,
+                node: require_non_empty_attr(device, "node", "disable-device")?,
+                status: require_non_empty_attr(device, "status", "disable-device")?,
+            };
+            to_js_value(&response)
         })
     }
 

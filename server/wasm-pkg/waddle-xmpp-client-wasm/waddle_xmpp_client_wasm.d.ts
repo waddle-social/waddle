@@ -31,6 +31,10 @@ export class WaddleClient {
     /**
      * `<disable-device node='…' device-id='…'/>` on the Push Service.
      * Idempotent — operates on the (node, device-id) row only.
+     * Resolves to the typed `PushServiceDevice` shape so the chat
+     * caller can observe the post-disable status (round-5 Copilot
+     * review on PR #760 — match `register_web_push_device`'s
+     * contract instead of resolving void).
      */
     disable_push_device(service_jid: string, node: string, device_id: string): Promise<any>;
     disable_push_notifications(service_jid: string, node: string): Promise<any>;

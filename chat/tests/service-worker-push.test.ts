@@ -152,7 +152,7 @@ describe("service worker push handling", () => {
     expect((options as NotificationOptions).body).toBe("hello there");
   });
 
-  test("dm conversation routes to /{username}", async () => {
+  test("dm conversation routes to /dm/{username}", async () => {
     const worker = loadServiceWorker();
     const event = makePushEvent({
       json: () => ({

@@ -780,7 +780,7 @@ fn build_ensure_push_node_carries_app_id_and_target_jid() {
 
 #[test]
 fn build_register_push_device_carries_web_push_fields() {
-    let registration = WebPushDeviceRegistration {
+    let registration = PushDeviceRegistration {
         node: "node-abc",
         device_id: "web-1234",
         environment: "prod",
@@ -817,7 +817,7 @@ fn build_register_push_device_omits_missing_provider_fields() {
     // APNs / FCM (later PRs) populate a subset of the provider fields.
     // Verify the builder omits the elements rather than emitting them
     // empty, so the server's text-extractor returns None.
-    let registration = WebPushDeviceRegistration {
+    let registration = PushDeviceRegistration {
         node: "node-abc",
         device_id: "ios-1234",
         environment: "prod",

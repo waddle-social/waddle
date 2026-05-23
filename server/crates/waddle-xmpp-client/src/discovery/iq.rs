@@ -385,7 +385,7 @@ pub fn build_ensure_push_node_iq(push_service_jid: &str, app_id: &str) -> Elemen
 /// Typed Web Push provider credentials. The three `Option<&str>` fields
 /// mirror the XEP-0357 §10 "provider" data — for Web Push all three
 /// are populated; APNs / FCM populate only the subset they need.
-pub struct WebPushDeviceRegistration<'a> {
+pub struct PushDeviceRegistration<'a> {
     pub node: &'a str,
     pub device_id: &'a str,
     pub environment: &'a str,
@@ -398,7 +398,7 @@ pub struct WebPushDeviceRegistration<'a> {
 pub fn build_register_push_device_iq(
     push_service_jid: &str,
     platform: &str,
-    registration: &WebPushDeviceRegistration<'_>,
+    registration: &PushDeviceRegistration<'_>,
 ) -> Element {
     let id = format!("push-register-device-{}", next_id());
     let mut register = Element::builder("register-device", WADDLE_PUSH_SERVICE_NS)

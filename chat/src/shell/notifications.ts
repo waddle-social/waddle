@@ -217,6 +217,17 @@ export function usePushNotifications() {
       );
       return false;
     }
+    // Defense in depth: the WASM bridge hard-fails on empty IDs
+    // (round-5 `require_non_empty_attr`), so an empty here would be
+    // a regression — but a stale wasm bundle (built before that
+    // fix) would have returned `{ id: "", … }`. Refuse to persist
+    // and propagate as caller failure.
+    if (!ensured.id) {
+      console.warn(
+        "[notifications] ensure-node returned an empty node id; refusing to persist",
+      );
+      return false;
+    }
     persistPushNodeId(ensured.id);
 
     const deviceId = ensureDeviceId();
@@ -299,7 +310,8 @@ export function usePushNotifications() {
     // the final return value — round-5 Greptile P1 finding.
     let pushServiceDisabled: boolean | null = null;
     if (deviceId) {
-      pushServiceDisabled = await xmppClient.disablePushDevice({ serviceJid, node, deviceId });
+      const disabled = await xmppClient.disablePushDevice({ serviceJid, node, deviceId });
+      pushServiceDisabled = disabled !== null;
       if (!pushServiceDisabled) {
         console.warn(
           "[notifications] disable-device IQ failed; user-server XEP-0357 disable will still run",
@@ -342,7 +354,16 @@ export function usePushNotifications() {
 }
 
 function resolvePushServiceJid(userJid: string): string {
-  const domain = userJid.includes("@") ? userJid.split("@")[1] ?? "" : "";
+  // Strip any `/resource` BEFORE extracting the domain — callers
+  // sometimes pass a full JID (e.g. `connectionStore.session.jid`
+  // which can carry the resource). Without the strip, the domain
+  // becomes `example.com/resource` and the push service JID
+  // becomes `push.example.com/resource` — an invalid component
+  // address that breaks ensure-node / register-device / enable.
+  // Round-5 Copilot review on PR #760.
+  if (!userJid.includes("@")) return "";
+  const bare = userJid.split("/")[0] ?? "";
+  const domain = bare.split("@")[1] ?? "";
   return PUSH_SERVICE_JID || (domain ? `push.${domain}` : "");
 }
 
