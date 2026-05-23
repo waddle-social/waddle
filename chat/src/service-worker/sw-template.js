@@ -90,19 +90,32 @@ self.addEventListener("push", (event) => {
   try {
     data = event.data?.json() ?? {};
   } catch {
-    const text = event.data?.text() ?? "";
-    data = { title: "Waddle", body: text };
+    // Server side now sends a JSON envelope; a non-JSON body is a
+    // legacy / misconfigured publish. Fall through to the minimal
+    // notification with no payload-derived state.
+    data = {};
   }
   const unreadCount = parseUnreadCount(data);
+  const context = parseRoutingContext(data);
+  const route = routeFromContext(context);
+  // Minimal default: no sender, no body preview. The server's
+  // canonical XEP-0357 summary carries `message-count` only; richer
+  // title/body previews remain opt-in (set `data.title`/`data.body`
+  // explicitly on the server side when the user has opted in).
+  const title = typeof data.title === "string" && data.title.length > 0
+    ? data.title
+    : defaultTitle(unreadCount);
+  const body = typeof data.body === "string" ? data.body : "";
+  const tag = context.conversation ?? data.roomJid ?? "waddle";
   event.waitUntil(
     Promise.all([
       updateAppBadge(unreadCount),
       postUnreadCountToClients(unreadCount),
-      self.registration.showNotification(data.title ?? "Waddle", {
-        body: data.body ?? "",
-        tag: data.roomJid,
+      self.registration.showNotification(title, {
+        body,
+        tag,
         icon: NOTIFICATION_ICON_URL,
-        data: { url: data.url ?? roomJidToPath(data.roomJid) },
+        data: { url: route, context },
       }),
     ]),
   );
@@ -123,16 +136,62 @@ self.addEventListener("notificationclick", (event) => {
   );
 });
 
-function roomJidToPath(roomJid) {
-  if (typeof roomJid !== "string") return "/";
-  const localpart = roomJid.split("@")[0] ?? "";
-  const parts = localpart.split("_");
-  if (parts.length < 2) return "/";
-  return `/${encodeURIComponent(parts[0])}/${encodeURIComponent(parts[1])}`;
+function defaultTitle(unreadCount) {
+  if (unreadCount === null || unreadCount === 0) return "Waddle";
+  if (unreadCount === 1) return "1 new message";
+  return `${unreadCount} new messages`;
+}
+
+/// Extract the typed `urn:waddle:push:context:0` routing context the
+/// server attaches to every published XEP-0357 notification. The
+/// Web Push HTTP dispatcher (server-side) flattens the XML into a
+/// JSON shape on `data.context = { conversation, thread, class }`.
+/// Legacy publishes that lack the typed context fall back to
+/// `data.roomJid` / `data.url` for compatibility.
+function parseRoutingContext(data) {
+  const context = data?.context;
+  if (context && typeof context === "object") {
+    return {
+      conversation: typeof context.conversation === "string" ? context.conversation : undefined,
+      thread: typeof context.thread === "string" && context.thread.length > 0 ? context.thread : undefined,
+      class: typeof context.class === "string" ? context.class : undefined,
+    };
+  }
+  return {
+    conversation: typeof data?.roomJid === "string" ? data.roomJid : undefined,
+    thread: undefined,
+    class: undefined,
+  };
+}
+
+/// Convert a typed routing context to a URL the chat will navigate to
+/// on click. The mapping mirrors the chat-side router:
+///   * direct (DM)            → /{username}
+///   * groupchat_*  (MUC)     → /{space}/{channel}
+///   * thread present          → /{...}/threads/{thread}
+function routeFromContext(context) {
+  const conv = context?.conversation;
+  if (typeof conv !== "string" || conv.length === 0) return "/";
+  if (!conv.includes("@")) return "/";
+  const [localpart] = conv.split("@");
+  const isMuc = conv.includes("@muc.") || (localpart ?? "").includes("_");
+  let base = "/";
+  if (isMuc) {
+    const parts = (localpart ?? "").split("_");
+    if (parts.length >= 2) {
+      base = `/${encodeURIComponent(parts[0])}/${encodeURIComponent(parts[1])}`;
+    }
+  } else {
+    base = `/${encodeURIComponent(localpart ?? "")}`;
+  }
+  if (context.thread) {
+    return `${base}/threads/${encodeURIComponent(context.thread)}`;
+  }
+  return base;
 }
 
 function parseUnreadCount(data) {
-  const value = data?.unreadCount ?? data?.totalUnread ?? data?.["message-count"];
+  const value = data?.messageCount ?? data?.["message-count"] ?? data?.unreadCount ?? data?.totalUnread;
   if (value === undefined || value === null) return null;
   const parsed = typeof value === "number" ? value : Number(value);
   if (!Number.isFinite(parsed) || parsed < 0) return null;

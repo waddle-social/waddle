@@ -28,11 +28,23 @@ export class WaddleClient {
      */
     admin_users_list(prefix?: string | null, page_size?: number | null, after_cursor?: string | null): Promise<any>;
     connect(): Promise<any>;
+    /**
+     * `<disable-device node='…' device-id='…'/>` on the Push Service.
+     * Idempotent — operates on the (node, device-id) row only.
+     */
+    disable_push_device(service_jid: string, node: string, device_id: string): Promise<any>;
     disable_push_notifications(service_jid: string, node: string): Promise<any>;
     disconnect(): Promise<any>;
     discover_extension_routes(user_jid?: string | null): Promise<any>;
     discover_upload_service(): Promise<any>;
     enable_push_notifications(service_jid: string, node: string, token: string): Promise<any>;
+    /**
+     * `<ensure-node app-id='…'/>` on the Push Service. Resolves to the
+     * stable per-(user, app-id) node id the chat should hand to
+     * `register_web_push_device` and to `enable_push_notifications`.
+     * Idempotent — repeated calls return the same node.
+     */
+    ensure_push_node(service_jid: string, app_id: string): Promise<any>;
     /**
      * Fetch the latest items from the community Social Feed node on
      * `spaces_jid` (typically `spaces.<domain>`). Returns an array of
@@ -137,6 +149,16 @@ export class WaddleClient {
     publish_mood(mood_json: any): Promise<any>;
     publish_tune(tune_json: any): Promise<any>;
     publish_vcard4(vcard_json: any): Promise<any>;
+    /**
+     * `<register-device …><provider-…/></register-device>` on the
+     * Push Service. Idempotent on `(node, device_id)`; subsequent
+     * calls UPDATE the row with the latest Web Push credentials.
+     * All three `provider_*` arguments are required for Web Push
+     * (they map to `PushSubscription.endpoint`, `.keys.auth`,
+     * `.keys.p256dh` respectively). Passing an empty string for any
+     * of them omits the corresponding child from the wire IQ.
+     */
+    register_web_push_device(service_jid: string, node: string, device_id: string, environment: string, provider_endpoint: string, provider_token: string, provider_key_material: string): Promise<any>;
     request_avatar(jid: string): Promise<any>;
     request_upload_slot(service_jid: string, filename: string, size: bigint, content_type: string): Promise<any>;
     retract_activity(): Promise<any>;

@@ -62,17 +62,36 @@ function makePushEvent(data: { json?: () => unknown; text?: () => string }) {
   };
 }
 
+function makeNotificationClickEvent(data: Record<string, unknown>) {
+  const waits: Array<Promise<unknown>> = [];
+  return {
+    notification: {
+      close: mock(() => {}),
+      data,
+    },
+    waitUntil: (promise: Promise<unknown>) => {
+      waits.push(Promise.resolve(promise));
+    },
+    done: () => Promise.all(waits),
+  };
+}
+
 describe("service worker push handling", () => {
-  test("sets the app badge and posts unread count to open clients", async () => {
+  test("minimal XEP-0357 payload renders default title + no body preview, updates badge", async () => {
+    // Canonical XEP-0357 publish carries only `message-count` plus
+    // the `urn:waddle:push:context:0` routing context. No sender,
+    // no body — preview is opt-in and out of the default path
+    // (#528 acceptance criterion).
     const client = { postMessage: mock((_message: unknown) => {}) };
     const worker = loadServiceWorker([client]);
     const event = makePushEvent({
       json: () => ({
-        title: "Mention",
-        body: "hello",
-        roomJid: "space_channel@conference.example.com",
-        url: "/space/channel",
         "message-count": 6,
+        context: {
+          conversation: "space_channel@conference.example.com",
+          thread: "",
+          class: "groupchat_personal_mention",
+        },
       }),
     });
 
@@ -80,31 +99,119 @@ describe("service worker push handling", () => {
     await event.done();
 
     expect(worker.setAppBadge).toHaveBeenCalledWith(6);
-    expect(worker.clients.matchAll).toHaveBeenCalledWith({
-      type: "window",
-      includeUncontrolled: true,
-    });
     expect(client.postMessage).toHaveBeenCalledWith({
       type: "waddle:unread-count",
       unreadCount: 6,
     });
-    expect(worker.showNotification).toHaveBeenCalledWith("Mention", {
-      body: "hello",
+    // Default title is count-derived; body is the empty string (no
+    // preview unless the server explicitly populated it).
+    expect(worker.showNotification).toHaveBeenCalledWith("6 new messages", {
+      body: "",
       tag: "space_channel@conference.example.com",
       icon: "/android-chrome-192x192.png",
-      data: { url: "/space/channel" },
+      data: {
+        url: "/space/channel",
+        context: {
+          conversation: "space_channel@conference.example.com",
+          thread: undefined,
+          class: "groupchat_personal_mention",
+        },
+      },
     });
   });
 
-  test("clears the app badge when push unread count is zero", async () => {
+  test("singular default title for a one-message push", async () => {
+    const worker = loadServiceWorker();
+    const event = makePushEvent({
+      json: () => ({
+        "message-count": 1,
+        context: { conversation: "alice@example.com" },
+      }),
+    });
+    worker.dispatch("push", event);
+    await event.done();
+
+    expect(worker.showNotification.mock.calls[0]?.[0]).toBe("1 new message");
+  });
+
+  test("opt-in preview keeps server-provided title/body", async () => {
+    const worker = loadServiceWorker();
+    const event = makePushEvent({
+      json: () => ({
+        title: "Mention from @alice",
+        body: "hello there",
+        "message-count": 1,
+        context: { conversation: "space_channel@conference.example.com" },
+      }),
+    });
+    worker.dispatch("push", event);
+    await event.done();
+
+    const [title, options] = worker.showNotification.mock.calls[0] ?? [];
+    expect(title).toBe("Mention from @alice");
+    expect((options as NotificationOptions).body).toBe("hello there");
+  });
+
+  test("dm conversation routes to /{username}", async () => {
+    const worker = loadServiceWorker();
+    const event = makePushEvent({
+      json: () => ({
+        "message-count": 1,
+        context: { conversation: "alice@example.com" },
+      }),
+    });
+    worker.dispatch("push", event);
+    await event.done();
+
+    const [, options] = worker.showNotification.mock.calls[0] ?? [];
+    expect((options as NotificationOptions & { data: { url: string } }).data.url).toBe("/alice");
+  });
+
+  test("muc conversation routes to /{space}/{channel}", async () => {
+    const worker = loadServiceWorker();
+    const event = makePushEvent({
+      json: () => ({
+        "message-count": 1,
+        context: { conversation: "myspace_general@muc.example.com" },
+      }),
+    });
+    worker.dispatch("push", event);
+    await event.done();
+
+    const [, options] = worker.showNotification.mock.calls[0] ?? [];
+    expect((options as NotificationOptions & { data: { url: string } }).data.url).toBe(
+      "/myspace/general",
+    );
+  });
+
+  test("thread context routes to /{...}/threads/{thread}", async () => {
+    const worker = loadServiceWorker();
+    const event = makePushEvent({
+      json: () => ({
+        "message-count": 1,
+        context: {
+          conversation: "myspace_general@muc.example.com",
+          thread: "thread-42",
+          class: "groupchat_personal_mention",
+        },
+      }),
+    });
+    worker.dispatch("push", event);
+    await event.done();
+
+    const [, options] = worker.showNotification.mock.calls[0] ?? [];
+    expect((options as NotificationOptions & { data: { url: string } }).data.url).toBe(
+      "/myspace/general/threads/thread-42",
+    );
+  });
+
+  test("clears the app badge when push message-count is zero", async () => {
     const client = { postMessage: mock((_message: unknown) => {}) };
     const worker = loadServiceWorker([client]);
     const event = makePushEvent({
       json: () => ({
-        title: "Waddle",
-        body: "",
-        roomJid: "space_channel@conference.example.com",
-        unreadCount: 0,
+        "message-count": 0,
+        context: { conversation: "alice@example.com" },
       }),
     });
 
@@ -118,7 +225,11 @@ describe("service worker push handling", () => {
     });
   });
 
-  test("keeps text notification fallback for non-json push payloads", async () => {
+  test("non-json push body silently produces a default 'Waddle' notification with no body", async () => {
+    // Legacy / malformed publishes that aren't JSON: render the
+    // minimal default without leaking the raw text into the
+    // notification body. The chat's foreground Notification API
+    // handles richer presentation when the user is online.
     const worker = loadServiceWorker();
     const event = makePushEvent({
       json: () => {
@@ -132,12 +243,41 @@ describe("service worker push handling", () => {
 
     expect(worker.setAppBadge).not.toHaveBeenCalled();
     expect(worker.clearAppBadge).not.toHaveBeenCalled();
-    expect(worker.clients.matchAll).not.toHaveBeenCalled();
     expect(worker.showNotification).toHaveBeenCalledWith("Waddle", {
-      body: "raw push text",
-      tag: undefined,
+      body: "",
+      tag: "waddle",
       icon: "/android-chrome-192x192.png",
-      data: { url: "/" },
+      data: {
+        url: "/",
+        context: {
+          conversation: undefined,
+          thread: undefined,
+          class: undefined,
+        },
+      },
     });
+  });
+
+  test("notification click navigates focused window to the routed url", async () => {
+    const focusedClient = {
+      url: "https://chat.example.test/some/other/page",
+      focus: mock(async () => {}),
+      navigate: mock(async (_url: string) => null),
+    };
+    const worker = loadServiceWorker([focusedClient]);
+    const clickEvent = makeNotificationClickEvent({
+      url: "/myspace/general/threads/thread-42",
+      context: {
+        conversation: "myspace_general@muc.example.com",
+        thread: "thread-42",
+      },
+    });
+    worker.dispatch("notificationclick", clickEvent);
+    await clickEvent.done();
+
+    expect(focusedClient.focus).toHaveBeenCalled();
+    expect(focusedClient.navigate).toHaveBeenCalledWith(
+      "/myspace/general/threads/thread-42",
+    );
   });
 });

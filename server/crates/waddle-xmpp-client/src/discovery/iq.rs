@@ -11,7 +11,7 @@ use super::types::{
 };
 use super::{
     CLIENT_NS, DATA_FORMS_NS, DISCO_INFO_NS, DISCO_ITEMS_NS, MUC_ADMIN_NS, PUBSUB_NS, PUSH_NS,
-    ROSTER_NS, UPLOAD_NS, USER_SEARCH_NS, WADDLE_INBOX_NS,
+    ROSTER_NS, UPLOAD_NS, USER_SEARCH_NS, WADDLE_INBOX_NS, WADDLE_PUSH_SERVICE_NS,
 };
 
 // ── IQ builders ──────────────────────────────────────────────────────────────
@@ -344,4 +344,135 @@ pub fn parse_muc_admin_affiliation_query(
             })
             .collect(),
     )
+}
+
+// ── urn:waddle:push-service:0 (issue #528) ───────────────────────────────────
+//
+// These three IQs register the chat's push provider credentials with
+// `push.<domain>`, the XMPP-native Push Service boundary. The shape
+// matches the server-side handlers in
+// `crates/waddle-server/src/server/routes/websocket/handlers/iq/push_service_iq.rs`.
+//
+// Web Push specifically maps the browser `PushSubscription` to the
+// three `provider-*` child elements:
+//   * `provider-endpoint`     ← `subscription.endpoint`
+//   * `provider-token`        ← `subscription.toJSON().keys.auth`
+//   * `provider-key-material` ← `subscription.toJSON().keys.p256dh`
+//
+// APNs / FCM (later PRs #529 / #530) reuse the same `register-device`
+// shape with the same field names — only the populated subset differs.
+
+/// Build a `<ensure-node app-id='…'/>` IQ. Returns a per-(user, app)
+/// stable node id from the Push Service; idempotent — repeated calls
+/// resolve to the same row.
+pub fn build_ensure_push_node_iq(push_service_jid: &str, app_id: &str) -> Element {
+    let id = format!("push-ensure-node-{}", next_id());
+    Element::builder("iq", CLIENT_NS)
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "set")
+        .attr(
+            minidom::rxml::xml_ncname!("to").to_owned(),
+            push_service_jid,
+        )
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), id)
+        .append(
+            Element::builder("ensure-node", WADDLE_PUSH_SERVICE_NS)
+                .attr(minidom::rxml::xml_ncname!("app-id").to_owned(), app_id)
+                .build(),
+        )
+        .build()
+}
+
+/// Typed Web Push provider credentials. The three `Option<&str>` fields
+/// mirror the XEP-0357 §10 "provider" data — for Web Push all three
+/// are populated; APNs / FCM populate only the subset they need.
+pub struct WebPushDeviceRegistration<'a> {
+    pub node: &'a str,
+    pub device_id: &'a str,
+    pub environment: &'a str,
+    pub provider_endpoint: Option<&'a str>,
+    pub provider_token: Option<&'a str>,
+    pub provider_key_material: Option<&'a str>,
+}
+
+/// Build a `<register-device …><provider-…/></register-device>` IQ.
+pub fn build_register_push_device_iq(
+    push_service_jid: &str,
+    platform: &str,
+    registration: &WebPushDeviceRegistration<'_>,
+) -> Element {
+    let id = format!("push-register-device-{}", next_id());
+    let mut register = Element::builder("register-device", WADDLE_PUSH_SERVICE_NS)
+        .attr(
+            minidom::rxml::xml_ncname!("node").to_owned(),
+            registration.node,
+        )
+        .attr(
+            minidom::rxml::xml_ncname!("device-id").to_owned(),
+            registration.device_id,
+        )
+        .attr(minidom::rxml::xml_ncname!("platform").to_owned(), platform)
+        .attr(
+            minidom::rxml::xml_ncname!("environment").to_owned(),
+            registration.environment,
+        );
+    if let Some(endpoint) = registration.provider_endpoint {
+        register = register.append(
+            Element::builder("provider-endpoint", WADDLE_PUSH_SERVICE_NS)
+                .append(endpoint)
+                .build(),
+        );
+    }
+    if let Some(token) = registration.provider_token {
+        register = register.append(
+            Element::builder("provider-token", WADDLE_PUSH_SERVICE_NS)
+                .append(token)
+                .build(),
+        );
+    }
+    if let Some(key_material) = registration.provider_key_material {
+        register = register.append(
+            Element::builder("provider-key-material", WADDLE_PUSH_SERVICE_NS)
+                .append(key_material)
+                .build(),
+        );
+    }
+    Element::builder("iq", CLIENT_NS)
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "set")
+        .attr(
+            minidom::rxml::xml_ncname!("to").to_owned(),
+            push_service_jid,
+        )
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), id)
+        .append(register.build())
+        .build()
+}
+
+/// Build a `<disable-device node='…' device-id='…'/>` IQ. Removes the
+/// device row at the Push Service so a published notification job no
+/// longer fans out to it. The XEP-0357 `<disable/>` on the user-server
+/// is a separate concern (see [`build_disable_push_iq`]); the chat
+/// SHOULD call both when the user opts out.
+pub fn build_disable_push_device_iq(
+    push_service_jid: &str,
+    node: &str,
+    device_id: &str,
+) -> Element {
+    let id = format!("push-disable-device-{}", next_id());
+    Element::builder("iq", CLIENT_NS)
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "set")
+        .attr(
+            minidom::rxml::xml_ncname!("to").to_owned(),
+            push_service_jid,
+        )
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), id)
+        .append(
+            Element::builder("disable-device", WADDLE_PUSH_SERVICE_NS)
+                .attr(minidom::rxml::xml_ncname!("node").to_owned(), node)
+                .attr(
+                    minidom::rxml::xml_ncname!("device-id").to_owned(),
+                    device_id,
+                )
+                .build(),
+        )
+        .build()
 }

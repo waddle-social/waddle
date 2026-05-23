@@ -424,6 +424,25 @@ pub struct WaddleServerVersion {
     pub os: Option<String>,
 }
 
+/// Result of `<ensure-node app-id='…'/>` against the Push Service.
+/// Returned to chat JS for use in subsequent `<register-device>` and
+/// XEP-0357 `<enable>` calls.
+#[derive(Debug, Serialize)]
+pub struct PushServiceNode {
+    pub id: String,
+    pub jid: String,
+    #[serde(rename = "appId")]
+    pub app_id: String,
+}
+
+/// Result of `<register-device …/>` against the Push Service.
+#[derive(Debug, Serialize)]
+pub struct PushServiceDevice {
+    pub id: String,
+    pub node: String,
+    pub status: String,
+}
+
 #[derive(Debug, Serialize)]
 pub struct WaddleRoomMember {
     pub jid: String,

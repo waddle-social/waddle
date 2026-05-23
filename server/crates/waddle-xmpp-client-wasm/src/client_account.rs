@@ -40,6 +40,83 @@ impl WaddleClient {
         })
     }
 
+    /// `<ensure-node app-id='…'/>` on the Push Service. Resolves to the
+    /// stable per-(user, app-id) node id the chat should hand to
+    /// `register_web_push_device` and to `enable_push_notifications`.
+    /// Idempotent — repeated calls return the same node.
+    pub fn ensure_push_node(&self, service_jid: String, app_id: String) -> Promise {
+        let inner = self.inner.clone();
+        future_to_promise(async move {
+            let iq = build_ensure_push_node_iq(&service_jid, &app_id);
+            let result = send_iq_command(inner, iq).await?;
+            let node = result
+                .get_child("node", WADDLE_PUSH_SERVICE_NS)
+                .ok_or_else(|| JsValue::from_str("ensure-node response missing <node/>"))?;
+            let id = node.attr("id").unwrap_or_default().to_string();
+            let jid = node.attr("jid").unwrap_or_default().to_string();
+            let app_id = node.attr("app-id").unwrap_or_default().to_string();
+            let response = PushServiceNode { id, jid, app_id };
+            to_js_value(&response)
+        })
+    }
+
+    /// `<register-device …><provider-…/></register-device>` on the
+    /// Push Service. Idempotent on `(node, device_id)`; subsequent
+    /// calls UPDATE the row with the latest Web Push credentials.
+    /// All three `provider_*` arguments are required for Web Push
+    /// (they map to `PushSubscription.endpoint`, `.keys.auth`,
+    /// `.keys.p256dh` respectively). Passing an empty string for any
+    /// of them omits the corresponding child from the wire IQ.
+    pub fn register_web_push_device(
+        &self,
+        service_jid: String,
+        node: String,
+        device_id: String,
+        environment: String,
+        provider_endpoint: String,
+        provider_token: String,
+        provider_key_material: String,
+    ) -> Promise {
+        let inner = self.inner.clone();
+        future_to_promise(async move {
+            let registration = WebPushDeviceRegistration {
+                node: &node,
+                device_id: &device_id,
+                environment: &environment,
+                provider_endpoint: non_empty(&provider_endpoint),
+                provider_token: non_empty(&provider_token),
+                provider_key_material: non_empty(&provider_key_material),
+            };
+            let iq = build_register_push_device_iq(&service_jid, "web", &registration);
+            let result = send_iq_command(inner, iq).await?;
+            let device = result
+                .get_child("device", WADDLE_PUSH_SERVICE_NS)
+                .ok_or_else(|| JsValue::from_str("register-device response missing <device/>"))?;
+            let response = PushServiceDevice {
+                id: device.attr("id").unwrap_or_default().to_string(),
+                node: device.attr("node").unwrap_or_default().to_string(),
+                status: device.attr("status").unwrap_or_default().to_string(),
+            };
+            to_js_value(&response)
+        })
+    }
+
+    /// `<disable-device node='…' device-id='…'/>` on the Push Service.
+    /// Idempotent — operates on the (node, device-id) row only.
+    pub fn disable_push_device(
+        &self,
+        service_jid: String,
+        node: String,
+        device_id: String,
+    ) -> Promise {
+        let inner = self.inner.clone();
+        future_to_promise(async move {
+            let iq = build_disable_push_device_iq(&service_jid, &node, &device_id);
+            let _ = send_iq_command(inner, iq).await?;
+            Ok(JsValue::UNDEFINED)
+        })
+    }
+
     pub fn get_server_version(&self) -> Promise {
         let inner = self.inner.clone();
         future_to_promise(async move {

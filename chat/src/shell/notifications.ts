@@ -3,8 +3,21 @@ import type { BrowserXmppClient } from "@/lib/xmpp-client";
 import { getOrRegisterServiceWorker, registerServiceWorker as registerChatServiceWorker } from "@/lib/service-worker-registration";
 
 const STORAGE_KEY = "waddle.chat.notifications-enabled";
+const DEVICE_ID_STORAGE_KEY = "waddle.chat.push-device-id";
+const PUSH_NODE_STORAGE_KEY = "waddle.chat.push-node-id";
 const PUSH_SERVICE_JID = (import.meta.env.PUBLIC_WADDLE_XMPP_PUSH_SERVICE_JID ?? "").trim();
+const VAPID_PUBLIC_KEY = (import.meta.env.PUBLIC_WADDLE_VAPID_PUBLIC_KEY ?? "").trim();
 const NOTIFICATION_ICON_URL = "/android-chrome-192x192.png";
+
+/// Push Service app-id for the browser/PWA chat. APNs ("ios") and
+/// FCM ("android") live behind the same `<register-device>` shape
+/// with their own app-ids — issues #529 / #530.
+const APP_ID_WEB = "web";
+
+/// Provider environment label for the Web Push device row. There's
+/// no APNs-style dev/prod split for Web Push; the constant is
+/// pinned here so the server's environment-filter logic is exercised.
+const PUSH_ENVIRONMENT = "prod";
 
 const hasNotificationApi =
   typeof window !== "undefined" && "Notification" in window;
@@ -112,15 +125,64 @@ export function usePushNotifications() {
     }
   }
 
-  async function syncPushSubscription(xmppClient: BrowserXmppClient, userJid: string): Promise<boolean> {
+  /**
+   * Full enable flow: ensure-node → register-device → XEP-0357 enable.
+   *
+   * Both calls to the Push Service (`urn:waddle:push-service:0`)
+   * carry the actual browser PushSubscription credentials; the
+   * downstream XEP-0357 `<enable jid='push.<domain>' node='…'/>`
+   * to the user-server carries ONLY the service JID + node — no
+   * endpoint, no p256dh, no auth. The Push Service is the single
+   * owner of provider creds.
+   */
+  async function syncPushSubscription(
+    xmppClient: BrowserXmppClient,
+    userJid: string,
+  ): Promise<boolean> {
     if (!notificationsEnabled.value || permissionState.value !== "granted") return false;
 
     const serviceJid = resolvePushServiceJid(userJid);
     if (!serviceJid) return false;
 
+    // Get or create a browser-side PushSubscription. Without a VAPID
+    // public key configured at build time the browser will refuse to
+    // subscribe — log and bail so the caller can fall back to the
+    // foreground Notification API.
+    if (!VAPID_PUBLIC_KEY) return false;
+    const reg = await getOrRegisterServiceWorker();
+    if (!reg) return false;
+    let subscription = await reg.pushManager.getSubscription();
+    if (!subscription) {
+      subscription = await subscribeToPush(VAPID_PUBLIC_KEY);
+    }
+    if (!subscription) return false;
+
+    const subJson = subscription.toJSON();
+    const endpoint = subscription.endpoint;
+    const auth = (subJson.keys?.auth ?? "").trim();
+    const p256dh = (subJson.keys?.p256dh ?? "").trim();
+    if (!endpoint || !auth || !p256dh) return false;
+
+    // Stable per-app PEP-style node id from the Push Service.
+    const ensured = await xmppClient.ensurePushNode({ serviceJid, appId: APP_ID_WEB });
+    if (!ensured) return false;
+    persistPushNodeId(ensured.id);
+
+    const deviceId = ensureDeviceId();
+    const registered = await xmppClient.registerWebPushDevice({
+      serviceJid,
+      node: ensured.id,
+      deviceId,
+      environment: PUSH_ENVIRONMENT,
+      providerEndpoint: endpoint,
+      providerToken: auth,
+      providerKeyMaterial: p256dh,
+    });
+    if (!registered) return false;
+
     return xmppClient.enablePushNotifications({
       serviceJid,
-      node: "web-push",
+      node: ensured.id,
     });
   }
 
@@ -136,9 +198,19 @@ export function usePushNotifications() {
     const serviceJid = resolvePushServiceJid(userJid);
     if (!serviceJid) return false;
 
+    const node = loadPushNodeId();
+    const deviceId = loadDeviceId();
+
+    // Disable on the Push Service first (drops the device row that
+    // would otherwise still receive fan-outs), then XEP-0357
+    // disable on the user-server.
+    if (node && deviceId) {
+      await xmppClient.disablePushDevice({ serviceJid, node, deviceId });
+    }
+    if (!node) return false;
     return xmppClient.disablePushNotifications({
       serviceJid,
-      node: "web-push",
+      node,
     });
   }
 
@@ -168,6 +240,32 @@ function loadEnabled(): boolean {
   } catch {
     return false;
   }
+}
+
+function ensureDeviceId(): string {
+  if (typeof window === "undefined") {
+    return `web-${Math.random().toString(36).slice(2)}`;
+  }
+  const existing = window.localStorage.getItem(DEVICE_ID_STORAGE_KEY);
+  if (existing && existing.length > 0) return existing;
+  const minted = `web-${crypto.randomUUID()}`;
+  window.localStorage.setItem(DEVICE_ID_STORAGE_KEY, minted);
+  return minted;
+}
+
+function loadDeviceId(): string | null {
+  if (typeof window === "undefined") return null;
+  return window.localStorage.getItem(DEVICE_ID_STORAGE_KEY);
+}
+
+function persistPushNodeId(node: string): void {
+  if (typeof window === "undefined") return;
+  window.localStorage.setItem(PUSH_NODE_STORAGE_KEY, node);
+}
+
+function loadPushNodeId(): string | null {
+  if (typeof window === "undefined") return null;
+  return window.localStorage.getItem(PUSH_NODE_STORAGE_KEY);
 }
 
 function urlBase64ToUint8Array(base64String: string): Uint8Array {
