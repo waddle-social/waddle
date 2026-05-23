@@ -11,3 +11,5 @@ pub mod reply;
 pub mod thread;
 pub mod threads;
 pub mod xep0292;
+pub mod xep0402;
+pub mod xep0492;

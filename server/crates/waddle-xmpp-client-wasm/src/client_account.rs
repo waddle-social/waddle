@@ -144,6 +144,131 @@ impl WaddleClient {
         })
     }
 
+    /// Fetch the user's XEP-0402 bookmark items from PEP, surfaced as
+    /// a typed array carrying the XEP-0492 fallback notification mode
+    /// (when present) for each room. The chat UI uses this to
+    /// hydrate per-chat notification controls on connect.
+    ///
+    /// Resolves to an empty array when the user's PEP `urn:xmpp:bookmarks:1`
+    /// node is absent (first publish hasn't happened) or empty. Per
+    /// XEP-0492 §3, the chat caller resolves an empty `notify_mode`
+    /// against the conversation-kind default.
+    pub fn fetch_user_bookmarks(&self) -> Promise {
+        let inner = self.inner.clone();
+        future_to_promise(async move {
+            let iq = build_fetch_bookmarks_iq("bookmarks-fetch");
+            let result = send_iq_command(inner, iq).await?;
+            let items = parse_bookmarks_response(&result);
+            let surfaced: Vec<WaddleBookmarkItem> = items
+                .into_iter()
+                .map(|item| {
+                    let notify_mode = item.extensions.iter().find_map(|ext| {
+                        if ext.is(
+                            "notify",
+                            waddle_xmpp_client::xep::xep0492::NS_NOTIFICATION_SETTINGS,
+                        ) {
+                            read_fallback_mode(ext)
+                        } else {
+                            None
+                        }
+                    });
+                    WaddleBookmarkItem {
+                        jid: item.jid.to_string(),
+                        name: item.name,
+                        autojoin: item.autojoin,
+                        notify_mode,
+                    }
+                })
+                .collect();
+            to_js_value(&surfaced)
+        })
+    }
+
+    /// Set the per-chat XEP-0492 notification mode for one room by
+    /// merging into the user's XEP-0402 bookmark for that room. If no
+    /// bookmark exists yet for `room_jid`, one is created with
+    /// `autojoin=false` so this call doesn't change join behavior.
+    ///
+    /// Semantics:
+    /// * Fetch existing PEP bookmarks (XEP-0402 §2).
+    /// * Find the item whose id matches `room_jid`; if missing,
+    ///   construct a fresh item with the given `name` (or `None`).
+    /// * Replace the fallback `<notify/>` child via
+    ///   [`merge_notify_into_extensions`] — foreign `<advanced/>`
+    ///   children and identity-scoped siblings written by other
+    ///   clients are preserved verbatim (XEP-0492 §3).
+    /// * Publish the merged item back.
+    ///
+    /// Resolves to the new [`WaddleBookmarkItem`] so the chat UI can
+    /// reconcile its store without a follow-up fetch.
+    pub fn set_room_notification_mode(&self, options: JsValue) -> Promise {
+        let inner = self.inner.clone();
+        future_to_promise(async move {
+            let opts: SetRoomNotificationModeOptions = serde_wasm_bindgen::from_value(options)
+                .map_err(|err| JsValue::from_str(&err.to_string()))?;
+            let room_jid: jid::BareJid = opts.room_jid.parse().map_err(|err: jid::Error| {
+                JsValue::from_str(&format!("invalid room JID: {err}"))
+            })?;
+
+            // Fetch existing bookmarks so we can preserve the rest of
+            // the bookmark item plus any foreign extension children
+            // when we merge in the new <notify/> setting.
+            let fetch_iq = build_fetch_bookmarks_iq("bookmarks-fetch-for-set");
+            let fetch_result = send_iq_command(inner.clone(), fetch_iq).await?;
+            let items = parse_bookmarks_response(&fetch_result);
+
+            let existing_extensions: Option<Element> =
+                items.iter().find(|item| item.jid == room_jid).map(|item| {
+                    let mut wrapper =
+                        Element::builder("extensions", waddle_xmpp_client::pep::NS_BOOKMARKS);
+                    for child in &item.extensions {
+                        wrapper = wrapper.append(child.clone());
+                    }
+                    wrapper.build()
+                });
+            let merged_extensions =
+                merge_notify_into_extensions(existing_extensions.as_ref(), opts.mode);
+            let extensions_children: Vec<Element> = merged_extensions.children().cloned().collect();
+
+            let existing = items.iter().find(|item| item.jid == room_jid);
+            let merged_item = BookmarkItem {
+                jid: room_jid.clone(),
+                name: existing
+                    .and_then(|item| item.name.clone())
+                    .or(opts.name.clone()),
+                autojoin: existing.map(|item| item.autojoin).unwrap_or(false),
+                extensions: extensions_children,
+            };
+
+            let publish_iq = build_publish_bookmark_iq(&merged_item, "bookmarks-publish");
+            let _ = send_iq_command(inner, publish_iq).await?;
+
+            // Read the actually-published mode back out of our merged
+            // extensions so the JS caller observes exactly what went
+            // on the wire (instead of trusting `opts.mode`).
+            // `merge_notify_into_extensions` always produces a
+            // `<notify/>` with a fallback child, so this is
+            // guaranteed Some.
+            let notify_mode = merged_item.extensions.iter().find_map(|ext| {
+                if ext.is(
+                    "notify",
+                    waddle_xmpp_client::xep::xep0492::NS_NOTIFICATION_SETTINGS,
+                ) {
+                    read_fallback_mode(ext)
+                } else {
+                    None
+                }
+            });
+            let response = WaddleBookmarkItem {
+                jid: merged_item.jid.to_string(),
+                name: merged_item.name,
+                autojoin: merged_item.autojoin,
+                notify_mode,
+            };
+            to_js_value(&response)
+        })
+    }
+
     pub fn get_server_version(&self) -> Promise {
         let inner = self.inner.clone();
         future_to_promise(async move {

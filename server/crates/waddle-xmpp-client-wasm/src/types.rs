@@ -743,6 +743,40 @@ pub struct WaddleFetchThreadsOptions {
     pub after_cursor: Option<String>,
 }
 
+/// JS-facing shape for one XEP-0402 bookmark item exposed via
+/// `WaddleClient::fetch_user_bookmarks`.
+///
+/// `jid` is the bookmarked room's bare JID as a string (JS-friendly);
+/// `notify_mode` is the XEP-0492 fallback setting (no `identity-*`
+/// attrs). `None` means the bookmark has no `<notify/>` extension
+/// and the chat UI should resolve against the conversation-kind
+/// default from XEP-0492 §3.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WaddleBookmarkItem {
+    pub jid: String,
+    pub name: Option<String>,
+    pub autojoin: bool,
+    pub notify_mode: Option<waddle_xmpp_client::xep::xep0492::NotifyMode>,
+}
+
+/// Options bag for `WaddleClient::set_room_notification_mode`.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetRoomNotificationModeOptions {
+    /// Bare JID of the room whose XEP-0402 bookmark carries the
+    /// XEP-0492 `<notify/>` extension.
+    pub room_jid: String,
+    /// Typed at the WASM boundary — unknown values fail at
+    /// `serde_wasm_bindgen::from_value` rather than reaching the IQ
+    /// builder.
+    pub mode: waddle_xmpp_client::xep::xep0492::NotifyMode,
+    /// `<conference name='…'>` to use when no bookmark exists yet.
+    /// Required so the freshly-created bookmark carries a useful
+    /// display name for clients that lean on it (XEP-0402 §2.2).
+    pub name: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::RegisterWebPushDeviceOptions;

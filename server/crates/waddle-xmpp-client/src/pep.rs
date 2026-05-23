@@ -17,6 +17,8 @@ pub const NS_ACTIVITY: &str = "http://jabber.org/protocol/activity";
 pub const NS_TUNE: &str = "http://jabber.org/protocol/tune";
 pub const NS_PUBSUB: &str = "http://jabber.org/protocol/pubsub";
 pub const NS_PUBSUB_EVENT: &str = "http://jabber.org/protocol/pubsub#event";
+/// XEP-0402 bookmarks PEP node + payload namespace.
+pub const NS_BOOKMARKS: &str = "urn:xmpp:bookmarks:1";
 
 const NS_CLIENT: &str = "jabber:client";
 

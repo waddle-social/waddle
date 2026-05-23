@@ -47,6 +47,10 @@ use waddle_xmpp_client::xep::{
     thread::ThreadRef,
     threads::{build_fetch_threads_iq, parse_threads_response},
     xep0292::{build_fetch_vcard4_iq, build_publish_vcard4_iq, parse_pep_vcard4, VCard4},
+    xep0402::{
+        build_fetch_bookmarks_iq, build_publish_bookmark_iq, parse_bookmarks_response, BookmarkItem,
+    },
+    xep0492::{merge_notify_into_extensions, read_fallback_mode},
 };
 use waddle_xmpp_client::{
     AccessToken, ArchivedMessage, ClientConfig, ClientError, ClientEvent, ClientRequest,
