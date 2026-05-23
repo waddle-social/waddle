@@ -177,14 +177,20 @@ impl DatabasePubSubStorage {
             }
         }
         if let Some((dnd_owner, parsed)) = dnd_publish_owner {
-            // published_at_ms doubles as the LWW source_version — see
+            // Monotonic DB-backed source_version. The earlier
+            // implementation used `published_at_ms` (wall-clock); an
+            // NTP backwards-jump would let a newer publish look older
+            // and silently drop from the projection via the LWW guard
+            // while `pubsub_items` still committed. Switching to a
+            // singleton counter (same pattern as the bookmarks
+            // projection) closes that hole — see
             // `dnd_projection::upsert_dnd_projection_tx` for the
-            // ON CONFLICT guard that keeps a slow-to-commit older
-            // publish from stomping a newer one.
+            // ON CONFLICT guard the counter is paired with.
+            let source_version = next_dnd_projection_source_version_tx(&mut tx).await?;
             let projection = DndProjection {
                 owner_bare_jid: dnd_owner,
                 state: parsed,
-                source_version: published_at_ms,
+                source_version,
                 updated_at_ms: published_at_ms,
             };
             upsert_dnd_projection_tx(&mut tx, &projection)
@@ -587,12 +593,36 @@ async fn apply_projection_mutation_tx(
 async fn next_notification_settings_source_version_tx(
     tx: &mut crate::db::Transaction<'_>,
 ) -> Result<i64, XmppError> {
+    next_singleton_counter_tx(tx, "notification_settings_projection_source_version").await
+}
+
+async fn next_dnd_projection_source_version_tx(
+    tx: &mut crate::db::Transaction<'_>,
+) -> Result<i64, XmppError> {
+    next_singleton_counter_tx(tx, "dnd_projection_source_version").await
+}
+
+/// Atomic monotonic-counter bump inside an open transaction. The
+/// singleton row is keyed on `id = 1` (check constraint at the DDL
+/// site) so two concurrent transactions serialize on the row's write
+/// lock instead of racing. Returns the post-increment value.
+///
+/// `&'static str` enforces at the type system level that callers
+/// cannot pass user input (no SQL-injection surface despite the
+/// `format!`); each call site is a literal table name pinned by
+/// the schema DDL.
+async fn next_singleton_counter_tx(
+    tx: &mut crate::db::Transaction<'_>,
+    table: &'static str,
+) -> Result<i64, XmppError> {
     tx.execute(
-        r#"
-        INSERT INTO notification_settings_projection_source_version (id, current_version)
-        VALUES (1, 0)
-        ON CONFLICT(id) DO NOTHING
-        "#,
+        &format!(
+            r#"
+            INSERT INTO {table} (id, current_version)
+            VALUES (1, 0)
+            ON CONFLICT(id) DO NOTHING
+            "#
+        ),
         (),
     )
     .await
@@ -600,12 +630,14 @@ async fn next_notification_settings_source_version_tx(
 
     let mut rows = tx
         .query(
-            r#"
-            UPDATE notification_settings_projection_source_version
-            SET current_version = current_version + 1
-            WHERE id = 1
-            RETURNING current_version
-            "#,
+            &format!(
+                r#"
+                UPDATE {table}
+                SET current_version = current_version + 1
+                WHERE id = 1
+                RETURNING current_version
+                "#
+            ),
             (),
         )
         .await

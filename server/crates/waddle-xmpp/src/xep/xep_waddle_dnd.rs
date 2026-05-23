@@ -121,8 +121,9 @@ pub struct WaddleDnd {
 
 /// One weekly schedule rule. `days` is the set of weekdays the rule
 /// fires on; `start` / `end` are wall-clock times in the document's
-/// timezone. When `end <= start`, the window wraps past midnight into
-/// the following calendar day.
+/// timezone. When `end < start`, the window wraps past midnight into
+/// the following calendar day. `start == end` is rejected at parse
+/// time (would otherwise expand to 24-hour DND).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScheduleRule {
     pub days: WeekdaySet,
@@ -529,9 +530,10 @@ fn format_time(time: NaiveTime) -> String {
 /// A non-wrapping rule (`start < end`) fires on each listed weekday
 /// between `start` (inclusive) and `end` (exclusive).
 ///
-/// A wrapping rule (`end <= start`) fires from `start` (inclusive) on
-/// each listed weekday through `end` (exclusive) on the FOLLOWING
-/// day. Checking `local` therefore requires looking at both:
+/// A wrapping rule (`end < start`; `end == start` is rejected at
+/// parse) fires from `start` (inclusive) on each listed weekday
+/// through `end` (exclusive) on the FOLLOWING day. Checking `local`
+/// therefore requires looking at both:
 ///   * "Is today a listed day AND `local.time() >= start`?", and
 ///   * "Was yesterday a listed day AND `local.time() < end`?".
 fn rule_contains<Tz: TimeZone>(rule: &ScheduleRule, local: &DateTime<Tz>) -> bool {

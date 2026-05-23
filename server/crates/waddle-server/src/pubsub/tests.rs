@@ -853,6 +853,57 @@ async fn dnd_publish_with_wrong_item_id_is_bad_request() {
         .expect("current id should be accepted");
 }
 
+/// The DND projection's `source_version` MUST come from the
+/// monotonic `dnd_projection_source_version` counter, not from
+/// wall-clock time. After two back-to-back publishes the counter
+/// MUST have incremented by at least one — proving the LWW guard
+/// is driven by transaction-serialized monotonicity, not by
+/// (potentially regressing) NTP time. Round-7 Copilot review on PR
+/// #759.
+#[tokio::test]
+async fn dnd_publish_source_version_is_strictly_monotonic_per_publish() {
+    let storage = DatabasePubSubStorage::open(Some("sqlite::memory:"))
+        .await
+        .expect("storage");
+    let bob = jid("bob@example.com");
+    let projection_store = crate::dnd_projection::DndProjectionStore::new(storage.database());
+
+    let item = waddle_xmpp::pubsub::PubSubItem {
+        id: Some(waddle_xmpp::xep::xep_waddle_dnd::ITEM_ID_CURRENT.to_string()),
+        publisher: None,
+        payload: Some(dnd_payload()),
+    };
+    storage
+        .get_or_create_node(&bob, "urn:waddle:dnd:0")
+        .await
+        .expect("node");
+    storage
+        .publish_item(&bob, "urn:waddle:dnd:0", &item, Some(&bob), false)
+        .await
+        .expect("first publish");
+    let first = projection_store
+        .get(&bob)
+        .await
+        .expect("get")
+        .expect("row")
+        .source_version;
+    storage
+        .publish_item(&bob, "urn:waddle:dnd:0", &item, Some(&bob), false)
+        .await
+        .expect("second publish");
+    let second = projection_store
+        .get(&bob)
+        .await
+        .expect("get")
+        .expect("row")
+        .source_version;
+    assert!(
+        second > first,
+        "source_version must be strictly increasing across publishes \
+         (first={first}, second={second})"
+    );
+}
+
 /// A DND publish without any `<dnd>` payload (XEP-0060 §7.1.3.3) MUST
 /// surface as the typed `PubSubPayloadRequired` variant — distinct
 /// from the malformed-payload case (§7.1.3.4). The dispatch layer

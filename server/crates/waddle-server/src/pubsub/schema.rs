@@ -11,7 +11,12 @@ use super::DatabasePubSubStorage;
 /// payloads previously written by an older server (otherwise the
 /// next read silently defaults the user to inactive; see
 /// [`crate::dnd_projection`] preamble).
-const PUBSUB_SCHEMA_VERSION: i64 = 5;
+///
+/// History:
+/// * v5 — initial `dnd_projection` (#367)
+/// * v6 — added `dnd_projection_source_version` singleton counter
+///   to replace wall-clock millis as the LWW key (round-7 review)
+const PUBSUB_SCHEMA_VERSION: i64 = 6;
 
 impl DatabasePubSubStorage {
     pub(super) async fn initialize(&self) -> Result<(), XmppError> {
@@ -65,6 +70,7 @@ impl DatabasePubSubStorage {
             }
             for table in [
                 "dnd_projection",
+                "dnd_projection_source_version",
                 "notification_settings_projection",
                 "notification_settings_projection_source_version",
                 "pubsub_items",
@@ -233,6 +239,37 @@ impl DatabasePubSubStorage {
             }
         };
         self.execute(dnd_projection_ddl, ()).await?;
+
+        // Singleton-row monotonic counter for the DND projection's
+        // `source_version`. Switching from wall-clock millis to a
+        // DB-backed counter (the same pattern as
+        // `notification_settings_projection_source_version`) closes
+        // the NTP-backwards-jump hole — the LWW guard
+        // `WHERE excluded.source_version > dnd_projection.source_version`
+        // is only safe when source_version is monotonic. With wall-
+        // clock millis, an NTP slew could make a newer publish look
+        // older and silently drop it from the projection while
+        // `pubsub_items` still gets updated, leaving the two stores
+        // disagreed. Round-7 Copilot review on PR #759.
+        let dnd_projection_source_version_ddl = match self.db.driver() {
+            crate::db::DatabaseDriver::Sqlite => {
+                r#"
+                CREATE TABLE IF NOT EXISTS dnd_projection_source_version (
+                    id INTEGER NOT NULL PRIMARY KEY CHECK (id = 1),
+                    current_version INTEGER NOT NULL
+                )
+                "#
+            }
+            crate::db::DatabaseDriver::Postgres => {
+                r#"
+                CREATE TABLE IF NOT EXISTS dnd_projection_source_version (
+                    id BIGINT NOT NULL PRIMARY KEY CHECK (id = 1),
+                    current_version BIGINT NOT NULL
+                )
+                "#
+            }
+        };
+        self.execute(dnd_projection_source_version_ddl, ()).await?;
 
         let items_ddl = match self.db.driver() {
             crate::db::DatabaseDriver::Sqlite => {

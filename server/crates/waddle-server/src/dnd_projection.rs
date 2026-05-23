@@ -29,13 +29,16 @@
 //! ## LWW arbitration
 //!
 //! Concurrent publishes from two resources race for the SQLite write
-//! lock. `source_version` is stamped from `published_at_ms` at the
-//! same point in the publish path; the `ON CONFLICT` clause includes
-//! `WHERE source_version < excluded.source_version` so a slow-to-commit
-//! older write cannot stomp a newer one. Same-ms collisions are
-//! deterministically resolved by `published_at_ms` ties going to the
-//! row already in the table — that's the SQLite UPSERT contract when
-//! the guard `excluded.source_version > source_version` fails.
+//! lock. `source_version` is sourced from the singleton
+//! `dnd_projection_source_version` counter incremented inside the
+//! publish transaction (NOT wall-clock millis — that would silently
+//! drop newer writes after an NTP backwards-jump). The `ON CONFLICT`
+//! clause includes `WHERE excluded.source_version > dnd_projection.source_version`
+//! so a slow-to-commit older write cannot stomp a newer one. Because
+//! the counter is incremented inside the same transaction as the
+//! upsert, two concurrent publishers serialize on the counter row's
+//! write lock and the later committer always sees a strictly higher
+//! version.
 
 use jid::BareJid;
 use minidom::Element;
