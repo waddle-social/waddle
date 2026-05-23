@@ -708,6 +708,12 @@ export function useChatAppController(giphyApiKey: string) {
     client.setSessionLifecycleHandler((event) => {
       messaging.onSessionLifecycle(event);
       dmMessaging.onSessionLifecycle(event);
+      // Short-circuit if the session is already torn down — a
+      // lifecycle event queued before `handleLogout` ran can fire
+      // here AFTER `notifySettingsStore.reset()` and would
+      // otherwise restart hydrate against the about-to-disconnect
+      // client. Round-12 reviewer P1.
+      if (!connectionStore.session) return;
       // Re-hydrate inbox on every XMPP session-ready, both resumed and
       // fresh. Stream resume catches up on stanzas the client missed
       // while disconnected, but a *fresh* reconnection (resume failed
@@ -723,15 +729,18 @@ export function useChatAppController(giphyApiKey: string) {
       void socialFeed.refresh();
       void stories.refresh();
       void communityEvents.refresh();
-      // Re-hydrate XEP-0492 notification settings on every fresh
-      // session-ready: the chat does not subscribe to PEP `+notify`
+      // Re-hydrate XEP-0492 notification settings only on *fresh*
+      // reconnects. A stream resume is by definition gap-free —
+      // any bookmark publish from another tab during the disconnect
+      // is impossible because we never disconnected as far as the
+      // server's PEP queue is concerned. Refetching on every resume
+      // burns one IQ round-trip per resume for no payoff (round-12
+      // reviewer P2). Until the chat subscribes to PEP `+notify`
       // headlines on `urn:xmpp:bookmarks:1` (deferred follow-up),
-      // so without this poll a setting changed in another tab
-      // would never reach this tab until the next first-sign-in.
-      // `notifySettingsStore.hydrate` commits atomically on success
-      // and never clears the cache mid-flight, so the redundant
-      // call on first connection is a no-op visual-wise.
-      void notifySettingsStore.hydrate(client);
+      // fresh-only hydrate is the correct cadence.
+      if (event.type === "fresh") {
+        void notifySettingsStore.hydrate(client);
+      }
     });
   }, { immediate: true });
 

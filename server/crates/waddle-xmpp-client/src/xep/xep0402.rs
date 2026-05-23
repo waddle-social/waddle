@@ -310,6 +310,43 @@ mod tests {
     }
 
     #[test]
+    fn build_conference_omits_autojoin_attr_when_false() {
+        // Round-12 reviewer P2: XEP-0402 §2.2 / XSD default for
+        // autojoin is `false`. We omit the attr entirely when
+        // false so the wire shape matches the canonical "no
+        // autojoin" form (an absent attr) — a regression that
+        // flipped to always-emit `autojoin="false"` would silently
+        // change every notification-mode publish's wire shape.
+        let item = BookmarkItem {
+            jid: "noauto@conference.example.com".parse().unwrap(),
+            name: None,
+            autojoin: false,
+            nick: None,
+            password: None,
+            extensions: vec![],
+        };
+        let conference = item.build_conference_element();
+        assert!(
+            conference.attr("autojoin").is_none(),
+            "autojoin MUST be omitted when false (XEP-0402 XSD default)"
+        );
+    }
+
+    #[test]
+    fn build_conference_emits_autojoin_true_when_set() {
+        let item = BookmarkItem {
+            jid: "auto@conference.example.com".parse().unwrap(),
+            name: None,
+            autojoin: true,
+            nick: None,
+            password: None,
+            extensions: vec![],
+        };
+        let conference = item.build_conference_element();
+        assert_eq!(conference.attr("autojoin"), Some("true"));
+    }
+
+    #[test]
     fn build_publish_bookmark_iq_omits_to_attr() {
         // Round-10 XMPP-conformance reviewer P3 — XEP-0163 §3.5: a
         // PEP publish from the bare-JID account targets the account's

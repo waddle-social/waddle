@@ -79,11 +79,15 @@ const buttonTitle = computed(() => {
 
 async function toggleOpen() {
   if (disabled.value) return;
-  open.value = !open.value;
   if (open.value) {
-    await nextTick();
-    focusOptionAt(MODES.indexOf(currentMode.value));
+    // Route close through closeAndReturnFocus so the error banner
+    // doesn't leak across opens — round-12 reviewer P1.
+    closeAndReturnFocus();
+    return;
   }
+  open.value = true;
+  await nextTick();
+  focusOptionAt(MODES.indexOf(currentMode.value));
 }
 
 function focusOptionAt(index: number) {
@@ -158,6 +162,14 @@ function onMenuKeydown(event: KeyboardEvent) {
     case "Escape":
       event.preventDefault();
       closeAndReturnFocus();
+      break;
+    case "Tab":
+      // WAI-ARIA APG menu pattern: Tab closes the menu and lets
+      // browser focus continue out — round-12 reviewer P2. We do
+      // NOT preventDefault so the next focusable element receives
+      // focus naturally.
+      open.value = false;
+      errorMessage.value = null;
       break;
   }
 }

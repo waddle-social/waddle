@@ -244,6 +244,69 @@ describe("createNotifySettingsStore", () => {
     expect(store.bookmarks.value["old-node@example.com"]).toBeUndefined();
   });
 
+  test("hydrate-during-reset: stale fetch result is discarded (round-10 P1)", async () => {
+    const store = createNotifySettingsStore();
+    let resolveFetch: (items: UserBookmarkItem[]) => void = () => {};
+    const slowClient = {
+      fetchUserBookmarks: () =>
+        new Promise<UserBookmarkItem[]>((resolve) => {
+          resolveFetch = resolve;
+        }),
+      setRoomNotificationMode: async (): Promise<SetRoomNotificationModeOutcome> => ({
+        kind: "error",
+      }),
+    };
+    const pending = store.hydrate(slowClient as unknown as BrowserXmppClient);
+    expect(store.hydrating.value).toBe(true);
+
+    // User logs out mid-fetch.
+    store.reset();
+    expect(store.hydrating.value).toBe(false);
+
+    // Old account's fetch now resolves.
+    resolveFetch([
+      { jid: "stale@example.com", name: "stale", autojoin: false, notifyMode: "always" },
+    ]);
+    await pending;
+
+    // The stale commit MUST be dropped — generation bumped on reset.
+    expect(store.bookmarks.value["stale@example.com"]).toBeUndefined();
+  });
+
+  test("setMode-during-reset: stale publish result is discarded (round-12 P1)", async () => {
+    const store = createNotifySettingsStore();
+    store.replaceAll([
+      { jid: "kept@example.com", name: "Kept", autojoin: false, notifyMode: "always" },
+    ]);
+    let resolvePublish: (outcome: SetRoomNotificationModeOutcome) => void = () => {};
+    const slowClient = {
+      fetchUserBookmarks: async () => [] as UserBookmarkItem[],
+      setRoomNotificationMode: (): Promise<SetRoomNotificationModeOutcome> =>
+        new Promise((resolve) => {
+          resolvePublish = resolve;
+        }),
+    };
+
+    const pending = store.setMode(slowClient as unknown as BrowserXmppClient, {
+      roomJid: "stale@example.com",
+      mode: "never",
+    });
+
+    // User logs out / switches accounts mid-publish.
+    store.reset();
+    expect(store.bookmarks.value["kept@example.com"]).toBeUndefined();
+
+    // Old account's publish now resolves successfully.
+    resolvePublish({
+      kind: "ok",
+      item: { jid: "stale@example.com", name: null, autojoin: false, notifyMode: "never" },
+    });
+    await pending;
+
+    // Stale publish MUST NOT commit into the post-reset cache.
+    expect(store.bookmarks.value["stale@example.com"]).toBeUndefined();
+  });
+
   test("reset clears the cache for logout / account-switch (round-8 P1)", async () => {
     const store = createNotifySettingsStore();
     store.replaceAll([

@@ -182,7 +182,21 @@ export function createNotifySettingsStore(): NotifySettingsStore {
     client: BrowserXmppClient,
     opts: { roomJid: string; mode: NotifyMode; name?: string },
   ): Promise<SetModeResult> {
+    // Capture the generation at call-start. If `reset()` fires
+    // during the await (the user signed out / switched accounts),
+    // the commit below would otherwise write the prior account's
+    // bookmark into the new account's cache — round-12 reviewer P1.
+    const myGen = generation;
     const outcome = await client.setRoomNotificationMode(opts);
+    if (myGen !== generation) {
+      // Stale publish from a prior session; drop the commit. The
+      // typed `kind` is still returned so the UI can clean up
+      // its own state, but the caller is expected to recognize
+      // that the surrounding session has been torn down.
+      if (outcome.kind === "ok") return "ok";
+      if (outcome.kind === "node-config-mismatch") return "node-config-mismatch";
+      return "error";
+    }
     if (outcome.kind === "ok") {
       bookmarks.value = { ...bookmarks.value, [outcome.item.jid]: outcome.item };
       return "ok";
