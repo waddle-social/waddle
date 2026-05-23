@@ -299,6 +299,83 @@ async fn dnd_pep_publish_invalid_payload_returns_bad_request() {
     let _ = bob.close().await;
 }
 
+/// Bob's own resource MUST be able to read his published DND state
+/// via a XEP-0060 `<items/>` get even though the DND PEP node is
+/// configured `access_model = whitelist` + `send_last_published_item
+/// = never`. The "never" config blocks the automatic push-on-subscribe
+/// fanout (which would leak the user's schedule to roster contacts);
+/// it must NOT block the user's own resource from fetching state on
+/// resume. The owner ↔ entity affiliation derivation in
+/// `pubsub_authz::effective_affiliation` grants Bob `Owner` on his
+/// own PEP node, so the items-get path resolves.
+#[tokio::test]
+async fn dnd_owner_resource_can_fetch_via_items_get_despite_whitelist() {
+    let temp_dir = tempfile::tempdir().expect("temp dir");
+    let db_path = temp_dir.path().join("dnd-items-get.sqlite3");
+    let database_url = format!("sqlite://{}?mode=rwc", db_path.display());
+    let server = TestServer::start_persistent_with_extra_envs(
+        &database_url,
+        &[("bob", "bob-dnd-password")],
+        &[("WADDLE_XMPP_PUBSUB_DATABASE_URL", &database_url)],
+    );
+    let mut bob = WsXmppClient::connect_and_auth(
+        &server.ws_url(),
+        DOMAIN,
+        "bob",
+        "bob-dnd-password",
+        &format!("dnd-items-bob-{}", uuid::Uuid::new_v4()),
+    )
+    .await
+    .expect("bob connection");
+
+    let publish = build_publish_dnd(
+        "current",
+        build_dnd_payload("Europe/Oslo", Some("2099-01-01T17:00:00Z")),
+    );
+    let publish_response = send_iq(
+        &mut bob,
+        iq_frame("set", "dnd-items-publish", "bob@localhost", publish),
+        "dnd-items-publish",
+    )
+    .await;
+    parse_iq(&publish_response, "dnd-items-publish", "result");
+
+    let items_request = Element::builder("pubsub", NS_PUBSUB)
+        .append(
+            Element::builder("items", NS_PUBSUB)
+                .attr(minidom::rxml::xml_ncname!("node").to_owned(), NS_WADDLE_DND)
+                .build(),
+        )
+        .build();
+    let items_response = send_iq(
+        &mut bob,
+        iq_frame("get", "dnd-items-get", "bob@localhost", items_request),
+        "dnd-items-get",
+    )
+    .await;
+    let iq = parse_iq(&items_response, "dnd-items-get", "result");
+    let pubsub = iq
+        .children()
+        .find(|c| c.name() == "pubsub")
+        .expect("pubsub child in items result");
+    let items = pubsub
+        .children()
+        .find(|c| c.name() == "items")
+        .expect("items child");
+    let item = items
+        .children()
+        .find(|c| c.name() == "item")
+        .expect("DND item visible to owner");
+    assert_eq!(item.attr("id"), Some("current"));
+    let dnd = item
+        .children()
+        .find(|c| c.name() == "dnd" && c.ns() == NS_WADDLE_DND)
+        .expect("<dnd> payload child");
+    assert_eq!(dnd.attr("timezone"), Some("Europe/Oslo"));
+
+    let _ = bob.close().await;
+}
+
 /// The `dnd_projection` row MUST survive a server restart pointed at
 /// the same SQLite file. Without durability the second server would
 /// treat Bob as not-in-DND on its first push gate run, defeating the

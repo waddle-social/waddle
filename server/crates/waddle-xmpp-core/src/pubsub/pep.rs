@@ -114,6 +114,11 @@ pub fn build_pep_identity() -> Identity {
 /// on the user's bare-JID disco#info as the canonical PEP-support
 /// signal — without it, clients fall back to per-node `+notify`
 /// probing or skip PEP-driven features entirely.
+/// Note: `urn:waddle:dnd:0+notify` is deliberately NOT advertised
+/// here. The DND PEP node defaults to `AccessModel::Whitelist` +
+/// `SendLastPublishedItem::Never` (see [`super::node::NodeConfig::waddle_dnd_defaults`])
+/// so there is no roster-contact fanout to opt into. The user's own
+/// resources fetch DND state via XEP-0060 `<items/>` get on resume.
 pub fn pep_features() -> Vec<Feature> {
     vec![
         Feature::pubsub(),

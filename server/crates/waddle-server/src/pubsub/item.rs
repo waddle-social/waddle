@@ -39,15 +39,25 @@ impl DatabasePubSubStorage {
         // publish gets a `<bad-request/>` instead of leaving the PEP
         // item in place with a stale projection alongside.
         //
-        // Additionally restrict the projection write to the case where
-        // the publisher IS the owner: even if the user grants explicit
-        // publish affiliation to a peer (or a future auto-affiliation
-        // rule does), only the user themself may overwrite their own
-        // DND state. A peer-published item still goes through to
-        // pubsub_items (the authz layer already decided that's OK) but
-        // does NOT update the server-side projection used to gate
-        // push notifications.
+        // Restrict publishes to the case where the publisher IS the
+        // owner. DND is user-identity state — even if the user grants
+        // explicit Publisher affiliation to a peer for some other PEP
+        // feature, the peer must NOT be able to write `urn:waddle:dnd:0`
+        // items. Allowing the wire-level publish-only while skipping
+        // the projection write would leave `pubsub_items` and the
+        // projection in disagreement; subscribers would see the peer's
+        // spoofed payload while the T1 push gate consults the owner's
+        // last-known state. Better to reject outright with
+        // `<forbidden/>`.
         let dnd_publish_owner = if is_dnd_node(node_name) {
+            match publisher {
+                Some(publisher_jid) if publisher_jid == owner => {}
+                _ => {
+                    return Err(XmppError::forbidden(Some(
+                        "urn:waddle:dnd:0 may only be published by the node owner".to_string(),
+                    )));
+                }
+            }
             let payload = item.payload.as_ref().ok_or_else(|| {
                 XmppError::bad_request(Some(
                     "urn:waddle:dnd:0 publish requires a <dnd> payload".to_string(),
@@ -55,10 +65,7 @@ impl DatabasePubSubStorage {
             })?;
             let parsed = waddle_xmpp::xep::xep_waddle_dnd::WaddleDnd::parse(payload)
                 .map_err(|error| XmppError::bad_request(Some(error.to_string())))?;
-            match publisher {
-                Some(publisher_jid) if publisher_jid == owner => Some((owner.clone(), parsed)),
-                _ => None,
-            }
+            Some((owner.clone(), parsed))
         } else {
             None
         };

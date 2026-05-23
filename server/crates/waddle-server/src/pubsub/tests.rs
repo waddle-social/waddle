@@ -12,6 +12,12 @@ fn bookmark_payload() -> minidom::Element {
         .expect("valid bookmark payload")
 }
 
+fn dnd_payload() -> minidom::Element {
+    "<dnd xmlns='urn:waddle:dnd:0' timezone='UTC'/>"
+        .parse()
+        .expect("valid dnd payload")
+}
+
 #[tokio::test]
 async fn database_pubsub_storage_persists_file_backing() {
     let artifacts = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/test-artifacts");
@@ -788,4 +794,52 @@ async fn subscribe_cleans_up_pre_existing_duplicate_rows() {
         1,
         "subscribe must garbage-collect duplicate rows for the (owner, node, subscriber) triple"
     );
+}
+
+/// A publisher that is NOT the node owner MUST be rejected with
+/// `<forbidden/>` when targeting `urn:waddle:dnd:0`. Accepting the
+/// publish-only path while skipping the projection write would
+/// leave `pubsub_items` and `dnd_projection` in disagreement —
+/// subscribers fetching `<items/>` would see the peer's spoofed
+/// payload while the T1 push gate consults the owner's last-known
+/// state. Found by the round-3 hostile-client adversarial review.
+#[tokio::test]
+async fn dnd_publish_from_non_owner_is_forbidden() {
+    let storage = DatabasePubSubStorage::open(Some("sqlite::memory:"))
+        .await
+        .expect("storage");
+    let bob = jid("bob@example.com");
+    let mallory = jid("mallory@example.com");
+    storage
+        .get_or_create_node(&bob, "urn:waddle:dnd:0")
+        .await
+        .expect("node");
+
+    let item = waddle_xmpp::pubsub::PubSubItem {
+        id: Some("current".to_string()),
+        publisher: None,
+        payload: Some(dnd_payload()),
+    };
+
+    let result = storage
+        .publish_item(&bob, "urn:waddle:dnd:0", &item, Some(&mallory), false)
+        .await;
+    let err = result.expect_err("non-owner DND publish must error");
+    match &err {
+        waddle_xmpp::XmppError::Stanza { condition, .. } => {
+            assert!(
+                format!("{condition:?}")
+                    .to_lowercase()
+                    .contains("forbidden"),
+                "expected <forbidden/> condition, got: {condition:?}"
+            );
+        }
+        other => panic!("expected Stanza forbidden error, got: {other:?}"),
+    }
+
+    // Sanity check: the owner can still publish.
+    storage
+        .publish_item(&bob, "urn:waddle:dnd:0", &item, Some(&bob), false)
+        .await
+        .expect("owner publish should succeed");
 }
