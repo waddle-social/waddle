@@ -62,6 +62,24 @@ pub enum XmppError {
         /// Optional text description
         text: Option<String>,
     },
+
+    /// XEP-0060 §7.1.3.3 — a PubSub publish item arrived without the
+    /// payload its node requires. Maps on the wire to
+    /// `<bad-request/>` (type=`modify`) plus the pubsub-namespaced
+    /// `<payload-required/>` extension element. Distinct from
+    /// [`Self::Stanza`] with `BadRequest` so callers can route this
+    /// case via typed match instead of stringly-typed text inspection
+    /// (typed-payloads hard rule).
+    #[error("PubSub publish missing required payload: {0:?}")]
+    PubSubPayloadRequired(Option<String>),
+
+    /// XEP-0060 §7.1.3.4 — a PubSub publish item carries a payload
+    /// that fails the per-node payload-conformance contract (typed
+    /// parser rejection, unknown attribute, etc.). Maps on the wire
+    /// to `<bad-request/>` (type=`modify`) plus the pubsub-namespaced
+    /// `<invalid-payload/>` extension element.
+    #[error("PubSub publish invalid payload: {0:?}")]
+    PubSubInvalidPayload(Option<String>),
 }
 
 impl XmppError {
@@ -205,6 +223,20 @@ impl XmppError {
             error_type: StanzaErrorType::Cancel,
             text,
         }
+    }
+
+    /// Create the XEP-0060 §7.1.3.3 `<payload-required/>` PubSub
+    /// publish error. The dispatch layer maps this variant onto the
+    /// wire as `<bad-request/>` + `<payload-required xmlns='http://jabber.org/protocol/pubsub#errors'/>`.
+    pub fn pubsub_payload_required(text: Option<String>) -> Self {
+        Self::PubSubPayloadRequired(text)
+    }
+
+    /// Create the XEP-0060 §7.1.3.4 `<invalid-payload/>` PubSub
+    /// publish error. The dispatch layer maps this variant onto the
+    /// wire as `<bad-request/>` + `<invalid-payload xmlns='http://jabber.org/protocol/pubsub#errors'/>`.
+    pub fn pubsub_invalid_payload(text: Option<String>) -> Self {
+        Self::PubSubInvalidPayload(text)
     }
 }
 

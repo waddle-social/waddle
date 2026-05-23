@@ -28,8 +28,10 @@
 //!   When present and in the future, DND is unconditionally active.
 //! * `<rule …/>` — Zero or more weekly schedule rules. Each rule
 //!   names one or more weekdays and a `start`/`end` `HH:MM` window in
-//!   the document's timezone. Windows whose `end <= start` wrap past
+//!   the document's timezone. Windows whose `end < start` wrap past
 //!   midnight into the following calendar day in the same tz.
+//!   Degenerate `end == start` rules are rejected by the parser
+//!   (they would otherwise expand to 24-hour DND).
 //!
 //! Unknown children and unknown attributes are rejected — clients
 //! that want to extend the shape should bump the namespace. The

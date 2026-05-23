@@ -249,21 +249,8 @@ pub(super) async fn handle_pubsub_iq(
                     }
                     Err(e) => {
                         warn!("PubSub publish failed: {}", e);
-                        let pubsub_err = pubsub_publish_error_from_xmpp_error(&e);
-                        // XEP-0060 §7.1.3.3 / §7.1.3.4: payload-shape
-                        // rejections on `urn:waddle:dnd:0` MUST carry
-                        // the pubsub-namespaced `<invalid-payload/>` /
-                        // `<payload-required/>` extension so clients
-                        // can distinguish them from generic bad-request.
-                        let pubsub_err = if node
-                            == waddle_xmpp::xep::xep_waddle_dnd::PEP_NODE_WADDLE_DND
-                            && matches!(pubsub_err, PubSubError::BadRequest)
-                        {
-                            classify_dnd_publish_bad_request(&e)
-                        } else {
-                            pubsub_err
-                        };
-                        let error = build_pubsub_error(iq, pubsub_err);
+                        let error =
+                            build_pubsub_error(iq, pubsub_publish_error_from_xmpp_error(&e));
                         return vec![iq_to_xml(error)];
                     }
                 }
@@ -525,31 +512,13 @@ fn is_valid_xep0402_bookmark_item_id(item_id: &str) -> bool {
         .is_ok_and(|jid| jid.node().is_some())
 }
 
-/// Decide which XEP-0060 §7.1.3 pubsub-error extension to attach to
-/// a `<bad-request/>` returned by an `urn:waddle:dnd:0` publish.
-///
-/// The publish hook in `pubsub::item::publish_item_impl` returns
-/// distinct text strings for the two payload-shape failure modes:
-/// "requires a `<dnd>` payload" (missing) vs everything else (invalid
-/// shape). We discriminate on those strings — they are produced and
-/// consumed within the same crate boundary, so the coupling is
-/// acceptable. The wrong-item-id case (`id != "current"`) is also
-/// invalid-payload territory; the strict-parser conditions
-/// (timezone, weekday, etc.) likewise map to `InvalidPayload`.
-fn classify_dnd_publish_bad_request(error: &waddle_xmpp::XmppError) -> PubSubError {
-    let text = match error {
-        waddle_xmpp::XmppError::Stanza { text, .. } => text.as_deref().unwrap_or(""),
-        _ => "",
-    };
-    if text.contains("requires a <dnd> payload") {
-        PubSubError::PayloadRequired
-    } else {
-        PubSubError::InvalidPayload
-    }
-}
-
 fn pubsub_publish_error_from_xmpp_error(error: &waddle_xmpp::XmppError) -> PubSubError {
     match error {
+        // XEP-0060 §7.1.3.3 / §7.1.3.4: typed payload-shape variants
+        // carry their pubsub-error subcondition explicitly. Match on
+        // type, not on substring (CLAUDE.md typed-payloads rule).
+        waddle_xmpp::XmppError::PubSubPayloadRequired(_) => PubSubError::PayloadRequired,
+        waddle_xmpp::XmppError::PubSubInvalidPayload(_) => PubSubError::InvalidPayload,
         waddle_xmpp::XmppError::Stanza {
             condition: waddle_xmpp::StanzaErrorCondition::BadRequest,
             ..

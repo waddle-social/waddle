@@ -822,17 +822,10 @@ async fn dnd_publish_with_wrong_item_id_is_bad_request() {
         .publish_item(&bob, "urn:waddle:dnd:0", &bad_item, Some(&bob), false)
         .await
         .expect_err("non-current item id must error");
-    match &err {
-        waddle_xmpp::XmppError::Stanza { condition, .. } => {
-            assert!(
-                format!("{condition:?}")
-                    .to_lowercase()
-                    .contains("badrequest"),
-                "expected <bad-request/> condition, got: {condition:?}"
-            );
-        }
-        other => panic!("expected Stanza bad-request error, got: {other:?}"),
-    }
+    assert!(
+        matches!(err, waddle_xmpp::XmppError::PubSubInvalidPayload(_)),
+        "expected PubSubInvalidPayload (XEP-0060 §7.1.3.4), got: {err:?}"
+    );
 
     let missing_id = waddle_xmpp::pubsub::PubSubItem {
         id: None,
@@ -843,7 +836,10 @@ async fn dnd_publish_with_wrong_item_id_is_bad_request() {
         .publish_item(&bob, "urn:waddle:dnd:0", &missing_id, Some(&bob), false)
         .await
         .expect_err("missing item id must also error");
-    assert!(matches!(err, waddle_xmpp::XmppError::Stanza { .. }));
+    assert!(matches!(
+        err,
+        waddle_xmpp::XmppError::PubSubInvalidPayload(_)
+    ));
 
     // The `current` id is accepted.
     let good_item = waddle_xmpp::pubsub::PubSubItem {
@@ -855,6 +851,43 @@ async fn dnd_publish_with_wrong_item_id_is_bad_request() {
         .publish_item(&bob, "urn:waddle:dnd:0", &good_item, Some(&bob), false)
         .await
         .expect("current id should be accepted");
+}
+
+/// A DND publish without any `<dnd>` payload (XEP-0060 §7.1.3.3) MUST
+/// surface as the typed `PubSubPayloadRequired` variant — distinct
+/// from the malformed-payload case (§7.1.3.4). The dispatch layer
+/// maps the two onto different pubsub-error extension elements on
+/// the wire, so the typed discriminator is load-bearing.
+#[tokio::test]
+async fn dnd_publish_without_payload_is_payload_required() {
+    let storage = DatabasePubSubStorage::open(Some("sqlite::memory:"))
+        .await
+        .expect("storage");
+    let bob = jid("bob@example.com");
+    storage
+        .get_or_create_node(&bob, "urn:waddle:dnd:0")
+        .await
+        .expect("node");
+
+    let item_missing_payload = waddle_xmpp::pubsub::PubSubItem {
+        id: Some(waddle_xmpp::xep::xep_waddle_dnd::ITEM_ID_CURRENT.to_string()),
+        publisher: None,
+        payload: None,
+    };
+    let err = storage
+        .publish_item(
+            &bob,
+            "urn:waddle:dnd:0",
+            &item_missing_payload,
+            Some(&bob),
+            false,
+        )
+        .await
+        .expect_err("missing payload must error");
+    assert!(
+        matches!(err, waddle_xmpp::XmppError::PubSubPayloadRequired(_)),
+        "expected PubSubPayloadRequired (XEP-0060 §7.1.3.3), got: {err:?}"
+    );
 }
 
 /// A publisher that is NOT the node owner MUST be rejected with

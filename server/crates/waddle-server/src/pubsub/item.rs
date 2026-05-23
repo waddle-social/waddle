@@ -78,7 +78,7 @@ impl DatabasePubSubStorage {
                         item_id = ?item.id,
                         "urn:waddle:dnd:0 publish rejected: item id is not 'current'"
                     );
-                    return Err(XmppError::bad_request(Some(format!(
+                    return Err(XmppError::pubsub_invalid_payload(Some(format!(
                         "urn:waddle:dnd:0 publish must use item id '{}'",
                         waddle_xmpp::xep::xep_waddle_dnd::ITEM_ID_CURRENT,
                     ))));
@@ -89,7 +89,7 @@ impl DatabasePubSubStorage {
                     owner = %owner,
                     "urn:waddle:dnd:0 publish rejected: missing <dnd> payload"
                 );
-                XmppError::bad_request(Some(
+                XmppError::pubsub_payload_required(Some(
                     "urn:waddle:dnd:0 publish requires a <dnd> payload".to_string(),
                 ))
             })?;
@@ -100,7 +100,7 @@ impl DatabasePubSubStorage {
                         %error,
                         "urn:waddle:dnd:0 publish rejected: invalid <dnd> payload"
                     );
-                    XmppError::bad_request(Some(error.to_string()))
+                    XmppError::pubsub_invalid_payload(Some(error.to_string()))
                 })?;
             Some((owner.clone(), parsed))
         } else {
