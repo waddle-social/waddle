@@ -1,6 +1,7 @@
 import { ref, watch } from "vue";
 import type { BrowserXmppClient } from "@/lib/xmpp-client";
 import { getOrRegisterServiceWorker, registerServiceWorker as registerChatServiceWorker } from "@/lib/service-worker-registration";
+import { createPushFlowLock } from "./push-flow-lock";
 
 const STORAGE_KEY = "waddle.chat.notifications-enabled";
 const DEVICE_ID_STORAGE_KEY = "waddle.chat.push-device-id";
@@ -53,12 +54,12 @@ export function usePushNotifications() {
   // in the UI (`notificationsEnabled === false` but server-side
   // device row is registered). Round-4 hostile-client adversarial
   // review on PR #760.
-  let pushFlowLock: Promise<unknown> = Promise.resolve();
-  function runPushFlow<T>(work: () => Promise<T>): Promise<T> {
-    const next = pushFlowLock.then(work, work);
-    pushFlowLock = next.catch(() => undefined);
-    return next;
-  }
+  //
+  // The lock helper is extracted into `push-flow-lock.ts` so the
+  // mutation-resistance test suite can pin serialization without
+  // having to stub the entire WASM + service-worker + Notification
+  // API surface that `usePushNotifications` would otherwise need.
+  const pushFlowLock = createPushFlowLock();
 
   watch(notificationsEnabled, (v) => {
     if (typeof window !== "undefined") {
@@ -155,7 +156,7 @@ export function usePushNotifications() {
     xmppClient: BrowserXmppClient,
     userJid: string,
   ): Promise<boolean> {
-    return runPushFlow(() => syncPushSubscriptionImpl(xmppClient, userJid));
+    return pushFlowLock.run(() => syncPushSubscriptionImpl(xmppClient, userJid));
   }
 
   async function syncPushSubscriptionImpl(
@@ -248,7 +249,7 @@ export function usePushNotifications() {
   }
 
   function disablePushSubscription(xmppClient: BrowserXmppClient, userJid: string): Promise<boolean> {
-    return runPushFlow(() => disablePushSubscriptionImpl(xmppClient, userJid));
+    return pushFlowLock.run(() => disablePushSubscriptionImpl(xmppClient, userJid));
   }
 
   async function disablePushSubscriptionImpl(xmppClient: BrowserXmppClient, userJid: string): Promise<boolean> {
