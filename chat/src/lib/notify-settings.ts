@@ -122,6 +122,14 @@ type SetModeResult = "ok" | "node-config-mismatch" | "error";
 export function createNotifySettingsStore(): NotifySettingsStore {
   const bookmarks = shallowRef<Record<string, UserBookmarkItem>>({});
   const hydrating = ref<boolean>(false);
+  // Generation token — incremented on every `reset()`. In-flight
+  // hydrate calls capture the generation at fetch-start; if the
+  // generation changes (logout / account-switch) before the fetch
+  // resolves, the commit is discarded. Without this, a stale
+  // hydrate from the previous account would write its bookmarks
+  // back into the cleared cache after the user signed into a
+  // different account — round-9 reviewer P1.
+  let generation = 0;
 
   function commit(items: UserBookmarkItem[]): void {
     const next: Record<string, UserBookmarkItem> = {};
@@ -141,12 +149,24 @@ export function createNotifySettingsStore(): NotifySettingsStore {
     // every reconnect tick, producing a visible icon flicker for any
     // chat that has a non-default mode stored. Reviewer P2 round 7.
     // Commit happens on success only.
+    const myGen = generation;
     hydrating.value = true;
     try {
       const items = await client.fetchUserBookmarks();
+      if (myGen !== generation) {
+        // reset() fired while we were fetching — the user logged
+        // out (or switched accounts) and our results no longer
+        // belong in the cache. Drop them on the floor.
+        return;
+      }
       commit(items);
     } finally {
-      hydrating.value = false;
+      // Only clear the in-flight flag if we still own it. If a
+      // reset() ran during our fetch it has already cleared the
+      // flag so a fresh sign-in hydrate can start.
+      if (myGen === generation) {
+        hydrating.value = false;
+      }
     }
   }
 
@@ -172,6 +192,7 @@ export function createNotifySettingsStore(): NotifySettingsStore {
   }
 
   function reset(): void {
+    generation += 1;
     bookmarks.value = {};
     hydrating.value = false;
   }

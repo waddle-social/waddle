@@ -224,9 +224,19 @@ fn build_merged_notify_element(setting_children: Vec<Element>, mode: NotifyMode)
 }
 
 fn sort_key(el: &Element) -> (u8, Option<&str>, Option<&str>) {
-    let mode_rank = NotifyMode::from_wire_name(el.name())
-        .map(|m| m.xsd_rank())
-        .unwrap_or(u8::MAX);
+    // Only spec setting elements get a real rank — foreign children
+    // (including any that happen to share a local name with `always`
+    // / `on-mention` / `never` but live in a different namespace)
+    // sort last with rank u8::MAX. Round-9 reviewer P2 — without the
+    // namespace check, a `<always xmlns='custom'/>` inside a
+    // `<notify/>` would interleave with the spec block.
+    let mode_rank = if el.ns() == NS_NOTIFICATION_SETTINGS {
+        NotifyMode::from_wire_name(el.name())
+            .map(|m| m.xsd_rank())
+            .unwrap_or(u8::MAX)
+    } else {
+        u8::MAX
+    };
     (
         mode_rank,
         el.attr("identity-category"),

@@ -100,6 +100,7 @@ function focusedIndex(): number {
 
 function closeAndReturnFocus() {
   open.value = false;
+  errorMessage.value = null;
   triggerEl.value?.focus();
 }
 
@@ -166,6 +167,9 @@ function onWindowClick(event: MouseEvent) {
   const target = event.target as Node | null;
   if (target && rootEl.value && !rootEl.value.contains(target)) {
     open.value = false;
+    // Drop the error banner on dismissal so it doesn't reappear
+    // the next time the user opens the popover. Round-9 P3.
+    errorMessage.value = null;
   }
 }
 

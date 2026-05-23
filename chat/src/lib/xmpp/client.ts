@@ -1349,27 +1349,27 @@ export class BrowserXmppClient {
     const xmpp = await this.requireConnectedXmpp();
     if (!xmpp.set_room_notification_mode) return { kind: "error" };
     try {
-      const item = (await xmpp.set_room_notification_mode({
+      // WASM resolves with a typed tagged outcome (round-9 P2 — no
+      // stringly-typed condition transport across the JS↔Rust
+      // boundary). We pass `kind` straight through so the chat UI
+      // can switch without parsing message bodies.
+      const outcome = (await xmpp.set_room_notification_mode({
         roomJid: opts.roomJid,
         mode: opts.mode,
         name: opts.name,
-      })) as UserBookmarkItem;
-      return { kind: "ok", item };
-    } catch (error) {
-      // The WASM bridge shapes stanza-level errors as
-      // `bookmark-publish:<condition>` (see
-      // `server/crates/waddle-xmpp-client-wasm/src/client_account.rs::set_room_notification_mode`).
-      // Distinguish `precondition-not-met` — the typical signal that
-      // the user's PEP `urn:xmpp:bookmarks:1` node was created by
-      // an older XEP-0223-style client with a different
-      // `access_model` — from generic errors so the UI can surface a
-      // useful hint.
-      const message = error instanceof Error ? error.message : String(error);
-      if (message.includes("bookmark-publish:precondition-not-met")) {
-        console.warn("[xmpp] XEP-0492 publish hit node-config mismatch:", error);
-        return { kind: "node-config-mismatch" };
+      })) as
+        | { kind: "ok"; item: UserBookmarkItem }
+        | { kind: "node-config-mismatch" }
+        | { kind: "error"; condition: string };
+      if (outcome.kind === "error") {
+        console.warn("[xmpp] XEP-0492 bookmark publish rejected:", outcome.condition);
+        return { kind: "error" };
       }
-      console.warn("[xmpp] XEP-0492 bookmark publish rejected:", error);
+      return outcome;
+    } catch (error) {
+      // Reached only for transport / serialization failures; stanza
+      // errors are surfaced via the typed outcome above.
+      console.warn("[xmpp] XEP-0492 bookmark publish transport error:", error);
       return { kind: "error" };
     }
   }

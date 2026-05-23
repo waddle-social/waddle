@@ -760,6 +760,33 @@ pub struct WaddleBookmarkItem {
     pub notify_mode: Option<waddle_xmpp_client::xep::xep0492::NotifyMode>,
 }
 
+/// JS-facing tagged outcome of `WaddleClient::set_room_notification_mode`.
+///
+/// Returned by always-resolving the Promise (never rejecting on
+/// stanza-level errors). Transport / serialization failures still
+/// reject the Promise via `JsValue`. This shape keeps the chat-side
+/// branching typed — the `kind` discriminator lets the wrapper in
+/// `BrowserXmppClient.setRoomNotificationMode` switch on a string
+/// union without parsing message bodies. Round-9 reviewer P2 fix
+/// for the typed-payloads hard rule.
+#[derive(Debug, Serialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum WaddleSetRoomNotificationModeOutcome {
+    Ok {
+        item: WaddleBookmarkItem,
+    },
+    /// XEP-0060 `precondition-not-met` on the publish — typically a
+    /// pre-existing XEP-0223-style PEP node with a divergent
+    /// `access_model`.
+    NodeConfigMismatch,
+    /// Any other stanza-level error (forbidden, internal-server-error,
+    /// etc). The condition string is carried verbatim so the chat
+    /// can log it for diagnostics; the UI shows a generic message.
+    Error {
+        condition: String,
+    },
+}
+
 /// Options bag for `WaddleClient::set_room_notification_mode`.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]

@@ -235,22 +235,22 @@ impl WaddleClient {
             // distinguish recoverable XEP-0060 conditions (notably
             // `precondition-not-met` on an older XEP-0223-style node
             // configured with `access_model=open`) from transport
-            // errors. Round-8 XEP reviewer P2. The JS surface shapes
-            // the rejection as `bookmark-publish:<condition>` so
-            // `BrowserXmppClient.setRoomNotificationMode` can match
-            // on `precondition-not-met` without parsing the message
-            // body.
-            match send_iq_command_stanza_aware(inner, publish_iq).await? {
-                Ok(_) => {}
-                Err(stanza_err) => {
-                    return Err(JsValue::from_str(&format!(
-                        "bookmark-publish:{}",
-                        stanza_err.condition
-                    )));
+            // errors. Round-9 reviewer P2 — we resolve the Promise
+            // with a typed JS-object outcome instead of throwing a
+            // stringly-typed payload across the boundary. The chat
+            // wrapper switches on `outcome.kind` directly.
+            let outcome = match send_iq_command_stanza_aware(inner, publish_iq).await? {
+                Ok(_) => WaddleSetRoomNotificationModeOutcome::Ok {
+                    item: surface_bookmark(merged_item),
+                },
+                Err(stanza_err) if stanza_err.condition == "precondition-not-met" => {
+                    WaddleSetRoomNotificationModeOutcome::NodeConfigMismatch
                 }
-            }
-
-            to_js_value(&surface_bookmark(merged_item))
+                Err(stanza_err) => WaddleSetRoomNotificationModeOutcome::Error {
+                    condition: stanza_err.condition,
+                },
+            };
+            to_js_value(&outcome)
         })
     }
 
