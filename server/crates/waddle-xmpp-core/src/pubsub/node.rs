@@ -258,6 +258,13 @@ impl NodeConfig {
     /// roster subscription does NOT receive the user's DND state.
     /// `max_items = 1` keeps the node single-slot (the PEP idiom for
     /// single-item nodes is `id = current`).
+    ///
+    /// `notify_retract` / `notify_delete` are set to `false` because
+    /// the server does not currently emit the XEP-0060 §7.2.2 /
+    /// §9.1.5 retract/delete events on the wire — advertising them
+    /// as `true` would lie to subscribers. Bob's other resources
+    /// resync DND state via `<items/>` GET on resume, not via
+    /// retract fanout. See PR #759 / round-6 XMPP-conformance review.
     pub fn waddle_dnd_defaults() -> Self {
         Self {
             access_model: AccessModel::Whitelist,
@@ -265,8 +272,8 @@ impl NodeConfig {
             max_items: 1,
             persist_items: true,
             deliver_payloads: true,
-            notify_retract: true,
-            notify_delete: true,
+            notify_retract: false,
+            notify_delete: false,
             send_last_published_item: SendLastPublishedItem::Never,
         }
     }

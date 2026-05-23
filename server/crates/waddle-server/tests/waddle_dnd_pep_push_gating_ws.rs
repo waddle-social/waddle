@@ -73,6 +73,8 @@ fn parse_iq(xml: &str, id: &str, iq_type: &str) -> Element {
     element
 }
 
+const NS_PUBSUB_ERRORS: &str = "http://jabber.org/protocol/pubsub#errors";
+
 fn assert_bad_request(xml: &str, id: &str) {
     let iq = parse_iq(xml, id, "error");
     let error = iq
@@ -84,6 +86,16 @@ fn assert_bad_request(xml: &str, id: &str) {
             .children()
             .any(|c| c.name() == "bad-request" && c.ns() == STANZA_ERROR_NS),
         "expected <bad-request/> stanza error: {xml}"
+    );
+    // XEP-0060 §7.1.3.4: payload-shape rejection on a PubSub publish
+    // MUST also carry the pubsub-namespaced `<invalid-payload/>`
+    // extension so clients can distinguish payload-shape errors from
+    // generic bad-request.
+    assert!(
+        error
+            .children()
+            .any(|c| c.name() == "invalid-payload" && c.ns() == NS_PUBSUB_ERRORS),
+        "expected XEP-0060 <invalid-payload/> pubsub-errors extension: {xml}"
     );
 }
 

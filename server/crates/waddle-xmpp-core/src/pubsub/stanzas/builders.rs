@@ -91,9 +91,10 @@ pub fn build_pubsub_error(original_iq: &Iq, error: PubSubError) -> Iq {
         PubSubError::NodeExists | PubSubError::PreconditionNotMet => {
             (ErrorType::Cancel, DefinedCondition::Conflict)
         }
-        PubSubError::BadRequest | PubSubError::InvalidJid => {
-            (ErrorType::Modify, DefinedCondition::BadRequest)
-        }
+        PubSubError::BadRequest
+        | PubSubError::InvalidJid
+        | PubSubError::InvalidPayload
+        | PubSubError::PayloadRequired => (ErrorType::Modify, DefinedCondition::BadRequest),
         PubSubError::NotSubscribed => (ErrorType::Cancel, DefinedCondition::UnexpectedRequest),
         PubSubError::InternalServerError => {
             (ErrorType::Wait, DefinedCondition::InternalServerError)
@@ -115,6 +116,14 @@ pub fn build_pubsub_error(original_iq: &Iq, error: PubSubError) -> Iq {
         );
     } else if let PubSubError::ClosedNode = error {
         stanza_error.other = Some(Element::builder("closed-node", NS_PUBSUB_ERRORS).build());
+    } else if let PubSubError::InvalidPayload = error {
+        // XEP-0060 §7.1.3.4: attach the pubsub-namespaced
+        // <invalid-payload/> condition so clients can distinguish
+        // payload-shape rejection from a generic <bad-request/>.
+        stanza_error.other = Some(Element::builder("invalid-payload", NS_PUBSUB_ERRORS).build());
+    } else if let PubSubError::PayloadRequired = error {
+        // XEP-0060 §7.1.3.3.
+        stanza_error.other = Some(Element::builder("payload-required", NS_PUBSUB_ERRORS).build());
     }
 
     Iq::Error {
