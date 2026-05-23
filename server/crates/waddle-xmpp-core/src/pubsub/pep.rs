@@ -26,6 +26,21 @@ pub const PEP_NODE_MDS_DISPLAYED: &str = "urn:xmpp:mds:displayed:0";
 /// constants are pinned equal by a `waddle-xmpp` test.
 pub const PEP_NODE_VCARD4: &str = "urn:xmpp:vcard4";
 
+/// Waddle DND PEP node + namespace (issue #367).
+///
+/// Mirrored as `waddle_xmpp::xep::xep_waddle_dnd::PEP_NODE_WADDLE_DND`
+/// so the well-known-node configuration table in
+/// `NodeConfig::pep_for_node` can reference it without pulling
+/// `waddle-xmpp` into `waddle-xmpp-core`. The two constants are pinned
+/// equal by a `waddle-xmpp` test.
+///
+/// The DND payload contains sensitive personal data (timezone, weekly
+/// sleep windows, snooze deadlines), so the well-known config forces
+/// `access_model = whitelist` and `send_last_published_item = never`
+/// to keep this off the roster-contact PEP fan-out. The authoritative
+/// consumer is the server-side projection at the T1 push gate.
+pub const PEP_NODE_WADDLE_DND: &str = "urn:waddle:dnd:0";
+
 /// Check if an IQ is a PEP request for the current user.
 pub fn is_pep_request(iq: &Iq, user_jid: &BareJid) -> bool {
     if !is_pubsub_iq(iq) {
@@ -61,6 +76,7 @@ impl PepHandler {
             || node == PEP_NODE_AVATAR_METADATA
             || node == PEP_NODE_MDS_DISPLAYED
             || node == PEP_NODE_VCARD4
+            || node == PEP_NODE_WADDLE_DND
             || node == "http://jabber.org/protocol/nick"
             || node == "http://jabber.org/protocol/mood"
             || node == "http://jabber.org/protocol/activity"
@@ -71,7 +87,10 @@ impl PepHandler {
 
     /// Get the default access model for a well-known PEP node.
     pub fn default_access_model_for_node(node: &str) -> AccessModel {
-        if node == PEP_NODE_BOOKMARKS || node == PEP_NODE_MDS_DISPLAYED {
+        if node == PEP_NODE_BOOKMARKS
+            || node == PEP_NODE_MDS_DISPLAYED
+            || node == PEP_NODE_WADDLE_DND
+        {
             return AccessModel::Whitelist;
         }
         if node == PEP_NODE_VCARD4 {
@@ -95,6 +114,11 @@ pub fn build_pep_identity() -> Identity {
 /// on the user's bare-JID disco#info as the canonical PEP-support
 /// signal — without it, clients fall back to per-node `+notify`
 /// probing or skip PEP-driven features entirely.
+/// Note: `urn:waddle:dnd:0+notify` is deliberately NOT advertised
+/// here. The DND PEP node defaults to `AccessModel::Whitelist` +
+/// `SendLastPublishedItem::Never` (see [`super::node::NodeConfig::waddle_dnd_defaults`])
+/// so there is no roster-contact fanout to opt into. The user's own
+/// resources fetch DND state via XEP-0060 `<items/>` get on resume.
 pub fn pep_features() -> Vec<Feature> {
     vec![
         Feature::pubsub(),

@@ -41,7 +41,9 @@ pub(super) async fn reconcile_well_known_pep_node_config(
     owner: &BareJid,
     node: &str,
 ) {
-    if node != waddle_xmpp_core::pubsub::PEP_NODE_VCARD4 {
+    if node != waddle_xmpp_core::pubsub::PEP_NODE_VCARD4
+        && node != waddle_xmpp_core::pubsub::PEP_NODE_WADDLE_DND
+    {
         return;
     }
     let storage = &state.deps.protocol.pubsub_storage;

@@ -100,6 +100,7 @@ zeroize = { version = "1", features = ["derive"] }
 # Utilities
 uuid = { version = "1.23", features = ["v4", "v7", "serde", "js"] }
 chrono = { version = "0.4", features = ["serde"] }
+chrono-tz = { version = "0.10", features = ["serde"] }
 url = "2.5"
 base64 = "0.22"
 rand = "0.10"

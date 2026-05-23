@@ -189,6 +189,15 @@ pub enum PubSubError {
     NodeExists,
     BadRequest,
     InvalidJid,
+    /// XEP-0060 §7.1.3.4: `<bad-request/>` + pubsub-namespaced
+    /// `<invalid-payload/>` extension. Used when a publish item's
+    /// payload fails the per-node payload-conformance contract
+    /// (e.g. the typed parser rejects the inner element).
+    InvalidPayload,
+    /// XEP-0060 §7.1.3.3: `<bad-request/>` + pubsub-namespaced
+    /// `<payload-required/>` extension. Used when a publish that
+    /// requires a payload arrives without one.
+    PayloadRequired,
     PreconditionNotMet,
     NotSubscribed,
     /// An unexpected backend/storage failure unrelated to the requested resource.

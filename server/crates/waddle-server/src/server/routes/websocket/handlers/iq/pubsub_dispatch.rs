@@ -514,6 +514,11 @@ fn is_valid_xep0402_bookmark_item_id(item_id: &str) -> bool {
 
 fn pubsub_publish_error_from_xmpp_error(error: &waddle_xmpp::XmppError) -> PubSubError {
     match error {
+        // XEP-0060 §7.1.3.3 / §7.1.3.4: typed payload-shape variants
+        // carry their pubsub-error subcondition explicitly. Match on
+        // type, not on substring (CLAUDE.md typed-payloads rule).
+        waddle_xmpp::XmppError::PubSubPayloadRequired(_) => PubSubError::PayloadRequired,
+        waddle_xmpp::XmppError::PubSubInvalidPayload(_) => PubSubError::InvalidPayload,
         waddle_xmpp::XmppError::Stanza {
             condition: waddle_xmpp::StanzaErrorCondition::BadRequest,
             ..

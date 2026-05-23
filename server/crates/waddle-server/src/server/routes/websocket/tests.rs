@@ -108,6 +108,12 @@ async fn create_test_websocket_state_with_extension_manager(
             pubsub_storage.database(),
         ),
     );
+    let dnd_projection = Arc::new(crate::dnd_projection::DndProjectionStore::new(
+        pubsub_storage.database(),
+    ));
+    let dnd_reader = Arc::new(crate::dnd_reader::PepDndReader::with_system_clock(
+        Arc::clone(&dnd_projection),
+    ));
     let notification_activity = Arc::new(
         crate::notification_activity::NotificationActivityStore::new(
             app_state.db_pool.global().clone(),
@@ -182,6 +188,8 @@ async fn create_test_websocket_state_with_extension_manager(
                     push_service,
                     notification_outbox,
                     notification_settings_projection,
+                    dnd_projection,
+                    dnd_reader,
                     notification_activity,
                     isr_token_store: waddle_xmpp::isr::create_shared_store(),
                     sm_session_registry: Arc::new(InMemorySmSessionRegistry::new()),

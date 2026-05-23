@@ -1,8 +1,22 @@
+use tracing::{error, warn};
 use waddle_xmpp::XmppError;
 
 use super::DatabasePubSubStorage;
 
-const PUBSUB_SCHEMA_VERSION: i64 = 4;
+/// Schema version for the pubsub + projection tables managed in this
+/// module. CLAUDE.md greenlights breaking changes, so a version
+/// mismatch unconditionally drops + recreates the listed tables —
+/// there is no in-place migration path. Bump this number on any
+/// schema-shape change, AND if a stricter parser may reject XML
+/// payloads previously written by an older server (otherwise the
+/// next read silently defaults the user to inactive; see
+/// [`crate::dnd_projection`] preamble).
+///
+/// History:
+/// * v5 — initial `dnd_projection` (#367)
+/// * v6 — added `dnd_projection_source_version` singleton counter
+///   to replace wall-clock millis as the LWW key (round-7 review)
+const PUBSUB_SCHEMA_VERSION: i64 = 6;
 
 impl DatabasePubSubStorage {
     pub(super) async fn initialize(&self) -> Result<(), XmppError> {
@@ -33,7 +47,30 @@ impl DatabasePubSubStorage {
 
         if current != Some(PUBSUB_SCHEMA_VERSION) {
             // Drop-and-recreate: CLAUDE.md greenlights breaking changes.
+            // Surface the destruction loudly so a developer with a
+            // file-backed dev SQLite doesn't lose hours of state on
+            // a quiet branch swap.
+            let prior_items: i64 = self.row_count("pubsub_items").await.unwrap_or(0);
+            if prior_items > 0 {
+                error!(
+                    from_version = ?current,
+                    to_version = PUBSUB_SCHEMA_VERSION,
+                    pubsub_items_dropped = prior_items,
+                    "pubsub schema version mismatch — DROPPING all pubsub tables \
+                     (including any DND, bookmark, vCard4, and avatar state). \
+                     Set WADDLE_DATABASE_URL/WADDLE_XMPP_PUBSUB_DATABASE_URL to a \
+                     fresh file if you wanted to preserve this data."
+                );
+            } else {
+                warn!(
+                    from_version = ?current,
+                    to_version = PUBSUB_SCHEMA_VERSION,
+                    "pubsub schema version mismatch — dropping and recreating tables"
+                );
+            }
             for table in [
+                "dnd_projection",
+                "dnd_projection_source_version",
                 "notification_settings_projection",
                 "notification_settings_projection_source_version",
                 "pubsub_items",
@@ -164,6 +201,75 @@ impl DatabasePubSubStorage {
             (),
         )
         .await?;
+
+        // Waddle DND projection (#367). Single row per user; stores the
+        // typed `<dnd xmlns='urn:waddle:dnd:0'>` payload XML so the T1
+        // gate can parse-and-evaluate without a second IO hop into
+        // `pubsub_items`. LWW on republish — there is no MUC-style
+        // multi-source merge to perform.
+        //
+        // ## Access pattern
+        //
+        // The ONLY query shape is a point-lookup by `owner_bare_jid`
+        // (the PRIMARY KEY's implicit index). If a future PR
+        // introduces another query (e.g. a janitor scanning by
+        // `updated_at_ms < cutoff`), it MUST add a covering index in
+        // the same migration — the table grows by one row per user
+        // and would otherwise force a full scan on every janitor tick.
+        let dnd_projection_ddl = match self.db.driver() {
+            crate::db::DatabaseDriver::Sqlite => {
+                r#"
+                CREATE TABLE IF NOT EXISTS dnd_projection (
+                    owner_bare_jid TEXT NOT NULL PRIMARY KEY,
+                    payload_xml TEXT NOT NULL,
+                    source_version INTEGER NOT NULL,
+                    updated_at_ms INTEGER NOT NULL
+                )
+                "#
+            }
+            crate::db::DatabaseDriver::Postgres => {
+                r#"
+                CREATE TABLE IF NOT EXISTS dnd_projection (
+                    owner_bare_jid TEXT NOT NULL PRIMARY KEY,
+                    payload_xml TEXT NOT NULL,
+                    source_version BIGINT NOT NULL,
+                    updated_at_ms BIGINT NOT NULL
+                )
+                "#
+            }
+        };
+        self.execute(dnd_projection_ddl, ()).await?;
+
+        // Singleton-row monotonic counter for the DND projection's
+        // `source_version`. Switching from wall-clock millis to a
+        // DB-backed counter (the same pattern as
+        // `notification_settings_projection_source_version`) closes
+        // the NTP-backwards-jump hole — the LWW guard
+        // `WHERE excluded.source_version > dnd_projection.source_version`
+        // is only safe when source_version is monotonic. With wall-
+        // clock millis, an NTP slew could make a newer publish look
+        // older and silently drop it from the projection while
+        // `pubsub_items` still gets updated, leaving the two stores
+        // disagreed. Round-7 Copilot review on PR #759.
+        let dnd_projection_source_version_ddl = match self.db.driver() {
+            crate::db::DatabaseDriver::Sqlite => {
+                r#"
+                CREATE TABLE IF NOT EXISTS dnd_projection_source_version (
+                    id INTEGER NOT NULL PRIMARY KEY CHECK (id = 1),
+                    current_version INTEGER NOT NULL
+                )
+                "#
+            }
+            crate::db::DatabaseDriver::Postgres => {
+                r#"
+                CREATE TABLE IF NOT EXISTS dnd_projection_source_version (
+                    id BIGINT NOT NULL PRIMARY KEY CHECK (id = 1),
+                    current_version BIGINT NOT NULL
+                )
+                "#
+            }
+        };
+        self.execute(dnd_projection_source_version_ddl, ()).await?;
 
         let items_ddl = match self.db.driver() {
             crate::db::DatabaseDriver::Sqlite => {

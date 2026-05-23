@@ -12,6 +12,12 @@ fn bookmark_payload() -> minidom::Element {
         .expect("valid bookmark payload")
 }
 
+fn dnd_payload() -> minidom::Element {
+    "<dnd xmlns='urn:waddle:dnd:0' timezone='UTC'/>"
+        .parse()
+        .expect("valid dnd payload")
+}
+
 #[tokio::test]
 async fn database_pubsub_storage_persists_file_backing() {
     let artifacts = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/test-artifacts");
@@ -788,4 +794,197 @@ async fn subscribe_cleans_up_pre_existing_duplicate_rows() {
         1,
         "subscribe must garbage-collect duplicate rows for the (owner, node, subscriber) triple"
     );
+}
+
+/// The XEP-0163 single-item PEP convention is `id="current"`. A
+/// client that publishes with a different id (e.g. `id="custom"`)
+/// then later retracts `id="current"` would silently leave the
+/// projection in place — the user would stay in DND with no
+/// wire-level way to clear it. Reject up-front. Copilot review on
+/// PR #759.
+#[tokio::test]
+async fn dnd_publish_with_wrong_item_id_is_bad_request() {
+    let storage = DatabasePubSubStorage::open(Some("sqlite::memory:"))
+        .await
+        .expect("storage");
+    let bob = jid("bob@example.com");
+    storage
+        .get_or_create_node(&bob, "urn:waddle:dnd:0")
+        .await
+        .expect("node");
+
+    let bad_item = waddle_xmpp::pubsub::PubSubItem {
+        id: Some("custom".to_string()),
+        publisher: None,
+        payload: Some(dnd_payload()),
+    };
+    let err = storage
+        .publish_item(&bob, "urn:waddle:dnd:0", &bad_item, Some(&bob), false)
+        .await
+        .expect_err("non-current item id must error");
+    assert!(
+        matches!(err, waddle_xmpp::XmppError::PubSubInvalidPayload(_)),
+        "expected PubSubInvalidPayload (XEP-0060 §7.1.3.4), got: {err:?}"
+    );
+
+    let missing_id = waddle_xmpp::pubsub::PubSubItem {
+        id: None,
+        publisher: None,
+        payload: Some(dnd_payload()),
+    };
+    let err = storage
+        .publish_item(&bob, "urn:waddle:dnd:0", &missing_id, Some(&bob), false)
+        .await
+        .expect_err("missing item id must also error");
+    assert!(matches!(
+        err,
+        waddle_xmpp::XmppError::PubSubInvalidPayload(_)
+    ));
+
+    // The `current` id is accepted.
+    let good_item = waddle_xmpp::pubsub::PubSubItem {
+        id: Some(waddle_xmpp::xep::xep_waddle_dnd::ITEM_ID_CURRENT.to_string()),
+        publisher: None,
+        payload: Some(dnd_payload()),
+    };
+    storage
+        .publish_item(&bob, "urn:waddle:dnd:0", &good_item, Some(&bob), false)
+        .await
+        .expect("current id should be accepted");
+}
+
+/// The DND projection's `source_version` MUST come from the
+/// monotonic `dnd_projection_source_version` counter, not from
+/// wall-clock time. After two back-to-back publishes the counter
+/// MUST have incremented by at least one — proving the LWW guard
+/// is driven by transaction-serialized monotonicity, not by
+/// (potentially regressing) NTP time. Round-7 Copilot review on PR
+/// #759.
+#[tokio::test]
+async fn dnd_publish_source_version_is_strictly_monotonic_per_publish() {
+    let storage = DatabasePubSubStorage::open(Some("sqlite::memory:"))
+        .await
+        .expect("storage");
+    let bob = jid("bob@example.com");
+    let projection_store = crate::dnd_projection::DndProjectionStore::new(storage.database());
+
+    let item = waddle_xmpp::pubsub::PubSubItem {
+        id: Some(waddle_xmpp::xep::xep_waddle_dnd::ITEM_ID_CURRENT.to_string()),
+        publisher: None,
+        payload: Some(dnd_payload()),
+    };
+    storage
+        .get_or_create_node(&bob, "urn:waddle:dnd:0")
+        .await
+        .expect("node");
+    storage
+        .publish_item(&bob, "urn:waddle:dnd:0", &item, Some(&bob), false)
+        .await
+        .expect("first publish");
+    let first = projection_store
+        .get(&bob)
+        .await
+        .expect("get")
+        .expect("row")
+        .source_version;
+    storage
+        .publish_item(&bob, "urn:waddle:dnd:0", &item, Some(&bob), false)
+        .await
+        .expect("second publish");
+    let second = projection_store
+        .get(&bob)
+        .await
+        .expect("get")
+        .expect("row")
+        .source_version;
+    assert!(
+        second > first,
+        "source_version must be strictly increasing across publishes \
+         (first={first}, second={second})"
+    );
+}
+
+/// A DND publish without any `<dnd>` payload (XEP-0060 §7.1.3.3) MUST
+/// surface as the typed `PubSubPayloadRequired` variant — distinct
+/// from the malformed-payload case (§7.1.3.4). The dispatch layer
+/// maps the two onto different pubsub-error extension elements on
+/// the wire, so the typed discriminator is load-bearing.
+#[tokio::test]
+async fn dnd_publish_without_payload_is_payload_required() {
+    let storage = DatabasePubSubStorage::open(Some("sqlite::memory:"))
+        .await
+        .expect("storage");
+    let bob = jid("bob@example.com");
+    storage
+        .get_or_create_node(&bob, "urn:waddle:dnd:0")
+        .await
+        .expect("node");
+
+    let item_missing_payload = waddle_xmpp::pubsub::PubSubItem {
+        id: Some(waddle_xmpp::xep::xep_waddle_dnd::ITEM_ID_CURRENT.to_string()),
+        publisher: None,
+        payload: None,
+    };
+    let err = storage
+        .publish_item(
+            &bob,
+            "urn:waddle:dnd:0",
+            &item_missing_payload,
+            Some(&bob),
+            false,
+        )
+        .await
+        .expect_err("missing payload must error");
+    assert!(
+        matches!(err, waddle_xmpp::XmppError::PubSubPayloadRequired(_)),
+        "expected PubSubPayloadRequired (XEP-0060 §7.1.3.3), got: {err:?}"
+    );
+}
+
+/// A publisher that is NOT the node owner MUST be rejected with
+/// `<forbidden/>` when targeting `urn:waddle:dnd:0`. Accepting the
+/// publish-only path while skipping the projection write would
+/// leave `pubsub_items` and `dnd_projection` in disagreement —
+/// subscribers fetching `<items/>` would see the peer's spoofed
+/// payload while the T1 push gate consults the owner's last-known
+/// state. Found by the round-3 hostile-client adversarial review.
+#[tokio::test]
+async fn dnd_publish_from_non_owner_is_forbidden() {
+    let storage = DatabasePubSubStorage::open(Some("sqlite::memory:"))
+        .await
+        .expect("storage");
+    let bob = jid("bob@example.com");
+    let mallory = jid("mallory@example.com");
+    storage
+        .get_or_create_node(&bob, "urn:waddle:dnd:0")
+        .await
+        .expect("node");
+
+    let item = waddle_xmpp::pubsub::PubSubItem {
+        id: Some("current".to_string()),
+        publisher: None,
+        payload: Some(dnd_payload()),
+    };
+
+    let result = storage
+        .publish_item(&bob, "urn:waddle:dnd:0", &item, Some(&mallory), false)
+        .await;
+    let err = result.expect_err("non-owner DND publish must error");
+    match &err {
+        waddle_xmpp::XmppError::Stanza { condition, .. } => {
+            assert!(
+                format!("{condition:?}")
+                    .to_lowercase()
+                    .contains("forbidden"),
+                "expected <forbidden/> condition, got: {condition:?}"
+            );
+        }
+        other => panic!("expected Stanza forbidden error, got: {other:?}"),
+    }
+
+    // Sanity check: the owner can still publish.
+    storage
+        .publish_item(&bob, "urn:waddle:dnd:0", &item, Some(&bob), false)
+        .await
+        .expect("owner publish should succeed");
 }

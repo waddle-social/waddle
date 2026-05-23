@@ -100,6 +100,17 @@ pub struct ProtocolServices {
     /// canonical XMPP state.
     pub notification_settings_projection:
         Arc<crate::notification_settings_projection::NotificationSettingsProjectionStore>,
+    /// Durable derived projection of the user's `urn:waddle:dnd:0` PEP
+    /// item (#367). Lookup keys: `owner_bare_jid` → typed
+    /// [`waddle_xmpp::xep::xep_waddle_dnd::WaddleDnd`]. Consulted at
+    /// T1 push dispatch via [`crate::dnd_reader::PepDndReader`].
+    pub dnd_projection: Arc<crate::dnd_projection::DndProjectionStore>,
+    /// PEP-backed DND reader plumbed into the T1 push gate
+    /// (`notification_outbox`). Reads [`dnd_projection`] + a
+    /// `chrono::Utc::now()` clock and resolves the typed
+    /// [`crate::notification_outbox::DndState`] used to suppress
+    /// candidates with [`crate::notification_outbox::SuppressedReason::WaddleDnd`].
+    pub dnd_reader: Arc<crate::dnd_reader::PepDndReader>,
     /// Durable per-(user, conversation) activity projection backing
     /// the XEP-0513 `<active/>` push filter. Ingested from typed
     /// XEP-0085 chat-state changes, XEP-0490 read-marker advances,
