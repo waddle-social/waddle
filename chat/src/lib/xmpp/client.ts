@@ -1228,7 +1228,7 @@ export class BrowserXmppClient {
     providerEndpoint: string;
     providerToken: string;
     providerKeyMaterial: string;
-  }): Promise<{ id: string; node: string; status: string } | null> {
+  }): Promise<{ id: string; node: string; status: "active" | "disabled" } | null> {
     const xmpp = await this.requireConnectedXmpp();
     if (!xmpp.register_web_push_device) return null;
     try {
@@ -1248,12 +1248,23 @@ export class BrowserXmppClient {
   }
 
   /**
-   * `<disable-device …/>` on the Push Service. Symmetric to
-   * `registerWebPushDevice`. The XEP-0357 `<disable/>` on the user
-   * server is a separate concern — chat should call both when the
-   * user opts out.
+   * `<disable-device …/>` on the Push Service. Removes ONLY this
+   * device's row from the stable per-(user, app-id) node, leaving
+   * other devices on the same node alone.
+   *
+   * The XEP-0357 `<disable jid='…' node='…'/>` on the user-server
+   * (see `disablePushNotifications`) is NODE-LEVEL: it removes the
+   * entire `(push-service-jid, node)` pair from the user-server's
+   * registration list, which silently stops fan-out to every
+   * device on the node. The chat MUST NOT call both from the
+   * per-device opt-out path — that would take down push for
+   * other installations.
+   *
+   * The "disable push everywhere" flow (a dedicated UI affordance
+   * with explicit user warning) is the only place that should call
+   * both APIs.
    */
-  async disablePushDevice(opts: { serviceJid: string; node: string; deviceId: string }): Promise<{ id: string; node: string; status: string } | null> {
+  async disablePushDevice(opts: { serviceJid: string; node: string; deviceId: string }): Promise<{ id: string; node: string; status: "active" | "disabled" } | null> {
     const xmpp = await this.requireConnectedXmpp();
     if (!xmpp.disable_push_device) return null;
     try {

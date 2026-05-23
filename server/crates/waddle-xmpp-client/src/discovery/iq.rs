@@ -382,13 +382,57 @@ pub fn build_ensure_push_node_iq(push_service_jid: &str, app_id: &str) -> Elemen
         .build()
 }
 
+/// Platform identifier the server's `PushDevicePlatform::parse`
+/// accepts. CLAUDE.md typed-payloads hard rule: do NOT pass this as
+/// a `&str` — a typo (`"ios"` instead of `"apns"`) silently
+/// produces an IQ the server rejects at runtime.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PushDevicePlatform {
+    Web,
+    /// Apple Push Notification service. `device-id` carries the APNs
+    /// device token; `provider-token` carries the JWT-signing kid.
+    Apns,
+    /// Firebase Cloud Messaging. `provider-token` carries the FCM
+    /// registration token.
+    Fcm,
+}
+
+impl PushDevicePlatform {
+    pub fn as_wire_str(self) -> &'static str {
+        match self {
+            Self::Web => "web",
+            Self::Apns => "apns",
+            Self::Fcm => "fcm",
+        }
+    }
+}
+
+/// Provider deployment environment. `apns` distinguishes
+/// `apns_development` vs `apns_production` endpoints; `web` and
+/// `fcm` have no equivalent split today (the server accepts
+/// `"prod"` uniformly).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PushEnvironment {
+    Prod,
+    Dev,
+}
+
+impl PushEnvironment {
+    pub fn as_wire_str(self) -> &'static str {
+        match self {
+            Self::Prod => "prod",
+            Self::Dev => "dev",
+        }
+    }
+}
+
 /// Typed Web Push provider credentials. The three `Option<&str>` fields
 /// mirror the XEP-0357 §10 "provider" data — for Web Push all three
 /// are populated; APNs / FCM populate only the subset they need.
 pub struct PushDeviceRegistration<'a> {
     pub node: &'a str,
     pub device_id: &'a str,
-    pub environment: &'a str,
+    pub environment: PushEnvironment,
     pub provider_endpoint: Option<&'a str>,
     pub provider_token: Option<&'a str>,
     pub provider_key_material: Option<&'a str>,
@@ -397,7 +441,7 @@ pub struct PushDeviceRegistration<'a> {
 /// Build a `<register-device …><provider-…/></register-device>` IQ.
 pub fn build_register_push_device_iq(
     push_service_jid: &str,
-    platform: &str,
+    platform: PushDevicePlatform,
     registration: &PushDeviceRegistration<'_>,
 ) -> Element {
     let id = format!("push-register-device-{}", next_id());
@@ -410,10 +454,13 @@ pub fn build_register_push_device_iq(
             minidom::rxml::xml_ncname!("device-id").to_owned(),
             registration.device_id,
         )
-        .attr(minidom::rxml::xml_ncname!("platform").to_owned(), platform)
+        .attr(
+            minidom::rxml::xml_ncname!("platform").to_owned(),
+            platform.as_wire_str(),
+        )
         .attr(
             minidom::rxml::xml_ncname!("environment").to_owned(),
-            registration.environment,
+            registration.environment.as_wire_str(),
         );
     if let Some(endpoint) = registration.provider_endpoint {
         register = register.append(

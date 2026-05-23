@@ -783,12 +783,13 @@ fn build_register_push_device_carries_web_push_fields() {
     let registration = PushDeviceRegistration {
         node: "node-abc",
         device_id: "web-1234",
-        environment: "prod",
+        environment: PushEnvironment::Prod,
         provider_endpoint: Some("https://fcm.googleapis.com/wp/abcdef"),
         provider_token: Some("vapid-auth-secret"),
         provider_key_material: Some("p256dh-public-key"),
     };
-    let iq = build_register_push_device_iq("push.example.com", "web", &registration);
+    let iq =
+        build_register_push_device_iq("push.example.com", PushDevicePlatform::Web, &registration);
     assert_eq!(iq.attr("type"), Some("set"));
     assert_eq!(iq.attr("to"), Some("push.example.com"));
     let register = iq
@@ -820,16 +821,13 @@ fn build_register_push_device_omits_missing_provider_fields() {
     let registration = PushDeviceRegistration {
         node: "node-abc",
         device_id: "ios-1234",
-        environment: "prod",
+        environment: PushEnvironment::Prod,
         provider_endpoint: None,
         provider_token: Some("apns-device-token"),
         provider_key_material: None,
     };
-    // Server-side `PushDevicePlatform::parse` accepts exactly
-    // `"web" | "apns" | "fcm"` — use the canonical vocabulary
-    // (NOT `"ios"`) so the test exercises an IQ shape the server
-    // will actually accept when APNs lands in #529.
-    let iq = build_register_push_device_iq("push.example.com", "apns", &registration);
+    let iq =
+        build_register_push_device_iq("push.example.com", PushDevicePlatform::Apns, &registration);
     let register = iq
         .get_child("register-device", WADDLE_PUSH_SERVICE_NS)
         .expect("register-device child");

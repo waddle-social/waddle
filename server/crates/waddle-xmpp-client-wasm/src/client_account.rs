@@ -79,15 +79,34 @@ impl WaddleClient {
         future_to_promise(async move {
             let opts: RegisterWebPushDeviceOptions = serde_wasm_bindgen::from_value(options)
                 .map_err(|err| JsValue::from_str(&err.to_string()))?;
+            // `environment` is wire-typed: `"prod"` and `"dev"` are the
+            // only values the server accepts. Map the chat-side string
+            // through the typed enum so a typo at the JS boundary
+            // surfaces as a typed `Err` instead of an IQ the server
+            // would silently reject. Round-7 typed-payloads review.
+            let environment = match opts.environment.as_str() {
+                "prod" => PushEnvironment::Prod,
+                "dev" => PushEnvironment::Dev,
+                other => {
+                    return Err(JsValue::from_str(&format!(
+                        "register_web_push_device: unknown environment '{other}' \
+                         (expected 'prod' or 'dev')"
+                    )));
+                }
+            };
             let registration = PushDeviceRegistration {
                 node: &opts.node,
                 device_id: &opts.device_id,
-                environment: &opts.environment,
+                environment,
                 provider_endpoint: non_empty(&opts.provider_endpoint),
                 provider_token: non_empty(&opts.provider_token),
                 provider_key_material: non_empty(&opts.provider_key_material),
             };
-            let iq = build_register_push_device_iq(&opts.service_jid, "web", &registration);
+            let iq = build_register_push_device_iq(
+                &opts.service_jid,
+                PushDevicePlatform::Web,
+                &registration,
+            );
             let result = send_iq_command(inner, iq).await?;
             let device = result
                 .get_child("device", WADDLE_PUSH_SERVICE_NS)
@@ -95,7 +114,11 @@ impl WaddleClient {
             let response = PushServiceDevice {
                 id: require_non_empty_attr(device, "id", "register-device")?,
                 node: require_non_empty_attr(device, "node", "register-device")?,
-                status: require_non_empty_attr(device, "status", "register-device")?,
+                status: PushDeviceStatus::from_wire(&require_non_empty_attr(
+                    device,
+                    "status",
+                    "register-device",
+                )?)?,
             };
             to_js_value(&response)
         })
@@ -123,7 +146,11 @@ impl WaddleClient {
             let response = PushServiceDevice {
                 id: require_non_empty_attr(device, "id", "disable-device")?,
                 node: require_non_empty_attr(device, "node", "disable-device")?,
-                status: require_non_empty_attr(device, "status", "disable-device")?,
+                status: PushDeviceStatus::from_wire(&require_non_empty_attr(
+                    device,
+                    "status",
+                    "disable-device",
+                )?)?,
             };
             to_js_value(&response)
         })

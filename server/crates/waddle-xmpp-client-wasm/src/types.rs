@@ -435,12 +435,38 @@ pub struct PushServiceNode {
     pub app_id: String,
 }
 
-/// Result of `<register-device …/>` against the Push Service.
+/// Push Service device wire status. The server emits `"active"` on
+/// successful register-device and `"disabled"` on disable-device.
+/// CLAUDE.md typed-payloads hard rule: do NOT carry this as a
+/// `String` — a server-side rename would silently reach TypeScript
+/// as an unrecognised string. Round-7 Greptile P1 finding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum PushDeviceStatus {
+    Active,
+    Disabled,
+}
+
+impl PushDeviceStatus {
+    pub fn from_wire(value: &str) -> Result<Self, JsValue> {
+        match value {
+            "active" => Ok(Self::Active),
+            "disabled" => Ok(Self::Disabled),
+            other => Err(JsValue::from_str(&format!(
+                "unknown Push Service device status '{other}' \
+                 (expected 'active' or 'disabled')"
+            ))),
+        }
+    }
+}
+
+/// Result of `<register-device …/>` / `<disable-device …/>` against
+/// the Push Service.
 #[derive(Debug, Serialize)]
 pub struct PushServiceDevice {
     pub id: String,
     pub node: String,
-    pub status: String,
+    pub status: PushDeviceStatus,
 }
 
 /// Arguments to `WaddleClient::register_web_push_device`. Bundled
