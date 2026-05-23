@@ -483,7 +483,12 @@ pub struct RegisterWebPushDeviceOptions {
     pub service_jid: String,
     pub node: String,
     pub device_id: String,
-    pub environment: String,
+    /// Typed at the WASM boundary — round-7 Greptile P1 caught the
+    /// previous `String` field as a typed-payloads-rule violation.
+    /// `"prod"` / `"dev"` are the wire values; anything else fails
+    /// at `serde_wasm_bindgen::from_value` with an unknown-variant
+    /// error rather than reaching the IQ builder as a typo.
+    pub environment: waddle_xmpp_client::discovery::PushEnvironment,
     pub provider_endpoint: String,
     pub provider_token: String,
     pub provider_key_material: String,
@@ -769,7 +774,10 @@ mod tests {
         assert_eq!(parsed.service_jid, "push.example.com");
         assert_eq!(parsed.node, "node-abc");
         assert_eq!(parsed.device_id, "web-1234");
-        assert_eq!(parsed.environment, "prod");
+        assert_eq!(
+            parsed.environment,
+            waddle_xmpp_client::discovery::PushEnvironment::Prod
+        );
         assert_eq!(
             parsed.provider_endpoint,
             "https://fcm.googleapis.com/wp/abcdef"
@@ -816,5 +824,27 @@ mod tests {
         });
         let parsed: Result<RegisterWebPushDeviceOptions, _> = serde_json::from_value(json);
         assert!(parsed.is_err(), "missing serviceJid must error");
+    }
+
+    /// `environment` is typed via the upstream `PushEnvironment`
+    /// enum — an unknown wire value MUST fail at deserialize time
+    /// rather than reaching the IQ builder. Round-7 Greptile P1
+    /// pinning.
+    #[test]
+    fn register_web_push_device_options_rejects_unknown_environment() {
+        let json = serde_json::json!({
+            "serviceJid": "push.example.com",
+            "node": "node-abc",
+            "deviceId": "web-1234",
+            "environment": "staging",
+            "providerEndpoint": "https://example",
+            "providerToken": "t",
+            "providerKeyMaterial": "k",
+        });
+        let parsed: Result<RegisterWebPushDeviceOptions, _> = serde_json::from_value(json);
+        assert!(
+            parsed.is_err(),
+            "unknown environment 'staging' must fail at the WASM boundary"
+        );
     }
 }

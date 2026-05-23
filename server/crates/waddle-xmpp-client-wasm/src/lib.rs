@@ -16,7 +16,7 @@ use waddle_xmpp_client::discovery::{
     build_register_push_device_iq, build_roster_get_iq, build_upload_slot_iq, build_user_search_iq,
     build_waddle_inbox_mark_read_iq, parse_muc_admin_affiliation_query, parse_roster_result,
     parse_user_search_result, MucAdminAffiliationItem, PushDevicePlatform, PushDeviceRegistration,
-    PushEnvironment, UserSearchQuery, WaddleInboxMarkRead, WADDLE_PUSH_SERVICE_NS,
+    UserSearchQuery, WaddleInboxMarkRead, WADDLE_PUSH_SERVICE_NS,
 };
 use waddle_xmpp_client::error::parse_stanza_error;
 use waddle_xmpp_client::mam::{self, build_mam_iq, MamIqBuilder};

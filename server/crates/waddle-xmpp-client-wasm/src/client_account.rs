@@ -79,25 +79,13 @@ impl WaddleClient {
         future_to_promise(async move {
             let opts: RegisterWebPushDeviceOptions = serde_wasm_bindgen::from_value(options)
                 .map_err(|err| JsValue::from_str(&err.to_string()))?;
-            // `environment` is wire-typed: `"prod"` and `"dev"` are the
-            // only values the server accepts. Map the chat-side string
-            // through the typed enum so a typo at the JS boundary
-            // surfaces as a typed `Err` instead of an IQ the server
-            // would silently reject. Round-7 typed-payloads review.
-            let environment = match opts.environment.as_str() {
-                "prod" => PushEnvironment::Prod,
-                "dev" => PushEnvironment::Dev,
-                other => {
-                    return Err(JsValue::from_str(&format!(
-                        "register_web_push_device: unknown environment '{other}' \
-                         (expected 'prod' or 'dev')"
-                    )));
-                }
-            };
+            // `environment` is wire-typed via `PushEnvironment` on
+            // the options struct — serde rejects unknown variants
+            // at the JS↔Rust boundary before reaching the IQ builder.
             let registration = PushDeviceRegistration {
                 node: &opts.node,
                 device_id: &opts.device_id,
-                environment,
+                environment: opts.environment,
                 provider_endpoint: non_empty(&opts.provider_endpoint),
                 provider_token: non_empty(&opts.provider_token),
                 provider_key_material: non_empty(&opts.provider_key_material),

@@ -386,7 +386,12 @@ pub fn build_ensure_push_node_iq(push_service_jid: &str, app_id: &str) -> Elemen
 /// accepts. CLAUDE.md typed-payloads hard rule: do NOT pass this as
 /// a `&str` — a typo (`"ios"` instead of `"apns"`) silently
 /// produces an IQ the server rejects at runtime.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// `Serialize` / `Deserialize` use the lowercase wire form so this
+/// enum can be carried across crate / WASM boundaries directly
+/// instead of via stringly-typed options structs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum PushDevicePlatform {
     Web,
     /// Apple Push Notification service. `device-id` carries the APNs
@@ -411,7 +416,8 @@ impl PushDevicePlatform {
 /// `apns_development` vs `apns_production` endpoints; `web` and
 /// `fcm` have no equivalent split today (the server accepts
 /// `"prod"` uniformly).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum PushEnvironment {
     Prod,
     Dev,

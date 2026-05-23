@@ -288,8 +288,17 @@ export function usePushNotifications() {
 
     const serviceJid = resolvePushServiceJid(userJid);
     if (!serviceJid) {
-      console.warn("[notifications] No XMPP Push Service JID resolved on disable");
-      return false;
+      // No Push Service JID means there was never an XMPP-side
+      // registration to undo (`syncPushSubscriptionImpl` also bails
+      // on `!serviceJid`). The browser subscription is already
+      // gone above. Signal success so the caller updates the UI
+      // correctly — consistent with the `!node || !deviceId` path
+      // below. Round-7 Greptile P1 finding.
+      console.warn(
+        "[notifications] No XMPP Push Service JID resolved; " +
+        "browser unsubscribed, no server-side state to remove",
+      );
+      return true;
     }
 
     const node = loadPushNodeId();
