@@ -26,6 +26,21 @@ pub const PEP_NODE_MDS_DISPLAYED: &str = "urn:xmpp:mds:displayed:0";
 /// constants are pinned equal by a `waddle-xmpp` test.
 pub const PEP_NODE_VCARD4: &str = "urn:xmpp:vcard4";
 
+/// Waddle DND PEP node + namespace (issue #367).
+///
+/// Mirrored as `waddle_xmpp::xep::xep_waddle_dnd::PEP_NODE_WADDLE_DND`
+/// so the well-known-node configuration table in
+/// `NodeConfig::pep_for_node` can reference it without pulling
+/// `waddle-xmpp` into `waddle-xmpp-core`. The two constants are pinned
+/// equal by a `waddle-xmpp` test.
+///
+/// The DND payload contains sensitive personal data (timezone, weekly
+/// sleep windows, snooze deadlines), so the well-known config forces
+/// `access_model = whitelist` and `send_last_published_item = never`
+/// to keep this off the roster-contact PEP fan-out. The authoritative
+/// consumer is the server-side projection at the T1 push gate.
+pub const PEP_NODE_WADDLE_DND: &str = "urn:waddle:dnd:0";
+
 /// Check if an IQ is a PEP request for the current user.
 pub fn is_pep_request(iq: &Iq, user_jid: &BareJid) -> bool {
     if !is_pubsub_iq(iq) {
@@ -61,6 +76,7 @@ impl PepHandler {
             || node == PEP_NODE_AVATAR_METADATA
             || node == PEP_NODE_MDS_DISPLAYED
             || node == PEP_NODE_VCARD4
+            || node == PEP_NODE_WADDLE_DND
             || node == "http://jabber.org/protocol/nick"
             || node == "http://jabber.org/protocol/mood"
             || node == "http://jabber.org/protocol/activity"
@@ -71,7 +87,10 @@ impl PepHandler {
 
     /// Get the default access model for a well-known PEP node.
     pub fn default_access_model_for_node(node: &str) -> AccessModel {
-        if node == PEP_NODE_BOOKMARKS || node == PEP_NODE_MDS_DISPLAYED {
+        if node == PEP_NODE_BOOKMARKS
+            || node == PEP_NODE_MDS_DISPLAYED
+            || node == PEP_NODE_WADDLE_DND
+        {
             return AccessModel::Whitelist;
         }
         if node == PEP_NODE_VCARD4 {

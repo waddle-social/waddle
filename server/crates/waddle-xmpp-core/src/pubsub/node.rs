@@ -242,8 +242,33 @@ impl NodeConfig {
             config = Self::mds_displayed();
         } else if node == super::pep::PEP_NODE_VCARD4 {
             config = Self::vcard4_defaults();
+        } else if node == super::pep::PEP_NODE_WADDLE_DND {
+            config = Self::waddle_dnd_defaults();
         }
         config
+    }
+
+    /// Defaults for the Waddle DND PEP node (issue #367).
+    ///
+    /// The payload contains personally-identifying schedule data
+    /// (timezone, sleep hours, snooze deadlines). The authoritative
+    /// consumer is the server-side projection consulted at the T1
+    /// push gate — no roster contact needs to read this node. Force
+    /// `whitelist` access and `never` send-last-published so a fresh
+    /// roster subscription does NOT receive the user's DND state.
+    /// `max_items = 1` keeps the node single-slot (the PEP idiom for
+    /// single-item nodes is `id = current`).
+    pub fn waddle_dnd_defaults() -> Self {
+        Self {
+            access_model: AccessModel::Whitelist,
+            publish_model: PublishModel::Publishers,
+            max_items: 1,
+            persist_items: true,
+            deliver_payloads: true,
+            notify_retract: true,
+            notify_delete: true,
+            send_last_published_item: SendLastPublishedItem::Never,
+        }
     }
 
     /// XEP-0292 §6.1 vCard4 PEP node defaults.

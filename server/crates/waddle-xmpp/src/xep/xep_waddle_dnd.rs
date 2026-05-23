@@ -55,6 +55,12 @@ use thiserror::Error;
 
 /// Waddle DND namespace (also the PEP node name, per XEP-0163
 /// single-payload-namespace convention).
+///
+/// Pinned equal to `waddle_xmpp_core::pubsub::PEP_NODE_WADDLE_DND` so
+/// `NodeConfig::pep_for_node` in the core crate can apply the
+/// `whitelist + send-last-published=never` privacy defaults without
+/// pulling `waddle-xmpp` into `waddle-xmpp-core`. The pin is exercised
+/// by `pep_node_waddle_dnd_constant_matches_core` below.
 pub const NS_WADDLE_DND_V0: &str = "urn:waddle:dnd:0";
 
 /// PEP node name for DND state. By XEP-0163 convention the PEP node
@@ -965,6 +971,16 @@ mod tests {
         let set = weekdays(&[Weekday::Sun, Weekday::Fri, Weekday::Mon]);
         let collected: Vec<Weekday> = set.iter().collect();
         assert_eq!(collected, vec![Weekday::Mon, Weekday::Fri, Weekday::Sun]);
+    }
+
+    /// Pin the `waddle-xmpp`-side namespace constant to its sibling in
+    /// `waddle-xmpp-core` so a rename in either crate fails CI.
+    #[test]
+    fn pep_node_waddle_dnd_constant_matches_core() {
+        assert_eq!(
+            PEP_NODE_WADDLE_DND,
+            waddle_xmpp_core::pubsub::PEP_NODE_WADDLE_DND
+        );
     }
 
     #[test]
