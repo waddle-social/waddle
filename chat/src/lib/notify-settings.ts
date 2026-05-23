@@ -3,6 +3,14 @@
 // identity-specific (identity-category / identity-type) entries in
 // this slice. Per-DM settings are deferred to #720 because the DM
 // carrier for XEP-0492 is not yet decided.
+//
+// Cross-client coherence: we do NOT yet subscribe to PEP `+notify`
+// headlines on `urn:xmpp:bookmarks:1` (XEP-0163 §4.4). The chat
+// re-fetches on every fresh session-ready via `hydrate(client)`,
+// so a setting changed in another tab reaches this tab on the next
+// reconnect. Wiring the conformant headline route is deferred to
+// a follow-up slice — it adds a new WASM event pipeline that's
+// scoped out of #532.
 
 import { ref, shallowRef, type Ref } from "vue";
 import type { BrowserXmppClient, NotifyMode, UserBookmarkItem } from "@/lib/xmpp-client";

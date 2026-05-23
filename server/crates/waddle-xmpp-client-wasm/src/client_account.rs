@@ -156,6 +156,16 @@ impl WaddleClient {
     /// rejecting the Promise. Per XEP-0492 §3, the chat caller
     /// resolves an empty `notify_mode` against the conversation-kind
     /// default.
+    ///
+    /// **Deferred:** the conformant XEP-0163 §4.4 `+notify` self-
+    /// subscription on `urn:xmpp:bookmarks:1` would push every other
+    /// client's bookmark publish to this client as a `<message>`
+    /// headline. Without it, the chat re-fetches on every fresh
+    /// session-ready (see `notifySettingsStore.hydrate` wiring at
+    /// `chat/src/shell/chat-app-controller.ts`); a setting changed
+    /// in another tab reaches this tab only on the next reconnect.
+    /// Wiring the headline route is a meaningful slice of new WASM
+    /// plumbing and lands in a separate PR.
     pub fn fetch_user_bookmarks(&self) -> Promise {
         let inner = self.inner.clone();
         future_to_promise(async move {

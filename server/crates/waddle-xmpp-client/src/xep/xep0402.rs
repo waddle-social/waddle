@@ -310,6 +310,37 @@ mod tests {
     }
 
     #[test]
+    fn build_publish_bookmark_iq_omits_to_attr() {
+        // Round-10 XMPP-conformance reviewer P3 — XEP-0163 §3.5: a
+        // PEP publish from the bare-JID account targets the account's
+        // own PEP service implicitly when `to=` is absent. Setting
+        // `to=` to anything else would route the publish off the
+        // user's own PEP node.
+        let item = BookmarkItem {
+            jid: "theplay@conference.example.com".parse().unwrap(),
+            name: None,
+            autojoin: false,
+            nick: None,
+            password: None,
+            extensions: vec![],
+        };
+        let iq = build_publish_bookmark_iq(&item, "req-no-to");
+        assert!(
+            iq.attr("to").is_none(),
+            "publish IQ MUST omit to= so the server routes to the account's own PEP service (XEP-0163 §3.5)"
+        );
+    }
+
+    #[test]
+    fn build_fetch_bookmarks_iq_omits_to_attr() {
+        let iq = build_fetch_bookmarks_iq("req-fetch-no-to");
+        assert!(
+            iq.attr("to").is_none(),
+            "fetch IQ MUST omit to= so the server routes to the account's own PEP service (XEP-0163 §3.5)"
+        );
+    }
+
+    #[test]
     fn build_publish_bookmark_iq_uses_canonical_publish_options() {
         // Round-8 Rust reviewer P2: pin every publish-options field
         // so a regression that drops or mistypes one of them gets

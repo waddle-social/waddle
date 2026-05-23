@@ -175,41 +175,80 @@ pub fn merge_notify_into_extensions(extensions: Option<&Element>, mode: NotifyMo
 /// list of setting children gathered from the input, applying the
 /// fallback-replace rule for the user's chosen `mode`.
 ///
+/// Spec-conformance choices (XEP-0492 v0.2.0 §3, round-10 XMPP
+/// review):
+///
+/// * §3 ¶1 *"Applications implementing this specification MUST NOT
+///   delete or alter the `<advanced/>` notification settings they
+///   do not support when updating the notification settings for a
+///   given conversation"* — when the user changes the fallback
+///   mode name and the previous fallback carried an `<advanced/>`
+///   block, **the `<advanced/>` element is moved verbatim under
+///   the new fallback parent**. The `<advanced/>` content itself is
+///   unchanged; only its enclosing setting-element name changes.
+///   The reverse choice (drop the `<advanced/>`) is the simpler
+///   read but violates the MUST NOT delete. The third option
+///   (preserve the old fallback as an identity-scoped sibling) was
+///   rejected because Waddle has no registered Service Discovery
+///   identity, so synthesizing an identity-category attr would
+///   leak the preserved rules to any reading client that shares
+///   the synthesized identity. Moving the foreign element verbatim
+///   is the least-bad option.
+///
+/// * §3 ¶3 *"There SHALL NOT be more than one notification element
+///   having the same name, attributes and attribute values"* — on
+///   the no-attrs fallback slot we emit exactly one element (for
+///   the user's chosen `mode`). Any extra no-attrs setting children
+///   in the input (a malformed but possible state) collapse into
+///   that single output; their `<advanced/>` children, if present,
+///   are merged onto the new fallback so no rules are lost.
+///
 /// Emitted children are sorted into the XEP-0492 XSD sequence
 /// (`always` → `on-mention` → `never`), with identity-scoped
 /// siblings ordered after the no-attrs fallback within each mode
 /// group — round-8 XEP reviewer P2.
 fn build_merged_notify_element(setting_children: Vec<Element>, mode: NotifyMode) -> Element {
-    let mut fallback_seen = false;
-    let mut emit: Vec<Element> = setting_children
-        .into_iter()
-        .map(|child| {
-            let is_setting = child.ns() == NS_NOTIFICATION_SETTINGS
-                && NotifyMode::from_wire_name(child.name()).is_some();
-            let has_identity_attr =
-                child.attr("identity-category").is_some() || child.attr("identity-type").is_some();
-            if is_setting && !has_identity_attr {
-                fallback_seen = true;
-                let existing_mode = NotifyMode::from_wire_name(child.name());
-                if existing_mode == Some(mode) {
-                    // No-op merge — preserve the existing element
-                    // verbatim, including any `<advanced/>` child.
-                    child
-                } else {
-                    // User explicitly overrode the fallback name;
-                    // drop the prior `<advanced/>` along with the
-                    // old parent (see merge_notify_into_extensions
-                    // docstring).
-                    Element::builder(mode.as_wire_name(), NS_NOTIFICATION_SETTINGS).build()
+    let mut identity_scoped: Vec<Element> = Vec::new();
+    let mut preserved_advanced: Vec<Element> = Vec::new();
+    let mut foreign: Vec<Element> = Vec::new();
+
+    for child in setting_children {
+        let is_setting = child.ns() == NS_NOTIFICATION_SETTINGS
+            && NotifyMode::from_wire_name(child.name()).is_some();
+        let has_identity_attr =
+            child.attr("identity-category").is_some() || child.attr("identity-type").is_some();
+        if is_setting && has_identity_attr {
+            // Identity-scoped sibling — preserve verbatim.
+            identity_scoped.push(child);
+        } else if is_setting {
+            // No-attrs fallback (possibly more than one, in
+            // malformed input). Salvage any `<advanced/>` child
+            // for the new fallback (§3 ¶1 MUST NOT delete) — the
+            // setting parent itself is collapsed into the single
+            // output fallback below.
+            for inner in child.children() {
+                if inner.is("advanced", NS_NOTIFICATION_SETTINGS) {
+                    preserved_advanced.push(inner.clone());
                 }
-            } else {
-                child
             }
-        })
-        .collect();
-    if !fallback_seen {
-        emit.push(Element::builder(mode.as_wire_name(), NS_NOTIFICATION_SETTINGS).build());
+        } else {
+            // Foreign child or other non-spec element — pass through.
+            foreign.push(child);
+        }
     }
+
+    // Build the single output fallback for the user's chosen mode,
+    // re-parenting any preserved `<advanced/>` children under it.
+    let mut new_fallback = Element::builder(mode.as_wire_name(), NS_NOTIFICATION_SETTINGS);
+    for advanced in preserved_advanced {
+        new_fallback = new_fallback.append(advanced);
+    }
+    let new_fallback = new_fallback.build();
+
+    let mut emit: Vec<Element> = Vec::with_capacity(1 + identity_scoped.len() + foreign.len());
+    emit.push(new_fallback);
+    emit.extend(identity_scoped);
+    emit.extend(foreign);
 
     // Stable sort by (XSD mode rank, identity-category, identity-type).
     // Unknown element names (foreign children) sort after the spec
@@ -374,14 +413,13 @@ mod tests {
     }
 
     #[test]
-    fn merge_drops_advanced_when_fallback_name_changes() {
-        // Round-7 XEP reviewer P2 — XEP-0492 §3 ¶4 picks the parent
-        // element name to encode the non-advanced fallback semantics.
-        // When the user explicitly changes the fallback name, the
-        // advanced rules tied to the previous parent no longer reflect
-        // user intent; re-publishing them under a different parent
-        // would "alter" the setting per §3 ¶1. Drop is the only
-        // spec-conformant move.
+    fn merge_moves_advanced_under_new_fallback_when_name_changes() {
+        // Round-10 XMPP-conformance reviewer P1 — XEP-0492 §3 ¶1
+        // "MUST NOT delete or alter the `<advanced />` notification
+        // settings they do not support when updating the notification
+        // settings for a given conversation". The `<advanced/>`
+        // element MUST survive the fallback-name change; we move it
+        // verbatim to the new fallback parent.
         let extensions_xml = "<extensions xmlns='urn:xmpp:bookmarks:1'>\
                     <notify xmlns='urn:xmpp:notification-settings:1'>\
                         <always>\
@@ -395,7 +433,6 @@ mod tests {
         let merged = merge_notify_into_extensions(Some(&extensions), NotifyMode::Never);
         let notify = find_notify_in_extensions(&merged).expect("notify present");
 
-        // Fallback rewritten to never with NO advanced child.
         assert_eq!(read_fallback_mode(notify), Some(NotifyMode::Never));
         let never_elem = notify
             .children()
@@ -405,12 +442,88 @@ mod tests {
                     && child.attr("identity-type").is_none()
             })
             .expect("rewritten never present");
-        assert!(
-            never_elem
-                .get_child("advanced", NS_NOTIFICATION_SETTINGS)
-                .is_none(),
-            "advanced child must be dropped when the fallback name changes"
-        );
+        let advanced = never_elem
+            .get_child("advanced", NS_NOTIFICATION_SETTINGS)
+            .expect("advanced moved under new fallback");
+        assert!(advanced
+            .children()
+            .any(|c| c.name() == "weekend" && c.ns() == "custom:other-client:1"));
+    }
+
+    #[test]
+    fn merge_never_emits_same_namespace_extensions_children() {
+        // Round-10 XMPP-conformance reviewer P2 — XEP-0402 XSD
+        // declares `<extensions/>` content as `<xs:any namespace='##other'>`,
+        // i.e. children MUST be in a namespace other than
+        // `urn:xmpp:bookmarks:1`. Our writer must never produce a
+        // child in the bookmarks namespace.
+        let merged = merge_notify_into_extensions(None, NotifyMode::Always);
+        for child in merged.children() {
+            assert_ne!(
+                child.ns(),
+                crate::pep::NS_BOOKMARKS,
+                "extensions child MUST be in a non-bookmarks namespace per XEP-0402 XSD"
+            );
+        }
+    }
+
+    #[test]
+    fn merge_collapses_multiple_no_attrs_fallbacks() {
+        // Round-10 §3 ¶3 corner case: malformed input with two
+        // no-attrs settings (different names) MUST yield exactly
+        // one no-attrs fallback on output (the user's chosen mode).
+        // Any `<advanced/>` from either prior fallback is preserved
+        // on the new one.
+        let extensions_xml = "<extensions xmlns='urn:xmpp:bookmarks:1'>\
+                    <notify xmlns='urn:xmpp:notification-settings:1'>\
+                        <always>\
+                            <advanced xmlns='urn:xmpp:notification-settings:1'>\
+                                <a xmlns='custom:a:1'/>\
+                            </advanced>\
+                        </always>\
+                        <never>\
+                            <advanced xmlns='urn:xmpp:notification-settings:1'>\
+                                <b xmlns='custom:b:1'/>\
+                            </advanced>\
+                        </never>\
+                    </notify>\
+                    </extensions>";
+        let extensions: Element = extensions_xml.parse().expect("valid xml");
+        let merged = merge_notify_into_extensions(Some(&extensions), NotifyMode::OnMention);
+        let notify = find_notify_in_extensions(&merged).expect("notify present");
+
+        // Exactly one no-attrs fallback element on output.
+        let fallback_count = notify
+            .children()
+            .filter(|c| {
+                c.ns() == NS_NOTIFICATION_SETTINGS
+                    && NotifyMode::from_wire_name(c.name()).is_some()
+                    && c.attr("identity-category").is_none()
+                    && c.attr("identity-type").is_none()
+            })
+            .count();
+        assert_eq!(fallback_count, 1);
+
+        // The single fallback carries both salvaged advanced
+        // children — no rules dropped.
+        let fallback = notify
+            .children()
+            .find(|c| c.name() == "on-mention" && c.attr("identity-category").is_none())
+            .expect("new fallback");
+        let advanced: Vec<&Element> = fallback
+            .children()
+            .filter(|c| c.is("advanced", NS_NOTIFICATION_SETTINGS))
+            .collect();
+        // Two `<advanced/>` blocks are kept verbatim; we don't try
+        // to merge their inner foreign children (they may not be
+        // commutative).
+        assert_eq!(advanced.len(), 2);
+        assert!(advanced
+            .iter()
+            .any(|a| a.children().any(|c| c.ns() == "custom:a:1")));
+        assert!(advanced
+            .iter()
+            .any(|a| a.children().any(|c| c.ns() == "custom:b:1")));
     }
 
     #[test]
