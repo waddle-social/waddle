@@ -158,7 +158,7 @@ export class WaddleClient {
      * `.keys.p256dh` respectively). Passing an empty string for any
      * of them omits the corresponding child from the wire IQ.
      */
-    register_web_push_device(service_jid: string, node: string, device_id: string, environment: string, provider_endpoint: string, provider_token: string, provider_key_material: string): Promise<any>;
+    register_web_push_device(options: any): Promise<any>;
     request_avatar(jid: string): Promise<any>;
     request_upload_slot(service_jid: string, filename: string, size: bigint, content_type: string): Promise<any>;
     retract_activity(): Promise<any>;

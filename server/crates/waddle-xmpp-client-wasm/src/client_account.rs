@@ -67,27 +67,20 @@ impl WaddleClient {
     /// (they map to `PushSubscription.endpoint`, `.keys.auth`,
     /// `.keys.p256dh` respectively). Passing an empty string for any
     /// of them omits the corresponding child from the wire IQ.
-    pub fn register_web_push_device(
-        &self,
-        service_jid: String,
-        node: String,
-        device_id: String,
-        environment: String,
-        provider_endpoint: String,
-        provider_token: String,
-        provider_key_material: String,
-    ) -> Promise {
+    pub fn register_web_push_device(&self, options: JsValue) -> Promise {
         let inner = self.inner.clone();
         future_to_promise(async move {
+            let opts: RegisterWebPushDeviceOptions = serde_wasm_bindgen::from_value(options)
+                .map_err(|err| JsValue::from_str(&err.to_string()))?;
             let registration = WebPushDeviceRegistration {
-                node: &node,
-                device_id: &device_id,
-                environment: &environment,
-                provider_endpoint: non_empty(&provider_endpoint),
-                provider_token: non_empty(&provider_token),
-                provider_key_material: non_empty(&provider_key_material),
+                node: &opts.node,
+                device_id: &opts.device_id,
+                environment: &opts.environment,
+                provider_endpoint: non_empty(&opts.provider_endpoint),
+                provider_token: non_empty(&opts.provider_token),
+                provider_key_material: non_empty(&opts.provider_key_material),
             };
-            let iq = build_register_push_device_iq(&service_jid, "web", &registration);
+            let iq = build_register_push_device_iq(&opts.service_jid, "web", &registration);
             let result = send_iq_command(inner, iq).await?;
             let device = result
                 .get_child("device", WADDLE_PUSH_SERVICE_NS)

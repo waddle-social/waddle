@@ -1219,15 +1219,15 @@ export class BrowserXmppClient {
     const xmpp = await this.requireConnectedXmpp();
     if (!xmpp.register_web_push_device) return null;
     try {
-      return await xmpp.register_web_push_device(
-        opts.serviceJid,
-        opts.node,
-        opts.deviceId,
-        opts.environment,
-        opts.providerEndpoint,
-        opts.providerToken,
-        opts.providerKeyMaterial,
-      );
+      return await xmpp.register_web_push_device({
+        serviceJid: opts.serviceJid,
+        node: opts.node,
+        deviceId: opts.deviceId,
+        environment: opts.environment,
+        providerEndpoint: opts.providerEndpoint,
+        providerToken: opts.providerToken,
+        providerKeyMaterial: opts.providerKeyMaterial,
+      });
     } catch {
       return null;
     }

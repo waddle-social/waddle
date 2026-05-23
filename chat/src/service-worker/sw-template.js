@@ -169,12 +169,28 @@ function parseRoutingContext(data) {
 ///   * direct (DM)            → /{username}
 ///   * groupchat_*  (MUC)     → /{space}/{channel}
 ///   * thread present          → /{...}/threads/{thread}
+///
+/// MUC discrimination is driven by the typed `class` field
+/// (`direct` vs `groupchat_*` — the SuppressedReason wire contract on
+/// the server side). When `class` is absent (legacy publishes), we
+/// fall back to the JID's domain prefix — JIDs do not carry a
+/// `space_channel` shape in their localpart on Waddle, so an underscore
+/// inside the local part of a DM JID (e.g. `jane_doe@example.com`)
+/// MUST NOT trigger MUC routing.
 function routeFromContext(context) {
   const conv = context?.conversation;
   if (typeof conv !== "string" || conv.length === 0) return "/";
   if (!conv.includes("@")) return "/";
-  const [localpart] = conv.split("@");
-  const isMuc = conv.includes("@muc.") || (localpart ?? "").includes("_");
+  const [localpart, domain] = conv.split("@");
+  const cls = typeof context?.class === "string" ? context.class : "";
+  const isMucByClass = cls.startsWith("groupchat_");
+  const isDirectByClass = cls === "direct";
+  // Legacy publishes lack `class` — discriminate on the JID's
+  // domain prefix instead. Standard XMPP MUC services advertise
+  // either `muc.` or `conference.` as their subdomain.
+  const isMucByDomain = typeof domain === "string"
+    && (domain.startsWith("muc.") || domain.startsWith("conference."));
+  const isMuc = isMucByClass || (!isDirectByClass && isMucByDomain);
   let base = "/";
   if (isMuc) {
     const parts = (localpart ?? "").split("_");

@@ -167,6 +167,31 @@ describe("service worker push handling", () => {
     expect((options as NotificationOptions & { data: { url: string } }).data.url).toBe("/alice");
   });
 
+  test("dm with underscore in localpart routes as DM, not MUC", async () => {
+    // Regression for an MUC heuristic that misrouted `jane_doe@example.com`
+    // to `/jane/doe` (the underscore-as-MUC-separator fallback).
+    // JIDs legally contain underscores; route on the typed `class`
+    // field or the JID's domain prefix instead. Adversarial review
+    // round-1 finding on PR #760.
+    const worker = loadServiceWorker();
+    const event = makePushEvent({
+      json: () => ({
+        "message-count": 1,
+        context: {
+          conversation: "jane_doe@example.com",
+          class: "direct",
+        },
+      }),
+    });
+    worker.dispatch("push", event);
+    await event.done();
+
+    const [, options] = worker.showNotification.mock.calls[0] ?? [];
+    expect((options as NotificationOptions & { data: { url: string } }).data.url).toBe(
+      "/jane_doe",
+    );
+  });
+
   test("muc conversation routes to /{space}/{channel}", async () => {
     const worker = loadServiceWorker();
     const event = makePushEvent({

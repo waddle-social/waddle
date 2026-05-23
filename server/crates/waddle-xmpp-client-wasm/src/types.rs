@@ -443,6 +443,26 @@ pub struct PushServiceDevice {
     pub status: String,
 }
 
+/// Arguments to `WaddleClient::register_web_push_device`. Bundled
+/// into a struct so the JS call site passes a single typed object
+/// (and the Rust signature stays under the
+/// `clippy::too_many_arguments` threshold).
+///
+/// Each `provider_*` string maps onto the corresponding XEP wire
+/// child element; an empty string is treated as "field absent" and
+/// the typed IQ builder omits the child.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RegisterWebPushDeviceOptions {
+    pub service_jid: String,
+    pub node: String,
+    pub device_id: String,
+    pub environment: String,
+    pub provider_endpoint: String,
+    pub provider_token: String,
+    pub provider_key_material: String,
+}
+
 #[derive(Debug, Serialize)]
 pub struct WaddleRoomMember {
     pub jid: String,

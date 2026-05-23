@@ -143,6 +143,14 @@ fn relay_payload(
         "roomJid": room_jid,
         "url": room_jid_to_path(room_jid),
         "message-count": unread_count,
+        // Typed routing context for the chat service worker
+        // (#528). Mirrors the `<context xmlns='urn:waddle:push:context:0'/>`
+        // element emitted on the XEP-0357 outbox path. The legacy
+        // relay path here doesn't have thread/class on hand, so the
+        // SW falls through to domain-prefix MUC detection.
+        "context": {
+            "conversation": room_jid,
+        },
         "endpoint": subscription.endpoint.as_deref(),
         "p256dh": subscription.p256dh.as_deref(),
         "auth": subscription.auth_key.as_deref(),
@@ -249,6 +257,29 @@ mod tests {
         assert_eq!(payload["endpoint"], "https://ep");
         assert_eq!(payload["p256dh"], "BASE64KEY");
         assert_eq!(payload["auth"], "BASE64AUTH");
+    }
+
+    #[test]
+    fn relay_payload_carries_typed_routing_context_for_chat_sw() {
+        // The chat service worker discriminates DM vs MUC routing via
+        // the typed `context` envelope (#528). The legacy relay path
+        // doesn't have thread/class on hand — verify it at least
+        // surfaces `conversation` so the SW's domain-prefix MUC
+        // fallback has the JID to work with.
+        let subscription = PushSubscription {
+            user_jid: "alice@ex".into(),
+            service_jid: "push.ex".into(),
+            node: Some("n1".into()),
+            publish_options: None,
+            endpoint: Some("https://ep".into()),
+            p256dh: Some("BASE64KEY".into()),
+            auth_key: Some("BASE64AUTH".into()),
+        };
+        let payload = relay_payload(&subscription, "Waddle", "", "c2@conference.example.com", 1);
+        assert_eq!(
+            payload["context"]["conversation"],
+            "c2@conference.example.com"
+        );
     }
 
     #[test]
