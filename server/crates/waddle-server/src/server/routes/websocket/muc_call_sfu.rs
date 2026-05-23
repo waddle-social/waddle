@@ -165,6 +165,8 @@ mod tests {
                     notification_settings_projection: Arc::clone(
                         &deps.protocol.notification_settings_projection,
                     ),
+                    dnd_projection: Arc::clone(&deps.protocol.dnd_projection),
+                    dnd_reader: Arc::clone(&deps.protocol.dnd_reader),
                     notification_activity: Arc::clone(&deps.protocol.notification_activity),
                     isr_token_store: Arc::clone(&deps.protocol.isr_token_store),
                     sm_session_registry: Arc::clone(&deps.protocol.sm_session_registry),

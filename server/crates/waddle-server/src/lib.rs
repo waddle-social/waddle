@@ -5,6 +5,8 @@ pub mod auth;
 pub mod channel_space_links;
 pub mod config;
 pub mod db;
+pub mod dnd_projection;
+pub mod dnd_reader;
 pub mod inbox;
 pub mod messages;
 pub mod notification_activity;

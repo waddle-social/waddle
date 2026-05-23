@@ -488,14 +488,13 @@ pub(crate) fn spawn_notification_outbox_janitor(websocket_state: &Arc<WebSocketS
         .unwrap_or(128);
     let retention_days = notification_outbox_retention_days_from_env();
     let prune_batch_size = notification_outbox_prune_batch_from_env();
-    // Operability: slice 2a ships with `NoopDndReader` wired everywhere.
-    // The `waddle_push_suppressed_total{reason="waddle_dnd"}` counter
-    // will therefore stay at 0 until #367 lands the real
-    // `urn:waddle:dnd:0` adapter. Surface this loudly at janitor start
-    // so operators don't mistake a flat metric for "no users in DND".
-    warn!(
-        "Notification outbox janitor: DND suppression is wired through NoopDndReader \
-         (waddle_push_suppressed_total{{reason=\"waddle_dnd\"}} will remain 0 until #367 lands)"
+    // Operability: DND suppression now reads the durable
+    // `urn:waddle:dnd:0` PEP projection (#367). The
+    // `waddle_push_suppressed_total{reason="waddle_dnd"}` counter
+    // reflects real recipient state — flat = no users actively in
+    // DND, not a wiring placeholder.
+    info!(
+        "Notification outbox janitor: DND suppression backed by urn:waddle:dnd:0 PEP projection"
     );
     // Slice 2b operability: log the effective XEP-0513 `<active/>`
     // TTL once at startup so operators can read the clamped value
@@ -555,11 +554,11 @@ pub(crate) fn spawn_notification_outbox_janitor(websocket_state: &Arc<WebSocketS
             }
             let room_policy =
                 RoomRegistryActorPolicy::new(state.deps.protocol.room_registry.clone());
-            let dnd_reader = crate::notification_outbox::NoopDndReader;
+            let dnd_reader = state.deps.protocol.dnd_reader.as_ref();
             let activity_reader = state.deps.protocol.notification_activity.as_ref();
             let deps = crate::notification_outbox::NotificationDrainDeps::new(
                 &room_policy,
-                &dnd_reader,
+                dnd_reader,
                 activity_reader,
             );
             match state

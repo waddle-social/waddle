@@ -3,6 +3,9 @@ use waddle_xmpp::pubsub::{PubSubItem, PubSubNode, PublishResult, StoredItem};
 use waddle_xmpp::XmppError;
 
 use super::DatabasePubSubStorage;
+use crate::dnd_projection::{
+    derive_dnd_projection_mutation, DndProjection, DndProjectionMutation,
+};
 use crate::notification_settings_projection::{
     derive_validated_bookmark_projection_mutation, validate_xep0402_bookmark_publish,
     ConversationKind, NotificationSettingsProjectionMutation,
@@ -31,6 +34,21 @@ impl DatabasePubSubStorage {
                 validate_xep0402_bookmark_publish(&item_id, payload)
                     .map_err(|error| XmppError::bad_request(Some(error.to_string())))?,
             )
+        } else {
+            None
+        };
+        // Validate `urn:waddle:dnd:0` publishes up-front so the wire
+        // publish gets a `<bad-request/>` instead of leaving the PEP
+        // item in place with a stale projection alongside.
+        let dnd_publish_owner = if is_dnd_node(node_name) {
+            let payload = item.payload.as_ref().ok_or_else(|| {
+                XmppError::bad_request(Some(
+                    "urn:waddle:dnd:0 publish requires a <dnd> payload".to_string(),
+                ))
+            })?;
+            waddle_xmpp::xep::xep_waddle_dnd::WaddleDnd::parse(payload)
+                .map_err(|error| XmppError::bad_request(Some(error.to_string())))?;
+            Some(owner.clone())
         } else {
             None
         };
@@ -103,6 +121,22 @@ impl DatabasePubSubStorage {
             for evicted_item_id in &evicted_item_ids {
                 delete_bookmark_projection_for_item_tx(&mut tx, owner, evicted_item_id).await?;
             }
+        }
+        if let Some(dnd_owner) = dnd_publish_owner {
+            let payload = item.payload.as_ref().ok_or_else(|| {
+                XmppError::internal("validated DND publish lost payload".to_string())
+            })?;
+            // published_at_ms doubles as the LWW source_version — the
+            // DND projection is single-row per user with no cross-
+            // resource ordering invariants beyond "newer write wins".
+            let mutation = derive_dnd_projection_mutation(
+                &dnd_owner,
+                Some(payload),
+                published_at_ms,
+                published_at_ms,
+            )
+            .map_err(|error| XmppError::internal(error.to_string()))?;
+            apply_dnd_projection_mutation_tx(&mut tx, mutation).await?;
         }
         tx.commit()
             .await
@@ -485,4 +519,66 @@ async fn next_notification_settings_source_version_tx(
 
 fn is_bookmarks_node(node_name: &str) -> bool {
     node_name == waddle_xmpp::xep::xep0402::PEP_NODE
+}
+
+fn is_dnd_node(node_name: &str) -> bool {
+    node_name == waddle_xmpp::xep::xep_waddle_dnd::PEP_NODE_WADDLE_DND
+}
+
+async fn apply_dnd_projection_mutation_tx(
+    tx: &mut crate::db::Transaction<'_>,
+    mutation: DndProjectionMutation,
+) -> Result<(), XmppError> {
+    match mutation {
+        DndProjectionMutation::Upsert(projection) => {
+            apply_dnd_projection_upsert_tx(tx, &projection).await?;
+        }
+        DndProjectionMutation::Delete { owner_bare_jid } => {
+            tx.execute(
+                "DELETE FROM dnd_projection WHERE owner_bare_jid = ?",
+                crate::db_params![owner_bare_jid.to_string()],
+            )
+            .await
+            .map_err(|error| XmppError::internal(error.to_string()))?;
+        }
+    }
+    Ok(())
+}
+
+async fn apply_dnd_projection_upsert_tx(
+    tx: &mut crate::db::Transaction<'_>,
+    projection: &DndProjection,
+) -> Result<(), XmppError> {
+    let mut buf: Vec<u8> = Vec::new();
+    projection
+        .state
+        .to_element()
+        .write_to(&mut buf)
+        .map_err(|error| XmppError::internal(error.to_string()))?;
+    let payload_xml = String::from_utf8(buf)
+        .map_err(|error| XmppError::internal(error.to_string()))?;
+    tx.execute(
+        r#"
+        INSERT INTO dnd_projection (
+            owner_bare_jid,
+            payload_xml,
+            source_version,
+            updated_at_ms
+        )
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(owner_bare_jid) DO UPDATE SET
+            payload_xml = excluded.payload_xml,
+            source_version = excluded.source_version,
+            updated_at_ms = excluded.updated_at_ms
+        "#,
+        crate::db_params![
+            projection.owner_bare_jid.to_string(),
+            payload_xml,
+            projection.source_version,
+            projection.updated_at_ms,
+        ],
+    )
+    .await
+    .map_err(|error| XmppError::internal(error.to_string()))?;
+    Ok(())
 }

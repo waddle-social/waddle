@@ -2,7 +2,7 @@ use waddle_xmpp::XmppError;
 
 use super::DatabasePubSubStorage;
 
-const PUBSUB_SCHEMA_VERSION: i64 = 4;
+const PUBSUB_SCHEMA_VERSION: i64 = 5;
 
 impl DatabasePubSubStorage {
     pub(super) async fn initialize(&self) -> Result<(), XmppError> {
@@ -34,6 +34,7 @@ impl DatabasePubSubStorage {
         if current != Some(PUBSUB_SCHEMA_VERSION) {
             // Drop-and-recreate: CLAUDE.md greenlights breaking changes.
             for table in [
+                "dnd_projection",
                 "notification_settings_projection",
                 "notification_settings_projection_source_version",
                 "pubsub_items",
@@ -164,6 +165,35 @@ impl DatabasePubSubStorage {
             (),
         )
         .await?;
+
+        // Waddle DND projection (#367). Single row per user; stores the
+        // typed `<dnd xmlns='urn:waddle:dnd:0'>` payload XML so the T1
+        // gate can parse-and-evaluate without a second IO hop into
+        // `pubsub_items`. LWW on republish — there is no MUC-style
+        // multi-source merge to perform.
+        let dnd_projection_ddl = match self.db.driver() {
+            crate::db::DatabaseDriver::Sqlite => {
+                r#"
+                CREATE TABLE IF NOT EXISTS dnd_projection (
+                    owner_bare_jid TEXT NOT NULL PRIMARY KEY,
+                    payload_xml TEXT NOT NULL,
+                    source_version INTEGER NOT NULL,
+                    updated_at_ms INTEGER NOT NULL
+                )
+                "#
+            }
+            crate::db::DatabaseDriver::Postgres => {
+                r#"
+                CREATE TABLE IF NOT EXISTS dnd_projection (
+                    owner_bare_jid TEXT NOT NULL PRIMARY KEY,
+                    payload_xml TEXT NOT NULL,
+                    source_version BIGINT NOT NULL,
+                    updated_at_ms BIGINT NOT NULL
+                )
+                "#
+            }
+        };
+        self.execute(dnd_projection_ddl, ()).await?;
 
         let items_ddl = match self.db.driver() {
             crate::db::DatabaseDriver::Sqlite => {
