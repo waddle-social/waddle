@@ -278,66 +278,44 @@ export function usePushNotifications() {
       return false;
     }
 
-    let node = loadPushNodeId();
+    const node = loadPushNodeId();
     const deviceId = loadDeviceId();
 
-    // Recover the node id if localStorage was cleared / never written
-    // (e.g. user disabled before completing an enable, or switched
-    // devices). `ensurePushNode` is idempotent on `(owner, app-id)`
-    // so this is safe to call from disable.
-    if (!node) {
-      const ensured = await xmppClient.ensurePushNode({ serviceJid, appId: APP_ID_WEB });
-      if (ensured) {
-        node = ensured.id;
-        persistPushNodeId(node);
-      }
-    }
-    if (!node) {
+    // **Per-device opt-out only.** The user clicked "Disable
+    // notifications" in THIS browser; this MUST NOT take down push
+    // for other devices registered under the same per-(user, app-id)
+    // node (e.g. a future iOS or Android install that #529/#530 will
+    // wire in). XEP-0357's `<disable jid='push.<domain>' node='…'/>`
+    // is node-level, not device-level — calling it here would
+    // unsubscribe every device on the node. The Push Service's
+    // `<disable-device device-id='…'/>` is the correct surface for
+    // a single-device opt-out: it removes only this device's row,
+    // and the user-server's `(jid, node)` registration stays alive
+    // so other devices keep receiving fan-out.
+    //
+    // A "disable push everywhere" UI affordance (e.g. an account-
+    // settings toggle that nukes the whole node + every device row)
+    // is a separate flow; it should call `disablePushNotifications`
+    // explicitly after the user has been told all their other
+    // devices will stop receiving pushes too.
+    if (!node || !deviceId) {
       console.warn(
-        "[notifications] No Push Service node id available; cannot disable XEP-0357",
+        "[notifications] No locally-persisted node/deviceId; skipping disable-device. " +
+        "The browser is unsubscribed; the Push Service row (if any) will be rotated " +
+        "on the next enable flow.",
+      );
+      return true;
+    }
+
+    const disabled = await xmppClient.disablePushDevice({ serviceJid, node, deviceId });
+    if (!disabled) {
+      console.warn(
+        "[notifications] disable-device IQ failed; this device may still be " +
+        "registered with the Push Service",
       );
       return false;
     }
-
-    // Best-effort: run BOTH the Push Service disable-device AND the
-    // user-server XEP-0357 disable, even if the first one errors.
-    // Stopping early on partial failure leaks state: the user-server
-    // keeps publishing to a node whose Push Service device row is
-    // already gone, or vice versa.
-    //
-    // Initialize `pushServiceDisabled` to `null` (= not attempted) so
-    // a missing deviceId can't masquerade as a successful disable in
-    // the final return value — round-5 Greptile P1 finding.
-    let pushServiceDisabled: boolean | null = null;
-    if (deviceId) {
-      const disabled = await xmppClient.disablePushDevice({ serviceJid, node, deviceId });
-      pushServiceDisabled = disabled !== null;
-      if (!pushServiceDisabled) {
-        console.warn(
-          "[notifications] disable-device IQ failed; user-server XEP-0357 disable will still run",
-        );
-      }
-    } else {
-      console.warn(
-        "[notifications] No deviceId in localStorage; skipping disable-device. " +
-        "The Push Service device row may persist until a new enable flow rotates it.",
-      );
-    }
-    const userServerDisabled = await xmppClient.disablePushNotifications({
-      serviceJid,
-      node,
-    });
-    if (!userServerDisabled) {
-      console.warn(
-        "[notifications] XEP-0357 disable IQ failed; Push Service publish jobs may still queue",
-      );
-    }
-    // Only claim "fully disabled" when BOTH the user-server disable
-    // AND the Push Service disable (if we attempted it) succeeded.
-    // `null` (= disable-device not attempted because deviceId was
-    // missing) collapses to `false` so the caller can't be misled
-    // into thinking the Push Service row was cleaned up.
-    return pushServiceDisabled === true && userServerDisabled;
+    return true;
   }
 
   return {
