@@ -20,12 +20,15 @@ const NS_CLIENT: &str = "jabber:client";
 
 /// One XEP-0402 bookmark item.
 ///
-/// `item_id` is the bookmarked room's bare JID per XEP-0402 §2; we
-/// keep both the typed JID and the raw string the server echoed so
-/// callers can round-trip an item without re-stringifying. `name` and
-/// `autojoin` are taken from the `<conference/>` element's attributes;
-/// `extensions` carries every direct child of `<extensions/>` so
-/// foreign extensions are never lost.
+/// `jid` is the bookmarked room's bare JID per XEP-0402 §2.2; `name`,
+/// `autojoin`, `nick`, and `password` map onto the `<conference/>`
+/// schema (§2.2 + XEP-0402 XSD); `extensions` carries every direct
+/// child of `<extensions/>` opaquely so foreign extensions
+/// (XEP-0492 `<notify/>`, other specs) are never lost.
+///
+/// `nick` and `password` are round-tripped verbatim so a notification-
+/// mode toggle does not silently destroy a sibling client's stored
+/// nickname or password — round-7 XEP-0402 reviewer P1 pinning.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BookmarkItem {
     /// The room's bare JID (XEP-0402 §2 item id).
@@ -35,6 +38,10 @@ pub struct BookmarkItem {
     /// `<conference autojoin='true|false'>` attribute. XEP-0402 §2.2
     /// defaults this to `false` when absent.
     pub autojoin: bool,
+    /// `<nick/>` child element body, when present (XEP-0402 §2.2).
+    pub nick: Option<String>,
+    /// `<password/>` child element body, when present (XEP-0402 §2.2).
+    pub password: Option<String>,
     /// Raw children of `<extensions/>`, preserved verbatim so
     /// concurrent writers of foreign extensions (XEP-0492 advanced
     /// settings, other specs) don't lose their state when this
@@ -57,6 +64,14 @@ impl BookmarkItem {
             .filter(|name| !name.is_empty())
             .map(str::to_string);
         let autojoin = matches!(conference.attr("autojoin"), Some("true") | Some("1"));
+        let nick = conference
+            .get_child("nick", NS_BOOKMARKS)
+            .map(|el| el.text())
+            .filter(|text| !text.is_empty());
+        let password = conference
+            .get_child("password", NS_BOOKMARKS)
+            .map(|el| el.text())
+            .filter(|text| !text.is_empty());
         let extensions = conference
             .get_child("extensions", NS_BOOKMARKS)
             .map(|exts| exts.children().cloned().collect())
@@ -65,11 +80,17 @@ impl BookmarkItem {
             jid,
             name,
             autojoin,
+            nick,
+            password,
             extensions,
         })
     }
 
     /// Build the `<conference/>` payload for a publish IQ.
+    ///
+    /// `<nick/>` and `<password/>` come *before* `<extensions/>` to
+    /// match the XEP-0402 XSD child-element ordering. Omitted (no
+    /// element on the wire) when the typed value is `None`.
     pub fn build_conference_element(&self) -> Element {
         let mut builder = Element::builder("conference", NS_BOOKMARKS).attr(
             minidom::rxml::xml_ncname!("autojoin").to_owned(),
@@ -77,6 +98,16 @@ impl BookmarkItem {
         );
         if let Some(name) = self.name.as_deref() {
             builder = builder.attr(minidom::rxml::xml_ncname!("name").to_owned(), name);
+        }
+        if let Some(nick) = self.nick.as_deref() {
+            builder = builder.append(Element::builder("nick", NS_BOOKMARKS).append(nick).build());
+        }
+        if let Some(password) = self.password.as_deref() {
+            builder = builder.append(
+                Element::builder("password", NS_BOOKMARKS)
+                    .append(password)
+                    .build(),
+            );
         }
         if !self.extensions.is_empty() {
             let mut exts = Element::builder("extensions", NS_BOOKMARKS);
@@ -261,6 +292,8 @@ mod tests {
             jid: "theplay@conference.example.com".parse().unwrap(),
             name: Some("The Play".into()),
             autojoin: true,
+            nick: None,
+            password: None,
             extensions: vec![merged.children().next().expect("notify child").clone()],
         };
         let conference = item.build_conference_element();
@@ -279,6 +312,8 @@ mod tests {
             jid: "theplay@conference.example.com".parse().unwrap(),
             name: Some("The Play".into()),
             autojoin: true,
+            nick: None,
+            password: None,
             extensions: vec![],
         };
         let iq = build_publish_bookmark_iq(&item, "req-1");
@@ -295,6 +330,36 @@ mod tests {
             .and_then(|field| field.get_child("value", "jabber:x:data"))
             .map(|value| value.text());
         assert_eq!(access_model.as_deref(), Some("whitelist"));
+    }
+
+    #[test]
+    fn round_trips_nick_and_password() {
+        // Round-7 XEP-0402 reviewer P1 — a sibling client may have
+        // written `<nick/>` / `<password/>` (XEP-0402 §2.2 + XSD).
+        // Our notification-mode publish path must preserve them.
+        let xml =
+            "<item xmlns='http://jabber.org/protocol/pubsub' id='theplay@conference.example.com'>\
+                    <conference xmlns='urn:xmpp:bookmarks:1' name='The Play' autojoin='true'>\
+                        <nick>JC</nick>\
+                        <password>cauldronburn</password>\
+                    </conference>\
+                    </item>";
+        let item: Element = xml.parse().expect("valid xml");
+        let parsed = BookmarkItem::parse_item(&item).expect("parsed");
+        assert_eq!(parsed.nick.as_deref(), Some("JC"));
+        assert_eq!(parsed.password.as_deref(), Some("cauldronburn"));
+
+        // Round-trip: build_conference_element must re-emit them so
+        // a republish doesn't drop them.
+        let conference = parsed.build_conference_element();
+        let nick = conference
+            .get_child("nick", NS_BOOKMARKS)
+            .map(|el| el.text());
+        let password = conference
+            .get_child("password", NS_BOOKMARKS)
+            .map(|el| el.text());
+        assert_eq!(nick.as_deref(), Some("JC"));
+        assert_eq!(password.as_deref(), Some("cauldronburn"));
     }
 
     #[test]

@@ -117,9 +117,12 @@ export class WaddleClient {
      * hydrate per-chat notification controls on connect.
      *
      * Resolves to an empty array when the user's PEP `urn:xmpp:bookmarks:1`
-     * node is absent (first publish hasn't happened) or empty. Per
-     * XEP-0492 §3, the chat caller resolves an empty `notify_mode`
-     * against the conversation-kind default.
+     * node is absent (first publish hasn't happened) or empty —
+     * XEP-0163 PEP returns `item-not-found` in that case, which is
+     * caught here and treated as the empty list rather than
+     * rejecting the Promise. Per XEP-0492 §3, the chat caller
+     * resolves an empty `notify_mode` against the conversation-kind
+     * default.
      */
     fetch_user_bookmarks(): Promise<any>;
     fetch_user_pep_profile(jid: string): Promise<any>;
@@ -312,7 +315,10 @@ export class WaddleClient {
      * `autojoin=false` so this call doesn't change join behavior.
      *
      * Semantics:
-     * * Fetch existing PEP bookmarks (XEP-0402 §2).
+     * * Fetch existing PEP bookmarks (XEP-0402 §2). A missing PEP
+     *   node (`item-not-found`) is treated as empty rather than a
+     *   hard error — the user's first XEP-0492 publish creates the
+     *   node via XEP-0060 publish-options.
      * * Find the item whose id matches `room_jid`; if missing,
      *   construct a fresh item with the given `name` (or `None`).
      * * Replace the fallback `<notify/>` child via

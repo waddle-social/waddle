@@ -59,6 +59,21 @@ export function effectiveNotifyMode(
   return bookmark?.notifyMode ?? resolveDefaultNotifyMode(kind);
 }
 
+/** Compute the next focus index for a WAI-ARIA radio menu given the
+ * current focused index and a navigation step (+1 for ArrowDown / Right,
+ * -1 for ArrowUp / Left). Wraps around. When no item is currently
+ * focused (`current === -1`), the next/previous wraps cleanly to the
+ * first / last item.
+ *
+ * Extracted from `NotifyModeButton.vue` so the index math can be
+ * unit-tested without a DOM (round-7 UX reviewer P2). */
+export function nextMenuIndex(current: number, step: 1 | -1, total: number): number {
+  if (total <= 0) return 0;
+  // When nothing is focused, a "down" goes to first (0), "up" to last.
+  const base = current < 0 ? (step === 1 ? -1 : 0) : current;
+  return ((base + step) % total + total) % total;
+}
+
 interface NotifySettingsStore {
   /** Map keyed by bare room JID. Stored as a plain object so Vue's
    * reactivity tracks property assignments without depending on
@@ -99,6 +114,11 @@ export function createNotifySettingsStore(): NotifySettingsStore {
   }
 
   async function hydrate(client: BrowserXmppClient): Promise<void> {
+    // Do NOT clear the cache before the fetch resolves — clearing it
+    // would make `effectiveNotifyMode` snap back to the §3 default on
+    // every reconnect tick, producing a visible icon flicker for any
+    // chat that has a non-default mode stored. Reviewer P2 round 7.
+    // Commit happens on success only.
     hydrating.value = true;
     try {
       const items = await client.fetchUserBookmarks();

@@ -9,6 +9,7 @@ import { describe, expect, test } from "bun:test";
 import {
   createNotifySettingsStore,
   effectiveNotifyMode,
+  nextMenuIndex,
   resolveDefaultNotifyMode,
 } from "../src/lib/notify-settings";
 import type {
@@ -86,6 +87,59 @@ describe("effectiveNotifyMode", () => {
   test("falls back to default when no bookmark exists at all", () => {
     expect(effectiveNotifyMode(undefined, "private-group")).toBe("always");
     expect(effectiveNotifyMode(undefined, "public-group")).toBe("on-mention");
+  });
+});
+
+describe("nextMenuIndex (WAI-ARIA radio menu nav)", () => {
+  test("ArrowDown advances and wraps", () => {
+    expect(nextMenuIndex(0, 1, 3)).toBe(1);
+    expect(nextMenuIndex(2, 1, 3)).toBe(0);
+  });
+
+  test("ArrowUp goes back and wraps", () => {
+    expect(nextMenuIndex(1, -1, 3)).toBe(0);
+    expect(nextMenuIndex(0, -1, 3)).toBe(2);
+  });
+
+  test("with no focused item, ArrowDown lands on first, ArrowUp on last", () => {
+    expect(nextMenuIndex(-1, 1, 3)).toBe(0);
+    expect(nextMenuIndex(-1, -1, 3)).toBe(2);
+  });
+});
+
+describe("hydrate preserves cache across reconnects (no flicker)", () => {
+  test("subsequent hydrate replaces atomically — cache is not cleared mid-flight", async () => {
+    const store = createNotifySettingsStore();
+    // Initial hydrate.
+    await store.hydrate(asClient(new FakeXmppClient([
+      { jid: "a@example.com", name: "A", autojoin: false, notifyMode: "never" },
+    ])));
+    expect(store.bookmarks.value["a@example.com"].notifyMode).toBe("never");
+
+    // Start a second hydrate; the cache must NOT clear before the
+    // fetch resolves (P2 round 7: icon flicker on reconnect).
+    let resolveFetch: (items: UserBookmarkItem[]) => void = () => {};
+    const slowClient = {
+      fetchUserBookmarks: () =>
+        new Promise<UserBookmarkItem[]>((resolve) => {
+          resolveFetch = resolve;
+        }),
+      setRoomNotificationMode: async () => null,
+    };
+    const pending = store.hydrate(slowClient as unknown as BrowserXmppClient);
+    expect(store.hydrating.value).toBe(true);
+    // Cache still holds the previous entry while the slow fetch is
+    // in flight.
+    expect(store.bookmarks.value["a@example.com"].notifyMode).toBe("never");
+
+    resolveFetch([
+      { jid: "a@example.com", name: "A", autojoin: false, notifyMode: "always" },
+      { jid: "b@example.com", name: "B", autojoin: false, notifyMode: "never" },
+    ]);
+    await pending;
+    expect(store.hydrating.value).toBe(false);
+    expect(store.bookmarks.value["a@example.com"].notifyMode).toBe("always");
+    expect(store.bookmarks.value["b@example.com"].notifyMode).toBe("never");
   });
 });
 

@@ -150,36 +150,23 @@ impl WaddleClient {
     /// hydrate per-chat notification controls on connect.
     ///
     /// Resolves to an empty array when the user's PEP `urn:xmpp:bookmarks:1`
-    /// node is absent (first publish hasn't happened) or empty. Per
-    /// XEP-0492 §3, the chat caller resolves an empty `notify_mode`
-    /// against the conversation-kind default.
+    /// node is absent (first publish hasn't happened) or empty —
+    /// XEP-0163 PEP returns `item-not-found` in that case, which is
+    /// caught here and treated as the empty list rather than
+    /// rejecting the Promise. Per XEP-0492 §3, the chat caller
+    /// resolves an empty `notify_mode` against the conversation-kind
+    /// default.
     pub fn fetch_user_bookmarks(&self) -> Promise {
         let inner = self.inner.clone();
         future_to_promise(async move {
-            let iq = build_fetch_bookmarks_iq("bookmarks-fetch");
-            let result = send_iq_command(inner, iq).await?;
-            let items = parse_bookmarks_response(&result);
-            let surfaced: Vec<WaddleBookmarkItem> = items
-                .into_iter()
-                .map(|item| {
-                    let notify_mode = item.extensions.iter().find_map(|ext| {
-                        if ext.is(
-                            "notify",
-                            waddle_xmpp_client::xep::xep0492::NS_NOTIFICATION_SETTINGS,
-                        ) {
-                            read_fallback_mode(ext)
-                        } else {
-                            None
-                        }
-                    });
-                    WaddleBookmarkItem {
-                        jid: item.jid.to_string(),
-                        name: item.name,
-                        autojoin: item.autojoin,
-                        notify_mode,
-                    }
-                })
-                .collect();
+            let iq = build_fetch_bookmarks_iq(&uuid::Uuid::new_v4().to_string());
+            let items = match send_iq_command_stanza_aware(inner, iq).await? {
+                Ok(elem) => parse_bookmarks_response(&elem),
+                Err(stanza_err) if stanza_err.condition == "item-not-found" => Vec::new(),
+                Err(stanza_err) => return Err(js_error(stanza_err.to_string())),
+            };
+            let surfaced: Vec<WaddleBookmarkItem> =
+                items.into_iter().map(surface_bookmark).collect();
             to_js_value(&surfaced)
         })
     }
@@ -190,7 +177,10 @@ impl WaddleClient {
     /// `autojoin=false` so this call doesn't change join behavior.
     ///
     /// Semantics:
-    /// * Fetch existing PEP bookmarks (XEP-0402 §2).
+    /// * Fetch existing PEP bookmarks (XEP-0402 §2). A missing PEP
+    ///   node (`item-not-found`) is treated as empty rather than a
+    ///   hard error — the user's first XEP-0492 publish creates the
+    ///   node via XEP-0060 publish-options.
     /// * Find the item whose id matches `room_jid`; if missing,
     ///   construct a fresh item with the given `name` (or `None`).
     /// * Replace the fallback `<notify/>` child via
@@ -212,60 +202,38 @@ impl WaddleClient {
 
             // Fetch existing bookmarks so we can preserve the rest of
             // the bookmark item plus any foreign extension children
-            // when we merge in the new <notify/> setting.
-            let fetch_iq = build_fetch_bookmarks_iq("bookmarks-fetch-for-set");
-            let fetch_result = send_iq_command(inner.clone(), fetch_iq).await?;
-            let items = parse_bookmarks_response(&fetch_result);
+            // when we merge in the new <notify/> setting. Treat
+            // first-publish item-not-found as empty.
+            let fetch_iq = build_fetch_bookmarks_iq(&uuid::Uuid::new_v4().to_string());
+            let items = match send_iq_command_stanza_aware(inner.clone(), fetch_iq).await? {
+                Ok(elem) => parse_bookmarks_response(&elem),
+                Err(stanza_err) if stanza_err.condition == "item-not-found" => Vec::new(),
+                Err(stanza_err) => return Err(js_error(stanza_err.to_string())),
+            };
 
-            let existing_extensions: Option<Element> =
-                items.iter().find(|item| item.jid == room_jid).map(|item| {
-                    let mut wrapper =
-                        Element::builder("extensions", waddle_xmpp_client::pep::NS_BOOKMARKS);
-                    for child in &item.extensions {
-                        wrapper = wrapper.append(child.clone());
-                    }
-                    wrapper.build()
-                });
+            let existing = items.iter().find(|item| item.jid == room_jid);
+            let existing_extensions =
+                existing.map(|item| build_extensions_wrapper(&item.extensions));
             let merged_extensions =
                 merge_notify_into_extensions(existing_extensions.as_ref(), opts.mode);
             let extensions_children: Vec<Element> = merged_extensions.children().cloned().collect();
 
-            let existing = items.iter().find(|item| item.jid == room_jid);
             let merged_item = BookmarkItem {
-                jid: room_jid.clone(),
+                jid: room_jid,
                 name: existing
                     .and_then(|item| item.name.clone())
                     .or(opts.name.clone()),
                 autojoin: existing.map(|item| item.autojoin).unwrap_or(false),
+                nick: existing.and_then(|item| item.nick.clone()),
+                password: existing.and_then(|item| item.password.clone()),
                 extensions: extensions_children,
             };
 
-            let publish_iq = build_publish_bookmark_iq(&merged_item, "bookmarks-publish");
+            let publish_iq =
+                build_publish_bookmark_iq(&merged_item, &uuid::Uuid::new_v4().to_string());
             let _ = send_iq_command(inner, publish_iq).await?;
 
-            // Read the actually-published mode back out of our merged
-            // extensions so the JS caller observes exactly what went
-            // on the wire (instead of trusting `opts.mode`).
-            // `merge_notify_into_extensions` always produces a
-            // `<notify/>` with a fallback child, so this is
-            // guaranteed Some.
-            let notify_mode = merged_item.extensions.iter().find_map(|ext| {
-                if ext.is(
-                    "notify",
-                    waddle_xmpp_client::xep::xep0492::NS_NOTIFICATION_SETTINGS,
-                ) {
-                    read_fallback_mode(ext)
-                } else {
-                    None
-                }
-            });
-            let response = WaddleBookmarkItem {
-                jid: merged_item.jid.to_string(),
-                name: merged_item.name,
-                autojoin: merged_item.autojoin,
-                notify_mode,
-            };
-            to_js_value(&response)
+            to_js_value(&surface_bookmark(merged_item))
         })
     }
 
@@ -627,6 +595,41 @@ impl WaddleClient {
             };
             to_js_value(&profile)
         })
+    }
+}
+
+/// Build the `<extensions xmlns='urn:xmpp:bookmarks:1'>…</extensions>`
+/// wrapper around the typed bookmark's foreign children so the merge
+/// helper has a single `Element` to walk. Pure / side-effect free.
+fn build_extensions_wrapper(children: &[Element]) -> Element {
+    let mut builder = Element::builder("extensions", waddle_xmpp_client::pep::NS_BOOKMARKS);
+    for child in children {
+        builder = builder.append(child.clone());
+    }
+    builder.build()
+}
+
+/// Surface one parsed [`BookmarkItem`] into the JS-facing
+/// [`WaddleBookmarkItem`]. Pulls the XEP-0492 fallback `<notify/>`
+/// child out of the extensions list and returns it as the typed
+/// `notify_mode`. Used by both `fetch_user_bookmarks` (per-item map)
+/// and `set_room_notification_mode` (response shaping).
+fn surface_bookmark(item: BookmarkItem) -> WaddleBookmarkItem {
+    let notify_mode = item.extensions.iter().find_map(|ext| {
+        if ext.is(
+            "notify",
+            waddle_xmpp_client::xep::xep0492::NS_NOTIFICATION_SETTINGS,
+        ) {
+            read_fallback_mode(ext)
+        } else {
+            None
+        }
+    });
+    WaddleBookmarkItem {
+        jid: item.jid.to_string(),
+        name: item.name,
+        autojoin: item.autojoin,
+        notify_mode,
     }
 }
 

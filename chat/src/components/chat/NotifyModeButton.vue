@@ -1,9 +1,10 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from "vue";
-import { Bell, BellMinus, BellOff } from "lucide-vue-next";
+import { computed, nextTick, onMounted, onUnmounted, ref } from "vue";
+import { AtSign, Bell, BellOff } from "lucide-vue-next";
 import type { BrowserXmppClient } from "@/lib/xmpp-client";
 import {
   effectiveNotifyMode,
+  nextMenuIndex,
   notifySettingsStore,
   NOTIFY_MODE_HINT,
   NOTIFY_MODE_LABEL,
@@ -18,22 +19,25 @@ import {
  * options. Selecting one publishes a XEP-0402 bookmark item update
  * to PEP via [[BrowserXmppClient.setRoomNotificationMode]].
  *
- * The button is hidden when `roomJid` is empty (DMs in this v1 slice
- * have no XEP-0492 carrier — per-DM settings ship in #720). */
+ * Accessibility (round-7 UX P1):
+ * * The popover is keyed as a `role="menu"` with three `menuitemradio`
+ *   children, matching the WAI-ARIA APG menu radio pattern.
+ * * On open, focus moves into the currently-selected option so screen
+ *   readers announce the active mode.
+ * * Arrow Up/Down move focus between options. Home / End jump to first
+ *   / last. Esc closes and returns focus to the trigger.
+ * * The trigger is disabled (`aria-disabled`) while no client is wired
+ *   or the store is still hydrating, so clicks don't open a popover
+ *   that can't act.
+ */
 const props = defineProps<{
   /** Bare JID of the room whose XEP-0402 bookmark carries the
-   * XEP-0492 `<notify/>` setting. Empty string disables the
-   * control (caller should `v-if` instead, but the empty-string
-   * guard is defence-in-depth for DM panes). */
+   * XEP-0492 `<notify/>` setting. */
   roomJid: string;
-  /** Conversation kind for XEP-0492 §3 default resolution. The chat
-   * layer currently lacks a public/private discriminator on
-   * `ChannelSummary`; callers pass `"private-group"` for all
-   * channels until that flag lands. */
+  /** Conversation kind for XEP-0492 §3 default resolution. */
   conversationKind: ConversationKind;
   /** Initial room display name copied into the bookmark on first
-   * publish (XEP-0402 §2.2 `name` attribute). Optional — when
-   * omitted the bookmark is created without a name attribute. */
+   * publish (XEP-0402 §2.2 `name` attribute). */
   roomName?: string;
   /** Wired XMPP client used to publish the update. */
   client: BrowserXmppClient | null;
@@ -43,6 +47,10 @@ const store = notifySettingsStore;
 const open = ref(false);
 const submitting = ref<NotifyMode | null>(null);
 const rootEl = ref<HTMLElement | null>(null);
+const triggerEl = ref<HTMLButtonElement | null>(null);
+const optionRefs = ref<(HTMLButtonElement | null)[]>([]);
+
+const MODES: NotifyMode[] = ["always", "on-mention", "never"];
 
 const currentMode = computed<NotifyMode>(() => {
   const bookmark = store.bookmarks.value[props.roomJid];
@@ -54,20 +62,51 @@ const icon = computed(() => {
     case "always":
       return Bell;
     case "on-mention":
-      return BellMinus;
+      return AtSign;
     case "never":
       return BellOff;
   }
-  return Bell;
 });
 
-const buttonTitle = computed(() => `Notifications: ${NOTIFY_MODE_LABEL[currentMode.value]}`);
+const disabled = computed(() => props.client === null || store.hydrating.value);
+
+const buttonTitle = computed(() => {
+  if (props.client === null) return "Notifications: connecting…";
+  if (store.hydrating.value) return "Notifications: syncing…";
+  return `Notifications: ${NOTIFY_MODE_LABEL[currentMode.value]}`;
+});
+
+async function toggleOpen() {
+  if (disabled.value) return;
+  open.value = !open.value;
+  if (open.value) {
+    await nextTick();
+    focusOptionAt(MODES.indexOf(currentMode.value));
+  }
+}
+
+function focusOptionAt(index: number) {
+  const refs = optionRefs.value;
+  if (refs.length === 0) return;
+  const clamped = ((index % refs.length) + refs.length) % refs.length;
+  refs[clamped]?.focus();
+}
+
+function focusedIndex(): number {
+  const active = document.activeElement as HTMLElement | null;
+  return optionRefs.value.findIndex((el) => el === active);
+}
+
+function closeAndReturnFocus() {
+  open.value = false;
+  triggerEl.value?.focus();
+}
 
 async function selectMode(mode: NotifyMode) {
   if (!props.client) return;
   if (submitting.value !== null) return;
   if (mode === currentMode.value) {
-    open.value = false;
+    closeAndReturnFocus();
     return;
   }
   submitting.value = mode;
@@ -77,9 +116,36 @@ async function selectMode(mode: NotifyMode) {
       mode,
       name: props.roomName,
     });
-    if (ok) open.value = false;
+    if (ok) closeAndReturnFocus();
   } finally {
     submitting.value = null;
+  }
+}
+
+function onMenuKeydown(event: KeyboardEvent) {
+  switch (event.key) {
+    case "ArrowDown":
+    case "ArrowRight":
+      event.preventDefault();
+      focusOptionAt(nextMenuIndex(focusedIndex(), 1, MODES.length));
+      break;
+    case "ArrowUp":
+    case "ArrowLeft":
+      event.preventDefault();
+      focusOptionAt(nextMenuIndex(focusedIndex(), -1, MODES.length));
+      break;
+    case "Home":
+      event.preventDefault();
+      focusOptionAt(0);
+      break;
+    case "End":
+      event.preventDefault();
+      focusOptionAt(MODES.length - 1);
+      break;
+    case "Escape":
+      event.preventDefault();
+      closeAndReturnFocus();
+      break;
   }
 }
 
@@ -91,33 +157,36 @@ function onWindowClick(event: MouseEvent) {
   }
 }
 
-function onEsc(event: KeyboardEvent) {
-  if (event.key === "Escape") open.value = false;
+function onWindowEsc(event: KeyboardEvent) {
+  // Top-level Esc when focus is somewhere else (e.g. user typed
+  // in the message composer while the popover was open).
+  if (event.key === "Escape" && open.value) closeAndReturnFocus();
 }
 
 onMounted(() => {
   window.addEventListener("mousedown", onWindowClick);
-  window.addEventListener("keydown", onEsc);
+  window.addEventListener("keydown", onWindowEsc);
 });
 
 onUnmounted(() => {
   window.removeEventListener("mousedown", onWindowClick);
-  window.removeEventListener("keydown", onEsc);
+  window.removeEventListener("keydown", onWindowEsc);
 });
-
-const modes: NotifyMode[] = ["always", "on-mention", "never"];
 </script>
 
 <template>
   <div v-if="roomJid" ref="rootEl" class="relative inline-flex">
     <button
+      ref="triggerEl"
       class="chat-icon-button chat-icon-button--md text-muted-foreground hover:bg-muted hover:text-foreground"
+      :class="{ 'opacity-50 cursor-not-allowed': disabled }"
       type="button"
       :title="buttonTitle"
       :aria-label="buttonTitle"
       :aria-expanded="open"
-      :aria-haspopup="true"
-      @click="open = !open"
+      :aria-disabled="disabled"
+      aria-haspopup="menu"
+      @click="toggleOpen"
     >
       <component :is="icon" class="w-3.5 h-3.5" />
     </button>
@@ -126,16 +195,18 @@ const modes: NotifyMode[] = ["always", "on-mention", "never"];
       class="absolute right-0 top-[calc(100%+4px)] z-30 w-64 rounded-lg border border-border bg-popover p-2 shadow-lg"
       role="menu"
       aria-label="Notification mode"
+      @keydown="onMenuKeydown"
     >
       <p class="type-section-label px-2 pb-1 pt-1 text-muted-foreground">Notifications for this chat</p>
       <button
-        v-for="mode in modes"
+        v-for="(mode, index) in MODES"
         :key="mode"
+        :ref="(el) => optionRefs[index] = (el as HTMLButtonElement | null)"
         type="button"
         role="menuitemradio"
         :aria-checked="currentMode === mode"
         :disabled="submitting !== null"
-        class="flex w-full flex-col items-start gap-0.5 rounded-md px-2 py-2 text-left hover:bg-muted focus:bg-muted focus:outline-none"
+        class="flex w-full flex-col items-start gap-0.5 rounded-md px-2 py-2 text-left hover:bg-muted focus:bg-muted focus:outline-none disabled:opacity-50 disabled:cursor-not-allowed"
         :class="{ 'bg-muted/60': currentMode === mode }"
         @click="selectMode(mode)"
       >

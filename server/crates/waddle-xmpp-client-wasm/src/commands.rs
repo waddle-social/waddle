@@ -30,6 +30,31 @@ pub(crate) async fn send_iq_command(
         .map_err(|err| js_error(err.to_string()))
 }
 
+/// Variant of [`send_iq_command`] that surfaces RFC 6120 §8.3 stanza
+/// errors as a typed [`waddle_xmpp_client::StanzaError`] instead of
+/// stringifying them onto the rejected Promise. Transport / disconnect
+/// failures still produce a rejected `JsValue`. Use this when the
+/// caller needs to branch on the stanza error condition (e.g. treat
+/// `item-not-found` on a first-publish XEP-0163 PEP fetch as an
+/// empty result rather than a hard failure).
+pub(crate) async fn send_iq_command_stanza_aware(
+    inner: Rc<RefCell<WaddleClientInner>>,
+    stanza: Element,
+) -> Result<Result<Element, waddle_xmpp_client::StanzaError>, JsValue> {
+    let mut cmd_tx = command_sender(&inner)?;
+    let (responder, rx) = oneshot::channel();
+    cmd_tx
+        .send(WasmCommand::SendIq { stanza, responder })
+        .await
+        .map_err(|_| js_error("client is disconnected"))?;
+    let result = rx.await.map_err(|_| js_error("client is disconnected"))?;
+    match result {
+        Ok(elem) => Ok(Ok(elem)),
+        Err(ClientError::StanzaError(stanza_err)) => Ok(Err(stanza_err)),
+        Err(other) => Err(js_error(other.to_string())),
+    }
+}
+
 pub(crate) async fn send_avatar_iq_command(
     inner: Rc<RefCell<WaddleClientInner>>,
     stanza: Element,
