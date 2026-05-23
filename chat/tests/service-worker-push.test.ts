@@ -90,7 +90,7 @@ describe("service worker push handling", () => {
         context: {
           conversation: "space_channel@conference.example.com",
           thread: "",
-          class: "groupchat_personal_mention",
+          class: "personal_mention",
         },
       }),
     });
@@ -110,11 +110,11 @@ describe("service worker push handling", () => {
       tag: "space_channel@conference.example.com",
       icon: "/android-chrome-192x192.png",
       data: {
-        url: "/space/channel",
+        url: "/r/space_channel",
         context: {
           conversation: "space_channel@conference.example.com",
           thread: undefined,
-          class: "groupchat_personal_mention",
+          class: "personal_mention",
         },
       },
     });
@@ -157,14 +157,14 @@ describe("service worker push handling", () => {
     const event = makePushEvent({
       json: () => ({
         "message-count": 1,
-        context: { conversation: "alice@example.com" },
+        context: { conversation: "alice@example.com", class: "dm" },
       }),
     });
     worker.dispatch("push", event);
     await event.done();
 
     const [, options] = worker.showNotification.mock.calls[0] ?? [];
-    expect((options as NotificationOptions & { data: { url: string } }).data.url).toBe("/alice");
+    expect((options as NotificationOptions & { data: { url: string } }).data.url).toBe("/dm/alice");
   });
 
   test("dm with underscore in localpart routes as DM, not MUC", async () => {
@@ -188,36 +188,21 @@ describe("service worker push handling", () => {
 
     const [, options] = worker.showNotification.mock.calls[0] ?? [];
     expect((options as NotificationOptions & { data: { url: string } }).data.url).toBe(
-      "/jane_doe",
+      "/dm/jane_doe",
     );
   });
 
-  test("muc conversation routes to /{space}/{channel}", async () => {
-    const worker = loadServiceWorker();
-    const event = makePushEvent({
-      json: () => ({
-        "message-count": 1,
-        context: { conversation: "myspace_general@muc.example.com" },
-      }),
-    });
-    worker.dispatch("push", event);
-    await event.done();
 
-    const [, options] = worker.showNotification.mock.calls[0] ?? [];
-    expect((options as NotificationOptions & { data: { url: string } }).data.url).toBe(
-      "/myspace/general",
-    );
-  });
-
-  test("thread context routes to /{...}/threads/{thread}", async () => {
+  test("muc conversation routes to /r/{channelId}", async () => {
+    // Chat router URL is `/r/{channelId}` where channelId == JID
+    // localpart (see chat/src/lib/xmpp/jid.ts::parseManagedRoomBareJid).
     const worker = loadServiceWorker();
     const event = makePushEvent({
       json: () => ({
         "message-count": 1,
         context: {
-          conversation: "myspace_general@muc.example.com",
-          thread: "thread-42",
-          class: "groupchat_personal_mention",
+          conversation: "general@muc.example.com",
+          class: "personal_mention",
         },
       }),
     });
@@ -226,7 +211,73 @@ describe("service worker push handling", () => {
 
     const [, options] = worker.showNotification.mock.calls[0] ?? [];
     expect((options as NotificationOptions & { data: { url: string } }).data.url).toBe(
-      "/myspace/general/threads/thread-42",
+      "/r/general",
+    );
+  });
+
+  test("thread context routes via ?thread= query string, not path segment", async () => {
+    // Chat router carries threads in a search-param codec
+    // (chat/src/router/codecs.ts::threadSearch), NOT a path segment.
+    const worker = loadServiceWorker();
+    const event = makePushEvent({
+      json: () => ({
+        "message-count": 1,
+        context: {
+          conversation: "general@muc.example.com",
+          thread: "thread-42",
+          class: "personal_mention",
+        },
+      }),
+    });
+    worker.dispatch("push", event);
+    await event.done();
+
+    const [, options] = worker.showNotification.mock.calls[0] ?? [];
+    expect((options as NotificationOptions & { data: { url: string } }).data.url).toBe(
+      "/r/general?thread=thread-42",
+    );
+  });
+
+  test("class='dm' overrides @muc. domain prefix", async () => {
+    // Defense-in-depth: a misconfigured server that issues DMs from
+    // a `muc.` subdomain MUST still route as DM when the typed
+    // `class` field says so.
+    const worker = loadServiceWorker();
+    const event = makePushEvent({
+      json: () => ({
+        "message-count": 1,
+        context: {
+          conversation: "alice@muc.example.com",
+          class: "dm",
+        },
+      }),
+    });
+    worker.dispatch("push", event);
+    await event.done();
+
+    const [, options] = worker.showNotification.mock.calls[0] ?? [];
+    expect((options as NotificationOptions & { data: { url: string } }).data.url).toBe(
+      "/dm/alice",
+    );
+  });
+
+  test("notify_all (group-class) routes to /r/{channelId}", async () => {
+    const worker = loadServiceWorker();
+    const event = makePushEvent({
+      json: () => ({
+        "message-count": 1,
+        context: {
+          conversation: "general@muc.example.com",
+          class: "notify_all",
+        },
+      }),
+    });
+    worker.dispatch("push", event);
+    await event.done();
+
+    const [, options] = worker.showNotification.mock.calls[0] ?? [];
+    expect((options as NotificationOptions & { data: { url: string } }).data.url).toBe(
+      "/r/general",
     );
   });
 
@@ -236,7 +287,7 @@ describe("service worker push handling", () => {
     const event = makePushEvent({
       json: () => ({
         "message-count": 0,
-        context: { conversation: "alice@example.com" },
+        context: { conversation: "alice@example.com", class: "dm" },
       }),
     });
 

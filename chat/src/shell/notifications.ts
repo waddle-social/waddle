@@ -142,30 +142,57 @@ export function usePushNotifications() {
     if (!notificationsEnabled.value || permissionState.value !== "granted") return false;
 
     const serviceJid = resolvePushServiceJid(userJid);
-    if (!serviceJid) return false;
+    if (!serviceJid) {
+      console.warn("[notifications] No XMPP Push Service JID resolved; push disabled");
+      return false;
+    }
 
     // Get or create a browser-side PushSubscription. Without a VAPID
     // public key configured at build time the browser will refuse to
     // subscribe — log and bail so the caller can fall back to the
     // foreground Notification API.
-    if (!VAPID_PUBLIC_KEY) return false;
+    if (!VAPID_PUBLIC_KEY) {
+      console.warn(
+        "[notifications] PUBLIC_WADDLE_VAPID_PUBLIC_KEY is not set; Web Push subscription skipped. " +
+        "Foreground Notification API still works while the chat tab is open.",
+      );
+      return false;
+    }
     const reg = await getOrRegisterServiceWorker();
-    if (!reg) return false;
+    if (!reg) {
+      console.warn("[notifications] Service worker registration failed; push disabled");
+      return false;
+    }
     let subscription = await reg.pushManager.getSubscription();
     if (!subscription) {
       subscription = await subscribeToPush(VAPID_PUBLIC_KEY);
     }
-    if (!subscription) return false;
+    if (!subscription) {
+      console.warn(
+        "[notifications] PushManager.subscribe() failed (browser may have rejected VAPID key)",
+      );
+      return false;
+    }
 
     const subJson = subscription.toJSON();
     const endpoint = subscription.endpoint;
     const auth = (subJson.keys?.auth ?? "").trim();
     const p256dh = (subJson.keys?.p256dh ?? "").trim();
-    if (!endpoint || !auth || !p256dh) return false;
+    if (!endpoint || !auth || !p256dh) {
+      console.warn(
+        "[notifications] PushSubscription is missing endpoint/auth/p256dh; cannot register",
+      );
+      return false;
+    }
 
     // Stable per-app PEP-style node id from the Push Service.
     const ensured = await xmppClient.ensurePushNode({ serviceJid, appId: APP_ID_WEB });
-    if (!ensured) return false;
+    if (!ensured) {
+      console.warn(
+        "[notifications] ensure-node IQ failed; XMPP Push Service may be unreachable",
+      );
+      return false;
+    }
     persistPushNodeId(ensured.id);
 
     const deviceId = ensureDeviceId();
@@ -178,12 +205,23 @@ export function usePushNotifications() {
       providerToken: auth,
       providerKeyMaterial: p256dh,
     });
-    if (!registered) return false;
+    if (!registered) {
+      console.warn(
+        "[notifications] register-device IQ failed; push subscription will not be delivered",
+      );
+      return false;
+    }
 
-    return xmppClient.enablePushNotifications({
+    const enabled = await xmppClient.enablePushNotifications({
       serviceJid,
       node: ensured.id,
     });
+    if (!enabled) {
+      console.warn(
+        "[notifications] XEP-0357 enable IQ failed; device is registered but not advertised",
+      );
+    }
+    return enabled;
   }
 
   async function disablePushSubscription(xmppClient: BrowserXmppClient, userJid: string): Promise<boolean> {
@@ -196,22 +234,39 @@ export function usePushNotifications() {
     }
 
     const serviceJid = resolvePushServiceJid(userJid);
-    if (!serviceJid) return false;
+    if (!serviceJid) {
+      console.warn("[notifications] No XMPP Push Service JID resolved on disable");
+      return false;
+    }
 
     const node = loadPushNodeId();
     const deviceId = loadDeviceId();
 
-    // Disable on the Push Service first (drops the device row that
-    // would otherwise still receive fan-outs), then XEP-0357
-    // disable on the user-server.
+    // Best-effort: run BOTH the Push Service disable-device AND the
+    // user-server XEP-0357 disable, even if the first one errors.
+    // Stopping early on partial failure leaks state: the user-server
+    // keeps publishing to a node whose Push Service device row is
+    // already gone, or vice versa.
+    let pushServiceDisabled = true;
     if (node && deviceId) {
-      await xmppClient.disablePushDevice({ serviceJid, node, deviceId });
+      pushServiceDisabled = await xmppClient.disablePushDevice({ serviceJid, node, deviceId });
+      if (!pushServiceDisabled) {
+        console.warn(
+          "[notifications] disable-device IQ failed; user-server XEP-0357 disable will still run",
+        );
+      }
     }
     if (!node) return false;
-    return xmppClient.disablePushNotifications({
+    const userServerDisabled = await xmppClient.disablePushNotifications({
       serviceJid,
       node,
     });
+    if (!userServerDisabled) {
+      console.warn(
+        "[notifications] XEP-0357 disable IQ failed; Push Service publish jobs may still queue",
+      );
+    }
+    return pushServiceDisabled && userServerDisabled;
   }
 
   return {
