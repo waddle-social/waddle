@@ -117,10 +117,9 @@ fn build_publish_dnd(item_id: &str, payload: Element) -> Element {
 
 async fn open_test_pool(database_url: &str) -> sqlx::SqlitePool {
     use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
-    let options = sqlx::sqlite::SqliteConnectOptions::from_str(database_url)
+    let options = SqliteConnectOptions::from_str(database_url)
         .expect("parse sqlite url")
         .busy_timeout(Duration::from_secs(5));
-    let _ = SqliteConnectOptions::from_str(database_url);
     SqlitePoolOptions::new()
         .max_connections(1)
         .connect_with(options)

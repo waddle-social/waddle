@@ -211,6 +211,12 @@ pub enum DndParseError {
     InvalidTime(String),
     #[error("more than {MAX_RULES_PER_DOCUMENT} <rule> children in <dnd>")]
     TooManyRules,
+    #[error("<rule start='{start}' end='{end}'> is a zero-length window")]
+    ZeroLengthRule { start: String, end: String },
+    #[error("namespaced attribute '{attr}' is not allowed on <{element}>")]
+    NamespacedAttribute { element: String, attr: String },
+    #[error("unexpected child element <{child}> in <{parent}>")]
+    UnexpectedChild { parent: String, child: String },
 }
 
 impl WaddleDnd {
@@ -326,14 +332,29 @@ impl ScheduleRule {
     }
 
     /// Returns true when the window wraps past midnight.
+    ///
+    /// Strict less-than: `end == start` is a zero-length rule rejected
+    /// at parse time (see [`DndParseError::ZeroLengthRule`]). Without
+    /// the rejection, a degenerate `start='22:00' end='22:00'` would
+    /// silently expand to a 24-hour DND window via the wrap branch.
     pub fn wraps_past_midnight(&self) -> bool {
-        self.end <= self.start
+        self.end < self.start
     }
 }
 
 fn reject_unknown_attrs_on_root(element: &Element, known: &[&str]) -> Result<(), DndParseError> {
-    for ((_ns, name), _value) in element.attrs().iter() {
+    for ((ns, name), _value) in element.attrs().iter() {
         let attr_name = name.as_str();
+        // Prefixed attributes (non-empty namespace) are never part of
+        // this XEP's contract — reject them outright so a client can't
+        // sneak `foo:timezone='bar'` past the strict-parser gate by
+        // riding a different namespace.
+        if !ns.as_str().is_empty() {
+            return Err(DndParseError::NamespacedAttribute {
+                element: ELEMENT_DND.to_string(),
+                attr: attr_name.to_string(),
+            });
+        }
         if !known.contains(&attr_name) {
             return Err(DndParseError::UnknownAttribute(attr_name.to_string()));
         }
@@ -346,8 +367,14 @@ fn reject_unknown_attrs_on_child(
     element_name: &str,
     known: &[&str],
 ) -> Result<(), DndParseError> {
-    for ((_ns, name), _value) in element.attrs().iter() {
+    for ((ns, name), _value) in element.attrs().iter() {
         let attr_name = name.as_str();
+        if !ns.as_str().is_empty() {
+            return Err(DndParseError::NamespacedAttribute {
+                element: element_name.to_string(),
+                attr: attr_name.to_string(),
+            });
+        }
         if !known.contains(&attr_name) {
             return Err(DndParseError::UnknownChildAttribute {
                 element: element_name.to_string(),
@@ -358,8 +385,19 @@ fn reject_unknown_attrs_on_child(
     Ok(())
 }
 
+fn reject_any_children(element: &Element, parent: &str) -> Result<(), DndParseError> {
+    if let Some(child) = element.children().next() {
+        return Err(DndParseError::UnexpectedChild {
+            parent: parent.to_string(),
+            child: child.name().to_string(),
+        });
+    }
+    Ok(())
+}
+
 fn parse_snooze(element: &Element) -> Result<DateTime<Utc>, DndParseError> {
     reject_unknown_attrs_on_child(element, ELEMENT_SNOOZE, &[ATTR_UNTIL])?;
+    reject_any_children(element, ELEMENT_SNOOZE)?;
     let raw = element
         .attr(ATTR_UNTIL)
         .ok_or(DndParseError::SnoozeMissingUntil)?;
@@ -370,6 +408,7 @@ fn parse_snooze(element: &Element) -> Result<DateTime<Utc>, DndParseError> {
 
 fn parse_rule(element: &Element) -> Result<ScheduleRule, DndParseError> {
     reject_unknown_attrs_on_child(element, ELEMENT_RULE, &[ATTR_DAYS, ATTR_START, ATTR_END])?;
+    reject_any_children(element, ELEMENT_RULE)?;
     let days_attr = element
         .attr(ATTR_DAYS)
         .ok_or(DndParseError::RuleMissingDays)?;
@@ -382,6 +421,12 @@ fn parse_rule(element: &Element) -> Result<ScheduleRule, DndParseError> {
     let days = parse_weekday_set(days_attr)?;
     let start = parse_time(start_attr)?;
     let end = parse_time(end_attr)?;
+    if start == end {
+        return Err(DndParseError::ZeroLengthRule {
+            start: start_attr.to_string(),
+            end: end_attr.to_string(),
+        });
+    }
     Ok(ScheduleRule { days, start, end })
 }
 
@@ -672,6 +717,72 @@ mod tests {
             WaddleDnd::parse(&bad).unwrap_err(),
             DndParseError::TooManyRules
         );
+    }
+
+    #[test]
+    fn parse_namespaced_attribute_on_root_rejected() {
+        // `foo:timezone='X'` must not silently fall through the
+        // local-name check — the strict-parser contract requires
+        // rejecting attributes carrying a non-empty namespace.
+        let bad: Element = "<dnd xmlns='urn:waddle:dnd:0' \
+             xmlns:other='urn:example:other' other:timezone='X'/>"
+            .parse()
+            .unwrap();
+        assert!(matches!(
+            WaddleDnd::parse(&bad),
+            Err(DndParseError::NamespacedAttribute { .. })
+        ));
+    }
+
+    #[test]
+    fn parse_namespaced_attribute_on_snooze_rejected() {
+        let bad: Element = "<dnd xmlns='urn:waddle:dnd:0'>\
+             <snooze xmlns:other='urn:example:other' \
+                     until='2026-05-23T17:00:00Z' \
+                     other:until='whatever'/>\
+             </dnd>"
+            .parse()
+            .unwrap();
+        assert!(matches!(
+            WaddleDnd::parse(&bad),
+            Err(DndParseError::NamespacedAttribute { .. })
+        ));
+    }
+
+    #[test]
+    fn parse_unknown_child_in_snooze_rejected() {
+        let bad: Element =
+            "<dnd xmlns='urn:waddle:dnd:0'><snooze until='2026-05-23T17:00:00Z'><extra/></snooze></dnd>"
+                .parse()
+                .unwrap();
+        assert!(matches!(
+            WaddleDnd::parse(&bad),
+            Err(DndParseError::UnexpectedChild { .. })
+        ));
+    }
+
+    #[test]
+    fn parse_unknown_child_in_rule_rejected() {
+        let bad: Element =
+            "<dnd xmlns='urn:waddle:dnd:0'><rule days='mon' start='22:00' end='07:00'><extra/></rule></dnd>"
+                .parse()
+                .unwrap();
+        assert!(matches!(
+            WaddleDnd::parse(&bad),
+            Err(DndParseError::UnexpectedChild { .. })
+        ));
+    }
+
+    #[test]
+    fn parse_zero_length_rule_rejected() {
+        let bad: Element =
+            "<dnd xmlns='urn:waddle:dnd:0'><rule days='mon' start='22:00' end='22:00'/></dnd>"
+                .parse()
+                .unwrap();
+        assert!(matches!(
+            WaddleDnd::parse(&bad),
+            Err(DndParseError::ZeroLengthRule { .. })
+        ));
     }
 
     #[test]
