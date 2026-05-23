@@ -91,11 +91,14 @@ impl BookmarkItem {
     /// `<nick/>` and `<password/>` come *before* `<extensions/>` to
     /// match the XEP-0402 XSD child-element ordering. Omitted (no
     /// element on the wire) when the typed value is `None`.
+    /// `autojoin` is only emitted when `true` — XEP-0402 §2.2 XSD
+    /// defaults the attribute to `false`, and an absent attr is the
+    /// canonical "no autojoin" wire shape.
     pub fn build_conference_element(&self) -> Element {
-        let mut builder = Element::builder("conference", NS_BOOKMARKS).attr(
-            minidom::rxml::xml_ncname!("autojoin").to_owned(),
-            if self.autojoin { "true" } else { "false" },
-        );
+        let mut builder = Element::builder("conference", NS_BOOKMARKS);
+        if self.autojoin {
+            builder = builder.attr(minidom::rxml::xml_ncname!("autojoin").to_owned(), "true");
+        }
         if let Some(name) = self.name.as_deref() {
             builder = builder.attr(minidom::rxml::xml_ncname!("name").to_owned(), name);
         }
@@ -308,6 +311,9 @@ mod tests {
 
     #[test]
     fn build_publish_bookmark_iq_uses_canonical_publish_options() {
+        // Round-8 Rust reviewer P2: pin every publish-options field
+        // so a regression that drops or mistypes one of them gets
+        // caught.
         let item = BookmarkItem {
             jid: "theplay@conference.example.com".parse().unwrap(),
             name: Some("The Play".into()),
@@ -324,12 +330,31 @@ mod tests {
         let form = publish_options
             .get_child("x", "jabber:x:data")
             .expect("x form present");
-        let access_model = form
-            .children()
-            .find(|child| child.attr("var") == Some("pubsub#access_model"))
-            .and_then(|field| field.get_child("value", "jabber:x:data"))
-            .map(|value| value.text());
-        assert_eq!(access_model.as_deref(), Some("whitelist"));
+        assert_eq!(form.attr("type"), Some("submit"));
+
+        let value_of = |var: &str| -> Option<String> {
+            form.children()
+                .find(|child| child.attr("var") == Some(var))
+                .and_then(|field| field.get_child("value", "jabber:x:data"))
+                .map(|value| value.text())
+        };
+
+        // FORM_TYPE marker for the publish-options form.
+        assert_eq!(
+            value_of("FORM_TYPE").as_deref(),
+            Some("http://jabber.org/protocol/pubsub#publish-options"),
+        );
+        // XEP-0402 §3.1 canonical fields.
+        assert_eq!(value_of("pubsub#persist_items").as_deref(), Some("true"));
+        assert_eq!(value_of("pubsub#max_items").as_deref(), Some("max"));
+        assert_eq!(
+            value_of("pubsub#send_last_published_item").as_deref(),
+            Some("never"),
+        );
+        assert_eq!(
+            value_of("pubsub#access_model").as_deref(),
+            Some("whitelist")
+        );
     }
 
     #[test]

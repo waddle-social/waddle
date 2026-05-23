@@ -231,7 +231,24 @@ impl WaddleClient {
 
             let publish_iq =
                 build_publish_bookmark_iq(&merged_item, &uuid::Uuid::new_v4().to_string());
-            let _ = send_iq_command(inner, publish_iq).await?;
+            // Use the stanza-aware send so the chat layer can
+            // distinguish recoverable XEP-0060 conditions (notably
+            // `precondition-not-met` on an older XEP-0223-style node
+            // configured with `access_model=open`) from transport
+            // errors. Round-8 XEP reviewer P2. The JS surface shapes
+            // the rejection as `bookmark-publish:<condition>` so
+            // `BrowserXmppClient.setRoomNotificationMode` can match
+            // on `precondition-not-met` without parsing the message
+            // body.
+            match send_iq_command_stanza_aware(inner, publish_iq).await? {
+                Ok(_) => {}
+                Err(stanza_err) => {
+                    return Err(JsValue::from_str(&format!(
+                        "bookmark-publish:{}",
+                        stanza_err.condition
+                    )));
+                }
+            }
 
             to_js_value(&surface_bookmark(merged_item))
         })

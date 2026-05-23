@@ -83,21 +83,37 @@ interface NotifySettingsStore {
    * this to disable the mode picker until the cache is hydrated. */
   readonly hydrating: Ref<boolean>;
   /** Hydrate the cache by fetching every XEP-0402 bookmark from the
-   * user's PEP node. Idempotent — safe to call on every reconnect. */
+   * user's PEP node. Re-entrancy guarded — concurrent calls
+   * (`onConnectionReady` + lifecycle handler firing together)
+   * collapse into one in-flight fetch. */
   hydrate(client: BrowserXmppClient): Promise<void>;
   /** Publish a new notification mode for one room and update the
-   * cached bookmark on success. Returns `true` when the publish
-   * round-trip succeeded; the caller does not need to refetch. */
+   * cached bookmark on success. Returns `"ok"` when the publish
+   * round-trip succeeded, `"node-config-mismatch"` when the server
+   * rejected with `precondition-not-met` (typically a pre-existing
+   * XEP-0223-style node with `access_model=open`), `"error"` for
+   * any other failure. */
   setMode(
     client: BrowserXmppClient,
     opts: { roomJid: string; mode: NotifyMode; name?: string },
-  ): Promise<boolean>;
+  ): Promise<SetModeResult>;
   /** Resolve the effective mode for `roomJid`. */
   getMode(roomJid: string, kind: ConversationKind): NotifyMode;
   /** Replace the cache wholesale — used by tests to set up fixtures
    * without going through the WASM client. */
   replaceAll(items: UserBookmarkItem[]): void;
+  /** Drop every cached bookmark and the in-flight indicator. Called
+   * from `handleLogout` so a subsequent sign-in does not leak the
+   * previous account's notification settings into UI reads while the
+   * fresh `hydrate` is still pending. Round-8 UX reviewer P1. */
+  reset(): void;
 }
+
+/** Typed outcome of [[NotifySettingsStore.setMode]]. The
+ * `node-config-mismatch` variant lets the UI surface a specific
+ * "this room's bookmark node was created by an older client; ask
+ * an admin to delete it" hint instead of a generic failure. */
+type SetModeResult = "ok" | "node-config-mismatch" | "error";
 
 /** Build a notification-settings store wired to `WaddleClient`. The
  * module-level singleton is exposed via `notifySettingsStore` so the
@@ -114,6 +130,12 @@ export function createNotifySettingsStore(): NotifySettingsStore {
   }
 
   async function hydrate(client: BrowserXmppClient): Promise<void> {
+    // Re-entrancy guard — round-8 UX reviewer P2. `onConnectionReady`
+    // and the session-lifecycle handler both fire `hydrate` on first
+    // connect; without this guard the two calls race and produce a
+    // hydrating.value true → false → true → false flicker that
+    // briefly enables the popover trigger between fetches.
+    if (hydrating.value) return;
     // Do NOT clear the cache before the fetch resolves — clearing it
     // would make `effectiveNotifyMode` snap back to the §3 default on
     // every reconnect tick, producing a visible icon flicker for any
@@ -131,11 +153,14 @@ export function createNotifySettingsStore(): NotifySettingsStore {
   async function setMode(
     client: BrowserXmppClient,
     opts: { roomJid: string; mode: NotifyMode; name?: string },
-  ): Promise<boolean> {
-    const updated = await client.setRoomNotificationMode(opts);
-    if (!updated) return false;
-    bookmarks.value = { ...bookmarks.value, [updated.jid]: updated };
-    return true;
+  ): Promise<SetModeResult> {
+    const outcome = await client.setRoomNotificationMode(opts);
+    if (outcome.kind === "ok") {
+      bookmarks.value = { ...bookmarks.value, [outcome.item.jid]: outcome.item };
+      return "ok";
+    }
+    if (outcome.kind === "node-config-mismatch") return "node-config-mismatch";
+    return "error";
   }
 
   function getMode(roomJid: string, kind: ConversationKind): NotifyMode {
@@ -146,7 +171,12 @@ export function createNotifySettingsStore(): NotifySettingsStore {
     commit(items);
   }
 
-  return { bookmarks, hydrating, hydrate, setMode, getMode, replaceAll };
+  function reset(): void {
+    bookmarks.value = {};
+    hydrating.value = false;
+  }
+
+  return { bookmarks, hydrating, hydrate, setMode, getMode, replaceAll, reset };
 }
 
 /** Module-level singleton store. Use this from Vue components and

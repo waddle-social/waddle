@@ -2,7 +2,13 @@ export {
   BrowserXmppClient,
   RoomMemberListUnavailableError,
 } from "./client";
-export type { AdminUserEntry, AdminUsersPage, NotifyMode, UserBookmarkItem } from "./client";
+export type {
+  AdminUserEntry,
+  AdminUsersPage,
+  NotifyMode,
+  SetRoomNotificationModeOutcome,
+  UserBookmarkItem,
+} from "./client";
 // Admin V2 — types re-exported for consumption by SpacesPanel,
 // ChannelsPanel, and their detail drawers. The `*Ref` /
 // `*SetRoleResult` / `*SetAffiliationResult` / `*KickResult` shapes

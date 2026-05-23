@@ -54,6 +54,17 @@ impl NotifyMode {
             _ => None,
         }
     }
+
+    /// XSD child-sequence rank used to keep emitted `<notify/>`
+    /// children in the order the XEP-0492 schema declares
+    /// (`always` → `on-mention` → `never`). Round-8 XEP reviewer P2.
+    fn xsd_rank(self) -> u8 {
+        match self {
+            Self::Always => 0,
+            Self::OnMention => 1,
+            Self::Never => 2,
+        }
+    }
 }
 
 /// Conversation-level default per XEP-0492 §3 last paragraph: in the
@@ -80,17 +91,6 @@ impl ConversationKind {
     }
 }
 
-/// Build a fresh `<notify/>` element containing only the requested
-/// fallback child.
-///
-/// Used when the conversation has no existing `<extensions/>` content
-/// — i.e. the merge helper has nothing to preserve.
-pub fn build_notify_element(mode: NotifyMode) -> Element {
-    Element::builder("notify", NS_NOTIFICATION_SETTINGS)
-        .append(Element::builder(mode.as_wire_name(), NS_NOTIFICATION_SETTINGS).build())
-        .build()
-}
-
 /// Read the **fallback** notification setting from a `<notify/>`
 /// element (no `identity-category`/`identity-type` attributes).
 ///
@@ -107,14 +107,6 @@ pub fn read_fallback_mode(notify: &Element) -> Option<NotifyMode> {
         }
         NotifyMode::from_wire_name(child.name())
     })
-}
-
-/// Find the XEP-0492 `<notify/>` child inside a XEP-0402
-/// `<extensions/>` element. Returns `None` when no such child exists.
-pub fn find_notify_in_extensions(extensions: &Element) -> Option<&Element> {
-    extensions
-        .children()
-        .find(|child| child.is("notify", NS_NOTIFICATION_SETTINGS))
 }
 
 /// Merge a desired [`NotifyMode`] into an existing XEP-0402
@@ -182,44 +174,75 @@ pub fn merge_notify_into_extensions(extensions: Option<&Element>, mode: NotifyMo
 /// Build the single `<notify/>` output element from the deduplicated
 /// list of setting children gathered from the input, applying the
 /// fallback-replace rule for the user's chosen `mode`.
+///
+/// Emitted children are sorted into the XEP-0492 XSD sequence
+/// (`always` → `on-mention` → `never`), with identity-scoped
+/// siblings ordered after the no-attrs fallback within each mode
+/// group — round-8 XEP reviewer P2.
 fn build_merged_notify_element(setting_children: Vec<Element>, mode: NotifyMode) -> Element {
-    let mut builder = Element::builder("notify", NS_NOTIFICATION_SETTINGS);
     let mut fallback_seen = false;
-    for child in setting_children {
-        let is_setting = child.ns() == NS_NOTIFICATION_SETTINGS
-            && NotifyMode::from_wire_name(child.name()).is_some();
-        let has_identity_attr =
-            child.attr("identity-category").is_some() || child.attr("identity-type").is_some();
-        if is_setting && !has_identity_attr {
-            fallback_seen = true;
-            let existing_mode = NotifyMode::from_wire_name(child.name());
-            if existing_mode == Some(mode) {
-                // No-op merge — preserve the existing element
-                // verbatim, including any `<advanced/>` child.
-                builder = builder.append(child);
+    let mut emit: Vec<Element> = setting_children
+        .into_iter()
+        .map(|child| {
+            let is_setting = child.ns() == NS_NOTIFICATION_SETTINGS
+                && NotifyMode::from_wire_name(child.name()).is_some();
+            let has_identity_attr =
+                child.attr("identity-category").is_some() || child.attr("identity-type").is_some();
+            if is_setting && !has_identity_attr {
+                fallback_seen = true;
+                let existing_mode = NotifyMode::from_wire_name(child.name());
+                if existing_mode == Some(mode) {
+                    // No-op merge — preserve the existing element
+                    // verbatim, including any `<advanced/>` child.
+                    child
+                } else {
+                    // User explicitly overrode the fallback name;
+                    // drop the prior `<advanced/>` along with the
+                    // old parent (see merge_notify_into_extensions
+                    // docstring).
+                    Element::builder(mode.as_wire_name(), NS_NOTIFICATION_SETTINGS).build()
+                }
             } else {
-                // User explicitly overrode the fallback name; drop
-                // the prior `<advanced/>` along with the old parent
-                // (see merge_notify_into_extensions docstring).
-                builder = builder.append(
-                    Element::builder(mode.as_wire_name(), NS_NOTIFICATION_SETTINGS).build(),
-                );
+                child
             }
-        } else {
-            // Identity-scoped sibling or non-setting child (e.g.
-            // unknown foreign element) — preserve verbatim.
-            builder = builder.append(child);
-        }
-    }
+        })
+        .collect();
     if !fallback_seen {
-        builder =
-            builder.append(Element::builder(mode.as_wire_name(), NS_NOTIFICATION_SETTINGS).build());
+        emit.push(Element::builder(mode.as_wire_name(), NS_NOTIFICATION_SETTINGS).build());
+    }
+
+    // Stable sort by (XSD mode rank, identity-category, identity-type).
+    // Unknown element names (foreign children) sort after the spec
+    // settings so the canonical XSD prefix appears first.
+    emit.sort_by(|a, b| sort_key(a).cmp(&sort_key(b)));
+
+    let mut builder = Element::builder("notify", NS_NOTIFICATION_SETTINGS);
+    for child in emit {
+        builder = builder.append(child);
     }
     builder.build()
 }
 
+fn sort_key(el: &Element) -> (u8, Option<&str>, Option<&str>) {
+    let mode_rank = NotifyMode::from_wire_name(el.name())
+        .map(|m| m.xsd_rank())
+        .unwrap_or(u8::MAX);
+    (
+        mode_rank,
+        el.attr("identity-category"),
+        el.attr("identity-type"),
+    )
+}
+
 /// Two setting elements are equivalent (for §3 ¶3 dedupe) when they
-/// share the same name and the same identity attribute pair.
+/// share the same name, namespace, and the identity attribute pair.
+/// XEP-0492 v0.2.0 §3 ¶3 forbids "more than one notification element
+/// having the same name, attributes and attribute values"; the XSD
+/// declares only `identity-category` / `identity-type` attrs on
+/// setting elements, so for any spec-valid input this is the
+/// authoritative key. The compare is by full namespaced + local name
+/// to defend against malformed input that mixes spec elements with
+/// foreign ones at the same level.
 fn settings_equivalent(a: &Element, b: &Element) -> bool {
     a.name() == b.name()
         && a.ns() == b.ns()
@@ -260,9 +283,16 @@ mod tests {
         );
     }
 
+    fn find_notify_in_extensions(extensions: &Element) -> Option<&Element> {
+        extensions
+            .children()
+            .find(|child| child.is("notify", NS_NOTIFICATION_SETTINGS))
+    }
+
     #[test]
-    fn build_notify_emits_single_fallback_child() {
-        let elem = build_notify_element(NotifyMode::OnMention);
+    fn merge_into_empty_extensions_emits_single_fallback_child() {
+        let extensions = merge_notify_into_extensions(None, NotifyMode::OnMention);
+        let elem = find_notify_in_extensions(&extensions).expect("notify present");
         assert_eq!(elem.name(), "notify");
         assert_eq!(elem.ns(), NS_NOTIFICATION_SETTINGS);
         let children: Vec<_> = elem.children().collect();
@@ -403,6 +433,29 @@ mod tests {
         assert!(advanced
             .children()
             .any(|child| child.name() == "weekend" && child.ns() == "custom:other-client:1"));
+    }
+
+    #[test]
+    fn merge_emits_children_in_xsd_sequence_order() {
+        // XEP-0492 v0.2.0 XSD declares <notify/> as a sequence of
+        // `always` → `on-mention` → `never` (xeps/xep-0492.xml:177-180).
+        // Input intentionally arrives out-of-order so we can assert
+        // the sort.
+        let extensions_xml = "<extensions xmlns='urn:xmpp:bookmarks:1'>\
+                    <notify xmlns='urn:xmpp:notification-settings:1'>\
+                        <never identity-category='client' identity-type='pc' />\
+                        <always />\
+                        <on-mention identity-category='client' identity-type='phone' />\
+                    </notify>\
+                    </extensions>";
+        let extensions: Element = extensions_xml.parse().expect("valid xml");
+        let merged = merge_notify_into_extensions(Some(&extensions), NotifyMode::Always);
+        let notify = find_notify_in_extensions(&merged).expect("notify present");
+
+        let names: Vec<&str> = notify.children().map(|c| c.name()).collect();
+        // Output sequence: always (fallback) first, then on-mention
+        // (identity-scoped phone), then never (identity-scoped pc).
+        assert_eq!(names, vec!["always", "on-mention", "never"]);
     }
 
     #[test]

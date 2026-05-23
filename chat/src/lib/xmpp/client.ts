@@ -270,6 +270,17 @@ export interface UserBookmarkItem {
   notifyMode: NotifyMode | null;
 }
 
+/** Typed outcome of [[BrowserXmppClient.setRoomNotificationMode]].
+ *
+ * `node-config-mismatch` separates the recoverable XEP-0060
+ * `precondition-not-met` case (a pre-existing PEP node with a
+ * different `access_model`) from generic transport / parser failures.
+ * Round-8 XEP reviewer P2. */
+export type SetRoomNotificationModeOutcome =
+  | { kind: "ok"; item: UserBookmarkItem }
+  | { kind: "node-config-mismatch" }
+  | { kind: "error" };
+
 type CompatEmitter = {
   on?: (event: string, handler: (...args: any[]) => void) => void;
   off?: (event: string, handler: (...args: any[]) => void) => void;
@@ -1334,19 +1345,32 @@ export class BrowserXmppClient {
     roomJid: string;
     mode: "always" | "on-mention" | "never";
     name?: string;
-  }): Promise<UserBookmarkItem | null> {
+  }): Promise<SetRoomNotificationModeOutcome> {
     const xmpp = await this.requireConnectedXmpp();
-    if (!xmpp.set_room_notification_mode) return null;
+    if (!xmpp.set_room_notification_mode) return { kind: "error" };
     try {
-      const result = (await xmpp.set_room_notification_mode({
+      const item = (await xmpp.set_room_notification_mode({
         roomJid: opts.roomJid,
         mode: opts.mode,
         name: opts.name,
       })) as UserBookmarkItem;
-      return result;
+      return { kind: "ok", item };
     } catch (error) {
+      // The WASM bridge shapes stanza-level errors as
+      // `bookmark-publish:<condition>` (see
+      // `server/crates/waddle-xmpp-client-wasm/src/client_account.rs::set_room_notification_mode`).
+      // Distinguish `precondition-not-met` — the typical signal that
+      // the user's PEP `urn:xmpp:bookmarks:1` node was created by
+      // an older XEP-0223-style client with a different
+      // `access_model` — from generic errors so the UI can surface a
+      // useful hint.
+      const message = error instanceof Error ? error.message : String(error);
+      if (message.includes("bookmark-publish:precondition-not-met")) {
+        console.warn("[xmpp] XEP-0492 publish hit node-config mismatch:", error);
+        return { kind: "node-config-mismatch" };
+      }
       console.warn("[xmpp] XEP-0492 bookmark publish rejected:", error);
-      return null;
+      return { kind: "error" };
     }
   }
 

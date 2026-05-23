@@ -15,6 +15,7 @@ import {
 import type {
   BrowserXmppClient,
   NotifyMode,
+  SetRoomNotificationModeOutcome,
   UserBookmarkItem,
 } from "../src/lib/xmpp-client";
 
@@ -32,7 +33,7 @@ class FakeXmppClient {
     roomJid: string;
     mode: NotifyMode;
     name?: string;
-  }): Promise<UserBookmarkItem | null> {
+  }): Promise<SetRoomNotificationModeOutcome> {
     this.published.push(opts);
     const updated: UserBookmarkItem = {
       jid: opts.roomJid,
@@ -43,7 +44,7 @@ class FakeXmppClient {
     const idx = this.bookmarks.findIndex((b) => b.jid === opts.roomJid);
     if (idx >= 0) this.bookmarks[idx] = { ...this.bookmarks[idx], notifyMode: opts.mode };
     else this.bookmarks.push(updated);
-    return updated;
+    return { kind: "ok", item: updated };
   }
 }
 
@@ -124,7 +125,9 @@ describe("hydrate preserves cache across reconnects (no flicker)", () => {
         new Promise<UserBookmarkItem[]>((resolve) => {
           resolveFetch = resolve;
         }),
-      setRoomNotificationMode: async () => null,
+      setRoomNotificationMode: async (): Promise<SetRoomNotificationModeOutcome> => ({
+        kind: "error",
+      }),
     };
     const pending = store.hydrate(slowClient as unknown as BrowserXmppClient);
     expect(store.hydrating.value).toBe(true);
@@ -177,12 +180,12 @@ describe("createNotifySettingsStore", () => {
   test("setMode publishes via the WASM bridge and updates the cache", async () => {
     const store = createNotifySettingsStore();
     const fake = new FakeXmppClient([]);
-    const ok = await store.setMode(asClient(fake), {
+    const result = await store.setMode(asClient(fake), {
       roomJid: "general@example.com",
       mode: "on-mention",
       name: "general",
     });
-    expect(ok).toBe(true);
+    expect(result).toBe("ok");
     expect(fake.published).toEqual([
       { roomJid: "general@example.com", mode: "on-mention", name: "general" },
     ]);
@@ -200,21 +203,83 @@ describe("createNotifySettingsStore", () => {
     expect(store.bookmarks.value["new@example.com"].notifyMode).toBe("never");
   });
 
-  test("setMode returns false when the WASM bridge rejects (resolves null)", async () => {
+  test("setMode failure leaves the rest of the cache unchanged (round-8 P2)", async () => {
     const store = createNotifySettingsStore();
+    store.replaceAll([
+      { jid: "kept@example.com", name: "Kept", autojoin: false, notifyMode: "never" },
+    ]);
     const rejecting = {
       async fetchUserBookmarks(): Promise<UserBookmarkItem[]> {
         return [];
       },
-      async setRoomNotificationMode(): Promise<UserBookmarkItem | null> {
-        return null;
+      async setRoomNotificationMode(): Promise<SetRoomNotificationModeOutcome> {
+        return { kind: "error" };
       },
     };
-    const ok = await store.setMode(rejecting as unknown as BrowserXmppClient, {
+    const result = await store.setMode(rejecting as unknown as BrowserXmppClient, {
       roomJid: "fails@example.com",
       mode: "always",
     });
-    expect(ok).toBe(false);
+    expect(result).toBe("error");
+    // Failed publish must not poison the rest of the cache.
+    expect(store.bookmarks.value["kept@example.com"].notifyMode).toBe("never");
     expect(store.bookmarks.value["fails@example.com"]).toBeUndefined();
+  });
+
+  test("setMode surfaces node-config-mismatch separately from generic errors", async () => {
+    const store = createNotifySettingsStore();
+    const mismatch = {
+      async fetchUserBookmarks(): Promise<UserBookmarkItem[]> {
+        return [];
+      },
+      async setRoomNotificationMode(): Promise<SetRoomNotificationModeOutcome> {
+        return { kind: "node-config-mismatch" };
+      },
+    };
+    const result = await store.setMode(mismatch as unknown as BrowserXmppClient, {
+      roomJid: "old-node@example.com",
+      mode: "never",
+    });
+    expect(result).toBe("node-config-mismatch");
+    expect(store.bookmarks.value["old-node@example.com"]).toBeUndefined();
+  });
+
+  test("reset clears the cache for logout / account-switch (round-8 P1)", async () => {
+    const store = createNotifySettingsStore();
+    store.replaceAll([
+      { jid: "a@example.com", name: "A", autojoin: false, notifyMode: "never" },
+      { jid: "b@example.com", name: "B", autojoin: false, notifyMode: "on-mention" },
+    ]);
+    expect(Object.keys(store.bookmarks.value).length).toBe(2);
+    store.reset();
+    expect(Object.keys(store.bookmarks.value).length).toBe(0);
+    expect(store.hydrating.value).toBe(false);
+  });
+
+  test("hydrate is re-entrancy-guarded (no double-fetch race)", async () => {
+    const store = createNotifySettingsStore();
+    let calls = 0;
+    let resolveFetch: (items: UserBookmarkItem[]) => void = () => {};
+    const slowClient = {
+      fetchUserBookmarks: () => {
+        calls += 1;
+        return new Promise<UserBookmarkItem[]>((resolve) => {
+          resolveFetch = resolve;
+        });
+      },
+      setRoomNotificationMode: async (): Promise<SetRoomNotificationModeOutcome> => ({
+        kind: "error",
+      }),
+    };
+
+    const first = store.hydrate(slowClient as unknown as BrowserXmppClient);
+    // Second concurrent call: skipped silently while the first is
+    // still in flight.
+    const second = store.hydrate(slowClient as unknown as BrowserXmppClient);
+    expect(calls).toBe(1);
+
+    resolveFetch([{ jid: "x@example.com", name: "X", autojoin: false, notifyMode: "never" }]);
+    await Promise.all([first, second]);
+    expect(calls).toBe(1);
   });
 });

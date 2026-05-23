@@ -46,6 +46,7 @@ const props = defineProps<{
 const store = notifySettingsStore;
 const open = ref(false);
 const submitting = ref<NotifyMode | null>(null);
+const errorMessage = ref<string | null>(null);
 const rootEl = ref<HTMLElement | null>(null);
 const triggerEl = ref<HTMLButtonElement | null>(null);
 const optionRefs = ref<(HTMLButtonElement | null)[]>([]);
@@ -110,13 +111,24 @@ async function selectMode(mode: NotifyMode) {
     return;
   }
   submitting.value = mode;
+  errorMessage.value = null;
   try {
-    const ok = await store.setMode(props.client, {
+    const result = await store.setMode(props.client, {
       roomJid: props.roomJid,
       mode,
       name: props.roomName,
     });
-    if (ok) closeAndReturnFocus();
+    if (result === "ok") {
+      closeAndReturnFocus();
+    } else if (result === "node-config-mismatch") {
+      // Round-8 UX P2: distinguish the recoverable XEP-0060
+      // precondition-not-met case so the user gets an actionable
+      // hint instead of a generic "didn't save".
+      errorMessage.value =
+        "This room's settings node was created by an older client. Ask a server admin to delete the node so Waddle can re-create it.";
+    } else {
+      errorMessage.value = "Couldn't save the setting. Try again in a moment.";
+    }
   } finally {
     submitting.value = null;
   }
@@ -194,7 +206,7 @@ onUnmounted(() => {
     </button>
     <div
       v-if="open"
-      class="absolute right-0 top-[calc(100%+4px)] z-30 w-64 rounded-lg border border-border bg-popover p-2 shadow-lg"
+      class="absolute right-0 top-[calc(100%+4px)] z-30 w-64 max-w-[calc(100vw-1rem)] rounded-lg border border-border bg-popover p-2 shadow-lg"
       role="menu"
       aria-label="Notification mode"
       @keydown="onMenuKeydown"
@@ -219,6 +231,12 @@ onUnmounted(() => {
         </div>
         <span class="type-meta text-muted-foreground">{{ NOTIFY_MODE_HINT[mode] }}</span>
       </button>
+      <p
+        v-if="errorMessage"
+        class="type-meta mt-1 rounded-md bg-destructive/10 px-2 py-1.5 text-destructive"
+        role="alert"
+        aria-live="assertive"
+      >{{ errorMessage }}</p>
     </div>
   </div>
 </template>

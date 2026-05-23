@@ -1606,6 +1606,10 @@ export function useChatAppController(giphyApiKey: string) {
     // see the prior user's pinned-message previews and pre-hydration
     // events buffered from the prior session don't leak forward.
     resetPinnedRooms();
+    // #532: drop the XEP-0492 settings cache so a subsequent
+    // sign-in does not leak the previous account's per-chat modes
+    // into UI reads while the fresh `hydrate` is still in flight.
+    notifySettingsStore.reset();
     ui.showPinnedPanel.value = false;
     navigate({ id: "home" });
     await connectionStore.logout();
