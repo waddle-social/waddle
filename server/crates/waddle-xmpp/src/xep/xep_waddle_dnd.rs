@@ -32,7 +32,27 @@
 //!   midnight into the following calendar day in the same tz.
 //!
 //! Unknown children and unknown attributes are rejected — clients
-//! that want to extend the shape should bump the namespace.
+//! that want to extend the shape should bump the namespace. The
+//! parser also rejects namespaced attributes (`foo:until='…'`),
+//! unexpected children inside `<snooze>` and `<rule>`, and degenerate
+//! `start == end` rules that would otherwise expand to 24-hour DND.
+//!
+//! ## Publish contract (server side)
+//!
+//! The Waddle server enforces three extra invariants on every publish
+//! to `urn:waddle:dnd:0` (see `crate::pubsub::item.rs::publish_item_impl`):
+//!
+//! * **`item id = "current"`** — the XEP-0163 single-item PEP idiom.
+//!   Any other id (or a missing id) returns `<bad-request/>`. Without
+//!   this, a later retract of `current` would silently leave the
+//!   server-side projection un-cleared.
+//! * **Publisher must equal node owner** — DND is user-identity state;
+//!   even an explicit `Publisher` affiliation on a peer is not enough
+//!   to update Bob's DND. Non-owner publishes return `<forbidden/>`.
+//! * **Privacy defaults** — `NodeConfig::waddle_dnd_defaults` pins
+//!   `access_model = whitelist` + `send_last_published_item = never`,
+//!   so the schedule is not broadcast to roster contacts by default.
+//!   The user's own resources still read it via XEP-0060 `<items/>` get.
 //!
 //! ## Evaluation
 //!

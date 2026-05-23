@@ -165,6 +165,18 @@ static PUSH_OUTBOX_RETRY_SCHEDULED: AtomicU64 = AtomicU64::new(0);
 // produce a terminal failure per job).
 static PUSH_OUTBOX_DEAD_LETTERED: AtomicU64 = AtomicU64::new(0);
 
+// `waddle_dnd_projection_read_errored_total` — incremented every
+// time `crate::dnd_reader::PepDndReader::dnd_state` swallows a
+// `DndProjectionError` and defaults the recipient to `Inactive`.
+//
+// This is the silent-fail-open signal: a transient SQLite contention
+// storm could flip every DND-active user to "not in DND" at the T1
+// push gate, and the only otherwise-visible trace would be
+// per-recipient `warn!` lines. A non-zero rate on this counter
+// indicates Operator-Action-Required, because users are receiving
+// push notifications they explicitly opted out of.
+static DND_PROJECTION_READ_ERRORED: AtomicU64 = AtomicU64::new(0);
+
 // `waddle_push_suppressed_total{reason="..."}` — incremented every
 // time a XEP-0357 push candidate is suppressed at either T0 emission
 // or the T1 drain. Labeled by the typed `SuppressedReason` enum.
@@ -413,6 +425,16 @@ pub fn increment_push_outbox_dead_lettered() {
     PUSH_OUTBOX_DEAD_LETTERED.fetch_add(1, Ordering::Relaxed);
 }
 
+/// Increment the `waddle_dnd_projection_read_errored_total` counter.
+///
+/// Bumped by `crate::dnd_reader::PepDndReader::dnd_state` whenever
+/// the projection read fails and the recipient is defaulted to
+/// `Inactive` — i.e. a user who was in DND silently becomes
+/// un-DND'd at the push gate. Non-zero rate is alert-worthy.
+pub fn increment_dnd_projection_read_errored() {
+    DND_PROJECTION_READ_ERRORED.fetch_add(1, Ordering::Relaxed);
+}
+
 /// Increment the `waddle_push_suppressed_total{reason}` counter.
 ///
 /// `reason` is a wire-contract value drawn from
@@ -496,6 +518,7 @@ pub fn reset_metrics_for_test() {
     PUSH_OUTBOX_PUBLISHED.store(0, Ordering::Release);
     PUSH_OUTBOX_RETRY_SCHEDULED.store(0, Ordering::Release);
     PUSH_OUTBOX_DEAD_LETTERED.store(0, Ordering::Release);
+    DND_PROJECTION_READ_ERRORED.store(0, Ordering::Release);
 }
 
 pub fn render_metrics() -> String {
@@ -526,6 +549,7 @@ pub fn render_metrics() -> String {
     let push_outbox_published = PUSH_OUTBOX_PUBLISHED.load(Ordering::Relaxed);
     let push_outbox_retry_scheduled = PUSH_OUTBOX_RETRY_SCHEDULED.load(Ordering::Relaxed);
     let push_outbox_dead_lettered = PUSH_OUTBOX_DEAD_LETTERED.load(Ordering::Relaxed);
+    let dnd_projection_read_errored = DND_PROJECTION_READ_ERRORED.load(Ordering::Relaxed);
 
     format!(
         concat!(
@@ -601,6 +625,9 @@ pub fn render_metrics() -> String {
             "# HELP waddle_push_outbox_dead_lettered_total XEP-0357 outbox jobs that transitioned to the terminal `failed` status — `NotificationOutboxPublishOutcome::Failed`. Covers both retry-budget exhaustion AND immediate hard-failure branches (non-first-party Push Service target, XEP-0191 blocked sender, missing XEP-0357 registration). Investigate sustained non-zero rate; isolated dead-letters are expected during provider-side device revocation (APNs `Unregistered` / FCM `UNREGISTERED` device flows). The outbox row stays for post-mortem and no further retry will run.\n",
             "# TYPE waddle_push_outbox_dead_lettered_total counter\n",
             "waddle_push_outbox_dead_lettered_total {push_outbox_dead_lettered}\n",
+            "# HELP waddle_dnd_projection_read_errored_total Recipient DND-projection reads that errored at the T1 push gate and silently defaulted the recipient to Inactive — a DND-active user receiving push notifications they explicitly opted out of. Alert-worthy on any sustained non-zero rate. Source: `dnd_reader::PepDndReader::dnd_state` failure path.\n",
+            "# TYPE waddle_dnd_projection_read_errored_total counter\n",
+            "waddle_dnd_projection_read_errored_total {dnd_projection_read_errored}\n",
             "{push_suppressed_lines}",
         ),
         connected_users = connected_users,
@@ -627,6 +654,7 @@ pub fn render_metrics() -> String {
         push_outbox_published = push_outbox_published,
         push_outbox_retry_scheduled = push_outbox_retry_scheduled,
         push_outbox_dead_lettered = push_outbox_dead_lettered,
+        dnd_projection_read_errored = dnd_projection_read_errored,
         push_suppressed_lines = {
             let mut buf = String::new();
             render_push_suppressed_lines(&mut buf);

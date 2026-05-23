@@ -12,6 +12,20 @@
 //! via [`upsert_dnd_projection_tx`] / [`delete_dnd_projection_tx`] so
 //! there is exactly one place that knows the table layout.
 //!
+//! ## Parse-failure-on-upgrade contract
+//!
+//! `payload_xml` is parsed back into typed `WaddleDnd` on every T1
+//! read. A future stricter parser could in principle reject XML
+//! previously written by an older server — `dnd_reader::PepDndReader`
+//! catches that error and defaults the user to `Inactive` (logged
+//! `warn!`), which silently un-DND's them. To avoid that surprise,
+//! ANY strict-parser tightening (new rejection paths in
+//! `xep_waddle_dnd::WaddleDnd::parse`) MUST bump `urn:waddle:dnd:0`
+//! to `:1` (forcing a fresh PEP item id at the wire) AND bump
+//! `pubsub_schema::PUBSUB_SCHEMA_VERSION` so the drop-and-recreate
+//! path clears any unparseable rows. The opposite — loosening the
+//! parser — is always safe.
+//!
 //! ## LWW arbitration
 //!
 //! Concurrent publishes from two resources race for the SQLite write

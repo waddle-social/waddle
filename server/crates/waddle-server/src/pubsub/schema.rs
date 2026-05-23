@@ -1,7 +1,16 @@
+use tracing::{error, warn};
 use waddle_xmpp::XmppError;
 
 use super::DatabasePubSubStorage;
 
+/// Schema version for the pubsub + projection tables managed in this
+/// module. CLAUDE.md greenlights breaking changes, so a version
+/// mismatch unconditionally drops + recreates the listed tables —
+/// there is no in-place migration path. Bump this number on any
+/// schema-shape change, AND if a stricter parser may reject XML
+/// payloads previously written by an older server (otherwise the
+/// next read silently defaults the user to inactive; see
+/// [`crate::dnd_projection`] preamble).
 const PUBSUB_SCHEMA_VERSION: i64 = 5;
 
 impl DatabasePubSubStorage {
@@ -33,6 +42,27 @@ impl DatabasePubSubStorage {
 
         if current != Some(PUBSUB_SCHEMA_VERSION) {
             // Drop-and-recreate: CLAUDE.md greenlights breaking changes.
+            // Surface the destruction loudly so a developer with a
+            // file-backed dev SQLite doesn't lose hours of state on
+            // a quiet branch swap.
+            let prior_items: i64 = self.row_count("pubsub_items").await.unwrap_or(0);
+            if prior_items > 0 {
+                error!(
+                    from_version = ?current,
+                    to_version = PUBSUB_SCHEMA_VERSION,
+                    pubsub_items_dropped = prior_items,
+                    "pubsub schema version mismatch — DROPPING all pubsub tables \
+                     (including any DND, bookmark, vCard4, and avatar state). \
+                     Set WADDLE_DATABASE_URL/WADDLE_XMPP_PUBSUB_DATABASE_URL to a \
+                     fresh file if you wanted to preserve this data."
+                );
+            } else {
+                warn!(
+                    from_version = ?current,
+                    to_version = PUBSUB_SCHEMA_VERSION,
+                    "pubsub schema version mismatch — dropping and recreating tables"
+                );
+            }
             for table in [
                 "dnd_projection",
                 "notification_settings_projection",
@@ -171,6 +201,15 @@ impl DatabasePubSubStorage {
         // gate can parse-and-evaluate without a second IO hop into
         // `pubsub_items`. LWW on republish — there is no MUC-style
         // multi-source merge to perform.
+        //
+        // ## Access pattern
+        //
+        // The ONLY query shape is a point-lookup by `owner_bare_jid`
+        // (the PRIMARY KEY's implicit index). If a future PR
+        // introduces another query (e.g. a janitor scanning by
+        // `updated_at_ms < cutoff`), it MUST add a covering index in
+        // the same migration — the table grows by one row per user
+        // and would otherwise force a full scan on every janitor tick.
         let dnd_projection_ddl = match self.db.driver() {
             crate::db::DatabaseDriver::Sqlite => {
                 r#"

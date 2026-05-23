@@ -867,20 +867,29 @@ pub enum DndState {
 
 /// T1 lookup of the recipient's Waddle DnD state.
 ///
-/// Slice 2a wires this trait into the evaluator with [`NoopDndReader`]
-/// at every call site so the typed signature flows end-to-end without
-/// behavior change. Issue #367 lands the real implementation backed by
-/// a `urn:waddle:dnd:0` PEP projection — that PR can swap the noop
-/// for the production reader without touching the evaluator.
+/// Production implementation lives in [`crate::dnd_reader::PepDndReader`],
+/// which reads the durable [`crate::dnd_projection::DndProjectionStore`]
+/// projection of the user's `urn:waddle:dnd:0` PEP item and resolves
+/// the typed [`DndState`] via the pure evaluator in
+/// [`waddle_xmpp::xep::xep_waddle_dnd`].
+///
+/// The T0 emit path keeps the [`NoopDndReader`] below — DND is a T1
+/// recipient-state read and is intentionally not consulted at emit
+/// time (see the stage check at the call site).
 #[async_trait::async_trait]
 pub trait DndReader: Send + Sync {
     async fn dnd_state(&self, user: &BareJid) -> Result<DndState, NotificationOutboxError>;
 }
 
-/// Default [`DndReader`] that reports every user as not-in-DND.
+/// [`DndReader`] that reports every user as not-in-DND.
 ///
-/// Used at every call site in slice 2a as a typed placeholder. The
-/// real impl arrives in #367.
+/// Used at the T0 emit call sites
+/// ([`crate::server::routes::interpret::offline_delivery`],
+/// [`crate::server::routes::interpret::groupchat_inbox`]) where the
+/// evaluator's typed signature requires a reader but DND consultation
+/// is skipped by the [`PushEvalStage::T1Drain`] guard. Production
+/// T1 drain (`session_janitors`) uses [`crate::dnd_reader::PepDndReader`]
+/// instead.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct NoopDndReader;
 

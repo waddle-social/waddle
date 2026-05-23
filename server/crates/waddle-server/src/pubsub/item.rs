@@ -1,4 +1,5 @@
 use jid::BareJid;
+use tracing::warn;
 use waddle_xmpp::pubsub::{PubSubItem, PubSubNode, PublishResult, StoredItem};
 use waddle_xmpp::XmppError;
 
@@ -53,6 +54,11 @@ impl DatabasePubSubStorage {
             match publisher {
                 Some(publisher_jid) if publisher_jid == owner => {}
                 _ => {
+                    warn!(
+                        owner = %owner,
+                        publisher = ?publisher,
+                        "urn:waddle:dnd:0 publish rejected: publisher is not the node owner"
+                    );
                     return Err(XmppError::forbidden(Some(
                         "urn:waddle:dnd:0 may only be published by the node owner".to_string(),
                     )));
@@ -67,6 +73,11 @@ impl DatabasePubSubStorage {
             match item.id.as_deref() {
                 Some(id) if id == waddle_xmpp::xep::xep_waddle_dnd::ITEM_ID_CURRENT => {}
                 _ => {
+                    warn!(
+                        owner = %owner,
+                        item_id = ?item.id,
+                        "urn:waddle:dnd:0 publish rejected: item id is not 'current'"
+                    );
                     return Err(XmppError::bad_request(Some(format!(
                         "urn:waddle:dnd:0 publish must use item id '{}'",
                         waddle_xmpp::xep::xep_waddle_dnd::ITEM_ID_CURRENT,
@@ -74,12 +85,23 @@ impl DatabasePubSubStorage {
                 }
             }
             let payload = item.payload.as_ref().ok_or_else(|| {
+                warn!(
+                    owner = %owner,
+                    "urn:waddle:dnd:0 publish rejected: missing <dnd> payload"
+                );
                 XmppError::bad_request(Some(
                     "urn:waddle:dnd:0 publish requires a <dnd> payload".to_string(),
                 ))
             })?;
-            let parsed = waddle_xmpp::xep::xep_waddle_dnd::WaddleDnd::parse(payload)
-                .map_err(|error| XmppError::bad_request(Some(error.to_string())))?;
+            let parsed =
+                waddle_xmpp::xep::xep_waddle_dnd::WaddleDnd::parse(payload).map_err(|error| {
+                    warn!(
+                        owner = %owner,
+                        %error,
+                        "urn:waddle:dnd:0 publish rejected: invalid <dnd> payload"
+                    );
+                    XmppError::bad_request(Some(error.to_string()))
+                })?;
             Some((owner.clone(), parsed))
         } else {
             None

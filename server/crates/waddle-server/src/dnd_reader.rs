@@ -65,13 +65,18 @@ impl DndReader for PepDndReader {
             Err(error) => {
                 // A projection read failure MUST NOT cause a push
                 // dispatch failure — the gate consults DND as one of
-                // many parallel suppression checks. Log and treat
-                // the user as not-in-DND so push goes through.
+                // many parallel suppression checks. Log AND bump the
+                // alert-worthy `waddle_dnd_projection_read_errored_total`
+                // counter so SREs can detect the silent-fail-open
+                // pattern (a DND-active user receiving push because
+                // we couldn't read their projection), then default
+                // to Inactive so push goes through.
                 warn!(
                     user = %user,
                     error = %error,
                     "dnd_projection read failed; defaulting recipient to Inactive"
                 );
+                waddle_xmpp::prometheus::increment_dnd_projection_read_errored();
                 return Ok(DndState::Inactive);
             }
         };
