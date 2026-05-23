@@ -179,7 +179,12 @@ describe("service worker push handling", () => {
         "message-count": 1,
         context: {
           conversation: "jane_doe@example.com",
-          class: "direct",
+          // `"dm"` matches DM_CLASS_VALUES exactly so the test is
+          // independent of the domain heuristic. With `"direct"` (a
+          // value the server never emits) the test would pass only
+          // because `example.com` doesn't start with `muc.` — a
+          // silent regression risk.
+          class: "dm",
         },
       }),
     });
@@ -279,6 +284,45 @@ describe("service worker push handling", () => {
     expect((options as NotificationOptions & { data: { url: string } }).data.url).toBe(
       "/r/general",
     );
+  });
+
+  test("legacy data.url is honored when typed context is absent", async () => {
+    // Mixed-version publishers (server pre-#528 emitter that doesn't
+    // carry `context: { conversation }`) ship a deep link in
+    // `data.url`. The SW must preserve that legacy behavior rather
+    // than collapsing to `/`. ChatGPT Codex bot flagged this
+    // regression on round-5.
+    const worker = loadServiceWorker();
+    const event = makePushEvent({
+      json: () => ({
+        "message-count": 1,
+        url: "/r/legacy-channel?thread=abc",
+      }),
+    });
+    worker.dispatch("push", event);
+    await event.done();
+
+    const [, options] = worker.showNotification.mock.calls[0] ?? [];
+    expect((options as NotificationOptions & { data: { url: string } }).data.url).toBe(
+      "/r/legacy-channel?thread=abc",
+    );
+  });
+
+  test("legacy data.url is rejected if cross-origin", async () => {
+    // Defense in depth: even on the legacy path, an off-origin
+    // `data.url` must NOT be accepted. `sameOriginUrl` runs first.
+    const worker = loadServiceWorker();
+    const event = makePushEvent({
+      json: () => ({
+        "message-count": 1,
+        url: "https://evil.example/steal",
+      }),
+    });
+    worker.dispatch("push", event);
+    await event.done();
+
+    const [, options] = worker.showNotification.mock.calls[0] ?? [];
+    expect((options as NotificationOptions & { data: { url: string } }).data.url).toBe("/");
   });
 
   test("clears the app badge when push message-count is zero", async () => {

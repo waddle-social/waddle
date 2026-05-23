@@ -267,24 +267,50 @@ export function usePushNotifications() {
       return false;
     }
 
-    const node = loadPushNodeId();
+    let node = loadPushNodeId();
     const deviceId = loadDeviceId();
+
+    // Recover the node id if localStorage was cleared / never written
+    // (e.g. user disabled before completing an enable, or switched
+    // devices). `ensurePushNode` is idempotent on `(owner, app-id)`
+    // so this is safe to call from disable.
+    if (!node) {
+      const ensured = await xmppClient.ensurePushNode({ serviceJid, appId: APP_ID_WEB });
+      if (ensured) {
+        node = ensured.id;
+        persistPushNodeId(node);
+      }
+    }
+    if (!node) {
+      console.warn(
+        "[notifications] No Push Service node id available; cannot disable XEP-0357",
+      );
+      return false;
+    }
 
     // Best-effort: run BOTH the Push Service disable-device AND the
     // user-server XEP-0357 disable, even if the first one errors.
     // Stopping early on partial failure leaks state: the user-server
     // keeps publishing to a node whose Push Service device row is
     // already gone, or vice versa.
-    let pushServiceDisabled = true;
-    if (node && deviceId) {
+    //
+    // Initialize `pushServiceDisabled` to `null` (= not attempted) so
+    // a missing deviceId can't masquerade as a successful disable in
+    // the final return value — round-5 Greptile P1 finding.
+    let pushServiceDisabled: boolean | null = null;
+    if (deviceId) {
       pushServiceDisabled = await xmppClient.disablePushDevice({ serviceJid, node, deviceId });
       if (!pushServiceDisabled) {
         console.warn(
           "[notifications] disable-device IQ failed; user-server XEP-0357 disable will still run",
         );
       }
+    } else {
+      console.warn(
+        "[notifications] No deviceId in localStorage; skipping disable-device. " +
+        "The Push Service device row may persist until a new enable flow rotates it.",
+      );
     }
-    if (!node) return false;
     const userServerDisabled = await xmppClient.disablePushNotifications({
       serviceJid,
       node,
@@ -294,7 +320,12 @@ export function usePushNotifications() {
         "[notifications] XEP-0357 disable IQ failed; Push Service publish jobs may still queue",
       );
     }
-    return pushServiceDisabled && userServerDisabled;
+    // Only claim "fully disabled" when BOTH the user-server disable
+    // AND the Push Service disable (if we attempted it) succeeded.
+    // `null` (= disable-device not attempted because deviceId was
+    // missing) collapses to `false` so the caller can't be misled
+    // into thinking the Push Service row was cleaned up.
+    return pushServiceDisabled === true && userServerDisabled;
   }
 
   return {

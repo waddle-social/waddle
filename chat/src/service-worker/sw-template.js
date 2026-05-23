@@ -97,7 +97,17 @@ self.addEventListener("push", (event) => {
   }
   const unreadCount = parseUnreadCount(data);
   const context = parseRoutingContext(data);
-  const route = routeFromContext(context);
+  // Routing precedence:
+  //   1. Typed `context.{conversation,thread,class}` envelope
+  //      (urn:waddle:push:context:0).
+  //   2. Legacy `data.url` if it's a same-origin path — kept for
+  //      mixed-version publishers that may still ship a deep link
+  //      in the top-level `url` field. `sameOriginUrl` rejects
+  //      cross-origin and javascript: URLs.
+  //   3. Final fallback to `/`.
+  const route = routeFromContext(context)
+    ?? sameOriginUrl(typeof data.url === "string" ? data.url : null)
+    ?? "/";
   // Minimal default: no sender, no body preview. The server's
   // canonical XEP-0357 summary carries `message-count` only; richer
   // title/body previews remain opt-in (set `data.title`/`data.body`
@@ -212,9 +222,15 @@ const MUC_CLASS_VALUES = new Set([
 
 function routeFromContext(context) {
   const conv = context?.conversation;
-  if (typeof conv !== "string" || conv.length === 0) return "/";
+  // Return `null` (NOT `/`) when the typed context lacks a
+  // conversation, so the caller can fall back to a legacy `data.url`
+  // if one is present rather than collapsing to root. ChatGPT Codex
+  // bot flagged this regression: pre-#528 SW used `data.url`
+  // directly when present; we shouldn't silently drop that path
+  // for mixed-version publishers.
+  if (typeof conv !== "string" || conv.length === 0) return null;
   const at = conv.lastIndexOf("@");
-  if (at <= 0) return "/";
+  if (at <= 0) return null;
   const localpart = conv.slice(0, at);
   const domain = conv.slice(at + 1);
   const cls = typeof context?.class === "string" ? context.class : "";

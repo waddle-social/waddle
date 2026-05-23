@@ -52,9 +52,16 @@ impl WaddleClient {
             let node = result
                 .get_child("node", WADDLE_PUSH_SERVICE_NS)
                 .ok_or_else(|| JsValue::from_str("ensure-node response missing <node/>"))?;
-            let id = node.attr("id").unwrap_or_default().to_string();
-            let jid = node.attr("jid").unwrap_or_default().to_string();
-            let app_id = node.attr("app-id").unwrap_or_default().to_string();
+            // Hard-fail on missing/empty required attrs. The server
+            // always emits all three on success; an empty here means
+            // the wire response is malformed. Persisting `node.id = ""`
+            // would silently brick the user's push pipeline (the
+            // subsequent register-device and enable IQs would target
+            // an empty node). Surface as a rejected Promise so the
+            // chat's `console.warn` chain has something to grep.
+            let id = require_non_empty_attr(node, "id", "ensure-node")?;
+            let jid = require_non_empty_attr(node, "jid", "ensure-node")?;
+            let app_id = require_non_empty_attr(node, "app-id", "ensure-node")?;
             let response = PushServiceNode { id, jid, app_id };
             to_js_value(&response)
         })
@@ -86,9 +93,9 @@ impl WaddleClient {
                 .get_child("device", WADDLE_PUSH_SERVICE_NS)
                 .ok_or_else(|| JsValue::from_str("register-device response missing <device/>"))?;
             let response = PushServiceDevice {
-                id: device.attr("id").unwrap_or_default().to_string(),
-                node: device.attr("node").unwrap_or_default().to_string(),
-                status: device.attr("status").unwrap_or_default().to_string(),
+                id: require_non_empty_attr(device, "id", "register-device")?,
+                node: require_non_empty_attr(device, "node", "register-device")?,
+                status: require_non_empty_attr(device, "status", "register-device")?,
             };
             to_js_value(&response)
         })
@@ -469,4 +476,27 @@ impl WaddleClient {
             to_js_value(&profile)
         })
     }
+}
+
+/// Extract a required non-empty XML attribute from a typed response
+/// element. Round-5 review on PR #760 flagged that `unwrap_or_default()`
+/// on Push Service response attributes would silently persist empty
+/// strings (e.g. `node.id = ""`) and brick subsequent IQs that target
+/// the broken value. Hard-fail instead — the server always emits
+/// these attrs on success, so an empty here means the wire shape has
+/// drifted and the chat must surface the error rather than continue.
+fn require_non_empty_attr(
+    element: &Element,
+    attr: &str,
+    response_kind: &str,
+) -> Result<String, JsValue> {
+    element
+        .attr(attr)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| {
+            JsValue::from_str(&format!(
+                "{response_kind} response missing required attribute '{attr}'"
+            ))
+        })
 }

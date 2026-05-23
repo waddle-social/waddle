@@ -22,7 +22,7 @@
  * Memory: each chain link is GC-eligible as soon as it resolves
  * and the next link's reassignment drops the prior reference.
  */
-export interface PushFlowLock {
+interface PushFlowLock {
   run<T>(work: () => Promise<T>): Promise<T>;
 }
 

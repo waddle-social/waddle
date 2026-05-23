@@ -825,7 +825,11 @@ fn build_register_push_device_omits_missing_provider_fields() {
         provider_token: Some("apns-device-token"),
         provider_key_material: None,
     };
-    let iq = build_register_push_device_iq("push.example.com", "ios", &registration);
+    // Server-side `PushDevicePlatform::parse` accepts exactly
+    // `"web" | "apns" | "fcm"` — use the canonical vocabulary
+    // (NOT `"ios"`) so the test exercises an IQ shape the server
+    // will actually accept when APNs lands in #529.
+    let iq = build_register_push_device_iq("push.example.com", "apns", &registration);
     let register = iq
         .get_child("register-device", WADDLE_PUSH_SERVICE_NS)
         .expect("register-device child");
