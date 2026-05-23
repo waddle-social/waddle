@@ -90,19 +90,42 @@ self.addEventListener("push", (event) => {
   try {
     data = event.data?.json() ?? {};
   } catch {
-    const text = event.data?.text() ?? "";
-    data = { title: "Waddle", body: text };
+    // Server side now sends a JSON envelope; a non-JSON body is a
+    // legacy / misconfigured publish. Fall through to the minimal
+    // notification with no payload-derived state.
+    data = {};
   }
   const unreadCount = parseUnreadCount(data);
+  const context = parseRoutingContext(data);
+  // Routing precedence:
+  //   1. Typed `context.{conversation,thread,class}` envelope
+  //      (urn:waddle:push:context:0).
+  //   2. Legacy `data.url` if it's a same-origin path — kept for
+  //      mixed-version publishers that may still ship a deep link
+  //      in the top-level `url` field. `sameOriginUrl` rejects
+  //      cross-origin and javascript: URLs.
+  //   3. Final fallback to `/`.
+  const route = routeFromContext(context)
+    ?? sameOriginUrl(typeof data.url === "string" ? data.url : null)
+    ?? "/";
+  // Minimal default: no sender, no body preview. The server's
+  // canonical XEP-0357 summary carries `message-count` only; richer
+  // title/body previews remain opt-in (set `data.title`/`data.body`
+  // explicitly on the server side when the user has opted in).
+  const title = typeof data.title === "string" && data.title.length > 0
+    ? data.title
+    : defaultTitle(unreadCount);
+  const body = typeof data.body === "string" ? data.body : "";
+  const tag = context.conversation ?? data.roomJid ?? "waddle";
   event.waitUntil(
     Promise.all([
       updateAppBadge(unreadCount),
       postUnreadCountToClients(unreadCount),
-      self.registration.showNotification(data.title ?? "Waddle", {
-        body: data.body ?? "",
-        tag: data.roomJid,
+      self.registration.showNotification(title, {
+        body,
+        tag,
         icon: NOTIFICATION_ICON_URL,
-        data: { url: data.url ?? roomJidToPath(data.roomJid) },
+        data: { url: route, context },
       }),
     ]),
   );
@@ -110,29 +133,122 @@ self.addEventListener("push", (event) => {
 
 self.addEventListener("notificationclick", (event) => {
   event.notification.close();
-  const url = event.notification.data?.url ?? "/";
+  // Defense in depth: ALWAYS resolve the data.url against our own
+  // origin and reject cross-origin paths before opening a window.
+  // `routeFromContext` always returns a relative `/dm/…` or `/r/…`
+  // today, so this is a guard against a future regression in the
+  // payload pipeline (or a poisoned legacy `data.url` field) that
+  // would otherwise let `clients.openWindow` navigate to an
+  // arbitrary origin.
+  const safeUrl = sameOriginUrl(event.notification.data?.url) ?? "/";
   event.waitUntil(
     clients.matchAll({ type: "window", includeUncontrolled: true }).then((windowClients) => {
       for (const client of windowClients) {
         if (client.url.includes(self.location.origin) && "focus" in client) {
-          return client.focus().then(() => client.navigate(url));
+          return client.focus().then(() => client.navigate(safeUrl));
         }
       }
-      return clients.openWindow(url);
+      return clients.openWindow(safeUrl);
     }),
   );
 });
 
-function roomJidToPath(roomJid) {
-  if (typeof roomJid !== "string") return "/";
-  const localpart = roomJid.split("@")[0] ?? "";
-  const parts = localpart.split("_");
-  if (parts.length < 2) return "/";
-  return `/${encodeURIComponent(parts[0])}/${encodeURIComponent(parts[1])}`;
+function sameOriginUrl(candidate) {
+  if (typeof candidate !== "string" || candidate.length === 0) return null;
+  try {
+    const resolved = new URL(candidate, self.location.origin);
+    return resolved.origin === self.location.origin ? `${resolved.pathname}${resolved.search}` : null;
+  } catch {
+    return null;
+  }
+}
+
+function defaultTitle(unreadCount) {
+  if (unreadCount === null || unreadCount === 0) return "Waddle";
+  if (unreadCount === 1) return "1 new message";
+  return `${unreadCount} new messages`;
+}
+
+/// Extract the typed `urn:waddle:push:context:0` routing context the
+/// server attaches to every published XEP-0357 notification. The
+/// Web Push HTTP dispatcher (server-side) flattens the XML into a
+/// JSON shape on `data.context = { conversation, thread, class }`.
+/// Legacy publishes that lack the typed context fall back to
+/// `data.roomJid` / `data.url` for compatibility.
+function parseRoutingContext(data) {
+  const context = data?.context;
+  if (context && typeof context === "object") {
+    return {
+      conversation: typeof context.conversation === "string" ? context.conversation : undefined,
+      thread: typeof context.thread === "string" && context.thread.length > 0 ? context.thread : undefined,
+      class: typeof context.class === "string" ? context.class : undefined,
+    };
+  }
+  return {
+    conversation: typeof data?.roomJid === "string" ? data.roomJid : undefined,
+    thread: undefined,
+    class: undefined,
+  };
+}
+
+/// Convert a typed routing context to a URL the chat will navigate to
+/// on click. The mapping mirrors the chat-side router exactly:
+///   * DM    → `/dm/{username}` (router: `chat/src/router/routes/dm.ts`)
+///   * MUC   → `/r/{channelId}`  (router: `chat/src/router/routes/channel.ts`)
+///   * Thread is a `?thread=…` query string per
+///     `chat/src/router/codecs.ts::threadSearch`, NOT a path segment.
+///
+/// DM-vs-MUC discrimination is driven by the typed `class` field —
+/// these strings are pinned to
+/// `NotificationClass::as_db_value` in
+/// `crates/waddle-server/src/notification_outbox.rs`:
+///   * `dm`, `dm_mention`                                    → DM
+///   * `personal_mention`, `channel_mention`,
+///     `active_channel_mention`, `notify_all`                → MUC
+///
+/// When `class` is absent (legacy publishes that predate the typed
+/// envelope), fall back to the JID's domain prefix —
+/// `muc.`/`conference.` are the standard XMPP MUC subdomains. JIDs
+/// legally contain underscores per RFC 6122 / PRECIS, so the SW
+/// must NOT treat an underscore in a DM JID's localpart as a
+/// MUC separator.
+const DM_CLASS_VALUES = new Set(["dm", "dm_mention"]);
+const MUC_CLASS_VALUES = new Set([
+  "personal_mention",
+  "channel_mention",
+  "active_channel_mention",
+  "notify_all",
+]);
+
+function routeFromContext(context) {
+  const conv = context?.conversation;
+  // Return `null` (NOT `/`) when the typed context lacks a
+  // conversation, so the caller can fall back to a legacy `data.url`
+  // if one is present rather than collapsing to root. ChatGPT Codex
+  // bot flagged this regression: pre-#528 SW used `data.url`
+  // directly when present; we shouldn't silently drop that path
+  // for mixed-version publishers.
+  if (typeof conv !== "string" || conv.length === 0) return null;
+  const at = conv.lastIndexOf("@");
+  if (at <= 0) return null;
+  const localpart = conv.slice(0, at);
+  const domain = conv.slice(at + 1);
+  const cls = typeof context?.class === "string" ? context.class : "";
+  const isDmByClass = DM_CLASS_VALUES.has(cls);
+  const isMucByClass = MUC_CLASS_VALUES.has(cls);
+  const isMucByDomain = domain.startsWith("muc.") || domain.startsWith("conference.");
+  const isMuc = isMucByClass || (!isDmByClass && isMucByDomain);
+  const base = isMuc
+    ? `/r/${encodeURIComponent(localpart)}`
+    : `/dm/${encodeURIComponent(localpart)}`;
+  if (context.thread) {
+    return `${base}?thread=${encodeURIComponent(context.thread)}`;
+  }
+  return base;
 }
 
 function parseUnreadCount(data) {
-  const value = data?.unreadCount ?? data?.totalUnread ?? data?.["message-count"];
+  const value = data?.messageCount ?? data?.["message-count"] ?? data?.unreadCount ?? data?.totalUnread;
   if (value === undefined || value === null) return null;
   const parsed = typeof value === "number" ? value : Number(value);
   if (!Number.isFinite(parsed) || parsed < 0) return null;

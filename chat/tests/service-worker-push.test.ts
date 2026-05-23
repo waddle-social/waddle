@@ -62,17 +62,36 @@ function makePushEvent(data: { json?: () => unknown; text?: () => string }) {
   };
 }
 
+function makeNotificationClickEvent(data: Record<string, unknown>) {
+  const waits: Array<Promise<unknown>> = [];
+  return {
+    notification: {
+      close: mock(() => {}),
+      data,
+    },
+    waitUntil: (promise: Promise<unknown>) => {
+      waits.push(Promise.resolve(promise));
+    },
+    done: () => Promise.all(waits),
+  };
+}
+
 describe("service worker push handling", () => {
-  test("sets the app badge and posts unread count to open clients", async () => {
+  test("minimal XEP-0357 payload renders default title + no body preview, updates badge", async () => {
+    // Canonical XEP-0357 publish carries only `message-count` plus
+    // the `urn:waddle:push:context:0` routing context. No sender,
+    // no body — preview is opt-in and out of the default path
+    // (#528 acceptance criterion).
     const client = { postMessage: mock((_message: unknown) => {}) };
     const worker = loadServiceWorker([client]);
     const event = makePushEvent({
       json: () => ({
-        title: "Mention",
-        body: "hello",
-        roomJid: "space_channel@conference.example.com",
-        url: "/space/channel",
         "message-count": 6,
+        context: {
+          conversation: "space_channel@conference.example.com",
+          thread: "",
+          class: "personal_mention",
+        },
       }),
     });
 
@@ -80,31 +99,239 @@ describe("service worker push handling", () => {
     await event.done();
 
     expect(worker.setAppBadge).toHaveBeenCalledWith(6);
-    expect(worker.clients.matchAll).toHaveBeenCalledWith({
-      type: "window",
-      includeUncontrolled: true,
-    });
     expect(client.postMessage).toHaveBeenCalledWith({
       type: "waddle:unread-count",
       unreadCount: 6,
     });
-    expect(worker.showNotification).toHaveBeenCalledWith("Mention", {
-      body: "hello",
+    // Default title is count-derived; body is the empty string (no
+    // preview unless the server explicitly populated it).
+    expect(worker.showNotification).toHaveBeenCalledWith("6 new messages", {
+      body: "",
       tag: "space_channel@conference.example.com",
       icon: "/android-chrome-192x192.png",
-      data: { url: "/space/channel" },
+      data: {
+        url: "/r/space_channel",
+        context: {
+          conversation: "space_channel@conference.example.com",
+          thread: undefined,
+          class: "personal_mention",
+        },
+      },
     });
   });
 
-  test("clears the app badge when push unread count is zero", async () => {
+  test("singular default title for a one-message push", async () => {
+    const worker = loadServiceWorker();
+    const event = makePushEvent({
+      json: () => ({
+        "message-count": 1,
+        context: { conversation: "alice@example.com" },
+      }),
+    });
+    worker.dispatch("push", event);
+    await event.done();
+
+    expect(worker.showNotification.mock.calls[0]?.[0]).toBe("1 new message");
+  });
+
+  test("opt-in preview keeps server-provided title/body", async () => {
+    const worker = loadServiceWorker();
+    const event = makePushEvent({
+      json: () => ({
+        title: "Mention from @alice",
+        body: "hello there",
+        "message-count": 1,
+        context: { conversation: "space_channel@conference.example.com" },
+      }),
+    });
+    worker.dispatch("push", event);
+    await event.done();
+
+    const [title, options] = worker.showNotification.mock.calls[0] ?? [];
+    expect(title).toBe("Mention from @alice");
+    expect((options as NotificationOptions).body).toBe("hello there");
+  });
+
+  test("dm conversation routes to /dm/{username}", async () => {
+    const worker = loadServiceWorker();
+    const event = makePushEvent({
+      json: () => ({
+        "message-count": 1,
+        context: { conversation: "alice@example.com", class: "dm" },
+      }),
+    });
+    worker.dispatch("push", event);
+    await event.done();
+
+    const [, options] = worker.showNotification.mock.calls[0] ?? [];
+    expect((options as NotificationOptions & { data: { url: string } }).data.url).toBe("/dm/alice");
+  });
+
+  test("dm with underscore in localpart routes as DM, not MUC", async () => {
+    // Regression for an MUC heuristic that misrouted `jane_doe@example.com`
+    // to `/jane/doe` (the underscore-as-MUC-separator fallback).
+    // JIDs legally contain underscores; route on the typed `class`
+    // field or the JID's domain prefix instead. Adversarial review
+    // round-1 finding on PR #760.
+    const worker = loadServiceWorker();
+    const event = makePushEvent({
+      json: () => ({
+        "message-count": 1,
+        context: {
+          conversation: "jane_doe@example.com",
+          // `"dm"` matches DM_CLASS_VALUES exactly so the test is
+          // independent of the domain heuristic. With `"direct"` (a
+          // value the server never emits) the test would pass only
+          // because `example.com` doesn't start with `muc.` — a
+          // silent regression risk.
+          class: "dm",
+        },
+      }),
+    });
+    worker.dispatch("push", event);
+    await event.done();
+
+    const [, options] = worker.showNotification.mock.calls[0] ?? [];
+    expect((options as NotificationOptions & { data: { url: string } }).data.url).toBe(
+      "/dm/jane_doe",
+    );
+  });
+
+
+  test("muc conversation routes to /r/{channelId}", async () => {
+    // Chat router URL is `/r/{channelId}` where channelId == JID
+    // localpart (see chat/src/lib/xmpp/jid.ts::parseManagedRoomBareJid).
+    const worker = loadServiceWorker();
+    const event = makePushEvent({
+      json: () => ({
+        "message-count": 1,
+        context: {
+          conversation: "general@muc.example.com",
+          class: "personal_mention",
+        },
+      }),
+    });
+    worker.dispatch("push", event);
+    await event.done();
+
+    const [, options] = worker.showNotification.mock.calls[0] ?? [];
+    expect((options as NotificationOptions & { data: { url: string } }).data.url).toBe(
+      "/r/general",
+    );
+  });
+
+  test("thread context routes via ?thread= query string, not path segment", async () => {
+    // Chat router carries threads in a search-param codec
+    // (chat/src/router/codecs.ts::threadSearch), NOT a path segment.
+    const worker = loadServiceWorker();
+    const event = makePushEvent({
+      json: () => ({
+        "message-count": 1,
+        context: {
+          conversation: "general@muc.example.com",
+          thread: "thread-42",
+          class: "personal_mention",
+        },
+      }),
+    });
+    worker.dispatch("push", event);
+    await event.done();
+
+    const [, options] = worker.showNotification.mock.calls[0] ?? [];
+    expect((options as NotificationOptions & { data: { url: string } }).data.url).toBe(
+      "/r/general?thread=thread-42",
+    );
+  });
+
+  test("class='dm' overrides @muc. domain prefix", async () => {
+    // Defense-in-depth: a misconfigured server that issues DMs from
+    // a `muc.` subdomain MUST still route as DM when the typed
+    // `class` field says so.
+    const worker = loadServiceWorker();
+    const event = makePushEvent({
+      json: () => ({
+        "message-count": 1,
+        context: {
+          conversation: "alice@muc.example.com",
+          class: "dm",
+        },
+      }),
+    });
+    worker.dispatch("push", event);
+    await event.done();
+
+    const [, options] = worker.showNotification.mock.calls[0] ?? [];
+    expect((options as NotificationOptions & { data: { url: string } }).data.url).toBe(
+      "/dm/alice",
+    );
+  });
+
+  test("notify_all (group-class) routes to /r/{channelId}", async () => {
+    const worker = loadServiceWorker();
+    const event = makePushEvent({
+      json: () => ({
+        "message-count": 1,
+        context: {
+          conversation: "general@muc.example.com",
+          class: "notify_all",
+        },
+      }),
+    });
+    worker.dispatch("push", event);
+    await event.done();
+
+    const [, options] = worker.showNotification.mock.calls[0] ?? [];
+    expect((options as NotificationOptions & { data: { url: string } }).data.url).toBe(
+      "/r/general",
+    );
+  });
+
+  test("legacy data.url is honored when typed context is absent", async () => {
+    // Mixed-version publishers (server pre-#528 emitter that doesn't
+    // carry `context: { conversation }`) ship a deep link in
+    // `data.url`. The SW must preserve that legacy behavior rather
+    // than collapsing to `/`. ChatGPT Codex bot flagged this
+    // regression on round-5.
+    const worker = loadServiceWorker();
+    const event = makePushEvent({
+      json: () => ({
+        "message-count": 1,
+        url: "/r/legacy-channel?thread=abc",
+      }),
+    });
+    worker.dispatch("push", event);
+    await event.done();
+
+    const [, options] = worker.showNotification.mock.calls[0] ?? [];
+    expect((options as NotificationOptions & { data: { url: string } }).data.url).toBe(
+      "/r/legacy-channel?thread=abc",
+    );
+  });
+
+  test("legacy data.url is rejected if cross-origin", async () => {
+    // Defense in depth: even on the legacy path, an off-origin
+    // `data.url` must NOT be accepted. `sameOriginUrl` runs first.
+    const worker = loadServiceWorker();
+    const event = makePushEvent({
+      json: () => ({
+        "message-count": 1,
+        url: "https://evil.example/steal",
+      }),
+    });
+    worker.dispatch("push", event);
+    await event.done();
+
+    const [, options] = worker.showNotification.mock.calls[0] ?? [];
+    expect((options as NotificationOptions & { data: { url: string } }).data.url).toBe("/");
+  });
+
+  test("clears the app badge when push message-count is zero", async () => {
     const client = { postMessage: mock((_message: unknown) => {}) };
     const worker = loadServiceWorker([client]);
     const event = makePushEvent({
       json: () => ({
-        title: "Waddle",
-        body: "",
-        roomJid: "space_channel@conference.example.com",
-        unreadCount: 0,
+        "message-count": 0,
+        context: { conversation: "alice@example.com", class: "dm" },
       }),
     });
 
@@ -118,7 +345,11 @@ describe("service worker push handling", () => {
     });
   });
 
-  test("keeps text notification fallback for non-json push payloads", async () => {
+  test("non-json push body silently produces a default 'Waddle' notification with no body", async () => {
+    // Legacy / malformed publishes that aren't JSON: render the
+    // minimal default without leaking the raw text into the
+    // notification body. The chat's foreground Notification API
+    // handles richer presentation when the user is online.
     const worker = loadServiceWorker();
     const event = makePushEvent({
       json: () => {
@@ -132,12 +363,61 @@ describe("service worker push handling", () => {
 
     expect(worker.setAppBadge).not.toHaveBeenCalled();
     expect(worker.clearAppBadge).not.toHaveBeenCalled();
-    expect(worker.clients.matchAll).not.toHaveBeenCalled();
     expect(worker.showNotification).toHaveBeenCalledWith("Waddle", {
-      body: "raw push text",
-      tag: undefined,
+      body: "",
+      tag: "waddle",
       icon: "/android-chrome-192x192.png",
-      data: { url: "/" },
+      data: {
+        url: "/",
+        context: {
+          conversation: undefined,
+          thread: undefined,
+          class: undefined,
+        },
+      },
     });
+  });
+
+  test("notification click rejects cross-origin url", async () => {
+    // Defense in depth: a poisoned `data.url` MUST NOT cause the SW
+    // to navigate to an arbitrary origin. Round-4 hostile-client
+    // adversarial review on PR #760.
+    const focusedClient = {
+      url: "https://chat.example.test/some/page",
+      focus: mock(async () => {}),
+      navigate: mock(async (_url: string) => null),
+    };
+    const worker = loadServiceWorker([focusedClient]);
+    const clickEvent = makeNotificationClickEvent({
+      url: "https://evil.example/steal",
+    });
+    worker.dispatch("notificationclick", clickEvent);
+    await clickEvent.done();
+
+    // Falls back to safe origin root, not the cross-origin URL.
+    expect(focusedClient.navigate).toHaveBeenCalledWith("/");
+  });
+
+  test("notification click navigates focused window to the routed url", async () => {
+    const focusedClient = {
+      url: "https://chat.example.test/some/other/page",
+      focus: mock(async () => {}),
+      navigate: mock(async (_url: string) => null),
+    };
+    const worker = loadServiceWorker([focusedClient]);
+    const clickEvent = makeNotificationClickEvent({
+      url: "/myspace/general/threads/thread-42",
+      context: {
+        conversation: "myspace_general@muc.example.com",
+        thread: "thread-42",
+      },
+    });
+    worker.dispatch("notificationclick", clickEvent);
+    await clickEvent.done();
+
+    expect(focusedClient.focus).toHaveBeenCalled();
+    expect(focusedClient.navigate).toHaveBeenCalledWith(
+      "/myspace/general/threads/thread-42",
+    );
   });
 });

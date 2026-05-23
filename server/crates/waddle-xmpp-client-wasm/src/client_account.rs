@@ -40,6 +40,110 @@ impl WaddleClient {
         })
     }
 
+    /// `<ensure-node app-id='…'/>` on the Push Service. Resolves to the
+    /// stable per-(user, app-id) node id the chat should hand to
+    /// `register_web_push_device` and to `enable_push_notifications`.
+    /// Idempotent — repeated calls return the same node.
+    pub fn ensure_push_node(&self, service_jid: String, app_id: String) -> Promise {
+        let inner = self.inner.clone();
+        future_to_promise(async move {
+            let iq = build_ensure_push_node_iq(&service_jid, &app_id);
+            let result = send_iq_command(inner, iq).await?;
+            let node = result
+                .get_child("node", WADDLE_PUSH_SERVICE_NS)
+                .ok_or_else(|| JsValue::from_str("ensure-node response missing <node/>"))?;
+            // Hard-fail on missing/empty required attrs. The server
+            // always emits all three on success; an empty here means
+            // the wire response is malformed. Persisting `node.id = ""`
+            // would silently brick the user's push pipeline (the
+            // subsequent register-device and enable IQs would target
+            // an empty node). Surface as a rejected Promise so the
+            // chat's `console.warn` chain has something to grep.
+            let id = require_non_empty_attr(node, "id", "ensure-node")?;
+            let jid = require_non_empty_attr(node, "jid", "ensure-node")?;
+            let app_id = require_non_empty_attr(node, "app-id", "ensure-node")?;
+            let response = PushServiceNode { id, jid, app_id };
+            to_js_value(&response)
+        })
+    }
+
+    /// `<register-device …><provider-…/></register-device>` on the
+    /// Push Service. Idempotent on `(node, device_id)`; subsequent
+    /// calls UPDATE the row with the latest Web Push credentials.
+    /// All three `provider_*` arguments are required for Web Push
+    /// (they map to `PushSubscription.endpoint`, `.keys.auth`,
+    /// `.keys.p256dh` respectively). Passing an empty string for any
+    /// of them omits the corresponding child from the wire IQ.
+    pub fn register_web_push_device(&self, options: JsValue) -> Promise {
+        let inner = self.inner.clone();
+        future_to_promise(async move {
+            let opts: RegisterWebPushDeviceOptions = serde_wasm_bindgen::from_value(options)
+                .map_err(|err| JsValue::from_str(&err.to_string()))?;
+            // `environment` is wire-typed via `PushEnvironment` on
+            // the options struct — serde rejects unknown variants
+            // at the JS↔Rust boundary before reaching the IQ builder.
+            let registration = PushDeviceRegistration {
+                node: &opts.node,
+                device_id: &opts.device_id,
+                environment: opts.environment,
+                provider_endpoint: non_empty(&opts.provider_endpoint),
+                provider_token: non_empty(&opts.provider_token),
+                provider_key_material: non_empty(&opts.provider_key_material),
+            };
+            let iq = build_register_push_device_iq(
+                &opts.service_jid,
+                PushDevicePlatform::Web,
+                &registration,
+            );
+            let result = send_iq_command(inner, iq).await?;
+            let device = result
+                .get_child("device", WADDLE_PUSH_SERVICE_NS)
+                .ok_or_else(|| JsValue::from_str("register-device response missing <device/>"))?;
+            let response = PushServiceDevice {
+                id: require_non_empty_attr(device, "id", "register-device")?,
+                node: require_non_empty_attr(device, "node", "register-device")?,
+                status: PushDeviceStatus::from_wire(&require_non_empty_attr(
+                    device,
+                    "status",
+                    "register-device",
+                )?)?,
+            };
+            to_js_value(&response)
+        })
+    }
+
+    /// `<disable-device node='…' device-id='…'/>` on the Push Service.
+    /// Idempotent — operates on the (node, device-id) row only.
+    /// Resolves to the typed `PushServiceDevice` shape so the chat
+    /// caller can observe the post-disable status (round-5 Copilot
+    /// review on PR #760 — match `register_web_push_device`'s
+    /// contract instead of resolving void).
+    pub fn disable_push_device(
+        &self,
+        service_jid: String,
+        node: String,
+        device_id: String,
+    ) -> Promise {
+        let inner = self.inner.clone();
+        future_to_promise(async move {
+            let iq = build_disable_push_device_iq(&service_jid, &node, &device_id);
+            let result = send_iq_command(inner, iq).await?;
+            let device = result
+                .get_child("device", WADDLE_PUSH_SERVICE_NS)
+                .ok_or_else(|| JsValue::from_str("disable-device response missing <device/>"))?;
+            let response = PushServiceDevice {
+                id: require_non_empty_attr(device, "id", "disable-device")?,
+                node: require_non_empty_attr(device, "node", "disable-device")?,
+                status: PushDeviceStatus::from_wire(&require_non_empty_attr(
+                    device,
+                    "status",
+                    "disable-device",
+                )?)?,
+            };
+            to_js_value(&response)
+        })
+    }
+
     pub fn get_server_version(&self) -> Promise {
         let inner = self.inner.clone();
         future_to_promise(async move {
@@ -399,4 +503,27 @@ impl WaddleClient {
             to_js_value(&profile)
         })
     }
+}
+
+/// Extract a required non-empty XML attribute from a typed response
+/// element. Round-5 review on PR #760 flagged that `unwrap_or_default()`
+/// on Push Service response attributes would silently persist empty
+/// strings (e.g. `node.id = ""`) and brick subsequent IQs that target
+/// the broken value. Hard-fail instead — the server always emits
+/// these attrs on success, so an empty here means the wire shape has
+/// drifted and the chat must surface the error rather than continue.
+fn require_non_empty_attr(
+    element: &Element,
+    attr: &str,
+    response_kind: &str,
+) -> Result<String, JsValue> {
+    element
+        .attr(attr)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| {
+            JsValue::from_str(&format!(
+                "{response_kind} response missing required attribute '{attr}'"
+            ))
+        })
 }

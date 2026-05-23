@@ -15,6 +15,7 @@ wasm = ["dep:futures", "dep:getrandom", "dep:js-sys", "dep:wasm-bindgen", "dep:w
 [dependencies]
 base64 = { workspace = true }
 chrono = { workspace = true }
+serde = { workspace = true }
 uuid = { workspace = true }
 futures = { workspace = true, optional = true }
 getrandom = { version = "0.4", features = ["wasm_js"], optional = true }

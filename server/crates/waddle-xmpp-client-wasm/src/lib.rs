@@ -10,11 +10,13 @@ use minidom::Element;
 use serde::{Deserialize, Serialize};
 use waddle_xmpp_client::avatar::{request_avatar_with_iq, AvatarRequestFailure};
 use waddle_xmpp_client::discovery::{
-    self, build_disable_push_iq, build_disco_info_iq, build_disco_items_iq, build_enable_push_iq,
-    build_muc_admin_affiliation_list_iq, build_muc_admin_affiliation_set_iq, build_roster_get_iq,
-    build_upload_slot_iq, build_user_search_iq, build_waddle_inbox_mark_read_iq,
-    parse_muc_admin_affiliation_query, parse_roster_result, parse_user_search_result,
-    MucAdminAffiliationItem, UserSearchQuery, WaddleInboxMarkRead,
+    self, build_disable_push_device_iq, build_disable_push_iq, build_disco_info_iq,
+    build_disco_items_iq, build_enable_push_iq, build_ensure_push_node_iq,
+    build_muc_admin_affiliation_list_iq, build_muc_admin_affiliation_set_iq,
+    build_register_push_device_iq, build_roster_get_iq, build_upload_slot_iq, build_user_search_iq,
+    build_waddle_inbox_mark_read_iq, parse_muc_admin_affiliation_query, parse_roster_result,
+    parse_user_search_result, MucAdminAffiliationItem, PushDevicePlatform, PushDeviceRegistration,
+    UserSearchQuery, WaddleInboxMarkRead, WADDLE_PUSH_SERVICE_NS,
 };
 use waddle_xmpp_client::error::parse_stanza_error;
 use waddle_xmpp_client::mam::{self, build_mam_iq, MamIqBuilder};
