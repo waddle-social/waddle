@@ -3,9 +3,7 @@ use waddle_xmpp::pubsub::{PubSubItem, PubSubNode, PublishResult, StoredItem};
 use waddle_xmpp::XmppError;
 
 use super::DatabasePubSubStorage;
-use crate::dnd_projection::{
-    derive_dnd_projection_mutation, DndProjection, DndProjectionMutation,
-};
+use crate::dnd_projection::{derive_dnd_projection_mutation, DndProjection, DndProjectionMutation};
 use crate::notification_settings_projection::{
     derive_validated_bookmark_projection_mutation, validate_xep0402_bookmark_publish,
     ConversationKind, NotificationSettingsProjectionMutation,
@@ -555,8 +553,8 @@ async fn apply_dnd_projection_upsert_tx(
         .to_element()
         .write_to(&mut buf)
         .map_err(|error| XmppError::internal(error.to_string()))?;
-    let payload_xml = String::from_utf8(buf)
-        .map_err(|error| XmppError::internal(error.to_string()))?;
+    let payload_xml =
+        String::from_utf8(buf).map_err(|error| XmppError::internal(error.to_string()))?;
     tx.execute(
         r#"
         INSERT INTO dnd_projection (

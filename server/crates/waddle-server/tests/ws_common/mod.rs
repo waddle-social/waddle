@@ -93,6 +93,23 @@ impl TestServer {
         Self::spawn(extra_accounts, None, None, extra_envs)
     }
 
+    /// Combine persistent SQLite with extra `WADDLE_*` env vars. Used
+    /// by tests that need to point the harness at a fixed sqlite file
+    /// AND tune janitor intervals (e.g. `WADDLE_NOTIFICATION_OUTBOX_JANITOR_INTERVAL`).
+    #[allow(dead_code)]
+    pub fn start_persistent_with_extra_envs(
+        database_url: &str,
+        extra_accounts: &[(&str, &str)],
+        extra_envs: &[(&str, &str)],
+    ) -> Self {
+        Self::spawn(
+            extra_accounts,
+            Some(database_url.to_string()),
+            None,
+            extra_envs,
+        )
+    }
+
     fn spawn(
         extra_accounts: &[(&str, &str)],
         database_url: Option<String>,

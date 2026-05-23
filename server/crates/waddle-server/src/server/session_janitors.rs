@@ -493,9 +493,7 @@ pub(crate) fn spawn_notification_outbox_janitor(websocket_state: &Arc<WebSocketS
     // `waddle_push_suppressed_total{reason="waddle_dnd"}` counter
     // reflects real recipient state — flat = no users actively in
     // DND, not a wiring placeholder.
-    info!(
-        "Notification outbox janitor: DND suppression backed by urn:waddle:dnd:0 PEP projection"
-    );
+    info!("Notification outbox janitor: DND suppression backed by urn:waddle:dnd:0 PEP projection");
     // Slice 2b operability: log the effective XEP-0513 `<active/>`
     // TTL once at startup so operators can read the clamped value
     // without grepping the codebase or re-deriving the env var

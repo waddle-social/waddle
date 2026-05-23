@@ -172,7 +172,9 @@ mod tests {
     #[tokio::test]
     async fn no_projection_row_returns_inactive() {
         let store = migrated_store().await;
-        let clock = Arc::new(FixedClock::new(Utc.with_ymd_and_hms(2026, 5, 23, 12, 0, 0).unwrap()));
+        let clock = Arc::new(FixedClock::new(
+            Utc.with_ymd_and_hms(2026, 5, 23, 12, 0, 0).unwrap(),
+        ));
         let reader = PepDndReader::new(store, clock);
         let state = reader.dnd_state(&alice()).await.expect("read");
         assert_eq!(state, DndState::Inactive);
@@ -191,7 +193,9 @@ mod tests {
             })
             .await
             .expect("upsert");
-        let clock = Arc::new(FixedClock::new(Utc.with_ymd_and_hms(2026, 5, 23, 16, 30, 0).unwrap()));
+        let clock = Arc::new(FixedClock::new(
+            Utc.with_ymd_and_hms(2026, 5, 23, 16, 30, 0).unwrap(),
+        ));
         let reader = PepDndReader::new(store, clock);
         let state = reader.dnd_state(&alice()).await.expect("read");
         assert_eq!(state, DndState::Active);
@@ -210,7 +214,9 @@ mod tests {
             })
             .await
             .expect("upsert");
-        let clock = Arc::new(FixedClock::new(Utc.with_ymd_and_hms(2026, 5, 23, 17, 30, 0).unwrap()));
+        let clock = Arc::new(FixedClock::new(
+            Utc.with_ymd_and_hms(2026, 5, 23, 17, 30, 0).unwrap(),
+        ));
         let reader = PepDndReader::new(store, clock);
         let state = reader.dnd_state(&alice()).await.expect("read");
         assert_eq!(state, DndState::Inactive);
@@ -235,7 +241,9 @@ mod tests {
             .await
             .expect("upsert");
         // 2026-05-25 23:00 Oslo CEST = 21:00 UTC.
-        let clock = Arc::new(FixedClock::new(Utc.with_ymd_and_hms(2026, 5, 25, 21, 0, 0).unwrap()));
+        let clock = Arc::new(FixedClock::new(
+            Utc.with_ymd_and_hms(2026, 5, 25, 21, 0, 0).unwrap(),
+        ));
         let reader = PepDndReader::new(store, clock);
         let state = reader.dnd_state(&alice()).await.expect("read");
         assert_eq!(state, DndState::Active);
@@ -259,7 +267,9 @@ mod tests {
             .await
             .expect("upsert");
         // 2026-05-25 14:00 Oslo CEST = 12:00 UTC (Monday afternoon, well outside).
-        let clock = Arc::new(FixedClock::new(Utc.with_ymd_and_hms(2026, 5, 25, 12, 0, 0).unwrap()));
+        let clock = Arc::new(FixedClock::new(
+            Utc.with_ymd_and_hms(2026, 5, 25, 12, 0, 0).unwrap(),
+        ));
         let reader = PepDndReader::new(store, clock);
         let state = reader.dnd_state(&alice()).await.expect("read");
         assert_eq!(state, DndState::Inactive);
@@ -278,7 +288,9 @@ mod tests {
             })
             .await
             .expect("upsert");
-        let clock = Arc::new(FixedClock::new(Utc.with_ymd_and_hms(2026, 5, 23, 16, 30, 0).unwrap()));
+        let clock = Arc::new(FixedClock::new(
+            Utc.with_ymd_and_hms(2026, 5, 23, 16, 30, 0).unwrap(),
+        ));
         let reader = PepDndReader::new(store.clone(), clock.clone());
         assert_eq!(
             reader.dnd_state(&alice()).await.expect("read"),
