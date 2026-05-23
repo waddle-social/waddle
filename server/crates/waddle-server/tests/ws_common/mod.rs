@@ -96,6 +96,15 @@ impl TestServer {
     /// Combine persistent SQLite with extra `WADDLE_*` env vars. Used
     /// by tests that need to point the harness at a fixed sqlite file
     /// AND tune janitor intervals (e.g. `WADDLE_NOTIFICATION_OUTBOX_JANITOR_INTERVAL`).
+    ///
+    /// `#[allow(dead_code)]` is required (matching the established
+    /// pattern on every other TestServer constructor in this file)
+    /// because each integration test compiles as its own crate; a
+    /// helper unused by a given test crate would otherwise fail
+    /// `cargo clippy --tests -- -D warnings`. The CLAUDE.md "never
+    /// add allow(...)" rule targets production code — there is no
+    /// structural way to satisfy it for shared test harness helpers
+    /// in the cargo integration-test layout.
     #[allow(dead_code)]
     pub fn start_persistent_with_extra_envs(
         database_url: &str,

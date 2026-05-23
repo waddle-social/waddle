@@ -239,6 +239,8 @@ pub enum DndParseError {
     NamespacedAttribute { element: String, attr: String },
     #[error("unexpected child element <{child}> in <{parent}>")]
     UnexpectedChild { parent: String, child: String },
+    #[error("unexpected text content in <{0}>")]
+    UnexpectedTextContent(String),
 }
 
 impl WaddleDnd {
@@ -407,12 +409,21 @@ fn reject_unknown_attrs_on_child(
     Ok(())
 }
 
+/// Reject both child elements AND any text content. `<snooze>` and
+/// `<rule>` are leaf elements in the wire contract; text content
+/// like `<snooze until='X'>oops</snooze>` slips past `children()`
+/// (which iterates element children only) and would be silently
+/// persisted into `pubsub_items` as raw XML. The strict-parser
+/// contract requires rejecting it.
 fn reject_any_children(element: &Element, parent: &str) -> Result<(), DndParseError> {
     if let Some(child) = element.children().next() {
         return Err(DndParseError::UnexpectedChild {
             parent: parent.to_string(),
             child: child.name().to_string(),
         });
+    }
+    if !element.text().trim().is_empty() {
+        return Err(DndParseError::UnexpectedTextContent(parent.to_string()));
     }
     Ok(())
 }
@@ -781,6 +792,43 @@ mod tests {
             WaddleDnd::parse(&bad),
             Err(DndParseError::UnexpectedChild { .. })
         ));
+    }
+
+    #[test]
+    fn parse_text_content_in_snooze_rejected() {
+        // Text inside <snooze> bypasses the children() iteration in
+        // minidom — verify the text-content branch in reject_any_children.
+        let bad: Element =
+            "<dnd xmlns='urn:waddle:dnd:0'><snooze until='2026-05-23T17:00:00Z'>oops</snooze></dnd>"
+                .parse()
+                .unwrap();
+        assert!(matches!(
+            WaddleDnd::parse(&bad),
+            Err(DndParseError::UnexpectedTextContent(_))
+        ));
+    }
+
+    #[test]
+    fn parse_text_content_in_rule_rejected() {
+        let bad: Element =
+            "<dnd xmlns='urn:waddle:dnd:0'><rule days='mon' start='22:00' end='07:00'>oops</rule></dnd>"
+                .parse()
+                .unwrap();
+        assert!(matches!(
+            WaddleDnd::parse(&bad),
+            Err(DndParseError::UnexpectedTextContent(_))
+        ));
+    }
+
+    #[test]
+    fn parse_whitespace_only_text_in_snooze_accepted() {
+        // Pure-whitespace text (formatting whitespace) is common in
+        // pretty-printed XML; treat it as equivalent to no text.
+        let element: Element =
+            "<dnd xmlns='urn:waddle:dnd:0'>\n  <snooze until='2026-05-23T17:00:00Z'>\n  </snooze>\n</dnd>"
+                .parse()
+                .unwrap();
+        WaddleDnd::parse(&element).expect("whitespace-only text must round-trip");
     }
 
     #[test]
