@@ -178,8 +178,10 @@ onUnmounted(() => {
   <div v-if="roomJid" ref="rootEl" class="relative inline-flex">
     <button
       ref="triggerEl"
-      class="chat-icon-button chat-icon-button--md text-muted-foreground hover:bg-muted hover:text-foreground"
-      :class="{ 'opacity-50 cursor-not-allowed': disabled }"
+      class="chat-icon-button chat-icon-button--md"
+      :class="disabled
+        ? 'opacity-50 cursor-not-allowed text-muted-foreground'
+        : 'text-muted-foreground hover:bg-muted hover:text-foreground'"
       type="button"
       :title="buttonTitle"
       :aria-label="buttonTitle"

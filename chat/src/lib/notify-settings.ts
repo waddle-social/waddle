@@ -65,10 +65,10 @@ export function effectiveNotifyMode(
  * focused (`current === -1`), the next/previous wraps cleanly to the
  * first / last item.
  *
- * Extracted from `NotifyModeButton.vue` so the index math can be
- * unit-tested without a DOM (round-7 UX reviewer P2). */
+ * Caller MUST pass `total > 0` — there is no valid menu navigation
+ * on an empty menu. Extracted from `NotifyModeButton.vue` so the
+ * index math can be unit-tested without a DOM (round-7 UX reviewer P2). */
 export function nextMenuIndex(current: number, step: 1 | -1, total: number): number {
-  if (total <= 0) return 0;
   // When nothing is focused, a "down" goes to first (0), "up" to last.
   const base = current < 0 ? (step === 1 ? -1 : 0) : current;
   return ((base + step) % total + total) % total;

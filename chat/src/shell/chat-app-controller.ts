@@ -723,6 +723,15 @@ export function useChatAppController(giphyApiKey: string) {
       void socialFeed.refresh();
       void stories.refresh();
       void communityEvents.refresh();
+      // Re-hydrate XEP-0492 notification settings on every fresh
+      // session-ready: the chat does not subscribe to PEP `+notify`
+      // headlines on `urn:xmpp:bookmarks:1` (deferred follow-up),
+      // so without this poll a setting changed in another tab
+      // would never reach this tab until the next first-sign-in.
+      // `notifySettingsStore.hydrate` commits atomically on success
+      // and never clears the cache mid-flight, so the redundant
+      // call on first connection is a no-op visual-wise.
+      void notifySettingsStore.hydrate(client);
     });
   }, { immediate: true });
 
