@@ -44,6 +44,22 @@ export function usePushNotifications() {
   );
   const notificationsEnabled = ref(loadEnabled());
 
+  // Serialize `syncPushSubscription` and `disablePushSubscription`
+  // against each other. Without this, a rapid Enable→Disable toggle
+  // can interleave the multi-step flows: disable would skip
+  // `pushManager.unsubscribe()` (no subscription yet), then enable
+  // commits a `register-device` row AFTER disable already ran the
+  // `disable-device` IQ, leaving a live device the user can't see
+  // in the UI (`notificationsEnabled === false` but server-side
+  // device row is registered). Round-4 hostile-client adversarial
+  // review on PR #760.
+  let pushFlowLock: Promise<unknown> = Promise.resolve();
+  function runPushFlow<T>(work: () => Promise<T>): Promise<T> {
+    const next = pushFlowLock.then(work, work);
+    pushFlowLock = next.catch(() => undefined);
+    return next;
+  }
+
   watch(notificationsEnabled, (v) => {
     if (typeof window !== "undefined") {
       window.localStorage.setItem(STORAGE_KEY, JSON.stringify(v));
@@ -135,7 +151,14 @@ export function usePushNotifications() {
    * endpoint, no p256dh, no auth. The Push Service is the single
    * owner of provider creds.
    */
-  async function syncPushSubscription(
+  function syncPushSubscription(
+    xmppClient: BrowserXmppClient,
+    userJid: string,
+  ): Promise<boolean> {
+    return runPushFlow(() => syncPushSubscriptionImpl(xmppClient, userJid));
+  }
+
+  async function syncPushSubscriptionImpl(
     xmppClient: BrowserXmppClient,
     userJid: string,
   ): Promise<boolean> {
@@ -224,7 +247,11 @@ export function usePushNotifications() {
     return enabled;
   }
 
-  async function disablePushSubscription(xmppClient: BrowserXmppClient, userJid: string): Promise<boolean> {
+  function disablePushSubscription(xmppClient: BrowserXmppClient, userJid: string): Promise<boolean> {
+    return runPushFlow(() => disablePushSubscriptionImpl(xmppClient, userJid));
+  }
+
+  async function disablePushSubscriptionImpl(xmppClient: BrowserXmppClient, userJid: string): Promise<boolean> {
     const reg = await getOrRegisterServiceWorker();
     if (reg) {
       const existing = await reg.pushManager.getSubscription();

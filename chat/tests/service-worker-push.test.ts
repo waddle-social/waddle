@@ -334,6 +334,26 @@ describe("service worker push handling", () => {
     });
   });
 
+  test("notification click rejects cross-origin url", async () => {
+    // Defense in depth: a poisoned `data.url` MUST NOT cause the SW
+    // to navigate to an arbitrary origin. Round-4 hostile-client
+    // adversarial review on PR #760.
+    const focusedClient = {
+      url: "https://chat.example.test/some/page",
+      focus: mock(async () => {}),
+      navigate: mock(async (_url: string) => null),
+    };
+    const worker = loadServiceWorker([focusedClient]);
+    const clickEvent = makeNotificationClickEvent({
+      url: "https://evil.example/steal",
+    });
+    worker.dispatch("notificationclick", clickEvent);
+    await clickEvent.done();
+
+    // Falls back to safe origin root, not the cross-origin URL.
+    expect(focusedClient.navigate).toHaveBeenCalledWith("/");
+  });
+
   test("notification click navigates focused window to the routed url", async () => {
     const focusedClient = {
       url: "https://chat.example.test/some/other/page",

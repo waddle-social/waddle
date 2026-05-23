@@ -123,18 +123,35 @@ self.addEventListener("push", (event) => {
 
 self.addEventListener("notificationclick", (event) => {
   event.notification.close();
-  const url = event.notification.data?.url ?? "/";
+  // Defense in depth: ALWAYS resolve the data.url against our own
+  // origin and reject cross-origin paths before opening a window.
+  // `routeFromContext` always returns a relative `/dm/…` or `/r/…`
+  // today, so this is a guard against a future regression in the
+  // payload pipeline (or a poisoned legacy `data.url` field) that
+  // would otherwise let `clients.openWindow` navigate to an
+  // arbitrary origin.
+  const safeUrl = sameOriginUrl(event.notification.data?.url) ?? "/";
   event.waitUntil(
     clients.matchAll({ type: "window", includeUncontrolled: true }).then((windowClients) => {
       for (const client of windowClients) {
         if (client.url.includes(self.location.origin) && "focus" in client) {
-          return client.focus().then(() => client.navigate(url));
+          return client.focus().then(() => client.navigate(safeUrl));
         }
       }
-      return clients.openWindow(url);
+      return clients.openWindow(safeUrl);
     }),
   );
 });
+
+function sameOriginUrl(candidate) {
+  if (typeof candidate !== "string" || candidate.length === 0) return null;
+  try {
+    const resolved = new URL(candidate, self.location.origin);
+    return resolved.origin === self.location.origin ? `${resolved.pathname}${resolved.search}` : null;
+  } catch {
+    return null;
+  }
+}
 
 function defaultTitle(unreadCount) {
   if (unreadCount === null || unreadCount === 0) return "Waddle";
