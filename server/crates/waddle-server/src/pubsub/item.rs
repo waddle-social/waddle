@@ -58,6 +58,21 @@ impl DatabasePubSubStorage {
                     )));
                 }
             }
+            // Enforce the XEP-0163 single-item PEP convention
+            // (`id="current"`). Without this, a client that publishes
+            // with `id="custom"` then later retracts `id="current"`
+            // would silently leave the projection in place — the user
+            // would stay in DND with no wire-level way to clear it.
+            // Reject up-front so the client surfaces the mistake.
+            match item.id.as_deref() {
+                Some(id) if id == waddle_xmpp::xep::xep_waddle_dnd::ITEM_ID_CURRENT => {}
+                _ => {
+                    return Err(XmppError::bad_request(Some(format!(
+                        "urn:waddle:dnd:0 publish must use item id '{}'",
+                        waddle_xmpp::xep::xep_waddle_dnd::ITEM_ID_CURRENT,
+                    ))));
+                }
+            }
             let payload = item.payload.as_ref().ok_or_else(|| {
                 XmppError::bad_request(Some(
                     "urn:waddle:dnd:0 publish requires a <dnd> payload".to_string(),

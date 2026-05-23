@@ -796,6 +796,67 @@ async fn subscribe_cleans_up_pre_existing_duplicate_rows() {
     );
 }
 
+/// The XEP-0163 single-item PEP convention is `id="current"`. A
+/// client that publishes with a different id (e.g. `id="custom"`)
+/// then later retracts `id="current"` would silently leave the
+/// projection in place — the user would stay in DND with no
+/// wire-level way to clear it. Reject up-front. Copilot review on
+/// PR #759.
+#[tokio::test]
+async fn dnd_publish_with_wrong_item_id_is_bad_request() {
+    let storage = DatabasePubSubStorage::open(Some("sqlite::memory:"))
+        .await
+        .expect("storage");
+    let bob = jid("bob@example.com");
+    storage
+        .get_or_create_node(&bob, "urn:waddle:dnd:0")
+        .await
+        .expect("node");
+
+    let bad_item = waddle_xmpp::pubsub::PubSubItem {
+        id: Some("custom".to_string()),
+        publisher: None,
+        payload: Some(dnd_payload()),
+    };
+    let err = storage
+        .publish_item(&bob, "urn:waddle:dnd:0", &bad_item, Some(&bob), false)
+        .await
+        .expect_err("non-current item id must error");
+    match &err {
+        waddle_xmpp::XmppError::Stanza { condition, .. } => {
+            assert!(
+                format!("{condition:?}")
+                    .to_lowercase()
+                    .contains("badrequest"),
+                "expected <bad-request/> condition, got: {condition:?}"
+            );
+        }
+        other => panic!("expected Stanza bad-request error, got: {other:?}"),
+    }
+
+    let missing_id = waddle_xmpp::pubsub::PubSubItem {
+        id: None,
+        publisher: None,
+        payload: Some(dnd_payload()),
+    };
+    let err = storage
+        .publish_item(&bob, "urn:waddle:dnd:0", &missing_id, Some(&bob), false)
+        .await
+        .expect_err("missing item id must also error");
+    assert!(matches!(err, waddle_xmpp::XmppError::Stanza { .. }));
+
+    // The `current` id is accepted.
+    let good_item = waddle_xmpp::pubsub::PubSubItem {
+        id: Some(waddle_xmpp::xep::xep_waddle_dnd::ITEM_ID_CURRENT.to_string()),
+        publisher: None,
+        payload: Some(dnd_payload()),
+    };
+    storage
+        .publish_item(&bob, "urn:waddle:dnd:0", &good_item, Some(&bob), false)
+        .await
+        .expect("current id should be accepted");
+}
+
 /// A publisher that is NOT the node owner MUST be rejected with
 /// `<forbidden/>` when targeting `urn:waddle:dnd:0`. Accepting the
 /// publish-only path while skipping the projection write would
