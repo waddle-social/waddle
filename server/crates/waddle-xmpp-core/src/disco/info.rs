@@ -380,6 +380,13 @@ pub fn server_features() -> Vec<Feature> {
         Feature::offline_messages(),
         Feature::vcard(),
         Feature::vcard4(),
+        // XEP-0357 §3 requires the USER'S server to advertise
+        // `urn:xmpp:push:0` so a XEP-0357-aware client knows to send
+        // `<enable jid='push.<domain>' node='…'/>` after registering
+        // its device with the Waddle Push Service. Without this, a
+        // conformant third-party client (Conversations, Monal, etc.)
+        // would refuse to enable Waddle push.
+        Feature::push(),
         Feature::http_upload(),
         Feature::blocking(),
         Feature::last_activity(),

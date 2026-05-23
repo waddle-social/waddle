@@ -91,6 +91,22 @@ fn test_vcard4_notify_feature_var_pins_xep0292_namespace() {
     assert_ne!(Feature::vcard4_notify(), Feature::avatar_metadata_notify());
 }
 
+/// XEP-0357 §3 requires the user's server to advertise
+/// `urn:xmpp:push:0` so XEP-0357-aware clients know to send the
+/// `<enable jid='push.<domain>' node='…'/>` IQ after they have
+/// registered their device with the Waddle Push Service. Without
+/// this, a conformant third-party client would refuse to enable
+/// push against the user's bare JID. Pinned by round-3 adversarial
+/// review on PR #760.
+#[test]
+fn test_server_features_advertise_xep0357_push() {
+    let features = server_features();
+    assert!(
+        features.contains(&Feature::push()),
+        "XEP-0357 §3: the user's server MUST advertise urn:xmpp:push:0"
+    );
+}
+
 #[test]
 fn test_server_features_exclude_unimplemented_advertisements() {
     let features = server_features();

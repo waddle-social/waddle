@@ -1168,13 +1168,25 @@ export class BrowserXmppClient {
   async enablePushNotifications(opts: { serviceJid: string; node: string }): Promise<boolean> {
     const xmpp = await this.requireConnectedXmpp();
     if (!xmpp.enable_push_notifications) return false;
-    try { await xmpp.enable_push_notifications(opts.serviceJid, opts.node, ""); return true; } catch { return false; }
+    try {
+      await xmpp.enable_push_notifications(opts.serviceJid, opts.node, "");
+      return true;
+    } catch (error) {
+      console.warn("[xmpp] XEP-0357 enable IQ rejected:", error);
+      return false;
+    }
   }
 
   async disablePushNotifications(opts: { serviceJid: string; node: string }): Promise<boolean> {
     const xmpp = await this.requireConnectedXmpp();
     if (!xmpp.disable_push_notifications) return false;
-    try { await xmpp.disable_push_notifications(opts.serviceJid, opts.node); return true; } catch { return false; }
+    try {
+      await xmpp.disable_push_notifications(opts.serviceJid, opts.node);
+      return true;
+    } catch (error) {
+      console.warn("[xmpp] XEP-0357 disable IQ rejected:", error);
+      return false;
+    }
   }
 
   /**
@@ -1191,7 +1203,8 @@ export class BrowserXmppClient {
     if (!xmpp.ensure_push_node) return null;
     try {
       return await xmpp.ensure_push_node(opts.serviceJid, opts.appId);
-    } catch {
+    } catch (error) {
+      console.warn("[xmpp] ensure-node IQ rejected:", error);
       return null;
     }
   }
@@ -1228,7 +1241,8 @@ export class BrowserXmppClient {
         providerToken: opts.providerToken,
         providerKeyMaterial: opts.providerKeyMaterial,
       });
-    } catch {
+    } catch (error) {
+      console.warn("[xmpp] register-device IQ rejected:", error);
       return null;
     }
   }
@@ -1242,7 +1256,13 @@ export class BrowserXmppClient {
   async disablePushDevice(opts: { serviceJid: string; node: string; deviceId: string }): Promise<boolean> {
     const xmpp = await this.requireConnectedXmpp();
     if (!xmpp.disable_push_device) return false;
-    try { await xmpp.disable_push_device(opts.serviceJid, opts.node, opts.deviceId); return true; } catch { return false; }
+    try {
+      await xmpp.disable_push_device(opts.serviceJid, opts.node, opts.deviceId);
+      return true;
+    } catch (error) {
+      console.warn("[xmpp] disable-device IQ rejected:", error);
+      return false;
+    }
   }
 
   /**
