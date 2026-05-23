@@ -879,6 +879,7 @@ function dayDividerLabel(createdAt: string): string {
       :connection-notice="connectionNotice"
       :connection-status-classes="connectionStatusClasses"
       :connection-status-icon="connectionStatusIcon"
+      :xmpp-client="xmppClient"
       @open-nav="emit('openNav')"
       @open-details="emit('openDetails')"
       @edit-channel="emit('editChannel')"

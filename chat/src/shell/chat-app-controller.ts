@@ -19,6 +19,7 @@ import { useXmppRosterContacts } from "@/contacts/roster";
 import { matchLocation, navigate, type RouteMatch } from "@/router";
 import { resolveChannelBySlug } from "@/shell/route-helpers";
 import { barePeerJid, jidDomain, parseManagedRoomBareJid } from "@/lib/xmpp-client";
+import { notifySettingsStore } from "@/lib/notify-settings";
 import { mdsChatKey, setLastSeen } from "@/lib/last-seen-store";
 import { roomJidForChannelId as resolveRoomJidForChannelId } from "@/lib/channel-room";
 import { connectionStore } from "@/lib/connection-store";
@@ -1560,6 +1561,15 @@ export function useChatAppController(giphyApiKey: string) {
     void channelUnread.hydrateFromInbox();
     void rosterContacts.loadRosterContacts();
     void socialFeed.refresh();
+
+    // Hydrate XEP-0492 per-chat notification settings from the user's
+    // XEP-0402 PEP bookmarks. Best-effort — an empty result is the
+    // first-run state and the UI falls back to the §3 conversation
+    // default via [[effectiveNotifyMode]].
+    void (async () => {
+      const client = xmppClient.value;
+      if (client) await notifySettingsStore.hydrate(client);
+    })();
 
     // Register service worker and sync push subscription (best-effort, non-blocking)
     void (async () => {

@@ -4,8 +4,10 @@ import { Hash, Menu, MessageCircle, MessagesSquare, Pin, Search, Settings, Users
 import AppAvatar from "@/components/ui/AppAvatar.vue";
 import CallButton from "@/components/calls/CallButton.vue";
 import MucCallButton from "@/components/calls/MucCallButton.vue";
+import NotifyModeButton from "@/components/chat/NotifyModeButton.vue";
 import type { ChannelSummary, SpaceSummary } from "@/lib/chat-types";
 import type { ConnectionNoticeCopy } from "@/lib/connection-notice";
+import type { BrowserXmppClient } from "@/lib/xmpp-client";
 import type { OccupantPresence } from "@/lib/xmpp-client";
 import type { MemberLoadState } from "@/waddles/directory";
 
@@ -38,6 +40,9 @@ const props = defineProps<{
   connectionNotice: ConnectionNoticeCopy | null;
   connectionStatusClasses: ConnectionStatusClasses | null;
   connectionStatusIcon: Component;
+  /** Wired XMPP client passed to per-conversation controls (notify
+   * mode picker). `null` while the session is still connecting. */
+  xmppClient?: BrowserXmppClient | null;
 }>();
 
 const MAX_HEADER_AVATARS = 4;
@@ -223,6 +228,13 @@ const memberButtonCopy = computed(() => {
         >
           <Pin class="w-3.5 h-3.5" />
         </button>
+        <NotifyModeButton
+          v-if="channel?.jid"
+          :room-jid="channel.jid"
+          :room-name="channel.name"
+          conversation-kind="private-group"
+          :client="xmppClient ?? null"
+        />
         <button
           v-if="canManageChannels && channel"
           class="chat-icon-button chat-icon-button--md text-muted-foreground hover:bg-muted hover:text-foreground"

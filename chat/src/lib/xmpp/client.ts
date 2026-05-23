@@ -247,6 +247,29 @@ export interface AdminUsersPage {
   next_cursor?: string | null;
 }
 
+/** XEP-0492 fallback notification mode — kebab-case to match the wire
+ * name produced by the WASM bridge. The chat UI presents these as
+ * "All messages", "Mentions only", "Muted" respectively.
+ */
+export type NotifyMode = "always" | "on-mention" | "never";
+
+/**
+ * One XEP-0402 bookmark item surfaced from
+ * `WaddleClient.fetchUserBookmarks` / `setRoomNotificationMode`.
+ *
+ * `notifyMode` is `null` when the bookmark exists but has no
+ * `<notify/>` extension yet (a bookmark another client wrote, or a
+ * Waddle bookmark we created before this slice). The chat resolves
+ * `null` against the conversation-kind default per XEP-0492 §3 via
+ * `resolveDefaultNotifyMode`.
+ */
+export interface UserBookmarkItem {
+  jid: string;
+  name: string | null;
+  autojoin: boolean;
+  notifyMode: NotifyMode | null;
+}
+
 type CompatEmitter = {
   on?: (event: string, handler: (...args: any[]) => void) => void;
   off?: (event: string, handler: (...args: any[]) => void) => void;
@@ -1271,6 +1294,58 @@ export class BrowserXmppClient {
       return await xmpp.disable_push_device(opts.serviceJid, opts.node, opts.deviceId);
     } catch (error) {
       console.warn("[xmpp] disable-device IQ rejected:", error);
+      return null;
+    }
+  }
+
+  /**
+   * Fetch the user's XEP-0402 bookmarks from PEP, surfacing each one
+   * with its XEP-0492 fallback notification mode when present (#532).
+   *
+   * Returns an empty list when the user has not yet published any
+   * bookmarks — that is the on-first-connect state and the chat UI
+   * resolves per-conversation defaults via [[resolveDefaultNotifyMode]]
+   * per XEP-0492 §3.
+   */
+  async fetchUserBookmarks(): Promise<UserBookmarkItem[]> {
+    const xmpp = await this.requireConnectedXmpp();
+    if (!xmpp.fetch_user_bookmarks) return [];
+    try {
+      const items = (await xmpp.fetch_user_bookmarks()) as UserBookmarkItem[] | null;
+      return items ?? [];
+    } catch (error) {
+      console.warn("[xmpp] XEP-0402 bookmark fetch rejected:", error);
+      return [];
+    }
+  }
+
+  /**
+   * Set the XEP-0492 fallback notification mode for one room.
+   *
+   * The WASM bridge is fetch-merge-publish: it preserves the rest of
+   * the user's bookmark for that room (name, autojoin) as well as
+   * foreign extensions / identity-scoped notify siblings that another
+   * client may have written (XEP-0492 §3 first paragraph). On success,
+   * resolves to the updated bookmark — the chat store should replace
+   * its cached entry with this value rather than trusting the
+   * requested mode in isolation.
+   */
+  async setRoomNotificationMode(opts: {
+    roomJid: string;
+    mode: "always" | "on-mention" | "never";
+    name?: string;
+  }): Promise<UserBookmarkItem | null> {
+    const xmpp = await this.requireConnectedXmpp();
+    if (!xmpp.set_room_notification_mode) return null;
+    try {
+      const result = (await xmpp.set_room_notification_mode({
+        roomJid: opts.roomJid,
+        mode: opts.mode,
+        name: opts.name,
+      })) as UserBookmarkItem;
+      return result;
+    } catch (error) {
+      console.warn("[xmpp] XEP-0492 bookmark publish rejected:", error);
       return null;
     }
   }
