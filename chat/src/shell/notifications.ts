@@ -264,12 +264,26 @@ export function usePushNotifications() {
   }
 
   async function disablePushSubscriptionImpl(xmppClient: BrowserXmppClient, userJid: string): Promise<boolean> {
-    const reg = await getOrRegisterServiceWorker();
-    if (reg) {
-      const existing = await reg.pushManager.getSubscription();
-      if (existing) {
-        await existing.unsubscribe();
+    // Browser unsubscribe is best-effort. If `pushManager.unsubscribe`
+    // (or `getSubscription`) rejects — quota errors, transient
+    // permissions glitch, browser bug — we MUST still continue to
+    // the server-side `<disable-device>` IQ. Otherwise the user
+    // leaves a stale device row on the Push Service that keeps
+    // receiving fan-out from the (still-enabled) user-server.
+    try {
+      const reg = await getOrRegisterServiceWorker();
+      if (reg) {
+        const existing = await reg.pushManager.getSubscription();
+        if (existing) {
+          await existing.unsubscribe();
+        }
       }
+    } catch (error) {
+      console.warn(
+        "[notifications] Browser pushManager unsubscribe failed; " +
+        "continuing to server-side disable-device:",
+        error,
+      );
     }
 
     const serviceJid = resolvePushServiceJid(userJid);
