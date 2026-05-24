@@ -60,6 +60,14 @@ hmac = { workspace = true }
 rand = { workspace = true }
 pbkdf2 = { version = "0.13", features = ["hmac"] }
 
+# Web Push crypto (RFC 8291 aes128gcm + RFC 8292 VAPID JWT signing)
+aes-gcm = { workspace = true }
+hkdf = { workspace = true }
+p256 = { workspace = true }
+elliptic-curve = { workspace = true }
+jsonwebtoken = { workspace = true }
+zeroize = { workspace = true }
+
 # HTTP client (for Web Push notifications)
 reqwest = { workspace = true }
 

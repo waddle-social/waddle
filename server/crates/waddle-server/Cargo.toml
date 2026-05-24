@@ -79,6 +79,9 @@ sha2 = { workspace = true }
 p256 = { workspace = true }
 elliptic-curve = { workspace = true }
 argon2 = { workspace = true }
+aes-gcm = { workspace = true }
+hkdf = { workspace = true }
+zeroize = { workspace = true }
 
 # Utilities
 uuid = { workspace = true }
