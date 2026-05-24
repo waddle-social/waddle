@@ -130,13 +130,19 @@ pub fn read_fallback_mode(notify: &Element) -> Option<NotifyMode> {
 ///   forbids more than one element with the same name + attrs.
 /// * When the user changes the fallback **name** (e.g. always →
 ///   never), the `<advanced/>` child attached to the prior fallback
-///   is **dropped**. The XEP-0492 §3 ¶4 "closest fallback" advice
-///   means the writing client picked the parent element name to
-///   encode its non-advanced fallback semantics; once the user
-///   explicitly overrides that parent's name, the advanced rules
-///   no longer reflect user intent. Re-publishing them under a
-///   different parent would "alter" the setting per §3 ¶1, which
-///   the spec forbids. Round-7 XEP reviewer P2 pinning.
+///   is **moved verbatim under the new fallback parent**. XEP-0492
+///   §3 ¶1 *"MUST NOT delete or alter the `<advanced/>` notification
+///   settings they do not support when updating the notification
+///   settings for a given conversation"* — moving the unchanged
+///   element to a new parent preserves the foreign rules while
+///   honoring the user's explicit fallback override. Dropping the
+///   block would violate the MUST NOT; promoting it to an
+///   identity-scoped sibling would require synthesizing a disco
+///   identity Waddle hasn't registered. The trade-off (the original
+///   writing client picked the parent name as the closest non-
+///   advanced fallback per §3 ¶5; our move re-parents under a
+///   different fallback name) is the least-bad option round-10 of
+///   the XMPP-compliance review settled on.
 /// * When the merge is a no-op (the existing fallback already has
 ///   the requested mode), the `<advanced/>` child is preserved
 ///   verbatim — nothing to invalidate.
@@ -160,6 +166,11 @@ pub fn merge_notify_into_extensions(extensions: Option<&Element>, mode: NotifyMo
                     }
                     notify_setting_children.push(setting.clone());
                 }
+            } else if child.ns() == crate::pep::NS_BOOKMARKS {
+                // XEP-0402 XSD `<extensions/>` content is
+                // `<xs:any namespace='##other'>` — drop any
+                // malformed same-namespace child so the republish
+                // is schema-valid (round-12 Copilot review).
             } else {
                 builder = builder.append(child.clone());
             }
@@ -250,9 +261,13 @@ fn build_merged_notify_element(setting_children: Vec<Element>, mode: NotifyMode)
     emit.extend(identity_scoped);
     emit.extend(foreign);
 
-    // Stable sort by (XSD mode rank, identity-category, identity-type).
+    // Sort by (XSD mode rank, identity-category, identity-type).
     // Unknown element names (foreign children) sort after the spec
     // settings so the canonical XSD prefix appears first.
+    // `Vec::sort_by` is stable per std (https://doc.rust-lang.org/
+    // std/vec/struct.Vec.html#method.sort_by) so the relative order
+    // of equal-key elements is preserved for debuggability and
+    // interop — the unstable variant would be `sort_unstable_by`.
     emit.sort_by(|a, b| sort_key(a).cmp(&sort_key(b)));
 
     let mut builder = Element::builder("notify", NS_NOTIFICATION_SETTINGS);

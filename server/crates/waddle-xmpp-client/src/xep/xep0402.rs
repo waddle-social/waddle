@@ -72,9 +72,20 @@ impl BookmarkItem {
             .get_child("password", NS_BOOKMARKS)
             .map(|el| el.text())
             .filter(|text| !text.is_empty());
+        // XEP-0402 XSD declares `<extensions/>` content as
+        // `<xs:any namespace='##other'>` — children MUST live in a
+        // non-bookmarks namespace. Filter any malformed
+        // same-namespace child here so a republish doesn't
+        // propagate the violation back onto the wire. Round-12
+        // Copilot review.
         let extensions = conference
             .get_child("extensions", NS_BOOKMARKS)
-            .map(|exts| exts.children().cloned().collect())
+            .map(|exts| {
+                exts.children()
+                    .filter(|child| child.ns() != NS_BOOKMARKS)
+                    .cloned()
+                    .collect()
+            })
             .unwrap_or_default();
         Some(Self {
             jid,
@@ -257,6 +268,31 @@ mod tests {
             read_fallback_mode(&parsed.extensions[0]),
             Some(NotifyMode::OnMention)
         );
+    }
+
+    #[test]
+    fn parse_drops_same_namespace_extensions_children() {
+        // Round-12 Copilot review: XEP-0402 XSD `<extensions/>`
+        // content is `<xs:any namespace='##other'>` — a same-ns
+        // child is malformed. If we kept it on parse, a subsequent
+        // republish (via set_room_notification_mode's fetch-merge-
+        // publish) would re-emit the violation and the server
+        // could reject the publish.
+        let xml =
+            "<item xmlns='http://jabber.org/protocol/pubsub' id='theplay@conference.example.com'>\
+                    <conference xmlns='urn:xmpp:bookmarks:1' name='The Play'>\
+                        <extensions>\
+                            <invalid xmlns='urn:xmpp:bookmarks:1'/>\
+                            <notify xmlns='urn:xmpp:notification-settings:1'><always /></notify>\
+                        </extensions>\
+                    </conference>\
+                    </item>";
+        let item: Element = xml.parse().expect("valid xml");
+        let parsed = BookmarkItem::parse_item(&item).expect("parsed");
+        // The malformed same-ns child is filtered out; only the
+        // foreign-namespace `<notify/>` survives.
+        assert_eq!(parsed.extensions.len(), 1);
+        assert!(parsed.extensions[0].is("notify", "urn:xmpp:notification-settings:1",));
     }
 
     #[test]

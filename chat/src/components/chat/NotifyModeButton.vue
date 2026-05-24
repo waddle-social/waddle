@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref } from "vue";
 import { AtSign, Bell, BellOff } from "lucide-vue-next";
-import type { BrowserXmppClient } from "@/lib/xmpp-client";
+import type { BrowserXmppClient, NotifyMode } from "@/lib/xmpp-client";
 import {
   effectiveNotifyMode,
   nextMenuIndex,
@@ -9,7 +9,6 @@ import {
   NOTIFY_MODE_HINT,
   NOTIFY_MODE_LABEL,
   type ConversationKind,
-  type NotifyMode,
 } from "@/lib/notify-settings";
 
 /** Per-chat XEP-0492 notification mode picker (#532).
@@ -214,6 +213,7 @@ onUnmounted(() => {
       :title="buttonTitle"
       :aria-label="buttonTitle"
       :aria-expanded="open"
+      :disabled="disabled"
       :aria-disabled="disabled"
       aria-haspopup="menu"
       @click="toggleOpen"

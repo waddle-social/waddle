@@ -799,8 +799,13 @@ pub struct SetRoomNotificationModeOptions {
     /// builder.
     pub mode: waddle_xmpp_client::xep::xep0492::NotifyMode,
     /// `<conference name='…'>` to use when no bookmark exists yet.
-    /// Required so the freshly-created bookmark carries a useful
-    /// display name for clients that lean on it (XEP-0402 §2.2).
+    /// Optional; XEP-0402 §2.2 makes the `name` attribute optional on
+    /// the wire (XSD `use='optional'`). Callers SHOULD pass a name
+    /// so the freshly-created bookmark carries a useful display
+    /// label for clients that lean on it, but the WASM bridge
+    /// happily publishes without one. When the room already has a
+    /// bookmark its existing `name` is preserved verbatim regardless
+    /// of this field.
     pub name: Option<String>,
 }
 
