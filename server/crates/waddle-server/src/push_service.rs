@@ -15,6 +15,8 @@ use jid::BareJid;
 use minidom::Element;
 use sha2::Sha256;
 use waddle_xmpp::pubsub::{Affiliation, NodeConfig, PubSubItem, PubSubRequest, PubSubStorage};
+use waddle_xmpp::push::vapid::VapidSigner;
+use waddle_xmpp::push::WebPushSender;
 use waddle_xmpp::push::{PushError, PushSubscription};
 use waddle_xmpp::xep::xep0357::NS_PUSH;
 use waddle_xmpp::XmppError;
@@ -59,6 +61,15 @@ pub struct DatabasePushServiceStore {
     db: Database,
     secrets: PushSecretCipher,
     pubsub_boundary: Option<PushServicePubSubBoundary>,
+    /// VAPID signer for outbound Web Push delivery. `None` when the
+    /// process boots without a configured push service (legacy test
+    /// path); the publish-job worker treats absence as
+    /// [`waddle_xmpp::push::WebPushCapability::Degraded`] and short-
+    /// circuits Web Push fan-out without falling back to plaintext.
+    vapid_signer: Option<Arc<dyn VapidSigner>>,
+    /// Transport-layer sender for outbound Web Push HTTPS posts. Paired
+    /// with [`Self::vapid_signer`] — both Some or both None.
+    web_push_sender: Option<Arc<dyn WebPushSender>>,
 }
 
 #[derive(Clone)]
@@ -508,6 +519,8 @@ impl DatabasePushServiceStore {
             db,
             secrets: PushSecretCipher::new(secret_key),
             pubsub_boundary: None,
+            vapid_signer: None,
+            web_push_sender: None,
         };
         store.initialize().await?;
         Ok(store)
@@ -526,9 +539,24 @@ impl DatabasePushServiceStore {
                 service_jid,
                 storage: pubsub_storage,
             }),
+            vapid_signer: None,
+            web_push_sender: None,
         };
         store.initialize().await?;
         Ok(store)
+    }
+
+    /// Install the VAPID signer + Web Push transport for outbound
+    /// delivery. Called once at boot from `server::http`. Both arguments
+    /// are paired — Web Push cannot dispatch without either.
+    pub fn with_web_push_provider(
+        mut self,
+        vapid_signer: Arc<dyn VapidSigner>,
+        web_push_sender: Arc<dyn WebPushSender>,
+    ) -> Self {
+        self.vapid_signer = Some(vapid_signer);
+        self.web_push_sender = Some(web_push_sender);
+        self
     }
 
     pub fn database(&self) -> Database {
