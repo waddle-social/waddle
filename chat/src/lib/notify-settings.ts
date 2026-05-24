@@ -163,7 +163,20 @@ export function createNotifySettingsStore(): NotifySettingsStore {
     const myGen = generation;
     hydrating.value = true;
     try {
-      const items = await client.fetchUserBookmarks();
+      // Defence-in-depth — `client.fetchUserBookmarks` is supposed
+      // to always resolve to a (possibly empty) array, but the
+      // session-lifecycle handler invokes hydrate with `void`, so
+      // any thrown rejection from a lower layer would surface as
+      // an unhandled Promise rejection on flaky networks. Catch
+      // and log, then proceed without committing. Round-14 PR
+      // review.
+      let items: UserBookmarkItem[];
+      try {
+        items = await client.fetchUserBookmarks();
+      } catch (error) {
+        console.warn("[notify-settings] fetchUserBookmarks threw:", error);
+        return;
+      }
       if (myGen !== generation) {
         // reset() fired while we were fetching — the user logged
         // out (or switched accounts) and our results no longer

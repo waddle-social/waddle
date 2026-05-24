@@ -745,7 +745,11 @@ export function useChatAppController(giphyApiKey: string) {
       // headlines on `urn:xmpp:bookmarks:1` (deferred follow-up),
       // fresh-only hydrate is the correct cadence.
       if (event.type === "fresh") {
-        void notifySettings.hydrate(client);
+        // Belt-and-braces: hydrate already catches lower-layer
+        // throws, but call-site .catch defends against any future
+        // regression so an unhandled rejection doesn't propagate
+        // out of the lifecycle handler. Round-14 PR review.
+        notifySettings.hydrate(client).catch(() => undefined);
       }
     });
   }, { immediate: true });
@@ -1592,7 +1596,12 @@ export function useChatAppController(giphyApiKey: string) {
     // default via [[effectiveNotifyMode]].
     void (async () => {
       const client = xmppClient.value;
-      if (client) await notifySettings.hydrate(client);
+      if (!client) return;
+      // Best-effort: hydrate already swallows lower-layer
+      // exceptions, but a defensive .catch keeps the IIFE quiet
+      // even if a future regression bypasses the inner guard.
+      // Round-14 PR review.
+      await notifySettings.hydrate(client).catch(() => undefined);
     })();
 
     // Register service worker and sync push subscription (best-effort, non-blocking)

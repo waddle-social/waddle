@@ -1319,13 +1319,20 @@ export class BrowserXmppClient {
    * per XEP-0492 §3.
    */
   async fetchUserBookmarks(): Promise<UserBookmarkItem[]> {
-    const xmpp = await this.requireConnectedXmpp();
-    if (!xmpp.fetch_user_bookmarks) return [];
+    // Wrap the whole call — including `requireConnectedXmpp()` — so
+    // a reconnect/teardown race (the client instance exists but the
+    // session isn't ready) doesn't escape as an unhandled
+    // rejection. `notifySettingsStore.hydrate` is dispatched with
+    // `void` from the lifecycle handler, so a thrown rejection here
+    // becomes an unhandled Promise rejection on flaky networks
+    // exactly when hydrate fires. Round-14 PR review.
     try {
+      const xmpp = await this.requireConnectedXmpp();
+      if (!xmpp.fetch_user_bookmarks) return [];
       const items = (await xmpp.fetch_user_bookmarks()) as UserBookmarkItem[] | null;
       return items ?? [];
     } catch (error) {
-      console.warn("[xmpp] XEP-0402 bookmark fetch rejected:", error);
+      console.warn("[xmpp] XEP-0402 bookmark fetch failed:", error);
       return [];
     }
   }

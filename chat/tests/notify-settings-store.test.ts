@@ -244,6 +244,30 @@ describe("createNotifySettingsStore", () => {
     expect(store.bookmarks.value["old-node@example.com"]).toBeUndefined();
   });
 
+  test("hydrate swallows a thrown rejection (round-14 PR review)", async () => {
+    // Pin the defence-in-depth: a lower-layer regression that
+    // throws (e.g. unwrapped requireConnectedXmpp() rejection)
+    // MUST NOT propagate as an unhandled Promise rejection out of
+    // the lifecycle handler's `void` dispatch.
+    const store = createNotifySettingsStore();
+    store.replaceAll([
+      { jid: "kept@example.com", name: "Kept", autojoin: false, notifyMode: "always" },
+    ]);
+    const throwing = {
+      async fetchUserBookmarks(): Promise<UserBookmarkItem[]> {
+        throw new Error("session not ready");
+      },
+      async setRoomNotificationMode(): Promise<SetRoomNotificationModeOutcome> {
+        return { kind: "error" };
+      },
+    };
+    // Must resolve, NOT reject.
+    await store.hydrate(throwing as unknown as BrowserXmppClient);
+    expect(store.hydrating.value).toBe(false);
+    // Cache untouched — the failed fetch never committed.
+    expect(store.bookmarks.value["kept@example.com"].notifyMode).toBe("always");
+  });
+
   test("hydrate-during-reset: stale fetch result is discarded (round-10 P1)", async () => {
     const store = createNotifySettingsStore();
     let resolveFetch: (items: UserBookmarkItem[]) => void = () => {};
