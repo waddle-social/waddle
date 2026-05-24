@@ -542,6 +542,30 @@ fn attempt_status_is_transient(status: &str) -> bool {
     )
 }
 
+/// XEP-0357 §6: which attempt outcomes mean the underlying device row
+/// should be marked disabled in `push_devices` so future publish jobs
+/// stop fanning out to it.
+///
+/// - `web-gone` is the textbook §6 trigger: the relay returned 404/410
+///   meaning the subscription is permanently dead.
+/// - `web-invalid-keys` / `web-invalid-endpoint` mean the stored
+///   material is structurally unusable; retrying the same row will keep
+///   failing with the same error.
+/// - `web-unseal-failed` is deliberately NOT listed — it usually
+///   signals a root-key drift across boots, which is fixable without
+///   the user re-registering their device. Disabling on that would
+///   compound a configuration mistake into data loss.
+/// - Transient statuses are handled by the retry path; we keep the
+///   device row active so the next attempt has somewhere to land.
+fn attempt_status_warrants_device_disable(status: &str) -> bool {
+    matches!(
+        status,
+        dispatch::ATTEMPT_STATUS_WEB_GONE
+            | dispatch::ATTEMPT_STATUS_WEB_INVALID_KEYS
+            | dispatch::ATTEMPT_STATUS_WEB_INVALID_ENDPOINT
+    )
+}
+
 /// Truncate a free-form diagnostic to fit the
 /// `push_delivery_attempts.last_error` column without bloating the table
 /// when a relay echoes back a multi-KB error body. Splits on a char
@@ -2346,13 +2370,20 @@ impl DatabasePushServiceStore {
                 } else {
                     Some(truncate_last_error(&web_push_outcome_diagnostic(&outcome)))
                 };
-                // TODO(#762/PR-D2 follow-up): when `outcome` is
-                // `WebPushOutcome::SubscriptionGone`, hook the XEP-0357
-                // §6 cleanup chain here — emit the IQ-error to the
-                // publisher and `urn:waddle:push-service:0` disable the
-                // device. Until then we persist the typed status
-                // `"web-gone"` so the next commit can find every gone
-                // attempt by SELECT.
+                // XEP-0357 §6 forward cleanup runs in
+                // `finalize_publish_job` — when the persisted status
+                // hits `attempt_status_warrants_device_disable`, the
+                // matching `push_devices` row is flipped to
+                // `disabled` in the same tx.
+                //
+                // TODO(#762 follow-up): emit a server-initiated
+                // `<message><device-disabled xmlns='urn:waddle:push-
+                // service:0'/></message>` to the registering chat
+                // client so it can drop its local subscription and
+                // resubscribe with a fresh device-id. Requires
+                // plumbing the connection router into the publish-job
+                // worker; deferred so PR-D2 stays scoped to the
+                // server-side cleanup half of §6.
                 DispatchedAttempt {
                     device_id: device.device_id.clone(),
                     platform: device.platform,
@@ -2415,6 +2446,43 @@ impl DatabasePushServiceStore {
             )
             .await
             .map_err(|error| XmppError::internal(error.to_string()))?;
+
+            // XEP-0357 §6 cleanup (forward direction):
+            //
+            //   "If a publish request is returned with an IQ-error,
+            //    then the server SHOULD consider the particular JID
+            //    and node combination to be disabled."
+            //
+            // The XEP frames this from the user-server's perspective,
+            // but in our deployment the push service AND the
+            // user-server are the same process. When the Web Push
+            // relay tells us a subscription is permanently gone
+            // (404/410), we mark the underlying `push_devices` row
+            // disabled inside the same tx that records the gone
+            // attempt — the next publish-job for this node will skip
+            // the device and `count_active_devices_for_node_tx` will
+            // see one fewer subscriber.
+            //
+            // We also disable on `web-invalid-keys` /
+            // `web-invalid-endpoint`: the stored material is
+            // structurally unusable, retrying with the same row is
+            // pointless. `web-unseal-failed` is deliberately NOT
+            // disabled — it usually signals a root-key drift across
+            // boots and is fixable without the user re-registering.
+            //
+            // Reverse direction (notifying the chat client so it can
+            // re-register a fresh subscription) lands in a follow-up
+            // commit — see `dispatch_web_device`.
+            if attempt_status_warrants_device_disable(attempt.status) {
+                mark_device_disabled_tx(
+                    &mut tx,
+                    job.node(),
+                    &attempt.device_id,
+                    attempt.status,
+                    now_ms,
+                )
+                .await?;
+            }
         }
         let any_transient = attempts
             .iter()
@@ -3301,6 +3369,42 @@ async fn mark_publish_job_failed_tx(
         WHERE job_id = ?
         "#,
         crate::db_params![PUBLISH_JOB_STATUS_FAILED, error, now_ms, job_id],
+    )
+    .await
+    .map_err(|error| XmppError::internal(error.to_string()))?;
+    Ok(())
+}
+
+/// XEP-0357 §6 forward cleanup: flip a `push_devices` row from
+/// `active` to `disabled` when its push subscription is permanently
+/// unusable (relay returned 404/410, stored keys are structurally
+/// invalid, etc.). Idempotent — already-disabled rows stay disabled.
+/// `reason` is stored on the row as `last_error` so an operator can
+/// see which permanent-failure outcome triggered the disable.
+async fn mark_device_disabled_tx(
+    tx: &mut crate::db::Transaction<'_>,
+    node: &str,
+    device_id: &str,
+    reason: &str,
+    now_ms: i64,
+) -> Result<(), XmppError> {
+    tx.execute(
+        r#"
+        UPDATE push_devices
+        SET status = ?,
+            failure_count = failure_count + 1,
+            last_error = ?,
+            updated_at_ms = ?
+        WHERE node = ? AND device_id = ? AND status = ?
+        "#,
+        crate::db_params![
+            DEVICE_STATUS_DISABLED,
+            reason,
+            now_ms,
+            node,
+            device_id,
+            DEVICE_STATUS_ACTIVE,
+        ],
     )
     .await
     .map_err(|error| XmppError::internal(error.to_string()))?;
@@ -5080,6 +5184,342 @@ mod tests {
         assert_eq!(attempts.len(), 1);
         assert_eq!(attempts[0].item_id(), "retry-when-device-returns");
         assert!(queued_after.is_empty());
+    }
+
+    // ── XEP-0357 §6 forward cleanup ────────────────────────────────────
+    //
+    // When the Web Push relay reports the subscription is permanently
+    // gone (404/410), the publish-job worker records a `web-gone`
+    // attempt AND marks the underlying `push_devices` row disabled in
+    // the same tx so future publish jobs for the node skip it. These
+    // tests exercise the full path with a mock `WebPushSender` so the
+    // cleanup behavior is locked in without needing a live relay.
+
+    use std::future::Future;
+    use std::pin::Pin;
+    use waddle_xmpp::push::types::{VapidSub, WebPushOutcome};
+    use waddle_xmpp::push::{WebPushRequest, WebPushSender};
+
+    /// A `WebPushSender` that returns the same configured outcome for
+    /// every request. Counts calls so tests can assert the worker
+    /// actually invoked it.
+    #[derive(Clone)]
+    struct FixedOutcomeSender {
+        outcome: WebPushOutcome,
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl FixedOutcomeSender {
+        fn new(outcome: WebPushOutcome) -> Self {
+            Self {
+                outcome,
+                calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            }
+        }
+
+        fn call_count(&self) -> usize {
+            self.calls.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    impl WebPushSender for FixedOutcomeSender {
+        fn send(
+            &self,
+            _request: WebPushRequest<'_>,
+        ) -> Pin<Box<dyn Future<Output = WebPushOutcome> + Send + '_>> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let outcome = self.outcome.clone();
+            Box::pin(async move { outcome })
+        }
+    }
+
+    /// Build a Web Push-shape `<notification>` payload with the typed
+    /// `urn:waddle:push:context:0` element the chat publisher emits.
+    /// `class` is the db-form value (e.g. `"dm"`, `"personal_mention"`).
+    fn web_push_notification_item(
+        item_id: &str,
+        conversation: &str,
+        class: &str,
+        message_count: u32,
+    ) -> PubSubItem {
+        use waddle_xmpp::xep::xep0004::NS_DATA_FORMS;
+        let summary = Element::builder("x", NS_DATA_FORMS)
+            .attr(minidom::rxml::xml_ncname!("type").to_owned(), "result")
+            .append(
+                Element::builder("field", NS_DATA_FORMS)
+                    .attr(minidom::rxml::xml_ncname!("var").to_owned(), "FORM_TYPE")
+                    .attr(minidom::rxml::xml_ncname!("type").to_owned(), "hidden")
+                    .append(
+                        Element::builder("value", NS_DATA_FORMS)
+                            .append("urn:xmpp:push:summary")
+                            .build(),
+                    )
+                    .build(),
+            )
+            .append(
+                Element::builder("field", NS_DATA_FORMS)
+                    .attr(
+                        minidom::rxml::xml_ncname!("var").to_owned(),
+                        "message-count",
+                    )
+                    .append(
+                        Element::builder("value", NS_DATA_FORMS)
+                            .append(message_count.to_string())
+                            .build(),
+                    )
+                    .build(),
+            )
+            .build();
+        let context = Element::builder("context", "urn:waddle:push:context:0")
+            .attr(
+                minidom::rxml::xml_ncname!("conversation").to_owned(),
+                conversation,
+            )
+            .attr(minidom::rxml::xml_ncname!("class").to_owned(), class)
+            .build();
+        let notification = Element::builder("notification", NS_PUSH)
+            .append(summary)
+            .append(context)
+            .build();
+        PubSubItem::new(Some(item_id.to_string()), Some(notification))
+    }
+
+    /// Generate a real (p256dh, auth) subscription pair the
+    /// `SubscriptionKeys` parser will accept. The relay-side mock
+    /// sender ignores them, but the worker's encrypt + sign path runs
+    /// for real so the keys must be valid.
+    fn fresh_subscription_material() -> (String, String) {
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        use base64::Engine as _;
+        use p256::elliptic_curve::rand_core::OsRng;
+        use p256::elliptic_curve::sec1::ToEncodedPoint;
+        use rand::RngExt as _;
+        let secret = p256::SecretKey::random(&mut OsRng);
+        let p256dh_bytes = secret.public_key().to_encoded_point(false);
+        let p256dh = URL_SAFE_NO_PAD.encode(p256dh_bytes.as_bytes());
+        let mut auth = [0u8; 16];
+        rand::rng().fill(&mut auth[..]);
+        let auth = URL_SAFE_NO_PAD.encode(auth);
+        (p256dh, auth)
+    }
+
+    /// Build a store wired with a real VAPID signer (from
+    /// `VapidStorage::load_or_provision` against a fresh in-memory db)
+    /// and a [`FixedOutcomeSender`].
+    async fn store_with_web_push_provider(
+        outcome: WebPushOutcome,
+    ) -> (DatabasePushServiceStore, FixedOutcomeSender) {
+        let db = Database::in_memory("push-service-web-push")
+            .await
+            .expect("db");
+        let store = DatabasePushServiceStore::new_with_secret_key(
+            db.clone(),
+            b"waddle-push-service-test-secret-key-32b",
+        )
+        .await
+        .expect("store");
+        let signer =
+            crate::push_service::vapid_storage::VapidStorage::load_or_provision(db, b"root-key")
+                .await
+                .expect("VAPID signer");
+        let sender = FixedOutcomeSender::new(outcome);
+        let sender_arc: Arc<dyn WebPushSender> = Arc::new(sender.clone());
+        let sub = VapidSub::default_for_domain("example.com").expect("vapid sub");
+        let store = store.with_web_push_provider(signer, sender_arc, sub);
+        (store, sender)
+    }
+
+    async fn device_status(
+        store: &DatabasePushServiceStore,
+        node: &str,
+        device_id: &str,
+    ) -> String {
+        let mut rows = store
+            .query(
+                "SELECT status FROM push_devices WHERE node = ? AND device_id = ?",
+                crate::db_params![node, device_id],
+            )
+            .await
+            .expect("status query");
+        let row = rows
+            .next()
+            .await
+            .expect("status query row")
+            .expect("device row present");
+        row.get::<String>(0).expect("status column")
+    }
+
+    #[tokio::test]
+    async fn subscription_gone_marks_device_disabled_per_xep0357_6() {
+        let (store, sender) =
+            store_with_web_push_provider(WebPushOutcome::SubscriptionGone { status: 410 }).await;
+        let owner = owner();
+        let node = store.ensure_node(&owner, "web").await.expect("node");
+        let (p256dh, auth) = fresh_subscription_material();
+        store
+            .upsert_device(
+                &owner,
+                PushDeviceRegistration::new("web-1", node.node(), PushDevicePlatform::Web, "test")
+                    .with_provider_endpoint(Some(
+                        "https://push.example.com/abc-subscription".to_string(),
+                    ))
+                    .with_provider_token(Some(auth))
+                    .with_provider_key_material(Some(p256dh)),
+            )
+            .await
+            .expect("device");
+        store
+            .publish_notification_from_user_server(
+                node.node(),
+                &web_push_notification_item("gone-item-1", "alice@example.com", "dm", 1),
+                &owner,
+            )
+            .await
+            .expect("publish");
+        store
+            .drain_queued_notification_publish_jobs(16)
+            .await
+            .expect("drain");
+
+        assert_eq!(
+            sender.call_count(),
+            1,
+            "real send must run for an active web device with full material"
+        );
+        assert_eq!(
+            device_status(&store, node.node(), "web-1").await,
+            DEVICE_STATUS_DISABLED,
+            "XEP-0357 §6: a `web-gone` outcome must flip the underlying device to disabled"
+        );
+        let attempts = store
+            .delivery_attempts_for_node(node.node())
+            .await
+            .expect("attempts");
+        assert_eq!(attempts.len(), 1);
+        assert_eq!(attempts[0].status(), dispatch::ATTEMPT_STATUS_WEB_GONE);
+    }
+
+    #[tokio::test]
+    async fn delivered_outcome_keeps_device_active() {
+        let (store, sender) =
+            store_with_web_push_provider(WebPushOutcome::Delivered { status: 201 }).await;
+        let owner = owner();
+        let node = store.ensure_node(&owner, "web").await.expect("node");
+        let (p256dh, auth) = fresh_subscription_material();
+        store
+            .upsert_device(
+                &owner,
+                PushDeviceRegistration::new("web-1", node.node(), PushDevicePlatform::Web, "test")
+                    .with_provider_endpoint(Some(
+                        "https://push.example.com/abc-subscription".to_string(),
+                    ))
+                    .with_provider_token(Some(auth))
+                    .with_provider_key_material(Some(p256dh)),
+            )
+            .await
+            .expect("device");
+        store
+            .publish_notification_from_user_server(
+                node.node(),
+                &web_push_notification_item("delivered-item-1", "alice@example.com", "dm", 1),
+                &owner,
+            )
+            .await
+            .expect("publish");
+        store
+            .drain_queued_notification_publish_jobs(16)
+            .await
+            .expect("drain");
+
+        assert_eq!(sender.call_count(), 1);
+        assert_eq!(
+            device_status(&store, node.node(), "web-1").await,
+            DEVICE_STATUS_ACTIVE,
+            "Delivered outcomes must NOT disable the device"
+        );
+        let attempts = store
+            .delivery_attempts_for_node(node.node())
+            .await
+            .expect("attempts");
+        assert_eq!(attempts.len(), 1);
+        assert_eq!(attempts[0].status(), dispatch::ATTEMPT_STATUS_WEB_DELIVERED);
+    }
+
+    #[tokio::test]
+    async fn transient_outcome_keeps_device_active_and_requeues() {
+        let (store, sender) = store_with_web_push_provider(WebPushOutcome::Transient {
+            kind: waddle_xmpp::push::types::TransientFailure::Network,
+        })
+        .await;
+        let owner = owner();
+        let node = store.ensure_node(&owner, "web").await.expect("node");
+        let (p256dh, auth) = fresh_subscription_material();
+        store
+            .upsert_device(
+                &owner,
+                PushDeviceRegistration::new("web-1", node.node(), PushDevicePlatform::Web, "test")
+                    .with_provider_endpoint(Some(
+                        "https://push.example.com/abc-subscription".to_string(),
+                    ))
+                    .with_provider_token(Some(auth))
+                    .with_provider_key_material(Some(p256dh)),
+            )
+            .await
+            .expect("device");
+        store
+            .publish_notification_from_user_server(
+                node.node(),
+                &web_push_notification_item("transient-item-1", "alice@example.com", "dm", 1),
+                &owner,
+            )
+            .await
+            .expect("publish");
+        store
+            .drain_queued_notification_publish_jobs(16)
+            .await
+            .expect("drain");
+
+        assert_eq!(sender.call_count(), 1);
+        assert_eq!(
+            device_status(&store, node.node(), "web-1").await,
+            DEVICE_STATUS_ACTIVE,
+            "Transient outcomes must keep the device active — XEP-0357 §6 disable applies only to permanent failures"
+        );
+    }
+
+    #[tokio::test]
+    async fn warrants_disable_matches_xep0357_section_6_intent() {
+        // §6: permanent unusable subscription → disable. Transient and
+        // unseal-class errors → keep active. Lock the matrix down so a
+        // future enum reorganization can't silently broaden or narrow
+        // the disable trigger.
+        assert!(attempt_status_warrants_device_disable(
+            dispatch::ATTEMPT_STATUS_WEB_GONE
+        ));
+        assert!(attempt_status_warrants_device_disable(
+            dispatch::ATTEMPT_STATUS_WEB_INVALID_KEYS
+        ));
+        assert!(attempt_status_warrants_device_disable(
+            dispatch::ATTEMPT_STATUS_WEB_INVALID_ENDPOINT
+        ));
+        for never_disable in [
+            dispatch::ATTEMPT_STATUS_WEB_DELIVERED,
+            dispatch::ATTEMPT_STATUS_WEB_CLOCK_SKEW,
+            dispatch::ATTEMPT_STATUS_WEB_RATE_LIMITED,
+            dispatch::ATTEMPT_STATUS_WEB_TRANSIENT,
+            dispatch::ATTEMPT_STATUS_WEB_BAD_REQUEST,
+            dispatch::ATTEMPT_STATUS_WEB_PAYLOAD_TOO_LARGE,
+            dispatch::ATTEMPT_STATUS_WEB_UNSEAL_FAILED,
+            dispatch::ATTEMPT_STATUS_WEB_MISSING_MATERIAL,
+            dispatch::ATTEMPT_STATUS_FAKE_SENT_NON_WEB,
+            ATTEMPT_STATUS_WEB_NOT_CONFIGURED,
+            ATTEMPT_STATUS_WEB_INTERNAL_ERROR,
+        ] {
+            assert!(
+                !attempt_status_warrants_device_disable(never_disable),
+                "{never_disable} must not trigger device disable"
+            );
+        }
     }
 
     #[tokio::test]
