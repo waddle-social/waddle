@@ -447,8 +447,16 @@ async fn create_websocket_state(
     )
     .await
     .map_err(|error| anyhow::anyhow!("failed to load VAPID signer: {error}"))?;
-    let web_push_sender: Arc<dyn waddle_xmpp::push::WebPushSender> =
+    // Rate-limit outbound sends: global semaphore caps concurrent
+    // requests at 64; per-(endpoint, urgency) leaky bucket spaces
+    // same-pair sends to at least 100ms apart so one chatty relay+class
+    // can't monopolize the global cap.
+    let limiter = Arc::new(waddle_xmpp::push::limiter::Limiter::with_defaults());
+    let raw_sender: Arc<dyn waddle_xmpp::push::WebPushSender> =
         Arc::new(waddle_xmpp::push::HttpWebPushSender::new());
+    let web_push_sender: Arc<dyn waddle_xmpp::push::WebPushSender> = Arc::new(
+        waddle_xmpp::push::limiter::RateLimitedWebPushSender::new(raw_sender, limiter),
+    );
     // RFC 8292 §2 — the VAPID `sub` claim identifies this push service
     // operator. We use `mailto:postmaster@<xmpp_domain>` per RFC 2142 so
     // relays (FCM, Mozilla autopush, Apple Web Push) have a reachable

@@ -20,7 +20,7 @@ use super::types::{EncryptedPayload, PushTopic, TransientFailure, VapidJwt, WebP
 
 /// RFC 8030 `Urgency` header values (§5.3). Carried as a typed enum so
 /// callers can't accidentally emit unknown values.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Urgency {
     VeryLow,
     Low,
