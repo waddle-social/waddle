@@ -93,16 +93,20 @@ pub struct InProcessVapidSigner {
     cache: Arc<Mutex<LruCache<CacheKey, CachedJwt>>>,
 }
 
+/// JWT cache key — typed end-to-end. `url::Origin` and `VapidSub` already
+/// implement `Hash + Eq + Clone`, so the cache compares structured values
+/// rather than ad-hoc string serializations. String conversion is
+/// deferred to the JWT-serialization boundary (`as_claim` /
+/// `ascii_serialization` are called only when populating the JWT claim
+/// set right before signing).
 #[derive(Clone, PartialEq, Eq, Hash)]
 struct CacheKey {
     kid: Kid,
-    /// Origin serialized once at key construction — `url::Origin` itself is
-    /// `Hash`/`Eq`, but we cache the canonical ASCII form for cheap comparisons.
-    origin_ascii: String,
+    aud: url::Origin,
     /// `sub` is part of the JWT claim set, so a cache hit MUST require an
     /// exact match — otherwise a caller varying `sub` for the same
-    /// `(kid, origin)` would receive a stale-`sub` JWT.
-    sub_claim: String,
+    /// `(kid, aud)` would receive a stale-`sub` JWT.
+    sub: VapidSub,
 }
 
 #[derive(Clone)]
@@ -163,8 +167,8 @@ impl InProcessVapidSigner {
     fn cache_key(&self, aud: &url::Origin, sub: &VapidSub) -> CacheKey {
         CacheKey {
             kid: self.kid,
-            origin_ascii: origin_ascii(aud),
-            sub_claim: sub.as_claim(),
+            aud: aud.clone(),
+            sub: sub.clone(),
         }
     }
 }
@@ -199,8 +203,11 @@ impl VapidSigner for InProcessVapidSigner {
         // huge timestamp in release, producing JWTs push services reject.
         let iat = now.saturating_sub(IAT_LAG.as_secs());
         let exp = iat.saturating_add(VAPID_JWT_LIFETIME.as_secs());
+        // String serialization happens only at the JWT-serialization
+        // boundary — typed `url::Origin` and `VapidSub` are converted
+        // here when populating the claim set.
         let claims = VapidClaims {
-            aud: origin_ascii(aud),
+            aud: aud.ascii_serialization(),
             exp,
             sub: sub.as_claim(),
             iat,
@@ -248,12 +255,6 @@ fn fresh_jti() -> String {
     URL_SAFE_NO_PAD.encode(bytes)
 }
 
-/// Canonical ASCII serialization of an `url::Origin`. Used in both the
-/// cache key and as the `aud` claim string.
-fn origin_ascii(origin: &url::Origin) -> String {
-    origin.ascii_serialization()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -272,7 +273,7 @@ mod tests {
     fn aud_for_fcm_strips_path() {
         let endpoint = Url::parse("https://fcm.googleapis.com/fcm/send/abc-def").unwrap();
         let aud = aud_for(&endpoint).expect("valid");
-        assert_eq!(origin_ascii(&aud), "https://fcm.googleapis.com");
+        assert_eq!(aud.ascii_serialization(), "https://fcm.googleapis.com");
     }
 
     #[test]
@@ -281,7 +282,7 @@ mod tests {
             Url::parse("https://updates.push.services.mozilla.com/wpush/v2/abc").unwrap();
         let aud = aud_for(&endpoint).expect("valid");
         assert_eq!(
-            origin_ascii(&aud),
+            aud.ascii_serialization(),
             "https://updates.push.services.mozilla.com"
         );
     }
@@ -290,14 +291,14 @@ mod tests {
     fn aud_for_apple() {
         let endpoint = Url::parse("https://web.push.apple.com/abc").unwrap();
         let aud = aud_for(&endpoint).expect("valid");
-        assert_eq!(origin_ascii(&aud), "https://web.push.apple.com");
+        assert_eq!(aud.ascii_serialization(), "https://web.push.apple.com");
     }
 
     #[test]
     fn aud_for_non_default_port() {
         let endpoint = Url::parse("https://example.com:8443/push/abc").unwrap();
         let aud = aud_for(&endpoint).expect("valid");
-        assert_eq!(origin_ascii(&aud), "https://example.com:8443");
+        assert_eq!(aud.ascii_serialization(), "https://example.com:8443");
     }
 
     #[test]

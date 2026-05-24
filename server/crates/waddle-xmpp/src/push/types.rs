@@ -96,7 +96,7 @@ impl fmt::Display for PushTopic {
 }
 
 /// VAPID `sub` claim — `mailto:<address>` or `https://<url>` per RFC 8292 §2.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum VapidSub {
     Mailto(MailtoAddress),
     Url(url::Url),
@@ -104,7 +104,7 @@ pub enum VapidSub {
 
 /// `mailto:` address, validated minimally for RFC 8292 `sub` use.
 /// Rule: split on last `@`, both sides non-empty, no control/whitespace.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct MailtoAddress(Box<str>);
 
 #[derive(Debug, Error, PartialEq, Eq)]
