@@ -243,7 +243,13 @@ impl std::str::FromStr for VapidSub {
 }
 
 /// RFC 8291 encrypted payload — RFC 8188 header + AES-GCM record.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// AES-GCM ciphertext + RFC 8188 header. Zeroizes on drop as
+/// defense-in-depth: the body is already encrypted, but the same
+/// allocation carries the per-message salt and AS public key (header
+/// fields), which are useful symmetric-state context for any heap-
+/// residue attacker. Clearing the buffer when the value is dropped
+/// shrinks that residue window.
+#[derive(Debug, Clone, PartialEq, Eq, ZeroizeOnDrop)]
 pub struct EncryptedPayload(Vec<u8>);
 
 impl EncryptedPayload {
@@ -254,10 +260,11 @@ impl EncryptedPayload {
     pub fn as_slice(&self) -> &[u8] {
         &self.0
     }
-
-    pub fn into_inner(self) -> Vec<u8> {
-        self.0
-    }
+    // `into_inner` is intentionally absent: the `ZeroizeOnDrop` impl
+    // means the inner `Vec<u8>` can't be moved out without losing the
+    // zeroize-on-drop guarantee. Callers should borrow via
+    // [`Self::as_slice`] instead — the transport layer never needs to
+    // take ownership of the bytes.
 }
 
 /// Signed VAPID JWT, ready for `Authorization: vapid t=…` use.

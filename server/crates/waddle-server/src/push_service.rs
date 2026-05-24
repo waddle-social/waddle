@@ -70,7 +70,17 @@ const MAX_PROVIDER_TOKEN_LEN: usize = 4_096;
 const MAX_PROVIDER_KEY_MATERIAL_LEN: usize = 4_096;
 const MAX_PUBSUB_ITEM_ID_LEN: usize = 256;
 const PUBLISH_JOB_RETRY_DELAY_MS: i64 = 60_000;
-const PUBLISH_JOB_CLAIM_TIMEOUT_MS: i64 = 300_000;
+/// Upper bound on the duration of one publish-job worker pass (phase 1
+/// claim → phase 2 HTTP fan-out → phase 3 record). Sized to comfortably
+/// exceed any realistic phase-2 elapsed time: 1000 same-relay devices ×
+/// 100ms per-bucket spacing = ~100s of best-case throughput, well below
+/// the cap. `recover_stale_publish_job_claims` resets claims older than
+/// this; setting it lower than realistic phase-2 duration risks a
+/// concurrent worker re-claiming and dispatching the same job in
+/// parallel. Until a claim-token UUID column lands (see
+/// `TODO(#762 follow-up)` in `finalize_publish_job`), this constant
+/// is the only mitigation for the at-most-once invariant.
+const PUBLISH_JOB_CLAIM_TIMEOUT_MS: i64 = 30 * 60 * 1_000; // 30 minutes
 /// Ceiling on transient retries before a publish job is marked
 /// `failed`. XEP-0357 §6 explicitly contemplates this: "a server MAY
 /// choose to keep a service enabled if the error is deemed recoverable
@@ -2490,6 +2500,18 @@ impl DatabasePushServiceStore {
     /// Phase 3: open a fresh tx, record one row per attempt, and either
     /// requeue the job (any transient outcome) or mark it published.
     /// Prunes the per-node attempts/jobs tail so retention stays bounded.
+    ///
+    /// TODO(#762 follow-up — at-most-once delivery): the current claim
+    /// model uses a 30-minute lease (`PUBLISH_JOB_CLAIM_TIMEOUT_MS`).
+    /// If a worker's phase 2 somehow exceeds that, a second worker can
+    /// `recover_stale_publish_job_claims` the job and dispatch it in
+    /// parallel — both will then race here in phase 3 and both write
+    /// attempts. The right fix is a `claim_token` UUID column written
+    /// in phase 1 and checked here in the UPDATE's WHERE clause; phase
+    /// 3 of a losing worker would see 0 rows updated and abort the
+    /// attempt writes without persisting. Deferred to keep PR-D2's
+    /// schema surface minimal; the 30-minute window covers any
+    /// realistic phase-2 duration.
     async fn finalize_publish_job(
         &self,
         job: &PushPublishJob,
