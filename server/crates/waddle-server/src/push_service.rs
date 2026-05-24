@@ -71,6 +71,18 @@ const MAX_PROVIDER_KEY_MATERIAL_LEN: usize = 4_096;
 const MAX_PUBSUB_ITEM_ID_LEN: usize = 256;
 const PUBLISH_JOB_RETRY_DELAY_MS: i64 = 60_000;
 const PUBLISH_JOB_CLAIM_TIMEOUT_MS: i64 = 300_000;
+/// Ceiling on transient retries before a publish job is marked
+/// `failed`. XEP-0357 §6 explicitly contemplates this: "a server MAY
+/// choose to keep a service enabled if the error is deemed recoverable
+/// or transient, until a sufficient number of errors have been received
+/// in a row." 24 attempts × 60s = a 24-minute upper bound on retry
+/// noise per job before the operator's `last_error` audit reveals the
+/// underlying problem.
+const PUBLISH_JOB_MAX_TRANSIENT_ATTEMPTS: i64 = 24;
+/// Hard ceiling on `Retry-After`-derived backoff to prevent a
+/// misbehaving relay from pinning a job into an effectively-forever
+/// requeue. 1 hour comfortably covers any sane rate-limit window.
+const PUBLISH_JOB_MAX_RETRY_AFTER_MS: i64 = 60 * 60 * 1_000;
 #[derive(Clone)]
 pub struct DatabasePushServiceStore {
     db: Database,
@@ -474,6 +486,11 @@ struct DispatchedAttempt {
     platform: PushDevicePlatform,
     status: &'static str,
     last_error: Option<String>,
+    /// `Retry-After` carried by a `WebPushOutcome::RateLimited` response.
+    /// Phase 3 honors the larger of this and the default backoff when
+    /// requeuing, so a relay's explicit "back off N seconds" hint is not
+    /// dropped on the floor.
+    retry_after: Option<std::time::Duration>,
 }
 
 /// Output of phase 1 of the publish-job worker — the typed pieces
@@ -538,8 +555,12 @@ fn attempt_status_is_transient(status: &str) -> bool {
             | dispatch::ATTEMPT_STATUS_WEB_RATE_LIMITED
             | dispatch::ATTEMPT_STATUS_WEB_CLOCK_SKEW
             | ATTEMPT_STATUS_WEB_NOT_CONFIGURED
-            | ATTEMPT_STATUS_WEB_INTERNAL_ERROR
     )
+    // `web-internal-error` is deliberately NOT transient: encrypt /
+    // sign / aud-derive failures are deterministic bugs that recur
+    // identically on retry. Classifying them as permanent means an
+    // operator sees the failure in `push_delivery_attempts` and can
+    // act, instead of the job spinning in a 60s loop forever.
 }
 
 /// XEP-0357 §6: which attempt outcomes mean the underlying device row
@@ -2326,18 +2347,24 @@ impl DatabasePushServiceStore {
                     self.dispatch_web_device(device, parsed, item_id, signer, sender, sub)
                         .await
                 }
-                // No Web Push provider wired up (tests, or a degraded
-                // boot that never called `with_web_push_provider`). The
-                // worker continues to record the legacy `fake-sent`
-                // marker for every platform so existing test dashboards
-                // and operator scripts keep working unchanged. The
-                // real-send path lights up only when all three of
-                // (vapid_signer, web_push_sender, vapid_sub) are wired.
-                (None, _) => DispatchedAttempt {
+                // No Web Push provider wired up. Web devices get the
+                // typed `web-not-configured` marker (transient, so the
+                // job retries once the operator fixes the boot config);
+                // APNS/FCM devices retain the legacy `fake-sent` marker
+                // (their senders ship in #529 / #530).
+                (None, PushDevicePlatform::Web) => DispatchedAttempt {
+                    device_id: device.device_id.clone(),
+                    platform: device.platform,
+                    status: ATTEMPT_STATUS_WEB_NOT_CONFIGURED,
+                    last_error: Some("Web Push provider not configured".to_string()),
+                    retry_after: None,
+                },
+                (None, PushDevicePlatform::Apns | PushDevicePlatform::Fcm) => DispatchedAttempt {
                     device_id: device.device_id.clone(),
                     platform: device.platform,
                     status: dispatch::ATTEMPT_STATUS_FAKE_SENT_NON_WEB,
                     last_error: None,
+                    retry_after: None,
                 },
                 // APNS/FCM are stubbed until #529/#530 land their real
                 // senders. Keep the historical `fake-sent` marker so
@@ -2348,6 +2375,7 @@ impl DatabasePushServiceStore {
                         platform: device.platform,
                         status: dispatch::ATTEMPT_STATUS_FAKE_SENT_NON_WEB,
                         last_error: None,
+                        retry_after: None,
                     }
                 }
             };
@@ -2376,6 +2404,7 @@ impl DatabasePushServiceStore {
                     platform: device.platform,
                     status: dispatch::skip_reason_to_attempt_status(reason),
                     last_error: None,
+                    retry_after: None,
                 };
             }
         };
@@ -2389,6 +2418,15 @@ impl DatabasePushServiceStore {
                     None
                 } else {
                     Some(truncate_last_error(&web_push_outcome_diagnostic(&outcome)))
+                };
+                // Honor RFC 7231 §7.1.3 `Retry-After` for rate-limited
+                // responses — phase 3 takes `max(default, retry_after)`
+                // so a relay's "back off N seconds" hint is not lost.
+                let retry_after = match &outcome {
+                    waddle_xmpp::push::types::WebPushOutcome::RateLimited {
+                        retry_after, ..
+                    } => *retry_after,
+                    _ => None,
                 };
                 // XEP-0357 §6 forward cleanup runs in
                 // `finalize_publish_job` — when the persisted status
@@ -2409,13 +2447,22 @@ impl DatabasePushServiceStore {
                     platform: device.platform,
                     status,
                     last_error,
+                    retry_after,
                 }
             }
+            // Internal-error path covers encrypt/sign/aud-derive
+            // failures. These are deterministic bugs — a retry on the
+            // same `(subscription, payload)` will fail identically — so
+            // we classify as PERMANENT (not transient) to avoid an
+            // unbounded retry loop. Recorded as `web-internal-error`
+            // so an operator can grep for it and fix the underlying
+            // bug; the device stays active (not a per-device problem).
             Err(error) => DispatchedAttempt {
                 device_id: device.device_id.clone(),
                 platform: device.platform,
                 status: ATTEMPT_STATUS_WEB_INTERNAL_ERROR,
                 last_error: Some(truncate_last_error(&error.to_string())),
+                retry_after: None,
             },
         }
     }
@@ -2508,7 +2555,13 @@ impl DatabasePushServiceStore {
             .iter()
             .any(|attempt| attempt_status_is_transient(attempt.status));
         if any_transient {
-            let retry_at_ms = retry_at_ms(now_ms);
+            // Read the current `attempt_count` so we can enforce the
+            // §6.1 "sufficient number of errors" cap. The row is
+            // exclusively held by our claim (IN_PROGRESS); the read is
+            // serializable.
+            let attempt_count_so_far = read_publish_job_attempt_count_tx(&mut tx, job.job_id())
+                .await?
+                .unwrap_or(0);
             // Surface the first transient diagnostic so an operator can
             // see why this job is waiting to retry.
             let transient_error = attempts
@@ -2516,28 +2569,74 @@ impl DatabasePushServiceStore {
                 .find(|attempt| attempt_status_is_transient(attempt.status))
                 .and_then(|attempt| attempt.last_error.clone())
                 .unwrap_or_else(|| "Web Push transient failure".to_string());
-            tx.execute(
-                r#"
-                UPDATE push_publish_jobs
-                SET status = ?,
-                    attempt_count = attempt_count + 1,
-                    last_error = ?,
-                    next_retry_at_ms = ?,
-                    claimed_at_ms = NULL,
-                    updated_at_ms = ?
-                WHERE job_id = ? AND status = ?
-                "#,
-                crate::db_params![
-                    PUBLISH_JOB_STATUS_QUEUED,
-                    transient_error,
-                    retry_at_ms,
-                    now_ms,
-                    job.job_id().to_string(),
-                    PUBLISH_JOB_STATUS_IN_PROGRESS,
-                ],
-            )
-            .await
-            .map_err(|error| XmppError::internal(error.to_string()))?;
+            if attempt_count_so_far + 1 >= PUBLISH_JOB_MAX_TRANSIENT_ATTEMPTS {
+                // XEP-0357 §6.1: "until a sufficient number of errors
+                // have been received in a row." Past the ceiling, mark
+                // the job permanently FAILED so it stops occupying the
+                // queue. The operator's audit trail
+                // (`push_delivery_attempts`) preserves every attempt.
+                tx.execute(
+                    r#"
+                    UPDATE push_publish_jobs
+                    SET status = ?,
+                        attempt_count = attempt_count + 1,
+                        last_error = ?,
+                        next_retry_at_ms = NULL,
+                        claimed_at_ms = NULL,
+                        updated_at_ms = ?
+                    WHERE job_id = ? AND status = ?
+                    "#,
+                    crate::db_params![
+                        PUBLISH_JOB_STATUS_FAILED,
+                        truncate_last_error(&format!(
+                            "transient retry cap exceeded ({PUBLISH_JOB_MAX_TRANSIENT_ATTEMPTS}); last: {transient_error}"
+                        )),
+                        now_ms,
+                        job.job_id().to_string(),
+                        PUBLISH_JOB_STATUS_IN_PROGRESS,
+                    ],
+                )
+                .await
+                .map_err(|error| XmppError::internal(error.to_string()))?;
+            } else {
+                // Honor the largest `Retry-After` carried by any
+                // 429-style attempt. The default 60s floor still
+                // applies — a relay that asks for 1s gets the 60s
+                // backoff anyway — but a relay asking for 5min gets
+                // 5min. Capped at 1h to bound runaway misbehavior.
+                let mut retry_at = retry_at_ms(now_ms);
+                if let Some(retry_after_ms) = attempts
+                    .iter()
+                    .filter_map(|attempt| attempt.retry_after)
+                    .map(|d| d.as_millis().min(PUBLISH_JOB_MAX_RETRY_AFTER_MS as u128) as i64)
+                    .max()
+                {
+                    let relay_deadline = now_ms.saturating_add(retry_after_ms);
+                    retry_at = retry_at.max(relay_deadline);
+                }
+                tx.execute(
+                    r#"
+                    UPDATE push_publish_jobs
+                    SET status = ?,
+                        attempt_count = attempt_count + 1,
+                        last_error = ?,
+                        next_retry_at_ms = ?,
+                        claimed_at_ms = NULL,
+                        updated_at_ms = ?
+                    WHERE job_id = ? AND status = ?
+                    "#,
+                    crate::db_params![
+                        PUBLISH_JOB_STATUS_QUEUED,
+                        transient_error,
+                        retry_at,
+                        now_ms,
+                        job.job_id().to_string(),
+                        PUBLISH_JOB_STATUS_IN_PROGRESS,
+                    ],
+                )
+                .await
+                .map_err(|error| XmppError::internal(error.to_string()))?;
+            }
         } else {
             tx.execute(
                 r#"
@@ -3371,6 +3470,31 @@ async fn get_publish_job_payload_xml_tx(
     Ok(Some(payload_xml))
 }
 
+/// Read the persisted `attempt_count` for a job. Used by phase 3 to
+/// enforce [`PUBLISH_JOB_MAX_TRANSIENT_ATTEMPTS`] (XEP-0357 §6.1).
+async fn read_publish_job_attempt_count_tx(
+    tx: &mut crate::db::Transaction<'_>,
+    job_id: &str,
+) -> Result<Option<i64>, XmppError> {
+    let mut rows = tx
+        .query(
+            "SELECT attempt_count FROM push_publish_jobs WHERE job_id = ?",
+            crate::db_params![job_id],
+        )
+        .await
+        .map_err(|error| XmppError::internal(error.to_string()))?;
+    let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| XmppError::internal(error.to_string()))?
+    else {
+        return Ok(None);
+    };
+    row.get(0)
+        .map(Some)
+        .map_err(|error| XmppError::internal(error.to_string()))
+}
+
 async fn mark_publish_job_failed_tx(
     tx: &mut crate::db::Transaction<'_>,
     job_id: &str,
@@ -3821,13 +3945,16 @@ mod tests {
 
     #[tokio::test]
     async fn publish_notification_fans_out_to_active_devices_only() {
+        // Queue-mechanics test: uses Apns platform so we don't need a
+        // Web Push provider wired. APNS sender lands in #529; until
+        // then non-Web platforms record the legacy `fake-sent` marker.
         let store = store().await;
         let owner = owner();
         let node = store.ensure_node(&owner, "web").await.expect("push node");
         store
             .upsert_device(
                 &owner,
-                PushDeviceRegistration::new("web-1", node.node(), PushDevicePlatform::Web, "test")
+                PushDeviceRegistration::new("dev-1", node.node(), PushDevicePlatform::Apns, "test")
                     .with_provider_endpoint(Some("https://push.example.com/one".to_string())),
             )
             .await
@@ -3835,13 +3962,13 @@ mod tests {
         store
             .upsert_device(
                 &owner,
-                PushDeviceRegistration::new("web-2", node.node(), PushDevicePlatform::Web, "test")
+                PushDeviceRegistration::new("dev-2", node.node(), PushDevicePlatform::Apns, "test")
                     .with_provider_endpoint(Some("https://push.example.com/two".to_string())),
             )
             .await
             .expect("device two");
         store
-            .disable_device_for_owner(&owner, node.node(), "web-2", Some("expired"))
+            .disable_device_for_owner(&owner, node.node(), "dev-2", Some("expired"))
             .await
             .expect("disable device");
 
@@ -3861,7 +3988,7 @@ mod tests {
             .await
             .expect("attempts");
         assert_eq!(attempts.len(), 1);
-        assert_eq!(attempts[0].device_id(), "web-1");
+        assert_eq!(attempts[0].device_id(), "dev-1");
         assert_eq!(
             attempts[0].status(),
             dispatch::ATTEMPT_STATUS_FAKE_SENT_NON_WEB
@@ -4658,9 +4785,9 @@ mod tests {
                 .upsert_device(
                     &owner,
                     PushDeviceRegistration::new(
-                        "web-1",
+                        "dev-1",
                         node.node(),
-                        PushDevicePlatform::Web,
+                        PushDevicePlatform::Apns,
                         "test",
                     ),
                 )
@@ -4688,7 +4815,7 @@ mod tests {
             .expect("attempts");
 
         assert_eq!(attempts.len(), 1);
-        assert_eq!(attempts[0].device_id(), "web-1");
+        assert_eq!(attempts[0].device_id(), "dev-1");
         assert_eq!(attempts[0].item_id(), "durable-attempt");
         assert_eq!(
             attempts[0].status(),
@@ -4698,6 +4825,8 @@ mod tests {
 
     #[tokio::test]
     async fn queued_publish_job_survives_reopen_and_retries_after_dispatch_failure() {
+        // Queue-mechanics: uses Apns so the fake-sent path applies; the
+        // Web platform now requires a wired provider.
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("push-service-publish-jobs.sqlite3");
         let owner = owner();
@@ -4713,9 +4842,9 @@ mod tests {
                 .upsert_device(
                     &owner,
                     PushDeviceRegistration::new(
-                        "web-1",
+                        "dev-1",
                         node.node(),
-                        PushDevicePlatform::Web,
+                        PushDevicePlatform::Apns,
                         "test",
                     ),
                 )
@@ -4902,7 +5031,7 @@ mod tests {
         store
             .upsert_device(
                 &owner,
-                PushDeviceRegistration::new("web-1", node.node(), PushDevicePlatform::Web, "test"),
+                PushDeviceRegistration::new("dev-1", node.node(), PushDevicePlatform::Apns, "test"),
             )
             .await
             .expect("device");
@@ -4945,7 +5074,7 @@ mod tests {
         store
             .upsert_device(
                 &owner,
-                PushDeviceRegistration::new("web-1", node.node(), PushDevicePlatform::Web, "test"),
+                PushDeviceRegistration::new("dev-1", node.node(), PushDevicePlatform::Apns, "test"),
             )
             .await
             .expect("device");
@@ -5000,7 +5129,7 @@ mod tests {
         store
             .upsert_device(
                 &owner,
-                PushDeviceRegistration::new("web-1", node.node(), PushDevicePlatform::Web, "test"),
+                PushDeviceRegistration::new("dev-1", node.node(), PushDevicePlatform::Apns, "test"),
             )
             .await
             .expect("device");
@@ -5159,12 +5288,12 @@ mod tests {
         store
             .upsert_device(
                 &owner,
-                PushDeviceRegistration::new("web-1", node.node(), PushDevicePlatform::Web, "test"),
+                PushDeviceRegistration::new("dev-1", node.node(), PushDevicePlatform::Apns, "test"),
             )
             .await
             .expect("device");
         store
-            .disable_device_for_owner(&owner, node.node(), "web-1", None)
+            .disable_device_for_owner(&owner, node.node(), "dev-1", None)
             .await
             .expect("disable device");
 
@@ -5185,7 +5314,7 @@ mod tests {
         store
             .upsert_device(
                 &owner,
-                PushDeviceRegistration::new("web-1", node.node(), PushDevicePlatform::Web, "test"),
+                PushDeviceRegistration::new("dev-1", node.node(), PushDevicePlatform::Apns, "test"),
             )
             .await
             .expect("reenable device");
