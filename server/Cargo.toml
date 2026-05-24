@@ -96,6 +96,8 @@ p256 = { version = "0.13", features = ["ecdsa", "jwk"] }
 elliptic-curve = { version = "0.13", features = ["jwk"] }
 argon2 = "0.5"
 zeroize = { version = "1", features = ["derive"] }
+aes-gcm = "0.11"
+hkdf = "0.13"
 
 # Utilities
 uuid = { version = "1.23", features = ["v4", "v7", "serde", "js"] }
