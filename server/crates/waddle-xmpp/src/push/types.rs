@@ -198,9 +198,13 @@ impl EncryptedPayload {
 
 /// Signed VAPID JWT, ready for `Authorization: vapid t=…` use.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct VapidJwt(pub String);
+pub struct VapidJwt(String);
 
 impl VapidJwt {
+    pub fn new(token: String) -> Self {
+        Self(token)
+    }
+
     pub fn as_str(&self) -> &str {
         &self.0
     }

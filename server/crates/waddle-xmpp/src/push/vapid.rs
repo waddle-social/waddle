@@ -185,7 +185,7 @@ impl VapidSigner for InProcessVapidSigner {
         let header = Header::new(Algorithm::ES256);
         let token = jsonwebtoken::encode(&header, &claims, &self.encoding_key)
             .map_err(VapidSignError::Signing)?;
-        let jwt = VapidJwt(token);
+        let jwt = VapidJwt::new(token);
 
         if let Ok(mut cache) = self.cache.lock() {
             cache.put(

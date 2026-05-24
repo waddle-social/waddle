@@ -241,8 +241,9 @@ impl VapidStorage {
             .cipher
             .open(&sealed, AAD_LABEL, kid.as_bytes())
             .map_err(|e| VapidLoadError::Unseal(e.to_string()))?;
-        let secret_key = p256::SecretKey::from_slice(&scalar)
+        let secret_key = p256::SecretKey::from_slice(scalar.as_slice())
             .map_err(|e| VapidLoadError::DbRead(format!("bad P-256 scalar: {e}")))?;
+        // `scalar` is `Zeroizing<Vec<u8>>` and zeroes here.
         Ok(Some((kid, secret_key)))
     }
 }
@@ -272,8 +273,11 @@ impl VapidKeyCipher {
     }
 
     fn seal(&self, plaintext: &[u8], label: &[u8], kid_bytes: &[u8]) -> Result<String, String> {
-        debug_assert!(label.len() <= u16::MAX as usize);
-        debug_assert!(kid_bytes.len() <= u16::MAX as usize);
+        // Length-prefix encoding uses u16, so each field is capped at 65535
+        // bytes. Practical labels (~32 B) and kids (16 B UUID) are far below
+        // the bound; the assertion catches future regressions.
+        assert!(label.len() <= u16::MAX as usize, "AAD label too long");
+        assert!(kid_bytes.len() <= u16::MAX as usize, "AAD kid too long");
         let aad = build_aad(label, kid_bytes);
         let mut nonce = [0u8; 12];
         rand::rng().fill(&mut nonce[..]);
@@ -294,7 +298,12 @@ impl VapidKeyCipher {
         ))
     }
 
-    fn open(&self, stored: &str, label: &[u8], kid_bytes: &[u8]) -> Result<Vec<u8>, String> {
+    fn open(
+        &self,
+        stored: &str,
+        label: &[u8],
+        kid_bytes: &[u8],
+    ) -> Result<Zeroizing<Vec<u8>>, String> {
         let mut parts = stored.split(':');
         let prefix = parts.next().ok_or("missing prefix")?;
         if prefix != SEALED_PREFIX {
@@ -315,7 +324,8 @@ impl VapidKeyCipher {
             .decode(ct_b64)
             .map_err(|e| format!("ciphertext base64url: {e}"))?;
         let aad = build_aad(label, kid_bytes);
-        self.cipher
+        let plaintext = self
+            .cipher
             .decrypt(
                 (&nonce).into(),
                 Payload {
@@ -323,7 +333,8 @@ impl VapidKeyCipher {
                     aad: &aad,
                 },
             )
-            .map_err(|e| format!("AES-256-GCM open (AAD/tag check failed): {e}"))
+            .map_err(|e| format!("AES-256-GCM open (AAD/tag check failed): {e}"))?;
+        Ok(Zeroizing::new(plaintext))
     }
 }
 
@@ -338,16 +349,21 @@ fn build_aad(label: &[u8], kid_bytes: &[u8]) -> Vec<u8> {
 
 fn parse_env_scalar(raw: &str) -> Result<p256::SecretKey, VapidLoadError> {
     let raw = raw.trim();
-    let bytes = URL_SAFE_NO_PAD
-        .decode(raw.trim_end_matches('='))
-        .map_err(|e| VapidLoadError::EnvParse(format!("base64url decode: {e}")))?;
+    // Wrap the decoded bytes in Zeroizing so the raw P-256 scalar zeroes
+    // out of heap when `bytes` falls out of scope, regardless of whether
+    // `from_slice` succeeds.
+    let bytes = Zeroizing::new(
+        URL_SAFE_NO_PAD
+            .decode(raw.trim_end_matches('='))
+            .map_err(|e| VapidLoadError::EnvParse(format!("base64url decode: {e}")))?,
+    );
     if bytes.len() != 32 {
         return Err(VapidLoadError::EnvParse(format!(
             "expected 32-byte P-256 scalar; got {} bytes",
             bytes.len()
         )));
     }
-    p256::SecretKey::from_slice(&bytes)
+    p256::SecretKey::from_slice(bytes.as_slice())
         .map_err(|e| VapidLoadError::EnvParse(format!("invalid P-256 scalar: {e}")))
 }
 
@@ -380,7 +396,7 @@ mod tests {
         let plaintext = b"my-32-byte-p256-scalar-padding!!";
         let sealed = cipher.seal(plaintext, AAD_LABEL, b"some-kid").unwrap();
         let opened = cipher.open(&sealed, AAD_LABEL, b"some-kid").unwrap();
-        assert_eq!(opened, plaintext);
+        assert_eq!(opened.as_slice(), plaintext);
     }
 
     #[test]
