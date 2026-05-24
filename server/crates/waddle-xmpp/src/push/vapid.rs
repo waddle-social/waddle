@@ -75,7 +75,13 @@ pub fn vapid_k_header(public_key: &p256::PublicKey) -> String {
 }
 
 /// In-process signer combining a `p256::SecretKey` private key + LRU JWT
-/// cache keyed by `(Kid, Origin)`.
+/// cache keyed by `(Kid, ascii-origin, sub-claim)`.
+///
+/// `sub` is part of the cache key because it lands in the JWT claim set —
+/// a caller varying `sub` for the same `(kid, origin)` MUST get a fresh
+/// JWT, not a cached one. `origin` is stored as its canonical ASCII
+/// serialization rather than as `url::Origin` to keep the key cheap to
+/// hash without `Tuple`/`Opaque` discriminator overhead.
 ///
 /// Wraps an `Arc<Mutex<LruCache>>` so concurrent senders share the cache.
 /// `max_capacity = VAPID_JWT_CACHE_CAPACITY` (32) — comfortably exceeds

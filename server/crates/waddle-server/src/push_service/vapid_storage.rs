@@ -188,7 +188,11 @@ impl VapidStorage {
         secret_key: &p256::SecretKey,
     ) -> Result<(), VapidLoadError> {
         let now_ms = chrono::Utc::now().timestamp_millis();
-        let scalar = secret_key.to_bytes();
+        // `p256::SecretKey::to_bytes` already returns a `Zeroizing`-aware
+        // `FieldBytes` per the crate, but wrap the borrow target in an
+        // explicit `Zeroizing` to make the discipline obvious to a reader
+        // and to defend against future API drift in `p256`.
+        let scalar = Zeroizing::new(secret_key.to_bytes());
         let sealed = self
             .cipher
             .seal(&scalar[..], AAD_LABEL, kid.as_bytes())

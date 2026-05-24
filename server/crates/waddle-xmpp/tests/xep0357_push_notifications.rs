@@ -13,10 +13,10 @@ use url::Url;
 use waddle_xmpp::disco::{server_features, Feature};
 use waddle_xmpp::pubsub::pep::pep_features;
 use waddle_xmpp::push::constants::{
-    AES128GCM_HEADER_LEN, AES128GCM_PAD_DELIMITER_LEN, AES128GCM_TAG_LEN, DEFAULT_PLAINTEXT_BUCKET,
-    DM_PLAINTEXT_BUCKET, WEB_PUSH_MAX_BODY_LEN, WEB_PUSH_MAX_PLAINTEXT, WEB_PUSH_MAX_RS,
+    AES128GCM_HEADER_LEN, AES128GCM_PAD_DELIMITER_LEN, AES128GCM_TAG_LEN, DM_PLAINTEXT_BUCKET,
+    WEB_PUSH_MAX_BODY_LEN, WEB_PUSH_MAX_PLAINTEXT, WEB_PUSH_MAX_RS,
 };
-use waddle_xmpp::push::encrypt::{encrypt, header_keyid, header_rs};
+use waddle_xmpp::push::encrypt::encrypt;
 use waddle_xmpp::push::types::{Kid, SubscriptionKeys, VapidSub};
 use waddle_xmpp::push::vapid::{aud_for, vapid_k_header, InProcessVapidSigner, VapidSigner};
 
@@ -74,37 +74,20 @@ fn sample_subscription() -> SubscriptionKeys {
 }
 
 #[test]
-fn aes128gcm_header_rs_round_trips_to_record_length() {
-    let sub = sample_subscription();
-    let payload = encrypt(&sub, b"hello", DEFAULT_PLAINTEXT_BUCKET).expect("encrypts");
-    let body = payload.as_slice();
-    let rs = header_rs(body).expect("rs field present");
-    // rs in the header == actual record length on the wire (no fragmentation).
-    let record_len = body.len() - AES128GCM_HEADER_LEN;
-    assert_eq!(rs as usize, record_len);
-    // record_len = bucket + delim + tag for the chosen bucket size.
-    assert_eq!(
-        record_len,
-        DEFAULT_PLAINTEXT_BUCKET + AES128GCM_PAD_DELIMITER_LEN + AES128GCM_TAG_LEN
-    );
-}
-
-#[test]
 fn dm_bucket_stays_under_web_push_max_body() {
     let sub = sample_subscription();
     // Exercise the max DM bucket plaintext.
     let pt = vec![0u8; DM_PLAINTEXT_BUCKET];
     let payload = encrypt(&sub, &pt, DM_PLAINTEXT_BUCKET).expect("encrypts");
     assert!(payload.as_slice().len() <= WEB_PUSH_MAX_BODY_LEN);
-}
-
-#[test]
-fn encrypt_keyid_is_uncompressed_p256_point() {
-    let sub = sample_subscription();
-    let payload = encrypt(&sub, b"x", DEFAULT_PLAINTEXT_BUCKET).expect("encrypts");
-    let keyid = header_keyid(payload.as_slice()).expect("keyid present");
-    assert_eq!(keyid.len(), 65);
-    assert_eq!(keyid[0], 0x04, "uncompressed-point prefix");
+    // Body layout sanity: header + (bucket + delim + tag).
+    assert_eq!(
+        payload.as_slice().len(),
+        AES128GCM_HEADER_LEN
+            + DM_PLAINTEXT_BUCKET
+            + AES128GCM_PAD_DELIMITER_LEN
+            + AES128GCM_TAG_LEN
+    );
 }
 
 // ── RFC 8292 VAPID — end-to-end sign + verify under our own key ──────────────

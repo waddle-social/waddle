@@ -5,9 +5,11 @@
 //! `src/push_service/vapid_storage.rs`. This file exercises the
 //! `VapidStorage::load_or_provision` boot path end-to-end against an
 //! in-memory database — fresh generation, persisted reuse, env-var
-//! bootstrap with write-before-remove, and the AAD-kid stability
-//! guarantee that a sealed blob is still openable after the row's
-//! autoincrement `id` is renumbered (DB-restore resilience).
+//! bootstrap with write-before-remove, and the AAD-kid binding that
+//! makes a sealed blob inseparable from the `kid` it was sealed against
+//! (the AAD includes `label || kid`, so cross-row blob swaps fail the
+//! GCM tag check). `kid` is the table's primary key — there is no
+//! autoincrement `id` column.
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;

@@ -48,6 +48,8 @@ pub struct PushTopic(Box<str>);
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum PushTopicParseError {
+    #[error("push topic must be 1..=32 chars; got empty")]
+    Empty,
     #[error("push topic exceeds 32 chars (got {0})")]
     TooLong(usize),
     #[error("push topic contains non-base64url character at index {0}")]
@@ -57,6 +59,10 @@ pub enum PushTopicParseError {
 impl PushTopic {
     pub fn new(value: impl Into<Box<str>>) -> Result<Self, PushTopicParseError> {
         let s: Box<str> = value.into();
+        // RFC 8030 §5.4: `Topic = 1*32(topic-char)` — minimum length 1.
+        if s.is_empty() {
+            return Err(PushTopicParseError::Empty);
+        }
         if s.len() > 32 {
             return Err(PushTopicParseError::TooLong(s.len()));
         }
@@ -522,6 +528,13 @@ mod tests {
         let s: String = "a".repeat(32);
         let t = PushTopic::new(s.clone()).expect("32 chars is valid");
         assert_eq!(t.as_str(), s);
+    }
+
+    #[test]
+    fn push_topic_rejects_empty_per_rfc_8030_5_4() {
+        // RFC 8030 §5.4: `Topic = 1*32(topic-char)` — minimum length 1.
+        let err = PushTopic::new("").unwrap_err();
+        assert_eq!(err, PushTopicParseError::Empty);
     }
 
     #[test]

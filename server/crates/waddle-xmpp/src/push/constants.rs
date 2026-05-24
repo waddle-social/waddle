@@ -5,9 +5,28 @@
 
 use std::time::Duration;
 
+/// RFC 8188 §2.1 salt length: 16 bytes.
+pub const AES128GCM_SALT_LEN: usize = 16;
+
+/// RFC 8188 §2.1 `rs` field length: u32 in network byte order.
+pub const AES128GCM_RS_LEN: usize = 4;
+
+/// RFC 8188 §2.1 `idlen` field length: u8 indicating keyid byte length.
+pub const AES128GCM_IDLEN_FIELD_LEN: usize = 1;
+
+/// Uncompressed P-256 SEC1 point length: `0x04` prefix + 32-byte X + 32-byte Y.
+pub const P256_UNCOMPRESSED_POINT_LEN: usize = 65;
+
+/// SEC1 uncompressed-point prefix byte.
+pub const P256_UNCOMPRESSED_POINT_PREFIX: u8 = 0x04;
+
+/// RFC 8188 §2.1 last-record padding delimiter byte.
+pub const AES128GCM_LAST_RECORD_DELIM: u8 = 0x02;
+
 /// RFC 8188 §2.1 header length for a Web Push payload:
-/// 16-byte salt + 4-byte rs + 1-byte idlen + 65-byte uncompressed P-256 keyid.
-pub const AES128GCM_HEADER_LEN: usize = 86;
+/// salt + rs + idlen + uncompressed P-256 keyid.
+pub const AES128GCM_HEADER_LEN: usize =
+    AES128GCM_SALT_LEN + AES128GCM_RS_LEN + AES128GCM_IDLEN_FIELD_LEN + P256_UNCOMPRESSED_POINT_LEN;
 
 /// AES-GCM authentication tag length (RFC 5116 §5.1).
 pub const AES128GCM_TAG_LEN: usize = 16;
