@@ -117,11 +117,23 @@ async function selectMode(mode: NotifyMode) {
   submitting.value = mode;
   errorMessage.value = null;
   try {
-    const result = await store.setMode(props.client, {
-      roomJid: props.roomJid,
-      mode,
-      name: props.roomName,
-    });
+    let result: Awaited<ReturnType<typeof store.setMode>>;
+    try {
+      result = await store.setMode(props.client, {
+        roomJid: props.roomJid,
+        mode,
+        name: props.roomName,
+      });
+    } catch (error) {
+      // Defence-in-depth — `store.setMode` is supposed to always
+      // resolve with a typed result, but if a lower layer ever
+      // regresses to throwing, surface the error in the banner
+      // instead of leaving the user with a silent dead popover.
+      // Round-13 PR review.
+      console.warn("[NotifyModeButton] store.setMode threw:", error);
+      errorMessage.value = "Couldn't save the setting. Try again in a moment.";
+      return;
+    }
     if (result === "ok") {
       closeAndReturnFocus();
     } else if (result === "node-config-mismatch") {

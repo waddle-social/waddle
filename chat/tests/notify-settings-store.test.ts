@@ -273,6 +273,28 @@ describe("createNotifySettingsStore", () => {
     expect(store.bookmarks.value["stale@example.com"]).toBeUndefined();
   });
 
+  test("setMode maps a thrown rejection to typed error (round-13 PR review)", async () => {
+    // Pin the defence-in-depth: a lower-layer regression that
+    // throws (e.g. unwrapped requireConnectedXmpp() rejection)
+    // MUST surface as a typed "error" result, not propagate as an
+    // exception that the UI doesn't translate into the banner.
+    const store = createNotifySettingsStore();
+    const throwing = {
+      async fetchUserBookmarks(): Promise<UserBookmarkItem[]> {
+        return [];
+      },
+      async setRoomNotificationMode(): Promise<SetRoomNotificationModeOutcome> {
+        throw new Error("session not ready");
+      },
+    };
+    const result = await store.setMode(throwing as unknown as BrowserXmppClient, {
+      roomJid: "throws@example.com",
+      mode: "always",
+    });
+    expect(result).toBe("error");
+    expect(store.bookmarks.value["throws@example.com"]).toBeUndefined();
+  });
+
   test("setMode-during-reset: stale publish result is discarded (round-12 P1)", async () => {
     const store = createNotifySettingsStore();
     store.replaceAll([

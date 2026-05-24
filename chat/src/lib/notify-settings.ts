@@ -187,7 +187,19 @@ export function createNotifySettingsStore(): NotifySettingsStore {
     // the commit below would otherwise write the prior account's
     // bookmark into the new account's cache — round-12 reviewer P1.
     const myGen = generation;
-    const outcome = await client.setRoomNotificationMode(opts);
+    // Defence-in-depth: `client.setRoomNotificationMode` is supposed
+    // to always resolve with a typed outcome, but if a lower layer
+    // ever regresses to throwing (e.g. an unwrapped
+    // requireConnectedXmpp() rejection), map the exception to the
+    // same typed `"error"` result so the UI banner still fires.
+    // Round-13 PR review.
+    let outcome: Awaited<ReturnType<typeof client.setRoomNotificationMode>>;
+    try {
+      outcome = await client.setRoomNotificationMode(opts);
+    } catch (error) {
+      console.warn("[notify-settings] setRoomNotificationMode threw:", error);
+      return "error";
+    }
     if (myGen !== generation) {
       // Stale publish from a prior session; drop the commit. The
       // typed `kind` is still returned so the UI can clean up

@@ -1346,9 +1346,14 @@ export class BrowserXmppClient {
     mode: "always" | "on-mention" | "never";
     name?: string;
   }): Promise<SetRoomNotificationModeOutcome> {
-    const xmpp = await this.requireConnectedXmpp();
-    if (!xmpp.set_room_notification_mode) return { kind: "error" };
+    // Wrap the WHOLE call — including `requireConnectedXmpp()` — so
+    // a reconnect/teardown race (the client instance exists but the
+    // session isn't ready) doesn't escape as an exception and break
+    // the typed-outcome contract documented at the call site.
+    // Round-13 PR review.
     try {
+      const xmpp = await this.requireConnectedXmpp();
+      if (!xmpp.set_room_notification_mode) return { kind: "error" };
       // WASM resolves with a typed tagged outcome — no stringly-typed
       // condition transport across the JS↔Rust boundary (round-13 PR
       // compliance #19). The specific RFC 6120 §8.3 condition stays
@@ -1364,9 +1369,11 @@ export class BrowserXmppClient {
       }
       return outcome;
     } catch (error) {
-      // Reached only for transport / serialization failures; stanza
-      // errors are surfaced via the typed outcome above.
-      console.warn("[xmpp] XEP-0492 bookmark publish transport error:", error);
+      // Reached for session-not-ready exceptions thrown from
+      // requireConnectedXmpp, plus transport / serialization
+      // failures. Stanza errors are surfaced via the typed outcome
+      // above and never reach here.
+      console.warn("[xmpp] XEP-0492 bookmark publish failed:", error);
       return { kind: "error" };
     }
   }
