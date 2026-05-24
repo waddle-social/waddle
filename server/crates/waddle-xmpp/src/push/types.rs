@@ -212,15 +212,23 @@ impl EncryptedPayload {
 
 /// Signed VAPID JWT, ready for `Authorization: vapid t=…` use.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct VapidJwt(String);
+pub struct VapidJwt(reqwest::header::HeaderValue);
+
+#[derive(Debug, Error)]
+pub enum VapidJwtError {
+    #[error("JWT is not a valid HTTP header value")]
+    InvalidHeaderValue(#[from] reqwest::header::InvalidHeaderValue),
+}
 
 impl VapidJwt {
-    pub fn new(token: String) -> Self {
-        Self(token)
+    pub fn new(token: &str) -> Result<Self, VapidJwtError> {
+        Ok(Self(reqwest::header::HeaderValue::from_str(token)?))
     }
 
     pub fn as_str(&self) -> &str {
-        &self.0
+        self.0
+            .to_str()
+            .expect("VAPID JWT must remain visible ASCII after construction")
     }
 }
 
@@ -386,6 +394,8 @@ pub enum VapidSignError {
         #[source]
         source: p256::pkcs8::Error,
     },
+    #[error("VAPID JWT formatting failed")]
+    JwtFormat(#[from] VapidJwtError),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
