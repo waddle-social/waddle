@@ -267,10 +267,17 @@ impl AuthSecret {
     }
 
     pub fn from_base64url(input: &str) -> Result<Self, WebPushCryptoError> {
-        let bytes = URL_SAFE_NO_PAD
-            .decode(input.trim_end_matches('='))
-            .map_err(|source| MalformedSubscriptionError::AuthSecretBase64url { source })?;
-        Self::from_slice(&bytes)
+        // The base64url decoder allocates a `Vec<u8>` for the output. Wrap
+        // it in `Zeroizing` so the intermediate heap buffer holding the
+        // raw `auth_secret` bytes is wiped when this scope ends — the
+        // `ZeroizeOnDrop` derive on `AuthSecret` only covers the final
+        // `[u8; 16]` stored in the struct, not the decoder's scratch.
+        let bytes: zeroize::Zeroizing<Vec<u8>> = zeroize::Zeroizing::new(
+            URL_SAFE_NO_PAD
+                .decode(input.trim_end_matches('='))
+                .map_err(|source| MalformedSubscriptionError::AuthSecretBase64url { source })?,
+        );
+        Self::from_slice(bytes.as_slice())
     }
 
     pub fn as_bytes(&self) -> &[u8; 16] {
