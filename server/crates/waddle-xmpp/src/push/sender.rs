@@ -16,7 +16,9 @@ use reqwest::header::{HeaderName, HeaderValue, AUTHORIZATION, CONTENT_ENCODING, 
 use tracing::{debug, warn};
 use url::Url;
 
-use super::types::{EncryptedPayload, PushTopic, TransientFailure, VapidJwt, WebPushOutcome};
+use super::types::{
+    EncryptedPayload, EndpointHash, PushTopic, TransientFailure, VapidJwt, WebPushOutcome,
+};
 
 /// RFC 8030 `Urgency` header values (§5.3). Carried as a typed enum so
 /// callers can't accidentally emit unknown values.
@@ -121,8 +123,13 @@ impl WebPushSender for HttpWebPushSender {
         let auth_header = match HeaderValue::from_str(&auth_value) {
             Ok(v) => v,
             Err(_) => {
+                // Log only the truncated endpoint hash — the full
+                // endpoint URL is a per-device bearer identifier;
+                // anyone with log access could otherwise replay-send
+                // to it.
                 warn!(
-                    endpoint = %endpoint,
+                    endpoint_hash = %EndpointHash::of(endpoint.as_str()),
+                    origin = endpoint.origin().ascii_serialization(),
                     "VAPID Authorization header is not a valid ASCII HTTP header value",
                 );
                 return Box::pin(async move { WebPushOutcome::BadRequest { status: 0 } });
@@ -188,13 +195,15 @@ async fn classify_response(resp: reqwest::Response) -> WebPushOutcome {
 }
 
 fn classify_transport_error(endpoint: &Url, err: reqwest::Error) -> WebPushOutcome {
+    let endpoint_hash = EndpointHash::of(endpoint.as_str());
+    let origin = endpoint.origin().ascii_serialization();
     if err.is_timeout() {
-        warn!(endpoint = %endpoint, error = %err, "Web Push timeout");
+        warn!(endpoint_hash = %endpoint_hash, origin = origin, error = %err, "Web Push timeout");
         WebPushOutcome::Transient {
             kind: TransientFailure::Timeout,
         }
     } else {
-        warn!(endpoint = %endpoint, error = %err, "Web Push transport failure");
+        warn!(endpoint_hash = %endpoint_hash, origin = origin, error = %err, "Web Push transport failure");
         WebPushOutcome::Transient {
             kind: TransientFailure::Network,
         }

@@ -390,6 +390,18 @@ impl EndpointHash {
     }
 }
 
+impl fmt::Display for EndpointHash {
+    /// Renders the first 8 bytes as lowercase hex (16 chars). Enough
+    /// to disambiguate endpoints in tracing without leaking the
+    /// per-device bearer URL.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for byte in &self.0[..8] {
+            write!(f, "{byte:02x}")?;
+        }
+        Ok(())
+    }
+}
+
 /// Errors from the Web Push crypto + sender path.
 ///
 /// Kept as a standalone enum (rather than extending `super::PushError`)

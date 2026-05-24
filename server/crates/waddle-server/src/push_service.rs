@@ -2920,6 +2920,11 @@ fn validate_device_registration(registration: &PushDeviceRegistration) -> Result
         registration.provider_endpoint.as_deref(),
         MAX_PROVIDER_ENDPOINT_LEN,
     )?;
+    if registration.platform == PushDevicePlatform::Web {
+        if let Some(endpoint) = registration.provider_endpoint.as_deref() {
+            validate_web_push_endpoint(endpoint)?;
+        }
+    }
     validate_optional_len(
         "Push Service provider token",
         registration.provider_token.as_deref(),
@@ -2931,6 +2936,51 @@ fn validate_device_registration(registration: &PushDeviceRegistration) -> Result
         MAX_PROVIDER_KEY_MATERIAL_LEN,
     )?;
     Ok(())
+}
+
+/// Reject Web Push endpoints that would let a registering client
+/// weaponize the publish-job worker as an SSRF probe against
+/// internal-network hosts. Accepted shape: `https://<host>/...` where
+/// `<host>` is a non-IP domain whose lowest label is not
+/// `localhost`. Literal IP addresses (any family) are rejected
+/// outright — legitimate relays use named hosts and DNS handles their
+/// addressing.
+///
+/// Note: this is register-time only; it does not prevent DNS-rebinding
+/// at delivery time. A full mitigation requires inspecting the
+/// resolved peer address inside the reqwest connection callback
+/// (deferred to a follow-up PR).
+fn validate_web_push_endpoint(endpoint: &str) -> Result<(), XmppError> {
+    let parsed = url::Url::parse(endpoint).map_err(|_| {
+        XmppError::bad_request(Some(
+            "Push Service provider endpoint is not a valid URL".to_string(),
+        ))
+    })?;
+    if parsed.scheme() != "https" {
+        return Err(XmppError::bad_request(Some(
+            "Push Service provider endpoint must use https".to_string(),
+        )));
+    }
+    let host = parsed.host_str().ok_or_else(|| {
+        XmppError::bad_request(Some(
+            "Push Service provider endpoint must include a host".to_string(),
+        ))
+    })?;
+    // Reject `localhost` and the IPv6 equivalent regardless of how the
+    // operator's resolver maps them.
+    let host_lower = host.to_ascii_lowercase();
+    if host_lower == "localhost" || host_lower.ends_with(".localhost") {
+        return Err(XmppError::bad_request(Some(
+            "Push Service provider endpoint must not target localhost".to_string(),
+        )));
+    }
+    // Literal IPs: any family. `url::Host` already classifies them.
+    match parsed.host() {
+        Some(url::Host::Ipv4(_)) | Some(url::Host::Ipv6(_)) => Err(XmppError::bad_request(Some(
+            "Push Service provider endpoint must be a hostname, not an IP literal".to_string(),
+        ))),
+        _ => Ok(()),
+    }
 }
 
 fn validate_optional_len(field: &str, value: Option<&str>, max: usize) -> Result<(), XmppError> {
@@ -5634,6 +5684,77 @@ mod tests {
             DEVICE_STATUS_ACTIVE,
             "Transient outcomes must keep the device active — XEP-0357 §6 disable applies only to permanent failures"
         );
+    }
+
+    #[tokio::test]
+    async fn web_push_endpoint_rejects_ssrf_vectors() {
+        let store = store().await;
+        let owner = owner();
+        let node = store.ensure_node(&owner, "web").await.expect("node");
+        for bad in [
+            // Literal IPs in any family must be rejected outright —
+            // legitimate relays use named hosts.
+            "https://127.0.0.1/abc",
+            "https://10.0.0.5/abc",
+            "https://169.254.169.254/latest/meta-data/",
+            "https://[::1]/abc",
+            "https://[fd00::1]/abc",
+            // localhost and any *.localhost subdomain.
+            "https://localhost/abc",
+            "https://foo.localhost/abc",
+            // Non-https schemes.
+            "http://push.example.com/abc",
+            "ftp://push.example.com/abc",
+        ] {
+            let err = store
+                .upsert_device(
+                    &owner,
+                    PushDeviceRegistration::new(
+                        "ssrf",
+                        node.node(),
+                        PushDevicePlatform::Web,
+                        "test",
+                    )
+                    .with_provider_endpoint(Some(bad.to_string())),
+                )
+                .await
+                .expect_err(&format!("must reject {bad}"));
+            match err {
+                XmppError::Stanza {
+                    condition: waddle_xmpp::StanzaErrorCondition::BadRequest,
+                    ..
+                } => {}
+                other => panic!("expected bad-request for {bad}, got {other:?}"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn web_push_endpoint_accepts_real_relay_hosts() {
+        let store = store().await;
+        let owner = owner();
+        let node = store.ensure_node(&owner, "web").await.expect("node");
+        for ok in [
+            "https://fcm.googleapis.com/fcm/send/abc",
+            "https://updates.push.services.mozilla.com/wpush/v1/abc",
+            "https://web.push.apple.com/abc",
+            // Self-hosted relays with named hosts are fine.
+            "https://push.internal.example.com/abc",
+        ] {
+            store
+                .upsert_device(
+                    &owner,
+                    PushDeviceRegistration::new(
+                        "good",
+                        node.node(),
+                        PushDevicePlatform::Web,
+                        "test",
+                    )
+                    .with_provider_endpoint(Some(ok.to_string())),
+                )
+                .await
+                .unwrap_or_else(|err| panic!("legitimate relay {ok} rejected: {err:?}"));
+        }
     }
 
     #[tokio::test]
