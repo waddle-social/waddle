@@ -129,31 +129,75 @@ impl VapidSub {
         Ok(Self::Mailto(MailtoAddress::new(mailto)?))
     }
 
-    /// Render as the `sub` claim string for JWT inclusion.
+    /// Render as the `sub` claim string for JWT inclusion. For the
+    /// `mailto:` variant the address is percent-encoded per RFC 6068 §5
+    /// — non-ASCII, control, whitespace, and the special set `%?#&=/`
+    /// are percent-encoded; ASCII alphanumerics and the `mailto`-safe
+    /// punctuation (`-._~+@`) are passed through unchanged.
     pub fn as_claim(&self) -> String {
         match self {
-            Self::Mailto(addr) => format!("mailto:{}", addr.as_str()),
+            Self::Mailto(addr) => format!("mailto:{}", percent_encode_mailto(addr.as_str())),
             Self::Url(url) => url.to_string(),
         }
     }
 }
 
+/// Percent-encode the addr-spec portion of a `mailto:` URI per
+/// RFC 6068 §5. Characters that MUST be percent-encoded:
+///
+///   - non-ASCII bytes (UTF-8 encoded then `%HH` per byte)
+///   - control characters and whitespace
+///   - the URI-reserved set used by `mailto` headers: `%`, `?`, `#`,
+///     `&`, `=`, `/`
+///
+/// All other ASCII characters (alphanumerics + `mailto`-safe punctuation
+/// like `-._~+@`) pass through unchanged. Output is always
+/// printable-ASCII and URI-safe.
+fn percent_encode_mailto(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    for byte in input.bytes() {
+        let must_encode = byte >= 0x80
+            || (byte as char).is_ascii_control()
+            || (byte as char).is_ascii_whitespace()
+            || matches!(byte, b'%' | b'?' | b'#' | b'&' | b'=' | b'/');
+        if must_encode {
+            out.push('%');
+            out.push(upper_hex_nibble(byte >> 4));
+            out.push(upper_hex_nibble(byte & 0x0F));
+        } else {
+            out.push(byte as char);
+        }
+    }
+    out
+}
+
+#[inline]
+fn upper_hex_nibble(nibble: u8) -> char {
+    match nibble {
+        0..=9 => (b'0' + nibble) as char,
+        10..=15 => (b'A' + nibble - 10) as char,
+        _ => unreachable!("nibble must be 0..=15"),
+    }
+}
+
 impl MailtoAddress {
+    /// Construct from a raw, unescaped email address. URI-reserved
+    /// characters (`%`, `?`, `#`, `&`, `=`, `/`) and non-ASCII bytes
+    /// are accepted here — they will be percent-encoded per RFC 6068 §5
+    /// when the address is rendered into the `sub` claim by
+    /// [`VapidSub::as_claim`]. Control characters, NUL, CR, LF, and a
+    /// missing `@` separator are still rejected; the local-part and
+    /// host MUST both be non-empty.
     pub fn new(value: impl Into<Box<str>>) -> Result<Self, VapidSubParseError> {
         let s: Box<str> = value.into();
         if s.is_empty() {
             return Err(VapidSubParseError::Empty);
         }
-        // Reject control/whitespace, plus URI-reserved characters that would
-        // require percent-encoding in a mailto URI (RFC 6068 §2). The
-        // `sub` claim is embedded verbatim as `mailto:<addr>` into the JWT;
-        // unescaped reserved chars produce malformed URIs.
-        let reject = |c: char| {
-            c.is_control()
-                || c.is_whitespace()
-                || matches!(c, '?' | '#' | '%' | '&' | '/' | ',' | ';')
-        };
-        if s.chars().any(reject) {
+        // Control characters (incl. NUL, CR, LF) and whitespace are never
+        // valid in an email address. Other characters that need
+        // percent-encoding for the mailto URI are accepted and rendered
+        // safely by `VapidSub::as_claim`.
+        if s.chars().any(|c| c.is_control() || c.is_whitespace()) {
             return Err(VapidSubParseError::BadMailto);
         }
         let (local, host) = s.rsplit_once('@').ok_or(VapidSubParseError::BadMailto)?;
@@ -602,21 +646,66 @@ mod tests {
     }
 
     #[test]
-    fn vapid_sub_rejects_mailto_with_uri_reserved_chars() {
-        // RFC 6068 §2: `?`, `#`, `%`, `&`, etc. need percent-encoding.
+    fn vapid_sub_accepts_mailto_with_uri_reserved_chars_and_percent_encodes_them() {
+        // RFC 6068 §5 requires `?`, `#`, `%`, `&`, `=`, `/` (and non-ASCII /
+        // control / whitespace) to be percent-encoded inside the `addr-spec`
+        // when rendered as a `mailto:` URI. We accept the raw address at
+        // construction and let `as_claim()` do the encoding.
+        let cases: &[(&str, &str)] = &[
+            ("mailto:foo?bar@example.com", "mailto:foo%3Fbar@example.com"),
+            (
+                "mailto:foo#frag@example.com",
+                "mailto:foo%23frag@example.com",
+            ),
+            ("mailto:foo&bar@example.com", "mailto:foo%26bar@example.com"),
+            ("mailto:foo=bar@example.com", "mailto:foo%3Dbar@example.com"),
+            ("mailto:foo/bar@example.com", "mailto:foo%2Fbar@example.com"),
+            // Pre-percent-encoded local-part: the `%` itself is re-encoded
+            // (`%20` → `%2520`) — operators who want literal `%HH` semantics
+            // should pass the decoded form.
+            (
+                "mailto:foo%20bar@example.com",
+                "mailto:foo%2520bar@example.com",
+            ),
+        ];
+        for (input, expected_claim) in cases {
+            let sub = VapidSub::from_str(input).unwrap_or_else(|e| {
+                panic!("input {input:?} should be accepted, got {e:?}");
+            });
+            assert_eq!(sub.as_claim(), *expected_claim, "input {input}");
+        }
+    }
+
+    #[test]
+    fn vapid_sub_mailto_still_rejects_control_chars() {
+        // Control / whitespace remain invalid — they can't appear in a real
+        // email address and percent-encoding them would be misleading.
         for bad in &[
-            "mailto:foo?subj=x@bar.example",
-            "mailto:foo#frag@bar.example",
-            "mailto:foo%20bar@bar.example",
-            "mailto:foo,bar@bar.example",
+            "mailto:foo\x00bar@example.com",
+            "mailto:foo bar@example.com",
+            "mailto:foo\tbar@example.com",
         ] {
             match VapidSub::from_str(bad) {
                 Ok(_) => panic!("input `{bad}` should be rejected"),
                 Err(err) => {
-                    assert!(matches!(err, VapidSubParseError::BadMailto), "input {bad}")
+                    assert!(
+                        matches!(err, VapidSubParseError::BadMailto),
+                        "input {bad:?}"
+                    )
                 }
             }
         }
+    }
+
+    #[test]
+    fn percent_encode_mailto_passes_through_safe_chars_and_encodes_non_ascii() {
+        // ASCII alphanumerics + mailto-safe punctuation should round-trip.
+        let safe = "ops-team+vapid_alert@push.example.com";
+        assert_eq!(percent_encode_mailto(safe), safe);
+
+        // Non-ASCII UTF-8 bytes are percent-encoded byte-by-byte.
+        // "naïve" in UTF-8 is `na\xc3\xafve` → `na%C3%AFve`.
+        assert_eq!(percent_encode_mailto("naïve"), "na%C3%AFve");
     }
 
     #[test]
