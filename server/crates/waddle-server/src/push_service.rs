@@ -548,6 +548,90 @@ fn web_push_outcome_diagnostic(outcome: &waddle_xmpp::push::types::WebPushOutcom
 /// statuses (delivered, gone, payload-too-large, bad-request, invalid
 /// endpoint/keys, missing material, unseal failed, fake-sent) mark the
 /// job as published.
+/// Dispatch one Web Push device row: unseal the subscription, then
+/// encrypt+sign+POST. Translates typed outcomes into the
+/// `push_delivery_attempts.status` wire format. Free function (not a
+/// method) so the per-device future is `Send + 'static`-compatible
+/// inside the `buffer_unordered` fan-out in `dispatch_devices`.
+async fn dispatch_web_device_owned(
+    device: &dispatch::SealedActiveDevice,
+    parsed: &dispatch::ParsedPushPayload,
+    item_id: &str,
+    signer: &Arc<dyn VapidSigner>,
+    sender: &Arc<dyn WebPushSender>,
+    sub: &VapidSub,
+    secrets: &PushSecretCipher,
+) -> DispatchedAttempt {
+    let target = match dispatch::WebPushTarget::try_from_sealed(device, secrets) {
+        Ok(target) => target,
+        Err(reason) => {
+            return DispatchedAttempt {
+                device_id: device.device_id.clone(),
+                platform: device.platform,
+                status: dispatch::skip_reason_to_attempt_status(reason),
+                last_error: None,
+                retry_after: None,
+            };
+        }
+    };
+    match dispatch::dispatch_one_web_push(&target, parsed, item_id, signer, sub, sender).await {
+        Ok(outcome) => {
+            let status = dispatch::outcome_to_attempt_status(&outcome);
+            let last_error = if matches!(
+                outcome,
+                waddle_xmpp::push::types::WebPushOutcome::Delivered { .. }
+            ) {
+                None
+            } else {
+                Some(truncate_last_error(&web_push_outcome_diagnostic(&outcome)))
+            };
+            // Honor RFC 7231 §7.1.3 `Retry-After` for rate-limited
+            // responses — phase 3 takes `max(default, retry_after)` so
+            // a relay's "back off N seconds" hint is not lost.
+            let retry_after = match &outcome {
+                waddle_xmpp::push::types::WebPushOutcome::RateLimited { retry_after, .. } => {
+                    *retry_after
+                }
+                _ => None,
+            };
+            // XEP-0357 §6 forward cleanup runs in
+            // `finalize_publish_job` — when the persisted status hits
+            // `attempt_status_warrants_device_disable`, the matching
+            // `push_devices` row is flipped to `disabled` in the same
+            // tx.
+            //
+            // TODO(#762 follow-up): emit a server-initiated
+            // `<message><device-disabled xmlns='urn:waddle:push-
+            // service:0'/></message>` to the registering chat client
+            // so it can drop its local subscription and resubscribe
+            // with a fresh device-id. Requires plumbing the connection
+            // router into the publish-job worker; deferred so PR-D2
+            // stays scoped to the server-side cleanup half of §6.
+            DispatchedAttempt {
+                device_id: device.device_id.clone(),
+                platform: device.platform,
+                status,
+                last_error,
+                retry_after,
+            }
+        }
+        // Internal-error path covers encrypt/sign/aud-derive failures.
+        // These are deterministic bugs — a retry on the same
+        // `(subscription, payload)` will fail identically — so we
+        // classify as PERMANENT (not transient) to avoid an unbounded
+        // retry loop. Recorded as `web-internal-error` so an operator
+        // can grep for it and fix the underlying bug; the device stays
+        // active (not a per-device problem).
+        Err(error) => DispatchedAttempt {
+            device_id: device.device_id.clone(),
+            platform: device.platform,
+            status: ATTEMPT_STATUS_WEB_INTERNAL_ERROR,
+            last_error: Some(truncate_last_error(&error.to_string())),
+            retry_after: None,
+        },
+    }
+}
+
 fn attempt_status_is_transient(status: &str) -> bool {
     matches!(
         status,
@@ -2323,148 +2407,84 @@ impl DatabasePushServiceStore {
     /// Phase 2 helper: drive each sealed device row through the typed
     /// Web Push dispatcher and collect typed [`DispatchedAttempt`]
     /// outcomes. Pure compute + network — never touches the DB.
+    ///
+    /// Devices are dispatched concurrently via `buffer_unordered` so a
+    /// large fan-out does not serialize on the per-device HTTPS
+    /// round-trip. The per-(host, urgency) leaky bucket and the global
+    /// semaphore inside `RateLimitedWebPushSender` are the real rate-
+    /// limiters; this cap exists to bound async-task overhead, not to
+    /// rate-limit (cap > global semaphore size means extras simply
+    /// block on the semaphore, which is fine).
     async fn dispatch_devices(
         &self,
         sealed_devices: &[dispatch::SealedActiveDevice],
         parsed: Option<&dispatch::ParsedPushPayload>,
         item_id: &str,
     ) -> Vec<DispatchedAttempt> {
-        let mut attempts = Vec::with_capacity(sealed_devices.len());
-        let provider = match (
+        use futures::stream::{self, StreamExt};
+        const DISPATCH_FAN_OUT: usize = 64;
+
+        let web_provider = match (
             self.vapid_signer.as_ref(),
             self.web_push_sender.as_ref(),
             self.vapid_sub.as_ref(),
             parsed,
         ) {
-            (Some(signer), Some(sender), Some(sub), Some(parsed)) => {
-                Some((signer, sender, sub, parsed))
-            }
+            (Some(signer), Some(sender), Some(sub), Some(parsed)) => Some((
+                Arc::clone(signer),
+                Arc::clone(sender),
+                sub.clone(),
+                parsed.clone(),
+                self.secrets.clone(),
+            )),
             _ => None,
         };
-        for device in sealed_devices {
-            let attempt = match (provider, device.platform) {
-                (Some((signer, sender, sub, parsed)), PushDevicePlatform::Web) => {
-                    self.dispatch_web_device(device, parsed, item_id, signer, sender, sub)
-                        .await
-                }
-                // No Web Push provider wired up. Web devices get the
-                // typed `web-not-configured` marker (transient, so the
-                // job retries once the operator fixes the boot config);
-                // APNS/FCM devices retain the legacy `fake-sent` marker
-                // (their senders ship in #529 / #530).
-                (None, PushDevicePlatform::Web) => DispatchedAttempt {
-                    device_id: device.device_id.clone(),
-                    platform: device.platform,
-                    status: ATTEMPT_STATUS_WEB_NOT_CONFIGURED,
-                    last_error: Some("Web Push provider not configured".to_string()),
-                    retry_after: None,
-                },
-                (None, PushDevicePlatform::Apns | PushDevicePlatform::Fcm) => DispatchedAttempt {
-                    device_id: device.device_id.clone(),
-                    platform: device.platform,
-                    status: dispatch::ATTEMPT_STATUS_FAKE_SENT_NON_WEB,
-                    last_error: None,
-                    retry_after: None,
-                },
-                // APNS/FCM are stubbed until #529/#530 land their real
-                // senders. Keep the historical `fake-sent` marker so
-                // existing tests / dashboards keep working.
-                (Some(_), PushDevicePlatform::Apns | PushDevicePlatform::Fcm) => {
-                    DispatchedAttempt {
-                        device_id: device.device_id.clone(),
-                        platform: device.platform,
-                        status: dispatch::ATTEMPT_STATUS_FAKE_SENT_NON_WEB,
-                        last_error: None,
-                        retry_after: None,
+        let item_id_arc: Arc<str> = Arc::from(item_id);
+
+        stream::iter(sealed_devices.iter().cloned())
+            .map(move |device| {
+                let item_id = Arc::clone(&item_id_arc);
+                let web_provider = web_provider.clone();
+                async move {
+                    match (&web_provider, device.platform) {
+                        (Some((signer, sender, sub, parsed, secrets)), PushDevicePlatform::Web) => {
+                            dispatch_web_device_owned(
+                                &device, parsed, &item_id, signer, sender, sub, secrets,
+                            )
+                            .await
+                        }
+                        // No Web Push provider wired up. Web devices
+                        // get the typed `web-not-configured` marker
+                        // (transient, so the job retries once the
+                        // operator fixes the boot config); APNS/FCM
+                        // devices retain the legacy `fake-sent` marker
+                        // (their senders ship in #529 / #530).
+                        (None, PushDevicePlatform::Web) => DispatchedAttempt {
+                            device_id: device.device_id.clone(),
+                            platform: device.platform,
+                            status: ATTEMPT_STATUS_WEB_NOT_CONFIGURED,
+                            last_error: Some("Web Push provider not configured".to_string()),
+                            retry_after: None,
+                        },
+                        (_, PushDevicePlatform::Apns | PushDevicePlatform::Fcm) => {
+                            // APNS/FCM are stubbed until #529/#530 land
+                            // their real senders. Keep the historical
+                            // `fake-sent` marker so existing tests /
+                            // dashboards keep working.
+                            DispatchedAttempt {
+                                device_id: device.device_id.clone(),
+                                platform: device.platform,
+                                status: dispatch::ATTEMPT_STATUS_FAKE_SENT_NON_WEB,
+                                last_error: None,
+                                retry_after: None,
+                            }
+                        }
                     }
                 }
-            };
-            attempts.push(attempt);
-        }
-        attempts
-    }
-
-    /// Dispatch one Web Push device row: unseal the subscription, then
-    /// encrypt+sign+POST. Translates typed outcomes into the
-    /// `push_delivery_attempts.status` wire format.
-    async fn dispatch_web_device(
-        &self,
-        device: &dispatch::SealedActiveDevice,
-        parsed: &dispatch::ParsedPushPayload,
-        item_id: &str,
-        signer: &Arc<dyn VapidSigner>,
-        sender: &Arc<dyn WebPushSender>,
-        sub: &VapidSub,
-    ) -> DispatchedAttempt {
-        let target = match dispatch::WebPushTarget::try_from_sealed(device, &self.secrets) {
-            Ok(target) => target,
-            Err(reason) => {
-                return DispatchedAttempt {
-                    device_id: device.device_id.clone(),
-                    platform: device.platform,
-                    status: dispatch::skip_reason_to_attempt_status(reason),
-                    last_error: None,
-                    retry_after: None,
-                };
-            }
-        };
-        match dispatch::dispatch_one_web_push(&target, parsed, item_id, signer, sub, sender).await {
-            Ok(outcome) => {
-                let status = dispatch::outcome_to_attempt_status(&outcome);
-                let last_error = if matches!(
-                    outcome,
-                    waddle_xmpp::push::types::WebPushOutcome::Delivered { .. }
-                ) {
-                    None
-                } else {
-                    Some(truncate_last_error(&web_push_outcome_diagnostic(&outcome)))
-                };
-                // Honor RFC 7231 §7.1.3 `Retry-After` for rate-limited
-                // responses — phase 3 takes `max(default, retry_after)`
-                // so a relay's "back off N seconds" hint is not lost.
-                let retry_after = match &outcome {
-                    waddle_xmpp::push::types::WebPushOutcome::RateLimited {
-                        retry_after, ..
-                    } => *retry_after,
-                    _ => None,
-                };
-                // XEP-0357 §6 forward cleanup runs in
-                // `finalize_publish_job` — when the persisted status
-                // hits `attempt_status_warrants_device_disable`, the
-                // matching `push_devices` row is flipped to
-                // `disabled` in the same tx.
-                //
-                // TODO(#762 follow-up): emit a server-initiated
-                // `<message><device-disabled xmlns='urn:waddle:push-
-                // service:0'/></message>` to the registering chat
-                // client so it can drop its local subscription and
-                // resubscribe with a fresh device-id. Requires
-                // plumbing the connection router into the publish-job
-                // worker; deferred so PR-D2 stays scoped to the
-                // server-side cleanup half of §6.
-                DispatchedAttempt {
-                    device_id: device.device_id.clone(),
-                    platform: device.platform,
-                    status,
-                    last_error,
-                    retry_after,
-                }
-            }
-            // Internal-error path covers encrypt/sign/aud-derive
-            // failures. These are deterministic bugs — a retry on the
-            // same `(subscription, payload)` will fail identically — so
-            // we classify as PERMANENT (not transient) to avoid an
-            // unbounded retry loop. Recorded as `web-internal-error`
-            // so an operator can grep for it and fix the underlying
-            // bug; the device stays active (not a per-device problem).
-            Err(error) => DispatchedAttempt {
-                device_id: device.device_id.clone(),
-                platform: device.platform,
-                status: ATTEMPT_STATUS_WEB_INTERNAL_ERROR,
-                last_error: Some(truncate_last_error(&error.to_string())),
-                retry_after: None,
-            },
-        }
+            })
+            .buffer_unordered(DISPATCH_FAN_OUT)
+            .collect::<Vec<_>>()
+            .await
     }
 
     /// Phase 3: open a fresh tx, record one row per attempt, and either
