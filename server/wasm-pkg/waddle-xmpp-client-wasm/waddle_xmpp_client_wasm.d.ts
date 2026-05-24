@@ -110,6 +110,31 @@ export class WaddleClient {
      * Returns a `WaddleThreadsPage` (empty page on transport failure).
      */
     fetch_threads(opts: any): Promise<any>;
+    /**
+     * Fetch the user's XEP-0402 bookmark items from PEP, surfaced as
+     * a typed array carrying the XEP-0492 fallback notification mode
+     * (when present) for each room. The chat UI uses this to
+     * hydrate per-chat notification controls on connect.
+     *
+     * Resolves to an empty array when the user's PEP `urn:xmpp:bookmarks:1`
+     * node is absent (first publish hasn't happened) or empty —
+     * XEP-0163 PEP returns `item-not-found` in that case, which is
+     * caught here and treated as the empty list rather than
+     * rejecting the Promise. Per XEP-0492 §3, the chat caller
+     * resolves an empty `notify_mode` against the conversation-kind
+     * default.
+     *
+     * **Deferred:** the conformant XEP-0163 §4.4 `+notify` self-
+     * subscription on `urn:xmpp:bookmarks:1` would push every other
+     * client's bookmark publish to this client as a `<message>`
+     * headline. Without it, the chat re-fetches on every fresh
+     * session-ready (see `notifySettingsStore.hydrate` wiring at
+     * `chat/src/shell/chat-app-controller.ts`); a setting changed
+     * in another tab reaches this tab only on the next reconnect.
+     * Wiring the headline route is a meaningful slice of new WASM
+     * plumbing and lands in a separate PR.
+     */
+    fetch_user_bookmarks(): Promise<any>;
     fetch_user_pep_profile(jid: string): Promise<any>;
     fetch_vcard4(jid: string): Promise<any>;
     get_resume_state(): any;
@@ -293,6 +318,29 @@ export class WaddleClient {
     set_on_presence(cb: Function): void;
     set_on_session_lifecycle(cb: Function): void;
     set_room_affiliation(room_jid: string, jid: string, affiliation: string): Promise<any>;
+    /**
+     * Set the per-chat XEP-0492 notification mode for one room by
+     * merging into the user's XEP-0402 bookmark for that room. If no
+     * bookmark exists yet for `room_jid`, one is created with
+     * `autojoin=false` so this call doesn't change join behavior.
+     *
+     * Semantics:
+     * * Fetch existing PEP bookmarks (XEP-0402 §2). A missing PEP
+     *   node (`item-not-found`) is treated as empty rather than a
+     *   hard error — the user's first XEP-0492 publish creates the
+     *   node via XEP-0060 publish-options.
+     * * Find the item whose id matches `room_jid`; if missing,
+     *   construct a fresh item with the given `name` (or `None`).
+     * * Replace the fallback `<notify/>` child via
+     *   [`merge_notify_into_extensions`] — foreign `<advanced/>`
+     *   children and identity-scoped siblings written by other
+     *   clients are preserved verbatim (XEP-0492 §3).
+     * * Publish the merged item back.
+     *
+     * Resolves to the new [`WaddleBookmarkItem`] so the chat UI can
+     * reconcile its store without a follow-up fetch.
+     */
+    set_room_notification_mode(options: any): Promise<any>;
     /**
      * Fetch the latest stories from the community stories node on
      * `community_jid`. Returns ALL items including expired ones —

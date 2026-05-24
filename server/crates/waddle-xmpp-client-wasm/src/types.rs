@@ -743,6 +743,76 @@ pub struct WaddleFetchThreadsOptions {
     pub after_cursor: Option<String>,
 }
 
+/// JS-facing shape for one XEP-0402 bookmark item exposed via
+/// `WaddleClient::fetch_user_bookmarks`.
+///
+/// `jid` is the bookmarked room's bare JID as a string (JS-friendly);
+/// `notify_mode` is the XEP-0492 fallback setting (no `identity-*`
+/// attrs). `None` means the bookmark has no `<notify/>` extension
+/// and the chat UI should resolve against the conversation-kind
+/// default from XEP-0492 §3.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WaddleBookmarkItem {
+    pub jid: String,
+    pub name: Option<String>,
+    pub autojoin: bool,
+    pub notify_mode: Option<waddle_xmpp_client::xep::xep0492::NotifyMode>,
+}
+
+/// JS-facing tagged outcome of `WaddleClient::set_room_notification_mode`.
+///
+/// Returned by always-resolving the Promise (never rejecting on
+/// stanza-level errors). Transport / serialization failures still
+/// reject the Promise via `JsValue`. This shape keeps the chat-side
+/// branching typed — the `kind` discriminator lets the wrapper in
+/// `BrowserXmppClient.setRoomNotificationMode` switch on a string
+/// union without parsing message bodies. Round-9 reviewer P2 fix
+/// for the typed-payloads hard rule.
+#[derive(Debug, Serialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum WaddleSetRoomNotificationModeOutcome {
+    Ok {
+        item: WaddleBookmarkItem,
+    },
+    /// XEP-0060 `precondition-not-met` on the publish — typically a
+    /// pre-existing XEP-0223-style PEP node with a divergent
+    /// `access_model`.
+    NodeConfigMismatch,
+    /// Any other stanza-level error (forbidden, internal-server-error,
+    /// etc). The specific RFC 6120 §8.3 condition stays on the Rust
+    /// side — emitted through `tracing::warn` so a debug build can
+    /// recover it from logs — rather than crossing the JS boundary as
+    /// a stringly-typed payload. The chat UI shows a generic "couldn't
+    /// save" message; if future UX needs to discriminate more cases,
+    /// the right move is to add new typed variants here (e.g.
+    /// `Forbidden`, `InternalServerError`) instead of widening
+    /// `Error` with a condition string. Round-13 PR compliance.
+    Error,
+}
+
+/// Options bag for `WaddleClient::set_room_notification_mode`.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetRoomNotificationModeOptions {
+    /// Bare JID of the room whose XEP-0402 bookmark carries the
+    /// XEP-0492 `<notify/>` extension.
+    pub room_jid: String,
+    /// Typed at the WASM boundary — unknown values fail at
+    /// `serde_wasm_bindgen::from_value` rather than reaching the IQ
+    /// builder.
+    pub mode: waddle_xmpp_client::xep::xep0492::NotifyMode,
+    /// `<conference name='…'>` to use when no bookmark exists yet.
+    /// Optional; XEP-0402 §2.2 makes the `name` attribute optional on
+    /// the wire (XSD `use='optional'`). Callers SHOULD pass a name
+    /// so the freshly-created bookmark carries a useful display
+    /// label for clients that lean on it, but the WASM bridge
+    /// happily publishes without one. When the room already has a
+    /// bookmark its existing `name` is preserved verbatim regardless
+    /// of this field.
+    pub name: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::RegisterWebPushDeviceOptions;

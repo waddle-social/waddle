@@ -19,6 +19,7 @@ import { useXmppRosterContacts } from "@/contacts/roster";
 import { matchLocation, navigate, type RouteMatch } from "@/router";
 import { resolveChannelBySlug } from "@/shell/route-helpers";
 import { barePeerJid, jidDomain, parseManagedRoomBareJid } from "@/lib/xmpp-client";
+import { createNotifySettingsStore } from "@/lib/notify-settings";
 import { mdsChatKey, setLastSeen } from "@/lib/last-seen-store";
 import { roomJidForChannelId as resolveRoomJidForChannelId } from "@/lib/channel-room";
 import { connectionStore } from "@/lib/connection-store";
@@ -57,6 +58,12 @@ export function useChatAppController(giphyApiKey: string) {
   const xmppClient = computed(() => connectionStore.client);
   const session = computed(() => connectionStore.session);
   const api = computed(() => connectionStore.api);
+  // Per-controller XEP-0492 store. Constructed here (not a
+  // module-level singleton) so unrelated consumers can't share
+  // state implicitly — PR-review compliance. Exposed on the
+  // controller return and threaded into child components via
+  // explicit props.
+  const notifySettings = createNotifySettingsStore();
 
   const waddles = useWaddleDirectory(
     api,
@@ -707,6 +714,12 @@ export function useChatAppController(giphyApiKey: string) {
     client.setSessionLifecycleHandler((event) => {
       messaging.onSessionLifecycle(event);
       dmMessaging.onSessionLifecycle(event);
+      // Short-circuit if the session is already torn down — a
+      // lifecycle event queued before `handleLogout` ran can fire
+      // here AFTER `notifySettings.reset()` and would
+      // otherwise restart hydrate against the about-to-disconnect
+      // client. Round-12 reviewer P1.
+      if (!connectionStore.session) return;
       // Re-hydrate inbox on every XMPP session-ready, both resumed and
       // fresh. Stream resume catches up on stanzas the client missed
       // while disconnected, but a *fresh* reconnection (resume failed
@@ -722,6 +735,22 @@ export function useChatAppController(giphyApiKey: string) {
       void socialFeed.refresh();
       void stories.refresh();
       void communityEvents.refresh();
+      // Re-hydrate XEP-0492 notification settings only on *fresh*
+      // reconnects. A stream resume is by definition gap-free —
+      // any bookmark publish from another tab during the disconnect
+      // is impossible because we never disconnected as far as the
+      // server's PEP queue is concerned. Refetching on every resume
+      // burns one IQ round-trip per resume for no payoff (round-12
+      // reviewer P2). Until the chat subscribes to PEP `+notify`
+      // headlines on `urn:xmpp:bookmarks:1` (deferred follow-up),
+      // fresh-only hydrate is the correct cadence.
+      if (event.type === "fresh") {
+        // Belt-and-braces: hydrate already catches lower-layer
+        // throws, but call-site .catch defends against any future
+        // regression so an unhandled rejection doesn't propagate
+        // out of the lifecycle handler. Round-14 PR review.
+        notifySettings.hydrate(client).catch(() => undefined);
+      }
     });
   }, { immediate: true });
 
@@ -1561,6 +1590,20 @@ export function useChatAppController(giphyApiKey: string) {
     void rosterContacts.loadRosterContacts();
     void socialFeed.refresh();
 
+    // Hydrate XEP-0492 per-chat notification settings from the user's
+    // XEP-0402 PEP bookmarks. Best-effort — an empty result is the
+    // first-run state and the UI falls back to the §3 conversation
+    // default via [[effectiveNotifyMode]].
+    void (async () => {
+      const client = xmppClient.value;
+      if (!client) return;
+      // Best-effort: hydrate already swallows lower-layer
+      // exceptions, but a defensive .catch keeps the IIFE quiet
+      // even if a future regression bypasses the inner guard.
+      // Round-14 PR review.
+      await notifySettings.hydrate(client).catch(() => undefined);
+    })();
+
     // Register service worker and sync push subscription (best-effort, non-blocking)
     void (async () => {
       await notifications.registerServiceWorker();
@@ -1587,6 +1630,10 @@ export function useChatAppController(giphyApiKey: string) {
     // see the prior user's pinned-message previews and pre-hydration
     // events buffered from the prior session don't leak forward.
     resetPinnedRooms();
+    // #532: drop the XEP-0492 settings cache so a subsequent
+    // sign-in does not leak the previous account's per-chat modes
+    // into UI reads while the fresh `hydrate` is still in flight.
+    notifySettings.reset();
     ui.showPinnedPanel.value = false;
     navigate({ id: "home" });
     await connectionStore.logout();
@@ -1795,6 +1842,7 @@ export function useChatAppController(giphyApiKey: string) {
       communityEvents,
       dmMessaging,
       xmppClient,
+      notifySettings,
       activeMessages,
       activeFirstUnseenId,
       extensionRoutes,

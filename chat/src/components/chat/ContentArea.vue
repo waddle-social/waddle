@@ -4,6 +4,7 @@ import { useStore } from "@nanostores/vue";
 import { AlertCircle, CheckCircle2, Hash, Loader2, MessageCircle, MessagesSquare, RefreshCw, Search, SearchX, Upload, WifiOff, X } from "lucide-vue-next";
 import { $pinnedStanzaIds } from "@/stores/pinned-messages";
 import { isForumChannel as detectForumChannel } from "@/lib/channel-types";
+import type { NotifySettingsStore } from "@/lib/notify-settings";
 import { getConnectionNoticeCopy } from "@/lib/connection-notice";
 import { findMessageElementById } from "@/lib/message-targeting";
 import { findMessageById } from "@/lib/message-ids";
@@ -97,6 +98,7 @@ const props = defineProps<{
   uploadProgress: { uploading: boolean; progress: number; filename: string };
   threadIndex: MessageThreadIndex;
   xmppClient?: BrowserXmppClient | null;
+  notifySettings: NotifySettingsStore;
   reactionMode?: { selectedMessageId: string | null } | null;
   ensureMessageLoaded?: (messageId: string) => Promise<boolean>;
   invokeExtensionAction?: (action: ExtensionAnnotationAction) => Promise<ExtensionCommandResult>;
@@ -879,6 +881,8 @@ function dayDividerLabel(createdAt: string): string {
       :connection-notice="connectionNotice"
       :connection-status-classes="connectionStatusClasses"
       :connection-status-icon="connectionStatusIcon"
+      :xmpp-client="xmppClient"
+      :notify-settings="notifySettings"
       @open-nav="emit('openNav')"
       @open-details="emit('openDetails')"
       @edit-channel="emit('editChannel')"

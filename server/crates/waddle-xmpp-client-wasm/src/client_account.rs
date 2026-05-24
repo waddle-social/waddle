@@ -144,6 +144,157 @@ impl WaddleClient {
         })
     }
 
+    /// Fetch the user's XEP-0402 bookmark items from PEP, surfaced as
+    /// a typed array carrying the XEP-0492 fallback notification mode
+    /// (when present) for each room. The chat UI uses this to
+    /// hydrate per-chat notification controls on connect.
+    ///
+    /// Resolves to an empty array when the user's PEP `urn:xmpp:bookmarks:1`
+    /// node is absent (first publish hasn't happened) or empty —
+    /// XEP-0163 PEP returns `item-not-found` in that case, which is
+    /// caught here and treated as the empty list rather than
+    /// rejecting the Promise. Per XEP-0492 §3, the chat caller
+    /// resolves an empty `notify_mode` against the conversation-kind
+    /// default.
+    ///
+    /// **Deferred:** the conformant XEP-0163 §4.4 `+notify` self-
+    /// subscription on `urn:xmpp:bookmarks:1` would push every other
+    /// client's bookmark publish to this client as a `<message>`
+    /// headline. Without it, the chat re-fetches on every fresh
+    /// session-ready (see `notifySettingsStore.hydrate` wiring at
+    /// `chat/src/shell/chat-app-controller.ts`); a setting changed
+    /// in another tab reaches this tab only on the next reconnect.
+    /// Wiring the headline route is a meaningful slice of new WASM
+    /// plumbing and lands in a separate PR.
+    pub fn fetch_user_bookmarks(&self) -> Promise {
+        let inner = self.inner.clone();
+        future_to_promise(async move {
+            let iq = build_fetch_bookmarks_iq(&uuid::Uuid::new_v4().to_string());
+            let items = match send_iq_command_stanza_aware(inner, iq).await? {
+                Ok(elem) => parse_bookmarks_response(&elem),
+                Err(stanza_err) if stanza_err.condition == "item-not-found" => Vec::new(),
+                Err(stanza_err) => return Err(js_error(stanza_err.to_string())),
+            };
+            let surfaced: Vec<WaddleBookmarkItem> =
+                items.into_iter().map(surface_bookmark).collect();
+            to_js_value(&surfaced)
+        })
+    }
+
+    /// Set the per-chat XEP-0492 notification mode for one room by
+    /// merging into the user's XEP-0402 bookmark for that room. If no
+    /// bookmark exists yet for `room_jid`, one is created with
+    /// `autojoin=false` so this call doesn't change join behavior.
+    ///
+    /// Semantics:
+    /// * Fetch existing PEP bookmarks (XEP-0402 §2). A missing PEP
+    ///   node (`item-not-found`) is treated as empty rather than a
+    ///   hard error — the user's first XEP-0492 publish creates the
+    ///   node via XEP-0060 publish-options.
+    /// * Find the item whose id matches `room_jid`; if missing,
+    ///   construct a fresh item with the given `name` (or `None`).
+    /// * Replace the fallback `<notify/>` child via
+    ///   [`merge_notify_into_extensions`] — foreign `<advanced/>`
+    ///   children and identity-scoped siblings written by other
+    ///   clients are preserved verbatim (XEP-0492 §3).
+    /// * Publish the merged item back.
+    ///
+    /// Resolves to the new [`WaddleBookmarkItem`] so the chat UI can
+    /// reconcile its store without a follow-up fetch.
+    pub fn set_room_notification_mode(&self, options: JsValue) -> Promise {
+        let inner = self.inner.clone();
+        future_to_promise(async move {
+            let opts: SetRoomNotificationModeOptions = serde_wasm_bindgen::from_value(options)
+                .map_err(|err| JsValue::from_str(&err.to_string()))?;
+            let room_jid: jid::BareJid = opts.room_jid.parse().map_err(|err: jid::Error| {
+                JsValue::from_str(&format!("invalid room JID: {err}"))
+            })?;
+            // XEP-0402 §2.2 bookmark item ids are room bare JIDs —
+            // the room MUST have a localpart (`<localpart>@<muc-service>`),
+            // a domain-only JID is not a valid bookmark id and the
+            // PEP service will reject the publish. Reject early so
+            // the caller gets a typed error instead of a stanza
+            // error round-trip. Round-13 Copilot review.
+            if room_jid.node().is_none() {
+                return Err(JsValue::from_str(
+                    "invalid room JID: XEP-0402 bookmark id MUST have a localpart",
+                ));
+            }
+            // Empty / whitespace-only `name` would publish
+            // `<conference name=""/>`, which is technically valid
+            // per the XSD but parser-side `parse_item` treats an
+            // empty name as `None` — round-trip asymmetry. Normalize
+            // here so the wire shape is consistent. Round-13.
+            let name_override = opts
+                .name
+                .as_deref()
+                .map(str::trim)
+                .filter(|trimmed| !trimmed.is_empty())
+                .map(str::to_string);
+
+            // Fetch existing bookmarks so we can preserve the rest of
+            // the bookmark item plus any foreign extension children
+            // when we merge in the new <notify/> setting. Treat
+            // first-publish item-not-found as empty.
+            let fetch_iq = build_fetch_bookmarks_iq(&uuid::Uuid::new_v4().to_string());
+            let items = match send_iq_command_stanza_aware(inner.clone(), fetch_iq).await? {
+                Ok(elem) => parse_bookmarks_response(&elem),
+                Err(stanza_err) if stanza_err.condition == "item-not-found" => Vec::new(),
+                Err(stanza_err) => return Err(js_error(stanza_err.to_string())),
+            };
+
+            let existing = items.iter().find(|item| item.jid == room_jid);
+            let existing_extensions =
+                existing.map(|item| build_extensions_wrapper(&item.extensions));
+            let merged_extensions =
+                merge_notify_into_extensions(existing_extensions.as_ref(), opts.mode);
+            let extensions_children: Vec<Element> = merged_extensions.children().cloned().collect();
+
+            let merged_item = BookmarkItem {
+                jid: room_jid,
+                name: existing
+                    .and_then(|item| item.name.clone())
+                    .or(name_override),
+                autojoin: existing.map(|item| item.autojoin).unwrap_or(false),
+                nick: existing.and_then(|item| item.nick.clone()),
+                password: existing.and_then(|item| item.password.clone()),
+                extensions: extensions_children,
+            };
+
+            let publish_iq =
+                build_publish_bookmark_iq(&merged_item, &uuid::Uuid::new_v4().to_string());
+            // Use the stanza-aware send so the chat layer can
+            // distinguish recoverable XEP-0060 conditions (notably
+            // `precondition-not-met` on an older XEP-0223-style node
+            // configured with `access_model=open`) from transport
+            // errors. Round-9 reviewer P2 — we resolve the Promise
+            // with a typed JS-object outcome instead of throwing a
+            // stringly-typed payload across the boundary. The chat
+            // wrapper switches on `outcome.kind` directly.
+            let outcome = match send_iq_command_stanza_aware(inner, publish_iq).await? {
+                Ok(_) => WaddleSetRoomNotificationModeOutcome::Ok {
+                    item: surface_bookmark(merged_item),
+                },
+                Err(stanza_err) if stanza_err.condition == "precondition-not-met" => {
+                    WaddleSetRoomNotificationModeOutcome::NodeConfigMismatch
+                }
+                Err(stanza_err) => {
+                    // Keep the specific RFC 6120 §8.3 condition on
+                    // the Rust side as a diagnostic log; do not leak
+                    // it across the JS boundary as a stringly-typed
+                    // payload. Round-13 PR compliance — typed
+                    // payloads beyond the I/O boundary.
+                    tracing::warn!(
+                        condition = %stanza_err.condition,
+                        "bookmark publish rejected with stanza error",
+                    );
+                    WaddleSetRoomNotificationModeOutcome::Error
+                }
+            };
+            to_js_value(&outcome)
+        })
+    }
+
     pub fn get_server_version(&self) -> Promise {
         let inner = self.inner.clone();
         future_to_promise(async move {
@@ -502,6 +653,41 @@ impl WaddleClient {
             };
             to_js_value(&profile)
         })
+    }
+}
+
+/// Build the `<extensions xmlns='urn:xmpp:bookmarks:1'>…</extensions>`
+/// wrapper around the typed bookmark's foreign children so the merge
+/// helper has a single `Element` to walk. Pure / side-effect free.
+fn build_extensions_wrapper(children: &[Element]) -> Element {
+    let mut builder = Element::builder("extensions", waddle_xmpp_client::pep::NS_BOOKMARKS);
+    for child in children {
+        builder = builder.append(child.clone());
+    }
+    builder.build()
+}
+
+/// Surface one parsed [`BookmarkItem`] into the JS-facing
+/// [`WaddleBookmarkItem`]. Pulls the XEP-0492 fallback `<notify/>`
+/// child out of the extensions list and returns it as the typed
+/// `notify_mode`. Used by both `fetch_user_bookmarks` (per-item map)
+/// and `set_room_notification_mode` (response shaping).
+fn surface_bookmark(item: BookmarkItem) -> WaddleBookmarkItem {
+    let notify_mode = item.extensions.iter().find_map(|ext| {
+        if ext.is(
+            "notify",
+            waddle_xmpp_client::xep::xep0492::NS_NOTIFICATION_SETTINGS,
+        ) {
+            read_fallback_mode(ext)
+        } else {
+            None
+        }
+    });
+    WaddleBookmarkItem {
+        jid: item.jid.to_string(),
+        name: item.name,
+        autojoin: item.autojoin,
+        notify_mode,
     }
 }
 
