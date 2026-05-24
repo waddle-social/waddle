@@ -58,10 +58,7 @@ struct VapidClaims {
 pub fn aud_for(endpoint: &Url) -> Result<url::Origin, WebPushCryptoError> {
     let origin = endpoint.origin();
     if !matches!(&origin, url::Origin::Tuple(scheme, _, _) if scheme == "https") {
-        return Err(WebPushCryptoError::InvalidEndpoint(format!(
-            "endpoint origin not https-tuple: {:?}",
-            origin
-        )));
+        return Err(WebPushCryptoError::InvalidEndpoint { origin });
     }
     Ok(origin)
 }
@@ -121,7 +118,7 @@ impl InProcessVapidSigner {
         let public_key = secret_key.public_key();
         let pem = secret_key
             .to_pkcs8_pem(Default::default())
-            .map_err(|e| VapidSignError::Storage(format!("encode PKCS#8 PEM: {e}")))?;
+            .map_err(|source| VapidSignError::KeyEncoding { source })?;
         let encoding_key =
             EncodingKey::from_ec_pem(pem.as_bytes()).map_err(VapidSignError::Signing)?;
         // `secret_key` drops here (zeroized by p256). `pem` is `Zeroizing<String>`
@@ -301,14 +298,14 @@ mod tests {
     fn aud_for_rejects_http() {
         let endpoint = Url::parse("http://insecure.example.com/abc").unwrap();
         let err = aud_for(&endpoint).unwrap_err();
-        assert!(matches!(err, WebPushCryptoError::InvalidEndpoint(_)));
+        assert!(matches!(err, WebPushCryptoError::InvalidEndpoint { .. }));
     }
 
     #[test]
     fn aud_for_rejects_data_scheme() {
         let endpoint = Url::parse("data:text/plain,hello").unwrap();
         let err = aud_for(&endpoint).unwrap_err();
-        assert!(matches!(err, WebPushCryptoError::InvalidEndpoint(_)));
+        assert!(matches!(err, WebPushCryptoError::InvalidEndpoint { .. }));
     }
 
     #[test]

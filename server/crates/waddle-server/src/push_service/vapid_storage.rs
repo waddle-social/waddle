@@ -32,7 +32,10 @@ use p256::elliptic_curve::sec1::ToEncodedPoint;
 use rand::RngExt;
 use sha2::Sha256;
 use uuid::Uuid;
-use waddle_xmpp::push::types::{Kid, VapidLoadError};
+use waddle_xmpp::push::types::{
+    Kid, VapidDbReadStage, VapidDbWriteStage, VapidEnvParseError, VapidLoadError,
+    VapidUnsealErrorKind,
+};
 use waddle_xmpp::push::vapid::{InProcessVapidSigner, VapidSigner};
 use waddle_xmpp::XmppError;
 use zeroize::Zeroizing;
@@ -65,9 +68,13 @@ impl VapidStorage {
         db: Database,
         root_key: &[u8],
     ) -> Result<Arc<dyn VapidSigner>, VapidLoadError> {
-        let storage = Self::new(db.clone(), root_key)
-            .await
-            .map_err(|e| VapidLoadError::DbWrite(e.to_string()))?;
+        let storage =
+            Self::new(db.clone(), root_key)
+                .await
+                .map_err(|source| VapidLoadError::DbWrite {
+                    stage: VapidDbWriteStage::Initialize,
+                    source: Box::new(source),
+                })?;
 
         // 1. Env-var bootstrap path.
         if let Ok(raw) = env::var(VAPID_ENV_VAR) {
@@ -85,7 +92,7 @@ impl VapidStorage {
             }
             return Ok(Arc::new(
                 InProcessVapidSigner::new(kid, secret_key)
-                    .map_err(|e| VapidLoadError::SignerInit(e.to_string()))?,
+                    .map_err(|source| VapidLoadError::SignerInit { source })?,
             ));
         }
 
@@ -93,7 +100,7 @@ impl VapidStorage {
         if let Some((kid, secret_key)) = storage.load_latest().await? {
             return Ok(Arc::new(
                 InProcessVapidSigner::new(kid, secret_key)
-                    .map_err(|e| VapidLoadError::SignerInit(e.to_string()))?,
+                    .map_err(|source| VapidLoadError::SignerInit { source })?,
             ));
         }
 
@@ -103,7 +110,7 @@ impl VapidStorage {
         storage.persist_keypair(&kid, &secret_key).await?;
         Ok(Arc::new(
             InProcessVapidSigner::new(kid, secret_key)
-                .map_err(|e| VapidLoadError::SignerInit(e.to_string()))?,
+                .map_err(|source| VapidLoadError::SignerInit { source })?,
         ))
     }
 
@@ -185,7 +192,10 @@ impl VapidStorage {
         let sealed = self
             .cipher
             .seal(&scalar[..], AAD_LABEL, kid.as_bytes())
-            .map_err(|e| VapidLoadError::DbWrite(format!("seal: {e}")))?;
+            .map_err(|source| VapidLoadError::DbWrite {
+                stage: VapidDbWriteStage::SealPrivateKey,
+                source: Box::new(source),
+            })?;
         let public_bytes = secret_key
             .public_key()
             .to_encoded_point(false)
@@ -206,7 +216,10 @@ impl VapidStorage {
             ],
         )
         .await
-        .map_err(|e| VapidLoadError::DbWrite(e.to_string()))?;
+        .map_err(|source| VapidLoadError::DbWrite {
+            stage: VapidDbWriteStage::InsertRow,
+            source: Box::new(source),
+        })?;
         Ok(())
     }
 
@@ -218,23 +231,29 @@ impl VapidStorage {
         let mut rows = self
             .run_query(sql, ())
             .await
-            .map_err(|e| VapidLoadError::DbRead(e.to_string()))?;
-        let Some(row) = rows
-            .next()
-            .await
-            .map_err(|e| VapidLoadError::DbRead(e.to_string()))?
+            .map_err(|source| VapidLoadError::DbRead {
+                stage: VapidDbReadStage::Query,
+                source: Box::new(source),
+            })?;
+        let Some(row) = rows.next().await.map_err(|source| VapidLoadError::DbRead {
+            stage: VapidDbReadStage::NextRow,
+            source: Box::new(source),
+        })?
         else {
             return Ok(None);
         };
-        let kid_str: String = row
-            .get(0)
-            .map_err(|e| VapidLoadError::DbRead(format!("kid: {e}")))?;
-        let sealed: String = row
-            .get(1)
-            .map_err(|e| VapidLoadError::DbRead(format!("sealed_private_key: {e}")))?;
-        let version: i64 = row
-            .get(2)
-            .map_err(|e| VapidLoadError::DbRead(format!("root_key_version: {e}")))?;
+        let kid_str: String = row.get(0).map_err(|source| VapidLoadError::DbRead {
+            stage: VapidDbReadStage::DecodeKid,
+            source: Box::new(source),
+        })?;
+        let sealed: String = row.get(1).map_err(|source| VapidLoadError::DbRead {
+            stage: VapidDbReadStage::DecodeSealedPrivateKey,
+            source: Box::new(source),
+        })?;
+        let version: i64 = row.get(2).map_err(|source| VapidLoadError::DbRead {
+            stage: VapidDbReadStage::DecodeRootKeyVersion,
+            source: Box::new(source),
+        })?;
         // Compare as `i64` directly to avoid the `as u32` wraparound foot-gun:
         // a negative value (or any v where `(v % 2^32) == 1`) would silently
         // pass an `i64 as u32 == 1` check.
@@ -244,16 +263,24 @@ impl VapidStorage {
                 max_installed: CURRENT_ROOT_KEY_VERSION,
             });
         }
-        let kid_uuid: Uuid = kid_str
-            .parse()
-            .map_err(|e: uuid::Error| VapidLoadError::DbRead(format!("kid not a UUID: {e}")))?;
+        let kid_uuid: Uuid =
+            kid_str
+                .parse()
+                .map_err(|source: uuid::Error| VapidLoadError::DbRead {
+                    stage: VapidDbReadStage::ParseKidUuid,
+                    source: Box::new(source),
+                })?;
         let kid = Kid(kid_uuid);
         let scalar = self
             .cipher
             .open(&sealed, AAD_LABEL, kid.as_bytes())
-            .map_err(|e| VapidLoadError::Unseal(e.to_string()))?;
-        let secret_key = p256::SecretKey::from_slice(scalar.as_slice())
-            .map_err(|e| VapidLoadError::DbRead(format!("bad P-256 scalar: {e}")))?;
+            .map_err(|kind| VapidLoadError::Unseal { kind })?;
+        let secret_key = p256::SecretKey::from_slice(scalar.as_slice()).map_err(|source| {
+            VapidLoadError::DbRead {
+                stage: VapidDbReadStage::ParseSecretKeyScalar,
+                source: Box::new(source),
+            }
+        })?;
         // `scalar` is `Zeroizing<Vec<u8>>` and zeroes here.
         Ok(Some((kid, secret_key)))
     }
@@ -267,6 +294,12 @@ struct VapidKeyCipher {
     /// Initialized once at storage construction. AES-256-GCM key was derived
     /// from the root key via HMAC-SHA256 with a domain-separating label.
     cipher: Aes256Gcm,
+}
+
+#[derive(Debug, thiserror::Error)]
+enum VapidSealError {
+    #[error("AES-256-GCM seal failed")]
+    EncryptFailed,
 }
 
 impl VapidKeyCipher {
@@ -285,7 +318,12 @@ impl VapidKeyCipher {
         Self { cipher }
     }
 
-    fn seal(&self, plaintext: &[u8], label: &[u8], kid_bytes: &[u8]) -> Result<String, String> {
+    fn seal(
+        &self,
+        plaintext: &[u8],
+        label: &[u8],
+        kid_bytes: &[u8],
+    ) -> Result<String, VapidSealError> {
         // Length-prefix encoding uses u16, so each field is capped at 65535
         // bytes. Practical labels (~32 B) and kids (16 B UUID) are far below
         // the bound; the assertion catches future regressions.
@@ -303,7 +341,7 @@ impl VapidKeyCipher {
                     aad: &aad,
                 },
             )
-            .map_err(|e| format!("AES-256-GCM seal: {e}"))?;
+            .map_err(|_| VapidSealError::EncryptFailed)?;
         Ok(format!(
             "{SEALED_PREFIX}:{}:{}",
             URL_SAFE_NO_PAD.encode(nonce),
@@ -316,26 +354,28 @@ impl VapidKeyCipher {
         stored: &str,
         label: &[u8],
         kid_bytes: &[u8],
-    ) -> Result<Zeroizing<Vec<u8>>, String> {
+    ) -> Result<Zeroizing<Vec<u8>>, VapidUnsealErrorKind> {
         let mut parts = stored.split(':');
-        let prefix = parts.next().ok_or("missing prefix")?;
+        let prefix = parts.next().ok_or(VapidUnsealErrorKind::MissingPrefix)?;
         if prefix != SEALED_PREFIX {
-            return Err(format!("unexpected sealed prefix {prefix:?}"));
+            return Err(VapidUnsealErrorKind::UnexpectedPrefix);
         }
-        let nonce_b64 = parts.next().ok_or("missing nonce")?;
-        let ct_b64 = parts.next().ok_or("missing ciphertext")?;
+        let nonce_b64 = parts.next().ok_or(VapidUnsealErrorKind::MissingNonce)?;
+        let ct_b64 = parts
+            .next()
+            .ok_or(VapidUnsealErrorKind::MissingCiphertext)?;
         if parts.next().is_some() {
-            return Err("unexpected trailing field".into());
+            return Err(VapidUnsealErrorKind::UnexpectedTrailingField);
         }
         let nonce = URL_SAFE_NO_PAD
             .decode(nonce_b64)
-            .map_err(|e| format!("nonce base64url: {e}"))?;
+            .map_err(|_| VapidUnsealErrorKind::NonceBase64urlDecode)?;
         let nonce: [u8; 12] = nonce
             .try_into()
-            .map_err(|v: Vec<u8>| format!("nonce wrong length: {}", v.len()))?;
+            .map_err(|_: Vec<u8>| VapidUnsealErrorKind::NonceWrongLength)?;
         let ciphertext = URL_SAFE_NO_PAD
             .decode(ct_b64)
-            .map_err(|e| format!("ciphertext base64url: {e}"))?;
+            .map_err(|_| VapidUnsealErrorKind::CiphertextBase64urlDecode)?;
         let aad = build_aad(label, kid_bytes);
         let plaintext = self
             .cipher
@@ -346,7 +386,7 @@ impl VapidKeyCipher {
                     aad: &aad,
                 },
             )
-            .map_err(|e| format!("AES-256-GCM open (AAD/tag check failed): {e}"))?;
+            .map_err(|_| VapidUnsealErrorKind::AeadOpenFailed)?;
         Ok(Zeroizing::new(plaintext))
     }
 }
@@ -368,16 +408,13 @@ fn parse_env_scalar(raw: &str) -> Result<p256::SecretKey, VapidLoadError> {
     let bytes = Zeroizing::new(
         URL_SAFE_NO_PAD
             .decode(raw.trim_end_matches('='))
-            .map_err(|e| VapidLoadError::EnvParse(format!("base64url decode: {e}")))?,
+            .map_err(|source| VapidEnvParseError::Base64urlDecode { source })?,
     );
     if bytes.len() != 32 {
-        return Err(VapidLoadError::EnvParse(format!(
-            "expected 32-byte P-256 scalar; got {} bytes",
-            bytes.len()
-        )));
+        return Err(VapidEnvParseError::InvalidLength { found: bytes.len() }.into());
     }
     p256::SecretKey::from_slice(bytes.as_slice())
-        .map_err(|e| VapidLoadError::EnvParse(format!("invalid P-256 scalar: {e}")))
+        .map_err(|source| VapidEnvParseError::InvalidScalar { source }.into())
 }
 
 #[cfg(test)]
@@ -418,7 +455,7 @@ mod tests {
         let plaintext = b"my-32-byte-p256-scalar-padding!!";
         let sealed = cipher.seal(plaintext, AAD_LABEL, b"kid-a").unwrap();
         let err = cipher.open(&sealed, AAD_LABEL, b"kid-b").unwrap_err();
-        assert!(err.contains("AAD/tag check failed"), "{err}");
+        assert_eq!(err, VapidUnsealErrorKind::AeadOpenFailed);
     }
 
     #[test]
@@ -427,7 +464,7 @@ mod tests {
         let plaintext = b"my-32-byte-p256-scalar-padding!!";
         let sealed = cipher.seal(plaintext, b"label-a", b"kid").unwrap();
         let err = cipher.open(&sealed, b"label-b", b"kid").unwrap_err();
-        assert!(err.contains("AAD/tag check failed"), "{err}");
+        assert_eq!(err, VapidUnsealErrorKind::AeadOpenFailed);
     }
 
     #[test]
@@ -437,7 +474,7 @@ mod tests {
         let plaintext = b"my-32-byte-p256-scalar-padding!!";
         let sealed = cipher_a.seal(plaintext, AAD_LABEL, b"kid").unwrap();
         let err = cipher_b.open(&sealed, AAD_LABEL, b"kid").unwrap_err();
-        assert!(err.contains("AAD/tag check failed"), "{err}");
+        assert_eq!(err, VapidUnsealErrorKind::AeadOpenFailed);
     }
 
     #[test]
@@ -452,7 +489,10 @@ mod tests {
     fn parse_env_scalar_rejects_wrong_length() {
         let encoded = URL_SAFE_NO_PAD.encode([0u8; 16]);
         let err = parse_env_scalar(&encoded).unwrap_err();
-        assert!(matches!(err, VapidLoadError::EnvParse(_)));
+        assert!(matches!(
+            err,
+            VapidLoadError::EnvParse(VapidEnvParseError::InvalidLength { found: 16 })
+        ));
     }
 
     #[test]

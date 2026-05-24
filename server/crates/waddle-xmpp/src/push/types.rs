@@ -243,10 +243,9 @@ impl AuthSecret {
 
     pub fn from_slice(bytes: &[u8]) -> Result<Self, WebPushCryptoError> {
         if bytes.len() != Self::LEN {
-            return Err(WebPushCryptoError::MalformedSubscription(format!(
-                "auth_secret must be 16 bytes, got {}",
-                bytes.len()
-            )));
+            return Err(
+                MalformedSubscriptionError::AuthSecretWrongLength { found: bytes.len() }.into(),
+            );
         }
         let mut buf = [0u8; 16];
         buf.copy_from_slice(bytes);
@@ -256,11 +255,7 @@ impl AuthSecret {
     pub fn from_base64url(input: &str) -> Result<Self, WebPushCryptoError> {
         let bytes = URL_SAFE_NO_PAD
             .decode(input.trim_end_matches('='))
-            .map_err(|e| {
-                WebPushCryptoError::MalformedSubscription(format!(
-                    "auth_secret base64url decode: {e}"
-                ))
-            })?;
+            .map_err(|source| MalformedSubscriptionError::AuthSecretBase64url { source })?;
         Self::from_slice(&bytes)
     }
 
@@ -291,24 +286,21 @@ impl SubscriptionKeys {
     pub fn from_base64url(p256dh: &str, auth: &str) -> Result<Self, WebPushCryptoError> {
         let p256dh_bytes = URL_SAFE_NO_PAD
             .decode(p256dh.trim_end_matches('='))
-            .map_err(|e| {
-                WebPushCryptoError::MalformedSubscription(format!("p256dh base64url decode: {e}"))
-            })?;
+            .map_err(|source| MalformedSubscriptionError::P256DhBase64url { source })?;
         if p256dh_bytes.len() != 65 {
-            return Err(WebPushCryptoError::MalformedSubscription(format!(
-                "p256dh must be 65 bytes (uncompressed P-256 point), got {}",
-                p256dh_bytes.len()
-            )));
+            return Err(MalformedSubscriptionError::P256DhWrongLength {
+                found: p256dh_bytes.len(),
+            }
+            .into());
         }
         if p256dh_bytes[0] != 0x04 {
-            return Err(WebPushCryptoError::MalformedSubscription(format!(
-                "p256dh must start with 0x04 (uncompressed point prefix), got 0x{:02x}",
-                p256dh_bytes[0]
-            )));
+            return Err(MalformedSubscriptionError::P256DhWrongPrefix {
+                found: p256dh_bytes[0],
+            }
+            .into());
         }
-        let pk = p256::PublicKey::from_sec1_bytes(&p256dh_bytes).map_err(|e| {
-            WebPushCryptoError::MalformedSubscription(format!("p256dh not on curve: {e}"))
-        })?;
+        let pk = p256::PublicKey::from_sec1_bytes(&p256dh_bytes)
+            .map_err(|source| MalformedSubscriptionError::P256DhNotOnCurve { source })?;
         let auth_secret = AuthSecret::from_base64url(auth)?;
         Ok(Self {
             p256dh: pk,
@@ -342,9 +334,9 @@ impl EndpointHash {
 #[derive(Debug, Error)]
 pub enum WebPushCryptoError {
     #[error("malformed subscription: {0}")]
-    MalformedSubscription(String),
-    #[error("invalid push endpoint: {0}")]
-    InvalidEndpoint(String),
+    MalformedSubscription(#[from] MalformedSubscriptionError),
+    #[error("invalid push endpoint origin: {origin:?}")]
+    InvalidEndpoint { origin: url::Origin },
     #[error("push payload too large: {plaintext_len} > {limit}")]
     PayloadTooLarge { plaintext_len: usize, limit: usize },
     #[error("AES-GCM encrypt failed")]
@@ -353,6 +345,31 @@ pub enum WebPushCryptoError {
     EcdhFailed,
     #[error("HKDF expansion failed")]
     HkdfFailed,
+}
+
+#[derive(Debug, Error)]
+pub enum MalformedSubscriptionError {
+    #[error("auth_secret base64url decode failed")]
+    AuthSecretBase64url {
+        #[source]
+        source: base64::DecodeError,
+    },
+    #[error("auth_secret must be 16 bytes, got {found}")]
+    AuthSecretWrongLength { found: usize },
+    #[error("p256dh base64url decode failed")]
+    P256DhBase64url {
+        #[source]
+        source: base64::DecodeError,
+    },
+    #[error("p256dh must be 65 bytes (uncompressed P-256 point), got {found}")]
+    P256DhWrongLength { found: usize },
+    #[error("p256dh must start with 0x04 (uncompressed point prefix), got 0x{found:02x}")]
+    P256DhWrongPrefix { found: u8 },
+    #[error("p256dh must be a valid P-256 point")]
+    P256DhNotOnCurve {
+        #[source]
+        source: p256::elliptic_curve::Error,
+    },
 }
 
 /// Errors from the VAPID signing path.
@@ -364,8 +381,58 @@ pub enum VapidSignError {
     Signing(#[from] jsonwebtoken::errors::Error),
     #[error("VAPID key {kid} is retired")]
     KeyRetired { kid: Kid },
-    #[error("VAPID storage unavailable: {0}")]
-    Storage(String),
+    #[error("VAPID signer key encoding failed")]
+    KeyEncoding {
+        #[source]
+        source: p256::pkcs8::Error,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VapidDbReadStage {
+    Query,
+    NextRow,
+    DecodeKid,
+    DecodeSealedPrivateKey,
+    DecodeRootKeyVersion,
+    ParseKidUuid,
+    ParseSecretKeyScalar,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VapidDbWriteStage {
+    Initialize,
+    SealPrivateKey,
+    InsertRow,
+}
+
+#[derive(Debug, Error)]
+pub enum VapidEnvParseError {
+    #[error("base64url decode failed")]
+    Base64urlDecode {
+        #[source]
+        source: base64::DecodeError,
+    },
+    #[error("expected 32-byte P-256 scalar; got {found} bytes")]
+    InvalidLength { found: usize },
+    #[error("invalid P-256 scalar")]
+    InvalidScalar {
+        #[source]
+        source: p256::elliptic_curve::Error,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VapidUnsealErrorKind {
+    MissingPrefix,
+    UnexpectedPrefix,
+    MissingNonce,
+    MissingCiphertext,
+    UnexpectedTrailingField,
+    NonceBase64urlDecode,
+    NonceWrongLength,
+    CiphertextBase64urlDecode,
+    AeadOpenFailed,
 }
 
 /// Errors loading the VAPID config at boot. All variants map to
@@ -373,25 +440,36 @@ pub enum VapidSignError {
 #[derive(Debug, Error)]
 pub enum VapidLoadError {
     #[error("env var WADDLE_VAPID_PRIVATE_KEY parse failed: {0}")]
-    EnvParse(String),
+    EnvParse(#[from] VapidEnvParseError),
     #[error("env var WADDLE_VAPID_SUB parse failed: {0}")]
     SubParse(#[from] VapidSubParseError),
-    #[error("VAPID storage read failed: {0}")]
-    DbRead(String),
-    #[error("VAPID storage write failed: {0}")]
-    DbWrite(String),
-    #[error("VAPID key unseal failed: {0}")]
-    Unseal(String),
+    #[error("VAPID storage read failed at {stage:?}")]
+    DbRead {
+        stage: VapidDbReadStage,
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+    #[error("VAPID storage write failed at {stage:?}")]
+    DbWrite {
+        stage: VapidDbWriteStage,
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+    #[error("VAPID key unseal failed ({kind:?})")]
+    Unseal { kind: VapidUnsealErrorKind },
     #[error(
         "sealed blob references unknown root_key_version {found}; max installed {max_installed}"
     )]
     UnknownRootKeyVersion { found: u32, max_installed: u32 },
     #[error("missing root key for version {0}")]
     MissingRootKey(u32),
-    #[error("VAPID signer initialization failed: {0}")]
-    SignerInit(String),
-    #[error("fresh P-256 keypair generation failed: {0}")]
-    Generate(String),
+    #[error("VAPID signer initialization failed")]
+    SignerInit {
+        #[source]
+        source: VapidSignError,
+    },
+    #[error("fresh P-256 keypair generation failed")]
+    Generate,
 }
 
 #[cfg(test)]
@@ -547,7 +625,12 @@ mod tests {
     #[test]
     fn subscription_keys_reject_short_p256dh() {
         let err = SubscriptionKeys::from_base64url("AAAA", "AAAAAAAAAAAAAAAAAAAAAA").unwrap_err();
-        assert!(matches!(err, WebPushCryptoError::MalformedSubscription(_)));
+        assert!(matches!(
+            err,
+            WebPushCryptoError::MalformedSubscription(
+                MalformedSubscriptionError::P256DhWrongLength { .. }
+            )
+        ));
     }
 
     #[test]
@@ -558,10 +641,12 @@ mod tests {
         let p256dh = URL_SAFE_NO_PAD.encode(&bad);
         let auth = URL_SAFE_NO_PAD.encode([0u8; 16]);
         let err = SubscriptionKeys::from_base64url(&p256dh, &auth).unwrap_err();
-        match err {
-            WebPushCryptoError::MalformedSubscription(msg) => assert!(msg.contains("0x04")),
-            other => panic!("expected MalformedSubscription, got {other:?}"),
-        }
+        assert!(matches!(
+            err,
+            WebPushCryptoError::MalformedSubscription(
+                MalformedSubscriptionError::P256DhWrongPrefix { found: 0x02 }
+            )
+        ));
     }
 
     #[test]
@@ -572,7 +657,12 @@ mod tests {
         let p256dh = URL_SAFE_NO_PAD.encode(&bad);
         let auth = URL_SAFE_NO_PAD.encode([0u8; 16]);
         let err = SubscriptionKeys::from_base64url(&p256dh, &auth).unwrap_err();
-        assert!(matches!(err, WebPushCryptoError::MalformedSubscription(_)));
+        assert!(matches!(
+            err,
+            WebPushCryptoError::MalformedSubscription(
+                MalformedSubscriptionError::P256DhNotOnCurve { .. }
+            )
+        ));
     }
 
     #[test]
@@ -585,6 +675,11 @@ mod tests {
         let p256dh = URL_SAFE_NO_PAD.encode(pk_bytes.as_bytes());
         let auth = URL_SAFE_NO_PAD.encode([0u8; 8]);
         let err = SubscriptionKeys::from_base64url(&p256dh, &auth).unwrap_err();
-        assert!(matches!(err, WebPushCryptoError::MalformedSubscription(_)));
+        assert!(matches!(
+            err,
+            WebPushCryptoError::MalformedSubscription(
+                MalformedSubscriptionError::AuthSecretWrongLength { found: 8 }
+            )
+        ));
     }
 }
