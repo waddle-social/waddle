@@ -6,6 +6,7 @@
 
 pub mod constants;
 pub mod encrypt;
+pub mod envelope;
 mod sender;
 mod store;
 pub mod types;
