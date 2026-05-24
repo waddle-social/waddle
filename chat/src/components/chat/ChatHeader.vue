@@ -9,6 +9,7 @@ import type { ChannelSummary, SpaceSummary } from "@/lib/chat-types";
 import type { ConnectionNoticeCopy } from "@/lib/connection-notice";
 import type { BrowserXmppClient } from "@/lib/xmpp-client";
 import type { OccupantPresence } from "@/lib/xmpp-client";
+import type { NotifySettingsStore } from "@/lib/notify-settings";
 import type { MemberLoadState } from "@/waddles/directory";
 
 interface ConnectionStatusClasses {
@@ -43,6 +44,9 @@ const props = defineProps<{
   /** Wired XMPP client passed to per-conversation controls (notify
    * mode picker). `null` while the session is still connecting. */
   xmppClient?: BrowserXmppClient | null;
+  /** Per-controller XEP-0492 settings store — explicit wiring,
+   * NOT a module singleton, per the PR-compliance note. */
+  notifySettings: NotifySettingsStore;
 }>();
 
 const MAX_HEADER_AVATARS = 4;
@@ -234,6 +238,7 @@ const memberButtonCopy = computed(() => {
           :room-name="channel.name"
           conversation-kind="private-group"
           :client="xmppClient ?? null"
+          :store="notifySettings"
         />
         <button
           v-if="canManageChannels && channel"

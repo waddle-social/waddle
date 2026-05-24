@@ -47,6 +47,7 @@ const {
   stories,
   communityEvents,
   xmppClient,
+  notifySettings,
   activeMessages,
   activeFirstUnseenId,
   channelExtensionRoutes,
@@ -442,6 +443,7 @@ onUnmounted(() => {
               :upload-progress="activeUploadProgress"
               :thread-index="threads.index.value"
               :xmpp-client="xmppClient"
+              :notify-settings="notifySettings"
               :reaction-mode="reactionModeTarget === 'main' ? reactionModeState : null"
               :ensure-message-loaded="ensureActiveMessageLoaded"
               :send-public-channel-message="sendPublicChannelMessage"

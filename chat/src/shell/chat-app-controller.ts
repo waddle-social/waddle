@@ -19,7 +19,7 @@ import { useXmppRosterContacts } from "@/contacts/roster";
 import { matchLocation, navigate, type RouteMatch } from "@/router";
 import { resolveChannelBySlug } from "@/shell/route-helpers";
 import { barePeerJid, jidDomain, parseManagedRoomBareJid } from "@/lib/xmpp-client";
-import { notifySettingsStore } from "@/lib/notify-settings";
+import { createNotifySettingsStore } from "@/lib/notify-settings";
 import { mdsChatKey, setLastSeen } from "@/lib/last-seen-store";
 import { roomJidForChannelId as resolveRoomJidForChannelId } from "@/lib/channel-room";
 import { connectionStore } from "@/lib/connection-store";
@@ -58,6 +58,12 @@ export function useChatAppController(giphyApiKey: string) {
   const xmppClient = computed(() => connectionStore.client);
   const session = computed(() => connectionStore.session);
   const api = computed(() => connectionStore.api);
+  // Per-controller XEP-0492 store. Constructed here (not a
+  // module-level singleton) so unrelated consumers can't share
+  // state implicitly — PR-review compliance. Exposed on the
+  // controller return and threaded into child components via
+  // explicit props.
+  const notifySettings = createNotifySettingsStore();
 
   const waddles = useWaddleDirectory(
     api,
@@ -710,7 +716,7 @@ export function useChatAppController(giphyApiKey: string) {
       dmMessaging.onSessionLifecycle(event);
       // Short-circuit if the session is already torn down — a
       // lifecycle event queued before `handleLogout` ran can fire
-      // here AFTER `notifySettingsStore.reset()` and would
+      // here AFTER `notifySettings.reset()` and would
       // otherwise restart hydrate against the about-to-disconnect
       // client. Round-12 reviewer P1.
       if (!connectionStore.session) return;
@@ -739,7 +745,7 @@ export function useChatAppController(giphyApiKey: string) {
       // headlines on `urn:xmpp:bookmarks:1` (deferred follow-up),
       // fresh-only hydrate is the correct cadence.
       if (event.type === "fresh") {
-        void notifySettingsStore.hydrate(client);
+        void notifySettings.hydrate(client);
       }
     });
   }, { immediate: true });
@@ -1586,7 +1592,7 @@ export function useChatAppController(giphyApiKey: string) {
     // default via [[effectiveNotifyMode]].
     void (async () => {
       const client = xmppClient.value;
-      if (client) await notifySettingsStore.hydrate(client);
+      if (client) await notifySettings.hydrate(client);
     })();
 
     // Register service worker and sync push subscription (best-effort, non-blocking)
@@ -1618,7 +1624,7 @@ export function useChatAppController(giphyApiKey: string) {
     // #532: drop the XEP-0492 settings cache so a subsequent
     // sign-in does not leak the previous account's per-chat modes
     // into UI reads while the fresh `hydrate` is still in flight.
-    notifySettingsStore.reset();
+    notifySettings.reset();
     ui.showPinnedPanel.value = false;
     navigate({ id: "home" });
     await connectionStore.logout();
@@ -1827,6 +1833,7 @@ export function useChatAppController(giphyApiKey: string) {
       communityEvents,
       dmMessaging,
       xmppClient,
+      notifySettings,
       activeMessages,
       activeFirstUnseenId,
       extensionRoutes,

@@ -5,10 +5,10 @@ import type { BrowserXmppClient, NotifyMode } from "@/lib/xmpp-client";
 import {
   effectiveNotifyMode,
   nextMenuIndex,
-  notifySettingsStore,
   NOTIFY_MODE_HINT,
   NOTIFY_MODE_LABEL,
   type ConversationKind,
+  type NotifySettingsStore,
 } from "@/lib/notify-settings";
 
 /** Per-chat XEP-0492 notification mode picker (#532).
@@ -40,9 +40,12 @@ const props = defineProps<{
   roomName?: string;
   /** Wired XMPP client used to publish the update. */
   client: BrowserXmppClient | null;
+  /** Per-controller XEP-0492 store. Threaded as a prop instead of a
+   * module-level singleton so unrelated test fixtures and (future)
+   * multi-account UIs can hold independent state. */
+  store: NotifySettingsStore;
 }>();
 
-const store = notifySettingsStore;
 const open = ref(false);
 const submitting = ref<NotifyMode | null>(null);
 const errorMessage = ref<string | null>(null);
@@ -53,7 +56,7 @@ const optionRefs = ref<(HTMLButtonElement | null)[]>([]);
 const MODES: NotifyMode[] = ["always", "on-mention", "never"];
 
 const currentMode = computed<NotifyMode>(() => {
-  const bookmark = store.bookmarks.value[props.roomJid];
+  const bookmark = props.store.bookmarks.value[props.roomJid];
   return effectiveNotifyMode(bookmark, props.conversationKind);
 });
 
@@ -68,11 +71,11 @@ const icon = computed(() => {
   }
 });
 
-const disabled = computed(() => props.client === null || store.hydrating.value);
+const disabled = computed(() => props.client === null || props.store.hydrating.value);
 
 const buttonTitle = computed(() => {
   if (props.client === null) return "Notifications: connecting…";
-  if (store.hydrating.value) return "Notifications: syncing…";
+  if (props.store.hydrating.value) return "Notifications: syncing…";
   return `Notifications: ${NOTIFY_MODE_LABEL[currentMode.value]}`;
 });
 
@@ -117,20 +120,20 @@ async function selectMode(mode: NotifyMode) {
   submitting.value = mode;
   errorMessage.value = null;
   try {
-    let result: Awaited<ReturnType<typeof store.setMode>>;
+    let result: Awaited<ReturnType<typeof props.store.setMode>>;
     try {
-      result = await store.setMode(props.client, {
+      result = await props.store.setMode(props.client, {
         roomJid: props.roomJid,
         mode,
         name: props.roomName,
       });
     } catch (error) {
-      // Defence-in-depth — `store.setMode` is supposed to always
+      // Defence-in-depth — `props.store.setMode` is supposed to always
       // resolve with a typed result, but if a lower layer ever
       // regresses to throwing, surface the error in the banner
       // instead of leaving the user with a silent dead popover.
       // Round-13 PR review.
-      console.warn("[NotifyModeButton] store.setMode threw:", error);
+      console.warn("[NotifyModeButton] props.store.setMode threw:", error);
       errorMessage.value = "Couldn't save the setting. Try again in a moment.";
       return;
     }

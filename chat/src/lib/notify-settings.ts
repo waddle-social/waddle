@@ -82,7 +82,7 @@ export function nextMenuIndex(current: number, step: 1 | -1, total: number): num
   return ((base + step) % total + total) % total;
 }
 
-interface NotifySettingsStore {
+export interface NotifySettingsStore {
   /** Map keyed by bare room JID. Stored as a plain object so Vue's
    * reactivity tracks property assignments without depending on
    * Map proxy semantics. */
@@ -123,10 +123,13 @@ interface NotifySettingsStore {
  * an admin to delete it" hint instead of a generic failure. */
 type SetModeResult = "ok" | "node-config-mismatch" | "error";
 
-/** Build a notification-settings store wired to `WaddleClient`. The
- * module-level singleton is exposed via `notifySettingsStore` so the
- * Vue components and the shell controller share state without prop
- * drilling. */
+/** Build a notification-settings store wired to `WaddleClient`.
+ *
+ * Construct exactly one instance per chat-app-controller lifetime
+ * (see `useChatAppController`) and thread it through the component
+ * tree as a prop. A previous version exposed a module-level
+ * singleton; that was dropped per the PR-review compliance note
+ * that bans implicit shared state across unrelated consumers. */
 export function createNotifySettingsStore(): NotifySettingsStore {
   const bookmarks = shallowRef<Record<string, UserBookmarkItem>>({});
   const hydrating = ref<boolean>(false);
@@ -233,8 +236,3 @@ export function createNotifySettingsStore(): NotifySettingsStore {
 
   return { bookmarks, hydrating, hydrate, setMode, getMode, replaceAll, reset };
 }
-
-/** Module-level singleton store. Use this from Vue components and
- * the chat shell. Tests construct fresh stores via
- * [[createNotifySettingsStore]]. */
-export const notifySettingsStore: NotifySettingsStore = createNotifySettingsStore();
