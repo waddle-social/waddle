@@ -62,7 +62,7 @@ const NOTIFICATION_OUTBOX_CLASS_VALUES: [&str; 6] = [
 const NOTIFICATION_OUTBOX_CLASS_CHECK_SQL: &str = "class IN ('dm', 'dm_mention', 'personal_mention', 'channel_mention', 'active_channel_mention', 'notify_all')";
 const NOTIFICATION_CANDIDATES_SUPPRESSED_REASON_CHECK_NAME: &str =
     "notification_candidates_suppressed_reason_check";
-const NOTIFICATION_CANDIDATES_SUPPRESSED_REASON_VALUES: [&str; 13] = [
+const NOTIFICATION_CANDIDATES_SUPPRESSED_REASON_VALUES: [&str; 14] = [
     "xep0357_self",
     "xep0357_no_registration",
     "xep0357_registration_disabled",
@@ -76,8 +76,9 @@ const NOTIFICATION_CANDIDATES_SUPPRESSED_REASON_VALUES: [&str; 13] = [
     "waddle_dnd",
     "provider_rejected",
     "provider_token_expired",
+    "xep0357_push_service_degraded",
 ];
-const NOTIFICATION_CANDIDATES_SUPPRESSED_REASON_CHECK_SQL: &str = "suppressed_reason IS NULL OR suppressed_reason IN ('xep0357_self', 'xep0357_no_registration', 'xep0357_registration_disabled', 'xep0492_never', 'xep0492_on_mention_miss', 'xep0191_blocked', 'xep0513_noping', 'xep0513_active_miss', 'xep0334_no_store', 'xep0334_no_permanent_store', 'waddle_dnd', 'provider_rejected', 'provider_token_expired')";
+const NOTIFICATION_CANDIDATES_SUPPRESSED_REASON_CHECK_SQL: &str = "suppressed_reason IS NULL OR suppressed_reason IN ('xep0357_self', 'xep0357_no_registration', 'xep0357_registration_disabled', 'xep0492_never', 'xep0492_on_mention_miss', 'xep0191_blocked', 'xep0513_noping', 'xep0513_active_miss', 'xep0334_no_store', 'xep0334_no_permanent_store', 'waddle_dnd', 'provider_rejected', 'provider_token_expired', 'xep0357_push_service_degraded')";
 const NOTIFICATION_CANDIDATES_INDEXES: [&str; 4] = [
     "idx_notification_candidates_recipient_created",
     "idx_notification_candidates_identity",
@@ -268,6 +269,18 @@ pub(crate) enum SuppressedReason {
     /// Push provider returned an expired-token signal. Reserved
     /// variant; emitted by provider slices.
     ProviderTokenExpired,
+    /// The XEP-0357 push service is degraded — currently means the
+    /// VAPID signer or Web Push transport is not wired (a
+    /// boot-time failure on the
+    /// [`WebPushCapability`](waddle_xmpp::push::WebPushCapability)
+    /// path). Reserved variant: this PR introduces the typed
+    /// suppression reason so a future in-band fallback path
+    /// (e.g. plaintext chat-notify) cannot accidentally leak
+    /// content when the encrypted push path is unavailable. No
+    /// current code path falls back to in-band notify, so today
+    /// this variant is never emitted — the audit shape is in
+    /// place for the day one is added.
+    Xep0357PushServiceDegraded,
 }
 
 impl SuppressedReason {
@@ -293,6 +306,7 @@ impl SuppressedReason {
         Self::WaddleDnd,
         Self::ProviderRejected,
         Self::ProviderTokenExpired,
+        Self::Xep0357PushServiceDegraded,
     ];
 
     pub(crate) fn as_db_value(self) -> &'static str {
@@ -310,6 +324,7 @@ impl SuppressedReason {
             Self::WaddleDnd => "waddle_dnd",
             Self::ProviderRejected => "provider_rejected",
             Self::ProviderTokenExpired => "provider_token_expired",
+            Self::Xep0357PushServiceDegraded => "xep0357_push_service_degraded",
         }
     }
 
@@ -8144,7 +8159,7 @@ mod tests {
 
     #[test]
     fn postgres_suppressed_reason_constraint_match_accepts_current_definition() {
-        let postgres_definition = "CHECK (((suppressed_reason IS NULL) OR ((suppressed_reason)::text = ANY ((ARRAY['xep0357_self'::character varying, 'xep0357_no_registration'::character varying, 'xep0357_registration_disabled'::character varying, 'xep0492_never'::character varying, 'xep0492_on_mention_miss'::character varying, 'xep0191_blocked'::character varying, 'xep0513_noping'::character varying, 'xep0513_active_miss'::character varying, 'xep0334_no_store'::character varying, 'xep0334_no_permanent_store'::character varying, 'waddle_dnd'::character varying, 'provider_rejected'::character varying, 'provider_token_expired'::character varying])::text[]))))";
+        let postgres_definition = "CHECK (((suppressed_reason IS NULL) OR ((suppressed_reason)::text = ANY ((ARRAY['xep0357_self'::character varying, 'xep0357_no_registration'::character varying, 'xep0357_registration_disabled'::character varying, 'xep0492_never'::character varying, 'xep0492_on_mention_miss'::character varying, 'xep0191_blocked'::character varying, 'xep0513_noping'::character varying, 'xep0513_active_miss'::character varying, 'xep0334_no_store'::character varying, 'xep0334_no_permanent_store'::character varying, 'waddle_dnd'::character varying, 'provider_rejected'::character varying, 'provider_token_expired'::character varying, 'xep0357_push_service_degraded'::character varying])::text[]))))";
         assert!(
             notification_candidates_suppressed_reason_constraint_matches_expected(
                 postgres_definition

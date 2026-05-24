@@ -2279,6 +2279,26 @@ impl DatabasePushServiceStore {
         self.vapid_signer.is_some() && self.web_push_sender.is_some() && self.vapid_sub.is_some()
     }
 
+    /// Public snapshot of the Web Push capability — `Ready` when the
+    /// store has a VAPID signer, transport, and sub all wired;
+    /// `Degraded { Xep0357PushServiceDegraded }` otherwise.
+    ///
+    /// The T1 push-gate (in `notification_outbox`) is expected to
+    /// consult this before falling back to any in-band channel, so a
+    /// degraded push service cannot accidentally leak content over a
+    /// plaintext path. No fallback path exists today, but the typed
+    /// suppression reason is plumbed end-to-end so the day someone
+    /// adds one, the safety invariant holds by construction.
+    pub fn web_push_capability(&self) -> waddle_xmpp::push::WebPushCapability {
+        if self.web_push_provider_ready() {
+            waddle_xmpp::push::WebPushCapability::Ready
+        } else {
+            waddle_xmpp::push::WebPushCapability::Degraded {
+                reason: waddle_xmpp::push::SuppressionReason::Xep0357PushServiceDegraded,
+            }
+        }
+    }
+
     /// Phase 2 helper: drive each sealed device row through the typed
     /// Web Push dispatcher and collect typed [`DispatchedAttempt`]
     /// outcomes. Pure compute + network — never touches the DB.
@@ -5484,6 +5504,27 @@ mod tests {
             device_status(&store, node.node(), "web-1").await,
             DEVICE_STATUS_ACTIVE,
             "Transient outcomes must keep the device active — XEP-0357 §6 disable applies only to permanent failures"
+        );
+    }
+
+    #[tokio::test]
+    async fn web_push_capability_is_degraded_without_provider() {
+        let store = store().await;
+        assert!(matches!(
+            store.web_push_capability(),
+            waddle_xmpp::push::WebPushCapability::Degraded {
+                reason: waddle_xmpp::push::SuppressionReason::Xep0357PushServiceDegraded,
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn web_push_capability_is_ready_when_provider_wired() {
+        let (store, _sender) =
+            store_with_web_push_provider(WebPushOutcome::Delivered { status: 201 }).await;
+        assert_eq!(
+            store.web_push_capability(),
+            waddle_xmpp::push::WebPushCapability::Ready
         );
     }
 
