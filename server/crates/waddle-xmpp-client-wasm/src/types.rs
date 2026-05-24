@@ -780,11 +780,15 @@ pub enum WaddleSetRoomNotificationModeOutcome {
     /// `access_model`.
     NodeConfigMismatch,
     /// Any other stanza-level error (forbidden, internal-server-error,
-    /// etc). The condition string is carried verbatim so the chat
-    /// can log it for diagnostics; the UI shows a generic message.
-    Error {
-        condition: String,
-    },
+    /// etc). The specific RFC 6120 §8.3 condition stays on the Rust
+    /// side — emitted through `tracing::warn` so a debug build can
+    /// recover it from logs — rather than crossing the JS boundary as
+    /// a stringly-typed payload. The chat UI shows a generic "couldn't
+    /// save" message; if future UX needs to discriminate more cases,
+    /// the right move is to add new typed variants here (e.g.
+    /// `Forbidden`, `InternalServerError`) instead of widening
+    /// `Error` with a condition string. Round-13 PR compliance.
+    Error,
 }
 
 /// Options bag for `WaddleClient::set_room_notification_mode`.

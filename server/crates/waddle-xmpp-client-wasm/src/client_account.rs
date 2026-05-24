@@ -278,9 +278,18 @@ impl WaddleClient {
                 Err(stanza_err) if stanza_err.condition == "precondition-not-met" => {
                     WaddleSetRoomNotificationModeOutcome::NodeConfigMismatch
                 }
-                Err(stanza_err) => WaddleSetRoomNotificationModeOutcome::Error {
-                    condition: stanza_err.condition,
-                },
+                Err(stanza_err) => {
+                    // Keep the specific RFC 6120 §8.3 condition on
+                    // the Rust side as a diagnostic log; do not leak
+                    // it across the JS boundary as a stringly-typed
+                    // payload. Round-13 PR compliance — typed
+                    // payloads beyond the I/O boundary.
+                    tracing::warn!(
+                        condition = %stanza_err.condition,
+                        "bookmark publish rejected with stanza error",
+                    );
+                    WaddleSetRoomNotificationModeOutcome::Error
+                }
             };
             to_js_value(&outcome)
         })

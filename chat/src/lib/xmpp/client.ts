@@ -1349,21 +1349,18 @@ export class BrowserXmppClient {
     const xmpp = await this.requireConnectedXmpp();
     if (!xmpp.set_room_notification_mode) return { kind: "error" };
     try {
-      // WASM resolves with a typed tagged outcome (round-9 P2 — no
-      // stringly-typed condition transport across the JS↔Rust
-      // boundary). We pass `kind` straight through so the chat UI
-      // can switch without parsing message bodies.
+      // WASM resolves with a typed tagged outcome — no stringly-typed
+      // condition transport across the JS↔Rust boundary (round-13 PR
+      // compliance #19). The specific RFC 6120 §8.3 condition stays
+      // on the Rust side as a tracing diagnostic; chat-side
+      // branching is on the `kind` discriminator only.
       const outcome = (await xmpp.set_room_notification_mode({
         roomJid: opts.roomJid,
         mode: opts.mode,
         name: opts.name,
-      })) as
-        | { kind: "ok"; item: UserBookmarkItem }
-        | { kind: "node-config-mismatch" }
-        | { kind: "error"; condition: string };
+      })) as SetRoomNotificationModeOutcome;
       if (outcome.kind === "error") {
-        console.warn("[xmpp] XEP-0492 bookmark publish rejected:", outcome.condition);
-        return { kind: "error" };
+        console.warn("[xmpp] XEP-0492 bookmark publish rejected");
       }
       return outcome;
     } catch (error) {
