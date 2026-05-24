@@ -209,6 +209,28 @@ impl WaddleClient {
             let room_jid: jid::BareJid = opts.room_jid.parse().map_err(|err: jid::Error| {
                 JsValue::from_str(&format!("invalid room JID: {err}"))
             })?;
+            // XEP-0402 §2.2 bookmark item ids are room bare JIDs —
+            // the room MUST have a localpart (`<localpart>@<muc-service>`),
+            // a domain-only JID is not a valid bookmark id and the
+            // PEP service will reject the publish. Reject early so
+            // the caller gets a typed error instead of a stanza
+            // error round-trip. Round-13 Copilot review.
+            if room_jid.node().is_none() {
+                return Err(JsValue::from_str(
+                    "invalid room JID: XEP-0402 bookmark id MUST have a localpart",
+                ));
+            }
+            // Empty / whitespace-only `name` would publish
+            // `<conference name=""/>`, which is technically valid
+            // per the XSD but parser-side `parse_item` treats an
+            // empty name as `None` — round-trip asymmetry. Normalize
+            // here so the wire shape is consistent. Round-13.
+            let name_override = opts
+                .name
+                .as_deref()
+                .map(str::trim)
+                .filter(|trimmed| !trimmed.is_empty())
+                .map(str::to_string);
 
             // Fetch existing bookmarks so we can preserve the rest of
             // the bookmark item plus any foreign extension children
@@ -232,7 +254,7 @@ impl WaddleClient {
                 jid: room_jid,
                 name: existing
                     .and_then(|item| item.name.clone())
-                    .or(opts.name.clone()),
+                    .or(name_override),
                 autojoin: existing.map(|item| item.autojoin).unwrap_or(false),
                 nick: existing.and_then(|item| item.nick.clone()),
                 password: existing.and_then(|item| item.password.clone()),
