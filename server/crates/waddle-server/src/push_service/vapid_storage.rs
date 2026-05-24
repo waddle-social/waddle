@@ -263,10 +263,12 @@ impl VapidKeyCipher {
         let mut mac = <Hmac<Sha256> as HmacKeyInit>::new_from_slice(root_key)
             .expect("HMAC-SHA256 accepts arbitrary-length keys");
         mac.update(b"waddle:push-service:vapid-key:enc:v1");
+        // `hmac 0.13` emits the newer `hybrid_array::Array<u8, U32>`, while
+        // `aes-gcm 0.10` still consumes the legacy `GenericArray<u8, U32>`.
+        // The two are layout-compatible but not type-compatible, so we
+        // route through `new_from_slice` (which takes `&[u8]`); the
+        // length check is statically guaranteed by the 32-byte MAC output.
         let derived = mac.finalize().into_bytes();
-        // `Aes256Gcm::new` takes a typed `Key<Aes256Gcm>` (32 bytes); the
-        // derived MAC output is guaranteed 32 bytes so the conversion is
-        // infallible.
         let cipher = Aes256Gcm::new_from_slice(&derived)
             .expect("HMAC-SHA256 output is 32 bytes — exactly the AES-256 key size");
         Self { cipher }

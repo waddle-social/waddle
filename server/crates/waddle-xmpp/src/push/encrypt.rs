@@ -116,7 +116,15 @@ pub fn encrypt(
 
     // 8. Pad plaintext per RFC 8188 §2.1: `plaintext || 0x02 || 0x00*`
     //    for the single/last record. Final length = `bucket_size + 1`.
-    let mut record_plaintext = Vec::with_capacity(bucket_size + AES128GCM_PAD_DELIMITER_LEN);
+    //
+    //    Wrapped in `Zeroizing` so the cleartext push body (chat message,
+    //    sender JID, etc.) zeroes out of heap when this scope ends. The
+    //    `with_capacity` matches the final length exactly, so no
+    //    reallocation occurs and no un-zeroized intermediate buffer is
+    //    freed to the allocator.
+    let mut record_plaintext = Zeroizing::new(Vec::with_capacity(
+        bucket_size + AES128GCM_PAD_DELIMITER_LEN,
+    ));
     record_plaintext.extend_from_slice(plaintext);
     record_plaintext.push(0x02);
     record_plaintext.resize(bucket_size + AES128GCM_PAD_DELIMITER_LEN, 0x00);
@@ -128,7 +136,7 @@ pub fn encrypt(
         .encrypt(
             (&nonce_bytes).into(),
             Payload {
-                msg: &record_plaintext,
+                msg: record_plaintext.as_slice(),
                 aad: &[],
             },
         )
