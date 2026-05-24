@@ -9,6 +9,15 @@
 //! delegating the actual JWT signing to [`InProcessVapidSigner`]. This
 //! crate owns the durable lifecycle (env-var bootstrap, fresh
 //! generation, DB persistence); the lower crate owns pure crypto.
+//!
+//! ## Safety
+//!
+//! `load_or_provision` calls `std::env::remove_var(WADDLE_VAPID_PRIVATE_KEY)`
+//! after the env-supplied scalar is persisted to the DB. The unsafe call is
+//! justified by the invariant that no other code in this crate reads or
+//! writes `WADDLE_VAPID_PRIVATE_KEY`. Operators MUST NOT pass the same env
+//! variable name to other tooling expecting steady-state availability —
+//! the value lives only for the boot window.
 
 use std::env;
 use std::sync::Arc;
@@ -23,9 +32,10 @@ use p256::elliptic_curve::sec1::ToEncodedPoint;
 use rand::RngExt;
 use sha2::Sha256;
 use uuid::Uuid;
-use waddle_xmpp::push::types::{Kid, VapidJwt, VapidLoadError, VapidSignError, VapidSub};
+use waddle_xmpp::push::types::{Kid, VapidLoadError};
 use waddle_xmpp::push::vapid::{InProcessVapidSigner, VapidSigner};
 use waddle_xmpp::XmppError;
+use zeroize::Zeroizing;
 
 use crate::db::{Database, IntoParams};
 
@@ -54,20 +64,22 @@ impl VapidStorage {
     pub async fn load_or_provision(
         db: Database,
         root_key: &[u8],
-    ) -> Result<Arc<InProcessVapidSigner>, VapidLoadError> {
+    ) -> Result<Arc<dyn VapidSigner>, VapidLoadError> {
         let storage = Self::new(db.clone(), root_key)
             .await
             .map_err(|e| VapidLoadError::DbWrite(e.to_string()))?;
 
         // 1. Env-var bootstrap path.
         if let Ok(raw) = env::var(VAPID_ENV_VAR) {
-            let secret_key = parse_env_scalar(&raw)?;
+            // Wrap the env-supplied string in Zeroizing so the heap-allocated
+            // base64url scalar zeroes when this scope ends.
+            let raw = Zeroizing::new(raw);
+            let secret_key = parse_env_scalar(raw.as_str())?;
             let kid = Kid::new();
             storage.persist_keypair(&kid, &secret_key).await?;
-            // SAFETY: remove_var is unsafe in newer Rust. We call this once
-            // at boot before spawning any threads that might read env.
-            // SAFETY justified: this is the boot path, single-threaded.
-            #[allow(unsafe_code)]
+            // SAFETY: see module-level invariant — `WADDLE_VAPID_PRIVATE_KEY`
+            // is read exactly once at boot via `load_or_provision`; no other
+            // code in this crate reads or writes it.
             unsafe {
                 env::remove_var(VAPID_ENV_VAR);
             }
@@ -240,19 +252,23 @@ impl VapidStorage {
 /// AAD is **length-prefixed** to prevent canonicalization collisions:
 /// `u16_be(len(label)) || label || u16_be(len(kid_bytes)) || kid_bytes`.
 struct VapidKeyCipher {
-    /// 32-byte AES-256 key derived from the root key via HMAC-SHA256.
-    key: [u8; 32],
+    /// Initialized once at storage construction. AES-256-GCM key was derived
+    /// from the root key via HMAC-SHA256 with a domain-separating label.
+    cipher: Aes256Gcm,
 }
 
 impl VapidKeyCipher {
     fn new(root_key: &[u8]) -> Self {
         let mut mac = <Hmac<Sha256> as HmacKeyInit>::new_from_slice(root_key)
-            .expect("HMAC supports any key length");
+            .expect("HMAC-SHA256 accepts arbitrary-length keys");
         mac.update(b"waddle:push-service:vapid-key:enc:v1");
         let derived = mac.finalize().into_bytes();
-        let mut key = [0u8; 32];
-        key.copy_from_slice(&derived);
-        Self { key }
+        // `Aes256Gcm::new` takes a typed `Key<Aes256Gcm>` (32 bytes); the
+        // derived MAC output is guaranteed 32 bytes so the conversion is
+        // infallible.
+        let cipher = Aes256Gcm::new_from_slice(&derived)
+            .expect("HMAC-SHA256 output is 32 bytes — exactly the AES-256 key size");
+        Self { cipher }
     }
 
     fn seal(&self, plaintext: &[u8], label: &[u8], kid_bytes: &[u8]) -> Result<String, String> {
@@ -261,9 +277,8 @@ impl VapidKeyCipher {
         let aad = build_aad(label, kid_bytes);
         let mut nonce = [0u8; 12];
         rand::rng().fill(&mut nonce[..]);
-        let cipher =
-            Aes256Gcm::new_from_slice(&self.key).map_err(|e| format!("AES-256-GCM init: {e}"))?;
-        let ciphertext = cipher
+        let ciphertext = self
+            .cipher
             .encrypt(
                 (&nonce).into(),
                 Payload {
@@ -300,9 +315,7 @@ impl VapidKeyCipher {
             .decode(ct_b64)
             .map_err(|e| format!("ciphertext base64url: {e}"))?;
         let aad = build_aad(label, kid_bytes);
-        let cipher =
-            Aes256Gcm::new_from_slice(&self.key).map_err(|e| format!("AES-256-GCM init: {e}"))?;
-        cipher
+        self.cipher
             .decrypt(
                 (&nonce).into(),
                 Payload {
@@ -336,35 +349,6 @@ fn parse_env_scalar(raw: &str) -> Result<p256::SecretKey, VapidLoadError> {
     }
     p256::SecretKey::from_slice(&bytes)
         .map_err(|e| VapidLoadError::EnvParse(format!("invalid P-256 scalar: {e}")))
-}
-
-/// Adapter wrapping a `VapidStorage`-produced signer that also exposes
-/// the storage handle for future operations (e.g. rotation).
-///
-/// Constructed indirectly via [`VapidStorage::load_or_provision`]; this
-/// is the public type held by the Push Service component.
-pub struct StoredVapidSigner {
-    inner: Arc<InProcessVapidSigner>,
-}
-
-impl StoredVapidSigner {
-    pub fn new(inner: Arc<InProcessVapidSigner>) -> Self {
-        Self { inner }
-    }
-}
-
-impl VapidSigner for StoredVapidSigner {
-    fn sign(&self, aud: &url::Origin, sub: &VapidSub) -> Result<VapidJwt, VapidSignError> {
-        self.inner.sign(aud, sub)
-    }
-
-    fn current_public_key(&self) -> p256::PublicKey {
-        self.inner.current_public_key()
-    }
-
-    fn current_kid(&self) -> Kid {
-        self.inner.current_kid()
-    }
 }
 
 #[cfg(test)]

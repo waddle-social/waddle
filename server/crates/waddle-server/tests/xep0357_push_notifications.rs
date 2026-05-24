@@ -13,10 +13,9 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
 use p256::elliptic_curve::sec1::ToEncodedPoint;
 use std::env;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, MutexGuard};
 use waddle_server::db::Database;
 use waddle_server::push_service::vapid_storage::VapidStorage;
-use waddle_xmpp::push::vapid::VapidSigner;
 
 /// Serializes tests that mutate `WADDLE_VAPID_PRIVATE_KEY`. The env is
 /// process-global; cargo runs tests in parallel by default. We use
@@ -35,20 +34,45 @@ fn b64u(bytes: &[u8]) -> String {
     URL_SAFE_NO_PAD.encode(bytes)
 }
 
-/// Helper: clear the env var so a previous test's leak doesn't bleed in.
-fn ensure_env_unset() {
-    // SAFETY: tests run single-threaded inside one test binary; the global
-    // env mutation is exclusively visible to this process.
-    #[allow(unsafe_code)]
-    unsafe {
-        env::remove_var(VAPID_ENV_VAR);
+/// RAII guard: acquires `ENV_MUTATION_LOCK` and clears the env var; on
+/// drop (even via panic) the env var is cleared again so no test sees
+/// state left behind by a previous one.
+struct EnvGuard<'a> {
+    _lock: MutexGuard<'a, ()>,
+}
+
+impl<'a> EnvGuard<'a> {
+    async fn acquire() -> EnvGuard<'a> {
+        let lock = ENV_MUTATION_LOCK.lock().await;
+        // SAFETY: see vapid_storage.rs SAFETY note. The lock guarantees
+        // exclusive env access for the duration of this guard's lifetime.
+        unsafe {
+            env::remove_var(VAPID_ENV_VAR);
+        }
+        EnvGuard { _lock: lock }
+    }
+
+    fn set(&self, value: &str) {
+        // SAFETY: same as above.
+        unsafe {
+            env::set_var(VAPID_ENV_VAR, value);
+        }
+    }
+}
+
+impl Drop for EnvGuard<'_> {
+    fn drop(&mut self) {
+        // SAFETY: same as above; runs unconditionally so a panicking test
+        // does not leak env state into subsequent tests.
+        unsafe {
+            env::remove_var(VAPID_ENV_VAR);
+        }
     }
 }
 
 #[tokio::test]
 async fn fresh_boot_generates_and_persists_keypair() {
-    let _guard = ENV_MUTATION_LOCK.lock().await;
-    ensure_env_unset();
+    let _guard = EnvGuard::acquire().await;
     let db = fresh_db("vapid-fresh-generate").await;
 
     let signer = VapidStorage::load_or_provision(db.clone(), ROOT_KEY)
@@ -80,14 +104,10 @@ async fn fresh_boot_generates_and_persists_keypair() {
 
 #[tokio::test]
 async fn env_var_bootstrap_writes_before_remove() {
-    let _guard = ENV_MUTATION_LOCK.lock().await;
-    ensure_env_unset();
+    let guard = EnvGuard::acquire().await;
     let scalar = [0xAEu8; 32];
     let encoded = b64u(&scalar);
-    #[allow(unsafe_code)]
-    unsafe {
-        env::set_var(VAPID_ENV_VAR, &encoded);
-    }
+    guard.set(&encoded);
 
     let db = fresh_db("vapid-env-bootstrap").await;
 
@@ -132,12 +152,8 @@ async fn env_var_bootstrap_writes_before_remove() {
 
 #[tokio::test]
 async fn env_var_malformed_does_not_brick_boot_silently() {
-    let _guard = ENV_MUTATION_LOCK.lock().await;
-    ensure_env_unset();
-    #[allow(unsafe_code)]
-    unsafe {
-        env::set_var(VAPID_ENV_VAR, "not-base64url-and-also-wrong-length");
-    }
+    let guard = EnvGuard::acquire().await;
+    guard.set("not-base64url-and-also-wrong-length");
 
     let db = fresh_db("vapid-env-malformed").await;
     let result = VapidStorage::load_or_provision(db, ROOT_KEY).await;
@@ -148,13 +164,12 @@ async fn env_var_malformed_does_not_brick_boot_silently() {
         env::var(VAPID_ENV_VAR).is_ok(),
         "env var must NOT be removed on parse error"
     );
-    ensure_env_unset();
+    // EnvGuard's Drop cleans up.
 }
 
 #[tokio::test]
 async fn sign_and_verify_round_trip_under_loaded_key() {
-    let _guard = ENV_MUTATION_LOCK.lock().await;
-    ensure_env_unset();
+    let _guard = EnvGuard::acquire().await;
     let db = fresh_db("vapid-sign-verify").await;
 
     let signer = VapidStorage::load_or_provision(db, ROOT_KEY)

@@ -60,8 +60,10 @@ impl PushTopic {
         if s.len() > 32 {
             return Err(PushTopicParseError::TooLong(s.len()));
         }
+        // RFC 8030 §5.4 ABNF: `topic-char = ALPHA / DIGIT / "-" / "_"` —
+        // strict base64url-no-pad alphabet; NO `:`.
         for (i, c) in s.chars().enumerate() {
-            let valid = c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == ':';
+            let valid = c.is_ascii_alphanumeric() || c == '-' || c == '_';
             if !valid {
                 return Err(PushTopicParseError::InvalidAlphabet(i));
             }
@@ -178,9 +180,13 @@ impl std::str::FromStr for VapidSub {
 
 /// RFC 8291 encrypted payload — RFC 8188 header + AES-GCM record.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EncryptedPayload(pub Vec<u8>);
+pub struct EncryptedPayload(Vec<u8>);
 
 impl EncryptedPayload {
+    pub fn new(bytes: Vec<u8>) -> Self {
+        Self(bytes)
+    }
+
     pub fn as_slice(&self) -> &[u8] {
         &self.0
     }
@@ -382,8 +388,15 @@ mod tests {
 
     #[test]
     fn push_topic_accepts_valid() {
-        let t = PushTopic::new("d:abcDEF-_0123").expect("valid");
-        assert_eq!(t.as_str(), "d:abcDEF-_0123");
+        let t = PushTopic::new("d-abcDEF_0123").expect("valid");
+        assert_eq!(t.as_str(), "d-abcDEF_0123");
+    }
+
+    #[test]
+    fn push_topic_rejects_colon_per_rfc_8030_5_4() {
+        // RFC 8030 §5.4 topic-char does NOT include `:` — must be rejected.
+        let err = PushTopic::new("d:abc").unwrap_err();
+        assert!(matches!(err, PushTopicParseError::InvalidAlphabet(1)));
     }
 
     #[test]

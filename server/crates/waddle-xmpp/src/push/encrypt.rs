@@ -114,26 +114,12 @@ pub fn encrypt(
     prk.expand(AES128GCM_NONCE_INFO, &mut nonce_bytes)
         .map_err(|_| WebPushCryptoError::HkdfFailed)?;
 
-    // 8. Pad plaintext: plaintext || 0x02 || 0x00*(bucket_size - plaintext.len())
-    //    The plaintext-side total after padding = bucket_size + 1 (delimiter).
+    // 8. Pad plaintext per RFC 8188 §2.1: `plaintext || 0x02 || 0x00*`
+    //    for the single/last record. Final length = `bucket_size + 1`.
     let mut record_plaintext = Vec::with_capacity(bucket_size + AES128GCM_PAD_DELIMITER_LEN);
     record_plaintext.extend_from_slice(plaintext);
-    record_plaintext.push(0x02); // last-record delimiter
-    record_plaintext.resize(
-        bucket_size + AES128GCM_PAD_DELIMITER_LEN,
-        // Actually wait — RFC 8188 §2.1 says padding zeros come BEFORE the
-        // delimiter, not after. Let me re-read.
-        0x00,
-    );
-
-    // RFC 8188 §2.1 padding format (corrected):
-    //   data = plaintext || 0x02 || 0x00*pad   (for the last/only record)
-    //   so the delimiter goes RIGHT AFTER plaintext, then the zero padding.
-    // The code above already does that — `extend_from_slice(plaintext)`,
-    // `push(0x02)`, then `resize(..., 0)` fills the remaining bucket bytes
-    // with zeros, which sit AFTER the delimiter. Re-reading RFC 8188 §2.1
-    // confirms: data = plaintext || pad_delim || zero_pad. The delimiter
-    // separates plaintext from zero padding.
+    record_plaintext.push(0x02);
+    record_plaintext.resize(bucket_size + AES128GCM_PAD_DELIMITER_LEN, 0x00);
 
     // 9. Encrypt: ciphertext = AES-128-GCM(key=CEK, nonce=nonce, plaintext+pad)
     let cipher =
@@ -172,7 +158,7 @@ pub fn encrypt(
         record_len
     );
 
-    Ok(EncryptedPayload(body))
+    Ok(EncryptedPayload::new(body))
 }
 
 /// Decode the `rs` u32 field from an RFC 8188 header. Test-helper.

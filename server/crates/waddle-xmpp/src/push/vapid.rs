@@ -10,8 +10,6 @@
 //!   same `jti` is reused for cache-lifetime; **no replay-narrowing claim**
 //!   attached — kept for spec conformance.
 
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -87,7 +85,7 @@ pub fn vapid_k_header(public_key: &p256::PublicKey) -> String {
 /// the legitimate browser-push origin set (~3), no origin allowlist.
 pub struct InProcessVapidSigner {
     kid: Kid,
-    secret_key: p256::SecretKey,
+    public_key: p256::PublicKey,
     encoding_key: EncodingKey,
     cache: Arc<Mutex<LruCache<CacheKey, CachedJwt>>>,
 }
@@ -109,16 +107,25 @@ struct CachedJwt {
 }
 
 impl InProcessVapidSigner {
+    /// Constructs a signer from a P-256 keypair. The raw `secret_key`
+    /// is consumed: its public point is captured and the scalar is
+    /// dropped (`p256::SecretKey` zeroizes on drop), leaving only the
+    /// `EncodingKey` (PKCS#8 PEM bytes) as the residual sign-capable
+    /// material in heap.
     pub fn new(kid: Kid, secret_key: p256::SecretKey) -> Result<Self, VapidSignError> {
         use p256::pkcs8::EncodePrivateKey;
+        let public_key = secret_key.public_key();
         let pem = secret_key
             .to_pkcs8_pem(Default::default())
             .map_err(|e| VapidSignError::Storage(format!("encode PKCS#8 PEM: {e}")))?;
         let encoding_key =
             EncodingKey::from_ec_pem(pem.as_bytes()).map_err(VapidSignError::Signing)?;
+        // `secret_key` drops here (zeroized by p256). `pem` is `Zeroizing<String>`
+        // and also zeroizes here. Only `encoding_key` retains key material.
+        drop(secret_key);
         Ok(Self {
             kid,
-            secret_key,
+            public_key,
             encoding_key,
             cache: Arc::new(Mutex::new(LruCache::new(
                 NonZeroUsize::new(VAPID_JWT_CACHE_CAPACITY).expect("non-zero capacity"),
@@ -142,9 +149,6 @@ impl InProcessVapidSigner {
     }
 }
 
-/// Manual `Hash`/`Eq`/`PartialEq` on `CacheKey` are derived (above); origin
-/// is compared by its ASCII serialization to avoid the deprecated-API churn
-/// on `url::Origin` directly.
 impl std::fmt::Debug for InProcessVapidSigner {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("InProcessVapidSigner")
@@ -196,7 +200,7 @@ impl VapidSigner for InProcessVapidSigner {
     }
 
     fn current_public_key(&self) -> p256::PublicKey {
-        self.secret_key.public_key()
+        self.public_key
     }
 
     fn current_kid(&self) -> Kid {
@@ -220,20 +224,10 @@ fn fresh_jti() -> String {
     URL_SAFE_NO_PAD.encode(bytes)
 }
 
-/// Canonical ASCII serialization of an `url::Origin`. We compare/hash this
-/// rather than `url::Origin` itself to avoid `Hash`-bound friction with the
-/// internal `Tuple`/`Opaque` variants.
+/// Canonical ASCII serialization of an `url::Origin`. Used in both the
+/// cache key and as the `aud` claim string.
 fn origin_ascii(origin: &url::Origin) -> String {
     origin.ascii_serialization()
-}
-
-// Suppress unused-field warnings (CacheKey hashes both fields explicitly).
-#[allow(dead_code)]
-fn _hash_cache_key(key: &CacheKey) -> u64 {
-    let mut h = DefaultHasher::new();
-    key.kid.as_uuid().hash(&mut h);
-    key.origin_ascii.hash(&mut h);
-    h.finish()
 }
 
 #[cfg(test)]
