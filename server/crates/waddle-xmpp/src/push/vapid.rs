@@ -140,9 +140,21 @@ impl InProcessVapidSigner {
     /// Drop every cached JWT — used on VAPID key rotation so stale
     /// `(old_kid, *)` entries don't linger until LRU pressure evicts them.
     pub fn invalidate_all(&self) {
-        if let Ok(mut cache) = self.cache.lock() {
-            cache.clear();
-        }
+        let mut cache = self.lock_cache_recovering();
+        cache.clear();
+    }
+
+    /// Lock the cache, recovering from a poisoned mutex by extracting the
+    /// inner guard. The cache's invariants don't depend on prior writers
+    /// having completed successfully — every entry is independent — so
+    /// poison recovery is safe and matches what `parking_lot::Mutex` would
+    /// do natively. Without this recovery, a single panic anywhere in the
+    /// signer would silently bypass the cache for the rest of the process
+    /// lifetime, forcing unbounded re-signing.
+    fn lock_cache_recovering(&self) -> std::sync::MutexGuard<'_, LruCache<CacheKey, CachedJwt>> {
+        self.cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     fn cache_key(&self, aud: &url::Origin, sub: &VapidSub) -> CacheKey {
@@ -167,7 +179,8 @@ impl VapidSigner for InProcessVapidSigner {
         let key = self.cache_key(aud, sub);
         let now = now_unix_seconds();
         // Cache hit path — short critical section, then return.
-        if let Ok(mut cache) = self.cache.lock() {
+        {
+            let mut cache = self.lock_cache_recovering();
             if let Some(entry) = cache.get(&key) {
                 if entry.exp_unix_seconds > now + CACHE_EVICT_MARGIN.as_secs() {
                     return Ok(entry.jwt.clone());
@@ -195,15 +208,15 @@ impl VapidSigner for InProcessVapidSigner {
             .map_err(VapidSignError::Signing)?;
         let jwt = VapidJwt::new(token);
 
-        if let Ok(mut cache) = self.cache.lock() {
-            cache.put(
-                key,
-                CachedJwt {
-                    jwt: jwt.clone(),
-                    exp_unix_seconds: exp,
-                },
-            );
-        }
+        let mut cache = self.lock_cache_recovering();
+        cache.put(
+            key,
+            CachedJwt {
+                jwt: jwt.clone(),
+                exp_unix_seconds: exp,
+            },
+        );
+        drop(cache);
         Ok(jwt)
     }
 

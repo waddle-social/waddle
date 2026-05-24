@@ -85,7 +85,7 @@ impl VapidStorage {
             }
             return Ok(Arc::new(
                 InProcessVapidSigner::new(kid, secret_key)
-                    .map_err(|e| VapidLoadError::DbWrite(e.to_string()))?,
+                    .map_err(|e| VapidLoadError::SignerInit(e.to_string()))?,
             ));
         }
 
@@ -93,7 +93,7 @@ impl VapidStorage {
         if let Some((kid, secret_key)) = storage.load_latest().await? {
             return Ok(Arc::new(
                 InProcessVapidSigner::new(kid, secret_key)
-                    .map_err(|e| VapidLoadError::DbWrite(e.to_string()))?,
+                    .map_err(|e| VapidLoadError::SignerInit(e.to_string()))?,
             ));
         }
 
@@ -103,7 +103,7 @@ impl VapidStorage {
         storage.persist_keypair(&kid, &secret_key).await?;
         Ok(Arc::new(
             InProcessVapidSigner::new(kid, secret_key)
-                .map_err(|e| VapidLoadError::DbWrite(e.to_string()))?,
+                .map_err(|e| VapidLoadError::SignerInit(e.to_string()))?,
         ))
     }
 
@@ -235,9 +235,12 @@ impl VapidStorage {
         let version: i64 = row
             .get(2)
             .map_err(|e| VapidLoadError::DbRead(format!("root_key_version: {e}")))?;
-        if version as u32 != CURRENT_ROOT_KEY_VERSION {
+        // Compare as `i64` directly to avoid the `as u32` wraparound foot-gun:
+        // a negative value (or any v where `(v % 2^32) == 1`) would silently
+        // pass an `i64 as u32 == 1` check.
+        if version != i64::from(CURRENT_ROOT_KEY_VERSION) {
             return Err(VapidLoadError::UnknownRootKeyVersion {
-                found: version as u32,
+                found: u32::try_from(version).unwrap_or(u32::MAX),
                 max_installed: CURRENT_ROOT_KEY_VERSION,
             });
         }

@@ -388,6 +388,8 @@ pub enum VapidLoadError {
     UnknownRootKeyVersion { found: u32, max_installed: u32 },
     #[error("missing root key for version {0}")]
     MissingRootKey(u32),
+    #[error("VAPID signer initialization failed: {0}")]
+    SignerInit(String),
     #[error("fresh P-256 keypair generation failed: {0}")]
     Generate(String),
 }
