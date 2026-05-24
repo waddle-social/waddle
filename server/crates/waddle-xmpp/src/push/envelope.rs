@@ -77,13 +77,23 @@ impl PushClass {
             PushClass::Room => b'r',
         }
     }
+}
 
-    fn as_str(self) -> &'static str {
-        match self {
-            PushClass::DirectMessage => "direct_message",
-            PushClass::Mention => "mention",
-            PushClass::Room => "room",
+/// Map a granular notification class (the db-form string emitted by the
+/// chat client into `<context xmlns='urn:waddle:push:context:0' class='...'/>`)
+/// to the transport-policy [`PushClass`].
+///
+/// Unknown values fall through to [`PushClass::Mention`] (small bucket,
+/// high urgency) — the safer side: small bucket can never leak more
+/// than ~256 bytes of plaintext-length, and high urgency wakes the
+/// device. Logging the unknown value is the caller's responsibility.
+pub fn push_class_for_db_value(class: &str) -> PushClass {
+    match class {
+        "dm" | "dm_mention" => PushClass::DirectMessage,
+        "personal_mention" | "channel_mention" | "active_channel_mention" | "notify_all" => {
+            PushClass::Mention
         }
+        _ => PushClass::Mention,
     }
 }
 
@@ -91,43 +101,47 @@ impl PushClass {
 ///
 /// Field names are intentionally short — every byte after padding
 /// counts towards the relay's body-size ceiling.
+///
+/// XEP-0357 §4 forbids the push service from receiving message
+/// content, so this envelope carries only routing metadata; the chat
+/// service worker uses it to decide *how* to render a generic
+/// "new message" notification and to wake the app for the real body.
 #[derive(Debug, Clone, Serialize)]
 pub struct PushEnvelope<'a> {
     /// Schema version. Always `1` for this PR; PR-D3's SW switches on
     /// it.
     pub v: u8,
-    /// Push class (see [`PushClass`]).
-    pub class: &'static str,
+    /// Granular notification class (e.g. `"dm"`, `"personal_mention"`,
+    /// `"channel_mention"`). Carries finer detail than the transport
+    /// [`PushClass`] so the SW can pick the right localized banner.
+    pub class: &'a str,
     /// Conversation bare JID (DM peer or MUC room).
     pub conversation: &'a str,
+    /// XEP-0201 thread id, if the publishing chat client included one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thread: Option<&'a str>,
     /// Stanza item id of the originating message — lets the SW
     /// deduplicate against an earlier in-band notification.
     pub item: &'a str,
-    /// User-facing title (already truncated by the caller).
-    pub title: &'a str,
-    /// User-facing body preview.
-    pub body: &'a str,
-    /// Server-side unread count snapshot (XEP-0357 message-count).
+    /// Server-side unread count snapshot (XEP-0357 `message-count`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub unread: Option<u64>,
 }
 
 impl<'a> PushEnvelope<'a> {
     pub fn new(
-        class: PushClass,
+        class: &'a str,
         conversation: &'a str,
+        thread: Option<&'a str>,
         item: &'a str,
-        title: &'a str,
-        body: &'a str,
         unread: Option<u64>,
     ) -> Self {
         Self {
             v: 1,
-            class: class.as_str(),
+            class,
             conversation,
+            thread,
             item,
-            title,
-            body,
             unread,
         }
     }
@@ -197,37 +211,53 @@ mod tests {
     #[test]
     fn envelope_serializes_v1_schema() {
         let env = PushEnvelope::new(
-            PushClass::DirectMessage,
+            "dm",
             "alice@example.com",
+            Some("thread-abc"),
             "item-123",
-            "Alice",
-            "hello",
             Some(3),
         );
         let bytes = env.to_plaintext();
         let s = std::str::from_utf8(&bytes).unwrap();
         let json: serde_json::Value = serde_json::from_str(s).unwrap();
         assert_eq!(json["v"], 1);
-        assert_eq!(json["class"], "direct_message");
+        assert_eq!(json["class"], "dm");
         assert_eq!(json["conversation"], "alice@example.com");
+        assert_eq!(json["thread"], "thread-abc");
         assert_eq!(json["item"], "item-123");
-        assert_eq!(json["title"], "Alice");
-        assert_eq!(json["body"], "hello");
         assert_eq!(json["unread"], 3);
     }
 
     #[test]
-    fn envelope_omits_unread_when_absent() {
-        let env = PushEnvelope::new(
-            PushClass::Room,
-            "room@conf.example.com",
-            "item-x",
-            "",
-            "ping",
-            None,
-        );
+    fn envelope_omits_optional_fields_when_absent() {
+        let env = PushEnvelope::new("dm", "alice@example.com", None, "item-x", None);
         let json: serde_json::Value = serde_json::from_slice(&env.to_plaintext()).unwrap();
         assert!(json.get("unread").is_none(), "unread must be omitted");
+        assert!(json.get("thread").is_none(), "thread must be omitted");
+    }
+
+    #[test]
+    fn push_class_for_db_value_maps_granular_classes() {
+        assert_eq!(push_class_for_db_value("dm"), PushClass::DirectMessage);
+        assert_eq!(
+            push_class_for_db_value("dm_mention"),
+            PushClass::DirectMessage
+        );
+        assert_eq!(
+            push_class_for_db_value("personal_mention"),
+            PushClass::Mention
+        );
+        assert_eq!(
+            push_class_for_db_value("channel_mention"),
+            PushClass::Mention
+        );
+        assert_eq!(
+            push_class_for_db_value("active_channel_mention"),
+            PushClass::Mention
+        );
+        assert_eq!(push_class_for_db_value("notify_all"), PushClass::Mention);
+        // Unknown falls through to Mention (safer-side default).
+        assert_eq!(push_class_for_db_value("anything-else"), PushClass::Mention);
     }
 
     #[test]

@@ -449,6 +449,12 @@ async fn create_websocket_state(
     .map_err(|error| anyhow::anyhow!("failed to load VAPID signer: {error}"))?;
     let web_push_sender: Arc<dyn waddle_xmpp::push::WebPushSender> =
         Arc::new(waddle_xmpp::push::HttpWebPushSender::new());
+    // RFC 8292 §2 — the VAPID `sub` claim identifies this push service
+    // operator. We use `mailto:postmaster@<xmpp_domain>` per RFC 2142 so
+    // relays (FCM, Mozilla autopush, Apple Web Push) have a reachable
+    // contact when our deliveries misbehave.
+    let vapid_sub = waddle_xmpp::push::types::VapidSub::default_for_domain(&xmpp_domain)
+        .map_err(|error| anyhow::anyhow!("failed to derive VAPID sub claim: {error}"))?;
     let push_service = Arc::new(
         crate::push_service::DatabasePushServiceStore::new_with_secret_key_and_pubsub(
             state.db_pool.global().clone(),
@@ -458,7 +464,7 @@ async fn create_websocket_state(
         )
         .await
         .map_err(|error| anyhow::anyhow!("failed to initialize XMPP Push Service: {error}"))?
-        .with_web_push_provider(vapid_signer, web_push_sender),
+        .with_web_push_provider(vapid_signer, web_push_sender, vapid_sub),
     );
     let notification_outbox = Arc::new(
         crate::notification_outbox::NotificationOutboxStore::new(state.db_pool.global().clone())

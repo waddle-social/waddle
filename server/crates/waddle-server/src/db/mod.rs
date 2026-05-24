@@ -141,6 +141,14 @@ impl Database {
         Transaction::begin(&self.backend).await
     }
 
+    /// Begin a transaction that acquires the database write lock
+    /// immediately. Use this for transactions that perform writes after
+    /// a read, to avoid SQLite deadlocks when two connections both
+    /// start as readers and then try to upgrade to writers.
+    pub async fn begin_immediate(&self) -> Result<Transaction<'_>, DatabaseError> {
+        Transaction::begin_immediate(&self.backend).await
+    }
+
     pub fn name(&self) -> &str {
         &self.name
     }
