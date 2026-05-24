@@ -5,6 +5,8 @@
 //! [`crate::push_registrations`]. Provider endpoints and tokens live here,
 //! behind the `push.<domain>` service boundary.
 
+pub mod vapid_storage;
+
 use std::{fmt, sync::Arc};
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
