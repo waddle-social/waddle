@@ -160,6 +160,11 @@ impl std::str::FromStr for VapidSub {
             return Err(VapidSubParseError::Empty);
         }
         if let Some(rest) = s.strip_prefix("mailto:") {
+            // RFC 6068: `mailto` URIs are NOT hierarchical and MUST NOT
+            // begin with `//`. Reject `mailto://foo@bar`-style inputs.
+            if rest.starts_with("//") {
+                return Err(VapidSubParseError::BadMailto);
+            }
             return Ok(Self::Mailto(MailtoAddress::new(rest.to_owned())?));
         }
         if let Some(scheme_idx) = s.find(':') {
@@ -413,6 +418,14 @@ mod tests {
     }
 
     #[test]
+    fn push_topic_accepts_exactly_32_chars() {
+        // RFC 8030 §5.4: `Topic = 1*32(topic-char)`. 32 is the inclusive max.
+        let s: String = "a".repeat(32);
+        let t = PushTopic::new(s.clone()).expect("32 chars is valid");
+        assert_eq!(t.as_str(), s);
+    }
+
+    #[test]
     fn push_topic_rejects_invalid_alphabet() {
         // '$' is not base64url
         let err = PushTopic::new("hello$world").unwrap_err();
@@ -460,6 +473,13 @@ mod tests {
     fn vapid_sub_rejects_no_scheme() {
         let err = VapidSub::from_str("nope").unwrap_err();
         assert!(matches!(err, VapidSubParseError::MissingScheme));
+    }
+
+    #[test]
+    fn vapid_sub_rejects_mailto_with_authority_slashes() {
+        // RFC 6068: mailto URIs are non-hierarchical; `mailto://foo@bar` is malformed.
+        let err = VapidSub::from_str("mailto://foo@bar.example").unwrap_err();
+        assert!(matches!(err, VapidSubParseError::BadMailto));
     }
 
     #[test]
