@@ -15,8 +15,9 @@ pub use sender::{notify_mentioned_users, HttpWebPushSender, WebPushSender};
 pub use store::{InMemoryPushStore, PushSubscriptionStore};
 pub use types::{
     AuthSecret, EncryptedPayload, EndpointHash, Kid, MailtoAddress, PushTopic, PushTopicParseError,
-    SubscriptionKeys, VapidJwt, VapidLoadError, VapidSignError, VapidSub, VapidSubParseError,
-    WebPushCryptoError,
+    SubscriptionKeys, SuppressionReason, TransientFailure, VapidJwt, VapidLoadError,
+    VapidSignError, VapidSub, VapidSubParseError, WebPushCapability, WebPushCryptoError,
+    WebPushOutcome,
 };
 
 use minidom::Element;

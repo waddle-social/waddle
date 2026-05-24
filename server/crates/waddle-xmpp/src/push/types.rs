@@ -539,6 +539,82 @@ pub enum VapidLoadError {
     Generate,
 }
 
+/// Classified outcome of a single Web Push HTTP POST.
+///
+/// Replaces stringly-typed `PushError::SendFailed("HTTP 410")` shapes
+/// with a typed enum the publish-job worker can pattern-match on to
+/// decide cleanup, retry, or alert. Mapped from RFC 8030 response codes
+/// per the table in §6.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WebPushOutcome {
+    /// 2xx — push relay accepted the message.
+    Delivered { status: u16 },
+    /// 404/410 — subscription is permanently gone; trigger XEP-0357 §6
+    /// cleanup forward (IQ-error to publisher) and
+    /// `urn:waddle:push-service:0` disable-device reverse.
+    SubscriptionGone { status: u16 },
+    /// 401 with `WWW-Authenticate: vapid` (or 403 from FCM with a
+    /// JWT-related body) — VAPID JWT was rejected, typically because
+    /// the relay's clock disagrees with ours. The VAPID cache must be
+    /// invalidated for this `(kid, aud, sub)` and a fresh JWT minted.
+    ClockSkew { status: u16 },
+    /// 429 — apply the token-bucket backoff for this endpoint+class.
+    RateLimited {
+        status: u16,
+        retry_after: Option<std::time::Duration>,
+    },
+    /// 413 — body exceeded relay's per-message ceiling. Indicates a
+    /// padding/bucket-class bug, not a transient condition.
+    PayloadTooLarge { status: u16 },
+    /// 400 — relay rejected the body shape (malformed headers, bad
+    /// encryption envelope, etc). Indicates an encoder bug.
+    BadRequest { status: u16 },
+    /// 5xx, network failure, or anything not matched above. The
+    /// publish-job worker retries via the existing
+    /// `push_publish_jobs.next_retry_at_ms` mechanism.
+    Transient { kind: TransientFailure },
+}
+
+/// The narrow set of transient failure shapes the sender produces.
+/// Kept typed instead of stringly to honor the typed-payloads rule.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TransientFailure {
+    /// Network-layer error (DNS, connect, TLS, body).
+    Network,
+    /// HTTP 5xx from the relay.
+    ServerError { status: u16 },
+    /// Request did not complete within the sender's per-attempt
+    /// timeout budget.
+    Timeout,
+}
+
+/// Reason a downstream send path was suppressed.
+///
+/// Extends the existing T1/legacy suppression machinery so a degraded
+/// XEP-0357 push service can prevent in-band fallbacks (e.g., plaintext
+/// chat-notify) from leaking when the encrypted path is unavailable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SuppressionReason {
+    /// XEP-0357 push service is degraded (no VAPID signer, no nodes
+    /// configured, repeated relay outages). Tracked in tandem with
+    /// [`WebPushCapability`].
+    Xep0357PushServiceDegraded,
+}
+
+/// Boot-time capability of the XEP-0357 push service.
+///
+/// Determined once at `VapidStorage::load_or_provision` time and
+/// refreshed by the publish-job worker on sustained failure. Drives
+/// disco advertisement, T1 gating, and the admin-alert path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WebPushCapability {
+    /// VAPID signer loaded; push service is fully operational.
+    Ready,
+    /// VAPID load failed or persistent relay degradation detected.
+    /// `reason` is preserved so disco can surface a typed condition.
+    Degraded { reason: SuppressionReason },
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
