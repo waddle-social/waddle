@@ -172,7 +172,14 @@ async fn classify_response(resp: reqwest::Response) -> WebPushOutcome {
         return WebPushOutcome::Delivered { status: code };
     }
     match code {
-        404 | 410 => WebPushOutcome::SubscriptionGone { status: code },
+        // 404 / 410 are the textbook "subscription gone" signals
+        // (RFC 8030 §6). 403 is added here because FCM and other
+        // relays use 403 to signal "the VAPID key is not authorized
+        // for this endpoint" — the actionable response is identical
+        // (the subscription must be re-registered with fresh keys),
+        // so the publish-job worker treats it as a device-side
+        // permanent failure and disables the row.
+        403 | 404 | 410 => WebPushOutcome::SubscriptionGone { status: code },
         401 => WebPushOutcome::ClockSkew { status: code },
         413 => WebPushOutcome::PayloadTooLarge { status: code },
         429 => {
@@ -186,7 +193,11 @@ async fn classify_response(resp: reqwest::Response) -> WebPushOutcome {
                 retry_after,
             }
         }
-        400 | 403 => WebPushOutcome::BadRequest { status: code },
+        // 400 is "our payload shape is wrong" — encoder bug, not a
+        // per-device problem. Surfaces in attempts for operator
+        // action; the device row stays active so the next publish
+        // succeeds once the bug is fixed.
+        400 => WebPushOutcome::BadRequest { status: code },
         500..=599 => WebPushOutcome::Transient {
             kind: TransientFailure::ServerError { status: code },
         },
@@ -477,6 +488,41 @@ mod tests {
         assert!(matches!(
             outcome,
             WebPushOutcome::BadRequest { status: 400 }
+        ));
+    }
+
+    #[tokio::test]
+    async fn classify_403_is_subscription_gone() {
+        // FCM and other relays return 403 to signal "VAPID key not
+        // authorized for this endpoint" — the subscription needs a
+        // fresh registration. Treated as per-device permanent so the
+        // worker disables the row instead of looping retries.
+        let server = mockito::Server::new_async().await;
+        let mut server = server;
+        let m = server
+            .mock("POST", "/p/forbidden")
+            .with_status(403)
+            .create_async()
+            .await;
+        let url = Url::parse(&format!("{}/p/forbidden", server.url())).unwrap();
+        let sender = HttpWebPushSender::new();
+        let jwt = dummy_jwt();
+        let p = payload();
+        let outcome = sender
+            .send(WebPushRequest {
+                endpoint: &url,
+                payload: &p,
+                vapid_jwt: &jwt,
+                vapid_public_key_b64u: "BFoo",
+                topic: None,
+                ttl: 60,
+                urgency: Urgency::Normal,
+            })
+            .await;
+        m.assert_async().await;
+        assert!(matches!(
+            outcome,
+            WebPushOutcome::SubscriptionGone { status: 403 }
         ));
     }
 

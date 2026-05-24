@@ -157,7 +157,14 @@ impl WebPushSender for RateLimitedWebPushSender {
         &self,
         request: WebPushRequest<'_>,
     ) -> Pin<Box<dyn std::future::Future<Output = WebPushOutcome> + Send + '_>> {
-        let endpoint_hash = EndpointHash::of(request.endpoint.as_str());
+        // Bucket key on relay host (scheme + host + port), NOT the
+        // full per-device endpoint URL. Otherwise a 1000-device fan-
+        // out to FCM would key on 1000 distinct buckets and the
+        // per-pair rate limit becomes per-device — defeating the
+        // "one chatty relay+class can't monopolize the global cap"
+        // semantic the doc-comment promises.
+        let endpoint_hash =
+            EndpointHash::of(&request.endpoint.origin().ascii_serialization());
         let urgency = request.urgency;
         let endpoint = request.endpoint.clone();
         let payload = request.payload.clone();
@@ -339,7 +346,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn different_endpoints_dont_share_buckets() {
+    async fn different_relay_hosts_dont_share_buckets() {
         let inner = PeakSender::with_delay(0);
         let inner_arc: Arc<dyn WebPushSender> = Arc::new(inner.clone());
         let limiter = Arc::new(Limiter::new(LimiterConfig {
@@ -349,8 +356,39 @@ mod tests {
         let sender = RateLimitedWebPushSender::new(inner_arc, limiter);
         let p = payload();
         let j = jwt();
-        let url_a = endpoint("/a");
-        let url_b = endpoint("/b");
+        let url_fcm = url::Url::parse("https://fcm.googleapis.com/fcm/send/abc").unwrap();
+        let url_moz = url::Url::parse("https://updates.push.services.mozilla.com/wpush/v1/xyz")
+            .unwrap();
+        let start = Instant::now();
+        sender
+            .send(make_request(&url_fcm, &p, &j, Urgency::Normal))
+            .await;
+        sender
+            .send(make_request(&url_moz, &p, &j, Urgency::Normal))
+            .await;
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed < Duration::from_millis(50),
+            "different relay hosts must use independent buckets; elapsed {elapsed:?}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn same_relay_different_paths_share_one_bucket() {
+        // Two devices behind the same relay share one (host, urgency)
+        // bucket — that's the whole point of per-pair rate limiting:
+        // a 1000-device fan-out to FCM should NOT bypass the spacing.
+        let inner = PeakSender::with_delay(0);
+        let inner_arc: Arc<dyn WebPushSender> = Arc::new(inner.clone());
+        let limiter = Arc::new(Limiter::new(LimiterConfig {
+            global_concurrency: 64,
+            per_pair_min_interval: Duration::from_millis(200),
+        }));
+        let sender = RateLimitedWebPushSender::new(inner_arc, limiter);
+        let p = payload();
+        let j = jwt();
+        let url_a = endpoint("/device-a");
+        let url_b = endpoint("/device-b");
         let start = Instant::now();
         sender
             .send(make_request(&url_a, &p, &j, Urgency::Normal))
@@ -360,8 +398,8 @@ mod tests {
             .await;
         let elapsed = start.elapsed();
         assert!(
-            elapsed < Duration::from_millis(50),
-            "different endpoints must use independent buckets; elapsed {elapsed:?}"
+            elapsed >= Duration::from_millis(200),
+            "two devices on the same relay must serialize via one shared bucket; elapsed {elapsed:?}"
         );
     }
 
