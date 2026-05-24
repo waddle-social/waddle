@@ -204,39 +204,47 @@ mod tests {
         Some(&body[keyid_offset..keyid_offset + idlen])
     }
 
-    /// RFC 8291 §5 known-answer test: the spec's worked example pins every
-    /// input (UA private/public, AS private/public, auth secret, salt,
-    /// plaintext) and gives the expected ciphertext bytes. Asserting
-    /// against the published vector catches the entire class of
-    /// derivation bugs that an in-process round-trip cannot — e.g.,
-    /// swapping `ua_public` and `as_public` in the `key_info` vector.
+    /// RFC 8291 §5 full known-answer test: the spec's worked example pins
+    /// every input (UA private/public, AS private/public, auth secret,
+    /// salt, plaintext) AND publishes the expected on-the-wire body
+    /// bytes. Asserts the entire deterministic pipeline end-to-end:
     ///
-    /// The `encrypt()` API derives the AS keypair and salt internally;
-    /// this KAT exercises the deterministic remainder of the pipeline
-    /// (CEK + nonce derivation, padding, AES-GCM seal) by reaching into
-    /// the same primitives directly. RFC 8291 §5:
+    ///   1. HKDF derivation produces the RFC's `IKM`, `CEK`, `nonce`.
+    ///   2. AES-128-GCM encrypt with the RFC's padded plaintext produces
+    ///      a ciphertext matching the RFC's published body, byte-for-byte.
+    ///   3. Header assembly (`salt || rs || idlen || as_public`) +
+    ///      ciphertext reproduces the full RFC body verbatim.
     ///
-    /// > as_private = yfWPiYE-n46HLnH0KqZOF1fJJU3MYrct3AELtAQ-oRw
-    /// > as_public  = BP4z9KsN6nGRTbVYI_c7VJSPQTBtkgcy27mlmlMoZIIgDll6e3vCYLocInmYWAmS6TlzAC8wEqKK6PBru3jl7A8
-    /// > auth_secret= BTBZMqHH6r4Tts7J_aSIgg
-    /// > salt       = DGv6ra1nlYgDCS1FRnbzlw
-    /// > plaintext  = "When I grow up, I want to be a watermelon"
+    /// Catches the entire class of derivation/serialization bugs that an
+    /// in-process round-trip cannot detect — e.g., `ua_public` /
+    /// `as_public` swapped in `key_info`, off-by-one padding, wrong
+    /// AES-GCM nonce or info string, or a header-field order mismatch.
     ///
-    /// Note: this test pins the deterministic crypto math — it does not
-    /// re-execute `encrypt()` (which generates a fresh AS keypair + salt
-    /// every call). Catching swapped HKDF info concatenation is the
-    /// load-bearing assertion.
+    /// `encrypt()` itself generates a fresh AS keypair and salt on every
+    /// call, so this KAT reaches into the same primitives directly with
+    /// the RFC-fixed inputs. The randomness paths are covered by
+    /// `salt_changes_per_call` / `ephemeral_keypair_changes_per_call`.
     #[test]
     fn rfc_8291_section_5_known_answer_vector() {
+        use super::super::constants::AES128GCM_RS_LEN;
         use p256::elliptic_curve::sec1::FromEncodedPoint;
         use p256::EncodedPoint;
         use sha2::Sha256;
 
+        // ---- RFC 8291 §5 inputs ------------------------------------------
         let ua_public_b64 = "BCVxsr7N_eNgVRqvHtD0zTZsEc6-VV-JvLexhqUzORcxaOzi6-AYWXvTBHm4bjyPjs7Vd8pZGH6SRpkNtoIAiw4";
         let auth_b64 = "BTBZMqHH6r4Tts7J_aSIgg";
         let as_private_b64 = "yfWPiYE-n46HLnH0KqZOF1fJJU3MYrct3AELtAQ-oRw";
         let as_public_b64 = "BP4z9KsN6nGRTbVYI_c7VJSPQTBtkgcy27mlmlMoZIIgDll6e3vCYLocInmYWAmS6TlzAC8wEqKK6PBru3jl7A8";
         let salt_b64 = "DGv6ra1nlYgDCS1FRnbzlw";
+        let plaintext = b"When I grow up, I want to be a watermelon";
+        // RFC 8291 §5 expected encrypted body — concatenation of the three
+        // lines as published in the RFC text.
+        let expected_body_b64 = concat!(
+            "DGv6ra1nlYgDCS1FRnbzlwAAEABBBP4z9KsN6nGRTbVYI_c7VJSPQTBtkgcy27ml",
+            "mlMoZIIgDll6e3vCYLocInmYWAmS6TlzAC8wEqKK6PBru3jl7A_yl95bQpu6cVPT",
+            "pK4Mqgkf1CXztLVBSt2Ks3oZwbuwXPXLWyouBWLVWGNWQexSgSxsj_Qulcy4a-fN",
+        );
 
         let ua_public_bytes = URL_SAFE_NO_PAD.decode(ua_public_b64).unwrap();
         let ua_pub_point = EncodedPoint::from_bytes(&ua_public_bytes).unwrap();
@@ -246,15 +254,15 @@ mod tests {
         let as_private = p256::SecretKey::from_slice(&as_private_scalar).unwrap();
         let as_public_bytes = URL_SAFE_NO_PAD.decode(as_public_b64).unwrap();
         let salt = URL_SAFE_NO_PAD.decode(salt_b64).unwrap();
+        let expected_body = URL_SAFE_NO_PAD.decode(expected_body_b64).unwrap();
 
-        // Step 1: ECDH(as_private, ua_public).
+        // ---- HKDF derivation ---------------------------------------------
         let shared = elliptic_curve::ecdh::diffie_hellman(
             as_private.to_nonzero_scalar(),
             ua_public.as_affine(),
         );
         let dh = shared.raw_secret_bytes();
 
-        // Step 2: PRK_key = HKDF-Extract(auth_secret, dh); IKM = HKDF-Expand.
         let prk_key = Hkdf::<Sha256>::new(Some(&auth), dh);
         let mut key_info =
             Vec::with_capacity(WEBPUSH_INFO_PREFIX.len() + 2 * P256_UNCOMPRESSED_POINT_LEN);
@@ -264,32 +272,57 @@ mod tests {
         let mut ikm = [0u8; HKDF_PRK_LEN];
         prk_key.expand(&key_info, &mut ikm).unwrap();
 
-        // Step 3: PRK = HKDF-Extract(salt, IKM); derive CEK and nonce.
         let prk = Hkdf::<Sha256>::new(Some(&salt), &ikm);
         let mut cek = [0u8; HKDF_CEK_LEN];
         prk.expand(AES128GCM_KEY_INFO, &mut cek).unwrap();
         let mut nonce = [0u8; HKDF_NONCE_LEN];
         prk.expand(AES128GCM_NONCE_INFO, &mut nonce).unwrap();
 
-        // RFC 8291 §5 expected derived values (encoded base64url no-pad):
-        //   IKM = "S4lYMb_L0FxCIaNnIlrqRA"
-        //   PRK = "09_eUZGrsvxChDCGRCdkLQ" (hex: d3dfdef51..., truncated)
-        //   CEK = "oIhVW04MRdy2XN9CiKLxTg"
-        //   nonce = "4h_95klXJ5E_qnoN"
-        // We assert the CEK and nonce bytes — these are the load-bearing
-        // intermediates; if the HKDF info construction has `ua_public` and
-        // `as_public` swapped, both will be wrong.
+        // RFC 8291 §5 published CEK and nonce (base64url no-pad). The RFC
+        // example also lists an `IKM` value but in a 16-byte truncated form
+        // (the full HKDF-Expand output is 32 bytes per RFC 8291 §3.4);
+        // CEK and nonce are exact and transitively cover any IKM bug.
         let expected_cek = URL_SAFE_NO_PAD.decode("oIhVW04MRdy2XN9CiKLxTg").unwrap();
         let expected_nonce = URL_SAFE_NO_PAD.decode("4h_95klXJ5E_qnoN").unwrap();
+        assert_eq!(&cek[..], &expected_cek[..], "CEK mismatch");
+        assert_eq!(&nonce[..], &expected_nonce[..], "nonce mismatch");
+
+        // ---- Pad to the RFC's actual record length, AES-GCM seal --------
+        // RFC 8188 §2.1: `rs` in the header is the configured per-record
+        // *maximum* (the RFC example uses 4096); the last record may be
+        // shorter. Derive the actual padded-plaintext length from the
+        // RFC's published body so we reproduce the reference encoder's
+        // padding choice exactly:
+        //     padded_plaintext_len = body.len() − header_len − tag_len.
+        let record_plaintext_len = expected_body.len() - AES128GCM_HEADER_LEN - AES128GCM_TAG_LEN;
+        let mut padded = Vec::with_capacity(record_plaintext_len);
+        padded.extend_from_slice(plaintext);
+        padded.push(AES128GCM_LAST_RECORD_DELIM);
+        padded.resize(record_plaintext_len, 0x00);
+
+        let cipher = Aes128Gcm::new_from_slice(&cek).unwrap();
+        let ciphertext = cipher
+            .encrypt((&nonce).into(), padded.as_slice())
+            .expect("AES-128-GCM encrypt");
+
+        // Read the RFC's `rs` field for header reassembly (4096 in the
+        // example — this is the configured max, not the actual record
+        // length).
+        let rs_field_start = AES128GCM_SALT_LEN;
+        let rs_field_end = rs_field_start + AES128GCM_RS_LEN;
+        let mut rs_bytes = [0u8; AES128GCM_RS_LEN];
+        rs_bytes.copy_from_slice(&expected_body[rs_field_start..rs_field_end]);
+
+        // ---- Assemble header || ciphertext, byte-equal the RFC body -----
+        let mut body = Vec::with_capacity(AES128GCM_HEADER_LEN + ciphertext.len());
+        body.extend_from_slice(&salt);
+        body.extend_from_slice(&rs_bytes);
+        body.push(as_public_bytes.len() as u8);
+        body.extend_from_slice(&as_public_bytes);
+        body.extend_from_slice(&ciphertext);
         assert_eq!(
-            &cek[..],
-            &expected_cek[..],
-            "CEK mismatch — HKDF derivation drift"
-        );
-        assert_eq!(
-            &nonce[..],
-            &expected_nonce[..],
-            "nonce mismatch — HKDF derivation drift"
+            body, expected_body,
+            "encrypted body must match RFC 8291 §5 expected output byte-for-byte"
         );
     }
 
