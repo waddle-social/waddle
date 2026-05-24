@@ -96,6 +96,10 @@ struct CacheKey {
     /// Origin serialized once at key construction — `url::Origin` itself is
     /// `Hash`/`Eq`, but we cache the canonical ASCII form for cheap comparisons.
     origin_ascii: String,
+    /// `sub` is part of the JWT claim set, so a cache hit MUST require an
+    /// exact match — otherwise a caller varying `sub` for the same
+    /// `(kid, origin)` would receive a stale-`sub` JWT.
+    sub_claim: String,
 }
 
 #[derive(Clone)]
@@ -141,10 +145,11 @@ impl InProcessVapidSigner {
         }
     }
 
-    fn cache_key(&self, aud: &url::Origin) -> CacheKey {
+    fn cache_key(&self, aud: &url::Origin, sub: &VapidSub) -> CacheKey {
         CacheKey {
             kid: self.kid,
             origin_ascii: origin_ascii(aud),
+            sub_claim: sub.as_claim(),
         }
     }
 }
@@ -159,7 +164,7 @@ impl std::fmt::Debug for InProcessVapidSigner {
 
 impl VapidSigner for InProcessVapidSigner {
     fn sign(&self, aud: &url::Origin, sub: &VapidSub) -> Result<VapidJwt, VapidSignError> {
-        let key = self.cache_key(aud);
+        let key = self.cache_key(aud, sub);
         let now = now_unix_seconds();
         // Cache hit path — short critical section, then return.
         if let Ok(mut cache) = self.cache.lock() {
@@ -172,9 +177,12 @@ impl VapidSigner for InProcessVapidSigner {
             }
         }
 
-        // Sign a fresh JWT.
-        let iat = now - IAT_LAG.as_secs();
-        let exp = iat + VAPID_JWT_LIFETIME.as_secs();
+        // Sign a fresh JWT. `saturating_sub` guards against a mis-set system
+        // clock that returns `now == 0` (or `< IAT_LAG`) from
+        // `now_unix_seconds()`; underflow would panic in debug and wrap to a
+        // huge timestamp in release, producing JWTs push services reject.
+        let iat = now.saturating_sub(IAT_LAG.as_secs());
+        let exp = iat.saturating_add(VAPID_JWT_LIFETIME.as_secs());
         let claims = VapidClaims {
             aud: origin_ascii(aud),
             exp,
@@ -364,6 +372,24 @@ mod tests {
     }
 
     #[test]
+    fn signer_distinguishes_subs_within_same_origin() {
+        // The JWT claim set embeds `sub`, so a caller that varies `sub` for
+        // the same (kid, origin) MUST get a JWT with the new `sub` — not a
+        // cached one bound to a previous `sub` value.
+        use std::str::FromStr as _;
+        let signer = fresh_signer();
+        let aud = parse_origin("https://fcm.googleapis.com/fcm/send/abc");
+        let sub_a = VapidSub::default_for_domain("example.com").unwrap();
+        let sub_b = VapidSub::from_str("mailto:ops@example.com").unwrap();
+        let jwt_a = signer.sign(&aud, &sub_a).unwrap();
+        let jwt_b = signer.sign(&aud, &sub_b).unwrap();
+        assert_ne!(jwt_a, jwt_b, "cache key must include `sub`");
+        // Each `sub` round-trips under itself.
+        let jwt_a2 = signer.sign(&aud, &sub_a).unwrap();
+        assert_eq!(jwt_a, jwt_a2);
+    }
+
+    #[test]
     fn signer_distinguishes_origins() {
         let signer = fresh_signer();
         let aud_fcm = parse_origin("https://fcm.googleapis.com/fcm/send/abc");
@@ -390,12 +416,15 @@ mod tests {
 
     #[test]
     fn signer_verifies_with_own_public_key() {
+        use p256::pkcs8::EncodePublicKey;
         let signer = fresh_signer();
         let aud = parse_origin("https://fcm.googleapis.com/fcm/send/abc");
         let sub = VapidSub::default_for_domain("example.com").unwrap();
         let jwt = signer.sign(&aud, &sub).expect("sign");
-        let pk = signer.current_public_key();
-        let pk_pem = pk.to_string();
+        let pk_pem = signer
+            .current_public_key()
+            .to_public_key_pem(Default::default())
+            .expect("public-key PEM");
         let decoding_key =
             jsonwebtoken::DecodingKey::from_ec_pem(pk_pem.as_bytes()).expect("decode key");
         let mut validation = jsonwebtoken::Validation::new(Algorithm::ES256);

@@ -118,13 +118,21 @@ impl VapidStorage {
 
     async fn initialize(&self) -> Result<(), XmppError> {
         let i64_type = crate::db::i64_sql_type(self.db.driver());
+        // `BLOB` is the SQLite byte type; Postgres requires `BYTEA`. Use the
+        // configured driver to emit the dialect-correct column type.
+        let blob_type = match self.db.driver() {
+            crate::db::DatabaseDriver::Sqlite => "BLOB",
+            crate::db::DatabaseDriver::Postgres => "BYTEA",
+        };
+        // `kid` is a UUIDv4 and already `NOT NULL UNIQUE`; using it as the
+        // primary key avoids the SQLite-vs-Postgres autoincrement-integer
+        // mismatch that an `id INTEGER PRIMARY KEY` column would create.
         let sql = format!(
             r#"
             CREATE TABLE IF NOT EXISTS push_service_vapid_keys (
-                id INTEGER PRIMARY KEY,
-                kid TEXT NOT NULL UNIQUE,
+                kid TEXT NOT NULL PRIMARY KEY,
                 sealed_private_key TEXT NOT NULL,
-                public_key BLOB NOT NULL,
+                public_key {blob_type} NOT NULL,
                 root_key_version {i64_type} NOT NULL,
                 created_at_ms {i64_type} NOT NULL,
                 retired_at_ms {i64_type}

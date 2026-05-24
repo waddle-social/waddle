@@ -138,7 +138,16 @@ impl MailtoAddress {
         if s.is_empty() {
             return Err(VapidSubParseError::Empty);
         }
-        if s.chars().any(|c| c.is_control() || c.is_whitespace()) {
+        // Reject control/whitespace, plus URI-reserved characters that would
+        // require percent-encoding in a mailto URI (RFC 6068 §2). The
+        // `sub` claim is embedded verbatim as `mailto:<addr>` into the JWT;
+        // unescaped reserved chars produce malformed URIs.
+        let reject = |c: char| {
+            c.is_control()
+                || c.is_whitespace()
+                || matches!(c, '?' | '#' | '%' | '&' | '/' | ',' | ';')
+        };
+        if s.chars().any(reject) {
             return Err(VapidSubParseError::BadMailto);
         }
         let (local, host) = s.rsplit_once('@').ok_or(VapidSubParseError::BadMailto)?;
@@ -480,6 +489,24 @@ mod tests {
         // RFC 6068: mailto URIs are non-hierarchical; `mailto://foo@bar` is malformed.
         let err = VapidSub::from_str("mailto://foo@bar.example").unwrap_err();
         assert!(matches!(err, VapidSubParseError::BadMailto));
+    }
+
+    #[test]
+    fn vapid_sub_rejects_mailto_with_uri_reserved_chars() {
+        // RFC 6068 §2: `?`, `#`, `%`, `&`, etc. need percent-encoding.
+        for bad in &[
+            "mailto:foo?subj=x@bar.example",
+            "mailto:foo#frag@bar.example",
+            "mailto:foo%20bar@bar.example",
+            "mailto:foo,bar@bar.example",
+        ] {
+            match VapidSub::from_str(bad) {
+                Ok(_) => panic!("input `{bad}` should be rejected"),
+                Err(err) => {
+                    assert!(matches!(err, VapidSubParseError::BadMailto), "input {bad}")
+                }
+            }
+        }
     }
 
     #[test]
