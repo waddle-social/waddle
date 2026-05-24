@@ -4,11 +4,20 @@
 //! and sending Web Push notifications. Subscriptions are registered via XEP-0357
 //! enable/disable IQ stanzas and stored for later notification delivery.
 
+pub mod constants;
+pub mod encrypt;
 mod sender;
 mod store;
+pub mod types;
+pub mod vapid;
 
 pub use sender::{notify_mentioned_users, HttpWebPushSender, WebPushSender};
 pub use store::{InMemoryPushStore, PushSubscriptionStore};
+pub use types::{
+    AuthSecret, EncryptedPayload, EndpointHash, Kid, MailtoAddress, PushTopic, PushTopicParseError,
+    SubscriptionKeys, VapidJwt, VapidLoadError, VapidSignError, VapidSub, VapidSubParseError,
+    WebPushCryptoError,
+};
 
 use minidom::Element;
 use thiserror::Error;

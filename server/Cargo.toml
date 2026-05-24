@@ -92,10 +92,12 @@ rustls-acme = { version = "0.15.2", default-features = false, features = ["ring"
 hmac = "0.13"
 sha1 = "0.11"
 sha2 = "0.11"
-p256 = { version = "0.13", features = ["ecdsa", "jwk"] }
+p256 = { version = "0.13", features = ["ecdsa", "ecdh", "jwk", "pem", "pkcs8"] }
 elliptic-curve = { version = "0.13", features = ["jwk"] }
 argon2 = "0.5"
 zeroize = { version = "1", features = ["derive"] }
+aes-gcm = "0.10"
+hkdf = "0.13"
 
 # Utilities
 uuid = { version = "1.23", features = ["v4", "v7", "serde", "js"] }
