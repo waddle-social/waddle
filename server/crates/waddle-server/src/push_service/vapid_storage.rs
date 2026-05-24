@@ -77,23 +77,43 @@ impl VapidStorage {
                 })?;
 
         // 1. Env-var bootstrap path.
+        //
+        // Ordering matters: `env::remove_var` MUST be the last fallible
+        // operation in this branch. If it ran before any later step that
+        // can fail (signer init, DB insert), a failure would leave the
+        // process without the env var even though `load_or_provision`
+        // returns `Err`, breaking the documented invariant
+        // ("remove only after successful bootstrap").
+        //
+        // We therefore derive scalar/public bytes BEFORE the signer
+        // consumes `secret_key`, then sequence: signer-init → persist →
+        // remove_var. If any step fails, env remains set so the
+        // operator can fix and retry.
         if let Ok(raw) = env::var(VAPID_ENV_VAR) {
-            // Wrap the env-supplied string in Zeroizing so the heap-allocated
-            // base64url scalar zeroes when this scope ends.
             let raw = Zeroizing::new(raw);
             let secret_key = parse_env_scalar(raw.as_str())?;
             let kid = Kid::new();
-            storage.persist_keypair(&kid, &secret_key).await?;
+            let scalar_bytes = Zeroizing::new(secret_key.to_bytes());
+            let public_bytes = secret_key
+                .public_key()
+                .to_encoded_point(false)
+                .as_bytes()
+                .to_vec();
+            // (a) signer-init (consumes secret_key — fallible).
+            let signer = InProcessVapidSigner::new(kid, secret_key)
+                .map_err(|source| VapidLoadError::SignerInit { source })?;
+            // (b) persist (fallible).
+            storage
+                .persist_keypair(&kid, &scalar_bytes[..], &public_bytes)
+                .await?;
+            // (c) all fallible steps succeeded — clear env.
             // SAFETY: see module-level invariant — `WADDLE_VAPID_PRIVATE_KEY`
             // is read exactly once at boot via `load_or_provision`; no other
             // code in this crate reads or writes it.
             unsafe {
                 env::remove_var(VAPID_ENV_VAR);
             }
-            return Ok(Arc::new(
-                InProcessVapidSigner::new(kid, secret_key)
-                    .map_err(|source| VapidLoadError::SignerInit { source })?,
-            ));
+            return Ok(Arc::new(signer));
         }
 
         // 2. Read latest non-retired row.
@@ -107,11 +127,18 @@ impl VapidStorage {
         // 3. Generate fresh.
         let kid = Kid::new();
         let secret_key = p256::SecretKey::random(&mut OsRng);
-        storage.persist_keypair(&kid, &secret_key).await?;
-        Ok(Arc::new(
-            InProcessVapidSigner::new(kid, secret_key)
-                .map_err(|source| VapidLoadError::SignerInit { source })?,
-        ))
+        let scalar_bytes = Zeroizing::new(secret_key.to_bytes());
+        let public_bytes = secret_key
+            .public_key()
+            .to_encoded_point(false)
+            .as_bytes()
+            .to_vec();
+        let signer = InProcessVapidSigner::new(kid, secret_key)
+            .map_err(|source| VapidLoadError::SignerInit { source })?;
+        storage
+            .persist_keypair(&kid, &scalar_bytes[..], &public_bytes)
+            .await?;
+        Ok(Arc::new(signer))
     }
 
     async fn new(db: Database, root_key: &[u8]) -> Result<Self, XmppError> {
@@ -182,29 +209,30 @@ impl VapidStorage {
             .map_err(|e| XmppError::internal(e.to_string()))
     }
 
+    /// Persist a sealed VAPID keypair from pre-derived byte material.
+    ///
+    /// Taking bytes rather than the `SecretKey` itself lets callers
+    /// construct the in-process signer (which consumes the `SecretKey`)
+    /// before the persist step, so `remove_var(WADDLE_VAPID_PRIVATE_KEY)`
+    /// can be deferred until ALL fallible operations succeed.
+    ///
+    /// `scalar_bytes` MUST be 32 bytes (a raw P-256 secret scalar) and
+    /// is wrapped in `Zeroizing` by the caller. `public_bytes` is the
+    /// 65-byte uncompressed SEC1 point (public, no zeroize needed).
     async fn persist_keypair(
         &self,
         kid: &Kid,
-        secret_key: &p256::SecretKey,
+        scalar_bytes: &[u8],
+        public_bytes: &[u8],
     ) -> Result<(), VapidLoadError> {
         let now_ms = chrono::Utc::now().timestamp_millis();
-        // `p256::SecretKey::to_bytes` already returns a `Zeroizing`-aware
-        // `FieldBytes` per the crate, but wrap the borrow target in an
-        // explicit `Zeroizing` to make the discipline obvious to a reader
-        // and to defend against future API drift in `p256`.
-        let scalar = Zeroizing::new(secret_key.to_bytes());
         let sealed = self
             .cipher
-            .seal(&scalar[..], AAD_LABEL, kid.as_bytes())
+            .seal(scalar_bytes, AAD_LABEL, kid.as_bytes())
             .map_err(|source| VapidLoadError::DbWrite {
                 stage: VapidDbWriteStage::SealPrivateKey,
                 source: Box::new(source),
             })?;
-        let public_bytes = secret_key
-            .public_key()
-            .to_encoded_point(false)
-            .as_bytes()
-            .to_vec();
 
         let sql = "INSERT INTO push_service_vapid_keys \
             (kid, sealed_private_key, public_key, root_key_version, created_at_ms) \
@@ -214,7 +242,7 @@ impl VapidStorage {
             crate::db_params![
                 kid.to_string(),
                 sealed,
-                public_bytes,
+                public_bytes.to_vec(),
                 CURRENT_ROOT_KEY_VERSION as i64,
                 now_ms,
             ],
