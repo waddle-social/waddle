@@ -412,7 +412,11 @@ async fn xep0357_offline_dm_emits_durable_summary_pubsub_publish_job() {
         .children()
         .find(|child| child.is("x", waddle_xmpp::xep::NS_DATA_FORMS))
         .expect("XEP-0357 summary data form");
-    assert_eq!(summary.attr("type"), Some("result"));
+    // XEP-0357 §4 example shows `<x xmlns='jabber:x:data'>` with no
+    // `type` attribute — XEP-0004 §3.2 reserves `type='result'` for
+    // query-response contexts, which doesn't fit a passively-
+    // encapsulated summary form.
+    assert_eq!(summary.attr("type"), None);
     assert!(summary.children().any(|field| {
         field.is("field", waddle_xmpp::xep::NS_DATA_FORMS)
             && field.attr("var") == Some("FORM_TYPE")
