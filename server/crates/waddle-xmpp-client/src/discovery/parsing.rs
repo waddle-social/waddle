@@ -48,6 +48,26 @@ pub fn parse_disco_info_result(iq: &Element, queried_jid: &str) -> Option<DiscoI
 }
 
 fn parse_disco_data_form(form: &Element) -> Option<DiscoDataForm> {
+    // XEP-0068 §4.3 (Incorrectly Specified FORM_TYPE): "If the FORM_TYPE
+    // field is not hidden in a form with type='form' or type='result',
+    // it MUST be ignored as a context indicator." We capture the
+    // FORM_TYPE value at this layer ONLY when the originating field
+    // carries `type='hidden'`, so a misconfigured or malicious server
+    // sending `<field var='FORM_TYPE' type='text-single'>...</field>`
+    // can't trick downstream code into accepting its claimed FORM_TYPE
+    // namespace.
+    let form_type = form
+        .children()
+        .filter(|child| child.name() == "field" && child.ns() == DATA_FORMS_NS)
+        .find(|field| {
+            field.attr("var") == Some("FORM_TYPE") && field.attr("type") == Some("hidden")
+        })
+        .and_then(|field| {
+            field
+                .children()
+                .find(|child| child.name() == "value" && child.ns() == DATA_FORMS_NS)
+                .map(Element::text)
+        });
     let fields: Vec<DiscoDataField> = form
         .children()
         .filter(|child| child.name() == "field" && child.ns() == DATA_FORMS_NS)
@@ -64,11 +84,6 @@ fn parse_disco_data_form(form: &Element) -> Option<DiscoDataForm> {
     if fields.is_empty() {
         return None;
     }
-    let form_type = fields
-        .iter()
-        .find(|field| field.var == "FORM_TYPE")
-        .and_then(|field| field.values.first())
-        .cloned();
     Some(DiscoDataForm { form_type, fields })
 }
 

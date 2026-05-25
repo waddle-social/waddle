@@ -48,6 +48,7 @@ fn parse_disco_info_result_extracts_data_form_metadata() {
                         .append(
                             Element::builder("field", DATA_FORMS_NS)
                                 .attr(minidom::rxml::xml_ncname!("var").to_owned(), "FORM_TYPE")
+                                .attr(minidom::rxml::xml_ncname!("type").to_owned(), "hidden")
                                 .append(
                                     Element::builder("value", DATA_FORMS_NS)
                                         .append(PUBSUB_METADATA_FORM_TYPE)
@@ -83,6 +84,7 @@ fn parse_disco_info_result_extracts_data_form_metadata() {
                         .append(
                             Element::builder("field", DATA_FORMS_NS)
                                 .attr(minidom::rxml::xml_ncname!("var").to_owned(), "FORM_TYPE")
+                                .attr(minidom::rxml::xml_ncname!("type").to_owned(), "hidden")
                                 .append(
                                     Element::builder("value", DATA_FORMS_NS)
                                         .append("http://jabber.org/protocol/muc#roominfo")

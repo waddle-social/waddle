@@ -761,30 +761,35 @@ fn require_non_empty_attr(
 /// stanza id, but the `from` rebinding requires the explicit check at
 /// the boundary that consumes the typed disco payload.
 ///
-/// RFC 6120 §8.1.2.1 permits `<iq>` results with an absent `from` when
-/// the reply originates from the user's own server; we treat that as a
-/// pass-through (the typical Push Service is a server component under
-/// the same domain). A `from` that matches the bare service JID OR a
-/// `from` of the form `service_jid/resource` (Push Services that
-/// publish from a full JID) is accepted.
+/// RFC 6120 §8.1.2.1 permits `<iq>` results with an absent `from` ONLY
+/// when the reply originates from the user's own server (the
+/// bare-domain of the bound JID). The Waddle Push Service is a
+/// separate addressable entity at `push.<domain>` (XEP-0357 §1 +
+/// XEP-0114 component) — a `from`-stripped reply from such a component
+/// is a server-side violation we MUST NOT silently accept, because a
+/// compromised C2S could strip `from` instead of spoofing it and
+/// bypass this guard. The check here therefore REQUIRES a present
+/// `from` that matches `service_jid`.
+///
+/// JID equality follows RFC 6122 §2.4 / RFC 7622 — domainparts are
+/// case-insensitive. Push Service JIDs are always pure domain JIDs
+/// (XEP-0114 components), so we don't accept a `service_jid/resource`
+/// form: it would be permissively useless for the production input
+/// set and would needlessly widen the attack surface. Nameprep is
+/// approximated with ASCII-lowercase since every push service JID in
+/// waddle is an ASCII subdomain — pulling in `idna` purely for this
+/// equality would inflate the WASM bundle.
 ///
 /// Extracted as a pure helper so the Rust test suite can pin the
 /// anti-spoof semantics without a full wasm-bindgen test harness.
 fn verify_iq_from_matches_query(from_attr: Option<&str>, service_jid: &str) -> Result<(), String> {
     let Some(from) = from_attr else {
-        return Ok(());
+        return Err(format!(
+            "Push Service disco#info response carries no `from`; RFC 6120 §8.1.2.1 requires components to stamp `from`. Refusing to trust VAPID advertisement (queried JID was {service_jid:?})"
+        ));
     };
-    if from == service_jid {
+    if from.eq_ignore_ascii_case(service_jid) {
         return Ok(());
-    }
-    // Allow `service_jid/resource` so a Push Service that responds
-    // from a full JID isn't rejected. Strict prefix match against the
-    // bare JID followed by `/` prevents `evil.tld/foo` from collapsing
-    // to a match against `service_jid` via substring containment.
-    if let Some(remainder) = from.strip_prefix(service_jid) {
-        if remainder.starts_with('/') {
-            return Ok(());
-        }
     }
     Err(format!(
         "Push Service disco#info response from {from:?} does not match queried JID {service_jid:?}; refusing to trust VAPID advertisement"
@@ -801,17 +806,32 @@ mod tests {
     }
 
     #[test]
-    fn verify_iq_from_accepts_absent_attr() {
-        assert!(verify_iq_from_matches_query(None, "push.example.com").is_ok());
+    fn verify_iq_from_rejects_absent_attr() {
+        // RFC 6120 §8.1.2.1's absent-from permission only applies to
+        // replies from the bound user's own server. The Push Service is
+        // a separate XEP-0114 component, so absent-from is a server
+        // violation we MUST NOT silently accept — a compromised C2S
+        // could strip `from` instead of spoofing it.
+        let err = verify_iq_from_matches_query(None, "push.example.com").unwrap_err();
+        assert!(err.contains("push.example.com"));
+        assert!(err.contains("no `from`"));
     }
 
     #[test]
-    fn verify_iq_from_accepts_service_jid_with_resource() {
-        assert!(verify_iq_from_matches_query(
-            Some("push.example.com/resource"),
-            "push.example.com"
-        )
-        .is_ok());
+    fn verify_iq_from_rejects_service_jid_with_resource() {
+        // Push Service components don't carry resources (XEP-0114).
+        // Accepting `push.example.com/anything` would be needlessly
+        // permissive and wouldn't help any real-world deployment.
+        let err =
+            verify_iq_from_matches_query(Some("push.example.com/resource"), "push.example.com")
+                .unwrap_err();
+        assert!(err.contains("push.example.com/resource"));
+    }
+
+    #[test]
+    fn verify_iq_from_accepts_case_variation_on_domain() {
+        // RFC 6122 §2.4: domainpart comparison is case-insensitive.
+        assert!(verify_iq_from_matches_query(Some("Push.Example.COM"), "push.example.com").is_ok());
     }
 
     #[test]
@@ -824,9 +844,8 @@ mod tests {
 
     #[test]
     fn verify_iq_from_rejects_prefix_substring_collision() {
-        // Without the `/` boundary, `push.example.com` could match
-        // `push.example.com.attacker.tld` via substring containment.
-        // Confirm the strict-prefix rule rejects this.
+        // `push.example.com` MUST NOT match `push.example.com.attacker.tld`
+        // even via case-insensitive equality.
         assert!(verify_iq_from_matches_query(
             Some("push.example.com.attacker.tld"),
             "push.example.com",

@@ -249,4 +249,87 @@ mod tests {
         let err = parse_push_vapid_from_disco_info(&disco).expect_err("bad b64");
         assert_eq!(err, PushVapidDiscoParseError::PublicKeyBase64urlDecode);
     }
+
+    /// XEP-0068 §4.3 (Incorrectly Specified FORM_TYPE): a non-hidden
+    /// FORM_TYPE field MUST be ignored as a context indicator. The
+    /// wire-level disco parser already strips the form_type when the
+    /// originating field isn't `type='hidden'`, which surfaces here as
+    /// `form_type: None` → `NotAdvertised`. This test pins that
+    /// behavior at the typed boundary so a regression in
+    /// `parse_disco_data_form` is caught by the chat-side suite.
+    #[test]
+    fn rejects_non_hidden_form_type_field() {
+        use minidom::Element;
+
+        use crate::discovery::parsing::parse_disco_info_result;
+        use crate::discovery::DATA_FORMS_NS;
+        use crate::discovery::DISCO_INFO_NS;
+
+        let bytes = {
+            let mut b = [0u8; 65];
+            b[0] = 0x04;
+            for (i, v) in b.iter_mut().enumerate().skip(1) {
+                *v = (i as u8).wrapping_mul(7);
+            }
+            b
+        };
+        let public_key_b64 = URL_SAFE_NO_PAD.encode(bytes);
+        let kid = Uuid::new_v4().to_string();
+        // Same wire shape as the legitimate form, but FORM_TYPE is
+        // emitted WITHOUT `type='hidden'`.
+        let form = Element::builder("x", DATA_FORMS_NS)
+            .attr(minidom::rxml::xml_ncname!("type").to_owned(), "result")
+            .append(
+                Element::builder("field", DATA_FORMS_NS)
+                    .attr(minidom::rxml::xml_ncname!("var").to_owned(), "FORM_TYPE")
+                    // Deliberately omit `type='hidden'`.
+                    .append(
+                        Element::builder("value", DATA_FORMS_NS)
+                            .append(PUSH_VAPID_FORM_TYPE)
+                            .build(),
+                    )
+                    .build(),
+            )
+            .append(
+                Element::builder("field", DATA_FORMS_NS)
+                    .attr(
+                        minidom::rxml::xml_ncname!("var").to_owned(),
+                        PUSH_VAPID_FIELD_PUBLIC_KEY,
+                    )
+                    .append(
+                        Element::builder("value", DATA_FORMS_NS)
+                            .append(&public_key_b64[..])
+                            .build(),
+                    )
+                    .build(),
+            )
+            .append(
+                Element::builder("field", DATA_FORMS_NS)
+                    .attr(
+                        minidom::rxml::xml_ncname!("var").to_owned(),
+                        PUSH_VAPID_FIELD_KID,
+                    )
+                    .append(
+                        Element::builder("value", DATA_FORMS_NS)
+                            .append(&kid[..])
+                            .build(),
+                    )
+                    .build(),
+            )
+            .build();
+        let iq = Element::builder("iq", "jabber:client")
+            .attr(minidom::rxml::xml_ncname!("type").to_owned(), "result")
+            .append(
+                Element::builder("query", DISCO_INFO_NS)
+                    .append(form)
+                    .build(),
+            )
+            .build();
+
+        let disco = parse_disco_info_result(&iq, "push.example.com")
+            .expect("disco parses despite the non-hidden FORM_TYPE");
+        let err = parse_push_vapid_from_disco_info(&disco)
+            .expect_err("non-hidden FORM_TYPE must NOT be honored as a context indicator");
+        assert_eq!(err, PushVapidDiscoParseError::NotAdvertised);
+    }
 }
