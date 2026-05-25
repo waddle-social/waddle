@@ -185,14 +185,45 @@ impl WebPushSender for HttpWebPushSender {
     }
 }
 
+/// Upper bound on the bytes the sender reads from a relay response
+/// body before giving up on connection reuse. Web Push relay error
+/// bodies are tiny (a few hundred bytes max — FCM/Mozilla autopush
+/// return JSON of `{"error":"…"}` shape); 32 KiB is generous headroom
+/// for a typical body while bounding the memory an attacker-controlled
+/// relay can force us to allocate to drain its response.
+const MAX_DRAIN_BYTES: usize = 32 * 1024;
+
+/// Drain a response body up to [`MAX_DRAIN_BYTES`] so the underlying
+/// hyper connection can be returned to the pool. Bounded so an
+/// attacker-controlled relay cannot OOM us by streaming an arbitrarily
+/// large response body. Two early-out paths:
+///
+/// 1. `Content-Length > MAX_DRAIN_BYTES` — drop the response without
+///    draining (sacrifices connection reuse for this single response;
+///    the next send opens a fresh connection).
+/// 2. Cumulative chunks exceed `MAX_DRAIN_BYTES` mid-stream — stop
+///    reading and let `resp` drop on the way out of the function;
+///    reqwest will close the connection rather than reuse it.
+async fn drain_body_bounded(mut resp: reqwest::Response) {
+    if let Some(len) = resp.content_length() {
+        if len > MAX_DRAIN_BYTES as u64 {
+            return;
+        }
+    }
+    let mut total = 0usize;
+    while let Ok(Some(chunk)) = resp.chunk().await {
+        total = total.saturating_add(chunk.len());
+        if total > MAX_DRAIN_BYTES {
+            return;
+        }
+    }
+}
+
 async fn classify_response(resp: reqwest::Response) -> WebPushOutcome {
     let status = resp.status();
     let code = status.as_u16();
     if status.is_success() {
-        // Drain the body before returning so reqwest's underlying
-        // hyper connection can be returned to the pool — without
-        // this the next per-host send opens a fresh connection.
-        let _ = resp.bytes().await;
+        drain_body_bounded(resp).await;
         debug!(status = %status, "Web Push delivered");
         return WebPushOutcome::Delivered { status: code };
     }
@@ -208,10 +239,7 @@ async fn classify_response(resp: reqwest::Response) -> WebPushOutcome {
         .get(reqwest::header::WWW_AUTHENTICATE)
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_ascii_lowercase());
-    // Drain the body to allow connection reuse. Capping wouldn't
-    // help here — reqwest buffers the whole body anyway; the goal
-    // is to consume it before we return.
-    let _ = resp.bytes().await;
+    drain_body_bounded(resp).await;
     match code {
         // 404 / 410 are the textbook "subscription gone" signals
         // (RFC 8030 §6). 403 is NOT folded in: while FCM does use 403
@@ -625,6 +653,50 @@ mod tests {
             })
             .await;
         assert!(matches!(outcome, WebPushOutcome::BadRequest { status: 0 }));
+    }
+
+    #[tokio::test]
+    async fn drain_body_bounded_handles_large_response_without_panic() {
+        // Relay returns a body larger than `MAX_DRAIN_BYTES`. The
+        // sender must classify the response without OOMing or
+        // panicking — `drain_body_bounded` bails on either the
+        // Content-Length fast path or the cumulative-chunk path.
+        // Either way the outcome is correctly classified from the
+        // status code.
+        let server = mockito::Server::new_async().await;
+        let mut server = server;
+        let big_body = vec![b'A'; MAX_DRAIN_BYTES * 2]; // 64 KiB
+        let m = server
+            .mock("POST", "/p/big")
+            .with_status(500)
+            .with_header("content-type", "text/plain")
+            .with_body(big_body)
+            .create_async()
+            .await;
+        let url = Url::parse(&format!("{}/p/big", server.url())).unwrap();
+        let sender = HttpWebPushSender::new();
+        let jwt = dummy_jwt();
+        let p = payload();
+        let outcome = sender
+            .send(WebPushRequest {
+                endpoint: &url,
+                payload: &p,
+                vapid_jwt: &jwt,
+                vapid_public_key_b64u: "BFoo",
+                topic: None,
+                ttl: 60,
+                urgency: Urgency::Normal,
+            })
+            .await;
+        m.assert_async().await;
+        // 5xx → Transient::ServerError. The body was too large for
+        // full drain, but classification proceeded from headers/status.
+        assert!(matches!(
+            outcome,
+            WebPushOutcome::Transient {
+                kind: TransientFailure::ServerError { status: 500 }
+            }
+        ));
     }
 
     #[tokio::test]
