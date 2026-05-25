@@ -16,13 +16,11 @@ pub use push_vapid::{
 };
 
 pub use iq::{
-    build_disable_push_device_iq, build_disable_push_iq, build_disco_info_iq, build_disco_items_iq,
-    build_enable_push_iq, build_ensure_push_node_iq, build_muc_admin_affiliation_list_iq,
-    build_muc_admin_affiliation_set_iq, build_pubsub_items_iq, build_register_push_device_iq,
-    build_roster_get_iq, build_upload_slot_iq, build_user_search_form_iq, build_user_search_iq,
+    build_disco_info_iq, build_disco_items_iq, build_muc_admin_affiliation_list_iq,
+    build_muc_admin_affiliation_set_iq, build_pubsub_items_iq, build_roster_get_iq,
+    build_upload_slot_iq, build_user_search_form_iq, build_user_search_iq,
     build_waddle_inbox_mark_read_iq, parse_muc_admin_affiliation_query, parse_roster_result,
-    parse_user_search_form, parse_user_search_result, PushDevicePlatform, PushDeviceRegistration,
-    PushEnvironment,
+    parse_user_search_form, parse_user_search_result,
 };
 pub use parsing::{
     parse_disco_info_result, parse_disco_items_result, parse_space_channels_result,
@@ -49,12 +47,6 @@ pub const UPLOAD_NS: &str = "urn:xmpp:http:upload:0";
 /// today; the WASM browser client does, via the inbox-streaming flow.
 pub const WADDLE_INBOX_NS: &str = "urn:waddle:inbox:0";
 pub const PUSH_NS: &str = "urn:xmpp:push:0";
-/// Waddle-private namespace for the XMPP Push Service registration
-/// boundary (see `crates/waddle-server/src/push_service.rs`). The chat
-/// uses this to register Web Push / APNs / FCM credentials with
-/// `push.<domain>` through `<ensure-node>`, `<register-device>`,
-/// `<disable-device>` IQs — replacing per-platform REST endpoints.
-pub const WADDLE_PUSH_SERVICE_NS: &str = "urn:waddle:push-service:0";
 pub const CLIENT_NS: &str = "jabber:client";
 pub const DATA_FORMS_NS: &str = "jabber:x:data";
 pub const RSM_NS: &str = "http://jabber.org/protocol/rsm";
