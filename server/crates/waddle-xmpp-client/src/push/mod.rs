@@ -42,7 +42,12 @@ pub const REGISTER_DEVICE_RESULT_NODE_FIELD: &str = "node";
 
 /// Provider platform discriminator. The wire string maps directly to
 /// the `platform` field on the XEP-0004 submit form (XEP-0050 §3).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// `Serialize` / `Deserialize` use the lowercase wire form so this
+/// enum can be carried across the WASM boundary directly via
+/// `serde_wasm_bindgen` (JS sends `"web"` / `"apns"` / `"fcm"`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum PushPlatform {
     Web,
     Apns,
@@ -62,9 +67,16 @@ impl PushPlatform {
 /// Deployment environment for the provider — `sandbox` distinguishes
 /// the APNs `apns_development` endpoint from `apns_production`. Web
 /// Push and FCM accept only `prod` today.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// Serde uses the wire-string representations directly (`"prod"` /
+/// `"sandbox"`) so the JS chat client passes `environment: "prod"`
+/// verbatim through the WASM boundary; unknown values fail at
+/// deserialization rather than reaching the IQ builder as typos.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum PushEnvironment {
+    #[serde(rename = "prod")]
     Production,
+    #[serde(rename = "sandbox")]
     Sandbox,
 }
 
@@ -170,6 +182,23 @@ pub fn build_register_device_submit_form(
         }
     }
     DataForm::new(DataFormType::Submit, REGISTER_DEVICE_FORM_TYPE, fields)
+}
+
+/// FORM_TYPE for the `disable-device` XEP-0050 command submit form.
+pub const DISABLE_DEVICE_FORM_TYPE: &str = "urn:xmpp:push-service:commands:disable-device:0";
+
+/// Build the XEP-0004 submit form for the `disable-device` command.
+/// Carries the XEP-0357 `node` id and the Push Service-assigned
+/// `device-id` so the service can locate the row.
+pub fn build_disable_device_submit_form(node: &str, device_id: &str) -> DataForm {
+    DataForm::new(
+        DataFormType::Submit,
+        DISABLE_DEVICE_FORM_TYPE,
+        vec![
+            text_single("node", node),
+            text_single("device-id", device_id),
+        ],
+    )
 }
 
 /// Extract the assigned node id from a `status='completed'` result

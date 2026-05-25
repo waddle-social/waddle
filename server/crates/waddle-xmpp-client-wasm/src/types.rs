@@ -424,51 +424,6 @@ pub struct WaddleServerVersion {
     pub os: Option<String>,
 }
 
-/// Result of `<ensure-node app-id='…'/>` against the Push Service.
-/// Returned to chat JS for use in subsequent `<register-device>` and
-/// XEP-0357 `<enable>` calls.
-#[derive(Debug, Serialize)]
-pub struct PushServiceNode {
-    pub id: String,
-    pub jid: String,
-    #[serde(rename = "appId")]
-    pub app_id: String,
-}
-
-/// Push Service device wire status. The server emits `"active"` on
-/// successful register-device and `"disabled"` on disable-device.
-/// CLAUDE.md typed-payloads hard rule: do NOT carry this as a
-/// `String` — a server-side rename would silently reach TypeScript
-/// as an unrecognised string. Round-7 Greptile P1 finding.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub enum PushDeviceStatus {
-    Active,
-    Disabled,
-}
-
-impl PushDeviceStatus {
-    pub fn from_wire(value: &str) -> Result<Self, JsValue> {
-        match value {
-            "active" => Ok(Self::Active),
-            "disabled" => Ok(Self::Disabled),
-            other => Err(JsValue::from_str(&format!(
-                "unknown Push Service device status '{other}' \
-                 (expected 'active' or 'disabled')"
-            ))),
-        }
-    }
-}
-
-/// Result of `<register-device …/>` / `<disable-device …/>` against
-/// the Push Service.
-#[derive(Debug, Serialize)]
-pub struct PushServiceDevice {
-    pub id: String,
-    pub node: String,
-    pub status: PushDeviceStatus,
-}
-
 /// Result of `fetch_vapid_public_key` — the Push Service's currently-
 /// active VAPID public key + kid as advertised via the XEP-0128 disco
 /// extension form `urn:waddle:push:vapid:0`. The chat hands
@@ -482,29 +437,91 @@ pub struct WaddleVapidAdvertisement {
     pub kid: String,
 }
 
-/// Arguments to `WaddleClient::register_web_push_device`. Bundled
-/// into a struct so the JS call site passes a single typed object
-/// (and the Rust signature stays under the
-/// `clippy::too_many_arguments` threshold).
+/// Returned by `register_push_device`. Wraps the assigned XEP-0357
+/// node id so JS can persist it for subsequent `enable` / `disable`
+/// calls.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WaddlePushNodeId {
+    pub value: String,
+}
+
+/// Arguments to `WaddleClient::register_push_device`. Bundled into a
+/// struct so the JS call site passes a single typed object. The
+/// platform discriminator + provider-specific fields drive the
+/// XEP-0050 submit form one layer down via the typed
+/// [`waddle_xmpp_client::push::PushDeviceCredentials`] enum.
 ///
-/// Each `provider_*` string maps onto the corresponding XEP wire
-/// child element; an empty string is treated as "field absent" and
-/// the typed IQ builder omits the child.
+/// Field shape pinned by the camelCase tests at the bottom of this
+/// module. The chat-side wrapper at
+/// `chat/src/lib/xmpp/client.ts::registerPushDevice` builds the
+/// matching JS object.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct RegisterWebPushDeviceOptions {
+pub struct RegisterPushDeviceOptions {
     pub service_jid: String,
-    pub node: String,
-    pub device_id: String,
-    /// Typed at the WASM boundary — round-7 Greptile P1 caught the
-    /// previous `String` field as a typed-payloads-rule violation.
-    /// `"prod"` / `"dev"` are the wire values; anything else fails
-    /// at `serde_wasm_bindgen::from_value` with an unknown-variant
-    /// error rather than reaching the IQ builder as a typo.
-    pub environment: waddle_xmpp_client::discovery::PushEnvironment,
-    pub provider_endpoint: String,
-    pub provider_token: String,
-    pub provider_key_material: String,
+    pub app_id: String,
+    /// Wire-typed via the upstream `PushEnvironment` enum
+    /// (`"prod"` / `"sandbox"`). Unknown values fail at
+    /// `serde_wasm_bindgen::from_value` before reaching the IQ
+    /// builder.
+    pub environment: waddle_xmpp_client::push::PushEnvironment,
+    /// Wire-typed via the upstream `PushPlatform` enum
+    /// (`"web"` / `"apns"` / `"fcm"`).
+    pub platform: waddle_xmpp_client::push::PushPlatform,
+    /// Web Push subscription endpoint URL (only valid for
+    /// `platform: "web"`).
+    pub endpoint: Option<String>,
+    /// Web Push P-256 public key (only valid for
+    /// `platform: "web"`).
+    pub p256dh: Option<String>,
+    /// Web Push subscription auth secret (only valid for
+    /// `platform: "web"`).
+    pub auth: Option<String>,
+    /// APNs device token (only valid for `platform: "apns"`).
+    pub apns_token: Option<String>,
+    /// FCM registration token (only valid for `platform: "fcm"`).
+    pub fcm_token: Option<String>,
+}
+
+impl RegisterPushDeviceOptions {
+    /// Convert the JS-flat options into the typed
+    /// `PushDeviceCredentials` enum. Returns a diagnostic `String`
+    /// when the platform-specific required fields are missing — the
+    /// WASM bridge wraps that as a rejected `Promise` at the call
+    /// site (keeps `JsValue` out of this conversion so native tests
+    /// can exercise the validation path).
+    pub fn into_credentials(
+        self,
+    ) -> Result<waddle_xmpp_client::push::PushDeviceCredentials, String> {
+        use waddle_xmpp_client::push::{PushDeviceCredentials, PushPlatform};
+        match self.platform {
+            PushPlatform::Web => Ok(PushDeviceCredentials::WebPush {
+                endpoint: require_field(self.endpoint, "endpoint", "web")?,
+                p256dh: require_field(self.p256dh, "p256dh", "web")?,
+                auth: require_field(self.auth, "auth", "web")?,
+            }),
+            PushPlatform::Apns => Ok(PushDeviceCredentials::Apns {
+                device_token: require_field(self.apns_token, "apnsToken", "apns")?,
+            }),
+            PushPlatform::Fcm => Ok(PushDeviceCredentials::Fcm {
+                registration_token: require_field(self.fcm_token, "fcmToken", "fcm")?,
+            }),
+        }
+    }
+}
+
+fn require_field(
+    value: Option<String>,
+    field_name: &str,
+    platform: &str,
+) -> Result<String, String> {
+    match value {
+        Some(v) if !v.is_empty() => Ok(v),
+        _ => Err(format!(
+            "register_push_device: platform '{platform}' requires field '{field_name}'"
+        )),
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -828,63 +845,93 @@ pub struct SetRoomNotificationModeOptions {
 
 #[cfg(test)]
 mod tests {
-    use super::RegisterWebPushDeviceOptions;
+    use super::RegisterPushDeviceOptions;
+    use waddle_xmpp_client::push::{PushDeviceCredentials, PushEnvironment, PushPlatform};
 
-    /// Pin the camelCase wire contract for the
-    /// `register_web_push_device` WASM bridge.
-    ///
-    /// The chat-side wrapper in
-    /// `chat/src/lib/xmpp/client.ts::registerWebPushDevice` builds
-    /// a JS object with these camelCase keys and hands it to the
-    /// WASM method. A future rename on either side without updating
-    /// the other would silently land empty strings on the wire
-    /// (via the `non_empty` helper) and the registered Web Push
-    /// device would have NO credentials. Round-5 mutation-rigor
-    /// adversarial review on PR #760.
+    /// Pin the camelCase wire contract for the `register_push_device`
+    /// WASM bridge. The chat-side wrapper at
+    /// `chat/src/lib/xmpp/client.ts` builds a JS object with these
+    /// camelCase keys.
     #[test]
-    fn register_web_push_device_options_deserializes_camelcase() {
+    fn register_push_device_options_deserializes_web_push_payload() {
         let json = serde_json::json!({
             "serviceJid": "push.example.com",
-            "node": "node-abc",
-            "deviceId": "web-1234",
+            "appId": "app-web",
             "environment": "prod",
-            "providerEndpoint": "https://fcm.googleapis.com/wp/abcdef",
-            "providerToken": "vapid-auth-secret",
-            "providerKeyMaterial": "p256dh-public-key",
+            "platform": "web",
+            "endpoint": "https://fcm.googleapis.com/wp/abcdef",
+            "p256dh": "p256-key",
+            "auth": "auth-secret",
         });
-        let parsed: RegisterWebPushDeviceOptions =
+        let parsed: RegisterPushDeviceOptions =
             serde_json::from_value(json).expect("camelCase deserialize");
         assert_eq!(parsed.service_jid, "push.example.com");
-        assert_eq!(parsed.node, "node-abc");
-        assert_eq!(parsed.device_id, "web-1234");
+        assert_eq!(parsed.app_id, "app-web");
+        assert_eq!(parsed.environment, PushEnvironment::Production);
+        assert_eq!(parsed.platform, PushPlatform::Web);
         assert_eq!(
-            parsed.environment,
-            waddle_xmpp_client::discovery::PushEnvironment::Prod
+            parsed.into_credentials().unwrap(),
+            PushDeviceCredentials::WebPush {
+                endpoint: "https://fcm.googleapis.com/wp/abcdef".to_string(),
+                p256dh: "p256-key".to_string(),
+                auth: "auth-secret".to_string(),
+            }
         );
-        assert_eq!(
-            parsed.provider_endpoint,
-            "https://fcm.googleapis.com/wp/abcdef"
-        );
-        assert_eq!(parsed.provider_token, "vapid-auth-secret");
-        assert_eq!(parsed.provider_key_material, "p256dh-public-key");
     }
 
     #[test]
-    fn register_web_push_device_options_rejects_snake_case() {
+    fn register_push_device_options_deserializes_apns_payload() {
+        let json = serde_json::json!({
+            "serviceJid": "push.example.com",
+            "appId": "app-ios",
+            "environment": "sandbox",
+            "platform": "apns",
+            "apnsToken": "apns-token-1234",
+        });
+        let parsed: RegisterPushDeviceOptions =
+            serde_json::from_value(json).expect("camelCase deserialize");
+        assert_eq!(parsed.environment, PushEnvironment::Sandbox);
+        assert_eq!(parsed.platform, PushPlatform::Apns);
+        assert_eq!(
+            parsed.into_credentials().unwrap(),
+            PushDeviceCredentials::Apns {
+                device_token: "apns-token-1234".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn register_push_device_options_deserializes_fcm_payload() {
+        let json = serde_json::json!({
+            "serviceJid": "push.example.com",
+            "appId": "app-android",
+            "environment": "prod",
+            "platform": "fcm",
+            "fcmToken": "fcm-reg-token",
+        });
+        let parsed: RegisterPushDeviceOptions =
+            serde_json::from_value(json).expect("camelCase deserialize");
+        assert_eq!(
+            parsed.into_credentials().unwrap(),
+            PushDeviceCredentials::Fcm {
+                registration_token: "fcm-reg-token".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn register_push_device_options_rejects_snake_case() {
         // Sanity check the rename: snake_case keys must NOT match.
-        // If a future refactor drops `#[serde(rename_all = "camelCase")]`,
-        // this assertion flips and the chat sends camelCase that the
-        // struct can't decode.
         let json = serde_json::json!({
             "service_jid": "push.example.com",
-            "node": "node-abc",
-            "device_id": "web-1234",
+            "app_id": "app-web",
             "environment": "prod",
-            "provider_endpoint": "https://example",
-            "provider_token": "t",
-            "provider_key_material": "k",
+            "platform": "web",
+            "endpoint": "https://example",
+            "p256dh": "p",
+            "auth": "a",
         });
-        let parsed: Result<RegisterWebPushDeviceOptions, _> = serde_json::from_value(json);
+        let parsed: Result<RegisterPushDeviceOptions, _> = serde_json::from_value(json);
         assert!(
             parsed.is_err(),
             "snake_case keys must NOT deserialize (rename_all=camelCase contract)"
@@ -892,42 +939,66 @@ mod tests {
     }
 
     #[test]
-    fn register_web_push_device_options_rejects_missing_required_field() {
-        // No `#[serde(default)]` on any field — missing serviceJid
-        // must produce a typed error rather than silently default to
-        // empty string (which would then go out as an IQ with no
-        // `to=` target).
+    fn register_push_device_options_rejects_missing_required_field() {
         let json = serde_json::json!({
-            "node": "node-abc",
-            "deviceId": "web-1234",
+            "appId": "app-web",
             "environment": "prod",
-            "providerEndpoint": "https://example",
-            "providerToken": "t",
-            "providerKeyMaterial": "k",
+            "platform": "web",
+            "endpoint": "https://example",
+            "p256dh": "p",
+            "auth": "a",
         });
-        let parsed: Result<RegisterWebPushDeviceOptions, _> = serde_json::from_value(json);
+        let parsed: Result<RegisterPushDeviceOptions, _> = serde_json::from_value(json);
         assert!(parsed.is_err(), "missing serviceJid must error");
     }
 
-    /// `environment` is typed via the upstream `PushEnvironment`
-    /// enum — an unknown wire value MUST fail at deserialize time
-    /// rather than reaching the IQ builder. Round-7 Greptile P1
-    /// pinning.
     #[test]
-    fn register_web_push_device_options_rejects_unknown_environment() {
+    fn register_push_device_options_rejects_unknown_environment() {
         let json = serde_json::json!({
             "serviceJid": "push.example.com",
-            "node": "node-abc",
-            "deviceId": "web-1234",
+            "appId": "app-web",
             "environment": "staging",
-            "providerEndpoint": "https://example",
-            "providerToken": "t",
-            "providerKeyMaterial": "k",
+            "platform": "web",
+            "endpoint": "https://example",
+            "p256dh": "p",
+            "auth": "a",
         });
-        let parsed: Result<RegisterWebPushDeviceOptions, _> = serde_json::from_value(json);
+        let parsed: Result<RegisterPushDeviceOptions, _> = serde_json::from_value(json);
         assert!(
             parsed.is_err(),
             "unknown environment 'staging' must fail at the WASM boundary"
+        );
+    }
+
+    #[test]
+    fn register_push_device_options_rejects_unknown_platform() {
+        let json = serde_json::json!({
+            "serviceJid": "push.example.com",
+            "appId": "app-web",
+            "environment": "prod",
+            "platform": "windows-mobile",
+        });
+        let parsed: Result<RegisterPushDeviceOptions, _> = serde_json::from_value(json);
+        assert!(
+            parsed.is_err(),
+            "unknown platform must fail at the WASM boundary"
+        );
+    }
+
+    #[test]
+    fn register_push_device_options_rejects_web_payload_missing_endpoint() {
+        let json = serde_json::json!({
+            "serviceJid": "push.example.com",
+            "appId": "app-web",
+            "environment": "prod",
+            "platform": "web",
+            "p256dh": "p",
+            "auth": "a",
+        });
+        let parsed: RegisterPushDeviceOptions = serde_json::from_value(json).expect("parses");
+        assert!(
+            parsed.into_credentials().is_err(),
+            "web platform must require all three Web Push fields"
         );
     }
 }
