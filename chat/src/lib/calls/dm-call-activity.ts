@@ -51,7 +51,7 @@ function isStale(timestamp: string, now: Date): boolean {
   return now.getTime() - ms > DM_CALL_ACTIVITY_ACTIVE_WINDOW_MS;
 }
 
-function millisecondsUntilStale(timestamp: string, now: Date): number | null {
+function millisecondsUntilStale(timestamp: string, now: Date): number {
   const ms = Date.parse(timestamp);
   if (!Number.isFinite(ms)) return 0;
   return ms + DM_CALL_ACTIVITY_ACTIVE_WINDOW_MS - now.getTime();
@@ -109,7 +109,6 @@ function scheduleActivityPrune(now = new Date()): void {
   let nextDelay: number | null = null;
   for (const activity of Object.values($dmCallActivities.get())) {
     const delay = millisecondsUntilStale(activity.updatedAt, now);
-    if (delay === null) continue;
     nextDelay = nextDelay === null ? delay : Math.min(nextDelay, delay);
   }
   if (nextDelay === null) return;
