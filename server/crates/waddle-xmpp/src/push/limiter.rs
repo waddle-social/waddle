@@ -20,11 +20,12 @@
 //! (publish-job worker, tests) see the same shape; the limiter is
 //! transparent except for the rate it imposes.
 
-use std::collections::HashMap;
+use std::num::NonZeroUsize;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use lru::LruCache;
 use tokio::sync::Semaphore;
 use tokio::time::Instant;
 
@@ -43,12 +44,23 @@ pub const DEFAULT_GLOBAL_CONCURRENCY: usize = 64;
 /// chatty pair from monopolizing the global cap.
 pub const DEFAULT_PER_PAIR_MIN_INTERVAL: Duration = Duration::from_millis(100);
 
+/// Default ceiling on the per-pair bucket cache. Bucket entries are
+/// keyed by `(relay_origin_hash, urgency)`; with four urgency levels
+/// and ~1k distinct relays a server might fan out to in practice, 4096
+/// gives ample headroom while bounding the limiter's heap footprint.
+/// On overflow the LRU evicts the least-recently-acquired pair —
+/// safe, since evicting an entry just means the *next* acquire for
+/// that pair will start with a fresh `next_available` (no spacing
+/// owed), which is exactly the cold-start behavior.
+pub const DEFAULT_PAIR_CACHE_CAPACITY: usize = 4096;
+
 /// Configurable knobs for the limiter. Constructed at boot from
-/// deployment defaults; tests can override either field.
+/// deployment defaults; tests can override any field.
 #[derive(Debug, Clone, Copy)]
 pub struct LimiterConfig {
     pub global_concurrency: usize,
     pub per_pair_min_interval: Duration,
+    pub pair_cache_capacity: usize,
 }
 
 impl Default for LimiterConfig {
@@ -56,6 +68,7 @@ impl Default for LimiterConfig {
         Self {
             global_concurrency: DEFAULT_GLOBAL_CONCURRENCY,
             per_pair_min_interval: DEFAULT_PER_PAIR_MIN_INTERVAL,
+            pair_cache_capacity: DEFAULT_PAIR_CACHE_CAPACITY,
         }
     }
 }
@@ -70,19 +83,29 @@ struct PairState {
 
 /// Rate-limiting state shared by every [`RateLimitedWebPushSender`]
 /// wrapping it. Cheap to clone via `Arc`.
+///
+/// The per-pair bucket map is an `LruCache` rather than a `HashMap`
+/// so a long-running process can't grow its limiter heap forever as
+/// new `(relay_origin, urgency)` pairs are observed. When the cache
+/// hits its capacity ceiling the least-recently-acquired pair is
+/// evicted; that pair's next acquire starts with a fresh
+/// `next_available` (no spacing owed) — the same cold-start behavior
+/// the very first acquire for any pair gets.
 #[derive(Debug)]
 pub struct Limiter {
     global: Arc<Semaphore>,
     config: LimiterConfig,
-    pairs: Mutex<HashMap<(EndpointHash, Urgency), PairState>>,
+    pairs: Mutex<LruCache<(EndpointHash, Urgency), PairState>>,
 }
 
 impl Limiter {
     pub fn new(config: LimiterConfig) -> Self {
+        let capacity = NonZeroUsize::new(config.pair_cache_capacity)
+            .unwrap_or_else(|| NonZeroUsize::new(DEFAULT_PAIR_CACHE_CAPACITY).expect("non-zero"));
         Self {
             global: Arc::new(Semaphore::new(config.global_concurrency)),
             config,
-            pairs: Mutex::new(HashMap::new()),
+            pairs: Mutex::new(LruCache::new(capacity)),
         }
     }
 
@@ -108,11 +131,12 @@ impl Limiter {
                 .pairs
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            let entry = pairs
-                .entry((endpoint_hash, urgency))
-                .or_insert_with(|| PairState {
-                    next_available: Instant::now(),
-                });
+            // `LruCache::get_or_insert_mut` looks up + LRU-promotes
+            // an existing entry, or constructs a new one (evicting
+            // the oldest if at capacity).
+            let entry = pairs.get_or_insert_mut((endpoint_hash, urgency), || PairState {
+                next_available: Instant::now(),
+            });
             let now = Instant::now();
             let start = entry.next_available.max(now);
             entry.next_available = start + self.config.per_pair_min_interval;
@@ -276,6 +300,7 @@ mod tests {
         let limiter = Arc::new(Limiter::new(LimiterConfig {
             global_concurrency: 3,
             per_pair_min_interval: Duration::ZERO,
+            ..LimiterConfig::default()
         }));
         let sender = RateLimitedWebPushSender::new(inner_arc, limiter);
 
@@ -302,6 +327,7 @@ mod tests {
         let limiter = Arc::new(Limiter::new(LimiterConfig {
             global_concurrency: 64,
             per_pair_min_interval: Duration::from_millis(50),
+            ..LimiterConfig::default()
         }));
         let sender = RateLimitedWebPushSender::new(inner_arc, limiter);
 
@@ -332,6 +358,7 @@ mod tests {
         let limiter = Arc::new(Limiter::new(LimiterConfig {
             global_concurrency: 64,
             per_pair_min_interval: Duration::from_millis(500),
+            ..LimiterConfig::default()
         }));
         let sender = RateLimitedWebPushSender::new(inner_arc, limiter);
         let p = payload();
@@ -359,6 +386,7 @@ mod tests {
         let limiter = Arc::new(Limiter::new(LimiterConfig {
             global_concurrency: 64,
             per_pair_min_interval: Duration::from_millis(500),
+            ..LimiterConfig::default()
         }));
         let sender = RateLimitedWebPushSender::new(inner_arc, limiter);
         let p = payload();
@@ -390,6 +418,7 @@ mod tests {
         let limiter = Arc::new(Limiter::new(LimiterConfig {
             global_concurrency: 64,
             per_pair_min_interval: Duration::from_millis(200),
+            ..LimiterConfig::default()
         }));
         let sender = RateLimitedWebPushSender::new(inner_arc, limiter);
         let p = payload();
@@ -408,6 +437,64 @@ mod tests {
             elapsed >= Duration::from_millis(200),
             "two devices on the same relay must serialize via one shared bucket; elapsed {elapsed:?}"
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn pair_cache_lru_evicts_oldest_pair_at_capacity() {
+        // Cap at 2 entries; touch three distinct (origin, urgency)
+        // pairs. The third acquire must evict the first — when that
+        // first pair is touched again afterwards, its bucket is
+        // fresh (no spacing owed), proving the LRU bounded the map.
+        let inner = PeakSender::with_delay(0);
+        let inner_arc: Arc<dyn WebPushSender> = Arc::new(inner.clone());
+        let limiter = Arc::new(Limiter::new(LimiterConfig {
+            global_concurrency: 64,
+            per_pair_min_interval: Duration::from_millis(500),
+            pair_cache_capacity: 2,
+        }));
+        let sender = RateLimitedWebPushSender::new(inner_arc, limiter);
+        let p = payload();
+        let j = jwt();
+        let url_a = url::Url::parse("https://a.example.com/x").unwrap();
+        let url_b = url::Url::parse("https://b.example.com/x").unwrap();
+        let url_c = url::Url::parse("https://c.example.com/x").unwrap();
+        sender
+            .send(make_request(&url_a, &p, &j, Urgency::Normal))
+            .await; // A: first-touch
+        sender
+            .send(make_request(&url_b, &p, &j, Urgency::Normal))
+            .await; // B: first-touch
+        sender
+            .send(make_request(&url_c, &p, &j, Urgency::Normal))
+            .await; // C: evicts A (LRU)
+                    // Now A is back at cold-start: no `next_available` to wait
+                    // on, so the next acquire returns immediately (well within
+                    // 50ms despite the 500ms min_interval that WOULD apply if A
+                    // had remained in the cache).
+        let start = Instant::now();
+        sender
+            .send(make_request(&url_a, &p, &j, Urgency::Normal))
+            .await;
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed < Duration::from_millis(50),
+            "A's bucket must be cold after LRU eviction (elapsed {elapsed:?})"
+        );
+    }
+
+    #[test]
+    fn pair_cache_capacity_zero_falls_back_to_default() {
+        // Guard against an operator config of `0` accidentally
+        // hitting `NonZeroUsize::new(0)` → panic. The constructor
+        // must fall back to the default, never panic.
+        let limiter = Limiter::new(LimiterConfig {
+            global_concurrency: 1,
+            per_pair_min_interval: Duration::ZERO,
+            pair_cache_capacity: 0,
+        });
+        // Internal sanity — we don't expose `pairs.cap()` so just
+        // assert construction succeeded.
+        let _ = limiter;
     }
 
     #[test]
