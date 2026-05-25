@@ -3149,20 +3149,23 @@ fn validate_web_push_endpoint(endpoint: &str) -> Result<(), XmppError> {
             "Push Service provider endpoint must use https".to_string(),
         )));
     }
-    // Reject non-default ports. Web Push relays universally listen on
-    // 443; permitting other ports lets a registering client point the
-    // worker at internal non-HTTPS services that happen to accept a
-    // POST (Redis 6379, Elasticsearch 9200, memcached 11211, etc.)
-    // via a permissive internal DNS record. `url::Url::port_or_known_default()`
-    // resolves to the scheme's default (443 for https) when the URL
-    // omits an explicit port, so `https://host:443/...` and
-    // `https://host/...` both compare equal to `Some(443)` and only
-    // genuinely non-default ports are rejected.
-    if parsed.port_or_known_default() != Some(443) {
-        return Err(XmppError::bad_request(Some(
-            "Push Service provider endpoint must use the default https port".to_string(),
-        )));
-    }
+    // Port restriction intentionally omitted: RFC 8030 / RFC 8292
+    // place no constraint on the Web Push endpoint's port. VAPID
+    // `aud` per RFC 8292 §2 is computed from the URL's origin
+    // (scheme + host + port), so a legitimate self-hosted Mozilla
+    // autopush relay on `:8443` MUST round-trip through this gate
+    // for VAPID signing to produce the right `aud` claim. A
+    // hard-coded `:443` requirement would reject those conformant
+    // deployments. SSRF protection is layered:
+    //
+    //   1. Scheme check above (`https` only) prevents `http://` to
+    //      anything.
+    //   2. The literal-IP and `*.localhost` rejections below block
+    //      the obvious internal targets regardless of port.
+    //   3. Network-level egress policy (out of scope here) is the
+    //      proper defence against SSRF to internal DNS names on
+    //      arbitrary ports — the application layer cannot enumerate
+    //      every internal service.
     let host = parsed.host_str().ok_or_else(|| {
         XmppError::bad_request(Some(
             "Push Service provider endpoint must include a host".to_string(),
@@ -5958,11 +5961,6 @@ mod tests {
             // Non-https schemes.
             "http://push.example.com/abc",
             "ftp://push.example.com/abc",
-            // Non-default ports — would let a registering client point
-            // the worker at Redis (6379), Elasticsearch (9200), etc.
-            "https://push.example.com:6379/",
-            "https://push.example.com:9200/",
-            "https://push.example.com:8443/abc",
         ] {
             let err = store
                 .upsert_device(
@@ -5998,11 +5996,14 @@ mod tests {
             "https://web.push.apple.com/abc",
             // Self-hosted relays with named hosts are fine.
             "https://push.internal.example.com/abc",
-            // Explicit default port `:443` must be accepted — it's
-            // syntactically valid and semantically identical to the
-            // omitted form. (`port_or_known_default()` resolves both
-            // to `Some(443)`.)
+            // Explicit default port `:443` must be accepted.
             "https://fcm.googleapis.com:443/fcm/send/abc",
+            // Non-default ports are also allowed: RFC 8030 / RFC 8292
+            // place no constraint on port, and the VAPID `aud` claim
+            // is computed from the URL origin (scheme + host + port),
+            // so self-hosted Mozilla autopush deployments on `:8443`
+            // must round-trip through this gate cleanly.
+            "https://autopush.self-hosted.example.com:8443/wpush/v1/abc",
         ] {
             store
                 .upsert_device(
