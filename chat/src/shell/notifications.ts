@@ -138,14 +138,37 @@ export function usePushNotifications() {
   ): Promise<PushSubscription | null> {
     const reg = await getOrRegisterServiceWorker();
     if (!reg) return null;
+    let keyBytes: Uint8Array;
     try {
-      const keyBytes = urlBase64ToUint8Array(vapidPublicKey);
-      const sub = await reg.pushManager.subscribe({
+      keyBytes = urlBase64ToUint8Array(vapidPublicKey);
+    } catch (error) {
+      console.warn("[notifications] urlBase64ToUint8Array failed on VAPID key:", error);
+      return null;
+    }
+    // PushManager rejects `applicationServerKey` if the underlying
+    // backing buffer has a non-zero `byteOffset` or extends beyond the
+    // 65-byte uncompressed P-256 point — Firefox and Safari both
+    // surface that as InvalidAccessError. Pass the Uint8Array directly
+    // (PushManager accepts any BufferSource per spec) so the view's
+    // length + offset stay authoritative, instead of leaking the raw
+    // ArrayBuffer that may be larger.
+    if (keyBytes.length !== 65 || keyBytes[0] !== 0x04) {
+      // Belt-and-braces validation: the wasm parser already rejects
+      // malformed keys, but a cache-hit path that bypassed the parser
+      // (older code, race) could still reach this point. Refuse to
+      // subscribe rather than hand the browser garbage.
+      console.warn(
+        "[notifications] VAPID public key is not a 65-byte 0x04-prefixed SEC1 point; refusing to subscribe",
+      );
+      return null;
+    }
+    try {
+      return await reg.pushManager.subscribe({
         userVisibleOnly: true,
-        applicationServerKey: keyBytes.buffer as ArrayBuffer,
+        applicationServerKey: keyBytes,
       });
-      return sub;
-    } catch {
+    } catch (error) {
+      console.warn("[notifications] PushManager.subscribe() failed:", error);
       return null;
     }
   }
@@ -165,10 +188,11 @@ export function usePushNotifications() {
     serviceJid: string,
     reg: ServiceWorkerRegistration,
   ): Promise<{ subscription: PushSubscription; rotated: boolean } | null> {
-    return withVapidRotationLock(async () => {
+    const accountJid = barePart(userJid);
+    return withVapidRotationLock(accountJid, async () => {
       const advertisement = await loadVapidPublicKey({
         client: xmppClient,
-        accountJid: barePart(userJid),
+        accountJid,
         serverJid: serviceJid,
       });
       if (!advertisement) {
@@ -180,13 +204,26 @@ export function usePushNotifications() {
       }
       const existing = await reg.pushManager.getSubscription();
       const persistedKid = loadPersistedKid();
+      // Three rotation triggers:
+      //   1. persistedKid present and differs from the advertised kid
+      //      — server rotated under us.
+      //   2. persistedKid missing while `existing` survives — localStorage
+      //      was cleared (private mode, "Clear site data", new browser
+      //      profile that inherited the SW registration). We can't trust
+      //      the surviving subscription is bound to the current key, so
+      //      verify via `existing.options.applicationServerKey` directly.
+      //   3. The existing subscription's applicationServerKey doesn't
+      //      match the advertised bytes — server-side rotation we missed.
+      const existingKeyMatches =
+        existing === null || subscriptionApplicationKeyMatches(existing, advertisement.publicKey);
       const kidChanged = persistedKid !== null && persistedKid !== advertisement.kid;
-      if (existing && !kidChanged) {
+      if (existing && !kidChanged && existingKeyMatches) {
         persistKid(advertisement.kid);
         return { subscription: existing, rotated: false };
       }
-      // Either no subscription yet, or the server kid changed under us.
-      // Unsubscribe (if any) and re-subscribe under the new key.
+      // Either no subscription yet, server kid changed under us, or the
+      // surviving subscription is bound to a stale key. Unsubscribe (if
+      // any) and re-subscribe under the new key.
       if (existing) {
         try {
           await existing.unsubscribe();
@@ -511,6 +548,37 @@ function clearPersistedKid(): void {
 /// `alice@example.com` as the same logical account.
 function barePart(userJid: string): string {
   return userJid.split("/")[0] ?? userJid;
+}
+
+/// Compare an existing PushSubscription's applicationServerKey (the
+/// 65-byte uncompressed P-256 point the browser stored when the
+/// subscription was created) against the server's currently-advertised
+/// public key (in base64url-no-pad form). Used to detect a stale
+/// subscription whose kid we no longer have a record of — e.g. when
+/// localStorage was wiped but the SW registration survived.
+///
+/// Returns `true` when the subscription has no applicationServerKey
+/// (very old browsers / non-VAPID origin server endpoints) so callers
+/// don't churn the subscription on an irrelevant comparison.
+function subscriptionApplicationKeyMatches(
+  subscription: PushSubscription,
+  advertisedPublicKeyBase64Url: string,
+): boolean {
+  const existingKey = subscription.options.applicationServerKey;
+  if (!existingKey) return true;
+  let advertised: Uint8Array;
+  try {
+    advertised = urlBase64ToUint8Array(advertisedPublicKeyBase64Url);
+  } catch {
+    return false;
+  }
+  const existing =
+    existingKey instanceof ArrayBuffer ? new Uint8Array(existingKey) : new Uint8Array(existingKey);
+  if (existing.length !== advertised.length) return false;
+  for (let i = 0; i < existing.length; i++) {
+    if (existing[i] !== advertised[i]) return false;
+  }
+  return true;
 }
 
 function urlBase64ToUint8Array(base64String: string): Uint8Array {

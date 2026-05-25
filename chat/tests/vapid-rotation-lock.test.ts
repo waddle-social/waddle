@@ -8,7 +8,7 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 import {
   __resetVapidRotationLockForTests,
-  VAPID_ROTATION_LOCK_NAME,
+  vapidRotationLockNameForTests,
   withVapidRotationLock,
 } from "../src/shell/vapid-rotation-lock";
 
@@ -51,18 +51,23 @@ describe("vapid-rotation-lock", () => {
     uninstallNavigator();
   });
 
-  test("uses navigator.locks.request with exclusive mode + canonical name", async () => {
+  test("uses navigator.locks.request with exclusive mode + per-account name", async () => {
     const { request } = installNavigatorLocks();
-    await withVapidRotationLock(async () => "ok");
+    await withVapidRotationLock("alice@example.com", async () => "ok");
     expect(request.mock.calls).toHaveLength(1);
     const [name, options] = request.mock.calls[0] ?? [];
-    expect(name).toBe(VAPID_ROTATION_LOCK_NAME);
+    expect(name).toBe(vapidRotationLockNameForTests("alice@example.com"));
     expect((options as { mode: string }).mode).toBe("exclusive");
+    // Different accounts must use different lock names so they don't
+    // serialize through each other.
+    expect(vapidRotationLockNameForTests("alice@example.com")).not.toBe(
+      vapidRotationLockNameForTests("bob@example.com"),
+    );
   });
 
   test("returns the callback's result through the lock", async () => {
     installNavigatorLocks();
-    const result = await withVapidRotationLock(async () => 42);
+    const result = await withVapidRotationLock("alice@example.com", async () => 42);
     expect(result).toBe(42);
   });
 
@@ -70,13 +75,13 @@ describe("vapid-rotation-lock", () => {
     installNavigatorWithoutLocks();
     const order: string[] = [];
     const firstGate = deferred<void>();
-    const first = withVapidRotationLock(async () => {
+    const first = withVapidRotationLock("alice@example.com", async () => {
       order.push("first-enter");
       await firstGate.promise;
       order.push("first-exit");
       return "first";
     });
-    const second = withVapidRotationLock(async () => {
+    const second = withVapidRotationLock("alice@example.com", async () => {
       order.push("second-enter");
       return "second";
     });
@@ -90,11 +95,11 @@ describe("vapid-rotation-lock", () => {
 
   test("fallback path: an error in one task doesn't permanently block subsequent acquires", async () => {
     installNavigatorWithoutLocks();
-    const first = withVapidRotationLock(async () => {
+    const first = withVapidRotationLock("alice@example.com", async () => {
       throw new Error("boom");
     });
     await expect(first).rejects.toThrow("boom");
-    const result = await withVapidRotationLock(async () => "still works");
+    const result = await withVapidRotationLock("alice@example.com", async () => "still works");
     expect(result).toBe("still works");
   });
 
@@ -102,7 +107,7 @@ describe("vapid-rotation-lock", () => {
     // Some test runners (and Node SSR) lack `navigator` entirely; the
     // lock must still acquire via the fallback.
     uninstallNavigator();
-    const result = await withVapidRotationLock(async () => "ok");
+    const result = await withVapidRotationLock("alice@example.com", async () => "ok");
     expect(result).toBe("ok");
   });
 });

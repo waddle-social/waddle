@@ -132,6 +132,23 @@ impl WaddleClient {
         future_to_promise(async move {
             let iq = build_disco_info_iq(&service_jid, None);
             let result = send_iq_command(inner, iq).await?;
+            // Defense in depth: refuse to accept a VAPID advertisement
+            // claiming a `from` other than the JID we queried. Without
+            // this, a malicious user-server (or a compromised middlebox
+            // on the C2S path) could spoof a `<iq from='attacker.tld'>`
+            // result carrying its own VAPID key, and the browser would
+            // bind its push subscription to attacker-signed JWTs.
+            // The XMPP server-side dispatcher already routes responses
+            // by stanza id, but the `from` rebinding requires the
+            // explicit check at the boundary that consumes the typed
+            // disco payload.
+            if let Some(from) = result.attr("from") {
+                if from != service_jid {
+                    return Err(js_error(format!(
+                        "Push Service disco#info response from {from:?} does not match queried JID {service_jid:?}; refusing to trust VAPID advertisement"
+                    )));
+                }
+            }
             let disco = parse_disco_info_result(&result, &service_jid).ok_or_else(|| {
                 js_error("Push Service disco#info response missing <query/> payload")
             })?;

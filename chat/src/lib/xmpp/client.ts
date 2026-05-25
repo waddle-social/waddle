@@ -1239,13 +1239,44 @@ export class BrowserXmppClient {
   async fetchVapidPublicKey(opts: { serviceJid: string }): Promise<{ publicKey: string; kid: string } | null> {
     const xmpp = await this.requireConnectedXmpp();
     if (!xmpp.fetch_vapid_public_key) return null;
+    // Bounded timeout (10s): the wasm-side `send_iq_command` is itself
+    // an unbounded oneshot. Without this race the rotation lock can be
+    // held indefinitely on a stalled Push Service handler, blocking
+    // every subsequent enable + reconnect's setupPushSubscription.
+    const TIMEOUT_MS = 10_000;
+    let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
+    const timeoutPromise = new Promise<null>((resolve) => {
+      timeoutHandle = setTimeout(() => resolve(null), TIMEOUT_MS);
+    });
     try {
-      const result = await xmpp.fetch_vapid_public_key(opts.serviceJid);
+      const result = await Promise.race([
+        xmpp.fetch_vapid_public_key(opts.serviceJid),
+        timeoutPromise,
+      ]);
       if (result === null || result === undefined) return null;
-      return result as { publicKey: string; kid: string };
+      const candidate = result as { publicKey?: unknown; kid?: unknown };
+      // Validate the JS-boundary shape — the wasm method's signature
+      // is `Promise<any>` after wasm-bindgen, so a regression on the
+      // Rust side that emitted an unexpected object would otherwise
+      // silently propagate. Hard-fail on shape drift.
+      if (
+        typeof candidate.publicKey !== "string" ||
+        candidate.publicKey.length === 0 ||
+        typeof candidate.kid !== "string" ||
+        candidate.kid.length === 0
+      ) {
+        console.warn(
+          "[xmpp] fetch_vapid_public_key returned an unexpected shape:",
+          candidate,
+        );
+        return null;
+      }
+      return { publicKey: candidate.publicKey, kid: candidate.kid };
     } catch (error) {
       console.warn("[xmpp] fetch_vapid_public_key IQ rejected:", error);
       return null;
+    } finally {
+      if (timeoutHandle !== null) clearTimeout(timeoutHandle);
     }
   }
 

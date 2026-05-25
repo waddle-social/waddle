@@ -9,10 +9,13 @@ const CACHE_PREFIX = "waddle.chat.vapid-cache:";
 /// Per-entry max age. The chat re-fetches at startup and after the
 /// rotation lock fires; this TTL bounds how stale a cache entry can get
 /// when neither happens (long-running tab on a server that silently
-/// rotated). 12 h is comfortably under the 14-day Web Push subscription
-/// validity window most relays advertise. The kid check still catches a
-/// rotation that lands inside the TTL; the TTL is only a backstop.
-const CACHE_MAX_AGE_MS = 12 * 60 * 60 * 1000;
+/// rotated). 1 h is a deliberate trade between (a) avoiding a re-fetch
+/// per reconnect on a non-rotated server and (b) shrinking the window
+/// during which a stale-but-cached key keeps the chat from picking up a
+/// rotation that lands inside the TTL. The kid check on every
+/// `ensureBrowserSubscriptionWithCurrentKey` call catches most rotations
+/// regardless of TTL; the TTL is the backstop for long-running tabs.
+const CACHE_MAX_AGE_MS = 60 * 60 * 1000;
 
 interface CachedVapidEntry {
   publicKey: string;
@@ -21,7 +24,11 @@ interface CachedVapidEntry {
 }
 
 function storageKey(accountJid: string, serverJid: string): string {
-  return `${CACHE_PREFIX}${accountJid}|${serverJid}`;
+  // JIDs are UTF-8 with broad allowed characters; a literal separator
+  // could collide if either side legally contained it. `JSON.stringify`
+  // on an array gives an unambiguous two-element encoding regardless of
+  // the individual values.
+  return `${CACHE_PREFIX}${JSON.stringify([accountJid, serverJid])}`;
 }
 
 function isCachedVapidEntry(value: unknown): value is CachedVapidEntry {

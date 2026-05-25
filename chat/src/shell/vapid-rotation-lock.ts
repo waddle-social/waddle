@@ -9,14 +9,31 @@
 ///
 /// `navigator.locks` (Web Locks API) is the canonical mechanism and is
 /// available everywhere the chat targets (Chrome 69+, Firefox 96+,
-/// Safari 15.4+). When absent — older iOS Safari builds, certain SSR
-/// or test environments — we fall back to an in-process Promise-chain
-/// serializer. The fallback is best-effort, but the operation it
-/// guards is itself idempotent (calling `subscribe({ applicationServerKey })`
-/// twice with the same key returns the same browser-level subscription),
-/// so a missed lock just produces redundant work, not incorrect state.
+/// Safari 15.4+). When absent — SSR, test environments, or older
+/// browsers — we fall back to an in-process Promise-chain serializer.
+/// This is best-effort; the fallback does NOT prevent cross-tab races.
+///
+/// Cross-tab race window when running on the fallback: two tabs may
+/// each call `unsubscribe()` + `subscribe(newKey)` concurrently. Both
+/// tabs end up with valid subscriptions, but the SECOND `subscribe`
+/// call replaces the first inside the browser's push registration —
+/// so the first tab's `register-device` IQ will have written
+/// credentials that are immediately stale. The caller layer
+/// (`syncPushSubscriptionImpl`) re-issues `register-device` on every
+/// reconnect so the stale row gets overwritten on the next sync; the
+/// transient inconsistency is bounded by one reconnect.
 
-const LOCK_NAME = "waddle:push:vapid-rotate";
+const LOCK_NAME_PREFIX = "waddle:push:vapid-rotate";
+
+/// Build the per-account lock name. Different accounts in different
+/// tabs MUST NOT serialize through one global lock — the rotation flows
+/// are independent, and a slow rotation on account A would otherwise
+/// hold up an unrelated subscribe on account B. The account JID is
+/// already validated upstream (bare JID for the active session), so
+/// embedding it verbatim is safe.
+function lockNameFor(accountJid: string | undefined): string {
+  return accountJid ? `${LOCK_NAME_PREFIX}:${accountJid}` : LOCK_NAME_PREFIX;
+}
 
 type RunInLock<T> = () => Promise<T>;
 
@@ -56,17 +73,22 @@ async function withFallbackLock<T>(callback: RunInLock<T>): Promise<T> {
 }
 
 /**
- * Run `callback` while holding the VAPID-rotation lock. The lock is
- * automatically released when the returned Promise settles. Re-entrant
- * calls within the same tab are serialized; calls from different tabs
- * are serialized through `navigator.locks` when available.
+ * Run `callback` while holding the VAPID-rotation lock for `accountJid`.
+ * The lock is automatically released when the returned Promise settles.
+ * Re-entrant calls within the same tab are serialized; calls from
+ * different tabs are serialized through `navigator.locks` when
+ * available. Different accounts use distinct lock names so cross-
+ * account rotations don't block each other.
  */
-export async function withVapidRotationLock<T>(callback: RunInLock<T>): Promise<T> {
+export async function withVapidRotationLock<T>(
+  accountJid: string | undefined,
+  callback: RunInLock<T>,
+): Promise<T> {
   const navWithLocks = hasWebLocks();
   if (!navWithLocks) {
     return withFallbackLock(callback);
   }
-  return navWithLocks.locks.request(LOCK_NAME, { mode: "exclusive" }, callback);
+  return navWithLocks.locks.request(lockNameFor(accountJid), { mode: "exclusive" }, callback);
 }
 
 /** Exposed for the test suite to reset the fallback chain between tests. */
@@ -74,5 +96,7 @@ export function __resetVapidRotationLockForTests(): void {
   fallbackChain = Promise.resolve();
 }
 
-/** Exposed so tests can assert on the lock name used at the platform layer. */
-export const VAPID_ROTATION_LOCK_NAME = LOCK_NAME;
+/** Exposed so tests can assert on the lock-name shape used at the platform layer. */
+export function vapidRotationLockNameForTests(accountJid: string | undefined): string {
+  return lockNameFor(accountJid);
+}
