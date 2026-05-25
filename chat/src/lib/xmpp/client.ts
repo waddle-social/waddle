@@ -1347,8 +1347,11 @@ export class BrowserXmppClient {
    *   * `p256dh`    ← `subscription.toJSON().keys.p256dh`
    *   * `auth`      ← `subscription.toJSON().keys.auth`
    *
-   * Idempotent on `(node, deviceId)` server-side; re-registering
-   * after a browser subscription rotation UPDATES the row in place.
+   * **Not** idempotent: every call mints a fresh server-assigned
+   * `deviceId` and persists a new `push_devices` row. The chat's
+   * `syncPushSubscriptionImpl` is responsible for short-circuiting
+   * a re-enable when localStorage already carries a `(node,
+   * deviceId)` pair (tracked separately under follow-up #768).
    *
    * `appId="web"` is the convention for the browser/PWA chat. APNs
    * and FCM follow with `"ios"` / `"android"` in later PRs.

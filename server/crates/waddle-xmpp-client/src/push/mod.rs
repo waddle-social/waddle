@@ -136,6 +136,24 @@ impl PushNodeId {
     }
 }
 
+/// Push Service-assigned device row id returned by a successful
+/// registration round. Newtype mirroring [`PushNodeId`] so the two
+/// sibling `urn:waddle:push-*` ids can't be transposed at the WASM /
+/// UniFFI boundary where both otherwise collapse to bare `String`s
+/// (CLAUDE.md typed-payloads hard rule).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PushDeviceId(String);
+
+impl PushDeviceId {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn into_string(self) -> String {
+        self.0
+    }
+}
+
 /// Outcome of a successful `register-device` XEP-0050 round. Carries
 /// the assigned XEP-0357 node id AND the Push Service-assigned device
 /// row id. The caller persists BOTH: node feeds the user-server's
@@ -144,7 +162,7 @@ impl PushNodeId {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RegisterDeviceResult {
     pub node: PushNodeId,
-    pub device_id: String,
+    pub device_id: PushDeviceId,
 }
 
 /// Transport abstraction used by [`register_push_device`].
@@ -179,14 +197,20 @@ impl CommandDriver for crate::client::ClientHandle {
 /// Build the stage-3 `<x type='submit'>` form the composer posts back
 /// to the Push Service. Exposed publicly so callers and tests can pin
 /// the field shape without round-tripping through a fake service.
+///
+/// `platform` is derived from `credentials` rather than taken
+/// separately so a caller can't construct an inconsistent form (e.g.
+/// `PushPlatform::Web` with `PushDeviceCredentials::Apns` populated).
+/// PR-comment fix: previously this fn took both as arguments and
+/// a mismatched pair would silently produce a form the server
+/// rejects at runtime.
 pub fn build_register_device_submit_form(
     app_id: &str,
-    platform: PushPlatform,
     environment: PushEnvironment,
     credentials: &PushDeviceCredentials,
 ) -> DataForm {
     let mut fields = vec![
-        text_single("platform", platform.as_wire_str()),
+        text_single("platform", credentials.platform().as_wire_str()),
         text_single("environment", environment.as_wire_str()),
         text_single("app-id", app_id),
     ];
@@ -232,11 +256,23 @@ pub fn build_disable_device_submit_form(node: &str, device_id: &str) -> DataForm
 /// the chat MUST NOT persist a half-populated record because the
 /// follow-up `disable-device` opt-out would have no way to scope.
 pub fn parse_register_device_result(form: &DataForm) -> Option<RegisterDeviceResult> {
+    // Form-shape gate (PR-comment fix): refuse to parse anything that
+    // isn't a stage-4 `<x type='result' FORM_TYPE=REGISTER_DEVICE_FORM_TYPE>`.
+    // Without this gate a wrong / drifted form could surface as a
+    // missing-field diagnostic ("result form missing 'node' field")
+    // when the real cause is a form-confusion attack or a server-side
+    // schema drift.
+    if form.type_ != DataFormType::Result_ {
+        return None;
+    }
+    if form.form_type() != Some(REGISTER_DEVICE_FORM_TYPE) {
+        return None;
+    }
     let node = required_form_value(form, REGISTER_DEVICE_RESULT_NODE_FIELD)?;
     let device_id = required_form_value(form, REGISTER_DEVICE_RESULT_DEVICE_ID_FIELD)?;
     Some(RegisterDeviceResult {
         node: PushNodeId(node),
-        device_id,
+        device_id: PushDeviceId(device_id),
     })
 }
 
@@ -346,8 +382,7 @@ pub async fn register_push_device<D: CommandDriver>(
 
     // Stage 3 → 4: submit the platform-specific form, expect
     // completed + result form with the assigned node id.
-    let submit_form =
-        build_register_device_submit_form(app_id, credentials.platform(), environment, credentials);
+    let submit_form = build_register_device_submit_form(app_id, environment, credentials);
     let complete = build_xep0050_command_request_with_session(
         push_service_jid,
         REGISTER_DEVICE_NODE,
@@ -365,8 +400,12 @@ pub async fn register_push_device<D: CommandDriver>(
     let result_form = completed
         .form
         .ok_or_else(|| protocol_error("missing result form in stage 4"))?;
-    parse_register_device_result(&result_form)
-        .ok_or_else(|| protocol_error("result form missing 'node' field"))
+    parse_register_device_result(&result_form).ok_or_else(|| {
+        protocol_error(
+            "stage 4 result form is malformed: wrong FORM_TYPE, wrong type='result', \
+             or missing/empty 'node' / 'device-id' field",
+        )
+    })
 }
 
 #[cfg(test)]
@@ -416,12 +455,8 @@ mod tests {
             p256dh: "p256-key".to_string(),
             auth: "auth-secret".to_string(),
         };
-        let form = build_register_device_submit_form(
-            "app-web",
-            PushPlatform::Web,
-            PushEnvironment::Production,
-            &credentials,
-        );
+        let form =
+            build_register_device_submit_form("app-web", PushEnvironment::Production, &credentials);
         assert_eq!(form.type_, DataFormType::Submit);
         let values: std::collections::HashMap<&str, &str> = form
             .fields
@@ -448,12 +483,8 @@ mod tests {
         let credentials = PushDeviceCredentials::Apns {
             device_token: "apns-token".to_string(),
         };
-        let form = build_register_device_submit_form(
-            "app-ios",
-            PushPlatform::Apns,
-            PushEnvironment::Sandbox,
-            &credentials,
-        );
+        let form =
+            build_register_device_submit_form("app-ios", PushEnvironment::Sandbox, &credentials);
         let vars: Vec<&str> = form
             .fields
             .iter()
@@ -473,7 +504,6 @@ mod tests {
         };
         let form = build_register_device_submit_form(
             "app-android",
-            PushPlatform::Fcm,
             PushEnvironment::Production,
             &credentials,
         );
@@ -504,7 +534,7 @@ mod tests {
         );
         let outcome = parse_register_device_result(&result).expect("outcome present");
         assert_eq!(outcome.node.as_str(), "node-xyz");
-        assert_eq!(outcome.device_id, "device-abc");
+        assert_eq!(outcome.device_id.as_str(), "device-abc");
     }
 
     #[test]
@@ -572,7 +602,8 @@ mod tests {
         let outcome = parse_register_device_result(&result).expect("outcome");
         assert_eq!(outcome.node.as_str(), "node-roundtrip");
         assert_eq!(outcome.node.clone().into_string(), "node-roundtrip");
-        assert_eq!(outcome.device_id, "device-roundtrip");
+        assert_eq!(outcome.device_id.as_str(), "device-roundtrip");
+        assert_eq!(outcome.device_id.clone().into_string(), "device-roundtrip");
     }
 
     fn iq_with_from(from_value: Option<&str>) -> Element {

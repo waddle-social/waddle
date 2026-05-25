@@ -71,12 +71,15 @@ fn iq_with_command(command: Element) -> Element {
 fn empty_form_request() -> Element {
     Element::builder("x", NS_DATA_FORMS)
         .attr(minidom::rxml::xml_ncname!("type").to_owned(), "form")
-        .append(form_type_field("form"))
+        .append(form_type_field())
         .build()
 }
 
-fn form_type_field(form_kind: &str) -> Element {
-    let field = Element::builder("field", NS_DATA_FORMS)
+/// FORM_TYPE field for the stage-4 result form. Form-vs-result share
+/// the same hidden FORM_TYPE field shape so a single helper covers
+/// both stages.
+fn form_type_field() -> Element {
+    Element::builder("field", NS_DATA_FORMS)
         .attr(minidom::rxml::xml_ncname!("var").to_owned(), "FORM_TYPE")
         .attr(minidom::rxml::xml_ncname!("type").to_owned(), "hidden")
         .append(
@@ -84,9 +87,7 @@ fn form_type_field(form_kind: &str) -> Element {
                 .append(REGISTER_DEVICE_FORM_TYPE)
                 .build(),
         )
-        .build();
-    let _ = form_kind; // form-vs-result share the same FORM_TYPE field shape
-    field
+        .build()
 }
 
 fn executing_response_with_form(session_id: &str) -> Element {
@@ -108,7 +109,7 @@ fn executing_response_with_form(session_id: &str) -> Element {
 fn completed_response_with_outcome(node_id: &str, device_id: &str) -> Element {
     let result_form = Element::builder("x", NS_DATA_FORMS)
         .attr(minidom::rxml::xml_ncname!("type").to_owned(), "result")
-        .append(form_type_field("result"))
+        .append(form_type_field())
         .append(
             Element::builder("field", NS_DATA_FORMS)
                 .attr(minidom::rxml::xml_ncname!("var").to_owned(), "node")
@@ -162,7 +163,7 @@ async fn register_push_device_completes_multi_step_dance() {
     .await
     .expect("composer succeeds");
     assert_eq!(outcome.node.as_str(), "node-xyz");
-    assert_eq!(outcome.device_id, "device-abc");
+    assert_eq!(outcome.device_id.as_str(), "device-abc");
 
     let transcript = driver.transcript();
     assert_eq!(transcript.len(), 2, "two IQs on the wire");
@@ -296,7 +297,7 @@ async fn register_push_device_rejects_completed_without_device_id_field() {
     let completed_without_device_id = {
         let result_form = Element::builder("x", NS_DATA_FORMS)
             .attr(minidom::rxml::xml_ncname!("type").to_owned(), "result")
-            .append(form_type_field("result"))
+            .append(form_type_field())
             .append(
                 Element::builder("field", NS_DATA_FORMS)
                     .attr(minidom::rxml::xml_ncname!("var").to_owned(), "node")
@@ -342,7 +343,7 @@ async fn register_push_device_rejects_completed_without_node_field() {
     let completed_without_node = {
         let result_form = Element::builder("x", NS_DATA_FORMS)
             .attr(minidom::rxml::xml_ncname!("type").to_owned(), "result")
-            .append(form_type_field("result"))
+            .append(form_type_field())
             .build();
         let command = Element::builder("command", NS_COMMANDS)
             .attr(

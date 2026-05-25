@@ -146,10 +146,11 @@ fn xep0004_field_value(command: &Element, var: &str) -> Option<String> {
 }
 
 /// Look up the first ACTIVE `push_devices` row registered against the
-/// given (owner, node) pair via the test-only DB query helpers. The
-/// XEP-0050 cutover hides the server-allocated `device_id` from the
-/// chat client, so test sites can no longer address devices by id —
-/// the (owner, node) pair is the new identity from the wire side.
+/// given (owner, node) pair via the test-only DB query helpers. Used
+/// by sites that want to assert "a device exists" without knowing
+/// the specific server-assigned `device_id`. Tests that DO care about
+/// the assigned device id read it from the stage-4 result form
+/// instead.
 async fn first_active_device_for_owner_node(
     state: &WebSocketState,
     owner: &BareJid,

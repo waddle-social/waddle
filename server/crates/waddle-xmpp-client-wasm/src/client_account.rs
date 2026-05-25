@@ -76,7 +76,7 @@ impl WaddleClient {
             .map_err(|err| JsValue::from_str(&err.to_string()))?;
             to_js_value(&WaddleRegisterDeviceResult {
                 node: outcome.node.into_string(),
-                device_id: outcome.device_id,
+                device_id: outcome.device_id.into_string(),
             })
         })
     }
