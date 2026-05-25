@@ -458,6 +458,7 @@ async fn handle_iq_command_request_routes_to_registry() {
                     ),
                     session_id: ctx.command.session_id.unwrap_or_default(),
                     notes: vec![],
+                    actions: None,
                 }
             },
         )
@@ -509,6 +510,7 @@ async fn handle_iq_command_request_requires_ready_phase() {
                     ),
                     session_id: String::new(),
                     notes: vec![],
+                    actions: None,
                 }
             },
         )
