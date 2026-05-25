@@ -112,6 +112,42 @@ impl WaddleClient {
         })
     }
 
+    /// Fetch the Push Service's currently-active VAPID public key + kid
+    /// via the XEP-0128 disco extension form
+    /// (`FORM_TYPE='urn:waddle:push:vapid:0'`). The chat passes
+    /// `publicKey` (base64url-no-pad uncompressed SEC1 P-256, 65 bytes
+    /// with leading 0x04) to `pushManager.subscribe({ applicationServerKey })`
+    /// and tracks `kid` so silent rotations on a server-side key change
+    /// re-subscribe transparently.
+    ///
+    /// Resolves to `null` when the server is reachable but does not
+    /// advertise the form (Web Push not configured on this deployment)
+    /// so the chat caller can branch into the "foreground-only"
+    /// fallback. Rejects on transport / stanza errors and on a
+    /// malformed advertisement — the chat MUST NOT degrade silently on
+    /// a malformed key (round-trip with the browser would fail anyway,
+    /// later and less diagnosable).
+    pub fn fetch_vapid_public_key(&self, service_jid: String) -> Promise {
+        let inner = self.inner.clone();
+        future_to_promise(async move {
+            let iq = build_disco_info_iq(&service_jid, None);
+            let result = send_iq_command(inner, iq).await?;
+            let disco = parse_disco_info_result(&result, &service_jid).ok_or_else(|| {
+                js_error("Push Service disco#info response missing <query/> payload")
+            })?;
+            let advertisement = match parse_push_vapid_from_disco_info(&disco) {
+                Ok(advertisement) => advertisement,
+                Err(PushVapidDiscoParseError::NotAdvertised) => return Ok(JsValue::NULL),
+                Err(other) => return Err(js_error(other.to_string())),
+            };
+            let surfaced = WaddleVapidAdvertisement {
+                public_key: advertisement.public_key_base64url,
+                kid: advertisement.kid.to_string(),
+            };
+            to_js_value(&surfaced)
+        })
+    }
+
     /// `<disable-device node='…' device-id='…'/>` on the Push Service.
     /// Idempotent — operates on the (node, device-id) row only.
     /// Resolves to the typed `PushServiceDevice` shape so the chat

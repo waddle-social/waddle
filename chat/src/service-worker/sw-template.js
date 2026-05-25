@@ -85,6 +85,33 @@ self.addEventListener("message", (event) => {
   }
 });
 
+/// Per-message dedup: when an in-band foreground notification has
+/// already been rendered (chat tab open, message hits `showMentionNotification`
+/// or `showDmNotification`), the SW push lands ~tens of ms later carrying
+/// the same `item` id. Suppressing the SW notification by `item` avoids
+/// a double-fire. Bounded to 256 entries via FIFO eviction.
+const SHOWN_ITEM_TTL_MS = 60_000;
+const SHOWN_ITEM_MAX = 256;
+const shownItems = new Map();
+function noteItemShown(itemId) {
+  if (!itemId) return;
+  shownItems.set(itemId, Date.now());
+  if (shownItems.size > SHOWN_ITEM_MAX) {
+    const oldestKey = shownItems.keys().next().value;
+    if (oldestKey !== undefined) shownItems.delete(oldestKey);
+  }
+}
+function isItemAlreadyShown(itemId) {
+  if (!itemId) return false;
+  const at = shownItems.get(itemId);
+  if (at === undefined) return false;
+  if (Date.now() - at > SHOWN_ITEM_TTL_MS) {
+    shownItems.delete(itemId);
+    return false;
+  }
+  return true;
+}
+
 self.addEventListener("push", (event) => {
   let data = {};
   try {
@@ -95,28 +122,49 @@ self.addEventListener("push", (event) => {
     // notification with no payload-derived state.
     data = {};
   }
-  const unreadCount = parseUnreadCount(data);
-  const context = parseRoutingContext(data);
+  // PR-D3: switch on the PR-D2 `"v": 1` envelope. Legacy publishers
+  // that pre-date the v=1 schema fall through to
+  // `parseLegacyRoutingContext`; both shapes feed the same typed
+  // routing fields carried into `notificationclick.data.context`.
+  // `item` (dedup key) and `unread` are sibling locals because they
+  // are transient transport metadata, not navigation state, and
+  // shouldn't reach the click handler.
+  const parsed = parseV1Envelope(data) ?? parseLegacyRoutingContext(data);
+  const context = {
+    conversation: parsed.conversation,
+    thread: parsed.thread,
+    class: parsed.class,
+  };
+  const unreadCount = parsed.unread ?? null;
+  const itemId = parsed.item;
   // Routing precedence:
-  //   1. Typed `context.{conversation,thread,class}` envelope
-  //      (urn:waddle:push:context:0).
+  //   1. Typed `context.{conversation,thread,class}` envelope.
   //   2. Legacy `data.url` if it's a same-origin path — kept for
-  //      mixed-version publishers that may still ship a deep link
-  //      in the top-level `url` field. `sameOriginUrl` rejects
-  //      cross-origin and javascript: URLs.
+  //      mixed-version publishers that may still ship a deep link in
+  //      the top-level `url` field. `sameOriginUrl` rejects cross-
+  //      origin and javascript: URLs.
   //   3. Final fallback to `/`.
   const route = routeFromContext(context)
     ?? sameOriginUrl(typeof data.url === "string" ? data.url : null)
     ?? "/";
-  // Minimal default: no sender, no body preview. The server's
-  // canonical XEP-0357 summary carries `message-count` only; richer
-  // title/body previews remain opt-in (set `data.title`/`data.body`
-  // explicitly on the server side when the user has opted in).
+  // Minimal default: no sender, no body preview. XEP-0357 §4 forbids
+  // the push service from receiving message content, so the v=1
+  // envelope never carries `title`/`body`. The legacy fallback path
+  // still honors them.
   const title = typeof data.title === "string" && data.title.length > 0
     ? data.title
     : defaultTitle(unreadCount);
   const body = typeof data.body === "string" ? data.body : "";
   const tag = context.conversation ?? data.roomJid ?? "waddle";
+  if (isItemAlreadyShown(itemId)) {
+    // Foreground tab already rendered this item — only update the
+    // badge / unread broadcast, no duplicate banner.
+    event.waitUntil(
+      Promise.all([updateAppBadge(unreadCount), postUnreadCountToClients(unreadCount)]),
+    );
+    return;
+  }
+  noteItemShown(itemId);
   event.waitUntil(
     Promise.all([
       updateAppBadge(unreadCount),
@@ -169,25 +217,52 @@ function defaultTitle(unreadCount) {
   return `${unreadCount} new messages`;
 }
 
-/// Extract the typed `urn:waddle:push:context:0` routing context the
-/// server attaches to every published XEP-0357 notification. The
-/// Web Push HTTP dispatcher (server-side) flattens the XML into a
-/// JSON shape on `data.context = { conversation, thread, class }`.
-/// Legacy publishes that lack the typed context fall back to
-/// `data.roomJid` / `data.url` for compatibility.
-function parseRoutingContext(data) {
+/// Parse the PR-D2 `"v": 1` envelope emitted by
+/// `crates/waddle-xmpp/src/push/envelope.rs::PushEnvelope`. Field shape:
+///
+///   * `v`            — schema version (must equal 1)
+///   * `class`        — granular NotificationClass (`"dm"`, `"personal_mention"`, …)
+///   * `conversation` — DM peer bare JID or MUC room bare JID
+///   * `thread`       — XEP-0201 thread id (optional)
+///   * `item`         — originating stanza id (used for in-band dedup)
+///   * `unread`       — XEP-0357 message-count snapshot (optional)
+///
+/// Returns `null` when the envelope is absent (legacy publish, or a
+/// non-v=1 schema bump the server side may roll out later); the caller
+/// falls back to `parseLegacyRoutingContext`.
+function parseV1Envelope(data) {
+  if (!data || data.v !== 1) return null;
+  return {
+    conversation: typeof data.conversation === "string" ? data.conversation : undefined,
+    thread: typeof data.thread === "string" && data.thread.length > 0 ? data.thread : undefined,
+    class: typeof data.class === "string" ? data.class : undefined,
+    item: typeof data.item === "string" ? data.item : undefined,
+    unread: parseUnreadCount(data),
+  };
+}
+
+/// Pre-PR-D2 routing fallback. Legacy server builds wrote a nested
+/// `data.context = { conversation, thread, class }` object alongside
+/// `data.roomJid`. Kept until every reachable server is on the v=1
+/// envelope; remove once telemetry confirms no `v` absent / != 1
+/// publishes are landing.
+function parseLegacyRoutingContext(data) {
   const context = data?.context;
   if (context && typeof context === "object") {
     return {
       conversation: typeof context.conversation === "string" ? context.conversation : undefined,
       thread: typeof context.thread === "string" && context.thread.length > 0 ? context.thread : undefined,
       class: typeof context.class === "string" ? context.class : undefined,
+      item: undefined,
+      unread: parseUnreadCount(data),
     };
   }
   return {
     conversation: typeof data?.roomJid === "string" ? data.roomJid : undefined,
     thread: undefined,
     class: undefined,
+    item: undefined,
+    unread: parseUnreadCount(data),
   };
 }
 
@@ -248,7 +323,15 @@ function routeFromContext(context) {
 }
 
 function parseUnreadCount(data) {
-  const value = data?.messageCount ?? data?.["message-count"] ?? data?.unreadCount ?? data?.totalUnread;
+  // Prefer the PR-D2 v=1 envelope's `unread` field; fall back to the
+  // pre-D2 wire names so a server emitting either shape still surfaces
+  // a count.
+  const value =
+    data?.unread ??
+    data?.messageCount ??
+    data?.["message-count"] ??
+    data?.unreadCount ??
+    data?.totalUnread;
   if (value === undefined || value === null) return null;
   const parsed = typeof value === "number" ? value : Number(value);
   if (!Number.isFinite(parsed) || parsed < 0) return null;

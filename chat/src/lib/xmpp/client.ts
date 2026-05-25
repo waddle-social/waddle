@@ -1224,6 +1224,32 @@ export class BrowserXmppClient {
   }
 
   /**
+   * Fetch the Push Service's currently-active VAPID public key + kid
+   * via the XEP-0128 disco extension form
+   * (`FORM_TYPE='urn:waddle:push:vapid:0'`).
+   *
+   * Resolves to `null` only when the server explicitly does not
+   * advertise the form — meaning Web Push is not configured on this
+   * deployment. Returns `null` (NOT throws) for any other error so the
+   * caller can fall back to the foreground Notification API path; the
+   * wasm side already validates wire-shape invariants
+   * (`PushVapidDiscoParseError`) and surfaces them via a rejected
+   * Promise, which we catch here as a `null` return + console warning.
+   */
+  async fetchVapidPublicKey(opts: { serviceJid: string }): Promise<{ publicKey: string; kid: string } | null> {
+    const xmpp = await this.requireConnectedXmpp();
+    if (!xmpp.fetch_vapid_public_key) return null;
+    try {
+      const result = await xmpp.fetch_vapid_public_key(opts.serviceJid);
+      if (result === null || result === undefined) return null;
+      return result as { publicKey: string; kid: string };
+    } catch (error) {
+      console.warn("[xmpp] fetch_vapid_public_key IQ rejected:", error);
+      return null;
+    }
+  }
+
+  /**
    * Idempotent get-or-create of the chat's per-(user, app-id) Push
    * Service node. Returns the stable node id the chat passes to
    * `registerWebPushDevice` and `enablePushNotifications`.

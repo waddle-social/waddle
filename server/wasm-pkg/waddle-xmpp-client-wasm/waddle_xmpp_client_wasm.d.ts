@@ -136,6 +136,24 @@ export class WaddleClient {
      */
     fetch_user_bookmarks(): Promise<any>;
     fetch_user_pep_profile(jid: string): Promise<any>;
+    /**
+     * Fetch the Push Service's currently-active VAPID public key + kid
+     * via the XEP-0128 disco extension form
+     * (`FORM_TYPE='urn:waddle:push:vapid:0'`). The chat passes
+     * `publicKey` (base64url-no-pad uncompressed SEC1 P-256, 65 bytes
+     * with leading 0x04) to `pushManager.subscribe({ applicationServerKey })`
+     * and tracks `kid` so silent rotations on a server-side key change
+     * re-subscribe transparently.
+     *
+     * Resolves to `null` when the server is reachable but does not
+     * advertise the form (Web Push not configured on this deployment)
+     * so the chat caller can branch into the "foreground-only"
+     * fallback. Rejects on transport / stanza errors and on a
+     * malformed advertisement — the chat MUST NOT degrade silently on
+     * a malformed key (round-trip with the browser would fail anyway,
+     * later and less diagnosable).
+     */
+    fetch_vapid_public_key(service_jid: string): Promise<any>;
     fetch_vcard4(jid: string): Promise<any>;
     get_resume_state(): any;
     get_resume_state_handle(): WaddleResumeState | undefined;

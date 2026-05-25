@@ -2,12 +2,14 @@ import { ref, watch } from "vue";
 import type { BrowserXmppClient } from "@/lib/xmpp-client";
 import { getOrRegisterServiceWorker, registerServiceWorker as registerChatServiceWorker } from "@/lib/service-worker-registration";
 import { createPushFlowLock } from "./push-flow-lock";
+import { clearCachedVapidKey, loadVapidPublicKey } from "./vapid-cache";
+import { withVapidRotationLock } from "./vapid-rotation-lock";
 
 const STORAGE_KEY = "waddle.chat.notifications-enabled";
 const DEVICE_ID_STORAGE_KEY = "waddle.chat.push-device-id";
 const PUSH_NODE_STORAGE_KEY = "waddle.chat.push-node-id";
+const PUSH_KID_STORAGE_KEY = "waddle.chat.push-kid";
 const PUSH_SERVICE_JID = (import.meta.env.PUBLIC_WADDLE_XMPP_PUSH_SERVICE_JID ?? "").trim();
-const VAPID_PUBLIC_KEY = (import.meta.env.PUBLIC_WADDLE_VAPID_PUBLIC_KEY ?? "").trim();
 const NOTIFICATION_ICON_URL = "/android-chrome-192x192.png";
 
 /// Push Service app-id for the browser/PWA chat. APNs ("ios") and
@@ -44,6 +46,12 @@ export function usePushNotifications() {
     hasNotificationApi ? Notification.permission : "denied",
   );
   const notificationsEnabled = ref(loadEnabled());
+  /// Surfaced to the UI as a non-intrusive banner the first time a
+  /// silent kid rotation re-binds the browser PushSubscription to a new
+  /// VAPID key. The UI clears the flag once the banner is dismissed; we
+  /// don't persist this across reloads because the rotation has already
+  /// happened by then and re-showing would be noise.
+  const rotationBannerVisible = ref(false);
 
   // Serialize `syncPushSubscription` and `disablePushSubscription`
   // against each other. Without this, a rapid Enable→Disable toggle
@@ -142,6 +150,68 @@ export function usePushNotifications() {
     }
   }
 
+  /// Ensure the browser's PushSubscription is bound to the current
+  /// server-advertised VAPID public key. Detects rotation (kid change),
+  /// unsubscribes the stale subscription, and re-subscribes under the
+  /// new key. Cross-tab serialized via the rotation lock so a single tab
+  /// drives the re-subscribe sequence per rotation event.
+  ///
+  /// Returns the active subscription (post-rotation if any), or `null`
+  /// when the server doesn't advertise a VAPID form (Web Push not
+  /// configured on this deployment).
+  async function ensureBrowserSubscriptionWithCurrentKey(
+    xmppClient: BrowserXmppClient,
+    userJid: string,
+    serviceJid: string,
+    reg: ServiceWorkerRegistration,
+  ): Promise<{ subscription: PushSubscription; rotated: boolean } | null> {
+    return withVapidRotationLock(async () => {
+      const advertisement = await loadVapidPublicKey({
+        client: xmppClient,
+        accountJid: barePart(userJid),
+        serverJid: serviceJid,
+      });
+      if (!advertisement) {
+        console.warn(
+          "[notifications] Push Service does not advertise a VAPID public key; " +
+          "Web Push subscription skipped. Foreground Notification API still works.",
+        );
+        return null;
+      }
+      const existing = await reg.pushManager.getSubscription();
+      const persistedKid = loadPersistedKid();
+      const kidChanged = persistedKid !== null && persistedKid !== advertisement.kid;
+      if (existing && !kidChanged) {
+        persistKid(advertisement.kid);
+        return { subscription: existing, rotated: false };
+      }
+      // Either no subscription yet, or the server kid changed under us.
+      // Unsubscribe (if any) and re-subscribe under the new key.
+      if (existing) {
+        try {
+          await existing.unsubscribe();
+        } catch (error) {
+          console.warn(
+            "[notifications] PushManager.unsubscribe() failed during VAPID rotation; " +
+            "continuing to re-subscribe under the new key:",
+            error,
+          );
+        }
+      }
+      const fresh = await subscribeToPush(advertisement.publicKey);
+      if (!fresh) {
+        // Subscribe failed — drop the persisted kid + cache entry so the
+        // next attempt re-fetches from the server. The chat can also fall
+        // back to the foreground Notification API in this state.
+        clearPersistedKid();
+        clearCachedVapidKey(barePart(userJid), serviceJid);
+        return null;
+      }
+      persistKid(advertisement.kid);
+      return { subscription: fresh, rotated: kidChanged };
+    });
+  }
+
   /**
    * Full enable flow: ensure-node → register-device → XEP-0357 enable.
    *
@@ -171,32 +241,34 @@ export function usePushNotifications() {
       return false;
     }
 
-    // Get or create a browser-side PushSubscription. Without a VAPID
-    // public key configured at build time the browser will refuse to
-    // subscribe — log and bail so the caller can fall back to the
-    // foreground Notification API.
-    if (!VAPID_PUBLIC_KEY) {
-      console.warn(
-        "[notifications] PUBLIC_WADDLE_VAPID_PUBLIC_KEY is not set; Web Push subscription skipped. " +
-        "Foreground Notification API still works while the chat tab is open.",
-      );
-      return false;
-    }
+    // Resolve the browser-side PushSubscription against the server's
+    // currently-advertised VAPID public key. PR-D3 swapped the build-
+    // time `PUBLIC_WADDLE_VAPID_PUBLIC_KEY` env for a runtime fetch via
+    // the Push Service's XEP-0128 disco extension form so the chat can
+    // ship without provider-specific build secrets and so server-side
+    // VAPID rotations are picked up automatically.
     const reg = await getOrRegisterServiceWorker();
     if (!reg) {
       console.warn("[notifications] Service worker registration failed; push disabled");
       return false;
     }
-    let subscription = await reg.pushManager.getSubscription();
-    if (!subscription) {
-      subscription = await subscribeToPush(VAPID_PUBLIC_KEY);
-    }
-    if (!subscription) {
-      console.warn(
-        "[notifications] PushManager.subscribe() failed (browser may have rejected VAPID key)",
-      );
+    const subscribeResult = await ensureBrowserSubscriptionWithCurrentKey(
+      xmppClient,
+      userJid,
+      serviceJid,
+      reg,
+    );
+    if (!subscribeResult) {
+      // Either the server doesn't advertise a VAPID form, or
+      // pushManager.subscribe() rejected the key. The helper has
+      // already emitted a precise warning; the chat falls back to the
+      // foreground Notification API path.
       return false;
     }
+    if (subscribeResult.rotated) {
+      rotationBannerVisible.value = true;
+    }
+    const subscription = subscribeResult.subscription;
 
     const subJson = subscription.toJSON();
     const endpoint = subscription.endpoint;
@@ -338,12 +410,25 @@ export function usePushNotifications() {
       );
       return false;
     }
+    // Clean up rotation state: drop the persisted kid + cached
+    // advertisement so a re-enable starts from a fresh fetch. The
+    // cache is keyed per `(account, server)` so this only invalidates
+    // the entry for the disabling account, not any other tenant on the
+    // same device.
+    clearPersistedKid();
+    clearCachedVapidKey(barePart(userJid), serviceJid);
     return true;
+  }
+
+  function dismissRotationBanner() {
+    rotationBannerVisible.value = false;
   }
 
   return {
     permissionState,
     notificationsEnabled,
+    rotationBannerVisible,
+    dismissRotationBanner,
     requestPermission,
     showMentionNotification,
     showDmNotification,
@@ -402,6 +487,30 @@ function persistPushNodeId(node: string): void {
 function loadPushNodeId(): string | null {
   if (typeof window === "undefined") return null;
   return window.localStorage.getItem(PUSH_NODE_STORAGE_KEY);
+}
+
+function persistKid(kid: string): void {
+  if (typeof window === "undefined") return;
+  window.localStorage.setItem(PUSH_KID_STORAGE_KEY, kid);
+}
+
+function loadPersistedKid(): string | null {
+  if (typeof window === "undefined") return null;
+  return window.localStorage.getItem(PUSH_KID_STORAGE_KEY);
+}
+
+function clearPersistedKid(): void {
+  if (typeof window === "undefined") return;
+  window.localStorage.removeItem(PUSH_KID_STORAGE_KEY);
+}
+
+/// Strip the optional `/resource` from a full JID so the cache key is
+/// stable across reconnect cycles (XMPP resources rotate every
+/// connection). The bare-JID extraction mirrors `resolvePushServiceJid`'s
+/// behavior — both must treat `alice@example.com/abc` and
+/// `alice@example.com` as the same logical account.
+function barePart(userJid: string): string {
+  return userJid.split("/")[0] ?? userJid;
 }
 
 function urlBase64ToUint8Array(base64String: string): Uint8Array {

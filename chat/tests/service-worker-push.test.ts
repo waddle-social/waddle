@@ -420,4 +420,103 @@ describe("service worker push handling", () => {
       "/myspace/general/threads/thread-42",
     );
   });
+
+  test("v=1 envelope: dm class routes to /dm/{username}", async () => {
+    // PR-D3: server emits flat `{ v: 1, class, conversation, thread?, item, unread? }`
+    // — the SW must parse this shape and route the same as the legacy
+    // nested-context shape.
+    const worker = loadServiceWorker();
+    const event = makePushEvent({
+      json: () => ({
+        v: 1,
+        class: "dm",
+        conversation: "alice@example.com",
+        item: "stanza-id-001",
+        unread: 3,
+      }),
+    });
+    worker.dispatch("push", event);
+    await event.done();
+
+    expect(worker.setAppBadge).toHaveBeenCalledWith(3);
+    const [title, options] = worker.showNotification.mock.calls[0] ?? [];
+    expect(title).toBe("3 new messages");
+    expect((options as NotificationOptions & { data: { url: string } }).data.url).toBe(
+      "/dm/alice",
+    );
+  });
+
+  test("v=1 envelope: channel mention routes to /r/{channelId}?thread=…", async () => {
+    const worker = loadServiceWorker();
+    const event = makePushEvent({
+      json: () => ({
+        v: 1,
+        class: "personal_mention",
+        conversation: "general@muc.example.com",
+        thread: "thread-42",
+        item: "stanza-id-002",
+        unread: 1,
+      }),
+    });
+    worker.dispatch("push", event);
+    await event.done();
+
+    const [, options] = worker.showNotification.mock.calls[0] ?? [];
+    expect((options as NotificationOptions & { data: { url: string } }).data.url).toBe(
+      "/r/general?thread=thread-42",
+    );
+  });
+
+  test("v=1 envelope: duplicate item id suppresses the second SW notification", async () => {
+    // In-band dedup: if the chat tab already rendered a foreground
+    // notification for this stanza id, the SW push (arriving a few ms
+    // later) should NOT fire a second banner — it should only refresh
+    // the badge + unread count.
+    const worker = loadServiceWorker();
+    const first = makePushEvent({
+      json: () => ({
+        v: 1,
+        class: "dm",
+        conversation: "alice@example.com",
+        item: "stanza-dedup-1",
+        unread: 1,
+      }),
+    });
+    worker.dispatch("push", first);
+    await first.done();
+    expect(worker.showNotification).toHaveBeenCalledTimes(1);
+
+    const second = makePushEvent({
+      json: () => ({
+        v: 1,
+        class: "dm",
+        conversation: "alice@example.com",
+        item: "stanza-dedup-1",
+        unread: 2,
+      }),
+    });
+    worker.dispatch("push", second);
+    await second.done();
+    // No second showNotification — but badge + broadcast still update.
+    expect(worker.showNotification).toHaveBeenCalledTimes(1);
+    expect(worker.setAppBadge).toHaveBeenLastCalledWith(2);
+  });
+
+  test("v=1 envelope: distinct item ids each render their own notification", async () => {
+    const worker = loadServiceWorker();
+    for (const item of ["a", "b"]) {
+      const event = makePushEvent({
+        json: () => ({
+          v: 1,
+          class: "dm",
+          conversation: "alice@example.com",
+          item,
+          unread: 1,
+        }),
+      });
+      worker.dispatch("push", event);
+      await event.done();
+    }
+    expect(worker.showNotification).toHaveBeenCalledTimes(2);
+  });
 });
