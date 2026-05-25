@@ -1204,7 +1204,7 @@ export class BrowserXmppClient {
     const xmpp = await this.requireConnectedXmpp();
     if (!xmpp.enable_push_notifications) return false;
     try {
-      await xmpp.enable_push_notifications(opts.serviceJid, opts.node, "");
+      await xmpp.enable_push_notifications(opts.serviceJid, opts.node);
       return true;
     } catch (error) {
       console.warn("[xmpp] XEP-0357 enable IQ rejected:", error);
@@ -1212,7 +1212,13 @@ export class BrowserXmppClient {
     }
   }
 
-  async disablePushNotifications(opts: { serviceJid: string; node: string }): Promise<boolean> {
+  /**
+   * XEP-0357 §6.1 `<disable/>` IQ. Passing `node: undefined` disables
+   * ALL push nodes at the service for this user (the "disable push
+   * everywhere" account-settings flow). Passing a specific node id
+   * disables only that one — leaves other registrations alone.
+   */
+  async disablePushNotifications(opts: { serviceJid: string; node?: string }): Promise<boolean> {
     const xmpp = await this.requireConnectedXmpp();
     if (!xmpp.disable_push_notifications) return false;
     try {
@@ -1328,67 +1334,62 @@ export class BrowserXmppClient {
   }
 
   /**
-   * Idempotent get-or-create of the chat's per-(user, app-id) Push
-   * Service node. Returns the stable node id the chat passes to
-   * `registerWebPushDevice` and `enablePushNotifications`.
+   * Register a Web Push device with the XMPP Push Service via the
+   * XEP-0050 `register-device` ad-hoc command. The composer drives
+   * the multi-step §3 dance (execute → executing+form → complete →
+   * completed+result) inside the WASM bridge and returns the
+   * assigned XEP-0357 node id — no separate `ensure-node` round
+   * trip is needed.
+   *
+   * The three Web Push fields come from a browser `PushSubscription`:
+   *
+   *   * `endpoint`  ← `subscription.endpoint`
+   *   * `p256dh`    ← `subscription.toJSON().keys.p256dh`
+   *   * `auth`      ← `subscription.toJSON().keys.auth`
+   *
+   * Idempotent on `(node, deviceId)` server-side; re-registering
+   * after a browser subscription rotation UPDATES the row in place.
    *
    * `appId="web"` is the convention for the browser/PWA chat. APNs
-   * and FCM follow with `appId="ios"` / `appId="android"` in later
-   * PRs (#529 / #530).
+   * and FCM follow with `"ios"` / `"android"` in later PRs.
    */
-  async ensurePushNode(opts: { serviceJid: string; appId: string }): Promise<{ id: string; jid: string; appId: string } | null> {
-    const xmpp = await this.requireConnectedXmpp();
-    if (!xmpp.ensure_push_node) return null;
-    try {
-      return await xmpp.ensure_push_node(opts.serviceJid, opts.appId);
-    } catch (error) {
-      console.warn("[xmpp] ensure-node IQ rejected:", error);
-      return null;
-    }
-  }
-
-  /**
-   * Register a Web Push device on the Push Service. The three
-   * `provider*` values come from a browser `PushSubscription`:
-   *
-   *   * `providerEndpoint`     ← `subscription.endpoint`
-   *   * `providerToken`        ← `subscription.toJSON().keys.auth`
-   *   * `providerKeyMaterial`  ← `subscription.toJSON().keys.p256dh`
-   *
-   * Idempotent on `(node, deviceId)`; re-registering after a browser
-   * subscription rotation UPDATES the row in place.
-   */
-  async registerWebPushDevice(opts: {
+  async registerPushDevice(opts: {
     serviceJid: string;
-    node: string;
-    deviceId: string;
-    environment: string;
-    providerEndpoint: string;
-    providerToken: string;
-    providerKeyMaterial: string;
-  }): Promise<{ id: string; node: string; status: "active" | "disabled" } | null> {
+    appId: string;
+    environment: "prod" | "sandbox";
+    endpoint: string;
+    p256dh: string;
+    auth: string;
+  }): Promise<{ node: string } | null> {
     const xmpp = await this.requireConnectedXmpp();
-    if (!xmpp.register_web_push_device) return null;
+    if (!xmpp.register_push_device) return null;
     try {
-      return await xmpp.register_web_push_device({
+      const result = await xmpp.register_push_device({
         serviceJid: opts.serviceJid,
-        node: opts.node,
-        deviceId: opts.deviceId,
+        appId: opts.appId,
         environment: opts.environment,
-        providerEndpoint: opts.providerEndpoint,
-        providerToken: opts.providerToken,
-        providerKeyMaterial: opts.providerKeyMaterial,
+        platform: "web",
+        endpoint: opts.endpoint,
+        p256dh: opts.p256dh,
+        auth: opts.auth,
       });
+      if (!result || typeof result.value !== "string" || result.value.length === 0) {
+        console.warn(
+          "[xmpp] register_push_device returned an empty node id; refusing to persist",
+        );
+        return null;
+      }
+      return { node: result.value };
     } catch (error) {
-      console.warn("[xmpp] register-device IQ rejected:", error);
+      console.warn("[xmpp] XEP-0050 register-device rejected:", error);
       return null;
     }
   }
 
   /**
-   * `<disable-device …/>` on the Push Service. Removes ONLY this
-   * device's row from the stable per-(user, app-id) node, leaving
-   * other devices on the same node alone.
+   * XEP-0050 `disable-device` ad-hoc command on the Push Service.
+   * Removes ONLY this device's row from the stable per-(user, app-id)
+   * node, leaving other devices on the same node alone.
    *
    * The XEP-0357 `<disable jid='…' node='…'/>` on the user-server
    * (see `disablePushNotifications`) is NODE-LEVEL: it removes the
@@ -1402,14 +1403,15 @@ export class BrowserXmppClient {
    * with explicit user warning) is the only place that should call
    * both APIs.
    */
-  async disablePushDevice(opts: { serviceJid: string; node: string; deviceId: string }): Promise<{ id: string; node: string; status: "active" | "disabled" } | null> {
+  async disablePushDevice(opts: { serviceJid: string; node: string; deviceId: string }): Promise<boolean> {
     const xmpp = await this.requireConnectedXmpp();
-    if (!xmpp.disable_push_device) return null;
+    if (!xmpp.disable_push_device) return false;
     try {
-      return await xmpp.disable_push_device(opts.serviceJid, opts.node, opts.deviceId);
+      await xmpp.disable_push_device(opts.serviceJid, opts.node, opts.deviceId);
+      return true;
     } catch (error) {
-      console.warn("[xmpp] disable-device IQ rejected:", error);
-      return null;
+      console.warn("[xmpp] XEP-0050 disable-device rejected:", error);
+      return false;
     }
   }
 

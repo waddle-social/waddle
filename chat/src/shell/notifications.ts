@@ -384,47 +384,32 @@ export function usePushNotifications() {
       return false;
     }
 
-    // Stable per-app PEP-style node id from the Push Service.
-    const ensured = await xmppClient.ensurePushNode({ serviceJid, appId: APP_ID_WEB });
-    if (!ensured) {
-      console.warn(
-        "[notifications] ensure-node IQ failed; XMPP Push Service may be unreachable",
-      );
-      return false;
-    }
-    // Defense in depth: the WASM bridge hard-fails on empty IDs
-    // (round-5 `require_non_empty_attr`), so an empty here would be
-    // a regression — but a stale wasm bundle (built before that
-    // fix) would have returned `{ id: "", … }`. Refuse to persist
-    // and propagate as caller failure.
-    if (!ensured.id) {
-      console.warn(
-        "[notifications] ensure-node returned an empty node id; refusing to persist",
-      );
-      return false;
-    }
-    persistPushNodeId(ensured.id);
-
-    const deviceId = ensureDeviceId();
-    const registered = await xmppClient.registerWebPushDevice({
+    // XEP-0050 multi-step `register-device` composes ensure-node +
+    // register-device into a single round trip; the result form
+    // carries the assigned XEP-0357 node id directly.
+    const registered = await xmppClient.registerPushDevice({
       serviceJid,
-      node: ensured.id,
-      deviceId,
+      appId: APP_ID_WEB,
       environment: PUSH_ENVIRONMENT,
-      providerEndpoint: endpoint,
-      providerToken: auth,
-      providerKeyMaterial: p256dh,
+      endpoint,
+      p256dh,
+      auth,
     });
     if (!registered) {
       console.warn(
-        "[notifications] register-device IQ failed; push subscription will not be delivered",
+        "[notifications] XEP-0050 register-device failed; push subscription will not be delivered",
       );
       return false;
     }
+    persistPushNodeId(registered.node);
+    // The device id is now Push Service-assigned (one per
+    // register-device round); the chat still persists a stable
+    // per-browser id for the `disable-device` flow below.
+    ensureDeviceId();
 
     const enabled = await xmppClient.enablePushNotifications({
       serviceJid,
-      node: ensured.id,
+      node: registered.node,
     });
     if (!enabled) {
       console.warn(
