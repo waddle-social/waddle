@@ -252,10 +252,6 @@ fn form_field(var: &str, value: &str, type_attr: Option<&str>) -> Element {
         .build()
 }
 
-/// Drive the full 4-stage XEP-0050 `register-device` dance against
-/// `push.<domain>` and return the assigned XEP-0357 node id. Used by
-/// every WS test that needs a registered push device before it can
-/// exercise XEP-0357 enable / publish flows.
 /// Outcome of a successful `register-device` XEP-0050 round. Both
 /// fields are extracted from the stage-4 result form — the chat
 /// client persists them so the matching `disable-device` round can
@@ -268,6 +264,10 @@ struct RegisterDeviceOutcome {
     device_id: String,
 }
 
+/// Drive the full 4-stage XEP-0050 `register-device` dance against
+/// `push.<domain>` and return the assigned XEP-0357 node id. Used by
+/// every WS test that needs a registered push device before it can
+/// exercise XEP-0357 enable / publish flows.
 async fn register_web_push_device_via_xep0050(
     client: &mut WsXmppClient,
     id_prefix: &str,
@@ -1139,9 +1139,13 @@ async fn xep0050_register_device_completes_and_persists_device_row() {
     .expect("query active devices count")
     .get("count");
     // After the per-device disable, the single web-push row is the
-    // only device on the node, so the active count drops to 0. A
-    // multi-device test (covering APNs / FCM siblings) is filed as
-    // a follow-up once those slices land.
+    // only device on the node, so the active count drops to 0.
+    // Multi-device coverage (a second sibling device on the same
+    // node that stays active after the targeted disable) lives in
+    // the lib-level unit test
+    // `handle_iq_push_service_xep0050_disable_device_is_per_device_scoped`
+    // — keeping that probe out of the WS layer avoids spinning up a
+    // second authenticated WS client just to register a sibling.
     assert_eq!(
         post_disable, 0,
         "disable-device flipped the only device on the node to 'disabled'"

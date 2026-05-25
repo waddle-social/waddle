@@ -1204,6 +1204,81 @@ async fn handle_iq_push_service_xep0050_disable_device_is_per_device_scoped() {
     );
 }
 
+/// XEP-0050 `disable-device` is idempotent: a second call against an
+/// already-disabled `(node, device_id)` row must surface
+/// `status='completed'` (NOT a stanza error) so the chat's opt-out
+/// retry path doesn't bounce on transient re-issue. The storage
+/// helper returns `Ok(false)` on the second call; the handler maps
+/// that to `Completed` the same as the happy path. Round-3
+/// adversarial test-rigor finding.
+#[tokio::test]
+async fn handle_iq_push_service_xep0050_disable_device_is_idempotent() {
+    use crate::push_service::commands::{
+        DISABLE_DEVICE_FORM_TYPE, DISABLE_DEVICE_NODE, FIELD_DEVICE_ID, FIELD_NODE,
+    };
+
+    let state = create_test_websocket_state().await;
+    let owner: BareJid = "alice@example.com".parse().expect("owner");
+    let jid: FullJid = "alice@example.com/web".parse().expect("valid jid");
+    let node = state
+        .deps
+        .protocol
+        .push_service
+        .ensure_node(&owner, "web")
+        .await
+        .expect("node");
+    let device_id = "device-idempotent";
+    state
+        .deps
+        .protocol
+        .push_service
+        .upsert_device(
+            &owner,
+            crate::push_service::PushDeviceRegistration::new(
+                device_id,
+                node.node(),
+                crate::push_service::PushDevicePlatform::Web,
+                "test",
+            ),
+        )
+        .await
+        .expect("device");
+
+    let build_disable_payload = || {
+        let submit_form = xep0004_submit_form(
+            DISABLE_DEVICE_FORM_TYPE,
+            &[(FIELD_NODE, node.node()), (FIELD_DEVICE_ID, device_id)],
+        );
+        command_iq_payload(DISABLE_DEVICE_NODE, "execute", None, Some(submit_form))
+    };
+
+    for round in ["first", "second"] {
+        let responses = handle_iq(
+            &iq_set_frame(
+                &format!("push-disable-{round}"),
+                "push.example.com",
+                build_disable_payload(),
+            ),
+            "example.com",
+            "muc.example.com",
+            state.as_ref(),
+            &None,
+            &ready_phase(&jid),
+        )
+        .await;
+        let response_iq = parse_iq_for_test(responses.first().expect("disable response"));
+        let completed_payload = match response_iq.split().1 {
+            IqPayload::Result(Some(payload)) => payload,
+            _ => panic!("expected disable-device result on {round} round"),
+        };
+        assert_eq!(
+            completed_payload.attr("status"),
+            Some("completed"),
+            "{round} disable-device must complete (idempotent)"
+        );
+    }
+}
+
 #[tokio::test]
 async fn handle_iq_xep0357_disable_removes_registration_without_retiring_push_service_node() {
     let state = create_test_websocket_state().await;

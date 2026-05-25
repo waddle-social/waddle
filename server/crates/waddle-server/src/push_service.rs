@@ -1137,7 +1137,7 @@ impl DatabasePushServiceStore {
         let now_ms = crate::time::now_ms();
         let mut tx = self
             .db
-            .begin()
+            .begin_immediate()
             .await
             .map_err(|error| XmppError::internal(error.to_string()))?;
         lock_owner_tx(&mut tx, owner_bare_jid, now_ms).await?;
@@ -1282,7 +1282,7 @@ impl DatabasePushServiceStore {
         let now_ms = crate::time::now_ms();
         let mut tx = self
             .db
-            .begin()
+            .begin_immediate()
             .await
             .map_err(|error| XmppError::internal(error.to_string()))?;
         validate_first_party_enable_node_tx(&mut tx, owner_bare_jid, node, now_ms).await?;
@@ -1305,7 +1305,7 @@ impl DatabasePushServiceStore {
         let now_ms = crate::time::now_ms();
         let mut tx = self
             .db
-            .begin()
+            .begin_immediate()
             .await
             .map_err(|error| XmppError::internal(error.to_string()))?;
         lock_owner_tx(&mut tx, owner_bare_jid, now_ms).await?;
@@ -1376,7 +1376,7 @@ impl DatabasePushServiceStore {
         let now_ms = crate::time::now_ms();
         let mut tx = self
             .db
-            .begin()
+            .begin_immediate()
             .await
             .map_err(|error| XmppError::internal(error.to_string()))?;
         if get_node_tx(&mut tx, &registration.node).await?.is_none() {
@@ -1494,7 +1494,7 @@ impl DatabasePushServiceStore {
         let now_ms = crate::time::now_ms();
         let mut tx = self
             .db
-            .begin()
+            .begin_immediate()
             .await
             .map_err(|error| XmppError::internal(error.to_string()))?;
         if get_node_tx(&mut tx, node).await?.is_none() {
@@ -1620,7 +1620,7 @@ impl DatabasePushServiceStore {
         let now_ms = crate::time::now_ms();
         let mut tx = self
             .db
-            .begin()
+            .begin_immediate()
             .await
             .map_err(|error| XmppError::internal(error.to_string()))?;
         lock_owner_tx(&mut tx, owner_bare_jid, now_ms).await?;
@@ -1696,7 +1696,7 @@ impl DatabasePushServiceStore {
         let now_ms = crate::time::now_ms();
         let mut tx = self
             .db
-            .begin()
+            .begin_immediate()
             .await
             .map_err(|error| XmppError::internal(error.to_string()))?;
         lock_owner_tx(&mut tx, owner_bare_jid, now_ms).await?;
@@ -2086,7 +2086,7 @@ impl DatabasePushServiceStore {
     ) -> Result<PushPublishJobEnqueue, XmppError> {
         let mut tx = self
             .db
-            .begin()
+            .begin_immediate()
             .await
             .map_err(|error| XmppError::internal(error.to_string()))?;
         let now_ms = crate::time::now_ms();

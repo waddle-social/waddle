@@ -401,6 +401,14 @@ export function usePushNotifications() {
       console.warn(
         "[notifications] XEP-0050 register-device failed; push subscription will not be delivered",
       );
+      // Round-3 adversarial finding: when register-device fails AFTER
+      // a previous successful enable persisted node + deviceId, the
+      // stale ids would still drive a doomed `disable-device` round
+      // against a node the server may have rotated. Clear them so
+      // the next opt-out is a clean no-op rather than surfacing a
+      // server-side `item-not-found` to the user.
+      clearPushNodeId();
+      clearDeviceId();
       return false;
     }
     persistPushNodeId(registered.node);
@@ -577,6 +585,16 @@ function persistPushNodeId(node: string): void {
 function loadPushNodeId(): string | null {
   if (typeof window === "undefined") return null;
   return window.localStorage.getItem(PUSH_NODE_STORAGE_KEY);
+}
+
+function clearPushNodeId(): void {
+  if (typeof window === "undefined") return;
+  window.localStorage.removeItem(PUSH_NODE_STORAGE_KEY);
+}
+
+function clearDeviceId(): void {
+  if (typeof window === "undefined") return;
+  window.localStorage.removeItem(DEVICE_ID_STORAGE_KEY);
 }
 
 /// Build the per-(account, service) localStorage key for the

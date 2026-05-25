@@ -288,12 +288,16 @@ async fn handle_disable_device(
         .disable_device_for_owner(&owner, &request.node, &request.device_id, None)
         .await
     {
-        // `Ok(false)` from the storage layer means either the node was
-        // already inactive or the (node, device_id) row didn't exist
-        // for this owner. Either way the caller's "this device is no
-        // longer registered" assertion is satisfied; surface as
-        // success so the chat's opt-out flow doesn't surface a
-        // spurious failure on already-disabled devices.
+        // `Ok(_)` covers both "the row flipped active → disabled"
+        // (Ok(true)) and "the node existed but was no longer
+        // `active`, so the device row was already past its terminal
+        // state" (Ok(false)). Both satisfy the caller's "this
+        // device is no longer registered" assertion. The
+        // "node-doesn't-exist" path bypasses this arm — the storage
+        // helper returns `Err(item-not-found)` there, which falls
+        // through to the `Err` arm below and surfaces as a typed
+        // IQ stanza error so the chat can distinguish "node gone"
+        // from "device flipped" in its diagnostic chain.
         Ok(_) => CommandResult::Completed {
             form: None,
             notes: vec![],
