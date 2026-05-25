@@ -186,7 +186,7 @@ async function loadCallActivityDockComponent() {
   const tempDir = mkdtempSync(join(tmpdir(), "waddle-call-activity-dock-"));
   try {
     const compiled = [
-      rewriteImports(script.content.replace("export default", "const __sfc__ ="), filename, tempDir),
+      rewriteImports(script.content.replace("export default", "const __sfc__ ="), filename),
       "export default __sfc__;",
     ].join("\n");
 
@@ -206,17 +206,17 @@ async function loadCallActivityDockComponent() {
   }
 }
 
-function rewriteImports(code: string, importer: URL, tempDir: string): string {
+function rewriteImports(code: string, importer: URL): string {
   return code.replace(/from\s+["']([^"']+)["']/g, (_match, specifier: string) =>
-    `from ${JSON.stringify(resolveModuleSpecifier(specifier, importer, tempDir))}`);
+    `from ${JSON.stringify(resolveModuleSpecifier(specifier, importer))}`);
 }
 
-function resolveModuleSpecifier(specifier: string, importer: URL, tempDir: string): string {
+function resolveModuleSpecifier(specifier: string, importer: URL): string {
   if (specifier.startsWith("@/")) {
-    return moduleUrlForPath(resolveSourcePath(new URL(`../src/${specifier.slice(2)}`, import.meta.url).pathname), specifier, tempDir);
+    return moduleUrlForPath(resolveSourcePath(new URL(`../src/${specifier.slice(2)}`, import.meta.url).pathname));
   }
   if (specifier.startsWith(".")) {
-    return moduleUrlForPath(resolveSourcePath(new URL(specifier, importer).pathname), specifier, tempDir);
+    return moduleUrlForPath(resolveSourcePath(new URL(specifier, importer).pathname));
   }
   return import.meta.resolve(specifier);
 }
@@ -237,12 +237,7 @@ function resolveSourcePath(basePath: string): string {
   return resolved;
 }
 
-function moduleUrlForPath(resolvedPath: string, specifier: string, tempDir: string): string {
+function moduleUrlForPath(resolvedPath: string): string {
   if (!resolvedPath.endsWith(".vue")) return pathToFileURL(resolvedPath).href;
-  const stubPath = join(tempDir, `${specifier.replace(/[^a-z0-9]/gi, "_")}.mjs`);
-  writeFileSync(stubPath, [
-    `import { h } from ${JSON.stringify(import.meta.resolve("vue"))};`,
-    `export default { name: ${JSON.stringify(`${specifier}Stub`)}, setup(_, { slots }) { return () => h("span", { "data-vue-stub": ${JSON.stringify(specifier)} }, slots.default?.()); } };`,
-  ].join("\n"));
-  return pathToFileURL(stubPath).href;
+  return new URL("./helpers/vue-sfc-stub.ts", import.meta.url).href;
 }
