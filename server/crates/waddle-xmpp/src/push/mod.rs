@@ -6,17 +6,27 @@
 
 pub mod constants;
 pub mod encrypt;
+pub mod envelope;
+pub mod limiter;
 mod sender;
 mod store;
 pub mod types;
 pub mod vapid;
 
-pub use sender::{notify_mentioned_users, HttpWebPushSender, WebPushSender};
-pub use store::{InMemoryPushStore, PushSubscriptionStore};
+pub use sender::{HttpWebPushSender, Urgency, WebPushRequest, WebPushSender};
+/// In-memory push store kept reachable only behind `test-utils` (or
+/// `cfg(test)` within this crate). Production code paths must depend on
+/// a durable `PushSubscriptionStore` impl; PR-D2's cutover narrows the
+/// public surface so accidental wiring against the in-memory fake is
+/// caught at compile time outside of integration-test builds.
+#[cfg(any(test, feature = "test-utils"))]
+pub use store::InMemoryPushStore;
+pub use store::PushSubscriptionStore;
 pub use types::{
     AuthSecret, EncryptedPayload, EndpointHash, Kid, MailtoAddress, PushTopic, PushTopicParseError,
-    SubscriptionKeys, VapidJwt, VapidLoadError, VapidSignError, VapidSub, VapidSubParseError,
-    WebPushCryptoError,
+    SubscriptionKeys, SuppressionReason, TransientFailure, VapidJwt, VapidLoadError,
+    VapidSignError, VapidSub, VapidSubParseError, WebPushCapability, WebPushCryptoError,
+    WebPushOutcome,
 };
 
 use minidom::Element;

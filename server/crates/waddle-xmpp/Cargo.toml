@@ -86,6 +86,7 @@ tempfile = "3.27"
 tracing-subscriber = { workspace = true }
 serde_json = { workspace = true }
 waddle-xmpp-core = { path = "../waddle-xmpp-core", features = ["test-utils"] }
+mockito = "1.7"
 
 [features]
 # Exposes `insert_raw_*_for_test` storage helpers (and other test-only

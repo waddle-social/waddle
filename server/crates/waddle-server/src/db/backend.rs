@@ -43,10 +43,18 @@ pub struct SqlxSqliteAdapter;
 #[async_trait]
 impl DatabaseAdapter for SqlxSqliteAdapter {
     async fn connect(&self, database_url: &str) -> Result<DatabaseBackend, DatabaseError> {
+        // WAL mode allows concurrent readers + one writer, but two
+        // pooled connections that both want the writer slot can race —
+        // SQLite returns SQLITE_BUSY/LOCKED. `busy_timeout` lets the
+        // engine block briefly and retry instead of surfacing the error
+        // immediately, which keeps concurrent worker pipelines (e.g.
+        // the publish-job drain that splits claim / dispatch / finalize
+        // across three short transactions) from deadlocking.
         let connect_options = SqliteConnectOptions::from_str(database_url)
             .map_err(|e| DatabaseError::ConnectionFailed(e.to_string()))?
             .create_if_missing(true)
             .foreign_keys(true)
+            .busy_timeout(std::time::Duration::from_secs(5))
             .journal_mode(SqliteJournalMode::Wal);
         let pool = SqlitePoolOptions::new()
             .max_connections(10)
@@ -445,6 +453,33 @@ impl<'a> Transaction<'a> {
     pub(super) async fn begin(backend: &'a DatabaseBackend) -> Result<Self, DatabaseError> {
         let inner = match backend {
             DatabaseBackend::Sqlite(pool) => TransactionInner::Sqlite(pool.begin().await?),
+            DatabaseBackend::Postgres(pool) => TransactionInner::Postgres(pool.begin().await?),
+        };
+        Ok(Self { inner })
+    }
+
+    /// Begin a transaction that acquires the database write lock
+    /// immediately. SQLite's default `BEGIN DEFERRED` upgrades from
+    /// reader to writer on the first write, which can deadlock when two
+    /// pooled connections both start as readers and then both try to
+    /// upgrade (SQLITE_LOCKED, not BUSY — `busy_timeout` doesn't help).
+    /// `BEGIN IMMEDIATE` resolves that.
+    ///
+    /// For Postgres this method falls through to plain `begin`: the
+    /// `BEGIN IMMEDIATE` upgrade race is SQLite-specific. Postgres at
+    /// the default READ COMMITTED isolation does NOT prevent two
+    /// concurrent worker phase 1's from both selecting `status='queued'`
+    /// rows simultaneously — serialization on Postgres comes from the
+    /// conditional `UPDATE ... WHERE status='queued'` (only one CAS
+    /// wins; the loser sees 0 rows changed and short-circuits) and the
+    /// `claim_token` interlock checked in phase 3's UPDATE.
+    pub(super) async fn begin_immediate(
+        backend: &'a DatabaseBackend,
+    ) -> Result<Self, DatabaseError> {
+        let inner = match backend {
+            DatabaseBackend::Sqlite(pool) => {
+                TransactionInner::Sqlite(pool.begin_with("BEGIN IMMEDIATE").await?)
+            }
             DatabaseBackend::Postgres(pool) => TransactionInner::Postgres(pool.begin().await?),
         };
         Ok(Self { inner })

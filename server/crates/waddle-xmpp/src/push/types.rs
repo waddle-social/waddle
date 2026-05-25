@@ -243,7 +243,13 @@ impl std::str::FromStr for VapidSub {
 }
 
 /// RFC 8291 encrypted payload — RFC 8188 header + AES-GCM record.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// AES-GCM ciphertext + RFC 8188 header. Zeroizes on drop as
+/// defense-in-depth: the body is already encrypted, but the same
+/// allocation carries the per-message salt and AS public key (header
+/// fields), which are useful symmetric-state context for any heap-
+/// residue attacker. Clearing the buffer when the value is dropped
+/// shrinks that residue window.
+#[derive(Debug, Clone, PartialEq, Eq, ZeroizeOnDrop)]
 pub struct EncryptedPayload(Vec<u8>);
 
 impl EncryptedPayload {
@@ -254,10 +260,22 @@ impl EncryptedPayload {
     pub fn as_slice(&self) -> &[u8] {
         &self.0
     }
-
-    pub fn into_inner(self) -> Vec<u8> {
-        self.0
-    }
+    // `into_inner` is intentionally absent: the `ZeroizeOnDrop` impl
+    // means the inner `Vec<u8>` can't be moved out without losing the
+    // zeroize-on-drop guarantee on this side of the boundary. Callers
+    // borrow via [`Self::as_slice`].
+    //
+    // ZeroizeOnDrop scope: this type owns the persistent reference
+    // the publish-job worker holds across the HTTP send; when the
+    // outer scope drops, the bytes are wiped. The transport layer
+    // (`HttpWebPushSender`) does have to copy the slice into a
+    // separate owned `Vec<u8>` to hand to reqwest's request body
+    // (reqwest doesn't expose a hook to zeroize the body buffer after
+    // send). That in-flight copy is encrypted ciphertext + the
+    // aes128gcm header (salt + AS public key); the header is also
+    // visible to the relay in plaintext, so the residual heap
+    // exposure on that copy is bounded to "what the relay already
+    // sees" plus zero plaintext. Documented gap, not a regression.
 }
 
 /// Signed VAPID JWT, ready for `Authorization: vapid t=…` use.
@@ -387,6 +405,18 @@ impl EndpointHash {
         let mut out = [0u8; 32];
         out.copy_from_slice(&hasher.finalize());
         Self(out)
+    }
+}
+
+impl fmt::Display for EndpointHash {
+    /// Renders the first 8 bytes as lowercase hex (16 chars). Enough
+    /// to disambiguate endpoints in tracing without leaking the
+    /// per-device bearer URL.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for byte in &self.0[..8] {
+            write!(f, "{byte:02x}")?;
+        }
+        Ok(())
     }
 }
 
@@ -537,6 +567,96 @@ pub enum VapidLoadError {
     },
     #[error("fresh P-256 keypair generation failed")]
     Generate,
+}
+
+/// Classified outcome of a single Web Push HTTP POST.
+///
+/// Replaces stringly-typed `PushError::SendFailed("HTTP 410")` shapes
+/// with a typed enum the publish-job worker can pattern-match on to
+/// decide cleanup, retry, or alert. Mapped from RFC 8030 response codes
+/// per the table in §6.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WebPushOutcome {
+    /// 2xx — push relay accepted the message.
+    Delivered { status: u16 },
+    /// 404/410 — subscription is permanently gone; trigger XEP-0357 §6
+    /// cleanup forward (IQ-error to publisher) and
+    /// `urn:waddle:push-service:0` disable-device reverse.
+    SubscriptionGone { status: u16 },
+    /// 401 with `WWW-Authenticate: vapid` (RFC 7235 §4.1) — the
+    /// canonical signal per RFC 8292 §3 that the VAPID JWT itself was
+    /// rejected, typically because the relay's clock disagrees with
+    /// ours past the `exp` skew tolerance. The publish-job worker
+    /// invalidates the JWT cache on this outcome (`VapidSigner::
+    /// invalidate_cache`) so the next attempt mints a fresh JWT.
+    /// 401 WITHOUT the `vapid` challenge is classified as
+    /// `BadRequest` instead — relay misconfig or rate-limit auth
+    /// gate, where invalidating the cache would just thrash it.
+    ClockSkew { status: u16 },
+    /// 429 — apply the token-bucket backoff for this endpoint+class.
+    RateLimited {
+        status: u16,
+        retry_after: Option<std::time::Duration>,
+    },
+    /// 413 — body exceeded relay's per-message ceiling. Indicates a
+    /// padding/bucket-class bug, not a transient condition.
+    PayloadTooLarge { status: u16 },
+    /// 400 / 403 / generic 401 — the relay rejected the request and
+    /// no other variant fits (subscription is not gone, JWT was not
+    /// the cause).
+    ///
+    /// `status = 0` is reserved as a sentinel for LOCAL preflight
+    /// failures inside `HttpWebPushSender::send` — non-https
+    /// endpoint reaching the sender despite registration-time
+    /// validation, or a VAPID header that fails `HeaderValue::from_str`.
+    /// There is no HTTP exchange in those cases, so no real status
+    /// code applies; downstream diagnostics render `status = 0` as
+    /// "preflight rejected" rather than the misleading "HTTP 0".
+    BadRequest { status: u16 },
+    /// 5xx, network failure, or anything not matched above. The
+    /// publish-job worker retries via the existing
+    /// `push_publish_jobs.next_retry_at_ms` mechanism.
+    Transient { kind: TransientFailure },
+}
+
+/// The narrow set of transient failure shapes the sender produces.
+/// Kept typed instead of stringly to honor the typed-payloads rule.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TransientFailure {
+    /// Network-layer error (DNS, connect, TLS, body).
+    Network,
+    /// HTTP 5xx from the relay.
+    ServerError { status: u16 },
+    /// Request did not complete within the sender's per-attempt
+    /// timeout budget.
+    Timeout,
+}
+
+/// Reason a downstream send path was suppressed.
+///
+/// Extends the existing T1/legacy suppression machinery so a degraded
+/// XEP-0357 push service can prevent in-band fallbacks (e.g., plaintext
+/// chat-notify) from leaking when the encrypted path is unavailable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SuppressionReason {
+    /// XEP-0357 push service is degraded (no VAPID signer, no nodes
+    /// configured, repeated relay outages). Tracked in tandem with
+    /// [`WebPushCapability`].
+    Xep0357PushServiceDegraded,
+}
+
+/// Boot-time capability of the XEP-0357 push service.
+///
+/// Determined once at `VapidStorage::load_or_provision` time and
+/// refreshed by the publish-job worker on sustained failure. Drives
+/// disco advertisement, T1 gating, and the admin-alert path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WebPushCapability {
+    /// VAPID signer loaded; push service is fully operational.
+    Ready,
+    /// VAPID load failed or persistent relay degradation detected.
+    /// `reason` is preserved so disco can surface a typed condition.
+    Degraded { reason: SuppressionReason },
 }
 
 #[cfg(test)]

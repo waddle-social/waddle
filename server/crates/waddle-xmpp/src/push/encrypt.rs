@@ -172,7 +172,8 @@ pub fn encrypt(
 #[cfg(test)]
 mod tests {
     use super::super::constants::{
-        DEFAULT_PLAINTEXT_BUCKET, DM_PLAINTEXT_BUCKET, WEB_PUSH_MAX_BODY_LEN,
+        AES128GCM_IDLEN_FIELD_LEN, AES128GCM_RS_LEN, AES128GCM_TAG_LEN, DEFAULT_PLAINTEXT_BUCKET,
+        DM_PLAINTEXT_BUCKET, WEB_PUSH_MAX_BODY_LEN,
     };
     use super::*;
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -323,6 +324,116 @@ mod tests {
         assert_eq!(
             body, expected_body,
             "encrypted body must match RFC 8291 §5 expected output byte-for-byte"
+        );
+    }
+
+    /// UA-side RFC 8291 decryption — used to assert that the real
+    /// `encrypt()` function produces output a conformant receiver
+    /// could actually decrypt. A bug in `encrypt()` itself (wrong
+    /// `key_info` order, wrong AES-GCM info string, swapped public-
+    /// key bytes, off-by-one padding) would surface as a decrypt
+    /// failure here. The earlier `rfc_8291_section_5_known_answer_vector`
+    /// test reimplements the pipeline inline; this one drives the
+    /// production code path end-to-end.
+    fn ua_side_decrypt(
+        ua_private: &p256::SecretKey,
+        auth_secret: &[u8; 16],
+        body: &[u8],
+    ) -> Vec<u8> {
+        use p256::elliptic_curve::sec1::FromEncodedPoint;
+        use p256::EncodedPoint;
+        use sha2::Sha256;
+        assert!(
+            body.len() > AES128GCM_HEADER_LEN + AES128GCM_TAG_LEN,
+            "body too short to be a valid aes128gcm record"
+        );
+        let salt = &body[..AES128GCM_SALT_LEN];
+        let idlen = body[AES128GCM_SALT_LEN + AES128GCM_RS_LEN] as usize;
+        assert_eq!(idlen, P256_UNCOMPRESSED_POINT_LEN, "idlen must be 65");
+        let keyid_start = AES128GCM_SALT_LEN + AES128GCM_RS_LEN + AES128GCM_IDLEN_FIELD_LEN;
+        let as_public_bytes = &body[keyid_start..keyid_start + idlen];
+        let ciphertext = &body[AES128GCM_HEADER_LEN..];
+        let as_pub_point = EncodedPoint::from_bytes(as_public_bytes).expect("as public");
+        let as_public =
+            p256::PublicKey::from_encoded_point(&as_pub_point).expect("as public valid");
+
+        let shared = elliptic_curve::ecdh::diffie_hellman(
+            ua_private.to_nonzero_scalar(),
+            as_public.as_affine(),
+        );
+        let dh = shared.raw_secret_bytes();
+
+        let ua_public_encoded = ua_private.public_key().to_encoded_point(false);
+        let ua_public_bytes = ua_public_encoded.as_bytes();
+        let prk_key = Hkdf::<Sha256>::new(Some(auth_secret), dh);
+        let mut key_info =
+            Vec::with_capacity(WEBPUSH_INFO_PREFIX.len() + 2 * P256_UNCOMPRESSED_POINT_LEN);
+        key_info.extend_from_slice(WEBPUSH_INFO_PREFIX);
+        key_info.extend_from_slice(ua_public_bytes);
+        key_info.extend_from_slice(as_public_bytes);
+        let mut ikm = [0u8; HKDF_PRK_LEN];
+        prk_key.expand(&key_info, &mut ikm).expect("prk_key expand");
+
+        let prk = Hkdf::<Sha256>::new(Some(salt), &ikm);
+        let mut cek = [0u8; HKDF_CEK_LEN];
+        prk.expand(AES128GCM_KEY_INFO, &mut cek).expect("cek");
+        let mut nonce = [0u8; HKDF_NONCE_LEN];
+        prk.expand(AES128GCM_NONCE_INFO, &mut nonce).expect("nonce");
+
+        let cipher = Aes128Gcm::new_from_slice(&cek).expect("cipher");
+        let padded = cipher
+            .decrypt((&nonce).into(), ciphertext)
+            .expect("decrypt");
+
+        // Strip RFC 8188 §2 padding: `plaintext || 0x02 || 0x00*` for
+        // the last record.
+        let mut end = padded.len();
+        while end > 0 && padded[end - 1] == 0 {
+            end -= 1;
+        }
+        assert!(end > 0, "padding had no delimiter");
+        assert_eq!(
+            padded[end - 1],
+            AES128GCM_LAST_RECORD_DELIM,
+            "expected last-record delimiter 0x02 before trailing zeros"
+        );
+        padded[..end - 1].to_vec()
+    }
+
+    /// Drive the production `encrypt()` function with the RFC 8291 §5
+    /// UA keypair and assert the output is decryptable back to the
+    /// original plaintext. Catches any future bug in `encrypt()` that
+    /// would silently ship an undecryptable body (wrong info-string
+    /// order, swapped public-key bytes, etc.) — the inline KAT above
+    /// only validates the inline reimplementation.
+    #[test]
+    fn encrypt_output_decrypts_under_rfc_8291_section_5_ua_keys() {
+        use p256::elliptic_curve::sec1::FromEncodedPoint;
+        use p256::EncodedPoint;
+        let ua_private_b64 = "q1dXpw3UpT5VOmu_cf_v6ih07Aems3njxI-JWgLcM94";
+        let ua_public_b64 = "BCVxsr7N_eNgVRqvHtD0zTZsEc6-VV-JvLexhqUzORcxaOzi6-AYWXvTBHm4bjyPjs7Vd8pZGH6SRpkNtoIAiw4";
+        let auth_b64 = "BTBZMqHH6r4Tts7J_aSIgg";
+
+        let ua_private_bytes = URL_SAFE_NO_PAD.decode(ua_private_b64).unwrap();
+        let ua_private = p256::SecretKey::from_slice(&ua_private_bytes).expect("ua private");
+        let ua_public_bytes = URL_SAFE_NO_PAD.decode(ua_public_b64).unwrap();
+        let ua_pub_point = EncodedPoint::from_bytes(&ua_public_bytes).unwrap();
+        let ua_public = p256::PublicKey::from_encoded_point(&ua_pub_point).unwrap();
+        let auth_bytes = URL_SAFE_NO_PAD.decode(auth_b64).unwrap();
+        let auth: [u8; 16] = auth_bytes.try_into().expect("16-byte auth");
+
+        let subscription = SubscriptionKeys {
+            p256dh: ua_public,
+            auth: std::sync::Arc::new(crate::push::types::AuthSecret::from_bytes(auth)),
+        };
+        let plaintext = b"When I grow up, I want to be a watermelon";
+        let encrypted = encrypt(&subscription, plaintext, DEFAULT_PLAINTEXT_BUCKET)
+            .expect("encrypt() succeeds with the RFC 8291 §5 UA key");
+        let decrypted = ua_side_decrypt(&ua_private, &auth, encrypted.as_slice());
+        assert_eq!(
+            decrypted, plaintext,
+            "encrypt() output must decrypt back to original plaintext under the UA private key — \
+             a regression here means encrypt() is producing undecryptable bodies"
         );
     }
 

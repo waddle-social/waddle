@@ -2,8 +2,10 @@
 
 use std::future::Future;
 use std::pin::Pin;
+#[cfg(any(test, feature = "test-utils"))]
 use std::sync::Arc;
 
+#[cfg(any(test, feature = "test-utils"))]
 use dashmap::DashMap;
 
 use super::{PushError, PushSubscription};
@@ -29,18 +31,22 @@ pub trait PushSubscriptionStore: Send + Sync + 'static {
     ) -> Pin<Box<dyn Future<Output = Result<Vec<PushSubscription>, PushError>> + Send + '_>>;
 }
 
-/// In-memory push subscription store backed by [`DashMap`].
+/// In-memory push subscription store backed by [`DashMap`]. Test-only:
+/// production code must use a durable `PushSubscriptionStore` impl.
+#[cfg(any(test, feature = "test-utils"))]
 #[derive(Debug, Clone)]
 pub struct InMemoryPushStore {
     subs: Arc<DashMap<String, Vec<PushSubscription>>>,
 }
 
+#[cfg(any(test, feature = "test-utils"))]
 impl Default for InMemoryPushStore {
     fn default() -> Self {
         Self::new()
     }
 }
 
+#[cfg(any(test, feature = "test-utils"))]
 impl InMemoryPushStore {
     /// Create a new empty in-memory push store.
     pub fn new() -> Self {
@@ -50,6 +56,7 @@ impl InMemoryPushStore {
     }
 }
 
+#[cfg(any(test, feature = "test-utils"))]
 impl PushSubscriptionStore for InMemoryPushStore {
     fn register(
         &self,

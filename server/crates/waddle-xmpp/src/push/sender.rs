@@ -1,40 +1,96 @@
-//! Web Push notification sender.
+//! RFC 8030 Web Push HTTP transport.
+//!
+//! The sender is intentionally narrow: it accepts a fully prepared
+//! [`WebPushRequest`] (encrypted body, signed VAPID JWT, public-key
+//! base64url, topic/TTL/urgency) and returns a typed
+//! [`WebPushOutcome`]. Encryption and JWT signing live in
+//! `super::encrypt` and `super::vapid` respectively — keeping the
+//! transport free of crypto state means the publish-job worker can sign
+//! once per `(kid, aud, sub)` and reuse the JWT across many devices.
 
 use std::future::Future;
 use std::pin::Pin;
+use std::time::Duration;
 
+use reqwest::header::{HeaderName, HeaderValue, AUTHORIZATION, CONTENT_ENCODING, CONTENT_TYPE};
 use tracing::{debug, warn};
+use url::Url;
 
-use super::store::PushSubscriptionStore;
-use super::{PushError, PushSubscription};
+use super::types::{
+    EncryptedPayload, EndpointHash, PushTopic, TransientFailure, VapidJwt, WebPushOutcome,
+};
 
-/// Trait for sending Web Push notifications.
-pub trait WebPushSender: Send + Sync + 'static {
-    /// Send a push notification to the given subscription.
-    fn send_notification(
-        &self,
-        subscription: &PushSubscription,
-        title: &str,
-        body: &str,
-        room_jid: &str,
-        unread_count: u64,
-    ) -> Pin<Box<dyn Future<Output = Result<(), PushError>> + Send + '_>>;
+/// RFC 8030 `Urgency` header values (§5.3). Carried as a typed enum so
+/// callers can't accidentally emit unknown values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Urgency {
+    VeryLow,
+    Low,
+    Normal,
+    High,
 }
 
-/// HTTP-based Web Push sender that POSTs JSON to a push relay/gateway.
+impl Urgency {
+    fn as_header(self) -> &'static str {
+        match self {
+            Urgency::VeryLow => "very-low",
+            Urgency::Low => "low",
+            Urgency::Normal => "normal",
+            Urgency::High => "high",
+        }
+    }
+}
+
+/// All inputs needed to make one RFC 8030 POST. Borrowed so callers can
+/// reuse a [`VapidJwt`] across the fan-out without cloning per device.
+pub struct WebPushRequest<'a> {
+    pub endpoint: &'a Url,
+    pub payload: &'a EncryptedPayload,
+    pub vapid_jwt: &'a VapidJwt,
+    /// RFC 8292 `k=` value: uncompressed P-256 public key, base64url
+    /// no-pad. Produced once at boot via
+    /// `super::vapid::vapid_k_header`.
+    pub vapid_public_key_b64u: &'a str,
+    pub topic: Option<&'a PushTopic>,
+    pub ttl: u32,
+    pub urgency: Urgency,
+}
+
+/// Transport-layer Web Push sender.
+///
+/// Implementors translate [`WebPushRequest`] → typed
+/// [`WebPushOutcome`]; they MUST NOT return `Result` because every
+/// failure mode is a `WebPushOutcome` variant. This keeps the
+/// publish-job worker's match arms exhaustive.
+pub trait WebPushSender: Send + Sync + 'static {
+    fn send(
+        &self,
+        request: WebPushRequest<'_>,
+    ) -> Pin<Box<dyn Future<Output = WebPushOutcome> + Send + '_>>;
+}
+
+const TTL_HEADER: HeaderName = HeaderName::from_static("ttl");
+const URGENCY_HEADER: HeaderName = HeaderName::from_static("urgency");
+const TOPIC_HEADER: HeaderName = HeaderName::from_static("topic");
+const AES128GCM: &str = "aes128gcm";
+const OCTET_STREAM: &str = "application/octet-stream";
+
 #[derive(Debug, Clone)]
 pub struct HttpWebPushSender {
     client: reqwest::Client,
 }
 
 impl HttpWebPushSender {
-    /// Create a new HTTP Web Push sender with a 10-second request timeout.
     pub fn new() -> Self {
         let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(10))
+            .timeout(Duration::from_secs(10))
             .redirect(reqwest::redirect::Policy::none())
             .build()
             .expect("failed to build HTTP Web Push client");
+        Self { client }
+    }
+
+    pub fn with_client(client: reqwest::Client) -> Self {
         Self { client }
     }
 }
@@ -46,245 +102,708 @@ impl Default for HttpWebPushSender {
 }
 
 impl WebPushSender for HttpWebPushSender {
-    fn send_notification(
+    fn send(
         &self,
-        subscription: &PushSubscription,
-        title: &str,
-        body: &str,
-        room_jid: &str,
-        unread_count: u64,
-    ) -> Pin<Box<dyn Future<Output = Result<(), PushError>> + Send + '_>> {
-        let endpoint = subscription.endpoint.clone();
-        // This sender targets an application relay/gateway endpoint. The relay is
-        // responsible for performing standards-compliant Web Push (VAPID/encryption)
-        // using the subscription keys supplied below.
-        let payload = relay_payload(subscription, title, body, room_jid, unread_count);
+        request: WebPushRequest<'_>,
+    ) -> Pin<Box<dyn Future<Output = WebPushOutcome> + Send + '_>> {
+        // Build the request synchronously so the spawned future owns
+        // nothing borrowed from the caller. Authorization is the only
+        // header that can fail to construct (length / invisible-char
+        // rejection in `HeaderValue::from_str`); a failure there is a
+        // bug in the caller's `vapid_public_key_b64u`, surfaced as
+        // `BadRequest` rather than a panic.
+        let endpoint = request.endpoint.clone();
+        // Strict HTTPS-only invariant on the production code path.
+        // Registration-time validation already rejects non-https
+        // endpoints; the sender re-checks at send time so a future
+        // caller bypassing `WebPushTarget::try_from_sealed`, a
+        // legacy stored endpoint, or any other reach-through can
+        // never POST a VAPID-signed `Authorization` header over a
+        // plaintext scheme. No carve-outs in production builds — the
+        // `cfg(test)` exception below is the ONLY way an in-process
+        // mockito test fixture (which serves `http://127.0.0.1:<port>/`)
+        // reaches the sender, and it never compiles into a release
+        // binary.
+        let scheme_ok = endpoint.scheme() == "https" || allow_non_https_for_test(&endpoint);
+        if !scheme_ok {
+            warn!(
+                endpoint_hash = %EndpointHash::of(endpoint.as_str()),
+                origin = endpoint.origin().ascii_serialization(),
+                scheme = endpoint.scheme(),
+                "Web Push refused: endpoint is not https",
+            );
+            return Box::pin(async move { WebPushOutcome::BadRequest { status: 0 } });
+        }
+        let body = request.payload.as_slice().to_vec();
+
+        let auth_value = format!(
+            "vapid t={}, k={}",
+            request.vapid_jwt.as_str(),
+            request.vapid_public_key_b64u,
+        );
+        let auth_header = match HeaderValue::from_str(&auth_value) {
+            Ok(v) => v,
+            Err(_) => {
+                // Log only the truncated endpoint hash — the full
+                // endpoint URL is a per-device bearer identifier;
+                // anyone with log access could otherwise replay-send
+                // to it.
+                warn!(
+                    endpoint_hash = %EndpointHash::of(endpoint.as_str()),
+                    origin = endpoint.origin().ascii_serialization(),
+                    "VAPID Authorization header is not a valid ASCII HTTP header value",
+                );
+                return Box::pin(async move { WebPushOutcome::BadRequest { status: 0 } });
+            }
+        };
+
+        let topic_value = request
+            .topic
+            .and_then(|t| HeaderValue::from_str(t.as_str()).ok());
+        let ttl_value = HeaderValue::from(request.ttl);
+        let urgency_value = HeaderValue::from_static(request.urgency.as_header());
+
+        let mut builder = self
+            .client
+            .post(endpoint.clone())
+            .header(AUTHORIZATION, auth_header)
+            .header(CONTENT_TYPE, OCTET_STREAM)
+            .header(CONTENT_ENCODING, AES128GCM)
+            .header(TTL_HEADER, ttl_value)
+            .header(URGENCY_HEADER, urgency_value)
+            .body(body);
+        if let Some(topic) = topic_value {
+            builder = builder.header(TOPIC_HEADER, topic);
+        }
+
         Box::pin(async move {
-            let ep = endpoint.as_deref().ok_or(PushError::MissingEndpoint)?;
-            match self.client.post(ep).json(&payload).send().await {
-                Ok(resp) if resp.status().is_success() => {
-                    debug!(endpoint = %ep, "Push notification delivered");
-                    Ok(())
-                }
-                Ok(resp) => {
-                    let status = resp.status();
-                    warn!(endpoint = %ep, status = %status, "Push rejected");
-                    Err(PushError::SendFailed(format!("HTTP {}", status)))
-                }
-                Err(e) => {
-                    warn!(endpoint = %ep, error = %e, "Push delivery failed");
-                    Err(PushError::HttpError(e.to_string()))
-                }
+            match builder.send().await {
+                Ok(resp) => classify_response(resp).await,
+                Err(err) => classify_transport_error(&endpoint, err),
             }
         })
     }
 }
 
-fn room_jid_to_path(room_jid: &str) -> String {
-    let localpart = room_jid.split('@').next().unwrap_or_default();
-    if let Some(channel_id) = crate::parse_managed_room_localpart(localpart) {
-        return format!("/{}", channel_id);
-    }
-    "/".to_string()
-}
+/// Upper bound on the bytes the sender reads from a relay response
+/// body before giving up on connection reuse. Web Push relay error
+/// bodies are tiny (a few hundred bytes max — FCM/Mozilla autopush
+/// return JSON of `{"error":"…"}` shape); 32 KiB is generous headroom
+/// for a typical body while bounding the memory an attacker-controlled
+/// relay can force us to allocate to drain its response.
+const MAX_DRAIN_BYTES: usize = 32 * 1024;
 
-/// Send push notifications for mentioned users.
-pub async fn notify_mentioned_users<S, W>(
-    store: &S,
-    sender: &W,
-    mentioned_jids: &[String],
-    sender_nick: &str,
-    body: &str,
-    room_jid: &str,
-    unread_count: u64,
-) where
-    S: PushSubscriptionStore + ?Sized,
-    W: WebPushSender + ?Sized,
-{
-    for jid in mentioned_jids {
-        let subs = match store.get_for_user(jid).await {
-            Ok(s) => s,
-            Err(e) => {
-                debug!(user_jid = %jid, error = %e, "Failed to get push subs");
-                continue;
-            }
-        };
-        if subs.is_empty() {
-            continue;
+/// Drain a response body up to [`MAX_DRAIN_BYTES`] so the underlying
+/// hyper connection can be returned to the pool. Bounded so an
+/// attacker-controlled relay cannot OOM us by streaming an arbitrarily
+/// large response body. Two early-out paths:
+///
+/// 1. `Content-Length > MAX_DRAIN_BYTES` — drop the response without
+///    draining (sacrifices connection reuse for this single response;
+///    the next send opens a fresh connection).
+/// 2. Cumulative chunks exceed `MAX_DRAIN_BYTES` mid-stream — stop
+///    reading and let `resp` drop on the way out of the function;
+///    reqwest will close the connection rather than reuse it.
+async fn drain_body_bounded(mut resp: reqwest::Response) {
+    if let Some(len) = resp.content_length() {
+        if len > MAX_DRAIN_BYTES as u64 {
+            return;
         }
-        let title = format!("@{} mentioned you", sender_nick);
-        let preview = if body.len() > 100 {
-            let end = body.char_indices().nth(100).map_or(body.len(), |(i, _)| i);
-            format!("{}...", &body[..end])
-        } else {
-            body.to_string()
-        };
-        for sub in &subs {
-            if let Err(e) = sender
-                .send_notification(sub, &title, &preview, room_jid, unread_count)
-                .await
-            {
-                debug!(user_jid = %jid, error = %e, "Push notification failed");
-            }
+    }
+    let mut total = 0usize;
+    while let Ok(Some(chunk)) = resp.chunk().await {
+        total = total.saturating_add(chunk.len());
+        if total > MAX_DRAIN_BYTES {
+            return;
         }
     }
 }
 
-fn relay_payload(
-    subscription: &PushSubscription,
-    title: &str,
-    body: &str,
-    room_jid: &str,
-    unread_count: u64,
-) -> serde_json::Value {
-    serde_json::json!({
-        "title": title,
-        "body": body,
-        "roomJid": room_jid,
-        "url": room_jid_to_path(room_jid),
-        "message-count": unread_count,
-        // Typed routing context for the chat service worker
-        // (#528). Mirrors the `<context xmlns='urn:waddle:push:context:0'/>`
-        // element emitted on the XEP-0357 outbox path. The legacy
-        // relay path here doesn't have thread/class on hand, so the
-        // SW falls through to domain-prefix MUC detection.
-        "context": {
-            "conversation": room_jid,
+async fn classify_response(resp: reqwest::Response) -> WebPushOutcome {
+    let status = resp.status();
+    let code = status.as_u16();
+    if status.is_success() {
+        drain_body_bounded(resp).await;
+        debug!(status = %status, "Web Push delivered");
+        return WebPushOutcome::Delivered { status: code };
+    }
+    // Snapshot headers used by classification BEFORE draining the
+    // body (which consumes `resp`).
+    let retry_after = resp
+        .headers()
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|v| v.to_str().ok())
+        .and_then(parse_retry_after);
+    let www_authenticate = resp
+        .headers()
+        .get(reqwest::header::WWW_AUTHENTICATE)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_ascii_lowercase());
+    drain_body_bounded(resp).await;
+    match code {
+        // 404 / 410 are the textbook "subscription gone" signals
+        // (RFC 8030 §6). 403 is NOT folded in: while FCM does use 403
+        // for "VAPID key not authorized for this endpoint", it also
+        // uses it for cluster-wide VAPID rejection (wrong `aud`,
+        // expired `exp` past the relay's tolerance, malformed JWT)
+        // which is a deployment bug affecting ALL devices, not a
+        // per-device subscription expiry. Routing every 403 to
+        // SubscriptionGone would mass-disable devices on a
+        // configuration error. Keep 403 as `BadRequest` (permanent,
+        // non-disabling) so the failure surfaces in the operator
+        // audit without bricking the user base.
+        404 | 410 => WebPushOutcome::SubscriptionGone { status: code },
+        // 401 means "VAPID JWT rejected" per RFC 8292 §3. The most
+        // common cause is clock skew (relay rejects our `exp`); we
+        // only label it `ClockSkew` when the relay echoes a vapid
+        // scheme in `WWW-Authenticate` (RFC 7235 §4.1), the canonical
+        // signal that the JWT itself was at fault. Otherwise treat as
+        // a generic permanent auth failure to avoid invalidating the
+        // JWT cache on unrelated 401 conditions.
+        401 if matches!(&www_authenticate, Some(v) if v.contains("vapid")) => {
+            WebPushOutcome::ClockSkew { status: code }
+        }
+        401 | 403 => WebPushOutcome::BadRequest { status: code },
+        413 => WebPushOutcome::PayloadTooLarge { status: code },
+        429 => WebPushOutcome::RateLimited {
+            status: code,
+            retry_after,
         },
-        "endpoint": subscription.endpoint.as_deref(),
-        "p256dh": subscription.p256dh.as_deref(),
-        "auth": subscription.auth_key.as_deref(),
-    })
+        // 400 is "our payload shape is wrong" — encoder bug, not a
+        // per-device problem. Surfaces in attempts for operator
+        // action; the device row stays active so the next publish
+        // succeeds once the bug is fixed.
+        400 => WebPushOutcome::BadRequest { status: code },
+        500..=599 => WebPushOutcome::Transient {
+            kind: TransientFailure::ServerError { status: code },
+        },
+        _ => WebPushOutcome::BadRequest { status: code },
+    }
+}
+
+fn classify_transport_error(endpoint: &Url, err: reqwest::Error) -> WebPushOutcome {
+    let endpoint_hash = EndpointHash::of(endpoint.as_str());
+    let origin = endpoint.origin().ascii_serialization();
+    if err.is_timeout() {
+        warn!(endpoint_hash = %endpoint_hash, origin = origin, error = %err, "Web Push timeout");
+        WebPushOutcome::Transient {
+            kind: TransientFailure::Timeout,
+        }
+    } else {
+        warn!(endpoint_hash = %endpoint_hash, origin = origin, error = %err, "Web Push transport failure");
+        WebPushOutcome::Transient {
+            kind: TransientFailure::Network,
+        }
+    }
+}
+
+/// Whether the HTTPS-only invariant accepts this endpoint. Production
+/// builds (`cfg(not(test))`) ALWAYS return false — there is no
+/// carve-out, no loopback exception, no environment override. The
+/// `cfg(test)` build permits loopback hosts so mockito test fixtures
+/// (which serve `http://127.0.0.1:<port>/`) can exercise the
+/// classifier; this branch never compiles into a release binary.
+#[cfg(not(test))]
+fn allow_non_https_for_test(_endpoint: &Url) -> bool {
+    false
+}
+
+#[cfg(test)]
+fn allow_non_https_for_test(endpoint: &Url) -> bool {
+    match endpoint.host() {
+        Some(url::Host::Ipv4(addr)) => addr.is_loopback(),
+        Some(url::Host::Ipv6(addr)) => addr.is_loopback(),
+        Some(url::Host::Domain(name)) => {
+            let lower = name.to_ascii_lowercase();
+            lower == "localhost" || lower.ends_with(".localhost")
+        }
+        None => false,
+    }
+}
+
+/// RFC 7231 §7.1.3 `Retry-After` is either a delta-seconds or an
+/// HTTP-date. Only the delta-seconds form is honored — HTTP-date
+/// parsing would pull in another dep for a value the publish-job
+/// worker already clamps against `next_retry_at_ms` policy.
+fn parse_retry_after(value: &str) -> Option<Duration> {
+    value.trim().parse::<u64>().ok().map(Duration::from_secs)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::super::store::InMemoryPushStore;
     use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use crate::push::types::{AuthSecret, EncryptedPayload, PushTopic, VapidJwt};
+    use std::sync::Arc;
 
-    struct MockSender(AtomicUsize);
-    impl MockSender {
-        fn new() -> Self {
-            Self(AtomicUsize::new(0))
-        }
-        fn count(&self) -> usize {
-            self.0.load(Ordering::SeqCst)
-        }
+    fn dummy_jwt() -> VapidJwt {
+        // Three-segment ASCII string; jsonwebtoken doesn't validate here.
+        VapidJwt::new("eyJhbGciOiJFUzI1NiJ9.eyJhdWQiOiJodHRwczovL2V4Lm9yZyJ9.sig").expect("jwt")
     }
-    impl WebPushSender for MockSender {
-        fn send_notification(
-            &self,
-            _: &PushSubscription,
-            _: &str,
-            _: &str,
-            _: &str,
-            _: u64,
-        ) -> Pin<Box<dyn Future<Output = Result<(), PushError>> + Send + '_>> {
-            self.0.fetch_add(1, Ordering::SeqCst);
-            Box::pin(async { Ok(()) })
-        }
+
+    fn _ensure_arc_authsecret_compiles() {
+        // Compile-time guard so this file's tests link against the
+        // typed `AuthSecret` API rather than reaching for a `&[u8]`.
+        let _: Arc<AuthSecret> = Arc::new(AuthSecret::from_bytes([0u8; 16]));
+    }
+
+    fn payload() -> EncryptedPayload {
+        EncryptedPayload::new(vec![0xAB; 32])
+    }
+
+    #[test]
+    fn urgency_header_values() {
+        assert_eq!(Urgency::VeryLow.as_header(), "very-low");
+        assert_eq!(Urgency::Low.as_header(), "low");
+        assert_eq!(Urgency::Normal.as_header(), "normal");
+        assert_eq!(Urgency::High.as_header(), "high");
+    }
+
+    #[test]
+    fn parse_retry_after_seconds() {
+        assert_eq!(parse_retry_after("30"), Some(Duration::from_secs(30)));
+        assert_eq!(parse_retry_after(" 30 "), Some(Duration::from_secs(30)));
+    }
+
+    #[test]
+    fn parse_retry_after_rejects_http_date() {
+        // We only honor delta-seconds; HTTP-date returns None.
+        assert_eq!(parse_retry_after("Fri, 31 Dec 1999 23:59:59 GMT"), None);
     }
 
     #[tokio::test]
-    async fn test_notify_sends_to_subscribed() {
-        let store = InMemoryPushStore::new();
-        store
-            .register(PushSubscription {
-                user_jid: "alice@ex".into(),
-                service_jid: "push.ex".into(),
-                node: Some("n1".into()),
-                publish_options: None,
-                endpoint: Some("https://ep".into()),
-                p256dh: None,
-                auth_key: None,
+    async fn classify_2xx_is_delivered() {
+        let server = mockito::Server::new_async().await;
+        let mut server = server;
+        let m = server
+            .mock("POST", "/p/abc")
+            .with_status(201)
+            .create_async()
+            .await;
+        let url = Url::parse(&format!("{}/p/abc", server.url())).unwrap();
+        let sender = HttpWebPushSender::new();
+        let jwt = dummy_jwt();
+        let p = payload();
+        let topic = PushTopic::new("d-test").ok();
+        let outcome = sender
+            .send(WebPushRequest {
+                endpoint: &url,
+                payload: &p,
+                vapid_jwt: &jwt,
+                vapid_public_key_b64u: "BFoo",
+                topic: topic.as_ref(),
+                ttl: 60,
+                urgency: Urgency::Normal,
             })
-            .await
-            .expect("ok");
-
-        let sender = MockSender::new();
-        notify_mentioned_users(
-            &store,
-            &sender,
-            &["alice@ex".into(), "bob@ex".into()],
-            "charlie",
-            "Hey!",
-            "room@muc",
-            3,
-        )
-        .await;
-        assert_eq!(sender.count(), 1); // only alice has a sub
+            .await;
+        m.assert_async().await;
+        assert!(matches!(outcome, WebPushOutcome::Delivered { status: 201 }));
     }
 
     #[tokio::test]
-    async fn test_notify_no_subs() {
-        let store = InMemoryPushStore::new();
-        let sender = MockSender::new();
-        notify_mentioned_users(
-            &store,
-            &sender,
-            &["alice@ex".into()],
-            "bob",
-            "Hi",
-            "room@muc",
-            0,
-        )
-        .await;
-        assert_eq!(sender.count(), 0);
+    async fn classify_410_is_subscription_gone() {
+        let server = mockito::Server::new_async().await;
+        let mut server = server;
+        let m = server
+            .mock("POST", "/p/x")
+            .with_status(410)
+            .create_async()
+            .await;
+        let url = Url::parse(&format!("{}/p/x", server.url())).unwrap();
+        let sender = HttpWebPushSender::new();
+        let jwt = dummy_jwt();
+        let p = payload();
+        let outcome = sender
+            .send(WebPushRequest {
+                endpoint: &url,
+                payload: &p,
+                vapid_jwt: &jwt,
+                vapid_public_key_b64u: "BFoo",
+                topic: None,
+                ttl: 60,
+                urgency: Urgency::Normal,
+            })
+            .await;
+        m.assert_async().await;
+        assert!(matches!(
+            outcome,
+            WebPushOutcome::SubscriptionGone { status: 410 }
+        ));
+    }
+
+    #[tokio::test]
+    async fn classify_401_with_vapid_www_authenticate_is_clock_skew() {
+        // 401 + `WWW-Authenticate: vapid` is the RFC 8292 §3 signal
+        // that the JWT itself was rejected — clock skew or expired
+        // exp. Worker invalidates the JWT cache on this outcome.
+        let server = mockito::Server::new_async().await;
+        let mut server = server;
+        let m = server
+            .mock("POST", "/p/y")
+            .with_status(401)
+            .with_header("www-authenticate", "vapid")
+            .create_async()
+            .await;
+        let url = Url::parse(&format!("{}/p/y", server.url())).unwrap();
+        let sender = HttpWebPushSender::new();
+        let jwt = dummy_jwt();
+        let p = payload();
+        let outcome = sender
+            .send(WebPushRequest {
+                endpoint: &url,
+                payload: &p,
+                vapid_jwt: &jwt,
+                vapid_public_key_b64u: "BFoo",
+                topic: None,
+                ttl: 60,
+                urgency: Urgency::Normal,
+            })
+            .await;
+        m.assert_async().await;
+        assert!(matches!(outcome, WebPushOutcome::ClockSkew { status: 401 }));
+    }
+
+    #[tokio::test]
+    async fn classify_401_without_vapid_www_authenticate_is_bad_request() {
+        // Generic 401 without the vapid challenge — could be relay
+        // misconfig or rate-limit-style auth gate. Do NOT invalidate
+        // the JWT cache; classify as BadRequest so the operator audit
+        // surfaces the cause without thrashing the cache.
+        let server = mockito::Server::new_async().await;
+        let mut server = server;
+        let m = server
+            .mock("POST", "/p/y")
+            .with_status(401)
+            .create_async()
+            .await;
+        let url = Url::parse(&format!("{}/p/y", server.url())).unwrap();
+        let sender = HttpWebPushSender::new();
+        let jwt = dummy_jwt();
+        let p = payload();
+        let outcome = sender
+            .send(WebPushRequest {
+                endpoint: &url,
+                payload: &p,
+                vapid_jwt: &jwt,
+                vapid_public_key_b64u: "BFoo",
+                topic: None,
+                ttl: 60,
+                urgency: Urgency::Normal,
+            })
+            .await;
+        m.assert_async().await;
+        assert!(matches!(
+            outcome,
+            WebPushOutcome::BadRequest { status: 401 }
+        ));
+    }
+
+    #[tokio::test]
+    async fn classify_413_is_payload_too_large() {
+        let server = mockito::Server::new_async().await;
+        let mut server = server;
+        let m = server
+            .mock("POST", "/p/z")
+            .with_status(413)
+            .create_async()
+            .await;
+        let url = Url::parse(&format!("{}/p/z", server.url())).unwrap();
+        let sender = HttpWebPushSender::new();
+        let jwt = dummy_jwt();
+        let p = payload();
+        let outcome = sender
+            .send(WebPushRequest {
+                endpoint: &url,
+                payload: &p,
+                vapid_jwt: &jwt,
+                vapid_public_key_b64u: "BFoo",
+                topic: None,
+                ttl: 60,
+                urgency: Urgency::Normal,
+            })
+            .await;
+        m.assert_async().await;
+        assert!(matches!(
+            outcome,
+            WebPushOutcome::PayloadTooLarge { status: 413 }
+        ));
+    }
+
+    #[tokio::test]
+    async fn classify_429_carries_retry_after() {
+        let server = mockito::Server::new_async().await;
+        let mut server = server;
+        let m = server
+            .mock("POST", "/p/q")
+            .with_status(429)
+            .with_header("retry-after", "45")
+            .create_async()
+            .await;
+        let url = Url::parse(&format!("{}/p/q", server.url())).unwrap();
+        let sender = HttpWebPushSender::new();
+        let jwt = dummy_jwt();
+        let p = payload();
+        let outcome = sender
+            .send(WebPushRequest {
+                endpoint: &url,
+                payload: &p,
+                vapid_jwt: &jwt,
+                vapid_public_key_b64u: "BFoo",
+                topic: None,
+                ttl: 60,
+                urgency: Urgency::Normal,
+            })
+            .await;
+        m.assert_async().await;
+        match outcome {
+            WebPushOutcome::RateLimited {
+                status: 429,
+                retry_after,
+            } => {
+                assert_eq!(retry_after, Some(Duration::from_secs(45)));
+            }
+            other => panic!("expected RateLimited, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn classify_5xx_is_transient_server_error() {
+        let server = mockito::Server::new_async().await;
+        let mut server = server;
+        let m = server
+            .mock("POST", "/p/s")
+            .with_status(503)
+            .create_async()
+            .await;
+        let url = Url::parse(&format!("{}/p/s", server.url())).unwrap();
+        let sender = HttpWebPushSender::new();
+        let jwt = dummy_jwt();
+        let p = payload();
+        let outcome = sender
+            .send(WebPushRequest {
+                endpoint: &url,
+                payload: &p,
+                vapid_jwt: &jwt,
+                vapid_public_key_b64u: "BFoo",
+                topic: None,
+                ttl: 60,
+                urgency: Urgency::Normal,
+            })
+            .await;
+        m.assert_async().await;
+        assert!(matches!(
+            outcome,
+            WebPushOutcome::Transient {
+                kind: TransientFailure::ServerError { status: 503 }
+            }
+        ));
     }
 
     #[test]
-    fn relay_payload_includes_xep_0357_message_count() {
-        let subscription = PushSubscription {
-            user_jid: "alice@ex".into(),
-            service_jid: "push.ex".into(),
-            node: Some("n1".into()),
-            publish_options: None,
-            endpoint: Some("https://ep".into()),
-            p256dh: Some("BASE64KEY".into()),
-            auth_key: Some("BASE64AUTH".into()),
-        };
-        let payload = relay_payload(
-            &subscription,
-            "Waddle",
-            "New message",
-            "c2@conference.example.com",
-            6,
-        );
-
-        assert_eq!(payload["message-count"], 6);
-        assert_eq!(payload["url"], "/c2");
-        assert_eq!(payload["endpoint"], "https://ep");
-        assert_eq!(payload["p256dh"], "BASE64KEY");
-        assert_eq!(payload["auth"], "BASE64AUTH");
+    fn allow_non_https_for_test_is_false_for_real_relay_hosts() {
+        // Compile-time guard: the test-only carve-out for
+        // `http://` MUST NOT match any host that could appear in
+        // production. Verifies the cfg(test) implementation only
+        // recognizes loopback. If someone adds a non-loopback case
+        // to the cfg(test) branch (e.g., `example.com`), this test
+        // fails and forces a re-think.
+        let urls = [
+            "http://push.example.com/abc",
+            "http://fcm.googleapis.com/fcm/send/abc",
+            "http://updates.push.services.mozilla.com/wpush/v1/abc",
+        ];
+        for raw in urls {
+            let u = Url::parse(raw).unwrap();
+            assert!(
+                !allow_non_https_for_test(&u),
+                "{raw} must not be accepted by the test carve-out"
+            );
+        }
+        // Loopback IS accepted, since mockito fixtures need it.
+        for raw in [
+            "http://127.0.0.1:1234/abc",
+            "http://[::1]:1234/abc",
+            "http://localhost:1234/abc",
+        ] {
+            let u = Url::parse(raw).unwrap();
+            assert!(
+                allow_non_https_for_test(&u),
+                "{raw} must be accepted in cfg(test)"
+            );
+        }
     }
 
-    #[test]
-    fn relay_payload_carries_typed_routing_context_for_chat_sw() {
-        // The chat service worker discriminates DM vs MUC routing via
-        // the typed `context` envelope (#528). The legacy relay path
-        // doesn't have thread/class on hand — verify it at least
-        // surfaces `conversation` so the SW's domain-prefix MUC
-        // fallback has the JID to work with.
-        let subscription = PushSubscription {
-            user_jid: "alice@ex".into(),
-            service_jid: "push.ex".into(),
-            node: Some("n1".into()),
-            publish_options: None,
-            endpoint: Some("https://ep".into()),
-            p256dh: Some("BASE64KEY".into()),
-            auth_key: Some("BASE64AUTH".into()),
-        };
-        let payload = relay_payload(&subscription, "Waddle", "", "c2@conference.example.com", 1);
-        assert_eq!(
-            payload["context"]["conversation"],
-            "c2@conference.example.com"
-        );
+    #[tokio::test]
+    async fn refuses_non_https_non_loopback_endpoint() {
+        // Production-shaped non-https URL: the strict invariant must
+        // reject it even in cfg(test) builds (the carve-out only
+        // matches loopback).
+        let url = Url::parse("http://push.example.com/abc").unwrap();
+        let sender = HttpWebPushSender::new();
+        let jwt = dummy_jwt();
+        let p = payload();
+        let outcome = sender
+            .send(WebPushRequest {
+                endpoint: &url,
+                payload: &p,
+                vapid_jwt: &jwt,
+                vapid_public_key_b64u: "BFoo",
+                topic: None,
+                ttl: 60,
+                urgency: Urgency::Normal,
+            })
+            .await;
+        assert!(matches!(outcome, WebPushOutcome::BadRequest { status: 0 }));
     }
 
-    #[test]
-    fn room_jid_to_path_uses_channel_id() {
-        assert_eq!(room_jid_to_path("c2@conference.example.com"), "/c2");
-        assert_eq!(room_jid_to_path("@conference.example.com"), "/");
+    #[tokio::test]
+    async fn drain_body_bounded_handles_large_response_without_panic() {
+        // Relay returns a body larger than `MAX_DRAIN_BYTES`. The
+        // sender must classify the response without OOMing or
+        // panicking — `drain_body_bounded` bails on either the
+        // Content-Length fast path or the cumulative-chunk path.
+        // Either way the outcome is correctly classified from the
+        // status code.
+        let server = mockito::Server::new_async().await;
+        let mut server = server;
+        let big_body = vec![b'A'; MAX_DRAIN_BYTES * 2]; // 64 KiB
+        let m = server
+            .mock("POST", "/p/big")
+            .with_status(500)
+            .with_header("content-type", "text/plain")
+            .with_body(big_body)
+            .create_async()
+            .await;
+        let url = Url::parse(&format!("{}/p/big", server.url())).unwrap();
+        let sender = HttpWebPushSender::new();
+        let jwt = dummy_jwt();
+        let p = payload();
+        let outcome = sender
+            .send(WebPushRequest {
+                endpoint: &url,
+                payload: &p,
+                vapid_jwt: &jwt,
+                vapid_public_key_b64u: "BFoo",
+                topic: None,
+                ttl: 60,
+                urgency: Urgency::Normal,
+            })
+            .await;
+        m.assert_async().await;
+        // 5xx → Transient::ServerError. The body was too large for
+        // full drain, but classification proceeded from headers/status.
+        assert!(matches!(
+            outcome,
+            WebPushOutcome::Transient {
+                kind: TransientFailure::ServerError { status: 500 }
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn classify_400_is_bad_request() {
+        let server = mockito::Server::new_async().await;
+        let mut server = server;
+        let m = server
+            .mock("POST", "/p/b")
+            .with_status(400)
+            .create_async()
+            .await;
+        let url = Url::parse(&format!("{}/p/b", server.url())).unwrap();
+        let sender = HttpWebPushSender::new();
+        let jwt = dummy_jwt();
+        let p = payload();
+        let outcome = sender
+            .send(WebPushRequest {
+                endpoint: &url,
+                payload: &p,
+                vapid_jwt: &jwt,
+                vapid_public_key_b64u: "BFoo",
+                topic: None,
+                ttl: 60,
+                urgency: Urgency::Normal,
+            })
+            .await;
+        m.assert_async().await;
+        assert!(matches!(
+            outcome,
+            WebPushOutcome::BadRequest { status: 400 }
+        ));
+    }
+
+    #[tokio::test]
+    async fn classify_403_is_bad_request_not_subscription_gone() {
+        // 403 is overloaded by real relays: it covers "VAPID key not
+        // authorized for this endpoint" (per-device) AND cluster-wide
+        // JWT rejection (wrong aud / expired exp / malformed JWT)
+        // which is a deployment bug affecting all devices. Routing
+        // every 403 to SubscriptionGone would mass-disable on a
+        // config error. Classify as BadRequest (permanent, non-
+        // disabling) so the failure surfaces in the operator audit
+        // without bricking the user base.
+        let server = mockito::Server::new_async().await;
+        let mut server = server;
+        let m = server
+            .mock("POST", "/p/forbidden")
+            .with_status(403)
+            .create_async()
+            .await;
+        let url = Url::parse(&format!("{}/p/forbidden", server.url())).unwrap();
+        let sender = HttpWebPushSender::new();
+        let jwt = dummy_jwt();
+        let p = payload();
+        let outcome = sender
+            .send(WebPushRequest {
+                endpoint: &url,
+                payload: &p,
+                vapid_jwt: &jwt,
+                vapid_public_key_b64u: "BFoo",
+                topic: None,
+                ttl: 60,
+                urgency: Urgency::Normal,
+            })
+            .await;
+        m.assert_async().await;
+        assert!(matches!(
+            outcome,
+            WebPushOutcome::BadRequest { status: 403 }
+        ));
+    }
+
+    #[tokio::test]
+    async fn sends_aes128gcm_headers_and_body() {
+        let server = mockito::Server::new_async().await;
+        let mut server = server;
+        let m = server
+            .mock("POST", "/p/h")
+            .match_header("content-encoding", "aes128gcm")
+            .match_header("content-type", "application/octet-stream")
+            .match_header("ttl", "120")
+            .match_header("urgency", "high")
+            .match_header("topic", "d-fingerprint")
+            .match_header(
+                "authorization",
+                "vapid t=eyJhbGciOiJFUzI1NiJ9.eyJhdWQiOiJodHRwczovL2V4Lm9yZyJ9.sig, k=BFoo",
+            )
+            .with_status(201)
+            .create_async()
+            .await;
+        let url = Url::parse(&format!("{}/p/h", server.url())).unwrap();
+        let sender = HttpWebPushSender::new();
+        let jwt = dummy_jwt();
+        let p = payload();
+        let topic = PushTopic::new("d-fingerprint").expect("topic");
+        let outcome = sender
+            .send(WebPushRequest {
+                endpoint: &url,
+                payload: &p,
+                vapid_jwt: &jwt,
+                vapid_public_key_b64u: "BFoo",
+                topic: Some(&topic),
+                ttl: 120,
+                urgency: Urgency::High,
+            })
+            .await;
+        m.assert_async().await;
+        assert!(matches!(outcome, WebPushOutcome::Delivered { status: 201 }));
     }
 }

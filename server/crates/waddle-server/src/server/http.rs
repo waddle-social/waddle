@@ -434,6 +434,35 @@ async fn create_websocket_state(
         .await
         .map_err(|error| anyhow::anyhow!("failed to initialize XEP-0357 storage: {error}"))?,
     );
+    // Provision (or load) the VAPID signing key once at boot. The
+    // signer is `Arc<dyn VapidSigner>` so the publish-job worker can
+    // sign once per (kid, aud, sub) and share the JWT across the device
+    // fan-out. `load_or_provision` returns `Err` only when the root key
+    // is unusable or the env-bootstrap value is malformed — in that
+    // case the entire push service degrades, so the caller intentionally
+    // fails boot rather than silently dispatching without VAPID.
+    let vapid_signer = crate::push_service::vapid_storage::VapidStorage::load_or_provision(
+        state.db_pool.global().clone(),
+        server_config.session_key.as_bytes(),
+    )
+    .await
+    .map_err(|error| anyhow::anyhow!("failed to load VAPID signer: {error}"))?;
+    // Rate-limit outbound sends: global semaphore caps concurrent
+    // requests at 64; per-(endpoint, urgency) leaky bucket spaces
+    // same-pair sends to at least 100ms apart so one chatty relay+class
+    // can't monopolize the global cap.
+    let limiter = Arc::new(waddle_xmpp::push::limiter::Limiter::with_defaults());
+    let raw_sender: Arc<dyn waddle_xmpp::push::WebPushSender> =
+        Arc::new(waddle_xmpp::push::HttpWebPushSender::new());
+    let web_push_sender: Arc<dyn waddle_xmpp::push::WebPushSender> = Arc::new(
+        waddle_xmpp::push::limiter::RateLimitedWebPushSender::new(raw_sender, limiter),
+    );
+    // RFC 8292 §2 — the VAPID `sub` claim identifies this push service
+    // operator. We use `mailto:postmaster@<xmpp_domain>` per RFC 2142 so
+    // relays (FCM, Mozilla autopush, Apple Web Push) have a reachable
+    // contact when our deliveries misbehave.
+    let vapid_sub = waddle_xmpp::push::types::VapidSub::default_for_domain(&xmpp_domain)
+        .map_err(|error| anyhow::anyhow!("failed to derive VAPID sub claim: {error}"))?;
     let push_service = Arc::new(
         crate::push_service::DatabasePushServiceStore::new_with_secret_key_and_pubsub(
             state.db_pool.global().clone(),
@@ -442,7 +471,8 @@ async fn create_websocket_state(
             Arc::clone(&pubsub_storage),
         )
         .await
-        .map_err(|error| anyhow::anyhow!("failed to initialize XMPP Push Service: {error}"))?,
+        .map_err(|error| anyhow::anyhow!("failed to initialize XMPP Push Service: {error}"))?
+        .with_web_push_provider(vapid_signer, web_push_sender, vapid_sub),
     );
     let notification_outbox = Arc::new(
         crate::notification_outbox::NotificationOutboxStore::new(state.db_pool.global().clone())
