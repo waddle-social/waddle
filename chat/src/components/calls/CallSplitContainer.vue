@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, toRef } from "vue";
+import { computed, ref } from "vue";
 import { useStore } from "@nanostores/vue";
 import {
   $callState,
@@ -11,6 +11,7 @@ import {
   $callMicEnabled,
   $callCamEnabled,
   hangupActiveCall,
+  peerLabelFromState,
   toggleCam,
   toggleMic,
 } from "@/lib/calls/call-controls";
@@ -18,22 +19,20 @@ import { useCallEngine } from "@/lib/calls/use-call-engine";
 import { useActiveMucCall } from "@/lib/calls/use-active-muc-call";
 import { useSplitResize } from "@/lib/calls/use-split-resize";
 import { normalizeMucCallRoomJid } from "@/lib/calls/muc-call-presence";
+import { barePeerJid } from "@/lib/xmpp/jid";
 import CallTileGrid from "./CallTileGrid.vue";
 import CallControls from "./CallControls.vue";
 import CallSettingsDialog from "./CallSettingsDialog.vue";
 import SplitDragHandle from "./SplitDragHandle.vue";
 
 /**
- * Inline split-view surface for an active MUC group call.
+ * Inline split-view surface for an active call in the current
+ * conversation.
  *
  * Mounted by `ContentArea.vue` between the channel header/banners
  * and the message timeline. Renders only when ALL of the following
- * hold:
- *   - There is an active call in `$callState` with `kind === "muc"`.
- *   - The room hosting the call matches the channel currently being
- *     viewed (props.roomJid).
- *   - The local user's nick is in that room's Muji-active list.
- *   - `$callUiMode` is `"split"` (not `"fullscreen"`).
+ * MUC calls also require the local user's nick to be in that room's
+ * Muji-active list; 1:1 calls are keyed by the peer's bare JID.
  *
  * The split lives ABOVE the timeline so the chat is always visible
  * beneath; the drag handle resizes the two regions inside the parent
@@ -41,7 +40,9 @@ import SplitDragHandle from "./SplitDragHandle.vue";
  * contract.
  */
 const props = defineProps<{
-  roomJid: string;
+  roomJid?: string;
+  dmPeerJid?: string;
+  dmPeerName?: string;
 }>();
 
 const state = useStore($callState);
@@ -57,28 +58,41 @@ const settingsOpen = ref(false);
 const containerRef = ref<HTMLElement | null>(null);
 
 const normalizedRoomJid = computed(() =>
-  normalizeMucCallRoomJid(props.roomJid),
+  normalizeMucCallRoomJid(props.roomJid ?? ""),
 );
 
-const ownsThisCall = computed(() => {
+const normalizedDmPeerJid = computed(() =>
+  barePeerJid(props.dmPeerJid ?? "").toLowerCase(),
+);
+
+const ownsMucCall = computed(() => {
   return (
+    state.value.phase === "active" &&
+    state.value.kind === "muc" &&
     activeRoomJid.value !== null &&
     activeRoomJid.value === normalizedRoomJid.value
   );
 });
 
+const ownsDmCall = computed(() => {
+  if (state.value.phase !== "active" || state.value.kind !== "dm") return false;
+  const peer = barePeerJid(state.value.peer).toLowerCase();
+  return !!peer && peer === normalizedDmPeerJid.value;
+});
+
 const shouldRender = computed(() => {
   return (
     state.value.phase === "active" &&
-    state.value.kind === "muc" &&
     uiMode.value === "split" &&
-    ownsThisCall.value &&
-    selfInCall.value
+    ((state.value.kind === "muc" && ownsMucCall.value && selfInCall.value) ||
+      (state.value.kind === "dm" && ownsDmCall.value))
   );
 });
 
-const roomJidRef = toRef(props, "roomJid");
-const { isDragging, percent, beginDrag } = useSplitResize(roomJidRef);
+const splitKey = computed(() =>
+  normalizedRoomJid.value || normalizedDmPeerJid.value,
+);
+const { isDragging, percent, beginDrag } = useSplitResize(splitKey);
 
 function getColumnRect(): DOMRect | null {
   // The flex column we resize within is `containerRef`'s offsetParent
@@ -109,10 +123,20 @@ const remoteParticipantCount = computed(() => {
 const subline = computed(() => {
   if (state.value.phase !== "active") return "";
   if (connecting.value) return "Connecting…";
+  if (state.value.kind === "dm") {
+    return state.value.media.video ? "Video call" : "Audio call";
+  }
   const others = remoteParticipantCount.value;
   return others === 0
     ? "Waiting for others to join…"
     : `${others} other${others === 1 ? "" : "s"} in call`;
+});
+
+const callLabel = computed(() => {
+  if (state.value.phase === "active" && state.value.kind === "dm") {
+    return props.dmPeerName || peerLabelFromState();
+  }
+  return peerLabelFromState();
 });
 
 const localIdentity = computed(() => engine.localIdentity);
@@ -135,7 +159,7 @@ async function onHangup(): Promise<void> {
       <header class="call-split__header">
         <div class="call-split__title">
           <span class="call-split__live-dot" aria-hidden="true" />
-          <span class="type-control">Live · {{ subline }}</span>
+          <span class="type-control">Live · {{ callLabel }} · {{ subline }}</span>
         </div>
       </header>
       <div

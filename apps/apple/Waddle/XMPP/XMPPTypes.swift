@@ -330,6 +330,10 @@ struct XMPPCallEvent: Sendable, Equatable {
     /// propose / session-initiate (XEP-0353 §0.6) so responses can
     /// be addressed back to the originating resource.
     let from: String
+    /// Stanza recipient stamped by the parser when available. This
+    /// lets multi-resource clients distinguish self-originated
+    /// carbons without guessing from the sender alone.
+    let to: String?
     /// Jingle session id correlating every stanza for this call.
     let sid: String
     let kind: XMPPCallEventKind
@@ -355,6 +359,7 @@ struct XMPPArchiveMessage: Sendable, Equatable {
     let stanzaID: String?
     let delayedDeliveryTimestamp: Date?
     let message: XMPPMessageEvent
+    let callEvent: XMPPCallEvent?
 }
 
 struct XMPPArchivePage: Sendable, Equatable {

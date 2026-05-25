@@ -57,13 +57,11 @@ pub struct JoinExistingOccupant {
     pub nick: String,
     pub affiliation: Affiliation,
     pub role: Role,
-    /// Snapshot of this occupant's currently-advertised XEP-0272
+    /// Snapshot of this exact session's currently-advertised XEP-0272
     /// `<muji xmlns='urn:xmpp:jingle:muji:0'/>` element at the moment
-    /// the new joiner asked to enter. The replay path appends this
-    /// to the occupant's reflected presence so the joiner immediately
-    /// sees the "in call" chip light up — no separate discovery
-    /// round-trip. `None` when the occupant has no live Muji
-    /// advertisement.
+    /// the new joiner asked to enter. Preparing is resource-owned
+    /// coordination state, so join replay must not stamp an aggregate
+    /// same-nick Muji payload onto an arbitrary full JID.
     pub muji: Option<crate::xep::xep0272::Muji>,
 }
 
@@ -92,6 +90,8 @@ pub struct LeaveOutcome {
     pub remaining_occupants: Vec<FullJid>,
     pub removed_last_session: bool,
     pub cleared_muji_state: bool,
+    pub remaining_muji: Option<crate::xep::xep0272::Muji>,
+    pub remaining_muji_sessions: Vec<(FullJid, crate::xep::xep0272::Muji)>,
     pub remaining_nick_real_jid: Option<FullJid>,
     pub occupant_count: usize,
     /// Mirrors `MucRoom.config.persistent`. Surfaced so the leave

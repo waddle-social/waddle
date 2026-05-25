@@ -255,8 +255,12 @@ pub(crate) fn archived_to_js(archived: ArchivedMessage) -> Option<WaddleArchived
         .collect();
     let parsed = match messaging::parse(&archived.inner) {
         Some(waddle_xmpp_client::MessagingEvent::Message(message)) => Some(message),
-        _ => return None,
+        _ => None,
     };
+    let call_event = messaging::parse_call_event(&archived.inner).map(call_event_to_js);
+    if parsed.is_none() && call_event.is_none() {
+        return None;
+    }
     let (reply_fallback_start, reply_fallback_end) = parsed
         .as_ref()
         .and_then(|message| message.reply_fallback)
@@ -365,6 +369,7 @@ pub(crate) fn archived_to_js(archived: ArchivedMessage) -> Option<WaddleArchived
         extension_body_fallback: parsed
             .as_ref()
             .is_some_and(|message| message.extension_body_fallback),
+        call_event,
     })
 }
 
@@ -425,6 +430,7 @@ pub(crate) fn shared_file_to_js(file: messaging::SharedFile) -> WaddleSharedFile
 pub(crate) fn call_event_to_js(event: InboundCallEvent) -> WaddleCallEvent {
     use waddle_xmpp_client::messaging::CallEventKind;
     let from = event.from.to_string();
+    let to = event.to.map(|jid| jid.to_string());
     // The JS surface keeps `sid` as a plain string — boundary
     // serialization is the explicit I/O exception to the typed-
     // payloads rule. Convert the typed `SessionId` once here.
@@ -432,6 +438,7 @@ pub(crate) fn call_event_to_js(event: InboundCallEvent) -> WaddleCallEvent {
     match event.kind {
         CallEventKind::Propose { media } => WaddleCallEvent {
             from,
+            to,
             sid,
             kind: "propose",
             media: Some(WaddleCallMedia {
@@ -445,6 +452,7 @@ pub(crate) fn call_event_to_js(event: InboundCallEvent) -> WaddleCallEvent {
         },
         CallEventKind::Proceed => WaddleCallEvent {
             from,
+            to,
             sid,
             kind: "proceed",
             media: None,
@@ -455,6 +463,7 @@ pub(crate) fn call_event_to_js(event: InboundCallEvent) -> WaddleCallEvent {
         },
         CallEventKind::Reject { reason, tie_break } => WaddleCallEvent {
             from,
+            to,
             sid,
             kind: "reject",
             media: None,
@@ -466,6 +475,7 @@ pub(crate) fn call_event_to_js(event: InboundCallEvent) -> WaddleCallEvent {
         },
         CallEventKind::Retract { reason, tie_break } => WaddleCallEvent {
             from,
+            to,
             sid,
             kind: "retract",
             media: None,
@@ -480,6 +490,7 @@ pub(crate) fn call_event_to_js(event: InboundCallEvent) -> WaddleCallEvent {
             migrated_to,
         } => WaddleCallEvent {
             from,
+            to,
             sid,
             kind: "finish",
             media: None,
@@ -491,6 +502,7 @@ pub(crate) fn call_event_to_js(event: InboundCallEvent) -> WaddleCallEvent {
         },
         CallEventKind::SessionInitiate { join, media } => WaddleCallEvent {
             from,
+            to,
             sid,
             kind: "session-initiate",
             media: Some(WaddleCallMedia {
@@ -509,6 +521,7 @@ pub(crate) fn call_event_to_js(event: InboundCallEvent) -> WaddleCallEvent {
         },
         CallEventKind::SessionAccept { join, media } => WaddleCallEvent {
             from,
+            to,
             sid,
             kind: "session-accept",
             media: Some(WaddleCallMedia {
@@ -527,6 +540,7 @@ pub(crate) fn call_event_to_js(event: InboundCallEvent) -> WaddleCallEvent {
         },
         CallEventKind::SessionTerminate { reason } => WaddleCallEvent {
             from,
+            to,
             sid,
             kind: "session-terminate",
             media: None,
@@ -621,6 +635,18 @@ mod inbound_to_js_tests {
         messaging::parse_call_event(&stanza).expect("JMI event parses")
     }
 
+    fn parse_jmi_to(jmi: Element, to: &str) -> messaging::InboundCallEvent {
+        let stanza = Element::builder("message", "jabber:client")
+            .attr(
+                minidom::rxml::xml_ncname!("from").to_owned(),
+                "alice@waddle.test/desktop",
+            )
+            .attr(minidom::rxml::xml_ncname!("to").to_owned(), to)
+            .append(jmi)
+            .build();
+        messaging::parse_call_event(&stanza).expect("JMI event parses")
+    }
+
     fn parse_message_element(xml: &str) -> InboundMessage {
         let el: Element = xml.parse().expect("invalid XML");
         match messaging::parse(&el).expect("expected message") {
@@ -658,6 +684,17 @@ mod inbound_to_js_tests {
     }
 
     #[test]
+    fn call_event_to_js_preserves_jmi_to_peer() {
+        let propose = call_event_to_js(parse_jmi_to(
+            messaging::build_propose(&sid("c1"), messaging::CallMedia::audio_only()),
+            "bob@waddle.test/phone",
+        ));
+
+        assert_eq!(propose.kind, "propose");
+        assert_eq!(propose.to.as_deref(), Some("bob@waddle.test/phone"));
+    }
+
+    #[test]
     fn call_event_to_js_preserves_finish_migration_metadata() {
         let finish = call_event_to_js(parse_jmi(messaging::build_finish_migrated(
             &sid("old"),
@@ -668,6 +705,36 @@ mod inbound_to_js_tests {
         assert_eq!(finish.reason.as_deref(), Some("expired"));
         assert_eq!(finish.tie_break, None);
         assert_eq!(finish.migrated_to.as_deref(), Some("new"));
+    }
+
+    #[test]
+    fn archived_to_js_preserves_jmi_only_call_events_for_dm_reload() {
+        let archived = parse_mam_archived(
+            "<message xmlns='jabber:client'>\
+               <result xmlns='urn:xmpp:mam:2' id='mam-call' queryid='q1'>\
+                 <forwarded xmlns='urn:xmpp:forward:0'>\
+                   <delay xmlns='urn:xmpp:delay' stamp='2026-05-25T10:00:00Z'/>\
+                   <message xmlns='jabber:client' type='chat' id='call-propose' \
+                            from='bob@waddle.test/phone' to='alice@waddle.test/web'>\
+                     <propose xmlns='urn:xmpp:jingle-message:0' id='call-1'>\
+                       <description xmlns='urn:xmpp:jingle:apps:rtp:1' media='audio'/>\
+                     </propose>\
+                     <store xmlns='urn:xmpp:hints'/>\
+                   </message>\
+                 </forwarded>\
+               </result>\
+             </message>",
+        );
+
+        let js = archived_to_js(archived).expect("JMI-only MAM row should convert");
+
+        assert_eq!(js.mam_id, "mam-call");
+        assert_eq!(js.body, None);
+        let call_event = js.call_event.expect("call event should be present");
+        assert_eq!(call_event.kind, "propose");
+        assert_eq!(call_event.sid, "call-1");
+        assert_eq!(call_event.from, "bob@waddle.test/phone");
+        assert!(call_event.media.expect("media").audio);
     }
 
     #[test]

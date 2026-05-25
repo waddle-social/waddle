@@ -16,29 +16,31 @@ export type LiveKitJoin = {
   token: string;
 };
 
+type CallEventEnvelope = {
+  from: string;
+  to?: string | null;
+  sid: string;
+};
+
 export type CallEvent =
   // `from` is the sender's full JID for every inbound event. The
   // only bare-addressed send path is outbound `<propose/>`.
-  | { kind: "propose"; from: string; sid: string; media: CallMedia }
-  | { kind: "proceed"; from: string; sid: string }
-  | { kind: "reject"; from: string; sid: string; reason?: string | null; tieBreak?: boolean }
-  | { kind: "retract"; from: string; sid: string; reason?: string | null; tieBreak?: boolean }
-  | { kind: "finish"; from: string; sid: string; reason?: string | null; migratedTo?: string | null }
-  | {
+  | (CallEventEnvelope & { kind: "propose"; media: CallMedia })
+  | (CallEventEnvelope & { kind: "proceed" })
+  | (CallEventEnvelope & { kind: "reject"; reason?: string | null; tieBreak?: boolean })
+  | (CallEventEnvelope & { kind: "retract"; reason?: string | null; tieBreak?: boolean })
+  | (CallEventEnvelope & { kind: "finish"; reason?: string | null; migratedTo?: string | null })
+  | (CallEventEnvelope & {
       kind: "session-initiate";
-      from: string;
-      sid: string;
       media: CallMedia;
       join: LiveKitJoin;
-    }
-  | {
+    })
+  | (CallEventEnvelope & {
       kind: "session-accept";
-      from: string;
-      sid: string;
       media: CallMedia;
       join: LiveKitJoin;
-    }
-  | { kind: "session-terminate"; from: string; sid: string; reason: string | null };
+    })
+  | (CallEventEnvelope & { kind: "session-terminate"; reason?: string | null });
 
 /**
  * The chat-side reduced state representing the lifecycle of a
@@ -57,6 +59,7 @@ export type CallState =
       media: CallMedia;
       kind: "muc";
       selfNick: string;
+      selfFullJid?: string | null;
       attemptId: string;
       activePresencePublished?: boolean;
     }
@@ -74,5 +77,6 @@ export type CallState =
        *  Stored so `tearDownActiveCall` can emit the matching
        *  Muji-clearing presence update for XEP-0272 §Leaving. */
       selfNick?: string;
+      selfFullJid?: string | null;
     }
   | { phase: "ended"; sid: string; reason: string | null };

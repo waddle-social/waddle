@@ -11,6 +11,10 @@ import {
   type PersistedQueuedDmMessage,
 } from "../outbound-queue-store";
 import { $callState, applyCallEvent, clearCallState, tearDownActiveCall } from "@/lib/calls/call-store";
+import {
+  applyDmCallEvent,
+  clearDmCallActivities,
+} from "@/lib/calls/dm-call-activity";
 import { handleCallEventSideEffect } from "@/lib/calls/call-effects";
 import {
   applyMucCallPresence,
@@ -206,6 +210,17 @@ function shouldSkipCatchupMessage(
   return false;
 }
 
+function shouldSkipRawCatchupMessage(
+  message: WasmMessage,
+  since?: string,
+  seenIds?: ReadonlyArray<string>,
+): boolean {
+  const seen = new Set(seenIds ?? []);
+  if (seen.size > 0 && rawMessageSeenIds(message).some((id) => seen.has(id))) return true;
+  if (!since || !message.timestamp) return false;
+  return compareTimestamps(message.timestamp, since) < 0;
+}
+
 type WasmModule = typeof import("@waddle/xmpp-client-wasm");
 type WasmClient = import("@waddle/xmpp-client-wasm").WaddleClient & {
   discover_extension_routes?: () => Promise<unknown>;
@@ -305,6 +320,30 @@ type XmppClientInstance = Partial<WasmClient> & CompatEmitter & {
   publish_mds_displayed?: (chatId: string, stanzaId: string, stanzaIdBy: string) => Promise<void>;
   fetch_mds_displayed?: () => Promise<ReadonlyArray<WasmMdsDisplayedEntry>>;
   subscribe_mds_displayed?: () => Promise<void>;
+  ensure_push_node?: (
+    serviceJid: string,
+    appId: string,
+  ) => Promise<{ id: string; jid: string; appId: string }>;
+  register_web_push_device?: (options: {
+    serviceJid: string;
+    node: string;
+    deviceId: string;
+    environment: string;
+    providerEndpoint: string;
+    providerToken: string;
+    providerKeyMaterial: string;
+  }) => Promise<{ id: string; node: string; status: "active" | "disabled" }>;
+  disable_push_device?: (
+    serviceJid: string,
+    node: string,
+    deviceId: string,
+  ) => Promise<{ id: string; node: string; status: "active" | "disabled" }>;
+  fetch_user_bookmarks?: () => Promise<UserBookmarkItem[] | null>;
+  set_room_notification_mode?: (options: {
+    roomJid: string;
+    mode: NotifyMode;
+    name?: string;
+  }) => Promise<SetRoomNotificationModeOutcome>;
 };
 
 /**
@@ -384,7 +423,7 @@ export class BrowserXmppClient {
   private dmReactionHandler: ((event: DmReactionEvent) => void) | null = null;
   private dmDisplayedHandler: ((event: DmDisplayedEvent) => void) | null = null;
   private presenceUpdateHandler: ((event: PresenceUpdateEvent) => void) | null = null;
-  private roomMemberJids: Record<string, string> = {};
+  private roomMemberJidsByRoom = new Map<string, Record<string, string>>();
   private memberJidHandler: ((nick: string, bareJid: string) => void) | null = null;
   private hatsHandler: ((hats: RoomHats) => void) | null = null;
   private authorityHandler: ((authority: RoomAuthority) => void) | null = null;
@@ -406,9 +445,14 @@ export class BrowserXmppClient {
   private roomSwitchPromise: Promise<void> | null = null;
   private roomSwitchTarget: string | null = null;
   private selfPingTimer: ReturnType<typeof setInterval> | null = null;
-  private roomHats: RoomHats = {};
-  private roomAuthority: RoomAuthority = {};
-  private roomPresence: RoomPresence = {};
+  private roomHatsByRoom = new Map<string, RoomHats>();
+  private roomAuthorityByRoom = new Map<string, RoomAuthority>();
+  private roomPresenceByRoom = new Map<string, RoomPresence>();
+  private readonly joinedMucs = new Map<string, Promise<void>>();
+  private readonly joinedMucJoinTokens = new Map<string, symbol>();
+  private readonly joinedMucReady = new Set<string>();
+  private retainedJoinedRoomJids = new Set<string>();
+  private autoJoinRoomJids: ReadonlyArray<string> = [];
   private uploadServiceJid: string | null = null;
   private discoveredRoomJids = new Map<string, string>();
   private reconnectStartedAt: number | null = null;
@@ -497,6 +541,41 @@ export class BrowserXmppClient {
       waiter.reject(error);
     }
     this.roomJoinWaiters.clear();
+  }
+
+  private ownFullJidCandidates(): Set<string> {
+    return new Set([
+      this.fullJid.trim().toLowerCase(),
+      `${barePeerJid(this.session.jid)}/${this.resource}`.trim().toLowerCase(),
+    ]);
+  }
+
+  private isOwnMucSelfPresence(presence: { muc_jid?: string | null }): boolean {
+    const mucJid = presence.muc_jid?.trim().toLowerCase();
+    return !!mucJid && this.ownFullJidCandidates().has(mucJid);
+  }
+
+  private isOwnAvailableMucSelfPresence(presence: {
+    muc_jid?: string | null;
+    presence_type?: string;
+  }): boolean {
+    return this.isOwnMucSelfPresence(presence) && presence.presence_type !== "unavailable";
+  }
+
+  private revokeMucReadiness(roomJid: string, options: { keepPendingJoin?: boolean } = {}): void {
+    const normalized = roomJid.trim().toLowerCase();
+    if (!options.keepPendingJoin) {
+      this.joinedMucs.delete(roomJid);
+      this.joinedMucJoinTokens.delete(roomJid);
+    }
+    this.joinedMucReady.delete(roomJid);
+    if (normalized && normalized !== roomJid) {
+      if (!options.keepPendingJoin) {
+        this.joinedMucs.delete(normalized);
+        this.joinedMucJoinTokens.delete(normalized);
+      }
+      this.joinedMucReady.delete(normalized);
+    }
   }
 
   setMessageHandler(h: (message: LiveRoomMessage) => void) { this.messageHandler = h; }
@@ -697,7 +776,7 @@ export class BrowserXmppClient {
     this.clearReconnectTimer();
     this.clearResumeState();
     const xmpp = this.xmpp;
-    const roomBefore = this.currentRoom;
+    const joinedRooms = [...this.joinedMucs.keys()];
     this.stopSelfPing();
     this.connected = false;
     this.connectPromise = null;
@@ -706,10 +785,12 @@ export class BrowserXmppClient {
     this.roomSwitchTarget = null;
     this.rejectRoomJoinWaiters(new Error("XMPP disconnected while joining a room"));
     this.uploadServiceJid = null;
-    this.roomHats = {};
-    this.roomAuthority = {};
-    this.roomPresence = {};
-    this.roomMemberJids = {};
+    this.clearRoomPresenceCaches();
+    this.retainedJoinedRoomJids.clear();
+    this.joinedMucs.clear();
+    this.joinedMucJoinTokens.clear();
+    this.joinedMucReady.clear();
+    clearDmCallActivities();
     clearMucCallParticipants();
     // Best-effort hangup: if we're in a call when the user logs out
     // we want the peer to see session-terminate before the stream
@@ -717,11 +798,13 @@ export class BrowserXmppClient {
     // `$callState`.
     await tearDownActiveCall(xmpp as unknown as CallWireSender | null, "success");
     this.xmpp = null;
-    try {
-      if (xmpp && roomBefore && xmpp.leave_room) {
-        await xmpp.leave_room(roomBefore, this.session.username);
+    if (xmpp?.leave_room) {
+      for (const roomJid of joinedRooms) {
+        try {
+          await xmpp.leave_room(roomJid, this.session.username);
+        } catch {}
       }
-    } catch {}
+    }
     await xmpp?.disconnect?.();
     this.emitStatus({ state: "offline", detail: "Disconnected" });
   }
@@ -754,6 +837,137 @@ export class BrowserXmppClient {
     });
   }
 
+  private clearRoomPresenceCaches(): void {
+    this.roomHatsByRoom.clear();
+    this.roomAuthorityByRoom.clear();
+    this.roomPresenceByRoom.clear();
+    this.roomMemberJidsByRoom.clear();
+  }
+
+  private hatsFor(roomJid: string): RoomHats {
+    let cached = this.roomHatsByRoom.get(roomJid);
+    if (!cached) {
+      cached = {};
+      this.roomHatsByRoom.set(roomJid, cached);
+    }
+    return cached;
+  }
+
+  private authorityFor(roomJid: string): RoomAuthority {
+    let cached = this.roomAuthorityByRoom.get(roomJid);
+    if (!cached) {
+      cached = {};
+      this.roomAuthorityByRoom.set(roomJid, cached);
+    }
+    return cached;
+  }
+
+  private presenceFor(roomJid: string): RoomPresence {
+    let cached = this.roomPresenceByRoom.get(roomJid);
+    if (!cached) {
+      cached = {};
+      this.roomPresenceByRoom.set(roomJid, cached);
+    }
+    return cached;
+  }
+
+  private memberJidsFor(roomJid: string): Record<string, string> {
+    let cached = this.roomMemberJidsByRoom.get(roomJid);
+    if (!cached) {
+      cached = {};
+      this.roomMemberJidsByRoom.set(roomJid, cached);
+    }
+    return cached;
+  }
+
+  private dispatchFocusedRoomHandlers(): void {
+    const roomJid = this.currentRoom;
+    if (!roomJid) {
+      this.hatsHandler?.({});
+      this.authorityHandler?.({});
+      this.presenceHandler?.({});
+      return;
+    }
+    this.hatsHandler?.({ ...(this.roomHatsByRoom.get(roomJid) ?? {}) });
+    this.authorityHandler?.({ ...(this.roomAuthorityByRoom.get(roomJid) ?? {}) });
+    this.presenceHandler?.({ ...(this.roomPresenceByRoom.get(roomJid) ?? {}) });
+    const memberJids = this.roomMemberJidsByRoom.get(roomJid) ?? {};
+    for (const [nick, bare] of Object.entries(memberJids)) {
+      this.memberJidHandler?.(nick, bare);
+    }
+  }
+
+  async ensureJoined(roomJid: string): Promise<void> {
+    if (this.joinedMucReady.has(roomJid)) return;
+    const existing = this.joinedMucs.get(roomJid);
+    if (existing) {
+      const existingToken = this.joinedMucJoinTokens.get(roomJid);
+      await existing;
+      if (existingToken && this.joinedMucJoinTokens.get(roomJid) !== existingToken) {
+        return;
+      }
+      if (!existingToken && !this.joinedMucs.has(roomJid)) return;
+      this.joinedMucReady.add(roomJid);
+      this.retainedJoinedRoomJids.add(roomJid);
+      return;
+    }
+    const promise = this.performMucJoin(roomJid);
+    const joinToken = Symbol(roomJid);
+    this.joinedMucs.set(roomJid, promise);
+    this.joinedMucJoinTokens.set(roomJid, joinToken);
+    try {
+      await promise;
+      if (this.joinedMucJoinTokens.get(roomJid) === joinToken) {
+        this.joinedMucReady.add(roomJid);
+        this.retainedJoinedRoomJids.add(roomJid);
+      }
+    } catch (err) {
+      if (this.joinedMucJoinTokens.get(roomJid) === joinToken) {
+        this.joinedMucs.delete(roomJid);
+        this.joinedMucJoinTokens.delete(roomJid);
+        this.joinedMucReady.delete(roomJid);
+      }
+      throw err;
+    }
+  }
+
+  private async performMucJoin(roomJid: string): Promise<void> {
+    const xmpp = this.xmpp;
+    if (!xmpp) throw new Error("XMPP session is not ready");
+    if (!xmpp.join_room && !xmpp.joinRoom) {
+      throw new Error("XMPP client missing join_room binding");
+    }
+    const ready = this.waitForRoomSelfPresence(roomJid, this.session.username);
+    if (xmpp.join_room) {
+      await Promise.allSettled([xmpp.join_room(roomJid, this.session.username)]);
+    } else if (xmpp.joinRoom) {
+      await xmpp.joinRoom(roomJid, this.session.username);
+    }
+    if (!this.isCurrentXmpp(xmpp)) {
+      await ready.catch(() => undefined);
+      return;
+    }
+    await ready;
+  }
+
+  async fanOutAutoJoin(roomJids: ReadonlyArray<string>, concurrency = 6): Promise<void> {
+    if (!this.xmpp) return;
+    const queue = [...new Set(roomJids.filter(Boolean))];
+    const workers = Array.from({ length: Math.max(1, concurrency) }, async () => {
+      while (queue.length > 0) {
+        const roomJid = queue.shift();
+        if (!roomJid) continue;
+        try {
+          await this.ensureJoined(roomJid);
+        } catch {
+          // Failed joins drop their tracker entry inside ensureJoined.
+          // The next topology refresh or reconnect replay can retry.
+        }
+      }
+    });
+    await Promise.allSettled(workers);
+  }
+
   async switchRoom(_spaceId: string, channelId: string) {
     await this.connect();
     const nextRoom = this.roomJidForChannel(channelId);
@@ -761,7 +975,12 @@ export class BrowserXmppClient {
       if (this.roomSwitchTarget === nextRoom) return this.roomSwitchPromise;
       await this.roomSwitchPromise.catch(() => undefined);
     }
-    if (this.currentRoom === nextRoom) return;
+    if (this.currentRoom === nextRoom) {
+      await this.ensureJoined(nextRoom);
+      this.dispatchFocusedRoomHandlers();
+      await this.flushQueuedRoomMessages(nextRoom);
+      return;
+    }
     const promise = this.performRoomSwitch(nextRoom);
     this.roomSwitchPromise = promise;
     this.roomSwitchTarget = nextRoom;
@@ -775,54 +994,19 @@ export class BrowserXmppClient {
     }
   }
 
-  private async tearDownMucCallForRoom(roomJid: string, xmpp: XmppClientInstance | null): Promise<void> {
-    const current = $callState.get();
-    if (
-      (current.phase === "active" || current.phase === "muc-pending") &&
-      current.kind === "muc" &&
-      barePeerJid(current.peer) === barePeerJid(roomJid)
-    ) {
-      await tearDownActiveCall(xmpp as unknown as CallWireSender | null, "success");
-    }
-  }
-
   private async performRoomSwitch(nextRoom: string) {
     const xmpp = this.xmpp;
     if (!xmpp) return;
-    if (this.currentRoom) {
-      await this.tearDownMucCallForRoom(this.currentRoom, xmpp);
-      if (!this.isCurrentXmpp(xmpp)) return;
-    }
-    if (this.currentRoom && xmpp.leave_room) {
-      try { await xmpp.leave_room(this.currentRoom, this.session.username); } catch {}
-      if (!this.isCurrentXmpp(xmpp)) return;
-    }
     this.currentRoom = nextRoom;
-    this.roomHats = {};
-    this.roomAuthority = {};
-    this.roomPresence = {};
-    this.roomMemberJids = {};
-    this.hatsHandler?.({});
-    this.authorityHandler?.({});
-    this.presenceHandler?.({});
-    if (xmpp.join_room) {
-      const ready = this.waitForRoomSelfPresence(nextRoom, this.session.username);
-      await Promise.allSettled([xmpp.join_room(nextRoom, this.session.username)]);
-      if (!this.isCurrentXmpp(xmpp)) {
-        await ready.catch(() => undefined);
-        return;
-      }
-      try {
-        await ready;
-      } catch (err) {
-        if (!this.isCurrentXmpp(xmpp)) return;
-        throw err;
-      }
+    this.dispatchFocusedRoomHandlers();
+    try {
+      await this.ensureJoined(nextRoom);
+    } catch (err) {
       if (!this.isCurrentXmpp(xmpp)) return;
-    } else if (xmpp.joinRoom) {
-      await xmpp.joinRoom(nextRoom, this.session.username);
-      if (!this.isCurrentXmpp(xmpp)) return;
+      throw err;
     }
+    if (!this.isCurrentXmpp(xmpp)) return;
+    this.dispatchFocusedRoomHandlers();
     this.startSelfPing();
     await this.flushQueuedRoomMessages(nextRoom);
   }
@@ -836,7 +1020,7 @@ export class BrowserXmppClient {
   }
 
   private roomIsReady(roomJid: string): boolean {
-    return this.canUseConnectedSession() && this.currentRoom === roomJid;
+    return this.canUseConnectedSession() && this.currentRoom === roomJid && this.joinedMucReady.has(roomJid);
   }
 
   private enqueueReason(): string {
@@ -992,7 +1176,7 @@ export class BrowserXmppClient {
         if (!this.roomIsReady(roomJid) || !this.xmpp) break;
         if (this.inflightQueuedIds.has(entry.id)) continue;
         this.queuedMessageStatusHandler?.(entry.id, "sending");
-        const messageId = await this.compatSendGroupMessage(this.xmpp, roomJid, entry.body, { ...(entry.markup?.length ? { markup: entry.markup } : {}), ...(entry.references?.length ? { references: entry.references } : {}), mentionJidsByNick: { ...(entry.mentionJidsByNick ?? {}), ...this.roomMemberJids }, ...(entry.files?.length ? { files: entry.files } : {}), ...(entry.replyTo ? { replyTo: entry.replyTo } : {}), ...(entry.threadId ? { threadId: entry.threadId } : {}), ...(entry.parentThreadId ? { parentThreadId: entry.parentThreadId } : {}), ...(entry.threadCreate ? { threadCreate: entry.threadCreate } : {}), ...(entry.threadReply ? { threadReply: entry.threadReply } : {}), id: entry.id });
+        const messageId = await this.compatSendGroupMessage(this.xmpp, roomJid, entry.body, { ...(entry.markup?.length ? { markup: entry.markup } : {}), ...(entry.references?.length ? { references: entry.references } : {}), mentionJidsByNick: { ...(entry.mentionJidsByNick ?? {}), ...this.memberJidsFor(roomJid) }, ...(entry.files?.length ? { files: entry.files } : {}), ...(entry.replyTo ? { replyTo: entry.replyTo } : {}), ...(entry.threadId ? { threadId: entry.threadId } : {}), ...(entry.parentThreadId ? { parentThreadId: entry.parentThreadId } : {}), ...(entry.threadCreate ? { threadCreate: entry.threadCreate } : {}), ...(entry.threadReply ? { threadReply: entry.threadReply } : {}), id: entry.id });
         if (messageId) { this.inflightQueuedIds.add(entry.id); this.recordPendingSend(entry.id, "room"); }
       }
     })();
@@ -1007,7 +1191,7 @@ export class BrowserXmppClient {
     if (!body.trim() && !hasFiles && !hasThreadMetadata && !hasForumMetadata) return null;
     const roomJid = this.roomJidForChannel(channelId);
     if (this.roomIsReady(roomJid) && this.xmpp) {
-      const id = await this.compatSendGroupMessage(this.xmpp, roomJid, body, { ...opts, mentionJidsByNick: { ...(opts.mentionJidsByNick ?? {}), ...this.roomMemberJids } });
+      const id = await this.compatSendGroupMessage(this.xmpp, roomJid, body, { ...opts, mentionJidsByNick: { ...(opts.mentionJidsByNick ?? {}), ...this.memberJidsFor(roomJid) } });
       this.recordPendingSend(id, "room");
       return { id, state: "sending" };
     }
@@ -1744,8 +1928,22 @@ export class BrowserXmppClient {
   private roomMamPageToMessages(page: WasmMamPage): MamHistoryPage<LiveRoomMessage> {
     return { messages: page.messages.map((message) => roomMessageFromArchived(message)).filter((message): message is LiveRoomMessage => !!message), ...(page.first_id ? { firstArchiveId: page.first_id } : {}), ...(page.last_id ? { lastArchiveId: page.last_id } : {}), complete: page.is_complete };
   }
-  private dmMamPageToMessages(page: WasmMamPage): MamHistoryPage<LiveDmMessage> {
+  private dmMamPageToMessages(
+    page: WasmMamPage,
+    options: { applyCallEvents?: boolean } = {},
+  ): MamHistoryPage<LiveDmMessage> {
     const selfBare = barePeerJid(this.session.jid);
+    if (options.applyCallEvents !== false) {
+      for (const message of page.messages) {
+        if (!message.call_event) continue;
+        applyDmCallEvent({
+          event: message.call_event,
+          selfBareJid: selfBare,
+          to: message.to,
+          timestamp: message.timestamp,
+        });
+      }
+    }
     return { messages: page.messages.map((message) => dmMessageFromArchived(message, selfBare)).filter((message): message is LiveDmMessage => !!message), ...(page.first_id ? { firstArchiveId: page.first_id } : {}), ...(page.last_id ? { lastArchiveId: page.last_id } : {}), complete: page.is_complete };
   }
   private recordRoomMamWatermarks(messages: ReadonlyArray<LiveRoomMessage>) {
@@ -1793,7 +1991,7 @@ export class BrowserXmppClient {
   async queryPersonalMamPage(peerJid: string, max = 100, pageParam: MamPageParam = { type: "latest" }): Promise<MamHistoryPage<LiveDmMessage>> {
     const xmpp = await this.requireConnectedXmpp(); const page = await xmpp.fetch_dm_history_page?.(barePeerJid(peerJid), max, pageParam) as WasmMamPage;
     if (!page) return { messages: [], complete: true };
-    const result = this.dmMamPageToMessages(page);
+    const result = this.dmMamPageToMessages(page, { applyCallEvents: pageParam.type !== "before" });
     this.recordDmMamWatermarks(result.messages);
     return result;
   }
@@ -1801,14 +1999,24 @@ export class BrowserXmppClient {
     if (!query.trim()) return [];
     const xmpp = await this.requireConnectedXmpp();
     const page = await xmpp.search_dm_history?.(barePeerJid(peerJid), query, max) as WasmMamPage;
-    const parsed = page ? this.dmMamPageToMessages(page).messages : [];
+    const parsed = page ? this.dmMamPageToMessages(page, { applyCallEvents: false }).messages : [];
     return parsed.filter((message) => !!message.body).map((message, index) => ({ id: message.id, ...(page?.messages[index]?.mam_id ? { archiveId: page.messages[index].mam_id } : {}), nick: message.nick, body: message.body, createdAt: message.createdAt, ...(message.threadId ? { threadId: message.threadId } : {}), ...(message.parentThreadId ? { parentThreadId: message.parentThreadId } : {}), peerJid: message.peerJid }));
   }
   async subscribeToPeerPresence(peerJid: string): Promise<void> { const xmpp = await this.requireConnectedXmpp(); await xmpp.subscribe_to_presence?.(barePeerJid(peerJid)); }
   async listRosterContacts(): Promise<RosterContact[]> { const xmpp = await this.requireConnectedXmpp(); const roster = await xmpp.list_roster_contacts?.() as WasmRosterContact[]; return (roster ?? []).map((item) => { const jid = barePeerJid(item.jid); return { jid, name: item.name, username: item.name?.trim() || jid.split("@")[0] || jid, subscription: (item.subscription ?? "none") as RosterContact["subscription"], groups: item.groups ?? [] }; }); }
   async getServerVersion(): Promise<WasmServerVersion | null> { const xmpp = await this.requireConnectedXmpp(); return await xmpp.get_server_version?.() as WasmServerVersion | null; }
   async discoverSpaceChannels(): Promise<any[]> { const xmpp = await this.requireConnectedXmpp(); return discoverChannels(xmpp as WasmClient, this.session.jid); }
-  async discoverTopology(): Promise<DiscoveredTopology> { const xmpp = await this.requireConnectedXmpp(); const topology = await discoverTopology(xmpp as WasmClient, this.session.jid); this.discoveredRoomJids = new Map(topology.rooms.flatMap((room) => room.jid ? [[room.id, room.jid] as const] : [])); return topology; }
+  async discoverTopology(): Promise<DiscoveredTopology> {
+    const xmpp = await this.requireConnectedXmpp();
+    const topology = await discoverTopology(xmpp as WasmClient, this.session.jid);
+    this.discoveredRoomJids = new Map(topology.rooms.flatMap((room) => room.jid ? [[room.id, room.jid] as const] : []));
+    const autoJoinRoomJids = topology.rooms
+      .filter((room) => room.autojoin !== false && !!room.jid)
+      .map((room) => room.jid!);
+    this.autoJoinRoomJids = autoJoinRoomJids;
+    if (autoJoinRoomJids.length > 0) void this.fanOutAutoJoin(autoJoinRoomJids);
+    return topology;
+  }
   async listRoomMembers(channelId: string, options?: ListRoomMembersOptions): Promise<MemberSummary[]> {
     const xmpp = await this.requireConnectedXmpp(); const roomJid = options?.roomJid ?? this.roomJidForChannel(channelId);
     const listMembers = xmpp.list_room_members
@@ -2032,6 +2240,11 @@ export class BrowserXmppClient {
       // disconnects before the catch-up IQ resolves.
       void this.bootstrapMdsDisplayed(xmpp);
     }
+    const roomsToJoin = new Set([...this.retainedJoinedRoomJids, ...this.autoJoinRoomJids]);
+    if (this.currentRoom) roomsToJoin.add(this.currentRoom);
+    if (roomsToJoin.size > 0) {
+      void this.fanOutAutoJoin([...roomsToJoin]);
+    }
     this.emitSessionLifecycle(lifecycle);
     const catchupEntries = this.catchup.onSessionStarted();
     if (catchupEntries.length === 0) {
@@ -2094,7 +2307,18 @@ export class BrowserXmppClient {
   private flushAfterSessionReady(xmpp: XmppClientInstance) {
     if (this.xmpp !== xmpp) return;
     void this.flushQueuedDirectMessages();
-    if (this.currentRoom) void this.flushQueuedRoomMessages(this.currentRoom);
+    const roomJid = this.currentRoom;
+    if (roomJid) void this.flushQueuedRoomAfterJoin(xmpp, roomJid);
+  }
+
+  private async flushQueuedRoomAfterJoin(xmpp: XmppClientInstance, roomJid: string): Promise<void> {
+    try {
+      await this.ensureJoined(roomJid);
+      if (this.xmpp !== xmpp) return;
+      await this.flushQueuedRoomMessages(roomJid);
+    } catch {
+      // Join retry is driven by reconnect/session-ready and explicit sends.
+    }
   }
 
   private fulfillOnceConnected() {
@@ -2127,6 +2351,7 @@ export class BrowserXmppClient {
   }
   private handleDisconnected(xmpp: XmppClientInstance, error?: Error) {
     if (this.xmpp !== xmpp) return;
+    const previouslyJoinedRooms = [...this.joinedMucs.keys()];
     this.connected = false; this.stopSelfPing(); this.xmpp = null;
     // The wire is gone — no point trying to send session-terminate.
     // Clear the local call slot so the UI doesn't strand on a stale
@@ -2144,6 +2369,14 @@ export class BrowserXmppClient {
     clearCallState();
     clearMucCallParticipants();
     void useCallEngine().engine.disconnect();
+    this.rejectRoomJoinWaiters(new Error("XMPP disconnected while joining a room"));
+    this.retainedJoinedRoomJids = new Set([
+      ...this.retainedJoinedRoomJids,
+      ...previouslyJoinedRooms,
+    ]);
+    this.joinedMucs.clear();
+    this.joinedMucReady.clear();
+    this.clearRoomPresenceCaches();
     if (this.destroying) { this.clearResumeState(); this.emitStatus({ state: "offline", detail: error?.message ?? "Disconnected" }); return; }
     this.setResumeStateHandle(xmpp.get_resume_state_handle?.() ?? null);
     this.resumeState = xmpp.get_resume_state?.() ?? null;
@@ -2160,16 +2393,31 @@ export class BrowserXmppClient {
   private handlePresence(presence: WasmPresence) {
     const from = presence.from ?? "";
     if ((presence as any).muc_jid !== undefined) {
-      const [room, nick = ""] = from.split("/"); const waiter = this.roomJoinWaiters.get(from); if (waiter && (presence as any).muc_jid) waiter.resolve(); if (!room) return; if (!nick && presence.vcard_avatar) this.roomAvatarHandler?.(room, presence.vcard_avatar); if (room !== this.currentRoom || !nick) return;
+      const [room, nick = ""] = from.split("/");
+      const waiter = this.roomJoinWaiters.get(from);
+      if (waiter && this.isOwnAvailableMucSelfPresence(presence)) waiter.resolve();
+      if (!room) return;
+      if (!nick && presence.vcard_avatar) this.roomAvatarHandler?.(room, presence.vcard_avatar);
+      if (!nick) return;
+      const roomHats = this.hatsFor(room);
+      const roomAuthority = this.authorityFor(room);
+      const roomPresence = this.presenceFor(room);
+      const roomMemberJids = this.memberJidsFor(room);
+      const isFocusedRoom = room === this.currentRoom;
       if (presence.presence_type === "unavailable") {
-        delete this.roomHats[nick];
-        this.hatsHandler?.({ ...this.roomHats });
-        delete this.roomAuthority[nick];
-        this.authorityHandler?.({ ...this.roomAuthority });
-        this.roomPresence[nick] = "offline";
-        this.presenceHandler?.({ ...this.roomPresence });
-        delete this.roomMemberJids[nick];
-        this.lastSeenHandler?.(nick, Date.now());
+        if (this.isOwnMucSelfPresence(presence)) {
+          this.revokeMucReadiness(room, { keepPendingJoin: this.roomJoinWaiters.has(from) });
+        }
+        delete roomHats[nick];
+        delete roomAuthority[nick];
+        roomPresence[nick] = "offline";
+        delete roomMemberJids[nick];
+        if (isFocusedRoom) {
+          this.hatsHandler?.({ ...roomHats });
+          this.authorityHandler?.({ ...roomAuthority });
+          this.presenceHandler?.({ ...roomPresence });
+          this.lastSeenHandler?.(nick, Date.now());
+        }
         return;
       }
       // XEP-0317 hats are server-emitted descriptive metadata only.
@@ -2177,22 +2425,24 @@ export class BrowserXmppClient {
       // those flow as `roomAuthority` and drive authority chips
       // independently (see `parseMucAffiliation` / `parseMucRole`
       // below).
-      this.roomHats[nick] = ((presence as any).hats ?? []).map((hat: any) => ({
+      roomHats[nick] = ((presence as any).hats ?? []).map((hat: any) => ({
         uri: hat.uri,
         title: hat.title,
       }));
-      this.hatsHandler?.({ ...this.roomHats });
-      this.roomAuthority[nick] = {
+      roomAuthority[nick] = {
         affiliation: parseMucAffiliation((presence as any).muc_affiliation),
         role: parseMucRole((presence as any).muc_role),
       };
-      this.authorityHandler?.({ ...this.roomAuthority });
-      this.roomPresence[nick] = parsePresenceShow(presence.show);
-      this.presenceHandler?.({ ...this.roomPresence });
+      roomPresence[nick] = parsePresenceShow(presence.show);
       if ((presence as any).muc_jid) {
         const bare = barePeerJid((presence as any).muc_jid);
-        this.roomMemberJids[nick] = bare;
-        this.memberJidHandler?.(nick, bare);
+        roomMemberJids[nick] = bare;
+        if (isFocusedRoom) this.memberJidHandler?.(nick, bare);
+      }
+      if (isFocusedRoom) {
+        this.hatsHandler?.({ ...roomHats });
+        this.authorityHandler?.({ ...roomAuthority });
+        this.presenceHandler?.({ ...roomPresence });
       }
       return;
     }
@@ -2204,6 +2454,15 @@ export class BrowserXmppClient {
     if (message.id && this.carbonDedupIds.has(message.id) && !message._fromCarbon) {
       this.carbonDedupIds.delete(message.id);
       return;
+    }
+    if (message.call_event) {
+      applyDmCallEvent({
+        event: message.call_event,
+        selfBareJid: barePeerJid(this.session.jid),
+        to: message.to ?? message.call_event.to,
+        timestamp: message.timestamp,
+      });
+      if (!message.body && !message.subject) return;
     }
     if (message.chat_state && !message.body) {
       if (message.is_muc) { const roomJid = barePeerJid(message.from ?? message.to ?? ""); const nick = (message.from ?? "").split("/")[1] ?? "unknown"; if (roomJid === this.currentRoom && nick !== this.session.username) this.chatStateHandler?.({ roomJid, nick, state: message.chat_state as ChatStateType }); }
@@ -2348,8 +2607,17 @@ export class BrowserXmppClient {
   }
   private applyDmCatchupPage(page: WasmMamPage | null | undefined, since?: string, seenIds?: ReadonlyArray<string>): string | undefined {
     let lastArchiveId = pageLastArchiveId(page);
+    const selfBare = barePeerJid(this.session.jid);
     for (const message of page?.messages ?? []) {
-      const converted = dmMessageFromArchived(message, barePeerJid(this.session.jid));
+      if (message.call_event && !shouldSkipRawCatchupMessage(message, since, seenIds)) {
+        applyDmCallEvent({
+          event: message.call_event,
+          selfBareJid: selfBare,
+          to: message.to,
+          timestamp: message.timestamp,
+        });
+      }
+      const converted = dmMessageFromArchived(message, selfBare);
       if (!converted || shouldSkipCatchupMessage(converted, since, seenIds)) continue;
       this.catchup.recordDmSeen(converted.peerJid, converted.createdAt, converted.archiveId, messageSeenIds(converted));
       this.directMessageHandler?.(converted);
@@ -2412,8 +2680,59 @@ export class BrowserXmppClient {
     xmpp.set_on_call?.((event: CallEvent) => {
       if (!this.isCurrentXmpp(xmpp)) return;
       const prev = $callState.get();
-      applyCallEvent(event);
-      void handleCallEventSideEffect(event, prev, xmpp as unknown as CallWireSender, this.fullJid);
+      const selfBare = barePeerJid(this.session.jid);
+      const isSelfOriginated = barePeerJid(event.from) === selfBare;
+      const currentDmPeer =
+        prev.phase === "incoming"
+          ? prev.from
+          : prev.phase === "outgoing"
+            ? prev.to
+            : prev.phase === "active" && prev.kind === "dm"
+              ? prev.peer
+              : undefined;
+      if (
+        event.kind === "propose" ||
+        event.kind === "proceed" ||
+        event.kind === "reject" ||
+        event.kind === "retract" ||
+        event.kind === "finish" ||
+        (event.kind === "session-initiate" &&
+          prev.phase === "incoming" &&
+          prev.sid === event.sid) ||
+        (event.kind === "session-accept" &&
+          prev.phase === "outgoing" &&
+          prev.sid === event.sid) ||
+        (event.kind === "session-terminate" &&
+          prev.phase === "active" &&
+          prev.kind === "dm" &&
+          prev.sid === event.sid)
+      ) {
+        applyDmCallEvent({
+          event,
+          selfBareJid: selfBare,
+          to: event.to ?? currentDmPeer,
+        });
+      }
+      const eventMatchesCurrentCall =
+        "sid" in prev &&
+        prev.sid === event.sid &&
+        event.kind !== "propose";
+      const selfOriginatedEventShouldTouchCurrentCall =
+        eventMatchesCurrentCall &&
+        (
+          event.kind === "proceed" ||
+          (event.kind === "reject" && prev.phase === "incoming") ||
+          (event.kind === "session-initiate" && prev.phase === "incoming") ||
+          (event.kind === "session-accept" && prev.phase === "outgoing") ||
+          (event.kind === "session-terminate" && prev.phase === "active" && prev.kind === "dm") ||
+          (event.kind === "finish" && prev.phase === "active" && prev.kind === "dm")
+        );
+      if (!isSelfOriginated || selfOriginatedEventShouldTouchCurrentCall) {
+        applyCallEvent(event);
+      }
+      if (!isSelfOriginated) {
+        void handleCallEventSideEffect(event, prev, xmpp as unknown as CallWireSender, this.fullJid);
+      }
     });
     xmpp.on?.("session:started", () => {
       if (!this.isCurrentXmpp(xmpp)) return;

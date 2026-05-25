@@ -3,7 +3,18 @@ use super::{
     replay::drain_outbound_into_replay, state::WsConnState, stream_management::sm_show_from_name,
 };
 use waddle_xmpp::muc::room_actor::LeaveOutcome;
+use waddle_xmpp::xep::xep0272::Muji;
 use waddle_xmpp::xep::xep0421::OccupantIdentity;
+
+fn muji_reflection_rank(muji: &Muji) -> u8 {
+    if muji.is_empty() {
+        0
+    } else if muji.is_active() {
+        2
+    } else {
+        1
+    }
+}
 
 /// Broadcast a `<presence type='unavailable'/>` from the leaving
 /// occupant's room-nick JID to every remaining occupant when their
@@ -57,45 +68,59 @@ pub(crate) fn broadcast_muc_leave_to_remaining(
     }
 }
 
-/// Broadcast a canonical available room/nick presence without
-/// `<muji/>` after the resource that owned the Muji state leaves
-/// while another same-nick session remains.
+/// Broadcast canonical available room/nick presence after one
+/// resource's Muji state changes while another same-nick session
+/// remains. Sibling Muji state is emitted under the exact full JID
+/// that owns it so resource-scoped XEP-0272 preparing state stays
+/// attributable.
 pub(crate) fn broadcast_muc_muji_clear_to_remaining(
     state: &WebSocketState,
     room_jid: &BareJid,
+    leaving_real_jid: &FullJid,
     outcome: &LeaveOutcome,
 ) {
     if outcome.removed_last_session || !outcome.cleared_muji_state {
         return;
     }
-    let Some(real_jid) = outcome.remaining_nick_real_jid.as_ref() else {
-        return;
-    };
     let from_jid = room_jid
         .clone()
         .with_resource_str(&outcome.nick)
-        .unwrap_or_else(|_| real_jid.clone());
-    let real_bare = real_jid.to_bare();
-    let identity = OccupantIdentity {
-        bare_jid: &real_bare,
-        real_jid: Some(real_jid),
-        secret: &state.deps.occupant_id_secret,
-    };
+        .unwrap_or_else(|_| {
+            outcome
+                .remaining_nick_real_jid
+                .clone()
+                .unwrap_or_else(|| outcome.leaving_room_jid.clone())
+        });
+    let mut entries = Vec::with_capacity(outcome.remaining_muji_sessions.len() + 1);
+    entries.push((leaving_real_jid.clone(), Muji::default()));
+    entries.extend(outcome.remaining_muji_sessions.iter().cloned());
+    entries.sort_by_key(|(owner_jid, muji)| (muji_reflection_rank(muji), owner_jid.to_string()));
     for occupant_jid in &outcome.remaining_occupants {
-        let is_self = occupant_jid.to_bare() == real_bare;
-        let presence = waddle_xmpp::muc::build_occupant_presence(
-            &from_jid,
-            occupant_jid,
-            outcome.affiliation,
-            outcome.role,
-            is_self,
-            &identity,
-        );
-        let _ = state
-            .deps
-            .protocol
-            .connection_registry
-            .try_send_to(occupant_jid, Stanza::Presence(presence));
+        for (owner_jid, muji) in &entries {
+            let owner_bare = owner_jid.to_bare();
+            let identity = OccupantIdentity {
+                bare_jid: &owner_bare,
+                real_jid: Some(owner_jid),
+                secret: &state.deps.occupant_id_secret,
+            };
+            let is_self = occupant_jid.to_bare() == owner_bare;
+            let mut presence = waddle_xmpp::muc::build_occupant_presence(
+                &from_jid,
+                occupant_jid,
+                outcome.affiliation,
+                outcome.role,
+                is_self,
+                &identity,
+            );
+            if !muji.is_empty() {
+                presence.payloads.push(muji.to_element());
+            }
+            let _ = state
+                .deps
+                .protocol
+                .connection_registry
+                .try_send_to(occupant_jid, Stanza::Presence(presence));
+        }
     }
 }
 
@@ -388,7 +413,7 @@ async fn cleanup_muc_presence(state: &WebSocketState, jid: &FullJid) {
                 // wire shape is identical regardless of how the
                 // session ended.
                 broadcast_muc_leave_to_remaining(state, &room_jid, jid, &outcome);
-                broadcast_muc_muji_clear_to_remaining(state, &room_jid, &outcome);
+                broadcast_muc_muji_clear_to_remaining(state, &room_jid, jid, &outcome);
                 maybe_evict_empty_room(state, &room_jid, &outcome).await;
             }
             Ok(None) => {}

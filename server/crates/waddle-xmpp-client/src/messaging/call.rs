@@ -115,6 +115,10 @@ pub struct InboundCallEvent {
     /// to be addressed to that full JID so the originating resource
     /// receives the answer, not every resource of the bare JID.
     pub from: Jid,
+    /// The original stanza recipient, when present. Message carbons
+    /// need this to let sibling resources associate self-originated
+    /// JMI events with the peer conversation.
+    pub to: Option<Jid>,
     pub sid: SessionId,
     pub kind: CallEventKind,
 }
@@ -136,6 +140,7 @@ pub fn parse_jmi_message(stanza: &Element) -> Option<InboundCallEvent> {
         return None;
     }
     let from = stanza.attr("from").and_then(|s| s.parse::<Jid>().ok())?;
+    let to = stanza.attr("to").and_then(|s| s.parse::<Jid>().ok());
 
     for child in stanza.children() {
         if child.ns() != NS_JINGLE_MESSAGE {
@@ -161,7 +166,12 @@ pub fn parse_jmi_message(stanza: &Element) -> Option<InboundCallEvent> {
             },
             _ => continue,
         };
-        return Some(InboundCallEvent { from, sid, kind });
+        return Some(InboundCallEvent {
+            from,
+            to: to.clone(),
+            sid,
+            kind,
+        });
     }
     None
 }
@@ -173,6 +183,7 @@ pub fn parse_jingle_iq(stanza: &Element) -> Option<InboundCallEvent> {
         return None;
     }
     let from = stanza.attr("from").and_then(|s| s.parse::<Jid>().ok())?;
+    let to = stanza.attr("to").and_then(|s| s.parse::<Jid>().ok());
     let jingle = stanza
         .children()
         .find(|c| c.name() == "jingle" && c.ns() == NS_JINGLE)?;
@@ -194,7 +205,12 @@ pub fn parse_jingle_iq(stanza: &Element) -> Option<InboundCallEvent> {
         },
         _ => return None,
     };
-    Some(InboundCallEvent { from, sid, kind })
+    Some(InboundCallEvent {
+        from,
+        to,
+        sid,
+        kind,
+    })
 }
 
 /// Convenience dispatcher: try JMI first, then Jingle.

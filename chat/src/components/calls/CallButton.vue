@@ -3,6 +3,7 @@ import { computed } from "vue";
 import { useStore } from "@nanostores/vue";
 import { Phone, Video } from "lucide-vue-next";
 import { $callState, beginOutgoingCall, reportCallError, scheduleOutgoingTimeout } from "@/lib/calls/call-store";
+import { clearDmCallActivity, useDmCallActivity } from "@/lib/calls/dm-call-activity";
 import { newCallSid, outboundCalls } from "@/lib/calls/outbound";
 import { connectionStore } from "@/lib/connection-store";
 import type { CallMedia } from "@/lib/calls/types";
@@ -16,12 +17,15 @@ const props = defineProps<{
 }>();
 
 const state = useStore($callState);
+const { hasActivity: hasPeerCallActivity } = useDmCallActivity(() => props.peerBareJid);
 
 /** A call is already in flight — disable the button so the
  *  caller can't start a parallel call while one is ringing or
  *  active. The store tracks a single slot today (see
  *  `CallState`). */
-const inCall = computed(() => state.value.phase !== "idle" && state.value.phase !== "ended");
+const inCall = computed(
+  () => (state.value.phase !== "idle" && state.value.phase !== "ended") || hasPeerCallActivity.value,
+);
 
 function getSender() {
   const client = connectionStore.client as unknown as { xmpp?: unknown } | null;
@@ -50,6 +54,7 @@ async function startCall(media: CallMedia): Promise<void> {
     if (current.phase === "outgoing" && current.sid === sid) {
       $callState.set({ phase: "idle" });
     }
+    clearDmCallActivity(props.peerBareJid, sid);
     reportCallError(err);
   }
 }

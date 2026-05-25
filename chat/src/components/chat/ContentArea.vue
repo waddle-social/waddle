@@ -1068,17 +1068,13 @@ function dayDividerLabel(createdAt: string): string {
       </div>
     </div>
 
-    <!-- Inline split-view for an active group call in this channel.
-         Renders ONLY when (a) a MUC call is active, (b) the call's
-         room matches this channel, (c) the local user is a
-         participant, and (d) the call UI mode is "split" (not
-         "fullscreen"). All of that gating is inside the component;
-         we mount it unconditionally and let it decide. The handle is
-         emitted as a sibling so it sits between the call region and
-         the timeline in the parent flex column. -->
+    <!-- Inline split-view for an active call in this conversation.
+         MUC and DM ownership gates live inside the component. -->
     <CallSplitContainer
-      v-if="channel?.jid"
-      :room-jid="channel.jid"
+      v-if="channel?.jid || dmPeer?.peerJid"
+      :room-jid="channel?.jid"
+      :dm-peer-jid="dmPeer?.peerJid"
+      :dm-peer-name="dmPeer?.peerUsername"
     />
 
     <!-- Composer (social / top-pinned mode) -->
@@ -1470,8 +1466,10 @@ function dayDividerLabel(createdAt: string): string {
          panel — stays visible. Decides its own visibility based on
          call state + ui mode. -->
     <CallExpandedSurface
-      v-if="channel?.jid"
-      :room-jid="channel.jid"
+      v-if="channel?.jid || dmPeer?.peerJid"
+      :room-jid="channel?.jid"
+      :dm-peer-jid="dmPeer?.peerJid"
+      :dm-peer-name="dmPeer?.peerUsername"
     />
   </div>
 </template>

@@ -73,6 +73,60 @@ fn app_stanza_routes_jmi_message_to_typed_call_event() {
 }
 
 #[test]
+fn app_stanza_routes_carbon_wrapped_jmi_to_typed_call_event() {
+    let mut runtime = XmppRuntime::new(config()).unwrap();
+    let stanza: Element =
+        r#"<message xmlns='jabber:client' from='alice@example.com' to='alice@example.com/macbook'>
+        <sent xmlns='urn:xmpp:carbons:2'>
+          <forwarded xmlns='urn:xmpp:forward:0'>
+            <message xmlns='jabber:client' from='alice@example.com/phone' to='bob@example.com/desktop'>
+              <finish xmlns='urn:xmpp:jingle-message:0' id='call-1'/>
+            </message>
+          </forwarded>
+        </sent>
+    </message>"#
+            .parse()
+            .unwrap();
+
+    let events = runtime.handle_app_stanza(&stanza);
+
+    assert_eq!(events.len(), 1);
+    assert!(matches!(
+        &events[0],
+        ClientEvent::Call(call)
+            if call.sid.0 == "call-1"
+                && call.from.to_string() == "alice@example.com/phone"
+                && call.to.as_ref().map(ToString::to_string).as_deref() == Some("bob@example.com/desktop")
+    ));
+}
+
+#[test]
+fn app_stanza_ignores_forged_carbon_wrapped_call_from_peer() {
+    let mut runtime = XmppRuntime::new(config()).unwrap();
+    let stanza: Element =
+        r#"<message xmlns='jabber:client' from='bob@example.com' to='alice@example.com/macbook'>
+        <sent xmlns='urn:xmpp:carbons:2'>
+          <forwarded xmlns='urn:xmpp:forward:0'>
+            <message xmlns='jabber:client' from='alice@example.com/phone' to='bob@example.com/desktop'>
+              <finish xmlns='urn:xmpp:jingle-message:0' id='call-1'/>
+            </message>
+          </forwarded>
+        </sent>
+    </message>"#
+            .parse()
+            .unwrap();
+
+    let events = runtime.handle_app_stanza(&stanza);
+
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, ClientEvent::Call(_))),
+        "XEP-0280 carbon copies must come from the authenticated account bare JID"
+    );
+}
+
+#[test]
 fn app_stanza_acknowledges_jingle_iq_set_and_surfaces_call_event() {
     let mut runtime = XmppRuntime::new(config()).unwrap();
     let stanza: Element = r#"<iq xmlns='jabber:client' type='set' id='j1' from='alice@waddle.test/desktop' to='bob@waddle.test/phone'>

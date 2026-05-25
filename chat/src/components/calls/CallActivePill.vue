@@ -1,13 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
-import { useStore } from "@nanostores/vue";
 import { Phone } from "lucide-vue-next";
-import { $callState } from "@/lib/calls/call-store";
-import {
-  $mucCallParticipants,
-  normalizeMucCallRoomJid,
-} from "@/lib/calls/muc-call-presence";
-import { useActiveMucCall } from "@/lib/calls/use-active-muc-call";
+import { useRoomHasActiveCall } from "@/lib/calls/use-active-muc-call";
 
 /**
  * Live-call indicator shown in the channel header when the room owns
@@ -34,31 +28,22 @@ const props = defineProps<{
   disabled?: boolean;
 }>();
 
-const state = useStore($callState);
-const participants = useStore($mucCallParticipants);
-const { selfInCall, activeRoomJid } = useActiveMucCall();
-
-const normalizedRoomJid = computed(() => normalizeMucCallRoomJid(props.roomJid));
-
-const callInThisRoom = computed(() => {
-  return (
-    activeRoomJid.value !== null &&
-    activeRoomJid.value === normalizedRoomJid.value
-  );
-});
+const {
+  hasActiveCall,
+  selfInCall,
+  localResourceInCall,
+  participantCount,
+} = useRoomHasActiveCall(
+  () => props.roomJid,
+);
 
 /**
  * The pill is visible only when:
- *   - There is an active MUC call in THIS room.
- *   - The local user is not currently joined to it (otherwise the
- *     split surface is already painting the state for them).
+ *   - There is an active MUC call in THIS room per Muji presence.
+ *   - This browser resource is not currently joined to it (otherwise
+ *     the split surface is already painting the state for them).
  */
-const isVisible = computed(() => callInThisRoom.value && !selfInCall.value);
-
-const participantCount = computed<number>(() => {
-  if (!callInThisRoom.value) return 0;
-  return (participants.value[normalizedRoomJid.value] ?? []).length;
-});
+const isVisible = computed(() => hasActiveCall.value && !localResourceInCall.value);
 
 /**
  * Running call duration. Pegged to a single shared 1Hz tick so we
@@ -72,7 +57,7 @@ const now = ref(Date.now());
 let tick: ReturnType<typeof setInterval> | null = null;
 
 function ensureStart(): void {
-  if (!callInThisRoom.value) {
+  if (!hasActiveCall.value) {
     callStartTimestamp.value = null;
     return;
   }
@@ -110,7 +95,10 @@ const durationLabel = computed<string>(() => {
 const ariaLabel = computed(() => {
   const count = participantCount.value;
   const noun = count === 1 ? "person" : "people";
-  return `Live call in this channel, ${count} ${noun}, ${durationLabel.value} elapsed. Click to join.`;
+  const device = selfInCall.value
+    ? " This account is connected on another device."
+    : "";
+  return `Live call in this channel, ${count} ${noun}, ${durationLabel.value} elapsed.${device} Click to join from this device.`;
 });
 
 function onClick(): void {

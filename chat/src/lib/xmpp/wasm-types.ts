@@ -1,3 +1,5 @@
+import type { CallEvent } from "@/lib/calls/types";
+
 /** TypeScript interfaces for Rust/WASM callback payload shapes.
  * All fields are snake_case (serde serialization convention).
  */
@@ -135,6 +137,7 @@ export interface WasmMessage {
   forum_thread_title?: string;
   is_sticker: boolean;
   shared_files: WasmSharedFile[];
+  call_event?: CallEvent;
   extension_envelope?: WasmExtensionEnvelope;
   extension_body_fallback?: boolean;
   /** urn:waddle:pin:0 pin/unpin event surfaced by the room (#414). */
@@ -205,6 +208,7 @@ export interface WasmArchivedMessage extends WasmMessage {
   mam_id: string;
   query_id?: string;
   author_real_jid?: string;
+  call_event?: CallEvent;
 }
 
 export interface WasmMamPage {

@@ -1,10 +1,11 @@
 <script setup lang="ts">
 import { computed, type Component } from "vue";
-import { Hash, Menu, MessageCircle, MessagesSquare, Pin, Search, Settings, Users } from "lucide-vue-next";
+import { Hash, Menu, MessageCircle, MessagesSquare, PhoneCall, Pin, Search, Settings, Users } from "lucide-vue-next";
 import AppAvatar from "@/components/ui/AppAvatar.vue";
 import CallButton from "@/components/calls/CallButton.vue";
 import MucCallButton from "@/components/calls/MucCallButton.vue";
 import NotifyModeButton from "@/components/chat/NotifyModeButton.vue";
+import { useDmCallActivity } from "@/lib/calls/dm-call-activity";
 import type { ChannelSummary, SpaceSummary } from "@/lib/chat-types";
 import type { ConnectionNoticeCopy } from "@/lib/connection-notice";
 import type { BrowserXmppClient } from "@/lib/xmpp-client";
@@ -74,6 +75,12 @@ const onlineCount = computed(() => sortedMembers.value.filter((m) => m.presence 
 
 const showSearch = defineModel<boolean>("showSearch", { required: true });
 const showPinnedPanel = defineModel<boolean>("showPinnedPanel", { default: false });
+const { activity: dmCallActivity } = useDmCallActivity(() => props.dmPeer?.peerJid);
+
+const dmCallActivityLabel = computed(() => {
+  if (!dmCallActivity.value) return "";
+  return dmCallActivity.value.state === "accepted" ? "Call active" : "Ringing";
+});
 
 const emit = defineEmits<{
   openNav: [];
@@ -165,6 +172,13 @@ const memberButtonCopy = computed(() => {
             </span>
             <span v-if="dmPeer" class="hidden lg:inline type-meta text-muted-foreground">
               · {{ presenceText(dmPeer.presenceShow) }}
+            </span>
+            <span
+              v-if="dmCallActivity"
+              class="type-meta inline-flex h-5 shrink-0 items-center gap-1 rounded-full border border-success/25 bg-success/10 px-2 text-success"
+            >
+              <PhoneCall class="h-3 w-3" />
+              {{ dmCallActivityLabel }}
             </span>
           </div>
           <div v-if="dmPeer" class="lg:hidden type-caption text-muted-foreground truncate">

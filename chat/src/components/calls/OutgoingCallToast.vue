@@ -3,6 +3,7 @@ import { computed } from "vue";
 import { useStore } from "@nanostores/vue";
 import { Phone, PhoneOff, Video } from "lucide-vue-next";
 import { $callState, $lastCallError, clearCallState, reportCallError } from "@/lib/calls/call-store";
+import { clearDmCallActivity } from "@/lib/calls/dm-call-activity";
 import { outboundCalls } from "@/lib/calls/outbound";
 import { connectionStore } from "@/lib/connection-store";
 
@@ -69,6 +70,7 @@ async function cancel(): Promise<void> {
       reportCallError(err);
     }
   }
+  clearDmCallActivity(to, sid);
   clearCallState();
 }
 
