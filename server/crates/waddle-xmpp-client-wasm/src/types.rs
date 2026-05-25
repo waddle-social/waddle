@@ -928,7 +928,7 @@ mod tests {
         // Sanity check the rename: snake_case keys must NOT match.
         let json = serde_json::json!({
             "service_jid": "push.example.com",
-            "app_id": "app-web",
+            "app-id": "app-web",
             "environment": "prod",
             "platform": "web",
             "endpoint": "https://example",

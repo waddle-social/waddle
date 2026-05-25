@@ -34,7 +34,7 @@ pub const DISABLE_DEVICE_NODE: &str = "disable-device";
 
 /// FORM_TYPE the Push Service expects on the submitted form. Keep in
 /// sync with the server-side handler.
-pub const REGISTER_DEVICE_FORM_TYPE: &str = "urn:xmpp:push-service:commands:register-device:0";
+pub const REGISTER_DEVICE_FORM_TYPE: &str = "urn:waddle:push-service:commands:register-device:0";
 
 /// XEP-0004 form field name carrying the assigned XEP-0357 node id in
 /// the stage-4 result form.
@@ -188,7 +188,7 @@ pub fn build_register_device_submit_form(
     let mut fields = vec![
         text_single("platform", platform.as_wire_str()),
         text_single("environment", environment.as_wire_str()),
-        text_single("app_id", app_id),
+        text_single("app-id", app_id),
     ];
     match credentials {
         PushDeviceCredentials::WebPush {
@@ -211,7 +211,7 @@ pub fn build_register_device_submit_form(
 }
 
 /// FORM_TYPE for the `disable-device` XEP-0050 command submit form.
-pub const DISABLE_DEVICE_FORM_TYPE: &str = "urn:xmpp:push-service:commands:disable-device:0";
+pub const DISABLE_DEVICE_FORM_TYPE: &str = "urn:waddle:push-service:commands:disable-device:0";
 
 /// Build the XEP-0004 submit form for the `disable-device` command.
 /// Carries the XEP-0357 `node` id and the Push Service-assigned
@@ -401,7 +401,7 @@ mod tests {
         );
         assert_eq!(values.get("platform").copied(), Some("web"));
         assert_eq!(values.get("environment").copied(), Some("prod"));
-        assert_eq!(values.get("app_id").copied(), Some("app-web"));
+        assert_eq!(values.get("app-id").copied(), Some("app-web"));
         assert_eq!(
             values.get("web-push-endpoint").copied(),
             Some("https://fcm.googleapis.com/wp/abc")

@@ -26,6 +26,15 @@ pub enum CommandResult {
         form: DataForm,
         session_id: String,
         notes: Vec<Note>,
+        /// XEP-0050 §3 / §5.2 `<actions/>` element advertising which
+        /// actions the requester may submit at the next stage. When
+        /// `None`, no `<actions/>` is emitted (XEP-0050 §5.2 says the
+        /// element MAY be omitted if `execute` defaults to `next`).
+        /// Multi-step commands with a single follow-up SHOULD set this
+        /// to `AllowedActions::new(Action::Complete).with_complete()`
+        /// so generic XEP-0050 clients know `complete` finishes the
+        /// wizard.
+        actions: Option<crate::xep::xep0050::AllowedActions>,
     },
     /// Command completed successfully.
     Completed {
@@ -289,11 +298,13 @@ impl CommandRegistry {
                     form,
                     session_id: response_session_id,
                     notes,
+                    actions,
                 },
             ) if response_session_id.is_empty() => CommandResult::Executing {
                 form,
                 session_id,
                 notes,
+                actions,
             },
             (_, result) => result,
         };
@@ -411,6 +422,7 @@ mod tests {
                         form: DataForm::new(crate::xep::xep0004::FormType::Form),
                         session_id: ctx.command.session_id.unwrap_or_default(),
                         notes: vec![],
+                        actions: None,
                     }
                 },
             )

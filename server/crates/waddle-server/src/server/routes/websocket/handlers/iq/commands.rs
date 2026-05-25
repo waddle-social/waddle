@@ -64,12 +64,14 @@ pub(super) async fn handle_command_iq(
             form,
             session_id,
             notes,
+            actions,
         } => {
             let mut command = Command::new(node.clone());
             command.status = Some(CommandStatus::Executing);
             command.session_id = Some(session_id);
             command.form = Some(form);
             command.notes = notes;
+            command.actions = actions;
             command
         }
         CommandResult::Completed { form, notes } => {

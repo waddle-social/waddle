@@ -371,6 +371,15 @@ impl std::fmt::Display for StanzaErrorType {
 /// Generate an IQ error response.
 ///
 /// Creates an error IQ stanza with the appropriate error element.
+///
+/// **Security note:** the `text`, `to`, `from`, and `id` arguments may
+/// carry attacker-controlled values that bubbled up from user input
+/// (e.g. an error message that echoes a malformed form field value
+/// the chat client submitted). They are XML-attribute / text-content
+/// escaped here so a `<` in the input cannot break the stanza envelope.
+/// This is a narrow patch on top of the legacy `format!`-built helper;
+/// a follow-up should migrate the entire helper to the typed
+/// `xmpp_parsers::iq::Iq` builders shared with the rest of the server.
 pub fn generate_iq_error(
     id: &str,
     to: Option<&str>,
@@ -379,14 +388,14 @@ pub fn generate_iq_error(
     error_type: StanzaErrorType,
     text: Option<&str>,
 ) -> String {
-    let mut iq = format!("<iq type='error' id='{}'", id);
+    let mut iq = format!("<iq type='error' id='{}'", xml_attr_escape(id));
 
     if let Some(to) = to {
-        iq.push_str(&format!(" to='{}'", to));
+        iq.push_str(&format!(" to='{}'", xml_attr_escape(to)));
     }
 
     if let Some(from) = from {
-        iq.push_str(&format!(" from='{}'", from));
+        iq.push_str(&format!(" from='{}'", xml_attr_escape(from)));
     }
 
     iq.push_str(&format!(
@@ -394,11 +403,68 @@ pub fn generate_iq_error(
         error_type.as_str(),
         condition.as_str(),
         ns::STANZAS,
-        text.map(|t| format!("<text xmlns='{}' xml:lang='en'>{}</text>", ns::STANZAS, t))
-            .unwrap_or_default()
+        text.map(|t| format!(
+            "<text xmlns='{}' xml:lang='en'>{}</text>",
+            ns::STANZAS,
+            xml_text_escape(t)
+        ))
+        .unwrap_or_default()
     ));
 
     iq
+}
+
+/// Escape an attribute value: replaces `&`, `<`, `>`, `'`, `"` with
+/// their XML entity references. Used by the legacy stanza builders
+/// (e.g. [`generate_iq_error`]) until they migrate to typed builders.
+fn xml_attr_escape(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '\'' => out.push_str("&apos;"),
+            '"' => out.push_str("&quot;"),
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+/// Escape a text node value: replaces `&`, `<`, `>` (but not quotes —
+/// XML text content is parsed differently from attribute values).
+fn xml_text_escape(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod escape_tests {
+    use super::{xml_attr_escape, xml_text_escape};
+
+    #[test]
+    fn attr_escape_handles_all_xml_specials() {
+        assert_eq!(
+            xml_attr_escape("a&b<c>d'e\"f"),
+            "a&amp;b&lt;c&gt;d&apos;e&quot;f"
+        );
+    }
+
+    #[test]
+    fn text_escape_handles_lt_gt_amp_only() {
+        // Quotes are legal in text content; not escaping them keeps the
+        // diagnostic readable. `<` and `&` are the dangerous ones.
+        assert_eq!(xml_text_escape("a&b<c>d'e\"f"), "a&amp;b&lt;c&gt;d'e\"f");
+    }
 }
 
 /// Generate a stream error and close tag.

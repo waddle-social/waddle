@@ -27,9 +27,9 @@ const REGISTER_DEVICE_NODE: &str = "register-device";
 /// XEP-0050 node identifier for push device deregistration.
 const DISABLE_DEVICE_NODE: &str = "disable-device";
 /// FORM_TYPE the server expects on the `register-device` submit form.
-const REGISTER_DEVICE_FORM_TYPE: &str = "urn:xmpp:push-service:commands:register-device:0";
+const REGISTER_DEVICE_FORM_TYPE: &str = "urn:waddle:push-service:commands:register-device:0";
 /// FORM_TYPE the server expects on the `disable-device` submit form.
-const DISABLE_DEVICE_FORM_TYPE: &str = "urn:xmpp:push-service:commands:disable-device:0";
+const DISABLE_DEVICE_FORM_TYPE: &str = "urn:waddle:push-service:commands:disable-device:0";
 
 const DOMAIN: &str = "localhost";
 const USERNAME: &str = "admin";
@@ -320,7 +320,7 @@ async fn register_web_push_device_via_xep0050_with_device_id(
         &[
             ("platform", "web"),
             ("environment", "prod"),
-            ("app_id", app_id),
+            ("app-id", app_id),
             ("web-push-endpoint", endpoint),
             ("web-push-p256dh", p256dh),
             ("web-push-auth", auth),
@@ -907,7 +907,7 @@ async fn xep0050_push_service_register_device_rejects_oversized_app_id() {
         &[
             ("platform", "web"),
             ("environment", "prod"),
-            ("app_id", &oversized_app_id),
+            ("app-id", &oversized_app_id),
             ("web-push-endpoint", "https://push.example.com/endpoint/big"),
             ("web-push-p256dh", "p256-key-big"),
             ("web-push-auth", "auth-secret-big"),

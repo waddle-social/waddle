@@ -201,6 +201,11 @@ pub(crate) async fn extension_command_result(
                     form: extension_data_form_to_xmpp(form),
                     session_id: command_session_id.unwrap_or_default(),
                     notes,
+                    // Extensions don't yet expose a typed `<actions/>`
+                    // model — leaving as `None` preserves the
+                    // pre-cutover behavior. Future extension API can
+                    // surface this when needed.
+                    actions: None,
                 };
             }
             ExtensionEffect::HostWarning(message) => {

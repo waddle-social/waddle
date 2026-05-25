@@ -202,7 +202,7 @@ async fn register_push_device_completes_multi_step_dance() {
         .collect();
     assert_eq!(fields.get("platform").map(String::as_str), Some("web"));
     assert_eq!(fields.get("environment").map(String::as_str), Some("prod"));
-    assert_eq!(fields.get("app_id").map(String::as_str), Some("app-web"));
+    assert_eq!(fields.get("app-id").map(String::as_str), Some("app-web"));
     assert_eq!(
         fields.get("web-push-endpoint").map(String::as_str),
         Some("https://fcm.googleapis.com/wp/abc")

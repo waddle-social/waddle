@@ -36,7 +36,7 @@ const NS_PUBSUB: &str = "http://jabber.org/protocol/pubsub";
 const NS_PUSH: &str = "urn:xmpp:push:0";
 const NS_WADDLE_DND: &str = "urn:waddle:dnd:0";
 const REGISTER_DEVICE_NODE: &str = "register-device";
-const REGISTER_DEVICE_FORM_TYPE: &str = "urn:xmpp:push-service:commands:register-device:0";
+const REGISTER_DEVICE_FORM_TYPE: &str = "urn:waddle:push-service:commands:register-device:0";
 const STANZA_ERROR_NS: &str = "urn:ietf:params:xml:ns:xmpp-stanzas";
 
 const DOMAIN: &str = "localhost";
@@ -168,7 +168,7 @@ async fn register_web_push_device_via_xep0050(
         &[
             ("platform", "web"),
             ("environment", "prod"),
-            ("app_id", app_id),
+            ("app-id", app_id),
             ("web-push-endpoint", endpoint),
             ("web-push-p256dh", p256dh),
             ("web-push-auth", auth),

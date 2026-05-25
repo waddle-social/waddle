@@ -174,7 +174,7 @@ mod tests {
     fn build_command_request_with_session_carries_sessionid_and_form() {
         let form = DataForm::new(
             DataFormType::Submit,
-            "urn:xmpp:push-service:commands:register-device:0",
+            "urn:waddle:push-service:commands:register-device:0",
             vec![],
         );
         let iq = build_xep0050_command_request_with_session(

@@ -19,7 +19,7 @@
 //! ## Wire contract — `register-device`
 //!
 //! Submit form FORM_TYPE = [`REGISTER_DEVICE_FORM_TYPE`]
-//! (`urn:xmpp:push-service:commands:register-device:0`). Required
+//! (`urn:waddle:push-service:commands:register-device:0`). Required
 //! fields:
 //!
 //! - `platform` ∈ {`web`, `apns`, `fcm`}.
@@ -39,7 +39,7 @@
 //! ## Wire contract — `disable-device`
 //!
 //! Submit form FORM_TYPE = [`DISABLE_DEVICE_FORM_TYPE`]
-//! (`urn:xmpp:push-service:commands:disable-device:0`). Required
+//! (`urn:waddle:push-service:commands:disable-device:0`). Required
 //! fields: `node` (the XEP-0357 push node id) and `device-id` (the
 //! Push Service-assigned device row id returned by the
 //! `register-device` result form). Disables ONLY that single device
@@ -76,10 +76,10 @@ pub const DISABLE_DEVICE_NODE: &str = "disable-device";
 /// XEP-0004 `FORM_TYPE` value pinning the submit/result form for
 /// [`REGISTER_DEVICE_NODE`]. Kept in lockstep with the client-side
 /// constant `waddle_xmpp_client::push::REGISTER_DEVICE_FORM_TYPE`.
-pub const REGISTER_DEVICE_FORM_TYPE: &str = "urn:xmpp:push-service:commands:register-device:0";
+pub const REGISTER_DEVICE_FORM_TYPE: &str = "urn:waddle:push-service:commands:register-device:0";
 /// XEP-0004 `FORM_TYPE` value pinning the submit form for
 /// [`DISABLE_DEVICE_NODE`].
-pub const DISABLE_DEVICE_FORM_TYPE: &str = "urn:xmpp:push-service:commands:disable-device:0";
+pub const DISABLE_DEVICE_FORM_TYPE: &str = "urn:waddle:push-service:commands:disable-device:0";
 
 /// XEP-0004 form field carrying the assigned XEP-0357 node id in the
 /// stage-4 `register-device` result form.
@@ -91,7 +91,13 @@ pub const FIELD_PLATFORM: &str = "platform";
 /// (`prod` / `sandbox`).
 pub const FIELD_ENVIRONMENT: &str = "environment";
 /// XEP-0004 form field carrying the caller's app namespace.
-pub const FIELD_APP_ID: &str = "app_id";
+/// Uses the kebab-case form-var convention shared with every other
+/// field in this FORM_TYPE (`device-id`, `web-push-endpoint`,
+/// `apns-token`, etc.). XEP-0068 §4.3 doesn't mandate one casing
+/// but a single FORM_TYPE MUST be consistent across submit and
+/// result forms; mixing snake_case `app_id` with kebab-case
+/// siblings would trip generic form-aware clients.
+pub const FIELD_APP_ID: &str = "app-id";
 /// XEP-0004 form field carrying the Web Push subscription endpoint
 /// URL (RFC 8030 §5).
 pub const FIELD_WEB_PUSH_ENDPOINT: &str = "web-push-endpoint";
@@ -201,6 +207,15 @@ async fn handle_register_device(
             form: build_register_device_form_prompt(),
             session_id: String::new(),
             notes: vec![],
+            // XEP-0050 §5.2: advertise that `complete` is the only
+            // follow-up action so a generic XEP-0050 client knows the
+            // wizard finishes here rather than expecting `next`.
+            actions: Some(
+                waddle_xmpp::xep::xep0050::AllowedActions::new(
+                    waddle_xmpp::xep::xep0050::Action::Complete,
+                )
+                .with_complete(),
+            ),
         };
     };
 
@@ -261,6 +276,13 @@ async fn handle_disable_device(
             form: build_disable_device_form_prompt(),
             session_id: String::new(),
             notes: vec![],
+            // XEP-0050 §5.2 — single follow-up via `complete`.
+            actions: Some(
+                waddle_xmpp::xep::xep0050::AllowedActions::new(
+                    waddle_xmpp::xep::xep0050::Action::Complete,
+                )
+                .with_complete(),
+            ),
         };
     };
 
