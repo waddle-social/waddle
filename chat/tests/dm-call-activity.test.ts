@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import {
   $dmCallActivities,
+  DM_CALL_ACTIVITY_ACTIVE_WINDOW_MS,
   applyDmCallEvent,
   clearDmCallActivities,
   clearDmCallActivity,
@@ -315,6 +316,56 @@ describe("DM call activity", () => {
     pruneExpiredDmCallActivities(new Date("2026-05-26T10:00:01.000Z"));
 
     expect(readDmCallActivity(bob, new Date("2026-05-26T10:00:01.000Z"))).toBeNull();
+  });
+
+  test("scheduled prune timer clears subscribed activity after the fallback window", async () => {
+    const originalSetTimeout = globalThis.setTimeout;
+    const originalClearTimeout = globalThis.clearTimeout;
+    const timer = { unref: () => undefined } as unknown as ReturnType<typeof setTimeout>;
+    let scheduledPrune: (() => void) | null = null;
+    let scheduledDelay: number | undefined;
+
+    globalThis.setTimeout = ((handler: TimerHandler, timeout?: number, ...args: unknown[]) => {
+      scheduledDelay = Number(timeout ?? 0);
+      scheduledPrune = () => {
+        if (typeof handler === "function") {
+          handler(...args);
+        }
+      };
+      return timer;
+    }) as typeof setTimeout;
+    globalThis.clearTimeout = (() => {
+      scheduledPrune = null;
+    }) as typeof clearTimeout;
+
+    try {
+      const timerArmedAt = new Date();
+      const timestamp = new Date(timerArmedAt.getTime() - DM_CALL_ACTIVITY_ACTIVE_WINDOW_MS).toISOString();
+      applyDmCallEvent({
+        event: {
+          kind: "propose",
+          from: `${bob}/phone`,
+          sid: "timer-pruned-call",
+          media: audio,
+        },
+        selfBareJid: self,
+        to: `${self}/web`,
+        timestamp,
+        now: timerArmedAt,
+      });
+
+      expect($dmCallActivities.get()[bob]?.sid).toBe("timer-pruned-call");
+      expect(scheduledDelay).toBe(1_000);
+      expect(scheduledPrune).not.toBeNull();
+
+      await new Promise<void>((resolve) => originalSetTimeout(resolve, 5));
+      scheduledPrune?.();
+
+      expect($dmCallActivities.get()).toEqual({});
+    } finally {
+      globalThis.setTimeout = originalSetTimeout;
+      globalThis.clearTimeout = originalClearTimeout;
+    }
   });
 
   test("treats unparseable activity timestamps as expired", () => {
