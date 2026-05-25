@@ -560,8 +560,13 @@ function barePart(userJid: string): string {
 /// Returns `true` when the subscription has no applicationServerKey
 /// (very old browsers / non-VAPID origin server endpoints) so callers
 /// don't churn the subscription on an irrelevant comparison.
-function subscriptionApplicationKeyMatches(
-  subscription: PushSubscription,
+///
+/// Exported so the test suite can pin the comparison semantics
+/// (cleared-localStorage rotation path is the entire point of this
+/// helper; covering it via the full `ensureBrowserSubscriptionWithCurrentKey`
+/// would require stubbing every PushManager + SW surface).
+export function subscriptionApplicationKeyMatches(
+  subscription: { options: { applicationServerKey?: ArrayBuffer | ArrayBufferView | null } },
   advertisedPublicKeyBase64Url: string,
 ): boolean {
   const existingKey = subscription.options.applicationServerKey;
@@ -572,8 +577,9 @@ function subscriptionApplicationKeyMatches(
   } catch {
     return false;
   }
-  const existing =
-    existingKey instanceof ArrayBuffer ? new Uint8Array(existingKey) : new Uint8Array(existingKey);
+  const existing = ArrayBuffer.isView(existingKey)
+    ? new Uint8Array(existingKey.buffer, existingKey.byteOffset, existingKey.byteLength)
+    : new Uint8Array(existingKey);
   if (existing.length !== advertised.length) return false;
   for (let i = 0; i < existing.length; i++) {
     if (existing[i] !== advertised[i]) return false;

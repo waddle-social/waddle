@@ -1245,14 +1245,27 @@ export class BrowserXmppClient {
     // every subsequent enable + reconnect's setupPushSubscription.
     const TIMEOUT_MS = 10_000;
     let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
-    const timeoutPromise = new Promise<null>((resolve) => {
-      timeoutHandle = setTimeout(() => resolve(null), TIMEOUT_MS);
+    let timedOut = false;
+    const timeoutSentinel = Symbol("vapid-fetch-timeout");
+    const timeoutPromise = new Promise<typeof timeoutSentinel>((resolve) => {
+      timeoutHandle = setTimeout(() => {
+        timedOut = true;
+        resolve(timeoutSentinel);
+      }, TIMEOUT_MS);
     });
     try {
       const result = await Promise.race([
         xmpp.fetch_vapid_public_key(opts.serviceJid),
         timeoutPromise,
       ]);
+      if (result === timeoutSentinel) {
+        console.warn(
+          `[xmpp] fetch_vapid_public_key timed out after ${TIMEOUT_MS}ms; ` +
+          "Push Service may be unreachable. Returning null so the chat falls back " +
+          "to the foreground Notification API; the next reconnect will retry.",
+        );
+        return null;
+      }
       if (result === null || result === undefined) return null;
       const candidate = result as { publicKey?: unknown; kid?: unknown };
       // Validate the JS-boundary shape — the wasm method's signature
@@ -1273,6 +1286,12 @@ export class BrowserXmppClient {
       }
       return { publicKey: candidate.publicKey, kid: candidate.kid };
     } catch (error) {
+      if (timedOut) {
+        // The wasm-side IQ rejected after we already gave up on it —
+        // the warning above already explained the timeout; this path
+        // just drops the late result silently.
+        return null;
+      }
       console.warn("[xmpp] fetch_vapid_public_key IQ rejected:", error);
       return null;
     } finally {

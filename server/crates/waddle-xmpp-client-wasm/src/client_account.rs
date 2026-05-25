@@ -132,23 +132,7 @@ impl WaddleClient {
         future_to_promise(async move {
             let iq = build_disco_info_iq(&service_jid, None);
             let result = send_iq_command(inner, iq).await?;
-            // Defense in depth: refuse to accept a VAPID advertisement
-            // claiming a `from` other than the JID we queried. Without
-            // this, a malicious user-server (or a compromised middlebox
-            // on the C2S path) could spoof a `<iq from='attacker.tld'>`
-            // result carrying its own VAPID key, and the browser would
-            // bind its push subscription to attacker-signed JWTs.
-            // The XMPP server-side dispatcher already routes responses
-            // by stanza id, but the `from` rebinding requires the
-            // explicit check at the boundary that consumes the typed
-            // disco payload.
-            if let Some(from) = result.attr("from") {
-                if from != service_jid {
-                    return Err(js_error(format!(
-                        "Push Service disco#info response from {from:?} does not match queried JID {service_jid:?}; refusing to trust VAPID advertisement"
-                    )));
-                }
-            }
+            verify_iq_from_matches_query(result.attr("from"), &service_jid).map_err(js_error)?;
             let disco = parse_disco_info_result(&result, &service_jid).ok_or_else(|| {
                 js_error("Push Service disco#info response missing <query/> payload")
             })?;
@@ -765,4 +749,94 @@ fn require_non_empty_attr(
                 "{response_kind} response missing required attribute '{attr}'"
             ))
         })
+}
+
+/// Defense-in-depth check for `fetch_vapid_public_key`: refuse to accept
+/// a disco#info advertisement whose `from` doesn't match the queried
+/// `service_jid`. Without this, a malicious user-server (or a
+/// compromised middlebox on the C2S path) could spoof a
+/// `<iq from='attacker.tld'>` result carrying its own VAPID key, and
+/// the browser would bind its push subscription to attacker-signed
+/// JWTs. The XMPP server-side dispatcher already routes responses by
+/// stanza id, but the `from` rebinding requires the explicit check at
+/// the boundary that consumes the typed disco payload.
+///
+/// RFC 6120 §8.1.2.1 permits `<iq>` results with an absent `from` when
+/// the reply originates from the user's own server; we treat that as a
+/// pass-through (the typical Push Service is a server component under
+/// the same domain). A `from` that matches the bare service JID OR a
+/// `from` of the form `service_jid/resource` (Push Services that
+/// publish from a full JID) is accepted.
+///
+/// Extracted as a pure helper so the Rust test suite can pin the
+/// anti-spoof semantics without a full wasm-bindgen test harness.
+fn verify_iq_from_matches_query(from_attr: Option<&str>, service_jid: &str) -> Result<(), String> {
+    let Some(from) = from_attr else {
+        return Ok(());
+    };
+    if from == service_jid {
+        return Ok(());
+    }
+    // Allow `service_jid/resource` so a Push Service that responds
+    // from a full JID isn't rejected. Strict prefix match against the
+    // bare JID followed by `/` prevents `evil.tld/foo` from collapsing
+    // to a match against `service_jid` via substring containment.
+    if let Some(remainder) = from.strip_prefix(service_jid) {
+        if remainder.starts_with('/') {
+            return Ok(());
+        }
+    }
+    Err(format!(
+        "Push Service disco#info response from {from:?} does not match queried JID {service_jid:?}; refusing to trust VAPID advertisement"
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn verify_iq_from_accepts_exact_match() {
+        assert!(verify_iq_from_matches_query(Some("push.example.com"), "push.example.com").is_ok());
+    }
+
+    #[test]
+    fn verify_iq_from_accepts_absent_attr() {
+        assert!(verify_iq_from_matches_query(None, "push.example.com").is_ok());
+    }
+
+    #[test]
+    fn verify_iq_from_accepts_service_jid_with_resource() {
+        assert!(verify_iq_from_matches_query(
+            Some("push.example.com/resource"),
+            "push.example.com"
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn verify_iq_from_rejects_unrelated_jid() {
+        let err =
+            verify_iq_from_matches_query(Some("attacker.tld"), "push.example.com").unwrap_err();
+        assert!(err.contains("attacker.tld"));
+        assert!(err.contains("push.example.com"));
+    }
+
+    #[test]
+    fn verify_iq_from_rejects_prefix_substring_collision() {
+        // Without the `/` boundary, `push.example.com` could match
+        // `push.example.com.attacker.tld` via substring containment.
+        // Confirm the strict-prefix rule rejects this.
+        assert!(verify_iq_from_matches_query(
+            Some("push.example.com.attacker.tld"),
+            "push.example.com",
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn verify_iq_from_rejects_empty_from() {
+        let err = verify_iq_from_matches_query(Some(""), "push.example.com").unwrap_err();
+        assert!(err.contains("push.example.com"));
+    }
 }
