@@ -163,8 +163,7 @@ impl WebPushSender for RateLimitedWebPushSender {
         // per-pair rate limit becomes per-device — defeating the
         // "one chatty relay+class can't monopolize the global cap"
         // semantic the doc-comment promises.
-        let endpoint_hash =
-            EndpointHash::of(&request.endpoint.origin().ascii_serialization());
+        let endpoint_hash = EndpointHash::of(&request.endpoint.origin().ascii_serialization());
         let urgency = request.urgency;
         let endpoint = request.endpoint.clone();
         let payload = request.payload.clone();
@@ -357,8 +356,8 @@ mod tests {
         let p = payload();
         let j = jwt();
         let url_fcm = url::Url::parse("https://fcm.googleapis.com/fcm/send/abc").unwrap();
-        let url_moz = url::Url::parse("https://updates.push.services.mozilla.com/wpush/v1/xyz")
-            .unwrap();
+        let url_moz =
+            url::Url::parse("https://updates.push.services.mozilla.com/wpush/v1/xyz").unwrap();
         let start = Instant::now();
         sender
             .send(make_request(&url_fcm, &p, &j, Urgency::Normal))

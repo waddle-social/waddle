@@ -350,13 +350,12 @@ mod tests {
         let salt = &body[..AES128GCM_SALT_LEN];
         let idlen = body[AES128GCM_SALT_LEN + AES128GCM_RS_LEN] as usize;
         assert_eq!(idlen, P256_UNCOMPRESSED_POINT_LEN, "idlen must be 65");
-        let keyid_start =
-            AES128GCM_SALT_LEN + AES128GCM_RS_LEN + AES128GCM_IDLEN_FIELD_LEN;
+        let keyid_start = AES128GCM_SALT_LEN + AES128GCM_RS_LEN + AES128GCM_IDLEN_FIELD_LEN;
         let as_public_bytes = &body[keyid_start..keyid_start + idlen];
         let ciphertext = &body[AES128GCM_HEADER_LEN..];
         let as_pub_point = EncodedPoint::from_bytes(as_public_bytes).expect("as public");
-        let as_public = p256::PublicKey::from_encoded_point(&as_pub_point)
-            .expect("as public valid");
+        let as_public =
+            p256::PublicKey::from_encoded_point(&as_pub_point).expect("as public valid");
 
         let shared = elliptic_curve::ecdh::diffie_hellman(
             ua_private.to_nonzero_scalar(),
