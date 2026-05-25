@@ -1,7 +1,7 @@
 //! Service discovery (XEP-0030), HTTP upload (XEP-0363), inbox (XEP-0430),
 //! push notifications, and XEP-0503 Spaces topology discovery.
 
-mod ids;
+pub(crate) mod ids;
 mod iq;
 mod parsing;
 mod push_vapid;
