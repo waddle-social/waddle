@@ -6,6 +6,7 @@ import { useDirectMessages } from "../src/dms/messages";
 import { useChannelMessages } from "../src/channels/messages";
 import { BrowserXmppClient, roomBareJidFor, type InboxEntry, type LiveDmMessage, type RoomActivityEvent } from "../src/lib/xmpp-client";
 import { enqueueQueuedMessage, listQueuedDmMessages, listQueuedRoomMessages } from "../src/lib/outbound-queue-store";
+import { clearDmCallActivities, readDmCallActivity } from "../src/lib/calls/dm-call-activity";
 import { handlerStubs } from "./helpers/xmpp-client-mock";
 
 function session(partial: Partial<WaddleSession> = {}): WaddleSession {
@@ -103,9 +104,11 @@ beforeEach(() => {
     localStorage: storage,
   } as Window & { localStorage: typeof storage };
   localStorage.clear();
+  clearDmCallActivities();
 });
 
 afterEach(() => {
+  clearDmCallActivities();
   localStorage.clear();
   if (originalLocalStorage === undefined) {
     Reflect.deleteProperty(globalThis, "localStorage");
@@ -869,9 +872,147 @@ describe("client keepalive lifecycle", () => {
     });
     expect(fetchDmHistoryPage).toHaveBeenCalledTimes(3);
     expect(dmHandler).toHaveBeenCalledTimes(3);
+    expect(dmHandler.mock.calls.map(([message]) => (message as LiveDmMessage).id)).toEqual([
+      "dm-same-time-missed",
+      "dm-newer-1",
+      "dm-newer-2",
+    ]);
     expect(dmHandler).toHaveBeenCalledWith(expect.objectContaining({ id: "dm-newer-2" }));
     expect(dmHandler).toHaveBeenCalledWith(expect.objectContaining({ id: "dm-newer-1" }));
     expect(dmHandler).toHaveBeenCalledWith(expect.objectContaining({ id: "dm-same-time-missed" }));
+  });
+
+  test("timestamp fallback replays DM call events oldest-to-newest across pages", async () => {
+    const client = new BrowserXmppClient(session());
+    const catchup = (client as unknown as {
+      catchup: {
+        recordDmSeen: (peer: string, ts: string, archiveId?: string, seenIds?: string[]) => void;
+        onSessionStarted: () => unknown[];
+      };
+    }).catchup;
+    catchup.recordDmSeen("bob@example.com", "2024-01-01T00:00:00.000Z");
+    catchup.onSessionStarted();
+    const fetchDmHistoryPage = mock(async (_peer: string, _max: number, pageParam: { type: string; before?: string }) => {
+      if (pageParam.type === "latest") {
+        return {
+          messages: [{
+            mam_id: "mam-proceed",
+            from: "alice@example.com/desktop",
+            to: "bob@example.com/phone",
+            message_type: "chat",
+            timestamp: new Date(Date.now() - 60_000).toISOString(),
+            reaction_emojis: [],
+            shared_files: [],
+            call_event: {
+              kind: "proceed",
+              from: "alice@example.com/desktop",
+              to: "bob@example.com/phone",
+              sid: "call-replay",
+            },
+          }],
+          first_id: "mam-proceed",
+          last_id: "mam-proceed",
+          is_complete: false,
+        };
+      }
+      return {
+        messages: [{
+          mam_id: "mam-propose",
+          from: "bob@example.com/phone",
+          to: "alice@example.com/desktop",
+          message_type: "chat",
+          timestamp: new Date(Date.now() - 120_000).toISOString(),
+          reaction_emojis: [],
+          shared_files: [],
+          call_event: {
+            kind: "propose",
+            from: "bob@example.com/phone",
+            sid: "call-replay",
+            media: { audio: true, video: true },
+          },
+        }],
+        first_id: "mam-propose",
+        last_id: "mam-propose",
+        is_complete: true,
+      };
+    });
+
+    const xmpp = Object.assign(new EventEmitter(), {
+      fetch_dm_history_page: fetchDmHistoryPage,
+    }) as unknown as Agent;
+    (client as unknown as { xmpp: Agent }).xmpp = xmpp;
+    (client as unknown as { wireEvents: (xmpp: Agent) => void }).wireEvents(xmpp);
+
+    xmpp.emit("stream:management:resumed");
+    await settleReconnectCatchup();
+
+    expect(fetchDmHistoryPage).toHaveBeenNthCalledWith(2, "bob@example.com", 100, {
+      type: "before",
+      before: "mam-proceed",
+    });
+    expect(readDmCallActivity("bob@example.com")).toMatchObject({
+      sid: "call-replay",
+      state: "accepted",
+      direction: "incoming",
+      media: { audio: true, video: true },
+    });
+  });
+
+  test("drops DM timestamp catch-up pages after the XMPP handle disconnects while awaiting MAM", async () => {
+    const client = new BrowserXmppClient(session());
+    const catchup = (client as unknown as {
+      catchup: {
+        recordDmSeen: (peer: string, ts: string, archiveId?: string, seenIds?: string[]) => void;
+        onSessionStarted: () => unknown[];
+      };
+    }).catchup;
+    catchup.recordDmSeen("bob@example.com", "2024-01-01T00:00:00.000Z");
+    catchup.onSessionStarted();
+    const dmHandler = mock(() => undefined);
+    client.setDirectMessageHandler(dmHandler);
+    let resolvePage: ((page: unknown) => void) | null = null;
+    const fetchDmHistoryPage = mock(async () => new Promise((resolve) => {
+      resolvePage = resolve;
+    }));
+
+    const xmpp = Object.assign(new EventEmitter(), {
+      fetch_dm_history_page: fetchDmHistoryPage,
+    }) as unknown as Agent;
+    (client as unknown as { xmpp: Agent }).xmpp = xmpp;
+    (client as unknown as { wireEvents: (xmpp: Agent) => void }).wireEvents(xmpp);
+
+    xmpp.emit("stream:management:resumed");
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(fetchDmHistoryPage).toHaveBeenCalledTimes(1);
+
+    xmpp.emit("disconnected");
+    resolvePage?.({
+      messages: [{
+        mam_id: "mam-stale",
+        id: "dm-stale",
+        from: "bob@example.com/phone",
+        to: "alice@example.com/desktop",
+        message_type: "chat",
+        body: "stale after disconnect",
+        timestamp: new Date().toISOString(),
+        reaction_emojis: [],
+        shared_files: [],
+        call_event: {
+          kind: "propose",
+          from: "bob@example.com/phone",
+          sid: "stale-after-disconnect",
+          media: { audio: true, video: true },
+        },
+      }],
+      first_id: "mam-stale",
+      last_id: "mam-stale",
+      is_complete: true,
+    });
+    await settleReconnectCatchup();
+
+    expect(dmHandler).toHaveBeenCalledTimes(0);
+    expect(readDmCallActivity("bob@example.com")).toBeNull();
   });
 
   test("timestamp fallback continues beyond fifty pages until it crosses the last seen timestamp", async () => {
@@ -1658,6 +1799,112 @@ describe("carbon forwarding", () => {
     });
 
     expect(dmHandler).toHaveBeenCalledTimes(0);
+  });
+
+  test("applies carbon-wrapped call activity on generic message events", () => {
+    const client = new BrowserXmppClient(session());
+    const xmpp = Object.assign(new EventEmitter(), {}) as unknown as Agent;
+    (client as unknown as { xmpp: Agent }).xmpp = xmpp;
+    (client as unknown as { wireEvents: (xmpp: Agent) => void }).wireEvents(xmpp);
+
+    xmpp.emit("message", {
+      id: "call-carbon-1",
+      type: "chat",
+      from: "alice@example.com/phone",
+      to: "bob@example.com/desktop",
+      timestamp: new Date().toISOString(),
+      carbon: { sent: true },
+      call_event: {
+        kind: "propose",
+        from: "alice@example.com/phone",
+        to: "bob@example.com/desktop",
+        sid: "call-carbon-1",
+        media: { audio: true, video: true },
+      },
+    });
+
+    expect(readDmCallActivity("bob@example.com")).toMatchObject({
+      sid: "call-carbon-1",
+      direction: "outgoing",
+      media: { audio: true, video: true },
+    });
+  });
+
+  test("applies call activity from carbon:sent events", () => {
+    const client = new BrowserXmppClient(session());
+    const xmpp = Object.assign(new EventEmitter(), {}) as unknown as Agent;
+    (client as unknown as { xmpp: Agent }).xmpp = xmpp;
+    (client as unknown as { wireEvents: (xmpp: Agent) => void }).wireEvents(xmpp);
+
+    xmpp.emit("carbon:sent", {
+      carbon: {
+        forward: {
+          message: {
+            id: "call-carbon-sent",
+            type: "chat",
+            from: "alice@example.com/phone",
+            to: "bob@example.com/desktop",
+            timestamp: new Date().toISOString(),
+            call_event: {
+              kind: "propose",
+              from: "alice@example.com/phone",
+              to: "bob@example.com/desktop",
+              sid: "call-carbon-sent",
+              media: { audio: true, video: true },
+            },
+          },
+        },
+      },
+    });
+
+    expect(readDmCallActivity("bob@example.com")).toMatchObject({
+      sid: "call-carbon-sent",
+      direction: "outgoing",
+      media: { audio: true, video: true },
+    });
+  });
+
+  test("deduplicates carbon:received call activity against the forwarded message event", () => {
+    const client = new BrowserXmppClient(session());
+    const xmpp = Object.assign(new EventEmitter(), {}) as unknown as Agent;
+    (client as unknown as { xmpp: Agent }).xmpp = xmpp;
+    (client as unknown as { wireEvents: (xmpp: Agent) => void }).wireEvents(xmpp);
+
+    const forwarded = {
+      id: "call-carbon-received",
+      type: "chat",
+      from: "bob@example.com/phone",
+      to: "alice@example.com/desktop",
+      timestamp: new Date().toISOString(),
+      call_event: {
+        kind: "propose",
+        from: "bob@example.com/phone",
+        sid: "call-carbon-received",
+        media: { audio: true, video: false },
+      },
+    };
+    xmpp.emit("carbon:received", {
+      carbon: {
+        forward: {
+          message: forwarded,
+        },
+      },
+    });
+    xmpp.emit("message", {
+      ...forwarded,
+      call_event: {
+        kind: "finish",
+        from: "bob@example.com/phone",
+        sid: "call-carbon-received",
+        reason: "success",
+      },
+    });
+
+    expect(readDmCallActivity("bob@example.com")).toMatchObject({
+      sid: "call-carbon-received",
+      direction: "incoming",
+      media: { audio: true, video: false },
+    });
   });
 
   test("forwards carbon:sent messages to the DM handler", () => {

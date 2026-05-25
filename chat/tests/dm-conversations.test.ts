@@ -12,6 +12,7 @@ type MockClient = BrowserXmppClient & {
   fetchInbox: ReturnType<typeof mock>;
   markInboxRead: ReturnType<typeof mock>;
   subscribeToPeerPresence: ReturnType<typeof mock>;
+  hydrateRecentDmCallActivities: ReturnType<typeof mock>;
 };
 
 function makeClient(conversations: InboxEntry[] = []): MockClient {
@@ -19,6 +20,7 @@ function makeClient(conversations: InboxEntry[] = []): MockClient {
     fetchInbox: mock(() => Promise.resolve({ totalUnread: conversations.reduce((sum, conversation) => sum + conversation.unread, 0), conversations })),
     markInboxRead: mock(() => Promise.resolve()),
     subscribeToPeerPresence: mock(() => Promise.resolve()),
+    hydrateRecentDmCallActivities: mock(() => Promise.resolve()),
   } as unknown as MockClient;
 }
 
@@ -140,6 +142,55 @@ describe("useDirectMessageConversations", () => {
       lastMessageAt: "2026-01-02T00:00:00Z",
       unreadCount: 1,
     });
+  });
+
+  test("hydrateFromInbox refreshes DM call activity from personal MAM", async () => {
+    const client = makeClient([
+      {
+        partner: "bob@example.com",
+        kind: "direct",
+        lastStanzaId: "sid-1",
+        lastUpdated: epochSeconds("2026-01-02T12:00:00Z"),
+        unread: 0,
+        preview: "from inbox",
+      },
+      {
+        partner: "carol@example.com/mobile",
+        kind: "direct",
+        lastStanzaId: "sid-2",
+        lastUpdated: epochSeconds("2026-01-02T12:05:00Z"),
+        unread: 0,
+        preview: "from inbox",
+      },
+    ]);
+    const { composable } = makeComposable({ client });
+
+    await composable.hydrateFromInbox();
+
+    expect(client.hydrateRecentDmCallActivities).toHaveBeenCalledTimes(1);
+  });
+
+  test("hydrateFromInbox keeps inbox results when DM call hydration fails", async () => {
+    const client = makeClient([
+      {
+        partner: "bob@example.com",
+        kind: "direct",
+        lastStanzaId: "sid-1",
+        lastUpdated: epochSeconds("2026-01-02T12:00:00Z"),
+        unread: 0,
+        preview: "from inbox",
+      },
+    ]);
+    client.hydrateRecentDmCallActivities = mock(async () => {
+      throw new Error("MAM unavailable");
+    });
+    const { composable } = makeComposable({ client });
+
+    const hydrated = await composable.hydrateFromInbox();
+
+    expect(hydrated).toBe(true);
+    expect(composable.conversations.value).toHaveLength(1);
+    expect(client.hydrateRecentDmCallActivities).toHaveBeenCalledTimes(1);
   });
 
   test("receiveIncomingDm creates conversation and increments unread", () => {

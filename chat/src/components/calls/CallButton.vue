@@ -17,15 +17,20 @@ const props = defineProps<{
 }>();
 
 const state = useStore($callState);
-const { hasActivity: hasPeerCallActivity } = useDmCallActivity(() => props.peerBareJid);
+const { activity: peerCallActivity } = useDmCallActivity(() => props.peerBareJid);
 
 /** A call is already in flight — disable the button so the
  *  caller can't start a parallel call while one is ringing or
- *  active. The store tracks a single slot today (see
- *  `CallState`). */
+ *  active. Hydrated peer activity alone stays actionable: sending
+ *  a fresh XEP-0353 propose lets the peer's active resource migrate
+ *  the call back to this refreshed client. */
 const inCall = computed(
-  () => (state.value.phase !== "idle" && state.value.phase !== "ended") || hasPeerCallActivity.value,
+  () => state.value.phase !== "idle" && state.value.phase !== "ended",
 );
+
+const hasPeerCallActivity = computed(() => !!peerCallActivity.value);
+const voiceLabel = computed(() => hasPeerCallActivity.value && !inCall.value ? "Reconnect voice call" : "Start voice call");
+const videoLabel = computed(() => hasPeerCallActivity.value && !inCall.value ? "Reconnect video call" : "Start video call");
 
 function getSender() {
   const client = connectionStore.client as unknown as { xmpp?: unknown } | null;
@@ -68,8 +73,8 @@ async function startCall(media: CallMedia): Promise<void> {
         ? 'text-muted-foreground opacity-40 cursor-not-allowed'
         : 'text-muted-foreground hover:bg-muted hover:text-foreground'"
       type="button"
-      title="Voice call"
-      aria-label="Start voice call"
+      :title="voiceLabel"
+      :aria-label="voiceLabel"
       :disabled="inCall"
       @click="startCall({ audio: true, video: false })"
     >
@@ -81,8 +86,8 @@ async function startCall(media: CallMedia): Promise<void> {
         ? 'text-muted-foreground opacity-40 cursor-not-allowed'
         : 'text-muted-foreground hover:bg-muted hover:text-foreground'"
       type="button"
-      title="Video call"
-      aria-label="Start video call"
+      :title="videoLabel"
+      :aria-label="videoLabel"
       :disabled="inCall"
       @click="startCall({ audio: true, video: true })"
     >

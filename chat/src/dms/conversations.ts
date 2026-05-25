@@ -222,6 +222,7 @@ export function useDirectMessageConversations(
       for (const conversation of directConversations) {
         void currentClient.subscribeToPeerPresence(barePeerJid(conversation.partner)).catch(() => undefined);
       }
+      await currentClient.hydrateRecentDmCallActivities().catch(() => undefined);
       return true;
     } catch {
       // best-effort

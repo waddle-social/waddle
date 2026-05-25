@@ -20,9 +20,9 @@ export interface XmppStatusSnapshot {
 export type SessionLifecycleEvent = { type: "resumed" } | { type: "fresh" };
 
 export type MamPageParam =
-  | { type: "latest" }
-  | { type: "before"; before: string }
-  | { type: "after"; after: string };
+  | { type: "latest"; start?: string }
+  | { type: "before"; before: string; start?: string }
+  | { type: "after"; after: string; start?: string };
 
 export type MamThreadPageParam =
   | { type: "latest" }

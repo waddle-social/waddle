@@ -1,9 +1,11 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import {
   $dmCallActivities,
+  DM_CALL_ACTIVITY_ACTIVE_WINDOW_MS,
   applyDmCallEvent,
   clearDmCallActivities,
   clearDmCallActivity,
+  pruneExpiredDmCallActivities,
   readDmCallActivity,
 } from "../src/lib/calls/dm-call-activity";
 import type { CallEvent } from "../src/lib/calls/types";
@@ -36,7 +38,7 @@ describe("DM call activity", () => {
       now,
     });
 
-    expect(readDmCallActivity(bob)).toEqual({
+    expect(readDmCallActivity(bob, now)).toEqual({
       peerJid: bob,
       sid: "call-1",
       media: audio,
@@ -60,8 +62,8 @@ describe("DM call activity", () => {
       now,
     });
 
-    expect(readDmCallActivity(bob)?.direction).toBe("outgoing");
-    expect(readDmCallActivity(bob)?.media.video).toBe(true);
+    expect(readDmCallActivity(bob, now)?.direction).toBe("outgoing");
+    expect(readDmCallActivity(bob, now)?.media.video).toBe(true);
   });
 
   test("marks a call accepted when a peer proceeds on one resource", () => {
@@ -91,7 +93,7 @@ describe("DM call activity", () => {
       now,
     });
 
-    expect(readDmCallActivity(bob)).toMatchObject({
+    expect(readDmCallActivity(bob, now)).toMatchObject({
       peerJid: bob,
       sid: "call-3",
       media: audio,
@@ -127,7 +129,7 @@ describe("DM call activity", () => {
       now,
     });
 
-    expect(readDmCallActivity(bob)).toBeNull();
+    expect(readDmCallActivity(bob, now)).toBeNull();
   });
 
   test("self-sent terminal events can clear by sid when the peer hint is gone", () => {
@@ -166,7 +168,7 @@ describe("DM call activity", () => {
       now,
     });
 
-    expect(readDmCallActivity(bob)).toBeNull();
+    expect(readDmCallActivity(bob, now)).toBeNull();
   });
 
   test("older MAM call events cannot regress a newer activity state", () => {
@@ -195,7 +197,7 @@ describe("DM call activity", () => {
       now,
     });
 
-    expect(readDmCallActivity(bob)).toMatchObject({
+    expect(readDmCallActivity(bob, now)).toMatchObject({
       sid: "call-7",
       state: "accepted",
       updatedAt: "2026-05-25T10:05:00.000Z",
@@ -229,7 +231,7 @@ describe("DM call activity", () => {
       now,
     });
 
-    expect(readDmCallActivity(bob)).toBeNull();
+    expect(readDmCallActivity(bob, now)).toBeNull();
   });
 
   test("self-sent terminal events with a to peer tombstone older sibling proposals", () => {
@@ -259,10 +261,10 @@ describe("DM call activity", () => {
       now,
     });
 
-    expect(readDmCallActivity(bob)).toBeNull();
+    expect(readDmCallActivity(bob, now)).toBeNull();
   });
 
-  test("does not let stale catch-up proposals resurrect old calls", () => {
+  test("does not let 24h-old catch-up proposals resurrect old calls", () => {
     applyDmCallEvent({
       event: {
         kind: "propose",
@@ -272,10 +274,113 @@ describe("DM call activity", () => {
       },
       selfBareJid: self,
       to: `${self}/web`,
-      timestamp: "2026-05-23T09:59:59.000Z",
+      timestamp: "2026-05-24T09:59:59.000Z",
       now,
     });
 
+    expect($dmCallActivities.get()).toEqual({});
+  });
+
+  test("does not let 24h-old accepted catch-up events resurrect old calls", () => {
+    applyDmCallEvent({
+      event: {
+        kind: "proceed",
+        from: `${bob}/phone`,
+        sid: "old-call",
+      },
+      selfBareJid: self,
+      to: `${self}/web`,
+      timestamp: "2026-05-24T09:59:59.000Z",
+      now,
+    });
+
+    expect($dmCallActivities.get()).toEqual({});
+  });
+
+  test("prunes visible unresolved activity after the 24h XEP-0353 fallback window", () => {
+    applyDmCallEvent({
+      event: {
+        kind: "propose",
+        from: `${bob}/phone`,
+        sid: "aging-call",
+        media: audio,
+      },
+      selfBareJid: self,
+      to: `${self}/web`,
+      timestamp: now.toISOString(),
+      now,
+    });
+
+    expect(readDmCallActivity(bob, now)?.sid).toBe("aging-call");
+
+    pruneExpiredDmCallActivities(new Date("2026-05-26T10:00:01.000Z"));
+
+    expect(readDmCallActivity(bob, new Date("2026-05-26T10:00:01.000Z"))).toBeNull();
+  });
+
+  test("scheduled prune timer clears subscribed activity after the fallback window", async () => {
+    const originalSetTimeout = globalThis.setTimeout;
+    const originalClearTimeout = globalThis.clearTimeout;
+    const timer = { unref: () => undefined } as unknown as ReturnType<typeof setTimeout>;
+    let scheduledPrune: (() => void) | null = null;
+    let scheduledDelay: number | undefined;
+
+    globalThis.setTimeout = ((handler: TimerHandler, timeout?: number, ...args: unknown[]) => {
+      scheduledDelay = Number(timeout ?? 0);
+      scheduledPrune = () => {
+        if (typeof handler === "function") {
+          handler(...args);
+        }
+      };
+      return timer;
+    }) as typeof setTimeout;
+    globalThis.clearTimeout = (() => {
+      scheduledPrune = null;
+    }) as typeof clearTimeout;
+
+    try {
+      const timerArmedAt = new Date();
+      const timestamp = new Date(timerArmedAt.getTime() - DM_CALL_ACTIVITY_ACTIVE_WINDOW_MS).toISOString();
+      applyDmCallEvent({
+        event: {
+          kind: "propose",
+          from: `${bob}/phone`,
+          sid: "timer-pruned-call",
+          media: audio,
+        },
+        selfBareJid: self,
+        to: `${self}/web`,
+        timestamp,
+        now: timerArmedAt,
+      });
+
+      expect($dmCallActivities.get()[bob]?.sid).toBe("timer-pruned-call");
+      expect(scheduledDelay).toBe(1_000);
+      expect(scheduledPrune).not.toBeNull();
+
+      await new Promise<void>((resolve) => originalSetTimeout(resolve, 5));
+      scheduledPrune?.();
+
+      expect($dmCallActivities.get()).toEqual({});
+    } finally {
+      globalThis.setTimeout = originalSetTimeout;
+      globalThis.clearTimeout = originalClearTimeout;
+    }
+  });
+
+  test("treats unparseable activity timestamps as expired", () => {
+    $dmCallActivities.set({
+      [bob]: {
+        peerJid: bob,
+        sid: "invalid-clock-call",
+        media: audio,
+        state: "ringing",
+        direction: "incoming",
+        updatedAt: "not-a-date",
+      },
+    });
+
+    expect(readDmCallActivity(bob, now)).toBeNull();
     expect($dmCallActivities.get()).toEqual({});
   });
 
@@ -295,6 +400,6 @@ describe("DM call activity", () => {
 
     clearDmCallActivity(bob, "call-5");
 
-    expect(readDmCallActivity(bob)).toBeNull();
+    expect(readDmCallActivity(bob, now)).toBeNull();
   });
 });

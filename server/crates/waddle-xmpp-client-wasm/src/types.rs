@@ -669,6 +669,7 @@ pub struct WaddleMamPageParam {
     pub kind: String,
     pub before: Option<String>,
     pub after: Option<String>,
+    pub start: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
