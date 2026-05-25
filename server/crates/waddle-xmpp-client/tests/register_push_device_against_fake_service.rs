@@ -56,8 +56,14 @@ fn protocol_error(text: &str) -> ClientError {
 }
 
 fn iq_with_command(command: Element) -> Element {
+    // Stamp `from='push.example.com'` so the composer's RFC 6120
+    // §8.1.2.1 defense-in-depth check on response provenance passes.
     Element::builder("iq", NS_CLIENT)
         .attr(minidom::rxml::xml_ncname!("type").to_owned(), "result")
+        .attr(
+            minidom::rxml::xml_ncname!("from").to_owned(),
+            "push.example.com",
+        )
         .append(command)
         .build()
 }
@@ -446,4 +452,104 @@ async fn register_push_device_rejects_stage_4_still_executing() {
     .await
     .expect_err("stage 4 still-executing rejected");
     assert!(matches!(err, ClientError::StanzaError(_)));
+}
+
+#[tokio::test]
+async fn register_push_device_rejects_response_with_spoofed_from() {
+    // RFC 6120 §8.1.2.1 / §10.5 — a compromised C2S could deliver an
+    // `<iq from='attacker.tld'>` carrying a malicious result form.
+    // The composer must refuse to persist a `node`/`device-id` minted
+    // by an entity other than the configured push service.
+    let spoofed = {
+        let command = Element::builder("command", NS_COMMANDS)
+            .attr(
+                minidom::rxml::xml_ncname!("node").to_owned(),
+                REGISTER_DEVICE_NODE,
+            )
+            .attr(
+                minidom::rxml::xml_ncname!("sessionid").to_owned(),
+                "session-attacker",
+            )
+            .attr(minidom::rxml::xml_ncname!("status").to_owned(), "executing")
+            .append(empty_form_request())
+            .build();
+        // Stamp the wrong `from=` — `iq_with_command` would default
+        // to `push.example.com`, so build the envelope manually here.
+        Element::builder("iq", NS_CLIENT)
+            .attr(minidom::rxml::xml_ncname!("type").to_owned(), "result")
+            .attr(
+                minidom::rxml::xml_ncname!("from").to_owned(),
+                "attacker.tld",
+            )
+            .append(command)
+            .build()
+    };
+    let driver = ScriptedDriver::new(vec![Ok(spoofed)]);
+    let credentials = PushDeviceCredentials::WebPush {
+        endpoint: "e".to_string(),
+        p256dh: "p".to_string(),
+        auth: "a".to_string(),
+    };
+    let err = register_push_device(
+        &driver,
+        "push.example.com",
+        "app-web",
+        PushEnvironment::Production,
+        &credentials,
+    )
+    .await
+    .expect_err("spoofed `from=` must reject");
+    assert!(matches!(err, ClientError::StanzaError(_)));
+    // We MUST NOT have proceeded to stage 3 after the spoofed stage 2.
+    assert_eq!(
+        driver.transcript().len(),
+        1,
+        "composer aborted before stage 3"
+    );
+}
+
+#[tokio::test]
+async fn register_push_device_rejects_response_without_from_attr() {
+    // A C2S could strip `from` instead of spoofing it. RFC 6120
+    // §8.1.2.1 lets components stamp `from` so the chat treats an
+    // absent `from` on a push.<domain> response as a server-side
+    // violation rather than silently accepting it.
+    let stripped = {
+        let command = Element::builder("command", NS_COMMANDS)
+            .attr(
+                minidom::rxml::xml_ncname!("node").to_owned(),
+                REGISTER_DEVICE_NODE,
+            )
+            .attr(
+                minidom::rxml::xml_ncname!("sessionid").to_owned(),
+                "session-stripped",
+            )
+            .attr(minidom::rxml::xml_ncname!("status").to_owned(), "executing")
+            .append(empty_form_request())
+            .build();
+        Element::builder("iq", NS_CLIENT)
+            .attr(minidom::rxml::xml_ncname!("type").to_owned(), "result")
+            // No `from` attribute.
+            .append(command)
+            .build()
+    };
+    let driver = ScriptedDriver::new(vec![Ok(stripped)]);
+    let credentials = PushDeviceCredentials::Fcm {
+        registration_token: "fcm".to_string(),
+    };
+    let err = register_push_device(
+        &driver,
+        "push.example.com",
+        "app-android",
+        PushEnvironment::Production,
+        &credentials,
+    )
+    .await
+    .expect_err("absent `from=` must reject");
+    match err {
+        ClientError::StanzaError(stanza) => {
+            assert!(stanza.text.as_deref().unwrap_or("").contains("no `from`"));
+        }
+        other => panic!("unexpected error: {other:?}"),
+    }
 }

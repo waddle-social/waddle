@@ -277,6 +277,37 @@ fn protocol_error(text: &str) -> ClientError {
     })
 }
 
+/// Defense-in-depth check against an IQ response whose `from` doesn't
+/// match the addressed `push_service_jid`. RFC 6120 §8.1.2.1 + §10.5:
+/// a client SHOULD verify that a response's `from=` matches the
+/// request's `to=` to detect spoofed responses arriving on the same
+/// stream. The XMPP server-side id-correlation already routes responses
+/// by stanza id, but a compromised C2S could deliver an attacker
+/// `<iq from='attacker.tld'>` carrying a malicious result form; without
+/// this check the composer would happily persist an attacker-issued
+/// `node` + `device-id` against the user's push pipeline.
+///
+/// JID comparison follows RFC 6122 §2.4 (case-insensitive domainpart).
+/// Push Service JIDs are pure-domain XEP-0114 components, so a
+/// `service_jid/resource` form is rejected even via case-insensitive
+/// equality.
+fn verify_iq_from_matches(iq: &Element, push_service_jid: &str) -> ClientResult<()> {
+    let from = iq.attr("from").ok_or_else(|| {
+        protocol_error(
+            "Push Service IQ response carries no `from`; RFC 6120 §8.1.2.1 \
+             requires components to stamp `from`. Refusing to trust the response.",
+        )
+    })?;
+    if from.eq_ignore_ascii_case(push_service_jid) {
+        Ok(())
+    } else {
+        Err(protocol_error(
+            "Push Service IQ response `from` does not match the addressed Push \
+             Service JID; refusing to trust the response.",
+        ))
+    }
+}
+
 /// Drive the XEP-0050 four-stage `register-device` dance against
 /// `push_service_jid`. Returns the assigned [`RegisterDeviceResult`]
 /// (node id + device id) on completion. The caller MUST persist BOTH
@@ -302,6 +333,7 @@ pub async fn register_push_device<D: CommandDriver>(
         None,
     );
     let executing_iq = driver.send_iq(initial).await?;
+    verify_iq_from_matches(&executing_iq, push_service_jid)?;
     let executing = parse_command_response(&executing_iq)
         .ok_or_else(|| protocol_error("expected <command/> response in stage 2"))?;
     if executing.status != AdHocStatus::Executing {
@@ -324,6 +356,7 @@ pub async fn register_push_device<D: CommandDriver>(
         Some(submit_form),
     );
     let completed_iq = driver.send_iq(complete).await?;
+    verify_iq_from_matches(&completed_iq, push_service_jid)?;
     let completed = parse_command_response(&completed_iq)
         .ok_or_else(|| protocol_error("expected <command/> response in stage 4"))?;
     if completed.status != AdHocStatus::Completed {
@@ -540,5 +573,69 @@ mod tests {
         assert_eq!(outcome.node.as_str(), "node-roundtrip");
         assert_eq!(outcome.node.clone().into_string(), "node-roundtrip");
         assert_eq!(outcome.device_id, "device-roundtrip");
+    }
+
+    fn iq_with_from(from_value: Option<&str>) -> Element {
+        let mut builder = Element::builder("iq", "jabber:client");
+        if let Some(value) = from_value {
+            builder = builder.attr(minidom::rxml::xml_ncname!("from").to_owned(), value);
+        }
+        builder.build()
+    }
+
+    #[test]
+    fn verify_iq_from_accepts_exact_match() {
+        assert!(verify_iq_from_matches(
+            &iq_with_from(Some("push.example.com")),
+            "push.example.com"
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn verify_iq_from_accepts_case_variation_on_domain() {
+        // RFC 6122 §2.4: domainpart comparison is case-insensitive.
+        assert!(verify_iq_from_matches(
+            &iq_with_from(Some("Push.Example.COM")),
+            "push.example.com"
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn verify_iq_from_rejects_absent_from() {
+        let err = verify_iq_from_matches(&iq_with_from(None), "push.example.com")
+            .expect_err("missing `from` must reject");
+        match err {
+            ClientError::StanzaError(stanza) => {
+                assert!(stanza.text.as_deref().unwrap_or("").contains("no `from`"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn verify_iq_from_rejects_unrelated_jid() {
+        let err = verify_iq_from_matches(&iq_with_from(Some("attacker.tld")), "push.example.com")
+            .expect_err("unrelated `from` must reject");
+        assert!(matches!(err, ClientError::StanzaError(_)));
+    }
+
+    #[test]
+    fn verify_iq_from_rejects_prefix_substring_collision() {
+        // `push.example.com` MUST NOT match `push.example.com.attacker.tld`.
+        let err = verify_iq_from_matches(
+            &iq_with_from(Some("push.example.com.attacker.tld")),
+            "push.example.com",
+        )
+        .expect_err("substring collision must reject");
+        assert!(matches!(err, ClientError::StanzaError(_)));
+    }
+
+    #[test]
+    fn verify_iq_from_rejects_empty_from() {
+        let err = verify_iq_from_matches(&iq_with_from(Some("")), "push.example.com")
+            .expect_err("empty `from` must reject");
+        assert!(matches!(err, ClientError::StanzaError(_)));
     }
 }

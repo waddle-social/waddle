@@ -122,6 +122,10 @@ impl WaddleClient {
     /// Single-step `action='execute'` carrying the `node` + `device-id`
     /// fields. The Push Service marks the row inactive — no payload
     /// shape returned, the caller only cares about success vs. error.
+    ///
+    /// Verifies the response's `from=` matches `service_jid` before
+    /// returning (RFC 6120 §8.1.2.1 / §10.5 defense-in-depth — same
+    /// pattern as `fetch_vapid_public_key` above).
     pub fn disable_push_device(
         &self,
         service_jid: String,
@@ -138,7 +142,8 @@ impl WaddleClient {
                 waddle_xmpp_client::xep::xep0050::AdHocAction::Execute,
                 Some(form),
             );
-            let _ = send_iq_command(inner, iq).await?;
+            let response = send_iq_command(inner, iq).await?;
+            verify_iq_from_matches_query(response.attr("from"), &service_jid).map_err(js_error)?;
             Ok(JsValue::UNDEFINED)
         })
     }
