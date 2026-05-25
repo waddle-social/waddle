@@ -90,7 +90,6 @@ mod pubsub_admin;
 mod pubsub_dispatch;
 mod pubsub_helpers;
 mod push;
-mod push_service_iq;
 mod roster;
 mod sans_io;
 mod search;
@@ -109,7 +108,7 @@ use disco_items::handle_disco_items_iq;
 use extension_forms::{
     command_name_by_boundary, command_refs_by_boundary, extension_command_metadata_form,
     extension_features_for_disco, extension_route_disco_node, extension_route_metadata_form,
-    EXTENSION_COMMAND_FORM_TYPE, EXTENSION_ROUTE_FORM_TYPE,
+    CommandBoundary, EXTENSION_COMMAND_FORM_TYPE, EXTENSION_ROUTE_FORM_TYPE,
 };
 use last_activity::handle_last_activity_iq;
 use mentions_permissions::{handle_mentions_permissions_iq, is_mentions_permissions_iq};
@@ -163,7 +162,6 @@ fn push_service_stanza_error(error: XmppError) -> xmpp_parsers::stanza_error::St
 use misc::handle_misc_iq;
 use muc_admin::handle_muc_admin_iq;
 use push::handle_push_iq;
-use push_service_iq::handle_push_service_iq;
 use roster::handle_roster_iq;
 use sans_io::handle_sans_io_iq;
 use search::{handle_channel_search_iq, handle_user_search_iq};
@@ -350,17 +348,13 @@ pub async fn handle_iq_with_conn_state(
         return disco_items_response;
     }
 
-    let push_service_response = handle_push_service_iq(handler_ctx, state, phase).await;
-    if !push_service_response.is_empty() {
-        return push_service_response;
-    }
-
     if payload_ns == "http://jabber.org/protocol/commands" {
         return handle_command_iq(
             &iq,
             state,
             domain,
             &extensions_domain,
+            &push_domain,
             authenticated_session,
             phase.bound_jid(),
         )

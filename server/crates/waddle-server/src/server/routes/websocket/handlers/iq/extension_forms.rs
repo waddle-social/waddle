@@ -3,17 +3,49 @@ use super::*;
 pub(super) const EXTENSION_ROUTE_FORM_TYPE: &str = "urn:waddle:extension:1:routes";
 pub(super) const EXTENSION_COMMAND_FORM_TYPE: &str = "urn:waddle:extension:1:command";
 
-pub(super) fn is_extension_command_node(node: &str) -> bool {
-    node == waddle_extensions::INVOKE_COMMAND_NODE || node.starts_with("urn:waddle:extension:1:")
+/// Which XMPP component a XEP-0050 ad-hoc command lives on.
+///
+/// Commands are dispatched through a single [`CommandRegistry`], but
+/// not every command is reachable on every component JID — admin
+/// commands ride on the server JID, extension commands on
+/// `extensions.<domain>`, and the push device-registration commands on
+/// `push.<domain>`. The boundary classifier replaces an earlier
+/// ad-hoc `bool` so adding a fourth boundary is a single
+/// enum-variant addition rather than a sea of bool flips.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum CommandBoundary {
+    /// Server-JID commands (the `urn:waddle:admin:*` family).
+    Server,
+    /// Extension-host commands at `extensions.<domain>`.
+    Extensions,
+    /// Push-service commands at `push.<domain>` (XEP-0050
+    /// `register-device` / `disable-device`).
+    PushService,
+}
+
+impl CommandBoundary {
+    pub(super) fn classify(node: &str) -> Self {
+        if node == waddle_extensions::INVOKE_COMMAND_NODE
+            || node.starts_with("urn:waddle:extension:1:")
+        {
+            Self::Extensions
+        } else if node == crate::push_service::commands::REGISTER_DEVICE_NODE
+            || node == crate::push_service::commands::DISABLE_DEVICE_NODE
+        {
+            Self::PushService
+        } else {
+            Self::Server
+        }
+    }
 }
 
 pub(super) fn command_refs_by_boundary(
     commands: &[(String, String)],
-    extension_boundary: bool,
+    boundary: CommandBoundary,
 ) -> Vec<(&str, &str)> {
     commands
         .iter()
-        .filter(|(node, _)| is_extension_command_node(node) == extension_boundary)
+        .filter(|(node, _)| CommandBoundary::classify(node) == boundary)
         .map(|(node, name)| (node.as_str(), name.as_str()))
         .collect()
 }
@@ -21,12 +53,12 @@ pub(super) fn command_refs_by_boundary(
 pub(super) fn command_name_by_boundary<'a>(
     commands: &'a [(String, String)],
     node: &str,
-    extension_boundary: bool,
+    boundary: CommandBoundary,
 ) -> Option<&'a str> {
     commands
         .iter()
         .find(|(command_node, _)| {
-            command_node == node && is_extension_command_node(command_node) == extension_boundary
+            command_node == node && CommandBoundary::classify(command_node) == boundary
         })
         .map(|(_, name)| name.as_str())
 }

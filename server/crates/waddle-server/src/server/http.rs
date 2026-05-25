@@ -474,6 +474,13 @@ async fn create_websocket_state(
         .map_err(|error| anyhow::anyhow!("failed to initialize XMPP Push Service: {error}"))?
         .with_web_push_provider(vapid_signer, web_push_sender, vapid_sub),
     );
+    // XEP-0050 ad-hoc command handlers for `register-device` and
+    // `disable-device` on `push.<domain>`. The command dispatcher
+    // routes by node ([`CommandBoundary::PushService`]); registration
+    // here is what makes the disco#items + dispatch arms wire up to
+    // typed storage calls instead of returning service-unavailable.
+    crate::push_service::commands::register(&websocket_command_registry, Arc::clone(&push_service))
+        .await;
     let notification_outbox = Arc::new(
         crate::notification_outbox::NotificationOutboxStore::new(state.db_pool.global().clone())
             .await

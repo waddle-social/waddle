@@ -22,7 +22,7 @@ pub(super) async fn handle_extensions_disco_info<'a>(
 
     if let Some(node) = req.node {
         let commands = state.deps.protocol.command_registry.list_commands().await;
-        if command_name_by_boundary(&commands, node, true).is_some() {
+        if command_name_by_boundary(&commands, node, CommandBoundary::Extensions).is_some() {
             let Some((plugin, descriptor)) = state
                 .deps
                 .protocol

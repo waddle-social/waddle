@@ -19,7 +19,7 @@ pub(super) async fn handle_command_disco_info<'a>(
     if req.target_to == Some(req.domain) {
         if let Some(node) = req.node {
             let commands = state.deps.protocol.command_registry.list_commands().await;
-            if let Some(name) = command_name_by_boundary(&commands, node, false) {
+            if let Some(name) = command_name_by_boundary(&commands, node, CommandBoundary::Server) {
                 let identities = vec![Identity::automation(Some(name))];
                 let features = vec![
                     Feature::disco_info(),

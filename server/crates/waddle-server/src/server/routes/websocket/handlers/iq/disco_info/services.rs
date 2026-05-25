@@ -22,7 +22,42 @@ pub(super) async fn handle_push_service_disco_info<'a>(
         return None;
     }
 
+    // The XEP-0050 command list lives at the well-known
+    // `http://jabber.org/protocol/commands` node. The disco#info
+    // response identifies as `automation/command-list` so a generic
+    // XEP-0050 client knows to ask disco#items for the registered
+    // commands before issuing an `<command action='execute'/>`.
+    if req.node == Some(NODE_COMMANDS) {
+        let identities = vec![Identity::command_list(Some("Push Service Commands"))];
+        let features = vec![
+            Feature::disco_info(),
+            Feature::disco_items(),
+            Feature::commands(),
+        ];
+        let response =
+            build_disco_info_response(req.request_iq, &identities, &features, Some(NODE_COMMANDS));
+        return Some(DiscoInfoResponse::iq(response));
+    }
+
     if let Some(node) = req.node {
+        // Two more `node=` shapes flow through this handler: per-command
+        // disco#info on `register-device` / `disable-device`, and the
+        // per-push-node disco#info on owner-allocated XEP-0357 leaves.
+        // Try the command path first; if the node is not a registered
+        // ad-hoc command, fall through to the per-push-node branch.
+        let commands = state.deps.protocol.command_registry.list_commands().await;
+        if let Some(name) = command_name_by_boundary(&commands, node, CommandBoundary::PushService)
+        {
+            let identities = vec![Identity::automation(Some(name))];
+            let features = vec![
+                Feature::disco_info(),
+                Feature::commands(),
+                Feature::new(DATA_FORMS_NS),
+            ];
+            let response =
+                build_disco_info_response(req.request_iq, &identities, &features, Some(node));
+            return Some(DiscoInfoResponse::iq(response));
+        }
         let Some(owner_bare_jid) = phase.bound_jid().map(|jid| jid.to_bare()) else {
             return Some(DiscoInfoResponse::error(
                 req.id,
