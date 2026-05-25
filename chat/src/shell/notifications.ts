@@ -162,10 +162,20 @@ export function usePushNotifications() {
       );
       return null;
     }
+    // Re-pack into a fresh `Uint8Array<ArrayBuffer>` view (NOT
+    // `Uint8Array<ArrayBufferLike>`, which TypeScript widens any
+    // `Uint8Array` to and which `PushSubscriptionOptionsInit.applicationServerKey`
+    // rejects because `SharedArrayBuffer` isn't a valid backing
+    // store). The new ArrayBuffer is owned by this view exclusively —
+    // no offset, exact 65-byte length — which is also the shape
+    // Firefox and Safari validate against; passing a wider backing
+    // buffer surfaces as InvalidAccessError in those engines.
+    const exactKey = new Uint8Array(new ArrayBuffer(keyBytes.byteLength));
+    exactKey.set(keyBytes);
     try {
       return await reg.pushManager.subscribe({
         userVisibleOnly: true,
-        applicationServerKey: keyBytes,
+        applicationServerKey: exactKey,
       });
     } catch (error) {
       console.warn("[notifications] PushManager.subscribe() failed:", error);
