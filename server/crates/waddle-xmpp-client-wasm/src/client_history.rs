@@ -45,11 +45,12 @@ impl WaddleClient {
         future_to_promise(async move {
             let query_id = uuid::Uuid::new_v4().to_string();
             let iq_id = uuid::Uuid::new_v4().to_string();
-            let iq = MamIqBuilder::new(&iq_id, &query_id, max)
-                .before("")
-                .with_jid(&peer_jid)
-                .fulltext(&query)
-                .build();
+            let account_jid = {
+                let stored = inner.borrow().config.clone();
+                bare_jid(&stored.jid)
+            };
+            let iq =
+                build_dm_search_history_iq(&iq_id, &query_id, max, &account_jid, &peer_jid, &query);
             let page = send_mam_query_command(inner, iq, query_id).await?;
             to_js_value(&mam_page_to_js(page))
         })
@@ -87,9 +88,29 @@ impl WaddleClient {
                 .map_err(|err| js_error(err.to_string()))?;
             let query_id = uuid::Uuid::new_v4().to_string();
             let iq_id = uuid::Uuid::new_v4().to_string();
-            let mut builder = MamIqBuilder::new(&iq_id, &query_id, max).with_jid(&peer_jid);
-            builder = apply_page_param(builder, &page)?;
-            let iq = builder.build();
+            let account_jid = {
+                let stored = inner.borrow().config.clone();
+                bare_jid(&stored.jid)
+            };
+            let iq =
+                build_dm_history_page_iq(&iq_id, &query_id, max, &account_jid, &peer_jid, &page)?;
+            let result = send_mam_query_command(inner, iq, query_id).await?;
+            to_js_value(&mam_page_to_js(result))
+        })
+    }
+
+    pub fn fetch_personal_history_page(&self, max: u32, page_param: JsValue) -> Promise {
+        let inner = self.inner.clone();
+        future_to_promise(async move {
+            let page: WaddleMamPageParam = serde_wasm_bindgen::from_value(page_param)
+                .map_err(|err| js_error(err.to_string()))?;
+            let query_id = uuid::Uuid::new_v4().to_string();
+            let iq_id = uuid::Uuid::new_v4().to_string();
+            let account_jid = {
+                let stored = inner.borrow().config.clone();
+                bare_jid(&stored.jid)
+            };
+            let iq = build_personal_history_page_iq(&iq_id, &query_id, max, &account_jid, &page)?;
             let result = send_mam_query_command(inner, iq, query_id).await?;
             to_js_value(&mam_page_to_js(result))
         })
@@ -164,13 +185,17 @@ impl WaddleClient {
         future_to_promise(async move {
             let query_id = uuid::Uuid::new_v4().to_string();
             let iq_id = uuid::Uuid::new_v4().to_string();
-            let iq = build_mam_iq(
+            let account_jid = {
+                let stored = inner.borrow().config.clone();
+                bare_jid(&stored.jid)
+            };
+            let iq = build_dm_history_iq(
                 &iq_id,
                 &query_id,
                 max,
+                &account_jid,
+                &peer_jid,
                 before_id.as_deref(),
-                Some(&peer_jid),
-                None,
             );
             let page = send_mam_query_command(inner, iq, query_id).await?;
             to_js_value(&mam_page_to_js(page))
@@ -217,7 +242,7 @@ fn apply_page_param<'a>(
     builder: MamIqBuilder<'a>,
     page: &'a WaddleMamPageParam,
 ) -> Result<MamIqBuilder<'a>, JsValue> {
-    Ok(match page.kind.as_str() {
+    let builder = match page.kind.as_str() {
         "latest" => builder.before(""),
         "before" => match page.before.as_deref() {
             Some(before) => builder.before(before),
@@ -228,7 +253,70 @@ fn apply_page_param<'a>(
             None => return Err(js_error("missing after page cursor")),
         },
         _ => return Err(js_error("invalid page param type")),
+    };
+    Ok(match page.start.as_deref() {
+        Some(start) => builder.start(start),
+        None => builder,
     })
+}
+
+fn build_personal_history_page_iq(
+    iq_id: &str,
+    query_id: &str,
+    max: u32,
+    account_jid: &str,
+    page: &WaddleMamPageParam,
+) -> Result<Element, JsValue> {
+    let builder = MamIqBuilder::new(iq_id, query_id, max).to_jid(account_jid);
+    Ok(apply_page_param(builder, page)?.build())
+}
+
+fn build_dm_history_page_iq(
+    iq_id: &str,
+    query_id: &str,
+    max: u32,
+    account_jid: &str,
+    peer_jid: &str,
+    page: &WaddleMamPageParam,
+) -> Result<Element, JsValue> {
+    let builder = MamIqBuilder::new(iq_id, query_id, max)
+        .to_jid(account_jid)
+        .with_jid(peer_jid);
+    Ok(apply_page_param(builder, page)?.build())
+}
+
+fn build_dm_search_history_iq(
+    iq_id: &str,
+    query_id: &str,
+    max: u32,
+    account_jid: &str,
+    peer_jid: &str,
+    query: &str,
+) -> Element {
+    MamIqBuilder::new(iq_id, query_id, max)
+        .before("")
+        .to_jid(account_jid)
+        .with_jid(peer_jid)
+        .fulltext(query)
+        .build()
+}
+
+fn build_dm_history_iq(
+    iq_id: &str,
+    query_id: &str,
+    max: u32,
+    account_jid: &str,
+    peer_jid: &str,
+    before_id: Option<&str>,
+) -> Element {
+    build_mam_iq(
+        iq_id,
+        query_id,
+        max,
+        before_id,
+        Some(peer_jid),
+        Some(account_jid),
+    )
 }
 
 #[cfg(test)]
@@ -238,12 +326,24 @@ mod client_history_tests {
     const TEST_MAM_NS: &str = "urn:xmpp:mam:2";
     const TEST_RSM_NS: &str = "http://jabber.org/protocol/rsm";
 
+    fn mam_form_value(iq: &Element, field_var: &str) -> Option<String> {
+        iq.get_child("query", TEST_MAM_NS)
+            .and_then(|query| query.get_child("x", "jabber:x:data"))
+            .and_then(|form| {
+                form.children()
+                    .find(|field| field.name() == "field" && field.attr("var") == Some(field_var))
+            })
+            .and_then(|field| field.get_child("value", "jabber:x:data"))
+            .map(|element| element.text())
+    }
+
     #[test]
     fn page_param_after_builds_rsm_after_query() {
         let page = WaddleMamPageParam {
             kind: "after".to_string(),
             before: None,
             after: Some("cursor-1".to_string()),
+            start: None,
         };
 
         let iq = apply_page_param(MamIqBuilder::new("iq-1", "query-1", 10), &page)
@@ -256,5 +356,102 @@ mod client_history_tests {
             .and_then(|set| set.get_child("after", TEST_RSM_NS))
             .map(|element| element.text());
         assert_eq!(after.as_deref(), Some("cursor-1"));
+    }
+
+    #[test]
+    fn page_param_start_builds_mam_start_field() {
+        let page = WaddleMamPageParam {
+            kind: "latest".to_string(),
+            before: None,
+            after: None,
+            start: Some("2026-05-25T00:00:00Z".to_string()),
+        };
+
+        let iq = apply_page_param(MamIqBuilder::new("iq-1", "query-1", 10), &page)
+            .expect("start page param should apply")
+            .build();
+
+        let value = mam_form_value(&iq, "start");
+        assert_eq!(value.as_deref(), Some("2026-05-25T00:00:00Z"));
+    }
+
+    #[test]
+    fn personal_history_page_targets_account_archive() {
+        let page = WaddleMamPageParam {
+            kind: "latest".to_string(),
+            before: None,
+            after: None,
+            start: Some("2026-05-25T00:00:00Z".to_string()),
+        };
+
+        let iq = build_personal_history_page_iq("iq-1", "query-1", 10, "alice@example.com", &page)
+            .expect("personal history IQ should build");
+
+        assert_eq!(iq.attr("to"), Some("alice@example.com"));
+        assert!(iq.get_child("query", TEST_MAM_NS).is_some());
+    }
+
+    #[test]
+    fn dm_history_page_targets_account_archive_and_filters_peer() {
+        let page = WaddleMamPageParam {
+            kind: "latest".to_string(),
+            before: None,
+            after: None,
+            start: None,
+        };
+
+        let iq = build_dm_history_page_iq(
+            "iq-1",
+            "query-1",
+            10,
+            "alice@example.com",
+            "bob@example.com",
+            &page,
+        )
+        .expect("DM history IQ should build");
+
+        assert_eq!(iq.attr("to"), Some("alice@example.com"));
+        let with_value = mam_form_value(&iq, "with");
+        assert_eq!(with_value.as_deref(), Some("bob@example.com"));
+    }
+
+    #[test]
+    fn dm_search_history_targets_account_archive_and_filters_peer() {
+        let iq = build_dm_search_history_iq(
+            "iq-1",
+            "query-1",
+            10,
+            "alice@example.com",
+            "bob@example.com",
+            "quarterly report",
+        );
+
+        assert_eq!(iq.attr("to"), Some("alice@example.com"));
+        let with_value = mam_form_value(&iq, "with");
+        assert_eq!(with_value.as_deref(), Some("bob@example.com"));
+        let fulltext_value = mam_form_value(&iq, "{urn:xmpp:fulltext:0}fulltext");
+        assert_eq!(fulltext_value.as_deref(), Some("quarterly report"));
+    }
+
+    #[test]
+    fn dm_legacy_history_targets_account_archive_and_filters_peer() {
+        let iq = build_dm_history_iq(
+            "iq-1",
+            "query-1",
+            10,
+            "alice@example.com",
+            "bob@example.com",
+            Some("cursor-1"),
+        );
+
+        assert_eq!(iq.attr("to"), Some("alice@example.com"));
+        let with_value = mam_form_value(&iq, "with");
+        assert_eq!(with_value.as_deref(), Some("bob@example.com"));
+        let before = iq
+            .get_child("query", TEST_MAM_NS)
+            .and_then(|query| query.get_child("set", TEST_RSM_NS))
+            .and_then(|set| set.get_child("before", TEST_RSM_NS))
+            .map(|element| element.text());
+        assert_eq!(before.as_deref(), Some("cursor-1"));
     }
 }

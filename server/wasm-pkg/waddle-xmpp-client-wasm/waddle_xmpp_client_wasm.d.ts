@@ -84,6 +84,7 @@ export class WaddleClient {
      * call (no node yet) is normal and not an error.
      */
     fetch_mds_displayed(): Promise<any>;
+    fetch_personal_history_page(max: number, page_param: any): Promise<any>;
     fetch_room_history(room_jid: string, max: number, before_id?: string | null): Promise<any>;
     fetch_room_history_by_thread(room_jid: string, thread_id: string, max: number, before_id?: string | null): Promise<any>;
     fetch_room_history_page(room_jid: string, max: number, page_param: any): Promise<any>;

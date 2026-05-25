@@ -4,12 +4,13 @@ import { map } from "nanostores";
 import { barePeerJid } from "@/lib/xmpp/jid";
 import type { CallEvent, CallMedia } from "./types";
 
-const ACTIVE_WINDOW_MS = 24 * 60 * 60 * 1000;
+export const DM_CALL_ACTIVITY_ACTIVE_WINDOW_MS = 24 * 60 * 60 * 1000;
 const MAX_TERMINAL_TIMESTAMPS = 1024;
+const PRUNE_TIMER_SLACK_MS = 1_000;
 
 type DmCallActivityState = "ringing" | "accepted";
 
-interface DmCallActivity {
+export interface DmCallActivity {
   peerJid: string;
   sid: string;
   media: CallMedia;
@@ -20,6 +21,7 @@ interface DmCallActivity {
 
 export const $dmCallActivities = map<Record<string, DmCallActivity>>({});
 const dmCallTerminalTimestamps = new Map<string, string>();
+let pruneTimer: ReturnType<typeof setTimeout> | null = null;
 
 interface DmCallEventEnvelope {
   event: CallEvent;
@@ -46,7 +48,13 @@ function timestampFromEnvelope(envelope: DmCallEventEnvelope): string {
 function isStale(timestamp: string, now: Date): boolean {
   const ms = Date.parse(timestamp);
   if (!Number.isFinite(ms)) return false;
-  return now.getTime() - ms > ACTIVE_WINDOW_MS;
+  return now.getTime() - ms > DM_CALL_ACTIVITY_ACTIVE_WINDOW_MS;
+}
+
+function millisecondsUntilStale(timestamp: string, now: Date): number | null {
+  const ms = Date.parse(timestamp);
+  if (!Number.isFinite(ms)) return null;
+  return ms + DM_CALL_ACTIVITY_ACTIVE_WINDOW_MS - now.getTime();
 }
 
 function isOlderThanCurrent(timestamp: string, current?: DmCallActivity): boolean {
@@ -90,6 +98,47 @@ function pruneTerminalTimestamps(now: Date): void {
   }
 }
 
+function clearPruneTimer(): void {
+  if (!pruneTimer) return;
+  clearTimeout(pruneTimer);
+  pruneTimer = null;
+}
+
+function scheduleActivityPrune(now = new Date()): void {
+  clearPruneTimer();
+  let nextDelay: number | null = null;
+  for (const activity of Object.values($dmCallActivities.get())) {
+    const delay = millisecondsUntilStale(activity.updatedAt, now);
+    if (delay === null) continue;
+    nextDelay = nextDelay === null ? delay : Math.min(nextDelay, delay);
+  }
+  if (nextDelay === null) return;
+  pruneTimer = setTimeout(() => {
+    pruneTimer = null;
+    pruneExpiredDmCallActivities();
+  }, Math.max(0, nextDelay) + PRUNE_TIMER_SLACK_MS);
+  (pruneTimer as { unref?: () => void }).unref?.();
+}
+
+export function pruneExpiredDmCallActivities(now = new Date()): void {
+  const current = $dmCallActivities.get();
+  const next: Record<string, DmCallActivity> = {};
+  let changed = false;
+  for (const [peerJid, activity] of Object.entries(current)) {
+    if (isStale(activity.updatedAt, now)) {
+      recordTerminal(peerJid, activity.sid, activity.updatedAt, now);
+      changed = true;
+      continue;
+    }
+    next[peerJid] = activity;
+  }
+  pruneTerminalTimestamps(now);
+  if (changed) {
+    $dmCallActivities.set(next);
+  }
+  scheduleActivityPrune(now);
+}
+
 function recordTerminal(peerJid: string, sid: string, timestamp: string, now = new Date()): void {
   const key = terminalKey(peerJid, sid);
   const previous = dmCallTerminalTimestamps.get(key);
@@ -129,6 +178,7 @@ function removeActivity(peerJid: string, sid: string): void {
   const next = { ...$dmCallActivities.get() };
   delete next[peerJid];
   $dmCallActivities.set(next);
+  scheduleActivityPrune();
 }
 
 export function clearDmCallActivity(peerJid: string, sid?: string): void {
@@ -167,6 +217,7 @@ export function applyDmCallEvent(envelope: DmCallEventEnvelope): void {
         direction: directionForEnvelope(envelope),
         updatedAt: timestamp,
       });
+      scheduleActivityPrune(now);
       return;
     case "proceed":
     case "session-initiate":
@@ -179,6 +230,7 @@ export function applyDmCallEvent(envelope: DmCallEventEnvelope): void {
         direction: previous?.direction ?? directionForEnvelope(envelope),
         updatedAt: timestamp,
       });
+      scheduleActivityPrune(now);
       return;
     case "reject":
     case "retract":
@@ -191,11 +243,13 @@ export function applyDmCallEvent(envelope: DmCallEventEnvelope): void {
 }
 
 export function clearDmCallActivities(): void {
+  clearPruneTimer();
   $dmCallActivities.set({});
   dmCallTerminalTimestamps.clear();
 }
 
-export function readDmCallActivity(peerJid: string): DmCallActivity | null {
+export function readDmCallActivity(peerJid: string, now = new Date()): DmCallActivity | null {
+  pruneExpiredDmCallActivities(now);
   const normalized = normalizedBare(peerJid);
   if (!normalized) return null;
   return $dmCallActivities.get()[normalized] ?? null;

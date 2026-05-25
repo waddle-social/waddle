@@ -22,6 +22,7 @@ import PinnedPanel from "@/components/chat/PinnedPanel.vue";
 import UserSettingsPage from "@/components/chat/UserSettingsPage.vue";
 import WaddlesSidebar from "@/components/chat/WaddlesSidebar.vue";
 import AdminView from "@/components/admin/AdminView.vue";
+import CallActivityDock from "@/components/calls/CallActivityDock.vue";
 import { navigate, useRouteMatch, type AdminMatch, type AdminPanel } from "@/router";
 import { buildHomeDashboardProps } from "@/home/dashboard-props";
 import type { ChatAppController } from "@/shell/chat-app-controller";
@@ -241,6 +242,17 @@ onUnmounted(() => {
   />
   <div v-else class="chat-app-shell">
     <ChatMobileDrawers :controller="controller" />
+    <CallActivityDock
+      class="call-activity-dock--mobile"
+      :channels="waddles.sortedChannels.value"
+      :conversations="dmConversations.conversations.value"
+      :active-channel-id="waddles.activeChannelId.value"
+      :active-peer-jid="dmConversations.activePeerJid.value"
+      :sidebar-mode="ui.sidebarMode.value"
+      :active-channel-jids="messaging.activeChannels.value"
+      @select-channel="onSelectChannelFromSidebar"
+      @select-dm="selectDm"
+    />
 
     <!-- Desktop layout -->
     <div class="chat-desktop-shell">
@@ -307,6 +319,16 @@ onUnmounted(() => {
           :active-peer-jid="dmConversations.activePeerJid.value"
           @select-dm="selectDm"
           @new-dm="ui.showNewDm.value = true"
+        />
+        <CallActivityDock
+          :channels="waddles.sortedChannels.value"
+          :conversations="dmConversations.conversations.value"
+          :active-channel-id="waddles.activeChannelId.value"
+          :active-peer-jid="dmConversations.activePeerJid.value"
+          :sidebar-mode="ui.sidebarMode.value"
+          :active-channel-jids="messaging.activeChannels.value"
+          @select-channel="onSelectChannelFromSidebar"
+          @select-dm="selectDm"
         />
       </div>
 

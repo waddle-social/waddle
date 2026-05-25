@@ -12,6 +12,7 @@ import {
 } from "../outbound-queue-store";
 import { $callState, applyCallEvent, clearCallState, tearDownActiveCall } from "@/lib/calls/call-store";
 import {
+  DM_CALL_ACTIVITY_ACTIVE_WINDOW_MS,
   applyDmCallEvent,
   clearDmCallActivities,
 } from "@/lib/calls/dm-call-activity";
@@ -221,8 +222,40 @@ function shouldSkipRawCatchupMessage(
   return compareTimestamps(message.timestamp, since) < 0;
 }
 
+const DM_CALL_ACTIVITY_PAGE_SIZE = 100;
+const DM_CALL_ACTIVITY_MAX_PAGES = 50;
+
+type DmCallActivityHydrationOptions = { since?: string; pageSize?: number; maxPages?: number };
+
+async function collectRecentMamPages(
+  fetchPage: (max: number, pageParam: MamPageParam) => Promise<WasmMamPage | null | undefined>,
+  options: DmCallActivityHydrationOptions,
+  shouldContinue: () => boolean,
+): Promise<WasmMamPage[]> {
+  const since = options.since ?? new Date(Date.now() - DM_CALL_ACTIVITY_ACTIVE_WINDOW_MS).toISOString();
+  const pageSize = options.pageSize ?? DM_CALL_ACTIVITY_PAGE_SIZE;
+  const maxPages = options.maxPages ?? DM_CALL_ACTIVITY_MAX_PAGES;
+  const pages: WasmMamPage[] = [];
+  let pageParam: MamPageParam = { type: "latest", start: since };
+  const seenBefore = new Set<string>();
+  for (let pageIndex = 0; pageIndex < maxPages; pageIndex += 1) {
+    if (!shouldContinue()) return [];
+    const page = await fetchPage(pageSize, pageParam);
+    if (!shouldContinue()) return [];
+    if (!page) return pages;
+    pages.push(page);
+    if (isMamPageComplete(page) || pageCrossesSince(page, since)) return pages;
+    const firstArchiveId = pageFirstArchiveId(page);
+    if (!firstArchiveId || seenBefore.has(firstArchiveId)) return pages;
+    seenBefore.add(firstArchiveId);
+    pageParam = { type: "before", before: firstArchiveId, start: since };
+  }
+  return pages;
+}
+
 type WasmModule = typeof import("@waddle/xmpp-client-wasm");
 type WasmClient = import("@waddle/xmpp-client-wasm").WaddleClient & {
+  fetch_personal_history_page?: (max: number, pageParam: MamPageParam) => Promise<WasmMamPage>;
   discover_extension_routes?: () => Promise<unknown>;
   fetch_extension_route_items?: (route: unknown, roomJid: string) => Promise<unknown>;
   admin_users_list?: (
@@ -534,6 +567,10 @@ export class BrowserXmppClient {
 
   private isCurrentXmpp(xmpp: XmppClientInstance): boolean {
     return this.xmpp === xmpp && !this.destroying;
+  }
+
+  private isCurrentConnectedXmpp(xmpp: XmppClientInstance, sessionJid: string): boolean {
+    return this.xmpp === xmpp && this.connected && !this.destroying && this.session.jid === sessionJid;
   }
 
   private rejectRoomJoinWaiters(error: Error): void {
@@ -1934,17 +1971,25 @@ export class BrowserXmppClient {
   ): MamHistoryPage<LiveDmMessage> {
     const selfBare = barePeerJid(this.session.jid);
     if (options.applyCallEvents !== false) {
-      for (const message of page.messages) {
-        if (!message.call_event) continue;
-        applyDmCallEvent({
-          event: message.call_event,
-          selfBareJid: selfBare,
-          to: message.to,
-          timestamp: message.timestamp,
-        });
-      }
+      this.applyDmCallEventsFromMamPage(page, selfBare);
     }
     return { messages: page.messages.map((message) => dmMessageFromArchived(message, selfBare)).filter((message): message is LiveDmMessage => !!message), ...(page.first_id ? { firstArchiveId: page.first_id } : {}), ...(page.last_id ? { lastArchiveId: page.last_id } : {}), complete: page.is_complete };
+  }
+  private applyDmCallEventsFromMamPage(
+    page: WasmMamPage | null | undefined,
+    selfBare = barePeerJid(this.session.jid),
+    options: { since?: string; seenIds?: ReadonlyArray<string> } = {},
+  ): void {
+    for (const message of page?.messages ?? []) {
+      if (!message.call_event) continue;
+      if (shouldSkipRawCatchupMessage(message, options.since, options.seenIds)) continue;
+      applyDmCallEvent({
+        event: message.call_event,
+        selfBareJid: selfBare,
+        to: message.to,
+        timestamp: message.timestamp,
+      });
+    }
   }
   private recordRoomMamWatermarks(messages: ReadonlyArray<LiveRoomMessage>) {
     for (const message of messages) {
@@ -1994,6 +2039,45 @@ export class BrowserXmppClient {
     const result = this.dmMamPageToMessages(page, { applyCallEvents: pageParam.type !== "before" });
     this.recordDmMamWatermarks(result.messages);
     return result;
+  }
+  async hydrateRecentDmCallActivity(
+    peerJid: string,
+    options: DmCallActivityHydrationOptions = {},
+  ): Promise<void> {
+    const xmpp = await this.requireConnectedXmpp();
+    if (!xmpp.fetch_dm_history_page) return;
+    const peer = barePeerJid(peerJid);
+    if (!peer) return;
+    const sessionJid = this.session.jid;
+    const fetchDmHistoryPage = xmpp.fetch_dm_history_page.bind(xmpp);
+    const pages = await collectRecentMamPages(
+      (max, pageParam) => fetchDmHistoryPage(peer, max, pageParam) as Promise<WasmMamPage>,
+      options,
+      () => this.isCurrentConnectedXmpp(xmpp, sessionJid),
+    );
+    if (!this.isCurrentConnectedXmpp(xmpp, sessionJid)) return;
+    const selfBare = barePeerJid(sessionJid);
+    for (const page of [...pages].reverse()) {
+      this.applyDmCallEventsFromMamPage(page, selfBare);
+    }
+  }
+  async hydrateRecentDmCallActivities(
+    options: DmCallActivityHydrationOptions = {},
+  ): Promise<void> {
+    const xmpp = await this.requireConnectedXmpp();
+    if (!xmpp.fetch_personal_history_page) return;
+    const sessionJid = this.session.jid;
+    const fetchPersonalHistoryPage = xmpp.fetch_personal_history_page.bind(xmpp);
+    const pages = await collectRecentMamPages(
+      (max, pageParam) => fetchPersonalHistoryPage(max, pageParam),
+      options,
+      () => this.isCurrentConnectedXmpp(xmpp, sessionJid),
+    );
+    if (!this.isCurrentConnectedXmpp(xmpp, sessionJid)) return;
+    const selfBare = barePeerJid(sessionJid);
+    for (const page of [...pages].reverse()) {
+      this.applyDmCallEventsFromMamPage(page, selfBare);
+    }
   }
   async searchDmMessages(peerJid: string, query: string, max = 20): Promise<MessageSearchResult[]> {
     if (!query.trim()) return [];
@@ -2450,7 +2534,6 @@ export class BrowserXmppClient {
   }
   private handleMessage(message: WasmMessage & { carbon?: { sent?: boolean; received?: boolean }; inboxPush?: InboxEntry; _fromCarbon?: boolean }) {
     if (message.inboxPush) { this.inboxPushHandler?.(message.inboxPush); return; }
-    if (message.carbon?.sent || message.carbon?.received) return;
     if (message.id && this.carbonDedupIds.has(message.id) && !message._fromCarbon) {
       this.carbonDedupIds.delete(message.id);
       return;
@@ -2464,6 +2547,7 @@ export class BrowserXmppClient {
       });
       if (!message.body && !message.subject) return;
     }
+    if (message.carbon?.sent || message.carbon?.received) return;
     if (message.chat_state && !message.body) {
       if (message.is_muc) { const roomJid = barePeerJid(message.from ?? message.to ?? ""); const nick = (message.from ?? "").split("/")[1] ?? "unknown"; if (roomJid === this.currentRoom && nick !== this.session.username) this.chatStateHandler?.({ roomJid, nick, state: message.chat_state as ChatStateType }); }
       else this.dmChatStateHandler?.({ peerJid: barePeerJid(message.from ?? message.to ?? ""), state: message.chat_state as ChatStateType });
@@ -2503,15 +2587,17 @@ export class BrowserXmppClient {
     xmpp: XmppClientInstance,
     entries: Array<{ kind: "dm" | "room"; key: string; after?: string; since?: string; seenIds?: string[] }>,
   ) {
+    const sessionJid = this.session.jid;
     for (const entry of entries) {
-      if (this.xmpp !== xmpp) return;
+      if (!this.isCurrentConnectedXmpp(xmpp, sessionJid)) return;
       try {
         if (entry.kind === "dm") {
-          await this.runDmReconnectCatchup(xmpp, entry);
+          await this.runDmReconnectCatchup(xmpp, entry, sessionJid);
         } else {
-          await this.runRoomReconnectCatchup(xmpp, entry);
+          await this.runRoomReconnectCatchup(xmpp, entry, sessionJid);
         }
       } catch (error) {
+        if (!this.isCurrentConnectedXmpp(xmpp, sessionJid)) return;
         this.emitError({
           kind: "history",
           recoverable: true,
@@ -2524,6 +2610,7 @@ export class BrowserXmppClient {
   private async runDmReconnectCatchup(
     xmpp: XmppClientInstance,
     entry: { key: string; after?: string; since?: string; seenIds?: string[] },
+    sessionJid: string,
   ) {
     if (!xmpp.fetch_dm_history_page) return;
     if (entry.after) {
@@ -2533,6 +2620,7 @@ export class BrowserXmppClient {
         if (seenAfter.has(after)) throw new Error(`Reconnect catch-up repeated archive cursor for ${entry.key}`);
         seenAfter.add(after);
         const page = await xmpp.fetch_dm_history_page(entry.key, 100, { type: "after", after }) as WasmMamPage;
+        if (!this.isCurrentConnectedXmpp(xmpp, sessionJid)) return;
         const nextAfter = this.applyDmCatchupPage(page, undefined, entry.seenIds);
         if (isMamPageComplete(page)) return;
         if (!nextAfter) throw new Error(`Reconnect catch-up could not advance archive cursor for ${entry.key}`);
@@ -2542,11 +2630,12 @@ export class BrowserXmppClient {
     }
     const since = entry.since ?? this.catchup.getDmLastSeen(entry.key);
     if (!since) return;
-    await this.runDmTimestampCatchup(xmpp, entry.key, since, entry.seenIds);
+    await this.runDmTimestampCatchup(xmpp, entry.key, since, sessionJid, entry.seenIds);
   }
   private async runRoomReconnectCatchup(
     xmpp: XmppClientInstance,
     entry: { key: string; after?: string; since?: string; seenIds?: string[] },
+    sessionJid: string,
   ) {
     if (!xmpp.fetch_room_history_page) return;
     if (entry.after) {
@@ -2556,6 +2645,7 @@ export class BrowserXmppClient {
         if (seenAfter.has(after)) throw new Error(`Reconnect catch-up repeated archive cursor for ${entry.key}`);
         seenAfter.add(after);
         const page = await xmpp.fetch_room_history_page(entry.key, 100, { type: "after", after }) as WasmMamPage;
+        if (!this.isCurrentConnectedXmpp(xmpp, sessionJid)) return;
         const nextAfter = this.applyRoomCatchupPage(page, undefined, entry.seenIds);
         if (isMamPageComplete(page)) return;
         if (!nextAfter) throw new Error(`Reconnect catch-up could not advance archive cursor for ${entry.key}`);
@@ -2565,58 +2655,74 @@ export class BrowserXmppClient {
     }
     const since = entry.since ?? this.catchup.getRoomLastSeen(entry.key);
     if (!since) return;
-    await this.runRoomTimestampCatchup(xmpp, entry.key, since, entry.seenIds);
+    await this.runRoomTimestampCatchup(xmpp, entry.key, since, sessionJid, entry.seenIds);
   }
   private async runDmTimestampCatchup(
     xmpp: XmppClientInstance,
     peerJid: string,
     since: string,
+    sessionJid: string,
     seenIds?: ReadonlyArray<string>,
   ) {
     let pageParam: MamPageParam = { type: "latest" };
     const seenBefore = new Set<string>();
+    const pages: WasmMamPage[] = [];
     while (true) {
       const page = await xmpp.fetch_dm_history_page?.(peerJid, 100, pageParam) as WasmMamPage;
-      this.applyDmCatchupPage(page, since, seenIds);
-      if (isMamPageComplete(page) || pageCrossesSince(page, since)) return;
+      if (!this.isCurrentConnectedXmpp(xmpp, sessionJid)) return;
+      if (page) pages.push(page);
+      if (isMamPageComplete(page) || pageCrossesSince(page, since)) break;
       const firstArchiveId = pageFirstArchiveId(page);
       if (!firstArchiveId) throw new Error(`Reconnect catch-up could not page backward for ${peerJid}`);
       if (seenBefore.has(firstArchiveId)) throw new Error(`Reconnect catch-up repeated backward archive cursor for ${peerJid}`);
       seenBefore.add(firstArchiveId);
       pageParam = { type: "before", before: firstArchiveId };
     }
+    const selfBare = barePeerJid(this.session.jid);
+    for (const page of [...pages].reverse()) {
+      this.applyDmCatchupPage(page, since, seenIds, { applyCallEvents: false });
+    }
+    for (const page of [...pages].reverse()) {
+      this.applyDmCallEventsFromMamPage(page, selfBare, { since, seenIds });
+    }
   }
   private async runRoomTimestampCatchup(
     xmpp: XmppClientInstance,
     roomJid: string,
     since: string,
+    sessionJid: string,
     seenIds?: ReadonlyArray<string>,
   ) {
     let pageParam: MamPageParam = { type: "latest" };
     const seenBefore = new Set<string>();
+    const pages: WasmMamPage[] = [];
     while (true) {
       const page = await xmpp.fetch_room_history_page?.(roomJid, 100, pageParam) as WasmMamPage;
-      this.applyRoomCatchupPage(page, since, seenIds);
-      if (isMamPageComplete(page) || pageCrossesSince(page, since)) return;
+      if (!this.isCurrentConnectedXmpp(xmpp, sessionJid)) return;
+      if (page) pages.push(page);
+      if (isMamPageComplete(page) || pageCrossesSince(page, since)) break;
       const firstArchiveId = pageFirstArchiveId(page);
       if (!firstArchiveId) throw new Error(`Reconnect catch-up could not page backward for ${roomJid}`);
       if (seenBefore.has(firstArchiveId)) throw new Error(`Reconnect catch-up repeated backward archive cursor for ${roomJid}`);
       seenBefore.add(firstArchiveId);
       pageParam = { type: "before", before: firstArchiveId };
     }
+    for (const page of [...pages].reverse()) {
+      this.applyRoomCatchupPage(page, since, seenIds);
+    }
   }
-  private applyDmCatchupPage(page: WasmMamPage | null | undefined, since?: string, seenIds?: ReadonlyArray<string>): string | undefined {
+  private applyDmCatchupPage(
+    page: WasmMamPage | null | undefined,
+    since?: string,
+    seenIds?: ReadonlyArray<string>,
+    options: { applyCallEvents?: boolean } = {},
+  ): string | undefined {
     let lastArchiveId = pageLastArchiveId(page);
     const selfBare = barePeerJid(this.session.jid);
+    if (options.applyCallEvents !== false) {
+      this.applyDmCallEventsFromMamPage(page, selfBare, { since, seenIds });
+    }
     for (const message of page?.messages ?? []) {
-      if (message.call_event && !shouldSkipRawCatchupMessage(message, since, seenIds)) {
-        applyDmCallEvent({
-          event: message.call_event,
-          selfBareJid: selfBare,
-          to: message.to,
-          timestamp: message.timestamp,
-        });
-      }
       const converted = dmMessageFromArchived(message, selfBare);
       if (!converted || shouldSkipCatchupMessage(converted, since, seenIds)) continue;
       this.catchup.recordDmSeen(converted.peerJid, converted.createdAt, converted.archiveId, messageSeenIds(converted));
