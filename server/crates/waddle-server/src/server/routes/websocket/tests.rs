@@ -174,7 +174,22 @@ async fn create_test_websocket_state_with_extension_manager(
                     pending_delivery_storage: Arc::new(
                         waddle_xmpp::pending_delivery::storage::InMemoryPendingDeliveryStorage::with_default_quota(),
                     ),
-                    command_registry: Arc::new(CommandRegistry::new()),
+                    command_registry: {
+                        // The XEP-0050 push commands (`register-device`,
+                        // `disable-device`) are registered here so the
+                        // unit-test harness mirrors what `http.rs` wires
+                        // up at boot. Without this, push command IQs would
+                        // fall through to the registry's
+                        // `service-unavailable` arm and shadow the actual
+                        // handler behaviour we want to assert.
+                        let registry = Arc::new(CommandRegistry::new());
+                        crate::push_service::commands::register(
+                            &registry,
+                            Arc::clone(&push_service),
+                        )
+                        .await;
+                        registry
+                    },
                     extension_manager,
                     dispatcher: Arc::new(dispatcher),
                     pubsub_storage,

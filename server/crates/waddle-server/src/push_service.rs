@@ -1575,6 +1575,42 @@ impl DatabasePushServiceStore {
         Ok(Some(decode_device(&row, &self.secrets)?))
     }
 
+    /// Test-only: list every ACTIVE `push_devices` row registered
+    /// against the given `(owner, node)` pair. Used by the XEP-0050
+    /// cutover tests — the chat client never learns the
+    /// server-allocated `device_id` under the new wire shape, so test
+    /// sites address devices by their (owner, node) identity instead
+    /// of by device id.
+    #[cfg(test)]
+    pub async fn test_only_active_devices_for_owner_node(
+        &self,
+        owner_bare_jid: &BareJid,
+        node: &str,
+    ) -> Result<Vec<PushServiceDevice>, XmppError> {
+        let mut rows = self
+            .query(
+                r#"
+                SELECT d.device_id, d.node, d.platform, d.environment,
+                       d.provider_endpoint, d.provider_token, d.provider_key_material
+                FROM push_devices d
+                JOIN push_nodes n ON n.node = d.node
+                WHERE n.owner_bare_jid = ? AND d.node = ? AND d.status = ?
+                ORDER BY d.created_at_ms ASC
+                "#,
+                crate::db_params![owner_bare_jid.to_string(), node, DEVICE_STATUS_ACTIVE],
+            )
+            .await?;
+        let mut devices = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|error| XmppError::internal(error.to_string()))?
+        {
+            devices.push(decode_device(&row, &self.secrets)?);
+        }
+        Ok(devices)
+    }
+
     pub async fn disable_nodes_for_owner(
         &self,
         owner_bare_jid: &BareJid,
