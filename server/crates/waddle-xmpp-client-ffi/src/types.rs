@@ -383,6 +383,65 @@ pub struct WaddleCallEvent {
     pub kind: WaddleCallEventKind,
 }
 
+// ── Push notifications (XEP-0357 + XEP-0050) ─────────────────────────────────
+
+/// Provider deployment environment. `Sandbox` distinguishes the APNs
+/// `apns_development` endpoint from `apns_production`; Web Push and
+/// FCM accept only `Production` today.
+#[derive(uniffi::Enum, Clone, Copy, PartialEq, Eq)]
+pub enum WaddlePushEnvironment {
+    Production,
+    Sandbox,
+}
+
+impl From<WaddlePushEnvironment> for waddle_xmpp_client::push::PushEnvironment {
+    fn from(value: WaddlePushEnvironment) -> Self {
+        match value {
+            WaddlePushEnvironment::Production => Self::Production,
+            WaddlePushEnvironment::Sandbox => Self::Sandbox,
+        }
+    }
+}
+
+/// Platform-discriminated provider credentials. Mirrors the upstream
+/// `PushDeviceCredentials` enum exactly; UniFFI generates a Swift
+/// associated-value enum that the Apple client populates per
+/// platform.
+#[derive(uniffi::Enum, Clone)]
+pub enum WaddlePushDeviceCredentials {
+    WebPush {
+        endpoint: String,
+        p256dh: String,
+        auth: String,
+    },
+    Apns {
+        device_token: String,
+    },
+    Fcm {
+        registration_token: String,
+    },
+}
+
+impl From<WaddlePushDeviceCredentials> for waddle_xmpp_client::push::PushDeviceCredentials {
+    fn from(value: WaddlePushDeviceCredentials) -> Self {
+        match value {
+            WaddlePushDeviceCredentials::WebPush {
+                endpoint,
+                p256dh,
+                auth,
+            } => Self::WebPush {
+                endpoint,
+                p256dh,
+                auth,
+            },
+            WaddlePushDeviceCredentials::Apns { device_token } => Self::Apns { device_token },
+            WaddlePushDeviceCredentials::Fcm { registration_token } => {
+                Self::Fcm { registration_token }
+            }
+        }
+    }
+}
+
 // ── Callback interface ───────────────────────────────────────────────────────
 
 #[uniffi::export(callback_interface)]

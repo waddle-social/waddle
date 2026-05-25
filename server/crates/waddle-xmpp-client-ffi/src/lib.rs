@@ -463,6 +463,85 @@ impl WaddleClient {
         }
     }
 
+    // ── Push notifications (XEP-0357 + XEP-0050) ─────────────────────
+
+    /// XEP-0357 §5 `<enable/>` IQ against the user's XMPP server.
+    /// Never carries provider credentials — those flow through
+    /// `register_push_device` (XEP-0050) at `push.<domain>`.
+    pub async fn enable_push_notifications(&self, push_service_jid: String, node: String) -> bool {
+        let Some(handle) = self.clone_handle().await else {
+            return false;
+        };
+        match handle
+            .enable_push_notifications(&push_service_jid, &node, None)
+            .await
+        {
+            Ok(()) => true,
+            Err(e) => {
+                self.listener
+                    .on_error(format!("enable_push_notifications failed: {e}"));
+                false
+            }
+        }
+    }
+
+    /// XEP-0357 §6.1 `<disable/>` IQ. A `None`/missing `node` disables
+    /// ALL push nodes at the service for this user.
+    pub async fn disable_push_notifications(
+        &self,
+        push_service_jid: String,
+        node: Option<String>,
+    ) -> bool {
+        let Some(handle) = self.clone_handle().await else {
+            return false;
+        };
+        match handle
+            .disable_push_notifications(&push_service_jid, node.as_deref())
+            .await
+        {
+            Ok(()) => true,
+            Err(e) => {
+                self.listener
+                    .on_error(format!("disable_push_notifications failed: {e}"));
+                false
+            }
+        }
+    }
+
+    /// XEP-0050 `register-device` ad-hoc command on `push.<domain>`.
+    /// Drives the multi-step dance and returns the assigned XEP-0357
+    /// node id (empty string on failure — the listener gets the
+    /// diagnostic).
+    pub async fn register_push_device(
+        &self,
+        push_service_jid: String,
+        app_id: String,
+        environment: WaddlePushEnvironment,
+        credentials: WaddlePushDeviceCredentials,
+    ) -> Option<String> {
+        let Some(handle) = self.clone_handle().await else {
+            return None;
+        };
+        let env: waddle_xmpp_client::push::PushEnvironment = environment.into();
+        let creds: waddle_xmpp_client::push::PushDeviceCredentials = credentials.into();
+        match waddle_xmpp_client::push::register_push_device(
+            &handle,
+            &push_service_jid,
+            &app_id,
+            env,
+            &creds,
+        )
+        .await
+        {
+            Ok(node) => Some(node.into_string()),
+            Err(e) => {
+                self.listener
+                    .on_error(format!("register_push_device failed: {e}"));
+                None
+            }
+        }
+    }
+
     // ── A/V calls (XEP-0353 + XEP-0166) ──────────────────────────────
 
     /// Send a XEP-0353 §5.1.1 `<propose/>` to the peer's bare JID.
