@@ -888,6 +888,19 @@ impl DatabasePushServiceStore {
         self.db.clone()
     }
 
+    /// Typed advertisement of the Push Service's active VAPID public key.
+    /// Returned only when a [`VapidSigner`] is installed via
+    /// [`Self::with_web_push_provider`]; legacy test paths that boot the
+    /// store without a signer return `None`, and the disco handler
+    /// suppresses the XEP-0128 form rather than synthesizing a placeholder.
+    pub fn vapid_advertisement(&self) -> Option<waddle_xmpp::push::disco::VapidAdvertisement> {
+        let signer = self.vapid_signer.as_ref()?;
+        Some(waddle_xmpp::push::disco::VapidAdvertisement::new(
+            signer.current_public_key(),
+            signer.current_kid(),
+        ))
+    }
+
     async fn ensure_xep0060_push_node_for_owner(
         &self,
         owner_bare_jid: &BareJid,
