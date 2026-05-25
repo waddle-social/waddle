@@ -206,6 +206,11 @@ pub async fn handle_muc_join(
     };
 
     let occupant_count = join_outcome.occupant_count;
+    let self_muji = join_outcome
+        .existing_occupants
+        .iter()
+        .find(|existing| existing.nick == nick && existing.jid == *sender_jid)
+        .and_then(|existing| existing.muji.as_ref());
 
     info!(room = %room_jid, nick = %nick, occupants = occupant_count, "User joined MUC room");
 
@@ -287,7 +292,7 @@ pub async fn handle_muc_join(
     // Drop accounting is handled inside `try_send_to` (logs + metrics);
     // per-occupant outcome is discarded here because a missed join
     // presence self-heals via the next MUC presence/probe round-trip.
-    if !join_outcome.is_same_bare_multi_session_join {
+    if !join_outcome.is_same_bare_multi_session_join && !join_outcome.is_existing_session_rejoin {
         for existing in &join_outcome.existing_occupants {
             let presence_stanza = create_presence_stanza(
                 state,
@@ -317,7 +322,7 @@ pub async fn handle_muc_join(
         role: join_outcome.new_occupant_role,
         real_jid: sender_jid,
         include_self_status: true,
-        muji: None,
+        muji: self_muji,
     }));
 
     // Same-account sibling resources share one MUC nick. If a

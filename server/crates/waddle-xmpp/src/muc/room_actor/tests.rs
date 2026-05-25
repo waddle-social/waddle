@@ -126,6 +126,38 @@ async fn test_join_rejected_when_room_full() {
 }
 
 #[tokio::test]
+async fn test_join_existing_session_allowed_when_room_full() {
+    let actor = spawn_room_actor_with_config(RoomConfig {
+        max_occupants: 1,
+        ..RoomConfig::default()
+    })
+    .await;
+    let alice = test_full_jid("alice");
+
+    actor
+        .ask(JoinWithAffiliation {
+            sender_jid: alice.clone(),
+            nick: "alice".to_string(),
+            effective_affiliation: Affiliation::Member,
+            local_domain: "example.com".to_string(),
+        })
+        .await
+        .expect("first join should succeed");
+
+    let outcome = actor
+        .ask(JoinWithAffiliation {
+            sender_jid: alice,
+            nick: "alice".to_string(),
+            effective_affiliation: Affiliation::Member,
+            local_domain: "example.com".to_string(),
+        })
+        .await
+        .expect("existing session rejoin should bypass full-room rejection");
+
+    assert_eq!(outcome.occupant_count, 1);
+}
+
+#[tokio::test]
 async fn test_leave() {
     let actor = spawn_room_actor().await;
 

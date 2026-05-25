@@ -396,6 +396,7 @@ async function dispatchSlashCommand(
   return ok;
 }
 const inMucContext = computed(() => !!props.roomJid);
+const callRoomJid = computed(() => props.roomJid ?? props.channel?.jid ?? null);
 
 watch(
   () => props.xmppClient,
@@ -1071,8 +1072,8 @@ function dayDividerLabel(createdAt: string): string {
     <!-- Inline split-view for an active call in this conversation.
          MUC and DM ownership gates live inside the component. -->
     <CallSplitContainer
-      v-if="channel?.jid || dmPeer?.peerJid"
-      :room-jid="channel?.jid"
+      v-if="callRoomJid || dmPeer?.peerJid"
+      :room-jid="callRoomJid ?? undefined"
       :dm-peer-jid="dmPeer?.peerJid"
       :dm-peer-name="dmPeer?.peerUsername"
     />
@@ -1466,8 +1467,8 @@ function dayDividerLabel(createdAt: string): string {
          panel — stays visible. Decides its own visibility based on
          call state + ui mode. -->
     <CallExpandedSurface
-      v-if="channel?.jid || dmPeer?.peerJid"
-      :room-jid="channel?.jid"
+      v-if="callRoomJid || dmPeer?.peerJid"
+      :room-jid="callRoomJid ?? undefined"
       :dm-peer-jid="dmPeer?.peerJid"
       :dm-peer-name="dmPeer?.peerUsername"
     />

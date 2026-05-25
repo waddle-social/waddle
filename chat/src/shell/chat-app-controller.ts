@@ -157,6 +157,7 @@ export function useChatAppController(giphyApiKey: string) {
     ui.sidebarMode.value === "dms" ? dmMessaging.firstUnseenId.value : messaging.firstUnseenId.value,
   );
   const extensionRoutes = ref<DiscoveredExtensionRoute[]>([]);
+  const selectedChannelRoomJids = ref<Record<string, string>>({});
   const activeExtensionRouteKey = ref<{ channelId: string; pluginId: string; routeId: string } | null>(null);
   const activeExtensionRoute = computed(() => {
     const key = activeExtensionRouteKey.value;
@@ -171,10 +172,26 @@ export function useChatAppController(giphyApiKey: string) {
       : [],
   );
   const activeChannelRoomJid = computed(() => {
+    const channelId = waddles.activeChannelId.value;
     const channel = waddles.currentChannel.value;
-    if (!channel || !session.value) return null;
-    return channel.jid ?? resolveRoomJidForChannelId(session.value, waddles.channels.value, channel.id);
+    if (!channelId || !session.value) return null;
+    if (channel?.jid) return barePeerJid(channel.jid);
+    const selectedRoomJid = selectedChannelRoomJids.value[channelId];
+    if (selectedRoomJid) return selectedRoomJid;
+    return resolveRoomJidForChannelId(session.value, waddles.channels.value, channelId);
   });
+  watch(
+    [activeChannelRoomJid, () => waddles.channels.value],
+    ([roomJid]) => {
+      if (ui.sidebarMode.value !== "channels" || !roomJid) return;
+      const normalizedRoomJid = barePeerJid(roomJid);
+      const channel = waddles.channels.value.find((candidate) =>
+        candidate.jid ? barePeerJid(candidate.jid) === normalizedRoomJid : false
+      );
+      if (!channel || channel.id === waddles.activeChannelId.value) return;
+      void selectChannel(channel.id, { roomJid: normalizedRoomJid });
+    },
+  );
 
   // Thread panel state - stack = breadcrumb trail into nested sub-threads.
   // Empty stack = panel closed. Only meaningful for channel messages since DMs
@@ -1623,6 +1640,7 @@ export function useChatAppController(giphyApiKey: string) {
     channelUnread.clearAll();
     rosterContacts.clearRosterContacts();
     extensionRoutes.value = [];
+    selectedChannelRoomJids.value = {};
     activeExtensionRouteKey.value = null;
     activeRightPanel.value = null;
     setupPromptShown = false;
@@ -1641,17 +1659,26 @@ export function useChatAppController(giphyApiKey: string) {
     await connectionStore.logout();
   }
 
-  async function selectChannel(channelId: string) {
+  async function selectChannel(channelId: string, options: { roomJid?: string } = {}) {
     ui.activePage.value = "chat";
     ui.sidebarMode.value = "channels";
     activeExtensionRouteKey.value = null;
     dmConversations.closeDm();
     memberJidByNick.value = {};
+    const selectedRoomJid = options.roomJid ? barePeerJid(options.roomJid) : null;
+    if (selectedRoomJid) {
+      selectedChannelRoomJids.value = {
+        ...selectedChannelRoomJids.value,
+        [channelId]: selectedRoomJid,
+      };
+      xmppClient.value?.rememberRoomJidForChannel(channelId, selectedRoomJid);
+      messaging.rememberChannelRoomJid(channelId, selectedRoomJid);
+    }
     waddles.activeChannelId.value = channelId;
     void waddles.reloadChannelMembers(channelId);
     messaging.clearMessages();
     // XEP-0502: Clear activity indicator for this channel
-    const roomJid = roomJidForChannelId(channelId);
+    const roomJid = selectedRoomJid ?? roomJidForChannelId(channelId);
     if (roomJid) {
       messaging.clearChannelActivity(roomJid);
     }
@@ -1662,6 +1689,18 @@ export function useChatAppController(giphyApiKey: string) {
       unreadAtLoad,
     );
     ui.showMobileNav.value = false;
+  }
+
+  async function selectChannelByRoomJid(roomJid: string) {
+    const normalizedRoomJid = barePeerJid(roomJid);
+    if (!normalizedRoomJid) return;
+    const channel = waddles.channels.value.find((candidate) =>
+      candidate.jid ? barePeerJid(candidate.jid) === normalizedRoomJid : false
+    );
+    const managedRoom = parseManagedRoomBareJid(normalizedRoomJid);
+    const channelId = channel?.id ?? managedRoom?.channelId;
+    if (!channelId) return;
+    await selectChannel(channelId, { roomJid: normalizedRoomJid });
   }
 
   async function selectExtensionRoute(channelId: string, route: DiscoveredExtensionRoute) {
@@ -1901,6 +1940,7 @@ export function useChatAppController(giphyApiKey: string) {
       closeUserSettings,
       handleLogout,
       selectChannel,
+      selectChannelByRoomJid,
       onSelectThread,
       selectExtensionRoute,
       handleOpenDm,

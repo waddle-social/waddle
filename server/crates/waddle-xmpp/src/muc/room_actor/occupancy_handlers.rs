@@ -37,11 +37,12 @@ impl kameo::message::Message<JoinWithAffiliation> for RoomActor {
                 members_only: self.room.config.members_only,
             });
         }
-        if self.room.is_full() {
-            return Err(RoomActorError::RoomFull);
-        }
-
         let mut is_same_bare_multi_session_join = false;
+        let is_existing_session_rejoin = self
+            .room
+            .get_occupant_sessions(&msg.nick)
+            .iter()
+            .any(|session| session == &msg.sender_jid);
         if let Some(existing) = self.room.get_occupant(&msg.nick) {
             if existing.real_jid != msg.sender_jid {
                 if existing.real_jid.to_bare() == msg.sender_jid.to_bare() {
@@ -50,6 +51,9 @@ impl kameo::message::Message<JoinWithAffiliation> for RoomActor {
                     return Err(RoomActorError::NickAlreadyInUse(msg.nick));
                 }
             }
+        }
+        if self.room.is_full() && !is_existing_session_rejoin && !is_same_bare_multi_session_join {
+            return Err(RoomActorError::RoomFull);
         }
 
         let existing_occupants: Vec<JoinExistingOccupant> = self
@@ -92,6 +96,7 @@ impl kameo::message::Message<JoinWithAffiliation> for RoomActor {
             occupant_count,
             room_jid,
             is_same_bare_multi_session_join,
+            is_existing_session_rejoin,
             subject_state,
         })
     }

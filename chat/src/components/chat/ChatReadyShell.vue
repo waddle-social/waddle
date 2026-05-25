@@ -99,6 +99,7 @@ const {
   closeUserSettings,
   handleLogout,
   selectChannel,
+  selectChannelByRoomJid,
   onSelectThread,
   selectExtensionRoute,
   handleOpenDm,
@@ -199,9 +200,13 @@ function onSelectCommunitySurface(surface: "feed" | "stories" | "events") {
   openCommunitySurface(surface);
 }
 
-function onSelectChannelFromSidebar(id: string) {
+function onSelectChannelFromSidebar(id: string | null, roomJid?: string) {
   ui.activeCommunitySurface.value = null;
-  selectChannel(id);
+  if (id) {
+    selectChannel(id, roomJid ? { roomJid } : undefined);
+    return;
+  }
+  if (roomJid) selectChannelByRoomJid(roomJid);
 }
 
 // ── Admin route plumbing ────────────────────────────────────────────
@@ -247,6 +252,7 @@ onUnmounted(() => {
       :channels="waddles.sortedChannels.value"
       :conversations="dmConversations.conversations.value"
       :active-channel-id="waddles.activeChannelId.value"
+      :active-channel-room-jid="activeChannelRoomJid"
       :active-peer-jid="dmConversations.activePeerJid.value"
       :sidebar-mode="ui.sidebarMode.value"
       :active-channel-jids="messaging.activeChannels.value"
@@ -324,6 +330,7 @@ onUnmounted(() => {
           :channels="waddles.sortedChannels.value"
           :conversations="dmConversations.conversations.value"
           :active-channel-id="waddles.activeChannelId.value"
+          :active-channel-room-jid="activeChannelRoomJid"
           :active-peer-jid="dmConversations.activePeerJid.value"
           :sidebar-mode="ui.sidebarMode.value"
           :active-channel-jids="messaging.activeChannels.value"
