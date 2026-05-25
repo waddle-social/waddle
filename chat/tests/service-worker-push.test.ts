@@ -520,6 +520,49 @@ describe("service worker push handling", () => {
     expect(worker.showNotification).toHaveBeenCalledTimes(2);
   });
 
+  test("v=1 envelope: dedup map evicts under overflow without unbounded scan", async () => {
+    // Regression for round-4 perf finding: under a burst of > 256
+    // distinct items inside the TTL window, the eviction scan must
+    // not degrade to O(SHOWN_ITEM_MAX) per push. Capped probe +
+    // FIFO fallback should keep eviction O(1) amortized.
+    //
+    // We can't directly time the SW from outside, but we can pin the
+    // OBSERVABLE consequence: after pushing N > MAX distinct items,
+    // the very first item must no longer be considered "shown" — it
+    // got evicted to make room. The second-to-last must still be
+    // suppressible. This catches a regression that broke eviction
+    // entirely (e.g. forgot to `delete` the head).
+    const worker = loadServiceWorker();
+    const fire = async (item: string) => {
+      const event = makePushEvent({
+        json: () => ({
+          v: 1,
+          class: "dm",
+          conversation: "alice@example.com",
+          item,
+          unread: 1,
+        }),
+      });
+      worker.dispatch("push", event);
+      await event.done();
+    };
+    // 260 distinct items: 4 past the 256 cap so the FIFO-head eviction
+    // fires multiple times.
+    const ITEMS = 260;
+    for (let i = 0; i < ITEMS; i++) {
+      await fire(`burst-${i}`);
+    }
+    // Each was distinct so each rendered. (Sanity check that the
+    // dedup didn't accidentally suppress any.)
+    expect(worker.showNotification).toHaveBeenCalledTimes(ITEMS);
+    // The first item was evicted: re-firing it now must render again.
+    await fire("burst-0");
+    expect(worker.showNotification).toHaveBeenCalledTimes(ITEMS + 1);
+    // A recent item is still in the dedup window: re-firing must NOT render.
+    await fire(`burst-${ITEMS - 1}`);
+    expect(worker.showNotification).toHaveBeenCalledTimes(ITEMS + 1);
+  });
+
   test("v=1 envelope: dedup map is recency-aware (delete-then-set on re-touch)", async () => {
     // Regression for round-3 perf finding: without `delete-then-set` on
     // re-noting an item, the Map's FIFO order is by ORIGINAL insertion,

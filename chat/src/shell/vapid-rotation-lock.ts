@@ -75,10 +75,18 @@ let fallbackChain: Promise<unknown> = Promise.resolve();
 
 async function withFallbackLock<T>(callback: RunInLock<T>): Promise<T> {
   const next = fallbackChain.then(() => callback());
-  // Swallow rejections in the chain itself so a failing rotation doesn't
-  // permanently block subsequent acquires. The original promise is
-  // returned to the caller so the error still propagates.
-  fallbackChain = next.catch(() => undefined);
+  // Use a single `then(success, failure)` form to register the chain's
+  // continuation atomically. The two-step `next.catch(...)` pattern
+  // would create a brief window in strict unhandledrejection runtimes
+  // (Node 15+ with `--unhandled-rejections=strict`, some test runners)
+  // where the `.catch` handler hasn't been attached yet — a microtask-
+  // synchronous rejection from `callback()` could fire an
+  // unhandledrejection event before the `.catch` registers and swallows
+  // it. Using `then(_, _)` attaches both handlers in one step.
+  fallbackChain = next.then(
+    () => undefined,
+    () => undefined,
+  );
   return next;
 }
 

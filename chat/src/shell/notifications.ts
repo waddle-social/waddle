@@ -531,17 +531,33 @@ function loadPushNodeId(): string | null {
 
 function persistKid(kid: string): void {
   if (typeof window === "undefined") return;
-  window.localStorage.setItem(PUSH_KID_STORAGE_KEY, kid);
+  // Safari Lockdown Mode and some Firefox/Brave privacy configurations
+  // throw a SecurityError on `window.localStorage` access (not just on
+  // get/set). Wrap so a hardened browser doesn't kill the entire
+  // rotation flow on a single persistence call.
+  try {
+    window.localStorage.setItem(PUSH_KID_STORAGE_KEY, kid);
+  } catch (error) {
+    console.warn("[notifications] localStorage unavailable; kid not persisted:", error);
+  }
 }
 
 function loadPersistedKid(): string | null {
   if (typeof window === "undefined") return null;
-  return window.localStorage.getItem(PUSH_KID_STORAGE_KEY);
+  try {
+    return window.localStorage.getItem(PUSH_KID_STORAGE_KEY);
+  } catch {
+    return null;
+  }
 }
 
 function clearPersistedKid(): void {
   if (typeof window === "undefined") return;
-  window.localStorage.removeItem(PUSH_KID_STORAGE_KEY);
+  try {
+    window.localStorage.removeItem(PUSH_KID_STORAGE_KEY);
+  } catch {
+    // best-effort cleanup
+  }
 }
 
 /// Strip the optional `/resource` from a full JID so the cache key is

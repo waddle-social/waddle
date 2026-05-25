@@ -96,6 +96,12 @@ self.addEventListener("message", (event) => {
 /// evicted while still inside its TTL window under retry pressure).
 const SHOWN_ITEM_TTL_MS = 60_000;
 const SHOWN_ITEM_MAX = 256;
+/// Maximum number of TTL-probe iterations per eviction. Bounds the
+/// worst-case per-push CPU under bursts > SHOWN_ITEM_MAX items inside
+/// the TTL window. 16 probes is enough to find an expired entry under
+/// any non-pathological pattern; under a true burst we fall back to
+/// FIFO head eviction in O(1).
+const SHOWN_ITEM_EVICT_PROBE = 16;
 const shownItems = new Map();
 function noteItemShown(itemId) {
   if (!itemId) return;
@@ -105,10 +111,16 @@ function noteItemShown(itemId) {
   shownItems.set(itemId, Date.now());
   if (shownItems.size > SHOWN_ITEM_MAX) {
     // Prefer to evict an already-expired entry over the oldest live
-    // one; falls back to FIFO head when nothing has expired.
+    // one; falls back to FIFO head when nothing has expired. Cap the
+    // TTL probe at SHOWN_ITEM_EVICT_PROBE so a hostile burst (>
+    // SHOWN_ITEM_MAX items inside SHOWN_ITEM_TTL_MS) doesn't degrade
+    // every push to an O(SHOWN_ITEM_MAX) scan. Capped scan + FIFO
+    // fallback yields O(SHOWN_ITEM_EVICT_PROBE) per eviction.
     const now = Date.now();
     let evicted = false;
+    let probes = 0;
     for (const [key, at] of shownItems) {
+      if (probes++ >= SHOWN_ITEM_EVICT_PROBE) break;
       if (now - at > SHOWN_ITEM_TTL_MS) {
         shownItems.delete(key);
         evicted = true;
