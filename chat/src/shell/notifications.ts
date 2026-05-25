@@ -31,6 +31,11 @@ interface MentionNotificationOptions {
   body: string;
   roomJid: string;
   isBroadcast: boolean;
+  /** XEP-0359 stanza id of the originating message. When present, the
+   * foreground tab posts it to the active service worker via
+   * `waddle:item-shown` so a Web Push for the same id (arriving a few
+   * tens of ms later) is suppressed instead of double-firing. */
+  stanzaId?: string;
   onNavigate?: (roomJid: string) => void;
 }
 
@@ -38,7 +43,29 @@ interface DmNotificationOptions {
   senderUsername: string;
   peerJid: string;
   body: string;
+  /** XEP-0359 stanza id; see `MentionNotificationOptions.stanzaId`. */
+  stanzaId?: string;
   onNavigate?: (peerJid: string) => void;
+}
+
+/// Foreground→SW signal: tell the active service worker we just
+/// rendered a notification for this stanza id so it can suppress the
+/// matching Web Push when it lands. Best-effort: a missing controller
+/// (SW not active yet, or never installed) is silently ignored —
+/// without the SW running, there is no push handler to deliver a
+/// duplicate notification either.
+const SW_ITEM_SHOWN_MESSAGE_TYPE = "waddle:item-shown";
+function postItemShownToServiceWorker(itemId: string | undefined): void {
+  if (!itemId) return;
+  if (typeof navigator === "undefined" || !navigator.serviceWorker) return;
+  const controller = navigator.serviceWorker.controller;
+  if (!controller) return;
+  try {
+    controller.postMessage({ type: SW_ITEM_SHOWN_MESSAGE_TYPE, itemId });
+  } catch {
+    // postMessage can throw if the controller transitioned to
+    // redundant between the controller-check and the call.
+  }
 }
 
 export function usePushNotifications() {
@@ -107,6 +134,11 @@ export function usePushNotifications() {
       notification.close();
     };
 
+    // Foreground→SW dedup signal: post BEFORE the setTimeout-close so
+    // the SW Map records the id even if the user dismisses the banner
+    // before the SW push arrives.
+    postItemShownToServiceWorker(opts.stanzaId);
+
     setTimeout(() => notification.close(), 5000);
   }
 
@@ -124,6 +156,7 @@ export function usePushNotifications() {
       opts.onNavigate?.(opts.peerJid);
       notification.close();
     };
+    postItemShownToServiceWorker(opts.stanzaId);
     setTimeout(() => notification.close(), 5000);
   }
 

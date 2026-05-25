@@ -644,6 +644,7 @@ export function useChatAppController(giphyApiKey: string) {
         body: event.body,
         roomJid: event.roomJid,
         isBroadcast,
+        stanzaId: event.stanzaId,
         onNavigate: (roomJid) => {
           const managedRoom = parseManagedRoomBareJid(roomJid);
           if (!managedRoom) return;
@@ -668,6 +669,7 @@ export function useChatAppController(giphyApiKey: string) {
           senderUsername: msg.nick,
           peerJid: msg.peerJid,
           body: msg.body,
+          stanzaId: msg.stanzaId,
           onNavigate: (peerJid) => {
             void handleOpenDm(peerJid);
           },

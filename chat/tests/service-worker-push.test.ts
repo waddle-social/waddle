@@ -520,6 +520,75 @@ describe("service worker push handling", () => {
     expect(worker.showNotification).toHaveBeenCalledTimes(2);
   });
 
+  test("foreground→SW signal: waddle:item-shown message suppresses the subsequent push for the same item", async () => {
+    // The chat tab calls `postMessage({ type: 'waddle:item-shown', itemId })`
+    // from `showMentionNotification` / `showDmNotification` when an
+    // in-band notification renders. The SW must record that id so the
+    // matching Web Push (arriving milliseconds later from the relay)
+    // doesn't double-fire.
+    const worker = loadServiceWorker();
+    worker.dispatch("message", {
+      data: { type: "waddle:item-shown", itemId: "stanza-foreground-1" },
+    });
+    const event = makePushEvent({
+      json: () => ({
+        v: 1,
+        class: "dm",
+        conversation: "alice@example.com",
+        item: "stanza-foreground-1",
+        unread: 1,
+      }),
+    });
+    worker.dispatch("push", event);
+    await event.done();
+    // No banner — the foreground tab already rendered for this id.
+    expect(worker.showNotification).not.toHaveBeenCalled();
+    // Badge + unread broadcast still updated.
+    expect(worker.setAppBadge).toHaveBeenCalledWith(1);
+  });
+
+  test("foreground→SW signal: a different item id is NOT suppressed", async () => {
+    const worker = loadServiceWorker();
+    worker.dispatch("message", {
+      data: { type: "waddle:item-shown", itemId: "stanza-foreground-1" },
+    });
+    const event = makePushEvent({
+      json: () => ({
+        v: 1,
+        class: "dm",
+        conversation: "alice@example.com",
+        item: "stanza-different-2",
+        unread: 1,
+      }),
+    });
+    worker.dispatch("push", event);
+    await event.done();
+    expect(worker.showNotification).toHaveBeenCalledTimes(1);
+  });
+
+  test("foreground→SW signal: malformed message is ignored", async () => {
+    // A non-string itemId, missing itemId, or unknown type must be
+    // tolerated — the SW shouldn't crash on a stray cross-tab message.
+    const worker = loadServiceWorker();
+    worker.dispatch("message", { data: { type: "waddle:item-shown" } });
+    worker.dispatch("message", { data: { type: "waddle:item-shown", itemId: 42 } });
+    worker.dispatch("message", { data: { type: "unknown-type", itemId: "x" } });
+    worker.dispatch("message", {});
+    // None of those should register dedup for an item with this id.
+    const event = makePushEvent({
+      json: () => ({
+        v: 1,
+        class: "dm",
+        conversation: "alice@example.com",
+        item: "x",
+        unread: 1,
+      }),
+    });
+    worker.dispatch("push", event);
+    await event.done();
+    expect(worker.showNotification).toHaveBeenCalledTimes(1);
+  });
+
   test("v=1 envelope: dedup map evicts under overflow without unbounded scan", async () => {
     // Regression for round-4 perf finding: under a burst of > 256
     // distinct items inside the TTL window, the eviction scan must

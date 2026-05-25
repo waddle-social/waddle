@@ -82,6 +82,16 @@ self.addEventListener("fetch", (event) => {
 self.addEventListener("message", (event) => {
   if (event.data?.type === "SKIP_WAITING") {
     event.waitUntil(self.skipWaiting());
+    return;
+  }
+  // Foreground→SW dedup signal. The chat tab calls this from
+  // `showMentionNotification` / `showDmNotification` when it renders
+  // an in-band notification. Recording the id in `shownItems` lets the
+  // subsequent SW `push` event for the same stanza suppress its
+  // duplicate banner. See `chat/src/shell/notifications.ts`.
+  if (event.data?.type === "waddle:item-shown") {
+    const itemId = typeof event.data.itemId === "string" ? event.data.itemId : null;
+    if (itemId) noteItemShown(itemId);
   }
 });
 

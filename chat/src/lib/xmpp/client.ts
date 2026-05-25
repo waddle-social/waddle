@@ -150,6 +150,7 @@ function isRoomActivityMessage(message: LiveRoomMessage): boolean {
 
 function roomActivityEventFromMessage(message: LiveRoomMessage): RoomActivityEvent {
   const activity: RoomActivityEvent = { roomJid: message.roomJid, nick: message.nick, body: message.body };
+  if (message.stanzaId) activity.stanzaId = message.stanzaId;
   if (message.mentions) activity.mentions = message.mentions;
   if (message.broadcastMention) activity.broadcastMention = message.broadcastMention;
   return activity;
