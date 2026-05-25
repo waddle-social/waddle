@@ -113,16 +113,19 @@ impl WebPushSender for HttpWebPushSender {
         // bug in the caller's `vapid_public_key_b64u`, surfaced as
         // `BadRequest` rather than a panic.
         let endpoint = request.endpoint.clone();
-        // Defense-in-depth: registration-time validation already
-        // rejects non-https endpoints, but if a future caller bypasses
-        // that path the sender refuses to send a VAPID-signed
-        // `Authorization` header over a plaintext scheme. Loopback
-        // is allowed so mockito-based test fixtures (which serve
-        // `http://127.0.0.1:<port>/`) keep working — registration-time
-        // validation rejects literal IPs in production anyway, so a
-        // non-loopback http URL cannot reach here in a real
-        // deployment.
-        if endpoint.scheme() != "https" && !endpoint_is_loopback(&endpoint) {
+        // Strict HTTPS-only invariant on the production code path.
+        // Registration-time validation already rejects non-https
+        // endpoints; the sender re-checks at send time so a future
+        // caller bypassing `WebPushTarget::try_from_sealed`, a
+        // legacy stored endpoint, or any other reach-through can
+        // never POST a VAPID-signed `Authorization` header over a
+        // plaintext scheme. No carve-outs in production builds — the
+        // `cfg(test)` exception below is the ONLY way an in-process
+        // mockito test fixture (which serves `http://127.0.0.1:<port>/`)
+        // reaches the sender, and it never compiles into a release
+        // binary.
+        let scheme_ok = endpoint.scheme() == "https" || allow_non_https_for_test(&endpoint);
+        if !scheme_ok {
             warn!(
                 endpoint_hash = %EndpointHash::of(endpoint.as_str()),
                 origin = endpoint.origin().ascii_serialization(),
@@ -266,12 +269,19 @@ fn classify_transport_error(endpoint: &Url, err: reqwest::Error) -> WebPushOutco
     }
 }
 
-/// Is the endpoint host a loopback address? Used by the HTTPS scheme
-/// guard to permit mockito-based test fixtures (which serve
-/// `http://127.0.0.1:<port>/`) without weakening production security:
-/// real deployments never reach a literal IP here because
-/// registration-time validation rejects them.
-fn endpoint_is_loopback(endpoint: &Url) -> bool {
+/// Whether the HTTPS-only invariant accepts this endpoint. Production
+/// builds (`cfg(not(test))`) ALWAYS return false — there is no
+/// carve-out, no loopback exception, no environment override. The
+/// `cfg(test)` build permits loopback hosts so mockito test fixtures
+/// (which serve `http://127.0.0.1:<port>/`) can exercise the
+/// classifier; this branch never compiles into a release binary.
+#[cfg(not(test))]
+fn allow_non_https_for_test(_endpoint: &Url) -> bool {
+    false
+}
+
+#[cfg(test)]
+fn allow_non_https_for_test(endpoint: &Url) -> bool {
     match endpoint.host() {
         Some(url::Host::Ipv4(addr)) => addr.is_loopback(),
         Some(url::Host::Ipv6(addr)) => addr.is_loopback(),
@@ -558,6 +568,63 @@ mod tests {
                 kind: TransientFailure::ServerError { status: 503 }
             }
         ));
+    }
+
+    #[test]
+    fn allow_non_https_for_test_is_false_for_real_relay_hosts() {
+        // Compile-time guard: the test-only carve-out for
+        // `http://` MUST NOT match any host that could appear in
+        // production. Verifies the cfg(test) implementation only
+        // recognizes loopback. If someone adds a non-loopback case
+        // to the cfg(test) branch (e.g., `example.com`), this test
+        // fails and forces a re-think.
+        let urls = [
+            "http://push.example.com/abc",
+            "http://fcm.googleapis.com/fcm/send/abc",
+            "http://updates.push.services.mozilla.com/wpush/v1/abc",
+        ];
+        for raw in urls {
+            let u = Url::parse(raw).unwrap();
+            assert!(
+                !allow_non_https_for_test(&u),
+                "{raw} must not be accepted by the test carve-out"
+            );
+        }
+        // Loopback IS accepted, since mockito fixtures need it.
+        for raw in [
+            "http://127.0.0.1:1234/abc",
+            "http://[::1]:1234/abc",
+            "http://localhost:1234/abc",
+        ] {
+            let u = Url::parse(raw).unwrap();
+            assert!(
+                allow_non_https_for_test(&u),
+                "{raw} must be accepted in cfg(test)"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn refuses_non_https_non_loopback_endpoint() {
+        // Production-shaped non-https URL: the strict invariant must
+        // reject it even in cfg(test) builds (the carve-out only
+        // matches loopback).
+        let url = Url::parse("http://push.example.com/abc").unwrap();
+        let sender = HttpWebPushSender::new();
+        let jwt = dummy_jwt();
+        let p = payload();
+        let outcome = sender
+            .send(WebPushRequest {
+                endpoint: &url,
+                payload: &p,
+                vapid_jwt: &jwt,
+                vapid_public_key_b64u: "BFoo",
+                topic: None,
+                ttl: 60,
+                urgency: Urgency::Normal,
+            })
+            .await;
+        assert!(matches!(outcome, WebPushOutcome::BadRequest { status: 0 }));
     }
 
     #[tokio::test]
