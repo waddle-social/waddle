@@ -337,19 +337,21 @@ mod tests {
     }
 
     fn build_summary_form(message_count: Option<u64>) -> Element {
-        let mut form = Element::builder("x", NS_DATA_FORMS)
-            .attr(minidom::rxml::xml_ncname!("type").to_owned(), "result")
-            .append(
-                Element::builder("field", NS_DATA_FORMS)
-                    .attr(minidom::rxml::xml_ncname!("var").to_owned(), "FORM_TYPE")
-                    .attr(minidom::rxml::xml_ncname!("type").to_owned(), "hidden")
-                    .append(
-                        Element::builder("value", NS_DATA_FORMS)
-                            .append(XEP0357_SUMMARY_FORM_TYPE)
-                            .build(),
-                    )
-                    .build(),
-            );
+        // XEP-0357 §4 example shows `<x xmlns='jabber:x:data'>` with
+        // no `type` attribute; production `build_xep0357_summary_form`
+        // dropped `type='result'` in an earlier review pass and this
+        // test fixture must match the on-wire shape.
+        let mut form = Element::builder("x", NS_DATA_FORMS).append(
+            Element::builder("field", NS_DATA_FORMS)
+                .attr(minidom::rxml::xml_ncname!("var").to_owned(), "FORM_TYPE")
+                .attr(minidom::rxml::xml_ncname!("type").to_owned(), "hidden")
+                .append(
+                    Element::builder("value", NS_DATA_FORMS)
+                        .append(XEP0357_SUMMARY_FORM_TYPE)
+                        .build(),
+                )
+                .build(),
+        );
         if let Some(count) = message_count {
             form = form.append(
                 Element::builder("field", NS_DATA_FORMS)
@@ -450,8 +452,8 @@ mod tests {
         // Form is present but FORM_TYPE doesn't match XEP-0357 §4.
         // message-count must be ignored — we don't trust counters
         // from unknown forms.
+        // Match the production summary form shape (no `type` attr).
         let wrong_form = Element::builder("x", NS_DATA_FORMS)
-            .attr(minidom::rxml::xml_ncname!("type").to_owned(), "result")
             .append(
                 Element::builder("field", NS_DATA_FORMS)
                     .attr(minidom::rxml::xml_ncname!("var").to_owned(), "FORM_TYPE")

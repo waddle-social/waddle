@@ -559,6 +559,16 @@ fn web_push_outcome_diagnostic(outcome: &waddle_xmpp::push::types::WebPushOutcom
             None => format!("rate limited HTTP {status}"),
         },
         WebPushOutcome::PayloadTooLarge { status } => format!("payload too large HTTP {status}"),
+        // `status = 0` is the sentinel `HttpWebPushSender` returns for
+        // local preflight failures (non-https endpoint reaching the
+        // sender despite registration-time validation, or VAPID
+        // header that fails `HeaderValue::from_str`) — there was no
+        // HTTP exchange so no real status code applies. Render the
+        // diagnostic with that context instead of the misleading
+        // "HTTP 0".
+        WebPushOutcome::BadRequest { status: 0 } => {
+            "bad request (preflight: invalid endpoint or auth header)".to_string()
+        }
         WebPushOutcome::BadRequest { status } => format!("bad request HTTP {status}"),
         WebPushOutcome::Transient { kind } => match kind {
             TransientFailure::Network => "transient: network".to_string(),
@@ -710,6 +720,31 @@ fn attempt_status_warrants_device_disable(status: &str) -> bool {
             | dispatch::ATTEMPT_STATUS_WEB_INVALID_KEYS
             | dispatch::ATTEMPT_STATUS_WEB_INVALID_ENDPOINT
     )
+}
+
+/// If every attempt in the fan-out carries the same encoder/config-bug
+/// status (i.e. all `web-bad-request` or all `web-payload-too-large`),
+/// return that status so the worker can finalize the job as FAILED
+/// instead of silently marking it PUBLISHED. Returns `None` otherwise.
+///
+/// Both statuses are deterministic on the fan-out: every device hits
+/// the same encoder/padding bug, so the job will recur identically on
+/// retry. Surfacing FAILED on `push_publish_jobs.status` lets monitors
+/// alert without auditing the attempts table.
+fn all_attempts_with_encoder_bug_signature(attempts: &[DispatchedAttempt]) -> Option<&'static str> {
+    if attempts.is_empty() {
+        return None;
+    }
+    let first = attempts[0].status;
+    let uniform = matches!(
+        first,
+        dispatch::ATTEMPT_STATUS_WEB_BAD_REQUEST | dispatch::ATTEMPT_STATUS_WEB_PAYLOAD_TOO_LARGE
+    ) && attempts.iter().all(|a| a.status == first);
+    if uniform {
+        Some(first)
+    } else {
+        None
+    }
 }
 
 /// Truncate a free-form diagnostic to fit the
@@ -2777,23 +2812,25 @@ impl DatabasePushServiceStore {
                 .await
                 .map_err(|error| XmppError::internal(error.to_string()))?;
             }
-        } else if !attempts.is_empty()
-            && attempts
-                .iter()
-                .all(|attempt| attempt.status == dispatch::ATTEMPT_STATUS_WEB_BAD_REQUEST)
-        {
-            // Every device returned `web-bad-request` — that means our
-            // payload shape was wrong (encoder bug), not a per-device
-            // failure. Marking PUBLISHED would hide an encoder
-            // regression behind a "successful" job status; mark FAILED
-            // with the diagnostic so monitoring on
-            // `push_publish_jobs.status='failed'` surfaces it without
-            // auditing the attempts table. The device rows stay
-            // active — re-publish succeeds once the bug is fixed.
-            let bad_request_error = attempts
+        } else if let Some(uniform_status) = all_attempts_with_encoder_bug_signature(attempts) {
+            // Every device returned the same encoder-bug status —
+            // either all `web-bad-request` (the relay rejected our
+            // payload shape) or all `web-payload-too-large` (every
+            // device exceeded the relay's per-message ceiling, which
+            // is a padding/bucket-class misconfiguration). Both
+            // recur identically on retry, so the job is a
+            // deterministic failure, not a per-device problem.
+            // Marking PUBLISHED would hide the regression behind a
+            // "successful" job status; mark FAILED with the
+            // diagnostic so monitoring on
+            // `push_publish_jobs.status='failed'` surfaces it
+            // without auditing the attempts table. Device rows
+            // stay active — re-publish succeeds once the bug is
+            // fixed.
+            let uniform_error = attempts
                 .iter()
                 .find_map(|attempt| attempt.last_error.clone())
-                .unwrap_or_else(|| "all devices returned web-bad-request".to_string());
+                .unwrap_or_else(|| format!("all devices returned {uniform_status}"));
             tx.execute(
                 r#"
                 UPDATE push_publish_jobs
@@ -2809,7 +2846,7 @@ impl DatabasePushServiceStore {
                 crate::db_params![
                     PUBLISH_JOB_STATUS_FAILED,
                     truncate_last_error(&format!(
-                        "all devices returned web-bad-request; encoder bug suspected: {bad_request_error}"
+                        "all devices returned {uniform_status}; encoder/config bug suspected: {uniform_error}"
                     )),
                     now_ms,
                     job.job_id().to_string(),
@@ -5939,6 +5976,68 @@ mod tests {
             device_status(&store, node.node(), "web-1").await,
             DEVICE_STATUS_ACTIVE,
             "Transient outcomes must keep the device active — XEP-0357 §6 disable applies only to permanent failures"
+        );
+    }
+
+    #[tokio::test]
+    async fn all_payload_too_large_marks_job_failed_not_published() {
+        // 413 from every device means the padding/bucket-class is
+        // wrong (encoder/config bug), not a per-device problem.
+        // Monitoring on `push_publish_jobs.status` must see FAILED,
+        // not PUBLISHED — otherwise the regression hides behind a
+        // "successful" status.
+        let (store, sender) =
+            store_with_web_push_provider(WebPushOutcome::PayloadTooLarge { status: 413 }).await;
+        let owner = owner();
+        let node = store.ensure_node(&owner, "web").await.expect("node");
+        let (p256dh, auth) = fresh_subscription_material();
+        store
+            .upsert_device(
+                &owner,
+                PushDeviceRegistration::new("web-1", node.node(), PushDevicePlatform::Web, "test")
+                    .with_provider_endpoint(Some(
+                        "https://push.example.com/abc-subscription".to_string(),
+                    ))
+                    .with_provider_token(Some(auth))
+                    .with_provider_key_material(Some(p256dh)),
+            )
+            .await
+            .expect("device");
+        store
+            .publish_notification_from_user_server(
+                node.node(),
+                &web_push_notification_item("ptl-item-1", "alice@example.com", "dm", 1),
+                &owner,
+            )
+            .await
+            .expect("publish");
+        store
+            .drain_queued_notification_publish_jobs(16)
+            .await
+            .expect("drain");
+
+        assert_eq!(sender.call_count(), 1);
+        // Job status must be FAILED, not PUBLISHED — see
+        // `all_attempts_with_encoder_bug_signature`.
+        let mut rows = store
+            .query(
+                "SELECT status FROM push_publish_jobs WHERE item_id = ?",
+                crate::db_params!["ptl-item-1"],
+            )
+            .await
+            .expect("status query");
+        let row = rows.next().await.expect("row stream").expect("row present");
+        let status: String = row.get(0).expect("status col");
+        assert_eq!(
+            status, PUBLISH_JOB_STATUS_FAILED,
+            "all-PayloadTooLarge fan-out must mark the job FAILED, got {status}"
+        );
+        // Device row stays active — re-publish succeeds once the
+        // encoder/config bug is fixed.
+        assert_eq!(
+            device_status(&store, node.node(), "web-1").await,
+            DEVICE_STATUS_ACTIVE,
+            "encoder-bug failure must not disable the device"
         );
     }
 

@@ -601,8 +601,17 @@ pub enum WebPushOutcome {
     /// 413 — body exceeded relay's per-message ceiling. Indicates a
     /// padding/bucket-class bug, not a transient condition.
     PayloadTooLarge { status: u16 },
-    /// 400 — relay rejected the body shape (malformed headers, bad
-    /// encryption envelope, etc). Indicates an encoder bug.
+    /// 400 / 403 / generic 401 — the relay rejected the request and
+    /// no other variant fits (subscription is not gone, JWT was not
+    /// the cause).
+    ///
+    /// `status = 0` is reserved as a sentinel for LOCAL preflight
+    /// failures inside `HttpWebPushSender::send` — non-https
+    /// endpoint reaching the sender despite registration-time
+    /// validation, or a VAPID header that fails `HeaderValue::from_str`.
+    /// There is no HTTP exchange in those cases, so no real status
+    /// code applies; downstream diagnostics render `status = 0` as
+    /// "preflight rejected" rather than the misleading "HTTP 0".
     BadRequest { status: u16 },
     /// 5xx, network failure, or anything not matched above. The
     /// publish-job worker retries via the existing
