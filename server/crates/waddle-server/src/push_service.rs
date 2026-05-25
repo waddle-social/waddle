@@ -2183,8 +2183,9 @@ impl DatabasePushServiceStore {
 
         // ---- Phase 1: tx1 — claim + validate + load sealed devices +
         // read payload_xml. We commit with the job still in
-        // `in-progress` so its 5-minute claim window covers phases 2+3
-        // without holding a DB transaction across the network round-trip.
+        // `in-progress` so its `PUBLISH_JOB_CLAIM_TIMEOUT_MS` claim
+        // window covers phases 2+3 without holding a DB transaction
+        // across the network round-trip.
         let phase1 = match self.process_publish_phase1(job_id, now_ms).await? {
             Phase1Outcome::Continue(state) => state,
             Phase1Outcome::ShortCircuit(result) => return Ok(result),
@@ -2244,8 +2245,9 @@ impl DatabasePushServiceStore {
     /// claim the job, validate node/owner/registration, ensure the
     /// XEP-0060 backing item exists, and load sealed devices + payload.
     /// Commits tx1 with the job still in
-    /// [`PUBLISH_JOB_STATUS_IN_PROGRESS`] so the 5-minute claim window
-    /// covers the out-of-tx Web Push round-trip.
+    /// [`PUBLISH_JOB_STATUS_IN_PROGRESS`] so the
+    /// [`PUBLISH_JOB_CLAIM_TIMEOUT_MS`] claim window covers the
+    /// out-of-tx Web Push round-trip.
     async fn process_publish_phase1(
         &self,
         job_id: &str,
@@ -2445,7 +2447,10 @@ impl DatabasePushServiceStore {
                 Arc::clone(sender),
                 sub.clone(),
                 parsed.clone(),
-                self.secrets.clone(),
+                // Wrap the cipher in `Arc` so the per-device fan-out
+                // clones an `Arc` refcount instead of duplicating the
+                // (enc_key, mac_key) byte buffers up to 64× in heap.
+                Arc::new(self.secrets.clone()),
             )),
             _ => None,
         };
@@ -2581,7 +2586,7 @@ impl DatabasePushServiceStore {
             //
             // Reverse direction (notifying the chat client so it can
             // re-register a fresh subscription) lands in a follow-up
-            // commit — see `dispatch_web_device`.
+            // commit — see `dispatch_web_device_owned`.
             if attempt_status_warrants_device_disable(attempt.status) {
                 mark_device_disabled_tx(
                     &mut tx,
@@ -3001,6 +3006,18 @@ fn validate_web_push_endpoint(endpoint: &str) -> Result<(), XmppError> {
     if parsed.scheme() != "https" {
         return Err(XmppError::bad_request(Some(
             "Push Service provider endpoint must use https".to_string(),
+        )));
+    }
+    // Reject non-default ports. Web Push relays universally listen on
+    // 443; permitting other ports lets a registering client point the
+    // worker at internal non-HTTPS services that happen to accept a
+    // POST (Redis 6379, Elasticsearch 9200, memcached 11211, etc.)
+    // via a permissive internal DNS record. `url::Url::port()` returns
+    // `None` for the default port of the scheme (443 for https), so
+    // any `Some(_)` here is a non-443 port.
+    if parsed.port().is_some() {
+        return Err(XmppError::bad_request(Some(
+            "Push Service provider endpoint must use the default https port".to_string(),
         )));
     }
     let host = parsed.host_str().ok_or_else(|| {
@@ -5747,6 +5764,11 @@ mod tests {
             // Non-https schemes.
             "http://push.example.com/abc",
             "ftp://push.example.com/abc",
+            // Non-default ports — would let a registering client point
+            // the worker at Redis (6379), Elasticsearch (9200), etc.
+            "https://push.example.com:6379/",
+            "https://push.example.com:9200/",
+            "https://push.example.com:8443/abc",
         ] {
             let err = store
                 .upsert_device(
@@ -5818,6 +5840,45 @@ mod tests {
             store.web_push_capability(),
             waddle_xmpp::push::WebPushCapability::Ready
         );
+    }
+
+    #[tokio::test]
+    async fn attempt_status_is_transient_matches_retry_intent() {
+        // Lock the matrix down so a future enum reorganization can't
+        // silently move `web-internal-error` (or any other permanent
+        // status) back into the transient set. Permanent statuses
+        // would spin in a 60s retry loop forever without the §6.1 cap;
+        // even with the cap, classifying a deterministic bug as
+        // transient burns 24 attempts before surfacing.
+        for transient in [
+            dispatch::ATTEMPT_STATUS_WEB_TRANSIENT,
+            dispatch::ATTEMPT_STATUS_WEB_RATE_LIMITED,
+            dispatch::ATTEMPT_STATUS_WEB_CLOCK_SKEW,
+            ATTEMPT_STATUS_WEB_NOT_CONFIGURED,
+        ] {
+            assert!(
+                attempt_status_is_transient(transient),
+                "{transient} must be classified transient"
+            );
+        }
+        for permanent in [
+            dispatch::ATTEMPT_STATUS_WEB_DELIVERED,
+            dispatch::ATTEMPT_STATUS_WEB_GONE,
+            dispatch::ATTEMPT_STATUS_WEB_BAD_REQUEST,
+            dispatch::ATTEMPT_STATUS_WEB_PAYLOAD_TOO_LARGE,
+            dispatch::ATTEMPT_STATUS_WEB_INVALID_KEYS,
+            dispatch::ATTEMPT_STATUS_WEB_INVALID_ENDPOINT,
+            dispatch::ATTEMPT_STATUS_WEB_UNSEAL_FAILED,
+            dispatch::ATTEMPT_STATUS_WEB_MISSING_MATERIAL,
+            dispatch::ATTEMPT_STATUS_FAKE_SENT_NON_WEB,
+            ATTEMPT_STATUS_WEB_INTERNAL_ERROR,
+        ] {
+            assert!(
+                !attempt_status_is_transient(permanent),
+                "{permanent} must NOT be classified transient — deterministic bugs and \
+                 device-permanent failures should not requeue"
+            );
+        }
     }
 
     #[tokio::test]
