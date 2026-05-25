@@ -62,7 +62,7 @@ function entryStatus(entry: CallActivityDockEntry): string {
 
 function entryTitle(entry: CallActivityDockEntry): string {
   if (entry.kind === "channel") {
-    return `Open ${entry.title} call, ${entryStatus(entry)}`;
+    return `Join ${entry.title} call, ${entryStatus(entry)}`;
   }
   return `Open ${entry.title} call, ${entryStatus(entry)}`;
 }

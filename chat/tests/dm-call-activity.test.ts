@@ -317,6 +317,22 @@ describe("DM call activity", () => {
     expect(readDmCallActivity(bob, new Date("2026-05-26T10:00:01.000Z"))).toBeNull();
   });
 
+  test("treats unparseable activity timestamps as expired", () => {
+    $dmCallActivities.set({
+      [bob]: {
+        peerJid: bob,
+        sid: "invalid-clock-call",
+        media: audio,
+        state: "ringing",
+        direction: "incoming",
+        updatedAt: "not-a-date",
+      },
+    });
+
+    expect(readDmCallActivity(bob, now)).toBeNull();
+    expect($dmCallActivities.get()).toEqual({});
+  });
+
   test("local cleanup can clear an optimistic outgoing proposal", () => {
     applyDmCallEvent({
       event: {

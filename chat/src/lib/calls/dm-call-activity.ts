@@ -47,13 +47,13 @@ function timestampFromEnvelope(envelope: DmCallEventEnvelope): string {
 
 function isStale(timestamp: string, now: Date): boolean {
   const ms = Date.parse(timestamp);
-  if (!Number.isFinite(ms)) return false;
+  if (!Number.isFinite(ms)) return true;
   return now.getTime() - ms > DM_CALL_ACTIVITY_ACTIVE_WINDOW_MS;
 }
 
 function millisecondsUntilStale(timestamp: string, now: Date): number | null {
   const ms = Date.parse(timestamp);
-  if (!Number.isFinite(ms)) return null;
+  if (!Number.isFinite(ms)) return 0;
   return ms + DM_CALL_ACTIVITY_ACTIVE_WINDOW_MS - now.getTime();
 }
 
