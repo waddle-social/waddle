@@ -1271,7 +1271,17 @@ export class BrowserXmppClient {
       // reconnect race during setupPushSubscription would abort the
       // whole rotation flow instead of degrading cleanly.
       const xmpp = await this.requireConnectedXmpp();
-      if (!xmpp.fetch_vapid_public_key) return null;
+      if (!xmpp.fetch_vapid_public_key) {
+        // Bundle-drift diagnostic: the JS shipped expects a wasm
+        // method that the active bundle doesn't export. Typically
+        // means the chat upgraded its TS but the @waddle/xmpp-client-wasm
+        // package is older. Surface so operators see why Web Push
+        // silently fell back to the foreground Notification API.
+        console.warn(
+          "[xmpp] fetch_vapid_public_key is unavailable (older wasm bundle?); returning null",
+        );
+        return null;
+      }
       const result = await Promise.race([
         xmpp.fetch_vapid_public_key(opts.serviceJid),
         timeoutPromise,
