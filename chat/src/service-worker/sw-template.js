@@ -89,16 +89,36 @@ self.addEventListener("message", (event) => {
 /// already been rendered (chat tab open, message hits `showMentionNotification`
 /// or `showDmNotification`), the SW push lands ~tens of ms later carrying
 /// the same `item` id. Suppressing the SW notification by `item` avoids
-/// a double-fire. Bounded to 256 entries via FIFO eviction.
+/// a double-fire. Bounded to 256 entries with TTL-first, FIFO-fallback
+/// eviction. Delete-then-set on touch so re-noting an item moves it to
+/// the Map's tail (Map iteration order = insertion order; without the
+/// delete a re-touch keeps the original position and the entry can be
+/// evicted while still inside its TTL window under retry pressure).
 const SHOWN_ITEM_TTL_MS = 60_000;
 const SHOWN_ITEM_MAX = 256;
 const shownItems = new Map();
 function noteItemShown(itemId) {
   if (!itemId) return;
+  // delete-then-set so a re-noted item moves to the tail of the Map's
+  // insertion order, keeping FIFO eviction recency-aware.
+  if (shownItems.has(itemId)) shownItems.delete(itemId);
   shownItems.set(itemId, Date.now());
   if (shownItems.size > SHOWN_ITEM_MAX) {
-    const oldestKey = shownItems.keys().next().value;
-    if (oldestKey !== undefined) shownItems.delete(oldestKey);
+    // Prefer to evict an already-expired entry over the oldest live
+    // one; falls back to FIFO head when nothing has expired.
+    const now = Date.now();
+    let evicted = false;
+    for (const [key, at] of shownItems) {
+      if (now - at > SHOWN_ITEM_TTL_MS) {
+        shownItems.delete(key);
+        evicted = true;
+        break;
+      }
+    }
+    if (!evicted) {
+      const oldestKey = shownItems.keys().next().value;
+      if (oldestKey !== undefined) shownItems.delete(oldestKey);
+    }
   }
 }
 function isItemAlreadyShown(itemId) {

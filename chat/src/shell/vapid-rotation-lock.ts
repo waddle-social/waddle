@@ -37,12 +37,22 @@ function lockNameFor(accountJid: string | undefined): string {
 
 type RunInLock<T> = () => Promise<T>;
 
+/// Minimal subset of the Web Locks API `Lock` interface — sufficient to
+/// type the callback signature without pulling the full `lib.dom`
+/// type. Callers ignore the argument today; preserved on the
+/// signature so a future caller that needs `lock.mode` / `lock.name`
+/// can read them without re-typing.
+interface WebLock {
+  readonly mode: "exclusive" | "shared";
+  readonly name: string;
+}
+
 interface NavigatorWithLocks {
   locks: {
     request: <T>(
       name: string,
       options: { mode: "exclusive" } | { mode: "shared" },
-      callback: () => Promise<T>,
+      callback: (lock: WebLock | null) => Promise<T>,
     ) => Promise<T>;
   };
 }
@@ -88,7 +98,9 @@ export async function withVapidRotationLock<T>(
   if (!navWithLocks) {
     return withFallbackLock(callback);
   }
-  return navWithLocks.locks.request(lockNameFor(accountJid), { mode: "exclusive" }, callback);
+  return navWithLocks.locks.request(lockNameFor(accountJid), { mode: "exclusive" }, () =>
+    callback(),
+  );
 }
 
 /** Exposed for the test suite to reset the fallback chain between tests. */

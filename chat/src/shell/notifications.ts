@@ -145,13 +145,6 @@ export function usePushNotifications() {
       console.warn("[notifications] urlBase64ToUint8Array failed on VAPID key:", error);
       return null;
     }
-    // PushManager rejects `applicationServerKey` if the underlying
-    // backing buffer has a non-zero `byteOffset` or extends beyond the
-    // 65-byte uncompressed P-256 point — Firefox and Safari both
-    // surface that as InvalidAccessError. Pass the Uint8Array directly
-    // (PushManager accepts any BufferSource per spec) so the view's
-    // length + offset stay authoritative, instead of leaking the raw
-    // ArrayBuffer that may be larger.
     if (keyBytes.length !== 65 || keyBytes[0] !== 0x04) {
       // Belt-and-braces validation: the wasm parser already rejects
       // malformed keys, but a cache-hit path that bypassed the parser

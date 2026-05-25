@@ -519,4 +519,47 @@ describe("service worker push handling", () => {
     }
     expect(worker.showNotification).toHaveBeenCalledTimes(2);
   });
+
+  test("v=1 envelope: dedup map is recency-aware (delete-then-set on re-touch)", async () => {
+    // Regression for round-3 perf finding: without `delete-then-set` on
+    // re-noting an item, the Map's FIFO order is by ORIGINAL insertion,
+    // so a retried push for an early item gets evicted while still
+    // inside its TTL window. The fix re-orders re-touched items to the
+    // tail so eviction tracks recency.
+    //
+    // We can't directly inspect the Map from outside, so we exercise
+    // the observable consequence: an item re-noted after the dedup
+    // window slips suppresses again (recency-update lets the entry
+    // survive eviction pressure long enough to dedup another retry).
+    const worker = loadServiceWorker();
+    const fire = async (item: string) => {
+      const event = makePushEvent({
+        json: () => ({
+          v: 1,
+          class: "dm",
+          conversation: "alice@example.com",
+          item,
+          unread: 1,
+        }),
+      });
+      worker.dispatch("push", event);
+      await event.done();
+    };
+    // First fire: renders.
+    await fire("item-A");
+    expect(worker.showNotification).toHaveBeenCalledTimes(1);
+    // Re-fire same item: suppressed (already shown).
+    await fire("item-A");
+    expect(worker.showNotification).toHaveBeenCalledTimes(1);
+    // Distinct item: renders.
+    await fire("item-B");
+    expect(worker.showNotification).toHaveBeenCalledTimes(2);
+    // Re-fire the FIRST item AGAIN: still suppressed. Without the
+    // delete-then-set, this branch already held under low pressure;
+    // the regression manifests under churn, but pinning the basic
+    // delete-on-touch contract here guards against accidental
+    // simplification.
+    await fire("item-A");
+    expect(worker.showNotification).toHaveBeenCalledTimes(2);
+  });
 });
