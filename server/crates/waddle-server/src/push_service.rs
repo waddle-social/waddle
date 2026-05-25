@@ -1575,10 +1575,13 @@ impl DatabasePushServiceStore {
 
     /// Test-only: list every ACTIVE `push_devices` row registered
     /// against the given `(owner, node)` pair. Used by the XEP-0050
-    /// cutover tests — the chat client never learns the
-    /// server-allocated `device_id` under the new wire shape, so test
-    /// sites address devices by their (owner, node) identity instead
-    /// of by device id.
+    /// cutover tests as a convenience for sites that only need to
+    /// assert "a device exists" for an owner/node without pinning the
+    /// specific server-assigned `device_id`. (The chat client DOES
+    /// learn `device_id` — the stage-4 `register-device` result form
+    /// returns it and the per-device `disable-device` opt-out requires
+    /// it; tests that care about the exact id read it from that result
+    /// form instead.)
     #[cfg(test)]
     pub async fn test_only_active_devices_for_owner_node(
         &self,

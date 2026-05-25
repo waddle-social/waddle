@@ -536,7 +536,7 @@ impl WaddleClient {
         {
             Ok(outcome) => Some(WaddleRegisterDeviceResult {
                 node: outcome.node.into_string(),
-                device_id: outcome.device_id,
+                device_id: outcome.device_id.into_string(),
             }),
             Err(e) => {
                 self.listener
