@@ -463,8 +463,16 @@ impl<'a> Transaction<'a> {
     /// reader to writer on the first write, which can deadlock when two
     /// pooled connections both start as readers and then both try to
     /// upgrade (SQLITE_LOCKED, not BUSY — `busy_timeout` doesn't help).
-    /// For Postgres the default semantics already serialize writers, so
-    /// this just falls through to `begin`.
+    /// `BEGIN IMMEDIATE` resolves that.
+    ///
+    /// For Postgres this method falls through to plain `begin`: the
+    /// `BEGIN IMMEDIATE` upgrade race is SQLite-specific. Postgres at
+    /// the default READ COMMITTED isolation does NOT prevent two
+    /// concurrent worker phase 1's from both selecting `status='queued'`
+    /// rows simultaneously — serialization on Postgres comes from the
+    /// conditional `UPDATE ... WHERE status='queued'` (only one CAS
+    /// wins; the loser sees 0 rows changed and short-circuits) and the
+    /// `claim_token` interlock checked in phase 3's UPDATE.
     pub(super) async fn begin_immediate(
         backend: &'a DatabaseBackend,
     ) -> Result<Self, DatabaseError> {

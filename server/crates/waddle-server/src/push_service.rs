@@ -23,6 +23,7 @@ use waddle_xmpp::push::{PushError, PushSubscription};
 use waddle_xmpp::xep::xep0357::NS_PUSH;
 use waddle_xmpp::XmppError;
 use xmpp_parsers::iq::Iq;
+use zeroize::ZeroizeOnDrop;
 
 use crate::db::{Database, IntoParams};
 
@@ -96,7 +97,7 @@ const PUBLISH_JOB_MAX_RETRY_AFTER_MS: i64 = 60 * 60 * 1_000;
 #[derive(Clone)]
 pub struct DatabasePushServiceStore {
     db: Database,
-    secrets: PushSecretCipher,
+    secrets: Arc<PushSecretCipher>,
     pubsub_boundary: Option<PushServicePubSubBoundary>,
     /// VAPID signer for outbound Web Push delivery. `None` when the
     /// process boots without a configured push service (legacy test
@@ -119,7 +120,13 @@ struct PushServicePubSubBoundary {
     storage: Arc<dyn PubSubStorage>,
 }
 
-#[derive(Clone)]
+/// Sealing cipher for device provider credentials at rest. Keys are
+/// HMAC-SHA256 derivations of the boot-time root key and are
+/// zeroized on drop so a process panic / shutdown does not leave the
+/// HMAC root-derived keys in heap residue. Wrap in `Arc` for cheap
+/// sharing across the publish-job fan-out; do not `.clone()` directly
+/// — that would duplicate the unzeroized byte buffers.
+#[derive(ZeroizeOnDrop)]
 pub(crate) struct PushSecretCipher {
     enc_key: Vec<u8>,
     mac_key: Vec<u8>,
@@ -477,6 +484,10 @@ pub struct PushPublishJob {
     item_id: String,
     push_service_jid: Option<String>,
     status: String,
+    /// The UUID-string written by phase 1's claim. Phase 3's UPDATE
+    /// gates on this so a stale-claim recovery + concurrent re-claim
+    /// can't persist attempts from the original worker.
+    claim_token: String,
 }
 
 #[derive(Debug, Clone)]
@@ -745,6 +756,10 @@ impl PushPublishJob {
     pub fn status(&self) -> &str {
         &self.status
     }
+
+    fn claim_token(&self) -> &str {
+        &self.claim_token
+    }
 }
 
 impl PushPublishJobEnqueue {
@@ -766,7 +781,7 @@ impl DatabasePushServiceStore {
     pub async fn new_with_secret_key(db: Database, secret_key: &[u8]) -> Result<Self, XmppError> {
         let store = Self {
             db,
-            secrets: PushSecretCipher::new(secret_key),
+            secrets: Arc::new(PushSecretCipher::new(secret_key)),
             pubsub_boundary: None,
             vapid_signer: None,
             web_push_sender: None,
@@ -784,7 +799,7 @@ impl DatabasePushServiceStore {
     ) -> Result<Self, XmppError> {
         let store = Self {
             db,
-            secrets: PushSecretCipher::new(secret_key),
+            secrets: Arc::new(PushSecretCipher::new(secret_key)),
             pubsub_boundary: Some(PushServicePubSubBoundary {
                 service_jid,
                 storage: pubsub_storage,
@@ -977,6 +992,7 @@ impl DatabasePushServiceStore {
                     last_error TEXT,
                     next_retry_at_ms {i64_type},
                     claimed_at_ms {i64_type},
+                    claim_token TEXT,
                     created_at_ms {i64_type} NOT NULL,
                     updated_at_ms {i64_type} NOT NULL,
                     published_at_ms {i64_type},
@@ -1003,6 +1019,12 @@ impl DatabasePushServiceStore {
         self.add_column_if_missing("push_publish_jobs", "publish_options_xml TEXT")
             .await?;
         self.add_column_if_missing("push_publish_jobs", "push_service_jid TEXT")
+            .await?;
+        // `claim_token` is the at-most-once delivery interlock: phase 1
+        // writes a fresh UUID; phase 3's UPDATE checks `claim_token = ?`
+        // so a recovered-and-re-claimed job (which holds a different
+        // token) cannot persist attempts from the original worker.
+        self.add_column_if_missing("push_publish_jobs", "claim_token TEXT")
             .await?;
         Ok(())
     }
@@ -2107,6 +2129,12 @@ impl DatabasePushServiceStore {
     async fn recover_stale_publish_job_claims(&self) -> Result<(), XmppError> {
         let now_ms = crate::time::now_ms();
         let retry_at_ms = retry_at_ms(now_ms);
+        // Clear the `claim_token` as part of recovery: a new claim
+        // will mint a fresh token, and the original worker's stale
+        // token can no longer match in phase 3's gating UPDATE — so
+        // even if the original phase 2 eventually completes its HTTP
+        // round-trip, its attempt-writes and job-state transition
+        // will be silently dropped instead of double-delivering.
         self.execute(
             r#"
             UPDATE push_publish_jobs
@@ -2114,6 +2142,7 @@ impl DatabasePushServiceStore {
                 last_error = ?,
                 next_retry_at_ms = ?,
                 claimed_at_ms = NULL,
+                claim_token = NULL,
                 updated_at_ms = ?
             WHERE status = ?
               AND claimed_at_ms IS NOT NULL
@@ -2141,6 +2170,7 @@ impl DatabasePushServiceStore {
                 last_error = ?,
                 next_retry_at_ms = NULL,
                 claimed_at_ms = NULL,
+                claim_token = NULL,
                 updated_at_ms = ?
             WHERE job_id = ?
               AND status = ?
@@ -2450,7 +2480,7 @@ impl DatabasePushServiceStore {
                 // Wrap the cipher in `Arc` so the per-device fan-out
                 // clones an `Arc` refcount instead of duplicating the
                 // (enc_key, mac_key) byte buffers up to 64× in heap.
-                Arc::new(self.secrets.clone()),
+                Arc::clone(&self.secrets),
             )),
             _ => None,
         };
@@ -2622,6 +2652,15 @@ impl DatabasePushServiceStore {
                 // the job permanently FAILED so it stops occupying the
                 // queue. The operator's audit trail
                 // (`push_delivery_attempts`) preserves every attempt.
+                //
+                // The `claim_token = ?` predicate is the at-most-once
+                // interlock: if a stale-claim recovery + concurrent
+                // re-claim happened between phase 1 and now, the row
+                // holds a different token and this UPDATE matches 0
+                // rows — our attempts insert is still durable, but
+                // the job-state transition is the responsibility of
+                // the worker that holds the *current* claim. Safe
+                // either way.
                 tx.execute(
                     r#"
                     UPDATE push_publish_jobs
@@ -2630,8 +2669,9 @@ impl DatabasePushServiceStore {
                         last_error = ?,
                         next_retry_at_ms = NULL,
                         claimed_at_ms = NULL,
+                        claim_token = NULL,
                         updated_at_ms = ?
-                    WHERE job_id = ? AND status = ?
+                    WHERE job_id = ? AND status = ? AND claim_token = ?
                     "#,
                     crate::db_params![
                         PUBLISH_JOB_STATUS_FAILED,
@@ -2641,6 +2681,7 @@ impl DatabasePushServiceStore {
                         now_ms,
                         job.job_id().to_string(),
                         PUBLISH_JOB_STATUS_IN_PROGRESS,
+                        job.claim_token().to_string(),
                     ],
                 )
                 .await
@@ -2669,8 +2710,9 @@ impl DatabasePushServiceStore {
                         last_error = ?,
                         next_retry_at_ms = ?,
                         claimed_at_ms = NULL,
+                        claim_token = NULL,
                         updated_at_ms = ?
-                    WHERE job_id = ? AND status = ?
+                    WHERE job_id = ? AND status = ? AND claim_token = ?
                     "#,
                     crate::db_params![
                         PUBLISH_JOB_STATUS_QUEUED,
@@ -2679,6 +2721,7 @@ impl DatabasePushServiceStore {
                         now_ms,
                         job.job_id().to_string(),
                         PUBLISH_JOB_STATUS_IN_PROGRESS,
+                        job.claim_token().to_string(),
                     ],
                 )
                 .await
@@ -2693,9 +2736,10 @@ impl DatabasePushServiceStore {
                     last_error = NULL,
                     next_retry_at_ms = NULL,
                     claimed_at_ms = NULL,
+                    claim_token = NULL,
                     updated_at_ms = ?,
                     published_at_ms = ?
-                WHERE job_id = ? AND status = ?
+                WHERE job_id = ? AND status = ? AND claim_token = ?
                 "#,
                 crate::db_params![
                     PUBLISH_JOB_STATUS_PUBLISHED,
@@ -2703,6 +2747,7 @@ impl DatabasePushServiceStore {
                     now_ms,
                     job.job_id().to_string(),
                     PUBLISH_JOB_STATUS_IN_PROGRESS,
+                    job.claim_token().to_string(),
                 ],
             )
             .await
@@ -2813,7 +2858,7 @@ impl DatabasePushServiceStore {
         let mut rows = self
             .query(
                 r#"
-                SELECT job_id, owner_bare_jid, node, item_id, push_service_jid, status
+                SELECT job_id, owner_bare_jid, node, item_id, push_service_jid, status, claim_token
                 FROM push_publish_jobs
                 WHERE status = ?
                 ORDER BY created_at_ms ASC, job_id ASC
@@ -2911,13 +2956,17 @@ impl DatabasePushServiceStore {
 }
 
 fn validate_xep0357_notification(item: &PubSubItem) -> Result<(), XmppError> {
+    // XEP-0060 §7.1.3 publish errors: surface the typed PubSub
+    // extension conditions instead of bare `<bad-request/>` so an
+    // external user-server gets the wire-required hint
+    // (`<payload-required/>` vs `<invalid-payload/>`) per §7.1.3.5.
     let Some(payload) = item.payload.as_ref() else {
-        return Err(XmppError::bad_request(Some(
+        return Err(XmppError::pubsub_payload_required(Some(
             "XEP-0357 PubSub publish requires a notification payload".to_string(),
         )));
     };
     if payload.name() != "notification" || payload.ns() != NS_PUSH {
-        return Err(XmppError::bad_request(Some(
+        return Err(XmppError::pubsub_invalid_payload(Some(
             "XEP-0357 PubSub publish payload must be notification in urn:xmpp:push:0".to_string(),
         )));
     }
@@ -3498,12 +3547,18 @@ async fn claim_publish_job_tx(
     job_id: &str,
     now_ms: i64,
 ) -> Result<Option<PushPublishJob>, XmppError> {
+    // Mint a fresh claim_token on every claim. Phase 3's UPDATE gates
+    // on this token so a stale-claim recovery + concurrent re-claim
+    // can never persist attempts from the original worker — the
+    // original worker's token is no longer the row's token.
+    let claim_token = uuid::Uuid::new_v4().to_string();
     let changed = tx
         .execute(
             r#"
             UPDATE push_publish_jobs
             SET status = ?,
                 claimed_at_ms = ?,
+                claim_token = ?,
                 updated_at_ms = ?
             WHERE job_id = ?
               AND status = ?
@@ -3512,6 +3567,7 @@ async fn claim_publish_job_tx(
             crate::db_params![
                 PUBLISH_JOB_STATUS_IN_PROGRESS,
                 now_ms,
+                claim_token,
                 now_ms,
                 job_id,
                 PUBLISH_JOB_STATUS_QUEUED,
@@ -3533,7 +3589,7 @@ async fn get_publish_job_tx(
     let mut rows = tx
         .query(
             r#"
-            SELECT job_id, owner_bare_jid, node, item_id, push_service_jid, status
+            SELECT job_id, owner_bare_jid, node, item_id, push_service_jid, status, claim_token
             FROM push_publish_jobs
             WHERE job_id = ?
             "#,
@@ -3802,6 +3858,13 @@ fn decode_publish_job(row: &crate::db::Row) -> Result<PushPublishJob, XmppError>
     let owner_bare_jid: String = row
         .get(1)
         .map_err(|error| XmppError::internal(error.to_string()))?;
+    // The `claim_token` column is nullable for legacy / unclaimed
+    // rows; treat NULL as empty string. Phase 3 only uses it for the
+    // gating UPDATE on rows it itself just claimed, so an empty
+    // token never matches a real claim.
+    let claim_token: Option<String> = row
+        .get(6)
+        .map_err(|error| XmppError::internal(error.to_string()))?;
     Ok(PushPublishJob {
         job_id: row
             .get(0)
@@ -3823,6 +3886,7 @@ fn decode_publish_job(row: &crate::db::Row) -> Result<PushPublishJob, XmppError>
         status: row
             .get(5)
             .map_err(|error| XmppError::internal(error.to_string()))?,
+        claim_token: claim_token.unwrap_or_default(),
     })
 }
 
@@ -4118,7 +4182,16 @@ mod tests {
             .publish_notification_from_user_server(node.node(), &item, &owner)
             .await
             .expect_err("reject wrong payload");
-        assert_bad_request(err);
+        // XEP-0060 §7.1.3.4: malformed payload must surface as the
+        // typed `<invalid-payload xmlns='http://jabber.org/protocol/
+        // pubsub#errors'/>` extension condition. The dispatch layer
+        // maps this onto `<bad-request/>` + the extension element on
+        // the wire, but the typed error is the carrier inside the
+        // process.
+        assert!(
+            matches!(err, XmppError::PubSubInvalidPayload(_)),
+            "expected pubsub:invalid-payload, got {err:?}"
+        );
     }
 
     #[tokio::test]

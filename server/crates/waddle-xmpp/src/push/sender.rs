@@ -113,6 +113,24 @@ impl WebPushSender for HttpWebPushSender {
         // bug in the caller's `vapid_public_key_b64u`, surfaced as
         // `BadRequest` rather than a panic.
         let endpoint = request.endpoint.clone();
+        // Defense-in-depth: registration-time validation already
+        // rejects non-https endpoints, but if a future caller bypasses
+        // that path the sender refuses to send a VAPID-signed
+        // `Authorization` header over a plaintext scheme. Loopback
+        // is allowed so mockito-based test fixtures (which serve
+        // `http://127.0.0.1:<port>/`) keep working — registration-time
+        // validation rejects literal IPs in production anyway, so a
+        // non-loopback http URL cannot reach here in a real
+        // deployment.
+        if endpoint.scheme() != "https" && !endpoint_is_loopback(&endpoint) {
+            warn!(
+                endpoint_hash = %EndpointHash::of(endpoint.as_str()),
+                origin = endpoint.origin().ascii_serialization(),
+                scheme = endpoint.scheme(),
+                "Web Push refused: endpoint is not https",
+            );
+            return Box::pin(async move { WebPushOutcome::BadRequest { status: 0 } });
+        }
         let body = request.payload.as_slice().to_vec();
 
         let auth_value = format!(
@@ -218,6 +236,23 @@ fn classify_transport_error(endpoint: &Url, err: reqwest::Error) -> WebPushOutco
         WebPushOutcome::Transient {
             kind: TransientFailure::Network,
         }
+    }
+}
+
+/// Is the endpoint host a loopback address? Used by the HTTPS scheme
+/// guard to permit mockito-based test fixtures (which serve
+/// `http://127.0.0.1:<port>/`) without weakening production security:
+/// real deployments never reach a literal IP here because
+/// registration-time validation rejects them.
+fn endpoint_is_loopback(endpoint: &Url) -> bool {
+    match endpoint.host() {
+        Some(url::Host::Ipv4(addr)) => addr.is_loopback(),
+        Some(url::Host::Ipv6(addr)) => addr.is_loopback(),
+        Some(url::Host::Domain(name)) => {
+            let lower = name.to_ascii_lowercase();
+            lower == "localhost" || lower.ends_with(".localhost")
+        }
+        None => false,
     }
 }
 

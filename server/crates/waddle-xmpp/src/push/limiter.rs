@@ -99,7 +99,15 @@ impl Limiter {
         // this before the global permit means a backed-up pair waits
         // without holding a slot the rest of the process could use.
         let sleep_until = {
-            let mut pairs = self.pairs.lock().expect("limiter pair map poisoned");
+            // Recover from a poisoned mutex instead of propagating the
+            // panic — each entry's `next_available` is self-contained
+            // (no inter-entry invariant), so a panicking sibling task
+            // cannot leave the map in an inconsistent state. Matches
+            // the pattern used by `InProcessVapidSigner`'s cache lock.
+            let mut pairs = self
+                .pairs
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             let entry = pairs
                 .entry((endpoint_hash, urgency))
                 .or_insert_with(|| PairState {
