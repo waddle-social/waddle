@@ -159,45 +159,39 @@ self.addEventListener("push", (event) => {
   try {
     data = event.data?.json() ?? {};
   } catch {
-    // Server side now sends a JSON envelope; a non-JSON body is a
-    // legacy / misconfigured publish. Fall through to the minimal
-    // notification with no payload-derived state.
+    // Non-JSON push body — treat as an empty envelope and render the
+    // minimal "Waddle" notification (required by the Push API spec
+    // for `userVisibleOnly: true` subscriptions).
     data = {};
   }
-  // PR-D3: switch on the PR-D2 `"v": 1` envelope. Legacy publishers
-  // that pre-date the v=1 schema fall through to
-  // `parseLegacyRoutingContext`; both shapes feed the same typed
-  // routing fields carried into `notificationclick.data.context`.
-  // `item` (dedup key) and `unread` are sibling locals because they
-  // are transient transport metadata, not navigation state, and
-  // shouldn't reach the click handler.
-  const parsed = parseV1Envelope(data) ?? parseLegacyRoutingContext(data);
+  // The server emits exactly the `v=1` envelope shape defined in
+  // `crates/waddle-xmpp/src/push/envelope.rs::PushEnvelope`. There is
+  // no migration window: a payload with `v !== 1` is from an
+  // unsupported server build and is rendered as the minimal default.
+  const parsed = parseV1Envelope(data) ?? {
+    conversation: undefined,
+    thread: undefined,
+    class: undefined,
+    item: undefined,
+    unread: null,
+  };
+  // `context` is the navigation-only subset stashed on the
+  // notification for the click handler; `item` (dedup key) and
+  // `unread` stay local because they're transient transport metadata.
   const context = {
     conversation: parsed.conversation,
     thread: parsed.thread,
     class: parsed.class,
   };
-  const unreadCount = parsed.unread ?? null;
+  const unreadCount = parsed.unread;
   const itemId = parsed.item;
-  // Routing precedence:
-  //   1. Typed `context.{conversation,thread,class}` envelope.
-  //   2. Legacy `data.url` if it's a same-origin path — kept for
-  //      mixed-version publishers that may still ship a deep link in
-  //      the top-level `url` field. `sameOriginUrl` rejects cross-
-  //      origin and javascript: URLs.
-  //   3. Final fallback to `/`.
-  const route = routeFromContext(context)
-    ?? sameOriginUrl(typeof data.url === "string" ? data.url : null)
-    ?? "/";
-  // Minimal default: no sender, no body preview. XEP-0357 §4 forbids
-  // the push service from receiving message content, so the v=1
-  // envelope never carries `title`/`body`. The legacy fallback path
-  // still honors them.
-  const title = typeof data.title === "string" && data.title.length > 0
-    ? data.title
-    : defaultTitle(unreadCount);
-  const body = typeof data.body === "string" ? data.body : "";
-  const tag = context.conversation ?? data.roomJid ?? "waddle";
+  const route = routeFromContext(context) ?? "/";
+  // XEP-0357 §4 forbids the Push Service from receiving message
+  // content, so the envelope never carries title/body. The SW always
+  // renders the count-derived default title with an empty body.
+  const title = defaultTitle(unreadCount);
+  const body = "";
+  const tag = context.conversation ?? "waddle";
   if (isItemAlreadyShown(itemId)) {
     // Foreground tab already rendered this item — only update the
     // badge / unread broadcast, no duplicate banner.
@@ -259,8 +253,8 @@ function defaultTitle(unreadCount) {
   return `${unreadCount} new messages`;
 }
 
-/// Parse the PR-D2 `"v": 1` envelope emitted by
-/// `crates/waddle-xmpp/src/push/envelope.rs::PushEnvelope`. Field shape:
+/// Parse the `"v": 1` envelope emitted by
+/// `crates/waddle-xmpp/src/push/envelope.rs::PushEnvelope`:
 ///
 ///   * `v`            — schema version (must equal 1)
 ///   * `class`        — granular NotificationClass (`"dm"`, `"personal_mention"`, …)
@@ -269,42 +263,26 @@ function defaultTitle(unreadCount) {
 ///   * `item`         — originating stanza id (used for in-band dedup)
 ///   * `unread`       — XEP-0357 message-count snapshot (optional)
 ///
-/// Returns `null` when the envelope is absent (legacy publish, or a
-/// non-v=1 schema bump the server side may roll out later); the caller
-/// falls back to `parseLegacyRoutingContext`.
+/// Returns `null` when the payload is not a v=1 envelope; the SW
+/// renders a minimal "Waddle" notification in that case. There is no
+/// legacy / mixed-version fallback — per the project's breaking-
+/// changes-by-default rule, the server emits exactly this shape.
 function parseV1Envelope(data) {
   if (!data || data.v !== 1) return null;
+  const rawUnread = data.unread;
+  let unread = null;
+  if (rawUnread !== undefined && rawUnread !== null) {
+    const parsed = typeof rawUnread === "number" ? rawUnread : Number(rawUnread);
+    if (Number.isFinite(parsed) && parsed >= 0) {
+      unread = Math.floor(parsed);
+    }
+  }
   return {
     conversation: typeof data.conversation === "string" ? data.conversation : undefined,
     thread: typeof data.thread === "string" && data.thread.length > 0 ? data.thread : undefined,
     class: typeof data.class === "string" ? data.class : undefined,
     item: typeof data.item === "string" ? data.item : undefined,
-    unread: parseUnreadCount(data),
-  };
-}
-
-/// Pre-PR-D2 routing fallback. Legacy server builds wrote a nested
-/// `data.context = { conversation, thread, class }` object alongside
-/// `data.roomJid`. Kept until every reachable server is on the v=1
-/// envelope; remove once telemetry confirms no `v` absent / != 1
-/// publishes are landing.
-function parseLegacyRoutingContext(data) {
-  const context = data?.context;
-  if (context && typeof context === "object") {
-    return {
-      conversation: typeof context.conversation === "string" ? context.conversation : undefined,
-      thread: typeof context.thread === "string" && context.thread.length > 0 ? context.thread : undefined,
-      class: typeof context.class === "string" ? context.class : undefined,
-      item: undefined,
-      unread: parseUnreadCount(data),
-    };
-  }
-  return {
-    conversation: typeof data?.roomJid === "string" ? data.roomJid : undefined,
-    thread: undefined,
-    class: undefined,
-    item: undefined,
-    unread: parseUnreadCount(data),
+    unread,
   };
 }
 
@@ -340,11 +318,8 @@ const MUC_CLASS_VALUES = new Set([
 function routeFromContext(context) {
   const conv = context?.conversation;
   // Return `null` (NOT `/`) when the typed context lacks a
-  // conversation, so the caller can fall back to a legacy `data.url`
-  // if one is present rather than collapsing to root. ChatGPT Codex
-  // bot flagged this regression: pre-#528 SW used `data.url`
-  // directly when present; we shouldn't silently drop that path
-  // for mixed-version publishers.
+  // conversation. The push handler maps `null` to `/` itself; null
+  // here just signals "no routable target."
   if (typeof conv !== "string" || conv.length === 0) return null;
   const at = conv.lastIndexOf("@");
   if (at <= 0) return null;
@@ -362,22 +337,6 @@ function routeFromContext(context) {
     return `${base}?thread=${encodeURIComponent(context.thread)}`;
   }
   return base;
-}
-
-function parseUnreadCount(data) {
-  // Prefer the PR-D2 v=1 envelope's `unread` field; fall back to the
-  // pre-D2 wire names so a server emitting either shape still surfaces
-  // a count.
-  const value =
-    data?.unread ??
-    data?.messageCount ??
-    data?.["message-count"] ??
-    data?.unreadCount ??
-    data?.totalUnread;
-  if (value === undefined || value === null) return null;
-  const parsed = typeof value === "number" ? value : Number(value);
-  if (!Number.isFinite(parsed) || parsed < 0) return null;
-  return Math.floor(parsed);
 }
 
 async function updateAppBadge(unreadCount) {

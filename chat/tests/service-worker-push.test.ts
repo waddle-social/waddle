@@ -77,21 +77,21 @@ function makeNotificationClickEvent(data: Record<string, unknown>) {
 }
 
 describe("service worker push handling", () => {
-  test("minimal XEP-0357 payload renders default title + no body preview, updates badge", async () => {
-    // Canonical XEP-0357 publish carries only `message-count` plus
-    // the `urn:waddle:push:context:0` routing context. No sender,
-    // no body — preview is opt-in and out of the default path
-    // (#528 acceptance criterion).
+  test("minimal v=1 payload renders default count title with no body preview, updates badge", async () => {
+    // Canonical v=1 envelope from
+    // `crates/waddle-xmpp/src/push/envelope.rs::PushEnvelope`. XEP-0357
+    // §4 forbids the push service from receiving message content, so
+    // there is never a sender or body preview — the SW always renders
+    // the count-derived default with an empty body.
     const client = { postMessage: mock((_message: unknown) => {}) };
     const worker = loadServiceWorker([client]);
     const event = makePushEvent({
       json: () => ({
-        "message-count": 6,
-        context: {
-          conversation: "space_channel@conference.example.com",
-          thread: "",
-          class: "personal_mention",
-        },
+        v: 1,
+        class: "personal_mention",
+        conversation: "space_channel@conference.example.com",
+        item: "stanza-id-mention-1",
+        unread: 6,
       }),
     });
 
@@ -103,8 +103,6 @@ describe("service worker push handling", () => {
       type: "waddle:unread-count",
       unreadCount: 6,
     });
-    // Default title is count-derived; body is the empty string (no
-    // preview unless the server explicitly populated it).
     expect(worker.showNotification).toHaveBeenCalledWith("6 new messages", {
       body: "",
       tag: "space_channel@conference.example.com",
@@ -124,8 +122,11 @@ describe("service worker push handling", () => {
     const worker = loadServiceWorker();
     const event = makePushEvent({
       json: () => ({
-        "message-count": 1,
-        context: { conversation: "alice@example.com" },
+        v: 1,
+        class: "dm",
+        conversation: "alice@example.com",
+        item: "stanza-id-1msg",
+        unread: 1,
       }),
     });
     worker.dispatch("push", event);
@@ -134,58 +135,19 @@ describe("service worker push handling", () => {
     expect(worker.showNotification.mock.calls[0]?.[0]).toBe("1 new message");
   });
 
-  test("opt-in preview keeps server-provided title/body", async () => {
-    const worker = loadServiceWorker();
-    const event = makePushEvent({
-      json: () => ({
-        title: "Mention from @alice",
-        body: "hello there",
-        "message-count": 1,
-        context: { conversation: "space_channel@conference.example.com" },
-      }),
-    });
-    worker.dispatch("push", event);
-    await event.done();
-
-    const [title, options] = worker.showNotification.mock.calls[0] ?? [];
-    expect(title).toBe("Mention from @alice");
-    expect((options as NotificationOptions).body).toBe("hello there");
-  });
-
-  test("dm conversation routes to /dm/{username}", async () => {
-    const worker = loadServiceWorker();
-    const event = makePushEvent({
-      json: () => ({
-        "message-count": 1,
-        context: { conversation: "alice@example.com", class: "dm" },
-      }),
-    });
-    worker.dispatch("push", event);
-    await event.done();
-
-    const [, options] = worker.showNotification.mock.calls[0] ?? [];
-    expect((options as NotificationOptions & { data: { url: string } }).data.url).toBe("/dm/alice");
-  });
-
   test("dm with underscore in localpart routes as DM, not MUC", async () => {
     // Regression for an MUC heuristic that misrouted `jane_doe@example.com`
     // to `/jane/doe` (the underscore-as-MUC-separator fallback).
     // JIDs legally contain underscores; route on the typed `class`
-    // field or the JID's domain prefix instead. Adversarial review
-    // round-1 finding on PR #760.
+    // field or the JID's domain prefix instead.
     const worker = loadServiceWorker();
     const event = makePushEvent({
       json: () => ({
-        "message-count": 1,
-        context: {
-          conversation: "jane_doe@example.com",
-          // `"dm"` matches DM_CLASS_VALUES exactly so the test is
-          // independent of the domain heuristic. With `"direct"` (a
-          // value the server never emits) the test would pass only
-          // because `example.com` doesn't start with `muc.` — a
-          // silent regression risk.
-          class: "dm",
-        },
+        v: 1,
+        class: "dm",
+        conversation: "jane_doe@example.com",
+        item: "stanza-id-underscore",
+        unread: 1,
       }),
     });
     worker.dispatch("push", event);
@@ -197,18 +159,17 @@ describe("service worker push handling", () => {
     );
   });
 
-
   test("muc conversation routes to /r/{channelId}", async () => {
     // Chat router URL is `/r/{channelId}` where channelId == JID
     // localpart (see chat/src/lib/xmpp/jid.ts::parseManagedRoomBareJid).
     const worker = loadServiceWorker();
     const event = makePushEvent({
       json: () => ({
-        "message-count": 1,
-        context: {
-          conversation: "general@muc.example.com",
-          class: "personal_mention",
-        },
+        v: 1,
+        class: "personal_mention",
+        conversation: "general@muc.example.com",
+        item: "stanza-id-muc",
+        unread: 1,
       }),
     });
     worker.dispatch("push", event);
@@ -220,29 +181,6 @@ describe("service worker push handling", () => {
     );
   });
 
-  test("thread context routes via ?thread= query string, not path segment", async () => {
-    // Chat router carries threads in a search-param codec
-    // (chat/src/router/codecs.ts::threadSearch), NOT a path segment.
-    const worker = loadServiceWorker();
-    const event = makePushEvent({
-      json: () => ({
-        "message-count": 1,
-        context: {
-          conversation: "general@muc.example.com",
-          thread: "thread-42",
-          class: "personal_mention",
-        },
-      }),
-    });
-    worker.dispatch("push", event);
-    await event.done();
-
-    const [, options] = worker.showNotification.mock.calls[0] ?? [];
-    expect((options as NotificationOptions & { data: { url: string } }).data.url).toBe(
-      "/r/general?thread=thread-42",
-    );
-  });
-
   test("class='dm' overrides @muc. domain prefix", async () => {
     // Defense-in-depth: a misconfigured server that issues DMs from
     // a `muc.` subdomain MUST still route as DM when the typed
@@ -250,11 +188,11 @@ describe("service worker push handling", () => {
     const worker = loadServiceWorker();
     const event = makePushEvent({
       json: () => ({
-        "message-count": 1,
-        context: {
-          conversation: "alice@muc.example.com",
-          class: "dm",
-        },
+        v: 1,
+        class: "dm",
+        conversation: "alice@muc.example.com",
+        item: "stanza-id-class-override",
+        unread: 1,
       }),
     });
     worker.dispatch("push", event);
@@ -270,11 +208,11 @@ describe("service worker push handling", () => {
     const worker = loadServiceWorker();
     const event = makePushEvent({
       json: () => ({
-        "message-count": 1,
-        context: {
-          conversation: "general@muc.example.com",
-          class: "notify_all",
-        },
+        v: 1,
+        class: "notify_all",
+        conversation: "general@muc.example.com",
+        item: "stanza-id-notify-all",
+        unread: 1,
       }),
     });
     worker.dispatch("push", event);
@@ -286,52 +224,16 @@ describe("service worker push handling", () => {
     );
   });
 
-  test("legacy data.url is honored when typed context is absent", async () => {
-    // Mixed-version publishers (server pre-#528 emitter that doesn't
-    // carry `context: { conversation }`) ship a deep link in
-    // `data.url`. The SW must preserve that legacy behavior rather
-    // than collapsing to `/`. ChatGPT Codex bot flagged this
-    // regression on round-5.
-    const worker = loadServiceWorker();
-    const event = makePushEvent({
-      json: () => ({
-        "message-count": 1,
-        url: "/r/legacy-channel?thread=abc",
-      }),
-    });
-    worker.dispatch("push", event);
-    await event.done();
-
-    const [, options] = worker.showNotification.mock.calls[0] ?? [];
-    expect((options as NotificationOptions & { data: { url: string } }).data.url).toBe(
-      "/r/legacy-channel?thread=abc",
-    );
-  });
-
-  test("legacy data.url is rejected if cross-origin", async () => {
-    // Defense in depth: even on the legacy path, an off-origin
-    // `data.url` must NOT be accepted. `sameOriginUrl` runs first.
-    const worker = loadServiceWorker();
-    const event = makePushEvent({
-      json: () => ({
-        "message-count": 1,
-        url: "https://evil.example/steal",
-      }),
-    });
-    worker.dispatch("push", event);
-    await event.done();
-
-    const [, options] = worker.showNotification.mock.calls[0] ?? [];
-    expect((options as NotificationOptions & { data: { url: string } }).data.url).toBe("/");
-  });
-
-  test("clears the app badge when push message-count is zero", async () => {
+  test("clears the app badge when v=1 unread is zero", async () => {
     const client = { postMessage: mock((_message: unknown) => {}) };
     const worker = loadServiceWorker([client]);
     const event = makePushEvent({
       json: () => ({
-        "message-count": 0,
-        context: { conversation: "alice@example.com", class: "dm" },
+        v: 1,
+        class: "dm",
+        conversation: "alice@example.com",
+        item: "stanza-id-zero",
+        unread: 0,
       }),
     });
 
@@ -342,6 +244,33 @@ describe("service worker push handling", () => {
     expect(client.postMessage).toHaveBeenCalledWith({
       type: "waddle:unread-count",
       unreadCount: 0,
+    });
+  });
+
+  test("non-v=1 payload collapses to the minimal default banner", async () => {
+    // Breaking-changes-by-default: a payload missing `v: 1` (or with
+    // a future-unknown version) is rendered as the minimal "Waddle"
+    // notification, not auto-routed via legacy heuristics. The chat
+    // upgrades the SW alongside the server; mixed-version publishers
+    // are not supported.
+    const worker = loadServiceWorker();
+    const event = makePushEvent({
+      json: () => ({ "message-count": 5, context: { conversation: "alice@example.com" } }),
+    });
+    worker.dispatch("push", event);
+    await event.done();
+    expect(worker.showNotification).toHaveBeenCalledWith("Waddle", {
+      body: "",
+      tag: "waddle",
+      icon: "/android-chrome-192x192.png",
+      data: {
+        url: "/",
+        context: {
+          conversation: undefined,
+          thread: undefined,
+          class: undefined,
+        },
+      },
     });
   });
 
