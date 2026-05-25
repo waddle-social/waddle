@@ -99,10 +99,6 @@ fn executing_response_with_form(session_id: &str) -> Element {
     iq_with_command(command)
 }
 
-fn completed_response_with_node(node_id: &str) -> Element {
-    completed_response_with_outcome(node_id, "device-default")
-}
-
 fn completed_response_with_outcome(node_id: &str, device_id: &str) -> Element {
     let result_form = Element::builder("x", NS_DATA_FORMS)
         .attr(minidom::rxml::xml_ncname!("type").to_owned(), "result")
