@@ -186,31 +186,58 @@ async fn classify_response(resp: reqwest::Response) -> WebPushOutcome {
     let status = resp.status();
     let code = status.as_u16();
     if status.is_success() {
+        // Drain the body before returning so reqwest's underlying
+        // hyper connection can be returned to the pool — without
+        // this the next per-host send opens a fresh connection.
+        let _ = resp.bytes().await;
         debug!(status = %status, "Web Push delivered");
         return WebPushOutcome::Delivered { status: code };
     }
+    // Snapshot headers used by classification BEFORE draining the
+    // body (which consumes `resp`).
+    let retry_after = resp
+        .headers()
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|v| v.to_str().ok())
+        .and_then(parse_retry_after);
+    let www_authenticate = resp
+        .headers()
+        .get(reqwest::header::WWW_AUTHENTICATE)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_ascii_lowercase());
+    // Drain the body to allow connection reuse. Capping wouldn't
+    // help here — reqwest buffers the whole body anyway; the goal
+    // is to consume it before we return.
+    let _ = resp.bytes().await;
     match code {
         // 404 / 410 are the textbook "subscription gone" signals
-        // (RFC 8030 §6). 403 is added here because FCM and other
-        // relays use 403 to signal "the VAPID key is not authorized
-        // for this endpoint" — the actionable response is identical
-        // (the subscription must be re-registered with fresh keys),
-        // so the publish-job worker treats it as a device-side
-        // permanent failure and disables the row.
-        403 | 404 | 410 => WebPushOutcome::SubscriptionGone { status: code },
-        401 => WebPushOutcome::ClockSkew { status: code },
-        413 => WebPushOutcome::PayloadTooLarge { status: code },
-        429 => {
-            let retry_after = resp
-                .headers()
-                .get(reqwest::header::RETRY_AFTER)
-                .and_then(|v| v.to_str().ok())
-                .and_then(parse_retry_after);
-            WebPushOutcome::RateLimited {
-                status: code,
-                retry_after,
-            }
+        // (RFC 8030 §6). 403 is NOT folded in: while FCM does use 403
+        // for "VAPID key not authorized for this endpoint", it also
+        // uses it for cluster-wide VAPID rejection (wrong `aud`,
+        // expired `exp` past the relay's tolerance, malformed JWT)
+        // which is a deployment bug affecting ALL devices, not a
+        // per-device subscription expiry. Routing every 403 to
+        // SubscriptionGone would mass-disable devices on a
+        // configuration error. Keep 403 as `BadRequest` (permanent,
+        // non-disabling) so the failure surfaces in the operator
+        // audit without bricking the user base.
+        404 | 410 => WebPushOutcome::SubscriptionGone { status: code },
+        // 401 means "VAPID JWT rejected" per RFC 8292 §3. The most
+        // common cause is clock skew (relay rejects our `exp`); we
+        // only label it `ClockSkew` when the relay echoes a vapid
+        // scheme in `WWW-Authenticate` (RFC 7235 §4.1), the canonical
+        // signal that the JWT itself was at fault. Otherwise treat as
+        // a generic permanent auth failure to avoid invalidating the
+        // JWT cache on unrelated 401 conditions.
+        401 if matches!(&www_authenticate, Some(v) if v.contains("vapid")) => {
+            WebPushOutcome::ClockSkew { status: code }
         }
+        401 | 403 => WebPushOutcome::BadRequest { status: code },
+        413 => WebPushOutcome::PayloadTooLarge { status: code },
+        429 => WebPushOutcome::RateLimited {
+            status: code,
+            retry_after,
+        },
         // 400 is "our payload shape is wrong" — encoder bug, not a
         // per-device problem. Surfaces in attempts for operator
         // action; the device row stays active so the next publish
@@ -366,7 +393,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn classify_401_is_clock_skew() {
+    async fn classify_401_with_vapid_www_authenticate_is_clock_skew() {
+        // 401 + `WWW-Authenticate: vapid` is the RFC 8292 §3 signal
+        // that the JWT itself was rejected — clock skew or expired
+        // exp. Worker invalidates the JWT cache on this outcome.
         let server = mockito::Server::new_async().await;
         let mut server = server;
         let m = server
@@ -392,6 +422,41 @@ mod tests {
             .await;
         m.assert_async().await;
         assert!(matches!(outcome, WebPushOutcome::ClockSkew { status: 401 }));
+    }
+
+    #[tokio::test]
+    async fn classify_401_without_vapid_www_authenticate_is_bad_request() {
+        // Generic 401 without the vapid challenge — could be relay
+        // misconfig or rate-limit-style auth gate. Do NOT invalidate
+        // the JWT cache; classify as BadRequest so the operator audit
+        // surfaces the cause without thrashing the cache.
+        let server = mockito::Server::new_async().await;
+        let mut server = server;
+        let m = server
+            .mock("POST", "/p/y")
+            .with_status(401)
+            .create_async()
+            .await;
+        let url = Url::parse(&format!("{}/p/y", server.url())).unwrap();
+        let sender = HttpWebPushSender::new();
+        let jwt = dummy_jwt();
+        let p = payload();
+        let outcome = sender
+            .send(WebPushRequest {
+                endpoint: &url,
+                payload: &p,
+                vapid_jwt: &jwt,
+                vapid_public_key_b64u: "BFoo",
+                topic: None,
+                ttl: 60,
+                urgency: Urgency::Normal,
+            })
+            .await;
+        m.assert_async().await;
+        assert!(matches!(
+            outcome,
+            WebPushOutcome::BadRequest { status: 401 }
+        ));
     }
 
     #[tokio::test]
@@ -527,11 +592,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn classify_403_is_subscription_gone() {
-        // FCM and other relays return 403 to signal "VAPID key not
-        // authorized for this endpoint" — the subscription needs a
-        // fresh registration. Treated as per-device permanent so the
-        // worker disables the row instead of looping retries.
+    async fn classify_403_is_bad_request_not_subscription_gone() {
+        // 403 is overloaded by real relays: it covers "VAPID key not
+        // authorized for this endpoint" (per-device) AND cluster-wide
+        // JWT rejection (wrong aud / expired exp / malformed JWT)
+        // which is a deployment bug affecting all devices. Routing
+        // every 403 to SubscriptionGone would mass-disable on a
+        // config error. Classify as BadRequest (permanent, non-
+        // disabling) so the failure surfaces in the operator audit
+        // without bricking the user base.
         let server = mockito::Server::new_async().await;
         let mut server = server;
         let m = server
@@ -557,7 +626,7 @@ mod tests {
         m.assert_async().await;
         assert!(matches!(
             outcome,
-            WebPushOutcome::SubscriptionGone { status: 403 }
+            WebPushOutcome::BadRequest { status: 403 }
         ));
     }
 

@@ -90,9 +90,13 @@ impl PushClass {
 pub fn push_class_for_db_value(class: &str) -> PushClass {
     match class {
         "dm" | "dm_mention" => PushClass::DirectMessage,
-        "personal_mention" | "channel_mention" | "active_channel_mention" | "notify_all" => {
-            PushClass::Mention
-        }
+        "personal_mention" | "channel_mention" | "active_channel_mention" => PushClass::Mention,
+        // `notify_all` is `@everyone`/`@here`-style broadcast — not a
+        // personal ping. Route to `Room` policy (lower urgency,
+        // shorter TTL) so battery-saver can coalesce and the device
+        // doesn't get woken for what is effectively a room
+        // announcement.
+        "notify_all" => PushClass::Room,
         _ => PushClass::Mention,
     }
 }
@@ -255,7 +259,9 @@ mod tests {
             push_class_for_db_value("active_channel_mention"),
             PushClass::Mention
         );
-        assert_eq!(push_class_for_db_value("notify_all"), PushClass::Mention);
+        // `notify_all` is @everyone broadcast — routes to Room policy
+        // (lower urgency, shorter TTL).
+        assert_eq!(push_class_for_db_value("notify_all"), PushClass::Room);
         // Unknown falls through to Mention (safer-side default).
         assert_eq!(push_class_for_db_value("anything-else"), PushClass::Mention);
     }

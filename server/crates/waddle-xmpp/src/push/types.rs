@@ -262,9 +262,20 @@ impl EncryptedPayload {
     }
     // `into_inner` is intentionally absent: the `ZeroizeOnDrop` impl
     // means the inner `Vec<u8>` can't be moved out without losing the
-    // zeroize-on-drop guarantee. Callers should borrow via
-    // [`Self::as_slice`] instead — the transport layer never needs to
-    // take ownership of the bytes.
+    // zeroize-on-drop guarantee on this side of the boundary. Callers
+    // borrow via [`Self::as_slice`].
+    //
+    // ZeroizeOnDrop scope: this type owns the persistent reference
+    // the publish-job worker holds across the HTTP send; when the
+    // outer scope drops, the bytes are wiped. The transport layer
+    // (`HttpWebPushSender`) does have to copy the slice into a
+    // separate owned `Vec<u8>` to hand to reqwest's request body
+    // (reqwest doesn't expose a hook to zeroize the body buffer after
+    // send). That in-flight copy is encrypted ciphertext + the
+    // aes128gcm header (salt + AS public key); the header is also
+    // visible to the relay in plaintext, so the residual heap
+    // exposure on that copy is bounded to "what the relay already
+    // sees" plus zero plaintext. Documented gap, not a regression.
 }
 
 /// Signed VAPID JWT, ready for `Authorization: vapid t=…` use.
@@ -572,10 +583,15 @@ pub enum WebPushOutcome {
     /// cleanup forward (IQ-error to publisher) and
     /// `urn:waddle:push-service:0` disable-device reverse.
     SubscriptionGone { status: u16 },
-    /// 401 with `WWW-Authenticate: vapid` (or 403 from FCM with a
-    /// JWT-related body) — VAPID JWT was rejected, typically because
-    /// the relay's clock disagrees with ours. The VAPID cache must be
-    /// invalidated for this `(kid, aud, sub)` and a fresh JWT minted.
+    /// 401 with `WWW-Authenticate: vapid` (RFC 7235 §4.1) — the
+    /// canonical signal per RFC 8292 §3 that the VAPID JWT itself was
+    /// rejected, typically because the relay's clock disagrees with
+    /// ours past the `exp` skew tolerance. The publish-job worker
+    /// invalidates the JWT cache on this outcome (`VapidSigner::
+    /// invalidate_cache`) so the next attempt mints a fresh JWT.
+    /// 401 WITHOUT the `vapid` challenge is classified as
+    /// `BadRequest` instead — relay misconfig or rate-limit auth
+    /// gate, where invalidating the cache would just thrash it.
     ClockSkew { status: u16 },
     /// 429 — apply the token-bucket backoff for this endpoint+class.
     RateLimited {

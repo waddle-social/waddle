@@ -41,8 +41,14 @@ const DEVICE_STATUS_DISABLED: &str = "disabled";
 /// the operator wires up the missing piece.
 const ATTEMPT_STATUS_WEB_NOT_CONFIGURED: &str = "web-not-configured";
 /// Internal error during Web Push dispatch (encrypt/sign/aud derivation
-/// failure). Treated as transient so an operator can ship a fix and the
-/// next tick will retry.
+/// failure). Classified PERMANENT, not transient: encrypt/sign/aud
+/// failures are deterministic on the inputs (same subscription, same
+/// payload, same signer key), so retrying produces the same error
+/// indefinitely. The job is marked PUBLISHED with the failure visible
+/// in `push_delivery_attempts.last_error` so an operator sees the bug
+/// and acts; the next *new* publish job tries the fixed code path.
+/// See `attempt_status_is_transient` — this constant is intentionally
+/// NOT in the transient set.
 const ATTEMPT_STATUS_WEB_INTERNAL_ERROR: &str = "web-internal-error";
 /// Maximum number of characters persisted in
 /// `push_delivery_attempts.last_error`. The column is `TEXT`, but we
@@ -615,6 +621,20 @@ async fn dispatch_web_device_owned(
                 }
                 _ => None,
             };
+            // ClockSkew (401 with WWW-Authenticate: vapid) means the
+            // relay rejected our JWT — likely because its clock
+            // disagrees with ours past the RFC 8292 §2 `exp` skew
+            // tolerance. The cached JWT is now poison: a retry that
+            // re-serves the same JWT will fail identically, exhausting
+            // the §6.1 attempt cap without ever sending a fresh one.
+            // Invalidate the cache so the next attempt mints a new JWT
+            // with a fresh `iat`/`exp` window.
+            if matches!(
+                outcome,
+                waddle_xmpp::push::types::WebPushOutcome::ClockSkew { .. }
+            ) {
+                signer.invalidate_cache();
+            }
             // XEP-0357 §6 forward cleanup runs in
             // `finalize_publish_job` — when the persisted status hits
             // `attempt_status_warrants_device_disable`, the matching
@@ -2552,17 +2572,15 @@ impl DatabasePushServiceStore {
     /// requeue the job (any transient outcome) or mark it published.
     /// Prunes the per-node attempts/jobs tail so retention stays bounded.
     ///
-    /// TODO(#762 follow-up — at-most-once delivery): the current claim
-    /// model uses a 30-minute lease (`PUBLISH_JOB_CLAIM_TIMEOUT_MS`).
-    /// If a worker's phase 2 somehow exceeds that, a second worker can
-    /// `recover_stale_publish_job_claims` the job and dispatch it in
-    /// parallel — both will then race here in phase 3 and both write
-    /// attempts. The right fix is a `claim_token` UUID column written
-    /// in phase 1 and checked here in the UPDATE's WHERE clause; phase
-    /// 3 of a losing worker would see 0 rows updated and abort the
-    /// attempt writes without persisting. Deferred to keep PR-D2's
-    /// schema surface minimal; the 30-minute window covers any
-    /// realistic phase-2 duration.
+    /// At-most-once delivery is enforced via the `claim_token` UUID
+    /// column: phase 1 mints a fresh token; phase 3's state-transition
+    /// UPDATEs gate on `claim_token = ?` so a stale worker (whose
+    /// claim was reset by `recover_stale_publish_job_claims`) sees 0
+    /// rows changed and the *current* claim-holder owns the final
+    /// state. The `push_delivery_attempts` INSERTs that come before
+    /// the gating UPDATE are guarded by a token re-check at the head
+    /// of the phase-3 tx — see the `verify_claim_token_or_abort_tx`
+    /// call below.
     async fn finalize_publish_job(
         &self,
         job: &PushPublishJob,
@@ -2579,6 +2597,22 @@ impl DatabasePushServiceStore {
             .map_err(|error| XmppError::internal(error.to_string()))?;
         lock_owner_tx(&mut tx, job.owner_bare_jid(), now_ms).await?;
         lock_node_tx(&mut tx, job.node(), now_ms).await?;
+        // At-most-once interlock: if our claim was reset by a
+        // stale-claim recovery between phase 1 and now, the row's
+        // current `claim_token` no longer matches the one phase 1
+        // captured. Abort BEFORE writing `push_delivery_attempts`
+        // rows or disabling devices — those side effects belong to
+        // the worker that holds the current claim. We still commit
+        // the empty tx so the locks release cleanly.
+        match read_publish_job_claim_token_tx(&mut tx, job.job_id()).await? {
+            Some(current) if current == job.claim_token() => {}
+            Some(_) | None => {
+                tx.commit()
+                    .await
+                    .map_err(|error| XmppError::internal(error.to_string()))?;
+                return Ok(());
+            }
+        }
         for attempt in attempts {
             tx.execute(
                 r#"
@@ -2743,6 +2777,48 @@ impl DatabasePushServiceStore {
                 .await
                 .map_err(|error| XmppError::internal(error.to_string()))?;
             }
+        } else if !attempts.is_empty()
+            && attempts
+                .iter()
+                .all(|attempt| attempt.status == dispatch::ATTEMPT_STATUS_WEB_BAD_REQUEST)
+        {
+            // Every device returned `web-bad-request` — that means our
+            // payload shape was wrong (encoder bug), not a per-device
+            // failure. Marking PUBLISHED would hide an encoder
+            // regression behind a "successful" job status; mark FAILED
+            // with the diagnostic so monitoring on
+            // `push_publish_jobs.status='failed'` surfaces it without
+            // auditing the attempts table. The device rows stay
+            // active — re-publish succeeds once the bug is fixed.
+            let bad_request_error = attempts
+                .iter()
+                .find_map(|attempt| attempt.last_error.clone())
+                .unwrap_or_else(|| "all devices returned web-bad-request".to_string());
+            tx.execute(
+                r#"
+                UPDATE push_publish_jobs
+                SET status = ?,
+                    attempt_count = attempt_count + 1,
+                    last_error = ?,
+                    next_retry_at_ms = NULL,
+                    claimed_at_ms = NULL,
+                    claim_token = NULL,
+                    updated_at_ms = ?
+                WHERE job_id = ? AND status = ? AND claim_token = ?
+                "#,
+                crate::db_params![
+                    PUBLISH_JOB_STATUS_FAILED,
+                    truncate_last_error(&format!(
+                        "all devices returned web-bad-request; encoder bug suspected: {bad_request_error}"
+                    )),
+                    now_ms,
+                    job.job_id().to_string(),
+                    PUBLISH_JOB_STATUS_IN_PROGRESS,
+                    job.claim_token().to_string(),
+                ],
+            )
+            .await
+            .map_err(|error| XmppError::internal(error.to_string()))?;
         } else {
             tx.execute(
                 r#"
@@ -3077,10 +3153,12 @@ fn validate_web_push_endpoint(endpoint: &str) -> Result<(), XmppError> {
     // 443; permitting other ports lets a registering client point the
     // worker at internal non-HTTPS services that happen to accept a
     // POST (Redis 6379, Elasticsearch 9200, memcached 11211, etc.)
-    // via a permissive internal DNS record. `url::Url::port()` returns
-    // `None` for the default port of the scheme (443 for https), so
-    // any `Some(_)` here is a non-443 port.
-    if parsed.port().is_some() {
+    // via a permissive internal DNS record. `url::Url::port_or_known_default()`
+    // resolves to the scheme's default (443 for https) when the URL
+    // omits an explicit port, so `https://host:443/...` and
+    // `https://host/...` both compare equal to `Some(443)` and only
+    // genuinely non-default ports are rejected.
+    if parsed.port_or_known_default() != Some(443) {
         return Err(XmppError::bad_request(Some(
             "Push Service provider endpoint must use the default https port".to_string(),
         )));
@@ -3649,6 +3727,33 @@ async fn get_publish_job_payload_xml_tx(
         .get(0)
         .map_err(|error| XmppError::internal(error.to_string()))?;
     Ok(Some(payload_xml))
+}
+
+/// Read the row's current `claim_token` so phase 3 can verify the
+/// claim is still ours before persisting any side effects. Returns
+/// `None` when the row was recovered (token cleared) or deleted.
+async fn read_publish_job_claim_token_tx(
+    tx: &mut crate::db::Transaction<'_>,
+    job_id: &str,
+) -> Result<Option<String>, XmppError> {
+    let mut rows = tx
+        .query(
+            "SELECT claim_token FROM push_publish_jobs WHERE job_id = ?",
+            crate::db_params![job_id],
+        )
+        .await
+        .map_err(|error| XmppError::internal(error.to_string()))?;
+    let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| XmppError::internal(error.to_string()))?
+    else {
+        return Ok(None);
+    };
+    let token: Option<String> = row
+        .get(0)
+        .map_err(|error| XmppError::internal(error.to_string()))?;
+    Ok(token)
 }
 
 /// Read the persisted `attempt_count` for a job. Used by phase 3 to
@@ -5893,6 +5998,11 @@ mod tests {
             "https://web.push.apple.com/abc",
             // Self-hosted relays with named hosts are fine.
             "https://push.internal.example.com/abc",
+            // Explicit default port `:443` must be accepted — it's
+            // syntactically valid and semantically identical to the
+            // omitted form. (`port_or_known_default()` resolves both
+            // to `Some(443)`.)
+            "https://fcm.googleapis.com:443/fcm/send/abc",
         ] {
             store
                 .upsert_device(

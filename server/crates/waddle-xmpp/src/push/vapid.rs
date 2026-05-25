@@ -40,6 +40,12 @@ pub trait VapidSigner: Send + Sync {
     /// Current `kid` (cache key component for the JWT cache + the disco-form
     /// `kid` field for chat-side rotation detection).
     fn current_kid(&self) -> Kid;
+
+    /// Invalidate the JWT cache. Called by the publish-job worker on
+    /// `WebPushOutcome::ClockSkew` so the next sign call re-mints a
+    /// fresh JWT instead of re-serving the cached one that just got
+    /// rejected. Implementations that don't cache JWTs may no-op.
+    fn invalidate_cache(&self);
 }
 
 /// VAPID JWT claims body per RFC 8292 §2.
@@ -236,6 +242,10 @@ impl VapidSigner for InProcessVapidSigner {
 
     fn current_kid(&self) -> Kid {
         self.kid
+    }
+
+    fn invalidate_cache(&self) {
+        self.invalidate_all();
     }
 }
 
