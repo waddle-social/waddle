@@ -28,8 +28,6 @@ use zeroize::ZeroizeOnDrop;
 
 use crate::db::{Database, IntoParams};
 
-pub const WADDLE_PUSH_SERVICE_NS: &str = "urn:waddle:push-service:0";
-
 type HmacSha256 = Hmac<Sha256>;
 
 const NODE_STATUS_ACTIVE: &str = "active";

@@ -1360,7 +1360,7 @@ export class BrowserXmppClient {
     endpoint: string;
     p256dh: string;
     auth: string;
-  }): Promise<{ node: string } | null> {
+  }): Promise<{ node: string; deviceId: string } | null> {
     const xmpp = await this.requireConnectedXmpp();
     if (!xmpp.register_push_device) return null;
     try {
@@ -1373,13 +1373,23 @@ export class BrowserXmppClient {
         p256dh: opts.p256dh,
         auth: opts.auth,
       });
-      if (!result || typeof result.value !== "string" || result.value.length === 0) {
+      // The chat MUST persist BOTH `node` and `deviceId`; a missing
+      // `deviceId` would force the disable-device opt-out into
+      // disable-everywhere semantics that take down sibling devices
+      // on the same XEP-0357 node.
+      if (
+        !result ||
+        typeof result.node !== "string" ||
+        result.node.length === 0 ||
+        typeof result.deviceId !== "string" ||
+        result.deviceId.length === 0
+      ) {
         console.warn(
-          "[xmpp] register_push_device returned an empty node id; refusing to persist",
+          "[xmpp] register_push_device returned an empty node/deviceId; refusing to persist",
         );
         return null;
       }
-      return { node: result.value };
+      return { node: result.node, deviceId: result.deviceId };
     } catch (error) {
       console.warn("[xmpp] XEP-0050 register-device rejected:", error);
       return null;

@@ -39,6 +39,10 @@ pub const REGISTER_DEVICE_FORM_TYPE: &str = "urn:xmpp:push-service:commands:regi
 /// XEP-0004 form field name carrying the assigned XEP-0357 node id in
 /// the stage-4 result form.
 pub const REGISTER_DEVICE_RESULT_NODE_FIELD: &str = "node";
+/// XEP-0004 form field name carrying the assigned Push Service device
+/// row id in the stage-4 result form. The caller persists this so the
+/// matching `disable-device` round can scope to a single row.
+pub const REGISTER_DEVICE_RESULT_DEVICE_ID_FIELD: &str = "device-id";
 
 /// Provider platform discriminator. The wire string maps directly to
 /// the `platform` field on the XEP-0004 submit form (XEP-0050 §3).
@@ -132,12 +136,34 @@ impl PushNodeId {
     }
 }
 
-/// Transport abstraction used by [`register_push_device`]. The native
-/// `ClientHandle` blanket-impls this. The integration test in
-/// `tests/register_push_device_against_fake_service.rs` substitutes a
-/// scripted lock-step driver, which is why this trait exists at all —
-/// directly threading `ClientHandle` would force the test to spin up a
-/// full XMPP transport just to pin the wire shape.
+/// Outcome of a successful `register-device` XEP-0050 round. Carries
+/// the assigned XEP-0357 node id AND the Push Service-assigned device
+/// row id. The caller persists BOTH: node feeds the user-server's
+/// XEP-0357 `<enable/>` IQ; device id is the per-device handle for
+/// the matching `disable-device` opt-out.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegisterDeviceResult {
+    pub node: PushNodeId,
+    pub device_id: String,
+}
+
+/// Transport abstraction used by [`register_push_device`].
+///
+/// **Intent: test seam, not a stable plugin point.** Production
+/// callers MUST use [`crate::client::ClientHandle`] (which blanket-
+/// impls this trait via the `native` feature) or the WASM bridge's
+/// driver (impl'd in `waddle-xmpp-client-wasm`). The integration
+/// test in `tests/register_push_device_against_fake_service.rs`
+/// substitutes a scripted lock-step driver — directly threading
+/// `ClientHandle` would force the test to spin up a full XMPP
+/// transport just to pin the wire shape, and the wasm bridge
+/// needs its own impl to convert `JsValue` errors into typed
+/// `ClientError`.
+///
+/// External crates SHOULD NOT impl this trait. If a new driver is
+/// genuinely needed (e.g. a different runtime), open an issue first
+/// rather than relying on the trait's `pub` visibility — the shape
+/// here may evolve as the composer gains new stages.
 #[allow(async_fn_in_trait)]
 pub trait CommandDriver {
     async fn send_iq(&self, iq: Element) -> ClientResult<Element>;
@@ -201,21 +227,31 @@ pub fn build_disable_device_submit_form(node: &str, device_id: &str) -> DataForm
     )
 }
 
-/// Extract the assigned node id from a `status='completed'` result
-/// form. Returns `None` when the form lacks the `node` field or the
-/// value is empty / whitespace-only.
-pub fn parse_register_device_result(form: &DataForm) -> Option<PushNodeId> {
+/// Extract the assigned node id + device id from a `status='completed'`
+/// result form. Returns `None` when either field is missing or empty —
+/// the chat MUST NOT persist a half-populated record because the
+/// follow-up `disable-device` opt-out would have no way to scope.
+pub fn parse_register_device_result(form: &DataForm) -> Option<RegisterDeviceResult> {
+    let node = required_form_value(form, REGISTER_DEVICE_RESULT_NODE_FIELD)?;
+    let device_id = required_form_value(form, REGISTER_DEVICE_RESULT_DEVICE_ID_FIELD)?;
+    Some(RegisterDeviceResult {
+        node: PushNodeId(node),
+        device_id,
+    })
+}
+
+fn required_form_value(form: &DataForm, var: &str) -> Option<String> {
     let value = form
         .fields
         .iter()
-        .find(|f| f.var.as_deref() == Some(REGISTER_DEVICE_RESULT_NODE_FIELD))?
+        .find(|f| f.var.as_deref() == Some(var))?
         .values
         .first()?
         .trim();
     if value.is_empty() {
         None
     } else {
-        Some(PushNodeId(value.to_string()))
+        Some(value.to_string())
     }
 }
 
@@ -242,7 +278,12 @@ fn protocol_error(text: &str) -> ClientError {
 }
 
 /// Drive the XEP-0050 four-stage `register-device` dance against
-/// `push_service_jid`. Returns the assigned node id on completion.
+/// `push_service_jid`. Returns the assigned [`RegisterDeviceResult`]
+/// (node id + device id) on completion. The caller MUST persist BOTH
+/// — the node id flows into the user-server XEP-0357 `<enable/>` IQ,
+/// the device id scopes the matching `disable-device` opt-out so a
+/// single-browser unsubscribe doesn't take down push for sibling
+/// devices (APNs, FCM, other browsers) on the same node.
 ///
 /// Errors flow through `ClientResult<StanzaError>` typed values —
 /// never stringly-typed payloads (CLAUDE.md typed-payloads hard rule).
@@ -252,7 +293,7 @@ pub async fn register_push_device<D: CommandDriver>(
     app_id: &str,
     environment: PushEnvironment,
     credentials: &PushDeviceCredentials,
-) -> ClientResult<PushNodeId> {
+) -> ClientResult<RegisterDeviceResult> {
     // Stage 1 → 2: execute, expect executing + form back + sessionid.
     let initial = build_xep0050_command_request(
         push_service_jid,
@@ -415,19 +456,47 @@ mod tests {
     }
 
     #[test]
-    fn parse_completed_result_extracts_node_field() {
+    fn parse_completed_result_extracts_node_and_device_id_fields() {
+        // Fixture carries multiple fields so a mutation that hard-codes
+        // the lookup to the wrong field var couldn't accidentally
+        // return the right value.
+        let result = DataForm::new(
+            DataFormType::Result_,
+            REGISTER_DEVICE_FORM_TYPE,
+            vec![
+                text_single("node", "node-xyz"),
+                text_single("device-id", "device-abc"),
+                text_single("status", "active-must-not-be-returned"),
+            ],
+        );
+        let outcome = parse_register_device_result(&result).expect("outcome present");
+        assert_eq!(outcome.node.as_str(), "node-xyz");
+        assert_eq!(outcome.device_id, "device-abc");
+    }
+
+    #[test]
+    fn parse_completed_result_missing_node_returns_none() {
+        // Only device-id present — without the node the chat can't
+        // wire up the user-server XEP-0357 `<enable/>` IQ, so the
+        // composer MUST refuse to surface a half-populated record.
+        let result = DataForm::new(
+            DataFormType::Result_,
+            REGISTER_DEVICE_FORM_TYPE,
+            vec![text_single("device-id", "device-abc")],
+        );
+        assert!(parse_register_device_result(&result).is_none());
+    }
+
+    #[test]
+    fn parse_completed_result_missing_device_id_returns_none() {
+        // Only node present — without device-id the chat can't later
+        // scope a per-device `disable-device` opt-out, so this is
+        // also a half-populated record we MUST refuse.
         let result = DataForm::new(
             DataFormType::Result_,
             REGISTER_DEVICE_FORM_TYPE,
             vec![text_single("node", "node-xyz")],
         );
-        let node = parse_register_device_result(&result).expect("node present");
-        assert_eq!(node.as_str(), "node-xyz");
-    }
-
-    #[test]
-    fn parse_completed_result_missing_node_returns_none() {
-        let result = DataForm::new(DataFormType::Result_, REGISTER_DEVICE_FORM_TYPE, vec![]);
         assert!(parse_register_device_result(&result).is_none());
     }
 
@@ -436,7 +505,23 @@ mod tests {
         let result = DataForm::new(
             DataFormType::Result_,
             REGISTER_DEVICE_FORM_TYPE,
-            vec![text_single("node", "   ")],
+            vec![
+                text_single("node", "   "),
+                text_single("device-id", "device-abc"),
+            ],
+        );
+        assert!(parse_register_device_result(&result).is_none());
+    }
+
+    #[test]
+    fn parse_completed_result_empty_device_id_returns_none() {
+        let result = DataForm::new(
+            DataFormType::Result_,
+            REGISTER_DEVICE_FORM_TYPE,
+            vec![
+                text_single("node", "node-xyz"),
+                text_single("device-id", "   "),
+            ],
         );
         assert!(parse_register_device_result(&result).is_none());
     }
@@ -446,10 +531,14 @@ mod tests {
         let result = DataForm::new(
             DataFormType::Result_,
             REGISTER_DEVICE_FORM_TYPE,
-            vec![text_single("node", "node-roundtrip")],
+            vec![
+                text_single("node", "node-roundtrip"),
+                text_single("device-id", "device-roundtrip"),
+            ],
         );
-        let node = parse_register_device_result(&result).expect("node");
-        assert_eq!(node.as_str(), "node-roundtrip");
-        assert_eq!(node.clone().into_string(), "node-roundtrip");
+        let outcome = parse_register_device_result(&result).expect("outcome");
+        assert_eq!(outcome.node.as_str(), "node-roundtrip");
+        assert_eq!(outcome.node.clone().into_string(), "node-roundtrip");
+        assert_eq!(outcome.device_id, "device-roundtrip");
     }
 }

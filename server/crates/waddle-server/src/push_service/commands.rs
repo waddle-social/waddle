@@ -8,11 +8,13 @@
 //!   `push_devices` row. Stage 4 returns `status='completed'` + a
 //!   result form whose `node` field carries the assigned XEP-0357 node
 //!   id.
-//! - `disable-device` (multi-step, but single-field): stage 3 receives
-//!   a submitted form carrying just the `node` id and flips every
-//!   device registered against that node + the node itself to
-//!   `status='disabled'` for the calling owner. The chat client never
-//!   sees per-device IDs under the XEP-0050 cutover.
+//! - `disable-device` (multi-step): stage 3 receives a submitted form
+//!   carrying `node` + the Push Service-assigned `device-id` and
+//!   flips ONLY that single row to `status='disabled'` for the
+//!   calling owner. Sibling devices on the same node keep receiving
+//!   fan-out — multi-platform installs (Apple + Android + Web)
+//!   routinely share a node, and a per-device opt-out from one MUST
+//!   NOT take down push for the others.
 //!
 //! ## Wire contract — `register-device`
 //!
@@ -28,21 +30,25 @@
 //!   - APNs: `apns-token`.
 //!   - FCM: `fcm-token`.
 //!
-//! Result form FORM_TYPE matches the submit form. The lone field is
-//! `node`, carrying the assigned XEP-0357 push-service node id.
+//! Result form FORM_TYPE matches the submit form. Two fields:
+//! `node` (the assigned XEP-0357 push-service node id, feeds the
+//! user-server `<enable/>` IQ) and `device-id` (the per-device handle
+//! the caller persists so it can later opt this device out via
+//! `disable-device`).
 //!
 //! ## Wire contract — `disable-device`
 //!
 //! Submit form FORM_TYPE = [`DISABLE_DEVICE_FORM_TYPE`]
 //! (`urn:xmpp:push-service:commands:disable-device:0`). Required
-//! field: `node` (the XEP-0357 push node id). Disables every device
-//! registered against that node for the calling owner, then retires
-//! the node itself — matching the [`disable_nodes_for_owner`] storage
-//! semantics. The chat client never sees per-device IDs under the
-//! XEP-0050 cutover, so the wire shape carries only what the client
-//! has visibility on. Result form is empty on success.
-//!
-//! [`disable_nodes_for_owner`]: crate::push_service::DatabasePushServiceStore::disable_nodes_for_owner
+//! fields: `node` (the XEP-0357 push node id) and `device-id` (the
+//! Push Service-assigned device row id returned by the
+//! `register-device` result form). Disables ONLY that single device
+//! row, leaving sibling devices on the same node intact — multiple
+//! platforms (Apple + Android + Web) routinely share a node, and
+//! per-device opt-out from one of them MUST NOT take push down on
+//! the others. The all-devices retirement flow is the user-server
+//! XEP-0357 `<disable jid='…' node='…'/>` IQ (different boundary).
+//! Result form is empty on success.
 //!
 //! ## Authorization
 //!
@@ -99,6 +105,10 @@ pub const FIELD_WEB_PUSH_AUTH: &str = "web-push-auth";
 pub const FIELD_APNS_TOKEN: &str = "apns-token";
 /// XEP-0004 form field carrying an FCM registration token.
 pub const FIELD_FCM_TOKEN: &str = "fcm-token";
+/// XEP-0004 form field carrying the Push Service-assigned device-id
+/// (returned in the `register-device` result form, persisted by the
+/// caller so it can later opt this device out).
+pub const FIELD_DEVICE_ID: &str = "device-id";
 
 /// Wire string for Web Push on [`FIELD_PLATFORM`].
 const PLATFORM_WIRE_WEB: &str = "web";
@@ -140,13 +150,14 @@ pub enum RegisterDeviceRequest {
     },
 }
 
-/// Typed parse of the [`DISABLE_DEVICE_NODE`] submit form. Carries
-/// only the push-service node id; the storage layer flips every
-/// device on that node to `disabled` for the calling owner and
-/// retires the node.
+/// Typed parse of the [`DISABLE_DEVICE_NODE`] submit form. Per-device
+/// scope — the storage layer flips ONLY the `(node, device_id)` row
+/// to `disabled` for the calling owner; sibling devices on the same
+/// node keep receiving fan-out.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DisableDeviceRequest {
     pub node: String,
+    pub device_id: String,
 }
 
 /// Register both push-service ad-hoc commands on `registry`. Invoked
@@ -232,7 +243,10 @@ async fn handle_register_device(
     };
 
     CommandResult::Completed {
-        form: Some(build_register_device_result_form(device.node())),
+        form: Some(build_register_device_result_form(
+            device.node(),
+            device.device_id(),
+        )),
         notes: vec![],
     }
 }
@@ -271,12 +285,15 @@ async fn handle_disable_device(
     };
 
     match push_service
-        .disable_nodes_for_owner(&owner, Some(&request.node))
+        .disable_device_for_owner(&owner, &request.node, &request.device_id, None)
         .await
     {
-        Ok(0) => CommandResult::Error(XmppError::item_not_found(Some(
-            "Requested Push Service node not found".to_string(),
-        ))),
+        // `Ok(false)` from the storage layer means either the node was
+        // already inactive or the (node, device_id) row didn't exist
+        // for this owner. Either way the caller's "this device is no
+        // longer registered" assertion is satisfied; surface as
+        // success so the chat's opt-out flow doesn't surface a
+        // spurious failure on already-disabled devices.
         Ok(_) => CommandResult::Completed {
             form: None,
             notes: vec![],
@@ -356,28 +373,42 @@ pub fn build_register_device_form_prompt() -> DataForm {
 }
 
 /// Build the stage-2 `<x type='form'>` prompt the service returns when
-/// the caller executes `disable-device`.
+/// the caller executes `disable-device`. Required fields: `node` (the
+/// XEP-0357 push node id) and `device-id` (the Push Service-assigned
+/// device row id). Per-device scope.
 pub fn build_disable_device_form_prompt() -> DataForm {
     use waddle_xmpp::xep::xep0004::FieldType;
 
     DataForm::new(FormType::Form)
         .with_title("Disable push device")
-        .add_instructions("Submit the push node id of the device that should be disabled.")
+        .add_instructions(
+            "Submit the push node id and the Push Service-assigned device id of \
+             the device that should be disabled.",
+        )
         .add_field(Field::form_type(DISABLE_DEVICE_FORM_TYPE))
         .add_field(
             Field::new(FIELD_NODE, FieldType::TextSingle)
                 .with_label("Push node id")
                 .with_required(),
         )
+        .add_field(
+            Field::new(FIELD_DEVICE_ID, FieldType::TextSingle)
+                .with_label("Device id (returned by register-device)")
+                .with_required(),
+        )
 }
 
 /// Build the stage-4 `<x type='result'>` form the service returns
 /// after a successful `register-device` round. Carries the assigned
-/// XEP-0357 node id under [`FIELD_NODE`].
-pub fn build_register_device_result_form(node: &str) -> DataForm {
+/// XEP-0357 node id under [`FIELD_NODE`] AND the server-assigned
+/// device row id under [`FIELD_DEVICE_ID`]. The caller persists both
+/// — node feeds the user-server XEP-0357 `<enable/>` IQ, device-id
+/// is the per-device handle for [`DISABLE_DEVICE_NODE`] opt-out.
+pub fn build_register_device_result_form(node: &str, device_id: &str) -> DataForm {
     DataForm::new(FormType::Result)
         .add_field(Field::form_type(REGISTER_DEVICE_FORM_TYPE))
         .add_field(Field::text_single(FIELD_NODE, node))
+        .add_field(Field::text_single(FIELD_DEVICE_ID, device_id))
 }
 
 /// Parse a submitted [`REGISTER_DEVICE_NODE`] form into the typed
@@ -431,10 +462,13 @@ pub fn parse_register_request(form: &DataForm) -> Result<RegisterDeviceRequest, 
 }
 
 /// Parse a submitted [`DISABLE_DEVICE_NODE`] form into the typed
-/// request.
+/// request. Both `node` and `device-id` are required so the handler
+/// can scope disable to a single row instead of nuking every device
+/// on the node.
 pub fn parse_disable_request(form: &DataForm) -> Result<DisableDeviceRequest, String> {
     let node = require_value(form, FIELD_NODE)?.to_string();
-    Ok(DisableDeviceRequest { node })
+    let device_id = require_value(form, FIELD_DEVICE_ID)?.to_string();
+    Ok(DisableDeviceRequest { node, device_id })
 }
 
 impl RegisterDeviceRequest {
@@ -653,25 +687,44 @@ mod tests {
     fn parse_disable_request_round_trip() {
         let form = DataForm::new(FormType::Submit)
             .add_field(Field::form_type(DISABLE_DEVICE_FORM_TYPE))
-            .add_field(Field::text_single(FIELD_NODE, "node-xyz"));
+            .add_field(Field::text_single(FIELD_NODE, "node-xyz"))
+            .add_field(Field::text_single(FIELD_DEVICE_ID, "device-1"));
         let request = parse_disable_request(&form).expect("parses");
         assert_eq!(request.node, "node-xyz");
+        assert_eq!(request.device_id, "device-1");
     }
 
     #[test]
     fn parse_disable_request_rejects_missing_node() {
-        let form =
-            DataForm::new(FormType::Submit).add_field(Field::form_type(DISABLE_DEVICE_FORM_TYPE));
+        let form = DataForm::new(FormType::Submit)
+            .add_field(Field::form_type(DISABLE_DEVICE_FORM_TYPE))
+            .add_field(Field::text_single(FIELD_DEVICE_ID, "device-1"));
         let err = parse_disable_request(&form).expect_err("missing node must reject");
         assert!(err.contains(FIELD_NODE), "{err}");
     }
 
     #[test]
-    fn register_device_result_form_carries_node_field() {
-        let form = build_register_device_result_form("urn:waddle:push-node:abc");
+    fn parse_disable_request_rejects_missing_device_id() {
+        let form = DataForm::new(FormType::Submit)
+            .add_field(Field::form_type(DISABLE_DEVICE_FORM_TYPE))
+            .add_field(Field::text_single(FIELD_NODE, "node-xyz"));
+        let err = parse_disable_request(&form).expect_err("missing device-id must reject");
+        assert!(err.contains(FIELD_DEVICE_ID), "{err}");
+    }
+
+    #[test]
+    fn register_device_result_form_carries_node_and_device_id_fields() {
+        let form = build_register_device_result_form(
+            "urn:waddle:push-node:abc",
+            "urn:waddle:push-device:1",
+        );
         assert!(matches!(form.form_type, FormType::Result));
         assert_eq!(form.get_form_type_value(), Some(REGISTER_DEVICE_FORM_TYPE));
         assert_eq!(form.get_value(FIELD_NODE), Some("urn:waddle:push-node:abc"));
+        assert_eq!(
+            form.get_value(FIELD_DEVICE_ID),
+            Some("urn:waddle:push-device:1")
+        );
     }
 
     #[test]
@@ -705,10 +758,11 @@ mod tests {
     }
 
     #[test]
-    fn disable_device_form_prompt_carries_node_field() {
+    fn disable_device_form_prompt_carries_node_and_device_id_fields() {
         let form = build_disable_device_form_prompt();
         assert!(matches!(form.form_type, FormType::Form));
         assert_eq!(form.get_form_type_value(), Some(DISABLE_DEVICE_FORM_TYPE));
         assert!(form.field(FIELD_NODE).is_some());
+        assert!(form.field(FIELD_DEVICE_ID).is_some());
     }
 }

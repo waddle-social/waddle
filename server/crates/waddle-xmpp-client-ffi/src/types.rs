@@ -385,6 +385,18 @@ pub struct WaddleCallEvent {
 
 // ── Push notifications (XEP-0357 + XEP-0050) ─────────────────────────────────
 
+/// Outcome of a successful `register_push_device` UniFFI call.
+/// Carries the assigned XEP-0357 node id AND the Push Service-assigned
+/// device row id. The Apple client persists both: node feeds the
+/// user-server XEP-0357 `<enable/>` IQ; device id scopes the
+/// matching `disable_push_device` opt-out so a per-device unsubscribe
+/// doesn't take down push for sibling devices on the same node.
+#[derive(uniffi::Record, Clone)]
+pub struct WaddleRegisterDeviceResult {
+    pub node: String,
+    pub device_id: String,
+}
+
 /// Provider deployment environment. `Sandbox` distinguishes the APNs
 /// `apns_development` endpoint from `apns_production`; Web Push and
 /// FCM accept only `Production` today.

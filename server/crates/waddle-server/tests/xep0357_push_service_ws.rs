@@ -256,6 +256,18 @@ fn form_field(var: &str, value: &str, type_attr: Option<&str>) -> Element {
 /// `push.<domain>` and return the assigned XEP-0357 node id. Used by
 /// every WS test that needs a registered push device before it can
 /// exercise XEP-0357 enable / publish flows.
+/// Outcome of a successful `register-device` XEP-0050 round. Both
+/// fields are extracted from the stage-4 result form — the chat
+/// client persists them so the matching `disable-device` round can
+/// scope to the assigned device row. Most existing call sites only
+/// need the node id and stay on
+/// [`register_web_push_device_via_xep0050`]; the per-device disable
+/// test uses [`register_web_push_device_via_xep0050_with_device_id`].
+struct RegisterDeviceOutcome {
+    node: String,
+    device_id: String,
+}
+
 async fn register_web_push_device_via_xep0050(
     client: &mut WsXmppClient,
     id_prefix: &str,
@@ -264,6 +276,21 @@ async fn register_web_push_device_via_xep0050(
     p256dh: &str,
     auth: &str,
 ) -> String {
+    register_web_push_device_via_xep0050_with_device_id(
+        client, id_prefix, app_id, endpoint, p256dh, auth,
+    )
+    .await
+    .node
+}
+
+async fn register_web_push_device_via_xep0050_with_device_id(
+    client: &mut WsXmppClient,
+    id_prefix: &str,
+    app_id: &str,
+    endpoint: &str,
+    p256dh: &str,
+    auth: &str,
+) -> RegisterDeviceOutcome {
     // Stage 1 → 2: execute, expect status='executing' + sessionid.
     let execute_id = format!("{id_prefix}-execute");
     let execute = command_element(REGISTER_DEVICE_NODE, "execute", None, None);
@@ -322,7 +349,11 @@ async fn register_web_push_device_via_xep0050(
         .children()
         .find(|child| child.is("x", NS_DATA_FORMS))
         .expect("stage 4 result form");
-    xdata_field_value(result_form, "node").expect("stage 4 result form must carry the `node` field")
+    let node = xdata_field_value(result_form, "node")
+        .expect("stage 4 result form must carry the `node` field");
+    let device_id = xdata_field_value(result_form, "device-id")
+        .expect("stage 4 result form must carry the `device-id` field");
+    RegisterDeviceOutcome { node, device_id }
 }
 
 #[tokio::test]
@@ -987,7 +1018,7 @@ async fn xep0050_register_device_completes_and_persists_device_row() {
     let endpoint = "https://push.example.com/endpoint/xep0050-end-to-end";
     let p256dh = "p256-key-xep0050-end-to-end";
     let auth = "auth-secret-xep0050-end-to-end";
-    let assigned_node = register_web_push_device_via_xep0050(
+    let outcome = register_web_push_device_via_xep0050_with_device_id(
         &mut client,
         "xep0050-register-flow",
         "web",
@@ -996,35 +1027,77 @@ async fn xep0050_register_device_completes_and_persists_device_row() {
         auth,
     )
     .await;
-    assert!(!assigned_node.is_empty(), "node id must not be empty");
+    assert!(!outcome.node.is_empty(), "node id must not be empty");
+    assert!(!outcome.device_id.is_empty(), "device id must not be empty");
 
-    // Verify the persisted `push_devices` row carries the right
-    // platform credentials. The chat client never sees the
-    // server-allocated `device_id`; query by (owner, node) instead.
+    // Verify the persisted `push_devices` row carries the full set of
+    // Web Push provider credentials so a field-shuffle regression in
+    // `build_registration` can't silently land garbage. Round-2
+    // test-rigor adversarial finding.
     let pool = sqlx::SqlitePool::connect(&database_url)
         .await
         .expect("open sqlite db");
     let row = sqlx::query(
-        "SELECT d.platform, d.environment \
+        "SELECT d.platform, d.environment, d.provider_endpoint, d.provider_token, \
+                d.provider_key_material, d.device_id, n.app_id, n.owner_bare_jid \
          FROM push_devices d \
          JOIN push_nodes n ON n.node = d.node \
          WHERE d.node = ? AND n.owner_bare_jid = ? AND d.status = 'active' \
          LIMIT 1",
     )
-    .bind(&assigned_node)
+    .bind(&outcome.node)
     .bind(format!("{USERNAME}@{DOMAIN}"))
     .fetch_one(&pool)
     .await
     .expect("active device row exists");
     let platform: String = row.get("platform");
     let environment: String = row.get("environment");
+    let provider_endpoint: String = row.get("provider_endpoint");
+    let provider_token: String = row.get("provider_token");
+    let provider_key_material: String = row.get("provider_key_material");
+    let row_device_id: String = row.get("device_id");
+    let row_app_id: String = row.get("app_id");
+    let row_owner: String = row.get("owner_bare_jid");
     assert_eq!(platform, "web");
     assert_eq!(environment, "prod");
+    assert_eq!(row_device_id, outcome.device_id);
+    assert_eq!(row_app_id, "web");
+    assert_eq!(row_owner, format!("{USERNAME}@{DOMAIN}"));
+    // Provider credentials are stored encrypted at rest
+    // (`waddle-push-secret-v1:…` envelope) so we can't compare raw
+    // plaintexts here. Instead pin that (a) every provider field is
+    // present and non-empty AND (b) the three ciphertexts are
+    // distinct — a field-shuffle bug in `build_registration` that
+    // wrote the same plaintext into two columns would round-trip to
+    // identical ciphertexts under the deterministic encryption
+    // scheme and fail this assertion. Round-2 test-rigor adversarial
+    // finding.
+    const ENCRYPTED_ENVELOPE_PREFIX: &str = "waddle-push-secret-v1:";
+    for (name, value) in [
+        ("provider_endpoint", &provider_endpoint),
+        ("provider_token", &provider_token),
+        ("provider_key_material", &provider_key_material),
+    ] {
+        assert!(
+            value.starts_with(ENCRYPTED_ENVELOPE_PREFIX),
+            "{name} must be stored encrypted: got {value}"
+        );
+    }
+    assert_ne!(provider_endpoint, provider_token);
+    assert_ne!(provider_token, provider_key_material);
+    assert_ne!(provider_endpoint, provider_key_material);
 
-    // Drive `disable-device` and confirm the node is retired.
+    // Drive per-device `disable-device` using the device-id the
+    // service returned in stage 4. The XEP-0050 cutover scopes
+    // disable to a single row — sibling devices on the same node
+    // keep receiving fan-out so a per-browser opt-out doesn't take
+    // down push for the user's other installs.
     let disable_form = submit_form(
         DISABLE_DEVICE_FORM_TYPE,
-        &[("node", assigned_node.as_str())],
+        &[
+            ("node", outcome.node.as_str()),
+            ("device-id", outcome.device_id.as_str()),
+        ],
     );
     let disable_cmd = command_element(DISABLE_DEVICE_NODE, "execute", None, Some(disable_form));
     let disable_response = send_iq(
@@ -1041,19 +1114,37 @@ async fn xep0050_register_device_completes_and_persists_device_row() {
         "disable-device must complete in one step: {disable_response}"
     );
 
+    // The targeted device row flips to `disabled`; the node + node
+    // record stays alive so a re-register can resurrect it.
+    let row_status: String =
+        sqlx::query("SELECT status FROM push_devices WHERE node = ? AND device_id = ?")
+            .bind(&outcome.node)
+            .bind(&outcome.device_id)
+            .fetch_one(&pool)
+            .await
+            .expect("query device row status")
+            .get("status");
+    assert_eq!(
+        row_status, "disabled",
+        "disable-device must flip the targeted row to 'disabled'"
+    );
     let post_disable: i64 = sqlx::query(
         "SELECT COUNT(*) AS count \
          FROM push_devices \
          WHERE node = ? AND status = 'active'",
     )
-    .bind(&assigned_node)
+    .bind(&outcome.node)
     .fetch_one(&pool)
     .await
     .expect("query active devices count")
     .get("count");
+    // After the per-device disable, the single web-push row is the
+    // only device on the node, so the active count drops to 0. A
+    // multi-device test (covering APNs / FCM siblings) is filed as
+    // a follow-up once those slices land.
     assert_eq!(
         post_disable, 0,
-        "disable-device MUST retire every active device on the node"
+        "disable-device flipped the only device on the node to 'disabled'"
     );
 
     let _ = client.close().await;

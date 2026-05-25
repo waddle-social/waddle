@@ -437,13 +437,17 @@ pub struct WaddleVapidAdvertisement {
     pub kid: String,
 }
 
-/// Returned by `register_push_device`. Wraps the assigned XEP-0357
-/// node id so JS can persist it for subsequent `enable` / `disable`
-/// calls.
+/// Returned by `register_push_device`. Carries both the assigned
+/// XEP-0357 node id (feeds the user-server `<enable/>` IQ) AND the
+/// Push Service-assigned device row id (scopes the matching
+/// `disable-device` opt-out). The chat MUST persist both; a missing
+/// `device_id` would force "disable everywhere" semantics that take
+/// down push for sibling devices on the same node.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct WaddlePushNodeId {
-    pub value: String,
+pub struct WaddleRegisterDeviceResult {
+    pub node: String,
+    pub device_id: String,
 }
 
 /// Arguments to `WaddleClient::register_push_device`. Bundled into a

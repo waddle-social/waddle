@@ -100,6 +100,10 @@ fn executing_response_with_form(session_id: &str) -> Element {
 }
 
 fn completed_response_with_node(node_id: &str) -> Element {
+    completed_response_with_outcome(node_id, "device-default")
+}
+
+fn completed_response_with_outcome(node_id: &str, device_id: &str) -> Element {
     let result_form = Element::builder("x", NS_DATA_FORMS)
         .attr(minidom::rxml::xml_ncname!("type").to_owned(), "result")
         .append(form_type_field("result"))
@@ -109,6 +113,16 @@ fn completed_response_with_node(node_id: &str) -> Element {
                 .append(
                     Element::builder("value", NS_DATA_FORMS)
                         .append(node_id)
+                        .build(),
+                )
+                .build(),
+        )
+        .append(
+            Element::builder("field", NS_DATA_FORMS)
+                .attr(minidom::rxml::xml_ncname!("var").to_owned(), "device-id")
+                .append(
+                    Element::builder("value", NS_DATA_FORMS)
+                        .append(device_id)
                         .build(),
                 )
                 .build(),
@@ -129,14 +143,14 @@ fn completed_response_with_node(node_id: &str) -> Element {
 async fn register_push_device_completes_multi_step_dance() {
     let driver = ScriptedDriver::new(vec![
         Ok(executing_response_with_form("session-1")),
-        Ok(completed_response_with_node("node-xyz")),
+        Ok(completed_response_with_outcome("node-xyz", "device-abc")),
     ]);
     let credentials = PushDeviceCredentials::WebPush {
         endpoint: "https://fcm.googleapis.com/wp/abc".to_string(),
         p256dh: "p256-key".to_string(),
         auth: "auth-secret".to_string(),
     };
-    let node = register_push_device(
+    let outcome = register_push_device(
         &driver,
         "push.example.com",
         "app-web",
@@ -145,10 +159,20 @@ async fn register_push_device_completes_multi_step_dance() {
     )
     .await
     .expect("composer succeeds");
-    assert_eq!(node.as_str(), "node-xyz");
+    assert_eq!(outcome.node.as_str(), "node-xyz");
+    assert_eq!(outcome.device_id, "device-abc");
 
     let transcript = driver.transcript();
     assert_eq!(transcript.len(), 2, "two IQs on the wire");
+
+    // Both IQs MUST be addressed to the configured Push Service JID.
+    // A bug that swapped `to`/`from`, dropped `to`, or routed through
+    // a transformed JID would leave the registration targeting the
+    // wrong entity.
+    assert_eq!(transcript[0].attr("to"), Some("push.example.com"));
+    assert_eq!(transcript[0].attr("type"), Some("set"));
+    assert_eq!(transcript[1].attr("to"), Some("push.example.com"));
+    assert_eq!(transcript[1].attr("type"), Some("set"));
 
     // Stage 1: execute, no session id, no submitted form.
     let cmd1 = transcript[0]
@@ -262,6 +286,56 @@ async fn register_push_device_rejects_stage_2_without_session_id() {
 }
 
 #[tokio::test]
+async fn register_push_device_rejects_completed_without_device_id_field() {
+    // A result form that carries `node` but no `device-id` is a
+    // server-side bug — the chat would not be able to scope a
+    // future `disable-device` opt-out. The composer rejects rather
+    // than persisting a half-populated record.
+    let completed_without_device_id = {
+        let result_form = Element::builder("x", NS_DATA_FORMS)
+            .attr(minidom::rxml::xml_ncname!("type").to_owned(), "result")
+            .append(form_type_field("result"))
+            .append(
+                Element::builder("field", NS_DATA_FORMS)
+                    .attr(minidom::rxml::xml_ncname!("var").to_owned(), "node")
+                    .append(
+                        Element::builder("value", NS_DATA_FORMS)
+                            .append("node-xyz")
+                            .build(),
+                    )
+                    .build(),
+            )
+            .build();
+        let command = Element::builder("command", NS_COMMANDS)
+            .attr(
+                minidom::rxml::xml_ncname!("node").to_owned(),
+                REGISTER_DEVICE_NODE,
+            )
+            .attr(minidom::rxml::xml_ncname!("status").to_owned(), "completed")
+            .append(result_form)
+            .build();
+        iq_with_command(command)
+    };
+    let driver = ScriptedDriver::new(vec![
+        Ok(executing_response_with_form("session-1")),
+        Ok(completed_without_device_id),
+    ]);
+    let credentials = PushDeviceCredentials::Apns {
+        device_token: "t".to_string(),
+    };
+    let err = register_push_device(
+        &driver,
+        "push.example.com",
+        "app-ios",
+        PushEnvironment::Sandbox,
+        &credentials,
+    )
+    .await
+    .expect_err("missing device-id field rejected");
+    assert!(matches!(err, ClientError::StanzaError(_)));
+}
+
+#[tokio::test]
 async fn register_push_device_rejects_completed_without_node_field() {
     let completed_without_node = {
         let result_form = Element::builder("x", NS_DATA_FORMS)
@@ -302,4 +376,78 @@ async fn register_push_device_rejects_completed_without_node_field() {
         }
         other => panic!("unexpected error: {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn register_push_device_rejects_stage_4_canceled_status() {
+    // XEP-0050 §3 allows the responder to return `status='canceled'`
+    // at any stage — the composer MUST treat that as a failed
+    // registration rather than mistaking it for `completed`.
+    let canceled = {
+        let command = Element::builder("command", NS_COMMANDS)
+            .attr(
+                minidom::rxml::xml_ncname!("node").to_owned(),
+                REGISTER_DEVICE_NODE,
+            )
+            .attr(minidom::rxml::xml_ncname!("status").to_owned(), "canceled")
+            .build();
+        iq_with_command(command)
+    };
+    let driver = ScriptedDriver::new(vec![
+        Ok(executing_response_with_form("session-1")),
+        Ok(canceled),
+    ]);
+    let credentials = PushDeviceCredentials::WebPush {
+        endpoint: "e".to_string(),
+        p256dh: "p".to_string(),
+        auth: "a".to_string(),
+    };
+    let err = register_push_device(
+        &driver,
+        "push.example.com",
+        "app-web",
+        PushEnvironment::Production,
+        &credentials,
+    )
+    .await
+    .expect_err("stage 4 canceled rejected");
+    assert!(matches!(err, ClientError::StanzaError(_)));
+}
+
+#[tokio::test]
+async fn register_push_device_rejects_stage_4_still_executing() {
+    // A responder that mistakenly returned `status='executing'` again
+    // at stage 4 (instead of `completed`) — the composer must reject
+    // rather than loop or treat as success.
+    let still_executing = {
+        let command = Element::builder("command", NS_COMMANDS)
+            .attr(
+                minidom::rxml::xml_ncname!("node").to_owned(),
+                REGISTER_DEVICE_NODE,
+            )
+            .attr(
+                minidom::rxml::xml_ncname!("sessionid").to_owned(),
+                "session-1",
+            )
+            .attr(minidom::rxml::xml_ncname!("status").to_owned(), "executing")
+            .build();
+        iq_with_command(command)
+    };
+    let driver = ScriptedDriver::new(vec![
+        Ok(executing_response_with_form("session-1")),
+        Ok(still_executing),
+    ]);
+    let credentials = PushDeviceCredentials::Apns {
+        device_token: "t".to_string(),
+    };
+    let err = register_push_device(
+        &driver,
+        "push.example.com",
+        "app-ios",
+        PushEnvironment::Sandbox,
+        &credentials,
+    )
+    .await
+    .expect_err("stage 4 still-executing rejected");
+    assert!(matches!(err, ClientError::StanzaError(_)));
 }

@@ -1110,33 +1110,34 @@ async fn handle_iq_push_service_xep0050_registration_keeps_provider_tokens_insid
 }
 
 #[tokio::test]
-async fn handle_iq_push_service_xep0050_disable_device_is_node_scoped() {
-    // XEP-0050 `disable-device` carries only the push node id. The
-    // handler disables every device on that node + the node itself
-    // for the calling owner. Devices on OTHER nodes for the same
-    // owner remain active.
+async fn handle_iq_push_service_xep0050_disable_device_is_per_device_scoped() {
+    // XEP-0050 `disable-device` carries BOTH the push node id and the
+    // device id. The handler retires only the targeted `(node,
+    // device_id)` row for the calling owner. Sibling devices on the
+    // same node — and devices on other nodes — remain active. This
+    // is the contract the chat's per-browser opt-out relies on:
+    // unsubscribing one browser MUST NOT take down push for sibling
+    // Apple / Android / other-browser installations on the same
+    // `(user, app_id)` node.
     use crate::push_service::commands::{
-        DISABLE_DEVICE_FORM_TYPE, DISABLE_DEVICE_NODE, FIELD_NODE,
+        DISABLE_DEVICE_FORM_TYPE, DISABLE_DEVICE_NODE, FIELD_DEVICE_ID, FIELD_NODE,
     };
 
     let state = create_test_websocket_state().await;
     let owner: BareJid = "alice@example.com".parse().expect("owner");
     let jid: FullJid = "alice@example.com/web".parse().expect("valid jid");
-    let first_node = state
+    let shared_node = state
         .deps
         .protocol
         .push_service
         .ensure_node(&owner, "web")
         .await
-        .expect("first node");
-    let second_node = state
-        .deps
-        .protocol
-        .push_service
-        .ensure_node(&owner, "mobile")
-        .await
-        .expect("second node");
-    for node in [first_node.node(), second_node.node()] {
+        .expect("shared node");
+    // Two devices on the SAME node — the per-device opt-out must
+    // disable only the targeted row.
+    let device_a_id = "device-a";
+    let device_b_id = "device-b";
+    for device_id in [device_a_id, device_b_id] {
         state
             .deps
             .protocol
@@ -1144,8 +1145,8 @@ async fn handle_iq_push_service_xep0050_disable_device_is_node_scoped() {
             .upsert_device(
                 &owner,
                 crate::push_service::PushDeviceRegistration::new(
-                    format!("device-on-{node}"),
-                    node,
+                    device_id,
+                    shared_node.node(),
                     crate::push_service::PushDevicePlatform::Web,
                     "test",
                 ),
@@ -1154,8 +1155,13 @@ async fn handle_iq_push_service_xep0050_disable_device_is_node_scoped() {
             .expect("device");
     }
 
-    let submit_form =
-        xep0004_submit_form(DISABLE_DEVICE_FORM_TYPE, &[(FIELD_NODE, first_node.node())]);
+    let submit_form = xep0004_submit_form(
+        DISABLE_DEVICE_FORM_TYPE,
+        &[
+            (FIELD_NODE, shared_node.node()),
+            (FIELD_DEVICE_ID, device_a_id),
+        ],
+    );
     let disable = command_iq_payload(DISABLE_DEVICE_NODE, "execute", None, Some(submit_form));
     let responses = handle_iq(
         &iq_set_frame("push-disable-1", "push.example.com", disable),
@@ -1173,49 +1179,29 @@ async fn handle_iq_push_service_xep0050_disable_device_is_node_scoped() {
     };
     assert_eq!(completed_payload.attr("status"), Some("completed"));
 
-    // The XEP-0050 cutover retires the entire push node when disable-
-    // device fires, so a publish on the disabled node now surfaces an
-    // item-not-found instead of a "0 attempted devices" result. The
-    // second node is untouched and still publishes successfully.
-    let first_publish_error = state
+    // The node is still active — the user-server XEP-0357
+    // registration stays alive — and the sibling device row keeps
+    // receiving fan-out. Publishing to the node MUST reach device B
+    // (one attempted) and NOT device A (filtered to active rows).
+    let publish = state
         .deps
         .protocol
         .push_service
         .publish_notification_from_user_server(
-            first_node.node(),
+            shared_node.node(),
             &waddle_xmpp::pubsub::PubSubItem::new(
-                Some("first".to_string()),
+                Some("after-disable".to_string()),
                 Some(Element::builder("notification", waddle_xmpp::xep::xep0357::NS_PUSH).build()),
             ),
             &owner,
         )
         .await
-        .expect_err("first publish must surface item-not-found on retired node");
-    assert!(
-        matches!(
-            first_publish_error,
-            waddle_xmpp::XmppError::Stanza {
-                condition: waddle_xmpp::StanzaErrorCondition::ItemNotFound,
-                ..
-            }
-        ),
-        "expected item-not-found on retired node, got {first_publish_error:?}"
+        .expect("publish still routes to sibling device");
+    assert_eq!(
+        publish.attempted_devices(),
+        1,
+        "exactly the sibling device remains active after per-device disable"
     );
-    let second_publish = state
-        .deps
-        .protocol
-        .push_service
-        .publish_notification_from_user_server(
-            second_node.node(),
-            &waddle_xmpp::pubsub::PubSubItem::new(
-                Some("second".to_string()),
-                Some(Element::builder("notification", waddle_xmpp::xep::xep0357::NS_PUSH).build()),
-            ),
-            &owner,
-        )
-        .await
-        .expect("second publish");
-    assert_eq!(second_publish.attempted_devices(), 1);
 }
 
 #[tokio::test]

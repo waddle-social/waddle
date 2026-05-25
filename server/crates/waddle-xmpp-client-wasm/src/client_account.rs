@@ -65,7 +65,7 @@ impl WaddleClient {
             let environment = opts.environment;
             let credentials = opts.into_credentials().map_err(js_error)?;
             let driver = WasmCommandDriver { inner };
-            let node = waddle_xmpp_client::push::register_push_device(
+            let outcome = waddle_xmpp_client::push::register_push_device(
                 &driver,
                 &service_jid,
                 &app_id,
@@ -74,8 +74,9 @@ impl WaddleClient {
             )
             .await
             .map_err(|err| JsValue::from_str(&err.to_string()))?;
-            to_js_value(&WaddlePushNodeId {
-                value: node.into_string(),
+            to_js_value(&WaddleRegisterDeviceResult {
+                node: outcome.node.into_string(),
+                device_id: outcome.device_id,
             })
         })
     }

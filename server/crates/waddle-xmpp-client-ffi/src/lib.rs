@@ -509,16 +509,19 @@ impl WaddleClient {
     }
 
     /// XEP-0050 `register-device` ad-hoc command on `push.<domain>`.
-    /// Drives the multi-step dance and returns the assigned XEP-0357
-    /// node id (empty string on failure — the listener gets the
-    /// diagnostic).
+    /// Drives the multi-step dance and returns the assigned
+    /// [`WaddleRegisterDeviceResult`] (node id + device id) on
+    /// success. Returns `None` on failure with the diagnostic on the
+    /// listener. The caller MUST persist both fields — node feeds
+    /// the user-server XEP-0357 `<enable/>` IQ, device id scopes the
+    /// per-device `disable_push_device` opt-out.
     pub async fn register_push_device(
         &self,
         push_service_jid: String,
         app_id: String,
         environment: WaddlePushEnvironment,
         credentials: WaddlePushDeviceCredentials,
-    ) -> Option<String> {
+    ) -> Option<WaddleRegisterDeviceResult> {
         let handle = self.clone_handle().await?;
         let env: waddle_xmpp_client::push::PushEnvironment = environment.into();
         let creds: waddle_xmpp_client::push::PushDeviceCredentials = credentials.into();
@@ -531,11 +534,46 @@ impl WaddleClient {
         )
         .await
         {
-            Ok(node) => Some(node.into_string()),
+            Ok(outcome) => Some(WaddleRegisterDeviceResult {
+                node: outcome.node.into_string(),
+                device_id: outcome.device_id,
+            }),
             Err(e) => {
                 self.listener
                     .on_error(format!("register_push_device failed: {e}"));
                 None
+            }
+        }
+    }
+
+    /// XEP-0050 `disable-device` ad-hoc command on `push.<domain>`.
+    /// Per-device scope — `device_id` is the value returned by the
+    /// preceding [`register_push_device`] call. Sibling devices on
+    /// the same node keep receiving fan-out. Returns `true` when the
+    /// command completes (including the idempotent already-disabled
+    /// case).
+    pub async fn disable_push_device(
+        &self,
+        push_service_jid: String,
+        node: String,
+        device_id: String,
+    ) -> bool {
+        let Some(handle) = self.clone_handle().await else {
+            return false;
+        };
+        let form = waddle_xmpp_client::push::build_disable_device_submit_form(&node, &device_id);
+        let iq = waddle_xmpp_client::xep::xep0050::build_xep0050_command_request(
+            &push_service_jid,
+            waddle_xmpp_client::push::DISABLE_DEVICE_NODE,
+            waddle_xmpp_client::xep::xep0050::AdHocAction::Execute,
+            Some(form),
+        );
+        match handle.send_iq(iq).await {
+            Ok(_) => true,
+            Err(e) => {
+                self.listener
+                    .on_error(format!("disable_push_device failed: {e}"));
+                false
             }
         }
     }

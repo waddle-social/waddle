@@ -316,14 +316,15 @@ export function usePushNotifications() {
   }
 
   /**
-   * Full enable flow: ensure-node → register-device → XEP-0357 enable.
+   * Full enable flow: XEP-0050 `register-device` on the Push Service
+   * (allocates + binds in one multi-step round trip) → XEP-0357
+   * `<enable/>` on the user-server.
    *
-   * Both calls to the Push Service (`urn:waddle:push-service:0`)
-   * carry the actual browser PushSubscription credentials; the
-   * downstream XEP-0357 `<enable jid='push.<domain>' node='…'/>`
-   * to the user-server carries ONLY the service JID + node — no
-   * endpoint, no p256dh, no auth. The Push Service is the single
-   * owner of provider creds.
+   * `register-device` carries the actual browser PushSubscription
+   * credentials; the downstream XEP-0357
+   * `<enable jid='push.<domain>' node='…'/>` to the user-server
+   * carries ONLY the service JID + node — no endpoint, no p256dh,
+   * no auth. The Push Service is the single owner of provider creds.
    */
   function syncPushSubscription(
     xmppClient: BrowserXmppClient,
@@ -384,9 +385,10 @@ export function usePushNotifications() {
       return false;
     }
 
-    // XEP-0050 multi-step `register-device` composes ensure-node +
-    // register-device into a single round trip; the result form
-    // carries the assigned XEP-0357 node id directly.
+    // XEP-0050 multi-step `register-device` allocates the per-(user,
+    // app-id) push node, binds the browser's PushSubscription, and
+    // returns BOTH the assigned XEP-0357 node id and the Push
+    // Service-assigned device id in the stage-4 result form.
     const registered = await xmppClient.registerPushDevice({
       serviceJid,
       appId: APP_ID_WEB,
@@ -402,10 +404,9 @@ export function usePushNotifications() {
       return false;
     }
     persistPushNodeId(registered.node);
-    // The device id is now Push Service-assigned (one per
-    // register-device round); the chat still persists a stable
-    // per-browser id for the `disable-device` flow below.
-    ensureDeviceId();
+    // Persist the server-assigned device id so the per-device
+    // `disable-device` flow can later scope to this exact row.
+    persistDeviceId(registered.deviceId);
 
     const enabled = await xmppClient.enablePushNotifications({
       serviceJid,
@@ -534,8 +535,8 @@ function resolvePushServiceJid(userJid: string): string {
   // which can carry the resource). Without the strip, the domain
   // becomes `example.com/resource` and the push service JID
   // becomes `push.example.com/resource` — an invalid component
-  // address that breaks ensure-node / register-device / enable.
-  // Round-5 Copilot review on PR #760.
+  // address that breaks both XEP-0050 push commands and the
+  // user-server XEP-0357 enable. Round-5 Copilot review on PR #760.
   if (!userJid.includes("@")) return "";
   const bare = userJid.split("/")[0] ?? "";
   const domain = bare.split("@")[1] ?? "";
@@ -552,15 +553,15 @@ function loadEnabled(): boolean {
   }
 }
 
-function ensureDeviceId(): string {
-  if (typeof window === "undefined") {
-    return `web-${Math.random().toString(36).slice(2)}`;
-  }
-  const existing = window.localStorage.getItem(DEVICE_ID_STORAGE_KEY);
-  if (existing && existing.length > 0) return existing;
-  const minted = `web-${crypto.randomUUID()}`;
-  window.localStorage.setItem(DEVICE_ID_STORAGE_KEY, minted);
-  return minted;
+/// Persist the Push Service-assigned device id returned by the
+/// XEP-0050 `register-device` result form. Pre-cutover the chat
+/// minted its own `web-<uuid>` here; that scheme couldn't survive
+/// the per-device disable flow because the server's `device_id`
+/// (under the `urn:waddle:push-device:` namespace) never matched
+/// what the chat sent.
+function persistDeviceId(deviceId: string): void {
+  if (typeof window === "undefined") return;
+  window.localStorage.setItem(DEVICE_ID_STORAGE_KEY, deviceId);
 }
 
 function loadDeviceId(): string | null {

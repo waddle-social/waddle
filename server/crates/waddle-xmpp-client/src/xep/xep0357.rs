@@ -87,15 +87,25 @@ mod tests {
         assert!(enable.get_child("x", "jabber:x:data").is_none());
         // Issue #718 acceptance criterion: zero provider-credential
         // children. The Push Service is the only consumer of those
-        // values (registered separately via XEP-0050).
+        // values (registered separately via XEP-0050 ad-hoc commands
+        // on `push.<domain>`).
+        //
+        // The pre-cutover wire shape stuffed provider credentials
+        // into the user-server XEP-0357 `<enable/>` via the custom
+        // `urn:waddle:push-service:0` namespace. The legacy namespace
+        // literal is referenced ONLY here as a regression guard
+        // against a future refactor that re-adds those children —
+        // it does NOT denote live code (the producers were deleted
+        // in this PR).
+        const LEGACY_PUSH_SERVICE_NS_GUARD: &str = "urn:waddle:push-service:0";
         assert!(enable
-            .get_child("provider-endpoint", "urn:waddle:push-service:0")
+            .get_child("provider-endpoint", LEGACY_PUSH_SERVICE_NS_GUARD)
             .is_none());
         assert!(enable
-            .get_child("provider-token", "urn:waddle:push-service:0")
+            .get_child("provider-token", LEGACY_PUSH_SERVICE_NS_GUARD)
             .is_none());
         assert!(enable
-            .get_child("provider-key-material", "urn:waddle:push-service:0")
+            .get_child("provider-key-material", LEGACY_PUSH_SERVICE_NS_GUARD)
             .is_none());
     }
 

@@ -731,12 +731,11 @@ fn resolve_component_services_first_match_wins() {
     assert_eq!(resolved.muc, bare("muc1.waddle.test"));
 }
 
-// XEP-0068 form-type discrimination — kept tests pin the disco#info
+// XEP-0068 form-type discrimination — these tests pin the disco#info
 // parser's refusal to honor a smuggled FORM_TYPE in a non-disco form.
-// (Custom-namespace `urn:waddle:push-service:0` builders moved to
-// XEP-0050 ad-hoc commands; their wire-shape tests live alongside the
-// typed builders in `xep/xep0050.rs`, `xep/xep0357.rs`, and
-// `tests/register_push_device_against_fake_service.rs`.)
+// Push command wire-shape coverage lives alongside the typed builders
+// in `xep/xep0050.rs`, `xep/xep0357.rs`, and the integration test at
+// `tests/register_push_device_against_fake_service.rs`.
 
 #[test]
 fn parse_disco_data_form_ignores_form_type_in_submit_form() {
