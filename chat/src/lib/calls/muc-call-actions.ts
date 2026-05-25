@@ -8,7 +8,9 @@ type MucCallStartActionOptions = {
   setStarting: (starting: boolean) => void;
   getSender: () => RawIqSender | null;
   getSelfNick: () => string | undefined;
+  getSelfFullJid?: () => string | null | undefined;
   getExpectedMixerJid?: () => string | null | undefined;
+  ensureJoined?: () => Promise<void>;
 };
 
 /**
@@ -23,19 +25,23 @@ export async function startMucCallAction({
   setStarting,
   getSender,
   getSelfNick,
+  getSelfFullJid,
   getExpectedMixerJid,
+  ensureJoined,
 }: MucCallStartActionOptions): Promise<boolean> {
   if (isBusy()) return false;
   const sender = getSender();
   if (!sender) return false;
   setStarting(true);
   try {
+    await ensureJoined?.();
     await beginMucCall(
       sender,
       roomJid,
       media,
       getSelfNick(),
       getExpectedMixerJid?.(),
+      getSelfFullJid?.(),
     );
     return true;
   } catch (err) {

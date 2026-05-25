@@ -1,7 +1,10 @@
 <script setup lang="ts">
-import { MessageCircle, Plus } from "lucide-vue-next";
+import { useStore } from "@nanostores/vue";
+import { MessageCircle, PhoneCall, Plus } from "lucide-vue-next";
 import AppAvatar from "@/components/ui/AppAvatar.vue";
 import { formatTimelineStamp } from "@/channels/timeline";
+import { $dmCallActivities } from "@/lib/calls/dm-call-activity";
+import { barePeerJid } from "@/lib/xmpp/jid";
 import type { DmConversation } from "@/lib/xmpp-client";
 
 const props = defineProps<{
@@ -14,6 +17,8 @@ const emit = defineEmits<{
   newDm: [];
 }>();
 
+const dmCallActivities = useStore($dmCallActivities);
+
 function preview(text?: string): string {
   if (!text) return "";
   return text.length > 44 ? `${text.slice(0, 44)}…` : text;
@@ -25,6 +30,17 @@ function dotClass(show?: DmConversation["presenceShow"]): string {
   if (show === "xa") return "bg-warning/55";
   if (show === "available") return "bg-success/75";
   return "bg-muted-foreground/25";
+}
+
+function hasCallActivity(peerJid: string): boolean {
+  const normalized = barePeerJid(peerJid).toLowerCase();
+  return !!normalized && !!dmCallActivities.value[normalized];
+}
+
+function callActivityLabel(peerJid: string): string {
+  const normalized = barePeerJid(peerJid).toLowerCase();
+  const activity = normalized ? dmCallActivities.value[normalized] : null;
+  return activity?.state === "ringing" ? "Ringing" : "Live";
 }
 </script>
 
@@ -87,10 +103,19 @@ function dotClass(show?: DmConversation["presenceShow"]): string {
               </span>
             </div>
             <div class="flex items-center gap-1.5">
-              <span class="type-caption text-sidebar-muted truncate">{{ preview(conversation.lastMessageBody) }}</span>
+              <span class="type-caption text-sidebar-muted min-w-0 flex-1 truncate">{{ preview(conversation.lastMessageBody) }}</span>
+              <span
+                v-if="hasCallActivity(conversation.peerJid)"
+                class="type-meta inline-flex h-[18px] shrink-0 items-center gap-1 rounded-full border border-success/25 bg-success/10 px-1.5 text-success"
+                :title="callActivityLabel(conversation.peerJid)"
+                :aria-label="callActivityLabel(conversation.peerJid)"
+              >
+                <PhoneCall class="h-3 w-3" />
+                <span>{{ callActivityLabel(conversation.peerJid) }}</span>
+              </span>
               <span
                 v-if="conversation.unreadCount > 0"
-                class="chat-badge-glow--primary type-count-badge ml-auto inline-flex min-w-[18px] h-[18px] px-1 items-center justify-center rounded-full bg-primary text-primary-foreground"
+                class="chat-badge-glow--primary type-count-badge inline-flex min-w-[18px] h-[18px] shrink-0 items-center justify-center rounded-full bg-primary px-1 text-primary-foreground"
               >
                 {{ conversation.unreadCount }}
               </span>

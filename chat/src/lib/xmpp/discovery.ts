@@ -8,6 +8,7 @@ const NS_FORUMS_0 = "urn:xmpp:forums:0";
 const NS_MUC = "http://jabber.org/protocol/muc";
 const NS_SPACES_0 = "urn:xmpp:spaces:0";
 const NS_PUBSUB = "http://jabber.org/protocol/pubsub";
+const NS_BOOKMARKS_1 = "urn:xmpp:bookmarks:1";
 const DISCO_INFO_NS = "http://jabber.org/protocol/disco#info";
 const DISCO_ITEMS_NS = "http://jabber.org/protocol/disco#items";
 const DATAFORM_NS = "jabber:x:data";
@@ -213,7 +214,14 @@ async function sendDiscoItems(xmpp: HybridClient, to: string, node?: string): Pr
     .map((item) => ({ jid: item.getAttribute("jid") ?? undefined, name: item.getAttribute("name") ?? undefined, node: item.getAttribute("node") ?? undefined }));
 }
 
-async function sendPubsubItems(xmpp: HybridClient, to: string, node: string): Promise<Array<{ jid?: string; name?: string }>> {
+type PubsubBookmarkItem = {
+  jid?: string;
+  name?: string;
+  /** XEP-0402 `autojoin`; omitted attribute means false for bookmarks. */
+  autojoin?: boolean;
+};
+
+async function sendPubsubItems(xmpp: HybridClient, to: string, node: string): Promise<PubsubBookmarkItem[]> {
   if (!xmpp.send_raw_iq) return [];
   const id = crypto.randomUUID();
   let responseXml: string;
@@ -233,10 +241,14 @@ async function sendPubsubItems(xmpp: HybridClient, to: string, node: string): Pr
   return Array.from(items.getElementsByTagNameNS(NS_PUBSUB, "item"))
     .filter((item) => item.parentNode === items)
     .map((item) => {
-      const conference = item.getElementsByTagName("conference")[0];
+      const conference = Array.from(item.getElementsByTagName("conference"))
+        .find((candidate) => !candidate.namespaceURI || candidate.namespaceURI === NS_BOOKMARKS_1);
       return {
         jid: item.getAttribute("id") ?? conference?.getAttribute("jid") ?? undefined,
         name: conference?.getAttribute("name") ?? undefined,
+        ...(conference
+          ? { autojoin: parseBooleanValue(conference.getAttribute("autojoin")) ?? false }
+          : {}),
       };
     });
 }
@@ -347,7 +359,7 @@ export async function discoverTopology(xmpp: HybridClient, jid: string): Promise
   const domain = jidDomain(jid);
   const services = await discoverComponentServices(xmpp, domain, jid);
   let rooms: DiscoveredChannel[] = [];
-  const bookmarkedSpaceIds = new Map<string, string>();
+  const bookmarkedRooms = new Map<string, { spaceId: string; autojoin: boolean }>();
   const spaces: DiscoveredSpace[] = [];
   let serverRole: DiscoveryRole = null;
 
@@ -369,7 +381,12 @@ export async function discoverTopology(xmpp: HybridClient, jid: string): Promise
       try {
         const bookmarks = await sendPubsubItems(xmpp, services.spaces, item.node);
         for (const bookmark of bookmarks) {
-          if (bookmark.jid) bookmarkedSpaceIds.set(barePeerJid(bookmark.jid), spaceId);
+          if (bookmark.jid) {
+            bookmarkedRooms.set(barePeerJid(bookmark.jid), {
+              spaceId,
+              autojoin: bookmark.autojoin ?? false,
+            });
+          }
         }
       } catch {}
       spaces.push({ id: spaceId, name: item.name ?? spaceId, role });
@@ -405,7 +422,16 @@ export async function discoverTopology(xmpp: HybridClient, jid: string): Promise
       ? entry.value
       : channelFromRoom({ jid: mucRooms[index]!.jid ?? "", name: mucRooms[index]!.name }, index),
   );
-  rooms = hydrated.map((room, position) => ({ ...room, position, ...(room.jid && bookmarkedSpaceIds.get(barePeerJid(room.jid)) ? { spaceId: bookmarkedSpaceIds.get(barePeerJid(room.jid)), standalone: false } : {}) }));
+  rooms = hydrated.map((room, position) => {
+    const bookmark = room.jid ? bookmarkedRooms.get(barePeerJid(room.jid)) : undefined;
+    return {
+      ...room,
+      position,
+      ...(bookmark
+        ? { spaceId: bookmark.spaceId, standalone: false, autojoin: bookmark.autojoin }
+        : { autojoin: true }),
+    };
+  });
 
   const roomSpaceIds = new Map(rooms.flatMap((room) => room.jid ? [[barePeerJid(room.jid), room.spaceId]] as const : []));
   return {

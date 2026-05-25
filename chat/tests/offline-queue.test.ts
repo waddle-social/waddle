@@ -176,6 +176,7 @@ describe("offline outbound queue replay", () => {
     (client as unknown as { xmpp: typeof xmpp; connected: boolean; currentRoom: string | null }).connected = true;
     (client as unknown as { xmpp: typeof xmpp; connected: boolean; currentRoom: string | null }).currentRoom =
       roomJid;
+    (client as unknown as { joinedMucReady: Set<string> }).joinedMucReady.add(roomJid);
     (client as unknown as { wireEvents: (x: typeof xmpp) => void }).wireEvents(xmpp);
 
     await (client as unknown as { flushQueuedRoomMessages: (roomJid: string) => Promise<void> }).flushQueuedRoomMessages(roomJid);

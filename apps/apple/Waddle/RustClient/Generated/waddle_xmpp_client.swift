@@ -1297,10 +1297,11 @@ public struct WaddleArchivedMessage: Equatable, Hashable {
     public var replyFallbackStart: UInt32?
     public var replyFallbackEnd: UInt32?
     public var sharedFiles: [WaddleSharedFile]
+    public var callEvent: WaddleCallEvent?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(mamId: String, queryId: String?, id: String?, stanzaId: String?, originId: String?, timestamp: String?, from: String?, to: String?, messageType: String, body: String?, reactionTargetId: String?, reactionEmojis: [String], thread: String?, parentThreadId: String?, replyToId: String?, replyToSender: String?, replyFallbackStart: UInt32?, replyFallbackEnd: UInt32?, sharedFiles: [WaddleSharedFile]) {
+    public init(mamId: String, queryId: String?, id: String?, stanzaId: String?, originId: String?, timestamp: String?, from: String?, to: String?, messageType: String, body: String?, reactionTargetId: String?, reactionEmojis: [String], thread: String?, parentThreadId: String?, replyToId: String?, replyToSender: String?, replyFallbackStart: UInt32?, replyFallbackEnd: UInt32?, sharedFiles: [WaddleSharedFile], callEvent: WaddleCallEvent?) {
         self.mamId = mamId
         self.queryId = queryId
         self.id = id
@@ -1320,6 +1321,7 @@ public struct WaddleArchivedMessage: Equatable, Hashable {
         self.replyFallbackStart = replyFallbackStart
         self.replyFallbackEnd = replyFallbackEnd
         self.sharedFiles = sharedFiles
+        self.callEvent = callEvent
     }
 
 
@@ -1356,7 +1358,8 @@ public struct FfiConverterTypeWaddleArchivedMessage: FfiConverterRustBuffer {
                 replyToSender: FfiConverterOptionString.read(from: &buf),
                 replyFallbackStart: FfiConverterOptionUInt32.read(from: &buf),
                 replyFallbackEnd: FfiConverterOptionUInt32.read(from: &buf),
-                sharedFiles: FfiConverterSequenceTypeWaddleSharedFile.read(from: &buf)
+                sharedFiles: FfiConverterSequenceTypeWaddleSharedFile.read(from: &buf),
+                callEvent: FfiConverterOptionTypeWaddleCallEvent.read(from: &buf)
         )
     }
 
@@ -1380,6 +1383,7 @@ public struct FfiConverterTypeWaddleArchivedMessage: FfiConverterRustBuffer {
         FfiConverterOptionUInt32.write(value.replyFallbackStart, into: &buf)
         FfiConverterOptionUInt32.write(value.replyFallbackEnd, into: &buf)
         FfiConverterSequenceTypeWaddleSharedFile.write(value.sharedFiles, into: &buf)
+        FfiConverterOptionTypeWaddleCallEvent.write(value.callEvent, into: &buf)
     }
 }
 
@@ -1505,18 +1509,21 @@ public func FfiConverterTypeWaddleAvatar_lower(_ value: WaddleAvatar) -> RustBuf
 /**
  * Typed A/V call event surfaced to Swift via `on_call(...)`.
  * `from` is the stamped sender JID (a *full* JID for propose /
- * session-initiate per XEP-0353 §0.6); `sid` is the Jingle
- * session id used to correlate every later event in the call.
+ * session-initiate per XEP-0353 §0.6); `to` is the stamped stanza
+ * recipient when available; `sid` is the Jingle session id used to
+ * correlate every later event in the call.
  */
 public struct WaddleCallEvent: Equatable, Hashable {
     public var from: String
+    public var to: String?
     public var sid: String
     public var kind: WaddleCallEventKind
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(from: String, sid: String, kind: WaddleCallEventKind) {
+    public init(from: String, to: String?, sid: String, kind: WaddleCallEventKind) {
         self.from = from
+        self.to = to
         self.sid = sid
         self.kind = kind
     }
@@ -1538,6 +1545,7 @@ public struct FfiConverterTypeWaddleCallEvent: FfiConverterRustBuffer {
         return
             try WaddleCallEvent(
                 from: FfiConverterString.read(from: &buf),
+                to: FfiConverterOptionString.read(from: &buf),
                 sid: FfiConverterString.read(from: &buf),
                 kind: FfiConverterTypeWaddleCallEventKind.read(from: &buf)
         )
@@ -1545,6 +1553,7 @@ public struct FfiConverterTypeWaddleCallEvent: FfiConverterRustBuffer {
 
     public static func write(_ value: WaddleCallEvent, into buf: inout [UInt8]) {
         FfiConverterString.write(value.from, into: &buf)
+        FfiConverterOptionString.write(value.to, into: &buf)
         FfiConverterString.write(value.sid, into: &buf)
         FfiConverterTypeWaddleCallEventKind.write(value.kind, into: &buf)
     }
@@ -4059,6 +4068,30 @@ fileprivate struct FfiConverterOptionTypeWaddleAvatar: FfiConverterRustBuffer {
         switch try readInt(&buf) as Int8 {
         case 0: return nil
         case 1: return try FfiConverterTypeWaddleAvatar.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeWaddleCallEvent: FfiConverterRustBuffer {
+    typealias SwiftType = WaddleCallEvent?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeWaddleCallEvent.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeWaddleCallEvent.read(from: &buf)
         default: throw UniffiInternalError.unexpectedOptionalTag
         }
     }

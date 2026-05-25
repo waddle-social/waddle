@@ -57,17 +57,19 @@ impl kameo::message::Message<JoinWithAffiliation> for RoomActor {
             .occupants
             .values()
             .flat_map(|o| {
-                let muji = self.room.muji_for_nick(&o.nick).cloned();
-                self.room.get_occupant_sessions(&o.nick).into_iter().map({
-                    let muji = muji.clone();
-                    move |jid| JoinExistingOccupant {
-                        jid,
-                        nick: o.nick.clone(),
-                        affiliation: o.affiliation,
-                        role: o.role,
-                        muji: muji.clone(),
-                    }
-                })
+                self.room
+                    .get_occupant_sessions(&o.nick)
+                    .into_iter()
+                    .map(|jid| {
+                        let muji = self.room.muji_for_session(&o.nick, &jid);
+                        JoinExistingOccupant {
+                            jid,
+                            nick: o.nick.clone(),
+                            affiliation: o.affiliation,
+                            role: o.role,
+                            muji,
+                        }
+                    })
             })
             .collect();
 
@@ -136,11 +138,21 @@ impl kameo::message::Message<LeaveByRealJid> for RoomActor {
             .room
             .muji_state
             .get(&nick)
-            .is_some_and(|entry| entry.originator == msg.sender_jid);
+            .is_some_and(|entries| entries.contains_key(&msg.sender_jid));
         let removed_last_session = self
             .room
             .remove_occupant_session(&nick, &msg.sender_jid)
             .unwrap_or(false);
+        let remaining_muji = if removed_last_session {
+            None
+        } else {
+            self.room.muji_for_nick(&nick)
+        };
+        let remaining_muji_sessions = if removed_last_session {
+            Vec::new()
+        } else {
+            self.room.muji_sessions_for_nick(&nick)
+        };
         let remaining_nick_real_jid = if removed_last_session {
             None
         } else {
@@ -158,6 +170,8 @@ impl kameo::message::Message<LeaveByRealJid> for RoomActor {
             remaining_occupants,
             removed_last_session,
             cleared_muji_state,
+            remaining_muji,
+            remaining_muji_sessions,
             remaining_nick_real_jid,
             occupant_count,
             is_persistent,
@@ -225,11 +239,17 @@ pub struct ClearMujiPresence {
 #[derive(Debug, Clone)]
 pub struct MujiPresenceUpdateOutcome {
     pub update: PresenceUpdateOutcome,
-    /// `Some(muji)` if the call indicator should be broadcast (the
-    /// session is preparing OR has active contents); `None` if the
-    /// participant left the call — the broadcast omits the `<muji/>`
-    /// child entirely per XEP-0272 §Leaving.
+    /// Exact Muji payload to reflect to the sending session. This
+    /// preserves the XEP-0272 preparing echo even when another
+    /// same-nick resource already has active contents.
+    pub sender_muji: Option<crate::xep::xep0272::Muji>,
+    /// Aggregate Muji payload for the occupant nick. Other occupants
+    /// receive this authoritative state so one resource's preparing
+    /// update cannot hide a sibling resource's active call.
     pub active_muji: Option<crate::xep::xep0272::Muji>,
+    /// Exact per-session Muji payloads still advertised for this nick
+    /// after the update.
+    pub session_mujis: Vec<(FullJid, crate::xep::xep0272::Muji)>,
 }
 
 impl kameo::message::Message<UpsertMujiPresence> for RoomActor {
@@ -258,7 +278,7 @@ impl kameo::message::Message<UpsertMujiPresence> for RoomActor {
         // emitted it so a partial-session leave (one resource of a
         // multi-resource occupant) clears the chip even when the
         // user's other sessions remain in the room.
-        let active_muji =
+        let muji_state =
             self.room
                 .upsert_muji_presence(&sender_nick, msg.sender_jid.clone(), msg.muji);
         Ok(Some(MujiPresenceUpdateOutcome {
@@ -270,7 +290,9 @@ impl kameo::message::Message<UpsertMujiPresence> for RoomActor {
                 room_jid,
                 recipients,
             },
-            active_muji,
+            sender_muji: muji_state.sender_muji,
+            active_muji: muji_state.room_muji,
+            session_mujis: muji_state.session_mujis,
         }))
     }
 }
@@ -290,9 +312,7 @@ impl kameo::message::Message<ClearMujiPresence> for RoomActor {
         let sender_real_jid = sender_occupant.real_jid.clone();
         let sender_role = sender_occupant.role;
         let sender_affiliation = sender_occupant.affiliation;
-        if !self.room.clear_muji_presence(&sender_nick, &msg.sender_jid) {
-            return Ok(None);
-        }
+        let muji_state = self.room.clear_muji_presence(&sender_nick, &msg.sender_jid);
         let room_jid = self.room.room_jid.clone();
         let recipients = self
             .room
@@ -309,7 +329,9 @@ impl kameo::message::Message<ClearMujiPresence> for RoomActor {
                 room_jid,
                 recipients,
             },
-            active_muji: None,
+            sender_muji: muji_state.sender_muji,
+            active_muji: muji_state.room_muji,
+            session_mujis: muji_state.session_mujis,
         }))
     }
 }

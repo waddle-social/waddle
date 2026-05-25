@@ -357,6 +357,13 @@ export interface DiscoveredChannel {
   spaceId?: string;
   standalone?: boolean;
   features?: string[];
+  /**
+   * XEP-0402 bookmark `autojoin` value. Bookmarked rooms with the
+   * attribute omitted are `false` per spec; rooms discovered outside
+   * bookmark PubSub nodes may set this to `true` as Waddle's sidebar
+   * membership convention.
+   */
+  autojoin?: boolean;
   /** #422: room's current pin permission, hydrated from the
    * `urn:waddle:room-metadata` extended-disco form so non-owners
    * can render the Pin action correctly under the `anyone`

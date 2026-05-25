@@ -26,9 +26,9 @@ export function discoInfoXml(info: { features?: string[]; identities?: DiscoIden
   }</query></iq>`;
 }
 
-export function pubsubItemsXml(items: Array<{ id?: string; jid?: string; name?: string }>): string {
+export function pubsubItemsXml(items: Array<{ id?: string; jid?: string; name?: string; autojoin?: boolean }>): string {
   return `<iq type="result"><pubsub xmlns="http://jabber.org/protocol/pubsub"><items>${items.map((item) =>
-    `<item${item.id ? ` id="${item.id}"` : ""}>${item.jid || item.name ? `<conference${item.jid ? ` jid="${item.jid}"` : ""}${item.name ? ` name="${item.name}"` : ""}/>` : ""}</item>`
+    `<item${item.id ? ` id="${item.id}"` : ""}>${item.jid || item.name ? `<conference xmlns="urn:xmpp:bookmarks:1"${item.jid ? ` jid="${item.jid}"` : ""}${item.name ? ` name="${item.name}"` : ""}${item.autojoin === undefined ? "" : ` autojoin="${item.autojoin ? "true" : "false"}"`}/>` : ""}</item>`
   ).join("")}</items></pubsub></iq>`;
 }
 

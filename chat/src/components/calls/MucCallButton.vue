@@ -42,6 +42,18 @@ function getSender(): RawIqSender | null {
   return (client?.xmpp as RawIqSender | undefined) ?? null;
 }
 
+function getClientJoiner(): ((roomJid: string) => Promise<void>) | null {
+  const client = connectionStore.client as unknown as {
+    ensureJoined?: (roomJid: string) => Promise<void>;
+  } | null;
+  return client?.ensureJoined?.bind(client) ?? null;
+}
+
+function getSelfFullJid(): string | undefined {
+  const client = connectionStore.client as unknown as { fullJid?: string } | null;
+  return client?.fullJid;
+}
+
 function getExpectedMixerJid(): string | undefined {
   const accountJid = connectionStore.session?.jid;
   return accountJid ? `calls.${jidDomain(accountJid)}` : undefined;
@@ -64,7 +76,11 @@ async function startCall(media: CallMedia): Promise<void> {
     },
     getSender,
     getSelfNick: () => connectionStore.session?.username ?? undefined,
+    getSelfFullJid,
     getExpectedMixerJid,
+    ensureJoined: async () => {
+      await getClientJoiner()?.(props.roomJid);
+    },
   });
 }
 

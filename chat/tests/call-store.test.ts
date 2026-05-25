@@ -9,6 +9,10 @@ import {
   reduceCallState,
   reportCallError,
 } from "../src/lib/calls/call-store";
+import {
+  clearDmCallActivities,
+  readDmCallActivity,
+} from "../src/lib/calls/dm-call-activity";
 import type { CallMedia, LiveKitJoin } from "../src/lib/calls/types";
 
 const audioVideo: CallMedia = { audio: true, video: true };
@@ -100,6 +104,21 @@ describe("call-store reducer", () => {
     expect(next).toEqual({ phase: "ended", sid: "c1", reason: "success" });
   });
 
+  test("session-terminate without serialized reason ends with null reason", () => {
+    const next = reduceCallState(
+      {
+        phase: "active",
+        peer: "alice@waddle.test/desktop",
+        sid: "c1",
+        media: audioVideo,
+        join,
+        kind: "dm",
+      },
+      { kind: "session-terminate", from: "alice@waddle.test/desktop", sid: "c1" },
+    );
+    expect(next).toEqual({ phase: "ended", sid: "c1", reason: null });
+  });
+
   test("finish ends the call without a reason", () => {
     const next = reduceCallState(
       {
@@ -156,6 +175,7 @@ describe("call-store reducer", () => {
 
   test("beginOutgoingCall transitions to the outgoing phase", () => {
     clearCallState();
+    clearDmCallActivities();
     beginOutgoingCall("bob@waddle.test", "c9", audioVideo);
     expect($callState.get()).toEqual({
       phase: "outgoing",
@@ -163,7 +183,14 @@ describe("call-store reducer", () => {
       sid: "c9",
       media: audioVideo,
     });
+    expect(readDmCallActivity("bob@waddle.test")).toMatchObject({
+      peerJid: "bob@waddle.test",
+      sid: "c9",
+      state: "ringing",
+      direction: "outgoing",
+    });
     clearCallState();
+    clearDmCallActivities();
   });
 
   test("proceed leaves outgoing intact (side-effect emits session-initiate)", () => {
@@ -179,6 +206,24 @@ describe("call-store reducer", () => {
       sid: "c9",
     });
     expect(next).toBe(current);
+  });
+
+  test("proceed clears sibling responder ringing for the same sid", () => {
+    const next = reduceCallState(
+      {
+        phase: "incoming",
+        from: "alice@waddle.test/laptop",
+        sid: "c9",
+        media: audioVideo,
+      },
+      {
+        kind: "proceed",
+        from: "bob@waddle.test/phone",
+        sid: "c9",
+      },
+    );
+
+    expect(next).toEqual({ phase: "idle" });
   });
 
   test("session-accept transitions outgoing to active", () => {

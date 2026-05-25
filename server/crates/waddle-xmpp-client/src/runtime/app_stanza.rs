@@ -2,6 +2,7 @@ use minidom::Element;
 
 use crate::event::{ClientEvent, ConnectionEvent};
 use crate::transport::TransportMessage;
+use crate::AuthenticationConfig;
 
 use super::XmppRuntime;
 
@@ -45,6 +46,10 @@ impl XmppRuntime {
             if let Some(pep_item) = pep::parse(element) {
                 return vec![ClientEvent::PepEvent(pep_item)];
             }
+
+            if let Some(call_event) = parse_carbon_call_event(element, self.account_bare_jid()) {
+                return vec![ClientEvent::Call(Box::new(call_event))];
+            }
         }
 
         if let Some(call_event) = messaging::parse_call_event(element) {
@@ -64,6 +69,49 @@ impl XmppRuntime {
 
         vec![ClientEvent::UnhandledStanza(element.clone())]
     }
+}
+
+impl XmppRuntime {
+    fn account_bare_jid(&self) -> &jid::BareJid {
+        match &self.config.auth {
+            AuthenticationConfig::OAuthBearer(config) => &config.account,
+        }
+    }
+}
+
+fn parse_carbon_call_event(
+    element: &Element,
+    account: &jid::BareJid,
+) -> Option<crate::messaging::InboundCallEvent> {
+    const NS_CARBONS: &str = "urn:xmpp:carbons:2";
+    const NS_FORWARD: &str = "urn:xmpp:forward:0";
+
+    if element.name() != "message" {
+        return None;
+    }
+    let outer_from = element.attr("from")?.parse::<jid::Jid>().ok()?.to_bare();
+    if &outer_from != account {
+        return None;
+    }
+
+    for carbon in element.children().filter(|child| {
+        child.ns() == NS_CARBONS && (child.name() == "sent" || child.name() == "received")
+    }) {
+        let Some(forwarded) = carbon.get_child("forwarded", NS_FORWARD) else {
+            continue;
+        };
+        let Some(inner_message) = forwarded
+            .children()
+            .find(|child| child.name() == "message" && child.ns() == "jabber:client")
+        else {
+            continue;
+        };
+        if let Some(call_event) = crate::messaging::parse_call_event(inner_message) {
+            return Some(call_event);
+        }
+    }
+
+    None
 }
 
 fn jingle_iq_set_ack(inbound: &Element) -> Option<Element> {

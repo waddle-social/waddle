@@ -18,6 +18,7 @@ import {
 import { useCallEngine } from "@/lib/calls/use-call-engine";
 import { useActiveMucCall } from "@/lib/calls/use-active-muc-call";
 import { normalizeMucCallRoomJid } from "@/lib/calls/muc-call-presence";
+import { barePeerJid } from "@/lib/xmpp/jid";
 import CallTileGrid from "./CallTileGrid.vue";
 import CallControls from "./CallControls.vue";
 import CallSettingsDialog from "./CallSettingsDialog.vue";
@@ -34,14 +35,13 @@ import CallSettingsDialog from "./CallSettingsDialog.vue";
  * header + banners + split + timeline + composer in one paint, so
  * the user sees only the call.
  *
- * Renders only when:
- *   - There is an active MUC call (`kind === "muc"`).
- *   - The call's room matches the channel currently being viewed.
- *   - The local user is a participant.
- *   - `$callUiMode === "expanded"`.
+ * MUC calls match the current room and require the local user to be
+ * present in Muji. 1:1 calls match the current DM peer's bare JID.
  */
 const props = defineProps<{
-  roomJid: string;
+  roomJid?: string;
+  dmPeerJid?: string;
+  dmPeerName?: string;
 }>();
 
 const state = useStore($callState);
@@ -56,23 +56,34 @@ const { activeRoomJid, selfInCall } = useActiveMucCall();
 const settingsOpen = ref(false);
 
 const normalizedRoomJid = computed(() =>
-  normalizeMucCallRoomJid(props.roomJid),
+  normalizeMucCallRoomJid(props.roomJid ?? ""),
 );
 
-const ownsThisCall = computed(() => {
+const normalizedDmPeerJid = computed(() =>
+  barePeerJid(props.dmPeerJid ?? "").toLowerCase(),
+);
+
+const ownsMucCall = computed(() => {
   return (
+    state.value.phase === "active" &&
+    state.value.kind === "muc" &&
     activeRoomJid.value !== null &&
     activeRoomJid.value === normalizedRoomJid.value
   );
 });
 
+const ownsDmCall = computed(() => {
+  if (state.value.phase !== "active" || state.value.kind !== "dm") return false;
+  const peer = barePeerJid(state.value.peer).toLowerCase();
+  return !!peer && peer === normalizedDmPeerJid.value;
+});
+
 const isOpen = computed(() => {
   return (
     state.value.phase === "active" &&
-    state.value.kind === "muc" &&
     uiMode.value === "expanded" &&
-    ownsThisCall.value &&
-    selfInCall.value
+    ((state.value.kind === "muc" && ownsMucCall.value && selfInCall.value) ||
+      (state.value.kind === "dm" && ownsDmCall.value))
   );
 });
 
@@ -82,7 +93,12 @@ const remoteParticipantCount = computed(() => {
   return ids.size;
 });
 
-const peerLabel = computed(() => peerLabelFromState());
+const peerLabel = computed(() => {
+  if (state.value.phase === "active" && state.value.kind === "dm") {
+    return props.dmPeerName || peerLabelFromState();
+  }
+  return peerLabelFromState();
+});
 
 const subline = computed(() => {
   if (state.value.phase !== "active") return "";

@@ -850,10 +850,24 @@ fn audio_muji() -> crate::xep::xep0272::Muji {
     )])
 }
 
+fn video_muji() -> crate::xep::xep0272::Muji {
+    use crate::xep::xep0167::MediaKind;
+    use crate::xep::xep0272::{Creator, Muji, MujiContent};
+    Muji::with_contents(vec![MujiContent::new(
+        "video",
+        Creator::Initiator,
+        MediaKind::Video,
+    )])
+}
+
 fn empty_muji() -> crate::xep::xep0272::Muji {
     // No `<preparing/>`, no `<content/>` → XEP-0272 §Leaving "absence
     // marker": the participant has exited the call.
     crate::xep::xep0272::Muji::default()
+}
+
+fn preparing_muji() -> crate::xep::xep0272::Muji {
+    crate::xep::xep0272::Muji::preparing()
 }
 
 #[tokio::test]
@@ -972,6 +986,190 @@ async fn upsert_muji_presence_recipients_include_every_sibling_session_of_sender
 }
 
 #[tokio::test]
+async fn same_nick_sibling_preparing_does_not_clobber_active_muji_snapshot() {
+    let actor = spawn_room_actor().await;
+    let desktop: FullJid = "alice@example.com/desktop".parse().expect("desktop");
+    let mobile: FullJid = "alice@example.com/mobile".parse().expect("mobile");
+    let bob: FullJid = "bob@example.com/desktop".parse().expect("bob");
+
+    actor
+        .ask(JoinWithAffiliation {
+            sender_jid: desktop.clone(),
+            nick: "alice".to_string(),
+            effective_affiliation: Affiliation::Member,
+            local_domain: "example.com".to_string(),
+        })
+        .await
+        .expect("desktop join");
+    actor
+        .ask(JoinWithAffiliation {
+            sender_jid: mobile.clone(),
+            nick: "alice".to_string(),
+            effective_affiliation: Affiliation::Member,
+            local_domain: "example.com".to_string(),
+        })
+        .await
+        .expect("mobile join");
+
+    actor
+        .ask(crate::muc::room_actor::UpsertMujiPresence {
+            sender_jid: desktop.clone(),
+            muji: audio_muji(),
+        })
+        .await
+        .expect("active ask")
+        .expect("desktop is an occupant");
+
+    let preparing = actor
+        .ask(crate::muc::room_actor::UpsertMujiPresence {
+            sender_jid: mobile.clone(),
+            muji: preparing_muji(),
+        })
+        .await
+        .expect("preparing ask")
+        .expect("mobile is an occupant");
+
+    assert!(
+        preparing
+            .sender_muji
+            .as_ref()
+            .is_some_and(|muji| muji.preparing && !muji.is_active()),
+        "mobile still receives its preparing reflection"
+    );
+    assert!(
+        preparing
+            .active_muji
+            .as_ref()
+            .is_some_and(|muji| muji.is_active() && muji.preparing),
+        "other occupants see both desktop's active advertisement and mobile's preparing state"
+    );
+
+    let replay = actor
+        .ask(JoinWithAffiliation {
+            sender_jid: bob,
+            nick: "bob".to_string(),
+            effective_affiliation: Affiliation::Member,
+            local_domain: "example.com".to_string(),
+        })
+        .await
+        .expect("bob join");
+
+    let desktop_replay = replay
+        .existing_occupants
+        .iter()
+        .find(|occupant| occupant.nick == "alice" && occupant.jid == desktop)
+        .expect("bob sees alice desktop");
+    let mobile_replay = replay
+        .existing_occupants
+        .iter()
+        .find(|occupant| occupant.nick == "alice" && occupant.jid == mobile)
+        .expect("bob sees alice mobile");
+    assert!(
+        desktop_replay
+            .muji
+            .as_ref()
+            .is_some_and(|muji| muji.is_active() && !muji.preparing),
+        "late join replay keeps desktop's active advertisement on the desktop JID"
+    );
+    assert!(
+        mobile_replay
+            .muji
+            .as_ref()
+            .is_some_and(|muji| muji.preparing && !muji.is_active()),
+        "late join replay keeps mobile's preparing advertisement on the mobile JID"
+    );
+}
+
+#[tokio::test]
+async fn late_join_replay_includes_preparing_only_same_nick_muji_with_exact_owner() {
+    let actor = spawn_room_actor().await;
+    let desktop: FullJid = "alice@example.com/desktop".parse().expect("desktop");
+    let mobile: FullJid = "alice@example.com/mobile".parse().expect("mobile");
+    let bob: FullJid = "bob@example.com/desktop".parse().expect("bob");
+
+    actor
+        .ask(JoinWithAffiliation {
+            sender_jid: desktop.clone(),
+            nick: "alice".to_string(),
+            effective_affiliation: Affiliation::Member,
+            local_domain: "example.com".to_string(),
+        })
+        .await
+        .expect("desktop join");
+    actor
+        .ask(JoinWithAffiliation {
+            sender_jid: mobile.clone(),
+            nick: "alice".to_string(),
+            effective_affiliation: Affiliation::Member,
+            local_domain: "example.com".to_string(),
+        })
+        .await
+        .expect("mobile join");
+
+    actor
+        .ask(crate::muc::room_actor::UpsertMujiPresence {
+            sender_jid: mobile.clone(),
+            muji: preparing_muji(),
+        })
+        .await
+        .expect("preparing ask")
+        .expect("mobile is an occupant");
+
+    let replay = actor
+        .ask(JoinWithAffiliation {
+            sender_jid: bob,
+            nick: "bob".to_string(),
+            effective_affiliation: Affiliation::Member,
+            local_domain: "example.com".to_string(),
+        })
+        .await
+        .expect("bob join");
+
+    let desktop_replay = replay
+        .existing_occupants
+        .iter()
+        .find(|occupant| occupant.nick == "alice" && occupant.jid == desktop)
+        .expect("bob sees alice desktop");
+    let mobile_replay = replay
+        .existing_occupants
+        .iter()
+        .find(|occupant| occupant.nick == "alice" && occupant.jid == mobile)
+        .expect("bob sees alice mobile");
+    assert!(
+        desktop_replay.muji.is_none(),
+        "desktop has no Muji state to replay"
+    );
+    assert!(
+        mobile_replay
+            .muji
+            .as_ref()
+            .is_some_and(|muji| muji.preparing && !muji.is_active()),
+        "late join replay preserves preparing-only state on its exact full JID"
+    );
+}
+
+#[test]
+fn same_nick_active_resources_are_aggregated_for_other_occupants() {
+    let mut room = test_room();
+    let desktop: FullJid = "alice@example.com/desktop".parse().expect("desktop");
+    let mobile: FullJid = "alice@example.com/mobile".parse().expect("mobile");
+
+    room.upsert_muji_presence("alice", desktop, audio_muji());
+    let video = room.upsert_muji_presence("alice", mobile, video_muji());
+
+    let aggregate = video
+        .room_muji
+        .as_ref()
+        .expect("other occupants see same-nick aggregate Muji");
+    assert!(aggregate.is_active(), "aggregate has content");
+    assert_eq!(
+        aggregate.contents.len(),
+        2,
+        "aggregate carries all same-nick active resources instead of choosing one"
+    );
+}
+
+#[tokio::test]
 async fn upsert_muji_presence_empty_clears_state_and_returns_none() {
     let actor = spawn_room_actor().await;
     let alice = test_full_jid("alice");
@@ -1085,7 +1283,7 @@ async fn clear_muji_presence_clears_existing_state_without_muji_payload() {
 }
 
 #[tokio::test]
-async fn clear_muji_presence_returns_none_when_no_state_exists() {
+async fn clear_muji_presence_reflects_plain_presence_when_no_state_exists() {
     let actor = spawn_room_actor().await;
     let alice = test_full_jid("alice");
     actor
@@ -1103,10 +1301,10 @@ async fn clear_muji_presence_returns_none_when_no_state_exists() {
         .await
         .expect("ask");
 
-    assert!(
-        outcome.is_none(),
-        "plain available presence without prior Muji state stays on the existing join/update path"
-    );
+    let outcome = outcome.expect("existing occupant presence update is reflected");
+    assert_eq!(outcome.update.sender_nick, "alice");
+    assert!(outcome.sender_muji.is_none());
+    assert!(outcome.active_muji.is_none());
 }
 
 #[tokio::test]
@@ -1362,4 +1560,85 @@ async fn leaving_non_originator_session_preserves_muji_state() {
         .as_ref()
         .expect("Muji preserved when non-originator session leaves");
     assert!(muji.is_active());
+}
+
+#[tokio::test]
+async fn leaving_one_active_same_nick_session_preserves_sibling_active_muji_state() {
+    let actor = spawn_room_actor().await;
+    let desktop: FullJid = "alice@example.com/desktop".parse().expect("desktop");
+    let mobile: FullJid = "alice@example.com/mobile".parse().expect("mobile");
+
+    actor
+        .ask(JoinWithAffiliation {
+            sender_jid: desktop.clone(),
+            nick: "alice".to_string(),
+            effective_affiliation: Affiliation::Member,
+            local_domain: "example.com".to_string(),
+        })
+        .await
+        .expect("desktop join");
+    actor
+        .ask(JoinWithAffiliation {
+            sender_jid: mobile.clone(),
+            nick: "alice".to_string(),
+            effective_affiliation: Affiliation::Member,
+            local_domain: "example.com".to_string(),
+        })
+        .await
+        .expect("mobile join");
+
+    actor
+        .ask(crate::muc::room_actor::UpsertMujiPresence {
+            sender_jid: desktop.clone(),
+            muji: audio_muji(),
+        })
+        .await
+        .expect("desktop active")
+        .expect("desktop is an occupant");
+    actor
+        .ask(crate::muc::room_actor::UpsertMujiPresence {
+            sender_jid: mobile.clone(),
+            muji: audio_muji(),
+        })
+        .await
+        .expect("mobile active")
+        .expect("mobile is an occupant");
+
+    let leave_outcome = actor
+        .ask(crate::muc::room_actor::LeaveByRealJid { sender_jid: mobile })
+        .await
+        .expect("mobile leave")
+        .expect("alice present");
+
+    assert!(leave_outcome.cleared_muji_state);
+    assert!(
+        leave_outcome
+            .remaining_muji
+            .as_ref()
+            .is_some_and(|muji| muji.is_active()),
+        "desktop's active Muji must remain after mobile hangs up"
+    );
+
+    let carol = test_full_jid("carol");
+    let join_outcome = actor
+        .ask(JoinWithAffiliation {
+            sender_jid: carol,
+            nick: "carol".to_string(),
+            effective_affiliation: Affiliation::Member,
+            local_domain: "example.com".to_string(),
+        })
+        .await
+        .expect("carol join");
+    let alice_replay = join_outcome
+        .existing_occupants
+        .iter()
+        .find(|o| o.nick == "alice")
+        .expect("alice still in room via desktop");
+    assert!(
+        alice_replay
+            .muji
+            .as_ref()
+            .is_some_and(|muji| muji.is_active()),
+        "late join replay preserves the remaining active sibling"
+    );
 }

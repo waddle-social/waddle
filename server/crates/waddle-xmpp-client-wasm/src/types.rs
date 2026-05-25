@@ -207,6 +207,8 @@ pub struct WaddleArchivedMessage {
     pub shared_files: Vec<WaddleSharedFile>,
     pub extension_envelope: Option<WaddleExtensionEnvelope>,
     pub extension_body_fallback: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub call_event: Option<WaddleCallEvent>,
 }
 
 #[derive(Debug, Serialize)]
@@ -250,6 +252,8 @@ pub struct WaddleLiveKitJoin {
 #[derive(Debug, Serialize)]
 pub struct WaddleCallEvent {
     pub from: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub to: Option<String>,
     pub sid: String,
     pub kind: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]

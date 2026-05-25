@@ -269,7 +269,9 @@ describe("client send readiness", () => {
       xmpp: typeof xmpp;
       connected: boolean;
       currentRoom: string | null;
+      joinedMucReady: Set<string>;
     }).currentRoom = roomJid;
+    (client as unknown as { joinedMucReady: Set<string> }).joinedMucReady.add(roomJid);
 
     const result = await client.sendGroupMessage("w1", "c1", "hello room");
 
@@ -292,6 +294,7 @@ describe("client send readiness", () => {
     }).xmpp = xmpp;
     (client as unknown as { connected: boolean }).connected = true;
     (client as unknown as { currentRoom: string | null }).currentRoom = roomJid;
+    (client as unknown as { joinedMucReady: Set<string> }).joinedMucReady.add(roomJid);
 
     const result = await client.sendGroupMessage("w1", "c1", "", {
       threadId: "thread-root",
@@ -325,6 +328,216 @@ describe("client send readiness", () => {
     await expect(client.sendDisplayed("w1", "c1", "msg-1")).rejects.toThrow("Reconnection timed out");
     await expect(client.sendChatState("w1", "c1", "composing")).rejects.toThrow("Reconnection timed out");
     expect(xmpp.sendMessage).toHaveBeenCalledTimes(0);
+  });
+
+  test("room join readiness waits for this resource's MUC self-presence", async () => {
+    const client = new BrowserXmppClient(session());
+    const roomJid = roomBareJidFor(session(), "c1");
+    let onPresence: ((presence: {
+      from?: string;
+      presence_type?: string;
+      muc_jid?: string;
+    }) => void) | null = null;
+    const xmpp = {
+      join_room: mock(async () => undefined),
+      set_on_presence(cb: NonNullable<typeof onPresence>) {
+        onPresence = cb;
+      },
+    };
+    (client as unknown as { xmpp: typeof xmpp; connected: boolean }).xmpp = xmpp;
+    (client as unknown as { xmpp: typeof xmpp; connected: boolean }).connected = true;
+    (client as unknown as { wireEvents: (xmpp: typeof xmpp) => void }).wireEvents(xmpp);
+
+    const joined = (client as unknown as { ensureJoined: (roomJid: string) => Promise<void> }).ensureJoined(roomJid);
+    onPresence?.({
+      from: `${roomJid}/alice`,
+      presence_type: "available",
+      muc_jid: "alice@example.com/phone",
+    });
+    await Promise.resolve();
+    expect((client as unknown as { joinedMucReady: Set<string> }).joinedMucReady.has(roomJid)).toBe(false);
+
+    onPresence?.({
+      from: `${roomJid}/alice`,
+      presence_type: "available",
+      muc_jid: (client as unknown as { fullJid: string }).fullJid,
+    });
+
+    await joined;
+    expect((client as unknown as { joinedMucReady: Set<string> }).joinedMucReady.has(roomJid)).toBe(true);
+  });
+
+  test("room join readiness ignores unavailable self-presence", async () => {
+    const client = new BrowserXmppClient(session());
+    const roomJid = roomBareJidFor(session(), "c1");
+    let onPresence: ((presence: {
+      from?: string;
+      presence_type?: string;
+      muc_jid?: string;
+    }) => void) | null = null;
+    const xmpp = {
+      join_room: mock(async () => undefined),
+      set_on_presence(cb: NonNullable<typeof onPresence>) {
+        onPresence = cb;
+      },
+    };
+    (client as unknown as { xmpp: typeof xmpp; connected: boolean }).xmpp = xmpp;
+    (client as unknown as { xmpp: typeof xmpp; connected: boolean }).connected = true;
+    (client as unknown as { wireEvents: (xmpp: typeof xmpp) => void }).wireEvents(xmpp);
+
+    const joined = (client as unknown as { ensureJoined: (roomJid: string) => Promise<void> }).ensureJoined(roomJid);
+    onPresence?.({
+      from: `${roomJid}/alice`,
+      presence_type: "unavailable",
+      muc_jid: (client as unknown as { fullJid: string }).fullJid,
+    });
+    await Promise.resolve();
+    expect((client as unknown as { joinedMucReady: Set<string> }).joinedMucReady.has(roomJid)).toBe(false);
+
+    onPresence?.({
+      from: `${roomJid}/alice`,
+      presence_type: "available",
+      muc_jid: (client as unknown as { fullJid: string }).fullJid,
+    });
+
+    await joined;
+    expect((client as unknown as { joinedMucReady: Set<string> }).joinedMucReady.has(roomJid)).toBe(true);
+  });
+
+  test("own unavailable self-presence revokes room readiness and forces a fresh join", async () => {
+    const client = new BrowserXmppClient(session());
+    const roomJid = roomBareJidFor(session(), "c1");
+    let onPresence: ((presence: {
+      from?: string;
+      presence_type?: string;
+      muc_jid?: string;
+    }) => void) | null = null;
+    const xmpp = {
+      join_room: mock(async () => undefined),
+      send_groupchat_message: mock(async (_room: string, _body: string, opts: { stanza_id?: string }) => opts.stanza_id),
+      set_on_presence(cb: NonNullable<typeof onPresence>) {
+        onPresence = cb;
+      },
+    };
+    (client as unknown as {
+      xmpp: typeof xmpp;
+      connected: boolean;
+      currentRoom: string | null;
+    }).xmpp = xmpp;
+    (client as unknown as { connected: boolean }).connected = true;
+    (client as unknown as { currentRoom: string | null }).currentRoom = roomJid;
+    (client as unknown as { joinedMucs: Map<string, Promise<void>> }).joinedMucs.set(roomJid, Promise.resolve());
+    (client as unknown as { joinedMucReady: Set<string> }).joinedMucReady.add(roomJid);
+    (client as unknown as { wireEvents: (xmpp: typeof xmpp) => void }).wireEvents(xmpp);
+
+    onPresence?.({
+      from: `${roomJid}/alice`,
+      presence_type: "unavailable",
+      muc_jid: (client as unknown as { fullJid: string }).fullJid,
+    });
+
+    expect((client as unknown as { joinedMucReady: Set<string> }).joinedMucReady.has(roomJid)).toBe(false);
+    expect((client as unknown as { joinedMucs: Map<string, Promise<void>> }).joinedMucs.has(roomJid)).toBe(false);
+
+    const sent = await client.sendGroupMessage("w1", "c1", "after unavailable");
+    expect(sent?.state).toBe("queued");
+    expect(xmpp.send_groupchat_message).toHaveBeenCalledTimes(0);
+    await settleReconnectCatchup();
+    expect(xmpp.join_room).toHaveBeenCalledWith(roomJid, "alice");
+
+    onPresence?.({
+      from: `${roomJid}/alice`,
+      presence_type: "available",
+      muc_jid: (client as unknown as { fullJid: string }).fullJid,
+    });
+    await settleReconnectCatchup();
+    expect(xmpp.send_groupchat_message).toHaveBeenCalledWith(
+      roomJid,
+      "after unavailable",
+      expect.any(Object),
+    );
+  });
+
+  test("session-ready room queue flush waits for current-room rejoin", async () => {
+    const client = new BrowserXmppClient(session());
+    const roomJid = roomBareJidFor(session(), "c1");
+    enqueueQueuedMessage("alice@example.com", {
+      kind: "room",
+      id: "queued-room-after-resume",
+      createdAt: new Date().toISOString(),
+      roomJid,
+      body: "queued while reconnecting",
+    });
+    let onPresence: ((presence: {
+      from?: string;
+      presence_type?: string;
+      muc_jid?: string;
+    }) => void) | null = null;
+    const xmpp = {
+      join_room: mock(async () => undefined),
+      send_groupchat_message: mock(async (_room: string, _body: string, opts: { stanza_id?: string }) => opts.stanza_id),
+      set_on_presence(cb: NonNullable<typeof onPresence>) {
+        onPresence = cb;
+      },
+    };
+    (client as unknown as { xmpp: typeof xmpp; currentRoom: string | null }).xmpp = xmpp;
+    (client as unknown as { currentRoom: string | null }).currentRoom = roomJid;
+    (client as unknown as { wireEvents: (xmpp: typeof xmpp) => void }).wireEvents(xmpp);
+
+    (client as unknown as {
+      handleSessionReady: (xmpp: typeof xmpp, lifecycle: { type: "resumed" }) => void;
+    }).handleSessionReady(xmpp, { type: "resumed" });
+    await settleReconnectCatchup();
+    expect(xmpp.send_groupchat_message).toHaveBeenCalledTimes(0);
+
+    onPresence?.({
+      from: `${roomJid}/alice`,
+      presence_type: "available",
+      muc_jid: (client as unknown as { fullJid: string }).fullJid,
+    });
+    await settleReconnectCatchup();
+
+    expect(xmpp.send_groupchat_message).toHaveBeenCalledWith(
+      roomJid,
+      "queued while reconnecting",
+      expect.objectContaining({ stanza_id: "queued-room-after-resume" }),
+    );
+  });
+
+  test("session-ready rejoins retained non-current rooms", async () => {
+    const client = new BrowserXmppClient(session());
+    const roomJid = "side@muc.example.com";
+    let onPresence: ((presence: {
+      from?: string;
+      presence_type?: string;
+      muc_jid?: string;
+    }) => void) | null = null;
+    const xmpp = {
+      join_room: mock(async () => undefined),
+      set_on_presence(cb: NonNullable<typeof onPresence>) {
+        onPresence = cb;
+      },
+    };
+    (client as unknown as {
+      xmpp: typeof xmpp;
+      retainedJoinedRoomJids: Set<string>;
+    }).xmpp = xmpp;
+    (client as unknown as { retainedJoinedRoomJids: Set<string> }).retainedJoinedRoomJids = new Set([roomJid]);
+    (client as unknown as { wireEvents: (xmpp: typeof xmpp) => void }).wireEvents(xmpp);
+
+    (client as unknown as {
+      handleSessionReady: (xmpp: typeof xmpp, lifecycle: { type: "resumed" }) => void;
+    }).handleSessionReady(xmpp, { type: "resumed" });
+    await settleReconnectCatchup();
+
+    expect(xmpp.join_room).toHaveBeenCalledWith(roomJid, "alice");
+    onPresence?.({
+      from: `${roomJid}/alice`,
+      presence_type: "available",
+      muc_jid: (client as unknown as { fullJid: string }).fullJid,
+    });
+    await settleReconnectCatchup();
+    expect((client as unknown as { joinedMucReady: Set<string> }).joinedMucReady.has(roomJid)).toBe(true);
   });
 
   test("DM send queues when the session is unavailable", async () => {
