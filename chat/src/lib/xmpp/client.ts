@@ -1229,13 +1229,23 @@ export class BrowserXmppClient {
    * via the XEP-0128 disco extension form
    * (`FORM_TYPE='urn:waddle:push:vapid:0'`).
    *
-   * Resolves to `null` only when the server explicitly does not
-   * advertise the form — meaning Web Push is not configured on this
-   * deployment. Returns `null` (NOT throws) for any other error so the
-   * caller can fall back to the foreground Notification API path; the
-   * wasm side already validates wire-shape invariants
-   * (`PushVapidDiscoParseError`) and surfaces them via a rejected
-   * Promise, which we catch here as a `null` return + console warning.
+   * Resolves to `null` in any of these cases — callers can't distinguish
+   * them from the return value alone, but each path emits a precise
+   * `console.warn` for diagnostics:
+   *   - The server doesn't advertise the form (Web Push not configured)
+   *   - The session is not ready (mid-reconnect / mid-teardown race)
+   *   - The disco IQ times out after 10s
+   *   - The wasm `fetch_vapid_public_key` method is missing (older bundle)
+   *   - The IQ is rejected (transport error, stanza error, malformed
+   *     advertisement caught by the wasm-side wire-shape validator)
+   *   - The JS-boundary shape is unexpected (regression on the Rust side)
+   *
+   * This is a `null`-on-any-error contract by design: every failure
+   * mode collapses to the same caller-visible action (fall back to the
+   * foreground Notification API; retry on next reconnect). UI surfaces
+   * that need to distinguish "not configured" from "transient error"
+   * should consume the console warnings via a log sink, not branch on
+   * the return value.
    */
   async fetchVapidPublicKey(opts: { serviceJid: string }): Promise<{ publicKey: string; kid: string } | null> {
     // Bounded timeout (10s): the wasm-side `send_iq_command` is itself

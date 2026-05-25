@@ -8,7 +8,13 @@ import { withVapidRotationLock } from "./vapid-rotation-lock";
 const STORAGE_KEY = "waddle.chat.notifications-enabled";
 const DEVICE_ID_STORAGE_KEY = "waddle.chat.push-device-id";
 const PUSH_NODE_STORAGE_KEY = "waddle.chat.push-node-id";
-const PUSH_KID_STORAGE_KEY = "waddle.chat.push-kid";
+/// Prefix for the per-(account, service) persisted VAPID kid. The
+/// full key is built by `pushKidStorageKey(accountJid, serviceJid)`.
+/// Multi-account sessions MUST NOT share one global kid — without
+/// namespacing, account B's kid would overwrite account A's,
+/// causing spurious rotation triggers when A reconnects and reads
+/// B's kid back as "different from advertised".
+const PUSH_KID_STORAGE_PREFIX = "waddle.chat.push-kid:";
 const PUSH_SERVICE_JID = (import.meta.env.PUBLIC_WADDLE_XMPP_PUSH_SERVICE_JID ?? "").trim();
 const NOTIFICATION_ICON_URL = "/android-chrome-192x192.png";
 
@@ -171,6 +177,19 @@ export function usePushNotifications() {
   ): Promise<PushSubscription | null> {
     const reg = await getOrRegisterServiceWorker();
     if (!reg) return null;
+    return subscribeOnRegistration(reg, vapidPublicKey);
+  }
+
+  /// Subscribe `reg.pushManager` to Web Push for the given VAPID
+  /// public key. Split out from `subscribeToPush` so callers that
+  /// already hold a `ServiceWorkerRegistration` (the rotation path)
+  /// don't pay an extra `getOrRegisterServiceWorker()` round-trip —
+  /// that round-trip can spuriously fail under an SW-update race
+  /// while we hold the rotation lock.
+  async function subscribeOnRegistration(
+    reg: ServiceWorkerRegistration,
+    vapidPublicKey: string,
+  ): Promise<PushSubscription | null> {
     let keyBytes: Uint8Array;
     try {
       keyBytes = urlBase64ToUint8Array(vapidPublicKey);
@@ -226,10 +245,17 @@ export function usePushNotifications() {
   ): Promise<{ subscription: PushSubscription; rotated: boolean } | null> {
     const accountJid = barePart(userJid);
     return withVapidRotationLock(accountJid, async () => {
+      // Force-refresh while holding the rotation lock so a cache-hit
+      // path doesn't mask a real server-side VAPID rotation that
+      // landed inside the cache TTL window. The 1h cache TTL is a
+      // backstop for stale tabs; rotation detection MUST run against
+      // a fresh disco fetch every time the lock is taken (i.e. on
+      // every enable / reconnect).
       const advertisement = await loadVapidPublicKey({
         client: xmppClient,
         accountJid,
         serverJid: serviceJid,
+        forceRefresh: true,
       });
       if (!advertisement) {
         console.warn(
@@ -239,7 +265,7 @@ export function usePushNotifications() {
         return null;
       }
       const existing = await reg.pushManager.getSubscription();
-      const persistedKid = loadPersistedKid();
+      const persistedKid = loadPersistedKid(accountJid, serviceJid);
       // Three rotation triggers:
       //   1. persistedKid present and differs from the advertised kid
       //      — server rotated under us.
@@ -254,7 +280,7 @@ export function usePushNotifications() {
         existing === null || subscriptionApplicationKeyMatches(existing, advertisement.publicKey);
       const kidChanged = persistedKid !== null && persistedKid !== advertisement.kid;
       if (existing && !kidChanged && existingKeyMatches) {
-        persistKid(advertisement.kid);
+        persistKid(accountJid, serviceJid, advertisement.kid);
         return { subscription: existing, rotated: false };
       }
       // Either no subscription yet, server kid changed under us, or the
@@ -271,16 +297,20 @@ export function usePushNotifications() {
           );
         }
       }
-      const fresh = await subscribeToPush(advertisement.publicKey);
+      // Re-use the registration the caller already holds instead of
+      // re-fetching via `getOrRegisterServiceWorker()`. The double
+      // lookup could turn a recoverable state (we have `reg` in hand)
+      // into a `null` if the second async lookup raced an SW update.
+      const fresh = await subscribeOnRegistration(reg, advertisement.publicKey);
       if (!fresh) {
         // Subscribe failed — drop the persisted kid + cache entry so the
         // next attempt re-fetches from the server. The chat can also fall
         // back to the foreground Notification API in this state.
-        clearPersistedKid();
-        clearCachedVapidKey(barePart(userJid), serviceJid);
+        clearPersistedKid(accountJid, serviceJid);
+        clearCachedVapidKey(accountJid, serviceJid);
         return null;
       }
-      persistKid(advertisement.kid);
+      persistKid(accountJid, serviceJid, advertisement.kid);
       return { subscription: fresh, rotated: kidChanged };
     });
   }
@@ -484,12 +514,13 @@ export function usePushNotifications() {
       return false;
     }
     // Clean up rotation state: drop the persisted kid + cached
-    // advertisement so a re-enable starts from a fresh fetch. The
-    // cache is keyed per `(account, server)` so this only invalidates
-    // the entry for the disabling account, not any other tenant on the
-    // same device.
-    clearPersistedKid();
-    clearCachedVapidKey(barePart(userJid), serviceJid);
+    // advertisement so a re-enable starts from a fresh fetch. Both
+    // are keyed per `(account, server)` so this only invalidates the
+    // entry for the disabling account/service pair, not any other
+    // tenant on the same device.
+    const accountJid = barePart(userJid);
+    clearPersistedKid(accountJid, serviceJid);
+    clearCachedVapidKey(accountJid, serviceJid);
     return true;
   }
 
@@ -562,32 +593,41 @@ function loadPushNodeId(): string | null {
   return window.localStorage.getItem(PUSH_NODE_STORAGE_KEY);
 }
 
-function persistKid(kid: string): void {
+/// Build the per-(account, service) localStorage key for the
+/// persisted VAPID kid. `JSON.stringify` on a two-element array gives
+/// an unambiguous encoding regardless of the individual values'
+/// content (JIDs legally contain `:` and most other plausible
+/// separators), matching the namespacing rule used by `vapid-cache.ts`.
+function pushKidStorageKey(accountJid: string, serviceJid: string): string {
+  return `${PUSH_KID_STORAGE_PREFIX}${JSON.stringify([accountJid, serviceJid])}`;
+}
+
+function persistKid(accountJid: string, serviceJid: string, kid: string): void {
   if (typeof window === "undefined") return;
   // Safari Lockdown Mode and some Firefox/Brave privacy configurations
   // throw a SecurityError on `window.localStorage` access (not just on
   // get/set). Wrap so a hardened browser doesn't kill the entire
   // rotation flow on a single persistence call.
   try {
-    window.localStorage.setItem(PUSH_KID_STORAGE_KEY, kid);
+    window.localStorage.setItem(pushKidStorageKey(accountJid, serviceJid), kid);
   } catch (error) {
     console.warn("[notifications] localStorage unavailable; kid not persisted:", error);
   }
 }
 
-function loadPersistedKid(): string | null {
+function loadPersistedKid(accountJid: string, serviceJid: string): string | null {
   if (typeof window === "undefined") return null;
   try {
-    return window.localStorage.getItem(PUSH_KID_STORAGE_KEY);
+    return window.localStorage.getItem(pushKidStorageKey(accountJid, serviceJid));
   } catch {
     return null;
   }
 }
 
-function clearPersistedKid(): void {
+function clearPersistedKid(accountJid: string, serviceJid: string): void {
   if (typeof window === "undefined") return;
   try {
-    window.localStorage.removeItem(PUSH_KID_STORAGE_KEY);
+    window.localStorage.removeItem(pushKidStorageKey(accountJid, serviceJid));
   } catch {
     // best-effort cleanup
   }

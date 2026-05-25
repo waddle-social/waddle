@@ -171,12 +171,37 @@ describe("vapid-cache", () => {
   });
 
   test("malformed cache entry is treated as a miss", async () => {
-    // Pre-existing localStorage entry written by an older build with a
-    // different schema must NOT crash the loader; the entry is
-    // ignored and the next fetch overwrites.
+    // Pre-existing localStorage entry under the CURRENT key shape but
+    // with un-parseable JSON content must NOT crash the loader; the
+    // entry is ignored and the next fetch overwrites. Uses the same
+    // key encoding (`JSON.stringify([account, server])`) as the
+    // production code at `storageKey(...)`, so the path actually
+    // exercised here is `JSON.parse` raising, NOT a cache miss.
     const ls = (globalThis as { window: { localStorage: { setItem: (k: string, v: string) => void } } })
       .window.localStorage;
-    ls.setItem(`waddle.chat.vapid-cache:${ACCOUNT}|${SERVER}`, "not json");
+    ls.setItem(`waddle.chat.vapid-cache:${JSON.stringify([ACCOUNT, SERVER])}`, "not json");
+    const client = makeClient(SAMPLE);
+    const result = await loadVapidPublicKey({
+      client,
+      accountJid: ACCOUNT,
+      serverJid: SERVER,
+      now: () => 1_000_000,
+    });
+    expect(result?.publicKey).toBe(SAMPLE.publicKey);
+    expect((client.fetchVapidPublicKey as ReturnType<typeof mock>).mock.calls).toHaveLength(1);
+  });
+
+  test("partially-valid cache entry (missing fields) is treated as a miss", async () => {
+    // Schema drift: an entry that JSON.parses successfully but lacks
+    // required fields must fail the `isCachedVapidEntry` guard and
+    // trigger a fresh fetch rather than propagating an unsafe
+    // partial value.
+    const ls = (globalThis as { window: { localStorage: { setItem: (k: string, v: string) => void } } })
+      .window.localStorage;
+    ls.setItem(
+      `waddle.chat.vapid-cache:${JSON.stringify([ACCOUNT, SERVER])}`,
+      JSON.stringify({ publicKey: "x" }),
+    );
     const client = makeClient(SAMPLE);
     const result = await loadVapidPublicKey({
       client,

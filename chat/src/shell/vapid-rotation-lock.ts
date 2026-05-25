@@ -68,13 +68,24 @@ function hasWebLocks(): NavigatorWithLocks | null {
   return navigator as unknown as NavigatorWithLocks;
 }
 
-/// In-process Promise chain used when `navigator.locks` is unavailable.
-/// One chain per process (=== one chain per tab); cross-tab races are
-/// handled correctness-wise by the idempotence of PushManager.subscribe.
-let fallbackChain: Promise<unknown> = Promise.resolve();
+/// In-process Promise chains used when `navigator.locks` is
+/// unavailable. One chain per lock name (per account) so different
+/// accounts in the same tab don't serialize through each other —
+/// matching the `navigator.locks` path which uses a distinct lock
+/// name per account. The map is keyed by the resolved lock name
+/// (`lockNameFor(accountJid)`); a missing entry is equivalent to an
+/// already-resolved chain. Cross-tab races on the fallback path
+/// remain best-effort: a concurrent rotation in another tab CAN
+/// produce a transient stale `register-device` row, recovered on
+/// the next `syncPushSubscriptionImpl` (i.e. next reconnect).
+const fallbackChains = new Map<string, Promise<unknown>>();
 
-async function withFallbackLock<T>(callback: RunInLock<T>): Promise<T> {
-  const next = fallbackChain.then(() => callback());
+async function withFallbackLock<T>(
+  lockName: string,
+  callback: RunInLock<T>,
+): Promise<T> {
+  const prev = fallbackChains.get(lockName) ?? Promise.resolve();
+  const next = prev.then(() => callback());
   // Use a single `then(success, failure)` form to register the chain's
   // continuation atomically. The two-step `next.catch(...)` pattern
   // would create a brief window in strict unhandledrejection runtimes
@@ -83,9 +94,12 @@ async function withFallbackLock<T>(callback: RunInLock<T>): Promise<T> {
   // synchronous rejection from `callback()` could fire an
   // unhandledrejection event before the `.catch` registers and swallows
   // it. Using `then(_, _)` attaches both handlers in one step.
-  fallbackChain = next.then(
-    () => undefined,
-    () => undefined,
+  fallbackChains.set(
+    lockName,
+    next.then(
+      () => undefined,
+      () => undefined,
+    ),
   );
   return next;
 }
@@ -102,18 +116,17 @@ export async function withVapidRotationLock<T>(
   accountJid: string | undefined,
   callback: RunInLock<T>,
 ): Promise<T> {
+  const lockName = lockNameFor(accountJid);
   const navWithLocks = hasWebLocks();
   if (!navWithLocks) {
-    return withFallbackLock(callback);
+    return withFallbackLock(lockName, callback);
   }
-  return navWithLocks.locks.request(lockNameFor(accountJid), { mode: "exclusive" }, () =>
-    callback(),
-  );
+  return navWithLocks.locks.request(lockName, { mode: "exclusive" }, () => callback());
 }
 
-/** Exposed for the test suite to reset the fallback chain between tests. */
+/** Exposed for the test suite to reset the fallback chains between tests. */
 export function __resetVapidRotationLockForTests(): void {
-  fallbackChain = Promise.resolve();
+  fallbackChains.clear();
 }
 
 /** Exposed so tests can assert on the lock-name shape used at the platform layer. */

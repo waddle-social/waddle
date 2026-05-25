@@ -237,11 +237,13 @@ async fn push_service_disco_advertises_xep0128_vapid_form() {
 
     let iq = parse_iq_element(&response, "push-disco-vapid", "result");
     // RFC 6120 §8.1.1.1: the chat's wasm-side `verify_iq_from_matches_query`
-    // guard expects `from` to either be absent (legitimate for own-server
-    // replies) OR match the queried JID exactly. The server-side Push
-    // Service component MUST set `from` so the chat doesn't silently
-    // fall through to the absent-from branch on a future server-side
-    // regression. Round-3 XEP-conformance review finding.
+    // REQUIRES a present `from` that matches the queried service JID
+    // exactly (round-5 tightening — the Push Service is a separate
+    // XEP-0114 component, not the user's own server, so §8.1.2.1's
+    // absent-from permission does not apply). This assertion pins the
+    // server-side stamping so a future regression that drops `from`
+    // on the push component's responses is caught immediately, not
+    // discovered later via a hostile-C2S spoof CVE.
     assert_eq!(
         iq.attr("from"),
         Some(PUSH_SERVICE_JID),
