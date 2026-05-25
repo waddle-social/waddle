@@ -4,6 +4,7 @@ import { barePeerJid } from "@/lib/xmpp/jid";
 import {
   callParticipantCountForChannel,
   candidateRoomJidsForChannel,
+  normalizeMucServiceDomain,
 } from "./muc-call-indicators";
 import { normalizeMucCallRoomJid } from "./muc-call-presence";
 import type { DmCallActivity } from "./dm-call-activity";
@@ -42,19 +43,22 @@ export function buildCallActivityDockEntries(options: {
   activePeerJid: string | null;
   sidebarMode: SidebarMode;
   activeChannelJids: Iterable<string>;
+  managedMucDomain?: string | null;
   callParticipantCounts: Record<string, number>;
   dmCallActivities: Record<string, DmCallActivity>;
 }): CallActivityDockEntry[] {
   const matchedRoomJids = new Set<string>();
   const activeChannelRoomJid = normalizeMucCallRoomJid(options.activeChannelRoomJid ?? "");
+  const managedMucDomain = normalizeMucServiceDomain(options.managedMucDomain);
   const channelEntries = options.channels.flatMap((channel): CallActivityDockEntry[] => {
     const participantCount = callParticipantCountForChannel(
       channel,
       options.callParticipantCounts,
       options.activeChannelJids,
+      options.managedMucDomain,
     );
     if (participantCount <= 0) return [];
-    const roomJid = candidateRoomJidsForChannel(channel, options.activeChannelJids)
+    const roomJid = candidateRoomJidsForChannel(channel, options.activeChannelJids, options.managedMucDomain)
       .map(normalizeMucCallRoomJid)
       .find((jid) => (options.callParticipantCounts[jid] ?? 0) > 0) ?? "";
     if (roomJid) matchedRoomJids.add(roomJid);
@@ -75,9 +79,11 @@ export function buildCallActivityDockEntries(options: {
   const fallbackChannelEntries = Object.entries(options.callParticipantCounts)
     .flatMap(([roomJid, participantCount]): CallActivityDockEntry[] => {
       const normalizedRoomJid = normalizeMucCallRoomJid(roomJid);
+      const roomDomain = normalizedRoomJid.split("@")[1] ?? "";
       if (!normalizedRoomJid || participantCount <= 0 || matchedRoomJids.has(normalizedRoomJid)) {
         return [];
       }
+      if (!managedMucDomain || roomDomain !== managedMucDomain) return [];
       const title = normalizedRoomJid.split("@")[0] ?? normalizedRoomJid;
       return [{
         kind: "channel",

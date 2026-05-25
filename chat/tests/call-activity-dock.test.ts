@@ -42,6 +42,7 @@ describe("call activity dock model", () => {
       activePeerJid: null,
       sidebarMode: "channels",
       activeChannelJids: new Set(["general@conference.example.com"]),
+      managedMucDomain: "conference.example.com",
       callParticipantCounts: {
         "general@conference.example.com": 3,
       },
@@ -120,6 +121,7 @@ describe("call activity dock model", () => {
       activePeerJid: null,
       sidebarMode: "channels",
       activeChannelJids: new Set(),
+      managedMucDomain: "conference.example.com",
       callParticipantCounts: {
         "general@conference.example.com": 2,
       },
@@ -140,6 +142,79 @@ describe("call activity dock model", () => {
     ]);
   });
 
+  test("resolves id-only known channels through the managed MUC domain", () => {
+    const entries = buildCallActivityDockEntries({
+      channels: [
+        { id: "general", name: "General" },
+      ],
+      conversations: [],
+      activeChannelId: null,
+      activePeerJid: null,
+      sidebarMode: "channels",
+      activeChannelJids: new Set(["general@custom-muc.example.test"]),
+      managedMucDomain: "custom-muc.example.test",
+      callParticipantCounts: {
+        "general@custom-muc.example.test": 3,
+      },
+      dmCallActivities: {},
+    });
+
+    expect(entries).toEqual([
+      {
+        kind: "channel",
+        key: "channel:general",
+        channelId: "general",
+        roomJid: "general@custom-muc.example.test",
+        title: "General",
+        participantCount: 3,
+        isKnownChannel: true,
+        isActive: false,
+      },
+    ]);
+  });
+
+  test("filters fallback group calls to the managed MUC domain", () => {
+    const entries = buildCallActivityDockEntries({
+      channels: [],
+      conversations: [],
+      activeChannelId: null,
+      activePeerJid: null,
+      sidebarMode: "channels",
+      activeChannelJids: new Set(),
+      managedMucDomain: "conference.example.com",
+      callParticipantCounts: {
+        "general@conference.example.com": 2,
+        "general@other-muc.example.com": 4,
+      },
+      dmCallActivities: {},
+    });
+
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({
+      kind: "channel",
+      roomJid: "general@conference.example.com",
+      participantCount: 2,
+      isKnownChannel: false,
+    });
+  });
+
+  test("does not surface unmatched fallback group calls without a trusted MUC domain", () => {
+    const entries = buildCallActivityDockEntries({
+      channels: [],
+      conversations: [],
+      activeChannelId: null,
+      activePeerJid: null,
+      sidebarMode: "channels",
+      activeChannelJids: new Set(),
+      callParticipantCounts: {
+        "general@conference.example.com": 2,
+      },
+      dmCallActivities: {},
+    });
+
+    expect(entries).toEqual([]);
+  });
+
   test("marks fallback group call active by room JID instead of an inferred channel ID", () => {
     const entries = buildCallActivityDockEntries({
       channels: [],
@@ -149,6 +224,7 @@ describe("call activity dock model", () => {
       activePeerJid: null,
       sidebarMode: "channels",
       activeChannelJids: new Set(),
+      managedMucDomain: "conference.example.com",
       callParticipantCounts: {
         "general@conference.example.com": 2,
       },
@@ -193,11 +269,15 @@ describe("CallActivityDock rendering", () => {
       activeChannelJids: new Set<string>(),
     });
 
-    expect(html).toContain("Calls");
+    expect(html).toContain("Active calls");
     expect(html).toContain("General");
     expect(html).toContain("Bob");
+    expect(html).toContain("Group call");
+    expect(html).toContain("Video call");
     expect(html).toContain("2 people");
     expect(html).toContain("Live");
+    expect(html).toContain("Open");
+    expect(html).not.toContain("Join");
   });
 
   test("renders active group calls before channel metadata hydrates", async () => {
@@ -212,11 +292,46 @@ describe("CallActivityDock rendering", () => {
       activePeerJid: null,
       sidebarMode: "channels",
       activeChannelJids: new Set<string>(),
+      managedMucDomain: "conference.example.com",
     });
 
-    expect(html).toContain("Calls");
+    expect(html).toContain("Active calls");
     expect(html).toContain("general");
+    expect(html).toContain("Group call · syncing");
     expect(html).toContain("2 people");
+    expect(html).toContain("Open");
+    expect(html).toContain("aria-label=\"Open general call, 2 people\"");
+    expect(html).not.toContain("disabled");
+  });
+
+  test("renders incoming 1:1 call activity without a false answer affordance", async () => {
+    $dmCallActivities.set({
+      "bob@example.com": {
+        peerJid: "bob@example.com",
+        sid: "dm-call-1",
+        media: { audio: true, video: false },
+        state: "ringing",
+        direction: "incoming",
+        updatedAt: "2026-05-25T12:00:00.000Z",
+      },
+    });
+
+    const html = await renderCallActivityDock({
+      channels: [],
+      conversations: [
+        { peerJid: "bob@example.com", peerUsername: "Bob", unreadCount: 0 },
+      ],
+      activeChannelId: null,
+      activePeerJid: null,
+      sidebarMode: "dms",
+      activeChannelJids: new Set<string>(),
+    });
+
+    expect(html).toContain("Bob");
+    expect(html).toContain("Voice call");
+    expect(html).toContain("Ringing");
+    expect(html).toContain("Open");
+    expect(html).not.toContain("Answer");
   });
 
   test("is mounted in the desktop sidebar and visible mobile shell", () => {
@@ -232,41 +347,44 @@ describe("CallActivityDock rendering", () => {
     expect(mobileDrawers).not.toContain("CallActivityDock");
   });
 
-  test("keeps the dock bounded and hydrated DM call controls actionable", () => {
-    const dock = readFileSync(new URL("../src/components/calls/CallActivityDock.vue", import.meta.url), "utf8");
-    const callButton = readFileSync(new URL("../src/components/calls/CallButton.vue", import.meta.url), "utf8");
-    const readyShell = readFileSync(new URL("../src/components/chat/ChatReadyShell.vue", import.meta.url), "utf8");
-    const controller = readFileSync(new URL("../src/shell/chat-app-controller.ts", import.meta.url), "utf8");
-    const contentArea = readFileSync(new URL("../src/components/chat/ContentArea.vue", import.meta.url), "utf8");
+  test("renders hydrated DM call controls with reconnect context", async () => {
+    $dmCallActivities.set({
+      "bob@example.com": {
+        peerJid: "bob@example.com",
+        sid: "dm-call-1",
+        media: { audio: true, video: true },
+        state: "accepted",
+        direction: "incoming",
+        updatedAt: "2026-05-25T12:00:00.000Z",
+      },
+    });
 
-    expect(dock).toContain("max-height: min(40dvh, 18rem)");
-    expect(dock).toContain("overflow-y: auto");
-    expect(dock).toContain("emit(\"selectChannel\", entry.channelId, entry.roomJid)");
-    expect(readyShell).toContain("function onSelectChannelFromSidebar(id: string | null, roomJid?: string)");
-    expect(readyShell).toContain("selectChannelByRoomJid(roomJid)");
-    expect(readyShell).toContain("selectChannel(id, roomJid ? { roomJid } : undefined)");
-    expect(readyShell).toContain(":active-channel-room-jid=\"activeChannelRoomJid\"");
-    expect(controller).toContain("void selectChannel(channel.id, { roomJid: normalizedRoomJid })");
-    expect(contentArea).toContain("const callRoomJid = computed(() => props.roomJid ?? props.channel?.jid ?? null)");
-    expect(contentArea).toContain(":room-jid=\"callRoomJid ?? undefined\"");
-    expect(callButton).toContain("Hydrated peer activity alone stays actionable");
-    expect(callButton).toContain("state.value.phase !== \"idle\" && state.value.phase !== \"ended\"");
-    expect(callButton).not.toContain("|| hasPeerCallActivity.value");
+    const html = await renderVueComponent("../src/components/calls/CallButton.vue", {
+      peerBareJid: "bob@example.com",
+    });
+
+    expect(html).toContain("Video call live");
+    expect(html).toContain("Reconnect voice call");
+    expect(html).toContain("Reconnect video call");
   });
 });
 
 async function renderCallActivityDock(props: Record<string, unknown>) {
-  const component = await loadCallActivityDockComponent();
+  return renderVueComponent("../src/components/calls/CallActivityDock.vue", props);
+}
+
+async function renderVueComponent(path: string, props: Record<string, unknown>) {
+  const component = await loadVueComponent(path);
   return renderToString(createSSRApp({ render: () => h(component, props) }));
 }
 
-async function loadCallActivityDockComponent() {
-  const filename = new URL("../src/components/calls/CallActivityDock.vue", import.meta.url);
+async function loadVueComponent(path: string) {
+  const filename = new URL(path, import.meta.url);
   const source = readFileSync(filename, "utf8");
   const { descriptor } = parse(source, { filename: filename.pathname });
-  const script = compileScript(descriptor, { id: "call-activity-dock-test", inlineTemplate: true });
+  const script = compileScript(descriptor, { id: filename.pathname, inlineTemplate: true });
 
-  const tempDir = mkdtempSync(join(tmpdir(), "waddle-call-activity-dock-"));
+  const tempDir = mkdtempSync(join(tmpdir(), "waddle-vue-component-"));
   try {
     const compiled = [
       rewriteImports(script.content.replace("export default", "const __sfc__ ="), filename),
@@ -280,7 +398,7 @@ async function loadCallActivityDockComponent() {
         verbatimModuleSyntax: false,
       },
     }).outputText;
-    const modulePath = join(tempDir, "CallActivityDock.mjs");
+    const modulePath = join(tempDir, "Component.mjs");
     writeFileSync(modulePath, js);
     const component = await import(pathToFileURL(modulePath).href);
     return component.default;

@@ -543,6 +543,8 @@ export function useWaddleDirectory(
     memberLoadState.value = "idle";
     memberSnapshotsByChannelId.clear();
     serverRole.value = null;
+    mucServiceJid.value = null;
+    spacesServiceJid.value = null;
     activeChannelId.value = null;
     selectedSpaceId.value = null;
   }
@@ -553,6 +555,7 @@ export function useWaddleDirectory(
     members,
     memberLoadState,
     serverRole,
+    mucServiceJid,
     activeSpaceId,
     activeChannelId,
     isLoadingStructure,

@@ -117,7 +117,7 @@ function joinExistingAudio(): void {
     >
       <Video class="w-3.5 h-3.5" />
     </button>
-    <!-- Live-call pill: green dot + count + running duration, click to
+    <!-- Live-call pill: green dot + participant count, click to
          join. The pill component decides its own visibility (only
          when this room owns the call AND the local user isn't in it),
          which is why we can mount it unconditionally and still keep

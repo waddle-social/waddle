@@ -31,6 +31,16 @@ const inCall = computed(
 const hasPeerCallActivity = computed(() => !!peerCallActivity.value);
 const voiceLabel = computed(() => hasPeerCallActivity.value && !inCall.value ? "Reconnect voice call" : "Start voice call");
 const videoLabel = computed(() => hasPeerCallActivity.value && !inCall.value ? "Reconnect video call" : "Start video call");
+const reconnectingPeerCall = computed(() => hasPeerCallActivity.value && !inCall.value);
+const activityBannerLabel = computed(() => {
+  const activity = peerCallActivity.value;
+  if (!activity) return "";
+  const media = activity.media.video ? "Video" : "Voice";
+  if (activity.state === "accepted") return `${media} call live`;
+  if (activity.direction === "incoming") return `Incoming ${media.toLowerCase()} call`;
+  if (activity.direction === "outgoing") return `${media} call calling`;
+  return `${media} call ringing`;
+});
 
 function getSender() {
   const client = connectionStore.client as unknown as { xmpp?: unknown } | null;
@@ -66,7 +76,17 @@ async function startCall(media: CallMedia): Promise<void> {
 </script>
 
 <template>
-  <div class="flex items-center gap-1.5">
+  <div
+    class="call-button-group"
+    :class="{ 'call-button-group--activity': reconnectingPeerCall }"
+  >
+    <span
+      v-if="reconnectingPeerCall"
+      class="call-button-group__hint type-meta"
+      aria-hidden="true"
+    >
+      {{ activityBannerLabel }}
+    </span>
     <button
       class="chat-icon-button chat-icon-button--md transition-all duration-200"
       :class="inCall
@@ -95,3 +115,34 @@ async function startCall(media: CallMedia): Promise<void> {
     </button>
   </div>
 </template>
+
+<style scoped>
+.call-button-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+}
+
+.call-button-group--activity {
+  gap: 0.25rem;
+  border: 1px solid color-mix(in oklab, var(--success) 28%, transparent);
+  border-radius: 9999px;
+  background: color-mix(in oklab, var(--success) 10%, transparent);
+  padding: 0.125rem;
+}
+
+.call-button-group__hint {
+  max-width: 8rem;
+  overflow: hidden;
+  padding-inline: 0.375rem 0.125rem;
+  color: var(--success);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@media (max-width: 48rem) {
+  .call-button-group__hint {
+    display: none;
+  }
+}
+</style>

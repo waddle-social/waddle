@@ -5,6 +5,7 @@ import {
   $mucCallParticipants,
   mucCallParticipantCounts,
 } from "@/lib/calls/muc-call-presence";
+import { normalizeMucServiceDomain } from "@/lib/calls/muc-call-indicators";
 import HomeDashboard from "@/components/chat/HomeDashboard.vue";
 import ThreadsView from "@/components/chat/ThreadsView.vue";
 import FeedPane from "@/components/community/FeedPane.vue";
@@ -157,6 +158,9 @@ const mucCallParticipantsStore = useStore($mucCallParticipants);
 const callParticipantCounts = computed<Record<string, number>>(() => {
   return mucCallParticipantCounts(mucCallParticipantsStore.value);
 });
+const managedMucDomain = computed(() =>
+  normalizeMucServiceDomain(waddles.mucServiceJid.value) || (selfDomain.value ? `muc.${selfDomain.value}` : ""),
+);
 
 const contentPaneClass = computed(() => {
   if (ui.sidebarMode.value !== "channels") return "";
@@ -256,6 +260,7 @@ onUnmounted(() => {
       :active-peer-jid="dmConversations.activePeerJid.value"
       :sidebar-mode="ui.sidebarMode.value"
       :active-channel-jids="messaging.activeChannels.value"
+      :managed-muc-domain="managedMucDomain"
       @select-channel="onSelectChannelFromSidebar"
       @select-dm="selectDm"
     />
@@ -304,6 +309,7 @@ onUnmounted(() => {
           :collapsed-group-ids="ui.collapsedSpaceGroupIds.value"
           :channel-unread-map="computedChannelUnreadMap"
           :call-participant-counts="callParticipantCounts"
+          :managed-muc-domain="managedMucDomain"
           :thread-entries-fn="(roomJid: string) => channelUnread.threadEntries(roomJid)"
           :active-community-surface="ui.activeCommunitySurface.value"
           :stories-active-count="stories.activeStories.value.length"
@@ -334,6 +340,7 @@ onUnmounted(() => {
           :active-peer-jid="dmConversations.activePeerJid.value"
           :sidebar-mode="ui.sidebarMode.value"
           :active-channel-jids="messaging.activeChannels.value"
+          :managed-muc-domain="managedMucDomain"
           @select-channel="onSelectChannelFromSidebar"
           @select-dm="selectDm"
         />
