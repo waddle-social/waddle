@@ -316,26 +316,69 @@ mod tests {
     use super::*;
     use waddle_xmpp::push::envelope::{push_class_for_db_value, PushClass};
 
+    /// Build a notification XML payload via structured `minidom`
+    /// builders (per CLAUDE.md "XML generation hard rule": never via
+    /// `format!`/`push_str` — even in tests, because string-built XML
+    /// trivially escapes special characters incorrectly and gives the
+    /// parser the wrong byte sequence for any non-ASCII input).
     fn build_notification_xml(
         class: &str,
         conversation: &str,
         thread: Option<&str>,
         message_count: Option<u64>,
     ) -> String {
-        let mut form = format!(
-            r#"<x xmlns='jabber:x:data' type='result'><field var='FORM_TYPE' type='hidden'><value>{XEP0357_SUMMARY_FORM_TYPE}</value></field>"#
-        );
+        let summary = build_summary_form(message_count);
+        let context = build_context_element(class, conversation, thread);
+        let notification = Element::builder("notification", NS_PUSH)
+            .append(summary)
+            .append(context)
+            .build();
+        String::from(&notification)
+    }
+
+    fn build_summary_form(message_count: Option<u64>) -> Element {
+        let mut form = Element::builder("x", NS_DATA_FORMS)
+            .attr(minidom::rxml::xml_ncname!("type").to_owned(), "result")
+            .append(
+                Element::builder("field", NS_DATA_FORMS)
+                    .attr(minidom::rxml::xml_ncname!("var").to_owned(), "FORM_TYPE")
+                    .attr(minidom::rxml::xml_ncname!("type").to_owned(), "hidden")
+                    .append(
+                        Element::builder("value", NS_DATA_FORMS)
+                            .append(XEP0357_SUMMARY_FORM_TYPE)
+                            .build(),
+                    )
+                    .build(),
+            );
         if let Some(count) = message_count {
-            form.push_str(&format!(
-                "<field var='message-count'><value>{count}</value></field>"
-            ));
+            form = form.append(
+                Element::builder("field", NS_DATA_FORMS)
+                    .attr(
+                        minidom::rxml::xml_ncname!("var").to_owned(),
+                        "message-count",
+                    )
+                    .append(
+                        Element::builder("value", NS_DATA_FORMS)
+                            .append(count.to_string())
+                            .build(),
+                    )
+                    .build(),
+            );
         }
-        form.push_str("</x>");
-        let thread_attr = thread.map(|t| format!(" thread='{t}'")).unwrap_or_default();
-        let context = format!(
-            "<context xmlns='{NS_WADDLE_PUSH_CONTEXT}' conversation='{conversation}' class='{class}'{thread_attr}/>"
-        );
-        format!("<notification xmlns='{NS_PUSH}'>{form}{context}</notification>")
+        form.build()
+    }
+
+    fn build_context_element(class: &str, conversation: &str, thread: Option<&str>) -> Element {
+        let mut ctx = Element::builder("context", NS_WADDLE_PUSH_CONTEXT)
+            .attr(
+                minidom::rxml::xml_ncname!("conversation").to_owned(),
+                conversation,
+            )
+            .attr(minidom::rxml::xml_ncname!("class").to_owned(), class);
+        if let Some(t) = thread {
+            ctx = ctx.attr(minidom::rxml::xml_ncname!("thread").to_owned(), t);
+        }
+        ctx.build()
     }
 
     #[test]
@@ -362,14 +405,16 @@ mod tests {
 
     #[test]
     fn parse_publish_payload_rejects_wrong_root() {
-        let xml = "<message xmlns='jabber:client'/>";
-        let err = parse_publish_payload(xml).unwrap_err();
+        let wrong = Element::builder("message", "jabber:client").build();
+        let xml = String::from(&wrong);
+        let err = parse_publish_payload(&xml).unwrap_err();
         assert!(err.to_string().contains("not <notification"));
     }
 
     #[test]
     fn parse_publish_payload_requires_context() {
-        let xml = format!("<notification xmlns='{NS_PUSH}'/>");
+        let bare = Element::builder("notification", NS_PUSH).build();
+        let xml = String::from(&bare);
         let err = parse_publish_payload(&xml).unwrap_err();
         assert!(err.to_string().contains("missing <context"));
     }
@@ -405,15 +450,38 @@ mod tests {
         // Form is present but FORM_TYPE doesn't match XEP-0357 §4.
         // message-count must be ignored — we don't trust counters
         // from unknown forms.
-        let xml = format!(
-            r#"<notification xmlns='{NS_PUSH}'>
-              <x xmlns='jabber:x:data' type='result'>
-                <field var='FORM_TYPE' type='hidden'><value>some:other:form</value></field>
-                <field var='message-count'><value>42</value></field>
-              </x>
-              <context xmlns='{NS_WADDLE_PUSH_CONTEXT}' conversation='alice@example.com' class='dm'/>
-            </notification>"#
-        );
+        let wrong_form = Element::builder("x", NS_DATA_FORMS)
+            .attr(minidom::rxml::xml_ncname!("type").to_owned(), "result")
+            .append(
+                Element::builder("field", NS_DATA_FORMS)
+                    .attr(minidom::rxml::xml_ncname!("var").to_owned(), "FORM_TYPE")
+                    .attr(minidom::rxml::xml_ncname!("type").to_owned(), "hidden")
+                    .append(
+                        Element::builder("value", NS_DATA_FORMS)
+                            .append("some:other:form")
+                            .build(),
+                    )
+                    .build(),
+            )
+            .append(
+                Element::builder("field", NS_DATA_FORMS)
+                    .attr(
+                        minidom::rxml::xml_ncname!("var").to_owned(),
+                        "message-count",
+                    )
+                    .append(
+                        Element::builder("value", NS_DATA_FORMS)
+                            .append("42")
+                            .build(),
+                    )
+                    .build(),
+            )
+            .build();
+        let notification = Element::builder("notification", NS_PUSH)
+            .append(wrong_form)
+            .append(build_context_element("dm", "alice@example.com", None))
+            .build();
+        let xml = String::from(&notification);
         let parsed = parse_publish_payload(&xml).expect("payload parses");
         assert_eq!(parsed.message_count, None);
     }
