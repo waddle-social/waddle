@@ -850,6 +850,12 @@ export class BrowserXmppClient {
     return this.discoveredRoomJids.get(channelId) ?? roomBareJidFor(this.session, channelId);
   }
 
+  rememberRoomJidForChannel(channelId: string, roomJid: string): void {
+    const normalizedRoomJid = barePeerJid(roomJid);
+    if (!channelId || !normalizedRoomJid) return;
+    this.discoveredRoomJids.set(channelId, normalizedRoomJid);
+  }
+
   private waitForRoomSelfPresence(roomJid: string, nick: string): Promise<void> {
     const fullJid = `${roomJid}/${nick}`;
     return new Promise((resolve, reject) => {

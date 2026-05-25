@@ -1,7 +1,7 @@
 import type { ChannelSummary } from "@/lib/chat-types";
 import { normalizeMucCallRoomJid } from "./muc-call-presence";
 
-function candidateRoomJids(
+export function candidateRoomJidsForChannel(
   channel: Pick<ChannelSummary, "id" | "jid">,
   activeChannelJids: Iterable<string>,
 ): string[] {
@@ -24,7 +24,7 @@ export function callParticipantCountForChannel(
   activeChannelJids: Iterable<string>,
 ): number {
   if (!callParticipantCounts) return 0;
-  for (const jid of candidateRoomJids(channel, activeChannelJids)) {
+  for (const jid of candidateRoomJidsForChannel(channel, activeChannelJids)) {
     const count = callParticipantCounts[normalizeMucCallRoomJid(jid)] ?? 0;
     if (count > 0) return count;
   }

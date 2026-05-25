@@ -73,6 +73,7 @@ pub struct JoinOutcome {
     pub occupant_count: usize,
     pub room_jid: BareJid,
     pub is_same_bare_multi_session_join: bool,
+    pub is_existing_session_rejoin: bool,
     /// Snapshot of `MucRoom.subject` at join time. Powers the XEP-0045
     /// §7.2.15 historical-subject emission the WebSocket join handler
     /// builds via `muc::messages::build_subject_message`. Bundled with

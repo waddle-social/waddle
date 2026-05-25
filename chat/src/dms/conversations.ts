@@ -203,12 +203,30 @@ export function useDirectMessageConversations(
     mergeInboxConversations([entry]);
   }
 
+  async function hydrateCurrentDmCallActivities(
+    currentClient: BrowserXmppClient,
+    currentSessionJid: string,
+    requestId: number,
+  ): Promise<void> {
+    if (
+      requestId !== inboxRequestId
+      || currentClient !== xmppClient.value
+      || currentSessionJid !== (session.value?.jid ?? null)
+    ) return;
+    await currentClient.hydrateRecentDmCallActivities().catch(() => undefined);
+  }
+
   async function hydrateFromInbox(): Promise<boolean> {
     const currentClient = xmppClient.value;
     const currentSessionJid = session.value?.jid ?? null;
     if (!currentClient || !currentSessionJid) return false;
 
     const requestId = ++inboxRequestId;
+    const dmCallActivityHydration = hydrateCurrentDmCallActivities(
+      currentClient,
+      currentSessionJid,
+      requestId,
+    );
     try {
       const inbox = await currentClient.fetchInbox();
       if (
@@ -222,9 +240,10 @@ export function useDirectMessageConversations(
       for (const conversation of directConversations) {
         void currentClient.subscribeToPeerPresence(barePeerJid(conversation.partner)).catch(() => undefined);
       }
-      await currentClient.hydrateRecentDmCallActivities().catch(() => undefined);
+      void dmCallActivityHydration;
       return true;
     } catch {
+      void dmCallActivityHydration;
       // best-effort
       return false;
     }

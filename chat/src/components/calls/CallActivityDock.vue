@@ -19,13 +19,14 @@ const props = defineProps<{
   channels: ChannelSummary[];
   conversations: DmConversation[];
   activeChannelId: string | null;
+  activeChannelRoomJid?: string | null;
   activePeerJid: string | null;
   sidebarMode: SidebarMode;
   activeChannelJids: Set<string>;
 }>();
 
 const emit = defineEmits<{
-  selectChannel: [channelId: string];
+  selectChannel: [channelId: string | null, roomJid: string];
   selectDm: [peerJid: string];
 }>();
 
@@ -40,6 +41,7 @@ const entries = computed(() => buildCallActivityDockEntries({
   channels: props.channels,
   conversations: props.conversations,
   activeChannelId: props.activeChannelId,
+  activeChannelRoomJid: props.activeChannelRoomJid ?? null,
   activePeerJid: props.activePeerJid,
   sidebarMode: props.sidebarMode,
   activeChannelJids: props.activeChannelJids,
@@ -69,7 +71,7 @@ function entryTitle(entry: CallActivityDockEntry): string {
 
 function selectEntry(entry: CallActivityDockEntry): void {
   if (entry.kind === "channel") {
-    emit("selectChannel", entry.channelId);
+    emit("selectChannel", entry.channelId, entry.roomJid);
     return;
   }
   emit("selectDm", entry.peerJid);

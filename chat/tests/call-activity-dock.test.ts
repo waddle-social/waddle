@@ -55,8 +55,10 @@ describe("call activity dock model", () => {
         kind: "channel",
         key: "channel:general",
         channelId: "general",
+        roomJid: "general@conference.example.com",
         title: "General",
         participantCount: 3,
+        isKnownChannel: true,
         isActive: true,
       },
       {
@@ -109,6 +111,57 @@ describe("call activity dock model", () => {
       isActive: true,
     });
   });
+
+  test("surfaces group calls while the channel directory is still loading", () => {
+    const entries = buildCallActivityDockEntries({
+      channels: [],
+      conversations: [],
+      activeChannelId: null,
+      activePeerJid: null,
+      sidebarMode: "channels",
+      activeChannelJids: new Set(),
+      callParticipantCounts: {
+        "general@conference.example.com": 2,
+      },
+      dmCallActivities: {},
+    });
+
+    expect(entries).toEqual([
+      {
+        kind: "channel",
+        key: "channel:general@conference.example.com",
+        channelId: null,
+        roomJid: "general@conference.example.com",
+        title: "general",
+        participantCount: 2,
+        isKnownChannel: false,
+        isActive: false,
+      },
+    ]);
+  });
+
+  test("marks fallback group call active by room JID instead of an inferred channel ID", () => {
+    const entries = buildCallActivityDockEntries({
+      channels: [],
+      conversations: [],
+      activeChannelId: "channel-uuid",
+      activeChannelRoomJid: "general@conference.example.com",
+      activePeerJid: null,
+      sidebarMode: "channels",
+      activeChannelJids: new Set(),
+      callParticipantCounts: {
+        "general@conference.example.com": 2,
+      },
+      dmCallActivities: {},
+    });
+
+    expect(entries[0]).toMatchObject({
+      kind: "channel",
+      channelId: null,
+      roomJid: "general@conference.example.com",
+      isActive: true,
+    });
+  });
 });
 
 describe("CallActivityDock rendering", () => {
@@ -147,6 +200,25 @@ describe("CallActivityDock rendering", () => {
     expect(html).toContain("Live");
   });
 
+  test("renders active group calls before channel metadata hydrates", async () => {
+    $mucCallParticipants.set({
+      "general@conference.example.com": ["alice", "bob"],
+    });
+
+    const html = await renderCallActivityDock({
+      channels: [],
+      conversations: [],
+      activeChannelId: null,
+      activePeerJid: null,
+      sidebarMode: "channels",
+      activeChannelJids: new Set<string>(),
+    });
+
+    expect(html).toContain("Calls");
+    expect(html).toContain("general");
+    expect(html).toContain("2 people");
+  });
+
   test("is mounted in the desktop sidebar and visible mobile shell", () => {
     const readyShell = readFileSync(new URL("../src/components/chat/ChatReadyShell.vue", import.meta.url), "utf8");
     const mobileDrawers = readFileSync(new URL("../src/components/chat/ChatMobileDrawers.vue", import.meta.url), "utf8");
@@ -163,9 +235,20 @@ describe("CallActivityDock rendering", () => {
   test("keeps the dock bounded and hydrated DM call controls actionable", () => {
     const dock = readFileSync(new URL("../src/components/calls/CallActivityDock.vue", import.meta.url), "utf8");
     const callButton = readFileSync(new URL("../src/components/calls/CallButton.vue", import.meta.url), "utf8");
+    const readyShell = readFileSync(new URL("../src/components/chat/ChatReadyShell.vue", import.meta.url), "utf8");
+    const controller = readFileSync(new URL("../src/shell/chat-app-controller.ts", import.meta.url), "utf8");
+    const contentArea = readFileSync(new URL("../src/components/chat/ContentArea.vue", import.meta.url), "utf8");
 
     expect(dock).toContain("max-height: min(40dvh, 18rem)");
     expect(dock).toContain("overflow-y: auto");
+    expect(dock).toContain("emit(\"selectChannel\", entry.channelId, entry.roomJid)");
+    expect(readyShell).toContain("function onSelectChannelFromSidebar(id: string | null, roomJid?: string)");
+    expect(readyShell).toContain("selectChannelByRoomJid(roomJid)");
+    expect(readyShell).toContain("selectChannel(id, roomJid ? { roomJid } : undefined)");
+    expect(readyShell).toContain(":active-channel-room-jid=\"activeChannelRoomJid\"");
+    expect(controller).toContain("void selectChannel(channel.id, { roomJid: normalizedRoomJid })");
+    expect(contentArea).toContain("const callRoomJid = computed(() => props.roomJid ?? props.channel?.jid ?? null)");
+    expect(contentArea).toContain(":room-jid=\"callRoomJid ?? undefined\"");
     expect(callButton).toContain("Hydrated peer activity alone stays actionable");
     expect(callButton).toContain("state.value.phase !== \"idle\" && state.value.phase !== \"ended\"");
     expect(callButton).not.toContain("|| hasPeerCallActivity.value");

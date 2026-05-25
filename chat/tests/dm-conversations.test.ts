@@ -193,6 +193,40 @@ describe("useDirectMessageConversations", () => {
     expect(client.hydrateRecentDmCallActivities).toHaveBeenCalledTimes(1);
   });
 
+  test("hydrateFromInbox still refreshes DM call activity when inbox fails", async () => {
+    const client = makeClient();
+    let resolveCallHydration!: () => void;
+    client.fetchInbox = mock(async () => {
+      throw new Error("inbox unavailable");
+    });
+    client.hydrateRecentDmCallActivities = mock(() => new Promise<void>((resolve) => {
+      resolveCallHydration = resolve;
+    }));
+    const { composable } = makeComposable({ client });
+
+    const hydrated = await composable.hydrateFromInbox();
+
+    expect(hydrated).toBe(false);
+    expect(client.hydrateRecentDmCallActivities).toHaveBeenCalledTimes(1);
+    resolveCallHydration();
+  });
+
+  test("hydrateFromInbox starts DM call activity before inbox returns", async () => {
+    const client = makeClient();
+    let resolveInbox!: (value: { totalUnread: number; conversations: InboxEntry[] }) => void;
+    client.fetchInbox = mock(() => new Promise((resolve) => {
+      resolveInbox = resolve;
+    }));
+    const { composable } = makeComposable({ client });
+
+    const hydration = composable.hydrateFromInbox();
+
+    expect(client.hydrateRecentDmCallActivities).toHaveBeenCalledTimes(1);
+
+    resolveInbox({ totalUnread: 0, conversations: [] });
+    expect(await hydration).toBe(true);
+  });
+
   test("receiveIncomingDm creates conversation and increments unread", () => {
     const { composable } = makeComposable();
     composable.receiveIncomingDm(makeDmMessage());

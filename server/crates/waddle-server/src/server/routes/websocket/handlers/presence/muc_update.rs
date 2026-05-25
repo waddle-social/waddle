@@ -36,6 +36,7 @@ use jid::{BareJid, FullJid};
 use tracing::{debug, warn};
 use waddle_xmpp::muc::{
     build_occupant_presence_update,
+    presence::NS_MUC,
     room_actor::{ClearMujiPresence, UpsertMujiPresence},
 };
 use waddle_xmpp::xep::xep0272::{find_muji, Muji, NS_MUJI};
@@ -57,6 +58,13 @@ pub(super) fn extract_muji(presence: &Presence) -> Option<Muji> {
         .iter()
         .find(|elem| elem.name() == "muji" && elem.ns() == NS_MUJI)
         .and_then(|elem| Muji::try_from(elem).ok())
+}
+
+fn is_muc_join_presence(presence: &Presence) -> bool {
+    presence
+        .payloads
+        .iter()
+        .any(|elem| elem.name() == "x" && elem.ns() == NS_MUC)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -117,6 +125,15 @@ pub(super) async fn try_handle_muc_presence_update(
 ) -> Option<Vec<String>> {
     let actor = get_room_actor(state, room_jid).await?;
     let muji = extract_muji(incoming);
+    // XEP-0045 join/rejoin presence carries `<x xmlns='.../muc'/>`.
+    // On stream resume the client may replay that autojoin while the
+    // room actor still has the full JID as an occupant. Treating that
+    // as a Muji clear would suppress the join replay that refreshes
+    // active-call state; XEP-0272 leave markers are plain available
+    // presence without this MUC join payload.
+    if muji.is_none() && is_muc_join_presence(incoming) {
+        return None;
+    }
 
     let outcome = match muji {
         Some(muji) => match actor
@@ -309,12 +326,27 @@ mod tests {
 
     #[test]
     fn extract_muji_returns_none_for_missing_payload() {
-        // A presence with no `<muji/>` extension. The dispatcher uses
-        // this as the signal to fall through to the regular join
-        // path — never to silently treat the presence as a call
-        // advertisement.
+        // A presence with no `<muji/>` extension. The update path may
+        // use this as a clear marker, but never as a call advertisement.
         let presence = ParsedPresence::new(PresenceType::None);
         assert!(extract_muji(&presence).is_none());
+    }
+
+    #[test]
+    fn is_muc_join_presence_detects_xep0045_join_payload() {
+        let mut presence = ParsedPresence::new(PresenceType::None);
+        presence
+            .payloads
+            .push(Element::builder("x", NS_MUC).build());
+
+        assert!(is_muc_join_presence(&presence));
+    }
+
+    #[test]
+    fn is_muc_join_presence_ignores_plain_muji_clear_presence() {
+        let presence = ParsedPresence::new(PresenceType::None);
+
+        assert!(!is_muc_join_presence(&presence));
     }
 
     #[test]
