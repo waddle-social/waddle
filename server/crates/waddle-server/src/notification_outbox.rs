@@ -3968,8 +3968,13 @@ pub fn build_xep0357_notification_payload(message_count: u32, context: &Element)
 }
 
 fn build_xep0357_summary_form(message_count: u32) -> Element {
+    // XEP-0357 §4 example shows `<x xmlns='jabber:x:data'>` with NO
+    // `type` attribute — the form is a passively-encapsulated summary,
+    // not the result of a search/query. XEP-0004 §3.2 reserves
+    // `type='result'` for query-response contexts which doesn't apply
+    // here; emitting it confused at least one client we tested
+    // against. Match the §4 example literally.
     Element::builder("x", NS_DATA_FORMS)
-        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "result")
         .append(xdata_hidden_field("FORM_TYPE", XEP0357_SUMMARY_FORM_TYPE))
         .append(xdata_field("message-count", &message_count.to_string()))
         .build()
@@ -6804,7 +6809,10 @@ mod tests {
             .children()
             .find(|child| child.is("x", NS_DATA_FORMS))
             .expect("summary form");
-        assert_eq!(summary.attr("type"), Some("result"));
+        // XEP-0357 §4 example shows `<x xmlns='jabber:x:data'>` with
+        // no `type` attribute — the form is a passively-encapsulated
+        // summary, not a query response.
+        assert_eq!(summary.attr("type"), None);
         assert!(summary.children().any(|field| {
             field.is("field", NS_DATA_FORMS)
                 && field.attr("var") == Some("FORM_TYPE")

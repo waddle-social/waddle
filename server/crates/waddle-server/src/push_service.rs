@@ -1758,12 +1758,28 @@ impl DatabasePushServiceStore {
                 "XEP-0357 Push Service publish requires an IQ set".to_string(),
             )));
         }
-        if iq.from().is_some_and(|from| from.to_bare() != *publisher) {
+        // RFC 6120 §8.1.1.1: stanzas routed to a peer entity MUST
+        // carry both `from` and `to`. The previous `is_some_and`
+        // shape silently accepted IQs with neither, which would
+        // pass-through an addressed-less stanza into the publish
+        // path. Require both and verify they match the trusted
+        // caller-supplied publisher / service JID.
+        let Some(from) = iq.from() else {
+            return Err(XmppError::bad_request(Some(
+                "XEP-0357 Push Service publish IQ missing `from`".to_string(),
+            )));
+        };
+        if from.to_bare() != *publisher {
             return Err(XmppError::forbidden(Some(
                 "XEP-0357 Push Service publish sender does not match publisher".to_string(),
             )));
         }
-        if iq.to().is_some_and(|to| to.to_string() != push_service_jid) {
+        let Some(to) = iq.to() else {
+            return Err(XmppError::bad_request(Some(
+                "XEP-0357 Push Service publish IQ missing `to`".to_string(),
+            )));
+        };
+        if to.to_string() != push_service_jid {
             return Err(XmppError::bad_request(Some(
                 "XEP-0357 Push Service publish target does not match service".to_string(),
             )));
