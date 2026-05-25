@@ -863,6 +863,99 @@ fn build_disable_push_device_carries_node_and_device_id() {
 /// covers this for the empty-token branch; this test pins the
 /// EXACT shape #528 promises to land.
 #[test]
+fn parse_disco_data_form_ignores_form_type_in_submit_form() {
+    // XEP-0068 §4.3: a FORM_TYPE field is only a context indicator
+    // when (a) the field itself carries `type='hidden'` AND (b) the
+    // wrapping `<x/>` is `type='form'` or `type='result'`. A
+    // `<x type='submit'>` form is a user-supplied payload, NOT a
+    // disco-style advertisement — accepting its FORM_TYPE would let a
+    // malicious server smuggle an attacker-claimed context indicator
+    // past downstream callers that key off `form.form_type`.
+    let iq = Element::builder("iq", CLIENT_NS)
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "result")
+        .append(
+            Element::builder("query", DISCO_INFO_NS)
+                .append(
+                    // The hostile shape: `<x type='submit'>` with a
+                    // well-formed hidden FORM_TYPE field. The parser
+                    // MUST drop form_type to None even though the
+                    // field itself is hidden.
+                    Element::builder("x", DATA_FORMS_NS)
+                        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "submit")
+                        .append(
+                            Element::builder("field", DATA_FORMS_NS)
+                                .attr(minidom::rxml::xml_ncname!("var").to_owned(), "FORM_TYPE")
+                                .attr(minidom::rxml::xml_ncname!("type").to_owned(), "hidden")
+                                .append(
+                                    Element::builder("value", DATA_FORMS_NS)
+                                        .append("urn:waddle:push:vapid:0")
+                                        .build(),
+                                )
+                                .build(),
+                        )
+                        .append(
+                            Element::builder("field", DATA_FORMS_NS)
+                                .attr(minidom::rxml::xml_ncname!("var").to_owned(), "public-key")
+                                .append(
+                                    Element::builder("value", DATA_FORMS_NS)
+                                        .append("BNcRdreALRFXTkOOUHK1")
+                                        .build(),
+                                )
+                                .build(),
+                        )
+                        .build(),
+                )
+                .build(),
+        )
+        .build();
+    let result = parse_disco_info_result(&iq, "push.example.com").expect("parses");
+    assert_eq!(
+        result.forms.len(),
+        1,
+        "submit form is still surfaced — only its form_type is ignored"
+    );
+    assert_eq!(
+        result.forms[0].form_type, None,
+        "FORM_TYPE in a `submit` form MUST NOT act as a context indicator"
+    );
+    // Fields themselves are preserved verbatim so a downstream caller
+    // that knows the form is a submit payload (e.g. publish-options)
+    // can still consume them.
+    assert!(result.forms[0].fields.iter().any(|f| f.var == "FORM_TYPE"
+        && f.values.first().map(|v| v.as_str()) == Some("urn:waddle:push:vapid:0")));
+}
+
+#[test]
+fn parse_disco_data_form_ignores_form_type_when_x_type_missing() {
+    // `<x/>` without a `type=` attribute is malformed per XEP-0004 §3.1.
+    // We refuse to honor any FORM_TYPE inside it.
+    let iq = Element::builder("iq", CLIENT_NS)
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "result")
+        .append(
+            Element::builder("query", DISCO_INFO_NS)
+                .append(
+                    Element::builder("x", DATA_FORMS_NS)
+                        .append(
+                            Element::builder("field", DATA_FORMS_NS)
+                                .attr(minidom::rxml::xml_ncname!("var").to_owned(), "FORM_TYPE")
+                                .attr(minidom::rxml::xml_ncname!("type").to_owned(), "hidden")
+                                .append(
+                                    Element::builder("value", DATA_FORMS_NS)
+                                        .append("urn:example:something:0")
+                                        .build(),
+                                )
+                                .build(),
+                        )
+                        .build(),
+                )
+                .build(),
+        )
+        .build();
+    let result = parse_disco_info_result(&iq, "push.example.com").expect("parses");
+    assert_eq!(result.forms[0].form_type, None);
+}
+
+#[test]
 fn xep0357_enable_for_web_push_carries_no_provider_fields() {
     let iq = build_enable_push_iq("push.example.com", "node-abc", "");
     let enable = iq.get_child("enable", PUSH_NS).expect("enable");
