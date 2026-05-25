@@ -1237,8 +1237,6 @@ export class BrowserXmppClient {
    * Promise, which we catch here as a `null` return + console warning.
    */
   async fetchVapidPublicKey(opts: { serviceJid: string }): Promise<{ publicKey: string; kid: string } | null> {
-    const xmpp = await this.requireConnectedXmpp();
-    if (!xmpp.fetch_vapid_public_key) return null;
     // Bounded timeout (10s): the wasm-side `send_iq_command` is itself
     // an unbounded oneshot. Without this race the rotation lock can be
     // held indefinitely on a stalled Push Service handler, blocking
@@ -1254,6 +1252,15 @@ export class BrowserXmppClient {
       }, TIMEOUT_MS);
     });
     try {
+      // `requireConnectedXmpp` throws when the session is not ready
+      // (mid-reconnect / mid-teardown race). The JSDoc contract for
+      // this method is "returns null on any error so the caller can
+      // fall back to foreground Notifications" — so the readiness
+      // check goes INSIDE the try block. Without this, a brief
+      // reconnect race during setupPushSubscription would abort the
+      // whole rotation flow instead of degrading cleanly.
+      const xmpp = await this.requireConnectedXmpp();
+      if (!xmpp.fetch_vapid_public_key) return null;
       const result = await Promise.race([
         xmpp.fetch_vapid_public_key(opts.serviceJid),
         timeoutPromise,
